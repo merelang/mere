@@ -1,0 +1,11 @@
+// top-level declarations: each ends with `;`
+// the final expression (no `;`) is what gets evaluated.
+
+let inc = fn n -> n + 1;
+let twice = fn f -> fn x -> f (f x);
+let dbl = fn n -> n * 2;
+
+let rec sum_to = fn n ->
+  if n < 1 then 0 else n + sum_to (n - 1);
+
+twice inc (sum_to 10) + dbl 5  // (55+1+1) + 10 = 67
