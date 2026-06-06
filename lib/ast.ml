@@ -1,8 +1,5 @@
 (* Abstract syntax tree for Lang. *)
 
-(* Type variable used by the inferencer (Algorithm W).
-   `link = None` means unbound; `link = Some t` means unified with t.
-   Mutable so unification can side-effect. *)
 type tyvar = {
   id : int;
   mutable link : ty option;
@@ -11,6 +8,8 @@ type tyvar = {
 and ty =
   | TyInt
   | TyBool
+  | TyStr
+  | TyUnit
   | TyArrow of ty * ty
   | TyVar of tyvar
 
@@ -19,6 +18,8 @@ type expr = { loc : Loc.t; node : expr_node }
 and expr_node =
   | Int_lit of int
   | Bool_lit of bool
+  | Str_lit of string
+  | Unit_lit
   | Var of string
   | Bin of binop * expr * expr
   | Cmp of cmpop * expr * expr
@@ -30,7 +31,7 @@ and expr_node =
   | App of expr * expr
   | Annot of expr * ty
 
-and binop = Add | Sub | Mul
+and binop = Add | Sub | Mul | Concat
 and cmpop = Eq | Lt
 
 type top_decl =
@@ -42,16 +43,15 @@ type program = {
   main : expr;
 }
 
-let binop_to_string = function Add -> "+" | Sub -> "-" | Mul -> "*"
+let binop_to_string = function
+  | Add -> "+" | Sub -> "-" | Mul -> "*" | Concat -> "++"
+
 let cmpop_to_string = function Eq -> "==" | Lt -> "<"
 
-(* Walk through TyVar links to find the canonical type. *)
 let rec walk = function
   | TyVar { link = Some t; _ } -> walk t
   | t -> t
 
-(* Pretty-print a type. Bound TyVars get short names 'a, 'b, ...
-   Each call produces a fresh local naming. *)
 let pp_ty t =
   let counter = ref 0 in
   let names = Hashtbl.create 4 in
@@ -72,18 +72,37 @@ let pp_ty t =
     match walk t with
     | TyInt -> "int"
     | TyBool -> "bool"
+    | TyStr -> "str"
+    | TyUnit -> "unit"
     | TyArrow (a, b) ->
-      let sa = aux a in     (* force left-to-right so var naming is stable *)
+      let sa = aux a in
       let sb = aux b in
       "(" ^ sa ^ " -> " ^ sb ^ ")"
     | TyVar v -> name_of v.id
   in
   aux t
 
+(* Escape a string for display in pp (showing quotes and escapes). *)
+let escape_string s =
+  let buf = Buffer.create (String.length s + 2) in
+  Buffer.add_char buf '"';
+  String.iter (fun c ->
+    match c with
+    | '"' -> Buffer.add_string buf "\\\""
+    | '\\' -> Buffer.add_string buf "\\\\"
+    | '\n' -> Buffer.add_string buf "\\n"
+    | '\t' -> Buffer.add_string buf "\\t"
+    | c -> Buffer.add_char buf c
+  ) s;
+  Buffer.add_char buf '"';
+  Buffer.contents buf
+
 let rec pp e =
   match e.node with
   | Int_lit n -> string_of_int n
   | Bool_lit b -> if b then "true" else "false"
+  | Str_lit s -> escape_string s
+  | Unit_lit -> "()"
   | Var name -> name
   | Neg a -> "-" ^ pp a
   | Bin (op, a, b) ->

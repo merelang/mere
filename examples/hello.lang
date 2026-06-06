@@ -1,3 +1,4 @@
-// hello.lang — first program in Lang
-// just an arithmetic expression
-1 + 2 * 3
+// hello, world — uses the builtin print and string concat
+let greet = fn name -> "Hello, " ++ name ++ "!";
+
+print (greet "World")
