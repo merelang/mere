@@ -1,6 +1,4 @@
-(* Tokenizer with source position tracking.
-   Supports: integer literals, identifiers, `let`/`in` keywords,
-   `+ - * =`, parens, `//` line comments, whitespace and newlines. *)
+(* Tokenizer. *)
 
 exception Lex_error of Loc.t * string
 
@@ -9,7 +7,14 @@ type token =
   | T_ident of string
   | T_let
   | T_in
-  | T_eq
+  | T_if
+  | T_then
+  | T_else
+  | T_true
+  | T_false
+  | T_eq          (* = *)
+  | T_eq_eq       (* == *)
+  | T_lt          (* < *)
   | T_plus
   | T_minus
   | T_star
@@ -51,7 +56,10 @@ let tokenize s =
       | '*' -> advance 1; aux (i + 1) ((pos, T_star) :: acc)
       | '(' -> advance 1; aux (i + 1) ((pos, T_lparen) :: acc)
       | ')' -> advance 1; aux (i + 1) ((pos, T_rparen) :: acc)
+      | '=' when i + 1 < len && s.[i + 1] = '=' ->
+        advance 2; aux (i + 2) ((pos, T_eq_eq) :: acc)
       | '=' -> advance 1; aux (i + 1) ((pos, T_eq) :: acc)
+      | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | c when is_digit c ->
         let rec read j =
           if j < len && is_digit s.[j] then read (j + 1) else j
@@ -69,6 +77,11 @@ let tokenize s =
         let tok = match word with
           | "let" -> T_let
           | "in" -> T_in
+          | "if" -> T_if
+          | "then" -> T_then
+          | "else" -> T_else
+          | "true" -> T_true
+          | "false" -> T_false
           | _ -> T_ident word
         in
         advance (j - i);

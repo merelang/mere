@@ -1,10 +1,12 @@
-(* Recursive-descent parser. Grammar:
-     expr   := 'let' ident '=' expr 'in' expr
-             | sum
-     sum    := term (('+' | '-') term)*    (* left-assoc *)
-     term   := factor ('*' factor)*        (* left-assoc *)
+(* Recursive-descent parser. Grammar (low to high precedence):
+     expr   := 'if' expr 'then' expr 'else' expr
+             | 'let' ident '=' expr 'in' expr
+             | cmp
+     cmp    := sum (('==' | '<') sum)?         (* non-associative *)
+     sum    := term (('+' | '-') term)*        (* left-assoc *)
+     term   := factor ('*' factor)*            (* left-assoc *)
      factor := '-' factor | atom
-     atom   := Int | Ident | '(' expr ')'
+     atom   := Int | Bool | Ident | '(' expr ')'
 *)
 
 exception Parse_error of Loc.t * string
@@ -18,6 +20,17 @@ let parse tokens =
   in
   let rec expr toks =
     match toks with
+    | (pos, T_if) :: rest ->
+      let cond, toks = expr rest in
+      (match toks with
+       | (_, T_then) :: rest ->
+         let then_branch, toks = expr rest in
+         (match toks with
+          | (_, T_else) :: rest ->
+            let else_branch, toks = expr rest in
+            mk pos (Ast.If (cond, then_branch, else_branch)), toks
+          | _ -> raise (Parse_error (pos_of toks, "expected 'else'")))
+       | _ -> raise (Parse_error (pos_of toks, "expected 'then'")))
     | (pos, T_let) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       (match toks with
@@ -28,7 +41,17 @@ let parse tokens =
          raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
     | (pos, T_let) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
-    | _ -> sum toks
+    | _ -> cmp toks
+  and cmp toks =
+    let lhs, toks = sum toks in
+    match toks with
+    | (pos, T_eq_eq) :: rest ->
+      let rhs, toks = sum rest in
+      mk pos (Ast.Cmp (Ast.Eq, lhs, rhs)), toks
+    | (pos, T_lt) :: rest ->
+      let rhs, toks = sum rest in
+      mk pos (Ast.Cmp (Ast.Lt, lhs, rhs)), toks
+    | _ -> lhs, toks
   and sum toks =
     let lhs, toks = term toks in
     sum_tail lhs toks
@@ -59,6 +82,8 @@ let parse tokens =
   and atom toks =
     match toks with
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest
+    | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest
+    | (pos, T_false) :: rest -> mk pos (Ast.Bool_lit false), rest
     | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
     | (_, T_lparen) :: rest ->
       let inner, toks = expr rest in
@@ -66,7 +91,7 @@ let parse tokens =
        | (_, T_rparen) :: rest -> inner, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ')'")))
     | (pos, _) :: _ ->
-      raise (Parse_error (pos, "expected integer, identifier, or '('"))
+      raise (Parse_error (pos, "expected integer, boolean, identifier, or '('"))
     | [] ->
       raise (Parse_error (Loc.dummy, "unexpected end of input"))
   in
