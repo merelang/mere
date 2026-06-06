@@ -1,0 +1,5 @@
+// higher-order: compose two functions, apply the result
+let compose = fn f -> fn g -> fn x -> f (g x) in
+let inc = fn x -> x + 1 in
+let dbl = fn x -> x * 2 in
+  compose dbl inc 5  // (5 + 1) * 2 = 12
