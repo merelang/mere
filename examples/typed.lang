@@ -1,0 +1,3 @@
+// type-annotated factorial. Try also: `lang-ml -t examples/typed.lang`
+let rec fact = (fn n -> if n < 1 then 1 else n * fact (n - 1)) : int -> int in
+  fact 6
