@@ -1,4 +1,6 @@
-(* Tree-walking interpreter. *)
+(* Tree-walking interpreter.
+   Env is a list of name -> ref to value, enabling recursive bindings
+   via placeholder ref + backpatching. *)
 
 exception Eval_error of Loc.t * string
 
@@ -7,7 +9,7 @@ type value =
   | V_bool of bool
   | V_closure of string * Ast.expr * env
 
-and env = (string * value) list
+and env = (string * value ref) list
 
 let to_string = function
   | V_int n -> string_of_int n
@@ -22,7 +24,7 @@ let eval expr =
     | Ast.Int_lit n -> V_int n
     | Ast.Bool_lit b -> V_bool b
     | Ast.Var name ->
-      (try List.assoc name env
+      (try !(List.assoc name env)
        with Not_found ->
          type_error e.Ast.loc ("unbound variable: " ^ name))
     | Ast.Neg a ->
@@ -48,7 +50,16 @@ let eval expr =
        | _ -> type_error e.Ast.loc "comparison type mismatch")
     | Ast.Let (name, value, body) ->
       let v = aux env value in
-      aux ((name, v) :: env) body
+      aux ((name, ref v) :: env) body
+    | Ast.Let_rec (name, value, body) ->
+      (* Backpatching: create a placeholder ref, evaluate value with env
+         including the placeholder (so the closure captures it), then
+         replace the placeholder with the actual value. *)
+      let placeholder = ref (V_int 0) in
+      let env' = (name, placeholder) :: env in
+      let v = aux env' value in
+      placeholder := v;
+      aux env' body
     | Ast.If (cond, then_, else_) ->
       (match aux env cond with
        | V_bool true -> aux env then_
@@ -60,7 +71,7 @@ let eval expr =
       (match aux env f with
        | V_closure (param, body, captured) ->
          let v = aux env arg in
-         aux ((param, v) :: captured) body
+         aux ((param, ref v) :: captured) body
        | _ -> type_error e.Ast.loc "applying non-function")
     | Ast.Annot (inner, _) -> aux env inner
   in

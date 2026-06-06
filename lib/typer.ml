@@ -1,7 +1,4 @@
-(* Bidirectional type checker.
-   `infer` returns a type. `check` verifies an expected type.
-   Functions without annotations cannot be inferred — they must appear in
-   a checking context (e.g. wrapped in `(fn x -> ...) : t1 -> t2`). *)
+(* Bidirectional type checker. *)
 
 exception Type_error of Loc.t * string
 
@@ -34,13 +31,23 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
        check env b Ast.TyInt;
        Ast.TyBool
      | Ast.Eq ->
-       (* Eq works on int or bool; infer LHS, check RHS *)
        let t = infer env a in
        check env b t;
        Ast.TyBool)
   | Ast.Let (name, value, body) ->
     let vt = infer env value in
     infer ((name, vt) :: env) body
+  | Ast.Let_rec (name, value, body) ->
+    (* Require value to carry a type annotation, since we can't infer
+       a recursive function's type without one. *)
+    (match value.Ast.node with
+     | Ast.Annot (_, t) ->
+       (* Check value at its annotation t, with env extended by self. *)
+       check ((name, t) :: env) value t;
+       infer ((name, t) :: env) body
+     | _ ->
+       raise (Type_error (e.loc,
+         "let rec value requires a type annotation: `let rec f = (... : t) in ...`")))
   | Ast.If (cond, then_, else_) ->
     check env cond Ast.TyBool;
     let t = infer env then_ in
@@ -72,6 +79,14 @@ and check env e expected =
   | Ast.Let (name, value, body), _ ->
     let vt = infer env value in
     check ((name, vt) :: env) body expected
+  | Ast.Let_rec (name, value, body), _ ->
+    (match value.Ast.node with
+     | Ast.Annot (_, t) ->
+       check ((name, t) :: env) value t;
+       check ((name, t) :: env) body expected
+     | _ ->
+       raise (Type_error (e.Ast.loc,
+         "let rec value requires a type annotation")))
   | _ ->
     let actual = infer env e in
     if actual <> expected then

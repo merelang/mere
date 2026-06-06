@@ -1,7 +1,7 @@
 (* Recursive-descent parser. Grammar:
-     expr      := base_expr (':' ty)?            (* ML-style post-fix annotation *)
+     expr      := base_expr (':' ty)?
      base_expr := 'if' expr 'then' expr 'else' expr
-                | 'let' ident '=' expr 'in' expr
+                | 'let' 'rec'? ident '=' expr 'in' expr
                 | 'fn' ident '->' expr
                 | cmp
      cmp       := sum (('==' | '<') sum)?
@@ -10,7 +10,7 @@
      factor    := '-' factor | apply
      apply     := atom atom*
      atom      := Int | Bool | Ident | '(' expr ')'
-     ty        := atom_ty ('->' ty)?              (* arrow right-assoc *)
+     ty        := atom_ty ('->' ty)?
      atom_ty   := 'int' | 'bool' | '(' ty ')'
 *)
 
@@ -61,6 +61,16 @@ let parse tokens =
             mk pos (Ast.If (cond, then_branch, else_branch)), toks
           | _ -> raise (Parse_error (pos_of toks, "expected 'else'")))
        | _ -> raise (Parse_error (pos_of toks, "expected 'then'")))
+    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let value, toks = expr rest in
+      (match toks with
+       | (_, T_in) :: rest ->
+         let body, toks = expr rest in
+         mk pos (Ast.Let_rec (name, value, body)), toks
+       | _ ->
+         raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
+    | (pos, T_let) :: (_, T_rec) :: _ ->
+      raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
     | (pos, T_let) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       (match toks with
@@ -70,7 +80,7 @@ let parse tokens =
        | _ ->
          raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
     | (pos, T_let) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
+      raise (Parse_error (pos, "expected 'ident = expr' or 'rec ident = expr' after 'let'"))
     | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
       let body, toks = expr rest in
       mk pos (Ast.Fun (param, body)), toks
