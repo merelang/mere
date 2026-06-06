@@ -1,11 +1,13 @@
 (* Recursive-descent parser. Grammar (low to high precedence):
      expr   := 'if' expr 'then' expr 'else' expr
              | 'let' ident '=' expr 'in' expr
+             | 'fn' ident '->' expr
              | cmp
-     cmp    := sum (('==' | '<') sum)?         (* non-associative *)
-     sum    := term (('+' | '-') term)*        (* left-assoc *)
-     term   := factor ('*' factor)*            (* left-assoc *)
-     factor := '-' factor | atom
+     cmp    := sum (('==' | '<') sum)?
+     sum    := term (('+' | '-') term)*
+     term   := factor ('*' factor)*
+     factor := '-' factor | apply
+     apply  := atom atom*                      (* left-assoc juxtaposition *)
      atom   := Int | Bool | Ident | '(' expr ')'
 *)
 
@@ -41,6 +43,11 @@ let parse tokens =
          raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
     | (pos, T_let) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
+    | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
+      let body, toks = expr rest in
+      mk pos (Ast.Fun (param, body)), toks
+    | (pos, T_fn) :: _ ->
+      raise (Parse_error (pos, "expected 'ident -> expr' after 'fn'"))
     | _ -> cmp toks
   and cmp toks =
     let lhs, toks = sum toks in
@@ -78,7 +85,16 @@ let parse tokens =
     | (pos, T_minus) :: rest ->
       let inner, toks = factor rest in
       mk pos (Ast.Neg inner), toks
-    | _ -> atom toks
+    | _ -> apply toks
+  and apply toks =
+    let head, toks = atom toks in
+    apply_tail head toks
+  and apply_tail f toks =
+    match toks with
+    | (_, (T_int _ | T_ident _ | T_lparen | T_true | T_false)) :: _ ->
+      let arg, toks = atom toks in
+      apply_tail (mk f.Ast.loc (Ast.App (f, arg))) toks
+    | _ -> f, toks
   and atom toks =
     match toks with
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest

@@ -5,12 +5,14 @@ exception Eval_error of Loc.t * string
 type value =
   | V_int of int
   | V_bool of bool
+  | V_closure of string * Ast.expr * env  (* param, body, captured env *)
 
-type env = (string * value) list
+and env = (string * value) list
 
 let to_string = function
   | V_int n -> string_of_int n
   | V_bool b -> if b then "true" else "false"
+  | V_closure (param, _, _) -> "<closure:" ^ param ^ ">"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -26,7 +28,7 @@ let eval expr =
     | Ast.Neg a ->
       (match aux env a with
        | V_int x -> V_int (- x)
-       | V_bool _ -> type_error e.Ast.loc "unary - requires int")
+       | _ -> type_error e.Ast.loc "unary - requires int")
     | Ast.Bin (op, a, b) ->
       (match aux env a, aux env b with
        | V_int x, V_int y ->
@@ -51,6 +53,14 @@ let eval expr =
       (match aux env cond with
        | V_bool true -> aux env then_
        | V_bool false -> aux env else_
-       | V_int _ -> type_error e.Ast.loc "if condition must be bool")
+       | _ -> type_error e.Ast.loc "if condition must be bool")
+    | Ast.Fun (param, body) ->
+      V_closure (param, body, env)
+    | Ast.App (f, arg) ->
+      (match aux env f with
+       | V_closure (param, body, captured) ->
+         let v = aux env arg in
+         aux ((param, v) :: captured) body
+       | _ -> type_error e.Ast.loc "applying non-function")
   in
   aux [] expr

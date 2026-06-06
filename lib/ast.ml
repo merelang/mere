@@ -6,29 +6,19 @@ and expr_node =
   | Int_lit of int
   | Bool_lit of bool
   | Var of string
-  | Bin of binop * expr * expr        (* arithmetic *)
-  | Cmp of cmpop * expr * expr        (* comparison, returns bool *)
+  | Bin of binop * expr * expr
+  | Cmp of cmpop * expr * expr
   | Neg of expr
   | Let of string * expr * expr
-  | If of expr * expr * expr          (* if cond then e1 else e2 *)
+  | If of expr * expr * expr
+  | Fun of string * expr               (* fn param -> body *)
+  | App of expr * expr                  (* f arg *)
 
-and binop =
-  | Add
-  | Sub
-  | Mul
+and binop = Add | Sub | Mul
+and cmpop = Eq | Lt
 
-and cmpop =
-  | Eq
-  | Lt
-
-let binop_to_string = function
-  | Add -> "+"
-  | Sub -> "-"
-  | Mul -> "*"
-
-let cmpop_to_string = function
-  | Eq -> "=="
-  | Lt -> "<"
+let binop_to_string = function Add -> "+" | Sub -> "-" | Mul -> "*"
+let cmpop_to_string = function Eq -> "==" | Lt -> "<"
 
 let rec pp e =
   match e.node with
@@ -44,3 +34,7 @@ let rec pp e =
     "(let " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | If (cond, then_, else_) ->
     "(if " ^ pp cond ^ " then " ^ pp then_ ^ " else " ^ pp else_ ^ ")"
+  | Fun (param, body) ->
+    "(fn " ^ param ^ " -> " ^ pp body ^ ")"
+  | App (f, arg) ->
+    "(" ^ pp f ^ " " ^ pp arg ^ ")"
