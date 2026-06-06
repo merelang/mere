@@ -1,9 +1,18 @@
 (* Abstract syntax tree for Lang. *)
 
-type ty =
+(* Type variable used by the inferencer (Algorithm W).
+   `link = None` means unbound; `link = Some t` means unified with t.
+   Mutable so unification can side-effect. *)
+type tyvar = {
+  id : int;
+  mutable link : ty option;
+}
+
+and ty =
   | TyInt
   | TyBool
   | TyArrow of ty * ty
+  | TyVar of tyvar
 
 type expr = { loc : Loc.t; node : expr_node }
 
@@ -24,8 +33,6 @@ and expr_node =
 and binop = Add | Sub | Mul
 and cmpop = Eq | Lt
 
-(* Top-level declarations.
-   A program is a sequence of declarations followed by a main expression. *)
 type top_decl =
   | Top_let of string * expr
   | Top_let_rec of string * expr
@@ -38,10 +45,40 @@ type program = {
 let binop_to_string = function Add -> "+" | Sub -> "-" | Mul -> "*"
 let cmpop_to_string = function Eq -> "==" | Lt -> "<"
 
-let rec pp_ty = function
-  | TyInt -> "int"
-  | TyBool -> "bool"
-  | TyArrow (a, b) -> "(" ^ pp_ty a ^ " -> " ^ pp_ty b ^ ")"
+(* Walk through TyVar links to find the canonical type. *)
+let rec walk = function
+  | TyVar { link = Some t; _ } -> walk t
+  | t -> t
+
+(* Pretty-print a type. Bound TyVars get short names 'a, 'b, ...
+   Each call produces a fresh local naming. *)
+let pp_ty t =
+  let counter = ref 0 in
+  let names = Hashtbl.create 4 in
+  let name_of id =
+    match Hashtbl.find_opt names id with
+    | Some n -> n
+    | None ->
+      let n = !counter in
+      incr counter;
+      let s =
+        if n < 26 then Printf.sprintf "'%c" (Char.chr (Char.code 'a' + n))
+        else Printf.sprintf "'t%d" n
+      in
+      Hashtbl.add names id s;
+      s
+  in
+  let rec aux t =
+    match walk t with
+    | TyInt -> "int"
+    | TyBool -> "bool"
+    | TyArrow (a, b) ->
+      let sa = aux a in     (* force left-to-right so var naming is stable *)
+      let sb = aux b in
+      "(" ^ sa ^ " -> " ^ sb ^ ")"
+    | TyVar v -> name_of v.id
+  in
+  aux t
 
 let rec pp e =
   match e.node with
@@ -66,8 +103,6 @@ let rec pp e =
   | Annot (inner, t) ->
     "(" ^ pp inner ^ " : " ^ pp_ty t ^ ")"
 
-(* Desugar a program into a single expression by wrapping top decls
-   as let/let-rec around the main expression. *)
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
     let loc = body.loc in
