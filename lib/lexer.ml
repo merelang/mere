@@ -6,6 +6,7 @@ type token =
   | T_int of int
   | T_ident of string
   | T_let
+  | T_rec
   | T_in
   | T_if
   | T_then
@@ -82,6 +83,7 @@ let tokenize s =
         let word = String.sub s i (j - i) in
         let tok = match word with
           | "let" -> T_let
+          | "rec" -> T_rec
           | "in" -> T_in
           | "if" -> T_if
           | "then" -> T_then

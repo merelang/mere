@@ -15,10 +15,11 @@ and expr_node =
   | Cmp of cmpop * expr * expr
   | Neg of expr
   | Let of string * expr * expr
+  | Let_rec of string * expr * expr     (* let rec name = value in body *)
   | If of expr * expr * expr
   | Fun of string * expr
   | App of expr * expr
-  | Annot of expr * ty            (* (expr : ty) *)
+  | Annot of expr * ty
 
 and binop = Add | Sub | Mul
 and cmpop = Eq | Lt
@@ -43,6 +44,8 @@ let rec pp e =
     "(" ^ pp a ^ " " ^ cmpop_to_string op ^ " " ^ pp b ^ ")"
   | Let (name, value, body) ->
     "(let " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
+  | Let_rec (name, value, body) ->
+    "(let rec " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | If (cond, then_, else_) ->
     "(if " ^ pp cond ^ " then " ^ pp then_ ^ " else " ^ pp else_ ^ ")"
   | Fun (param, body) ->
