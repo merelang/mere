@@ -1,11 +1,4 @@
-(* Hindley-Milner type inference (Algorithm W) with let-polymorphism.
-
-   Unannotated functions are inferred. let-bound values are generalized
-   over type variables that are not free in the surrounding environment,
-   giving let-polymorphism (`let id = fn x -> x in id 5; id true` works).
-
-   Type annotations (`(expr : ty)`) act as unification hints: they constrain
-   the inferred type to match the annotation. *)
+(* Hindley-Milner type inference (Algorithm W) with let-polymorphism. *)
 
 exception Type_error of Loc.t * string
 
@@ -18,7 +11,7 @@ let fresh_var () =
 let rec occurs id = function
   | Ast.TyVar v when v.id = id -> true
   | Ast.TyVar { link = Some t; _ } -> occurs id t
-  | Ast.TyVar _ | Ast.TyInt | Ast.TyBool -> false
+  | Ast.TyVar _ | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> false
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
 
 let rec unify loc t1 t2 =
@@ -27,6 +20,8 @@ let rec unify loc t1 t2 =
   match t1, t2 with
   | Ast.TyInt, Ast.TyInt -> ()
   | Ast.TyBool, Ast.TyBool -> ()
+  | Ast.TyStr, Ast.TyStr -> ()
+  | Ast.TyUnit, Ast.TyUnit -> ()
   | Ast.TyArrow (a1, b1), Ast.TyArrow (a2, b2) ->
     unify loc a1 a2;
     unify loc b1 b2
@@ -49,7 +44,7 @@ let mono t = { quantified = []; body = t }
 
 let rec collect_free_vars t acc =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool -> acc
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> acc
   | Ast.TyVar v -> if List.mem v.id acc then acc else v.id :: acc
   | Ast.TyArrow (a, b) -> collect_free_vars b (collect_free_vars a acc)
 
@@ -73,7 +68,7 @@ let instantiate sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
     match Ast.walk t with
-    | (Ast.TyInt | Ast.TyBool) as t -> t
+    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
     | Ast.TyVar v as orig ->
       (try List.assoc v.id mapping with Not_found -> orig)
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
@@ -82,10 +77,15 @@ let instantiate sch =
 
 type env = (string * scheme) list
 
+let initial_env : env =
+  [ ("print", mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit))) ]
+
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
   match e.node with
   | Ast.Int_lit _ -> Ast.TyInt
   | Ast.Bool_lit _ -> Ast.TyBool
+  | Ast.Str_lit _ -> Ast.TyStr
+  | Ast.Unit_lit -> Ast.TyUnit
   | Ast.Var name ->
     (try instantiate (List.assoc name env)
      with Not_found ->
@@ -94,12 +94,18 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let t = infer env a in
     unify a.loc t Ast.TyInt;
     Ast.TyInt
-  | Ast.Bin (_, a, b) ->
+  | Ast.Bin (op, a, b) ->
     let ta = infer env a in
     let tb = infer env b in
-    unify a.loc ta Ast.TyInt;
-    unify b.loc tb Ast.TyInt;
-    Ast.TyInt
+    (match op with
+     | Ast.Add | Ast.Sub | Ast.Mul ->
+       unify a.loc ta Ast.TyInt;
+       unify b.loc tb Ast.TyInt;
+       Ast.TyInt
+     | Ast.Concat ->
+       unify a.loc ta Ast.TyStr;
+       unify b.loc tb Ast.TyStr;
+       Ast.TyStr)
   | Ast.Cmp (op, a, b) ->
     let ta = infer env a in
     let tb = infer env b in
@@ -126,7 +132,6 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let env_rec = (name, mono alpha) :: env in
     let tv = infer env_rec value in
     unify e.loc alpha tv;
-    (* Generalize against the OUTER env so the recursive binding can be polymorphic. *)
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
   | Ast.Fun (param, body) ->
@@ -145,5 +150,5 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     t
 
 let type_check e =
-  counter := 0;  (* Fresh counter per top-level inference for stable test output. *)
-  infer [] e
+  counter := 0;
+  infer initial_env e
