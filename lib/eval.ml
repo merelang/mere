@@ -5,7 +5,7 @@ exception Eval_error of Loc.t * string
 type value =
   | V_int of int
   | V_bool of bool
-  | V_closure of string * Ast.expr * env  (* param, body, captured env *)
+  | V_closure of string * Ast.expr * env
 
 and env = (string * value) list
 
@@ -62,5 +62,6 @@ let eval expr =
          let v = aux env arg in
          aux ((param, v) :: captured) body
        | _ -> type_error e.Ast.loc "applying non-function")
+    | Ast.Annot (inner, _) -> aux env inner
   in
   aux [] expr
