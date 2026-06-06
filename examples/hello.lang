@@ -1,0 +1,3 @@
+// hello.lang — first program in Lang
+// just an arithmetic expression
+1 + 2 * 3
