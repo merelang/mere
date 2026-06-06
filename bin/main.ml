@@ -6,6 +6,7 @@ let usage () =
   print_endline "  lang-ml -e <expr>       evaluate an inline expression";
   print_endline "  lang-ml -t <file.lang>  print the inferred type";
   print_endline "  lang-ml -te <expr>      print the inferred type of an inline expression";
+  print_endline "  lang-ml -r              start interactive REPL";
   print_endline "  lang-ml -h | --help     show this help"
 
 let read_file path =
@@ -36,6 +37,7 @@ let () =
   match Array.to_list Sys.argv with
   | [_] -> usage ()
   | [_; "-h"] | [_; "--help"] -> usage ()
+  | [_; "-r"] -> Lang_ml.Repl.run ()
   | [_; "-e"; expr] ->
     run_action Lang_ml.Pipeline.process "<inline>" expr
   | [_; "-te"; expr] ->
