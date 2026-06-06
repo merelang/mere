@@ -4,6 +4,7 @@ exception Lex_error of Loc.t * string
 
 type token =
   | T_int of int
+  | T_string of string
   | T_ident of string
   | T_let
   | T_rec
@@ -21,6 +22,7 @@ type token =
   | T_colon
   | T_semi
   | T_plus
+  | T_plus_plus    (* ++ for string concat *)
   | T_minus
   | T_star
   | T_lparen
@@ -56,6 +58,8 @@ let tokenize s =
         let j = skip (i + 2) in
         advance (j - i);
         aux j acc
+      | '+' when i + 1 < len && s.[i + 1] = '+' ->
+        advance 2; aux (i + 2) ((pos, T_plus_plus) :: acc)
       | '+' -> advance 1; aux (i + 1) ((pos, T_plus) :: acc)
       | '-' when i + 1 < len && s.[i + 1] = '>' ->
         advance 2; aux (i + 2) ((pos, T_arrow) :: acc)
@@ -69,6 +73,39 @@ let tokenize s =
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
+      | '"' ->
+        (* String literal with simple escapes: n / t / backslash / dquote *)
+        let buf = Buffer.create 16 in
+        let rec read j =
+          if j >= len then
+            raise (Lex_error (pos, "unterminated string literal"))
+          else
+            let c = s.[j] in
+            match c with
+            | '"' -> j + 1
+            | '\\' when j + 1 < len ->
+              let esc = s.[j + 1] in
+              let actual = match esc with
+                | 'n' -> '\n'
+                | 't' -> '\t'
+                | '\\' -> '\\'
+                | '"' -> '"'
+                | _ ->
+                  raise (Lex_error (pos,
+                    Printf.sprintf "unknown escape: \\%c" esc))
+              in
+              Buffer.add_char buf actual;
+              read (j + 2)
+            | '\n' ->
+              raise (Lex_error (pos, "newline in string literal"))
+            | c ->
+              Buffer.add_char buf c;
+              read (j + 1)
+        in
+        let j = read (i + 1) in
+        let str = Buffer.contents buf in
+        advance (j - i);
+        aux j ((pos, T_string str) :: acc)
       | c when is_digit c ->
         let rec read j =
           if j < len && is_digit s.[j] then read (j + 1) else j

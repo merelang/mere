@@ -11,17 +11,13 @@
                 | 'fn' ident '->' expr
                 | cmp
      cmp       := sum (('==' | '<') sum)?
-     sum       := term (('+' | '-') term)*
+     sum       := term (('+' | '-' | '++') term)*
      term      := factor ('*' factor)*
      factor    := '-' factor | apply
      apply     := atom atom*
-     atom      := Int | Bool | Ident | '(' expr ')'
+     atom      := Int | Str | Bool | '()' | Ident | '(' expr ')'
      ty        := atom_ty ('->' ty)?
-     atom_ty   := 'int' | 'bool' | '(' ty ')'
-
-   Top-level disambiguation:
-     `let name = expr ;`   -> top declaration (no `in`)
-     `let name = expr in body` -> in-expression, becomes main expr
+     atom_ty   := 'int' | 'bool' | 'str' | 'unit' | '(' ty ')'
 *)
 
 exception Parse_error of Loc.t * string
@@ -44,12 +40,14 @@ let parse_program tokens =
     match toks with
     | (_, T_ident "int") :: rest -> Ast.TyInt, rest
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
+    | (_, T_ident "str") :: rest -> Ast.TyStr, rest
+    | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
     | (_, T_lparen) :: rest ->
       let inner, toks = ty rest in
       (match toks with
        | (_, T_rparen) :: rest -> inner, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ')' in type")))
-    | _ -> raise (Parse_error (pos_of toks, "expected type (int / bool / fn type)"))
+    | _ -> raise (Parse_error (pos_of toks, "expected type (int/bool/str/unit/arrow)"))
   in
   let rec expr toks =
     let inner, toks = base_expr toks in
@@ -118,6 +116,9 @@ let parse_program tokens =
     | (pos, T_minus) :: rest ->
       let rhs, toks = term rest in
       sum_tail (mk pos (Ast.Bin (Ast.Sub, lhs, rhs))) toks
+    | (pos, T_plus_plus) :: rest ->
+      let rhs, toks = term rest in
+      sum_tail (mk pos (Ast.Bin (Ast.Concat, lhs, rhs))) toks
     | _ -> lhs, toks
   and term toks =
     let lhs, toks = factor toks in
@@ -139,28 +140,29 @@ let parse_program tokens =
     apply_tail head toks
   and apply_tail f toks =
     match toks with
-    | (_, (T_int _ | T_ident _ | T_lparen | T_true | T_false)) :: _ ->
+    | (_, (T_int _ | T_string _ | T_ident _ | T_lparen | T_true | T_false)) :: _ ->
       let arg, toks = atom toks in
       apply_tail (mk f.Ast.loc (Ast.App (f, arg))) toks
     | _ -> f, toks
   and atom toks =
     match toks with
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest
+    | (pos, T_string s) :: rest -> mk pos (Ast.Str_lit s), rest
     | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest
     | (pos, T_false) :: rest -> mk pos (Ast.Bool_lit false), rest
     | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
+    | (pos, T_lparen) :: (_, T_rparen) :: rest ->
+      mk pos Ast.Unit_lit, rest
     | (_, T_lparen) :: rest ->
       let inner, toks = expr rest in
       (match toks with
        | (_, T_rparen) :: rest -> inner, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ')'")))
     | (pos, _) :: _ ->
-      raise (Parse_error (pos, "expected integer, boolean, identifier, or '('"))
+      raise (Parse_error (pos, "expected literal, identifier, '()' or '('"))
     | [] ->
       raise (Parse_error (Loc.dummy, "unexpected end of input"))
   in
-  (* Top-level: parse let-decls (each ending with `;`) followed by main expr.
-     If we see `let X = E in body`, that's the main (in-let form). *)
   let finish decls main toks =
     match toks with
     | [(_, T_eof)] -> { Ast.decls = List.rev decls; main }
@@ -201,7 +203,6 @@ let parse_program tokens =
   in
   parse_decls [] tokens
 
-(* Convenience: parse a single expression only (no top decls). *)
 let parse tokens =
   let prog = parse_program tokens in
   match prog.decls with
