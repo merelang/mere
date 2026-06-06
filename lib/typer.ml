@@ -6,7 +6,7 @@ type env = (string * Ast.ty) list
 
 let mismatch loc expected actual =
   raise (Type_error (loc, Printf.sprintf
-    "type error: expected %s, got %s"
+    "expected %s, got %s"
     (Ast.pp_ty expected) (Ast.pp_ty actual)))
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
@@ -63,7 +63,7 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
        t2
      | t ->
        raise (Type_error (e.loc, Printf.sprintf
-         "type error: applying non-function (got %s)" (Ast.pp_ty t))))
+         "applying non-function (got %s)" (Ast.pp_ty t))))
   | Ast.Annot (inner, t) ->
     check env inner t;
     t

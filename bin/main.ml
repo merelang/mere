@@ -11,23 +11,23 @@ let usage () =
 let read_file path =
   In_channel.with_open_text path In_channel.input_all
 
+let report_and_exit ~source ~filename loc kind msg =
+  prerr_endline (Lang_ml.Diagnostic.format ~source ~filename loc kind msg);
+  exit 1
+
 let run_action action label source =
   try
     let result = action source in
     print_endline result
   with
   | Lang_ml.Lexer.Lex_error (loc, msg) ->
-    Printf.eprintf "%s: lex error at %s: %s\n" label (Lang_ml.Loc.to_string loc) msg;
-    exit 1
+    report_and_exit ~source ~filename:label loc "lex error" msg
   | Lang_ml.Parser.Parse_error (loc, msg) ->
-    Printf.eprintf "%s: parse error at %s: %s\n" label (Lang_ml.Loc.to_string loc) msg;
-    exit 1
+    report_and_exit ~source ~filename:label loc "parse error" msg
   | Lang_ml.Eval.Eval_error (loc, msg) ->
-    Printf.eprintf "%s: eval error at %s: %s\n" label (Lang_ml.Loc.to_string loc) msg;
-    exit 1
+    report_and_exit ~source ~filename:label loc "eval error" msg
   | Lang_ml.Typer.Type_error (loc, msg) ->
-    Printf.eprintf "%s: type error at %s: %s\n" label (Lang_ml.Loc.to_string loc) msg;
-    exit 1
+    report_and_exit ~source ~filename:label loc "type error" msg
   | Sys_error msg ->
     Printf.eprintf "io error: %s\n" msg;
     exit 1
