@@ -1,4 +1,10 @@
-(* Recursive-descent parser. Grammar:
+(* Recursive-descent parser.
+
+   Program grammar:
+     program  := top_decl* main_expr
+     top_decl := 'let' 'rec'? ident '=' expr ';'
+
+   Expression grammar (low to high precedence):
      expr      := base_expr (':' ty)?
      base_expr := 'if' expr 'then' expr 'else' expr
                 | 'let' 'rec'? ident '=' expr 'in' expr
@@ -12,11 +18,15 @@
      atom      := Int | Bool | Ident | '(' expr ')'
      ty        := atom_ty ('->' ty)?
      atom_ty   := 'int' | 'bool' | '(' ty ')'
+
+   Top-level disambiguation:
+     `let name = expr ;`   -> top declaration (no `in`)
+     `let name = expr in body` -> in-expression, becomes main expr
 *)
 
 exception Parse_error of Loc.t * string
 
-let parse tokens =
+let parse_program tokens =
   let open Lexer in
   let mk loc node = Ast.{ loc; node } in
   let pos_of = function
@@ -68,7 +78,7 @@ let parse tokens =
          let body, toks = expr rest in
          mk pos (Ast.Let_rec (name, value, body)), toks
        | _ ->
-         raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
+         raise (Parse_error (pos_of toks, "expected 'in' after let rec binding (use ';' for top-level)")))
     | (pos, T_let) :: (_, T_rec) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
     | (pos, T_let) :: (_, T_ident name) :: (_, T_eq) :: rest ->
@@ -78,7 +88,7 @@ let parse tokens =
          let body, toks = expr rest in
          mk pos (Ast.Let (name, value, body)), toks
        | _ ->
-         raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
+         raise (Parse_error (pos_of toks, "expected 'in' after let binding (use ';' for top-level)")))
     | (pos, T_let) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' or 'rec ident = expr' after 'let'"))
     | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
@@ -149,8 +159,53 @@ let parse tokens =
     | [] ->
       raise (Parse_error (Loc.dummy, "unexpected end of input"))
   in
-  let result, toks = expr tokens in
-  match toks with
-  | [(_, T_eof)] -> result
-  | (pos, _) :: _ -> raise (Parse_error (pos, "trailing input"))
-  | [] -> raise (Parse_error (Loc.dummy, "expected EOF"))
+  (* Top-level: parse let-decls (each ending with `;`) followed by main expr.
+     If we see `let X = E in body`, that's the main (in-let form). *)
+  let finish decls main toks =
+    match toks with
+    | [(_, T_eof)] -> { Ast.decls = List.rev decls; main }
+    | (pos, _) :: _ -> raise (Parse_error (pos, "trailing input"))
+    | [] -> raise (Parse_error (Loc.dummy, "expected EOF"))
+  in
+  let rec parse_decls decls toks =
+    match toks with
+    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let value, toks = expr rest in
+      (match toks with
+       | (_, T_semi) :: rest ->
+         parse_decls (Ast.Top_let_rec (name, value) :: decls) rest
+       | (_, T_in) :: rest ->
+         let body, toks = expr rest in
+         let main = mk pos (Ast.Let_rec (name, value, body)) in
+         finish decls main toks
+       | _ ->
+         raise (Parse_error (pos_of toks, "expected ';' or 'in' after let rec binding")))
+    | (pos, T_let) :: (_, T_rec) :: _ ->
+      raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
+    | (pos, T_let) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let value, toks = expr rest in
+      (match toks with
+       | (_, T_semi) :: rest ->
+         parse_decls (Ast.Top_let (name, value) :: decls) rest
+       | (_, T_in) :: rest ->
+         let body, toks = expr rest in
+         let main = mk pos (Ast.Let (name, value, body)) in
+         finish decls main toks
+       | _ ->
+         raise (Parse_error (pos_of toks, "expected ';' or 'in' after let binding")))
+    | (pos, T_let) :: _ ->
+      raise (Parse_error (pos, "expected 'ident = expr' or 'rec ident = expr' after 'let'"))
+    | _ ->
+      let main, toks = expr toks in
+      finish decls main toks
+  in
+  parse_decls [] tokens
+
+(* Convenience: parse a single expression only (no top decls). *)
+let parse tokens =
+  let prog = parse_program tokens in
+  match prog.decls with
+  | [] -> prog.main
+  | _ ->
+    raise (Parse_error (Loc.dummy,
+      "this parser entry-point does not accept top-level decls; use parse_program"))

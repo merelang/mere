@@ -19,6 +19,7 @@ type token =
   | T_eq_eq
   | T_lt
   | T_colon
+  | T_semi
   | T_plus
   | T_minus
   | T_star
@@ -67,6 +68,7 @@ let tokenize s =
       | '=' -> advance 1; aux (i + 1) ((pos, T_eq) :: acc)
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
+      | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
       | c when is_digit c ->
         let rec read j =
           if j < len && is_digit s.[j] then read (j + 1) else j
