@@ -1,14 +1,17 @@
-(* Recursive-descent parser. Grammar (low to high precedence):
-     expr   := 'if' expr 'then' expr 'else' expr
-             | 'let' ident '=' expr 'in' expr
-             | 'fn' ident '->' expr
-             | cmp
-     cmp    := sum (('==' | '<') sum)?
-     sum    := term (('+' | '-') term)*
-     term   := factor ('*' factor)*
-     factor := '-' factor | apply
-     apply  := atom atom*                      (* left-assoc juxtaposition *)
-     atom   := Int | Bool | Ident | '(' expr ')'
+(* Recursive-descent parser. Grammar:
+     expr      := base_expr (':' ty)?            (* ML-style post-fix annotation *)
+     base_expr := 'if' expr 'then' expr 'else' expr
+                | 'let' ident '=' expr 'in' expr
+                | 'fn' ident '->' expr
+                | cmp
+     cmp       := sum (('==' | '<') sum)?
+     sum       := term (('+' | '-') term)*
+     term      := factor ('*' factor)*
+     factor    := '-' factor | apply
+     apply     := atom atom*
+     atom      := Int | Bool | Ident | '(' expr ')'
+     ty        := atom_ty ('->' ty)?              (* arrow right-assoc *)
+     atom_ty   := 'int' | 'bool' | '(' ty ')'
 *)
 
 exception Parse_error of Loc.t * string
@@ -20,7 +23,32 @@ let parse tokens =
     | (pos, _) :: _ -> pos
     | [] -> Loc.dummy
   in
+  let rec ty toks =
+    let lhs, toks = atom_ty toks in
+    match toks with
+    | (_, T_arrow) :: rest ->
+      let rhs, toks = ty rest in
+      Ast.TyArrow (lhs, rhs), toks
+    | _ -> lhs, toks
+  and atom_ty toks =
+    match toks with
+    | (_, T_ident "int") :: rest -> Ast.TyInt, rest
+    | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
+    | (_, T_lparen) :: rest ->
+      let inner, toks = ty rest in
+      (match toks with
+       | (_, T_rparen) :: rest -> inner, rest
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' in type")))
+    | _ -> raise (Parse_error (pos_of toks, "expected type (int / bool / fn type)"))
+  in
   let rec expr toks =
+    let inner, toks = base_expr toks in
+    match toks with
+    | (_, T_colon) :: rest ->
+      let t, toks = ty rest in
+      mk inner.Ast.loc (Ast.Annot (inner, t)), toks
+    | _ -> inner, toks
+  and base_expr toks =
     match toks with
     | (pos, T_if) :: rest ->
       let cond, toks = expr rest in

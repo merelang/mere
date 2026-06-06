@@ -1,5 +1,10 @@
 (* Abstract syntax tree for Lang. *)
 
+type ty =
+  | TyInt
+  | TyBool
+  | TyArrow of ty * ty
+
 type expr = { loc : Loc.t; node : expr_node }
 
 and expr_node =
@@ -11,14 +16,20 @@ and expr_node =
   | Neg of expr
   | Let of string * expr * expr
   | If of expr * expr * expr
-  | Fun of string * expr               (* fn param -> body *)
-  | App of expr * expr                  (* f arg *)
+  | Fun of string * expr
+  | App of expr * expr
+  | Annot of expr * ty            (* (expr : ty) *)
 
 and binop = Add | Sub | Mul
 and cmpop = Eq | Lt
 
 let binop_to_string = function Add -> "+" | Sub -> "-" | Mul -> "*"
 let cmpop_to_string = function Eq -> "==" | Lt -> "<"
+
+let rec pp_ty = function
+  | TyInt -> "int"
+  | TyBool -> "bool"
+  | TyArrow (a, b) -> "(" ^ pp_ty a ^ " -> " ^ pp_ty b ^ ")"
 
 let rec pp e =
   match e.node with
@@ -38,3 +49,5 @@ let rec pp e =
     "(fn " ^ param ^ " -> " ^ pp body ^ ")"
   | App (f, arg) ->
     "(" ^ pp f ^ " " ^ pp arg ^ ")"
+  | Annot (inner, t) ->
+    "(" ^ pp inner ^ " : " ^ pp_ty t ^ ")"
