@@ -1,4 +1,5 @@
-(* Hindley-Milner type inference (Algorithm W) with let-polymorphism. *)
+(* Hindley-Milner type inference with let-polymorphism + user-defined
+   nominal sum types (no type parameters yet). *)
 
 exception Type_error of Loc.t * string
 
@@ -12,6 +13,7 @@ let rec occurs id = function
   | Ast.TyVar v when v.id = id -> true
   | Ast.TyVar { link = Some t; _ } -> occurs id t
   | Ast.TyVar _ | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> false
+  | Ast.TyCon _ -> false
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
 
 let rec unify loc t1 t2 =
@@ -22,6 +24,7 @@ let rec unify loc t1 t2 =
   | Ast.TyBool, Ast.TyBool -> ()
   | Ast.TyStr, Ast.TyStr -> ()
   | Ast.TyUnit, Ast.TyUnit -> ()
+  | Ast.TyCon a, Ast.TyCon b when a = b -> ()
   | Ast.TyArrow (a1, b1), Ast.TyArrow (a2, b2) ->
     unify loc a1 a2;
     unify loc b1 b2
@@ -44,7 +47,7 @@ let mono t = { quantified = []; body = t }
 
 let rec collect_free_vars t acc =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> acc
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyCon _ -> acc
   | Ast.TyVar v -> if List.mem v.id acc then acc else v.id :: acc
   | Ast.TyArrow (a, b) -> collect_free_vars b (collect_free_vars a acc)
 
@@ -68,7 +71,7 @@ let instantiate sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
     match Ast.walk t with
-    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyCon _) as t -> t
     | Ast.TyVar v as orig ->
       (try List.assoc v.id mapping with Not_found -> orig)
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
@@ -76,6 +79,21 @@ let instantiate sch =
   subst sch.body
 
 type env = (string * scheme) list
+
+(* Constructor registry: name -> (arg_type option, result_type_name).
+   Populated by Top_type declarations. *)
+type constr_info = {
+  arg : Ast.ty option;
+  result : string;     (* the TyCon name *)
+}
+
+let constructors : (string, constr_info) Hashtbl.t = Hashtbl.create 16
+
+let register_type type_name variants =
+  List.iter (fun (cname, payload) ->
+    Hashtbl.replace constructors cname
+      { arg = payload; result = type_name }
+  ) variants
 
 let initial_env : env =
   [ ("print", mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit))) ]
@@ -148,6 +166,59 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let ti = infer env inner in
     unify e.loc ti t;
     t
+  | Ast.Constr (name, arg_opt) ->
+    let info =
+      try Hashtbl.find constructors name
+      with Not_found ->
+        raise (Type_error (e.loc, "unknown constructor: " ^ name))
+    in
+    (match info.arg, arg_opt with
+     | None, None -> Ast.TyCon info.result
+     | Some expected_arg_ty, Some arg ->
+       let ta = infer env arg in
+       unify arg.loc ta expected_arg_ty;
+       Ast.TyCon info.result
+     | None, Some _ ->
+       raise (Type_error (e.loc,
+         "constructor " ^ name ^ " takes no argument"))
+     | Some _, None ->
+       raise (Type_error (e.loc,
+         "constructor " ^ name ^ " requires an argument")))
+  | Ast.Match (scrut, arms) ->
+    let t_scrut = infer env scrut in
+    let result_var = fresh_var () in
+    List.iter (fun (pat, branch) ->
+      let bindings = check_pattern pat t_scrut in
+      let env' = List.fold_left (fun acc (n, t) -> (n, mono t) :: acc) env bindings in
+      let tb = infer env' branch in
+      unify branch.loc tb result_var
+    ) arms;
+    result_var
+
+and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list =
+  match p.pnode with
+  | Ast.P_wild -> []
+  | Ast.P_var name -> [(name, expected)]
+  | Ast.P_int _ -> unify p.ploc expected Ast.TyInt; []
+  | Ast.P_bool _ -> unify p.ploc expected Ast.TyBool; []
+  | Ast.P_str _ -> unify p.ploc expected Ast.TyStr; []
+  | Ast.P_unit -> unify p.ploc expected Ast.TyUnit; []
+  | Ast.P_constr (name, sub) ->
+    let info =
+      try Hashtbl.find constructors name
+      with Not_found ->
+        raise (Type_error (p.ploc, "unknown constructor in pattern: " ^ name))
+    in
+    unify p.ploc expected (Ast.TyCon info.result);
+    (match info.arg, sub with
+     | None, None -> []
+     | Some arg_ty, Some sub_pat -> check_pattern sub_pat arg_ty
+     | None, Some _ ->
+       raise (Type_error (p.ploc,
+         "constructor pattern " ^ name ^ " takes no sub-pattern"))
+     | Some _, None ->
+       raise (Type_error (p.ploc,
+         "constructor pattern " ^ name ^ " requires a sub-pattern")))
 
 let type_check e =
   counter := 0;

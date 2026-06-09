@@ -9,20 +9,22 @@ type value =
   | V_unit
   | V_closure of string * Ast.expr * env
   | V_builtin of string * (value -> value)
+  | V_constr of string * value option
 
 and env = (string * value ref) list
 
-let to_string = function
+let rec to_string = function
   | V_int n -> string_of_int n
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "()"
   | V_closure (param, _, _) -> "<closure:" ^ param ^ ">"
   | V_builtin (name, _) -> "<builtin:" ^ name ^ ">"
+  | V_constr (name, None) -> name
+  | V_constr (name, Some v) -> name ^ " " ^ to_string v
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
-(* Built-ins pre-bound in the initial env. *)
 let builtin_print =
   V_builtin ("print", fun v ->
     (match v with
@@ -32,6 +34,22 @@ let builtin_print =
 
 let initial_env : env =
   [ ("print", ref builtin_print) ]
+
+(* Try to match value against pattern. Returns Some bindings if successful, None otherwise. *)
+let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
+  match p.pnode, v with
+  | Ast.P_wild, _ -> Some []
+  | Ast.P_var n, _ -> Some [(n, v)]
+  | Ast.P_int n, V_int m when n = m -> Some []
+  | Ast.P_bool b, V_bool b' when b = b' -> Some []
+  | Ast.P_str s, V_str s' when s = s' -> Some []
+  | Ast.P_unit, V_unit -> Some []
+  | Ast.P_constr (c, None), V_constr (c', None) when c = c' -> Some []
+  | Ast.P_constr (c, Some sub_p), V_constr (c', Some sub_v) when c = c' ->
+    (match match_pattern sub_p sub_v with
+     | Some bs -> Some bs
+     | None -> None)
+  | _ -> None
 
 let rec eval_in (env : env) (e : Ast.expr) =
   match e.Ast.node with
@@ -96,5 +114,21 @@ let rec eval_in (env : env) (e : Ast.expr) =
        fn v
      | _ -> type_error e.Ast.loc "applying non-function")
   | Ast.Annot (inner, _) -> eval_in env inner
+  | Ast.Constr (name, None) -> V_constr (name, None)
+  | Ast.Constr (name, Some arg) ->
+    let v = eval_in env arg in
+    V_constr (name, Some v)
+  | Ast.Match (scrut, arms) ->
+    let v = eval_in env scrut in
+    let rec try_arms = function
+      | [] -> type_error e.Ast.loc "no matching arm in match"
+      | (p, body) :: rest ->
+        (match match_pattern p v with
+         | Some bindings ->
+           let env' = List.fold_left (fun acc (n, v) -> (n, ref v) :: acc) env bindings in
+           eval_in env' body
+         | None -> try_arms rest)
+    in
+    try_arms arms
 
 let eval expr = eval_in initial_env expr
