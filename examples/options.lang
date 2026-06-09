@@ -1,0 +1,16 @@
+// Option-like sum type for representing "maybe a value"
+type opt = None | Some of int;
+
+// safe operation that may produce no result (uses Some/None)
+let safe_step = fn n ->
+  if n < 0 then None
+  else Some (n * 10);
+
+let describe = fn x ->
+  match x with
+  | None   -> "no value"
+  | Some _ -> "got an int";
+
+// chain two prints via let-in (no separate statement separator yet)
+let _show1 = print (describe (safe_step 5)) in
+print (describe (safe_step (-3)))

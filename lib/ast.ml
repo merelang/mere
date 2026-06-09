@@ -12,6 +12,7 @@ and ty =
   | TyUnit
   | TyArrow of ty * ty
   | TyVar of tyvar
+  | TyCon of string                    (* user-defined nominal type, e.g. opt, result *)
 
 type expr = { loc : Loc.t; node : expr_node }
 
@@ -30,13 +31,26 @@ and expr_node =
   | Fun of string * expr
   | App of expr * expr
   | Annot of expr * ty
+  | Constr of string * expr option     (* C  or  C arg  *)
+  | Match of expr * (pattern * expr) list
 
 and binop = Add | Sub | Mul | Concat
 and cmpop = Eq | Lt
 
+and pattern = { ploc : Loc.t; pnode : pattern_node }
+and pattern_node =
+  | P_wild
+  | P_var of string
+  | P_int of int
+  | P_bool of bool
+  | P_str of string
+  | P_unit
+  | P_constr of string * pattern option
+
 type top_decl =
   | Top_let of string * expr
   | Top_let_rec of string * expr
+  | Top_type of string * (string * ty option) list   (* type name = (Cn ['of' ty])+ *)
 
 type program = {
   decls : top_decl list;
@@ -79,10 +93,10 @@ let pp_ty t =
       let sb = aux b in
       "(" ^ sa ^ " -> " ^ sb ^ ")"
     | TyVar v -> name_of v.id
+    | TyCon name -> name
   in
   aux t
 
-(* Escape a string for display in pp (showing quotes and escapes). *)
 let escape_string s =
   let buf = Buffer.create (String.length s + 2) in
   Buffer.add_char buf '"';
@@ -96,6 +110,17 @@ let escape_string s =
   ) s;
   Buffer.add_char buf '"';
   Buffer.contents buf
+
+let rec pp_pattern p =
+  match p.pnode with
+  | P_wild -> "_"
+  | P_var n -> n
+  | P_int n -> string_of_int n
+  | P_bool b -> if b then "true" else "false"
+  | P_str s -> escape_string s
+  | P_unit -> "()"
+  | P_constr (c, None) -> c
+  | P_constr (c, Some sub) -> c ^ " " ^ pp_pattern sub
 
 let rec pp e =
   match e.node with
@@ -121,8 +146,19 @@ let rec pp e =
     "(" ^ pp f ^ " " ^ pp arg ^ ")"
   | Annot (inner, t) ->
     "(" ^ pp inner ^ " : " ^ pp_ty t ^ ")"
+  | Constr (c, None) -> c
+  | Constr (c, Some arg) -> "(" ^ c ^ " " ^ pp arg ^ ")"
+  | Match (scrut, arms) ->
+    let arms_s =
+      arms
+      |> List.map (fun (p, body) -> "| " ^ pp_pattern p ^ " -> " ^ pp body)
+      |> String.concat " "
+    in
+    "(match " ^ pp scrut ^ " with " ^ arms_s ^ ")"
 
 let desugar_program (prog : program) : expr =
+  (* Only Top_let / Top_let_rec become nested lets around main.
+     Top_type is handled at typer-level (out of band). *)
   List.fold_right (fun decl body ->
     let loc = body.loc in
     match decl with
@@ -130,4 +166,5 @@ let desugar_program (prog : program) : expr =
       { loc; node = Let (name, value, body) }
     | Top_let_rec (name, value) ->
       { loc; node = Let_rec (name, value, body) }
+    | Top_type _ -> body
   ) prog.decls prog.main

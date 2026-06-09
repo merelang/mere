@@ -15,14 +15,20 @@ type token =
   | T_true
   | T_false
   | T_fn
+  | T_type
+  | T_match
+  | T_with
+  | T_of
+  | T_underscore
   | T_arrow
   | T_eq
   | T_eq_eq
   | T_lt
   | T_colon
   | T_semi
+  | T_pipe
   | T_plus
-  | T_plus_plus    (* ++ for string concat *)
+  | T_plus_plus
   | T_minus
   | T_star
   | T_lparen
@@ -73,6 +79,7 @@ let tokenize s =
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
+      | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
       | '"' ->
         (* String literal with simple escapes: n / t / backslash / dquote *)
         let buf = Buffer.create 16 in
@@ -130,6 +137,11 @@ let tokenize s =
           | "true" -> T_true
           | "false" -> T_false
           | "fn" -> T_fn
+          | "type" -> T_type
+          | "match" -> T_match
+          | "with" -> T_with
+          | "of" -> T_of
+          | "_" -> T_underscore
           | _ -> T_ident word
         in
         advance (j - i);

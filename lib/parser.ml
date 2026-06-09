@@ -1,33 +1,28 @@
-(* Recursive-descent parser.
-
-   Program grammar:
-     program  := top_decl* main_expr
-     top_decl := 'let' 'rec'? ident '=' expr ';'
-
-   Expression grammar (low to high precedence):
-     expr      := base_expr (':' ty)?
-     base_expr := 'if' expr 'then' expr 'else' expr
-                | 'let' 'rec'? ident '=' expr 'in' expr
-                | 'fn' ident '->' expr
-                | cmp
-     cmp       := sum (('==' | '<') sum)?
-     sum       := term (('+' | '-' | '++') term)*
-     term      := factor ('*' factor)*
-     factor    := '-' factor | apply
-     apply     := atom atom*
-     atom      := Int | Str | Bool | '()' | Ident | '(' expr ')'
-     ty        := atom_ty ('->' ty)?
-     atom_ty   := 'int' | 'bool' | 'str' | 'unit' | '(' ty ')'
-*)
+(* Recursive-descent parser with stateful constructor registry. *)
 
 exception Parse_error of Loc.t * string
+
+let starts_with_upper s =
+  String.length s > 0 &&
+  let c = s.[0] in
+  c >= 'A' && c <= 'Z'
+
+(* Constructor registry: name -> arity (0 or 1).
+   Populated by `type` decls. Module-level so REPL inputs accumulate state. *)
+let constructors : (string, int) Hashtbl.t = Hashtbl.create 16
 
 let parse_program tokens =
   let open Lexer in
   let mk loc node = Ast.{ loc; node } in
+  let mkp loc node = Ast.{ ploc = loc; pnode = node } in
   let pos_of = function
     | (pos, _) :: _ -> pos
     | [] -> Loc.dummy
+  in
+  let lookup_constr name =
+    match Hashtbl.find_opt constructors name with
+    | Some a -> Some a
+    | None -> None
   in
   let rec ty toks =
     let lhs, toks = atom_ty toks in
@@ -42,12 +37,36 @@ let parse_program tokens =
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
+    | (_, T_ident name) :: rest -> Ast.TyCon name, rest
     | (_, T_lparen) :: rest ->
       let inner, toks = ty rest in
       (match toks with
        | (_, T_rparen) :: rest -> inner, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ')' in type")))
-    | _ -> raise (Parse_error (pos_of toks, "expected type (int/bool/str/unit/arrow)"))
+    | _ -> raise (Parse_error (pos_of toks, "expected type"))
+  in
+  let parse_variants toks =
+    (* Optional leading `|`, then variant ('|' variant)* *)
+    let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
+    let rec loop acc toks =
+      match toks with
+      | (_, T_ident name) :: rest when starts_with_upper name ->
+        let payload, rest =
+          match rest with
+          | (_, T_of) :: rest_after_of ->
+            let t, rest' = ty rest_after_of in
+            Some t, rest'
+          | _ -> None, rest
+        in
+        let acc = (name, payload) :: acc in
+        (match rest with
+         | (_, T_pipe) :: rest' -> loop acc rest'
+         | _ -> List.rev acc, rest)
+      | _ ->
+        raise (Parse_error (pos_of toks,
+          "expected variant constructor (capitalized identifier)"))
+    in
+    loop [] toks
   in
   let rec expr toks =
     let inner, toks = base_expr toks in
@@ -76,7 +95,7 @@ let parse_program tokens =
          let body, toks = expr rest in
          mk pos (Ast.Let_rec (name, value, body)), toks
        | _ ->
-         raise (Parse_error (pos_of toks, "expected 'in' after let rec binding (use ';' for top-level)")))
+         raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
     | (pos, T_let) :: (_, T_rec) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
     | (pos, T_let) :: (_, T_ident name) :: (_, T_eq) :: rest ->
@@ -86,15 +105,71 @@ let parse_program tokens =
          let body, toks = expr rest in
          mk pos (Ast.Let (name, value, body)), toks
        | _ ->
-         raise (Parse_error (pos_of toks, "expected 'in' after let binding (use ';' for top-level)")))
+         raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
     | (pos, T_let) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' or 'rec ident = expr' after 'let'"))
+      raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
     | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
       let body, toks = expr rest in
       mk pos (Ast.Fun (param, body)), toks
     | (pos, T_fn) :: _ ->
       raise (Parse_error (pos, "expected 'ident -> expr' after 'fn'"))
+    | (pos, T_match) :: rest ->
+      let scrut, toks = expr rest in
+      (match toks with
+       | (_, T_with) :: rest ->
+         let arms, toks = parse_arms rest in
+         mk pos (Ast.Match (scrut, arms)), toks
+       | _ -> raise (Parse_error (pos_of toks, "expected 'with' after match")))
     | _ -> cmp toks
+  and parse_arms toks =
+    let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
+    let rec loop acc toks =
+      let p, toks = pattern toks in
+      let toks =
+        match toks with
+        | (_, T_arrow) :: rest -> rest
+        | _ -> raise (Parse_error (pos_of toks, "expected '->' in match arm"))
+      in
+      let body, toks = expr toks in
+      let acc = (p, body) :: acc in
+      match toks with
+      | (_, T_pipe) :: rest -> loop acc rest
+      | _ -> List.rev acc, toks
+    in
+    loop [] toks
+  and pattern toks =
+    match toks with
+    | (pos, T_underscore) :: rest -> mkp pos Ast.P_wild, rest
+    | (pos, T_int n) :: rest -> mkp pos (Ast.P_int n), rest
+    | (pos, T_string s) :: rest -> mkp pos (Ast.P_str s), rest
+    | (pos, T_true) :: rest -> mkp pos (Ast.P_bool true), rest
+    | (pos, T_false) :: rest -> mkp pos (Ast.P_bool false), rest
+    | (pos, T_lparen) :: (_, T_rparen) :: rest -> mkp pos Ast.P_unit, rest
+    | (_, T_lparen) :: rest ->
+      let inner, toks = pattern rest in
+      (match toks with
+       | (_, T_rparen) :: rest -> inner, rest
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' in pattern")))
+    | (pos, T_ident name) :: rest when starts_with_upper name ->
+      (* Constructor pattern *)
+      let arity =
+        match lookup_constr name with
+        | Some a -> a
+        | None -> 0  (* unknown — assume nullary, typer will error *)
+      in
+      if arity = 0 then
+        mkp pos (Ast.P_constr (name, None)), rest
+      else begin
+        match rest with
+        | (_, (T_int _ | T_string _ | T_true | T_false | T_underscore
+              | T_lparen | T_ident _)) :: _ ->
+          let sub, rest = pattern rest in
+          mkp pos (Ast.P_constr (name, Some sub)), rest
+        | _ ->
+          mkp pos (Ast.P_constr (name, None)), rest
+      end
+    | (pos, T_ident name) :: rest -> mkp pos (Ast.P_var name), rest
+    | _ -> raise (Parse_error (pos_of toks, "expected pattern"))
   and cmp toks =
     let lhs, toks = sum toks in
     match toks with
@@ -150,16 +225,33 @@ let parse_program tokens =
     | (pos, T_string s) :: rest -> mk pos (Ast.Str_lit s), rest
     | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest
     | (pos, T_false) :: rest -> mk pos (Ast.Bool_lit false), rest
-    | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
-    | (pos, T_lparen) :: (_, T_rparen) :: rest ->
-      mk pos Ast.Unit_lit, rest
+    | (pos, T_lparen) :: (_, T_rparen) :: rest -> mk pos Ast.Unit_lit, rest
     | (_, T_lparen) :: rest ->
       let inner, toks = expr rest in
       (match toks with
        | (_, T_rparen) :: rest -> inner, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ')'")))
+    | (pos, T_ident name) :: rest when starts_with_upper name ->
+      (* Constructor expression — consume one payload atom iff arity = 1 *)
+      let arity =
+        match lookup_constr name with
+        | Some a -> a
+        | None -> 0  (* unknown — assume nullary *)
+      in
+      if arity = 0 then
+        mk pos (Ast.Constr (name, None)), rest
+      else begin
+        match rest with
+        | (_, (T_int _ | T_string _ | T_ident _ | T_lparen
+              | T_true | T_false)) :: _ ->
+          let arg, rest = atom rest in
+          mk pos (Ast.Constr (name, Some arg)), rest
+        | _ ->
+          mk pos (Ast.Constr (name, None)), rest
+      end
+    | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
     | (pos, _) :: _ ->
-      raise (Parse_error (pos, "expected literal, identifier, '()' or '('"))
+      raise (Parse_error (pos, "expected literal, identifier, or '('"))
     | [] ->
       raise (Parse_error (Loc.dummy, "unexpected end of input"))
   in
@@ -171,6 +263,19 @@ let parse_program tokens =
   in
   let rec parse_decls decls toks =
     match toks with
+    | (_, T_type) :: (_, T_ident type_name) :: (_, T_eq) :: rest ->
+      let variants, toks = parse_variants rest in
+      (* Register each variant's arity *)
+      List.iter (fun (cname, payload) ->
+        Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
+      ) variants;
+      (match toks with
+       | (_, T_semi) :: rest ->
+         parse_decls (Ast.Top_type (type_name, variants) :: decls) rest
+       | _ ->
+         raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
+    | (pos, T_type) :: _ ->
+      raise (Parse_error (pos, "expected 'ident = ...' after 'type'"))
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       (match toks with
@@ -196,7 +301,7 @@ let parse_program tokens =
        | _ ->
          raise (Parse_error (pos_of toks, "expected ';' or 'in' after let binding")))
     | (pos, T_let) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' or 'rec ident = expr' after 'let'"))
+      raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
     | _ ->
       let main, toks = expr toks in
       finish decls main toks

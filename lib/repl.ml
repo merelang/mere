@@ -30,7 +30,8 @@ let format_exn = function
     Printf.sprintf "eval error at %s: %s" (Loc.to_string loc) msg
   | e -> "internal error: " ^ Printexc.to_string e
 
-(* Process one top decl, updating both envs. Returns (name, scheme) for display. *)
+(* Process one top decl, updating both envs.
+   Returns Some (name, scheme) for binding decls, None for type decls. *)
 let process_decl eval_env type_env decl =
   match decl with
   | Ast.Top_let (name, value) ->
@@ -39,7 +40,7 @@ let process_decl eval_env type_env decl =
     let v = Eval.eval_in !eval_env value in
     eval_env := (name, ref v) :: !eval_env;
     type_env := (name, sch) :: !type_env;
-    (name, sch)
+    Some (name, sch)
   | Ast.Top_let_rec (name, value) ->
     let alpha = Typer.fresh_var () in
     let env_rec = (name, Typer.mono alpha) :: !type_env in
@@ -52,7 +53,11 @@ let process_decl eval_env type_env decl =
     placeholder := v;
     eval_env := env_eval;
     type_env := (name, sch) :: !type_env;
-    (name, sch)
+    Some (name, sch)
+  | Ast.Top_type (name, variants) ->
+    Typer.register_type name variants;
+    Printf.printf "type %s defined (%d variants)\n" name (List.length variants);
+    None
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
 let prepare_input s =
@@ -69,7 +74,7 @@ let handle_input eval_env type_env input =
   let prepared = prepare_input input in
   let tokens = Lexer.tokenize prepared in
   let prog = Parser.parse_program tokens in
-  let added = List.map (process_decl eval_env type_env) prog.decls in
+  let added = List.filter_map (process_decl eval_env type_env) prog.decls in
   let main_t = Typer.infer !type_env prog.main in
   let main_v = Eval.eval_in !eval_env prog.main in
   List.iter (fun (name, sch) ->
