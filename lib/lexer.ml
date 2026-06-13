@@ -26,6 +26,7 @@ type token =
   | T_lt
   | T_colon
   | T_semi
+  | T_comma
   | T_pipe
   | T_plus
   | T_plus_plus
@@ -79,6 +80,7 @@ let tokenize s =
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
+      | ',' -> advance 1; aux (i + 1) ((pos, T_comma) :: acc)
       | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
       | '"' ->
         (* String literal with simple escapes: n / t / backslash / dquote *)

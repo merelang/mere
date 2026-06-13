@@ -10,6 +10,7 @@ type value =
   | V_closure of string * Ast.expr * env
   | V_builtin of string * (value -> value)
   | V_constr of string * value option
+  | V_tuple of value list
 
 and env = (string * value ref) list
 
@@ -22,6 +23,8 @@ let rec to_string = function
   | V_builtin (name, _) -> "<builtin:" ^ name ^ ">"
   | V_constr (name, None) -> name
   | V_constr (name, Some v) -> name ^ " " ^ to_string v
+  | V_tuple vs ->
+    "(" ^ String.concat ", " (List.map to_string vs) ^ ")"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -35,7 +38,6 @@ let builtin_print =
 let initial_env : env =
   [ ("print", ref builtin_print) ]
 
-(* Try to match value against pattern. Returns Some bindings if successful, None otherwise. *)
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
   match p.pnode, v with
   | Ast.P_wild, _ -> Some []
@@ -46,9 +48,18 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
   | Ast.P_unit, V_unit -> Some []
   | Ast.P_constr (c, None), V_constr (c', None) when c = c' -> Some []
   | Ast.P_constr (c, Some sub_p), V_constr (c', Some sub_v) when c = c' ->
-    (match match_pattern sub_p sub_v with
-     | Some bs -> Some bs
-     | None -> None)
+    match_pattern sub_p sub_v
+  | Ast.P_tuple ps, V_tuple vs when List.length ps = List.length vs ->
+    let rec combine acc ps vs =
+      match ps, vs with
+      | [], [] -> Some acc
+      | p :: ps', v :: vs' ->
+        (match match_pattern p v with
+         | None -> None
+         | Some bs -> combine (acc @ bs) ps' vs')
+      | _ -> None
+    in
+    combine [] ps vs
   | _ -> None
 
 let rec eval_in (env : env) (e : Ast.expr) =
@@ -130,5 +141,7 @@ let rec eval_in (env : env) (e : Ast.expr) =
          | None -> try_arms rest)
     in
     try_arms arms
+  | Ast.Tuple es ->
+    V_tuple (List.map (eval_in env) es)
 
 let eval expr = eval_in initial_env expr

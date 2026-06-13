@@ -12,7 +12,8 @@ and ty =
   | TyUnit
   | TyArrow of ty * ty
   | TyVar of tyvar
-  | TyCon of string                    (* user-defined nominal type, e.g. opt, result *)
+  | TyCon of string
+  | TyTuple of ty list      (* length >= 2 *)
 
 type expr = { loc : Loc.t; node : expr_node }
 
@@ -31,8 +32,9 @@ and expr_node =
   | Fun of string * expr
   | App of expr * expr
   | Annot of expr * ty
-  | Constr of string * expr option     (* C  or  C arg  *)
+  | Constr of string * expr option
   | Match of expr * (pattern * expr) list
+  | Tuple of expr list      (* length >= 2 *)
 
 and binop = Add | Sub | Mul | Concat
 and cmpop = Eq | Lt
@@ -46,11 +48,12 @@ and pattern_node =
   | P_str of string
   | P_unit
   | P_constr of string * pattern option
+  | P_tuple of pattern list   (* length >= 2 *)
 
 type top_decl =
   | Top_let of string * expr
   | Top_let_rec of string * expr
-  | Top_type of string * (string * ty option) list   (* type name = (Cn ['of' ty])+ *)
+  | Top_type of string * (string * ty option) list
 
 type program = {
   decls : top_decl list;
@@ -94,6 +97,9 @@ let pp_ty t =
       "(" ^ sa ^ " -> " ^ sb ^ ")"
     | TyVar v -> name_of v.id
     | TyCon name -> name
+    | TyTuple ts ->
+      let parts = List.map aux ts in
+      "(" ^ String.concat " * " parts ^ ")"
   in
   aux t
 
@@ -121,6 +127,8 @@ let rec pp_pattern p =
   | P_unit -> "()"
   | P_constr (c, None) -> c
   | P_constr (c, Some sub) -> c ^ " " ^ pp_pattern sub
+  | P_tuple ps ->
+    "(" ^ String.concat ", " (List.map pp_pattern ps) ^ ")"
 
 let rec pp e =
   match e.node with
@@ -155,10 +163,10 @@ let rec pp e =
       |> String.concat " "
     in
     "(match " ^ pp scrut ^ " with " ^ arms_s ^ ")"
+  | Tuple es ->
+    "(" ^ String.concat ", " (List.map pp es) ^ ")"
 
 let desugar_program (prog : program) : expr =
-  (* Only Top_let / Top_let_rec become nested lets around main.
-     Top_type is handled at typer-level (out of band). *)
   List.fold_right (fun decl body ->
     let loc = body.loc in
     match decl with

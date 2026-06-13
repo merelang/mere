@@ -1,5 +1,5 @@
-(* Hindley-Milner type inference with let-polymorphism + user-defined
-   nominal sum types (no type parameters yet). *)
+(* Hindley-Milner type inference with let-polymorphism, user-defined
+   nominal sum types, and tuples. *)
 
 exception Type_error of Loc.t * string
 
@@ -15,6 +15,7 @@ let rec occurs id = function
   | Ast.TyVar _ | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> false
   | Ast.TyCon _ -> false
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
+  | Ast.TyTuple ts -> List.exists (occurs id) ts
 
 let rec unify loc t1 t2 =
   let t1 = Ast.walk t1 in
@@ -28,6 +29,8 @@ let rec unify loc t1 t2 =
   | Ast.TyArrow (a1, b1), Ast.TyArrow (a2, b2) ->
     unify loc a1 a2;
     unify loc b1 b2
+  | Ast.TyTuple ts1, Ast.TyTuple ts2 when List.length ts1 = List.length ts2 ->
+    List.iter2 (unify loc) ts1 ts2
   | Ast.TyVar v1, Ast.TyVar v2 when v1.id = v2.id -> ()
   | Ast.TyVar v, t | t, Ast.TyVar v ->
     if occurs v.id t then
@@ -50,6 +53,7 @@ let rec collect_free_vars t acc =
   | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyCon _ -> acc
   | Ast.TyVar v -> if List.mem v.id acc then acc else v.id :: acc
   | Ast.TyArrow (a, b) -> collect_free_vars b (collect_free_vars a acc)
+  | Ast.TyTuple ts -> List.fold_left (fun a t -> collect_free_vars t a) acc ts
 
 let env_free_vars env =
   List.fold_left (fun acc (_, sch) ->
@@ -75,16 +79,15 @@ let instantiate sch =
     | Ast.TyVar v as orig ->
       (try List.assoc v.id mapping with Not_found -> orig)
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
+    | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
   in
   subst sch.body
 
 type env = (string * scheme) list
 
-(* Constructor registry: name -> (arg_type option, result_type_name).
-   Populated by Top_type declarations. *)
 type constr_info = {
   arg : Ast.ty option;
-  result : string;     (* the TyCon name *)
+  result : string;
 }
 
 let constructors : (string, constr_info) Hashtbl.t = Hashtbl.create 16
@@ -194,6 +197,9 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
       unify branch.loc tb result_var
     ) arms;
     result_var
+  | Ast.Tuple es ->
+    let ts = List.map (infer env) es in
+    Ast.TyTuple ts
 
 and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list =
   match p.pnode with
@@ -219,6 +225,10 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
      | Some _, None ->
        raise (Type_error (p.ploc,
          "constructor pattern " ^ name ^ " requires a sub-pattern")))
+  | Ast.P_tuple ps ->
+    let element_tys = List.map (fun _ -> fresh_var ()) ps in
+    unify p.ploc expected (Ast.TyTuple element_tys);
+    List.concat (List.map2 check_pattern ps element_tys)
 
 let type_check e =
   counter := 0;
