@@ -1,0 +1,18 @@
+// Binary tree using sum types + tuples.
+//
+//        2
+//       / \
+//      1   3
+//
+// sum = 6
+
+type tree = Leaf | Node of tree * int * tree;
+
+let rec sum_tree = fn t ->
+  match t with
+  | Leaf            -> 0
+  | Node (l, v, r)  -> sum_tree l + v + sum_tree r;
+
+let example = Node (Node (Leaf, 1, Leaf), 2, Node (Leaf, 3, Leaf));
+
+sum_tree example
