@@ -6,6 +6,7 @@ type token =
   | T_int of int
   | T_string of string
   | T_ident of string
+  | T_tyvar of string         (* 'a, 'b, ... *)
   | T_let
   | T_rec
   | T_in
@@ -82,8 +83,15 @@ let tokenize s =
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
       | ',' -> advance 1; aux (i + 1) ((pos, T_comma) :: acc)
       | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
+      | '\'' when i + 1 < len && is_alpha s.[i + 1] ->
+        let rec read j =
+          if j < len && is_ident_cont s.[j] then read (j + 1) else j
+        in
+        let j = read (i + 1) in
+        let name = String.sub s (i + 1) (j - i - 1) in
+        advance (j - i);
+        aux j ((pos, T_tyvar name) :: acc)
       | '"' ->
-        (* String literal with simple escapes: n / t / backslash / dquote *)
         let buf = Buffer.create 16 in
         let rec read j =
           if j >= len then

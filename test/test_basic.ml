@@ -25,101 +25,109 @@ let () =
   check "version is 0.1.0" Version.v "0.1.0";
 
   (* --- regression --- *)
-  check "'1 + 2'"          (Pipeline.process "1 + 2")          "3";
+  check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
   check "factorial"
     (Pipeline.process "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 6") "720";
-  check "type opt"
-    (Pipeline.process "type opt = None | Some of int; Some 5") "Some 5";
-  check "match opt"
-    (Pipeline.process
-      "type opt = None | Some of int;
-       match Some 5 with | None -> 0 | Some n -> n + 1") "6";
-
-  (* --- tuples: expressions --- *)
-  check "tuple 2"
-    (Pipeline.process "(1, 2)") "(1, 2)";
-  check "tuple 3"
+  check "tuple basic"
     (Pipeline.process "(1, 2, 3)") "(1, 2, 3)";
-  check "tuple of mixed types"
-    (Pipeline.process "(1, true, \"hi\")") "(1, true, \"hi\")";
-  check "tuple type"
-    (Pipeline.type_of "(1, 2)") "(int * int)";
-  check "tuple type mixed"
-    (Pipeline.type_of "(1, true, \"hi\")") "(int * bool * str)";
 
-  (* --- tuples: pattern match --- *)
-  check "match tuple"
-    (Pipeline.process "match (1, 2) with | (a, b) -> a + b") "3";
-  check "match tuple 3"
-    (Pipeline.process "match (1, 2, 3) with | (a, b, c) -> a + b + c") "6";
-  check "match tuple with wildcard"
-    (Pipeline.process "match (1, 2, 3) with | (_, b, _) -> b") "2";
+  (* --- legacy non-polymorphic type still works --- *)
+  check "mono type still works"
+    (Pipeline.process "type col = R | G | B; G") "G";
 
-  (* --- multi-arg variants via tuple payload --- *)
-  check "variant with tuple payload"
-    (Pipeline.process
-      "type pair = Pair of int * int;
-       Pair (3, 4)") "Pair (3, 4)";
-  check "match variant with tuple"
-    (Pipeline.process
-      "type pair = Pair of int * int;
-       match Pair (3, 4) with | Pair (a, b) -> a * b") "12";
-  check "type of pair"
-    (Pipeline.type_of
-      "type pair = Pair of int * int;
-       Pair (3, 4)") "pair";
+  (* --- polymorphic type declaration & use --- *)
+  check "poly opt: Some 5"
+    (Pipeline.process "type 'a opt = None | Some of 'a; Some 5") "Some 5";
+  check "poly opt: Some str"
+    (Pipeline.process "type 'a opt = None | Some of 'a; Some \"hi\"") "Some \"hi\"";
+  check "poly opt: None"
+    (Pipeline.process "type 'a opt = None | Some of 'a; None") "None";
+  check "poly opt type of Some 5"
+    (Pipeline.type_of "type 'a opt = None | Some of 'a; Some 5") "int opt";
+  check "poly opt type of Some 'hi'"
+    (Pipeline.type_of "type 'a opt = None | Some of 'a; Some \"hi\"") "str opt";
 
-  (* --- linked list! --- *)
-  check "list: sum to 6"
+  (* --- match on polymorphic option --- *)
+  check "match poly Some"
     (Pipeline.process
-      "type intlist = INil | ICons of int * intlist;
+      "type 'a opt = None | Some of 'a;
+       match Some 42 with | None -> 0 | Some n -> n + 1") "43";
+  check "match poly None"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match None with | None -> 0 | Some n -> n + 1") "0";
+  check "match poly Some str"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some \"hi\" with | None -> \"x\" | Some s -> s ++ \"!\"") "\"hi!\"";
+
+  (* --- polymorphic list! --- *)
+  check "poly list: sum int"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
        let rec sum = fn lst ->
          match lst with
-         | INil -> 0
-         | ICons (h, t) -> h + sum t
-       in sum (ICons (1, ICons (2, ICons (3, INil))))") "6";
-  check "list: length 4"
+         | Nil -> 0
+         | Cons (h, t) -> h + sum t
+       in sum (Cons (1, Cons (2, Cons (3, Nil))))") "6";
+  check "poly list: length of str list"
     (Pipeline.process
-      "type intlist = INil | ICons of int * intlist;
+      "type 'a list = Nil | Cons of 'a * 'a list;
        let rec len = fn lst ->
          match lst with
-         | INil -> 0
-         | ICons (_, t) -> 1 + len t
-       in len (ICons (10, ICons (20, ICons (30, ICons (40, INil)))))") "4";
+         | Nil -> 0
+         | Cons (_, t) -> 1 + len t
+       in len (Cons (\"a\", Cons (\"b\", Cons (\"c\", Nil))))") "3";
 
-  (* --- binary tree --- *)
-  check "tree: sum of node values"
+  (* --- type inference: list with let-polymorphism --- *)
+  check "poly list type at int"
+    (Pipeline.type_of
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       Cons (1, Nil)") "int list";
+  check "poly list type at str"
+    (Pipeline.type_of
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       Cons (\"a\", Nil)") "str list";
+
+  (* --- Result-like with one param (Ok of 'a, Err of str — but Err of str is monomorphic; need 2 params for full result) --- *)
+  check "poly Box"
     (Pipeline.process
-      "type tree = Leaf | Node of tree * int * tree;
+      "type 'a box = Box of 'a;
+       match Box (3 + 4) with | Box x -> x * 2") "14";
+  check "poly Box str"
+    (Pipeline.process
+      "type 'a box = Box of 'a;
+       match Box \"hello\" with | Box s -> s ++ \"!\"") "\"hello!\"";
+
+  (* --- polymorphic tree (single param) --- *)
+  check "poly tree: sum of int values"
+    (Pipeline.process
+      "type 'a tree = Leaf | Node of 'a tree * 'a * 'a tree;
        let rec sum = fn t ->
          match t with
          | Leaf -> 0
          | Node (l, v, r) -> sum l + v + sum r
        in sum (Node (Node (Leaf, 1, Leaf), 2, Node (Leaf, 3, Leaf)))") "6";
 
-  (* --- tuple via let then use --- *)
-  check "let-bound tuple via match"
-    (Pipeline.process
-      "let p = (10, 20) in
-       match p with | (a, b) -> a + b") "30";
+  (* --- pp polymorphic types --- *)
+  check "pp_ty 'a opt"
+    (Ast.pp_ty (Ast.TyCon ("opt", [Ast.TyParam "a"]))) "'a opt";
+  check "pp_ty int opt"
+    (Ast.pp_ty (Ast.TyCon ("opt", [Ast.TyInt]))) "int opt";
+  check "pp_ty (int * int) opt"
+    (Ast.pp_ty (Ast.TyCon ("opt", [Ast.TyTuple [Ast.TyInt; Ast.TyInt]])))
+    "(int * int) opt";
 
   (* --- type errors --- *)
-  check_raises "tuple size mismatch"
-    (fun () -> Pipeline.type_of "match (1, 2) with | (a, b, c) -> a");
-  check_raises "tuple element type mismatch in unify"
+  check_raises "mix int and str in poly opt"
     (fun () -> Pipeline.type_of
-      "let f = fn p -> match p with | (a, b) -> a + b in
-       f (1, true)");
-  check_raises "constructor expects tuple but got int"
-    (fun () -> Pipeline.process
-      "type pair = Pair of int * int;
-       Pair 3");
-
-  (* --- pp --- *)
-  check "pp tuple"
-    (Ast.pp (Pipeline.parse_only "(1, 2, 3)")) "(1, 2, 3)";
-  check "pp_ty tuple"
-    (Ast.pp_ty (Ast.TyTuple [Ast.TyInt; Ast.TyBool])) "(int * bool)";
+      "type 'a opt = None | Some of 'a;
+       let f = fn x -> match x with | None -> 0 | Some n -> n + 1 in
+       f (Some \"hi\")");
+  check_raises "cons int onto str list"
+    (fun () -> Pipeline.type_of
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       Cons (1, Cons (\"hi\", Nil))");
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

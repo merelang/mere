@@ -54,9 +54,14 @@ let process_decl eval_env type_env decl =
     eval_env := env_eval;
     type_env := (name, sch) :: !type_env;
     Some (name, sch)
-  | Ast.Top_type (name, variants) ->
-    Typer.register_type name variants;
-    Printf.printf "type %s defined (%d variants)\n" name (List.length variants);
+  | Ast.Top_type (name, params, variants) ->
+    Typer.register_type name params variants;
+    let param_str = match params with
+      | [] -> ""
+      | [p] -> "'" ^ p ^ " "
+      | _ -> "(" ^ String.concat ", " (List.map (fun p -> "'" ^ p) params) ^ ") "
+    in
+    Printf.printf "type %s%s defined (%d variants)\n" param_str name (List.length variants);
     None
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)

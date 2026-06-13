@@ -9,6 +9,10 @@ let starts_with_upper s =
 
 let constructors : (string, int) Hashtbl.t = Hashtbl.create 16
 
+let is_primitive_type_name = function
+  | "int" | "bool" | "str" | "unit" -> true
+  | _ -> false
+
 let parse_program tokens =
   let open Lexer in
   let mk loc node = Ast.{ loc; node } in
@@ -20,8 +24,12 @@ let parse_program tokens =
   let lookup_constr name = Hashtbl.find_opt constructors name in
   (* Type parser. Precedence (low -> high):
        ty       := tuple_ty ('->' ty)?
-       tuple_ty := atom_ty ('*' atom_ty)*   -- 2+ elements form a TyTuple
-       atom_ty  := 'int' | 'bool' | 'str' | 'unit' | IDENT | '(' ty ')'  *)
+       tuple_ty := app_ty ('*' app_ty)+ | app_ty
+       app_ty   := simple_ty (IDENT_NON_PRIM)*    -- postfix `arg name` constructor
+       simple_ty:= 'int' | 'bool' | 'str' | 'unit'
+                 | IDENT_NON_PRIM       -- 0-arg TyCon
+                 | T_tyvar              -- 'a (TyParam)
+                 | '(' ty ')'  *)
   let rec ty toks =
     let lhs, toks = tuple_ty toks in
     match toks with
@@ -30,11 +38,11 @@ let parse_program tokens =
       Ast.TyArrow (lhs, rhs), toks
     | _ -> lhs, toks
   and tuple_ty toks =
-    let first, toks = atom_ty toks in
+    let first, toks = app_ty toks in
     let rec collect acc toks =
       match toks with
       | (_, T_star) :: rest ->
-        let next, toks = atom_ty rest in
+        let next, toks = app_ty rest in
         collect (next :: acc) toks
       | _ -> List.rev acc, toks
     in
@@ -42,13 +50,23 @@ let parse_program tokens =
     (match elements with
      | [t] -> t, toks
      | ts -> Ast.TyTuple ts, toks)
-  and atom_ty toks =
+  and app_ty toks =
+    let base, toks = simple_ty toks in
+    let rec loop t toks =
+      match toks with
+      | (_, T_ident name) :: rest when not (is_primitive_type_name name) ->
+        loop (Ast.TyCon (name, [t])) rest
+      | _ -> t, toks
+    in
+    loop base toks
+  and simple_ty toks =
     match toks with
     | (_, T_ident "int") :: rest -> Ast.TyInt, rest
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
-    | (_, T_ident name) :: rest -> Ast.TyCon name, rest
+    | (_, T_ident name) :: rest -> Ast.TyCon (name, []), rest
+    | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
     | (_, T_lparen) :: rest ->
       let inner, toks = ty rest in
       (match toks with
@@ -285,20 +303,29 @@ let parse_program tokens =
     | (pos, _) :: _ -> raise (Parse_error (pos, "trailing input"))
     | [] -> raise (Parse_error (Loc.dummy, "expected EOF"))
   in
+  (* Parse type params: optional `'a` before the type name. *)
+  let parse_type_params toks =
+    match toks with
+    | (_, T_tyvar name) :: rest -> [name], rest
+    | _ -> [], toks
+  in
   let rec parse_decls decls toks =
     match toks with
-    | (_, T_type) :: (_, T_ident type_name) :: (_, T_eq) :: rest ->
-      let variants, toks = parse_variants rest in
-      List.iter (fun (cname, payload) ->
-        Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
-      ) variants;
-      (match toks with
-       | (_, T_semi) :: rest ->
-         parse_decls (Ast.Top_type (type_name, variants) :: decls) rest
+    | (_, T_type) :: rest ->
+      let params, rest = parse_type_params rest in
+      (match rest with
+       | (_, T_ident type_name) :: (_, T_eq) :: rest ->
+         let variants, toks = parse_variants rest in
+         List.iter (fun (cname, payload) ->
+           Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
+         ) variants;
+         (match toks with
+          | (_, T_semi) :: rest ->
+            parse_decls (Ast.Top_type (type_name, params, variants) :: decls) rest
+          | _ ->
+            raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
        | _ ->
-         raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
-    | (pos, T_type) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = ...' after 'type'"))
+         raise (Parse_error (pos_of rest, "expected 'ident = ...' after 'type'")))
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       (match toks with

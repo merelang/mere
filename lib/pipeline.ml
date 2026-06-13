@@ -31,8 +31,8 @@ let process_decls eval_env type_env decls =
       placeholder := v;
       eval_env := env_eval;
       type_env := (name, sch) :: !type_env
-    | Ast.Top_type (name, variants) ->
-      Typer.register_type name variants
+    | Ast.Top_type (name, params, variants) ->
+      Typer.register_type name params variants
   ) decls
 
 let process s =
@@ -63,8 +63,8 @@ let type_of s =
       Typer.unify value.Ast.loc alpha t;
       let sch = Typer.generalize !type_env t in
       type_env := (name, sch) :: !type_env
-    | Ast.Top_type (name, variants) ->
-      Typer.register_type name variants
+    | Ast.Top_type (name, params, variants) ->
+      Typer.register_type name params variants
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 

@@ -1,0 +1,22 @@
+// Polymorphic linked list — one definition, works at any element type.
+
+type 'a list = Nil | Cons of 'a * 'a list;
+type 'a opt = None | Some of 'a;
+
+let rec len = fn lst ->
+  match lst with
+  | Nil          -> 0
+  | Cons (_, t)  -> 1 + len t;
+
+let rec sum_int = fn lst ->
+  match lst with
+  | Nil          -> 0
+  | Cons (h, t)  -> h + sum_int t;
+
+// build an int list and a str list with the SAME `list` type
+let ints = Cons (1, Cons (2, Cons (3, Cons (4, Cons (5, Nil)))));
+let strs = Cons ("hello", Cons (" ", Cons ("world", Nil)));
+
+let _show_lens = print ("ints length=" ++ "5" ++ ", strs length=" ++ "3") in
+
+sum_int ints  // 15

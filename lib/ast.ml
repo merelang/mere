@@ -12,8 +12,9 @@ and ty =
   | TyUnit
   | TyArrow of ty * ty
   | TyVar of tyvar
-  | TyCon of string
-  | TyTuple of ty list      (* length >= 2 *)
+  | TyParam of string             (* source-level type parameter, e.g. 'a *)
+  | TyCon of string * ty list     (* name + type args (postfix application) *)
+  | TyTuple of ty list
 
 type expr = { loc : Loc.t; node : expr_node }
 
@@ -34,7 +35,7 @@ and expr_node =
   | Annot of expr * ty
   | Constr of string * expr option
   | Match of expr * (pattern * expr) list
-  | Tuple of expr list      (* length >= 2 *)
+  | Tuple of expr list
 
 and binop = Add | Sub | Mul | Concat
 and cmpop = Eq | Lt
@@ -48,12 +49,13 @@ and pattern_node =
   | P_str of string
   | P_unit
   | P_constr of string * pattern option
-  | P_tuple of pattern list   (* length >= 2 *)
+  | P_tuple of pattern list
 
 type top_decl =
   | Top_let of string * expr
   | Top_let_rec of string * expr
-  | Top_type of string * (string * ty option) list
+  | Top_type of string * string list * (string * ty option) list
+    (* type name * type params (param names) * variants *)
 
 type program = {
   decls : top_decl list;
@@ -72,7 +74,7 @@ let rec walk = function
 let pp_ty t =
   let counter = ref 0 in
   let names = Hashtbl.create 4 in
-  let name_of id =
+  let name_of_var id =
     match Hashtbl.find_opt names id with
     | Some n -> n
     | None ->
@@ -95,8 +97,12 @@ let pp_ty t =
       let sa = aux a in
       let sb = aux b in
       "(" ^ sa ^ " -> " ^ sb ^ ")"
-    | TyVar v -> name_of v.id
-    | TyCon name -> name
+    | TyVar v -> name_of_var v.id
+    | TyParam p -> "'" ^ p
+    | TyCon (name, []) -> name
+    | TyCon (name, [a]) -> aux a ^ " " ^ name
+    | TyCon (name, args) ->
+      "(" ^ String.concat ", " (List.map aux args) ^ ") " ^ name
     | TyTuple ts ->
       let parts = List.map aux ts in
       "(" ^ String.concat " * " parts ^ ")"
