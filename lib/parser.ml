@@ -7,8 +7,6 @@ let starts_with_upper s =
   let c = s.[0] in
   c >= 'A' && c <= 'Z'
 
-(* Constructor registry: name -> arity (0 or 1).
-   Populated by `type` decls. Module-level so REPL inputs accumulate state. *)
 let constructors : (string, int) Hashtbl.t = Hashtbl.create 16
 
 let parse_program tokens =
@@ -19,18 +17,31 @@ let parse_program tokens =
     | (pos, _) :: _ -> pos
     | [] -> Loc.dummy
   in
-  let lookup_constr name =
-    match Hashtbl.find_opt constructors name with
-    | Some a -> Some a
-    | None -> None
-  in
+  let lookup_constr name = Hashtbl.find_opt constructors name in
+  (* Type parser. Precedence (low -> high):
+       ty       := tuple_ty ('->' ty)?
+       tuple_ty := atom_ty ('*' atom_ty)*   -- 2+ elements form a TyTuple
+       atom_ty  := 'int' | 'bool' | 'str' | 'unit' | IDENT | '(' ty ')'  *)
   let rec ty toks =
-    let lhs, toks = atom_ty toks in
+    let lhs, toks = tuple_ty toks in
     match toks with
     | (_, T_arrow) :: rest ->
       let rhs, toks = ty rest in
       Ast.TyArrow (lhs, rhs), toks
     | _ -> lhs, toks
+  and tuple_ty toks =
+    let first, toks = atom_ty toks in
+    let rec collect acc toks =
+      match toks with
+      | (_, T_star) :: rest ->
+        let next, toks = atom_ty rest in
+        collect (next :: acc) toks
+      | _ -> List.rev acc, toks
+    in
+    let elements, toks = collect [first] toks in
+    (match elements with
+     | [t] -> t, toks
+     | ts -> Ast.TyTuple ts, toks)
   and atom_ty toks =
     match toks with
     | (_, T_ident "int") :: rest -> Ast.TyInt, rest
@@ -46,7 +57,6 @@ let parse_program tokens =
     | _ -> raise (Parse_error (pos_of toks, "expected type"))
   in
   let parse_variants toks =
-    (* Optional leading `|`, then variant ('|' variant)* *)
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
     let rec loop acc toks =
       match toks with
@@ -145,18 +155,25 @@ let parse_program tokens =
     | (pos, T_true) :: rest -> mkp pos (Ast.P_bool true), rest
     | (pos, T_false) :: rest -> mkp pos (Ast.P_bool false), rest
     | (pos, T_lparen) :: (_, T_rparen) :: rest -> mkp pos Ast.P_unit, rest
-    | (_, T_lparen) :: rest ->
-      let inner, toks = pattern rest in
+    | (pos, T_lparen) :: rest ->
+      let first, toks = pattern rest in
       (match toks with
-       | (_, T_rparen) :: rest -> inner, rest
-       | _ -> raise (Parse_error (pos_of toks, "expected ')' in pattern")))
+       | (_, T_comma) :: _ ->
+         let rec collect acc toks =
+           match toks with
+           | (_, T_comma) :: rest ->
+             let next, toks = pattern rest in
+             collect (next :: acc) toks
+           | _ -> List.rev acc, toks
+         in
+         let elements, toks = collect [first] toks in
+         (match toks with
+          | (_, T_rparen) :: rest -> mkp pos (Ast.P_tuple elements), rest
+          | _ -> raise (Parse_error (pos_of toks, "expected ')' in tuple pattern")))
+       | (_, T_rparen) :: rest -> first, rest
+       | _ -> raise (Parse_error (pos_of toks, "expected ',' or ')' in pattern")))
     | (pos, T_ident name) :: rest when starts_with_upper name ->
-      (* Constructor pattern *)
-      let arity =
-        match lookup_constr name with
-        | Some a -> a
-        | None -> 0  (* unknown — assume nullary, typer will error *)
-      in
+      let arity = match lookup_constr name with Some a -> a | None -> 0 in
       if arity = 0 then
         mkp pos (Ast.P_constr (name, None)), rest
       else begin
@@ -226,18 +243,25 @@ let parse_program tokens =
     | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest
     | (pos, T_false) :: rest -> mk pos (Ast.Bool_lit false), rest
     | (pos, T_lparen) :: (_, T_rparen) :: rest -> mk pos Ast.Unit_lit, rest
-    | (_, T_lparen) :: rest ->
-      let inner, toks = expr rest in
+    | (pos, T_lparen) :: rest ->
+      let first, toks = expr rest in
       (match toks with
-       | (_, T_rparen) :: rest -> inner, rest
-       | _ -> raise (Parse_error (pos_of toks, "expected ')'")))
+       | (_, T_comma) :: _ ->
+         let rec collect acc toks =
+           match toks with
+           | (_, T_comma) :: rest ->
+             let next, toks = expr rest in
+             collect (next :: acc) toks
+           | _ -> List.rev acc, toks
+         in
+         let elements, toks = collect [first] toks in
+         (match toks with
+          | (_, T_rparen) :: rest -> mk pos (Ast.Tuple elements), rest
+          | _ -> raise (Parse_error (pos_of toks, "expected ')' in tuple")))
+       | (_, T_rparen) :: rest -> first, rest
+       | _ -> raise (Parse_error (pos_of toks, "expected ',' or ')' after expression")))
     | (pos, T_ident name) :: rest when starts_with_upper name ->
-      (* Constructor expression — consume one payload atom iff arity = 1 *)
-      let arity =
-        match lookup_constr name with
-        | Some a -> a
-        | None -> 0  (* unknown — assume nullary *)
-      in
+      let arity = match lookup_constr name with Some a -> a | None -> 0 in
       if arity = 0 then
         mk pos (Ast.Constr (name, None)), rest
       else begin
@@ -265,7 +289,6 @@ let parse_program tokens =
     match toks with
     | (_, T_type) :: (_, T_ident type_name) :: (_, T_eq) :: rest ->
       let variants, toks = parse_variants rest in
-      (* Register each variant's arity *)
       List.iter (fun (cname, payload) ->
         Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
       ) variants;

@@ -1,0 +1,23 @@
+// Linked list using sum types + tuples (multi-arg variant).
+//
+// Tuples enable multi-arg variants: `Cons of int * intlist`.
+
+type intlist = INil | ICons of int * intlist;
+
+let rec sum = fn lst ->
+  match lst with
+  | INil          -> 0
+  | ICons (h, t)  -> h + sum t;
+
+let rec len = fn lst ->
+  match lst with
+  | INil          -> 0
+  | ICons (_, t)  -> 1 + len t;
+
+let xs = ICons (1, ICons (2, ICons (3, ICons (4, ICons (5, INil)))));
+
+// build a quick description string (no int-to-string yet, so just describe)
+let banner = "list len=" ++ "5" ++ ", sum=" ++ "15";
+
+let _print = print banner in
+sum xs  // 15
