@@ -49,6 +49,8 @@ type token =
   | T_rparen
   | T_lbrace            (* { *)
   | T_rbrace            (* } *)
+  | T_lbracket          (* [ *)
+  | T_rbracket          (* ] *)
   | T_dot               (* . — field access *)
   | T_eof
 
@@ -96,6 +98,8 @@ let tokenize s =
       | ')' -> advance 1; aux (i + 1) ((pos, T_rparen) :: acc)
       | '{' -> advance 1; aux (i + 1) ((pos, T_lbrace) :: acc)
       | '}' -> advance 1; aux (i + 1) ((pos, T_rbrace) :: acc)
+      | '[' -> advance 1; aux (i + 1) ((pos, T_lbracket) :: acc)
+      | ']' -> advance 1; aux (i + 1) ((pos, T_rbracket) :: acc)
       | '.' -> advance 1; aux (i + 1) ((pos, T_dot) :: acc)
       | '=' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_eq_eq) :: acc)

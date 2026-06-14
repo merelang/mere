@@ -377,5 +377,47 @@ let () =
       "let rec a = fn x -> b x and b = fn x -> a x in a 1"))
     "(let rec a = (fn x -> (b x)) and b = (fn x -> (a x)) in (a 1))";
 
+  (* --- list literal sugar `[...]` --- *)
+  check "list literal int"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [1, 2, 3]") "Cons (1, Cons (2, Cons (3, Nil)))";
+  check "empty list"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       []") "Nil";
+  check "list literal sum"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       let rec sum = fn xs -> match xs with
+         | Nil -> 0
+         | Cons (h, t) -> h + sum t
+       in sum [10, 20, 30, 40]") "100";
+  check "list literal str"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [\"a\", \"b\", \"c\"]")
+    "Cons (\"a\", Cons (\"b\", Cons (\"c\", Nil)))";
+  check "list literal type at int"
+    (Pipeline.type_of
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [1, 2, 3]") "int list";
+  check "list literal type at str"
+    (Pipeline.type_of
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [\"x\"]") "str list";
+  check "nested list literal"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       let rec len = fn xs -> match xs with
+         | Nil -> 0
+         | Cons (_, t) -> 1 + len t
+       in len [[1], [2, 3], [4, 5, 6]]") "3";
+  (* Note: `[1, 2, 3]` requires Nil/Cons constructors to be in scope
+     (declared via `type 'a list = Nil | Cons of 'a * 'a list;`).
+     Cannot easily test the "not declared" case in-process because
+     the constructors Hashtbl is module-level and persists across
+     Pipeline.process calls. *)
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

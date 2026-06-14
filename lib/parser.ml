@@ -431,7 +431,8 @@ let parse_program tokens =
     apply_tail head toks
   and apply_tail f toks =
     match toks with
-    | (_, (T_int _ | T_string _ | T_ident _ | T_lparen | T_true | T_false)) :: _ ->
+    | (_, (T_int _ | T_string _ | T_ident _ | T_lparen | T_true | T_false
+          | T_lbracket)) :: _ ->
       let arg, toks = atom toks in
       apply_tail (mk f.Ast.loc (Ast.App (f, arg))) toks
     | _ -> f, toks
@@ -447,6 +448,25 @@ let parse_program tokens =
     field_chain v rest
   and atom_base toks =
     match toks with
+    | (pos, T_lbracket) :: (_, T_rbracket) :: rest ->
+      (* `[]` desugars to Nil *)
+      mk pos (Ast.Constr ("Nil", None)), rest
+    | (pos, T_lbracket) :: rest ->
+      (* `[e1, e2, ...]` desugars to Cons (e1, Cons (e2, ... Nil)) *)
+      let rec parse_elems acc toks =
+        let e, toks = expr toks in
+        let acc = e :: acc in
+        match toks with
+        | (_, T_comma) :: rest -> parse_elems acc rest
+        | (_, T_rbracket) :: rest -> List.rev acc, rest
+        | _ -> raise (Parse_error (pos_of toks, "expected ',' or ']' in list literal"))
+      in
+      let elems, rest = parse_elems [] rest in
+      let nil = mk pos (Ast.Constr ("Nil", None)) in
+      let result = List.fold_right (fun e acc ->
+        mk pos (Ast.Constr ("Cons", Some (mk pos (Ast.Tuple [e; acc]))))
+      ) elems nil in
+      result, rest
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest
     | (pos, T_string s) :: rest -> mk pos (Ast.Str_lit s), rest
     | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest

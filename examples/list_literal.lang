@@ -1,0 +1,34 @@
+// リストリテラル `[1, 2, 3]` (Cons/Nil チェインの構文糖)
+//
+// `[]`       → Nil
+// `[e1, ...]` → Cons (e1, Cons (..., Nil))
+//
+// 'a list 型を declare すれば list literal が使える。
+// 多相 (int / str / list of list) も自然に推論される。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+let rec sum = fn xs -> match xs with
+  | Nil -> 0
+  | Cons (h, t) -> h + sum t;
+
+let rec len = fn xs -> match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + len t;
+
+let rec join = fn (xs, sep) -> match xs with
+  | Nil -> ""
+  | Cons (h, Nil) -> h
+  | Cons (h, t) -> h ++ sep ++ join t sep;
+
+let xs = [10, 20, 30, 40, 50];
+let ys = ["red", "green", "blue"];
+let nested = [[1], [2, 3], [4, 5, 6], []];
+
+// sum + len + nested の項目数の合計
+let s = sum xs;          // 150
+let l = len ys;          // 3
+let n = len nested;      // 4
+let printed = print (join ys ", ");   // stdout: red, green, blue
+
+s + l + n
