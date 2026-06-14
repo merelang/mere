@@ -432,7 +432,7 @@ let parse_program tokens =
   and apply_tail f toks =
     match toks with
     | (_, (T_int _ | T_string _ | T_ident _ | T_lparen | T_true | T_false
-          | T_lbracket)) :: _ ->
+          | T_lbracket | T_lbrace)) :: _ ->
       let arg, toks = atom toks in
       apply_tail (mk f.Ast.loc (Ast.App (f, arg))) toks
     | _ -> f, toks
@@ -448,6 +448,36 @@ let parse_program tokens =
     field_chain v rest
   and atom_base toks =
     match toks with
+    | (pos, T_lbrace) :: (_, T_rbrace) :: rest ->
+      (* `{}` is the empty block — evaluates to unit. *)
+      mk pos Ast.Unit_lit, rest
+    | (pos, T_lbrace) :: rest ->
+      (* Block expression: `{ e1; e2; ...; eN }`
+         desugars to `let _ = e1 in let _ = e2 in ... eN`. *)
+      let rec parse_exprs acc toks =
+        let e, toks = expr toks in
+        let acc = e :: acc in
+        match toks with
+        | (_, T_semi) :: (_, T_rbrace) :: rest ->
+          List.rev acc, rest
+        | (_, T_semi) :: rest ->
+          parse_exprs acc rest
+        | (_, T_rbrace) :: rest ->
+          List.rev acc, rest
+        | _ ->
+          raise (Parse_error (pos_of toks, "expected ';' or '}' in block"))
+      in
+      let exprs, rest = parse_exprs [] rest in
+      let result =
+        match List.rev exprs with
+        | [] -> mk pos Ast.Unit_lit
+        | last :: prev_rev ->
+          let wild = mkp pos Ast.P_wild in
+          List.fold_left (fun acc e ->
+            mk pos (Ast.Let (wild, e, acc))
+          ) last prev_rev
+      in
+      result, rest
     | (pos, T_lbracket) :: (_, T_rbracket) :: rest ->
       (* `[]` desugars to Nil *)
       mk pos (Ast.Constr ("Nil", None)), rest

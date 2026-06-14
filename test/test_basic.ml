@@ -419,5 +419,29 @@ let () =
      the constructors Hashtbl is module-level and persists across
      Pipeline.process calls. *)
 
+  (* --- block expression `{ e1; e2; ...; eN }` --- *)
+  check "block single expr"
+    (Pipeline.process "{ 1 + 2 }") "3";
+  check "empty block"
+    (Pipeline.process "{}") "()";
+  check "block sequencing"
+    (Pipeline.process "{ 100; 200; 300 }") "300";
+  check "block returns last"
+    (Pipeline.process "let x = { 1; 2; 3 } in x + 10") "13";
+  check "block with print"
+    (Pipeline.process "{ print \"hi\"; 42 }") "42";
+  check "block trailing semi"
+    (Pipeline.process "{ 1; 2; 3; }") "3";
+  check "block in fn body"
+    (Pipeline.process "let f = fn x -> { x + 1 } in f 10") "11";
+  check "block type"
+    (Pipeline.type_of "{ true; \"hi\"; 42 }") "int";
+  check "nested block"
+    (Pipeline.process "{ { 1; 2 }; { 10; 20 } }") "20";
+  check "block does not conflict with record"
+    (Pipeline.process
+      "type P = { x: int };
+       let p = P { x = 7 } in { p.x; p.x + 1 }") "8";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
