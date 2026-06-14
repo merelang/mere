@@ -182,9 +182,13 @@ let instantiate_record name (info : record_info) =
   (fields', Ast.TyCon (name, result_args))
 
 let initial_env : env =
-  [ ("print",      mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit)));
-    ("print_int",  mono (Ast.TyArrow (Ast.TyInt, Ast.TyUnit)));
-    ("str_of_int", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
+  [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
+    ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
+    ("print_bool",  mono (Ast.TyArrow (Ast.TyBool, Ast.TyUnit)));
+    ("str_of_int",  mono (Ast.TyArrow (Ast.TyInt,  Ast.TyStr)));
+    ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
+    ("str_len",     mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
+    ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
