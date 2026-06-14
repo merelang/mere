@@ -38,6 +38,10 @@ and expr_node =
   | Constr of string * expr option
   | Match of expr * (pattern * expr) list
   | Tuple of expr list
+  | Record_lit of string * (string * expr) list
+    (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
+  | Field_get of expr * string
+    (* p.field *)
 
 and binop = Add | Sub | Mul | Div | Mod | Concat
 and cmpop = Eq | Ne | Lt | Le | Gt | Ge
@@ -53,6 +57,8 @@ and pattern_node =
   | P_unit
   | P_constr of string * pattern option
   | P_tuple of pattern list
+  | P_record of string * (string * pattern) list
+    (* nominal record pattern:  TypeName { f1 = pat, f2 = pat } *)
 
 type top_decl =
   | Top_let of string * expr
@@ -61,6 +67,8 @@ type top_decl =
     (* type name * type params (param names) * variants *)
   | Top_signature of string * (string * ty) list
     (* signature name * param list (all type-annotated) *)
+  | Top_record of string * string list * (string * ty) list
+    (* record type name * type params * field list (name, type) *)
 
 type program = {
   decls : top_decl list;
@@ -143,6 +151,9 @@ let rec pp_pattern p =
   | P_constr (c, Some sub) -> c ^ " " ^ pp_pattern sub
   | P_tuple ps ->
     "(" ^ String.concat ", " (List.map pp_pattern ps) ^ ")"
+  | P_record (name, fields) ->
+    let parts = List.map (fun (f, p) -> f ^ " = " ^ pp_pattern p) fields in
+    name ^ " { " ^ String.concat ", " parts ^ " }"
 
 let rec pp e =
   match e.node with
@@ -185,6 +196,11 @@ let rec pp e =
     "(match " ^ pp scrut ^ " with " ^ arms_s ^ ")"
   | Tuple es ->
     "(" ^ String.concat ", " (List.map pp es) ^ ")"
+  | Record_lit (name, fields) ->
+    let parts = List.map (fun (f, e) -> f ^ " = " ^ pp e) fields in
+    name ^ " { " ^ String.concat ", " parts ^ " }"
+  | Field_get (e, f) ->
+    pp e ^ "." ^ f
 
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
@@ -197,4 +213,5 @@ let desugar_program (prog : program) : expr =
       { loc; node = Let_rec (name, value, body) }
     | Top_type _ -> body
     | Top_signature _ -> body
+    | Top_record _ -> body
   ) prog.decls prog.main

@@ -283,5 +283,64 @@ let () =
   check "pipe below arithmetic"
     (Pipeline.process "1 + 2 |> (fn x -> x * 10)") "30";
 
+  (* --- records (D) --- *)
+  check "record basic"
+    (Pipeline.process
+      "type Point = { x: int, y: int };
+       let p = Point { x = 3, y = 4 } in p.x + p.y") "7";
+  check "record with str field"
+    (Pipeline.process
+      "type User = { name: str, age: int };
+       let u = User { name = \"Alice\", age = 30 } in u.name") "\"Alice\"";
+  check "record nested field"
+    (Pipeline.process
+      "type Inner = { v: int };
+       type Outer = { inner: Inner };
+       let o = Outer { inner = Inner { v = 42 } } in o.inner.v") "42";
+  check "record pattern destructure"
+    (Pipeline.process
+      "type P = { a: int, b: int };
+       match P { a = 10, b = 20 } with | P { a = x, b = y } -> x * y") "200";
+  check "record partial pattern"
+    (Pipeline.process
+      "type P = { a: int, b: int, c: int };
+       match P { a = 1, b = 2, c = 3 } with | P { a = x } -> x") "1";
+  check "record polymorphic"
+    (Pipeline.process
+      "type 'a Box = { value: 'a };
+       let b = Box { value = 100 } in b.value") "100";
+  check "record poly with str"
+    (Pipeline.process
+      "type 'a Box = { value: 'a };
+       let b = Box { value = \"hi\" } in b.value") "\"hi\"";
+  check "record poly type"
+    (Pipeline.type_of
+      "type 'a Box = { value: 'a };
+       Box { value = 42 }") "int Box";
+  check "record to_string"
+    (Pipeline.process
+      "type P = { x: int, y: int };
+       P { x = 1, y = 2 }") "P { x = 1, y = 2 }";
+  check "record pp"
+    (Ast.pp (Pipeline.parse_only
+      "type P = { x: int }; P { x = 5 }"))
+    "P { x = 5 }";
+  check_raises "record missing field"
+    (fun () -> Pipeline.process
+      "type P = { x: int, y: int };
+       P { x = 1 }");
+  check_raises "record extra field"
+    (fun () -> Pipeline.process
+      "type P = { x: int };
+       P { x = 1, y = 2 }");
+  check_raises "record wrong field type"
+    (fun () -> Pipeline.process
+      "type P = { x: int };
+       P { x = \"hi\" }");
+  check_raises "record unknown field access"
+    (fun () -> Pipeline.process
+      "type P = { x: int };
+       let p = P { x = 1 } in p.y");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -14,6 +14,11 @@ let constructors : (string, int) Hashtbl.t = Hashtbl.create 16
    `...name` spread inside fn parameter lists. *)
 let signatures : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
 
+(* Record registry: type name -> ordered (field, ty) list.
+   Used by the parser to distinguish `Point { ... }` (record literal)
+   from `Some 5` (constructor application). *)
+let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
+
 let is_primitive_type_name = function
   | "int" | "bool" | "str" | "unit" -> true
   | _ -> false
@@ -296,6 +301,31 @@ let parse_program tokens =
        | (_, T_rparen) :: rest -> first, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ',' or ')' in pattern")))
     | (pos, T_ident name) :: rest when starts_with_upper name ->
+      (* Record pattern:  Name { f1 = pat, f2 = pat, ... } *)
+      if Hashtbl.mem records name then begin
+        match rest with
+        | (_, T_lbrace) :: body_rest ->
+          let rec parse_fpats acc toks =
+            match toks with
+            | (_, T_rbrace) :: rest -> List.rev acc, rest
+            | (_, T_ident fname) :: (_, T_eq) :: rest ->
+              let p, rest = pattern rest in
+              let acc = (fname, p) :: acc in
+              (match rest with
+               | (_, T_comma) :: rest -> parse_fpats acc rest
+               | (_, T_rbrace) :: rest -> List.rev acc, rest
+               | _ ->
+                 raise (Parse_error (pos_of rest,
+                   "expected ',' or '}' in record pattern")))
+            | _ ->
+              raise (Parse_error (pos_of toks,
+                "expected 'field = pat' in record pattern"))
+          in
+          let fpats, rest = parse_fpats [] body_rest in
+          mkp pos (Ast.P_record (name, fpats)), rest
+        | _ ->
+          raise (Parse_error (pos, "expected '{' for record pattern"))
+      end else
       let arity = match lookup_constr name with Some a -> a | None -> 0 in
       if arity = 0 then
         mkp pos (Ast.P_constr (name, None)), rest
@@ -396,6 +426,16 @@ let parse_program tokens =
       apply_tail (mk f.Ast.loc (Ast.App (f, arg))) toks
     | _ -> f, toks
   and atom toks =
+    let v, rest = atom_base toks in
+    (* Postfix `.field` chain — left-associative.  p.x.y = Field_get(Field_get(p, x), y) *)
+    let rec field_chain v toks =
+      match toks with
+      | (pos, T_dot) :: (_, T_ident f) :: rest ->
+        field_chain (mk pos (Ast.Field_get (v, f))) rest
+      | _ -> v, toks
+    in
+    field_chain v rest
+  and atom_base toks =
     match toks with
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest
     | (pos, T_string s) :: rest -> mk pos (Ast.Str_lit s), rest
@@ -420,18 +460,43 @@ let parse_program tokens =
        | (_, T_rparen) :: rest -> first, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ',' or ')' after expression")))
     | (pos, T_ident name) :: rest when starts_with_upper name ->
-      let arity = match lookup_constr name with Some a -> a | None -> 0 in
-      if arity = 0 then
-        mk pos (Ast.Constr (name, None)), rest
-      else begin
+      (* Record literal:  Name { f1 = e1, f2 = e2, ... } *)
+      if Hashtbl.mem records name then begin
         match rest with
-        | (_, (T_int _ | T_string _ | T_ident _ | T_lparen
-              | T_true | T_false)) :: _ ->
-          let arg, rest = atom rest in
-          mk pos (Ast.Constr (name, Some arg)), rest
+        | (_, T_lbrace) :: body_rest ->
+          let rec parse_fields acc toks =
+            match toks with
+            | (_, T_rbrace) :: rest -> List.rev acc, rest
+            | (_, T_ident fname) :: (_, T_eq) :: rest ->
+              let e, rest = expr rest in
+              let acc = (fname, e) :: acc in
+              (match rest with
+               | (_, T_comma) :: rest -> parse_fields acc rest
+               | (_, T_rbrace) :: rest -> List.rev acc, rest
+               | _ ->
+                 raise (Parse_error (pos_of rest,
+                   "expected ',' or '}' in record literal")))
+            | _ ->
+              raise (Parse_error (pos_of toks,
+                "expected 'field = expr' in record literal"))
+          in
+          let fields, rest = parse_fields [] body_rest in
+          mk pos (Ast.Record_lit (name, fields)), rest
         | _ ->
+          raise (Parse_error (pos, "expected '{' for record literal"))
+      end else
+        let arity = match lookup_constr name with Some a -> a | None -> 0 in
+        if arity = 0 then
           mk pos (Ast.Constr (name, None)), rest
-      end
+        else begin
+          match rest with
+          | (_, (T_int _ | T_string _ | T_ident _ | T_lparen
+                | T_true | T_false)) :: _ ->
+            let arg, rest = atom rest in
+            mk pos (Ast.Constr (name, Some arg)), rest
+          | _ ->
+            mk pos (Ast.Constr (name, None)), rest
+        end
     | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
     | (pos, _) :: _ ->
       raise (Parse_error (pos, "expected literal, identifier, or '('"))
@@ -490,6 +555,31 @@ let parse_program tokens =
     | (_, T_type) :: rest ->
       let params, rest = parse_type_params rest in
       (match rest with
+       | (_, T_ident type_name) :: (_, T_eq) :: (_, T_lbrace) :: body_rest ->
+         (* Record type: type Name = { f1: T1, f2: T2, ... }; *)
+         let rec parse_fields acc toks =
+           match toks with
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | (_, T_ident fname) :: (_, T_colon) :: rest ->
+             let t, rest = ty rest in
+             let acc = (fname, t) :: acc in
+             (match rest with
+              | (_, T_comma) :: rest -> parse_fields acc rest
+              | (_, T_rbrace) :: rest -> List.rev acc, rest
+              | _ ->
+                raise (Parse_error (pos_of rest,
+                  "expected ',' or '}' in record fields")))
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected 'field: type' in record body"))
+         in
+         let fields, toks = parse_fields [] body_rest in
+         Hashtbl.replace records type_name fields;
+         (match toks with
+          | (_, T_semi) :: rest ->
+            parse_decls (Ast.Top_record (type_name, params, fields) :: decls) rest
+          | _ ->
+            raise (Parse_error (pos_of toks, "expected ';' after record declaration")))
        | (_, T_ident type_name) :: (_, T_eq) :: rest ->
          let variants, toks = parse_variants rest in
          List.iter (fun (cname, payload) ->

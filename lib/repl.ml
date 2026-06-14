@@ -66,6 +66,15 @@ let process_decl eval_env type_env decl =
   | Ast.Top_signature (name, params) ->
     Printf.printf "signature %s defined (%d params)\n" name (List.length params);
     None
+  | Ast.Top_record (name, params, fields) ->
+    Typer.register_record name params fields;
+    let param_str = match params with
+      | [] -> ""
+      | [p] -> "'" ^ p ^ " "
+      | _ -> "(" ^ String.concat ", " (List.map (fun p -> "'" ^ p) params) ^ ") "
+    in
+    Printf.printf "record %s%s defined (%d fields)\n" param_str name (List.length fields);
+    None
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
 let prepare_input s =

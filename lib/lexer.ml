@@ -46,6 +46,9 @@ type token =
   | T_percent          (* % *)
   | T_lparen
   | T_rparen
+  | T_lbrace            (* { *)
+  | T_rbrace            (* } *)
+  | T_dot               (* . — field access *)
   | T_eof
 
 let is_digit c = c >= '0' && c <= '9'
@@ -90,6 +93,9 @@ let tokenize s =
       | '*' -> advance 1; aux (i + 1) ((pos, T_star) :: acc)
       | '(' -> advance 1; aux (i + 1) ((pos, T_lparen) :: acc)
       | ')' -> advance 1; aux (i + 1) ((pos, T_rparen) :: acc)
+      | '{' -> advance 1; aux (i + 1) ((pos, T_lbrace) :: acc)
+      | '}' -> advance 1; aux (i + 1) ((pos, T_rbrace) :: acc)
+      | '.' -> advance 1; aux (i + 1) ((pos, T_dot) :: acc)
       | '=' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_eq_eq) :: acc)
       | '=' -> advance 1; aux (i + 1) ((pos, T_eq) :: acc)

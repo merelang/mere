@@ -129,12 +129,23 @@ let constructors : (string, constr_info) Hashtbl.t = Hashtbl.create 16
 (* Type registry: name -> declared arity (param count). *)
 let types : (string, int) Hashtbl.t = Hashtbl.create 16
 
+(* Record registry: type_name -> (type params, ordered field list). *)
+type record_info = {
+  r_params : string list;
+  r_fields : (string * Ast.ty) list;
+}
+let records : (string, record_info) Hashtbl.t = Hashtbl.create 16
+
 let register_type type_name params variants =
   Hashtbl.replace types type_name (List.length params);
   List.iter (fun (cname, payload) ->
     Hashtbl.replace constructors cname
       { params; arg = payload; type_name }
   ) variants
+
+let register_record type_name params fields =
+  Hashtbl.replace types type_name (List.length params);
+  Hashtbl.replace records type_name { r_params = params; r_fields = fields }
 
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
    substitute them into the arg type and result type. *)
@@ -152,6 +163,23 @@ let instantiate_constr (info : constr_info) =
   let arg' = Option.map subst info.arg in
   let result_args = List.map (fun p -> List.assoc p mapping) info.params in
   (arg', Ast.TyCon (info.type_name, result_args))
+
+(* Instantiate a record type at a use site: pick fresh TyVars for params,
+   substitute them into each field type and into the result type. *)
+let instantiate_record name (info : record_info) =
+  let mapping = List.map (fun p -> (p, fresh_var ())) info.r_params in
+  let rec subst t =
+    match Ast.walk t with
+    | Ast.TyParam p ->
+      (try List.assoc p mapping with Not_found -> t)
+    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
+    | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
+    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+  in
+  let fields' = List.map (fun (f, t) -> (f, subst t)) info.r_fields in
+  let result_args = List.map (fun p -> List.assoc p mapping) info.r_params in
+  (fields', Ast.TyCon (name, result_args))
 
 let initial_env : env =
   [ ("print",      mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit)));
@@ -283,6 +311,44 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Tuple es ->
     let ts = List.map (infer env) es in
     Ast.TyTuple ts
+  | Ast.Record_lit (name, fields) ->
+    let info =
+      try Hashtbl.find records name
+      with Not_found ->
+        raise (Type_error (e.loc, "unknown record type: " ^ name))
+    in
+    let (expected_fields, result_ty) = instantiate_record name info in
+    (* All declared fields must be provided exactly once. *)
+    let provided_names = List.map fst fields in
+    let expected_names = List.map fst expected_fields in
+    if List.sort compare provided_names <> List.sort compare expected_names then
+      raise (Type_error (e.loc,
+        Printf.sprintf "record %s: field set mismatch (expected: %s, got: %s)"
+          name
+          (String.concat ", " expected_names)
+          (String.concat ", " provided_names)));
+    List.iter (fun (fname, fexpr) ->
+      let exp_ty = List.assoc fname expected_fields in
+      let t = infer env fexpr in
+      unify fexpr.loc t exp_ty
+    ) fields;
+    result_ty
+  | Ast.Field_get (inner, fname) ->
+    let t_inner = infer env inner in
+    (* The inner expression must have type `TyCon (rec_name, args)` for some
+       declared record `rec_name`.  Walk to resolve type vars. *)
+    (match Ast.walk t_inner with
+     | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
+       let info = Hashtbl.find records rec_name in
+       let (expected_fields, result_ty) = instantiate_record rec_name info in
+       unify inner.loc t_inner result_ty;
+       (try List.assoc fname expected_fields
+        with Not_found ->
+          raise (Type_error (e.loc,
+            Printf.sprintf "record %s has no field %s" rec_name fname)))
+     | _ ->
+       raise (Type_error (e.loc,
+         "field access on non-record value (cannot infer record type)")))
 
 and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list =
   match p.pnode with
@@ -313,6 +379,24 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
     let element_tys = List.map (fun _ -> fresh_var ()) ps in
     unify p.ploc expected (Ast.TyTuple element_tys);
     List.concat (List.map2 check_pattern ps element_tys)
+  | Ast.P_record (name, fpats) ->
+    let info =
+      try Hashtbl.find records name
+      with Not_found ->
+        raise (Type_error (p.ploc, "unknown record type in pattern: " ^ name))
+    in
+    let (expected_fields, result_ty) = instantiate_record name info in
+    unify p.ploc expected result_ty;
+    (* Each pattern field must be a declared field; partial patterns are allowed. *)
+    List.concat_map (fun (fname, fpat) ->
+      let exp_ty =
+        try List.assoc fname expected_fields
+        with Not_found ->
+          raise (Type_error (p.ploc,
+            Printf.sprintf "record %s has no field %s" name fname))
+      in
+      check_pattern fpat exp_ty
+    ) fpats
 
 let type_check e =
   counter := 0;
