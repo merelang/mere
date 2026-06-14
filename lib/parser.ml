@@ -294,6 +294,39 @@ let parse_program tokens =
     loop [] toks
   and pattern toks =
     match toks with
+    | (pos, T_lbracket) :: (_, T_rbracket) :: rest ->
+      (* `[]` pattern -> P_constr ("Nil", None) *)
+      mkp pos (Ast.P_constr ("Nil", None)), rest
+    | (pos, T_lbracket) :: rest ->
+      (* List pattern: `[a, b, c]` or `[a, b, ...rest]`
+         desugars to Cons(a, Cons(b, Cons(c, Nil))) or
+         Cons(a, Cons(b, rest)) respectively. *)
+      let rec parse_elems acc toks =
+        (* Check for `...rest` tail first *)
+        match toks with
+        | (_, T_ellipsis) :: (_, T_ident name) :: (_, T_rbracket) :: rest ->
+          let tail = mkp pos (Ast.P_var name) in
+          List.rev acc, tail, rest
+        | (_, T_ellipsis) :: (_, T_underscore) :: (_, T_rbracket) :: rest ->
+          let tail = mkp pos Ast.P_wild in
+          List.rev acc, tail, rest
+        | _ ->
+          let p, toks = pattern toks in
+          let acc = p :: acc in
+          (match toks with
+           | (_, T_comma) :: rest -> parse_elems acc rest
+           | (_, T_rbracket) :: rest ->
+             let nil = mkp pos (Ast.P_constr ("Nil", None)) in
+             List.rev acc, nil, rest
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected ',' or ']' in list pattern")))
+      in
+      let elems, tail, rest = parse_elems [] rest in
+      let result = List.fold_right (fun p acc ->
+        mkp pos (Ast.P_constr ("Cons", Some (mkp pos (Ast.P_tuple [p; acc]))))
+      ) elems tail in
+      result, rest
     | (pos, T_underscore) :: rest -> mkp pos Ast.P_wild, rest
     | (pos, T_int n) :: rest -> mkp pos (Ast.P_int n), rest
     | (pos, T_string s) :: rest -> mkp pos (Ast.P_str s), rest

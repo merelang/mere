@@ -489,5 +489,52 @@ let () =
       "match x with | n when n > 0 -> n | _ -> 0"))
     "(match x with | n when (n > 0) -> n | _ -> 0)";
 
+  (* --- list patterns `[]`, `[a, b, c]`, `[h, ...t]` --- *)
+  check "list pattern empty"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [] with | [] -> \"empty\" | [_, ..._] -> \"some\"") "\"empty\"";
+  check "list pattern head/rest"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [10, 20, 30] with | [] -> 0 | [h, ...t] -> h") "10";
+  check "list pattern fixed length"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [1, 2, 3] with | [a, b, c] -> a * 100 + b * 10 + c | _ -> 0") "123";
+  check "list pattern fixed length fail"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [1, 2, 3, 4] with | [a, b, c] -> a + b + c | _ -> 999") "999";
+  check "list pattern two-elem rest"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [1, 2, 3, 4, 5] with | [a, b, ...rest] -> a + b | _ -> 0") "3";
+  check "list pattern sum recursion"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       let rec sum = fn xs -> match xs with
+         | [] -> 0
+         | [h, ...t] -> h + sum t
+       in sum [10, 20, 30, 40]") "100";
+  check "list pattern wildcard rest"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [1, 2, 3] with | [h, ..._] -> h | [] -> 0") "1";
+  check "list pattern len recursion"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       let rec len = fn xs -> match xs with
+         | [] -> 0
+         | [_, ...t] -> 1 + len t
+       in len [1, 2, 3, 4, 5]") "5";
+  check "list pattern with guard"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [3, 4, 5] with
+       | [h, ...t] when h > 10 -> 1000
+       | [h, ...t] -> h
+       | [] -> 0") "3";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
