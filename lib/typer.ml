@@ -246,13 +246,23 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
       (n, sch) :: acc
     ) env bindings in
     infer env' body
-  | Ast.Let_rec (name, value, body) ->
-    let alpha = fresh_var () in
-    let env_rec = (name, mono alpha) :: env in
-    let tv = infer env_rec value in
-    unify e.loc alpha tv;
-    let sch = generalize env tv in
-    infer ((name, sch) :: env) body
+  | Ast.Let_rec (bindings, body) ->
+    (* Mutual recursion: fresh vars for ALL names first, infer each value
+       under env_rec (which has all names mono-bound), unify each, then
+       generalize each against the OUTER env. *)
+    let alphas = List.map (fun _ -> fresh_var ()) bindings in
+    let env_rec = List.fold_left2 (fun acc (n, _) a ->
+      (n, mono a) :: acc
+    ) env bindings alphas in
+    List.iter2 (fun (_, value) alpha ->
+      let tv = infer env_rec value in
+      unify value.Ast.loc alpha tv
+    ) bindings alphas;
+    let env' = List.fold_left2 (fun acc (n, _) a ->
+      let sch = generalize env a in
+      (n, sch) :: acc
+    ) env bindings alphas in
+    infer env' body
   | Ast.With (name, value, body) ->
     (* v0: identical to Let. Lifetime/resource semantics will be added with
        Drop/destructors in a future slice. *)

@@ -161,11 +161,16 @@ let rec eval_in (env : env) (e : Ast.expr) =
        eval_in env' body
      | None ->
        type_error e.Ast.loc "let pattern did not match (use irrefutable patterns)")
-  | Ast.Let_rec (name, value, body) ->
-    let placeholder = ref V_unit in
-    let env' = (name, placeholder) :: env in
-    let v = eval_in env' value in
-    placeholder := v;
+  | Ast.Let_rec (bindings, body) ->
+    (* Mutual recursion: placeholder ref for each name, evaluate each
+       value under the env with all placeholders, then backpatch each. *)
+    let placeholders = List.map (fun (n, _) -> (n, ref V_unit)) bindings in
+    let env' = List.fold_left (fun acc (n, r) -> (n, r) :: acc) env placeholders in
+    List.iter (fun (n, value) ->
+      let v = eval_in env' value in
+      let r = List.assoc n placeholders in
+      r := v
+    ) bindings;
     eval_in env' body
   | Ast.With (name, value, body) ->
     (* v0: identical to Let in semantics. Q-007 narrowing says scope-bound

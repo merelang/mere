@@ -342,5 +342,40 @@ let () =
       "type P = { x: int };
        let p = P { x = 1 } in p.y");
 
+  (* --- mutual recursion `let rec ... and ...` --- *)
+  check "mutual rec is_even"
+    (Pipeline.process
+      "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)
+       and is_odd  = fn n -> if n == 0 then false else is_even (n - 1)
+       in is_even 10") "true";
+  check "mutual rec is_odd"
+    (Pipeline.process
+      "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)
+       and is_odd  = fn n -> if n == 0 then false else is_even (n - 1)
+       in is_odd 7") "true";
+  check "mutual rec three-way"
+    (Pipeline.process
+      "let rec a = fn n -> if n == 0 then 0 else b (n - 1)
+       and b = fn n -> if n == 0 then 1 else c (n - 1)
+       and c = fn n -> if n == 0 then 2 else a (n - 1)
+       in a 7 + b 7 + c 7") "3";
+  check "mutual rec type"
+    (Pipeline.type_of
+      "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)
+       and is_odd  = fn n -> if n == 0 then false else is_even (n - 1)
+       in is_even") "(int -> bool)";
+  check "mutual rec top-level"
+    (Pipeline.process
+      "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)
+       and is_odd  = fn n -> if n == 0 then false else is_even (n - 1);
+       is_even 100") "true";
+  check "single let rec still works"
+    (Pipeline.process
+      "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5") "120";
+  check "pp mutual rec"
+    (Ast.pp (Pipeline.parse_only
+      "let rec a = fn x -> b x and b = fn x -> a x in a 1"))
+    "(let rec a = (fn x -> (b x)) and b = (fn x -> (a x)) in (a 1))";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

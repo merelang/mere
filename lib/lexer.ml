@@ -9,6 +9,7 @@ type token =
   | T_tyvar of string         (* 'a, 'b, ... *)
   | T_let
   | T_rec
+  | T_and             (* and — for mutual recursion *)
   | T_in
   | T_if
   | T_then
@@ -174,6 +175,7 @@ let tokenize s =
         let tok = match word with
           | "let" -> T_let
           | "rec" -> T_rec
+          | "and" -> T_and
           | "in" -> T_in
           | "if" -> T_if
           | "then" -> T_then
