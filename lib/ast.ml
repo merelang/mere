@@ -27,9 +27,9 @@ and expr_node =
   | Bin of binop * expr * expr
   | Cmp of cmpop * expr * expr
   | Neg of expr
-  | Let of string * expr * expr
+  | Let of pattern * expr * expr   (* left side is a pattern — supports `let (a, b) = ...` etc. *)
   | Let_rec of string * expr * expr
-  | With of string * expr * expr   (* with name = value in body — scope-bound resource (Q-007) *)
+  | With of string * expr * expr
   | If of expr * expr * expr
   | Fun of string * expr
   | App of expr * expr
@@ -149,8 +149,8 @@ let rec pp e =
     "(" ^ pp a ^ " " ^ binop_to_string op ^ " " ^ pp b ^ ")"
   | Cmp (op, a, b) ->
     "(" ^ pp a ^ " " ^ cmpop_to_string op ^ " " ^ pp b ^ ")"
-  | Let (name, value, body) ->
-    "(let " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
+  | Let (pat, value, body) ->
+    "(let " ^ pp_pattern pat ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | Let_rec (name, value, body) ->
     "(let rec " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | With (name, value, body) ->
@@ -180,7 +180,8 @@ let desugar_program (prog : program) : expr =
     let loc = body.loc in
     match decl with
     | Top_let (name, value) ->
-      { loc; node = Let (name, value, body) }
+      let pat = { ploc = loc; pnode = P_var name } in
+      { loc; node = Let (pat, value, body) }
     | Top_let_rec (name, value) ->
       { loc; node = Let_rec (name, value, body) }
     | Top_type _ -> body

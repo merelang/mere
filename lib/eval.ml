@@ -99,9 +99,14 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | V_str x, V_str y when op = Ast.Eq ->
        V_bool (x = y)
      | _ -> type_error e.Ast.loc "comparison type mismatch")
-  | Ast.Let (name, value, body) ->
+  | Ast.Let (pat, value, body) ->
     let v = eval_in env value in
-    eval_in ((name, ref v) :: env) body
+    (match match_pattern pat v with
+     | Some bindings ->
+       let env' = List.fold_left (fun acc (n, v) -> (n, ref v) :: acc) env bindings in
+       eval_in env' body
+     | None ->
+       type_error e.Ast.loc "let pattern did not match (use irrefutable patterns)")
   | Ast.Let_rec (name, value, body) ->
     let placeholder = ref V_unit in
     let env' = (name, placeholder) :: env in

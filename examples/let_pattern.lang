@@ -1,0 +1,18 @@
+// let pattern: destructure on the left of `let ... in ...`
+//
+//   - 変数 (`let x = ...`)
+//   - ワイルドカード (`let _ = ...`)
+//   - タプル分解 (`let (a, b) = ...`)
+//   - ネスト (`let (a, (b, c)) = ...`)
+//   - unit (`let () = ...`)
+//
+// 現状の制約: 上記は expression 形式 (let ... in ...) のみ。
+// top-level decl 形式 (let ... ;) は ident のみ対応。
+
+let pair = (10, 20);
+
+let (a, b) = pair in
+let (f, g) = (fn x -> x, fn x -> x + 1) in
+let _ = print "destructured!" in
+
+f (g (a + b))  // f(g(30)) = f(31) = 31

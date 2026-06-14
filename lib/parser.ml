@@ -126,16 +126,21 @@ let parse_program tokens =
          raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
     | (pos, T_let) :: (_, T_rec) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
-    | (pos, T_let) :: (_, T_ident name) :: (_, T_eq) :: rest ->
-      let value, toks = expr rest in
-      (match toks with
-       | (_, T_in) :: rest ->
-         let body, toks = expr rest in
-         mk pos (Ast.Let (name, value, body)), toks
+    | (pos, T_let) :: rest_after_let ->
+      (* Parse the pattern (P_var for the typical `let x = ...` case,
+         or P_tuple / P_wild / P_unit for destructuring). *)
+      let pat, rest = pattern rest_after_let in
+      (match rest with
+       | (_, T_eq) :: rest ->
+         let value, rest = expr rest in
+         (match rest with
+          | (_, T_in) :: rest ->
+            let body, rest = expr rest in
+            mk pos (Ast.Let (pat, value, body)), rest
+          | _ ->
+            raise (Parse_error (pos_of rest, "expected 'in' after let binding")))
        | _ ->
-         raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
-    | (pos, T_let) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
+         raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
     | (pos, T_with) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       (* Allow multiple bindings separated by commas:
@@ -371,12 +376,13 @@ let parse_program tokens =
          parse_decls (Ast.Top_let (name, value) :: decls) rest
        | (_, T_in) :: rest ->
          let body, toks = expr rest in
-         let main = mk pos (Ast.Let (name, value, body)) in
+         let name_pat = mkp pos (Ast.P_var name) in
+         let main = mk pos (Ast.Let (name_pat, value, body)) in
          finish decls main toks
        | _ ->
          raise (Parse_error (pos_of toks, "expected ';' or 'in' after let binding")))
-    | (pos, T_let) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
+    (* Non-ident form (let pattern = ... in ..., let _ = ..., let (a,b) = ...)
+       isn't a top-level decl. Fall through to expr below. *)
     | _ ->
       let main, toks = expr toks in
       finish decls main toks
