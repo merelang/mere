@@ -231,8 +231,13 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let tv = infer env value in
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
-  | Ast.Fun (param, body) ->
+  | Ast.Fun (param, ty_opt, body) ->
     let alpha = fresh_var () in
+    (match ty_opt with
+     | Some t ->
+       let t', _ = freshen_params t in
+       unify e.loc alpha t'
+     | None -> ());
     let tb = infer ((param, mono alpha) :: env) body in
     Ast.TyArrow (alpha, tb)
   | Ast.App (f, arg) ->

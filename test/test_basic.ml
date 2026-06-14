@@ -211,5 +211,28 @@ let () =
   check "compose with stdlib"
     (Pipeline.process "let msg = \"sum = \" ++ str_of_int (10 + 20) in msg") "\"sum = 30\"";
 
+  (* --- multi-arg typed fn (A') --- *)
+  check "fn (x: int, y: int)"
+    (Pipeline.process "(fn (x: int, y: int) -> x + y) 3 4") "7";
+  check "fn (x: int) typed single"
+    (Pipeline.process "(fn (x: int) -> x * 2) 5") "10";
+  check "fn (a, b, c) untyped multi"
+    (Pipeline.process "(fn (a, b, c) -> a + b * c) 1 2 3") "7";
+  check "fn ()"
+    (Pipeline.process "(fn () -> 42) ()") "42";
+  check "type of typed multi-arg fn"
+    (Pipeline.type_of "fn (x: int, y: str) -> str_of_int x ++ y") "(int -> (str -> str))";
+  check "type of untyped multi-arg fn (inferred)"
+    (Pipeline.type_of "fn (a, b) -> a + b") "(int -> (int -> int))";
+  check "annotation enforces type"
+    (Pipeline.process
+       "let add = fn (x: int, y: int) -> x + y in add 10 20") "30";
+  check "existing single-arg fn still works"
+    (Pipeline.process "(fn x -> x + 1) 10") "11";
+  check_raises "annotation mismatch caught"
+    (fun () -> Pipeline.type_of "(fn (x: int) -> x + 1) \"hi\"");
+  check "partial application of multi-arg fn"
+    (Pipeline.type_of "(fn (x: int, y: int) -> x + y) 3") "(int -> int)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

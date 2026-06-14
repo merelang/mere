@@ -32,7 +32,7 @@ and expr_node =
   | Let_rec of string * expr * expr
   | With of string * expr * expr
   | If of expr * expr * expr
-  | Fun of string * expr
+  | Fun of string * ty option * expr   (* fn x -> body  or  fn (x : t) -> body *)
   | App of expr * expr
   | Annot of expr * ty
   | Constr of string * expr option
@@ -164,8 +164,10 @@ let rec pp e =
     "(with " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | If (cond, then_, else_) ->
     "(if " ^ pp cond ^ " then " ^ pp then_ ^ " else " ^ pp else_ ^ ")"
-  | Fun (param, body) ->
+  | Fun (param, None, body) ->
     "(fn " ^ param ^ " -> " ^ pp body ^ ")"
+  | Fun (param, Some t, body) ->
+    "(fn (" ^ param ^ " : " ^ pp_ty t ^ ") -> " ^ pp body ^ ")"
   | App (f, arg) ->
     "(" ^ pp f ^ " " ^ pp arg ^ ")"
   | Annot (inner, t) ->

@@ -160,7 +160,7 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | V_bool true -> eval_in env then_
      | V_bool false -> eval_in env else_
      | _ -> type_error e.Ast.loc "if condition must be bool")
-  | Ast.Fun (param, body) ->
+  | Ast.Fun (param, _ty_opt, body) ->
     V_closure (param, body, env)
   | Ast.App (f, arg) ->
     (match eval_in env f with

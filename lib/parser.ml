@@ -166,11 +166,53 @@ let parse_program tokens =
          raise (Parse_error (pos_of toks, "expected 'in' after with binding")))
     | (pos, T_with) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'with'"))
+    | (pos, T_fn) :: (_, T_lparen) :: rest ->
+      (* Multi-arg with optional type annotations:
+           fn (x: int, y: str) -> body
+           fn (x: int) -> body
+           fn (x, y) -> body                 (* no types, multi-arg *)
+           fn () -> body                     (* single unit param *)
+         Desugars to nested Fun (param, ty_opt, ...).  *)
+      let rec parse_params toks =
+        (* end of params? *)
+        match toks with
+        | (_, T_rparen) :: rest -> [], rest
+        | _ ->
+          let (n, t_opt), rest = parse_one toks in
+          (match rest with
+           | (_, T_comma) :: rest ->
+             let rest_ps, rest = parse_params rest in
+             ((n, t_opt) :: rest_ps), rest
+           | (_, T_rparen) :: rest -> [(n, t_opt)], rest
+           | _ -> raise (Parse_error (pos_of rest, "expected ',' or ')' in param list")))
+      and parse_one toks =
+        match toks with
+        | (_, T_ident name) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          (name, Some t), rest
+        | (_, T_ident name) :: rest ->
+          (name, None), rest
+        | _ -> raise (Parse_error (pos_of toks, "expected parameter name"))
+      in
+      let params, toks = parse_params rest in
+      (match toks with
+       | (_, T_arrow) :: rest ->
+         let body, toks = expr rest in
+         (* Special case: empty param list `fn () -> body` means a single
+            unit-typed param with a fresh name. *)
+         let params = if params = [] then [("_u", Some Ast.TyUnit)] else params in
+         let f =
+           List.fold_right
+             (fun (n, t) acc -> mk pos (Ast.Fun (n, t, acc)))
+             params body
+         in
+         f, toks
+       | _ -> raise (Parse_error (pos_of toks, "expected '->' after parameter list")))
     | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
       let body, toks = expr rest in
-      mk pos (Ast.Fun (param, body)), toks
+      mk pos (Ast.Fun (param, None, body)), toks
     | (pos, T_fn) :: _ ->
-      raise (Parse_error (pos, "expected 'ident -> expr' after 'fn'"))
+      raise (Parse_error (pos, "expected 'ident -> expr' or '(params) -> expr' after 'fn'"))
     | (pos, T_match) :: rest ->
       let scrut, toks = expr rest in
       (match toks with
