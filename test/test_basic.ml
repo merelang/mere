@@ -155,5 +155,28 @@ let () =
   check_raises "with no ="
     (fun () -> Pipeline.process "with x 5 in x");
 
+  (* --- let pattern (E1) --- *)
+  check "let tuple pattern"
+    (Pipeline.process "let (a, b) = (3, 4) in a + b") "7";
+  check "let tuple of 3"
+    (Pipeline.process "let (a, b, c) = (1, 2, 3) in a * b + c") "5";
+  check "let wildcard"
+    (Pipeline.process "let _ = 99 in 42") "42";
+  check "let unit pattern"
+    (Pipeline.process "let () = () in 1") "1";
+  check "let pattern preserves let-poly: f is polymorphic"
+    (Pipeline.type_of "let (f, g) = (fn x -> x, fn x -> x + 1) in f") "('a -> 'a)";
+  check "let pattern preserves let-poly: g is int -> int"
+    (Pipeline.type_of "let (f, g) = (fn x -> x, fn x -> x + 1) in g") "(int -> int)";
+  check "nested let patterns"
+    (Pipeline.process "let (a, (b, c)) = (1, (2, 3)) in a + b + c") "6";
+  check "let pattern with print side effect"
+    (Pipeline.process "let _ = print \"hello\" in 42") "42";
+  check "pp let tuple pattern"
+    (Ast.pp (Pipeline.parse_only "let (a, b) = (1, 2) in a"))
+    "(let (a, b) = (1, 2) in a)";
+  check_raises "let pattern arity mismatch"
+    (fun () -> Pipeline.type_of "let (a, b, c) = (1, 2) in a");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

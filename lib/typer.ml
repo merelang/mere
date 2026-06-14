@@ -199,10 +199,16 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let te = infer env else_ in
     unify else_.loc te tt;
     tt
-  | Ast.Let (name, value, body) ->
+  | Ast.Let (pat, value, body) ->
     let tv = infer env value in
-    let sch = generalize env tv in
-    infer ((name, sch) :: env) body
+    let bindings = check_pattern pat tv in
+    (* Generalize each binding against the OUTER env so polymorphism is preserved
+       for `let (f, g) = (fn x -> x, fn x -> x + 1) in ...` style. *)
+    let env' = List.fold_left (fun acc (n, t) ->
+      let sch = generalize env t in
+      (n, sch) :: acc
+    ) env bindings in
+    infer env' body
   | Ast.Let_rec (name, value, body) ->
     let alpha = fresh_var () in
     let env_rec = (name, mono alpha) :: env in
