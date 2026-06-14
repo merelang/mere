@@ -26,6 +26,7 @@ and expr_node =
   | Var of string
   | Bin of binop * expr * expr
   | Cmp of cmpop * expr * expr
+  | Logic of logicop * expr * expr     (* && / ||、short-circuit eval *)
   | Neg of expr
   | Let of pattern * expr * expr   (* left side is a pattern — supports `let (a, b) = ...` etc. *)
   | Let_rec of string * expr * expr
@@ -38,8 +39,9 @@ and expr_node =
   | Match of expr * (pattern * expr) list
   | Tuple of expr list
 
-and binop = Add | Sub | Mul | Concat
-and cmpop = Eq | Lt
+and binop = Add | Sub | Mul | Div | Mod | Concat
+and cmpop = Eq | Ne | Lt | Le | Gt | Ge
+and logicop = And | Or
 
 and pattern = { ploc : Loc.t; pnode : pattern_node }
 and pattern_node =
@@ -64,9 +66,12 @@ type program = {
 }
 
 let binop_to_string = function
-  | Add -> "+" | Sub -> "-" | Mul -> "*" | Concat -> "++"
+  | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%" | Concat -> "++"
 
-let cmpop_to_string = function Eq -> "==" | Lt -> "<"
+let cmpop_to_string = function
+  | Eq -> "==" | Ne -> "!=" | Lt -> "<" | Le -> "<=" | Gt -> ">" | Ge -> ">="
+
+let logicop_to_string = function And -> "&&" | Or -> "||"
 
 let rec walk = function
   | TyVar { link = Some t; _ } -> walk t
@@ -149,6 +154,8 @@ let rec pp e =
     "(" ^ pp a ^ " " ^ binop_to_string op ^ " " ^ pp b ^ ")"
   | Cmp (op, a, b) ->
     "(" ^ pp a ^ " " ^ cmpop_to_string op ^ " " ^ pp b ^ ")"
+  | Logic (op, a, b) ->
+    "(" ^ pp a ^ " " ^ logicop_to_string op ^ " " ^ pp b ^ ")"
   | Let (pat, value, body) ->
     "(let " ^ pp_pattern pat ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | Let_rec (name, value, body) ->

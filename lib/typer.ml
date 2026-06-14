@@ -154,7 +154,10 @@ let instantiate_constr (info : constr_info) =
   (arg', Ast.TyCon (info.type_name, result_args))
 
 let initial_env : env =
-  [ ("print", mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit))) ]
+  [ ("print",      mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit)));
+    ("print_int",  mono (Ast.TyArrow (Ast.TyInt, Ast.TyUnit)));
+    ("str_of_int", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
+  ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
   match e.node with
@@ -174,7 +177,7 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let ta = infer env a in
     let tb = infer env b in
     (match op with
-     | Ast.Add | Ast.Sub | Ast.Mul ->
+     | Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod ->
        unify a.loc ta Ast.TyInt;
        unify b.loc tb Ast.TyInt;
        Ast.TyInt
@@ -186,11 +189,17 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let ta = infer env a in
     let tb = infer env b in
     (match op with
-     | Ast.Lt ->
+     | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
        unify a.loc ta Ast.TyInt;
        unify b.loc tb Ast.TyInt
-     | Ast.Eq ->
+     | Ast.Eq | Ast.Ne ->
        unify e.loc ta tb);
+    Ast.TyBool
+  | Ast.Logic (_, a, b) ->
+    let ta = infer env a in
+    let tb = infer env b in
+    unify a.loc ta Ast.TyBool;
+    unify b.loc tb Ast.TyBool;
     Ast.TyBool
   | Ast.If (cond, then_, else_) ->
     let tc = infer env cond in

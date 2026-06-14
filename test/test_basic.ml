@@ -178,5 +178,38 @@ let () =
   check_raises "let pattern arity mismatch"
     (fun () -> Pipeline.type_of "let (a, b, c) = (1, 2) in a");
 
+  (* --- new arithmetic operators (E2) --- *)
+  check "div"             (Pipeline.process "10 / 3") "3";
+  check "mod"             (Pipeline.process "10 % 3") "1";
+  check "div precedence"  (Pipeline.process "20 / 2 + 1") "11";
+  check_raises "div by zero" (fun () -> Pipeline.process "1 / 0");
+  check_raises "mod by zero" (fun () -> Pipeline.process "1 % 0");
+
+  (* --- new comparison operators (E2) --- *)
+  check "le true"   (Pipeline.process "5 <= 5") "true";
+  check "le false"  (Pipeline.process "6 <= 5") "false";
+  check "ge true"   (Pipeline.process "5 >= 5") "true";
+  check "gt true"   (Pipeline.process "5 > 4") "true";
+  check "gt false"  (Pipeline.process "4 > 5") "false";
+  check "ne true"   (Pipeline.process "5 != 6") "true";
+  check "ne bool"   (Pipeline.process "true != false") "true";
+  check "ne str"    (Pipeline.process "\"a\" != \"b\"") "true";
+
+  (* --- logical operators with short-circuit (E2) --- *)
+  check "and true"      (Pipeline.process "true && true") "true";
+  check "and false"     (Pipeline.process "true && false") "false";
+  check "or"            (Pipeline.process "false || true") "true";
+  check "and short-circuit (rhs not evaluated)"
+    (Pipeline.process "false && (1 / 0 == 0)") "false";
+  check "or short-circuit (rhs not evaluated)"
+    (Pipeline.process "true || (1 / 0 == 0)") "true";
+
+  (* --- stdlib (F1) --- *)
+  check "type of print_int"  (Pipeline.type_of "print_int") "(int -> unit)";
+  check "type of str_of_int" (Pipeline.type_of "str_of_int") "(int -> str)";
+  check "str_of_int"         (Pipeline.process "str_of_int 123") "\"123\"";
+  check "compose with stdlib"
+    (Pipeline.process "let msg = \"sum = \" ++ str_of_int (10 + 20) in msg") "\"sum = 30\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
