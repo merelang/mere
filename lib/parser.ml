@@ -178,7 +178,7 @@ let parse_program tokens =
          let arms, toks = parse_arms rest in
          mk pos (Ast.Match (scrut, arms)), toks
        | _ -> raise (Parse_error (pos_of toks, "expected 'with' after match")))
-    | _ -> cmp toks
+    | _ -> logic_or toks
   and parse_arms toks =
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
     let rec loop acc toks =
@@ -235,15 +235,45 @@ let parse_program tokens =
       end
     | (pos, T_ident name) :: rest -> mkp pos (Ast.P_var name), rest
     | _ -> raise (Parse_error (pos_of toks, "expected pattern"))
+  and logic_or toks =
+    (* || is left-associative *)
+    let lhs, toks = logic_and toks in
+    let rec loop lhs toks =
+      match toks with
+      | (pos, T_pipe_pipe) :: rest ->
+        let rhs, toks = logic_and rest in
+        loop (mk pos (Ast.Logic (Ast.Or, lhs, rhs))) toks
+      | _ -> lhs, toks
+    in
+    loop lhs toks
+  and logic_and toks =
+    let lhs, toks = cmp toks in
+    let rec loop lhs toks =
+      match toks with
+      | (pos, T_amp_amp) :: rest ->
+        let rhs, toks = cmp rest in
+        loop (mk pos (Ast.Logic (Ast.And, lhs, rhs))) toks
+      | _ -> lhs, toks
+    in
+    loop lhs toks
   and cmp toks =
     let lhs, toks = sum toks in
+    let cmp_op = function
+      | T_eq_eq -> Some Ast.Eq
+      | T_bang_eq -> Some Ast.Ne
+      | T_lt -> Some Ast.Lt
+      | T_lt_eq -> Some Ast.Le
+      | T_gt -> Some Ast.Gt
+      | T_gt_eq -> Some Ast.Ge
+      | _ -> None
+    in
     match toks with
-    | (pos, T_eq_eq) :: rest ->
-      let rhs, toks = sum rest in
-      mk pos (Ast.Cmp (Ast.Eq, lhs, rhs)), toks
-    | (pos, T_lt) :: rest ->
-      let rhs, toks = sum rest in
-      mk pos (Ast.Cmp (Ast.Lt, lhs, rhs)), toks
+    | (pos, tk) :: rest ->
+      (match cmp_op tk with
+       | Some op ->
+         let rhs, toks = sum rest in
+         mk pos (Ast.Cmp (op, lhs, rhs)), toks
+       | None -> lhs, toks)
     | _ -> lhs, toks
   and sum toks =
     let lhs, toks = term toks in
@@ -268,6 +298,12 @@ let parse_program tokens =
     | (pos, T_star) :: rest ->
       let rhs, toks = factor rest in
       term_tail (mk pos (Ast.Bin (Ast.Mul, lhs, rhs))) toks
+    | (pos, T_slash) :: rest ->
+      let rhs, toks = factor rest in
+      term_tail (mk pos (Ast.Bin (Ast.Div, lhs, rhs))) toks
+    | (pos, T_percent) :: rest ->
+      let rhs, toks = factor rest in
+      term_tail (mk pos (Ast.Bin (Ast.Mod, lhs, rhs))) toks
     | _ -> lhs, toks
   and factor toks =
     match toks with

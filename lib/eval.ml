@@ -32,11 +32,27 @@ let builtin_print =
   V_builtin ("print", fun v ->
     (match v with
      | V_str s -> print_endline s
-     | _ -> failwith "print: expected str (type check should have caught this)");
+     | _ -> failwith "print: expected str");
     V_unit)
 
+let builtin_print_int =
+  V_builtin ("print_int", fun v ->
+    (match v with
+     | V_int n -> print_endline (string_of_int n)
+     | _ -> failwith "print_int: expected int");
+    V_unit)
+
+let builtin_str_of_int =
+  V_builtin ("str_of_int", fun v ->
+    match v with
+    | V_int n -> V_str (string_of_int n)
+    | _ -> failwith "str_of_int: expected int")
+
 let initial_env : env =
-  [ ("print", ref builtin_print) ]
+  [ ("print", ref builtin_print);
+    ("print_int", ref builtin_print_int);
+    ("str_of_int", ref builtin_str_of_int);
+  ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
   match p.pnode, v with
@@ -83,8 +99,14 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | Ast.Add, V_int x, V_int y -> V_int (x + y)
      | Ast.Sub, V_int x, V_int y -> V_int (x - y)
      | Ast.Mul, V_int x, V_int y -> V_int (x * y)
+     | Ast.Div, V_int _, V_int 0 ->
+       type_error e.Ast.loc "division by zero"
+     | Ast.Div, V_int x, V_int y -> V_int (x / y)
+     | Ast.Mod, V_int _, V_int 0 ->
+       type_error e.Ast.loc "modulo by zero"
+     | Ast.Mod, V_int x, V_int y -> V_int (x mod y)
      | Ast.Concat, V_str x, V_str y -> V_str (x ^ y)
-     | (Ast.Add | Ast.Sub | Ast.Mul), _, _ ->
+     | (Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod), _, _ ->
        type_error e.Ast.loc "arithmetic requires int operands"
      | Ast.Concat, _, _ ->
        type_error e.Ast.loc "++ requires str operands")
@@ -93,12 +115,27 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | V_int x, V_int y ->
        (match op with
         | Ast.Eq -> V_bool (x = y)
-        | Ast.Lt -> V_bool (x < y))
-     | V_bool x, V_bool y when op = Ast.Eq ->
-       V_bool (x = y)
-     | V_str x, V_str y when op = Ast.Eq ->
-       V_bool (x = y)
+        | Ast.Ne -> V_bool (x <> y)
+        | Ast.Lt -> V_bool (x < y)
+        | Ast.Le -> V_bool (x <= y)
+        | Ast.Gt -> V_bool (x > y)
+        | Ast.Ge -> V_bool (x >= y))
+     | V_bool x, V_bool y when op = Ast.Eq -> V_bool (x = y)
+     | V_bool x, V_bool y when op = Ast.Ne -> V_bool (x <> y)
+     | V_str x, V_str y when op = Ast.Eq -> V_bool (x = y)
+     | V_str x, V_str y when op = Ast.Ne -> V_bool (x <> y)
      | _ -> type_error e.Ast.loc "comparison type mismatch")
+  | Ast.Logic (op, a, b) ->
+    (* short-circuit evaluation: don't evaluate b unless needed *)
+    (match op, eval_in env a with
+     | Ast.And, V_bool false -> V_bool false
+     | Ast.Or, V_bool true -> V_bool true
+     | (Ast.And | Ast.Or), V_bool _ ->
+       (match eval_in env b with
+        | V_bool _ as v -> v
+        | _ -> type_error e.Ast.loc "logical operator: rhs must be bool")
+     | _ ->
+       type_error e.Ast.loc "logical operator: lhs must be bool")
   | Ast.Let (pat, value, body) ->
     let v = eval_in env value in
     (match match_pattern pat v with
