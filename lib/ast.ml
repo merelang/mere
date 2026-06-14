@@ -59,6 +59,8 @@ type top_decl =
   | Top_let_rec of string * expr
   | Top_type of string * string list * (string * ty option) list
     (* type name * type params (param names) * variants *)
+  | Top_signature of string * (string * ty) list
+    (* signature name * param list (all type-annotated) *)
 
 type program = {
   decls : top_decl list;
@@ -194,4 +196,5 @@ let desugar_program (prog : program) : expr =
     | Top_let_rec (name, value) ->
       { loc; node = Let_rec (name, value, body) }
     | Top_type _ -> body
+    | Top_signature _ -> body
   ) prog.decls prog.main

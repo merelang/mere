@@ -63,6 +63,9 @@ let process_decl eval_env type_env decl =
     in
     Printf.printf "type %s%s defined (%d variants)\n" param_str name (List.length variants);
     None
+  | Ast.Top_signature (name, params) ->
+    Printf.printf "signature %s defined (%d params)\n" name (List.length params);
+    None
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
 let prepare_input s =

@@ -33,6 +33,9 @@ let process_decls eval_env type_env decls =
       type_env := (name, sch) :: !type_env
     | Ast.Top_type (name, params, variants) ->
       Typer.register_type name params variants
+    | Ast.Top_signature _ ->
+      (* Pure parse-time expansion; nothing to do at type/eval level. *)
+      ()
   ) decls
 
 let process s =
@@ -65,6 +68,7 @@ let type_of s =
       type_env := (name, sch) :: !type_env
     | Ast.Top_type (name, params, variants) ->
       Typer.register_type name params variants
+    | Ast.Top_signature _ -> ()
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 

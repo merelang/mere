@@ -17,10 +17,12 @@ type token =
   | T_false
   | T_fn
   | T_type
+  | T_signature       (* signature keyword *)
   | T_match
   | T_with
   | T_of
   | T_underscore
+  | T_ellipsis        (* ... — for spreading signature params *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -74,6 +76,8 @@ let tokenize s =
         let j = skip (i + 2) in
         advance (j - i);
         aux j acc
+      | '.' when i + 2 < len && s.[i + 1] = '.' && s.[i + 2] = '.' ->
+        advance 3; aux (i + 3) ((pos, T_ellipsis) :: acc)
       | '/' -> advance 1; aux (i + 1) ((pos, T_slash) :: acc)
       | '%' -> advance 1; aux (i + 1) ((pos, T_percent) :: acc)
       | '+' when i + 1 < len && s.[i + 1] = '+' ->
@@ -169,6 +173,7 @@ let tokenize s =
           | "false" -> T_false
           | "fn" -> T_fn
           | "type" -> T_type
+          | "signature" -> T_signature
           | "match" -> T_match
           | "with" -> T_with
           | "of" -> T_of

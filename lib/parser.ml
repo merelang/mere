@@ -9,6 +9,11 @@ let starts_with_upper s =
 
 let constructors : (string, int) Hashtbl.t = Hashtbl.create 16
 
+(* signature alias registry: name -> typed param list.
+   Populated by `signature name = (p1: T1, ...);` and consumed by
+   `...name` spread inside fn parameter lists. *)
+let signatures : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
+
 let is_primitive_type_name = function
   | "int" | "bool" | "str" | "unit" -> true
   | _ -> false
@@ -177,6 +182,22 @@ let parse_program tokens =
         (* end of params? *)
         match toks with
         | (_, T_rparen) :: rest -> [], rest
+        | (sp_pos, T_ellipsis) :: (_, T_ident sig_name) :: rest ->
+          (* `...sig_name` expands to the signature's parameter list. *)
+          let expanded =
+            match Hashtbl.find_opt signatures sig_name with
+            | Some params ->
+              List.map (fun (n, t) -> (n, Some t)) params
+            | None ->
+              raise (Parse_error (sp_pos,
+                Printf.sprintf "unknown signature: %s" sig_name))
+          in
+          (match rest with
+           | (_, T_comma) :: rest ->
+             let rest_ps, rest = parse_params rest in
+             (expanded @ rest_ps), rest
+           | (_, T_rparen) :: rest -> expanded, rest
+           | _ -> raise (Parse_error (pos_of rest, "expected ',' or ')' after spread")))
         | _ ->
           let (n, t_opt), rest = parse_one toks in
           (match rest with
@@ -417,8 +438,43 @@ let parse_program tokens =
     | (_, T_tyvar name) :: rest -> [name], rest
     | _ -> [], toks
   in
+  let parse_signature_params toks =
+    (* (name: ty, name: ty, ...)   all annotations required *)
+    match toks with
+    | (_, T_lparen) :: rest ->
+      let rec loop acc toks =
+        match toks with
+        | (_, T_rparen) :: rest -> List.rev acc, rest
+        | (_, T_ident name) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          let acc = (name, t) :: acc in
+          (match rest with
+           | (_, T_comma) :: rest -> loop acc rest
+           | (_, T_rparen) :: rest -> List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ',' or ')' in signature param list")))
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected typed parameter (name: type) in signature"))
+      in
+      loop [] rest
+    | _ ->
+      raise (Parse_error (pos_of toks, "expected '(' after signature name"))
+  in
   let rec parse_decls decls toks =
     match toks with
+    | (_, T_signature) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let params, toks = parse_signature_params rest in
+      Hashtbl.replace signatures name params;
+      (match toks with
+       | (_, T_semi) :: rest ->
+         parse_decls (Ast.Top_signature (name, params) :: decls) rest
+       | _ ->
+         raise (Parse_error (pos_of toks,
+           "expected ';' after signature declaration")))
+    | (pos, T_signature) :: _ ->
+      raise (Parse_error (pos, "expected 'name = (params)' after 'signature'"))
     | (_, T_type) :: rest ->
       let params, rest = parse_type_params rest in
       (match rest with

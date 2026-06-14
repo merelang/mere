@@ -234,5 +234,38 @@ let () =
   check "partial application of multi-arg fn"
     (Pipeline.type_of "(fn (x: int, y: int) -> x + y) 3") "(int -> int)";
 
+  (* --- signature alias (A) --- *)
+  check "signature basic"
+    (Pipeline.process
+      "signature ctx = (db: int, log: int);
+       let f = fn (...ctx, n: int) -> db + log + n in f 1 2 3") "6";
+  check "signature alone"
+    (Pipeline.process
+      "signature ctx = (a: int, b: int);
+       let g = fn (...ctx) -> a * b in g 4 5") "20";
+  check "signature with leading params"
+    (Pipeline.process
+      "signature ctx = (db: int);
+       let h = fn (a: int, ...ctx, b: int) -> a + db + b in h 1 2 3") "6";
+  check "signature multiple spreads"
+    (Pipeline.process
+      "signature a = (x: int);
+       signature b = (y: int);
+       let f = fn (...a, ...b) -> x + y in f 10 20") "30";
+  check "signature type inferred"
+    (Pipeline.type_of
+      "signature ctx = (db: int, log: str);
+       fn (...ctx) -> log") "(int -> (str -> str))";
+  check "signature with str param"
+    (Pipeline.process
+      "signature ctx = (greeting: str);
+       let greet = fn (...ctx, name: str) -> greeting ++ name in greet \"hi \" \"world\"") "\"hi world\"";
+  check_raises "unknown signature"
+    (fun () -> Pipeline.process
+      "let f = fn (...missing, n: int) -> n in f 1");
+  check_raises "signature param without type"
+    (fun () -> Pipeline.process
+      "signature ctx = (db); let f = fn (...ctx) -> db in f 1");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

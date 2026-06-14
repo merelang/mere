@@ -1,0 +1,25 @@
+// シグネチャエイリアス (Q-005 narrowed, slice A)
+// 共通の引数リスト (ケイパビリティ束) を名前で再利用できる。
+//
+// signature decl は parse 時に展開され、ランタイムには現れない。
+// 「...sig」で param list を展開、cascade 可。
+
+signature ctx = (db: int, log: int);
+
+let save_order = fn (...ctx, order: int) ->
+  db + log + order;
+
+let log_event = fn (...ctx, event: int) ->
+  log + event;
+
+// 2 つの signature を同時に spread
+signature counters = (x: int);
+signature totals   = (y: int);
+
+let combine = fn (...counters, ...totals, z: int) -> x + y + z;
+
+let main = save_order 100 10 5
+       + log_event 100 10 7
+       + combine 1 2 3;
+
+main
