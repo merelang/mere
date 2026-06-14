@@ -241,7 +241,19 @@ let parse_program tokens =
          let arms, toks = parse_arms rest in
          mk pos (Ast.Match (scrut, arms)), toks
        | _ -> raise (Parse_error (pos_of toks, "expected 'with' after match")))
-    | _ -> logic_or toks
+    | _ -> pipe toks
+  and pipe toks =
+    (* Lowest-precedence operator below let/if/fn/match.
+       `a |> f` desugars to `f a`. Left-associative: `a |> b |> c` = `c (b a)`. *)
+    let lhs, toks = logic_or toks in
+    let rec loop lhs toks =
+      match toks with
+      | (pos, T_pipe_gt) :: rest ->
+        let rhs, toks = logic_or rest in
+        loop (mk pos (Ast.App (rhs, lhs))) toks
+      | _ -> lhs, toks
+    in
+    loop lhs toks
   and parse_arms toks =
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
     let rec loop acc toks =

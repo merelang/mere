@@ -36,6 +36,7 @@ type token =
   | T_comma
   | T_pipe
   | T_pipe_pipe        (* || *)
+  | T_pipe_gt          (* |>  pipe operator *)
   | T_amp_amp          (* && *)
   | T_plus
   | T_plus_plus
@@ -105,6 +106,8 @@ let tokenize s =
       | ',' -> advance 1; aux (i + 1) ((pos, T_comma) :: acc)
       | '|' when i + 1 < len && s.[i + 1] = '|' ->
         advance 2; aux (i + 2) ((pos, T_pipe_pipe) :: acc)
+      | '|' when i + 1 < len && s.[i + 1] = '>' ->
+        advance 2; aux (i + 2) ((pos, T_pipe_gt) :: acc)
       | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
       | '&' when i + 1 < len && s.[i + 1] = '&' ->
         advance 2; aux (i + 2) ((pos, T_amp_amp) :: acc)
