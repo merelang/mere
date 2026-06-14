@@ -31,7 +31,7 @@ let format_exn = function
   | e -> "internal error: " ^ Printexc.to_string e
 
 (* Process one top decl, updating both envs.
-   Returns Some (name, scheme) for binding decls, None for type decls. *)
+   Returns a list of (name, scheme) for binding decls, [] for type decls. *)
 let process_decl eval_env type_env decl =
   match decl with
   | Ast.Top_let (name, value) ->
@@ -40,20 +40,31 @@ let process_decl eval_env type_env decl =
     let v = Eval.eval_in !eval_env value in
     eval_env := (name, ref v) :: !eval_env;
     type_env := (name, sch) :: !type_env;
-    Some (name, sch)
-  | Ast.Top_let_rec (name, value) ->
-    let alpha = Typer.fresh_var () in
-    let env_rec = (name, Typer.mono alpha) :: !type_env in
-    let t = Typer.infer env_rec value in
-    Typer.unify value.Ast.loc alpha t;
-    let sch = Typer.generalize !type_env t in
-    let placeholder = ref Eval.V_unit in
-    let env_eval = (name, placeholder) :: !eval_env in
-    let v = Eval.eval_in env_eval value in
-    placeholder := v;
+    [(name, sch)]
+  | Ast.Top_let_rec bindings ->
+    let outer_env = !type_env in
+    let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+    let env_rec = List.fold_left2 (fun acc (n, _) a ->
+      (n, Typer.mono a) :: acc
+    ) outer_env bindings alphas in
+    List.iter2 (fun (_, value) alpha ->
+      let t = Typer.infer env_rec value in
+      Typer.unify value.Ast.loc alpha t
+    ) bindings alphas;
+    let placeholders = List.map (fun (n, _) -> (n, ref Eval.V_unit)) bindings in
+    let env_eval = List.fold_left (fun acc (n, r) -> (n, r) :: acc) !eval_env placeholders in
+    List.iter (fun (n, value) ->
+      let v = Eval.eval_in env_eval value in
+      let r = List.assoc n placeholders in
+      r := v
+    ) bindings;
     eval_env := env_eval;
-    type_env := (name, sch) :: !type_env;
-    Some (name, sch)
+    let added = List.map2 (fun (n, _) a ->
+      let sch = Typer.generalize outer_env a in
+      (n, sch)
+    ) bindings alphas in
+    type_env := List.fold_left (fun acc (n, s) -> (n, s) :: acc) outer_env added;
+    added
   | Ast.Top_type (name, params, variants) ->
     Typer.register_type name params variants;
     let param_str = match params with
@@ -62,10 +73,10 @@ let process_decl eval_env type_env decl =
       | _ -> "(" ^ String.concat ", " (List.map (fun p -> "'" ^ p) params) ^ ") "
     in
     Printf.printf "type %s%s defined (%d variants)\n" param_str name (List.length variants);
-    None
+    []
   | Ast.Top_signature (name, params) ->
     Printf.printf "signature %s defined (%d params)\n" name (List.length params);
-    None
+    []
   | Ast.Top_record (name, params, fields) ->
     Typer.register_record name params fields;
     let param_str = match params with
@@ -74,7 +85,7 @@ let process_decl eval_env type_env decl =
       | _ -> "(" ^ String.concat ", " (List.map (fun p -> "'" ^ p) params) ^ ") "
     in
     Printf.printf "record %s%s defined (%d fields)\n" param_str name (List.length fields);
-    None
+    []
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
 let prepare_input s =
@@ -91,7 +102,7 @@ let handle_input eval_env type_env input =
   let prepared = prepare_input input in
   let tokens = Lexer.tokenize prepared in
   let prog = Parser.parse_program tokens in
-  let added = List.filter_map (process_decl eval_env type_env) prog.decls in
+  let added = List.concat_map (process_decl eval_env type_env) prog.decls in
   let main_t = Typer.infer !type_env prog.main in
   let main_v = Eval.eval_in !eval_env prog.main in
   List.iter (fun (name, sch) ->

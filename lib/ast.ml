@@ -29,7 +29,7 @@ and expr_node =
   | Logic of logicop * expr * expr     (* && / ||、short-circuit eval *)
   | Neg of expr
   | Let of pattern * expr * expr   (* left side is a pattern — supports `let (a, b) = ...` etc. *)
-  | Let_rec of string * expr * expr
+  | Let_rec of (string * expr) list * expr   (* list >= 1; multi for `let rec X = e1 and Y = e2 in body` *)
   | With of string * expr * expr
   | If of expr * expr * expr
   | Fun of string * ty option * expr   (* fn x -> body  or  fn (x : t) -> body *)
@@ -62,7 +62,7 @@ and pattern_node =
 
 type top_decl =
   | Top_let of string * expr
-  | Top_let_rec of string * expr
+  | Top_let_rec of (string * expr) list   (* multi for `let rec X = e1 and Y = e2 ;` *)
   | Top_type of string * string list * (string * ty option) list
     (* type name * type params (param names) * variants *)
   | Top_signature of string * (string * ty) list
@@ -171,8 +171,9 @@ let rec pp e =
     "(" ^ pp a ^ " " ^ logicop_to_string op ^ " " ^ pp b ^ ")"
   | Let (pat, value, body) ->
     "(let " ^ pp_pattern pat ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
-  | Let_rec (name, value, body) ->
-    "(let rec " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
+  | Let_rec (bindings, body) ->
+    let parts = List.map (fun (n, v) -> n ^ " = " ^ pp v) bindings in
+    "(let rec " ^ String.concat " and " parts ^ " in " ^ pp body ^ ")"
   | With (name, value, body) ->
     "(with " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | If (cond, then_, else_) ->
@@ -209,8 +210,8 @@ let desugar_program (prog : program) : expr =
     | Top_let (name, value) ->
       let pat = { ploc = loc; pnode = P_var name } in
       { loc; node = Let (pat, value, body) }
-    | Top_let_rec (name, value) ->
-      { loc; node = Let_rec (name, value, body) }
+    | Top_let_rec bindings ->
+      { loc; node = Let_rec (bindings, body) }
     | Top_type _ -> body
     | Top_signature _ -> body
     | Top_record _ -> body

@@ -128,10 +128,20 @@ let parse_program tokens =
        | _ -> raise (Parse_error (pos_of toks, "expected 'then'")))
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
+      (* `and NAME = expr` chain for mutual recursion. *)
+      let rec parse_more acc toks =
+        match toks with
+        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+          let v, toks = expr rest in
+          parse_more ((n, v) :: acc) toks
+        | _ -> List.rev acc, toks
+      in
+      let more, toks = parse_more [] toks in
+      let bindings = (name, value) :: more in
       (match toks with
        | (_, T_in) :: rest ->
          let body, toks = expr rest in
-         mk pos (Ast.Let_rec (name, value, body)), toks
+         mk pos (Ast.Let_rec (bindings, body)), toks
        | _ ->
          raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
     | (pos, T_let) :: (_, T_rec) :: _ ->
@@ -594,12 +604,21 @@ let parse_program tokens =
          raise (Parse_error (pos_of rest, "expected 'ident = ...' after 'type'")))
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
+      let rec parse_more acc toks =
+        match toks with
+        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+          let v, toks = expr rest in
+          parse_more ((n, v) :: acc) toks
+        | _ -> List.rev acc, toks
+      in
+      let more, toks = parse_more [] toks in
+      let bindings = (name, value) :: more in
       (match toks with
        | (_, T_semi) :: rest ->
-         parse_decls (Ast.Top_let_rec (name, value) :: decls) rest
+         parse_decls (Ast.Top_let_rec bindings :: decls) rest
        | (_, T_in) :: rest ->
          let body, toks = expr rest in
-         let main = mk pos (Ast.Let_rec (name, value, body)) in
+         let main = mk pos (Ast.Let_rec (bindings, body)) in
          finish decls main toks
        | _ ->
          raise (Parse_error (pos_of toks, "expected ';' or 'in' after let rec binding")))
