@@ -210,6 +210,12 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     unify e.loc alpha tv;
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
+  | Ast.With (name, value, body) ->
+    (* v0: identical to Let. Lifetime/resource semantics will be added with
+       Drop/destructors in a future slice. *)
+    let tv = infer env value in
+    let sch = generalize env tv in
+    infer ((name, sch) :: env) body
   | Ast.Fun (param, body) ->
     let alpha = fresh_var () in
     let tb = infer ((param, mono alpha) :: env) body in

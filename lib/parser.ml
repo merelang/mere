@@ -136,6 +136,31 @@ let parse_program tokens =
          raise (Parse_error (pos_of toks, "expected 'in' after let binding")))
     | (pos, T_let) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let'"))
+    | (pos, T_with) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let value, toks = expr rest in
+      (* Allow multiple bindings separated by commas:
+         `with x = e1, y = e2 in body` desugars to nested With's. *)
+      let rec parse_more acc toks =
+        match toks with
+        | (_, T_comma) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+          let v, toks = expr rest in
+          parse_more ((n, v) :: acc) toks
+        | _ -> List.rev acc, toks
+      in
+      let more, toks = parse_more [] toks in
+      (match toks with
+       | (_, T_in) :: rest ->
+         let body, toks = expr rest in
+         let inner =
+           List.fold_right (fun (n, v) acc ->
+             mk pos (Ast.With (n, v, acc))
+           ) more body
+         in
+         mk pos (Ast.With (name, value, inner)), toks
+       | _ ->
+         raise (Parse_error (pos_of toks, "expected 'in' after with binding")))
+    | (pos, T_with) :: _ ->
+      raise (Parse_error (pos, "expected 'ident = expr' after 'with'"))
     | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
       let body, toks = expr rest in
       mk pos (Ast.Fun (param, body)), toks
