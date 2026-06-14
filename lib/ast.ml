@@ -36,7 +36,9 @@ and expr_node =
   | App of expr * expr
   | Annot of expr * ty
   | Constr of string * expr option
-  | Match of expr * (pattern * expr) list
+  | Match of expr * (pattern * expr option * expr) list
+    (* arm: pattern * optional guard * body.  guard is bool expr — if false,
+       fall through to next arm. *)
   | Tuple of expr list
   | Record_lit of string * (string * expr) list
     (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
@@ -191,7 +193,12 @@ let rec pp e =
   | Match (scrut, arms) ->
     let arms_s =
       arms
-      |> List.map (fun (p, body) -> "| " ^ pp_pattern p ^ " -> " ^ pp body)
+      |> List.map (fun (p, guard, body) ->
+        let g_s = match guard with
+          | None -> ""
+          | Some g -> " when " ^ pp g
+        in
+        "| " ^ pp_pattern p ^ g_s ^ " -> " ^ pp body)
       |> String.concat " "
     in
     "(match " ^ pp scrut ^ " with " ^ arms_s ^ ")"

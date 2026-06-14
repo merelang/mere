@@ -273,13 +273,20 @@ let parse_program tokens =
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
     let rec loop acc toks =
       let p, toks = pattern toks in
+      let guard, toks =
+        match toks with
+        | (_, T_when) :: rest ->
+          let g, toks = expr rest in
+          Some g, toks
+        | _ -> None, toks
+      in
       let toks =
         match toks with
         | (_, T_arrow) :: rest -> rest
         | _ -> raise (Parse_error (pos_of toks, "expected '->' in match arm"))
       in
       let body, toks = expr toks in
-      let acc = (p, body) :: acc in
+      let acc = (p, guard, body) :: acc in
       match toks with
       | (_, T_pipe) :: rest -> loop acc rest
       | _ -> List.rev acc, toks

@@ -21,6 +21,7 @@ type token =
   | T_signature       (* signature keyword *)
   | T_match
   | T_with
+  | T_when            (* when — match guard *)
   | T_of
   | T_underscore
   | T_ellipsis        (* ... — for spreading signature params *)
@@ -191,6 +192,7 @@ let tokenize s =
           | "signature" -> T_signature
           | "match" -> T_match
           | "with" -> T_with
+          | "when" -> T_when
           | "of" -> T_of
           | "_" -> T_underscore
           | _ -> T_ident word
