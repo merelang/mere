@@ -202,11 +202,19 @@ let rec eval_in (env : env) (e : Ast.expr) =
     let v = eval_in env scrut in
     let rec try_arms = function
       | [] -> type_error e.Ast.loc "no matching arm in match"
-      | (p, body) :: rest ->
+      | (p, guard, body) :: rest ->
         (match match_pattern p v with
          | Some bindings ->
            let env' = List.fold_left (fun acc (n, v) -> (n, ref v) :: acc) env bindings in
-           eval_in env' body
+           let g_ok = match guard with
+             | None -> true
+             | Some g ->
+               (match eval_in env' g with
+                | V_bool b -> b
+                | _ -> type_error g.Ast.loc "match guard must be bool")
+           in
+           if g_ok then eval_in env' body
+           else try_arms rest
          | None -> try_arms rest)
     in
     try_arms arms

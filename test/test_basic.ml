@@ -443,5 +443,51 @@ let () =
       "type P = { x: int };
        let p = P { x = 7 } in { p.x; p.x + 1 }") "8";
 
+  (* --- match guards `| pat when expr -> body` --- *)
+  check "guard small"
+    (Pipeline.process
+      "match 5 with
+       | n when n < 0 -> \"neg\"
+       | 0 -> \"zero\"
+       | n when n < 10 -> \"small\"
+       | _ -> \"large\"") "\"small\"";
+  check "guard large fallthrough"
+    (Pipeline.process
+      "match 100 with
+       | n when n < 0 -> \"neg\"
+       | 0 -> \"zero\"
+       | n when n < 10 -> \"small\"
+       | _ -> \"large\"") "\"large\"";
+  check "guard literal zero"
+    (Pipeline.process
+      "match 0 with
+       | n when n < 0 -> \"neg\"
+       | 0 -> \"zero\"
+       | _ -> \"pos\"") "\"zero\"";
+  check "guard with constructor"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some 7 with
+       | None -> 0
+       | Some n when n > 10 -> 1000
+       | Some n -> n + 1") "8";
+  check "guard then fall to next"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some 50 with
+       | None -> 0
+       | Some n when n > 10 -> 1000
+       | Some n -> n + 1") "1000";
+  check "guard does not bypass type"
+    (Pipeline.type_of
+      "fn n -> match n with | x when x > 0 -> x | _ -> 0") "(int -> int)";
+  check_raises "guard must be bool"
+    (fun () -> Pipeline.type_of
+      "match 1 with | n when n + 1 -> 0 | _ -> 0");
+  check "pp match with guard"
+    (Ast.pp (Pipeline.parse_only
+      "match x with | n when n > 0 -> n | _ -> 0"))
+    "(match x with | n when (n > 0) -> n | _ -> 0)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

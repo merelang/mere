@@ -311,9 +311,14 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Match (scrut, arms) ->
     let t_scrut = infer env scrut in
     let result_var = fresh_var () in
-    List.iter (fun (pat, branch) ->
+    List.iter (fun (pat, guard, branch) ->
       let bindings = check_pattern pat t_scrut in
       let env' = List.fold_left (fun acc (n, t) -> (n, mono t) :: acc) env bindings in
+      (match guard with
+       | None -> ()
+       | Some g ->
+         let tg = infer env' g in
+         unify g.Ast.loc tg Ast.TyBool);
       let tb = infer env' branch in
       unify branch.loc tb result_var
     ) arms;
