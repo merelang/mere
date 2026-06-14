@@ -11,6 +11,7 @@ type value =
   | V_builtin of string * (value -> value)
   | V_constr of string * value option
   | V_tuple of value list
+  | V_record of string * (string * value) list
 
 and env = (string * value ref) list
 
@@ -25,6 +26,9 @@ let rec to_string = function
   | V_constr (name, Some v) -> name ^ " " ^ to_string v
   | V_tuple vs ->
     "(" ^ String.concat ", " (List.map to_string vs) ^ ")"
+  | V_record (name, fields) ->
+    let parts = List.map (fun (f, v) -> f ^ " = " ^ to_string v) fields in
+    name ^ " { " ^ String.concat ", " parts ^ " }"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -76,6 +80,19 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
       | _ -> None
     in
     combine [] ps vs
+  | Ast.P_record (name, fpats), V_record (vname, fields) when name = vname ->
+    let rec combine acc fpats =
+      match fpats with
+      | [] -> Some acc
+      | (fname, fpat) :: rest ->
+        (match List.assoc_opt fname fields with
+         | None -> None
+         | Some v ->
+           (match match_pattern fpat v with
+            | None -> None
+            | Some bs -> combine (acc @ bs) rest))
+    in
+    combine [] fpats
   | _ -> None
 
 let rec eval_in (env : env) (e : Ast.expr) =
@@ -190,5 +207,14 @@ let rec eval_in (env : env) (e : Ast.expr) =
     try_arms arms
   | Ast.Tuple es ->
     V_tuple (List.map (eval_in env) es)
+  | Ast.Record_lit (name, fields) ->
+    V_record (name, List.map (fun (f, e) -> (f, eval_in env e)) fields)
+  | Ast.Field_get (inner, fname) ->
+    (match eval_in env inner with
+     | V_record (_, fields) ->
+       (try List.assoc fname fields
+        with Not_found ->
+          type_error e.Ast.loc ("record has no field " ^ fname))
+     | _ -> type_error e.Ast.loc "field access on non-record value")
 
 let eval expr = eval_in initial_env expr
