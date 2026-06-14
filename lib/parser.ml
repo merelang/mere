@@ -492,32 +492,56 @@ let parse_program tokens =
       (* `{}` is the empty block — evaluates to unit. *)
       mk pos Ast.Unit_lit, rest
     | (pos, T_lbrace) :: rest ->
-      (* Block expression: `{ e1; e2; ...; eN }`
-         desugars to `let _ = e1 in let _ = e2 in ... eN`. *)
-      let rec parse_exprs acc toks =
-        let e, toks = expr toks in
-        let acc = e :: acc in
-        match toks with
-        | (_, T_semi) :: (_, T_rbrace) :: rest ->
-          List.rev acc, rest
-        | (_, T_semi) :: rest ->
-          parse_exprs acc rest
-        | (_, T_rbrace) :: rest ->
-          List.rev acc, rest
-        | _ ->
-          raise (Parse_error (pos_of toks, "expected ';' or '}' in block"))
-      in
-      let exprs, rest = parse_exprs [] rest in
-      let result =
-        match List.rev exprs with
-        | [] -> mk pos Ast.Unit_lit
-        | last :: prev_rev ->
-          let wild = mkp pos Ast.P_wild in
-          List.fold_left (fun acc e ->
-            mk pos (Ast.Let (wild, e, acc))
-          ) last prev_rev
-      in
-      result, rest
+      (* Two forms share `{ expr ...`:
+         - Block: `{ e1; e2; ...; eN }`  -> Let(P_wild) chain
+         - Record update: `{ base | f1 = e1, f2 = e2 }`  -> Record_update *)
+      let first, toks = expr rest in
+      (match toks with
+       | (_, T_pipe) :: rest ->
+         (* Record update *)
+         let rec parse_updates acc toks =
+           match toks with
+           | (_, T_ident fname) :: (_, T_eq) :: rest ->
+             let e, rest = expr rest in
+             let acc = (fname, e) :: acc in
+             (match rest with
+              | (_, T_comma) :: rest -> parse_updates acc rest
+              | (_, T_rbrace) :: rest -> List.rev acc, rest
+              | _ ->
+                raise (Parse_error (pos_of rest,
+                  "expected ',' or '}' in record update")))
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected 'field = expr' in record update"))
+         in
+         let updates, rest = parse_updates [] rest in
+         mk pos (Ast.Record_update (first, updates)), rest
+       | _ ->
+         (* Block expression *)
+         let rec parse_rest acc toks =
+           match toks with
+           | (_, T_semi) :: (_, T_rbrace) :: rest ->
+             List.rev acc, rest
+           | (_, T_semi) :: rest ->
+             let e, toks = expr rest in
+             parse_rest (e :: acc) toks
+           | (_, T_rbrace) :: rest ->
+             List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected ';' or '}' in block"))
+         in
+         let exprs, rest = parse_rest [first] toks in
+         let result =
+           match List.rev exprs with
+           | [] -> mk pos Ast.Unit_lit
+           | last :: prev_rev ->
+             let wild = mkp pos Ast.P_wild in
+             List.fold_left (fun acc e ->
+               mk pos (Ast.Let (wild, e, acc))
+             ) last prev_rev
+         in
+         result, rest)
     | (pos, T_lbracket) :: (_, T_rbracket) :: rest ->
       (* `[]` desugars to Nil *)
       mk pos (Ast.Constr ("Nil", None)), rest

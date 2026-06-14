@@ -364,6 +364,27 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
      | _ ->
        raise (Type_error (e.loc,
          "field access on non-record value (cannot infer record type)")))
+  | Ast.Record_update (base, updates) ->
+    let t_base = infer env base in
+    (match Ast.walk t_base with
+     | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
+       let info = Hashtbl.find records rec_name in
+       let (expected_fields, result_ty) = instantiate_record rec_name info in
+       unify base.loc t_base result_ty;
+       List.iter (fun (fname, fexpr) ->
+         let exp_ty =
+           try List.assoc fname expected_fields
+           with Not_found ->
+             raise (Type_error (e.loc,
+               Printf.sprintf "record %s has no field %s" rec_name fname))
+         in
+         let t = infer env fexpr in
+         unify fexpr.loc t exp_ty
+       ) updates;
+       result_ty
+     | _ ->
+       raise (Type_error (e.loc,
+         "record update base must be a record value")))
 
 and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list =
   match p.pnode with
