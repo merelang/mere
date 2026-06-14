@@ -578,5 +578,29 @@ let () =
       "type P = { x: int }; let p = P { x = 1 } in { p | x = 5 }"))
     "(let p = P { x = 1 } in { p | x = 5 })";
 
+  (* --- stdlib additions: not, str_len, int_of_str, print_bool --- *)
+  check "not true" (Pipeline.process "not true") "false";
+  check "not false" (Pipeline.process "not false") "true";
+  check "not type" (Pipeline.type_of "not") "(bool -> bool)";
+  check "str_len basic" (Pipeline.process "str_len \"hello\"") "5";
+  check "str_len empty" (Pipeline.process "str_len \"\"") "0";
+  check "str_len type" (Pipeline.type_of "str_len") "(str -> int)";
+  check "int_of_str basic" (Pipeline.process "int_of_str \"42\"") "42";
+  check "int_of_str trim" (Pipeline.process "int_of_str \"  100  \"") "100";
+  check "int_of_str chain"
+    (Pipeline.process "int_of_str \"7\" + int_of_str \"3\"") "10";
+  check "int_of_str type" (Pipeline.type_of "int_of_str") "(str -> int)";
+  check_raises "int_of_str invalid"
+    (fun () -> Pipeline.process "int_of_str \"abc\"");
+  check "print_bool type" (Pipeline.type_of "print_bool") "(bool -> unit)";
+  check "combo: str_len + int_of_str"
+    (Pipeline.process
+      "let s = \"123\" in
+       let n = int_of_str s in
+       n + str_len s") "126";
+  check "not in if-condition"
+    (Pipeline.process
+      "let f = fn (b: bool) -> if not b then 10 else 20 in f false") "10";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

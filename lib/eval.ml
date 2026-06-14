@@ -52,10 +52,43 @@ let builtin_str_of_int =
     | V_int n -> V_str (string_of_int n)
     | _ -> failwith "str_of_int: expected int")
 
+let builtin_print_bool =
+  V_builtin ("print_bool", fun v ->
+    (match v with
+     | V_bool b -> print_endline (if b then "true" else "false")
+     | _ -> failwith "print_bool: expected bool");
+    V_unit)
+
+let builtin_not =
+  V_builtin ("not", fun v ->
+    match v with
+    | V_bool b -> V_bool (not b)
+    | _ -> failwith "not: expected bool")
+
+let builtin_str_len =
+  V_builtin ("str_len", fun v ->
+    match v with
+    | V_str s -> V_int (String.length s)
+    | _ -> failwith "str_len: expected str")
+
+let builtin_int_of_str =
+  V_builtin ("int_of_str", fun v ->
+    match v with
+    | V_str s ->
+      (try V_int (int_of_string (String.trim s))
+       with Failure _ ->
+         raise (Eval_error (Loc.dummy,
+           Printf.sprintf "int_of_str: %S is not a valid int" s)))
+    | _ -> failwith "int_of_str: expected str")
+
 let initial_env : env =
   [ ("print", ref builtin_print);
     ("print_int", ref builtin_print_int);
+    ("print_bool", ref builtin_print_bool);
     ("str_of_int", ref builtin_str_of_int);
+    ("not", ref builtin_not);
+    ("str_len", ref builtin_str_len);
+    ("int_of_str", ref builtin_int_of_str);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
