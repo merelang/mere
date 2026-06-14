@@ -267,5 +267,21 @@ let () =
     (fun () -> Pipeline.process
       "signature ctx = (db); let f = fn (...ctx) -> db in f 1");
 
+  (* --- pipe operator |> --- *)
+  check "pipe single"
+    (Pipeline.process "5 |> (fn x -> x + 1)") "6";
+  check "pipe chain"
+    (Pipeline.process "5 |> (fn x -> x + 1) |> (fn x -> x * 2)") "12";
+  check "pipe with let"
+    (Pipeline.process "let inc = fn x -> x + 1 in let dbl = fn x -> x * 2 in 10 |> inc |> dbl") "22";
+  check "pipe with multi-arg curry"
+    (Pipeline.process "let add = fn (a: int, b: int) -> a + b in 5 |> add 3") "8";
+  check "pipe with stdlib"
+    (Pipeline.process "42 |> str_of_int") "\"42\"";
+  check "pipe is left-associative"
+    (Pipeline.process "1 |> (fn x -> x + 10) |> (fn x -> x * 100)") "1100";
+  check "pipe below arithmetic"
+    (Pipeline.process "1 + 2 |> (fn x -> x * 10)") "30";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
