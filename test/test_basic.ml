@@ -536,5 +536,47 @@ let () =
        | [h, ...t] -> h
        | [] -> 0") "3";
 
+  (* --- record update `{ base | f1 = e1, ... }` --- *)
+  check "record update single field"
+    (Pipeline.process
+      "type P = { x: int, y: int };
+       let p = P { x = 1, y = 2 } in { p | x = 10 }")
+    "P { x = 10, y = 2 }";
+  check "record update multi field"
+    (Pipeline.process
+      "type P = { x: int, y: int, z: int };
+       let p = P { x = 1, y = 2, z = 3 } in { p | x = 100, z = 300 }")
+    "P { x = 100, y = 2, z = 300 }";
+  check "record update preserves original"
+    (Pipeline.process
+      "type P = { x: int };
+       let p = P { x = 5 } in
+       let p2 = { p | x = 99 } in p.x + p2.x") "104";
+  check "record update with computed value"
+    (Pipeline.process
+      "type P = { x: int, y: int };
+       let p = P { x = 10, y = 20 } in { p | x = p.x + p.y }")
+    "P { x = 30, y = 20 }";
+  check "record update type preserves"
+    (Pipeline.type_of
+      "type P = { x: int };
+       fn (p: P) -> { p | x = 0 }") "(P -> P)";
+  check "record update polymorphic"
+    (Pipeline.process
+      "type 'a Box = { value: 'a };
+       let b = Box { value = 42 } in ({ b | value = 100 }).value") "100";
+  check_raises "record update unknown field"
+    (fun () -> Pipeline.process
+      "type P = { x: int };
+       let p = P { x = 1 } in { p | y = 2 }");
+  check_raises "record update wrong type"
+    (fun () -> Pipeline.process
+      "type P = { x: int };
+       let p = P { x = 1 } in { p | x = \"hi\" }");
+  check "pp record update"
+    (Ast.pp (Pipeline.parse_only
+      "type P = { x: int }; let p = P { x = 1 } in { p | x = 5 }"))
+    "(let p = P { x = 1 } in { p | x = 5 })";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

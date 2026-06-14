@@ -44,6 +44,8 @@ and expr_node =
     (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
   | Field_get of expr * string
     (* p.field *)
+  | Record_update of expr * (string * expr) list
+    (* { base | f1 = e1, f2 = e2 }: new record with selected fields updated *)
 
 and binop = Add | Sub | Mul | Div | Mod | Concat
 and cmpop = Eq | Ne | Lt | Le | Gt | Ge
@@ -209,6 +211,9 @@ let rec pp e =
     name ^ " { " ^ String.concat ", " parts ^ " }"
   | Field_get (e, f) ->
     pp e ^ "." ^ f
+  | Record_update (base, updates) ->
+    let parts = List.map (fun (f, e) -> f ^ " = " ^ pp e) updates in
+    "{ " ^ pp base ^ " | " ^ String.concat ", " parts ^ " }"
 
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->

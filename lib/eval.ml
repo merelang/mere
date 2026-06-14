@@ -229,5 +229,16 @@ let rec eval_in (env : env) (e : Ast.expr) =
         with Not_found ->
           type_error e.Ast.loc ("record has no field " ^ fname))
      | _ -> type_error e.Ast.loc "field access on non-record value")
+  | Ast.Record_update (base, updates) ->
+    (match eval_in env base with
+     | V_record (name, base_fields) ->
+       (* Replace matching fields, preserve order of declared fields. *)
+       let new_fields = List.map (fun (fname, fval) ->
+         match List.assoc_opt fname updates with
+         | Some upd_expr -> (fname, eval_in env upd_expr)
+         | None -> (fname, fval)
+       ) base_fields in
+       V_record (name, new_fields)
+     | _ -> type_error e.Ast.loc "record update on non-record value")
 
 let eval expr = eval_in initial_env expr
