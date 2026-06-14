@@ -129,5 +129,31 @@ let () =
       "type 'a list = Nil | Cons of 'a * 'a list;
        Cons (1, Cons (\"hi\", Nil))");
 
+  (* --- with expression (Q-007 first slice) --- *)
+  check "with basic"
+    (Pipeline.process "with x = 5 in x + 1") "6";
+  check "with multi-binding"
+    (Pipeline.process "with x = 5, y = 10, z = 100 in x + y + z") "115";
+  check "with shadowing"
+    (Pipeline.process "with x = 1 in (with x = 2 in x) + x") "3";
+  check "with + fn"
+    (Pipeline.process "with f = fn x -> x + 1 in f 10") "11";
+  check "with let-poly: id at bool and int"
+    (Pipeline.process "with id = fn x -> x in if id true then id 1 else id 2") "1";
+  check "with type: polymorphic id"
+    (Pipeline.type_of "with id = fn x -> x in id") "('a -> 'a)";
+  check "with nested with let"
+    (Pipeline.process
+      "with logger = 100 in
+       let log = fn n -> n + logger in
+       with greeted = log 5 in greeted") "105";
+  check "pp with"
+    (Ast.pp (Pipeline.parse_only "with x = 5 in x + 1"))
+    "(with x = 5 in (x + 1))";
+  check_raises "with no in"
+    (fun () -> Pipeline.process "with x = 5");
+  check_raises "with no ="
+    (fun () -> Pipeline.process "with x 5 in x");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

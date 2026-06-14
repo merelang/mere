@@ -29,6 +29,7 @@ and expr_node =
   | Neg of expr
   | Let of string * expr * expr
   | Let_rec of string * expr * expr
+  | With of string * expr * expr   (* with name = value in body — scope-bound resource (Q-007) *)
   | If of expr * expr * expr
   | Fun of string * expr
   | App of expr * expr
@@ -152,6 +153,8 @@ let rec pp e =
     "(let " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | Let_rec (name, value, body) ->
     "(let rec " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
+  | With (name, value, body) ->
+    "(with " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | If (cond, then_, else_) ->
     "(if " ^ pp cond ^ " then " ^ pp then_ ^ " else " ^ pp else_ ^ ")"
   | Fun (param, body) ->

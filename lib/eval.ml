@@ -108,6 +108,11 @@ let rec eval_in (env : env) (e : Ast.expr) =
     let v = eval_in env' value in
     placeholder := v;
     eval_in env' body
+  | Ast.With (name, value, body) ->
+    (* v0: identical to Let in semantics. Q-007 narrowing says scope-bound
+       resource cleanup will be added later when we have Drop/destructors. *)
+    let v = eval_in env value in
+    eval_in ((name, ref v) :: env) body
   | Ast.If (cond, then_, else_) ->
     (match eval_in env cond with
      | V_bool true -> eval_in env then_
