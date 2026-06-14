@@ -24,15 +24,23 @@ type token =
   | T_arrow
   | T_eq
   | T_eq_eq
+  | T_bang_eq          (* != *)
   | T_lt
+  | T_lt_eq            (* <= *)
+  | T_gt               (* > *)
+  | T_gt_eq            (* >= *)
   | T_colon
   | T_semi
   | T_comma
   | T_pipe
+  | T_pipe_pipe        (* || *)
+  | T_amp_amp          (* && *)
   | T_plus
   | T_plus_plus
   | T_minus
   | T_star
+  | T_slash            (* / *)
+  | T_percent          (* % *)
   | T_lparen
   | T_rparen
   | T_eof
@@ -66,6 +74,8 @@ let tokenize s =
         let j = skip (i + 2) in
         advance (j - i);
         aux j acc
+      | '/' -> advance 1; aux (i + 1) ((pos, T_slash) :: acc)
+      | '%' -> advance 1; aux (i + 1) ((pos, T_percent) :: acc)
       | '+' when i + 1 < len && s.[i + 1] = '+' ->
         advance 2; aux (i + 2) ((pos, T_plus_plus) :: acc)
       | '+' -> advance 1; aux (i + 1) ((pos, T_plus) :: acc)
@@ -78,11 +88,22 @@ let tokenize s =
       | '=' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_eq_eq) :: acc)
       | '=' -> advance 1; aux (i + 1) ((pos, T_eq) :: acc)
+      | '!' when i + 1 < len && s.[i + 1] = '=' ->
+        advance 2; aux (i + 2) ((pos, T_bang_eq) :: acc)
+      | '<' when i + 1 < len && s.[i + 1] = '=' ->
+        advance 2; aux (i + 2) ((pos, T_lt_eq) :: acc)
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
+      | '>' when i + 1 < len && s.[i + 1] = '=' ->
+        advance 2; aux (i + 2) ((pos, T_gt_eq) :: acc)
+      | '>' -> advance 1; aux (i + 1) ((pos, T_gt) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)
       | ',' -> advance 1; aux (i + 1) ((pos, T_comma) :: acc)
+      | '|' when i + 1 < len && s.[i + 1] = '|' ->
+        advance 2; aux (i + 2) ((pos, T_pipe_pipe) :: acc)
       | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
+      | '&' when i + 1 < len && s.[i + 1] = '&' ->
+        advance 2; aux (i + 2) ((pos, T_amp_amp) :: acc)
       | '\'' when i + 1 < len && is_alpha s.[i + 1] ->
         let rec read j =
           if j < len && is_ident_cont s.[j] then read (j + 1) else j
