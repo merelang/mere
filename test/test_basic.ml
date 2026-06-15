@@ -755,5 +755,22 @@ let () =
        let neg = fn (x: int) -> if x < 0 then x else fail \"non-neg\" in
        pos 5 + neg (- 3)") "2";
 
+  (* --- stdlib F5: int helpers (min, max, abs) --- *)
+  check "min smaller" (Pipeline.process "min 3 5") "3";
+  check "min larger" (Pipeline.process "min 5 3") "3";
+  check "min equal" (Pipeline.process "min 7 7") "7";
+  check "max smaller" (Pipeline.process "max 3 5") "5";
+  check "max larger" (Pipeline.process "max 5 3") "5";
+  check "abs positive" (Pipeline.process "abs 10") "10";
+  check "abs negative" (Pipeline.process "abs (- 7)") "7";
+  check "abs zero" (Pipeline.process "abs 0") "0";
+  check "min type" (Pipeline.type_of "min") "(int -> (int -> int))";
+  check "max type" (Pipeline.type_of "max") "(int -> (int -> int))";
+  check "abs type" (Pipeline.type_of "abs") "(int -> int)";
+  check "min/max chained"
+    (Pipeline.process "max (min 10 20) (min 5 50)") "10";
+  check "min curry partial"
+    (Pipeline.process "let clamp_lo = min 100 in clamp_lo 50") "50";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
