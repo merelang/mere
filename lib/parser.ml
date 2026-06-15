@@ -19,6 +19,33 @@ let signatures : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
    from `Some 5` (constructor application). *)
 let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
 
+(* Type alias registry: name -> (params, body).
+   Populated by `type Name = T;` (non-record, non-variant body).
+   Consumed at type-expression sites to substitute aliases inline
+   (parse-time expansion). *)
+let aliases : (string, string list * Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* Substitute alias params in body with args.  Used when a TyCon (name, args)
+   references a known alias. *)
+let substitute_params params args body =
+  let mapping = List.combine params args in
+  let rec subst t =
+    match t with
+    | Ast.TyParam p ->
+      (try List.assoc p mapping with Not_found -> t)
+    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) -> t
+    | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
+    | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
+    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+  in
+  subst body
+
+let expand_alias_or_tycon name args =
+  match Hashtbl.find_opt aliases name with
+  | Some (params, body) when List.length params = List.length args ->
+    substitute_params params args body
+  | _ -> Ast.TyCon (name, args)
+
 let is_primitive_type_name = function
   | "int" | "bool" | "str" | "unit" -> true
   | _ -> false
@@ -65,7 +92,7 @@ let parse_program tokens =
     let rec loop t toks =
       match toks with
       | (_, T_ident name) :: rest when not (is_primitive_type_name name) ->
-        loop (Ast.TyCon (name, [t])) rest
+        loop (expand_alias_or_tycon name [t]) rest
       | _ -> t, toks
     in
     loop base toks
@@ -75,7 +102,7 @@ let parse_program tokens =
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
-    | (_, T_ident name) :: rest -> Ast.TyCon (name, []), rest
+    | (_, T_ident name) :: rest -> expand_alias_or_tycon name [], rest
     | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
     | (_, T_lparen) :: rest ->
       let first, toks = ty rest in
@@ -94,7 +121,7 @@ let parse_program tokens =
          (match toks with
           | (_, T_rparen) :: (_, T_ident name) :: rest
             when not (is_primitive_type_name name) ->
-            Ast.TyCon (name, args), rest
+            expand_alias_or_tycon name args, rest
           | _ ->
             raise (Parse_error (pos_of toks,
               "expected ') NAME' for multi-arg type constructor")))
@@ -735,16 +762,40 @@ let parse_program tokens =
             parse_decls (Ast.Top_record (type_name, params, fields) :: decls) rest
           | _ ->
             raise (Parse_error (pos_of toks, "expected ';' after record declaration")))
-       | (_, T_ident type_name) :: (_, T_eq) :: rest ->
-         let variants, toks = parse_variants rest in
-         List.iter (fun (cname, payload) ->
-           Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
-         ) variants;
-         (match toks with
-          | (_, T_semi) :: rest ->
-            parse_decls (Ast.Top_type (type_name, params, variants) :: decls) rest
-          | _ ->
-            raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
+       | (_, T_ident type_name) :: (_, T_eq) :: body_rest ->
+         (* Disambiguate: variant body starts with capitalized ident or `|`;
+            anything else is a type alias. *)
+         (* Variant body markers:
+            - leading `|` (`type X = | A | B`)
+            - capitalized ident followed by `|` (`type X = A | B`)
+            - capitalized ident followed by `of` (`type X = A of int`)
+            Otherwise treat as type alias (capitalized refs to records or
+            multi-arg-applied types still resolve via aliases / TyCon). *)
+         let is_variant_body =
+           match body_rest with
+           | (_, T_pipe) :: _ -> true
+           | (_, T_ident n) :: (_, (T_pipe | T_of)) :: _ when starts_with_upper n -> true
+           | _ -> false
+         in
+         if is_variant_body then
+           let variants, toks = parse_variants body_rest in
+           List.iter (fun (cname, payload) ->
+             Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
+           ) variants;
+           (match toks with
+            | (_, T_semi) :: rest ->
+              parse_decls (Ast.Top_type (type_name, params, variants) :: decls) rest
+            | _ ->
+              raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
+         else
+           (* Type alias: `type Name = T;` *)
+           let body, toks = ty body_rest in
+           Hashtbl.replace aliases type_name (params, body);
+           (match toks with
+            | (_, T_semi) :: rest ->
+              parse_decls (Ast.Top_type_alias (type_name, params, body) :: decls) rest
+            | _ ->
+              raise (Parse_error (pos_of toks, "expected ';' after type alias")))
        | _ ->
          raise (Parse_error (pos_of rest, "expected 'ident = ...' after 'type'")))
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
