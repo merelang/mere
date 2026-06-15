@@ -138,6 +138,26 @@ let builtin_odd =
     | V_int n -> V_bool (n mod 2 <> 0)
     | _ -> failwith "odd: expected int")
 
+let builtin_pow =
+  V_builtin ("pow", fun base ->
+    match base with
+    | V_int b ->
+      V_builtin ("pow_partial", fun exp ->
+        match exp with
+        | V_int e when e < 0 ->
+          raise (Eval_error (Loc.dummy,
+            Printf.sprintf "pow: negative exponent %d" e))
+        | V_int e ->
+          (* iterative integer exponentiation *)
+          let rec loop acc base exp =
+            if exp = 0 then acc
+            else if exp mod 2 = 1 then loop (acc * base) (base * base) (exp / 2)
+            else loop acc (base * base) (exp / 2)
+          in
+          V_int (loop 1 b e)
+        | _ -> failwith "pow: 2nd arg expected int")
+    | _ -> failwith "pow: 1st arg expected int")
+
 let builtin_fail =
   V_builtin ("fail", fun v ->
     match v with
@@ -190,6 +210,7 @@ let initial_env : env =
     ("abs", ref builtin_abs);
     ("even", ref builtin_even);
     ("odd", ref builtin_odd);
+    ("pow", ref builtin_pow);
     ("assert", ref builtin_assert);
     ("show", ref builtin_show);
   ]

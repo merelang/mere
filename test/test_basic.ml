@@ -956,5 +956,18 @@ let () =
          | [h, ...t] -> if even h then 1 + count_evens t else count_evens t
        in count_evens [1, 2, 3, 4, 5, 6]") "3";
 
+  (* --- stdlib F9: pow (integer exponentiation) --- *)
+  check "pow 2^10" (Pipeline.process "pow 2 10") "1024";
+  check "pow 3^4" (Pipeline.process "pow 3 4") "81";
+  check "pow base^0" (Pipeline.process "pow 5 0") "1";
+  check "pow 0^5" (Pipeline.process "pow 0 5") "0";
+  check "pow 1^big" (Pipeline.process "pow 1 100") "1";
+  check "pow negative base" (Pipeline.process "pow (- 2) 3") "-8";
+  check "pow type" (Pipeline.type_of "pow") "(int -> (int -> int))";
+  check_raises "pow negative exponent"
+    (fun () -> Pipeline.process "pow 2 (- 1)");
+  check "pow combo"
+    (Pipeline.process "pow 2 16 + pow 3 3") "65563";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

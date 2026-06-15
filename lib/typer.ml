@@ -220,6 +220,7 @@ let initial_env : env =
     ("abs",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("even",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyBool)));
     ("odd",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyBool)));
+    ("pow",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     ("assert",
        mono (Ast.TyArrow (Ast.TyBool, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
     ("show",        show_scheme);
