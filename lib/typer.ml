@@ -205,6 +205,9 @@ let initial_env : env =
     ("char_at",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyStr))));
     ("fail",        fail_scheme);
+    ("min",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("max",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("abs",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

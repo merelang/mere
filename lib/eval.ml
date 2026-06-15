@@ -100,6 +100,32 @@ let builtin_str_contains =
         | _ -> failwith "str_contains: 2nd arg expected str")
     | _ -> failwith "str_contains: 1st arg expected str")
 
+let builtin_min =
+  V_builtin ("min", fun a ->
+    match a with
+    | V_int x ->
+      V_builtin ("min_partial", fun b ->
+        match b with
+        | V_int y -> V_int (if x < y then x else y)
+        | _ -> failwith "min: 2nd arg expected int")
+    | _ -> failwith "min: 1st arg expected int")
+
+let builtin_max =
+  V_builtin ("max", fun a ->
+    match a with
+    | V_int x ->
+      V_builtin ("max_partial", fun b ->
+        match b with
+        | V_int y -> V_int (if x > y then x else y)
+        | _ -> failwith "max: 2nd arg expected int")
+    | _ -> failwith "max: 1st arg expected int")
+
+let builtin_abs =
+  V_builtin ("abs", fun v ->
+    match v with
+    | V_int n -> V_int (if n < 0 then -n else n)
+    | _ -> failwith "abs: expected int")
+
 let builtin_fail =
   V_builtin ("fail", fun v ->
     match v with
@@ -132,6 +158,9 @@ let initial_env : env =
     ("str_contains", ref builtin_str_contains);
     ("char_at", ref builtin_char_at);
     ("fail", ref builtin_fail);
+    ("min", ref builtin_min);
+    ("max", ref builtin_max);
+    ("abs", ref builtin_abs);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
