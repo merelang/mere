@@ -141,7 +141,11 @@ let parse_program tokens =
           | (_, T_else) :: rest ->
             let else_branch, toks = expr rest in
             mk pos (Ast.If (cond, then_branch, else_branch)), toks
-          | _ -> raise (Parse_error (pos_of toks, "expected 'else'")))
+          | _ ->
+            (* Else-less form: `if cond then body` for unit-typed body.
+               Synthesize `else ()`. The typer will unify then with unit. *)
+            let else_branch = mk pos Ast.Unit_lit in
+            mk pos (Ast.If (cond, then_branch, else_branch)), toks)
        | _ -> raise (Parse_error (pos_of toks, "expected 'then'")))
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
