@@ -81,6 +81,18 @@ let builtin_int_of_str =
            Printf.sprintf "int_of_str: %S is not a valid int" s)))
     | _ -> failwith "int_of_str: expected str")
 
+let builtin_bool_of_str =
+  V_builtin ("bool_of_str", fun v ->
+    match v with
+    | V_str s ->
+      (match String.trim s with
+       | "true" -> V_bool true
+       | "false" -> V_bool false
+       | _ ->
+         raise (Eval_error (Loc.dummy,
+           Printf.sprintf "bool_of_str: %S is not 'true' or 'false'" s)))
+    | _ -> failwith "bool_of_str: expected str")
+
 let builtin_str_contains =
   V_builtin ("str_contains", fun haystack ->
     match haystack with
@@ -299,6 +311,7 @@ let initial_env : env =
     ("not", ref builtin_not);
     ("str_len", ref builtin_str_len);
     ("int_of_str", ref builtin_int_of_str);
+    ("bool_of_str", ref builtin_bool_of_str);
     ("str_contains", ref builtin_str_contains);
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);

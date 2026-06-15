@@ -1049,5 +1049,21 @@ let () =
   check "gcd identity"
     (Pipeline.process "gcd (gcd 24 36) 60") "12";
 
+  (* --- stdlib F14: bool_of_str --- *)
+  check "bool_of_str true"
+    (Pipeline.process "bool_of_str \"true\"") "true";
+  check "bool_of_str false"
+    (Pipeline.process "bool_of_str \"false\"") "false";
+  check "bool_of_str trimmed"
+    (Pipeline.process "bool_of_str \"  true  \"") "true";
+  check "bool_of_str type"
+    (Pipeline.type_of "bool_of_str") "(str -> bool)";
+  check_raises "bool_of_str invalid"
+    (fun () -> Pipeline.process "bool_of_str \"yes\"");
+  check_raises "bool_of_str empty"
+    (fun () -> Pipeline.process "bool_of_str \"\"");
+  check "bool_of_str chained"
+    (Pipeline.process "if bool_of_str \"true\" then 1 else 0") "1";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
