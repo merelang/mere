@@ -65,7 +65,7 @@ and pattern_node =
     (* nominal record pattern:  TypeName { f1 = pat, f2 = pat } *)
 
 type top_decl =
-  | Top_let of string * expr
+  | Top_let of pattern * expr   (* left-side can be P_var (typical) or P_wild/P_tuple etc. *)
   | Top_let_rec of (string * expr) list   (* multi for `let rec X = e1 and Y = e2 ;` *)
   | Top_type of string * string list * (string * ty option) list
     (* type name * type params (param names) * variants *)
@@ -219,8 +219,7 @@ let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
     let loc = body.loc in
     match decl with
-    | Top_let (name, value) ->
-      let pat = { ploc = loc; pnode = P_var name } in
+    | Top_let (pat, value) ->
       { loc; node = Let (pat, value, body) }
     | Top_let_rec bindings ->
       { loc; node = Let_rec (bindings, body) }

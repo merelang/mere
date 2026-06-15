@@ -662,5 +662,26 @@ let () =
       "type ('a, 'b) result = Ok of 'a | Err of 'b;
        (int) result");
 
+  (* --- top-level let pattern --- *)
+  check "top let wildcard"
+    (Pipeline.process "let _ = 99; 42") "42";
+  check "top let tuple"
+    (Pipeline.process "let (a, b) = (3, 4); a * b") "12";
+  check "top let 3-tuple"
+    (Pipeline.process "let (a, b, c) = (1, 10, 100); a + b + c") "111";
+  check "top let unit"
+    (Pipeline.process "let () = (); 1") "1";
+  check "top let nested tuple"
+    (Pipeline.process "let (a, (b, c)) = (1, (2, 3)); a + b + c") "6";
+  check "top let ident (legacy form)"
+    (Pipeline.process "let x = 5; let y = 10; x + y") "15";
+  check "top let preserves polymorphism"
+    (Pipeline.type_of
+      "let (f, g) = (fn x -> x, fn x -> x + 1); f") "('a -> 'a)";
+  check_raises "top let arity mismatch"
+    (fun () -> Pipeline.process "let (a, b, c) = (1, 2); a");
+  check_raises "top let type mismatch"
+    (fun () -> Pipeline.process "let (a, b) = (1, 2, 3); a");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

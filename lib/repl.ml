@@ -34,13 +34,26 @@ let format_exn = function
    Returns a list of (name, scheme) for binding decls, [] for type decls. *)
 let process_decl eval_env type_env decl =
   match decl with
-  | Ast.Top_let (name, value) ->
-    let t = Typer.infer !type_env value in
-    let sch = Typer.generalize !type_env t in
+  | Ast.Top_let (pat, value) ->
+    let outer_env = !type_env in
+    let t = Typer.infer outer_env value in
+    let bindings = Typer.check_pattern pat t in
     let v = Eval.eval_in !eval_env value in
-    eval_env := (name, ref v) :: !eval_env;
-    type_env := (name, sch) :: !type_env;
-    [(name, sch)]
+    let val_bindings =
+      match Eval.match_pattern pat v with
+      | Some bs -> bs
+      | None ->
+        raise (Eval.Eval_error (pat.Ast.ploc,
+          "top-level let pattern did not match"))
+    in
+    eval_env := List.fold_left (fun acc (n, v) -> (n, ref v) :: acc)
+                  !eval_env val_bindings;
+    let added = List.map (fun (n, ty) ->
+      let sch = Typer.generalize outer_env ty in
+      (n, sch)
+    ) bindings in
+    type_env := List.fold_left (fun acc (n, s) -> (n, s) :: acc) outer_env added;
+    added
   | Ast.Top_let_rec bindings ->
     let outer_env = !type_env in
     let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in

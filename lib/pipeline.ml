@@ -13,12 +13,21 @@ let parse_only s =
 let process_decls eval_env type_env decls =
   List.iter (fun decl ->
     match decl with
-    | Ast.Top_let (name, value) ->
-      let t = Typer.infer !type_env value in
-      let sch = Typer.generalize !type_env t in
+    | Ast.Top_let (pat, value) ->
+      let outer_env = !type_env in
+      let t = Typer.infer outer_env value in
+      let bindings = Typer.check_pattern pat t in
       let v = Eval.eval_in !eval_env value in
-      eval_env := (name, ref v) :: !eval_env;
-      type_env := (name, sch) :: !type_env
+      (match Eval.match_pattern pat v with
+       | None ->
+         raise (Eval.Eval_error (pat.Ast.ploc,
+           "top-level let pattern did not match"))
+       | Some val_bindings ->
+         eval_env := List.fold_left (fun acc (n, v) -> (n, ref v) :: acc)
+                       !eval_env val_bindings);
+      type_env := List.fold_left (fun acc (n, ty) ->
+        let sch = Typer.generalize outer_env ty in
+        (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
       let outer_env = !type_env in
       let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
@@ -66,10 +75,13 @@ let type_of s =
   (* Type-check decls but skip eval to avoid side effects. *)
   List.iter (fun decl ->
     match decl with
-    | Ast.Top_let (name, value) ->
-      let t = Typer.infer !type_env value in
-      let sch = Typer.generalize !type_env t in
-      type_env := (name, sch) :: !type_env;
+    | Ast.Top_let (pat, value) ->
+      let outer_env = !type_env in
+      let t = Typer.infer outer_env value in
+      let bindings = Typer.check_pattern pat t in
+      type_env := List.fold_left (fun acc (n, ty) ->
+        let sch = Typer.generalize outer_env ty in
+        (n, sch) :: acc) outer_env bindings;
       eval_env := !eval_env  (* unused *)
     | Ast.Top_let_rec bindings ->
       let outer_env = !type_env in
