@@ -73,6 +73,8 @@ type top_decl =
     (* signature name * param list (all type-annotated) *)
   | Top_record of string * string list * (string * ty) list
     (* record type name * type params * field list (name, type) *)
+  | Top_type_alias of string * string list * ty
+    (* alias name * type params * aliased type — parse-time substitution *)
 
 type program = {
   decls : top_decl list;
@@ -226,4 +228,5 @@ let desugar_program (prog : program) : expr =
     | Top_type _ -> body
     | Top_signature _ -> body
     | Top_record _ -> body
+    | Top_type_alias _ -> body
   ) prog.decls prog.main

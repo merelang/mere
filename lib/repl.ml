@@ -99,6 +99,14 @@ let process_decl eval_env type_env decl =
     in
     Printf.printf "record %s%s defined (%d fields)\n" param_str name (List.length fields);
     []
+  | Ast.Top_type_alias (name, params, body) ->
+    let param_str = match params with
+      | [] -> ""
+      | [p] -> "'" ^ p ^ " "
+      | _ -> "(" ^ String.concat ", " (List.map (fun p -> "'" ^ p) params) ^ ") "
+    in
+    Printf.printf "type alias %s%s = %s\n" param_str name (Ast.pp_ty body);
+    []
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
 let prepare_input s =

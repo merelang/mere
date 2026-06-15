@@ -57,6 +57,9 @@ let process_decls eval_env type_env decls =
       ()
     | Ast.Top_record (name, params, fields) ->
       Typer.register_record name params fields
+    | Ast.Top_type_alias _ ->
+      (* Parse-time expansion only; nothing to do at type/eval level. *)
+      ()
   ) decls
 
 let process s =
@@ -102,6 +105,7 @@ let type_of s =
     | Ast.Top_signature _ -> ()
     | Ast.Top_record (name, params, fields) ->
       Typer.register_record name params fields
+    | Ast.Top_type_alias _ -> ()
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 

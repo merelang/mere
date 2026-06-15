@@ -837,5 +837,44 @@ let () =
        | p when p == (1, 2) -> \"hit\"
        | _ -> \"miss\"") "\"hit\"";
 
+  (* --- type aliases `type Name = T;` --- *)
+  check "alias to int"
+    (Pipeline.process
+      "type UserId = int;
+       let mk = fn (x: UserId) -> x + 1 in mk 41") "42";
+  check "alias to tuple"
+    (Pipeline.process
+      "type Pair = int * int;
+       let f = fn (x: Pair) -> x in f (10, 20)") "(10, 20)";
+  check "alias type display unifies to base"
+    (Pipeline.type_of
+      "type UserId = int;
+       fn (x: UserId) -> x + 1") "(int -> int)";
+  check "alias chain"
+    (Pipeline.process
+      "type Box = int;
+       type DoubleBox = Box;
+       let f = fn (x: DoubleBox) -> x * 2 in f 21") "42";
+  check "alias to arrow"
+    (Pipeline.process
+      "type Cont = int -> int;
+       let twice = fn (f: Cont) -> fn x -> f (f x) in
+       twice (fn x -> x + 1) 10") "12";
+  check "polymorphic alias"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       type 'a Stack = 'a list;
+       let push = fn (x: int, s: int Stack) -> Cons (x, s) in
+       push 1 [2, 3]") "Cons (1, Cons (2, Cons (3, Nil)))";
+  check "alias as record field type"
+    (Pipeline.process
+      "type Id = int;
+       type User = { id: Id, name: str };
+       let u = User { id = 7, name = \"alice\" } in u.id") "7";
+  check "variant with single constructor still works"
+    (Pipeline.process
+      "type Wrap = Wrap of int;
+       match Wrap 10 with | Wrap n -> n + 5") "15";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
