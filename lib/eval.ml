@@ -192,6 +192,23 @@ let builtin_str_starts_with =
         | _ -> failwith "str_starts_with: 2nd arg expected str")
     | _ -> failwith "str_starts_with: 1st arg expected str")
 
+let builtin_str_repeat =
+  V_builtin ("str_repeat", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("str_repeat_partial", fun n_val ->
+        match n_val with
+        | V_int n when n < 0 ->
+          raise (Eval_error (Loc.dummy,
+            Printf.sprintf "str_repeat: negative count %d" n))
+        | V_int 0 -> V_str ""
+        | V_int n ->
+          let buf = Buffer.create (String.length s * n) in
+          for _ = 1 to n do Buffer.add_string buf s done;
+          V_str (Buffer.contents buf)
+        | _ -> failwith "str_repeat: 2nd arg expected int")
+    | _ -> failwith "str_repeat: 1st arg expected str")
+
 let builtin_str_ends_with =
   V_builtin ("str_ends_with", fun s_val ->
     match s_val with
@@ -231,6 +248,7 @@ let initial_env : env =
     ("str_contains", ref builtin_str_contains);
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);
+    ("str_repeat", ref builtin_str_repeat);
     ("char_at", ref builtin_char_at);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);

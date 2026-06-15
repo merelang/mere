@@ -995,5 +995,21 @@ let () =
   check "starts_with empty string"
     (Pipeline.process "str_starts_with \"\" \"a\"") "false";
 
+  (* --- stdlib F11: str_repeat --- *)
+  check "str_repeat basic"
+    (Pipeline.process "str_repeat \"ab\" 3") "\"ababab\"";
+  check "str_repeat dashes"
+    (Pipeline.process "str_repeat \"-\" 5") "\"-----\"";
+  check "str_repeat zero"
+    (Pipeline.process "str_repeat \"hi\" 0") "\"\"";
+  check "str_repeat empty string"
+    (Pipeline.process "str_repeat \"\" 5") "\"\"";
+  check "str_repeat type"
+    (Pipeline.type_of "str_repeat") "(str -> (int -> str))";
+  check_raises "str_repeat negative"
+    (fun () -> Pipeline.process "str_repeat \"x\" (- 1)");
+  check "str_repeat single char"
+    (Pipeline.process "str_repeat \"X\" 1") "\"X\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
