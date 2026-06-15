@@ -384,6 +384,11 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
     (match match_pattern inner v with
      | None -> None
      | Some bs -> Some ((name, v) :: bs))
+  | Ast.P_or (p1, p2), v ->
+    (* Try the left branch first; on failure try the right. *)
+    (match match_pattern p1 v with
+     | Some bs -> Some bs
+     | None -> match_pattern p2 v)
   | _ -> None
 
 (* Structural equality for `==` / `!=`.  Recurses through tuples, records,

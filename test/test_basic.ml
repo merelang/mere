@@ -1118,5 +1118,46 @@ let () =
       "match x with | (a, b) as p -> a"))
     "(match x with | ((a, b) as p) -> a)";
 
+  (* --- or-pattern `| pat1 | pat2 -> body` --- *)
+  check "or-pattern ints"
+    (Pipeline.process
+      "match 5 with
+       | 1 | 2 | 3 -> \"low\"
+       | 4 | 5 | 6 -> \"mid\"
+       | _ -> \"high\"") "\"mid\"";
+  check "or-pattern fallthrough"
+    (Pipeline.process
+      "match 100 with
+       | 1 | 2 | 3 -> \"low\"
+       | _ -> \"other\"") "\"other\"";
+  check "or-pattern constr"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with
+       | None | Some 0 -> 0
+       | Some n -> n") "5";
+  check "or-pattern with var binding (consistent)"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with
+       | Some 0 | Some 1 -> \"low\"
+       | Some n -> show n") "\"5\"";
+  check_raises "or-pattern with conflicting bindings"
+    (fun () -> Pipeline.process
+      "type T = A of int | B of str;
+       match A 1 with | A x | B x -> x");
+  check "or-pattern in let (single arm)"
+    (Pipeline.process
+      "match (1, 2) with | (a, b) | (b, a) -> a + b") "3";
+  check "or-pattern with guard"
+    (Pipeline.process
+      "match 3 with
+       | 1 | 2 | 3 when true -> \"matched\"
+       | _ -> \"other\"") "\"matched\"";
+  check "pp or-pattern"
+    (Ast.pp (Pipeline.parse_only
+      "match x with | 1 | 2 -> 10 | _ -> 0"))
+    "(match x with | (1 | 2) -> 10 | _ -> 0)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

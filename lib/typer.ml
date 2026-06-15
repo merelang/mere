@@ -491,6 +491,23 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
     (* Match inner pattern + bind the whole matched value to `name`. *)
     let inner_bindings = check_pattern inner expected in
     (name, expected) :: inner_bindings
+  | Ast.P_or (p1, p2) ->
+    (* Both branches must bind the same set of names with unified types. *)
+    let bs1 = check_pattern p1 expected in
+    let bs2 = check_pattern p2 expected in
+    let names1 = List.sort compare (List.map fst bs1) in
+    let names2 = List.sort compare (List.map fst bs2) in
+    if names1 <> names2 then
+      raise (Type_error (p.ploc,
+        Printf.sprintf
+          "or-pattern branches bind different names: [%s] vs [%s]"
+          (String.concat ", " names1)
+          (String.concat ", " names2)));
+    List.iter (fun (n, t1) ->
+      let t2 = List.assoc n bs2 in
+      unify p.ploc t1 t2
+    ) bs1;
+    bs1
 
 let type_check e =
   counter := 0;

@@ -349,6 +349,19 @@ let parse_program tokens =
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
     let rec loop acc toks =
       let p, toks = pattern toks in
+      (* Or-pattern continuation: `pat1 | pat2 | pat3 -> body`.
+         A `|` here (before `->`/`when`) groups patterns into a single arm.
+         Left-associative. *)
+      let p, toks =
+        let rec collect_or lhs toks =
+          match toks with
+          | (pos, T_pipe) :: rest ->
+            let rhs, toks = pattern rest in
+            collect_or (mkp pos (Ast.P_or (lhs, rhs))) toks
+          | _ -> lhs, toks
+        in
+        collect_or p toks
+      in
       let guard, toks =
         match toks with
         | (_, T_when) :: rest ->

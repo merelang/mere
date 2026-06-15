@@ -65,6 +65,9 @@ and pattern_node =
     (* nominal record pattern:  TypeName { f1 = pat, f2 = pat } *)
   | P_as of pattern * string
     (* `pat as name` — match the inner pattern and bind the whole value to `name`. *)
+  | P_or of pattern * pattern
+    (* `pat1 | pat2` — match either pattern (only valid in match arms).
+       Both branches must bind the same set of names with compatible types. *)
 
 type top_decl =
   | Top_let of pattern * expr   (* left-side can be P_var (typical) or P_wild/P_tuple etc. *)
@@ -164,6 +167,8 @@ let rec pp_pattern p =
     name ^ " { " ^ String.concat ", " parts ^ " }"
   | P_as (inner, name) ->
     "(" ^ pp_pattern inner ^ " as " ^ name ^ ")"
+  | P_or (p1, p2) ->
+    "(" ^ pp_pattern p1 ^ " | " ^ pp_pattern p2 ^ ")"
 
 let rec pp e =
   match e.node with
