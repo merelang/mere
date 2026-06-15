@@ -179,6 +179,32 @@ let builtin_assert =
         | _ -> failwith "assert: 2nd arg expected str")
     | _ -> failwith "assert: 1st arg expected bool")
 
+let builtin_str_starts_with =
+  V_builtin ("str_starts_with", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("str_starts_with_partial", fun p_val ->
+        match p_val with
+        | V_str p ->
+          let s_len = String.length s in
+          let p_len = String.length p in
+          V_bool (p_len <= s_len && String.sub s 0 p_len = p)
+        | _ -> failwith "str_starts_with: 2nd arg expected str")
+    | _ -> failwith "str_starts_with: 1st arg expected str")
+
+let builtin_str_ends_with =
+  V_builtin ("str_ends_with", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("str_ends_with_partial", fun p_val ->
+        match p_val with
+        | V_str p ->
+          let s_len = String.length s in
+          let p_len = String.length p in
+          V_bool (p_len <= s_len && String.sub s (s_len - p_len) p_len = p)
+        | _ -> failwith "str_ends_with: 2nd arg expected str")
+    | _ -> failwith "str_ends_with: 1st arg expected str")
+
 let builtin_char_at =
   V_builtin ("char_at", fun s_val ->
     match s_val with
@@ -203,6 +229,8 @@ let initial_env : env =
     ("str_len", ref builtin_str_len);
     ("int_of_str", ref builtin_int_of_str);
     ("str_contains", ref builtin_str_contains);
+    ("str_starts_with", ref builtin_str_starts_with);
+    ("str_ends_with", ref builtin_str_ends_with);
     ("char_at", ref builtin_char_at);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);

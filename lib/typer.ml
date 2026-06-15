@@ -212,6 +212,10 @@ let initial_env : env =
     ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
     ("str_contains",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
+    ("str_starts_with",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
+    ("str_ends_with",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
     ("char_at",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyStr))));
     ("fail",        fail_scheme);

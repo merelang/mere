@@ -969,5 +969,31 @@ let () =
   check "pow combo"
     (Pipeline.process "pow 2 16 + pow 3 3") "65563";
 
+  (* --- stdlib F10: str_starts_with / str_ends_with --- *)
+  check "starts_with hit"
+    (Pipeline.process "str_starts_with \"hello world\" \"hello\"") "true";
+  check "starts_with miss"
+    (Pipeline.process "str_starts_with \"hello\" \"world\"") "false";
+  check "starts_with empty prefix"
+    (Pipeline.process "str_starts_with \"abc\" \"\"") "true";
+  check "starts_with full match"
+    (Pipeline.process "str_starts_with \"abc\" \"abc\"") "true";
+  check "starts_with longer prefix"
+    (Pipeline.process "str_starts_with \"abc\" \"abcd\"") "false";
+  check "ends_with hit"
+    (Pipeline.process "str_ends_with \"hello world\" \"world\"") "true";
+  check "ends_with miss"
+    (Pipeline.process "str_ends_with \"hello\" \"world\"") "false";
+  check "ends_with empty suffix"
+    (Pipeline.process "str_ends_with \"abc\" \"\"") "true";
+  check "ends_with full match"
+    (Pipeline.process "str_ends_with \"abc\" \"abc\"") "true";
+  check "starts_with type"
+    (Pipeline.type_of "str_starts_with") "(str -> (str -> bool))";
+  check "ends_with type"
+    (Pipeline.type_of "str_ends_with") "(str -> (str -> bool))";
+  check "starts_with empty string"
+    (Pipeline.process "str_starts_with \"\" \"a\"") "false";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
