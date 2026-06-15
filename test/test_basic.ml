@@ -772,5 +772,22 @@ let () =
   check "min curry partial"
     (Pipeline.process "let clamp_lo = min 100 in clamp_lo 50") "50";
 
+  (* --- stdlib F6: assert --- *)
+  check "assert true returns unit"
+    (Pipeline.process "assert true \"ok\"") "()";
+  check_raises "assert false raises"
+    (fun () -> Pipeline.process "assert false \"boom\"");
+  check "assert type"
+    (Pipeline.type_of "assert") "(bool -> (str -> unit))";
+  check "assert in block"
+    (Pipeline.process
+      "{ assert (1 + 1 == 2) \"math broken\"; \"all good\" }") "\"all good\"";
+  check_raises "assert chained false raises"
+    (fun () -> Pipeline.process
+      "{ assert (10 > 0) \"a\"; assert (1 == 2) \"b\"; \"x\" }");
+  check "assert curry partial"
+    (Pipeline.process
+      "let must = assert true in must \"unused\"") "()";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

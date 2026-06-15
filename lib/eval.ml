@@ -132,6 +132,18 @@ let builtin_fail =
     | V_str msg -> raise (Eval_error (Loc.dummy, "fail: " ^ msg))
     | _ -> failwith "fail: expected str")
 
+let builtin_assert =
+  V_builtin ("assert", fun cond ->
+    match cond with
+    | V_bool b ->
+      V_builtin ("assert_partial", fun msg ->
+        match msg with
+        | V_str m ->
+          if b then V_unit
+          else raise (Eval_error (Loc.dummy, "assertion failed: " ^ m))
+        | _ -> failwith "assert: 2nd arg expected str")
+    | _ -> failwith "assert: 1st arg expected bool")
+
 let builtin_char_at =
   V_builtin ("char_at", fun s_val ->
     match s_val with
@@ -161,6 +173,7 @@ let initial_env : env =
     ("min", ref builtin_min);
     ("max", ref builtin_max);
     ("abs", ref builtin_abs);
+    ("assert", ref builtin_assert);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
