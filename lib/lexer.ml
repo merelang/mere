@@ -39,6 +39,8 @@ type token =
   | T_pipe
   | T_pipe_pipe        (* || *)
   | T_pipe_gt          (* |>  pipe operator *)
+  | T_lt_lt            (* <<  function composition (compose-right-to-left) *)
+  | T_gt_gt            (* >>  function composition (compose-left-to-right) *)
   | T_amp_amp          (* && *)
   | T_plus
   | T_plus_plus
@@ -109,9 +111,13 @@ let tokenize s =
         advance 2; aux (i + 2) ((pos, T_bang_eq) :: acc)
       | '<' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_lt_eq) :: acc)
+      | '<' when i + 1 < len && s.[i + 1] = '<' ->
+        advance 2; aux (i + 2) ((pos, T_lt_lt) :: acc)
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | '>' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_gt_eq) :: acc)
+      | '>' when i + 1 < len && s.[i + 1] = '>' ->
+        advance 2; aux (i + 2) ((pos, T_gt_gt) :: acc)
       | '>' -> advance 1; aux (i + 1) ((pos, T_gt) :: acc)
       | ':' -> advance 1; aux (i + 1) ((pos, T_colon) :: acc)
       | ';' -> advance 1; aux (i + 1) ((pos, T_semi) :: acc)

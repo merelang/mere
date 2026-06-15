@@ -876,5 +876,41 @@ let () =
       "type Wrap = Wrap of int;
        match Wrap 10 with | Wrap n -> n + 5") "15";
 
+  (* --- function composition `<<` and `>>` --- *)
+  check "compose << basic"
+    (Pipeline.process
+      "let inc = fn x -> x + 1 in
+       let dbl = fn x -> x * 2 in
+       (inc << dbl) 5") "11";
+  check "compose >> basic"
+    (Pipeline.process
+      "let inc = fn x -> x + 1 in
+       let dbl = fn x -> x * 2 in
+       (inc >> dbl) 5") "12";
+  check "compose << right-assoc"
+    (Pipeline.process
+      "let inc = fn x -> x + 1 in
+       let dbl = fn x -> x * 2 in
+       let neg = fn x -> 0 - x in
+       (inc << dbl << neg) 3") "-5";
+  check "compose >> right-assoc"
+    (Pipeline.process
+      "let a = fn x -> x + 1 in
+       let b = fn x -> x * 2 in
+       let c = fn x -> x - 3 in
+       (a >> b >> c) 5") "9";
+  check "compose with pipe"
+    (Pipeline.process
+      "let inc = fn x -> x + 1 in
+       let dbl = fn x -> x * 2 in
+       5 |> (inc << dbl)") "11";
+  check "compose type"
+    (Pipeline.type_of
+      "fn (f: int -> int) -> fn (g: int -> int) -> f << g")
+    "((int -> int) -> ((int -> int) -> (int -> int)))";
+  check "compose with stdlib"
+    (Pipeline.process
+      "let show_inc = str_of_int << (fn x -> x + 1) in show_inc 41") "\"42\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
