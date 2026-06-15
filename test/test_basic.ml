@@ -602,5 +602,65 @@ let () =
     (Pipeline.process
       "let f = fn (b: bool) -> if not b then 10 else 20 in f false") "10";
 
+  (* --- multi-arg type parameters: `('a, 'b) result` etc. --- *)
+  check "result Ok"
+    (Pipeline.process
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       Ok 5") "Ok 5";
+  check "result Err"
+    (Pipeline.process
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       Err \"boom\"") "Err \"boom\"";
+  check "result type of Ok"
+    (Pipeline.type_of
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       Ok 5") "(int, 'a) result";
+  check "result type of Err"
+    (Pipeline.type_of
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       Err \"oops\"") "('a, str) result";
+  check "safe_div with result"
+    (Pipeline.process
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       let safe_div = fn (a: int, b: int) ->
+         if b == 0 then Err \"div by zero\"
+         else Ok (a / b)
+       in match safe_div 20 4 with
+       | Ok v -> v
+       | Err _ -> -1") "5";
+  check "safe_div err case"
+    (Pipeline.process
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       let safe_div = fn (a: int, b: int) ->
+         if b == 0 then Err \"div by zero\"
+         else Ok (a / b)
+       in match safe_div 10 0 with
+       | Ok v -> v
+       | Err _ -> -1") "-1";
+  check "Either-like 3-arg type"
+    (Pipeline.process
+      "type ('a, 'b, 'c) triple = A of 'a | B of 'b | C of 'c;
+       B 42") "B 42";
+  check "3-arg type display"
+    (Pipeline.type_of
+      "type ('a, 'b, 'c) triple = A of 'a | B of 'b | C of 'c;
+       B 42") "('a, int, 'b) triple";
+  check "single param still works"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       Some 5") "Some 5";
+  check "multi-arg type in field"
+    (Pipeline.process
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       type Wrapper = { value: (int, str) result };
+       let w = Wrapper { value = Ok 42 } in
+       match w.value with
+       | Ok n -> n
+       | Err _ -> 0") "42";
+  check_raises "type param count mismatch"
+    (fun () -> Pipeline.process
+      "type ('a, 'b) result = Ok of 'a | Err of 'b;
+       (int) result");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
