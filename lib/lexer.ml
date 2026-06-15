@@ -23,6 +23,7 @@ type token =
   | T_with
   | T_when            (* when — match guard *)
   | T_of
+  | T_as              (* as — as-pattern: `| pat as name -> body` *)
   | T_underscore
   | T_ellipsis        (* ... — for spreading signature params *)
   | T_arrow
@@ -200,6 +201,7 @@ let tokenize s =
           | "with" -> T_with
           | "when" -> T_when
           | "of" -> T_of
+          | "as" -> T_as
           | "_" -> T_underscore
           | _ -> T_ident word
         in

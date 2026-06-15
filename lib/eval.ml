@@ -379,6 +379,11 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
             | Some bs -> combine (acc @ bs) rest))
     in
     combine [] fpats
+  | Ast.P_as (inner, name), v ->
+    (* Match inner pattern + bind the whole value to `name`. *)
+    (match match_pattern inner v with
+     | None -> None
+     | Some bs -> Some ((name, v) :: bs))
   | _ -> None
 
 (* Structural equality for `==` / `!=`.  Recurses through tuples, records,
