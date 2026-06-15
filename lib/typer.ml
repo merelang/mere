@@ -213,6 +213,8 @@ let initial_env : env =
     ("bool_of_str", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyBool)));
     ("str_contains",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
+    ("str_compare",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
     ("str_starts_with",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
     ("str_ends_with",

@@ -93,6 +93,18 @@ let builtin_bool_of_str =
            Printf.sprintf "bool_of_str: %S is not 'true' or 'false'" s)))
     | _ -> failwith "bool_of_str: expected str")
 
+let builtin_str_compare =
+  V_builtin ("str_compare", fun a ->
+    match a with
+    | V_str x ->
+      V_builtin ("str_compare_partial", fun b ->
+        match b with
+        | V_str y ->
+          let c = String.compare x y in
+          V_int (if c < 0 then -1 else if c > 0 then 1 else 0)
+        | _ -> failwith "str_compare: 2nd arg expected str")
+    | _ -> failwith "str_compare: 1st arg expected str")
+
 let builtin_str_contains =
   V_builtin ("str_contains", fun haystack ->
     match haystack with
@@ -313,6 +325,7 @@ let initial_env : env =
     ("int_of_str", ref builtin_int_of_str);
     ("bool_of_str", ref builtin_bool_of_str);
     ("str_contains", ref builtin_str_contains);
+    ("str_compare", ref builtin_str_compare);
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);
     ("str_repeat", ref builtin_str_repeat);

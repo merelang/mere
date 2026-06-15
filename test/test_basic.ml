@@ -1065,5 +1065,22 @@ let () =
   check "bool_of_str chained"
     (Pipeline.process "if bool_of_str \"true\" then 1 else 0") "1";
 
+  (* --- stdlib F15: str_compare (lexicographic, -1/0/1) --- *)
+  check "str_compare equal"
+    (Pipeline.process "str_compare \"abc\" \"abc\"") "0";
+  check "str_compare less"
+    (Pipeline.process "str_compare \"abc\" \"abd\"") "-1";
+  check "str_compare greater"
+    (Pipeline.process "str_compare \"abd\" \"abc\"") "1";
+  check "str_compare empty vs nonempty"
+    (Pipeline.process "str_compare \"\" \"a\"") "-1";
+  check "str_compare prefix"
+    (Pipeline.process "str_compare \"abc\" \"abcd\"") "-1";
+  check "str_compare type"
+    (Pipeline.type_of "str_compare") "(str -> (str -> int))";
+  check "str_compare in if"
+    (Pipeline.process
+      "if str_compare \"a\" \"b\" < 0 then \"a-first\" else \"b-first\"") "\"a-first\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
