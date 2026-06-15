@@ -213,6 +213,30 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
     combine [] fpats
   | _ -> None
 
+(* Structural equality for `==` / `!=`.  Recurses through tuples, records,
+   and constructors.  Functions (closures/builtins) are not comparable —
+   raise Eval_error since we cannot meaningfully equate them. *)
+let rec value_eq a b =
+  match a, b with
+  | V_int x, V_int y -> x = y
+  | V_bool x, V_bool y -> x = y
+  | V_str x, V_str y -> x = y
+  | V_unit, V_unit -> true
+  | V_tuple xs, V_tuple ys when List.length xs = List.length ys ->
+    List.for_all2 value_eq xs ys
+  | V_constr (n1, None), V_constr (n2, None) -> n1 = n2
+  | V_constr (n1, Some v1), V_constr (n2, Some v2) -> n1 = n2 && value_eq v1 v2
+  | V_constr _, V_constr _ -> false
+  | V_record (n1, fs1), V_record (n2, fs2) when n1 = n2 ->
+    (try List.for_all (fun (f, v1) ->
+       value_eq v1 (List.assoc f fs2)
+     ) fs1
+     with Not_found -> false)
+  | (V_closure _ | V_builtin _), _
+  | _, (V_closure _ | V_builtin _) ->
+    raise (Eval_error (Loc.dummy, "functions are not comparable with == / !="))
+  | _ -> false
+
 let rec eval_in (env : env) (e : Ast.expr) =
   match e.Ast.node with
   | Ast.Int_lit n -> V_int n
@@ -246,20 +270,17 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | Ast.Concat, _, _ ->
        type_error e.Ast.loc "++ requires str operands")
   | Ast.Cmp (op, a, b) ->
-    (match eval_in env a, eval_in env b with
-     | V_int x, V_int y ->
-       (match op with
-        | Ast.Eq -> V_bool (x = y)
-        | Ast.Ne -> V_bool (x <> y)
-        | Ast.Lt -> V_bool (x < y)
-        | Ast.Le -> V_bool (x <= y)
-        | Ast.Gt -> V_bool (x > y)
-        | Ast.Ge -> V_bool (x >= y))
-     | V_bool x, V_bool y when op = Ast.Eq -> V_bool (x = y)
-     | V_bool x, V_bool y when op = Ast.Ne -> V_bool (x <> y)
-     | V_str x, V_str y when op = Ast.Eq -> V_bool (x = y)
-     | V_str x, V_str y when op = Ast.Ne -> V_bool (x <> y)
-     | _ -> type_error e.Ast.loc "comparison type mismatch")
+    let va = eval_in env a in
+    let vb = eval_in env b in
+    (match op, va, vb with
+     | Ast.Lt, V_int x, V_int y -> V_bool (x < y)
+     | Ast.Le, V_int x, V_int y -> V_bool (x <= y)
+     | Ast.Gt, V_int x, V_int y -> V_bool (x > y)
+     | Ast.Ge, V_int x, V_int y -> V_bool (x >= y)
+     | (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), _, _ ->
+       type_error e.Ast.loc "ordering requires int operands"
+     | Ast.Eq, _, _ -> V_bool (value_eq va vb)
+     | Ast.Ne, _, _ -> V_bool (not (value_eq va vb)))
   | Ast.Logic (op, a, b) ->
     (* short-circuit evaluation: don't evaluate b unless needed *)
     (match op, eval_in env a with

@@ -789,5 +789,53 @@ let () =
     (Pipeline.process
       "let must = assert true in must \"unused\"") "()";
 
+  (* --- structural equality on compound values --- *)
+  check "tuple eq same"
+    (Pipeline.process "(1, 2, 3) == (1, 2, 3)") "true";
+  check "tuple eq different"
+    (Pipeline.process "(1, 2, 3) == (1, 2, 4)") "false";
+  check "tuple ne"
+    (Pipeline.process "(1, 2) != (1, 3)") "true";
+  check "nested tuple eq"
+    (Pipeline.process "(1, (2, 3)) == (1, (2, 3))") "true";
+  check "nested tuple ne"
+    (Pipeline.process "(1, (2, 3)) == (1, (2, 4))") "false";
+  check "record eq same"
+    (Pipeline.process
+      "type P = { x: int, y: int };
+       P { x = 1, y = 2 } == P { x = 1, y = 2 }") "true";
+  check "record eq diff value"
+    (Pipeline.process
+      "type P = { x: int };
+       P { x = 1 } == P { x = 5 }") "false";
+  check "constr nullary eq"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       (None: int opt) == None") "true";
+  check "constr payload eq"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       Some 5 == Some 5") "true";
+  check "constr different variant"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       Some 5 == None") "false";
+  check "constr nested eq"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [1, 2, 3] == [1, 2, 3]") "true";
+  check "list ne different length"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [1, 2, 3] == [1, 2]") "false";
+  check_raises "function equality raises"
+    (fun () -> Pipeline.process
+      "(fn x -> x) == (fn x -> x)");
+  check "eq in match guard"
+    (Pipeline.process
+      "match (1, 2) with
+       | p when p == (1, 2) -> \"hit\"
+       | _ -> \"miss\"") "\"hit\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
