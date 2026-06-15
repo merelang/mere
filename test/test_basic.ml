@@ -683,5 +683,21 @@ let () =
   check_raises "top let type mismatch"
     (fun () -> Pipeline.process "let (a, b) = (1, 2, 3); a");
 
+  (* --- if without else (unit-typed branch) --- *)
+  check "if without else (true branch)"
+    (Pipeline.process "if true then print \"hi\"") "()";
+  check "if without else (false branch)"
+    (Pipeline.process "if false then print \"hi\"") "()";
+  check "if without else type"
+    (Pipeline.type_of "if true then print \"x\"") "unit";
+  check "if without else in block"
+    (Pipeline.process "{ if false then print \"skip\"; 42 }") "42";
+  check "if without else in fn"
+    (Pipeline.process
+      "let log_if = fn (b: bool, msg: str) -> if b then print msg in
+       { log_if true \"shown\"; log_if false \"hidden\"; 1 }") "1";
+  check_raises "if without else needs unit branch"
+    (fun () -> Pipeline.process "if true then 5");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
