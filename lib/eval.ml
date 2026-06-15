@@ -138,6 +138,39 @@ let builtin_odd =
     | V_int n -> V_bool (n mod 2 <> 0)
     | _ -> failwith "odd: expected int")
 
+let builtin_gcd =
+  V_builtin ("gcd", fun a ->
+    match a with
+    | V_int x ->
+      V_builtin ("gcd_partial", fun b ->
+        match b with
+        | V_int y ->
+          let rec euclid a b =
+            if b = 0 then a
+            else euclid b (a mod b)
+          in
+          V_int (euclid (abs x) (abs y))
+        | _ -> failwith "gcd: 2nd arg expected int")
+    | _ -> failwith "gcd: 1st arg expected int")
+
+let builtin_lcm =
+  V_builtin ("lcm", fun a ->
+    match a with
+    | V_int x ->
+      V_builtin ("lcm_partial", fun b ->
+        match b with
+        | V_int y ->
+          if x = 0 || y = 0 then V_int 0
+          else
+            let rec euclid a b =
+              if b = 0 then a
+              else euclid b (a mod b)
+            in
+            let g = euclid (abs x) (abs y) in
+            V_int (abs (x / g * y))
+        | _ -> failwith "lcm: 2nd arg expected int")
+    | _ -> failwith "lcm: 1st arg expected int")
+
 let builtin_pow =
   V_builtin ("pow", fun base ->
     match base with
@@ -279,6 +312,8 @@ let initial_env : env =
     ("even", ref builtin_even);
     ("odd", ref builtin_odd);
     ("pow", ref builtin_pow);
+    ("gcd", ref builtin_gcd);
+    ("lcm", ref builtin_lcm);
     ("assert", ref builtin_assert);
     ("show", ref builtin_show);
   ]

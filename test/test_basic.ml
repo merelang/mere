@@ -1034,5 +1034,20 @@ let () =
     (Pipeline.process
       "let take = substring \"abcdef\" 0 in take 4") "\"abcd\"";
 
+  (* --- stdlib F13: gcd / lcm --- *)
+  check "gcd basic" (Pipeline.process "gcd 12 18") "6";
+  check "gcd coprime" (Pipeline.process "gcd 7 13") "1";
+  check "gcd with zero" (Pipeline.process "gcd 0 5") "5";
+  check "gcd negative" (Pipeline.process "gcd (- 12) 18") "6";
+  check "gcd same" (Pipeline.process "gcd 9 9") "9";
+  check "lcm basic" (Pipeline.process "lcm 4 6") "12";
+  check "lcm with zero" (Pipeline.process "lcm 0 5") "0";
+  check "lcm not exact mult"
+    (Pipeline.process "lcm 21 6") "42";
+  check "gcd type" (Pipeline.type_of "gcd") "(int -> (int -> int))";
+  check "lcm type" (Pipeline.type_of "lcm") "(int -> (int -> int))";
+  check "gcd identity"
+    (Pipeline.process "gcd (gcd 24 36) 60") "12";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
