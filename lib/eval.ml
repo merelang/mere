@@ -100,6 +100,12 @@ let builtin_str_contains =
         | _ -> failwith "str_contains: 2nd arg expected str")
     | _ -> failwith "str_contains: 1st arg expected str")
 
+let builtin_fail =
+  V_builtin ("fail", fun v ->
+    match v with
+    | V_str msg -> raise (Eval_error (Loc.dummy, "fail: " ^ msg))
+    | _ -> failwith "fail: expected str")
+
 let builtin_char_at =
   V_builtin ("char_at", fun s_val ->
     match s_val with
@@ -125,6 +131,7 @@ let initial_env : env =
     ("int_of_str", ref builtin_int_of_str);
     ("str_contains", ref builtin_str_contains);
     ("char_at", ref builtin_char_at);
+    ("fail", ref builtin_fail);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

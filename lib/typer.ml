@@ -181,6 +181,17 @@ let instantiate_record name (info : record_info) =
   let result_args = List.map (fun p -> List.assoc p mapping) info.r_params in
   (fields', Ast.TyCon (name, result_args))
 
+(* Build a polymorphic scheme `str -> 'a` for `fail`.  We allocate a tyvar
+   at module-load time; instantiate replaces it with a fresh var on each use. *)
+let _fail_alpha_init = fresh_var ()
+let fail_scheme =
+  let id = match _fail_alpha_init with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { quantified = [id];
+    body = Ast.TyArrow (Ast.TyStr, _fail_alpha_init) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
@@ -193,6 +204,7 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
     ("char_at",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyStr))));
+    ("fail",        fail_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

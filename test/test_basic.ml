@@ -726,5 +726,34 @@ let () =
   check "char_at curry"
     (Pipeline.process "let first = char_at \"abcdef\" in first 2") "\"c\"";
 
+  (* --- polymorphic `fail : str -> 'a` --- *)
+  check "fail type is polymorphic"
+    (Pipeline.type_of "fail") "(str -> 'a)";
+  check "fail unified with int"
+    (Pipeline.type_of
+      "fn (x: int) -> if x < 0 then fail \"neg\" else x") "(int -> int)";
+  check "fail unified with bool"
+    (Pipeline.type_of
+      "fn (x: int) -> if x == 0 then fail \"zero\" else true") "(int -> bool)";
+  check "fail in non-taken branch"
+    (Pipeline.process
+      "let f = fn (x: int) -> if x < 0 then fail \"neg\" else x in f 7") "7";
+  check "fail in match arm"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with | Some n -> n | None -> fail \"expected Some\"") "5";
+  check_raises "fail actually raises"
+    (fun () -> Pipeline.process
+      "let f = fn (x: int) -> if x < 0 then fail \"neg\" else x in f (- 5)");
+  check_raises "fail with match falling to None"
+    (fun () -> Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match None with | Some n -> n | None -> fail \"expected Some\"");
+  check "fail polymorphic at multiple sites"
+    (Pipeline.process
+      "let pos = fn (x: int) -> if x > 0 then x else fail \"non-pos\" in
+       let neg = fn (x: int) -> if x < 0 then x else fail \"non-neg\" in
+       pos 5 + neg (- 3)") "2";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
