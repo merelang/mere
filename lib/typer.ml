@@ -192,6 +192,16 @@ let fail_scheme =
   { quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, _fail_alpha_init) }
 
+(* `show : 'a -> str` — convert any value to a string. *)
+let _show_alpha_init = fresh_var ()
+let show_scheme =
+  let id = match _show_alpha_init with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { quantified = [id];
+    body = Ast.TyArrow (_show_alpha_init, Ast.TyStr) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
@@ -210,6 +220,7 @@ let initial_env : env =
     ("abs",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("assert",
        mono (Ast.TyArrow (Ast.TyBool, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
+    ("show",        show_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
