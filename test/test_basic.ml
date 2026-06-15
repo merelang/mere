@@ -940,5 +940,21 @@ let () =
       "let print_int_v2 = print << show in
        { print_int_v2 99; 1 }") "1";
 
+  (* --- stdlib F8: even / odd --- *)
+  check "even 4" (Pipeline.process "even 4") "true";
+  check "even 7" (Pipeline.process "even 7") "false";
+  check "even 0" (Pipeline.process "even 0") "true";
+  check "odd 3" (Pipeline.process "odd 3") "true";
+  check "odd negative" (Pipeline.process "odd (- 5)") "true";
+  check "even type" (Pipeline.type_of "even") "(int -> bool)";
+  check "odd type" (Pipeline.type_of "odd") "(int -> bool)";
+  check "even/odd in filter-like"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       let rec count_evens = fn xs -> match xs with
+         | [] -> 0
+         | [h, ...t] -> if even h then 1 + count_evens t else count_evens t
+       in count_evens [1, 2, 3, 4, 5, 6]") "3";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
