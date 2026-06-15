@@ -192,6 +192,27 @@ let builtin_str_starts_with =
         | _ -> failwith "str_starts_with: 2nd arg expected str")
     | _ -> failwith "str_starts_with: 1st arg expected str")
 
+let builtin_substring =
+  V_builtin ("substring", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("substring_p1", fun start_val ->
+        match start_val with
+        | V_int start ->
+          V_builtin ("substring_p2", fun end_val ->
+            match end_val with
+            | V_int end_ ->
+              let len = String.length s in
+              if start < 0 || end_ > len || start > end_ then
+                raise (Eval_error (Loc.dummy,
+                  Printf.sprintf
+                    "substring: range [%d, %d) invalid for str of length %d"
+                    start end_ len))
+              else V_str (String.sub s start (end_ - start))
+            | _ -> failwith "substring: 3rd arg expected int")
+        | _ -> failwith "substring: 2nd arg expected int")
+    | _ -> failwith "substring: 1st arg expected str")
+
 let builtin_str_repeat =
   V_builtin ("str_repeat", fun s_val ->
     match s_val with
@@ -249,6 +270,7 @@ let initial_env : env =
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);
     ("str_repeat", ref builtin_str_repeat);
+    ("substring", ref builtin_substring);
     ("char_at", ref builtin_char_at);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);

@@ -1011,5 +1011,28 @@ let () =
   check "str_repeat single char"
     (Pipeline.process "str_repeat \"X\" 1") "\"X\"";
 
+  (* --- stdlib F12: substring (3-arg curry) --- *)
+  check "substring basic"
+    (Pipeline.process "substring \"hello\" 1 4") "\"ell\"";
+  check "substring full"
+    (Pipeline.process "substring \"hello\" 0 5") "\"hello\"";
+  check "substring empty range"
+    (Pipeline.process "substring \"hello\" 2 2") "\"\"";
+  check "substring prefix"
+    (Pipeline.process "substring \"hello\" 0 3") "\"hel\"";
+  check "substring suffix"
+    (Pipeline.process "substring \"hello\" 2 5") "\"llo\"";
+  check "substring type"
+    (Pipeline.type_of "substring") "(str -> (int -> (int -> str)))";
+  check_raises "substring end too large"
+    (fun () -> Pipeline.process "substring \"hi\" 0 10");
+  check_raises "substring start negative"
+    (fun () -> Pipeline.process "substring \"hi\" (- 1) 1");
+  check_raises "substring start > end"
+    (fun () -> Pipeline.process "substring \"hi\" 2 1");
+  check "substring curry partial"
+    (Pipeline.process
+      "let take = substring \"abcdef\" 0 in take 4") "\"abcd\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
