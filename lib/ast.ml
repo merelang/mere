@@ -63,6 +63,8 @@ and pattern_node =
   | P_tuple of pattern list
   | P_record of string * (string * pattern) list
     (* nominal record pattern:  TypeName { f1 = pat, f2 = pat } *)
+  | P_as of pattern * string
+    (* `pat as name` — match the inner pattern and bind the whole value to `name`. *)
 
 type top_decl =
   | Top_let of pattern * expr   (* left-side can be P_var (typical) or P_wild/P_tuple etc. *)
@@ -160,6 +162,8 @@ let rec pp_pattern p =
   | P_record (name, fields) ->
     let parts = List.map (fun (f, p) -> f ^ " = " ^ pp_pattern p) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"
+  | P_as (inner, name) ->
+    "(" ^ pp_pattern inner ^ " as " ^ name ^ ")"
 
 let rec pp e =
   match e.node with

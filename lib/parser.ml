@@ -369,6 +369,13 @@ let parse_program tokens =
     in
     loop [] toks
   and pattern toks =
+    (* Wrap pattern_base with optional trailing `as IDENT`. *)
+    let p, toks = pattern_base toks in
+    match toks with
+    | (pos, T_as) :: (_, T_ident name) :: rest ->
+      mkp pos (Ast.P_as (p, name)), rest
+    | _ -> p, toks
+  and pattern_base toks =
     match toks with
     | (pos, T_lbracket) :: (_, T_rbracket) :: rest ->
       (* `[]` pattern -> P_constr ("Nil", None) *)

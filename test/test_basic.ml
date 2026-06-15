@@ -1082,5 +1082,41 @@ let () =
     (Pipeline.process
       "if str_compare \"a\" \"b\" < 0 then \"a-first\" else \"b-first\"") "\"a-first\"";
 
+  (* --- as-pattern `| pat as name -> body` --- *)
+  check "as-pattern tuple"
+    (Pipeline.process
+      "match (1, 2) with | (a, b) as p -> a + b") "3";
+  check "as-pattern preserves whole"
+    (Pipeline.process
+      "match (10, 20) with | (a, b) as whole -> show whole")
+    "\"(10, 20)\"";
+  check "as-pattern with constructor"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with | Some n as s -> n | None -> 0") "5";
+  check "as-pattern with list"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match [1, 2, 3] with
+       | Cons (h, t) as whole -> h
+       | [] -> 0") "1";
+  check "as-pattern bind both"
+    (Pipeline.process
+      "match (3, 4) with
+       | (a, b) as p -> a + b + (let (x, y) = p in x * y)") "19";
+  check "as-pattern in let"
+    (Pipeline.process
+      "let (a, b) as p = (5, 6) in
+       a + b + (let (_, _) = p in 100)") "111";
+  check "as-pattern with guard"
+    (Pipeline.process
+      "match (1, 2) with
+       | (a, b) as p when a < b -> \"ordered\"
+       | _ -> \"reversed\"") "\"ordered\"";
+  check "pp as-pattern"
+    (Ast.pp (Pipeline.parse_only
+      "match x with | (a, b) as p -> a"))
+    "(match x with | ((a, b) as p) -> a)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

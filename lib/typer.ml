@@ -487,6 +487,10 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
       in
       check_pattern fpat exp_ty
     ) fpats
+  | Ast.P_as (inner, name) ->
+    (* Match inner pattern + bind the whole matched value to `name`. *)
+    let inner_bindings = check_pattern inner expected in
+    (name, expected) :: inner_bindings
 
 let type_check e =
   counter := 0;
