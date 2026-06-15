@@ -132,6 +132,9 @@ let builtin_fail =
     | V_str msg -> raise (Eval_error (Loc.dummy, "fail: " ^ msg))
     | _ -> failwith "fail: expected str")
 
+let builtin_show =
+  V_builtin ("show", fun v -> V_str (to_string v))
+
 let builtin_assert =
   V_builtin ("assert", fun cond ->
     match cond with
@@ -174,6 +177,7 @@ let initial_env : env =
     ("max", ref builtin_max);
     ("abs", ref builtin_abs);
     ("assert", ref builtin_assert);
+    ("show", ref builtin_show);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

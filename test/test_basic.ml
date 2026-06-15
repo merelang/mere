@@ -912,5 +912,33 @@ let () =
     (Pipeline.process
       "let show_inc = str_of_int << (fn x -> x + 1) in show_inc 41") "\"42\"";
 
+  (* --- polymorphic `show : 'a -> str` --- *)
+  check "show type" (Pipeline.type_of "show") "('a -> str)";
+  check "show int" (Pipeline.process "show 42") "\"42\"";
+  check "show bool" (Pipeline.process "show true") "\"true\"";
+  check "show str" (Pipeline.process "show \"hi\"") "\"\\\"hi\\\"\"";
+  check "show tuple" (Pipeline.process "show (1, 2, 3)") "\"(1, 2, 3)\"";
+  check "show unit" (Pipeline.process "show ()") "\"()\"";
+  check "show record"
+    (Pipeline.process
+      "type P = { x: int };
+       show (P { x = 5 })") "\"P { x = 5 }\"";
+  check "show constructor"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       show (Some 42)") "\"Some 42\"";
+  check "show list"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       show [1, 2]") "\"Cons (1, Cons (2, Nil))\"";
+  check "show at multiple types in one expr"
+    (Pipeline.process
+      "show 1 ++ \" / \" ++ show true ++ \" / \" ++ show \"x\"")
+    "\"1 / true / \\\"x\\\"\"";
+  check "show with compose"
+    (Pipeline.process
+      "let print_int_v2 = print << show in
+       { print_int_v2 99; 1 }") "1";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
