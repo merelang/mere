@@ -19,6 +19,13 @@ let signatures : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
    from `Some 5` (constructor application). *)
 let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
 
+(* Counter for fresh variable names synthesized by `<<` / `>>` desugaring. *)
+let compose_var_counter = ref 0
+let fresh_compose_var () =
+  let n = !compose_var_counter in
+  incr compose_var_counter;
+  Printf.sprintf "__cx_%d" n
+
 (* Type alias registry: name -> (params, body).
    Populated by `type Name = T;` (non-record, non-variant body).
    Consumed at type-expression sites to substitute aliases inline
@@ -308,15 +315,36 @@ let parse_program tokens =
   and pipe toks =
     (* Lowest-precedence operator below let/if/fn/match.
        `a |> f` desugars to `f a`. Left-associative: `a |> b |> c` = `c (b a)`. *)
-    let lhs, toks = logic_or toks in
+    let lhs, toks = compose toks in
     let rec loop lhs toks =
       match toks with
       | (pos, T_pipe_gt) :: rest ->
-        let rhs, toks = logic_or rest in
+        let rhs, toks = compose rest in
         loop (mk pos (Ast.App (rhs, lhs))) toks
       | _ -> lhs, toks
     in
     loop lhs toks
+  and compose toks =
+    (* Function composition `<<` and `>>` — right-associative, binds
+       tighter than `|>` but looser than logic_or.
+       `f << g` = `fn __cx -> f (g __cx)`   (apply g first, then f)
+       `f >> g` = `fn __cx -> g (f __cx)`   (apply f first, then g)
+       `a << b << c` = `a << (b << c)` (right-assoc) *)
+    let lhs, toks = logic_or toks in
+    match toks with
+    | (pos, T_lt_lt) :: rest ->
+      let rhs, toks = compose rest in
+      let x = fresh_compose_var () in
+      let var = mk pos (Ast.Var x) in
+      let body = mk pos (Ast.App (lhs, mk pos (Ast.App (rhs, var)))) in
+      mk pos (Ast.Fun (x, None, body)), toks
+    | (pos, T_gt_gt) :: rest ->
+      let rhs, toks = compose rest in
+      let x = fresh_compose_var () in
+      let var = mk pos (Ast.Var x) in
+      let body = mk pos (Ast.App (rhs, mk pos (Ast.App (lhs, var)))) in
+      mk pos (Ast.Fun (x, None, body)), toks
+    | _ -> lhs, toks
   and parse_arms toks =
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
     let rec loop acc toks =
