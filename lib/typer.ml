@@ -189,6 +189,10 @@ let initial_env : env =
     ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
     ("str_len",     mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
     ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
+    ("str_contains",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
+    ("char_at",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyStr))));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

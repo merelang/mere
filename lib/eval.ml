@@ -81,6 +81,40 @@ let builtin_int_of_str =
            Printf.sprintf "int_of_str: %S is not a valid int" s)))
     | _ -> failwith "int_of_str: expected str")
 
+let builtin_str_contains =
+  V_builtin ("str_contains", fun haystack ->
+    match haystack with
+    | V_str h ->
+      V_builtin ("str_contains_partial", fun needle ->
+        match needle with
+        | V_str n ->
+          let h_len = String.length h in
+          let n_len = String.length n in
+          let rec scan i =
+            if n_len = 0 then true
+            else if i + n_len > h_len then false
+            else if String.sub h i n_len = n then true
+            else scan (i + 1)
+          in
+          V_bool (scan 0)
+        | _ -> failwith "str_contains: 2nd arg expected str")
+    | _ -> failwith "str_contains: 1st arg expected str")
+
+let builtin_char_at =
+  V_builtin ("char_at", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("char_at_partial", fun i_val ->
+        match i_val with
+        | V_int i ->
+          if i < 0 || i >= String.length s then
+            raise (Eval_error (Loc.dummy,
+              Printf.sprintf "char_at: index %d out of range (len=%d)"
+                i (String.length s)))
+          else V_str (String.sub s i 1)
+        | _ -> failwith "char_at: 2nd arg expected int")
+    | _ -> failwith "char_at: 1st arg expected str")
+
 let initial_env : env =
   [ ("print", ref builtin_print);
     ("print_int", ref builtin_print_int);
@@ -89,6 +123,8 @@ let initial_env : env =
     ("not", ref builtin_not);
     ("str_len", ref builtin_str_len);
     ("int_of_str", ref builtin_int_of_str);
+    ("str_contains", ref builtin_str_contains);
+    ("char_at", ref builtin_char_at);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

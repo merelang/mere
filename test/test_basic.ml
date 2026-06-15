@@ -699,5 +699,32 @@ let () =
   check_raises "if without else needs unit branch"
     (fun () -> Pipeline.process "if true then 5");
 
+  (* --- stdlib F3: 2-arg curry builtins --- *)
+  check "str_contains hit"
+    (Pipeline.process "str_contains \"hello world\" \"world\"") "true";
+  check "str_contains miss"
+    (Pipeline.process "str_contains \"hello\" \"xyz\"") "false";
+  check "str_contains empty needle"
+    (Pipeline.process "str_contains \"abc\" \"\"") "true";
+  check "str_contains type"
+    (Pipeline.type_of "str_contains") "(str -> (str -> bool))";
+  check "char_at first"
+    (Pipeline.process "char_at \"hello\" 0") "\"h\"";
+  check "char_at last"
+    (Pipeline.process "char_at \"hello\" 4") "\"o\"";
+  check "char_at type"
+    (Pipeline.type_of "char_at") "(str -> (int -> str))";
+  check_raises "char_at out of range"
+    (fun () -> Pipeline.process "char_at \"abc\" 10");
+  check_raises "char_at negative"
+    (fun () -> Pipeline.process "char_at \"abc\" (- 1)");
+  check "str_contains with pipe (needle piped)"
+    (* `"sub" |> str_contains "haystack"` desugars to
+       `str_contains "haystack" "sub"` — pipe + curry composes naturally
+       when the piped value is the second curry arg. *)
+    (Pipeline.process "\"world\" |> str_contains \"hello world\"") "true";
+  check "char_at curry"
+    (Pipeline.process "let first = char_at \"abcdef\" in first 2") "\"c\"";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
