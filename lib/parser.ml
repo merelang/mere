@@ -78,9 +78,26 @@ let parse_program tokens =
     | (_, T_ident name) :: rest -> Ast.TyCon (name, []), rest
     | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
     | (_, T_lparen) :: rest ->
-      let inner, toks = ty rest in
+      let first, toks = ty rest in
       (match toks with
-       | (_, T_rparen) :: rest -> inner, rest
+       | (_, T_rparen) :: rest -> first, rest
+       | (_, T_comma) :: _ ->
+         (* Multi-arg TyCon application: `(T1, T2, ...) name` *)
+         let rec collect acc toks =
+           match toks with
+           | (_, T_comma) :: rest ->
+             let next, toks = ty rest in
+             collect (next :: acc) toks
+           | _ -> List.rev acc, toks
+         in
+         let args, toks = collect [first] toks in
+         (match toks with
+          | (_, T_rparen) :: (_, T_ident name) :: rest
+            when not (is_primitive_type_name name) ->
+            Ast.TyCon (name, args), rest
+          | _ ->
+            raise (Parse_error (pos_of toks,
+              "expected ') NAME' for multi-arg type constructor")))
        | _ -> raise (Parse_error (pos_of toks, "expected ')' in type")))
     | _ -> raise (Parse_error (pos_of toks, "expected type"))
   in
@@ -633,9 +650,19 @@ let parse_program tokens =
     | (pos, _) :: _ -> raise (Parse_error (pos, "trailing input"))
     | [] -> raise (Parse_error (Loc.dummy, "expected EOF"))
   in
-  (* Parse type params: optional `'a` before the type name. *)
+  (* Parse type params: optional `'a` or `('a, 'b, ...)` before the type name. *)
   let parse_type_params toks =
     match toks with
+    | (_, T_lparen) :: (_, T_tyvar n1) :: rest ->
+      let rec collect acc toks =
+        match toks with
+        | (_, T_comma) :: (_, T_tyvar n) :: rest -> collect (n :: acc) rest
+        | (_, T_rparen) :: rest -> List.rev acc, rest
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected ',' or ')' in type parameter list"))
+      in
+      collect [n1] rest
     | (_, T_tyvar name) :: rest -> [name], rest
     | _ -> [], toks
   in
