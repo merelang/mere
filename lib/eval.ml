@@ -126,6 +126,18 @@ let builtin_abs =
     | V_int n -> V_int (if n < 0 then -n else n)
     | _ -> failwith "abs: expected int")
 
+let builtin_even =
+  V_builtin ("even", fun v ->
+    match v with
+    | V_int n -> V_bool (n mod 2 = 0)
+    | _ -> failwith "even: expected int")
+
+let builtin_odd =
+  V_builtin ("odd", fun v ->
+    match v with
+    | V_int n -> V_bool (n mod 2 <> 0)
+    | _ -> failwith "odd: expected int")
+
 let builtin_fail =
   V_builtin ("fail", fun v ->
     match v with
@@ -176,6 +188,8 @@ let initial_env : env =
     ("min", ref builtin_min);
     ("max", ref builtin_max);
     ("abs", ref builtin_abs);
+    ("even", ref builtin_even);
+    ("odd", ref builtin_odd);
     ("assert", ref builtin_assert);
     ("show", ref builtin_show);
   ]
