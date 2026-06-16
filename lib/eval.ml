@@ -105,6 +105,28 @@ let builtin_str_compare =
         | _ -> failwith "str_compare: 2nd arg expected str")
     | _ -> failwith "str_compare: 1st arg expected str")
 
+let builtin_str_count =
+  V_builtin ("str_count", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("str_count_partial", fun n_val ->
+        match n_val with
+        | V_str needle ->
+          if needle = "" then V_int 0
+          else begin
+            let s_len = String.length s in
+            let n_len = String.length needle in
+            let rec scan i acc =
+              if i + n_len > s_len then acc
+              else if String.sub s i n_len = needle then
+                scan (i + n_len) (acc + 1)  (* non-overlapping *)
+              else scan (i + 1) acc
+            in
+            V_int (scan 0 0)
+          end
+        | _ -> failwith "str_count: 2nd arg expected str")
+    | _ -> failwith "str_count: 1st arg expected str")
+
 let builtin_str_contains =
   V_builtin ("str_contains", fun haystack ->
     match haystack with
@@ -504,6 +526,7 @@ let initial_env : env =
     ("int_of_str", ref builtin_int_of_str);
     ("bool_of_str", ref builtin_bool_of_str);
     ("str_contains", ref builtin_str_contains);
+    ("str_count", ref builtin_str_count);
     ("str_compare", ref builtin_str_compare);
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);
