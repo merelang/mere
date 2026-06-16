@@ -1684,5 +1684,55 @@ let () =
     (* sqrt pi ~= 1.7725、pipe + curry なので `f_lt 1.7 (sqrt pi)` = `1.7 < 1.7725` *)
     (Pipeline.process "sqrt pi |> f_lt 1.7") "true";
 
+  (* --- exhaustiveness check (Phase 1: bool + variant types) --- *)
+  let warnings_of s =
+    String.concat " | " (Pipeline.exhaustiveness_warnings s)
+  in
+  check "exhaustive: both bool branches → no warning"
+    (warnings_of
+      "match true with | true -> 1 | false -> 0") "";
+  check "exhaustive: wildcard makes any match exhaustive"
+    (warnings_of
+      "match 42 with | 0 -> \"zero\" | _ -> \"other\"") "";
+  check "exhaustive: variable pattern covers all"
+    (warnings_of
+      "match 42 with | n -> n + 1") "";
+  check "non-exhaustive: bool missing false"
+    (warnings_of "match true with | true -> 1")
+    "line 1, col 1: warning: non-exhaustive match (missing false)";
+  check "non-exhaustive: opt missing None"
+    (warnings_of
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with | Some n -> n")
+    "line 2, col 8: warning: non-exhaustive match (missing None)";
+  check "non-exhaustive: opt missing Some"
+    (warnings_of
+      "type 'a opt = None | Some of 'a;
+       match (None : int opt) with | None -> 0")
+    "line 2, col 8: warning: non-exhaustive match (missing Some _)";
+  check "non-exhaustive: variant 3rd missing"
+    (warnings_of
+      "type Color = Red | Green | Blue;
+       match Red with | Red -> 0 | Green -> 1")
+    "line 2, col 8: warning: non-exhaustive match (missing Blue)";
+  check "guarded arm doesn't count as exhaustive"
+    (* guard 付き arm は実行時 false 可能性があるので保守的に「カバーしてない」扱い *)
+    (warnings_of
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with
+       | None -> 0
+       | Some n when n > 0 -> n")
+    "line 2, col 8: warning: non-exhaustive match (missing Some _)";
+  check "or-pattern covers both variants"
+    (warnings_of
+      "type Sign = Pos | Neg | Zero;
+       match Pos with | Pos | Neg -> 1 | Zero -> 0") "";
+  check "as-pattern transparent to exhaustiveness"
+    (warnings_of
+      "type 'a opt = None | Some of 'a;
+       match Some 5 with
+       | None          -> 0
+       | Some n as all -> n") "";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

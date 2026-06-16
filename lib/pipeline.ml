@@ -63,15 +63,29 @@ let process_decls eval_env type_env decls =
   ) decls
 
 let process s =
+  Exhaustive.reset ();
   let prog = parse_program s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
   let _ = Typer.infer !type_env prog.main in
+  List.iter prerr_endline (Exhaustive.take ());
   let v = Eval.eval_in !eval_env prog.main in
   Eval.to_string v
 
+(* Test-friendly entry point: returns the exhaustiveness warnings as a list
+   (no side-effects), for unit tests to assert against. *)
+let exhaustiveness_warnings s =
+  Exhaustive.reset ();
+  let prog = parse_program s in
+  let eval_env = ref Eval.initial_env in
+  let type_env = ref Typer.initial_env in
+  process_decls eval_env type_env prog.decls;
+  let _ = Typer.infer !type_env prog.main in
+  Exhaustive.take ()
+
 let type_of s =
+  Exhaustive.reset ();
   let prog = parse_program s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -110,6 +124,7 @@ let type_of s =
   Ast.pp_ty (Typer.infer !type_env prog.main)
 
 let process_typed s =
+  Exhaustive.reset ();
   let prog = parse_program s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in

@@ -305,7 +305,8 @@ signature ctx = (db: int, log: int);
 
 - float / 任意ビット幅整数なし
 - 文字列 escape は `\n \t \\ \"` のみ
-- 網羅性検査なし (`match` の case 漏れは runtime fallthrough エラー)
+- 網羅性検査は **Phase 1** (bool + variant types) — 非網羅は **warning** を stderr に出力、評価は継続 (case 漏れは runtime fallthrough エラー)
+- int/str/float/tuple/record の網羅性は wildcard arm が必要 (より精密な検査は将来)
 - ネイティブ codegen なし (全てインタプリタ)
 - メモリモデル / region / view / effect は未実装 (設計は `internal design notes` で進行)
 - REPL は単一行入力のみ

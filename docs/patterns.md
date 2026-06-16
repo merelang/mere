@@ -278,13 +278,14 @@ match char_at s i with
 | _   -> ...
 ```
 
-### 3. `match` 網羅性は実行時チェック
+### 3. ~~`match` 網羅性は実行時チェック~~ → Phase 1 で警告対応
 ```
 match opt with
 | Some n -> n
-// None が来たら runtime Eval_error
+// stderr: "line X, col Y: warning: non-exhaustive match (missing None)"
+// 評価は継続するが、None が来たら runtime Eval_error
 ```
-網羅性検査は未実装。明示的に `| _ -> default` か `| None -> fail "..."` を書く。
+bool と variant type 関する網羅性は compile-time に warning として検出される。int/str/tuple/record はまだ wildcard arm が必要。完全網羅化したければ `| _ -> default` か `| None -> fail "..."` を書く。
 
 ### 4. record update には base の型が必要
 ```
