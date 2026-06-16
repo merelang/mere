@@ -16,6 +16,7 @@ and ty =
   | TyParam of string             (* source-level type parameter, e.g. 'a *)
   | TyCon of string * ty list     (* name + type args (postfix application) *)
   | TyTuple of ty list
+  | TyRef of string * ty          (* `&R T` — region-tagged reference type *)
 
 type expr = { loc : Loc.t; node : expr_node }
 
@@ -42,6 +43,7 @@ and expr_node =
     (* arm: pattern * optional guard * body.  guard is bool expr — if false,
        fall through to next arm. *)
   | Tuple of expr list
+  | Region_block of string * expr   (* `region R { body }` — introduces region name R *)
   | Record_lit of string * (string * expr) list
     (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
   | Field_get of expr * string
@@ -136,6 +138,7 @@ let pp_ty t =
     | TyTuple ts ->
       let parts = List.map aux ts in
       "(" ^ String.concat " * " parts ^ ")"
+    | TyRef (region, inner) -> "&" ^ region ^ " " ^ aux inner
   in
   aux t
 
@@ -221,6 +224,8 @@ let rec pp e =
     "(match " ^ pp scrut ^ " with " ^ arms_s ^ ")"
   | Tuple es ->
     "(" ^ String.concat ", " (List.map pp es) ^ ")"
+  | Region_block (name, body) ->
+    "(region " ^ name ^ " { " ^ pp body ^ " })"
   | Record_lit (name, fields) ->
     let parts = List.map (fun (f, e) -> f ^ " = " ^ pp e) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"

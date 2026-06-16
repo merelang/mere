@@ -44,6 +44,7 @@ let substitute_params params args body =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
   in
   subst body
 
@@ -105,6 +106,10 @@ let parse_program tokens =
     loop base toks
   and simple_ty toks =
     match toks with
+    | (_, T_amp) :: (_, T_ident region) :: rest ->
+      (* `&R T` — region-tagged reference type *)
+      let inner, rest = simple_ty rest in
+      Ast.TyRef (region, inner), rest
     | (_, T_ident "int") :: rest -> Ast.TyInt, rest
     | (_, T_ident "float") :: rest -> Ast.TyFloat, rest
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
@@ -312,6 +317,14 @@ let parse_program tokens =
          let arms, toks = parse_arms rest in
          mk pos (Ast.Match (scrut, arms)), toks
        | _ -> raise (Parse_error (pos_of toks, "expected 'with' after match")))
+    | (pos, T_region) :: (_, T_ident name) :: (_, T_lbrace) :: rest ->
+      let body, toks = expr rest in
+      (match toks with
+       | (_, T_rbrace) :: rest ->
+         mk pos (Ast.Region_block (name, body)), rest
+       | _ -> raise (Parse_error (pos_of toks, "expected '}' to close region block")))
+    | (pos, T_region) :: _ ->
+      raise (Parse_error (pos, "expected 'NAME { body }' after 'region'"))
     | _ -> pipe toks
   and pipe toks =
     (* Lowest-precedence operator below let/if/fn/match.

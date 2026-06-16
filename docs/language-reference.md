@@ -67,6 +67,7 @@ t1 * t2 * ...    タプル型
 t list           型コンストラクタ (postfix application)
 (t1, t2) result  多 type-arg
 'a               型パラメータ (declaration 内、annotation 内)
+&R t             region 付き参照型 (Phase 1: 構文のみ、semantic check は将来)
 ```
 
 ---
@@ -120,6 +121,20 @@ if cond then print "msg"            // 副作用専用、body は unit 型必須
 with logger = 100, db = 200 in
   logger + db
 ```
+
+### region (Phase 1: 構文のみ、設計 Q-008/009 に基づく)
+```
+region R { body }                   // R を region 名としてスコープに導入、body を評価
+region R { region S { ... } }       // ネスト可
+
+fn (x: &R int) -> x                  // `&R T` 参照型 (R が region 名)
+```
+
+**現状の意味論 (Phase 1)**:
+- `region R { body }` は R を内部スコープに束縛して body を評価。R 自体は unit 値の placeholder。
+- `&R T` は region 付き参照型として型システムに表現される (`&` の左辺は region 名)。
+- **escape check 等の semantic check はまだ未実装** — `&R T` 値は region 外に漏れても警告されない。
+- 将来 (Phase 2 以降) に: region から escape する参照を禁止、`r.alloc(v)` で region 内 alloc、`view V[R] of T` 宣言、`Trivial[R]` 制約、`with` + Drop の統合等が乗る。
 
 ### 関数
 ```

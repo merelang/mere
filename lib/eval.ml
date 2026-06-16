@@ -1098,6 +1098,11 @@ let rec eval_in (env : env) (e : Ast.expr) =
     try_arms arms
   | Ast.Tuple es ->
     V_tuple (List.map (eval_in env) es)
+  | Ast.Region_block (name, body) ->
+    (* Phase 1: region scope is purely syntactic. Bind the region name to a
+       unit value (placeholder).  Future phases will tie this to actual
+       allocator state.  *)
+    eval_in ((name, ref V_unit) :: env) body
   | Ast.Record_lit (name, fields) ->
     V_record (name, List.map (fun (f, e) -> (f, eval_in env e)) fields)
   | Ast.Field_get (inner, fname) ->

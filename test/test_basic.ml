@@ -1734,5 +1734,27 @@ let () =
        | None          -> 0
        | Some n as all -> n") "";
 
+  (* --- region / &R T : Phase 1 (syntactic only) --- *)
+  check "region block basic"
+    (Pipeline.process "region R { 42 }") "42";
+  check "region block with let"
+    (Pipeline.process "region R { let x = 5 in x + 1 }") "6";
+  check "nested region blocks"
+    (Pipeline.process "region R { region S { 100 } }") "100";
+  check "&R int type"
+    (Pipeline.type_of "fn (x: &R int) -> x") "(&R int -> &R int)";
+  check "&R (int * str) type"
+    (Pipeline.type_of "fn (x: &R (int * str)) -> x")
+    "(&R (int * str) -> &R (int * str))";
+  check "&R T pp"
+    (Pipeline.type_of "fn (x: &alpha str) -> x") "(&alpha str -> &alpha str)";
+  check "region returns body type"
+    (Pipeline.type_of "region R { \"hello\" }") "str";
+  check "region with print side effect"
+    (Pipeline.process "region R { let _ = print \"in region\" in 7 }") "7";
+  check "region block in fn"
+    (Pipeline.process
+      "let f = fn (x: int) -> region R { x * 2 } in f 21") "42";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

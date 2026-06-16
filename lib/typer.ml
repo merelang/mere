@@ -18,6 +18,7 @@ let rec occurs id = function
   | Ast.TyCon (_, args) -> List.exists (occurs id) args
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
   | Ast.TyTuple ts -> List.exists (occurs id) ts
+  | Ast.TyRef (_, inner) -> occurs id inner
 
 let rec unify loc t1 t2 =
   let t1 = Ast.walk t1 in
@@ -37,6 +38,8 @@ let rec unify loc t1 t2 =
     unify loc b1 b2
   | Ast.TyTuple ts1, Ast.TyTuple ts2 when List.length ts1 = List.length ts2 ->
     List.iter2 (unify loc) ts1 ts2
+  | Ast.TyRef (r1, t1), Ast.TyRef (r2, t2) when r1 = r2 ->
+    unify loc t1 t2
   | Ast.TyVar v1, Ast.TyVar v2 when v1.id = v2.id -> ()
   | Ast.TyVar v, t | t, Ast.TyVar v ->
     if occurs v.id t then
@@ -63,6 +66,7 @@ let rec collect_free_vars t acc =
   | Ast.TyTuple ts -> List.fold_left (fun a t -> collect_free_vars t a) acc ts
   | Ast.TyCon (_, args) ->
     List.fold_left (fun a t -> collect_free_vars t a) acc args
+  | Ast.TyRef (_, inner) -> collect_free_vars inner acc
 
 let env_free_vars env =
   List.fold_left (fun acc (_, sch) ->
@@ -91,6 +95,7 @@ let instantiate sch =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
   in
   subst sch.body
 
@@ -115,6 +120,7 @@ let freshen_params t =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (aux a, aux b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map aux ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map aux args)
+    | Ast.TyRef (r, inner) -> Ast.TyRef (r, aux inner)
   in
   aux t, mapping
 
@@ -161,6 +167,7 @@ let instantiate_constr (info : constr_info) =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
   in
   let arg' = Option.map subst info.arg in
   let result_args = List.map (fun p -> List.assoc p mapping) info.params in
@@ -178,6 +185,7 @@ let instantiate_record name (info : record_info) =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
   in
   let fields' = List.map (fun (f, t) -> (f, subst t)) info.r_fields in
   let result_args = List.map (fun p -> List.assoc p mapping) info.r_params in
@@ -485,6 +493,11 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let tv = infer env value in
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
+  | Ast.Region_block (_name, body) ->
+    (* Phase 1: region introduces a name in scope but the value is a unit
+       placeholder.  No escape checking yet (e.g. `&R T` values can leak out).
+       Future phases will add region scope tracking and escape checks. *)
+    infer env body
   | Ast.Fun (param, ty_opt, body) ->
     let alpha = fresh_var () in
     (match ty_opt with

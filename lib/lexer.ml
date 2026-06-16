@@ -20,6 +20,8 @@ type token =
   | T_fn
   | T_type
   | T_signature       (* signature keyword *)
+  | T_region          (* region keyword *)
+  | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
   | T_when            (* when — match guard *)
@@ -131,6 +133,7 @@ let tokenize s =
       | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
       | '&' when i + 1 < len && s.[i + 1] = '&' ->
         advance 2; aux (i + 2) ((pos, T_amp_amp) :: acc)
+      | '&' -> advance 1; aux (i + 1) ((pos, T_amp) :: acc)
       | '\'' ->
         (* Disambiguate single-quote between two forms:
            - char literal: 'X' (3 chars) or '\X' (4 chars, escape)
@@ -234,6 +237,7 @@ let tokenize s =
           | "fn" -> T_fn
           | "type" -> T_type
           | "signature" -> T_signature
+          | "region" -> T_region
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when
