@@ -350,6 +350,9 @@ let initial_env : env =
     ("const",       const_scheme);
     ("flip",        flip_scheme);
     ("try_or",      try_or_scheme);
+    ("iter_n",
+       mono (Ast.TyArrow (Ast.TyInt,
+              Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit), Ast.TyUnit))));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
