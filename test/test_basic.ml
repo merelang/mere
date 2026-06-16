@@ -1511,5 +1511,40 @@ let () =
       "type 'a misc = Nope | Cons of 'a;
        show (Cons 5)") "\"Cons 5\"";
 
+  (* --- character literals `'X'` (length-1 str) --- *)
+  check "char literal basic"
+    (Pipeline.process "'A'") "\"A\"";
+  check "char literal type"
+    (Pipeline.type_of "'A'") "str";
+  check "char literal escape newline"
+    (Pipeline.process "'\\n'") "\"\\n\"";
+  check "char literal escape tab"
+    (Pipeline.process "'\\t'") "\"\\t\"";
+  check "char literal escape backslash"
+    (Pipeline.process "'\\\\'") "\"\\\\\"";
+  check "char literal in match"
+    (Pipeline.process
+      "match 'h' with | 'h' -> \"hit\" | _ -> \"miss\"") "\"hit\"";
+  check "char literal in match fallthrough"
+    (Pipeline.process
+      "match 'x' with | 'h' -> \"hit\" | _ -> \"miss\"") "\"miss\"";
+  check "char literal in if condition"
+    (Pipeline.process
+      "let c = char_at \"hello\" 0 in
+       if c == 'h' then \"yes\" else \"no\"") "\"yes\"";
+  check "char literal dispatch chain"
+    (Pipeline.process
+      "let classify = fn (c: str) ->
+         match c with
+         | 'a' | 'e' | 'i' | 'o' | 'u' -> \"vowel\"
+         | _ -> \"other\"
+       in classify 'e' ++ \"-\" ++ classify 'b'") "\"vowel-other\"";
+  check "tyvar still works (not confused with char literal)"
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       Some 5") "Some 5";
+  check "polymorphic id with tyvar"
+    (Pipeline.type_of "fn x -> x") "('a -> 'a)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -30,7 +30,7 @@ let rec skip_ws = fn (s: str, i: int) ->
 
 let expect_char = fn (s: str, i: int, c: str) ->
   if i >= str_len s || char_at s i != c
-    then fail ("expected '" ++ c ++ "' at pos " ++ str_of_int i)
+    then fail ("expected " ++ c ++ " at pos " ++ str_of_int i)
   else i + 1;
 
 // === Atoms ===
@@ -48,7 +48,7 @@ let parse_false = fn (s: str, i: int) -> parse_keyword s i "false" (JBool false)
 let parse_num = fn (s: str, i: int) ->
   let start = i in
   let i1 =
-    if i < str_len s && char_at s i == "-" then i + 1
+    if i < str_len s && char_at s i == '-' then i + 1
     else i
   in
   let rec scan = fn (j: int) ->
@@ -62,10 +62,10 @@ let parse_num = fn (s: str, i: int) ->
 
 let parse_raw_str = fn (s: str, i: int) ->
   // Returns (content, end_pos).  No escape support.
-  let i1 = expect_char s i "\"" in
+  let i1 = expect_char s i '"' in
   let rec scan = fn (j: int) ->
     if j >= str_len s then fail "unterminated string"
-    else if char_at s j == "\"" then j
+    else if char_at s j == '"' then j
     else scan (j + 1)
   in
   let close = scan i1 in
@@ -81,20 +81,21 @@ let rec parse_value = fn (s: str, i0: int) ->
   let i = skip_ws s i0 in
   if i >= str_len s then fail "unexpected EOF"
   else
-    let c = char_at s i in
-    if c == "n" then parse_null  s i
-    else if c == "t" then parse_true  s i
-    else if c == "f" then parse_false s i
-    else if c == "\"" then parse_jstr s i
-    else if c == "[" then parse_array s i
-    else if c == "{" then parse_object s i
-    else if c == "-" || is_digit c then parse_num s i
-    else fail ("unexpected '" ++ c ++ "' at pos " ++ str_of_int i)
+    match char_at s i with
+    | 'n' -> parse_null  s i
+    | 't' -> parse_true  s i
+    | 'f' -> parse_false s i
+    | '"' -> parse_jstr  s i
+    | '[' -> parse_array s i
+    | '{' -> parse_object s i
+    | '-' -> parse_num s i
+    | c when is_digit c -> parse_num s i
+    | c -> fail ("unexpected '" ++ c ++ "' at pos " ++ str_of_int i)
 
 and parse_array = fn (s: str, i: int) ->
-  let i = expect_char s i "[" in
+  let i = expect_char s i '[' in
   let i = skip_ws s i in
-  if i < str_len s && char_at s i == "]"
+  if i < str_len s && char_at s i == ']'
   then (JArr Nil, i + 1)
   else
     let rec loop = fn (acc, j) ->
@@ -102,32 +103,32 @@ and parse_array = fn (s: str, i: int) ->
       let j = skip_ws s j in
       if j >= str_len s then fail "unexpected EOF in array"
       else
-        let c = char_at s j in
-        if c == "," then loop (Cons (v, acc)) (j + 1)
-        else if c == "]" then (JArr (rev (Cons (v, acc))), j + 1)
-        else fail ("expected ',' or ']' at pos " ++ str_of_int j)
+        match char_at s j with
+        | ',' -> loop (Cons (v, acc)) (j + 1)
+        | ']' -> (JArr (rev (Cons (v, acc))), j + 1)
+        | _   -> fail ("expected ',' or ']' at pos " ++ str_of_int j)
     in
     loop Nil i
 
 and parse_object = fn (s: str, i: int) ->
-  let i = expect_char s i "{" in
+  let i = expect_char s i '{' in
   let i = skip_ws s i in
-  if i < str_len s && char_at s i == "}"
+  if i < str_len s && char_at s i == '}'
   then (JObj Nil, i + 1)
   else
     let rec loop = fn (acc, j) ->
       let j = skip_ws s j in
       let (key, j) = parse_raw_str s j in
       let j = skip_ws s j in
-      let j = expect_char s j ":" in
+      let j = expect_char s j ':' in
       let (v, j) = parse_value s j in
       let j = skip_ws s j in
       if j >= str_len s then fail "unexpected EOF in object"
       else
-        let c = char_at s j in
-        if c == "," then loop (Cons ((key, v), acc)) (j + 1)
-        else if c == "}" then (JObj (rev (Cons ((key, v), acc))), j + 1)
-        else fail ("expected ',' or '}' at pos " ++ str_of_int j)
+        match char_at s j with
+        | ',' -> loop (Cons ((key, v), acc)) (j + 1)
+        | '}' -> (JObj (rev (Cons ((key, v), acc))), j + 1)
+        | _   -> fail ("expected ',' or '}' at pos " ++ str_of_int j)
     in
     loop Nil i;
 
