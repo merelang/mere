@@ -40,6 +40,10 @@ let content = read_file "/tmp/out.txt" in print content;
 | `str_of_int` | `int -> str` | 整数を文字列に |
 | `int_of_str` ⚡ | `str -> int` | trim 後パース、不正で raise |
 | `bool_of_str` ⚡ | `str -> bool` | trim 後 `"true"`/`"false"` のみ、他は raise |
+| `float_of_int` | `int -> float` | int → float (精度損失なし) |
+| `int_of_float` | `float -> int` | float → int (切り捨て) |
+| `str_of_float` | `float -> str` | float を文字列に (OCaml semantics) |
+| `float_of_str` ⚡ | `str -> float` | trim 後パース、不正で raise |
 
 ```
 str_of_int 42        // "42"
@@ -105,6 +109,21 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `divmod` ⚡ | `int -> int -> (int * int)` | (商, 剰余)、0 div で raise |
 | `sum_range` | `int -> int -> int` | `lo..hi` 総和 (Gauss 公式、O(1)) |
 | `not` | `bool -> bool` | 論理否定 |
+
+### Float 算術 (4)
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `f_add` | `float -> float -> float` | 加算 |
+| `f_sub` | `float -> float -> float` | 減算 |
+| `f_mul` | `float -> float -> float` | 乗算 |
+| `f_div` | `float -> float -> float` | 除算 (IEEE 754: 0 div は inf/nan) |
+
+```
+f_add 1.5 2.5                    // 4.0
+f_div 10.0 4.0                   // 2.5
+3.14 |> f_mul 2.0                // 6.28
+```
 
 ```
 clamp 0 100 150                  // 100
@@ -178,13 +197,15 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ```
 abs assert bool_of_str char_at chr clamp const cube
-decr divmod even fail flip fst gcd id incr int_of_str
-is_alpha is_digit is_space iter_n lcm max min not odd
-ord pair pow print print_bool print_err print_int
-print_no_nl read_line show sign snd square str_compare
-str_contains str_count str_ends_with str_len str_of_int
-str_repeat str_replace str_rev str_starts_with str_trim
-substring sum_range swap to_lower to_upper try_or
+decr divmod even f_add f_div f_mul f_sub fail flip
+float_of_int float_of_str fst gcd id incr int_of_float
+int_of_str is_alpha is_digit is_space iter_n lcm max
+min not odd ord pair pow print print_bool print_err
+print_int print_no_nl read_file read_line show sign snd
+square str_compare str_contains str_count str_ends_with
+str_len str_of_float str_of_int str_repeat str_replace
+str_rev str_starts_with str_trim str_unescape substring
+sum_range swap to_lower to_upper try_or write_file
 ```
 
 ---

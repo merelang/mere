@@ -1580,5 +1580,46 @@ let () =
   check_raises "read_file missing"
     (fun () -> Pipeline.process "read_file \"/nonexistent/no/such/file\"");
 
+  (* --- float type and basic arithmetic --- *)
+  check "float literal"
+    (Pipeline.process "3.14") "3.14";
+  check "float type"
+    (Pipeline.type_of "1.5") "float";
+  check "float in fn annotation"
+    (Pipeline.type_of "fn (x: float) -> x") "(float -> float)";
+  check "float equality"
+    (Pipeline.process "1.5 == 1.5") "true";
+  check "float inequality"
+    (Pipeline.process "1.5 != 2.0") "true";
+  check "float show"
+    (Pipeline.process "show 2.5") "\"2.5\"";
+  check "f_add"
+    (Pipeline.process "f_add 1.5 2.5") "4.";
+  check "f_sub"
+    (Pipeline.process "f_sub 10.0 3.0") "7.";
+  check "f_mul"
+    (Pipeline.process "f_mul 3.0 4.0") "12.";
+  check "f_div"
+    (Pipeline.process "f_div 10.0 4.0") "2.5";
+  check "float_of_int"
+    (Pipeline.process "float_of_int 7") "7.";
+  check "int_of_float truncates"
+    (Pipeline.process "int_of_float 3.7") "3";
+  check "str_of_float"
+    (Pipeline.process "str_of_float 1.5") "\"1.5\"";
+  check "float_of_str"
+    (Pipeline.process "float_of_str \"3.14\"") "3.14";
+  check "float_of_str trimmed"
+    (Pipeline.process "float_of_str \"  2.5  \"") "2.5";
+  check_raises "float_of_str invalid"
+    (fun () -> Pipeline.process "float_of_str \"abc\"");
+  check "float pipe chain"
+    (Pipeline.process "1.5 |> f_add 2.5 |> f_mul 2.0") "8.";
+  check "int + float = type error"
+    (* Lang requires explicit conversion *)
+    (Pipeline.type_of "(float_of_int 3) |> f_add 0.5") "float";
+  check_raises "f_add with int errors"
+    (fun () -> Pipeline.type_of "f_add 1 2");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
