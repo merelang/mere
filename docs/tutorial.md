@@ -266,6 +266,7 @@ save_order 100 10 5 + log_event 100 10 7    // 132
 - **`pipe.lang`** — `|>` `<<` `>>` 連結
 - **`word_count.lang`** — file I/O + str_count を使った `wc` 風スクリプト
 - **`json_parser.lang`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + escape + エラー、文字 dispatch 含む)
+- **`csv_parser.lang`** — 110 行で完動する CSV パーサ (RFC 4180 縮小版、quoted field + `""` escape + 空 field + file round-trip)
 
 REPL で対話的に試したいときは:
 ```sh
