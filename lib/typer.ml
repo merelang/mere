@@ -236,6 +236,17 @@ let swap_scheme =
     body = Ast.TyArrow (Ast.TyTuple [_swap_alpha; _swap_beta],
                         Ast.TyTuple [_swap_beta; _swap_alpha]) }
 
+(* `pair : 'a -> 'b -> ('a * 'b)` — construct a 2-tuple from curried args. *)
+let _pair_alpha = fresh_var ()
+let _pair_beta = fresh_var ()
+let pair_scheme =
+  let aid = match _pair_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _pair_beta with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; bid];
+    body = Ast.TyArrow (_pair_alpha,
+                        Ast.TyArrow (_pair_beta,
+                                     Ast.TyTuple [_pair_alpha; _pair_beta])) }
+
 (* `const : 'a -> 'b -> 'a` — returns first arg, ignores second. *)
 let _const_alpha = fresh_var ()
 let _const_beta = fresh_var ()
@@ -330,6 +341,7 @@ let initial_env : env =
     ("snd",         snd_scheme);
     ("id",          id_scheme);
     ("swap",        swap_scheme);
+    ("pair",        pair_scheme);
     ("const",       const_scheme);
     ("flip",        flip_scheme);
     ("try_or",      try_or_scheme);

@@ -1376,5 +1376,22 @@ let () =
       "let c = char_at \"abc123\" 3 in
        is_digit c && (not (is_alpha c))") "true";
 
+  (* --- polymorphic `pair : 'a -> 'b -> ('a * 'b)` --- *)
+  check "pair type"
+    (Pipeline.type_of "pair") "('a -> ('b -> ('a * 'b)))";
+  check "pair int/str"
+    (Pipeline.process "pair 1 \"hi\"") "(1, \"hi\")";
+  check "pair bool/int"
+    (Pipeline.process "pair true 42") "(true, 42)";
+  check "pair + fst"
+    (Pipeline.process "fst (pair 10 20)") "10";
+  check "pair + snd"
+    (Pipeline.process "snd (pair \"x\" \"y\")") "\"y\"";
+  check "pair curry partial"
+    (Pipeline.process "let with_loc = pair \"@\" in with_loc 99") "(\"@\", 99)";
+  check "pair == swap inverse"
+    (Pipeline.process
+      "let p = pair 1 2 in (swap (pair 2 1)) == p") "true";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

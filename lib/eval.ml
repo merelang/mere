@@ -268,6 +268,10 @@ let builtin_swap =
     | V_tuple [a; b] -> V_tuple [b; a]
     | _ -> failwith "swap: expected 2-tuple")
 
+let builtin_pair =
+  V_builtin ("pair", fun a ->
+    V_builtin ("pair_partial", fun b -> V_tuple [a; b]))
+
 let builtin_const =
   V_builtin ("const", fun a ->
     V_builtin ("const_partial", fun _b -> a))
@@ -533,6 +537,7 @@ let initial_env : env =
     ("snd", ref builtin_snd);
     ("id", ref builtin_id);
     ("swap", ref builtin_swap);
+    ("pair", ref builtin_pair);
     ("const", ref builtin_const);
     ("flip", ref builtin_flip);
     ("try_or", ref builtin_try_or);
