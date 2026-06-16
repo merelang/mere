@@ -6,6 +6,7 @@
 
 ## 2026-06-16
 
+- **region Phase 2.1**: `&R v` 値式 + escape check — `&R 5` で値を region tag 付きの参照型に。`region R { body }` の出口で body の型に R が漏れていないかチェックし、漏れていればコンパイル時エラー。これで region は「型システム上のラベル」から「実際の安全性保証」に格上げ。
 - **region / `&R T` Phase 1** — メモリモデル本丸への第一歩。`region R { body }` 式が R を region 名としてスコープに導入、`&R T` を参照型として AST/typer/eval に追加。Phase 1 は **構文** のみ — escape check や Trivial 制約、view 型、`r.alloc(v)` semantics は Phase 2 以降。設計 doc: 11_region_vs_arena.md / 14_view_types.md に対応。
 - **網羅性検査 Phase 1** (Exhaustive モジュール) — bool と variant types の網羅性を warning として検出。`match Some x with | Some n -> ...` で「missing None」を stderr に出力、評価は継続。guarded arm は保守的に「カバーしてない」扱い、as-pattern と or-pattern は透過。lib/exhaustive.ml は Typer に依存しない逆方向 (Typer が register_variants を呼んで populate)。
 - **数学 builtin 8 個** (`pi`/`e` 定数 + `sqrt`/`f_abs`/`f_neg`/`floor`/`ceil`/`round`) — float 算術が一通り揃った。

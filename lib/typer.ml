@@ -101,6 +101,17 @@ let instantiate sch =
 
 type env = (string * scheme) list
 
+(* Check whether a type mentions region `name` anywhere in its structure.
+   Used by Region_block's escape check. *)
+let rec mentions_region (name : string) (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyRef (r, inner) -> r = name || mentions_region name inner
+  | Ast.TyArrow (a, b) -> mentions_region name a || mentions_region name b
+  | Ast.TyTuple ts -> List.exists (mentions_region name) ts
+  | Ast.TyCon (_, args) -> List.exists (mentions_region name) args
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
+  | Ast.TyParam _ | Ast.TyVar _ -> false
+
 (* Replace TyParam by fresh TyVars, sharing per param name within one call.
    Used to instantiate polymorphic constructors and user-supplied annotations. *)
 let freshen_params t =
@@ -493,11 +504,20 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let tv = infer env value in
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
-  | Ast.Region_block (_name, body) ->
-    (* Phase 1: region introduces a name in scope but the value is a unit
-       placeholder.  No escape checking yet (e.g. `&R T` values can leak out).
-       Future phases will add region scope tracking and escape checks. *)
-    infer env body
+  | Ast.Region_block (name, body) ->
+    (* Phase 2: introduce region name R in scope, then check that R does not
+       escape the block (i.e., body's resulting type should not mention R). *)
+    let t = infer env body in
+    if mentions_region name (Ast.walk t) then
+      raise (Type_error (e.loc,
+        Printf.sprintf
+          "region escape: value of type `%s` cannot leave region `%s`"
+          (Ast.pp_ty t) name));
+    t
+  | Ast.Ref (region, inner) ->
+    (* `&R e` — tag the value's type with region R. *)
+    let t = infer env inner in
+    Ast.TyRef (region, t)
   | Ast.Fun (param, ty_opt, body) ->
     let alpha = fresh_var () in
     (match ty_opt with
