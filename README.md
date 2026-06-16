@@ -4,7 +4,7 @@
 
 ## ステータス (2026-06-16 時点)
 
-- **85 stdlib builtin、619 tests passing** (網羅性検査 Phase 1 + region/`&R T` Phase 1 含む)
+- **85 stdlib builtin、628 tests passing** (網羅性検査 Phase 1 + region/`&R T` Phase 2.1 含む)
 - ツリーウォーキング interpreter (codegen なし)
 - 設計コンテキストは別リポ `internal design notes` (private)
 

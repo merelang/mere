@@ -1756,5 +1756,32 @@ let () =
     (Pipeline.process
       "let f = fn (x: int) -> region R { x * 2 } in f 21") "42";
 
+  (* --- region Phase 2: `&R v` value form + escape check --- *)
+  check "&R v type at toplevel"
+    (Pipeline.type_of "&R 5") "&R int";
+  check "&R v evaluates to inner value"
+    (Pipeline.process "&R 42") "42";
+  check "region body with let-bound &R value (no escape)"
+    (Pipeline.process "region R { let x = &R 5 in 42 }") "42";
+  check "&R nested expr"
+    (Pipeline.process "region R { let pair = &R (1, 2) in 99 }") "99";
+  check "&R str"
+    (Pipeline.type_of "&R \"hello\"") "&R str";
+  check_raises "region escape: returning &R int from region"
+    (fun () -> Pipeline.process "region R { &R 5 }");
+  check_raises "region escape: function with &R return"
+    (fun () -> Pipeline.type_of "region R { fn (x: int) -> &R x }");
+  check_raises "region escape: tuple containing &R"
+    (fun () -> Pipeline.process "region R { (&R 1, 2) }");
+  check "different region names don't unify"
+    (* &R int != &S int *)
+    (let ok =
+       try
+         let _ = Pipeline.type_of "fn (x: &R int) -> (x : &S int)" in
+         false
+       with _ -> true
+     in
+     if ok then "raised" else "did-not-raise") "raised";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -44,6 +44,7 @@ and expr_node =
        fall through to next arm. *)
   | Tuple of expr list
   | Region_block of string * expr   (* `region R { body }` — introduces region name R *)
+  | Ref of string * expr            (* `&R e` — tag value with region R, type becomes &R T *)
   | Record_lit of string * (string * expr) list
     (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
   | Field_get of expr * string
@@ -226,6 +227,7 @@ let rec pp e =
     "(" ^ String.concat ", " (List.map pp es) ^ ")"
   | Region_block (name, body) ->
     "(region " ^ name ^ " { " ^ pp body ^ " })"
+  | Ref (r, inner) -> "&" ^ r ^ " " ^ pp inner
   | Record_lit (name, fields) ->
     let parts = List.map (fun (f, e) -> f ^ " = " ^ pp e) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"
