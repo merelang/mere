@@ -1,0 +1,96 @@
+// List ユーティリティを Lang 自身で実装した library
+//
+// stdlib に builtin map/filter/fold を入れる代わりに、ユーザ側で書ける見本。
+// `type 'a list = Nil | Cons of 'a * 'a list;` 前提。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+// === 基本 ===
+
+let rec length = fn (xs) -> match xs with
+  | []        -> 0
+  | [_, ...t] -> 1 + length t;
+
+let rec rev_aux = fn (xs, acc) -> match xs with
+  | []        -> acc
+  | [h, ...t] -> rev_aux t (Cons (h, acc));
+
+let rev = fn (xs) -> rev_aux xs [];
+
+// === 高階 ===
+
+let rec map = fn (f, xs) -> match xs with
+  | []        -> []
+  | [h, ...t] -> Cons (f h, map f t);
+
+let rec filter = fn (p, xs) -> match xs with
+  | []        -> []
+  | [h, ...t] -> if p h then Cons (h, filter p t) else filter p t;
+
+let rec fold_left = fn (f, acc, xs) -> match xs with
+  | []        -> acc
+  | [h, ...t] -> fold_left f (f acc h) t;
+
+let rec fold_right = fn (f, xs, acc) -> match xs with
+  | []        -> acc
+  | [h, ...t] -> f h (fold_right f t acc);
+
+let rec for_all = fn (p, xs) -> match xs with
+  | []        -> true
+  | [h, ...t] -> if p h then for_all p t else false;
+
+let rec any = fn (p, xs) -> match xs with
+  | []        -> false
+  | [h, ...t] -> if p h then true else any p t;
+
+// === 切り出し ===
+
+let rec take = fn (n, xs) ->
+  if n <= 0 then []
+  else match xs with
+    | []        -> []
+    | [h, ...t] -> Cons (h, take (n - 1) t);
+
+let rec drop = fn (n, xs) ->
+  if n <= 0 then xs
+  else match xs with
+    | []        -> []
+    | [_, ...t] -> drop (n - 1) t;
+
+// === 生成 ===
+
+let rec range = fn (lo: int, hi: int) ->
+  if lo > hi then []
+  else Cons (lo, range (lo + 1) hi);
+
+let rec replicate = fn (n: int, v) ->
+  if n <= 0 then []
+  else Cons (v, replicate (n - 1) v);
+
+// === Self-tests ===
+
+let xs = [1, 2, 3, 4, 5];
+
+let _ = print ("len    = " ++ show (length xs));         // 5
+let _ = print ("rev    = " ++ show (rev xs));            // [5,4,3,2,1]
+let _ = print ("map^2  = " ++ show (map square xs));     // [1,4,9,16,25]
+let _ = print ("filter = " ++ show (filter even xs));    // [2,4]
+let _ = print ("sum    = " ++ show (fold_left (fn (a) -> fn (b) -> a + b) 0 xs));
+                                                          // 15
+let _ = print ("max    = " ++ show (fold_left max int_min xs));
+                                                          // 5
+let _ = print ("all_pos= " ++ show (for_all (fn (x) -> x > 0) xs));   // true
+let _ = print ("any_big= " ++ show (any (fn (x) -> x > 4) xs));       // true
+let _ = print ("take 3 = " ++ show (take 3 xs));         // [1,2,3]
+let _ = print ("drop 3 = " ++ show (drop 3 xs));         // [4,5]
+let _ = print ("range  = " ++ show (range 1 5));         // [1,2,3,4,5]
+let _ = print ("rep    = " ++ show (replicate 4 "x"));   // ["x","x","x","x"]
+
+// Composition demo: 1..10 から偶数を 2 乗して合計
+let _ = print "---";
+let _ = print
+  ("sum-of-squares-of-evens 1..10 = " ++
+   show (fold_left (fn (a) -> fn (b) -> a + b) 0
+          (map square (filter even (range 1 10)))));   // 4+16+36+64+100=220
+
+0
