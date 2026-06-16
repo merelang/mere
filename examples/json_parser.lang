@@ -61,15 +61,18 @@ let parse_num = fn (s: str, i: int) ->
   else (JNum (int_of_str (substring s start end_pos)), end_pos);
 
 let parse_raw_str = fn (s: str, i: int) ->
-  // Returns (content, end_pos).  No escape support.
+  // Returns (content, end_pos).  Handles `\"` `\\` `\n` `\t` `\r` `\/` via
+  // str_unescape after scanning the raw region.
   let i1 = expect_char s i '"' in
   let rec scan = fn (j: int) ->
     if j >= str_len s then fail "unterminated string"
-    else if char_at s j == '"' then j
-    else scan (j + 1)
+    else match char_at s j with
+    | '\\' -> scan (j + 2)         // skip escape pair (whatever follows)
+    | '"'  -> j
+    | _    -> scan (j + 1)
   in
   let close = scan i1 in
-  (substring s i1 close, close + 1);
+  (str_unescape (substring s i1 close), close + 1);
 
 let parse_jstr = fn (s: str, i: int) ->
   let (text, j) = parse_raw_str s i in
@@ -160,6 +163,9 @@ let _ = case "obj-flat"  "{\"a\": 1, \"b\": 2}";
 let _ = case "nested"    "{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
 let _ = case "ws"        "  [  1 ,  2  ]  ";
 let _ = case "deep"      "[[1, 2], [3, [4, 5]], []]";
+let _ = case "escape-quote" "\"a\\\"b\"";
+let _ = case "escape-newline" "\"line1\\nline2\"";
+let _ = case "escape-mixed"   "{\"msg\": \"hello\\nworld\"}";
 let _ = case "bad-trailing" "1 2";
 let _ = case "bad-token"   "xxx";
 let _ = case "bad-arr"     "[1, 2,";

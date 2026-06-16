@@ -564,6 +564,37 @@ let builtin_is_space =
     | V_str _ -> V_bool false
     | _ -> failwith "is_space: expected str")
 
+let builtin_str_unescape =
+  V_builtin ("str_unescape", fun v ->
+    match v with
+    | V_str s ->
+      let n = String.length s in
+      let buf = Buffer.create n in
+      let rec loop i =
+        if i >= n then ()
+        else if s.[i] = '\\' && i + 1 < n then
+          let c = match s.[i + 1] with
+            | 'n'  -> '\n'
+            | 't'  -> '\t'
+            | 'r'  -> '\r'
+            | '\\' -> '\\'
+            | '"'  -> '"'
+            | '/'  -> '/'
+            | c ->
+              raise (Eval_error (Loc.dummy,
+                Printf.sprintf "str_unescape: unknown escape '\\%c'" c))
+          in
+          Buffer.add_char buf c;
+          loop (i + 2)
+        else begin
+          Buffer.add_char buf s.[i];
+          loop (i + 1)
+        end
+      in
+      loop 0;
+      V_str (Buffer.contents buf)
+    | _ -> failwith "str_unescape: expected str")
+
 let builtin_str_rev =
   V_builtin ("str_rev", fun v ->
     match v with
@@ -647,6 +678,7 @@ let initial_env : env =
     ("to_lower", ref builtin_to_lower);
     ("str_trim", ref builtin_str_trim);
     ("str_rev", ref builtin_str_rev);
+    ("str_unescape", ref builtin_str_unescape);
     ("is_digit", ref builtin_is_digit);
     ("is_alpha", ref builtin_is_alpha);
     ("is_space", ref builtin_is_space);
