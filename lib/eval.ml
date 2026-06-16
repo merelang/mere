@@ -47,6 +47,13 @@ let builtin_read_line =
        with End_of_file -> V_str "")
     | _ -> failwith "read_line: expected unit")
 
+let builtin_print_no_nl =
+  V_builtin ("print_no_nl", fun v ->
+    (match v with
+     | V_str s -> print_string s; flush stdout
+     | _ -> failwith "print_no_nl: expected str");
+    V_unit)
+
 let builtin_print_int =
   V_builtin ("print_int", fun v ->
     (match v with
@@ -527,6 +534,7 @@ let builtin_char_at =
 let initial_env : env =
   [ ("print", ref builtin_print);
     ("read_line", ref builtin_read_line);
+    ("print_no_nl", ref builtin_print_no_nl);
     ("print_int", ref builtin_print_int);
     ("print_bool", ref builtin_print_bool);
     ("str_of_int", ref builtin_str_of_int);

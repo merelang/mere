@@ -1415,5 +1415,13 @@ let () =
   check "read_line in compose"
     (Pipeline.type_of "str_len << read_line") "(unit -> int)";
 
+  (* --- print_no_nl : str -> unit (prompts without trailing newline) --- *)
+  check "print_no_nl type"
+    (Pipeline.type_of "print_no_nl") "(str -> unit)";
+  check "print_no_nl returns unit"
+    (Pipeline.process "print_no_nl \"x\"") "()";
+  check "print_no_nl in block"
+    (Pipeline.process "{ print_no_nl \"a\"; print_no_nl \"b\"; 42 }") "42";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
