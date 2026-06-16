@@ -130,14 +130,41 @@ let tokenize s =
       | '|' -> advance 1; aux (i + 1) ((pos, T_pipe) :: acc)
       | '&' when i + 1 < len && s.[i + 1] = '&' ->
         advance 2; aux (i + 2) ((pos, T_amp_amp) :: acc)
-      | '\'' when i + 1 < len && is_alpha s.[i + 1] ->
-        let rec read j =
-          if j < len && is_ident_cont s.[j] then read (j + 1) else j
-        in
-        let j = read (i + 1) in
-        let name = String.sub s (i + 1) (j - i - 1) in
-        advance (j - i);
-        aux j ((pos, T_tyvar name) :: acc)
+      | '\'' ->
+        (* Disambiguate single-quote between two forms:
+           - char literal: 'X' (3 chars) or '\X' (4 chars, escape)
+             -> emit T_string of length 1 (Lang has no separate char type)
+           - tyvar: 'name (letter-start identifier, no closing quote)
+             -> emit T_tyvar
+           The char form requires the closing `'` at a specific offset. *)
+        if i + 3 < len && s.[i + 1] = '\\' && s.[i + 3] = '\'' then begin
+          let actual = match s.[i + 2] with
+            | 'n' -> '\n' | 't' -> '\t' | '\\' -> '\\'
+            | '\'' -> '\'' | '"' -> '"'
+            | c -> raise (Lex_error (pos,
+                Printf.sprintf "unknown escape in char literal: '\\%c'" c))
+          in
+          advance 4;
+          aux (i + 4) ((pos, T_string (String.make 1 actual)) :: acc)
+        end
+        else if i + 2 < len && s.[i + 1] <> '\\' && s.[i + 2] = '\'' then begin
+          (* `'X'` where X is any single char other than `\` (escapes handled
+             above) and `'` (we don't allow an empty literal). *)
+          let c = s.[i + 1] in
+          advance 3;
+          aux (i + 3) ((pos, T_string (String.make 1 c)) :: acc)
+        end
+        else if i + 1 < len && is_alpha s.[i + 1] then begin
+          let rec read j =
+            if j < len && is_ident_cont s.[j] then read (j + 1) else j
+          in
+          let j = read (i + 1) in
+          let name = String.sub s (i + 1) (j - i - 1) in
+          advance (j - i);
+          aux j ((pos, T_tyvar name) :: acc)
+        end
+        else
+          raise (Lex_error (pos, "unexpected '"))
       | '"' ->
         let buf = Buffer.create 16 in
         let rec read j =
