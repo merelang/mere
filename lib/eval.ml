@@ -212,6 +212,18 @@ let builtin_sign =
     | V_int n -> V_int (if n > 0 then 1 else if n < 0 then -1 else 0)
     | _ -> failwith "sign: expected int")
 
+let builtin_incr =
+  V_builtin ("incr", fun v ->
+    match v with
+    | V_int n -> V_int (n + 1)
+    | _ -> failwith "incr: expected int")
+
+let builtin_decr =
+  V_builtin ("decr", fun v ->
+    match v with
+    | V_int n -> V_int (n - 1)
+    | _ -> failwith "decr: expected int")
+
 let builtin_clamp =
   V_builtin ("clamp", fun lo_val ->
     match lo_val with
@@ -586,6 +598,8 @@ let initial_env : env =
     ("even", ref builtin_even);
     ("odd", ref builtin_odd);
     ("sign", ref builtin_sign);
+    ("incr", ref builtin_incr);
+    ("decr", ref builtin_decr);
     ("clamp", ref builtin_clamp);
     ("pow", ref builtin_pow);
     ("gcd", ref builtin_gcd);
