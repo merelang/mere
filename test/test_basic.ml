@@ -1546,5 +1546,25 @@ let () =
   check "polymorphic id with tyvar"
     (Pipeline.type_of "fn x -> x") "('a -> 'a)";
 
+  (* --- str_unescape : decode escape sequences in a string --- *)
+  check "str_unescape newline len"
+    (Pipeline.process "str_len (str_unescape \"\\\\n\")") "1";
+  check "str_unescape preserves non-escapes"
+    (Pipeline.process "str_unescape \"abc\"") "\"abc\"";
+  check "str_unescape equals lexer newline"
+    (Pipeline.process "str_unescape \"\\\\n\" == \"\\n\"") "true";
+  check "str_unescape mixed"
+    (Pipeline.process "str_len (str_unescape \"a\\\\nb\\\\tc\")") "5";
+  check "str_unescape backslash"
+    (Pipeline.process "str_unescape \"\\\\\\\\\" == \"\\\\\"") "true";
+  check "str_unescape quote"
+    (Pipeline.process "str_unescape \"\\\\\\\"\" == \"\\\"\"") "true";
+  check "str_unescape slash"
+    (Pipeline.process "str_unescape \"\\\\/\" == \"/\"") "true";
+  check "str_unescape type"
+    (Pipeline.type_of "str_unescape") "(str -> str)";
+  check_raises "str_unescape unknown escape"
+    (fun () -> Pipeline.process "str_unescape \"\\\\x\"");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
