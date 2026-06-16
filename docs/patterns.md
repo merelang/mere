@@ -207,12 +207,12 @@ a + b
 ## 12. デバッグ出力は `show` 一本
 
 ```
-let _ = print ("xs = " ++ show xs);
-let _ = print ("user = " ++ show user);
+let _ = print ("xs = " ++ show xs);              // "xs = [1, 2, 3]"
+let _ = print ("user = " ++ show user);          // "user = User { name = ..., age = ... }"
 let _ = print ("result = " ++ show (parse_json input));
 ```
 
-`show : 'a -> str` は多相なので、record/sum/list/tuple なんでも内部の `to_string` で文字列化する。
+`show : 'a -> str` は多相なので、record/sum/list/tuple なんでも内部の `to_string` で文字列化する。Cons/Nil chain は `[a, b, c]` 形式で短く出力される。
 
 ---
 
