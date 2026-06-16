@@ -162,6 +162,29 @@ let builtin_odd =
     | V_int n -> V_bool (n mod 2 <> 0)
     | _ -> failwith "odd: expected int")
 
+let builtin_sign =
+  V_builtin ("sign", fun v ->
+    match v with
+    | V_int n -> V_int (if n > 0 then 1 else if n < 0 then -1 else 0)
+    | _ -> failwith "sign: expected int")
+
+let builtin_clamp =
+  V_builtin ("clamp", fun lo_val ->
+    match lo_val with
+    | V_int lo ->
+      V_builtin ("clamp_p1", fun hi_val ->
+        match hi_val with
+        | V_int hi ->
+          V_builtin ("clamp_p2", fun x_val ->
+            match x_val with
+            | V_int x ->
+              if x < lo then V_int lo
+              else if x > hi then V_int hi
+              else V_int x
+            | _ -> failwith "clamp: 3rd arg expected int")
+        | _ -> failwith "clamp: 2nd arg expected int")
+    | _ -> failwith "clamp: 1st arg expected int")
+
 let builtin_gcd =
   V_builtin ("gcd", fun a ->
     match a with
@@ -382,6 +405,8 @@ let initial_env : env =
     ("abs", ref builtin_abs);
     ("even", ref builtin_even);
     ("odd", ref builtin_odd);
+    ("sign", ref builtin_sign);
+    ("clamp", ref builtin_clamp);
     ("pow", ref builtin_pow);
     ("gcd", ref builtin_gcd);
     ("lcm", ref builtin_lcm);
