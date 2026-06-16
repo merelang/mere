@@ -340,6 +340,17 @@ let builtin_try_or =
       try !apply_value_ref f V_unit
       with Eval_error _ -> default))
 
+let builtin_iter_n =
+  V_builtin ("iter_n", fun n_val ->
+    match n_val with
+    | V_int n ->
+      V_builtin ("iter_n_partial", fun f ->
+        for _ = 1 to n do
+          ignore (!apply_value_ref f V_unit)
+        done;
+        V_unit)
+    | _ -> failwith "iter_n: 1st arg expected int")
+
 let builtin_assert =
   V_builtin ("assert", fun cond ->
     match cond with
@@ -589,6 +600,7 @@ let initial_env : env =
     ("const", ref builtin_const);
     ("flip", ref builtin_flip);
     ("try_or", ref builtin_try_or);
+    ("iter_n", ref builtin_iter_n);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

@@ -1429,5 +1429,15 @@ let () =
   check "print_err returns unit"
     (Pipeline.process "print_err \"err msg\"") "()";
 
+  (* --- iter_n : int -> (unit -> unit) -> unit (side-effect loop) --- *)
+  check "iter_n type"
+    (Pipeline.type_of "iter_n") "(int -> ((unit -> unit) -> unit))";
+  check "iter_n returns unit"
+    (Pipeline.process "iter_n 3 (fn () -> ())") "()";
+  check "iter_n zero is no-op"
+    (Pipeline.process "iter_n 0 (fn () -> fail \"should not run\")") "()";
+  check "iter_n negative is no-op"
+    (Pipeline.process "iter_n (- 5) (fn () -> fail \"never\")") "()";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
