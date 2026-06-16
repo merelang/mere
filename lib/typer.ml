@@ -287,6 +287,9 @@ let initial_env : env =
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("print_no_nl", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_err",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
+    ("read_file",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyStr)));
+    ("write_file",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
     ("print_bool",  mono (Ast.TyArrow (Ast.TyBool, Ast.TyUnit)));
     ("str_of_int",  mono (Ast.TyArrow (Ast.TyInt,  Ast.TyStr)));

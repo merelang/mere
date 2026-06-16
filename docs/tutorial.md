@@ -234,7 +234,8 @@ save_order 100 10 5 + log_event 100 10 7    // 132
 - **`signature.lang`** — signature alias
 - **`mutual_rec.lang`** — `let rec ... and ...`
 - **`pipe.lang`** — `|>` `<<` `>>` 連結
-- **`json_parser.lang`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + エラー)
+- **`word_count.lang`** — file I/O + str_count を使った `wc` 風スクリプト
+- **`json_parser.lang`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + escape + エラー)
 
 REPL で対話的に試したいときは:
 ```sh

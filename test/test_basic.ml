@@ -1566,5 +1566,19 @@ let () =
   check_raises "str_unescape unknown escape"
     (fun () -> Pipeline.process "str_unescape \"\\\\x\"");
 
+  (* --- file I/O: read_file / write_file (round-trip via /tmp) --- *)
+  check "read_file type"
+    (Pipeline.type_of "read_file") "(str -> str)";
+  check "write_file type"
+    (Pipeline.type_of "write_file") "(str -> (str -> unit))";
+  check "file round-trip"
+    (let path = Filename.temp_file "lang_ml_test" ".txt" in
+     Pipeline.process
+       (Printf.sprintf
+          "{ write_file %S \"hello lang\"; read_file %S }" path path))
+    "\"hello lang\"";
+  check_raises "read_file missing"
+    (fun () -> Pipeline.process "read_file \"/nonexistent/no/such/file\"");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

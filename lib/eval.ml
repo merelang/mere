@@ -83,6 +83,38 @@ let builtin_print_err =
      | _ -> failwith "print_err: expected str");
     V_unit)
 
+let builtin_read_file =
+  V_builtin ("read_file", fun v ->
+    match v with
+    | V_str path ->
+      (try
+         let ic = open_in path in
+         let len = in_channel_length ic in
+         let buf = Bytes.create len in
+         really_input ic buf 0 len;
+         close_in ic;
+         V_str (Bytes.to_string buf)
+       with Sys_error msg ->
+         raise (Eval_error (Loc.dummy, "read_file: " ^ msg)))
+    | _ -> failwith "read_file: expected str")
+
+let builtin_write_file =
+  V_builtin ("write_file", fun path_val ->
+    match path_val with
+    | V_str path ->
+      V_builtin ("write_file_partial", fun content_val ->
+        match content_val with
+        | V_str content ->
+          (try
+             let oc = open_out path in
+             output_string oc content;
+             close_out oc;
+             V_unit
+           with Sys_error msg ->
+             raise (Eval_error (Loc.dummy, "write_file: " ^ msg)))
+        | _ -> failwith "write_file: 2nd arg expected str")
+    | _ -> failwith "write_file: 1st arg expected str")
+
 let builtin_print_int =
   V_builtin ("print_int", fun v ->
     (match v with
@@ -656,6 +688,8 @@ let initial_env : env =
     ("read_line", ref builtin_read_line);
     ("print_no_nl", ref builtin_print_no_nl);
     ("print_err", ref builtin_print_err);
+    ("read_file", ref builtin_read_file);
+    ("write_file", ref builtin_write_file);
     ("print_int", ref builtin_print_int);
     ("print_bool", ref builtin_print_bool);
     ("str_of_int", ref builtin_str_of_int);
