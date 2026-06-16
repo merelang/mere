@@ -1182,5 +1182,25 @@ let () =
   check_raises "fst on non-2-tuple"
     (fun () -> Pipeline.process "fst (1, 2, 3)");
 
+  (* --- polymorphic `id` and `swap` --- *)
+  check "id type" (Pipeline.type_of "id") "('a -> 'a)";
+  check "id int" (Pipeline.process "id 42") "42";
+  check "id str" (Pipeline.process "id \"hi\"") "\"hi\"";
+  check "id with compose"
+    (Pipeline.process
+      "let f = id << (fn x -> x + 1) in f 41") "42";
+  check "id at multiple types"
+    (Pipeline.process "id 1 + (if id true then 10 else 0)") "11";
+  check "swap type"
+    (Pipeline.type_of "swap") "(('a * 'b) -> ('b * 'a))";
+  check "swap basic"
+    (Pipeline.process "swap (1, \"a\")") "(\"a\", 1)";
+  check "swap involution"
+    (Pipeline.process "swap (swap (10, 20))") "(10, 20)";
+  check "swap with fst/snd"
+    (Pipeline.process "fst (swap (1, \"hello\"))") "\"hello\"";
+  check_raises "swap on non-2-tuple"
+    (fun () -> Pipeline.process "swap (1, 2, 3)");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
