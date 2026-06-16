@@ -1,0 +1,132 @@
+// 算術式の評価器 in Lang
+//
+// 文法 (precedence: + - は低、* / は高、() で覆える):
+//   expr   := term (("+" | "-") term)*
+//   term   := factor (("*" | "/") factor)*
+//   factor := number | "-" factor | "(" expr ")"
+//   number := [0-9]+
+//
+// 100 行クラスのプログラムで Lang の parser パターンを再使用。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+type expr =
+  | Num of int
+  | Neg of expr
+  | Add of expr * expr
+  | Sub of expr * expr
+  | Mul of expr * expr
+  | Div of expr * expr;
+
+// === Whitespace ===
+
+let rec skip_ws = fn (s: str, i: int) ->
+  if i >= str_len s then i
+  else if is_space (char_at s i) then skip_ws s (i + 1)
+  else i;
+
+// === Number ===
+
+let parse_number = fn (s: str, i0: int) ->
+  let i = skip_ws s i0 in
+  let rec scan = fn (j: int) ->
+    if j >= str_len s then j
+    else if is_digit (char_at s j) then scan (j + 1)
+    else j
+  in
+  let end_pos = scan i in
+  if end_pos == i
+    then fail ("expected digit at pos " ++ str_of_int i)
+  else (Num (int_of_str (substring s i end_pos)), end_pos);
+
+// === Expression parsing (precedence climbing) ===
+// factor は単項 - も受ける、term は * / の連鎖、expr は + - の連鎖。
+
+let rec parse_expr = fn (s: str, i: int) ->
+  let (left, j) = parse_term s i in
+  let rec loop = fn (acc, k) ->
+    let k = skip_ws s k in
+    if k >= str_len s then (acc, k)
+    else match char_at s k with
+    | '+' ->
+      let (rhs, k2) = parse_term s (k + 1) in
+      loop (Add (acc, rhs)) k2
+    | '-' ->
+      let (rhs, k2) = parse_term s (k + 1) in
+      loop (Sub (acc, rhs)) k2
+    | _ -> (acc, k)
+  in
+  loop left j
+
+and parse_term = fn (s: str, i: int) ->
+  let (left, j) = parse_factor s i in
+  let rec loop = fn (acc, k) ->
+    let k = skip_ws s k in
+    if k >= str_len s then (acc, k)
+    else match char_at s k with
+    | '*' ->
+      let (rhs, k2) = parse_factor s (k + 1) in
+      loop (Mul (acc, rhs)) k2
+    | '/' ->
+      let (rhs, k2) = parse_factor s (k + 1) in
+      loop (Div (acc, rhs)) k2
+    | _ -> (acc, k)
+  in
+  loop left j
+
+and parse_factor = fn (s: str, i: int) ->
+  let i = skip_ws s i in
+  if i >= str_len s then fail "unexpected EOF"
+  else match char_at s i with
+  | '-' ->
+    let (inner, j) = parse_factor s (i + 1) in
+    (Neg inner, j)
+  | '(' ->
+    let (inner, j) = parse_expr s (i + 1) in
+    let j = skip_ws s j in
+    if j >= str_len s || char_at s j != ')'
+      then fail ("expected ')' at pos " ++ str_of_int j)
+    else (inner, j + 1)
+  | c when is_digit c -> parse_number s i
+  | c -> fail ("unexpected '" ++ c ++ "' at pos " ++ str_of_int i);
+
+// === Top-level parser: parse_expr + trailing ws check ===
+
+let parse = fn (s: str) ->
+  let (ast, i) = parse_expr s 0 in
+  let i = skip_ws s i in
+  if i != str_len s
+    then fail ("trailing input at pos " ++ str_of_int i)
+  else ast;
+
+// === Evaluator ===
+
+let rec eval = fn (e) -> match e with
+  | Num n        -> n
+  | Neg a        -> 0 - eval a
+  | Add (a, b)   -> eval a + eval b
+  | Sub (a, b)   -> eval a - eval b
+  | Mul (a, b)   -> eval a * eval b
+  | Div (a, b)   ->
+    let bv = eval b in
+    if bv == 0 then fail "div by zero" else eval a / bv;
+
+// === Top-level driver ===
+
+let run = fn (input: str) ->
+  let result = try_or (fn () -> show (eval (parse input))) "<error>" in
+  print (input ++ "  =>  " ++ result);
+
+let _ = run "1 + 2";
+let _ = run "2 * 3 + 4";
+let _ = run "1 + 2 * 3";
+let _ = run "(1 + 2) * 3";
+let _ = run "10 / 2 - 1";
+let _ = run "-5 + 10";
+let _ = run "((1 + 2) * 3 - 4) / 5";
+let _ = run "  3 *  4  ";
+let _ = run "1 / 0";
+let _ = run "1 +";
+let _ = run "(1 + 2";
+
+0
