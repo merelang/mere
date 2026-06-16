@@ -1452,5 +1452,13 @@ let () =
   check "incr/decr inverse"
     (Pipeline.process "(incr >> decr) 42") "42";
 
+  (* --- sum_range : int -> int -> int (Gauss formula) --- *)
+  check "sum_range 1..10" (Pipeline.process "sum_range 1 10") "55";
+  check "sum_range 1..100" (Pipeline.process "sum_range 1 100") "5050";
+  check "sum_range single" (Pipeline.process "sum_range 5 5") "5";
+  check "sum_range empty"  (Pipeline.process "sum_range 10 5") "0";
+  check "sum_range 0..0"   (Pipeline.process "sum_range 0 0") "0";
+  check "sum_range type"   (Pipeline.type_of "sum_range") "(int -> (int -> int))";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
