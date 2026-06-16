@@ -236,6 +236,32 @@ let swap_scheme =
     body = Ast.TyArrow (Ast.TyTuple [_swap_alpha; _swap_beta],
                         Ast.TyTuple [_swap_beta; _swap_alpha]) }
 
+(* `const : 'a -> 'b -> 'a` — returns first arg, ignores second. *)
+let _const_alpha = fresh_var ()
+let _const_beta = fresh_var ()
+let const_scheme =
+  let aid = match _const_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _const_beta with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; bid];
+    body = Ast.TyArrow (_const_alpha,
+                        Ast.TyArrow (_const_beta, _const_alpha)) }
+
+(* `flip : ('a -> 'b -> 'c) -> ('b -> 'a -> 'c)` — flip arg order of a curried
+   binary function.  Lang's first 3-quantified, higher-order builtin. *)
+let _flip_alpha = fresh_var ()
+let _flip_beta = fresh_var ()
+let _flip_gamma = fresh_var ()
+let flip_scheme =
+  let aid = match _flip_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _flip_beta with Ast.TyVar v -> v.id | _ -> assert false in
+  let cid = match _flip_gamma with Ast.TyVar v -> v.id | _ -> assert false in
+  let arrow_in =
+    Ast.TyArrow (_flip_alpha, Ast.TyArrow (_flip_beta, _flip_gamma)) in
+  let arrow_out =
+    Ast.TyArrow (_flip_beta, Ast.TyArrow (_flip_alpha, _flip_gamma)) in
+  { quantified = [aid; bid; cid];
+    body = Ast.TyArrow (arrow_in, arrow_out) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
@@ -277,6 +303,8 @@ let initial_env : env =
     ("snd",         snd_scheme);
     ("id",          id_scheme);
     ("swap",        swap_scheme);
+    ("const",       const_scheme);
+    ("flip",        flip_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
