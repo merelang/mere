@@ -1305,5 +1305,25 @@ let () =
   check_raises "ord empty"
     (fun () -> Pipeline.process "ord \"\"");
 
+  (* --- stdlib: to_upper / to_lower (ASCII case) --- *)
+  check "to_upper basic"
+    (Pipeline.process "to_upper \"hello\"") "\"HELLO\"";
+  check "to_lower basic"
+    (Pipeline.process "to_lower \"WORLD\"") "\"world\"";
+  check "to_upper mixed"
+    (Pipeline.process "to_upper \"Hello World 123\"") "\"HELLO WORLD 123\"";
+  check "to_lower mixed"
+    (Pipeline.process "to_lower \"Hello World 123\"") "\"hello world 123\"";
+  check "to_upper empty"
+    (Pipeline.process "to_upper \"\"") "\"\"";
+  check "to_upper idempotent"
+    (Pipeline.process "to_upper (to_upper \"abc\")") "\"ABC\"";
+  check "to_upper/to_lower inverse on letters"
+    (Pipeline.process "to_lower (to_upper \"hello\")") "\"hello\"";
+  check "to_upper type"
+    (Pipeline.type_of "to_upper") "(str -> str)";
+  check "to_lower type"
+    (Pipeline.type_of "to_lower") "(str -> str)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

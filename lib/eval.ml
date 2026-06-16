@@ -401,6 +401,18 @@ let builtin_str_ends_with =
         | _ -> failwith "str_ends_with: 2nd arg expected str")
     | _ -> failwith "str_ends_with: 1st arg expected str")
 
+let builtin_to_upper =
+  V_builtin ("to_upper", fun v ->
+    match v with
+    | V_str s -> V_str (String.uppercase_ascii s)
+    | _ -> failwith "to_upper: expected str")
+
+let builtin_to_lower =
+  V_builtin ("to_lower", fun v ->
+    match v with
+    | V_str s -> V_str (String.lowercase_ascii s)
+    | _ -> failwith "to_lower: expected str")
+
 let builtin_chr =
   V_builtin ("chr", fun v ->
     match v with
@@ -456,6 +468,8 @@ let initial_env : env =
     ("char_at", ref builtin_char_at);
     ("chr", ref builtin_chr);
     ("ord", ref builtin_ord);
+    ("to_upper", ref builtin_to_upper);
+    ("to_lower", ref builtin_to_lower);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);
     ("max", ref builtin_max);
