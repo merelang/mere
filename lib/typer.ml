@@ -322,6 +322,7 @@ let initial_env : env =
     ("to_lower",    mono (Ast.TyArrow (Ast.TyStr, Ast.TyStr)));
     ("str_trim",    mono (Ast.TyArrow (Ast.TyStr, Ast.TyStr)));
     ("str_rev",     mono (Ast.TyArrow (Ast.TyStr, Ast.TyStr)));
+    ("str_unescape", mono (Ast.TyArrow (Ast.TyStr, Ast.TyStr)));
     ("is_digit",    mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
     ("is_alpha",    mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
     ("is_space",    mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));

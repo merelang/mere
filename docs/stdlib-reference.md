@@ -57,6 +57,7 @@ bool_of_str "true"   // true
 | `str_replace` | `str -> str -> str -> str` | 全置換、empty needle は変化なし |
 | `str_rev` | `str -> str` | 文字列反転 |
 | `str_trim` | `str -> str` | 前後空白除去 |
+| `str_unescape` ⚡ | `str -> str` | `\n` `\t` `\r` `\\` `\"` `\/` を decode、未知 escape で raise |
 | `substring` ⚡ | `str -> int -> int -> str` | `s[start:end_excl]`、範囲外で raise |
 | `char_at` ⚡ | `str -> int -> str` | index アクセス (長さ 1 の str)、OOB で raise |
 | `chr` ⚡ | `int -> str` | 0..255 の int を 1 文字 str に、範囲外で raise |
@@ -72,6 +73,7 @@ str_replace "foo bar foo" "foo" "X"           // "X bar X"
 substring "hello world" 6 11                  // "world"
 char_at "abcdef" 2                            // "c"
 "world" |> str_contains "hello world"         // true (pipe + curry)
+str_unescape "a\\nb"                          // a + newline + b (3 chars)
 ```
 
 ---
