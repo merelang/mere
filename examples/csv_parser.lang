@@ -1,0 +1,130 @@
+// CSV パーサ in Lang
+//
+// 仕様 (RFC 4180 縮小版):
+//   - field 区切りは `,`
+//   - 行区切りは `\n`
+//   - field は quote `"..."` 可、quote 内では `""` で literal quote
+//   - quote 外の field は trim しない (CRLF も対応せず単純化)
+//
+// 結果は `str list list` (行のリスト、各行は field のリスト)
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+let rec rev_aux = fn (xs, acc) ->
+  match xs with
+  | []         -> acc
+  | [h, ...t]  -> rev_aux t (Cons (h, acc));
+
+let rev = fn (xs) -> rev_aux xs [];
+
+// === field parser: quoted or bare ===
+// 戻り値: (field, next_pos)
+
+let parse_quoted = fn (s: str, i: int) ->
+  // s[i] == '"'.  Scan until next un-paired '"', interpreting "" as literal ".
+  let rec scan = fn (chunk_start: int, j: int, parts: str list) ->
+    if j >= str_len s then fail "unterminated quoted field"
+    else match char_at s j with
+    | '"' ->
+      if j + 1 < str_len s && char_at s (j + 1) == '"' then
+        // Escaped quote: take chunk + literal '"', advance chunk_start to j+2
+        let chunk = substring s chunk_start j in
+        scan (j + 2) (j + 2) (Cons ("\"", Cons (chunk, parts)))
+      else
+        // End of quoted field
+        let chunk = substring s chunk_start j in
+        let all_parts = rev (Cons (chunk, parts)) in
+        let rec join = fn (xs) -> match xs with
+          | []         -> ""
+          | [h, ...t]  -> h ++ join t
+        in
+        (join all_parts, j + 1)
+    | _ -> scan chunk_start (j + 1) parts
+  in
+  scan (i + 1) (i + 1) [];
+
+let parse_bare = fn (s: str, i: int) ->
+  // bare field: scan until `,` or `\n` or EOF
+  let rec scan = fn (j: int) ->
+    if j >= str_len s then j
+    else match char_at s j with
+    | ',' -> j
+    | '\n' -> j
+    | _    -> scan (j + 1)
+  in
+  let end_pos = scan i in
+  (substring s i end_pos, end_pos);
+
+let parse_field = fn (s: str, i: int) ->
+  if i < str_len s && char_at s i == '"'
+  then parse_quoted s i
+  else parse_bare s i;
+
+// === Row parser: comma-separated fields ===
+
+let parse_row = fn (s: str, i: int) ->
+  let rec loop = fn (acc, j) ->
+    let (f, j) = parse_field s j in
+    if j >= str_len s then (rev (Cons (f, acc)), j)
+    else match char_at s j with
+    | ',' -> loop (Cons (f, acc)) (j + 1)
+    | '\n' -> (rev (Cons (f, acc)), j + 1)  // consume newline
+    | _ -> (rev (Cons (f, acc)), j)
+  in
+  loop [] i;
+
+// === File parser: multiple rows until EOF ===
+
+let parse_csv = fn (s: str) ->
+  let n = str_len s in
+  let rec loop = fn (acc, i) ->
+    if i >= n then rev acc
+    else
+      let (row, j) = parse_row s i in
+      loop (Cons (row, acc)) j
+  in
+  loop [] 0;
+
+// === Self-tests ===
+
+let case = fn (name: str, input: str) ->
+  let result = try_or (fn () -> show (parse_csv input)) "<error>" in
+  {
+    print ("=== " ++ name);
+    print ("in : " ++ input);
+    print ("out: " ++ result)
+  };
+
+let _ = case "simple"
+  "a,b,c\nd,e,f";
+
+let _ = case "quoted"
+  "name,city\n\"alice\",\"tokyo\"\n\"bob\",\"osaka\"";
+
+let _ = case "escaped-quote"
+  "msg\n\"he said \"\"hi\"\"\"";
+
+let _ = case "field-with-comma"
+  "a,\"b,c\",d";
+
+let _ = case "empty-fields"
+  "a,,c\n,b,";
+
+let _ = case "trailing-newline"
+  "x,y\n1,2\n";
+
+// === Real file round-trip ===
+
+let path = "/tmp/lang_csv_test.csv";
+
+let _ = write_file path
+  "id,name,score\n1,alice,9.5\n2,bob,8.0\n3,charlie,7.2";
+
+let content = read_file path;
+let rows = parse_csv content;
+
+let _ = print "";
+let _ = print "=== file round-trip ===";
+let _ = print ("rows: " ++ show rows);
+
+0
