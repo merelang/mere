@@ -401,6 +401,12 @@ let builtin_str_ends_with =
         | _ -> failwith "str_ends_with: 2nd arg expected str")
     | _ -> failwith "str_ends_with: 1st arg expected str")
 
+let builtin_str_trim =
+  V_builtin ("str_trim", fun v ->
+    match v with
+    | V_str s -> V_str (String.trim s)
+    | _ -> failwith "str_trim: expected str")
+
 let builtin_to_upper =
   V_builtin ("to_upper", fun v ->
     match v with
@@ -470,6 +476,7 @@ let initial_env : env =
     ("ord", ref builtin_ord);
     ("to_upper", ref builtin_to_upper);
     ("to_lower", ref builtin_to_lower);
+    ("str_trim", ref builtin_str_trim);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);
     ("max", ref builtin_max);

@@ -1325,5 +1325,21 @@ let () =
   check "to_lower type"
     (Pipeline.type_of "to_lower") "(str -> str)";
 
+  (* --- stdlib: str_trim (trim leading/trailing whitespace) --- *)
+  check "str_trim basic"
+    (Pipeline.process "str_trim \"  hello  \"") "\"hello\"";
+  check "str_trim newlines"
+    (Pipeline.process "str_trim \"\\n\\tabc\\n \"") "\"abc\"";
+  check "str_trim no-op"
+    (Pipeline.process "str_trim \"abc\"") "\"abc\"";
+  check "str_trim empty"
+    (Pipeline.process "str_trim \"\"") "\"\"";
+  check "str_trim all whitespace"
+    (Pipeline.process "str_trim \"   \"") "\"\"";
+  check "str_trim preserves inner"
+    (Pipeline.process "str_trim \"  a b c  \"") "\"a b c\"";
+  check "str_trim type"
+    (Pipeline.type_of "str_trim") "(str -> str)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
