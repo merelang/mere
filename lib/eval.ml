@@ -54,6 +54,13 @@ let builtin_print_no_nl =
      | _ -> failwith "print_no_nl: expected str");
     V_unit)
 
+let builtin_print_err =
+  V_builtin ("print_err", fun v ->
+    (match v with
+     | V_str s -> prerr_endline s
+     | _ -> failwith "print_err: expected str");
+    V_unit)
+
 let builtin_print_int =
   V_builtin ("print_int", fun v ->
     (match v with
@@ -535,6 +542,7 @@ let initial_env : env =
   [ ("print", ref builtin_print);
     ("read_line", ref builtin_read_line);
     ("print_no_nl", ref builtin_print_no_nl);
+    ("print_err", ref builtin_print_err);
     ("print_int", ref builtin_print_int);
     ("print_bool", ref builtin_print_bool);
     ("str_of_int", ref builtin_str_of_int);

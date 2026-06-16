@@ -1423,5 +1423,11 @@ let () =
   check "print_no_nl in block"
     (Pipeline.process "{ print_no_nl \"a\"; print_no_nl \"b\"; 42 }") "42";
 
+  (* --- print_err : str -> unit (stderr output) --- *)
+  check "print_err type"
+    (Pipeline.type_of "print_err") "(str -> unit)";
+  check "print_err returns unit"
+    (Pipeline.process "print_err \"err msg\"") "()";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
