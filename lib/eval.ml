@@ -15,13 +15,35 @@ type value =
 
 and env = (string * value ref) list
 
-let rec to_string = function
+(* Try to interpret a value as a Nil-terminated Cons chain.
+   Returns Some [v1; v2; ...] when the value walks all the way to Nil,
+   None otherwise (mid-chain shape mismatch or non-Cons head). *)
+let rec try_as_list = function
+  | V_constr ("Nil", None) -> Some []
+  | V_constr ("Cons", Some (V_tuple [h; tail])) ->
+    (match try_as_list tail with
+     | Some rest -> Some (h :: rest)
+     | None -> None)
+  | _ -> None
+
+and to_string = function
   | V_int n -> string_of_int n
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "()"
   | V_closure (param, _, _) -> "<closure:" ^ param ^ ">"
   | V_builtin (name, _) -> "<builtin:" ^ name ^ ">"
+  (* Cons/Nil chain -> `[a, b, c]` notation when the chain is well-formed. *)
+  | V_constr ("Nil", None) -> "[]"
+  | V_constr ("Cons", Some (V_tuple [_; _])) as v ->
+    (match try_as_list v with
+     | Some elems ->
+       "[" ^ String.concat ", " (List.map to_string elems) ^ "]"
+     | None ->
+       (* Fallback: malformed chain (e.g. user-defined non-list Cons) *)
+       (match v with
+        | V_constr (name, Some inner) -> name ^ " " ^ to_string inner
+        | _ -> assert false))
   | V_constr (name, None) -> name
   | V_constr (name, Some v) -> name ^ " " ^ to_string v
   | V_tuple vs ->

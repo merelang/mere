@@ -381,11 +381,11 @@ let () =
   check "list literal int"
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
-       [1, 2, 3]") "Cons (1, Cons (2, Cons (3, Nil)))";
+       [1, 2, 3]") "[1, 2, 3]";
   check "empty list"
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
-       []") "Nil";
+       []") "[]";
   check "list literal sum"
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
@@ -397,7 +397,7 @@ let () =
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
        [\"a\", \"b\", \"c\"]")
-    "Cons (\"a\", Cons (\"b\", Cons (\"c\", Nil)))";
+    "[\"a\", \"b\", \"c\"]";
   check "list literal type at int"
     (Pipeline.type_of
       "type 'a list = Nil | Cons of 'a * 'a list;
@@ -865,7 +865,7 @@ let () =
       "type 'a list = Nil | Cons of 'a * 'a list;
        type 'a Stack = 'a list;
        let push = fn (x: int, s: int Stack) -> Cons (x, s) in
-       push 1 [2, 3]") "Cons (1, Cons (2, Cons (3, Nil)))";
+       push 1 [2, 3]") "[1, 2, 3]";
   check "alias as record field type"
     (Pipeline.process
       "type Id = int;
@@ -930,7 +930,7 @@ let () =
   check "show list"
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
-       show [1, 2]") "\"Cons (1, Cons (2, Nil))\"";
+       show [1, 2]") "\"[1, 2]\"";
   check "show at multiple types in one expr"
     (Pipeline.process
       "show 1 ++ \" / \" ++ show true ++ \" / \" ++ show \"x\"")
@@ -1486,6 +1486,30 @@ let () =
     (Pipeline.type_of "divmod") "(int -> (int -> (int * int)))";
   check_raises "divmod by zero"
     (fun () -> Pipeline.process "divmod 10 0");
+
+  (* --- list display sugar: Cons/Nil chain is printed as [a, b, c] --- *)
+  check "list display nested"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       show [[1, 2], [3], []]") "\"[[1, 2], [3], []]\"";
+  check "list display with tuples"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       show [(1, \"a\"), (2, \"b\")]") "\"[(1, \\\"a\\\"), (2, \\\"b\\\")]\"";
+  check "list display with constructors"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       type 'a opt = None | Some of 'a;
+       show [Some 1, None, Some 3]") "\"[Some 1, None, Some 3]\"";
+  check "list display single"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [42]") "[42]";
+  check "list-shaped user type still works"
+    (* User-defined Cons with non-list shape falls back to standard display *)
+    (Pipeline.process
+      "type 'a misc = Nope | Cons of 'a;
+       show (Cons 5)") "\"Cons 5\"";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -144,7 +144,8 @@ if x < 0 then fail "negative" else x
 ```
 show 42                          // "42"
 show (Some 5)                    // "Some 5"
-show [1, 2, 3]                   // "Cons (1, Cons (2, Cons (3, Nil)))"
+show [1, 2, 3]                   // "[1, 2, 3]"   (Cons/Nil chain は [..] で表示)
+show [Some 1, None, Some 3]      // "[Some 1, None, Some 3]"
 
 fst (pair "hi" 42)               // "hi"
 let always_7 = const 7 in always_7 "anything"   // 7
