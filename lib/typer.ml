@@ -219,6 +219,23 @@ let snd_scheme =
   { quantified = [aid; bid];
     body = Ast.TyArrow (Ast.TyTuple [_snd_alpha; _snd_beta], _snd_beta) }
 
+(* `id : 'a -> 'a` — identity function. *)
+let _id_alpha = fresh_var ()
+let id_scheme =
+  let aid = match _id_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (_id_alpha, _id_alpha) }
+
+(* `swap : ('a * 'b) -> ('b * 'a)` — 2-tuple swap. *)
+let _swap_alpha = fresh_var ()
+let _swap_beta = fresh_var ()
+let swap_scheme =
+  let aid = match _swap_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _swap_beta with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; bid];
+    body = Ast.TyArrow (Ast.TyTuple [_swap_alpha; _swap_beta],
+                        Ast.TyTuple [_swap_beta; _swap_alpha]) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
@@ -258,6 +275,8 @@ let initial_env : env =
     ("show",        show_scheme);
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);
+    ("id",          id_scheme);
+    ("swap",        swap_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

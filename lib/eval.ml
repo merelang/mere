@@ -236,6 +236,15 @@ let builtin_snd =
     | V_tuple [_; b] -> b
     | _ -> failwith "snd: expected 2-tuple")
 
+let builtin_id =
+  V_builtin ("id", fun v -> v)
+
+let builtin_swap =
+  V_builtin ("swap", fun v ->
+    match v with
+    | V_tuple [a; b] -> V_tuple [b; a]
+    | _ -> failwith "swap: expected 2-tuple")
+
 let builtin_assert =
   V_builtin ("assert", fun cond ->
     match cond with
@@ -356,6 +365,8 @@ let initial_env : env =
     ("show", ref builtin_show);
     ("fst", ref builtin_fst);
     ("snd", ref builtin_snd);
+    ("id", ref builtin_id);
+    ("swap", ref builtin_swap);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
