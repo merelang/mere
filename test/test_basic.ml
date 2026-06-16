@@ -1460,5 +1460,16 @@ let () =
   check "sum_range 0..0"   (Pipeline.process "sum_range 0 0") "0";
   check "sum_range type"   (Pipeline.type_of "sum_range") "(int -> (int -> int))";
 
+  (* --- square / cube (int -> int) --- *)
+  check "square positive" (Pipeline.process "square 7") "49";
+  check "square negative" (Pipeline.process "square (- 4)") "16";
+  check "square zero" (Pipeline.process "square 0") "0";
+  check "cube positive" (Pipeline.process "cube 3") "27";
+  check "cube negative" (Pipeline.process "cube (- 2)") "-8";
+  check "square type" (Pipeline.type_of "square") "(int -> int)";
+  check "cube type" (Pipeline.type_of "cube") "(int -> int)";
+  check "square + cube via compose"
+    (Pipeline.process "(cube << square) 2") "64";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

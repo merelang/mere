@@ -336,6 +336,8 @@ let initial_env : env =
     ("decr",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("sum_range",
        mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("square",      mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("cube",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("clamp",
        mono (Ast.TyArrow (Ast.TyInt,
               Ast.TyArrow (Ast.TyInt,

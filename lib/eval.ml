@@ -224,6 +224,18 @@ let builtin_decr =
     | V_int n -> V_int (n - 1)
     | _ -> failwith "decr: expected int")
 
+let builtin_square =
+  V_builtin ("square", fun v ->
+    match v with
+    | V_int n -> V_int (n * n)
+    | _ -> failwith "square: expected int")
+
+let builtin_cube =
+  V_builtin ("cube", fun v ->
+    match v with
+    | V_int n -> V_int (n * n * n)
+    | _ -> failwith "cube: expected int")
+
 let builtin_sum_range =
   V_builtin ("sum_range", fun lo_val ->
     match lo_val with
@@ -613,6 +625,8 @@ let initial_env : env =
     ("incr", ref builtin_incr);
     ("decr", ref builtin_decr);
     ("sum_range", ref builtin_sum_range);
+    ("square", ref builtin_square);
+    ("cube", ref builtin_cube);
     ("clamp", ref builtin_clamp);
     ("pow", ref builtin_pow);
     ("gcd", ref builtin_gcd);
