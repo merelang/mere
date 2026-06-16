@@ -338,6 +338,10 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     ("square",      mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("cube",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("divmod",
+       mono (Ast.TyArrow (Ast.TyInt,
+              Ast.TyArrow (Ast.TyInt,
+              Ast.TyTuple [Ast.TyInt; Ast.TyInt]))));
     ("clamp",
        mono (Ast.TyArrow (Ast.TyInt,
               Ast.TyArrow (Ast.TyInt,

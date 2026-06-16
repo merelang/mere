@@ -236,6 +236,19 @@ let builtin_cube =
     | V_int n -> V_int (n * n * n)
     | _ -> failwith "cube: expected int")
 
+let builtin_divmod =
+  V_builtin ("divmod", fun a_val ->
+    match a_val with
+    | V_int a ->
+      V_builtin ("divmod_partial", fun b_val ->
+        match b_val with
+        | V_int 0 ->
+          raise (Eval_error (Loc.dummy, "divmod: division by zero"))
+        | V_int b ->
+          V_tuple [V_int (a / b); V_int (a mod b)]
+        | _ -> failwith "divmod: 2nd arg expected int")
+    | _ -> failwith "divmod: 1st arg expected int")
+
 let builtin_sum_range =
   V_builtin ("sum_range", fun lo_val ->
     match lo_val with
@@ -627,6 +640,7 @@ let initial_env : env =
     ("sum_range", ref builtin_sum_range);
     ("square", ref builtin_square);
     ("cube", ref builtin_cube);
+    ("divmod", ref builtin_divmod);
     ("clamp", ref builtin_clamp);
     ("pow", ref builtin_pow);
     ("gcd", ref builtin_gcd);

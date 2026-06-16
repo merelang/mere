@@ -1471,5 +1471,21 @@ let () =
   check "square + cube via compose"
     (Pipeline.process "(cube << square) 2") "64";
 
+  (* --- divmod : int -> int -> (int * int) (quotient, remainder) --- *)
+  check "divmod basic"
+    (Pipeline.process "divmod 17 5") "(3, 2)";
+  check "divmod exact"
+    (Pipeline.process "divmod 20 4") "(5, 0)";
+  check "divmod by 1"
+    (Pipeline.process "divmod 42 1") "(42, 0)";
+  check "divmod with fst"
+    (Pipeline.process "fst (divmod 100 7)") "14";
+  check "divmod with snd"
+    (Pipeline.process "snd (divmod 100 7)") "2";
+  check "divmod type"
+    (Pipeline.type_of "divmod") "(int -> (int -> (int * int)))";
+  check_raises "divmod by zero"
+    (fun () -> Pipeline.process "divmod 10 0");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
