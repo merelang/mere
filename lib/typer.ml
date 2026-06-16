@@ -284,6 +284,7 @@ let try_or_scheme =
 
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
+    ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
     ("print_bool",  mono (Ast.TyArrow (Ast.TyBool, Ast.TyUnit)));
     ("str_of_int",  mono (Ast.TyArrow (Ast.TyInt,  Ast.TyStr)));
