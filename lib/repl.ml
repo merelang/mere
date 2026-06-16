@@ -108,7 +108,7 @@ let process_decl eval_env type_env decl =
     Printf.printf "type alias %s%s = %s\n" param_str name (Ast.pp_ty body);
     []
   | Ast.Top_view (name, region, fields) ->
-    Typer.register_record name [] fields;
+    Typer.register_view name region fields;
     Printf.printf "view %s[%s] defined (%d fields)\n"
       name region (List.length fields);
     []
