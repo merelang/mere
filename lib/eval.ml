@@ -225,6 +225,42 @@ let builtin_f_le = make_float_cmp "f_le" (<=)
 let builtin_f_gt = make_float_cmp "f_gt" (>)
 let builtin_f_ge = make_float_cmp "f_ge" (>=)
 
+let builtin_f_abs =
+  V_builtin ("f_abs", fun v ->
+    match v with
+    | V_float f -> V_float (Float.abs f)
+    | _ -> failwith "f_abs: expected float")
+
+let builtin_f_neg =
+  V_builtin ("f_neg", fun v ->
+    match v with
+    | V_float f -> V_float (-. f)
+    | _ -> failwith "f_neg: expected float")
+
+let builtin_sqrt =
+  V_builtin ("sqrt", fun v ->
+    match v with
+    | V_float f -> V_float (Float.sqrt f)
+    | _ -> failwith "sqrt: expected float")
+
+let builtin_floor =
+  V_builtin ("floor", fun v ->
+    match v with
+    | V_float f -> V_float (Float.floor f)
+    | _ -> failwith "floor: expected float")
+
+let builtin_ceil =
+  V_builtin ("ceil", fun v ->
+    match v with
+    | V_float f -> V_float (Float.ceil f)
+    | _ -> failwith "ceil: expected float")
+
+let builtin_round =
+  V_builtin ("round", fun v ->
+    match v with
+    | V_float f -> V_float (Float.round f)
+    | _ -> failwith "round: expected float")
+
 let builtin_print_bool =
   V_builtin ("print_bool", fun v ->
     (match v with
@@ -806,6 +842,14 @@ let initial_env : env =
     ("f_le", ref builtin_f_le);
     ("f_gt", ref builtin_f_gt);
     ("f_ge", ref builtin_f_ge);
+    ("f_abs", ref builtin_f_abs);
+    ("f_neg", ref builtin_f_neg);
+    ("sqrt", ref builtin_sqrt);
+    ("floor", ref builtin_floor);
+    ("ceil", ref builtin_ceil);
+    ("round", ref builtin_round);
+    ("pi", ref (V_float Float.pi));
+    ("e", ref (V_float (Float.exp 1.0)));
     ("not", ref builtin_not);
     ("str_len", ref builtin_str_len);
     ("int_of_str", ref builtin_int_of_str);
