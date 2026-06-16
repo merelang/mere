@@ -1409,5 +1409,11 @@ let () =
   check "str_count type"
     (Pipeline.type_of "str_count") "(str -> (str -> int))";
 
+  (* --- read_line : unit -> str (only test type — stdin is process-level) --- *)
+  check "read_line type"
+    (Pipeline.type_of "read_line") "(unit -> str)";
+  check "read_line in compose"
+    (Pipeline.type_of "str_len << read_line") "(unit -> int)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
