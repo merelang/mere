@@ -1250,5 +1250,19 @@ let () =
       "let safe_parse = fn (s: str) -> try_or (fn () -> int_of_str s) (- 1) in
        safe_parse \"7\" + safe_parse \"hi\"") "6";
 
+  (* --- stdlib int helpers: sign / clamp --- *)
+  check "sign positive" (Pipeline.process "sign 5") "1";
+  check "sign negative" (Pipeline.process "sign (- 5)") "-1";
+  check "sign zero" (Pipeline.process "sign 0") "0";
+  check "sign type" (Pipeline.type_of "sign") "(int -> int)";
+  check "clamp in range" (Pipeline.process "clamp 0 10 5") "5";
+  check "clamp below" (Pipeline.process "clamp 0 10 (- 3)") "0";
+  check "clamp above" (Pipeline.process "clamp 0 10 99") "10";
+  check "clamp at boundary" (Pipeline.process "clamp 0 10 0") "0";
+  check "clamp type" (Pipeline.type_of "clamp") "(int -> (int -> (int -> int)))";
+  check "clamp curry"
+    (Pipeline.process
+      "let percent = clamp 0 100 in percent 150 + percent (- 5)") "100";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
