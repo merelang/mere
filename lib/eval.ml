@@ -785,6 +785,8 @@ let initial_env : env =
     ("read_line", ref builtin_read_line);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);
+    ("int_max", ref (V_int max_int));
+    ("int_min", ref (V_int min_int));
     ("print_no_nl", ref builtin_print_no_nl);
     ("print_err", ref builtin_print_err);
     ("read_file", ref builtin_read_file);

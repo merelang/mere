@@ -1642,5 +1642,22 @@ let () =
     (Pipeline.type_of
       "fn (n: int) -> if n < 0 then exit 1 else n") "(int -> int)";
 
+  (* --- int_max / int_min constants (non-function builtins) --- *)
+  check "int_max type"
+    (Pipeline.type_of "int_max") "int";
+  check "int_min type"
+    (Pipeline.type_of "int_min") "int";
+  check "int_max > 0"
+    (Pipeline.process "int_max > 0") "true";
+  check "int_min < 0"
+    (Pipeline.process "int_min < 0") "true";
+  check "int_max > int_min"
+    (Pipeline.process "int_max > int_min") "true";
+  check "min init pattern"
+    (* よくある最小値初期化パターン *)
+    (Pipeline.process
+      "let candidate = 42 in
+       if candidate < int_max then candidate else int_max") "42";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
