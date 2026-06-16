@@ -1,108 +1,96 @@
 # lang-ml
 
-新プログラミング言語 (仮称 Lang) の OCaml 実装。
+新プログラミング言語 (仮称 **Lang**) の OCaml 実装。ML 系 mini lang として実用域に到達。本来の目標 (effect / memory model / region) はこれから。
 
-## ステータス
+## ステータス (2026-06-16 時点)
 
-実装中 (2026-06-06 着手)。最小コア言語 (整数 / 真偽値 / let / let rec / if / 関数 / 双方向型検査) が動作。
+- 56 stdlib builtin、519 tests passing
+- ツリーウォーキング interpreter (codegen なし)
+- 設計コンテキストは別リポ `internal design notes` (private)
 
-詳しい実装ステータスは別リポ aidocs の [`internal design notes`](https://github.com/284km/aidocs) を参照 (private)。
+## 動く機能ハイライト
 
-## 現在動く機能
+| カテゴリ | 内容 |
+|---|---|
+| 型システム | Hindley-Milner 推論、let-polymorphism、多相 builtin (1〜3-quantified) |
+| データ | int / bool / str / unit、tuple、record、sum types、list 構文糖 `[1, 2, 3]` |
+| 制御 | `if-then-else`、`if-then` (unit)、`match` + ガード `when` + as-pattern + or-pattern |
+| パターン | wildcard / var / lit / tuple / constructor / list `[h, ...t]` / record / as / or |
+| 関数 | 多引数型付き fn / `let rec ... and ...` 相互再帰 / 高階 / closure |
+| 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` |
+| 名前管理 | `let _ = ...;` `let (a, b) = ...;` `signature`、`type X = T` (alias) |
+| stdlib | I/O・文字列・数値・多相・higher-order(`flip`,`try_or`,`iter_n`) 56 種 |
+| REPL | 対話実行、永続 env、`:type`/`:help`/`:quit` |
+| エラー | ソース該当行 + caret 表示 |
 
-| 機能 | 例 | 結果 |
-|---|---|---|
-| 整数算術 | `1 + 2 * 3` | `7` |
-| let | `let x = 5 in x + 1` | `6` |
-| 真偽値・比較・if | `if 1 < 2 then 100 else 200` | `100` |
-| 第一級関数 | `let inc = fn x -> x + 1 in inc 5` | `6` |
-| 高階関数 | `let twice = fn f -> fn x -> f (f x) in twice (fn x -> x + 1) 5` | `7` |
-| 再帰 (let rec) | `let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10` | `3628800` |
-| 型検査 | `((fn x -> x + 1) : int -> int) 5` | 型 `int`, 値 `6` |
-| 行コメント | `1 + 2 // sum` | `3` |
-
-## 使い方
+## クイック例
 
 ```sh
-# ファイル評価
-lang-ml examples/factorial.lang
-# → 3628800
+$ dune exec ./bin/main.exe -- -e '5 |> (fn x -> x + 1) |> show'
+"6"
 
-# インライン評価
-lang-ml -e '1 + 2 * 3'
-# → 7
+$ dune exec ./bin/main.exe -- -e 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10'
+3628800
 
-# 型表示
-lang-ml -t examples/typed.lang
-# → int
+$ dune exec ./bin/main.exe -- -e 'type 'a opt = None | Some of 'a; match Some 42 with | None -> 0 | Some n -> n + 1'
+43
 
-# inline 型表示
-lang-ml -te '(fn x -> x + 1) : int -> int'
-# → (int -> int)
-
-# ヘルプ
-lang-ml --help
+$ dune exec ./bin/main.exe -- examples/json_parser.lang
+# JSON パーサ in Lang (140 行) のセルフテストが走る
 ```
 
-エラー時はソース該当行と caret が表示される:
+## ドキュメント
 
-```
-$ lang-ml -te '1 + true'
-<inline>:1:5: type error: expected int, got bool
-  1 + true
-      ^
-```
-
-## 経緯
-
-- ホスト言語として OCaml を採用 (Q-001 resolved 2026-06-06)
-- 採用判断のための trial: `internal design notes` (49 tests)
-
-## 設計コンテキスト
-
-設計判断の詳細は別リポ `aidocs` (private) の以下を参照:
-
-- `internal design notes` (再開時の入口)
-- `internal design notes` (実装と設計の対応)
-- `internal design notes`
-- `internal design notes` (採用判断 trial)
-
-## レイアウト
-
-```
-lang-ml/
-├── dune-project
-├── bin/             # CLI エントリ (main.ml)
-├── lib/             # コア処理系
-│   ├── loc.ml          # 位置情報
-│   ├── ast.ml          # AST + 型
-│   ├── lexer.ml        # トークナイザ
-│   ├── parser.ml       # 再帰下降パーサ
-│   ├── typer.ml        # 双方向型検査
-│   ├── eval.ml         # interpreter
-│   ├── pipeline.ml     # process / type_of
-│   ├── diagnostic.ml   # ソース付きエラー整形
-│   └── version.ml
-├── test/            # テスト (24 件)
-└── examples/        # サンプル .lang ファイル (5 件)
-```
+- **[Tutorial](docs/tutorial.md)** — 初めての方はここから
+- **[Language reference](docs/language-reference.md)** — 構文と意味論
+- **[Stdlib reference](docs/stdlib-reference.md)** — 全 56 builtin の表
+- **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
+- `examples/` — 動く .lang ファイル群 (FizzBuzz、relational、JSON parser 等)
 
 ## ビルド・実行
 
 ```sh
 dune build
-dune exec bin/main.exe -- examples/factorial.lang
+dune exec ./bin/main.exe -- examples/factorial.lang
+dune exec ./bin/main.exe -- -e '1 + 2 * 3'
+dune exec ./bin/main.exe -- -te 'fn x -> x + 1'    # 型表示
+dune exec ./bin/main.exe -- -r                     # REPL
 dune runtest
 ```
 
-## 既知の制約
+## レイアウト
 
-- HM 型推論はまだない。関数アノテーションは都度書く必要あり
-- 単一式プログラム (複数 top-level 定義は未対応)
-- パターンマッチ・sum types なし
-- 文字列・float なし
-- ネイティブ codegen なし (全てインタプリタ)
+```
+lang-ml/
+├── bin/main.ml         # CLI エントリ
+├── lib/                # コア処理系
+│   ├── loc.ml / ast.ml / lexer.ml / parser.ml
+│   ├── typer.ml        # HM 推論 + sum types + records + let-poly
+│   ├── eval.ml         # ツリーウォーキング interpreter
+│   ├── pipeline.ml     # process / type_of
+│   ├── repl.ml         # 対話実行
+│   ├── diagnostic.ml   # ソース付きエラー整形
+│   └── version.ml
+├── test/test_basic.ml  # 519 tests
+├── examples/           # .lang サンプル群
+└── docs/               # tutorial / language-reference / stdlib-reference / patterns
+```
+
+## 設計コンテキスト (別リポ)
+
+設計判断は `internal design notes` (private) で進行:
+
+- `00_design_principles.md` — 言語哲学
+- `01_memory_model.md` — 5 戦略 (owned / borrowed / region (= arena) / view / stack)
+- `05_effect_system.md` — capability passing
+- `OPEN_QUESTIONS.md` — Q-001〜Q-011 全 resolved / narrowed
+- `implementation_status.md` — slice ごとの進捗
+- `11_region_vs_arena.md` 〜 `14_view_types.md` — メモリモデル deep dive
 
 ## 名前について
 
-`lang-ml` は仮称。本番名は設計の核 (effect / type / memory model) が動くようになった頃に再考する。
+`lang-ml` は OCaml 実装中の仮称。本番名は設計の核 (effect / type / memory) が動く頃に再考。
+
+## ライセンス
+
+未定 (private)
