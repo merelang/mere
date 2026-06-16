@@ -1,0 +1,166 @@
+// JSON パーサ in Lang
+// stdlib (str ops + is_digit + try_or + fail) と user-defined sum types
+// + 多相 list / pattern matching + 相互再帰 fn の組み合わせで実装。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+type json =
+  | JNull
+  | JBool of bool
+  | JNum  of int
+  | JStr  of str
+  | JArr  of json list
+  | JObj  of (str * json) list;
+
+// === List utilities (rev for accumulator-style parsing) ===
+
+let rec rev_aux = fn (xs, acc) ->
+  match xs with
+  | [] -> acc
+  | [h, ...t] -> rev_aux t (Cons (h, acc));
+
+let rev = fn (xs) -> rev_aux xs Nil;
+
+// === Whitespace skip ===
+
+let rec skip_ws = fn (s: str, i: int) ->
+  if i >= str_len s then i
+  else if is_space (char_at s i) then skip_ws s (i + 1)
+  else i;
+
+let expect_char = fn (s: str, i: int, c: str) ->
+  if i >= str_len s || char_at s i != c
+    then fail ("expected '" ++ c ++ "' at pos " ++ str_of_int i)
+  else i + 1;
+
+// === Atoms ===
+
+let parse_keyword = fn (s: str, i: int, kw: str, value: json) ->
+  let n = str_len kw in
+  if i + n <= str_len s && substring s i (i + n) == kw
+  then (value, i + n)
+  else fail ("expected '" ++ kw ++ "' at pos " ++ str_of_int i);
+
+let parse_null  = fn (s: str, i: int) -> parse_keyword s i "null"  JNull;
+let parse_true  = fn (s: str, i: int) -> parse_keyword s i "true"  (JBool true);
+let parse_false = fn (s: str, i: int) -> parse_keyword s i "false" (JBool false);
+
+let parse_num = fn (s: str, i: int) ->
+  let start = i in
+  let i1 =
+    if i < str_len s && char_at s i == "-" then i + 1
+    else i
+  in
+  let rec scan = fn (j: int) ->
+    if j >= str_len s then j
+    else if is_digit (char_at s j) then scan (j + 1)
+    else j
+  in
+  let end_pos = scan i1 in
+  if end_pos == i1 then fail ("expected digit at pos " ++ str_of_int i1)
+  else (JNum (int_of_str (substring s start end_pos)), end_pos);
+
+let parse_raw_str = fn (s: str, i: int) ->
+  // Returns (content, end_pos).  No escape support.
+  let i1 = expect_char s i "\"" in
+  let rec scan = fn (j: int) ->
+    if j >= str_len s then fail "unterminated string"
+    else if char_at s j == "\"" then j
+    else scan (j + 1)
+  in
+  let close = scan i1 in
+  (substring s i1 close, close + 1);
+
+let parse_jstr = fn (s: str, i: int) ->
+  let (text, j) = parse_raw_str s i in
+  (JStr text, j);
+
+// === Value dispatcher (mutual recursion with array / object) ===
+
+let rec parse_value = fn (s: str, i0: int) ->
+  let i = skip_ws s i0 in
+  if i >= str_len s then fail "unexpected EOF"
+  else
+    let c = char_at s i in
+    if c == "n" then parse_null  s i
+    else if c == "t" then parse_true  s i
+    else if c == "f" then parse_false s i
+    else if c == "\"" then parse_jstr s i
+    else if c == "[" then parse_array s i
+    else if c == "{" then parse_object s i
+    else if c == "-" || is_digit c then parse_num s i
+    else fail ("unexpected '" ++ c ++ "' at pos " ++ str_of_int i)
+
+and parse_array = fn (s: str, i: int) ->
+  let i = expect_char s i "[" in
+  let i = skip_ws s i in
+  if i < str_len s && char_at s i == "]"
+  then (JArr Nil, i + 1)
+  else
+    let rec loop = fn (acc, j) ->
+      let (v, j) = parse_value s j in
+      let j = skip_ws s j in
+      if j >= str_len s then fail "unexpected EOF in array"
+      else
+        let c = char_at s j in
+        if c == "," then loop (Cons (v, acc)) (j + 1)
+        else if c == "]" then (JArr (rev (Cons (v, acc))), j + 1)
+        else fail ("expected ',' or ']' at pos " ++ str_of_int j)
+    in
+    loop Nil i
+
+and parse_object = fn (s: str, i: int) ->
+  let i = expect_char s i "{" in
+  let i = skip_ws s i in
+  if i < str_len s && char_at s i == "}"
+  then (JObj Nil, i + 1)
+  else
+    let rec loop = fn (acc, j) ->
+      let j = skip_ws s j in
+      let (key, j) = parse_raw_str s j in
+      let j = skip_ws s j in
+      let j = expect_char s j ":" in
+      let (v, j) = parse_value s j in
+      let j = skip_ws s j in
+      if j >= str_len s then fail "unexpected EOF in object"
+      else
+        let c = char_at s j in
+        if c == "," then loop (Cons ((key, v), acc)) (j + 1)
+        else if c == "}" then (JObj (rev (Cons ((key, v), acc))), j + 1)
+        else fail ("expected ',' or '}' at pos " ++ str_of_int j)
+    in
+    loop Nil i;
+
+// === Top-level entry: parses a single JSON value, allows trailing ws ===
+
+let parse_json = fn (s: str) ->
+  let (v, i) = parse_value s 0 in
+  let i = skip_ws s i in
+  if i != str_len s
+    then fail ("trailing input at pos " ++ str_of_int i)
+  else v;
+
+// === Self-tests ===
+
+let case = fn (name: str, s: str) ->
+  let result = try_or (fn () -> show (parse_json s)) "<error>" in
+  print (name ++ " | " ++ s ++ " => " ++ result);
+
+let _ = case "null"     "null";
+let _ = case "true"     "true";
+let _ = case "int"      "42";
+let _ = case "neg"      "-17";
+let _ = case "str"      "\"hello\"";
+let _ = case "arr-empty" "[]";
+let _ = case "arr-flat"  "[1, 2, 3]";
+let _ = case "arr-mix"   "[true, \"x\", -5, null]";
+let _ = case "obj-empty" "{}";
+let _ = case "obj-flat"  "{\"a\": 1, \"b\": 2}";
+let _ = case "nested"    "{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
+let _ = case "ws"        "  [  1 ,  2  ]  ";
+let _ = case "deep"      "[[1, 2], [3, [4, 5]], []]";
+let _ = case "bad-trailing" "1 2";
+let _ = case "bad-token"   "xxx";
+let _ = case "bad-arr"     "[1, 2,";
+
+0
