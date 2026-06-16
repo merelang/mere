@@ -263,6 +263,12 @@ let builtin_flip =
         let f_a = !apply_value_ref f a in
         !apply_value_ref f_a b)))
 
+let builtin_try_or =
+  V_builtin ("try_or", fun f ->
+    V_builtin ("try_or_partial", fun default ->
+      try !apply_value_ref f V_unit
+      with Eval_error _ -> default))
+
 let builtin_assert =
   V_builtin ("assert", fun cond ->
     match cond with
@@ -387,6 +393,7 @@ let initial_env : env =
     ("swap", ref builtin_swap);
     ("const", ref builtin_const);
     ("flip", ref builtin_flip);
+    ("try_or", ref builtin_try_or);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

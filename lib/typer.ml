@@ -262,6 +262,15 @@ let flip_scheme =
   { quantified = [aid; bid; cid];
     body = Ast.TyArrow (arrow_in, arrow_out) }
 
+(* `try_or : (unit -> 'a) -> 'a -> 'a` — catch Eval_error, return default. *)
+let _try_alpha = fresh_var ()
+let try_or_scheme =
+  let aid = match _try_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (
+      Ast.TyArrow (Ast.TyUnit, _try_alpha),
+      Ast.TyArrow (_try_alpha, _try_alpha)) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
@@ -305,6 +314,7 @@ let initial_env : env =
     ("swap",        swap_scheme);
     ("const",       const_scheme);
     ("flip",        flip_scheme);
+    ("try_or",      try_or_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

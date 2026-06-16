@@ -1229,5 +1229,26 @@ let () =
       "let take_first = flip const in
        take_first \"discarded\" 100") "100";
 
+  (* --- polymorphic `try_or` (catch Eval_error, return default) --- *)
+  check "try_or type"
+    (Pipeline.type_of "try_or") "((unit -> 'a) -> ('a -> 'a))";
+  check "try_or success"
+    (Pipeline.process "try_or (fn () -> 1 + 2) 0") "3";
+  check "try_or catches int_of_str"
+    (Pipeline.process "try_or (fn () -> int_of_str \"abc\") (- 1)") "-1";
+  check "try_or catches fail"
+    (Pipeline.process "try_or (fn () -> fail \"oops\") 999") "999";
+  check "try_or catches div by zero"
+    (Pipeline.process "try_or (fn () -> 10 / 0) 0") "0";
+  check "try_or catches assert"
+    (Pipeline.process "try_or (fn () -> { assert false \"bad\"; 1 }) 42") "42";
+  check "try_or polymorphic at str"
+    (Pipeline.process
+      "try_or (fn () -> int_of_str \"bad\" |> show) \"none\"") "\"none\"";
+  check "try_or chained"
+    (Pipeline.process
+      "let safe_parse = fn (s: str) -> try_or (fn () -> int_of_str s) (- 1) in
+       safe_parse \"7\" + safe_parse \"hi\"") "6";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
