@@ -407,6 +407,14 @@ let builtin_str_trim =
     | V_str s -> V_str (String.trim s)
     | _ -> failwith "str_trim: expected str")
 
+let builtin_str_rev =
+  V_builtin ("str_rev", fun v ->
+    match v with
+    | V_str s ->
+      let n = String.length s in
+      V_str (String.init n (fun i -> s.[n - 1 - i]))
+    | _ -> failwith "str_rev: expected str")
+
 let builtin_to_upper =
   V_builtin ("to_upper", fun v ->
     match v with
@@ -477,6 +485,7 @@ let initial_env : env =
     ("to_upper", ref builtin_to_upper);
     ("to_lower", ref builtin_to_lower);
     ("str_trim", ref builtin_str_trim);
+    ("str_rev", ref builtin_str_rev);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);
     ("max", ref builtin_max);

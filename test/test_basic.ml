@@ -1341,5 +1341,20 @@ let () =
   check "str_trim type"
     (Pipeline.type_of "str_trim") "(str -> str)";
 
+  (* --- stdlib: str_rev (string reversal) --- *)
+  check "str_rev basic"
+    (Pipeline.process "str_rev \"hello\"") "\"olleh\"";
+  check "str_rev empty"
+    (Pipeline.process "str_rev \"\"") "\"\"";
+  check "str_rev single"
+    (Pipeline.process "str_rev \"a\"") "\"a\"";
+  check "str_rev involutive"
+    (Pipeline.process "str_rev (str_rev \"abcdef\")") "\"abcdef\"";
+  check "str_rev palindrome check"
+    (Pipeline.process
+      "let s = \"abcba\" in s == str_rev s") "true";
+  check "str_rev type"
+    (Pipeline.type_of "str_rev") "(str -> str)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
