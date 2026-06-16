@@ -1393,5 +1393,21 @@ let () =
     (Pipeline.process
       "let p = pair 1 2 in (swap (pair 2 1)) == p") "true";
 
+  (* --- stdlib: str_count (non-overlapping occurrences) --- *)
+  check "str_count basic"
+    (Pipeline.process "str_count \"abababab\" \"ab\"") "4";
+  check "str_count non-overlapping"
+    (Pipeline.process "str_count \"aaaa\" \"aa\"") "2";
+  check "str_count miss"
+    (Pipeline.process "str_count \"hello\" \"xyz\"") "0";
+  check "str_count empty needle"
+    (Pipeline.process "str_count \"abc\" \"\"") "0";
+  check "str_count multi-occurrence"
+    (Pipeline.process "str_count \"foo bar foo baz foo\" \"foo\"") "3";
+  check "str_count single char"
+    (Pipeline.process "str_count \"banana\" \"a\"") "3";
+  check "str_count type"
+    (Pipeline.type_of "str_count") "(str -> (str -> int))";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
