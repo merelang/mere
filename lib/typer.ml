@@ -139,6 +139,7 @@ let records : (string, record_info) Hashtbl.t = Hashtbl.create 16
 
 let register_type type_name params variants =
   Hashtbl.replace types type_name (List.length params);
+  Exhaustive.register_variants type_name variants;
   List.iter (fun (cname, payload) ->
     Hashtbl.replace constructors cname
       { params; arg = payload; type_name }
@@ -525,6 +526,7 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
          "constructor " ^ name ^ " requires an argument")))
   | Ast.Match (scrut, arms) ->
     let t_scrut = infer env scrut in
+    Exhaustive.record_match e.loc t_scrut arms;
     let result_var = fresh_var () in
     List.iter (fun (pat, guard, branch) ->
       let bindings = check_pattern pat t_scrut in

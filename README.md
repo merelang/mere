@@ -4,7 +4,7 @@
 
 ## ステータス (2026-06-16 時点)
 
-- **85 stdlib builtin、600 tests passing**
+- **85 stdlib builtin、610 tests passing** (網羅性検査 Phase 1 含む)
 - ツリーウォーキング interpreter (codegen なし)
 - 設計コンテキストは別リポ `aidocs/projects/lang/` (private)
 
