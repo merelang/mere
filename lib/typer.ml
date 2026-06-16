@@ -317,6 +317,14 @@ let initial_env : env =
     ("f_le",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
     ("f_gt",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
     ("f_ge",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
+    ("f_abs",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("f_neg",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("sqrt",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("floor",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("ceil",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("round",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("pi",          mono Ast.TyFloat);
+    ("e",           mono Ast.TyFloat);
     ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
     ("str_len",     mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
     ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));

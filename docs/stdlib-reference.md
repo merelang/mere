@@ -122,6 +122,14 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `f_le` | `float -> float -> bool` | 以下 |
 | `f_gt` | `float -> float -> bool` | 大なり |
 | `f_ge` | `float -> float -> bool` | 以上 |
+| `f_neg` | `float -> float` | 単項マイナス (`Neg` は int 専用なので float はこっち) |
+| `f_abs` | `float -> float` | 絶対値 |
+| `sqrt` | `float -> float` | 平方根 (負数は NaN) |
+| `floor` | `float -> float` | 切り捨て |
+| `ceil` | `float -> float` | 切り上げ |
+| `round` | `float -> float` | 四捨五入 |
+| `pi` | `float` | 円周率 ≈ 3.14159265 (定数 builtin) |
+| `e` | `float` | ネイピア数 ≈ 2.71828183 (定数 builtin) |
 
 ```
 f_add 1.5 2.5                    // 4.0
@@ -216,16 +224,17 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、77 個)
+## 全 builtin 一覧 (アルファベット順、85 個)
 
 ```
-abs assert bool_of_str char_at chr clamp const cube
-decr divmod even exit f_add f_div f_ge f_gt f_le f_lt
-f_mul f_sub fail flip float_of_int float_of_str fst gcd
-id incr int_max int_min int_of_float int_of_str is_alpha
-is_digit is_space iter_n lcm max min not odd ord pair
-pow print print_bool print_err print_int print_no_nl
-read_file read_line show sign snd square str_compare
+abs assert bool_of_str ceil char_at chr clamp const cube
+decr divmod e even exit f_abs f_add f_div f_ge f_gt
+f_le f_lt f_mul f_neg f_sub fail flip float_of_int
+float_of_str floor fst gcd id incr int_max int_min
+int_of_float int_of_str is_alpha is_digit is_space
+iter_n lcm max min not odd ord pair pi pow print
+print_bool print_err print_int print_no_nl read_file
+read_line round show sign snd sqrt square str_compare
 str_contains str_count str_ends_with str_len str_of_float
 str_of_int str_repeat str_replace str_rev str_starts_with
 str_trim str_unescape substring sum_range swap time
