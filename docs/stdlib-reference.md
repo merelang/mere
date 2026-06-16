@@ -18,11 +18,17 @@
 | `print_bool` | `bool -> unit` | bool を改行付きで出力 |
 | `print_err` | `str -> unit` | stderr に書き出し + 改行 |
 | `read_line` | `unit -> str` | stdin から 1 行、EOF は空文字 |
+| `read_file` ⚡ | `str -> str` | ファイル全体を読む、失敗で raise |
+| `write_file` ⚡ | `str -> str -> unit` | path → content をファイルに書く (上書き)、失敗で raise |
 
 ```
 let _ = print "Hello";
 let _ = print_no_nl "Name: ";
 let name = read_line () in print ("Hi, " ++ name);
+
+// ファイル round-trip
+let _ = write_file "/tmp/out.txt" "hello lang";
+let content = read_file "/tmp/out.txt" in print content;
 ```
 
 ---
