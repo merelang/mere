@@ -407,6 +407,33 @@ let builtin_str_trim =
     | V_str s -> V_str (String.trim s)
     | _ -> failwith "str_trim: expected str")
 
+let builtin_is_digit =
+  V_builtin ("is_digit", fun v ->
+    match v with
+    | V_str s when String.length s = 1 ->
+      let c = s.[0] in
+      V_bool (c >= '0' && c <= '9')
+    | V_str _ -> V_bool false
+    | _ -> failwith "is_digit: expected str")
+
+let builtin_is_alpha =
+  V_builtin ("is_alpha", fun v ->
+    match v with
+    | V_str s when String.length s = 1 ->
+      let c = s.[0] in
+      V_bool ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+    | V_str _ -> V_bool false
+    | _ -> failwith "is_alpha: expected str")
+
+let builtin_is_space =
+  V_builtin ("is_space", fun v ->
+    match v with
+    | V_str s when String.length s = 1 ->
+      let c = s.[0] in
+      V_bool (c = ' ' || c = '\t' || c = '\n' || c = '\r')
+    | V_str _ -> V_bool false
+    | _ -> failwith "is_space: expected str")
+
 let builtin_str_rev =
   V_builtin ("str_rev", fun v ->
     match v with
@@ -486,6 +513,9 @@ let initial_env : env =
     ("to_lower", ref builtin_to_lower);
     ("str_trim", ref builtin_str_trim);
     ("str_rev", ref builtin_str_rev);
+    ("is_digit", ref builtin_is_digit);
+    ("is_alpha", ref builtin_is_alpha);
+    ("is_space", ref builtin_is_space);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);
     ("max", ref builtin_max);

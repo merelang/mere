@@ -1356,5 +1356,25 @@ let () =
   check "str_rev type"
     (Pipeline.type_of "str_rev") "(str -> str)";
 
+  (* --- stdlib: is_digit / is_alpha / is_space (single-char predicates) --- *)
+  check "is_digit yes" (Pipeline.process "is_digit \"5\"") "true";
+  check "is_digit zero" (Pipeline.process "is_digit \"0\"") "true";
+  check "is_digit no" (Pipeline.process "is_digit \"a\"") "false";
+  check "is_digit empty" (Pipeline.process "is_digit \"\"") "false";
+  check "is_digit multi" (Pipeline.process "is_digit \"12\"") "false";
+  check "is_alpha lower" (Pipeline.process "is_alpha \"x\"") "true";
+  check "is_alpha upper" (Pipeline.process "is_alpha \"Z\"") "true";
+  check "is_alpha digit" (Pipeline.process "is_alpha \"9\"") "false";
+  check "is_alpha symbol" (Pipeline.process "is_alpha \"!\"") "false";
+  check "is_space space" (Pipeline.process "is_space \" \"") "true";
+  check "is_space tab" (Pipeline.process "is_space \"\\t\"") "true";
+  check "is_space newline" (Pipeline.process "is_space \"\\n\"") "true";
+  check "is_space letter" (Pipeline.process "is_space \"a\"") "false";
+  check "is_digit type" (Pipeline.type_of "is_digit") "(str -> bool)";
+  check "char predicate combo"
+    (Pipeline.process
+      "let c = char_at \"abc123\" 3 in
+       is_digit c && (not (is_alpha c))") "true";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
