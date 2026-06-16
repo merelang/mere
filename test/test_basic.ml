@@ -1439,5 +1439,18 @@ let () =
   check "iter_n negative is no-op"
     (Pipeline.process "iter_n (- 5) (fn () -> fail \"never\")") "()";
 
+  (* --- incr / decr (int -> int helpers) --- *)
+  check "incr basic" (Pipeline.process "incr 9") "10";
+  check "decr basic" (Pipeline.process "decr 10") "9";
+  check "incr zero" (Pipeline.process "incr 0") "1";
+  check "decr zero" (Pipeline.process "decr 0") "-1";
+  check "incr negative" (Pipeline.process "incr (- 1)") "0";
+  check "incr chain via compose"
+    (Pipeline.process "(incr << incr << incr) 0") "3";
+  check "incr type" (Pipeline.type_of "incr") "(int -> int)";
+  check "decr type" (Pipeline.type_of "decr") "(int -> int)";
+  check "incr/decr inverse"
+    (Pipeline.process "(incr >> decr) 42") "42";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

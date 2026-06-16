@@ -332,6 +332,8 @@ let initial_env : env =
     ("even",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyBool)));
     ("odd",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyBool)));
     ("sign",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("incr",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("decr",        mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("clamp",
        mono (Ast.TyArrow (Ast.TyInt,
               Ast.TyArrow (Ast.TyInt,
