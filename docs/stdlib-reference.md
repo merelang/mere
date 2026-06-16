@@ -118,6 +118,10 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `f_sub` | `float -> float -> float` | 減算 |
 | `f_mul` | `float -> float -> float` | 乗算 |
 | `f_div` | `float -> float -> float` | 除算 (IEEE 754: 0 div は inf/nan) |
+| `f_lt` | `float -> float -> bool` | 小なり |
+| `f_le` | `float -> float -> bool` | 以下 |
+| `f_gt` | `float -> float -> bool` | 大なり |
+| `f_ge` | `float -> float -> bool` | 以上 |
 
 ```
 f_add 1.5 2.5                    // 4.0
@@ -187,25 +191,43 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 |---|---|---|
 | `iter_n` ★ | `int -> (unit -> unit) -> unit` | thunk を N 回適用 (副作用ループ)、N≤0 で no-op |
 
+---
+
+## システム (2)
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `time` | `unit -> float` | Unix epoch 秒数 (gettimeofday)。ベンチマーク・タイムスタンプ用 |
+| `exit` ★ | `int -> 'a` | プロセスを exit code で終了 (never returns、polymorphic 返り型) |
+
+```
+let start = time () in
+{ run_heavy_computation ();
+  print ("elapsed: " ++ str_of_float (f_sub (time ()) start) ++ " sec") }
+
+if config_invalid then exit 1 else continue ()
+```
+
 ```
 iter_n 3 (fn () -> print "===")   // === を 3 回出力
 ```
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、68 個)
+## 全 builtin 一覧 (アルファベット順、75 個)
 
 ```
 abs assert bool_of_str char_at chr clamp const cube
-decr divmod even f_add f_div f_mul f_sub fail flip
-float_of_int float_of_str fst gcd id incr int_of_float
-int_of_str is_alpha is_digit is_space iter_n lcm max
-min not odd ord pair pow print print_bool print_err
-print_int print_no_nl read_file read_line show sign snd
-square str_compare str_contains str_count str_ends_with
-str_len str_of_float str_of_int str_repeat str_replace
-str_rev str_starts_with str_trim str_unescape substring
-sum_range swap to_lower to_upper try_or write_file
+decr divmod even exit f_add f_div f_ge f_gt f_le f_lt
+f_mul f_sub fail flip float_of_int float_of_str fst gcd
+id incr int_of_float int_of_str is_alpha is_digit
+is_space iter_n lcm max min not odd ord pair pow print
+print_bool print_err print_int print_no_nl read_file
+read_line show sign snd square str_compare str_contains
+str_count str_ends_with str_len str_of_float str_of_int
+str_repeat str_replace str_rev str_starts_with str_trim
+str_unescape substring sum_range swap time to_lower
+to_upper try_or write_file
 ```
 
 ---

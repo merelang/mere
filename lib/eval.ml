@@ -63,6 +63,18 @@ let builtin_print =
      | _ -> failwith "print: expected str");
     V_unit)
 
+let builtin_time =
+  V_builtin ("time", fun v ->
+    match v with
+    | V_unit -> V_float (Unix.gettimeofday ())
+    | _ -> failwith "time: expected unit")
+
+let builtin_exit =
+  V_builtin ("exit", fun v ->
+    match v with
+    | V_int code -> exit code
+    | _ -> failwith "exit: expected int")
+
 let builtin_read_line =
   V_builtin ("read_line", fun v ->
     match v with
@@ -197,6 +209,21 @@ let builtin_f_div =
         | V_float y -> V_float (x /. y)  (* IEEE 754: 1.0 /. 0.0 -> inf, nan etc. *)
         | _ -> failwith "f_div: 2nd arg expected float")
     | _ -> failwith "f_div: 1st arg expected float")
+
+let make_float_cmp name op =
+  V_builtin (name, fun a ->
+    match a with
+    | V_float x ->
+      V_builtin (name ^ "_partial", fun b ->
+        match b with
+        | V_float y -> V_bool (op x y)
+        | _ -> failwith (name ^ ": 2nd arg expected float"))
+    | _ -> failwith (name ^ ": 1st arg expected float"))
+
+let builtin_f_lt = make_float_cmp "f_lt" (<)
+let builtin_f_le = make_float_cmp "f_le" (<=)
+let builtin_f_gt = make_float_cmp "f_gt" (>)
+let builtin_f_ge = make_float_cmp "f_ge" (>=)
 
 let builtin_print_bool =
   V_builtin ("print_bool", fun v ->
@@ -756,6 +783,8 @@ let builtin_char_at =
 let initial_env : env =
   [ ("print", ref builtin_print);
     ("read_line", ref builtin_read_line);
+    ("time", ref builtin_time);
+    ("exit", ref builtin_exit);
     ("print_no_nl", ref builtin_print_no_nl);
     ("print_err", ref builtin_print_err);
     ("read_file", ref builtin_read_file);
@@ -771,6 +800,10 @@ let initial_env : env =
     ("f_sub", ref builtin_f_sub);
     ("f_mul", ref builtin_f_mul);
     ("f_div", ref builtin_f_div);
+    ("f_lt", ref builtin_f_lt);
+    ("f_le", ref builtin_f_le);
+    ("f_gt", ref builtin_f_gt);
+    ("f_ge", ref builtin_f_ge);
     ("not", ref builtin_not);
     ("str_len", ref builtin_str_len);
     ("int_of_str", ref builtin_int_of_str);

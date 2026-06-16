@@ -4,7 +4,7 @@
 
 ## ステータス (2026-06-16 時点)
 
-- **68 stdlib builtin、567 tests passing**
+- **75 stdlib builtin、577 tests passing**
 - ツリーウォーキング interpreter (codegen なし)
 - 設計コンテキストは別リポ `internal design notes` (private)
 
@@ -20,7 +20,7 @@
 | 関数 | 多引数型付き fn / `let rec ... and ...` 相互再帰 / 高階 / closure |
 | 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` (int 算術)、float は `f_add` 等 |
 | 名前管理 | `let _ = ...;` `let (a, b) = ...;` `signature`、`type X = T` (alias) |
-| stdlib | 68 種: I/O 8 (stdin/stdout/stderr/file) / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 8 / error 3 |
+| stdlib | 75 種: I/O 8 / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 12 (算術 4 + 比較 4 + 変換 4) / error 3 / システム (time/exit) |
 | REPL | 対話実行、永続 env、`:type`/`:help`/`:quit` |
 | エラー | ソース該当行 + caret 表示 |
 
@@ -48,7 +48,7 @@ $ dune exec ./bin/main.exe -- examples/word_count.lang
 
 - **[Tutorial](docs/tutorial.md)** — 初めての方はここから
 - **[Language reference](docs/language-reference.md)** — 構文と意味論
-- **[Stdlib reference](docs/stdlib-reference.md)** — 全 68 builtin の表
+- **[Stdlib reference](docs/stdlib-reference.md)** — 全 75 builtin の表
 - **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
 - `examples/` — 動く .lang ファイル群 (FizzBuzz、JSON parser、word count 等)

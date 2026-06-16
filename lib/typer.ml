@@ -283,9 +283,18 @@ let try_or_scheme =
       Ast.TyArrow (Ast.TyUnit, _try_alpha),
       Ast.TyArrow (_try_alpha, _try_alpha)) }
 
+(* `exit : int -> 'a` — never returns, polymorphic result. *)
+let _exit_alpha = fresh_var ()
+let exit_scheme =
+  let aid = match _exit_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyInt, _exit_alpha) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
+    ("exit",        exit_scheme);
     ("print_no_nl", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_err",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("read_file",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyStr)));
@@ -302,6 +311,10 @@ let initial_env : env =
     ("f_sub",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
     ("f_mul",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
     ("f_div",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_lt",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
+    ("f_le",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
+    ("f_gt",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
+    ("f_ge",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyBool))));
     ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
     ("str_len",     mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
     ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));

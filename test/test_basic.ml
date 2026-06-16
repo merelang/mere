@@ -1621,5 +1621,26 @@ let () =
   check_raises "f_add with int errors"
     (fun () -> Pipeline.type_of "f_add 1 2");
 
+  (* --- float comparison: f_lt / f_le / f_gt / f_ge --- *)
+  check "f_lt true"  (Pipeline.process "f_lt 1.5 2.5") "true";
+  check "f_lt false" (Pipeline.process "f_lt 2.5 1.5") "false";
+  check "f_le equal" (Pipeline.process "f_le 1.5 1.5") "true";
+  check "f_gt true"  (Pipeline.process "f_gt 3.0 2.0") "true";
+  check "f_ge equal" (Pipeline.process "f_ge 1.0 1.0") "true";
+  check "f_lt type"
+    (Pipeline.type_of "f_lt") "(float -> (float -> bool))";
+
+  (* --- system: time + exit --- *)
+  check "time type"
+    (Pipeline.type_of "time") "(unit -> float)";
+  check "time > 0"
+    (Pipeline.process "f_gt (time ()) 0.0") "true";
+  check "exit type"
+    (Pipeline.type_of "exit") "(int -> 'a)";
+  check "exit polymorphic"
+    (* The body of `else` is never executed, but its type unifies with `int` *)
+    (Pipeline.type_of
+      "fn (n: int) -> if n < 0 then exit 1 else n") "(int -> int)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
