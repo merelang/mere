@@ -401,6 +401,27 @@ let builtin_str_ends_with =
         | _ -> failwith "str_ends_with: 2nd arg expected str")
     | _ -> failwith "str_ends_with: 1st arg expected str")
 
+let builtin_chr =
+  V_builtin ("chr", fun v ->
+    match v with
+    | V_int n ->
+      if n < 0 || n > 255 then
+        raise (Eval_error (Loc.dummy,
+          Printf.sprintf "chr: %d out of byte range [0, 255]" n))
+      else V_str (String.make 1 (Char.chr n))
+    | _ -> failwith "chr: expected int")
+
+let builtin_ord =
+  V_builtin ("ord", fun v ->
+    match v with
+    | V_str s ->
+      if String.length s <> 1 then
+        raise (Eval_error (Loc.dummy,
+          Printf.sprintf "ord: expected single-char str, got length %d"
+            (String.length s)))
+      else V_int (Char.code s.[0])
+    | _ -> failwith "ord: expected str")
+
 let builtin_char_at =
   V_builtin ("char_at", fun s_val ->
     match s_val with
@@ -433,6 +454,8 @@ let initial_env : env =
     ("substring", ref builtin_substring);
     ("str_replace", ref builtin_str_replace);
     ("char_at", ref builtin_char_at);
+    ("chr", ref builtin_chr);
+    ("ord", ref builtin_ord);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);
     ("max", ref builtin_max);

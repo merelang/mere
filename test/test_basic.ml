@@ -1286,5 +1286,24 @@ let () =
   check "str_replace type"
     (Pipeline.type_of "str_replace") "(str -> (str -> (str -> str)))";
 
+  (* --- stdlib chr / ord (code point conversions) --- *)
+  check "chr A" (Pipeline.process "chr 65") "\"A\"";
+  check "chr space" (Pipeline.process "chr 32") "\" \"";
+  check "chr zero" (Pipeline.process "chr 48") "\"0\"";
+  check "ord A" (Pipeline.process "ord \"A\"") "65";
+  check "ord lower a" (Pipeline.process "ord \"a\"") "97";
+  check "chr/ord roundtrip"
+    (Pipeline.process "ord (chr 100)") "100";
+  check "chr type" (Pipeline.type_of "chr") "(int -> str)";
+  check "ord type" (Pipeline.type_of "ord") "(str -> int)";
+  check_raises "chr out of range high"
+    (fun () -> Pipeline.process "chr 256");
+  check_raises "chr out of range low"
+    (fun () -> Pipeline.process "chr (- 1)");
+  check_raises "ord multi-char"
+    (fun () -> Pipeline.process "ord \"hi\"");
+  check_raises "ord empty"
+    (fun () -> Pipeline.process "ord \"\"");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
