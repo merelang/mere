@@ -25,9 +25,12 @@ dune exec ./bin/main.exe -- -r               # REPL
 
 > if 1 < 2 then "yes" else "no"
 - : str = "yes"
+
+> 3.14 |> f_mul 2.0
+- : float = 6.28
 ```
 
-整数算術、文字列結合 `++`、比較、論理 `&& ||`、`if-then-else` は普通の ML 流。
+整数算術、文字列結合 `++`、比較、論理 `&& ||`、`if-then-else` は普通の ML 流。`int` と `float` は別の型で、float 算術は `f_add`/`f_sub`/`f_mul`/`f_div` builtin を使う (`float_of_int` / `int_of_float` で明示変換)。
 
 ## 2. 変数 (`let`) と関数 (`fn`)
 
@@ -122,6 +125,19 @@ match (1, 2) with
 | (a, b) as whole    -> show whole         // as-pattern: tuple 全体を whole に
 ```
 
+### 文字リテラル (length-1 str)
+```
+'A'                  // length-1 str "A"
+'\n'                 // newline as length-1 str
+
+match char_at s i with
+| 'a' | 'e' | 'i' | 'o' | 'u' -> "vowel"
+| c when is_digit c           -> "digit"
+| _                            -> "other"
+```
+
+`'X'` は単に長さ 1 の str (Lang は別 char 型を持たない)。`'a` 等の型変数構文との区別は閉じ quote の有無で。
+
 ## 6. データ型
 
 ### Sum type (variant)
@@ -198,6 +214,20 @@ safe_parse "42"                     // 42
 safe_parse "abc"                    // -1
 ```
 
+## 9.5. ファイル I/O
+
+```
+let content = read_file "input.txt";       // ファイル全体を str に
+let _ = write_file "out.txt" "hello lang"; // 上書き
+
+// プロセス入力もある
+let line = read_line ();                   // stdin から 1 行
+let _ = print_no_nl "Name: ";              // プロンプト (改行なし)
+let _ = print_err "error message";         // stderr
+```
+
+ファイル存在しない等のエラーは `Eval_error` を raise。`try_or` で safe parse パターンが書ける。
+
 ## 10. Signature alias (cap-passing パターン)
 
 複数の引数を 1 つの「束」として再利用:
@@ -235,7 +265,7 @@ save_order 100 10 5 + log_event 100 10 7    // 132
 - **`mutual_rec.lang`** — `let rec ... and ...`
 - **`pipe.lang`** — `|>` `<<` `>>` 連結
 - **`word_count.lang`** — file I/O + str_count を使った `wc` 風スクリプト
-- **`json_parser.lang`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + escape + エラー)
+- **`json_parser.lang`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + escape + エラー、文字 dispatch 含む)
 
 REPL で対話的に試したいときは:
 ```sh

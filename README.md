@@ -4,7 +4,7 @@
 
 ## ステータス (2026-06-16 時点)
 
-- 56 stdlib builtin、519 tests passing
+- **68 stdlib builtin、567 tests passing**
 - ツリーウォーキング interpreter (codegen なし)
 - 設計コンテキストは別リポ `internal design notes` (private)
 
@@ -13,13 +13,14 @@
 | カテゴリ | 内容 |
 |---|---|
 | 型システム | Hindley-Milner 推論、let-polymorphism、多相 builtin (1〜3-quantified) |
-| データ | int / bool / str / unit、tuple、record、sum types、list 構文糖 `[1, 2, 3]` |
+| プリミティブ | `int`、`float` (IEEE 754)、`bool`、`str`、`unit` |
+| データ | tuple、record、sum types、list 構文糖 `[1, 2, 3]` (show 出力も `[..]` 形式) |
 | 制御 | `if-then-else`、`if-then` (unit)、`match` + ガード `when` + as-pattern + or-pattern |
-| パターン | wildcard / var / lit / tuple / constructor / list `[h, ...t]` / record / as / or |
+| パターン | wildcard / var / lit / 文字 `'X'` / tuple / constructor / list `[h, ...t]` / record / as / or |
 | 関数 | 多引数型付き fn / `let rec ... and ...` 相互再帰 / 高階 / closure |
-| 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` |
+| 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` (int 算術)、float は `f_add` 等 |
 | 名前管理 | `let _ = ...;` `let (a, b) = ...;` `signature`、`type X = T` (alias) |
-| stdlib | I/O・文字列・数値・多相・higher-order(`flip`,`try_or`,`iter_n`) 56 種 |
+| stdlib | 68 種: I/O 8 (stdin/stdout/stderr/file) / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 8 / error 3 |
 | REPL | 対話実行、永続 env、`:type`/`:help`/`:quit` |
 | エラー | ソース該当行 + caret 表示 |
 
@@ -37,15 +38,20 @@ $ dune exec ./bin/main.exe -- -e 'type 'a opt = None | Some of 'a; match Some 42
 
 $ dune exec ./bin/main.exe -- examples/json_parser.lang
 # JSON パーサ in Lang (140 行) のセルフテストが走る
+
+$ echo "hello lang world" > /tmp/input.txt
+$ dune exec ./bin/main.exe -- examples/word_count.lang
+# file: /tmp/input.txt / chars / lines / words を表示
 ```
 
 ## ドキュメント
 
 - **[Tutorial](docs/tutorial.md)** — 初めての方はここから
 - **[Language reference](docs/language-reference.md)** — 構文と意味論
-- **[Stdlib reference](docs/stdlib-reference.md)** — 全 56 builtin の表
+- **[Stdlib reference](docs/stdlib-reference.md)** — 全 68 builtin の表
 - **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
-- `examples/` — 動く .lang ファイル群 (FizzBuzz、relational、JSON parser 等)
+- **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
+- `examples/` — 動く .lang ファイル群 (FizzBuzz、JSON parser、word count 等)
 
 ## ビルド・実行
 

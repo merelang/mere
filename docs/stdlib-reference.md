@@ -193,7 +193,7 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、56 個)
+## 全 builtin 一覧 (アルファベット順、68 個)
 
 ```
 abs assert bool_of_str char_at chr clamp const cube

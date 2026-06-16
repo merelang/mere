@@ -1,0 +1,82 @@
+# Changelog (lang-ml)
+
+実装の主要なマイルストーンを slice 単位で記録 (新しいもの順)。詳細な commit メッセージは `git log` 参照。
+
+---
+
+## 2026-06-16
+
+- **float 型導入** — `TyFloat` プリミティブ + `Float_lit` (`1.5` リテラル) + V_float、変換 4 (`float_of_int` / `int_of_float` / `str_of_float` / `float_of_str`) + 算術 4 (`f_add` / `f_sub` / `f_mul` / `f_div`)。int と float の暗黙変換なし。既知制約「float なし」を解消。
+- **file I/O** — `read_file : str -> str` / `write_file : str -> str -> unit`。CLI ツールが書けるように。`examples/word_count.lang` 追加。
+- **`str_unescape` builtin** — `\n` `\t` `\r` `\\` `\"` `\/` を decode。JSON parser で escape 入り文字列対応。
+- **文字リテラル `'X'`** — lexer のみ、長さ 1 の str に。tyvar `'a` と曖昧解消 (closing quote の有無)、`match c with | 'n' -> ...` でディスパッチ可。
+- **list display 改善** — `to_string` で Cons/Nil chain を `[a, b, c]` 表示。JSON parser 出力が劇的に読みやすく。
+- **ドキュメント整備** — README 刷新 + `docs/{tutorial, language-reference, stdlib-reference, patterns}.md` を新設 (1100+ 行)。
+- **`divmod`** — Lang 初の tuple 戻り builtin (`int → int → (int * int)`)。
+- **`square` / `cube`** — int → int の 2 乗 / 3 乗。
+- **`sum_range`** — Gauss 公式で O(1) 総和。
+- **`incr` / `decr`** — int → int の +1 / -1。
+- **`iter_n`** — higher-order 副作用ループ。
+- **多相 `const` / `flip`** — Lang 初の 3-quantified、higher-order 多相 builtin。`apply_value_ref` の forward-ref で実装。
+- **多相 `id` / `swap` / `pair`** — tuple 操作の標準セット完成。
+- **多相 `fst` / `snd`** — Lang 初の 2-quantified scheme builtin。
+- **`try_or`** — Lang 初の error-handling builtin。
+- **`fail` / `show`** — Lang 初の多相 builtin (scheme.quantified)。
+- **as-pattern / or-pattern** — `(a, b) as p`、`| 1 | 2 | 3 -> ...` (binding names/型一致を typer 強制)。
+- **構造的等価性** — `==` / `!=` がタプル / レコード / コンストラクタを再帰比較。
+- **型エイリアス `type Name = T;`** — parse-time substitution、variant/record/alias を `|`/`of` で disambiguate。
+- **関数合成 `<<` / `>>`** — 右結合、`|>` より高優先。
+- **複数型パラメータ `('a, 'b) result`** — 既知制約「型パラメータ 1 個まで」を解消。
+- **top-level let pattern** — `let _ = ...;`、`let (a, b) = ...;` 等が top-level でも、既知制約解消。
+- **if without else** — `if cond then body` (body unit 型)。
+- **マッチガード `| pat when expr -> body`** — 既知制約「ガードなし」を解消。
+- **ブロック式 `{ e1; e2; eN }`** — Let(P_wild) chain への parser 糖。
+- **リストパターン `[a, b, ...t]`** — リテラルと対称、parser 糖。
+- **レコード更新 `{ p | x = 10 }`** — immutable update。
+- **レコード型 `type Point = { x: int, y: int }`** — nominal records、多相、partial pattern。
+- **相互再帰 `let rec ... and ...`** — 既知制約「相互再帰なし」を解消。
+- **リスト リテラル `[1, 2, 3]`** — Cons/Nil chain への parser 糖。
+- **パイプ `|>` / シグネチャエイリアス** — ergonomic 改善。
+- **多引数型付き fn** — `fn (x: int, y: str) -> body` を curry に desugar。
+- **stdlib 大量追加** — print_int / str_of_int / int_of_str / str_len / not / min / max / abs / pow / gcd / lcm / clamp / sign / even / odd / chr / ord / to_upper / to_lower / str_trim / str_rev / str_contains / str_count / str_replace / str_starts_with / str_ends_with / str_repeat / substring / char_at / is_digit / is_alpha / is_space / read_line / print_no_nl / print_err / assert / bool_of_str / str_compare 等多数。
+
+---
+
+## 2026-06-15 〜 06-16 (週前半)
+
+- 主要な拡張: 演算子拡充 (`/ %` `<= >= > !=` `&& ||`)、let pattern、`with` 式、多相型 (`'a opt`)、タプル、sum types + パターンマッチ。
+- 設計 doc: Q-008 (region/arena 統合)、Q-009 (view 型 3 公理)、Q-010 (region 版 std)、Q-011 (Drop 順序)。Lang のメモリモデル設計地図が完成。
+
+---
+
+## 2026-06-06 (着手日)
+
+- OCaml 4-phase trial を経てホスト言語 OCaml 決定 (Q-001 resolved)
+- 1 日で「整数 + let + bool + if + 関数 + 再帰 + 双方向型検査 + REPL」の最小コア完成 (24 tests)
+- 文字列 + print + `++` 連結 + unit (slice 1)、REPL (slice 2)、複数 top-level decl (slice 8)
+- **Hindley-Milner 型推論 + let-polymorphism**: Algorithm W + occurs check + generalize/instantiate を実装。注釈なし関数の推論、多相 id、多相 compose、let-poly 全て動作 (slice 9、29 tests)。
+
+---
+
+## 累計 (2026-06-16 時点)
+
+- 設計 doc 4 件 (Q-008/009/010/011)
+- 実装スライス **62 個**
+- テスト **567 個** (初回 35 → 567、16 倍)
+- builtin **68 個**
+- 既知制約 **8 個解消** (相互再帰 / ガード / 多 type param / top-level let pattern / list display / char literal / file I/O / float)
+
+---
+
+## 未着手 (将来)
+
+- **`&T` 参照** — 借用注釈 (`&shared write` 等) → メモリモデル本丸
+- **`region R { ... }` / `view V[R] of T`** — Q-008/009 の実装
+- **エフェクトシステム** — capability 型と effect 追跡
+- **ネイティブ codegen** — LLVM or Wasm
+- **網羅性検査** — match arm が全 case 覆っているか
+- **行内 unicode / Unicode source** — 現状 ASCII 限定
+- **モジュールシステム** — ファイル分割 + namespace
+- **依存型 / refinement types** — 04_fundamental_tradeoffs.md の段階導入
+- **row polymorphism** — record update に annotation 不要にする
+- **多行 REPL** — REPL は単一行のみ
