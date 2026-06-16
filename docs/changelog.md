@@ -6,6 +6,7 @@
 
 ## 2026-06-16
 
+- **region Phase 2.3**: view 構築の region 強制 + region パラメータ substitution — view を構築できるのは `region { ... }` block 内のみ。構築時に view 宣言の region パラメータ `R` が active region 名に置換され、フィールドに `&R T` がある場合、別名 region でも自動的にタグが揃う。typer に views Hashtbl と active_regions stack を追加、`Region_block` で push/pop、`Record_lit` で view dispatch + `subst_region`。memory-model.md の §5 「view 型」セクションと連携。
 - **region Phase 2.2**: `view V[R] of T { fields };` 宣言 — Q-009 で確定した view 型を構文として導入。`view Node[R] of int { value: int, next: int };` のように region パラメータ `[R]` と (optional な) 内部型 `of T` を取り、`{ field: ty, ... }` でフィールドを宣言。Phase 2.2 では「region 付き record」として扱い (region は記録のみ、強制なし)、`Node { value = 1, next = 0 }` 構築と `n.value` アクセスが動く。意味論の厳格化 (region 内構築のみ、フィールド `&R T` 必須化) は将来 Phase で。設計 doc: `14_view_types.md` の 3 公理 (immutable / region-scoped / structural identity) のうち最初の 2 個を構文で表現する段階。
 - **region Phase 2.1**: `&R v` 値式 + escape check — `&R 5` で値を region tag 付きの参照型に。`region R { body }` の出口で body の型に R が漏れていないかチェックし、漏れていればコンパイル時エラー。これで region は「型システム上のラベル」から「実際の安全性保証」に格上げ。
 - **region / `&R T` Phase 1** — メモリモデル本丸への第一歩。`region R { body }` 式が R を region 名としてスコープに導入、`&R T` を参照型として AST/typer/eval に追加。Phase 1 は **構文** のみ — escape check や Trivial 制約、view 型、`r.alloc(v)` semantics は Phase 2 以降。設計 doc: 11_region_vs_arena.md / 14_view_types.md に対応。

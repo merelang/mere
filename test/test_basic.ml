@@ -1783,30 +1783,46 @@ let () =
      in
      if ok then "raised" else "did-not-raise") "raised";
 
-  (* --- view type declarations: Phase 2.2 ---
-     `view V[R] of T { fields }` declares a region-tagged view.  Phase 2.2
-     treats views as records (region parameter recorded but not enforced). *)
-  check "view declaration + construction + field access"
+  (* --- view type declarations: Phase 2.3 ---
+     `view V[R] of T { fields }` declares a region-tagged view. Phase 2.3
+     enforces that construction happens inside a `region { ... }` block and
+     substitutes the view's region param with the active region. *)
+  check "view constructed inside region"
     (Pipeline.process
       "view Node[R] of int { value: int, next: int };\n\
-       let n = Node { value = 1, next = 0 } in n.value")
+       region R { let n = Node { value = 1, next = 0 } in n.value }")
     "1";
-  check "view without `of T`"
-    (Pipeline.process
-      "view Slot[R] { item: str };\n\
-       let s = Slot { item = \"hi\" } in s.item")
-    "\"hi\"";
-  check "view inside region block"
+  check "view constructed inside differently-named region (region param substituted)"
     (Pipeline.process
       "view Cell[R] of int { v: int };\n\
-       region R { let c = Cell { v = 7 } in c.v }")
+       region MyArena { let c = Cell { v = 7 } in c.v }")
     "7";
-  check "view field update via record update syntax"
+  check "view with `&R T` field accepts matching region tag"
+    (Pipeline.process
+      "view Slot[R] { item: &R int };\n\
+       region S { let s = Slot { item = &S 42 } in 100 }")
+    "100";
+  check_raises "view constructed outside any region: error"
+    (fun () ->
+      Pipeline.process
+        "view Node[R] of int { value: int, next: int };\n\
+         let n = Node { value = 1, next = 0 } in n.value");
+  check_raises "view with `&R T` field rejects wrong region tag"
+    (fun () ->
+      Pipeline.process
+        "view Slot[R] { item: &R int };\n\
+         region S { let s = Slot { item = &T 42 } in 100 }");
+  check "view field update via record update syntax (inside region)"
     (Pipeline.process
       "view Pair[R] { a: int, b: int };\n\
-       let p = Pair { a = 1, b = 2 } in\n\
-       let q = { p | a = 10 } in q.a + q.b")
+       region R { let p = Pair { a = 1, b = 2 } in\n\
+                  let q = { p | a = 10 } in q.a + q.b }")
     "12";
+  check "nested regions: view picks innermost"
+    (Pipeline.process
+      "view Tag[R] { mark: &R int };\n\
+       region Outer { region Inner { let t = Tag { mark = &Inner 9 } in 0 } }")
+    "0";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

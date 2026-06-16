@@ -154,6 +154,36 @@ type record_info = {
 }
 let records : (string, record_info) Hashtbl.t = Hashtbl.create 16
 
+(* View registry: name -> (region_param, ordered field list).
+   View construction is enforced to happen inside an active region block;
+   the region_param is substituted with the active region at construction. *)
+type view_info = {
+  v_region_param : string;
+  v_fields : (string * Ast.ty) list;
+}
+let views : (string, view_info) Hashtbl.t = Hashtbl.create 8
+
+(* Stack of currently-open region names (innermost first), maintained by
+   Region_block during inference. Used to enforce that view construction
+   happens inside a region. *)
+let active_regions : string list ref = ref []
+
+(* Substitute a region name in a type. Used when instantiating a view's
+   declared field types at construction time. *)
+let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyRef (r, inner) ->
+    let r' = if r = from_name then to_name else r in
+    Ast.TyRef (r', subst_region from_name to_name inner)
+  | Ast.TyArrow (a, b) ->
+    Ast.TyArrow (subst_region from_name to_name a,
+                 subst_region from_name to_name b)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_region from_name to_name) ts)
+  | Ast.TyCon (n, args) ->
+    Ast.TyCon (n, List.map (subst_region from_name to_name) args)
+  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
+    | Ast.TyParam _ | Ast.TyVar _) as t -> t
+
 let register_type type_name params variants =
   Hashtbl.replace types type_name (List.length params);
   Exhaustive.register_variants type_name variants;
@@ -165,6 +195,15 @@ let register_type type_name params variants =
 let register_record type_name params fields =
   Hashtbl.replace types type_name (List.length params);
   Hashtbl.replace records type_name { r_params = params; r_fields = fields }
+
+(* Register a view: populates both the view registry (for construction-time
+   region enforcement) and the record registry (so field access / record
+   update work as for a plain record). *)
+let register_view view_name region_param fields =
+  Hashtbl.replace views view_name
+    { v_region_param = region_param; v_fields = fields };
+  Hashtbl.replace types view_name 0;
+  Hashtbl.replace records view_name { r_params = []; r_fields = fields }
 
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
    substitute them into the arg type and result type. *)
@@ -506,8 +545,17 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     infer ((name, sch) :: env) body
   | Ast.Region_block (name, body) ->
     (* Phase 2: introduce region name R in scope, then check that R does not
-       escape the block (i.e., body's resulting type should not mention R). *)
-    let t = infer env body in
+       escape the block (i.e., body's resulting type should not mention R).
+       Also push name on active_regions so view constructions inside the
+       block can substitute R with the active region (Phase 2.3). *)
+    active_regions := name :: !active_regions;
+    let t =
+      try infer env body
+      with ex ->
+        active_regions := List.tl !active_regions;
+        raise ex
+    in
+    active_regions := List.tl !active_regions;
     if mentions_region name (Ast.walk t) then
       raise (Type_error (e.loc,
         Printf.sprintf
@@ -577,27 +625,59 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     let ts = List.map (infer env) es in
     Ast.TyTuple ts
   | Ast.Record_lit (name, fields) ->
-    let info =
-      try Hashtbl.find records name
-      with Not_found ->
-        raise (Type_error (e.loc, "unknown record type: " ^ name))
-    in
-    let (expected_fields, result_ty) = instantiate_record name info in
-    (* All declared fields must be provided exactly once. *)
-    let provided_names = List.map fst fields in
-    let expected_names = List.map fst expected_fields in
-    if List.sort compare provided_names <> List.sort compare expected_names then
-      raise (Type_error (e.loc,
-        Printf.sprintf "record %s: field set mismatch (expected: %s, got: %s)"
-          name
-          (String.concat ", " expected_names)
-          (String.concat ", " provided_names)));
-    List.iter (fun (fname, fexpr) ->
-      let exp_ty = List.assoc fname expected_fields in
-      let t = infer env fexpr in
-      unify fexpr.loc t exp_ty
-    ) fields;
-    result_ty
+    (* If name is a registered view, enforce construction-inside-region and
+       substitute the view's region param with the innermost active region. *)
+    (match Hashtbl.find_opt views name with
+     | Some vinfo ->
+       let target_region =
+         match !active_regions with
+         | [] ->
+           raise (Type_error (e.loc,
+             Printf.sprintf
+               "view %s must be constructed inside a region block" name))
+         | r :: _ -> r
+       in
+       let expected_fields =
+         List.map (fun (f, t) ->
+           (f, subst_region vinfo.v_region_param target_region t)
+         ) vinfo.v_fields
+       in
+       let provided_names = List.map fst fields in
+       let expected_names = List.map fst expected_fields in
+       if List.sort compare provided_names <> List.sort compare expected_names then
+         raise (Type_error (e.loc,
+           Printf.sprintf "view %s: field set mismatch (expected: %s, got: %s)"
+             name
+             (String.concat ", " expected_names)
+             (String.concat ", " provided_names)));
+       List.iter (fun (fname, fexpr) ->
+         let exp_ty = List.assoc fname expected_fields in
+         let t = infer env fexpr in
+         unify fexpr.loc t exp_ty
+       ) fields;
+       Ast.TyCon (name, [])
+     | None ->
+       let info =
+         try Hashtbl.find records name
+         with Not_found ->
+           raise (Type_error (e.loc, "unknown record type: " ^ name))
+       in
+       let (expected_fields, result_ty) = instantiate_record name info in
+       (* All declared fields must be provided exactly once. *)
+       let provided_names = List.map fst fields in
+       let expected_names = List.map fst expected_fields in
+       if List.sort compare provided_names <> List.sort compare expected_names then
+         raise (Type_error (e.loc,
+           Printf.sprintf "record %s: field set mismatch (expected: %s, got: %s)"
+             name
+             (String.concat ", " expected_names)
+             (String.concat ", " provided_names)));
+       List.iter (fun (fname, fexpr) ->
+         let exp_ty = List.assoc fname expected_fields in
+         let t = infer env fexpr in
+         unify fexpr.loc t exp_ty
+       ) fields;
+       result_ty)
   | Ast.Field_get (inner, fname) ->
     let t_inner = infer env inner in
     (* The inner expression must have type `TyCon (rec_name, args)` for some
