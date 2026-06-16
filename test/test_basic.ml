@@ -1202,5 +1202,32 @@ let () =
   check_raises "swap on non-2-tuple"
     (fun () -> Pipeline.process "swap (1, 2, 3)");
 
+  (* --- polymorphic `const` and `flip` (higher-order) --- *)
+  check "const type"
+    (Pipeline.type_of "const") "('a -> ('b -> 'a))";
+  check "const int/str"
+    (Pipeline.process "const 42 \"ignored\"") "42";
+  check "const partial"
+    (Pipeline.process
+      "let always7 = const 7 in
+       always7 \"a\" + always7 100") "14";
+  check "flip type"
+    (Pipeline.type_of "flip")
+    "(('a -> ('b -> 'c)) -> ('b -> ('a -> 'c)))";
+  check "flip swaps args"
+    (Pipeline.process
+      "let sub = fn (a: int) -> fn (b: int) -> a - b in
+       (flip sub) 3 10") "7";
+  check "flip with builtin"
+    (Pipeline.process "flip str_contains \"world\" \"hello world\"") "true";
+  check "flip is self-inverse"
+    (Pipeline.process
+      "let sub = fn (a: int) -> fn (b: int) -> a - b in
+       flip (flip sub) 10 3") "7";
+  check "const + flip combo"
+    (Pipeline.process
+      "let take_first = flip const in
+       take_first \"discarded\" 100") "100";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
