@@ -143,7 +143,64 @@ Phase 1 は「型システム上の領域ラベル」を確立する段階で、
 
 ---
 
-## 5. ロードマップ
+## 5. view 型 — 領域内の自己参照・循環構造
+
+region は「同じ寿命を共有する箱」だが、その中で **データ同士が指し合う構造** (グラフ、リンクリスト、AST、JSON 木等) を安全に扱う機構が必要。これが **view 型**。
+
+### 動機: 所有権モデルの苦手領域
+
+```
+// Rust だとほぼ書けない: 相互参照する 2 ノード
+let a = Node { value = 1, next = ??? }  // ??? を b にしたい
+let b = Node { value = 2, next = a }    // でも a も b を指したい
+```
+
+所有権言語では循環参照が原理的に困難 (`Rc<RefCell<T>>` への退避、`unsafe`、自前 arena 等)。region 内なら **全員が同じ寿命** なので循環 OK。view はこの「region 内の関係構造」を型として表現する。
+
+### 3 公理 (Q-009 paper-validated)
+
+| 公理 | 意味 |
+|---|---|
+| **immutable** | view 値は構築後変更不可。再代入も不可 |
+| **region-scoped** | 必ずどこかの region R に属し、R の外に出せない (型に `[R]` が焼き付く) |
+| **structural identity by region** | 同じ region 内の同型 view は同一視 — 循環参照が安全に成立する根拠 |
+
+### record との違い
+
+```
+type Point = { x: int, y: int };       // 普通の record: 寿命は GC 任せ、領域非依存
+view Node[R] of int { value: int };    // view: region R に縛られた束ね型
+```
+
+- record は単なるデータ。view は **region tag が型に焼き付いた** 構造 (`Node[R]` の `[R]`)
+- フィールド型に `&R T` を持てる: `view Node[R] of int { next: &R Node[R] }` で自己参照
+- view 値は `&R Node` 経由でしか触れない (構造の同一性は region 単位)
+
+### なぜ「view」と呼ぶか
+
+物理レイアウト (内部型 `of T`) とプログラマが触る型 (`Node`) を **別物として "見立てる"**。「内部は連番 int だが、view としては Node 構造体」のような表現を可能にする (将来的な機能)。
+
+### 現状 (Phase 2.2、2026-06-16)
+
+構文のみ通っている段階。region パラメータは parser が記録するだけで、構築時の region 強制やフィールド型での R 伝播はまだ未実装 — 実質 record と同等扱い。
+
+```
+view Node[R] of int { value: int, next: int };
+let n = Node { value = 1, next = 0 } in n.value    // 1
+```
+
+### 将来 Phase で厳格化される予定
+
+- 構築は対応する `region R { ... }` 内に限定
+- フィールド型に `&R T` を要求 (region tag が view 全体に伝播)
+- view 値そのものは `&R V` 経由でしか参照できない
+- 同一 region 内の循環構築 (mutable な構築 phase + immutable な使用 phase の二段階)
+
+詳細設計は `internal design notes` (Q-009 resolved) を参照。
+
+---
+
+## 6. ロードマップ
 
 ### Phase 2 (中サイズ、~600-800 LoC、複数 slice) — 進行中
 - [x] `&R v` 値式 (Phase 2.1、2026-06-16)
@@ -166,7 +223,7 @@ Phase 1 は「型システム上の領域ラベル」を確立する段階で、
 
 ---
 
-## 6. 設計コンテキスト (詳細)
+## 7. 設計コンテキスト (詳細)
 
 具体的な設計判断は別リポ `internal design notes` (private) を参照:
 
@@ -185,7 +242,7 @@ Phase 1 は「型システム上の領域ラベル」を確立する段階で、
 
 ---
 
-## 7. 学術的ルーツ
+## 8. 学術的ルーツ
 
 | 文献 | 内容 |
 |---|---|
