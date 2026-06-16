@@ -60,6 +60,11 @@ let process_decls eval_env type_env decls =
     | Ast.Top_type_alias _ ->
       (* Parse-time expansion only; nothing to do at type/eval level. *)
       ()
+    | Ast.Top_view (name, _region, fields) ->
+      (* Phase 2.2: treat view as a region-agnostic record. The region
+         parameter is currently ignored — future phases will enforce that
+         construction happens inside the matching region. *)
+      Typer.register_record name [] fields
   ) decls
 
 let process s =
@@ -120,6 +125,8 @@ let type_of s =
     | Ast.Top_record (name, params, fields) ->
       Typer.register_record name params fields
     | Ast.Top_type_alias _ -> ()
+    | Ast.Top_view (name, _region, fields) ->
+      Typer.register_record name [] fields
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 

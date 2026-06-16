@@ -801,6 +801,49 @@ let parse_program tokens =
            "expected ';' after signature declaration")))
     | (pos, T_signature) :: _ ->
       raise (Parse_error (pos, "expected 'name = (params)' after 'signature'"))
+    | (pos, T_view) :: (_, T_ident view_name) :: (_, T_lbracket)
+      :: (_, T_ident region_param) :: (_, T_rbracket) :: rest ->
+      (* `view V[R] of T { fields };` or `view V[R] { fields };` (no `of T`) *)
+      let rest =
+        match rest with
+        | (_, T_of) :: rest ->
+          (* Parse and discard `of T` — Phase 2.2 doesn't enforce this yet. *)
+          let _, rest = ty rest in
+          rest
+        | _ -> rest
+      in
+      (match rest with
+       | (_, T_lbrace) :: body_rest ->
+         let rec parse_fields acc toks =
+           match toks with
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | (_, T_ident fname) :: (_, T_colon) :: rest ->
+             let t, rest = ty rest in
+             let acc = (fname, t) :: acc in
+             (match rest with
+              | (_, T_comma) :: rest -> parse_fields acc rest
+              | (_, T_rbrace) :: rest -> List.rev acc, rest
+              | _ ->
+                raise (Parse_error (pos_of rest,
+                  "expected ',' or '}' in view fields")))
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected 'field: type' in view body"))
+         in
+         let fields, toks = parse_fields [] body_rest in
+         Hashtbl.replace records view_name fields;
+         (match toks with
+          | (_, T_semi) :: rest ->
+            parse_decls
+              (Ast.Top_view (view_name, region_param, fields) :: decls)
+              rest
+          | _ ->
+            raise (Parse_error (pos_of toks,
+              "expected ';' after view declaration")))
+       | _ -> raise (Parse_error (pos, "expected '{' to start view body")))
+    | (pos, T_view) :: _ ->
+      raise (Parse_error (pos,
+        "expected 'NAME [R] (of T)? { fields }' after 'view'"))
     | (_, T_type) :: rest ->
       let params, rest = parse_type_params rest in
       (match rest with
