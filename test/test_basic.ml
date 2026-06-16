@@ -1159,5 +1159,28 @@ let () =
       "match x with | 1 | 2 -> 10 | _ -> 0"))
     "(match x with | (1 | 2) -> 10 | _ -> 0)";
 
+  (* --- polymorphic `fst` / `snd` for 2-tuples --- *)
+  check "fst int/str"
+    (Pipeline.process "fst (42, \"hi\")") "42";
+  check "snd int/str"
+    (Pipeline.process "snd (42, \"hi\")") "\"hi\"";
+  check "fst type"
+    (Pipeline.type_of "fst") "(('a * 'b) -> 'a)";
+  check "snd type"
+    (Pipeline.type_of "snd") "(('a * 'b) -> 'b)";
+  check "fst at int/bool"
+    (Pipeline.type_of "fst (1, true)") "int";
+  check "snd at int/bool"
+    (Pipeline.type_of "snd (1, true)") "bool";
+  check "fst polymorphic two sites"
+    (Pipeline.process
+      "fst (10, true) + (if snd (\"x\", 5) > 0 then 1 else 0)") "11";
+  check "fst/snd nested"
+    (Pipeline.process "fst (snd ((1, 2), (3, 4)))") "3";
+  check "fst with show"
+    (Pipeline.process "show (fst (\"a\", 42))") "\"\\\"a\\\"\"";
+  check_raises "fst on non-2-tuple"
+    (fun () -> Pipeline.process "fst (1, 2, 3)");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
