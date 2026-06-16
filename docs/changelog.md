@@ -6,6 +6,14 @@
 
 ## 2026-06-16
 
+- **網羅性検査 Phase 1** (Exhaustive モジュール) — bool と variant types の網羅性を warning として検出。`match Some x with | Some n -> ...` で「missing None」を stderr に出力、評価は継続。guarded arm は保守的に「カバーしてない」扱い、as-pattern と or-pattern は透過。lib/exhaustive.ml は Typer に依存しない逆方向 (Typer が register_variants を呼んで populate)。
+- **数学 builtin 8 個** (`pi`/`e` 定数 + `sqrt`/`f_abs`/`f_neg`/`floor`/`ceil`/`round`) — float 算術が一通り揃った。
+- **`int_max`/`int_min` 定数 builtin** — Lang 初の non-function builtin。
+- **`time : unit -> float` + `exit : int -> 'a`** — Unix epoch とプロセス終了。
+- **float 比較 4** (`f_lt`/`f_le`/`f_gt`/`f_ge`)。
+- **CSV パーサ example** (~130 行、RFC 4180 縮小版)。
+- **mini_calc.lang 拡張**: let バインディング + 変数 + env-based eval、shadowing 動作。
+- **list_lib.lang** 追加: Lang 自身で書く list ユーティリティ 12 関数 (map/filter/fold_left/fold_right/length/rev/take/drop/range/replicate/for_all/any)。
 - **float 型導入** — `TyFloat` プリミティブ + `Float_lit` (`1.5` リテラル) + V_float、変換 4 (`float_of_int` / `int_of_float` / `str_of_float` / `float_of_str`) + 算術 4 (`f_add` / `f_sub` / `f_mul` / `f_div`)。int と float の暗黙変換なし。既知制約「float なし」を解消。
 - **file I/O** — `read_file : str -> str` / `write_file : str -> str -> unit`。CLI ツールが書けるように。`examples/word_count.lang` 追加。
 - **`str_unescape` builtin** — `\n` `\t` `\r` `\\` `\"` `\/` を decode。JSON parser で escape 入り文字列対応。
@@ -74,7 +82,7 @@
 - **`region R { ... }` / `view V[R] of T`** — Q-008/009 の実装
 - **エフェクトシステム** — capability 型と effect 追跡
 - **ネイティブ codegen** — LLVM or Wasm
-- **網羅性検査** — match arm が全 case 覆っているか
+- **網羅性検査 Phase 2** — int/str/float/tuple/record の精密な網羅性、redundancy check
 - **行内 unicode / Unicode source** — 現状 ASCII 限定
 - **モジュールシステム** — ファイル分割 + namespace
 - **依存型 / refinement types** — 04_fundamental_tradeoffs.md の段階導入
