@@ -85,6 +85,8 @@ type top_decl =
     (* record type name * type params * field list (name, type) *)
   | Top_type_alias of string * string list * ty
     (* alias name * type params * aliased type — parse-time substitution *)
+  | Top_view of string * string * (string * ty) list
+    (* view name * region param * fields (can reference the region via &R T) *)
 
 type program = {
   decls : top_decl list;
@@ -249,4 +251,5 @@ let desugar_program (prog : program) : expr =
     | Top_signature _ -> body
     | Top_record _ -> body
     | Top_type_alias _ -> body
+    | Top_view _ -> body
   ) prog.decls prog.main

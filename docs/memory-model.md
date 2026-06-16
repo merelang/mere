@@ -99,11 +99,12 @@ with db = Database.connect(...) in
 
 ## 4. lang-ml での現状 (2026-06-16)
 
-### 動くこと (Phase 2: 構文 + 値式 + escape check)
+### 動くこと (Phase 2: 構文 + 値式 + escape check + view 宣言)
 - `region R { body }` 式 — R を region 名としてスコープに導入
 - `&R T` 参照型 — region-tagged reference
 - `&R v` 値式 — 値を region tag 付きで表現
 - **escape check** — `region R { body }` の body の型に R が漏れたらコンパイルエラー
+- `view V[R] of T { fields }` 宣言 — region パラメータ付き view 型 (Phase 2.2 では record 同等扱い)
 
 ```
 > region R { 42 }
@@ -120,13 +121,17 @@ ERROR: region escape: `&R int` cannot leave region `R`
 
 > region R { region S { 100 } }            // ネスト OK
 - : int = 100
+
+> view Node[R] of int { value: int, next: int };
+  let n = Node { value = 1, next = 0 } in n.value
+- : int = 1                                // view は record として構築/アクセス可
 ```
 
 ### まだ動かないこと
 
 - **`r.alloc(v)` method 形式** — `&R v` の syntactic sugar (Phase 3 で sugar 化予定)
 - **Trivial[R] 制約** — Drop あり型を region に置く時のエラー
-- **`view V[R] of T` 宣言** — 自己参照ビュー型
+- **`view V[R]` の region 強制** — Phase 2.2 では region は宣言時記録のみ、構築/フィールド型での R 強制は Phase 3
 - **子 region (`region S of R { ... }`)** — 入れ子 region 間で promote
 - **`with` + Drop の統合** — Drop あり cap のライフサイクル
 
@@ -143,9 +148,10 @@ Phase 1 は「型システム上の領域ラベル」を確立する段階で、
 ### Phase 2 (中サイズ、~600-800 LoC、複数 slice) — 進行中
 - [x] `&R v` 値式 (Phase 2.1、2026-06-16)
 - [x] region escape check (`&R T` が R の外に漏れないか、Phase 2.1)
-- [ ] `view V[R] of T { ... }` 宣言 (Q-009 paper-validated)
+- [x] `view V[R] of T { ... }` 宣言 (Phase 2.2、2026-06-16、Q-009 paper-validated)
 - [ ] `r.alloc(v)` メソッド呼び出し (`&R v` の sugar)
 - [ ] `Trivial[R]` 型制約
+- [ ] view の region 強制 (構築は region 内のみ、フィールド型 `&R T` 必須化)
 
 ### Phase 3 (大型、設計再開も必要)
 - [ ] 借用注釈の細分化 `&shared write` / `&exclusive write` (Q-004 narrowed)

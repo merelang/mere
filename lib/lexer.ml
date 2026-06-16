@@ -21,6 +21,7 @@ type token =
   | T_type
   | T_signature       (* signature keyword *)
   | T_region          (* region keyword *)
+  | T_view            (* view keyword (for view-type declarations) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -238,6 +239,7 @@ let tokenize s =
           | "type" -> T_type
           | "signature" -> T_signature
           | "region" -> T_region
+          | "view" -> T_view
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when
