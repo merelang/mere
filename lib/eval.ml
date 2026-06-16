@@ -224,6 +224,18 @@ let builtin_decr =
     | V_int n -> V_int (n - 1)
     | _ -> failwith "decr: expected int")
 
+let builtin_sum_range =
+  V_builtin ("sum_range", fun lo_val ->
+    match lo_val with
+    | V_int lo ->
+      V_builtin ("sum_range_partial", fun hi_val ->
+        match hi_val with
+        | V_int hi ->
+          if lo > hi then V_int 0
+          else V_int ((hi - lo + 1) * (lo + hi) / 2)
+        | _ -> failwith "sum_range: 2nd arg expected int")
+    | _ -> failwith "sum_range: 1st arg expected int")
+
 let builtin_clamp =
   V_builtin ("clamp", fun lo_val ->
     match lo_val with
@@ -600,6 +612,7 @@ let initial_env : env =
     ("sign", ref builtin_sign);
     ("incr", ref builtin_incr);
     ("decr", ref builtin_decr);
+    ("sum_range", ref builtin_sum_range);
     ("clamp", ref builtin_clamp);
     ("pow", ref builtin_pow);
     ("gcd", ref builtin_gcd);
