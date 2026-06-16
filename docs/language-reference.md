@@ -123,6 +123,8 @@ with logger = 100, db = 200 in
 ```
 
 ### region (Phase 1: 構文のみ、設計 Q-008/009 に基づく)
+
+メモリ管理の概念・比較・Lang 全体の戦略は [memory-model.md](memory-model.md) を参照。
 ```
 region R { body }                   // R を region 名としてスコープに導入、body を評価
 region R { region S { ... } }       // ネスト可

@@ -50,6 +50,7 @@ $ dune exec ./bin/main.exe -- examples/word_count.lang
 - **[Language reference](docs/language-reference.md)** — 構文と意味論
 - **[Stdlib reference](docs/stdlib-reference.md)** — 全 85 builtin の表
 - **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
+- **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
 - `examples/` — 動く .lang ファイル群 (FizzBuzz、JSON parser、word count 等)
 
