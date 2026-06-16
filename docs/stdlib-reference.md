@@ -193,12 +193,14 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 
 ---
 
-## システム (2)
+## システム / 定数 (4)
 
 | 名前 | 型 | 説明 |
 |---|---|---|
 | `time` | `unit -> float` | Unix epoch 秒数 (gettimeofday)。ベンチマーク・タイムスタンプ用 |
 | `exit` ★ | `int -> 'a` | プロセスを exit code で終了 (never returns、polymorphic 返り型) |
+| `int_max` | `int` | int の最大値 (OCaml runtime 依存、64-bit で 2^62-1) — 定数 builtin |
+| `int_min` | `int` | int の最小値 — 定数 builtin |
 
 ```
 let start = time () in
@@ -214,20 +216,20 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、75 個)
+## 全 builtin 一覧 (アルファベット順、77 個)
 
 ```
 abs assert bool_of_str char_at chr clamp const cube
 decr divmod even exit f_add f_div f_ge f_gt f_le f_lt
 f_mul f_sub fail flip float_of_int float_of_str fst gcd
-id incr int_of_float int_of_str is_alpha is_digit
-is_space iter_n lcm max min not odd ord pair pow print
-print_bool print_err print_int print_no_nl read_file
-read_line show sign snd square str_compare str_contains
-str_count str_ends_with str_len str_of_float str_of_int
-str_repeat str_replace str_rev str_starts_with str_trim
-str_unescape substring sum_range swap time to_lower
-to_upper try_or write_file
+id incr int_max int_min int_of_float int_of_str is_alpha
+is_digit is_space iter_n lcm max min not odd ord pair
+pow print print_bool print_err print_int print_no_nl
+read_file read_line show sign snd square str_compare
+str_contains str_count str_ends_with str_len str_of_float
+str_of_int str_repeat str_replace str_rev str_starts_with
+str_trim str_unescape substring sum_range swap time
+to_lower to_upper try_or write_file
 ```
 
 ---

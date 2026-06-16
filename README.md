@@ -4,7 +4,7 @@
 
 ## ステータス (2026-06-16 時点)
 
-- **75 stdlib builtin、577 tests passing**
+- **77 stdlib builtin、583 tests passing**
 - ツリーウォーキング interpreter (codegen なし)
 - 設計コンテキストは別リポ `internal design notes` (private)
 
@@ -48,7 +48,7 @@ $ dune exec ./bin/main.exe -- examples/word_count.lang
 
 - **[Tutorial](docs/tutorial.md)** — 初めての方はここから
 - **[Language reference](docs/language-reference.md)** — 構文と意味論
-- **[Stdlib reference](docs/stdlib-reference.md)** — 全 75 builtin の表
+- **[Stdlib reference](docs/stdlib-reference.md)** — 全 77 builtin の表
 - **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
 - `examples/` — 動く .lang ファイル群 (FizzBuzz、JSON parser、word count 等)

@@ -295,6 +295,8 @@ let initial_env : env =
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
+    ("int_max",     mono Ast.TyInt);
+    ("int_min",     mono Ast.TyInt);
     ("print_no_nl", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_err",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("read_file",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyStr)));
