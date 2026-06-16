@@ -1659,5 +1659,30 @@ let () =
       "let candidate = 42 in
        if candidate < int_max then candidate else int_max") "42";
 
+  (* --- math constants + float helpers --- *)
+  check "pi type"      (Pipeline.type_of "pi") "float";
+  check "pi positive"  (Pipeline.process "f_gt pi 3.0") "true";
+  check "pi < 4"       (Pipeline.process "f_lt pi 4.0") "true";
+  check "e type"       (Pipeline.type_of "e") "float";
+  check "e ~ 2.718"    (Pipeline.process "f_gt e 2.7") "true";
+
+  check "sqrt 16"      (Pipeline.process "sqrt 16.0") "4.";
+  check "sqrt 2 approx"
+    (Pipeline.process "f_lt (sqrt 2.0) 1.5") "true";
+  check "f_abs neg"    (Pipeline.process "f_abs (f_neg 3.5)") "3.5";
+  check "f_abs pos"    (Pipeline.process "f_abs 4.2") "4.2";
+  check "f_neg"        (Pipeline.process "f_neg 1.0") "-1.";
+
+  check "floor down"   (Pipeline.process "floor 3.7") "3.";
+  check "floor neg"    (Pipeline.process "floor (f_neg 1.2)") "-2.";
+  check "ceil up"      (Pipeline.process "ceil 3.2") "4.";
+  check "round half"   (Pipeline.process "round 3.5") "4.";
+  check "round down"   (Pipeline.process "round 3.4") "3.";
+
+  check "sqrt type"    (Pipeline.type_of "sqrt") "(float -> float)";
+  check "pi >> sqrt"
+    (* sqrt pi ~= 1.7725、pipe + curry なので `f_lt 1.7 (sqrt pi)` = `1.7 < 1.7725` *)
+    (Pipeline.process "sqrt pi |> f_lt 1.7") "true";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
