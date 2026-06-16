@@ -202,6 +202,23 @@ let show_scheme =
   { quantified = [id];
     body = Ast.TyArrow (_show_alpha_init, Ast.TyStr) }
 
+(* `fst : ('a * 'b) -> 'a` and `snd : ('a * 'b) -> 'b` — 2-quantified schemes. *)
+let _fst_alpha = fresh_var ()
+let _fst_beta = fresh_var ()
+let fst_scheme =
+  let aid = match _fst_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _fst_beta with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; bid];
+    body = Ast.TyArrow (Ast.TyTuple [_fst_alpha; _fst_beta], _fst_alpha) }
+
+let _snd_alpha = fresh_var ()
+let _snd_beta = fresh_var ()
+let snd_scheme =
+  let aid = match _snd_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _snd_beta with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; bid];
+    body = Ast.TyArrow (Ast.TyTuple [_snd_alpha; _snd_beta], _snd_beta) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
@@ -239,6 +256,8 @@ let initial_env : env =
     ("assert",
        mono (Ast.TyArrow (Ast.TyBool, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
     ("show",        show_scheme);
+    ("fst",         fst_scheme);
+    ("snd",         snd_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

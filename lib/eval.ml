@@ -224,6 +224,18 @@ let builtin_fail =
 let builtin_show =
   V_builtin ("show", fun v -> V_str (to_string v))
 
+let builtin_fst =
+  V_builtin ("fst", fun v ->
+    match v with
+    | V_tuple [a; _] -> a
+    | _ -> failwith "fst: expected 2-tuple")
+
+let builtin_snd =
+  V_builtin ("snd", fun v ->
+    match v with
+    | V_tuple [_; b] -> b
+    | _ -> failwith "snd: expected 2-tuple")
+
 let builtin_assert =
   V_builtin ("assert", fun cond ->
     match cond with
@@ -342,6 +354,8 @@ let initial_env : env =
     ("lcm", ref builtin_lcm);
     ("assert", ref builtin_assert);
     ("show", ref builtin_show);
+    ("fst", ref builtin_fst);
+    ("snd", ref builtin_snd);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
