@@ -13,7 +13,7 @@ let rec occurs id = function
   | Ast.TyVar v when v.id = id -> true
   | Ast.TyVar { link = Some t; _ } -> occurs id t
   | Ast.TyVar _ -> false
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> false
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> false
   | Ast.TyParam _ -> false
   | Ast.TyCon (_, args) -> List.exists (occurs id) args
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
@@ -24,6 +24,7 @@ let rec unify loc t1 t2 =
   let t2 = Ast.walk t2 in
   match t1, t2 with
   | Ast.TyInt, Ast.TyInt -> ()
+  | Ast.TyFloat, Ast.TyFloat -> ()
   | Ast.TyBool, Ast.TyBool -> ()
   | Ast.TyStr, Ast.TyStr -> ()
   | Ast.TyUnit, Ast.TyUnit -> ()
@@ -55,7 +56,7 @@ let mono t = { quantified = []; body = t }
 
 let rec collect_free_vars t acc =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> acc
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> acc
   | Ast.TyParam _ -> acc
   | Ast.TyVar v -> if List.mem v.id acc then acc else v.id :: acc
   | Ast.TyArrow (a, b) -> collect_free_vars b (collect_free_vars a acc)
@@ -83,7 +84,7 @@ let instantiate sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
     match Ast.walk t with
-    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
     | Ast.TyParam _ as t -> t
     | Ast.TyVar v as orig ->
       (try List.assoc v.id mapping with Not_found -> orig)
@@ -110,7 +111,7 @@ let freshen_params t =
   let rec aux t =
     match Ast.walk t with
     | Ast.TyParam p -> lookup p
-    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (aux a, aux b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map aux ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map aux args)
@@ -155,7 +156,7 @@ let instantiate_constr (info : constr_info) =
     match Ast.walk t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -172,7 +173,7 @@ let instantiate_record name (info : record_info) =
     match Ast.walk t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -293,6 +294,14 @@ let initial_env : env =
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
     ("print_bool",  mono (Ast.TyArrow (Ast.TyBool, Ast.TyUnit)));
     ("str_of_int",  mono (Ast.TyArrow (Ast.TyInt,  Ast.TyStr)));
+    ("float_of_int", mono (Ast.TyArrow (Ast.TyInt,  Ast.TyFloat)));
+    ("int_of_float", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyInt)));
+    ("str_of_float", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyStr)));
+    ("float_of_str", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyFloat)));
+    ("f_add",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_sub",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_mul",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_div",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
     ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
     ("str_len",     mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
     ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
@@ -372,6 +381,7 @@ let initial_env : env =
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
   match e.node with
   | Ast.Int_lit _ -> Ast.TyInt
+  | Ast.Float_lit _ -> Ast.TyFloat
   | Ast.Bool_lit _ -> Ast.TyBool
   | Ast.Str_lit _ -> Ast.TyStr
   | Ast.Unit_lit -> Ast.TyUnit

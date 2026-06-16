@@ -7,6 +7,7 @@ type tyvar = {
 
 and ty =
   | TyInt
+  | TyFloat
   | TyBool
   | TyStr
   | TyUnit
@@ -20,6 +21,7 @@ type expr = { loc : Loc.t; node : expr_node }
 
 and expr_node =
   | Int_lit of int
+  | Float_lit of float
   | Bool_lit of bool
   | Str_lit of string
   | Unit_lit
@@ -117,6 +119,7 @@ let pp_ty t =
   let rec aux t =
     match walk t with
     | TyInt -> "int"
+    | TyFloat -> "float"
     | TyBool -> "bool"
     | TyStr -> "str"
     | TyUnit -> "unit"
@@ -173,6 +176,7 @@ let rec pp_pattern p =
 let rec pp e =
   match e.node with
   | Int_lit n -> string_of_int n
+  | Float_lit f -> string_of_float f
   | Bool_lit b -> if b then "true" else "false"
   | Str_lit s -> escape_string s
   | Unit_lit -> "()"

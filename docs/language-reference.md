@@ -15,6 +15,7 @@
 | 種類 | 例 |
 |---|---|
 | 整数 | `0`、`42`、`-5` (構文上は `Neg (Int_lit 5)`) |
+| 浮動小数 | `1.5`、`3.14`、`0.0` (digits.digits、bare `1.` は不可) |
 | 真偽 | `true`、`false` |
 | 文字列 | `"hello"`、escape は `\n` `\t` `\\` `\"` |
 | 文字 (length-1 str) | `'X'`、escape は `'\n'` `'\t'` `'\\'` `'\''` `'\"'` |
@@ -54,8 +55,10 @@ match with when of as _
 
 ### プリミティブ
 ```
-int   bool   str   unit
+int   float   bool   str   unit
 ```
+
+`float` は IEEE 754 倍精度。リテラルは `1.5` のように小数点 + 数字を含むものが float、`1` は int (bare `1.` は float ではなく `1` + `.field` 候補)。`int` と `float` は別の型で、暗黙変換なし — `float_of_int` / `int_of_float` で明示変換、算術は `f_add` / `f_sub` / `f_mul` / `f_div` を使う。
 
 ### 合成型
 ```
