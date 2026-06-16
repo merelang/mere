@@ -294,6 +294,10 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr,
               Ast.TyArrow (Ast.TyInt,
               Ast.TyArrow (Ast.TyInt, Ast.TyStr)))));
+    ("str_replace",
+       mono (Ast.TyArrow (Ast.TyStr,
+              Ast.TyArrow (Ast.TyStr,
+              Ast.TyArrow (Ast.TyStr, Ast.TyStr)))));
     ("char_at",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyStr))));
     ("fail",        fail_scheme);

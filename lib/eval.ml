@@ -317,6 +317,39 @@ let builtin_str_starts_with =
         | _ -> failwith "str_starts_with: 2nd arg expected str")
     | _ -> failwith "str_starts_with: 1st arg expected str")
 
+let builtin_str_replace =
+  V_builtin ("str_replace", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("str_replace_p1", fun old_val ->
+        match old_val with
+        | V_str old_str ->
+          V_builtin ("str_replace_p2", fun new_val ->
+            match new_val with
+            | V_str new_str ->
+              if old_str = "" then V_str s
+              else begin
+                let old_len = String.length old_str in
+                let s_len = String.length s in
+                let buf = Buffer.create s_len in
+                let rec loop i =
+                  if i + old_len > s_len then
+                    Buffer.add_substring buf s i (s_len - i)
+                  else if String.sub s i old_len = old_str then begin
+                    Buffer.add_string buf new_str;
+                    loop (i + old_len)
+                  end else begin
+                    Buffer.add_char buf s.[i];
+                    loop (i + 1)
+                  end
+                in
+                loop 0;
+                V_str (Buffer.contents buf)
+              end
+            | _ -> failwith "str_replace: 3rd arg expected str")
+        | _ -> failwith "str_replace: 2nd arg expected str")
+    | _ -> failwith "str_replace: 1st arg expected str")
+
 let builtin_substring =
   V_builtin ("substring", fun s_val ->
     match s_val with
@@ -398,6 +431,7 @@ let initial_env : env =
     ("str_ends_with", ref builtin_str_ends_with);
     ("str_repeat", ref builtin_str_repeat);
     ("substring", ref builtin_substring);
+    ("str_replace", ref builtin_str_replace);
     ("char_at", ref builtin_char_at);
     ("fail", ref builtin_fail);
     ("min", ref builtin_min);

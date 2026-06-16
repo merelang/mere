@@ -1264,5 +1264,27 @@ let () =
     (Pipeline.process
       "let percent = clamp 0 100 in percent 150 + percent (- 5)") "100";
 
+  (* --- stdlib: str_replace (3-arg curry, replace-all) --- *)
+  check "str_replace basic"
+    (Pipeline.process "str_replace \"hello world\" \"world\" \"lang\"")
+    "\"hello lang\"";
+  check "str_replace multiple"
+    (Pipeline.process "str_replace \"foo bar foo\" \"foo\" \"X\"")
+    "\"X bar X\"";
+  check "str_replace expand"
+    (Pipeline.process "str_replace \"aaa\" \"a\" \"bc\"")
+    "\"bcbcbc\"";
+  check "str_replace shrink"
+    (Pipeline.process "str_replace \"xxxxx\" \"xx\" \"y\"")
+    "\"yyx\"";
+  check "str_replace none"
+    (Pipeline.process "str_replace \"abc\" \"x\" \"y\"") "\"abc\"";
+  check "str_replace empty needle"
+    (Pipeline.process "str_replace \"hi\" \"\" \"!\"") "\"hi\"";
+  check "str_replace to empty"
+    (Pipeline.process "str_replace \"a-b-c\" \"-\" \"\"") "\"abc\"";
+  check "str_replace type"
+    (Pipeline.type_of "str_replace") "(str -> (str -> (str -> str)))";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
