@@ -40,7 +40,7 @@ let substitute_params params args body =
     match t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -54,7 +54,7 @@ let expand_alias_or_tycon name args =
   | _ -> Ast.TyCon (name, args)
 
 let is_primitive_type_name = function
-  | "int" | "bool" | "str" | "unit" -> true
+  | "int" | "float" | "bool" | "str" | "unit" -> true
   | _ -> false
 
 let parse_program tokens =
@@ -106,6 +106,7 @@ let parse_program tokens =
   and simple_ty toks =
     match toks with
     | (_, T_ident "int") :: rest -> Ast.TyInt, rest
+    | (_, T_ident "float") :: rest -> Ast.TyFloat, rest
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
@@ -477,8 +478,8 @@ let parse_program tokens =
         mkp pos (Ast.P_constr (name, None)), rest
       else begin
         match rest with
-        | (_, (T_int _ | T_string _ | T_true | T_false | T_underscore
-              | T_lparen | T_ident _)) :: _ ->
+        | (_, (T_int _ | T_float _ | T_string _ | T_true | T_false
+              | T_underscore | T_lparen | T_ident _)) :: _ ->
           let sub, rest = pattern rest in
           mkp pos (Ast.P_constr (name, Some sub)), rest
         | _ ->
@@ -567,8 +568,8 @@ let parse_program tokens =
     apply_tail head toks
   and apply_tail f toks =
     match toks with
-    | (_, (T_int _ | T_string _ | T_ident _ | T_lparen | T_true | T_false
-          | T_lbracket | T_lbrace)) :: _ ->
+    | (_, (T_int _ | T_float _ | T_string _ | T_ident _ | T_lparen
+          | T_true | T_false | T_lbracket | T_lbrace)) :: _ ->
       let arg, toks = atom toks in
       apply_tail (mk f.Ast.loc (Ast.App (f, arg))) toks
     | _ -> f, toks
@@ -658,6 +659,7 @@ let parse_program tokens =
       ) elems nil in
       result, rest
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest
+    | (pos, T_float f) :: rest -> mk pos (Ast.Float_lit f), rest
     | (pos, T_string s) :: rest -> mk pos (Ast.Str_lit s), rest
     | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest
     | (pos, T_false) :: rest -> mk pos (Ast.Bool_lit false), rest
@@ -710,7 +712,7 @@ let parse_program tokens =
           mk pos (Ast.Constr (name, None)), rest
         else begin
           match rest with
-          | (_, (T_int _ | T_string _ | T_ident _ | T_lparen
+          | (_, (T_int _ | T_float _ | T_string _ | T_ident _ | T_lparen
                 | T_true | T_false)) :: _ ->
             let arg, rest = atom rest in
             mk pos (Ast.Constr (name, Some arg)), rest

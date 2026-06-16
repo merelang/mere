@@ -4,6 +4,7 @@ exception Eval_error of Loc.t * string
 
 type value =
   | V_int of int
+  | V_float of float
   | V_bool of bool
   | V_str of string
   | V_unit
@@ -28,6 +29,7 @@ let rec try_as_list = function
 
 and to_string = function
   | V_int n -> string_of_int n
+  | V_float f -> string_of_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "()"
@@ -127,6 +129,74 @@ let builtin_str_of_int =
     match v with
     | V_int n -> V_str (string_of_int n)
     | _ -> failwith "str_of_int: expected int")
+
+let builtin_float_of_int =
+  V_builtin ("float_of_int", fun v ->
+    match v with
+    | V_int n -> V_float (float_of_int n)
+    | _ -> failwith "float_of_int: expected int")
+
+let builtin_int_of_float =
+  V_builtin ("int_of_float", fun v ->
+    match v with
+    | V_float f -> V_int (int_of_float f)
+    | _ -> failwith "int_of_float: expected float")
+
+let builtin_str_of_float =
+  V_builtin ("str_of_float", fun v ->
+    match v with
+    | V_float f -> V_str (string_of_float f)
+    | _ -> failwith "str_of_float: expected float")
+
+let builtin_float_of_str =
+  V_builtin ("float_of_str", fun v ->
+    match v with
+    | V_str s ->
+      (try V_float (float_of_string (String.trim s))
+       with Failure _ ->
+         raise (Eval_error (Loc.dummy,
+           Printf.sprintf "float_of_str: %S is not a valid float" s)))
+    | _ -> failwith "float_of_str: expected str")
+
+let builtin_f_add =
+  V_builtin ("f_add", fun a ->
+    match a with
+    | V_float x ->
+      V_builtin ("f_add_partial", fun b ->
+        match b with
+        | V_float y -> V_float (x +. y)
+        | _ -> failwith "f_add: 2nd arg expected float")
+    | _ -> failwith "f_add: 1st arg expected float")
+
+let builtin_f_sub =
+  V_builtin ("f_sub", fun a ->
+    match a with
+    | V_float x ->
+      V_builtin ("f_sub_partial", fun b ->
+        match b with
+        | V_float y -> V_float (x -. y)
+        | _ -> failwith "f_sub: 2nd arg expected float")
+    | _ -> failwith "f_sub: 1st arg expected float")
+
+let builtin_f_mul =
+  V_builtin ("f_mul", fun a ->
+    match a with
+    | V_float x ->
+      V_builtin ("f_mul_partial", fun b ->
+        match b with
+        | V_float y -> V_float (x *. y)
+        | _ -> failwith "f_mul: 2nd arg expected float")
+    | _ -> failwith "f_mul: 1st arg expected float")
+
+let builtin_f_div =
+  V_builtin ("f_div", fun a ->
+    match a with
+    | V_float x ->
+      V_builtin ("f_div_partial", fun b ->
+        match b with
+        | V_float y -> V_float (x /. y)  (* IEEE 754: 1.0 /. 0.0 -> inf, nan etc. *)
+        | _ -> failwith "f_div: 2nd arg expected float")
+    | _ -> failwith "f_div: 1st arg expected float")
 
 let builtin_print_bool =
   V_builtin ("print_bool", fun v ->
@@ -693,6 +763,14 @@ let initial_env : env =
     ("print_int", ref builtin_print_int);
     ("print_bool", ref builtin_print_bool);
     ("str_of_int", ref builtin_str_of_int);
+    ("float_of_int", ref builtin_float_of_int);
+    ("int_of_float", ref builtin_int_of_float);
+    ("str_of_float", ref builtin_str_of_float);
+    ("float_of_str", ref builtin_float_of_str);
+    ("f_add", ref builtin_f_add);
+    ("f_sub", ref builtin_f_sub);
+    ("f_mul", ref builtin_f_mul);
+    ("f_div", ref builtin_f_div);
     ("not", ref builtin_not);
     ("str_len", ref builtin_str_len);
     ("int_of_str", ref builtin_int_of_str);
@@ -799,6 +877,7 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
 let rec value_eq a b =
   match a, b with
   | V_int x, V_int y -> x = y
+  | V_float x, V_float y -> x = y
   | V_bool x, V_bool y -> x = y
   | V_str x, V_str y -> x = y
   | V_unit, V_unit -> true
@@ -820,6 +899,7 @@ let rec value_eq a b =
 let rec eval_in (env : env) (e : Ast.expr) =
   match e.Ast.node with
   | Ast.Int_lit n -> V_int n
+  | Ast.Float_lit f -> V_float f
   | Ast.Bool_lit b -> V_bool b
   | Ast.Str_lit s -> V_str s
   | Ast.Unit_lit -> V_unit

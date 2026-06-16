@@ -4,6 +4,7 @@ exception Lex_error of Loc.t * string
 
 type token =
   | T_int of int
+  | T_float of float
   | T_string of string
   | T_ident of string
   | T_tyvar of string         (* 'a, 'b, ... *)
@@ -202,9 +203,18 @@ let tokenize s =
           if j < len && is_digit s.[j] then read (j + 1) else j
         in
         let j = read i in
-        let n = int_of_string (String.sub s i (j - i)) in
-        advance (j - i);
-        aux j ((pos, T_int n) :: acc)
+        (* Float literal: `digits.digits`.  Bare `1.` is NOT a float
+           (would conflict with `.field` access on a future int).  *)
+        if j + 1 < len && s.[j] = '.' && is_digit s.[j + 1] then begin
+          let k = read (j + 1) in
+          let text = String.sub s i (k - i) in
+          advance (k - i);
+          aux k ((pos, T_float (float_of_string text)) :: acc)
+        end else begin
+          let n = int_of_string (String.sub s i (j - i)) in
+          advance (j - i);
+          aux j ((pos, T_int n) :: acc)
+        end
       | c when is_alpha c ->
         let rec read j =
           if j < len && is_ident_cont s.[j] then read (j + 1) else j
