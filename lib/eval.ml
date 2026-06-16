@@ -245,6 +245,24 @@ let builtin_swap =
     | V_tuple [a; b] -> V_tuple [b; a]
     | _ -> failwith "swap: expected 2-tuple")
 
+let builtin_const =
+  V_builtin ("const", fun a ->
+    V_builtin ("const_partial", fun _b -> a))
+
+(* Forward-reference into eval_in's apply machinery so higher-order builtins
+   like `flip` can call user functions (V_closure / V_builtin) at runtime.
+   Patched at the bottom of this file, after eval_in is defined. *)
+let apply_value_ref : (value -> value -> value) ref =
+  ref (fun _ _ -> failwith "apply_value_ref: not initialized (BUG)")
+
+let builtin_flip =
+  V_builtin ("flip", fun f ->
+    V_builtin ("flip_p1", fun b ->
+      V_builtin ("flip_p2", fun a ->
+        (* flip f b a = (f a) b *)
+        let f_a = !apply_value_ref f a in
+        !apply_value_ref f_a b)))
+
 let builtin_assert =
   V_builtin ("assert", fun cond ->
     match cond with
@@ -367,6 +385,8 @@ let initial_env : env =
     ("snd", ref builtin_snd);
     ("id", ref builtin_id);
     ("swap", ref builtin_swap);
+    ("const", ref builtin_const);
+    ("flip", ref builtin_flip);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
@@ -584,3 +604,13 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | _ -> type_error e.Ast.loc "record update on non-record value")
 
 let eval expr = eval_in initial_env expr
+
+(* Patch apply_value_ref now that eval_in is bound, so higher-order builtins
+   (`flip` and friends) can call into the evaluator at runtime. *)
+let () =
+  apply_value_ref := (fun f arg ->
+    match f with
+    | V_closure (param, body, captured) ->
+      eval_in ((param, ref arg) :: captured) body
+    | V_builtin (_, fn) -> fn arg
+    | _ -> failwith "apply_value: not a function")
