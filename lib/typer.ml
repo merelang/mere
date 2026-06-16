@@ -300,6 +300,8 @@ let initial_env : env =
               Ast.TyArrow (Ast.TyStr, Ast.TyStr)))));
     ("char_at",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyStr))));
+    ("chr",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
+    ("ord",         mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("fail",        fail_scheme);
     ("min",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     ("max",         mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
