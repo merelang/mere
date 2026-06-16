@@ -1099,10 +1099,15 @@ let rec eval_in (env : env) (e : Ast.expr) =
   | Ast.Tuple es ->
     V_tuple (List.map (eval_in env) es)
   | Ast.Region_block (name, body) ->
-    (* Phase 1: region scope is purely syntactic. Bind the region name to a
-       unit value (placeholder).  Future phases will tie this to actual
-       allocator state.  *)
+    (* Phase 2: region scope syntactic + escape check (in typer).  At runtime
+       the region is a unit-value placeholder; actual bump-allocation will
+       come with codegen.  *)
     eval_in ((name, ref V_unit) :: env) body
+  | Ast.Ref (_region, inner) ->
+    (* `&R v` — runtime is identity, the region tag exists only in the type
+       system.  Eventual codegen will materialize this as an actual region
+       allocation. *)
+    eval_in env inner
   | Ast.Record_lit (name, fields) ->
     V_record (name, List.map (fun (f, e) -> (f, eval_in env e)) fields)
   | Ast.Field_get (inner, fname) ->

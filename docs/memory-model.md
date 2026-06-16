@@ -99,9 +99,11 @@ with db = Database.connect(...) in
 
 ## 4. lang-ml での現状 (2026-06-16)
 
-### 動くこと (Phase 1: 構文のみ)
+### 動くこと (Phase 2: 構文 + 値式 + escape check)
 - `region R { body }` 式 — R を region 名としてスコープに導入
 - `&R T` 参照型 — region-tagged reference
+- `&R v` 値式 — 値を region tag 付きで表現
+- **escape check** — `region R { body }` の body の型に R が漏れたらコンパイルエラー
 
 ```
 > region R { 42 }
@@ -110,14 +112,19 @@ with db = Database.connect(...) in
 > fn (x: &R int) -> x
 - : (&R int -> &R int)
 
-> region R { region S { 100 } }    // ネスト OK
+> region R { let x = &R 5 in 42 }
+- : int = 42                              // 内部で &R 使うが結果は int → OK
+
+> region R { &R 5 }
+ERROR: region escape: `&R int` cannot leave region `R`
+
+> region R { region S { 100 } }            // ネスト OK
 - : int = 100
 ```
 
 ### まだ動かないこと
 
-- **`r.alloc(v)` semantics** — region に値を alloc して `&R T` を返す
-- **escape check** — region から `&R T` 値が漏れた場合のエラー
+- **`r.alloc(v)` method 形式** — `&R v` の syntactic sugar (Phase 3 で sugar 化予定)
 - **Trivial[R] 制約** — Drop あり型を region に置く時のエラー
 - **`view V[R] of T` 宣言** — 自己参照ビュー型
 - **子 region (`region S of R { ... }`)** — 入れ子 region 間で promote
@@ -133,10 +140,11 @@ Phase 1 は「型システム上の領域ラベル」を確立する段階で、
 
 ## 5. ロードマップ
 
-### Phase 2 (中サイズ、~600-800 LoC、複数 slice)
+### Phase 2 (中サイズ、~600-800 LoC、複数 slice) — 進行中
+- [x] `&R v` 値式 (Phase 2.1、2026-06-16)
+- [x] region escape check (`&R T` が R の外に漏れないか、Phase 2.1)
 - [ ] `view V[R] of T { ... }` 宣言 (Q-009 paper-validated)
-- [ ] `r.alloc(v)` メソッド呼び出し
-- [ ] region escape check (`&R T` が R の外に漏れないか)
+- [ ] `r.alloc(v)` メソッド呼び出し (`&R v` の sugar)
 - [ ] `Trivial[R]` 型制約
 
 ### Phase 3 (大型、設計再開も必要)

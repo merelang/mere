@@ -598,6 +598,10 @@ let parse_program tokens =
     field_chain v rest
   and atom_base toks =
     match toks with
+    | (pos, T_amp) :: (_, T_ident region) :: rest ->
+      (* `&R v` — value-level reference: tag v with region R *)
+      let inner, rest = atom rest in
+      mk pos (Ast.Ref (region, inner)), rest
     | (pos, T_lbrace) :: (_, T_rbrace) :: rest ->
       (* `{}` is the empty block — evaluates to unit. *)
       mk pos Ast.Unit_lit, rest
