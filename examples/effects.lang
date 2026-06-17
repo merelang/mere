@@ -16,33 +16,15 @@ let rec map = fn f -> fn xs -> match xs with
   | []        -> []
   | [h, ...t] -> Cons (f h, map f t);
 
-// === ケイパビリティ型 ===
-// cap は record として表現する。フィールドは「使える操作」を表す関数群。
-// 普通の record と区別は型の使い方だけ — 構文的な特権はない。
-
-type Logger = {
-  info: str -> unit,
-  warn: str -> unit,
-};
-
-type Metrics = {
-  inc:    str -> unit,
-  record: str -> int -> unit,
-};
-
-// === Cap の構築 ===
-// 通常は外部リソースから注入するが、ここでは print を内部に持つ素朴版を構築。
-// 戻り値は cap 型の record 値で、これを caller に渡せば caller がそれを使える。
-
-let mk_logger = fn (prefix: str) -> Logger {
-  info = fn msg -> print (prefix ++ " [INFO] " ++ msg),
-  warn = fn msg -> print (prefix ++ " [WARN] " ++ msg),
-};
-
-let mk_metrics = fn () -> Metrics {
-  inc    = fn name -> print ("[METRIC] inc " ++ name),
-  record = fn name -> fn n -> print ("[METRIC] " ++ name ++ "=" ++ show n),
-};
+// === ケイパビリティ型 (builtin) ===
+// `Logger` / `Metrics` は builtin の cap 型 (typer/eval が事前に登録)。
+// 構築は `mk_logger : str -> Logger` / `mk_metrics : unit -> Metrics`。
+//
+// 内訳:
+//   Logger { info: str -> unit, warn: str -> unit, error: str -> unit }
+//   Metrics { inc: str -> unit, record: str -> int -> unit }
+//
+// 自作 cap も同じパターン: `type MyCap = { ... }` + `let mk_mycap = fn -> ...`。
 
 // === パターン 1: 低階関数で cap を直接使用 ===
 // cap は引数で受け取り、使う側で .field 経由で呼び出す。
