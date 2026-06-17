@@ -68,6 +68,10 @@ dune exec ./bin/main.exe -- -e '1 + 2 * 3'
 dune exec ./bin/main.exe -- -te 'fn x -> x + 1'    # 型表示
 dune exec ./bin/main.exe -- -r                     # REPL
 dune runtest
+
+# C codegen (Phase 4 MVP、int subset)
+dune exec ./bin/main.exe -- -ce 'let x = 5 in x * 2' > out.c
+clang out.c -o out && ./out                        # native 実行 → 10
 ```
 
 ## レイアウト
@@ -79,6 +83,7 @@ lang-ml/
 │   ├── loc.ml / ast.ml / lexer.ml / parser.ml
 │   ├── typer.ml        # HM 推論 + sum types + records + let-poly
 │   ├── eval.ml         # ツリーウォーキング interpreter
+│   ├── codegen_c.ml    # C codegen (Phase 4 MVP、int subset)
 │   ├── pipeline.ml     # process / type_of
 │   ├── repl.ml         # 対話実行
 │   ├── diagnostic.ml   # ソース付きエラー整形

@@ -2075,5 +2075,31 @@ let () =
        c1.id + c2.id")
     "3";
 
+  (* --- C codegen first slice (Phase 4 prep) ---
+     Snapshot tests for the generated C source for the supported subset. *)
+  let codegen s =
+    let prog = Pipeline.parse_program s in
+    Codegen_c.emit_program prog
+  in
+  check "codegen: int literal"
+    (codegen "42")
+    "#include <stdio.h>\n\nint main(void) {\n  printf(\"%d\\n\", 42);\n  return 0;\n}\n";
+  check "codegen: arithmetic precedence"
+    (codegen "1 + 2 * 3")
+    "#include <stdio.h>\n\nint main(void) {\n  printf(\"%d\\n\", (1 + (2 * 3)));\n  return 0;\n}\n";
+  check "codegen: let + if"
+    (codegen "let x = 5 in if x < 10 then x * 2 else 0")
+    "#include <stdio.h>\n\nint main(void) {\n  printf(\"%d\\n\", ({ int x = 5; ((x < 10) ? (x * 2) : 0); }));\n  return 0;\n}\n";
+  check "codegen: bool literal becomes 0/1"
+    (codegen "true")
+    "#include <stdio.h>\n\nint main(void) {\n  printf(\"%d\\n\", 1);\n  return 0;\n}\n";
+  check "codegen: logical &&/||"
+    (codegen "true && false")
+    "#include <stdio.h>\n\nint main(void) {\n  printf(\"%d\\n\", (1 && 0));\n  return 0;\n}\n";
+  check_raises "codegen: functions rejected"
+    (fun () -> let _ = codegen "fn x -> x + 1" in ());
+  check_raises "codegen: strings rejected"
+    (fun () -> let _ = codegen "\"hello\"" in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
