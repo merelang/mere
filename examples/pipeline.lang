@@ -1,0 +1,69 @@
+// 統合 example: region + view + effect (cap passing + using sugar + builtin
+// Logger/Metrics) + with Drop semantics を組合せた realistic example。
+//
+// シナリオ: 簡易ビルドパイプライン。
+//   - ユーザのセッションを `with session = ...` で開き、scope 末に close
+//   - 各タスクを `region R { ... }` で region に閉じて処理
+//   - region 内で view (Task[R]) を組み立て、計算結果 (Trivial int) を返す
+//   - Logger / Metrics を cap として passing (using sugar で簡潔化)
+//
+// 設計 doc: 05_effect_system.md (cap passing) + 12_drop_and_with.md (案 i,
+// region は Trivial 厳格、Drop は with) + 14_view_types.md (view 型 3 公理)
+// を一つの例題で実証。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+let rec iter = fn f -> fn xs -> match xs with
+  | []        -> ()
+  | [h, ...t] -> { f h; iter f t };
+
+// === Drop ありリソース: Session ===
+// open 時に session 開始を log、close 時に session 終了を log。
+drop type Session = {
+  user_id: int,
+  close:   unit -> unit,
+};
+
+let open_session = fn uid using [logger: Logger] -> {
+  logger.info ("session open for user " ++ show uid);
+  Session {
+    user_id = uid,
+    close   = fn () -> logger.info ("session close for user " ++ show uid),
+  }
+};
+
+// === region 内で view を組み立てて 1 タスクを処理 ===
+// Task[R] は region R 上の view。region 内で計算用 scratch として使い、
+// 計算結果 (size: int) だけ region 外に返す (Task[R] 自体は escape 不可)。
+view Task[R] of int { size: int };
+
+let process_task =
+  fn name using [logger: Logger, metrics: Metrics, session: Session] ->
+    region R {
+      let _ = logger.info ("[task] " ++ name) in
+      let _ = metrics.inc "task.run" in
+      let scratch = Task { size = str_len name } in
+      let _ = metrics.record "task.size" scratch.size in
+      let _ = logger.info (
+        "  user " ++ show session.user_id ++
+        " size=" ++ show scratch.size
+      ) in
+      scratch.size
+    };
+
+// === メイン ===
+let tasks = ["build", "test", "lint", "deploy"];
+
+let logger  = mk_logger "pipeline";
+let metrics = mk_metrics ();
+
+let total =
+  with session = open_session logger 42 in {
+    let do_one = fn name -> process_task logger metrics session name in
+    let rec sum = fn xs -> match xs with
+      | []        -> 0
+      | [h, ...t] -> do_one h + sum t in
+    sum tasks
+  };
+
+print ("=== total computed size: " ++ show total)

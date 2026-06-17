@@ -6,6 +6,7 @@
 
 ## 2026-06-17
 
+- **example: examples/pipeline.lang** — region / view / effect (builtin Logger・Metrics + cap passing + using sugar) / with Drop の全機能を組合せた realistic example (~75 行)。簡易ビルドパイプライン: ユーザ session を `with session = open_session logger uid` で開閉、各タスクを `region R { ... }` で処理、region 内で `view Task[R]` を組み立てて size を計算。出力は session 開閉 log + タスクごとの [task] log / [METRIC] inc / record / user log + 最終合計。Lang の全機能が一貫した実用例で動くことを実証。
 - **Phase 3.1: `with` Drop semantics** — `with c = v in body` は v の型が Drop 型 (`drop type ...` 宣言済み) であることを要求 (Trivial 値は型エラー、`let` を使う)。eval 側でスコープ末に v の `close: unit -> unit` field を呼び出す (field 無ければ no-op)。複数 `with x, y in body` は y → x の LIFO 順で close 実行。examples/with_caps.lang を Drop 型ベースに書き直し。設計 doc 12_drop_and_with.md 案 (i) を実装。テスト 6 件追加 / 6 件再構成 (670 passing)。
 - **effect: builtin `Logger` / `Metrics` cap 型 + `mk_logger` / `mk_metrics` 構築 builtin** — cap 型を stdlib として provide。typer に `Logger { info, warn, error: str -> unit }` と `Metrics { inc: str -> unit, record: str -> int -> unit }` を register、eval に対応する V_record 構築関数を追加。ユーザが毎回 cap 型を再定義しなくて済む (オーバーライドは可)。examples/effects.lang を builtin 使用に書き直し。テスト 7 件追加 (668 passing)。
 - **effect: `using [cap]` 構文糖** — `fn x using [logger] -> body` を `fn logger -> fn x -> body` に desugar (caps が outer-most curried args)。cap-passing スタイルで頻発する partial application 反復 (Q-003/Q-006 解の主要パターン) を緩和。型注釈可、複数 cap 可、通常 params との組合せ可。設計 doc `10_effect_trial_findings.md` の補助設計を実装。テスト 7 件追加 (661 passing)。examples/effects.lang も sugar 形で書き直し。
