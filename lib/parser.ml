@@ -171,6 +171,43 @@ let parse_program tokens =
     in
     loop [] toks
   in
+  (* `using [c1, c2: T, ...]` clause on a fn — returns list of cap params
+     (name + optional type), to be prepended to the fn's regular params so
+     they become the outer-most curried args. If no `using` clause is
+     present, returns ([], toks) unchanged. *)
+  let parse_using_caps toks =
+    match toks with
+    | (pos, T_using) :: (_, T_lbracket) :: rest ->
+      let rec loop acc toks =
+        match toks with
+        | (_, T_rbracket) :: rest -> List.rev acc, rest
+        | (_, T_ident name) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          let acc = (name, Some t) :: acc in
+          (match rest with
+           | (_, T_comma) :: rest -> loop acc rest
+           | (_, T_rbracket) :: rest -> List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ',' or ']' in using cap list")))
+        | (_, T_ident name) :: rest ->
+          let acc = (name, None) :: acc in
+          (match rest with
+           | (_, T_comma) :: rest -> loop acc rest
+           | (_, T_rbracket) :: rest -> List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ',' or ']' in using cap list")))
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected cap name in using list"))
+      in
+      let caps, rest = loop [] rest in
+      if caps = [] then
+        raise (Parse_error (pos, "using clause must list at least one cap"));
+      caps, rest
+    | _ -> [], toks
+  in
   let rec expr toks =
     let inner, toks = base_expr toks in
     match toks with
@@ -300,22 +337,37 @@ let parse_program tokens =
         | _ -> raise (Parse_error (pos_of toks, "expected parameter name"))
       in
       let params, toks = parse_params rest in
+      let caps, toks = parse_using_caps toks in
       (match toks with
        | (_, T_arrow) :: rest ->
          let body, toks = expr rest in
          (* Special case: empty param list `fn () -> body` means a single
             unit-typed param with a fresh name. *)
-         let params = if params = [] then [("_u", Some Ast.TyUnit)] else params in
+         let params = if params = [] && caps = [] then [("_u", Some Ast.TyUnit)] else params in
+         (* `using [c1, c2] params` desugars to `fn c1 -> fn c2 -> fn params -> body`
+            — caps are outer params so partial application captures them first. *)
+         let all_params = caps @ params in
          let f =
            List.fold_right
              (fun (n, t) acc -> mk pos (Ast.Fun (n, t, acc)))
-             params body
+             all_params body
          in
          f, toks
        | _ -> raise (Parse_error (pos_of toks, "expected '->' after parameter list")))
-    | (pos, T_fn) :: (_, T_ident param) :: (_, T_arrow) :: rest ->
-      let body, toks = expr rest in
-      mk pos (Ast.Fun (param, None, body)), toks
+    | (pos, T_fn) :: (_, T_ident param) :: (param_rest) ->
+      (* Single-ident form: `fn x -> body` or `fn x using [caps] -> body`. *)
+      let caps, after_caps = parse_using_caps param_rest in
+      (match after_caps with
+       | (_, T_arrow) :: rest ->
+         let body, toks = expr rest in
+         let all_params = caps @ [(param, None)] in
+         let f =
+           List.fold_right
+             (fun (n, t) acc -> mk pos (Ast.Fun (n, t, acc)))
+             all_params body
+         in
+         f, toks
+       | _ -> raise (Parse_error (pos_of after_caps, "expected '->' after parameter")))
     | (pos, T_fn) :: _ ->
       raise (Parse_error (pos, "expected 'ident -> expr' or '(params) -> expr' after 'fn'"))
     | (pos, T_match) :: rest ->

@@ -68,11 +68,14 @@ let process_user =
 // === パターン 3: 高階関数 + partial application で cap を閉じ込める ===
 // iter のような高階関数は cap を知らない (汎用)。cap を使う関数は partial app で
 // あらかじめ cap を埋めてから渡す。これが Q-003/Q-006 の解。
+//
+// `using [cap]` 構文糖を使うと、cap を outer curry param に上げられる:
+//   `fn x using [logger] -> body` ≡ `fn logger -> fn x -> body`
+// これで `f cap` で cap を閉じ込めた `T -> U` を得られ、高階関数に渡しやすい。
 
 let handle_orders =
-  fn (logger: Logger) -> fn (metrics: Metrics) -> fn (user_id: int) -> fn order_ids ->
-    // logger / metrics / user_id を partial app で閉じ込めて、iter に渡せる
-    // `int -> unit` 関数を作る。
+  fn order_ids using [logger: Logger, metrics: Metrics, user_id: int] ->
+    // caps を partial app で閉じ込めて、iter に渡せる `int -> unit` を作る。
     let handle_one = fn id -> process_user logger metrics user_id id in
     iter handle_one order_ids;
 
