@@ -19,6 +19,12 @@ let signatures : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
    from `Some 5` (constructor application). *)
 let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
 
+(* Region name stack — pushed when entering a `region NAME { ... }` body
+   and popped on exit. Used to recognize `R.alloc(expr)` as sugar for
+   `&R expr` only when R is a lexically-enclosing region (so existing
+   `obj.alloc(...)` field access on regular records stays untouched). *)
+let region_stack : string list ref = ref []
+
 (* Counter for fresh variable names synthesized by `<<` / `>>` desugaring. *)
 let compose_var_counter = ref 0
 let fresh_compose_var () =
@@ -60,6 +66,8 @@ let is_primitive_type_name = function
 
 let parse_program tokens =
   let open Lexer in
+  (* Reset transient parser state so failed earlier parses don't leak. *)
+  region_stack := [];
   let mk loc node = Ast.{ loc; node } in
   let mkp loc node = Ast.{ ploc = loc; pnode = node } in
   let pos_of = function
@@ -318,7 +326,12 @@ let parse_program tokens =
          mk pos (Ast.Match (scrut, arms)), toks
        | _ -> raise (Parse_error (pos_of toks, "expected 'with' after match")))
     | (pos, T_region) :: (_, T_ident name) :: (_, T_lbrace) :: rest ->
-      let body, toks = expr rest in
+      region_stack := name :: !region_stack;
+      let body, toks =
+        try expr rest
+        with ex -> region_stack := List.tl !region_stack; raise ex
+      in
+      region_stack := List.tl !region_stack;
       (match toks with
        | (_, T_rbrace) :: rest ->
          mk pos (Ast.Region_block (name, body)), rest
@@ -588,9 +601,30 @@ let parse_program tokens =
     | _ -> f, toks
   and atom toks =
     let v, rest = atom_base toks in
-    (* Postfix `.field` chain — left-associative.  p.x.y = Field_get(Field_get(p, x), y) *)
+    (* Postfix `.field` chain — left-associative.  p.x.y = Field_get(Field_get(p, x), y).
+       Special case: `R.alloc(expr)` where R is a lexically-enclosing region
+       desugars to `&R expr`. *)
     let rec field_chain v toks =
+      (* Region names are uppercase identifiers and the parser turns them
+         into nullary Constr nodes; some toolings (or future relaxations)
+         may yield Var instead. Accept both shapes. *)
+      let region_name_of_atom =
+        match v.Ast.node with
+        | Ast.Var n | Ast.Constr (n, None)
+          when List.mem n !region_stack -> Some n
+        | _ -> None
+      in
       match toks with
+      | (pos, T_dot) :: (_, T_ident "alloc") :: (_, T_lparen) :: rest
+        when region_name_of_atom <> None ->
+        let region_name = match region_name_of_atom with Some n -> n | None -> assert false in
+        let inner, rest = expr rest in
+        (match rest with
+         | (_, T_rparen) :: rest2 ->
+           field_chain (mk pos (Ast.Ref (region_name, inner))) rest2
+         | _ ->
+           raise (Parse_error (pos_of rest,
+             "expected ')' after region.alloc argument")))
       | (pos, T_dot) :: (_, T_ident f) :: rest ->
         field_chain (mk pos (Ast.Field_get (v, f))) rest
       | _ -> v, toks

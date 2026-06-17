@@ -1869,5 +1869,47 @@ let () =
        }")
     "12";
 
+  (* --- R.alloc(v) sugar (Phase 2.5) ---
+     Inside `region R { ... }`, `R.alloc(expr)` parses as `&R expr`. The
+     sugar only fires when R is a lexically-enclosing region — regular
+     `obj.field(...)` chains on non-region identifiers stay as field access. *)
+  check "R.alloc(v) is sugar for &R v"
+    (Pipeline.process "region R { let x = R.alloc(5) in 42 }") "42";
+  check "R.alloc with tuple arg"
+    (* `&R` wraps the value, so `c.v` would fail (no auto-deref).  Test
+       the sugar with a primitive payload that doesn't need field access. *)
+    (Pipeline.process
+      "region R { let p = R.alloc((1, 2)) in 99 }")
+    "99";
+  check "R.alloc value is usable inside region (and bounded by escape check)"
+    (Pipeline.process
+      "region R { let x = R.alloc(5) in let f = fn (y: &R int) -> 88 in f x }")
+    "88";
+  check "R.alloc nested region uses correct R"
+    (Pipeline.process
+      "region RoOut { region RoIn { let x = RoIn.alloc(99) in 100 } }")
+    "100";
+  check_raises "R.alloc escapes region: caught by escape check"
+    (fun () -> Pipeline.process "region R { R.alloc(5) }");
+  check "outside any region: t.alloc parses as field access (not sugar)"
+    (* Demonstrates that the sugar is opt-in via region context: here `t`
+       is a regular variable, not a region, so `t.alloc(...)` should NOT
+       desugar (and will type-error because t has no `alloc` field). *)
+    (let ok =
+       try
+         let _ = Pipeline.process
+           "let t = 5 in t.alloc(1)"
+         in false
+       with _ -> true
+     in
+     if ok then "raised" else "did-not-raise") "raised";
+  check "outside region scope: R is just a variable name (.alloc → field access)"
+    (let ok =
+       try
+         let _ = Pipeline.process "let R = 5 in R.alloc(1)" in false
+       with _ -> true
+     in
+     if ok then "raised" else "did-not-raise") "raised";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
