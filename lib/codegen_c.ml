@@ -1,29 +1,33 @@
 (* C codegen — Phase 4 prep.
 
    Subset:
-     int / bool literals
+     int / bool / str literals
      binary arithmetic   + - * / %
+     string concat       ++  (allocates via __lang_str_concat helper)
      unary negation      -
      comparisons         == != < <= > >=  (results in int 0/1)
      logical             && ||             (short-circuit via C's own)
      if-then-else        (both branches must have the same type)
-     let bindings        (only P_var pattern, int- or bool-typed values)
+     let bindings        (P_var pattern; type inferred from usage on C side)
      Var references
-     Annot (drops the annotation, emits the inner expression)
+     Annot
      Top-level fn bindings (single-arg, no closures) — lifted to C
-       functions. Includes self-recursion and mutual recursion via the
-       emitted forward declarations.
+       functions. Self-recursion and mutual recursion supported via
+       forward declarations.
      Direct function calls `Var name`-headed App.
+     `print : str -> unit` builtin → `puts(...)`.
 
    Not yet supported (will raise Codegen_error):
      closures / nested fn defs / curried multi-arg fns / first-class fns
-     strings / records / variants / tuples / patterns / match
+     records / variants / tuples / patterns / match / floats
      region / view / Ref / with
-     stdlib builtins (print, mk_logger, etc.)
+     other builtins (mk_logger, read_file, etc.)
 
    Top-level decls are flattened into nested `let` via Ast.desugar_program;
    we then walk that chain to extract fn bindings into a list of C
-   functions, leaving the residual body to emit as the C `main`. *)
+   functions, leaving the residual body to emit as the C `main`. The main
+   expression's inferred type drives the printf format (int/bool → %d,
+   str → %s, unit → skip the printf). *)
 
 exception Codegen_error of Loc.t * string
 
@@ -56,10 +60,12 @@ let rec emit_expr (e : Ast.expr) : string =
   match e.node with
   | Ast.Int_lit n -> string_of_int n
   | Ast.Bool_lit b -> if b then "1" else "0"
+  | Ast.Str_lit s -> Ast.escape_string s
   | Ast.Var name -> name
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
-  | Ast.Bin (Ast.Concat, _, _) -> unsupported e.loc "string concat (++)"
+  | Ast.Bin (Ast.Concat, a, b) ->
+    "__lang_str_concat(" ^ emit_expr a ^ ", " ^ emit_expr b ^ ")"
   | Ast.Bin (op, a, b) ->
     "(" ^ emit_expr a ^ " " ^ binop_to_c op ^ " " ^ emit_expr b ^ ")"
   | Ast.Cmp (op, a, b) ->
@@ -71,22 +77,27 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Let (pat, value, body) ->
     (match pat.pnode with
      | Ast.P_var name ->
-       (* Use a GCC/Clang statement expression so the whole let stays a
-          C expression. Type assumed `int` for now — bools collapse to
-          int(0/1). String/record bindings will need a richer scheme. *)
-       "({ int " ^ name ^ " = " ^ emit_expr value ^ "; " ^ emit_expr body ^ "; })"
+       (* GCC/Clang statement expression so the whole let stays a C
+          expression. `__auto_type` (GCC/Clang extension) lets us bind
+          values of varying static types (int, const char*, ...) without
+          threading typer info into codegen. *)
+       "({ __auto_type " ^ name ^ " = " ^ emit_expr value ^ "; " ^ emit_expr body ^ "; })"
      | _ -> unsupported pat.ploc "non-variable let pattern")
   (* Unsupported nodes *)
   | Ast.Float_lit _   -> unsupported e.loc "float literals"
-  | Ast.Str_lit _     -> unsupported e.loc "string literals"
-  | Ast.Unit_lit      -> unsupported e.loc "unit literal"
+  | Ast.Unit_lit      -> "0"  (* unit becomes int 0 in C *)
   | Ast.Let_rec _     -> unsupported e.loc "let rec inside an expression (only allowed at top level)"
   | Ast.With _        -> unsupported e.loc "with"
   | Ast.Fun _         -> unsupported e.loc "functions in expression position (only top-level lifted fns supported)"
   | Ast.App (f, arg) ->
     (* Only `name(arg)` form: f must be a bare Var that names a lifted
-       function. Curried multi-arg / closure values are out of scope. *)
+       function or a recognized builtin (currently `print`). Curried
+       multi-arg / closure values are out of scope. *)
     (match f.node with
+     | Ast.Var "print" ->
+       (* `print : str -> unit` → puts; statement expression yields 0
+          so the surrounding context still sees an int value. *)
+       "({ puts(" ^ emit_expr arg ^ "); 0; })"
      | Ast.Var name ->
        name ^ "(" ^ emit_expr arg ^ ")"
      | _ ->
@@ -143,11 +154,34 @@ let emit_fn (f : fn_decl) : string =
   Printf.sprintf "int %s(int %s) {\n  return %s;\n}"
     f.name f.param (emit_expr f.body)
 
+(* String-concat runtime helper: allocates a new heap buffer of size
+   |a| + |b| + 1 and concatenates. Memory is leaked — fine for short-lived
+   programs (and matches the GC-less interpreter's current laxity). A
+   future slice will swap in proper region / arena allocation. *)
+let str_concat_helper =
+  String.concat "\n"
+    [ "static const char* __lang_str_concat(const char* a, const char* b) {";
+      "  size_t la = strlen(a), lb = strlen(b);";
+      "  char* r = (char*) malloc(la + lb + 1);";
+      "  memcpy(r, a, la);";
+      "  memcpy(r + la, b, lb);";
+      "  r[la + lb] = '\\0';";
+      "  return r;";
+      "}" ]
+
+let main_format_of (t : Ast.ty) : string option =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool -> Some "%d"
+  | Ast.TyStr -> Some "%s"
+  | Ast.TyUnit -> None
+  | _ -> Some "%d"  (* best-effort; type-checker should have caught issues *)
+
 (* Compile a whole program: flatten top-decls into nested lets, lift
    top-level fn bindings into C functions (with forward declarations to
    support self / mutual recursion), and emit the residual body inside
-   `int main()`. *)
-let emit_program (prog : Ast.program) : string =
+   `int main()`. `main_ty` drives the printf format (int/bool → %d, str
+   → %s, unit → no printf). *)
+let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let main_expr = Ast.desugar_program prog in
   let fns, body_expr = lift_fns main_expr in
   let forward_decls =
@@ -155,12 +189,22 @@ let emit_program (prog : Ast.program) : string =
   in
   let fn_defs = List.map emit_fn fns in
   let main_body = emit_expr body_expr in
+  let main_stmt =
+    match main_format_of main_ty with
+    | None -> "  (void)(" ^ main_body ^ ");  /* unit result */"
+    | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
+  in
   let parts =
-    [ "#include <stdio.h>"; "" ]
+    [ "#include <stdio.h>";
+      "#include <stdlib.h>";
+      "#include <string.h>";
+      "";
+      str_concat_helper;
+      "" ]
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";
-        "  printf(\"%d\\n\", " ^ main_body ^ ");";
+        main_stmt;
         "  return 0;";
         "}";
         "" ]

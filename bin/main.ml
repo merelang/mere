@@ -39,10 +39,14 @@ let run_action action label source =
 
 let compile_to_c source =
   let prog = Lang_ml.Pipeline.parse_program source in
-  (* Type-check first so we surface type errors before codegen. *)
-  let _ = Lang_ml.Typer.infer Lang_ml.Typer.initial_env
-            (Lang_ml.Ast.desugar_program prog) in
-  Lang_ml.Codegen_c.emit_program prog
+  (* Type-check first so we surface type errors before codegen, and
+     capture the main expression's inferred type so codegen can pick
+     the right printf format (int → %d, str → %s, unit → skip). *)
+  let main_ty =
+    Lang_ml.Typer.infer Lang_ml.Typer.initial_env
+      (Lang_ml.Ast.desugar_program prog)
+  in
+  Lang_ml.Codegen_c.emit_program ~main_ty prog
 
 let () =
   match Array.to_list Sys.argv with
