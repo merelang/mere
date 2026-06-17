@@ -213,6 +213,26 @@ region S { Cell { v = 1 } }            // ERROR: Cell[S] cannot leave region S
 
 詳細は [memory-model.md](memory-model.md) と `internal design notes` 参照。
 
+### 関数 + `using [cap]` 構文糖
+
+`using [cap1, cap2, ...]` は cap-passing スタイルで頻発する partial application パターンを緩和する構文糖。caps は outer-most curried args として展開される。
+```
+fn x using [logger] -> body
+// ≡ fn logger -> fn x -> body
+```
+
+これにより caller は `f cap` で cap を embedding した `T -> U` を即座に得られ、`map` 等の高階関数に渡せる:
+```
+let log_x = fn x using [logger] -> logger (show x);
+let bound = log_x my_logger;    // bound : int -> unit
+iter bound [1, 2, 3];
+```
+
+- 型注釈可: `fn x using [c: int -> int] -> c x`
+- 複数 cap: `fn x using [logger: Logger, metrics: Metrics] -> ...`
+- 通常 params と組合せ: `fn (x: int) using [c: Logger] -> c.info (show x)`
+- 空 `using []` は parse error
+
 ### 関数
 ```
 fn x -> x + 1                       // 単引数 (型推論)
