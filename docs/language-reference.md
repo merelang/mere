@@ -116,11 +116,24 @@ if cond then a else b               // 通常の if、a と b は同型
 if cond then print "msg"            // 副作用専用、body は unit 型必須
 ```
 
-### with (スコープ束縛、将来 Drop と統合予定)
+### with (Drop ありリソースのスコープ束縛、Phase 3.1)
+
+`with c = v in body` は **Drop ありリソース** (DB connection / file handle / mutex 等) 用。bound value の型は `drop type ...` で宣言された Drop 型でなければならない (Trivial 値は `let`)。スコープ末で値の `close: unit -> unit` field が呼ばれる (field が無ければ no-op)。複数 binding は **LIFO 順** で close 実行。
 ```
-with logger = 100, db = 200 in
-  logger + db
+drop type Conn = { id: int, close: unit -> unit };
+let mk_conn = fn id ->
+  Conn { id = id, close = fn () -> print ("close " ++ show id) };
+
+with c = mk_conn 1 in c.id
+// 結果: 1。scope 末で "close 1" が出力される
+
+with c1 = mk_conn 1, c2 = mk_conn 2 in c1.id + c2.id
+// 結果: 3。"close 2" → "close 1" の順で出力 (LIFO)
+
+with x = 5 in x + 1    // ERROR: int は Drop 型ではない。`let` を使う
 ```
+
+設計 doc: `internal design notes` の案 (i)「region は Trivial 厳格、Drop ありは `with` で管理」を実装。
 
 ### region (Phase 2: 構文 + 値式 `&R v` + escape check)
 

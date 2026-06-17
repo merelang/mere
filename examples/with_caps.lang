@@ -1,10 +1,39 @@
-// `with` 式: scope-bound resource binding.
-// 現状は let とほぼ同じ意味 (v0)。
-// 将来的に scope を抜けるとリソース自動破棄 (Drop) と arena 紐付けが入る予定。
+// `with` 式: Drop ありリソースのスコープ束縛 (Phase 3.1)。
+//
+// `let` が Trivial 値 (デストラクタ不要) 用なのに対し、`with` は Drop ありの
+// cap (DB connection / file handle / mutex 等) 用。Drop 型として宣言された
+// 値だけが with 束縛できる。スコープ末で値の `close: unit -> unit` field が
+// 呼ばれる (無ければ no-op)。複数 binding は LIFO 順で close される。
+//
+// 設計 doc: 12_drop_and_with.md 案 (i)「region は Trivial 厳格、Drop ありは
+// with で管理」を実装。
 
-// 複数 binding を一度に: with x = ..., y = ..., z = ... in body
-with one = 1,
-     two = 2,
-     three = 3
-in
-  one + two + three  // 6
+drop type Conn = {
+  id:    int,
+  close: unit -> unit,
+};
+
+let mk_conn = fn id ->
+  Conn {
+    id    = id,
+    close = fn () -> print ("close conn " ++ show id),
+  };
+
+// 単一 with: スコープ末で close 1 が呼ばれる
+let r1 =
+  with c = mk_conn 1 in
+    c.id * 10;
+
+// 複数 with: LIFO 順、c2 → c1 で close
+let r2 =
+  with c1 = mk_conn 1,
+       c2 = mk_conn 2 in
+    c1.id + c2.id;
+
+// 期待出力:
+// close conn 1
+// close conn 2
+// close conn 1
+// 結果は (r1, r2) = (10, 3)
+
+(r1, r2)

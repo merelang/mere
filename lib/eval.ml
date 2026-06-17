@@ -1101,10 +1101,20 @@ let rec eval_in (env : env) (e : Ast.expr) =
     ) bindings;
     eval_in env' body
   | Ast.With (name, value, body) ->
-    (* v0: identical to Let in semantics. Q-007 narrowing says scope-bound
-       resource cleanup will be added later when we have Drop/destructors. *)
+    (* Phase 3.1: scope-bound resource cleanup. Eval body then invoke the
+       value's `close` field (if present) as a unit-returning thunk. Drop
+       order across nested with-bindings is naturally LIFO since each
+       outer `with` waits for the inner body (and its drops) to finish
+       before running its own close. *)
     let v = eval_in env value in
-    eval_in ((name, ref v) :: env) body
+    let result = eval_in ((name, ref v) :: env) body in
+    (match v with
+     | V_record (_, fields) ->
+       (match List.assoc_opt "close" fields with
+        | Some close_fn -> ignore (!apply_value_ref close_fn V_unit)
+        | None -> ())
+     | _ -> ());
+    result
   | Ast.If (cond, then_, else_) ->
     (match eval_in env cond with
      | V_bool true -> eval_in env then_
