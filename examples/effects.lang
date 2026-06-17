@@ -1,0 +1,85 @@
+// Capability passing パターンのデモ。
+//
+// Lang のエフェクトシステムは「副作用 = ケイパビリティを値として引数で渡す」設計
+// (設計 doc: 05_effect_system.md, 10_effect_trial_findings.md)。HM + 関数引数だけで
+// 成立し、副作用情報は型に出さない。
+//
+// このファイルは Lang の現状機能だけで cap-passing が書けることを実証する例題。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+let rec iter = fn f -> fn xs -> match xs with
+  | []        -> ()
+  | [h, ...t] -> { f h; iter f t };
+
+let rec map = fn f -> fn xs -> match xs with
+  | []        -> []
+  | [h, ...t] -> Cons (f h, map f t);
+
+// === ケイパビリティ型 ===
+// cap は record として表現する。フィールドは「使える操作」を表す関数群。
+// 普通の record と区別は型の使い方だけ — 構文的な特権はない。
+
+type Logger = {
+  info: str -> unit,
+  warn: str -> unit,
+};
+
+type Metrics = {
+  inc:    str -> unit,
+  record: str -> int -> unit,
+};
+
+// === Cap の構築 ===
+// 通常は外部リソースから注入するが、ここでは print を内部に持つ素朴版を構築。
+// 戻り値は cap 型の record 値で、これを caller に渡せば caller がそれを使える。
+
+let mk_logger = fn (prefix: str) -> Logger {
+  info = fn msg -> print (prefix ++ " [INFO] " ++ msg),
+  warn = fn msg -> print (prefix ++ " [WARN] " ++ msg),
+};
+
+let mk_metrics = fn () -> Metrics {
+  inc    = fn name -> print ("[METRIC] inc " ++ name),
+  record = fn name -> fn n -> print ("[METRIC] " ++ name ++ "=" ++ show n),
+};
+
+// === パターン 1: 低階関数で cap を直接使用 ===
+// cap は引数で受け取り、使う側で .field 経由で呼び出す。
+// シグネチャを見れば「この関数は Logger と Metrics を使う」が一目でわかる。
+
+let save_order = fn (logger: Logger) -> fn (metrics: Metrics) -> fn (order_id: int) -> {
+  logger.info ("saving order " ++ show order_id);
+  metrics.inc "orders.saved";
+  metrics.record "orders.id" order_id;
+};
+
+// === パターン 2: バケツリレー (intermediate 関数) ===
+// process_user は metrics を直接使わないが、save_order に渡すために受け取る。
+// これは Lang の哲学では「機能ではなくバグ」ではなく、「副作用経路の可視化」。
+
+let process_user =
+  fn (logger: Logger) -> fn (metrics: Metrics) ->
+  fn (user_id: int) -> fn (order_id: int) -> {
+    logger.info ("user " ++ show user_id ++ " processing");
+    save_order logger metrics order_id;
+  };
+
+// === パターン 3: 高階関数 + partial application で cap を閉じ込める ===
+// iter のような高階関数は cap を知らない (汎用)。cap を使う関数は partial app で
+// あらかじめ cap を埋めてから渡す。これが Q-003/Q-006 の解。
+
+let handle_orders =
+  fn (logger: Logger) -> fn (metrics: Metrics) -> fn (user_id: int) -> fn order_ids ->
+    // logger / metrics / user_id を partial app で閉じ込めて、iter に渡せる
+    // `int -> unit` 関数を作る。
+    let handle_one = fn id -> process_user logger metrics user_id id in
+    iter handle_one order_ids;
+
+// === 実行 ===
+
+let logger  = mk_logger "app";
+let metrics = mk_metrics ();
+let orders  = [101, 102, 103];
+
+handle_orders logger metrics 42 orders
