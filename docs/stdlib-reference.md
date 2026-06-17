@@ -201,6 +201,35 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 
 ---
 
+## Capability (2 + 2 builtin record types)
+
+エフェクトシステム ([effects.lang](../examples/effects.lang) 参照) で使う cap 型のうち、`Logger` と `Metrics` は builtin として事前登録済み。ユーザは `type Logger = ...` で上書きすることもできる。
+
+```
+type Logger  = { info: str -> unit, warn: str -> unit, error: str -> unit };
+type Metrics = { inc: str -> unit, record: str -> int -> unit };
+```
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `mk_logger`  | `str -> Logger`   | prefix 付き Logger を作成。各 field は `prefix [LEVEL] msg` 形式で print する |
+| `mk_metrics` | `unit -> Metrics` | Metrics を作成。`inc` / `record` は `[METRIC] ...` 形式で print する |
+
+```
+let lg = mk_logger "app" in
+{ lg.info "started";
+  lg.warn "slow query";
+  lg.error "abort" }
+
+let m = mk_metrics () in
+{ m.inc "users";
+  m.record "latency_ms" 23 }
+```
+
+cap-passing パターンの完全な例は [examples/effects.lang](../examples/effects.lang) を参照。
+
+---
+
 ## システム / 定数 (4)
 
 | 名前 | 型 | 説明 |
@@ -224,7 +253,7 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、85 個)
+## 全 builtin 一覧 (アルファベット順、87 個)
 
 ```
 abs assert bool_of_str ceil char_at chr clamp const cube
@@ -232,8 +261,8 @@ decr divmod e even exit f_abs f_add f_div f_ge f_gt
 f_le f_lt f_mul f_neg f_sub fail flip float_of_int
 float_of_str floor fst gcd id incr int_max int_min
 int_of_float int_of_str is_alpha is_digit is_space
-iter_n lcm max min not odd ord pair pi pow print
-print_bool print_err print_int print_no_nl read_file
+iter_n lcm max min mk_logger mk_metrics not odd ord pair pi
+pow print print_bool print_err print_int print_no_nl read_file
 read_line round show sign snd sqrt square str_compare
 str_contains str_count str_ends_with str_len str_of_float
 str_of_int str_repeat str_replace str_rev str_starts_with

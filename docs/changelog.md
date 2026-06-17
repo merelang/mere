@@ -6,6 +6,7 @@
 
 ## 2026-06-17
 
+- **effect: builtin `Logger` / `Metrics` cap 型 + `mk_logger` / `mk_metrics` 構築 builtin** — cap 型を stdlib として provide。typer に `Logger { info, warn, error: str -> unit }` と `Metrics { inc: str -> unit, record: str -> int -> unit }` を register、eval に対応する V_record 構築関数を追加。ユーザが毎回 cap 型を再定義しなくて済む (オーバーライドは可)。examples/effects.lang を builtin 使用に書き直し。テスト 7 件追加 (668 passing)。
 - **effect: `using [cap]` 構文糖** — `fn x using [logger] -> body` を `fn logger -> fn x -> body` に desugar (caps が outer-most curried args)。cap-passing スタイルで頻発する partial application 反復 (Q-003/Q-006 解の主要パターン) を緩和。型注釈可、複数 cap 可、通常 params との組合せ可。設計 doc `10_effect_trial_findings.md` の補助設計を実装。テスト 7 件追加 (661 passing)。examples/effects.lang も sugar 形で書き直し。
 - **example: examples/effects.lang** — Capability passing パターンの実証例 (約 75 行)。`Logger` / `Metrics` cap 型を record として宣言、低階関数で直接使用 / バケツリレー / partial application で高階関数に渡すの 3 パターンを demo。設計 doc `05_effect_system.md` の「副作用 = ケイパビリティを値で渡す」が現状の Lang (HM + 関数引数 + record + curry) だけで動くことを実証 — エフェクトシステムのために新規構文を入れる必要なし。
 - **region Phase 2.6**: `Trivial[R]` 制約 — `drop type Name = ...` で Drop 型を宣言できるように。`&R v` / `R.alloc(v)` / view フィールドの構築時に inner 型を walk して、`drop_types` registry に登録された型を含めば「Trivial[R] violated」型エラー。function 型は Trivial 扱い (closure 値自体は Drop ではない)。設計 doc 12_drop_and_with.md の案 (i) を構文化。`with` 式 + Drop 実行は Phase 3 で。テスト 7 件追加 (654 passing)。

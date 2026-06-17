@@ -63,6 +63,54 @@ let builtin_print =
      | _ -> failwith "print: expected str");
     V_unit)
 
+(* Capability constructors. Each cap field is a V_builtin closure that
+   captures the constructor's parameters (e.g., logger prefix) and
+   performs the I/O via print_endline. *)
+let builtin_mk_logger =
+  V_builtin ("mk_logger", fun v ->
+    match v with
+    | V_str prefix ->
+      let mk_field level =
+        V_builtin (level, fun msg_v ->
+          (match msg_v with
+           | V_str msg ->
+             print_endline (prefix ^ " [" ^ level ^ "] " ^ msg)
+           | _ -> failwith (level ^ ": expected str"));
+          V_unit)
+      in
+      V_record ("Logger",
+        [("info",  mk_field "INFO");
+         ("warn",  mk_field "WARN");
+         ("error", mk_field "ERROR")])
+    | _ -> failwith "mk_logger: expected str")
+
+let builtin_mk_metrics =
+  V_builtin ("mk_metrics", fun v ->
+    match v with
+    | V_unit ->
+      let inc_field =
+        V_builtin ("inc", fun name_v ->
+          (match name_v with
+           | V_str name -> print_endline ("[METRIC] inc " ^ name)
+           | _ -> failwith "inc: expected str");
+          V_unit)
+      in
+      let record_field =
+        V_builtin ("record", fun name_v ->
+          match name_v with
+          | V_str name ->
+            V_builtin ("record_2", fun n_v ->
+              (match n_v with
+               | V_int n ->
+                 print_endline ("[METRIC] " ^ name ^ "=" ^ string_of_int n)
+               | _ -> failwith "record: 2nd arg expected int");
+              V_unit)
+          | _ -> failwith "record: 1st arg expected str")
+      in
+      V_record ("Metrics",
+        [("inc", inc_field); ("record", record_field)])
+    | _ -> failwith "mk_metrics: expected unit")
+
 let builtin_time =
   V_builtin ("time", fun v ->
     match v with
@@ -901,6 +949,8 @@ let initial_env : env =
     ("flip", ref builtin_flip);
     ("try_or", ref builtin_try_or);
     ("iter_n", ref builtin_iter_n);
+    ("mk_logger", ref builtin_mk_logger);
+    ("mk_metrics", ref builtin_mk_metrics);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =
