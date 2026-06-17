@@ -4,6 +4,10 @@
 
 ---
 
+## 2026-06-17
+
+- **region Phase 2.4**: view 値の type-level region tag + field access / record update の region 伝播 — view 構築で `TyCon (name, [TyRef (target_region, TyUnit)])` を返すようにして value の型に region を埋め込み、`Field_get` / `Record_update` で view 名 + 埋め込み region を読み取って `subst_region` で field 型を実 region に置換。view 値そのものも escape check の対象になる (`Cell[S]` を region S の外に持ち出せない)。pp_ty に `Name[R]` 表記の heuristic を追加。テスト 5 件追加 (640 passing)。Phase 2.3 の "field access は raw R を返す" 既知制約を解消。
+
 ## 2026-06-16
 
 - **region Phase 2.3**: view 構築の region 強制 + region パラメータ substitution — view を構築できるのは `region { ... }` block 内のみ。構築時に view 宣言の region パラメータ `R` が active region 名に置換され、フィールドに `&R T` がある場合、別名 region でも自動的にタグが揃う。typer に views Hashtbl と active_regions stack を追加、`Region_block` で push/pop、`Record_lit` で view dispatch + `subst_region`。memory-model.md の §5 「view 型」セクションと連携。
