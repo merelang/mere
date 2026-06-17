@@ -2096,10 +2096,31 @@ let () =
   check "codegen: logical &&/||"
     (codegen "true && false")
     "#include <stdio.h>\n\nint main(void) {\n  printf(\"%d\\n\", (1 && 0));\n  return 0;\n}\n";
-  check_raises "codegen: functions rejected"
-    (fun () -> let _ = codegen "fn x -> x + 1" in ());
   check_raises "codegen: strings rejected"
     (fun () -> let _ = codegen "\"hello\"" in ());
+
+  (* --- C codegen: function lifting (Phase 4 second slice) --- *)
+  check "codegen: lifts top-level fn binding"
+    (codegen "let inc = fn x -> x + 1 in inc 5")
+    "#include <stdio.h>\n\nint inc(int);\n\nint inc(int x) {\n  return (x + 1);\n}\n\nint main(void) {\n  printf(\"%d\\n\", inc(5));\n  return 0;\n}\n";
+  check "codegen: lifts let-rec (self-recursion)"
+    (codegen "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5")
+    "#include <stdio.h>\n\nint fact(int);\n\nint fact(int n) {\n  return ((n < 1) ? 1 : (n * fact((n - 1))));\n}\n\nint main(void) {\n  printf(\"%d\\n\", fact(5));\n  return 0;\n}\n";
+  check "codegen: mutual recursion lifts both fns"
+    (codegen
+       "let rec ev = fn n -> if n == 0 then 1 else od (n - 1)\n\
+        and od = fn n -> if n == 0 then 0 else ev (n - 1)\n\
+        in ev 4")
+    "#include <stdio.h>\n\nint ev(int);\nint od(int);\n\nint ev(int n) {\n  return ((n == 0) ? 1 : od((n - 1)));\n}\nint od(int n) {\n  return ((n == 0) ? 0 : ev((n - 1)));\n}\n\nint main(void) {\n  printf(\"%d\\n\", ev(4));\n  return 0;\n}\n";
+  check_raises "codegen: nested fn (closure) rejected"
+    (fun () ->
+      let _ = codegen
+        "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5"
+      in ());
+  check_raises "codegen: indirect fn application rejected"
+    (* `(fn x -> x + 1) 5` — App head is a Fun expression, not a Var,
+       so codegen rejects (no first-class functions). *)
+    (fun () -> let _ = codegen "(fn x -> x + 1) 5" in ());
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

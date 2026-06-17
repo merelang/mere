@@ -69,9 +69,12 @@ dune exec ./bin/main.exe -- -te 'fn x -> x + 1'    # 型表示
 dune exec ./bin/main.exe -- -r                     # REPL
 dune runtest
 
-# C codegen (Phase 4 MVP、int subset)
+# C codegen (Phase 4、int subset + 関数 lifting)
 dune exec ./bin/main.exe -- -ce 'let x = 5 in x * 2' > out.c
 clang out.c -o out && ./out                        # native 実行 → 10
+
+dune exec ./bin/main.exe -- -ce 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10' > fact.c
+clang fact.c -o fact && ./fact                     # → 3628800
 ```
 
 ## レイアウト
