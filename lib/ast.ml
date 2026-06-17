@@ -135,6 +135,10 @@ let pp_ty t =
     | TyVar v -> name_of_var v.id
     | TyParam p -> "'" ^ p
     | TyCon (name, []) -> name
+    (* Heuristic: a TyCon whose sole arg is a region-tagged unit is a view
+       value (typer encodes the construction-time region this way). Print
+       as `Name[R]` instead of the literal `&R () Name`. *)
+    | TyCon (name, [TyRef (r, TyUnit)]) -> name ^ "[" ^ r ^ "]"
     | TyCon (name, [a]) -> aux a ^ " " ^ name
     | TyCon (name, args) ->
       "(" ^ String.concat ", " (List.map aux args) ^ ") " ^ name

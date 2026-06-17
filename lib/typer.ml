@@ -655,7 +655,11 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
          let t = infer env fexpr in
          unify fexpr.loc t exp_ty
        ) fields;
-       Ast.TyCon (name, [])
+       (* Encode the construction-time region in the value's type so that
+          field access can later substitute the view's region param with
+          the actual region. The TyRef-of-unit marker is recognized by
+          Field_get / Record_update / pp_ty. *)
+       Ast.TyCon (name, [Ast.TyRef (target_region, Ast.TyUnit)])
      | None ->
        let info =
          try Hashtbl.find records name
@@ -683,6 +687,17 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     (* The inner expression must have type `TyCon (rec_name, args)` for some
        declared record `rec_name`.  Walk to resolve type vars. *)
     (match Ast.walk t_inner with
+     | Ast.TyCon (view_name, [Ast.TyRef (region, Ast.TyUnit)])
+       when Hashtbl.mem views view_name ->
+       (* View field access: substitute the view's region param with the
+          construction-time region recorded in the value's type. *)
+       let vinfo = Hashtbl.find views view_name in
+       (try
+          let raw_ty = List.assoc fname vinfo.v_fields in
+          subst_region vinfo.v_region_param region raw_ty
+        with Not_found ->
+          raise (Type_error (e.loc,
+            Printf.sprintf "view %s has no field %s" view_name fname)))
      | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
        let info = Hashtbl.find records rec_name in
        let (expected_fields, result_ty) = instantiate_record rec_name info in
@@ -697,6 +712,23 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Record_update (base, updates) ->
     let t_base = infer env base in
     (match Ast.walk t_base with
+     | Ast.TyCon (view_name, [Ast.TyRef (region, Ast.TyUnit)]) as t_view
+       when Hashtbl.mem views view_name ->
+       (* View record update: substitute region in each updated field's
+          declared type, type-check, and return the same view-typed value. *)
+       let vinfo = Hashtbl.find views view_name in
+       List.iter (fun (fname, fexpr) ->
+         let raw_ty =
+           try List.assoc fname vinfo.v_fields
+           with Not_found ->
+             raise (Type_error (e.loc,
+               Printf.sprintf "view %s has no field %s" view_name fname))
+         in
+         let exp_ty = subst_region vinfo.v_region_param region raw_ty in
+         let t = infer env fexpr in
+         unify fexpr.loc t exp_ty
+       ) updates;
+       t_view
      | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
        let info = Hashtbl.find records rec_name in
        let (expected_fields, result_ty) = instantiate_record rec_name info in
