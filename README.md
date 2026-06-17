@@ -42,6 +42,11 @@ $ dune exec ./bin/main.exe -- examples/json_parser.lang
 $ echo "hello lang world" > /tmp/input.txt
 $ dune exec ./bin/main.exe -- examples/word_count.lang
 # file: /tmp/input.txt / chars / lines / words を表示
+
+$ dune exec ./bin/main.exe -- examples/pipeline.lang
+# region/view/effect/with の全機能を組合せた realistic example。
+# Drop ありの Session を with で開閉、各タスクを region 内で view で処理、
+# Logger/Metrics の cap を using sugar で渡す。
 ```
 
 ## ドキュメント
