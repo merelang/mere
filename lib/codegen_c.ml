@@ -1,4 +1,4 @@
-(* C codegen — first slice (Phase 4 prep).
+(* C codegen — Phase 4 prep.
 
    Subset:
      int / bool literals
@@ -10,25 +10,20 @@
      let bindings        (only P_var pattern, int- or bool-typed values)
      Var references
      Annot (drops the annotation, emits the inner expression)
+     Top-level fn bindings (single-arg, no closures) — lifted to C
+       functions. Includes self-recursion and mutual recursion via the
+       emitted forward declarations.
+     Direct function calls `Var name`-headed App.
 
    Not yet supported (will raise Codegen_error):
-     functions / closures / app
+     closures / nested fn defs / curried multi-arg fns / first-class fns
      strings / records / variants / tuples / patterns / match
      region / view / Ref / with
-     stdlib builtins beyond what the subset needs
+     stdlib builtins (print, mk_logger, etc.)
 
-   Top-level decls are flattened into nested `let` via Ast.desugar_program
-   so we only need to translate one expression. The whole program becomes:
-
-     #include <stdio.h>
-     int main(void) {
-       printf("%d\n", <EXPR>);
-       return 0;
-     }
-
-   Let-bindings use GCC/Clang statement expressions `({ ... })` so the whole
-   thing is one C expression — keeps emit_expr cleanly recursive.
-*)
+   Top-level decls are flattened into nested `let` via Ast.desugar_program;
+   we then walk that chain to extract fn bindings into a list of C
+   functions, leaving the residual body to emit as the C `main`. *)
 
 exception Codegen_error of Loc.t * string
 
@@ -85,10 +80,18 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Float_lit _   -> unsupported e.loc "float literals"
   | Ast.Str_lit _     -> unsupported e.loc "string literals"
   | Ast.Unit_lit      -> unsupported e.loc "unit literal"
-  | Ast.Let_rec _     -> unsupported e.loc "let rec"
+  | Ast.Let_rec _     -> unsupported e.loc "let rec inside an expression (only allowed at top level)"
   | Ast.With _        -> unsupported e.loc "with"
-  | Ast.Fun _         -> unsupported e.loc "functions / closures"
-  | Ast.App _         -> unsupported e.loc "function application"
+  | Ast.Fun _         -> unsupported e.loc "functions in expression position (only top-level lifted fns supported)"
+  | Ast.App (f, arg) ->
+    (* Only `name(arg)` form: f must be a bare Var that names a lifted
+       function. Curried multi-arg / closure values are out of scope. *)
+    (match f.node with
+     | Ast.Var name ->
+       name ^ "(" ^ emit_expr arg ^ ")"
+     | _ ->
+       unsupported e.loc
+         "function application requires a direct named function (no closures / curry)")
   | Ast.Constr _      -> unsupported e.loc "data constructors"
   | Ast.Match _       -> unsupported e.loc "match"
   | Ast.Tuple _       -> unsupported e.loc "tuples"
@@ -98,16 +101,68 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Field_get _   -> unsupported e.loc "field access"
   | Ast.Record_update _ -> unsupported e.loc "record update"
 
-(* Compile a whole program: flatten top-decls into nested lets, then wrap
-   the main expression in a C `int main` that prints the result. *)
+type fn_decl = {
+  name  : string;
+  param : string;
+  body  : Ast.expr;
+}
+
+(* Walk the desugared main expression, extracting top-level fn bindings
+   into a list of fn_decls. Stops at the first non-let / non-fn-let node
+   and returns it as the residual main body. *)
+let lift_fns (e : Ast.expr) : fn_decl list * Ast.expr =
+  let rec go (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Let (pat, value, rest)
+      when (match pat.Ast.pnode with Ast.P_var _ -> true | _ -> false) ->
+      (match value.Ast.node with
+       | Ast.Fun (param, _, fn_body) ->
+         let name =
+           match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false
+         in
+         let more, rest' = go rest in
+         { name; param; body = fn_body } :: more, rest'
+       | _ -> [], e)
+    | Ast.Let_rec (bindings, rest) ->
+      let fns =
+        List.map (fun (n, v) ->
+          match v.Ast.node with
+          | Ast.Fun (p, _, fb) -> { name = n; param = p; body = fb }
+          | _ ->
+            raise (Codegen_error (v.Ast.loc,
+              "let rec binding must be a single-arg function in C subset")))
+          bindings
+      in
+      let more, rest' = go rest in
+      fns @ more, rest'
+    | _ -> [], e
+  in
+  go e
+
+let emit_fn (f : fn_decl) : string =
+  Printf.sprintf "int %s(int %s) {\n  return %s;\n}"
+    f.name f.param (emit_expr f.body)
+
+(* Compile a whole program: flatten top-decls into nested lets, lift
+   top-level fn bindings into C functions (with forward declarations to
+   support self / mutual recursion), and emit the residual body inside
+   `int main()`. *)
 let emit_program (prog : Ast.program) : string =
   let main_expr = Ast.desugar_program prog in
-  let body = emit_expr main_expr in
-  String.concat "\n"
-    [ "#include <stdio.h>";
-      "";
-      "int main(void) {";
-      "  printf(\"%d\\n\", " ^ body ^ ");";
-      "  return 0;";
-      "}";
-      "" ]
+  let fns, body_expr = lift_fns main_expr in
+  let forward_decls =
+    List.map (fun f -> "int " ^ f.name ^ "(int);") fns
+  in
+  let fn_defs = List.map emit_fn fns in
+  let main_body = emit_expr body_expr in
+  let parts =
+    [ "#include <stdio.h>"; "" ]
+    @ (if forward_decls = [] then [] else forward_decls @ [""])
+    @ (if fn_defs = [] then [] else fn_defs @ [""])
+    @ [ "int main(void) {";
+        "  printf(\"%d\\n\", " ^ main_body ^ ");";
+        "  return 0;";
+        "}";
+        "" ]
+  in
+  String.concat "\n" parts
