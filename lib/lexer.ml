@@ -23,6 +23,7 @@ type token =
   | T_region          (* region keyword *)
   | T_view            (* view keyword (for view-type declarations) *)
   | T_drop            (* drop keyword (Drop type marker for Trivial[R] check) *)
+  | T_using           (* using keyword (capability list sugar for fn params) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -242,6 +243,7 @@ let tokenize s =
           | "region" -> T_region
           | "view" -> T_view
           | "drop" -> T_drop
+          | "using" -> T_using
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when

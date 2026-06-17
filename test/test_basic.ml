@@ -1954,5 +1954,45 @@ let () =
        region R { let _ = &R (fn (c: Conn) -> c.id) in 100 }")
     "100";
 
+  (* --- `using [cap]` sugar for fn (Effect.1) ---
+     `fn x using [cap] -> body` desugars to `fn cap -> fn x -> body`.
+     Caps become outer-most curried args so partial application captures
+     them first — the common pattern in cap-passing code. *)
+  check "fn single arg + single cap (no type)"
+    (Pipeline.process
+      "let f = fn x using [c] -> c x in\n\
+       let bound = f (fn n -> n + 1) in\n\
+       bound 10")
+    "11";
+  check "fn with typed cap"
+    (Pipeline.process
+      "let apply = fn x using [c: int -> int] -> c x in\n\
+       apply (fn n -> n * 2) 5")
+    "10";
+  check "fn multi-cap using"
+    (Pipeline.process
+      "let f = fn x using [a, b] -> a (b x) in\n\
+       f (fn n -> n + 1) (fn n -> n * 10) 3")
+    "31";
+  check "fn parens-param + using cap"
+    (Pipeline.process
+      "let g = fn (x: int) using [c: int -> int] -> c x + 1 in\n\
+       g (fn n -> n * 5) 4")
+    "21";
+  check "fn multi explicit + multi cap"
+    (Pipeline.process
+      "let h = fn (x, y) using [c1, c2] -> c1 (c2 x) + y in\n\
+       h (fn n -> n + 100) (fn n -> n * 2) 3 4")
+    "110";
+  check "using sugar matches explicit curry semantically"
+    (Pipeline.process
+      "let log_x_sugar = fn x using [logger] -> logger (show x) in\n\
+       let log_x_explicit = fn logger -> fn x -> logger (show x) in\n\
+       let cap = fn s -> s ++ \"!\" in\n\
+       log_x_sugar cap 42 ++ \"/\" ++ log_x_explicit cap 42")
+    "\"42!/42!\"";
+  check_raises "empty using clause: error"
+    (fun () -> Pipeline.process "let f = fn x using [] -> x in f 1");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
