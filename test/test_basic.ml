@@ -1994,5 +1994,40 @@ let () =
   check_raises "empty using clause: error"
     (fun () -> Pipeline.process "let f = fn x using [] -> x in f 1");
 
+  (* --- builtin cap types: Logger / Metrics + constructors (Effect.2) ---
+     `Logger` and `Metrics` are pre-registered record types; `mk_logger`
+     and `mk_metrics` are builtins constructing the values. *)
+  check "mk_logger has type str -> Logger"
+    (Pipeline.type_of "mk_logger")
+    "(str -> Logger)";
+  check "mk_metrics has type unit -> Metrics"
+    (Pipeline.type_of "mk_metrics")
+    "(unit -> Metrics)";
+  check "Logger field type via field access"
+    (Pipeline.type_of "let lg = mk_logger \"x\" in lg.info")
+    "(str -> unit)";
+  check "Metrics record field type via field access"
+    (Pipeline.type_of "let m = mk_metrics () in m.record")
+    "(str -> (int -> unit))";
+  check "Logger fields invokable, returning unit"
+    (Pipeline.type_of
+      "let lg = mk_logger \"x\" in lg.info \"msg\"")
+    "unit";
+  check "user-passed Logger can be used downstream (with type annotation)"
+    (* Demonstrates cap-passing pattern with a builtin Logger. Type
+       annotation is needed because plain field access can't infer the
+       record type from field name alone. *)
+    (Pipeline.type_of
+      "let handler = fn (lg: Logger) -> lg.info \"hello\" in\n\
+       handler (mk_logger \"app\")")
+    "unit";
+  check "Logger overridable by user-defined type"
+    (* If user declares their own `type Logger`, it replaces the builtin
+       in the records registry. *)
+    (Pipeline.type_of
+      "type Logger = { debug: str -> unit };\n\
+       fn (l: Logger) -> l.debug")
+    "(Logger -> (str -> unit))";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -196,6 +196,19 @@ let register_record type_name params fields =
   Hashtbl.replace types type_name (List.length params);
   Hashtbl.replace records type_name { r_params = params; r_fields = fields }
 
+(* Built-in capability record types. Registered at module load so that
+   `mk_logger`/`mk_metrics` return values whose type the typer recognizes
+   as Logger / Metrics. Users can override with their own `type Logger`
+   declarations if they want a different shape. *)
+let () =
+  register_record "Logger" []
+    [("info",  Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
+     ("warn",  Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
+     ("error", Ast.TyArrow (Ast.TyStr, Ast.TyUnit))];
+  register_record "Metrics" []
+    [("inc",    Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
+     ("record", Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))]
+
 (* Register a view: populates both the view registry (for construction-time
    region enforcement) and the record registry (so field access / record
    update work as for a plain record). *)
@@ -481,6 +494,10 @@ let initial_env : env =
     ("iter_n",
        mono (Ast.TyArrow (Ast.TyInt,
               Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit), Ast.TyUnit))));
+    (* Capability constructors (cf. builtin Logger / Metrics record types
+       registered above). *)
+    ("mk_logger",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyCon ("Logger",  []))));
+    ("mk_metrics", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Metrics", []))));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
