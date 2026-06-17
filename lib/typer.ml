@@ -578,9 +578,16 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
     ) env bindings alphas in
     infer env' body
   | Ast.With (name, value, body) ->
-    (* v0: identical to Let. Lifetime/resource semantics will be added with
-       Drop/destructors in a future slice. *)
+    (* Phase 3.1: `with c = v in body` requires v's type to be a Drop type
+       (declared via `drop type ...`). At runtime, the value's `close`
+       field (if present) is invoked when the with-scope ends. *)
     let tv = infer env value in
+    if not (contains_drop_type tv) then
+      raise (Type_error (e.loc,
+        Printf.sprintf
+          "`with` binding `%s` requires a Drop type (use `let` for Trivial values); \
+           got `%s`"
+          name (Ast.pp_ty tv)));
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
   | Ast.Region_block (name, body) ->
