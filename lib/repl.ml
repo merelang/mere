@@ -112,6 +112,10 @@ let process_decl eval_env type_env decl =
     Printf.printf "view %s[%s] defined (%d fields)\n"
       name region (List.length fields);
     []
+  | Ast.Top_drop name ->
+    Typer.register_drop_type name;
+    Printf.printf "drop type %s registered\n" name;
+    []
 
 (* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
 let prepare_input s =

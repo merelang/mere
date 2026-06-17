@@ -205,6 +205,29 @@ let register_view view_name region_param fields =
   Hashtbl.replace types view_name 0;
   Hashtbl.replace records view_name { r_params = []; r_fields = fields }
 
+(* Drop type registry: names declared with `drop type ...`. Region-tagged
+   values (`&R v`) must NOT have a type that mentions any drop type
+   anywhere — this is the Trivial[R] constraint. *)
+let drop_types : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let register_drop_type name =
+  Hashtbl.replace drop_types name ()
+
+(* True when the type structurally contains a TyCon whose name is in the
+   drop_types registry. Walks through type vars / refs / tuples /
+   constructors. Function-type arms are skipped (a function value itself
+   is Trivial even if it captures Drop resources via closure). *)
+let rec contains_drop_type (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyCon (name, args) ->
+    Hashtbl.mem drop_types name
+    || List.exists contains_drop_type args
+  | Ast.TyTuple ts -> List.exists contains_drop_type ts
+  | Ast.TyRef (_, inner) -> contains_drop_type inner
+  | Ast.TyArrow _ -> false
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
+  | Ast.TyParam _ | Ast.TyVar _ -> false
+
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
    substitute them into the arg type and result type. *)
 let instantiate_constr (info : constr_info) =
@@ -563,8 +586,15 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
           (Ast.pp_ty t) name));
     t
   | Ast.Ref (region, inner) ->
-    (* `&R e` — tag the value's type with region R. *)
+    (* `&R e` — tag the value's type with region R. Enforces the Trivial[R]
+       constraint: the inner value's type must not mention any Drop type. *)
     let t = infer env inner in
+    if contains_drop_type t then
+      raise (Type_error (e.loc,
+        Printf.sprintf
+          "Trivial[%s] violated: cannot place value of type `%s` into region — \
+           type contains a Drop type (use `with` to manage Drop cap lifetimes)"
+          region (Ast.pp_ty t)));
     Ast.TyRef (region, t)
   | Ast.Fun (param, ty_opt, body) ->
     let alpha = fresh_var () in
@@ -655,6 +685,15 @@ let rec infer (env : env) (e : Ast.expr) : Ast.ty =
          let t = infer env fexpr in
          unify fexpr.loc t exp_ty
        ) fields;
+       (* Trivial[R] for view: no field may have a Drop type since the view
+          is constructed in the region. *)
+       List.iter (fun (fname, ft) ->
+         if contains_drop_type ft then
+           raise (Type_error (e.loc,
+             Printf.sprintf
+               "Trivial[%s] violated: view %s field `%s` has Drop type `%s`"
+               target_region name fname (Ast.pp_ty ft)))
+       ) expected_fields;
        (* Encode the construction-time region in the value's type so that
           field access can later substitute the view's region param with
           the actual region. The TyRef-of-unit marker is recognized by

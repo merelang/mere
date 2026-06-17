@@ -158,6 +158,24 @@ region R {
 }
 ```
 
+**`Trivial[R]` 制約 (Phase 2.6)**: region に置ける値は **Drop semantics を持たない型** (Trivial) のみ。Drop 型は `drop type Name = ...` で宣言し、region 配置 (`&R v` / `R.alloc(v)` / view フィールド) で Drop 型を含むと型エラーになる。これは「region の一括解放を可能にするための制約」で、Drop が必要な cap (DB connection / file handle 等) は将来の `with` 式で別途管理する。
+```
+drop type Conn = { id: int };
+
+let c = Conn { id = 1 } in c.id      // OK: region 外なら Drop 型も普通に使える
+
+region R {
+  &R Conn { id = 1 }                  // ERROR: Trivial[R] violated
+}
+
+view Holder[R] { c: Conn };
+region S { Holder { c = ... } }       // ERROR: view field has Drop type
+
+region R {
+  &R (fn (c: Conn) -> c.id)           // OK: function 型は closure 値として Trivial
+}
+```
+
 ### view (Phase 2.4: 宣言 + region 強制 + 型 tag 伝播)
 
 ```

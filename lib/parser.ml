@@ -824,6 +824,23 @@ let parse_program tokens =
   in
   let rec parse_decls decls toks =
     match toks with
+    | (pos, T_drop) :: ((_, T_type) :: rest_after_type as after_drop) ->
+      (* `drop type Name = ...` marks Name as having Drop semantics.
+         We extract the name via look-ahead and prepend `Top_drop name`
+         to the decl list, then let the existing `type` parser produce
+         the actual declaration. *)
+      let _, after_params = parse_type_params rest_after_type in
+      let name =
+        match after_params with
+        | (_, T_ident n) :: _ -> n
+        | _ ->
+          raise (Parse_error (pos,
+            "expected type name after `drop type`"))
+      in
+      parse_decls (Ast.Top_drop name :: decls) after_drop
+    | (pos, T_drop) :: _ ->
+      raise (Parse_error (pos,
+        "expected `type` after `drop`"))
     | (_, T_signature) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let params, toks = parse_signature_params rest in
       Hashtbl.replace signatures name params;
