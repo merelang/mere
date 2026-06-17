@@ -139,7 +139,6 @@ ERROR: view Node must be constructed inside a region block
 
 ### まだ動かないこと
 
-- **`r.alloc(v)` method 形式** — `&R v` の syntactic sugar (Phase 3 で sugar 化予定)
 - **Trivial[R] 制約** — Drop あり型を region に置く時のエラー
 - **子 region (`region S of R { ... }`)** — 入れ子 region 間で promote
 - **`with` + Drop の統合** — Drop あり cap のライフサイクル
@@ -231,7 +230,7 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] `view V[R] of T { ... }` 宣言 (Phase 2.2、2026-06-16、Q-009 paper-validated)
 - [x] view の region 強制 (構築は region 内のみ + 構築時に R を active region に substitute、Phase 2.3、2026-06-16)
 - [x] view 値の type-level region tag + field access / record update の region 伝播 + view の escape check (Phase 2.4、2026-06-17)
-- [ ] `r.alloc(v)` メソッド呼び出し (`&R v` の sugar)
+- [x] `R.alloc(v)` syntactic sugar (`&R v` 相当、parser が region_stack を見て desugar、Phase 2.5、2026-06-17)
 - [ ] `Trivial[R]` 型制約
 
 ### Phase 3 (大型、設計再開も必要)
