@@ -22,6 +22,7 @@ type token =
   | T_signature       (* signature keyword *)
   | T_region          (* region keyword *)
   | T_view            (* view keyword (for view-type declarations) *)
+  | T_drop            (* drop keyword (Drop type marker for Trivial[R] check) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -240,6 +241,7 @@ let tokenize s =
           | "signature" -> T_signature
           | "region" -> T_region
           | "view" -> T_view
+          | "drop" -> T_drop
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when

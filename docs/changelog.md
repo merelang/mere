@@ -6,6 +6,7 @@
 
 ## 2026-06-17
 
+- **region Phase 2.6**: `Trivial[R]` 制約 — `drop type Name = ...` で Drop 型を宣言できるように。`&R v` / `R.alloc(v)` / view フィールドの構築時に inner 型を walk して、`drop_types` registry に登録された型を含めば「Trivial[R] violated」型エラー。function 型は Trivial 扱い (closure 値自体は Drop ではない)。設計 doc 12_drop_and_with.md の案 (i) を構文化。`with` 式 + Drop 実行は Phase 3 で。テスト 7 件追加 (654 passing)。
 - **region Phase 2.5**: `R.alloc(v)` syntactic sugar — `&R v` の method-call 風記法。parser が region_stack を保持し、`region NAME { ... }` の body 内では `NAME.alloc(EXPR)` を `Ref (NAME, EXPR)` に desugar。R がスコープ内 region でない場合は普通の field access として扱われるので、既存の `obj.alloc(...)` パターンは無影響。テスト 7 件追加 (647 passing)。
 - **region Phase 2.4**: view 値の type-level region tag + field access / record update の region 伝播 — view 構築で `TyCon (name, [TyRef (target_region, TyUnit)])` を返すようにして value の型に region を埋め込み、`Field_get` / `Record_update` で view 名 + 埋め込み region を読み取って `subst_region` で field 型を実 region に置換。view 値そのものも escape check の対象になる (`Cell[S]` を region S の外に持ち出せない)。pp_ty に `Name[R]` 表記の heuristic を追加。テスト 5 件追加 (640 passing)。Phase 2.3 の "field access は raw R を返す" 既知制約を解消。
 

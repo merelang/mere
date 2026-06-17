@@ -64,6 +64,8 @@ let process_decls eval_env type_env decls =
       (* Phase 2.3: register as a view (construction requires active region)
          and also as a record (for field access / record update). *)
       Typer.register_view name region fields
+    | Ast.Top_drop name ->
+      Typer.register_drop_type name
   ) decls
 
 let process s =
@@ -126,6 +128,8 @@ let type_of s =
     | Ast.Top_type_alias _ -> ()
     | Ast.Top_view (name, region, fields) ->
       Typer.register_view name region fields
+    | Ast.Top_drop name ->
+      Typer.register_drop_type name
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 

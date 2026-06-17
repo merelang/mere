@@ -1911,5 +1911,48 @@ let () =
      in
      if ok then "raised" else "did-not-raise") "raised";
 
+  (* --- Trivial[R] constraint (Phase 2.6) ---
+     `drop type Name = ...` marks Name as a Drop type. Region-tagged values
+     (&R v) and view fields must NOT have Drop types — this is the Trivial
+     constraint that enables bump-allocator semantics for regions. *)
+  check "drop type declared, used outside region: OK"
+    (Pipeline.process
+      "drop type Conn = { id: int };\n\
+       let c = Conn { id = 1 } in c.id")
+    "1";
+  check_raises "drop type cannot be placed in region via &R"
+    (fun () ->
+      Pipeline.process
+        "drop type Conn = { id: int };\n\
+         region R { let _ = &R Conn { id = 1 } in 0 }");
+  check_raises "drop type cannot be placed in region via R.alloc sugar"
+    (fun () ->
+      Pipeline.process
+        "drop type Conn = { id: int };\n\
+         region R { let _ = R.alloc(Conn { id = 1 }) in 0 }");
+  check_raises "view field with drop type rejected"
+    (fun () ->
+      Pipeline.process
+        "drop type Conn = { id: int };\n\
+         view Holder[R] { c: Conn };\n\
+         region S { Holder { c = Conn { id = 1 } } }");
+  check_raises "drop type in tuple inside region rejected"
+    (fun () ->
+      Pipeline.process
+        "drop type Conn = { id: int };\n\
+         region R { &R (1, Conn { id = 1 }) }");
+  check "non-drop type can still be placed in region"
+    (Pipeline.process
+      "type Pt = { x: int };\n\
+       region R { let p = &R Pt { x = 5 } in 99 }")
+    "99";
+  check "drop type can be wrapped in function (closures are Trivial)"
+    (* Function types skip the Drop check — a closure's value is just a
+       pointer, even if it captures Drop resources. *)
+    (Pipeline.process
+      "drop type Conn = { id: int };\n\
+       region R { let _ = &R (fn (c: Conn) -> c.id) in 100 }")
+    "100";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

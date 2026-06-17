@@ -139,7 +139,6 @@ ERROR: view Node must be constructed inside a region block
 
 ### まだ動かないこと
 
-- **Trivial[R] 制約** — Drop あり型を region に置く時のエラー
 - **子 region (`region S of R { ... }`)** — 入れ子 region 間で promote
 - **`with` + Drop の統合** — Drop あり cap のライフサイクル
 
@@ -231,7 +230,7 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] view の region 強制 (構築は region 内のみ + 構築時に R を active region に substitute、Phase 2.3、2026-06-16)
 - [x] view 値の type-level region tag + field access / record update の region 伝播 + view の escape check (Phase 2.4、2026-06-17)
 - [x] `R.alloc(v)` syntactic sugar (`&R v` 相当、parser が region_stack を見て desugar、Phase 2.5、2026-06-17)
-- [ ] `Trivial[R]` 型制約
+- [x] `Trivial[R]` 型制約 (`drop type Name = ...` で Drop 型を宣言、region 配置時に Drop 型を含むと型エラー、Phase 2.6、2026-06-17)
 
 ### Phase 3 (大型、設計再開も必要)
 - [ ] 借用注釈の細分化 `&shared write` / `&exclusive write` (Q-004 narrowed)

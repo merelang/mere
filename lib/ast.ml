@@ -87,6 +87,11 @@ type top_decl =
     (* alias name * type params * aliased type — parse-time substitution *)
   | Top_view of string * string * (string * ty) list
     (* view name * region param * fields (can reference the region via &R T) *)
+  | Top_drop of string
+    (* Marks an existing type/record name as having Drop semantics.
+       Emitted by the parser when it sees `drop type ...` or `drop type =
+       { ... }` form. The typer uses this to enforce the Trivial[R]
+       constraint on region-tagged values. *)
 
 type program = {
   decls : top_decl list;
@@ -256,4 +261,5 @@ let desugar_program (prog : program) : expr =
     | Top_record _ -> body
     | Top_type_alias _ -> body
     | Top_view _ -> body
+    | Top_drop _ -> body
   ) prog.decls prog.main
