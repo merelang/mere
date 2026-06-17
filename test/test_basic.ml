@@ -1824,5 +1824,50 @@ let () =
        region Outer { region Inner { let t = Tag { mark = &Inner 9 } in 0 } }")
     "0";
 
+  (* --- view field access: region 伝播 (Phase 2.4) ---
+     view 値の TyCon に構築時 region が埋め込まれており、field access で
+     宣言時の R を実際の region に置換して返す。 *)
+  check "view int field access (region-free field)"
+    (Pipeline.process
+      "view Cell[R] of int { v: int };\n\
+       region S { let c = Cell { v = 42 } in c.v }")
+    "42";
+  check "view field access propagates region — accepted by function expecting &S int"
+    (* If propagation works, s.item has type &S int (not raw &R int) and
+       unifies with the parameter's &S int. *)
+    (Pipeline.process
+      "view Slot[R] { item: &R int };\n\
+       region S {\n\
+         let s = Slot { item = &S 7 } in\n\
+         let take_s = fn (x: &S int) -> 99 in\n\
+         take_s s.item\n\
+       }")
+    "99";
+  check_raises "view field access: wrong-region function rejects propagated tag"
+    (* take_t expects &T int; s.item is &S int → unify fails. *)
+    (fun () ->
+      Pipeline.process
+        "view Slot[R] { item: &R int };\n\
+         region S {\n\
+           let s = Slot { item = &S 7 } in\n\
+           let take_t = fn (x: &T int) -> 99 in\n\
+           take_t s.item\n\
+         }");
+  check_raises "view value itself cannot escape its construction region"
+    (* Cell[S] mentions region S, so escape check fires. *)
+    (fun () ->
+      Pipeline.process
+        "view Cell[R] of int { v: int };\n\
+         region S { Cell { v = 1 } }");
+  check "view record update keeps region, allows further field access"
+    (Pipeline.process
+      "view Pair[R] { a: int, b: int };\n\
+       region S {\n\
+         let p = Pair { a = 1, b = 2 } in\n\
+         let q = { p | a = 10 } in\n\
+         q.a + q.b\n\
+       }")
+    "12";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
