@@ -252,7 +252,8 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] **region runtime (bump allocator)** — メモリモデルの本領発揮、2026-06-18
 - [x] `with` Drop 実行 codegen (2026-06-18、scope 末で `close` field を自動呼出)
 - [x] view 構築の region 化 (2026-06-18、view 値が region 上の bump alloc + ポインタ)
-- [ ] closure env / 文字列 / variant node の region 統合 (現状は malloc leak)
+- [x] closure env の default region 化 (2026-06-18、Phase 4.20。program-lifetime arena `__lang_default_region` を `main` で init/free、closure env alloc を bump 化)
+- [ ] 文字列 / variant node の region 統合 (現状は malloc leak)
 - [ ] LLVM IR or Wasm への移行
 
 ---
