@@ -35,6 +35,11 @@ let unsupported loc what =
   raise (Codegen_error (loc,
     Printf.sprintf "unsupported in C codegen subset: %s" what))
 
+(* Constructor name → tag index (declaration order). Populated by
+   emit_program from Top_type decls; read by emit_expr for Constr /
+   Match. *)
+let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
+
 let binop_to_c = function
   | Ast.Add -> "+"
   | Ast.Sub -> "-"
@@ -125,8 +130,64 @@ let rec emit_expr (e : Ast.expr) : string =
      | _ ->
        unsupported e.loc
          "function application requires a direct named function (no closures / curry)")
-  | Ast.Constr _      -> unsupported e.loc "data constructors"
-  | Ast.Match _       -> unsupported e.loc "match"
+  | Ast.Constr (name, arg_opt) ->
+    let info =
+      try Hashtbl.find Typer.constructors name
+      with Not_found ->
+        unsupported e.loc ("unknown constructor: " ^ name)
+    in
+    let tag = Hashtbl.find variant_tags name in
+    let type_name = info.Typer.type_name in
+    let payload_str =
+      match arg_opt with
+      | None -> ""
+      | Some arg ->
+        Printf.sprintf ", .payload.%s = %s" name (emit_expr arg)
+    in
+    Printf.sprintf "((%s){.tag = %d%s})" type_name tag payload_str
+  | Ast.Match (scrut, arms) ->
+    let scrut_c = emit_expr scrut in
+    let emit_arm (pat, guard, body) =
+      if guard <> None then
+        unsupported pat.Ast.ploc "match guard (`when ...`) in C codegen";
+      let test, bindings =
+        match pat.Ast.pnode with
+        | Ast.P_wild -> ("1", "")
+        | Ast.P_var n ->
+          ("1",
+           Printf.sprintf "__auto_type %s = __scrut; " n)
+        | Ast.P_constr (cname, sub_opt) ->
+          let tag =
+            try Hashtbl.find variant_tags cname
+            with Not_found ->
+              unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ cname)
+          in
+          let test = Printf.sprintf "__scrut.tag == %d" tag in
+          let bind =
+            match sub_opt with
+            | None -> ""
+            | Some sub ->
+              (match sub.Ast.pnode with
+               | Ast.P_wild -> ""
+               | Ast.P_var n ->
+                 Printf.sprintf "__auto_type %s = __scrut.payload.%s; " n cname
+               | _ ->
+                 unsupported sub.Ast.ploc
+                   "nested pattern in C codegen (only P_var / P_wild)")
+          in
+          (test, bind)
+        | _ ->
+          unsupported pat.Ast.ploc
+            "pattern shape not supported in C codegen yet"
+      in
+      Printf.sprintf "(%s) ? ({ %s%s; }) " test bindings (emit_expr body)
+    in
+    let arms_c = String.concat ": " (List.map emit_arm arms) in
+    (* Final fallthrough: should be unreachable after the typer's
+       exhaustiveness checker; emit an `abort()` so it's at least loud. *)
+    Printf.sprintf
+      "({ __auto_type __scrut = %s; %s: ({ abort(); 0; }); })"
+      scrut_c arms_c
   | Ast.Tuple es ->
     (* Construction via C99 compound literal. Use the typer's recorded
        type to pick the right struct name. *)
@@ -180,6 +241,11 @@ let c_type_of (t : Ast.ty) : string =
   | Ast.TyTuple ts -> tuple_struct_name ts
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     (* User-declared record type — the struct name matches the Lang name. *)
+    name
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.types name ->
+    (* User-declared variant type (or record / view registered via types).
+       For variants, the struct name matches the Lang type name; the
+       payload union is keyed by constructor name. *)
     name
   | other ->
     raise (Codegen_error (Loc.dummy,
@@ -413,7 +479,45 @@ let emit_record_typedef (name : string) : string =
   Printf.sprintf "typedef struct {\n%s\n} %s;"
     (String.concat "\n" fields) name
 
+(* Emit a tagged-union struct typedef for a Lang variant declaration.
+   Records the tag index for each constructor name in `variant_tags`. *)
+let emit_variant_typedef (name : string) (params : string list)
+    (variants : (string * Ast.ty option) list) : string =
+  if params <> [] then
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf
+        "polymorphic variant `%s` not supported in C codegen yet" name));
+  List.iteri (fun i (cname, _) ->
+    Hashtbl.replace variant_tags cname i) variants;
+  let payload_arms =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> None
+      | Some ty -> Some (Printf.sprintf "    %s %s;" (c_type_of ty) cname))
+      variants
+  in
+  let body =
+    if payload_arms = [] then "  int tag;"
+    else
+      "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
+      "\n  } payload;"
+  in
+  Printf.sprintf "typedef struct {\n%s\n} %s;" body name
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  (* Variant typedefs come from Top_type decls. Walk prog.decls (NOT the
+     desugared main, which drops type decls) and emit a tagged-union
+     struct for each declared variant type. This also populates
+     variant_tags as a side effect. *)
+  Hashtbl.reset variant_tags;
+  let variant_typedefs =
+    List.filter_map (fun decl ->
+      match decl with
+      | Ast.Top_type (name, params, variants) ->
+        Some (emit_variant_typedef name params variants)
+      | _ -> None
+    ) prog.decls
+  in
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
   let fns = resolve_fn_types skels in
@@ -456,6 +560,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "";
       str_concat_helper;
       "" ]
+    @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])

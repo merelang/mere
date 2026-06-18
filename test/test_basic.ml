@@ -2251,5 +2251,56 @@ let () =
          let b = CgBox { v = 1 } in b.v"
       in ());
 
+  (* --- C codegen: variant + match (Phase 4 seventh slice) ---
+     Variants → tagged unions, match → if-else chain via ternaries.
+     Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
+  assert_contains "codegen: nullary variant becomes tag-only struct"
+    (codegen_with_decls
+      "type CgCol = CR | CG | CB;\n\
+       let c = CG in match c with | CR -> 0 | CG -> 1 | CB -> 2")
+    "typedef struct {\n  int tag;\n} CgCol;";
+  assert_contains "codegen: variant with payload includes union"
+    (codegen_with_decls
+      "type CgStat = COk | CErr of str;\n\
+       match CErr \"x\" with | COk -> 0 | CErr m -> str_len m")
+    "  union {\n    const char* CErr;\n  } payload;";
+  assert_contains "codegen: Constr emits compound literal with tag"
+    (codegen_with_decls
+      "type CgCol2 = X | Y;\n\
+       let c = Y in match c with | X -> 0 | Y -> 1")
+    "((CgCol2){.tag = 1})";
+  assert_contains "codegen: Constr with arg emits payload"
+    (codegen_with_decls
+      "type CgStat2 = SOk | SErr of int;\n\
+       SErr 42")
+    ".payload.SErr = 42";
+  assert_contains "codegen: match emits scrut binding"
+    (codegen_with_decls
+      "type CgCol3 = A | B;\n\
+       match A with | A -> 0 | B -> 1")
+    "__auto_type __scrut =";
+  assert_contains "codegen: P_constr emits tag equality test"
+    (codegen_with_decls
+      "type CgCol4 = A | B;\n\
+       match A with | A -> 0 | B -> 1")
+    "__scrut.tag == 0";
+  assert_contains "codegen: P_constr with payload binds via __auto_type"
+    (codegen_with_decls
+      "type CgStat3 = SOk | SErr of str;\n\
+       match SErr \"hi\" with | SOk -> 0 | SErr m -> str_len m")
+    "__auto_type m = __scrut.payload.SErr";
+  check_raises "codegen: polymorphic variant rejected"
+    (fun () ->
+      let _ = codegen_with_decls
+        "type 'a CgOpt = CNone | CSome of 'a;\n\
+         CNone"
+      in ());
+  check_raises "codegen: match guard rejected"
+    (fun () ->
+      let _ = codegen_with_decls
+        "type CgCol5 = A | B;\n\
+         match A with | A when true -> 0 | _ -> 1"
+      in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
