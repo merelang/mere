@@ -76,9 +76,9 @@ let rec ty_tag (t : Ast.ty) : string =
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
 
-(* Walk a Lang type to its LLVM type. Tuples lower to named-struct
-   references (`%tuple_int_int`); these are emitted as `type` definitions
-   at the top of the module. *)
+(* Walk a Lang type to its LLVM type. Tuples / monomorphic records lower
+   to named-struct references (`%tuple_int_int`, `%Point`); these are
+   emitted as `type` definitions at the top of the module. *)
 let llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "i32"
@@ -86,7 +86,28 @@ let llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyStr -> "ptr"
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
+  | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
+
+(* Look up a record's ordered field list. Raises if name isn't in the
+   typer registry — the typer should have caught that before codegen. *)
+let record_fields (name : string) : (string * Ast.ty) list =
+  match Hashtbl.find_opt Typer.records name with
+  | Some info -> info.Typer.r_fields
+  | None ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "unknown record type `%s` at LLVM codegen" name))
+
+let field_index (record_name : string) (field_name : string) : int =
+  let fields = record_fields record_name in
+  let rec idx i = function
+    | [] ->
+      raise (Codegen_error (Loc.dummy,
+        Printf.sprintf "record `%s` has no field `%s`" record_name field_name))
+    | (n, _) :: _ when n = field_name -> i
+    | _ :: rest -> idx (i + 1) rest
+  in
+  idx 0 fields
 
 (* Encode an OCaml string to LLVM's c"..." literal body (without the
    trailing \00). Printable ASCII goes through; everything else is \HH. *)
@@ -302,6 +323,63 @@ let emit_tuple_typedef (elems : Ast.ty list) : string =
   let fields = String.concat ", " (List.map llvm_ty_of elems) in
   Printf.sprintf "%%%s = type { %s }" name fields
 
+(* Walk a typed AST + fn signatures to collect every monomorphic record
+   type name encountered. *)
+let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
+  let seen = Hashtbl.create 8 in
+  let add name =
+    if Hashtbl.mem Typer.records name &&
+       not (Hashtbl.mem seen name) then
+      let info = Hashtbl.find Typer.records name in
+      if info.Typer.r_params = [] then
+        Hashtbl.add seen name ()
+  in
+  let rec walk_ty (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyCon (n, args) -> add n; List.iter walk_ty args
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    (match e.Ast.node with
+     | Ast.Record_lit (n, _) -> add n
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
+  Hashtbl.fold (fun k () acc -> k :: acc) seen []
+
+let emit_record_typedef (name : string) : string =
+  let fields = record_fields name in
+  let field_tys = String.concat ", " (List.map (fun (_, t) -> llvm_ty_of t) fields) in
+  Printf.sprintf "%%%s = type { %s }" name field_tys
+
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
@@ -473,11 +551,84 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         build r (idx + 1) rest
     in
     build "undef" 0 (List.combine elems elem_tys)
+  | Ast.Record_lit (name, fields) ->
+    if Hashtbl.mem Typer.views name then
+      unsupported e.Ast.loc "view literal — Phase 5 later slice"
+    else begin
+      let info =
+        match Hashtbl.find_opt Typer.records name with
+        | Some i -> i
+        | None ->
+          unsupported e.Ast.loc ("unknown record type: " ^ name)
+      in
+      if info.Typer.r_params <> [] then
+        unsupported e.Ast.loc "polymorphic record — Phase 5 later slice";
+      (* Build struct by inserting each field in declaration order. The
+         source may list fields in any order — re-order to match the
+         record's declared field list. *)
+      let rec build prev = function
+        | [] -> prev
+        | (fname, fty) :: rest ->
+          let ex =
+            match List.assoc_opt fname fields with
+            | Some e -> e
+            | None ->
+              unsupported e.Ast.loc
+                (Printf.sprintf "missing field `%s` in record literal" fname)
+          in
+          let ev = emit_expr env ex in
+          let r = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                        r name prev (llvm_ty_of fty) ev (field_index name fname));
+          build r rest
+      in
+      build "undef" info.Typer.r_fields
+    end
+  | Ast.Field_get (inner, fname) ->
+    let iv = emit_expr env inner in
+    let rname =
+      match inner.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
+         | _ -> unsupported e.Ast.loc "field access on non-record")
+      | None -> unsupported e.Ast.loc "field access: missing inner type"
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                  r rname iv (field_index rname fname));
+    r
+  | Ast.Record_update (base, updates) ->
+    let bv = emit_expr env base in
+    let rname =
+      match base.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
+         | _ -> unsupported e.Ast.loc "record update on non-record")
+      | None -> unsupported e.Ast.loc "record update: missing base type"
+    in
+    let fields = record_fields rname in
+    let rec apply prev = function
+      | [] -> prev
+      | (fname, ex) :: rest ->
+        let fty =
+          try List.assoc fname fields
+          with Not_found ->
+            unsupported e.Ast.loc
+              (Printf.sprintf "record `%s` has no field `%s`" rname fname)
+        in
+        let ev = emit_expr env ex in
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                      r rname prev (llvm_ty_of fty) ev (field_index rname fname));
+        apply r rest
+    in
+    apply bv updates
   | Ast.Float_lit _ | Ast.Unit_lit
   | Ast.Let_rec _ | Ast.With _ | Ast.Fun _
   | Ast.Constr _ | Ast.Match _
-  | Ast.Region_block _ | Ast.Ref _
-  | Ast.Record_lit _ | Ast.Field_get _ | Ast.Record_update _ ->
+  | Ast.Region_block _ | Ast.Ref _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
 
 (* Emit a top-level fn definition. Each fn gets fresh register/label
@@ -549,6 +700,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let fns = resolve_fn_types skels main_expr in
   let tuple_shapes = collect_tuple_shapes main_expr fns in
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
+  let record_names = collect_record_names main_expr fns in
+  let record_typedefs = List.map emit_record_typedef record_names in
   let fn_defs = List.map emit_fn_def fns in
   (* Reset counters for the main body. *)
   reg_counter := 0;
@@ -592,6 +745,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     [ "; LLVM IR generated by lang-ml (Phase 5)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
       "" ]
+    @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
     @ format_globals
