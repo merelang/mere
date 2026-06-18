@@ -146,7 +146,7 @@ ERROR: view Node must be constructed inside a region block
 
 `lang-ml` は OCaml で書いた**ツリーウォーキング interpreter**で、実際のメモリ管理は OCaml の GC が担っている。region の本来の威力 (bump allocator、一括解放、cache 局所性) は**ネイティブ codegen** が乗ったときに出る。
 
-Phase 1 は「型システム上の領域ラベル」を確立する段階で、Phase 2 で escape check 等の静的検証を、将来の codegen フェーズで実際のメモリレイアウトを実装する。
+Phase 1 は「型システム上の領域ラベル」を確立する段階で、Phase 2 で escape check 等の静的検証を、Phase 4 の codegen で実際のメモリレイアウトを実装する。Phase 4 の進捗は [codegen.md](codegen.md) を参照。
 
 ---
 
@@ -239,9 +239,18 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [ ] `with` + Drop ordering の統合実装 (Q-011 resolved の機械化)
 
 ### Phase 4 (codegen)
-- [ ] ネイティブ codegen (LLVM or Wasm)
-- [ ] 実際の bump allocator 実装
-- [ ] cache 局所性最適化
+
+進行中 — [codegen.md](codegen.md) 参照。
+
+- [x] C codegen MVP (int + 算術 + if + let、2026-06-17)
+- [x] 関数 lifting + 再帰 (factorial / fibonacci 動作、2026-06-17)
+- [x] 文字列 + print + concat (hello world、2026-06-18)
+- [x] str を取る / 返す関数 (2026-06-18)
+- [x] tuple + AST 型注釈基盤 (2026-06-18)
+- [ ] record / variant / pattern match
+- [ ] closure conversion
+- [ ] region runtime (bump allocator) — **メモリモデルの本領発揮はここ**
+- [ ] LLVM IR or Wasm への移行
 
 ---
 
