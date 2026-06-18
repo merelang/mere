@@ -128,6 +128,52 @@ let mono_record_name (name : string) (args : Ast.ty list) : string =
   | [] -> name
   | _ -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
 
+(* Names of variants whose value representation is a pointer to a heap
+   node (because the variant's payload self-references). Mono and poly
+   instantiations are tracked separately by their LLVM-side struct name. *)
+let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
+
+let is_recursive_variant_name (name : string) : bool =
+  Hashtbl.mem recursive_variants name
+
+(* Direct self-reference in a variant's payload (the type's own name). *)
+let variant_is_recursive
+    (name : string) (variants : (string * Ast.ty option) list) : bool =
+  let rec mentions t =
+    match Ast.walk t with
+    | Ast.TyCon (n, _) when n = name -> true
+    | Ast.TyCon (_, args) -> List.exists mentions args
+    | Ast.TyTuple ts -> List.exists mentions ts
+    | Ast.TyArrow (a, b) -> mentions a || mentions b
+    | Ast.TyRef (_, inner) -> mentions inner
+    | _ -> false
+  in
+  List.exists (fun (_, arg_opt) ->
+    match arg_opt with Some t -> mentions t | None -> false) variants
+
+(* Whether a mono instance (name, args) is recursive — does any
+   substituted payload mention the SAME (name, args)? *)
+let mono_variant_is_recursive
+    (vname : string) (args : Ast.ty list)
+    (svariants : (string * Ast.ty option) list) : bool =
+  let same_inst t =
+    match Ast.walk t with
+    | Ast.TyCon (n, ts) when n = vname && List.length ts = List.length args ->
+      List.for_all2 (fun a b -> ty_tag (Ast.walk a) = ty_tag (Ast.walk b)) ts args
+    | _ -> false
+  in
+  let rec ty_mentions t =
+    same_inst t
+    || (match Ast.walk t with
+        | Ast.TyTuple ts -> List.exists ty_mentions ts
+        | Ast.TyArrow (a, b) -> ty_mentions a || ty_mentions b
+        | Ast.TyCon (_, targs) -> List.exists ty_mentions targs
+        | Ast.TyRef (_, inner) -> ty_mentions inner
+        | _ -> false)
+  in
+  List.exists (fun (_, arg_opt) ->
+    match arg_opt with Some t -> ty_mentions t | None -> false) svariants
+
 (* Walk a Lang type to its LLVM type. Tuples / monomorphic records /
    variants lower to named-struct references (`%tuple_int_int`,
    `%Point`, `%Status`); these are emitted as `type` definitions at the
@@ -143,8 +189,10 @@ let llvm_ty_of (t : Ast.ty) : string =
     "%" ^ mono_record_name name (List.map Ast.walk args)
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_variants name ->
-    "%" ^ mono_variant_name name (List.map Ast.walk args)
-  | Ast.TyCon (name, []) when Hashtbl.mem Typer.types name -> "%" ^ name
+    let mono = mono_variant_name name (List.map Ast.walk args) in
+    if is_recursive_variant_name mono then "ptr" else "%" ^ mono
+  | Ast.TyCon (name, []) when Hashtbl.mem Typer.types name ->
+    if is_recursive_variant_name name then "ptr" else "%" ^ name
   | Ast.TyArrow (p, r) -> "%" ^ closure_struct_name p r
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
 
@@ -239,6 +287,37 @@ let current_var_types : (string * Ast.ty) list ref = ref []
    anonymous Funs in tail position can recover their concrete arrow
    type even when their .ty was generalized to polymorphic. *)
 let current_expected_ty : Ast.ty option ref = ref None
+
+(* For a pattern matched against a scrutinee of type `scrut_ty` and
+   payload of type `payload_ty` (if any), produce the (name, concrete-ty)
+   bindings introduced by the pattern. Used to update current_var_types
+   so arm bodies can recover concrete types for pattern-bound names
+   (otherwise the typer's AST .ty may carry polymorphic ty-vars). *)
+let pattern_var_types
+    (pat : Ast.pattern) (scrut_ty : Ast.ty) (payload_ty : Ast.ty option)
+    : (string * Ast.ty) list =
+  match pat.Ast.pnode with
+  | Ast.P_var n -> [(n, scrut_ty)]
+  | Ast.P_wild -> []
+  | Ast.P_constr (_, None) -> []
+  | Ast.P_constr (_, Some sub) ->
+    (match sub.Ast.pnode, payload_ty with
+     | Ast.P_var n, Some t -> [(n, t)]
+     | Ast.P_wild, _ -> []
+     | Ast.P_tuple pats, Some t ->
+       let elem_tys =
+         match Ast.walk t with
+         | Ast.TyTuple ts -> ts
+         | _ -> []
+       in
+       List.map2 (fun p ety ->
+         match p.Ast.pnode with
+         | Ast.P_var n -> [(n, ety)]
+         | _ -> [])
+         pats elem_tys
+       |> List.concat
+     | _ -> [])
+  | _ -> []
 
 (* Names of a pattern's bound variables (used by free_vars). *)
 let pattern_vars (p : Ast.pattern) : string list =
@@ -622,9 +701,21 @@ let emit_variant_typedef (name : string) : string =
   let vs = variant_shape name in
   List.iteri (fun i (cname, _) ->
     Hashtbl.replace variant_tags cname i) vs;
-  match variant_payload_ty name with
-  | None -> Printf.sprintf "%%%s = type { i32 }" name
-  | Some t -> Printf.sprintf "%%%s = type { i32, %s }" name (llvm_ty_of t)
+  if is_recursive_variant_name name then begin
+    (* Recursive: emit `%name_node = type { i32, T }` — the on-heap
+       node. The "value" of the variant at this point is `ptr` (handled
+       by llvm_ty_of). *)
+    let payload =
+      match variant_payload_ty name with
+      | None -> ""
+      | Some t -> Printf.sprintf ", %s" (llvm_ty_of t)
+    in
+    Printf.sprintf "%%%s_node = type { i32%s }" name payload
+  end
+  else
+    match variant_payload_ty name with
+    | None -> Printf.sprintf "%%%s = type { i32 }" name
+    | Some t -> Printf.sprintf "%%%s = type { i32, %s }" name (llvm_ty_of t)
 
 (* Variant payload type for an already-substituted variant list (used by
    mono-instance codegen, where we've already applied param→arg subst). *)
@@ -647,9 +738,18 @@ let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : str
   let mono_name = mono_variant_name variant_name args in
   let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
   let svariants = subst_variants params args variants in
-  match variant_payload_ty_of svariants with
-  | None -> Printf.sprintf "%%%s = type { i32 }" mono_name
-  | Some t -> Printf.sprintf "%%%s = type { i32, %s }" mono_name (llvm_ty_of t)
+  if is_recursive_variant_name mono_name then begin
+    let payload =
+      match variant_payload_ty_of svariants with
+      | None -> ""
+      | Some t -> Printf.sprintf ", %s" (llvm_ty_of t)
+    in
+    Printf.sprintf "%%%s_node = type { i32%s }" mono_name payload
+  end
+  else
+    match variant_payload_ty_of svariants with
+    | None -> Printf.sprintf "%%%s = type { i32 }" mono_name
+    | Some t -> Printf.sprintf "%%%s = type { i32, %s }" mono_name (llvm_ty_of t)
 
 (* Specialized typedef for a polymorphic record instance. *)
 let emit_mono_record_typedef (record_name : string) (args : Ast.ty list) : string =
@@ -939,16 +1039,28 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     let av = emit_expr env arg in
-    (* Look up the call site's return type; default to i32. *)
     let ret_ty =
       match e.Ast.ty with
       | Some t -> llvm_ty_of t
       | None -> "i32"
     in
     let arg_ty =
-      match arg.Ast.ty with
-      | Some t -> llvm_ty_of t
-      | None -> "i32"
+      (* Prefer current_var_types for Var args (in case the AST .ty is
+         still polymorphic from let-rec generalization). *)
+      let from_var_types =
+        match arg.Ast.node with
+        | Ast.Var n ->
+          (match List.assoc_opt n !current_var_types with
+           | Some t when ty_is_concrete t -> Some (llvm_ty_of (Ast.walk t))
+           | _ -> None)
+        | _ -> None
+      in
+      match from_var_types with
+      | Some s -> s
+      | None ->
+        (match arg.Ast.ty with
+         | Some t -> llvm_ty_of t
+         | None -> "i32")
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty name arg_ty av);
@@ -1162,8 +1274,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Some t -> t
       | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
     in
-    (* For polymorphic variants, pick the mono instance from the
-       Constr's inferred result type. *)
     let struct_name, payload_ty =
       if Hashtbl.mem polymorphic_variants type_name then begin
         let args =
@@ -1182,27 +1292,75 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       end else
         (type_name, variant_payload_ty type_name)
     in
-    let r0 = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, i32 %d, 0"
-                  r0 struct_name tag);
-    (match arg_opt, payload_ty with
-     | None, _ -> r0
-     | Some arg, Some pty ->
-       let av = emit_expr env arg in
-       let r1 = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, 1"
-                     r1 struct_name r0 (llvm_ty_of pty) av);
-       r1
-     | Some _, None ->
-       unsupported e.Ast.loc
-         (Printf.sprintf
-            "constructor `%s` has payload but variant lowered as nullary-only"
-            cname))
+    if is_recursive_variant_name struct_name then begin
+      (* Recursive variant: allocate a node in the default region, write
+         tag (+ optional payload) via getelementptr + store, return ptr. *)
+      let node_ty = "%" ^ struct_name ^ "_node" in
+      let size_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
+                    size_p node_ty);
+      let size = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
+      let p = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                    p size);
+      let tag_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
+                    tag_p node_ty p);
+      emit_instr (Printf.sprintf "  store i32 %d, ptr %s" tag tag_p);
+      (match arg_opt, payload_ty with
+       | None, _ -> ()
+       | Some arg, Some pty ->
+         let av = emit_expr env arg in
+         let pl_p = fresh_reg () in
+         emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
+                       pl_p node_ty p);
+         emit_instr (Printf.sprintf "  store %s %s, ptr %s"
+                       (llvm_ty_of pty) av pl_p)
+       | Some _, None ->
+         unsupported e.Ast.loc
+           (Printf.sprintf
+              "constructor `%s` has payload but variant lowered as nullary-only"
+              cname));
+      p
+    end
+    else begin
+      let r0 = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, i32 %d, 0"
+                    r0 struct_name tag);
+      match arg_opt, payload_ty with
+      | None, _ -> r0
+      | Some arg, Some pty ->
+        let av = emit_expr env arg in
+        let r1 = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, 1"
+                      r1 struct_name r0 (llvm_ty_of pty) av);
+        r1
+      | Some _, None ->
+        unsupported e.Ast.loc
+          (Printf.sprintf
+             "constructor `%s` has payload but variant lowered as nullary-only"
+             cname)
+    end
   | Ast.Match (scrut, arms) ->
     let scrut_ty =
-      match scrut.Ast.ty with
-      | Some t -> Ast.walk t
-      | None -> unsupported e.Ast.loc "match: missing scrutinee type"
+      (* Prefer current_var_types when scrut is a Var: the AST's .ty
+         may still be polymorphic from let-poly generalization. *)
+      let from_var_types =
+        match scrut.Ast.node with
+        | Ast.Var n ->
+          (match List.assoc_opt n !current_var_types with
+           | Some t when ty_is_concrete t -> Some (Ast.walk t)
+           | _ -> None)
+        | _ -> None
+      in
+      match from_var_types with
+      | Some t -> t
+      | None ->
+        (match scrut.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported e.Ast.loc "match: missing scrutinee type")
     in
     let source_name, type_name, payload_ty =
       match scrut_ty with
@@ -1219,9 +1377,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     let _ = source_name in
     let scrut_v = emit_expr env scrut in
+    let recursive = is_recursive_variant_name type_name in
+    let node_ty = "%" ^ type_name ^ "_node" in
     let tag_reg = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0"
-                  tag_reg type_name scrut_v);
+    if recursive then begin
+      let p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
+                    p node_ty scrut_v);
+      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag_reg p)
+    end else
+      emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0"
+                    tag_reg type_name scrut_v);
     let result_ty =
       match e.Ast.ty with
       | Some t -> llvm_ty_of t
@@ -1235,12 +1401,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let compile_pat pat v_tag v_payload_opt
       : string (* cond reg (i1) *) * (string * string) list (* (name, value) bindings *) =
       match pat.Ast.pnode with
-      | Ast.P_wild -> ("1", [])  (* always true *)
-      | Ast.P_var n ->
-        (* Bind to whole scrutinee — but in Phase 5 MVP we don't really
-           need to construct the whole struct value here; the caller's
-           env binding can point at the original scrut_v. *)
-        ("1", [(n, scrut_v)])
+      | Ast.P_wild -> ("1", [])
+      | Ast.P_var n -> ("1", [(n, scrut_v)])
       | Ast.P_constr (cname, sub) ->
         let tag =
           match Hashtbl.find_opt variant_tags cname with
@@ -1256,6 +1418,32 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
             (match sub_pat.Ast.pnode with
              | Ast.P_wild -> []
              | Ast.P_var n -> [(n, pv)]
+             | Ast.P_tuple pats ->
+               (* Tuple sub-pattern: payload is a tuple struct, extract
+                  each element by index. Only P_var / P_wild leaves. *)
+               let tname =
+                 match payload_ty with
+                 | Some t ->
+                   (match Ast.walk t with
+                    | Ast.TyTuple ts -> tuple_struct_name ts
+                    | _ -> unsupported sub_pat.Ast.ploc
+                             "ctor tuple sub-pattern needs tuple payload")
+                 | None -> unsupported sub_pat.Ast.ploc
+                             "ctor sub-pattern with no payload type"
+               in
+               List.mapi (fun i sub_p ->
+                 match sub_p.Ast.pnode with
+                 | Ast.P_var n ->
+                   let r = fresh_reg () in
+                   emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                                 r tname pv i);
+                   (n, r)
+                 | Ast.P_wild -> ("_", "0")
+                 | _ ->
+                   unsupported sub_p.Ast.ploc
+                     "nested tuple sub-pattern — Phase 5 later slice")
+                 pats
+               |> List.filter (fun (n, _) -> n <> "_")
              | _ ->
                unsupported sub_pat.Ast.ploc
                  "nested ctor sub-pattern — Phase 5 later slice")
@@ -1281,9 +1469,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           | None -> None
           | Some pty ->
             let r = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
-                          r type_name scrut_v);
-            ignore pty; Some r
+            if recursive then begin
+              let p = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
+                            p node_ty scrut_v);
+              emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                            r (llvm_ty_of pty) p)
+            end else
+              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
+                            r type_name scrut_v);
+            Some r
         in
         let (cond, bindings) = compile_pat pat tag_reg payload_reg in
         let arm_label = fresh_label "arm_" in
@@ -1292,7 +1487,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                       cond arm_label next_label);
         emit_label arm_label;
         let env' = bindings @ env in
+        (* Update current_var_types so the arm body can recover concrete
+           types for pattern-bound names (used for nested poly Match
+           and recursive App calls). For simple cases we use Ast.TyInt as
+           a placeholder — for tuple sub-patterns we annotate properly. *)
+        let saved_vt = !current_var_types in
+        let pat_var_tys = pattern_var_types pat scrut_ty payload_ty in
+        current_var_types := pat_var_tys @ saved_vt;
         let v = emit_expr env' body in
+        current_var_types := saved_vt;
         let end_label = fresh_label "arm_end_" in
         emit_instr (Printf.sprintf "  br label %%%s" end_label);
         emit_label end_label;
@@ -1580,12 +1783,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset polymorphic_records;
   Hashtbl.reset mono_variant_instances;
   Hashtbl.reset mono_record_instances;
+  Hashtbl.reset recursive_variants;
   (* Register variant tags + classify into mono / poly. Polymorphic
      variants and records are deferred to mono-instance emission. *)
   Hashtbl.iter (fun name vs ->
     List.iteri (fun i (cname, _) ->
       Hashtbl.replace variant_tags cname i) vs;
-    (* Determine params from any constructor's params (all share). *)
     let params =
       match vs with
       | (cname, _) :: _ ->
@@ -1594,7 +1797,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          | None -> [])
       | [] -> []
     in
-    if params <> [] then Hashtbl.replace polymorphic_variants name (params, vs)
+    if params <> [] then Hashtbl.replace polymorphic_variants name (params, vs);
+    (* Mark source-level recursive variants. Mono instances of poly
+       recursive variants will be marked below at instance-collection time. *)
+    if variant_is_recursive name vs then
+      Hashtbl.replace recursive_variants name ()
   ) Exhaustive.type_variants;
   Hashtbl.iter (fun name info ->
     if info.Typer.r_params <> [] then
@@ -1605,13 +1812,23 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
+  (* Discover mono variant / record instances + mark recursive ones
+     BEFORE any typedef emission, so llvm_ty_of returns `ptr` for
+     recursive variant types when called from tuple / record / closure
+     typedef emitters. *)
+  collect_mono_instances main_expr fns;
+  Hashtbl.iter (fun _ (vn, args) ->
+    let (params, variants) = Hashtbl.find polymorphic_variants vn in
+    let sv = subst_variants params args variants in
+    if mono_variant_is_recursive vn args sv then
+      Hashtbl.replace recursive_variants (mono_variant_name vn args) ()
+  ) mono_variant_instances;
   let tuple_shapes = collect_tuple_shapes main_expr fns in
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in
   let variant_names = collect_variant_names main_expr fns in
   let variant_typedefs = List.map emit_variant_typedef variant_names in
-  collect_mono_instances main_expr fns;
   let mono_variant_typedefs =
     Hashtbl.fold (fun _ (vn, args) acc ->
       emit_mono_variant_typedef vn args :: acc) mono_variant_instances []

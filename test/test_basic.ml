@@ -2991,5 +2991,42 @@ let () =
        str_len bs.v + bi.v")
     "%LCgBox4_str = type { ptr }";
 
+  (* --- LLVM IR codegen: 再帰 variant (Phase 5.10) ---
+     Recursive variants (e.g. `'a list`, self-referential `ilist`) lower
+     to heap-allocated nodes via region alloc; values are `ptr` to the
+     node, accessed via getelementptr + load. P_tuple sub-pattern in Cons
+     unpacks the payload tuple via extractvalue. *)
+  assert_contains "llvm: recursive variant emits _node typedef"
+    (llvm_with_decls
+      "type LCgIList = LCgINil | LCgICons of int * LCgIList;\n\
+       LCgICons (1, LCgINil)")
+    "%LCgIList_node = type { i32, %tuple_int_LCgIList }";
+  assert_contains "llvm: recursive Constr allocs via region"
+    (llvm_with_decls
+      "type LCgIList2 = LCgINil2 | LCgICons2 of int * LCgIList2;\n\
+       LCgICons2 (1, LCgINil2)")
+    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64";
+  assert_contains "llvm: recursive Match loads tag via GEP"
+    (llvm_with_decls
+      "type LCgIList3 = LCgINil3 | LCgICons3 of int * LCgIList3;\n\
+       match LCgINil3 with | LCgINil3 -> 0 | LCgICons3 (h, _) -> h")
+    "getelementptr %LCgIList3_node, ptr ";
+  assert_contains "llvm: poly recursive list emits mono _node typedef"
+    (llvm_with_decls
+      "type 'a LCgList = LCgNil | LCgCons of 'a * 'a LCgList;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | LCgNil -> 0\n\
+         | LCgCons (h, t) -> h + sum t\n\
+       in sum (LCgCons (1, LCgCons (2, LCgNil)))")
+    "%LCgList_int_node = type { i32, %tuple_int_LCgList_int }";
+  assert_contains "llvm: P_tuple sub-pattern extracts via extractvalue"
+    (llvm_with_decls
+      "type LCgIList4 = LCgINil4 | LCgICons4 of int * LCgIList4;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | LCgINil4 -> 0\n\
+         | LCgICons4 (h, t) -> h + sum t\n\
+       in sum (LCgICons4 (1, LCgINil4))")
+    "extractvalue %tuple_int_LCgIList4";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
