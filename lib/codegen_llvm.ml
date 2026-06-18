@@ -63,6 +63,137 @@ let llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyBool -> "i1"
   | _ -> "i32"  (* best-effort fallback; typer should reject str/etc. before this *)
 
+let rec ty_is_concrete (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
+  | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
+  | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
+  | Ast.TyRef (_, inner) -> ty_is_concrete inner
+  | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+
+(* Top-level fn binding extracted from main: `let name = fn param -> body in ...`.
+   We keep the original Fun expr so we can read its typer-set `.ty`. *)
+type fn_skel = {
+  sname : string;
+  sparam : string;
+  sbody : Ast.expr;
+  sfun : Ast.expr;
+}
+
+(* Fully type-resolved fn declaration. *)
+type fn_decl = {
+  name      : string;
+  param     : string;
+  body      : Ast.expr;
+  param_ty  : Ast.ty;
+  return_ty : Ast.ty;
+}
+
+(* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
+let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+(* Walk the desugared main expression, peeling top-level fn-binding lets
+   (P_var of Fun) and let-recs whose bindings are all single-arg fns.
+   Returns the skels and the residual main body. *)
+let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
+  let rec go (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Let (pat, value, rest)
+      when (match pat.Ast.pnode with Ast.P_var _ -> true | _ -> false) ->
+      (match value.Ast.node with
+       | Ast.Fun (param, _, fn_body) ->
+         let name = match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false in
+         let more, rest' = go rest in
+         { sname = name; sparam = param; sbody = fn_body; sfun = value }
+         :: more, rest'
+       | _ -> [], e)
+    | Ast.Let_rec (bindings, rest) ->
+      let skels =
+        List.map (fun (n, v) ->
+          match v.Ast.node with
+          | Ast.Fun (p, _, fb) ->
+            { sname = n; sparam = p; sbody = fb; sfun = v }
+          | _ ->
+            raise (Codegen_error (v.Ast.loc,
+              "let rec binding must be a single-arg function in LLVM subset")))
+          bindings
+      in
+      let more, rest' = go rest in
+      skels @ more, rest'
+    | _ -> [], e
+  in
+  go e
+
+(* Scan `root` for a Var of `name` whose ty walked to a concrete arrow.
+   Used when the binding-site Fun.ty was generalized (let-poly) and we
+   need a monomorphic instantiation. *)
+let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
+  let found = ref None in
+  let rec go (e : Ast.expr) =
+    (if !found = None then
+       match e.Ast.node with
+       | Ast.Var n when n = name ->
+         (match e.Ast.ty with
+          | Some t ->
+            let t = Ast.walk t in
+            (match t with
+             | Ast.TyArrow _ when ty_is_concrete t -> found := Some t
+             | _ -> ())
+          | _ -> ())
+       | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go root;
+  !found
+
+let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
+  List.map (fun s ->
+    let arrow =
+      let fun_ty =
+        match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+      in
+      if ty_is_concrete fun_ty then fun_ty
+      else
+        match find_concrete_arrow s.sname root with
+        | Some t -> t
+        | None ->
+          raise (Codegen_error (s.sfun.Ast.loc,
+            Printf.sprintf
+              "fn `%s` has polymorphic type with no concrete use site \
+               — LLVM codegen needs a monomorphic instantiation" s.sname))
+    in
+    match arrow with
+    | Ast.TyArrow (p, r) ->
+      { name = s.sname; param = s.sparam; body = s.sbody;
+        param_ty = Ast.walk p; return_ty = Ast.walk r }
+    | _ ->
+      raise (Codegen_error (s.sfun.Ast.loc,
+        Printf.sprintf "function `%s` has non-arrow inferred type" s.sname))
+  ) skels
+
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
@@ -143,12 +274,49 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_expr ((name, rv) :: env) body
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 5 later slice")
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem toplevel_fn_names name ->
+    let av = emit_expr env arg in
+    (* Look up the call site's return type; default to i32. *)
+    let ret_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty name arg_ty av);
+    r
+  | Ast.App _ ->
+    unsupported e.Ast.loc "indirect / first-class fn call — Phase 5 later slice"
   | Ast.Str_lit _ | Ast.Float_lit _ | Ast.Unit_lit
-  | Ast.Let_rec _ | Ast.With _ | Ast.Fun _ | Ast.App _
+  | Ast.Let_rec _ | Ast.With _ | Ast.Fun _
   | Ast.Constr _ | Ast.Match _ | Ast.Tuple _
   | Ast.Region_block _ | Ast.Ref _
   | Ast.Record_lit _ | Ast.Field_get _ | Ast.Record_update _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
+
+(* Emit a top-level fn definition. Each fn gets fresh register/label
+   counters so the SSA names don't collide across functions. *)
+let emit_fn_def (f : fn_decl) : string =
+  reg_counter := 0;
+  label_counter := 0;
+  let saved = !instrs in
+  instrs := [];
+  emit_instr "entry:";
+  (* Bind the param under its source name; in LLVM the param has its
+     own SSA name "%<param>" supplied by the function header. *)
+  let env = [(f.param, "%" ^ f.param)] in
+  let rv = emit_expr env f.body in
+  emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved;
+  Printf.sprintf "define %s @%s(%s %%%s) {\n%s\n}"
+    (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
 
 (* Convert the program's main result type to (LLVM type, printf format).
    `unit` skips printing entirely. *)
@@ -163,7 +331,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reg_counter := 0;
   label_counter := 0;
   instrs := [];
-  let body_expr = Ast.desugar_program prog in
+  Hashtbl.reset toplevel_fn_names;
+  let main_expr = Ast.desugar_program prog in
+  (* Lift top-level fn bindings; the remainder is the actual main body. *)
+  let skels, body_expr = lift_fn_skels main_expr in
+  List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  let fns = resolve_fn_types skels main_expr in
+  let fn_defs = List.map emit_fn_def fns in
+  (* Reset counters for the main body. *)
+  reg_counter := 0;
+  label_counter := 0;
+  instrs := [];
   emit_instr "entry:";
   let r = emit_expr [] body_expr in
   (* Optional printf of main result. *)
@@ -197,14 +375,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [ "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"" ]
   in
   let parts =
-    [ "; LLVM IR generated by lang-ml (Phase 5.1 MVP)";
+    [ "; LLVM IR generated by lang-ml (Phase 5)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
       "" ]
     @ format_globals
     @ [ "";
         "declare i32 @printf(ptr, ...)";
-        "";
-        "define i32 @main() {";
+        "" ]
+    @ (if fn_defs = [] then [] else fn_defs @ [""])
+    @ [ "define i32 @main() {";
         body;
         "}";
         "" ]

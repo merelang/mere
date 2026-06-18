@@ -2688,5 +2688,29 @@ let () =
   assert_contains "llvm: ret 0 at main end"
     (llvm "1") "ret i32 0";
 
+  (* --- LLVM IR codegen: 関数 lifting + recursion (Phase 5.2) --- *)
+  assert_contains "llvm: top-level fn lifted to @name"
+    (llvm "let inc = fn x -> x + 1 in inc 5")
+    "define i32 @inc(i32 %x)";
+  assert_contains "llvm: direct call site uses call instr"
+    (llvm "let inc = fn x -> x + 1 in inc 5")
+    "call i32 @inc(i32 5)";
+  assert_contains "llvm: self-recursion compiles"
+    (llvm "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1) in fact 5")
+    "call i32 @fact";
+  assert_contains "llvm: mutual recursion emits both definitions"
+    (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
+           and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
+           in is_even 4")
+    "define i1 @is_even(i32 %n)";
+  assert_contains "llvm: mutual recursion second fn"
+    (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
+           and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
+           in is_even 4")
+    "define i1 @is_odd(i32 %n)";
+  assert_contains "llvm: param accessed via %name"
+    (llvm "let inc = fn x -> x + 1 in inc 5")
+    "add i32 %x, 1";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
