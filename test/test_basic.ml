@@ -3063,5 +3063,39 @@ let () =
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
     "guard_pass_";
 
+  (* --- LLVM IR codegen: show 汎用 builtin (Phase 5.12) ---
+     `show : 'a -> str` を呼出ごとに引数型から `show_T` を specialize、
+     int/bool/str/unit/tuple/record/variant (mono + poly + recursive) 対応。
+     `@asprintf` ベースで型ごとに dedicated 関数を生成、collect_show_types
+     で必要な型を発見、`App (Var "show", arg)` を `call ptr @show_<tag>` に
+     dispatch。 *)
+  assert_contains "llvm: asprintf declared"
+    (llvm "print (show 42)") "declare i32 @asprintf(ptr, ptr, ...)";
+  assert_contains "llvm: show_int defined"
+    (llvm "show 42") "define ptr @show_int(i32 %x)";
+  assert_contains "llvm: show int call site"
+    (llvm "show 42") "call ptr @show_int(i32 42)";
+  assert_contains "llvm: show str specialization"
+    (llvm "show \"hi\"") "define ptr @show_str(ptr %x)";
+  assert_contains "llvm: show bool specialization"
+    (llvm "show true") "define ptr @show_bool(i1 %x)";
+  assert_contains "llvm: show tuple composes elements"
+    (llvm "show (1, \"hi\")") "define ptr @show_tuple_int_str";
+  assert_contains "llvm: show variant uses tag dispatch"
+    (llvm_with_decls
+      "type LCgCol8 = LCg8A | LCg8B;\n\
+       show LCg8A")
+    "define ptr @show_LCgCol8";
+  assert_contains "llvm: show poly variant uses mono name"
+    (llvm_with_decls
+      "type 'a LCgOpt7 = LCgN7 | LCgS7 of 'a;\n\
+       show (LCgS7 1)")
+    "define ptr @show_LCgOpt7_int";
+  assert_contains "llvm: show record"
+    (llvm_with_decls
+      "type LCgPt6 = { x: int, y: int };\n\
+       show (LCgPt6 { x = 1, y = 2 })")
+    "define ptr @show_LCgPt6";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
