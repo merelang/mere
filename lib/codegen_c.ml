@@ -226,19 +226,31 @@ let mono_record_name (name : string) (args : Ast.ty list) : string =
   | [] -> name
   | _ -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
 
-(* Whether the value at type `v_ty` is represented as a pointer (for
-   recursive variants, mono or polymorphic). Used by pattern compiler
-   to choose `->` vs `.` accessors. *)
-let is_ptr_ty (v_ty : Ast.ty) : bool =
+(* Views (declared via `view V[R] of T { ... }`) are represented as
+   pointers into a region — the `[R]` marker on the value's type
+   carries the region name (encoded as `TyRef (R, TyUnit)` since
+   Phase 2.4). The codegen treats view types as `V*` so values live in
+   the bump-allocator buffer and follow its lifetime. *)
+let is_view_type (v_ty : Ast.ty) : bool =
   match Ast.walk v_ty with
-  | Ast.TyCon (n, args) ->
-    let mono_n =
-      if Hashtbl.mem polymorphic_variants n then
-        mono_variant_name n (List.map Ast.walk args)
-      else n
-    in
-    is_recursive_variant mono_n
+  | Ast.TyCon (n, _) -> Hashtbl.mem Typer.views n
   | _ -> false
+
+(* Whether the value at type `v_ty` is represented as a pointer (for
+   recursive variants, mono or polymorphic, or views). Used by pattern
+   compiler and field access to choose `->` vs `.` accessors. *)
+let is_ptr_ty (v_ty : Ast.ty) : bool =
+  if is_view_type v_ty then true
+  else
+    match Ast.walk v_ty with
+    | Ast.TyCon (n, args) ->
+      let mono_n =
+        if Hashtbl.mem polymorphic_variants n then
+          mono_variant_name n (List.map Ast.walk args)
+        else n
+      in
+      is_recursive_variant mono_n
+    | _ -> false
 
 (* For a value of `v_ty` (assumed to be a variant), return the payload
    type of constructor `cname` (with type-params substituted). *)
@@ -691,26 +703,51 @@ let rec emit_expr (e : Ast.expr) : string =
        *__ref_p = __ref_v; __ref_p; })"
       (emit_expr inner) region_var
   | Ast.Record_lit (name, fields) ->
-    (* If this record is polymorphic, pick the mono name from the
-       Record_lit's inferred type. *)
-    let cstruct =
-      if Hashtbl.mem polymorphic_records name then
-        match e.Ast.ty with
-        | Some t ->
-          (match Ast.walk t with
-           | Ast.TyCon (n, args) when n = name ->
-             mono_record_name n (List.map Ast.walk args)
-           | _ -> name)
-        | None -> name
-      else name
-    in
     let parts =
       List.map (fun (f, ex) ->
         Printf.sprintf ".%s = %s" f (emit_expr ex)) fields
     in
-    "((" ^ cstruct ^ "){" ^ String.concat ", " parts ^ "})"
+    if Hashtbl.mem Typer.views name then begin
+      (* View construction: bump-allocate in the construction-time
+         region (encoded as the `[R]` arg of the value's TyCon), copy
+         the initializer in, return the pointer. *)
+      let region =
+        match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyCon (_, [Ast.TyRef (r, _)]) -> r
+           | _ -> unsupported e.loc
+                    "view literal missing region marker in inferred type")
+        | None -> unsupported e.loc "view literal missing type info"
+      in
+      Printf.sprintf
+        "({ %s* __view_p = (%s*) __lang_region_alloc(&__region_%s, sizeof(%s)); \
+         *__view_p = (%s){%s}; __view_p; })"
+        name name region name name (String.concat ", " parts)
+    end
+    else begin
+      (* Regular record literal. Use mono name if polymorphic. *)
+      let cstruct =
+        if Hashtbl.mem polymorphic_records name then
+          match e.Ast.ty with
+          | Some t ->
+            (match Ast.walk t with
+             | Ast.TyCon (n, args) when n = name ->
+               mono_record_name n (List.map Ast.walk args)
+             | _ -> name)
+          | None -> name
+        else name
+      in
+      "((" ^ cstruct ^ "){" ^ String.concat ", " parts ^ "})"
+    end
   | Ast.Field_get (inner, fname) ->
-    "(" ^ emit_expr inner ^ ")." ^ fname
+    (* `->` for view (pointer) values, `.` for plain records. *)
+    let dot =
+      match inner.Ast.ty with
+      | Some t when is_view_type t -> "->"
+      | _ -> "."
+    in
+    "(" ^ emit_expr inner ^ ")" ^ dot ^ fname
   | Ast.Record_update (base, updates) ->
     (* Use a statement expression with a tmp variable so we can patch
        individual fields and yield the result. *)
@@ -831,6 +868,9 @@ let rec c_type_of (t : Ast.ty) : string =
        region name is dropped (escape check at the typer guarantees the
        pointer isn't used past the region's lifetime). *)
     c_type_of inner ^ "*"
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.views name ->
+    (* View values are region-allocated pointers: `V*`. *)
+    name ^ "*"
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_records name ->
     (* Polymorphic record instantiation. *)
     mono_record_name name (List.map Ast.walk args)
