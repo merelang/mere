@@ -189,6 +189,8 @@ let llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyStr -> "ptr"
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
+  | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.views name -> "ptr"
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_records name ->
     "%" ^ mono_record_name name (List.map Ast.walk args)
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name
@@ -199,6 +201,14 @@ let llvm_ty_of (t : Ast.ty) : string =
     if is_recursive_variant_name name then "ptr" else "%" ^ name
   | Ast.TyArrow (p, r) -> "%" ^ closure_struct_name p r
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
+
+(* View test: is this Lang type a view? Views are constructed via
+   Record_lit with a name in Typer.views; values are ptr to the
+   region-allocated struct. *)
+let is_view_type (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyCon (n, _) -> Hashtbl.mem Typer.views n
+  | _ -> false
 
 (* Look up a record's ordered field list. Raises if name isn't in the
    typer registry — the typer should have caught that before codegen. *)
@@ -291,6 +301,11 @@ let current_var_types : (string * Ast.ty) list ref = ref []
    anonymous Funs in tail position can recover their concrete arrow
    type even when their .ty was generalized to polymorphic. *)
 let current_expected_ty : Ast.ty option ref = ref None
+
+(* Active user `region R { ... }` scopes — region name → SSA register
+   holding the region's ptr. Pushed by Region_block entry, popped at
+   exit so `&R v` / view literals can find the right region. *)
+let current_regions : (string * string) list ref = ref []
 
 (* For a pattern matched against a scrutinee of type `scrut_ty` and
    payload of type `payload_ty` (if any), produce the (name, concrete-ty)
@@ -1213,6 +1228,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   match e.Ast.node with
   | Ast.Int_lit n -> string_of_int n
   | Ast.Bool_lit b -> if b then "1" else "0"
+  | Ast.Unit_lit -> "0"  (* unit represented as i32 0 *)
   | Ast.Str_lit s ->
     (* String literals lower to a private constant + return its symbol;
        since pointers are opaque, the global is directly usable as a ptr. *)
@@ -1474,10 +1490,57 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         build r (idx + 1) rest
     in
     build "undef" 0 (List.combine elems elem_tys)
+  | Ast.Record_lit (name, fields) when Hashtbl.mem Typer.views name ->
+    (* View literal: allocate the struct in the view's region (encoded as
+       a [R] tyref in the inferred type), insertvalue chain to build the
+       record value, store into the allocated buffer, return ptr. *)
+    let region =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (_, [Ast.TyRef (r, _)]) -> r
+         | _ -> unsupported e.Ast.loc
+                  "view literal missing region marker in inferred type")
+      | None -> unsupported e.Ast.loc "view literal: missing type info"
+    in
+    let region_p =
+      match List.assoc_opt region !current_regions with
+      | Some r -> r
+      | None -> unsupported e.Ast.loc
+                  ("view literal: region not in scope: " ^ region)
+    in
+    let info = Hashtbl.find Typer.views name in
+    let rec build prev idx = function
+      | [] -> prev
+      | (fname, fty) :: rest ->
+        let ex =
+          match List.assoc_opt fname fields with
+          | Some e -> e
+          | None ->
+            unsupported e.Ast.loc
+              (Printf.sprintf "view literal missing field `%s`" fname)
+        in
+        let ev = emit_expr env ex in
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                      r name prev (llvm_ty_of fty) ev idx);
+        build r (idx + 1) rest
+    in
+    let v = build "undef" 0 info.Typer.v_fields in
+    let size_p = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1"
+                  size_p name);
+    let size = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
+    let p = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @__lang_region_alloc(ptr %s, i64 %s)"
+                  p region_p size);
+    emit_instr (Printf.sprintf "  store %%%s %s, ptr %s" name v p);
+    p
   | Ast.Record_lit (name, fields) ->
-    if Hashtbl.mem Typer.views name then
-      unsupported e.Ast.loc "view literal — Phase 5 later slice"
-    else begin
+    let () = ignore name in
+    begin
       let info =
         match Hashtbl.find_opt Typer.records name with
         | Some i -> i
@@ -1526,34 +1589,63 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     end
   | Ast.Field_get (inner, fname) ->
     let iv = emit_expr env inner in
-    let struct_name, fields =
+    let inner_ty =
       match inner.Ast.ty with
-      | Some t ->
-        (match Ast.walk t with
-         | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
-           let args = List.map Ast.walk args in
-           let (params, fs) = Hashtbl.find polymorphic_records n in
-           let mapping = List.combine params args in
-           let sf = List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fs in
-           (mono_record_name n args, sf)
-         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
-           (n, record_fields n)
-         | _ -> unsupported e.Ast.loc "field access on non-record")
+      | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "field access: missing inner type"
     in
-    let idx =
-      let rec find i = function
+    if is_view_type inner_ty then begin
+      (* View value is a ptr to a region-allocated struct. GEP+load. *)
+      let name =
+        match inner_ty with
+        | Ast.TyCon (n, _) -> n
+        | _ -> assert false
+      in
+      let info = Hashtbl.find Typer.views name in
+      let fields = info.Typer.v_fields in
+      let rec find_idx i = function
         | [] ->
           unsupported e.Ast.loc
-            (Printf.sprintf "record `%s` has no field `%s`" struct_name fname)
-        | (n, _) :: _ when n = fname -> i
-        | _ :: rest -> find (i + 1) rest
-      in find 0 fields
-    in
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
-                  r struct_name iv idx);
-    r
+            (Printf.sprintf "view `%s` has no field `%s`" name fname)
+        | (n, t) :: _ when n = fname -> (i, t)
+        | _ :: rest -> find_idx (i + 1) rest
+      in
+      let (idx, ft) = find_idx 0 fields in
+      let p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 %d"
+                    p name iv idx);
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                    r (llvm_ty_of ft) p);
+      r
+    end
+    else begin
+      let struct_name, fields =
+        match inner_ty with
+        | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+          let args = List.map Ast.walk args in
+          let (params, fs) = Hashtbl.find polymorphic_records n in
+          let mapping = List.combine params args in
+          let sf = List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fs in
+          (mono_record_name n args, sf)
+        | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+          (n, record_fields n)
+        | _ -> unsupported e.Ast.loc "field access on non-record"
+      in
+      let idx =
+        let rec find i = function
+          | [] ->
+            unsupported e.Ast.loc
+              (Printf.sprintf "record `%s` has no field `%s`" struct_name fname)
+          | (n, _) :: _ when n = fname -> i
+          | _ :: rest -> find (i + 1) rest
+        in find 0 fields
+      in
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                    r struct_name iv idx);
+      r
+    end
   | Ast.Record_update (base, updates) ->
     let bv = emit_expr env base in
     let struct_name, fields =
@@ -1997,9 +2089,90 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                     r1 cstruct r0 adapter_name);
       r1
     end
-  | Ast.Float_lit _ | Ast.Unit_lit
-  | Ast.Let_rec _ | Ast.With _
-  | Ast.Region_block _ | Ast.Ref _ ->
+  | Ast.Region_block (name, body) ->
+    (* Allocate a fresh region locally, run body within it, free at exit.
+       The region's SSA ptr is pushed onto current_regions so Ref / view
+       constructions inside body find it by name. *)
+    let region_p = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = alloca %%__lang_region" region_p);
+    emit_instr (Printf.sprintf
+                  "  call void @__lang_region_init(ptr %s, i64 1048576)" region_p);
+    let saved = !current_regions in
+    current_regions := (name, region_p) :: saved;
+    let v = emit_expr env body in
+    current_regions := saved;
+    emit_instr (Printf.sprintf "  call void @__lang_region_free(ptr %s)" region_p);
+    v
+  | Ast.Ref (region, inner) ->
+    (* `&R v` — region-allocate a copy of `v` and return ptr. *)
+    let v = emit_expr env inner in
+    let v_ty =
+      match inner.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "&R: missing inner type"
+    in
+    let region_p =
+      match List.assoc_opt region !current_regions with
+      | Some r -> r
+      | None -> unsupported e.Ast.loc ("&R: region not in scope: " ^ region)
+    in
+    let size_p = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
+                  size_p (llvm_ty_of v_ty));
+    let size = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
+    let p = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @__lang_region_alloc(ptr %s, i64 %s)"
+                  p region_p size);
+    emit_instr (Printf.sprintf "  store %s %s, ptr %s" (llvm_ty_of v_ty) v p);
+    p
+  | Ast.With (name, value, body) ->
+    (* `with c = v in body` — bind v, run body, then auto-invoke
+       c.close(unit) if v's record type has a `close: unit -> unit` field.
+       Body's resulting value is returned. *)
+    let vv = emit_expr env value in
+    let value_ty =
+      match value.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "with: missing value type"
+    in
+    (* Discover record type name + struct + close field index (if any). *)
+    let close_info =
+      match value_ty with
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+        let fields = record_fields n in
+        let rec find_close i = function
+          | [] -> None
+          | (fname, fty) :: _ when fname = "close" -> Some (i, fty, n)
+          | _ :: rest -> find_close (i + 1) rest
+        in
+        find_close 0 fields
+      | _ -> None
+    in
+    let saved_vt = !current_var_types in
+    current_var_types := (name, value_ty) :: saved_vt;
+    let body_v = emit_expr ((name, vv) :: env) body in
+    current_var_types := saved_vt;
+    (* Auto-invoke close (after body is evaluated). *)
+    (match close_info with
+     | None -> ()
+     | Some (idx, fty, struct_name) ->
+       let close_cl = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                     close_cl struct_name vv idx);
+       let cname = llvm_ty_of fty in
+       let env_r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 0"
+                     env_r cname close_cl);
+       let fn_r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 1"
+                     fn_r cname close_cl);
+       let _ = fresh_reg () in
+       emit_instr (Printf.sprintf "  call i32 %s(ptr %s, i32 0)" fn_r env_r));
+    body_v
+  | Ast.Float_lit _
+  | Ast.Let_rec _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
 
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture

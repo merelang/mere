@@ -3097,5 +3097,42 @@ let () =
        show (LCgPt6 { x = 1, y = 2 })")
     "define ptr @show_LCgPt6";
 
+  (* --- LLVM IR codegen: region runtime (Region_block + Ref) + with Drop +
+       view 構築 (Phase 5.13) ---
+     `region R { body }` を __lang_region_init + body + __lang_region_free に
+     compile、`&R v` を region_alloc + store で ptr return、`with c = v in body`
+     を bind + body + auto-close、view 構築は region_alloc + insertvalue + store
+     + ptr return。 *)
+  assert_contains "llvm: Region_block calls __lang_region_init"
+    (llvm "region R { let x = &R 5 in 42 }")
+    "call void @__lang_region_init(ptr ";
+  assert_contains "llvm: Region_block calls __lang_region_free"
+    (llvm "region R { let x = &R 5 in 42 }")
+    "call void @__lang_region_free(ptr ";
+  assert_contains "llvm: Ref allocs via region + store"
+    (llvm "region R { let x = &R 5 in 42 }")
+    "store i32 5, ptr ";
+  assert_contains "llvm: with calls close.fn(env, 0) at scope end"
+    (llvm_with_decls
+      "drop type LCgConn7 = { id: int, close: unit -> unit };\n\
+       let mk = fn i -> LCgConn7 { id = i, close = fn () -> () } in\n\
+       with c = mk 7 in c.id")
+    "call i32 ";
+  assert_contains "llvm: view typedef same as record (insertvalue then store)"
+    (llvm_with_decls
+      "view LCgCell8[R] of int { v: int };\n\
+       region R { let c = LCgCell8 { v = 7 } in c.v }")
+    "%LCgCell8 = type { i32 }";
+  assert_contains "llvm: view construction region-allocates"
+    (llvm_with_decls
+      "view LCgCell9[R] of int { v: int };\n\
+       region R { let c = LCgCell9 { v = 7 } in c.v }")
+    "call ptr @__lang_region_alloc(ptr ";
+  assert_contains "llvm: view field access uses GEP + load"
+    (llvm_with_decls
+      "view LCgCellA[R] of int { v: int };\n\
+       region R { let c = LCgCellA { v = 7 } in c.v }")
+    "getelementptr %LCgCellA, ptr ";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
