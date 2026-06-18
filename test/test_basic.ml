@@ -2458,5 +2458,27 @@ let () =
        CgSome3 42")
     "Cgopt3_int){.tag = 1";
 
+  (* --- C codegen: show polymorphic builtin (Phase 4.12) --- *)
+  assert_contains "codegen: show int emits show_int adapter"
+    (codegen "show 42") "show_int";
+  assert_contains "codegen: show int call site"
+    (codegen "show 42") "show_int(42)";
+  assert_contains "codegen: show str specialization"
+    (codegen "show \"hi\"") "show_str";
+  assert_contains "codegen: show bool specialization"
+    (codegen "show true") "show_bool";
+  assert_contains "codegen: show tuple composes elements"
+    (codegen "show (1, \"hi\")") "show_tuple_int_str";
+  assert_contains "codegen: show variant uses tagged dispatch"
+    (codegen_with_decls
+      "type CgCol6 = X6 | Y6;\n\
+       show X6")
+    "show_CgCol6";
+  assert_contains "codegen: show poly variant uses mono name"
+    (codegen_with_decls
+      "type 'a Cgopt4 = CgNone4 | CgSome4 of 'a;\n\
+       show (CgSome4 1)")
+    "show_Cgopt4_int";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

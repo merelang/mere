@@ -99,6 +99,7 @@ interpreter 方式だと「Lang は OCaml の上で動く」状態。codegen で
 | Variant | 単相 `type Status = Ok \| Err of str` → tagged union (`typedef struct { int tag; union { ... } payload; } Status;`)、Constr emit に compound literal、match を ternary chain + statement expression に展開 (`P_constr` / `P_var` / `P_wild` / `P_tuple` sub、guard 不可) |
 | 再帰 variant | 自己参照 payload を持つ variant (例: `type ilist = INil \| ICons of int * ilist`) は heap allocated + ポインタ表現 (`typedef ilist_node* ilist;`)。Constr が malloc して node を返し、match は `__scrut->tag` で dereference。tuple payload も `P_tuple (h, t)` で `.f0` / `.f1` を bind |
 | 多相 variant の monomorphization | `type 'a list = Nil \| Cons of 'a * 'a list` 等の polymorphic variant を、AST + fn signatures から concrete instantiation を集めて instance ごとに specialized struct を emit (`list_int`, `opt_str` 等)。再帰性の判定も substitute 後の payload で行う。これで `[1, 2, 3]` リテラル + `'a list` の `sum` 等が native 実行可能 |
+| show 汎用 builtin | `show : 'a -> str` を AST から呼出ごとの引数型を集めて型ごとに specialized `show_T` C 関数を自動生成。int/bool/str/unit/tuple/record/variant (mono + 多相 instantiation) すべて対応。再帰 variant も対応 (collect は循環ガードあり、出力は `Cons (1, Cons (2, Nil))` 形式)。`asprintf` ベースで heap allocation |
 | Closure (defunct) | 関数本体内の `let n = fn x -> body` を defunctionalization で top-level に lift。free vars を C function param に prepend、call site を rewrite。captures は int/bool/str/unit のみ (tuple/record/関数値 capture は未対応)。多段ネスト OK |
 | First-class fn (Phase A + B) | `T1 -> T2` 型を closure struct (`{ void* env; T2 (*fn)(void*, T1); }`) で表現。各 top-level fn に `_closure_fn` adapter + `_as_value` const、anonymous Fun in expression position は env struct (heap-alloc) + adapter (`__anon_N_fn`) + closure construction として lift され、capture は `__env_self->name` に rewrite される。closure dispatch は `({ __auto_type __c = e; __c.fn(__c.env, x); })`。Direct call (known top-level の Var head) は引き続き直接呼出の高速パス |
 
@@ -147,6 +148,7 @@ clang sample.c -o sample
 | 4.9-b | first-class fns (Phase B、anonymous Fun + captures) | anonymous Fun in expression position を heap-allocated env struct + adapter + closure 構築に lift、capture を `__env_self->name` に rewrite、curried HOF (`apply f x = f x`)・`make_adder` クロージャまで動作 |
 | 4.10 | 再帰 variant + P_tuple pattern | 自己参照 variant (`type ilist = INil \| ICons of int * ilist`) を heap-allocated node + ptr typedef に、Constr が malloc、match が `->` dereference、tuple sub-pattern を `.f0 / .f1` bind。連結リストの `sum` が clang 経由 native 実行可能 |
 | 4.11 | 多相 variant の monomorphization | `type 'a opt = None \| Some of 'a` / `type 'a list = Nil \| Cons of 'a * 'a list` 等の polymorphic variant を、AST + fn signature から concrete instantiation を収集して instance ごとに specialized struct (`opt_int`, `list_int` 等) を emit。`[1, 2, 3]` リテラル + `'a list` の sum が動く |
+| 4.12 | show 汎用 builtin | `show : 'a -> str` を呼出ごとに引数型から `show_T` を specialize。int/bool/str/unit/tuple/record/variant (mono + 多相 instantiation + 再帰) 対応。生成は `asprintf` ベース、循環ガード付き |
 
 slice ごとに **clang 経由で native binary 化して実行確認** している (例: factorial 10 → 3628800、`print (greet 5)` → "positive"、`fst ("hello", 42)` → "hello")。
 

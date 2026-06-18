@@ -69,6 +69,10 @@ let polymorphic_variants
 let mono_variant_instances : (string, string * Ast.ty list) Hashtbl.t =
   Hashtbl.create 8
 
+(* Types that need a `show_T` function emitted. Key is the ty_tag of
+   the type (used as the function name suffix); value is the type. *)
+let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Substitute TyParam names → concrete types throughout `t`. *)
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
@@ -450,6 +454,17 @@ let rec emit_expr (e : Ast.expr) : string =
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
        "(" ^ emit_expr arg ^ ").f1"
+     | Ast.Var "show" ->
+       (* Polymorphic builtin — dispatch to the type-specialized
+          show_<tag> function based on arg's inferred type. *)
+       let arg_ty =
+         match arg.Ast.ty with
+         | Some t -> Ast.walk t
+         | None ->
+           unsupported e.loc "show: missing arg type info"
+       in
+       let tag = ty_tag arg_ty in
+       Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
        (* Defunctionalized direct call (Phase 4.8). *)
        let li = Hashtbl.find inner_lifts name in
@@ -865,6 +880,85 @@ let emit_closure_env_typedef (ce : closure_emission) : string =
     in
     Printf.sprintf "typedef struct {\n%s\n} %s;" fields ce.ce_env_name
 
+(* Emit a `show_T` function for type `t`, returning a C string. For
+   tuple / record / variant types the function composes calls to inner
+   `show_<elem>` functions. *)
+let emit_show_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header =
+    Printf.sprintf "static const char* show_%s(%s v)" tag cty
+  in
+  match Ast.walk t with
+  | Ast.TyInt ->
+    header ^ " {\n  char* buf; asprintf(&buf, \"%d\", v); return buf;\n}"
+  | Ast.TyBool ->
+    header ^ " { return v ? \"true\" : \"false\"; }"
+  | Ast.TyStr ->
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", v); return buf; }"
+  | Ast.TyUnit ->
+    header ^ " { (void)v; return \"()\"; }"
+  | Ast.TyTuple ts ->
+    let parts =
+      List.mapi (fun i et ->
+        Printf.sprintf "show_%s(v.f%d)" (ty_tag et) i) ts
+    in
+    let fmt = "(" ^ String.concat ", " (List.map (fun _ -> "%s") ts) ^ ")" in
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+      header fmt (String.concat ", " parts)
+  | Ast.TyArrow _ ->
+    header ^ " { (void)v; return \"<closure>\"; }"
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+    let info = Hashtbl.find Typer.records name in
+    let fields_parts =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "show_%s(v.%s)" (ty_tag ft) fname)
+        info.Typer.r_fields
+    in
+    let fmt =
+      name ^ " { " ^
+      String.concat ", "
+        (List.map (fun (fname, _) -> fname ^ " = %s") info.Typer.r_fields) ^
+      " }"
+    in
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+      header fmt (String.concat ", " fields_parts)
+  | Ast.TyCon (name, args) ->
+    (* Variant — either monomorphic or polymorphic instance. Find its
+       variants via polymorphic_variants or by scanning constructors. *)
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name then (cname, info.arg) :: acc else acc)
+          Typer.constructors []
+    in
+    let is_ptr = is_recursive_variant cty in
+    let dot = if is_ptr then "->" else "." in
+    let cases =
+      List.map (fun (cname, arg_opt) ->
+        let tag_n =
+          try Hashtbl.find variant_tags cname with Not_found -> 0
+        in
+        match arg_opt with
+        | None ->
+          Printf.sprintf "  if (v%stag == %d) return \"%s\";"
+            dot tag_n cname
+        | Some ty ->
+          Printf.sprintf
+            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(v%spayload.%s)); return buf; }"
+            dot tag_n cname (ty_tag ty) dot cname)
+        variants
+    in
+    Printf.sprintf "%s {\n%s\n  return \"<unknown>\";\n}"
+      header (String.concat "\n" cases)
+  | _ ->
+    Printf.sprintf "%s { (void)v; return \"<unsupported>\"; }" header
+
+let emit_show_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static const char* show_%s(%s);" tag (c_type_of t)
+
 let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
   Printf.sprintf "static %s %s(void*, %s);"
     (c_type_of ce.ce_return_ty) ce.ce_adapter_name
@@ -1041,6 +1135,81 @@ let lift_inner_fns
     walk_in_fn f.param f.body) fns;
   List.rev !lifted
 
+
+(* Walk the AST for `App (Var "show", arg)` calls and add each arg's
+   type to `show_types` so emit_program can synthesize the right
+   specialized show functions. Recurses into types so e.g. `show (1, 2)`
+   also triggers show_int (for the elements). *)
+let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
+  let rec add_with_deps t =
+    let t = Ast.walk t in
+    if not (ty_is_concrete t) then ()
+    else
+      let tag = ty_tag t in
+      (* Guard before recursion so recursive variants (e.g. list) don't
+         infinite-loop through their self-referential payloads. *)
+      if Hashtbl.mem show_types tag then ()
+      else begin
+        Hashtbl.add show_types tag t;
+        match t with
+        | Ast.TyTuple ts -> List.iter add_with_deps ts
+        | Ast.TyArrow _ -> ()
+        | Ast.TyCon (name, args) ->
+          List.iter add_with_deps args;
+          if Hashtbl.mem Typer.records name then
+            let info = Hashtbl.find Typer.records name in
+            List.iter (fun (_, ft) -> add_with_deps ft) info.Typer.r_fields
+          else if Hashtbl.mem polymorphic_variants name then begin
+            let (params, variants) = Hashtbl.find polymorphic_variants name in
+            let svariants = subst_variants params args variants in
+            List.iter (fun (_, arg_opt) ->
+              match arg_opt with Some t -> add_with_deps t | None -> ()) svariants
+          end
+          else if Hashtbl.mem Typer.types name then begin
+            let variants =
+              Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+                if info.type_name = name then (cname, info.arg) :: acc else acc)
+                Typer.constructors []
+            in
+            List.iter (fun (_, arg_opt) ->
+              match arg_opt with Some t -> add_with_deps t | None -> ()) variants
+          end
+        | _ -> ()
+      end
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
+       (match arg.Ast.ty with
+        | Some t -> add_with_deps t
+        | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_expr f.body) fns
 
 (* Walk a typed AST + fn signatures to find every concrete instantiation
    of a polymorphic variant. Populates `mono_variant_instances`. *)
@@ -1489,7 +1658,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      instantiations from the AST + fn signatures, then emit specialized
      typedefs (forward+ptr for recursive instances, full struct for
      non-recursive). Bodies come after tuple/record typedefs. *)
+  Hashtbl.reset show_types;
   collect_mono_variant_instances main_expr fns;
+  collect_show_types main_expr fns;
   let mono_variant_typedefs =
     Hashtbl.fold (fun _ (vn, args) acc ->
       emit_mono_variant_typedef vn args :: acc) mono_variant_instances []
@@ -1568,15 +1739,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let closure_adapter_forward_decls = List.rev !closure_adapter_forward_decls in
   let closure_adapters = List.rev !closure_adapters in
+  let show_fn_forward_decls =
+    Hashtbl.fold (fun tag t acc ->
+      emit_show_fn_forward_decl tag t :: acc) show_types []
+  in
+  let show_fn_defs =
+    Hashtbl.fold (fun tag t acc ->
+      emit_show_fn tag t :: acc) show_types []
+  in
   let forward_decls =
     List.map emit_fn_forward_decl fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
     @ closure_adapter_forward_decls
+    @ show_fn_forward_decls
   in
   let fn_defs =
     fn_defs_main
     @ closure_adapters
     @ closure_wrappers
+    @ show_fn_defs
   in
   let main_body = emit_expr body_expr in
   let main_stmt =
