@@ -2187,5 +2187,69 @@ let () =
     (codegen "let split = fn s -> (s, str_len s) in split \"x\"")
     "tuple_str_int split(const char* s)";
 
+  (* --- C codegen: record support (Phase 4 sixth slice) ---
+     Records share the codegen path with tuples but with named fields.
+     The typer's `records` registry tells us the C field types/order.
+     NB: the typer's `records` Hashtbl is global mutable state, so
+     declaring `type CgPt = ...` here is visible to later tests; pick
+     fresh names that don't collide with the record-test suite earlier. *)
+  let codegen_with_decls s =
+    let prog = Pipeline.parse_program s in
+    (* Process decls so the typer's records registry is populated. *)
+    let type_env = ref Typer.initial_env in
+    List.iter (fun decl ->
+      match decl with
+      | Ast.Top_record (name, params, fields) ->
+        Typer.register_record name params fields
+      | Ast.Top_type (name, params, variants) ->
+        Typer.register_type name params variants
+      | Ast.Top_let (pat, value) ->
+        let outer = !type_env in
+        let t = Typer.infer outer value in
+        let bs = Typer.check_pattern pat t in
+        type_env := List.fold_left (fun acc (n, ty) ->
+          (n, Typer.generalize outer ty) :: acc) outer bs
+      | _ -> ()
+    ) prog.decls;
+    let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
+    Codegen_c.emit_program ~main_ty prog
+  in
+  assert_contains "codegen: record typedef"
+    (codegen_with_decls
+      "type CgRectA = { w: int, h: int };\n\
+       let r = CgRectA { w = 3, h = 4 } in r.w * r.h")
+    "typedef struct {\n  int w;\n  int h;\n} CgRectA;";
+  assert_contains "codegen: record literal compound"
+    (codegen_with_decls
+      "type CgRectB = { w: int, h: int };\n\
+       let r = CgRectB { w = 3, h = 4 } in r.w")
+    "((CgRectB){.w = 3, .h = 4})";
+  assert_contains "codegen: record field access"
+    (codegen_with_decls
+      "type CgRectC = { w: int };\n\
+       let r = CgRectC { w = 5 } in r.w")
+    "(r).w";
+  assert_contains "codegen: record update via tmp + statement expr"
+    (codegen_with_decls
+      "type CgRectD = { w: int, h: int };\n\
+       let r = CgRectD { w = 1, h = 2 } in { r | w = 99 }")
+    "__rupd.w = 99";
+  assert_contains "codegen: record-returning fn signature"
+    (codegen_with_decls
+      "type CgRectE = { w: int };\n\
+       let mk = fn n -> CgRectE { w = n } in mk 7")
+    "CgRectE mk(int n)";
+  assert_contains "codegen: record with str field"
+    (codegen_with_decls
+      "type CgUser = { name: str, age: int };\n\
+       let u = CgUser { name = \"a\", age = 30 } in u.name")
+    "  const char* name;";
+  check_raises "codegen: polymorphic record rejected"
+    (fun () ->
+      let _ = codegen_with_decls
+        "type 'a CgBox = { v: 'a };\n\
+         let b = CgBox { v = 1 } in b.v"
+      in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

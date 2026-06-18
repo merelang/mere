@@ -144,9 +144,24 @@ let rec emit_expr (e : Ast.expr) : string =
     "((" ^ struct_name ^ "){" ^ String.concat ", " init_fields ^ "})"
   | Ast.Region_block _ -> unsupported e.loc "region blocks"
   | Ast.Ref _         -> unsupported e.loc "region references"
-  | Ast.Record_lit _  -> unsupported e.loc "record literals"
-  | Ast.Field_get _   -> unsupported e.loc "field access"
-  | Ast.Record_update _ -> unsupported e.loc "record update"
+  | Ast.Record_lit (name, fields) ->
+    let parts =
+      List.map (fun (f, ex) ->
+        Printf.sprintf ".%s = %s" f (emit_expr ex)) fields
+    in
+    "((" ^ name ^ "){" ^ String.concat ", " parts ^ "})"
+  | Ast.Field_get (inner, fname) ->
+    "(" ^ emit_expr inner ^ ")." ^ fname
+  | Ast.Record_update (base, updates) ->
+    (* Use a statement expression with a tmp variable so we can patch
+       individual fields and yield the result. *)
+    let tmp = "__rupd" in
+    let updates_c =
+      List.map (fun (f, ex) ->
+        Printf.sprintf "%s.%s = %s;" tmp f (emit_expr ex)) updates
+    in
+    "({ __auto_type " ^ tmp ^ " = " ^ emit_expr base ^ "; "
+    ^ String.concat " " updates_c ^ " " ^ tmp ^ "; })"
 
 type fn_decl = {
   name      : string;
@@ -163,10 +178,13 @@ let c_type_of (t : Ast.ty) : string =
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyTuple ts -> tuple_struct_name ts
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+    (* User-declared record type — the struct name matches the Lang name. *)
+    name
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf
-        "unsupported C codegen type: %s (only int/bool/str/unit/tuple)"
+        "unsupported C codegen type: %s (only int/bool/str/unit/tuple/record)"
         (Ast.pp_ty other)))
 
 (* Skeleton info collected while walking the AST — types are filled in
@@ -329,6 +347,72 @@ let emit_tuple_typedef (elems : Ast.ty list) : string =
   Printf.sprintf "typedef struct {\n%s\n} %s;"
     (String.concat "\n" fields) name
 
+(* Walk a typed AST and collect every distinct record TyCon name
+   encountered. Used to drive struct typedef emission. The record's
+   field list is then looked up from Typer.records. *)
+let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
+  let seen = Hashtbl.create 8 in
+  let order = ref [] in
+  let add name =
+    if Hashtbl.mem Typer.records name && not (Hashtbl.mem seen name) then begin
+      Hashtbl.add seen name ();
+      order := name :: !order
+    end
+  in
+  let rec walk_ty (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyCon (name, args) -> add name; List.iter walk_ty args
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bindings, b) ->
+      List.iter (fun (_, v) -> walk_expr v) bindings; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (name, fs) ->
+      add name; List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) ->
+      walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty) fns;
+  List.rev !order
+
+let emit_record_typedef (name : string) : string =
+  let info = Hashtbl.find Typer.records name in
+  if info.Typer.r_params <> [] then
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf
+        "polymorphic record `%s` not supported in C codegen yet" name));
+  let fields =
+    List.map (fun (fname, ft) ->
+      Printf.sprintf "  %s %s;" (c_type_of ft) fname) info.Typer.r_fields
+  in
+  Printf.sprintf "typedef struct {\n%s\n} %s;"
+    (String.concat "\n" fields) name
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
@@ -355,6 +439,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     ) all
   in
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
+  let record_names = collect_record_names main_expr fns in
+  let record_typedefs = List.map emit_record_typedef record_names in
   let forward_decls = List.map emit_fn_forward_decl fns in
   let fn_defs = List.map emit_fn fns in
   let main_body = emit_expr body_expr in
@@ -370,6 +456,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "";
       str_concat_helper;
       "" ]
+    @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])

@@ -38,15 +38,48 @@ let run_action action label source =
     exit 1
 
 let compile_to_c source =
-  let prog = Lang_ml.Pipeline.parse_program source in
-  (* Type-check first so we surface type errors before codegen, and
-     capture the main expression's inferred type so codegen can pick
-     the right printf format (int → %d, str → %s, unit → skip). *)
+  let open Lang_ml in
+  let prog = Pipeline.parse_program source in
+  (* Type-check top-level decls (registering record / variant / view /
+     drop types with the typer) WITHOUT evaluating any top-level side
+     effects — mirrors Pipeline.type_of's flow. We need the registrations
+     so `c_type_of` can resolve user-declared record types. *)
+  let type_env = ref Typer.initial_env in
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_let (pat, value) ->
+      let outer_env = !type_env in
+      let t = Typer.infer outer_env value in
+      let bindings = Typer.check_pattern pat t in
+      type_env := List.fold_left (fun acc (n, ty) ->
+        let sch = Typer.generalize outer_env ty in
+        (n, sch) :: acc) outer_env bindings
+    | Ast.Top_let_rec bindings ->
+      let outer_env = !type_env in
+      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+      let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        (n, Typer.mono a) :: acc) outer_env bindings alphas in
+      List.iter2 (fun (_, value) alpha ->
+        let t = Typer.infer env_rec value in
+        Typer.unify value.Ast.loc alpha t) bindings alphas;
+      type_env := List.fold_left2 (fun acc (n, _) a ->
+        let sch = Typer.generalize outer_env a in
+        (n, sch) :: acc) outer_env bindings alphas
+    | Ast.Top_type (name, params, variants) ->
+      Typer.register_type name params variants
+    | Ast.Top_signature _ -> ()
+    | Ast.Top_record (name, params, fields) ->
+      Typer.register_record name params fields
+    | Ast.Top_type_alias _ -> ()
+    | Ast.Top_view (name, region, fields) ->
+      Typer.register_view name region fields
+    | Ast.Top_drop name ->
+      Typer.register_drop_type name
+  ) prog.decls;
   let main_ty =
-    Lang_ml.Typer.infer Lang_ml.Typer.initial_env
-      (Lang_ml.Ast.desugar_program prog)
+    Typer.infer !type_env (Ast.desugar_program prog)
   in
-  Lang_ml.Codegen_c.emit_program ~main_ty prog
+  Codegen_c.emit_program ~main_ty prog
 
 let () =
   match Array.to_list Sys.argv with
