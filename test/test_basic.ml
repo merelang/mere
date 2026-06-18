@@ -2949,5 +2949,47 @@ let () =
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "= call ptr @malloc(i64 %t";
 
+  (* --- LLVM IR codegen: 多相 variant / record の monomorphization (Phase 5.9) ---
+     `'a opt`, `'a Box` etc. get a specialized struct per concrete
+     instantiation (`%opt_int`, `%Box_str`). Constr / Record_lit /
+     Field_get / Match use the mono name. *)
+  assert_contains "llvm: poly variant mono typedef"
+    (llvm_with_decls
+      "type 'a LCgOpt = LCgN | LCgS of 'a;\n\
+       match LCgS 42 with | LCgN -> 0 | LCgS n -> n")
+    "%LCgOpt_int = type { i32, i32 }";
+  assert_contains "llvm: poly variant Constr uses mono name"
+    (llvm_with_decls
+      "type 'a LCgOpt2 = LCgN2 | LCgS2 of 'a;\n\
+       LCgS2 42")
+    "insertvalue %LCgOpt2_int";
+  assert_contains "llvm: poly variant Match uses mono name"
+    (llvm_with_decls
+      "type 'a LCgOpt3 = LCgN3 | LCgS3 of 'a;\n\
+       match LCgS3 42 with | LCgN3 -> 0 | LCgS3 n -> n")
+    "extractvalue %LCgOpt3_int";
+  assert_contains "llvm: poly record mono typedef"
+    (llvm_with_decls
+      "type 'a LCgBox = { v: 'a };\n\
+       let b = LCgBox { v = 42 } in b.v")
+    "%LCgBox_int = type { i32 }";
+  assert_contains "llvm: poly record Record_lit uses mono name"
+    (llvm_with_decls
+      "type 'a LCgBox2 = { v: 'a };\n\
+       let b = LCgBox2 { v = 42 } in b.v")
+    "insertvalue %LCgBox2_int";
+  assert_contains "llvm: poly record Field_get uses mono name"
+    (llvm_with_decls
+      "type 'a LCgBox3 = { v: 'a };\n\
+       let b = LCgBox3 { v = 42 } in b.v")
+    "extractvalue %LCgBox3_int";
+  assert_contains "llvm: poly record specializes at two types"
+    (llvm_with_decls
+      "type 'a LCgBox4 = { v: 'a };\n\
+       let bi = LCgBox4 { v = 42 } in\n\
+       let bs = LCgBox4 { v = \"hi\" } in\n\
+       str_len bs.v + bi.v")
+    "%LCgBox4_str = type { ptr }";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

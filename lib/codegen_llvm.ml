@@ -79,6 +79,55 @@ let tuple_struct_name (elems : Ast.ty list) : string =
 let closure_struct_name (p : Ast.ty) (r : Ast.ty) : string =
   "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
 
+(* Variant tags: each constructor → integer tag. Populated up front
+   for both monomorphic and polymorphic variants. *)
+let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
+
+(* Polymorphic variant declarations: name → (params, variants).
+   Populated before emit_expr from Exhaustive's variant registry. *)
+let polymorphic_variants
+    : (string, string list * (string * Ast.ty option) list) Hashtbl.t =
+  Hashtbl.create 4
+
+(* Polymorphic record declarations: name → (params, fields). *)
+let polymorphic_records
+    : (string, string list * (string * Ast.ty) list) Hashtbl.t =
+  Hashtbl.create 4
+
+(* Concrete instantiations seen in the program. Key is the mono name
+   (e.g. `opt_int`, `Box_str`); value is the source name + arg list. *)
+let mono_variant_instances : (string, string * Ast.ty list) Hashtbl.t =
+  Hashtbl.create 8
+let mono_record_instances : (string, string * Ast.ty list) Hashtbl.t =
+  Hashtbl.create 8
+
+let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyParam p ->
+    (try List.assoc p mapping with Not_found -> t)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (subst_params mapping a, subst_params mapping b)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_params mapping) ts)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_params mapping) args)
+  | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst_params mapping inner)
+  | t -> t
+
+let subst_variants
+    (params : string list) (args : Ast.ty list)
+    (variants : (string * Ast.ty option) list) : (string * Ast.ty option) list =
+  let mapping = List.combine params args in
+  List.map (fun (cname, arg_opt) ->
+    (cname, Option.map (subst_params mapping) arg_opt)) variants
+
+let mono_variant_name (name : string) (args : Ast.ty list) : string =
+  match args with
+  | [] -> name
+  | _ -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+
+let mono_record_name (name : string) (args : Ast.ty list) : string =
+  match args with
+  | [] -> name
+  | _ -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+
 (* Walk a Lang type to its LLVM type. Tuples / monomorphic records /
    variants lower to named-struct references (`%tuple_int_int`,
    `%Point`, `%Status`); these are emitted as `type` definitions at the
@@ -90,7 +139,11 @@ let llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyStr -> "ptr"
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
+  | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_records name ->
+    "%" ^ mono_record_name name (List.map Ast.walk args)
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name
+  | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_variants name ->
+    "%" ^ mono_variant_name name (List.map Ast.walk args)
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.types name -> "%" ^ name
   | Ast.TyArrow (p, r) -> "%" ^ closure_struct_name p r
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
@@ -535,10 +588,6 @@ let emit_record_typedef (name : string) : string =
   let field_tys = String.concat ", " (List.map (fun (_, t) -> llvm_ty_of t) fields) in
   Printf.sprintf "%%%s = type { %s }" name field_tys
 
-(* Variant tags: each constructor → integer tag. Populated by
-   emit_variant_typedef as a side effect. *)
-let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
-
 (* Variants and their concrete shape — populated from Exhaustive's
    registry. None means nullary-only; Some t means all payload-bearing
    constructors share payload type t (MVP restriction). *)
@@ -576,6 +625,42 @@ let emit_variant_typedef (name : string) : string =
   match variant_payload_ty name with
   | None -> Printf.sprintf "%%%s = type { i32 }" name
   | Some t -> Printf.sprintf "%%%s = type { i32, %s }" name (llvm_ty_of t)
+
+(* Variant payload type for an already-substituted variant list (used by
+   mono-instance codegen, where we've already applied param→arg subst). *)
+let variant_payload_ty_of (variants : (string * Ast.ty option) list)
+    : Ast.ty option =
+  let payloads = List.filter_map (fun (_, p) -> p) variants in
+  match payloads with
+  | [] -> None
+  | first :: rest ->
+    let first_tag = ty_tag (Ast.walk first) in
+    if List.for_all (fun p -> ty_tag (Ast.walk p) = first_tag) rest then
+      Some first
+    else
+      raise (Codegen_error (Loc.dummy,
+        "variant has constructors with different payload types — \
+         Phase 5 MVP needs all payloads to be the same type"))
+
+(* Specialized typedef for a polymorphic variant instance. *)
+let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : string =
+  let mono_name = mono_variant_name variant_name args in
+  let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
+  let svariants = subst_variants params args variants in
+  match variant_payload_ty_of svariants with
+  | None -> Printf.sprintf "%%%s = type { i32 }" mono_name
+  | Some t -> Printf.sprintf "%%%s = type { i32, %s }" mono_name (llvm_ty_of t)
+
+(* Specialized typedef for a polymorphic record instance. *)
+let emit_mono_record_typedef (record_name : string) (args : Ast.ty list) : string =
+  let mono_name = mono_record_name record_name args in
+  let (params, fields) = Hashtbl.find polymorphic_records record_name in
+  let mapping = List.combine params args in
+  let field_tys =
+    String.concat ", " (List.map (fun (_, ft) ->
+      llvm_ty_of (subst_params mapping ft)) fields)
+  in
+  Printf.sprintf "%%%s = type { %s }" mono_name field_tys
 
 (* Collect every distinct concrete arrow type (T1 -> T2) used in the
    program — these become `%closure_T1_T2 = type { ptr, ptr }` typedefs. *)
@@ -627,6 +712,66 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
     add (Ast.walk f.param_ty) (Ast.walk f.return_ty);
     walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
   Hashtbl.fold (fun _ v acc -> v :: acc) seen []
+
+(* Walk AST + fns to find every concrete instantiation of a polymorphic
+   variant / record. Populates mono_variant_instances and
+   mono_record_instances; later iteration emits one typedef per key. *)
+let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
+  let add name args =
+    if List.for_all ty_is_concrete args then begin
+      if Hashtbl.mem polymorphic_variants name
+         && not (Hashtbl.mem mono_variant_instances
+                   (mono_variant_name name args))
+      then
+        Hashtbl.add mono_variant_instances
+          (mono_variant_name name args) (name, args);
+      if Hashtbl.mem polymorphic_records name
+         && not (Hashtbl.mem mono_record_instances
+                   (mono_record_name name args))
+      then
+        Hashtbl.add mono_record_instances
+          (mono_record_name name args) (name, args)
+    end
+  in
+  let rec walk_ty t =
+    match Ast.walk t with
+    | Ast.TyCon (n, args) ->
+      let args' = List.map Ast.walk args in
+      List.iter walk_ty args';
+      add n args'
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns
 
 (* Closure value layout: `{ ptr env, ptr fn }`. The fn pointer's
    concrete signature (T2 (ptr, T1)) is encoded via bitcast at call
@@ -890,12 +1035,29 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         | None ->
           unsupported e.Ast.loc ("unknown record type: " ^ name)
       in
-      if info.Typer.r_params <> [] then
-        unsupported e.Ast.loc "polymorphic record — Phase 5 later slice";
-      (* Build struct by inserting each field in declaration order. The
-         source may list fields in any order — re-order to match the
-         record's declared field list. *)
-      let rec build prev = function
+      (* Mono vs poly: for polymorphic records, pick the mono instance
+         from the Record_lit's inferred type and substitute fields. *)
+      let struct_name, decl_fields =
+        if info.Typer.r_params <> [] then
+          let args =
+            match e.Ast.ty with
+            | Some t ->
+              (match Ast.walk t with
+               | Ast.TyCon (n, ts) when n = name -> List.map Ast.walk ts
+               | _ -> unsupported e.Ast.loc
+                        "Record_lit: type info missing concrete args")
+            | None -> unsupported e.Ast.loc "Record_lit: missing inferred type"
+          in
+          let mapping = List.combine info.Typer.r_params args in
+          let sf =
+            List.map (fun (fn, ft) -> (fn, subst_params mapping ft))
+              info.Typer.r_fields
+          in
+          (mono_record_name name args, sf)
+        else
+          (name, info.Typer.r_fields)
+      in
+      let rec build prev idx = function
         | [] -> prev
         | (fname, fty) :: rest ->
           let ex =
@@ -908,36 +1070,67 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           let ev = emit_expr env ex in
           let r = fresh_reg () in
           emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
-                        r name prev (llvm_ty_of fty) ev (field_index name fname));
-          build r rest
+                        r struct_name prev (llvm_ty_of fty) ev idx);
+          build r (idx + 1) rest
       in
-      build "undef" info.Typer.r_fields
+      build "undef" 0 decl_fields
     end
   | Ast.Field_get (inner, fname) ->
     let iv = emit_expr env inner in
-    let rname =
+    let struct_name, fields =
       match inner.Ast.ty with
       | Some t ->
         (match Ast.walk t with
-         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
+         | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+           let args = List.map Ast.walk args in
+           let (params, fs) = Hashtbl.find polymorphic_records n in
+           let mapping = List.combine params args in
+           let sf = List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fs in
+           (mono_record_name n args, sf)
+         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+           (n, record_fields n)
          | _ -> unsupported e.Ast.loc "field access on non-record")
       | None -> unsupported e.Ast.loc "field access: missing inner type"
     in
+    let idx =
+      let rec find i = function
+        | [] ->
+          unsupported e.Ast.loc
+            (Printf.sprintf "record `%s` has no field `%s`" struct_name fname)
+        | (n, _) :: _ when n = fname -> i
+        | _ :: rest -> find (i + 1) rest
+      in find 0 fields
+    in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
-                  r rname iv (field_index rname fname));
+                  r struct_name iv idx);
     r
   | Ast.Record_update (base, updates) ->
     let bv = emit_expr env base in
-    let rname =
+    let struct_name, fields =
       match base.Ast.ty with
       | Some t ->
         (match Ast.walk t with
-         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
+         | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+           let args = List.map Ast.walk args in
+           let (params, fs) = Hashtbl.find polymorphic_records n in
+           let mapping = List.combine params args in
+           let sf = List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fs in
+           (mono_record_name n args, sf)
+         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+           (n, record_fields n)
          | _ -> unsupported e.Ast.loc "record update on non-record")
       | None -> unsupported e.Ast.loc "record update: missing base type"
     in
-    let fields = record_fields rname in
+    let field_index_local fname =
+      let rec find i = function
+        | [] ->
+          unsupported e.Ast.loc
+            (Printf.sprintf "record `%s` has no field `%s`" struct_name fname)
+        | (n, _) :: _ when n = fname -> i
+        | _ :: rest -> find (i + 1) rest
+      in find 0 fields
+    in
     let rec apply prev = function
       | [] -> prev
       | (fname, ex) :: rest ->
@@ -945,12 +1138,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           try List.assoc fname fields
           with Not_found ->
             unsupported e.Ast.loc
-              (Printf.sprintf "record `%s` has no field `%s`" rname fname)
+              (Printf.sprintf "record `%s` has no field `%s`" struct_name fname)
         in
         let ev = emit_expr env ex in
         let r = fresh_reg () in
         emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
-                      r rname prev (llvm_ty_of fty) ev (field_index rname fname));
+                      r struct_name prev (llvm_ty_of fty) ev
+                      (field_index_local fname));
         apply r rest
     in
     apply bv updates
@@ -963,46 +1157,71 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let type_name = info.Typer.type_name in
     if not (Hashtbl.mem Typer.types type_name) then
       unsupported e.Ast.loc ("constructor's type not registered: " ^ type_name);
-    if info.Typer.params <> [] then
-      unsupported e.Ast.loc "polymorphic variant — Phase 5 later slice";
     let tag =
       match Hashtbl.find_opt variant_tags cname with
       | Some t -> t
       | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
     in
+    (* For polymorphic variants, pick the mono instance from the
+       Constr's inferred result type. *)
+    let struct_name, payload_ty =
+      if Hashtbl.mem polymorphic_variants type_name then begin
+        let args =
+          match e.Ast.ty with
+          | Some t ->
+            (match Ast.walk t with
+             | Ast.TyCon (n, ts) when n = type_name -> List.map Ast.walk ts
+             | _ -> unsupported e.Ast.loc
+                      "Constr: type info missing concrete args")
+          | None -> unsupported e.Ast.loc "Constr: missing inferred type"
+        in
+        let mono = mono_variant_name type_name args in
+        let (params, variants) = Hashtbl.find polymorphic_variants type_name in
+        let sv = subst_variants params args variants in
+        (mono, variant_payload_ty_of sv)
+      end else
+        (type_name, variant_payload_ty type_name)
+    in
     let r0 = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, i32 %d, 0"
-                  r0 type_name tag);
-    (match arg_opt, variant_payload_ty type_name with
+                  r0 struct_name tag);
+    (match arg_opt, payload_ty with
      | None, _ -> r0
      | Some arg, Some pty ->
        let av = emit_expr env arg in
        let r1 = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, 1"
-                     r1 type_name r0 (llvm_ty_of pty) av);
+                     r1 struct_name r0 (llvm_ty_of pty) av);
        r1
      | Some _, None ->
        unsupported e.Ast.loc
          (Printf.sprintf
-            "constructor `%s` has payload but variant `%s` was lowered as nullary-only"
-            cname type_name))
+            "constructor `%s` has payload but variant lowered as nullary-only"
+            cname))
   | Ast.Match (scrut, arms) ->
     let scrut_ty =
       match scrut.Ast.ty with
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "match: missing scrutinee type"
     in
-    let type_name =
+    let source_name, type_name, payload_ty =
       match scrut_ty with
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n -> n
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+        let args = List.map Ast.walk args in
+        let (params, variants) = Hashtbl.find polymorphic_variants n in
+        let sv = subst_variants params args variants in
+        (n, mono_variant_name n args, variant_payload_ty_of sv)
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+        (n, n, variant_payload_ty n)
       | _ ->
-        unsupported e.Ast.loc "match: scrutinee is not a user-declared variant (Phase 5 MVP)"
+        unsupported e.Ast.loc
+          "match: scrutinee is not a user-declared variant (Phase 5 MVP)"
     in
+    let _ = source_name in
     let scrut_v = emit_expr env scrut in
     let tag_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0"
                   tag_reg type_name scrut_v);
-    let payload_ty = variant_payload_ty type_name in
     let result_ty =
       match e.Ast.ty with
       | Some t -> llvm_ty_of t
@@ -1357,6 +1576,30 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   anon_closure_counter := 0;
   current_var_types := [];
   Hashtbl.reset toplevel_fn_names;
+  Hashtbl.reset polymorphic_variants;
+  Hashtbl.reset polymorphic_records;
+  Hashtbl.reset mono_variant_instances;
+  Hashtbl.reset mono_record_instances;
+  (* Register variant tags + classify into mono / poly. Polymorphic
+     variants and records are deferred to mono-instance emission. *)
+  Hashtbl.iter (fun name vs ->
+    List.iteri (fun i (cname, _) ->
+      Hashtbl.replace variant_tags cname i) vs;
+    (* Determine params from any constructor's params (all share). *)
+    let params =
+      match vs with
+      | (cname, _) :: _ ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some info -> info.Typer.params
+         | None -> [])
+      | [] -> []
+    in
+    if params <> [] then Hashtbl.replace polymorphic_variants name (params, vs)
+  ) Exhaustive.type_variants;
+  Hashtbl.iter (fun name info ->
+    if info.Typer.r_params <> [] then
+      Hashtbl.replace polymorphic_records name (info.Typer.r_params, info.Typer.r_fields)
+  ) Typer.records;
   let main_expr = Ast.desugar_program prog in
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
   let skels, body_expr = lift_fn_skels main_expr in
@@ -1366,9 +1609,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in
-  Hashtbl.reset variant_tags;
   let variant_names = collect_variant_names main_expr fns in
   let variant_typedefs = List.map emit_variant_typedef variant_names in
+  collect_mono_instances main_expr fns;
+  let mono_variant_typedefs =
+    Hashtbl.fold (fun _ (vn, args) acc ->
+      emit_mono_variant_typedef vn args :: acc) mono_variant_instances []
+  in
+  let mono_record_typedefs =
+    Hashtbl.fold (fun _ (rn, args) acc ->
+      emit_mono_record_typedef rn args :: acc) mono_record_instances []
+  in
   let arrow_types = collect_arrow_types main_expr fns in
   let closure_typedefs = List.map emit_closure_typedef arrow_types in
   let fn_defs = List.map emit_fn_def fns in
@@ -1433,7 +1684,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
       "" ]
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
+    @ (if mono_variant_typedefs = [] then [] else mono_variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
+    @ (if mono_record_typedefs = [] then [] else mono_record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if !anon_env_typedefs = [] then []
