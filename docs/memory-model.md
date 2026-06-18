@@ -144,9 +144,9 @@ ERROR: view Node must be constructed inside a region block
 
 ### なぜ「構文のみ」なのか
 
-`lang-ml` は OCaml で書いた**ツリーウォーキング interpreter**で、実際のメモリ管理は OCaml の GC が担っている。region の本来の威力 (bump allocator、一括解放、cache 局所性) は**ネイティブ codegen** が乗ったときに出る。
+`lang-ml` は OCaml で書いた**ツリーウォーキング interpreter**で、interpreter モードでは実際のメモリ管理は OCaml の GC が担っている。
 
-Phase 1 は「型システム上の領域ラベル」を確立する段階で、Phase 2 で escape check 等の静的検証を、Phase 4 の codegen で実際のメモリレイアウトを実装する。Phase 4 の進捗は [codegen.md](codegen.md) を参照。
+**Phase 4 codegen (C出力) では region が実体ある bump allocator として動く** (2026-06-18 達成、Phase 4.17)。`region R { body }` が C runtime の `__lang_region` を init し、`&R v` (`R.alloc(v)` sugar) は region 内に bump-alloc して T* を返す、scope を抜けると一括 free。escape check (typer) と組合せて、region scope を超えるとメモリが解放されるが、その時点で `&R T` 値も型シグネチャ上漏れていないことが保証されている。詳細は [codegen.md](codegen.md) の Phase 4.17 を参照。
 
 ---
 
@@ -247,9 +247,10 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] 文字列 + print + concat (hello world、2026-06-18)
 - [x] str を取る / 返す関数 (2026-06-18)
 - [x] tuple + AST 型注釈基盤 (2026-06-18)
-- [ ] record / variant / pattern match
-- [ ] closure conversion
-- [ ] region runtime (bump allocator) — **メモリモデルの本領発揮はここ**
+- [x] record / variant / pattern match (2026-06-18、多相 monomorphization 含む)
+- [x] closure conversion + 第一級関数 (2026-06-18)
+- [x] **region runtime (bump allocator)** — メモリモデルの本領発揮、2026-06-18
+- [ ] view runtime (`with` Drop 実行 / view 構築の region 化)
 - [ ] LLVM IR or Wasm への移行
 
 ---

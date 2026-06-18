@@ -2327,6 +2327,25 @@ let () =
        show [1, 2]")
     "\"%s, %s\"";
 
+  (* --- C codegen: region runtime (Phase 4.17) ---
+     `region R { body }` initializes a bump-allocator buffer, evaluates
+     the body, frees the buffer. `&R v` allocates v in the region. *)
+  assert_contains "codegen: region runtime helpers injected"
+    (codegen "1")
+    "__lang_region_alloc";
+  assert_contains "codegen: region block initializes + frees buffer"
+    (codegen "region R { 42 }")
+    "__lang_region_init(&__region_R";
+  assert_contains "codegen: region block frees at end"
+    (codegen "region R { 42 }")
+    "__lang_region_free(&__region_R)";
+  assert_contains "codegen: Ref allocates in region and copies"
+    (codegen "region R { let x = &R 5 in 42 }")
+    "__lang_region_alloc(&__region_R";
+  assert_contains "codegen: Ref uses typeof for inner type"
+    (codegen "region R { let x = &R 5 in 42 }")
+    "typeof(__ref_v)*";
+
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
      Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
