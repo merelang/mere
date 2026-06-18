@@ -1040,6 +1040,32 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       header fmt (String.concat ", " parts)
   | Ast.TyArrow _ ->
     header ^ " { (void)v; return \"<closure>\"; }"
+  | Ast.TyCon ("list", [elem_ty]) when Hashtbl.mem polymorphic_variants "list" ->
+    (* Special case: render `'a list` as `[a, b, c]` to match the
+       interpreter's pretty printing. Requires the user-declared
+       `type 'a list = Nil | Cons of 'a * 'a list` (Lang's standard
+       list shape). *)
+    let elem_show = "show_" ^ ty_tag (Ast.walk elem_ty) in
+    Printf.sprintf
+      "%s {\n  \
+         if (v->tag == 0) return \"[]\";\n  \
+         const char* __acc = \"[\";\n  \
+         %s __cur = v;\n  \
+         int __first = 1;\n  \
+         while (__cur->tag == 1) {\n  \
+           char* __buf;\n  \
+           if (__first) {\n  \
+             asprintf(&__buf, \"%%s%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+           } else {\n  \
+             asprintf(&__buf, \"%%s, %%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+           }\n  \
+           __acc = __buf;\n  \
+           __cur = __cur->payload.Cons.f1;\n  \
+           __first = 0;\n  \
+         }\n  \
+         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __buf;\n\
+       }"
+      header cty elem_show elem_show
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     let info = Hashtbl.find Typer.records name in
     let fields_parts =
@@ -1859,7 +1885,22 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       @ (match Ast.walk f.return_ty with
          | Ast.TyTuple ts -> [ts] | _ -> [])
     ) fns in
-    let all = from_expr @ from_fns in
+    (* Also collect tuples inside specialized variant payloads (e.g.,
+       `tuple_int_list_int` inside `list_int`'s Cons). *)
+    let from_variants =
+      Hashtbl.fold (fun _ (name, args) acc ->
+        let (params, variants) = Hashtbl.find polymorphic_variants name in
+        let mapping = List.combine params args in
+        List.fold_left (fun acc (_, arg_opt) ->
+          match arg_opt with
+          | Some t ->
+            (match Ast.walk (subst_params mapping t) with
+             | Ast.TyTuple ts -> ts :: acc
+             | _ -> acc)
+          | None -> acc) acc variants
+      ) mono_variant_instances []
+    in
+    let all = from_expr @ from_fns @ from_variants in
     (* Dedup by struct name. *)
     let seen = Hashtbl.create 8 in
     List.filter (fun ts ->

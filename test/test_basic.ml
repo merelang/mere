@@ -2315,6 +2315,18 @@ let () =
     (codegen "match 7 with | n when n > 5 -> n * 10 | _ -> 0")
     "__auto_type n =";
 
+  (* --- C codegen: list show pretty-print (Phase 4.16) --- *)
+  assert_contains "codegen: list show emits Cons-iterating formatter"
+    (codegen_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "if (v->tag == 0) return \"[]\"";
+  assert_contains "codegen: list show separator is \", \""
+    (codegen_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2]")
+    "\"%s, %s\"";
+
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
      Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
