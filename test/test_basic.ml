@@ -2212,6 +2212,8 @@ let () =
         Typer.register_type name params variants
       | Ast.Top_drop name ->
         Typer.register_drop_type name
+      | Ast.Top_view (name, region, fields) ->
+        Typer.register_view name region fields
       | Ast.Top_let (pat, value) ->
         let outer = !type_env in
         let t = Typer.infer outer value in
@@ -2368,6 +2370,23 @@ let () =
       "drop type CgRes = { v: int };\n\
        with r = CgRes { v = 5 } in r.v")
     "__with_result";
+
+  (* --- C codegen: view runtime (Phase 4.19) — views are region-allocated pointers --- *)
+  assert_contains "codegen: view type becomes pointer"
+    (codegen_with_decls
+      "view CgCell[R] of int { v: int };\n\
+       region R { let c = CgCell { v = 7 } in c.v }")
+    "CgCell*";
+  assert_contains "codegen: view construction bump-allocates in region"
+    (codegen_with_decls
+      "view CgCell2[R] of int { v: int };\n\
+       region R { let c = CgCell2 { v = 7 } in c.v }")
+    "__lang_region_alloc(&__region_R, sizeof(CgCell2))";
+  assert_contains "codegen: view field access uses -> "
+    (codegen_with_decls
+      "view CgCell3[R] of int { v: int };\n\
+       region R { let c = CgCell3 { v = 7 } in c.v }")
+    "(c)->v";
 
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
