@@ -2251,12 +2251,22 @@ let () =
       "type CgUser = { name: str, age: int };\n\
        let u = CgUser { name = \"a\", age = 30 } in u.name")
     "  const char* name;";
-  check_raises "codegen: polymorphic record rejected"
-    (fun () ->
-      let _ = codegen_with_decls
-        "type 'a CgBox = { v: 'a };\n\
-         let b = CgBox { v = 1 } in b.v"
-      in ());
+  assert_contains "codegen: polymorphic record specialized via monomorphization"
+    (* Was previously rejected; Phase 4.13 specializes per instantiation. *)
+    (codegen_with_decls
+      "type 'a CgBox = { v: 'a };\n\
+       let b = CgBox { v = 1 } in b.v")
+    "} CgBox_int;";
+  assert_contains "codegen: poly record Box_str specialization"
+    (codegen_with_decls
+      "type 'a CgBox2 = { v: 'a };\n\
+       let b = CgBox2 { v = \"hi\" } in b.v")
+    "  const char* v;\n} CgBox2_str;";
+  assert_contains "codegen: poly record literal uses mono name"
+    (codegen_with_decls
+      "type 'a CgBox3 = { v: 'a };\n\
+       CgBox3 { v = 42 }")
+    "((CgBox3_int){.v = 42})";
 
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
