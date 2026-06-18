@@ -3219,5 +3219,28 @@ let () =
            in is_even 4")
     "(func $is_odd";
 
+  (* --- Wasm codegen: 文字列対応 (Phase 6.3) ---
+     文字列は linear memory に置く: Str_lit は data セグメント、
+     bump pointer global で動的 alloc、$__lang_strlen / $__lang_str_concat
+     を WAT 内に inline 定義、print は host import (env.puts)。 *)
+  assert_contains "wasm: memory declared + exported"
+    (wasm "\"hi\"") "(memory (export \"memory\") 1)";
+  assert_contains "wasm: bump pointer global declared"
+    (wasm "\"hi\"") "(global $__lang_bump (mut i32)";
+  assert_contains "wasm: puts imported"
+    (wasm "\"hi\"") "(import \"env\" \"puts\" (func $puts (param i32)))";
+  assert_contains "wasm: str literal becomes data segment"
+    (wasm "\"hi\"") "(data (i32.const ";
+  assert_contains "wasm: str_len calls $__lang_strlen"
+    (wasm "str_len \"hi\"") "call $__lang_strlen";
+  assert_contains "wasm: ++ calls $__lang_str_concat"
+    (wasm "\"a\" ++ \"b\"") "call $__lang_str_concat";
+  assert_contains "wasm: print calls $puts"
+    (wasm "print \"hi\"") "call $puts";
+  assert_contains "wasm: __lang_strlen helper defined"
+    (wasm "\"hi\"") "(func $__lang_strlen";
+  assert_contains "wasm: __lang_str_concat helper defined"
+    (wasm "\"hi\"") "(func $__lang_str_concat";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

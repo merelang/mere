@@ -34,6 +34,36 @@ let fresh_local () =
   incr local_counter;
   n
 
+(* String literals live in linear memory. Each Str_lit is laid out
+   sequentially starting at `str_initial_offset` (we reserve the first
+   slot of memory for the bump-allocator's top pointer just out of
+   habit, even though it actually lives in a Wasm global). *)
+let str_initial_offset = 16
+let str_data_decls : string list ref = ref []
+let str_offset_counter = ref str_initial_offset
+
+(* WAT data-string escape: printable ASCII as-is, otherwise \HH. *)
+let wasm_string_escape (s : string) : string =
+  let buf = Buffer.create (String.length s + 4) in
+  String.iter (fun c ->
+    let code = Char.code c in
+    if code >= 32 && code <= 126 && c <> '"' && c <> '\\' then
+      Buffer.add_char buf c
+    else
+      Buffer.add_string buf (Printf.sprintf "\\%02x" code)
+  ) s;
+  Buffer.contents buf
+
+let fresh_str_offset (s : string) : int =
+  let off = !str_offset_counter in
+  let bytes_len = String.length s + 1 in
+  str_offset_counter := off + bytes_len;
+  let escaped = wasm_string_escape s in
+  str_data_decls :=
+    Printf.sprintf "  (data (i32.const %d) \"%s\\00\")" off escaped
+    :: !str_data_decls;
+  off
+
 (* Reset per emit_program. *)
 let reset () =
   instrs := [];
@@ -189,6 +219,9 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "i32.const %d" n)
   | Ast.Bool_lit b ->
     emit_instr (Printf.sprintf "i32.const %d" (if b then 1 else 0))
+  | Ast.Str_lit s ->
+    let off = fresh_str_offset s in
+    emit_instr (Printf.sprintf "i32.const %d" off)
   | Ast.Var name ->
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
@@ -198,8 +231,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.const 0";
     emit_expr inner;
     emit_instr "i32.sub"
-  | Ast.Bin (Ast.Concat, _, _) ->
-    unsupported e.Ast.loc "string concat (++) — Phase 6 later slice"
+  | Ast.Bin (Ast.Concat, a, b) ->
+    emit_expr a;
+    emit_expr b;
+    emit_instr "call $__lang_str_concat"
   | Ast.Bin (op, a, b) ->
     emit_expr a;
     emit_expr b;
@@ -231,6 +266,13 @@ let rec emit_expr (e : Ast.expr) : unit =
        locals := prev
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 6 later slice")
+  | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $puts";
+    emit_instr "i32.const 0"  (* unit / int 0 *)
+  | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_strlen"
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     emit_expr arg;
@@ -270,10 +312,53 @@ let emit_fn_def (f : fn_decl) : string =
     "  (func $%s (param i32) (result i32)\n%s%s)"
     f.name local_decl indented_body
 
+(* Static runtime helpers emitted into the Wasm module: strlen and
+   str_concat both work on the linear memory. The bump pointer is a
+   mutable global; concat advances it after copying the result. *)
+let runtime_helpers = {|
+  (func $__lang_strlen (param $s i32) (result i32)
+    (local $i i32)
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $i))
+  (func $__lang_str_concat (param $a i32) (param $b i32) (result i32)
+    (local $la i32) (local $lb i32) (local $r i32) (local $i i32)
+    (local.set $la (call $__lang_strlen (local.get $a)))
+    (local.set $lb (call $__lang_strlen (local.get $b)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end_a
+      (loop $lp_a
+        (br_if $end_a (i32.eq (local.get $i) (local.get $la)))
+        (i32.store8 (i32.add (local.get $r) (local.get $i))
+                    (i32.load8_u (i32.add (local.get $a) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_a)))
+    (local.set $i (i32.const 0))
+    (block $end_b
+      (loop $lp_b
+        (br_if $end_b (i32.eq (local.get $i) (local.get $lb)))
+        (i32.store8 (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $i))
+                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_b)))
+    (i32.store8 (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
+                (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
+               (i32.const 1)))
+    (local.get $r))|}
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
   Hashtbl.reset toplevel_fn_names;
+  str_data_decls := [];
+  str_offset_counter := str_initial_offset;
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
@@ -296,6 +381,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if fn_defs = [] then "" else
       String.concat "\n" fn_defs ^ "\n"
   in
+  let data_section =
+    if !str_data_decls = [] then ""
+    else String.concat "\n" (List.rev !str_data_decls) ^ "\n"
+  in
+  let bump_init = !str_offset_counter in
   Printf.sprintf
-    "(module\n%s  (func $main (export \"main\") (result i32)\n%s%s)\n)\n"
-    fn_section local_decl indented_body
+    "(module\n\
+     \  (import \"env\" \"puts\" (func $puts (param i32)))\n\
+     \  (memory (export \"memory\") 1)\n\
+     \  (global $__lang_bump (mut i32) (i32.const %d))\n\
+     %s\
+     %s\
+     %s\
+     \  (func $main (export \"main\") (result i32)\n%s%s)\n\
+     )\n"
+    bump_init data_section runtime_helpers fn_section local_decl indented_body
