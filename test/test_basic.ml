@@ -2657,6 +2657,31 @@ let () =
     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
     Codegen_llvm.emit_program ~main_ty prog
   in
+  (* Same as `llvm`, but processes top-level decls (type / record / view)
+     so the typer's registries are populated before codegen runs. *)
+  let llvm_with_decls s =
+    let prog = Pipeline.parse_program s in
+    let type_env = ref Typer.initial_env in
+    List.iter (fun decl ->
+      match decl with
+      | Ast.Top_record (name, params, fields) ->
+        Typer.register_record name params fields
+      | Ast.Top_type (name, params, variants) ->
+        Typer.register_type name params variants
+      | Ast.Top_drop name -> Typer.register_drop_type name
+      | Ast.Top_view (name, region, fields) ->
+        Typer.register_view name region fields
+      | Ast.Top_let (pat, value) ->
+        let outer = !type_env in
+        let t = Typer.infer outer value in
+        let bs = Typer.check_pattern pat t in
+        type_env := List.fold_left (fun acc (n, ty) ->
+          (n, Typer.generalize outer ty) :: acc) outer bs
+      | _ -> ()
+    ) prog.decls;
+    let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
+    Codegen_llvm.emit_program ~main_ty prog
+  in
   assert_contains "llvm: declares printf"
     (llvm "42") "declare i32 @printf(ptr, ...)";
   assert_contains "llvm: defines main"
@@ -2760,6 +2785,41 @@ let () =
   assert_contains "llvm: tuple-returning fn signature"
     (llvm "let split = fn s -> (s, str_len s) in split \"hi\"")
     "define %tuple_str_int @split(ptr %s)";
+
+  (* --- LLVM IR codegen: record (Phase 5.5) ---
+     Monomorphic records lower to named structs; literal builds via
+     insertvalue, field access via extractvalue, update via insertvalue
+     chain on top of the base. *)
+  assert_contains "llvm: record typedef emitted"
+    (llvm_with_decls
+      "type CgLRect = { w: int, h: int };\n\
+       let r = CgLRect { w = 3, h = 4 } in r.w * r.h")
+    "%CgLRect = type { i32, i32 }";
+  assert_contains "llvm: record literal builds via insertvalue chain"
+    (llvm_with_decls
+      "type CgLPt = { x: int, y: int };\n\
+       let p = CgLPt { x = 1, y = 2 } in p.x")
+    "insertvalue %CgLPt undef, i32 1, 0";
+  assert_contains "llvm: record field get via extractvalue"
+    (llvm_with_decls
+      "type CgLPt2 = { x: int, y: int };\n\
+       let p = CgLPt2 { x = 1, y = 2 } in p.y")
+    "extractvalue %CgLPt2";
+  assert_contains "llvm: record update emits insertvalue on top of base"
+    (llvm_with_decls
+      "type CgLPt3 = { x: int, y: int };\n\
+       let p = CgLPt3 { x = 1, y = 2 } in { p | x = 100 }.x")
+    "insertvalue %CgLPt3";
+  assert_contains "llvm: record with str field"
+    (llvm_with_decls
+      "type CgLPair = { a: str, b: int };\n\
+       let p = CgLPair { a = \"hi\", b = 42 } in p.b")
+    "%CgLPair = type { ptr, i32 }";
+  assert_contains "llvm: record-returning fn signature"
+    (llvm_with_decls
+      "type CgLPt4 = { x: int, y: int };\n\
+       let mk = fn n -> CgLPt4 { x = n, y = n + 1 } in (mk 5).x")
+    "define %CgLPt4 @mk(i32 %n)";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
