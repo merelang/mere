@@ -40,6 +40,19 @@ let unsupported loc what =
    Match. *)
 let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
 
+(* Inner-fn lifting (defunctionalization) — populated by a pre-pass and
+   read by emit_expr. For each `let name = fn x -> body` found nested
+   inside a top-level fn, we record:
+     - lifted_name : fresh C function name
+     - captures    : (var, ty) pairs prepended to the lifted fn's params
+   emit_expr drops the Let binding and rewrites `App (Var name, arg)` to
+   `lifted_name(capture1, ..., arg)`. *)
+type lifted_inner = {
+  lifted_name : string;
+  captures    : (string * Ast.ty) list;
+}
+let inner_lifts : (string, lifted_inner) Hashtbl.t = Hashtbl.create 8
+
 let binop_to_c = function
   | Ast.Add -> "+"
   | Ast.Sub -> "-"
@@ -61,6 +74,19 @@ let logicop_to_c = function
   | Ast.Or  -> "||"
 
 (* Lang type → tag string, used to name tuple structs uniquely. *)
+(* Probe: is every element of this type resolved enough to name in C?
+   Used by tuple shape collector to skip polymorphic-shaped tuples that
+   appear in the typer's recorded annotations of generalized fn bodies
+   (those shapes are not part of the program's actual run-time types). *)
+let rec ty_is_concrete (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
+  | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
+  | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
+  | Ast.TyRef (_, inner) -> ty_is_concrete inner
+  | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "int"
@@ -74,6 +100,70 @@ let rec ty_tag (t : Ast.ty) : string =
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
+
+let pattern_vars (p : Ast.pattern) : string list =
+  let rec go p =
+    match p.Ast.pnode with
+    | Ast.P_var n -> [n]
+    | Ast.P_constr (_, Some sub) -> go sub
+    | Ast.P_tuple ps -> List.concat_map go ps
+    | Ast.P_record (_, fs) -> List.concat_map (fun (_, p) -> go p) fs
+    | Ast.P_as (inner, n) -> n :: go inner
+    | Ast.P_or (a, _) -> go a  (* both branches must bind same names *)
+    | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit
+    | Ast.P_constr (_, None) -> []
+  in
+  go p
+
+(* Free variables of an expression with respect to a given set of bound
+   names. Used to compute captures for inner fn lifting. *)
+let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
+  let seen = Hashtbl.create 8 in
+  let order = ref [] in
+  let add n =
+    if not (Hashtbl.mem seen n) then begin
+      Hashtbl.add seen n ();
+      order := n :: !order
+    end
+  in
+  let rec go (e : Ast.expr) (bound : string list) =
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit -> ()
+    | Ast.Var n -> if not (List.mem n bound) then add n
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a bound; go b bound
+    | Ast.Neg a | Ast.Annot (a, _) -> go a bound
+    | Ast.Let (pat, v, body) ->
+      go v bound;
+      go body (pattern_vars pat @ bound)
+    | Ast.Let_rec (bindings, body) ->
+      let names = List.map fst bindings in
+      let bound' = names @ bound in
+      List.iter (fun (_, v) -> go v bound') bindings;
+      go body bound'
+    | Ast.With (n, v, body) ->
+      go v bound; go body (n :: bound)
+    | Ast.If (c, t, e_) -> go c bound; go t bound; go e_ bound
+    | Ast.Fun (param, _, body) -> go body (param :: bound)
+    | Ast.Constr (_, Some a) -> go a bound
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s bound;
+      List.iter (fun (pat, guard, body) ->
+        let bound' = pattern_vars pat @ bound in
+        (match guard with Some g -> go g bound' | None -> ());
+        go body bound') arms
+    | Ast.Tuple es -> List.iter (fun e -> go e bound) es
+    | Ast.Region_block (n, b) -> go b (n :: bound)
+    | Ast.Ref (_, a) -> go a bound
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
+    | Ast.Field_get (a, _) -> go a bound
+    | Ast.Record_update (a, fs) ->
+      go a bound; List.iter (fun (_, e) -> go e bound) fs
+  in
+  go e initially_bound;
+  List.rev !order
 
 (* Translate one Lang expression to a C expression string. *)
 let rec emit_expr (e : Ast.expr) : string =
@@ -96,6 +186,12 @@ let rec emit_expr (e : Ast.expr) : string =
     "(" ^ emit_expr cond ^ " ? " ^ emit_expr then_ ^ " : " ^ emit_expr else_ ^ ")"
   | Ast.Let (pat, value, body) ->
     (match pat.pnode with
+     | Ast.P_var name when
+         (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
+         && Hashtbl.mem inner_lifts name ->
+       (* This inner-fn binding has been lifted out during the pre-pass.
+          The lifted definition lives at top level; just emit the body. *)
+       emit_expr body
      | Ast.P_var name ->
        (* GCC/Clang statement expression so the whole let stays a C
           expression. `__auto_type` (GCC/Clang extension) lets us bind
@@ -125,6 +221,11 @@ let rec emit_expr (e : Ast.expr) : string =
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
        "(" ^ emit_expr arg ^ ").f1"
+     | Ast.Var name when Hashtbl.mem inner_lifts name ->
+       let li = Hashtbl.find inner_lifts name in
+       let cap_args = List.map (fun (n, _) -> n) li.captures in
+       li.lifted_name ^ "(" ^
+       String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
      | Ast.Var name ->
        name ^ "(" ^ emit_expr arg ^ ")"
      | _ ->
@@ -253,9 +354,17 @@ let c_type_of (t : Ast.ty) : string =
         "unsupported C codegen type: %s (only int/bool/str/unit/tuple/record)"
         (Ast.pp_ty other)))
 
-(* Skeleton info collected while walking the AST — types are filled in
-   afterwards by inferring all fns together as one let-rec group. *)
-type fn_skel = { sname : string; sparam : string; sbody : Ast.expr }
+(* Skeleton info collected while walking the AST. We keep the Fun
+   expression around so we can read its inferred `.ty` (set by the
+   typer in the compile_to_c phase) instead of re-inferring — re-
+   inference would overwrite the .ty fields with fresh tyvars that
+   never see the call sites. *)
+type fn_skel = {
+  sname : string;
+  sparam : string;
+  sbody : Ast.expr;
+  sfun : Ast.expr;  (* the original Fun expression, with its typer .ty *)
+}
 
 (* Walk the desugared main expression, extracting top-level fn bindings.
    Returns (fn skeletons in declaration order, residual main body). *)
@@ -270,13 +379,15 @@ let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
            match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false
          in
          let more, rest' = go rest in
-         { sname = name; sparam = param; sbody = fn_body } :: more, rest'
+         { sname = name; sparam = param; sbody = fn_body; sfun = value }
+         :: more, rest'
        | _ -> [], e)
     | Ast.Let_rec (bindings, rest) ->
       let skels =
         List.map (fun (n, v) ->
           match v.Ast.node with
-          | Ast.Fun (p, _, fb) -> { sname = n; sparam = p; sbody = fb }
+          | Ast.Fun (p, _, fb) ->
+            { sname = n; sparam = p; sbody = fb; sfun = v }
           | _ ->
             raise (Codegen_error (v.Ast.loc,
               "let rec binding must be a single-arg function in C subset")))
@@ -288,32 +399,95 @@ let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
   in
   go e
 
-(* Infer types for the lifted fn group via let-rec style: pre-bind all
-   names to fresh tyvars, infer each body, unify. Returns full fn_decls. *)
-let resolve_fn_types (skels : fn_skel list) : fn_decl list =
-  let alphas = List.map (fun _ -> Typer.fresh_var ()) skels in
-  let env_rec =
-    List.fold_left2 (fun acc s a -> (s.sname, Typer.mono a) :: acc)
-      Typer.initial_env skels alphas
+(* Find the first Var node with the given name in `e` whose recorded
+   `.ty` walks to a concrete arrow type. Used to recover a monomorphic
+   instantiation when the binding-site Fun.ty is left polymorphic by
+   let-poly generalization. *)
+let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
+  let found = ref None in
+  let rec go (e : Ast.expr) =
+    (if !found = None then
+       match e.Ast.node with
+       | Ast.Var n when n = name ->
+         (match e.Ast.ty with
+          | Some t when ty_is_concrete (Ast.walk t) ->
+            (match Ast.walk t with
+             | Ast.TyArrow _ as ar -> found := Some ar
+             | _ -> ())
+          | _ -> ())
+       | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
   in
-  List.iter2 (fun s alpha ->
-    let fun_expr =
-      Ast.{ loc = Loc.dummy;
-            ty = None;
-            node = Ast.Fun (s.sparam, None, s.sbody) } in
-    let t = Typer.infer env_rec fun_expr in
-    Typer.unify Loc.dummy alpha t
-  ) skels alphas;
-  List.map2 (fun s alpha ->
-    match Ast.walk alpha with
+  go e;
+  !found
+
+(* Build fn_decls from the typer-annotated AST. For each skeleton, prefer
+   the Fun's own .ty if it's already concrete; otherwise (let-poly
+   generalized it) recover a concrete arrow type by scanning the main
+   expression for a use-site Var with the same name. *)
+let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
+  List.map (fun s ->
+    let arrow =
+      let fun_ty =
+        match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+      in
+      if ty_is_concrete fun_ty then fun_ty
+      else
+        match find_concrete_arrow s.sname root with
+        | Some t -> t
+        | None ->
+          raise (Codegen_error (s.sfun.Ast.loc,
+            Printf.sprintf
+              "fn `%s` has polymorphic type `%s` with no concrete use site \
+               — C codegen needs a monomorphic instantiation"
+              s.sname (Ast.pp_ty fun_ty)))
+    in
+    match arrow with
     | Ast.TyArrow (p, r) ->
       { name = s.sname; param = s.sparam; body = s.sbody;
         param_ty = Ast.walk p; return_ty = Ast.walk r }
     | other ->
-      raise (Codegen_error (Loc.dummy,
+      raise (Codegen_error (s.sfun.Ast.loc,
         Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
           s.sname (Ast.pp_ty other)))
-  ) skels alphas
+  ) skels
+
+(* Lifted-inner-fn signature: captures (with types) prepended to the
+   original param. Stored separately because fn_decl assumes a single
+   param. *)
+type lifted_fn = {
+  l_name      : string;
+  l_captures  : (string * Ast.ty) list;
+  l_param     : string;
+  l_param_ty  : Ast.ty;
+  l_body      : Ast.expr;
+  l_return_ty : Ast.ty;
+}
+
+let format_param (n, ty) =
+  Printf.sprintf "%s %s" (c_type_of ty) n
 
 let emit_fn (f : fn_decl) : string =
   Printf.sprintf "%s %s(%s %s) {\n  return %s;\n}"
@@ -323,9 +497,25 @@ let emit_fn (f : fn_decl) : string =
     f.param
     (emit_expr f.body)
 
+let emit_lifted_fn (f : lifted_fn) : string =
+  let params =
+    String.concat ", "
+      (List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
+  in
+  Printf.sprintf "%s %s(%s) {\n  return %s;\n}"
+    (c_type_of f.l_return_ty) f.l_name params (emit_expr f.l_body)
+
 let emit_fn_forward_decl (f : fn_decl) : string =
   Printf.sprintf "%s %s(%s);"
     (c_type_of f.return_ty) f.name (c_type_of f.param_ty)
+
+let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
+  let params =
+    String.concat ", "
+      (List.map (fun (_, t) -> c_type_of t)
+         (f.l_captures @ [(f.l_param, f.l_param_ty)]))
+  in
+  Printf.sprintf "%s %s(%s);" (c_type_of f.l_return_ty) f.l_name params
 
 (* String-concat runtime helper: allocates a new heap buffer of size
    |a| + |b| + 1 and concatenates. Memory is leaked — fine for short-lived
@@ -354,6 +544,160 @@ let main_format_of (t : Ast.ty) : string option =
    support self / mutual recursion), and emit the residual body inside
    `int main()`. `main_ty` drives the printf format (int/bool → %d, str
    → %s, unit → no printf). *)
+(* Counter for fresh lifted-inner-fn names. *)
+let inner_fn_counter = ref 0
+let fresh_inner_name base =
+  let n = !inner_fn_counter in
+  incr inner_fn_counter;
+  Printf.sprintf "__lifted_%s_%d" base n
+
+(* Walk all top-level fn bodies for nested `let name = fn x -> body in
+   rest` patterns. For each, compute captures (free vars minus known
+   top-level fn names) and produce a lifted_fn. Records the mapping in
+   `inner_lifts` so emit_expr can rewrite call sites and drop bindings. *)
+let rec lift_inner_fns
+    (toplevel_names : string list)
+    (fns : fn_decl list) : lifted_fn list =
+  Hashtbl.reset inner_lifts;
+  inner_fn_counter := 0;
+  let lifted = ref [] in
+  (* Globals = top-level lifted fns + builtins (anything in Typer's
+     initial env). Closure captures must exclude these. *)
+  let builtin_names = List.map fst Typer.initial_env in
+  let known = ref (toplevel_names @ builtin_names) in
+  let rec walk_in_fn (host_param : string) (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Let (pat, value, body) ->
+      (match pat.Ast.pnode, value.Ast.node with
+       | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
+         (* Lift this inner fn. *)
+         let body_fvs = free_vars fn_body (p :: !known) in
+         let captures =
+           List.map (fun fv ->
+             (* Look up the var's type by searching the host fn's body
+                for a Var node with this name; use the typer's recorded
+                ty on it. Falls back to int if not found (defensive). *)
+             let ty = lookup_var_ty fn_body fv in
+             (fv, ty)) body_fvs
+         in
+         List.iter (fun (_, ty) ->
+           match Ast.walk ty with
+           | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
+           | _ ->
+             raise (Codegen_error (value.Ast.loc,
+               Printf.sprintf
+                 "closure capture of non-primitive type `%s` not yet supported"
+                 (Ast.pp_ty ty))))
+           captures;
+         let lifted_name = fresh_inner_name n in
+         (* The inner fn's overall type is recorded on `value`. *)
+         let return_ty, param_ty =
+           match value.Ast.ty with
+           | Some t ->
+             (match Ast.walk t with
+              | Ast.TyArrow (a, b) -> (Ast.walk b, Ast.walk a)
+              | _ ->
+                raise (Codegen_error (value.Ast.loc,
+                  "inner fn has non-arrow inferred type")))
+           | None ->
+             raise (Codegen_error (value.Ast.loc,
+               "inner fn missing inferred type (typer not run?)"))
+         in
+         let lifted_fn = {
+           l_name = lifted_name; l_captures = captures;
+           l_param = p; l_param_ty = param_ty;
+           l_body = fn_body; l_return_ty = return_ty;
+         } in
+         lifted := lifted_fn :: !lifted;
+         Hashtbl.replace inner_lifts n
+           { lifted_name; captures };
+         known := lifted_name :: !known;
+         (* Recurse into the lifted body and into `body` of the let. *)
+         walk_in_fn p fn_body;
+         walk_in_fn host_param body
+       | _ ->
+         walk_in_fn host_param value;
+         walk_in_fn host_param body)
+    | Ast.Fun (_, _, _) ->
+      raise (Codegen_error (e.Ast.loc,
+        "anonymous fn (not in `let name = fn ...`) not yet supported"))
+    | _ -> walk_children walk_in_fn host_param e
+  and walk_children walker host_param e =
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walker host_param a; walker host_param b
+    | Ast.Neg a | Ast.Annot (a, _) -> walker host_param a
+    | Ast.Let (_, v, b) -> walker host_param v; walker host_param b
+    | Ast.Let_rec (bs, b) ->
+      List.iter (fun (_, v) -> walker host_param v) bs;
+      walker host_param b
+    | Ast.With (_, v, b) -> walker host_param v; walker host_param b
+    | Ast.If (c, t, e_) -> walker host_param c; walker host_param t; walker host_param e_
+    | Ast.Fun (_, _, b) -> walker host_param b
+    | Ast.Constr (_, Some a) -> walker host_param a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walker host_param s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walker host_param ge | None -> ());
+        walker host_param b) arms
+    | Ast.Tuple es -> List.iter (walker host_param) es
+    | Ast.Region_block (_, b) -> walker host_param b
+    | Ast.Ref (_, a) -> walker host_param a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walker host_param e) fs
+    | Ast.Field_get (a, _) -> walker host_param a
+    | Ast.Record_update (a, fs) ->
+      walker host_param a; List.iter (fun (_, e) -> walker host_param e) fs
+  in
+  List.iter (fun (f : fn_decl) ->
+    walk_in_fn f.param f.body) fns;
+  List.rev !lifted
+
+(* Find a Var node with the given name in `e` and return the typer-
+   recorded type of that node's enclosing context. We search by walking
+   e and matching Var n; the ty field on that node was set by Typer. *)
+and lookup_var_ty (e : Ast.expr) (name : string) : Ast.ty =
+  let found = ref None in
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n when n = name ->
+       (match e.Ast.ty with
+        | Some t -> if !found = None then found := Some (Ast.walk t)
+        | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go e;
+  match !found with
+  | Some t -> t
+  | None ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "captured variable `%s` has no recorded type" name))
+
 (* Walk a typed AST and collect every distinct tuple shape encountered
    in any node's recorded type. Used to know which structs to define. *)
 let collect_tuple_shapes (root : Ast.expr) : Ast.ty list list =
@@ -364,7 +708,12 @@ let collect_tuple_shapes (root : Ast.expr) : Ast.ty list list =
   in
   let rec walk_ty (t : Ast.ty) =
     match Ast.walk t with
-    | Ast.TyTuple ts -> add ts; List.iter walk_ty ts
+    | Ast.TyTuple ts ->
+      (* Skip polymorphic-shaped tuples — they appear in generalized fn
+         bodies' annotations but aren't part of any concrete run-time
+         shape we need to emit a struct for. *)
+      if List.for_all ty_is_concrete ts then add ts;
+      List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
     | Ast.TyCon (_, args) -> List.iter walk_ty args
     | Ast.TyRef (_, inner) -> walk_ty inner
@@ -520,7 +869,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
-  let fns = resolve_fn_types skels in
+  let fns = resolve_fn_types skels main_expr in
   (* Tuple shape collection: walk the (now typer-annotated) AST plus the
      resolved fn signatures. *)
   let tuple_shapes =
@@ -545,8 +894,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in
-  let forward_decls = List.map emit_fn_forward_decl fns in
-  let fn_defs = List.map emit_fn fns in
+  (* Closure / inner-fn lifting (defunctionalization). Done AFTER
+     top-level fn types are resolved so we know toplevel names. *)
+  let toplevel_names = List.map (fun f -> f.name) fns in
+  let inner_fns = lift_inner_fns toplevel_names fns in
+  let forward_decls =
+    List.map emit_fn_forward_decl fns
+    @ List.map emit_lifted_fn_forward_decl inner_fns
+  in
+  let fn_defs =
+    List.map emit_lifted_fn inner_fns
+    @ List.map emit_fn fns
+  in
   let main_body = emit_expr body_expr in
   let main_stmt =
     match main_format_of main_ty with
