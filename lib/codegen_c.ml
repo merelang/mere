@@ -226,6 +226,50 @@ let mono_record_name (name : string) (args : Ast.ty list) : string =
   | [] -> name
   | _ -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
 
+(* Whether the value at type `v_ty` is represented as a pointer (for
+   recursive variants, mono or polymorphic). Used by pattern compiler
+   to choose `->` vs `.` accessors. *)
+let is_ptr_ty (v_ty : Ast.ty) : bool =
+  match Ast.walk v_ty with
+  | Ast.TyCon (n, args) ->
+    let mono_n =
+      if Hashtbl.mem polymorphic_variants n then
+        mono_variant_name n (List.map Ast.walk args)
+      else n
+    in
+    is_recursive_variant mono_n
+  | _ -> false
+
+(* For a value of `v_ty` (assumed to be a variant), return the payload
+   type of constructor `cname` (with type-params substituted). *)
+let payload_ty_for_ctor (v_ty : Ast.ty) (cname : string) : Ast.ty option =
+  match Ast.walk v_ty with
+  | Ast.TyCon (tname, args) when Hashtbl.mem polymorphic_variants tname ->
+    let (params, variants) = Hashtbl.find polymorphic_variants tname in
+    let mapping = List.combine params args in
+    (try
+       Option.map (subst_params mapping)
+         (List.assoc cname variants)
+     with Not_found -> None)
+  | Ast.TyCon _ | _ ->
+    (try
+       let info = Hashtbl.find Typer.constructors cname in
+       info.Typer.arg
+     with Not_found -> None)
+
+(* For a record value of `v_ty`, return the type of field `fname`. *)
+let field_ty (v_ty : Ast.ty) (fname : string) : Ast.ty =
+  match Ast.walk v_ty with
+  | Ast.TyCon (rname, args) when Hashtbl.mem polymorphic_records rname ->
+    let (params, fields) = Hashtbl.find polymorphic_records rname in
+    let mapping = List.combine params args in
+    (try subst_params mapping (List.assoc fname fields)
+     with Not_found -> Ast.TyInt)
+  | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+    let info = Hashtbl.find Typer.records rname in
+    (try List.assoc fname info.Typer.r_fields with Not_found -> Ast.TyInt)
+  | _ -> Ast.TyInt
+
 (* Find the first Var node with the given name in `e` whose typer-
    recorded `.ty` is set, and return that type. Used to recover capture
    types for closure conversion. *)
@@ -538,67 +582,15 @@ let rec emit_expr (e : Ast.expr) : string =
       Printf.sprintf "((%s){.tag = %d%s})" actual_type_name tag payload_str
   | Ast.Match (scrut, arms) ->
     let scrut_c = emit_expr scrut in
-    (* Decide value-access vs pointer-access from the scrutinee's
-       inferred type: recursive variants are pointers, so use `->`. *)
-    let is_ptr =
+    let scrut_ty =
       match scrut.Ast.ty with
-      | Some t ->
-        (match Ast.walk t with
-         | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
-           is_recursive_variant
-             (mono_variant_name n (List.map Ast.walk args))
-         | Ast.TyCon (n, _) -> is_recursive_variant n
-         | _ -> false)
-      | None -> false
+      | Some t -> Ast.walk t
+      | None -> Ast.TyInt
     in
-    let dot = if is_ptr then "->" else "." in
     let emit_arm (pat, guard, body) =
       if guard <> None then
         unsupported pat.Ast.ploc "match guard (`when ...`) in C codegen";
-      let test, bindings =
-        match pat.Ast.pnode with
-        | Ast.P_wild -> ("1", "")
-        | Ast.P_var n ->
-          ("1",
-           Printf.sprintf "__auto_type %s = __scrut; " n)
-        | Ast.P_constr (cname, sub_opt) ->
-          let tag =
-            try Hashtbl.find variant_tags cname
-            with Not_found ->
-              unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ cname)
-          in
-          let test = Printf.sprintf "__scrut%stag == %d" dot tag in
-          let bind =
-            match sub_opt with
-            | None -> ""
-            | Some sub ->
-              (match sub.Ast.pnode with
-               | Ast.P_wild -> ""
-               | Ast.P_var n ->
-                 Printf.sprintf "__auto_type %s = __scrut%spayload.%s; "
-                   n dot cname
-               | Ast.P_tuple ps ->
-                 (* Destructure tuple payload via .f0 / .f1 / ... *)
-                 String.concat " "
-                   (List.mapi (fun i p ->
-                     match p.Ast.pnode with
-                     | Ast.P_var n ->
-                       Printf.sprintf
-                         "__auto_type %s = __scrut%spayload.%s.f%d;"
-                         n dot cname i
-                     | Ast.P_wild -> ""
-                     | _ ->
-                       unsupported p.Ast.ploc
-                         "nested tuple element (only P_var / P_wild)") ps)
-               | _ ->
-                 unsupported sub.Ast.ploc
-                   "nested pattern in C codegen (only P_var / P_wild / P_tuple)")
-          in
-          (test, bind)
-        | _ ->
-          unsupported pat.Ast.ploc
-            "pattern shape not supported in C codegen yet"
-      in
+      let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
       Printf.sprintf "(%s) ? ({ %s%s; }) " test bindings (emit_expr body)
     in
     let arms_c = String.concat ": " (List.map emit_arm arms) in
@@ -653,6 +645,90 @@ let rec emit_expr (e : Ast.expr) : string =
     in
     "({ __auto_type " ^ tmp ^ " = " ^ emit_expr base ^ "; "
     ^ String.concat " " updates_c ^ " " ^ tmp ^ "; })"
+
+(* Compile a pattern against a C expression of type `v_ty`, returning
+   a (test, bindings) pair: a boolean C expression that's true iff the
+   pattern matches, and a sequence of __auto_type binding statements
+   for the names introduced by the pattern. *)
+and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
+    : string * string =
+  match pat.Ast.pnode with
+  | Ast.P_wild -> ("1", "")
+  | Ast.P_var n ->
+    ("1", Printf.sprintf "__auto_type %s = %s; " n v_c)
+  | Ast.P_int n ->
+    (Printf.sprintf "((%s) == %d)" v_c n, "")
+  | Ast.P_bool b ->
+    (Printf.sprintf "((%s) == %d)" v_c (if b then 1 else 0), "")
+  | Ast.P_str s ->
+    (Printf.sprintf "(strcmp((%s), %s) == 0)" v_c (Ast.escape_string s), "")
+  | Ast.P_unit -> ("1", "")
+  | Ast.P_constr (cname, sub_opt) ->
+    let tag =
+      try Hashtbl.find variant_tags cname
+      with Not_found ->
+        unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ cname)
+    in
+    let dot = if is_ptr_ty v_ty then "->" else "." in
+    let tag_test = Printf.sprintf "(%s)%stag == %d" v_c dot tag in
+    (match sub_opt with
+     | None -> (tag_test, "")
+     | Some sub ->
+       let payload_ty =
+         match payload_ty_for_ctor v_ty cname with
+         | Some t -> t
+         | None ->
+           unsupported pat.Ast.ploc
+             ("missing payload type for " ^ cname)
+       in
+       let sub_v = Printf.sprintf "(%s)%spayload.%s" v_c dot cname in
+       let (sub_test, sub_bind) = compile_pattern sub sub_v payload_ty in
+       let combined_test =
+         if sub_test = "1" then tag_test
+         else Printf.sprintf "((%s) && (%s))" tag_test sub_test
+       in
+       (combined_test, sub_bind))
+  | Ast.P_tuple ps ->
+    let elem_tys =
+      match Ast.walk v_ty with
+      | Ast.TyTuple ts -> ts
+      | _ -> List.map (fun _ -> Ast.TyInt) ps
+    in
+    let parts =
+      List.mapi (fun i p ->
+        let sub_v = Printf.sprintf "(%s).f%d" v_c i in
+        let sub_ty = try List.nth elem_tys i with _ -> Ast.TyInt in
+        compile_pattern p sub_v sub_ty) ps
+    in
+    let tests = List.map fst parts in
+    let binds = List.map snd parts in
+    let real_tests = List.filter (fun t -> t <> "1") tests in
+    let combined_test =
+      if real_tests = [] then "1"
+      else String.concat " && " (List.map (fun t -> "(" ^ t ^ ")") real_tests)
+    in
+    (combined_test, String.concat "" binds)
+  | Ast.P_record (_, fps) ->
+    let parts =
+      List.map (fun (fname, p) ->
+        let sub_v = Printf.sprintf "(%s).%s" v_c fname in
+        let sub_ty = field_ty v_ty fname in
+        compile_pattern p sub_v sub_ty) fps
+    in
+    let tests = List.map fst parts in
+    let binds = List.map snd parts in
+    let real_tests = List.filter (fun t -> t <> "1") tests in
+    let combined_test =
+      if real_tests = [] then "1"
+      else String.concat " && " (List.map (fun t -> "(" ^ t ^ ")") real_tests)
+    in
+    (combined_test, String.concat "" binds)
+  | Ast.P_as (inner, n) ->
+    let (test, bind) = compile_pattern inner v_c v_ty in
+    let as_bind = Printf.sprintf "__auto_type %s = %s; " n v_c in
+    (test, bind ^ as_bind)
+  | Ast.P_or _ ->
+    unsupported pat.Ast.ploc "or-pattern not yet supported in C codegen"
 
 type fn_decl = {
   name      : string;
