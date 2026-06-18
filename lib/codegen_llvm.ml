@@ -56,12 +56,44 @@ let llvm_cmp_int = function
   | Ast.Gt -> "sgt"
   | Ast.Ge -> "sge"
 
-(* Walk a Lang type to its LLVM type. MVP: int + bool only. *)
+(* Walk a Lang type to its LLVM type. *)
 let llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
-  | _ -> "i32"  (* best-effort fallback; typer should reject str/etc. before this *)
+  | Ast.TyStr -> "ptr"
+  | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
+  | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
+
+(* Encode an OCaml string to LLVM's c"..." literal body (without the
+   trailing \00). Printable ASCII goes through; everything else is \HH. *)
+let llvm_string_escape (s : string) : string =
+  let buf = Buffer.create (String.length s + 4) in
+  String.iter (fun c ->
+    let code = Char.code c in
+    if code >= 32 && code <= 126 && c <> '"' && c <> '\\' then
+      Buffer.add_char buf c
+    else
+      Buffer.add_string buf (Printf.sprintf "\\%02X" code)
+  ) s;
+  Buffer.contents buf
+
+(* Accumulator for string-literal globals.
+   Each entry: full LLVM declaration line. *)
+let str_globals : string list ref = ref []
+let str_counter = ref 0
+let fresh_str_global (s : string) : string =
+  let n = !str_counter in
+  incr str_counter;
+  let label = Printf.sprintf "@.str_%d" n in
+  let escaped = llvm_string_escape s in
+  let bytes_len = String.length s + 1 in
+  let decl =
+    Printf.sprintf "%s = private constant [%d x i8] c\"%s\\00\""
+      label bytes_len escaped
+  in
+  str_globals := decl :: !str_globals;
+  label
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
@@ -201,6 +233,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   match e.Ast.node with
   | Ast.Int_lit n -> string_of_int n
   | Ast.Bool_lit b -> if b then "1" else "0"
+  | Ast.Str_lit s ->
+    (* String literals lower to a private constant + return its symbol;
+       since pointers are opaque, the global is directly usable as a ptr. *)
+    fresh_str_global s
   | Ast.Var name -> lookup env name e.Ast.loc
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
@@ -208,8 +244,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = sub i32 0, %s" r v);
     r
-  | Ast.Bin (Ast.Concat, _, _) ->
-    unsupported e.Ast.loc "string concat (++) — Phase 5 later slice"
+  | Ast.Bin (Ast.Concat, a, b) ->
+    let ra = emit_expr env a in
+    let rb = emit_expr env b in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_concat(ptr %s, ptr %s)" r ra rb);
+    r
   | Ast.Bin (op, a, b) ->
     let ra = emit_expr env a in
     let rb = emit_expr env b in
@@ -274,6 +314,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_expr ((name, rv) :: env) body
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 5 later slice")
+  | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
+    let av = emit_expr env arg in
+    emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
+    "0"  (* unit / int 0 *)
+  | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" raw av);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r raw);
+    r
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     let av = emit_expr env arg in
@@ -293,7 +344,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   | Ast.App _ ->
     unsupported e.Ast.loc "indirect / first-class fn call — Phase 5 later slice"
-  | Ast.Str_lit _ | Ast.Float_lit _ | Ast.Unit_lit
+  | Ast.Float_lit _ | Ast.Unit_lit
   | Ast.Let_rec _ | Ast.With _ | Ast.Fun _
   | Ast.Constr _ | Ast.Match _ | Ast.Tuple _
   | Ast.Region_block _ | Ast.Ref _
@@ -319,18 +370,48 @@ let emit_fn_def (f : fn_decl) : string =
     (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
 
 (* Convert the program's main result type to (LLVM type, printf format).
-   `unit` skips printing entirely. *)
+   `unit` skips printing entirely. `str` uses %s. *)
 let main_format_of (t : Ast.ty) : (string * string) option =
   match Ast.walk t with
   | Ast.TyInt -> Some ("i32", "%d")
   | Ast.TyBool -> Some ("i32", "%d")  (* zext from i1 *)
+  | Ast.TyStr -> Some ("ptr", "%s")
   | Ast.TyUnit -> None
   | _ -> Some ("i32", "%d")
+
+(* Runtime helpers emitted as LLVM IR. Mirrors codegen_c's runtime
+   helpers but inlined into the .ll module so the file is self-contained. *)
+let runtime_decls =
+  String.concat "\n"
+    [ "declare ptr @malloc(i64)";
+      "declare i64 @strlen(ptr)";
+      "declare ptr @memcpy(ptr, ptr, i64)";
+      "declare i32 @puts(ptr)";
+      "declare i32 @printf(ptr, ...)" ]
+
+let str_concat_helper =
+  String.concat "\n"
+    [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
+      "entry:";
+      "  %la = call i64 @strlen(ptr %a)";
+      "  %lb = call i64 @strlen(ptr %b)";
+      "  %total = add i64 %la, %lb";
+      "  %totalp1 = add i64 %total, 1";
+      "  %r = call ptr @malloc(i64 %totalp1)";
+      "  call ptr @memcpy(ptr %r, ptr %a, i64 %la)";
+      "  %p1 = getelementptr i8, ptr %r, i64 %la";
+      "  call ptr @memcpy(ptr %p1, ptr %b, i64 %lb)";
+      "  %p2 = getelementptr i8, ptr %r, i64 %total";
+      "  store i8 0, ptr %p2";
+      "  ret ptr %r";
+      "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reg_counter := 0;
   label_counter := 0;
   instrs := [];
+  str_globals := [];
+  str_counter := 0;
   Hashtbl.reset toplevel_fn_names;
   let main_expr = Ast.desugar_program prog in
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
@@ -366,21 +447,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   emit_instr "  ret i32 0";
   let body = String.concat "\n" (List.rev !instrs) in
   let format_globals =
-    (* The byte length includes the null terminator and counts LLVM
-       escapes (`\0A`) as 1 byte each. We hardcode the few formats we
-       use rather than maintain a generic length calculator. *)
+    (* Hardcoded format strings. Byte lengths count LLVM escapes (`\0A`)
+       as 1 byte each and include the null terminator. *)
     match main_format_of main_ty with
     | None -> []
-    | Some _ ->
+    | Some (_, "%d") ->
       [ "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"" ]
+    | Some (_, "%s") ->
+      [ "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"" ]
+    | _ -> []
   in
   let parts =
     [ "; LLVM IR generated by lang-ml (Phase 5)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
       "" ]
+    @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
     @ format_globals
     @ [ "";
-        "declare i32 @printf(ptr, ...)";
+        runtime_decls;
+        "";
+        str_concat_helper;
         "" ]
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "define i32 @main() {";
