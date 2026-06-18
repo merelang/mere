@@ -133,6 +133,10 @@ let mono_record_name (name : string) (args : Ast.ty list) : string =
    instantiations are tracked separately by their LLVM-side struct name. *)
 let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
 
+(* Types that need a `show_<tag>` function emitted. Key is ty_tag of
+   the type (used as the function name suffix); value is the type. *)
+let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 let is_recursive_variant_name (name : string) : bool =
   Hashtbl.mem recursive_variants name
 
@@ -873,6 +877,327 @@ let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
   walk_expr root;
   List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns
 
+(* Walk AST to collect types passed to `show`. Pulls in dependent types
+   (tuple elems, record fields, variant payloads) recursively. The
+   Hashtbl guard prevents infinite recursion on self-referential
+   variants (e.g. `'a list`). *)
+let rec add_show_type (t : Ast.ty) : unit =
+  let t = Ast.walk t in
+  if not (ty_is_concrete t) then ()
+  else
+    let tag = ty_tag t in
+    if Hashtbl.mem show_types tag then ()
+    else begin
+      Hashtbl.add show_types tag t;
+      (* Recurse into dependent types. *)
+      match t with
+      | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
+      | Ast.TyTuple ts -> List.iter add_show_type ts
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+        let (params, fields) = Hashtbl.find polymorphic_records n in
+        let mapping = List.combine params args in
+        List.iter (fun (_, ft) -> add_show_type (subst_params mapping ft)) fields
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+        let fields = record_fields n in
+        List.iter (fun (_, ft) -> add_show_type ft) fields
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+        let (params, variants) = Hashtbl.find polymorphic_variants n in
+        let sv = subst_variants params args variants in
+        List.iter (fun (_, arg_opt) ->
+          match arg_opt with Some t -> add_show_type t | None -> ()) sv
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+        let vs = variant_shape n in
+        List.iter (fun (_, arg_opt) ->
+          match arg_opt with Some t -> add_show_type t | None -> ()) vs
+      | _ -> ()
+    end
+
+let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
+       (match arg.Ast.ty with
+        | Some t -> add_show_type t
+        | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_expr f.body) fns
+
+(* Pre-defined string globals used by show fns. Emitted once per program. *)
+let show_string_globals = ref []
+let show_format_globals = ref []
+(* String global for an arbitrary literal — adds a unique label.
+   Different from fresh_str_global (which is per-call); these are
+   shared / pre-registered at the start of show emission. *)
+let mint_show_global name content =
+  let bytes_len = String.length content + 1 in
+  let escaped = llvm_string_escape content in
+  show_string_globals :=
+    Printf.sprintf "@.%s = private constant [%d x i8] c\"%s\\00\""
+      name bytes_len escaped
+    :: !show_string_globals
+
+let mint_show_format name fmt =
+  (* `fmt` is the OCaml string content (e.g. "%d") — emit it as the LLVM
+     constant body and let LLVM count the bytes correctly. *)
+  let bytes_len = String.length fmt + 1 in
+  let escaped = llvm_string_escape fmt in
+  show_format_globals :=
+    Printf.sprintf "@.fmt_%s = private constant [%d x i8] c\"%s\\00\""
+      name bytes_len escaped
+    :: !show_format_globals
+
+(* Emit a single show_<tag> function for the given type. *)
+let emit_show_fn (tag : string) (t : Ast.ty) : string =
+  let saved_instrs = !instrs in
+  let saved_reg = !reg_counter and saved_lbl = !label_counter in
+  reg_counter := 0;
+  label_counter := 0;
+  instrs := [];
+  let param_ty = llvm_ty_of t in
+  let emit_asprintf fmt_name args =
+    (* Allocate a local ptr to receive the asprintf result. *)
+    let p = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = alloca ptr" p);
+    let arg_str =
+      if args = "" then "" else ", " ^ args
+    in
+    emit_instr (Printf.sprintf
+                  "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s%s)"
+                  p fmt_name arg_str);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+    r
+  in
+  emit_instr "entry:";
+  let result_reg =
+    match Ast.walk t with
+    | Ast.TyInt ->
+      emit_asprintf "show_int" "i32 %x"
+    | Ast.TyBool ->
+      (* Select between "true" / "false" globals. *)
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = select i1 %%x, ptr @.s_true, ptr @.s_false" r);
+      r
+    | Ast.TyStr ->
+      emit_asprintf "show_str" "ptr %x"
+    | Ast.TyUnit ->
+      "@.s_unit"
+    | Ast.TyTuple ts ->
+      (* Show each element, then asprintf "(%s, %s, ...)" with them. *)
+      let tname = tuple_struct_name ts in
+      let elem_strs =
+        List.mapi (fun i ety ->
+          let e = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, %d" e tname i);
+          let s = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                        s (ty_tag ety) (llvm_ty_of ety) e);
+          Printf.sprintf "ptr %s" s
+        ) ts
+      in
+      emit_asprintf ("show_" ^ tag) (String.concat ", " elem_strs)
+    | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+      let (params, fields) = Hashtbl.find polymorphic_records n in
+      let mapping = List.combine params args in
+      let sf = List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fields in
+      let mono = mono_record_name n args in
+      let field_strs =
+        List.mapi (fun i (_, ft) ->
+          let e = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, %d" e mono i);
+          let s = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                        s (ty_tag ft) (llvm_ty_of ft) e);
+          Printf.sprintf "ptr %s" s
+        ) sf
+      in
+      emit_asprintf ("show_" ^ tag) (String.concat ", " field_strs)
+    | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+      let fields = record_fields n in
+      let field_strs =
+        List.mapi (fun i (_, ft) ->
+          let e = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, %d" e n i);
+          let s = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                        s (ty_tag ft) (llvm_ty_of ft) e);
+          Printf.sprintf "ptr %s" s
+        ) fields
+      in
+      emit_asprintf ("show_" ^ tag) (String.concat ", " field_strs)
+    | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+      let (params, variants) = Hashtbl.find polymorphic_variants n in
+      let sv = subst_variants params args variants in
+      let mono = mono_variant_name n args in
+      let recursive = is_recursive_variant_name mono in
+      let node_ty = "%" ^ mono ^ "_node" in
+      (* Extract tag *)
+      let tag_reg = fresh_reg () in
+      if recursive then begin
+        let p = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %%x, i32 0, i32 0"
+                      p node_ty);
+        emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag_reg p)
+      end else
+        emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 0" tag_reg mono);
+      (* Switch over tag: for each constructor, emit a branch that
+         produces the string. *)
+      let merge_label = fresh_label "show_join_" in
+      let phi_entries = ref [] in
+      List.iteri (fun ctor_tag (cname, arg_opt) ->
+        let arm_label = fresh_label "show_arm_" in
+        let next_label = fresh_label "show_next_" in
+        let cmp = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" cmp tag_reg ctor_tag);
+        emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                      cmp arm_label next_label);
+        emit_label arm_label;
+        let s =
+          match arg_opt with
+          | None ->
+            "@.s_ctor_" ^ cname
+          | Some pty ->
+            let p_reg = fresh_reg () in
+            if recursive then begin
+              let pp = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %%x, i32 0, i32 1"
+                            pp node_ty);
+              emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                            p_reg (llvm_ty_of pty) pp)
+            end else
+              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 1" p_reg mono);
+            let ps = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                          ps (ty_tag pty) (llvm_ty_of pty) p_reg);
+            (* Build "Ctor payload_str" *)
+            let p = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = alloca ptr" p);
+            emit_instr (Printf.sprintf
+                          "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_show_ctor_payload, ptr @.s_ctor_%s, ptr %s)"
+                          p cname ps);
+            let r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+            r
+        in
+        let end_label = fresh_label "show_armend_" in
+        emit_instr (Printf.sprintf "  br label %%%s" end_label);
+        emit_label end_label;
+        phi_entries := (s, end_label) :: !phi_entries;
+        emit_instr (Printf.sprintf "  br label %%%s" merge_label);
+        emit_label next_label
+      ) sv;
+      (* Final unreachable (typer should catch non-exhaustive) *)
+      emit_instr "  call void @abort()";
+      emit_instr "  unreachable";
+      emit_label merge_label;
+      let r = fresh_reg () in
+      let phi_parts =
+        String.concat ", " (List.rev_map (fun (v, lbl) ->
+          Printf.sprintf "[%s, %%%s]" v lbl) !phi_entries)
+      in
+      emit_instr (Printf.sprintf "  %s = phi ptr %s" r phi_parts);
+      r
+    | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+      (* Mono variant. *)
+      let vs = variant_shape n in
+      let recursive = is_recursive_variant_name n in
+      let node_ty = "%" ^ n ^ "_node" in
+      let tag_reg = fresh_reg () in
+      if recursive then begin
+        let p = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %%x, i32 0, i32 0"
+                      p node_ty);
+        emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag_reg p)
+      end else
+        emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 0" tag_reg n);
+      let merge_label = fresh_label "show_join_" in
+      let phi_entries = ref [] in
+      List.iteri (fun ctor_tag (cname, arg_opt) ->
+        let arm_label = fresh_label "show_arm_" in
+        let next_label = fresh_label "show_next_" in
+        let cmp = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" cmp tag_reg ctor_tag);
+        emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                      cmp arm_label next_label);
+        emit_label arm_label;
+        let s =
+          match arg_opt with
+          | None -> "@.s_ctor_" ^ cname
+          | Some pty ->
+            let p_reg = fresh_reg () in
+            if recursive then begin
+              let pp = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %%x, i32 0, i32 1"
+                            pp node_ty);
+              emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                            p_reg (llvm_ty_of pty) pp)
+            end else
+              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 1" p_reg n);
+            let ps = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                          ps (ty_tag pty) (llvm_ty_of pty) p_reg);
+            let p = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = alloca ptr" p);
+            emit_instr (Printf.sprintf
+                          "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_show_ctor_payload, ptr @.s_ctor_%s, ptr %s)"
+                          p cname ps);
+            let r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+            r
+        in
+        let end_label = fresh_label "show_armend_" in
+        emit_instr (Printf.sprintf "  br label %%%s" end_label);
+        emit_label end_label;
+        phi_entries := (s, end_label) :: !phi_entries;
+        emit_instr (Printf.sprintf "  br label %%%s" merge_label);
+        emit_label next_label
+      ) vs;
+      emit_instr "  call void @abort()";
+      emit_instr "  unreachable";
+      emit_label merge_label;
+      let r = fresh_reg () in
+      let phi_parts =
+        String.concat ", " (List.rev_map (fun (v, lbl) ->
+          Printf.sprintf "[%s, %%%s]" v lbl) !phi_entries)
+      in
+      emit_instr (Printf.sprintf "  %s = phi ptr %s" r phi_parts);
+      r
+    | _ ->
+      "@.s_unit"  (* unknown — fallback to "()" *)
+  in
+  emit_instr (Printf.sprintf "  ret ptr %s" result_reg);
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs;
+  reg_counter := saved_reg;
+  label_counter := saved_lbl;
+  Printf.sprintf "define ptr @show_%s(%s %%x) {\n%s\n}" tag param_ty body
+
 (* Closure value layout: `{ ptr env, ptr fn }`. The fn pointer's
    concrete signature (T2 (ptr, T1)) is encoded via bitcast at call
    sites; LLVM's opaque pointers tolerate that without a typed cast. *)
@@ -1024,6 +1349,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" r tname av);
+    r
+  | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "show: missing arg type"
+    in
+    let tag = ty_tag arg_ty in
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                  r tag (llvm_ty_of arg_ty) av);
     r
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     let av = emit_expr env arg in
@@ -1764,6 +2101,7 @@ let runtime_decls =
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
+      "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()" ]
 
 (* Region runtime — mirrors codegen_c's region_runtime_helpers but
@@ -1838,6 +2176,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_variant_instances;
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset recursive_variants;
+  Hashtbl.reset show_types;
+  show_string_globals := [];
+  show_format_globals := [];
   (* Register variant tags + classify into mono / poly. Polymorphic
      variants and records are deferred to mono-instance emission. *)
   Hashtbl.iter (fun name vs ->
@@ -1893,6 +2234,72 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let arrow_types = collect_arrow_types main_expr fns in
   let closure_typedefs = List.map emit_closure_typedef arrow_types in
+  (* Collect show types + pre-register globals (constants + format
+     strings) used by show fns. The fns themselves are emitted later. *)
+  collect_show_types main_expr fns;
+  if Hashtbl.length show_types > 0 then begin
+    mint_show_global "s_true" "true";
+    mint_show_global "s_false" "false";
+    mint_show_global "s_unit" "()";
+    mint_show_format "show_int" "%d";
+    mint_show_format "show_str" "\"%s\"";
+    mint_show_format "show_ctor_payload" "%s %s";
+    (* Per-type tuple / record / variant format strings + per-ctor
+       name strings. *)
+    let registered_ctors = Hashtbl.create 4 in
+    Hashtbl.iter (fun tag t ->
+      match Ast.walk t with
+      | Ast.TyTuple ts ->
+        let body =
+          "(" ^ String.concat ", "
+            (List.init (List.length ts) (fun _ -> "%s")) ^ ")"
+        in
+        mint_show_format ("show_" ^ tag) body
+      | Ast.TyCon (n, _) when Hashtbl.mem polymorphic_records n
+                           || Hashtbl.mem Typer.records n ->
+        let fields_count =
+          if Hashtbl.mem polymorphic_records n then
+            let (_, fs) = Hashtbl.find polymorphic_records n in List.length fs
+          else
+            List.length (record_fields n)
+        in
+        let body =
+          n ^ " { " ^
+          String.concat ", "
+            (List.mapi (fun i _ ->
+              let fname =
+                if Hashtbl.mem polymorphic_records n then
+                  fst (List.nth (snd (Hashtbl.find polymorphic_records n)) i)
+                else
+                  fst (List.nth (record_fields n) i)
+              in
+              fname ^ " = %s") (List.init fields_count (fun _ -> 0)))
+          ^ " }"
+        in
+        mint_show_format ("show_" ^ tag) body
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+        let (params, variants) = Hashtbl.find polymorphic_variants n in
+        let sv = subst_variants params args variants in
+        List.iter (fun (cname, _) ->
+          if not (Hashtbl.mem registered_ctors cname) then begin
+            Hashtbl.add registered_ctors cname ();
+            mint_show_global ("s_ctor_" ^ cname) cname
+          end
+        ) sv
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+        let vs = variant_shape n in
+        List.iter (fun (cname, _) ->
+          if not (Hashtbl.mem registered_ctors cname) then begin
+            Hashtbl.add registered_ctors cname ();
+            mint_show_global ("s_ctor_" ^ cname) cname
+          end
+        ) vs
+      | _ -> ()
+    ) show_types
+  end;
+  let show_fn_defs =
+    Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
+  in
   let fn_defs = List.map emit_fn_def fns in
   let closure_adapters = List.map emit_closure_adapter fns in
   (* Reset counters for the main body. *)
@@ -1963,6 +2370,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !anon_env_typedefs = [] then []
        else List.rev !anon_env_typedefs @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
+    @ (if !show_string_globals = [] then []
+       else List.rev !show_string_globals @ [""])
+    @ (if !show_format_globals = [] then []
+       else List.rev !show_format_globals @ [""])
     @ format_globals
     @ [ "";
         runtime_decls;
@@ -1973,6 +2384,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "" ]
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
+    @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
     @ (if anon_adapters = [] then [] else anon_adapters @ [""])
     @ [ "define i32 @main() {";
         body;
