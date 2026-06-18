@@ -76,9 +76,10 @@ let rec ty_tag (t : Ast.ty) : string =
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
 
-(* Walk a Lang type to its LLVM type. Tuples / monomorphic records lower
-   to named-struct references (`%tuple_int_int`, `%Point`); these are
-   emitted as `type` definitions at the top of the module. *)
+(* Walk a Lang type to its LLVM type. Tuples / monomorphic records /
+   variants lower to named-struct references (`%tuple_int_int`,
+   `%Point`, `%Status`); these are emitted as `type` definitions at the
+   top of the module. *)
 let llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "i32"
@@ -87,6 +88,7 @@ let llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name
+  | Ast.TyCon (name, []) when Hashtbl.mem Typer.types name -> "%" ^ name
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
 
 (* Look up a record's ordered field list. Raises if name isn't in the
@@ -323,6 +325,61 @@ let emit_tuple_typedef (elems : Ast.ty list) : string =
   let fields = String.concat ", " (List.map llvm_ty_of elems) in
   Printf.sprintf "%%%s = type { %s }" name fields
 
+(* Walk a typed AST + fn signatures to collect every monomorphic variant
+   type name encountered. *)
+let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
+  let seen = Hashtbl.create 8 in
+  let add name =
+    if Hashtbl.mem Typer.types name &&
+       not (Hashtbl.mem Typer.records name) &&
+       not (Hashtbl.mem seen name) &&
+       Hashtbl.find Typer.types name = 0 (* arity 0 — monomorphic *)
+    then Hashtbl.add seen name ()
+  in
+  let rec walk_ty (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyCon (n, args) -> add n; List.iter walk_ty args
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    (match e.Ast.node with
+     | Ast.Constr (cname, _) ->
+       (match Hashtbl.find_opt Typer.constructors cname with
+        | Some info -> add info.Typer.type_name
+        | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
+  Hashtbl.fold (fun k () acc -> k :: acc) seen []
+
 (* Walk a typed AST + fn signatures to collect every monomorphic record
    type name encountered. *)
 let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
@@ -379,6 +436,48 @@ let emit_record_typedef (name : string) : string =
   let fields = record_fields name in
   let field_tys = String.concat ", " (List.map (fun (_, t) -> llvm_ty_of t) fields) in
   Printf.sprintf "%%%s = type { %s }" name field_tys
+
+(* Variant tags: each constructor → integer tag. Populated by
+   emit_variant_typedef as a side effect. *)
+let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
+
+(* Variants and their concrete shape — populated from Exhaustive's
+   registry. None means nullary-only; Some t means all payload-bearing
+   constructors share payload type t (MVP restriction). *)
+let variant_shape (name : string) : (string * Ast.ty option) list =
+  match Hashtbl.find_opt Exhaustive.type_variants name with
+  | Some vs -> vs
+  | None ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "unknown variant type `%s` at LLVM codegen" name))
+
+(* Decide the single payload type for a variant (Phase 5.6 MVP only
+   handles all-nullary or single-payload-type). Returns None if all
+   constructors are nullary. *)
+let variant_payload_ty (name : string) : Ast.ty option =
+  let vs = variant_shape name in
+  let payloads =
+    List.filter_map (fun (_, p) -> p) vs
+  in
+  match payloads with
+  | [] -> None
+  | first :: rest ->
+    let first_tag = ty_tag (Ast.walk first) in
+    if List.for_all (fun p -> ty_tag (Ast.walk p) = first_tag) rest then
+      Some first
+    else
+      raise (Codegen_error (Loc.dummy,
+        Printf.sprintf
+          "variant `%s` has constructors with different payload types — \
+           Phase 5 MVP needs all payloads to be the same type" name))
+
+let emit_variant_typedef (name : string) : string =
+  let vs = variant_shape name in
+  List.iteri (fun i (cname, _) ->
+    Hashtbl.replace variant_tags cname i) vs;
+  match variant_payload_ty name with
+  | None -> Printf.sprintf "%%%s = type { i32 }" name
+  | Some t -> Printf.sprintf "%%%s = type { i32, %s }" name (llvm_ty_of t)
 
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
@@ -625,9 +724,145 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         apply r rest
     in
     apply bv updates
+  | Ast.Constr (cname, arg_opt) ->
+    let info =
+      match Hashtbl.find_opt Typer.constructors cname with
+      | Some i -> i
+      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ cname)
+    in
+    let type_name = info.Typer.type_name in
+    if not (Hashtbl.mem Typer.types type_name) then
+      unsupported e.Ast.loc ("constructor's type not registered: " ^ type_name);
+    if info.Typer.params <> [] then
+      unsupported e.Ast.loc "polymorphic variant — Phase 5 later slice";
+    let tag =
+      match Hashtbl.find_opt variant_tags cname with
+      | Some t -> t
+      | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
+    in
+    let r0 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, i32 %d, 0"
+                  r0 type_name tag);
+    (match arg_opt, variant_payload_ty type_name with
+     | None, _ -> r0
+     | Some arg, Some pty ->
+       let av = emit_expr env arg in
+       let r1 = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, 1"
+                     r1 type_name r0 (llvm_ty_of pty) av);
+       r1
+     | Some _, None ->
+       unsupported e.Ast.loc
+         (Printf.sprintf
+            "constructor `%s` has payload but variant `%s` was lowered as nullary-only"
+            cname type_name))
+  | Ast.Match (scrut, arms) ->
+    let scrut_ty =
+      match scrut.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "match: missing scrutinee type"
+    in
+    let type_name =
+      match scrut_ty with
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n -> n
+      | _ ->
+        unsupported e.Ast.loc "match: scrutinee is not a user-declared variant (Phase 5 MVP)"
+    in
+    let scrut_v = emit_expr env scrut in
+    let tag_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0"
+                  tag_reg type_name scrut_v);
+    let payload_ty = variant_payload_ty type_name in
+    let result_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    let merge_label = fresh_label "match_join_" in
+    (* For each arm, generate: test (icmp eq tag, N) → arm-body block;
+       fallthrough to next test. We collect (block_end_label, value)
+       pairs for the final phi node. *)
+    let phi_entries = ref [] in
+    let compile_pat pat v_tag v_payload_opt
+      : string (* cond reg (i1) *) * (string * string) list (* (name, value) bindings *) =
+      match pat.Ast.pnode with
+      | Ast.P_wild -> ("1", [])  (* always true *)
+      | Ast.P_var n ->
+        (* Bind to whole scrutinee — but in Phase 5 MVP we don't really
+           need to construct the whole struct value here; the caller's
+           env binding can point at the original scrut_v. *)
+        ("1", [(n, scrut_v)])
+      | Ast.P_constr (cname, sub) ->
+        let tag =
+          match Hashtbl.find_opt variant_tags cname with
+          | Some t -> t
+          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+        in
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" r v_tag tag);
+        let bindings =
+          match sub, v_payload_opt with
+          | None, _ -> []
+          | Some sub_pat, Some pv ->
+            (match sub_pat.Ast.pnode with
+             | Ast.P_wild -> []
+             | Ast.P_var n -> [(n, pv)]
+             | _ ->
+               unsupported sub_pat.Ast.ploc
+                 "nested ctor sub-pattern — Phase 5 later slice")
+          | Some _, None ->
+            unsupported pat.Ast.ploc
+              "pattern has payload but variant lowered as nullary-only"
+        in
+        (r, bindings)
+      | _ ->
+        unsupported pat.Ast.ploc "pattern kind not yet in Phase 5 MVP"
+    in
+    let rec emit_arms = function
+      | [] ->
+        (* Fall through to abort — typer's exhaustiveness should catch
+           non-total matches, but emit a guard anyway. *)
+        emit_instr "  call void @abort()";
+        emit_instr "  unreachable"
+      | (pat, guard, body) :: rest ->
+        if guard <> None then
+          unsupported pat.Ast.ploc "match guard — Phase 5 later slice";
+        let payload_reg =
+          match payload_ty with
+          | None -> None
+          | Some pty ->
+            let r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
+                          r type_name scrut_v);
+            ignore pty; Some r
+        in
+        let (cond, bindings) = compile_pat pat tag_reg payload_reg in
+        let arm_label = fresh_label "arm_" in
+        let next_label = fresh_label "next_" in
+        emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                      cond arm_label next_label);
+        emit_label arm_label;
+        let env' = bindings @ env in
+        let v = emit_expr env' body in
+        let end_label = fresh_label "arm_end_" in
+        emit_instr (Printf.sprintf "  br label %%%s" end_label);
+        emit_label end_label;
+        phi_entries := (v, end_label) :: !phi_entries;
+        emit_instr (Printf.sprintf "  br label %%%s" merge_label);
+        emit_label next_label;
+        emit_arms rest
+    in
+    emit_arms arms;
+    emit_label merge_label;
+    let r = fresh_reg () in
+    let phi_parts =
+      String.concat ", " (List.rev_map (fun (v, lbl) ->
+        Printf.sprintf "[%s, %%%s]" v lbl) !phi_entries)
+    in
+    emit_instr (Printf.sprintf "  %s = phi %s %s" r result_ty phi_parts);
+    r
   | Ast.Float_lit _ | Ast.Unit_lit
   | Ast.Let_rec _ | Ast.With _ | Ast.Fun _
-  | Ast.Constr _ | Ast.Match _
   | Ast.Region_block _ | Ast.Ref _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
 
@@ -667,7 +902,8 @@ let runtime_decls =
       "declare i64 @strlen(ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
-      "declare i32 @printf(ptr, ...)" ]
+      "declare i32 @printf(ptr, ...)";
+      "declare void @abort()" ]
 
 let str_concat_helper =
   String.concat "\n"
@@ -702,6 +938,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in
+  Hashtbl.reset variant_tags;
+  let variant_names = collect_variant_names main_expr fns in
+  let variant_typedefs = List.map emit_variant_typedef variant_names in
   let fn_defs = List.map emit_fn_def fns in
   (* Reset counters for the main body. *)
   reg_counter := 0;
@@ -745,6 +984,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     [ "; LLVM IR generated by lang-ml (Phase 5)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
       "" ]
+    @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
