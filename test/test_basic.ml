@@ -2897,5 +2897,31 @@ let () =
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "define i32 @apply(%closure_int_int %f)";
 
+  (* --- LLVM IR codegen: anonymous Fun + closure-with-captures (Phase 5.7-b) ---
+     Inner `fn x -> ...` in expression position lifts to an env struct
+     + adapter; captures are stored in a heap-allocated env (via malloc
+     for now) and re-loaded inside the adapter from `%env_self`. *)
+  assert_contains "llvm: anon adapter emitted"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "define i32 @anon_0_fn(ptr %env_self, i32 %x)";
+  assert_contains "llvm: anon env struct typedef"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "%anon_0_env = type { i32 }";
+  assert_contains "llvm: anon env allocated via malloc"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "= call ptr @malloc";
+  assert_contains "llvm: capture stored into env via getelementptr"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "getelementptr %anon_0_env, ptr ";
+  assert_contains "llvm: capture loaded from env_self in adapter"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "= load i32, ptr ";
+  assert_contains "llvm: anon closure value built with adapter pointer"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "ptr @anon_0_fn, 1";
+  assert_contains "llvm: captureless anon Fun uses null env"
+    (llvm "let apply = fn f -> f 5 in apply (fn x -> x + 1)")
+    "insertvalue %closure_int_int undef, ptr null, 0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

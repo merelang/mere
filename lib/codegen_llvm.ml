@@ -181,6 +181,94 @@ let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
    around each fn body emit. *)
 let current_var_types : (string * Ast.ty) list ref = ref []
 
+(* Type the parent context expects this expression to have. Set by
+   emit_fn_def / emit_anon_adapter as the body's return type, so
+   anonymous Funs in tail position can recover their concrete arrow
+   type even when their .ty was generalized to polymorphic. *)
+let current_expected_ty : Ast.ty option ref = ref None
+
+(* Names of a pattern's bound variables (used by free_vars). *)
+let pattern_vars (p : Ast.pattern) : string list =
+  let rec go p =
+    match p.Ast.pnode with
+    | Ast.P_var n -> [n]
+    | Ast.P_constr (_, Some sub) -> go sub
+    | Ast.P_tuple ps -> List.concat_map go ps
+    | Ast.P_record (_, fs) -> List.concat_map (fun (_, p) -> go p) fs
+    | Ast.P_as (inner, n) -> n :: go inner
+    | Ast.P_or (a, _) -> go a
+    | _ -> []
+  in
+  go p
+
+(* Free variables of `e` excluding `initially_bound` and names introduced
+   by inner binders. Preserves left-to-right first-appearance order. *)
+let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
+  let seen = Hashtbl.create 8 in
+  let order = ref [] in
+  let add n =
+    if not (Hashtbl.mem seen n) then begin
+      Hashtbl.add seen n ();
+      order := n :: !order
+    end
+  in
+  let rec go (e : Ast.expr) (bound : string list) =
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit -> ()
+    | Ast.Var n -> if not (List.mem n bound) then add n
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a bound; go b bound
+    | Ast.Neg a | Ast.Annot (a, _) -> go a bound
+    | Ast.Let (pat, v, body) ->
+      go v bound;
+      go body (pattern_vars pat @ bound)
+    | Ast.Let_rec (bindings, body) ->
+      let names = List.map fst bindings in
+      let bound' = names @ bound in
+      List.iter (fun (_, v) -> go v bound') bindings;
+      go body bound'
+    | Ast.With (n, v, body) -> go v bound; go body (n :: bound)
+    | Ast.If (c, t, e_) -> go c bound; go t bound; go e_ bound
+    | Ast.Fun (param, _, body) -> go body (param :: bound)
+    | Ast.Constr (_, Some a) -> go a bound
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s bound;
+      List.iter (fun (pat, g, b) ->
+        let bound' = pattern_vars pat @ bound in
+        (match g with Some ge -> go ge bound' | None -> ()); go b bound') arms
+    | Ast.Tuple es -> List.iter (fun e -> go e bound) es
+    | Ast.Region_block (n, b) -> go b (n :: bound)
+    | Ast.Ref (_, a) -> go a bound
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
+    | Ast.Field_get (a, _) -> go a bound
+    | Ast.Record_update (a, fs) ->
+      go a bound; List.iter (fun (_, e) -> go e bound) fs
+  in
+  go e initially_bound;
+  List.rev !order
+
+(* Anonymous-closure emission state. Each `Fun` in expression position
+   becomes one of these; the adapter body is emitted later by
+   draining the queue in emit_program. *)
+type closure_emission = {
+  ce_adapter_name : string;
+  ce_env_name     : string;
+  ce_env_fields   : (string * Ast.ty) list;
+  ce_param        : string;
+  ce_param_ty     : Ast.ty;
+  ce_return_ty    : Ast.ty;
+  ce_body         : Ast.expr;
+}
+let pending_closures : closure_emission list ref = ref []
+let anon_env_typedefs : string list ref = ref []
+let anon_closure_counter = ref 0
+let fresh_anon_names () =
+  let n = !anon_closure_counter in
+  incr anon_closure_counter;
+  (Printf.sprintf "anon_%d_fn" n, Printf.sprintf "anon_%d_env" n)
+
 (* Walk the desugared main expression, peeling top-level fn-binding lets
    (P_var of Fun) and let-recs whose bindings are all single-arg fns.
    Returns the skels and the residual main body. *)
@@ -656,7 +744,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (match pat.Ast.pnode with
      | Ast.P_var name ->
        let rv = emit_expr env value in
-       emit_expr ((name, rv) :: env) body
+       let saved = !current_var_types in
+       let value_ty =
+         match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+       in
+       current_var_types := (name, value_ty) :: saved;
+       let r = emit_expr ((name, rv) :: env) body in
+       current_var_types := saved;
+       r
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 5 later slice")
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
@@ -996,10 +1091,146 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     emit_instr (Printf.sprintf "  %s = phi %s %s" r result_ty phi_parts);
     r
+  | Ast.Fun (param, _, fn_body) ->
+    (* Anonymous Fun in expression position → emit a closure value:
+       env-struct alloc (default region) + adapter (deferred) + closure
+       value built via insertvalue. *)
+    let arrow_ty =
+      let from_node =
+        match e.Ast.ty with Some t -> Some (Ast.walk t) | None -> None
+      in
+      let from_ctx = !current_expected_ty in
+      match from_node, from_ctx with
+      | Some t, _ when ty_is_concrete t -> t
+      | _, Some t when ty_is_concrete t -> t
+      | Some t, _ -> t  (* best-effort; will likely raise in ty_tag *)
+      | None, _ ->
+        unsupported e.Ast.loc "anonymous fn missing inferred type (no context)"
+    in
+    let param_ty, return_ty =
+      match arrow_ty with
+      | Ast.TyArrow (p, r) -> (Ast.walk p, Ast.walk r)
+      | _ -> unsupported e.Ast.loc "anonymous fn has non-arrow type"
+    in
+    let raw_fvs = free_vars fn_body [param] in
+    let fvs =
+      List.filter (fun n -> List.mem_assoc n !current_var_types) raw_fvs
+    in
+    let captures =
+      List.map (fun fv ->
+        let cty =
+          match List.assoc_opt fv !current_var_types with
+          | Some t when ty_is_concrete t -> Ast.walk t
+          | _ ->
+            unsupported e.Ast.loc
+              (Printf.sprintf "capture `%s` has non-concrete type" fv)
+        in
+        (fv, cty)) fvs
+    in
+    let adapter_name, env_name = fresh_anon_names () in
+    pending_closures := {
+      ce_adapter_name = adapter_name;
+      ce_env_name = env_name;
+      ce_env_fields = captures;
+      ce_param = param;
+      ce_param_ty = param_ty;
+      ce_return_ty = return_ty;
+      ce_body = fn_body;
+    } :: !pending_closures;
+    (* Env struct typedef (even when empty — only emit if captures > 0). *)
+    if captures <> [] then begin
+      let fields =
+        String.concat ", " (List.map (fun (_, t) -> llvm_ty_of t) captures)
+      in
+      anon_env_typedefs :=
+        Printf.sprintf "%%%s = type { %s }" env_name fields
+        :: !anon_env_typedefs
+    end;
+    let cstruct = closure_struct_name param_ty return_ty in
+    if captures = [] then begin
+      let r0 = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr null, 0" r0 cstruct);
+      let r1 = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s, 1"
+                    r1 cstruct r0 adapter_name);
+      r1
+    end else begin
+      let size_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1"
+                    size_p env_name);
+      let size = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
+      let env_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = call ptr @malloc(i64 %s)" env_p size);
+      List.iteri (fun i (cname, cty) ->
+        let cv =
+          match List.assoc_opt cname env with
+          | Some v -> v
+          | None -> unsupported e.Ast.loc ("capture not in scope: " ^ cname)
+        in
+        let p = fresh_reg () in
+        emit_instr (Printf.sprintf
+                      "  %s = getelementptr %%%s, ptr %s, i32 0, i32 %d"
+                      p env_name env_p i);
+        emit_instr (Printf.sprintf "  store %s %s, ptr %s"
+                      (llvm_ty_of cty) cv p)
+      ) captures;
+      let r0 = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr %s, 0"
+                    r0 cstruct env_p);
+      let r1 = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s, 1"
+                    r1 cstruct r0 adapter_name);
+      r1
+    end
   | Ast.Float_lit _ | Ast.Unit_lit
-  | Ast.Let_rec _ | Ast.With _ | Ast.Fun _
+  | Ast.Let_rec _ | Ast.With _
   | Ast.Region_block _ | Ast.Ref _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
+
+(* Emit the body of an anonymous-Fun adapter: gep + load each capture
+   from `%env_self`, then evaluate the original Fun body with the
+   captures bound. Returns the full `define ...` string. *)
+let emit_anon_adapter (ce : closure_emission) : string =
+  let saved_instrs = !instrs in
+  let saved_reg = !reg_counter and saved_lbl = !label_counter in
+  let saved_vt = !current_var_types in
+  let saved_exp = !current_expected_ty in
+  reg_counter := 0;
+  label_counter := 0;
+  instrs := [];
+  current_expected_ty := Some ce.ce_return_ty;
+  emit_instr "entry:";
+  (* Build env: load each capture from %env_self into a fresh register
+     so the body can reference it by name. *)
+  let cap_env =
+    List.mapi (fun i (cname, cty) ->
+      if ce.ce_env_fields = [] then assert false;
+      let p = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = getelementptr %%%s, ptr %%env_self, i32 0, i32 %d"
+                    p ce.ce_env_name i);
+      let v = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                    v (llvm_ty_of cty) p);
+      (cname, v)) ce.ce_env_fields
+  in
+  let env = (ce.ce_param, "%" ^ ce.ce_param) :: cap_env in
+  current_var_types :=
+    (ce.ce_param, ce.ce_param_ty) ::
+    List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
+  let rv = emit_expr env ce.ce_body in
+  emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of ce.ce_return_ty) rv);
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs;
+  reg_counter := saved_reg;
+  label_counter := saved_lbl;
+  current_var_types := saved_vt;
+  current_expected_ty := saved_exp;
+  Printf.sprintf
+    "define %s @%s(ptr %%env_self, %s %%%s) {\n%s\n}"
+    (llvm_ty_of ce.ce_return_ty) ce.ce_adapter_name
+    (llvm_ty_of ce.ce_param_ty) ce.ce_param body
 
 (* Env-ignoring adapter so the top-level fn `f` can be used as a closure
    value: `T2 @f_closure_fn(ptr unused, T1 %x) { ret T2 @f(T1 %x); }`. *)
@@ -1020,17 +1251,18 @@ let emit_fn_def (f : fn_decl) : string =
   label_counter := 0;
   let saved = !instrs in
   let saved_types = !current_var_types in
+  let saved_exp = !current_expected_ty in
   instrs := [];
   current_var_types := [(f.param, f.param_ty)];
+  current_expected_ty := Some f.return_ty;
   emit_instr "entry:";
-  (* Bind the param under its source name; in LLVM the param has its
-     own SSA name "%<param>" supplied by the function header. *)
   let env = [(f.param, "%" ^ f.param)] in
   let rv = emit_expr env f.body in
   emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved;
   current_var_types := saved_types;
+  current_expected_ty := saved_exp;
   Printf.sprintf "define %s @%s(%s %%%s) {\n%s\n}"
     (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
 
@@ -1078,6 +1310,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   instrs := [];
   str_globals := [];
   str_counter := 0;
+  pending_closures := [];
+  anon_env_typedefs := [];
+  anon_closure_counter := 0;
+  current_var_types := [];
   Hashtbl.reset toplevel_fn_names;
   let main_expr = Ast.desugar_program prog in
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
@@ -1122,6 +1358,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   List.iter emit_instr print_lines;
   emit_instr "  ret i32 0";
   let body = String.concat "\n" (List.rev !instrs) in
+  (* Drain pending closures (anonymous Funs accumulated during all of
+     the above emits). Draining can push more pendings — keep going
+     until the queue is empty. *)
+  let anon_adapters = ref [] in
+  let rec drain () =
+    match !pending_closures with
+    | [] -> ()
+    | ce :: rest ->
+      pending_closures := rest;
+      anon_adapters := emit_anon_adapter ce :: !anon_adapters;
+      drain ()
+  in
+  drain ();
+  let anon_adapters = List.rev !anon_adapters in
   let format_globals =
     (* Hardcoded format strings. Byte lengths count LLVM escapes (`\0A`)
        as 1 byte each and include the null terminator. *)
@@ -1141,6 +1391,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
+    @ (if !anon_env_typedefs = [] then []
+       else List.rev !anon_env_typedefs @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
     @ format_globals
     @ [ "";
@@ -1150,6 +1402,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "" ]
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
+    @ (if anon_adapters = [] then [] else anon_adapters @ [""])
     @ [ "define i32 @main() {";
         body;
         "}";
