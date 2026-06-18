@@ -2418,6 +2418,12 @@ let () =
   assert_contains "codegen: main frees default region"
     (codegen_with_decls "1 + 2")
     "__lang_region_free(&__lang_default_region)";
+  assert_contains "codegen: str_concat allocates in default region"
+    (codegen_with_decls "\"hi\" ++ \"!\"")
+    "__lang_region_alloc(&__lang_default_region, la + lb + 1)";
+  assert_no_contains "codegen: str_concat no longer mallocs"
+    (codegen_with_decls "\"hi\" ++ \"!\"")
+    "malloc(la + lb + 1)";
 
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
@@ -2569,14 +2575,14 @@ let () =
          | CgCons2 (h, t) -> h + sum t\n\
        in sum (CgCons2 (1, CgNil2))")
     "struct CgList2_node {";
-  assert_contains "codegen: recursive variant Constr mallocs node"
+  assert_contains "codegen: recursive variant Constr uses default region"
     (codegen_with_decls
       "type CgList3 = CgNil3 | CgCons3 of int * CgList3;\n\
        let rec sum = fn xs -> match xs with\n\
          | CgNil3 -> 0\n\
          | CgCons3 (h, t) -> h + sum t\n\
        in sum (CgCons3 (1, CgNil3))")
-    "malloc(sizeof(CgList3_node))";
+    "__lang_region_alloc(&__lang_default_region, sizeof(CgList3_node))";
   assert_contains "codegen: match on recursive variant uses -> access"
     (codegen_with_decls
       "type CgList4 = CgNil4 | CgCons4 of int * CgList4;\n\
