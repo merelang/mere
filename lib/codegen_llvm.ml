@@ -56,13 +56,36 @@ let llvm_cmp_int = function
   | Ast.Gt -> "sgt"
   | Ast.Ge -> "sge"
 
-(* Walk a Lang type to its LLVM type. *)
+(* Stable name fragment for a type — used to mint struct names. Mirrors
+   codegen_c's ty_tag so a Lang `(int, str)` tuple maps to the same
+   `tuple_int_str` shape across backends. *)
+let rec ty_tag (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyInt -> "int"
+  | Ast.TyBool -> "bool"
+  | Ast.TyStr -> "str"
+  | Ast.TyUnit -> "unit"
+  | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
+  | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
+  | Ast.TyCon (name, []) -> name
+  | Ast.TyCon (name, args) -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+  | other ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "unsupported LLVM codegen type element: %s" (Ast.pp_ty other)))
+
+let tuple_struct_name (elems : Ast.ty list) : string =
+  "tuple_" ^ String.concat "_" (List.map ty_tag elems)
+
+(* Walk a Lang type to its LLVM type. Tuples lower to named-struct
+   references (`%tuple_int_int`); these are emitted as `type` definitions
+   at the top of the module. *)
 let llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
   | Ast.TyStr -> "ptr"
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
+  | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
 
 (* Encode an OCaml string to LLVM's c"..." literal body (without the
@@ -226,6 +249,59 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
         Printf.sprintf "function `%s` has non-arrow inferred type" s.sname))
   ) skels
 
+(* Walk a typed AST + fn signatures to collect every concrete tuple shape
+   so we can emit `%tuple_int_str = type { i32, ptr }` for each. *)
+let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list list =
+  let seen = Hashtbl.create 8 in
+  let add elems =
+    let key = tuple_struct_name elems in
+    if not (Hashtbl.mem seen key) then Hashtbl.add seen key elems
+  in
+  let rec walk_ty (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyTuple ts ->
+      if List.for_all ty_is_concrete ts then add ts;
+      List.iter walk_ty ts
+    | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
+    | Ast.TyCon (_, args) -> List.iter walk_ty args
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
+  Hashtbl.fold (fun _ v acc -> v :: acc) seen []
+
+let emit_tuple_typedef (elems : Ast.ty list) : string =
+  let name = tuple_struct_name elems in
+  let fields = String.concat ", " (List.map llvm_ty_of elems) in
+  Printf.sprintf "%%%s = type { %s }" name fields
+
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
@@ -314,6 +390,32 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_expr ((name, rv) :: env) body
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 5 later slice")
+  | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let tname =
+      match arg.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyTuple ts -> tuple_struct_name ts
+         | _ -> unsupported e.Ast.loc "fst on non-tuple")
+      | None -> unsupported e.Ast.loc "fst: missing arg type"
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" r tname av);
+    r
+  | Ast.App ({ node = Ast.Var "snd"; _ }, arg) ->
+    let av = emit_expr env arg in
+    let tname =
+      match arg.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyTuple ts -> tuple_struct_name ts
+         | _ -> unsupported e.Ast.loc "snd on non-tuple")
+      | None -> unsupported e.Ast.loc "snd: missing arg type"
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" r tname av);
+    r
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
@@ -344,9 +446,36 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   | Ast.App _ ->
     unsupported e.Ast.loc "indirect / first-class fn call — Phase 5 later slice"
+  | Ast.Tuple elems ->
+    let tname =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyTuple ts -> tuple_struct_name ts
+         | _ -> unsupported e.Ast.loc "tuple literal has non-tuple type")
+      | None -> unsupported e.Ast.loc "tuple literal: missing inferred type"
+    in
+    let elem_tys =
+      match e.Ast.ty with
+      | Some t -> (match Ast.walk t with Ast.TyTuple ts -> ts | _ -> [])
+      | None -> []
+    in
+    (* Build the struct value via a chain of insertvalue, starting from
+       `undef`. Each insertvalue produces a new SSA value of the same
+       struct type. *)
+    let rec build prev idx = function
+      | [] -> prev
+      | (elem, ty) :: rest ->
+        let ev = emit_expr env elem in
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                      r tname prev (llvm_ty_of ty) ev idx);
+        build r (idx + 1) rest
+    in
+    build "undef" 0 (List.combine elems elem_tys)
   | Ast.Float_lit _ | Ast.Unit_lit
   | Ast.Let_rec _ | Ast.With _ | Ast.Fun _
-  | Ast.Constr _ | Ast.Match _ | Ast.Tuple _
+  | Ast.Constr _ | Ast.Match _
   | Ast.Region_block _ | Ast.Ref _
   | Ast.Record_lit _ | Ast.Field_get _ | Ast.Record_update _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
@@ -418,6 +547,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
+  let tuple_shapes = collect_tuple_shapes main_expr fns in
+  let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let fn_defs = List.map emit_fn_def fns in
   (* Reset counters for the main body. *)
   reg_counter := 0;
@@ -461,6 +592,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     [ "; LLVM IR generated by lang-ml (Phase 5)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
       "" ]
+    @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
     @ format_globals
     @ [ "";

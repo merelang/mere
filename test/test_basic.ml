@@ -2736,5 +2736,30 @@ let () =
     (llvm "let len = fn s -> str_len s in len \"hello\"")
     "@len(ptr ";
 
+  (* --- LLVM IR codegen: tuple (Phase 5.4) ---
+     Tuples lower to named struct types; literals build via insertvalue
+     chains, fst/snd via extractvalue at index 0 / 1. *)
+  assert_contains "llvm: tuple type definition emitted"
+    (llvm "(1, 2)") "%tuple_int_int = type { i32, i32 }";
+  assert_contains "llvm: tuple literal uses insertvalue undef"
+    (llvm "(1, 2)") "insertvalue %tuple_int_int undef, i32 1, 0";
+  assert_contains "llvm: tuple literal chains insertvalue"
+    (llvm "(1, 2)") "insertvalue %tuple_int_int";
+  assert_contains "llvm: fst lowers to extractvalue 0"
+    (llvm "let p = (1, 2) in fst p")
+    "extractvalue %tuple_int_int";
+  assert_contains "llvm: tuple of mixed types"
+    (llvm "(\"hi\", 42)")
+    "%tuple_str_int = type { ptr, i32 }";
+  assert_contains "llvm: nested tuple type definition"
+    (llvm "((1, 2), 3)")
+    "%tuple_tuple_int_int_int = type { %tuple_int_int, i32 }";
+  assert_contains "llvm: tuple-arg fn signature"
+    (llvm "let sum_pair = fn p -> fst p + snd p in sum_pair (1, 2)")
+    "define i32 @sum_pair(%tuple_int_int %p)";
+  assert_contains "llvm: tuple-returning fn signature"
+    (llvm "let split = fn s -> (s, str_len s) in split \"hi\"")
+    "define %tuple_str_int @split(ptr %s)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
