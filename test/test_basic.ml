@@ -2150,5 +2150,22 @@ let () =
   assert_contains "codegen: helper __lang_str_concat is injected"
     (codegen "1") "__lang_str_concat";  (* always emitted, even if unused *)
 
+  (* --- C codegen: str-typed lifted fns (Phase 4 fourth slice) --- *)
+  assert_contains "codegen: str-returning fn gets const char* return"
+    (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
+    "const char* greet(int n)";
+  assert_contains "codegen: str-taking fn gets const char* param"
+    (codegen "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
+    "const char* exclaim(const char* s)";
+  assert_contains "codegen: forward decl carries through the right type"
+    (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
+    "const char* greet(int);";
+  assert_contains "codegen: str_len builtin maps to strlen"
+    (codegen "str_len \"abc\"")
+    "(int) strlen(\"abc\")";
+  check_raises "codegen: unsupported type (e.g. float fn) → Codegen_error"
+    (fun () ->
+      let _ = codegen "let f = fn x -> x +. 1.0 in f 2.0" in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

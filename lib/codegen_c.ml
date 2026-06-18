@@ -91,13 +91,16 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Fun _         -> unsupported e.loc "functions in expression position (only top-level lifted fns supported)"
   | Ast.App (f, arg) ->
     (* Only `name(arg)` form: f must be a bare Var that names a lifted
-       function or a recognized builtin (currently `print`). Curried
-       multi-arg / closure values are out of scope. *)
+       function or a recognized builtin. Curried multi-arg / closure
+       values are out of scope. *)
     (match f.node with
      | Ast.Var "print" ->
        (* `print : str -> unit` → puts; statement expression yields 0
           so the surrounding context still sees an int value. *)
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
+     | Ast.Var "str_len" ->
+       (* `str_len : str -> int` → cast away size_t. *)
+       "((int) strlen(" ^ emit_expr arg ^ "))"
      | Ast.Var name ->
        name ^ "(" ^ emit_expr arg ^ ")"
      | _ ->
@@ -113,15 +116,32 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Record_update _ -> unsupported e.loc "record update"
 
 type fn_decl = {
-  name  : string;
-  param : string;
-  body  : Ast.expr;
+  name      : string;
+  param     : string;
+  body      : Ast.expr;
+  param_ty  : Ast.ty;
+  return_ty : Ast.ty;
 }
 
-(* Walk the desugared main expression, extracting top-level fn bindings
-   into a list of fn_decls. Stops at the first non-let / non-fn-let node
-   and returns it as the residual main body. *)
-let lift_fns (e : Ast.expr) : fn_decl list * Ast.expr =
+(* Lang type → C type, restricted to the codegen subset. *)
+let c_type_of (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool -> "int"
+  | Ast.TyStr -> "const char*"
+  | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
+  | other ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf
+        "unsupported C codegen type: %s (only int/bool/str/unit so far)"
+        (Ast.pp_ty other)))
+
+(* Skeleton info collected while walking the AST — types are filled in
+   afterwards by inferring all fns together as one let-rec group. *)
+type fn_skel = { sname : string; sparam : string; sbody : Ast.expr }
+
+(* Walk the desugared main expression, extracting top-level fn bindings.
+   Returns (fn skeletons in declaration order, residual main body). *)
+let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
   let rec go (e : Ast.expr) =
     match e.Ast.node with
     | Ast.Let (pat, value, rest)
@@ -132,27 +152,61 @@ let lift_fns (e : Ast.expr) : fn_decl list * Ast.expr =
            match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false
          in
          let more, rest' = go rest in
-         { name; param; body = fn_body } :: more, rest'
+         { sname = name; sparam = param; sbody = fn_body } :: more, rest'
        | _ -> [], e)
     | Ast.Let_rec (bindings, rest) ->
-      let fns =
+      let skels =
         List.map (fun (n, v) ->
           match v.Ast.node with
-          | Ast.Fun (p, _, fb) -> { name = n; param = p; body = fb }
+          | Ast.Fun (p, _, fb) -> { sname = n; sparam = p; sbody = fb }
           | _ ->
             raise (Codegen_error (v.Ast.loc,
               "let rec binding must be a single-arg function in C subset")))
           bindings
       in
       let more, rest' = go rest in
-      fns @ more, rest'
+      skels @ more, rest'
     | _ -> [], e
   in
   go e
 
+(* Infer types for the lifted fn group via let-rec style: pre-bind all
+   names to fresh tyvars, infer each body, unify. Returns full fn_decls. *)
+let resolve_fn_types (skels : fn_skel list) : fn_decl list =
+  let alphas = List.map (fun _ -> Typer.fresh_var ()) skels in
+  let env_rec =
+    List.fold_left2 (fun acc s a -> (s.sname, Typer.mono a) :: acc)
+      Typer.initial_env skels alphas
+  in
+  List.iter2 (fun s alpha ->
+    let fun_expr =
+      Ast.{ loc = Loc.dummy;
+            node = Ast.Fun (s.sparam, None, s.sbody) } in
+    let t = Typer.infer env_rec fun_expr in
+    Typer.unify Loc.dummy alpha t
+  ) skels alphas;
+  List.map2 (fun s alpha ->
+    match Ast.walk alpha with
+    | Ast.TyArrow (p, r) ->
+      { name = s.sname; param = s.sparam; body = s.sbody;
+        param_ty = Ast.walk p; return_ty = Ast.walk r }
+    | other ->
+      raise (Codegen_error (Loc.dummy,
+        Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
+          s.sname (Ast.pp_ty other)))
+  ) skels alphas
+
 let emit_fn (f : fn_decl) : string =
-  Printf.sprintf "int %s(int %s) {\n  return %s;\n}"
-    f.name f.param (emit_expr f.body)
+  Printf.sprintf "%s %s(%s %s) {\n  return %s;\n}"
+    (c_type_of f.return_ty)
+    f.name
+    (c_type_of f.param_ty)
+    f.param
+    (emit_expr f.body)
+
+let emit_fn_forward_decl (f : fn_decl) : string =
+  Printf.sprintf "%s %s(%s);"
+    (c_type_of f.return_ty) f.name (c_type_of f.param_ty)
 
 (* String-concat runtime helper: allocates a new heap buffer of size
    |a| + |b| + 1 and concatenates. Memory is leaked — fine for short-lived
@@ -183,10 +237,9 @@ let main_format_of (t : Ast.ty) : string option =
    → %s, unit → no printf). *)
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let main_expr = Ast.desugar_program prog in
-  let fns, body_expr = lift_fns main_expr in
-  let forward_decls =
-    List.map (fun f -> "int " ^ f.name ^ "(int);") fns
-  in
+  let skels, body_expr = lift_fn_skels main_expr in
+  let fns = resolve_fn_types skels in
+  let forward_decls = List.map emit_fn_forward_decl fns in
   let fn_defs = List.map emit_fn fns in
   let main_body = emit_expr body_expr in
   let main_stmt =
