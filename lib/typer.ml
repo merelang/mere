@@ -501,6 +501,11 @@ let initial_env : env =
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
+  let t = infer_node env e in
+  e.Ast.ty <- Some t;
+  t
+
+and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   match e.node with
   | Ast.Int_lit _ -> Ast.TyInt
   | Ast.Float_lit _ -> Ast.TyFloat
