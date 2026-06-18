@@ -207,6 +207,7 @@ C / LLVM 両 backend が完成形 (Phase 4 / 5 並列カバー) になり、desi
 | slice | 内容 | 動くもの |
 |---|---|---|
 | 6.1 | **Wasm (WAT) MVP** (スタックベース emit) | int / bool / 算術 / 比較 / 論理 / Neg / If / Let (P_var) / Var / Annot を WAT に変換。`-w` / `-we` CLI flag、stack-based emission (LLVM の SSA とは違い operand を順に push して opcode 1 つでスタック消費 + 結果 push)。`If` を WAT の `if (result i32) ... else ... end` ブロックに、`Let (P_var)` を `(local i32)` 宣言 + `local.set N` / `local.get N` に。比較は `i32.lt_s` / `i32.eq` 等、bool は i32 ワイド化。動作確認 (wat2wasm + Node.js WebAssembly): `let a = 10 in let b = 20 in if a + b > 25 then a * b else 0` → 200、`if 3 > 2 then 100 else 200` → 100、`let x = 5 in x * x + 1` → 26、`true && (false || true)` → 1。テスト 14 件追加 (909 passing) |
+| 6.2 | **関数 lifting + recursion** | top-level `let f = fn x -> ...` および `let rec` を `(func $f (param i32) (result i32) ...)` として lift。Phase 5.2 と同形の `fn_skel` / `lift_fn_skels` / `find_concrete_arrow` / `resolve_fn_types` を codegen_wasm に並列実装。`emit_fn_def` で各 fn を独立した locals / instrs scope として emit (param は slot 0、let bindings は slot 1, 2, ...)。`App (Var name, arg)` を `<arg push>; call $name` の連続に compile (`toplevel_fn_names` 登録済の名前のみ direct call)。Wasm は同モジュール内で前方参照可なので C のような forward decl は不要 — 相互再帰もそのまま動く。動作確認 (wat2wasm + Node.js): `factorial 10` → 3628800、`fibonacci 15` → 610、`is_even 7` (相互再帰) → 0。テスト 5 件追加 (914 passing)。クロージャ / 第一級関数 / 文字列 / record / variant 等は後続 slice |
 
 #### 残りの Phase 6 作業
 
