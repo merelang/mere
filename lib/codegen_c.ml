@@ -40,6 +40,11 @@ let unsupported loc what =
    Match. *)
 let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
 
+(* Names of top-level lifted fns. Set by emit_program before emit_expr
+   runs so Var-in-value-position can pick the right closure wrapper
+   const, and App-in-head-position can choose direct vs indirect call. *)
+let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* Inner-fn lifting (defunctionalization) — populated by a pre-pass and
    read by emit_expr. For each `let name = fn x -> body` found nested
    inside a top-level fn, we record:
@@ -94,12 +99,23 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit"
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
+  | Ast.TyArrow (p, r) ->
+    (* Recursive arrow → use the same naming used by closure_struct_name. *)
+    "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
+  | Ast.TyCon (name, []) -> name
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unsupported C codegen type element: %s" (Ast.pp_ty other)))
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
+
+(* Closure-value struct name for an arrow type. A function value of type
+   T1 -> T2 is represented at C level as a struct with an `env` void
+   pointer and an `fn` pointer (T2 returning, taking void* + T1). The
+   struct is named `closure_T1_T2`. *)
+let closure_struct_name (param : Ast.ty) (ret : Ast.ty) : string =
+  "closure_" ^ ty_tag param ^ "_" ^ ty_tag ret
 
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
@@ -171,7 +187,15 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Int_lit n -> string_of_int n
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s -> Ast.escape_string s
-  | Ast.Var name -> name
+  | Ast.Var name ->
+    (* When a top-level fn name is referenced in a non-callee position,
+       emit the prepared closure const so the value has the right C type. *)
+    if Hashtbl.mem toplevel_fn_names name then name ^ "_as_value"
+    else if Hashtbl.mem inner_lifts name then
+      unsupported e.loc
+        ("inner-lifted fn `" ^ name ^
+         "` used as a value — only direct calls are supported (Phase 4.9-a)")
+    else name
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
   | Ast.Bin (Ast.Concat, a, b) ->
@@ -206,31 +230,29 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.With _        -> unsupported e.loc "with"
   | Ast.Fun _         -> unsupported e.loc "functions in expression position (only top-level lifted fns supported)"
   | Ast.App (f, arg) ->
-    (* Only `name(arg)` form: f must be a bare Var that names a lifted
-       function or a recognized builtin. Curried multi-arg / closure
-       values are out of scope. *)
     (match f.node with
      | Ast.Var "print" ->
-       (* `print : str -> unit` → puts; statement expression yields 0
-          so the surrounding context still sees an int value. *)
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
      | Ast.Var "str_len" ->
-       (* `str_len : str -> int` → cast away size_t. *)
        "((int) strlen(" ^ emit_expr arg ^ "))"
      | Ast.Var "fst" ->
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
        "(" ^ emit_expr arg ^ ").f1"
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
+       (* Defunctionalized direct call (Phase 4.8). *)
        let li = Hashtbl.find inner_lifts name in
        let cap_args = List.map (fun (n, _) -> n) li.captures in
        li.lifted_name ^ "(" ^
        String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
-     | Ast.Var name ->
+     | Ast.Var name when Hashtbl.mem toplevel_fn_names name ->
+       (* Direct call to a known top-level fn — fast path, no closure. *)
        name ^ "(" ^ emit_expr arg ^ ")"
      | _ ->
-       unsupported e.loc
-         "function application requires a direct named function (no closures / curry)")
+       (* Closure dispatch via the closure value's fn pointer + env. *)
+       Printf.sprintf
+         "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
+         (emit_expr f) (emit_expr arg))
   | Ast.Constr (name, arg_opt) ->
     let info =
       try Hashtbl.find Typer.constructors name
@@ -340,6 +362,7 @@ let c_type_of (t : Ast.ty) : string =
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyTuple ts -> tuple_struct_name ts
+  | Ast.TyArrow (p, r) -> closure_struct_name p r
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     (* User-declared record type — the struct name matches the Lang name. *)
     name
@@ -351,7 +374,7 @@ let c_type_of (t : Ast.ty) : string =
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf
-        "unsupported C codegen type: %s (only int/bool/str/unit/tuple/record)"
+        "unsupported C codegen type: %s (only int/bool/str/unit/tuple/record/closure)"
         (Ast.pp_ty other)))
 
 (* Skeleton info collected while walking the AST. We keep the Fun
@@ -508,6 +531,31 @@ let emit_lifted_fn (f : lifted_fn) : string =
 let emit_fn_forward_decl (f : fn_decl) : string =
   Printf.sprintf "%s %s(%s);"
     (c_type_of f.return_ty) f.name (c_type_of f.param_ty)
+
+(* Closure-value wrapper for a top-level fn: an env-ignoring adapter
+   plus a const closure literal that can be passed as a value. *)
+let emit_closure_wrapper (f : fn_decl) : string =
+  let cstruct = closure_struct_name f.param_ty f.return_ty in
+  let cret = c_type_of f.return_ty in
+  let carg = c_type_of f.param_ty in
+  Printf.sprintf
+    "static %s %s_closure_fn(void* __env, %s %s) {\n  \
+       (void)__env;\n  \
+       return %s(%s);\n\
+     }\n\
+     static const %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
+    cret f.name carg f.param
+    f.name f.param
+    cstruct f.name f.name
+
+(* Closure struct typedef for a `(p) -> r` arrow. *)
+let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
+  let cstruct = closure_struct_name p r in
+  let cret = c_type_of r in
+  let carg = c_type_of p in
+  Printf.sprintf
+    "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n} %s;"
+    cret carg cstruct
 
 let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
   let params =
@@ -698,6 +746,62 @@ and lookup_var_ty (e : Ast.expr) (name : string) : Ast.ty =
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "captured variable `%s` has no recorded type" name))
 
+(* Walk a typed AST + fn signatures and collect every distinct
+   `(p, r)` arrow type so we can emit a `closure_p_r` typedef. *)
+let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
+    (Ast.ty * Ast.ty) list =
+  let seen = Hashtbl.create 8 in
+  let order = ref [] in
+  let add p r =
+    if not (ty_is_concrete p && ty_is_concrete r) then ()
+    else
+      let key = closure_struct_name p r in
+      if not (Hashtbl.mem seen key) then begin
+        Hashtbl.add seen key ();
+        order := (p, r) :: !order
+      end
+  in
+  let rec walk_ty (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyArrow (p, r) ->
+      add (Ast.walk p) (Ast.walk r);
+      walk_ty p; walk_ty r
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyCon (_, args) -> List.iter walk_ty args
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f ->
+    walk_ty f.param_ty; walk_ty f.return_ty) fns;
+  List.rev !order
+
 (* Walk a typed AST and collect every distinct tuple shape encountered
    in any node's recorded type. Used to know which structs to define. *)
 let collect_tuple_shapes (root : Ast.expr) : Ast.ty list list =
@@ -870,6 +974,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
   let fns = resolve_fn_types skels main_expr in
+  (* Populate toplevel_fn_names so emit_expr can pick direct vs closure
+     call and value-position references can use the closure wrapper. *)
+  Hashtbl.reset toplevel_fn_names;
+  List.iter (fun f -> Hashtbl.replace toplevel_fn_names f.name ()) fns;
   (* Tuple shape collection: walk the (now typer-annotated) AST plus the
      resolved fn signatures. *)
   let tuple_shapes =
@@ -898,6 +1006,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      top-level fn types are resolved so we know toplevel names. *)
   let toplevel_names = List.map (fun f -> f.name) fns in
   let inner_fns = lift_inner_fns toplevel_names fns in
+  (* Closure (first-class fn) machinery: emit a `closure_T1_T2` typedef
+     per arrow type used + a wrapper / value const for each top-level fn. *)
+  let arrow_pairs = collect_arrow_types main_expr fns in
+  let closure_typedefs =
+    List.map (fun (p, r) -> emit_closure_typedef p r) arrow_pairs
+  in
+  let closure_wrappers = List.map emit_closure_wrapper fns in
   let forward_decls =
     List.map emit_fn_forward_decl fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
@@ -905,6 +1020,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let fn_defs =
     List.map emit_lifted_fn inner_fns
     @ List.map emit_fn fns
+    @ closure_wrappers
   in
   let main_body = emit_expr body_expr in
   let main_stmt =
@@ -922,6 +1038,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
+    @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";

@@ -2342,5 +2342,34 @@ let () =
         "let outer = fn x -> let t = (x, x) in let h = fn y -> fst t in h 1 in outer 5"
       in ());
 
+  (* --- C codegen: first-class functions (Phase 4 ninth slice, "Phase A") ---
+     Top-level fns can be passed as values via prepared closure wrappers.
+     HOF param of type T1 -> T2 becomes a closure struct, application via
+     `.fn(.env, arg)`. Direct call to a known top-level Var stays direct. *)
+  assert_contains "codegen: closure typedef for int -> int"
+    (codegen
+      "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "} closure_int_int;";
+  assert_contains "codegen: top-level fn gets closure wrapper"
+    (codegen
+      "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "static int inc_closure_fn(void* __env, int x)";
+  assert_contains "codegen: top-level fn gets _as_value constant"
+    (codegen
+      "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "static const closure_int_int inc_as_value =";
+  assert_contains "codegen: HOF takes closure param"
+    (codegen
+      "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "int apply(closure_int_int f)";
+  assert_contains "codegen: closure dispatch via .fn(.env, x)"
+    (codegen
+      "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "__c.fn(__c.env, 5)";
+  assert_contains "codegen: Var of top-level fn in value pos emits _as_value"
+    (codegen
+      "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "apply(inc_as_value)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
