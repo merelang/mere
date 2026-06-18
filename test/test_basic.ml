@@ -2392,5 +2392,47 @@ let () =
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
     "(__env_self->f)";
 
+  (* --- C codegen: recursive variants + P_tuple pattern (Phase 4.10) --- *)
+  assert_contains "codegen: recursive variant emits forward + ptr typedef"
+    (codegen_with_decls
+      "type CgList = CgNil | CgCons of int * CgList;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | CgNil -> 0\n\
+         | CgCons (h, t) -> h + sum t\n\
+       in sum (CgCons (1, CgCons (2, CgNil)))")
+    "typedef CgList_node* CgList;";
+  assert_contains "codegen: recursive variant struct body emitted"
+    (codegen_with_decls
+      "type CgList2 = CgNil2 | CgCons2 of int * CgList2;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | CgNil2 -> 0\n\
+         | CgCons2 (h, t) -> h + sum t\n\
+       in sum (CgCons2 (1, CgNil2))")
+    "struct CgList2_node {";
+  assert_contains "codegen: recursive variant Constr mallocs node"
+    (codegen_with_decls
+      "type CgList3 = CgNil3 | CgCons3 of int * CgList3;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | CgNil3 -> 0\n\
+         | CgCons3 (h, t) -> h + sum t\n\
+       in sum (CgCons3 (1, CgNil3))")
+    "malloc(sizeof(CgList3_node))";
+  assert_contains "codegen: match on recursive variant uses -> access"
+    (codegen_with_decls
+      "type CgList4 = CgNil4 | CgCons4 of int * CgList4;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | CgNil4 -> 0\n\
+         | CgCons4 (h, t) -> h + sum t\n\
+       in sum (CgCons4 (1, CgNil4))")
+    "__scrut->tag == 0";
+  assert_contains "codegen: P_tuple pattern destructures via .f0 / .f1"
+    (codegen_with_decls
+      "type CgList5 = CgNil5 | CgCons5 of int * CgList5;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | CgNil5 -> 0\n\
+         | CgCons5 (h, t) -> h + sum t\n\
+       in sum (CgCons5 (1, CgNil5))")
+    "__scrut->payload.CgCons5.f0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

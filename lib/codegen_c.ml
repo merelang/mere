@@ -45,6 +45,18 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Variant types whose constructors carry payload referencing the same
+   type (directly recursive). These are emitted as pointer-typed values:
+     typedef intlist_node intlist_node;
+     struct intlist_node { ... };
+     typedef intlist_node* intlist;
+   So `intlist` in C is `intlist_node*`, Cons mallocs a node, and
+   pattern match dereferences via `->`. *)
+let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
+
+let is_recursive_variant (name : string) : bool =
+  Hashtbl.mem recursive_variants name
+
 (* Inner-fn lifting (defunctionalization) — populated by a pre-pass and
    read by emit_expr. For each `let name = fn x -> body` found nested
    inside a top-level fn, we record:
@@ -422,9 +434,33 @@ let rec emit_expr (e : Ast.expr) : string =
       | Some arg ->
         Printf.sprintf ", .payload.%s = %s" name (emit_expr arg)
     in
-    Printf.sprintf "((%s){.tag = %d%s})" type_name tag payload_str
+    if is_recursive_variant type_name then
+      (* Recursive variant: allocate a node on the heap and return its
+         pointer (the value type for recursive variants in C). *)
+      let node = type_name ^ "_node" in
+      Printf.sprintf
+        "({ %s* __p = (%s*)malloc(sizeof(%s)); \
+         __p->tag = %d%s; __p; })"
+        node node node tag
+        (match arg_opt with
+         | None -> ""
+         | Some arg -> "; __p->payload." ^ name ^ " = " ^ emit_expr arg)
+    else
+      let _ = payload_str in (* keep for non-recursive path *)
+      Printf.sprintf "((%s){.tag = %d%s})" type_name tag payload_str
   | Ast.Match (scrut, arms) ->
     let scrut_c = emit_expr scrut in
+    (* Decide value-access vs pointer-access from the scrutinee's
+       inferred type: recursive variants are pointers, so use `->`. *)
+    let is_ptr =
+      match scrut.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (n, _) -> is_recursive_variant n
+         | _ -> false)
+      | None -> false
+    in
+    let dot = if is_ptr then "->" else "." in
     let emit_arm (pat, guard, body) =
       if guard <> None then
         unsupported pat.Ast.ploc "match guard (`when ...`) in C codegen";
@@ -440,7 +476,7 @@ let rec emit_expr (e : Ast.expr) : string =
             with Not_found ->
               unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ cname)
           in
-          let test = Printf.sprintf "__scrut.tag == %d" tag in
+          let test = Printf.sprintf "__scrut%stag == %d" dot tag in
           let bind =
             match sub_opt with
             | None -> ""
@@ -448,10 +484,24 @@ let rec emit_expr (e : Ast.expr) : string =
               (match sub.Ast.pnode with
                | Ast.P_wild -> ""
                | Ast.P_var n ->
-                 Printf.sprintf "__auto_type %s = __scrut.payload.%s; " n cname
+                 Printf.sprintf "__auto_type %s = __scrut%spayload.%s; "
+                   n dot cname
+               | Ast.P_tuple ps ->
+                 (* Destructure tuple payload via .f0 / .f1 / ... *)
+                 String.concat " "
+                   (List.mapi (fun i p ->
+                     match p.Ast.pnode with
+                     | Ast.P_var n ->
+                       Printf.sprintf
+                         "__auto_type %s = __scrut%spayload.%s.f%d;"
+                         n dot cname i
+                     | Ast.P_wild -> ""
+                     | _ ->
+                       unsupported p.Ast.ploc
+                         "nested tuple element (only P_var / P_wild)") ps)
                | _ ->
                  unsupported sub.Ast.ploc
-                   "nested pattern in C codegen (only P_var / P_wild)")
+                   "nested pattern in C codegen (only P_var / P_wild / P_tuple)")
           in
           (test, bind)
         | _ ->
@@ -461,8 +511,6 @@ let rec emit_expr (e : Ast.expr) : string =
       Printf.sprintf "(%s) ? ({ %s%s; }) " test bindings (emit_expr body)
     in
     let arms_c = String.concat ": " (List.map emit_arm arms) in
-    (* Final fallthrough: should be unreachable after the typer's
-       exhaustiveness checker; emit an `abort()` so it's at least loud. *)
     Printf.sprintf
       "({ __auto_type __scrut = %s; %s: ({ abort(); 0; }); })"
       scrut_c arms_c
@@ -522,9 +570,11 @@ let c_type_of (t : Ast.ty) : string =
     (* User-declared record type — the struct name matches the Lang name. *)
     name
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.types name ->
-    (* User-declared variant type (or record / view registered via types).
-       For variants, the struct name matches the Lang type name; the
-       payload union is keyed by constructor name. *)
+    (* User-declared variant type. For non-recursive variants, `name` is
+       the struct typedef. For recursive variants, `name` is a `T_node*`
+       typedef (a pointer alias) so values are passed by pointer and the
+       infinite-size cycle is broken. Either way, c_type_of just yields
+       `name`. *)
     name
   | other ->
     raise (Codegen_error (Loc.dummy,
@@ -1120,8 +1170,25 @@ let emit_record_typedef (name : string) : string =
   Printf.sprintf "typedef struct {\n%s\n} %s;"
     (String.concat "\n" fields) name
 
+(* Detect direct self-reference in a variant's payload types. *)
+let variant_is_recursive (name : string)
+    (variants : (string * Ast.ty option) list) : bool =
+  let rec mentions t =
+    match Ast.walk t with
+    | Ast.TyCon (n, _) when n = name -> true
+    | Ast.TyCon (_, args) -> List.exists mentions args
+    | Ast.TyTuple ts -> List.exists mentions ts
+    | Ast.TyArrow (a, b) -> mentions a || mentions b
+    | Ast.TyRef (_, inner) -> mentions inner
+    | _ -> false
+  in
+  List.exists (fun (_, arg_opt) ->
+    match arg_opt with Some t -> mentions t | None -> false) variants
+
 (* Emit a tagged-union struct typedef for a Lang variant declaration.
-   Records the tag index for each constructor name in `variant_tags`. *)
+   Records the tag index for each constructor name in `variant_tags`.
+   For recursive variants, emits a `T_node` struct + a `T = T_node*`
+   pointer typedef so values can be passed by reference. *)
 let emit_variant_typedef (name : string) (params : string list)
     (variants : (string * Ast.ty option) list) : string =
   if params <> [] then
@@ -1130,6 +1197,9 @@ let emit_variant_typedef (name : string) (params : string list)
         "polymorphic variant `%s` not supported in C codegen yet" name));
   List.iteri (fun i (cname, _) ->
     Hashtbl.replace variant_tags cname i) variants;
+  let recursive = variant_is_recursive name variants in
+  if recursive then Hashtbl.replace recursive_variants name ();
+  let node_name = if recursive then name ^ "_node" else name in
   let payload_arms =
     List.filter_map (fun (cname, arg_opt) ->
       match arg_opt with
@@ -1143,7 +1213,39 @@ let emit_variant_typedef (name : string) (params : string list)
       "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
       "\n  } payload;"
   in
-  Printf.sprintf "typedef struct {\n%s\n} %s;" body name
+  if recursive then
+    (* For recursive variants we only emit the forward decl + ptr typedef
+       here. The struct BODY (which may reference tuple / other types
+       that come later in the topo order) is emitted by
+       `emit_variant_struct_body` after the tuple/record typedefs. *)
+    Printf.sprintf
+      "typedef struct %s %s;\ntypedef %s* %s;"
+      node_name node_name node_name name
+  else
+    Printf.sprintf "typedef struct {\n%s\n} %s;" body name
+
+(* Emit the full struct body for a recursive variant. Called by
+   emit_program AFTER tuple / record typedefs are in place. *)
+let emit_variant_struct_body (name : string)
+    (variants : (string * Ast.ty option) list) : string option =
+  if not (is_recursive_variant name) then None
+  else
+    let node_name = name ^ "_node" in
+    let payload_arms =
+      List.filter_map (fun (cname, arg_opt) ->
+        match arg_opt with
+        | None -> None
+        | Some ty ->
+          Some (Printf.sprintf "    %s %s;" (c_type_of ty) cname))
+        variants
+    in
+    let body =
+      if payload_arms = [] then "  int tag;"
+      else
+        "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
+        "\n  } payload;"
+    in
+    Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Variant typedefs come from Top_type decls. Walk prog.decls (NOT the
@@ -1151,13 +1253,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      struct for each declared variant type. This also populates
      variant_tags as a side effect. *)
   Hashtbl.reset variant_tags;
-  let variant_typedefs =
+  Hashtbl.reset recursive_variants;
+  let variant_decls =
     List.filter_map (fun decl ->
       match decl with
-      | Ast.Top_type (name, params, variants) ->
-        Some (emit_variant_typedef name params variants)
-      | _ -> None
-    ) prog.decls
+      | Ast.Top_type (name, params, variants) -> Some (name, params, variants)
+      | _ -> None) prog.decls
+  in
+  let variant_typedefs =
+    List.map (fun (name, params, variants) ->
+      emit_variant_typedef name params variants) variant_decls
+  in
+  let variant_struct_bodies =
+    List.filter_map (fun (name, _, variants) ->
+      emit_variant_struct_body name variants) variant_decls
   in
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
@@ -1260,6 +1369,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
+    @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])

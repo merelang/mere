@@ -96,7 +96,8 @@ interpreter 方式だと「Lang は OCaml の上で動く」状態。codegen で
 | 関数 | top-level fn の lifting (`let f = ...` / `let rec f = ... and g = ...`)、forward decl で自己再帰 / 相互再帰、str を取る / 返す関数 |
 | Tuple | C struct (`tuple_int_str` 等を shape ごとに自動生成) + C99 compound literal、`fst` / `snd` builtin |
 | Record | 単相 `type Point = { x: int, y: int }` → `typedef struct {...} Point;`、construction (`Point { x = 1, y = 2 }`) / field access / record update をサポート |
-| Variant | 単相 `type Status = Ok \| Err of str` → tagged union (`typedef struct { int tag; union { ... } payload; } Status;`)、Constr emit に compound literal、match を ternary chain + statement expression に展開 (`P_constr` / `P_var` / `P_wild` のみ、guard 不可) |
+| Variant | 単相 `type Status = Ok \| Err of str` → tagged union (`typedef struct { int tag; union { ... } payload; } Status;`)、Constr emit に compound literal、match を ternary chain + statement expression に展開 (`P_constr` / `P_var` / `P_wild` / `P_tuple` sub、guard 不可) |
+| 再帰 variant | 自己参照 payload を持つ variant (例: `type ilist = INil \| ICons of int * ilist`) は heap allocated + ポインタ表現 (`typedef ilist_node* ilist;`)。Constr が malloc して node を返し、match は `__scrut->tag` で dereference。tuple payload も `P_tuple (h, t)` で `.f0` / `.f1` を bind |
 | Closure (defunct) | 関数本体内の `let n = fn x -> body` を defunctionalization で top-level に lift。free vars を C function param に prepend、call site を rewrite。captures は int/bool/str/unit のみ (tuple/record/関数値 capture は未対応)。多段ネスト OK |
 | First-class fn (Phase A + B) | `T1 -> T2` 型を closure struct (`{ void* env; T2 (*fn)(void*, T1); }`) で表現。各 top-level fn に `_closure_fn` adapter + `_as_value` const、anonymous Fun in expression position は env struct (heap-alloc) + adapter (`__anon_N_fn`) + closure construction として lift され、capture は `__env_self->name` に rewrite される。closure dispatch は `({ __auto_type __c = e; __c.fn(__c.env, x); })`。Direct call (known top-level の Var head) は引き続き直接呼出の高速パス |
 
@@ -107,10 +108,10 @@ interpreter 方式だと「Lang は OCaml の上で動く」状態。codegen で
 - 多引数 curry (`fn x -> fn y -> ...` を `f x y` のように両方適用するときの中間段)
 - float
 - 多相 record (`type 'a Box = { v: 'a }` 等)
-- 多相 variant (`type 'a opt = None | Some of 'a` 等)
-- 複雑な pattern (P_int / P_str / P_tuple / P_or / P_as / P_record / nested)
+- 多相 variant (`type 'a opt = None | Some of 'a` 等、list を含む)
+- 複雑な pattern (P_int / P_str / P_or / P_as / P_record / nested)
 - match guard (`| pat when ... -> ...`)
-- list / list literal `[1, 2, 3]`
+- list literal `[1, 2, 3]` (要 多相 variant)
 - region / view / `&R T` / `with`
 - `show` polymorphic builtin
 - ほとんどの stdlib builtin (print と str_len のみ wired up)
@@ -145,6 +146,7 @@ clang sample.c -o sample
 | 4.8 | closure conversion (defunctionalization) | 関数本体内の `let h = fn ... in ...` を top-level に lift、free vars を param に prepend、call site rewrite |
 | 4.9-a | first-class fns (Phase A、top-level fn as value) | `T1 -> T2` を `closure_T1_T2` struct に、top-level fn に adapter + `_as_value` const、HOF が closure 引数を受け取って `.fn(.env, x)` で dispatch |
 | 4.9-b | first-class fns (Phase B、anonymous Fun + captures) | anonymous Fun in expression position を heap-allocated env struct + adapter + closure 構築に lift、capture を `__env_self->name` に rewrite、curried HOF (`apply f x = f x`)・`make_adder` クロージャまで動作 |
+| 4.10 | 再帰 variant + P_tuple pattern | 自己参照 variant (`type ilist = INil \| ICons of int * ilist`) を heap-allocated node + ptr typedef に、Constr が malloc、match が `->` dereference、tuple sub-pattern を `.f0 / .f1` bind。連結リストの `sum` が clang 経由 native 実行可能 |
 
 slice ごとに **clang 経由で native binary 化して実行確認** している (例: factorial 10 → 3628800、`print (greet 5)` → "positive"、`fst ("hello", 42)` → "hello")。
 
