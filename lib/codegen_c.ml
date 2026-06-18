@@ -587,16 +587,37 @@ let rec emit_expr (e : Ast.expr) : string =
       | Some t -> Ast.walk t
       | None -> Ast.TyInt
     in
-    let emit_arm (pat, guard, body) =
-      if guard <> None then
-        unsupported pat.Ast.ploc "match guard (`when ...`) in C codegen";
-      let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
-      Printf.sprintf "(%s) ? ({ %s%s; }) " test bindings (emit_expr body)
+    (* Flatten P_or into multiple arms (the typer guarantees both
+       branches bind the same names so duplicating the body is safe). *)
+    let rec expand_or (pat, guard, body) =
+      match pat.Ast.pnode with
+      | Ast.P_or (a, b) -> expand_or (a, guard, body) @ expand_or (b, guard, body)
+      | _ -> [(pat, guard, body)]
     in
-    let arms_c = String.concat ": " (List.map emit_arm arms) in
+    let arms = List.concat_map expand_or arms in
+    (* Emit nested ternaries — each arm's body is wrapped in a
+       statement expression so the pattern bindings are in scope for
+       the guard (if any) and the body. *)
+    let rec emit_arms = function
+      | [] -> "({ abort(); 0; })"
+      | (pat, guard, body) :: rest ->
+        let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
+        let next = emit_arms rest in
+        let body_c = emit_expr body in
+        let bound =
+          match guard with
+          | None ->
+            Printf.sprintf "({ %s%s; })" bindings body_c
+          | Some g ->
+            let guard_c = emit_expr g in
+            Printf.sprintf "({ %s(%s) ? (%s) : (%s); })"
+              bindings guard_c body_c next
+        in
+        Printf.sprintf "(%s) ? %s : (%s)" test bound next
+    in
     Printf.sprintf
-      "({ __auto_type __scrut = %s; %s: ({ abort(); 0; }); })"
-      scrut_c arms_c
+      "({ __auto_type __scrut = %s; %s; })"
+      scrut_c (emit_arms arms)
   | Ast.Tuple es ->
     (* Construction via C99 compound literal. Use the typer's recorded
        type to pick the right struct name. *)
@@ -728,7 +749,11 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     let as_bind = Printf.sprintf "__auto_type %s = %s; " n v_c in
     (test, bind ^ as_bind)
   | Ast.P_or _ ->
-    unsupported pat.Ast.ploc "or-pattern not yet supported in C codegen"
+    (* Or-patterns are flattened to multiple arms BEFORE compile_pattern
+       is called by the Match emitter, so encountering one here means
+       it's nested inside another pattern — not yet supported. *)
+    unsupported pat.Ast.ploc
+      "or-pattern nested inside a constructor / tuple / record"
 
 type fn_decl = {
   name      : string;

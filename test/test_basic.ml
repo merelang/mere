@@ -2297,6 +2297,24 @@ let () =
     (codegen "match 5 with | n as all -> n + all")
     "__auto_type all = __scrut";
 
+  (* --- C codegen: or-pattern + match guard (Phase 4.15) --- *)
+  assert_contains "codegen: or-pattern flattens into two arms"
+    (codegen_with_decls
+      "type CgOr1 = OA | OB | OC;\n\
+       match OB with | OA | OB -> 1 | OC -> 2")
+    ".tag == 0";  (* both alternatives emit their own tag test *)
+  assert_contains "codegen: or-pattern result correct via duplicated body"
+    (codegen_with_decls
+      "type CgOr2 = OD | OE;\n\
+       match OE with | OD | OE -> 99")
+    "{ 99; }";  (* body 99 duplicated for both alternatives *)
+  assert_contains "codegen: guard emitted in bindings scope"
+    (codegen "match 7 with | n when n < 5 -> 100 | _ -> 200")
+    "n < 5";
+  assert_contains "codegen: guard with bindings"
+    (codegen "match 7 with | n when n > 5 -> n * 10 | _ -> 0")
+    "__auto_type n =";
+
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
      Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
@@ -2341,12 +2359,11 @@ let () =
         "type 'a CgOpt = CNone | CSome of 'a;\n\
          CNone"
       in ());
-  check_raises "codegen: match guard rejected"
-    (fun () ->
-      let _ = codegen_with_decls
-        "type CgCol5 = A | B;\n\
-         match A with | A when true -> 0 | _ -> 1"
-      in ());
+  assert_contains "codegen: match guard accepted"
+    (codegen_with_decls
+      "type CgCol5 = A | B;\n\
+       match A with | A when true -> 0 | _ -> 1")
+    "(1) ? (0)";
 
   (* --- C codegen: closure conversion (Phase 4 eighth slice) ---
      Inner `let n = fn x -> body` is lifted to a top-level fn with
