@@ -2137,8 +2137,11 @@ let () =
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
     "__lifted_helper_0(x, 10)";
-  check_raises "codegen: indirect fn application rejected"
-    (fun () -> let _ = codegen "(fn x -> x + 1) 5" in ());
+  assert_contains "codegen: anonymous fn application via closure"
+    (* Phase 4.9-B: anonymous Fun in expression position is now lifted as
+       a closure value, and the App goes through closure dispatch. *)
+    (codegen "(fn x -> x + 1) 5")
+    "__c.fn(__c.env, 5)";
 
   (* --- C codegen: string support (Phase 4 third slice) --- *)
   assert_contains "codegen: str literal emits C string"
@@ -2370,6 +2373,24 @@ let () =
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "apply(inc_as_value)";
+
+  (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) --- *)
+  assert_contains "codegen: anonymous Fun emits env typedef"
+    (codegen
+      "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
+    "} __anon_0_env;";
+  assert_contains "codegen: anonymous Fun emits adapter"
+    (codegen
+      "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
+    "static int __anon_0_fn(void* __env_self_void, int x)";
+  assert_contains "codegen: anonymous Fun emits closure construction"
+    (codegen
+      "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
+    "__env->f = f";
+  assert_contains "codegen: captured var rewritten to env access"
+    (codegen
+      "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
+    "(__env_self->f)";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

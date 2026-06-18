@@ -58,6 +58,46 @@ type lifted_inner = {
 }
 let inner_lifts : (string, lifted_inner) Hashtbl.t = Hashtbl.create 8
 
+(* Anonymous closure (Phase B): a Fun in expression position becomes a
+   closure value. We queue its env struct + adapter for emission and
+   produce a closure construction expression at the Fun's site. *)
+type closure_emission = {
+  ce_adapter_name : string;
+  ce_env_name     : string;
+  ce_env_fields   : (string * Ast.ty) list;  (* captures *)
+  ce_param        : string;
+  ce_param_ty     : Ast.ty;
+  ce_return_ty    : Ast.ty;
+  ce_body         : Ast.expr;
+}
+let pending_closures : closure_emission list ref = ref []
+
+(* Substitution map used inside an adapter body to rewrite captured Var
+   references to env-pointer accesses (`x` → `__env_self->x`). Saved/
+   restored around adapter emission so nested closures stack cleanly. *)
+let current_env_subst : (string * string) list ref = ref []
+
+(* When the typer's recorded .ty on a Fun is still polymorphic (because
+   the enclosing fn was let-poly generalized), fall back to the type
+   the parent context expects. Set by emit_fn / emit_lifted_fn /
+   emit_closure_adapter; consulted by emit_expr's Fun case. *)
+let current_expected_ty : Ast.ty option ref = ref None
+
+(* In-scope variable types. Used to recover concrete capture types when
+   the typer's recorded .ty on a Var has been left polymorphic by
+   let-poly generalization. Updated by emit_fn / emit_lifted_fn /
+   emit_closure_adapter (binding the fn's param + any captures) and by
+   emit_expr Let (binding the let's name). *)
+let current_var_types : (string * Ast.ty) list ref = ref []
+
+(* Fresh names for anonymous closures + their env structs. *)
+let anon_closure_counter = ref 0
+let fresh_anon_names () =
+  let n = !anon_closure_counter in
+  incr anon_closure_counter;
+  (Printf.sprintf "__anon_%d_fn" n,
+   Printf.sprintf "__anon_%d_env" n)
+
 let binop_to_c = function
   | Ast.Add -> "+"
   | Ast.Sub -> "-"
@@ -109,6 +149,49 @@ let rec ty_tag (t : Ast.ty) : string =
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
+
+(* Find the first Var node with the given name in `e` whose typer-
+   recorded `.ty` is set, and return that type. Used to recover capture
+   types for closure conversion. *)
+let lookup_var_ty (e : Ast.expr) (name : string) : Ast.ty =
+  let found = ref None in
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n when n = name ->
+       (match e.Ast.ty with
+        | Some t -> if !found = None then found := Some (Ast.walk t)
+        | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go e;
+  match !found with
+  | Some t -> t
+  | None ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "captured variable `%s` has no recorded type" name))
 
 (* Closure-value struct name for an arrow type. A function value of type
    T1 -> T2 is represented at C level as a struct with an `env` void
@@ -188,14 +271,17 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s -> Ast.escape_string s
   | Ast.Var name ->
-    (* When a top-level fn name is referenced in a non-callee position,
-       emit the prepared closure const so the value has the right C type. *)
-    if Hashtbl.mem toplevel_fn_names name then name ^ "_as_value"
-    else if Hashtbl.mem inner_lifts name then
-      unsupported e.loc
-        ("inner-lifted fn `" ^ name ^
-         "` used as a value — only direct calls are supported (Phase 4.9-a)")
-    else name
+    (* If we're inside a closure adapter and this name is one of the
+       captured vars, rewrite to env access. *)
+    (match List.assoc_opt name !current_env_subst with
+     | Some s -> s
+     | None ->
+       if Hashtbl.mem toplevel_fn_names name then name ^ "_as_value"
+       else if Hashtbl.mem inner_lifts name then
+         unsupported e.loc
+           ("inner-lifted fn `" ^ name ^
+            "` used as a value — only direct calls are supported (Phase 4.9-a)")
+       else name)
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
   | Ast.Bin (Ast.Concat, a, b) ->
@@ -228,7 +314,76 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Unit_lit      -> "0"  (* unit becomes int 0 in C *)
   | Ast.Let_rec _     -> unsupported e.loc "let rec inside an expression (only allowed at top level)"
   | Ast.With _        -> unsupported e.loc "with"
-  | Ast.Fun _         -> unsupported e.loc "functions in expression position (only top-level lifted fns supported)"
+  | Ast.Fun (param, _, fn_body) ->
+    (* Anonymous Fun in expression position → emit a closure value.
+       Prefer the typer's recorded type; if it's still polymorphic (due
+       to let-poly generalization above us), fall back to the type the
+       parent context expects. *)
+    let arrow_ty =
+      let from_node =
+        match e.Ast.ty with Some t -> Some (Ast.walk t) | None -> None
+      in
+      let from_context = !current_expected_ty in
+      match from_node, from_context with
+      | Some t, _ when ty_is_concrete t -> t
+      | _, Some t when ty_is_concrete t -> t
+      | Some t, _ -> t  (* best-effort; will likely raise downstream *)
+      | None, None ->
+        unsupported e.loc
+          "anonymous fn missing inferred type (no context)"
+      | None, Some _ -> assert false
+    in
+    let param_ty, return_ty =
+      match arrow_ty with
+      | Ast.TyArrow (a, b) -> (Ast.walk a, Ast.walk b)
+      | _ -> unsupported e.loc "anonymous fn has non-arrow type"
+    in
+    (* Captures = free vars of body excluding the param, builtins, and
+       known top-level fn names. Vars currently visible via env_subst
+       are also "free in the surrounding scope" — they're our captures
+       in this adapter, but already accessible via the OUTER env. *)
+    let exclusions =
+      let builtins = List.map fst Typer.initial_env in
+      let tops = Hashtbl.fold (fun k () acc -> k :: acc)
+                   toplevel_fn_names [] in
+      let inners = Hashtbl.fold (fun k _ acc -> k :: acc) inner_lifts [] in
+      param :: builtins @ tops @ inners
+    in
+    let fvs = free_vars fn_body exclusions in
+    (* Capture type lookup: prefer the in-scope binding's resolved type;
+       fall back to scanning Var nodes in the body (which may be
+       polymorphic if the host fn was generalized). *)
+    let cap_ty_of fv =
+      match List.assoc_opt fv !current_var_types with
+      | Some t when ty_is_concrete t -> Ast.walk t
+      | _ -> lookup_var_ty fn_body fv
+    in
+    let captures = List.map (fun fv -> (fv, cap_ty_of fv)) fvs in
+    let adapter_name, env_name = fresh_anon_names () in
+    pending_closures := {
+      ce_adapter_name = adapter_name;
+      ce_env_name = env_name;
+      ce_env_fields = captures;
+      ce_param = param;
+      ce_param_ty = param_ty;
+      ce_return_ty = return_ty;
+      ce_body = fn_body;
+    } :: !pending_closures;
+    let cstruct = closure_struct_name param_ty return_ty in
+    if captures = [] then
+      (* No env needed — pass NULL. *)
+      Printf.sprintf "((%s){.env = NULL, .fn = %s})" cstruct adapter_name
+    else
+      let inits =
+        String.concat " "
+          (List.map (fun (n, _) ->
+            Printf.sprintf "__env->%s = %s;" n (emit_expr
+              { Ast.loc = e.loc; ty = Some (List.assoc n captures);
+                node = Ast.Var n })) captures)
+      in
+      Printf.sprintf
+        "({ %s* __env = (%s*)malloc(sizeof(%s)); %s (%s){.env = __env, .fn = %s}; })"
+        env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
     (match f.node with
      | Ast.Var "print" ->
@@ -512,21 +667,44 @@ type lifted_fn = {
 let format_param (n, ty) =
   Printf.sprintf "%s %s" (c_type_of ty) n
 
+let with_expected_ty (t : Ast.ty) (f : unit -> 'a) : 'a =
+  let prev = !current_expected_ty in
+  current_expected_ty := Some t;
+  let r = try f () with ex -> current_expected_ty := prev; raise ex in
+  current_expected_ty := prev;
+  r
+
+let with_var_types (bindings : (string * Ast.ty) list) (f : unit -> 'a) : 'a =
+  let prev = !current_var_types in
+  current_var_types := bindings @ prev;
+  let r = try f () with ex -> current_var_types := prev; raise ex in
+  current_var_types := prev;
+  r
+
 let emit_fn (f : fn_decl) : string =
+  let body_c =
+    with_var_types [(f.param, f.param_ty)] (fun () ->
+      with_expected_ty f.return_ty (fun () -> emit_expr f.body))
+  in
   Printf.sprintf "%s %s(%s %s) {\n  return %s;\n}"
     (c_type_of f.return_ty)
     f.name
     (c_type_of f.param_ty)
     f.param
-    (emit_expr f.body)
+    body_c
 
 let emit_lifted_fn (f : lifted_fn) : string =
   let params =
     String.concat ", "
       (List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
+  let all_bindings = f.l_captures @ [(f.l_param, f.l_param_ty)] in
+  let body_c =
+    with_var_types all_bindings (fun () ->
+      with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body))
+  in
   Printf.sprintf "%s %s(%s) {\n  return %s;\n}"
-    (c_type_of f.l_return_ty) f.l_name params (emit_expr f.l_body)
+    (c_type_of f.l_return_ty) f.l_name params body_c
 
 let emit_fn_forward_decl (f : fn_decl) : string =
   Printf.sprintf "%s %s(%s);"
@@ -564,6 +742,53 @@ let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
          (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
   Printf.sprintf "%s %s(%s);" (c_type_of f.l_return_ty) f.l_name params
+
+(* Render an anonymous-closure env struct typedef. *)
+let emit_closure_env_typedef (ce : closure_emission) : string =
+  if ce.ce_env_fields = [] then ""
+  else
+    let fields =
+      String.concat "\n"
+        (List.map (fun (n, t) ->
+          Printf.sprintf "  %s %s;" (c_type_of t) n) ce.ce_env_fields)
+    in
+    Printf.sprintf "typedef struct {\n%s\n} %s;" fields ce.ce_env_name
+
+let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
+  Printf.sprintf "static %s %s(void*, %s);"
+    (c_type_of ce.ce_return_ty) ce.ce_adapter_name
+    (c_type_of ce.ce_param_ty)
+
+(* Render an anonymous-closure adapter, emitting its body with the
+   capture-name → env-pointer substitution map. *)
+let emit_closure_adapter (ce : closure_emission) : string =
+  let env_subst =
+    List.map (fun (n, _) -> (n, "(__env_self->" ^ n ^ ")"))
+      ce.ce_env_fields
+  in
+  let prev = !current_env_subst in
+  current_env_subst := env_subst;
+  let var_bindings =
+    ce.ce_env_fields @ [(ce.ce_param, ce.ce_param_ty)]
+  in
+  let body_c =
+    with_var_types var_bindings (fun () ->
+      with_expected_ty ce.ce_return_ty (fun () -> emit_expr ce.ce_body))
+  in
+  current_env_subst := prev;
+  let env_unpack =
+    if ce.ce_env_fields = [] then "(void)__env_self_void;"
+    else
+      Printf.sprintf "%s* __env_self = (%s*)__env_self_void;"
+        ce.ce_env_name ce.ce_env_name
+  in
+  Printf.sprintf
+    "static %s %s(void* __env_self_void, %s %s) {\n  \
+       %s\n  \
+       return %s;\n}"
+    (c_type_of ce.ce_return_ty) ce.ce_adapter_name
+    (c_type_of ce.ce_param_ty) ce.ce_param
+    env_unpack body_c
 
 (* String-concat runtime helper: allocates a new heap buffer of size
    |a| + |b| + 1 and concatenates. Memory is leaked — fine for short-lived
@@ -603,7 +828,7 @@ let fresh_inner_name base =
    rest` patterns. For each, compute captures (free vars minus known
    top-level fn names) and produce a lifted_fn. Records the mapping in
    `inner_lifts` so emit_expr can rewrite call sites and drop bindings. *)
-let rec lift_inner_fns
+let lift_inner_fns
     (toplevel_names : string list)
     (fns : fn_decl list) : lifted_fn list =
   Hashtbl.reset inner_lifts;
@@ -666,9 +891,11 @@ let rec lift_inner_fns
        | _ ->
          walk_in_fn host_param value;
          walk_in_fn host_param body)
-    | Ast.Fun (_, _, _) ->
-      raise (Codegen_error (e.Ast.loc,
-        "anonymous fn (not in `let name = fn ...`) not yet supported"))
+    | Ast.Fun (_, _, body) ->
+      (* Anonymous Fun in expression position — handled by emit_expr
+         as a closure value (Phase B). Just recurse so deeper Funs are
+         walked too. *)
+      walk_in_fn host_param body
     | _ -> walk_children walk_in_fn host_param e
   and walk_children walker host_param e =
     match e.Ast.node with
@@ -703,48 +930,6 @@ let rec lift_inner_fns
     walk_in_fn f.param f.body) fns;
   List.rev !lifted
 
-(* Find a Var node with the given name in `e` and return the typer-
-   recorded type of that node's enclosing context. We search by walking
-   e and matching Var n; the ty field on that node was set by Typer. *)
-and lookup_var_ty (e : Ast.expr) (name : string) : Ast.ty =
-  let found = ref None in
-  let rec go (e : Ast.expr) =
-    (match e.Ast.node with
-     | Ast.Var n when n = name ->
-       (match e.Ast.ty with
-        | Some t -> if !found = None then found := Some (Ast.walk t)
-        | None -> ())
-     | _ -> ());
-    match e.Ast.node with
-    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
-    | Ast.Unit_lit | Ast.Var _ -> ()
-    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-    | Ast.App (a, b) -> go a; go b
-    | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
-    | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (_, _, b) -> go b
-    | Ast.Constr (_, Some a) -> go a
-    | Ast.Constr (_, None) -> ()
-    | Ast.Match (s, arms) ->
-      go s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
-    | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
-    | Ast.Ref (_, a) -> go a
-    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
-    | Ast.Field_get (a, _) -> go a
-    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
-  in
-  go e;
-  match !found with
-  | Some t -> t
-  | None ->
-    raise (Codegen_error (Loc.dummy,
-      Printf.sprintf "captured variable `%s` has no recorded type" name))
 
 (* Walk a typed AST + fn signatures and collect every distinct
    `(p, r)` arrow type so we can emit a `closure_p_r` typedef. *)
@@ -764,8 +949,11 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
   let rec walk_ty (t : Ast.ty) =
     match Ast.walk t with
     | Ast.TyArrow (p, r) ->
-      add (Ast.walk p) (Ast.walk r);
-      walk_ty p; walk_ty r
+      (* Walk children FIRST so simpler arrows are added before the
+         outer arrow that references them — keeps C typedef ordering
+         legal (typedef body needs prior types to be fully defined). *)
+      walk_ty p; walk_ty r;
+      add (Ast.walk p) (Ast.walk r)
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyCon (_, args) -> List.iter walk_ty args
     | Ast.TyRef (_, inner) -> walk_ty inner
@@ -1013,13 +1201,47 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     List.map (fun (p, r) -> emit_closure_typedef p r) arrow_pairs
   in
   let closure_wrappers = List.map emit_closure_wrapper fns in
+  (* Reset anonymous-closure state before generating fn defs (which
+     drives emit_expr to populate `pending_closures`). *)
+  pending_closures := [];
+  anon_closure_counter := 0;
+  let fn_defs_main =
+    List.map emit_lifted_fn inner_fns
+    @ List.map emit_fn fns
+  in
+  (* Now emit the closure adapters that were registered during the
+     above emissions. They might themselves emit more pending closures
+     (nested), so keep draining until the queue is empty. *)
+  let closure_env_typedefs = ref [] in
+  let closure_adapter_forward_decls = ref [] in
+  let closure_adapters = ref [] in
+  let rec drain () =
+    let queue = !pending_closures in
+    pending_closures := [];
+    if queue <> [] then begin
+      List.iter (fun ce ->
+        closure_env_typedefs := emit_closure_env_typedef ce :: !closure_env_typedefs;
+        closure_adapter_forward_decls :=
+          emit_closure_adapter_forward_decl ce :: !closure_adapter_forward_decls;
+        closure_adapters := emit_closure_adapter ce :: !closure_adapters)
+        (List.rev queue);
+      drain ()
+    end
+  in
+  drain ();
+  let closure_env_typedefs =
+    List.filter (fun s -> s <> "") (List.rev !closure_env_typedefs)
+  in
+  let closure_adapter_forward_decls = List.rev !closure_adapter_forward_decls in
+  let closure_adapters = List.rev !closure_adapters in
   let forward_decls =
     List.map emit_fn_forward_decl fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
+    @ closure_adapter_forward_decls
   in
   let fn_defs =
-    List.map emit_lifted_fn inner_fns
-    @ List.map emit_fn fns
+    fn_defs_main
+    @ closure_adapters
     @ closure_wrappers
   in
   let main_body = emit_expr body_expr in
@@ -1039,6 +1261,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
+    @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";
