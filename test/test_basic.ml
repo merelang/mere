@@ -2923,5 +2923,31 @@ let () =
     (llvm "let apply = fn f -> f 5 in apply (fn x -> x + 1)")
     "insertvalue %closure_int_int undef, ptr null, 0";
 
+  (* --- LLVM IR codegen: default region runtime (Phase 5.8) ---
+     %__lang_region struct, init/alloc/free helpers, and the global
+     @__lang_default_region initialized at @main start. Closure env and
+     string concat allocations now go through the bump arena. *)
+  assert_contains "llvm: __lang_region struct typedef"
+    (llvm "1 + 2") "%__lang_region = type { ptr, ptr, i64 }";
+  assert_contains "llvm: default region global"
+    (llvm "1 + 2") "@__lang_default_region = internal global %__lang_region zeroinitializer";
+  assert_contains "llvm: region_alloc helper defined"
+    (llvm "1 + 2") "define ptr @__lang_region_alloc(ptr %r, i64 %n)";
+  assert_contains "llvm: main initializes default region"
+    (llvm "1 + 2")
+    "call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";
+  assert_contains "llvm: main frees default region"
+    (llvm "1 + 2")
+    "call void @__lang_region_free(ptr @__lang_default_region)";
+  assert_contains "llvm: str_concat uses default region"
+    (llvm "\"a\" ++ \"b\"")
+    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %totalp1)";
+  assert_contains "llvm: closure env alloc uses default region"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64";
+  assert_no_contains "llvm: closure env no longer uses bare malloc"
+    (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "= call ptr @malloc(i64 %t";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
