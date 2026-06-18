@@ -633,8 +633,28 @@ let rec emit_expr (e : Ast.expr) : string =
         Printf.sprintf ".f%d = %s" i (emit_expr ex)) es
     in
     "((" ^ struct_name ^ "){" ^ String.concat ", " init_fields ^ "})"
-  | Ast.Region_block _ -> unsupported e.loc "region blocks"
-  | Ast.Ref _         -> unsupported e.loc "region references"
+  | Ast.Region_block (name, body) ->
+    (* Allocate a region buffer, evaluate body, free. The region's C
+       local name is `__region_<name>` — accessed by Ref/`&R v` when
+       emitting `R.alloc(...)` calls inside body. Default cap 1 MB. *)
+    let region_var = "__region_" ^ name in
+    Printf.sprintf
+      "({ __lang_region %s; __lang_region_init(&%s, 1 << 20); \
+       __auto_type __r_result = (%s); \
+       __lang_region_free(&%s); \
+       __r_result; })"
+      region_var region_var (emit_expr body) region_var
+  | Ast.Ref (region, inner) ->
+    (* `&R v` — allocate v in region R's bump buffer and return a
+       pointer of type `T*`. Uses typeof / __auto_type so we don't need
+       to thread the inner type's C representation through. *)
+    let region_var = "__region_" ^ region in
+    Printf.sprintf
+      "({ __auto_type __ref_v = (%s); \
+       typeof(__ref_v)* __ref_p = (typeof(__ref_v)*) \
+         __lang_region_alloc(&%s, sizeof(__ref_v)); \
+       *__ref_p = __ref_v; __ref_p; })"
+      (emit_expr inner) region_var
   | Ast.Record_lit (name, fields) ->
     (* If this record is polymorphic, pick the mono name from the
        Record_lit's inferred type. *)
@@ -764,13 +784,18 @@ type fn_decl = {
 }
 
 (* Lang type → C type, restricted to the codegen subset. *)
-let c_type_of (t : Ast.ty) : string =
+let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> "int"
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyTuple ts -> tuple_struct_name ts
   | Ast.TyArrow (p, r) -> closure_struct_name p r
+  | Ast.TyRef (_, inner) ->
+    (* `&R T` at runtime is a pointer into the region's buffer; the
+       region name is dropped (escape check at the typer guarantees the
+       pointer isn't used past the region's lifetime). *)
+    c_type_of inner ^ "*"
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_records name ->
     (* Polymorphic record instantiation. *)
     mono_record_name name (List.map Ast.walk args)
@@ -1167,6 +1192,38 @@ let str_concat_helper =
       "  memcpy(r + la, b, lb);";
       "  r[la + lb] = '\\0';";
       "  return r;";
+      "}" ]
+
+(* Region runtime: a bump allocator. `region R { body }` initializes a
+   region buffer, runs body, and frees the buffer. `&R v` allocates a
+   copy of v in the region and returns a pointer. Escape check at the
+   typer ensures no `&R T` value leaves the region's scope. *)
+let region_runtime_helpers =
+  String.concat "\n"
+    [ "typedef struct {";
+      "  char* base;";
+      "  char* top;";
+      "  size_t cap;";
+      "} __lang_region;";
+      "";
+      "static void __lang_region_init(__lang_region* r, size_t cap) {";
+      "  r->base = (char*) malloc(cap);";
+      "  r->top = r->base;";
+      "  r->cap = cap;";
+      "}";
+      "";
+      "static void* __lang_region_alloc(__lang_region* r, size_t n) {";
+      "  size_t aligned = (n + 7) & ~((size_t)7);";
+      "  if (r->top + aligned > r->base + r->cap) {";
+      "    fprintf(stderr, \"region OOM\\n\"); abort();";
+      "  }";
+      "  void* p = r->top;";
+      "  r->top += aligned;";
+      "  return p;";
+      "}";
+      "";
+      "static void __lang_region_free(__lang_region* r) {";
+      "  free(r->base);";
       "}" ]
 
 let main_format_of (t : Ast.ty) : string option =
@@ -1988,6 +2045,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <string.h>";
       "";
       str_concat_helper;
+      "";
+      region_runtime_helpers;
       "" ]
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if mono_variant_typedefs = [] then [] else mono_variant_typedefs @ [""])
