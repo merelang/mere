@@ -2712,5 +2712,29 @@ let () =
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "add i32 %x, 1";
 
+  (* --- LLVM IR codegen: 文字列 / print / ++ / str_len (Phase 5.3) --- *)
+  assert_contains "llvm: str literal global"
+    (llvm "\"hi\"") "@.str_0 = private constant [3 x i8] c\"hi\\00\"";
+  assert_contains "llvm: str main printf uses %s"
+    (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
+  assert_contains "llvm: str passed as ptr to printf"
+    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_0)";
+  assert_contains "llvm: print emits puts call"
+    (llvm "print \"hi\"") "call i32 @puts(ptr ";
+  assert_contains "llvm: ++ lowers to __lang_str_concat"
+    (llvm "\"a\" ++ \"b\"") "call ptr @__lang_str_concat";
+  assert_contains "llvm: __lang_str_concat helper is emitted"
+    (llvm "\"a\" ++ \"b\"") "define ptr @__lang_str_concat(ptr %a, ptr %b)";
+  assert_contains "llvm: str_len uses strlen + trunc"
+    (llvm "str_len \"hi\"") "call i64 @strlen(ptr ";
+  assert_contains "llvm: str_len truncates to i32"
+    (llvm "str_len \"hi\"") "trunc i64";
+  assert_contains "llvm: str-returning fn signature"
+    (llvm "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
+    "define ptr @exclaim(ptr %s)";
+  assert_contains "llvm: str arg passed as ptr"
+    (llvm "let len = fn s -> str_len s in len \"hello\"")
+    "@len(ptr ";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
