@@ -549,7 +549,7 @@ let rec emit_expr (e : Ast.expr) : string =
                 node = Ast.Var n })) captures)
       in
       Printf.sprintf
-        "({ %s* __env = (%s*)malloc(sizeof(%s)); %s (%s){.env = __env, .fn = %s}; })"
+        "({ %s* __env = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s (%s){.env = __env, .fn = %s}; })"
         env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
     (match f.node with
@@ -1299,7 +1299,11 @@ let region_runtime_helpers =
       "";
       "static void __lang_region_free(__lang_region* r) {";
       "  free(r->base);";
-      "}" ]
+      "}";
+      "";
+      "/* Program-lifetime arena for closure envs and other long-lived";
+      "   allocations that outlive any user `region R { ... }` block. */";
+      "static __lang_region __lang_default_region;" ]
 
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
@@ -2178,7 +2182,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";
+        "  __lang_region_init(&__lang_default_region, 1 << 22);";
         main_stmt;
+        "  __lang_region_free(&__lang_default_region);";
         "  return 0;";
         "}";
         "" ]

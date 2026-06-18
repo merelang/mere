@@ -2101,6 +2101,15 @@ let () =
         name needle out
     end
   in
+  let assert_no_contains name out needle =
+    if not (contains out needle) then begin
+      incr pass; Printf.printf "PASS  %s\n" name
+    end else begin
+      incr fail;
+      Printf.printf "FAIL  %s\n  unexpected substring=%s\n  in=%s\n"
+        name needle out
+    end
+  in
   let int_lit_out = codegen "42" in
   assert_contains "codegen: emits stdio.h" int_lit_out "#include <stdio.h>";
   assert_contains "codegen: int literal printf" int_lit_out "printf(\"%d\\n\", 42)";
@@ -2387,6 +2396,28 @@ let () =
       "view CgCell3[R] of int { v: int };\n\
        region R { let c = CgCell3 { v = 7 } in c.v }")
     "(c)->v";
+
+  (* --- C codegen: closure env in default region (Phase 4.20) — closures
+       outlive any user region, so their env structs go to a program-lifetime
+       bump arena (`__lang_default_region`) instead of malloc. --- *)
+  assert_contains "codegen: default region declared at file scope"
+    (codegen_with_decls
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
+    "static __lang_region __lang_default_region;";
+  assert_contains "codegen: closure env uses default region alloc"
+    (codegen_with_decls
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
+    "__lang_region_alloc(&__lang_default_region, sizeof(__anon";
+  assert_no_contains "codegen: closure env no longer uses malloc"
+    (codegen_with_decls
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
+    "__env = (__anon_0_env*)malloc";
+  assert_contains "codegen: main initializes default region"
+    (codegen_with_decls "1 + 2")
+    "__lang_region_init(&__lang_default_region";
+  assert_contains "codegen: main frees default region"
+    (codegen_with_decls "1 + 2")
+    "__lang_region_free(&__lang_default_region)";
 
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
