@@ -2649,5 +2649,44 @@ let () =
        show (CgSome4 1)")
     "show_Cgopt4_int";
 
+  (* --- LLVM IR codegen (Phase 5.1 MVP) ---
+     Subset: int / bool / arith / cmp / logic / Neg / If / Let (P_var) / Var / Annot.
+     Emits textual LLVM IR that clang can compile directly. *)
+  let llvm s =
+    let prog = Pipeline.parse_program s in
+    let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_llvm.emit_program ~main_ty prog
+  in
+  assert_contains "llvm: declares printf"
+    (llvm "42") "declare i32 @printf(ptr, ...)";
+  assert_contains "llvm: defines main"
+    (llvm "42") "define i32 @main()";
+  assert_contains "llvm: format constant present"
+    (llvm "42") "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"";
+  assert_contains "llvm: int literal call site"
+    (llvm "42") "@printf(ptr @.fmt_d, i32 42)";
+  assert_contains "llvm: add lowers to LLVM add"
+    (llvm "1 + 2") "add i32 1, 2";
+  assert_contains "llvm: mul lowers to LLVM mul"
+    (llvm "3 * 4") "mul i32 3, 4";
+  assert_contains "llvm: sdiv used for /"
+    (llvm "10 / 2") "sdiv i32 10, 2";
+  assert_contains "llvm: srem used for %"
+    (llvm "10 % 3") "srem i32 10, 3";
+  assert_contains "llvm: < lowers to icmp slt"
+    (llvm "if 1 < 2 then 10 else 20") "icmp slt i32 1, 2";
+  assert_contains "llvm: if emits br on i1"
+    (llvm "if 1 < 2 then 10 else 20") "br i1";
+  assert_contains "llvm: if uses phi for join"
+    (llvm "if 1 < 2 then 10 else 20") "= phi i32";
+  assert_contains "llvm: let body sees binding"
+    (llvm "let x = 5 in x * x") "mul i32 5, 5";
+  assert_contains "llvm: bool literal as i1 in logic"
+    (llvm "true && false") "and i1 1, 0";
+  assert_contains "llvm: bool result is zero-extended for printf"
+    (llvm "true") "zext i1";
+  assert_contains "llvm: ret 0 at main end"
+    (llvm "1") "ret i32 0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

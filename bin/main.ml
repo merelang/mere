@@ -8,6 +8,8 @@ let usage () =
   print_endline "  lang-ml -te <expr>      print the inferred type of an inline expression";
   print_endline "  lang-ml -c <file.lang>  emit C source for the program (Phase 4 prep, int subset)";
   print_endline "  lang-ml -ce <expr>      emit C source for an inline expression";
+  print_endline "  lang-ml -ll <file.lang> emit LLVM IR for the program (Phase 5 prep, int subset)";
+  print_endline "  lang-ml -lle <expr>     emit LLVM IR for an inline expression";
   print_endline "  lang-ml -r              start interactive REPL";
   print_endline "  lang-ml -h | --help     show this help"
 
@@ -33,17 +35,15 @@ let run_action action label source =
     report_and_exit ~source ~filename:label loc "type error" msg
   | Lang_ml.Codegen_c.Codegen_error (loc, msg) ->
     report_and_exit ~source ~filename:label loc "codegen error" msg
+  | Lang_ml.Codegen_llvm.Codegen_error (loc, msg) ->
+    report_and_exit ~source ~filename:label loc "codegen error" msg
   | Sys_error msg ->
     Printf.eprintf "io error: %s\n" msg;
     exit 1
 
-let compile_to_c source =
+let infer_program source =
   let open Lang_ml in
   let prog = Pipeline.parse_program source in
-  (* Type-check top-level decls (registering record / variant / view /
-     drop types with the typer) WITHOUT evaluating any top-level side
-     effects — mirrors Pipeline.type_of's flow. We need the registrations
-     so `c_type_of` can resolve user-declared record types. *)
   let type_env = ref Typer.initial_env in
   List.iter (fun decl ->
     match decl with
@@ -79,7 +79,17 @@ let compile_to_c source =
   let main_ty =
     Typer.infer !type_env (Ast.desugar_program prog)
   in
+  (prog, main_ty)
+
+let compile_to_c source =
+  let open Lang_ml in
+  let (prog, main_ty) = infer_program source in
   Codegen_c.emit_program ~main_ty prog
+
+let compile_to_llvm source =
+  let open Lang_ml in
+  let (prog, main_ty) = infer_program source in
+  Codegen_llvm.emit_program ~main_ty prog
 
 let () =
   match Array.to_list Sys.argv with
@@ -95,6 +105,11 @@ let () =
   | [_; "-c"; path] ->
     let source = read_file path in
     run_action compile_to_c path source
+  | [_; "-lle"; expr] ->
+    run_action compile_to_llvm "<inline>" expr
+  | [_; "-ll"; path] ->
+    let source = read_file path in
+    run_action compile_to_llvm path source
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Lang_ml.Pipeline.type_of path source
