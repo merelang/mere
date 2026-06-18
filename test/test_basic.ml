@@ -2821,5 +2821,55 @@ let () =
        let mk = fn n -> CgLPt4 { x = n, y = n + 1 } in (mk 5).x")
     "define %CgLPt4 @mk(i32 %n)";
 
+  (* --- LLVM IR codegen: variant + match (Phase 5.6) ---
+     Variants lower to `%V = type { i32 }` (nullary) or `%V = type { i32, T }`
+     (single-payload-type). Constr → insertvalue chain, Match → icmp chain
+     with phi node for the join. *)
+  assert_contains "llvm: nullary variant typedef"
+    (llvm_with_decls
+      "type LCol = LR | LG | LB;\n\
+       match LG with | LR -> 0 | LG -> 1 | LB -> 2")
+    "%LCol = type { i32 }";
+  assert_contains "llvm: variant with payload typedef"
+    (llvm_with_decls
+      "type LStat = LOk | LErr of str;\n\
+       match LErr \"x\" with | LOk -> 0 | LErr m -> str_len m")
+    "%LStat = type { i32, ptr }";
+  assert_contains "llvm: Constr emits insertvalue with tag"
+    (llvm_with_decls
+      "type LCol2 = LX | LY;\n\
+       let c = LY in match c with | LX -> 0 | LY -> 1")
+    "insertvalue %LCol2 undef, i32 1, 0";
+  assert_contains "llvm: Constr with payload emits second insertvalue"
+    (llvm_with_decls
+      "type LStat2 = LOk2 | LErr2 of int;\n\
+       LErr2 42")
+    "insertvalue %LStat2 ";
+  assert_contains "llvm: Match extracts tag via extractvalue"
+    (llvm_with_decls
+      "type LCol3 = LR3 | LG3;\n\
+       match LR3 with | LR3 -> 1 | LG3 -> 2")
+    "extractvalue %LCol3";
+  assert_contains "llvm: Match uses icmp eq on tag"
+    (llvm_with_decls
+      "type LCol4 = LR4 | LG4;\n\
+       match LR4 with | LR4 -> 1 | LG4 -> 2")
+    "icmp eq i32";
+  assert_contains "llvm: Match phi joins arm results"
+    (llvm_with_decls
+      "type LCol5 = LR5 | LG5;\n\
+       match LR5 with | LR5 -> 10 | LG5 -> 20")
+    "= phi i32";
+  assert_contains "llvm: Match payload bound via extractvalue"
+    (llvm_with_decls
+      "type LStat3 = LOk3 | LErr3 of int;\n\
+       match LErr3 5 with | LOk3 -> 0 | LErr3 n -> n")
+    "extractvalue %LStat3";
+  assert_contains "llvm: abort declared for fallthrough"
+    (llvm_with_decls
+      "type LCol6 = LR6 | LG6;\n\
+       match LR6 with | LR6 -> 1 | LG6 -> 2")
+    "declare void @abort()";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
