@@ -567,6 +567,21 @@ let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list li
   in
   walk_expr root;
   List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
+  (* Also walk substituted payloads of mono instances — variant
+     payloads (e.g. `(int, list int)` inside Cons) are referenced by
+     the variant struct definition but may never appear as a direct
+     AST node when the program only matches/shows the type. *)
+  Hashtbl.iter (fun _ (vn, args) ->
+    let (params, variants) = Hashtbl.find polymorphic_variants vn in
+    let sv = subst_variants params args variants in
+    List.iter (fun (_, arg_opt) ->
+      match arg_opt with Some t -> walk_ty t | None -> ()) sv
+  ) mono_variant_instances;
+  Hashtbl.iter (fun _ (rn, args) ->
+    let (params, fields) = Hashtbl.find polymorphic_records rn in
+    let mapping = List.combine params args in
+    List.iter (fun (_, ft) -> walk_ty (subst_params mapping ft)) fields
+  ) mono_record_instances;
   Hashtbl.fold (fun _ v acc -> v :: acc) seen []
 
 let emit_tuple_typedef (elems : Ast.ty list) : string =
@@ -904,6 +919,20 @@ let rec add_show_type (t : Ast.ty) : unit =
     if Hashtbl.mem show_types tag then ()
     else begin
       Hashtbl.add show_types tag t;
+      (* For polymorphic types, register the mono instance so typedef
+         emission picks them up — needed when the program only uses
+         this type via show (no constructor call to seed
+         collect_mono_instances). *)
+      (match t with
+       | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+         let mono = mono_variant_name n args in
+         if not (Hashtbl.mem mono_variant_instances mono) then
+           Hashtbl.add mono_variant_instances mono (n, args)
+       | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+         let mono = mono_record_name n args in
+         if not (Hashtbl.mem mono_record_instances mono) then
+           Hashtbl.add mono_record_instances mono (n, args)
+       | _ -> ());
       (* Recurse into dependent types. *)
       match t with
       | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
@@ -1066,6 +1095,94 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         ) fields
       in
       emit_asprintf ("show_" ^ tag) (String.concat ", " field_strs)
+    | Ast.TyCon ("list", [elem_ty])
+      when is_recursive_variant_name (mono_variant_name "list" [elem_ty]) ->
+      (* `'a list` special-case: render as `[a, b, c]` instead of the
+         generic `Cons (a, Cons (b, Cons (c, Nil)))` form. Walks the
+         list with mutable iter / acc / first flag (via alloca/load/store
+         for simplicity over phi chains). *)
+      let mono = mono_variant_name "list" [elem_ty] in
+      let node_ty = "%" ^ mono ^ "_node" in
+      let payload_struct =
+        "%" ^ tuple_struct_name [elem_ty; Ast.TyCon ("list", [elem_ty])]
+      in
+      let iter_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = alloca ptr" iter_p);
+      let acc_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = alloca ptr" acc_p);
+      let first_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = alloca i1" first_p);
+      emit_instr (Printf.sprintf "  store ptr %%x, ptr %s" iter_p);
+      emit_instr (Printf.sprintf "  store ptr @.s_lbracket, ptr %s" acc_p);
+      emit_instr (Printf.sprintf "  store i1 1, ptr %s" first_p);
+      let test_lbl = fresh_label "list_show_test_" in
+      let body_lbl = fresh_label "list_show_body_" in
+      let end_lbl = fresh_label "list_show_end_" in
+      let first_lbl = fresh_label "list_show_first_" in
+      let nfirst_lbl = fresh_label "list_show_nfirst_" in
+      let iter_lbl = fresh_label "list_show_iter_" in
+      emit_instr (Printf.sprintf "  br label %%%s" test_lbl);
+      emit_label test_lbl;
+      let cur = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" cur iter_p);
+      let tag_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
+                    tag_p node_ty cur);
+      let tag = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag tag_p);
+      let is_nil = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" is_nil tag);
+      emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                    is_nil end_lbl body_lbl);
+      emit_label body_lbl;
+      let pl_p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
+                    pl_p node_ty cur);
+      let pl = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load %s, ptr %s" pl payload_struct pl_p);
+      let h = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 0" h payload_struct pl);
+      let t = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 1" t payload_struct pl);
+      let h_str = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
+                    h_str (ty_tag elem_ty) (llvm_ty_of elem_ty) h);
+      let is_first = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load i1, ptr %s" is_first first_p);
+      let acc_cur = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" acc_cur acc_p);
+      emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                    is_first first_lbl nfirst_lbl);
+      emit_label first_lbl;
+      let new_acc_1 = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_str_concat(ptr %s, ptr %s)"
+                    new_acc_1 acc_cur h_str);
+      emit_instr (Printf.sprintf "  store ptr %s, ptr %s" new_acc_1 acc_p);
+      emit_instr (Printf.sprintf "  store i1 0, ptr %s" first_p);
+      emit_instr (Printf.sprintf "  br label %%%s" iter_lbl);
+      emit_label nfirst_lbl;
+      let tmp = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_str_concat(ptr %s, ptr @.s_comma_space)"
+                    tmp acc_cur);
+      let new_acc_2 = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_str_concat(ptr %s, ptr %s)"
+                    new_acc_2 tmp h_str);
+      emit_instr (Printf.sprintf "  store ptr %s, ptr %s" new_acc_2 acc_p);
+      emit_instr (Printf.sprintf "  br label %%%s" iter_lbl);
+      emit_label iter_lbl;
+      emit_instr (Printf.sprintf "  store ptr %s, ptr %s" t iter_p);
+      emit_instr (Printf.sprintf "  br label %%%s" test_lbl);
+      emit_label end_lbl;
+      let acc_final = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" acc_final acc_p);
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_str_concat(ptr %s, ptr @.s_rbracket)"
+                    r acc_final);
+      r
     | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
       let (params, variants) = Hashtbl.find polymorphic_variants n in
       let sv = subst_variants params args variants in
@@ -2381,10 +2498,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
   (* Discover mono variant / record instances + mark recursive ones
-     BEFORE any typedef emission, so llvm_ty_of returns `ptr` for
-     recursive variant types when called from tuple / record / closure
-     typedef emitters. *)
+     BEFORE any typedef emission. Also collect show types now (their
+     instances need to flow into mono_variant_instances so emit picks
+     up types only-used-via-show). *)
   collect_mono_instances main_expr fns;
+  collect_show_types main_expr fns;
   Hashtbl.iter (fun _ (vn, args) ->
     let (params, variants) = Hashtbl.find polymorphic_variants vn in
     let sv = subst_variants params args variants in
@@ -2407,13 +2525,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let arrow_types = collect_arrow_types main_expr fns in
   let closure_typedefs = List.map emit_closure_typedef arrow_types in
-  (* Collect show types + pre-register globals (constants + format
-     strings) used by show fns. The fns themselves are emitted later. *)
-  collect_show_types main_expr fns;
+  (* Pre-register show globals (constants + format strings). Show types
+     are already collected (above), but the format strings depend on
+     specific types that we register here. *)
   if Hashtbl.length show_types > 0 then begin
     mint_show_global "s_true" "true";
     mint_show_global "s_false" "false";
     mint_show_global "s_unit" "()";
+    mint_show_global "s_lbracket" "[";
+    mint_show_global "s_rbracket" "]";
+    mint_show_global "s_comma_space" ", ";
     mint_show_format "show_int" "%d";
     mint_show_format "show_str" "\"%s\"";
     mint_show_format "show_ctor_payload" "%s %s";

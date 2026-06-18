@@ -3134,5 +3134,30 @@ let () =
        region R { let c = LCgCellA { v = 7 } in c.v }")
     "getelementptr %LCgCellA, ptr ";
 
+  (* --- LLVM IR codegen: list show を [a, b, c] 形式に (Phase 5.14) ---
+     `'a list` を recursive variant の generic show より special-case で
+     `[1, 2, 3]` 形式で表示。show_list_<T> 内で alloca/load/store + ループ
+     で各要素 show_T を呼んで __lang_str_concat で繋ぐ。 *)
+  assert_contains "llvm: list show emits [ prefix"
+    (llvm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "@.s_lbracket";
+  assert_contains "llvm: list show emits ] suffix"
+    (llvm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "@.s_rbracket";
+  assert_contains "llvm: list show emits comma separator"
+    (llvm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "@.s_comma_space";
+  assert_contains "llvm: list show calls element show via str_concat"
+    (llvm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "call ptr @__lang_str_concat";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
