@@ -18,7 +18,15 @@ and ty =
   | TyTuple of ty list
   | TyRef of string * ty          (* `&R T` — region-tagged reference type *)
 
-type expr = { loc : Loc.t; node : expr_node }
+type expr = {
+  loc : Loc.t;
+  mutable ty : ty option;
+  (* Set by Typer.infer to the node's inferred type. Codegen reads this
+     to know e.g. the element types of a Tuple literal, or the param /
+     return types of a Fun. None means the typer hasn't visited this
+     node (or the program failed earlier). *)
+  node : expr_node;
+}
 
 and expr_node =
   | Int_lit of int
@@ -253,9 +261,9 @@ let desugar_program (prog : program) : expr =
     let loc = body.loc in
     match decl with
     | Top_let (pat, value) ->
-      { loc; node = Let (pat, value, body) }
+      { loc; ty = None; node = Let (pat, value, body) }
     | Top_let_rec bindings ->
-      { loc; node = Let_rec (bindings, body) }
+      { loc; ty = None; node = Let_rec (bindings, body) }
     | Top_type _ -> body
     | Top_signature _ -> body
     | Top_record _ -> body

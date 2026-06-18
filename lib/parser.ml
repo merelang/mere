@@ -68,7 +68,7 @@ let parse_program tokens =
   let open Lexer in
   (* Reset transient parser state so failed earlier parses don't leak. *)
   region_stack := [];
-  let mk loc node = Ast.{ loc; node } in
+  let mk loc node = Ast.{ loc; ty = None; node } in
   let mkp loc node = Ast.{ ploc = loc; pnode = node } in
   let pos_of = function
     | (pos, _) :: _ -> pos

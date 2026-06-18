@@ -2167,5 +2167,25 @@ let () =
     (fun () ->
       let _ = codegen "let f = fn x -> x +. 1.0 in f 2.0" in ());
 
+  (* --- C codegen: tuple support (Phase 4 fifth slice) --- *)
+  assert_contains "codegen: tuple typedef for int*int"
+    (codegen "let p = (1, 2) in fst p + snd p")
+    "typedef struct {\n  int f0;\n  int f1;\n} tuple_int_int;";
+  assert_contains "codegen: tuple literal uses compound literal"
+    (codegen "let p = (1, 2) in fst p")
+    "((tuple_int_int){.f0 = 1, .f1 = 2})";
+  assert_contains "codegen: fst → .f0 access"
+    (codegen "let p = (1, 2) in fst p")
+    "(p).f0";
+  assert_contains "codegen: snd → .f1 access"
+    (codegen "let p = (1, 2) in snd p")
+    "(p).f1";
+  assert_contains "codegen: mixed-type tuple struct (str, int)"
+    (codegen "let p = (\"hi\", 42) in fst p")
+    "typedef struct {\n  const char* f0;\n  int f1;\n} tuple_str_int;";
+  assert_contains "codegen: tuple-returning fn signature"
+    (codegen "let split = fn s -> (s, str_len s) in split \"x\"")
+    "tuple_str_int split(const char* s)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
