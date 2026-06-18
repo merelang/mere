@@ -614,11 +614,12 @@ let rec emit_expr (e : Ast.expr) : string =
         Printf.sprintf ", .payload.%s = %s" name (emit_expr arg)
     in
     if is_recursive_variant actual_type_name then
-      (* Recursive variant: allocate a node on the heap and return its
-         pointer (the value type for recursive variants in C). *)
+      (* Recursive variant: allocate a node in the default region and
+         return its pointer (the value type for recursive variants in
+         C). Reclaimed in bulk when main exits. *)
       let node = actual_type_name ^ "_node" in
       Printf.sprintf
-        "({ %s* __p = (%s*)malloc(sizeof(%s)); \
+        "({ %s* __p = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); \
          __p->tag = %d%s; __p; })"
         node node node tag
         (match arg_opt with
@@ -1254,15 +1255,13 @@ let emit_closure_adapter (ce : closure_emission) : string =
     (c_type_of ce.ce_param_ty) ce.ce_param
     env_unpack body_c
 
-(* String-concat runtime helper: allocates a new heap buffer of size
-   |a| + |b| + 1 and concatenates. Memory is leaked — fine for short-lived
-   programs (and matches the GC-less interpreter's current laxity). A
-   future slice will swap in proper region / arena allocation. *)
+(* String-concat runtime helper: allocates |a| + |b| + 1 bytes from the
+   default region and concatenates. Reclaimed in bulk when main exits. *)
 let str_concat_helper =
   String.concat "\n"
     [ "static const char* __lang_str_concat(const char* a, const char* b) {";
       "  size_t la = strlen(a), lb = strlen(b);";
-      "  char* r = (char*) malloc(la + lb + 1);";
+      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, la + lb + 1);";
       "  memcpy(r, a, la);";
       "  memcpy(r + la, b, lb);";
       "  r[la + lb] = '\\0';";
@@ -2154,9 +2153,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <stdlib.h>";
       "#include <string.h>";
       "";
-      str_concat_helper;
-      "";
       region_runtime_helpers;
+      "";
+      str_concat_helper;
       "" ]
     (* Forward decls of all named struct types — these let closure
        typedefs (function pointers returning struct values by name)

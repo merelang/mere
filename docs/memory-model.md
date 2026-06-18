@@ -253,7 +253,7 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] `with` Drop 実行 codegen (2026-06-18、scope 末で `close` field を自動呼出)
 - [x] view 構築の region 化 (2026-06-18、view 値が region 上の bump alloc + ポインタ)
 - [x] closure env の default region 化 (2026-06-18、Phase 4.20。program-lifetime arena `__lang_default_region` を `main` で init/free、closure env alloc を bump 化)
-- [ ] 文字列 / variant node の region 統合 (現状は malloc leak)
+- [x] 文字列 / 再帰 variant node の default region 化 (2026-06-18、Phase 4.21。`__lang_str_concat` と recursive Constr の malloc も default region 経由に。ユーザ可視な malloc は完全に消えた)
 - [ ] LLVM IR or Wasm への移行
 
 ---
