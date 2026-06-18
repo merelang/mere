@@ -3028,5 +3028,40 @@ let () =
        in sum (LCgICons4 (1, LCgINil4))")
     "extractvalue %tuple_int_LCgIList4";
 
+  (* --- LLVM IR codegen: 複雑な pattern (Phase 5.11) ---
+     P_int / P_bool / P_str (via @strcmp) / P_unit / P_record / P_as /
+     or-pattern (pre-flattened) / guard (and-ed with arm test). *)
+  assert_contains "llvm: strcmp declared"
+    (llvm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
+    "declare i32 @strcmp(ptr, ptr)";
+  assert_contains "llvm: P_int via icmp eq"
+    (llvm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
+    "= icmp eq i32 ";
+  assert_contains "llvm: P_str via strcmp"
+    (llvm "match \"hello\" with | \"hi\" -> 1 | \"hello\" -> 2 | _ -> 9")
+    "= call i32 @strcmp(ptr ";
+  assert_contains "llvm: P_bool via icmp eq i1"
+    (llvm "match true with | false -> 0 | true -> 1")
+    "= icmp eq i1 ";
+  assert_contains "llvm: record pattern via extractvalue"
+    (llvm_with_decls
+      "type LCgPt5 = { x: int, y: int };\n\
+       match LCgPt5 { x = 3, y = 4 } with | LCgPt5 { x = a, y = b } -> a + b")
+    "extractvalue %LCgPt5";
+  assert_contains "llvm: nested constructor with P_constr sub"
+    (llvm_with_decls
+      "type 'a LCgOpt5 = LCgN5 | LCgS5 of 'a;\n\
+       match LCgS5 (LCgS5 7) with | LCgN5 -> 0 | LCgS5 LCgN5 -> 1 | LCgS5 (LCgS5 n) -> n")
+    "and i1 ";
+  assert_contains "llvm: or-pattern flattens to multiple arms"
+    (llvm_with_decls
+      "type LCgCol7 = LCg7A | LCg7B | LCg7C;\n\
+       match LCg7B with | LCg7A | LCg7B -> 1 | LCg7C -> 2")
+    "%arm_";
+  assert_contains "llvm: match guard adds br after pass"
+    (llvm
+       "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
+    "guard_pass_";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

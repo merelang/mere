@@ -1345,8 +1345,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     end
   | Ast.Match (scrut, arms) ->
     let scrut_ty =
-      (* Prefer current_var_types when scrut is a Var: the AST's .ty
-         may still be polymorphic from let-poly generalization. *)
       let from_var_types =
         match scrut.Ast.node with
         | Ast.Var n ->
@@ -1362,138 +1360,193 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          | Some t -> Ast.walk t
          | None -> unsupported e.Ast.loc "match: missing scrutinee type")
     in
-    let source_name, type_name, payload_ty =
-      match scrut_ty with
-      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
-        let args = List.map Ast.walk args in
-        let (params, variants) = Hashtbl.find polymorphic_variants n in
-        let sv = subst_variants params args variants in
-        (n, mono_variant_name n args, variant_payload_ty_of sv)
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
-        (n, n, variant_payload_ty n)
-      | _ ->
-        unsupported e.Ast.loc
-          "match: scrutinee is not a user-declared variant (Phase 5 MVP)"
-    in
-    let _ = source_name in
     let scrut_v = emit_expr env scrut in
-    let recursive = is_recursive_variant_name type_name in
-    let node_ty = "%" ^ type_name ^ "_node" in
-    let tag_reg = fresh_reg () in
-    if recursive then begin
-      let p = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
-                    p node_ty scrut_v);
-      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag_reg p)
-    end else
-      emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0"
-                    tag_reg type_name scrut_v);
     let result_ty =
       match e.Ast.ty with
       | Some t -> llvm_ty_of t
       | None -> "i32"
     in
     let merge_label = fresh_label "match_join_" in
-    (* For each arm, generate: test (icmp eq tag, N) → arm-body block;
-       fallthrough to next test. We collect (block_end_label, value)
-       pairs for the final phi node. *)
     let phi_entries = ref [] in
-    let compile_pat pat v_tag v_payload_opt
-      : string (* cond reg (i1) *) * (string * string) list (* (name, value) bindings *) =
+    (* Combine two i1 booleans with `and i1`. *)
+    let and_cond a b =
+      if a = "1" then b
+      else if b = "1" then a
+      else begin
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = and i1 %s, %s" r a b);
+        r
+      end
+    in
+    (* Fully recursive pattern compiler. Tests run via icmp / strcmp /
+       extractvalue / load and AND together. Bindings accumulate as
+       (name, register). For nested constructors / tuples / records,
+       sub-patterns recurse on extracted sub-values. *)
+    let rec compile_pat (pat : Ast.pattern) (v_reg : string) (v_ty : Ast.ty)
+      : string * (string * string) list * (string * Ast.ty) list =
       match pat.Ast.pnode with
-      | Ast.P_wild -> ("1", [])
-      | Ast.P_var n -> ("1", [(n, scrut_v)])
+      | Ast.P_wild -> ("1", [], [])
+      | Ast.P_var n -> ("1", [(n, v_reg)], [(n, v_ty)])
+      | Ast.P_unit -> ("1", [], [])
+      | Ast.P_int n ->
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" r v_reg n);
+        (r, [], [])
+      | Ast.P_bool b ->
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i1 %s, %d" r v_reg (if b then 1 else 0));
+        (r, [], [])
+      | Ast.P_str s ->
+        let label = fresh_str_global s in
+        let cmp = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" cmp v_reg label);
+        let r = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r cmp);
+        (r, [], [])
+      | Ast.P_as (inner, n) ->
+        let (c, bs, tys) = compile_pat inner v_reg v_ty in
+        (c, (n, v_reg) :: bs, (n, v_ty) :: tys)
+      | Ast.P_tuple pats ->
+        let elem_tys =
+          match Ast.walk v_ty with Ast.TyTuple ts -> ts | _ ->
+            unsupported pat.Ast.ploc "P_tuple on non-tuple"
+        in
+        let tname = tuple_struct_name elem_tys in
+        let rec go i acc_cond acc_bs acc_tys = function
+          | [] -> (acc_cond, List.rev acc_bs, List.rev acc_tys)
+          | p :: rest ->
+            let ety = List.nth elem_tys i in
+            let er = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                          er tname v_reg i);
+            let (c, bs, tys) = compile_pat p er ety in
+            go (i + 1) (and_cond acc_cond c)
+              (List.rev_append bs acc_bs) (List.rev_append tys acc_tys) rest
+        in
+        go 0 "1" [] [] pats
+      | Ast.P_record (_, sub_fields) ->
+        let struct_name, decl_fields =
+          match Ast.walk v_ty with
+          | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+            let args = List.map Ast.walk args in
+            let (params, fs) = Hashtbl.find polymorphic_records n in
+            let mapping = List.combine params args in
+            let sf = List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fs in
+            (mono_record_name n args, sf)
+          | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+            (n, record_fields n)
+          | _ -> unsupported pat.Ast.ploc "P_record on non-record"
+        in
+        let idx_of fname =
+          let rec find i = function
+            | [] -> -1
+            | (n, _) :: _ when n = fname -> i
+            | _ :: rest -> find (i + 1) rest
+          in find 0 decl_fields
+        in
+        let ty_of fname = List.assoc fname decl_fields in
+        let rec go acc_cond acc_bs acc_tys = function
+          | [] -> (acc_cond, List.rev acc_bs, List.rev acc_tys)
+          | (fname, sub_p) :: rest ->
+            let i = idx_of fname in
+            let ft = ty_of fname in
+            let fr = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                          fr struct_name v_reg i);
+            let (c, bs, tys) = compile_pat sub_p fr ft in
+            go (and_cond acc_cond c)
+              (List.rev_append bs acc_bs) (List.rev_append tys acc_tys) rest
+        in
+        go "1" [] [] sub_fields
       | Ast.P_constr (cname, sub) ->
+        let info =
+          match Hashtbl.find_opt Typer.constructors cname with
+          | Some i -> i
+          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+        in
+        let type_name = info.Typer.type_name in
+        let struct_name, payload_ty =
+          match Ast.walk v_ty with
+          | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+            let args = List.map Ast.walk args in
+            let mono = mono_variant_name n args in
+            let (params, variants) = Hashtbl.find polymorphic_variants n in
+            let sv = subst_variants params args variants in
+            (mono, variant_payload_ty_of sv)
+          | _ -> (type_name, variant_payload_ty type_name)
+        in
+        let recursive = is_recursive_variant_name struct_name in
+        let node_ty = "%" ^ struct_name ^ "_node" in
         let tag =
           match Hashtbl.find_opt variant_tags cname with
           | Some t -> t
-          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+          | None -> unsupported pat.Ast.ploc ("ctor without tag: " ^ cname)
         in
-        let r = fresh_reg () in
-        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" r v_tag tag);
-        let bindings =
-          match sub, v_payload_opt with
-          | None, _ -> []
-          | Some sub_pat, Some pv ->
-            (match sub_pat.Ast.pnode with
-             | Ast.P_wild -> []
-             | Ast.P_var n -> [(n, pv)]
-             | Ast.P_tuple pats ->
-               (* Tuple sub-pattern: payload is a tuple struct, extract
-                  each element by index. Only P_var / P_wild leaves. *)
-               let tname =
-                 match payload_ty with
-                 | Some t ->
-                   (match Ast.walk t with
-                    | Ast.TyTuple ts -> tuple_struct_name ts
-                    | _ -> unsupported sub_pat.Ast.ploc
-                             "ctor tuple sub-pattern needs tuple payload")
-                 | None -> unsupported sub_pat.Ast.ploc
-                             "ctor sub-pattern with no payload type"
-               in
-               List.mapi (fun i sub_p ->
-                 match sub_p.Ast.pnode with
-                 | Ast.P_var n ->
-                   let r = fresh_reg () in
-                   emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
-                                 r tname pv i);
-                   (n, r)
-                 | Ast.P_wild -> ("_", "0")
-                 | _ ->
-                   unsupported sub_p.Ast.ploc
-                     "nested tuple sub-pattern — Phase 5 later slice")
-                 pats
-               |> List.filter (fun (n, _) -> n <> "_")
-             | _ ->
-               unsupported sub_pat.Ast.ploc
-                 "nested ctor sub-pattern — Phase 5 later slice")
-          | Some _, None ->
-            unsupported pat.Ast.ploc
-              "pattern has payload but variant lowered as nullary-only"
-        in
-        (r, bindings)
-      | _ ->
-        unsupported pat.Ast.ploc "pattern kind not yet in Phase 5 MVP"
+        let tag_reg = fresh_reg () in
+        if recursive then begin
+          let p = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
+                        p node_ty v_reg);
+          emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag_reg p)
+        end else
+          emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0"
+                        tag_reg struct_name v_reg);
+        let tag_cond = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" tag_cond tag_reg tag);
+        (match sub, payload_ty with
+         | None, _ -> (tag_cond, [], [])
+         | Some sub_pat, Some pty ->
+           let payload_reg = fresh_reg () in
+           if recursive then begin
+             let p = fresh_reg () in
+             emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
+                           p node_ty v_reg);
+             emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                           payload_reg (llvm_ty_of pty) p)
+           end else
+             emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
+                           payload_reg struct_name v_reg);
+           let (c, bs, tys) = compile_pat sub_pat payload_reg pty in
+           (and_cond tag_cond c, bs, tys)
+         | Some _, None ->
+           unsupported pat.Ast.ploc
+             "pattern has payload but variant has no payload type")
+      | Ast.P_or _ ->
+        unsupported pat.Ast.ploc "P_or should have been flattened"
     in
+    (* Pre-flatten or-patterns into multiple arms. The typer guarantees
+       both branches bind the same names with compatible types. *)
+    let rec expand_or (pat, guard, body) =
+      match pat.Ast.pnode with
+      | Ast.P_or (a, b) ->
+        expand_or (a, guard, body) @ expand_or (b, guard, body)
+      | _ -> [(pat, guard, body)]
+    in
+    let arms = List.concat_map expand_or arms in
     let rec emit_arms = function
       | [] ->
-        (* Fall through to abort — typer's exhaustiveness should catch
-           non-total matches, but emit a guard anyway. *)
         emit_instr "  call void @abort()";
         emit_instr "  unreachable"
       | (pat, guard, body) :: rest ->
-        if guard <> None then
-          unsupported pat.Ast.ploc "match guard — Phase 5 later slice";
-        let payload_reg =
-          match payload_ty with
-          | None -> None
-          | Some pty ->
-            let r = fresh_reg () in
-            if recursive then begin
-              let p = fresh_reg () in
-              emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
-                            p node_ty scrut_v);
-              emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
-                            r (llvm_ty_of pty) p)
-            end else
-              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
-                            r type_name scrut_v);
-            Some r
-        in
-        let (cond, bindings) = compile_pat pat tag_reg payload_reg in
+        let (cond, bindings, var_tys) = compile_pat pat scrut_v scrut_ty in
         let arm_label = fresh_label "arm_" in
         let next_label = fresh_label "next_" in
         emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
                       cond arm_label next_label);
         emit_label arm_label;
         let env' = bindings @ env in
-        (* Update current_var_types so the arm body can recover concrete
-           types for pattern-bound names (used for nested poly Match
-           and recursive App calls). For simple cases we use Ast.TyInt as
-           a placeholder — for tuple sub-patterns we annotate properly. *)
         let saved_vt = !current_var_types in
-        let pat_var_tys = pattern_var_types pat scrut_ty payload_ty in
-        current_var_types := pat_var_tys @ saved_vt;
+        current_var_types := var_tys @ saved_vt;
+        (* Guard: evaluate within the arm's bindings scope. If false,
+           branch to next_label (= same as failing the test). *)
+        (match guard with
+         | None -> ()
+         | Some g ->
+           let gv = emit_expr env' g in
+           let pass_label = fresh_label "guard_pass_" in
+           emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                         gv pass_label next_label);
+           emit_label pass_label);
         let v = emit_expr env' body in
         current_var_types := saved_vt;
         let end_label = fresh_label "arm_end_" in
@@ -1707,6 +1760,7 @@ let runtime_decls =
     [ "declare ptr @malloc(i64)";
       "declare void @free(ptr)";
       "declare i64 @strlen(ptr)";
+      "declare i32 @strcmp(ptr, ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
