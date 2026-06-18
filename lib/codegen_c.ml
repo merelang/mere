@@ -57,6 +57,41 @@ let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
 let is_recursive_variant (name : string) : bool =
   Hashtbl.mem recursive_variants name
 
+(* Polymorphic variant declarations: stored here at emit_variant_typedef
+   time when params != [], then specialized at collect/emit time per
+   concrete instantiation. *)
+let polymorphic_variants
+    : (string, string list * (string * Ast.ty option) list) Hashtbl.t =
+  Hashtbl.create 4
+
+(* Concrete instantiations seen in the program. Key is the mono name
+   (`list_int`, ...); value is the variant's source name + arg types. *)
+let mono_variant_instances : (string, string * Ast.ty list) Hashtbl.t =
+  Hashtbl.create 8
+
+(* Substitute TyParam names → concrete types throughout `t`. *)
+let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyParam p ->
+    (try List.assoc p mapping with Not_found -> t)
+  | Ast.TyArrow (a, b) ->
+    Ast.TyArrow (subst_params mapping a, subst_params mapping b)
+  | Ast.TyTuple ts ->
+    Ast.TyTuple (List.map (subst_params mapping) ts)
+  | Ast.TyCon (n, args) ->
+    Ast.TyCon (n, List.map (subst_params mapping) args)
+  | Ast.TyRef (r, inner) ->
+    Ast.TyRef (r, subst_params mapping inner)
+  | t -> t
+
+(* Substitute params → args in a variant declaration's payload types. *)
+let subst_variants
+    (params : string list) (args : Ast.ty list)
+    (variants : (string * Ast.ty option) list) : (string * Ast.ty option) list =
+  let mapping = List.combine params args in
+  List.map (fun (cname, arg_opt) ->
+    (cname, Option.map (subst_params mapping) arg_opt)) variants
+
 (* Inner-fn lifting (defunctionalization) — populated by a pre-pass and
    read by emit_expr. For each `let name = fn x -> body` found nested
    inside a top-level fn, we record:
@@ -155,12 +190,21 @@ let rec ty_tag (t : Ast.ty) : string =
     (* Recursive arrow → use the same naming used by closure_struct_name. *)
     "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
+  | Ast.TyCon (name, args) ->
+    (* Polymorphic instantiation (e.g., `int list` → `list_int`). *)
+    name ^ "_" ^ String.concat "_" (List.map ty_tag args)
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unsupported C codegen type element: %s" (Ast.pp_ty other)))
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
+
+(* Specialized struct name for a polymorphic variant at given args. *)
+let mono_variant_name (name : string) (args : Ast.ty list) : string =
+  match args with
+  | [] -> name
+  | _ -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
 
 (* Find the first Var node with the given name in `e` whose typer-
    recorded `.ty` is set, and return that type. Used to recover capture
@@ -428,16 +472,29 @@ let rec emit_expr (e : Ast.expr) : string =
     in
     let tag = Hashtbl.find variant_tags name in
     let type_name = info.Typer.type_name in
+    (* If this constructor belongs to a polymorphic variant, pick the
+       mono name from the Constr's inferred result type. *)
+    let actual_type_name =
+      if Hashtbl.mem polymorphic_variants type_name then
+        match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyCon (n, args) when n = type_name ->
+             mono_variant_name n (List.map Ast.walk args)
+           | _ -> type_name)
+        | None -> type_name
+      else type_name
+    in
     let payload_str =
       match arg_opt with
       | None -> ""
       | Some arg ->
         Printf.sprintf ", .payload.%s = %s" name (emit_expr arg)
     in
-    if is_recursive_variant type_name then
+    if is_recursive_variant actual_type_name then
       (* Recursive variant: allocate a node on the heap and return its
          pointer (the value type for recursive variants in C). *)
-      let node = type_name ^ "_node" in
+      let node = actual_type_name ^ "_node" in
       Printf.sprintf
         "({ %s* __p = (%s*)malloc(sizeof(%s)); \
          __p->tag = %d%s; __p; })"
@@ -446,8 +503,8 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> ""
          | Some arg -> "; __p->payload." ^ name ^ " = " ^ emit_expr arg)
     else
-      let _ = payload_str in (* keep for non-recursive path *)
-      Printf.sprintf "((%s){.tag = %d%s})" type_name tag payload_str
+      let _ = payload_str in
+      Printf.sprintf "((%s){.tag = %d%s})" actual_type_name tag payload_str
   | Ast.Match (scrut, arms) ->
     let scrut_c = emit_expr scrut in
     (* Decide value-access vs pointer-access from the scrutinee's
@@ -456,6 +513,9 @@ let rec emit_expr (e : Ast.expr) : string =
       match scrut.Ast.ty with
       | Some t ->
         (match Ast.walk t with
+         | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+           is_recursive_variant
+             (mono_variant_name n (List.map Ast.walk args))
          | Ast.TyCon (n, _) -> is_recursive_variant n
          | _ -> false)
       | None -> false
@@ -569,12 +629,13 @@ let c_type_of (t : Ast.ty) : string =
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     (* User-declared record type — the struct name matches the Lang name. *)
     name
+  | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_variants name ->
+    (* Polymorphic variant instantiation — pick the specialized name
+       (`list_int`, `opt_str`, ...). For recursive instantiations this
+       name is the ptr typedef; for non-recursive it's the struct. *)
+    mono_variant_name name (List.map Ast.walk args)
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.types name ->
-    (* User-declared variant type. For non-recursive variants, `name` is
-       the struct typedef. For recursive variants, `name` is a `T_node*`
-       typedef (a pointer alias) so values are passed by pointer and the
-       infinite-size cycle is broken. Either way, c_type_of just yields
-       `name`. *)
+    (* Monomorphic user-declared variant type. *)
     name
   | other ->
     raise (Codegen_error (Loc.dummy,
@@ -981,6 +1042,66 @@ let lift_inner_fns
   List.rev !lifted
 
 
+(* Walk a typed AST + fn signatures to find every concrete instantiation
+   of a polymorphic variant. Populates `mono_variant_instances`. *)
+let collect_mono_variant_instances (root : Ast.expr) (fns : fn_decl list) : unit =
+  let add name args =
+    if Hashtbl.mem polymorphic_variants name
+       && List.for_all ty_is_concrete args
+       && not (Hashtbl.mem mono_variant_instances (mono_variant_name name args))
+    then
+      Hashtbl.add mono_variant_instances
+        (mono_variant_name name args) (name, args)
+  in
+  let rec walk_ty t =
+    match Ast.walk t with
+    | Ast.TyCon (n, args) ->
+      let args' = List.map Ast.walk args in
+      List.iter walk_ty args';
+      add n args'
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty) fns;
+  (* Also walk substituted payload types of each collected instance so
+     tuples that appear only inside variant payloads (e.g.
+     `tuple_int_list_int` inside Cons) get found by later collectors. *)
+  Hashtbl.iter (fun _ (name, args) ->
+    let (params, variants) = Hashtbl.find polymorphic_variants name in
+    let svariants = subst_variants params args variants in
+    List.iter (fun (_, arg_opt) ->
+      match arg_opt with Some t -> walk_ty t | None -> ()) svariants
+  ) mono_variant_instances
+
 (* Walk a typed AST + fn signatures and collect every distinct
    `(p, r)` arrow type so we can emit a `closure_p_r` typedef. *)
 let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
@@ -1191,12 +1312,17 @@ let variant_is_recursive (name : string)
    pointer typedef so values can be passed by reference. *)
 let emit_variant_typedef (name : string) (params : string list)
     (variants : (string * Ast.ty option) list) : string =
-  if params <> [] then
-    raise (Codegen_error (Loc.dummy,
-      Printf.sprintf
-        "polymorphic variant `%s` not supported in C codegen yet" name));
+  (* Tags are by constructor name and shared across all instantiations
+     of a polymorphic variant. Set them regardless. *)
   List.iteri (fun i (cname, _) ->
     Hashtbl.replace variant_tags cname i) variants;
+  if params <> [] then begin
+    (* Defer struct emission — wait until we know the concrete
+       instantiations from the program's AST + fn signatures. *)
+    Hashtbl.replace polymorphic_variants name (params, variants);
+    ""
+  end
+  else
   let recursive = variant_is_recursive name variants in
   if recursive then Hashtbl.replace recursive_variants name ();
   let node_name = if recursive then name ^ "_node" else name in
@@ -1223,6 +1349,85 @@ let emit_variant_typedef (name : string) (params : string list)
       node_name node_name node_name name
   else
     Printf.sprintf "typedef struct {\n%s\n} %s;" body name
+
+(* Check whether a specific (variant_name, args) instance is recursive:
+   does any substituted payload reference the SAME (name, args)? *)
+let mono_variant_is_recursive
+    (variant_name : string) (args : Ast.ty list)
+    (subst_variants : (string * Ast.ty option) list) : bool =
+  let same_inst t =
+    match Ast.walk t with
+    | Ast.TyCon (n, ts) when n = variant_name
+                          && List.length ts = List.length args ->
+      List.for_all2 (fun a b ->
+        ty_tag (Ast.walk a) = ty_tag (Ast.walk b)) ts args
+    | _ -> false
+  in
+  let rec ty_mentions t =
+    same_inst t
+    || (match Ast.walk t with
+        | Ast.TyTuple ts -> List.exists ty_mentions ts
+        | Ast.TyArrow (a, b) -> ty_mentions a || ty_mentions b
+        | Ast.TyCon (_, ts) -> List.exists ty_mentions ts
+        | Ast.TyRef (_, inner) -> ty_mentions inner
+        | _ -> false)
+  in
+  List.exists (fun (_, arg_opt) ->
+    match arg_opt with Some t -> ty_mentions t | None -> false)
+    subst_variants
+
+(* Emit typedef for a mono variant instance — same shape as the
+   monomorphic case (forward + ptr if recursive, else inline struct). *)
+let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : string =
+  let mono_name = mono_variant_name variant_name args in
+  let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
+  let svariants = subst_variants params args variants in
+  let recursive = mono_variant_is_recursive variant_name args svariants in
+  if recursive then Hashtbl.replace recursive_variants mono_name ();
+  let node_name = if recursive then mono_name ^ "_node" else mono_name in
+  let payload_arms =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> None
+      | Some ty -> Some (Printf.sprintf "    %s %s;" (c_type_of ty) cname))
+      svariants
+  in
+  let body =
+    if payload_arms = [] then "  int tag;"
+    else
+      "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
+      "\n  } payload;"
+  in
+  if recursive then
+    Printf.sprintf "typedef struct %s %s;\ntypedef %s* %s;"
+      node_name node_name node_name mono_name
+  else
+    Printf.sprintf "typedef struct {\n%s\n} %s;" body mono_name
+
+(* For recursive mono variants, the struct body comes AFTER tuple /
+   other typedefs so all referenced types are defined. *)
+let emit_mono_variant_struct_body (variant_name : string) (args : Ast.ty list)
+    : string option =
+  let mono_name = mono_variant_name variant_name args in
+  if not (Hashtbl.mem recursive_variants mono_name) then None
+  else
+    let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
+    let svariants = subst_variants params args variants in
+    let node_name = mono_name ^ "_node" in
+    let payload_arms =
+      List.filter_map (fun (cname, arg_opt) ->
+        match arg_opt with
+        | None -> None
+        | Some ty -> Some (Printf.sprintf "    %s %s;" (c_type_of ty) cname))
+        svariants
+    in
+    let body =
+      if payload_arms = [] then "  int tag;"
+      else
+        "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
+        "\n  } payload;"
+    in
+    Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
 
 (* Emit the full struct body for a recursive variant. Called by
    emit_program AFTER tuple / record typedefs are in place. *)
@@ -1254,6 +1459,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      variant_tags as a side effect. *)
   Hashtbl.reset variant_tags;
   Hashtbl.reset recursive_variants;
+  Hashtbl.reset polymorphic_variants;
+  Hashtbl.reset mono_variant_instances;
   let variant_decls =
     List.filter_map (fun decl ->
       match decl with
@@ -1263,6 +1470,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let variant_typedefs =
     List.map (fun (name, params, variants) ->
       emit_variant_typedef name params variants) variant_decls
+  in
+  let variant_typedefs =
+    List.filter (fun s -> s <> "") variant_typedefs
   in
   let variant_struct_bodies =
     List.filter_map (fun (name, _, variants) ->
@@ -1275,6 +1485,21 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      call and value-position references can use the closure wrapper. *)
   Hashtbl.reset toplevel_fn_names;
   List.iter (fun f -> Hashtbl.replace toplevel_fn_names f.name ()) fns;
+  (* Polymorphic variant monomorphization: collect concrete
+     instantiations from the AST + fn signatures, then emit specialized
+     typedefs (forward+ptr for recursive instances, full struct for
+     non-recursive). Bodies come after tuple/record typedefs. *)
+  collect_mono_variant_instances main_expr fns;
+  let mono_variant_typedefs =
+    Hashtbl.fold (fun _ (vn, args) acc ->
+      emit_mono_variant_typedef vn args :: acc) mono_variant_instances []
+  in
+  let mono_variant_struct_bodies =
+    Hashtbl.fold (fun _ (vn, args) acc ->
+      match emit_mono_variant_struct_body vn args with
+      | Some s -> s :: acc
+      | None -> acc) mono_variant_instances []
+  in
   (* Tuple shape collection: walk the (now typer-annotated) AST plus the
      resolved fn signatures. *)
   let tuple_shapes =
@@ -1367,9 +1592,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       str_concat_helper;
       "" ]
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
+    @ (if mono_variant_typedefs = [] then [] else mono_variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
     @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
+    @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])

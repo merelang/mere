@@ -2434,5 +2434,29 @@ let () =
        in sum (CgCons5 (1, CgNil5))")
     "__scrut->payload.CgCons5.f0";
 
+  (* --- C codegen: polymorphic variant monomorphization (Phase 4.11) --- *)
+  assert_contains "codegen: polymorphic opt specialized to opt_int"
+    (codegen_with_decls
+      "type 'a Cgopt = CgNone | CgSome of 'a;\n\
+       let v = CgSome 42 in match v with | CgNone -> 0 | CgSome n -> n")
+    "} Cgopt_int;";
+  assert_contains "codegen: polymorphic list specialized to list_int"
+    (codegen_with_decls
+      "type 'a Cglst = CgN | CgC of 'a * 'a Cglst;\n\
+       let rec sum = fn xs -> match xs with | CgN -> 0 | CgC (h, t) -> h + sum t in\n\
+       sum (CgC (1, CgC (2, CgN)))")
+    "typedef Cglst_int_node* Cglst_int;";
+  assert_contains "codegen: mono variant tuple struct for list payload"
+    (codegen_with_decls
+      "type 'a Cglst2 = CgN2 | CgC2 of 'a * 'a Cglst2;\n\
+       let rec sum = fn xs -> match xs with | CgN2 -> 0 | CgC2 (h, t) -> h + sum t in\n\
+       sum (CgC2 (1, CgN2))")
+    "} tuple_int_Cglst2_int;";
+  assert_contains "codegen: Constr for mono variant uses specialized name"
+    (codegen_with_decls
+      "type 'a Cgopt3 = CgNone3 | CgSome3 of 'a;\n\
+       CgSome3 42")
+    "Cgopt3_int){.tag = 1";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
