@@ -275,8 +275,44 @@ REPL で対話的に試したいときは:
 lang-ml -r
 ```
 
+## 13. ネイティブコンパイル (Phase 4 codegen)
+
+Lang プログラムは `-c` (file) / `-ce` (inline) で C source に変換でき、`clang` でネイティブバイナリに compile できる。
+
+```sh
+lang-ml -ce 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10' > fact.c
+clang fact.c -o fact
+./fact   # → 3628800
+```
+
+サポート範囲は広く、主要な構文がすべて native compile できる:
+
+```sh
+# closure + 高階関数
+lang-ml -ce 'let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10' > a.c
+clang a.c -o a && ./a   # → 15
+
+# 多相 variant + 再帰 + pattern match
+lang-ml -ce "type 'a list = Nil | Cons of 'a * 'a list;
+  let rec sum = fn xs -> match xs with
+    | Nil -> 0
+    | Cons (h, t) -> h + sum t
+  in sum [1, 2, 3]" > sum.c
+clang sum.c -o sum && ./sum   # → 6
+
+# show 汎用 builtin + list 表示
+lang-ml -ce "type 'a list = Nil | Cons of 'a * 'a list;
+  print (show [1, 2, 3])" > sh.c
+clang sh.c -o sh && ./sh   # → [1, 2, 3]
+```
+
+詳細は [codegen.md](codegen.md) を参照。
+
+interpreter モード (`lang-ml file.lang`) の機能と並列で codegen が動く設計で、両者の出力は同じプログラムなら一致する (`[1, 2, 3]` 等の整形も同じ)。region / view / `with` Drop 等のメモリモデル機能は現状 codegen 上では effective には実装されておらず (Phase 4 残りの大物)、type 検査のみが効く。
+
 ## 次のステップ
 
 - 全機能の参照は [language-reference.md](language-reference.md)
 - builtin の一覧は [stdlib-reference.md](stdlib-reference.md)
 - よくあるイディオムは [patterns.md](patterns.md)
+- C codegen の詳細・残課題は [codegen.md](codegen.md)

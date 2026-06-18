@@ -1,11 +1,13 @@
 # lang-ml
 
-新プログラミング言語 (仮称 **Lang**) の OCaml 実装。ML 系 mini lang として実用域に到達。本来の目標 (effect / memory model / region) はこれから。
+新プログラミング言語 (仮称 **Lang**) の OCaml 実装。ML 系 mini lang として実用域に到達、メモリモデル (region/view/Trivial[R])・エフェクトシステム (cap passing)・C codegen (主要構文 16 slice まで native 化) も進行中。
 
-## ステータス (2026-06-16 時点)
+## ステータス (2026-06-18 時点)
 
-- **85 stdlib builtin、628 tests passing** (網羅性検査 Phase 1 + region/`&R T` Phase 2.1 含む)
-- ツリーウォーキング interpreter (codegen なし)
+- **87 stdlib builtin、761 tests passing**
+- ツリーウォーキング interpreter + **Phase 4 C codegen** (主要構文ほぼすべて native compile + 実行可能)
+- メモリモデル: region/view/Trivial[R]/`with` Drop が型レベルで動く (codegen 上の実体実装は将来)
+- エフェクトシステム: cap-passing パターン + `using [cap]` sugar + builtin Logger/Metrics
 - 設計コンテキストは別リポ `aidocs/projects/lang/` (private)
 
 ## 動く機能ハイライト
@@ -20,7 +22,11 @@
 | 関数 | 多引数型付き fn / `let rec ... and ...` 相互再帰 / 高階 / closure |
 | 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` (int 算術)、float は `f_add` 等 |
 | 名前管理 | `let _ = ...;` `let (a, b) = ...;` `signature`、`type X = T` (alias) |
-| stdlib | 75 種: I/O 8 / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 12 (算術 4 + 比較 4 + 変換 4) / error 3 / システム (time/exit) |
+| メモリモデル | region (`region R { ... }`) / view (`view V[R] of T { ... }`) / `&R T` 参照 / escape check / Trivial[R] 制約 / `R.alloc(v)` sugar |
+| エフェクト | capability passing (cap = record の値)、`using [cap]` sugar、builtin Logger / Metrics |
+| with Drop | `with c = ... in body` で scope 末に `close` field 自動呼出、複数 binding は LIFO |
+| stdlib | 87 種: I/O 8 / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 12 / error 3 / システム / Logger・Metrics |
+| codegen | C source 出力 + clang/gcc で native binary (主要構文 16 slice まで対応、interpreter と並列で動く) |
 | REPL | 対話実行、永続 env、`:type`/`:help`/`:quit` |
 | エラー | ソース該当行 + caret 表示 |
 
@@ -70,7 +76,7 @@ dune exec ./bin/main.exe -- -te 'fn x -> x + 1'    # 型表示
 dune exec ./bin/main.exe -- -r                     # REPL
 dune runtest
 
-# C codegen (Phase 4、int subset + 関数 lifting)
+# C codegen (Phase 4 を 16 slice、主要構文ほぼ全部対応)
 dune exec ./bin/main.exe -- -ce 'let x = 5 in x * 2' > out.c
 clang out.c -o out && ./out                        # native 実行 → 10
 
@@ -79,6 +85,14 @@ clang fact.c -o fact && ./fact                     # → 3628800
 
 dune exec ./bin/main.exe -- -ce 'print ("hello, " ++ "lang!")' > hello.c
 clang hello.c -o hello && ./hello                  # → hello, lang!
+
+# 多相 variant + 高階関数 + show
+dune exec ./bin/main.exe -- -ce "type 'a list = Nil | Cons of 'a * 'a list;
+  let rec sum = fn xs -> match xs with
+    | Nil -> 0
+    | Cons (h, t) -> h + sum t
+  in print (show (sum [1, 2, 3]))" > demo.c
+clang demo.c -o demo && ./demo                     # → "6"
 ```
 
 ## レイアウト
@@ -90,7 +104,7 @@ lang-ml/
 │   ├── loc.ml / ast.ml / lexer.ml / parser.ml
 │   ├── typer.ml        # HM 推論 + sum types + records + let-poly
 │   ├── eval.ml         # ツリーウォーキング interpreter
-│   ├── codegen_c.ml    # C codegen (Phase 4 MVP、int subset)
+│   ├── codegen_c.ml    # C codegen (Phase 4、16 slice 進行: int / 文字列 / tuple / record / variant / closure / 多相 / show / pattern match)
 │   ├── pipeline.ml     # process / type_of
 │   ├── repl.ml         # 対話実行
 │   ├── diagnostic.ml   # ソース付きエラー整形
