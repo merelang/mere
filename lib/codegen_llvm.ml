@@ -76,6 +76,9 @@ let rec ty_tag (t : Ast.ty) : string =
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
 
+let closure_struct_name (p : Ast.ty) (r : Ast.ty) : string =
+  "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
+
 (* Walk a Lang type to its LLVM type. Tuples / monomorphic records /
    variants lower to named-struct references (`%tuple_int_int`,
    `%Point`, `%Status`); these are emitted as `type` definitions at the
@@ -89,6 +92,7 @@ let llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name -> "%" ^ name
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.types name -> "%" ^ name
+  | Ast.TyArrow (p, r) -> "%" ^ closure_struct_name p r
   | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
 
 (* Look up a record's ordered field list. Raises if name isn't in the
@@ -170,6 +174,12 @@ type fn_decl = {
 
 (* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+(* Concrete LLVM-side types of in-scope name bindings. Used to recover
+   concrete arrow types when an inner App's head Var still has a
+   polymorphic `.ty` from let-poly generalization. Saved/restored
+   around each fn body emit. *)
+let current_var_types : (string * Ast.ty) list ref = ref []
 
 (* Walk the desugared main expression, peeling top-level fn-binding lets
    (P_var of Fun) and let-recs whose bindings are all single-arg fns.
@@ -479,6 +489,65 @@ let emit_variant_typedef (name : string) : string =
   | None -> Printf.sprintf "%%%s = type { i32 }" name
   | Some t -> Printf.sprintf "%%%s = type { i32, %s }" name (llvm_ty_of t)
 
+(* Collect every distinct concrete arrow type (T1 -> T2) used in the
+   program — these become `%closure_T1_T2 = type { ptr, ptr }` typedefs. *)
+let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.ty) list =
+  let seen = Hashtbl.create 8 in
+  let add p r =
+    let key = closure_struct_name p r in
+    if not (Hashtbl.mem seen key) then Hashtbl.add seen key (p, r)
+  in
+  let rec walk_ty (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyArrow (p, r) ->
+      let p' = Ast.walk p and r' = Ast.walk r in
+      if ty_is_concrete p' && ty_is_concrete r' then add p' r';
+      walk_ty p'; walk_ty r'
+    | Ast.TyTuple ts -> List.iter walk_ty ts
+    | Ast.TyCon (_, args) -> List.iter walk_ty args
+    | Ast.TyRef (_, inner) -> walk_ty inner
+    | _ -> ()
+  in
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> walk_ty t | None -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f ->
+    add (Ast.walk f.param_ty) (Ast.walk f.return_ty);
+    walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
+  Hashtbl.fold (fun _ v acc -> v :: acc) seen []
+
+(* Closure value layout: `{ ptr env, ptr fn }`. The fn pointer's
+   concrete signature (T2 (ptr, T1)) is encoded via bitcast at call
+   sites; LLVM's opaque pointers tolerate that without a typed cast. *)
+let emit_closure_typedef ((p : Ast.ty), (r : Ast.ty)) : string =
+  ignore p; ignore r;
+  let name = closure_struct_name p r in
+  Printf.sprintf "%%%s = type { ptr, ptr }" name
+
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
@@ -490,7 +559,30 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (* String literals lower to a private constant + return its symbol;
        since pointers are opaque, the global is directly usable as a ptr. *)
     fresh_str_global s
-  | Ast.Var name -> lookup env name e.Ast.loc
+  | Ast.Var name ->
+    (* If a local binding shadows a top-level fn, prefer it. Otherwise,
+       if the name resolves to a known top-level fn, materialize the
+       closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
+    (match List.assoc_opt name env with
+     | Some v -> v
+     | None when Hashtbl.mem toplevel_fn_names name ->
+       let arrow =
+         match e.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported e.Ast.loc ("fn-as-value missing type: " ^ name)
+       in
+       let cname =
+         match arrow with
+         | Ast.TyArrow (p, r) -> closure_struct_name (Ast.walk p) (Ast.walk r)
+         | _ -> unsupported e.Ast.loc "fn-as-value on non-arrow type"
+       in
+       let r0 = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr null, 0" r0 cname);
+       let r1 = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s_closure_fn, 1"
+                     r1 cname r0 name);
+       r1
+     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
     let v = emit_expr env inner in
@@ -621,8 +713,51 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty name arg_ty av);
     r
-  | Ast.App _ ->
-    unsupported e.Ast.loc "indirect / first-class fn call — Phase 5 later slice"
+  | Ast.App (f, arg) ->
+    (* Closure dispatch via the closure value's fn pointer. *)
+    let arrow_ty =
+      (* Prefer current_var_types if the head is a Var with a known
+         concrete binding — fn body may carry polymorphic .ty. *)
+      let from_var_types =
+        match f.Ast.node with
+        | Ast.Var n ->
+          (match List.assoc_opt n !current_var_types with
+           | Some t when ty_is_concrete t -> Some (Ast.walk t)
+           | _ -> None)
+        | _ -> None
+      in
+      match from_var_types with
+      | Some t -> t
+      | None ->
+        (match f.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported f.Ast.loc "closure call: missing fn type")
+    in
+    let cname =
+      match arrow_ty with
+      | Ast.TyArrow (p, r) -> closure_struct_name (Ast.walk p) (Ast.walk r)
+      | _ -> unsupported f.Ast.loc "closure call on non-arrow"
+    in
+    let ret_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    let cv = emit_expr env f in
+    let av = emit_expr env arg in
+    let env_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" env_reg cname cv);
+    let fn_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fn_reg cname cv);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s)"
+                  r ret_ty fn_reg env_reg arg_ty av);
+    r
   | Ast.Tuple elems ->
     let tname =
       match e.Ast.ty with
@@ -866,13 +1001,27 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.Region_block _ | Ast.Ref _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
 
+(* Env-ignoring adapter so the top-level fn `f` can be used as a closure
+   value: `T2 @f_closure_fn(ptr unused, T1 %x) { ret T2 @f(T1 %x); }`. *)
+let emit_closure_adapter (f : fn_decl) : string =
+  let pt = llvm_ty_of f.param_ty in
+  let rt = llvm_ty_of f.return_ty in
+  let inner_call =
+    Printf.sprintf "  %%r = call %s @%s(%s %%x)" rt f.name pt
+  in
+  Printf.sprintf
+    "define %s @%s_closure_fn(ptr %%env_unused, %s %%x) {\nentry:\n%s\n  ret %s %%r\n}"
+    rt f.name pt inner_call rt
+
 (* Emit a top-level fn definition. Each fn gets fresh register/label
    counters so the SSA names don't collide across functions. *)
 let emit_fn_def (f : fn_decl) : string =
   reg_counter := 0;
   label_counter := 0;
   let saved = !instrs in
+  let saved_types = !current_var_types in
   instrs := [];
+  current_var_types := [(f.param, f.param_ty)];
   emit_instr "entry:";
   (* Bind the param under its source name; in LLVM the param has its
      own SSA name "%<param>" supplied by the function header. *)
@@ -881,6 +1030,7 @@ let emit_fn_def (f : fn_decl) : string =
   emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved;
+  current_var_types := saved_types;
   Printf.sprintf "define %s @%s(%s %%%s) {\n%s\n}"
     (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
 
@@ -941,7 +1091,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset variant_tags;
   let variant_names = collect_variant_names main_expr fns in
   let variant_typedefs = List.map emit_variant_typedef variant_names in
+  let arrow_types = collect_arrow_types main_expr fns in
+  let closure_typedefs = List.map emit_closure_typedef arrow_types in
   let fn_defs = List.map emit_fn_def fns in
+  let closure_adapters = List.map emit_closure_adapter fns in
   (* Reset counters for the main body. *)
   reg_counter := 0;
   label_counter := 0;
@@ -987,6 +1140,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
+    @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if !str_globals = [] then [] else List.rev !str_globals @ [""])
     @ format_globals
     @ [ "";
@@ -995,6 +1149,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         str_concat_helper;
         "" ]
     @ (if fn_defs = [] then [] else fn_defs @ [""])
+    @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ [ "define i32 @main() {";
         body;
         "}";
