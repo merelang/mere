@@ -2871,5 +2871,31 @@ let () =
        match LR6 with | LR6 -> 1 | LG6 -> 2")
     "declare void @abort()";
 
+  (* --- LLVM IR codegen: first-class top-level fn (Phase 5.7-a) ---
+     Top-level fn can be passed as value. closure_T1_T2 = { ptr, ptr }
+     struct, fn_closure_fn adapter, indirect App goes through extractvalue +
+     call via fn pointer. *)
+  assert_contains "llvm: closure typedef for int->int"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "%closure_int_int = type { ptr, ptr }";
+  assert_contains "llvm: closure adapter emitted"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "define i32 @inc_closure_fn(ptr %env_unused, i32 %x)";
+  assert_contains "llvm: fn-as-value builds closure with adapter"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "insertvalue %closure_int_int undef, ptr null, 0";
+  assert_contains "llvm: fn-as-value sets fn pointer"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "ptr @inc_closure_fn, 1";
+  assert_contains "llvm: indirect App extracts env + fn ptr"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "extractvalue %closure_int_int";
+  assert_contains "llvm: indirect call uses extracted fn ptr"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "= call i32 ";
+  assert_contains "llvm: HOF receives closure-typed param"
+    (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "define i32 @apply(%closure_int_int %f)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
