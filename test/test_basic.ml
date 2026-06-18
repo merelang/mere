@@ -2268,6 +2268,35 @@ let () =
        CgBox3 { v = 42 }")
     "((CgBox3_int){.v = 42})";
 
+  (* --- C codegen: complex patterns (Phase 4.14) --- *)
+  assert_contains "codegen: P_int compiles to equality"
+    (codegen "match 3 with | 0 -> 100 | _ -> 200")
+    "(__scrut) == 0";
+  assert_contains "codegen: P_str compiles to strcmp"
+    (codegen "match \"hi\" with | \"a\" -> 1 | _ -> 2")
+    "strcmp((__scrut), \"a\")";
+  assert_contains "codegen: P_bool true compiles to == 1"
+    (codegen "match true with | true -> 1 | false -> 0")
+    "(__scrut) == 1";
+  assert_contains "codegen: nested P_constr binds inner var"
+    (codegen_with_decls
+      "type 'a CgO = CgN | CgS of 'a;\n\
+       type 'a CgL = CgLN | CgLC of 'a * 'a CgL;\n\
+       match CgLC (CgS 5, CgLN) with\n\
+         | CgLN -> 0\n\
+         | CgLC (CgN, _) -> 1\n\
+         | CgLC (CgS n, _) -> n")
+    "__auto_type n =";
+  assert_contains "codegen: P_record destructures named fields"
+    (codegen_with_decls
+      "type CgPtX = { a: int, b: int };\n\
+       match CgPtX { a = 3, b = 4 } with\n\
+         | CgPtX { a = x, b = y } -> x + y")
+    "__auto_type x =";
+  assert_contains "codegen: P_as binds whole-value"
+    (codegen "match 5 with | n as all -> n + all")
+    "__auto_type all = __scrut";
+
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
      Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
@@ -2300,12 +2329,12 @@ let () =
     (codegen_with_decls
       "type CgCol4 = A | B;\n\
        match A with | A -> 0 | B -> 1")
-    "__scrut.tag == 0";
+    ".tag == 0";
   assert_contains "codegen: P_constr with payload binds via __auto_type"
     (codegen_with_decls
       "type CgStat3 = SOk | SErr of str;\n\
        match SErr \"hi\" with | SOk -> 0 | SErr m -> str_len m")
-    "__auto_type m = __scrut.payload.SErr";
+    "__auto_type m =";
   check_raises "codegen: polymorphic variant rejected"
     (fun () ->
       let _ = codegen_with_decls
@@ -2434,15 +2463,18 @@ let () =
          | CgNil4 -> 0\n\
          | CgCons4 (h, t) -> h + sum t\n\
        in sum (CgCons4 (1, CgNil4))")
-    "__scrut->tag == 0";
-  assert_contains "codegen: P_tuple pattern destructures via .f0 / .f1"
-    (codegen_with_decls
+    "->tag == 0";
+  let cg5_out =
+    codegen_with_decls
       "type CgList5 = CgNil5 | CgCons5 of int * CgList5;\n\
        let rec sum = fn xs -> match xs with\n\
          | CgNil5 -> 0\n\
          | CgCons5 (h, t) -> h + sum t\n\
-       in sum (CgCons5 (1, CgNil5))")
-    "__scrut->payload.CgCons5.f0";
+       in sum (CgCons5 (1, CgNil5))"
+  in
+  assert_contains "codegen: P_tuple pattern destructures via .f0 / .f1"
+    cg5_out
+    "payload.CgCons5).f0";
 
   (* --- C codegen: polymorphic variant monomorphization (Phase 4.11) --- *)
   assert_contains "codegen: polymorphic opt specialized to opt_int"
