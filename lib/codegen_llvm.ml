@@ -1161,7 +1161,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       let size = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
       let env_p = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = call ptr @malloc(i64 %s)" env_p size);
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                    env_p size);
       List.iteri (fun i (cname, cty) ->
         let cv =
           match List.assoc_opt cname env with
@@ -1281,11 +1283,51 @@ let main_format_of (t : Ast.ty) : (string * string) option =
 let runtime_decls =
   String.concat "\n"
     [ "declare ptr @malloc(i64)";
+      "declare void @free(ptr)";
       "declare i64 @strlen(ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
       "declare void @abort()" ]
+
+(* Region runtime — mirrors codegen_c's region_runtime_helpers but
+   expressed in LLVM IR. Uses an 8-byte aligned bump-pointer allocator.
+   The default region is a file-scope global initialized in @main. *)
+let region_runtime_helpers =
+  String.concat "\n"
+    [ "%__lang_region = type { ptr, ptr, i64 }";
+      "@__lang_default_region = internal global %__lang_region zeroinitializer";
+      "";
+      "define void @__lang_region_init(ptr %r, i64 %cap) {";
+      "entry:";
+      "  %base = call ptr @malloc(i64 %cap)";
+      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
+      "  store ptr %base, ptr %base_p";
+      "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
+      "  store ptr %base, ptr %top_p";
+      "  %cap_p = getelementptr %__lang_region, ptr %r, i32 0, i32 2";
+      "  store i64 %cap, ptr %cap_p";
+      "  ret void";
+      "}";
+      "";
+      "define ptr @__lang_region_alloc(ptr %r, i64 %n) {";
+      "entry:";
+      "  %n7 = add i64 %n, 7";
+      "  %aligned = and i64 %n7, -8";
+      "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
+      "  %top = load ptr, ptr %top_p";
+      "  %new_top = getelementptr i8, ptr %top, i64 %aligned";
+      "  store ptr %new_top, ptr %top_p";
+      "  ret ptr %top";
+      "}";
+      "";
+      "define void @__lang_region_free(ptr %r) {";
+      "entry:";
+      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
+      "  %base = load ptr, ptr %base_p";
+      "  call void @free(ptr %base)";
+      "  ret void";
+      "}" ]
 
 let str_concat_helper =
   String.concat "\n"
@@ -1295,7 +1337,7 @@ let str_concat_helper =
       "  %lb = call i64 @strlen(ptr %b)";
       "  %total = add i64 %la, %lb";
       "  %totalp1 = add i64 %total, 1";
-      "  %r = call ptr @malloc(i64 %totalp1)";
+      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %totalp1)";
       "  call ptr @memcpy(ptr %r, ptr %a, i64 %la)";
       "  %p1 = getelementptr i8, ptr %r, i64 %la";
       "  call ptr @memcpy(ptr %p1, ptr %b, i64 %lb)";
@@ -1336,6 +1378,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   label_counter := 0;
   instrs := [];
   emit_instr "entry:";
+  emit_instr
+    "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";
   let r = emit_expr [] body_expr in
   (* Optional printf of main result. *)
   let print_lines =
@@ -1356,6 +1400,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           (String.sub fmt 1 (String.length fmt - 1)) ty r_final ]
   in
   List.iter emit_instr print_lines;
+  emit_instr "  call void @__lang_region_free(ptr @__lang_default_region)";
   emit_instr "  ret i32 0";
   let body = String.concat "\n" (List.rev !instrs) in
   (* Drain pending closures (anonymous Funs accumulated during all of
@@ -1397,6 +1442,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ format_globals
     @ [ "";
         runtime_decls;
+        "";
+        region_runtime_helpers;
         "";
         str_concat_helper;
         "" ]
