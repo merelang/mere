@@ -3197,5 +3197,27 @@ let () =
   assert_contains "wasm: and lowers to i32.and"
     (wasm "true && false") "i32.and";
 
+  (* --- Wasm codegen: 関数 lifting + recursion (Phase 6.2) ---
+     top-level fn が `(func $name (param i32) (result i32))` に lift、
+     直接呼出は `call $name`、相互再帰も同モジュール内で動く (Wasm は
+     前方参照可)。 *)
+  assert_contains "wasm: top-level fn lifted to (func $name)"
+    (wasm "let inc = fn x -> x + 1 in inc 5")
+    "(func $inc (param i32) (result i32)";
+  assert_contains "wasm: direct call uses call $name"
+    (wasm "let inc = fn x -> x + 1 in inc 5")
+    "call $inc";
+  assert_contains "wasm: param read via local.get 0"
+    (wasm "let inc = fn x -> x + 1 in inc 5")
+    "local.get 0";
+  assert_contains "wasm: self-recursion compiles"
+    (wasm "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1) in fact 5")
+    "call $fact";
+  assert_contains "wasm: mutual recursion: both fns defined"
+    (wasm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
+           and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
+           in is_even 4")
+    "(func $is_odd";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
