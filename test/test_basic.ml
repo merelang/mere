@@ -3159,5 +3159,43 @@ let () =
        show [1, 2, 3]")
     "call ptr @__lang_str_concat";
 
+  (* --- Wasm (WAT) codegen MVP (Phase 6.1) ---
+     Stack-based emission to WAT (S-expression text format). subset:
+     int / bool / arith / cmp / logic / Neg / If / Let (P_var) / Var /
+     Annot. Verified end-to-end via wat2wasm + WebAssembly.instantiate. *)
+  let wasm s =
+    let prog = Pipeline.parse_program s in
+    let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_wasm.emit_program ~main_ty prog
+  in
+  assert_contains "wasm: emits (module"
+    (wasm "42") "(module";
+  assert_contains "wasm: exports main with i32 result"
+    (wasm "42") "(func $main (export \"main\") (result i32)";
+  assert_contains "wasm: int literal becomes i32.const"
+    (wasm "42") "i32.const 42";
+  assert_contains "wasm: add maps to i32.add"
+    (wasm "1 + 2") "i32.add";
+  assert_contains "wasm: mul maps to i32.mul"
+    (wasm "3 * 4") "i32.mul";
+  assert_contains "wasm: sdiv via i32.div_s"
+    (wasm "10 / 2") "i32.div_s";
+  assert_contains "wasm: < maps to i32.lt_s"
+    (wasm "if 1 < 2 then 10 else 20") "i32.lt_s";
+  assert_contains "wasm: if uses if/else/end"
+    (wasm "if 1 < 2 then 10 else 20") "if (result i32)";
+  assert_contains "wasm: if has else branch"
+    (wasm "if 1 < 2 then 10 else 20") "else";
+  assert_contains "wasm: let allocates local slot"
+    (wasm "let x = 5 in x * x") "local.set 0";
+  assert_contains "wasm: var reads via local.get"
+    (wasm "let x = 5 in x") "local.get 0";
+  assert_contains "wasm: locals declared at fn start"
+    (wasm "let x = 5 in x") "(local i32)";
+  assert_contains "wasm: bool literal as i32"
+    (wasm "true") "i32.const 1";
+  assert_contains "wasm: and lowers to i32.and"
+    (wasm "true && false") "i32.and";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
