@@ -250,7 +250,8 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] record / variant / pattern match (2026-06-18、多相 monomorphization 含む)
 - [x] closure conversion + 第一級関数 (2026-06-18)
 - [x] **region runtime (bump allocator)** — メモリモデルの本領発揮、2026-06-18
-- [ ] view runtime (`with` Drop 実行 / view 構築の region 化)
+- [x] `with` Drop 実行 codegen (2026-06-18、scope 末で `close` field を自動呼出)
+- [ ] view 構築の region 化
 - [ ] LLVM IR or Wasm への移行
 
 ---

@@ -426,14 +426,51 @@ let rec emit_expr (e : Ast.expr) : string =
        (* GCC/Clang statement expression so the whole let stays a C
           expression. `__auto_type` (GCC/Clang extension) lets us bind
           values of varying static types (int, const char*, ...) without
-          threading typer info into codegen. *)
-       "({ __auto_type " ^ name ^ " = " ^ emit_expr value ^ "; " ^ emit_expr body ^ "; })"
+          threading typer info into codegen. Also extend
+          current_var_types so a Fun in `body` can recognize this
+          binding as a capture candidate. *)
+       let value_c = emit_expr value in
+       let bind_ty =
+         match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
+       in
+       let prev = !current_var_types in
+       current_var_types := (name, bind_ty) :: prev;
+       let body_c =
+         try let r = emit_expr body in current_var_types := prev; r
+         with ex -> current_var_types := prev; raise ex
+       in
+       "({ __auto_type " ^ name ^ " = " ^ value_c ^ "; " ^ body_c ^ "; })"
      | _ -> unsupported pat.ploc "non-variable let pattern")
   (* Unsupported nodes *)
   | Ast.Float_lit _   -> unsupported e.loc "float literals"
   | Ast.Unit_lit      -> "0"  (* unit becomes int 0 in C *)
   | Ast.Let_rec _     -> unsupported e.loc "let rec inside an expression (only allowed at top level)"
-  | Ast.With _        -> unsupported e.loc "with"
+  | Ast.With (name, value, body) ->
+    (* `with c = v in body` — bind c, evaluate body, then invoke c's
+       `close` field if the type defines one (Phase 3.1 convention).
+       The close field is a `unit -> unit` closure; dispatch via the
+       closure struct's `.fn(.env, 0)`. *)
+    let value_c = emit_expr value in
+    let body_c = emit_expr body in
+    let close_call =
+      match value.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+           let info = Hashtbl.find Typer.records rname in
+           (match List.assoc_opt "close" info.Typer.r_fields with
+            | Some _ ->
+              let dot = if is_ptr_ty t then "->" else "." in
+              Printf.sprintf
+                "%s%sclose.fn(%s%sclose.env, 0); "
+                name dot name dot
+            | None -> "")
+         | _ -> "")
+      | None -> ""
+    in
+    Printf.sprintf
+      "({ __auto_type %s = %s; __auto_type __with_result = (%s); %s__with_result; })"
+      name value_c body_c close_call
   | Ast.Fun (param, _, fn_body) ->
     (* Anonymous Fun in expression position → emit a closure value.
        Prefer the typer's recorded type; if it's still polymorphic (due
@@ -458,18 +495,16 @@ let rec emit_expr (e : Ast.expr) : string =
       | Ast.TyArrow (a, b) -> (Ast.walk a, Ast.walk b)
       | _ -> unsupported e.loc "anonymous fn has non-arrow type"
     in
-    (* Captures = free vars of body excluding the param, builtins, and
-       known top-level fn names. Vars currently visible via env_subst
-       are also "free in the surrounding scope" — they're our captures
-       in this adapter, but already accessible via the OUTER env. *)
-    let exclusions =
-      let builtins = List.map fst Typer.initial_env in
-      let tops = Hashtbl.fold (fun k () acc -> k :: acc)
-                   toplevel_fn_names [] in
-      let inners = Hashtbl.fold (fun k _ acc -> k :: acc) inner_lifts [] in
-      param :: builtins @ tops @ inners
+    (* Captures = free vars of body that are bound by the enclosing
+       fn / let chain (i.e., present in current_var_types). Globals
+       (builtins, top-level fns, inner-lifted fns) are NOT captured —
+       they're referenced directly in the generated C. Filtering by
+       current_var_types respects shadowing (e.g., a user's `id`
+       parameter is captured even though `id` is also a builtin). *)
+    let raw_fvs = free_vars fn_body [param] in
+    let fvs =
+      List.filter (fun n -> List.mem_assoc n !current_var_types) raw_fvs
     in
-    let fvs = free_vars fn_body exclusions in
     (* Capture type lookup: prefer the in-scope binding's resolved type;
        fall back to scanning Var nodes in the body (which may be
        polymorphic if the host fn was generalized). *)
@@ -1614,12 +1649,15 @@ let collect_tuple_shapes (root : Ast.expr) : Ast.ty list list =
 
 let emit_tuple_typedef (elems : Ast.ty list) : string =
   let name = tuple_struct_name elems in
+  Printf.sprintf "typedef struct %s %s;" name name
+
+let emit_tuple_struct_body (elems : Ast.ty list) : string =
+  let name = tuple_struct_name elems in
   let fields =
     List.mapi (fun i t ->
       Printf.sprintf "  %s f%d;" (c_type_of t) i) elems
   in
-  Printf.sprintf "typedef struct {\n%s\n} %s;"
-    (String.concat "\n" fields) name
+  Printf.sprintf "struct %s {\n%s\n};" name (String.concat "\n" fields)
 
 (* Walk a typed AST and collect every distinct record TyCon name
    encountered. Used to drive struct typedef emission. The record's
@@ -1683,15 +1721,27 @@ let emit_record_typedef (name : string) : string =
     ""
   end
   else
+    (* Forward decl form so closure typedefs that reference this struct
+       can be emitted before the struct body (function-pointer return
+       types accept forward-declared structs). *)
+    Printf.sprintf "typedef struct %s %s;" name name
+
+let emit_record_struct_body (name : string) : string =
+  let info = Hashtbl.find Typer.records name in
+  if info.Typer.r_params <> [] then ""
+  else
     let fields =
       List.map (fun (fname, ft) ->
         Printf.sprintf "  %s %s;" (c_type_of ft) fname) info.Typer.r_fields
     in
-    Printf.sprintf "typedef struct {\n%s\n} %s;"
-      (String.concat "\n" fields) name
+    Printf.sprintf "struct %s {\n%s\n};" name (String.concat "\n" fields)
 
 (* Emit specialized typedef for a polymorphic record instance. *)
 let emit_mono_record_typedef (record_name : string) (args : Ast.ty list) : string =
+  let mono_name = mono_record_name record_name args in
+  Printf.sprintf "typedef struct %s %s;" mono_name mono_name
+
+let emit_mono_record_struct_body (record_name : string) (args : Ast.ty list) : string =
   let mono_name = mono_record_name record_name args in
   let (params, fields) = Hashtbl.find polymorphic_records record_name in
   let mapping = List.combine params args in
@@ -1702,8 +1752,8 @@ let emit_mono_record_typedef (record_name : string) (args : Ast.ty list) : strin
     List.map (fun (fname, ft) ->
       Printf.sprintf "  %s %s;" (c_type_of ft) fname) subst_fields
   in
-  Printf.sprintf "typedef struct {\n%s\n} %s;"
-    (String.concat "\n" field_lines) mono_name
+  Printf.sprintf "struct %s {\n%s\n};"
+    mono_name (String.concat "\n" field_lines)
 
 (* Detect direct self-reference in a variant's payload types. *)
 let variant_is_recursive (name : string)
@@ -1754,15 +1804,17 @@ let emit_variant_typedef (name : string) (params : string list)
       "\n  } payload;"
   in
   if recursive then
-    (* For recursive variants we only emit the forward decl + ptr typedef
-       here. The struct BODY (which may reference tuple / other types
-       that come later in the topo order) is emitted by
-       `emit_variant_struct_body` after the tuple/record typedefs. *)
     Printf.sprintf
       "typedef struct %s %s;\ntypedef %s* %s;"
       node_name node_name node_name name
-  else
-    Printf.sprintf "typedef struct {\n%s\n} %s;" body name
+  else begin
+    let _ = body in
+    (* Non-recursive variants also split into forward + body so closures
+       referencing this variant can be emitted before the struct
+       definition (function-pointer return types accept forward-declared
+       struct types). *)
+    Printf.sprintf "typedef struct %s %s;" node_name node_name
+  end
 
 (* Check whether a specific (variant_name, args) instance is recursive:
    does any substituted payload reference the SAME (name, args)? *)
@@ -1812,44 +1864,49 @@ let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : str
       "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
       "\n  } payload;"
   in
+  let _ = body in
   if recursive then
     Printf.sprintf "typedef struct %s %s;\ntypedef %s* %s;"
       node_name node_name node_name mono_name
   else
-    Printf.sprintf "typedef struct {\n%s\n} %s;" body mono_name
+    Printf.sprintf "typedef struct %s %s;" node_name node_name
 
-(* For recursive mono variants, the struct body comes AFTER tuple /
-   other typedefs so all referenced types are defined. *)
+(* For mono variants, the struct body comes AFTER tuple / closure / etc.
+   typedefs so all referenced types are visible. *)
 let emit_mono_variant_struct_body (variant_name : string) (args : Ast.ty list)
     : string option =
   let mono_name = mono_variant_name variant_name args in
-  if not (Hashtbl.mem recursive_variants mono_name) then None
-  else
-    let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
-    let svariants = subst_variants params args variants in
-    let node_name = mono_name ^ "_node" in
-    let payload_arms =
-      List.filter_map (fun (cname, arg_opt) ->
-        match arg_opt with
-        | None -> None
-        | Some ty -> Some (Printf.sprintf "    %s %s;" (c_type_of ty) cname))
-        svariants
-    in
-    let body =
-      if payload_arms = [] then "  int tag;"
-      else
-        "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
-        "\n  } payload;"
-    in
-    Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
+  let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
+  let svariants = subst_variants params args variants in
+  let node_name =
+    if Hashtbl.mem recursive_variants mono_name then mono_name ^ "_node"
+    else mono_name
+  in
+  let payload_arms =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> None
+      | Some ty -> Some (Printf.sprintf "    %s %s;" (c_type_of ty) cname))
+      svariants
+  in
+  let body =
+    if payload_arms = [] then "  int tag;"
+    else
+      "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
+      "\n  } payload;"
+  in
+  Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
 
-(* Emit the full struct body for a recursive variant. Called by
-   emit_program AFTER tuple / record typedefs are in place. *)
+(* Emit the full struct body for a variant — both recursive and
+   non-recursive. Called by emit_program AFTER closure / tuple / record
+   forward decls are in place so referenced types are visible. *)
 let emit_variant_struct_body (name : string)
     (variants : (string * Ast.ty option) list) : string option =
-  if not (is_recursive_variant name) then None
+  if Hashtbl.mem polymorphic_variants name then None
   else
-    let node_name = name ^ "_node" in
+    let node_name =
+      if is_recursive_variant name then name ^ "_node" else name
+    in
     let payload_arms =
       List.filter_map (fun (cname, arg_opt) ->
         match arg_opt with
@@ -1930,6 +1987,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _ (rn, args) acc ->
       emit_mono_record_typedef rn args :: acc) mono_record_instances []
   in
+  let mono_record_struct_bodies =
+    Hashtbl.fold (fun _ (rn, args) acc ->
+      emit_mono_record_struct_body rn args :: acc) mono_record_instances []
+  in
   (* Tuple shape collection: walk the (now typer-annotated) AST plus the
      resolved fn signatures. *)
   let tuple_shapes =
@@ -1969,6 +2030,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in
+  let record_struct_bodies = List.map emit_record_struct_body record_names in
+  let record_struct_bodies =
+    List.filter (fun s -> s <> "") record_struct_bodies
+  in
+  let tuple_struct_bodies = List.map emit_tuple_struct_body tuple_shapes in
   (* Closure / inner-fn lifting (defunctionalization). Done AFTER
      top-level fn types are resolved so we know toplevel names. *)
   let toplevel_names = List.map (fun f -> f.name) fns in
@@ -2048,14 +2114,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "";
       region_runtime_helpers;
       "" ]
+    (* Forward decls of all named struct types — these let closure
+       typedefs (function pointers returning struct values by name)
+       compile even when the struct body isn't visible yet. *)
     @ (if variant_typedefs = [] then [] else variant_typedefs @ [""])
     @ (if mono_variant_typedefs = [] then [] else mono_variant_typedefs @ [""])
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if mono_record_typedefs = [] then [] else mono_record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
+    (* Closure typedefs reference user struct names (e.g.,
+       `closure_int_Conn`) but only via function pointer types, which C
+       accepts with forward-declared structs. *)
+    @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
+    (* Now the struct bodies themselves — fields may reference closure
+       types (e.g., `closure_unit_unit close;` inside a Drop record), so
+       these need to come AFTER closure typedefs. *)
+    @ (if tuple_struct_bodies = [] then [] else tuple_struct_bodies @ [""])
+    @ (if record_struct_bodies = [] then [] else record_struct_bodies @ [""])
+    @ (if mono_record_struct_bodies = [] then [] else mono_record_struct_bodies @ [""])
     @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
     @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
-    @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])

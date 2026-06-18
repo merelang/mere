@@ -2177,7 +2177,7 @@ let () =
   (* --- C codegen: tuple support (Phase 4 fifth slice) --- *)
   assert_contains "codegen: tuple typedef for int*int"
     (codegen "let p = (1, 2) in fst p + snd p")
-    "typedef struct {\n  int f0;\n  int f1;\n} tuple_int_int;";
+    "struct tuple_int_int {\n  int f0;\n  int f1;\n};";
   assert_contains "codegen: tuple literal uses compound literal"
     (codegen "let p = (1, 2) in fst p")
     "((tuple_int_int){.f0 = 1, .f1 = 2})";
@@ -2189,7 +2189,7 @@ let () =
     "(p).f1";
   assert_contains "codegen: mixed-type tuple struct (str, int)"
     (codegen "let p = (\"hi\", 42) in fst p")
-    "typedef struct {\n  const char* f0;\n  int f1;\n} tuple_str_int;";
+    "struct tuple_str_int {\n  const char* f0;\n  int f1;\n};";
   assert_contains "codegen: tuple-returning fn signature"
     (codegen "let split = fn s -> (s, str_len s) in split \"x\"")
     "tuple_str_int split(const char* s)";
@@ -2210,6 +2210,8 @@ let () =
         Typer.register_record name params fields
       | Ast.Top_type (name, params, variants) ->
         Typer.register_type name params variants
+      | Ast.Top_drop name ->
+        Typer.register_drop_type name
       | Ast.Top_let (pat, value) ->
         let outer = !type_env in
         let t = Typer.infer outer value in
@@ -2225,7 +2227,7 @@ let () =
     (codegen_with_decls
       "type CgRectA = { w: int, h: int };\n\
        let r = CgRectA { w = 3, h = 4 } in r.w * r.h")
-    "typedef struct {\n  int w;\n  int h;\n} CgRectA;";
+    "struct CgRectA {\n  int w;\n  int h;\n};";
   assert_contains "codegen: record literal compound"
     (codegen_with_decls
       "type CgRectB = { w: int, h: int };\n\
@@ -2256,12 +2258,12 @@ let () =
     (codegen_with_decls
       "type 'a CgBox = { v: 'a };\n\
        let b = CgBox { v = 1 } in b.v")
-    "} CgBox_int;";
+    "struct CgBox_int {";
   assert_contains "codegen: poly record Box_str specialization"
     (codegen_with_decls
       "type 'a CgBox2 = { v: 'a };\n\
        let b = CgBox2 { v = \"hi\" } in b.v")
-    "  const char* v;\n} CgBox2_str;";
+    "  const char* v;\n};";
   assert_contains "codegen: poly record literal uses mono name"
     (codegen_with_decls
       "type 'a CgBox3 = { v: 'a };\n\
@@ -2346,6 +2348,27 @@ let () =
     (codegen "region R { let x = &R 5 in 42 }")
     "typeof(__ref_v)*";
 
+  (* --- C codegen: `with` Drop execution (Phase 4.18) --- *)
+  assert_contains "codegen: with binding emit"
+    (codegen_with_decls
+      "drop type CgConn = { id: int, close: unit -> unit };\n\
+       let mk = fn id ->\n\
+         CgConn { id = id, close = fn () -> () } in\n\
+       with c = mk 1 in c.id")
+    "__auto_type c =";
+  assert_contains "codegen: with calls close field at scope end"
+    (codegen_with_decls
+      "drop type CgConn2 = { id: int, close: unit -> unit };\n\
+       let mk = fn id ->\n\
+         CgConn2 { id = id, close = fn () -> () } in\n\
+       with c = mk 1 in c.id")
+    "c.close.fn(c.close.env, 0)";
+  assert_contains "codegen: with on Drop type without close field omits call"
+    (codegen_with_decls
+      "drop type CgRes = { v: int };\n\
+       with r = CgRes { v = 5 } in r.v")
+    "__with_result";
+
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
      Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
@@ -2353,7 +2376,7 @@ let () =
     (codegen_with_decls
       "type CgCol = CR | CG | CB;\n\
        let c = CG in match c with | CR -> 0 | CG -> 1 | CB -> 2")
-    "typedef struct {\n  int tag;\n} CgCol;";
+    "struct CgCol {\n  int tag;\n};";
   assert_contains "codegen: variant with payload includes union"
     (codegen_with_decls
       "type CgStat = COk | CErr of str;\n\
@@ -2529,7 +2552,7 @@ let () =
     (codegen_with_decls
       "type 'a Cgopt = CgNone | CgSome of 'a;\n\
        let v = CgSome 42 in match v with | CgNone -> 0 | CgSome n -> n")
-    "} Cgopt_int;";
+    "struct Cgopt_int {";
   assert_contains "codegen: polymorphic list specialized to list_int"
     (codegen_with_decls
       "type 'a Cglst = CgN | CgC of 'a * 'a Cglst;\n\
@@ -2541,7 +2564,7 @@ let () =
       "type 'a Cglst2 = CgN2 | CgC2 of 'a * 'a Cglst2;\n\
        let rec sum = fn xs -> match xs with | CgN2 -> 0 | CgC2 (h, t) -> h + sum t in\n\
        sum (CgC2 (1, CgN2))")
-    "} tuple_int_Cglst2_int;";
+    "struct tuple_int_Cglst2_int {";
   assert_contains "codegen: Constr for mono variant uses specialized name"
     (codegen_with_decls
       "type 'a Cgopt3 = CgNone3 | CgSome3 of 'a;\n\
