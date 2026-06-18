@@ -2128,11 +2128,15 @@ let () =
         and od = fn n -> if n == 0 then 0 else ev (n - 1)\n\
         in ev 4")
     "int ev(int);\nint od(int);";
-  check_raises "codegen: nested fn (closure) rejected"
-    (fun () ->
-      let _ = codegen
-        "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5"
-      in ());
+  assert_contains "codegen: nested fn lifted to top level with captures"
+    (* Previously rejected; Phase 4.8 lifts inner fns via defunctionalization. *)
+    (codegen
+      "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
+    "int __lifted_helper_0(int x, int y)";
+  assert_contains "codegen: lifted inner fn called with captures prepended"
+    (codegen
+      "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
+    "__lifted_helper_0(x, 10)";
   check_raises "codegen: indirect fn application rejected"
     (fun () -> let _ = codegen "(fn x -> x + 1) 5" in ());
 
@@ -2300,6 +2304,42 @@ let () =
       let _ = codegen_with_decls
         "type CgCol5 = A | B;\n\
          match A with | A when true -> 0 | _ -> 1"
+      in ());
+
+  (* --- C codegen: closure conversion (Phase 4 eighth slice) ---
+     Inner `let n = fn x -> body` is lifted to a top-level fn with
+     captured outer-scope vars prepended to its params (defunctionalization).
+     Call sites are rewritten to pass the captures explicitly. *)
+  assert_contains "codegen: closure captures host param"
+    (codegen
+      "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
+    "int __lifted_h_0(int x, int y)";
+  assert_contains "codegen: closure call site prepends captures"
+    (codegen
+      "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
+    "__lifted_h_0(x, 10)";
+  assert_contains "codegen: closure binding is dropped from let-chain"
+    (* The `__auto_type h = ...` should NOT appear since h was lifted. *)
+    (codegen
+      "let outer = fn x -> let h = fn y -> y + 1 in h 5 in outer 3")
+    "int outer(int x) {\n  return __lifted_h_0(5);";
+  assert_contains "codegen: nested closure captures from multiple levels"
+    (* Inner `h` captures `x` (from g's param) and `n` (from f's param).
+       Free-var collection orders captures by source order of usage, so
+       captures = [x; n]. g gets slot 0, h gets slot 1. *)
+    (codegen
+      "let f = fn n ->\n\
+         let g = fn x ->\n\
+           let h = fn y -> x + y + n in\n\
+           h 1\n\
+         in g 2\n\
+       in f 3")
+    "int __lifted_h_1(int x, int n, int y)";
+  check_raises "codegen: capture of non-primitive type rejected"
+    (* Tuple captures aren't supported yet (only int/bool/str/unit). *)
+    (fun () ->
+      let _ = codegen
+        "let outer = fn x -> let t = (x, x) in let h = fn y -> fst t in h 1 in outer 5"
       in ());
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
