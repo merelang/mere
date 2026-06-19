@@ -4054,5 +4054,20 @@ let () =
     (codegen_err_msg (fun p -> Codegen_wasm.emit_program ~main_ty:Ast.TyInt p))
     "interpreter-only";
 
+  (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
+  (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
+     同一の TyCon になる (forward-compatible)。 *)
+  check "vec[R, T]: type-annotation parses"
+    (Pipeline.type_of "fn (v: Vec[R, int]) -> vec_len v")
+    "(int Vec -> int)";
+  check "vec[R, T]: str Vec[R] works"
+    (Pipeline.type_of "fn (v: Vec[R, str]) -> vec_get v 0")
+    "(str Vec -> str)";
+  check "vec[R, T]: same type as `T Vec` (1-arg postfix form)"
+    (let a = Pipeline.type_of "fn (v: int Vec) -> vec_len v" in
+     let b = Pipeline.type_of "fn (v: Vec[R, int]) -> vec_len v" in
+     if a = b then "same" else "DIFFERENT: " ^ a ^ " vs " ^ b)
+    "same";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

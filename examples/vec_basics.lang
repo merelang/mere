@@ -31,8 +31,10 @@ let nums = vec_new () in
   };
 
   // === region に置く: Trivial[R] が通るので OK ===
+  // Phase 12.2 から `Vec[R, T]` 構文も書ける (現状 R はドキュメント
+  // のみ、内部表現は `T Vec` と同一)。
   region R {
-    let local = vec_new () in
+    let local = (vec_new () : Vec[R, int]) in
     {
       vec_push local 100;
       vec_push local 200;

@@ -151,6 +151,37 @@ let rec parse_program_internal tokens =
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
+    | (_, T_ident name) :: (_, T_lbracket) :: rest
+      when starts_with_upper name ->
+      (* `Vec[R, T]` style — bracket-delimited parameter list with a
+         leading region name + types. Phase 12.2 (Q-010 narrowed →
+         実装第二段階): parse the syntax forward-compatibly, but the
+         region marker R is currently DROPPED from the internal type
+         representation — `Vec[R, T]` is treated as `T Vec` (1-arg
+         TyCon). Future slice will give R semantic teeth (region-aware
+         allocation, lifetime tracking). *)
+      let rec parse_bracket_args acc toks =
+        match toks with
+        | (_, T_rbracket) :: rest -> List.rev acc, rest
+        | (_, T_comma) :: rest -> parse_bracket_args acc rest
+        | _ ->
+          (* Region name is uppercase / lowercase ident — accept either,
+             stay quiet about its identity for now. Type args are parsed
+             via the normal type parser. *)
+          let t, rest = ty toks in
+          parse_bracket_args (t :: acc) rest
+      in
+      let all_args, rest = parse_bracket_args [] rest in
+      (* Drop the leading TyCon-with-no-args entries that come from
+         bare region idents (uppercase). Type args remain. *)
+      let type_args =
+        List.filter (fun a ->
+          match a with
+          | Ast.TyCon (_, []) -> false  (* bare region marker *)
+          | _ -> true
+        ) all_args
+      in
+      expand_alias_or_tycon name type_args, rest
     | (_, T_ident name) :: rest -> expand_alias_or_tycon name [], rest
     | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
     | (_, T_lparen) :: rest ->

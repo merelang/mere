@@ -406,10 +406,22 @@ region R {
 //   into region — type contains a Drop type
 ```
 
-現状 (Phase 12.1) の制約:
+**Phase 12.2 から `Vec[R, T]` 構文も書ける** (forward-compatible 注釈):
+
+```
+fn (v: Vec[R, int]) -> vec_len v    // OK: (int Vec -> int)
+```
+
+現状 R はドキュメントのみで、`Vec[R, int]` は内部的に `int Vec` (1-arg
+TyCon) と同一の型。region のセマンティック裏付け (region-aware allocation /
+lifetime tracking) は将来の slice で。1-arg `T Vec` と 2-arg `Vec[R, T]`
+はどちらも書ける。
+
+現状 (Phase 12.2) の制約:
 - **インタプリタ専用** — 3 backend codegen は `vec_new` 等を見つけると
   `Codegen_error` で reject (`interpreter-only` メッセージ付き)
-- **region をパラメータに乗せる `Vec[R, T]`** はまだ — 現状は単純 `'a Vec`
+- **`Vec[R, T]` の R はドキュメントのみ** — 内部表現は `T Vec` と同一、
+  region は実行時に追跡されない (将来 slice で本格化)
 - **`OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]`** はまだ
 - **`Allocator` trait の API 統一** もまだ
 
