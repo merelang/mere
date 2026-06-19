@@ -24,6 +24,13 @@ let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
    qualified name (Var "M.x") rather than a field access on M. *)
 let module_names : (string, unit) Hashtbl.t = Hashtbl.create 4
 
+(* Module bindings registry (Phase 9.3): qualified module path → ordered
+   list of short binding names defined directly in that module. Used by
+   `open M;` to expand into a chain of `let name = M.name in ...`
+   aliases. Nested modules register both their short name (for use
+   within the parent) and the full path. *)
+let module_bindings : (string, string list) Hashtbl.t = Hashtbl.create 4
+
 (* Import registry: file path -> ().  Populated when `import "path";` is
    processed; consumed to skip subsequent imports of the same file
    (cycle guard). Paths are stored as given by the source (no
@@ -969,52 +976,9 @@ let rec parse_program_internal tokens =
     | _ ->
       raise (Parse_error (pos_of toks, "expected '(' after signature name"))
   in
-  (* Parse a `module M { ... }` body. Only `let` / `let rec` decls are
-     accepted in slice 1 — type/record/etc. at module scope is a
-     future enhancement. Terminates at the matching `T_rbrace`. *)
-  let rec parse_module_body decls toks =
-    match toks with
-    | (_, T_rbrace) :: rest -> List.rev decls, rest
-    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
-      let value, toks = expr rest in
-      let rec parse_more acc toks =
-        match toks with
-        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
-          let v, toks = expr rest in
-          parse_more ((n, v) :: acc) toks
-        | _ -> List.rev acc, toks
-      in
-      let more, toks = parse_more [] toks in
-      let bindings = (name, value) :: more in
-      let _ = pos in
-      (match toks with
-       | (_, T_semi) :: rest ->
-         parse_module_body (Ast.Top_let_rec bindings :: decls) rest
-       | _ ->
-         raise (Parse_error (pos_of toks,
-           "expected ';' after let rec in module body")))
-    | (pos, T_let) :: rest_after_let ->
-      let _ = pos in
-      let pat, rest = pattern rest_after_let in
-      (match rest with
-       | (_, T_eq) :: rest ->
-         let value, rest = expr rest in
-         (match rest with
-          | (_, T_semi) :: rest ->
-            parse_module_body (Ast.Top_let (pat, value) :: decls) rest
-          | _ ->
-            raise (Parse_error (pos_of rest,
-              "expected ';' after let in module body")))
-       | _ ->
-         raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
-    | (pos, _) :: _ ->
-      raise (Parse_error (pos,
-        "only `let` / `let rec` allowed in module body (slice 1)"))
-    | [] ->
-      raise (Parse_error (Loc.dummy, "unterminated module body"))
-  in
   (* Collect bound names from a module's decls — used to compute the
-     rename map for prefixing. *)
+     rename map for prefixing. Includes both direct lets and nested
+     module names (which arrive as `N.f` after the inner prefix pass). *)
   let collect_module_names decls =
     List.concat_map (function
       | Ast.Top_let ({ pnode = Ast.P_var n; _ }, _) -> [n]
@@ -1027,6 +991,12 @@ let rec parse_program_internal tokens =
      short-name refs (`foo` inside `M`) resolve to the exported form. *)
   let prefix_module_decls m_name decls =
     let names = collect_module_names decls in
+    (* For `open M;`: record only the DIRECT short names (no dot in
+       the name) — nested module's exports are accessed via their own
+       qualified name, not via `open M`. *)
+    let direct_names =
+      List.filter (fun n -> not (String.contains n '.')) names in
+    Hashtbl.replace module_bindings m_name direct_names;
     let rename = List.map (fun n -> (n, m_name ^ "." ^ n)) names in
     let lookup n = List.assoc_opt n rename in
     List.map (function
@@ -1041,6 +1011,74 @@ let rec parse_program_internal tokens =
         Ast.Top_let_rec new_bindings
       | d -> d
     ) decls
+  in
+  (* Parse a `module M { ... }` body. Only `let` / `let rec` / nested
+     `module N { ... }` decls are accepted (type/record at module scope
+     is a future slice). Terminates at the matching `T_rbrace`.
+
+     Phase 9.3: takes the qualified module path for recursive nesting.
+     The path is used to register the FULL path of nested modules
+     (e.g., "M.N") in `module_names` so external qualified access
+     `M.N.f` parses correctly. *)
+  let rec parse_module_body cur_path decls toks =
+    match toks with
+    | (_, T_rbrace) :: rest -> List.rev decls, rest
+    | (pos, T_module) :: (_, T_ident inner_name) :: (_, T_lbrace) :: rest ->
+      let _ = pos in
+      let inner_path = cur_path ^ "." ^ inner_name in
+      (* Register both short and full path so qualified access works
+         from inside the outer module AND externally. *)
+      Hashtbl.replace module_names inner_name ();
+      Hashtbl.replace module_names inner_path ();
+      let inner_body, rest = parse_module_body inner_path [] rest in
+      let prefixed = prefix_module_decls inner_name inner_body in
+      let decls' = List.rev_append prefixed decls in
+      let rest =
+        match rest with
+        | (_, T_semi) :: r -> r
+        | _ -> rest
+      in
+      parse_module_body cur_path decls' rest
+    | (pos, T_module) :: _ ->
+      raise (Parse_error (pos,
+        "expected `NAME { decls }` after nested `module`"))
+    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let value, toks = expr rest in
+      let rec parse_more acc toks =
+        match toks with
+        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+          let v, toks = expr rest in
+          parse_more ((n, v) :: acc) toks
+        | _ -> List.rev acc, toks
+      in
+      let more, toks = parse_more [] toks in
+      let bindings = (name, value) :: more in
+      let _ = pos in
+      (match toks with
+       | (_, T_semi) :: rest ->
+         parse_module_body cur_path (Ast.Top_let_rec bindings :: decls) rest
+       | _ ->
+         raise (Parse_error (pos_of toks,
+           "expected ';' after let rec in module body")))
+    | (pos, T_let) :: rest_after_let ->
+      let _ = pos in
+      let pat, rest = pattern rest_after_let in
+      (match rest with
+       | (_, T_eq) :: rest ->
+         let value, rest = expr rest in
+         (match rest with
+          | (_, T_semi) :: rest ->
+            parse_module_body cur_path (Ast.Top_let (pat, value) :: decls) rest
+          | _ ->
+            raise (Parse_error (pos_of rest,
+              "expected ';' after let in module body")))
+       | _ ->
+         raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
+    | (pos, _) :: _ ->
+      raise (Parse_error (pos,
+        "only `let` / `let rec` / nested `module` allowed in module body"))
+    | [] ->
+      raise (Parse_error (Loc.dummy, "unterminated module body"))
   in
   let rec parse_decls decls toks =
     match toks with
@@ -1076,7 +1114,7 @@ let rec parse_program_internal tokens =
          self-references like `M.foo` inside the module resolve
          correctly via `field_chain`. *)
       Hashtbl.replace module_names m_name ();
-      let body, rest = parse_module_body [] rest in
+      let body, rest = parse_module_body m_name [] rest in
       let prefixed = prefix_module_decls m_name body in
       (* `decls` accumulates newest-first; `prefixed` is in source order.
          Prepend each prefixed decl so the final List.rev yields the
@@ -1092,6 +1130,27 @@ let rec parse_program_internal tokens =
       parse_decls decls' rest
     | (pos, T_module) :: _ ->
       raise (Parse_error (pos, "expected `NAME { decls }` after `module`"))
+    | (pos, T_open) :: (_, T_ident m_name) :: (_, T_semi) :: rest ->
+      (* `open M;` — bring M's bindings into the current scope by
+         emitting `let name = M.name;` aliases for each binding M
+         exports. Requires M to have been declared earlier in the
+         program (or via `import`). *)
+      let bindings =
+        match Hashtbl.find_opt module_bindings m_name with
+        | Some bs -> bs
+        | None ->
+          raise (Parse_error (pos,
+            Printf.sprintf "open: module `%s` is not declared" m_name))
+      in
+      let alias_decls = List.map (fun n ->
+        let pat = mkp pos (Ast.P_var n) in
+        let value = mk pos (Ast.Var (m_name ^ "." ^ n)) in
+        Ast.Top_let (pat, value)
+      ) bindings in
+      let decls' = List.rev_append alias_decls decls in
+      parse_decls decls' rest
+    | (pos, T_open) :: _ ->
+      raise (Parse_error (pos, "expected `NAME;` after `open`"))
     | (pos, T_drop) :: ((_, T_type) :: rest_after_type as after_drop) ->
       (* `drop type Name = ...` marks Name as having Drop semantics.
          We extract the name via look-ahead and prepend `Top_drop name`

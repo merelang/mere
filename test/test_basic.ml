@@ -4393,6 +4393,55 @@ let () =
            in\n\
            let m = &mut R x in 0\n\
          }");
+  (* --- Phase 9.3: 入れ子 module + `open M;` --- *)
+  check "module nested: M.N.f access"
+    (Pipeline.process
+       "module MNest {\n\
+          module Inner {\n\
+            let f = fn x -> x + 1;\n\
+          };\n\
+          let g = fn x -> Inner.f (Inner.f x);\n\
+        };\n\
+        MNest.Inner.f 10 + MNest.g 20") "33";
+  check "module nested: inner sees outer via short name within outer"
+    (Pipeline.process
+       "module NN {\n\
+          let helper = fn x -> x * 10;\n\
+          module Aux {\n\
+            let twice = fn x -> x + x;\n\
+          };\n\
+          let use_aux = fn x -> Aux.twice (helper x);\n\
+        };\n\
+        NN.use_aux 7") "140";
+  check "open: simple aliasing"
+    (Pipeline.process
+       "module Tools {\n\
+          let dbl = fn x -> x * 2;\n\
+          let trp = fn x -> x * 3;\n\
+        };\n\
+        open Tools;\n\
+        dbl 7 + trp 5") "29";
+  check "open: works after import-then-open chain conceptually"
+    (Pipeline.process
+       "module Tk {\n\
+          let val_a = 100;\n\
+          let val_b = 200;\n\
+        };\n\
+        open Tk;\n\
+        val_a + val_b") "300";
+  check_raises "open: undeclared module → parse error"
+    (fun () -> Pipeline.process "open NoSuchModule;\n42");
+  check_raises "open: missing ;"
+    (fun () -> Pipeline.process "module X { let v = 1; }; open X 42");
+  (* `open M` should not break qualified access *)
+  check "open: qualified access still works after open"
+    (Pipeline.process
+       "module Box93 {\n\
+          let v = 100;\n\
+        };\n\
+        open Box93;\n\
+        v + Box93.v") "200";
+
   check_raises "borrow checker (match): 別 arm 同士の union も active"
     (fun () ->
       Pipeline.process
