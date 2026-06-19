@@ -3578,5 +3578,20 @@ let () =
     (infer_err_with_decls "type WErr1 = { a: int };\nlet p = WErr1 { a = \"x\" } in p.a")
     "expected `int`, got `str`";
 
+  (* --- Typo suggestions (Phase 7.3) ---
+     Levenshtein-based hint: "did you mean X?". *)
+  assert_contains "diag: unbound var with close match suggests it"
+    (infer_err "let factorial = 10 in factrial + 1")
+    "did you mean `factorial`?";
+  assert_contains "diag: unbound var with no close match → no hint"
+    (infer_err "zzzzzz")
+    "unbound variable: zzzzzz";
+  assert_no_contains "diag: distant name → no suggestion"
+    (infer_err "zzzzzz")
+    "did you mean";
+  assert_contains "diag: unknown constructor suggests close ctor"
+    (infer_err_with_decls "type Color7 = Red7 | Green7 | Blue7;\nlet c = Greeen7 in c")
+    "did you mean `Green7`?";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
