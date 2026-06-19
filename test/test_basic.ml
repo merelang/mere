@@ -3311,5 +3311,40 @@ let () =
        let mk = fn n -> WCgPt3 { x = n, y = n + 1 } in (mk 5).x")
     "(func $mk (param i32) (result i32)";
 
+  (* --- Wasm codegen: variant + match (Phase 6.6) ---
+     Variant も linear memory に: {i32 tag} (nullary) or {i32 tag, i32 payload}。
+     Constr で alloc + store tag (+ payload)、Match は tag load + 入れ子の
+     if/else チェーン、fallthrough は unreachable で trap。 *)
+  assert_contains "wasm: nullary variant Constr stores tag"
+    (wasm_with_decls
+      "type WCgCol1 = WCgR1 | WCgG1 | WCgB1;\n\
+       WCgG1")
+    "i32.store offset=0";
+  assert_contains "wasm: variant with payload stores payload at offset=4"
+    (wasm_with_decls
+      "type WCgStat1 = WCgOk1 | WCgErr1 of int;\n\
+       WCgErr1 42")
+    "i32.store offset=4";
+  assert_contains "wasm: Match loads tag at offset=0"
+    (wasm_with_decls
+      "type WCgCol2 = WCgR2 | WCgG2;\n\
+       match WCgR2 with | WCgR2 -> 1 | WCgG2 -> 2")
+    "i32.load offset=0";
+  assert_contains "wasm: Match dispatches with i32.eq + if"
+    (wasm_with_decls
+      "type WCgCol3 = WCgR3 | WCgG3;\n\
+       match WCgR3 with | WCgR3 -> 1 | WCgG3 -> 2")
+    "i32.eq";
+  assert_contains "wasm: Match fallthrough is unreachable"
+    (wasm_with_decls
+      "type WCgCol4 = WCgR4 | WCgG4;\n\
+       match WCgR4 with | WCgR4 -> 1 | WCgG4 -> 2")
+    "unreachable";
+  assert_contains "wasm: payload bind loads via offset=4"
+    (wasm_with_decls
+      "type WCgStat2 = WCgOk2 | WCgErr2 of int;\n\
+       match WCgErr2 5 with | WCgOk2 -> 0 | WCgErr2 n -> n")
+    "i32.load offset=4";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
