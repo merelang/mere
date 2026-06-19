@@ -1469,8 +1469,17 @@ let rec extract_borrows (e : Ast.expr) : (string * string * Ast.borrow_mode * Lo
      | None -> [])
   | Ast.If (_, t, el) ->
     extract_borrows t @ extract_borrows el
+  | Ast.Match (_, arms) ->
+    (* Phase 11.7: each arm's body may produce a borrow; the actual
+       arm chosen is runtime-determined, so conservatively union all
+       arms' borrows. Guards don't contribute (they're side conditions
+       for matching, not the produced value). *)
+    List.concat_map (fun (_, _, body) -> extract_borrows body) arms
   | Ast.Let (_, _, body) -> extract_borrows body
+  | Ast.Let_rec (_, body) -> extract_borrows body
+  | Ast.With (_, _, body) -> extract_borrows body
   | Ast.Annot (inner, _) -> extract_borrows inner
+  | Ast.Region_block (_, body) -> extract_borrows body
   | _ -> []
 
 let rec check_borrows active (e : Ast.expr) : unit =
