@@ -885,8 +885,17 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Field_get (inner, fname) ->
     let t_inner = infer env inner in
     (* The inner expression must have type `TyCon (rec_name, args)` for some
-       declared record `rec_name`.  Walk to resolve type vars. *)
-    (match Ast.walk t_inner with
+       declared record `rec_name`.  Walk to resolve type vars. We also
+       transparently strip `&[mode] R T` wrappers (Phase 11.3 auto-deref):
+       `lg_ref.info` resolves through the borrow to the underlying record.
+       Borrow mode is purely a static contract — eval sees the record value
+       directly, so no run-time deref. *)
+    let rec strip_refs t =
+      match Ast.walk t with
+      | Ast.TyRef (_, _, inner_t) -> strip_refs inner_t
+      | t' -> t'
+    in
+    (match strip_refs t_inner with
      | Ast.TyCon (view_name, [Ast.TyRef (_, region, Ast.TyUnit)])
        when Hashtbl.mem views view_name ->
        (* View field access: substitute the view's region param with the
@@ -898,10 +907,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
         with Not_found ->
           raise (Type_error (e.loc,
             Printf.sprintf "view %s has no field %s" view_name fname)))
-     | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
+     | Ast.TyCon (rec_name, _) as t_stripped
+       when Hashtbl.mem records rec_name ->
        let info = Hashtbl.find records rec_name in
        let (expected_fields, result_ty) = instantiate_record rec_name info in
-       unify inner.loc result_ty t_inner;
+       unify inner.loc result_ty t_stripped;
        (try List.assoc fname expected_fields
         with Not_found ->
           raise (Type_error (e.loc,

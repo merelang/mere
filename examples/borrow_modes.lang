@@ -1,5 +1,7 @@
-// Phase 11.1 で追加された借用注釈の 4 mode を、Logger / Metrics
-// (組込み cap) と組み合わせて使い分けるデモ。
+// Phase 11 で追加された借用注釈の 4 mode を、Logger / Metrics
+// (組込み cap) と組み合わせて使い分けるデモ。Phase 11.3 で `&R T` を
+// 介した field access の auto-deref が動くようになったので、
+// signature だけでなく **実際の cap method 呼出** まで動く。
 //
 // 設計コンテキスト: internal design notes (Q-004)
 //
@@ -17,71 +19,59 @@
 //
 //   &mut R T          exclusive write (Rust の `&mut` 相当)
 //                     1 度に 1 caller、Database 接続の transaction 等
-//
-// 現状 (Phase 11.1) は「型としてここまで書ける」段階。borrow checker
-// (同じ region への &shared と &exclusive の同時取得拒否など) は次の
-// slice で。
 
 // === パターン 1: shared write (Logger) ===
-// 「複数 handler から同じ logger に並行書き込み」の意図を型で表現。
-// 内部 lock は cap 側 (mk_logger の実装) で透過。
+// 複数 handler から同じ logger に並行書き込み。内部 lock は cap 側 (今回は
+// builtin mk_logger) で透過。field access はborrow 越しに直接呼べる。
 
 let log_action = fn (lg: &shared write R Logger) -> fn (action: str) ->
-  // ※ Phase 11.1 では `&R T` を介した field access は未対応のため、
-  //   ここでは signature の demo に留め、body は logged 文字列を返す
-  //   だけにする。実装側 (lg.info の呼出) は将来の slice (&R T の
-  //   auto-deref) で書けるようになる予定。
-  "[logged] " ++ action;
+  lg.info ("action: " ++ action);
 
 // === パターン 2: exclusive write (Database 風) ===
-// 排他 write 必要なリソース。同じ region から `&shared write` や
-// `&R` を同時取得すべきでない (将来 borrow checker で機械検証)。
+// 排他 write 必要なリソース。`&mut` を要求するので、shared な借用を渡すと
+// 型エラーになる (詳細は borrow_modes_typeerror.lang)。
 
-type DbHandle = { id: int };
+type DbHandle = { id: int, exec: str -> int };
 
-let db_exec = fn (db: &mut R DbHandle) -> fn (sql: str) ->
-  "[exclusive] " ++ sql;
+let mk_db = fn id ->
+  DbHandle {
+    id = id,
+    exec = fn sql -> { print ("[db " ++ show id ++ "] " ++ sql); 1 },
+  };
+
+let db_run = fn (db: &mut R DbHandle) -> fn (sql: str) ->
+  db.exec sql;
 
 // === パターン 3: shared read (Config 風) ===
-// 設定値など読み取り専用。複数 caller で同時取得 OK。
+// 設定値など読み取り専用。複数 caller が同時取得できる。
 
 type AppConfig = { name: str, threads: int };
 
-let read_config = fn (cfg: &R AppConfig) ->
-  "[read]";
-
-// === 型エラーが捕捉されることの確認 (コメントアウト) ===
-// 以下を unコメントすると `expected `&mut R DbHandle`, got `&R DbHandle``
-// の型エラー。借用 mode 違いは parser/typer がすでに区別している。
-//
-// region R {
-//   let db_value = DbHandle { id = 1 } in
-//   let db_borrowed = &R db_value in    // shared read
-//   db_exec db_borrowed "SELECT 1"       // ← &mut を要求するので拒否
-// }
+let show_config = fn (cfg: &R AppConfig) ->
+  print (cfg.name ++ " threads=" ++ show cfg.threads);
 
 // === 実行: 4 mode を全部 region 内で構築 ===
 region R {
   let logger = mk_logger "app" in
-  let db = DbHandle { id = 42 } in
+  let db = mk_db 7 in
   let cfg = AppConfig { name = "demo", threads = 4 } in
 
   let lg_ref  = &shared write R logger in
   let db_ref  = &mut R db in
   let cfg_ref = &R cfg in
 
-  let r1 = log_action lg_ref "save_order" in
-  let r2 = db_exec db_ref "UPDATE orders SET ..." in
-  let r3 = read_config cfg_ref in
-
   {
-    print r1;
-    print r2;
-    print r3
+    log_action lg_ref "save_order";
+    log_action lg_ref "process_user";   // 別 caller が同じ logger を共有 write
+    let n = db_run db_ref "UPDATE orders SET status = 'paid'" in
+    print ("rows affected: " ++ show n);
+    show_config cfg_ref
   }
 }
 
 // 期待出力:
-// [logged] save_order
-// [exclusive] UPDATE orders SET ...
-// [read]
+// app [INFO] action: save_order
+// app [INFO] action: process_user
+// [db 7] UPDATE orders SET status = 'paid'
+// rows affected: 1
+// demo threads=4

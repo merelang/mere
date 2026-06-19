@@ -3899,5 +3899,41 @@ let () =
        "let f = fn (x: &shared write R int) -> 42 in \
         region R { f (&shared write R 5) }") "42";
 
+  (* --- Phase 11.3: &R T を介した field access の auto-deref --- *)
+  check "borrow: field access through &R (auto-deref)"
+    (Pipeline.process
+       "type Pt = { x: int, y: int };\n\
+        region R {\n\
+          let p = Pt { x = 3, y = 4 } in\n\
+          let p_ref = &R p in\n\
+          p_ref.x + p_ref.y\n\
+        }") "7";
+  check "borrow: field access through &mut R"
+    (Pipeline.process
+       "type C = { v: int };\n\
+        region R {\n\
+          let c = C { v = 42 } in\n\
+          let c_ref = &mut R c in\n\
+          c_ref.v\n\
+        }") "42";
+  check "borrow: field access through &shared write R"
+    (Pipeline.process
+       "type C = { v: int };\n\
+        region R {\n\
+          let c = C { v = 9 } in\n\
+          let c_ref = &shared write R c in\n\
+          c_ref.v * 10\n\
+        }") "90";
+  check "borrow: field call type-checks through &shared write"
+    (Pipeline.type_of
+       "type Lg11 = { info: str -> unit };\n\
+        fn (lg: &shared write R Lg11) -> fn (msg: str) -> lg.info msg")
+    "(&shared write R Lg11 -> (str -> unit))";
+  check "borrow: field type read through &R"
+    (Pipeline.type_of
+       "type Lg11r = { info: str -> unit };\n\
+        fn (lg: &R Lg11r) -> lg.info")
+    "(&R Lg11r -> (str -> unit))";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

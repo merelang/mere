@@ -276,9 +276,21 @@ db_exec db_ref "X"               // ← &mut を要求 → 型エラー
 これで設計の **Logger 問題** (`&borrowed` だと write 意図が出ない、
 `&mut` だと並行不可) が `&shared write` で型として書ける。
 
-現状 (Phase 11.1) は型として認識できる段階で、**借用機構の排他規則**
-(同じ region から `&shared` と `&exclusive` を同時取得拒否など) と
-**`&R T` を介した field access の auto-deref** は今後の slice。
+**Phase 11.3 から `&R T` を介した field access の auto-deref が動く**:
+
+```
+let logger = mk_logger "app" in
+region R {
+  let lg_ref = &shared write R logger in
+  lg_ref.info "hi"     // → "app [INFO] hi" を print
+}
+```
+
+borrow mode は静的契約のままで、runtime は元の record の field を直接呼ぶ
+(現状の interpreter / 3 backend 全部対応)。
+
+残る今後の slice 候補: **借用機構の排他規則** (同じ region から `&shared`
+と `&exclusive` を同時取得拒否など) は borrow checker の最小ハーネスで。
 動く実例は [`examples/borrow_modes.lang`](../examples/borrow_modes.lang)、
 意図的に型エラーを起こす side は
 [`examples/borrow_modes_typeerror.lang`](../examples/borrow_modes_typeerror.lang)。
