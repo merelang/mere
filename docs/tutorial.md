@@ -1,18 +1,18 @@
-# Tutorial (lang-ml)
+# Tutorial (mere)
 
 ML 系言語の経験がある読者を想定。15 分くらいで一通り読める分量。
 
 ## 0. インストールと起動
 
 ```sh
-git clone git@github.com:284km/lang-ml
-cd lang-ml
+git clone git@github.com:284km/mere
+cd mere
 dune build
-dune exec ./bin/main.exe -- -e '1 + 2 * 3'   # → 7
-dune exec ./bin/main.exe -- -r               # REPL
+dune exec ./bin/mere.exe -- -e '1 + 2 * 3'   # → 7
+dune exec ./bin/mere.exe -- -r               # REPL
 ```
 
-以降 `lang-ml` と書いたら `dune exec ./bin/main.exe --` のショートカット。
+以降 `mere` と書いたら `dune exec ./bin/mere.exe --` のショートカット。
 
 ## 1. 式と評価
 
@@ -136,7 +136,7 @@ match char_at s i with
 | _                            -> "other"
 ```
 
-`'X'` は単に長さ 1 の str (Lang は別 char 型を持たない)。`'a` 等の型変数構文との区別は閉じ quote の有無で。
+`'X'` は単に長さ 1 の str (Mere は別 char 型を持たない)。`'a` 等の型変数構文との区別は閉じ quote の有無で。
 
 ## 6. データ型
 
@@ -332,7 +332,7 @@ region R {
 
 並存可能なペアは shared read 同士 (`&R` + `&R`) と shared write 同士
 (`&shared write R` + `&shared write R`) のみ。それ以外の組合せは衝突。
-動く失敗例は [`examples/borrow_conflict.lang`](../examples/borrow_conflict.lang)。
+動く失敗例は [`examples/borrow_conflict.mere`](../examples/borrow_conflict.mere)。
 
 **Phase 11.5 から複雑な place expression も追跡対象** — `&R p.x` のような
 field access path も識別子 (`"p.x"`、`"p.q.r"` 等) として比較される。
@@ -372,9 +372,9 @@ region R {
 
 これにより `if` を介した借用漏れも防げる。残る borrow checker DEFERRED は
 §2.3 NLL (使われなくなった borrow を解放する flow analysis)。
-動く実例は [`examples/borrow_modes.lang`](../examples/borrow_modes.lang)、
+動く実例は [`examples/borrow_modes.mere`](../examples/borrow_modes.mere)、
 意図的に型エラーを起こす side は
-[`examples/borrow_modes_typeerror.lang`](../examples/borrow_modes_typeerror.lang)。
+[`examples/borrow_modes_typeerror.mere`](../examples/borrow_modes_typeerror.mere)。
 
 ## 10.5. モジュールと import
 
@@ -398,7 +398,7 @@ Math.inc_then_square 4    // 25
 別ファイルに切り出した decls は `import "path";` で取り込む。
 
 ```
-// lib_list_ops.lang
+// lib_list_ops.mere
 type 'a list = Nil | Cons of 'a * 'a list;
 module ListOps {
   let rec sum = fn xs -> match xs with
@@ -408,8 +408,8 @@ module ListOps {
 ```
 
 ```
-// main.lang
-import "lib_list_ops.lang";
+// main.mere
+import "lib_list_ops.mere";
 ListOps.sum [1, 2, 3, 4, 5]    // 15
 ```
 
@@ -456,25 +456,25 @@ M.unwrap (MySome 35)                       // 35
 - module 内 declare された type / record / constructor 名は **M-prefix されず global registry に入る** ため、同名の型を異なる module で declare すると衝突する。M-prefix scoping は今後の slice で
 - `open M;` は M の direct binding のみ (`open M.N;` はまだ)
 
-**Phase 9.5 から import パスは importer 相対**: `./foo.lang` のような
+**Phase 9.5 から import パスは importer 相対**: `./foo.mere` のような
 relative path は **import 文があるファイルからの相対パス** として解決
 される (cwd 相対ではない)。`Unix.realpath` で canonicalize されるので、
 異なる relative form で同じファイルを指しても cycle guard が正しく動く。
 
 ```
-// sub/lib.lang
+// sub/lib.mere
 let helper = fn x -> x * 7;
 ```
 
 ```
-// main.lang (sub/ と同じディレクトリの上)
-import "./sub/lib.lang";       // main.lang からの相対パス
+// main.mere (sub/ と同じディレクトリの上)
+import "./sub/lib.mere";       // main.mere からの相対パス
 helper 6                       // → 42
 ```
 
 ## 10.6. 可変長 Vector (`'a Vec`)
 
-Lang の最初の **region-aware standard collection**。`'a list` が再帰的な
+Mere の最初の **region-aware standard collection**。`'a list` が再帰的な
 不変リストなのに対し、`'a Vec` は可変長の growable vector (内部は array)。
 
 ```
@@ -577,7 +577,7 @@ region R {
 ```
 
 「短命 / region scope」と「長期保持 / heap」が同じ Vector で書き分けられる。
-動く対比 demo は [`examples/vec_vs_owned_vec.lang`](../examples/vec_vs_owned_vec.lang)。
+動く対比 demo は [`examples/vec_vs_owned_vec.mere`](../examples/vec_vs_owned_vec.mere)。
 内部実装は両者とも同じ可変配列 — 型システム上の区別のみ。
 
 **Phase 12.10 で `Map[R, K, V]`** — region-aware mutable map (連想配列)。
@@ -610,7 +610,7 @@ region R {
 内部は OCaml Hashtbl (polymorphic hash/eq) なので、key には primitive
 (int / str / bool / tuple of primitives) を使う想定。closure / ref を
 含む key は識別が ref 単位になるので注意。実例:
-[`examples/map_basics.lang`](../examples/map_basics.lang)。
+[`examples/map_basics.mere`](../examples/map_basics.mere)。
 
 **Phase 12.9 で Vec の高階 API** — `vec_iter` / `vec_map` / `vec_fold` /
 `vec_set`。`vec_map` の結果 Vec は source と同じ region に置かれる
@@ -638,7 +638,7 @@ let xs = vec_new () in
 | `vec_to_owned` (Phase 12.11) | `Vec[R, T] -> T OwnedVec` (region 内 → heap への deep copy) |
 | `owned_vec_to_vec` (Phase 12.12) | `T OwnedVec -> Vec[R, T]` (heap → region 内 deep copy、R は active region に bind) |
 
-実例: [`examples/vec_higher_order.lang`](../examples/vec_higher_order.lang)。
+実例: [`examples/vec_higher_order.mere`](../examples/vec_higher_order.mere)。
 
 **Phase 12.7 で `StrBuf[R]` を追加** — region 内可変文字列バッファ。
 `Vec[R, T]` と同じ construction-time binding パターンで動く:
@@ -658,7 +658,7 @@ strbuf_new ()                    // 型: StrBuf[__heap] (default region)
 ```
 
 API: `strbuf_new`, `strbuf_push`, `strbuf_to_str`, `strbuf_len`。polymorphic
-`len` も StrBuf に効く。実例は [`examples/strbuf_basics.lang`](../examples/strbuf_basics.lang)。
+`len` も StrBuf に効く。実例は [`examples/strbuf_basics.mere`](../examples/strbuf_basics.mere)。
 
 現状 (Phase 12.7) の制約:
 - **インタプリタ専用** — 3 backend codegen は Vec / OwnedVec / StrBuf の
@@ -670,7 +670,7 @@ API: `strbuf_new`, `strbuf_push`, `strbuf_to_str`, `strbuf_len`。polymorphic
 設計 Q-010 の全貌は [aidocs/projects/lang/13_region_std_types.md](https://github.com/284km/aidocs/blob/main/projects/lang/13_region_std_types.md)
 を参照 (private repo)。
 
-動く実例: [`examples/vec_basics.lang`](../examples/vec_basics.lang)。
+動く実例: [`examples/vec_basics.mere`](../examples/vec_basics.mere)。
 
 ## 11. ブロック式 (副作用シーケンス)
 
@@ -686,12 +686,12 @@ API: `strbuf_new`, `strbuf_push`, `strbuf_to_str`, `strbuf_len`。polymorphic
 
 ## 11.5. REPL を使う
 
-`lang-ml -r` で対話起動。multi-line 入力、code frame 付き型エラー、env
+`mere -r` で対話起動。multi-line 入力、code frame 付き型エラー、env
 管理コマンドが揃っている。
 
 ```
-$ lang-ml -r
-lang-ml REPL. Type :help for commands, :quit to exit.
+$ mere -r
+mere REPL. Type :help for commands, :quit to exit.
 
 > let rec fact = fn n ->
 ..>   if n < 1 then 1
@@ -723,42 +723,42 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 ## 12. 動く実例を読む
 
 `examples/` から:
-- **`factorial.lang`** — 単純な再帰
-- **`fibonacci.lang`** — 同上
-- **`fizzbuzz.lang`** — 演算子・条件分岐
-- **`options.lang`** — sum types + match
-- **`list_literal.lang`** — list 構文糖 + 再帰
-- **`records.lang`** — record + パターン
-- **`signature.lang`** — signature alias
-- **`mutual_rec.lang`** — `let rec ... and ...`
-- **`pipe.lang`** — `|>` `<<` `>>` 連結
-- **`word_count.lang`** — file I/O + str_count を使った `wc` 風スクリプト
-- **`json_parser.lang`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + escape + エラー、文字 dispatch 含む)
-- **`csv_parser.lang`** — 110 行で完動する CSV パーサ (RFC 4180 縮小版、quoted field + `""` escape + 空 field + file round-trip)
-- **`mini_calc.lang`** — 160 行の式評価器 (算術 + 括弧 + 単項マイナス + let バインディング + 変数 + env-based eval、shadowing 動作)
-- **`list_lib.lang`** — Lang 自身で実装した list ユーティリティ集 (map/filter/fold_left/fold_right/length/rev/take/drop/range/replicate/for_all/any)、stdlib に builtin として入れない哲学の見本
-- **`module_basic.lang`** — `module M { ... }` + qualified 参照 `M.f` のミニ実例
-- **`lib_list_ops.lang`** + **`import_demo.lang`** — decls-only ライブラリと、それを `import "path";` で取り込む側のペア
+- **`factorial.mere`** — 単純な再帰
+- **`fibonacci.mere`** — 同上
+- **`fizzbuzz.mere`** — 演算子・条件分岐
+- **`options.mere`** — sum types + match
+- **`list_literal.mere`** — list 構文糖 + 再帰
+- **`records.mere`** — record + パターン
+- **`signature.mere`** — signature alias
+- **`mutual_rec.mere`** — `let rec ... and ...`
+- **`pipe.mere`** — `|>` `<<` `>>` 連結
+- **`word_count.mere`** — file I/O + str_count を使った `wc` 風スクリプト
+- **`json_parser.mere`** — 140 行で完動する JSON パーサ (atoms + array + object + ネスト + escape + エラー、文字 dispatch 含む)
+- **`csv_parser.mere`** — 110 行で完動する CSV パーサ (RFC 4180 縮小版、quoted field + `""` escape + 空 field + file round-trip)
+- **`mini_calc.mere`** — 160 行の式評価器 (算術 + 括弧 + 単項マイナス + let バインディング + 変数 + env-based eval、shadowing 動作)
+- **`list_lib.mere`** — Mere 自身で実装した list ユーティリティ集 (map/filter/fold_left/fold_right/length/rev/take/drop/range/replicate/for_all/any)、stdlib に builtin として入れない哲学の見本
+- **`module_basic.mere`** — `module M { ... }` + qualified 参照 `M.f` のミニ実例
+- **`lib_list_ops.mere`** + **`import_demo.mere`** — decls-only ライブラリと、それを `import "path";` で取り込む側のペア
 - **`repl_session.md`** — REPL の使い方を対話セッション形式で示したドキュメント
-- **`borrow_modes.lang`** — 4 種類の借用注釈 (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) を組み合わせて使うデモ
-- **`borrow_modes_typeerror.lang`** — borrow mode mismatch が型エラーで捕捉される様子 (意図的に失敗する demo)
-- **`borrow_conflict.lang`** — borrow checker (Phase 11.4) が同一変数への衝突 borrow を拒否する demo (意図的に失敗)
-- **`vec_basics.lang`** — `'a Vec` の基本操作 + region 配置 (Phase 12.1)
-- **`vec_vs_owned_vec.lang`** — `Vec[R, T]` (region) vs `OwnedVec[T]` (heap, Drop) の対比 demo (Phase 12.5)
-- **`strbuf_basics.lang`** — `StrBuf[R]` の基本操作 + region 配置 (Phase 12.7)
-- **`vec_higher_order.lang`** — `vec_iter` / `vec_map` / `vec_fold` / `vec_set` の高階 API デモ (Phase 12.9)
-- **`map_basics.lang`** — `Map[R, K, V]` の基本操作 + region 配置 (Phase 12.10)
-- **`module_nested.lang`** — 入れ子 module (`M.N.f`) + `open M;` のデモ (Phase 9.3)
+- **`borrow_modes.mere`** — 4 種類の借用注釈 (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) を組み合わせて使うデモ
+- **`borrow_modes_typeerror.mere`** — borrow mode mismatch が型エラーで捕捉される様子 (意図的に失敗する demo)
+- **`borrow_conflict.mere`** — borrow checker (Phase 11.4) が同一変数への衝突 borrow を拒否する demo (意図的に失敗)
+- **`vec_basics.mere`** — `'a Vec` の基本操作 + region 配置 (Phase 12.1)
+- **`vec_vs_owned_vec.mere`** — `Vec[R, T]` (region) vs `OwnedVec[T]` (heap, Drop) の対比 demo (Phase 12.5)
+- **`strbuf_basics.mere`** — `StrBuf[R]` の基本操作 + region 配置 (Phase 12.7)
+- **`vec_higher_order.mere`** — `vec_iter` / `vec_map` / `vec_fold` / `vec_set` の高階 API デモ (Phase 12.9)
+- **`map_basics.mere`** — `Map[R, K, V]` の基本操作 + region 配置 (Phase 12.10)
+- **`module_nested.mere`** — 入れ子 module (`M.N.f`) + `open M;` のデモ (Phase 9.3)
 
 REPL で対話的に試したいときは:
 ```sh
-lang-ml -r
+mere -r
 ```
 
 ## 13. ネイティブコンパイル (C / LLVM / Wasm の 3 backend)
 
-Lang プログラムは 3 つの backend で codegen できる。すべて feature parity
-で動き、同じ Lang ソースから 3 種のネイティブ / portable バイナリを出せる。
+Mere プログラムは 3 つの backend で codegen できる。すべて feature parity
+で動き、同じ Mere ソースから 3 種のネイティブ / portable バイナリを出せる。
 
 | flag | backend | 出力 |
 |---|---|---|
@@ -766,10 +766,10 @@ Lang プログラムは 3 つの backend で codegen できる。すべて featu
 | `-ll` / `-lle` | LLVM IR | `llc` + `clang` で native binary 化 |
 | `-w` / `-we` | Wasm (WAT) | `wat2wasm` で `.wasm`、Node.js などで実行 |
 
-`*.lang` ファイルから C を出す例:
+`*.mere` ファイルから C を出す例:
 
 ```sh
-lang-ml -ce 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10' > fact.c
+mere -ce 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10' > fact.c
 clang fact.c -o fact
 ./fact   # → 3628800
 ```
@@ -778,11 +778,11 @@ clang fact.c -o fact
 
 ```sh
 # closure + 高階関数
-lang-ml -ce 'let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10' > a.c
+mere -ce 'let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10' > a.c
 clang a.c -o a && ./a   # → 15
 
 # 多相 variant + 再帰 + pattern match
-lang-ml -ce "type 'a list = Nil | Cons of 'a * 'a list;
+mere -ce "type 'a list = Nil | Cons of 'a * 'a list;
   let rec sum = fn xs -> match xs with
     | Nil -> 0
     | Cons (h, t) -> h + sum t
@@ -790,7 +790,7 @@ lang-ml -ce "type 'a list = Nil | Cons of 'a * 'a list;
 clang sum.c -o sum && ./sum   # → 6
 
 # show 汎用 builtin + list 表示
-lang-ml -ce "type 'a list = Nil | Cons of 'a * 'a list;
+mere -ce "type 'a list = Nil | Cons of 'a * 'a list;
   print (show [1, 2, 3])" > sh.c
 clang sh.c -o sh && ./sh   # → [1, 2, 3]
 ```
@@ -799,16 +799,16 @@ LLVM / Wasm 用は flag を差し替え:
 
 ```sh
 # LLVM IR → native
-lang-ml -ll examples/factorial.lang | llc - -o fact.s && clang fact.s -o fact
+mere -ll examples/factorial.mere | llc - -o fact.s && clang fact.s -o fact
 
 # Wasm (WAT)
-lang-ml -w examples/factorial.lang > fact.wat
+mere -w examples/factorial.mere > fact.wat
 wat2wasm fact.wat -o fact.wasm    # 別途 wabt が必要
 ```
 
 詳細は [codegen.md](codegen.md) を参照。
 
-interpreter モード (`lang-ml file.lang`) と codegen の出力は同じプログラム
+interpreter モード (`mere file.mere`) と codegen の出力は同じプログラム
 なら一致する (`[1, 2, 3]` 等の整形も同じ)。3 backend は feature parity で、
 int / 関数 / 文字列 / tuple / record / variant / closure / 多相 / 再帰 variant /
 複雑 pattern / show / region / view / `with` Drop / list pretty-print まで

@@ -1,4 +1,4 @@
-open Lang_ml
+open Mere
 
 let pass = ref 0
 let fail = ref 0
@@ -1571,7 +1571,7 @@ let () =
   check "write_file type"
     (Pipeline.type_of "write_file") "(str -> (str -> unit))";
   check "file round-trip"
-    (let path = Filename.temp_file "lang_ml_test" ".txt" in
+    (let path = Filename.temp_file "mere_test" ".txt" in
      Pipeline.process
        (Printf.sprintf
           "{ write_file %S \"hello lang\"; read_file %S }" path path))

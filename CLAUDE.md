@@ -1,6 +1,6 @@
-# lang-ml への指示
+# mere への指示
 
-新プログラミング言語 (仮称 Lang) の OCaml 実装。
+新プログラミング言語 (Mere) の OCaml 実装。
 
 ## 設計コンテキスト
 
@@ -18,8 +18,8 @@
 - コミットメッセージは日本語で簡潔に
 - コミットに Co-Authored-By を含めない
 - private リポなので個人情報・秘密情報の混入は警戒する (将来 public 化の可能性あり)
-- OCaml モジュール名は `Lang_ml.*` (lang-ml のハイフンを underscore 化)
+- OCaml モジュール名は `Lang_ml.*` (mere のハイフンを underscore 化)
 
 ## 着手予定
 
-最初に通すべきは「最小の Lang 式を一行通す」ところ。trial (`aidocs/projects/lang/trials/ocaml-expr/`) の構造を雛形にしつつ、Lang 本来の構文に合わせて拡張する。
+最初に通すべきは「最小の Mere 式を一行通す」ところ。trial (`aidocs/projects/lang/trials/ocaml-expr/`) の構造を雛形にしつつ、Mere 本来の構文に合わせて拡張する。
