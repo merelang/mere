@@ -666,6 +666,11 @@ let builtin_vec_len =
     | V_vec arr -> V_int (Array.length !arr)
     | _ -> failwith "vec_len: expected Vec")
 
+(* Vec の高階 API (Phase 12.9) は apply_value_ref が必要なため、
+   apply_value_ref 定義のあとに配置 (`builtin_vec_iter` etc. を後述)。
+   in-place mutation の `vec_set` は apply_value_ref 不要だが、Phase 12.9
+   グループとして同じ場所に置く。 *)
+
 (* OwnedVec[T] (Phase 12.5) — runtime は V_vec を共有。型システム上だけ
    別型として扱われる。`Vec[R, T]` との対比は、OwnedVec が Drop 型として
    登録されていて region に置けない点で表現される。 *)
@@ -783,6 +788,57 @@ let builtin_try_or =
     V_builtin ("try_or_partial", fun default ->
       try !apply_value_ref f V_unit
       with Eval_error _ -> default))
+
+(* Phase 12.9: Vec の高階 API (iter / map / fold / set)。
+   apply_value_ref を介して user functions (V_closure / V_builtin) を呼ぶ。 *)
+let builtin_vec_iter =
+  V_builtin ("vec_iter", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_iter_p1", fun f ->
+        Array.iter (fun x -> ignore (!apply_value_ref f x)) !arr;
+        V_unit)
+    | _ -> failwith "vec_iter: expected Vec")
+
+let builtin_vec_map =
+  V_builtin ("vec_map", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_map_p1", fun f ->
+        let mapped = Array.map (fun x -> !apply_value_ref f x) !arr in
+        V_vec (ref mapped))
+    | _ -> failwith "vec_map: expected Vec")
+
+let builtin_vec_fold =
+  V_builtin ("vec_fold", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_fold_p1", fun init ->
+        V_builtin ("vec_fold_p2", fun f ->
+          Array.fold_left (fun acc x ->
+            let acc_x = !apply_value_ref f acc in
+            !apply_value_ref acc_x x
+          ) init !arr))
+    | _ -> failwith "vec_fold: expected Vec")
+
+let builtin_vec_set =
+  V_builtin ("vec_set", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_set_p1", fun idx ->
+        V_builtin ("vec_set_p2", fun new_val ->
+          match idx with
+          | V_int i ->
+            if i < 0 || i >= Array.length !arr then
+              raise (Eval_error (Loc.dummy,
+                Printf.sprintf "vec_set: index %d out of bounds (len = %d)"
+                  i (Array.length !arr)))
+            else begin
+              (!arr).(i) <- new_val;
+              V_unit
+            end
+          | _ -> failwith "vec_set: expected int index"))
+    | _ -> failwith "vec_set: expected Vec")
 
 let builtin_iter_n =
   V_builtin ("iter_n", fun n_val ->
@@ -1115,6 +1171,10 @@ let initial_env : env =
     ("vec_push", ref builtin_vec_push);
     ("vec_get",  ref builtin_vec_get);
     ("vec_len",  ref builtin_vec_len);
+    ("vec_iter", ref builtin_vec_iter);
+    ("vec_map",  ref builtin_vec_map);
+    ("vec_fold", ref builtin_vec_fold);
+    ("vec_set",  ref builtin_vec_set);
     ("owned_vec_new",  ref builtin_owned_vec_new);
     ("owned_vec_push", ref builtin_owned_vec_push);
     ("owned_vec_get",  ref builtin_owned_vec_get);

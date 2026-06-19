@@ -550,6 +550,66 @@ let vec_len_scheme =
    synthetic `__heap`). *)
 let () = Hashtbl.replace types "Vec" 2
 
+(* --- Vec の高階 API (Phase 12.9) ---
+   region-polymorphic、element-type-polymorphic な schemes。
+     vec_iter : forall R T. Vec[R, T] -> (T -> unit) -> unit
+     vec_map  : forall R T U. Vec[R, T] -> (T -> U) -> Vec[R, U]
+     vec_fold : forall R T U. Vec[R, T] -> U -> (U -> T -> U) -> U
+     vec_set  : forall R T. Vec[R, T] -> int -> T -> unit *)
+let _vec_iter_elem = fresh_var ()
+let _vec_iter_region = fresh_var ()
+let vec_iter_scheme =
+  let aid = match _vec_iter_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_iter_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_iter_region; _vec_iter_elem]),
+      Ast.TyArrow (
+        Ast.TyArrow (_vec_iter_elem, Ast.TyUnit),
+        Ast.TyUnit)) }
+
+let _vec_map_t = fresh_var ()
+let _vec_map_u = fresh_var ()
+let _vec_map_region = fresh_var ()
+let vec_map_scheme =
+  let tid = match _vec_map_t with Ast.TyVar v -> v.id | _ -> assert false in
+  let uid = match _vec_map_u with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_map_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [tid; uid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_map_region; _vec_map_t]),
+      Ast.TyArrow (
+        Ast.TyArrow (_vec_map_t, _vec_map_u),
+        Ast.TyCon ("Vec", [_vec_map_region; _vec_map_u]))) }
+
+let _vec_fold_t = fresh_var ()
+let _vec_fold_u = fresh_var ()
+let _vec_fold_region = fresh_var ()
+let vec_fold_scheme =
+  let tid = match _vec_fold_t with Ast.TyVar v -> v.id | _ -> assert false in
+  let uid = match _vec_fold_u with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_fold_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [tid; uid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_fold_region; _vec_fold_t]),
+      Ast.TyArrow (
+        _vec_fold_u,
+        Ast.TyArrow (
+          Ast.TyArrow (_vec_fold_u,
+            Ast.TyArrow (_vec_fold_t, _vec_fold_u)),
+          _vec_fold_u))) }
+
+let _vec_set_elem = fresh_var ()
+let _vec_set_region = fresh_var ()
+let vec_set_scheme =
+  let aid = match _vec_set_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_set_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_set_region; _vec_set_elem]),
+      Ast.TyArrow (Ast.TyInt,
+        Ast.TyArrow (_vec_set_elem, Ast.TyUnit))) }
+
 (* --- OwnedVec[T] (Phase 12.5, Q-010 narrowed → 設計 (b) 別型分離) ---
    `OwnedVec[T]` は heap-allocated, Drop あり vector。`Vec[R, T]`
    (region 内、Trivial) と対照的に、Drop 型として登録されるので
@@ -748,6 +808,10 @@ let initial_env : env =
     ("mk_metrics", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Metrics", []))));
     (* Vec builtins (Phase 12.1) *)
     ("vec_new",    vec_new_scheme);
+    ("vec_iter",   vec_iter_scheme);
+    ("vec_map",    vec_map_scheme);
+    ("vec_fold",   vec_fold_scheme);
+    ("vec_set",    vec_set_scheme);
     ("owned_vec_new",  owned_vec_new_scheme);
     ("owned_vec_push", owned_vec_push_scheme);
     ("owned_vec_get",  owned_vec_get_scheme);

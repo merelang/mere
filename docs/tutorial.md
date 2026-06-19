@@ -469,6 +469,30 @@ region R {
 動く対比 demo は [`examples/vec_vs_owned_vec.lang`](../examples/vec_vs_owned_vec.lang)。
 内部実装は両者とも同じ可変配列 — 型システム上の区別のみ。
 
+**Phase 12.9 で Vec の高階 API** — `vec_iter` / `vec_map` / `vec_fold` /
+`vec_set`。`vec_map` の結果 Vec は source と同じ region に置かれる
+(region-preserving):
+
+```
+let xs = vec_new () in
+{
+  vec_push xs 1; vec_push xs 2; vec_push xs 3;
+  let squared = vec_map xs (fn x -> x * x) in    // Vec[R, int]
+  let sum = vec_fold xs 0 (fn acc -> fn x -> acc + x) in  // 6
+  vec_set xs 1 99;                                // in-place mutation
+  vec_iter xs (fn x -> print (show x))            // side effect
+}
+```
+
+| API | 型 |
+|---|---|
+| `vec_iter` | `Vec[R, T] -> (T -> unit) -> unit` |
+| `vec_map` | `Vec[R, T] -> (T -> U) -> Vec[R, U]` |
+| `vec_fold` | `Vec[R, T] -> U -> (U -> T -> U) -> U` |
+| `vec_set` | `Vec[R, T] -> int -> T -> unit` |
+
+実例: [`examples/vec_higher_order.lang`](../examples/vec_higher_order.lang)。
+
 **Phase 12.7 で `StrBuf[R]` を追加** — region 内可変文字列バッファ。
 `Vec[R, T]` と同じ construction-time binding パターンで動く:
 
@@ -575,6 +599,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`vec_basics.lang`** — `'a Vec` の基本操作 + region 配置 (Phase 12.1)
 - **`vec_vs_owned_vec.lang`** — `Vec[R, T]` (region) vs `OwnedVec[T]` (heap, Drop) の対比 demo (Phase 12.5)
 - **`strbuf_basics.lang`** — `StrBuf[R]` の基本操作 + region 配置 (Phase 12.7)
+- **`vec_higher_order.lang`** — `vec_iter` / `vec_map` / `vec_fold` / `vec_set` の高階 API デモ (Phase 12.9)
 
 REPL で対話的に試したいときは:
 ```sh

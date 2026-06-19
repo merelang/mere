@@ -1357,6 +1357,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.Var name ->
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
+       || name = "vec_iter" || name = "vec_map"
+       || name = "vec_fold" || name = "vec_set"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
