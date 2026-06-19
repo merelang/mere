@@ -16,7 +16,9 @@
      :quit | :q       exit REPL
      :type EXPR       print the inferred type of EXPR
      :env             list current bindings with their types
+     :show NAME       show one binding's type AND value
      :load FILE       load decls from FILE into the REPL env
+     :reset           clear all user bindings (back to builtin env)
      :help | :h       show help
 *)
 
@@ -25,7 +27,9 @@ let help_text =
   \  :quit | :q       exit\n\
   \  :type EXPR       show inferred type of EXPR\n\
   \  :env             list current bindings with their types\n\
+  \  :show NAME       show one binding's type AND value\n\
   \  :load FILE       load decls from FILE into the REPL env\n\
+  \  :reset           clear all user bindings (back to builtin env)\n\
   \  :help | :h       this help\n\
    Multi-line: if input is incomplete, you'll get a `..>` continuation\n\
    prompt. Press Enter on a blank `..>` line to abort the buffer.\n\
@@ -215,6 +219,29 @@ let print_env type_env =
     Printf.printf "val %s : %s\n" n (Ast.pp_ty sch.Typer.body)
   ) bs
 
+(* `:show NAME` — render one binding's type AND its current value. The
+   value side uses `Eval.to_string` (same formatter as expression results
+   in the main loop). Function values come out as `<closure:param>` /
+   `<builtin:name>`; everything else round-trips to readable Lang syntax.
+   Returns the message string (no I/O) so callers / tests can consume it. *)
+let format_show eval_env type_env name =
+  match List.assoc_opt name type_env with
+  | None -> Printf.sprintf "unbound name: %s" name
+  | Some sch ->
+    let head = Printf.sprintf "val %s : %s" name (Ast.pp_ty sch.Typer.body) in
+    (match List.assoc_opt name eval_env with
+     | None -> head
+     | Some r ->
+       Printf.sprintf "%s\n  = %s" head (Eval.to_string !r))
+
+let print_show eval_env type_env name =
+  print_endline (format_show eval_env type_env name)
+
+(* Reset both envs to their initial (builtin-only) state. *)
+let do_reset eval_env type_env =
+  eval_env := Eval.initial_env;
+  type_env := Typer.initial_env
+
 let handle_load eval_env type_env path =
   let source =
     try In_channel.with_open_text path In_channel.input_all
@@ -295,6 +322,17 @@ let run () =
       end
       else if trimmed = ":env" then begin
         print_env !type_env;
+        loop ()
+      end
+      else if trimmed = ":reset" then begin
+        do_reset eval_env type_env;
+        print_endline "(envs reset)";
+        loop ()
+      end
+      else if starts_with ":show " trimmed then begin
+        let name = String.trim (String.sub trimmed 6 (String.length trimmed - 6)) in
+        if name = "" then print_endline "usage: :show NAME"
+        else print_show !eval_env !type_env name;
         loop ()
       end
       else if starts_with ":type " trimmed then begin

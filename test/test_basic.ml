@@ -3722,5 +3722,29 @@ let () =
   check "repl: :env on initial env → no user bindings"
     (string_of_int (List.length no_user_names)) "0";
 
+  (* --- Phase 8.2: :show and :reset --- *)
+  let mk_envs () =
+    let eenv = ref Eval.initial_env in
+    let tenv = ref Typer.initial_env in
+    (* Bind `x = 42 : int` and `g = "hi" : str` for show/reset tests. *)
+    eenv := ("g", ref (Eval.V_str "hi")) :: ("x", ref (Eval.V_int 42)) :: !eenv;
+    tenv := ("g", Typer.mono Ast.TyStr) :: ("x", Typer.mono Ast.TyInt) :: !tenv;
+    (eenv, tenv)
+  in
+  let (eenv, tenv) = mk_envs () in
+  check "repl: :show on int binding shows type + value"
+    (Repl.format_show !eenv !tenv "x") "val x : int\n  = 42";
+  check "repl: :show on str binding quotes the value"
+    (Repl.format_show !eenv !tenv "g") "val g : str\n  = \"hi\"";
+  check "repl: :show on unknown name reports unbound"
+    (Repl.format_show !eenv !tenv "nope") "unbound name: nope";
+
+  Repl.do_reset eenv tenv;
+  check "repl: :reset → user bindings empty"
+    (string_of_int (List.length (Repl.user_bindings !tenv))) "0";
+  check "repl: :reset → eval env back to initial length"
+    (string_of_int (List.length !eenv))
+    (string_of_int (List.length Eval.initial_env));
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
