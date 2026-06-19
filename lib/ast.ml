@@ -163,10 +163,14 @@ let pp_ty t =
        form to match user-facing syntax. *)
     | TyCon (name, [TyRef (_, r, TyUnit); t]) ->
       name ^ "[" ^ r ^ ", " ^ aux t ^ "]"
+    | TyCon (name, [TyRef (_, r, TyUnit); k; v]) ->
+      name ^ "[" ^ r ^ ", " ^ aux k ^ ", " ^ aux v ^ "]"
     | TyCon (name, [region_tv; t]) when name = "Vec" ->
       name ^ "[" ^ aux region_tv ^ ", " ^ aux t ^ "]"
     | TyCon (name, [region_tv]) when name = "StrBuf" ->
       name ^ "[" ^ aux region_tv ^ "]"
+    | TyCon (name, [region_tv; k; v]) when name = "Map" ->
+      name ^ "[" ^ aux region_tv ^ ", " ^ aux k ^ ", " ^ aux v ^ "]"
     | TyCon (name, [a]) -> aux a ^ " " ^ name
     | TyCon (name, args) ->
       "(" ^ String.concat ", " (List.map aux args) ^ ") " ^ name
