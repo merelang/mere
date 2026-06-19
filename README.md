@@ -136,7 +136,8 @@ lang-ml/
 - `05_effect_system.md` — capability passing
 - `OPEN_QUESTIONS.md` — Q-001〜Q-011 全 resolved / narrowed
 - `implementation_status.md` — slice ごとの進捗
-- `SUMMARY.md` — Phase 1〜9 の到達点を外向けに集約
+- `SUMMARY.md` — 到達点を外向けに集約
+- `DEFERRED.md` — 後回しにした実装項目の一覧 (codegen / borrow checker 精緻化 / trait システム等)
 - `11_region_vs_arena.md` 〜 `14_view_types.md` — メモリモデル deep dive
 
 ## 名前について
