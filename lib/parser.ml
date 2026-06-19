@@ -24,6 +24,13 @@ let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
    qualified name (Var "M.x") rather than a field access on M. *)
 let module_names : (string, unit) Hashtbl.t = Hashtbl.create 4
 
+(* Import registry: file path -> ().  Populated when `import "path";` is
+   processed; consumed to skip subsequent imports of the same file
+   (cycle guard). Paths are stored as given by the source (no
+   canonicalisation in slice 1 — symlinks / different relative forms
+   of the same file would each re-import). *)
+let imported_files : (string, unit) Hashtbl.t = Hashtbl.create 4
+
 (* Region name stack — pushed when entering a `region NAME { ... }` body
    and popped on exit. Used to recognize `R.alloc(expr)` as sugar for
    `&R expr` only when R is a lexically-enclosing region (so existing
@@ -69,9 +76,12 @@ let is_primitive_type_name = function
   | "int" | "float" | "bool" | "str" | "unit" -> true
   | _ -> false
 
-let parse_program tokens =
+let rec parse_program_internal tokens =
   let open Lexer in
-  (* Reset transient parser state so failed earlier parses don't leak. *)
+  (* Reset transient parser state so failed earlier parses don't leak.
+     `imported_files` is NOT reset here — the outer `parse_program`
+     wrapper resets it once per top-level parse so the cycle guard
+     accumulates across recursive imports within a single program. *)
   region_stack := [];
   let mk loc node = Ast.{ loc; ty = None; node } in
   let mkp loc node = Ast.{ ploc = loc; pnode = node } in
@@ -972,6 +982,33 @@ let parse_program tokens =
   in
   let rec parse_decls decls toks =
     match toks with
+    | (pos, T_import) :: (_, T_string path) :: (_, T_semi) :: rest ->
+      (* `import "path";` — read the file, recursively parse its decls,
+         and splice them into the current decl stream. Skip if the
+         same path has been imported already (cycle guard). Parser
+         registries (constructors, records, module_names, aliases) are
+         shared across the recursive call, so imported types are
+         visible to the importer. *)
+      let _ = pos in
+      if Hashtbl.mem imported_files path then
+        parse_decls decls rest
+      else begin
+        Hashtbl.replace imported_files path ();
+        let source =
+          try In_channel.with_open_text path In_channel.input_all
+          with Sys_error msg ->
+            raise (Parse_error (pos, "import: " ^ msg))
+        in
+        let toks_imp = Lexer.tokenize source in
+        let prog_imp = parse_program_internal toks_imp in
+        (* Imported file's main expression is discarded (decls-only is
+           the recommended form). We prepend its decls newest-first so
+           the final List.rev yields the correct source order. *)
+        let decls' = List.rev_append prog_imp.Ast.decls decls in
+        parse_decls decls' rest
+      end
+    | (pos, T_import) :: _ ->
+      raise (Parse_error (pos, "expected `import \"path\";`"))
     | (pos, T_module) :: (_, T_ident m_name) :: (_, T_lbrace) :: rest ->
       (* Register the module name BEFORE parsing the body so qualified
          self-references like `M.foo` inside the module resolve
@@ -1177,6 +1214,14 @@ let parse_program tokens =
       finish decls main toks
   in
   parse_decls [] tokens
+
+(* Public entry-point: clear the per-program import accumulator, then
+   delegate to the recursive worker. Inside the worker, `import` calls
+   `parse_program_internal` directly so the cycle guard survives the
+   recursion. *)
+let parse_program tokens =
+  Hashtbl.reset imported_files;
+  parse_program_internal tokens
 
 let parse tokens =
   let prog = parse_program tokens in

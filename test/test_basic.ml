@@ -3784,5 +3784,60 @@ let () =
         };\n\
         M.id_v 7") "7";
 
+  (* --- Phase 9.2: import "path" --- *)
+  let write_file path content =
+    let oc = open_out path in
+    output_string oc content;
+    close_out oc
+  in
+  let lib_path = Filename.temp_file "lang_import_lib" ".lang" in
+  write_file lib_path
+    "let helper = fn x -> x * 3;\nlet base = 7;\n";
+  check "import: pulls in let bindings"
+    (Pipeline.process
+       (Printf.sprintf "import %S;\nhelper base" lib_path)) "21";
+
+  let modlib_path = Filename.temp_file "lang_import_mod" ".lang" in
+  write_file modlib_path
+    "module Math {\n  let dbl = fn x -> x * 2;\n  let sq = fn x -> x * x;\n};\n";
+  check "import: pulls in modules"
+    (Pipeline.process
+       (Printf.sprintf "import %S;\nMath.sq (Math.dbl 5)" modlib_path)) "100";
+
+  (* Cycle: two files import each other. The cycle guard should let the
+     program complete (no infinite loop), and both files' bindings
+     should be visible from the entry point. *)
+  let cyc_a = Filename.temp_file "lang_import_cyc_a" ".lang" in
+  let cyc_b = Filename.temp_file "lang_import_cyc_b" ".lang" in
+  write_file cyc_a (Printf.sprintf "import %S;\nlet a_val = 10;\n" cyc_b);
+  write_file cyc_b (Printf.sprintf "import %S;\nlet b_val = 20;\n" cyc_a);
+  check "import: cycle is broken by guard (no infinite loop)"
+    (Pipeline.process
+       (Printf.sprintf "import %S;\na_val + b_val" cyc_a)) "30";
+
+  (* Diamond: lib_path imported by two intermediates AND merged main.
+     Without the guard this would double-bind `helper` (effectively
+     fine but wasteful); with the guard it's imported once. *)
+  let int_x = Filename.temp_file "lang_import_x" ".lang" in
+  let int_y = Filename.temp_file "lang_import_y" ".lang" in
+  write_file int_x (Printf.sprintf "import %S;\nlet xv = 1;\n" lib_path);
+  write_file int_y (Printf.sprintf "import %S;\nlet yv = 2;\n" lib_path);
+  check "import: diamond (same file imported via two paths)"
+    (Pipeline.process
+       (Printf.sprintf "import %S;\nimport %S;\nxv + yv + base"
+          int_x int_y)) "10";
+
+  (* The cycle guard is reset between top-level parses, so re-running a
+     program with the same imports works. *)
+  check "import: cycle guard resets between top-level parses"
+    (Pipeline.process
+       (Printf.sprintf "import %S;\nhelper base" lib_path)) "21";
+
+  (* Missing file → parse error (not silent skip). *)
+  check_raises "import: missing file raises"
+    (fun () ->
+      Pipeline.process
+        "import \"/nonexistent/path/foo.lang\";\n42");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
