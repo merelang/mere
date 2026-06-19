@@ -3544,5 +3544,39 @@ let () =
   assert_contains "diag: zero-loc falls back to single line"
     zero_loc_err "test.lang: io error: file not found";
 
+  (* --- Type error wording (Phase 7.2) ---
+     unify error reports "expected `X`, got `Y`" with the caller-side
+     argument order conventions audited to be (expected, actual). *)
+  let infer_err src =
+    try
+      let prog = Pipeline.parse_program src in
+      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+      ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "diag: + arg wrong type → expected int got str"
+    (infer_err "let x = 5 in x + \"hi\"") "expected `int`, got `str`";
+  assert_contains "diag: App passes str where int expected"
+    (infer_err "let f = fn x -> x + 1 in f \"hi\"") "expected `int`, got `str`";
+  assert_contains "diag: if branches: then sets expected"
+    (infer_err "if 1 < 2 then \"yes\" else 42") "expected `str`, got `int`";
+  let infer_err_with_decls src =
+    try
+      let prog = Pipeline.parse_program src in
+      List.iter (fun decl ->
+        match decl with
+        | Ast.Top_record (name, params, fields) ->
+          Typer.register_record name params fields
+        | Ast.Top_type (name, params, variants) ->
+          Typer.register_type name params variants
+        | _ -> ()) prog.decls;
+      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+      ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "diag: record field type mismatch"
+    (infer_err_with_decls "type WErr1 = { a: int };\nlet p = WErr1 { a = \"x\" } in p.a")
+    "expected `int`, got `str`";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
