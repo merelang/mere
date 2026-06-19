@@ -48,7 +48,7 @@ let rec unify loc t1 t2 =
       v.link <- Some t
   | _ ->
     raise (Type_error (loc, Printf.sprintf
-      "type mismatch: `%s` vs `%s`" (Ast.pp_ty t1) (Ast.pp_ty t2)))
+      "expected `%s`, got `%s`" (Ast.pp_ty t1) (Ast.pp_ty t2)))
 
 type scheme = {
   quantified : int list;
@@ -518,42 +518,44 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        raise (Type_error (e.loc, "unbound variable: " ^ name)))
   | Ast.Neg a ->
     let t = infer env a in
-    unify a.loc t Ast.TyInt;
+    unify a.loc Ast.TyInt t;
     Ast.TyInt
   | Ast.Bin (op, a, b) ->
     let ta = infer env a in
     let tb = infer env b in
     (match op with
      | Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod ->
-       unify a.loc ta Ast.TyInt;
-       unify b.loc tb Ast.TyInt;
+       unify a.loc Ast.TyInt ta;
+       unify b.loc Ast.TyInt tb;
        Ast.TyInt
      | Ast.Concat ->
-       unify a.loc ta Ast.TyStr;
-       unify b.loc tb Ast.TyStr;
+       unify a.loc Ast.TyStr ta;
+       unify b.loc Ast.TyStr tb;
        Ast.TyStr)
   | Ast.Cmp (op, a, b) ->
     let ta = infer env a in
     let tb = infer env b in
     (match op with
      | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
-       unify a.loc ta Ast.TyInt;
-       unify b.loc tb Ast.TyInt
+       unify a.loc Ast.TyInt ta;
+       unify b.loc Ast.TyInt tb
      | Ast.Eq | Ast.Ne ->
+       (* Symmetric: lhs is the "first observed" type. *)
        unify e.loc ta tb);
     Ast.TyBool
   | Ast.Logic (_, a, b) ->
     let ta = infer env a in
     let tb = infer env b in
-    unify a.loc ta Ast.TyBool;
-    unify b.loc tb Ast.TyBool;
+    unify a.loc Ast.TyBool ta;
+    unify b.loc Ast.TyBool tb;
     Ast.TyBool
   | Ast.If (cond, then_, else_) ->
     let tc = infer env cond in
-    unify cond.loc tc Ast.TyBool;
+    unify cond.loc Ast.TyBool tc;
     let tt = infer env then_ in
     let te = infer env else_ in
-    unify else_.loc te tt;
+    (* `then` branch sets the expected type; `else` must match. *)
+    unify else_.loc tt te;
     tt
   | Ast.Let (pat, value, body) ->
     let tv = infer env value in
@@ -630,7 +632,8 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     (match ty_opt with
      | Some t ->
        let t', _ = freshen_params t in
-       unify e.loc alpha t'
+       (* User-supplied annotation is the expected type. *)
+       unify e.loc t' alpha
      | None -> ());
     let tb = infer ((param, mono alpha) :: env) body in
     Ast.TyArrow (alpha, tb)
@@ -638,12 +641,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let tf = infer env f in
     let ta = infer env arg in
     let result = fresh_var () in
+    (* fn position must be an arrow; tf carries the declared param/return
+       types (so message reads "expected <param>, got <arg type>"). *)
     unify e.loc tf (Ast.TyArrow (ta, result));
     result
   | Ast.Annot (inner, t) ->
     let t', _ = freshen_params t in
     let ti = infer env inner in
-    unify e.loc ti t';
+    (* Annotation declares the expected type. *)
+    unify e.loc t' ti;
     t'
   | Ast.Constr (name, arg_opt) ->
     let info =
@@ -656,7 +662,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
      | None, None -> result_ty
      | Some exp, Some arg ->
        let ta = infer env arg in
-       unify arg.loc ta exp;
+       unify arg.loc exp ta;
        result_ty
      | None, Some _ ->
        raise (Type_error (e.loc,
@@ -675,9 +681,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        | None -> ()
        | Some g ->
          let tg = infer env' g in
-         unify g.Ast.loc tg Ast.TyBool);
+         unify g.Ast.loc Ast.TyBool tg);
       let tb = infer env' branch in
-      unify branch.loc tb result_var
+      (* Result var collects each arm's type; first arm sets the
+         "expected" for subsequent arms. *)
+      unify branch.loc result_var tb
     ) arms;
     result_var
   | Ast.Tuple es ->
@@ -712,7 +720,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        List.iter (fun (fname, fexpr) ->
          let exp_ty = List.assoc fname expected_fields in
          let t = infer env fexpr in
-         unify fexpr.loc t exp_ty
+         unify fexpr.loc exp_ty t
        ) fields;
        (* Trivial[R] for view: no field may have a Drop type since the view
           is constructed in the region. *)
@@ -747,7 +755,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        List.iter (fun (fname, fexpr) ->
          let exp_ty = List.assoc fname expected_fields in
          let t = infer env fexpr in
-         unify fexpr.loc t exp_ty
+         unify fexpr.loc exp_ty t
        ) fields;
        result_ty)
   | Ast.Field_get (inner, fname) ->
@@ -769,7 +777,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
      | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
        let info = Hashtbl.find records rec_name in
        let (expected_fields, result_ty) = instantiate_record rec_name info in
-       unify inner.loc t_inner result_ty;
+       unify inner.loc result_ty t_inner;
        (try List.assoc fname expected_fields
         with Not_found ->
           raise (Type_error (e.loc,
@@ -794,13 +802,13 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
          in
          let exp_ty = subst_region vinfo.v_region_param region raw_ty in
          let t = infer env fexpr in
-         unify fexpr.loc t exp_ty
+         unify fexpr.loc exp_ty t
        ) updates;
        t_view
      | Ast.TyCon (rec_name, _) when Hashtbl.mem records rec_name ->
        let info = Hashtbl.find records rec_name in
        let (expected_fields, result_ty) = instantiate_record rec_name info in
-       unify base.loc t_base result_ty;
+       unify base.loc result_ty t_base;
        List.iter (fun (fname, fexpr) ->
          let exp_ty =
            try List.assoc fname expected_fields
@@ -809,7 +817,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
                Printf.sprintf "record %s has no field %s" rec_name fname))
          in
          let t = infer env fexpr in
-         unify fexpr.loc t exp_ty
+         unify fexpr.loc exp_ty t
        ) updates;
        result_ty
      | _ ->
