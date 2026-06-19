@@ -3660,5 +3660,28 @@ let () =
     (infer_err "(1, 2) + 3")
     "use `show";
 
+  (* --- Phase 7.7: hint expansion --- *)
+  assert_contains "hint: bool where int expected → suggest if/then/else"
+    (infer_err "true + 1")
+    "use `if b then 1 else 0`";
+  assert_contains "hint: tuple arity mismatch → say lengths differ"
+    (infer_err
+       "let f = fn t -> match t with | (a, b) -> a + b in f (1, 2, 3)")
+    "tuple lengths differ";
+  assert_contains "hint: extra argument → expected a function"
+    (infer_err "let inc = fn x -> x + 1 in inc 3 4")
+    "expected a function";
+  assert_contains "hint: extra argument → mention too many args"
+    (infer_err "let inc = fn x -> x + 1 in inc 3 4")
+    "too many arguments";
+  assert_contains "hint: partial application → suggest missing argument"
+    (infer_err "let add = fn x -> fn y -> x + y in add 1 + 2")
+    "missing an argument";
+  assert_contains "hint: distinct named types → name both sides"
+    (infer_err_with_decls
+       "type FooN = { a : int };\ntype BarN = { a : int };\n\
+        match BarN { a = 1 } with | FooN { a = x } -> x")
+    "different named types";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

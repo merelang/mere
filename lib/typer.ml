@@ -83,19 +83,31 @@ let rec occurs id = function
   | Ast.TyRef (_, inner) -> occurs id inner
 
 (* For common primitive-type mismatches, suggest a likely fix. Returns
-   None for combinations where no obvious one-liner conversion exists. *)
+   None for combinations where no obvious one-liner conversion exists.
+   t1 = expected, t2 = actual. *)
 let type_conversion_hint (t1 : Ast.ty) (t2 : Ast.ty) : string option =
   match Ast.walk t1, Ast.walk t2 with
   | Ast.TyStr, Ast.TyInt | Ast.TyStr, Ast.TyBool ->
     Some "use `show x` to render a value as `str`"
   | Ast.TyInt, Ast.TyStr ->
     Some "use `str_len s` to get the length, or call a parser yourself"
+  | Ast.TyInt, Ast.TyBool ->
+    Some "use `if b then 1 else 0` to get an `int` from a `bool`"
   | Ast.TyBool, (Ast.TyInt | Ast.TyStr) ->
     Some "wrap in a comparison (e.g. `x == 0`) to get a `bool`"
-  | Ast.TyArrow _, _ ->
-    Some "you may be missing an argument — apply the function to a value first"
-  | _, Ast.TyArrow _ ->
-    Some "you may have passed a partially-applied function — check the arity"
+  | Ast.TyTuple ts1, Ast.TyTuple ts2 when List.length ts1 <> List.length ts2 ->
+    Some (Printf.sprintf
+            "tuple lengths differ — expected %d element(s), got %d"
+            (List.length ts1) (List.length ts2))
+  | Ast.TyArrow _, (Ast.TyInt | Ast.TyStr | Ast.TyBool | Ast.TyUnit
+                   | Ast.TyTuple _ | Ast.TyCon _) ->
+    Some "you may be passing one too many arguments (the function position was \
+          already fully applied)"
+  | (Ast.TyInt | Ast.TyStr | Ast.TyBool | Ast.TyUnit
+    | Ast.TyTuple _ | Ast.TyCon _), Ast.TyArrow _ ->
+    Some "you may be missing an argument — the function value isn't fully applied"
+  | Ast.TyCon (n1, _), Ast.TyCon (n2, _) when n1 <> n2 ->
+    Some (Printf.sprintf "these are different named types (`%s` vs `%s`)" n1 n2)
   | _ -> None
 
 let rec unify loc t1 t2 =
@@ -726,11 +738,31 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.App (f, arg) ->
     let tf = infer env f in
     let ta = infer env arg in
-    let result = fresh_var () in
-    (* fn position must be an arrow; tf carries the declared param/return
-       types (so message reads "expected <param>, got <arg type>"). *)
-    unify e.loc tf (Ast.TyArrow (ta, result));
-    result
+    (match Ast.walk tf with
+     | Ast.TyArrow (param_ty, ret_ty) ->
+       (* tf is a concrete arrow: unify param ↔ arg directly so the
+          error reads "expected <param>, got <arg>" at the arg's loc. *)
+       unify arg.loc param_ty ta;
+       ret_ty
+     | Ast.TyVar _ ->
+       (* fn type is still a free tyvar — fall back to whole-arrow unify
+          (which then specializes the tyvar to (arg → result)). *)
+       let result = fresh_var () in
+       unify e.loc tf (Ast.TyArrow (ta, result));
+       result
+     | _ ->
+       (* Calling a concrete non-arrow value — most often "extra
+          argument to a fully-applied function" or applying a literal. *)
+       let msg =
+         Printf.sprintf
+           "expected a function (`'a -> 'b`), got `%s`" (Ast.pp_ty tf)
+       in
+       let msg =
+         msg ^
+         "\nhelp: you may be passing one too many arguments (the call's \
+          left side is already a value, not a function)"
+       in
+       raise (Type_error (f.loc, msg)))
   | Ast.Annot (inner, t) ->
     let t', _ = freshen_params t in
     let ti = infer env inner in
