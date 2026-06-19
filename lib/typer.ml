@@ -1038,3 +1038,107 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
 let type_check e =
   counter := 0;
   infer initial_env e
+
+(* === Borrow checker (Phase 11.4) ===
+
+   Static check for "same value, same region, conflicting borrow modes
+   active simultaneously". Tracks `&[mode] R x` borrows where `x` is a
+   simple `Var name`; complex borrowees (`&R record.field`, literals
+   etc.) are out of scope for this slice — they don't have a stable
+   identity to conflict on.
+
+   Conflict matrix — two borrows `B1`, `B2` on the same (region, var)
+   coexist iff:
+     - both are BorrowedRead (multiple shared read)
+     - both are SharedWrite (multiple shared write, cap-internal lock)
+   Anything else conflicts (exclusive borrows + anything else, or
+   mixing shared-read with shared-write).
+
+   The checker walks the expression, threading a list of currently
+   active borrows. When entering a `Let p = (&[m] R x) in body`, the
+   new borrow is added to `body`'s active set. Borrows do not survive
+   past the `body`. Borrows introduced by free-standing `&[m] R x`
+   (not via Let) must not conflict with currently-active borrows; the
+   borrow itself ends with the expression. *)
+let borrows_compatible m1 m2 =
+  match m1, m2 with
+  | Ast.BorrowedRead, Ast.BorrowedRead -> true
+  | Ast.SharedWrite,  Ast.SharedWrite  -> true
+  | _ -> false
+
+let mode_label = function
+  | Ast.BorrowedRead -> "&R"
+  | Ast.SharedWrite -> "&shared write R"
+  | Ast.ExclusiveRead -> "&exclusive R"
+  | Ast.ExclusiveWrite -> "&mut R"
+
+(* `active` is a list of (region, var_name, mode, loc) describing
+   borrows in scope. *)
+let check_borrow_conflict active region var_name mode loc =
+  List.iter (fun (r', v', m', loc') ->
+    if r' = region && v' = var_name
+       && not (borrows_compatible mode m') then begin
+      let msg =
+        Printf.sprintf
+          "borrow conflict: `%s` is already borrowed as `%s %s` here, \
+           cannot reborrow as `%s %s`\n\
+           note: previous borrow at line %d, col %d"
+          var_name (mode_label m') var_name (mode_label mode) var_name
+          loc'.Loc.line loc'.Loc.col
+      in
+      raise (Type_error (loc, msg))
+    end
+  ) active
+
+let rec check_borrows active (e : Ast.expr) : unit =
+  let go e = check_borrows active e in
+  match e.node with
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+  | Ast.Str_lit _ | Ast.Unit_lit | Ast.Var _ -> ()
+  | Ast.Neg a -> go a
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
+    go a; go b
+  | Ast.If (c, t, el) -> go c; go t; go el
+  | Ast.App (f, a) -> go f; go a
+  | Ast.Annot (inner, _) -> go inner
+  | Ast.Constr (_, None) -> ()
+  | Ast.Constr (_, Some a) -> go a
+  | Ast.Tuple es -> List.iter go es
+  | Ast.Region_block (_, body) -> go body
+  | Ast.Fun (_, _, body) -> go body
+  | Ast.Record_lit (_, fields) -> List.iter (fun (_, e') -> go e') fields
+  | Ast.Field_get (inner, _) -> go inner
+  | Ast.Record_update (base, updates) ->
+    go base; List.iter (fun (_, e') -> go e') updates
+  | Ast.Match (scrut, arms) ->
+    go scrut;
+    List.iter (fun (_, guard, body) ->
+      Option.iter go guard; go body
+    ) arms
+  | Ast.With (_, value, body) -> go value; go body
+  | Ast.Ref (mode, region, inner) ->
+    (* The borrow itself must not conflict with any currently-active
+       borrow on the same (region, var). The borrow's lifetime ends
+       with this expression unless captured by an enclosing Let — that
+       case is handled in Ast.Let below. *)
+    (match inner.Ast.node with
+     | Ast.Var v_name ->
+       check_borrow_conflict active region v_name mode e.loc
+     | _ -> ());
+    go inner
+  | Ast.Let (pat, value, body) ->
+    check_borrows active value;
+    (* If the let-bound value is a `&[mode] R x` (x a simple Var),
+       extend the active set for the body so subsequent borrows of
+       the same x can be checked against this one. *)
+    let active' =
+      match pat.Ast.pnode, value.Ast.node with
+      | Ast.P_var _, Ast.Ref (mode, region, { node = Ast.Var v_name; _ }) ->
+        check_borrow_conflict active region v_name mode value.loc;
+        (region, v_name, mode, value.loc) :: active
+      | _ -> active
+    in
+    check_borrows active' body
+  | Ast.Let_rec (bindings, body) ->
+    List.iter (fun (_, v) -> check_borrows active v) bindings;
+    check_borrows active body
