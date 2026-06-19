@@ -138,12 +138,10 @@ let process_decl eval_env type_env decl =
     Printf.printf "drop type %s registered\n" name;
     []
 
-(* Synthesize a trailing `; ()` so inputs that only declare bind correctly. *)
-let prepare_input s =
-  let trimmed = String.trim s in
-  let len = String.length trimmed in
-  if len > 0 && trimmed.[len - 1] = ';' then trimmed ^ " ()"
-  else trimmed
+(* No-op now that the parser natively allows decls-only programs;
+   kept as an identity wrapper for backwards-compat with existing tests
+   that import `Repl.prepare_input`. *)
+let prepare_input s = String.trim s
 
 let starts_with prefix s =
   String.length s >= String.length prefix
