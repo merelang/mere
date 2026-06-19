@@ -240,6 +240,49 @@ let log_event  = fn (...ctx, evt: int)   -> log + evt;
 save_order 100 10 5 + log_event 100 10 7    // 132
 ```
 
+## 10.4. 借用注釈 (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`)
+
+`&R T` は region R の中の値への参照。**借用 mode** を付けて「どんな
+access か」を型に書ける (Phase 11.1 で導入)。
+
+| 構文 | mode | 意図 |
+|---|---|---|
+| `&R T` (省略 = default) | borrowed (shared read) | 設定値・読み取り cap |
+| `&shared write R T` | shared write | Logger・Metrics 等、複数 caller が並行書き込み (cap 内部で安全) |
+| `&exclusive R T` | exclusive read | 排他 read (稀) |
+| `&mut R T` | exclusive write | Database 接続の transaction 等、Rust の `&mut` 相当 |
+
+```
+type DbHandle = { id: int };
+
+let db_exec = fn (db: &mut R DbHandle) -> fn (sql: str) ->
+  "[exclusive] " ++ sql;
+
+region R {
+  let db = DbHandle { id = 1 } in
+  let db_ref = &mut R db in
+  db_exec db_ref "UPDATE ..."
+}
+```
+
+mode が違うと unify が拒否:
+
+```
+let db_ref = &R db in           // shared read
+db_exec db_ref "X"               // ← &mut を要求 → 型エラー
+// expected `&mut R DbHandle`, got `&R DbHandle`
+```
+
+これで設計の **Logger 問題** (`&borrowed` だと write 意図が出ない、
+`&mut` だと並行不可) が `&shared write` で型として書ける。
+
+現状 (Phase 11.1) は型として認識できる段階で、**借用機構の排他規則**
+(同じ region から `&shared` と `&exclusive` を同時取得拒否など) と
+**`&R T` を介した field access の auto-deref** は今後の slice。
+動く実例は [`examples/borrow_modes.lang`](../examples/borrow_modes.lang)、
+意図的に型エラーを起こす side は
+[`examples/borrow_modes_typeerror.lang`](../examples/borrow_modes_typeerror.lang)。
+
 ## 10.5. モジュールと import
 
 複数の関連 binding を `module M { ... }` でくくれる。bindings は `M.name`
@@ -353,6 +396,8 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`module_basic.lang`** — `module M { ... }` + qualified 参照 `M.f` のミニ実例
 - **`lib_list_ops.lang`** + **`import_demo.lang`** — decls-only ライブラリと、それを `import "path";` で取り込む側のペア
 - **`repl_session.md`** — REPL の使い方を対話セッション形式で示したドキュメント
+- **`borrow_modes.lang`** — 4 種類の借用注釈 (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) を組み合わせて使うデモ
+- **`borrow_modes_typeerror.lang`** — borrow mode mismatch が型エラーで捕捉される様子 (意図的に失敗する demo)
 
 REPL で対話的に試したいときは:
 ```sh
