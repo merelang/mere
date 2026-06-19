@@ -582,6 +582,40 @@ let builtin_fail =
 let builtin_show =
   V_builtin ("show", fun v -> V_str (to_string v))
 
+(* Phase 12.6 — Q-010 narrowed: trait-style API unification の最初の
+   一歩。`len` を `'a -> int` の polymorphic builtin として追加、
+   runtime に値の variant を見て dispatch:
+     - V_vec       → array length (Vec[R, T] と OwnedVec[T] が共有する
+                     V_vec runtime をカバー)
+     - V_str       → byte length
+     - V_constr (Nil/Cons …) → list traversal で要素数
+     - V_tuple     → arity
+     - else        → eval error
+   これは ad-hoc polymorphism (show と同じ枠) — 完全な trait システム
+   ではないが、`Vec[R, T] / OwnedVec[T] / list / str / tuple` に対して
+   単一の API を提供する。本格的な trait は将来 slice で。 *)
+let rec vec_len_via_constr v =
+  match v with
+  | V_constr ("Nil", None) -> 0
+  | V_constr ("Cons", Some (V_tuple [_; tail])) -> 1 + vec_len_via_constr tail
+  | _ -> -1
+
+let builtin_len =
+  V_builtin ("len", fun v ->
+    match v with
+    | V_vec arr -> V_int (Array.length !arr)
+    | V_str s -> V_int (String.length s)
+    | V_tuple es -> V_int (List.length es)
+    | V_constr _ ->
+      let n = vec_len_via_constr v in
+      if n < 0 then
+        raise (Eval_error (Loc.dummy,
+          "len: constructor value is not a recognized list (Nil/Cons chain)"))
+      else V_int n
+    | _ ->
+      raise (Eval_error (Loc.dummy,
+        "len: value has no defined length (expected Vec / OwnedVec / list / str / tuple)")))
+
 (* --- Vec builtins (Phase 12.1) ---
    `'a Vec` is a region-aware growable vector. In the interpreter
    the underlying storage is `value array ref` — `push` reallocates
@@ -1046,6 +1080,7 @@ let initial_env : env =
     ("owned_vec_push", ref builtin_owned_vec_push);
     ("owned_vec_get",  ref builtin_owned_vec_get);
     ("owned_vec_len",  ref builtin_owned_vec_len);
+    ("len",            ref builtin_len);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

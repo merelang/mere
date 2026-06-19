@@ -431,6 +431,22 @@ region R { vec_new () }
 legacy `T Vec` (1-arg postfix) も書けて、内部的には `Vec[__heap, T]` に
 展開される (forward-compat)。
 
+**Phase 12.6 で polymorphic `len`** — 単一の名前で複数のコレクション型に
+対応する ad-hoc polymorphic builtin (`show` と同じ枠):
+
+```
+len "hello world"                              // 11 (str)
+let v = vec_new () in
+  { vec_push v 1; vec_push v 2; len v }        // 2 (Vec[R, T])
+let w = owned_vec_new () in
+  { owned_vec_push w "x"; len w }              // 1 (OwnedVec[T])
+len (1, 2, 3, 4)                               // 4 (tuple)
+len (Cons (1, Cons (2, Cons (3, Nil))))        // 3 ('a list)
+```
+
+型は `'a -> int`、runtime dispatch で値の variant を見て対応する長さを
+返す。trait システムの代わりに「同じ名前で多くの型に効く」最小実装。
+
 **Phase 12.5 で `OwnedVec[T]` を追加** — Vec[R, T] が region 内 Trivial
 なのに対し、`OwnedVec[T]` は heap-allocated で Drop 型扱い。region に置こう
 とすると静的拒否:

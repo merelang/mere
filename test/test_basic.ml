@@ -4106,5 +4106,31 @@ let () =
         "let v = owned_vec_new () in owned_vec_len v" in
       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
 
+  (* --- Phase 12.6: ad-hoc polymorphic `len` (Q-010 narrowed / trait-style) --- *)
+  check "len: scheme is `'a -> int`"
+    (Pipeline.type_of "len") "('a -> int)";
+  check "len: works on str"
+    (Pipeline.process "len \"hello world\"") "11";
+  check "len: works on Vec[R, T]"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 10; vec_push v 20; vec_push v 30; len v }") "3";
+  check "len: works on OwnedVec"
+    (Pipeline.process
+       "let v = owned_vec_new () in \
+        { owned_vec_push v \"a\"; owned_vec_push v \"b\"; len v }") "2";
+  check "len: works on tuple"
+    (Pipeline.process "len (1, 2, 3, 4)") "4";
+  check "len: works on 'a list"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        len (Cons (1, Cons (2, Cons (3, Nil))))") "3";
+  check_raises "len: int has no defined length (eval error)"
+    (fun () -> Pipeline.process "len 42");
+  check_raises "len: codegen rejection (C)"
+    (fun () ->
+      let prog = Pipeline.parse_program "len \"hi\"" in
+      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

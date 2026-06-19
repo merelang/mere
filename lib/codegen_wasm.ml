@@ -475,10 +475,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len" then
+       || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (Vec / OwnedVec builtins are interpreter-only)"));
+        ^ " (Vec / OwnedVec / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->

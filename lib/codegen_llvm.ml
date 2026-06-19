@@ -1357,9 +1357,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len" then
+       || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (Vec / OwnedVec builtins are interpreter-only)");
+        (name ^ " (Vec / OwnedVec / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)

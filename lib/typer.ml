@@ -395,6 +395,20 @@ let show_scheme =
   { quantified = [id];
     body = Ast.TyArrow (_show_alpha_init, Ast.TyStr) }
 
+(* `len : 'a -> int` (Phase 12.6) — ad-hoc polymorphic builtin that
+   dispatches at runtime over Vec[R, T] / OwnedVec[T] / 'a list / str /
+   tuple. Type-system level it is just `'a -> int` (same枠 as `show`);
+   illegal argument types surface as runtime errors. A future slice may
+   replace this with a proper trait-based dispatch. *)
+let _len_alpha = fresh_var ()
+let len_scheme =
+  let id = match _len_alpha with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { quantified = [id];
+    body = Ast.TyArrow (_len_alpha, Ast.TyInt) }
+
 (* `fst : ('a * 'b) -> 'a` and `snd : ('a * 'b) -> 'b` — 2-quantified schemes. *)
 let _fst_alpha = fresh_var ()
 let _fst_beta = fresh_var ()
@@ -679,6 +693,7 @@ let initial_env : env =
     ("assert",
        mono (Ast.TyArrow (Ast.TyBool, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
     ("show",        show_scheme);
+    ("len",         len_scheme);
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);
     ("id",          id_scheme);

@@ -409,9 +409,10 @@ let rec emit_expr (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len" then
+       || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "len" then
       unsupported e.loc
-        (name ^ " (Vec / OwnedVec builtins are interpreter-only)");
+        (name ^ " (Vec / OwnedVec / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
