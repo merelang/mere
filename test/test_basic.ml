@@ -4132,5 +4132,39 @@ let () =
       let prog = Pipeline.parse_program "len \"hi\"" in
       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
 
+  (* --- Phase 12.7: StrBuf[R] (region 内可変文字列バッファ) --- *)
+  check "strbuf: strbuf_new : unit -> StrBuf['r]"
+    (Pipeline.type_of "strbuf_new") "(unit -> StrBuf['a])";
+  check "strbuf: push + to_str round-trip"
+    (Pipeline.process
+       "let b = strbuf_new () in \
+        { strbuf_push b \"hello\"; strbuf_push b \", \"; \
+          strbuf_push b \"world\"; strbuf_to_str b }")
+    "\"hello, world\"";
+  check "strbuf: empty len = 0"
+    (Pipeline.process "let b = strbuf_new () in strbuf_len b") "0";
+  check "strbuf: byte length after push"
+    (Pipeline.process
+       "let b = strbuf_new () in \
+        { strbuf_push b \"abc\"; strbuf_push b \"de\"; strbuf_len b }") "5";
+  (* Phase 12.7: region binding via active_regions *)
+  check_raises "strbuf: cannot escape region (StrBuf[R] tagged in)"
+    (fun () -> Pipeline.process "region R { strbuf_new () }");
+  check "strbuf: outside region defaults to __heap"
+    (Pipeline.type_of "strbuf_new ()") "StrBuf[__heap]";
+  check "strbuf: inside region R binds to R"
+    (Pipeline.type_of
+       "fn () -> region R { let b = strbuf_new () in strbuf_len b }")
+    "(unit -> int)";
+  (* polymorphic len also handles StrBuf *)
+  check "strbuf: polymorphic len works on StrBuf"
+    (Pipeline.process
+       "let b = strbuf_new () in { strbuf_push b \"hello\"; len b }") "5";
+  check_raises "strbuf: codegen rejection (C)"
+    (fun () ->
+      let prog = Pipeline.parse_program
+        "let b = strbuf_new () in strbuf_len b" in
+      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -17,6 +17,12 @@ type value =
     (* `'a Vec` — region-aware growable vector (Phase 12.1, Q-010
        narrowed → 実装第一段階).  Backed by a mutable array ref;
        push reallocates. Trivial[R] when element type is Trivial[R]. *)
+  | V_strbuf of Buffer.t
+    (* `StrBuf[R]` — region-aware mutable string buffer (Phase 12.7,
+       Q-010 narrowed). 設計 doc 13_region_std_types.md §4 の最小実装。
+       内部は OCaml Buffer、文字列の bytes を保持。Trivial 扱いなので
+       region に置ける。型は TyCon ("StrBuf", [TyRef BR R TyUnit])
+       (region marker 1-arg、view 型と同じ慣例)。 *)
 
 and env = (string * value ref) list
 
@@ -60,6 +66,8 @@ and to_string = function
   | V_vec arr ->
     let elems = Array.to_list !arr in
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
+  | V_strbuf buf ->
+    "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -604,6 +612,7 @@ let builtin_len =
   V_builtin ("len", fun v ->
     match v with
     | V_vec arr -> V_int (Array.length !arr)
+    | V_strbuf buf -> V_int (Buffer.length buf)
     | V_str s -> V_int (String.length s)
     | V_tuple es -> V_int (List.length es)
     | V_constr _ ->
@@ -614,7 +623,7 @@ let builtin_len =
       else V_int n
     | _ ->
       raise (Eval_error (Loc.dummy,
-        "len: value has no defined length (expected Vec / OwnedVec / list / str / tuple)")))
+        "len: value has no defined length (expected Vec / OwnedVec / StrBuf / list / str / tuple)")))
 
 (* --- Vec builtins (Phase 12.1) ---
    `'a Vec` is a region-aware growable vector. In the interpreter
@@ -695,6 +704,36 @@ let builtin_owned_vec_len =
     match v with
     | V_vec arr -> V_int (Array.length !arr)
     | _ -> failwith "owned_vec_len: expected OwnedVec")
+
+(* StrBuf[R] builtins (Phase 12.7) — region 内可変文字列バッファ。
+   実装は OCaml Buffer で、push は append、to_str で snapshot を返す。 *)
+let builtin_strbuf_new =
+  V_builtin ("strbuf_new", fun v ->
+    match v with
+    | V_unit -> V_strbuf (Buffer.create 64)
+    | _ -> failwith "strbuf_new: expected unit")
+
+let builtin_strbuf_push =
+  V_builtin ("strbuf_push", fun v ->
+    match v with
+    | V_strbuf buf ->
+      V_builtin ("strbuf_push_p1", fun s ->
+        match s with
+        | V_str s -> Buffer.add_string buf s; V_unit
+        | _ -> failwith "strbuf_push: expected str")
+    | _ -> failwith "strbuf_push: expected StrBuf")
+
+let builtin_strbuf_to_str =
+  V_builtin ("strbuf_to_str", fun v ->
+    match v with
+    | V_strbuf buf -> V_str (Buffer.contents buf)
+    | _ -> failwith "strbuf_to_str: expected StrBuf")
+
+let builtin_strbuf_len =
+  V_builtin ("strbuf_len", fun v ->
+    match v with
+    | V_strbuf buf -> V_int (Buffer.length buf)
+    | _ -> failwith "strbuf_len: expected StrBuf")
 
 let builtin_fst =
   V_builtin ("fst", fun v ->
@@ -1080,6 +1119,10 @@ let initial_env : env =
     ("owned_vec_push", ref builtin_owned_vec_push);
     ("owned_vec_get",  ref builtin_owned_vec_get);
     ("owned_vec_len",  ref builtin_owned_vec_len);
+    ("strbuf_new",     ref builtin_strbuf_new);
+    ("strbuf_push",    ref builtin_strbuf_push);
+    ("strbuf_to_str",  ref builtin_strbuf_to_str);
+    ("strbuf_len",     ref builtin_strbuf_len);
     ("len",            ref builtin_len);
   ]
 
