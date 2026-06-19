@@ -3372,5 +3372,34 @@ let () =
     (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "i32.load offset=0";
 
+  (* --- Wasm codegen: Region_block + Ref + with Drop + view (Phase 6.8) ---
+     LIFO region (save/restore bump pointer on Region_block entry/exit),
+     Ref allocs + stores + returns ptr, With Drop auto-calls close field
+     via call_indirect, view literal uses the same bump alloc as record. *)
+  assert_contains "wasm: Region_block saves bump pointer"
+    (wasm "region R { 42 }")
+    "global.set $__lang_bump";
+  assert_contains "wasm: Ref stores value at allocated slot"
+    (wasm "region R { let x = &R 5 in 42 }")
+    "i32.store offset=0";
+  assert_contains "wasm: with calls close via call_indirect"
+    (wasm_with_decls
+      "drop type WCgConn = { id: int, close: unit -> unit };\n\
+       let mk = fn i -> WCgConn { id = i, close = fn () -> () } in\n\
+       with c = mk 7 in c.id")
+    "call_indirect (type $cl)";
+  assert_contains "wasm: view literal stores fields"
+    (wasm_with_decls
+      "view WCgCellW[R] of int { v: int };\n\
+       region R { let c = WCgCellW { v = 7 } in c.v }")
+    "i32.store offset=0";
+  assert_contains "wasm: view field access via i32.load offset"
+    (wasm_with_decls
+      "view WCgCellW2[R] of int { v: int, w: int };\n\
+       region R { let c = WCgCellW2 { v = 7, w = 9 } in c.w }")
+    "i32.load offset=4";
+  assert_contains "wasm: Unit_lit becomes i32.const 0"
+    (wasm "fn () -> ()") "i32.const 0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -339,6 +339,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "i32.const %d" n)
   | Ast.Bool_lit b ->
     emit_instr (Printf.sprintf "i32.const %d" (if b then 1 else 0))
+  | Ast.Unit_lit ->
+    emit_instr "i32.const 0"
   | Ast.Str_lit s ->
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i32.const %d" off)
@@ -433,6 +435,32 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr "i32.load offset=4";
     emit_instr "call_indirect (type $cl)"
+  | Ast.Record_lit (name, fields) when Hashtbl.mem Typer.views name ->
+    (* View literal: same memory layout as a record (i32 per field),
+       allocated from the active region's bump pointer. In Wasm all
+       Lang regions share a single bump pointer so we use it directly. *)
+    let info = Hashtbl.find Typer.views name in
+    let decl_fields = info.Typer.v_fields in
+    let n = List.length decl_fields in
+    let base_slot = fresh_local () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" base_slot);
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    List.iteri (fun i (fname, _) ->
+      let v_expr =
+        match List.assoc_opt fname fields with
+        | Some v -> v
+        | None -> unsupported e.Ast.loc
+                    (Printf.sprintf "missing field `%s` in view literal" fname)
+      in
+      emit_instr (Printf.sprintf "local.get %d" base_slot);
+      emit_expr v_expr;
+      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+    ) decl_fields;
+    emit_instr (Printf.sprintf "local.get %d" base_slot)
   | Ast.Record_lit (name, fields) ->
     let info =
       match Hashtbl.find_opt Typer.records name with
@@ -441,8 +469,6 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     if info.Typer.r_params <> [] then
       unsupported e.Ast.loc "polymorphic record — Phase 6 later slice";
-    if Hashtbl.mem Typer.views name then
-      unsupported e.Ast.loc "view literal — Phase 6 later slice";
     let decl_fields = info.Typer.r_fields in
     let n = List.length decl_fields in
     let base_slot = fresh_local () in
@@ -470,19 +496,21 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "field access: missing inner type"
     in
-    let rname =
+    let rname, fields =
       match inner_ty with
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
-      | _ -> unsupported e.Ast.loc "field access on non-record"
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.views n ->
+        (n, (Hashtbl.find Typer.views n).Typer.v_fields)
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+        (n, (Hashtbl.find Typer.records n).Typer.r_fields)
+      | _ -> unsupported e.Ast.loc "field access on non-record/view"
     in
-    let info = Hashtbl.find Typer.records rname in
     let rec find_idx i = function
       | [] -> unsupported e.Ast.loc
-                (Printf.sprintf "record `%s` has no field `%s`" rname fname)
+                (Printf.sprintf "%s has no field `%s`" rname fname)
       | (n, _) :: _ when n = fname -> i
       | _ :: rest -> find_idx (i + 1) rest
     in
-    let idx = find_idx 0 info.Typer.r_fields in
+    let idx = find_idx 0 fields in
     emit_expr inner;
     emit_instr (Printf.sprintf "i32.load offset=%d" (4 * idx))
   | Ast.Record_update (base, updates) ->
@@ -721,6 +749,74 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
     ) elems;
     emit_instr (Printf.sprintf "local.get %d" base_slot)
+  | Ast.Region_block (_, body) ->
+    (* All Lang regions share the single Wasm linear-memory bump
+       pointer. Region_block uses a save / restore pattern so any
+       allocations made inside the body are reclaimed on exit (LIFO). *)
+    let saved_bump = fresh_local () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" saved_bump);
+    emit_expr body;
+    let result_slot = fresh_local () in
+    emit_instr (Printf.sprintf "local.set %d" result_slot);
+    emit_instr (Printf.sprintf "local.get %d" saved_bump);
+    emit_instr "global.set $__lang_bump";
+    emit_instr (Printf.sprintf "local.get %d" result_slot)
+  | Ast.Ref (_, inner) ->
+    (* `&R v` — region-alloc 4 bytes, store value, return ptr. *)
+    let base_slot = fresh_local () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" base_slot);
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr "i32.const 4";
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_expr inner;
+    emit_instr "i32.store offset=0";
+    emit_instr (Printf.sprintf "local.get %d" base_slot)
+  | Ast.With (name, value, body) ->
+    (* `with c = v in body` — bind v, run body, auto-invoke c.close
+       if v has a `close: unit -> unit` field. *)
+    let v_slot = fresh_local () in
+    emit_expr value;
+    emit_instr (Printf.sprintf "local.set %d" v_slot);
+    let close_idx =
+      match value.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+           let fields = (Hashtbl.find Typer.records n).Typer.r_fields in
+           let rec find i = function
+             | [] -> None
+             | (fname, _) :: _ when fname = "close" -> Some i
+             | _ :: rest -> find (i + 1) rest
+           in find 0 fields
+         | _ -> None)
+      | _ -> None
+    in
+    let prev_locals = !locals in
+    locals := (name, v_slot) :: prev_locals;
+    emit_expr body;
+    locals := prev_locals;
+    (match close_idx with
+     | None -> ()
+     | Some idx ->
+       (* Stash body's result, then call c.close(unit), restore result. *)
+       let result_slot = fresh_local () in
+       emit_instr (Printf.sprintf "local.set %d" result_slot);
+       let cl_slot = fresh_local () in
+       emit_instr (Printf.sprintf "local.get %d" v_slot);
+       emit_instr (Printf.sprintf "i32.load offset=%d" (4 * idx));
+       emit_instr (Printf.sprintf "local.set %d" cl_slot);
+       emit_instr (Printf.sprintf "local.get %d" cl_slot);
+       emit_instr "i32.load offset=0";  (* env *)
+       emit_instr "i32.const 0";        (* unit arg *)
+       emit_instr (Printf.sprintf "local.get %d" cl_slot);
+       emit_instr "i32.load offset=4";  (* fn_idx *)
+       emit_instr "call_indirect (type $cl)";
+       emit_instr "drop";               (* discard close's return *)
+       emit_instr (Printf.sprintf "local.get %d" result_slot))
   | _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 6 MVP"
 
