@@ -1,9 +1,11 @@
 (* Source string -> ... convenience functions.
    Handles top-level decls (let, let rec, type) in order. *)
 
-let parse_program s =
+let parse_program ?base_dir s =
   let tokens = Lexer.tokenize s in
-  Parser.parse_program tokens
+  match base_dir with
+  | Some d -> Parser.parse_program ~base_dir:d tokens
+  | None -> Parser.parse_program tokens
 
 let parse_only s =
   let prog = parse_program s in
@@ -68,9 +70,9 @@ let process_decls eval_env type_env decls =
       Typer.register_drop_type name
   ) decls
 
-let process s =
+let process ?base_dir s =
   Exhaustive.reset ();
-  let prog = parse_program s in
+  let prog = parse_program ?base_dir s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;

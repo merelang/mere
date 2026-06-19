@@ -4465,6 +4465,40 @@ let () =
         };\n\
         Status94.label (Err94 \"boom\")") "\"boom\"";
 
+  (* --- Phase 9.5: importer-relative import path resolution --- *)
+  let tmpdir = Filename.temp_dir "lang_imp95" "" in
+  let write path content =
+    let oc = open_out path in output_string oc content; close_out oc
+  in
+  let helper_path = Filename.concat tmpdir "helper.lang" in
+  let main_path = Filename.concat tmpdir "main.lang" in
+  write helper_path "let helper95 = fn x -> x * 7;";
+  write main_path "import \"./helper.lang\";\nhelper95 6";
+  check "import95: ./relative path resolves to importer's directory"
+    (Pipeline.process ~base_dir:tmpdir
+       "import \"./helper.lang\";\nhelper95 8") "56";
+  (* Nested relative path: main → middle → sub/inner *)
+  let sub_dir = Filename.concat tmpdir "sub" in
+  Unix.mkdir sub_dir 0o755;
+  let inner_path = Filename.concat sub_dir "inner.lang" in
+  let middle_path = Filename.concat tmpdir "middle.lang" in
+  write inner_path "let inner_val95 = 100;";
+  write middle_path "import \"./sub/inner.lang\";\nlet middle95 = fn x -> inner_val95 + x;";
+  check "import95: nested relative path (./sub/inner via middle)"
+    (Pipeline.process ~base_dir:tmpdir
+       "import \"./middle.lang\";\nmiddle95 23") "123";
+  (* Canonicalisation: two different relative forms of the same file
+     should be detected as the same by the cycle guard. *)
+  let alt_a = Filename.concat tmpdir "ax.lang" in
+  let alt_b_relative = "./ax.lang" in
+  write alt_a "let alt_val95 = 42;";
+  (* alt_a 経由と alt_b_relative 経由は canonical 同じ → 1 度のみ読込 *)
+  check "import95: canonical equality across relative / absolute forms"
+    (Pipeline.process ~base_dir:tmpdir
+       (Printf.sprintf
+          "import \"%s\";\nimport \"%s\";\nalt_val95" alt_a alt_b_relative))
+    "42";
+
   check_raises "borrow checker (match): 別 arm 同士の union も active"
     (fun () ->
       Pipeline.process
