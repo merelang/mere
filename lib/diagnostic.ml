@@ -18,17 +18,28 @@ let split_lines (s : string) : string array =
 let context_lines_before = 2
 let context_lines_after = 1
 
+(* Split a Type_error's msg into (headline, extra_lines). Anything past
+   the first newline is treated as supplementary `help:` / `note:` text
+   to render below the code frame. *)
+let split_msg (msg : string) : string * string list =
+  match String.split_on_char '\n' msg with
+  | [] -> (msg, [])
+  | head :: rest -> (head, rest)
+
 let format ~source ~filename loc kind msg =
   let { Loc.line; col } = loc in
+  let headline, extras = split_msg msg in
   if line = 0 then
-    (* No location info — fall back to a simple single-line message. *)
-    Printf.sprintf "%s: %s: %s" filename kind msg
+    let extra_block =
+      if extras = [] then ""
+      else "\n" ^ String.concat "\n" extras
+    in
+    Printf.sprintf "%s: %s: %s%s" filename kind headline extra_block
   else begin
     let lines = split_lines source in
     let last_idx = Array.length lines - 1 in
     let lo = max 0 (line - 1 - context_lines_before) in
     let hi = min last_idx (line - 1 + context_lines_after) in
-    (* Width of the line-number margin: widest number we'll print. *)
     let gutter_w = String.length (string_of_int (hi + 1)) in
     let pad_num n =
       let s = string_of_int n in
@@ -36,7 +47,7 @@ let format ~source ~filename loc kind msg =
     in
     let blank_gutter = String.make gutter_w ' ' in
     let buf = Buffer.create 256 in
-    Buffer.add_string buf (Printf.sprintf "%s: %s\n" kind msg);
+    Buffer.add_string buf (Printf.sprintf "%s: %s\n" kind headline);
     Buffer.add_string buf
       (Printf.sprintf "%s --> %s:%d:%d\n" blank_gutter filename line col);
     Buffer.add_string buf (Printf.sprintf "%s |\n" blank_gutter);
@@ -47,10 +58,16 @@ let format ~source ~filename loc kind msg =
       if line_no = line then begin
         let caret_pad = String.make (max 0 (col - 1)) ' ' in
         Buffer.add_string buf
-          (Printf.sprintf "%s | %s^ %s\n" blank_gutter caret_pad msg)
+          (Printf.sprintf "%s | %s^ %s\n" blank_gutter caret_pad headline)
       end
     done;
-    (* Trim trailing newline so the caller can append cleanly. *)
+    if extras <> [] then begin
+      Buffer.add_string buf (Printf.sprintf "%s |\n" blank_gutter);
+      List.iter (fun line ->
+        Buffer.add_string buf
+          (Printf.sprintf "%s = %s\n" blank_gutter line)
+      ) extras
+    end;
     let s = Buffer.contents buf in
     if String.length s > 0 && s.[String.length s - 1] = '\n' then
       String.sub s 0 (String.length s - 1)

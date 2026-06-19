@@ -3,6 +3,68 @@
 
 exception Type_error of Loc.t * string
 
+(* ── Levenshtein-based name suggestions (Phase 7.3) ──
+   Used to suggest "did you mean `fact`?" when the user typo'd a name
+   as e.g. `facot`. *)
+
+let levenshtein (a : string) (b : string) : int =
+  let la = String.length a and lb = String.length b in
+  if la = 0 then lb
+  else if lb = 0 then la
+  else begin
+    let prev = Array.make (lb + 1) 0 in
+    let curr = Array.make (lb + 1) 0 in
+    for j = 0 to lb do prev.(j) <- j done;
+    for i = 1 to la do
+      curr.(0) <- i;
+      for j = 1 to lb do
+        let cost = if a.[i - 1] = b.[j - 1] then 0 else 1 in
+        let del = prev.(j) + 1 in
+        let ins = curr.(j - 1) + 1 in
+        let sub = prev.(j - 1) + cost in
+        curr.(j) <- min (min del ins) sub
+      done;
+      Array.blit curr 0 prev 0 (lb + 1)
+    done;
+    prev.(lb)
+  end
+
+(* Best candidate within `max_dist` edit-distance, else None. Ties pick
+   the shortest name (more conservative suggestion). *)
+let suggest_name (target : string) (candidates : string list) : string option =
+  let max_dist =
+    if String.length target <= 3 then 1
+    else if String.length target <= 6 then 2
+    else 3
+  in
+  let scored =
+    List.filter_map (fun c ->
+      let d = levenshtein target c in
+      if d <= max_dist && d > 0 then Some (d, c) else None
+    ) candidates
+  in
+  match scored with
+  | [] -> None
+  | _ ->
+    let sorted = List.sort (fun (d1, n1) (d2, n2) ->
+      let c = compare d1 d2 in
+      if c <> 0 then c else compare (String.length n1) (String.length n2)
+    ) scored in
+    Some (snd (List.hd sorted))
+
+(* Append a `help:` hint line to a Type_error message. Diagnostic.format
+   recognizes `\nhelp: ...` and renders it below the code frame. *)
+let with_hint (msg : string) (hint : string) : string =
+  msg ^ "\nhelp: " ^ hint
+
+let raise_with_suggestion loc kind target candidates =
+  let msg =
+    match suggest_name target candidates with
+    | Some n -> with_hint (kind ^ ": " ^ target) (Printf.sprintf "did you mean `%s`?" n)
+    | None -> kind ^ ": " ^ target
+  in
+  raise (Type_error (loc, msg))
+
 let counter = ref 0
 let fresh_var () =
   let id = !counter in
@@ -515,7 +577,8 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Var name ->
     (try instantiate (List.assoc name env)
      with Not_found ->
-       raise (Type_error (e.loc, "unbound variable: " ^ name)))
+       raise_with_suggestion e.loc "unbound variable" name
+         (List.map fst env))
   | Ast.Neg a ->
     let t = infer env a in
     unify a.loc Ast.TyInt t;
@@ -655,7 +718,10 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let info =
       try Hashtbl.find constructors name
       with Not_found ->
-        raise (Type_error (e.loc, "unknown constructor: " ^ name))
+        let candidates =
+          Hashtbl.fold (fun k _ acc -> k :: acc) constructors []
+        in
+        raise_with_suggestion e.loc "unknown constructor" name candidates
     in
     let (expected_arg, result_ty) = instantiate_constr info in
     (match expected_arg, arg_opt with
@@ -740,7 +806,10 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let info =
          try Hashtbl.find records name
          with Not_found ->
-           raise (Type_error (e.loc, "unknown record type: " ^ name))
+           let candidates =
+             Hashtbl.fold (fun k _ acc -> k :: acc) records []
+           in
+           raise_with_suggestion e.loc "unknown record type" name candidates
        in
        let (expected_fields, result_ty) = instantiate_record name info in
        (* All declared fields must be provided exactly once. *)
@@ -836,7 +905,11 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
     let info =
       try Hashtbl.find constructors name
       with Not_found ->
-        raise (Type_error (p.ploc, "unknown constructor in pattern: " ^ name))
+        let candidates =
+          Hashtbl.fold (fun k _ acc -> k :: acc) constructors []
+        in
+        raise_with_suggestion p.ploc "unknown constructor in pattern" name
+          candidates
     in
     let (expected_arg, result_ty) = instantiate_constr info in
     unify p.ploc expected result_ty;
@@ -857,7 +930,11 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
     let info =
       try Hashtbl.find records name
       with Not_found ->
-        raise (Type_error (p.ploc, "unknown record type in pattern: " ^ name))
+        let candidates =
+          Hashtbl.fold (fun k _ acc -> k :: acc) records []
+        in
+        raise_with_suggestion p.ploc "unknown record type in pattern" name
+          candidates
     in
     let (expected_fields, result_ty) = instantiate_record name info in
     unify p.ploc expected result_ty;
