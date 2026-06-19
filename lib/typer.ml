@@ -82,6 +82,22 @@ let rec occurs id = function
   | Ast.TyTuple ts -> List.exists (occurs id) ts
   | Ast.TyRef (_, inner) -> occurs id inner
 
+(* For common primitive-type mismatches, suggest a likely fix. Returns
+   None for combinations where no obvious one-liner conversion exists. *)
+let type_conversion_hint (t1 : Ast.ty) (t2 : Ast.ty) : string option =
+  match Ast.walk t1, Ast.walk t2 with
+  | Ast.TyStr, Ast.TyInt | Ast.TyStr, Ast.TyBool ->
+    Some "use `show x` to render a value as `str`"
+  | Ast.TyInt, Ast.TyStr ->
+    Some "use `str_len s` to get the length, or call a parser yourself"
+  | Ast.TyBool, (Ast.TyInt | Ast.TyStr) ->
+    Some "wrap in a comparison (e.g. `x == 0`) to get a `bool`"
+  | Ast.TyArrow _, _ ->
+    Some "you may be missing an argument — apply the function to a value first"
+  | _, Ast.TyArrow _ ->
+    Some "you may have passed a partially-applied function — check the arity"
+  | _ -> None
+
 let rec unify loc t1 t2 =
   let t1 = Ast.walk t1 in
   let t2 = Ast.walk t2 in
@@ -109,8 +125,15 @@ let rec unify loc t1 t2 =
     else
       v.link <- Some t
   | _ ->
-    raise (Type_error (loc, Printf.sprintf
-      "expected `%s`, got `%s`" (Ast.pp_ty t1) (Ast.pp_ty t2)))
+    let base =
+      Printf.sprintf "expected `%s`, got `%s`" (Ast.pp_ty t1) (Ast.pp_ty t2)
+    in
+    let msg =
+      match type_conversion_hint t1 t2 with
+      | Some hint -> base ^ "\nhelp: " ^ hint
+      | None -> base
+    in
+    raise (Type_error (loc, msg))
 
 type scheme = {
   quantified : int list;

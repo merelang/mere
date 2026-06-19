@@ -3644,5 +3644,21 @@ let () =
   assert_contains "diag: factrial identifier → 8 carets"
     lex_err_caret "^^^^^^^^";
 
+  (* --- Type conversion hints (Phase 7.6) ---
+     For common primitive mismatches the unify error appends a `help:`
+     suggesting a likely fix. *)
+  assert_contains "hint: int where str expected → suggest show"
+    (infer_err "\"x: \" ++ 42")
+    "use `show x` to render a value as `str`";
+  assert_contains "hint: str where int expected → mention str_len"
+    (infer_err "5 + \"hi\"")
+    "use `str_len s` to get the length";
+  assert_contains "hint: int where bool expected → suggest comparison"
+    (infer_err "if 1 then 0 else 1")
+    "wrap in a comparison";
+  assert_no_contains "hint: omitted when types don't pair into a known case"
+    (infer_err "(1, 2) + 3")
+    "use `show";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
