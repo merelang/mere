@@ -89,6 +89,100 @@ type fn_decl = {
 
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Names bound by a pattern (for the free-vars walk). *)
+let pattern_vars (p : Ast.pattern) : string list =
+  let rec go p =
+    match p.Ast.pnode with
+    | Ast.P_var n -> [n]
+    | Ast.P_constr (_, Some sub) -> go sub
+    | Ast.P_tuple ps -> List.concat_map go ps
+    | Ast.P_record (_, fs) -> List.concat_map (fun (_, p) -> go p) fs
+    | Ast.P_as (inner, n) -> n :: go inner
+    | Ast.P_or (a, _) -> go a
+    | _ -> []
+  in
+  go p
+
+let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
+  let seen = Hashtbl.create 8 in
+  let order = ref [] in
+  let add n =
+    if not (Hashtbl.mem seen n) then begin
+      Hashtbl.add seen n ();
+      order := n :: !order
+    end
+  in
+  let rec go (e : Ast.expr) (bound : string list) =
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit -> ()
+    | Ast.Var n -> if not (List.mem n bound) then add n
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a bound; go b bound
+    | Ast.Neg a | Ast.Annot (a, _) -> go a bound
+    | Ast.Let (pat, v, body) ->
+      go v bound;
+      go body (pattern_vars pat @ bound)
+    | Ast.Let_rec (bindings, body) ->
+      let names = List.map fst bindings in
+      let bound' = names @ bound in
+      List.iter (fun (_, v) -> go v bound') bindings;
+      go body bound'
+    | Ast.With (n, v, body) -> go v bound; go body (n :: bound)
+    | Ast.If (c, t, e_) -> go c bound; go t bound; go e_ bound
+    | Ast.Fun (param, _, body) -> go body (param :: bound)
+    | Ast.Constr (_, Some a) -> go a bound
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s bound;
+      List.iter (fun (pat, g, b) ->
+        let bound' = pattern_vars pat @ bound in
+        (match g with Some ge -> go ge bound' | None -> ()); go b bound') arms
+    | Ast.Tuple es -> List.iter (fun e -> go e bound) es
+    | Ast.Region_block (n, b) -> go b (n :: bound)
+    | Ast.Ref (_, a) -> go a bound
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
+    | Ast.Field_get (a, _) -> go a bound
+    | Ast.Record_update (a, fs) ->
+      go a bound; List.iter (fun (_, e) -> go e bound) fs
+  in
+  go e initially_bound;
+  List.rev !order
+
+(* ── Closure machinery (Phase 6.7) ──
+   Wasm closures are 8-byte memory structs `{ env_offset, fn_table_idx }`.
+   The fn pointer is a `funcref` table index, not a memory pointer —
+   indirect calls go through `call_indirect (type $cl)`. Every
+   closure-callable function has signature `(env, x) -> result` and is
+   registered in the module's table. *)
+
+(* Function names that appear in the module's `(elem ...)` section.
+   List position == table index. *)
+let table_entries : string list ref = ref []
+let register_in_table (name : string) : int =
+  let idx = List.length !table_entries in
+  table_entries := !table_entries @ [name];
+  idx
+
+(* Top-level fn name → its closure adapter's table index. Populated
+   when we emit the per-top-level-fn `<name>_closure` wrapper. *)
+let fn_closure_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
+
+(* Anonymous-Fun closure emission state. *)
+type closure_emission = {
+  ce_adapter_name : string;
+  ce_param        : string;
+  ce_body         : Ast.expr;
+  ce_captures     : (string * int) list;  (* (name, source local slot) *)
+  ce_table_idx    : int;
+}
+let pending_closures : closure_emission list ref = ref []
+let anon_counter = ref 0
+let fresh_anon_name () =
+  let n = !anon_counter in
+  incr anon_counter;
+  Printf.sprintf "anon_%d_fn" n
+
 (* Each variant constructor → integer tag. Populated up front from
    Exhaustive.type_variants. *)
 let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
@@ -251,6 +345,24 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.Var name ->
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
+     | None when Hashtbl.mem fn_closure_table_idx name ->
+       (* Top-level fn as a value: materialize a closure
+          `{ env = 0, fn_idx = table_idx }`. *)
+       let idx = Hashtbl.find fn_closure_table_idx name in
+       let base = fresh_local () in
+       emit_instr "global.get $__lang_bump";
+       emit_instr (Printf.sprintf "local.set %d" base);
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr "i32.const 8";
+       emit_instr "i32.add";
+       emit_instr "global.set $__lang_bump";
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr "i32.const 0";
+       emit_instr "i32.store offset=0";
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr (Printf.sprintf "i32.const %d" idx);
+       emit_instr "i32.store offset=4";
+       emit_instr (Printf.sprintf "local.get %d" base)
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
@@ -309,6 +421,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     when Hashtbl.mem toplevel_fn_names name ->
     emit_expr arg;
     emit_instr (Printf.sprintf "call $%s" name)
+  | Ast.App (f, arg) ->
+    (* Indirect call via call_indirect on the closure value's table
+       index. closure layout: { env @ offset 0, fn_idx @ offset 4 }. *)
+    let cl_slot = fresh_local () in
+    emit_expr f;
+    emit_instr (Printf.sprintf "local.set %d" cl_slot);
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.load offset=0";
+    emit_expr arg;
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.load offset=4";
+    emit_instr "call_indirect (type $cl)"
   | Ast.Record_lit (name, fields) ->
     let info =
       match Hashtbl.find_opt Typer.records name with
@@ -524,6 +648,60 @@ let rec emit_expr (e : Ast.expr) : unit =
           emit_instr "end"
     in
     emit_arms arms
+  | Ast.Fun (param, _, fn_body) ->
+    (* Anonymous Fun in expression position: register an adapter in the
+       function table, build a closure value `{ env, fn_idx }`. Captures
+       go into a memory-resident env struct (or env = 0 if there are
+       none). *)
+    let raw_fvs = free_vars fn_body [param] in
+    let captures =
+      List.filter_map (fun n ->
+        match List.assoc_opt n !locals with
+        | Some slot -> Some (n, slot)
+        | None -> None) raw_fvs
+    in
+    let n = List.length captures in
+    let adapter_name = fresh_anon_name () in
+    let table_idx = register_in_table adapter_name in
+    pending_closures :=
+      { ce_adapter_name = adapter_name;
+        ce_param = param;
+        ce_body = fn_body;
+        ce_captures = captures;
+        ce_table_idx = table_idx }
+      :: !pending_closures;
+    let env_slot = fresh_local () in
+    let cl_slot = fresh_local () in
+    if n = 0 then begin
+      emit_instr "i32.const 0";
+      emit_instr (Printf.sprintf "local.set %d" env_slot)
+    end else begin
+      emit_instr "global.get $__lang_bump";
+      emit_instr (Printf.sprintf "local.set %d" env_slot);
+      emit_instr (Printf.sprintf "local.get %d" env_slot);
+      emit_instr (Printf.sprintf "i32.const %d" (n * 4));
+      emit_instr "i32.add";
+      emit_instr "global.set $__lang_bump";
+      List.iteri (fun i (_, src_slot) ->
+        emit_instr (Printf.sprintf "local.get %d" env_slot);
+        emit_instr (Printf.sprintf "local.get %d" src_slot);
+        emit_instr (Printf.sprintf "i32.store offset=%d" (i * 4))
+      ) captures
+    end;
+    (* Build closure value: { env, fn_idx } at fresh memory slot. *)
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" cl_slot);
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.const 8";
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr (Printf.sprintf "local.get %d" env_slot);
+    emit_instr "i32.store offset=0";
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr (Printf.sprintf "i32.const %d" table_idx);
+    emit_instr "i32.store offset=4";
+    emit_instr (Printf.sprintf "local.get %d" cl_slot)
   | Ast.Tuple elems ->
     (* All elements occupy 4 bytes (i32 / ptr-style offset). The tuple
        value is the base offset into linear memory. RESERVE the memory
@@ -578,6 +756,55 @@ let emit_fn_def (f : fn_decl) : string =
     "  (func $%s (param i32) (result i32)\n%s%s)"
     f.name local_decl indented_body
 
+(* Env-ignoring adapter so top-level fn `f` can be used as a closure
+   value: `(env, x) -> result` that just calls `$f(x)`. *)
+let emit_top_adapter (f : fn_decl) : string =
+  Printf.sprintf
+    "  (func $%s_closure (param i32) (param i32) (result i32)\n\
+     \    local.get 1\n\
+     \    call $%s)" f.name f.name
+
+(* Adapter for an anonymous Fun. Slot 0 = env ptr, slot 1 = param;
+   capture locals start at slot 2. Loads each capture from env at the
+   appropriate offset, then evaluates the original Fun body. *)
+let emit_anon_adapter (ce : closure_emission) : string =
+  let saved_instrs = !instrs in
+  let saved_local_counter = !local_counter in
+  let saved_locals = !locals in
+  instrs := [];
+  let env_slot = 0 in
+  let param_slot = 1 in
+  let n = List.length ce.ce_captures in
+  let capture_locals =
+    List.mapi (fun i (cname, _) ->
+      let slot = 2 + i in
+      emit_instr (Printf.sprintf "local.get %d" env_slot);
+      emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+      emit_instr (Printf.sprintf "local.set %d" slot);
+      (cname, slot)
+    ) ce.ce_captures
+  in
+  local_counter := 2 + n;
+  locals := (ce.ce_param, param_slot) :: capture_locals;
+  emit_expr ce.ce_body;
+  let body_instrs = List.rev !instrs in
+  let extra_locals = !local_counter - 2 in
+  instrs := saved_instrs;
+  local_counter := saved_local_counter;
+  locals := saved_locals;
+  let local_decl =
+    if extra_locals <= 0 then ""
+    else
+      Printf.sprintf "    (local%s)\n"
+        (String.concat "" (List.init extra_locals (fun _ -> " i32")))
+  in
+  let indented_body =
+    String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
+  in
+  Printf.sprintf
+    "  (func $%s (param i32) (param i32) (result i32)\n%s%s)"
+    ce.ce_adapter_name local_decl indented_body
+
 (* Static runtime helpers emitted into the Wasm module: strlen and
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
@@ -624,6 +851,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
+  Hashtbl.reset fn_closure_table_idx;
+  table_entries := [];
+  pending_closures := [];
+  anon_counter := 0;
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
   (* Pre-register variant tags from Exhaustive's registry. *)
@@ -636,6 +867,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
   let fn_defs = List.map emit_fn_def fns in
+  (* Register top-level closure adapters in the table and remember
+     their indices so `Var name` (value position) can find them. *)
+  let top_adapters =
+    List.map (fun f ->
+      let idx = register_in_table (f.name ^ "_closure") in
+      Hashtbl.replace fn_closure_table_idx f.name idx;
+      emit_top_adapter f
+    ) fns
+  in
   (* Reset counters for the main body. *)
   reset ();
   emit_expr body_expr;
@@ -649,23 +889,52 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let indented_body =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
   in
+  (* Drain pending anonymous-Fun adapters (Fun emits can nest, so
+     adapter emission may push more — iterate to a fixpoint). *)
+  let anon_adapters = ref [] in
+  let rec drain () =
+    match !pending_closures with
+    | [] -> ()
+    | ce :: rest ->
+      pending_closures := rest;
+      anon_adapters := emit_anon_adapter ce :: !anon_adapters;
+      drain ()
+  in
+  drain ();
+  let anon_adapters = List.rev !anon_adapters in
   let fn_section =
-    if fn_defs = [] then "" else
-      String.concat "\n" fn_defs ^ "\n"
+    let all = fn_defs @ top_adapters @ anon_adapters in
+    if all = [] then "" else String.concat "\n" all ^ "\n"
   in
   let data_section =
     if !str_data_decls = [] then ""
     else String.concat "\n" (List.rev !str_data_decls) ^ "\n"
   in
+  let table_section =
+    if !table_entries = [] then ""
+    else begin
+      let n = List.length !table_entries in
+      let elem_names =
+        String.concat " " (List.map (fun s -> "$" ^ s) !table_entries)
+      in
+      Printf.sprintf
+        "  (table %d funcref)\n\
+        \  (elem (i32.const 0) %s)\n"
+        n elem_names
+    end
+  in
   let bump_init = !str_offset_counter in
   Printf.sprintf
     "(module\n\
+     \  (type $cl (func (param i32) (param i32) (result i32)))\n\
      \  (import \"env\" \"puts\" (func $puts (param i32)))\n\
      \  (memory (export \"memory\") 1)\n\
+     %s\
      \  (global $__lang_bump (mut i32) (i32.const %d))\n\
      %s\
      %s\
      %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
-    bump_init data_section runtime_helpers fn_section local_decl indented_body
+    table_section bump_init data_section runtime_helpers fn_section
+    local_decl indented_body

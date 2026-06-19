@@ -3346,5 +3346,31 @@ let () =
        match WCgErr2 5 with | WCgOk2 -> 0 | WCgErr2 n -> n")
     "i32.load offset=4";
 
+  (* --- Wasm codegen: first-class fn + closure (Phase 6.7) ---
+     Closure = 8-byte memory struct `{ env_offset, fn_table_idx }`.
+     Top-level fn adapter + indirect App via call_indirect (type $cl).
+     Anonymous Fun captures env in memory + adapter loads them. *)
+  assert_contains "wasm: closure type declared"
+    (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "(type $cl (func (param i32) (param i32) (result i32)))";
+  assert_contains "wasm: function table declared"
+    (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "(table ";
+  assert_contains "wasm: top-level adapter emitted"
+    (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "(func $inc_closure (param i32) (param i32) (result i32)";
+  assert_contains "wasm: elem section places adapters"
+    (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "(elem (i32.const 0)";
+  assert_contains "wasm: indirect App uses call_indirect"
+    (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
+    "call_indirect (type $cl)";
+  assert_contains "wasm: anonymous Fun adapter emitted"
+    (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "(func $anon_0_fn (param i32) (param i32) (result i32)";
+  assert_contains "wasm: anonymous adapter loads captures from env"
+    (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    "i32.load offset=0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
