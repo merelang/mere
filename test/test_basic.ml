@@ -4560,6 +4560,53 @@ let () =
            let o = vec_to_owned v in &R o \
          }");
 
+  (* --- Phase 13: 型エラー UX 続編 — record field + qualified name typo --- *)
+  let field_typo_msg =
+    try
+      let _ = Pipeline.process
+        "type PtN = { name: str, value: int };\n\
+         let p = PtN { name = \"a\", value = 42 } in p.namee"
+      in ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "field typo: did-you-mean for record field"
+    field_typo_msg "did you mean `name`?";
+
+  let view_field_typo_msg =
+    try
+      let _ = Pipeline.process
+        "view CellV[R] of int { value: int };\n\
+         region R { let c = CellV { value = 3 } in c.valuee }"
+      in ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "field typo: did-you-mean for view field"
+    view_field_typo_msg "did you mean `value`?";
+
+  let record_update_typo_msg =
+    try
+      let _ = Pipeline.process
+        "type PtU = { name: str, value: int };\n\
+         let p = PtU { name = \"a\", value = 1 } in { p | namee = \"b\" }"
+      in ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "field typo: did-you-mean in record update"
+    record_update_typo_msg "did you mean `name`?";
+
+  let qname_typo_msg =
+    try
+      let _ = Pipeline.process
+        "module MathT {\n\
+          let rec factorial = fn n -> if n < 1 then 1 else n * factorial (n - 1);\n\
+         };\n\
+         MathT.factrial 5"
+      in ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "qualified name typo: did-you-mean across module path"
+    qname_typo_msg "did you mean `MathT.factorial`?";
+
   check_raises "borrow checker (match): 別 arm 同士の union も active"
     (fun () ->
       Pipeline.process

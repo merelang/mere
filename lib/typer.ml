@@ -1291,8 +1291,9 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           let raw_ty = List.assoc fname vinfo.v_fields in
           subst_region vinfo.v_region_param region raw_ty
         with Not_found ->
-          raise (Type_error (e.loc,
-            Printf.sprintf "view %s has no field %s" view_name fname)))
+          let candidates = List.map fst vinfo.v_fields in
+          raise_with_suggestion e.loc
+            (Printf.sprintf "view %s has no field" view_name) fname candidates)
      | Ast.TyCon (rec_name, _) as t_stripped
        when Hashtbl.mem records rec_name ->
        let info = Hashtbl.find records rec_name in
@@ -1300,8 +1301,9 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        unify inner.loc result_ty t_stripped;
        (try List.assoc fname expected_fields
         with Not_found ->
-          raise (Type_error (e.loc,
-            Printf.sprintf "record %s has no field %s" rec_name fname)))
+          let candidates = List.map fst expected_fields in
+          raise_with_suggestion e.loc
+            (Printf.sprintf "record %s has no field" rec_name) fname candidates)
      | _ ->
        raise (Type_error (e.loc,
          "field access on non-record value (cannot infer record type)")))
@@ -1317,8 +1319,9 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
          let raw_ty =
            try List.assoc fname vinfo.v_fields
            with Not_found ->
-             raise (Type_error (e.loc,
-               Printf.sprintf "view %s has no field %s" view_name fname))
+             let candidates = List.map fst vinfo.v_fields in
+             raise_with_suggestion e.loc
+               (Printf.sprintf "view %s has no field" view_name) fname candidates
          in
          let exp_ty = subst_region vinfo.v_region_param region raw_ty in
          let t = infer env fexpr in
@@ -1333,8 +1336,9 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
          let exp_ty =
            try List.assoc fname expected_fields
            with Not_found ->
-             raise (Type_error (e.loc,
-               Printf.sprintf "record %s has no field %s" rec_name fname))
+             let candidates = List.map fst expected_fields in
+             raise_with_suggestion e.loc
+               (Printf.sprintf "record %s has no field" rec_name) fname candidates
          in
          let t = infer env fexpr in
          unify fexpr.loc exp_ty t

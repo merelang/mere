@@ -201,6 +201,30 @@ show_inc 41                                 // "42"
 (fn x -> x * 2) >> str_of_int               // = fn x -> str_of_int (x * 2)
 ```
 
+## 8.5. 型エラー UX
+
+型エラーは Rust 風 code frame で表示される (`error: ...` ヘッダ / `-->`
+ロケーション / コード行 + caret / `help:` / `note:`)。よくある typo は
+Levenshtein で近い候補を提案:
+
+```
+let factorial = ... in factrial 5
+// type error: unbound variable: factrial
+//   help: did you mean `factorial`?
+
+type Pt = { name: str, value: int };
+let p = Pt { name = "a", value = 1 } in p.namee
+// type error: record Pt has no field: namee
+//   help: did you mean `name`?
+
+module M { let rec fact = ...; }; M.fct 5
+// type error: unbound variable: M.fct
+//   help: did you mean `M.fact`?
+```
+
+カバーしている提案: unbound variable / unknown constructor / unknown
+record type / record / view field typo / qualified module-path typo。
+
 ## 9. エラー処理
 
 ```
