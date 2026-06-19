@@ -1,0 +1,50 @@
+// Phase 12.1 で追加された `'a Vec` の最小ハーネス。
+//
+// 設計コンテキスト: internal design notes (Q-010)
+//
+// このスライス (Phase 12.1) のスコープ:
+//   - `'a Vec` を polymorphic builtin として追加 (`'a list` と同じ枠)
+//   - 操作: vec_new / vec_push / vec_get / vec_len
+//   - Trivial 扱いなので region に置ける (Drop 型を要素にすると拒否)
+//   - インタプリタ専用 — codegen はまだ
+//
+// 今後の slice (`Vec[R, T]` のように region をパラメータに、`OwnedVec`
+// との区別、Trivial 階層的、Allocator API、std 全体の整備) は別 slice。
+
+// === int Vec ===
+let nums = vec_new () in
+{
+  vec_push nums 10;
+  vec_push nums 20;
+  vec_push nums 30;
+  print ("len = " ++ show (vec_len nums));
+  print ("nums[0] = " ++ show (vec_get nums 0));
+  print ("nums[2] = " ++ show (vec_get nums 2));
+
+  // === str Vec も多相で動く ===
+  let words = vec_new () in
+  {
+    vec_push words "hello";
+    vec_push words "lang";
+    vec_push words "!";
+    print (vec_get words 0 ++ " " ++ vec_get words 1 ++ vec_get words 2)
+  };
+
+  // === region に置く: Trivial[R] が通るので OK ===
+  region R {
+    let local = vec_new () in
+    {
+      vec_push local 100;
+      vec_push local 200;
+      let v_ref = &R local in
+      print ("region-local Vec len via ref binding = " ++ show (vec_len local))
+    }
+  }
+}
+
+// 期待出力:
+// len = 3
+// nums[0] = 10
+// nums[2] = 30
+// hello lang!
+// region-local Vec len via ref binding = 2

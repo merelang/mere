@@ -3994,5 +3994,65 @@ let () =
   assert_contains "borrow checker: error message points to previous borrow"
     conflict_msg "previous borrow at";
 
+  (* --- Phase 12.1: `'a Vec` 最小ハーネス (Q-010 narrowed 実装第一段階) --- *)
+  check "vec: vec_new : unit -> 'a Vec"
+    (Pipeline.type_of "vec_new") "(unit -> 'a Vec)";
+  check "vec: vec_push : 'a Vec -> 'a -> unit"
+    (Pipeline.type_of "vec_push") "('a Vec -> ('a -> unit))";
+  check "vec: vec_get : 'a Vec -> int -> 'a"
+    (Pipeline.type_of "vec_get") "('a Vec -> (int -> 'a))";
+  check "vec: vec_len : 'a Vec -> int"
+    (Pipeline.type_of "vec_len") "('a Vec -> int)";
+  check "vec: empty Vec has len 0"
+    (Pipeline.process "let v = vec_new () in vec_len v") "0";
+  check "vec: push 3 ints then len"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 10; vec_push v 20; vec_push v 30; vec_len v }") "3";
+  check "vec: get returns pushed value"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 10; vec_push v 20; vec_get v 0 + vec_get v 1 }") "30";
+  check "vec: polymorphic — str Vec"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v \"hello\"; vec_push v \"world\"; \
+          vec_get v 0 ++ \" \" ++ vec_get v 1 }") "\"hello world\"";
+  check "vec: Vec can be placed in a region (Trivial[R] passes for int)"
+    (Pipeline.process
+       "region R { let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; let _ = &R v in vec_len v } }") "2";
+  check_raises "vec: Trivial[R] rejects Vec of drop type"
+    (fun () ->
+      Pipeline.process
+        "drop type Conn = { close: unit -> unit };\n\
+         region R { let v = (vec_new () : Conn Vec) in &R v }");
+  check_raises "vec: vec_get out-of-bounds raises eval error"
+    (fun () ->
+      Pipeline.process "let v = vec_new () in vec_get v 0");
+  (* Codegen はインタプリタ専用と明示 — 3 backend いずれも Codegen_error *)
+  let codegen_err_msg backend_emit =
+    try
+      let prog = Pipeline.parse_program "let v = vec_new () in vec_len v" in
+      let _ = backend_emit prog in ""
+    with
+    | Codegen_c.Codegen_error (_, msg) -> msg
+    | Codegen_llvm.Codegen_error (_, msg) -> msg
+    | Codegen_wasm.Codegen_error (_, msg) -> msg
+  in
+  assert_contains "vec: C codegen rejects Vec with clear message"
+    (codegen_err_msg (fun p -> Codegen_c.emit_program ~main_ty:Ast.TyInt p))
+    "interpreter-only";
+  (* LLVM はポリモフィズム未解決を先に検出するので "interpreter-only" 文字列
+     には到達しない (`unsupported LLVM codegen type element` で reject)。
+     どちらでも codegen エラーになることだけ確認。 *)
+  check_raises "vec: LLVM codegen rejects Vec"
+    (fun () ->
+      let prog = Pipeline.parse_program "let v = vec_new () in vec_len v" in
+      let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog in ());
+  assert_contains "vec: Wasm codegen rejects Vec with clear message"
+    (codegen_err_msg (fun p -> Codegen_wasm.emit_program ~main_ty:Ast.TyInt p))
+    "interpreter-only";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

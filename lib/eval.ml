@@ -13,6 +13,10 @@ type value =
   | V_constr of string * value option
   | V_tuple of value list
   | V_record of string * (string * value) list
+  | V_vec of value array ref
+    (* `'a Vec` — region-aware growable vector (Phase 12.1, Q-010
+       narrowed → 実装第一段階).  Backed by a mutable array ref;
+       push reallocates. Trivial[R] when element type is Trivial[R]. *)
 
 and env = (string * value ref) list
 
@@ -53,6 +57,9 @@ and to_string = function
   | V_record (name, fields) ->
     let parts = List.map (fun (f, v) -> f ^ " = " ^ to_string v) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"
+  | V_vec arr ->
+    let elems = Array.to_list !arr in
+    "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -575,6 +582,47 @@ let builtin_fail =
 let builtin_show =
   V_builtin ("show", fun v -> V_str (to_string v))
 
+(* --- Vec builtins (Phase 12.1) ---
+   `'a Vec` is a region-aware growable vector. In the interpreter
+   the underlying storage is `value array ref` — `push` reallocates
+   when full. Operations are mutating, so multiple `&R Vec` borrows
+   to the same Vec are subject to the borrow checker rules. *)
+let builtin_vec_new =
+  V_builtin ("vec_new", fun v ->
+    match v with
+    | V_unit -> V_vec (ref [||])
+    | _ -> failwith "vec_new: expected unit")
+
+let builtin_vec_push =
+  V_builtin ("vec_push", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_push_p1", fun x ->
+        arr := Array.append !arr [| x |];
+        V_unit)
+    | _ -> failwith "vec_push: expected Vec")
+
+let builtin_vec_get =
+  V_builtin ("vec_get", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_get_p1", fun idx ->
+        match idx with
+        | V_int i ->
+          if i < 0 || i >= Array.length !arr then
+            raise (Eval_error (Loc.dummy,
+              Printf.sprintf "vec_get: index %d out of bounds (len = %d)"
+                i (Array.length !arr)))
+          else (!arr).(i)
+        | _ -> failwith "vec_get: expected int index")
+    | _ -> failwith "vec_get: expected Vec")
+
+let builtin_vec_len =
+  V_builtin ("vec_len", fun v ->
+    match v with
+    | V_vec arr -> V_int (Array.length !arr)
+    | _ -> failwith "vec_len: expected Vec")
+
 let builtin_fst =
   V_builtin ("fst", fun v ->
     match v with
@@ -951,6 +999,10 @@ let initial_env : env =
     ("iter_n", ref builtin_iter_n);
     ("mk_logger", ref builtin_mk_logger);
     ("mk_metrics", ref builtin_mk_metrics);
+    ("vec_new",  ref builtin_vec_new);
+    ("vec_push", ref builtin_vec_push);
+    ("vec_get",  ref builtin_vec_get);
+    ("vec_len",  ref builtin_vec_len);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

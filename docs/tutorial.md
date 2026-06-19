@@ -361,6 +361,63 @@ ListOps.sum [1, 2, 3, 4, 5]    // 15
 - 入れ子 module / `open M` 構文は今後
 - import パス resolution は cwd 相対 (importer 相対は今後)
 
+## 10.6. 可変長 Vector (`'a Vec`)
+
+Lang の最初の **region-aware standard collection**。`'a list` が再帰的な
+不変リストなのに対し、`'a Vec` は可変長の growable vector (内部は array)。
+
+```
+let nums = vec_new () in
+{
+  vec_push nums 10;
+  vec_push nums 20;
+  vec_push nums 30;
+  vec_len nums              // → 3
+}
+```
+
+builtin API:
+
+| 関数 | 型 | 動作 |
+|---|---|---|
+| `vec_new` | `unit -> 'a Vec` | 空の Vec を作る |
+| `vec_push` | `'a Vec -> 'a -> unit` | 末尾に push (in-place) |
+| `vec_get` | `'a Vec -> int -> 'a` | index 取得 (範囲外は eval error) |
+| `vec_len` | `'a Vec -> int` | 要素数 |
+
+**region に置ける**: `'a` が Trivial[R] (drop type を含まない) なら、
+Vec は region に置ける:
+
+```
+region R {
+  let v = vec_new () in
+  { vec_push v 1; vec_push v 2; &R v }   // OK
+}
+```
+
+Drop 型 (`drop type Conn = { ... }`) を要素にすると Trivial[R] が破れる
+ので region に置けない:
+
+```
+region R {
+  let v = (vec_new () : Conn Vec) in &R v
+}
+// type error: Trivial[R] violated: cannot place value of type `Conn Vec`
+//   into region — type contains a Drop type
+```
+
+現状 (Phase 12.1) の制約:
+- **インタプリタ専用** — 3 backend codegen は `vec_new` 等を見つけると
+  `Codegen_error` で reject (`interpreter-only` メッセージ付き)
+- **region をパラメータに乗せる `Vec[R, T]`** はまだ — 現状は単純 `'a Vec`
+- **`OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]`** はまだ
+- **`Allocator` trait の API 統一** もまだ
+
+設計 Q-010 の全貌は [internal design notes](https://github.com/284km/internal design notes)
+を参照 (private repo)。
+
+動く実例: [`examples/vec_basics.lang`](../examples/vec_basics.lang)。
+
 ## 11. ブロック式 (副作用シーケンス)
 
 ```
@@ -432,6 +489,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`borrow_modes.lang`** — 4 種類の借用注釈 (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) を組み合わせて使うデモ
 - **`borrow_modes_typeerror.lang`** — borrow mode mismatch が型エラーで捕捉される様子 (意図的に失敗する demo)
 - **`borrow_conflict.lang`** — borrow checker (Phase 11.4) が同一変数への衝突 borrow を拒否する demo (意図的に失敗)
+- **`vec_basics.lang`** — `'a Vec` の基本操作 + region 配置 (Phase 12.1)
 
 REPL で対話的に試したいときは:
 ```sh

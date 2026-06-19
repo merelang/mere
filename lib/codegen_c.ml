@@ -403,6 +403,13 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s -> Ast.escape_string s
   | Ast.Var name ->
+    (* Vec builtins are interpreter-only (Phase 12.1). Reject early in
+       codegen with a clear message rather than emitting code that
+       fails at C compile time with undeclared-identifier errors. *)
+    if name = "vec_new" || name = "vec_push"
+       || name = "vec_get" || name = "vec_len" then
+      unsupported e.loc
+        (name ^ " (Vec builtins are interpreter-only in Phase 12.1)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -859,6 +866,9 @@ type fn_decl = {
 (* Lang type → C type, restricted to the codegen subset. *)
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
+  | Ast.TyCon ("Vec", _) ->
+    raise (Codegen_error (Loc.dummy,
+      "unsupported in C codegen subset: `'a Vec` (Phase 12.1 is interpreter-only)"))
   | Ast.TyInt | Ast.TyBool -> "int"
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)

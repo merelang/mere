@@ -482,6 +482,41 @@ let exit_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyInt, _exit_alpha) }
 
+(* --- Vec builtins (Phase 12.1, Q-010 narrowed → 実装第一段階) ---
+   `'a Vec` は region-aware な可変長 vector。型は TyCon ("Vec", [elem]) で
+   表現、`'a list` と同じ枠組み。Trivial 扱いなので region に置ける。 *)
+let _vec_new_alpha = fresh_var ()
+let vec_new_scheme =
+  let aid = match _vec_new_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Vec", [_vec_new_alpha])) }
+
+let _vec_push_alpha = fresh_var ()
+let vec_push_scheme =
+  let aid = match _vec_push_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_push_alpha]),
+      Ast.TyArrow (_vec_push_alpha, Ast.TyUnit)) }
+
+let _vec_get_alpha = fresh_var ()
+let vec_get_scheme =
+  let aid = match _vec_get_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_get_alpha]),
+      Ast.TyArrow (Ast.TyInt, _vec_get_alpha)) }
+
+let _vec_len_alpha = fresh_var ()
+let vec_len_scheme =
+  let aid = match _vec_len_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Vec", [_vec_len_alpha]), Ast.TyInt) }
+
+(* Pre-register `'a Vec` (arity 1) so user code can write `int Vec` /
+   `(int Vec) Vec` in type annotations. *)
+let () = Hashtbl.replace types "Vec" 1
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
@@ -595,6 +630,11 @@ let initial_env : env =
        registered above). *)
     ("mk_logger",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyCon ("Logger",  []))));
     ("mk_metrics", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Metrics", []))));
+    (* Vec builtins (Phase 12.1) *)
+    ("vec_new",    vec_new_scheme);
+    ("vec_push",   vec_push_scheme);
+    ("vec_get",    vec_get_scheme);
+    ("vec_len",    vec_len_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

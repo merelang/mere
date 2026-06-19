@@ -184,6 +184,9 @@ let mono_variant_is_recursive
    top of the module. *)
 let llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
+  | Ast.TyCon ("Vec", _) ->
+    raise (Codegen_error (Loc.dummy,
+      "unsupported in LLVM codegen subset: `'a Vec` (Phase 12.1 is interpreter-only)"))
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
   | Ast.TyStr -> "ptr"
@@ -1351,6 +1354,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        since pointers are opaque, the global is directly usable as a ptr. *)
     fresh_str_global s
   | Ast.Var name ->
+    if name = "vec_new" || name = "vec_push"
+       || name = "vec_get" || name = "vec_len" then
+      unsupported e.Ast.loc
+        (name ^ " (Vec builtins are interpreter-only in Phase 12.1)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
