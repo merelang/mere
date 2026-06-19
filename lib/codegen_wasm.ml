@@ -89,6 +89,32 @@ type fn_decl = {
 
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Each variant constructor → integer tag. Populated up front from
+   Exhaustive.type_variants. *)
+let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
+
+(* Single payload type for a variant (None if all-nullary). Mirrors the
+   LLVM backend's `variant_payload_ty_of`: all payload-bearing
+   constructors must share one payload type or we raise. *)
+let variant_payload_ty (vname : string) : Ast.ty option =
+  match Hashtbl.find_opt Exhaustive.type_variants vname with
+  | None ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "unknown variant type `%s` at Wasm codegen" vname))
+  | Some vs ->
+    let payloads = List.filter_map (fun (_, p) -> p) vs in
+    (match payloads with
+     | [] -> None
+     | first :: rest ->
+       (* Compare by string representation as a cheap shape test. *)
+       let same = List.for_all (fun p -> p = first) rest in
+       if same then Some first
+       else
+         raise (Codegen_error (Loc.dummy,
+           Printf.sprintf
+             "variant `%s` has constructors with different payload types — \
+              Phase 6 MVP needs all payloads to be the same type" vname)))
+
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
@@ -372,6 +398,132 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
     ) decl_fields;
     emit_instr (Printf.sprintf "local.get %d" dst_slot)
+  | Ast.Constr (cname, arg_opt) ->
+    let info =
+      match Hashtbl.find_opt Typer.constructors cname with
+      | Some i -> i
+      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ cname)
+    in
+    let type_name = info.Typer.type_name in
+    if info.Typer.params <> [] then
+      unsupported e.Ast.loc "polymorphic variant — Phase 6 later slice";
+    let tag =
+      match Hashtbl.find_opt variant_tags cname with
+      | Some t -> t
+      | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
+    in
+    let payload_ty = variant_payload_ty type_name in
+    let n_bytes = match payload_ty with None -> 4 | Some _ -> 8 in
+    let base_slot = fresh_local () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" base_slot);
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr (Printf.sprintf "i32.const %d" n_bytes);
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    (* Store tag at offset 0. *)
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr (Printf.sprintf "i32.const %d" tag);
+    emit_instr "i32.store offset=0";
+    (match arg_opt, payload_ty with
+     | None, _ -> ()
+     | Some arg, Some _ ->
+       emit_instr (Printf.sprintf "local.get %d" base_slot);
+       emit_expr arg;
+       emit_instr "i32.store offset=4"
+     | Some _, None ->
+       unsupported e.Ast.loc
+         (Printf.sprintf
+            "constructor `%s` has payload but variant lowered as nullary-only"
+            cname));
+    emit_instr (Printf.sprintf "local.get %d" base_slot)
+  | Ast.Match (scrut, arms) ->
+    let scrut_ty =
+      match scrut.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "match: missing scrutinee type"
+    in
+    let type_name =
+      match scrut_ty with
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n -> n
+      | _ -> unsupported e.Ast.loc
+               "match: scrutinee is not a user-declared variant (Phase 6 MVP)"
+    in
+    let payload_ty = variant_payload_ty type_name in
+    let scrut_slot = fresh_local () in
+    let tag_slot = fresh_local () in
+    let payload_slot = match payload_ty with
+      | None -> -1
+      | Some _ -> fresh_local ()
+    in
+    emit_expr scrut;
+    emit_instr (Printf.sprintf "local.set %d" scrut_slot);
+    emit_instr (Printf.sprintf "local.get %d" scrut_slot);
+    emit_instr "i32.load offset=0";
+    emit_instr (Printf.sprintf "local.set %d" tag_slot);
+    (match payload_ty with
+     | None -> ()
+     | Some _ ->
+       emit_instr (Printf.sprintf "local.get %d" scrut_slot);
+       emit_instr "i32.load offset=4";
+       emit_instr (Printf.sprintf "local.set %d" payload_slot));
+    (* Emit nested if/else chain. Each arm pushes its result; final
+       fallthrough is `unreachable` to mirror typer-promised exhaustiveness. *)
+    let rec emit_arms = function
+      | [] ->
+        emit_instr "unreachable"
+      | (pat, guard, body) :: rest ->
+        if guard <> None then
+          unsupported pat.Ast.ploc "match guard — Phase 6 later slice";
+        let tag_value, bindings =
+          match pat.Ast.pnode with
+          | Ast.P_wild -> (None, [])
+          | Ast.P_var n -> (None, [(n, scrut_slot)])
+          | Ast.P_constr (cname, sub) ->
+            let t =
+              match Hashtbl.find_opt variant_tags cname with
+              | Some t -> t
+              | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+            in
+            let bs =
+              match sub with
+              | None -> []
+              | Some sp ->
+                (match sp.Ast.pnode, payload_ty with
+                 | Ast.P_wild, _ -> []
+                 | Ast.P_var n, Some _ -> [(n, payload_slot)]
+                 | _, None ->
+                   unsupported sp.Ast.ploc
+                     "ctor sub-pattern on nullary-only variant"
+                 | _ ->
+                   unsupported sp.Ast.ploc
+                     "ctor sub-pattern kind not yet in Phase 6 MVP")
+            in
+            (Some t, bs)
+          | _ ->
+            unsupported pat.Ast.ploc "pattern kind not yet in Phase 6 MVP"
+        in
+        match tag_value with
+        | None ->
+          (* Wildcard or var: always matches. *)
+          let prev_locals = !locals in
+          locals := bindings @ prev_locals;
+          emit_expr body;
+          locals := prev_locals
+        | Some t ->
+          emit_instr (Printf.sprintf "local.get %d" tag_slot);
+          emit_instr (Printf.sprintf "i32.const %d" t);
+          emit_instr "i32.eq";
+          emit_instr "if (result i32)";
+          let prev_locals = !locals in
+          locals := bindings @ prev_locals;
+          emit_expr body;
+          locals := prev_locals;
+          emit_instr "else";
+          emit_arms rest;
+          emit_instr "end"
+    in
+    emit_arms arms
   | Ast.Tuple elems ->
     (* All elements occupy 4 bytes (i32 / ptr-style offset). The tuple
        value is the base offset into linear memory. RESERVE the memory
@@ -471,8 +623,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
   Hashtbl.reset toplevel_fn_names;
+  Hashtbl.reset variant_tags;
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
+  (* Pre-register variant tags from Exhaustive's registry. *)
+  Hashtbl.iter (fun _name vs ->
+    List.iteri (fun i (cname, _) ->
+      Hashtbl.replace variant_tags cname i) vs
+  ) Exhaustive.type_variants;
   let main_expr = Ast.desugar_program prog in
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
