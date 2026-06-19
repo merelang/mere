@@ -1163,7 +1163,7 @@ let rec eval_in (env : env) (e : Ast.expr) =
        the region is a unit-value placeholder; actual bump-allocation will
        come with codegen.  *)
     eval_in ((name, ref V_unit) :: env) body
-  | Ast.Ref (_region, inner) ->
+  | Ast.Ref (_mode, _region, inner) ->
     (* `&R v` — runtime is identity, the region tag exists only in the type
        system.  Eventual codegen will materialize this as an actual region
        allocation. *)

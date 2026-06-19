@@ -80,7 +80,7 @@ let rec occurs id = function
   | Ast.TyCon (_, args) -> List.exists (occurs id) args
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
   | Ast.TyTuple ts -> List.exists (occurs id) ts
-  | Ast.TyRef (_, inner) -> occurs id inner
+  | Ast.TyRef (_, _, inner) -> occurs id inner
 
 (* For common primitive-type mismatches, suggest a likely fix. Returns
    None for combinations where no obvious one-liner conversion exists.
@@ -128,7 +128,7 @@ let rec unify loc t1 t2 =
     unify loc b1 b2
   | Ast.TyTuple ts1, Ast.TyTuple ts2 when List.length ts1 = List.length ts2 ->
     List.iter2 (unify loc) ts1 ts2
-  | Ast.TyRef (r1, t1), Ast.TyRef (r2, t2) when r1 = r2 ->
+  | Ast.TyRef (m1, r1, t1), Ast.TyRef (m2, r2, t2) when r1 = r2 && m1 = m2 ->
     unify loc t1 t2
   | Ast.TyVar v1, Ast.TyVar v2 when v1.id = v2.id -> ()
   | Ast.TyVar v, t | t, Ast.TyVar v ->
@@ -163,7 +163,7 @@ let rec collect_free_vars t acc =
   | Ast.TyTuple ts -> List.fold_left (fun a t -> collect_free_vars t a) acc ts
   | Ast.TyCon (_, args) ->
     List.fold_left (fun a t -> collect_free_vars t a) acc args
-  | Ast.TyRef (_, inner) -> collect_free_vars inner acc
+  | Ast.TyRef (_, _, inner) -> collect_free_vars inner acc
 
 let env_free_vars env =
   List.fold_left (fun acc (_, sch) ->
@@ -192,7 +192,7 @@ let instantiate sch =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
-    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst inner)
   in
   subst sch.body
 
@@ -202,7 +202,7 @@ type env = (string * scheme) list
    Used by Region_block's escape check. *)
 let rec mentions_region (name : string) (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyRef (r, inner) -> r = name || mentions_region name inner
+  | Ast.TyRef (_, r, inner) -> r = name || mentions_region name inner
   | Ast.TyArrow (a, b) -> mentions_region name a || mentions_region name b
   | Ast.TyTuple ts -> List.exists (mentions_region name) ts
   | Ast.TyCon (_, args) -> List.exists (mentions_region name) args
@@ -228,7 +228,7 @@ let freshen_params t =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (aux a, aux b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map aux ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map aux args)
-    | Ast.TyRef (r, inner) -> Ast.TyRef (r, aux inner)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, aux inner)
   in
   aux t, mapping
 
@@ -269,9 +269,9 @@ let active_regions : string list ref = ref []
    declared field types at construction time. *)
 let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
-  | Ast.TyRef (r, inner) ->
+  | Ast.TyRef (m, r, inner) ->
     let r' = if r = from_name then to_name else r in
-    Ast.TyRef (r', subst_region from_name to_name inner)
+    Ast.TyRef (m, r', subst_region from_name to_name inner)
   | Ast.TyArrow (a, b) ->
     Ast.TyArrow (subst_region from_name to_name a,
                  subst_region from_name to_name b)
@@ -333,7 +333,7 @@ let rec contains_drop_type (t : Ast.ty) : bool =
     Hashtbl.mem drop_types name
     || List.exists contains_drop_type args
   | Ast.TyTuple ts -> List.exists contains_drop_type ts
-  | Ast.TyRef (_, inner) -> contains_drop_type inner
+  | Ast.TyRef (_, _, inner) -> contains_drop_type inner
   | Ast.TyArrow _ -> false
   | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
@@ -350,7 +350,7 @@ let instantiate_constr (info : constr_info) =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
-    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst inner)
   in
   let arg' = Option.map subst info.arg in
   let result_args = List.map (fun p -> List.assoc p mapping) info.params in
@@ -368,7 +368,7 @@ let instantiate_record name (info : record_info) =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
-    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst inner)
   in
   let fields' = List.map (fun (f, t) -> (f, subst t)) info.r_fields in
   let result_args = List.map (fun p -> List.assoc p mapping) info.r_params in
@@ -714,7 +714,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           "region escape: value of type `%s` cannot leave region `%s`"
           (Ast.pp_ty t) name));
     t
-  | Ast.Ref (region, inner) ->
+  | Ast.Ref (mode, region, inner) ->
     (* `&R e` — tag the value's type with region R. Enforces the Trivial[R]
        constraint: the inner value's type must not mention any Drop type. *)
     let t = infer env inner in
@@ -724,7 +724,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           "Trivial[%s] violated: cannot place value of type `%s` into region — \
            type contains a Drop type (use `with` to manage Drop cap lifetimes)"
           region (Ast.pp_ty t)));
-    Ast.TyRef (region, t)
+    Ast.TyRef (mode, region, t)
   | Ast.Fun (param, ty_opt, body) ->
     let alpha = fresh_var () in
     (match ty_opt with
@@ -856,7 +856,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           field access can later substitute the view's region param with
           the actual region. The TyRef-of-unit marker is recognized by
           Field_get / Record_update / pp_ty. *)
-       Ast.TyCon (name, [Ast.TyRef (target_region, Ast.TyUnit)])
+       Ast.TyCon (name, [Ast.TyRef (Ast.BorrowedRead, target_region, Ast.TyUnit)])
      | None ->
        let info =
          try Hashtbl.find records name
@@ -887,7 +887,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     (* The inner expression must have type `TyCon (rec_name, args)` for some
        declared record `rec_name`.  Walk to resolve type vars. *)
     (match Ast.walk t_inner with
-     | Ast.TyCon (view_name, [Ast.TyRef (region, Ast.TyUnit)])
+     | Ast.TyCon (view_name, [Ast.TyRef (_, region, Ast.TyUnit)])
        when Hashtbl.mem views view_name ->
        (* View field access: substitute the view's region param with the
           construction-time region recorded in the value's type. *)
@@ -912,7 +912,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Record_update (base, updates) ->
     let t_base = infer env base in
     (match Ast.walk t_base with
-     | Ast.TyCon (view_name, [Ast.TyRef (region, Ast.TyUnit)]) as t_view
+     | Ast.TyCon (view_name, [Ast.TyRef (_, region, Ast.TyUnit)]) as t_view
        when Hashtbl.mem views view_name ->
        (* View record update: substitute region in each updated field's
           declared type, type-check, and return the same view-typed value. *)

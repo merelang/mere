@@ -108,7 +108,7 @@ let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   | Ast.TyArrow (a, b) -> Ast.TyArrow (subst_params mapping a, subst_params mapping b)
   | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_params mapping) ts)
   | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_params mapping) args)
-  | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst_params mapping inner)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst_params mapping inner)
   | t -> t
 
 let subst_variants
@@ -149,7 +149,7 @@ let variant_is_recursive
     | Ast.TyCon (_, args) -> List.exists mentions args
     | Ast.TyTuple ts -> List.exists mentions ts
     | Ast.TyArrow (a, b) -> mentions a || mentions b
-    | Ast.TyRef (_, inner) -> mentions inner
+    | Ast.TyRef (_, _, inner) -> mentions inner
     | _ -> false
   in
   List.exists (fun (_, arg_opt) ->
@@ -172,7 +172,7 @@ let mono_variant_is_recursive
         | Ast.TyTuple ts -> List.exists ty_mentions ts
         | Ast.TyArrow (a, b) -> ty_mentions a || ty_mentions b
         | Ast.TyCon (_, targs) -> List.exists ty_mentions targs
-        | Ast.TyRef (_, inner) -> ty_mentions inner
+        | Ast.TyRef (_, _, inner) -> ty_mentions inner
         | _ -> false)
   in
   List.exists (fun (_, arg_opt) ->
@@ -266,7 +266,7 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
-  | Ast.TyRef (_, inner) -> ty_is_concrete inner
+  | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
   | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
 
 (* Top-level fn binding extracted from main: `let name = fn param -> body in ...`.
@@ -391,7 +391,7 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
         (match g with Some ge -> go ge bound' | None -> ()); go b bound') arms
     | Ast.Tuple es -> List.iter (fun e -> go e bound) es
     | Ast.Region_block (n, b) -> go b (n :: bound)
-    | Ast.Ref (_, a) -> go a bound
+    | Ast.Ref (_, _, a) -> go a bound
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
     | Ast.Field_get (a, _) -> go a bound
     | Ast.Record_update (a, fs) ->
@@ -488,7 +488,7 @@ let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
     | Ast.Region_block (_, b) -> go b
-    | Ast.Ref (_, a) -> go a
+    | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
     | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
@@ -536,7 +536,7 @@ let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list li
       List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
     | Ast.TyCon (_, args) -> List.iter walk_ty args
-    | Ast.TyRef (_, inner) -> walk_ty inner
+    | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
   let rec walk_expr (e : Ast.expr) =
@@ -560,7 +560,7 @@ let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list li
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -605,7 +605,7 @@ let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
     | Ast.TyCon (n, args) -> add n; List.iter walk_ty args
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
-    | Ast.TyRef (_, inner) -> walk_ty inner
+    | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
   let rec walk_expr (e : Ast.expr) =
@@ -635,7 +635,7 @@ let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -660,7 +660,7 @@ let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
     | Ast.TyCon (n, args) -> add n; List.iter walk_ty args
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
-    | Ast.TyRef (_, inner) -> walk_ty inner
+    | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
   let rec walk_expr (e : Ast.expr) =
@@ -687,7 +687,7 @@ let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -812,7 +812,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
       walk_ty p'; walk_ty r'
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyCon (_, args) -> List.iter walk_ty args
-    | Ast.TyRef (_, inner) -> walk_ty inner
+    | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
   let rec walk_expr (e : Ast.expr) =
@@ -836,7 +836,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -875,7 +875,7 @@ let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
       add n args'
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
-    | Ast.TyRef (_, inner) -> walk_ty inner
+    | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
   let rec walk_expr (e : Ast.expr) =
@@ -899,7 +899,7 @@ let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -983,7 +983,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -1615,7 +1615,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       match e.Ast.ty with
       | Some t ->
         (match Ast.walk t with
-         | Ast.TyCon (_, [Ast.TyRef (r, _)]) -> r
+         | Ast.TyCon (_, [Ast.TyRef (_, r, _)]) -> r
          | _ -> unsupported e.Ast.loc
                   "view literal missing region marker in inferred type")
       | None -> unsupported e.Ast.loc "view literal: missing type info"
@@ -2220,7 +2220,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     current_regions := saved;
     emit_instr (Printf.sprintf "  call void @__lang_region_free(ptr %s)" region_p);
     v
-  | Ast.Ref (region, inner) ->
+  | Ast.Ref (_mode, region, inner) ->
     (* `&R v` — region-allocate a copy of `v` and return ptr. *)
     let v = emit_expr env inner in
     let v_ty =

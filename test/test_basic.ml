@@ -3839,5 +3839,65 @@ let () =
       Pipeline.process
         "import \"/nonexistent/path/foo.lang\";\n42");
 
+  (* --- Phase 11.1: 借用注釈の細分化 (Q-004 narrowed) --- *)
+  (* デフォルト `&R T` は BorrowedRead (shared read)、syntax 上は無印。 *)
+  check "borrow: &R T parses as default (borrowed/shared-read)"
+    (Pipeline.type_of "fn (x: &R int) -> 1") "(&R int -> int)";
+  check "borrow: &mut R T = exclusive write"
+    (Pipeline.type_of "fn (x: &mut R int) -> 1") "(&mut R int -> int)";
+  check "borrow: &shared write R T = shared write"
+    (Pipeline.type_of "fn (x: &shared write R int) -> 1")
+    "(&shared write R int -> int)";
+  check "borrow: &exclusive R T = exclusive read"
+    (Pipeline.type_of "fn (x: &exclusive R int) -> 1")
+    "(&exclusive R int -> int)";
+
+  (* 値レベル `&R v` も同じく 4 modes をパース。region から抜けると
+     region escape になるので、annotation で mode をピン留めして
+     region 内で消費するパターンで検証する。 *)
+  check "borrow: value-level &R v defaults to borrowed read"
+    (Pipeline.process
+       "region R { let _ = (&R 5 : &R int) in 42 }") "42";
+  check "borrow: value-level &mut R v"
+    (Pipeline.process
+       "region R { let _ = (&mut R 5 : &mut R int) in 42 }") "42";
+  check "borrow: value-level &shared write R v"
+    (Pipeline.process
+       "region R { let _ = (&shared write R 5 : &shared write R int) in 42 }") "42";
+  check "borrow: value-level &exclusive R v"
+    (Pipeline.process
+       "region R { let _ = (&exclusive R 5 : &exclusive R int) in 42 }") "42";
+  (* annotation で mode を強制 → mismatch なら型エラー *)
+  check_raises "borrow: value-level mode mismatch fails (&R 5 : &mut R int)"
+    (fun () ->
+      Pipeline.process
+        "region R { let _ = (&R 5 : &mut R int) in 42 }");
+
+  (* Unify は mode を区別する (subtyping なし、strict equality) *)
+  check_raises "borrow: &R != &mut R (caller passes &R to &mut R param)"
+    (fun () ->
+      Pipeline.process
+        "let f = fn (x: &mut R int) -> 1 in region R { f (&R 5) }");
+  check_raises "borrow: &shared write != &mut"
+    (fun () ->
+      Pipeline.process
+        "let f = fn (x: &mut R int) -> 1 in \
+         region R { f (&shared write R 5) }");
+  check_raises "borrow: &exclusive != &shared write"
+    (fun () ->
+      Pipeline.process
+        "let f = fn (x: &shared write R int) -> 1 in \
+         region R { f (&exclusive R 5) }");
+
+  (* 同じ mode 同士は通る *)
+  check "borrow: same-mode call type-checks (mut → mut)"
+    (Pipeline.process
+       "let f = fn (x: &mut R int) -> 42 in region R { f (&mut R 5) }")
+    "42";
+  check "borrow: same-mode call type-checks (shared write → shared write)"
+    (Pipeline.process
+       "let f = fn (x: &shared write R int) -> 42 in \
+        region R { f (&shared write R 5) }") "42";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
