@@ -976,6 +976,64 @@ let rec parse_program_internal tokens =
     | _ ->
       raise (Parse_error (pos_of toks, "expected '(' after signature name"))
   in
+  (* Phase 9.4: extract the `type ...;` decl parser so both top-level
+     `parse_decls` and `parse_module_body` can reuse it. Returns the
+     parsed top_decl + the remaining tokens after the terminating `;`. *)
+  let parse_type_decl_after_keyword toks =
+    let params, rest = parse_type_params toks in
+    match rest with
+    | (_, T_ident type_name) :: (_, T_eq) :: (_, T_lbrace) :: body_rest ->
+      let rec parse_fields acc toks =
+        match toks with
+        | (_, T_rbrace) :: rest -> List.rev acc, rest
+        | (_, T_ident fname) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          let acc = (fname, t) :: acc in
+          (match rest with
+           | (_, T_comma) :: rest -> parse_fields acc rest
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ',' or '}' in record fields")))
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected 'field: type' in record body"))
+      in
+      let fields, toks = parse_fields [] body_rest in
+      Hashtbl.replace records type_name fields;
+      (match toks with
+       | (_, T_semi) :: rest ->
+         Ast.Top_record (type_name, params, fields), rest
+       | _ ->
+         raise (Parse_error (pos_of toks, "expected ';' after record declaration")))
+    | (_, T_ident type_name) :: (_, T_eq) :: body_rest ->
+      let is_variant_body =
+        match body_rest with
+        | (_, T_pipe) :: _ -> true
+        | (_, T_ident n) :: (_, (T_pipe | T_of)) :: _ when starts_with_upper n -> true
+        | _ -> false
+      in
+      if is_variant_body then
+        let variants, toks = parse_variants body_rest in
+        List.iter (fun (cname, payload) ->
+          Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
+        ) variants;
+        (match toks with
+         | (_, T_semi) :: rest ->
+           Ast.Top_type (type_name, params, variants), rest
+         | _ ->
+           raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
+      else
+        let body, toks = ty body_rest in
+        Hashtbl.replace aliases type_name (params, body);
+        (match toks with
+         | (_, T_semi) :: rest ->
+           Ast.Top_type_alias (type_name, params, body), rest
+         | _ ->
+           raise (Parse_error (pos_of toks, "expected ';' after type alias")))
+    | _ ->
+      raise (Parse_error (pos_of rest, "expected 'ident = ...' after 'type'"))
+  in
   (* Collect bound names from a module's decls — used to compute the
      rename map for prefixing. Includes both direct lets and nested
      module names (which arrive as `N.f` after the inner prefix pass). *)
@@ -1042,6 +1100,14 @@ let rec parse_program_internal tokens =
     | (pos, T_module) :: _ ->
       raise (Parse_error (pos,
         "expected `NAME { decls }` after nested `module`"))
+    | (_, T_type) :: rest ->
+      (* Phase 9.4: `type` declarations are allowed inside module body.
+         For slice 1 of this feature, the type / record / variant /
+         alias name is NOT M-prefixed — the type lives in the global
+         registry (records / constructors / aliases). Subsequent slices
+         may add proper M-prefix scoping for module-internal types. *)
+      let decl, rest = parse_type_decl_after_keyword rest in
+      parse_module_body cur_path (decl :: decls) rest
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       let rec parse_more acc toks =
@@ -1223,69 +1289,8 @@ let rec parse_program_internal tokens =
       raise (Parse_error (pos,
         "expected 'NAME [R] (of T)? { fields }' after 'view'"))
     | (_, T_type) :: rest ->
-      let params, rest = parse_type_params rest in
-      (match rest with
-       | (_, T_ident type_name) :: (_, T_eq) :: (_, T_lbrace) :: body_rest ->
-         (* Record type: type Name = { f1: T1, f2: T2, ... }; *)
-         let rec parse_fields acc toks =
-           match toks with
-           | (_, T_rbrace) :: rest -> List.rev acc, rest
-           | (_, T_ident fname) :: (_, T_colon) :: rest ->
-             let t, rest = ty rest in
-             let acc = (fname, t) :: acc in
-             (match rest with
-              | (_, T_comma) :: rest -> parse_fields acc rest
-              | (_, T_rbrace) :: rest -> List.rev acc, rest
-              | _ ->
-                raise (Parse_error (pos_of rest,
-                  "expected ',' or '}' in record fields")))
-           | _ ->
-             raise (Parse_error (pos_of toks,
-               "expected 'field: type' in record body"))
-         in
-         let fields, toks = parse_fields [] body_rest in
-         Hashtbl.replace records type_name fields;
-         (match toks with
-          | (_, T_semi) :: rest ->
-            parse_decls (Ast.Top_record (type_name, params, fields) :: decls) rest
-          | _ ->
-            raise (Parse_error (pos_of toks, "expected ';' after record declaration")))
-       | (_, T_ident type_name) :: (_, T_eq) :: body_rest ->
-         (* Disambiguate: variant body starts with capitalized ident or `|`;
-            anything else is a type alias. *)
-         (* Variant body markers:
-            - leading `|` (`type X = | A | B`)
-            - capitalized ident followed by `|` (`type X = A | B`)
-            - capitalized ident followed by `of` (`type X = A of int`)
-            Otherwise treat as type alias (capitalized refs to records or
-            multi-arg-applied types still resolve via aliases / TyCon). *)
-         let is_variant_body =
-           match body_rest with
-           | (_, T_pipe) :: _ -> true
-           | (_, T_ident n) :: (_, (T_pipe | T_of)) :: _ when starts_with_upper n -> true
-           | _ -> false
-         in
-         if is_variant_body then
-           let variants, toks = parse_variants body_rest in
-           List.iter (fun (cname, payload) ->
-             Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
-           ) variants;
-           (match toks with
-            | (_, T_semi) :: rest ->
-              parse_decls (Ast.Top_type (type_name, params, variants) :: decls) rest
-            | _ ->
-              raise (Parse_error (pos_of toks, "expected ';' after type declaration")))
-         else
-           (* Type alias: `type Name = T;` *)
-           let body, toks = ty body_rest in
-           Hashtbl.replace aliases type_name (params, body);
-           (match toks with
-            | (_, T_semi) :: rest ->
-              parse_decls (Ast.Top_type_alias (type_name, params, body) :: decls) rest
-            | _ ->
-              raise (Parse_error (pos_of toks, "expected ';' after type alias")))
-       | _ ->
-         raise (Parse_error (pos_of rest, "expected 'ident = ...' after 'type'")))
+      let decl, rest = parse_type_decl_after_keyword rest in
+      parse_decls (decl :: decls) rest
     | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       let rec parse_more acc toks =

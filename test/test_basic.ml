@@ -4442,6 +4442,29 @@ let () =
         open Box93;\n\
         v + Box93.v") "200";
 
+  (* --- Phase 9.4: module 内での type / record declare --- *)
+  check "module-type: record declared inside module body"
+    (Pipeline.process
+       "module M94 {\n\
+          type Pt94 = { x: int, y: int };\n\
+          let mk = fn p -> Pt94 { x = fst p, y = snd p };\n\
+        };\n\
+        let p = M94.mk (3, 4) in p.x + p.y") "7";
+  check "module-type: variant declared inside module body"
+    (Pipeline.process
+       "module M94v {\n\
+          type 'a opt94 = N94 | S94 of 'a;\n\
+          let unwrap = fn o -> match o with | N94 -> 0 | S94 n -> n;\n\
+        };\n\
+        M94v.unwrap (S94 42)") "42";
+  check "module-type: type / let mixed in module body"
+    (Pipeline.process
+       "module Status94 {\n\
+          type code = Ok94 | Err94 of str;\n\
+          let label = fn c -> match c with | Ok94 -> \"ok\" | Err94 s -> s;\n\
+        };\n\
+        Status94.label (Err94 \"boom\")") "\"boom\"";
+
   check_raises "borrow checker (match): 別 arm 同士の union も active"
     (fun () ->
       Pipeline.process

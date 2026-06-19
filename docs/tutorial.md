@@ -414,9 +414,23 @@ Math.Adv.cube 2                 // 8 (nested は qualified のまま)
 の alias を展開する糖衣。nested module の export は qualified access で
 そのまま使う設計。
 
-現状の制約:
-- module 内では `let` / `let rec` / 入れ子 `module` のみ (type / record は module の外で declare、今後の slice)
-- `open M;` は M に対してのみ (`open M.N;` はまだ)
+**Phase 9.4 から module 内で `type` / `record` / `variant` を declare できる**:
+
+```
+module M {
+  type Pt = { x: int, y: int };
+  type 'a opt = MyNone | MySome of 'a;
+  let mk = fn p -> Pt { x = fst p, y = snd p };
+  let unwrap = fn o -> match o with | MyNone -> 0 | MySome n -> n;
+};
+
+let p = M.mk (3, 4) in p.x + p.y          // 7
+M.unwrap (MySome 35)                       // 35
+```
+
+現状の制約 (slice 1 範囲):
+- module 内 declare された type / record / constructor 名は **M-prefix されず global registry に入る** ため、同名の型を異なる module で declare すると衝突する。M-prefix scoping は今後の slice で
+- `open M;` は M の direct binding のみ (`open M.N;` はまだ)
 - import パス resolution は cwd 相対 (importer 相対は今後)
 
 ## 10.6. 可変長 Vector (`'a Vec`)
