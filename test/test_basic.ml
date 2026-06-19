@@ -3401,5 +3401,35 @@ let () =
   assert_contains "wasm: Unit_lit becomes i32.const 0"
     (wasm "fn () -> ()") "i32.const 0";
 
+  (* --- Wasm codegen: poly variant/record + recursive variant + P_tuple
+     sub-pattern (Phase 6.9) ---
+     Wasm の memory layout は uniform (どの値も i32 = 4 bytes) なので、
+     多相 variant/record は monomorphization 不要、recursive variant
+     (`'a list` の Cons) も同じ memory レイアウト。Match の Cons (h, t) も
+     payload を tuple offset として読んで extractvalue 連鎖。 *)
+  assert_contains "wasm: polymorphic variant works without specialization"
+    (wasm_with_decls
+      "type 'a WCgOpt = WCgN | WCgS of 'a;\n\
+       match WCgS 42 with | WCgN -> 0 | WCgS n -> n")
+    "i32.eq";
+  assert_contains "wasm: polymorphic record works without specialization"
+    (wasm_with_decls
+      "type 'a WCgBox = { v: 'a };\n\
+       let b = WCgBox { v = 42 } in b.v")
+    "i32.store offset=0";
+  assert_contains "wasm: recursive variant Cons stores tuple payload"
+    (wasm_with_decls
+      "type 'a WCgList = WCgNil | WCgCons of 'a * 'a WCgList;\n\
+       WCgCons (1, WCgNil)")
+    "i32.store offset=4";
+  assert_contains "wasm: P_tuple sub-pattern extracts elements"
+    (wasm_with_decls
+      "type 'a WCgList2 = WCgNil2 | WCgCons2 of 'a * 'a WCgList2;\n\
+       let rec sum = fn xs -> match xs with\n\
+         | WCgNil2 -> 0\n\
+         | WCgCons2 (h, t) -> h + sum t\n\
+       in sum (WCgCons2 (1, WCgNil2))")
+    "i32.load offset=0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -467,8 +467,9 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some i -> i
       | None -> unsupported e.Ast.loc ("unknown record type: " ^ name)
     in
-    if info.Typer.r_params <> [] then
-      unsupported e.Ast.loc "polymorphic record — Phase 6 later slice";
+    (* Wasm layout is uniform (all fields are i32 / 4 bytes), so
+       polymorphic records use the same code as monomorphic ones — no
+       per-instance specialization needed unlike LLVM. *)
     let decl_fields = info.Typer.r_fields in
     let n = List.length decl_fields in
     let base_slot = fresh_local () in
@@ -557,8 +558,6 @@ let rec emit_expr (e : Ast.expr) : unit =
       | None -> unsupported e.Ast.loc ("unknown constructor: " ^ cname)
     in
     let type_name = info.Typer.type_name in
-    if info.Typer.params <> [] then
-      unsupported e.Ast.loc "polymorphic variant — Phase 6 later slice";
     let tag =
       match Hashtbl.find_opt variant_tags cname with
       | Some t -> t
@@ -644,6 +643,23 @@ let rec emit_expr (e : Ast.expr) : unit =
                 (match sp.Ast.pnode, payload_ty with
                  | Ast.P_wild, _ -> []
                  | Ast.P_var n, Some _ -> [(n, payload_slot)]
+                 | Ast.P_tuple sub_pats, Some _ ->
+                   (* Payload is a tuple — extract each element via
+                      i32.load at offset i*4 into a fresh local. *)
+                   List.mapi (fun i sub_p ->
+                     match sub_p.Ast.pnode with
+                     | Ast.P_var n ->
+                       let slot = fresh_local () in
+                       emit_instr (Printf.sprintf "local.get %d" payload_slot);
+                       emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+                       emit_instr (Printf.sprintf "local.set %d" slot);
+                       Some (n, slot)
+                     | Ast.P_wild -> None
+                     | _ ->
+                       unsupported sub_p.Ast.ploc
+                         "nested tuple sub-pattern — Phase 6 later slice")
+                     sub_pats
+                   |> List.filter_map (fun x -> x)
                  | _, None ->
                    unsupported sp.Ast.ploc
                      "ctor sub-pattern on nullary-only variant"
