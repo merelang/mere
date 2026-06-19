@@ -4607,6 +4607,41 @@ let () =
   assert_contains "qualified name typo: did-you-mean across module path"
     qname_typo_msg "did you mean `MathT.factorial`?";
 
+  (* --- Phase 12.12: 逆向き owned_vec_to_vec --- *)
+  check "owned_vec_to_vec: scheme (region は active_regions から)"
+    (Pipeline.type_of "owned_vec_to_vec")
+    "('a OwnedVec -> Vec['b, 'a])";
+  check "owned_vec_to_vec: inside region R, returns Vec[R, T]"
+    (Pipeline.process
+       "let o = owned_vec_new () in \
+        let _ = owned_vec_push o 10 in let _ = owned_vec_push o 20 in \
+        let _ = owned_vec_push o 30 in \
+        region R { \
+          let v = owned_vec_to_vec o in \
+          vec_get v 0 + vec_get v 1 + vec_get v 2 \
+        }") "60";
+  check "owned_vec_to_vec: outside region → Vec[__heap, T]"
+    (Pipeline.process
+       "let o = owned_vec_new () in \
+        let _ = owned_vec_push o 1 in let _ = owned_vec_push o 2 in \
+        let v = owned_vec_to_vec o in \
+        vec_get v 0 + vec_get v 1") "3";
+  check_raises "owned_vec_to_vec: Vec[R, T] cannot escape region R"
+    (fun () ->
+      Pipeline.process
+        "let o = owned_vec_new () in \
+         region R { owned_vec_to_vec o }");
+  check "owned_vec_to_vec: deep copy — modifying owned doesn't affect vec"
+    (Pipeline.process
+       "let o = owned_vec_new () in \
+        let _ = owned_vec_push o 100 in \
+        let _ = owned_vec_push o 200 in \
+        region R { \
+          let v = owned_vec_to_vec o in \
+          let _ = owned_vec_push o 999 in \
+          vec_len v * 10 + vec_get v 0 \
+        }") "120";
+
   check_raises "borrow checker (match): 別 arm 同士の union も active"
     (fun () ->
       Pipeline.process

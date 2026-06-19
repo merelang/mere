@@ -1360,7 +1360,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "vec_iter" || name = "vec_map"
        || name = "vec_fold" || name = "vec_set"
        || name = "vec_filter" || name = "vec_to_list"
-       || name = "vec_to_owned"
+       || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"

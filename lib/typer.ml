@@ -646,6 +646,19 @@ let vec_to_owned_scheme =
       Ast.TyCon ("Vec", [_vec_to_owned_region; _vec_to_owned_elem]),
       Ast.TyCon ("OwnedVec", [_vec_to_owned_elem])) }
 
+(* Phase 12.12: 逆向き OwnedVec[T] → Vec[R, T]。region は call site の
+   active_regions から App ハンドラの special-case で inject される
+   (vec_new / strbuf_new / map_new と同じパターン)。 *)
+let _ovec_to_vec_elem = fresh_var ()
+let _ovec_to_vec_region = fresh_var ()
+let owned_vec_to_vec_scheme =
+  let aid = match _ovec_to_vec_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _ovec_to_vec_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("OwnedVec", [_ovec_to_vec_elem]),
+      Ast.TyCon ("Vec", [_ovec_to_vec_region; _ovec_to_vec_elem])) }
+
 (* --- OwnedVec[T] (Phase 12.5, Q-010 narrowed → 設計 (b) 別型分離) ---
    `OwnedVec[T]` は heap-allocated, Drop あり vector。`Vec[R, T]`
    (region 内、Trivial) と対照的に、Drop 型として登録されるので
@@ -917,6 +930,7 @@ let initial_env : env =
     ("vec_filter",   vec_filter_scheme);
     ("vec_to_list",  vec_to_list_scheme);
     ("vec_to_owned", vec_to_owned_scheme);
+    ("owned_vec_to_vec", owned_vec_to_vec_scheme);
     ("owned_vec_new",  owned_vec_new_scheme);
     ("owned_vec_push", owned_vec_push_scheme);
     ("owned_vec_get",  owned_vec_get_scheme);
@@ -1122,6 +1136,26 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let result_ty =
          Ast.TyCon ("Map", [marker; fresh_var (); fresh_var ()]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | Ast.Var "owned_vec_to_vec" ->
+       (* Phase 12.12: OwnedVec → Vec の region は active_regions から
+          inject。outside any region なら __heap。 *)
+       let active_region =
+         match !active_regions with
+         | r :: _ -> r
+         | [] -> "__heap"
+       in
+       let marker =
+         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
+       in
+       let elem = fresh_var () in
+       let result_ty = Ast.TyCon ("Vec", [marker; elem]) in
+       (* arg は OwnedVec[T] と unify する必要があるので、scheme と
+          同じ shape の関数型を構築して unify。 *)
+       unify e.loc tf
+         (Ast.TyArrow (Ast.TyCon ("OwnedVec", [elem]), result_ty));
+       (* arg の型を確認 (ta は既に inferred、 unify に通す) *)
+       unify arg.loc (Ast.TyCon ("OwnedVec", [elem])) ta;
        result_ty
      | _ ->
     (match Ast.walk tf with

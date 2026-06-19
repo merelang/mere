@@ -931,6 +931,15 @@ let builtin_vec_to_owned =
       V_vec (ref (Array.copy !arr))
     | _ -> failwith "vec_to_owned: expected Vec")
 
+(* Phase 12.12: 逆向き OwnedVec[T] → Vec[R, T]。region は呼出位置の
+   active_regions から typer の special-case で注入される。runtime は
+   単純な deep copy (V_vec を共有しているため、Array.copy で独立化)。 *)
+let builtin_owned_vec_to_vec =
+  V_builtin ("owned_vec_to_vec", fun v ->
+    match v with
+    | V_vec arr -> V_vec (ref (Array.copy !arr))
+    | _ -> failwith "owned_vec_to_vec: expected OwnedVec")
+
 let builtin_iter_n =
   V_builtin ("iter_n", fun n_val ->
     match n_val with
@@ -1269,6 +1278,7 @@ let initial_env : env =
     ("vec_filter",   ref builtin_vec_filter);
     ("vec_to_list",  ref builtin_vec_to_list);
     ("vec_to_owned", ref builtin_vec_to_owned);
+    ("owned_vec_to_vec", ref builtin_owned_vec_to_vec);
     ("owned_vec_new",  ref builtin_owned_vec_new);
     ("owned_vec_push", ref builtin_owned_vec_push);
     ("owned_vec_get",  ref builtin_owned_vec_get);
