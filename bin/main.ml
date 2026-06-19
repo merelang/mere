@@ -140,7 +140,11 @@ let () =
     run_action Lang_ml.Pipeline.type_of path source
   | [_; path] ->
     let source = read_file path in
-    run_action Lang_ml.Pipeline.process path source
+    (* Phase 9.5: importer-relative path resolution — pre-set Parser's
+       base_dir to this file's dir so `import "./foo.lang"` inside
+       resolves relative to the running file. *)
+    let base = Filename.dirname path in
+    run_action (Lang_ml.Pipeline.process ~base_dir:base) path source
   | _ ->
     usage ();
     exit 1

@@ -31,12 +31,18 @@ let module_names : (string, unit) Hashtbl.t = Hashtbl.create 4
    within the parent) and the full path. *)
 let module_bindings : (string, string list) Hashtbl.t = Hashtbl.create 4
 
-(* Import registry: file path -> ().  Populated when `import "path";` is
-   processed; consumed to skip subsequent imports of the same file
-   (cycle guard). Paths are stored as given by the source (no
-   canonicalisation in slice 1 — symlinks / different relative forms
-   of the same file would each re-import). *)
+(* Import registry: canonicalised file path -> ().  Populated when
+   `import "path";` is processed; consumed to skip subsequent imports
+   of the same file (cycle guard). Phase 9.5 で canonicalisation
+   (Unix.realpath) を入れたので、同一ファイルへの異なる relative path
+   表記でも 1 度だけ読まれる。 *)
 let imported_files : (string, unit) Hashtbl.t = Hashtbl.create 4
+
+(* Phase 9.5: importer-relative path resolution の基準ディレクトリ。
+   `parse_program ~base_dir` で top-level に設定、`import "path";` を
+   処理するたびに 「import 先ファイルのディレクトリ」を一時的に push
+   する (recursive imports で正しく辿るため)。 *)
+let current_base_dir : string ref = ref ""
 
 (* Region name stack — pushed when entering a `region NAME { ... }` body
    and popped on exit. Used to recognize `R.alloc(expr)` as sugar for
@@ -1149,24 +1155,45 @@ let rec parse_program_internal tokens =
   let rec parse_decls decls toks =
     match toks with
     | (pos, T_import) :: (_, T_string path) :: (_, T_semi) :: rest ->
-      (* `import "path";` — read the file, recursively parse its decls,
-         and splice them into the current decl stream. Skip if the
-         same path has been imported already (cycle guard). Parser
-         registries (constructors, records, module_names, aliases) are
-         shared across the recursive call, so imported types are
-         visible to the importer. *)
-      let _ = pos in
-      if Hashtbl.mem imported_files path then
+      (* `import "path";` — Phase 9.5: importer-relative path resolution.
+         Relative paths are resolved against `current_base_dir` (the
+         directory of the file currently being parsed). Absolute paths
+         used as-is. Canonicalisation via `Unix.realpath` collapses
+         symlinks and different relative forms of the same file, so the
+         cycle guard catches them. *)
+      let resolved =
+        if Filename.is_relative path then
+          Filename.concat !current_base_dir path
+        else path
+      in
+      let canonical =
+        try Unix.realpath resolved
+        with Unix.Unix_error _ ->
+          raise (Parse_error (pos,
+            Printf.sprintf "import: cannot resolve path `%s` (relative to `%s`)"
+              path !current_base_dir))
+      in
+      if Hashtbl.mem imported_files canonical then
         parse_decls decls rest
       else begin
-        Hashtbl.replace imported_files path ();
+        Hashtbl.replace imported_files canonical ();
         let source =
-          try In_channel.with_open_text path In_channel.input_all
+          try In_channel.with_open_text canonical In_channel.input_all
           with Sys_error msg ->
             raise (Parse_error (pos, "import: " ^ msg))
         in
         let toks_imp = Lexer.tokenize source in
-        let prog_imp = parse_program_internal toks_imp in
+        (* Switch base_dir to the imported file's directory so any
+           `import` inside it resolves relative to ITS location. *)
+        let saved = !current_base_dir in
+        current_base_dir := Filename.dirname canonical;
+        let prog_imp =
+          try parse_program_internal toks_imp
+          with ex ->
+            current_base_dir := saved;
+            raise ex
+        in
+        current_base_dir := saved;
         (* Imported file's main expression is discarded (decls-only is
            the recommended form). We prepend its decls newest-first so
            the final List.rev yields the correct source order. *)
@@ -1345,8 +1372,9 @@ let rec parse_program_internal tokens =
    delegate to the recursive worker. Inside the worker, `import` calls
    `parse_program_internal` directly so the cycle guard survives the
    recursion. *)
-let parse_program tokens =
+let parse_program ?(base_dir = Sys.getcwd ()) tokens =
   Hashtbl.reset imported_files;
+  current_base_dir := base_dir;
   parse_program_internal tokens
 
 let parse tokens =

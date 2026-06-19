@@ -431,7 +431,22 @@ M.unwrap (MySome 35)                       // 35
 現状の制約 (slice 1 範囲):
 - module 内 declare された type / record / constructor 名は **M-prefix されず global registry に入る** ため、同名の型を異なる module で declare すると衝突する。M-prefix scoping は今後の slice で
 - `open M;` は M の direct binding のみ (`open M.N;` はまだ)
-- import パス resolution は cwd 相対 (importer 相対は今後)
+
+**Phase 9.5 から import パスは importer 相対**: `./foo.lang` のような
+relative path は **import 文があるファイルからの相対パス** として解決
+される (cwd 相対ではない)。`Unix.realpath` で canonicalize されるので、
+異なる relative form で同じファイルを指しても cycle guard が正しく動く。
+
+```
+// sub/lib.lang
+let helper = fn x -> x * 7;
+```
+
+```
+// main.lang (sub/ と同じディレクトリの上)
+import "./sub/lib.lang";       // main.lang からの相対パス
+helper 6                       // → 42
+```
 
 ## 10.6. 可変長 Vector (`'a Vec`)
 
