@@ -431,11 +431,33 @@ region R { vec_new () }
 legacy `T Vec` (1-arg postfix) も書けて、内部的には `Vec[__heap, T]` に
 展開される (forward-compat)。
 
-現状 (Phase 12.3) の制約:
-- **インタプリタ専用** — 3 backend codegen は `vec_new` 等を見つけると
-  `Codegen_error` で reject (`interpreter-only` メッセージ付き)
-- **`OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]`** はまだ
-- **`Allocator` trait の API 統一** もまだ
+**Phase 12.5 で `OwnedVec[T]` を追加** — Vec[R, T] が region 内 Trivial
+なのに対し、`OwnedVec[T]` は heap-allocated で Drop 型扱い。region に置こう
+とすると静的拒否:
+
+```
+let lasting = owned_vec_new () in   // 型: int OwnedVec
+{
+  owned_vec_push lasting 100;
+  owned_vec_len lasting              // → 1
+}
+
+region R {
+  let v = owned_vec_new () in &R v
+  // type error: Trivial[R] violated: cannot place value of type
+  // `'a OwnedVec` into region — type contains a Drop type
+}
+```
+
+「短命 / region scope」と「長期保持 / heap」が同じ Vector で書き分けられる。
+動く対比 demo は [`examples/vec_vs_owned_vec.lang`](../examples/vec_vs_owned_vec.lang)。
+内部実装は両者とも同じ可変配列 — 型システム上の区別のみ。
+
+現状 (Phase 12.5) の制約:
+- **インタプリタ専用** — 3 backend codegen は Vec / OwnedVec の builtin を
+  見つけると `Codegen_error` で reject (`interpreter-only` メッセージ)
+- **`StrBuf[R]` / `Map[R, K, V]`** はまだ
+- **`Allocator` trait の API 統一** もまだ — 設計 (b) のうち「別型」のみ実装
 - **borrow checker は Vec 内部の要素単位までは追跡しない** — Vec を borrow した時点での mode は機械検証されるが、`vec_get` の結果を borrow するなどの細部は今後
 
 設計 Q-010 の全貌は [internal design notes](https://github.com/284km/internal design notes)
@@ -515,6 +537,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`borrow_modes_typeerror.lang`** — borrow mode mismatch が型エラーで捕捉される様子 (意図的に失敗する demo)
 - **`borrow_conflict.lang`** — borrow checker (Phase 11.4) が同一変数への衝突 borrow を拒否する demo (意図的に失敗)
 - **`vec_basics.lang`** — `'a Vec` の基本操作 + region 配置 (Phase 12.1)
+- **`vec_vs_owned_vec.lang`** — `Vec[R, T]` (region) vs `OwnedVec[T]` (heap, Drop) の対比 demo (Phase 12.5)
 
 REPL で対話的に試したいときは:
 ```sh

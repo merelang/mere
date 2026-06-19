@@ -4078,5 +4078,33 @@ let () =
   check "vec[R, T]: vec_new outside region defaults to __heap"
     (Pipeline.type_of "vec_new ()") "Vec[__heap, 'a]";
 
+  (* --- Phase 12.5: OwnedVec[T] (Q-010 narrowed (b) 別型分離) --- *)
+  check "owned_vec: owned_vec_new : unit -> 'a OwnedVec"
+    (Pipeline.type_of "owned_vec_new") "(unit -> 'a OwnedVec)";
+  check "owned_vec: basic push/len round-trip"
+    (Pipeline.process
+       "let v = owned_vec_new () in \
+        { owned_vec_push v 10; owned_vec_push v 20; owned_vec_len v }") "2";
+  check "owned_vec: polymorphic — str OwnedVec"
+    (Pipeline.process
+       "let v = owned_vec_new () in \
+        { owned_vec_push v \"a\"; owned_vec_push v \"b\"; \
+          owned_vec_get v 0 ++ owned_vec_get v 1 }") "\"ab\"";
+  (* 設計の核: OwnedVec は Drop なので region に置けない *)
+  check_raises "owned_vec: cannot be placed in a region (Drop)"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = owned_vec_new () in &R v }");
+  (* 対照: Vec[R, T] は Trivial なので region に置ける *)
+  check "owned_vec: contrast — Vec[R, T] still goes in region"
+    (Pipeline.process
+       "region R { let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; vec_len v } }") "2";
+  check_raises "owned_vec: codegen rejection (C)"
+    (fun () ->
+      let prog = Pipeline.parse_program
+        "let v = owned_vec_new () in owned_vec_len v" in
+      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

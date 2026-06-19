@@ -623,6 +623,45 @@ let builtin_vec_len =
     | V_vec arr -> V_int (Array.length !arr)
     | _ -> failwith "vec_len: expected Vec")
 
+(* OwnedVec[T] (Phase 12.5) — runtime は V_vec を共有。型システム上だけ
+   別型として扱われる。`Vec[R, T]` との対比は、OwnedVec が Drop 型として
+   登録されていて region に置けない点で表現される。 *)
+let builtin_owned_vec_new =
+  V_builtin ("owned_vec_new", fun v ->
+    match v with
+    | V_unit -> V_vec (ref [||])
+    | _ -> failwith "owned_vec_new: expected unit")
+
+let builtin_owned_vec_push =
+  V_builtin ("owned_vec_push", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("owned_vec_push_p1", fun x ->
+        arr := Array.append !arr [| x |];
+        V_unit)
+    | _ -> failwith "owned_vec_push: expected OwnedVec")
+
+let builtin_owned_vec_get =
+  V_builtin ("owned_vec_get", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("owned_vec_get_p1", fun idx ->
+        match idx with
+        | V_int i ->
+          if i < 0 || i >= Array.length !arr then
+            raise (Eval_error (Loc.dummy,
+              Printf.sprintf "owned_vec_get: index %d out of bounds (len = %d)"
+                i (Array.length !arr)))
+          else (!arr).(i)
+        | _ -> failwith "owned_vec_get: expected int index")
+    | _ -> failwith "owned_vec_get: expected OwnedVec")
+
+let builtin_owned_vec_len =
+  V_builtin ("owned_vec_len", fun v ->
+    match v with
+    | V_vec arr -> V_int (Array.length !arr)
+    | _ -> failwith "owned_vec_len: expected OwnedVec")
+
 let builtin_fst =
   V_builtin ("fst", fun v ->
     match v with
@@ -1003,6 +1042,10 @@ let initial_env : env =
     ("vec_push", ref builtin_vec_push);
     ("vec_get",  ref builtin_vec_get);
     ("vec_len",  ref builtin_vec_len);
+    ("owned_vec_new",  ref builtin_owned_vec_new);
+    ("owned_vec_push", ref builtin_owned_vec_push);
+    ("owned_vec_get",  ref builtin_owned_vec_get);
+    ("owned_vec_len",  ref builtin_owned_vec_len);
   ]
 
 let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list option =

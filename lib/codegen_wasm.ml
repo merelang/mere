@@ -227,9 +227,9 @@ let variant_payload_ty (vname : string) : Ast.ty option =
    codegen's ty_tag so e.g. `int list` lowers to `show_list_int`. *)
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
-  | Ast.TyCon ("Vec", _) ->
+  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in Wasm codegen subset: `'a Vec` (Phase 12.1 is interpreter-only)"))
+      "unsupported in Wasm codegen subset: Vec / OwnedVec (interpreter-only)"))
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
@@ -473,10 +473,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "i32.const %d" off)
   | Ast.Var name ->
     if name = "vec_new" || name = "vec_push"
-       || name = "vec_get" || name = "vec_len" then
+       || name = "vec_get" || name = "vec_len"
+       || name = "owned_vec_new" || name = "owned_vec_push"
+       || name = "owned_vec_get" || name = "owned_vec_len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (Vec builtins are interpreter-only in Phase 12.1)"));
+        ^ " (Vec / OwnedVec builtins are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
