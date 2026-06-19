@@ -283,6 +283,95 @@ let rec emit_expr (e : Ast.expr) : unit =
     when Hashtbl.mem toplevel_fn_names name ->
     emit_expr arg;
     emit_instr (Printf.sprintf "call $%s" name)
+  | Ast.Record_lit (name, fields) ->
+    let info =
+      match Hashtbl.find_opt Typer.records name with
+      | Some i -> i
+      | None -> unsupported e.Ast.loc ("unknown record type: " ^ name)
+    in
+    if info.Typer.r_params <> [] then
+      unsupported e.Ast.loc "polymorphic record — Phase 6 later slice";
+    if Hashtbl.mem Typer.views name then
+      unsupported e.Ast.loc "view literal — Phase 6 later slice";
+    let decl_fields = info.Typer.r_fields in
+    let n = List.length decl_fields in
+    let base_slot = fresh_local () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" base_slot);
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    List.iteri (fun i (fname, _) ->
+      let v_expr =
+        match List.assoc_opt fname fields with
+        | Some v -> v
+        | None -> unsupported e.Ast.loc
+                    (Printf.sprintf "missing field `%s` in record literal" fname)
+      in
+      emit_instr (Printf.sprintf "local.get %d" base_slot);
+      emit_expr v_expr;
+      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+    ) decl_fields;
+    emit_instr (Printf.sprintf "local.get %d" base_slot)
+  | Ast.Field_get (inner, fname) ->
+    let inner_ty =
+      match inner.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "field access: missing inner type"
+    in
+    let rname =
+      match inner_ty with
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
+      | _ -> unsupported e.Ast.loc "field access on non-record"
+    in
+    let info = Hashtbl.find Typer.records rname in
+    let rec find_idx i = function
+      | [] -> unsupported e.Ast.loc
+                (Printf.sprintf "record `%s` has no field `%s`" rname fname)
+      | (n, _) :: _ when n = fname -> i
+      | _ :: rest -> find_idx (i + 1) rest
+    in
+    let idx = find_idx 0 info.Typer.r_fields in
+    emit_expr inner;
+    emit_instr (Printf.sprintf "i32.load offset=%d" (4 * idx))
+  | Ast.Record_update (base, updates) ->
+    let base_ty =
+      match base.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "record update: missing base type"
+    in
+    let rname =
+      match base_ty with
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> n
+      | _ -> unsupported e.Ast.loc "record update on non-record"
+    in
+    let info = Hashtbl.find Typer.records rname in
+    let decl_fields = info.Typer.r_fields in
+    let n = List.length decl_fields in
+    let src_slot = fresh_local () in
+    let dst_slot = fresh_local () in
+    (* Evaluate base into src local. *)
+    emit_expr base;
+    emit_instr (Printf.sprintf "local.set %d" src_slot);
+    (* Reserve memory for new struct. *)
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" dst_slot);
+    emit_instr (Printf.sprintf "local.get %d" dst_slot);
+    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    (* Fill in each field: from update if present, else load from src. *)
+    List.iteri (fun i (fname, _) ->
+      emit_instr (Printf.sprintf "local.get %d" dst_slot);
+      (match List.assoc_opt fname updates with
+       | Some v_expr -> emit_expr v_expr
+       | None ->
+         emit_instr (Printf.sprintf "local.get %d" src_slot);
+         emit_instr (Printf.sprintf "i32.load offset=%d" (4 * i)));
+      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+    ) decl_fields;
+    emit_instr (Printf.sprintf "local.get %d" dst_slot)
   | Ast.Tuple elems ->
     (* All elements occupy 4 bytes (i32 / ptr-style offset). The tuple
        value is the base offset into linear memory. RESERVE the memory

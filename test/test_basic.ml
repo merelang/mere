@@ -3168,6 +3168,29 @@ let () =
     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
     Codegen_wasm.emit_program ~main_ty prog
   in
+  let wasm_with_decls s =
+    let prog = Pipeline.parse_program s in
+    let type_env = ref Typer.initial_env in
+    List.iter (fun decl ->
+      match decl with
+      | Ast.Top_record (name, params, fields) ->
+        Typer.register_record name params fields
+      | Ast.Top_type (name, params, variants) ->
+        Typer.register_type name params variants
+      | Ast.Top_drop name -> Typer.register_drop_type name
+      | Ast.Top_view (name, region, fields) ->
+        Typer.register_view name region fields
+      | Ast.Top_let (pat, value) ->
+        let outer = !type_env in
+        let t = Typer.infer outer value in
+        let bs = Typer.check_pattern pat t in
+        type_env := List.fold_left (fun acc (n, ty) ->
+          (n, Typer.generalize outer ty) :: acc) outer bs
+      | _ -> ()
+    ) prog.decls;
+    let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
+    Codegen_wasm.emit_program ~main_ty prog
+  in
   assert_contains "wasm: emits (module"
     (wasm "42") "(module";
   assert_contains "wasm: exports main with i32 result"
@@ -3262,6 +3285,31 @@ let () =
   assert_contains "wasm: tuple reserves space via bump advance"
     (wasm "(1, 2)")
     "global.set $__lang_bump";
+
+  (* --- Wasm codegen: record (Phase 6.5) ---
+     Record も tuple と同じ linear memory レイアウト。Record_lit は宣言順に
+     i32.store、Field_get は field index から i32.load offset、Record_update
+     は新 buffer に reserve + 更新 field 以外は load コピー。 *)
+  assert_contains "wasm: record literal stores fields at offset"
+    (wasm_with_decls
+      "type WCgRect = { w: int, h: int };\n\
+       let r = WCgRect { w = 3, h = 4 } in r.w * r.h")
+    "i32.store offset=0";
+  assert_contains "wasm: record field access via i32.load offset"
+    (wasm_with_decls
+      "type WCgPt = { x: int, y: int };\n\
+       let p = WCgPt { x = 1, y = 2 } in p.y")
+    "i32.load offset=4";
+  assert_contains "wasm: record update reserves new struct"
+    (wasm_with_decls
+      "type WCgPt2 = { x: int, y: int };\n\
+       let p = WCgPt2 { x = 1, y = 2 } in { p | x = 100 }.x")
+    "global.set $__lang_bump";
+  assert_contains "wasm: record-returning fn uses i32 return"
+    (wasm_with_decls
+      "type WCgPt3 = { x: int, y: int };\n\
+       let mk = fn n -> WCgPt3 { x = n, y = n + 1 } in (mk 5).x")
+    "(func $mk (param i32) (result i32)";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
