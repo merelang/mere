@@ -1249,6 +1249,36 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
          "    (call $__lang_str_concat (local.get $r) (i32.const %d)))"
          suffix);
     Buffer.contents lines
+  | Ast.TyCon ("list", [elem_ty]) ->
+    (* `'a list = Nil | Cons of 'a * 'a list` special-case: render as
+       `[a, b, c]`. Walk via cur/acc/first locals; for each Cons node
+       at offset 0 the tag is 1 and offset 4 holds the (head, tail)
+       tuple offset. *)
+    let lb = intern_show_str "[" in
+    let rb = intern_show_str "]" in
+    let comma = intern_show_str ", " in
+    Printf.sprintf
+      "  (func $show_%s (param $x i32) (result i32)\n\
+      \    (local $cur i32) (local $acc i32) (local $first i32)\n\
+      \    (local $tag i32) (local $pl i32) (local $h i32)\n\
+      \    (local.set $acc (i32.const %d))\n\
+      \    (local.set $cur (local.get $x))\n\
+      \    (local.set $first (i32.const 1))\n\
+      \    (block $end\n\
+      \      (loop $lp\n\
+      \        (local.set $tag (i32.load offset=0 (local.get $cur)))\n\
+      \        (br_if $end (i32.eqz (local.get $tag)))\n\
+      \        (local.set $pl (i32.load offset=4 (local.get $cur)))\n\
+      \        (local.set $h (i32.load offset=0 (local.get $pl)))\n\
+      \        (if (i32.eqz (local.get $first))\n\
+      \          (then\n\
+      \            (local.set $acc (call $__lang_str_concat (local.get $acc) (i32.const %d)))))\n\
+      \        (local.set $acc (call $__lang_str_concat (local.get $acc) (call $show_%s (local.get $h))))\n\
+      \        (local.set $first (i32.const 0))\n\
+      \        (local.set $cur (i32.load offset=4 (local.get $pl)))\n\
+      \        (br $lp)))\n\
+      \    (call $__lang_str_concat (local.get $acc) (i32.const %d)))"
+      tag lb comma (ty_tag elem_ty) rb
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
     let vs =
       match Hashtbl.find_opt Exhaustive.type_variants n with

@@ -3499,5 +3499,24 @@ let () =
        show (WCgPt6 { x = 1, y = 2 })")
     "(func $show_WCgPt6";
 
+  (* --- Wasm codegen: list show を `[a, b, c]` 形式に (Phase 6.12) ---
+     `'a list = Nil | Cons of 'a * 'a list` を special-case で配列形式の
+     文字列に。 *)
+  assert_contains "wasm: list show uses loop / block"
+    (wasm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "(loop $lp";
+  assert_contains "wasm: list show concats element show"
+    (wasm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "call $__lang_str_concat";
+  assert_contains "wasm: list show special-case fn defined"
+    (wasm_with_decls
+      "type 'a list = Nil | Cons of 'a * 'a list;\n\
+       show [1, 2, 3]")
+    "(func $show_list_int";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
