@@ -1,0 +1,55 @@
+// Phase 12.7: StrBuf[R] — region 内可変文字列バッファ。
+//
+// 設計コンテキスト: aidocs/projects/lang/13_region_std_types.md §4
+//
+// `StrBuf[R]` は region 内で文字列を逐次組み立てる用途。Trivial 扱い
+// なので region に置ける。region 末で一括解放される (scope を出ると
+// 値も無効、escape は static error)。
+//
+// API:
+//   strbuf_new    : unit -> StrBuf[R]   (region に bind、外なら __heap)
+//   strbuf_push   : StrBuf[R] -> str -> unit
+//   strbuf_to_str : StrBuf[R] -> str     (snapshot を str として取り出す)
+//   strbuf_len    : StrBuf[R] -> int
+//   len (polymorphic) : StrBuf[R] -> int も同じく動く
+
+{
+  // === パターン 1: outside any region — default `__heap` で動く ===
+  let greet = strbuf_new () in
+  {
+    strbuf_push greet "Hello";
+    strbuf_push greet ", ";
+    strbuf_push greet "world!";
+    print (strbuf_to_str greet);
+    print ("len = " ++ show (strbuf_len greet))
+  };
+
+  // === パターン 2: region 内で短命に組み立てる ===
+  let report =
+    region R {
+      let buf = strbuf_new () in    // 型: StrBuf[R]
+      {
+        strbuf_push buf "report: ";
+        strbuf_push buf (show 42);
+        strbuf_push buf " ok";
+        // strbuf を region 外に持ち出すには内容を str にコピーする:
+        strbuf_to_str buf
+      }
+    }
+  in
+  print report;
+
+  // === パターン 3: polymorphic `len` でも長さが取れる ===
+  let counted = strbuf_new () in
+  {
+    strbuf_push counted "abc";
+    strbuf_push counted "de";
+    print ("counted bytes = " ++ show (len counted))
+  }
+}
+
+// 期待出力:
+// Hello, world!
+// len = 13
+// report: 42 ok
+// counted bytes = 5

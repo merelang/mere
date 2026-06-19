@@ -165,6 +165,8 @@ let pp_ty t =
       name ^ "[" ^ r ^ ", " ^ aux t ^ "]"
     | TyCon (name, [region_tv; t]) when name = "Vec" ->
       name ^ "[" ^ aux region_tv ^ ", " ^ aux t ^ "]"
+    | TyCon (name, [region_tv]) when name = "StrBuf" ->
+      name ^ "[" ^ aux region_tv ^ "]"
     | TyCon (name, [a]) -> aux a ^ " " ^ name
     | TyCon (name, args) ->
       "(" ^ String.concat ", " (List.map aux args) ^ ") " ^ name

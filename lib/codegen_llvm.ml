@@ -184,9 +184,10 @@ let mono_variant_is_recursive
    top of the module. *)
 let llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
-  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+  | Ast.TyCon ("StrBuf", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in LLVM codegen subset: Vec / OwnedVec (interpreter-only)"))
+      "unsupported in LLVM codegen subset: Vec / OwnedVec / StrBuf (interpreter-only)"))
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
   | Ast.TyStr -> "ptr"
@@ -1358,9 +1359,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "vec_get" || name = "vec_len"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "strbuf_new" || name = "strbuf_push"
+       || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (Vec / OwnedVec / len are interpreter-only)");
+        (name ^ " (Vec / OwnedVec / StrBuf / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)

@@ -595,6 +595,43 @@ let () =
   Hashtbl.replace types "OwnedVec" 1;
   Hashtbl.replace drop_types "OwnedVec" ()
 
+(* --- StrBuf[R] (Phase 12.7, Q-010 narrowed) ---
+   region 内可変文字列バッファ。型は 1-arg `TyCon ("StrBuf",
+   [TyRef BorrowedRead R TyUnit])` (region marker のみ、view 型と同じ
+   慣例)。Trivial 扱いで region に置ける。`vec_new` と同じく `App
+   (Var "strbuf_new", _)` を typer の special handler で active_regions
+   から region を bind する。 *)
+let _strbuf_new_region = fresh_var ()
+let strbuf_new_scheme =
+  let rid = match _strbuf_new_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (Ast.TyUnit,
+      Ast.TyCon ("StrBuf", [_strbuf_new_region])) }
+
+let _strbuf_push_region = fresh_var ()
+let strbuf_push_scheme =
+  let rid = match _strbuf_push_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("StrBuf", [_strbuf_push_region]),
+      Ast.TyArrow (Ast.TyStr, Ast.TyUnit)) }
+
+let _strbuf_to_str_region = fresh_var ()
+let strbuf_to_str_scheme =
+  let rid = match _strbuf_to_str_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("StrBuf", [_strbuf_to_str_region]), Ast.TyStr) }
+
+let _strbuf_len_region = fresh_var ()
+let strbuf_len_scheme =
+  let rid = match _strbuf_len_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("StrBuf", [_strbuf_len_region]), Ast.TyInt) }
+
+let () = Hashtbl.replace types "StrBuf" 1
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
@@ -715,6 +752,10 @@ let initial_env : env =
     ("owned_vec_push", owned_vec_push_scheme);
     ("owned_vec_get",  owned_vec_get_scheme);
     ("owned_vec_len",  owned_vec_len_scheme);
+    ("strbuf_new",     strbuf_new_scheme);
+    ("strbuf_push",    strbuf_push_scheme);
+    ("strbuf_to_str",  strbuf_to_str_scheme);
+    ("strbuf_len",     strbuf_len_scheme);
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);
     ("vec_len",    vec_len_scheme);
@@ -881,6 +922,18 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let result_ty = Ast.TyCon ("Vec", [marker; fresh_var ()]) in
        (* Force the scheme's region tyvar to bind to our marker by
           unifying through the call. *)
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | Ast.Var "strbuf_new" ->
+       let active_region =
+         match !active_regions with
+         | r :: _ -> r
+         | [] -> "__heap"
+       in
+       let marker =
+         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
+       in
+       let result_ty = Ast.TyCon ("StrBuf", [marker]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | _ ->

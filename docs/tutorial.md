@@ -469,10 +469,30 @@ region R {
 動く対比 demo は [`examples/vec_vs_owned_vec.lang`](../examples/vec_vs_owned_vec.lang)。
 内部実装は両者とも同じ可変配列 — 型システム上の区別のみ。
 
-現状 (Phase 12.5) の制約:
-- **インタプリタ専用** — 3 backend codegen は Vec / OwnedVec の builtin を
-  見つけると `Codegen_error` で reject (`interpreter-only` メッセージ)
-- **`StrBuf[R]` / `Map[R, K, V]`** はまだ
+**Phase 12.7 で `StrBuf[R]` を追加** — region 内可変文字列バッファ。
+`Vec[R, T]` と同じ construction-time binding パターンで動く:
+
+```
+region R {
+  let buf = strbuf_new () in    // 型: StrBuf[R]
+  {
+    strbuf_push buf "Hello";
+    strbuf_push buf ", ";
+    strbuf_push buf "world!";
+    strbuf_to_str buf            // → "Hello, world!" (str として取り出し)
+  }
+}
+
+strbuf_new ()                    // 型: StrBuf[__heap] (default region)
+```
+
+API: `strbuf_new`, `strbuf_push`, `strbuf_to_str`, `strbuf_len`。polymorphic
+`len` も StrBuf に効く。実例は [`examples/strbuf_basics.lang`](../examples/strbuf_basics.lang)。
+
+現状 (Phase 12.7) の制約:
+- **インタプリタ専用** — 3 backend codegen は Vec / OwnedVec / StrBuf の
+  builtin を見つけると `Codegen_error` で reject
+- **`Map[R, K, V]`** はまだ
 - **`Allocator` trait の API 統一** もまだ — 設計 (b) のうち「別型」のみ実装
 - **borrow checker は Vec 内部の要素単位までは追跡しない** — Vec を borrow した時点での mode は機械検証されるが、`vec_get` の結果を borrow するなどの細部は今後
 
@@ -554,6 +574,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`borrow_conflict.lang`** — borrow checker (Phase 11.4) が同一変数への衝突 borrow を拒否する demo (意図的に失敗)
 - **`vec_basics.lang`** — `'a Vec` の基本操作 + region 配置 (Phase 12.1)
 - **`vec_vs_owned_vec.lang`** — `Vec[R, T]` (region) vs `OwnedVec[T]` (heap, Drop) の対比 demo (Phase 12.5)
+- **`strbuf_basics.lang`** — `StrBuf[R]` の基本操作 + region 配置 (Phase 12.7)
 
 REPL で対話的に試したいときは:
 ```sh

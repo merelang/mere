@@ -410,9 +410,11 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "vec_get" || name = "vec_len"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "strbuf_new" || name = "strbuf_push"
+       || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "len" then
       unsupported e.loc
-        (name ^ " (Vec / OwnedVec / len are interpreter-only)");
+        (name ^ " (Vec / OwnedVec / StrBuf / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -869,9 +871,10 @@ type fn_decl = {
 (* Lang type → C type, restricted to the codegen subset. *)
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
-  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+  | Ast.TyCon ("StrBuf", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in C codegen subset: Vec / OwnedVec (interpreter-only)"))
+      "unsupported in C codegen subset: Vec / OwnedVec / StrBuf (interpreter-only)"))
   | Ast.TyInt | Ast.TyBool -> "int"
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
