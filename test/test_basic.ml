@@ -4233,5 +4233,45 @@ let () =
         "let v = vec_new () in vec_iter v (fn x -> ())" in
       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
 
+  (* --- Phase 12.10: Map[R, K, V] (region-aware mutable map) --- *)
+  check "map: map_new : unit -> Map[r, k, v]"
+    (Pipeline.type_of "map_new") "(unit -> Map['c, 'b, 'a])";
+  check "map: basic set/get round-trip (str -> int)"
+    (Pipeline.process
+       "let m = map_new () in \
+        { map_set m \"a\" 10; map_set m \"b\" 20; \
+          map_get m \"a\" + map_get m \"b\" }") "30";
+  check "map: map_has true/false branch"
+    (Pipeline.process
+       "let m = map_new () in \
+        { map_set m \"k\" 42; \
+          if map_has m \"k\" then if map_has m \"x\" then 0 else 1 else 0 }") "1";
+  check "map: map_len counts unique keys"
+    (Pipeline.process
+       "let m = map_new () in \
+        { map_set m \"a\" 1; map_set m \"b\" 2; map_set m \"a\" 999; \
+          map_len m }") "2";
+  check "map: polymorphic key/value type (int -> str)"
+    (Pipeline.process
+       "let m = map_new () in \
+        { map_set m 1 \"one\"; map_set m 2 \"two\"; \
+          map_get m 1 ++ \", \" ++ map_get m 2 }") "\"one, two\"";
+  check_raises "map: map_get on missing key raises eval error"
+    (fun () ->
+      Pipeline.process "let m = map_new () in map_get m \"absent\"");
+  check_raises "map: cannot escape region"
+    (fun () ->
+      Pipeline.process "region R { map_new () }");
+  check "map: outside region defaults to __heap"
+    (Pipeline.type_of "map_new ()") "Map[__heap, 'b, 'a]";
+  check "map: polymorphic len works on Map"
+    (Pipeline.process
+       "let m = map_new () in { map_set m \"a\" 1; map_set m \"b\" 2; len m }") "2";
+  check_raises "map: codegen rejection (C)"
+    (fun () ->
+      let prog = Pipeline.parse_program
+        "let m = map_new () in map_len m" in
+      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -228,9 +228,9 @@ let variant_payload_ty (vname : string) : Ast.ty option =
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
-  | Ast.TyCon ("StrBuf", _) ->
+  | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in Wasm codegen subset: Vec / OwnedVec / StrBuf (interpreter-only)"))
+      "unsupported in Wasm codegen subset: Vec / OwnedVec / StrBuf / Map (interpreter-only)"))
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
@@ -481,10 +481,12 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
+       || name = "map_new" || name = "map_set" || name = "map_get"
+       || name = "map_has" || name = "map_len"
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (Vec / OwnedVec / StrBuf / len are interpreter-only)"));
+        ^ " (Vec / OwnedVec / StrBuf / Map / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->

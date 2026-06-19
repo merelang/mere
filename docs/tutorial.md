@@ -469,6 +469,38 @@ region R {
 動く対比 demo は [`examples/vec_vs_owned_vec.lang`](../examples/vec_vs_owned_vec.lang)。
 内部実装は両者とも同じ可変配列 — 型システム上の区別のみ。
 
+**Phase 12.10 で `Map[R, K, V]`** — region-aware mutable map (連想配列)。
+Vec[R, T] / StrBuf[R] と同じ construction-time binding パターン:
+
+```
+let counts = map_new () in
+{
+  map_set counts "apple" 3;
+  map_set counts "banana" 5;
+  map_get counts "apple"        // → 3
+  + (if map_has counts "absent" then map_get counts "absent" else 0)
+}
+
+region R {
+  let acc = map_new () in       // Map[R, str, int]
+  map_set acc "k" 42;
+  len acc                       // → 1 (polymorphic len も対応)
+}
+```
+
+| API | 型 |
+|---|---|
+| `map_new` | `unit -> Map[R, K, V]` |
+| `map_set` | `Map[R, K, V] -> K -> V -> unit` |
+| `map_get` | `Map[R, K, V] -> K -> V` (キー不在は eval error) |
+| `map_has` | `Map[R, K, V] -> K -> bool` |
+| `map_len` | `Map[R, K, V] -> int` |
+
+内部は OCaml Hashtbl (polymorphic hash/eq) なので、key には primitive
+(int / str / bool / tuple of primitives) を使う想定。closure / ref を
+含む key は識別が ref 単位になるので注意。実例:
+[`examples/map_basics.lang`](../examples/map_basics.lang)。
+
 **Phase 12.9 で Vec の高階 API** — `vec_iter` / `vec_map` / `vec_fold` /
 `vec_set`。`vec_map` の結果 Vec は source と同じ region に置かれる
 (region-preserving):
@@ -600,6 +632,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`vec_vs_owned_vec.lang`** — `Vec[R, T]` (region) vs `OwnedVec[T]` (heap, Drop) の対比 demo (Phase 12.5)
 - **`strbuf_basics.lang`** — `StrBuf[R]` の基本操作 + region 配置 (Phase 12.7)
 - **`vec_higher_order.lang`** — `vec_iter` / `vec_map` / `vec_fold` / `vec_set` の高階 API デモ (Phase 12.9)
+- **`map_basics.lang`** — `Map[R, K, V]` の基本操作 + region 配置 (Phase 12.10)
 
 REPL で対話的に試したいときは:
 ```sh
