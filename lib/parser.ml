@@ -62,7 +62,7 @@ let substitute_params params args body =
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
-    | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst inner)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst inner)
   in
   subst body
 
@@ -129,10 +129,23 @@ let rec parse_program_internal tokens =
     loop base toks
   and simple_ty toks =
     match toks with
-    | (_, T_amp) :: (_, T_ident region) :: rest ->
-      (* `&R T` — region-tagged reference type *)
+    | (_, T_amp) :: (_, T_ident "mut") :: (_, T_ident region) :: rest ->
+      (* `&mut R T` — exclusive write *)
       let inner, rest = simple_ty rest in
-      Ast.TyRef (region, inner), rest
+      Ast.TyRef (Ast.ExclusiveWrite, region, inner), rest
+    | (_, T_amp) :: (_, T_ident "shared") :: (_, T_ident "write") ::
+      (_, T_ident region) :: rest ->
+      (* `&shared write R T` — shared write (cap-internal lock) *)
+      let inner, rest = simple_ty rest in
+      Ast.TyRef (Ast.SharedWrite, region, inner), rest
+    | (_, T_amp) :: (_, T_ident "exclusive") :: (_, T_ident region) :: rest ->
+      (* `&exclusive R T` — exclusive read (rare) *)
+      let inner, rest = simple_ty rest in
+      Ast.TyRef (Ast.ExclusiveRead, region, inner), rest
+    | (_, T_amp) :: (_, T_ident region) :: rest ->
+      (* `&R T` — default: borrowed (shared read) *)
+      let inner, rest = simple_ty rest in
+      Ast.TyRef (Ast.BorrowedRead, region, inner), rest
     | (_, T_ident "int") :: rest -> Ast.TyInt, rest
     | (_, T_ident "float") :: rest -> Ast.TyFloat, rest
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
@@ -688,7 +701,7 @@ let rec parse_program_internal tokens =
         let inner, rest = expr rest in
         (match rest with
          | (_, T_rparen) :: rest2 ->
-           field_chain (mk pos (Ast.Ref (region_name, inner))) rest2
+           field_chain (mk pos (Ast.Ref (Ast.BorrowedRead, region_name, inner))) rest2
          | _ ->
            raise (Parse_error (pos_of rest,
              "expected ')' after region.alloc argument")))
@@ -713,10 +726,23 @@ let rec parse_program_internal tokens =
     field_chain v rest
   and atom_base toks =
     match toks with
-    | (pos, T_amp) :: (_, T_ident region) :: rest ->
-      (* `&R v` — value-level reference: tag v with region R *)
+    | (pos, T_amp) :: (_, T_ident "mut") :: (_, T_ident region) :: rest ->
+      (* `&mut R v` — exclusive write *)
       let inner, rest = atom rest in
-      mk pos (Ast.Ref (region, inner)), rest
+      mk pos (Ast.Ref (Ast.ExclusiveWrite, region, inner)), rest
+    | (pos, T_amp) :: (_, T_ident "shared") :: (_, T_ident "write") ::
+      (_, T_ident region) :: rest ->
+      (* `&shared write R v` — shared write *)
+      let inner, rest = atom rest in
+      mk pos (Ast.Ref (Ast.SharedWrite, region, inner)), rest
+    | (pos, T_amp) :: (_, T_ident "exclusive") :: (_, T_ident region) :: rest ->
+      (* `&exclusive R v` — exclusive read *)
+      let inner, rest = atom rest in
+      mk pos (Ast.Ref (Ast.ExclusiveRead, region, inner)), rest
+    | (pos, T_amp) :: (_, T_ident region) :: rest ->
+      (* `&R v` — default: borrowed (shared read) *)
+      let inner, rest = atom rest in
+      mk pos (Ast.Ref (Ast.BorrowedRead, region, inner)), rest
     | (pos, T_lbrace) :: (_, T_rbrace) :: rest ->
       (* `{}` is the empty block — evaluates to unit. *)
       mk pos Ast.Unit_lit, rest

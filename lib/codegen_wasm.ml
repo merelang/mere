@@ -140,7 +140,7 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
         (match g with Some ge -> go ge bound' | None -> ()); go b bound') arms
     | Ast.Tuple es -> List.iter (fun e -> go e bound) es
     | Ast.Region_block (n, b) -> go b (n :: bound)
-    | Ast.Ref (_, a) -> go a bound
+    | Ast.Ref (_, _, a) -> go a bound
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
     | Ast.Field_get (a, _) -> go a bound
     | Ast.Record_update (a, fs) ->
@@ -246,7 +246,7 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
-  | Ast.TyRef (_, inner) -> ty_is_concrete inner
+  | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
   | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
 
 (* Substitute TyParam → concrete throughout `t`. Used by add_show_type
@@ -261,7 +261,7 @@ let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_params mapping) ts)
   | Ast.TyCon (n, args) ->
     Ast.TyCon (n, List.map (subst_params mapping) args)
-  | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst_params mapping inner)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst_params mapping inner)
   | other -> other
 
 (* Register a type for show emission, then walk dependent types
@@ -334,7 +334,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
     | Ast.Region_block (_, b) -> walk_expr b
-    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
@@ -405,7 +405,7 @@ let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
     | Ast.Region_block (_, b) -> go b
-    | Ast.Ref (_, a) -> go a
+    | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
     | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
@@ -987,7 +987,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" saved_bump);
     emit_instr "global.set $__lang_bump";
     emit_instr (Printf.sprintf "local.get %d" result_slot)
-  | Ast.Ref (_, inner) ->
+  | Ast.Ref (_, _, inner) ->
     (* `&R v` — region-alloc 4 bytes, store value, return ptr. *)
     let base_slot = fresh_local () in
     emit_instr "global.get $__lang_bump";

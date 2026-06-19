@@ -16,7 +16,13 @@ and ty =
   | TyParam of string             (* source-level type parameter, e.g. 'a *)
   | TyCon of string * ty list     (* name + type args (postfix application) *)
   | TyTuple of ty list
-  | TyRef of string * ty          (* `&R T` — region-tagged reference type *)
+  | TyRef of borrow_mode * string * ty (* `&[m] R T` — region-tagged ref *)
+
+and borrow_mode =
+  | BorrowedRead    (* default; shared, read-only — written `&R T` *)
+  | SharedWrite     (* `&shared write R T` — shared, write OK (cap-internal lock) *)
+  | ExclusiveRead   (* `&exclusive R T` — exclusive, read-only (rare) *)
+  | ExclusiveWrite  (* `&mut R T` — exclusive, write OK (Rust `&mut` 相当) *)
 
 type expr = {
   loc : Loc.t;
@@ -52,7 +58,7 @@ and expr_node =
        fall through to next arm. *)
   | Tuple of expr list
   | Region_block of string * expr   (* `region R { body }` — introduces region name R *)
-  | Ref of string * expr            (* `&R e` — tag value with region R, type becomes &R T *)
+  | Ref of borrow_mode * string * expr (* `&[m] R e` — value-level ref, mode m *)
   | Record_lit of string * (string * expr) list
     (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
   | Field_get of expr * string
@@ -151,14 +157,21 @@ let pp_ty t =
     (* Heuristic: a TyCon whose sole arg is a region-tagged unit is a view
        value (typer encodes the construction-time region this way). Print
        as `Name[R]` instead of the literal `&R () Name`. *)
-    | TyCon (name, [TyRef (r, TyUnit)]) -> name ^ "[" ^ r ^ "]"
+    | TyCon (name, [TyRef (_, r, TyUnit)]) -> name ^ "[" ^ r ^ "]"
     | TyCon (name, [a]) -> aux a ^ " " ^ name
     | TyCon (name, args) ->
       "(" ^ String.concat ", " (List.map aux args) ^ ") " ^ name
     | TyTuple ts ->
       let parts = List.map aux ts in
       "(" ^ String.concat " * " parts ^ ")"
-    | TyRef (region, inner) -> "&" ^ region ^ " " ^ aux inner
+    | TyRef (mode, region, inner) ->
+      let prefix = match mode with
+        | BorrowedRead -> "&"
+        | SharedWrite -> "&shared write "
+        | ExclusiveRead -> "&exclusive "
+        | ExclusiveWrite -> "&mut "
+      in
+      prefix ^ region ^ " " ^ aux inner
   in
   aux t
 
@@ -246,7 +259,14 @@ let rec pp e =
     "(" ^ String.concat ", " (List.map pp es) ^ ")"
   | Region_block (name, body) ->
     "(region " ^ name ^ " { " ^ pp body ^ " })"
-  | Ref (r, inner) -> "&" ^ r ^ " " ^ pp inner
+  | Ref (mode, r, inner) ->
+    let prefix = match mode with
+      | BorrowedRead -> "&"
+      | SharedWrite -> "&shared write "
+      | ExclusiveRead -> "&exclusive "
+      | ExclusiveWrite -> "&mut "
+    in
+    prefix ^ r ^ " " ^ pp inner
   | Record_lit (name, fields) ->
     let parts = List.map (fun (f, e) -> f ^ " = " ^ pp e) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"
@@ -333,8 +353,8 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
       { e with node = Tuple (List.map (go shadowed) es) }
     | Region_block (r, body) ->
       { e with node = Region_block (r, go shadowed body) }
-    | Ref (r, inner) ->
-      { e with node = Ref (r, go shadowed inner) }
+    | Ref (mode, r, inner) ->
+      { e with node = Ref (mode, r, go shadowed inner) }
     | Record_lit (name, fields) ->
       let fields' = List.map (fun (f, ex) -> (f, go shadowed ex)) fields in
       { e with node = Record_lit (name, fields') }
