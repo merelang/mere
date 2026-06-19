@@ -3935,5 +3935,64 @@ let () =
         fn (lg: &R Lg11r) -> lg.info")
     "(&R Lg11r -> (str -> unit))";
 
+  (* --- Phase 11.4: borrow checker --- *)
+  (* 並存 OK: shared read 同士、shared write 同士 *)
+  check "borrow checker: multiple &R on same var → OK"
+    (Pipeline.process
+       "region R { let v = 5 in let a = &R v in let b = &R v in 42 }")
+    "42";
+  check "borrow checker: multiple &shared write on same var → OK"
+    (Pipeline.process
+       "region R { let v = 5 in \
+        let a = &shared write R v in \
+        let b = &shared write R v in 42 }")
+    "42";
+
+  (* 衝突: &R + &mut R *)
+  check_raises "borrow checker: &R + &mut R on same var → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &R v in let b = &mut R v in 42 }");
+
+  (* 衝突: &mut R + &mut R (排他) *)
+  check_raises "borrow checker: &mut R + &mut R → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &mut R v in let b = &mut R v in 42 }");
+
+  (* 衝突: &R + &shared write R (shared read invalidated by shared write) *)
+  check_raises "borrow checker: &R + &shared write → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &R v in let b = &shared write R v in 42 }");
+
+  (* 衝突: &exclusive R は他とどれとも共存不可 *)
+  check_raises "borrow checker: &exclusive + &R → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &exclusive R v in let b = &R v in 42 }");
+
+  (* 異なる変数なら衝突しない *)
+  check "borrow checker: different vars don't conflict"
+    (Pipeline.process
+       "region R { let x = 1 in let y = 2 in \
+        let a = &R x in let b = &mut R y in 42 }")
+    "42";
+
+  (* 衝突メッセージに「previous borrow at」note が含まれる *)
+  let conflict_msg =
+    try
+      let _ = Pipeline.process
+        "region R { let v = 5 in let a = &R v in let b = &mut R v in 42 }"
+      in ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "borrow checker: error message points to previous borrow"
+    conflict_msg "previous borrow at";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -289,8 +289,29 @@ region R {
 borrow mode は静的契約のままで、runtime は元の record の field を直接呼ぶ
 (現状の interpreter / 3 backend 全部対応)。
 
-残る今後の slice 候補: **借用機構の排他規則** (同じ region から `&shared`
-と `&exclusive` を同時取得拒否など) は borrow checker の最小ハーネスで。
+**Phase 11.4: borrow checker (同一変数の衝突 borrow 拒否)**
+
+同じ region 内で同じ変数を、衝突する 2 つの mode で借りようとすると
+static error:
+
+```
+region R {
+  let v = 5 in
+  let a = &R v in        // shared read
+  let b = &mut R v in    // ← exclusive write を要求 → 拒否
+  42
+}
+// type error: borrow conflict: `v` is already borrowed as `&R v` here,
+//   cannot reborrow as `&mut R v`
+//   note: previous borrow at line N, col N
+```
+
+並存可能なペアは shared read 同士 (`&R` + `&R`) と shared write 同士
+(`&shared write R` + `&shared write R`) のみ。それ以外の組合せは衝突。
+動く失敗例は [`examples/borrow_conflict.lang`](../examples/borrow_conflict.lang)。
+
+現状追跡するのは `&[mode] R x` の `x` が単純変数の場合のみ。複雑式
+(`&R rec.field` 等) は本 slice の対象外。
 動く実例は [`examples/borrow_modes.lang`](../examples/borrow_modes.lang)、
 意図的に型エラーを起こす side は
 [`examples/borrow_modes_typeerror.lang`](../examples/borrow_modes_typeerror.lang)。
@@ -410,6 +431,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`repl_session.md`** — REPL の使い方を対話セッション形式で示したドキュメント
 - **`borrow_modes.lang`** — 4 種類の借用注釈 (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) を組み合わせて使うデモ
 - **`borrow_modes_typeerror.lang`** — borrow mode mismatch が型エラーで捕捉される様子 (意図的に失敗する demo)
+- **`borrow_conflict.lang`** — borrow checker (Phase 11.4) が同一変数への衝突 borrow を拒否する demo (意図的に失敗)
 
 REPL で対話的に試したいときは:
 ```sh
