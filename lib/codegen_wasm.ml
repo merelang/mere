@@ -273,10 +273,35 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_strlen"
+  | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "i32.load offset=0"
+  | Ast.App ({ node = Ast.Var "snd"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "i32.load offset=4"
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     emit_expr arg;
     emit_instr (Printf.sprintf "call $%s" name)
+  | Ast.Tuple elems ->
+    (* All elements occupy 4 bytes (i32 / ptr-style offset). The tuple
+       value is the base offset into linear memory. RESERVE the memory
+       up-front (advance bump immediately) so nested tuples / concat
+       inside element evaluation get their own non-overlapping memory. *)
+    let n = List.length elems in
+    let base_slot = fresh_local () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" base_slot);
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_bump";
+    List.iteri (fun i el ->
+      emit_instr (Printf.sprintf "local.get %d" base_slot);
+      emit_expr el;
+      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+    ) elems;
+    emit_instr (Printf.sprintf "local.get %d" base_slot)
   | _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 6 MVP"
 

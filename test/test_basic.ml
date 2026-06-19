@@ -3242,5 +3242,26 @@ let () =
   assert_contains "wasm: __lang_str_concat helper defined"
     (wasm "\"hi\"") "(func $__lang_str_concat";
 
+  (* --- Wasm codegen: tuple (Phase 6.4) ---
+     tuple は linear memory に置く: 各要素 4 bytes (i32 / offset)、
+     base offset を一旦 local に保存して bump を即座に進める (nested
+     tuple や ++ がスタンプを advance してもメモリが重ならない)、
+     fst/snd は i32.load offset で取得。 *)
+  assert_contains "wasm: tuple stores via i32.store offset"
+    (wasm "let p = (1, 2) in fst p + snd p")
+    "i32.store offset=0";
+  assert_contains "wasm: tuple stores second element at offset=4"
+    (wasm "let p = (1, 2) in fst p + snd p")
+    "i32.store offset=4";
+  assert_contains "wasm: fst lowers to i32.load offset=0"
+    (wasm "let p = (1, 2) in fst p")
+    "i32.load offset=0";
+  assert_contains "wasm: snd lowers to i32.load offset=4"
+    (wasm "let p = (1, 2) in snd p")
+    "i32.load offset=4";
+  assert_contains "wasm: tuple reserves space via bump advance"
+    (wasm "(1, 2)")
+    "global.set $__lang_bump";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
