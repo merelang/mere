@@ -75,6 +75,11 @@ let process s =
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
   let _ = Typer.infer !type_env prog.main in
+  (* Phase 11.4: borrow checker — reject conflicting borrows on the
+     same (region, var) within a single program. Runs on the desugared
+     program (decls folded into nested Let chains) so cross-decl
+     borrows are tracked too. *)
+  Typer.check_borrows [] (Ast.desugar_program prog);
   List.iter prerr_endline (Exhaustive.take ());
   let v = Eval.eval_in !eval_env prog.main in
   Eval.to_string v
