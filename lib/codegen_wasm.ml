@@ -477,6 +477,8 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "vec_get" || name = "vec_len"
        || name = "vec_iter" || name = "vec_map"
        || name = "vec_fold" || name = "vec_set"
+       || name = "vec_filter" || name = "vec_to_list"
+       || name = "vec_to_owned"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
