@@ -3683,5 +3683,44 @@ let () =
         match BarN { a = 1 } with | FooN { a = x } -> x")
     "different named types";
 
+  (* --- Phase 8.1: REPL helpers --- *)
+  let probe_unfinished s =
+    try
+      let toks = Lexer.tokenize (Repl.prepare_input s) in
+      ignore (Parser.parse_program toks);
+      false  (* parsed successfully → finished *)
+    with e -> Repl.is_unfinished ~source:(Repl.prepare_input s) e
+  in
+  check "repl: complete expression → finished"
+    (string_of_bool (probe_unfinished "1 + 2")) "false";
+  check "repl: bare `let x = 5;` → finished (prepare_input adds main)"
+    (string_of_bool (probe_unfinished "let x = 5;")) "false";
+  check "repl: `let f = fn n ->` → unfinished (fn body missing)"
+    (string_of_bool (probe_unfinished "let f = fn n ->")) "true";
+  check "repl: `if x < 2 then` → unfinished (then branch missing)"
+    (string_of_bool (probe_unfinished "if x < 2 then")) "true";
+  check "repl: `match x with` → unfinished (no arms yet)"
+    (string_of_bool (probe_unfinished "match x with")) "true";
+  check "repl: complete multi-line let-rec → finished"
+    (string_of_bool (probe_unfinished
+       "let rec f = fn n ->\n  if n < 1 then 1\n  else n * f (n - 1)\nin f 5"))
+    "false";
+  check "repl: actual parse error mid-input → NOT unfinished"
+    (string_of_bool (probe_unfinished "let 1 = 2 in 3")) "false";
+
+  (* user_bindings reports user-added names in insertion order, skipping
+     anything from Typer.initial_env (builtins). *)
+  let env =
+    let t = Typer.initial_env in
+    let sch ty = Typer.mono ty in
+    ("y", sch Ast.TyStr) :: ("x", sch Ast.TyInt) :: t
+  in
+  let names = List.map fst (Repl.user_bindings env) in
+  check "repl: :env preserves insertion order (oldest first)"
+    (String.concat "," names) "x,y";
+  let no_user_names = List.map fst (Repl.user_bindings Typer.initial_env) in
+  check "repl: :env on initial env → no user bindings"
+    (string_of_int (List.length no_user_names)) "0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
