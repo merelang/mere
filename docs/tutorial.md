@@ -609,6 +609,9 @@ let xs = vec_new () in
 | `vec_map` | `Vec[R, T] -> (T -> U) -> Vec[R, U]` |
 | `vec_fold` | `Vec[R, T] -> U -> (U -> T -> U) -> U` |
 | `vec_set` | `Vec[R, T] -> int -> T -> unit` |
+| `vec_filter` (Phase 12.11) | `Vec[R, T] -> (T -> bool) -> Vec[R, T]` (region-preserving) |
+| `vec_to_list` (Phase 12.11) | `Vec[R, T] -> T list` (要素を `'a list` の Nil/Cons chain に) |
+| `vec_to_owned` (Phase 12.11) | `Vec[R, T] -> T OwnedVec` (region 内 → heap への deep copy) |
 
 実例: [`examples/vec_higher_order.lang`](../examples/vec_higher_order.lang)。
 

@@ -897,6 +897,40 @@ let builtin_vec_set =
           | _ -> failwith "vec_set: expected int index"))
     | _ -> failwith "vec_set: expected Vec")
 
+(* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。 *)
+let builtin_vec_filter =
+  V_builtin ("vec_filter", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_filter_p1", fun pred ->
+        let filtered = Array.of_list (
+          List.filter (fun x ->
+            match !apply_value_ref pred x with
+            | V_bool b -> b
+            | _ -> failwith "vec_filter: predicate must return bool"
+          ) (Array.to_list !arr)
+        ) in
+        V_vec (ref filtered))
+    | _ -> failwith "vec_filter: expected Vec")
+
+let builtin_vec_to_list =
+  V_builtin ("vec_to_list", fun v ->
+    match v with
+    | V_vec arr ->
+      Array.fold_right (fun x acc ->
+        V_constr ("Cons", Some (V_tuple [x; acc]))
+      ) !arr (V_constr ("Nil", None))
+    | _ -> failwith "vec_to_list: expected Vec")
+
+let builtin_vec_to_owned =
+  V_builtin ("vec_to_owned", fun v ->
+    match v with
+    | V_vec arr ->
+      (* Deep copy: the underlying mutable array is duplicated so the
+         OwnedVec result is independent of the source Vec's lifetime. *)
+      V_vec (ref (Array.copy !arr))
+    | _ -> failwith "vec_to_owned: expected Vec")
+
 let builtin_iter_n =
   V_builtin ("iter_n", fun n_val ->
     match n_val with
@@ -1232,6 +1266,9 @@ let initial_env : env =
     ("vec_map",  ref builtin_vec_map);
     ("vec_fold", ref builtin_vec_fold);
     ("vec_set",  ref builtin_vec_set);
+    ("vec_filter",   ref builtin_vec_filter);
+    ("vec_to_list",  ref builtin_vec_to_list);
+    ("vec_to_owned", ref builtin_vec_to_owned);
     ("owned_vec_new",  ref builtin_owned_vec_new);
     ("owned_vec_push", ref builtin_owned_vec_push);
     ("owned_vec_get",  ref builtin_owned_vec_get);

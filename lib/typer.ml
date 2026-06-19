@@ -610,6 +610,42 @@ let vec_set_scheme =
       Ast.TyArrow (Ast.TyInt,
         Ast.TyArrow (_vec_set_elem, Ast.TyUnit))) }
 
+(* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。
+   - vec_filter は region-preserving (source の R を結果も持つ)
+   - vec_to_list は `'a list` (user-declared または builtin) に変換
+   - vec_to_owned は region 内 Vec を heap-allocated OwnedVec に deep copy *)
+let _vec_filter_elem = fresh_var ()
+let _vec_filter_region = fresh_var ()
+let vec_filter_scheme =
+  let aid = match _vec_filter_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_filter_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_filter_region; _vec_filter_elem]),
+      Ast.TyArrow (
+        Ast.TyArrow (_vec_filter_elem, Ast.TyBool),
+        Ast.TyCon ("Vec", [_vec_filter_region; _vec_filter_elem]))) }
+
+let _vec_to_list_elem = fresh_var ()
+let _vec_to_list_region = fresh_var ()
+let vec_to_list_scheme =
+  let aid = match _vec_to_list_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_to_list_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_to_list_region; _vec_to_list_elem]),
+      Ast.TyCon ("list", [_vec_to_list_elem])) }
+
+let _vec_to_owned_elem = fresh_var ()
+let _vec_to_owned_region = fresh_var ()
+let vec_to_owned_scheme =
+  let aid = match _vec_to_owned_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_to_owned_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_to_owned_region; _vec_to_owned_elem]),
+      Ast.TyCon ("OwnedVec", [_vec_to_owned_elem])) }
+
 (* --- OwnedVec[T] (Phase 12.5, Q-010 narrowed → 設計 (b) 別型分離) ---
    `OwnedVec[T]` は heap-allocated, Drop あり vector。`Vec[R, T]`
    (region 内、Trivial) と対照的に、Drop 型として登録されるので
@@ -878,6 +914,9 @@ let initial_env : env =
     ("vec_map",    vec_map_scheme);
     ("vec_fold",   vec_fold_scheme);
     ("vec_set",    vec_set_scheme);
+    ("vec_filter",   vec_filter_scheme);
+    ("vec_to_list",  vec_to_list_scheme);
+    ("vec_to_owned", vec_to_owned_scheme);
     ("owned_vec_new",  owned_vec_new_scheme);
     ("owned_vec_push", owned_vec_push_scheme);
     ("owned_vec_get",  owned_vec_get_scheme);

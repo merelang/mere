@@ -4499,6 +4499,67 @@ let () =
           "import \"%s\";\nimport \"%s\";\nalt_val95" alt_a alt_b_relative))
     "42";
 
+  (* --- Phase 12.11: vec_filter / vec_to_list / vec_to_owned --- *)
+  check "vec_filter: type signature (region-preserving)"
+    (Pipeline.type_of "vec_filter")
+    "(Vec['b, 'a] -> (('a -> bool) -> Vec['b, 'a]))";
+  check "vec_filter: keeps elements where predicate is true"
+    (Pipeline.process
+       "let v = vec_new () in \
+        let _ = vec_push v 1 in let _ = vec_push v 2 in \
+        let _ = vec_push v 3 in let _ = vec_push v 4 in \
+        let _ = vec_push v 5 in \
+        let evens = vec_filter v (fn x -> x % 2 == 0) in \
+        vec_get evens 0 + vec_get evens 1") "6";
+  check "vec_filter: empty result when no match"
+    (Pipeline.process
+       "let v = vec_new () in \
+        let _ = vec_push v 1 in let _ = vec_push v 3 in \
+        let _ = vec_push v 5 in \
+        vec_len (vec_filter v (fn x -> x > 100))") "0";
+
+  check "vec_to_list: scheme returns T list"
+    (Pipeline.type_of "vec_to_list")
+    "(Vec['b, 'a] -> 'a list)";
+  check "vec_to_list: produces list constructor chain"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let v = vec_new () in \
+        let _ = vec_push v 10 in let _ = vec_push v 20 in \
+        let _ = vec_push v 30 in \
+        show (vec_to_list v)") "\"[10, 20, 30]\"";
+  check "vec_to_list: empty Vec → []"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let v = vec_new () in show (vec_to_list v)") "\"[]\"";
+
+  check "vec_to_owned: scheme converts Vec[R, T] to T OwnedVec"
+    (Pipeline.type_of "vec_to_owned")
+    "(Vec['b, 'a] -> 'a OwnedVec)";
+  check "vec_to_owned: deep copy preserves elements"
+    (Pipeline.process
+       "let v = vec_new () in \
+        let _ = vec_push v 1 in let _ = vec_push v 2 in \
+        let _ = vec_push v 3 in \
+        let o = vec_to_owned v in \
+        owned_vec_len o * 100 + owned_vec_get o 0 + owned_vec_get o 2")
+    "304";
+  check "vec_to_owned: deep copy is independent of source"
+    (Pipeline.process
+       "let v = vec_new () in \
+        let _ = vec_push v 10 in let _ = vec_push v 20 in \
+        let o = vec_to_owned v in \
+        let _ = vec_set v 0 999 in \
+        owned_vec_get o 0 + owned_vec_get o 1") "30";
+  check_raises "vec_to_owned: result is OwnedVec (cannot place in region)"
+    (fun () ->
+      Pipeline.process
+        "region R { \
+           let v = vec_new () in \
+           let _ = vec_push v 1 in \
+           let o = vec_to_owned v in &R o \
+         }");
+
   check_raises "borrow checker (match): 別 arm 同士の union も active"
     (fun () ->
       Pipeline.process
