@@ -72,7 +72,8 @@ let tokenize s =
   let len = String.length s in
   let line = ref 1 in
   let col = ref 1 in
-  let here () = Loc.{ line = !line; col = !col } in
+  let here () = Loc.mk ~line:(!line) ~col:(!col) () in
+  let with_width (pos : Loc.t) (w : int) : Loc.t = { pos with width = w } in
   let advance n = col := !col + n in
   let newline () =
     incr line;
@@ -152,14 +153,12 @@ let tokenize s =
                 Printf.sprintf "unknown escape in char literal: '\\%c'" c))
           in
           advance 4;
-          aux (i + 4) ((pos, T_string (String.make 1 actual)) :: acc)
+          aux (i + 4) ((with_width pos 4, T_string (String.make 1 actual)) :: acc)
         end
         else if i + 2 < len && s.[i + 1] <> '\\' && s.[i + 2] = '\'' then begin
-          (* `'X'` where X is any single char other than `\` (escapes handled
-             above) and `'` (we don't allow an empty literal). *)
           let c = s.[i + 1] in
           advance 3;
-          aux (i + 3) ((pos, T_string (String.make 1 c)) :: acc)
+          aux (i + 3) ((with_width pos 3, T_string (String.make 1 c)) :: acc)
         end
         else if i + 1 < len && is_alpha s.[i + 1] then begin
           let rec read j =
@@ -167,8 +166,9 @@ let tokenize s =
           in
           let j = read (i + 1) in
           let name = String.sub s (i + 1) (j - i - 1) in
-          advance (j - i);
-          aux j ((pos, T_tyvar name) :: acc)
+          let w = j - i in
+          advance w;
+          aux j ((with_width pos w, T_tyvar name) :: acc)
         end
         else
           raise (Lex_error (pos, "unexpected '"))
@@ -202,24 +202,25 @@ let tokenize s =
         in
         let j = read (i + 1) in
         let str = Buffer.contents buf in
-        advance (j - i);
-        aux j ((pos, T_string str) :: acc)
+        let w = j - i in
+        advance w;
+        aux j ((with_width pos w, T_string str) :: acc)
       | c when is_digit c ->
         let rec read j =
           if j < len && is_digit s.[j] then read (j + 1) else j
         in
         let j = read i in
-        (* Float literal: `digits.digits`.  Bare `1.` is NOT a float
-           (would conflict with `.field` access on a future int).  *)
         if j + 1 < len && s.[j] = '.' && is_digit s.[j + 1] then begin
           let k = read (j + 1) in
           let text = String.sub s i (k - i) in
-          advance (k - i);
-          aux k ((pos, T_float (float_of_string text)) :: acc)
+          let w = k - i in
+          advance w;
+          aux k ((with_width pos w, T_float (float_of_string text)) :: acc)
         end else begin
           let n = int_of_string (String.sub s i (j - i)) in
-          advance (j - i);
-          aux j ((pos, T_int n) :: acc)
+          let w = j - i in
+          advance w;
+          aux j ((with_width pos w, T_int n) :: acc)
         end
       | c when is_alpha c ->
         let rec read j =
@@ -252,8 +253,9 @@ let tokenize s =
           | "_" -> T_underscore
           | _ -> T_ident word
         in
-        advance (j - i);
-        aux j ((pos, tok) :: acc)
+        let w = j - i in
+        advance w;
+        aux j ((with_width pos w, tok) :: acc)
       | _ ->
         raise (Lex_error (pos, Printf.sprintf "unexpected '%c'" c))
   in
