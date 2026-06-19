@@ -187,6 +187,20 @@ let fresh_anon_name () =
    Exhaustive.type_variants. *)
 let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
 
+(* Types whose `show_<ty_tag>` function we need to emit. *)
+let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* Cache: literal string → data segment offset, so repeated literals
+   (e.g. `, ` between tuple elements) share one segment. *)
+let show_str_offsets : (string, int) Hashtbl.t = Hashtbl.create 16
+let intern_show_str (s : string) : int =
+  match Hashtbl.find_opt show_str_offsets s with
+  | Some off -> off
+  | None ->
+    let off = fresh_str_offset s in
+    Hashtbl.add show_str_offsets s off;
+    off
+
 (* Single payload type for a variant (None if all-nullary). Mirrors the
    LLVM backend's `variant_payload_ty_of`: all payload-bearing
    constructors must share one payload type or we raise. *)
@@ -209,6 +223,23 @@ let variant_payload_ty (vname : string) : Ast.ty option =
              "variant `%s` has constructors with different payload types — \
               Phase 6 MVP needs all payloads to be the same type" vname)))
 
+(* Stable name fragment per type for show fn naming. Mirrors C/LLVM
+   codegen's ty_tag so e.g. `int list` lowers to `show_list_int`. *)
+let rec ty_tag (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyInt -> "int"
+  | Ast.TyBool -> "bool"
+  | Ast.TyStr -> "str"
+  | Ast.TyUnit -> "unit"
+  | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
+  | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
+  | Ast.TyCon (name, []) -> name
+  | Ast.TyCon (name, args) ->
+    name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+  | _ ->
+    raise (Codegen_error (Loc.dummy,
+      "unsupported Wasm codegen type for ty_tag"))
+
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
@@ -217,6 +248,99 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
   | Ast.TyRef (_, inner) -> ty_is_concrete inner
   | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+
+(* Substitute TyParam → concrete throughout `t`. Used by add_show_type
+   to specialize variant payloads / record fields against the actual
+   args of a polymorphic instance. *)
+let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyParam p ->
+    (try List.assoc p mapping with Not_found -> t)
+  | Ast.TyArrow (a, b) ->
+    Ast.TyArrow (subst_params mapping a, subst_params mapping b)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_params mapping) ts)
+  | Ast.TyCon (n, args) ->
+    Ast.TyCon (n, List.map (subst_params mapping) args)
+  | Ast.TyRef (r, inner) -> Ast.TyRef (r, subst_params mapping inner)
+  | other -> other
+
+(* Register a type for show emission, then walk dependent types
+   (tuple elems / record fields / variant payloads) recursively. The
+   already-seen guard prevents infinite recursion on self-referential
+   variants. *)
+let rec add_show_type (t : Ast.ty) : unit =
+  let t = Ast.walk t in
+  if not (ty_is_concrete t) then ()
+  else
+    let tag = ty_tag t in
+    if Hashtbl.mem show_types tag then ()
+    else begin
+      Hashtbl.add show_types tag t;
+      match t with
+      | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
+      | Ast.TyTuple ts -> List.iter add_show_type ts
+      | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+        let info = Hashtbl.find Typer.records n in
+        let mapping =
+          if info.Typer.r_params = [] then []
+          else List.combine info.Typer.r_params args
+        in
+        List.iter (fun (_, ft) ->
+          add_show_type (subst_params mapping ft)) info.Typer.r_fields
+      | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
+        (match Hashtbl.find_opt Exhaustive.type_variants n with
+         | None -> ()
+         | Some vs ->
+           let mapping =
+             match vs with
+             | (cname, _) :: _ ->
+               (match Hashtbl.find_opt Typer.constructors cname with
+                | Some info when info.Typer.params <> [] ->
+                  List.combine info.Typer.params args
+                | _ -> [])
+             | [] -> []
+           in
+           List.iter (fun (_, arg_opt) ->
+             match arg_opt with
+             | Some t -> add_show_type (subst_params mapping t)
+             | None -> ()) vs)
+      | _ -> ()
+    end
+
+let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
+       (match arg.Ast.ty with
+        | Some t -> add_show_type t
+        | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_expr f.body) fns
 
 let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
   let rec go (e : Ast.expr) =
@@ -406,6 +530,15 @@ let rec emit_expr (e : Ast.expr) : unit =
        locals := prev
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 6 later slice")
+  | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "show: missing arg type"
+    in
+    let tag = ty_tag arg_ty in
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $show_%s" tag)
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $puts";
@@ -993,6 +1126,187 @@ let emit_anon_adapter (ce : closure_emission) : string =
     "  (func $%s (param i32) (param i32) (result i32)\n%s%s)"
     ce.ce_adapter_name local_decl indented_body
 
+(* Emit `show_<tag>(x: i32) -> i32` for one type. Returns the WAT
+   function definition as a string. *)
+let emit_show_fn (tag : string) (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyInt ->
+    (* int → decimal string in a fresh 16-byte buffer, write digits
+       right-to-left, return pointer to the first digit. *)
+    {|  (func $show_int (param $n i32) (result i32)
+    (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 16)))
+    (local.set $i (i32.const 15))
+    (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 0))
+    (if (i32.lt_s (local.get $n) (i32.const 0))
+      (then
+        (local.set $neg (i32.const 1))
+        (local.set $abs (i32.sub (i32.const 0) (local.get $n))))
+      (else
+        (local.set $neg (i32.const 0))
+        (local.set $abs (local.get $n))))
+    (if (i32.eqz (local.get $abs))
+      (then
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))
+        (return (i32.add (local.get $buf) (local.get $i)))))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eqz (local.get $abs)))
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (i32.store8 (i32.add (local.get $buf) (local.get $i))
+          (i32.add (i32.const 48) (i32.rem_u (local.get $abs) (i32.const 10))))
+        (local.set $abs (i32.div_u (local.get $abs) (i32.const 10)))
+        (br $lp)))
+    (if (local.get $neg)
+      (then
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
+    (i32.add (local.get $buf) (local.get $i)))|}
+  | Ast.TyBool ->
+    let t_off = intern_show_str "true" in
+    let f_off = intern_show_str "false" in
+    Printf.sprintf
+      "  (func $show_bool (param $b i32) (result i32)\n\
+      \    (if (result i32) (local.get $b)\n\
+      \      (then (i32.const %d))\n\
+      \      (else (i32.const %d))))"
+      t_off f_off
+  | Ast.TyStr ->
+    let q_off = intern_show_str "\"" in
+    Printf.sprintf
+      "  (func $show_str (param $s i32) (result i32)\n\
+      \    (call $__lang_str_concat\n\
+      \      (call $__lang_str_concat (i32.const %d) (local.get $s))\n\
+      \      (i32.const %d)))"
+      q_off q_off
+  | Ast.TyUnit ->
+    let off = intern_show_str "()" in
+    Printf.sprintf
+      "  (func $show_unit (param $u i32) (result i32)\n\
+      \    (i32.const %d))"
+      off
+  | Ast.TyTuple ts ->
+    let comma = intern_show_str ", " in
+    let lparen = intern_show_str "(" in
+    let rparen = intern_show_str ")" in
+    let lines = Buffer.create 256 in
+    Buffer.add_string lines
+      (Printf.sprintf "  (func $show_%s (param $x i32) (result i32)\n" tag);
+    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines
+      (Printf.sprintf "    (local.set $r (i32.const %d))\n" lparen);
+    List.iteri (fun i ety ->
+      if i > 0 then
+        Buffer.add_string lines
+          (Printf.sprintf
+             "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+             comma);
+      Buffer.add_string lines
+        (Printf.sprintf
+           "    (local.set $r (call $__lang_str_concat (local.get $r) \
+            (call $show_%s (i32.load offset=%d (local.get $x)))))\n"
+           (ty_tag ety) (i * 4))
+    ) ts;
+    Buffer.add_string lines
+      (Printf.sprintf
+         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))"
+         rparen);
+    Buffer.contents lines
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+    let info = Hashtbl.find Typer.records n in
+    let mapping =
+      if info.Typer.r_params = [] then []
+      else List.combine info.Typer.r_params args
+    in
+    let hdr = intern_show_str (n ^ " { ") in
+    let suffix = intern_show_str " }" in
+    let lines = Buffer.create 256 in
+    Buffer.add_string lines
+      (Printf.sprintf "  (func $show_%s (param $x i32) (result i32)\n" tag);
+    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines
+      (Printf.sprintf "    (local.set $r (i32.const %d))\n" hdr);
+    List.iteri (fun i (fname, ft) ->
+      let ft = subst_params mapping ft in
+      let sep =
+        if i = 0 then intern_show_str (fname ^ " = ")
+        else intern_show_str (", " ^ fname ^ " = ")
+      in
+      Buffer.add_string lines
+        (Printf.sprintf
+           "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+           sep);
+      Buffer.add_string lines
+        (Printf.sprintf
+           "    (local.set $r (call $__lang_str_concat (local.get $r) \
+            (call $show_%s (i32.load offset=%d (local.get $x)))))\n"
+           (ty_tag ft) (i * 4))
+    ) info.Typer.r_fields;
+    Buffer.add_string lines
+      (Printf.sprintf
+         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))"
+         suffix);
+    Buffer.contents lines
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
+    let vs =
+      match Hashtbl.find_opt Exhaustive.type_variants n with
+      | Some vs -> vs
+      | None -> []
+    in
+    let mapping =
+      match vs with
+      | (cname, _) :: _ ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some info when info.Typer.params <> [] ->
+           List.combine info.Typer.params args
+         | _ -> [])
+      | [] -> []
+    in
+    let lines = Buffer.create 256 in
+    Buffer.add_string lines
+      (Printf.sprintf "  (func $show_%s (param $x i32) (result i32)\n" tag);
+    Buffer.add_string lines "    (local $tag i32)\n";
+    Buffer.add_string lines
+      "    (local.set $tag (i32.load offset=0 (local.get $x)))\n";
+    (* Nested if/else chain over each ctor's tag. *)
+    let rec emit_branches = function
+      | [] -> "(unreachable)"
+      | (cname, arg_opt) :: rest ->
+        let ctor_tag =
+          match Hashtbl.find_opt variant_tags cname with
+          | Some t -> t
+          | None -> raise (Codegen_error (Loc.dummy,
+            "ctor without tag in show_fn: " ^ cname))
+        in
+        let arm_body =
+          match arg_opt with
+          | None ->
+            Printf.sprintf "(i32.const %d)" (intern_show_str cname)
+          | Some pty ->
+            let pty = subst_params mapping pty in
+            let prefix = intern_show_str (cname ^ " ") in
+            Printf.sprintf
+              "(call $__lang_str_concat (i32.const %d) \
+               (call $show_%s (i32.load offset=4 (local.get $x))))"
+              prefix (ty_tag pty)
+        in
+        Printf.sprintf
+          "(if (result i32) (i32.eq (local.get $tag) (i32.const %d))\n\
+          \      (then %s)\n\
+          \      (else %s))"
+          ctor_tag arm_body (emit_branches rest)
+    in
+    Buffer.add_string lines (Printf.sprintf "    %s)" (emit_branches vs));
+    Buffer.contents lines
+  | _ ->
+    let off = intern_show_str ("<?show_" ^ tag ^ "?>") in
+    Printf.sprintf
+      "  (func $show_%s (param $x i32) (result i32)\n\
+      \    (i32.const %d))"
+      tag off
+
 (* Static runtime helpers emitted into the Wasm module: strlen and
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
@@ -1053,6 +1367,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
   Hashtbl.reset fn_closure_table_idx;
+  Hashtbl.reset show_types;
+  Hashtbl.reset show_str_offsets;
   table_entries := [];
   pending_closures := [];
   anon_counter := 0;
@@ -1067,6 +1383,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
+  collect_show_types main_expr fns;
   let fn_defs = List.map emit_fn_def fns in
   (* Register top-level closure adapters in the table and remember
      their indices so `Var name` (value position) can find them. *)
@@ -1076,6 +1393,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       Hashtbl.replace fn_closure_table_idx f.name idx;
       emit_top_adapter f
     ) fns
+  in
+  (* Emit one specialized `show_<tag>` function per registered type. *)
+  let show_fn_defs =
+    Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
   in
   (* Reset counters for the main body. *)
   reset ();
@@ -1104,7 +1425,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   drain ();
   let anon_adapters = List.rev !anon_adapters in
   let fn_section =
-    let all = fn_defs @ top_adapters @ anon_adapters in
+    let all = fn_defs @ top_adapters @ anon_adapters @ show_fn_defs in
     if all = [] then "" else String.concat "\n" all ^ "\n"
   in
   let data_section =

@@ -3469,5 +3469,35 @@ let () =
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
     "if (result i32)";
 
+  (* --- Wasm codegen: show 汎用 builtin (Phase 6.11) ---
+     LLVM Phase 5.12 相当。show は self-contained: int→string conversion
+     も Wasm 内で実装、文字列/タプル/レコード/variant の合成は
+     __lang_str_concat で。 *)
+  assert_contains "wasm: show_int defined"
+    (wasm "show 42") "(func $show_int";
+  assert_contains "wasm: show int call site"
+    (wasm "show 42") "call $show_int";
+  assert_contains "wasm: show_bool selects between true/false offsets"
+    (wasm "show true") "(func $show_bool";
+  assert_contains "wasm: show_str wraps via str_concat"
+    (wasm "show \"hi\"") "(func $show_str";
+  assert_contains "wasm: show tuple composes elements"
+    (wasm "show (1, \"hi\")") "(func $show_tuple_int_str";
+  assert_contains "wasm: show variant tag dispatch"
+    (wasm_with_decls
+      "type WCgCol8 = WCg8A | WCg8B;\n\
+       show WCg8A")
+    "(func $show_WCgCol8";
+  assert_contains "wasm: show poly variant uses mono name"
+    (wasm_with_decls
+      "type 'a WCgOpt7 = WCgN7 | WCgS7 of 'a;\n\
+       show (WCgS7 1)")
+    "(func $show_WCgOpt7_int";
+  assert_contains "wasm: show record"
+    (wasm_with_decls
+      "type WCgPt6 = { x: int, y: int };\n\
+       show (WCgPt6 { x = 1, y = 2 })")
+    "(func $show_WCgPt6";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
