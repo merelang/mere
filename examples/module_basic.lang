@@ -1,0 +1,23 @@
+// module で名前空間を切る。bindings は `M.name` 形式で外から見える。
+// モジュール内の短縮名 (`inc`, `square`) は parse 時に `Math.inc`,
+// `Math.square` に書き換わるので、相互参照は自然に動く。
+
+module Math {
+  let inc = fn x -> x + 1;
+  let square = fn x -> x * x;
+
+  let rec pow = fn base ->
+    fn n ->
+      if n < 1 then 1
+      else base * pow base (n - 1);
+
+  let inc_then_square = fn x -> square (inc x);
+};
+
+{
+  print (show (Math.inc 7));
+  print (show (Math.square 9));
+  print (show (Math.pow 2 10));
+  print (show (Math.inc_then_square 4));
+  print (show (Math.pow (Math.square 3) 2))
+}

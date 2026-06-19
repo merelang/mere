@@ -240,6 +240,51 @@ let log_event  = fn (...ctx, evt: int)   -> log + evt;
 save_order 100 10 5 + log_event 100 10 7    // 132
 ```
 
+## 10.5. モジュールと import
+
+複数の関連 binding を `module M { ... }` でくくれる。bindings は `M.name`
+で外から参照する。
+
+```
+module Math {
+  let inc = fn x -> x + 1;
+  let square = fn x -> x * x;
+  let inc_then_square = fn x -> square (inc x);
+};
+
+Math.inc_then_square 4    // 25
+```
+
+モジュール内の短縮名 (`inc`, `square`) は parse 時に `Math.inc`, `Math.square`
+に書き換わるので、相互参照 (上の `inc_then_square` が `square (inc x)`
+として書ける) は自然に動く。`let rec` の自己参照も同様。
+
+別ファイルに切り出した decls は `import "path";` で取り込む。
+
+```
+// lib_list_ops.lang
+type 'a list = Nil | Cons of 'a * 'a list;
+module ListOps {
+  let rec sum = fn xs -> match xs with
+    | Nil -> 0
+    | Cons (h, t) -> h + sum t;
+};
+```
+
+```
+// main.lang
+import "lib_list_ops.lang";
+ListOps.sum [1, 2, 3, 4, 5]    // 15
+```
+
+同じパスが直接 / 間接で複数回 import されても 1 回だけ取り込まれる
+(cycle guard)。パスは cwd 基準で解決する (slice 1)。
+
+現状 slice 1 の制約:
+- module 内では `let` / `let rec` のみ (type / record は module の外で declare)
+- 入れ子 module / `open M` 構文は今後
+- import パス resolution は cwd 相対 (importer 相対は今後)
+
 ## 11. ブロック式 (副作用シーケンス)
 
 ```
@@ -251,6 +296,42 @@ save_order 100 10 5 + log_event 100 10 7    // 132
 ```
 
 `let _ = ...; ...; 最後の式` の構文糖。
+
+## 11.5. REPL を使う
+
+`lang-ml -r` で対話起動。multi-line 入力、code frame 付き型エラー、env
+管理コマンドが揃っている。
+
+```
+$ lang-ml -r
+lang-ml REPL. Type :help for commands, :quit to exit.
+
+> let rec fact = fn n ->
+..>   if n < 1 then 1
+..>   else n * fact (n - 1);
+val fact : (int -> int)
+
+> :show fact
+val fact : (int -> int)
+  = <closure:n>
+
+> fact 10
+- : int = 3628800
+```
+
+主要コマンド:
+
+| コマンド | 用途 |
+|---|---|
+| `:type EXPR` | 型推論結果のみ表示 (eval しない) |
+| `:env` | 現在の user bindings 一覧 |
+| `:show NAME` | NAME の型 + 値を同時に表示 |
+| `:load FILE` | FILE の decls を REPL env に取り込み |
+| `:reset` | 全 user bindings をクリア |
+| `:quit` / `:q` | exit |
+
+multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buffer
+破棄。詳細なセッション例は [examples/repl_session.md](../examples/repl_session.md)。
 
 ## 12. 動く実例を読む
 
@@ -269,15 +350,27 @@ save_order 100 10 5 + log_event 100 10 7    // 132
 - **`csv_parser.lang`** — 110 行で完動する CSV パーサ (RFC 4180 縮小版、quoted field + `""` escape + 空 field + file round-trip)
 - **`mini_calc.lang`** — 160 行の式評価器 (算術 + 括弧 + 単項マイナス + let バインディング + 変数 + env-based eval、shadowing 動作)
 - **`list_lib.lang`** — Lang 自身で実装した list ユーティリティ集 (map/filter/fold_left/fold_right/length/rev/take/drop/range/replicate/for_all/any)、stdlib に builtin として入れない哲学の見本
+- **`module_basic.lang`** — `module M { ... }` + qualified 参照 `M.f` のミニ実例
+- **`lib_list_ops.lang`** + **`import_demo.lang`** — decls-only ライブラリと、それを `import "path";` で取り込む側のペア
+- **`repl_session.md`** — REPL の使い方を対話セッション形式で示したドキュメント
 
 REPL で対話的に試したいときは:
 ```sh
 lang-ml -r
 ```
 
-## 13. ネイティブコンパイル (Phase 4 codegen)
+## 13. ネイティブコンパイル (C / LLVM / Wasm の 3 backend)
 
-Lang プログラムは `-c` (file) / `-ce` (inline) で C source に変換でき、`clang` でネイティブバイナリに compile できる。
+Lang プログラムは 3 つの backend で codegen できる。すべて feature parity
+で動き、同じ Lang ソースから 3 種のネイティブ / portable バイナリを出せる。
+
+| flag | backend | 出力 |
+|---|---|---|
+| `-c` / `-ce` | C source | `clang` で native binary 化 |
+| `-ll` / `-lle` | LLVM IR | `llc` + `clang` で native binary 化 |
+| `-w` / `-we` | Wasm (WAT) | `wat2wasm` で `.wasm`、Node.js などで実行 |
+
+`*.lang` ファイルから C を出す例:
 
 ```sh
 lang-ml -ce 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10' > fact.c
@@ -306,9 +399,24 @@ lang-ml -ce "type 'a list = Nil | Cons of 'a * 'a list;
 clang sh.c -o sh && ./sh   # → [1, 2, 3]
 ```
 
+LLVM / Wasm 用は flag を差し替え:
+
+```sh
+# LLVM IR → native
+lang-ml -ll examples/factorial.lang | llc - -o fact.s && clang fact.s -o fact
+
+# Wasm (WAT)
+lang-ml -w examples/factorial.lang > fact.wat
+wat2wasm fact.wat -o fact.wasm    # 別途 wabt が必要
+```
+
 詳細は [codegen.md](codegen.md) を参照。
 
-interpreter モード (`lang-ml file.lang`) の機能と並列で codegen が動く設計で、両者の出力は同じプログラムなら一致する (`[1, 2, 3]` 等の整形も同じ)。region / view / `with` Drop 等のメモリモデル機能は現状 codegen 上では effective には実装されておらず (Phase 4 残りの大物)、type 検査のみが効く。
+interpreter モード (`lang-ml file.lang`) と codegen の出力は同じプログラム
+なら一致する (`[1, 2, 3]` 等の整形も同じ)。3 backend は feature parity で、
+int / 関数 / 文字列 / tuple / record / variant / closure / 多相 / 再帰 variant /
+複雑 pattern / show / region / view / `with` Drop / list pretty-print まで
+すべて動く。
 
 ## 次のステップ
 

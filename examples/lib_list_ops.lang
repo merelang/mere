@@ -1,0 +1,25 @@
+// import 専用ライブラリの例 — decls-only ファイル (末尾に main 式
+// を置かない) を import 元から取り込む形。
+//
+// 注: slice 1 では module 内で type / record を declare できないので、
+// 'a list 型は module の外で宣言してから ListOps で使う。
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+module ListOps {
+  let rec length = fn xs ->
+    match xs with
+    | Nil -> 0
+    | Cons (_, t) -> 1 + length t;
+
+  let rec sum = fn xs ->
+    match xs with
+    | Nil -> 0
+    | Cons (h, t) -> h + sum t;
+
+  let rec map = fn f ->
+    fn xs ->
+      match xs with
+      | Nil -> Nil
+      | Cons (h, t) -> Cons (f h, map f t);
+};
