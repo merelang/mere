@@ -3995,14 +3995,14 @@ let () =
     conflict_msg "previous borrow at";
 
   (* --- Phase 12.1: `'a Vec` 最小ハーネス (Q-010 narrowed 実装第一段階) --- *)
-  check "vec: vec_new : unit -> 'a Vec"
-    (Pipeline.type_of "vec_new") "(unit -> 'a Vec)";
-  check "vec: vec_push : 'a Vec -> 'a -> unit"
-    (Pipeline.type_of "vec_push") "('a Vec -> ('a -> unit))";
-  check "vec: vec_get : 'a Vec -> int -> 'a"
-    (Pipeline.type_of "vec_get") "('a Vec -> (int -> 'a))";
-  check "vec: vec_len : 'a Vec -> int"
-    (Pipeline.type_of "vec_len") "('a Vec -> int)";
+  check "vec: vec_new : unit -> Vec[r, elem]"
+    (Pipeline.type_of "vec_new") "(unit -> Vec['b, 'a])";
+  check "vec: vec_push : Vec[r, a] -> a -> unit"
+    (Pipeline.type_of "vec_push") "(Vec['b, 'a] -> ('a -> unit))";
+  check "vec: vec_get : Vec[r, a] -> int -> a"
+    (Pipeline.type_of "vec_get") "(Vec['b, 'a] -> (int -> 'a))";
+  check "vec: vec_len : Vec[r, a] -> int"
+    (Pipeline.type_of "vec_len") "(Vec['b, 'a] -> int)";
   check "vec: empty Vec has len 0"
     (Pipeline.process "let v = vec_new () in vec_len v") "0";
   check "vec: push 3 ints then len"
@@ -4057,17 +4057,26 @@ let () =
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
   (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
      同一の TyCon になる (forward-compatible)。 *)
-  check "vec[R, T]: type-annotation parses"
+  check "vec[R, T]: type-annotation prints as Vec[R, int]"
     (Pipeline.type_of "fn (v: Vec[R, int]) -> vec_len v")
-    "(int Vec -> int)";
-  check "vec[R, T]: str Vec[R] works"
+    "(Vec[R, int] -> int)";
+  check "vec[R, T]: str variant"
     (Pipeline.type_of "fn (v: Vec[R, str]) -> vec_get v 0")
-    "(str Vec -> str)";
-  check "vec[R, T]: same type as `T Vec` (1-arg postfix form)"
-    (let a = Pipeline.type_of "fn (v: int Vec) -> vec_len v" in
-     let b = Pipeline.type_of "fn (v: Vec[R, int]) -> vec_len v" in
-     if a = b then "same" else "DIFFERENT: " ^ a ^ " vs " ^ b)
-    "same";
+    "(Vec[R, str] -> str)";
+  check "vec[R, T]: `int Vec` (postfix) defaults region to __heap"
+    (Pipeline.type_of "fn (v: int Vec) -> vec_len v")
+    "(Vec[__heap, int] -> int)";
+  (* Phase 12.3 semantic teeth: vec_new inside a region binds the
+     region marker to the active region. *)
+  check "vec[R, T]: vec_new inside `region R` binds to R"
+    (Pipeline.type_of
+       "fn () -> region R { let v = vec_new () in vec_len v }")
+    "(unit -> int)";
+  check_raises "vec[R, T]: Vec from region R cannot escape"
+    (fun () ->
+      Pipeline.process "region R { vec_new () }");
+  check "vec[R, T]: vec_new outside region defaults to __heap"
+    (Pipeline.type_of "vec_new ()") "Vec[__heap, 'a]";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -31,18 +31,21 @@ let nums = vec_new () in
   };
 
   // === region に置く: Trivial[R] が通るので OK ===
-  // Phase 12.2 から `Vec[R, T]` 構文も書ける (現状 R はドキュメント
-  // のみ、内部表現は `T Vec` と同一)。
+  // Phase 12.3 から `vec_new ()` を region R 内で呼ぶと、自動的に
+  // `Vec[R, int]` 型 (region 注釈付き) が推論される。region から
+  // 漏らそうとすると static error。
   region R {
-    let local = (vec_new () : Vec[R, int]) in
+    let local = vec_new () in    // 型: Vec[R, int]
     {
       vec_push local 100;
       vec_push local 200;
-      let v_ref = &R local in
-      print ("region-local Vec len via ref binding = " ++ show (vec_len local))
+      print ("region-local Vec len = " ++ show (vec_len local))
     }
   }
 }
+
+// outside-region なら `Vec[__heap, T]` (default region marker)
+// inside `region R { ... }` なら `Vec[R, T]` に自動 bind
 
 // 期待出力:
 // len = 3

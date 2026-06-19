@@ -406,24 +406,37 @@ region R {
 //   into region — type contains a Drop type
 ```
 
-**Phase 12.2 から `Vec[R, T]` 構文も書ける** (forward-compatible 注釈):
+**Phase 12.3 から `Vec[R, T]` 構文に region が意味を持つ**:
 
 ```
-fn (v: Vec[R, int]) -> vec_len v    // OK: (int Vec -> int)
+fn (v: Vec[R, int]) -> vec_len v    // 型: (Vec[R, int] -> int)
+
+region R {
+  let v = vec_new () in              // 型: Vec[R, int] (R に自動 bind!)
+  { vec_push v 1; vec_push v 2; vec_len v }
+}
+
+vec_new ()                           // 型: Vec[__heap, 'a] (default region)
 ```
 
-現状 R はドキュメントのみで、`Vec[R, int]` は内部的に `int Vec` (1-arg
-TyCon) と同一の型。region のセマンティック裏付け (region-aware allocation /
-lifetime tracking) は将来の slice で。1-arg `T Vec` と 2-arg `Vec[R, T]`
-はどちらも書ける。
+`vec_new ()` を呼ぶと、内側の `region R { ... }` があれば自動的に
+`Vec[R, T]` 型 (region 注釈付き) を返し、なければ default 名 `__heap` の
+region marker を持つ。region 越えで escape しようとすると静的拒否:
 
-現状 (Phase 12.2) の制約:
+```
+region R { vec_new () }
+// type error: region escape: value of type `Vec[R, 'a]` cannot leave region `R`
+```
+
+legacy `T Vec` (1-arg postfix) も書けて、内部的には `Vec[__heap, T]` に
+展開される (forward-compat)。
+
+現状 (Phase 12.3) の制約:
 - **インタプリタ専用** — 3 backend codegen は `vec_new` 等を見つけると
   `Codegen_error` で reject (`interpreter-only` メッセージ付き)
-- **`Vec[R, T]` の R はドキュメントのみ** — 内部表現は `T Vec` と同一、
-  region は実行時に追跡されない (将来 slice で本格化)
 - **`OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]`** はまだ
 - **`Allocator` trait の API 統一** もまだ
+- **borrow checker は Vec 内部の要素単位までは追跡しない** — Vec を borrow した時点での mode は機械検証されるが、`vec_get` の結果を borrow するなどの細部は今後
 
 設計 Q-010 の全貌は [internal design notes](https://github.com/284km/internal design notes)
 を参照 (private repo)。

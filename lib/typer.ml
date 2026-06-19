@@ -482,40 +482,59 @@ let exit_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyInt, _exit_alpha) }
 
-(* --- Vec builtins (Phase 12.1, Q-010 narrowed → 実装第一段階) ---
-   `'a Vec` は region-aware な可変長 vector。型は TyCon ("Vec", [elem]) で
-   表現、`'a list` と同じ枠組み。Trivial 扱いなので region に置ける。 *)
-let _vec_new_alpha = fresh_var ()
+(* --- Vec builtins (Q-010 narrowed → 実装、Phase 12.1〜12.3) ---
+   `Vec[R, T]` は region-aware な可変長 vector。型は 2-arg TyCon
+   `TyCon ("Vec", [TyRef BorrowedRead R TyUnit; T])`:
+     - 第 1 引数: region marker (`TyRef` を介して region 名を埋め込む、
+       view 型と同じ慣例)
+     - 第 2 引数: 要素型
+   Trivial 扱いなので Trivial[R'] が破れない限り region に置ける。
+
+   Schemes は region 位置に TyVar を置く: 各呼出ごとに「任意の region
+   marker」と unify される。具体的な region 名は scheme 内で固定せず、
+   call site の Vec 値から伝搬する。 *)
+let _vec_new_elem = fresh_var ()
+let _vec_new_region = fresh_var ()
 let vec_new_scheme =
-  let aid = match _vec_new_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
-    body = Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Vec", [_vec_new_alpha])) }
+  let aid = match _vec_new_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_new_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (Ast.TyUnit,
+      Ast.TyCon ("Vec", [_vec_new_region; _vec_new_elem])) }
 
-let _vec_push_alpha = fresh_var ()
+let _vec_push_elem = fresh_var ()
+let _vec_push_region = fresh_var ()
 let vec_push_scheme =
-  let aid = match _vec_push_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  let aid = match _vec_push_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_push_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
     body = Ast.TyArrow (
-      Ast.TyCon ("Vec", [_vec_push_alpha]),
-      Ast.TyArrow (_vec_push_alpha, Ast.TyUnit)) }
+      Ast.TyCon ("Vec", [_vec_push_region; _vec_push_elem]),
+      Ast.TyArrow (_vec_push_elem, Ast.TyUnit)) }
 
-let _vec_get_alpha = fresh_var ()
+let _vec_get_elem = fresh_var ()
+let _vec_get_region = fresh_var ()
 let vec_get_scheme =
-  let aid = match _vec_get_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  let aid = match _vec_get_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_get_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
     body = Ast.TyArrow (
-      Ast.TyCon ("Vec", [_vec_get_alpha]),
-      Ast.TyArrow (Ast.TyInt, _vec_get_alpha)) }
+      Ast.TyCon ("Vec", [_vec_get_region; _vec_get_elem]),
+      Ast.TyArrow (Ast.TyInt, _vec_get_elem)) }
 
-let _vec_len_alpha = fresh_var ()
+let _vec_len_elem = fresh_var ()
+let _vec_len_region = fresh_var ()
 let vec_len_scheme =
-  let aid = match _vec_len_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
-    body = Ast.TyArrow (Ast.TyCon ("Vec", [_vec_len_alpha]), Ast.TyInt) }
+  let aid = match _vec_len_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_len_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (Ast.TyCon ("Vec", [_vec_len_region; _vec_len_elem]),
+                        Ast.TyInt) }
 
-(* Pre-register `'a Vec` (arity 1) so user code can write `int Vec` /
-   `(int Vec) Vec` in type annotations. *)
-let () = Hashtbl.replace types "Vec" 1
+(* Pre-register `Vec[R, T]` (arity 2). User code can write `Vec[R, int]`
+   or `int Vec` (legacy 1-arg postfix, auto-defaults the region to a
+   synthetic `__heap`). *)
+let () = Hashtbl.replace types "Vec" 2
 
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
@@ -778,6 +797,29 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.App (f, arg) ->
     let tf = infer env f in
     let ta = infer env arg in
+    (* Phase 12.3 special case: `vec_new ()` binds its return type's
+       region marker to the innermost active region (or `__heap` if
+       there is none). This gives `Vec[R, T]` real semantic teeth — the
+       construction-time region is recorded in the value's type, same
+       view-style binding pattern. The Var path is preserved so
+       `vec_new` as a first-class value still has its polymorphic
+       scheme; only direct application triggers the binding. *)
+    (match f.Ast.node with
+     | Ast.Var "vec_new" ->
+       let active_region =
+         match !active_regions with
+         | r :: _ -> r
+         | [] -> "__heap"
+       in
+       let marker =
+         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
+       in
+       let result_ty = Ast.TyCon ("Vec", [marker; fresh_var ()]) in
+       (* Force the scheme's region tyvar to bind to our marker by
+          unifying through the call. *)
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | _ ->
     (match Ast.walk tf with
      | Ast.TyArrow (param_ty, ret_ty) ->
        (* tf is a concrete arrow: unify param ↔ arg directly so the
@@ -802,7 +844,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
          "\nhelp: you may be passing one too many arguments (the call's \
           left side is already a value, not a function)"
        in
-       raise (Type_error (f.loc, msg)))
+       raise (Type_error (f.loc, msg))))
   | Ast.Annot (inner, t) ->
     let t', _ = freshen_params t in
     let ti = infer env inner in

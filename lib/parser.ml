@@ -122,6 +122,15 @@ let rec parse_program_internal tokens =
     let base, toks = simple_ty toks in
     let rec loop t toks =
       match toks with
+      | (_, T_ident "Vec") :: rest ->
+        (* Legacy `T Vec` postfix: auto-fill `__heap` as the region
+           marker so the 2-arg internal form (`TyCon ("Vec", [TyRef
+           BR "__heap" TyUnit; T])`) is produced. Keeps backward
+           compat with `int Vec` / `str Vec` annotations. *)
+        let region_marker =
+          Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit)
+        in
+        loop (Ast.TyCon ("Vec", [region_marker; t])) rest
       | (_, T_ident name) :: rest when not (is_primitive_type_name name) ->
         loop (expand_alias_or_tycon name [t]) rest
       | _ -> t, toks
@@ -153,35 +162,31 @@ let rec parse_program_internal tokens =
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
     | (_, T_ident name) :: (_, T_lbracket) :: rest
       when starts_with_upper name ->
-      (* `Vec[R, T]` style — bracket-delimited parameter list with a
-         leading region name + types. Phase 12.2 (Q-010 narrowed →
-         実装第二段階): parse the syntax forward-compatibly, but the
-         region marker R is currently DROPPED from the internal type
-         representation — `Vec[R, T]` is treated as `T Vec` (1-arg
-         TyCon). Future slice will give R semantic teeth (region-aware
-         allocation, lifetime tracking). *)
+      (* `Vec[R, T]` style — bracket-delimited parameter list. The
+         first uppercase bare ident is treated as a region name and
+         encoded as `TyRef BorrowedRead R TyUnit` (the same marker
+         pattern as view types). Remaining entries are type
+         expressions. For `Vec` specifically the result is the 2-arg
+         form `TyCon ("Vec", [TyRef BR R TyUnit; T])`. *)
       let rec parse_bracket_args acc toks =
         match toks with
         | (_, T_rbracket) :: rest -> List.rev acc, rest
         | (_, T_comma) :: rest -> parse_bracket_args acc rest
+        | (_, T_ident rname) :: rest2
+          when starts_with_upper rname
+               && acc = [] ->
+          (* Leading uppercase bare ident → treat as region name.
+             Encode as TyRef marker. *)
+          let marker =
+            Ast.TyRef (Ast.BorrowedRead, rname, Ast.TyUnit)
+          in
+          parse_bracket_args (marker :: acc) rest2
         | _ ->
-          (* Region name is uppercase / lowercase ident — accept either,
-             stay quiet about its identity for now. Type args are parsed
-             via the normal type parser. *)
           let t, rest = ty toks in
           parse_bracket_args (t :: acc) rest
       in
-      let all_args, rest = parse_bracket_args [] rest in
-      (* Drop the leading TyCon-with-no-args entries that come from
-         bare region idents (uppercase). Type args remain. *)
-      let type_args =
-        List.filter (fun a ->
-          match a with
-          | Ast.TyCon (_, []) -> false  (* bare region marker *)
-          | _ -> true
-        ) all_args
-      in
-      expand_alias_or_tycon name type_args, rest
+      let args, rest = parse_bracket_args [] rest in
+      expand_alias_or_tycon name args, rest
     | (_, T_ident name) :: rest -> expand_alias_or_tycon name [], rest
     | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
     | (_, T_lparen) :: rest ->

@@ -158,6 +158,13 @@ let pp_ty t =
        value (typer encodes the construction-time region this way). Print
        as `Name[R]` instead of the literal `&R () Name`. *)
     | TyCon (name, [TyRef (_, r, TyUnit)]) -> name ^ "[" ^ r ^ "]"
+    (* `Vec[R, T]` and similar — first arg is a region marker
+       (TyRef-of-unit) or a polymorphic region var; print in bracket
+       form to match user-facing syntax. *)
+    | TyCon (name, [TyRef (_, r, TyUnit); t]) ->
+      name ^ "[" ^ r ^ ", " ^ aux t ^ "]"
+    | TyCon (name, [region_tv; t]) when name = "Vec" ->
+      name ^ "[" ^ aux region_tv ^ ", " ^ aux t ^ "]"
     | TyCon (name, [a]) -> aux a ^ " " ^ name
     | TyCon (name, args) ->
       "(" ^ String.concat ", " (List.map aux args) ^ ") " ^ name
