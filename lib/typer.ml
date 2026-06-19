@@ -1452,6 +1452,27 @@ let check_borrow_conflict active region place mode loc =
     end
   ) active
 
+(* Phase 11.6: 制御フロー解析の最小版。式が「let の右辺として bind
+   された時に、上に伝播し得る borrow」のリストを抽出する。
+   - Ref (mode, region, inner): その borrow を 1 つ返す (place が
+     追跡可能なら)
+   - If (cond, t, e): 両分岐から抽出した borrow を union (どちらに
+     なるかは runtime 依存なので保守的に両方とも active と見なす)
+   - Let (_, _, body): body から抽出 (let-in を value 位置に書いた場合)
+   - Annot (inner, _): inner から抽出
+   - それ以外: 空リスト *)
+let rec extract_borrows (e : Ast.expr) : (string * string * Ast.borrow_mode * Loc.t) list =
+  match e.Ast.node with
+  | Ast.Ref (mode, region, inner) ->
+    (match place_id inner with
+     | Some p -> [(region, p, mode, e.Ast.loc)]
+     | None -> [])
+  | Ast.If (_, t, el) ->
+    extract_borrows t @ extract_borrows el
+  | Ast.Let (_, _, body) -> extract_borrows body
+  | Ast.Annot (inner, _) -> extract_borrows inner
+  | _ -> []
+
 let rec check_borrows active (e : Ast.expr) : unit =
   let go e = check_borrows active e in
   match e.node with
@@ -1490,17 +1511,18 @@ let rec check_borrows active (e : Ast.expr) : unit =
     go inner
   | Ast.Let (pat, value, body) ->
     check_borrows active value;
-    (* If the let-bound value is a `&[mode] R <place>`, extend the
-       active set for the body so subsequent borrows of the same
-       place can be checked against this one. *)
+    (* Extend the active set with any borrows produced by `value`.
+       Phase 11.6: traverse If branches and nested Let bodies to find
+       borrows that flow up to the let-binding. Each extracted borrow
+       is conflict-checked against the existing active set. *)
     let active' =
-      match pat.Ast.pnode, value.Ast.node with
-      | Ast.P_var _, Ast.Ref (mode, region, inner) ->
-        (match place_id inner with
-         | Some p ->
-           check_borrow_conflict active region p mode value.loc;
-           (region, p, mode, value.loc) :: active
-         | None -> active)
+      match pat.Ast.pnode with
+      | Ast.P_var _ ->
+        let new_borrows = extract_borrows value in
+        List.iter (fun (r, p, m, lc) ->
+          check_borrow_conflict active r p m lc
+        ) new_borrows;
+        new_borrows @ active
       | _ -> active
     in
     check_borrows active' body

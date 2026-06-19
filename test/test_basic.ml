@@ -4332,5 +4332,53 @@ let () =
   assert_contains "borrow checker (place): error mentions field-place path"
     conflict_msg "p.x";
 
+  (* --- Phase 11.6: borrow checker — if 分岐を介した borrow 伝播 --- *)
+  (* let r = if ... then &R x else &R x in let m = &mut R x → conflict *)
+  check_raises "borrow checker (if): &R x captured via if then conflict"
+    (fun () ->
+      Pipeline.process
+        "region R {\n\
+           let x = 5 in\n\
+           let r = if 1 < 2 then &R x else &R x in\n\
+           let m = &mut R x in 0\n\
+         }");
+  (* 両分岐の borrow が union として伝播 (片方だけのケースでも検出) *)
+  check_raises "borrow checker (if): borrow from else-branch also tracked"
+    (fun () ->
+      Pipeline.process
+        "region R {\n\
+           let x = 1 in let y = 2 in\n\
+           let r = if 1 < 2 then &R x else &R y in\n\
+           let m = &mut R y in 0\n\
+         }");
+  check_raises "borrow checker (if): borrow from then-branch also tracked"
+    (fun () ->
+      Pipeline.process
+        "region R {\n\
+           let x = 1 in let y = 2 in\n\
+           let r = if 1 < 2 then &R x else &R y in\n\
+           let m = &mut R x in 0\n\
+         }");
+  (* if-borrow が非衝突なら通る *)
+  check "borrow checker (if): if-borrow vs unrelated var → OK"
+    (Pipeline.process
+       "region R {\n\
+          let x = 1 in let y = 2 in let z = 3 in\n\
+          let r = if 1 < 2 then &R x else &R y in\n\
+          let m = &mut R z in 42\n\
+        }") "42";
+  (* nested let inside if value も追跡される *)
+  check_raises "borrow checker (if): nested let-in-if propagates borrow"
+    (fun () ->
+      Pipeline.process
+        "region R {\n\
+           let x = 5 in\n\
+           let r =\n\
+             if 1 < 2 then\n\
+               let _ = 0 in &R x\n\
+             else &R x in\n\
+           let m = &mut R x in 0\n\
+         }");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

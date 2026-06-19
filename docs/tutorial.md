@@ -332,6 +332,22 @@ region R {
 
 `p` 全体と `p.x` は別 place として扱われる (現状の単純比較)。本格的な
 place subset 解析は別 slice。
+
+**Phase 11.6 から if 分岐を介した borrow 伝播も追跡される** — `let r = if c then &R x else &R y in body` のように if expression の結果として
+borrow が漏れ出すケースで、両分岐の borrow を union として body の active set に追加。runtime 依存で結果が決まるので保守的に両方とも active と見なす:
+
+```
+region R {
+  let x = 1 in let y = 2 in
+  let r = if 1 < 2 then &R x else &R y in
+  let m = &mut R y in 0
+  // type error: borrow conflict: `y` is already borrowed as `&R y` here,
+  //   cannot reborrow as `&mut R y` (else 分岐 from y)
+}
+```
+
+これにより `if` を介した借用漏れも防げる。残る borrow checker DEFERRED は
+§2.3 NLL (使われなくなった borrow を解放する flow analysis)。
 動く実例は [`examples/borrow_modes.lang`](../examples/borrow_modes.lang)、
 意図的に型エラーを起こす side は
 [`examples/borrow_modes_typeerror.lang`](../examples/borrow_modes_typeerror.lang)。
