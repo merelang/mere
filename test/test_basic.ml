@@ -4380,5 +4380,42 @@ let () =
            let m = &mut R x in 0\n\
          }");
 
+  (* --- Phase 11.7: match arm からの borrow 伝播 --- *)
+  check_raises "borrow checker (match): arm からの borrow が active に"
+    (fun () ->
+      Pipeline.process
+        "type 'a opt117 = N117 | S117 of 'a;\n\
+         region R {\n\
+           let x = 5 in\n\
+           let r = match S117 1 with\n\
+             | N117 -> &R x\n\
+             | S117 _ -> &R x\n\
+           in\n\
+           let m = &mut R x in 0\n\
+         }");
+  check_raises "borrow checker (match): 別 arm 同士の union も active"
+    (fun () ->
+      Pipeline.process
+        "type 'a opt117b = N117b | S117b of 'a;\n\
+         region R {\n\
+           let x = 1 in let y = 2 in\n\
+           let r = match S117b 1 with\n\
+             | N117b -> &R x\n\
+             | S117b _ -> &R y\n\
+           in\n\
+           let m = &mut R y in 0\n\
+         }");
+  check "borrow checker (match): 関係ない var との非衝突は OK"
+    (Pipeline.process
+       "type 'a opt117c = N117c | S117c of 'a;\n\
+        region R {\n\
+          let x = 1 in let y = 2 in let z = 3 in\n\
+          let r = match S117c 1 with\n\
+            | N117c -> &R x\n\
+            | S117c _ -> &R y\n\
+          in\n\
+          let m = &mut R z in 42\n\
+        }") "42";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
