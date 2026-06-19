@@ -256,6 +256,97 @@ let rec pp e =
     let parts = List.map (fun (f, e) -> f ^ " = " ^ pp e) updates in
     "{ " ^ pp base ^ " | " ^ String.concat ", " parts ^ " }"
 
+(* Pattern-bound names — used by `rename_free_vars` to know what's
+   shadowed inside a match arm or `let pat = ... in` body. *)
+let rec pattern_vars p =
+  match p.pnode with
+  | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> []
+  | P_var n -> [n]
+  | P_constr (_, None) -> []
+  | P_constr (_, Some sub) -> pattern_vars sub
+  | P_tuple ps -> List.concat_map pattern_vars ps
+  | P_record (_, fields) ->
+    List.concat_map (fun (_, p) -> pattern_vars p) fields
+  | P_as (inner, n) -> n :: pattern_vars inner
+  | P_or (a, _) -> pattern_vars a  (* P_or arms bind the same names *)
+
+(* Walk an expr and rewrite every FREE variable reference matching
+   `lookup name` to a new name. `lookup` returns `Some new_name` to
+   rewrite or `None` to leave the Var alone. Shadowing scopes (Fun,
+   Let body, Let_rec, Match arm body, With body) hide names from the
+   rewrite. *)
+let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
+  let rec go shadowed e =
+    let n_or_e n =
+      if List.mem n shadowed then e
+      else match lookup n with
+        | Some n' -> { e with node = Var n' }
+        | None -> e
+    in
+    let with_shadow xs e' = go (xs @ shadowed) e' in
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit -> e
+    | Var n -> n_or_e n
+    | Neg a -> { e with node = Neg (go shadowed a) }
+    | Bin (op, a, b) ->
+      { e with node = Bin (op, go shadowed a, go shadowed b) }
+    | Cmp (op, a, b) ->
+      { e with node = Cmp (op, go shadowed a, go shadowed b) }
+    | Logic (op, a, b) ->
+      { e with node = Logic (op, go shadowed a, go shadowed b) }
+    | Let (pat, value, body) ->
+      let value' = go shadowed value in
+      let body' = with_shadow (pattern_vars pat) body in
+      { e with node = Let (pat, value', body') }
+    | Let_rec (bindings, body) ->
+      let names = List.map fst bindings in
+      let bindings' =
+        List.map (fun (n, v) -> (n, with_shadow names v)) bindings
+      in
+      let body' = with_shadow names body in
+      { e with node = Let_rec (bindings', body') }
+    | With (name, value, body) ->
+      let value' = go shadowed value in
+      let body' = with_shadow [name] body in
+      { e with node = With (name, value', body') }
+    | If (c, t, el) ->
+      { e with node = If (go shadowed c, go shadowed t, go shadowed el) }
+    | Fun (param, ty_opt, body) ->
+      let body' = with_shadow [param] body in
+      { e with node = Fun (param, ty_opt, body') }
+    | App (f, a) ->
+      { e with node = App (go shadowed f, go shadowed a) }
+    | Annot (inner, t) ->
+      { e with node = Annot (go shadowed inner, t) }
+    | Constr (c, None) -> { e with node = Constr (c, None) }
+    | Constr (c, Some a) -> { e with node = Constr (c, Some (go shadowed a)) }
+    | Match (scrut, arms) ->
+      let scrut' = go shadowed scrut in
+      let arms' = List.map (fun (p, guard, body) ->
+        let pv = pattern_vars p in
+        let guard' = Option.map (with_shadow pv) guard in
+        let body' = with_shadow pv body in
+        (p, guard', body')
+      ) arms in
+      { e with node = Match (scrut', arms') }
+    | Tuple es ->
+      { e with node = Tuple (List.map (go shadowed) es) }
+    | Region_block (r, body) ->
+      { e with node = Region_block (r, go shadowed body) }
+    | Ref (r, inner) ->
+      { e with node = Ref (r, go shadowed inner) }
+    | Record_lit (name, fields) ->
+      let fields' = List.map (fun (f, ex) -> (f, go shadowed ex)) fields in
+      { e with node = Record_lit (name, fields') }
+    | Field_get (inner, f) ->
+      { e with node = Field_get (go shadowed inner, f) }
+    | Record_update (base, updates) ->
+      let base' = go shadowed base in
+      let updates' = List.map (fun (f, ex) -> (f, go shadowed ex)) updates in
+      { e with node = Record_update (base', updates') }
+  in
+  go [] e
+
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
     let loc = body.loc in

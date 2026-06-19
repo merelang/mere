@@ -3746,5 +3746,43 @@ let () =
     (string_of_int (List.length !eenv))
     (string_of_int (List.length Eval.initial_env));
 
+  (* --- Phase 9.1: modules (`module M { let f = ...; }`) --- *)
+  check "module: basic qualified access"
+    (Pipeline.process
+       "module M { let answer = 42; let add = fn x -> fn y -> x + y; };\n\
+        M.add M.answer 8") "50";
+  check "module: inside-module short-name references resolve to M.X"
+    (Pipeline.process
+       "module M { let base = 10;\n\
+        let inc = fn x -> x + base;\n\
+        let twice = fn x -> inc (inc x); };\n\
+        M.twice 7") "27";
+  check "module: let rec inside module supports self-recursion"
+    (Pipeline.process
+       "module M {\n\
+        let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1);\n\
+        };\n\
+        M.fact 5") "120";
+  check "module: two modules don't collide"
+    (Pipeline.process
+       "module M { let v = 42; };\n\
+        module N { let v = 100; };\n\
+        M.v + N.v") "142";
+  check "module: regular field access (p.x) still works"
+    (Pipeline.process
+       "type Pt = { x: int, y: int };\n\
+        let p = Pt { x = 3, y = 4 } in p.x + p.y") "7";
+  check "module: shadowing inside module is per-decl"
+    (Pipeline.process
+       "module M { let v = 1; let v = v + 10; };\n\
+        M.v") "11";
+  check "module: fn parameter shadows module-bound name"
+    (Pipeline.process
+       "module M {\n\
+        let v = 100;\n\
+        let id_v = fn v -> v;\n\
+        };\n\
+        M.id_v 7") "7";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
