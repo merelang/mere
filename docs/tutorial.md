@@ -392,9 +392,31 @@ ListOps.sum [1, 2, 3, 4, 5]    // 15
 同じパスが直接 / 間接で複数回 import されても 1 回だけ取り込まれる
 (cycle guard)。パスは cwd 基準で解決する (slice 1)。
 
-現状 slice 1 の制約:
-- module 内では `let` / `let rec` のみ (type / record は module の外で declare)
-- 入れ子 module / `open M` 構文は今後
+**Phase 9.3 から入れ子 module と `open M;` が使える**:
+
+```
+module Math {
+  let inc = fn x -> x + 1;
+  module Adv {
+    let square = fn x -> x * x;
+  };
+  let inc_then_square = fn x -> Adv.square (inc x);
+};
+
+Math.Adv.square 7              // 49 (qualified nested access)
+
+open Math;                      // direct bindings を unqualified に
+inc 5                           // 6 (open 後)
+Math.Adv.cube 2                 // 8 (nested は qualified のまま)
+```
+
+`open M;` は M の direct (非 nested) binding ごとに `let name = M.name;`
+の alias を展開する糖衣。nested module の export は qualified access で
+そのまま使う設計。
+
+現状の制約:
+- module 内では `let` / `let rec` / 入れ子 `module` のみ (type / record は module の外で declare、今後の slice)
+- `open M;` は M に対してのみ (`open M.N;` はまだ)
 - import パス resolution は cwd 相対 (importer 相対は今後)
 
 ## 10.6. 可変長 Vector (`'a Vec`)
@@ -669,6 +691,7 @@ multi-line 入力中に空行 / `:` 始まりの行で `(input aborted)` で buf
 - **`strbuf_basics.lang`** — `StrBuf[R]` の基本操作 + region 配置 (Phase 12.7)
 - **`vec_higher_order.lang`** — `vec_iter` / `vec_map` / `vec_fold` / `vec_set` の高階 API デモ (Phase 12.9)
 - **`map_basics.lang`** — `Map[R, K, V]` の基本操作 + region 配置 (Phase 12.10)
+- **`module_nested.lang`** — 入れ子 module (`M.N.f`) + `open M;` のデモ (Phase 9.3)
 
 REPL で対話的に試したいときは:
 ```sh

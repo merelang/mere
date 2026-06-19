@@ -26,6 +26,7 @@ type token =
   | T_using           (* using keyword (capability list sugar for fn params) *)
   | T_module          (* module keyword (top-level module declarations) *)
   | T_import          (* import keyword (load decls from another file) *)
+  | T_open            (* open keyword (bring module bindings into scope) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -249,6 +250,7 @@ let tokenize s =
           | "using" -> T_using
           | "module" -> T_module
           | "import" -> T_import
+          | "open" -> T_open
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when

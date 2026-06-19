@@ -1,0 +1,45 @@
+// Phase 9.3: 入れ子 module + `open M;` のデモ。
+//
+// `module M { module N { let f = ... } }` で `M.N.f` 形式の qualified
+// access が動く。`open M;` で M の direct bindings を unqualified に
+// 取り込める (let alias chain に脱糖)。
+
+module Math {
+  let inc = fn x -> x + 1;
+  let dbl = fn x -> x * 2;
+
+  module Adv {
+    let square = fn x -> x * x;
+    let cube = fn x -> x * x * x;
+  };
+
+  let inc_then_square = fn x -> Adv.square (inc x);
+};
+
+// `open Math;` で direct binding (inc / dbl / inc_then_square) を取込み。
+// nested module の Adv は対象外 (Math.Adv のまま使う)。
+open Math;
+
+{
+  // qualified access (Math.foo) と unqualified (foo) を混在させる
+  print ("Math.inc 10 = " ++ show (Math.inc 10));
+  print ("Math.Adv.square 7 = " ++ show (Math.Adv.square 7));
+  print ("Math.Adv.cube 3 = " ++ show (Math.Adv.cube 3));
+  print ("Math.inc_then_square 4 = " ++ show (Math.inc_then_square 4));
+  // open 後の短縮形
+  print ("after open: inc 5 = " ++ show (inc 5));
+  print ("after open: dbl 5 = " ++ show (dbl 5));
+  // nested は qualified のまま
+  print ("after open: Math.Adv.cube 2 = " ++ show (Math.Adv.cube 2));
+  print "done"
+}
+
+// 期待出力:
+// Math.inc 10 = 11
+// Math.Adv.square 7 = 49
+// Math.Adv.cube 3 = 27
+// Math.inc_then_square 4 = 25
+// after open: inc 5 = 6
+// after open: dbl 5 = 10
+// after open: Math.Adv.cube 2 = 8
+// done
