@@ -1,23 +1,32 @@
 # lang-ml
 
-新プログラミング言語 (仮称 **Lang**) の OCaml 実装。ML 系 mini lang として実用域に到達、メモリモデル (region/view/Trivial[R])・エフェクトシステム (cap passing)・C codegen (主要構文 16 slice まで native 化) も進行中。
+新プログラミング言語 (仮称 **Lang**) の OCaml 実装。ML 系 mini lang として
+実用域に到達し、メモリモデル (region/view/Trivial[R])・エフェクトシステム
+(cap passing)・3 バックエンド (C / LLVM IR / Wasm) の codegen まで全部
+feature-parity で動く段階。
 
-## ステータス (2026-06-18 時点)
+## ステータス (2026-06-19 時点)
 
-- **87 stdlib builtin、761 tests passing**
-- ツリーウォーキング interpreter + **Phase 4 C codegen** (主要構文ほぼすべて native compile + 実行可能)
-- メモリモデル: region/view/Trivial[R]/`with` Drop が型レベルで動く (codegen 上の実体実装は将来)
-- エフェクトシステム: cap-passing パターン + `using [cap]` sugar + builtin Logger/Metrics
+- **1033 tests passing**
+- ツリーウォーキング interpreter + **C / LLVM IR / Wasm の 3 backend** が
+  feature parity で動く (同じ Lang プログラムから 3 種のバイナリを出せる)
+- メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
+  3 backend codegen すべてで動く
+- エフェクトシステム: cap-passing パターン + `using [cap]` sugar + builtin Logger / Metrics
+- 言語 surface: `module M { ... }` + `M.f` qualified access、`import "path";`
+  によるファイル分割
+- REPL: multi-line 入力、`:env` / `:show` / `:load` / `:reset`、Rust 風
+  code frame でエラー表示
 - 設計コンテキストは別リポ `aidocs/projects/lang/` (private)
 
 ## 動く機能ハイライト
 
 | カテゴリ | 内容 |
 |---|---|
-| 型システム | Hindley-Milner 推論、let-polymorphism、多相 builtin (1〜3-quantified) |
+| 型システム | Hindley-Milner 推論、let-polymorphism、多相 builtin |
 | プリミティブ | `int`、`float` (IEEE 754)、`bool`、`str`、`unit` |
 | データ | tuple、record、sum types、list 構文糖 `[1, 2, 3]` (show 出力も `[..]` 形式) |
-| 制御 | `if-then-else`、`if-then` (unit)、`match` + ガード `when` + as-pattern + or-pattern |
+| 制御 | `if-then-else`、`if-then` (unit)、`match` + guard `when` + as-pattern + or-pattern |
 | パターン | wildcard / var / lit / 文字 `'X'` / tuple / constructor / list `[h, ...t]` / record / as / or |
 | 関数 | 多引数型付き fn / `let rec ... and ...` 相互再帰 / 高階 / closure |
 | 演算子 | `+ - * / % == != < <= > >= && \|\| ++ \|> << >>` (int 算術)、float は `f_add` 等 |
@@ -25,10 +34,12 @@
 | メモリモデル | region (`region R { ... }`) / view (`view V[R] of T { ... }`) / `&R T` 参照 / escape check / Trivial[R] 制約 / `R.alloc(v)` sugar |
 | エフェクト | capability passing (cap = record の値)、`using [cap]` sugar、builtin Logger / Metrics |
 | with Drop | `with c = ... in body` で scope 末に `close` field 自動呼出、複数 binding は LIFO |
-| stdlib | 87 種: I/O 8 / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 12 / error 3 / システム / Logger・Metrics |
-| codegen | C source 出力 + clang/gcc で native binary (主要構文 16 slice まで対応、interpreter と並列で動く) |
-| REPL | 対話実行、永続 env、`:type`/`:help`/`:quit` |
-| エラー | ソース該当行 + caret 表示 |
+| モジュール | `module M { ... }` で名前空間、`M.f` 参照、内部短縮名は parse 時 rewrite |
+| import | `import "path";` で別ファイルの decls を取り込み、cycle guard あり |
+| stdlib | 87 種の builtin: I/O 8 / 変換 7 / 文字列 20 / 数値 17 / 多相 helper 8 / float 12 / error 3 / システム / Logger・Metrics |
+| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く (詳細は [codegen.md](docs/codegen.md)) |
+| REPL | 永続 env、multi-line 入力、`:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
+| エラー UX | Rust 風 multi-line code frame、ANSI 色 (TTY 時)、Levenshtein による typo 提案、型変換 hint (`use show x`, `if b then 1 else 0` 等) |
 
 ## クイック例
 
@@ -39,32 +50,32 @@ $ dune exec ./bin/main.exe -- -e '5 |> (fn x -> x + 1) |> show'
 $ dune exec ./bin/main.exe -- -e 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10'
 3628800
 
-$ dune exec ./bin/main.exe -- -e 'type 'a opt = None | Some of 'a; match Some 42 with | None -> 0 | Some n -> n + 1'
+$ dune exec ./bin/main.exe -- -e 'type opt = None | Some of int; match Some 42 with | None -> 0 | Some n -> n + 1'
 43
+
+$ dune exec ./bin/main.exe -- examples/module_basic.lang
+# `module Math { ... }` + Math.inc / Math.square / Math.pow を呼ぶ
+
+$ dune exec ./bin/main.exe -- examples/import_demo.lang
+# import "examples/lib_list_ops.lang"; ListOps.sum [1..5] を計算
 
 $ dune exec ./bin/main.exe -- examples/json_parser.lang
 # JSON パーサ in Lang (140 行) のセルフテストが走る
 
-$ echo "hello lang world" > /tmp/input.txt
-$ dune exec ./bin/main.exe -- examples/word_count.lang
-# file: /tmp/input.txt / chars / lines / words を表示
-
 $ dune exec ./bin/main.exe -- examples/pipeline.lang
-# region/view/effect/with の全機能を組合せた realistic example。
-# Drop ありの Session を with で開閉、各タスクを region 内で view で処理、
-# Logger/Metrics の cap を using sugar で渡す。
+# region/view/effect/with の全機能を組合せた realistic example
 ```
 
 ## ドキュメント
 
-- **[Tutorial](docs/tutorial.md)** — 初めての方はここから
+- **[Tutorial](docs/tutorial.md)** — 初めての方はここから (`module` / `import` / REPL 含む)
 - **[Language reference](docs/language-reference.md)** — 構文と意味論
-- **[Stdlib reference](docs/stdlib-reference.md)** — 全 85 builtin の表
+- **[Stdlib reference](docs/stdlib-reference.md)** — builtin の表
 - **[Patterns / cookbook](docs/patterns.md)** — よくあるイディオム
 - **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
-- **[Codegen](docs/codegen.md)** — C codegen の戦略・現状の subset・LLVM/Wasm への道
+- **[Codegen](docs/codegen.md)** — C / LLVM IR / Wasm の 3 backend 戦略 + slice 表
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
-- `examples/` — 動く .lang ファイル群 (FizzBuzz、JSON parser、word count 等)
+- `examples/` — 動く .lang ファイル群 (FizzBuzz、JSON parser、word count、module/import 例 等)
 
 ## ビルド・実行
 
@@ -72,28 +83,28 @@ $ dune exec ./bin/main.exe -- examples/pipeline.lang
 dune build
 dune exec ./bin/main.exe -- examples/factorial.lang
 dune exec ./bin/main.exe -- -e '1 + 2 * 3'
-dune exec ./bin/main.exe -- -te 'fn x -> x + 1'    # 型表示
-dune exec ./bin/main.exe -- -r                     # REPL
-dune runtest
+dune exec ./bin/main.exe -- -te 'fn x -> x + 1'      # 型表示
+dune exec ./bin/main.exe -- -r                       # REPL
+dune runtest                                         # 1033 tests
 
-# C codegen (Phase 4 を 16 slice、主要構文ほぼ全部対応)
+# C codegen
 dune exec ./bin/main.exe -- -ce 'let x = 5 in x * 2' > out.c
-clang out.c -o out && ./out                        # native 実行 → 10
+clang out.c -o out && ./out                          # → 10
 
-dune exec ./bin/main.exe -- -ce 'let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10' > fact.c
-clang fact.c -o fact && ./fact                     # → 3628800
+# LLVM IR codegen
+dune exec ./bin/main.exe -- -lle '1 + 2 * 3' | llc - -o sum.s
+clang sum.s -o sum && ./sum                          # → 7
 
-dune exec ./bin/main.exe -- -ce 'print ("hello, " ++ "lang!")' > hello.c
-clang hello.c -o hello && ./hello                  # → hello, lang!
-
-# 多相 variant + 高階関数 + show
-dune exec ./bin/main.exe -- -ce "type 'a list = Nil | Cons of 'a * 'a list;
-  let rec sum = fn xs -> match xs with
-    | Nil -> 0
-    | Cons (h, t) -> h + sum t
-  in print (show (sum [1, 2, 3]))" > demo.c
-clang demo.c -o demo && ./demo                     # → "6"
+# Wasm codegen (要 wabt / Node.js)
+dune exec ./bin/main.exe -- -we '1 + 2 * 3' > sum.wat
+wat2wasm sum.wat -o sum.wasm
+node -e 'WebAssembly.instantiate(require("fs").readFileSync("sum.wasm"))
+  .then(r => console.log(r.instance.exports.main()))'   # → 7
 ```
+
+3 backend (C / LLVM / Wasm) はすべて feature parity で、int / 関数 / 文字列 /
+tuple / record / variant / closure / 多相 / 再帰 variant / 複雑 pattern /
+show / region / view / `with` Drop / list pretty-print まで通る。
 
 ## レイアウト
 
@@ -104,14 +115,16 @@ lang-ml/
 │   ├── loc.ml / ast.ml / lexer.ml / parser.ml
 │   ├── typer.ml        # HM 推論 + sum types + records + let-poly
 │   ├── eval.ml         # ツリーウォーキング interpreter
-│   ├── codegen_c.ml    # C codegen (Phase 4、16 slice 進行: int / 文字列 / tuple / record / variant / closure / 多相 / show / pattern match)
+│   ├── codegen_c.ml    # C codegen
+│   ├── codegen_llvm.ml # LLVM IR codegen
+│   ├── codegen_wasm.ml # Wasm (WAT) codegen
 │   ├── pipeline.ml     # process / type_of
-│   ├── repl.ml         # 対話実行
-│   ├── diagnostic.ml   # ソース付きエラー整形
+│   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
+│   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 519 tests
+├── test/test_basic.ml  # 1033 tests
 ├── examples/           # .lang サンプル群
-└── docs/               # tutorial / language-reference / stdlib-reference / patterns
+└── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
 ```
 
 ## 設計コンテキスト (別リポ)
@@ -123,11 +136,13 @@ lang-ml/
 - `05_effect_system.md` — capability passing
 - `OPEN_QUESTIONS.md` — Q-001〜Q-011 全 resolved / narrowed
 - `implementation_status.md` — slice ごとの進捗
+- `SUMMARY.md` — Phase 1〜9 の到達点を外向けに集約
 - `11_region_vs_arena.md` 〜 `14_view_types.md` — メモリモデル deep dive
 
 ## 名前について
 
-`lang-ml` は OCaml 実装中の仮称。本番名は設計の核 (effect / type / memory) が動く頃に再考。
+`lang-ml` は OCaml 実装中の仮称。本番名は設計の核 (effect / type / memory)
+が動く頃に再考。
 
 ## ライセンス
 

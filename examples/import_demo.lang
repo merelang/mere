@@ -1,0 +1,16 @@
+// import "./path"; で別ファイルの decls を取り込む。同じファイルが
+// (直接 / 間接で) 2 回以上参照されても cycle guard でちょうど 1 回だけ
+// 取り込まれる。
+//
+// このファイルから lib_list_ops.lang を参照する場合、
+// dune exec bin/main.exe -- examples/import_demo.lang
+// と run する想定 (パスは cwd 基準で resolve)。
+
+import "examples/lib_list_ops.lang";
+
+let xs = [1, 2, 3, 4, 5] in
+{
+  print (show (ListOps.length xs));
+  print (show (ListOps.sum xs));
+  print (show (ListOps.map (fn x -> x * x) xs))
+}
