@@ -4166,5 +4166,72 @@ let () =
         "let b = strbuf_new () in strbuf_len b" in
       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
 
+  (* --- Phase 12.9: Vec の高階 API (iter / map / fold / set) --- *)
+  check "vec_iter: type signature"
+    (Pipeline.type_of "vec_iter")
+    "(Vec['b, 'a] -> (('a -> unit) -> unit))";
+  check "vec_map: same region, possibly different element type"
+    (Pipeline.type_of "vec_map")
+    "(Vec['b, 'a] -> (('a -> 'c) -> Vec['b, 'c]))";
+  check "vec_fold: foldl shape"
+    (Pipeline.type_of "vec_fold")
+    "(Vec['b, 'a] -> ('c -> (('c -> ('a -> 'c)) -> 'c)))";
+  check "vec_set: index + new value -> unit"
+    (Pipeline.type_of "vec_set")
+    "(Vec['b, 'a] -> (int -> ('a -> unit)))";
+
+  (* runtime 動作 *)
+  check "vec_map: doubling ints"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; vec_push v 3; \
+          let doubled = vec_map v (fn x -> x * 2) in \
+          vec_get doubled 0 + vec_get doubled 1 + vec_get doubled 2 }") "12";
+  check "vec_map: element-type change (int → str)"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; \
+          let s = vec_map v show in \
+          vec_get s 0 ++ \", \" ++ vec_get s 1 }") "\"1, 2\"";
+  check "vec_fold: sum"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 10; vec_push v 20; vec_push v 30; \
+          vec_fold v 0 (fn acc -> fn x -> acc + x) }") "60";
+  check "vec_set: mutates in place"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; vec_push v 3; \
+          vec_set v 1 99; \
+          vec_get v 0 + vec_get v 1 + vec_get v 2 }") "103";
+  check_raises "vec_set: out of bounds"
+    (fun () ->
+      Pipeline.process
+        "let v = vec_new () in { vec_push v 1; vec_set v 5 99 }");
+
+  (* vec_iter: callback side effects accumulate via outer Vec *)
+  check "vec_iter: callback side effects via another Vec"
+    (Pipeline.process
+       "let src = vec_new () in \
+        { vec_push src 10; vec_push src 20; vec_push src 30; \
+          let acc = vec_new () in \
+          { vec_iter src (fn x -> vec_push acc (x * 100)); \
+            vec_fold acc 0 (fn s -> fn y -> s + y) } }") "6000";
+
+  (* region 内で vec_map 結果も同じ region *)
+  check "vec_map: result Vec shares the source's region"
+    (Pipeline.type_of
+       "fn () -> region R { \
+         let v = vec_new () in \
+         { vec_push v 1; vec_push v 2; \
+           let _ = vec_map v (fn x -> x + 1) in 0 } }")
+    "(unit -> int)";
+
+  check_raises "vec_iter: codegen rejection (C)"
+    (fun () ->
+      let prog = Pipeline.parse_program
+        "let v = vec_new () in vec_iter v (fn x -> ())" in
+      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
