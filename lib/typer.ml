@@ -692,6 +692,72 @@ let strbuf_len_scheme =
 
 let () = Hashtbl.replace types "StrBuf" 1
 
+(* --- Map[R, K, V] (Phase 12.10, Q-010 narrowed) ---
+   region-aware mutable map。型は 3-arg `TyCon ("Map", [TyRef BR R TyUnit;
+   K; V])`、region marker + key 型 + value 型。schemes は region / K / V
+   それぞれ多相 (TyVar)。`map_new` は active_regions から region binding。 *)
+let _map_new_region = fresh_var ()
+let _map_new_k = fresh_var ()
+let _map_new_v = fresh_var ()
+let map_new_scheme =
+  let rid = match _map_new_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_new_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_new_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (Ast.TyUnit,
+      Ast.TyCon ("Map", [_map_new_region; _map_new_k; _map_new_v])) }
+
+let _map_set_region = fresh_var ()
+let _map_set_k = fresh_var ()
+let _map_set_v = fresh_var ()
+let map_set_scheme =
+  let rid = match _map_set_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_set_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_set_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_set_region; _map_set_k; _map_set_v]),
+      Ast.TyArrow (_map_set_k,
+        Ast.TyArrow (_map_set_v, Ast.TyUnit))) }
+
+let _map_get_region = fresh_var ()
+let _map_get_k = fresh_var ()
+let _map_get_v = fresh_var ()
+let map_get_scheme =
+  let rid = match _map_get_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_get_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_get_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_get_region; _map_get_k; _map_get_v]),
+      Ast.TyArrow (_map_get_k, _map_get_v)) }
+
+let _map_has_region = fresh_var ()
+let _map_has_k = fresh_var ()
+let _map_has_v = fresh_var ()
+let map_has_scheme =
+  let rid = match _map_has_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_has_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_has_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_has_region; _map_has_k; _map_has_v]),
+      Ast.TyArrow (_map_has_k, Ast.TyBool)) }
+
+let _map_len_region = fresh_var ()
+let _map_len_k = fresh_var ()
+let _map_len_v = fresh_var ()
+let map_len_scheme =
+  let rid = match _map_len_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_len_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_len_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_len_region; _map_len_k; _map_len_v]),
+      Ast.TyInt) }
+
+let () = Hashtbl.replace types "Map" 3
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
@@ -820,6 +886,11 @@ let initial_env : env =
     ("strbuf_push",    strbuf_push_scheme);
     ("strbuf_to_str",  strbuf_to_str_scheme);
     ("strbuf_len",     strbuf_len_scheme);
+    ("map_new",        map_new_scheme);
+    ("map_set",        map_set_scheme);
+    ("map_get",        map_get_scheme);
+    ("map_has",        map_has_scheme);
+    ("map_len",        map_len_scheme);
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);
     ("vec_len",    vec_len_scheme);
@@ -998,6 +1069,19 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
          Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
        in
        let result_ty = Ast.TyCon ("StrBuf", [marker]) in
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | Ast.Var "map_new" ->
+       let active_region =
+         match !active_regions with
+         | r :: _ -> r
+         | [] -> "__heap"
+       in
+       let marker =
+         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
+       in
+       let result_ty =
+         Ast.TyCon ("Map", [marker; fresh_var (); fresh_var ()]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | _ ->

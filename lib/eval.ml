@@ -23,6 +23,12 @@ type value =
        内部は OCaml Buffer、文字列の bytes を保持。Trivial 扱いなので
        region に置ける。型は TyCon ("StrBuf", [TyRef BR R TyUnit])
        (region marker 1-arg、view 型と同じ慣例)。 *)
+  | V_map of (value, value) Hashtbl.t
+    (* `Map[R, K, V]` — region-aware mutable associative map (Phase 12.10,
+       Q-010 narrowed). 設計 doc 13_region_std_types.md §5 の最小実装。
+       内部は OCaml Hashtbl で polymorphic hash / eq を使う (closures /
+       refs を含む key は識別が ref 単位、注意)。型は TyCon ("Map",
+       [TyRef BR R TyUnit; K; V])。 *)
 
 and env = (string * value ref) list
 
@@ -68,6 +74,10 @@ and to_string = function
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
   | V_strbuf buf ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
+  | V_map tbl ->
+    let entries = Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl [] in
+    let parts = List.map (fun (k, v) -> to_string k ^ " => " ^ to_string v) entries in
+    "Map[" ^ String.concat ", " parts ^ "]"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -613,6 +623,7 @@ let builtin_len =
     match v with
     | V_vec arr -> V_int (Array.length !arr)
     | V_strbuf buf -> V_int (Buffer.length buf)
+    | V_map tbl -> V_int (Hashtbl.length tbl)
     | V_str s -> V_int (String.length s)
     | V_tuple es -> V_int (List.length es)
     | V_constr _ ->
@@ -623,7 +634,7 @@ let builtin_len =
       else V_int n
     | _ ->
       raise (Eval_error (Loc.dummy,
-        "len: value has no defined length (expected Vec / OwnedVec / StrBuf / list / str / tuple)")))
+        "len: value has no defined length (expected Vec / OwnedVec / StrBuf / Map / list / str / tuple)")))
 
 (* --- Vec builtins (Phase 12.1) ---
    `'a Vec` is a region-aware growable vector. In the interpreter
@@ -739,6 +750,52 @@ let builtin_strbuf_len =
     match v with
     | V_strbuf buf -> V_int (Buffer.length buf)
     | _ -> failwith "strbuf_len: expected StrBuf")
+
+(* Map[R, K, V] builtins (Phase 12.10). 内部は OCaml Hashtbl (polymorphic
+   hash/eq)。Lang 値 (V_int / V_str / V_bool / V_tuple of primitives) を
+   key として使う想定。closures や refs を含む key は識別が ref 単位
+   になるため、用法には注意。 *)
+let builtin_map_new =
+  V_builtin ("map_new", fun v ->
+    match v with
+    | V_unit -> V_map (Hashtbl.create 16)
+    | _ -> failwith "map_new: expected unit")
+
+let builtin_map_set =
+  V_builtin ("map_set", fun v ->
+    match v with
+    | V_map tbl ->
+      V_builtin ("map_set_p1", fun k ->
+        V_builtin ("map_set_p2", fun vv ->
+          Hashtbl.replace tbl k vv;
+          V_unit))
+    | _ -> failwith "map_set: expected Map")
+
+let builtin_map_get =
+  V_builtin ("map_get", fun v ->
+    match v with
+    | V_map tbl ->
+      V_builtin ("map_get_p1", fun k ->
+        match Hashtbl.find_opt tbl k with
+        | Some vv -> vv
+        | None ->
+          raise (Eval_error (Loc.dummy,
+            "map_get: key not found in Map (use map_has to check first)")))
+    | _ -> failwith "map_get: expected Map")
+
+let builtin_map_has =
+  V_builtin ("map_has", fun v ->
+    match v with
+    | V_map tbl ->
+      V_builtin ("map_has_p1", fun k ->
+        V_bool (Hashtbl.mem tbl k))
+    | _ -> failwith "map_has: expected Map")
+
+let builtin_map_len =
+  V_builtin ("map_len", fun v ->
+    match v with
+    | V_map tbl -> V_int (Hashtbl.length tbl)
+    | _ -> failwith "map_len: expected Map")
 
 let builtin_fst =
   V_builtin ("fst", fun v ->
@@ -1183,6 +1240,11 @@ let initial_env : env =
     ("strbuf_push",    ref builtin_strbuf_push);
     ("strbuf_to_str",  ref builtin_strbuf_to_str);
     ("strbuf_len",     ref builtin_strbuf_len);
+    ("map_new",        ref builtin_map_new);
+    ("map_set",        ref builtin_map_set);
+    ("map_get",        ref builtin_map_get);
+    ("map_has",        ref builtin_map_has);
+    ("map_len",        ref builtin_map_len);
     ("len",            ref builtin_len);
   ]
 
