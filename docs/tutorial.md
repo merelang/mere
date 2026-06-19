@@ -310,8 +310,28 @@ region R {
 (`&shared write R` + `&shared write R`) のみ。それ以外の組合せは衝突。
 動く失敗例は [`examples/borrow_conflict.lang`](../examples/borrow_conflict.lang)。
 
-現状追跡するのは `&[mode] R x` の `x` が単純変数の場合のみ。複雑式
-(`&R rec.field` 等) は本 slice の対象外。
+**Phase 11.5 から複雑な place expression も追跡対象** — `&R p.x` のような
+field access path も識別子 (`"p.x"`、`"p.q.r"` 等) として比較される。
+異なる field を別 mode で借りるのは OK、同じ field を非互換 mode で
+借りると静的拒否:
+
+```
+type Pt = { x: int, y: int };
+region R {
+  let p = Pt { x = 3, y = 4 } in
+  let a = &R p.x in
+  let b = &mut R p.x in 42   // 衝突: borrow conflict: `p.x` is already ...
+}
+
+region R {
+  let p = Pt { x = 3, y = 4 } in
+  let a = &R p.x in
+  let b = &mut R p.y in 42   // OK: 別 field
+}
+```
+
+`p` 全体と `p.x` は別 place として扱われる (現状の単純比較)。本格的な
+place subset 解析は別 slice。
 動く実例は [`examples/borrow_modes.lang`](../examples/borrow_modes.lang)、
 意図的に型エラーを起こす side は
 [`examples/borrow_modes_typeerror.lang`](../examples/borrow_modes_typeerror.lang)。

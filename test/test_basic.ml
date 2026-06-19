@@ -4273,5 +4273,64 @@ let () =
         "let m = map_new () in map_len m" in
       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
 
+  (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
+  (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
+  check_raises "borrow checker (place): &R p.x + &mut R p.x → conflict"
+    (fun () ->
+      Pipeline.process
+        "type Pt115a = { x: int, y: int };\n\
+         region R {\n\
+           let p = Pt115a { x = 3, y = 4 } in\n\
+           let a = &R p.x in let b = &mut R p.x in 42\n\
+         }");
+  (* 異なる field なら衝突しない *)
+  check "borrow checker (place): &R p.x + &mut R p.y → OK (different fields)"
+    (Pipeline.process
+       "type Pt115b = { x: int, y: int };\n\
+        region R {\n\
+          let p = Pt115b { x = 3, y = 4 } in\n\
+          let a = &R p.x in let b = &mut R p.y in 42\n\
+        }") "42";
+  (* shared read 同士は OK *)
+  check "borrow checker (place): &R p.x + &R p.x → OK (shared read 同士)"
+    (Pipeline.process
+       "type Pt115c = { x: int, y: int };\n\
+        region R {\n\
+          let p = Pt115c { x = 3, y = 4 } in\n\
+          let a = &R p.x in let b = &R p.x in 42\n\
+        }") "42";
+  (* nested field chain (p.q.r) も追跡される *)
+  check_raises "borrow checker (place): nested field — p.q.r conflict"
+    (fun () ->
+      Pipeline.process
+        "type Inner115 = { v: int };\n\
+         type Outer115 = { inner: Inner115 };\n\
+         region R {\n\
+           let o = Outer115 { inner = Inner115 { v = 1 } } in\n\
+           let a = &R o.inner.v in let b = &mut R o.inner.v in 42\n\
+         }");
+  (* 親 と 子 path は独立に追跡 (制約緩い、現状の単純な比較) *)
+  check "borrow checker (place): p と p.x は別 place として扱われる"
+    (Pipeline.process
+       "type Pt115d = { x: int, y: int };\n\
+        region R {\n\
+          let p = Pt115d { x = 3, y = 4 } in\n\
+          let a = &R p in let b = &mut R p.x in 42\n\
+        }") "42";
+  (* エラーメッセージは place ID (`p.x`) を含む *)
+  let conflict_msg =
+    try
+      let _ = Pipeline.process
+        "type Pt115e = { x: int };\n\
+         region R {\n\
+           let p = Pt115e { x = 1 } in\n\
+           let a = &R p.x in let b = &mut R p.x in 0\n\
+         }"
+      in ""
+    with Typer.Type_error (_, msg) -> msg
+  in
+  assert_contains "borrow checker (place): error mentions field-place path"
+    conflict_msg "p.x";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

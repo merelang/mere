@@ -1419,18 +1419,33 @@ let mode_label = function
   | Ast.ExclusiveRead -> "&exclusive R"
   | Ast.ExclusiveWrite -> "&mut R"
 
-(* `active` is a list of (region, var_name, mode, loc) describing
-   borrows in scope. *)
-let check_borrow_conflict active region var_name mode loc =
-  List.iter (fun (r', v', m', loc') ->
-    if r' = region && v' = var_name
+(* Phase 11.5: 借用 target の identity を抽出するヘルパ。Var だけでなく
+   `p.field` / `p.q.r` のような Field_get chain も追跡対象にする。
+   Returns Some "<dotted>" or None when the borrowee is something more
+   complex (a function call result, a literal, etc.) — None だと borrow
+   tracking の対象外 (= 衝突検出なし) になる。 *)
+let rec place_id (e : Ast.expr) : string option =
+  match e.Ast.node with
+  | Ast.Var n -> Some n
+  | Ast.Field_get (inner, fname) ->
+    (match place_id inner with
+     | Some s -> Some (s ^ "." ^ fname)
+     | None -> None)
+  | _ -> None
+
+(* `active` is a list of (region, place_id, mode, loc) describing
+   borrows in scope. `place_id` is a stable string identity for the
+   borrowee (see `place_id` helper). *)
+let check_borrow_conflict active region place mode loc =
+  List.iter (fun (r', p', m', loc') ->
+    if r' = region && p' = place
        && not (borrows_compatible mode m') then begin
       let msg =
         Printf.sprintf
           "borrow conflict: `%s` is already borrowed as `%s %s` here, \
            cannot reborrow as `%s %s`\n\
            note: previous borrow at line %d, col %d"
-          var_name (mode_label m') var_name (mode_label mode) var_name
+          place (mode_label m') place (mode_label mode) place
           loc'.Loc.line loc'.Loc.col
       in
       raise (Type_error (loc, msg))
@@ -1465,24 +1480,27 @@ let rec check_borrows active (e : Ast.expr) : unit =
   | Ast.With (_, value, body) -> go value; go body
   | Ast.Ref (mode, region, inner) ->
     (* The borrow itself must not conflict with any currently-active
-       borrow on the same (region, var). The borrow's lifetime ends
-       with this expression unless captured by an enclosing Let — that
-       case is handled in Ast.Let below. *)
-    (match inner.Ast.node with
-     | Ast.Var v_name ->
-       check_borrow_conflict active region v_name mode e.loc
-     | _ -> ());
+       borrow on the same (region, place). Place identity is computed
+       via `place_id` — Var + Field_get chains are tracked; anything
+       else falls outside borrow tracking (Phase 11.5 widened from
+       Phase 11.4's Var-only). *)
+    (match place_id inner with
+     | Some p -> check_borrow_conflict active region p mode e.loc
+     | None -> ());
     go inner
   | Ast.Let (pat, value, body) ->
     check_borrows active value;
-    (* If the let-bound value is a `&[mode] R x` (x a simple Var),
-       extend the active set for the body so subsequent borrows of
-       the same x can be checked against this one. *)
+    (* If the let-bound value is a `&[mode] R <place>`, extend the
+       active set for the body so subsequent borrows of the same
+       place can be checked against this one. *)
     let active' =
       match pat.Ast.pnode, value.Ast.node with
-      | Ast.P_var _, Ast.Ref (mode, region, { node = Ast.Var v_name; _ }) ->
-        check_borrow_conflict active region v_name mode value.loc;
-        (region, v_name, mode, value.loc) :: active
+      | Ast.P_var _, Ast.Ref (mode, region, inner) ->
+        (match place_id inner with
+         | Some p ->
+           check_borrow_conflict active region p mode value.loc;
+           (region, p, mode, value.loc) :: active
+         | None -> active)
       | _ -> active
     in
     check_borrows active' body
