@@ -25,6 +25,7 @@ type token =
   | T_drop            (* drop keyword (Drop type marker for Trivial[R] check) *)
   | T_using           (* using keyword (capability list sugar for fn params) *)
   | T_module          (* module keyword (top-level module declarations) *)
+  | T_import          (* import keyword (load decls from another file) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -247,6 +248,7 @@ let tokenize s =
           | "drop" -> T_drop
           | "using" -> T_using
           | "module" -> T_module
+          | "import" -> T_import
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when
