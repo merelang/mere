@@ -1,6 +1,6 @@
-# Stdlib reference (lang-ml)
+# Stdlib reference (mere)
 
-`initial_env` で常に使える 56 個の builtin。型は `lang-ml -te NAME` で確認可。
+`initial_env` で常に使える 56 個の builtin。型は `mere -te NAME` で確認可。
 
 凡例:
 - ⚡ = `Eval_error` を raise する可能性あり
@@ -203,7 +203,7 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 
 ## Capability (2 + 2 builtin record types)
 
-エフェクトシステム ([effects.lang](../examples/effects.lang) 参照) で使う cap 型のうち、`Logger` と `Metrics` は builtin として事前登録済み。ユーザは `type Logger = ...` で上書きすることもできる。
+エフェクトシステム ([effects.mere](../examples/effects.mere) 参照) で使う cap 型のうち、`Logger` と `Metrics` は builtin として事前登録済み。ユーザは `type Logger = ...` で上書きすることもできる。
 
 ```
 type Logger  = { info: str -> unit, warn: str -> unit, error: str -> unit };
@@ -226,7 +226,7 @@ let m = mk_metrics () in
   m.record "latency_ms" 23 }
 ```
 
-cap-passing パターンの完全な例は [examples/effects.lang](../examples/effects.lang) を参照。
+cap-passing パターンの完全な例は [examples/effects.mere](../examples/effects.mere) を参照。
 
 ---
 
@@ -276,4 +276,4 @@ to_lower to_upper try_or write_file
 
 - 演算子 (`+ * == ++ |> << >>` 等) は **builtin ではなく言語構文** で、参照は [language-reference.md](language-reference.md)
 - 使用イディオムは [patterns.md](patterns.md)
-- 実例: `examples/json_parser.lang` で stdlib 多数を組み合わせて 140 行の JSON パーサを書いている
+- 実例: `examples/json_parser.mere` で stdlib 多数を組み合わせて 140 行の JSON パーサを書いている

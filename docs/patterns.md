@@ -1,6 +1,6 @@
-# Patterns / cookbook (lang-ml)
+# Patterns / cookbook (mere)
 
-実際に Lang でプログラムを書く時に頻出するイディオム集。
+実際に Mere でプログラムを書く時に頻出するイディオム集。
 
 ---
 
@@ -200,7 +200,7 @@ let (b, i) = parse_num s (i + 1) in
 a + b
 ```
 
-`examples/json_parser.lang` で実際にこのパターンを使っている。
+`examples/json_parser.mere` で実際にこのパターンを使っている。
 
 ---
 

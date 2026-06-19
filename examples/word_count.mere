@@ -3,7 +3,7 @@
 //
 // Usage:
 //   echo "hello world\nlang ml" > /tmp/input.txt
-//   dune exec ./bin/main.exe -- examples/word_count.lang
+//   dune exec ./bin/mere.exe -- examples/word_count.mere
 
 let path = "/tmp/input.txt";
 

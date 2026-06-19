@@ -1,11 +1,11 @@
 # REPL セッションの例
 
-`lang-ml -r` で起動して以下のように対話。`> ` は通常プロンプト、`..>` は
+`mere -r` で起動して以下のように対話。`> ` は通常プロンプト、`..>` は
 multi-line 継続プロンプト。
 
 ```
-$ lang-ml -r
-lang-ml REPL. Type :help for commands, :quit to exit.
+$ mere -r
+mere REPL. Type :help for commands, :quit to exit.
 
 > 1 + 2 * 3
 - : int = 7
@@ -35,12 +35,12 @@ val fact : (int -> int)
 val greet : (str -> str)
 val fact : (int -> int)
 
-> :load examples/lib_list_ops.lang
+> :load examples/lib_list_ops.mere
 type 'a list defined (2 variants)
 val ListOps.length : ('a list -> int)
 val ListOps.sum : (int list -> int)
 val ListOps.map : (('a -> 'b) -> ('a list -> 'b list))
-(loaded examples/lib_list_ops.lang)
+(loaded examples/lib_list_ops.mere)
 
 > ListOps.sum [1, 2, 3, 4, 5]
 - : int = 15

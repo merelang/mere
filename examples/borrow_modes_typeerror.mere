@@ -1,7 +1,7 @@
 // 借用注釈 mismatch が型エラーとして検出されることを示す demo。
 // この example は **意図的に型エラーで落ちる**。
 //
-//   dune exec bin/main.exe -- examples/borrow_modes_typeerror.lang
+//   dune exec bin/mere.exe -- examples/borrow_modes_typeerror.mere
 //
 // 出力 (抜粋):
 //   type error: expected `&mut R DbHandle`, got `&R DbHandle`

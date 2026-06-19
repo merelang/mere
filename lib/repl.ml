@@ -303,7 +303,7 @@ let read_logical_input () =
   loop (Buffer.create 64) true
 
 let run () =
-  print_endline "lang-ml REPL. Type :help for commands, :quit to exit.";
+  print_endline "Mere REPL. Type :help for commands, :quit to exit.";
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   let rec loop () =

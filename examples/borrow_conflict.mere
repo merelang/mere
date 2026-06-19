@@ -2,7 +2,7 @@
 // 衝突する borrow を静的に拒否することを示す demo。**意図的に型エラーで
 // 落ちる**。
 //
-//   dune exec bin/main.exe -- examples/borrow_conflict.lang
+//   dune exec bin/mere.exe -- examples/borrow_conflict.mere
 //
 // 出力 (抜粋):
 //   type error: borrow conflict: `v` is already borrowed as `&R v` here,

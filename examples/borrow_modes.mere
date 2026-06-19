@@ -29,7 +29,7 @@ let log_action = fn (lg: &shared write R Logger) -> fn (action: str) ->
 
 // === パターン 2: exclusive write (Database 風) ===
 // 排他 write 必要なリソース。`&mut` を要求するので、shared な借用を渡すと
-// 型エラーになる (詳細は borrow_modes_typeerror.lang)。
+// 型エラーになる (詳細は borrow_modes_typeerror.mere)。
 
 type DbHandle = { id: int, exec: str -> int };
 

@@ -1,6 +1,6 @@
-# Language reference (lang-ml)
+# Language reference (mere)
 
-現在実装されている Lang の構文と意味論。将来予定の機能 (`&T` 参照 / `region` / `view` / effect 等) は含まない。
+現在実装されている Mere の構文と意味論。将来予定の機能 (`&T` 参照 / `region` / `view` / effect 等) は含まない。
 
 ---
 
@@ -21,7 +21,7 @@
 | 文字 (length-1 str) | `'X'`、escape は `'\n'` `'\t'` `'\\'` `'\''` `'\"'` |
 | ユニット | `()` |
 
-文字リテラル `'X'` は単に長さ 1 の str (Lang は独立した char 型を持たない)。`match c with | 'n' -> ...` 等のディスパッチで便利。`'a opt` 等の型変数構文と曖昧にならないように、lexer は `'X'` (閉じ quote あり) か `'NAME` (閉じ quote なし、英字始まり) かで分岐する。
+文字リテラル `'X'` は単に長さ 1 の str (Mere は独立した char 型を持たない)。`match c with | 'n' -> ...` 等のディスパッチで便利。`'a opt` 等の型変数構文と曖昧にならないように、lexer は `'X'` (閉じ quote あり) か `'NAME` (閉じ quote なし、英字始まり) かで分岐する。
 
 ### 識別子
 - 先頭が小文字 or `_`、続きは英数 / `_`
@@ -137,7 +137,7 @@ with x = 5 in x + 1    // ERROR: int は Drop 型ではない。`let` を使う
 
 ### region (Phase 2: 構文 + 値式 `&R v` + escape check)
 
-メモリ管理の概念・比較・Lang 全体の戦略は [memory-model.md](memory-model.md) を参照。
+メモリ管理の概念・比較・Mere 全体の戦略は [memory-model.md](memory-model.md) を参照。
 ```
 region R { body }                   // R を region 名としてスコープに導入、body を評価
 region R { region S { ... } }       // ネスト可
