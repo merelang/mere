@@ -48,7 +48,7 @@ let rec unify loc t1 t2 =
       v.link <- Some t
   | _ ->
     raise (Type_error (loc, Printf.sprintf
-      "cannot unify %s with %s" (Ast.pp_ty t1) (Ast.pp_ty t2)))
+      "type mismatch: `%s` vs `%s`" (Ast.pp_ty t1) (Ast.pp_ty t2)))
 
 type scheme = {
   quantified : int list;

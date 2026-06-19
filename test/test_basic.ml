@@ -3518,5 +3518,31 @@ let () =
        show [1, 2, 3]")
     "(func $show_list_int";
 
+  (* --- Diagnostic format (Phase 7.1) ---
+     Multi-line code frame with line numbers + caret with inline message. *)
+  let diag source loc kind msg =
+    Diagnostic.format ~source ~filename:"test.lang" loc kind msg
+  in
+  let mkloc line col = { Loc.line; col } in
+  let single_line_err =
+    diag "let x = 5 + 1 in\nlet y = x + \"hi\" in\ny"
+      (mkloc 2 13) "type error" "type mismatch: `str` vs `int`"
+  in
+  assert_contains "diag: includes kind + msg header"
+    single_line_err "type error: type mismatch";
+  assert_contains "diag: arrow pointer with filename:line:col"
+    single_line_err "--> test.lang:2:13";
+  assert_contains "diag: prints line numbers in margin"
+    single_line_err "1 | let x = 5 + 1 in";
+  assert_contains "diag: caret line includes message"
+    single_line_err "^ type mismatch";
+  assert_contains "diag: shows context line after"
+    single_line_err "3 | y";
+  let zero_loc_err =
+    diag "" (mkloc 0 0) "io error" "file not found"
+  in
+  assert_contains "diag: zero-loc falls back to single line"
+    zero_loc_err "test.lang: io error: file not found";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
