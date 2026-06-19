@@ -3523,7 +3523,7 @@ let () =
   let diag source loc kind msg =
     Diagnostic.format ~source ~filename:"test.lang" loc kind msg
   in
-  let mkloc line col = { Loc.line; col } in
+  let mkloc ?(w = 1) line col = Loc.mk ~line ~col ~width:w () in
   let single_line_err =
     diag "let x = 5 + 1 in\nlet y = x + \"hi\" in\ny"
       (mkloc 2 13) "type error" "type mismatch: `str` vs `int`"
@@ -3620,6 +3620,29 @@ let () =
   Diagnostic.use_color := false;
   assert_contains "diag: color on → cyan help: keyword"
     with_hint_colored "\027[1;36mhelp: ";
+
+  (* --- Source span (Phase 7.5) ---
+     Loc.t carries a `width` (token char count) so the caret line can
+     show `^^^^^` underlining the whole token. *)
+  assert_contains "diag: width=1 → single caret"
+    (diag "let x = 5 in x" (mkloc 1 14) "type error" "msg")
+    "^ msg";
+  assert_contains "diag: width=4 → four carets"
+    (diag "let f = 10 in f" (mkloc ~w:4 1 1) "type error" "msg")
+    "^^^^ msg";
+  (* End-to-end: lexer should attach token width to identifier locs.
+     The "factrial" token width = 8 → 8 carets in the error frame. *)
+  let lex_err_caret =
+    let src = "let factorial = 10 in factrial + 1" in
+    try
+      let prog = Pipeline.parse_program src in
+      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+      ""
+    with Typer.Type_error (loc, msg) ->
+      Diagnostic.format ~source:src ~filename:"<inline>" loc "type error" msg
+  in
+  assert_contains "diag: factrial identifier → 8 carets"
+    lex_err_caret "^^^^^^^^";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

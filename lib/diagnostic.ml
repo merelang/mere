@@ -51,8 +51,9 @@ let render_extra (line : string) : string =
   | _ -> line
 
 let format ~source ~filename loc kind msg =
-  let { Loc.line; col } = loc in
+  let { Loc.line; col; width } = loc in
   let headline, extras = split_msg msg in
+  let caret_glyphs = max 1 width in
   if line = 0 then
     let extra_block =
       if extras = [] then ""
@@ -86,9 +87,10 @@ let format ~source ~filename loc kind msg =
            (blue (pad_num line_no)) bar lines.(i));
       if line_no = line then begin
         let caret_pad = String.make (max 0 (col - 1)) ' ' in
+        let carets = bold_red (String.make caret_glyphs '^') in
         Buffer.add_string buf
           (Printf.sprintf "%s %s %s%s %s\n"
-             blank_gutter bar caret_pad (bold_red "^") headline)
+             blank_gutter bar caret_pad carets headline)
       end
     done;
     if extras <> [] then begin
