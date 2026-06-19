@@ -19,6 +19,11 @@ let signatures : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
    from `Some 5` (constructor application). *)
 let records : (string, (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
 
+(* Module registry: name -> ().  Populated when `module M { ... }` is
+   parsed; consumed in `field_chain` to decide whether `M.x` is a
+   qualified name (Var "M.x") rather than a field access on M. *)
+let module_names : (string, unit) Hashtbl.t = Hashtbl.create 4
+
 (* Region name stack — pushed when entering a `region NAME { ... }` body
    and popped on exit. Used to recognize `R.alloc(expr)` as sugar for
    `&R expr` only when R is a lexically-enclosing region (so existing
@@ -678,7 +683,21 @@ let parse_program tokens =
            raise (Parse_error (pos_of rest,
              "expected ')' after region.alloc argument")))
       | (pos, T_dot) :: (_, T_ident f) :: rest ->
-        field_chain (mk pos (Ast.Field_get (v, f))) rest
+        (* Module-qualified name? If the lhs is a bare `Var "M"` and `M`
+           is in `module_names`, treat `M.f` as a single qualified Var
+           (and absorb the chain start so subsequent `.` continue as
+           field access on the resolved value). *)
+        let qualified =
+          match v.Ast.node with
+          | Ast.Var n when Hashtbl.mem module_names n ->
+            Some n
+          | _ -> None
+        in
+        (match qualified with
+         | Some m ->
+           field_chain (mk pos (Ast.Var (m ^ "." ^ f))) rest
+         | None ->
+           field_chain (mk pos (Ast.Field_get (v, f))) rest)
       | _ -> v, toks
     in
     field_chain v rest
@@ -785,8 +804,12 @@ let parse_program tokens =
        | (_, T_rparen) :: rest -> first, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ',' or ')' after expression")))
     | (pos, T_ident name) :: rest when starts_with_upper name ->
+      (* Module-qualified access:  `M.foo` — return Var so field_chain
+         picks up the `.` and forms a single qualified name. *)
+      if Hashtbl.mem module_names name then
+        mk pos (Ast.Var name), rest
       (* Record literal:  Name { f1 = e1, f2 = e2, ... } *)
-      if Hashtbl.mem records name then begin
+      else if Hashtbl.mem records name then begin
         match rest with
         | (_, T_lbrace) :: body_rest ->
           let rec parse_fields acc toks =
@@ -874,8 +897,102 @@ let parse_program tokens =
     | _ ->
       raise (Parse_error (pos_of toks, "expected '(' after signature name"))
   in
+  (* Parse a `module M { ... }` body. Only `let` / `let rec` decls are
+     accepted in slice 1 — type/record/etc. at module scope is a
+     future enhancement. Terminates at the matching `T_rbrace`. *)
+  let rec parse_module_body decls toks =
+    match toks with
+    | (_, T_rbrace) :: rest -> List.rev decls, rest
+    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+      let value, toks = expr rest in
+      let rec parse_more acc toks =
+        match toks with
+        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+          let v, toks = expr rest in
+          parse_more ((n, v) :: acc) toks
+        | _ -> List.rev acc, toks
+      in
+      let more, toks = parse_more [] toks in
+      let bindings = (name, value) :: more in
+      let _ = pos in
+      (match toks with
+       | (_, T_semi) :: rest ->
+         parse_module_body (Ast.Top_let_rec bindings :: decls) rest
+       | _ ->
+         raise (Parse_error (pos_of toks,
+           "expected ';' after let rec in module body")))
+    | (pos, T_let) :: rest_after_let ->
+      let _ = pos in
+      let pat, rest = pattern rest_after_let in
+      (match rest with
+       | (_, T_eq) :: rest ->
+         let value, rest = expr rest in
+         (match rest with
+          | (_, T_semi) :: rest ->
+            parse_module_body (Ast.Top_let (pat, value) :: decls) rest
+          | _ ->
+            raise (Parse_error (pos_of rest,
+              "expected ';' after let in module body")))
+       | _ ->
+         raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
+    | (pos, _) :: _ ->
+      raise (Parse_error (pos,
+        "only `let` / `let rec` allowed in module body (slice 1)"))
+    | [] ->
+      raise (Parse_error (Loc.dummy, "unterminated module body"))
+  in
+  (* Collect bound names from a module's decls — used to compute the
+     rename map for prefixing. *)
+  let collect_module_names decls =
+    List.concat_map (function
+      | Ast.Top_let ({ pnode = Ast.P_var n; _ }, _) -> [n]
+      | Ast.Top_let_rec bindings -> List.map fst bindings
+      | _ -> []
+    ) decls
+  in
+  (* Apply `M.` prefix to every bound name in the module's decls, AND
+     rewrite free Var references that match those names so internal
+     short-name refs (`foo` inside `M`) resolve to the exported form. *)
+  let prefix_module_decls m_name decls =
+    let names = collect_module_names decls in
+    let rename = List.map (fun n -> (n, m_name ^ "." ^ n)) names in
+    let lookup n = List.assoc_opt n rename in
+    List.map (function
+      | Ast.Top_let ({ pnode = Ast.P_var n; ploc }, value) ->
+        let new_pat = { Ast.ploc; pnode = Ast.P_var (m_name ^ "." ^ n) } in
+        let new_value = Ast.rename_free_vars lookup value in
+        Ast.Top_let (new_pat, new_value)
+      | Ast.Top_let_rec bindings ->
+        let new_bindings = List.map (fun (n, v) ->
+          (m_name ^ "." ^ n, Ast.rename_free_vars lookup v)
+        ) bindings in
+        Ast.Top_let_rec new_bindings
+      | d -> d
+    ) decls
+  in
   let rec parse_decls decls toks =
     match toks with
+    | (pos, T_module) :: (_, T_ident m_name) :: (_, T_lbrace) :: rest ->
+      (* Register the module name BEFORE parsing the body so qualified
+         self-references like `M.foo` inside the module resolve
+         correctly via `field_chain`. *)
+      Hashtbl.replace module_names m_name ();
+      let body, rest = parse_module_body [] rest in
+      let prefixed = prefix_module_decls m_name body in
+      (* `decls` accumulates newest-first; `prefixed` is in source order.
+         Prepend each prefixed decl so the final List.rev yields the
+         correct source order. *)
+      let decls' = List.rev_append prefixed decls in
+      (* Optional trailing `;` for visual consistency with other decls. *)
+      let rest =
+        match rest with
+        | (_, T_semi) :: r -> r
+        | _ -> rest
+      in
+      let _ = pos in
+      parse_decls decls' rest
+    | (pos, T_module) :: _ ->
+      raise (Parse_error (pos, "expected `NAME { decls }` after `module`"))
     | (pos, T_drop) :: ((_, T_type) :: rest_after_type as after_drop) ->
       (* `drop type Name = ...` marks Name as having Drop semantics.
          We extract the name via look-ahead and prepend `Top_drop name`
@@ -1050,6 +1167,11 @@ let parse_program tokens =
             raise (Parse_error (pos_of rest, "expected ';' or 'in' after let binding")))
        | _ ->
          raise (Parse_error (pos_of rest, "expected '=' after let pattern")))
+    | [(pos, T_eof)] ->
+      (* Decls-only program (no trailing main expression). Synthesize
+         `()` as the main so the typer / eval pipeline still has
+         something to chew on. *)
+      finish decls (mk pos Ast.Unit_lit) toks
     | _ ->
       let main, toks = expr toks in
       finish decls main toks
