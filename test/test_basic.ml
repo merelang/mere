@@ -3593,5 +3593,33 @@ let () =
     (infer_err_with_decls "type Color7 = Red7 | Green7 | Blue7;\nlet c = Greeen7 in c")
     "did you mean `Green7`?";
 
+  (* --- ANSI color output (Phase 7.4) ---
+     `use_color` defaults to false (set by CLI when stderr is a TTY).
+     When toggled on, headers / gutter / caret / help: get ANSI codes. *)
+  assert_no_contains "diag: color off → no ANSI codes"
+    (diag "let x = 5 in let y = x + \"hi\" in y" (mkloc 1 23)
+       "type error" "expected `int`, got `str`")
+    "\027[";
+  Diagnostic.use_color := true;
+  let colored =
+    diag "let x = 5 in let y = x + \"hi\" in y" (mkloc 1 23)
+      "type error" "expected `int`, got `str`"
+  in
+  Diagnostic.use_color := false;
+  assert_contains "diag: color on → red kind header"
+    colored "\027[1;31mtype error";
+  assert_contains "diag: color on → blue gutter pipe"
+    colored "\027[34m|";
+  assert_contains "diag: color on → red caret"
+    colored "\027[1;31m^";
+  Diagnostic.use_color := true;
+  let with_hint_colored =
+    diag "let f = 10 in fa + 1" (mkloc 1 15)
+      "type error" "unbound variable: fa\nhelp: did you mean `f`?"
+  in
+  Diagnostic.use_color := false;
+  assert_contains "diag: color on → cyan help: keyword"
+    with_hint_colored "\027[1;36mhelp: ";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -100,6 +100,17 @@ let compile_to_wasm source =
   let (prog, main_ty) = infer_program source in
   Codegen_wasm.emit_program ~main_ty prog
 
+(* Enable ANSI color in diagnostics when stderr is a TTY and the
+   environment hasn't opted out via NO_COLOR (https://no-color.org/). *)
+let () =
+  let no_color =
+    match Sys.getenv_opt "NO_COLOR" with
+    | Some "" | None -> false
+    | Some _ -> true
+  in
+  if not no_color && Unix.isatty Unix.stderr then
+    Lang_ml.Diagnostic.use_color := true
+
 let () =
   match Array.to_list Sys.argv with
   | [_] -> usage ()
