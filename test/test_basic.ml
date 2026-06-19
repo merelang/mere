@@ -3431,5 +3431,43 @@ let () =
        in sum (WCgCons2 (1, WCgNil2))")
     "i32.load offset=0";
 
+  (* --- Wasm codegen: 複雑な pattern (Phase 6.10) ---
+     P_int / P_bool / P_str (via @__lang_streq) / P_unit / P_record / P_as /
+     nested ctor / or-pattern (pre-flattened) / guard. *)
+  assert_contains "wasm: streq runtime helper emitted"
+    (wasm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
+    "(func $__lang_streq";
+  assert_contains "wasm: P_int via i32.eq"
+    (wasm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
+    "i32.eq";
+  assert_contains "wasm: P_str via streq call"
+    (wasm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
+    "call $__lang_streq";
+  assert_contains "wasm: P_bool via i32.eq"
+    (wasm "match true with | false -> 0 | true -> 1")
+    "i32.eq";
+  assert_contains "wasm: record pattern via i32.load offset"
+    (wasm_with_decls
+      "type WCgPt5 = { x: int, y: int };\n\
+       match WCgPt5 { x = 3, y = 4 } with | WCgPt5 { x = a, y = b } -> a + b")
+    "i32.load offset=0";
+  assert_contains "wasm: nested ctor with combined i32.and"
+    (wasm_with_decls
+      "type 'a WCgOpt7 = WCgN7 | WCgS7 of 'a;\n\
+       match WCgS7 (WCgS7 7) with\n\
+         | WCgN7 -> 0\n\
+         | WCgS7 WCgN7 -> 1\n\
+         | WCgS7 (WCgS7 n) -> n")
+    "i32.and";
+  assert_contains "wasm: or-pattern flattens to multiple arms"
+    (wasm_with_decls
+      "type WCgCol9 = WCg9A | WCg9B | WCg9C;\n\
+       match WCg9B with | WCg9A | WCg9B -> 1 | WCg9C -> 2")
+    "if (result i32)";
+  assert_contains "wasm: match guard short-circuits via inner if"
+    (wasm
+       "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
+    "if (result i32)";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

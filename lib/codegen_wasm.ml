@@ -594,102 +594,178 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "match: missing scrutinee type"
     in
-    let type_name =
-      match scrut_ty with
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n -> n
-      | _ -> unsupported e.Ast.loc
-               "match: scrutinee is not a user-declared variant (Phase 6 MVP)"
-    in
-    let payload_ty = variant_payload_ty type_name in
     let scrut_slot = fresh_local () in
-    let tag_slot = fresh_local () in
-    let payload_slot = match payload_ty with
-      | None -> -1
-      | Some _ -> fresh_local ()
-    in
     emit_expr scrut;
     emit_instr (Printf.sprintf "local.set %d" scrut_slot);
-    emit_instr (Printf.sprintf "local.get %d" scrut_slot);
-    emit_instr "i32.load offset=0";
-    emit_instr (Printf.sprintf "local.set %d" tag_slot);
-    (match payload_ty with
-     | None -> ()
-     | Some _ ->
-       emit_instr (Printf.sprintf "local.get %d" scrut_slot);
-       emit_instr "i32.load offset=4";
-       emit_instr (Printf.sprintf "local.set %d" payload_slot));
-    (* Emit nested if/else chain. Each arm pushes its result; final
-       fallthrough is `unreachable` to mirror typer-promised exhaustiveness. *)
-    let rec emit_arms = function
-      | [] ->
-        emit_instr "unreachable"
-      | (pat, guard, body) :: rest ->
-        if guard <> None then
-          unsupported pat.Ast.ploc "match guard — Phase 6 later slice";
-        let tag_value, bindings =
-          match pat.Ast.pnode with
-          | Ast.P_wild -> (None, [])
-          | Ast.P_var n -> (None, [(n, scrut_slot)])
-          | Ast.P_constr (cname, sub) ->
-            let t =
-              match Hashtbl.find_opt variant_tags cname with
-              | Some t -> t
-              | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
-            in
-            let bs =
-              match sub with
-              | None -> []
-              | Some sp ->
-                (match sp.Ast.pnode, payload_ty with
-                 | Ast.P_wild, _ -> []
-                 | Ast.P_var n, Some _ -> [(n, payload_slot)]
-                 | Ast.P_tuple sub_pats, Some _ ->
-                   (* Payload is a tuple — extract each element via
-                      i32.load at offset i*4 into a fresh local. *)
-                   List.mapi (fun i sub_p ->
-                     match sub_p.Ast.pnode with
-                     | Ast.P_var n ->
-                       let slot = fresh_local () in
-                       emit_instr (Printf.sprintf "local.get %d" payload_slot);
-                       emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
-                       emit_instr (Printf.sprintf "local.set %d" slot);
-                       Some (n, slot)
-                     | Ast.P_wild -> None
-                     | _ ->
-                       unsupported sub_p.Ast.ploc
-                         "nested tuple sub-pattern — Phase 6 later slice")
-                     sub_pats
-                   |> List.filter_map (fun x -> x)
-                 | _, None ->
-                   unsupported sp.Ast.ploc
-                     "ctor sub-pattern on nullary-only variant"
-                 | _ ->
-                   unsupported sp.Ast.ploc
-                     "ctor sub-pattern kind not yet in Phase 6 MVP")
-            in
-            (Some t, bs)
-          | _ ->
-            unsupported pat.Ast.ploc "pattern kind not yet in Phase 6 MVP"
+    (* combine_and pushes both conds, runs i32.and, stores in a fresh local. *)
+    let combine_and (a : int) (b : int) : int =
+      let slot = fresh_local () in
+      emit_instr (Printf.sprintf "local.get %d" a);
+      emit_instr (Printf.sprintf "local.get %d" b);
+      emit_instr "i32.and";
+      emit_instr (Printf.sprintf "local.set %d" slot);
+      slot
+    in
+    let true_cond () =
+      let slot = fresh_local () in
+      emit_instr "i32.const 1";
+      emit_instr (Printf.sprintf "local.set %d" slot);
+      slot
+    in
+    (* Fully recursive pattern compile. Returns (cond local slot,
+       (name, value-slot) bindings). *)
+    let rec compile_pat (pat : Ast.pattern) (v_slot : int) (v_ty : Ast.ty)
+      : int * (string * int) list =
+      match pat.Ast.pnode with
+      | Ast.P_wild -> (true_cond (), [])
+      | Ast.P_var n -> (true_cond (), [(n, v_slot)])
+      | Ast.P_unit -> (true_cond (), [])
+      | Ast.P_int n ->
+        let slot = fresh_local () in
+        emit_instr (Printf.sprintf "local.get %d" v_slot);
+        emit_instr (Printf.sprintf "i32.const %d" n);
+        emit_instr "i32.eq";
+        emit_instr (Printf.sprintf "local.set %d" slot);
+        (slot, [])
+      | Ast.P_bool b ->
+        let slot = fresh_local () in
+        emit_instr (Printf.sprintf "local.get %d" v_slot);
+        emit_instr (Printf.sprintf "i32.const %d" (if b then 1 else 0));
+        emit_instr "i32.eq";
+        emit_instr (Printf.sprintf "local.set %d" slot);
+        (slot, [])
+      | Ast.P_str s ->
+        let lit_off = fresh_str_offset s in
+        let slot = fresh_local () in
+        emit_instr (Printf.sprintf "local.get %d" v_slot);
+        emit_instr (Printf.sprintf "i32.const %d" lit_off);
+        emit_instr "call $__lang_streq";
+        emit_instr (Printf.sprintf "local.set %d" slot);
+        (slot, [])
+      | Ast.P_as (inner, n) ->
+        let (c, bs) = compile_pat inner v_slot v_ty in
+        (c, (n, v_slot) :: bs)
+      | Ast.P_tuple pats ->
+        let elem_tys =
+          match Ast.walk v_ty with Ast.TyTuple ts -> ts | _ ->
+            unsupported pat.Ast.ploc "P_tuple on non-tuple"
         in
-        match tag_value with
-        | None ->
-          (* Wildcard or var: always matches. *)
-          let prev_locals = !locals in
-          locals := bindings @ prev_locals;
-          emit_expr body;
-          locals := prev_locals
-        | Some t ->
-          emit_instr (Printf.sprintf "local.get %d" tag_slot);
-          emit_instr (Printf.sprintf "i32.const %d" t);
-          emit_instr "i32.eq";
-          emit_instr "if (result i32)";
-          let prev_locals = !locals in
-          locals := bindings @ prev_locals;
-          emit_expr body;
-          locals := prev_locals;
-          emit_instr "else";
-          emit_arms rest;
-          emit_instr "end"
+        let conds_bs = List.mapi (fun i p ->
+          let elem_slot = fresh_local () in
+          emit_instr (Printf.sprintf "local.get %d" v_slot);
+          emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+          emit_instr (Printf.sprintf "local.set %d" elem_slot);
+          let elem_ty = try List.nth elem_tys i with _ -> Ast.TyInt in
+          compile_pat p elem_slot elem_ty
+        ) pats in
+        let conds = List.map fst conds_bs in
+        let cond = List.fold_left combine_and (true_cond ()) conds in
+        let bs = List.concat_map snd conds_bs in
+        (cond, bs)
+      | Ast.P_record (_, sub_fields) ->
+        let fields =
+          match Ast.walk v_ty with
+          | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+            (Hashtbl.find Typer.records n).Typer.r_fields
+          | Ast.TyCon (n, _) when Hashtbl.mem Typer.views n ->
+            (Hashtbl.find Typer.views n).Typer.v_fields
+          | _ -> unsupported pat.Ast.ploc "P_record on non-record"
+        in
+        let idx_of fname =
+          let rec find i = function
+            | [] -> -1
+            | (n, _) :: _ when n = fname -> i
+            | _ :: rest -> find (i + 1) rest
+          in find 0 fields
+        in
+        let ty_of fname = List.assoc fname fields in
+        let conds_bs = List.map (fun (fname, sub_p) ->
+          let i = idx_of fname in
+          let ft = ty_of fname in
+          let f_slot = fresh_local () in
+          emit_instr (Printf.sprintf "local.get %d" v_slot);
+          emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+          emit_instr (Printf.sprintf "local.set %d" f_slot);
+          compile_pat sub_p f_slot ft
+        ) sub_fields in
+        let conds = List.map fst conds_bs in
+        let cond = List.fold_left combine_and (true_cond ()) conds in
+        let bs = List.concat_map snd conds_bs in
+        (cond, bs)
+      | Ast.P_constr (cname, sub) ->
+        let info =
+          match Hashtbl.find_opt Typer.constructors cname with
+          | Some i -> i
+          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
+        in
+        let type_name = info.Typer.type_name in
+        let payload_ty = variant_payload_ty type_name in
+        let tag =
+          match Hashtbl.find_opt variant_tags cname with
+          | Some t -> t
+          | None -> unsupported pat.Ast.ploc ("ctor without tag: " ^ cname)
+        in
+        let tag_cond = fresh_local () in
+        emit_instr (Printf.sprintf "local.get %d" v_slot);
+        emit_instr "i32.load offset=0";
+        emit_instr (Printf.sprintf "i32.const %d" tag);
+        emit_instr "i32.eq";
+        emit_instr (Printf.sprintf "local.set %d" tag_cond);
+        (match sub, payload_ty with
+         | None, _ -> (tag_cond, [])
+         | Some sub_pat, Some pty ->
+           let pl_slot = fresh_local () in
+           emit_instr (Printf.sprintf "local.get %d" v_slot);
+           emit_instr "i32.load offset=4";
+           emit_instr (Printf.sprintf "local.set %d" pl_slot);
+           let (sub_cond, sub_bs) = compile_pat sub_pat pl_slot pty in
+           (combine_and tag_cond sub_cond, sub_bs)
+         | Some _, None ->
+           unsupported pat.Ast.ploc
+             "pattern has payload but variant has no payload type")
+      | Ast.P_or _ ->
+        unsupported pat.Ast.ploc "P_or should have been flattened"
+    in
+    (* Pre-flatten or-patterns into multiple arms. *)
+    let rec expand_or (pat, guard, body) =
+      match pat.Ast.pnode with
+      | Ast.P_or (a, b) ->
+        expand_or (a, guard, body) @ expand_or (b, guard, body)
+      | _ -> [(pat, guard, body)]
+    in
+    let arms = List.concat_map expand_or arms in
+    let rec emit_arms = function
+      | [] -> emit_instr "unreachable"
+      | (pat, guard, body) :: rest ->
+        let (cond_slot, bindings) = compile_pat pat scrut_slot scrut_ty in
+        (* Guard: evaluate within arm-bindings scope, AND with cond. If
+           cond is false, short-circuit (don't even evaluate guard). *)
+        let final_cond =
+          match guard with
+          | None -> cond_slot
+          | Some g ->
+            let g_slot = fresh_local () in
+            emit_instr (Printf.sprintf "local.get %d" cond_slot);
+            emit_instr "if (result i32)";
+            let prev = !locals in
+            locals := bindings @ prev;
+            emit_expr g;
+            locals := prev;
+            emit_instr "else";
+            emit_instr "i32.const 0";
+            emit_instr "end";
+            emit_instr (Printf.sprintf "local.set %d" g_slot);
+            g_slot
+        in
+        emit_instr (Printf.sprintf "local.get %d" final_cond);
+        emit_instr "if (result i32)";
+        let prev = !locals in
+        locals := bindings @ prev;
+        emit_expr body;
+        locals := prev;
+        emit_instr "else";
+        emit_arms rest;
+        emit_instr "end"
     in
     emit_arms arms
   | Ast.Fun (param, _, fn_body) ->
@@ -956,7 +1032,20 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
                (i32.const 1)))
-    (local.get $r))|}
+    (local.get $r))
+  (func $__lang_streq (param $a i32) (param $b i32) (result i32)
+    (local $ba i32) (local $bb i32)
+    (block $not_eq
+      (loop $lp
+        (local.set $ba (i32.load8_u (local.get $a)))
+        (local.set $bb (i32.load8_u (local.get $b)))
+        (br_if $not_eq (i32.ne (local.get $ba) (local.get $bb)))
+        (if (i32.eqz (local.get $ba))
+          (then (return (i32.const 1))))
+        (local.set $a (i32.add (local.get $a) (i32.const 1)))
+        (local.set $b (i32.add (local.get $b) (i32.const 1)))
+        (br $lp)))
+    (i32.const 0))|}
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
