@@ -67,6 +67,7 @@ codegen。
 | [csv_parser.mere](csv_parser.mere) | CSV パーサ |
 | [word_count.mere](word_count.mere) | 単語カウント |
 | [pipeline.mere](pipeline.mere) | region / view / cap / with を組合せた realistic な処理 |
+| [todo_app.mere](todo_app.mere) | TODO リスト管理 (OwnedVec[Task] + Logger + vec_map / fold)。**interpreter only** (mk_logger が codegen 未対応)。Phase 16 第 1 スライスでの試作 |
 
 ### Q-010 collection (Phase 12 — interpreter)
 
