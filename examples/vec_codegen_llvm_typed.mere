@@ -1,0 +1,48 @@
+// Phase 15.3: Vec[R, T] の LLVM IR codegen 対応 (Phase 15.2 と feature parity)。
+//
+// C backend (Phase 15.2) と同じ形で 4 種類の Vec instance を作り、
+// それぞれ別の `%mere_vec_<tag>` LLVM IR runtime に monomorphize される
+// ことを確認する program。allocator は region (C 版と同じ
+// `__lang_region_alloc` を共有)、要素型ごとに struct typedef +
+// 4 helper define を 1 セット emit。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- -ll examples/vec_codegen_llvm_typed.mere > /tmp/vt.ll
+//   clang /tmp/vt.ll -o /tmp/vt && /tmp/vt
+//   # → 252
+
+type Tag = Lo of int | Hi of int;
+
+let ints = vec_new () in
+let __ = vec_push ints 1 in
+let __ = vec_push ints 2 in
+let __ = vec_push ints 3 in
+let ints_sum = vec_get ints 0 + vec_get ints 1 + vec_get ints 2 in
+
+let words = vec_new () in
+let __ = vec_push words "hi" in
+let __ = vec_push words "you" in
+let strs_len = str_len (vec_get words 0) + str_len (vec_get words 1) in
+
+let pairs = vec_new () in
+let __ = vec_push pairs (10, 100) in
+let __ = vec_push pairs (20, 200) in
+let pairs_sum = fst (vec_get pairs 0) + snd (vec_get pairs 1) in
+
+let tags = (vec_new () : Tag Vec) in
+let __ = vec_push tags (Lo 7) in
+let __ = vec_push tags (Hi 15) in
+let tag_sum =
+  match vec_get tags 0 with
+  | Lo n -> n
+  | Hi n -> n
+in
+let tag_sum2 =
+  match vec_get tags 1 with
+  | Lo n -> n
+  | Hi n -> n
+in
+
+ints_sum + strs_len + pairs_sum + tag_sum + tag_sum2 + vec_len ints + vec_len words + vec_len pairs + vec_len tags
+// = 6 + 5 + 210 + 7 + 15 + 3 + 2 + 2 + 2
+// = 252

@@ -4086,13 +4086,32 @@ let () =
   in
   assert_contains "vec: C codegen accepts Vec[R, tuple]"
     c_src_tup "mere_vec_tuple_int_int";
-  (* LLVM はポリモフィズム未解決を先に検出するので "interpreter-only" 文字列
-     には到達しない (`unsupported LLVM codegen type element` で reject)。
-     どちらでも codegen エラーになることだけ確認。 *)
-  check_raises "vec: LLVM codegen rejects Vec"
-    (fun () ->
-      let prog = Pipeline.parse_program "let v = vec_new () in vec_len v" in
-      let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog in ());
+  (* Phase 15.3: LLVM IR codegen も Vec[R, T] を要素型一般化で対応。 *)
+  let vec_codegen_llvm src =
+    let prog = Pipeline.parse_program src in
+    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog
+  in
+  check "vec: LLVM codegen accepts Vec[R, int]"
+    (let ll = vec_codegen_llvm
+       "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
+     if String.length ll > 0 then "ok" else "empty") "ok";
+  assert_contains "vec: LLVM codegen emits mere_vec_int runtime"
+    (vec_codegen_llvm
+       "let v = vec_new () in let r = vec_push v 7 in vec_len v")
+    "@mere_vec_int_new";
+  assert_contains "vec: LLVM codegen accepts Vec[R, str]"
+    (vec_codegen_llvm
+       "let v = vec_new () in let r = vec_push v \"hi\" in vec_len v")
+    "@mere_vec_str_new";
+  assert_contains "vec: LLVM codegen accepts Vec[R, tuple]"
+    (vec_codegen_llvm
+       "let v = vec_new () in let r = vec_push v (1, 2) in vec_len v")
+    "@mere_vec_tuple_int_int_new";
+  assert_contains "vec: LLVM codegen binds vec_new inside region R to that region"
+    (vec_codegen_llvm
+       "region R { let v = vec_new () in let r = vec_push v 7 in vec_len v }")
+    "@mere_vec_int_new";
   assert_contains "vec: Wasm codegen rejects Vec with clear message"
     (codegen_err_msg
        (fun p -> Codegen_wasm.emit_program ~main_ty:Ast.TyInt p)
