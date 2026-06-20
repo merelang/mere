@@ -95,6 +95,11 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    placed inside a region. *)
 let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 15.9: StrBuf[R] usage flag — StrBuf is a single (non-polymorphic)
+   region-bound mutable string buffer, so no per-T monomorphization.
+   The runtime is emitted iff this flag is set. *)
+let strbuf_used = ref false
+
 (* Substitute TyParam names → concrete types throughout `t`. *)
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
@@ -473,17 +478,17 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len" then
-      unsupported e.loc
-        (name ^ " as a value (Phase 15.1〜15.7: vec_* / owned_vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
+       || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len"
+       || name = "strbuf_to_str" || name = "strbuf_len" then
+      unsupported e.loc
+        (name ^ " as a value (Phase 15.1〜15.9: vec_* / owned_vec_* / strbuf_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "map_new" || name = "map_set" || name = "map_get"
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.loc
-        (name ^ " (StrBuf / Map / vec_to_list / len are interpreter-only)");
+        (name ^ " (Map / vec_to_list / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -769,6 +774,33 @@ let rec emit_expr (e : Ast.expr) : string =
             mere_owned_vec_%s_push(__new, mere_vec_%s_get(__vc, __i)); \
           } __new; })"
          (emit_expr arg) t_tag t_tag t_tag
+     | Ast.Var "strbuf_new" ->
+       (* Phase 15.9: strbuf_new () — region は result type の TyCon arg
+          から取り出す。Vec[R, T] と同じ慣例。 *)
+       strbuf_used := true;
+       let region_name =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("StrBuf", [Ast.TyRef (_, r, Ast.TyUnit)]) -> r
+            | _ -> "__heap")
+         | None -> "__heap"
+       in
+       let region_var =
+         if region_name = "__heap" then "__lang_default_region"
+         else "__region_" ^ region_name
+       in
+       Printf.sprintf "mere_strbuf_new(&%s)" region_var
+     | Ast.Var "strbuf_len" ->
+       strbuf_used := true;
+       Printf.sprintf "mere_strbuf_len(%s)" (emit_expr arg)
+     | Ast.Var "strbuf_to_str" ->
+       strbuf_used := true;
+       Printf.sprintf "mere_strbuf_to_str(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "strbuf_push"; _ }, sb_e) ->
+       strbuf_used := true;
+       Printf.sprintf "mere_strbuf_push(%s, %s)"
+         (emit_expr sb_e) (emit_expr arg)
      | Ast.Var "owned_vec_to_vec" ->
        (* Phase 15.7: owned_vec_to_vec o — heap OwnedVec を region Vec に
           deep copy。region は結果 Vec の TyRef marker から取り出す。 *)
@@ -1124,9 +1156,15 @@ let rec c_type_of (t : Ast.ty) : string =
      | _ ->
        raise (Codegen_error (Loc.dummy,
          "unsupported in C codegen subset: OwnedVec[<unresolved>] (element type must be concrete)")))
-  | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
+  | Ast.TyCon ("StrBuf", _) ->
+    (* Phase 15.9: StrBuf[R] — single non-polymorphic type、`mere_strbuf*`。
+       region marker は使わず (Vec と違い)、struct 内 region ptr で
+       追跡。 *)
+    strbuf_used := true;
+    "mere_strbuf*"
+  | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in C codegen subset: StrBuf / Map (interpreter-only)"))
+      "unsupported in C codegen subset: Map (interpreter-only)"))
   | Ast.TyInt | Ast.TyBool -> "int"
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
@@ -1571,6 +1609,51 @@ let region_runtime_helpers =
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. */";
       "static __lang_region __lang_default_region;" ]
+
+(* Phase 15.9: StrBuf[R] runtime — region-allocated mutable string buffer.
+   Single-instance (StrBuf has no element type parameter, it's always bytes).
+   to_str returns a null-terminated copy in the region. *)
+let strbuf_runtime =
+  String.concat "\n"
+    [ "typedef struct mere_strbuf {";
+      "  char* data;";
+      "  int len;";
+      "  int cap;";
+      "  __lang_region* region;";
+      "} mere_strbuf;";
+      "";
+      "static mere_strbuf* mere_strbuf_new(__lang_region* r) {";
+      "  mere_strbuf* sb = (mere_strbuf*)__lang_region_alloc(r, sizeof(mere_strbuf));";
+      "  sb->cap = 16;";
+      "  sb->len = 0;";
+      "  sb->data = (char*)__lang_region_alloc(r, sizeof(char) * 16);";
+      "  sb->region = r;";
+      "  return sb;";
+      "}";
+      "";
+      "static int mere_strbuf_push(mere_strbuf* sb, const char* s) {";
+      "  int slen = (int)strlen(s);";
+      "  while (sb->len + slen > sb->cap) {";
+      "    int new_cap = sb->cap * 2;";
+      "    char* new_data = (char*)__lang_region_alloc(sb->region, sizeof(char) * new_cap);";
+      "    for (int i = 0; i < sb->len; i++) new_data[i] = sb->data[i];";
+      "    sb->data = new_data;";
+      "    sb->cap = new_cap;";
+      "  }";
+      "  for (int i = 0; i < slen; i++) sb->data[sb->len + i] = s[i];";
+      "  sb->len += slen;";
+      "  return 0; /* unit */";
+      "}";
+      "";
+      "static const char* mere_strbuf_to_str(mere_strbuf* sb) {";
+      "  /* Return null-terminated copy allocated in the same region. */";
+      "  char* r = (char*)__lang_region_alloc(sb->region, sb->len + 1);";
+      "  for (int i = 0; i < sb->len; i++) r[i] = sb->data[i];";
+      "  r[sb->len] = '\\0';";
+      "  return r;";
+      "}";
+      "";
+      "static int mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
 
 (* Phase 15.8: 全 OwnedVec を tracking する registry。`owned_vec_new` /
    `vec_to_owned` で確保された struct を全部 thread-local list に登録、
@@ -2392,6 +2475,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   Hashtbl.reset owned_vec_instances;
+  strbuf_used := false;
   let variant_decls =
     List.filter_map (fun decl ->
       match decl with
@@ -2697,12 +2781,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if mono_record_typedefs = [] then [] else mono_record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
-    (* Forward typedef of Vec[R, T] / OwnedVec[T] runtime structs so
-       closure typedefs (which may carry these values) can compile
-       before the full runtime struct body is emitted. *)
+    (* Forward typedef of Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime
+       structs so closure typedefs (which may carry these values) can
+       compile before the full runtime struct body is emitted. *)
     @ (if vec_forward_typedefs = [] then [] else vec_forward_typedefs @ [""])
     @ (if owned_vec_forward_typedefs = [] then []
        else owned_vec_forward_typedefs @ [""])
+    @ (if !strbuf_used then
+         ["typedef struct mere_strbuf mere_strbuf;"; ""]
+       else [])
     (* Closure typedefs reference user struct names (e.g.,
        `closure_int_Conn`) but only via function pointer types, which C
        accepts with forward-declared structs. *)
@@ -2716,12 +2803,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
     @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
-    (* Vec[R, T] / OwnedVec[T] runtime — depends on the element type's
-       C struct being complete, so emit after tuple / record / variant
-       bodies. OwnedVec registry先行 (各 _new がそれを参照する)。 *)
+    (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
+       element type's C struct being complete, so emit after tuple /
+       record / variant bodies. OwnedVec registry先行 (各 _new が参照)。 *)
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
+    @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";

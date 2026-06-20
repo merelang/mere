@@ -103,6 +103,9 @@ let vec_used = ref false
    empty) table when these helpers are emitted. *)
 let vec_higher_order_used = ref false
 
+(* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
+let strbuf_used = ref false
+
 (* Names bound by a pattern (for the free-vars walk). *)
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
@@ -498,19 +501,19 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len" then
+       || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "strbuf_new" || name = "strbuf_push"
+       || name = "strbuf_to_str" || name = "strbuf_len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4〜15.7: vec_* / owned_vec_* は直接 application のみ対応)"));
+        ^ " as a value (Phase 15.4〜15.9: vec_* / owned_vec_* / strbuf_* は直接 application のみ対応)"));
     if name = "vec_to_list"
-       || name = "strbuf_new" || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
        || name = "map_has" || name = "map_len"
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (StrBuf / Map / vec_to_list / len are interpreter-only)"));
+        ^ " (Map / vec_to_list / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -673,6 +676,24 @@ let rec emit_expr (e : Ast.expr) : unit =
     vec_used := true;
     emit_expr owned_e;
     emit_instr "call $mere_vec_clone"
+  | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
+    (* Phase 15.9: strbuf_new () — region は無視 (Wasm の bump はグローバル
+       1 本)。 *)
+    strbuf_used := true;
+    emit_instr "call $mere_strbuf_new"
+  | Ast.App ({ node = Ast.Var "strbuf_len"; _ }, arg) ->
+    strbuf_used := true;
+    emit_expr arg;
+    emit_instr "call $mere_strbuf_len"
+  | Ast.App ({ node = Ast.Var "strbuf_to_str"; _ }, arg) ->
+    strbuf_used := true;
+    emit_expr arg;
+    emit_instr "call $mere_strbuf_to_str"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "strbuf_push"; _ }, sb_e); _ }, str_e) ->
+    strbuf_used := true;
+    emit_expr sb_e;
+    emit_expr str_e;
+    emit_instr "call $mere_strbuf_push"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load offset=0"
@@ -1720,6 +1741,85 @@ let vec_higher_order_runtime = {|
         (br $lp)))
     (local.get $new))|}
 
+(* Phase 15.9: StrBuf[R] runtime — single non-polymorphic helper set.
+   Wasm の bump アロケータ ($__lang_bump) を使う。Layout:
+   { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 byte (Vec と同じ). *)
+let strbuf_runtime_wasm = {|
+  (func $mere_strbuf_new (result i32)
+    (local $sb i32) (local $buf i32)
+    (local.set $sb (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $sb) (i32.const 16)))
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 16)))
+    (i32.store offset=0 (local.get $sb) (local.get $buf))
+    (i32.store offset=4 (local.get $sb) (i32.const 0))
+    (i32.store offset=8 (local.get $sb) (i32.const 16))
+    (local.get $sb))
+  (func $mere_strbuf_push (param $sb i32) (param $s i32) (result i32)
+    (local $slen i32) (local $len i32) (local $cap i32) (local $buf i32)
+    (local $new_buf i32) (local $i i32)
+    (local.set $slen (call $__lang_strlen (local.get $s)))
+    (block $resize_end
+      (loop $resize_lp
+        (local.set $len (i32.load offset=4 (local.get $sb)))
+        (local.set $cap (i32.load offset=8 (local.get $sb)))
+        (br_if $resize_end
+          (i32.le_s (i32.add (local.get $len) (local.get $slen))
+                    (local.get $cap)))
+        ;; grow
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new_buf (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_buf) (local.get $cap)))
+        (local.set $buf (i32.load offset=0 (local.get $sb)))
+        (local.set $i (i32.const 0))
+        (block $cp_end
+          (loop $cp_lp
+            (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+            (i32.store8
+              (i32.add (local.get $new_buf) (local.get $i))
+              (i32.load8_u (i32.add (local.get $buf) (local.get $i))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp_lp)))
+        (i32.store offset=0 (local.get $sb) (local.get $new_buf))
+        (i32.store offset=8 (local.get $sb) (local.get $cap))
+        (br $resize_lp)))
+    ;; copy s into the buffer at offset len
+    (local.set $buf (i32.load offset=0 (local.get $sb)))
+    (local.set $len (i32.load offset=4 (local.get $sb)))
+    (local.set $i (i32.const 0))
+    (block $cp2_end
+      (loop $cp2_lp
+        (br_if $cp2_end (i32.eq (local.get $i) (local.get $slen)))
+        (i32.store8
+          (i32.add (i32.add (local.get $buf) (local.get $len)) (local.get $i))
+          (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cp2_lp)))
+    (i32.store offset=4 (local.get $sb)
+      (i32.add (local.get $len) (local.get $slen)))
+    (i32.const 0))
+  (func $mere_strbuf_to_str (param $sb i32) (result i32)
+    (local $len i32) (local $out i32) (local $buf i32) (local $i i32)
+    (local.set $len (i32.load offset=4 (local.get $sb)))
+    (local.set $buf (i32.load offset=0 (local.get $sb)))
+    (local.set $out (global.get $__lang_bump))
+    (global.set $__lang_bump
+      (i32.add (local.get $out) (i32.add (local.get $len) (i32.const 1))))
+    (local.set $i (i32.const 0))
+    (block $cp_end
+      (loop $cp_lp
+        (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+        (i32.store8
+          (i32.add (local.get $out) (local.get $i))
+          (i32.load8_u (i32.add (local.get $buf) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cp_lp)))
+    (i32.store8 (i32.add (local.get $out) (local.get $len)) (i32.const 0))
+    (local.get $out))
+  (func $mere_strbuf_len (param $sb i32) (result i32)
+    (i32.load offset=4 (local.get $sb)))|}
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
@@ -1735,6 +1835,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_offset_counter := str_initial_offset;
   vec_used := false;
   vec_higher_order_used := false;
+  strbuf_used := false;
   (* Pre-register variant tags from Exhaustive's registry. *)
   Hashtbl.iter (fun _name vs ->
     List.iteri (fun i (cname, _) ->
@@ -1901,6 +2002,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
+  let strbuf_section = if !strbuf_used then strbuf_runtime_wasm else "" in
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
@@ -1913,7 +2015,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     table_section bump_init data_section runtime_helpers vec_runtime_section
-    vec_higher_order_section fn_section local_decl indented_body
+    vec_higher_order_section strbuf_section fn_section local_decl indented_body

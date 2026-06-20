@@ -4379,11 +4379,27 @@ let () =
   check "strbuf: polymorphic len works on StrBuf"
     (Pipeline.process
        "let b = strbuf_new () in { strbuf_push b \"hello\"; len b }") "5";
-  check_raises "strbuf: codegen rejection (C)"
-    (fun () ->
-      let prog = Pipeline.parse_program
-        "let b = strbuf_new () in strbuf_len b" in
-      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+  (* Phase 15.9: 3 backend で StrBuf[R] codegen を accept する。 *)
+  let strbuf_src =
+    "let b = strbuf_new () in let __ = strbuf_push b \"hi\" in strbuf_len b"
+  in
+  assert_contains "strbuf: C codegen emits mere_strbuf runtime"
+    (let prog = Pipeline.parse_program strbuf_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_strbuf_new";
+  assert_contains "strbuf: LLVM codegen emits @mere_strbuf_new"
+    (let prog = Pipeline.parse_program strbuf_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_strbuf_new";
+  assert_contains "strbuf: Wasm codegen emits $mere_strbuf_new"
+    (let prog = Pipeline.parse_program strbuf_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_strbuf_new";
+  check "strbuf: interpreter parity"
+    (Pipeline.process strbuf_src) "2";
 
   (* --- Phase 12.9: Vec の高階 API (iter / map / fold / set) --- *)
   check "vec_iter: type signature"
