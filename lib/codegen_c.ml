@@ -439,11 +439,19 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
          let rec is_key_supported = function
            | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
            | Ast.TyTuple ts -> List.for_all is_key_supported ts
+           | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+             let info = Hashtbl.find Typer.records rname in
+             List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
+               info.Typer.r_fields
+           | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+             (* Allow only nullary variants (all ctors have no payload). *)
+             let ctors = Hashtbl.find Exhaustive.type_variants vname in
+             List.for_all (fun (_, payload) -> payload = None) ctors
            | _ -> false
          in
          if not (is_key_supported k_ty) then
            raise (Codegen_error (loc,
-             "Map key type must be int / bool / str / tuple in C codegen (Phase 15.10/15.14)"));
+             "Map key type must be int / bool / str / tuple / record / nullary variant in C codegen (Phase 15.10/15.14/15.15)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -1342,8 +1350,8 @@ let rec c_type_of (t : Ast.ty) : string =
     strbuf_used := true;
     "mere_strbuf*"
   | Ast.TyCon ("Map", args) ->
-    (* Phase 15.10/15.14: Map[R, K, V] — per-(K, V) monomorphize。
-       K = int / bool / str / tuple (of supported types). *)
+    (* Phase 15.10/15.14/15.15: Map[R, K, V] — per-(K, V) monomorphize。
+       K = int / bool / str / tuple / record / nullary variant. *)
     (match List.map Ast.walk args with
      | [_; k_ty; v_ty]
        when ty_is_concrete k_ty && ty_is_concrete v_ty ->
@@ -1352,11 +1360,18 @@ let rec c_type_of (t : Ast.ty) : string =
        let rec is_key_supported = function
          | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
          | Ast.TyTuple ts -> List.for_all is_key_supported ts
+         | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+           let info = Hashtbl.find Typer.records rname in
+           List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
+             info.Typer.r_fields
+         | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+           let ctors = Hashtbl.find Exhaustive.type_variants vname in
+           List.for_all (fun (_, payload) -> payload = None) ctors
          | _ -> false
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (Loc.dummy,
-           "Map key type must be int / bool / str / tuple in C codegen (Phase 15.10/15.14)"));
+           "Map key type must be int / bool / str / tuple / record / nullary variant in C codegen (Phase 15.10/15.14/15.15)"));
        let key = k_tag ^ "__" ^ v_tag in
        if not (Hashtbl.mem map_instances key) then
          Hashtbl.add map_instances key (k_ty, v_ty);
@@ -1829,6 +1844,18 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
           (Printf.sprintf "(%s).f%d" a i)
           (Printf.sprintf "(%s).f%d" b i)) ts in
       "(" ^ String.concat " && " parts ^ ")"
+    | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+      (* Phase 15.15: record key — compare each field recursively. *)
+      let info = Hashtbl.find Typer.records rname in
+      let parts = List.map (fun (fname, fty) ->
+        key_eq_for fty
+          (Printf.sprintf "(%s).%s" a fname)
+          (Printf.sprintf "(%s).%s" b fname)) info.Typer.r_fields in
+      "(" ^ String.concat " && " parts ^ ")"
+    | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+      (* Phase 15.15: nullary variant key — compare tags. Payloads not
+         supported in this slice (would require per-tag union access). *)
+      Printf.sprintf "(%s).tag == (%s).tag" a b
     | _ -> Printf.sprintf "(%s) == (%s)" a b
   in
   let key_eq_expr a b = key_eq_for k_ty a b in

@@ -504,11 +504,18 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
        let rec is_key_supported = function
          | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
          | Ast.TyTuple ts -> List.for_all is_key_supported ts
+         | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+           let info = Hashtbl.find Typer.records rname in
+           List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
+             info.Typer.r_fields
+         | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+           let ctors = Hashtbl.find Exhaustive.type_variants vname in
+           List.for_all (fun (_, payload) -> payload = None) ctors
          | _ -> false
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (loc,
-           "Map key type must be int / bool / str / tuple in Wasm codegen (Phase 15.10/15.14)"));
+           "Map key type must be int / bool / str / tuple / record / nullary variant in Wasm codegen (Phase 15.10/15.14/15.15)"));
        let tag = ty_tag k_ty in
        if not (Hashtbl.mem map_key_types tag) then
          Hashtbl.add map_key_types tag k_ty;
@@ -1955,32 +1962,54 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
       Printf.sprintf "(call $__lang_streq %s %s)" a_expr b_expr
     | _ -> Printf.sprintf "(i32.eq %s %s)" a_expr b_expr
   in
+  let compound_eq fields_offsets a_expr b_expr =
+    (* For each (offset, field_ty) compute eq and AND together,
+       loading from offset 4*idx. *)
+    let a_loc = fresh_loc "ta" in
+    let b_loc = fresh_loc "tb" in
+    locals := (a_loc, "i32") :: !locals;
+    locals := (b_loc, "i32") :: !locals;
+    let setup =
+      Printf.sprintf "(local.set %s %s) (local.set %s %s)" a_loc a_expr b_loc b_expr
+    in
+    let parts = List.map (fun (off, t) ->
+      let fa = Printf.sprintf "(i32.load offset=%d (local.get %s))" off a_loc in
+      let fb = Printf.sprintf "(i32.load offset=%d (local.get %s))" off b_loc in
+      t, fa, fb) fields_offsets in
+    parts, setup, a_loc, b_loc
+  in
   let rec build ty a_expr b_expr =
     match Ast.walk ty with
     | Ast.TyTuple ts ->
-      (* For each field i: load from offset 4*i, recursively compare,
-         AND together. *)
-      let a_loc = fresh_loc "ta" in
-      let b_loc = fresh_loc "tb" in
-      locals := (a_loc, "i32") :: !locals;
-      locals := (b_loc, "i32") :: !locals;
-      (* Use a block-scoped let-pattern via local.set to keep WAT simple. *)
-      let setup =
-        Printf.sprintf "(local.set %s %s) (local.set %s %s)" a_loc a_expr b_loc b_expr
-      in
-      let parts = List.mapi (fun i t ->
-        let off = i * 4 in
-        let fa = Printf.sprintf "(i32.load offset=%d (local.get %s))" off a_loc in
-        let fb = Printf.sprintf "(i32.load offset=%d (local.get %s))" off b_loc in
-        build t fa fb) ts in
+      let fields_off = List.mapi (fun i t -> (i * 4, t)) ts in
+      let parts, setup, _, _ = compound_eq fields_off a_expr b_expr in
       let combined =
         match parts with
         | [] -> "(i32.const 1)"
-        | [p] -> p
-        | p0 :: rest ->
-          List.fold_left (fun acc p -> Printf.sprintf "(i32.and %s %s)" acc p) p0 rest
+        | (t, a, b) :: rest ->
+          let first = build t a b in
+          List.fold_left (fun acc (t, a, b) ->
+            Printf.sprintf "(i32.and %s %s)" acc (build t a b)) first rest
       in
       Printf.sprintf "(block (result i32) %s %s)" setup combined
+    | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+      let info = Hashtbl.find Typer.records rname in
+      let fields_off = List.mapi (fun i (_, ft) -> (i * 4, ft))
+        info.Typer.r_fields in
+      let parts, setup, _, _ = compound_eq fields_off a_expr b_expr in
+      let combined =
+        match parts with
+        | [] -> "(i32.const 1)"
+        | (t, a, b) :: rest ->
+          let first = build t a b in
+          List.fold_left (fun acc (t, a, b) ->
+            Printf.sprintf "(i32.and %s %s)" acc (build t a b)) first rest
+      in
+      Printf.sprintf "(block (result i32) %s %s)" setup combined
+    | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+      (* nullary variant — compare tags at offset 0. *)
+      Printf.sprintf "(i32.eq (i32.load offset=0 %s) (i32.load offset=0 %s))"
+        a_expr b_expr
     | _ -> emit_eq_for_atom ty a_expr b_expr
   in
   let body_expr = build k_ty "(local.get $a)" "(local.get $b)" in

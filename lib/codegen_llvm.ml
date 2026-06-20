@@ -269,11 +269,18 @@ let rec llvm_ty_of (t : Ast.ty) : string =
        let rec is_key_supported = function
          | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
          | Ast.TyTuple ts -> List.for_all is_key_supported ts
+         | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+           let info = Hashtbl.find Typer.records rname in
+           List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
+             info.Typer.r_fields
+         | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+           let ctors = Hashtbl.find Exhaustive.type_variants vname in
+           List.for_all (fun (_, payload) -> payload = None) ctors
          | _ -> false
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (Loc.dummy,
-           "Map key type must be int / bool / str / tuple in LLVM codegen (Phase 15.10/15.14)"));
+           "Map key type must be int / bool / str / tuple / record / nullary variant in LLVM codegen (Phase 15.10/15.14/15.15)"));
        let k_tag = ty_tag k_ty in
        let v_tag = ty_tag v_ty in
        let key = k_tag ^ "__" ^ v_tag in
@@ -1452,11 +1459,18 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
          let rec is_key_supported = function
            | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
            | Ast.TyTuple ts -> List.for_all is_key_supported ts
+           | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+             let info = Hashtbl.find Typer.records rname in
+             List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
+               info.Typer.r_fields
+           | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+             let ctors = Hashtbl.find Exhaustive.type_variants vname in
+             List.for_all (fun (_, payload) -> payload = None) ctors
            | _ -> false
          in
          if not (is_key_supported k_ty) then
            raise (Codegen_error (loc,
-             "Map key type must be int / bool / str / tuple in LLVM codegen (Phase 15.10/15.14)"));
+             "Map key type must be int / bool / str / tuple / record / nullary variant in LLVM codegen (Phase 15.10/15.14/15.15)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -3718,6 +3732,36 @@ let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
              let r = fresh () in
              emit (Printf.sprintf "  %s = and i1 true, true" r);
              r)
+        | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+          (* Phase 15.15: record key — compare each field via extractvalue. *)
+          let info = Hashtbl.find Typer.records rname in
+          let acc = ref None in
+          List.iteri (fun i (_, ft) ->
+            let a_f = fresh () in
+            emit (Printf.sprintf "  %s = extractvalue %%%s %s, %d" a_f rname a i);
+            let b_f = fresh () in
+            emit (Printf.sprintf "  %s = extractvalue %%%s %s, %d" b_f rname b i);
+            let eq_i = go ft a_f b_f in
+            (match !acc with
+             | None -> acc := Some eq_i
+             | Some prev ->
+               let combined = fresh () in
+               emit (Printf.sprintf "  %s = and i1 %s, %s" combined prev eq_i);
+               acc := Some combined)
+          ) info.Typer.r_fields;
+          (match !acc with Some r -> r | None ->
+             let r = fresh () in
+             emit (Printf.sprintf "  %s = and i1 true, true" r);
+             r)
+        | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+          (* Phase 15.15: nullary variant key — extract tag field, icmp. *)
+          let a_tag = fresh () in
+          emit (Printf.sprintf "  %s = extractvalue %%%s %s, 0" a_tag vname a);
+          let b_tag = fresh () in
+          emit (Printf.sprintf "  %s = extractvalue %%%s %s, 0" b_tag vname b);
+          let r = fresh () in
+          emit (Printf.sprintf "  %s = icmp eq i32 %s, %s" r a_tag b_tag);
+          r
         | _ ->
           let r = fresh () in
           emit (Printf.sprintf "  %s = icmp eq %s %s, %s" r c_k a b);
