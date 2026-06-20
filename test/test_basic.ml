@@ -5884,5 +5884,25 @@ let () =
      if scan 0 then "ok" else "missing-strcmp")
     "ok";
 
+  (* Phase 22.6: C reserved keyword mangling + str_unescape builtin +
+     polymorphic type name in match abort fallthrough. *)
+  check "§22.6: user fn named `case` emits valid C (keyword mangling)"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let case = fn (x: int) -> x + 1 in case 5") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.6: str_unescape emits __lang_str_unescape"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "str_unescape \"a\\nb\"") in
+     let pat = "__lang_str_unescape" in
+     let nlen = String.length c_src and plen = String.length pat in
+     let rec scan i =
+       if i + plen > nlen then false
+       else if String.sub c_src i plen = pat then true
+       else scan (i + 1)
+     in
+     if scan 0 then "ok" else "missing")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
