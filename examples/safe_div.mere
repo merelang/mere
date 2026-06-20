@@ -1,0 +1,47 @@
+// Phase 19.5 で prelude に追加した `('a, 'e) result` 型を使った demo。
+// 「失敗を値として返す」エラー処理パターンの最小例。
+//
+// 目的: examples roadmap D1。Result idiom を Mere で書く際の典型形を
+// 示す。prelude のおかげで `type ('a, 'e) result` の declare が不要、
+// `Ok x` / `Err msg` をそのまま使える。
+//
+// 実行モード: interpreter のみ (多相 user 定義 let-rec の codegen が
+// DEFERRED §1.7 で未対応、Phase 20.1 で fix 予定)
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/safe_div.mere
+//   # 期待出力:
+//   # 10 / 3 = 3
+//   # 10 / 0 = error: division by zero
+//   # 100 / 5 / 4 = 5
+//   # 100 / 0 / 4 = error: outer division failed
+//
+// パターン:
+//   1. safe_div : int -> int -> (int, str) result
+//   2. match で Ok / Err を分解、Err は文字列メッセージで再構築
+//   3. 連鎖は match のネストで書く (`?` operator は未実装、Phase 19.x 続編)
+
+let safe_div = fn (a: int) -> fn (b: int) ->
+  if b == 0 then Err "division by zero"
+  else Ok (a / b);
+
+// Result を表示用文字列に変換する helper (Mere に組込みの
+// `result_to_str` のような builtin は未実装、自前で書く)。
+let show_div = fn (r) ->
+  match r with
+  | Ok n -> show n
+  | Err msg -> "error: " ++ msg;
+
+// 連鎖: a / b / c を safe に。途中で Err が出たら全体を Err に。
+// (option_map / result_and_then 等の helper は prelude 機構が
+// monomorphize 対応した後で追加予定、現状は match で chain)
+let chain_div = fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  match safe_div a b with
+  | Err _ -> Err "outer division failed"
+  | Ok x -> safe_div x c;
+
+let __ = print ("10 / 3 = " ++ show_div (safe_div 10 3)) in
+let __ = print ("10 / 0 = " ++ show_div (safe_div 10 0)) in
+let __ = print ("100 / 5 / 4 = " ++ show_div (chain_div 100 5 4)) in
+let __ = print ("100 / 0 / 4 = " ++ show_div (chain_div 100 0 4)) in
+()

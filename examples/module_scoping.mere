@@ -1,0 +1,93 @@
+// Phase 18.1 / 18.2 で実装した module proper scoping の demo。
+//
+// 機能 (Phase 18 系):
+//   - module 内 ctor / record / type が **M-prefix scoping**
+//   - 2 module 間で同名 ctor を持っても disambiguate 可能
+//     (`A.Red` vs `B.Red`)
+//   - `M.Pt { ... }` qualified record literal (単一 nest 階層)
+//   - `match v with | M.Red -> ...` qualified pattern
+//   - `open A.B;` で nested module の binding を unqualified import
+//   - bare 名は backward compat で動く (typer の alias 経由、eval は
+//     V_constr を canonical name に正規化)
+//
+// 実行モード: interpreter のみ
+//   (codegen は M-prefix の pattern matching が未対応、
+//    Phase 18.x 後続で対応予定)
+//
+// 既知の制約:
+//   - 2 階層以上 nested module の record literal `A.B.Rec { ... }` は
+//     parse できない (parser-side records は最終 nest のみ M-prefix
+//     登録)。Phase 18.x 後続 slice で対応予定 — 当面は最後の module を
+//     `open A.B;` してから `Rec { ... }` で OK
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/module_scoping.mere
+//   # 期待出力:
+//   #   Traffic.Red = stop
+//   #   Mood.Red = passionate
+//   #   pt: (3, 4) area = 12
+//   #   nested.greet = hello world
+
+// === パターン 1: 2 module が同名 ctor (Red) を持つ ===
+// Phase 18.1 がなかった時代は、後の declare が前の Red を黙って上書き
+// していた。今は qualified 形式で別物として扱える。
+
+module Traffic {
+  type Light = Red | Yellow | Green;
+
+  let label = fn (l) -> match l with
+    | Red -> "stop"
+    | Yellow -> "slow"
+    | Green -> "go";
+};
+
+module Mood {
+  type Color = Red | Blue | Purple;
+
+  let label = fn (c) -> match c with
+    | Red -> "passionate"
+    | Blue -> "calm"
+    | Purple -> "dreamy";
+};
+
+// === パターン 2: 単一 nest module + qualified record literal ===
+// Phase 18.1 で `M.Pt { ... }` が動く (1 階層まで)。
+
+module Shapes {
+  type Rect = { w: int, h: int };
+};
+
+// 摩擦点 (Phase 18.x): module 内で `let area = fn (r: Rect) -> r.w * r.h`
+// と書くと、`r: Rect` の bare 型注釈が typer 側で `Shapes.Rect` と
+// 別物扱いされ、外から呼べない (alias は記録されているが unify は別)。
+// 当面は area を main 側で inline 計算する。要 Phase 18.x 後続対応。
+
+// === パターン 3: nested module + `open A.B;` ===
+// Phase 18.2 で `open A.B;` (nested path への open) が動く。
+
+module Greet {
+  module Inner {
+    let greet = fn (name) -> "hello " ++ name;
+  };
+};
+
+// Greet.Inner の direct bindings (= 短い名前) を unqualified に import。
+open Greet.Inner;
+
+// === main ===
+// すべてのデモを順に実行。block 内の `;` で副作用 sequence。
+
+{
+  // 両 module の Red を qualified で disambiguate
+  print ("Traffic.Red = " ++ Traffic.label Traffic.Red);
+  print ("Mood.Red = " ++ Mood.label Mood.Red);
+
+  // 単一階層 qualified record literal で構築 + field access
+  // (area は inline 計算、上記摩擦点を回避)
+  let pt = Shapes.Rect { w = 3, h = 4 } in
+  print ("pt: (" ++ show pt.w ++ ", " ++ show pt.h
+       ++ ") area = " ++ show (pt.w * pt.h));
+
+  // open Greet.Inner で `greet` が unqualified に
+  print ("nested.greet = " ++ greet "world")
+}
