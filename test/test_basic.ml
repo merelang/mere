@@ -3578,6 +3578,31 @@ let () =
     (wasm "let m = mk_metrics () in m.inc \"x\"")
     "call $__mere_mk_metrics";
 
+  (* Phase 16.4 / DEFERRED §1.6: Region_block で bump save/restore を
+     していたのを止めて arena-leak セマンティクスに揃えた。region 内で
+     allocate して外に escape させる値 (e.g. `let v = region R {
+     vec_to_owned ... }` の OwnedVec) が後続 allocation で上書きされない
+     ことを保証する。 *)
+  assert_contains "wasm: Region_block emits body directly (no save/restore)"
+    (wasm "region R { 42 }")
+    "(func $main";
+  assert_no_contains "wasm: Region_block does not save bump in main body"
+    (* main の (local.set N (global.get $__lang_bump)) save 構文は、
+       fix 前は emit されていた。fix 後は main 内で出ない。 *)
+    (let w = wasm "region R { 42 }" in
+     (* main function 部分だけ取り出す: "(func $main" 以降。 *)
+     let needle = "(func $main" in
+     let nl = String.length needle and wl = String.length w in
+     let rec find i =
+       if i + nl > wl then None
+       else if String.sub w i nl = needle then Some i
+       else find (i + 1)
+     in
+     match find 0 with
+     | Some i -> String.sub w i (wl - i)
+     | None -> w)
+    "global.get $__lang_bump";
+
   (* --- Diagnostic format (Phase 7.1) ---
      Multi-line code frame with line numbers + caret with inline message. *)
   let diag source loc kind msg =

@@ -1268,17 +1268,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" base_slot)
   | Ast.Region_block (_, body) ->
     (* All Lang regions share the single Wasm linear-memory bump
-       pointer. Region_block uses a save / restore pattern so any
-       allocations made inside the body are reclaimed on exit (LIFO). *)
-    let saved_bump = fresh_local () in
-    emit_instr "global.get $__lang_bump";
-    emit_instr (Printf.sprintf "local.set %d" saved_bump);
-    emit_expr body;
-    let result_slot = fresh_local () in
-    emit_instr (Printf.sprintf "local.set %d" result_slot);
-    emit_instr (Printf.sprintf "local.get %d" saved_bump);
-    emit_instr "global.set $__lang_bump";
-    emit_instr (Printf.sprintf "local.get %d" result_slot)
+       pointer. Earlier we used a save / restore pattern so any
+       allocations inside the body were reclaimed on exit (LIFO).
+       Phase 16.4 / DEFERRED §1.6: that approach is unsound when a
+       value allocated inside the region escapes — e.g.,
+         let v = region R { vec_to_owned (...) } in ...
+       returns an OwnedVec whose data lives inside R's bump range.
+       After restore, subsequent allocations overwrite that data,
+       corrupting fields like a record's str pointer. We now do NOT
+       restore bump on region exit — Wasm semantics become a plain
+       arena-leak (matches what the other backends effectively do for
+       OwnedVec via main-end sweep). *)
+    emit_expr body
   | Ast.Ref (_, _, inner) ->
     (* `&R v` — region-alloc 4 bytes, store value, return ptr. *)
     let base_slot = fresh_local () in
