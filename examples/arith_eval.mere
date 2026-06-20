@@ -1,0 +1,168 @@
+// mini functional language の interpreter
+//
+// mini_calc.mere の発展形。算術 + let に加えて
+//   - if cond then a else b (bool は VBool で表現、比較演算 ==, <, > を導入)
+//   - fn x -> body / 関数適用 f arg (1st-class function、closure)
+// を持つ小さな functional language を AST から評価する。
+//
+// 目的: examples roadmap C3。recursive variant + closure + env-passing
+//   eval を 1 file で示し、tree.mere → mini_calc.mere の延長線として
+//   "言語を language で書く" 練習場。
+//
+// 実行モード: interpreter のみ
+//   - parser を内包せず AST を直接組み立てる demo に絞ることで、Phase
+//     19.x までの interpreter 機能だけで通る形に。
+//   - C codegen 未対応の理由: (a) `let _ = ...` の wildcard pattern が
+//     C codegen 未対応 (mini_calc.mere と同様)、(b) closure を持つ
+//     value 型が自己再帰 + (str * value) list を持つため多相 user 定義
+//     関数 (lookup / eval) の codegen monomorphize gap (DEFERRED §1.7)。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/arith_eval.mere
+//   # 期待出力:
+//   #   1 + 2 * 3                                      = 7
+//   #   if 1 < 2 then 10 else 20                       = 10
+//   #   let x = 5 in x * x                             = 25
+//   #   (fn x -> x + 1) 41                             = 42
+//   #   let add = fn x -> fn y -> x + y in add 3 4     = 7
+//   #   factorial 6                                    = 720
+
+type expr =
+  | ENum  of int
+  | EBool of bool
+  | EVar  of str
+  | EAdd  of expr * expr
+  | ESub  of expr * expr
+  | EMul  of expr * expr
+  | EDiv  of expr * expr
+  | EEq   of expr * expr
+  | ELt   of expr * expr
+  | EIf   of expr * expr * expr
+  | ELet  of str * expr * expr
+  | EFun  of str * expr
+  | EApp  of expr * expr;
+
+// value: VInt / VBool / VClosure (param, body, captured env)。
+// env は (str, value) list を 'a list (prelude) で再利用。
+type value =
+  | VInt     of int
+  | VBool    of bool
+  | VClosure of str * expr * (str * value) list;
+
+// === env 操作 ===
+
+let rec lookup = fn (env: (str * value) list) -> fn (name: str) ->
+  match env with
+  | Nil -> fail ("unbound variable: " ++ name)
+  | Cons ((n, v), rest) ->
+    if n == name then v else lookup rest name;
+
+let extend = fn (env: (str * value) list) -> fn (name: str) -> fn (v: value) ->
+  Cons ((name, v), env);
+
+// === 表示 ===
+
+let show_value = fn (v: value) ->
+  match v with
+  | VInt n        -> show n
+  | VBool true    -> "true"
+  | VBool false   -> "false"
+  | VClosure _    -> "<closure>";
+
+// === evaluator ===
+
+let unwrap_int = fn (v: value) ->
+  match v with
+  | VInt n -> n
+  | _      -> fail ("expected int, got " ++ show_value v);
+
+let unwrap_bool = fn (v: value) ->
+  match v with
+  | VBool b -> b
+  | _       -> fail ("expected bool, got " ++ show_value v);
+
+let rec eval = fn (env: (str * value) list) -> fn (e: expr) ->
+  match e with
+  | ENum n                  -> VInt n
+  | EBool b                 -> VBool b
+  | EVar n                  -> lookup env n
+  | EAdd (a, b)             ->
+    VInt (unwrap_int (eval env a) + unwrap_int (eval env b))
+  | ESub (a, b)             ->
+    VInt (unwrap_int (eval env a) - unwrap_int (eval env b))
+  | EMul (a, b)             ->
+    VInt (unwrap_int (eval env a) * unwrap_int (eval env b))
+  | EDiv (a, b)             ->
+    let bv = unwrap_int (eval env b) in
+    if bv == 0 then fail "div by zero"
+    else VInt (unwrap_int (eval env a) / bv)
+  | EEq (a, b)              ->
+    VBool (unwrap_int (eval env a) == unwrap_int (eval env b))
+  | ELt (a, b)              ->
+    VBool (unwrap_int (eval env a) < unwrap_int (eval env b))
+  | EIf (c, t, f)           ->
+    if unwrap_bool (eval env c) then eval env t else eval env f
+  | ELet (n, value_expr, body) ->
+    let v = eval env value_expr in
+    eval (extend env n v) body
+  | EFun (param, body)      -> VClosure (param, body, env)
+  | EApp (fe, arg)          ->
+    match eval env fe with
+    | VClosure (param, body, fenv) ->
+      let av = eval env arg in
+      eval (extend fenv param av) body
+    | other -> fail ("not a function: " ++ show_value other);
+
+// === driver ===
+
+let run = fn (label: str) -> fn (e: expr) ->
+  let v = eval Nil e in
+  print (label ++ "  =  " ++ show_value v);
+
+// 1 + 2 * 3
+let _ = run "1 + 2 * 3" (EAdd (ENum 1, EMul (ENum 2, ENum 3)));
+
+// if 1 < 2 then 10 else 20
+let _ = run "if 1 < 2 then 10 else 20"
+  (EIf (ELt (ENum 1, ENum 2), ENum 10, ENum 20));
+
+// let x = 5 in x * x
+let _ = run "let x = 5 in x * x"
+  (ELet ("x", ENum 5, EMul (EVar "x", EVar "x")));
+
+// (fn x -> x + 1) 41
+let _ = run "(fn x -> x + 1) 41"
+  (EApp (EFun ("x", EAdd (EVar "x", ENum 1)), ENum 41));
+
+// let add = fn x -> fn y -> x + y in add 3 4
+let _ = run "let add = fn x -> fn y -> x + y in add 3 4"
+  (ELet ("add",
+    EFun ("x", EFun ("y", EAdd (EVar "x", EVar "y"))),
+    EApp (EApp (EVar "add", ENum 3), ENum 4)));
+
+// factorial 6: let rec を持たないので、Y-combinator を avoid して
+// "f を引数に取って f を applied する" self-application trick で再帰。
+// fact = fn n -> if n == 0 then 1 else n * fact (n - 1)
+// → let fact_step = fn rec_fn -> fn n -> if n == 0 then 1
+//        else n * (rec_fn rec_fn (n - 1))
+//   in let fact = fn n -> fact_step fact_step n
+//   in fact 6
+let fact_step =
+  EFun ("rec_fn",
+    EFun ("n",
+      EIf (EEq (EVar "n", ENum 0),
+        ENum 1,
+        EMul (EVar "n",
+          EApp (EApp (EVar "rec_fn", EVar "rec_fn"),
+            ESub (EVar "n", ENum 1))))));
+
+let factorial_6_expr =
+  ELet ("fact_step", fact_step,
+    ELet ("fact",
+      EFun ("n",
+        EApp (EApp (EVar "fact_step", EVar "fact_step"), EVar "n")),
+      EApp (EVar "fact", ENum 6)));
+
+let _ = run "factorial 6" factorial_6_expr;
+
+0
