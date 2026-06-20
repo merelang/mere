@@ -1648,6 +1648,47 @@ let () =
   check_raises "read_file missing"
     (fun () -> Pipeline.process "read_file \"/nonexistent/no/such/file\"");
 
+  (* --- Phase 19.6: I/O 拡張 (read_lines / file_exists / env_var / args) --- *)
+  check "read_lines type"
+    (Pipeline.type_of "read_lines") "(str -> str list)";
+  check "file_exists type"
+    (Pipeline.type_of "file_exists") "(str -> bool)";
+  check "env_var type"
+    (Pipeline.type_of "env_var") "(str -> str option)";
+  check "args type"
+    (Pipeline.type_of "args") "(unit -> str list)";
+  check "read_lines roundtrip via /tmp"
+    (let path = Filename.temp_file "mere_lines_test" ".txt" in
+     Pipeline.process
+       (Printf.sprintf
+          "{ write_file %S \"alpha\\nbeta\\ngamma\\n\"; \
+             match read_lines %S with \
+             | Nil -> \"empty\" \
+             | Cons (h, _) -> h }" path path))
+    "\"alpha\"";
+  check "file_exists: existing file (this very source dir)"
+    (Pipeline.process "file_exists \"/etc\"") "true";
+  check "file_exists: missing path"
+    (Pipeline.process "file_exists \"/this/path/does/not/exist\"") "false";
+  check "env_var: PATH should exist on any reasonable host"
+    (Pipeline.process
+       "match env_var \"PATH\" with | None -> \"\" | Some _ -> \"yes\"")
+    "\"yes\"";
+  check "env_var: bogus var → None"
+    (Pipeline.process
+       "match env_var \"MERE_DEFINITELY_UNSET_XYZ_123\" with \
+        | None -> \"none\" | Some _ -> \"some\"")
+    "\"none\"";
+  (* args は Sys.argv 依存なので結果は test runner の起動方法次第。
+     evaluation が落ちないことを確認するだけ。 *)
+  (try
+    let _ = Pipeline.process "args ()" in
+    incr pass;
+    Printf.printf "PASS  args: evaluation doesn't crash\n"
+  with _ ->
+    incr fail;
+    Printf.printf "FAIL  args: evaluation crashed\n");
+
   (* --- float type and basic arithmetic --- *)
   check "float literal"
     (Pipeline.process "3.14") "3.14";

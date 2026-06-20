@@ -895,6 +895,15 @@ let initial_env : env =
     ("read_file",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyStr)));
     ("write_file",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
+    (* Phase 19.6: I/O 拡張。prelude が `'a list` / `'a option` を提供。 *)
+    ("read_lines",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
+    ("file_exists",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
+    ("env_var",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [Ast.TyStr]))));
+    ("args",
+       mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("list", [Ast.TyStr]))));
     ("print_int",   mono (Ast.TyArrow (Ast.TyInt,  Ast.TyUnit)));
     ("print_bool",  mono (Ast.TyArrow (Ast.TyBool, Ast.TyUnit)));
     ("str_of_int",  mono (Ast.TyArrow (Ast.TyInt,  Ast.TyStr)));

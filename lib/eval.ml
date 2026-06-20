@@ -185,6 +185,62 @@ let builtin_read_file =
          raise (Eval_error (Loc.dummy, "read_file: " ^ msg)))
     | _ -> failwith "read_file: expected str")
 
+(* Phase 19.6: I/O 拡張。read_lines, file_exists, env_var, args.
+   read_lines / args は str list を返すので prelude の `type 'a list`
+   に依存。env_var は str option を返す (prelude の `'a option`)。 *)
+
+let rec str_list_to_v_local = function
+  | [] -> V_constr ("Nil", None)
+  | s :: rest ->
+    V_constr ("Cons", Some (V_tuple [V_str s; str_list_to_v_local rest]))
+
+let builtin_read_lines =
+  V_builtin ("read_lines", fun v ->
+    match v with
+    | V_str path ->
+      (try
+         let ic = open_in path in
+         let rec collect acc =
+           match input_line ic with
+           | line -> collect (line :: acc)
+           | exception End_of_file -> List.rev acc
+         in
+         let lines = collect [] in
+         close_in ic;
+         str_list_to_v_local lines
+       with Sys_error msg ->
+         raise (Eval_error (Loc.dummy, "read_lines: " ^ msg)))
+    | _ -> failwith "read_lines: expected str")
+
+let builtin_file_exists =
+  V_builtin ("file_exists", fun v ->
+    match v with
+    | V_str path -> V_bool (Sys.file_exists path)
+    | _ -> failwith "file_exists: expected str")
+
+let builtin_env_var =
+  V_builtin ("env_var", fun v ->
+    match v with
+    | V_str name ->
+      (match Sys.getenv_opt name with
+       | None -> V_constr ("None", None)
+       | Some s -> V_constr ("Some", Some (V_str s)))
+    | _ -> failwith "env_var: expected str")
+
+let builtin_args =
+  V_builtin ("args", fun v ->
+    match v with
+    | V_unit ->
+      (* OCaml Sys.argv[0] は実行ファイル名 — Mere program 視点では
+         「program 自身の args」(argv[1..]) を返すのが自然。 *)
+      let argv = Sys.argv in
+      let n = Array.length argv in
+      let args = if n <= 1 then [] else
+        Array.to_list (Array.sub argv 1 (n - 1))
+      in
+      str_list_to_v_local args
+    | _ -> failwith "args: expected unit")
+
 let builtin_write_file =
   V_builtin ("write_file", fun path_val ->
     match path_val with
@@ -1333,6 +1389,10 @@ let initial_env : env =
     ("print_err", ref builtin_print_err);
     ("read_file", ref builtin_read_file);
     ("write_file", ref builtin_write_file);
+    ("read_lines", ref builtin_read_lines);
+    ("file_exists", ref builtin_file_exists);
+    ("env_var", ref builtin_env_var);
+    ("args", ref builtin_args);
     ("print_int", ref builtin_print_int);
     ("print_bool", ref builtin_print_bool);
     ("str_of_int", ref builtin_str_of_int);

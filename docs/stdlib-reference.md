@@ -8,7 +8,7 @@
 
 ---
 
-## I/O (6)
+## I/O (10)
 
 | 名前 | 型 | 説明 |
 |---|---|---|
@@ -20,6 +20,24 @@
 | `read_line` | `unit -> str` | stdin から 1 行、EOF は空文字 |
 | `read_file` ⚡ | `str -> str` | ファイル全体を読む、失敗で raise |
 | `write_file` ⚡ | `str -> str -> unit` | path → content をファイルに書く (上書き)、失敗で raise |
+| `read_lines` ⚡ ★ | `str -> str list` | 行単位で読み込み、`str list` 返却 (Phase 19.6、prelude 依存) |
+| `file_exists` ★ | `str -> bool` | path が存在するか (Phase 19.6) |
+| `env_var` ★ | `str -> str option` | 環境変数取得、未設定は `None` (Phase 19.6、prelude 依存) |
+| `args` ★ | `unit -> str list` | program 起動時 argv[1..] (Phase 19.6) |
+
+```
+file_exists "/etc/hosts"            // → true
+env_var "PATH"                      // → Some "..."
+env_var "BOGUS"                     // → None
+read_lines "data.txt"               // → ["line1", "line2", ...]
+args ()                             // → ["foo", "bar"] (mere prog -- foo bar)
+```
+
+**★ codegen 状況**: Phase 19.6 では **interpreter のみ**。`read_lines` /
+`args` は `'a list` 構築、`env_var` は `'a option` 構築が必要で、これらの
+codegen は DEFERRED §1.7 (多相 let-rec / 多相 variant の codegen
+monomorphize) 解決後に Phase 19.6.1 で対応予定。`file_exists` は scalar
+返り値で簡単だが、対セットで follow-up。
 
 ```
 let _ = print "Hello";
@@ -266,19 +284,19 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、91 個)
+## 全 builtin 一覧 (アルファベット順、95 個)
 
 ```
-abs assert bool_of_str ceil char_at chr clamp const cube
-decr divmod e even exit f_abs f_add f_div f_ge f_gt
-f_le f_lt f_mul f_neg f_sub fail flip float_of_int
-float_of_str floor fst gcd id incr int_max int_min
-int_of_float int_of_str is_alpha is_digit is_space
+abs args assert bool_of_str ceil char_at chr clamp const cube
+decr divmod e env_var even exit f_abs f_add f_div f_ge
+f_gt f_le f_lt f_mul f_neg f_sub fail file_exists flip
+float_of_int float_of_str floor fst gcd id incr int_max
+int_min int_of_float int_of_str is_alpha is_digit is_space
 iter_n lcm max min mk_logger mk_metrics not odd ord pair pi
 pow print print_bool print_err print_int print_no_nl read_file
-read_line round show sign snd sqrt square str_compare
-str_contains str_count str_ends_with str_index_of str_join
-str_len str_of_float str_of_int str_repeat str_replace
+read_line read_lines round show sign snd sqrt square
+str_compare str_contains str_count str_ends_with str_index_of
+str_join str_len str_of_float str_of_int str_repeat str_replace
 str_rev str_split str_starts_with str_trim str_unescape
 substring sum_range swap time to_lower to_upper try_or
 write_file
