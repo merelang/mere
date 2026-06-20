@@ -4633,6 +4633,51 @@ let () =
     "store ptr null, ptr";
   check "with-OwnedVec: interpreter parity"
     (Pipeline.process with_src) "30";
+  (* --- Phase 15.14: Map K 拡張 (bool / tuple keys) --- *)
+  let map_bool_src =
+    "let m = map_new () in let __ = map_set m true 100 in \
+     let __ = map_set m false 200 in \
+     map_get m true + map_get m false + map_len m"
+  in
+  let map_tup_src =
+    "let m = map_new () in let __ = map_set m (1, 2) 10 in \
+     let __ = map_set m (1, 3) 20 in let __ = map_set m (1, 2) 99 in \
+     map_get m (1, 2) + map_get m (1, 3) + map_len m"
+  in
+  assert_contains "map[bool, int]: C codegen accepts"
+    (let prog = Pipeline.parse_program map_bool_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_map_bool_int";
+  assert_contains "map[tuple, int]: C codegen accepts"
+    (let prog = Pipeline.parse_program map_tup_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_map_tuple_int_int_int";
+  assert_contains "map[bool, int]: LLVM codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_bool_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_key_eq_bool";
+  assert_contains "map[tuple, int]: LLVM codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_tup_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_key_eq_tuple_int_int";
+  assert_contains "map[bool]: Wasm codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_bool_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_key_eq_bool";
+  assert_contains "map[tuple]: Wasm codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_tup_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_key_eq_tuple_int_int";
+  check "map[bool]: interpreter parity"
+    (Pipeline.process map_bool_src) "302";
+  check "map[tuple]: interpreter parity"
+    (Pipeline.process map_tup_src) "121";
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
