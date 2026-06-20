@@ -111,6 +111,11 @@ let strbuf_used = ref false
 let map_int_used = ref false
 let map_str_used = ref false
 
+(* Phase 15.12: vec_to_list と len-on-list で同じ list 構造を扱うため、
+   どちらか使われたら runtime を emit。tag 値は codegen 時に確定。 *)
+let vec_to_list_used = ref false
+let list_len_used = ref false
+
 (* Names bound by a pattern (for the free-vars walk). *)
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
@@ -530,14 +535,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.4〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応)"));
-    if name = "len" then
+    if name = "len" || name = "vec_to_list" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.11: len は直接 application のみ対応)"));
-    if name = "vec_to_list" then
-      raise (Codegen_error (e.Ast.loc,
-        "unsupported in Wasm codegen subset: " ^ name
-        ^ " (vec_to_list is interpreter-only)"));
+        ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -730,6 +731,14 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr arg;
        emit_instr "drop";
        emit_instr (Printf.sprintf "i32.const %d" (List.length ts))
+     | Ast.TyCon (n, _)
+       when Hashtbl.mem Exhaustive.type_variants n
+            && Hashtbl.mem variant_tags "Cons"
+            && Hashtbl.mem variant_tags "Nil" ->
+       (* Phase 15.12: `len` on `T list` — shared $mere_list_len. *)
+       list_len_used := true;
+       emit_expr arg;
+       emit_instr "call $mere_list_len"
      | _ ->
        raise (Codegen_error (e.Ast.loc,
          "len: arg type has no codegen-defined length")))
@@ -762,6 +771,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr k_e;
     emit_expr v_e;
     emit_instr (Printf.sprintf "call $mere_map_%s_set" k_tag)
+  | Ast.App ({ node = Ast.Var "vec_to_list"; _ }, vec_e) ->
+    (* Phase 15.12: vec_to_list — shared $mere_vec_to_list helper. *)
+    vec_used := true;
+    vec_to_list_used := true;
+    emit_expr vec_e;
+    emit_instr "call $mere_vec_to_list"
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
     (* Phase 15.9: strbuf_new () — region は無視 (Wasm の bump はグローバル
        1 本)。 *)
@@ -2160,6 +2175,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   strbuf_used := false;
   map_int_used := false;
   map_str_used := false;
+  vec_to_list_used := false;
+  list_len_used := false;
   (* Pre-register variant tags from Exhaustive's registry. *)
   Hashtbl.iter (fun _name vs ->
     List.iteri (fun i (cname, _) ->
@@ -2331,6 +2348,63 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let strbuf_section = if !strbuf_used then strbuf_runtime_wasm else "" in
   let map_int_section = if !map_int_used then map_int_runtime_wasm else "" in
   let map_str_section = if !map_str_used then map_str_runtime_wasm else "" in
+  (* Phase 15.12: vec_to_list / list_len helpers. tag 値は variant_tags
+     から codegen 時に取り出して baked-in. *)
+  let cons_tag_v =
+    try Hashtbl.find variant_tags "Cons" with Not_found -> 1
+  in
+  let nil_tag_v =
+    try Hashtbl.find variant_tags "Nil" with Not_found -> 0
+  in
+  let vec_to_list_section =
+    if not !vec_to_list_used then "" else
+    Printf.sprintf "
+  (func $mere_vec_to_list (param $v i32) (result i32)
+    (local $len i32) (local $i i32) (local $acc i32)
+    (local $tup i32) (local $node i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    ;; allocate Nil node (8 bytes)
+    (local.set $acc (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $acc) (i32.const 8)))
+    (i32.store offset=0 (local.get $acc) (i32.const %d))  ;; nil_tag
+    (i32.store offset=4 (local.get $acc) (i32.const 0))
+    (local.set $i (i32.sub (local.get $len) (i32.const 1)))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.lt_s (local.get $i) (i32.const 0)))
+        ;; allocate tuple (8 bytes): { f0=vec[i], f1=acc }
+        (local.set $tup (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 8)))
+        (i32.store offset=0 (local.get $tup)
+          (call $mere_vec_get (local.get $v) (local.get $i)))
+        (i32.store offset=4 (local.get $tup) (local.get $acc))
+        ;; allocate Cons node (8 bytes): { tag=cons_tag, payload=tup }
+        (local.set $node (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (local.get $node) (i32.const 8)))
+        (i32.store offset=0 (local.get $node) (i32.const %d))  ;; cons_tag
+        (i32.store offset=4 (local.get $node) (local.get $tup))
+        (local.set $acc (local.get $node))
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $acc))" nil_tag_v cons_tag_v
+  in
+  let list_len_section =
+    if not !list_len_used then "" else
+    Printf.sprintf "
+  (func $mere_list_len (param $l i32) (result i32)
+    (local $n i32) (local $tag i32) (local $payload i32)
+    (local.set $n (i32.const 0))
+    (block $end
+      (loop $lp
+        (local.set $tag (i32.load offset=0 (local.get $l)))
+        (br_if $end (i32.ne (local.get $tag) (i32.const %d)))  ;; not Cons
+        (local.set $n (i32.add (local.get $n) (i32.const 1)))
+        (local.set $payload (i32.load offset=4 (local.get $l)))
+        ;; tuple.f1 (next list) at offset 4 of payload
+        (local.set $l (i32.load offset=4 (local.get $payload)))
+        (br $lp)))
+    (local.get $n))" cons_tag_v
+  in
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
@@ -2346,8 +2420,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     table_section bump_init data_section runtime_helpers vec_runtime_section
     vec_higher_order_section strbuf_section map_int_section map_str_section
+    vec_to_list_section list_len_section
     fn_section local_decl indented_body
