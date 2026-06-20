@@ -2250,7 +2250,10 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyBool ->
     header ^ " { return v ? \"true\" : \"false\"; }"
   | Ast.TyStr ->
-    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", v); return buf; }"
+    (* Phase 23.5: escape special chars so show_str's output matches
+       interp (which shows backslash-n as 2 literal chars, not a real
+       newline). *)
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return buf; }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return \"()\"; }"
   | Ast.TyTuple ts ->
@@ -2461,6 +2464,28 @@ let str_concat_helper =
       "  char* r = (char*) __lang_region_alloc(&__lang_default_region, len + 1);";
       "  memcpy(r, s + start, (size_t)len);";
       "  r[len] = '\\0';";
+      "  return r;";
+      "}";
+      "";
+      (* Phase 23.5: str_escape — show_str がこれを通して output、
+         改行 / タブ / バックスラッシュ / ダブルクオートをバックスラッシュ
+         エスケープ形式に変換。interp の show_str との一致を保つ。 *)
+      "static const char* __lang_str_escape(const char* s) {";
+      "  size_t n = strlen(s);";
+      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, n * 2 + 1);";
+      "  size_t j = 0;";
+      "  for (size_t i = 0; i < n; i++) {";
+      "    char c = s[i];";
+      "    switch (c) {";
+      "      case '\\n': r[j++] = '\\\\'; r[j++] = 'n'; break;";
+      "      case '\\t': r[j++] = '\\\\'; r[j++] = 't'; break;";
+      "      case '\\r': r[j++] = '\\\\'; r[j++] = 'r'; break;";
+      "      case '\\\\': r[j++] = '\\\\'; r[j++] = '\\\\'; break;";
+      "      case '\\\"': r[j++] = '\\\\'; r[j++] = '\\\"'; break;";
+      "      default:   r[j++] = c; break;";
+      "    }";
+      "  }";
+      "  r[j] = '\\0';";
       "  return r;";
       "}";
       "";
