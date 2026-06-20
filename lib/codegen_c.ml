@@ -45,6 +45,23 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 22.6: C reserved keywords that can collide with user-defined
+   identifier names (`let case = ...` in json_parser). Mangle by
+   appending `_` so the emitted C is valid while leaving Mere names
+   intact in error messages and AST. *)
+let c_reserved_keywords =
+  ["auto"; "break"; "case"; "char"; "const"; "continue"; "default";
+   "do"; "double"; "else"; "enum"; "extern"; "float"; "for"; "goto";
+   "if"; "inline"; "int"; "long"; "register"; "restrict"; "return";
+   "short"; "signed"; "sizeof"; "static"; "struct"; "switch"; "typedef";
+   "union"; "unsigned"; "void"; "volatile"; "while";
+   (* C99/C11/C23 + stdlib pitfalls *)
+   "_Bool"; "_Complex"; "_Imaginary"; "_Atomic"; "_Static_assert";
+   "_Thread_local"; "_Alignas"; "_Alignof"; "_Generic"; "_Noreturn";
+   "main"]
+let c_safe_name (n : string) : string =
+  if List.mem n c_reserved_keywords then n ^ "_" else n
+
 (* Variant types whose constructors carry payload referencing the same
    type (directly recursive). These are emitted as pointer-typed values:
      typedef intlist_node intlist_node;
@@ -578,12 +595,12 @@ let rec emit_expr (e : Ast.expr) : string =
     (match List.assoc_opt name !current_env_subst with
      | Some s -> s
      | None ->
-       if Hashtbl.mem toplevel_fn_names name then name ^ "_as_value"
+       if Hashtbl.mem toplevel_fn_names name then c_safe_name name ^ "_as_value"
        else if Hashtbl.mem inner_lifts name then
          unsupported e.loc
            ("inner-lifted fn `" ^ name ^
             "` used as a value — only direct calls are supported (Phase 4.9-a)")
-       else name)
+       else c_safe_name name)
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
   | Ast.Bin (Ast.Concat, a, b) ->
@@ -879,6 +896,8 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Phase 22.5: int_of_str s — atoi 経由 (符号 + digits)。
           fail handling は省略 (atoi は不正入力で 0 を返す silent failure)。 *)
        Printf.sprintf "atoi(%s)" (emit_expr arg)
+     | Ast.Var "str_unescape" ->
+       Printf.sprintf "__lang_str_unescape(%s)" (emit_expr arg)
      | Ast.Var "fail" ->
        (* Phase 22.4/22.5: fail msg — noreturn helper + 文脈期待型に
           応じた default literal を後置。primitive 型は専用 helper、
@@ -893,7 +912,10 @@ let rec emit_expr (e : Ast.expr) : string =
          | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "int"
          | Ast.TyStr -> "const char*"
          | Ast.TyTuple ts -> tuple_struct_name ts
-         | Ast.TyCon (n, _) -> n  (* record / variant など named type *)
+         | Ast.TyCon (n, args) ->
+           (* Phase 22.6: polymorphic types need mono-specialized name
+              (`list` instantiated to `'a = json` → `list_json`). *)
+           if args = [] then n else mono_variant_name n (List.map Ast.walk args)
          | _ -> "int"
        in
        (match result_ty with
@@ -1324,7 +1346,7 @@ let rec emit_expr (e : Ast.expr) : string =
        String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
      | Ast.Var name when Hashtbl.mem toplevel_fn_names name ->
        (* Direct call to a known top-level fn — fast path, no closure. *)
-       name ^ "(" ^ emit_expr arg ^ ")"
+       c_safe_name name ^ "(" ^ emit_expr arg ^ ")"
      | _ ->
        (* Closure dispatch via the closure value's fn pointer + env. *)
        Printf.sprintf
@@ -1399,8 +1421,13 @@ let rec emit_expr (e : Ast.expr) : string =
       | Ast.TyStr -> "({ abort(); \"\"; })"
       | Ast.TyTuple ts ->
         Printf.sprintf "({ abort(); (%s){0}; })" (tuple_struct_name ts)
-      | Ast.TyCon (n, _) ->
-        Printf.sprintf "({ abort(); (%s){0}; })" n
+      | Ast.TyCon (n, args) ->
+        (* Phase 22.6: polymorphic types need mono name. *)
+        let c_n =
+          if args = [] then n
+          else mono_variant_name n (List.map Ast.walk args)
+        in
+        Printf.sprintf "({ abort(); (%s){0}; })" c_n
       | _ -> "({ abort(); 0; })"
     in
     (* Emit nested ternaries — each arm's body is wrapped in a
@@ -1908,7 +1935,7 @@ let emit_fn (f : fn_decl) : string =
   in
   Printf.sprintf "%s %s(%s %s) {\n  return %s;\n}"
     (c_type_of f.return_ty)
-    f.name
+    (c_safe_name f.name)
     (c_type_of f.param_ty)
     f.param
     body_c
@@ -1931,7 +1958,7 @@ let emit_lifted_fn (f : lifted_fn) : string =
 
 let emit_fn_forward_decl (f : fn_decl) : string =
   Printf.sprintf "%s %s(%s);"
-    (c_type_of f.return_ty) f.name (c_type_of f.param_ty)
+    (c_type_of f.return_ty) (c_safe_name f.name) (c_type_of f.param_ty)
 
 (* Closure-value wrapper for a top-level fn: an env-ignoring adapter
    plus a const closure literal that can be passed as a value. *)
@@ -1939,15 +1966,16 @@ let emit_closure_wrapper (f : fn_decl) : string =
   let cstruct = closure_struct_name f.param_ty f.return_ty in
   let cret = c_type_of f.return_ty in
   let carg = c_type_of f.param_ty in
+  let safe = c_safe_name f.name in
   Printf.sprintf
     "static %s %s_closure_fn(void* __env, %s %s) {\n  \
        (void)__env;\n  \
        return %s(%s);\n\
      }\n\
      static const %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
-    cret f.name carg f.param
-    f.name f.param
-    cstruct f.name f.name
+    cret safe carg f.param
+    safe f.param
+    cstruct safe safe
 
 (* Closure struct typedef for a `(p) -> r` arrow. *)
 let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
@@ -2202,6 +2230,34 @@ let str_concat_helper =
       "  char* r = (char*) __lang_region_alloc(&__lang_default_region, len + 1);";
       "  memcpy(r, s + start, (size_t)len);";
       "  r[len] = '\\0';";
+      "  return r;";
+      "}";
+      "";
+      (* Phase 22.6: str_unescape — backslash escapes (n / t / r / backslash
+         / quote / slash) を解釈、他はそのまま出力。json_parser 等で string
+         literal 内の escape を処理。 *)
+      "static const char* __lang_str_unescape(const char* s) {";
+      "  size_t n = strlen(s);";
+      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, n + 1);";
+      "  size_t i = 0, j = 0;";
+      "  while (i < n) {";
+      "    if (s[i] == '\\\\' && i + 1 < n) {";
+      "      char c = s[i + 1];";
+      "      switch (c) {";
+      "        case 'n': r[j++] = '\\n'; break;";
+      "        case 't': r[j++] = '\\t'; break;";
+      "        case 'r': r[j++] = '\\r'; break;";
+      "        case '\\\\': r[j++] = '\\\\'; break;";
+      "        case '\"': r[j++] = '\"'; break;";
+      "        case '/': r[j++] = '/'; break;";
+      "        default: r[j++] = c; break;";
+      "      }";
+      "      i += 2;";
+      "    } else {";
+      "      r[j++] = s[i++];";
+      "    }";
+      "  }";
+      "  r[j] = '\\0';";
       "  return r;";
       "}" ]
 
