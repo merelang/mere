@@ -5953,6 +5953,27 @@ let () =
         let a = id 5 in\n\
         let b = id \"hi\" in\n\
         a") "5";
+  check "§23.4: chained multi-inst — child poly fn called only via parent multi-inst"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec helper = fn x -> x in\n\
+        let wrap = fn x -> helper x in\n\
+        let a = wrap 5 in\n\
+        let b = wrap \"hi\" in\n\
+        let __ = print b in\n\
+        a") in
+     let s = c_src in
+     let has p =
+       let nlen = String.length s and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub s i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "helper__int" && has "helper__str" && has "wrap__int" && has "wrap__str"
+     then "all4" else "missing")
+    "all4";
   check "§23.3: multi-instantiation poly fn — C codegen emits 2 specs"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let rec id = fn x -> x in\n\

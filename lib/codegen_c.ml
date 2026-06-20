@@ -1876,10 +1876,12 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
 
 (* Phase 23.1 (DEFERRED §1.7 multi-instantiation): collect ALL distinct
    concrete arrow types at use sites of `name`. Used to detect when a
-   single-specialization emit would silently miscompile (e.g., rev_aux
-   used with both `'json list -> ...` and `'(str * json) list -> ...`
-   in json_parser). *)
-let find_all_concrete_arrows (name : string) (e : Ast.expr) : Ast.ty list =
+   single-specialization emit would silently miscompile.
+
+   Phase 23.3: takes a list of exprs to scan, so chained-poly multi-inst
+   can include cloned bodies of already-specialized parent fns (e.g.,
+   to detect rev_aux's multi-inst from rev's cloned bodies). *)
+let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty list =
   let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
   let rec go (e : Ast.expr) =
     (match e.Ast.node with
@@ -1918,7 +1920,7 @@ let find_all_concrete_arrows (name : string) (e : Ast.expr) : Ast.ty list =
     | Ast.Field_get (a, _) -> go a
     | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
   in
-  go e;
+  List.iter go exprs;
   Hashtbl.fold (fun _ v acc -> v :: acc) seen []
 
 (* Phase 23.3: deep-clone an expression with fresh tyvars.
@@ -2038,15 +2040,20 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
           Hashtbl.add resolved s.sname fun_ty;
           progress := true
         end else
-          match find_concrete_arrow s.sname root with
-          | Some _ ->
+          let extra_exprs =
+            Hashtbl.fold (fun _ specs acc ->
+              List.fold_left (fun acc (_, body) -> body :: acc) acc specs
+            ) multi_specs []
+          in
+          let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs) in
+          match all with
+          | _ :: _ ->
             (* Phase 23.3: per-instantiation specialization. If the fn
                is called at 2+ distinct concrete arrow types, clone the
                body once per type, unify each clone's Fun.ty with the
                concrete arrow, and emit each as a separately-named
                fn_decl. Register in multi_inst_fns so call-site
                dispatch can pick the right mangled name. *)
-            let all = find_all_concrete_arrows s.sname root in
             if List.length all > 1 then begin
               Hashtbl.add multi_inst_fns s.sname all;
               let specs = List.map (fun arrow ->
@@ -2081,7 +2088,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
               Hashtbl.add resolved s.sname (List.hd all);
               progress := true
             end
-          | None -> ()
+          | [] -> ()
       end
     ) skels
   done;
@@ -3294,7 +3301,13 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
   in
   walk_expr root;
   List.iter (fun f ->
-    walk_ty f.param_ty; walk_ty f.return_ty) fns;
+    walk_ty f.param_ty; walk_ty f.return_ty;
+    (* Phase 23.3: also include the fn's OWN arrow (param → return) so
+       the closure_wrapper's `<fn>_as_value` typedef references an
+       arrow type that's actually been declared. Multi-inst fns have
+       fn_decls whose top-level arrow isn't visible in the original
+       AST's annotations (since cloning happened in codegen). *)
+    add (Ast.walk f.param_ty) (Ast.walk f.return_ty)) fns;
   List.rev !order
 
 (* Walk a typed AST and collect every distinct tuple shape encountered
@@ -3957,7 +3970,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let _ = tuple_struct_bodies in
   (* Closure / inner-fn lifting (defunctionalization). Done AFTER
      top-level fn types are resolved so we know toplevel names. *)
-  let toplevel_names = List.map (fun f -> f.name) fns in
+  (* Phase 23.3: include skel names too — multi-inst fns have mangled
+     fn names in `fns` (e.g., rev__list_json), but call sites in inner
+     fn bodies use the original Mere name (`rev`). lift_inner_fns must
+     see these as "globals" to NOT include them in captures. *)
+  let toplevel_names =
+    List.map (fun f -> f.name) fns @ List.map (fun s -> s.sname) skels in
   let inner_fns = lift_inner_fns toplevel_names fns in
   (* Closure (first-class fn) machinery: emit a `closure_T1_T2` typedef
      per arrow type used + a wrapper / value const for each top-level fn. *)
