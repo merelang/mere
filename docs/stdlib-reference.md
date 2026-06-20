@@ -53,7 +53,7 @@ bool_of_str "true"   // true
 
 ---
 
-## 文字列操作 (19)
+## 文字列操作 (22)
 
 | 名前 | 型 | 説明 |
 |---|---|---|
@@ -62,6 +62,9 @@ bool_of_str "true"   // true
 | `str_starts_with` | `str -> str -> bool` | prefix 判定 |
 | `str_ends_with` | `str -> str -> bool` | suffix 判定 |
 | `str_count` | `str -> str -> int` | 非オーバーラップ出現回数 |
+| `str_index_of` ★ | `str -> str -> int` | needle の最初の位置、無ければ -1。empty needle は 0 (Phase 19.1) |
+| `str_split` ★ | `str -> str -> str list` | delimiter で分割、`str list` 返却。`type 'a list = ...` の declare が必要。empty delimiter は単一要素 list を返す (Phase 19.1) |
+| `str_join` ★ | `str -> str list -> str` | separator で結合。空 list は空文字列 (Phase 19.1) |
 | `str_compare` | `str -> str -> int` | 辞書順 -1 / 0 / 1 |
 | `str_repeat` ⚡ | `str -> int -> str` | N 回繰り返し、N<0 で raise |
 | `str_replace` | `str -> str -> str -> str` | 全置換、empty needle は変化なし |
@@ -77,6 +80,16 @@ bool_of_str "true"   // true
 | `is_digit` | `str -> bool` | 単一文字で `'0'..'9'` なら true、他は false |
 | `is_alpha` | `str -> bool` | 単一文字で letter なら true |
 | `is_space` | `str -> bool` | 単一文字で space/tab/\n/\r なら true |
+
+```
+type 'a list = Nil | Cons of 'a * 'a list;
+str_split "a,b,c" ","                          // ["a", "b", "c"]
+str_join "-" ["alpha", "beta", "gamma"]        // "alpha-beta-gamma"
+str_index_of "hello world" "world"             // 6
+str_index_of "hello" "xyz"                     // -1
+```
+
+**★ codegen 状況**: `str_index_of` は 4 backend 全部で動く予定 (Phase 19.1.1)。`str_split` / `str_join` は **interpreter only** (codegen は recursive variant `list` 構築が必要で、Phase 19.1.1 で対応予定)。
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"
@@ -253,7 +266,7 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、87 個)
+## 全 builtin 一覧 (アルファベット順、90 個)
 
 ```
 abs assert bool_of_str ceil char_at chr clamp const cube
@@ -264,10 +277,11 @@ int_of_float int_of_str is_alpha is_digit is_space
 iter_n lcm max min mk_logger mk_metrics not odd ord pair pi
 pow print print_bool print_err print_int print_no_nl read_file
 read_line round show sign snd sqrt square str_compare
-str_contains str_count str_ends_with str_len str_of_float
-str_of_int str_repeat str_replace str_rev str_starts_with
-str_trim str_unescape substring sum_range swap time
-to_lower to_upper try_or write_file
+str_contains str_count str_ends_with str_index_of str_join
+str_len str_of_float str_of_int str_repeat str_replace
+str_rev str_split str_starts_with str_trim str_unescape
+substring sum_range swap time to_lower to_upper try_or
+write_file
 ```
 
 ---
