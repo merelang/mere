@@ -5047,6 +5047,35 @@ let () =
         open Box93;\n\
         v + Box93.v") "200";
 
+  (* --- Phase 18.2 / DEFERRED §4.1 残: `open A.B;` nested path --- *)
+  check "open nested: open A.B brings A.B's bindings unqualified"
+    (Pipeline.process
+       "module An182 {\n\
+          module Bn182 {\n\
+            let answer = 42;\n\
+            let plus = fn x -> x + 1;\n\
+          };\n\
+        };\n\
+        open An182.Bn182;\n\
+        plus answer") "43";
+  check "open nested: open A.B.C (three-level)"
+    (Pipeline.process
+       "module An183 {\n\
+          module Bn183 {\n\
+            module Cn183 {\n\
+              let deep = 100;\n\
+            };\n\
+          };\n\
+        };\n\
+        open An183.Bn183.Cn183;\n\
+        deep") "100";
+  check_raises "open nested: missing module path → error"
+    (fun () ->
+      Pipeline.process
+        "module Xn184 { let v = 1; };\n\
+         open Xn184.NotThere;\n\
+         v");
+
   (* --- Phase 9.4: module 内での type / record declare --- *)
   check "module-type: record declared inside module body"
     (Pipeline.process
