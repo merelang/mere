@@ -81,9 +81,18 @@ interpreter 方式だと「Mere は OCaml の上で動く」状態。codegen で
 
 ---
 
-## 4. mere での現状 (2026-06-18、Phase 4 を 16 slice まで進めた段階)
+## 4. mere での現状 (2026-06-20、Phase 4〜6 + Phase 15 完了段階)
 
-interpreter で書ける Mere プログラムの**主要構文ほぼ全て**が native compile + 実行可能。テスト 761 件 passing、E2E では factorial / fibonacci / 連結リスト sum / make_adder closure / 多相 variant + record / pattern match (nested / guard / or) 等が clang 経由で動く。
+interpreter で書ける Mere プログラムの**主要構文ほぼ全て** + **Q-010
+collection (Vec / OwnedVec / StrBuf / Map)** が 3 backend (C / LLVM IR /
+Wasm) で native compile + 実行可能。テスト **1268 件 passing**、E2E では
+factorial / fibonacci / 連結リスト sum / make_adder closure / 多相
+variant + record / pattern match (nested / guard / or) に加えて、Phase 15
+で Vec[R, T] の全要素型 / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K =
+int / bool / str / tuple / record / 全 variant) / 高階 API (vec_set / iter
+/ fold / map / filter) / 変換 (vec_to_owned / owned_vec_to_vec /
+vec_to_list) / len ad-hoc polymorphism / with-OwnedVec scope-Drop までが
+3 backend で動く。
 
 ### 動くこと
 
@@ -111,12 +120,22 @@ interpreter で書ける Mere プログラムの**主要構文ほぼ全て**が 
 
 ### 動かないこと (今のところ Codegen_error で reject)
 
+- **builtin の first-class value 用法** (`let f = vec_new in ...`) — vec_*
+  / strbuf_* / map_* を直接 application 以外で使うのは未対応 (DEFERRED
+  §1.2)。interpreter のみで動く
+- **OwnedVec の自動 scope-bound Drop** — `with v = ...` 明示なら scope 末
+  で free、明示しなければ main 末で一括 free (Phase 15.8 / 15.13、
+  DEFERRED §1.3)
 - inner-lifted fn (`let h = fn ...`) を VALUE として使う (現状は直接呼出のみ。anonymous Fun として書き直せば動く)
 - closure capture の非プリミティブ型 (tuple/record の capture。closure 値 capture は OK)
 - float (`f_add` 等の float builtin と `Float_lit` / `f_neg` 全般)
 - nested or-pattern (or 内に constructor / tuple / record)
-- ほとんどの stdlib builtin (`print` / `str_len` / `fst` / `snd` / `show` のみ wired up)
-- 文字列・closure env・variant node の GC (現状 malloc leak、短時間実行向け)
+- ほとんどの stdlib builtin (`print` / `str_len` / `fst` / `snd` / `show`
+  / `vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` / `len` のみ wired up)
+- 文字列・closure env・variant node の GC (現状 region arena 一括解放、
+  短時間実行向け)
+- LLVM / Wasm の Map K の payload-mixed variant (uniform payload のみ)
+  — C は mixed OK
 
 ### CLI
 
@@ -169,16 +188,19 @@ slice ごとに **clang 経由で native binary 化して実行確認** して�
 
 ## 6. ロードマップ
 
-### Phase 4 で残る主要機能
+### 残課題 (DEFERRED §1.2 / §1.3 参照)
 
 | 機能 | 必要なもの |
 |---|---|
+| builtin の first-class value 用法 | `let f = vec_new in ...` を per-T closure wrapper として emit (DEFERRED §1.2)。複数 slice 級 |
+| OwnedVec の自動 scope-bound Drop | NLL + move semantics (DEFERRED §1.3)、設計から |
 | nested or-pattern | constructor 内の or を展開 |
 | inner-lifted fn as value | `let h = fn ...` の `h` を値として使うときに closure-form を同時に生成 (現状は anonymous Fun として書き直す必要あり) |
 | closure の複雑 capture | tuple / record の capture (現状は int / bool / str / unit / 関数値 のみ) |
 | float | `Float_lit` / `f_add` 等の float builtin を C `double` + `%g` 系に |
 | long-running program 対応 | 現状は arena 一括解放方式 (`main` 終了まで持つ)。長時間動くプロセス用には、show output 等の一時文字列を捨てられる sub-arena か、proper GC が要る |
-| 残りの stdlib builtin | 約 80 個の builtin (sqrt, str_replace, ...) を C 対応 |
+| 残りの stdlib builtin | 約 70 個の builtin (sqrt, str_replace, ...) を 3 backend 対応 |
+| LLVM / Wasm の Map K に payload-mixed variant | variant の uniform-payload MVP 制約を緩和 (大きな変更) |
 
 ### Phase 5 (LLVM/Wasm 移行)
 
@@ -219,13 +241,50 @@ C / LLVM 両 backend が完成形 (Phase 4 / 5 並列カバー) になり、desi
 | 6.12 | **`'a list` の show を `[a, b, c]` 形式に special-case** | LLVM Phase 5.14 相当を Wasm 版で。`emit_show_fn` の variant branch の前に `TyCon ("list", [elem_ty])` を special-case として処理: locals (cur / acc / first / tag / pl / h) を使ってループで走査。`block $end` + `loop $lp` で先頭から: tag = `i32.load offset=0`、Nil なら break (`br_if $end`)、Cons なら payload (= tuple offset) を load → head = `i32.load offset=0 payload` → 必要なら `, ` を concat (first フラグ) → `show_<elem_tag>(h)` を concat → cur = tail = `i32.load offset=4 payload` → loop。終了後 `]` を concat。`@.s_lbracket` / `@.s_rbracket` / `@.s_comma_space` 相当を `intern_show_str` で確保。動作確認 (wat2wasm + Node.js): `show [1, 2, 3]` → `[1, 2, 3]`、`show (Nil : int list)` → `[]`、`show ["hello", "world"]` → `["hello", "world"]`。テスト 3 件追加 (974 passing) — **3 backend (C / LLVM / Wasm) が完全並列に到達** |
 | 6.11 | **show 汎用 builtin** | LLVM Phase 5.12 相当を Wasm 版で。Wasm には `asprintf` 相当がないので **全部自前実装**: `show_int` は Wasm 上で int→decimal string conversion (16 byte buffer を bump pointer から確保 → 右から左に digit を書く → 必要なら `-` を prepend → first digit へのポインタを返す)、`show_bool` は `true` / `false` を data segment に登録して `select` で分岐、`show_str` は `"` でラップする 2 段 concat、`show_unit` は `()` の const offset、`show_tuple_X_Y` は `(`、各要素 show、`, `、`)` を `__lang_str_concat` で連結、`show_<R>` は `R { f1 = `、各 field show、`, f2 = `、` }` を concat、`show_<V>` は tag dispatch (`i32.load + i32.eq` の nested if/else) → 各 ctor で nullary なら data ptr 直接、payload あれば `ctor_name + " "` + payload 再帰 show を concat。`show_types` Hashtbl + `collect_show_types` + `add_show_type` で型を発見 + 依存型を再帰登録 (循環ガード)。`subst_params` で polymorphic record/variant の args 適用 (Wasm でも mono instance ごとに別関数を emit、layout は共通)。`intern_show_str` で literal を de-dupe して data segment を節約。`App (Var "show", arg)` を `call $show_<ty_tag arg.ty>` に dispatch。動作確認 (wat2wasm + Node.js): `show 42` → "42"、`show true` → "true"、`show "hi"` → "\"hi\""、`show (1, "hi")` → "(1, \"hi\")"、`show (SS 42)` → "SS 42"、`show (Pt { x = 3, y = 4 })` → "Pt { x = 3, y = 4 }"、`show (Cons (1, Cons (2, Cons (3, Nil))))` → "Cons (1, Cons (2, Cons (3, Nil)))" (recursive)。テスト 8 件追加 (971 passing)。`'a list` の special-case `[a, b, c]` 形式は今後の slice |
 
-#### 残りの Phase 6 作業
+### Phase 15 (Q-010 collection の 3 backend codegen — 2026-06-20、16 slice)
 
-- 関数 lifting + recursion (Phase 4.2 / 5.2 に相当): Wasm の `(func)` + `call $name` への lift
-- 文字列対応: linear memory + WASI または独自 string runtime
-- tuple / record / variant: linear memory にレイアウト + load/store
-- closure 変換: env + fn pointer (Wasm では `table` + `call_indirect`)
-- pattern match / show / region runtime
+Phase 12 で interpreter に乗った Q-010 collection (Vec / OwnedVec /
+StrBuf / Map + 高階 API + 変換) を、3 backend すべてで動かす作業。
+詳細は [internal design notes](https://github.com/284km/internal design notes)
+(private) 参照。
+
+| slice | 内容 | 動くもの (3 backend) | tests |
+|---|---|---|---|
+| 15.1 | C codegen で `Vec[R, int]` 最小ハーネス | C: int 限定 | 1177 |
+| 15.2 | C codegen で `Vec[R, T]` 要素型一般化 (`vec_instances` テーブル + per-T monomorphize) | C: int / bool / str / tuple / record / variant | 1178 |
+| 15.3 | LLVM IR に Phase 15.2 を移植 | + LLVM | 1182 |
+| 15.4 | Wasm に Phase 15.2 を移植 (全 i32 共通なので per-T monomorphize 不要) | + Wasm (3 backend parity) | 1185 |
+| 15.5 | 3 backend に `vec_set` / `vec_iter` / `vec_fold` | 高階 API 3 つ | 1197 |
+| 15.6 | 3 backend に `vec_map` / `vec_filter` (region-preserving) | Vec 高階 API 主要 5 つ | 1206 |
+| 15.7 | 3 backend に `OwnedVec[T]` + `vec_to_owned` / `owned_vec_to_vec` | heap-allocated owned vec + Vec ⇄ OwnedVec 変換 | 1218 |
+| 15.8 | OwnedVec の main 末一括 free (process-wide registry + `__mere_owned_vec_free_all`、leak sanitizer クリーン化) | C / LLVM の memory leak 解消 | 1222 |
+| 15.9 | 3 backend に `StrBuf[R]` (region 内 mutable 文字列バッファ) | + StrBuf | 1225 |
+| 15.10 | 3 backend に `Map[R, K, V]` (K = int / str + V 任意、線形スキャン) | + Map (K = int / str) | 1232 |
+| 15.11 | 3 backend に `len` ad-hoc polymorphic builtin (arg.ty 静的 dispatch) | len で Vec / OwnedVec / StrBuf / Map / str / tuple | 1237 |
+| 15.12 | 3 backend に `vec_to_list` + `len`-on-list (recursive variant Nil/Cons chain) | list 変換と len | 1244 |
+| 15.13 | `with v = owned_vec_new () in body` で OwnedVec の scope-bound Drop (明示) | scope 末 free | 1247 |
+| 15.14 | Map K を bool / tuple に拡張 (per-K eq 再帰展開) | Map K = int / bool / str / tuple | 1255 |
+| 15.15 | Map K を record / nullary variant に拡張 | + record / nullary variant | 1263 |
+| 15.16 | Map K を payload 付き variant に拡張 (Mere の全 concrete 型を Map key に) | Map K = 全 concrete 型 | 1268 |
+
+#### Phase 15 の設計パターン
+
+- **per-T monomorphize** (C / LLVM): `vec_instances` 等の table で出会った
+  T を収集、`emit_vec_runtime_for elem_ty` 等で要素型ごとに専用 struct +
+  helpers を emit
+- **Wasm の i32 共通**: 値が全部 4-byte i32 なので、per-T monomorphize は
+  ほぼ不要。Vec も OwnedVec も StrBuf も単一 runtime helper セットで済む
+  (例外: Map は key equality が型依存なので per-K)
+- **`resolve_vec_let_types` pre-pass**: Mere の let-poly が `let v =
+  vec_new () in body` を `forall T. Vec[R, T]` に generalize するため、
+  binding 側の `.ty` には未解決の TyVar が残る → codegen の前に walk して
+  binding ty を body 内の use site の ty と `Typer.unify` で繋ぐ
+- **registry + free_all** (Phase 15.8): 全 `mere_owned_vec_<T>` は同じ
+  先頭 layout `{ void* data; int len; int cap; }` なので generic に
+  `free(v->data); free(v);` できる
+- **per-K key equality** (Phase 15.14〜15.16): tuple / record / variant
+  キーの構造的比較を再帰的に展開、C はインライン式、LLVM / Wasm は
+  per-K helper (`@mere_map_key_eq_<K>` / `$mere_map_key_eq_<K>`)
 
 C codegen と LLVM codegen と Wasm codegen は parallel 実装。AST + 型注釈は共通基盤、emit 戦略のみ別 backend。
 

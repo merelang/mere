@@ -660,12 +660,40 @@ strbuf_new ()                    // 型: StrBuf[__heap] (default region)
 API: `strbuf_new`, `strbuf_push`, `strbuf_to_str`, `strbuf_len`。polymorphic
 `len` も StrBuf に効く。実例は [`examples/strbuf_basics.mere`](../examples/strbuf_basics.mere)。
 
-現状 (Phase 12.7) の制約:
-- **インタプリタ専用** — 3 backend codegen は Vec / OwnedVec / StrBuf の
-  builtin を見つけると `Codegen_error` で reject
-- **`Map[R, K, V]`** はまだ
-- **`Allocator` trait の API 統一** もまだ — 設計 (b) のうち「別型」のみ実装
-- **borrow checker は Vec 内部の要素単位までは追跡しない** — Vec を borrow した時点での mode は機械検証されるが、`vec_get` の結果を borrow するなどの細部は今後
+**Phase 15 で 3 backend codegen 対応** — Vec / OwnedVec / StrBuf / Map +
+全高階 API + 変換 + len ad-hoc polymorphism + with-OwnedVec scope-Drop が
+すべて C / LLVM IR / Wasm で動くようになった。`vec_codegen_c.mere` /
+`owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere` /
+`vec_higher_order_codegen.mere` 等の例で `-c` / `-ll` / `-w` flag で
+codegen を試せる:
+
+```sh
+# Vec[R, int] を C codegen して native binary 化
+mere -c examples/vec_codegen_c.mere | clang -x c - -o vec && ./vec   # → 95
+
+# Map[R, str, int] を LLVM IR codegen
+mere -ll examples/map_codegen.mere | clang -x ir - -o map && ./map   # → 640
+
+# Wasm codegen (要 wabt / Node.js)
+mere -w examples/vec_codegen_wasm_typed.mere > v.wat
+wat2wasm v.wat -o v.wasm
+node -e 'WebAssembly.instantiate(require("fs").readFileSync("v.wasm"),
+  { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
+# → 252
+```
+
+残課題 (DEFERRED §1.2 / §1.3 参照):
+
+- **builtin の first-class value 用法** (`let f = vec_new in ...`) は
+  まだ codegen 未対応 — interpreter のみ。回避策: `fn v -> vec_push v x`
+  のような wrapper を書く
+- **OwnedVec の自動 scope-bound Drop** は未対応 — `with v = owned_vec_new
+  () in body` と明示すれば scope 末で free、明示しなければ main 末で一括 free
+- **borrow checker は Vec 内部の要素単位までは追跡しない** — Vec を borrow
+  した時点での mode は機械検証されるが、`vec_get` の結果を borrow するなどの
+  細部は今後
+- **LLVM / Wasm の Map K に payload-mixed variant** は MVP 制約で uniform
+  payload 型のみ (C は mixed OK)
 
 設計 Q-010 の全貌は [internal design notes](https://github.com/284km/internal design notes)
 を参照 (private repo)。
@@ -810,9 +838,19 @@ wat2wasm fact.wat -o fact.wasm    # 別途 wabt が必要
 
 interpreter モード (`mere file.mere`) と codegen の出力は同じプログラム
 なら一致する (`[1, 2, 3]` 等の整形も同じ)。3 backend は feature parity で、
-int / 関数 / 文字列 / tuple / record / variant / closure / 多相 / 再帰 variant /
-複雑 pattern / show / region / view / `with` Drop / list pretty-print まで
-すべて動く。
+int / 関数 / 文字列 / tuple / record / variant / closure / 多相 / 再帰
+variant / 複雑 pattern / show / region / view / `with` Drop / list
+pretty-print に加えて、**Phase 15 で Q-010 collection** (Vec / OwnedVec /
+StrBuf / Map) + 高階 API + 変換 + len + with-Drop までもが 3 backend で
+動く。
+
+interpreter / 3 backend の **feature parity ギャップ** は現在:
+- builtin の **first-class value 用法** (`let f = vec_new in ...`) は
+  interpreter のみ
+- **OwnedVec の自動 scope-bound Drop** は未対応 (`with` 明示か main 末
+  一括 free のみ)
+- LLVM / Wasm の **Map K の payload-mixed variant** は uniform payload
+  のみ受理 (C は mixed OK)
 
 ## 次のステップ
 

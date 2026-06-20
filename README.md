@@ -82,7 +82,10 @@ $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 - **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
 - **[Codegen](docs/codegen.md)** — C / LLVM IR / Wasm の 3 backend 戦略 + slice 表
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
-- `examples/` — 動く `.mere` ファイル群 (FizzBuzz、JSON parser、word count、module/import 例 等)
+- `examples/` — 動く `.mere` ファイル群 (45+ 本、[examples/README.md](examples/README.md) で
+  カテゴリ別索引)。基本的な FizzBuzz / JSON parser / word count から、
+  Q-010 collection の 3 backend codegen demo (`vec_codegen_*.mere` /
+  `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`) まで
 
 ## ビルド・実行
 
