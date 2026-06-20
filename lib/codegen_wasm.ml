@@ -495,14 +495,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_map" || name = "vec_filter" then
-      raise (Codegen_error (e.Ast.loc,
-        "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4〜15.6: vec_* は直接 application のみ対応)"));
-    if name = "vec_to_list"
+       || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "owned_vec_get" || name = "owned_vec_len" then
+      raise (Codegen_error (e.Ast.loc,
+        "unsupported in Wasm codegen subset: " ^ name
+        ^ " as a value (Phase 15.4〜15.7: vec_* / owned_vec_* は直接 application のみ対応)"));
+    if name = "vec_to_list"
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
@@ -510,7 +510,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (OwnedVec / StrBuf / Map / vec_to_* / len are interpreter-only)"));
+        ^ " (StrBuf / Map / vec_to_list / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -644,6 +644,35 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr vec_e;
     emit_expr fn_e;
     emit_instr "call $mere_vec_filter"
+  | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
+    (* Phase 15.7: Wasm では OwnedVec も Vec も同じ bump runtime を使うので
+       owned_vec_new = $mere_vec_new (alias)。 *)
+    vec_used := true;
+    emit_instr "call $mere_vec_new"
+  | Ast.App ({ node = Ast.Var "owned_vec_len"; _ }, arg) ->
+    vec_used := true;
+    emit_expr arg;
+    emit_instr "call $mere_vec_len"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_push"; _ }, vec_e); _ }, val_e) ->
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr val_e;
+    emit_instr "call $mere_vec_push"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_get"; _ }, vec_e); _ }, idx_e) ->
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr idx_e;
+    emit_instr "call $mere_vec_get"
+  | Ast.App ({ node = Ast.Var "vec_to_owned"; _ }, vec_e) ->
+    (* Phase 15.7: Wasm では Vec と OwnedVec の runtime 表現は同じなので、
+       $mere_vec_clone で deep copy するだけ。 *)
+    vec_used := true;
+    emit_expr vec_e;
+    emit_instr "call $mere_vec_clone"
+  | Ast.App ({ node = Ast.Var "owned_vec_to_vec"; _ }, owned_e) ->
+    vec_used := true;
+    emit_expr owned_e;
+    emit_instr "call $mere_vec_clone"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load offset=0"
@@ -1563,7 +1592,27 @@ let vec_runtime = {|
     (i32.store
       (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))
       (local.get $x))
-    (i32.const 0))|}
+    (i32.const 0))
+  ;; Phase 15.7: OwnedVec の helpers — Wasm では値が全部 i32 で
+  ;; bump アロケータも共有なので、Vec と OwnedVec のランタイム表現は
+  ;; 同じ。owned_vec_* は $mere_vec_* に thin wrapper として alias。
+  ;; deep copy (vec_to_owned / owned_vec_to_vec) は $mere_vec_clone を使う。
+  (func $mere_vec_clone (param $src i32) (result i32)
+    (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
+    (local.set $new (call $mere_vec_new))
+    (local.set $len (i32.load offset=4 (local.get $src)))
+    (local.set $buf (i32.load offset=0 (local.get $src)))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (drop (call $mere_vec_push
+                 (local.get $new)
+                 (i32.load (i32.add (local.get $buf)
+                                    (i32.mul (local.get $i) (i32.const 4))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $new))|}
 
 (* Phase 15.5: vec_iter / vec_fold helpers. References (type $cl) and
    uses call_indirect, so the module must declare a funcref table when

@@ -4208,6 +4208,46 @@ let () =
     (Pipeline.process src_map) "14";
   check "vec_filter: interpreter parity"
     (Pipeline.process src_filter) "8";
+  (* --- Phase 15.7: OwnedVec[T] + vec_to_owned / owned_vec_to_vec --- *)
+  let src_owned =
+    "let o = owned_vec_new () in let __ = owned_vec_push o 10 in \
+     let __ = owned_vec_push o 20 in let __ = owned_vec_push o 30 in \
+     owned_vec_get o 0 + owned_vec_get o 1 + owned_vec_get o 2 + owned_vec_len o"
+  in
+  assert_contains "owned_vec: C codegen emits mere_owned_vec_int_new"
+    (vec_codegen_c src_owned) "mere_owned_vec_int_new";
+  assert_contains "owned_vec: LLVM codegen emits @mere_owned_vec_int_new"
+    (vec_codegen_llvm src_owned) "@mere_owned_vec_int_new";
+  (* Wasm: owned_vec_new aliases to $mere_vec_new, so just check the call exists. *)
+  assert_contains "owned_vec: Wasm codegen aliases owned_vec_new to $mere_vec_new"
+    (vec_codegen_wasm src_owned) "call $mere_vec_new";
+  let src_to_owned =
+    "let v = vec_new () in let __ = vec_push v 1 in let __ = vec_push v 2 in \
+     let o = vec_to_owned v in owned_vec_get o 0 + owned_vec_get o 1 + owned_vec_len o"
+  in
+  assert_contains "vec_to_owned: C codegen emits mere_owned_vec_int_push"
+    (vec_codegen_c src_to_owned) "mere_owned_vec_int_push";
+  assert_contains "vec_to_owned: LLVM codegen emits @mere_vec_to_owned_int"
+    (vec_codegen_llvm src_to_owned) "@mere_vec_to_owned_int";
+  assert_contains "vec_to_owned: Wasm codegen routes to $mere_vec_clone"
+    (vec_codegen_wasm src_to_owned) "$mere_vec_clone";
+  let src_o2v =
+    "let o = owned_vec_new () in let __ = owned_vec_push o 1 in \
+     let __ = owned_vec_push o 2 in \
+     let v = owned_vec_to_vec o in vec_get v 0 + vec_get v 1 + vec_len v"
+  in
+  assert_contains "owned_vec_to_vec: C codegen emits mere_vec_int_push"
+    (vec_codegen_c src_o2v) "mere_vec_int_push";
+  assert_contains "owned_vec_to_vec: LLVM codegen emits @mere_owned_vec_to_vec_int"
+    (vec_codegen_llvm src_o2v) "@mere_owned_vec_to_vec_int";
+  assert_contains "owned_vec_to_vec: Wasm codegen routes to $mere_vec_clone"
+    (vec_codegen_wasm src_o2v) "$mere_vec_clone";
+  check "owned_vec: interpreter parity"
+    (Pipeline.process src_owned) "63";
+  check "vec_to_owned: interpreter parity"
+    (Pipeline.process src_to_owned) "5";
+  check "owned_vec_to_vec: interpreter parity"
+    (Pipeline.process src_o2v) "5";
 
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
   (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
