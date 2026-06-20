@@ -5600,8 +5600,18 @@ let () =
     "0";
   check "prelude: with prelude (default) prog.decls includes auto-injected"
     (let prog = Pipeline.parse_program "42" in
+     (* Phase 19.5: 3 types (list / option / result) *)
      string_of_int (List.length prog.Ast.decls))
-    "1";
+    "3";
+
+  (* Phase 19.5: Option / Result also available without declare. *)
+  check "prelude: Option (Some / None) works without declare"
+    (Pipeline.process "match Some 5 with | None -> 0 | Some x -> x * 2") "10";
+  check "prelude: Result (Ok / Err) works without declare"
+    (Pipeline.process "match Ok 7 with | Ok x -> x + 1 | Err _ -> 0") "8";
+  check "prelude: Result with Err branch"
+    (Pipeline.process
+       "match Err \"bad\" with | Ok n -> n | Err _ -> -1") "-1";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
