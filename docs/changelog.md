@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-06-20
+
+Phase 15 第 16 から始まり、Phase 16 / 17 / 18 を一気に走った 1 日。
+1268 → 1304 tests、DEFERRED §1.4 / §1.5 / §1.6 / §2.1 / §2.5 / §4.1 の
+6 件を解決。**4 backend が non-trivial プログラム (todo_app) で完全
+一致 + borrow checker conflict matrix 全 10 ペア網羅 + module の
+proper scoping (M.Red qualified + open A.B; nested path)** という状態
+に到達。
+
+- **Phase 18.2: `open A.B;` (nested module path への open)** — DEFERRED
+  §4.1 完全完了。`module_bindings` を short-name key に加えて full-path
+  key (`A.B`) でも登録、parser の `T_open` を path parser に refactor。
+  既存 `open M;` は同一 code path で動く (1304 passing)。
+- **Phase 18.1: module 内 ctor / record の M-prefix scoping** — DEFERRED
+  §4.1 残。`module M { type T = Red | Blue; }` 後に `M.Red` qualified
+  access、`M.Pt { ... }` qualified record literal、`match v with | M.Red
+  -> ...` qualified pattern が動く。2 module 間で同名 ctor の collision
+  も qualified 形式で disambiguate 可能。実装は疎結合: 新 AST decl
+  `Top_ctor_alias` / `Top_record_alias` + 共有 alias table (`Ast.ctor_aliases`)
+  + typer.alias_ctor + eval が V_constr 構築時に canonical 名へ正規化。
+  bare 名は backward compat で動く (1301 passing)。
+- **Phase 17.2: 借用 conflict matrix を全 10 ペア網羅 + tuple 内部衝突**
+  — DEFERRED §2.5 解決。4 mode × 4 mode = 10 ペアの conflict matrix の
+  うち未テスト 4 ペア (SW×ER, SW×EW, ER×ER, ER×EW) を test 追加、
+  `check_borrows` の Tuple 分岐を sequential threading に変更、設計
+  doc 08 に「Conflict matrix と拡張履歴」節を追加 (1295 passing)。
+- **Phase 17.1: 関数返り値の borrow を let-bind 名で追跡** — DEFERRED
+  §2.1 完全解決。`let r = f x in let r2 = &mut R r` で f が `&R T` を
+  返すとき、let-bind した name を place として synthetic borrow を
+  active に追加して衝突検出 (1287 passing)。
+- **Phase 16 仕上げ**: 摩擦点 #1/#2/#3/#4 を tutorial / patterns に
+  反映 (`{ t | f = v }` の差分更新、同名 rebinding、closure 引数の
+  型注釈イディオム)。Phase 16 retrospective を新規作成。
+- **Phase 16.4: Wasm の Region_block bump restore を撤去** — DEFERRED
+  §1.6。`let v = region R { vec_to_owned ... } in ...` のように region
+  内 alloc して外に escape させる OwnedVec があると、region 終了で
+  bump が巻き戻り後続 alloc が escape 値を上書きする bug を fix。
+  Wasm region semantics を arena-leak に揃えた (1283 passing)。
+- **Phase 16.3: mk_logger / mk_metrics の 3 backend codegen 対応** —
+  DEFERRED §1.5。interpreter only だった Logger / Metrics cap builtin
+  を C / LLVM / Wasm に揃える。Logger = `{ closure_str_unit info / warn
+  / error }`、Metrics = `{ inc, record (curried str→int→unit) }`。副次
+  変更: `collect_arrow_types` (C/LLVM) が既知 record の field 型を再帰
+  traverse → Logger 経由でしか使われない closure typedef も自動 emit
+  (1281 passing)。
+- **Phase 16.2: C codegen `let x = f x` 同名 rebinding bug を fix** —
+  DEFERRED §1.4。`__auto_type x = ...x...` は C 規則「変数を自身の
+  初期化子で参照してはならない」に該当して clang error。`codegen_c.ml`
+  の Let を一律 2-step 形 `({ __auto_type __let_tmp_<name> = <value>;
+  __auto_type <name> = __let_tmp_<name>; <body>; })` に展開、右辺評価
+  時点ではまだ新 binding が宣言されていないので旧 binding が見える
+  (1269 passing)。
+- **Phase 16.1: 実用 example todo_app.mere で摩擦点 6 件を炙り出す** —
+  OwnedVec[Task] + Logger + vec_map + region を組合せた 110 行の TODO
+  アプリ。設計通り 2 件 (#1/#2 immutable record 更新)、HM 限界 2 件
+  (#3/#4 field access 推論)、真のバグ 2 件 (#5 rebinding, #6 mk_logger
+  codegen)、Wasm bug 1 件 (§1.6) を documentation 化 (1268 passing)。
+- **Phase 15 第十六**: 3 backend で Map[R, K, V] の K を payload 付き
+  variant に拡張 (Mere の全 concrete 型を Map key にできる状態へ)。
+
+---
+
 ## 2026-06-19
 
 - **Phase 15 第十六スライス: 3 backend で Map[R, K, V] の K を payload 付き variant に拡張** — Phase 15.15 の nullary variant の延長で、ctor が payload を持つ variant も K として使えるように。Mere のすべての concrete 型を Map key にできる状態へ到達。**(a) C codegen**: `key_eq_for` の variant 分岐を拡張 — `(a.tag == b.tag) && (a.tag == TAG_X ? eq_payload_X : a.tag == TAG_Y ? eq_payload_Y : ... : 0)` のネストした三項演算で per-tag dispatch、nullary ctor は `1` (true) で短絡。payload は再帰的に `key_eq_for` を呼んで比較。C codegen は ctor 間で payload 型が異なっても OK (variant の union 表現を活用)。**(b) LLVM IR**: `emit_map_key_eq_helper_llvm` の variant 分岐を拡張 — extractvalue で tag を取得、tag が一致しない時は 0、一致したら payload を抽出して比較。**LLVM MVP 制約**: ctor 間で payload 型が同一であることが必要 (MVP の variant codegen が単一 payload type を要求するため)。nullary ctor 用の "tag が nullary 集合に含まれるか" check を OR で重ね、payload eq と組み合わせ。**(c) Wasm**: `emit_map_key_eq_wasm` の variant 分岐を拡張 — `i32.load offset=0` で tag 取得後、各 payload-ctor について `if (tag == TAG_X) then eq_payload_X else ...` のネスト if/else 連鎖。最後の else は 1 (nullary or covered)。Wasm も LLVM 同様、MVP 制約で uniform payload type が前提。`is_key_supported` も 3 backend それぞれで payload variant を許可、再帰的に payload 型をチェック。test 5 件追加 (1268 passing) — C は mixed-payload (A int / B str) も accept、LLVM / Wasm は uniform-payload (A int / B int / C nullary) を accept + interpreter parity (1502, 603)。**副次的に test helper refactor**: `vec_codegen_c` / `_llvm` / `_wasm` の test helper を `typed_prog` 経由に変更し、`Pipeline.process_decls` で Top_type 等を先に登録するようにした (これまでは type 宣言を含む program は test helper で typer error していた)。これで Mere の Map key support は **すべての concrete 型** (int / bool / str / tuple / record / nullary variant / payload variant) を網羅。残: first-class value 用法、自動 Drop。
