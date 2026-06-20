@@ -117,6 +117,10 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_iter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_fold_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 15.6: vec_map per-(T, U) and vec_filter per-T helper instances. *)
+let vec_map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
+let vec_filter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -1422,11 +1426,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        で special-case 処理。first-class value 用法のみここで reject。 *)
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
-       || name = "vec_set" || name = "vec_iter" || name = "vec_fold" then
+       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+       || name = "vec_map" || name = "vec_filter" then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3/15.5: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_map"
-       || name = "vec_filter" || name = "vec_to_list"
+        (name ^ " as a value (Phase 15.3〜15.6: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
@@ -1436,7 +1440,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (OwnedVec / StrBuf / Map / vec_map / vec_filter / vec_to_* / len are interpreter-only)");
+        (name ^ " (OwnedVec / StrBuf / Map / vec_to_* / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1678,6 +1682,38 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_iter(ptr %s, %%%s %s)"
+                  r elem_tag av cname cv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e); _ }, fn_e) ->
+    (* Phase 15.6: vec_map v f — per-(T, U) helper.
+       Returns ptr to fresh mere_vec_<U>, region-preserving. *)
+    let t_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let u_tag = vec_elem_tag_of e.Ast.ty e.Ast.loc in
+    let t_ty = Hashtbl.find vec_instances t_tag in
+    let u_ty = Hashtbl.find vec_instances u_tag in
+    let key = t_tag ^ "__" ^ u_tag in
+    if not (Hashtbl.mem vec_map_instances key) then
+      Hashtbl.add vec_map_instances key (t_ty, u_ty);
+    let av = emit_expr env vec_e in
+    let cv = emit_expr env fn_e in
+    let cname = closure_struct_name t_ty u_ty in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_vec_%s_map_%s(ptr %s, %%%s %s)"
+                  r t_tag u_tag av cname cv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_filter"; _ }, vec_e); _ }, fn_e) ->
+    (* Phase 15.6: vec_filter v f — per-T helper. *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    if not (Hashtbl.mem vec_filter_instances elem_tag) then
+      Hashtbl.add vec_filter_instances elem_tag elem_ty;
+    let av = emit_expr env vec_e in
+    let cv = emit_expr env fn_e in
+    let cname = closure_struct_name elem_ty Ast.TyBool in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_vec_%s_filter(ptr %s, %%%s %s)"
                   r elem_tag av cname cv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_fold"; _ }, vec_e); _ }, acc_e); _ }, fn_e) ->
@@ -2829,6 +2865,90 @@ let emit_vec_fold_helper_llvm (elem_ty : Ast.ty) (acc_ty : Ast.ty) : string =
       Printf.sprintf "  ret %s %%acc" c_acc;
       "}" ]
 
+(* Phase 15.6: vec_map per-(T, U) helper.
+   Signature: ptr @mere_vec_<T>_map_<U>(ptr v, %closure_<T>_<U> cl)
+   Region-preserving: 結果 Vec の region は v->region から取得。 *)
+let emit_vec_map_helper_llvm (elem_ty : Ast.ty) (out_ty : Ast.ty) : string =
+  let t_tag = ty_tag elem_ty in
+  let u_tag = ty_tag out_ty in
+  let c_t = llvm_ty_of elem_ty in
+  let c_u = llvm_ty_of out_ty in
+  let t_struct = "mere_vec_" ^ t_tag in
+  let cname = closure_struct_name elem_ty out_ty in
+  String.concat "\n"
+    [ Printf.sprintf
+        "define ptr @mere_vec_%s_map_%s(ptr %%v, %%%s %%cl) {"
+        t_tag u_tag cname;
+      "entry:";
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%v, i32 0, i32 3" t_struct;
+      "  %region = load ptr, ptr %rp";
+      Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%region)" u_tag;
+      "  %env = extractvalue %" ^ cname ^ " %cl, 0";
+      "  %fn = extractvalue %" ^ cname ^ " %cl, 1";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" t_struct;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" t_struct;
+      "  %data = load ptr, ptr %dp";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_t;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_t;
+      Printf.sprintf "  %%mapped = call %s %%fn(ptr %%env, %s %%elem)" c_u c_t;
+      Printf.sprintf
+        "  %%_ = call i32 @mere_vec_%s_push(ptr %%new, %s %%mapped)" u_tag c_u;
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret ptr %new";
+      "}" ]
+
+(* Phase 15.6: vec_filter per-T helper.
+   Signature: ptr @mere_vec_<T>_filter(ptr v, %closure_<T>_bool cl)
+   Region-preserving。closure 返り値 i1 を icmp / br で分岐。 *)
+let emit_vec_filter_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_t = llvm_ty_of elem_ty in
+  let t_struct = "mere_vec_" ^ tag in
+  let cname = closure_struct_name elem_ty Ast.TyBool in
+  String.concat "\n"
+    [ Printf.sprintf
+        "define ptr @mere_vec_%s_filter(ptr %%v, %%%s %%cl) {"
+        tag cname;
+      "entry:";
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%v, i32 0, i32 3" t_struct;
+      "  %region = load ptr, ptr %rp";
+      Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%region)" tag;
+      "  %env = extractvalue %" ^ cname ^ " %cl, 0";
+      "  %fn = extractvalue %" ^ cname ^ " %cl, 1";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" t_struct;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" t_struct;
+      "  %data = load ptr, ptr %dp";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %cont ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_t;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_t;
+      Printf.sprintf "  %%keep = call i1 %%fn(ptr %%env, %s %%elem)" c_t;
+      "  br i1 %keep, label %push, label %cont";
+      "push:";
+      Printf.sprintf
+        "  %%_ = call i32 @mere_vec_%s_push(ptr %%new, %s %%elem)" tag c_t;
+      "  br label %cont";
+      "cont:";
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret ptr %new";
+      "}" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
@@ -2866,6 +2986,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_instances;
   Hashtbl.reset vec_iter_instances;
   Hashtbl.reset vec_fold_instances;
+  Hashtbl.reset vec_map_instances;
+  Hashtbl.reset vec_filter_instances;
   show_string_globals := [];
   show_format_globals := [];
   (* Register variant tags + classify into mono / poly. Polymorphic
@@ -3147,6 +3269,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _key (elem_ty, acc_ty) acc ->
       emit_vec_fold_helper_llvm elem_ty acc_ty :: acc) vec_fold_instances []
   in
+  let vec_map_helpers =
+    Hashtbl.fold (fun _key (t_ty, u_ty) acc ->
+      emit_vec_map_helper_llvm t_ty u_ty :: acc) vec_map_instances []
+  in
+  let vec_filter_helpers =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_vec_filter_helper_llvm elem_ty :: acc) vec_filter_instances []
+  in
   let parts =
     [ "; LLVM IR generated by Mere (Phase 5 / 15.3)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
@@ -3175,6 +3305,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
     @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
+    @ (if vec_map_helpers = [] then [] else vec_map_helpers @ [""])
+    @ (if vec_filter_helpers = [] then [] else vec_filter_helpers @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])

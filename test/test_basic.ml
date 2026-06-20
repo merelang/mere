@@ -4170,6 +4170,44 @@ let () =
     (Pipeline.process src_iter) "23";
   check "vec_fold: interpreter parity"
     (Pipeline.process src_fold) "14";
+  (* --- Phase 15.6: vec_map / vec_filter の 3 backend codegen --- *)
+  let src_map =
+    "let v = vec_new () in let __ = vec_push v 1 in \
+     let __ = vec_push v 2 in let __ = vec_push v 3 in \
+     let m = vec_map v (fn x -> x * x) in \
+     vec_get m 0 + vec_get m 1 + vec_get m 2"
+  in
+  assert_contains "vec_map: C codegen emits inline statement expression"
+    (vec_codegen_c src_map) "mere_vec_int_new";
+  assert_contains "vec_map: LLVM codegen emits @mere_vec_int_map_int"
+    (vec_codegen_llvm src_map) "@mere_vec_int_map_int";
+  assert_contains "vec_map: Wasm codegen emits $mere_vec_map"
+    (vec_codegen_wasm src_map) "$mere_vec_map";
+  let src_map_str =
+    "let v = vec_new () in let __ = vec_push v 1 in \
+     let __ = vec_push v 2 in \
+     let m = vec_map v (fn x -> show x) in \
+     str_len (vec_get m 0) + str_len (vec_get m 1)"
+  in
+  assert_contains "vec_map: LLVM codegen emits per-(T, U) — @mere_vec_int_map_str"
+    (vec_codegen_llvm src_map_str) "@mere_vec_int_map_str";
+  let src_filter =
+    "let v = vec_new () in let __ = vec_push v 1 in \
+     let __ = vec_push v 2 in let __ = vec_push v 3 in \
+     let __ = vec_push v 4 in \
+     let m = vec_filter v (fn x -> x % 2 == 0) in \
+     vec_get m 0 + vec_get m 1 + vec_len m"
+  in
+  assert_contains "vec_filter: C codegen emits inline statement expression"
+    (vec_codegen_c src_filter) "mere_vec_int_new";
+  assert_contains "vec_filter: LLVM codegen emits @mere_vec_int_filter"
+    (vec_codegen_llvm src_filter) "@mere_vec_int_filter";
+  assert_contains "vec_filter: Wasm codegen emits $mere_vec_filter"
+    (vec_codegen_wasm src_filter) "$mere_vec_filter";
+  check "vec_map: interpreter parity"
+    (Pipeline.process src_map) "14";
+  check "vec_filter: interpreter parity"
+    (Pipeline.process src_filter) "8";
 
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
   (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
