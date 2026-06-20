@@ -4502,11 +4502,49 @@ let () =
   check "map: polymorphic len works on Map"
     (Pipeline.process
        "let m = map_new () in { map_set m \"a\" 1; map_set m \"b\" 2; len m }") "2";
-  check_raises "map: codegen rejection (C)"
-    (fun () ->
-      let prog = Pipeline.parse_program
-        "let m = map_new () in map_len m" in
-      let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
+  (* Phase 15.10: 3 backend で Map[R, int / str, V] codegen を accept する。 *)
+  let map_str_src =
+    "let m = map_new () in let __ = map_set m \"a\" 10 in \
+     let __ = map_set m \"b\" 20 in map_get m \"a\" + map_get m \"b\" + map_len m"
+  in
+  let map_int_src =
+    "let m = map_new () in let __ = map_set m 1 100 in \
+     let __ = map_set m 2 200 in map_get m 1 + map_get m 2 + map_len m"
+  in
+  assert_contains "map[str, int]: C codegen emits mere_map_str_int_new"
+    (let prog = Pipeline.parse_program map_str_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_map_str_int_new";
+  assert_contains "map[int, int]: C codegen emits mere_map_int_int_new"
+    (let prog = Pipeline.parse_program map_int_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_map_int_int_new";
+  assert_contains "map[str, int]: LLVM codegen emits @mere_map_str_int_new"
+    (let prog = Pipeline.parse_program map_str_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_str_int_new";
+  assert_contains "map[int, int]: LLVM codegen emits @mere_map_int_int_new"
+    (let prog = Pipeline.parse_program map_int_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_int_int_new";
+  assert_contains "map[str]: Wasm codegen emits $mere_map_str_new"
+    (let prog = Pipeline.parse_program map_str_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_str_new";
+  assert_contains "map[int]: Wasm codegen emits $mere_map_int_new"
+    (let prog = Pipeline.parse_program map_int_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_int_new";
+  check "map[str, int]: interpreter parity"
+    (Pipeline.process map_str_src) "32";
+  check "map[int, int]: interpreter parity"
+    (Pipeline.process map_int_src) "302";
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
