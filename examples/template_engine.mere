@@ -1,0 +1,99 @@
+// 簡易 mustache 風 template engine
+//
+// `Hello {{name}}, you are {{age}} years old.` のような template と
+// Map[R, str, str] の変数辞書を受け取り、`{{KEY}}` を変数値に置換した
+// 文字列を返す。未定義の key はそのまま `{{KEY}}` を残す (soft fail)。
+//
+// 目的: examples roadmap B1。Map[R, str, str] + StrBuf[R] + str_index_of
+// の組合せで text processing の典型を 1 file に。
+//
+// 実行モード: interpreter のみ
+//   - render は str / StrBuf / Map を扱う多相 user 定義関数。
+//     DEFERRED §1.7 解決後に codegen 再評価。
+//   - wildcard `let _ = ...` も C codegen 未対応 (mini_calc と同様)。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/template_engine.mere
+//   # 期待出力:
+//   #   --- greeting ---
+//   #   Hello Alice! You are 30 years old and live in Tokyo.
+//   #   --- partial (unknown key) ---
+//   #   Welcome {{username}} (unknown left as-is).
+//   #   --- multi-line ---
+//   #   Order #1042 by Bob:
+//   #     - apple x 3 @ 100yen
+//   #     - banana x 5 @ 50yen
+//   #     Total: 550yen.
+
+// {{KEY}} を vars[KEY] に置換。未定義の KEY はそのまま残す。
+let render = fn (template: str) -> fn vars ->
+  region BUF {
+    let buf = strbuf_new () in
+    let len = str_len template in
+    let rec loop = fn (i: int) ->
+      if i >= len then strbuf_to_str buf
+      else
+        let rest = substring template i len in
+        let open_off = str_index_of rest "{{" in
+        if open_off < 0 then
+          // もう placeholder 無し: 残りを丸ごと append
+          let __ = strbuf_push buf rest in
+          strbuf_to_str buf
+        else
+          let abs_open = i + open_off in
+          // {{ 直前までの literal text を append
+          let __ = strbuf_push buf (substring template i abs_open) in
+          // {{ の後ろ (= abs_open + 2) から }} を探す
+          let after_open = substring template (abs_open + 2) len in
+          let close_off = str_index_of after_open "}}" in
+          if close_off < 0 then fail "unclosed {{ in template"
+          else
+            let abs_close = abs_open + 2 + close_off in
+            let key = substring template (abs_open + 2) abs_close in
+            let value =
+              if map_has vars key then map_get vars key
+              else "{{" ++ key ++ "}}" in
+            let __ = strbuf_push buf value in
+            loop (abs_close + 2)
+    in
+    loop 0
+  };
+
+// === driver ===
+
+region R {
+  let vars = map_new () in
+  let __ = map_set vars "name" "Alice" in
+  let __ = map_set vars "age" "30" in
+  let __ = map_set vars "city" "Tokyo" in
+
+  let greeting_tpl =
+    "Hello {{name}}! You are {{age}} years old and live in {{city}}." in
+  let __ = print "--- greeting ---" in
+  let __ = print (render greeting_tpl vars) in
+
+  // username だけ未定義 → そのまま残る
+  let partial_tpl = "Welcome {{username}} (unknown left as-is)." in
+  let __ = print "--- partial (unknown key) ---" in
+  let __ = print (render partial_tpl vars) in
+
+  // 複数行 + 同じ key の繰り返し
+  let order = map_new () in
+  let __ = map_set order "id" "1042" in
+  let __ = map_set order "buyer" "Bob" in
+  let __ = map_set order "item1" "apple" in
+  let __ = map_set order "qty1" "3" in
+  let __ = map_set order "price1" "100" in
+  let __ = map_set order "item2" "banana" in
+  let __ = map_set order "qty2" "5" in
+  let __ = map_set order "price2" "50" in
+  let __ = map_set order "total" "550" in
+
+  let order_tpl =
+    "Order #{{id}} by {{buyer}}:\n" ++
+    "  - {{item1}} x {{qty1}} @ {{price1}}yen\n" ++
+    "  - {{item2}} x {{qty2}} @ {{price2}}yen\n" ++
+    "  Total: {{total}}yen." in
+  let __ = print "--- multi-line ---" in
+  print (render order_tpl order)
+}
