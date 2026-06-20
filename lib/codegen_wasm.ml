@@ -89,6 +89,14 @@ type fn_decl = {
 
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 15.4: Vec[R, T] runtime used flag. All Mere values lower to a
+   4-byte i32 in Wasm (scalars are direct, structured types are linear-
+   memory offsets), so a single $mere_vec_* runtime handles every element
+   type — no per-T monomorphization is needed (unlike C / LLVM which use
+   typed structs). The flag is set the first time emit_expr / ty
+   inspection sees a Vec value; emit_program emits the helpers iff true. *)
+let vec_used = ref false
+
 (* Names bound by a pattern (for the free-vars walk). *)
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
@@ -227,10 +235,10 @@ let variant_payload_ty (vname : string) : Ast.ty option =
    codegen's ty_tag so e.g. `int list` lowers to `show_list_int`. *)
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
-  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+  | Ast.TyCon ("OwnedVec", _)
   | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in Wasm codegen subset: Vec / OwnedVec / StrBuf / Map (interpreter-only)"))
+      "unsupported in Wasm codegen subset: OwnedVec / StrBuf / Map (interpreter-only)"))
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
@@ -240,6 +248,9 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyCon (name, []) -> name
   | Ast.TyCon (name, args) ->
     name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+  | Ast.TyRef (_, r, Ast.TyUnit) ->
+    (* Region marker — region 名そのものを tag に (C / LLVM と同じ). *)
+    r
   | _ ->
     raise (Codegen_error (Loc.dummy,
       "unsupported Wasm codegen type for ty_tag"))
@@ -473,9 +484,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i32.const %d" off)
   | Ast.Var name ->
+    (* Phase 15.4: vec_new / vec_push / vec_get / vec_len は App handler
+       で special-case 処理。first-class value 用法のみここで reject。 *)
     if name = "vec_new" || name = "vec_push"
-       || name = "vec_get" || name = "vec_len"
-       || name = "vec_iter" || name = "vec_map"
+       || name = "vec_get" || name = "vec_len" then
+      raise (Codegen_error (e.Ast.loc,
+        "unsupported in Wasm codegen subset: " ^ name
+        ^ " as a value (Phase 15.4: vec_* は直接 application のみ対応)"));
+    if name = "vec_iter" || name = "vec_map"
        || name = "vec_fold" || name = "vec_set"
        || name = "vec_filter" || name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
@@ -488,7 +504,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (Vec / OwnedVec / StrBuf / Map / len are interpreter-only)"));
+        ^ " (OwnedVec / StrBuf / Map / vec の高階 API / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -566,6 +582,26 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_strlen"
+  | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
+    (* Phase 15.4: vec_new () — region は無視 (Wasm の bump はグローバル
+       で一本)、要素は全て 4 byte i32 なので単一 runtime で OK。
+       arg は unit literal なので積まない。 *)
+    vec_used := true;
+    emit_instr "call $mere_vec_new"
+  | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
+    vec_used := true;
+    emit_expr arg;
+    emit_instr "call $mere_vec_len"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e); _ }, val_e) ->
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr val_e;
+    emit_instr "call $mere_vec_push"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e); _ }, idx_e) ->
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr idx_e;
+    emit_instr "call $mere_vec_get"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load offset=0"
@@ -1411,6 +1447,71 @@ let runtime_helpers = {|
         (br $lp)))
     (i32.const 0))|}
 
+(* Phase 15.4: Vec[R, T] runtime — all element types share one
+   implementation because every Mere value lowers to a 4-byte i32 in
+   Wasm (scalars direct, structured types are memory offsets).
+   Layout: 16 bytes per vec — { data_ptr:i32, len:i32, cap:i32, _pad:i32 }.
+   `_pad` keeps the struct 16-byte-aligned (matches C / LLVM layout).
+   Push reallocates by appending a fresh buffer at the bump pointer
+   (arena semantics — old buffers leak until process exit). *)
+let vec_runtime = {|
+  (func $mere_vec_new (result i32)
+    (local $v i32) (local $buf i32)
+    (local.set $v (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $v) (i32.const 16)))
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 16)))
+    (i32.store offset=0 (local.get $v) (local.get $buf))
+    (i32.store offset=4 (local.get $v) (i32.const 0))
+    (i32.store offset=8 (local.get $v) (i32.const 4))
+    (local.get $v))
+  (func $mere_vec_push (param $v i32) (param $x i32) (result i32)
+    (local $len i32) (local $cap i32) (local $buf i32)
+    (local $new_buf i32) (local $i i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (local.set $cap (i32.load offset=8 (local.get $v)))
+    (if (i32.eq (local.get $len) (local.get $cap))
+      (then
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new_buf (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_buf)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $buf (i32.load offset=0 (local.get $v)))
+        (local.set $i (i32.const 0))
+        (block $copy_end
+          (loop $copy_lp
+            (br_if $copy_end (i32.eq (local.get $i) (local.get $len)))
+            (i32.store
+              (i32.add (local.get $new_buf)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load
+                (i32.add (local.get $buf)
+                         (i32.mul (local.get $i) (i32.const 4)))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $copy_lp)))
+        (i32.store offset=0 (local.get $v) (local.get $new_buf))
+        (i32.store offset=8 (local.get $v) (local.get $cap))))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (i32.store
+      (i32.add (local.get $buf)
+               (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $x))
+    (i32.store offset=4 (local.get $v) (i32.add (local.get $len) (i32.const 1)))
+    (i32.const 0))
+  (func $mere_vec_get (param $v i32) (param $i i32) (result i32)
+    (local $len i32) (local $buf i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
+                (i32.ge_s (local.get $i) (local.get $len)))
+      (then (unreachable)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (i32.load
+      (i32.add (local.get $buf)
+               (i32.mul (local.get $i) (i32.const 4)))))
+  (func $mere_vec_len (param $v i32) (result i32)
+    (i32.load offset=4 (local.get $v)))|}
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
@@ -1424,12 +1525,98 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   anon_counter := 0;
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
+  vec_used := false;
   (* Pre-register variant tags from Exhaustive's registry. *)
   Hashtbl.iter (fun _name vs ->
     List.iteri (fun i (cname, _) ->
       Hashtbl.replace variant_tags cname i) vs
   ) Exhaustive.type_variants;
   let main_expr = Ast.desugar_program prog in
+  (* Phase 15.4: resolve let-bound Vec element types. Same trick as
+     codegen_c / codegen_llvm — Mere's let-poly generalizes
+     `let v = vec_new () in body` to `forall T. Vec[..., T]`, so each
+     use of v in body gets a fresh element tyvar. Walk the typed AST
+     and unify the binding-site element with each `Var name`.ty.
+     Wasm doesn't need monomorphic types (everything is i32) but we
+     still want the binding's recorded type to be concrete so
+     downstream tooling / show / typed annotations behave consistently. *)
+  let resolve_vec_let_types (root : Ast.expr) : unit =
+    let unify_with_value (vt : Ast.ty) (ut : Ast.ty) : unit =
+      try Typer.unify Loc.dummy vt ut with _ -> ()
+    in
+    let rec scan_uses name vt body =
+      (match body.Ast.node with
+       | Ast.Var n when n = name ->
+         (match body.Ast.ty with
+          | Some t -> unify_with_value vt t
+          | None -> ())
+       | _ -> ());
+      let recur b = scan_uses name vt b in
+      match body.Ast.node with
+      | Ast.App (a, b) -> recur a; recur b
+      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
+        recur a; recur b
+      | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> recur a
+      | Ast.Let (pat, v, b) ->
+        recur v;
+        (match pat.Ast.pnode with
+         | Ast.P_var n when n = name -> ()
+         | _ -> recur b)
+      | Ast.Let_rec (bs, b) ->
+        let shadowed = List.exists (fun (n, _) -> n = name) bs in
+        List.iter (fun (_, v) -> recur v) bs;
+        if not shadowed then recur b
+      | Ast.If (c, t, e_) -> recur c; recur t; recur e_
+      | Ast.Tuple es -> List.iter recur es
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> recur e) fs
+      | Ast.Record_update (a, fs) ->
+        recur a; List.iter (fun (_, e) -> recur e) fs
+      | Ast.With (n, v, b) -> recur v; if n <> name then recur b
+      | Ast.Fun (n, _, b) -> if n <> name then recur b
+      | Ast.Match (s, arms) ->
+        recur s;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> recur ge | None -> ()); recur b) arms
+      | Ast.Constr (_, Some a) -> recur a
+      | _ -> ()
+    in
+    let rec walk e =
+      (match e.Ast.node with
+       | Ast.Let (pat, value, body) ->
+         (match pat.Ast.pnode, value.Ast.ty with
+          | Ast.P_var name, Some vt ->
+            (match Ast.walk vt with
+             | Ast.TyCon ("Vec", _) -> scan_uses name vt body
+             | _ -> ())
+          | _ -> ())
+       | _ -> ());
+      walk_subs e
+    and walk_subs e =
+      match e.Ast.node with
+      | Ast.Let (_, v, b) -> walk v; walk b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+      | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b)
+      | Ast.Logic (_, a, b) -> walk a; walk b
+      | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Fun (_, _, a) ->
+        walk a
+      | Ast.If (c, t, e_) -> walk c; walk t; walk e_
+      | Ast.Tuple es -> List.iter walk es
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk e) fs
+      | Ast.Record_update (a, fs) ->
+        walk a; List.iter (fun (_, e) -> walk e) fs
+      | Ast.With (_, v, b) -> walk v; walk b
+      | Ast.Match (s, arms) ->
+        walk s;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> walk ge | None -> ()); walk b) arms
+      | Ast.Constr (_, Some a) -> walk a
+      | _ -> ()
+    in
+    walk root
+  in
+  resolve_vec_let_types main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
@@ -1496,6 +1683,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     end
   in
   let bump_init = !str_offset_counter in
+  let vec_runtime_section = if !vec_used then vec_runtime else "" in
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
@@ -1506,7 +1694,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
-    table_section bump_init data_section runtime_helpers fn_section
-    local_decl indented_body
+    table_section bump_init data_section runtime_helpers vec_runtime_section
+    fn_section local_decl indented_body

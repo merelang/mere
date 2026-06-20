@@ -4030,20 +4030,12 @@ let () =
   check_raises "vec: vec_get out-of-bounds raises eval error"
     (fun () ->
       Pipeline.process "let v = vec_new () in vec_get v 0");
-  (* Codegen 状況 (Phase 15.1):
-     - C: Vec[R, int] は mere_vec_int* で対応。Vec[R, 非int] / OwnedVec /
-       StrBuf / Map は引き続き reject。
-     - LLVM / Wasm: 引き続き全て interpreter-only。 *)
-  let codegen_err_msg backend_emit src =
-    try
-      let prog = Pipeline.parse_program src in
-      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-      let _ = backend_emit prog in ""
-    with
-    | Codegen_c.Codegen_error (_, msg) -> msg
-    | Codegen_llvm.Codegen_error (_, msg) -> msg
-    | Codegen_wasm.Codegen_error (_, msg) -> msg
-  in
+  (* Codegen 状況 (Phase 15.1 〜 15.4):
+     - C / LLVM: Vec[R, T] が要素型 T を一般化 — int / bool / str / tuple /
+       record / variant 全対応 (Phase 15.2 / 15.3)。OwnedVec / StrBuf / Map
+       は引き続き reject。
+     - Wasm: Vec[R, T] 対応 (Phase 15.4)。Wasm では値がすべて 4-byte i32
+       なので per-T monomorphize 不要、単一 $mere_vec_* runtime で扱う。 *)
   (* Phase 15.1: Vec[R, int] は C codegen で動く (e2e は examples/vec_codegen_c.mere) *)
   let vec_codegen_c src =
     let prog = Pipeline.parse_program src in
@@ -4112,11 +4104,29 @@ let () =
     (vec_codegen_llvm
        "region R { let v = vec_new () in let r = vec_push v 7 in vec_len v }")
     "@mere_vec_int_new";
-  assert_contains "vec: Wasm codegen rejects Vec with clear message"
-    (codegen_err_msg
-       (fun p -> Codegen_wasm.emit_program ~main_ty:Ast.TyInt p)
-       "let v = vec_new () in vec_len v")
-    "interpreter-only";
+  (* Phase 15.4: Wasm backend も Vec[R, T] を accept。Wasm では値が
+     すべて 4-byte i32 なので per-T monomorphize 不要、単一の
+     $mere_vec_* runtime で全要素型を扱う。 *)
+  let vec_codegen_wasm src =
+    let prog = Pipeline.parse_program src in
+    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog
+  in
+  let wat_int = vec_codegen_wasm
+    "let v = vec_new () in let r = vec_push v 7 in vec_len v"
+  in
+  assert_contains "vec: Wasm codegen emits mere_vec runtime"
+    wat_int "$mere_vec_new";
+  assert_contains "vec: Wasm codegen routes vec_push to runtime"
+    wat_int "$mere_vec_push";
+  assert_contains "vec: Wasm codegen accepts Vec[R, str]"
+    (vec_codegen_wasm
+       "let v = vec_new () in let r = vec_push v \"hi\" in vec_len v")
+    "$mere_vec_push";
+  assert_contains "vec: Wasm codegen accepts Vec[R, tuple]"
+    (vec_codegen_wasm
+       "let v = vec_new () in let r = vec_push v (1, 2) in vec_len v")
+    "$mere_vec_push";
 
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
   (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
