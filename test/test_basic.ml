@@ -5718,5 +5718,49 @@ let () =
     (Pipeline.process
        "match Err \"bad\" with | Ok n -> n | Err _ -> -1") "-1";
 
+  (* Phase 21.1 (DEFERRED §1.7): 多相 user 定義 let-rec の codegen
+     monomorphization. resolve_fn_types で binding-site Fun.ty を
+     concrete use-site と unify することで body の tyvar が解決される。 *)
+  let typed_prog src =
+    let prog = Pipeline.parse_program src in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    (try Pipeline.process_decls eval_env type_env prog.Ast.decls with _ -> ());
+    let _ = Typer.infer !type_env (Ast.desugar_program prog) in
+    prog
+  in
+  check "§1.7: poly user let-rec accepts concrete int instantiation (interp)"
+    (Pipeline.process
+       "let rec list_length = fn xs ->\n\
+       \  match xs with | Nil -> 0 | Cons (h, t) -> 1 + list_length t in\n\
+        list_length (Cons (10, Cons (20, Cons (30, Nil))))")
+    "3";
+  check "§1.7: poly user let-rec emits C code without 'a error"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec list_length = fn xs ->\n\
+       \  match xs with | Nil -> 0 | Cons (h, t) -> 1 + list_length t in\n\
+        list_length (Cons (10, Cons (20, Cons (30, Nil))))") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§1.7: poly user let-rec emits LLVM IR without 'a error"
+    (let ll_src = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec list_length = fn xs ->\n\
+       \  match xs with | Nil -> 0 | Cons (h, t) -> 1 + list_length t in\n\
+        list_length (Cons (10, Cons (20, Cons (30, Nil))))") in
+     if String.length ll_src > 0 then "ok" else "empty")
+    "ok";
+  check "§1.7: poly user let-rec emits Wasm without 'a error"
+    (let wat_src = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec list_length = fn xs ->\n\
+       \  match xs with | Nil -> 0 | Cons (h, t) -> 1 + list_length t in\n\
+        list_length (Cons (10, Cons (20, Cons (30, Nil))))") in
+     if String.length wat_src > 0 then "ok" else "empty")
+    "ok";
+  check "§1.7: wildcard `let _ = E in B` works in C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let _ = print \"side effect\" in 42") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
