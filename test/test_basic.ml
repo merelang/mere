@@ -4733,6 +4733,27 @@ let () =
   check "map: polymorphic len works on Map"
     (Pipeline.process
        "let m = map_new () in { map_set m \"a\" 1; map_set m \"b\" 2; len m }") "2";
+
+  (* --- Phase 19.2: map_iter (K -> V -> unit, applied to each entry) --- *)
+  check "map_iter: type"
+    (Pipeline.type_of "map_iter")
+    "(Map['c, 'b, 'a] -> (('b -> ('a -> unit)) -> unit))";
+  check "map_iter: counts iterations via Vec accumulator"
+    (Pipeline.process
+       "let m = map_new () in let v = vec_new () in \
+        let __ = map_set m \"a\" 1 in \
+        let __ = map_set m \"b\" 2 in \
+        let __ = map_set m \"c\" 3 in \
+        let __ = map_iter m (fn k -> fn vv -> vec_push v (vv * 10)) in \
+        let sum = vec_fold v 0 (fn acc -> fn x -> acc + x) in \
+        sum")
+    "60";
+  check "map_iter: empty Map → no iterations"
+    (Pipeline.process
+       "let m = map_new () in let v = vec_new () in \
+        let __ = map_iter m (fn k -> fn vv -> vec_push v 1) in \
+        vec_len v")
+    "0";
   (* Phase 15.10: 3 backend で Map[R, int / str, V] codegen を accept する。 *)
   let map_str_src =
     "let m = map_new () in let __ = map_set m \"a\" 10 in \
@@ -4776,6 +4797,29 @@ let () =
     (Pipeline.process map_str_src) "32";
   check "map[int, int]: interpreter parity"
     (Pipeline.process map_int_src) "302";
+
+  (* Phase 19.2: map_iter codegen の 3 backend assertion *)
+  let map_iter_src =
+    "let m = map_new () in let __ = map_set m \"a\" 1 in \
+     let __ = map_set m \"b\" 2 in let v = vec_new () in \
+     let __ = map_iter m (fn k -> fn vv -> vec_push v vv) in \
+     vec_fold v 0 (fn acc -> fn x -> acc + x)"
+  in
+  assert_contains "map_iter: C codegen inlines closure dispatch"
+    (let prog = Pipeline.parse_program map_iter_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "__outer.fn(__outer.env, __m->keys[__i])";
+  assert_contains "map_iter: LLVM codegen emits per-(K,V) iter helper"
+    (let prog = Pipeline.parse_program map_iter_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_str_int_iter";
+  assert_contains "map_iter: Wasm codegen emits $mere_map_str_iter"
+    (let prog = Pipeline.parse_program map_iter_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_str_iter";
   (* --- Phase 15.11: ad-hoc polymorphic `len` の codegen --- *)
   let len_src =
     "let v = vec_new () in let __ = vec_push v 1 in \

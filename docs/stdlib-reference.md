@@ -266,7 +266,7 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、90 個)
+## 全 builtin 一覧 (アルファベット順、91 個)
 
 ```
 abs assert bool_of_str ceil char_at chr clamp const cube
@@ -283,6 +283,11 @@ str_rev str_split str_starts_with str_trim str_unescape
 substring sum_range swap time to_lower to_upper try_or
 write_file
 ```
+
+Q-010 collection builtins (`vec_*` / `owned_vec_*` / `strbuf_*` /
+`map_*` / `len`) は本表とは別枠の registered builtin として
+language-reference / tutorial を参照。Phase 19.2 で **`map_iter :
+Map[R, K, V] -> (K -> V -> unit) -> unit`** を追加 (4 backend 全部で動く)。
 
 ---
 

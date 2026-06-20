@@ -828,6 +828,22 @@ let map_len_scheme =
       Ast.TyCon ("Map", [_map_len_region; _map_len_k; _map_len_v]),
       Ast.TyInt) }
 
+(* Phase 19.2: map_iter — call (K -> V -> unit) on each entry. *)
+let _map_iter_region = fresh_var ()
+let _map_iter_k = fresh_var ()
+let _map_iter_v = fresh_var ()
+let map_iter_scheme =
+  let rid = match _map_iter_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_iter_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_iter_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_iter_region; _map_iter_k; _map_iter_v]),
+      Ast.TyArrow (
+        Ast.TyArrow (_map_iter_k,
+          Ast.TyArrow (_map_iter_v, Ast.TyUnit)),
+        Ast.TyUnit)) }
+
 let () = Hashtbl.replace types "Map" 3
 
 let initial_env : env =
@@ -978,6 +994,7 @@ let initial_env : env =
     ("map_get",        map_get_scheme);
     ("map_has",        map_has_scheme);
     ("map_len",        map_len_scheme);
+    ("map_iter",       map_iter_scheme);
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);
     ("vec_len",    vec_len_scheme);
