@@ -1748,6 +1748,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r raw);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e); _ }, n_e) ->
+    (* Phase 19.1.1: str_index_of h n — curried. *)
+    let hv = emit_expr env h_e in
+    let nv = emit_expr env n_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @__lang_str_index_of(ptr %s, ptr %s)"
+                  r hv nv);
+    r
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.3: vec_new () — region と要素型を result type の TyCon
        args から取り出し、`@mere_vec_<tag>_new` runtime を call。
@@ -3088,6 +3097,7 @@ let runtime_decls =
       "declare void @free(ptr)";
       "declare i64 @strlen(ptr)";
       "declare i32 @strcmp(ptr, ptr)";
+      "declare ptr @strstr(ptr, ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
@@ -4223,6 +4233,29 @@ let str_concat_helper =
       "  %p2 = getelementptr i8, ptr %r, i64 %total";
       "  store i8 0, ptr %p2";
       "  ret ptr %r";
+      "}";
+      "";
+      (* Phase 19.1.1: str_index_of — needle position in haystack, -1 if
+         not found. Empty needle returns 0. Uses libc strstr. *)
+      "define i32 @__lang_str_index_of(ptr %h, ptr %n) {";
+      "entry:";
+      "  %nfirst = load i8, ptr %n";
+      "  %is_empty = icmp eq i8 %nfirst, 0";
+      "  br i1 %is_empty, label %ret0, label %dosearch";
+      "ret0:";
+      "  ret i32 0";
+      "dosearch:";
+      "  %p = call ptr @strstr(ptr %h, ptr %n)";
+      "  %notfound = icmp eq ptr %p, null";
+      "  br i1 %notfound, label %retneg, label %retdiff";
+      "retneg:";
+      "  ret i32 -1";
+      "retdiff:";
+      "  %diff = ptrtoint ptr %p to i64";
+      "  %base = ptrtoint ptr %h to i64";
+      "  %off = sub i64 %diff, %base";
+      "  %r = trunc i64 %off to i32";
+      "  ret i32 %r";
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =

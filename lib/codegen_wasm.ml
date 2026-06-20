@@ -659,6 +659,11 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_strlen"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e); _ }, n_e) ->
+    (* Phase 19.1.1: str_index_of h n — curried. *)
+    emit_expr h_e;
+    emit_expr n_e;
+    emit_instr "call $__lang_str_index_of"
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.4: vec_new () — region は無視 (Wasm の bump はグローバル
        で一本)、要素は全て 4 byte i32 なので単一 runtime で OK。
@@ -1682,7 +1687,38 @@ let runtime_helpers = {|
         (local.set $a (i32.add (local.get $a) (i32.const 1)))
         (local.set $b (i32.add (local.get $b) (i32.const 1)))
         (br $lp)))
-    (i32.const 0))|}
+    (i32.const 0))
+  ;; Phase 19.1.1: str_index_of — returns position of needle in haystack,
+  ;; -1 if not found. Empty needle returns 0.
+  (func $__lang_str_index_of (param $h i32) (param $n i32) (result i32)
+    (local $hlen i32) (local $nlen i32) (local $i i32) (local $j i32)
+    (local $match i32)
+    (local.set $hlen (call $__lang_strlen (local.get $h)))
+    (local.set $nlen (call $__lang_strlen (local.get $n)))
+    (if (i32.eqz (local.get $nlen)) (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (block $end_outer
+      (loop $lp_outer
+        ;; if i + nlen > hlen → not found
+        (br_if $end_outer
+               (i32.gt_s (i32.add (local.get $i) (local.get $nlen))
+                         (local.get $hlen)))
+        (local.set $j (i32.const 0))
+        (local.set $match (i32.const 1))
+        (block $end_inner
+          (loop $lp_inner
+            (br_if $end_inner (i32.eq (local.get $j) (local.get $nlen)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (local.get $h)
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (local.get $n) (local.get $j))))
+              (then (local.set $match (i32.const 0)) (br $end_inner)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_inner)))
+        (if (local.get $match) (then (return (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_outer)))
+    (i32.const -1))|}
 
 (* Phase 15.4: Vec[R, T] runtime — all element types share one
    implementation because every Mere value lowers to a 4-byte i32 in

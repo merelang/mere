@@ -2283,6 +2283,13 @@ let () =
   assert_contains "codegen: str_len builtin maps to strlen"
     (codegen "str_len \"abc\"")
     "(int) strlen(\"abc\")";
+  (* Phase 19.1.1: str_index_of codegen *)
+  assert_contains "codegen: str_index_of calls __lang_str_index_of"
+    (codegen "str_index_of \"hi\" \"i\"")
+    "__lang_str_index_of(\"hi\", \"i\")";
+  assert_contains "codegen: __lang_str_index_of helper defined"
+    (codegen "str_index_of \"hi\" \"i\"")
+    "static int __lang_str_index_of(const char* h, const char* n)";
   check_raises "codegen: unsupported type (e.g. float fn) → Codegen_error"
     (fun () ->
       let _ = codegen "let f = fn x -> x +. 1.0 in f 2.0" in ());
@@ -2858,6 +2865,16 @@ let () =
     (llvm "str_len \"hi\"") "call i64 @strlen(ptr ";
   assert_contains "llvm: str_len truncates to i32"
     (llvm "str_len \"hi\"") "trunc i64";
+  (* Phase 19.1.1: str_index_of codegen *)
+  assert_contains "llvm: str_index_of calls __lang_str_index_of"
+    (llvm "str_index_of \"hi\" \"i\"")
+    "call i32 @__lang_str_index_of(ptr ";
+  assert_contains "llvm: __lang_str_index_of helper defined"
+    (llvm "str_index_of \"hi\" \"i\"")
+    "define i32 @__lang_str_index_of";
+  assert_contains "llvm: declares strstr"
+    (llvm "str_index_of \"hi\" \"i\"")
+    "declare ptr @strstr(ptr, ptr)";
   assert_contains "llvm: str-returning fn signature"
     (llvm "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
     "define ptr @exclaim(ptr %s)";
@@ -3379,6 +3396,11 @@ let () =
     (wasm "\"hi\"") "(func $__lang_strlen";
   assert_contains "wasm: __lang_str_concat helper defined"
     (wasm "\"hi\"") "(func $__lang_str_concat";
+  (* Phase 19.1.1: str_index_of codegen *)
+  assert_contains "wasm: str_index_of calls $__lang_str_index_of"
+    (wasm "str_index_of \"hi\" \"i\"") "call $__lang_str_index_of";
+  assert_contains "wasm: __lang_str_index_of helper defined"
+    (wasm "str_index_of \"hi\" \"i\"") "(func $__lang_str_index_of";
 
   (* --- Wasm codegen: tuple (Phase 6.4) ---
      tuple は linear memory に置く: 各要素 4 bytes (i32 / offset)、
