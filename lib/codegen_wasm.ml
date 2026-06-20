@@ -106,6 +106,11 @@ let vec_higher_order_used = ref false
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
 
+(* Phase 15.10: Map[R, K, V] — Wasm では値が全部 i32 なので per-V は不要、
+   per-K (int / str) のみ。`map_int_used` と `map_str_used` の 2 flag. *)
+let map_int_used = ref false
+let map_str_used = ref false
+
 (* Names bound by a pattern (for the free-vars walk). *)
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
@@ -480,6 +485,22 @@ let wasm_cmp = function
   | Ast.Gt -> "i32.gt_s"
   | Ast.Ge -> "i32.ge_s"
 
+(* Phase 15.10: Wasm では値が全部 i32 なので per-V 不要、K (int / str)
+   のみで helper を分岐。 *)
+let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
+  match ty_opt with
+  | Some t ->
+    (match Ast.walk t with
+     | Ast.TyCon ("Map", [_; k_ty; _]) ->
+       (match Ast.walk k_ty with
+        | Ast.TyInt -> "int"
+        | Ast.TyStr -> "str"
+        | _ ->
+          raise (Codegen_error (loc,
+            "Map key type must be int or str in Wasm codegen (Phase 15.10)")))
+     | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
+  | None -> raise (Codegen_error (loc, "map_*: missing type info"))
+
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
   match e.Ast.node with
@@ -503,17 +524,17 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len" then
+       || name = "strbuf_to_str" || name = "strbuf_len"
+       || name = "map_new" || name = "map_set" || name = "map_get"
+       || name = "map_has" || name = "map_len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4〜15.9: vec_* / owned_vec_* / strbuf_* は直接 application のみ対応)"));
+        ^ " as a value (Phase 15.4〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応)"));
     if name = "vec_to_list"
-       || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len"
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (Map / vec_to_list / len are interpreter-only)"));
+        ^ " (vec_to_list / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -676,6 +697,35 @@ let rec emit_expr (e : Ast.expr) : unit =
     vec_used := true;
     emit_expr owned_e;
     emit_instr "call $mere_vec_clone"
+  | Ast.App ({ node = Ast.Var "map_new"; _ }, _arg) ->
+    (* Phase 15.10: map_new () — Wasm では region 無視、key 型のみ pick. *)
+    let k_tag = map_key_tag_of_wasm e.Ast.ty e.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_instr (Printf.sprintf "call $mere_map_%s_new" k_tag)
+  | Ast.App ({ node = Ast.Var "map_len"; _ }, arg) ->
+    let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $mere_map_%s_len" k_tag)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_get"; _ }, m_e); _ }, k_e) ->
+    let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr m_e;
+    emit_expr k_e;
+    emit_instr (Printf.sprintf "call $mere_map_%s_get" k_tag)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_has"; _ }, m_e); _ }, k_e) ->
+    let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr m_e;
+    emit_expr k_e;
+    emit_instr (Printf.sprintf "call $mere_map_%s_has" k_tag)
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e); _ }, v_e) ->
+    let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr m_e;
+    emit_expr k_e;
+    emit_expr v_e;
+    emit_instr (Printf.sprintf "call $mere_map_%s_set" k_tag)
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
     (* Phase 15.9: strbuf_new () — region は無視 (Wasm の bump はグローバル
        1 本)。 *)
@@ -1820,6 +1870,242 @@ let strbuf_runtime_wasm = {|
   (func $mere_strbuf_len (param $sb i32) (result i32)
     (i32.load offset=4 (local.get $sb)))|}
 
+(* Phase 15.10: Map[R, K, V] runtime — per-K only (V は i32 共通)。
+   Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 byte。
+   線形スキャン、cap 到達時は新配列を bump で確保 (arena semantics). *)
+let map_int_runtime_wasm = {|
+  (func $mere_map_int_new (result i32)
+    (local $m i32) (local $keys i32) (local $values i32)
+    (local.set $m (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
+    (local.set $keys (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (local.set $values (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
+    (i32.store offset=0 (local.get $m) (local.get $keys))
+    (i32.store offset=4 (local.get $m) (local.get $values))
+    (i32.store offset=8 (local.get $m) (i32.const 0))
+    (i32.store offset=12 (local.get $m) (i32.const 4))
+    (local.get $m))
+  (func $mere_map_int_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+    (local $i i32) (local $len i32) (local $cap i32)
+    (local $keys i32) (local $values i32)
+    (local $new_keys i32) (local $new_values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (i32.eq (i32.load (i32.add (local.get $keys)
+                                       (i32.mul (local.get $i) (i32.const 4))))
+                    (local.get $k))
+          (then
+            (i32.store
+              (i32.add (local.get $values)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (local.get $v))
+            (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    ;; not found: append, grow if full
+    (local.set $cap (i32.load offset=12 (local.get $m)))
+    (if (i32.eq (local.get $len) (local.get $cap))
+      (then
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new_keys (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_keys)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $new_values (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_values)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $i (i32.const 0))
+        (block $cp_end
+          (loop $cp_lp
+            (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+            (i32.store
+              (i32.add (local.get $new_keys)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4)))))
+            (i32.store
+              (i32.add (local.get $new_values)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load (i32.add (local.get $values)
+                                 (i32.mul (local.get $i) (i32.const 4)))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp_lp)))
+        (i32.store offset=0 (local.get $m) (local.get $new_keys))
+        (i32.store offset=4 (local.get $m) (local.get $new_values))
+        (i32.store offset=12 (local.get $m) (local.get $cap))
+        (local.set $keys (local.get $new_keys))
+        (local.set $values (local.get $new_values))))
+    (i32.store
+      (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $k))
+    (i32.store
+      (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $v))
+    (i32.store offset=8 (local.get $m)
+      (i32.add (local.get $len) (i32.const 1)))
+    (i32.const 0))
+  (func $mere_map_int_get (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (i32.eq (i32.load (i32.add (local.get $keys)
+                                       (i32.mul (local.get $i) (i32.const 4))))
+                    (local.get $k))
+          (then
+            (return (i32.load (i32.add (local.get $values)
+                                       (i32.mul (local.get $i) (i32.const 4)))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (unreachable))
+  (func $mere_map_int_has (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $len i32) (local $keys i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (i32.eq (i32.load (i32.add (local.get $keys)
+                                       (i32.mul (local.get $i) (i32.const 4))))
+                    (local.get $k))
+          (then (return (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (i32.const 0))
+  (func $mere_map_int_len (param $m i32) (result i32)
+    (i32.load offset=8 (local.get $m)))|}
+
+(* Same shape with $__lang_streq for key comparison (str keys). *)
+let map_str_runtime_wasm = {|
+  (func $mere_map_str_new (result i32)
+    (local $m i32) (local $keys i32) (local $values i32)
+    (local.set $m (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
+    (local.set $keys (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (local.set $values (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
+    (i32.store offset=0 (local.get $m) (local.get $keys))
+    (i32.store offset=4 (local.get $m) (local.get $values))
+    (i32.store offset=8 (local.get $m) (i32.const 0))
+    (i32.store offset=12 (local.get $m) (i32.const 4))
+    (local.get $m))
+  (func $mere_map_str_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+    (local $i i32) (local $len i32) (local $cap i32)
+    (local $keys i32) (local $values i32)
+    (local $new_keys i32) (local $new_values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $__lang_streq
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            (i32.store
+              (i32.add (local.get $values)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (local.get $v))
+            (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (local.set $cap (i32.load offset=12 (local.get $m)))
+    (if (i32.eq (local.get $len) (local.get $cap))
+      (then
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new_keys (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_keys)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $new_values (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_values)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $i (i32.const 0))
+        (block $cp_end
+          (loop $cp_lp
+            (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+            (i32.store
+              (i32.add (local.get $new_keys)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4)))))
+            (i32.store
+              (i32.add (local.get $new_values)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load (i32.add (local.get $values)
+                                 (i32.mul (local.get $i) (i32.const 4)))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp_lp)))
+        (i32.store offset=0 (local.get $m) (local.get $new_keys))
+        (i32.store offset=4 (local.get $m) (local.get $new_values))
+        (i32.store offset=12 (local.get $m) (local.get $cap))
+        (local.set $keys (local.get $new_keys))
+        (local.set $values (local.get $new_values))))
+    (i32.store
+      (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $k))
+    (i32.store
+      (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $v))
+    (i32.store offset=8 (local.get $m)
+      (i32.add (local.get $len) (i32.const 1)))
+    (i32.const 0))
+  (func $mere_map_str_get (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $__lang_streq
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            (return (i32.load (i32.add (local.get $values)
+                                       (i32.mul (local.get $i) (i32.const 4)))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (unreachable))
+  (func $mere_map_str_has (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $len i32) (local $keys i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $__lang_streq
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then (return (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (i32.const 0))
+  (func $mere_map_str_len (param $m i32) (result i32)
+    (i32.load offset=8 (local.get $m)))|}
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
@@ -1836,6 +2122,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
+  map_int_used := false;
+  map_str_used := false;
   (* Pre-register variant tags from Exhaustive's registry. *)
   Hashtbl.iter (fun _name vs ->
     List.iteri (fun i (cname, _) ->
@@ -1897,7 +2185,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          (match pat.Ast.pnode, value.Ast.ty with
           | Ast.P_var name, Some vt ->
             (match Ast.walk vt with
-             | Ast.TyCon ("Vec", _) -> scan_uses name vt body
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
+               scan_uses name vt body
              | _ -> ())
           | _ -> ())
        | _ -> ());
@@ -2003,6 +2293,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
   let strbuf_section = if !strbuf_used then strbuf_runtime_wasm else "" in
+  let map_int_section = if !map_int_used then map_int_runtime_wasm else "" in
+  let map_str_section = if !map_str_used then map_str_runtime_wasm else "" in
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
@@ -2016,7 +2308,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     table_section bump_init data_section runtime_helpers vec_runtime_section
-    vec_higher_order_section strbuf_section fn_section local_decl indented_body
+    vec_higher_order_section strbuf_section map_int_section map_str_section
+    fn_section local_decl indented_body

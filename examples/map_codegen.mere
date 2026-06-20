@@ -1,0 +1,69 @@
+// Phase 15.10: Map[R, K, V] の 3 backend codegen demo。
+//
+// K = int / str + V = 任意 concrete 型。線形スキャン (O(n) lookup) で
+// 実装、cap 到達時は新配列を region に確保 = arena semantics。
+//
+// 各 backend の戦略:
+//   - C: per-(K, V) struct `mere_map_<K>_<V>` + 5 helpers
+//     (new / set / get / has / len)。key 比較は int なら `==`、str なら
+//     `strcmp(..) == 0`
+//   - LLVM IR: per-(K, V) `%mere_map_<K>_<V>` + 5 helpers。phi で scan
+//     loop、key 比較は `icmp eq i32` (int) or `@strcmp` (str)
+//   - Wasm: per-K のみ (V は i32 共通)。`$mere_map_int_*` /
+//     `$mere_map_str_*` の 2 セット。key 比較は `i32.eq` or
+//     `$__lang_streq`
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/map_codegen.mere
+//   dune exec ./bin/mere.exe -- -c examples/map_codegen.mere > /tmp/v.c
+//     && clang /tmp/v.c -o /tmp/v && /tmp/v
+//   dune exec ./bin/mere.exe -- -ll examples/map_codegen.mere > /tmp/v.ll
+//     && clang /tmp/v.ll -o /tmp/v && /tmp/v
+//   dune exec ./bin/mere.exe -- -w examples/map_codegen.mere > /tmp/v.wat
+//     && wat2wasm /tmp/v.wat -o /tmp/v.wasm
+//     && node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/v.wasm"),
+//          { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
+//   どれも → 640
+
+// === str → int の単純 map (例: word count) ===
+let counts = map_new () in
+let __ = map_set counts "apple" 3 in
+let __ = map_set counts "banana" 5 in
+let __ = map_set counts "cherry" 2 in
+let __ = map_set counts "apple" 7 in  // 上書き (apple = 7)
+let counts_sum =
+  map_get counts "apple" + map_get counts "banana" + map_get counts "cherry"
+in
+// 7 + 5 + 2 = 14
+
+// map_has で存在チェック → 安全 lookup
+let lookup_present = if map_has counts "apple" then map_get counts "apple" else 0 in
+let lookup_missing = if map_has counts "kiwi"  then map_get counts "kiwi"  else -1 in
+// 7, -1
+
+// === int → str (型を逆にしても自然に動く) ===
+let names = map_new () in
+let __ = map_set names 1 "one" in
+let __ = map_set names 2 "two" in
+let __ = map_set names 3 "three" in
+let names_total_len =
+  str_len (map_get names 1) + str_len (map_get names 2) + str_len (map_get names 3)
+in
+// "one"(3) + "two"(3) + "three"(5) = 11
+
+// === region 内で短命の Map ===
+let region_result = region R {
+  let local = map_new () in
+  let __ = map_set local 10 100 in
+  let __ = map_set local 20 200 in
+  let __ = map_set local 30 300 in
+  // local は region 末で破棄、結果値だけ持ち出し
+  map_get local 10 + map_get local 20 + map_get local 30 + map_len local
+} in
+// 100 + 200 + 300 + 3 = 603
+
+// 合算:
+//   counts_sum (14) + lookup_present (7) + lookup_missing (-1) +
+//   names_total_len (11) + region_result (603) + map_len counts (3) + map_len names (3)
+//   = 640
+counts_sum + lookup_present + lookup_missing + names_total_len + region_result + map_len counts + map_len names

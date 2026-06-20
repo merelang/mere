@@ -100,6 +100,12 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    The runtime is emitted iff this flag is set. *)
 let strbuf_used = ref false
 
+(* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key は int / str
+   のみサポート、value は codegen の任意 concrete 型。線形スキャン。
+   キーは ty_tag、value は ty_tag で `mere_map_<K_tag>_<V_tag>` を
+   作る。 *)
+let map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 (* Substitute TyParam names → concrete types throughout `t`. *)
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
@@ -418,6 +424,32 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
   go e initially_bound;
   List.rev !order
 
+(* Phase 15.10: extract (K_tag, V_tag) from a Map[R, K, V] typed expr,
+   register in `map_instances`. *)
+let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
+  match ty_opt with
+  | Some t ->
+    (match Ast.walk t with
+     | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
+       let k_ty = Ast.walk k_ty in
+       let v_ty = Ast.walk v_ty in
+       if ty_is_concrete k_ty && ty_is_concrete v_ty then begin
+         (match k_ty with
+          | Ast.TyInt | Ast.TyStr -> ()
+          | _ ->
+            raise (Codegen_error (loc,
+              "Map key type must be int or str in C codegen (Phase 15.10)")));
+         let k_tag = ty_tag k_ty in
+         let v_tag = ty_tag v_ty in
+         let key = k_tag ^ "__" ^ v_tag in
+         if not (Hashtbl.mem map_instances key) then
+           Hashtbl.add map_instances key (k_ty, v_ty);
+         (k_tag, v_tag)
+       end else raise (Codegen_error (loc,
+         "map_* on Map with unresolved K or V"))
+     | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
+  | None -> raise (Codegen_error (loc, "map_*: missing type info"))
+
 (* Pull the element type out of an `OwnedVec[T]` typed expression and
    return its `ty_tag`. Registers in `owned_vec_instances`. *)
 let owned_vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
@@ -480,15 +512,15 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len" then
-      unsupported e.loc
-        (name ^ " as a value (Phase 15.1〜15.9: vec_* / owned_vec_* / strbuf_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
+       || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len"
+       || name = "map_has" || name = "map_len" then
+      unsupported e.loc
+        (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "len" then
       unsupported e.loc
-        (name ^ " (Map / vec_to_list / len are interpreter-only)");
+        (name ^ " (vec_to_list / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -774,6 +806,38 @@ let rec emit_expr (e : Ast.expr) : string =
             mere_owned_vec_%s_push(__new, mere_vec_%s_get(__vc, __i)); \
           } __new; })"
          (emit_expr arg) t_tag t_tag t_tag
+     | Ast.Var "map_new" ->
+       (* Phase 15.10: map_new () — region と (K, V) を result type から取り出す。 *)
+       let (k_tag, v_tag) = map_kv_tags_of e.Ast.ty e.Ast.loc in
+       let region_name =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("Map", [Ast.TyRef (_, r, Ast.TyUnit); _; _]) -> r
+            | _ -> "__heap")
+         | None -> "__heap"
+       in
+       let region_var =
+         if region_name = "__heap" then "__lang_default_region"
+         else "__region_" ^ region_name
+       in
+       Printf.sprintf "mere_map_%s_%s_new(&%s)" k_tag v_tag region_var
+     | Ast.Var "map_len" ->
+       let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_len(%s)" k_tag v_tag (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "map_get"; _ }, m_e) ->
+       let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_get(%s, %s)"
+         k_tag v_tag (emit_expr m_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "map_has"; _ }, m_e) ->
+       let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_has(%s, %s)"
+         k_tag v_tag (emit_expr m_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e) ->
+       (* map_set m k v : outer arg = v、inner App arg = k、innermost = m *)
+       let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_set(%s, %s, %s)"
+         k_tag v_tag (emit_expr m_e) (emit_expr k_e) (emit_expr arg)
      | Ast.Var "strbuf_new" ->
        (* Phase 15.9: strbuf_new () — region は result type の TyCon arg
           から取り出す。Vec[R, T] と同じ慣例。 *)
@@ -1162,9 +1226,26 @@ let rec c_type_of (t : Ast.ty) : string =
        追跡。 *)
     strbuf_used := true;
     "mere_strbuf*"
-  | Ast.TyCon ("Map", _) ->
-    raise (Codegen_error (Loc.dummy,
-      "unsupported in C codegen subset: Map (interpreter-only)"))
+  | Ast.TyCon ("Map", args) ->
+    (* Phase 15.10: Map[R, K, V] — per-(K, V) monomorphize。
+       K は int / str のみ対応。 *)
+    (match List.map Ast.walk args with
+     | [_; k_ty; v_ty]
+       when ty_is_concrete k_ty && ty_is_concrete v_ty ->
+       let k_tag = ty_tag k_ty in
+       let v_tag = ty_tag v_ty in
+       (match k_ty with
+        | Ast.TyInt | Ast.TyStr -> ()
+        | _ ->
+          raise (Codegen_error (Loc.dummy,
+            "Map key type must be int or str in C codegen (Phase 15.10)")));
+       let key = k_tag ^ "__" ^ v_tag in
+       if not (Hashtbl.mem map_instances key) then
+         Hashtbl.add map_instances key (k_ty, v_ty);
+       Printf.sprintf "mere_map_%s_%s*" k_tag v_tag
+     | _ ->
+       raise (Codegen_error (Loc.dummy,
+         "unsupported in C codegen subset: Map[<unresolved>] (K and V must be concrete)")))
   | Ast.TyInt | Ast.TyBool -> "int"
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
@@ -1609,6 +1690,93 @@ let region_runtime_helpers =
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. */";
       "static __lang_region __lang_default_region;" ]
+
+(* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan
+   associative array. K は int / str のみ、V は任意 concrete 型。
+   storage は 2 つの並列配列 (keys[], values[]) で、cap 到達時は同
+   region に新配列を確保 (arena semantics)。 *)
+let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let v_tag = ty_tag v_ty in
+  let c_k = c_type_of k_ty in
+  let c_v = c_type_of v_ty in
+  let struct_name = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  let key_eq_expr a b =
+    match k_ty with
+    | Ast.TyInt -> Printf.sprintf "(%s) == (%s)" a b
+    | Ast.TyStr -> Printf.sprintf "strcmp((%s), (%s)) == 0" a b
+    | _ -> Printf.sprintf "(%s) == (%s)" a b  (* fallback: pointer eq *)
+  in
+  String.concat "\n"
+    [ Printf.sprintf "typedef struct %s {" struct_name;
+      Printf.sprintf "  %s* keys;" c_k;
+      Printf.sprintf "  %s* values;" c_v;
+      "  int len;";
+      "  int cap;";
+      "  __lang_region* region;";
+      Printf.sprintf "} %s;" struct_name;
+      "";
+      (* new *)
+      Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
+      Printf.sprintf "  %s* m = (%s*)__lang_region_alloc(r, sizeof(%s));"
+        struct_name struct_name struct_name;
+      "  m->cap = 4;";
+      "  m->len = 0;";
+      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_k c_k;
+      Printf.sprintf "  m->values = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_v c_v;
+      "  m->region = r;";
+      "  return m;";
+      "}";
+      "";
+      (* set: 既存 key なら置き換え、なければ append (cap 到達なら配列拡張) *)
+      Printf.sprintf "static int %s_set(%s* m, %s k, %s v) {"
+        struct_name struct_name c_k c_v;
+      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "    if (%s) { m->values[i] = v; return 0; }"
+        (key_eq_expr "m->keys[i]" "k");
+      "  }";
+      "  if (m->len == m->cap) {";
+      "    int new_cap = m->cap * 2;";
+      Printf.sprintf "    %s* nk = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_k c_k c_k;
+      Printf.sprintf "    %s* nv = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_v c_v c_v;
+      "    for (int i = 0; i < m->len; i++) {";
+      "      nk[i] = m->keys[i];";
+      "      nv[i] = m->values[i];";
+      "    }";
+      "    m->keys = nk;";
+      "    m->values = nv;";
+      "    m->cap = new_cap;";
+      "  }";
+      "  m->keys[m->len] = k;";
+      "  m->values[m->len] = v;";
+      "  m->len++;";
+      "  return 0; /* unit */";
+      "}";
+      "";
+      (* get *)
+      Printf.sprintf "static %s %s_get(%s* m, %s k) {"
+        c_v struct_name struct_name c_k;
+      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "    if (%s) return m->values[i];"
+        (key_eq_expr "m->keys[i]" "k");
+      "  }";
+      "  fprintf(stderr, \"map_get: key not found\\n\");";
+      "  abort();";
+      "}";
+      "";
+      (* has *)
+      Printf.sprintf "static int %s_has(%s* m, %s k) {"
+        struct_name struct_name c_k;
+      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "    if (%s) return 1;"
+        (key_eq_expr "m->keys[i]" "k");
+      "  }";
+      "  return 0;";
+      "}";
+      "";
+      (* len *)
+      Printf.sprintf "static int %s_len(%s* m) { return m->len; }"
+        struct_name struct_name ]
 
 (* Phase 15.9: StrBuf[R] runtime — region-allocated mutable string buffer.
    Single-instance (StrBuf has no element type parameter, it's always bytes).
@@ -2475,6 +2643,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   Hashtbl.reset owned_vec_instances;
+  Hashtbl.reset map_instances;
   strbuf_used := false;
   let variant_decls =
     List.filter_map (fun decl ->
@@ -2551,7 +2720,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          (match pat.Ast.pnode, value.Ast.ty with
           | Ast.P_var name, Some vt ->
             (match Ast.walk vt with
-             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
                scan_uses name vt body
              | _ -> ())
           | _ -> ())
@@ -2746,6 +2916,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_owned_vec_runtime_for elem_ty :: acc) owned_vec_instances []
   in
+  let map_runtimes =
+    Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
+      emit_map_runtime_for k_ty v_ty :: acc) map_instances []
+  in
+  let map_forward_typedefs =
+    Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
+      let k_tag = ty_tag k_ty and v_tag = ty_tag v_ty in
+      Printf.sprintf "typedef struct mere_map_%s_%s mere_map_%s_%s;"
+        k_tag v_tag k_tag v_tag :: acc) map_instances []
+  in
   (* Forward typedefs so closure typedefs / fn forward decls can
      reference `mere_vec_T*` / `mere_owned_vec_T*` before the runtime
      struct body appears. *)
@@ -2790,6 +2970,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !strbuf_used then
          ["typedef struct mere_strbuf mere_strbuf;"; ""]
        else [])
+    @ (if map_forward_typedefs = [] then []
+       else map_forward_typedefs @ [""])
     (* Closure typedefs reference user struct names (e.g.,
        `closure_int_Conn`) but only via function pointer types, which C
        accepts with forward-declared structs. *)
@@ -2810,6 +2992,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
+    @ (if map_runtimes = [] then [] else map_runtimes @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";

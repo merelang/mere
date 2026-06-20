@@ -128,6 +128,9 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
 
+(* Phase 15.10: Map[R, K, V] per-(K, V) instances. *)
+let map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -254,9 +257,27 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyCon ("StrBuf", _) ->
     strbuf_used := true;
     "ptr"
-  | Ast.TyCon ("Map", _) ->
-    raise (Codegen_error (Loc.dummy,
-      "unsupported in LLVM codegen subset: Map (interpreter-only)"))
+  | Ast.TyCon ("Map", args) ->
+    (* Phase 15.10: Map[R, K, V] — per-(K, V) monomorphize、K = int / str。 *)
+    (match List.map Ast.walk args with
+     | [_; k_ty; v_ty]
+       when ty_is_concrete k_ty && ty_is_concrete v_ty ->
+       (match k_ty with
+        | Ast.TyInt | Ast.TyStr -> ()
+        | _ ->
+          raise (Codegen_error (Loc.dummy,
+            "Map key type must be int or str in LLVM codegen (Phase 15.10)")));
+       let k_tag = ty_tag k_ty in
+       let v_tag = ty_tag v_ty in
+       let key = k_tag ^ "__" ^ v_tag in
+       if not (Hashtbl.mem map_instances key) then
+         Hashtbl.add map_instances key (k_ty, v_ty);
+       let _ = llvm_ty_of k_ty in
+       let _ = llvm_ty_of v_ty in
+       "ptr"
+     | _ ->
+       raise (Codegen_error (Loc.dummy,
+         "unsupported in LLVM codegen subset: Map[<unresolved>]")))
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
   | Ast.TyStr -> "ptr"
@@ -1411,6 +1432,32 @@ let emit_closure_typedef ((p : Ast.ty), (r : Ast.ty)) : string =
   let name = closure_struct_name p r in
   Printf.sprintf "%%%s = type { ptr, ptr }" name
 
+(* Phase 15.10: extract (K_tag, V_tag) from a Map[R, K, V] typed expr,
+   register in `map_instances`. *)
+let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
+  match ty_opt with
+  | Some t ->
+    (match Ast.walk t with
+     | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
+       let k_ty = Ast.walk k_ty in
+       let v_ty = Ast.walk v_ty in
+       if ty_is_concrete k_ty && ty_is_concrete v_ty then begin
+         (match k_ty with
+          | Ast.TyInt | Ast.TyStr -> ()
+          | _ ->
+            raise (Codegen_error (loc,
+              "Map key type must be int or str in LLVM codegen (Phase 15.10)")));
+         let k_tag = ty_tag k_ty in
+         let v_tag = ty_tag v_ty in
+         let key = k_tag ^ "__" ^ v_tag in
+         if not (Hashtbl.mem map_instances key) then
+           Hashtbl.add map_instances key (k_ty, v_ty);
+         (k_tag, v_tag)
+       end else raise (Codegen_error (loc,
+         "map_* on Map with unresolved K or V"))
+     | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
+  | None -> raise (Codegen_error (loc, "map_*: missing type info"))
+
 (* Phase 15.7: pull the element type out of an `OwnedVec[T]` typed
    expression and register in `owned_vec_instances`. *)
 let owned_vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
@@ -1473,15 +1520,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len" then
-      unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3〜15.9: vec_* / owned_vec_* / strbuf_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
+       || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len"
+       || name = "map_has" || name = "map_len" then
+      unsupported e.Ast.loc
+        (name ^ " as a value (Phase 15.3〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (Map / vec_to_list / len are interpreter-only)");
+        (name ^ " (vec_to_list / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1757,6 +1804,70 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_strbuf_push(ptr %s, ptr %s)"
                   r sv xv);
+    r
+  | Ast.App ({ node = Ast.Var "map_new"; _ }, _arg) ->
+    (* Phase 15.10: map_new () — region と (K, V) を result type から取り出す。 *)
+    let (k_tag, v_tag) = map_kv_tags_of e.Ast.ty e.Ast.loc in
+    let region_name =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("Map", [Ast.TyRef (_, r, Ast.TyUnit); _; _]) -> r
+         | _ -> "__heap")
+      | None -> "__heap"
+    in
+    let region_reg =
+      if region_name = "__heap" then "@__lang_default_region"
+      else match List.assoc_opt region_name !current_regions with
+        | Some reg -> reg
+        | None ->
+          unsupported e.Ast.loc
+            ("map_new: region not in scope: " ^ region_name)
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_map_%s_%s_new(ptr %s)"
+                  r k_tag v_tag region_reg);
+    r
+  | Ast.App ({ node = Ast.Var "map_len"; _ }, arg) ->
+    let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_map_%s_%s_len(ptr %s)"
+                  r k_tag v_tag av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_get"; _ }, m_e); _ }, k_e) ->
+    let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+    let (k_ty, v_ty) = Hashtbl.find map_instances (k_tag ^ "__" ^ v_tag) in
+    let av = emit_expr env m_e in
+    let kv = emit_expr env k_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call %s @mere_map_%s_%s_get(ptr %s, %s %s)"
+                  r (llvm_ty_of v_ty) k_tag v_tag av (llvm_ty_of k_ty) kv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_has"; _ }, m_e); _ }, k_e) ->
+    let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+    let (k_ty, _) = Hashtbl.find map_instances (k_tag ^ "__" ^ v_tag) in
+    let av = emit_expr env m_e in
+    let kv = emit_expr env k_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i1 @mere_map_%s_%s_has(ptr %s, %s %s)"
+                  r k_tag v_tag av (llvm_ty_of k_ty) kv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e); _ }, v_e) ->
+    (* map_set m k v *)
+    let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+    let (k_ty, v_ty) = Hashtbl.find map_instances (k_tag ^ "__" ^ v_tag) in
+    let av = emit_expr env m_e in
+    let kv = emit_expr env k_e in
+    let vv = emit_expr env v_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_map_%s_%s_set(ptr %s, %s %s, %s %s)"
+                  r k_tag v_tag av (llvm_ty_of k_ty) kv (llvm_ty_of v_ty) vv);
     r
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
     (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T]。
@@ -3328,6 +3439,190 @@ let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
+(* Phase 15.10: Map[R, K, V] per-(K, V) runtime in LLVM IR.
+   Linear-scan, region-allocated parallel arrays (keys[], values[]).
+   K = int / str only; key equality is `icmp eq` for int, `@strcmp` for str. *)
+let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let v_tag = ty_tag v_ty in
+  let c_k = llvm_ty_of k_ty in
+  let c_v = llvm_ty_of v_ty in
+  let struct_name = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  let fn_prefix = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  (* Key equality emit: produces an i1 register `%eq` from `%lhs` and `%k`
+     (the current loop key and the searched key). *)
+  let emit_key_eq lhs k_reg eq_reg =
+    match k_ty with
+    | Ast.TyInt ->
+      Printf.sprintf "  %s = icmp eq i32 %s, %s" eq_reg lhs k_reg
+    | Ast.TyStr ->
+      Printf.sprintf
+        "  %%cmp = call i32 @strcmp(ptr %s, ptr %s)\n  %s = icmp eq i32 %%cmp, 0"
+        lhs k_reg eq_reg
+    | _ ->
+      Printf.sprintf "  %s = icmp eq %s %s, %s" eq_reg c_k lhs k_reg
+  in
+  String.concat "\n"
+    [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr }" struct_name;
+      "";
+      (* new *)
+      Printf.sprintf "define ptr @%s_new(ptr %%r) {" fn_prefix;
+      "entry:";
+      Printf.sprintf "  %%size_p = getelementptr %%%s, ptr null, i32 1" struct_name;
+      "  %size = ptrtoint ptr %size_p to i64";
+      "  %m = call ptr @__lang_region_alloc(ptr %r, i64 %size)";
+      Printf.sprintf "  %%ksize_p = getelementptr %s, ptr null, i32 1" c_k;
+      "  %ksize = ptrtoint ptr %ksize_p to i64";
+      Printf.sprintf "  %%vsize_p = getelementptr %s, ptr null, i32 1" c_v;
+      "  %vsize = ptrtoint ptr %vsize_p to i64";
+      "  %k_bytes = mul i64 %ksize, 4";
+      "  %v_bytes = mul i64 %vsize, 4";
+      "  %keys = call ptr @__lang_region_alloc(ptr %r, i64 %k_bytes)";
+      "  %values = call ptr @__lang_region_alloc(ptr %r, i64 %v_bytes)";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
+      "  store ptr %keys, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" struct_name;
+      "  store ptr %values, ptr %vp";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  store i32 0, ptr %lp";
+      Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%m, i32 0, i32 3" struct_name;
+      "  store i32 4, ptr %cp";
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%m, i32 0, i32 4" struct_name;
+      "  store ptr %r, ptr %rp";
+      "  ret ptr %m";
+      "}";
+      "";
+      (* set *)
+      Printf.sprintf "define i32 @%s_set(ptr %%m, %s %%k, %s %%v) {"
+        fn_prefix c_k c_v;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" struct_name;
+      "  %values = load ptr, ptr %vp";
+      "  br label %scan_check";
+      "scan_check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %scan_cont ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %not_found, label %scan_body";
+      "scan_body:";
+      Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%i" c_k;
+      Printf.sprintf "  %%cur_k = load %s, ptr %%kslot" c_k;
+      emit_key_eq "%cur_k" "%k" "%eq";
+      "  br i1 %eq, label %replace, label %scan_cont";
+      "replace:";
+      Printf.sprintf "  %%vslot = getelementptr %s, ptr %%values, i32 %%i" c_v;
+      Printf.sprintf "  store %s %%v, ptr %%vslot" c_v;
+      "  ret i32 0";
+      "scan_cont:";
+      "  %i_next = add i32 %i, 1";
+      "  br label %scan_check";
+      "not_found:";
+      Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%m, i32 0, i32 3" struct_name;
+      "  %cap = load i32, ptr %cp";
+      "  %full = icmp eq i32 %len, %cap";
+      "  br i1 %full, label %grow, label %do_store";
+      "grow:";
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%m, i32 0, i32 4" struct_name;
+      "  %reg = load ptr, ptr %rp";
+      "  %new_cap = mul i32 %cap, 2";
+      "  %nc64 = zext i32 %new_cap to i64";
+      Printf.sprintf "  %%ksize_p = getelementptr %s, ptr null, i32 1" c_k;
+      "  %ksize = ptrtoint ptr %ksize_p to i64";
+      Printf.sprintf "  %%vsize_p = getelementptr %s, ptr null, i32 1" c_v;
+      "  %vsize = ptrtoint ptr %vsize_p to i64";
+      "  %k_bytes = mul i64 %nc64, %ksize";
+      "  %v_bytes = mul i64 %nc64, %vsize";
+      "  %new_keys = call ptr @__lang_region_alloc(ptr %reg, i64 %k_bytes)";
+      "  %new_values = call ptr @__lang_region_alloc(ptr %reg, i64 %v_bytes)";
+      "  %len64 = zext i32 %len to i64";
+      "  %k_copy_bytes = mul i64 %len64, %ksize";
+      "  %v_copy_bytes = mul i64 %len64, %vsize";
+      "  call ptr @memcpy(ptr %new_keys, ptr %keys, i64 %k_copy_bytes)";
+      "  call ptr @memcpy(ptr %new_values, ptr %values, i64 %v_copy_bytes)";
+      "  store ptr %new_keys, ptr %kp";
+      "  store ptr %new_values, ptr %vp";
+      "  store i32 %new_cap, ptr %cp";
+      "  br label %do_store";
+      "do_store:";
+      "  %cur_keys = load ptr, ptr %kp";
+      "  %cur_values = load ptr, ptr %vp";
+      Printf.sprintf "  %%kslot2 = getelementptr %s, ptr %%cur_keys, i32 %%len" c_k;
+      Printf.sprintf "  store %s %%k, ptr %%kslot2" c_k;
+      Printf.sprintf "  %%vslot2 = getelementptr %s, ptr %%cur_values, i32 %%len" c_v;
+      Printf.sprintf "  store %s %%v, ptr %%vslot2" c_v;
+      "  %new_len = add i32 %len, 1";
+      "  store i32 %new_len, ptr %lp";
+      "  ret i32 0";
+      "}";
+      "";
+      (* get *)
+      Printf.sprintf "define %s @%s_get(ptr %%m, %s %%k) {" c_v fn_prefix c_k;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" struct_name;
+      "  %values = load ptr, ptr %vp";
+      "  br label %scan_check";
+      "scan_check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %scan_cont ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %fail, label %scan_body";
+      "scan_body:";
+      Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%i" c_k;
+      Printf.sprintf "  %%cur_k = load %s, ptr %%kslot" c_k;
+      emit_key_eq "%cur_k" "%k" "%eq";
+      "  br i1 %eq, label %found, label %scan_cont";
+      "found:";
+      Printf.sprintf "  %%vslot = getelementptr %s, ptr %%values, i32 %%i" c_v;
+      Printf.sprintf "  %%v = load %s, ptr %%vslot" c_v;
+      Printf.sprintf "  ret %s %%v" c_v;
+      "scan_cont:";
+      "  %i_next = add i32 %i, 1";
+      "  br label %scan_check";
+      "fail:";
+      "  call void @abort()";
+      "  unreachable";
+      "}";
+      "";
+      (* has *)
+      Printf.sprintf "define i1 @%s_has(ptr %%m, %s %%k) {" fn_prefix c_k;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
+      "  %keys = load ptr, ptr %kp";
+      "  br label %scan_check";
+      "scan_check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %scan_cont ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %not_found, label %scan_body";
+      "scan_body:";
+      Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%i" c_k;
+      Printf.sprintf "  %%cur_k = load %s, ptr %%kslot" c_k;
+      emit_key_eq "%cur_k" "%k" "%eq";
+      "  br i1 %eq, label %found, label %scan_cont";
+      "found:";
+      "  ret i1 1";
+      "scan_cont:";
+      "  %i_next = add i32 %i, 1";
+      "  br label %scan_check";
+      "not_found:";
+      "  ret i1 0";
+      "}";
+      "";
+      (* len *)
+      Printf.sprintf "define i32 @%s_len(ptr %%m) {" fn_prefix;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  %len = load i32, ptr %lp";
+      "  ret i32 %len";
+      "}" ]
+
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic type. Region-
    allocated mutable byte buffer; to_str returns a null-terminated copy
    in the same region. *)
@@ -3456,6 +3751,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_map_instances;
   Hashtbl.reset vec_filter_instances;
   Hashtbl.reset owned_vec_instances;
+  Hashtbl.reset map_instances;
   strbuf_used := false;
   show_string_globals := [];
   show_format_globals := [];
@@ -3536,7 +3832,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          (match pat.Ast.pnode, value.Ast.ty with
           | Ast.P_var name, Some vt ->
             (match Ast.walk vt with
-             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
                scan_uses name vt body
              | _ -> ())
           | _ -> ())
@@ -3754,6 +4051,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_owned_vec_runtime_llvm elem_ty :: acc) owned_vec_instances []
   in
+  let map_runtimes =
+    Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
+      emit_map_runtime_llvm k_ty v_ty :: acc) map_instances []
+  in
   let vec_to_owned_helpers =
     Hashtbl.fold (fun tag _elem_ty acc ->
       (* emit a helper iff both vec and owned_vec exist for this tag *)
@@ -3797,6 +4098,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
+    @ (if map_runtimes = [] then [] else map_runtimes @ [""])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
     @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
     @ (if vec_map_helpers = [] then [] else vec_map_helpers @ [""])
