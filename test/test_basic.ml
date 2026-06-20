@@ -2125,6 +2125,34 @@ let () =
   assert_contains "codegen: same-name rebinding uses tmp var"
     (codegen "let x = 1 in let x = x + 10 in x")
     "__let_tmp_x = (x + 10)";
+  (* Phase 16.3 / DEFERRED §1.5: mk_logger / mk_metrics の codegen 対応。
+     interpreter only だった cap builtin を C codegen でも printf-based
+     で動かす。Logger record + 3 closure_str_unit field、Metrics record
+     + (inc / record) curried closure。
+     注: 前段 test で `type Logger = { debug: ... }` を declare している
+     ので、builtin field を re-register してから検査する。 *)
+  Typer.register_record "Logger" []
+    [("info",  Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
+     ("warn",  Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
+     ("error", Ast.TyArrow (Ast.TyStr, Ast.TyUnit))];
+  Typer.register_record "Metrics" []
+    [("inc",    Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
+     ("record", Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))];
+  assert_contains "codegen: mk_logger emits runtime call"
+    (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "__mere_mk_logger";
+  assert_contains "codegen: logger runtime printf"
+    (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "%s [INFO] %s";
+  assert_contains "codegen: Logger struct uses closure fields"
+    (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "closure_str_unit info";
+  assert_contains "codegen: mk_metrics emits runtime call"
+    (codegen "let m = mk_metrics () in m.inc \"x\"")
+    "__mere_mk_metrics";
+  assert_contains "codegen: metrics record curried emits inner fn"
+    (codegen "let m = mk_metrics () in m.record \"qps\" 7")
+    "__mere_metrics_record_inner_fn";
   assert_contains "codegen: bool literal → 0/1"
     (codegen "true") "printf(\"%d\\n\", 1)";
   assert_contains "codegen: logical && via C &&"
@@ -3166,6 +3194,17 @@ let () =
        show [1, 2, 3]")
     "call ptr @__lang_str_concat";
 
+  (* Phase 16.3: mk_logger / mk_metrics LLVM codegen. *)
+  assert_contains "llvm: mk_logger emits @__mere_mk_logger call"
+    (llvm "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "call %Logger @__mere_mk_logger";
+  assert_contains "llvm: logger info fn defined"
+    (llvm "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "define internal i32 @__mere_logger_info_fn";
+  assert_contains "llvm: mk_metrics emits @__mere_mk_metrics call"
+    (llvm "let m = mk_metrics () in m.inc \"x\"")
+    "call %Metrics @__mere_mk_metrics";
+
   (* --- Wasm (WAT) codegen MVP (Phase 6.1) ---
      Stack-based emission to WAT (S-expression text format). subset:
      int / bool / arith / cmp / logic / Neg / If / Let (P_var) / Var /
@@ -3524,6 +3563,20 @@ let () =
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "(func $show_list_int";
+
+  (* Phase 16.3: mk_logger / mk_metrics Wasm codegen. *)
+  assert_contains "wasm: mk_logger calls $__mere_mk_logger"
+    (wasm "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "call $__mere_mk_logger";
+  assert_contains "wasm: logger info helper defined"
+    (wasm "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    "(func $__mere_logger_info_fn";
+  assert_contains "wasm: logger format prefix in data"
+    (wasm "let lg = mk_logger \"app\" in lg.info \"hi\"")
+    " [INFO] ";
+  assert_contains "wasm: mk_metrics calls $__mere_mk_metrics"
+    (wasm "let m = mk_metrics () in m.inc \"x\"")
+    "call $__mere_mk_metrics";
 
   (* --- Diagnostic format (Phase 7.1) ---
      Multi-line code frame with line numbers + caret with inline message. *)

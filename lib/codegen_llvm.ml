@@ -128,6 +128,10 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
 
+(* Phase 16.3: Logger / Metrics builtin usage flags. *)
+let logger_used = ref false
+let metrics_used = ref false
+
 (* Phase 15.10: Map[R, K, V] per-(K, V) instances. *)
 let map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 
@@ -918,6 +922,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
     let key = closure_struct_name p r in
     if not (Hashtbl.mem seen key) then Hashtbl.add seen key (p, r)
   in
+  let seen_records : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let rec walk_ty (t : Ast.ty) =
     match Ast.walk t with
     | Ast.TyArrow (p, r) ->
@@ -925,7 +930,19 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
       if ty_is_concrete p' && ty_is_concrete r' then add p' r';
       walk_ty p'; walk_ty r'
     | Ast.TyTuple ts -> List.iter walk_ty ts
-    | Ast.TyCon (_, args) -> List.iter walk_ty args
+    | Ast.TyCon (name, args) ->
+      List.iter walk_ty args;
+      (* Phase 16.3: 既知 record の field 型もたどる。Logger / Metrics
+         のように field が closure 型を持つ record で、field 経由でしか
+         登場しない closure 型を arrow_pairs に拾わせる。 *)
+      if Hashtbl.mem Typer.records name
+         && not (Hashtbl.mem seen_records name)
+      then begin
+        Hashtbl.add seen_records name ();
+        let info = Hashtbl.find Typer.records name in
+        if info.Typer.r_params = [] then
+          List.iter (fun (_, ft) -> walk_ty ft) info.Typer.r_fields
+      end
     | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
@@ -1709,6 +1726,21 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
     "0"  (* unit / int 0 *)
+  | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
+    (* Phase 16.3 / DEFERRED §1.5: call @__mere_mk_logger to build a
+       Logger value (= 3 closure_str_unit fields). *)
+    logger_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %%Logger @__mere_mk_logger(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, arg) ->
+    (* Phase 16.3: mk_metrics () — unit arg ignored. *)
+    metrics_used := true;
+    let _ = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %%Metrics @__mere_mk_metrics()" r);
+    r
   | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
     let av = emit_expr env arg in
     let raw = fresh_reg () in
@@ -4111,6 +4143,71 @@ let strbuf_runtime_llvm =
       "  ret i32 %len";
       "}" ]
 
+(* Phase 16.3 / DEFERRED §1.5: Logger / Metrics の LLVM IR runtime。
+   C 側と同じ printf-based 実装を IR で表現する。Logger 構造体は
+   既に %Logger = type { %closure_str_unit, %closure_str_unit,
+   %closure_str_unit } が record typedef 経由で emit されている前提。 *)
+let logger_runtime_llvm =
+  String.concat "\n"
+    [ "@.__logger_fmt_info = private constant [14 x i8] c\"%s [INFO] %s\\0A\\00\"";
+      "@.__logger_fmt_warn = private constant [14 x i8] c\"%s [WARN] %s\\0A\\00\"";
+      "@.__logger_fmt_err  = private constant [15 x i8] c\"%s [ERROR] %s\\0A\\00\"";
+      "";
+      "define internal i32 @__mere_logger_info_fn(ptr %env, ptr %msg) {";
+      "  call i32 (ptr, ...) @printf(ptr @.__logger_fmt_info, ptr %env, ptr %msg)";
+      "  ret i32 0";
+      "}";
+      "define internal i32 @__mere_logger_warn_fn(ptr %env, ptr %msg) {";
+      "  call i32 (ptr, ...) @printf(ptr @.__logger_fmt_warn, ptr %env, ptr %msg)";
+      "  ret i32 0";
+      "}";
+      "define internal i32 @__mere_logger_error_fn(ptr %env, ptr %msg) {";
+      "  call i32 (ptr, ...) @printf(ptr @.__logger_fmt_err, ptr %env, ptr %msg)";
+      "  ret i32 0";
+      "}";
+      "";
+      "define %Logger @__mere_mk_logger(ptr %prefix) {";
+      "entry:";
+      (* Build the Logger value via insertvalue cascades.
+         Logger = { closure_str_unit info, warn, error }
+         closure_str_unit = { ptr env, ptr fn } *)
+      "  %r0 = insertvalue %Logger zeroinitializer, ptr %prefix, 0, 0";
+      "  %r1 = insertvalue %Logger %r0, ptr @__mere_logger_info_fn, 0, 1";
+      "  %r2 = insertvalue %Logger %r1, ptr %prefix, 1, 0";
+      "  %r3 = insertvalue %Logger %r2, ptr @__mere_logger_warn_fn, 1, 1";
+      "  %r4 = insertvalue %Logger %r3, ptr %prefix, 2, 0";
+      "  %r5 = insertvalue %Logger %r4, ptr @__mere_logger_error_fn, 2, 1";
+      "  ret %Logger %r5";
+      "}" ]
+
+let metrics_runtime_llvm =
+  String.concat "\n"
+    [ "@.__metrics_fmt_inc = private constant [17 x i8] c\"[METRIC] inc %s\\0A\\00\"";
+      "@.__metrics_fmt_rec = private constant [16 x i8] c\"[METRIC] %s=%d\\0A\\00\"";
+      "";
+      "define internal i32 @__mere_metrics_inc_fn(ptr %env, ptr %name) {";
+      "  call i32 (ptr, ...) @printf(ptr @.__metrics_fmt_inc, ptr %name)";
+      "  ret i32 0";
+      "}";
+      "define internal i32 @__mere_metrics_record_inner_fn(ptr %env, i32 %n) {";
+      "  call i32 (ptr, ...) @printf(ptr @.__metrics_fmt_rec, ptr %env, i32 %n)";
+      "  ret i32 0";
+      "}";
+      "define internal %closure_int_unit @__mere_metrics_record_outer_fn(ptr %env, ptr %name) {";
+      "  %r0 = insertvalue %closure_int_unit zeroinitializer, ptr %name, 0";
+      "  %r1 = insertvalue %closure_int_unit %r0, ptr @__mere_metrics_record_inner_fn, 1";
+      "  ret %closure_int_unit %r1";
+      "}";
+      "";
+      "define %Metrics @__mere_mk_metrics() {";
+      "entry:";
+      "  %r0 = insertvalue %Metrics zeroinitializer, ptr null, 0, 0";
+      "  %r1 = insertvalue %Metrics %r0, ptr @__mere_metrics_inc_fn, 0, 1";
+      "  %r2 = insertvalue %Metrics %r1, ptr null, 1, 0";
+      "  %r3 = insertvalue %Metrics %r2, ptr @__mere_metrics_record_outer_fn, 1, 1";
+      "  ret %Metrics %r3";
+      "}" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
@@ -4154,6 +4251,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset map_instances;
   Hashtbl.reset vec_to_list_instances;
   strbuf_used := false;
+  logger_used := false;
+  metrics_used := false;
   show_string_globals := [];
   show_format_globals := [];
   (* Register variant tags + classify into mono / poly. Polymorphic
@@ -4540,6 +4639,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
+    @ (if !logger_used then [logger_runtime_llvm; ""] else [])
+    @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_key_eq_helpers = [] then [] else map_key_eq_helpers @ [""])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
     @ (if vec_to_list_helpers = [] then [] else vec_to_list_helpers @ [""])
