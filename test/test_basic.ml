@@ -5953,6 +5953,16 @@ let () =
         let a = id 5 in\n\
         let b = id \"hi\" in\n\
         a") "5";
+  (* Phase 23.5: show_str escapes special chars to match interp.
+     show's output wraps the str in quotes, so e.g. `show "a\nb"`
+     returns the 6-char string `"a\nb"`. *)
+  check "§23.5: show_str escapes newline as backslash-n"
+    (Pipeline.process "show \"a\\nb\"") "\"\\\"a\\\\nb\\\"\"";
+  check "§23.5: show_str escapes double-quote"
+    (Pipeline.process "show \"a\\\"b\"") "\"\\\"a\\\\\\\"b\\\"\"";
+  check "§23.5: show_str escapes backslash"
+    (Pipeline.process "show \"a\\\\b\"") "\"\\\"a\\\\\\\\b\\\"\"";
+
   check "§23.4: chained multi-inst — child poly fn called only via parent multi-inst"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let rec helper = fn x -> x in\n\
