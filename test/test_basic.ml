@@ -5705,9 +5705,11 @@ let () =
     "0";
   check "prelude: with prelude (default) prog.decls includes auto-injected"
     (let prog = Pipeline.parse_program "42" in
-     (* Phase 19.5: 3 types (list / option / result) *)
+     (* Phase 19.5: 3 types (list / option / result)
+        + Phase 21.2: 6 list helpers (list_iter / list_map / list_fold /
+          list_len / list_rev_into / list_rev) = 9 total *)
      string_of_int (List.length prog.Ast.decls))
-    "3";
+    "9";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"
