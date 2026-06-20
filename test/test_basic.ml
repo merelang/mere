@@ -5573,5 +5573,35 @@ let () =
      Buffer.contents buf)
     "`rrr` is already borrowed";
 
+  (* --- Phase 19.4: prelude 機構 (`type 'a list` を自動 import) --- *)
+  (* prelude 入った状態で、Nil / Cons をユーザコードで宣言せずに使える *)
+  check "prelude: Cons / Nil work without explicit type declare"
+    (Pipeline.process "Cons (1, Cons (2, Cons (3, Nil)))")
+    "[1, 2, 3]";
+  check "prelude: list literal sugar works without declare"
+    (Pipeline.process "[10, 20, 30]") "[10, 20, 30]";
+  check "prelude: str_split returns a list immediately usable"
+    (Pipeline.process
+       "match str_split \"a,b,c\" \",\" with \
+        | Nil -> \"empty\" \
+        | Cons (h, _) -> h")
+    "\"a\"";
+  check "prelude: pattern match on Nil works"
+    (Pipeline.process "match Nil with | Nil -> 1 | _ -> 0") "1";
+  (* user の同名 redeclare は backward compat で動く *)
+  check "prelude: user redeclare of `type 'a list` is harmless"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        Cons (42, Nil)") "[42]";
+  (* prelude を opt-out すると AST に prelude decls が prepend されない *)
+  check "prelude: ?prelude:false omits prelude decls"
+    (let prog = Pipeline.parse_program ~prelude:false "42" in
+     string_of_int (List.length prog.Ast.decls))
+    "0";
+  check "prelude: with prelude (default) prog.decls includes auto-injected"
+    (let prog = Pipeline.parse_program "42" in
+     string_of_int (List.length prog.Ast.decls))
+    "1";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

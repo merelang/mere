@@ -1,11 +1,29 @@
 (* Source string -> ... convenience functions.
    Handles top-level decls (let, let rec, type) in order. *)
 
-let parse_program ?base_dir s =
+(* Phase 19.4: 自動 import される prelude を parse して decls を返す。
+   ユーザの parse 開始時に、これらの decls が user decls の先頭に
+   挿入される。`?prelude:false` で無効化 (テスト・debug 用)。 *)
+let parse_prelude () : Ast.top_decl list =
+  let tokens = Lexer.tokenize Prelude_stdlib.contents in
+  let prog = Parser.parse_program tokens in
+  prog.Ast.decls
+
+let parse_program ?(prelude = true) ?base_dir s =
+  (* Phase 19.4: parse the prelude FIRST so parser.constructors etc.
+     have the prelude's types/ctors registered before the user's source
+     is tokenized + parsed. Otherwise `Cons` in user code lookups arity
+     0 and produces a payload-less ctor. *)
+  let prelude_decls =
+    if prelude then parse_prelude () else []
+  in
   let tokens = Lexer.tokenize s in
-  match base_dir with
-  | Some d -> Parser.parse_program ~base_dir:d tokens
-  | None -> Parser.parse_program tokens
+  let user_prog =
+    match base_dir with
+    | Some d -> Parser.parse_program ~base_dir:d tokens
+    | None -> Parser.parse_program tokens
+  in
+  { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }
 
 let parse_only s =
   let prog = parse_program s in
