@@ -532,7 +532,7 @@ let rec emit_expr (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_reverse" || name = "vec_concat"
+       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -855,6 +855,27 @@ let rec emit_expr (e : Ast.expr) : string =
           __new; })"
          (emit_expr a_e) (emit_expr arg)
          elem_tag elem_tag elem_tag elem_tag elem_tag elem_tag
+     | Ast.App ({ node = Ast.Var "vec_sort"; _ }, vec_e) ->
+       (* Phase 19.3: vec_sort v cmp — in-place insertion sort with
+          comparator (T -> T -> int) curried. cmp.fn(env, a) returns
+          inner closure, then inner.fn(inner.env, b) returns int.
+          Insertion sort is O(n²) but simple and inline-friendly;
+          replace with quicksort if perf needed. *)
+       let _ = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __vs = %s; __auto_type __cmp = %s; \
+          for (int __i = 1; __i < __vs->len; __i++) { \
+            __auto_type __key = __vs->data[__i]; \
+            int __j = __i - 1; \
+            while (__j >= 0) { \
+              __auto_type __inner = __cmp.fn(__cmp.env, __vs->data[__j]); \
+              if (__inner.fn(__inner.env, __key) <= 0) break; \
+              __vs->data[__j + 1] = __vs->data[__j]; \
+              __j--; \
+            } \
+            __vs->data[__j + 1] = __key; \
+          } 0; })"
+         (emit_expr vec_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e) ->
        (* Phase 15.6: vec_map v f — region-preserving 新 Vec を返す。
           v の要素型 T と結果 Vec の要素型 U はそれぞれ AST から取り出す。

@@ -656,6 +656,20 @@ let vec_concat_scheme =
         Ast.TyCon ("Vec", [_vec_concat_region; _vec_concat_elem]),
         Ast.TyCon ("Vec", [_vec_concat_region; _vec_concat_elem]))) }
 
+(* Phase 19.3: vec_sort — in-place sort with T -> T -> int comparator. *)
+let _vec_sort_elem = fresh_var ()
+let _vec_sort_region = fresh_var ()
+let vec_sort_scheme =
+  let aid = match _vec_sort_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_sort_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_sort_region; _vec_sort_elem]),
+      Ast.TyArrow (
+        Ast.TyArrow (_vec_sort_elem,
+          Ast.TyArrow (_vec_sort_elem, Ast.TyInt)),
+        Ast.TyUnit)) }
+
 (* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。
    - vec_filter は region-preserving (source の R を結果も持つ)
    - vec_to_list は `'a list` (user-declared または builtin) に変換
@@ -1002,6 +1016,7 @@ let initial_env : env =
     ("vec_set",    vec_set_scheme);
     ("vec_reverse", vec_reverse_scheme);
     ("vec_concat",  vec_concat_scheme);
+    ("vec_sort",    vec_sort_scheme);
     ("vec_filter",   vec_filter_scheme);
     ("vec_to_list",  vec_to_list_scheme);
     ("vec_to_owned", vec_to_owned_scheme);
