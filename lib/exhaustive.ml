@@ -104,13 +104,29 @@ let check_match (loc : Loc.t)
    Typer entry point would be invasive. *)
 let warnings : string list ref = ref []
 
-let reset () = warnings := []
+(* Phase 21.2: deferred matches.  Storing the triple lets us re-walk the
+   scrutinee type AFTER all typer unification has completed, so a Match
+   whose scrut_ty is initially a fresh tyvar (e.g., the param `xs` of a
+   poly let-rec, only later unified to `'a list` by the patterns) is
+   judged against its final concrete type rather than an unresolved one. *)
+let deferred : (Loc.t * Ast.ty * (Ast.pattern * Ast.expr option * Ast.expr) list) list ref =
+  ref []
+
+let reset () =
+  warnings := [];
+  deferred := []
 
 let take () =
-  let ws = List.rev !warnings in
+  (* Run deferred checks now that typing is done — scrut tys have walked. *)
+  let ws_def =
+    List.concat_map (fun (loc, scrut_ty, arms) ->
+      check_match loc scrut_ty arms
+    ) (List.rev !deferred)
+  in
+  let ws = List.rev !warnings @ ws_def in
   warnings := [];
+  deferred := [];
   ws
 
 let record_match loc scrut_ty arms =
-  let ws = check_match loc scrut_ty arms in
-  List.iter (fun w -> warnings := w :: !warnings) ws
+  deferred := (loc, scrut_ty, arms) :: !deferred

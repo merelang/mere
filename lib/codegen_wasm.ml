@@ -462,32 +462,36 @@ let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
   !found
 
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
-  List.map (fun s ->
-    let arrow =
-      let fun_ty =
-        match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
-      in
-      if ty_is_concrete fun_ty then fun_ty
-      else
-        match find_concrete_arrow s.sname root with
-        | Some t ->
-          (* Phase 21.1 (DEFERRED §1.7) fix: unify binding-site Fun.ty
-             with the concrete use-site type so the body's tyvars get
-             linked. See codegen_c.ml for design notes. *)
-          (try Typer.unify Loc.dummy fun_ty t
-           with _ -> ());
-          t
-        | None ->
-          raise (Codegen_error (s.sfun.Ast.loc,
-            Printf.sprintf
-              "fn `%s` has polymorphic type with no concrete use site \
-               — Wasm codegen needs a monomorphic instantiation" s.sname))
-    in
-    match arrow with
-    | Ast.TyArrow (p, r) ->
-      { name = s.sname; param = s.sparam; body = s.sbody;
+  (* Phase 21.2 multi-pass — see codegen_c.ml for design notes. *)
+  let resolved : (string, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
+  let progress = ref true in
+  while !progress do
+    progress := false;
+    List.iter (fun s ->
+      if not (Hashtbl.mem resolved s.sname) then begin
+        let fun_ty =
+          match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+        in
+        if ty_is_concrete fun_ty then begin
+          Hashtbl.add resolved s.sname fun_ty;
+          progress := true
+        end else
+          match find_concrete_arrow s.sname root with
+          | Some t ->
+            (try Typer.unify Loc.dummy fun_ty t with _ -> ());
+            Hashtbl.add resolved s.sname t;
+            progress := true
+          | None -> ()
+      end
+    ) skels
+  done;
+  List.filter_map (fun s ->
+    match Hashtbl.find_opt resolved s.sname with
+    | None -> None
+    | Some (Ast.TyArrow (p, r)) ->
+      Some { name = s.sname; param = s.sparam; body = s.sbody;
         param_ty = Ast.walk p; return_ty = Ast.walk r }
-    | _ ->
+    | Some _ ->
       raise (Codegen_error (s.sfun.Ast.loc,
         Printf.sprintf "function `%s` has non-arrow inferred type" s.sname))
   ) skels

@@ -1631,36 +1631,47 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
    generalized it) recover a concrete arrow type by scanning the main
    expression for a use-site Var with the same name. *)
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
-  List.map (fun s ->
-    let arrow =
-      let fun_ty =
-        match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
-      in
-      if ty_is_concrete fun_ty then fun_ty
-      else
-        match find_concrete_arrow s.sname root with
-        | Some t ->
-          (* Phase 21.1 (DEFERRED §1.7) fix: unify the binding-site Fun.ty
-             with the concrete use-site type. This links the body's tyvars
-             (which share identity with fun_ty's tyvars from infer under
-             env_rec) to concrete types, so emit_expr can resolve every
-             `.ty` annotation inside the body without hitting "'a".
-             Same trick as resolve_vec_let_types. *)
-          (try Typer.unify Loc.dummy fun_ty t
-           with _ -> ());
-          t
-        | None ->
-          raise (Codegen_error (s.sfun.Ast.loc,
-            Printf.sprintf
-              "fn `%s` has polymorphic type `%s` with no concrete use site \
-               — C codegen needs a monomorphic instantiation"
-              s.sname (Ast.pp_ty fun_ty)))
-    in
-    match arrow with
-    | Ast.TyArrow (p, r) ->
-      { name = s.sname; param = s.sparam; body = s.sbody;
+  (* Phase 21.1 (DEFERRED §1.7) + 21.2 multi-pass:
+     - Each pass tries to resolve each yet-unresolved fn by either (a)
+       observing its Fun.ty has become concrete via prior unify, or (b)
+       calling find_concrete_arrow to locate an external use site, then
+       unifying.
+     - Repeat until no progress. This handles chained poly helpers
+       (e.g., list_rev calls list_rev_into; once list_rev is unified
+       via its top-level use, list_rev_into's Var inside list_rev's
+       body has concrete .ty and find_concrete_arrow picks it up next
+       pass).
+     - Unused poly fns (stdlib helpers user didn't reference) stay
+       unresolved and are silently filtered out. *)
+  let resolved : (string, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
+  let progress = ref true in
+  while !progress do
+    progress := false;
+    List.iter (fun s ->
+      if not (Hashtbl.mem resolved s.sname) then begin
+        let fun_ty =
+          match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+        in
+        if ty_is_concrete fun_ty then begin
+          Hashtbl.add resolved s.sname fun_ty;
+          progress := true
+        end else
+          match find_concrete_arrow s.sname root with
+          | Some t ->
+            (try Typer.unify Loc.dummy fun_ty t with _ -> ());
+            Hashtbl.add resolved s.sname t;
+            progress := true
+          | None -> ()
+      end
+    ) skels
+  done;
+  List.filter_map (fun s ->
+    match Hashtbl.find_opt resolved s.sname with
+    | None -> None  (* unused poly fn — skip *)
+    | Some (Ast.TyArrow (p, r)) ->
+      Some { name = s.sname; param = s.sparam; body = s.sbody;
         param_ty = Ast.walk p; return_ty = Ast.walk r }
-    | other ->
+    | Some other ->
       raise (Codegen_error (s.sfun.Ast.loc,
         Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
           s.sname (Ast.pp_ty other)))

@@ -26,7 +26,12 @@ let parse_program ?(prelude = true) ?base_dir s =
   { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }
 
 let parse_only s =
-  let prog = parse_program s in
+  (* Phase 21.2: parse_only is used by pretty-print / AST-shape tests
+     where the prelude noise (let-rec helpers wrapping the user's expr)
+     would obscure the AST under test. Disable prelude here. Type decls
+     (list / option / result) still aren't needed for these shape
+     tests since the input rarely uses them. *)
+  let prog = parse_program ~prelude:false s in
   Ast.desugar_program prog
 
 (* Process top-decls in order, updating envs and the typer's constructor table. *)
