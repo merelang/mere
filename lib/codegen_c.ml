@@ -1572,9 +1572,51 @@ let region_runtime_helpers =
       "   allocations that outlive any user `region R { ... }` block. */";
       "static __lang_region __lang_default_region;" ]
 
-(* Phase 15.7: emit one OwnedVec[T] runtime per concrete element type.
-   Heap-allocated (malloc / realloc). Drop is currently a no-op — memory
-   is reclaimed at process exit. *)
+(* Phase 15.8: 全 OwnedVec を tracking する registry。`owned_vec_new` /
+   `vec_to_owned` で確保された struct を全部 thread-local list に登録、
+   main 関数末で `__mere_owned_vec_free_all` が iterate して
+   `free(v->data); free(v);` を呼ぶ。これで valgrind 等のメモリ解析が
+   クリーンになる (process exit に任せた状態だと「リーク」として報告
+   される)。全 mere_owned_vec_<T> は同じ struct layout `{ T*, int, int }`
+   なので、第一 field の void* data を generic に読み出せる。 *)
+let owned_vec_registry_runtime =
+  String.concat "\n"
+    [ "/* Phase 15.8: heap-allocated OwnedVec の registry。プロセス末で";
+      "   一括 free する。 */";
+      "typedef struct __mere_owned_vec_base {";
+      "  void* data;";
+      "  int len;";
+      "  int cap;";
+      "} __mere_owned_vec_base;";
+      "";
+      "static void** __mere_owned_vec_registry = NULL;";
+      "static int __mere_owned_vec_count = 0;";
+      "static int __mere_owned_vec_cap = 0;";
+      "";
+      "static void __mere_owned_vec_register(void* v) {";
+      "  if (__mere_owned_vec_count == __mere_owned_vec_cap) {";
+      "    __mere_owned_vec_cap = __mere_owned_vec_cap == 0 ? 8 : __mere_owned_vec_cap * 2;";
+      "    __mere_owned_vec_registry = (void**)realloc(";
+      "      __mere_owned_vec_registry, sizeof(void*) * __mere_owned_vec_cap);";
+      "  }";
+      "  __mere_owned_vec_registry[__mere_owned_vec_count++] = v;";
+      "}";
+      "";
+      "static void __mere_owned_vec_free_all(void) {";
+      "  for (int i = 0; i < __mere_owned_vec_count; i++) {";
+      "    __mere_owned_vec_base* v = (__mere_owned_vec_base*)__mere_owned_vec_registry[i];";
+      "    free(v->data);";
+      "    free(v);";
+      "  }";
+      "  free(__mere_owned_vec_registry);";
+      "  __mere_owned_vec_registry = NULL;";
+      "  __mere_owned_vec_count = 0;";
+      "  __mere_owned_vec_cap = 0;";
+      "}" ]
+
+(* Phase 15.7/15.8: emit one OwnedVec[T] runtime per concrete element type.
+   Heap-allocated (malloc / realloc). Each `_new` registers itself in the
+   process-wide registry so main can free everything at program exit. *)
 let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = c_type_of elem_ty in
@@ -1592,6 +1634,7 @@ let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->cap = 4;";
       "  v->len = 0;";
       Printf.sprintf "  v->data = (%s*)malloc(sizeof(%s) * 4);" c_elem c_elem;
+      "  __mere_owned_vec_register(v);";
       "  return v;";
       "}";
       "";
@@ -2675,14 +2718,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     (* Vec[R, T] / OwnedVec[T] runtime — depends on the element type's
        C struct being complete, so emit after tuple / record / variant
-       bodies. *)
+       bodies. OwnedVec registry先行 (各 _new がそれを参照する)。 *)
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
-    @ (if owned_vec_runtimes = [] then [] else owned_vec_runtimes @ [""])
+    @ (if owned_vec_runtimes = [] then []
+       else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";
         "  __lang_region_init(&__lang_default_region, 1 << 22);";
         main_stmt;
+        (* Phase 15.8: free all OwnedVec allocations registered during run. *)
+        (if Hashtbl.length owned_vec_instances > 0
+         then "  __mere_owned_vec_free_all();" else "");
         "  __lang_region_free(&__lang_default_region);";
         "  return 0;";
         "}";
