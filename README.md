@@ -12,7 +12,7 @@ feature-parity で動く段階。
 
 ## ステータス (2026-06-19 時点)
 
-- **1171 tests passing**
+- **1177 tests passing**
 - ツリーウォーキング interpreter + **C / LLVM IR / Wasm の 3 backend** が
   feature parity で動く (同じ Mere プログラムから 3 種のバイナリを出せる)
 - メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
@@ -44,7 +44,7 @@ feature-parity で動く段階。
 | import | `import "./path";` で別ファイル取込み (importer-relative + canonical) |
 | collection | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + 高階 API (iter/map/fold/filter/to_list/to_owned) |
 | stdlib | 90+ 種の builtin: I/O / 変換 / 文字列 / 数値 / 多相 helper / float / error / Logger・Metrics |
-| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く (詳細は [codegen.md](docs/codegen.md))。Vec/OwnedVec/StrBuf/Map は interpreter-only |
+| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く (詳細は [codegen.md](docs/codegen.md))。Vec/OwnedVec/StrBuf/Map は interpreter-only (例外: C codegen のみ `Vec[R, int]` を Phase 15.1 で対応開始) |
 | REPL | 永続 env、multi-line 入力、`:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | エラー UX | Rust 風 multi-line code frame、ANSI 色 (TTY 時)、Levenshtein による typo 提案 (record field / qualified name 含む)、型変換 hint |
 
@@ -92,7 +92,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1171 tests
+dune runtest                                         # 1177 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -112,7 +112,9 @@ node -e 'WebAssembly.instantiate(require("fs").readFileSync("sum.wasm"))
 3 backend (C / LLVM / Wasm) はすべて feature parity で、int / 関数 / 文字列 /
 tuple / record / variant / closure / 多相 / 再帰 variant / 複雑 pattern /
 show / region / view / `with` Drop / list pretty-print まで通る。
-(Vec / OwnedVec / StrBuf / Map は interpreter-only、codegen 対応は今後)
+(Vec / OwnedVec / StrBuf / Map は interpreter-only、codegen 対応は今後。
+Phase 15.1 で C codegen のみ `Vec[R, int]` を先行対応 — 例:
+`examples/vec_codegen_c.mere`)
 
 ## レイアウト
 
@@ -130,7 +132,7 @@ mere/
 │   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 1171 tests
+├── test/test_basic.ml  # 1177 tests
 ├── examples/           # *.mere サンプル群
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
 ```
