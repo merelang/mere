@@ -70,6 +70,7 @@ codegen。
 | [arith_eval.mere](arith_eval.mere) | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価。**interpreter only** (wildcard `let _` + 多相 user let-rec の codegen 未対応)。Phase 20.2 / examples roadmap C3 |
 | [s_expression.mere](s_expression.mere) | S 式 (Lisp 風) parser + printer + 簡易 eval (`+ - * / = <`, `if`, `let`)。**interpreter only** (同上)。Phase 20.3 / examples roadmap I4 |
 | [template_engine.mere](template_engine.mere) | mustache 風 `{{KEY}}` 置換 engine。Map[R, str, str] + StrBuf[R] + str_index_of の組合せ demo。未定義 key は soft fail で literal を残す。**interpreter only** (DEFERRED §1.7)。Phase 20.4 / examples roadmap B1 |
+| [mini_shell.mere](mini_shell.mere) | 簡易 shell の batch evaluator。variant command + str_split parse + dispatch + state (env Map + history Vec + exit flag)。echo / set / get / list / add / history / help / exit を実装。**interpreter only** (DEFERRED §1.7)。Phase 20.5 / examples roadmap G1 |
 | [todo_app.mere](todo_app.mere) | TODO リスト管理 (OwnedVec[Task] + Logger + vec_map / fold)。Phase 16 第 1 スライスでの試作、Phase 16-17 fix で **4 backend 完全対応** |
 | [word_freq.mere](word_freq.mere) | 単語頻度カウンタ (Map[R, str, int] + str_split + map_iter)。**interpreter only** (多相 let-rec の codegen 未対応)。Phase 19.1+19.2 後の摩擦炙り出し |
 | [safe_div.mere](safe_div.mere) | `(int, str) result` を使った失敗を値で返すパターン。**interpreter only**。Phase 19.5 prelude の Result demo |
