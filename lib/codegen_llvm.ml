@@ -266,11 +266,14 @@ let rec llvm_ty_of (t : Ast.ty) : string =
     (match List.map Ast.walk args with
      | [_; k_ty; v_ty]
        when ty_is_concrete k_ty && ty_is_concrete v_ty ->
-       (match k_ty with
-        | Ast.TyInt | Ast.TyStr -> ()
-        | _ ->
-          raise (Codegen_error (Loc.dummy,
-            "Map key type must be int or str in LLVM codegen (Phase 15.10)")));
+       let rec is_key_supported = function
+         | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
+         | Ast.TyTuple ts -> List.for_all is_key_supported ts
+         | _ -> false
+       in
+       if not (is_key_supported k_ty) then
+         raise (Codegen_error (Loc.dummy,
+           "Map key type must be int / bool / str / tuple in LLVM codegen (Phase 15.10/15.14)"));
        let k_tag = ty_tag k_ty in
        let v_tag = ty_tag v_ty in
        let key = k_tag ^ "__" ^ v_tag in
@@ -1446,11 +1449,14 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
        let k_ty = Ast.walk k_ty in
        let v_ty = Ast.walk v_ty in
        if ty_is_concrete k_ty && ty_is_concrete v_ty then begin
-         (match k_ty with
-          | Ast.TyInt | Ast.TyStr -> ()
-          | _ ->
-            raise (Codegen_error (loc,
-              "Map key type must be int or str in LLVM codegen (Phase 15.10)")));
+         let rec is_key_supported = function
+           | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
+           | Ast.TyTuple ts -> List.for_all is_key_supported ts
+           | _ -> false
+         in
+         if not (is_key_supported k_ty) then
+           raise (Codegen_error (loc,
+             "Map key type must be int / bool / str / tuple in LLVM codegen (Phase 15.10/15.14)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -3665,6 +3671,69 @@ let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
       "  ret i32 %n";
       "}" ]
 
+(* Phase 15.14: per-K equality helper for Map. Supports int / bool / str /
+   tuple (recursive). Emitted once per K type, shared across (K, V) pairs. *)
+let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let c_k = llvm_ty_of k_ty in
+  let reg_counter = ref 0 in
+  let fresh () = incr reg_counter; Printf.sprintf "%%r%d" !reg_counter in
+  let lines = ref [] in
+  let emit s = lines := s :: !lines in
+  let build a b =
+    match Ast.walk k_ty with
+    | _ ->
+      let rec go ty a b =
+        match Ast.walk ty with
+        | Ast.TyInt | Ast.TyBool ->
+          let r = fresh () in
+          let t = llvm_ty_of ty in
+          emit (Printf.sprintf "  %s = icmp eq %s %s, %s" r t a b);
+          r
+        | Ast.TyStr ->
+          let cmp_r = fresh () in
+          emit (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" cmp_r a b);
+          let r = fresh () in
+          emit (Printf.sprintf "  %s = icmp eq i32 %s, 0" r cmp_r);
+          r
+        | Ast.TyTuple ts ->
+          let tup_struct = tuple_struct_name ts in
+          let acc = ref None in
+          List.iteri (fun i t ->
+            let a_f = fresh () in
+            emit (Printf.sprintf "  %s = extractvalue %%%s %s, %d" a_f tup_struct a i);
+            let b_f = fresh () in
+            emit (Printf.sprintf "  %s = extractvalue %%%s %s, %d" b_f tup_struct b i);
+            let eq_i = go t a_f b_f in
+            (match !acc with
+             | None -> acc := Some eq_i
+             | Some prev ->
+               let combined = fresh () in
+               emit (Printf.sprintf "  %s = and i1 %s, %s" combined prev eq_i);
+               acc := Some combined)
+          ) ts;
+          (match !acc with
+           | Some r -> r
+           | None ->
+             let r = fresh () in
+             emit (Printf.sprintf "  %s = and i1 true, true" r);
+             r)
+        | _ ->
+          let r = fresh () in
+          emit (Printf.sprintf "  %s = icmp eq %s %s, %s" r c_k a b);
+          r
+      in
+      go k_ty a b
+  in
+  let final = build "%a" "%b" in
+  let body_lines = List.rev !lines in
+  String.concat "\n"
+    ([ Printf.sprintf "define i1 @mere_map_key_eq_%s(%s %%a, %s %%b) {" k_tag c_k c_k;
+       "entry:" ]
+     @ body_lines
+     @ [ Printf.sprintf "  ret i1 %s" final;
+         "}" ])
+
 (* Phase 15.10: Map[R, K, V] per-(K, V) runtime in LLVM IR.
    Linear-scan, region-allocated parallel arrays (keys[], values[]).
    K = int / str only; key equality is `icmp eq` for int, `@strcmp` for str. *)
@@ -3675,18 +3744,11 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let c_v = llvm_ty_of v_ty in
   let struct_name = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
   let fn_prefix = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
-  (* Key equality emit: produces an i1 register `%eq` from `%lhs` and `%k`
-     (the current loop key and the searched key). *)
+  (* Phase 15.14: emit a call to the per-K equality helper.
+     The helper itself is emitted separately by `emit_map_key_eq_helper_llvm`. *)
   let emit_key_eq lhs k_reg eq_reg =
-    match k_ty with
-    | Ast.TyInt ->
-      Printf.sprintf "  %s = icmp eq i32 %s, %s" eq_reg lhs k_reg
-    | Ast.TyStr ->
-      Printf.sprintf
-        "  %%cmp = call i32 @strcmp(ptr %s, ptr %s)\n  %s = icmp eq i32 %%cmp, 0"
-        lhs k_reg eq_reg
-    | _ ->
-      Printf.sprintf "  %s = icmp eq %s %s, %s" eq_reg c_k lhs k_reg
+    Printf.sprintf "  %s = call i1 @mere_map_key_eq_%s(%s %s, %s %s)"
+      eq_reg k_tag c_k lhs c_k k_reg
   in
   String.concat "\n"
     [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr }" struct_name;
@@ -4287,6 +4349,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_owned_vec_runtime_llvm elem_ty :: acc) owned_vec_instances []
   in
+  (* Phase 15.14: emit per-K key-equality helpers once, before the
+     per-(K, V) map runtimes (which call them). *)
+  let map_key_eq_helpers =
+    let seen = Hashtbl.create 4 in
+    Hashtbl.fold (fun _key (k_ty, _) acc ->
+      let k_tag = ty_tag k_ty in
+      if Hashtbl.mem seen k_tag then acc
+      else begin
+        Hashtbl.add seen k_tag ();
+        emit_map_key_eq_helper_llvm k_ty :: acc
+      end) map_instances []
+  in
   let map_runtimes =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       emit_map_runtime_llvm k_ty v_ty :: acc) map_instances []
@@ -4354,6 +4428,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
+    @ (if map_key_eq_helpers = [] then [] else map_key_eq_helpers @ [""])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
     @ (if vec_to_list_helpers = [] then [] else vec_to_list_helpers @ [""])
     @ (if list_len_helpers = [] then [] else list_len_helpers @ [""])

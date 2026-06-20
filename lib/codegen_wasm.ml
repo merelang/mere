@@ -106,10 +106,13 @@ let vec_higher_order_used = ref false
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
 
-(* Phase 15.10: Map[R, K, V] — Wasm では値が全部 i32 なので per-V は不要、
-   per-K (int / str) のみ。`map_int_used` と `map_str_used` の 2 flag. *)
+(* Phase 15.10/15.14: Map[R, K, V] — Wasm では値が全部 i32 なので per-V
+   は不要、per-K のみ。K の型を `map_key_types` に登録、emit_program で
+   per-K helper を 1 セットずつ emit。`map_int_used` / `map_str_used` は
+   後方互換 (新規 code はテーブル経由)。 *)
 let map_int_used = ref false
 let map_str_used = ref false
+let map_key_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 15.12: vec_to_list と len-on-list で同じ list 構造を扱うため、
    どちらか使われたら runtime を emit。tag 値は codegen 時に確定。 *)
@@ -497,12 +500,19 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
   | Some t ->
     (match Ast.walk t with
      | Ast.TyCon ("Map", [_; k_ty; _]) ->
-       (match Ast.walk k_ty with
-        | Ast.TyInt -> "int"
-        | Ast.TyStr -> "str"
-        | _ ->
-          raise (Codegen_error (loc,
-            "Map key type must be int or str in Wasm codegen (Phase 15.10)")))
+       let k_ty = Ast.walk k_ty in
+       let rec is_key_supported = function
+         | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
+         | Ast.TyTuple ts -> List.for_all is_key_supported ts
+         | _ -> false
+       in
+       if not (is_key_supported k_ty) then
+         raise (Codegen_error (loc,
+           "Map key type must be int / bool / str / tuple in Wasm codegen (Phase 15.10/15.14)"));
+       let tag = ty_tag k_ty in
+       if not (Hashtbl.mem map_key_types tag) then
+         Hashtbl.add map_key_types tag k_ty;
+       tag
      | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
   | None -> raise (Codegen_error (loc, "map_*: missing type info"))
 
@@ -1924,6 +1934,189 @@ let strbuf_runtime_wasm = {|
 (* Phase 15.10: Map[R, K, V] runtime — per-K only (V は i32 共通)。
    Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 byte。
    線形スキャン、cap 到達時は新配列を bump で確保 (arena semantics). *)
+
+(* Phase 15.14: emit a key-equality WAT function for K type. K can be
+   int / bool / str / tuple (recursive over tuple). Result is `i32`
+   (0/1). Tuple elements are i32 stored at offset 4*i within the
+   tuple's memory block. *)
+let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let local_counter = ref 0 in
+  let fresh_loc prefix =
+    incr local_counter;
+    Printf.sprintf "$%s%d" prefix !local_counter
+  in
+  let locals = ref [] in
+  let emit_eq_for_atom ty a_expr b_expr =
+    match Ast.walk ty with
+    | Ast.TyInt | Ast.TyBool ->
+      Printf.sprintf "(i32.eq %s %s)" a_expr b_expr
+    | Ast.TyStr ->
+      Printf.sprintf "(call $__lang_streq %s %s)" a_expr b_expr
+    | _ -> Printf.sprintf "(i32.eq %s %s)" a_expr b_expr
+  in
+  let rec build ty a_expr b_expr =
+    match Ast.walk ty with
+    | Ast.TyTuple ts ->
+      (* For each field i: load from offset 4*i, recursively compare,
+         AND together. *)
+      let a_loc = fresh_loc "ta" in
+      let b_loc = fresh_loc "tb" in
+      locals := (a_loc, "i32") :: !locals;
+      locals := (b_loc, "i32") :: !locals;
+      (* Use a block-scoped let-pattern via local.set to keep WAT simple. *)
+      let setup =
+        Printf.sprintf "(local.set %s %s) (local.set %s %s)" a_loc a_expr b_loc b_expr
+      in
+      let parts = List.mapi (fun i t ->
+        let off = i * 4 in
+        let fa = Printf.sprintf "(i32.load offset=%d (local.get %s))" off a_loc in
+        let fb = Printf.sprintf "(i32.load offset=%d (local.get %s))" off b_loc in
+        build t fa fb) ts in
+      let combined =
+        match parts with
+        | [] -> "(i32.const 1)"
+        | [p] -> p
+        | p0 :: rest ->
+          List.fold_left (fun acc p -> Printf.sprintf "(i32.and %s %s)" acc p) p0 rest
+      in
+      Printf.sprintf "(block (result i32) %s %s)" setup combined
+    | _ -> emit_eq_for_atom ty a_expr b_expr
+  in
+  let body_expr = build k_ty "(local.get $a)" "(local.get $b)" in
+  let local_decls =
+    if !locals = [] then ""
+    else
+      "    " ^ String.concat " "
+        (List.rev_map (fun (n, t) -> Printf.sprintf "(local %s %s)" n t) !locals)
+      ^ "\n"
+  in
+  Printf.sprintf "  (func $mere_map_key_eq_%s (param $a i32) (param $b i32) (result i32)\n%s    %s)"
+    k_tag local_decls body_expr
+
+(* Phase 15.14: emit one Wasm map runtime per K type (new/set/get/has/len),
+   each delegating to `$mere_map_key_eq_<K>`. Replaces the hardcoded
+   map_int_runtime_wasm / map_str_runtime_wasm. *)
+let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  Printf.sprintf "
+  (func $mere_map_%s_new (result i32)
+    (local $m i32) (local $keys i32) (local $values i32)
+    (local.set $m (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
+    (local.set $keys (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (local.set $values (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
+    (i32.store offset=0 (local.get $m) (local.get $keys))
+    (i32.store offset=4 (local.get $m) (local.get $values))
+    (i32.store offset=8 (local.get $m) (i32.const 0))
+    (i32.store offset=12 (local.get $m) (i32.const 4))
+    (local.get $m))
+  (func $mere_map_%s_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+    (local $i i32) (local $len i32) (local $cap i32)
+    (local $keys i32) (local $values i32)
+    (local $new_keys i32) (local $new_values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $mere_map_key_eq_%s
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            (i32.store
+              (i32.add (local.get $values)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (local.get $v))
+            (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (local.set $cap (i32.load offset=12 (local.get $m)))
+    (if (i32.eq (local.get $len) (local.get $cap))
+      (then
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new_keys (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_keys)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $new_values (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_values)
+                   (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $i (i32.const 0))
+        (block $cp_end
+          (loop $cp_lp
+            (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+            (i32.store
+              (i32.add (local.get $new_keys)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4)))))
+            (i32.store
+              (i32.add (local.get $new_values)
+                       (i32.mul (local.get $i) (i32.const 4)))
+              (i32.load (i32.add (local.get $values)
+                                 (i32.mul (local.get $i) (i32.const 4)))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp_lp)))
+        (i32.store offset=0 (local.get $m) (local.get $new_keys))
+        (i32.store offset=4 (local.get $m) (local.get $new_values))
+        (i32.store offset=12 (local.get $m) (local.get $cap))
+        (local.set $keys (local.get $new_keys))
+        (local.set $values (local.get $new_values))))
+    (i32.store
+      (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $k))
+    (i32.store
+      (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4)))
+      (local.get $v))
+    (i32.store offset=8 (local.get $m)
+      (i32.add (local.get $len) (i32.const 1)))
+    (i32.const 0))
+  (func $mere_map_%s_get (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $mere_map_key_eq_%s
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            (return (i32.load (i32.add (local.get $values)
+                                       (i32.mul (local.get $i) (i32.const 4)))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (unreachable))
+  (func $mere_map_%s_has (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $len i32) (local $keys i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $scan_done
+      (loop $scan_lp
+        (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $mere_map_key_eq_%s
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then (return (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan_lp)))
+    (i32.const 0))
+  (func $mere_map_%s_len (param $m i32) (result i32)
+    (i32.load offset=8 (local.get $m)))"
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+
 let map_int_runtime_wasm = {|
   (func $mere_map_int_new (result i32)
     (local $m i32) (local $keys i32) (local $values i32)
@@ -2175,6 +2368,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   strbuf_used := false;
   map_int_used := false;
   map_str_used := false;
+  Hashtbl.reset map_key_types;
   vec_to_list_used := false;
   list_len_used := false;
   (* Pre-register variant tags from Exhaustive's registry. *)
@@ -2355,8 +2549,22 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
   let strbuf_section = if !strbuf_used then strbuf_runtime_wasm else "" in
-  let map_int_section = if !map_int_used then map_int_runtime_wasm else "" in
-  let map_str_section = if !map_str_used then map_str_runtime_wasm else "" in
+  (* Phase 15.14: emit per-K key-eq helper + per-K map runtime for each K
+     in map_key_types. *)
+  let map_key_eq_section =
+    String.concat "\n"
+      (Hashtbl.fold (fun _tag k_ty acc ->
+         emit_map_key_eq_wasm k_ty :: acc) map_key_types [])
+  in
+  let map_runtime_section =
+    String.concat "\n"
+      (Hashtbl.fold (fun _tag k_ty acc ->
+         emit_map_runtime_wasm k_ty :: acc) map_key_types [])
+  in
+  (* Legacy flags (for tests that still toggle them) — no-op effect since
+     the table is the authoritative source. *)
+  let _ = !map_int_used and _ = !map_str_used in
+  ignore map_int_runtime_wasm; ignore map_str_runtime_wasm;
   (* Phase 15.12: vec_to_list / list_len helpers. tag 値は variant_tags
      から codegen 時に取り出して baked-in. *)
   let cons_tag_v =
@@ -2434,6 +2642,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     table_section bump_init data_section runtime_helpers vec_runtime_section
-    vec_higher_order_section strbuf_section map_int_section map_str_section
+    vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     vec_to_list_section list_len_section
     fn_section local_decl indented_body

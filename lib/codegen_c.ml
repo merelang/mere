@@ -434,11 +434,16 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
        let k_ty = Ast.walk k_ty in
        let v_ty = Ast.walk v_ty in
        if ty_is_concrete k_ty && ty_is_concrete v_ty then begin
-         (match k_ty with
-          | Ast.TyInt | Ast.TyStr -> ()
-          | _ ->
-            raise (Codegen_error (loc,
-              "Map key type must be int or str in C codegen (Phase 15.10)")));
+         (* Phase 15.10/15.14: K must be a type with codegen-defined equality.
+            int / bool / str / tuple (of supported types) are supported. *)
+         let rec is_key_supported = function
+           | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
+           | Ast.TyTuple ts -> List.for_all is_key_supported ts
+           | _ -> false
+         in
+         if not (is_key_supported k_ty) then
+           raise (Codegen_error (loc,
+             "Map key type must be int / bool / str / tuple in C codegen (Phase 15.10/15.14)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -1337,18 +1342,21 @@ let rec c_type_of (t : Ast.ty) : string =
     strbuf_used := true;
     "mere_strbuf*"
   | Ast.TyCon ("Map", args) ->
-    (* Phase 15.10: Map[R, K, V] — per-(K, V) monomorphize。
-       K は int / str のみ対応。 *)
+    (* Phase 15.10/15.14: Map[R, K, V] — per-(K, V) monomorphize。
+       K = int / bool / str / tuple (of supported types). *)
     (match List.map Ast.walk args with
      | [_; k_ty; v_ty]
        when ty_is_concrete k_ty && ty_is_concrete v_ty ->
        let k_tag = ty_tag k_ty in
        let v_tag = ty_tag v_ty in
-       (match k_ty with
-        | Ast.TyInt | Ast.TyStr -> ()
-        | _ ->
-          raise (Codegen_error (Loc.dummy,
-            "Map key type must be int or str in C codegen (Phase 15.10)")));
+       let rec is_key_supported = function
+         | Ast.TyInt | Ast.TyBool | Ast.TyStr -> true
+         | Ast.TyTuple ts -> List.for_all is_key_supported ts
+         | _ -> false
+       in
+       if not (is_key_supported k_ty) then
+         raise (Codegen_error (Loc.dummy,
+           "Map key type must be int / bool / str / tuple in C codegen (Phase 15.10/15.14)"));
        let key = k_tag ^ "__" ^ v_tag in
        if not (Hashtbl.mem map_instances key) then
          Hashtbl.add map_instances key (k_ty, v_ty);
@@ -1811,12 +1819,19 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let c_k = c_type_of k_ty in
   let c_v = c_type_of v_ty in
   let struct_name = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
-  let key_eq_expr a b =
-    match k_ty with
-    | Ast.TyInt -> Printf.sprintf "(%s) == (%s)" a b
+  let rec key_eq_for k a b =
+    match Ast.walk k with
+    | Ast.TyInt | Ast.TyBool -> Printf.sprintf "(%s) == (%s)" a b
     | Ast.TyStr -> Printf.sprintf "strcmp((%s), (%s)) == 0" a b
-    | _ -> Printf.sprintf "(%s) == (%s)" a b  (* fallback: pointer eq *)
+    | Ast.TyTuple ts ->
+      let parts = List.mapi (fun i t ->
+        key_eq_for t
+          (Printf.sprintf "(%s).f%d" a i)
+          (Printf.sprintf "(%s).f%d" b i)) ts in
+      "(" ^ String.concat " && " parts ^ ")"
+    | _ -> Printf.sprintf "(%s) == (%s)" a b
   in
+  let key_eq_expr a b = key_eq_for k_ty a b in
   String.concat "\n"
     [ Printf.sprintf "typedef struct %s {" struct_name;
       Printf.sprintf "  %s* keys;" c_k;
