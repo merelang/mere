@@ -723,6 +723,11 @@ let rec emit_expr (e : Ast.expr) : string =
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
      | Ast.Var "str_len" ->
        "((int) strlen(" ^ emit_expr arg ^ "))"
+     | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
+       (* Phase 19.1.1: str_index_of h n — curried, outer App carries
+          the needle. Emits a call to the runtime helper. *)
+       Printf.sprintf "__lang_str_index_of(%s, %s)"
+         (emit_expr h_e) (emit_expr arg)
      | Ast.Var "fst" ->
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
@@ -1823,6 +1828,14 @@ let str_concat_helper =
       "  memcpy(r + la, b, lb);";
       "  r[la + lb] = '\\0';";
       "  return r;";
+      "}";
+      "";
+      (* Phase 19.1.1: str_index_of — return position of needle in
+         haystack, -1 if not found. Empty needle returns 0. *)
+      "static int __lang_str_index_of(const char* h, const char* n) {";
+      "  if (n[0] == '\\0') return 0;";
+      "  const char* p = strstr(h, n);";
+      "  return p == NULL ? -1 : (int)(p - h);";
       "}" ]
 
 (* Region runtime: a bump allocator. `region R { body }` initializes a

@@ -89,7 +89,7 @@ str_index_of "hello world" "world"             // 6
 str_index_of "hello" "xyz"                     // -1
 ```
 
-**★ codegen 状況**: `str_index_of` は 4 backend 全部で動く予定 (Phase 19.1.1)。`str_split` / `str_join` は **interpreter only** (codegen は recursive variant `list` 構築が必要で、Phase 19.1.1 で対応予定)。
+**★ codegen 状況**: `str_index_of` は **4 backend 全部で動く** (Phase 19.1.1 で対応完了)。`str_split` / `str_join` は **interpreter only** (codegen は recursive variant `list` 構築が必要で、Phase 19.1.2 で対応予定)。
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"
