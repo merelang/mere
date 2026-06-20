@@ -640,6 +640,48 @@ let rec emit_expr (e : Ast.expr) : unit =
        locals := (name, slot) :: prev;
        emit_expr body;
        locals := prev
+     | Ast.P_wild | Ast.P_unit ->
+       (* Phase 22.1: evaluate RHS for side effects, drop, then body. *)
+       emit_expr value;
+       emit_instr "drop";
+       emit_expr body
+     | Ast.P_tuple ps ->
+       (* Phase 22.1: `let (a, b, ...) = E in B` — Wasm tuples are flat
+          memory blocks of i32 cells, so emit a tuple-ptr local then
+          `i32.load offset=N*4` per index. *)
+       let tup_slot = fresh_local () in
+       emit_expr value;
+       emit_instr (Printf.sprintf "local.set %d" tup_slot);
+       let value_ty =
+         match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+       in
+       let elem_tys = match value_ty with
+         | Ast.TyTuple ts -> ts
+         | _ ->
+           raise (Codegen_error (pat.Ast.ploc,
+             "let-tuple pattern requires a tuple-typed RHS"))
+       in
+       if List.length ps <> List.length elem_tys then
+         raise (Codegen_error (pat.Ast.ploc,
+           "let-tuple arity mismatch"));
+       let prev = !locals in
+       let new_bindings = ref [] in
+       List.iteri (fun i p ->
+         match p.Ast.pnode with
+         | Ast.P_var n ->
+           let slot = fresh_local () in
+           emit_instr (Printf.sprintf "local.get %d" tup_slot);
+           emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+           emit_instr (Printf.sprintf "local.set %d" slot);
+           new_bindings := (n, slot) :: !new_bindings
+         | Ast.P_wild -> ()
+         | _ ->
+           raise (Codegen_error (p.Ast.ploc,
+             "nested let-tuple patterns not supported in Wasm codegen subset"))
+       ) ps;
+       locals := !new_bindings @ prev;
+       emit_expr body;
+       locals := prev
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 6 later slice")
   | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->

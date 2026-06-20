@@ -5764,5 +5764,35 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
+     `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
+     per-field 取り出しを emit。 *)
+  check "§22.1: let (a, b) = E in B works in interpreter"
+    (Pipeline.process "let (a, b) = (3, 4) in a + b") "7";
+  check "§22.1: nested let-tuple chain works in interpreter"
+    (Pipeline.process
+       "let p = (1, 2) in let (x, y) = p in let q = (x, y, x + y) in \
+        let (a, b, c) = q in a + b + c") "6";
+  check "§22.1: P_tuple let emits C code"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let (a, b) = (3, 4) in a + b") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.1: P_tuple let emits LLVM IR"
+    (let ll_src = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let (a, b) = (3, 4) in a + b") in
+     if String.length ll_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.1: P_tuple let emits Wasm"
+    (let wat_src = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let (a, b) = (3, 4) in a + b") in
+     if String.length wat_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.1: P_tuple let with wildcard slot"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let (a, _) = (10, 99) in a") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

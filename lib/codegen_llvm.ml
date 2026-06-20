@@ -1703,6 +1703,50 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let r = emit_expr ((name, rv) :: env) body in
        current_var_types := saved;
        r
+     | Ast.P_wild | Ast.P_unit ->
+       (* Phase 22.1: evaluate RHS for side effects, then continue with body. *)
+       let _ = emit_expr env value in
+       emit_expr env body
+     | Ast.P_tuple ps ->
+       (* Phase 22.1: `let (a, b, ...) = E in B` — extractvalue per index. *)
+       let rv = emit_expr env value in
+       let value_ty =
+         match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+       in
+       let elem_tys = match value_ty with
+         | Ast.TyTuple ts -> ts
+         | _ ->
+           raise (Codegen_error (pat.Ast.ploc,
+             "let-tuple pattern requires a tuple-typed RHS"))
+       in
+       if List.length ps <> List.length elem_tys then
+         raise (Codegen_error (pat.Ast.ploc,
+           "let-tuple arity mismatch"));
+       let tname = tuple_struct_name elem_tys in
+       let saved = !current_var_types in
+       let new_env_extra = List.mapi (fun i p ->
+         let elem_ty = List.nth elem_tys i in
+         match p.Ast.pnode with
+         | Ast.P_var n ->
+           let r = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
+                         r tname rv i);
+           Some (n, r, elem_ty)
+         | Ast.P_wild -> None
+         | _ ->
+           raise (Codegen_error (p.Ast.ploc,
+             "nested let-tuple patterns not supported in LLVM codegen subset"))
+       ) ps in
+       let env' =
+         List.filter_map (function Some (n, r, _) -> Some (n, r) | None -> None)
+           new_env_extra @ env
+       in
+       current_var_types :=
+         List.filter_map (function Some (n, _, t) -> Some (n, t) | None -> None)
+           new_env_extra @ saved;
+       let r = emit_expr env' body in
+       current_var_types := saved;
+       r
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 5 later slice")
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
