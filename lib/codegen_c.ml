@@ -532,6 +532,7 @@ let rec emit_expr (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+       || name = "vec_reverse" || name = "vec_concat"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -826,6 +827,34 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_vec_%s_set(%s, %s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr idx_e) (emit_expr arg)
+     | Ast.Var "vec_reverse" ->
+       (* Phase 19.3: in-place reverse via swap loop. Returns 0 (unit). *)
+       let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       let _ = elem_tag in
+       Printf.sprintf
+         "({ __auto_type __vc = %s; \
+          int __lo = 0, __hi = __vc->len - 1; \
+          while (__lo < __hi) { \
+            __auto_type __tmp = __vc->data[__lo]; \
+            __vc->data[__lo] = __vc->data[__hi]; \
+            __vc->data[__hi] = __tmp; \
+            __lo++; __hi--; \
+          } 0; })"
+         (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "vec_concat"; _ }, a_e) ->
+       (* Phase 19.3: vec_concat a b — allocate new Vec in a's region,
+          push all of a's then b's elements. *)
+       let elem_tag = vec_elem_tag_of a_e.Ast.ty a_e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __va = %s; __auto_type __vb = %s; \
+          mere_vec_%s* __new = mere_vec_%s_new(__va->region); \
+          for (int __i = 0; __i < __va->len; __i++) \
+            mere_vec_%s_push(__new, mere_vec_%s_get(__va, __i)); \
+          for (int __i = 0; __i < __vb->len; __i++) \
+            mere_vec_%s_push(__new, mere_vec_%s_get(__vb, __i)); \
+          __new; })"
+         (emit_expr a_e) (emit_expr arg)
+         elem_tag elem_tag elem_tag elem_tag elem_tag elem_tag
      | Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e) ->
        (* Phase 15.6: vec_map v f — region-preserving 新 Vec を返す。
           v の要素型 T と結果 Vec の要素型 U はそれぞれ AST から取り出す。

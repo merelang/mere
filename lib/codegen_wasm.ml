@@ -552,6 +552,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+       || name = "vec_reverse" || name = "vec_concat"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -691,6 +692,17 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr idx_e;
     emit_expr val_e;
     emit_instr "call $mere_vec_set"
+  | Ast.App ({ node = Ast.Var "vec_reverse"; _ }, vec_e) ->
+    (* Phase 19.3: vec_reverse v — in-place *)
+    vec_used := true;
+    emit_expr vec_e;
+    emit_instr "call $mere_vec_reverse"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_concat"; _ }, a_e); _ }, b_e) ->
+    (* Phase 19.3: vec_concat a b — new Vec *)
+    vec_used := true;
+    emit_expr a_e;
+    emit_expr b_e;
+    emit_instr "call $mere_vec_concat"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_iter"; _ }, vec_e); _ }, fn_e) ->
     (* Phase 15.5: vec_iter v f *)
     vec_used := true;
@@ -1826,6 +1838,56 @@ let vec_runtime = {|
                                     (i32.mul (local.get $i) (i32.const 4))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
+    (local.get $new))
+  ;; Phase 19.3: vec_reverse — in-place swap, returns 0 (unit).
+  (func $mere_vec_reverse (param $v i32) (result i32)
+    (local $lo i32) (local $hi i32) (local $buf i32) (local $tmp i32)
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $lo (i32.const 0))
+    (local.set $hi (i32.sub (i32.load offset=4 (local.get $v)) (i32.const 1)))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.ge_s (local.get $lo) (local.get $hi)))
+        (local.set $tmp (i32.load
+          (i32.add (local.get $buf) (i32.mul (local.get $lo) (i32.const 4)))))
+        (i32.store
+          (i32.add (local.get $buf) (i32.mul (local.get $lo) (i32.const 4)))
+          (i32.load (i32.add (local.get $buf)
+                             (i32.mul (local.get $hi) (i32.const 4)))))
+        (i32.store
+          (i32.add (local.get $buf) (i32.mul (local.get $hi) (i32.const 4)))
+          (local.get $tmp))
+        (local.set $lo (i32.add (local.get $lo) (i32.const 1)))
+        (local.set $hi (i32.sub (local.get $hi) (i32.const 1)))
+        (br $lp)))
+    (i32.const 0))
+  ;; Phase 19.3: vec_concat — new Vec, copy a then b.
+  (func $mere_vec_concat (param $a i32) (param $b i32) (result i32)
+    (local $new i32) (local $i i32) (local $alen i32) (local $blen i32)
+    (local $abuf i32) (local $bbuf i32)
+    (local.set $new (call $mere_vec_new))
+    (local.set $alen (i32.load offset=4 (local.get $a)))
+    (local.set $blen (i32.load offset=4 (local.get $b)))
+    (local.set $abuf (i32.load offset=0 (local.get $a)))
+    (local.set $bbuf (i32.load offset=0 (local.get $b)))
+    (local.set $i (i32.const 0))
+    (block $end_a
+      (loop $lp_a
+        (br_if $end_a (i32.eq (local.get $i) (local.get $alen)))
+        (drop (call $mere_vec_push (local.get $new)
+                (i32.load (i32.add (local.get $abuf)
+                                   (i32.mul (local.get $i) (i32.const 4))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_a)))
+    (local.set $i (i32.const 0))
+    (block $end_b
+      (loop $lp_b
+        (br_if $end_b (i32.eq (local.get $i) (local.get $blen)))
+        (drop (call $mere_vec_push (local.get $new)
+                (i32.load (i32.add (local.get $bbuf)
+                                   (i32.mul (local.get $i) (i32.const 4))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_b)))
     (local.get $new))|}
 
 (* Phase 15.5: vec_iter / vec_fold helpers. References (type $cl) and

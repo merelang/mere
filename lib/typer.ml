@@ -633,6 +633,29 @@ let vec_set_scheme =
       Ast.TyArrow (Ast.TyInt,
         Ast.TyArrow (_vec_set_elem, Ast.TyUnit))) }
 
+(* Phase 19.3: vec_reverse (in-place), vec_concat (returns new region Vec). *)
+let _vec_reverse_elem = fresh_var ()
+let _vec_reverse_region = fresh_var ()
+let vec_reverse_scheme =
+  let aid = match _vec_reverse_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_reverse_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_reverse_region; _vec_reverse_elem]),
+      Ast.TyUnit) }
+
+let _vec_concat_elem = fresh_var ()
+let _vec_concat_region = fresh_var ()
+let vec_concat_scheme =
+  let aid = match _vec_concat_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _vec_concat_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_concat_region; _vec_concat_elem]),
+      Ast.TyArrow (
+        Ast.TyCon ("Vec", [_vec_concat_region; _vec_concat_elem]),
+        Ast.TyCon ("Vec", [_vec_concat_region; _vec_concat_elem]))) }
+
 (* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。
    - vec_filter は region-preserving (source の R を結果も持つ)
    - vec_to_list は `'a list` (user-declared または builtin) に変換
@@ -977,6 +1000,8 @@ let initial_env : env =
     ("vec_map",    vec_map_scheme);
     ("vec_fold",   vec_fold_scheme);
     ("vec_set",    vec_set_scheme);
+    ("vec_reverse", vec_reverse_scheme);
+    ("vec_concat",  vec_concat_scheme);
     ("vec_filter",   vec_filter_scheme);
     ("vec_to_list",  vec_to_list_scheme);
     ("vec_to_owned", vec_to_owned_scheme);
