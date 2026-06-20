@@ -5223,5 +5223,50 @@ let () =
           let m = &mut R z in 42\n\
         }") "42";
 
+  (* --- Phase 17.1 / DEFERRED §2.1 残: 関数返り値の borrow 追跡 --- *)
+  check_raises "borrow checker (app-result): &mut R r when r came from fn returning &R T"
+    (fun () ->
+      Pipeline.process
+        "let get_ref = fn (x: &R int) -> x in\n\
+         region R {\n\
+           let v = 42 in\n\
+           let r = get_ref (&R v) in\n\
+           let r2 = &mut R r in\n\
+           0\n\
+         }");
+  check_raises "borrow checker (app-result): &R r when r came from fn returning &mut R T"
+    (fun () ->
+      Pipeline.process
+        "let get_mut = fn (x: &mut R int) -> x in\n\
+         region R {\n\
+           let v = 42 in\n\
+           let r1 = get_mut (&mut R v) in\n\
+           let r2 = &R r1 in\n\
+           0\n\
+         }");
+  check "borrow checker (app-result): two shared-read fn results — OK"
+    (Pipeline.process
+       "let get_ref = fn (x: &R int) -> x in\n\
+        region R {\n\
+          let v = 42 in\n\
+          let r1 = get_ref (&R v) in\n\
+          let r2 = get_ref (&R v) in\n\
+          0\n\
+        }") "0";
+  assert_contains "borrow checker (app-result): error names the let-bound place"
+    (let buf = Buffer.create 64 in
+     (try
+        let _ = Pipeline.process
+          "let get_ref = fn (x: &R int) -> x in\n\
+           region R {\n\
+             let v = 42 in\n\
+             let rrr = get_ref (&R v) in\n\
+             let r2 = &mut R rrr in\n\
+             0\n\
+           }" in ()
+      with Typer.Type_error (_, m) -> Buffer.add_string buf m);
+     Buffer.contents buf)
+    "`rrr` is already borrowed";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
