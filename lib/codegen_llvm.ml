@@ -1568,6 +1568,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+       || name = "vec_reverse" || name = "vec_concat"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -1832,6 +1833,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_set(ptr %s, i32 %s, %s %s)"
                   r elem_tag av iv (llvm_ty_of elem_ty) xv);
+    r
+  | Ast.App ({ node = Ast.Var "vec_reverse"; _ }, vec_e) ->
+    (* Phase 19.3: vec_reverse v — in-place, per-T helper. *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let av = emit_expr env vec_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_vec_%s_reverse(ptr %s)"
+                  r elem_tag av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_concat"; _ }, a_e); _ }, b_e) ->
+    (* Phase 19.3: vec_concat a b — new region Vec, per-T helper. *)
+    let elem_tag = vec_elem_tag_of a_e.Ast.ty a_e.Ast.loc in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_vec_%s_concat(ptr %s, ptr %s)"
+                  r elem_tag av bv);
     r
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
     (* Phase 15.9: strbuf_new () — result type の TyCon arg から region を
@@ -3280,6 +3300,87 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "  ret i32 0";
       "}" ]
 
+(* Phase 19.3: vec_reverse helper — in-place swap loop. *)
+let emit_vec_reverse_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let struct_name = "mere_vec_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "define i32 @mere_vec_%s_reverse(ptr %%v) {" tag;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      "  %hi_init = sub i32 %len, 1";
+      "  br label %check";
+      "check:";
+      "  %lo = phi i32 [ 0, %entry ], [ %lo_next, %swap ]";
+      "  %hi = phi i32 [ %hi_init, %entry ], [ %hi_next, %swap ]";
+      "  %done = icmp sge i32 %lo, %hi";
+      "  br i1 %done, label %end, label %swap";
+      "swap:";
+      Printf.sprintf "  %%lo_slot = getelementptr %s, ptr %%data, i32 %%lo" c_elem;
+      Printf.sprintf "  %%hi_slot = getelementptr %s, ptr %%data, i32 %%hi" c_elem;
+      Printf.sprintf "  %%lo_val = load %s, ptr %%lo_slot" c_elem;
+      Printf.sprintf "  %%hi_val = load %s, ptr %%hi_slot" c_elem;
+      Printf.sprintf "  store %s %%hi_val, ptr %%lo_slot" c_elem;
+      Printf.sprintf "  store %s %%lo_val, ptr %%hi_slot" c_elem;
+      "  %lo_next = add i32 %lo, 1";
+      "  %hi_next = sub i32 %hi, 1";
+      "  br label %check";
+      "end:";
+      "  ret i32 0";
+      "}" ]
+
+(* Phase 19.3: vec_concat helper — new Vec in a's region with a's then b's. *)
+let emit_vec_concat_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let struct_name = "mere_vec_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "define ptr @mere_vec_%s_concat(ptr %%a, ptr %%b) {" tag;
+      "entry:";
+      (* Allocate new Vec in a's region. *)
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%a, i32 0, i32 3" struct_name;
+      "  %reg = load ptr, ptr %rp";
+      Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%reg)" tag;
+      (* Copy from a. *)
+      Printf.sprintf "  %%alp = getelementptr %%%s, ptr %%a, i32 0, i32 1" struct_name;
+      "  %alen = load i32, ptr %alp";
+      Printf.sprintf "  %%adp = getelementptr %%%s, ptr %%a, i32 0, i32 0" struct_name;
+      "  %adata = load ptr, ptr %adp";
+      "  br label %check_a";
+      "check_a:";
+      "  %ai = phi i32 [ 0, %entry ], [ %ai_next, %body_a ]";
+      "  %adone = icmp sge i32 %ai, %alen";
+      "  br i1 %adone, label %prep_b, label %body_a";
+      "body_a:";
+      Printf.sprintf "  %%aslot = getelementptr %s, ptr %%adata, i32 %%ai" c_elem;
+      Printf.sprintf "  %%aelem = load %s, ptr %%aslot" c_elem;
+      Printf.sprintf "  call i32 @mere_vec_%s_push(ptr %%new, %s %%aelem)" tag c_elem;
+      "  %ai_next = add i32 %ai, 1";
+      "  br label %check_a";
+      "prep_b:";
+      Printf.sprintf "  %%blp = getelementptr %%%s, ptr %%b, i32 0, i32 1" struct_name;
+      "  %blen = load i32, ptr %blp";
+      Printf.sprintf "  %%bdp = getelementptr %%%s, ptr %%b, i32 0, i32 0" struct_name;
+      "  %bdata = load ptr, ptr %bdp";
+      "  br label %check_b";
+      "check_b:";
+      "  %bi = phi i32 [ 0, %prep_b ], [ %bi_next, %body_b ]";
+      "  %bdone = icmp sge i32 %bi, %blen";
+      "  br i1 %bdone, label %end, label %body_b";
+      "body_b:";
+      Printf.sprintf "  %%bslot = getelementptr %s, ptr %%bdata, i32 %%bi" c_elem;
+      Printf.sprintf "  %%belem = load %s, ptr %%bslot" c_elem;
+      Printf.sprintf "  call i32 @mere_vec_%s_push(ptr %%new, %s %%belem)" tag c_elem;
+      "  %bi_next = add i32 %bi, 1";
+      "  br label %check_b";
+      "end:";
+      "  ret ptr %new";
+      "}" ]
+
 (* Phase 15.5: vec_iter helper per element type T.
    Signature: i32 @mere_vec_<T>_iter(ptr v, %closure_<T>_unit cl)
    Emits a basic-block-style loop calling the closure for each element. *)
@@ -4637,6 +4738,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_vec_runtime_for_llvm elem_ty :: acc) vec_instances []
   in
+  (* Phase 19.3: vec_reverse / vec_concat — emit per element type seen.
+     Emitted for ALL vec_instances regardless of use, simple and harmless
+     (LLVM optimizes away if unreferenced). *)
+  let vec_reverse_concat_helpers =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_vec_reverse_helper_llvm elem_ty
+      :: emit_vec_concat_helper_llvm elem_ty
+      :: acc) vec_instances []
+  in
   let vec_iter_helpers =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_vec_iter_helper_llvm elem_ty :: acc) vec_iter_instances []
@@ -4737,6 +4847,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         str_concat_helper;
         "" ]
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
+    @ (if vec_reverse_concat_helpers = [] then []
+       else vec_reverse_concat_helpers @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])

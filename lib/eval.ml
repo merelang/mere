@@ -996,6 +996,32 @@ let builtin_vec_set =
           | _ -> failwith "vec_set: expected int index"))
     | _ -> failwith "vec_set: expected Vec")
 
+(* Phase 19.3: vec_reverse (in-place) / vec_concat (returns new Vec). *)
+let builtin_vec_reverse =
+  V_builtin ("vec_reverse", fun v ->
+    match v with
+    | V_vec arr ->
+      let n = Array.length !arr in
+      for i = 0 to (n / 2) - 1 do
+        let j = n - 1 - i in
+        let tmp = (!arr).(i) in
+        (!arr).(i) <- (!arr).(j);
+        (!arr).(j) <- tmp
+      done;
+      V_unit
+    | _ -> failwith "vec_reverse: expected Vec")
+
+let builtin_vec_concat =
+  V_builtin ("vec_concat", fun v1 ->
+    match v1 with
+    | V_vec a1 ->
+      V_builtin ("vec_concat_p1", fun v2 ->
+        match v2 with
+        | V_vec a2 ->
+          V_vec (ref (Array.append !a1 !a2))
+        | _ -> failwith "vec_concat: 2nd arg expected Vec")
+    | _ -> failwith "vec_concat: 1st arg expected Vec")
+
 (* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。 *)
 let builtin_vec_filter =
   V_builtin ("vec_filter", fun v ->
@@ -1377,6 +1403,8 @@ let initial_env : env =
     ("vec_map",  ref builtin_vec_map);
     ("vec_fold", ref builtin_vec_fold);
     ("vec_set",  ref builtin_vec_set);
+    ("vec_reverse", ref builtin_vec_reverse);
+    ("vec_concat",  ref builtin_vec_concat);
     ("vec_filter",   ref builtin_vec_filter);
     ("vec_to_list",  ref builtin_vec_to_list);
     ("vec_to_owned", ref builtin_vec_to_owned);

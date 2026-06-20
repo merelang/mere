@@ -4237,6 +4237,36 @@ let () =
     (Pipeline.process
        "let v = vec_new () in \
         { vec_push v 10; vec_push v 20; vec_get v 0 + vec_get v 1 }") "30";
+
+  (* --- Phase 19.3: vec_reverse / vec_concat --- *)
+  check "vec_reverse: in-place reverses elements"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; vec_push v 3; vec_reverse v; \
+          vec_get v 0 * 100 + vec_get v 1 * 10 + vec_get v 2 }") "321";
+  check "vec_reverse: empty Vec → no-op"
+    (Pipeline.process
+       "let v = vec_new () in let __ = vec_reverse v in (vec_len v : int)") "0";
+  check "vec_reverse: single element → identity"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 42; vec_reverse v; vec_get v 0 }") "42";
+  check "vec_reverse type"
+    (Pipeline.type_of "vec_reverse") "(Vec['b, 'a] -> unit)";
+
+  check "vec_concat: concatenates two Vecs"
+    (Pipeline.process
+       "let a = vec_new () in let b = vec_new () in \
+        { vec_push a 1; vec_push a 2; vec_push b 30; vec_push b 40; \
+          let c = vec_concat a b in \
+          vec_get c 0 + vec_get c 1 + vec_get c 2 + vec_get c 3 }") "73";
+  check "vec_concat: empty + nonempty"
+    (Pipeline.process
+       "let a = vec_new () in let b = vec_new () in \
+        { vec_push b 99; let c = vec_concat a b in vec_len c + vec_get c 0 }") "100";
+  check "vec_concat type"
+    (Pipeline.type_of "vec_concat")
+    "(Vec['b, 'a] -> (Vec['b, 'a] -> Vec['b, 'a]))";
   check "vec: polymorphic — str Vec"
     (Pipeline.process
        "let v = vec_new () in \
