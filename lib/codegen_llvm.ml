@@ -131,6 +131,10 @@ let strbuf_used = ref false
 (* Phase 15.10: Map[R, K, V] per-(K, V) instances. *)
 let map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 15.12: vec_to_list per-T instances. *)
+let vec_to_list_instances : (string, Ast.ty * Ast.ty) Hashtbl.t =
+  Hashtbl.create 4
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -1525,12 +1529,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len" then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.3〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "len" then
+    if name = "len" || name = "vec_to_list" then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.11: len は直接 application のみ対応)");
-    if name = "vec_to_list" then
-      unsupported e.Ast.loc
-        (name ^ " (vec_to_list is interpreter-only)");
+        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1856,6 +1857,30 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        (* Static arity. Emit arg for side effects (but tuples have none). *)
        let _ = emit_expr env arg in
        string_of_int (List.length ts)
+     | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n
+                             && Hashtbl.mem variant_tags "Cons"
+                             && Hashtbl.mem variant_tags "Nil" ->
+       (* Phase 15.12: `len` on `T list` — call per-T helper
+          `@mere_list_<T>_len`. Track in `vec_to_list_instances` so
+          emit_program emits the helper. *)
+       let args = List.map Ast.walk args in
+       (match args with
+        | [t_ty] ->
+          let t_tag = ty_tag t_ty in
+          let list_mono = mono_variant_name n args in
+          let key = list_mono ^ "__" ^ t_tag in
+          if not (Hashtbl.mem vec_to_list_instances key) then
+            Hashtbl.add vec_to_list_instances key (t_ty,
+              Ast.TyCon (n, [t_ty]));
+          let lv = emit_expr env arg in
+          let r = fresh_reg () in
+          emit_instr (Printf.sprintf
+                        "  %s = call i32 @mere_list_%s_len(ptr %s)"
+                        r t_tag lv);
+          r
+        | _ ->
+          unsupported e.Ast.loc
+            "len: list variants with non-1-arg parameter unsupported")
      | _ ->
        unsupported e.Ast.loc
          "len: arg type has no codegen-defined length")
@@ -1957,6 +1982,29 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call %s @mere_owned_vec_%s_get(ptr %s, i32 %s)"
                   r (llvm_ty_of elem_ty) elem_tag av iv);
+    r
+  | Ast.App ({ node = Ast.Var "vec_to_list"; _ }, vec_e) ->
+    (* Phase 15.12: vec_to_list — per-T helper @mere_vec_to_list_<T>. *)
+    let t_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let t_ty = Hashtbl.find vec_instances t_tag in
+    let result_ty =
+      match e.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "vec_to_list: missing result type"
+    in
+    let list_ty =
+      match result_ty with
+      | Ast.TyCon (_, _) -> result_ty
+      | _ -> unsupported e.Ast.loc "vec_to_list: result is not a list type"
+    in
+    let key = t_tag ^ "__listresult" in
+    if not (Hashtbl.mem vec_to_list_instances key) then
+      Hashtbl.add vec_to_list_instances key (t_ty, list_ty);
+    let av = emit_expr env vec_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_vec_to_list_%s(ptr %s)"
+                  r t_tag av);
     r
   | Ast.App ({ node = Ast.Var "vec_to_owned"; _ }, vec_e) ->
     (* Phase 15.7: vec_to_owned v — region Vec[R, T] を heap OwnedVec[T] に
@@ -3493,6 +3541,109 @@ let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
+(* Phase 15.12: vec_to_list per-T helper.
+   Builds the Cons chain bottom-up (start from Nil, prepend each elem in
+   reverse). Allocates list nodes + tuple payloads in the default region.
+   Layout: list_<T>_node = { i32 tag, %tuple_<T>_list_<T> payload }. *)
+let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
+    : string =
+  let t_tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let v_struct = "mere_vec_" ^ t_tag in
+  let list_mono =
+    match list_ty with
+    | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+      mono_variant_name n (List.map Ast.walk args)
+    | Ast.TyCon (n, _) -> n
+    | _ -> "list_" ^ t_tag
+  in
+  let node_struct =
+    if is_recursive_variant_name list_mono then list_mono ^ "_node"
+    else list_mono
+  in
+  let tup_struct = tuple_struct_name [elem_ty; Ast.TyCon (list_mono, [])] in
+  let cons_tag =
+    try Hashtbl.find variant_tags "Cons" with Not_found -> 1
+  in
+  let nil_tag =
+    try Hashtbl.find variant_tags "Nil" with Not_found -> 0
+  in
+  String.concat "\n"
+    [ Printf.sprintf "define ptr @mere_vec_to_list_%s(ptr %%v) {" t_tag;
+      "entry:";
+      (* Allocate Nil node *)
+      Printf.sprintf "  %%node_size_p = getelementptr %%%s, ptr null, i32 1" node_struct;
+      "  %node_size = ptrtoint ptr %node_size_p to i64";
+      "  %nil = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %node_size)";
+      Printf.sprintf "  %%nil_tp = getelementptr %%%s, ptr %%nil, i32 0, i32 0" node_struct;
+      Printf.sprintf "  store i32 %d, ptr %%nil_tp" nil_tag;
+      (* Loop *)
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" v_struct;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" v_struct;
+      "  %data = load ptr, ptr %dp";
+      "  %start_i = sub i32 %len, 1";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ %start_i, %entry ], [ %i_next, %body ]";
+      "  %acc = phi ptr [ %nil, %entry ], [ %new_node, %body ]";
+      "  %done = icmp slt i32 %i, 0";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
+      "  %new_node = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %node_size)";
+      Printf.sprintf "  %%ntp = getelementptr %%%s, ptr %%new_node, i32 0, i32 0" node_struct;
+      Printf.sprintf "  store i32 %d, ptr %%ntp" cons_tag;
+      Printf.sprintf "  %%npp = getelementptr %%%s, ptr %%new_node, i32 0, i32 1" node_struct;
+      Printf.sprintf "  %%tup = insertvalue %%%s undef, %s %%elem, 0" tup_struct c_elem;
+      Printf.sprintf "  %%tup2 = insertvalue %%%s %%tup, ptr %%acc, 1" tup_struct;
+      Printf.sprintf "  store %%%s %%tup2, ptr %%npp" tup_struct;
+      "  %i_next = sub i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret ptr %acc";
+      "}" ]
+
+(* Phase 15.12: len on T list per-T helper. *)
+let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
+  let t_tag = ty_tag elem_ty in
+  let list_mono =
+    match list_ty with
+    | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+      mono_variant_name n (List.map Ast.walk args)
+    | Ast.TyCon (n, _) -> n
+    | _ -> "list_" ^ t_tag
+  in
+  let node_struct =
+    if is_recursive_variant_name list_mono then list_mono ^ "_node"
+    else list_mono
+  in
+  let tup_struct = tuple_struct_name [elem_ty; Ast.TyCon (list_mono, [])] in
+  let cons_tag =
+    try Hashtbl.find variant_tags "Cons" with Not_found -> 1
+  in
+  String.concat "\n"
+    [ Printf.sprintf "define i32 @mere_list_%s_len(ptr %%l) {" t_tag;
+      "entry:";
+      "  br label %check";
+      "check:";
+      "  %n = phi i32 [ 0, %entry ], [ %n_next, %body ]";
+      "  %cur = phi ptr [ %l, %entry ], [ %next, %body ]";
+      Printf.sprintf "  %%tagp = getelementptr %%%s, ptr %%cur, i32 0, i32 0" node_struct;
+      "  %tagv = load i32, ptr %tagp";
+      Printf.sprintf "  %%is_cons = icmp eq i32 %%tagv, %d" cons_tag;
+      "  br i1 %is_cons, label %body, label %end";
+      "body:";
+      Printf.sprintf "  %%pp = getelementptr %%%s, ptr %%cur, i32 0, i32 1" node_struct;
+      Printf.sprintf "  %%tup = load %%%s, ptr %%pp" tup_struct;
+      "  %next = extractvalue " ^ "%" ^ tup_struct ^ " %tup, 1";
+      "  %n_next = add i32 %n, 1";
+      "  br label %check";
+      "end:";
+      "  ret i32 %n";
+      "}" ]
+
 (* Phase 15.10: Map[R, K, V] per-(K, V) runtime in LLVM IR.
    Linear-scan, region-allocated parallel arrays (keys[], values[]).
    K = int / str only; key equality is `icmp eq` for int, `@strcmp` for str. *)
@@ -3806,6 +3957,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_filter_instances;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset map_instances;
+  Hashtbl.reset vec_to_list_instances;
   strbuf_used := false;
   show_string_globals := [];
   show_format_globals := [];
@@ -4109,6 +4261,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       emit_map_runtime_llvm k_ty v_ty :: acc) map_instances []
   in
+  let vec_to_list_helpers =
+    let seen = Hashtbl.create 4 in
+    Hashtbl.fold (fun _key (t_ty, list_ty) acc ->
+      let t_tag = ty_tag t_ty in
+      if Hashtbl.mem seen t_tag then acc
+      else begin
+        Hashtbl.add seen t_tag ();
+        emit_vec_to_list_helper_llvm t_ty list_ty :: acc
+      end) vec_to_list_instances []
+  in
+  let list_len_helpers =
+    let seen = Hashtbl.create 4 in
+    Hashtbl.fold (fun _key (t_ty, list_ty) acc ->
+      let t_tag = ty_tag t_ty in
+      if Hashtbl.mem seen t_tag then acc
+      else begin
+        Hashtbl.add seen t_tag ();
+        emit_list_len_helper_llvm t_ty list_ty :: acc
+      end) vec_to_list_instances []
+  in
   let vec_to_owned_helpers =
     Hashtbl.fold (fun tag _elem_ty acc ->
       (* emit a helper iff both vec and owned_vec exist for this tag *)
@@ -4153,6 +4325,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
+    @ (if vec_to_list_helpers = [] then [] else vec_to_list_helpers @ [""])
+    @ (if list_len_helpers = [] then [] else list_len_helpers @ [""])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
     @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
     @ (if vec_map_helpers = [] then [] else vec_map_helpers @ [""])
