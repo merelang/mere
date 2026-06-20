@@ -510,12 +510,15 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
              info.Typer.r_fields
          | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
            let ctors = Hashtbl.find Exhaustive.type_variants vname in
-           List.for_all (fun (_, payload) -> payload = None) ctors
+           List.for_all (fun (_, payload) ->
+             match payload with
+             | None -> true
+             | Some pt -> is_key_supported (Ast.walk pt)) ctors
          | _ -> false
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (loc,
-           "Map key type must be int / bool / str / tuple / record / nullary variant in Wasm codegen (Phase 15.10/15.14/15.15)"));
+           "Map key type must be int / bool / str / tuple / record / variant in Wasm codegen (Phase 15.10〜15.16)"));
        let tag = ty_tag k_ty in
        if not (Hashtbl.mem map_key_types tag) then
          Hashtbl.add map_key_types tag k_ty;
@@ -2007,9 +2010,50 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
       in
       Printf.sprintf "(block (result i32) %s %s)" setup combined
     | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
-      (* nullary variant — compare tags at offset 0. *)
-      Printf.sprintf "(i32.eq (i32.load offset=0 %s) (i32.load offset=0 %s))"
-        a_expr b_expr
+      (* Phase 15.15/15.16: variant — compare tags at offset 0, then
+         dispatch on tag to compare payload (or short-circuit to true for
+         nullary ctors). *)
+      let ctors = Hashtbl.find Exhaustive.type_variants vname in
+      let has_payload = List.exists (fun (_, p) -> p <> None) ctors in
+      if not has_payload then
+        Printf.sprintf "(i32.eq (i32.load offset=0 %s) (i32.load offset=0 %s))"
+          a_expr b_expr
+      else begin
+        let a_loc = fresh_loc "va" in
+        let b_loc = fresh_loc "vb" in
+        locals := (a_loc, "i32") :: !locals;
+        locals := (b_loc, "i32") :: !locals;
+        let setup =
+          Printf.sprintf "(local.set %s %s) (local.set %s %s)" a_loc a_expr b_loc b_expr
+        in
+        let tag_a = Printf.sprintf "(i32.load offset=0 (local.get %s))" a_loc in
+        let tag_b = Printf.sprintf "(i32.load offset=0 (local.get %s))" b_loc in
+        let pl_a = Printf.sprintf "(i32.load offset=4 (local.get %s))" a_loc in
+        let pl_b = Printf.sprintf "(i32.load offset=4 (local.get %s))" b_loc in
+        let tags_eq =
+          Printf.sprintf "(i32.eq %s %s)" tag_a tag_b
+        in
+        (* Build nested if/else chain over ctors. Default branch is 1
+           (nullary or covered). *)
+        let branches = List.filter_map (fun (cname, payload) ->
+          match payload with
+          | None -> None
+          | Some pt ->
+            let tv = Hashtbl.find variant_tags cname in
+            Some (tv, Ast.walk pt)
+        ) ctors in
+        let rec emit_dispatch = function
+          | [] -> "(i32.const 1)"
+          | (tv, pt) :: rest ->
+            let eq_pl = build pt pl_a pl_b in
+            Printf.sprintf
+              "(if (result i32) (i32.eq %s (i32.const %d)) (then %s) (else %s))"
+              tag_a tv eq_pl (emit_dispatch rest)
+        in
+        Printf.sprintf
+          "(block (result i32) %s (if (result i32) %s (then %s) (else (i32.const 0))))"
+          setup tags_eq (emit_dispatch branches)
+      end
     | _ -> emit_eq_for_atom ty a_expr b_expr
   in
   let body_expr = build k_ty "(local.get $a)" "(local.get $b)" in

@@ -4037,9 +4037,18 @@ let () =
      - Wasm: Vec[R, T] 対応 (Phase 15.4)。Wasm では値がすべて 4-byte i32
        なので per-T monomorphize 不要、単一 $mere_vec_* runtime で扱う。 *)
   (* Phase 15.1: Vec[R, int] は C codegen で動く (e2e は examples/vec_codegen_c.mere) *)
-  let vec_codegen_c src =
+  (* Test helper: process top-level decls (Top_type / Top_record / etc.)
+     before typing the main expr — needed for user-defined types. *)
+  let typed_prog src =
     let prog = Pipeline.parse_program src in
-    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    (try Pipeline.process_decls eval_env type_env prog.Ast.decls with _ -> ());
+    let _ = Typer.infer !type_env (Ast.desugar_program prog) in
+    prog
+  in
+  let vec_codegen_c src =
+    let prog = typed_prog src in
     Codegen_c.emit_program ~main_ty:Ast.TyInt prog
   in
   check "vec: C codegen accepts Vec[R, int]"
@@ -4080,8 +4089,7 @@ let () =
     c_src_tup "mere_vec_tuple_int_int";
   (* Phase 15.3: LLVM IR codegen も Vec[R, T] を要素型一般化で対応。 *)
   let vec_codegen_llvm src =
-    let prog = Pipeline.parse_program src in
-    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    let prog = typed_prog src in
     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog
   in
   check "vec: LLVM codegen accepts Vec[R, int]"
@@ -4108,8 +4116,7 @@ let () =
      すべて 4-byte i32 なので per-T monomorphize 不要、単一の
      $mere_vec_* runtime で全要素型を扱う。 *)
   let vec_codegen_wasm src =
-    let prog = Pipeline.parse_program src in
-    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    let prog = typed_prog src in
     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog
   in
   let wat_int = vec_codegen_wasm
@@ -4693,39 +4700,50 @@ let () =
      map_get m (Pt { x = 1, y = 2 }) + map_len m"
   in
   assert_contains "map[variant, int]: C codegen accepts"
-    (let prog = Pipeline.parse_program map_var_src in
-     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
-    "mere_map_Color_int";
+    (vec_codegen_c map_var_src) "mere_map_Color_int";
   assert_contains "map[record, int]: C codegen accepts"
-    (let prog = Pipeline.parse_program map_rec_src in
-     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
-    "mere_map_Pt_int";
+    (vec_codegen_c map_rec_src) "mere_map_Pt_int";
   assert_contains "map[variant]: LLVM codegen emits key_eq"
-    (let prog = Pipeline.parse_program map_var_src in
-     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
-    "@mere_map_key_eq_Color";
+    (vec_codegen_llvm map_var_src) "@mere_map_key_eq_Color";
   assert_contains "map[record]: LLVM codegen emits key_eq"
-    (let prog = Pipeline.parse_program map_rec_src in
-     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
-    "@mere_map_key_eq_Pt";
+    (vec_codegen_llvm map_rec_src) "@mere_map_key_eq_Pt";
   assert_contains "map[variant]: Wasm codegen emits key_eq"
-    (let prog = Pipeline.parse_program map_var_src in
-     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
-    "$mere_map_key_eq_Color";
+    (vec_codegen_wasm map_var_src) "$mere_map_key_eq_Color";
   assert_contains "map[record]: Wasm codegen emits key_eq"
-    (let prog = Pipeline.parse_program map_rec_src in
-     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
-     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
-    "$mere_map_key_eq_Pt";
+    (vec_codegen_wasm map_rec_src) "$mere_map_key_eq_Pt";
   check "map[variant]: interpreter parity"
     (Pipeline.process map_var_src) "9";
   check "map[record]: interpreter parity"
     (Pipeline.process map_rec_src) "1000";
+  (* --- Phase 15.16: Map K の payload 付き variant 拡張 --- *)
+  (* C: mixed-payload variant OK *)
+  let map_varp_mixed_src =
+    "type TagMixed = AMixed of int | BMixed of str | CMixed;\n\
+     let m = map_new () in let __ = map_set m (AMixed 10) 100 in \
+     let __ = map_set m (BMixed \"hi\") 200 in let __ = map_set m CMixed 300 in \
+     map_get m (AMixed 10) + map_get m (BMixed \"hi\") + map_get m CMixed + map_len m"
+  in
+  assert_contains "map[payload variant, mixed]: C codegen accepts"
+    (vec_codegen_c map_varp_mixed_src)
+    "mere_map_TagMixed_int";
+  check "map[payload variant, mixed]: C interpreter parity"
+    (Pipeline.process map_varp_mixed_src) "603";
+  (* LLVM / Wasm: uniform-payload variant (MVP 制約に従う) *)
+  let map_varp_uniform_src =
+    "type TagU = AU of int | BU of int | CU;\n\
+     let m = map_new () in let __ = map_set m (AU 10) 100 in \
+     let __ = map_set m (BU 20) 200 in let __ = map_set m CU 300 in \
+     let __ = map_set m (AU 10) 999 in \
+     map_get m (AU 10) + map_get m (BU 20) + map_get m CU + map_len m"
+  in
+  assert_contains "map[payload variant, uniform]: LLVM codegen accepts"
+    (vec_codegen_llvm map_varp_uniform_src)
+    "@mere_map_key_eq_TagU";
+  assert_contains "map[payload variant, uniform]: Wasm codegen accepts"
+    (vec_codegen_wasm map_varp_uniform_src)
+    "$mere_map_key_eq_TagU";
+  check "map[payload variant, uniform]: interpreter parity"
+    (Pipeline.process map_varp_uniform_src) "1502";
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)

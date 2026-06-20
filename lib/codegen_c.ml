@@ -444,14 +444,19 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
              List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
                info.Typer.r_fields
            | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
-             (* Allow only nullary variants (all ctors have no payload). *)
+             (* Phase 15.15: nullary variants ✓.
+                Phase 15.16: also payload variants (per-ctor recursive
+                check on each ctor's payload type). *)
              let ctors = Hashtbl.find Exhaustive.type_variants vname in
-             List.for_all (fun (_, payload) -> payload = None) ctors
+             List.for_all (fun (_, payload) ->
+               match payload with
+               | None -> true
+               | Some pt -> is_key_supported (Ast.walk pt)) ctors
            | _ -> false
          in
          if not (is_key_supported k_ty) then
            raise (Codegen_error (loc,
-             "Map key type must be int / bool / str / tuple / record / nullary variant in C codegen (Phase 15.10/15.14/15.15)"));
+             "Map key type must be int / bool / str / tuple / record / variant in C codegen (Phase 15.10〜15.16)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -1366,12 +1371,15 @@ let rec c_type_of (t : Ast.ty) : string =
              info.Typer.r_fields
          | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
            let ctors = Hashtbl.find Exhaustive.type_variants vname in
-           List.for_all (fun (_, payload) -> payload = None) ctors
+           List.for_all (fun (_, payload) ->
+             match payload with
+             | None -> true
+             | Some pt -> is_key_supported (Ast.walk pt)) ctors
          | _ -> false
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (Loc.dummy,
-           "Map key type must be int / bool / str / tuple / record / nullary variant in C codegen (Phase 15.10/15.14/15.15)"));
+           "Map key type must be int / bool / str / tuple / record / variant in C codegen (Phase 15.10〜15.16)"));
        let key = k_tag ^ "__" ^ v_tag in
        if not (Hashtbl.mem map_instances key) then
          Hashtbl.add map_instances key (k_ty, v_ty);
@@ -1853,9 +1861,31 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
           (Printf.sprintf "(%s).%s" b fname)) info.Typer.r_fields in
       "(" ^ String.concat " && " parts ^ ")"
     | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
-      (* Phase 15.15: nullary variant key — compare tags. Payloads not
-         supported in this slice (would require per-tag union access). *)
-      Printf.sprintf "(%s).tag == (%s).tag" a b
+      (* Phase 15.15/15.16: variant key — first check tags match, then
+         for matching tag, recursively compare the payload (if any).
+         Emit as a tag-keyed ternary chain. Nullary ctors short-circuit
+         to `1` (their tag match is the only test). *)
+      let ctors = Hashtbl.find Exhaustive.type_variants vname in
+      let has_payload = List.exists (fun (_, p) -> p <> None) ctors in
+      if not has_payload then
+        (* All nullary — just compare tags. *)
+        Printf.sprintf "(%s).tag == (%s).tag" a b
+      else begin
+        let cases =
+          List.map (fun (cname, payload) ->
+            let tag_v = Hashtbl.find variant_tags cname in
+            match payload with
+            | None -> Printf.sprintf "(%s).tag == %d ? 1" a tag_v
+            | Some pt ->
+              let pa = Printf.sprintf "(%s).payload.%s" a cname in
+              let pb = Printf.sprintf "(%s).payload.%s" b cname in
+              Printf.sprintf "(%s).tag == %d ? (%s)"
+                a tag_v (key_eq_for (Ast.walk pt) pa pb)
+          ) ctors
+        in
+        Printf.sprintf "((%s).tag == (%s).tag && (%s : 0))"
+          a b (String.concat " : " cases)
+      end
     | _ -> Printf.sprintf "(%s) == (%s)" a b
   in
   let key_eq_expr a b = key_eq_for k_ty a b in
