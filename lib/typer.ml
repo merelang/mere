@@ -1572,7 +1572,21 @@ let rec check_borrows active (e : Ast.expr) : unit =
   | Ast.Annot (inner, _) -> go inner
   | Ast.Constr (_, None) -> ()
   | Ast.Constr (_, Some a) -> go a
-  | Ast.Tuple es -> List.iter go es
+  | Ast.Tuple es ->
+    (* Phase 17.2 / DEFERRED §2.5: tuple elements coexist after the
+       tuple is built, so accumulate borrows from earlier elements and
+       check later elements against them. This catches:
+         let (a, b) = (&R v, &mut R v) in ...
+       where the two borrows would otherwise both be checked against
+       the outer `active` without seeing each other. *)
+    ignore (List.fold_left (fun acc e ->
+      check_borrows acc e;
+      let new_b = extract_borrows e in
+      List.iter (fun (r, p, m, lc) ->
+        check_borrow_conflict acc r p m lc
+      ) new_b;
+      new_b @ acc
+    ) active es)
   | Ast.Region_block (_, body) -> go body
   | Ast.Fun (_, _, body) -> go body
   | Ast.Record_lit (_, fields) -> List.iter (fun (_, e') -> go e') fields

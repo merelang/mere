@@ -4061,6 +4061,54 @@ let () =
         "region R { let v = 5 in \
          let a = &exclusive R v in let b = &R v in 42 }");
 
+  (* Phase 17.2 / DEFERRED §2.5: conflict matrix の残り 4 ペア (full
+     10 ペア = 4 mode × 4 mode の対称行列を埋める) *)
+  check_raises "borrow checker: &shared write + &exclusive → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &shared write R v in let b = &exclusive R v in 42 }");
+  check_raises "borrow checker: &shared write + &mut R → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &shared write R v in let b = &mut R v in 42 }");
+  check_raises "borrow checker: two &exclusive R → conflict (exclusive is exclusive of itself)"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &exclusive R v in let b = &exclusive R v in 42 }");
+  check_raises "borrow checker: &exclusive + &mut R → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let a = &exclusive R v in let b = &mut R v in 42 }");
+
+  (* 異なる region なら同じ変数でも衝突しない (region 隔離) *)
+  check "borrow checker: same var in different regions → OK"
+    (Pipeline.process
+       "region R { region S { let v = 5 in \
+        let a = &R v in let b = &mut S v in 42 } }")
+    "42";
+
+  (* Phase 17.2: tuple 内に conflicting な 2 borrow を書くと検出される
+     (1 つ目を eval → active に追加 → 2 つ目を eval) *)
+  check_raises "borrow checker (tuple): (&R v, &mut R v) → conflict"
+    (fun () ->
+      Pipeline.process
+        "region R { let v = 5 in \
+         let _t = (&R v, &mut R v) in 42 }");
+  check "borrow checker (tuple): (&R v, &R u) → OK (different vars)"
+    (Pipeline.process
+       "region R { let v = 5 in let u = 7 in \
+        let _t = (&R v, &R u) in 42 }")
+    "42";
+  check "borrow checker (tuple): (&R v, &R v) → OK (both shared read)"
+    (Pipeline.process
+       "region R { let v = 5 in \
+        let _t = (&R v, &R v) in 42 }")
+    "42";
+
   (* 異なる変数なら衝突しない *)
   check "borrow checker: different vars don't conflict"
     (Pipeline.process
