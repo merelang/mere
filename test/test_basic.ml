@@ -5706,10 +5706,10 @@ let () =
   check "prelude: with prelude (default) prog.decls includes auto-injected"
     (let prog = Pipeline.parse_program "42" in
      (* Phase 19.5: 3 types (list / option / result)
-        + Phase 21.2: 6 list helpers (list_iter / list_map / list_fold /
-          list_len / list_rev_into / list_rev) = 9 total *)
+        + Phase 21.2: 6 list helpers
+        + Phase 23.2: 3 option + 5 result helpers = 17 total *)
      string_of_int (List.length prog.Ast.decls))
-    "9";
+    "17";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"
@@ -5907,6 +5907,44 @@ let () =
   (* Phase 23.1: multi-instantiation detection — single-spec fn called
      with 2+ distinct concrete types now raises a clear codegen error
      instead of silently miscompiling (which led to SIGABRT in json_parser). *)
+  (* Phase 23.2: Option / Result helpers in prelude. *)
+  check "§23.2: option_map (Some)"
+    (Pipeline.process "option_map (Some 5) (fn x -> x * 10)")
+    "Some 50";
+  check "§23.2: option_map (None)"
+    (Pipeline.process "option_map None (fn x -> x * 10)")
+    "None";
+  check "§23.2: option_default (Some)"
+    (Pipeline.process "option_default (Some 42) 0") "42";
+  check "§23.2: option_default (None)"
+    (Pipeline.process "option_default None 0") "0";
+  check "§23.2: option_is_some (Some)"
+    (Pipeline.process "option_is_some (Some 1)") "true";
+  check "§23.2: option_is_some (None)"
+    (Pipeline.process "option_is_some None") "false";
+  check "§23.2: result_map (Ok)"
+    (Pipeline.process "result_map (Ok 5) (fn x -> x + 1)") "Ok 6";
+  check "§23.2: result_map (Err)"
+    (Pipeline.process "result_map (Err \"bad\") (fn x -> x + 1)") "Err \"bad\"";
+  check "§23.2: result_and_then (Ok chain)"
+    (Pipeline.process
+       "result_and_then (Ok 10) (fn x -> if x > 5 then Ok (x * 2) else Err \"small\")")
+    "Ok 20";
+  check "§23.2: result_and_then (Err short-circuit)"
+    (Pipeline.process
+       "result_and_then (Err \"e\") (fn x -> Ok (x + 1))")
+    "Err \"e\"";
+  check "§23.2: result_or_else (Err recover)"
+    (Pipeline.process
+       "result_or_else (Err 0) (fn e -> Ok (e + 99))")
+    "Ok 99";
+  check "§23.2: result_default (Err)"
+    (Pipeline.process "result_default (Err \"e\") 7") "7";
+  check "§23.2: result_is_ok (Ok)"
+    (Pipeline.process "result_is_ok (Ok 1)") "true";
+  check "§23.2: result_is_ok (Err)"
+    (Pipeline.process "result_is_ok (Err \"e\")") "false";
+
   check "§23.1: multi-instantiation poly fn raises clear codegen error"
     (try
        let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog

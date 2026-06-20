@@ -1,15 +1,22 @@
-(* Phase 19.4/19.5 + 21.2: 自動 import される prelude。
+(* Phase 19.4/19.5 + 21.2 + 23.2: 自動 import される prelude。
    全 Mere プログラムの parse 開始時に、ここの decls が
    ユーザのソースの **先頭** に挿入される。
 
    方針:
    - **型宣言**: `type 'a list` / `'a option` / `('a, 'e) result` の 3 つ。
-   - **list helpers** (Phase 21.2 で追加): list_iter / list_map / list_fold
-     / list_len / list_rev。多相 let-rec の codegen 部分解決 (Phase 21.1
-     §1.7 fix) で **単一 instantiation** の codegen が動くようになったの
-     と、resolve_fn_types で **unused poly fn を skip** するようにした
-     (Phase 21.2) ことを前提に、ユーザの program が helpers を使わない
-     場合は codegen から除外される設計。
+   - **list helpers** (Phase 21.2): list_iter / list_map / list_fold
+     / list_len / list_rev。
+   - **option helpers** (Phase 23.2): option_map / option_default /
+     option_is_some。
+   - **result helpers** (Phase 23.2): result_map / result_and_then /
+     result_or_else / result_default / result_is_ok。
+   - 多相 let-rec の codegen 部分解決 (Phase 21.1 §1.7 fix) で **単一
+     instantiation** の codegen が動くようになったのと、resolve_fn_types
+     で **unused poly fn を skip** するようにした (Phase 21.2) ことを
+     前提に、ユーザの program が helpers を使わない場合は codegen から
+     除外される設計。
+   - 多 instantiation (同じ helper を 2 つ以上の concrete 型で呼ぶ) は
+     Phase 23.1 で codegen error 化される (silent miscompile より安全)。
    - ユーザが同じ型を再宣言しても破綻しないように (typer は
      `Hashtbl.replace` で上書き、ctor も同様)。 *)
 
@@ -47,4 +54,48 @@ let rec list_rev_into = fn acc -> fn xs ->
 // which processes Top_let but skips Top_let_rec — doesn't try to infer
 // this binding's body under an env that lacks list_rev_into.
 let rec list_rev = fn xs -> list_rev_into Nil xs;
+
+// === Option helpers ===
+
+let rec option_map = fn opt -> fn f ->
+  match opt with
+  | None -> None
+  | Some v -> Some (f v);
+
+let rec option_default = fn opt -> fn d ->
+  match opt with
+  | None -> d
+  | Some v -> v;
+
+let rec option_is_some = fn opt ->
+  match opt with
+  | None -> false
+  | Some _ -> true;
+
+// === Result helpers ===
+
+let rec result_map = fn r -> fn f ->
+  match r with
+  | Err e -> Err e
+  | Ok v -> Ok (f v);
+
+let rec result_and_then = fn r -> fn f ->
+  match r with
+  | Err e -> Err e
+  | Ok v -> f v;
+
+let rec result_or_else = fn r -> fn f ->
+  match r with
+  | Ok v -> Ok v
+  | Err e -> f e;
+
+let rec result_default = fn r -> fn d ->
+  match r with
+  | Err _ -> d
+  | Ok v -> v;
+
+let rec result_is_ok = fn r ->
+  match r with
+  | Err _ -> false
+  | Ok _ -> true;
 |}
