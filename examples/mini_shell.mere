@@ -1,0 +1,148 @@
+// 簡易 shell の batch evaluator
+//
+// 行ごとのコマンド (list of str) を順に parse → variant に分類 →
+// dispatch して env / history を更新する小さな state machine。
+// 対話的 (REPL) には せず、入力 list を fold する batch 形式 で
+// Mere の interpreter で素直に動く形に。
+//
+// 含むコマンド:
+//   echo MSG          - メッセージ表示
+//   set NAME VAL      - env に NAME=VAL を記録
+//   get NAME          - env から取得 (未定義は <unset>)
+//   list              - env を全部表示 (key 順は insertion 順)
+//   add A B           - 整数加算 (A, B は数字)
+//   history           - これまでの入力ライン表示
+//   help              - コマンド一覧
+//   exit              - 以降のコマンドは無視
+//   (それ以外)        - "unknown command: ..." を表示
+//
+// 目的: examples roadmap G1。variant command + str_split parse +
+// dispatch + state (env + history + exit flag) の組合せ demo。
+//
+// 実行モード: interpreter のみ
+//   - 多相 user 定義関数 (parse_cmd / dispatch / fold over cmds) の
+//     codegen monomorphize gap (DEFERRED §1.7)。
+//   - wildcard `let _ = ...` も C codegen 未対応。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/mini_shell.mere
+//   # 期待出力 (抜粋):
+//   #   $ echo hello world
+//   #   hello world
+//   #   $ set name Alice
+//   #   $ set age 30
+//   #   $ get name
+//   #   Alice
+//   #   ... etc
+
+type command =
+  | CEcho    of str
+  | CSet     of str * str
+  | CGet     of str
+  | CList
+  | CAdd     of int * int
+  | CHistory
+  | CHelp
+  | CExit
+  | CUnknown of str;
+
+// === parse ===
+
+let parse_cmd = fn (line: str) ->
+  let tokens = str_split line " " in
+  match tokens with
+  | Nil           -> CUnknown ""
+  | Cons (head, rest) ->
+    if head == "echo" then
+      // echo の引数は残り全部を再結合
+      CEcho (str_join " " rest)
+    else if head == "set" then
+      match rest with
+      | Cons (name, Cons (val_str, _)) -> CSet (name, val_str)
+      | _ -> CUnknown line
+    else if head == "get" then
+      match rest with
+      | Cons (name, _) -> CGet name
+      | _ -> CUnknown line
+    else if head == "list" then CList
+    else if head == "add" then
+      match rest with
+      | Cons (a, Cons (b, _)) -> CAdd (int_of_str a, int_of_str b)
+      | _ -> CUnknown line
+    else if head == "history" then CHistory
+    else if head == "help" then CHelp
+    else if head == "exit" then CExit
+    else CUnknown line;
+
+// === dispatch ===
+
+let show_help = fn () ->
+  let __ = print "  echo MSG       - print message" in
+  let __ = print "  set NAME VAL   - bind variable" in
+  let __ = print "  get NAME       - read variable" in
+  let __ = print "  list           - list all bindings" in
+  let __ = print "  add A B        - integer add" in
+  let __ = print "  history        - show entered lines" in
+  let __ = print "  help           - this help" in
+  print "  exit           - stop accepting input";
+
+let exec = fn env -> fn history -> fn (cmd: command) ->
+  match cmd with
+  | CEcho msg          -> print msg
+  | CSet (name, value) -> let __ = map_set env name value in ()
+  | CGet name          ->
+    if map_has env name then print (map_get env name)
+    else print "<unset>"
+  | CList              ->
+    map_iter env (fn k -> fn v -> print (k ++ "=" ++ v))
+  | CAdd (a, b)        -> print (show (a + b))
+  | CHistory           ->
+    vec_iter history (fn line -> print ("  " ++ line))
+  | CHelp              -> show_help ()
+  | CExit              -> ()
+  | CUnknown line      -> print ("unknown command: " ++ line);
+
+// 1 line を処理。exit 後は何もしない。
+// 戻り値は "exit 済か" の bool。
+let step = fn env -> fn history -> fn (exited: bool) -> fn (line: str) ->
+  if exited then exited
+  else
+    let __ = print ("$ " ++ line) in
+    let __ = vec_push history line in
+    let cmd = parse_cmd line in
+    let __ = exec env history cmd in
+    match cmd with
+    | CExit -> true
+    | _     -> false;
+
+// 入力 list を順に step に流す。
+let rec run_lines = fn env -> fn history -> fn (exited: bool) -> fn lines ->
+  match lines with
+  | Nil -> exited
+  | Cons (line, rest) ->
+    let next_exited = step env history exited line in
+    run_lines env history next_exited rest;
+
+// === driver ===
+
+region R {
+  let env = map_new () in
+  let history = vec_new () in
+
+  let lines = [
+    "echo hello world",
+    "set name Alice",
+    "set age 30",
+    "get name",
+    "get unknown_key",
+    "add 3 4",
+    "list",
+    "history",
+    "help",
+    "exit",
+    "echo after-exit (should be ignored)"
+  ] in
+
+  let __ = run_lines env history false lines in
+  print "[shell done]"
+}
