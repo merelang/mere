@@ -3062,8 +3062,74 @@ let emit_vec_filter_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
-(* Phase 15.7: OwnedVec[T] runtime — heap-allocated (malloc / realloc).
-   Drop は process exit に任せる (最小スコープ)。 *)
+(* Phase 15.8: OwnedVec registry — main 末で一括 free するための tracking。
+   ptr の動的配列 + count / cap を file-scope globals に置く。各
+   `@mere_owned_vec_<T>_new` が register を call、`@main` 末で
+   `@__mere_owned_vec_free_all` を call。 *)
+let owned_vec_registry_runtime_llvm =
+  String.concat "\n"
+    [ "; Phase 15.8: OwnedVec registry (process末で一括 free)";
+      "@__mere_owned_vec_registry = internal global ptr null";
+      "@__mere_owned_vec_count = internal global i32 0";
+      "@__mere_owned_vec_cap = internal global i32 0";
+      "";
+      "define void @__mere_owned_vec_register(ptr %v) {";
+      "entry:";
+      "  %count = load i32, ptr @__mere_owned_vec_count";
+      "  %cap = load i32, ptr @__mere_owned_vec_cap";
+      "  %full = icmp eq i32 %count, %cap";
+      "  br i1 %full, label %grow, label %store";
+      "grow:";
+      "  %is_zero = icmp eq i32 %cap, 0";
+      "  %doubled = mul i32 %cap, 2";
+      "  %new_cap = select i1 %is_zero, i32 8, i32 %doubled";
+      "  store i32 %new_cap, ptr @__mere_owned_vec_cap";
+      "  %nc64 = zext i32 %new_cap to i64";
+      "  %psize = getelementptr ptr, ptr null, i32 1";
+      "  %psize_i = ptrtoint ptr %psize to i64";
+      "  %total = mul i64 %nc64, %psize_i";
+      "  %old_reg = load ptr, ptr @__mere_owned_vec_registry";
+      "  %new_reg = call ptr @realloc(ptr %old_reg, i64 %total)";
+      "  store ptr %new_reg, ptr @__mere_owned_vec_registry";
+      "  br label %store";
+      "store:";
+      "  %reg = load ptr, ptr @__mere_owned_vec_registry";
+      "  %slot = getelementptr ptr, ptr %reg, i32 %count";
+      "  store ptr %v, ptr %slot";
+      "  %new_count = add i32 %count, 1";
+      "  store i32 %new_count, ptr @__mere_owned_vec_count";
+      "  ret void";
+      "}";
+      "";
+      "define void @__mere_owned_vec_free_all() {";
+      "entry:";
+      "  %count = load i32, ptr @__mere_owned_vec_count";
+      "  %reg = load ptr, ptr @__mere_owned_vec_registry";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
+      "  %done = icmp sge i32 %i, %count";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      "  %slot = getelementptr ptr, ptr %reg, i32 %i";
+      "  %v = load ptr, ptr %slot";
+      "  ; mere_owned_vec_<T> の最初の field は data ptr。全 T で同じ layout。";
+      "  %dp = load ptr, ptr %v";
+      "  call void @free(ptr %dp)";
+      "  call void @free(ptr %v)";
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  call void @free(ptr %reg)";
+      "  store ptr null, ptr @__mere_owned_vec_registry";
+      "  store i32 0, ptr @__mere_owned_vec_count";
+      "  store i32 0, ptr @__mere_owned_vec_cap";
+      "  ret void";
+      "}" ]
+
+(* Phase 15.7/15.8: OwnedVec[T] runtime — heap-allocated (malloc / realloc).
+   `_new` registers itself in `__mere_owned_vec_registry` so main can
+   free everything at program exit. *)
 let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = llvm_ty_of elem_ty in
@@ -3087,6 +3153,7 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       "  store i32 0, ptr %lp";
       Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%v, i32 0, i32 2" struct_name;
       "  store i32 4, ptr %cp";
+      "  call void @__mere_owned_vec_register(ptr %v)";
       "  ret ptr %v";
       "}";
       "";
@@ -3487,6 +3554,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           (String.sub fmt 1 (String.length fmt - 1)) ty r_final ]
   in
   List.iter emit_instr print_lines;
+  (* Phase 15.8: free all OwnedVec allocations registered during run. *)
+  if Hashtbl.length owned_vec_instances > 0 then
+    emit_instr "  call void @__mere_owned_vec_free_all()";
   emit_instr "  call void @__lang_region_free(ptr @__lang_default_region)";
   emit_instr "  ret i32 0";
   let body = String.concat "\n" (List.rev !instrs) in
@@ -3581,7 +3651,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         str_concat_helper;
         "" ]
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
-    @ (if owned_vec_runtimes = [] then [] else owned_vec_runtimes @ [""])
+    @ (if owned_vec_runtimes = [] then []
+       else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
     @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
     @ (if vec_map_helpers = [] then [] else vec_map_helpers @ [""])
