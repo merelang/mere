@@ -517,12 +517,9 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len" then
       unsupported e.loc
         (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "len" then
+    if name = "len" || name = "vec_to_list" then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.11: len は直接 application のみ対応)");
-    if name = "vec_to_list" then
-      unsupported e.loc
-        (name ^ " (vec_to_list is interpreter-only)");
+        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -792,6 +789,59 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = owned_vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_owned_vec_%s_get(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
+     | Ast.Var "vec_to_list" ->
+       (* Phase 15.12: vec_to_list v — region Vec[R, T] を `T list` に
+          deep copy。インラインで Cons chain を bottom-up に構築する。
+          要素型 T、result の mono name (`list_<T>`)、Cons/Nil の tag、
+          Cons の tuple struct 名は全て codegen 時に解決。 *)
+       let t_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       let t_ty = Hashtbl.find vec_instances t_tag in
+       let result_ty =
+         match e.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported e.Ast.loc "vec_to_list: missing result type"
+       in
+       let mono_list =
+         match result_ty with
+         | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+           mono_variant_name n (List.map Ast.walk args)
+         | Ast.TyCon (n, []) -> n
+         | _ -> unsupported e.Ast.loc "vec_to_list: result is not a list type"
+       in
+       (* Cons payload is a tuple (T, list_T). The tuple struct name. *)
+       let tup_name =
+         tuple_struct_name [t_ty; Ast.TyCon (mono_list, [])]
+       in
+       let cons_tag =
+         try Hashtbl.find variant_tags "Cons"
+         with Not_found ->
+           unsupported e.Ast.loc
+             "vec_to_list: result type must have a `Cons` constructor"
+       in
+       let nil_tag =
+         try Hashtbl.find variant_tags "Nil"
+         with Not_found ->
+           unsupported e.Ast.loc
+             "vec_to_list: result type must have a `Nil` constructor"
+       in
+       Printf.sprintf
+         "({ __auto_type __v = %s; \
+          %s __acc = (%s)__lang_region_alloc(&__lang_default_region, sizeof(%s_node)); \
+          __acc->tag = %d; \
+          for (int __i = __v->len - 1; __i >= 0; __i--) { \
+            %s __new_node = (%s)__lang_region_alloc(&__lang_default_region, sizeof(%s_node)); \
+            __new_node->tag = %d; \
+            __new_node->payload.Cons.f0 = mere_vec_%s_get(__v, __i); \
+            __new_node->payload.Cons.f1 = __acc; \
+            __acc = __new_node; \
+          } __acc; })"
+         (emit_expr arg)
+         mono_list mono_list mono_list
+         nil_tag
+         mono_list mono_list mono_list
+         cons_tag
+         t_tag
+         |> fun s -> ignore tup_name; s
      | Ast.Var "vec_to_owned" ->
        (* Phase 15.7: vec_to_owned v — region 内 Vec を heap OwnedVec に
           deep copy。要素型 T は v から取り出す。 *)
@@ -838,6 +888,17 @@ let rec emit_expr (e : Ast.expr) : string =
              side effects but discarded. *)
           Printf.sprintf "({ (void)(%s); %d; })"
             (emit_expr arg) (List.length ts)
+        | Ast.TyCon (n, _) when Hashtbl.mem polymorphic_variants n
+                             && Hashtbl.mem variant_tags "Cons"
+                             && Hashtbl.mem variant_tags "Nil" ->
+          (* Phase 15.12: `len` on `T list` (Nil/Cons chain). Walk the
+             cons chain counting. Works for any user-declared
+             `type 'a list = Nil | Cons of 'a * 'a list`-shaped variant. *)
+          let cons_tag = Hashtbl.find variant_tags "Cons" in
+          Printf.sprintf
+            "({ __auto_type __l = %s; int __n = 0; \
+             while (__l->tag == %d) { __n++; __l = __l->payload.Cons.f1; } __n; })"
+            (emit_expr arg) cons_tag
         | _ ->
           unsupported e.loc
             "len: arg type has no codegen-defined length (use vec_len / strbuf_len / map_len / str_len for specific types)")

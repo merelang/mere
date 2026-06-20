@@ -12,7 +12,7 @@ feature-parity で動く段階。
 
 ## ステータス (2026-06-19 時点)
 
-- **1237 tests passing**
+- **1244 tests passing**
 - ツリーウォーキング interpreter + **C / LLVM IR / Wasm の 3 backend** が
   feature parity で動く (同じ Mere プログラムから 3 種のバイナリを出せる)
 - メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
@@ -44,7 +44,7 @@ feature-parity で動く段階。
 | import | `import "./path";` で別ファイル取込み (importer-relative + canonical) |
 | collection | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + 高階 API (iter/map/fold/filter/to_list/to_owned) |
 | stdlib | 90+ 種の builtin: I/O / 変換 / 文字列 / 数値 / 多相 helper / float / error / Logger・Metrics |
-| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く (詳細は [codegen.md](docs/codegen.md))。Q-010 collection 4 種 (Vec / OwnedVec / StrBuf / Map) + 高階 API (vec_set / iter / fold / map / filter) + 変換 (vec_to_owned / owned_vec_to_vec) + `len` ad-hoc polymorphism がすべて 3 backend で動作 (Phase 15.2 〜 15.11) |
+| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く (詳細は [codegen.md](docs/codegen.md))。Q-010 collection 4 種 (Vec / OwnedVec / StrBuf / Map) + 高階 API (vec_set / iter / fold / map / filter) + 変換 (vec_to_owned / owned_vec_to_vec / **vec_to_list**) + `len` ad-hoc polymorphism (Vec / OwnedVec / StrBuf / Map / str / tuple / **list**) がすべて 3 backend で動作 (Phase 15.2 〜 15.12) |
 | REPL | 永続 env、multi-line 入力、`:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | エラー UX | Rust 風 multi-line code frame、ANSI 色 (TTY 時)、Levenshtein による typo 提案 (record field / qualified name 含む)、型変換 hint |
 
@@ -92,7 +92,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1237 tests
+dune runtest                                         # 1244 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -134,7 +134,7 @@ mere/
 │   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 1237 tests
+├── test/test_basic.ml  # 1244 tests
 ├── examples/           # *.mere サンプル群
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
 ```

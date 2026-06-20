@@ -4574,6 +4574,46 @@ let () =
     "$mere_vec_len";
   check "len: interpreter parity"
     (Pipeline.process len_src) "12";  (* 3 + 5 + 4 *)
+  (* --- Phase 15.12: vec_to_list + len on list の 3 backend codegen --- *)
+  let v2l_src =
+    "type 'a list = Nil | Cons of 'a * 'a list;\n\
+     let v = vec_new () in let __ = vec_push v 10 in \
+     let __ = vec_push v 20 in let __ = vec_push v 30 in \
+     let l = (vec_to_list v : int list) in len l + \
+     (match l with | Cons (h, _) -> h | Nil -> 0)"
+  in
+  assert_contains "vec_to_list: C codegen builds Cons chain"
+    (let prog = Pipeline.parse_program v2l_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "payload.Cons.f1";
+  assert_contains "vec_to_list: LLVM codegen emits @mere_vec_to_list_int"
+    (let prog = Pipeline.parse_program v2l_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_vec_to_list_int";
+  assert_contains "vec_to_list: Wasm codegen emits $mere_vec_to_list"
+    (let prog = Pipeline.parse_program v2l_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_vec_to_list";
+  assert_contains "len-on-list: C codegen walks Cons chain"
+    (let prog = Pipeline.parse_program v2l_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "__l = __l->payload.Cons.f1";
+  assert_contains "len-on-list: LLVM codegen emits @mere_list_int_len"
+    (let prog = Pipeline.parse_program v2l_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_list_int_len";
+  assert_contains "len-on-list: Wasm codegen emits $mere_list_len"
+    (let prog = Pipeline.parse_program v2l_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_list_len";
+  check "vec_to_list + len-on-list: interpreter parity"
+    (Pipeline.process v2l_src) "13";  (* len 3 + head 10 = 13 *)
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
