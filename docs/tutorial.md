@@ -640,6 +640,31 @@ let xs = vec_new () in
 
 実例: [`examples/vec_higher_order.mere`](../examples/vec_higher_order.mere)。
 
+**closure 引数の型注釈イディオム** — `vec_map` / `vec_iter` / `vec_fold` の
+closure 引数 が **record の場合は `(t: T) -> ...` と明示注釈する**。HM 推論は
+closure 引数の型を field アクセスから逆引きしないので、注釈なしだと
+`t.done` のような field 参照で型エラーになる:
+
+```
+type Task = { id: int, text: str, done: bool };
+
+vec_fold tasks 0 (fn acc -> fn (t: Task) ->         // ← (t: Task) 明示
+  if t.done then acc else acc + 1)
+```
+
+同じことが「record cap (Logger / Metrics / 自前 cap) を引数に取る関数」
+にも当てはまる:
+
+```
+let dump_tasks = fn (lg: Logger) -> fn tasks ->     // ← (lg: Logger) 明示
+  vec_iter tasks (fn (t: Task) ->
+    lg.info (show t.id ++ ": " ++ t.text))
+```
+
+具体的な使い方は [`examples/todo_app.mere`](../examples/todo_app.mere)
+が参考になる (OwnedVec + Logger + vec_map / fold を組み合わせた小さな
+TODO アプリ)。
+
 **Phase 12.7 で `StrBuf[R]` を追加** — region 内可変文字列バッファ。
 `Vec[R, T]` と同じ construction-time binding パターンで動く:
 

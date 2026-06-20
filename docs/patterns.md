@@ -145,6 +145,58 @@ let prod_cfg = { default_cfg | name = "app-prod" };
 
 ---
 
+## 8.5. コレクション内 record の「1 要素だけ更新」
+
+`Vec` / `OwnedVec` は append-only、record は immutable なので、コレクション
+内の特定 record だけを書き換える直接手段はない。代わりに **`vec_map` +
+`{ t | f = v }` で「条件に合う要素だけ差し替えた新コレクション」を作る**:
+
+```mere
+type Task = { id: int, text: str, done: bool };
+
+let mark_done = fn tasks -> fn target_id ->
+  region R {
+    let src = owned_vec_to_vec tasks in
+    let dst = vec_map src (fn (t: Task) ->
+      if t.id == target_id then { t | done = true }   // ← 差分更新
+      else t) in
+    vec_to_owned dst
+  };
+```
+
+ポイント:
+
+- `{ t | done = true }` は `Task { id = t.id, text = t.text, done = true }`
+  と等価だが、変更しない field を書かなくて済むので update 意図が明確
+- 結果は **新 `OwnedVec`** なので caller が受け取って bind し直す必要がある
+  (次節 8.6 の同名 rebinding を併用)
+- `fn (t: Task) -> ...` の **明示注釈は必須**。HM は closure 引数が
+  どの record か (field 名から) 逆引きしないので、`t.done` で型エラーに
+  なる
+
+---
+
+## 8.6. 不変更新の連鎖は同名 rebinding で書く
+
+`mark_done` のように新コレクションを返す関数を続けて使うときは、
+**同じ名前で rebinding** すれば自然に書ける:
+
+```mere
+let tasks = owned_vec_new () in
+let __ = owned_vec_push tasks (Task { id = 1, text = "buy milk", done = false }) in
+let __ = owned_vec_push tasks (Task { id = 2, text = "write report", done = false }) in
+
+// 同名 rebinding で「タスク 1 と 2 を完了に」
+let tasks = mark_done tasks 1 in
+let tasks = mark_done tasks 2 in
+```
+
+これは ML 系の自然な書き方で、interpreter / C / LLVM / Wasm の 4 backend
+すべてで動く (codegen は内部的に 2-step 形に展開して C の `__auto_type`
+self-init 制約を回避している)。
+
+---
+
 ## 9. リスト構築の慣用句
 
 ```
