@@ -813,6 +813,27 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "str_of_int" ->
        (* Phase 22.3: str_of_int は show_int と同じ。alias として emit。 *)
        Printf.sprintf "show_int(%s)" (emit_expr arg)
+     | Ast.Var "fail" ->
+       (* Phase 22.4: fail msg — noreturn helper + 文脈期待型に応じた
+          default literal を後置。c_type_of は forward ref できないので
+          primitive 型は inline 判定、それ以外は __lang_fail_int で int
+          を返してから expected 型へ cast されない場合は failure (rare)。 *)
+       let result_ty =
+         match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
+       in
+       let arg_c = emit_expr arg in
+       (match result_ty with
+        | Ast.TyStr ->
+          Printf.sprintf "__lang_fail_str(%s)" arg_c
+        | Ast.TyInt | Ast.TyBool | Ast.TyUnit ->
+          Printf.sprintf "__lang_fail_int(%s)" arg_c
+        | _ ->
+          (* 非 primitive 型: __lang_fail_impl は noreturn、後置の値は
+             unreachable。compound literal を typeof で wrap して
+             expected 型をコンパイラに推論させる: typeof(<dummy>)
+             で context の型を取れないので、shadow expr 経由で context
+             の型に合わせる trick。ここでは int を返してから cast。 *)
+          Printf.sprintf "({ __lang_fail_impl(%s); 0; })" arg_c)
      | Ast.Var "fst" ->
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
@@ -2040,6 +2061,24 @@ let str_concat_helper =
       "static int __lang_is_space(const char* s) {";
       "  unsigned char c = (unsigned char)s[0];";
       "  return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r';";
+      "}";
+      "";
+      (* Phase 22.4: fail builtin — print to stderr + abort. noreturn 属性
+         で C compiler に unreachable と伝えるが、callsite では (void
+         expr) として包んで expected return 型に応じた default 値を
+         並べる必要がある。ここでは int (= 0) を返す static helper にし、
+         callsite で必要なら cast する。show 系と組合せる場合は str 返却
+         が必要なので、return 型に応じて 2 種類 (__lang_fail_int /
+         __lang_fail_str) を提供。 *)
+      "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
+      "  fprintf(stderr, \"fail: %s\\n\", msg);";
+      "  abort();";
+      "}";
+      "static int __lang_fail_int(const char* msg) {";
+      "  __lang_fail_impl(msg); return 0;";
+      "}";
+      "static const char* __lang_fail_str(const char* msg) {";
+      "  __lang_fail_impl(msg); return \"\";";
       "}" ]
 
 (* Region runtime: a bump allocator. `region R { body }` initializes a
@@ -3370,11 +3409,39 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     let all = from_expr @ from_fns @ from_variants in
     (* Dedup by struct name. *)
     let seen = Hashtbl.create 8 in
-    List.filter (fun ts ->
+    let deduped =
+      List.filter (fun ts ->
+        let k = tuple_struct_name ts in
+        if Hashtbl.mem seen k then false
+        else (Hashtbl.add seen k (); true)
+      ) all
+    in
+    (* Phase 22.4: topo sort so a tuple shape with a tuple-typed field
+       has its inner-tuple struct body emitted FIRST. C requires complete
+       struct types at point of use in field declarations. *)
+    let name_index : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (fun ts -> Hashtbl.add name_index (tuple_struct_name ts) ts) deduped;
+    let visited : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+    let result = ref [] in
+    let rec visit ts =
       let k = tuple_struct_name ts in
-      if Hashtbl.mem seen k then false
-      else (Hashtbl.add seen k (); true)
-    ) all
+      if not (Hashtbl.mem visited k) then begin
+        Hashtbl.add visited k ();
+        List.iter (fun elem ->
+          match Ast.walk elem with
+          | Ast.TyTuple _ as inner ->
+            let dep_name = tuple_struct_name (
+              match inner with Ast.TyTuple ts -> ts | _ -> []) in
+            (match Hashtbl.find_opt name_index dep_name with
+             | Some dep_ts -> visit dep_ts
+             | None -> ())
+          | _ -> ()
+        ) ts;
+        result := ts :: !result
+      end
+    in
+    List.iter visit deduped;
+    List.rev !result
   in
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
