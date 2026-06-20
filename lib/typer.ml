@@ -1603,8 +1603,25 @@ let rec check_borrows active (e : Ast.expr) : unit =
        is conflict-checked against the existing active set. *)
     let active' =
       match pat.Ast.pnode with
-      | Ast.P_var _ ->
+      | Ast.P_var name ->
         let new_borrows = extract_borrows value in
+        (* Phase 17.1 / DEFERRED §2.1 残: if `value` has type `&R T` but
+           extract_borrows returned no borrow (= the source is a
+           function call / complex expr without a stable place_id),
+           treat the let-binding name itself as a borrow place. This
+           catches reborrow conflicts on the result of a function that
+           returns a borrow. *)
+        let new_borrows =
+          if new_borrows <> [] then new_borrows
+          else
+            match value.Ast.ty with
+            | Some t ->
+              (match Ast.walk t with
+               | Ast.TyRef (mode, region, _) ->
+                 [(region, name, mode, value.Ast.loc)]
+               | _ -> [])
+            | None -> []
+        in
         List.iter (fun (r, p, m, lc) ->
           check_borrow_conflict active r p m lc
         ) new_borrows;
