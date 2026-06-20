@@ -4678,6 +4678,54 @@ let () =
     (Pipeline.process map_bool_src) "302";
   check "map[tuple]: interpreter parity"
     (Pipeline.process map_tup_src) "121";
+  (* --- Phase 15.15: Map K の record / nullary variant 拡張 --- *)
+  let map_var_src =
+    "type Color = Red | Green | Blue;\n\
+     let m = map_new () in let __ = map_set m Red 1 in \
+     let __ = map_set m Green 2 in let __ = map_set m Blue 3 in \
+     map_get m Red + map_get m Green + map_get m Blue + map_len m"
+  in
+  let map_rec_src =
+    "type Pt = { x: int, y: int };\n\
+     let m = map_new () in \
+     let __ = map_set m (Pt { x = 1, y = 2 }) 100 in \
+     let __ = map_set m (Pt { x = 1, y = 2 }) 999 in \
+     map_get m (Pt { x = 1, y = 2 }) + map_len m"
+  in
+  assert_contains "map[variant, int]: C codegen accepts"
+    (let prog = Pipeline.parse_program map_var_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_map_Color_int";
+  assert_contains "map[record, int]: C codegen accepts"
+    (let prog = Pipeline.parse_program map_rec_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_map_Pt_int";
+  assert_contains "map[variant]: LLVM codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_var_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_key_eq_Color";
+  assert_contains "map[record]: LLVM codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_rec_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_key_eq_Pt";
+  assert_contains "map[variant]: Wasm codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_var_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_key_eq_Color";
+  assert_contains "map[record]: Wasm codegen emits key_eq"
+    (let prog = Pipeline.parse_program map_rec_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_key_eq_Pt";
+  check "map[variant]: interpreter parity"
+    (Pipeline.process map_var_src) "9";
+  check "map[record]: interpreter parity"
+    (Pipeline.process map_rec_src) "1000";
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
