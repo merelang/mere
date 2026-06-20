@@ -45,6 +45,13 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 23.3: poly fns that need per-instantiation specialization.
+   Key = fn name (e.g., "rev_aux"). Value = list of distinct concrete
+   arrow types observed at use sites. Each entry causes resolve_fn_types
+   to emit N specialized fn_decls (one per arrow) with mangled names,
+   and emit_expr's call-site dispatch to pick the right mangled name. *)
+let multi_inst_fns : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4
+
 (* Phase 22.6: C reserved keywords that can collide with user-defined
    identifier names (`let case = ...` in json_parser). Mangle by
    appending `_` so the emitted C is valid while leaving Mere names
@@ -292,6 +299,21 @@ let rec ty_tag (t : Ast.ty) : string =
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
+
+(* Phase 23.3: mangle a fn name with its concrete arrow type tag, e.g.
+   `rev_aux` with `list_json -> list_json -> list_json` becomes
+   `rev_aux__list_json__list_json__list_json`. Used for per-instantiation
+   specialization. Must be defined before emit_expr (which dispatches via
+   this) and before resolve_fn_types (which creates fn_decls with these
+   names). *)
+let mangled_inst_name (base : string) (arrow : Ast.ty) : string =
+  let rec collect_tys t acc =
+    match Ast.walk t with
+    | Ast.TyArrow (a, b) -> collect_tys b (a :: acc)
+    | _ -> List.rev (t :: acc)
+  in
+  let tys = collect_tys arrow [] in
+  base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
 
 (* Specialized struct name for a polymorphic variant at given args. *)
 let mono_variant_name (name : string) (args : Ast.ty list) : string =
@@ -1346,7 +1368,20 @@ let rec emit_expr (e : Ast.expr) : string =
        String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
      | Ast.Var name when Hashtbl.mem toplevel_fn_names name ->
        (* Direct call to a known top-level fn — fast path, no closure. *)
-       c_safe_name name ^ "(" ^ emit_expr arg ^ ")"
+       (* Phase 23.3: per-instantiation dispatch. If name is multi-inst,
+          use the call site's Var.ty (walked, which is the specific
+          arrow type for this use) to pick the mangled name. *)
+       let fn_name =
+         if Hashtbl.mem multi_inst_fns name then
+           match f.Ast.ty with
+           | Some t ->
+             (match Ast.walk t with
+              | Ast.TyArrow _ as arrow -> mangled_inst_name name arrow
+              | _ -> c_safe_name name)
+           | None -> c_safe_name name
+         else c_safe_name name
+       in
+       fn_name ^ "(" ^ emit_expr arg ^ ")"
      | _ ->
        (* Closure dispatch via the closure value's fn pointer + env. *)
        Printf.sprintf
@@ -1886,6 +1921,88 @@ let find_all_concrete_arrows (name : string) (e : Ast.expr) : Ast.ty list =
   go e;
   Hashtbl.fold (fun _ v acc -> v :: acc) seen []
 
+(* Phase 23.3: deep-clone an expression with fresh tyvars.
+   For multi-instantiation specialization of poly fns: the original
+   body's tyvars are shared (mutable refs) so we can't independently
+   unify them to different concrete types. Cloning produces a body
+   tree where every TyVar.id is fresh and link=None. Tyvar identity
+   within the clone is preserved via a per-clone id→fresh map.
+
+   Concrete types (TyInt, TyArrow with no vars, etc.) are recreated
+   structurally — cheap and correct. TyParam (source-level 'a) is
+   preserved as-is. *)
+let clone_with_fresh_tyvars (e : Ast.expr) : Ast.expr =
+  let map : (int, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
+  let rec clone_ty t =
+    match Ast.walk t with
+    | Ast.TyVar v ->
+      (match Hashtbl.find_opt map v.id with
+       | Some fresh -> fresh
+       | None ->
+         let fresh = Typer.fresh_var () in
+         Hashtbl.add map v.id fresh;
+         fresh)
+    | Ast.TyParam _ as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
+    | Ast.TyArrow (a, b) -> Ast.TyArrow (clone_ty a, clone_ty b)
+    | Ast.TyTuple ts -> Ast.TyTuple (List.map clone_ty ts)
+    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map clone_ty args)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, clone_ty inner)
+  in
+  let clone_ty_opt = function None -> None | Some t -> Some (clone_ty t) in
+  let rec clone_expr (e : Ast.expr) : Ast.expr =
+    { Ast.loc = e.Ast.loc;
+      ty = clone_ty_opt e.Ast.ty;
+      node = clone_node e.Ast.node }
+  and clone_node = function
+    | (Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+       | Ast.Str_lit _ | Ast.Unit_lit | Ast.Var _) as n -> n
+    | Ast.Bin (op, a, b) -> Ast.Bin (op, clone_expr a, clone_expr b)
+    | Ast.Cmp (op, a, b) -> Ast.Cmp (op, clone_expr a, clone_expr b)
+    | Ast.Logic (op, a, b) -> Ast.Logic (op, clone_expr a, clone_expr b)
+    | Ast.Neg a -> Ast.Neg (clone_expr a)
+    | Ast.Let (p, v, b) -> Ast.Let (clone_pattern p, clone_expr v, clone_expr b)
+    | Ast.Let_rec (bs, b) ->
+      Ast.Let_rec (List.map (fun (n, e) -> (n, clone_expr e)) bs, clone_expr b)
+    | Ast.With (n, v, b) -> Ast.With (n, clone_expr v, clone_expr b)
+    | Ast.If (c, t, e_) -> Ast.If (clone_expr c, clone_expr t, clone_expr e_)
+    | Ast.Fun (n, t_opt, b) ->
+      Ast.Fun (n, (match t_opt with None -> None | Some t -> Some (clone_ty t)),
+        clone_expr b)
+    | Ast.App (a, b) -> Ast.App (clone_expr a, clone_expr b)
+    | Ast.Annot (a, t) -> Ast.Annot (clone_expr a, clone_ty t)
+    | Ast.Constr (n, Some a) -> Ast.Constr (n, Some (clone_expr a))
+    | Ast.Constr (n, None) -> Ast.Constr (n, None)
+    | Ast.Match (s, arms) ->
+      Ast.Match (clone_expr s,
+        List.map (fun (p, g, b) ->
+          (clone_pattern p,
+           (match g with None -> None | Some e -> Some (clone_expr e)),
+           clone_expr b)) arms)
+    | Ast.Tuple es -> Ast.Tuple (List.map clone_expr es)
+    | Ast.Region_block (n, b) -> Ast.Region_block (n, clone_expr b)
+    | Ast.Ref (m, r, a) -> Ast.Ref (m, r, clone_expr a)
+    | Ast.Record_lit (n, fs) ->
+      Ast.Record_lit (n, List.map (fun (k, v) -> (k, clone_expr v)) fs)
+    | Ast.Field_get (a, f) -> Ast.Field_get (clone_expr a, f)
+    | Ast.Record_update (a, fs) ->
+      Ast.Record_update (clone_expr a,
+        List.map (fun (k, v) -> (k, clone_expr v)) fs)
+  and clone_pattern p =
+    { Ast.ploc = p.Ast.ploc; pnode = clone_pattern_node p.Ast.pnode }
+  and clone_pattern_node = function
+    | (Ast.P_wild | Ast.P_var _ | Ast.P_int _ | Ast.P_bool _
+       | Ast.P_str _ | Ast.P_unit) as n -> n
+    | Ast.P_constr (c, Some sub) -> Ast.P_constr (c, Some (clone_pattern sub))
+    | Ast.P_constr (c, None) -> Ast.P_constr (c, None)
+    | Ast.P_tuple ps -> Ast.P_tuple (List.map clone_pattern ps)
+    | Ast.P_record (n, fs) ->
+      Ast.P_record (n, List.map (fun (k, v) -> (k, clone_pattern v)) fs)
+    | Ast.P_as (p, n) -> Ast.P_as (clone_pattern p, n)
+    | Ast.P_or (a, b) -> Ast.P_or (clone_pattern a, clone_pattern b)
+  in
+  clone_expr e
+
 (* Build fn_decls from the typer-annotated AST. For each skeleton, prefer
    the Fun's own .ty if it's already concrete; otherwise (let-poly
    generalized it) recover a concrete arrow type by scanning the main
@@ -1905,10 +2022,15 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
        unresolved and are silently filtered out. *)
   let resolved : (string, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
   let progress = ref true in
+  Hashtbl.reset multi_inst_fns;
+  let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
+    Hashtbl.create 4
+  in
   while !progress do
     progress := false;
     List.iter (fun s ->
-      if not (Hashtbl.mem resolved s.sname) then begin
+      if not (Hashtbl.mem resolved s.sname || Hashtbl.mem multi_specs s.sname)
+      then begin
         let fun_ty =
           match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
         in
@@ -1917,46 +2039,79 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
           progress := true
         end else
           match find_concrete_arrow s.sname root with
-          | Some t ->
-            (* Phase 23.1: multi-instantiation detection. If the fn is
-               called at 2+ distinct concrete arrow types, single-spec
-               emit would silently miscompile (pointer-cast lets the
-               wrong-typed call go through but body misinterprets
-               fields → memory garbage → eventual SIGABRT, as found
-               in json_parser's `rev_aux` used both `'json list` and
-               `'(str * json) list`). Detect early and report a clear
-               error pointing to DEFERRED §1.7. *)
+          | Some _ ->
+            (* Phase 23.3: per-instantiation specialization. If the fn
+               is called at 2+ distinct concrete arrow types, clone the
+               body once per type, unify each clone's Fun.ty with the
+               concrete arrow, and emit each as a separately-named
+               fn_decl. Register in multi_inst_fns so call-site
+               dispatch can pick the right mangled name. *)
             let all = find_all_concrete_arrows s.sname root in
-            if List.length all > 1 then
-              raise (Codegen_error (s.sfun.Ast.loc,
-                Printf.sprintf
-                  "polymorphic fn `%s` is called at %d distinct concrete \
-                   types (e.g., %s) — multi-instantiation specialization \
-                   is not yet implemented (DEFERRED §1.7 残). Workaround: \
-                   define separately-named specialized fns at the source \
-                   level."
-                  s.sname (List.length all)
-                  (String.concat " | "
-                     (List.map Ast.pp_ty (List.filteri (fun i _ -> i < 3) all)))))
-            else begin
-              (try Typer.unify Loc.dummy fun_ty t with _ -> ());
-              Hashtbl.add resolved s.sname t;
+            if List.length all > 1 then begin
+              Hashtbl.add multi_inst_fns s.sname all;
+              let specs = List.map (fun arrow ->
+                (* Phase 23.3 fix: clone the WHOLE Fun expression so the
+                   Fun.ty and the body's annotations share fresh tyvar
+                   identity via the same clone-time map. Cloning them
+                   separately would give independent maps → unify on
+                   Fun.ty wouldn't propagate to body. *)
+                let cloned_fun = clone_with_fresh_tyvars s.sfun in
+                let clone_fun_ty =
+                  match cloned_fun.Ast.ty with
+                  | Some t -> Ast.walk t
+                  | None -> Ast.TyUnit
+                in
+                (try Typer.unify Loc.dummy clone_fun_ty arrow with _ -> ());
+                (* Extract the cloned body from the cloned Fun (it's the
+                   3rd field of the Fun expr node). Note: s.sparam is the
+                   param name string, same across all clones. *)
+                let cloned_body =
+                  match cloned_fun.Ast.node with
+                  | Ast.Fun (_, _, b) -> b
+                  | _ ->
+                    raise (Codegen_error (s.sfun.Ast.loc,
+                      "multi-inst clone: expected Fun at root"))
+                in
+                (arrow, cloned_body)
+              ) all in
+              Hashtbl.add multi_specs s.sname specs;
+              progress := true
+            end else begin
+              (try Typer.unify Loc.dummy fun_ty (List.hd all) with _ -> ());
+              Hashtbl.add resolved s.sname (List.hd all);
               progress := true
             end
           | None -> ()
       end
     ) skels
   done;
-  List.filter_map (fun s ->
-    match Hashtbl.find_opt resolved s.sname with
-    | None -> None  (* unused poly fn — skip *)
-    | Some (Ast.TyArrow (p, r)) ->
-      Some { name = s.sname; param = s.sparam; body = s.sbody;
-        param_ty = Ast.walk p; return_ty = Ast.walk r }
-    | Some other ->
-      raise (Codegen_error (s.sfun.Ast.loc,
-        Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
-          s.sname (Ast.pp_ty other)))
+  List.concat_map (fun s ->
+    match Hashtbl.find_opt multi_specs s.sname with
+    | Some specs ->
+      (* Emit one fn_decl per instantiation, mangled name + cloned body. *)
+      List.map (fun (arrow, cloned_body) ->
+        match Ast.walk arrow with
+        | Ast.TyArrow (p, r) ->
+          { name = mangled_inst_name s.sname arrow;
+            param = s.sparam;
+            body = cloned_body;
+            param_ty = Ast.walk p;
+            return_ty = Ast.walk r }
+        | other ->
+          raise (Codegen_error (s.sfun.Ast.loc,
+            Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
+              s.sname (Ast.pp_ty other)))
+      ) specs
+    | None ->
+      (match Hashtbl.find_opt resolved s.sname with
+       | None -> []  (* unused poly fn — skip *)
+       | Some (Ast.TyArrow (p, r)) ->
+         [{ name = s.sname; param = s.sparam; body = s.sbody;
+            param_ty = Ast.walk p; return_ty = Ast.walk r }]
+       | Some other ->
+         raise (Codegen_error (s.sfun.Ast.loc,
+           Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
+             s.sname (Ast.pp_ty other))))
   ) skels
 
 (* Lifted-inner-fn signature: captures (with types) prepended to the
@@ -3612,6 +3767,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      call and value-position references can use the closure wrapper. *)
   Hashtbl.reset toplevel_fn_names;
   List.iter (fun f -> Hashtbl.replace toplevel_fn_names f.name ()) fns;
+  (* Phase 23.3: also register the unmangled SKEL names so call sites
+     `Ast.Var "rev_aux"` (which use the original Mere name) hit the
+     toplevel_fn_names branch and get dispatched (then mangled by
+     multi_inst_fns lookup). *)
+  List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   (* Polymorphic variant monomorphization: collect concrete
      instantiations from the AST + fn signatures, then emit specialized
      typedefs (forward+ptr for recursive instances, full struct for
