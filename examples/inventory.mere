@@ -1,0 +1,77 @@
+// 在庫管理ミニアプリ - Map[R, str, int] (在庫数) + Vec[R, Tx] (履歴) +
+// record (Tx) の組合せ。Phase 19.2 (map_iter) / 19.3 (vec_sort) /
+// prelude (Result) を実用 task に投入する demo。
+//
+// 目的: examples roadmap G2。倉庫の在庫を増減し、履歴を残し、最終的に
+// 上位 3 商品を表示する。
+//
+// 実行モード: interpreter のみ
+//   - C codegen: 別件発見 — variant (tx_kind) を record (Tx) の field に
+//     する時、variant の struct body が record より後ろに出るので
+//     "incomplete type" エラー (forward decl 順序 bug、新 DEFERRED)
+//   - LLVM / Wasm: 同様の課題が予想される
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/inventory.mere
+//   # 期待出力:
+//   #   tx#1: stock_add apple +10
+//   #   tx#2: stock_add banana +5
+//   #   tx#3: stock_add apple +3
+//   #   tx#4: stock_sub banana -2
+//   #   --- final inventory ---
+//   #   apple: 13
+//   #   banana: 3
+//   #   --- top 2 by stock ---
+//   #   1. apple (13)
+//   #   2. banana (3)
+
+type tx_kind = StockAdd | StockSub;
+
+type Tx = { id: int, item: str, delta: int, kind: tx_kind };
+
+// 取引を 1 件記録: Map 更新 + history Vec に push。
+let apply_tx = fn (stock) -> fn (history) -> fn (next_id) -> fn (item: str) -> fn (delta: int) -> fn (kind) ->
+  let prev = if map_has stock item then map_get stock item else 0 in
+  let __ = map_set stock item (prev + delta) in
+  let tx = Tx { id = next_id, item = item, delta = delta, kind = kind } in
+  let __ = vec_push history tx in
+  let kind_str = match kind with
+    | StockAdd -> "stock_add"
+    | StockSub -> "stock_sub" in
+  let sign = if delta >= 0 then "+" else "" in
+  let __ = print ("tx#" ++ show next_id ++ ": " ++ kind_str ++ " "
+                  ++ item ++ " " ++ sign ++ show delta) in
+  next_id + 1;
+
+region R {
+  let stock = map_new () in
+  let history = vec_new () in
+
+  // 取引を 4 件流す
+  let id = apply_tx stock history 1 "apple" 10 StockAdd in
+  let id = apply_tx stock history id "banana" 5 StockAdd in
+  let id = apply_tx stock history id "apple" 3 StockAdd in
+  let __ = apply_tx stock history id "banana" (- 2) StockSub in
+
+  let __ = print "--- final inventory ---" in
+  let __ = map_iter stock (fn k -> fn v ->
+    print (k ++ ": " ++ show v)) in
+
+  // Map → Vec[(str, int)] 化して頻度降順 sort (上位 2 商品)。
+  // 摩擦点: Map.entries / keys / values が未実装 (Phase 19.2 でスキップ)
+  // なので、map_iter で side-effect 的に Vec へ集める。
+  let entries = vec_new () in
+  let __ = map_iter stock (fn k -> fn v ->
+    vec_push entries (k, v)) in
+  let __ = vec_sort entries (fn (a: (str * int)) -> fn (b: (str * int)) ->
+    snd b - snd a) in
+
+  let __ = print "--- top 2 by stock ---" in
+  let __ = print ("1. " ++ fst (vec_get entries 0)
+                ++ " (" ++ show (snd (vec_get entries 0)) ++ ")") in
+  let __ = print ("2. " ++ fst (vec_get entries 1)
+                ++ " (" ++ show (snd (vec_get entries 1)) ++ ")") in
+
+  // 履歴の件数も表示
+  print ("total transactions: " ++ show (vec_len history))
+}

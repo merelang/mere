@@ -73,6 +73,7 @@ codegen。
 | [module_scoping.mere](module_scoping.mere) | 2 module で同名 ctor を qualified 形式で disambiguate + nested `open A.B;`。**interpreter only** (codegen が M-prefix pattern 未対応)。Phase 18 demo |
 | [json_writer.mere](json_writer.mere) | StrBuf[R] + recursive variant (json ADT) で compact / pretty-print。**interpreter only** (多相 user 定義 let-rec の codegen 未対応、§1.7)。Phase 19.3 (StrBuf) demo |
 | [cap_handler.mere](cap_handler.mere) | `&shared write` で複数 handler が同じ Logger / Metrics を共有書き込みする app 風 demo。**4 backend 対応** (Phase 19.x で borrow 越し Field_get を C/LLVM/Wasm に対応)。Phase 17 / borrow_modes 延長 |
+| [inventory.mere](inventory.mere) | 在庫管理 (Map[R, str, int] + Vec[R, Tx] + tx_kind variant)。Phase 19.2 (map_iter) / 19.3 (vec_sort) を実用 task に投入。**interpreter only** (C codegen で variant→record field の forward decl 順序 bug、別 DEFERRED) |
 
 ### Q-010 collection (Phase 12 — interpreter)
 
