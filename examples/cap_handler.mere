@@ -1,0 +1,57 @@
+// &shared write を本格使用した demo — 複数 handler が同じ cap (Logger /
+// Metrics) を共有書き込みするパターン。
+//
+// 目的: examples roadmap F1。borrow_modes.mere の延長で「実際の
+// アプリ風」シナリオを書く: HTTP request 処理を模した複数 handler が
+// 共通の Logger / Metrics を扱う。
+//
+// Phase 17.1/17.2 で borrow checker が conflict matrix を完全網羅
+// したので、`&shared write` 同士は衝突せず並存できる (この example で
+// 検証される)。
+//
+// 実行モード: interpreter (Logger/Metrics の codegen は Phase 16.3 で
+// 4 backend 対応済みだが、&shared write の region scope 含む example
+// 全体の codegen 検証は別途要)。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/cap_handler.mere
+//   # 期待出力:
+//   #   svc [INFO] handle: login(user=alice)
+//   #   [METRIC] inc requests
+//   #   svc [INFO] handle: search(q=mere lang)
+//   #   [METRIC] inc requests
+//   #   svc [INFO] handle: login(user=bob)
+//   #   [METRIC] inc requests
+//   #   svc [INFO] total handled: 3
+
+// 「signature alias」で各 handler の共通 cap 束を再利用 (cap-passing
+// パターン)。`...svc_ctx` で展開、handler は各 cap を直接受け取る。
+signature svc_ctx = (
+  lg: &shared write R Logger,
+  met: &shared write R Metrics
+);
+
+let handle_login = fn (...svc_ctx, user: str) -> {
+  lg.info ("handle: login(user=" ++ user ++ ")");
+  met.inc "requests"
+};
+
+let handle_search = fn (...svc_ctx, q: str) -> {
+  lg.info ("handle: search(q=" ++ q ++ ")");
+  met.inc "requests"
+};
+
+// === main ===
+
+region R {
+  let logger = mk_logger "svc" in
+  let metrics = mk_metrics () in
+  let lg_ref = &shared write R logger in
+  let met_ref = &shared write R metrics in
+  {
+    handle_login lg_ref met_ref "alice";
+    handle_search lg_ref met_ref "mere lang";
+    handle_login lg_ref met_ref "bob";
+    lg_ref.info "total handled: 3"
+  }
+}
