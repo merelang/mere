@@ -619,6 +619,56 @@ let rec emit_expr (e : Ast.expr) : string =
        let value_c = emit_expr value in
        let body_c = emit_expr body in
        Printf.sprintf "({ (void)(%s); %s; })" value_c body_c
+     | Ast.P_tuple ps ->
+       (* Phase 22.1: `let (a, b, ...) = E in B` — emit a fresh `__let_tup`
+          temporary holding the tuple value, then per-field __auto_type
+          bindings via `(__let_tup).f0` etc. Each sub-pattern must be
+          P_var or P_wild (nested destructuring should use `match` for now). *)
+       let value_c = emit_expr value in
+       let value_ty =
+         match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
+       in
+       let elem_tys = match value_ty with
+         | Ast.TyTuple ts -> ts
+         | _ ->
+           raise (Codegen_error (pat.ploc,
+             Printf.sprintf
+               "let-tuple pattern requires a tuple-typed RHS, got `%s`"
+               (Ast.pp_ty value_ty)))
+       in
+       if List.length ps <> List.length elem_tys then
+         raise (Codegen_error (pat.ploc,
+           Printf.sprintf "let-tuple arity mismatch: pattern has %d, value has %d"
+             (List.length ps) (List.length elem_tys)));
+       let bindings_info = List.mapi (fun i p ->
+         let sub_ty = List.nth elem_tys i in
+         match p.Ast.pnode with
+         | Ast.P_var n -> (Some n, sub_ty, i)
+         | Ast.P_wild -> (None, sub_ty, i)
+         | _ ->
+           raise (Codegen_error (p.Ast.ploc,
+             "nested pattern in let-tuple not supported in C codegen subset \
+              — use `match` for non-flat destructuring"))
+       ) ps in
+       let prev = !current_var_types in
+       current_var_types :=
+         List.filter_map (fun (n_opt, ty, _) ->
+           match n_opt with Some n -> Some (n, ty) | None -> None)
+           bindings_info @ prev;
+       let body_c =
+         try let r = emit_expr body in current_var_types := prev; r
+         with ex -> current_var_types := prev; raise ex
+       in
+       let bind_stmts =
+         String.concat " " (List.filter_map (fun (n_opt, _, i) ->
+           match n_opt with
+           | Some n ->
+             Some (Printf.sprintf "__auto_type %s = (__let_tup).f%d;" n i)
+           | None -> None
+         ) bindings_info)
+       in
+       Printf.sprintf "({ __auto_type __let_tup = %s; %s %s; })"
+         value_c bind_stmts body_c
      | _ -> unsupported pat.ploc "non-variable let pattern")
   (* Unsupported nodes *)
   | Ast.Float_lit _   -> unsupported e.loc "float literals"
