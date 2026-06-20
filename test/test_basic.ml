@@ -5904,5 +5904,28 @@ let () =
      if scan 0 then "ok" else "missing")
     "ok";
 
+  (* Phase 23.1: multi-instantiation detection — single-spec fn called
+     with 2+ distinct concrete types now raises a clear codegen error
+     instead of silently miscompiling (which led to SIGABRT in json_parser). *)
+  check "§23.1: multi-instantiation poly fn raises clear codegen error"
+    (try
+       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+         "let rec id = fn x -> x in\n\
+          let a = id 5 in\n\
+          let b = id \"hi\" in\n\
+          let __ = print b in\n\
+          a") in
+       "no-error"
+     with Codegen_c.Codegen_error (_, msg) ->
+       let pat = "multi-instantiation" in
+       let nlen = String.length msg and plen = String.length pat in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub msg i plen = pat then true
+         else scan (i + 1)
+       in
+       if scan 0 then "detected" else "wrong-error")
+    "detected";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

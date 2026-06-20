@@ -1839,6 +1839,53 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
   go e;
   !found
 
+(* Phase 23.1 (DEFERRED §1.7 multi-instantiation): collect ALL distinct
+   concrete arrow types at use sites of `name`. Used to detect when a
+   single-specialization emit would silently miscompile (e.g., rev_aux
+   used with both `'json list -> ...` and `'(str * json) list -> ...`
+   in json_parser). *)
+let find_all_concrete_arrows (name : string) (e : Ast.expr) : Ast.ty list =
+  let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n when n = name ->
+       (match e.Ast.ty with
+        | Some t when ty_is_concrete (Ast.walk t) ->
+          let walked = Ast.walk t in
+          (match walked with
+           | Ast.TyArrow _ ->
+             let key = Ast.pp_ty walked in
+             if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
+           | _ -> ())
+        | _ -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, _, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go e;
+  Hashtbl.fold (fun _ v acc -> v :: acc) seen []
+
 (* Build fn_decls from the typer-annotated AST. For each skeleton, prefer
    the Fun's own .ty if it's already concrete; otherwise (let-poly
    generalized it) recover a concrete arrow type by scanning the main
@@ -1871,9 +1918,31 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
         end else
           match find_concrete_arrow s.sname root with
           | Some t ->
-            (try Typer.unify Loc.dummy fun_ty t with _ -> ());
-            Hashtbl.add resolved s.sname t;
-            progress := true
+            (* Phase 23.1: multi-instantiation detection. If the fn is
+               called at 2+ distinct concrete arrow types, single-spec
+               emit would silently miscompile (pointer-cast lets the
+               wrong-typed call go through but body misinterprets
+               fields → memory garbage → eventual SIGABRT, as found
+               in json_parser's `rev_aux` used both `'json list` and
+               `'(str * json) list`). Detect early and report a clear
+               error pointing to DEFERRED §1.7. *)
+            let all = find_all_concrete_arrows s.sname root in
+            if List.length all > 1 then
+              raise (Codegen_error (s.sfun.Ast.loc,
+                Printf.sprintf
+                  "polymorphic fn `%s` is called at %d distinct concrete \
+                   types (e.g., %s) — multi-instantiation specialization \
+                   is not yet implemented (DEFERRED §1.7 残). Workaround: \
+                   define separately-named specialized fns at the source \
+                   level."
+                  s.sname (List.length all)
+                  (String.concat " | "
+                     (List.map Ast.pp_ty (List.filteri (fun i _ -> i < 3) all)))))
+            else begin
+              (try Typer.unify Loc.dummy fun_ty t with _ -> ());
+              Hashtbl.add resolved s.sname t;
+              progress := true
+            end
           | None -> ()
       end
     ) skels
