@@ -9,9 +9,9 @@
 // したので、`&shared write` 同士は衝突せず並存できる (この example で
 // 検証される)。
 //
-// 実行モード: interpreter (Logger/Metrics の codegen は Phase 16.3 で
-// 4 backend 対応済みだが、&shared write の region scope 含む example
-// 全体の codegen 検証は別途要)。
+// 実行モード: interpreter + C codegen 動作確認済 (Phase 19.x で
+// `&[mode] R T` の ty_tag / Field_get 対応を追加、Logger 以外の
+// record (Metrics 等) も borrow 越し field access が動くように)。
 //
 // 使い方:
 //   dune exec ./bin/mere.exe -- examples/cap_handler.mere
@@ -31,15 +31,13 @@ signature svc_ctx = (
   met: &shared write R Metrics
 );
 
-let handle_login = fn (...svc_ctx, user: str) -> {
-  lg.info ("handle: login(user=" ++ user ++ ")");
-  met.inc "requests"
-};
+let handle_login = fn (...svc_ctx, user: str) ->
+  let __ = lg.info ("handle: login(user=" ++ user ++ ")") in
+  met.inc "requests";
 
-let handle_search = fn (...svc_ctx, q: str) -> {
-  lg.info ("handle: search(q=" ++ q ++ ")");
-  met.inc "requests"
-};
+let handle_search = fn (...svc_ctx, q: str) ->
+  let __ = lg.info ("handle: search(q=" ++ q ++ ")") in
+  met.inc "requests";
 
 // === main ===
 
@@ -48,10 +46,8 @@ region R {
   let metrics = mk_metrics () in
   let lg_ref = &shared write R logger in
   let met_ref = &shared write R metrics in
-  {
-    handle_login lg_ref met_ref "alice";
-    handle_search lg_ref met_ref "mere lang";
-    handle_login lg_ref met_ref "bob";
-    lg_ref.info "total handled: 3"
-  }
+  let __ = handle_login lg_ref met_ref "alice" in
+  let __ = handle_search lg_ref met_ref "mere lang" in
+  let __ = handle_login lg_ref met_ref "bob" in
+  lg_ref.info "total handled: 3"
 }

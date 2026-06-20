@@ -4283,6 +4283,35 @@ let () =
         let a = &R x in let b = &mut R y in 42 }")
     "42";
 
+  (* Phase 19.x: borrow 越し field access の codegen 対応。
+     ty_tag (TyRef) と Field_get (auto-deref) が 3 backend 全部で動く。 *)
+  let borrow_field_src =
+    "let use_log = fn (lg: &shared write R Logger) -> \
+       let __ = lg.info \"hello\" in lg.warn \"world\";\n\
+     region R {\n\
+       let logger = mk_logger \"test\" in\n\
+       let lr = &shared write R logger in\n\
+       use_log lr\n\
+     }"
+  in
+  check "borrow codegen: interpreter runs fn with &shared write R Logger"
+    (Pipeline.process borrow_field_src) "()";
+  assert_contains "borrow codegen: C emits Logger via -> on borrow"
+    (let prog = Pipeline.parse_program borrow_field_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyUnit prog)
+    "(lg)->info";
+  assert_contains "borrow codegen: LLVM unwraps TyRef for field GEP"
+    (let prog = Pipeline.parse_program borrow_field_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyUnit prog)
+    "getelementptr %Logger";
+  assert_contains "borrow codegen: Wasm unbox load for borrow Field_get"
+    (let prog = Pipeline.parse_program borrow_field_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyUnit prog)
+    "$use_log";
+
   (* 衝突メッセージに「previous borrow at」note が含まれる *)
   let conflict_msg =
     try
