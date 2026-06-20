@@ -100,6 +100,13 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    The runtime is emitted iff this flag is set. *)
 let strbuf_used = ref false
 
+(* Phase 16.3: Logger / Metrics builtin usage flags. Triggered by
+   `Ast.Var "mk_logger" / "mk_metrics"` in App-head position. The
+   runtime helpers (printf-based logger + simple metrics) are emitted
+   after closure_typedefs and Logger / Metrics struct bodies. *)
+let logger_used = ref false
+let metrics_used = ref false
+
 (* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key は int / str
    のみサポート、value は codegen の任意 concrete 型。線形スキャン。
    キーは ty_tag、value は ty_tag で `mere_map_<K_tag>_<V_tag>` を
@@ -731,6 +738,18 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        let tag = ty_tag arg_ty in
        Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
+     | Ast.Var "mk_logger" ->
+       (* Phase 16.3 / DEFERRED §1.5: emit a runtime helper call that
+          returns a Logger record (3 closure_str_unit fields capturing
+          the prefix as their env). *)
+       logger_used := true;
+       Printf.sprintf "__mere_mk_logger(%s)" (emit_expr arg)
+     | Ast.Var "mk_metrics" ->
+       (* Phase 16.3: mk_metrics () — Metrics record with `inc :
+          str -> unit` and `record : str -> int -> unit` curried
+          closure. *)
+       metrics_used := true;
+       Printf.sprintf "__mere_mk_metrics(%s)" (emit_expr arg)
      | Ast.Var "vec_new" ->
        (* Phase 15.1/15.2: vec_new () — region と要素型を result type の
           TyCon args から取り出す。region = __heap なら default region、
@@ -2015,6 +2034,70 @@ let strbuf_runtime =
       "";
       "static int mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
 
+(* Phase 16.3 / DEFERRED §1.5: mk_logger / mk_metrics の codegen runtime。
+   interpreter で V_builtin として実装されている cap を C 側でも使える
+   ように、Logger/Metrics の struct 型 (typer で register 済み、record
+   として codegen される) を返す factory 関数を提供する。
+
+   Logger の 3 field (info / warn / error) は全部 `closure_str_unit`
+   (= `{ void* env, int (*fn)(void*, const char*) }`)。env は prefix
+   文字列を直接持たせる (string literal なのでコピー不要)。
+
+   Metrics の `record` は `str -> int -> unit` の curried 形なので、
+   外側 closure は inner closure を返す。inner の env で field 名を
+   持つ必要があるが、default region から alloc して使い回す。 *)
+let logger_runtime =
+  String.concat "\n"
+    [ "/* Phase 16.3: mk_logger runtime — 3 closure_str_unit field を持つ";
+      "   Logger record を返す。prefix は env として bind。 */";
+      "static int __mere_logger_info_fn(void* env, const char* msg) {";
+      "  printf(\"%s [INFO] %s\\n\", (const char*)env, msg);";
+      "  return 0;";
+      "}";
+      "static int __mere_logger_warn_fn(void* env, const char* msg) {";
+      "  printf(\"%s [WARN] %s\\n\", (const char*)env, msg);";
+      "  return 0;";
+      "}";
+      "static int __mere_logger_error_fn(void* env, const char* msg) {";
+      "  printf(\"%s [ERROR] %s\\n\", (const char*)env, msg);";
+      "  return 0;";
+      "}";
+      "static Logger __mere_mk_logger(const char* prefix) {";
+      "  return (Logger){";
+      "    .info  = {.env = (void*)prefix, .fn = __mere_logger_info_fn},";
+      "    .warn  = {.env = (void*)prefix, .fn = __mere_logger_warn_fn},";
+      "    .error = {.env = (void*)prefix, .fn = __mere_logger_error_fn},";
+      "  };";
+      "}" ]
+
+let metrics_runtime =
+  String.concat "\n"
+    [ "/* Phase 16.3: mk_metrics runtime — Metrics record (inc / record)。";
+      "   record は curried (str -> int -> unit)、inner closure の env";
+      "   に field 名を持たせる。 */";
+      "static int __mere_metrics_inc_fn(void* env, const char* name) {";
+      "  (void)env;";
+      "  printf(\"[METRIC] inc %s\\n\", name);";
+      "  return 0;";
+      "}";
+      "static int __mere_metrics_record_inner_fn(void* env, int n) {";
+      "  printf(\"[METRIC] %s=%d\\n\", (const char*)env, n);";
+      "  return 0;";
+      "}";
+      "static closure_int_unit __mere_metrics_record_outer_fn(void* env, const char* name) {";
+      "  (void)env;";
+      "  /* name は string literal を想定 (interpreter と同じ前提)、";
+      "     コピー不要で env に直接持たせる。 */";
+      "  return (closure_int_unit){.env = (void*)name, .fn = __mere_metrics_record_inner_fn};";
+      "}";
+      "static Metrics __mere_mk_metrics(int unit_arg) {";
+      "  (void)unit_arg;";
+      "  return (Metrics){";
+      "    .inc    = {.env = NULL, .fn = __mere_metrics_inc_fn},";
+      "    .record = {.env = NULL, .fn = __mere_metrics_record_outer_fn},";
+      "  };";
+      "}" ]
+
 (* Phase 15.8: 全 OwnedVec を tracking する registry。`owned_vec_new` /
    `vec_to_owned` で確保された struct を全部 thread-local list に登録、
    main 関数末で `__mere_owned_vec_free_all` が iterate して
@@ -2447,6 +2530,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
         order := (p, r) :: !order
       end
   in
+  let seen_records : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let rec walk_ty (t : Ast.ty) =
     match Ast.walk t with
     | Ast.TyArrow (p, r) ->
@@ -2456,7 +2540,19 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
       walk_ty p; walk_ty r;
       add (Ast.walk p) (Ast.walk r)
     | Ast.TyTuple ts -> List.iter walk_ty ts
-    | Ast.TyCon (_, args) -> List.iter walk_ty args
+    | Ast.TyCon (name, args) ->
+      List.iter walk_ty args;
+      (* Phase 16.3: 既知 record の field 型もたどる。Logger / Metrics
+         のように field が closure 型を持つ record では、field 経由でしか
+         登場しない closure_X_Y を arrow_pairs に拾わせる必要がある。 *)
+      if Hashtbl.mem Typer.records name
+         && not (Hashtbl.mem seen_records name)
+      then begin
+        Hashtbl.add seen_records name ();
+        let info = Hashtbl.find Typer.records name in
+        if info.Typer.r_params = [] then
+          List.iter (fun (_, ft) -> walk_ty ft) info.Typer.r_fields
+      end
     | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
   in
@@ -2837,6 +2933,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset map_instances;
   strbuf_used := false;
+  logger_used := false;
+  metrics_used := false;
   let variant_decls =
     List.filter_map (fun decl ->
       match decl with
@@ -3194,6 +3292,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
+    (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
+       Metrics struct bodies (= records) and closure_str_unit /
+       closure_int_unit typedefs, so emit after struct bodies. *)
+    @ (if !logger_used then [logger_runtime; ""] else [])
+    @ (if !metrics_used then [metrics_runtime; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";

@@ -9,9 +9,10 @@
 //   - 一覧は OwnedVec[Task] (heap、複数の関数を跨いで保持したい)
 //   - Logger cap で操作を記録
 //
-// **実行モード**: interpreter のみ (`mk_logger` builtin は codegen 未対応)。
-// codegen で動かしたい場合は Logger 部分を `print` 直接呼びに置換する必要が
-// ある — 設計レポートの摩擦点 #6 を参照。
+// **実行モード**: interpreter + C + LLVM で動く (Phase 16.3 で
+// `mk_logger` / `mk_metrics` を 3 backend codegen 対応した)。
+// Wasm は OwnedVec ⇄ Vec の往復で別件のメモリ問題があり、todo_app の
+// 完全実行は未確認 — 単純な mk_logger / mk_metrics は Wasm でも動く。
 //
 // 使い方:
 //   dune exec ./bin/mere.exe -- examples/todo_app.mere

@@ -106,6 +106,10 @@ let vec_higher_order_used = ref false
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
 
+(* Phase 16.3: Logger / Metrics builtin usage flags. *)
+let logger_used = ref false
+let metrics_used = ref false
+
 (* Phase 15.10/15.14: Map[R, K, V] — Wasm では値が全部 i32 なので per-V
    は不要、per-K のみ。K の型を `map_key_types` に登録、emit_program で
    per-K helper を 1 セットずつ emit。`map_int_used` / `map_str_used` は
@@ -351,6 +355,10 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_show_type t
         | None -> ())
+     | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, _) ->
+       (* Phase 16.3: metrics.record uses show_int internally to format
+          the integer payload, so register `int` ahead of show_fn_defs. *)
+       add_show_type Ast.TyInt
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
@@ -633,6 +641,21 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "call $puts";
     emit_instr "i32.const 0"  (* unit / int 0 *)
+  | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
+    (* Phase 16.3 / DEFERRED §1.5: build a Logger record in linear
+       memory (3 closure ptrs, each pointing to an 8-byte { env=prefix,
+       fn_idx } block). *)
+    logger_used := true;
+    emit_expr arg;
+    emit_instr "call $__mere_mk_logger"
+  | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, arg) ->
+    (* Phase 16.3: mk_metrics () — unit arg is consumed (still pushed
+       so stack stays balanced) and `$__mere_mk_metrics` returns the
+       Metrics record. *)
+    metrics_used := true;
+    emit_expr arg;
+    emit_instr "drop";
+    emit_instr "call $__mere_mk_metrics"
   | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_strlen"
@@ -2439,6 +2462,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
+  logger_used := false;
+  metrics_used := false;
   map_int_used := false;
   map_str_used := false;
   Hashtbl.reset map_key_types;
@@ -2590,8 +2615,125 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   drain ();
   let anon_adapters = List.rev !anon_adapters in
+  (* Phase 16.3 / DEFERRED §1.5: Logger / Metrics runtime — register
+     helper fns in the table now (after main body has populated
+     table_entries with user closures), so their indices are stable.
+     The runtime body is built with the indices interpolated. *)
+  let logger_runtime_section =
+    if not !logger_used then "" else begin
+      let info_idx  = register_in_table "__mere_logger_info_fn" in
+      let warn_idx  = register_in_table "__mere_logger_warn_fn" in
+      let error_idx = register_in_table "__mere_logger_error_fn" in
+      let info_prefix_off  = fresh_str_offset " [INFO] " in
+      let warn_prefix_off  = fresh_str_offset " [WARN] " in
+      let error_prefix_off = fresh_str_offset " [ERROR] " in
+      Printf.sprintf {|
+  (func $__mere_logger_info_fn (param $env i32) (param $msg i32) (result i32)
+    (local $tmp i32)
+    (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
+    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
+    (call $puts (local.get $tmp))
+    (i32.const 0))
+  (func $__mere_logger_warn_fn (param $env i32) (param $msg i32) (result i32)
+    (local $tmp i32)
+    (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
+    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
+    (call $puts (local.get $tmp))
+    (i32.const 0))
+  (func $__mere_logger_error_fn (param $env i32) (param $msg i32) (result i32)
+    (local $tmp i32)
+    (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
+    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
+    (call $puts (local.get $tmp))
+    (i32.const 0))
+  (func $__mere_mk_logger (param $prefix i32) (result i32)
+    (local $logger i32) (local $cl i32)
+    ;; Logger record: 3 ptrs to closures = 12 bytes
+    (local.set $logger (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $logger) (i32.const 12)))
+    ;; info closure (8 bytes: env, fn_idx)
+    (local.set $cl (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    (i32.store offset=0 (local.get $cl) (local.get $prefix))
+    (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=0 (local.get $logger) (local.get $cl))
+    ;; warn
+    (local.set $cl (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    (i32.store offset=0 (local.get $cl) (local.get $prefix))
+    (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=4 (local.get $logger) (local.get $cl))
+    ;; error
+    (local.set $cl (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    (i32.store offset=0 (local.get $cl) (local.get $prefix))
+    (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $logger) (local.get $cl))
+    (local.get $logger))|}
+        info_prefix_off warn_prefix_off error_prefix_off
+        info_idx warn_idx error_idx
+    end
+  in
+  let metrics_runtime_section =
+    if not !metrics_used then "" else begin
+      let inc_idx   = register_in_table "__mere_metrics_inc_fn" in
+      let rec_outer = register_in_table "__mere_metrics_record_outer_fn" in
+      let rec_inner = register_in_table "__mere_metrics_record_inner_fn" in
+      let inc_prefix_off = fresh_str_offset "[METRIC] inc " in
+      let rec_prefix_off = fresh_str_offset "[METRIC] " in
+      let eq_off         = fresh_str_offset "=" in
+      Printf.sprintf {|
+  (func $__mere_metrics_inc_fn (param $env i32) (param $name i32) (result i32)
+    (local $tmp i32)
+    (local.set $tmp (call $__lang_str_concat (i32.const %d) (local.get $name)))
+    (call $puts (local.get $tmp))
+    (i32.const 0))
+  (func $__mere_metrics_record_inner_fn (param $env i32) (param $n i32) (result i32)
+    (local $tmp i32) (local $ns i32)
+    (local.set $ns (call $show_int (local.get $n)))
+    (local.set $tmp (call $__lang_str_concat (i32.const %d) (local.get $env)))
+    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (i32.const %d)))
+    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $ns)))
+    (call $puts (local.get $tmp))
+    (i32.const 0))
+  (func $__mere_metrics_record_outer_fn (param $env i32) (param $name i32) (result i32)
+    (local $cl i32)
+    (local.set $cl (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    (i32.store offset=0 (local.get $cl) (local.get $name))
+    (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (local.get $cl))
+  (func $__mere_mk_metrics (result i32)
+    (local $m i32) (local $cl i32)
+    ;; Metrics record: 2 ptrs = 8 bytes
+    (local.set $m (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 8)))
+    ;; inc closure
+    (local.set $cl (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    (i32.store offset=0 (local.get $cl) (i32.const 0))
+    (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=0 (local.get $m) (local.get $cl))
+    ;; record outer closure
+    (local.set $cl (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    (i32.store offset=0 (local.get $cl) (i32.const 0))
+    (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=4 (local.get $m) (local.get $cl))
+    (local.get $m))|}
+        inc_prefix_off rec_prefix_off eq_off rec_inner inc_idx rec_outer
+    end
+  in
   let fn_section =
     let all = fn_defs @ top_adapters @ anon_adapters @ show_fn_defs in
+    let all =
+      if logger_runtime_section <> "" then all @ [logger_runtime_section]
+      else all
+    in
+    let all =
+      if metrics_runtime_section <> "" then all @ [metrics_runtime_section]
+      else all
+    in
     if all = [] then "" else String.concat "\n" all ^ "\n"
   in
   let data_section =
