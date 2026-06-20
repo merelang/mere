@@ -2243,6 +2243,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                scan_uses name vt body
              | _ -> ())
           | _ -> ())
+       | Ast.With (name, value, body) ->
+         (match value.Ast.ty with
+          | Some vt ->
+            (match Ast.walk vt with
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
+               scan_uses name vt body
+             | _ -> ())
+          | None -> ())
        | _ -> ());
       walk_subs e
     and walk_subs e =
