@@ -873,6 +873,17 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
     ("str_count",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
+    (* Phase 19.1: str_split / str_join / str_index_of *)
+    ("str_index_of",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
+    ("str_split",
+       mono (Ast.TyArrow (Ast.TyStr,
+              Ast.TyArrow (Ast.TyStr,
+                Ast.TyCon ("list", [Ast.TyStr])))));
+    ("str_join",
+       mono (Ast.TyArrow (Ast.TyStr,
+              Ast.TyArrow (Ast.TyCon ("list", [Ast.TyStr]),
+                Ast.TyStr))));
     ("str_compare",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
     ("str_starts_with",

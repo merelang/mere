@@ -428,6 +428,85 @@ let builtin_str_contains =
         | _ -> failwith "str_contains: 2nd arg expected str")
     | _ -> failwith "str_contains: 1st arg expected str")
 
+(* Phase 19.1: str_index_of, str_split, str_join *)
+
+let builtin_str_index_of =
+  V_builtin ("str_index_of", fun haystack ->
+    match haystack with
+    | V_str h ->
+      V_builtin ("str_index_of_partial", fun needle ->
+        match needle with
+        | V_str n ->
+          let h_len = String.length h in
+          let n_len = String.length n in
+          if n_len = 0 then V_int 0
+          else
+            let rec scan i =
+              if i + n_len > h_len then V_int (-1)
+              else if String.sub h i n_len = n then V_int i
+              else scan (i + 1)
+            in
+            scan 0
+        | _ -> failwith "str_index_of: 2nd arg expected str")
+    | _ -> failwith "str_index_of: 1st arg expected str")
+
+(* Helper: produce an OCaml list of str → wrap as V_constr Nil/Cons chain. *)
+let rec str_list_to_v = function
+  | [] -> V_constr ("Nil", None)
+  | s :: rest ->
+    V_constr ("Cons", Some (V_tuple [V_str s; str_list_to_v rest]))
+
+let builtin_str_split =
+  V_builtin ("str_split", fun s_val ->
+    match s_val with
+    | V_str s ->
+      V_builtin ("str_split_partial", fun d_val ->
+        match d_val with
+        | V_str delim ->
+          let s_len = String.length s in
+          let d_len = String.length delim in
+          if d_len = 0 then
+            (* Empty delimiter → single-element list with the original string,
+               matching common conventions (Python "abc".split("") errors but
+               we choose pragmatic single-element output). *)
+            str_list_to_v [s]
+          else begin
+            let rec loop start acc =
+              if start > s_len then List.rev acc
+              else
+                let rec find i =
+                  if i + d_len > s_len then None
+                  else if String.sub s i d_len = delim then Some i
+                  else find (i + 1)
+                in
+                match find start with
+                | None -> List.rev (String.sub s start (s_len - start) :: acc)
+                | Some pos ->
+                  let part = String.sub s start (pos - start) in
+                  loop (pos + d_len) (part :: acc)
+            in
+            str_list_to_v (loop 0 [])
+          end
+        | _ -> failwith "str_split: 2nd arg expected str (delimiter)")
+    | _ -> failwith "str_split: 1st arg expected str")
+
+let builtin_str_join =
+  V_builtin ("str_join", fun sep_val ->
+    match sep_val with
+    | V_str sep ->
+      V_builtin ("str_join_partial", fun lst ->
+        let rec collect v =
+          match v with
+          | V_constr ("Nil", None) -> []
+          | V_constr ("Cons", Some (V_tuple [V_str s; rest])) ->
+            s :: collect rest
+          | V_constr ("Cons", Some (V_tuple [_; _])) ->
+            failwith "str_join: list element expected str"
+          | _ -> failwith "str_join: 2nd arg expected str list"
+        in
+        V_str (String.concat sep (collect lst)))
+    | _ -> failwith "str_join: 1st arg expected str (separator)")
+
 let builtin_min =
   V_builtin ("min", fun a ->
     match a with
@@ -1220,6 +1299,9 @@ let initial_env : env =
     ("bool_of_str", ref builtin_bool_of_str);
     ("str_contains", ref builtin_str_contains);
     ("str_count", ref builtin_str_count);
+    ("str_index_of", ref builtin_str_index_of);
+    ("str_split", ref builtin_str_split);
+    ("str_join", ref builtin_str_join);
     ("str_compare", ref builtin_str_compare);
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);
