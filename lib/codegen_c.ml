@@ -443,11 +443,11 @@ let rec emit_expr (e : Ast.expr) : string =
        handler の special-case で直接 emit する。first-class value 用法
        (let f = vec_new in ...) はまだ未対応で、ここで reject される。 *)
     if name = "vec_new" || name = "vec_push"
-       || name = "vec_get" || name = "vec_len" then
+       || name = "vec_get" || name = "vec_len"
+       || name = "vec_set" || name = "vec_iter" || name = "vec_fold" then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.1: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_iter" || name = "vec_map"
-       || name = "vec_fold" || name = "vec_set"
+        (name ^ " as a value (Phase 15.1/15.5: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_map"
        || name = "vec_filter" || name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -458,7 +458,7 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.loc
-        (name ^ " (OwnedVec / StrBuf / Map / vec の高階 API / len are interpreter-only)");
+        (name ^ " (OwnedVec / StrBuf / Map / vec_map / vec_filter / vec_to_* / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -669,6 +669,36 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_vec_%s_get(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "vec_iter"; _ }, vec_e) ->
+       (* `vec_iter v f` curried: App (App (Var vec_iter, v), f).
+          Phase 15.5: emit inline loop, closure dispatch per element. *)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __vc = %s; __auto_type __cl = %s; \
+          for (int __i = 0; __i < __vc->len; __i++) { \
+            __cl.fn(__cl.env, mere_vec_%s_get(__vc, __i)); \
+          } 0; })"
+         (emit_expr vec_e) (emit_expr arg) elem_tag
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_fold"; _ }, vec_e); _ }, acc_e) ->
+       (* `vec_fold v acc f`: outer App's arg is the closure `f`,
+          inner App's arg is `acc`, innermost is `v`.
+          f : U -> T -> U, so f(env, acc) returns inner closure_T_U.
+          Phase 15.5: inline loop with accumulator. *)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __vc = %s; __auto_type __acc = %s; \
+          __auto_type __outer = %s; \
+          for (int __i = 0; __i < __vc->len; __i++) { \
+            __auto_type __inner = __outer.fn(__outer.env, __acc); \
+            __acc = __inner.fn(__inner.env, mere_vec_%s_get(__vc, __i)); \
+          } __acc; })"
+         (emit_expr vec_e) (emit_expr acc_e) (emit_expr arg) elem_tag
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_set"; _ }, vec_e); _ }, idx_e) ->
+       (* `vec_set v i x`: outer App arg = x, inner App arg = i, innermost = v.
+          Phase 15.5: dispatch to per-T `mere_vec_<tag>_set` runtime helper. *)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf "mere_vec_%s_set(%s, %s, %s)"
+         elem_tag (emit_expr vec_e) (emit_expr idx_e) (emit_expr arg)
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
        (* Defunctionalized direct call (Phase 4.8). *)
        let li = Hashtbl.find inner_lifts name in
@@ -1480,7 +1510,18 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "}";
       "";
       Printf.sprintf "static int %s_len(%s* v) { return v->len; }"
-        struct_name struct_name ]
+        struct_name struct_name;
+      "";
+      (* Phase 15.5: vec_set v i x — in-place mutation. *)
+      Printf.sprintf "static int %s_set(%s* v, int i, %s x) {"
+        struct_name struct_name c_elem;
+      "  if (i < 0 || i >= v->len) {";
+      "    fprintf(stderr, \"vec_set: index %d out of bounds (len = %d)\\n\", i, v->len);";
+      "    abort();";
+      "  }";
+      "  v->data[i] = x;";
+      "  return 0; /* unit */";
+      "}" ]
 
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
@@ -2383,6 +2424,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     end
   in
   drain ();
+  let main_body = emit_expr body_expr in
+  (* Phase 15.5: main_body may contain anonymous `Fun` nodes that push
+     additional closure adapters onto pending_closures (e.g.,
+     `vec_iter v (fn x -> ...)`). Drain again so the env typedefs and
+     adapter definitions are emitted. *)
+  drain ();
   let closure_env_typedefs =
     List.filter (fun s -> s <> "") (List.rev !closure_env_typedefs)
   in
@@ -2408,7 +2455,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_wrappers
     @ show_fn_defs
   in
-  let main_body = emit_expr body_expr in
   (* Phase 15.2: vec_instances is populated during fn / main emission
      via c_type_of and emit_expr. Emit one runtime block per element
      type now, after main_body has run through emit_expr. *)

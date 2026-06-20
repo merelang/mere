@@ -97,6 +97,12 @@ let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
    inspection sees a Vec value; emit_program emits the helpers iff true. *)
 let vec_used = ref false
 
+(* Phase 15.5: vec_iter / vec_fold reference `(type $cl)` and use
+   `call_indirect`, which both require a funcref table to be declared
+   in the module. Track usage so emit_program can declare a (possibly
+   empty) table when these helpers are emitted. *)
+let vec_higher_order_used = ref false
+
 (* Names bound by a pattern (for the free-vars walk). *)
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
@@ -487,12 +493,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     (* Phase 15.4: vec_new / vec_push / vec_get / vec_len は App handler
        で special-case 処理。first-class value 用法のみここで reject。 *)
     if name = "vec_new" || name = "vec_push"
-       || name = "vec_get" || name = "vec_len" then
+       || name = "vec_get" || name = "vec_len"
+       || name = "vec_set" || name = "vec_iter" || name = "vec_fold" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4: vec_* は直接 application のみ対応)"));
-    if name = "vec_iter" || name = "vec_map"
-       || name = "vec_fold" || name = "vec_set"
+        ^ " as a value (Phase 15.4/15.5: vec_* は直接 application のみ対応)"));
+    if name = "vec_map"
        || name = "vec_filter" || name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -504,7 +510,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (OwnedVec / StrBuf / Map / vec の高階 API / len are interpreter-only)"));
+        ^ " (OwnedVec / StrBuf / Map / vec_map / vec_filter / vec_to_* / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -602,6 +608,28 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr vec_e;
     emit_expr idx_e;
     emit_instr "call $mere_vec_get"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_set"; _ }, vec_e); _ }, idx_e); _ }, val_e) ->
+    (* Phase 15.5: vec_set v i x *)
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr idx_e;
+    emit_expr val_e;
+    emit_instr "call $mere_vec_set"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_iter"; _ }, vec_e); _ }, fn_e) ->
+    (* Phase 15.5: vec_iter v f *)
+    vec_used := true;
+    vec_higher_order_used := true;
+    emit_expr vec_e;
+    emit_expr fn_e;
+    emit_instr "call $mere_vec_iter"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_fold"; _ }, vec_e); _ }, acc_e); _ }, fn_e) ->
+    (* Phase 15.5: vec_fold v acc f *)
+    vec_used := true;
+    vec_higher_order_used := true;
+    emit_expr vec_e;
+    emit_expr acc_e;
+    emit_expr fn_e;
+    emit_instr "call $mere_vec_fold"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load offset=0"
@@ -1510,7 +1538,76 @@ let vec_runtime = {|
       (i32.add (local.get $buf)
                (i32.mul (local.get $i) (i32.const 4)))))
   (func $mere_vec_len (param $v i32) (result i32)
-    (i32.load offset=4 (local.get $v)))|}
+    (i32.load offset=4 (local.get $v)))
+  (func $mere_vec_set (param $v i32) (param $i i32) (param $x i32) (result i32)
+    (local $len i32) (local $buf i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
+                (i32.ge_s (local.get $i) (local.get $len)))
+      (then (unreachable)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (i32.store
+      (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))
+      (local.get $x))
+    (i32.const 0))|}
+
+(* Phase 15.5: vec_iter / vec_fold helpers. References (type $cl) and
+   uses call_indirect, so the module must declare a funcref table when
+   this block is emitted (even if no closure entries exist). *)
+let vec_higher_order_runtime = {|
+  (func $mere_vec_iter (param $v i32) (param $cl i32) (result i32)
+    (local $i i32) (local $len i32) (local $buf i32)
+    (local $env i32) (local $fn i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $env (i32.load offset=0 (local.get $cl)))
+    (local.set $fn (i32.load offset=4 (local.get $cl)))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (drop
+          (call_indirect (type $cl)
+            (local.get $env)
+            (i32.load (i32.add (local.get $buf)
+                               (i32.mul (local.get $i) (i32.const 4))))
+            (local.get $fn)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.const 0))
+  (func $mere_vec_fold (param $v i32) (param $init_acc i32) (param $outer_cl i32) (result i32)
+    (local $i i32) (local $len i32) (local $buf i32) (local $acc i32)
+    (local $outer_env i32) (local $outer_fn i32)
+    (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32) (local $elem i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $outer_env (i32.load offset=0 (local.get $outer_cl)))
+    (local.set $outer_fn (i32.load offset=4 (local.get $outer_cl)))
+    (local.set $acc (local.get $init_acc))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (local.set $elem
+          (i32.load (i32.add (local.get $buf)
+                             (i32.mul (local.get $i) (i32.const 4)))))
+        ;; inner = outer(env, acc)
+        (local.set $inner_cl
+          (call_indirect (type $cl)
+            (local.get $outer_env)
+            (local.get $acc)
+            (local.get $outer_fn)))
+        (local.set $inner_env (i32.load offset=0 (local.get $inner_cl)))
+        (local.set $inner_fn (i32.load offset=4 (local.get $inner_cl)))
+        ;; acc = inner(inner_env, elem)
+        (local.set $acc
+          (call_indirect (type $cl)
+            (local.get $inner_env)
+            (local.get $elem)
+            (local.get $inner_fn)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $acc))|}
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
@@ -1526,6 +1623,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
   vec_used := false;
+  vec_higher_order_used := false;
   (* Pre-register variant tags from Exhaustive's registry. *)
   Hashtbl.iter (fun _name vs ->
     List.iteri (fun i (cname, _) ->
@@ -1670,8 +1768,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     else String.concat "\n" (List.rev !str_data_decls) ^ "\n"
   in
   let table_section =
-    if !table_entries = [] then ""
-    else begin
+    if !table_entries <> [] then begin
       let n = List.length !table_entries in
       let elem_names =
         String.concat " " (List.map (fun s -> "$" ^ s) !table_entries)
@@ -1681,9 +1778,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         \  (elem (i32.const 0) %s)\n"
         n elem_names
     end
+    else if !vec_higher_order_used then
+      (* No closure adapters in the table but the higher-order Vec
+         helpers reference (type $cl) + call_indirect, which require a
+         table. Declare a zero-element one. *)
+      "  (table 0 funcref)\n"
+    else ""
   in
   let bump_init = !str_offset_counter in
   let vec_runtime_section = if !vec_used then vec_runtime else "" in
+  let vec_higher_order_section =
+    if !vec_higher_order_used then vec_higher_order_runtime else ""
+  in
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
@@ -1695,7 +1801,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     table_section bump_init data_section runtime_helpers vec_runtime_section
-    fn_section local_decl indented_body
+    vec_higher_order_section fn_section local_decl indented_body

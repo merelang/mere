@@ -4127,6 +4127,49 @@ let () =
     (vec_codegen_wasm
        "let v = vec_new () in let r = vec_push v (1, 2) in vec_len v")
     "$mere_vec_push";
+  (* --- Phase 15.5: 高階 API (vec_set / vec_iter / vec_fold) の codegen --- *)
+  let src_set =
+    "let v = vec_new () in let __ = vec_push v 10 in \
+     let __ = vec_push v 20 in let __ = vec_set v 0 99 in vec_get v 0"
+  in
+  assert_contains "vec_set: C codegen emits mere_vec_int_set"
+    (vec_codegen_c src_set) "mere_vec_int_set";
+  assert_contains "vec_set: LLVM codegen emits @mere_vec_int_set"
+    (vec_codegen_llvm src_set) "@mere_vec_int_set";
+  assert_contains "vec_set: Wasm codegen emits $mere_vec_set"
+    (vec_codegen_wasm src_set) "$mere_vec_set";
+  let src_iter =
+    "let v = vec_new () in let __ = vec_push v 1 in \
+     let __ = vec_push v 2 in \
+     let acc = vec_new () in \
+     let __ = vec_iter v (fn x -> vec_push acc (x + 10)) in \
+     vec_get acc 0 + vec_get acc 1"
+  in
+  assert_contains "vec_iter: C codegen emits mere_vec_int_get inline loop"
+    (vec_codegen_c src_iter) "mere_vec_int_get";
+  assert_contains "vec_iter: LLVM codegen emits @mere_vec_int_iter"
+    (vec_codegen_llvm src_iter) "@mere_vec_int_iter";
+  assert_contains "vec_iter: Wasm codegen emits $mere_vec_iter"
+    (vec_codegen_wasm src_iter) "$mere_vec_iter";
+  let src_fold =
+    "let v = vec_new () in let __ = vec_push v 1 in \
+     let __ = vec_push v 2 in let __ = vec_push v 3 in \
+     vec_fold v 0 (fn acc -> fn x -> acc + x * x)"
+  in
+  assert_contains "vec_fold: C codegen emits inline loop"
+    (vec_codegen_c src_fold) "mere_vec_int_get";
+  assert_contains "vec_fold: LLVM codegen emits @mere_vec_int_fold_int"
+    (vec_codegen_llvm src_fold) "@mere_vec_int_fold_int";
+  assert_contains "vec_fold: Wasm codegen emits $mere_vec_fold"
+    (vec_codegen_wasm src_fold) "$mere_vec_fold";
+  (* Interpreter parity check (already tested elsewhere, but co-locate
+     for this slice's sanity). *)
+  check "vec_set: interpreter parity"
+    (Pipeline.process src_set) "99";
+  check "vec_iter: interpreter parity"
+    (Pipeline.process src_iter) "23";
+  check "vec_fold: interpreter parity"
+    (Pipeline.process src_fold) "14";
 
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
   (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
