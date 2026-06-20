@@ -205,8 +205,13 @@ let rec ty_tag (t : Ast.ty) : string =
     "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
   | Ast.TyCon (name, args) ->
-    (* Polymorphic instantiation (e.g., `int list` → `list_int`). *)
+    (* Polymorphic instantiation (e.g., `int list` → `list_int`).
+       Phase 15.1: Vec[R, T] の region marker (TyRef _ R TyUnit) は
+       region 名だけを tag に。 *)
     name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+  | Ast.TyRef (_, r, Ast.TyUnit) ->
+    (* Region marker — region 名そのものを tag に使う。 *)
+    r
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unsupported C codegen type element: %s" (Ast.pp_ty other)))
@@ -406,9 +411,14 @@ let rec emit_expr (e : Ast.expr) : string =
     (* Vec builtins are interpreter-only (Phase 12.1). Reject early in
        codegen with a clear message rather than emitting code that
        fails at C compile time with undeclared-identifier errors. *)
+    (* Phase 15.1: vec_new / vec_push / vec_get / vec_len は App
+       handler の special-case で直接 emit する。first-class value 用法
+       (let f = vec_new in ...) はまだ未対応で、ここで reject される。 *)
     if name = "vec_new" || name = "vec_push"
-       || name = "vec_get" || name = "vec_len"
-       || name = "vec_iter" || name = "vec_map"
+       || name = "vec_get" || name = "vec_len" then
+      unsupported e.loc
+        (name ^ " as a value (Phase 15.1: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_iter" || name = "vec_map"
        || name = "vec_fold" || name = "vec_set"
        || name = "vec_filter" || name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
@@ -420,7 +430,7 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.loc
-        (name ^ " (Vec / OwnedVec / StrBuf / Map / len are interpreter-only)");
+        (name ^ " (OwnedVec / StrBuf / Map / vec の高階 API / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -590,6 +600,35 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        let tag = ty_tag arg_ty in
        Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
+     | Ast.Var "vec_new" ->
+       (* Phase 15.1: vec_new () — region は result type の TyCon arg
+          (TyRef _ R TyUnit) から取り出す。R = "__heap" なら default
+          region、それ以外は __region_<R>。 *)
+       let region_name =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) -> r
+            | _ -> "__heap")
+         | None -> "__heap"
+       in
+       let region_var =
+         if region_name = "__heap" then "__lang_default_region"
+         else "__region_" ^ region_name
+       in
+       Printf.sprintf "mere_vec_int_new(&%s)" region_var
+     | Ast.Var "vec_len" ->
+       Printf.sprintf "mere_vec_int_len(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
+       (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
+          ここの outer App は inner = App (Var "vec_push", vec_e)、
+          arg = x。返り値は unit (int 0)。 *)
+       Printf.sprintf "mere_vec_int_push(%s, %s)"
+         (emit_expr vec_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e) ->
+       (* `vec_get v i` curried. *)
+       Printf.sprintf "mere_vec_int_get(%s, %s)"
+         (emit_expr vec_e) (emit_expr arg)
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
        (* Defunctionalized direct call (Phase 4.8). *)
        let li = Hashtbl.find inner_lifts name in
@@ -877,10 +916,18 @@ type fn_decl = {
 (* Lang type → C type, restricted to the codegen subset. *)
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
-  | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+  | Ast.TyCon ("Vec", args) ->
+    (* Phase 15.1: Vec[R, int] のみ C codegen 対応。args の中身は walk されて
+       いないので、ここで walk してから判定。 *)
+    (match List.map Ast.walk args with
+     | [_; Ast.TyInt] -> "mere_vec_int*"
+     | _ ->
+       raise (Codegen_error (Loc.dummy,
+         "unsupported in C codegen subset: Vec[R, <non-int>] (interpreter-only; Phase 15.1 では Vec[R, int] のみ codegen 対応)")))
+  | Ast.TyCon ("OwnedVec", _)
   | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in C codegen subset: Vec / OwnedVec / StrBuf / Map (interpreter-only)"))
+      "unsupported in C codegen subset: OwnedVec / StrBuf / Map (interpreter-only)"))
   | Ast.TyInt | Ast.TyBool -> "int"
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
@@ -1324,7 +1371,50 @@ let region_runtime_helpers =
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. */";
-      "static __lang_region __lang_default_region;" ]
+      "static __lang_region __lang_default_region;";
+      "";
+      "/* === Phase 15.1: Vec[R, int] runtime ===";
+      "   region-allocated growable int array. Struct + initial buffer";
+      "   live in the region; push reallocates by allocating a fresh";
+      "   larger buffer in the same region (old buffer leaks until the";
+      "   region is freed — that is the arena semantics). */";
+      "typedef struct mere_vec_int {";
+      "  int* data;";
+      "  int len;";
+      "  int cap;";
+      "  __lang_region* region;";
+      "} mere_vec_int;";
+      "";
+      "static mere_vec_int* mere_vec_int_new(__lang_region* r) {";
+      "  mere_vec_int* v = (mere_vec_int*)__lang_region_alloc(r, sizeof(mere_vec_int));";
+      "  v->cap = 4;";
+      "  v->len = 0;";
+      "  v->data = (int*)__lang_region_alloc(r, sizeof(int) * 4);";
+      "  v->region = r;";
+      "  return v;";
+      "}";
+      "";
+      "static int mere_vec_int_push(mere_vec_int* v, int x) {";
+      "  if (v->len == v->cap) {";
+      "    int new_cap = v->cap * 2;";
+      "    int* new_data = (int*)__lang_region_alloc(v->region, sizeof(int) * new_cap);";
+      "    for (int i = 0; i < v->len; i++) new_data[i] = v->data[i];";
+      "    v->data = new_data;";
+      "    v->cap = new_cap;";
+      "  }";
+      "  v->data[v->len++] = x;";
+      "  return 0; /* unit */";
+      "}";
+      "";
+      "static int mere_vec_int_get(mere_vec_int* v, int i) {";
+      "  if (i < 0 || i >= v->len) {";
+      "    fprintf(stderr, \"vec_get: index %d out of bounds (len = %d)\\n\", i, v->len);";
+      "    abort();";
+      "  }";
+      "  return v->data[i];";
+      "}";
+      "";
+      "static int mere_vec_int_len(mere_vec_int* v) { return v->len; }" ]
 
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with

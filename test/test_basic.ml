@@ -4030,19 +4030,55 @@ let () =
   check_raises "vec: vec_get out-of-bounds raises eval error"
     (fun () ->
       Pipeline.process "let v = vec_new () in vec_get v 0");
-  (* Codegen はインタプリタ専用と明示 — 3 backend いずれも Codegen_error *)
-  let codegen_err_msg backend_emit =
+  (* Codegen 状況 (Phase 15.1):
+     - C: Vec[R, int] は mere_vec_int* で対応。Vec[R, 非int] / OwnedVec /
+       StrBuf / Map は引き続き reject。
+     - LLVM / Wasm: 引き続き全て interpreter-only。 *)
+  let codegen_err_msg backend_emit src =
     try
-      let prog = Pipeline.parse_program "let v = vec_new () in vec_len v" in
+      let prog = Pipeline.parse_program src in
+      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
       let _ = backend_emit prog in ""
     with
     | Codegen_c.Codegen_error (_, msg) -> msg
     | Codegen_llvm.Codegen_error (_, msg) -> msg
     | Codegen_wasm.Codegen_error (_, msg) -> msg
   in
-  assert_contains "vec: C codegen rejects Vec with clear message"
-    (codegen_err_msg (fun p -> Codegen_c.emit_program ~main_ty:Ast.TyInt p))
-    "interpreter-only";
+  (* Phase 15.1: Vec[R, int] は C codegen で動く (e2e は examples/vec_codegen_c.mere) *)
+  let vec_codegen_c src =
+    let prog = Pipeline.parse_program src in
+    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_c.emit_program ~main_ty:Ast.TyInt prog
+  in
+  check "vec: C codegen accepts Vec[R, int]"
+    (let c_src = vec_codegen_c
+       "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  let c_src_default_region =
+    vec_codegen_c
+      "let v = vec_new () in let r = vec_push v 7 in vec_len v"
+  in
+  assert_contains "vec: C codegen emits mere_vec_int runtime"
+    c_src_default_region "mere_vec_int";
+  assert_contains "vec: C codegen wires vec_new outside region to default arena"
+    c_src_default_region "mere_vec_int_new(&__lang_default_region)";
+  assert_contains "vec: C codegen routes vec_push to runtime helper"
+    c_src_default_region "mere_vec_int_push";
+  assert_contains "vec: C codegen routes vec_len to runtime helper"
+    c_src_default_region "mere_vec_int_len";
+  let c_src_region_R =
+    vec_codegen_c
+      "region R { let v = vec_new () in let r = vec_push v 7 in vec_len v }"
+  in
+  assert_contains "vec: C codegen binds vec_new inside region R to that region"
+    c_src_region_R "mere_vec_int_new(&__region_R)";
+  (* Vec[R, str] のような非 int 要素は依然 reject *)
+  assert_contains "vec: C codegen rejects Vec[R, <non-int>] with clear message"
+    (codegen_err_msg
+       (fun p -> Codegen_c.emit_program ~main_ty:Ast.TyInt p)
+       "let v = (vec_new () : str Vec) in vec_len v")
+    "Vec[R, <non-int>]";
   (* LLVM はポリモフィズム未解決を先に検出するので "interpreter-only" 文字列
      には到達しない (`unsupported LLVM codegen type element` で reject)。
      どちらでも codegen エラーになることだけ確認。 *)
@@ -4051,7 +4087,9 @@ let () =
       let prog = Pipeline.parse_program "let v = vec_new () in vec_len v" in
       let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog in ());
   assert_contains "vec: Wasm codegen rejects Vec with clear message"
-    (codegen_err_msg (fun p -> Codegen_wasm.emit_program ~main_ty:Ast.TyInt p))
+    (codegen_err_msg
+       (fun p -> Codegen_wasm.emit_program ~main_ty:Ast.TyInt p)
+       "let v = vec_new () in vec_len v")
     "interpreter-only";
 
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
