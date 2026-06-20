@@ -2117,7 +2117,14 @@ let () =
     (codegen "1 + 2 * 3") "(1 + (2 * 3))";
   assert_contains "codegen: let + if uses statement-expr"
     (codegen "let x = 5 in if x < 10 then x * 2 else 0")
-    "({ __auto_type x = 5;";
+    "__let_tmp_x = 5";
+  (* Phase 16 第 2 / DEFERRED §1.4: 同名 rebinding `let x = f x` で右辺の
+     旧 x が新 x で覆われて自己参照になっていた問題の regression test。
+     2-step 形 (__let_tmp_<name> 経由) で右辺評価時点では旧 binding が
+     見える、を保証する。 *)
+  assert_contains "codegen: same-name rebinding uses tmp var"
+    (codegen "let x = 1 in let x = x + 10 in x")
+    "__let_tmp_x = (x + 10)";
   assert_contains "codegen: bool literal → 0/1"
     (codegen "true") "printf(\"%d\\n\", 1)";
   assert_contains "codegen: logical && via C &&"

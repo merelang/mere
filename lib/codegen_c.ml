@@ -575,7 +575,15 @@ let rec emit_expr (e : Ast.expr) : string =
           values of varying static types (int, const char*, ...) without
           threading typer info into codegen. Also extend
           current_var_types so a Fun in `body` can recognize this
-          binding as a capture candidate. *)
+          binding as a capture candidate.
+
+          Phase 16 §1.4 fix: same-name rebinding (`let tasks = f tasks`)
+          must not produce `__auto_type tasks = ...tasks...`, which C
+          rejects ("variable declared with deduced type cannot appear in
+          its own initializer"). Always use a 2-step form via a fresh
+          temporary so the initializer references the OUTER `tasks` and
+          the new binding shadows it only after the value has been
+          computed. *)
        let value_c = emit_expr value in
        let bind_ty =
          match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
@@ -586,7 +594,9 @@ let rec emit_expr (e : Ast.expr) : string =
          try let r = emit_expr body in current_var_types := prev; r
          with ex -> current_var_types := prev; raise ex
        in
-       "({ __auto_type " ^ name ^ " = " ^ value_c ^ "; " ^ body_c ^ "; })"
+       Printf.sprintf
+         "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
+         name value_c name name body_c
      | _ -> unsupported pat.ploc "non-variable let pattern")
   (* Unsupported nodes *)
   | Ast.Float_lit _   -> unsupported e.loc "float literals"

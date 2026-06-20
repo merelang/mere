@@ -97,16 +97,16 @@ let __ = lg.info ("added " ++ show (owned_vec_len tasks) ++ " tasks") in
 let __ = dump_tasks lg tasks in
 
 // 2 と 4 を完了にする (mark_done が新 OwnedVec を返す — 摩擦点 #2)
-// 摩擦点 #5: 同名 rebinding (`let tasks = mark_done tasks ...`) は C
-// codegen の __auto_type シャドウイング制約と衝突するので、fresh name
-// (tasks2 / tasks3) を使う。
-let tasks2 = mark_done tasks 2 in
-let tasks3 = mark_done tasks2 4 in
+// 摩擦点 #5 (DEFERRED §1.4 で fix): 同名 rebinding `let tasks = mark_done
+// tasks ...` は Phase 16 第 2 スライスで codegen を 2-step 形に直したので
+// 動くようになった。interpreter でも codegen でも自然に書ける。
+let tasks = mark_done tasks 2 in
+let tasks = mark_done tasks 4 in
 
 let __ = lg.info "after marking 2 and 4 done:" in
-let __ = dump_tasks lg tasks3 in
+let __ = dump_tasks lg tasks in
 
-let undone = count_undone tasks3 in
+let undone = count_undone tasks in
 let __ = lg.info ("undone count = " ++ show undone) in
 
-owned_vec_len tasks3
+owned_vec_len tasks
