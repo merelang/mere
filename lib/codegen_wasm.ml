@@ -494,12 +494,12 @@ let rec emit_expr (e : Ast.expr) : unit =
        で special-case 処理。first-class value 用法のみここで reject。 *)
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
-       || name = "vec_set" || name = "vec_iter" || name = "vec_fold" then
+       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+       || name = "vec_map" || name = "vec_filter" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4/15.5: vec_* は直接 application のみ対応)"));
-    if name = "vec_map"
-       || name = "vec_filter" || name = "vec_to_list"
+        ^ " as a value (Phase 15.4〜15.6: vec_* は直接 application のみ対応)"));
+    if name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
@@ -510,7 +510,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (OwnedVec / StrBuf / Map / vec_map / vec_filter / vec_to_* / len are interpreter-only)"));
+        ^ " (OwnedVec / StrBuf / Map / vec_to_* / len are interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -630,6 +630,20 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr acc_e;
     emit_expr fn_e;
     emit_instr "call $mere_vec_fold"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e); _ }, fn_e) ->
+    (* Phase 15.6: vec_map v f *)
+    vec_used := true;
+    vec_higher_order_used := true;
+    emit_expr vec_e;
+    emit_expr fn_e;
+    emit_instr "call $mere_vec_map"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_filter"; _ }, vec_e); _ }, fn_e) ->
+    (* Phase 15.6: vec_filter v f *)
+    vec_used := true;
+    vec_higher_order_used := true;
+    emit_expr vec_e;
+    emit_expr fn_e;
+    emit_instr "call $mere_vec_filter"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load offset=0"
@@ -1607,7 +1621,55 @@ let vec_higher_order_runtime = {|
             (local.get $inner_fn)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (local.get $acc))|}
+    (local.get $acc))
+  (func $mere_vec_map (param $v i32) (param $cl i32) (result i32)
+    (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
+    (local $env i32) (local $fn i32) (local $mapped i32)
+    (local.set $new (call $mere_vec_new))
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $env (i32.load offset=0 (local.get $cl)))
+    (local.set $fn (i32.load offset=4 (local.get $cl)))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (local.set $mapped
+          (call_indirect (type $cl)
+            (local.get $env)
+            (i32.load (i32.add (local.get $buf)
+                               (i32.mul (local.get $i) (i32.const 4))))
+            (local.get $fn)))
+        (drop (call $mere_vec_push (local.get $new) (local.get $mapped)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $new))
+  (func $mere_vec_filter (param $v i32) (param $cl i32) (result i32)
+    (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
+    (local $env i32) (local $fn i32) (local $elem i32) (local $keep i32)
+    (local.set $new (call $mere_vec_new))
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $env (i32.load offset=0 (local.get $cl)))
+    (local.set $fn (i32.load offset=4 (local.get $cl)))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (local.set $elem
+          (i32.load (i32.add (local.get $buf)
+                             (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $keep
+          (call_indirect (type $cl)
+            (local.get $env)
+            (local.get $elem)
+            (local.get $fn)))
+        (if (local.get $keep)
+          (then
+            (drop (call $mere_vec_push (local.get $new) (local.get $elem)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $new))|}
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;

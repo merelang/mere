@@ -444,11 +444,11 @@ let rec emit_expr (e : Ast.expr) : string =
        (let f = vec_new in ...) はまだ未対応で、ここで reject される。 *)
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
-       || name = "vec_set" || name = "vec_iter" || name = "vec_fold" then
+       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
+       || name = "vec_map" || name = "vec_filter" then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.1/15.5: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_map"
-       || name = "vec_filter" || name = "vec_to_list"
+        (name ^ " as a value (Phase 15.1〜15.6: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
@@ -458,7 +458,7 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.loc
-        (name ^ " (OwnedVec / StrBuf / Map / vec_map / vec_filter / vec_to_* / len are interpreter-only)");
+        (name ^ " (OwnedVec / StrBuf / Map / vec_to_* / len are interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -699,6 +699,33 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_vec_%s_set(%s, %s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr idx_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e) ->
+       (* Phase 15.6: vec_map v f — region-preserving 新 Vec を返す。
+          v の要素型 T と結果 Vec の要素型 U はそれぞれ AST から取り出す。
+          GCC/Clang の statement expression で inline emit。 *)
+       let t_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       let u_tag = vec_elem_tag_of e.Ast.ty e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __vc = %s; __auto_type __cl = %s; \
+          mere_vec_%s* __new = mere_vec_%s_new(__vc->region); \
+          for (int __i = 0; __i < __vc->len; __i++) { \
+            mere_vec_%s_push(__new, __cl.fn(__cl.env, mere_vec_%s_get(__vc, __i))); \
+          } __new; })"
+         (emit_expr vec_e) (emit_expr arg) u_tag u_tag u_tag t_tag
+     | Ast.App ({ node = Ast.Var "vec_filter"; _ }, vec_e) ->
+       (* Phase 15.6: vec_filter v f — region-preserving、predicate true の
+          要素のみ残す。要素型 T は v と結果で同じ。__auto_type で C 型
+          解決を compiler に委ねる (c_type_of がここから見えない都合)。 *)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __vc = %s; __auto_type __cl = %s; \
+          mere_vec_%s* __new = mere_vec_%s_new(__vc->region); \
+          for (int __i = 0; __i < __vc->len; __i++) { \
+            __auto_type __x = mere_vec_%s_get(__vc, __i); \
+            if (__cl.fn(__cl.env, __x)) { mere_vec_%s_push(__new, __x); } \
+          } __new; })"
+         (emit_expr vec_e) (emit_expr arg) elem_tag elem_tag
+         elem_tag elem_tag
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
        (* Defunctionalized direct call (Phase 4.8). *)
        let li = Hashtbl.find inner_lifts name in
