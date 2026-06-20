@@ -110,6 +110,13 @@ let mono_record_instances : (string, string * Ast.ty list) Hashtbl.t =
    `%mere_vec_<tag>` struct type + 4 helper functions. *)
 let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 15.5: vec_iter / vec_fold helper instances.
+   vec_iter is keyed by T tag; vec_fold by `T_tag ^ "__" ^ U_tag` —
+   each instance gets its own `@mere_vec_<T>_iter` /
+   `@mere_vec_<T>_fold_<U>` function. *)
+let vec_iter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
+let vec_fold_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -1414,11 +1421,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (* Phase 15.3: vec_new / vec_push / vec_get / vec_len は App handler
        で special-case 処理。first-class value 用法のみここで reject。 *)
     if name = "vec_new" || name = "vec_push"
-       || name = "vec_get" || name = "vec_len" then
+       || name = "vec_get" || name = "vec_len"
+       || name = "vec_set" || name = "vec_iter" || name = "vec_fold" then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_iter" || name = "vec_map"
-       || name = "vec_fold" || name = "vec_set"
+        (name ^ " as a value (Phase 15.3/15.5: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_map"
        || name = "vec_filter" || name = "vec_to_list"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -1429,7 +1436,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (OwnedVec / StrBuf / Map / vec の高階 API / len are interpreter-only)");
+        (name ^ " (OwnedVec / StrBuf / Map / vec_map / vec_filter / vec_to_* / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1645,6 +1652,61 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call %s @mere_vec_%s_get(ptr %s, i32 %s)"
                   r (llvm_ty_of elem_ty) elem_tag av iv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_set"; _ }, vec_e); _ }, idx_e); _ }, val_e) ->
+    (* Phase 15.5: vec_set v i x — per-T runtime helper. *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    let av = emit_expr env vec_e in
+    let iv = emit_expr env idx_e in
+    let xv = emit_expr env val_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_vec_%s_set(ptr %s, i32 %s, %s %s)"
+                  r elem_tag av iv (llvm_ty_of elem_ty) xv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_iter"; _ }, vec_e); _ }, fn_e) ->
+    (* Phase 15.5: vec_iter v f — per-T helper.
+       Helper signature: i32 @mere_vec_<T>_iter(ptr v, %closure_<T>_unit cl). *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    if not (Hashtbl.mem vec_iter_instances elem_tag) then
+      Hashtbl.add vec_iter_instances elem_tag elem_ty;
+    let av = emit_expr env vec_e in
+    let cv = emit_expr env fn_e in
+    let cname = closure_struct_name elem_ty Ast.TyUnit in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_vec_%s_iter(ptr %s, %%%s %s)"
+                  r elem_tag av cname cv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_fold"; _ }, vec_e); _ }, acc_e); _ }, fn_e) ->
+    (* Phase 15.5: vec_fold v acc f — per-(T, U) helper.
+       Helper signature:
+         <U> @mere_vec_<T>_fold_<U>(ptr v, <U> acc, %closure_<U>_closure_<T>_<U> outer) *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    let acc_ty =
+      match acc_e.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported acc_e.Ast.loc "vec_fold: missing acc type"
+    in
+    let acc_tag = ty_tag acc_ty in
+    let key = elem_tag ^ "__" ^ acc_tag in
+    if not (Hashtbl.mem vec_fold_instances key) then
+      Hashtbl.add vec_fold_instances key (elem_ty, acc_ty);
+    let av = emit_expr env vec_e in
+    let initv = emit_expr env acc_e in
+    let cv = emit_expr env fn_e in
+    let inner_cl_name = closure_struct_name elem_ty acc_ty in
+    let outer_cl_name = closure_struct_name acc_ty
+      (Ast.TyArrow (elem_ty, acc_ty)) in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call %s @mere_vec_%s_fold_%s(ptr %s, %s %s, %%%s %s)"
+                  r (llvm_ty_of acc_ty) elem_tag acc_tag
+                  av (llvm_ty_of acc_ty) initv outer_cl_name cv);
+    ignore inner_cl_name;
     r
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
@@ -2669,6 +2731,102 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len = load i32, ptr %lp";
       "  ret i32 %len";
+      "}";
+      "";
+      (* Phase 15.5: vec_set v i x — in-place mutation. *)
+      Printf.sprintf "define i32 @mere_vec_%s_set(ptr %%v, i32 %%i, %s %%x) {" tag c_elem;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      "  %lt0 = icmp slt i32 %i, 0";
+      "  %ge = icmp sge i32 %i, %len";
+      "  %oob = or i1 %lt0, %ge";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @abort()";
+      "  unreachable";
+      "ok:";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
+      "  ret i32 0";
+      "}" ]
+
+(* Phase 15.5: vec_iter helper per element type T.
+   Signature: i32 @mere_vec_<T>_iter(ptr v, %closure_<T>_unit cl)
+   Emits a basic-block-style loop calling the closure for each element. *)
+let emit_vec_iter_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let struct_name = "mere_vec_" ^ tag in
+  let cname = closure_struct_name elem_ty Ast.TyUnit in
+  String.concat "\n"
+    [ Printf.sprintf "define i32 @mere_vec_%s_iter(ptr %%v, %%%s %%cl) {" tag cname;
+      "entry:";
+      "  %env = extractvalue %" ^ cname ^ " %cl, 0";
+      "  %fn = extractvalue %" ^ cname ^ " %cl, 1";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
+      Printf.sprintf "  %%_ = call i32 %%fn(ptr %%env, %s %%elem)" c_elem;
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret i32 0";
+      "}" ]
+
+(* Phase 15.5: vec_fold helper per (T, U) pair.
+   Signature: <U> @mere_vec_<T>_fold_<U>(ptr v, <U> acc, %closure_<U>_closure_<T>_<U> outer)
+   outer: U -> (T -> U). Apply outer(acc) to get inner closure_T_U, then
+   inner(elem) to get the next acc. *)
+let emit_vec_fold_helper_llvm (elem_ty : Ast.ty) (acc_ty : Ast.ty) : string =
+  let t_tag = ty_tag elem_ty in
+  let u_tag = ty_tag acc_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let c_acc = llvm_ty_of acc_ty in
+  let struct_name = "mere_vec_" ^ t_tag in
+  let inner_cl = closure_struct_name elem_ty acc_ty in
+  let outer_cl = closure_struct_name acc_ty
+    (Ast.TyArrow (elem_ty, acc_ty)) in
+  String.concat "\n"
+    [ Printf.sprintf
+        "define %s @mere_vec_%s_fold_%s(ptr %%v, %s %%init, %%%s %%outer) {"
+        c_acc t_tag u_tag c_acc outer_cl;
+      "entry:";
+      "  %outer_env = extractvalue %" ^ outer_cl ^ " %outer, 0";
+      "  %outer_fn = extractvalue %" ^ outer_cl ^ " %outer, 1";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      "  br label %check";
+      "check:";
+      Printf.sprintf "  %%i = phi i32 [ 0, %%entry ], [ %%i_next, %%body ]";
+      Printf.sprintf "  %%acc = phi %s [ %%init, %%entry ], [ %%new_acc, %%body ]" c_acc;
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
+      Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%acc)"
+        inner_cl c_acc;
+      Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
+      Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
+      Printf.sprintf "  %%new_acc = call %s %%inner_fn(ptr %%inner_env, %s %%elem)" c_acc c_elem;
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      Printf.sprintf "  ret %s %%acc" c_acc;
       "}" ]
 
 let str_concat_helper =
@@ -2706,6 +2864,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset recursive_variants;
   Hashtbl.reset show_types;
   Hashtbl.reset vec_instances;
+  Hashtbl.reset vec_iter_instances;
+  Hashtbl.reset vec_fold_instances;
   show_string_globals := [];
   show_format_globals := [];
   (* Register variant tags + classify into mono / poly. Polymorphic
@@ -2979,6 +3139,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_vec_runtime_for_llvm elem_ty :: acc) vec_instances []
   in
+  let vec_iter_helpers =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_vec_iter_helper_llvm elem_ty :: acc) vec_iter_instances []
+  in
+  let vec_fold_helpers =
+    Hashtbl.fold (fun _key (elem_ty, acc_ty) acc ->
+      emit_vec_fold_helper_llvm elem_ty acc_ty :: acc) vec_fold_instances []
+  in
   let parts =
     [ "; LLVM IR generated by Mere (Phase 5 / 15.3)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
@@ -3005,6 +3173,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         str_concat_helper;
         "" ]
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
+    @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
+    @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])

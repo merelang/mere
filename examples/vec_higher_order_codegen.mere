@@ -1,0 +1,60 @@
+// Phase 15.5: Vec 高階 API の 3 backend codegen 対応 demo (vec_set / vec_iter / vec_fold)。
+//
+// それぞれ:
+//   - vec_set v i x:   in-place mutation。i 番目を x に上書き
+//   - vec_iter v f:    closure f を要素ごとに呼ぶ (副作用駆動)
+//   - vec_fold v acc f: f : U -> T -> U で畳み込む
+//
+// 3 backend での扱い:
+//   - C: vec_set は per-T runtime helper、vec_iter / vec_fold は call
+//     site でインライン loop emit (closure dispatch を直接展開)
+//   - LLVM IR: vec_set は per-T helper、vec_iter は per-T、vec_fold は
+//     per-(T, U) の独立した define として emit (phi で loop 状態を管理)
+//   - Wasm: 値が全て i32 なので 3 つの helper をすべて単一 runtime
+//     ($mere_vec_set / $mere_vec_iter / $mere_vec_fold) で共有
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/vec_higher_order_codegen.mere
+//   dune exec ./bin/mere.exe -- -c examples/vec_higher_order_codegen.mere > /tmp/v.c
+//     && clang /tmp/v.c -o /tmp/v && /tmp/v
+//   dune exec ./bin/mere.exe -- -ll examples/vec_higher_order_codegen.mere > /tmp/v.ll
+//     && clang /tmp/v.ll -o /tmp/v && /tmp/v
+//   dune exec ./bin/mere.exe -- -w  examples/vec_higher_order_codegen.mere > /tmp/v.wat
+//     && wat2wasm /tmp/v.wat -o /tmp/v.wasm
+//     && node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/v.wasm"),
+//          { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
+//   どれも → 1234
+
+// 元になる Vec
+let v = vec_new () in
+let __ = vec_push v 1 in
+let __ = vec_push v 2 in
+let __ = vec_push v 3 in
+let __ = vec_push v 4 in
+let __ = vec_push v 5 in
+
+// vec_set: index 0 と 4 を書き換え
+let __ = vec_set v 0 100 in
+let __ = vec_set v 4 500 in
+// v = [100, 2, 3, 4, 500]
+
+// vec_iter で別の Vec に変換 (closure が外の Vec を捕捉)
+let doubled = vec_new () in
+let __ = vec_iter v (fn x -> vec_push doubled (x * 2)) in
+// doubled = [200, 4, 6, 8, 1000]
+
+// vec_fold で sum of squares を計算
+let sum_sq = vec_fold v 0 (fn acc -> fn x -> acc + x * x) in
+// 100*100 + 2*2 + 3*3 + 4*4 + 500*500 = 10000 + 4 + 9 + 16 + 250000 = 260029
+
+// 動作確認用の合成: doubled[0] + doubled[4] + sum_sq の下位 4 桁
+// = 200 + 1000 + (260029 mod 10000) = 200 + 1000 + 29 = 1229
+//   …の代わりに見やすい数値:
+//
+// (doubled[0] + doubled[2]) - 6 + vec_len v - sum_sq の修正値
+// よりも単純に:
+//
+//   doubled 全要素を vec_fold で足す = 200+4+6+8+1000 = 1218
+//   それに len v (=5) と len doubled (=5) と 6 を足す = 1218+5+5+6 = 1234
+
+vec_fold doubled 0 (fn a -> fn x -> a + x) + vec_len v + vec_len doubled + 6
