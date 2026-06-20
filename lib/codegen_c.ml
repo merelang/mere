@@ -577,6 +577,8 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.With (name, value, body) ->
     (* `with c = v in body` — bind c, evaluate body, then invoke c's
        `close` field if the type defines one (Phase 3.1 convention).
+       Phase 15.13: also free OwnedVec at scope end (instead of waiting
+       for the process-wide registry's main-end sweep).
        The close field is a `unit -> unit` closure; dispatch via the
        closure struct's `.fn(.env, 0)`. *)
     let value_c = emit_expr value in
@@ -585,6 +587,18 @@ let rec emit_expr (e : Ast.expr) : string =
       match value.Ast.ty with
       | Some t ->
         (match Ast.walk t with
+         (* Phase 15.13: scope-bound Drop for OwnedVec.
+            `with v = owned_vec_new () in body` frees v's data buffer at
+            scope end (the biggest heap allocation). Struct itself remains
+            in the registry and is freed at main-end by free_all — but the
+            buffer is gone, so total live memory after `with` ends is much
+            smaller. We rely on `free(NULL)` being a no-op (C standard)
+            so free_all's `free(v->data)` after this is safe. *)
+         | Ast.TyCon ("OwnedVec", _) ->
+           Printf.sprintf
+             "free(((__mere_owned_vec_base*)%s)->data); \
+              ((__mere_owned_vec_base*)%s)->data = NULL; "
+             name name
          | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
            let info = Hashtbl.find Typer.records rname in
            (match List.assoc_opt "close" info.Typer.r_fields with
@@ -2821,6 +2835,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                scan_uses name vt body
              | _ -> ())
           | _ -> ())
+       | Ast.With (name, value, body) ->
+         (match value.Ast.ty with
+          | Some vt ->
+            (match Ast.walk vt with
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
+               scan_uses name vt body
+             | _ -> ())
+          | None -> ())
        | _ -> ());
       walk_subs e
     and walk_subs e =

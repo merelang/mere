@@ -4614,6 +4614,25 @@ let () =
     "$mere_list_len";
   check "vec_to_list + len-on-list: interpreter parity"
     (Pipeline.process v2l_src) "13";  (* len 3 + head 10 = 13 *)
+  (* --- Phase 15.13: with-OwnedVec で scope 末 free --- *)
+  let with_src =
+    "with o = owned_vec_new () in \
+     let __ = owned_vec_push o 10 in \
+     let __ = owned_vec_push o 20 in \
+     owned_vec_get o 0 + owned_vec_get o 1"
+  in
+  assert_contains "with-OwnedVec: C codegen emits scope-end free"
+    (let prog = Pipeline.parse_program with_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "__mere_owned_vec_base";
+  assert_contains "with-OwnedVec: LLVM codegen emits scope-end free"
+    (let prog = Pipeline.parse_program with_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "store ptr null, ptr";
+  check "with-OwnedVec: interpreter parity"
+    (Pipeline.process with_src) "30";
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)

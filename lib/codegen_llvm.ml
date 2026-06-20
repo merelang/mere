@@ -2904,6 +2904,27 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                      fn_r cname close_cl);
        let _ = fresh_reg () in
        emit_instr (Printf.sprintf "  call i32 %s(ptr %s, i32 0)" fn_r env_r));
+    (* Phase 15.13: scope-bound Drop for OwnedVec. Free the data buffer
+       and zero out the struct's data pointer so the registry's
+       free_all sweep at main-end won't double-free (free(NULL) is a
+       C-standard no-op). The struct itself is freed by free_all. *)
+    (match value_ty with
+     | Ast.TyCon ("OwnedVec", _) ->
+       (* GEP to struct field 0 (data pointer), load it, free it,
+          then store NULL into the field. *)
+       let dp = fresh_reg () in
+       (* mere_owned_vec_<T> has { ptr, i32, i32 }; field 0 is data. *)
+       (* We don't have the struct name handy here; use the generic
+          field-0 layout via a generic ptr GEP. All mere_owned_vec_<T>
+          share the same prefix layout. *)
+       emit_instr (Printf.sprintf
+                     "  %s = getelementptr {ptr, i32, i32}, ptr %s, i32 0, i32 0"
+                     dp vv);
+       let data = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" data dp);
+       emit_instr (Printf.sprintf "  call void @free(ptr %s)" data);
+       emit_instr (Printf.sprintf "  store ptr null, ptr %s" dp)
+     | _ -> ());
     body_v
   | Ast.Float_lit _
   | Ast.Let_rec _ ->
@@ -4043,6 +4064,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                scan_uses name vt body
              | _ -> ())
           | _ -> ())
+       | Ast.With (name, value, body) ->
+         (match value.Ast.ty with
+          | Some vt ->
+            (match Ast.walk vt with
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
+               scan_uses name vt body
+             | _ -> ())
+          | None -> ())
        | _ -> ());
       walk_subs e
     and walk_subs e =
