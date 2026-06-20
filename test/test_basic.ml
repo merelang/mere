@@ -5794,5 +5794,30 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 22.2: inner let-rec lifting in C codegen.
+     `let host = fn x -> let rec go = ... in go ...` を C codegen で
+     support。lift_inner_fns に Let_rec ケースを追加し、再帰 / 相互再帰
+     bindings を top-level lifted_fn に lift + 呼出を rewrite。 *)
+  check "§22.2: inner let-rec lifts in C codegen (self-recursive)"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let sum_to = fn (n: int) ->\n\
+       \  let rec go = fn (i: int) ->\n\
+       \    if i > n then 0 else i + go (i + 1)\n\
+       \  in go 1;\n\
+        sum_to 10") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.2: inner let-rec lifts in C codegen (mutual)"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let test = fn (n: int) ->\n\
+       \  let rec is_even = fn (x: int) ->\n\
+       \    if x == 0 then true else is_odd (x - 1)\n\
+       \  and is_odd = fn (x: int) ->\n\
+       \    if x == 0 then false else is_even (x - 1)\n\
+       \  in if is_even n then 1 else 0;\n\
+        test 10") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
