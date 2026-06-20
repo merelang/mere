@@ -390,6 +390,53 @@ let builtin_round =
     | V_float f -> V_float (Float.round f)
     | _ -> failwith "round: expected float")
 
+(* Phase 19.7: 数学拡張 — 自然対数 / 指数 / 三角 / 比較 / random。 *)
+
+let unary_float name f =
+  V_builtin (name, fun v ->
+    match v with
+    | V_float x -> V_float (f x)
+    | _ -> failwith (name ^ ": expected float"))
+
+let builtin_log = unary_float "log" Float.log
+let builtin_exp = unary_float "exp" Float.exp
+let builtin_sin = unary_float "sin" Float.sin
+let builtin_cos = unary_float "cos" Float.cos
+let builtin_tan = unary_float "tan" Float.tan
+
+let binary_float name f =
+  V_builtin (name, fun a ->
+    match a with
+    | V_float fa ->
+      V_builtin (name ^ "_p1", fun b ->
+        match b with
+        | V_float fb -> V_float (f fa fb)
+        | _ -> failwith (name ^ ": 2nd arg expected float"))
+    | _ -> failwith (name ^ ": 1st arg expected float"))
+
+let builtin_atan2 = binary_float "atan2" Float.atan2
+let builtin_f_min = binary_float "f_min" Float.min
+let builtin_f_max = binary_float "f_max" Float.max
+let builtin_f_pow = binary_float "f_pow" Float.pow
+
+(* random_int n: 0..n-1 の int を返す。n <= 0 で raise。 *)
+let builtin_random_int =
+  V_builtin ("random_int", fun v ->
+    match v with
+    | V_int n ->
+      if n <= 0 then
+        raise (Eval_error (Loc.dummy,
+          "random_int: bound must be positive (got " ^ string_of_int n ^ ")"))
+      else V_int (Random.int n)
+    | _ -> failwith "random_int: expected int")
+
+(* random_float (): 0.0 <= x < 1.0 の float を返す。 *)
+let builtin_random_float =
+  V_builtin ("random_float", fun v ->
+    match v with
+    | V_unit -> V_float (Random.float 1.0)
+    | _ -> failwith "random_float: expected unit")
+
 let builtin_print_bool =
   V_builtin ("print_bool", fun v ->
     (match v with
@@ -1411,6 +1458,17 @@ let initial_env : env =
     ("f_abs", ref builtin_f_abs);
     ("f_neg", ref builtin_f_neg);
     ("sqrt", ref builtin_sqrt);
+    ("log", ref builtin_log);
+    ("exp", ref builtin_exp);
+    ("sin", ref builtin_sin);
+    ("cos", ref builtin_cos);
+    ("tan", ref builtin_tan);
+    ("atan2", ref builtin_atan2);
+    ("f_min", ref builtin_f_min);
+    ("f_max", ref builtin_f_max);
+    ("f_pow", ref builtin_f_pow);
+    ("random_int", ref builtin_random_int);
+    ("random_float", ref builtin_random_float);
     ("floor", ref builtin_floor);
     ("ceil", ref builtin_ceil);
     ("round", ref builtin_round);

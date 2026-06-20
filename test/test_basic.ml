@@ -1793,6 +1793,41 @@ let () =
     (* sqrt pi ~= 1.7725、pipe + curry なので `f_lt 1.7 (sqrt pi)` = `1.7 < 1.7725` *)
     (Pipeline.process "sqrt pi |> f_lt 1.7") "true";
 
+  (* --- Phase 19.7: 数学拡張 (log / exp / 三角 / f_min_max / f_pow / random) --- *)
+  check "log e == 1"    (Pipeline.process "log e") "1.";
+  check "exp 0 == 1"    (Pipeline.process "exp 0.0") "1.";
+  check "log type"      (Pipeline.type_of "log") "(float -> float)";
+  check "exp type"      (Pipeline.type_of "exp") "(float -> float)";
+  check "sin 0 == 0"    (Pipeline.process "sin 0.0") "0.";
+  check "cos 0 == 1"    (Pipeline.process "cos 0.0") "1.";
+  check "tan 0 == 0"    (Pipeline.process "tan 0.0") "0.";
+  check "sin type"      (Pipeline.type_of "sin") "(float -> float)";
+  check "atan2 type"
+    (Pipeline.type_of "atan2") "(float -> (float -> float))";
+  check "f_min picks smaller"
+    (Pipeline.process "f_min 3.5 2.0") "2.";
+  check "f_max picks larger"
+    (Pipeline.process "f_max 3.5 2.0") "3.5";
+  check "f_min type"
+    (Pipeline.type_of "f_min") "(float -> (float -> float))";
+  check "f_pow basic"
+    (Pipeline.process "f_pow 2.0 10.0") "1024.";
+  check "f_pow type"
+    (Pipeline.type_of "f_pow") "(float -> (float -> float))";
+  check "random_int in [0, n)"
+    (Pipeline.process "let n = random_int 100 in if n >= 0 && n < 100 then \"ok\" else \"bad\"")
+    "\"ok\"";
+  check "random_float in [0, 1)"
+    (Pipeline.process
+       "let f = random_float () in if f_ge f 0.0 && f_lt f 1.0 then \"ok\" else \"bad\"")
+    "\"ok\"";
+  check "random_int type"
+    (Pipeline.type_of "random_int") "(int -> int)";
+  check "random_float type"
+    (Pipeline.type_of "random_float") "(unit -> float)";
+  check_raises "random_int rejects bound <= 0"
+    (fun () -> Pipeline.process "random_int 0");
+
   (* --- exhaustiveness check (Phase 1: bool + variant types) --- *)
   let warnings_of s =
     String.concat " | " (Pipeline.exhaustiveness_warnings s)

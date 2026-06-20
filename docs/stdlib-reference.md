@@ -159,8 +159,23 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `floor` | `float -> float` | 切り捨て |
 | `ceil` | `float -> float` | 切り上げ |
 | `round` | `float -> float` | 四捨五入 |
+| `f_min` ★ | `float -> float -> float` | 小さい方 (Phase 19.7) |
+| `f_max` ★ | `float -> float -> float` | 大きい方 (Phase 19.7) |
+| `f_pow` ★ | `float -> float -> float` | 累乗 `base ^ exp` (Phase 19.7) |
+| `log` ★ | `float -> float` | 自然対数 (Phase 19.7) |
+| `exp` ★ | `float -> float` | e^x (Phase 19.7) |
+| `sin` ★ | `float -> float` | 正弦 (radians、Phase 19.7) |
+| `cos` ★ | `float -> float` | 余弦 (Phase 19.7) |
+| `tan` ★ | `float -> float` | 正接 (Phase 19.7) |
+| `atan2` ★ | `float -> float -> float` | `atan2 y x` で角度 (Phase 19.7) |
+| `random_int` ★ ⚡ | `int -> int` | `random_int n` で `0..n-1` の int、n<=0 で raise (Phase 19.7) |
+| `random_float` ★ | `unit -> float` | `[0.0, 1.0)` の float (Phase 19.7) |
 | `pi` | `float` | 円周率 ≈ 3.14159265 (定数 builtin) |
 | `e` | `float` | ネイピア数 ≈ 2.71828183 (定数 builtin) |
+
+**★ codegen 状況**: Phase 19.7 で追加した 11 個は **interpreter のみ**。
+codegen 対応は libm のリンク or 各 backend で組込み数学関数の wiring が
+必要で、follow-up slice (19.7.1) で対応予定。
 
 ```
 f_add 1.5 2.5                    // 4.0
@@ -284,22 +299,23 @@ iter_n 3 (fn () -> print "===")   // === を 3 回出力
 
 ---
 
-## 全 builtin 一覧 (アルファベット順、95 個)
+## 全 builtin 一覧 (アルファベット順、106 個)
 
 ```
-abs args assert bool_of_str ceil char_at chr clamp const cube
-decr divmod e env_var even exit f_abs f_add f_div f_ge
-f_gt f_le f_lt f_mul f_neg f_sub fail file_exists flip
-float_of_int float_of_str floor fst gcd id incr int_max
-int_min int_of_float int_of_str is_alpha is_digit is_space
-iter_n lcm max min mk_logger mk_metrics not odd ord pair pi
-pow print print_bool print_err print_int print_no_nl read_file
-read_line read_lines round show sign snd sqrt square
-str_compare str_contains str_count str_ends_with str_index_of
-str_join str_len str_of_float str_of_int str_repeat str_replace
-str_rev str_split str_starts_with str_trim str_unescape
-substring sum_range swap time to_lower to_upper try_or
-write_file
+abs args assert atan2 bool_of_str ceil char_at chr clamp const
+cos cube decr divmod e env_var even exit exp f_abs f_add
+f_div f_ge f_gt f_le f_lt f_max f_min f_mul f_neg f_pow
+f_sub fail file_exists flip float_of_int float_of_str floor
+fst gcd id incr int_max int_min int_of_float int_of_str
+is_alpha is_digit is_space iter_n lcm log max min mk_logger
+mk_metrics not odd ord pair pi pow print print_bool
+print_err print_int print_no_nl random_float random_int
+read_file read_line read_lines round show sign sin snd sqrt
+square str_compare str_contains str_count str_ends_with
+str_index_of str_join str_len str_of_float str_of_int
+str_repeat str_replace str_rev str_split str_starts_with
+str_trim str_unescape substring sum_range swap tan time
+to_lower to_upper try_or write_file
 ```
 
 Q-010 collection builtins (`vec_*` / `owned_vec_*` / `strbuf_*` /

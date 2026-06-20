@@ -925,6 +925,18 @@ let initial_env : env =
     ("floor",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("ceil",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("round",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    (* Phase 19.7: 数学拡張 *)
+    ("log",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("exp",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("sin",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("cos",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("tan",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
+    ("atan2",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_min",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_max",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("f_pow",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    ("random_int",  mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("random_float", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("pi",          mono Ast.TyFloat);
     ("e",           mono Ast.TyFloat);
     ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
