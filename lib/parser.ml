@@ -1141,7 +1141,7 @@ let rec parse_program_internal tokens =
   (* Apply `M.` prefix to every bound name in the module's decls, AND
      rewrite free Var references that match those names so internal
      short-name refs (`foo` inside `M`) resolve to the exported form. *)
-  let prefix_module_decls m_name decls =
+  let prefix_module_decls ?(full_path = "") m_name decls =
     let names = collect_module_names decls in
     (* For `open M;`: record only the DIRECT short names (no dot in
        the name) — nested module's exports are accessed via their own
@@ -1149,6 +1149,11 @@ let rec parse_program_internal tokens =
     let direct_names =
       List.filter (fun n -> not (String.contains n '.')) names in
     Hashtbl.replace module_bindings m_name direct_names;
+    (* Phase 18.2: also register under the FULL path (e.g., "A.B") so
+       `open A.B;` can resolve. When `full_path` is empty (top-level
+       module), m_name IS the full path. *)
+    if full_path <> "" && full_path <> m_name then
+      Hashtbl.replace module_bindings full_path direct_names;
     (* Phase 18.1 / DEFERRED §4.1 残: gather type / record / constructor
        names from this module's Top_type / Top_record / Top_type_alias
        decls, so we can M-prefix them and rewrite internal references.
@@ -1251,7 +1256,7 @@ let rec parse_program_internal tokens =
       Hashtbl.replace module_names inner_name ();
       Hashtbl.replace module_names inner_path ();
       let inner_body, rest = parse_module_body inner_path [] rest in
-      let prefixed = prefix_module_decls inner_name inner_body in
+      let prefixed = prefix_module_decls ~full_path:inner_path inner_name inner_body in
       let decls' = List.rev_append prefixed decls in
       let rest =
         match rest with
@@ -1379,27 +1384,39 @@ let rec parse_program_internal tokens =
       parse_decls decls' rest
     | (pos, T_module) :: _ ->
       raise (Parse_error (pos, "expected `NAME { decls }` after `module`"))
-    | (pos, T_open) :: (_, T_ident m_name) :: (_, T_semi) :: rest ->
-      (* `open M;` — bring M's bindings into the current scope by
-         emitting `let name = M.name;` aliases for each binding M
-         exports. Requires M to have been declared earlier in the
+    | (pos, T_open) :: rest_after_open ->
+      (* `open M;` or `open A.B;` (Phase 18.2) — bring the module's
+         bindings into the current scope by emitting `let name =
+         <path>.name;` aliases for each binding the module exports.
+         Requires the module to have been declared earlier in the
          program (or via `import`). *)
-      let bindings =
-        match Hashtbl.find_opt module_bindings m_name with
-        | Some bs -> bs
-        | None ->
-          raise (Parse_error (pos,
-            Printf.sprintf "open: module `%s` is not declared" m_name))
+      let rec parse_path acc = function
+        | (_, T_ident n) :: (_, T_dot) :: r -> parse_path (n :: acc) r
+        | (_, T_ident n) :: r -> List.rev (n :: acc), r
+        | _ -> [], rest_after_open
       in
-      let alias_decls = List.map (fun n ->
-        let pat = mkp pos (Ast.P_var n) in
-        let value = mk pos (Ast.Var (m_name ^ "." ^ n)) in
-        Ast.Top_let (pat, value)
-      ) bindings in
-      let decls' = List.rev_append alias_decls decls in
-      parse_decls decls' rest
-    | (pos, T_open) :: _ ->
-      raise (Parse_error (pos, "expected `NAME;` after `open`"))
+      let path_parts, rest = parse_path [] rest_after_open in
+      (match path_parts, rest with
+       | [], _ ->
+         raise (Parse_error (pos, "expected `NAME;` or `A.B;` after `open`"))
+       | _, (_, T_semi) :: rest ->
+         let full_path = String.concat "." path_parts in
+         let bindings =
+           match Hashtbl.find_opt module_bindings full_path with
+           | Some bs -> bs
+           | None ->
+             raise (Parse_error (pos,
+               Printf.sprintf "open: module `%s` is not declared" full_path))
+         in
+         let alias_decls = List.map (fun n ->
+           let pat = mkp pos (Ast.P_var n) in
+           let value = mk pos (Ast.Var (full_path ^ "." ^ n)) in
+           Ast.Top_let (pat, value)
+         ) bindings in
+         let decls' = List.rev_append alias_decls decls in
+         parse_decls decls' rest
+       | _ ->
+         raise (Parse_error (pos, "expected `;` after `open NAME`")))
     | (pos, T_drop) :: ((_, T_type) :: rest_after_type as after_drop) ->
       (* `drop type Name = ...` marks Name as having Drop semantics.
          We extract the name via look-ahead and prepend `Top_drop name`
