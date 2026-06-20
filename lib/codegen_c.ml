@@ -673,7 +673,14 @@ let rec emit_expr (e : Ast.expr) : string =
   (* Unsupported nodes *)
   | Ast.Float_lit _   -> unsupported e.loc "float literals"
   | Ast.Unit_lit      -> "0"  (* unit becomes int 0 in C *)
-  | Ast.Let_rec _     -> unsupported e.loc "let rec inside an expression (only allowed at top level)"
+  | Ast.Let_rec (bindings, body) ->
+    (* Phase 22.2: inner let-rec lifting. If lift_inner_fns has registered
+       all of the bindings here in inner_lifts, the lifted definitions
+       live at top level (with captures prepended) — just emit body. *)
+    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts n) bindings then
+      emit_expr body
+    else
+      unsupported e.loc "let rec inside an expression (only allowed at top level)"
   | Ast.With (name, value, body) ->
     (* `with c = v in body` — bind c, evaluate body, then invoke c's
        `close` field if the type defines one (Phase 3.1 convention).
@@ -2442,59 +2449,92 @@ let lift_inner_fns
      initial env). Closure captures must exclude these. *)
   let builtin_names = List.map fst Typer.initial_env in
   let known = ref (toplevel_names @ builtin_names) in
+  let lift_one host_param n p fn_body value_loc value_ty =
+    let body_fvs = free_vars fn_body (p :: !known) in
+    let captures =
+      List.map (fun fv ->
+        let ty = lookup_var_ty fn_body fv in
+        (fv, ty)) body_fvs
+    in
+    List.iter (fun (_, ty) ->
+      match Ast.walk ty with
+      | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
+      | _ ->
+        raise (Codegen_error (value_loc,
+          Printf.sprintf
+            "closure capture of non-primitive type `%s` not yet supported"
+            (Ast.pp_ty ty))))
+      captures;
+    let lifted_name = fresh_inner_name n in
+    let return_ty, param_ty =
+      match value_ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyArrow (a, b) -> (Ast.walk b, Ast.walk a)
+         | _ ->
+           raise (Codegen_error (value_loc,
+             "inner fn has non-arrow inferred type")))
+      | None ->
+        raise (Codegen_error (value_loc,
+          "inner fn missing inferred type (typer not run?)"))
+    in
+    let lf = {
+      l_name = lifted_name; l_captures = captures;
+      l_param = p; l_param_ty = param_ty;
+      l_body = fn_body; l_return_ty = return_ty;
+    } in
+    lifted := lf :: !lifted;
+    Hashtbl.replace inner_lifts n { lifted_name; captures };
+    known := lifted_name :: !known;
+    (host_param, fn_body)
+  in
   let rec walk_in_fn (host_param : string) (e : Ast.expr) =
     match e.Ast.node with
     | Ast.Let (pat, value, body) ->
       (match pat.Ast.pnode, value.Ast.node with
        | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
-         (* Lift this inner fn. *)
-         let body_fvs = free_vars fn_body (p :: !known) in
-         let captures =
-           List.map (fun fv ->
-             (* Look up the var's type by searching the host fn's body
-                for a Var node with this name; use the typer's recorded
-                ty on it. Falls back to int if not found (defensive). *)
-             let ty = lookup_var_ty fn_body fv in
-             (fv, ty)) body_fvs
+         let (host_param, fn_body) =
+           lift_one host_param n p fn_body value.Ast.loc value.Ast.ty
          in
-         List.iter (fun (_, ty) ->
-           match Ast.walk ty with
-           | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
-           | _ ->
-             raise (Codegen_error (value.Ast.loc,
-               Printf.sprintf
-                 "closure capture of non-primitive type `%s` not yet supported"
-                 (Ast.pp_ty ty))))
-           captures;
-         let lifted_name = fresh_inner_name n in
-         (* The inner fn's overall type is recorded on `value`. *)
-         let return_ty, param_ty =
-           match value.Ast.ty with
-           | Some t ->
-             (match Ast.walk t with
-              | Ast.TyArrow (a, b) -> (Ast.walk b, Ast.walk a)
-              | _ ->
-                raise (Codegen_error (value.Ast.loc,
-                  "inner fn has non-arrow inferred type")))
-           | None ->
-             raise (Codegen_error (value.Ast.loc,
-               "inner fn missing inferred type (typer not run?)"))
-         in
-         let lifted_fn = {
-           l_name = lifted_name; l_captures = captures;
-           l_param = p; l_param_ty = param_ty;
-           l_body = fn_body; l_return_ty = return_ty;
-         } in
-         lifted := lifted_fn :: !lifted;
-         Hashtbl.replace inner_lifts n
-           { lifted_name; captures };
-         known := lifted_name :: !known;
-         (* Recurse into the lifted body and into `body` of the let. *)
          walk_in_fn p fn_body;
          walk_in_fn host_param body
        | _ ->
          walk_in_fn host_param value;
          walk_in_fn host_param body)
+    | Ast.Let_rec (bindings, body) ->
+      (* Phase 22.2: inner let-rec lifting. For each binding (n, Fun (p, _, body))
+         in this Let_rec, register its lifted name in inner_lifts BEFORE
+         walking any body — so recursive (and mutual) calls resolve via
+         the standard inner-lifts call-site rewriting. Captures for each
+         binding exclude all rec names introduced here (they become globals
+         after lifting). *)
+      let rec_names = List.map fst bindings in
+      let known_before = !known in
+      (* First pass: provisionally compute captures + register all rec
+         names in `known` so recursive calls don't count themselves /
+         each other as captures. *)
+      let fn_specs = List.map (fun (n, value) ->
+        match value.Ast.node with
+        | Ast.Fun (p, _, fn_body) ->
+          (n, p, fn_body, value.Ast.loc, value.Ast.ty)
+        | _ ->
+          raise (Codegen_error (value.Ast.loc,
+            "inner let-rec binding must be a single-arg function"))
+      ) bindings in
+      (* Pretend each rec name is "known" (so they're excluded from
+         each other's free-var sets). *)
+      known := rec_names @ !known;
+      List.iter (fun (n, p, fn_body, loc, vty) ->
+        let _ = lift_one host_param n p fn_body loc vty in ()
+      ) fn_specs;
+      (* Walk each lifted body now that all rec names are in inner_lifts. *)
+      List.iter (fun (_, p, fn_body, _, _) ->
+        walk_in_fn p fn_body) fn_specs;
+      (* Restore known prefix — the rec names are still in `known` because
+         they were appended in `lift_one`, but we drop the temporary
+         pre-registration. (The lifted_name entries remain.) *)
+      let _ = known_before in
+      walk_in_fn host_param body
     | Ast.Fun (_, _, body) ->
       (* Anonymous Fun in expression position — handled by emit_expr
          as a closure value (Phase B). Just recurse so deeper Funs are
