@@ -4073,12 +4073,19 @@ let () =
   in
   assert_contains "vec: C codegen binds vec_new inside region R to that region"
     c_src_region_R "mere_vec_int_new(&__region_R)";
-  (* Vec[R, str] のような非 int 要素は依然 reject *)
-  assert_contains "vec: C codegen rejects Vec[R, <non-int>] with clear message"
-    (codegen_err_msg
-       (fun p -> Codegen_c.emit_program ~main_ty:Ast.TyInt p)
-       "let v = (vec_new () : str Vec) in vec_len v")
-    "Vec[R, <non-int>]";
+  (* Phase 15.2: Vec[R, T] は T が codegen 対応の concrete type ならすべて
+     対応 — int / bool / str / tuple / record / variant。下は str / tuple
+     / 多相 record を例に accept を確認。 *)
+  let c_src_str = vec_codegen_c
+    "let v = vec_new () in let r = vec_push v \"hi\" in vec_len v"
+  in
+  assert_contains "vec: C codegen accepts Vec[R, str]"
+    c_src_str "mere_vec_str";
+  let c_src_tup = vec_codegen_c
+    "let v = vec_new () in let r = vec_push v (1, 2) in vec_len v"
+  in
+  assert_contains "vec: C codegen accepts Vec[R, tuple]"
+    c_src_tup "mere_vec_tuple_int_int";
   (* LLVM はポリモフィズム未解決を先に検出するので "interpreter-only" 文字列
      には到達しない (`unsupported LLVM codegen type element` で reject)。
      どちらでも codegen エラーになることだけ確認。 *)
