@@ -1,0 +1,25 @@
+// Phase 15.1: Vec[R, int] の C codegen 対応 (DEFERRED §1.1 の第一歩)。
+//
+// `vec_new / vec_push / vec_get / vec_len` を C コードに落とせる。
+// region 内 / region 外いずれも対応 (`__heap` 既定 region か、user の
+// `region R { ... }` 内なら R 内アロケータを使う)。
+//
+// 制限:
+//   - 要素は int のみ (Phase 15.1 のスコープ)。`str Vec` 等は引き続き
+//     interpreter-only で C codegen は reject。
+//   - 高階 API (vec_iter / vec_map / vec_fold / vec_filter / vec_to_list
+//     / vec_to_owned / vec_set) は対象外。`vec_set` を含めて将来 slice。
+//   - OwnedVec / StrBuf / Map は interpreter-only のまま。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- -c examples/vec_codegen_c.mere > /tmp/vec.c
+//   clang /tmp/vec.c -o /tmp/vec && /tmp/vec
+//   # → 95
+
+let v = vec_new () in
+let r1 = vec_push v 10 in
+let r2 = vec_push v 20 in
+let r3 = vec_push v 30 in
+let r4 = vec_push v 40 in
+let r5 = vec_push v 50 in
+vec_get v 0 + vec_get v 2 + vec_get v 4 + vec_len v
