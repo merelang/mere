@@ -1,0 +1,219 @@
+// S 式 (Lisp 風) の parser + printer + 簡易 evaluator
+//
+// (+ 1 (* 2 3)) のような S 式を read し、compact / pretty 形式で
+// print し、組込み演算子 (+ - * / = <) と特殊形 (if let) で eval する。
+//
+// 目的: examples roadmap I4。recursive variant + Lisp eval を 1 file
+//   で。arith_eval.mere の表記違い兄弟版で、parser 込みなのが差分。
+//
+// 実行モード: interpreter のみ
+//   - 多相 user 定義 let-rec (parse_sexpr / show_sexpr / eval) の
+//     codegen monomorphize gap (DEFERRED §1.7) に該当。
+//   - wildcard `let _ = ...` も C codegen 未対応。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/s_expression.mere
+//   # 期待出力:
+//   #   parsed:   (+ 1 (* 2 3))
+//   #   eval:     (+ 1 (* 2 3))                =  7
+//   #   eval:     (- 10 3 2)                   =  5
+//   #   eval:     (if (< 1 2) 100 200)         =  100
+//   #   eval:     (let ((x 5) (y 7)) (* x y))  =  35
+//   #   pretty:
+//   #   (let
+//   #     ((x 5)
+//   #     (y 7))
+//   #     (* x y))
+
+type sexpr =
+  | SInt  of int
+  | SSym  of str
+  | SList of sexpr list;
+
+// === list utilities (Mere stdlib に list_reverse が無いので自前) ===
+
+let rec list_rev_into = fn (acc) -> fn (xs) ->
+  match xs with
+  | Nil -> acc
+  | Cons (x, rest) -> list_rev_into (Cons (x, acc)) rest;
+
+let list_reverse = fn (xs) -> list_rev_into Nil xs;
+
+// === parser ===
+
+let rec skip_ws = fn (s: str, i: int) ->
+  if i >= str_len s then i
+  else
+    let c = char_at s i in
+    if is_space c then skip_ws s (i + 1)
+    else i;
+
+let is_atom_char = fn c ->
+  c != '(' && c != ')' && (is_space c == false);
+
+let parse_int_or_sym = fn (s: str, i: int) ->
+  let rec scan = fn j ->
+    if j >= str_len s then j
+    else if is_atom_char (char_at s j) then scan (j + 1)
+    else j in
+  let end_pos = scan i in
+  let tok = substring s i end_pos in
+  let head = char_at s i in
+  if is_digit head || (head == '-' && end_pos > i + 1 && is_digit (char_at s (i + 1)))
+  then (SInt (int_of_str tok), end_pos)
+  else (SSym tok, end_pos);
+
+let rec parse_sexpr = fn (s: str, i0: int) ->
+  let i = skip_ws s i0 in
+  if i >= str_len s then fail "unexpected EOF in s-expression"
+  else
+    let c = char_at s i in
+    if c == '(' then parse_list s (i + 1)
+    else if c == ')' then fail ("unexpected ')' at pos " ++ show i)
+    else parse_int_or_sym s i
+
+and parse_list = fn (s: str, i: int) ->
+  let rec loop = fn (acc: sexpr list, k: int) ->
+    let k = skip_ws s k in
+    if k >= str_len s then fail "unmatched '(' — EOF before ')'"
+    else if char_at s k == ')' then (SList (list_reverse acc), k + 1)
+    else
+      let (item, k2) = parse_sexpr s k in
+      loop (Cons (item, acc)) k2
+  in loop Nil i;
+
+let parse = fn (s: str) ->
+  let (ast, i) = parse_sexpr s 0 in
+  let i = skip_ws s i in
+  if i != str_len s then fail ("trailing input at pos " ++ show i)
+  else ast;
+
+// === printer (compact) ===
+
+let rec show_sexpr_compact = fn (e: sexpr) ->
+  match e with
+  | SInt n      -> show n
+  | SSym s      -> s
+  | SList items -> "(" ++ show_sexpr_items items ++ ")"
+
+and show_sexpr_items = fn (items: sexpr list) ->
+  match items with
+  | Nil                     -> ""
+  | Cons (x, Nil)           -> show_sexpr_compact x
+  | Cons (x, Cons (y, rest)) ->
+    show_sexpr_compact x ++ " " ++ show_sexpr_items (Cons (y, rest));
+
+// === pretty printer ===
+
+let rec pad = fn n -> if n <= 0 then "" else " " ++ pad (n - 1);
+
+// `(head a b c)` 形式で head が `let` / `if` の場合のみ改行つき pretty に。
+// 簡略実装: head の名前を見て一定パターンを認識。
+let rec pretty_sexpr = fn (indent: int) -> fn (e: sexpr) ->
+  match e with
+  | SInt _    -> show_sexpr_compact e
+  | SSym _    -> show_sexpr_compact e
+  | SList items ->
+    match items with
+    | Cons (SSym "let", Cons (bindings, Cons (body, Nil))) ->
+      "(let\n" ++ pad (indent + 2) ++ pretty_sexpr (indent + 2) bindings
+        ++ "\n" ++ pad (indent + 2) ++ pretty_sexpr (indent + 2) body ++ ")"
+    | Cons (SList _, _) ->
+      // bindings ((x 5) (y 7)) のような list-of-lists
+      "(" ++ pretty_items indent items ++ ")"
+    | _ -> show_sexpr_compact (SList items)
+
+and pretty_items = fn (indent: int) -> fn (items: sexpr list) ->
+  match items with
+  | Nil                     -> ""
+  | Cons (x, Nil)           -> pretty_sexpr indent x
+  | Cons (x, Cons (y, rest)) ->
+    pretty_sexpr indent x ++ "\n" ++ pad indent
+      ++ pretty_items indent (Cons (y, rest));
+
+// === evaluator ===
+
+let rec env_lookup = fn (env: (str * int) list) -> fn (name: str) ->
+  match env with
+  | Nil -> fail ("unbound variable: " ++ name)
+  | Cons ((n, v), rest) ->
+    if n == name then v else env_lookup rest name;
+
+let extend_env = fn (env: (str * int) list) -> fn (name: str) -> fn (v: int) ->
+  Cons ((name, v), env);
+
+let rec eval = fn (env: (str * int) list) -> fn (e: sexpr) ->
+  match e with
+  | SInt n   -> n
+  | SSym s   -> env_lookup env s
+  | SList items ->
+    match items with
+    | Nil -> fail "empty application"
+    | Cons (SSym "if", Cons (c, Cons (t, Cons (f, Nil)))) ->
+      if eval env c != 0 then eval env t else eval env f
+    | Cons (SSym "let", Cons (SList bindings, Cons (body, Nil))) ->
+      let env2 = extend_env_bindings env bindings in
+      eval env2 body
+    | Cons (SSym op, args) -> apply_op env op args
+    | _ -> fail "unsupported application form"
+
+and extend_env_bindings = fn (env: (str * int) list) -> fn (bindings: sexpr list) ->
+  match bindings with
+  | Nil -> env
+  | Cons (SList (Cons (SSym name, Cons (val_expr, Nil))), rest) ->
+    let v = eval env val_expr in
+    extend_env_bindings (extend_env env name v) rest
+  | _ -> fail "malformed let binding"
+
+and apply_op = fn (env: (str * int) list) -> fn (op: str) -> fn (args: sexpr list) ->
+  let evaled = eval_args env args in
+  if op == "+" then fold_op evaled 0 (fn a -> fn b -> a + b)
+  else if op == "*" then fold_op evaled 1 (fn a -> fn b -> a * b)
+  else if op == "-" then
+    match evaled with
+    | Nil           -> fail "- needs at least 1 arg"
+    | Cons (x, Nil) -> 0 - x
+    | Cons (x, rest) -> fold_op rest x (fn a -> fn b -> a - b)
+  else if op == "/" then
+    match evaled with
+    | Nil -> fail "/ needs at least 2 args"
+    | Cons (x, rest) -> fold_op rest x (fn a -> fn b ->
+      if b == 0 then fail "div by zero" else a / b)
+  else if op == "=" then
+    match evaled with
+    | Cons (a, Cons (b, Nil)) -> if a == b then 1 else 0
+    | _ -> fail "= takes 2 args"
+  else if op == "<" then
+    match evaled with
+    | Cons (a, Cons (b, Nil)) -> if a < b then 1 else 0
+    | _ -> fail "< takes 2 args"
+  else fail ("unknown operator: " ++ op)
+
+and eval_args = fn (env: (str * int) list) -> fn (args: sexpr list) ->
+  match args with
+  | Nil -> Nil
+  | Cons (a, rest) -> Cons (eval env a, eval_args env rest)
+
+and fold_op = fn (xs: int list) -> fn (acc: int) -> fn (f: int -> int -> int) ->
+  match xs with
+  | Nil -> acc
+  | Cons (x, rest) -> fold_op rest (f acc x) f;
+
+// === driver ===
+
+let _ = print ("parsed:   " ++ show_sexpr_compact (parse "(+ 1 (* 2 3))"));
+
+let run = fn (src: str) ->
+  let ast = parse src in
+  let v = eval Nil ast in
+  print ("eval:     " ++ show_sexpr_compact ast ++ "  =  " ++ show v);
+
+let _ = run "(+ 1 (* 2 3))";
+let _ = run "(- 10 3 2)";
+let _ = run "(if (< 1 2) 100 200)";
+let _ = run "(let ((x 5) (y 7)) (* x y))";
+
+let _ = print "pretty:";
+let _ = print (pretty_sexpr 0 (parse "(let ((x 5) (y 7)) (* x y))"));
+
+0
