@@ -121,6 +121,10 @@ let vec_fold_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_filter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 15.7: concrete element types of `OwnedVec[T]`. Heap-allocated,
+   not region-bound. *)
+let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -231,10 +235,22 @@ let rec llvm_ty_of (t : Ast.ty) : string =
      | _ ->
        raise (Codegen_error (Loc.dummy,
          "unsupported in LLVM codegen subset: Vec[R, <unresolved>] (element type must be concrete)")))
-  | Ast.TyCon ("OwnedVec", _)
+  | Ast.TyCon ("OwnedVec", args) ->
+    (* Phase 15.7: OwnedVec[T] — heap-allocated、要素型 T を walk して
+       opaque ptr を返す。`owned_vec_instances` に登録。 *)
+    (match List.map Ast.walk args with
+     | [elem_ty] when ty_is_concrete elem_ty ->
+       let tag = ty_tag elem_ty in
+       if not (Hashtbl.mem owned_vec_instances tag) then
+         Hashtbl.add owned_vec_instances tag elem_ty;
+       let _ = llvm_ty_of elem_ty in
+       "ptr"
+     | _ ->
+       raise (Codegen_error (Loc.dummy,
+         "unsupported in LLVM codegen subset: OwnedVec[<unresolved>] (element type must be concrete)")))
   | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in LLVM codegen subset: OwnedVec / StrBuf / Map (interpreter-only)"))
+      "unsupported in LLVM codegen subset: StrBuf / Map (interpreter-only)"))
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
   | Ast.TyStr -> "ptr"
@@ -1389,6 +1405,25 @@ let emit_closure_typedef ((p : Ast.ty), (r : Ast.ty)) : string =
   let name = closure_struct_name p r in
   Printf.sprintf "%%%s = type { ptr, ptr }" name
 
+(* Phase 15.7: pull the element type out of an `OwnedVec[T]` typed
+   expression and register in `owned_vec_instances`. *)
+let owned_vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
+  match ty_opt with
+  | Some t ->
+    (match Ast.walk t with
+     | Ast.TyCon ("OwnedVec", [et]) ->
+       let et = Ast.walk et in
+       if ty_is_concrete et then begin
+         let tag = ty_tag et in
+         if not (Hashtbl.mem owned_vec_instances tag) then
+           Hashtbl.add owned_vec_instances tag et;
+         tag
+       end else raise (Codegen_error (loc,
+         "owned_vec_* on OwnedVec with unresolved element type"))
+     | _ -> raise (Codegen_error (loc,
+         "owned_vec_* expected an OwnedVec value")))
+  | None -> raise (Codegen_error (loc, "owned_vec_*: missing type info"))
+
 (* Pull the element type out of a `Vec[R, T]` typed expression and
    return its `ty_tag`. Also registers the element type in
    `vec_instances` so the runtime emitter generates the matching
@@ -1427,20 +1462,20 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_map" || name = "vec_filter" then
-      unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3〜15.6: vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
+       || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len"
+       || name = "owned_vec_get" || name = "owned_vec_len" then
+      unsupported e.Ast.loc
+        (name ^ " as a value (Phase 15.3〜15.7: vec_* / owned_vec_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (OwnedVec / StrBuf / Map / vec_to_* / len are interpreter-only)");
+        (name ^ " (StrBuf / Map / vec_to_list / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1668,6 +1703,83 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_set(ptr %s, i32 %s, %s %s)"
                   r elem_tag av iv (llvm_ty_of elem_ty) xv);
+    r
+  | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
+    (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T]。
+       要素型 T を e.ty (result Vec の TyCon arg) から取り出す。 *)
+    let elem_tag = owned_vec_elem_tag_of e.Ast.ty e.Ast.loc in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @mere_owned_vec_%s_new()" r elem_tag);
+    r
+  | Ast.App ({ node = Ast.Var "owned_vec_len"; _ }, arg) ->
+    let elem_tag = owned_vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_owned_vec_%s_len(ptr %s)"
+                  r elem_tag av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_push"; _ }, vec_e); _ }, val_e) ->
+    let elem_tag = owned_vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find owned_vec_instances elem_tag in
+    let av = emit_expr env vec_e in
+    let xv = emit_expr env val_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_owned_vec_%s_push(ptr %s, %s %s)"
+                  r elem_tag av (llvm_ty_of elem_ty) xv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_get"; _ }, vec_e); _ }, idx_e) ->
+    let elem_tag = owned_vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find owned_vec_instances elem_tag in
+    let av = emit_expr env vec_e in
+    let iv = emit_expr env idx_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call %s @mere_owned_vec_%s_get(ptr %s, i32 %s)"
+                  r (llvm_ty_of elem_ty) elem_tag av iv);
+    r
+  | Ast.App ({ node = Ast.Var "vec_to_owned"; _ }, vec_e) ->
+    (* Phase 15.7: vec_to_owned v — region Vec[R, T] を heap OwnedVec[T] に
+       deep copy。 *)
+    let t_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances t_tag in
+    if not (Hashtbl.mem owned_vec_instances t_tag) then
+      Hashtbl.add owned_vec_instances t_tag elem_ty;
+    let av = emit_expr env vec_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_vec_to_owned_%s(ptr %s)"
+                  r t_tag av);
+    r
+  | Ast.App ({ node = Ast.Var "owned_vec_to_vec"; _ }, owned_e) ->
+    (* Phase 15.7: owned_vec_to_vec o — heap OwnedVec[T] を region Vec[R, T]
+       に deep copy。region は e.ty の TyRef marker から取り出す。 *)
+    let t_tag = owned_vec_elem_tag_of owned_e.Ast.ty owned_e.Ast.loc in
+    let elem_ty = Hashtbl.find owned_vec_instances t_tag in
+    if not (Hashtbl.mem vec_instances t_tag) then
+      Hashtbl.add vec_instances t_tag elem_ty;
+    let region_name =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) -> r
+         | _ -> "__heap")
+      | None -> "__heap"
+    in
+    let region_reg =
+      if region_name = "__heap" then "@__lang_default_region"
+      else match List.assoc_opt region_name !current_regions with
+        | Some reg -> reg
+        | None ->
+          unsupported e.Ast.loc
+            ("owned_vec_to_vec: region not in scope: " ^ region_name)
+    in
+    let ov = emit_expr env owned_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_owned_vec_to_vec_%s(ptr %s, ptr %s)"
+                  r t_tag ov region_reg);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_iter"; _ }, vec_e); _ }, fn_e) ->
     (* Phase 15.5: vec_iter v f — per-T helper.
@@ -2623,6 +2735,7 @@ let main_format_of (t : Ast.ty) : (string * string) option =
 let runtime_decls =
   String.concat "\n"
     [ "declare ptr @malloc(i64)";
+      "declare ptr @realloc(ptr, i64)";
       "declare void @free(ptr)";
       "declare i64 @strlen(ptr)";
       "declare i32 @strcmp(ptr, ptr)";
@@ -2949,6 +3062,151 @@ let emit_vec_filter_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
+(* Phase 15.7: OwnedVec[T] runtime — heap-allocated (malloc / realloc).
+   Drop は process exit に任せる (最小スコープ)。 *)
+let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let struct_name = "mere_owned_vec_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "%%%s = type { ptr, i32, i32 }" struct_name;
+      "";
+      (* new *)
+      Printf.sprintf "define ptr @mere_owned_vec_%s_new() {" tag;
+      "entry:";
+      Printf.sprintf "  %%size_p = getelementptr %%%s, ptr null, i32 1" struct_name;
+      "  %size = ptrtoint ptr %size_p to i64";
+      "  %v = call ptr @malloc(i64 %size)";
+      Printf.sprintf "  %%esize_p = getelementptr %s, ptr null, i32 1" c_elem;
+      "  %esize = ptrtoint ptr %esize_p to i64";
+      "  %init_bytes = mul i64 %esize, 4";
+      "  %buf = call ptr @malloc(i64 %init_bytes)";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  store ptr %buf, ptr %dp";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  store i32 0, ptr %lp";
+      Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%v, i32 0, i32 2" struct_name;
+      "  store i32 4, ptr %cp";
+      "  ret ptr %v";
+      "}";
+      "";
+      (* push *)
+      Printf.sprintf "define i32 @mere_owned_vec_%s_push(ptr %%v, %s %%x) {" tag c_elem;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%v, i32 0, i32 2" struct_name;
+      "  %cap = load i32, ptr %cp";
+      "  %full = icmp eq i32 %len, %cap";
+      "  br i1 %full, label %grow, label %store";
+      "grow:";
+      "  %new_cap = mul i32 %cap, 2";
+      Printf.sprintf "  %%esize_p = getelementptr %s, ptr null, i32 1" c_elem;
+      "  %esize = ptrtoint ptr %esize_p to i64";
+      "  %nc64 = zext i32 %new_cap to i64";
+      "  %new_bytes = mul i64 %nc64, %esize";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %old_buf = load ptr, ptr %dp";
+      "  %new_buf = call ptr @realloc(ptr %old_buf, i64 %new_bytes)";
+      "  store ptr %new_buf, ptr %dp";
+      "  store i32 %new_cap, ptr %cp";
+      "  br label %store";
+      "store:";
+      Printf.sprintf "  %%dp2 = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp2";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%len" c_elem;
+      Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
+      "  %new_len = add i32 %len, 1";
+      "  store i32 %new_len, ptr %lp";
+      "  ret i32 0";
+      "}";
+      "";
+      (* get *)
+      Printf.sprintf "define %s @mere_owned_vec_%s_get(ptr %%v, i32 %%i) {" c_elem tag;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      "  %lt0 = icmp slt i32 %i, 0";
+      "  %ge = icmp sge i32 %i, %len";
+      "  %oob = or i1 %lt0, %ge";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @abort()";
+      "  unreachable";
+      "ok:";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%val = load %s, ptr %%slot" c_elem;
+      Printf.sprintf "  ret %s %%val" c_elem;
+      "}";
+      "";
+      (* len *)
+      Printf.sprintf "define i32 @mere_owned_vec_%s_len(ptr %%v) {" tag;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      "  ret i32 %len";
+      "}" ]
+
+(* Phase 15.7: vec_to_owned helper per-T.
+   入力 Vec[R, T] → 出力 OwnedVec[T] への deep copy。 *)
+let emit_vec_to_owned_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let v_struct = "mere_vec_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "define ptr @mere_vec_to_owned_%s(ptr %%v) {" tag;
+      "entry:";
+      Printf.sprintf "  %%new = call ptr @mere_owned_vec_%s_new()" tag;
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" v_struct;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" v_struct;
+      "  %data = load ptr, ptr %dp";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
+      Printf.sprintf "  %%_ = call i32 @mere_owned_vec_%s_push(ptr %%new, %s %%elem)" tag c_elem;
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret ptr %new";
+      "}" ]
+
+(* Phase 15.7: owned_vec_to_vec helper per-T.
+   入力 OwnedVec[T] + region → 出力 Vec[R, T] への deep copy。 *)
+let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let ov_struct = "mere_owned_vec_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "define ptr @mere_owned_vec_to_vec_%s(ptr %%o, ptr %%region) {" tag;
+      "entry:";
+      Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%region)" tag;
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%o, i32 0, i32 1" ov_struct;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%o, i32 0, i32 0" ov_struct;
+      "  %data = load ptr, ptr %dp";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
+      Printf.sprintf "  %%_ = call i32 @mere_vec_%s_push(ptr %%new, %s %%elem)" tag c_elem;
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret ptr %new";
+      "}" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
@@ -2988,6 +3246,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_fold_instances;
   Hashtbl.reset vec_map_instances;
   Hashtbl.reset vec_filter_instances;
+  Hashtbl.reset owned_vec_instances;
   show_string_globals := [];
   show_format_globals := [];
   (* Register variant tags + classify into mono / poly. Polymorphic
@@ -3067,7 +3326,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          (match pat.Ast.pnode, value.Ast.ty with
           | Ast.P_var name, Some vt ->
             (match Ast.walk vt with
-             | Ast.TyCon ("Vec", _) -> scan_uses name vt body
+             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+               scan_uses name vt body
              | _ -> ())
           | _ -> ())
        | _ -> ());
@@ -3277,6 +3537,24 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_vec_filter_helper_llvm elem_ty :: acc) vec_filter_instances []
   in
+  let owned_vec_runtimes =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_owned_vec_runtime_llvm elem_ty :: acc) owned_vec_instances []
+  in
+  let vec_to_owned_helpers =
+    Hashtbl.fold (fun tag _elem_ty acc ->
+      (* emit a helper iff both vec and owned_vec exist for this tag *)
+      if Hashtbl.mem vec_instances tag then
+        (let elem_ty = Hashtbl.find vec_instances tag in
+         emit_vec_to_owned_helper_llvm elem_ty :: acc)
+      else acc) owned_vec_instances []
+  in
+  let owned_vec_to_vec_helpers =
+    Hashtbl.fold (fun tag elem_ty acc ->
+      if Hashtbl.mem vec_instances tag then
+        emit_owned_vec_to_vec_helper_llvm elem_ty :: acc
+      else acc) owned_vec_instances []
+  in
   let parts =
     [ "; LLVM IR generated by Mere (Phase 5 / 15.3)";
       "target triple = \"" ^ "x86_64-apple-macosx" ^ "\"";  (* clang will retarget if needed *)
@@ -3303,10 +3581,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         str_concat_helper;
         "" ]
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
+    @ (if owned_vec_runtimes = [] then [] else owned_vec_runtimes @ [""])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
     @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
     @ (if vec_map_helpers = [] then [] else vec_map_helpers @ [""])
     @ (if vec_filter_helpers = [] then [] else vec_filter_helpers @ [""])
+    @ (if vec_to_owned_helpers = [] then [] else vec_to_owned_helpers @ [""])
+    @ (if owned_vec_to_vec_helpers = [] then [] else owned_vec_to_vec_helpers @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])

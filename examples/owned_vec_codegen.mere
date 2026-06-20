@@ -1,0 +1,55 @@
+// Phase 15.7: OwnedVec[T] + vec_to_owned / owned_vec_to_vec の 3 backend
+// codegen demo。
+//
+// Vec[R, T] は region-allocated で region 末で一括解放される短命の値、
+// OwnedVec[T] は heap-allocated でドロップ型として扱われる長命の値。
+// 行ったり来たり (Vec → OwnedVec → Vec) の deep copy 経由で値を渡せる。
+//
+// 各 backend の戦略:
+//   - C: malloc / realloc で per-T `mere_owned_vec_<T>` struct + 4 helpers
+//   - LLVM IR: malloc / realloc + per-T `%mere_owned_vec_<T>` struct +
+//     4 helpers (LLVM の sizeof イディオム)、変換ヘルパ
+//     `@mere_vec_to_owned_<T>` / `@mere_owned_vec_to_vec_<T>` を別途 emit
+//   - Wasm: 値が i32 共通で bump アロケータも共有なので owned_vec_* は
+//     $mere_vec_* に alias、変換は単一の $mere_vec_clone helper
+//
+// Drop 処理は最小スコープでは省略 (プロセス終了で OS が回収)。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/owned_vec_codegen.mere
+//   dune exec ./bin/mere.exe -- -c examples/owned_vec_codegen.mere > /tmp/v.c
+//     && clang /tmp/v.c -o /tmp/v && /tmp/v
+//   dune exec ./bin/mere.exe -- -ll examples/owned_vec_codegen.mere > /tmp/v.ll
+//     && clang /tmp/v.ll -o /tmp/v && /tmp/v
+//   dune exec ./bin/mere.exe -- -w examples/owned_vec_codegen.mere > /tmp/v.wat
+//     && wat2wasm /tmp/v.wat -o /tmp/v.wasm
+//     && node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/v.wasm"),
+//          { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
+//   どれも → 67
+
+// Vec[R, T] を region (here: __heap = default) に作る
+let v = vec_new () in
+let __ = vec_push v 1 in
+let __ = vec_push v 2 in
+let __ = vec_push v 3 in
+let __ = vec_push v 4 in
+let __ = vec_push v 5 in
+// vec_to_owned で heap に持ち出す (元の v は region 末で消えるが o は残せる)
+let o = vec_to_owned v in
+let __ = owned_vec_push o 6 in
+let __ = owned_vec_push o 7 in
+// o は heap にあるので、ここで好きに使える
+let owned_sum =
+  vec_get v 0 + vec_get v 4
+  + owned_vec_get o 0 + owned_vec_get o 5 + owned_vec_get o 6
+  + owned_vec_len o
+in
+// = 1 + 5 + 1 + 6 + 7 + 7 = 27
+
+// owned_vec_to_vec で再度 region に取り込める
+let v2 = owned_vec_to_vec o in
+let v2_sum = vec_fold v2 0 (fn a -> fn x -> a + x) in
+// = 1+2+3+4+5+6+7 = 28
+
+owned_sum + v2_sum + vec_len v2 + vec_len v
+// = 27 + 28 + 7 + 5 = 67
