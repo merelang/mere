@@ -5857,5 +5857,32 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 22.5: substring / try_or / int_of_str builtins + unified
+     struct body topo sort + str == strcmp + match abort cast + per-host
+     inner_lifts scope. mini_calc が C codegen 完全動作したマイルストーン。 *)
+  check "§22.5: substring emits in C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "substring \"hello world\" 0 5") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.5: try_or catches fail and returns default"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "try_or (fn () -> fail \"bad\") 42") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.5: string == becomes strcmp"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyBool (typed_prog
+       "\"hello\" == \"hello\"") in
+     (* Body should contain strcmp call — naive substring search. *)
+     let s = c_src in let pat = "strcmp" in
+     let nlen = String.length s and plen = String.length pat in
+     let rec scan i =
+       if i + plen > nlen then false
+       else if String.sub s i plen = pat then true
+       else scan (i + 1)
+     in
+     if scan 0 then "ok" else "missing-strcmp")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

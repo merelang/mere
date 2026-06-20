@@ -147,7 +147,24 @@ type lifted_inner = {
   lifted_name : string;
   captures    : (string * Ast.ty) list;
 }
+(* Phase 22.5: inner_lifts is the ACTIVE scope (per-host fn) — set
+   before emitting each host fn's body. inner_lifts_by_host stores the
+   per-host scope tables; lift_inner_fns populates these during
+   walk_in_fn, and emit_program / emit_fn swaps `inner_lifts` to the
+   right host before emitting that host's body.
+   This fixes the collision when two top-level fns both have a
+   `let rec inner = ...` with the same local name (e.g., `loop` in
+   parse_add and parse_term). *)
 let inner_lifts : (string, lifted_inner) Hashtbl.t = Hashtbl.create 8
+let inner_lifts_by_host : (string, (string, lifted_inner) Hashtbl.t) Hashtbl.t =
+  Hashtbl.create 8
+let current_host_fn : string ref = ref ""
+let set_inner_lifts_for_host (host : string) : unit =
+  Hashtbl.reset inner_lifts;
+  (match Hashtbl.find_opt inner_lifts_by_host host with
+   | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts k v) tbl
+   | None -> ());
+  current_host_fn := host
 
 (* Anonymous closure (Phase B): a Fun in expression position becomes a
    closure value. We queue its env struct + adapter for emission and
@@ -160,6 +177,10 @@ type closure_emission = {
   ce_param_ty     : Ast.ty;
   ce_return_ty    : Ast.ty;
   ce_body         : Ast.expr;
+  ce_host         : string;
+    (* Phase 22.5: which top-level fn was being emitted when this
+       closure was queued — used by emit_closure_adapter to restore
+       inner_lifts scope at drain time. *)
 }
 let pending_closures : closure_emission list ref = ref []
 
@@ -570,7 +591,23 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Bin (op, a, b) ->
     "(" ^ emit_expr a ^ " " ^ binop_to_c op ^ " " ^ emit_expr b ^ ")"
   | Ast.Cmp (op, a, b) ->
-    "(" ^ emit_expr a ^ " " ^ cmpop_to_c op ^ " " ^ emit_expr b ^ ")"
+    (* Phase 22.5: string comparison must use strcmp, not pointer compare. *)
+    let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+    (match Ast.walk a_ty, op with
+     | Ast.TyStr, Ast.Eq ->
+       Printf.sprintf "(strcmp(%s, %s) == 0)" (emit_expr a) (emit_expr b)
+     | Ast.TyStr, Ast.Ne ->
+       Printf.sprintf "(strcmp(%s, %s) != 0)" (emit_expr a) (emit_expr b)
+     | Ast.TyStr, Ast.Lt ->
+       Printf.sprintf "(strcmp(%s, %s) < 0)" (emit_expr a) (emit_expr b)
+     | Ast.TyStr, Ast.Le ->
+       Printf.sprintf "(strcmp(%s, %s) <= 0)" (emit_expr a) (emit_expr b)
+     | Ast.TyStr, Ast.Gt ->
+       Printf.sprintf "(strcmp(%s, %s) > 0)" (emit_expr a) (emit_expr b)
+     | Ast.TyStr, Ast.Ge ->
+       Printf.sprintf "(strcmp(%s, %s) >= 0)" (emit_expr a) (emit_expr b)
+     | _ ->
+       "(" ^ emit_expr a ^ " " ^ cmpop_to_c op ^ " " ^ emit_expr b ^ ")")
   | Ast.Logic (op, a, b) ->
     "(" ^ emit_expr a ^ " " ^ logicop_to_c op ^ " " ^ emit_expr b ^ ")"
   | Ast.If (cond, then_, else_) ->
@@ -773,6 +810,7 @@ let rec emit_expr (e : Ast.expr) : string =
       ce_param_ty = param_ty;
       ce_return_ty = return_ty;
       ce_body = fn_body;
+      ce_host = !current_host_fn;
     } :: !pending_closures;
     let cstruct = closure_struct_name param_ty return_ty in
     if captures = [] then
@@ -804,6 +842,30 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
        Printf.sprintf "__lang_char_at(%s, %s)"
          (emit_expr s_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e) ->
+       (* Phase 22.5: substring s start end_ — 3-arg curried。 *)
+       Printf.sprintf "__lang_substring(%s, %s, %s)"
+         (emit_expr s_e) (emit_expr start_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e) ->
+       (* Phase 22.5: try_or fn default — setjmp で fail を catch、
+          失敗時は default を返す。__lang_fail_impl は jmpbuf set 時に
+          longjmp、unset 時は abort。nested 用に save/restore。 *)
+       let default_c = emit_expr arg in
+       let fn_invoke_c =
+         Printf.sprintf "({ __auto_type __c = %s; __c.fn(__c.env, 0); })"
+           (emit_expr fn_e)
+       in
+       Printf.sprintf
+         "({ jmp_buf __saved_jmp; int __saved_set = __lang_fail_jmpbuf_set; \
+             memcpy(__saved_jmp, __lang_fail_jmpbuf, sizeof(jmp_buf)); \
+             __lang_fail_jmpbuf_set = 1; \
+             __auto_type __default = (%s); \
+             __auto_type __res = __default; \
+             if (setjmp(__lang_fail_jmpbuf) == 0) { __res = (%s); } \
+             __lang_fail_jmpbuf_set = __saved_set; \
+             memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
+             __res; })"
+         default_c fn_invoke_c
      | Ast.Var "is_digit" ->
        Printf.sprintf "__lang_is_digit(%s)" (emit_expr arg)
      | Ast.Var "is_alpha" ->
@@ -813,27 +875,35 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "str_of_int" ->
        (* Phase 22.3: str_of_int は show_int と同じ。alias として emit。 *)
        Printf.sprintf "show_int(%s)" (emit_expr arg)
+     | Ast.Var "int_of_str" ->
+       (* Phase 22.5: int_of_str s — atoi 経由 (符号 + digits)。
+          fail handling は省略 (atoi は不正入力で 0 を返す silent failure)。 *)
+       Printf.sprintf "atoi(%s)" (emit_expr arg)
      | Ast.Var "fail" ->
-       (* Phase 22.4: fail msg — noreturn helper + 文脈期待型に応じた
-          default literal を後置。c_type_of は forward ref できないので
-          primitive 型は inline 判定、それ以外は __lang_fail_int で int
-          を返してから expected 型へ cast されない場合は failure (rare)。 *)
+       (* Phase 22.4/22.5: fail msg — noreturn helper + 文脈期待型に
+          応じた default literal を後置。primitive 型は専用 helper、
+          非 primitive (tuple / record / variant) は inline c_type_of で
+          型名を取って (TY){0} compound literal を後置。 *)
        let result_ty =
          match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
        in
        let arg_c = emit_expr arg in
+       let inline_c_type_of t =
+         match Ast.walk t with
+         | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "int"
+         | Ast.TyStr -> "const char*"
+         | Ast.TyTuple ts -> tuple_struct_name ts
+         | Ast.TyCon (n, _) -> n  (* record / variant など named type *)
+         | _ -> "int"
+       in
        (match result_ty with
         | Ast.TyStr ->
           Printf.sprintf "__lang_fail_str(%s)" arg_c
         | Ast.TyInt | Ast.TyBool | Ast.TyUnit ->
           Printf.sprintf "__lang_fail_int(%s)" arg_c
-        | _ ->
-          (* 非 primitive 型: __lang_fail_impl は noreturn、後置の値は
-             unreachable。compound literal を typeof で wrap して
-             expected 型をコンパイラに推論させる: typeof(<dummy>)
-             で context の型を取れないので、shadow expr 経由で context
-             の型に合わせる trick。ここでは int を返してから cast。 *)
-          Printf.sprintf "({ __lang_fail_impl(%s); 0; })" arg_c)
+        | other ->
+          let c_ty = inline_c_type_of other in
+          Printf.sprintf "({ __lang_fail_impl(%s); (%s){0}; })" arg_c c_ty)
      | Ast.Var "fst" ->
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
@@ -1238,9 +1308,18 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr vec_e) (emit_expr arg) elem_tag elem_tag
          elem_tag elem_tag
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
-       (* Defunctionalized direct call (Phase 4.8). *)
+       (* Defunctionalized direct call (Phase 4.8).
+          Phase 22.5 fix: capture name might refer to a closure-env field
+          if the call site is inside an adapter (e.g., `parse_number =
+          fn s -> fn i -> ...lifted_scan i...` where the second fn is
+          a closure capturing s). Route capture refs through
+          current_env_subst the same way bare Var emission does. *)
        let li = Hashtbl.find inner_lifts name in
-       let cap_args = List.map (fun (n, _) -> n) li.captures in
+       let cap_args = List.map (fun (n, _) ->
+         match List.assoc_opt n !current_env_subst with
+         | Some s -> s
+         | None -> n
+       ) li.captures in
        li.lifted_name ^ "(" ^
        String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
      | Ast.Var name when Hashtbl.mem toplevel_fn_names name ->
@@ -1308,11 +1387,27 @@ let rec emit_expr (e : Ast.expr) : string =
       | _ -> [(pat, guard, body)]
     in
     let arms = List.concat_map expand_or arms in
+    (* Phase 22.5 fix: non-exhaustive fallthrough — emit a value of the
+       MATCH result type, not always `0` (int). Otherwise tuple/record
+       returning matches break with "incompatible operand types". *)
+    let match_result_ty =
+      match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
+    in
+    let fallthrough_default =
+      match match_result_ty with
+      | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ abort(); 0; })"
+      | Ast.TyStr -> "({ abort(); \"\"; })"
+      | Ast.TyTuple ts ->
+        Printf.sprintf "({ abort(); (%s){0}; })" (tuple_struct_name ts)
+      | Ast.TyCon (n, _) ->
+        Printf.sprintf "({ abort(); (%s){0}; })" n
+      | _ -> "({ abort(); 0; })"
+    in
     (* Emit nested ternaries — each arm's body is wrapped in a
        statement expression so the pattern bindings are in scope for
        the guard (if any) and the body. *)
     let rec emit_arms = function
-      | [] -> "({ abort(); 0; })"
+      | [] -> fallthrough_default
       | (pat, guard, body) :: rest ->
         let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
         let next = emit_arms rest in
@@ -1778,6 +1873,11 @@ type lifted_fn = {
   l_param_ty  : Ast.ty;
   l_body      : Ast.expr;
   l_return_ty : Ast.ty;
+  l_host      : string;
+    (* Phase 22.5: which top-level fn this was lifted out of — used to
+       switch inner_lifts scope at emit time so sibling lifted fns in
+       the same host see each other's mappings (e.g., mutual recursion
+       inside a `let rec ... and ...`). *)
 }
 
 let format_param (n, ty) =
@@ -1798,6 +1898,10 @@ let with_var_types (bindings : (string * Ast.ty) list) (f : unit -> 'a) : 'a =
   r
 
 let emit_fn (f : fn_decl) : string =
+  (* Phase 22.5: switch inner_lifts to this host's scope before
+     emitting body, so call-site dispatch finds the right local
+     lifted-fn (e.g., `loop` in parse_add vs parse_term). *)
+  set_inner_lifts_for_host f.name;
   let body_c =
     with_var_types [(f.param, f.param_ty)] (fun () ->
       with_expected_ty f.return_ty (fun () -> emit_expr f.body))
@@ -1810,6 +1914,9 @@ let emit_fn (f : fn_decl) : string =
     body_c
 
 let emit_lifted_fn (f : lifted_fn) : string =
+  (* Same host scope as the host fn it was lifted from — for sibling
+     mutual recursion inside `let rec ... and ...`. *)
+  set_inner_lifts_for_host f.l_host;
   let params =
     String.concat ", "
       (List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
@@ -1983,6 +2090,10 @@ let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
 (* Render an anonymous-closure adapter, emitting its body with the
    capture-name → env-pointer substitution map. *)
 let emit_closure_adapter (ce : closure_emission) : string =
+  (* Phase 22.5: switch inner_lifts to the host scope that was active
+     when this closure was queued, so any Let_rec inside the closure
+     body finds its inner-lifted siblings. *)
+  set_inner_lifts_for_host ce.ce_host;
   let env_subst =
     List.map (fun (n, _) -> (n, "(__env_self->" ^ n ^ ")"))
       ce.ce_env_fields
@@ -2070,8 +2181,11 @@ let str_concat_helper =
          callsite で必要なら cast する。show 系と組合せる場合は str 返却
          が必要なので、return 型に応じて 2 種類 (__lang_fail_int /
          __lang_fail_str) を提供。 *)
+      "static int __lang_fail_jmpbuf_set = 0;";
+      "static jmp_buf __lang_fail_jmpbuf;";
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
       "  fprintf(stderr, \"fail: %s\\n\", msg);";
+      "  if (__lang_fail_jmpbuf_set) { longjmp(__lang_fail_jmpbuf, 1); }";
       "  abort();";
       "}";
       "static int __lang_fail_int(const char* msg) {";
@@ -2079,6 +2193,16 @@ let str_concat_helper =
       "}";
       "static const char* __lang_fail_str(const char* msg) {";
       "  __lang_fail_impl(msg); return \"\";";
+      "}";
+      "";
+      (* Phase 22.5: substring s start end_ — region alloc + memcpy。 *)
+      "static const char* __lang_substring(const char* s, int start, int end_) {";
+      "  int len = end_ - start;";
+      "  if (len < 0) len = 0;";
+      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, len + 1);";
+      "  memcpy(r, s + start, (size_t)len);";
+      "  r[len] = '\\0';";
+      "  return r;";
       "}" ]
 
 (* Region runtime: a bump allocator. `region R { body }` initializes a
@@ -2526,8 +2650,13 @@ let lift_inner_fns
     (toplevel_names : string list)
     (fns : fn_decl list) : lifted_fn list =
   Hashtbl.reset inner_lifts;
+  Hashtbl.reset inner_lifts_by_host;
   inner_fn_counter := 0;
   let lifted = ref [] in
+  (* Tracks which host fn we're currently inside; written by the outer
+     List.iter that calls walk_in_fn per top-level fn. lift_one /
+     Let_rec writes into inner_lifts_by_host[current_host]. *)
+  let current_host = ref "" in
   (* Globals = top-level lifted fns + builtins (anything in Typer's
      initial env). Closure captures must exclude these. *)
   let builtin_names = List.map fst Typer.initial_env in
@@ -2565,9 +2694,20 @@ let lift_inner_fns
       l_name = lifted_name; l_captures = captures;
       l_param = p; l_param_ty = param_ty;
       l_body = fn_body; l_return_ty = return_ty;
+      l_host = !current_host;
     } in
     lifted := lf :: !lifted;
-    Hashtbl.replace inner_lifts n { lifted_name; captures };
+    let entry = { lifted_name; captures } in
+    Hashtbl.replace inner_lifts n entry;  (* keep last-write for back-compat *)
+    let host_tbl =
+      match Hashtbl.find_opt inner_lifts_by_host !current_host with
+      | Some t -> t
+      | None ->
+        let t = Hashtbl.create 4 in
+        Hashtbl.add inner_lifts_by_host !current_host t;
+        t
+    in
+    Hashtbl.replace host_tbl n entry;
     known := lifted_name :: !known;
     (host_param, fn_body)
   in
@@ -2654,6 +2794,7 @@ let lift_inner_fns
       walker host_param a; List.iter (fun (_, e) -> walker host_param e) fs
   in
   List.iter (fun (f : fn_decl) ->
+    current_host := f.name;
     walk_in_fn f.param f.body) fns;
   List.rev !lifted
 
@@ -3237,7 +3378,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let variant_typedefs =
     List.filter (fun s -> s <> "") variant_typedefs
   in
-  let variant_struct_bodies =
+  let _ = (* unused — replaced by unified_struct_bodies (Phase 22.5) *)
     List.filter_map (fun (name, _, variants) ->
       emit_variant_struct_body name variants) variant_decls
   in
@@ -3446,11 +3587,89 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in
-  let record_struct_bodies = List.map emit_record_struct_body record_names in
-  let record_struct_bodies =
-    List.filter (fun s -> s <> "") record_struct_bodies
+  (* Phase 22.5: unified topo sort across all struct bodies (tuples,
+     non-recursive variants, recursive variants, records). Deps reflect
+     "this struct needs the complete body of X". Pointer-typed refs
+     (recursive variants, which typedef to `*_node*`) don't introduce
+     deps — only forward decls matter for those.
+
+     We collect a list of (name, body, deps), then topo-sort and emit. *)
+  let ty_deps (t : Ast.ty) : string list =
+    match Ast.walk t with
+    | Ast.TyTuple ts -> [tuple_struct_name ts]
+    | Ast.TyCon (n, _) when is_recursive_variant n -> []  (* pointer *)
+    | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> [n]
+    | Ast.TyCon (n, _) when List.exists (fun (vn, _, _) -> vn = n) variant_decls -> [n]
+    | _ -> []
   in
-  let tuple_struct_bodies = List.map emit_tuple_struct_body tuple_shapes in
+  let variant_deps_of name variants =
+    let node_name = if is_recursive_variant name then name ^ "_node" else name in
+    let payload_deps =
+      List.concat_map (fun (_, arg_opt) ->
+        match arg_opt with
+        | None -> []
+        | Some t -> ty_deps t) variants
+    in
+    (node_name, payload_deps)
+  in
+  let tuple_deps_of shape =
+    let name = tuple_struct_name shape in
+    let elem_deps = List.concat_map ty_deps shape in
+    (name, elem_deps)
+  in
+  let record_deps_of name =
+    let info = Hashtbl.find Typer.records name in
+    let field_deps =
+      List.concat_map (fun (_, t) -> ty_deps t) info.Typer.r_fields
+    in
+    (name, field_deps)
+  in
+  (* Build the node list *)
+  let nodes : (string * string * string list) list ref = ref [] in
+  List.iter (fun (name, _, variants) ->
+    match emit_variant_struct_body name variants with
+    | Some body ->
+      let (n, deps) = variant_deps_of name variants in
+      nodes := (n, body, deps) :: !nodes
+    | None -> ()
+  ) variant_decls;
+  List.iter (fun shape ->
+    let body = emit_tuple_struct_body shape in
+    let (n, deps) = tuple_deps_of shape in
+    nodes := (n, body, deps) :: !nodes
+  ) tuple_shapes;
+  List.iter (fun name ->
+    let body = emit_record_struct_body name in
+    if body <> "" then begin
+      let (n, deps) = record_deps_of name in
+      nodes := (n, body, deps) :: !nodes
+    end
+  ) record_names;
+  (* Topo sort *)
+  let name_to_node : (string, string * string list) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (n, b, d) -> Hashtbl.add name_to_node n (b, d)) !nodes;
+  let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let sorted_bodies = ref [] in
+  let rec visit n =
+    if Hashtbl.mem visited n then ()
+    else begin
+      Hashtbl.add visited n ();
+      match Hashtbl.find_opt name_to_node n with
+      | None -> ()
+      | Some (body, deps) ->
+        List.iter visit deps;
+        sorted_bodies := body :: !sorted_bodies
+    end
+  in
+  List.iter (fun (n, _, _) -> visit n) !nodes;
+  let unified_struct_bodies = List.rev !sorted_bodies in
+  (* Keep these two empty so the parts list later sees no leftover bodies
+     in the per-category positions — we emit everything via
+     unified_struct_bodies. *)
+  let record_struct_bodies = [] in
+  let tuple_struct_bodies = [] in
+  let _ = record_struct_bodies in
+  let _ = tuple_struct_bodies in
   (* Closure / inner-fn lifting (defunctionalization). Done AFTER
      top-level fn types are resolved so we know toplevel names. *)
   let toplevel_names = List.map (fun f -> f.name) fns in
@@ -3564,6 +3783,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     [ "#include <stdio.h>";
       "#include <stdlib.h>";
       "#include <string.h>";
+      "#include <setjmp.h>";
       "";
       region_runtime_helpers;
       "";
@@ -3600,10 +3820,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        bodies, because records can have variant-typed fields (e.g.,
        `Tx { kind: tx_kind }` in inventory.mere), and C requires the
        field type to have a complete struct body at the point of use. *)
-    @ (if tuple_struct_bodies = [] then [] else tuple_struct_bodies @ [""])
-    @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
+    (* Phase 22.5: unified topo-sorted struct bodies (tuples + non-rec
+       variants + recursive variants + records) — replaces the per-
+       category ordering. mono_variant / mono_record specializations
+       are still emitted separately below since they're generated by
+       a different code path. *)
+    @ (if unified_struct_bodies = [] then [] else unified_struct_bodies @ [""])
     @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
-    @ (if record_struct_bodies = [] then [] else record_struct_bodies @ [""])
     @ (if mono_record_struct_bodies = [] then [] else mono_record_struct_bodies @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
