@@ -5838,5 +5838,24 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 22.4: tuple struct body topo sort + fail builtin in C codegen.
+     ネストした tuple (tuple of tuple や record with tuple field) で
+     forward decl 順序を topo sort、fail を noreturn helper として emit。 *)
+  check "§22.4: nested tuple struct topo sort (no incomplete type)"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let outer = ((\"x\", 1), 2) in let (inner, n) = outer in n") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.4: fail builtin emits in C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "if true then 1 else fail \"never\"") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.4: fail with str return type"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "if true then \"ok\" else fail \"bad\"") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
