@@ -115,6 +115,9 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    each instance gets its own `@mere_vec_<T>_iter` /
    `@mere_vec_<T>_fold_<U>` function. *)
 let vec_iter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
+
+(* Phase 19.2: map_iter helper instances, keyed by "<K_tag>__<V_tag>". *)
+let map_iter_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_fold_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 15.6: vec_map per-(T, U) and vec_filter per-T helper instances. *)
@@ -1572,7 +1575,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len" then
+       || name = "map_has" || name = "map_len" || name = "map_iter" then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.3〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
     if name = "len" || name = "vec_to_list" then
@@ -2017,6 +2020,22 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_map_%s_%s_set(ptr %s, %s %s, %s %s)"
                   r k_tag v_tag av (llvm_ty_of k_ty) kv (llvm_ty_of v_ty) vv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_iter"; _ }, m_e); _ }, fn_e) ->
+    (* Phase 19.2: map_iter m f — per-(K, V) helper.
+       Signature: i32 @mere_map_<K>_<V>_iter(ptr m, %closure_<K>_<closure_<V>_unit> outer) *)
+    let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+    let (k_ty, v_ty) = Hashtbl.find map_instances (k_tag ^ "__" ^ v_tag) in
+    let key = k_tag ^ "__" ^ v_tag in
+    if not (Hashtbl.mem map_iter_instances key) then
+      Hashtbl.add map_iter_instances key (k_ty, v_ty);
+    let av = emit_expr env m_e in
+    let cv = emit_expr env fn_e in
+    let outer_cl = closure_struct_name k_ty (Ast.TyArrow (v_ty, Ast.TyUnit)) in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_map_%s_%s_iter(ptr %s, %%%s %s)"
+                  r k_tag v_tag av outer_cl cv);
     r
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
     (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T]。
@@ -3293,6 +3312,50 @@ let emit_vec_iter_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret i32 0";
       "}" ]
 
+(* Phase 19.2: map_iter helper per (K, V) pair.
+   Signature: i32 @mere_map_<K>_<V>_iter(ptr m, %closure_<K>_<closure_<V>_unit> outer)
+   outer: K -> (V -> unit). Apply outer(k) to get inner_cl, then inner_cl(v). *)
+let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let v_tag = ty_tag v_ty in
+  let c_k = llvm_ty_of k_ty in
+  let c_v = llvm_ty_of v_ty in
+  let struct_name = "mere_map_" ^ k_tag ^ "_" ^ v_tag in
+  let inner_cl = closure_struct_name v_ty Ast.TyUnit in
+  let outer_cl = closure_struct_name k_ty (Ast.TyArrow (v_ty, Ast.TyUnit)) in
+  String.concat "\n"
+    [ Printf.sprintf "define i32 @mere_map_%s_%s_iter(ptr %%m, %%%s %%outer) {"
+        k_tag v_tag outer_cl;
+      "entry:";
+      Printf.sprintf "  %%outer_env = extractvalue %%%s %%outer, 0" outer_cl;
+      Printf.sprintf "  %%outer_fn = extractvalue %%%s %%outer, 1" outer_cl;
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" struct_name;
+      "  %values = load ptr, ptr %vp";
+      "  br label %check";
+      "check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %end, label %body";
+      "body:";
+      Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%i" c_k;
+      Printf.sprintf "  %%k = load %s, ptr %%kslot" c_k;
+      Printf.sprintf "  %%vslot = getelementptr %s, ptr %%values, i32 %%i" c_v;
+      Printf.sprintf "  %%v = load %s, ptr %%vslot" c_v;
+      Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%k)"
+        inner_cl c_k;
+      Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
+      Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
+      Printf.sprintf "  %%_ = call i32 %%inner_fn(ptr %%inner_env, %s %%v)" c_v;
+      "  %i_next = add i32 %i, 1";
+      "  br label %check";
+      "end:";
+      "  ret i32 0";
+      "}" ]
+
 (* Phase 15.5: vec_fold helper per (T, U) pair.
    Signature: <U> @mere_vec_<T>_fold_<U>(ptr v, <U> acc, %closure_<U>_closure_<T>_<U> outer)
    outer: U -> (T -> U). Apply outer(acc) to get inner closure_T_U, then
@@ -4277,6 +4340,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset show_types;
   Hashtbl.reset vec_instances;
   Hashtbl.reset vec_iter_instances;
+  Hashtbl.reset map_iter_instances;
   Hashtbl.reset vec_fold_instances;
   Hashtbl.reset vec_map_instances;
   Hashtbl.reset vec_filter_instances;
@@ -4609,6 +4673,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       emit_map_runtime_llvm k_ty v_ty :: acc) map_instances []
   in
+  let map_iter_helpers =
+    Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
+      emit_map_iter_helper_llvm k_ty v_ty :: acc) map_iter_instances []
+  in
   let vec_to_list_helpers =
     let seen = Hashtbl.create 4 in
     Hashtbl.fold (fun _key (t_ty, list_ty) acc ->
@@ -4676,6 +4744,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_key_eq_helpers = [] then [] else map_key_eq_helpers @ [""])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
+    @ (if map_iter_helpers = [] then [] else map_iter_helpers @ [""])
     @ (if vec_to_list_helpers = [] then [] else vec_to_list_helpers @ [""])
     @ (if list_len_helpers = [] then [] else list_len_helpers @ [""])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])

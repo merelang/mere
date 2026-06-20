@@ -558,7 +558,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
-       || name = "map_new" || name = "map_set" || name = "map_get"
+       || name = "map_new" || name = "map_set" || name = "map_get" || name = "map_iter"
        || name = "map_has" || name = "map_len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
@@ -819,6 +819,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr k_e;
     emit_expr v_e;
     emit_instr (Printf.sprintf "call $mere_map_%s_set" k_tag)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_iter"; _ }, m_e); _ }, fn_e) ->
+    (* Phase 19.2: map_iter m f — closure dispatch via call_indirect.
+       Need both the table (vec_higher_order flag) and the basic vec
+       helpers (since vec_higher_order_runtime contains vec_map / filter
+       that call $mere_vec_new). Setting vec_used pulls them in. *)
+    let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    vec_used := true;
+    vec_higher_order_used := true;
+    emit_expr m_e;
+    emit_expr fn_e;
+    emit_instr (Printf.sprintf "call $mere_map_%s_iter" k_tag)
   | Ast.App ({ node = Ast.Var "vec_to_list"; _ }, vec_e) ->
     (* Phase 15.12: vec_to_list — shared $mere_vec_to_list helper. *)
     vec_used := true;
@@ -2247,8 +2259,38 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (br $scan_lp)))
     (i32.const 0))
   (func $mere_map_%s_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))"
-    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    (i32.load offset=8 (local.get $m)))
+  ;; Phase 19.2: map_iter — call outer(k) → inner closure, then inner(v).
+  ;; outer closure: { env@0, fn_idx@4 }; outer(env, k) returns inner closure ptr.
+  (func $mere_map_%s_iter (param $m i32) (param $cl i32) (result i32)
+    (local $i i32) (local $len i32)
+    (local $keys i32) (local $values i32)
+    (local $outer_env i32) (local $outer_fn i32)
+    (local $k i32) (local $v i32) (local $inner_cl i32)
+    (local.set $len    (i32.load offset=8 (local.get $m)))
+    (local.set $keys   (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $outer_env (i32.load offset=0 (local.get $cl)))
+    (local.set $outer_fn  (i32.load offset=4 (local.get $cl)))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (local.set $k (i32.load (i32.add (local.get $keys)
+                                  (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $v (i32.load (i32.add (local.get $values)
+                                  (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $inner_cl
+          (call_indirect (type $cl) (local.get $outer_env) (local.get $k)
+                         (local.get $outer_fn)))
+        (drop (call_indirect (type $cl)
+                (i32.load offset=0 (local.get $inner_cl))
+                (local.get $v)
+                (i32.load offset=4 (local.get $inner_cl))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.const 0))"
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
 let map_int_runtime_wasm = {|
   (func $mere_map_int_new (result i32)

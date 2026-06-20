@@ -539,7 +539,7 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len" then
+       || name = "map_has" || name = "map_len" || name = "map_iter" then
       unsupported e.loc
         (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
     if name = "len" || name = "vec_to_list" then
@@ -1000,6 +1000,19 @@ let rec emit_expr (e : Ast.expr) : string =
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_set(%s, %s, %s)"
          k_tag v_tag (emit_expr m_e) (emit_expr k_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "map_iter"; _ }, m_e) ->
+       (* Phase 19.2: `map_iter m f` curried. closure f : K -> V -> unit,
+          so f.fn(env, k) returns inner closure_V_unit, then
+          inner.fn(inner.env, v) returns unit. Inline loop over keys/values
+          parallel arrays. __auto_type infers types from the runtime call. *)
+       let _ = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+       Printf.sprintf
+         "({ __auto_type __m = %s; __auto_type __outer = %s; \
+          for (int __i = 0; __i < __m->len; __i++) { \
+            __auto_type __inner = __outer.fn(__outer.env, __m->keys[__i]); \
+            __inner.fn(__inner.env, __m->values[__i]); \
+          } 0; })"
+         (emit_expr m_e) (emit_expr arg)
      | Ast.Var "strbuf_new" ->
        (* Phase 15.9: strbuf_new () — region は result type の TyCon arg
           から取り出す。Vec[R, T] と同じ慣例。 *)

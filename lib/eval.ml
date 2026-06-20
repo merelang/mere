@@ -876,6 +876,11 @@ let builtin_map_len =
     | V_map tbl -> V_int (Hashtbl.length tbl)
     | _ -> failwith "map_len: expected Map")
 
+(* Phase 19.2: map_iter — apply (K -> V -> unit) to each entry.
+   Note: defined here for grouping with other map_* builtins, but
+   uses apply_value_ref which is defined later. The forward-reference
+   pattern matches builtin_vec_iter (line ~930). *)
+
 let builtin_fst =
   V_builtin ("fst", fun v ->
     match v with
@@ -956,6 +961,21 @@ let builtin_vec_fold =
             !apply_value_ref acc_x x
           ) init !arr))
     | _ -> failwith "vec_fold: expected Vec")
+
+(* Phase 19.2: map_iter — call (K -> V -> unit) for each entry.
+   Curried closure: apply f to K (returns inner V_builtin), apply
+   inner to V (returns unit). *)
+let builtin_map_iter =
+  V_builtin ("map_iter", fun v ->
+    match v with
+    | V_map tbl ->
+      V_builtin ("map_iter_p1", fun f ->
+        Hashtbl.iter (fun k vv ->
+          let f_k = !apply_value_ref f k in
+          ignore (!apply_value_ref f_k vv)
+        ) tbl;
+        V_unit)
+    | _ -> failwith "map_iter: expected Map")
 
 let builtin_vec_set =
   V_builtin ("vec_set", fun v ->
@@ -1371,6 +1391,7 @@ let initial_env : env =
     ("strbuf_len",     ref builtin_strbuf_len);
     ("map_new",        ref builtin_map_new);
     ("map_set",        ref builtin_map_set);
+    ("map_iter",       ref builtin_map_iter);
     ("map_get",        ref builtin_map_get);
     ("map_has",        ref builtin_map_has);
     ("map_len",        ref builtin_map_len);
