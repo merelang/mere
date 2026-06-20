@@ -517,10 +517,12 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len" then
       unsupported e.loc
         (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
-       || name = "len" then
+    if name = "len" then
       unsupported e.loc
-        (name ^ " (vec_to_list / len are interpreter-only)");
+        (name ^ " as a value (Phase 15.11: len は直接 application のみ対応)");
+    if name = "vec_to_list" then
+      unsupported e.loc
+        (name ^ " (vec_to_list is interpreter-only)");
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -806,6 +808,39 @@ let rec emit_expr (e : Ast.expr) : string =
             mere_owned_vec_%s_push(__new, mere_vec_%s_get(__vc, __i)); \
           } __new; })"
          (emit_expr arg) t_tag t_tag t_tag
+     | Ast.Var "len" ->
+       (* Phase 15.11: len は arg.ty に基づくコンパイル時 dispatch。
+          Vec / OwnedVec / StrBuf / Map → 既存の _len ヘルパに routing、
+          str → strlen、tuple → 静的 arity 定数。 *)
+       let arg_ty =
+         match arg.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported arg.Ast.loc "len: missing arg type info"
+       in
+       (match arg_ty with
+        | Ast.TyCon ("Vec", _) ->
+          let t_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+          Printf.sprintf "mere_vec_%s_len(%s)" t_tag (emit_expr arg)
+        | Ast.TyCon ("OwnedVec", _) ->
+          let t_tag = owned_vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+          Printf.sprintf "mere_owned_vec_%s_len(%s)" t_tag (emit_expr arg)
+        | Ast.TyCon ("StrBuf", _) ->
+          strbuf_used := true;
+          Printf.sprintf "mere_strbuf_len(%s)" (emit_expr arg)
+        | Ast.TyCon ("Map", _) ->
+          let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+          Printf.sprintf "mere_map_%s_%s_len(%s)"
+            k_tag v_tag (emit_expr arg)
+        | Ast.TyStr ->
+          Printf.sprintf "((int)strlen(%s))" (emit_expr arg)
+        | Ast.TyTuple ts ->
+          (* Static arity — just emit the constant. Arg evaluated for
+             side effects but discarded. *)
+          Printf.sprintf "({ (void)(%s); %d; })"
+            (emit_expr arg) (List.length ts)
+        | _ ->
+          unsupported e.loc
+            "len: arg type has no codegen-defined length (use vec_len / strbuf_len / map_len / str_len for specific types)")
      | Ast.Var "map_new" ->
        (* Phase 15.10: map_new () — region と (K, V) を result type から取り出す。 *)
        let (k_tag, v_tag) = map_kv_tags_of e.Ast.ty e.Ast.loc in

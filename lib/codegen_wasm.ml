@@ -530,11 +530,14 @@ let rec emit_expr (e : Ast.expr) : unit =
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.4〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応)"));
-    if name = "vec_to_list"
-       || name = "len" then
+    if name = "len" then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " (vec_to_list / len are interpreter-only)"));
+        ^ " as a value (Phase 15.11: len は直接 application のみ対応)"));
+    if name = "vec_to_list" then
+      raise (Codegen_error (e.Ast.loc,
+        "unsupported in Wasm codegen subset: " ^ name
+        ^ " (vec_to_list is interpreter-only)"));
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -697,6 +700,39 @@ let rec emit_expr (e : Ast.expr) : unit =
     vec_used := true;
     emit_expr owned_e;
     emit_instr "call $mere_vec_clone"
+  | Ast.App ({ node = Ast.Var "len"; _ }, arg) ->
+    (* Phase 15.11: len ad-hoc dispatch — arg.ty に基づいて対応する
+       _len ヘルパに routing。Wasm では値は全て i32。 *)
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> raise (Codegen_error (arg.Ast.loc, "len: missing arg type info"))
+    in
+    (match arg_ty with
+     | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+       vec_used := true;
+       emit_expr arg;
+       emit_instr "call $mere_vec_len"
+     | Ast.TyCon ("StrBuf", _) ->
+       strbuf_used := true;
+       emit_expr arg;
+       emit_instr "call $mere_strbuf_len"
+     | Ast.TyCon ("Map", _) ->
+       let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
+       (if k_tag = "int" then map_int_used := true else map_str_used := true);
+       emit_expr arg;
+       emit_instr (Printf.sprintf "call $mere_map_%s_len" k_tag)
+     | Ast.TyStr ->
+       emit_expr arg;
+       emit_instr "call $__lang_strlen"
+     | Ast.TyTuple ts ->
+       (* Static arity。arg は side-effectful の可能性があるので drop。 *)
+       emit_expr arg;
+       emit_instr "drop";
+       emit_instr (Printf.sprintf "i32.const %d" (List.length ts))
+     | _ ->
+       raise (Codegen_error (e.Ast.loc,
+         "len: arg type has no codegen-defined length")))
   | Ast.App ({ node = Ast.Var "map_new"; _ }, _arg) ->
     (* Phase 15.10: map_new () — Wasm では region 無視、key 型のみ pick. *)
     let k_tag = map_key_tag_of_wasm e.Ast.ty e.Ast.loc in

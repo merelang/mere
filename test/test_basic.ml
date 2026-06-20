@@ -4545,6 +4545,35 @@ let () =
     (Pipeline.process map_str_src) "32";
   check "map[int, int]: interpreter parity"
     (Pipeline.process map_int_src) "302";
+  (* --- Phase 15.11: ad-hoc polymorphic `len` の codegen --- *)
+  let len_src =
+    "let v = vec_new () in let __ = vec_push v 1 in \
+     let __ = vec_push v 2 in let __ = vec_push v 3 in \
+     let s = \"hello\" in let t = (1, 2, 3, 4) in \
+     len v + len s + len t"
+  in
+  assert_contains "len: C codegen dispatches Vec → mere_vec_int_len"
+    (let prog = Pipeline.parse_program len_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "mere_vec_int_len";
+  assert_contains "len: C codegen dispatches str → strlen"
+    (let prog = Pipeline.parse_program len_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "((int)strlen";
+  assert_contains "len: LLVM codegen dispatches Vec"
+    (let prog = Pipeline.parse_program len_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_vec_int_len";
+  assert_contains "len: Wasm codegen dispatches Vec"
+    (let prog = Pipeline.parse_program len_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_vec_len";
+  check "len: interpreter parity"
+    (Pipeline.process len_src) "12";  (* 3 + 5 + 4 *)
 
   (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
   (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
