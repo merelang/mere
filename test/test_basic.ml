@@ -5945,25 +5945,34 @@ let () =
   check "§23.2: result_is_ok (Err)"
     (Pipeline.process "result_is_ok (Err \"e\")") "false";
 
-  check "§23.1: multi-instantiation poly fn raises clear codegen error"
-    (try
-       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
-         "let rec id = fn x -> x in\n\
-          let a = id 5 in\n\
-          let b = id \"hi\" in\n\
-          let __ = print b in\n\
-          a") in
-       "no-error"
-     with Codegen_c.Codegen_error (_, msg) ->
-       let pat = "multi-instantiation" in
-       let nlen = String.length msg and plen = String.length pat in
+  (* Phase 23.1 → 23.3: multi-instantiation poly fn now works (per-spec
+     emit) instead of raising. Verify both call sites succeed. *)
+  check "§23.3: multi-instantiation poly fn — int + str (interp)"
+    (Pipeline.process
+       "let rec id = fn x -> x in\n\
+        let a = id 5 in\n\
+        let b = id \"hi\" in\n\
+        a") "5";
+  check "§23.3: multi-instantiation poly fn — C codegen emits 2 specs"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec id = fn x -> x in\n\
+        let a = id 5 in\n\
+        let b = id \"hi\" in\n\
+        let __ = print b in\n\
+        a") in
+     (* Should contain mangled id__int and id__str. *)
+     let s = c_src in
+     let has p =
+       let nlen = String.length s and plen = String.length p in
        let rec scan i =
          if i + plen > nlen then false
-         else if String.sub msg i plen = pat then true
+         else if String.sub s i plen = p then true
          else scan (i + 1)
        in
-       if scan 0 then "detected" else "wrong-error")
-    "detected";
+       scan 0
+     in
+     if has "id__int" && has "id__str" then "ok" else "missing-spec")
+    "ok";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
