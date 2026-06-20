@@ -83,6 +83,12 @@ let polymorphic_records
 let mono_record_instances : (string, string * Ast.ty list) Hashtbl.t =
   Hashtbl.create 8
 
+(* Phase 15.2: concrete element types of `Vec[R, T]` seen in the program.
+   Key is `ty_tag` of the element type (`int`, `str`, `tuple_int_int`,
+   ...) and value is the walked element type. For each entry the
+   codegen emits `mere_vec_<tag>` struct + 4 helpers. *)
+let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 (* Substitute TyParam names → concrete types throughout `t`. *)
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
@@ -401,6 +407,28 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
   go e initially_bound;
   List.rev !order
 
+(* Pull the element type out of a `Vec[R, T]` typed expression and
+   return its `ty_tag`. Also registers the element type in
+   `vec_instances` so the runtime emitter generates the matching
+   struct + helpers. *)
+let vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
+  match ty_opt with
+  | Some t ->
+    (match Ast.walk t with
+     | Ast.TyCon ("Vec", [_; et]) ->
+       let et = Ast.walk et in
+       if ty_is_concrete et then begin
+         let tag = ty_tag et in
+         if not (Hashtbl.mem vec_instances tag) then
+           Hashtbl.add vec_instances tag et;
+         tag
+       end else raise (Codegen_error (loc,
+         "vec_* on Vec with unresolved element type"))
+     | _ -> raise (Codegen_error (loc,
+         "vec_* expected a Vec value"))
+   )
+  | None -> raise (Codegen_error (loc, "vec_*: missing type info"))
+
 (* Translate one Lang expression to a C expression string. *)
 let rec emit_expr (e : Ast.expr) : string =
   match e.node with
@@ -601,34 +629,46 @@ let rec emit_expr (e : Ast.expr) : string =
        let tag = ty_tag arg_ty in
        Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
      | Ast.Var "vec_new" ->
-       (* Phase 15.1: vec_new () — region は result type の TyCon arg
-          (TyRef _ R TyUnit) から取り出す。R = "__heap" なら default
-          region、それ以外は __region_<R>。 *)
-       let region_name =
+       (* Phase 15.1/15.2: vec_new () — region と要素型を result type の
+          TyCon args から取り出す。region = __heap なら default region、
+          それ以外は __region_<R>。要素型を ty_tag でサニタイズし、
+          `mere_vec_<tag>_new` の helper 名にする (登録は c_type_of に
+          委ねる — c_type_of がここでも先に呼ばれる)。 *)
+       let (region_name, elem_tag) =
          match e.Ast.ty with
          | Some t ->
            (match Ast.walk t with
-            | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) -> r
-            | _ -> "__heap")
-         | None -> "__heap"
+            | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); et]) ->
+              let et = Ast.walk et in
+              if ty_is_concrete et then begin
+                let tag = ty_tag et in
+                if not (Hashtbl.mem vec_instances tag) then
+                  Hashtbl.add vec_instances tag et;
+                (r, tag)
+              end else unsupported e.loc "vec_new: unresolved element type"
+            | _ -> unsupported e.loc "vec_new: missing Vec result type")
+         | None -> unsupported e.loc "vec_new: missing type info"
        in
        let region_var =
          if region_name = "__heap" then "__lang_default_region"
          else "__region_" ^ region_name
        in
-       Printf.sprintf "mere_vec_int_new(&%s)" region_var
+       Printf.sprintf "mere_vec_%s_new(&%s)" elem_tag region_var
      | Ast.Var "vec_len" ->
-       Printf.sprintf "mere_vec_int_len(%s)" (emit_expr arg)
+       let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_vec_%s_len(%s)" elem_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
        (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
           ここの outer App は inner = App (Var "vec_push", vec_e)、
           arg = x。返り値は unit (int 0)。 *)
-       Printf.sprintf "mere_vec_int_push(%s, %s)"
-         (emit_expr vec_e) (emit_expr arg)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf "mere_vec_%s_push(%s, %s)"
+         elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e) ->
        (* `vec_get v i` curried. *)
-       Printf.sprintf "mere_vec_int_get(%s, %s)"
-         (emit_expr vec_e) (emit_expr arg)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf "mere_vec_%s_get(%s, %s)"
+         elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.Var name when Hashtbl.mem inner_lifts name ->
        (* Defunctionalized direct call (Phase 4.8). *)
        let li = Hashtbl.find inner_lifts name in
@@ -917,13 +957,19 @@ type fn_decl = {
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("Vec", args) ->
-    (* Phase 15.1: Vec[R, int] のみ C codegen 対応。args の中身は walk されて
-       いないので、ここで walk してから判定。 *)
+    (* Phase 15.2: Vec[R, T] — T を concrete に展開して `mere_vec_<tag>*`。
+       args は walk されていないので、ここで walk してから判定。
+       要素型は ty_tag でサニタイズし、`vec_instances` に登録 (runtime
+       生成は emit_program 側で一括 emit)。 *)
     (match List.map Ast.walk args with
-     | [_; Ast.TyInt] -> "mere_vec_int*"
+     | [_; elem_ty] when ty_is_concrete elem_ty ->
+       let tag = ty_tag elem_ty in
+       if not (Hashtbl.mem vec_instances tag) then
+         Hashtbl.add vec_instances tag elem_ty;
+       "mere_vec_" ^ tag ^ "*"
      | _ ->
        raise (Codegen_error (Loc.dummy,
-         "unsupported in C codegen subset: Vec[R, <non-int>] (interpreter-only; Phase 15.1 では Vec[R, int] のみ codegen 対応)")))
+         "unsupported in C codegen subset: Vec[R, <unresolved>] (element type must be concrete; tyvar に残った場合は monomorphize 失敗)")))
   | Ast.TyCon ("OwnedVec", _)
   | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
@@ -1371,33 +1417,51 @@ let region_runtime_helpers =
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. */";
-      "static __lang_region __lang_default_region;";
-      "";
-      "/* === Phase 15.1: Vec[R, int] runtime ===";
-      "   region-allocated growable int array. Struct + initial buffer";
-      "   live in the region; push reallocates by allocating a fresh";
-      "   larger buffer in the same region (old buffer leaks until the";
-      "   region is freed — that is the arena semantics). */";
-      "typedef struct mere_vec_int {";
-      "  int* data;";
+      "static __lang_region __lang_default_region;" ]
+
+(* Phase 15.2: Vec[R, T] runtime — emit one typedef + 4 helpers
+   (new / push / get / len) per concrete element type seen in the
+   program. Element type can be int / bool / str / tuple / record /
+   variant, etc.; the C name `mere_vec_<tag>` is keyed by `ty_tag`.
+
+   Storage strategy: struct + initial element buffer both allocated
+   from the region. `push` reallocates by allocating a fresh larger
+   buffer in the same region (arena semantics — old buffers leak
+   until the region is freed). Value semantics: elements are stored
+   by value (`T data[]`), so str/closure are stored as pointers
+   already (they are C pointer types), tuple/record are stored as
+   the C struct value. *)
+let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = c_type_of elem_ty in
+  let struct_name = "mere_vec_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "typedef struct %s {" struct_name;
+      Printf.sprintf "  %s* data;" c_elem;
       "  int len;";
       "  int cap;";
       "  __lang_region* region;";
-      "} mere_vec_int;";
+      Printf.sprintf "} %s;" struct_name;
       "";
-      "static mere_vec_int* mere_vec_int_new(__lang_region* r) {";
-      "  mere_vec_int* v = (mere_vec_int*)__lang_region_alloc(r, sizeof(mere_vec_int));";
+      Printf.sprintf "static %s* %s_new(__lang_region* r) {"
+        struct_name struct_name;
+      Printf.sprintf "  %s* v = (%s*)__lang_region_alloc(r, sizeof(%s));"
+        struct_name struct_name struct_name;
       "  v->cap = 4;";
       "  v->len = 0;";
-      "  v->data = (int*)__lang_region_alloc(r, sizeof(int) * 4);";
+      Printf.sprintf "  v->data = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);"
+        c_elem c_elem;
       "  v->region = r;";
       "  return v;";
       "}";
       "";
-      "static int mere_vec_int_push(mere_vec_int* v, int x) {";
+      Printf.sprintf "static int %s_push(%s* v, %s x) {"
+        struct_name struct_name c_elem;
       "  if (v->len == v->cap) {";
       "    int new_cap = v->cap * 2;";
-      "    int* new_data = (int*)__lang_region_alloc(v->region, sizeof(int) * new_cap);";
+      Printf.sprintf
+        "    %s* new_data = (%s*)__lang_region_alloc(v->region, sizeof(%s) * new_cap);"
+        c_elem c_elem c_elem;
       "    for (int i = 0; i < v->len; i++) new_data[i] = v->data[i];";
       "    v->data = new_data;";
       "    v->cap = new_cap;";
@@ -1406,7 +1470,8 @@ let region_runtime_helpers =
       "  return 0; /* unit */";
       "}";
       "";
-      "static int mere_vec_int_get(mere_vec_int* v, int i) {";
+      Printf.sprintf "static %s %s_get(%s* v, int i) {"
+        c_elem struct_name struct_name;
       "  if (i < 0 || i >= v->len) {";
       "    fprintf(stderr, \"vec_get: index %d out of bounds (len = %d)\\n\", i, v->len);";
       "    abort();";
@@ -1414,7 +1479,8 @@ let region_runtime_helpers =
       "  return v->data[i];";
       "}";
       "";
-      "static int mere_vec_int_len(mere_vec_int* v) { return v->len; }" ]
+      Printf.sprintf "static int %s_len(%s* v) { return v->len; }"
+        struct_name struct_name ]
 
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
@@ -2089,6 +2155,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_variant_instances;
   Hashtbl.reset polymorphic_records;
   Hashtbl.reset mono_record_instances;
+  Hashtbl.reset vec_instances;
   let variant_decls =
     List.filter_map (fun decl ->
       match decl with
@@ -2107,6 +2174,93 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       emit_variant_struct_body name variants) variant_decls
   in
   let main_expr = Ast.desugar_program prog in
+  (* Phase 15.2: resolve let-bound Vec element types.
+     `let v = vec_new () in body` generalizes v to `forall T. Vec[..., T]`,
+     so each use of v in body gets a *fresh* element tyvar. Some of those
+     tyvars get linked to a concrete type (e.g., `vec_push v 10` links to
+     int), others stay unlinked (e.g., `vec_len v` doesn't constrain the
+     element).
+     Strategy: for each `Let(P_var name, value, body)` whose value.ty is
+     a Vec, walk body and unify value.ty with every `Var name`.ty
+     encountered. unify chains the tyvars together, so once any one is
+     resolved (by e.g. vec_push), all others share that resolution. *)
+  let resolve_vec_let_types (root : Ast.expr) : unit =
+    let unify_with_value (vt : Ast.ty) (ut : Ast.ty) : unit =
+      try Typer.unify Loc.dummy vt ut with _ -> ()
+    in
+    let rec scan_uses name vt body =
+      (match body.Ast.node with
+       | Ast.Var n when n = name ->
+         (match body.Ast.ty with
+          | Some t -> unify_with_value vt t
+          | None -> ())
+       | _ -> ());
+      let recur b = scan_uses name vt b in
+      match body.Ast.node with
+      | Ast.App (a, b) -> recur a; recur b
+      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
+        recur a; recur b
+      | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> recur a
+      | Ast.Let (pat, v, b) ->
+        recur v;
+        (match pat.Ast.pnode with
+         | Ast.P_var n when n = name -> ()  (* shadowed *)
+         | _ -> recur b)
+      | Ast.Let_rec (bs, b) ->
+        let shadowed = List.exists (fun (n, _) -> n = name) bs in
+        List.iter (fun (_, v) -> recur v) bs;
+        if not shadowed then recur b
+      | Ast.If (c, t, e_) -> recur c; recur t; recur e_
+      | Ast.Tuple es -> List.iter recur es
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> recur e) fs
+      | Ast.Record_update (a, fs) ->
+        recur a; List.iter (fun (_, e) -> recur e) fs
+      | Ast.With (n, v, b) -> recur v; if n <> name then recur b
+      | Ast.Fun (n, _, b) -> if n <> name then recur b
+      | Ast.Match (s, arms) ->
+        recur s;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> recur ge | None -> ()); recur b) arms
+      | Ast.Constr (_, Some a) -> recur a
+      | _ -> ()
+    in
+    let rec walk e =
+      (match e.Ast.node with
+       | Ast.Let (pat, value, body) ->
+         (match pat.Ast.pnode, value.Ast.ty with
+          | Ast.P_var name, Some vt ->
+            (match Ast.walk vt with
+             | Ast.TyCon ("Vec", _) -> scan_uses name vt body
+             | _ -> ())
+          | _ -> ())
+       | _ -> ());
+      walk_subs e
+    and walk_subs e =
+      match e.Ast.node with
+      | Ast.Let (_, v, b) -> walk v; walk b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+      | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b)
+      | Ast.Logic (_, a, b) -> walk a; walk b
+      | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Fun (_, _, a) ->
+        walk a
+      | Ast.If (c, t, e_) -> walk c; walk t; walk e_
+      | Ast.Tuple es -> List.iter walk es
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk e) fs
+      | Ast.Record_update (a, fs) ->
+        walk a; List.iter (fun (_, e) -> walk e) fs
+      | Ast.With (_, v, b) -> walk v; walk b
+      | Ast.Match (s, arms) ->
+        walk s;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> walk ge | None -> ()); walk b) arms
+      | Ast.Constr (_, Some a) -> walk a
+      | _ -> ()
+    in
+    walk root
+  in
+  resolve_vec_let_types main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
   let fns = resolve_fn_types skels main_expr in
   (* Populate toplevel_fn_names so emit_expr can pick direct vs closure
@@ -2255,6 +2409,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ show_fn_defs
   in
   let main_body = emit_expr body_expr in
+  (* Phase 15.2: vec_instances is populated during fn / main emission
+     via c_type_of and emit_expr. Emit one runtime block per element
+     type now, after main_body has run through emit_expr. *)
+  let vec_runtimes =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_vec_runtime_for elem_ty :: acc) vec_instances []
+  in
+  (* Forward typedefs so closure typedefs / fn forward decls can
+     reference `mere_vec_T*` before the runtime struct body appears. *)
+  let vec_forward_typedefs =
+    Hashtbl.fold (fun tag _ acc ->
+      Printf.sprintf "typedef struct mere_vec_%s mere_vec_%s;" tag tag :: acc)
+      vec_instances []
+  in
   let main_stmt =
     match main_format_of main_ty with
     | None -> "  (void)(" ^ main_body ^ ");  /* unit result */"
@@ -2277,6 +2445,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if record_typedefs = [] then [] else record_typedefs @ [""])
     @ (if mono_record_typedefs = [] then [] else mono_record_typedefs @ [""])
     @ (if tuple_typedefs = [] then [] else tuple_typedefs @ [""])
+    (* Forward typedef of Vec[R, T] runtime structs so closure typedefs
+       (which may carry Vec values) can compile before the full runtime
+       struct body is emitted. *)
+    @ (if vec_forward_typedefs = [] then [] else vec_forward_typedefs @ [""])
     (* Closure typedefs reference user struct names (e.g.,
        `closure_int_Conn`) but only via function pointer types, which C
        accepts with forward-declared structs. *)
@@ -2290,6 +2462,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
     @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
+    (* Vec[R, T] runtime — depends on the element type's C struct
+       being complete, so emit after tuple / record / variant bodies. *)
+    @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";

@@ -1,0 +1,53 @@
+// Phase 15.2: Vec[R, T] の C codegen が要素型 T を一般化したことの demo。
+// 同じ program 中で 4 種類の Vec instance を作り、それぞれ別の
+// `mere_vec_<tag>` runtime に monomorphize されることを示す。
+//
+//   - Vec[__heap, int]   → mere_vec_int
+//   - Vec[__heap, str]   → mere_vec_str
+//   - Vec[__heap, tuple] → mere_vec_tuple_int_int
+//   - Vec[__heap, Tag]   → mere_vec_Tag (user 型 variant)
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- -c examples/vec_codegen_c_typed.mere > /tmp/vt.c
+//   clang /tmp/vt.c -o /tmp/vt && /tmp/vt
+//   # → 252
+
+type Tag = Lo of int | Hi of int;
+
+// int Vec — 普通のスカラー要素。
+let ints = vec_new () in
+let __ = vec_push ints 1 in
+let __ = vec_push ints 2 in
+let __ = vec_push ints 3 in
+let ints_sum = vec_get ints 0 + vec_get ints 1 + vec_get ints 2 in
+
+// str Vec — 要素は `const char*` として配列化される。
+let words = vec_new () in
+let __ = vec_push words "hi" in
+let __ = vec_push words "you" in
+let strs_len = str_len (vec_get words 0) + str_len (vec_get words 1) in
+
+// tuple Vec — `mere_vec_tuple_int_int` 専用 struct + 値配列に展開される。
+let pairs = vec_new () in
+let __ = vec_push pairs (10, 100) in
+let __ = vec_push pairs (20, 200) in
+let pairs_sum = fst (vec_get pairs 0) + snd (vec_get pairs 1) in
+
+// user variant Vec — `Tag` の tagged-union が配列要素として並ぶ。
+let tags = (vec_new () : Tag Vec) in
+let __ = vec_push tags (Lo 7) in
+let __ = vec_push tags (Hi 15) in
+let tag_sum =
+  match vec_get tags 0 with
+  | Lo n -> n
+  | Hi n -> n
+in
+let tag_sum2 =
+  match vec_get tags 1 with
+  | Lo n -> n
+  | Hi n -> n
+in
+
+ints_sum + strs_len + pairs_sum + tag_sum + tag_sum2 + vec_len ints + vec_len words + vec_len pairs + vec_len tags
+// = 6 + 5 + 210 + 7 + 15 + 3 + 2 + 2 + 2
+// = 252
