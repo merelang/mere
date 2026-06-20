@@ -67,7 +67,7 @@ codegen。
 | [csv_parser.mere](csv_parser.mere) | CSV パーサ |
 | [word_count.mere](word_count.mere) | 単語カウント |
 | [pipeline.mere](pipeline.mere) | region / view / cap / with を組合せた realistic な処理 |
-| [arith_eval.mere](arith_eval.mere) | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価。**interpreter only** (wildcard `let _` + 多相 user let-rec の codegen 未対応)。Phase 20.2 / examples roadmap C3 |
+| [arith_eval.mere](arith_eval.mere) | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価。**Phase 23 完成後 C codegen と interp が完全一致** (Phase 24.0 検証)。Phase 20.2 / examples roadmap C3 |
 | [s_expression.mere](s_expression.mere) | S 式 (Lisp 風) parser + printer + 簡易 eval (`+ - * / = <`, `if`, `let`)。**interpreter only** (同上)。Phase 20.3 / examples roadmap I4 |
 | [template_engine.mere](template_engine.mere) | mustache 風 `{{KEY}}` 置換 engine。Map[R, str, str] + StrBuf[R] + str_index_of の組合せ demo。未定義 key は soft fail で literal を残す。**interpreter only** (DEFERRED §1.7)。Phase 20.4 / examples roadmap B1 |
 | [mini_shell.mere](mini_shell.mere) | 簡易 shell の batch evaluator。variant command + str_split parse + dispatch + state (env Map + history Vec + exit flag)。echo / set / get / list / add / history / help / exit を実装。**interpreter only** (DEFERRED §1.7)。Phase 20.5 / examples roadmap G1 |
