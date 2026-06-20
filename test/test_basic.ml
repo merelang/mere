@@ -1408,6 +1408,75 @@ let () =
   check "str_count type"
     (Pipeline.type_of "str_count") "(str -> (str -> int))";
 
+  (* --- Phase 19.1: str_index_of / str_split / str_join --- *)
+  check "str_index_of: found"
+    (Pipeline.process "str_index_of \"hello world\" \"world\"") "6";
+  check "str_index_of: not found returns -1"
+    (Pipeline.process "str_index_of \"hello\" \"xyz\"") "-1";
+  check "str_index_of: empty needle returns 0"
+    (Pipeline.process "str_index_of \"abc\" \"\"") "0";
+  check "str_index_of: at start"
+    (Pipeline.process "str_index_of \"abc\" \"a\"") "0";
+  check "str_index_of type"
+    (Pipeline.type_of "str_index_of") "(str -> (str -> int))";
+
+  check "str_split: basic split"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_split \"a,b,c\" \",\"")
+    "[\"a\", \"b\", \"c\"]";
+  check "str_split: multi-char delimiter"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_split \"foo::bar::baz\" \"::\"")
+    "[\"foo\", \"bar\", \"baz\"]";
+  check "str_split: no delimiter found → 1-element list"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_split \"hello\" \",\"")
+    "[\"hello\"]";
+  check "str_split: trailing delimiter → empty tail"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_split \"a,b,\" \",\"")
+    "[\"a\", \"b\", \"\"]";
+  check "str_split: empty delimiter returns single-element"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_split \"hello\" \"\"")
+    "[\"hello\"]";
+  check "str_split type"
+    (Pipeline.type_of "str_split") "(str -> (str -> str list))";
+
+  check "str_join: basic"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_join \", \" [\"alpha\", \"beta\", \"gamma\"]")
+    "\"alpha, beta, gamma\"";
+  check "str_join: empty separator"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_join \"\" [\"a\", \"b\", \"c\"]")
+    "\"abc\"";
+  check "str_join: empty list"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_join \", \" ([] : str list)")
+    "\"\"";
+  check "str_join: single-element"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_join \", \" [\"only\"]")
+    "\"only\"";
+  check "str_join type"
+    (Pipeline.type_of "str_join") "(str -> (str list -> str))";
+
+  check "str_split + str_join roundtrip"
+    (Pipeline.process
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        str_join \"-\" (str_split \"hello world foo bar\" \" \")")
+    "\"hello-world-foo-bar\"";
+
   (* --- read_line : unit -> str (only test type — stdin is process-level) --- *)
   check "read_line type"
     (Pipeline.type_of "read_line") "(unit -> str)";
