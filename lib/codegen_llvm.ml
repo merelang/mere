@@ -125,6 +125,9 @@ let vec_filter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    not region-bound. *)
 let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
+let strbuf_used = ref false
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -248,9 +251,12 @@ let rec llvm_ty_of (t : Ast.ty) : string =
      | _ ->
        raise (Codegen_error (Loc.dummy,
          "unsupported in LLVM codegen subset: OwnedVec[<unresolved>] (element type must be concrete)")))
-  | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
+  | Ast.TyCon ("StrBuf", _) ->
+    strbuf_used := true;
+    "ptr"
+  | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in LLVM codegen subset: StrBuf / Map (interpreter-only)"))
+      "unsupported in LLVM codegen subset: Map (interpreter-only)"))
   | Ast.TyInt -> "i32"
   | Ast.TyBool -> "i1"
   | Ast.TyStr -> "ptr"
@@ -1465,17 +1471,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
-       || name = "owned_vec_get" || name = "owned_vec_len" then
-      unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3〜15.7: vec_* / owned_vec_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
+       || name = "owned_vec_get" || name = "owned_vec_len"
        || name = "strbuf_new" || name = "strbuf_push"
-       || name = "strbuf_to_str" || name = "strbuf_len"
+       || name = "strbuf_to_str" || name = "strbuf_len" then
+      unsupported e.Ast.loc
+        (name ^ " as a value (Phase 15.3〜15.9: vec_* / owned_vec_* / strbuf_* は直接 application のみ対応、first-class value 用法は未対応)");
+    if name = "vec_to_list"
        || name = "map_new" || name = "map_set" || name = "map_get"
        || name = "map_has" || name = "map_len"
        || name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (StrBuf / Map / vec_to_list / len are interpreter-only)");
+        (name ^ " (Map / vec_to_list / len are interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1703,6 +1709,54 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_set(ptr %s, i32 %s, %s %s)"
                   r elem_tag av iv (llvm_ty_of elem_ty) xv);
+    r
+  | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
+    (* Phase 15.9: strbuf_new () — result type の TyCon arg から region を
+       取り出して @mere_strbuf_new に渡す。 *)
+    strbuf_used := true;
+    let region_name =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("StrBuf", [Ast.TyRef (_, r, Ast.TyUnit)]) -> r
+         | _ -> "__heap")
+      | None -> "__heap"
+    in
+    let region_reg =
+      if region_name = "__heap" then "@__lang_default_region"
+      else match List.assoc_opt region_name !current_regions with
+        | Some reg -> reg
+        | None ->
+          unsupported e.Ast.loc
+            ("strbuf_new: region not in scope: " ^ region_name)
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_strbuf_new(ptr %s)"
+                  r region_reg);
+    r
+  | Ast.App ({ node = Ast.Var "strbuf_len"; _ }, arg) ->
+    strbuf_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_strbuf_len(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "strbuf_to_str"; _ }, arg) ->
+    strbuf_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_strbuf_to_str(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "strbuf_push"; _ }, sb_e); _ }, str_e) ->
+    strbuf_used := true;
+    let sv = emit_expr env sb_e in
+    let xv = emit_expr env str_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_strbuf_push(ptr %s, ptr %s)"
+                  r sv xv);
     r
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
     (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T]。
@@ -3274,6 +3328,94 @@ let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
+(* Phase 15.9: StrBuf[R] runtime — single non-polymorphic type. Region-
+   allocated mutable byte buffer; to_str returns a null-terminated copy
+   in the same region. *)
+let strbuf_runtime_llvm =
+  String.concat "\n"
+    [ "%mere_strbuf = type { ptr, i32, i32, ptr }";
+      "";
+      (* new *)
+      "define ptr @mere_strbuf_new(ptr %r) {";
+      "entry:";
+      "  %sb = call ptr @__lang_region_alloc(ptr %r, i64 24)";
+      "  %buf = call ptr @__lang_region_alloc(ptr %r, i64 16)";
+      "  %dp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
+      "  store ptr %buf, ptr %dp";
+      "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
+      "  store i32 0, ptr %lp";
+      "  %cp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 2";
+      "  store i32 16, ptr %cp";
+      "  %rp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 3";
+      "  store ptr %r, ptr %rp";
+      "  ret ptr %sb";
+      "}";
+      "";
+      (* push *)
+      "define i32 @mere_strbuf_push(ptr %sb, ptr %s) {";
+      "entry:";
+      "  %slen64 = call i64 @strlen(ptr %s)";
+      "  %slen = trunc i64 %slen64 to i32";
+      "  br label %check";
+      "check:";
+      "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
+      "  %len = load i32, ptr %lp";
+      "  %cp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 2";
+      "  %cap = load i32, ptr %cp";
+      "  %need = add i32 %len, %slen";
+      "  %too_small = icmp sgt i32 %need, %cap";
+      "  br i1 %too_small, label %grow, label %do_copy";
+      "grow:";
+      "  %new_cap = mul i32 %cap, 2";
+      "  %rp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 3";
+      "  %reg = load ptr, ptr %rp";
+      "  %nc64 = zext i32 %new_cap to i64";
+      "  %new_buf = call ptr @__lang_region_alloc(ptr %reg, i64 %nc64)";
+      "  %dp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
+      "  %old_buf = load ptr, ptr %dp";
+      "  %len_zext = zext i32 %len to i64";
+      "  call ptr @memcpy(ptr %new_buf, ptr %old_buf, i64 %len_zext)";
+      "  store ptr %new_buf, ptr %dp";
+      "  store i32 %new_cap, ptr %cp";
+      "  br label %check";
+      "do_copy:";
+      "  %dp2 = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
+      "  %buf2 = load ptr, ptr %dp2";
+      "  %dst = getelementptr i8, ptr %buf2, i32 %len";
+      "  %slen_zext = zext i32 %slen to i64";
+      "  call ptr @memcpy(ptr %dst, ptr %s, i64 %slen_zext)";
+      "  %new_len = add i32 %len, %slen";
+      "  store i32 %new_len, ptr %lp";
+      "  ret i32 0";
+      "}";
+      "";
+      (* to_str *)
+      "define ptr @mere_strbuf_to_str(ptr %sb) {";
+      "entry:";
+      "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
+      "  %len = load i32, ptr %lp";
+      "  %rp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 3";
+      "  %reg = load ptr, ptr %rp";
+      "  %len1 = add i32 %len, 1";
+      "  %len1_64 = zext i32 %len1 to i64";
+      "  %out = call ptr @__lang_region_alloc(ptr %reg, i64 %len1_64)";
+      "  %dp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
+      "  %buf = load ptr, ptr %dp";
+      "  %len_64 = zext i32 %len to i64";
+      "  call ptr @memcpy(ptr %out, ptr %buf, i64 %len_64)";
+      "  %end = getelementptr i8, ptr %out, i32 %len";
+      "  store i8 0, ptr %end";
+      "  ret ptr %out";
+      "}";
+      "";
+      (* len *)
+      "define i32 @mere_strbuf_len(ptr %sb) {";
+      "entry:";
+      "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
+      "  %len = load i32, ptr %lp";
+      "  ret i32 %len";
+      "}" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
@@ -3314,6 +3456,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_map_instances;
   Hashtbl.reset vec_filter_instances;
   Hashtbl.reset owned_vec_instances;
+  strbuf_used := false;
   show_string_globals := [];
   show_format_globals := [];
   (* Register variant tags + classify into mono / poly. Polymorphic
@@ -3653,6 +3796,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
+    @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
     @ (if vec_iter_helpers = [] then [] else vec_iter_helpers @ [""])
     @ (if vec_fold_helpers = [] then [] else vec_fold_helpers @ [""])
     @ (if vec_map_helpers = [] then [] else vec_map_helpers @ [""])
