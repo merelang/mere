@@ -72,6 +72,10 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyRef (_, r, Ast.TyUnit) ->
     (* Region marker — region 名そのものを tag に使う (codegen_c と同じ). *)
     r
+  | Ast.TyRef (_, _, inner) ->
+    (* Phase 19.x: borrow 型 `&[mode] R T` の tag は inner T のものを使う。
+       codegen_c と同じ方針。 *)
+    ty_tag inner
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unsupported LLVM codegen type element: %s" (Ast.pp_ty other)))
@@ -2451,20 +2455,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     end
   | Ast.Field_get (inner, fname) ->
     let iv = emit_expr env inner in
-    let inner_ty =
+    let raw_ty =
       match inner.Ast.ty with
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "field access: missing inner type"
     in
-    if is_view_type inner_ty then begin
-      (* View value is a ptr to a region-allocated struct. GEP+load. *)
+    (* Phase 19.x: borrow 越し field access。&[mode] R T は LLVM では
+       ptr 値、unwrap して inner T の record 型として扱う (view と同じ
+       GEP+load 経路を辿る)。 *)
+    let inner_ty, via_borrow =
+      match raw_ty with
+      | Ast.TyRef (_, _, t) -> (Ast.walk t, true)
+      | _ -> (raw_ty, false)
+    in
+    if is_view_type inner_ty || via_borrow then begin
+      (* View value (or borrowed record) is a ptr to a region-allocated
+         struct. GEP+load. *)
       let name =
         match inner_ty with
         | Ast.TyCon (n, _) -> n
         | _ -> assert false
       in
-      let info = Hashtbl.find Typer.views name in
-      let fields = info.Typer.v_fields in
+      let fields =
+        match Hashtbl.find_opt Typer.views name with
+        | Some info -> info.Typer.v_fields
+        | None ->
+          (* Borrowed plain record — use record info. *)
+          record_fields name
+      in
       let rec find_idx i = function
         | [] ->
           unsupported e.Ast.loc

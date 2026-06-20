@@ -242,6 +242,12 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyRef (_, r, Ast.TyUnit) ->
     (* Region marker — region 名そのものを tag に使う。 *)
     r
+  | Ast.TyRef (_, _, inner) ->
+    (* Phase 19.x: borrow 型 `&[mode] R T` の tag は inner T の tag をそのまま
+       使う。mode / region は静的情報のみ。typer の auto-deref で field access
+       も透過するので、tag レベルでも T と区別しない方が、後段の lookup
+       (closure_struct_name 等) が一致して都合がよい。 *)
+    ty_tag inner
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unsupported C codegen type element: %s" (Ast.pp_ty other)))
@@ -1302,11 +1308,17 @@ let rec emit_expr (e : Ast.expr) : string =
       "((" ^ cstruct ^ "){" ^ String.concat ", " parts ^ "})"
     end
   | Ast.Field_get (inner, fname) ->
-    (* `->` for view (pointer) values, `.` for plain records. *)
+    (* `->` for view (pointer) values OR for `&[mode] R T` borrowed
+       records (Phase 19.x: c_type_of TyRef → inner*, so field access
+       needs ptr arrow). `.` for plain records. *)
     let dot =
       match inner.Ast.ty with
       | Some t when is_view_type t -> "->"
-      | _ -> "."
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyRef _ -> "->"
+         | _ -> ".")
+      | None -> "."
     in
     "(" ^ emit_expr inner ^ ")" ^ dot ^ fname
   | Ast.Record_update (base, updates) ->

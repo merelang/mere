@@ -277,6 +277,9 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyRef (_, r, Ast.TyUnit) ->
     (* Region marker — region 名そのものを tag に (C / LLVM と同じ). *)
     r
+  | Ast.TyRef (_, _, inner) ->
+    (* Phase 19.x: borrow 型は inner の tag をそのまま使う (C / LLVM と同じ). *)
+    ty_tag inner
   | _ ->
     raise (Codegen_error (Loc.dummy,
       "unsupported Wasm codegen type for ty_tag"))
@@ -954,10 +957,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     ) decl_fields;
     emit_instr (Printf.sprintf "local.get %d" base_slot)
   | Ast.Field_get (inner, fname) ->
-    let inner_ty =
+    let raw_ty =
       match inner.Ast.ty with
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "field access: missing inner type"
+    in
+    (* Phase 19.x: borrow 越し field access — TyRef を unwrap して
+       inner T の record として扱う。Wasm はすべて i32 (ptr) なので
+       record の値表現は変わらず、field access は同じ手順で動く。 *)
+    let inner_ty =
+      match raw_ty with
+      | Ast.TyRef (_, _, t) -> Ast.walk t
+      | _ -> raw_ty
     in
     let rname, fields =
       match inner_ty with
@@ -975,6 +986,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     let idx = find_idx 0 fields in
     emit_expr inner;
+    (* Phase 19.x: borrow 越し (raw_ty が TyRef) なら Ref が 4-byte box を
+       追加しているので、unbox の extra i32.load が要る。 *)
+    (match raw_ty with
+     | Ast.TyRef _ -> emit_instr "i32.load offset=0"
+     | _ -> ());
     emit_instr (Printf.sprintf "i32.load offset=%d" (4 * idx))
   | Ast.Record_update (base, updates) ->
     let base_ty =

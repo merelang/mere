@@ -72,7 +72,7 @@ codegen。
 | [safe_div.mere](safe_div.mere) | `(int, str) result` を使った失敗を値で返すパターン。**interpreter only**。Phase 19.5 prelude の Result demo |
 | [module_scoping.mere](module_scoping.mere) | 2 module で同名 ctor を qualified 形式で disambiguate + nested `open A.B;`。**interpreter only** (codegen が M-prefix pattern 未対応)。Phase 18 demo |
 | [json_writer.mere](json_writer.mere) | StrBuf[R] + recursive variant (json ADT) で compact / pretty-print。**interpreter only** (多相 user 定義 let-rec の codegen 未対応、§1.7)。Phase 19.3 (StrBuf) demo |
-| [cap_handler.mere](cap_handler.mere) | `&shared write` で複数 handler が同じ Logger / Metrics を共有書き込みする app 風 demo。**interpreter only** (codegen が &shared write の record 系 typeref を未サポート)。Phase 17 / borrow_modes 延長 |
+| [cap_handler.mere](cap_handler.mere) | `&shared write` で複数 handler が同じ Logger / Metrics を共有書き込みする app 風 demo。**4 backend 対応** (Phase 19.x で borrow 越し Field_get を C/LLVM/Wasm に対応)。Phase 17 / borrow_modes 延長 |
 
 ### Q-010 collection (Phase 12 — interpreter)
 
