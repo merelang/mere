@@ -3365,12 +3365,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
     (* Now the struct bodies themselves — fields may reference closure
        types (e.g., `closure_unit_unit close;` inside a Drop record), so
-       these need to come AFTER closure typedefs. *)
+       these need to come AFTER closure typedefs.
+
+       §1.8 fix: variant struct bodies must come BEFORE record struct
+       bodies, because records can have variant-typed fields (e.g.,
+       `Tx { kind: tx_kind }` in inventory.mere), and C requires the
+       field type to have a complete struct body at the point of use. *)
     @ (if tuple_struct_bodies = [] then [] else tuple_struct_bodies @ [""])
-    @ (if record_struct_bodies = [] then [] else record_struct_bodies @ [""])
-    @ (if mono_record_struct_bodies = [] then [] else mono_record_struct_bodies @ [""])
     @ (if variant_struct_bodies = [] then [] else variant_struct_bodies @ [""])
     @ (if mono_variant_struct_bodies = [] then [] else mono_variant_struct_bodies @ [""])
+    @ (if record_struct_bodies = [] then [] else record_struct_bodies @ [""])
+    @ (if mono_record_struct_bodies = [] then [] else mono_record_struct_bodies @ [""])
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /

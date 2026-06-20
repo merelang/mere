@@ -5,11 +5,11 @@
 // 目的: examples roadmap G2。倉庫の在庫を増減し、履歴を残し、最終的に
 // 上位 3 商品を表示する。
 //
-// 実行モード: interpreter のみ
-//   - C codegen: 別件発見 — variant (tx_kind) を record (Tx) の field に
-//     する時、variant の struct body が record より後ろに出るので
-//     "incomplete type" エラー (forward decl 順序 bug、新 DEFERRED)
-//   - LLVM / Wasm: 同様の課題が予想される
+// 実行モード: 4 backend 完全対応 (Phase 20.1 fix 済)
+//   - C codegen: typedef 順序を「tuple → variant → record」へ修正、
+//     record が variant field を持つ場合でも variant struct body が
+//     先に出るように (DEFERRED §1.8)
+//   - LLVM / Wasm: 元から動作 (型 emit のタイミングが C ほど厳しくない)
 //
 // 使い方:
 //   dune exec ./bin/mere.exe -- examples/inventory.mere
