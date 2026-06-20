@@ -12,7 +12,7 @@ feature-parity で動く段階。
 
 ## ステータス (2026-06-19 時点)
 
-- **1218 tests passing**
+- **1222 tests passing**
 - ツリーウォーキング interpreter + **C / LLVM IR / Wasm の 3 backend** が
   feature parity で動く (同じ Mere プログラムから 3 種のバイナリを出せる)
 - メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
@@ -92,7 +92,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1218 tests
+dune runtest                                         # 1222 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -134,7 +134,7 @@ mere/
 │   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 1218 tests
+├── test/test_basic.ml  # 1222 tests
 ├── examples/           # *.mere サンプル群
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
 ```

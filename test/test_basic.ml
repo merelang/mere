@@ -4248,6 +4248,30 @@ let () =
     (Pipeline.process src_to_owned) "5";
   check "owned_vec_to_vec: interpreter parity"
     (Pipeline.process src_o2v) "5";
+  (* --- Phase 15.8: OwnedVec の main 末一括 free (registry) --- *)
+  assert_contains "owned_vec: C codegen emits registry"
+    (vec_codegen_c src_owned) "__mere_owned_vec_register";
+  assert_contains "owned_vec: C codegen calls free_all in main"
+    (vec_codegen_c src_owned) "__mere_owned_vec_free_all";
+  assert_contains "owned_vec: LLVM codegen emits registry"
+    (vec_codegen_llvm src_owned) "@__mere_owned_vec_register";
+  assert_contains "owned_vec: LLVM codegen calls free_all in main"
+    (vec_codegen_llvm src_owned) "@__mere_owned_vec_free_all";
+  (* Wasm では malloc が無い (linear memory なので process exit で OS が
+     一括解放) — registry / free_all は emit されないこと。 *)
+  let wat_owned = vec_codegen_wasm src_owned in
+  if
+    (try ignore (String.length wat_owned); false with _ -> true)
+    || (let nl = "__mere_owned_vec_register" in
+        let hl = String.length wat_owned and nlen = String.length nl in
+        let rec loop i =
+          if i + nlen > hl then false
+          else if String.sub wat_owned i nlen = nl then true
+          else loop (i + 1)
+        in loop 0)
+  then failwith "Wasm should not emit owned_vec registry"
+  else ()
+  ;
 
   (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
   (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
