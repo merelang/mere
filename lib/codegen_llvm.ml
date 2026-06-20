@@ -274,13 +274,19 @@ let rec llvm_ty_of (t : Ast.ty) : string =
            List.for_all (fun (_, ft) -> is_key_supported (Ast.walk ft))
              info.Typer.r_fields
          | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+           (* Phase 15.15: nullary variants.
+              Phase 15.16: also payload variants, but LLVM MVP requires
+              all payloads share the same type. *)
            let ctors = Hashtbl.find Exhaustive.type_variants vname in
-           List.for_all (fun (_, payload) -> payload = None) ctors
+           List.for_all (fun (_, payload) ->
+             match payload with
+             | None -> true
+             | Some pt -> is_key_supported (Ast.walk pt)) ctors
          | _ -> false
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (Loc.dummy,
-           "Map key type must be int / bool / str / tuple / record / nullary variant in LLVM codegen (Phase 15.10/15.14/15.15)"));
+           "Map key type must be int / bool / str / tuple / record / variant in LLVM codegen (Phase 15.10〜15.16)"));
        let k_tag = ty_tag k_ty in
        let v_tag = ty_tag v_ty in
        let key = k_tag ^ "__" ^ v_tag in
@@ -1465,12 +1471,15 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
                info.Typer.r_fields
            | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
              let ctors = Hashtbl.find Exhaustive.type_variants vname in
-             List.for_all (fun (_, payload) -> payload = None) ctors
+             List.for_all (fun (_, payload) ->
+               match payload with
+               | None -> true
+               | Some pt -> is_key_supported (Ast.walk pt)) ctors
            | _ -> false
          in
          if not (is_key_supported k_ty) then
            raise (Codegen_error (loc,
-             "Map key type must be int / bool / str / tuple / record / nullary variant in LLVM codegen (Phase 15.10/15.14/15.15)"));
+             "Map key type must be int / bool / str / tuple / record / variant in LLVM codegen (Phase 15.10〜15.16)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -3754,14 +3763,73 @@ let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
              emit (Printf.sprintf "  %s = and i1 true, true" r);
              r)
         | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
-          (* Phase 15.15: nullary variant key — extract tag field, icmp. *)
+          (* Phase 15.15/15.16: variant key.
+             1) Extract & compare tags.
+             2) If a payload-carrying ctor (tag in nullary_tags excluded),
+                compare payload (LLVM MVP: all payloads share same type).
+             3) Otherwise (nullary), return tag-eq result. *)
+          let ctors = Hashtbl.find Exhaustive.type_variants vname in
           let a_tag = fresh () in
           emit (Printf.sprintf "  %s = extractvalue %%%s %s, 0" a_tag vname a);
           let b_tag = fresh () in
           emit (Printf.sprintf "  %s = extractvalue %%%s %s, 0" b_tag vname b);
-          let r = fresh () in
-          emit (Printf.sprintf "  %s = icmp eq i32 %s, %s" r a_tag b_tag);
-          r
+          let tag_eq = fresh () in
+          emit (Printf.sprintf "  %s = icmp eq i32 %s, %s" tag_eq a_tag b_tag);
+          (* Find the single shared payload type (if any). *)
+          let payload_ty_opt =
+            List.fold_left (fun acc (_, p) ->
+              match acc, p with
+              | None, Some pt -> Some (Ast.walk pt)
+              | x, _ -> x) None ctors
+          in
+          (match payload_ty_opt with
+           | None ->
+             (* All nullary — tag eq is the answer. *)
+             tag_eq
+           | Some pt ->
+             let a_pl = fresh () in
+             emit (Printf.sprintf "  %s = extractvalue %%%s %s, 1" a_pl vname a);
+             let b_pl = fresh () in
+             emit (Printf.sprintf "  %s = extractvalue %%%s %s, 1" b_pl vname b);
+             (* Determine if any nullary ctors exist; if so, those tags
+                should short-circuit to true once tags match. We OR them
+                with the payload-eq result. *)
+             let nullary_tags =
+               List.filter_map (fun (cname, p) ->
+                 if p = None then Some (Hashtbl.find variant_tags cname)
+                 else None) ctors
+             in
+             (* Compute "tag is nullary" as a series of icmp + or. *)
+             let is_nullary_reg =
+               match nullary_tags with
+               | [] -> None
+               | _ ->
+                 let acc = ref None in
+                 List.iter (fun tv ->
+                   let r = fresh () in
+                   emit (Printf.sprintf "  %s = icmp eq i32 %s, %d" r a_tag tv);
+                   (match !acc with
+                    | None -> acc := Some r
+                    | Some prev ->
+                      let combined = fresh () in
+                      emit (Printf.sprintf "  %s = or i1 %s, %s" combined prev r);
+                      acc := Some combined)) nullary_tags;
+                 !acc
+             in
+             (* payload eq: recursive call on payload type pt. *)
+             let pl_eq = go pt a_pl b_pl in
+             (* result = tag_eq && (is_nullary || payload_eq) *)
+             let inner =
+               match is_nullary_reg with
+               | None -> pl_eq
+               | Some n ->
+                 let r = fresh () in
+                 emit (Printf.sprintf "  %s = or i1 %s, %s" r n pl_eq);
+                 r
+             in
+             let r = fresh () in
+             emit (Printf.sprintf "  %s = and i1 %s, %s" r tag_eq inner);
+             r)
         | _ ->
           let r = fresh () in
           emit (Printf.sprintf "  %s = icmp eq %s %s, %s" r c_k a b);
