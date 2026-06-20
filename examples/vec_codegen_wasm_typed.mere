@@ -1,0 +1,50 @@
+// Phase 15.4: Vec[R, T] の Wasm codegen 対応 (3 backend 完全 parity)。
+//
+// Wasm では Mere の値はすべて 4-byte i32 (スカラーは直接、構造化型は
+// linear memory 内の offset) として表現されるため、要素型 T ごとに
+// 別 runtime を作る必要がない (C / LLVM とは違う設計判断)。単一の
+// $mere_vec_new / push / get / len で int / str / tuple / record /
+// variant すべてを扱う。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- -w examples/vec_codegen_wasm_typed.mere > /tmp/vt.wat
+//   wat2wasm /tmp/vt.wat -o /tmp/vt.wasm
+//   node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/vt.wasm"),
+//     { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
+//   # → 252
+
+type Tag = Lo of int | Hi of int;
+
+let ints = vec_new () in
+let __ = vec_push ints 1 in
+let __ = vec_push ints 2 in
+let __ = vec_push ints 3 in
+let ints_sum = vec_get ints 0 + vec_get ints 1 + vec_get ints 2 in
+
+let words = vec_new () in
+let __ = vec_push words "hi" in
+let __ = vec_push words "you" in
+let strs_len = str_len (vec_get words 0) + str_len (vec_get words 1) in
+
+let pairs = vec_new () in
+let __ = vec_push pairs (10, 100) in
+let __ = vec_push pairs (20, 200) in
+let pairs_sum = fst (vec_get pairs 0) + snd (vec_get pairs 1) in
+
+let tags = (vec_new () : Tag Vec) in
+let __ = vec_push tags (Lo 7) in
+let __ = vec_push tags (Hi 15) in
+let tag_sum =
+  match vec_get tags 0 with
+  | Lo n -> n
+  | Hi n -> n
+in
+let tag_sum2 =
+  match vec_get tags 1 with
+  | Lo n -> n
+  | Hi n -> n
+in
+
+ints_sum + strs_len + pairs_sum + tag_sum + tag_sum2 + vec_len ints + vec_len words + vec_len pairs + vec_len tags
+// = 6 + 5 + 210 + 7 + 15 + 3 + 2 + 2 + 2
+// = 252
