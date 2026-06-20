@@ -293,6 +293,29 @@ let register_record type_name params fields =
   Hashtbl.replace types type_name (List.length params);
   Hashtbl.replace records type_name { r_params = params; r_fields = fields }
 
+(* Phase 18.1 / DEFERRED §4.1 残: register `alias` as a constructor with
+   the same variant info as `target`. Used to give module-internal
+   constructors a qualified name (`M.Red`) while keeping the unqualified
+   one (`Red`) for backward compat. Also populates `Ast.ctor_aliases`
+   so eval can canonicalize V_constr names at construction time. *)
+let alias_ctor alias target =
+  match Hashtbl.find_opt constructors target with
+  | Some info ->
+    Hashtbl.replace constructors alias info;
+    Hashtbl.replace Ast.ctor_aliases alias target
+  | None -> ()  (* silently skip — parser-side guard should catch this *)
+
+(* Same as `alias_ctor` but for records (types + records registries). *)
+let alias_record alias target =
+  match Hashtbl.find_opt records target with
+  | Some info ->
+    Hashtbl.replace records alias info;
+    (match Hashtbl.find_opt types target with
+     | Some arity -> Hashtbl.replace types alias arity
+     | None -> ());
+    Hashtbl.replace Ast.record_aliases alias target
+  | None -> ()
+
 (* Built-in capability record types. Registered at module load so that
    `mk_logger`/`mk_metrics` return values whose type the typer recognizes
    as Logger / Metrics. Users can override with their own `type Logger`

@@ -5070,6 +5070,38 @@ let () =
         };\n\
         Status94.label (Err94 \"boom\")") "\"boom\"";
 
+  (* --- Phase 18.1 / DEFERRED §4.1 残: module constructor / record の
+     M-prefix scoping。bare 名は backward compat で動き、`M.X` qualified
+     access も動く。typer 側の alias 経由で同じ ctor / record として
+     扱われ、eval は ctor 名を canonical (bare) に正規化して保持する
+     ので pattern match も自然に動く。 *)
+  check "module ctor: qualified access M.X works"
+    (Pipeline.process
+       "module Mq1 { type T1q = Red1q | Blue1q; };\n\
+        Mq1.Red1q") "Red1q";
+  check "module ctor: qualified with payload"
+    (Pipeline.process
+       "module Mq2 { type 'a opt2q = N2q | S2q of 'a; };\n\
+        match Mq2.S2q 42 with | S2q n -> n | N2q -> 0") "42";
+  check "module ctor: cross-module name collision — qualified disambiguates"
+    (Pipeline.process
+       "module Aq3 { type ColAq = Redq | Blueq; };\n\
+        module Bq3 { type ColBq = Redq | Greenq; };\n\
+        match Aq3.Redq with | Aq3.Redq -> 1 | Aq3.Blueq -> 2") "1";
+  check "module record: qualified literal M.Pt { ... }"
+    (Pipeline.process
+       "module Mq4 { type Ptq = { xq: int, yq: int }; };\n\
+        let p = Mq4.Ptq { xq = 3, yq = 4 } in p.xq + p.yq") "7";
+  check "module record: qualified pattern M.Pt { ... }"
+    (Pipeline.process
+       "module Mq5 { type Ptq5 = { xq5: int, yq5: int }; };\n\
+        let p = Mq5.Ptq5 { xq5 = 10, yq5 = 20 } in\n\
+        match p with | Mq5.Ptq5 { xq5 = xv, yq5 = yv } -> xv + yv") "30";
+  check "module ctor: bare ctor used outside module (backward compat)"
+    (Pipeline.process
+       "module Mq6 { type T6q = Ok6q of int | Err6q; };\n\
+        match Mq6.Ok6q 99 with | Ok6q n -> n | Err6q -> 0") "99";
+
   (* --- Phase 9.5: importer-relative import path resolution --- *)
   let tmpdir = Filename.temp_dir "lang_imp95" "" in
   let write path content =

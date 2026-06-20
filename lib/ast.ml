@@ -106,11 +106,42 @@ type top_decl =
        Emitted by the parser when it sees `drop type ...` or `drop type =
        { ... }` form. The typer uses this to enforce the Trivial[R]
        constraint on region-tagged values. *)
+  | Top_ctor_alias of string * string
+    (* Phase 18.1 / DEFERRED §4.1 残: typer-side aliasing of constructor
+       names. Emitted by parser's `prefix_module_decls` for each ctor in
+       a module: `Top_ctor_alias ("M.Red", "Red")` registers `M.Red` as
+       another name pointing to the same variant info as `Red`. Allows
+       qualified access `M.Red` while keeping unqualified `Red` working
+       (backward compat). *)
+  | Top_record_alias of string * string
+    (* Same as Top_ctor_alias but for records. `Top_record_alias
+       ("M.Pt", "Pt")` registers `M.Pt` as alias for `Pt`. *)
 
 type program = {
   decls : top_decl list;
   main : expr;
 }
+
+(* Phase 18.1 / DEFERRED §4.1 残: Global alias maps for ctor / record
+   names. Populated by Pipeline / Typer.alias_ctor / Typer.alias_record
+   via Top_ctor_alias / Top_record_alias decls.
+
+   Read by eval (to canonicalize V_constr / Record_lit names at
+   construction time, so pattern matches work regardless of whether
+   the user wrote the bare or qualified name) and by codegen
+   (similar canonicalization for emitted ctor tags). *)
+let ctor_aliases : (string, string) Hashtbl.t = Hashtbl.create 8
+let record_aliases : (string, string) Hashtbl.t = Hashtbl.create 8
+
+let canonical_ctor name =
+  match Hashtbl.find_opt ctor_aliases name with
+  | Some canonical -> canonical
+  | None -> name
+
+let canonical_record name =
+  match Hashtbl.find_opt record_aliases name with
+  | Some canonical -> canonical
+  | None -> name
 
 let binop_to_string = function
   | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%" | Concat -> "++"
@@ -309,6 +340,23 @@ let rec pattern_vars p =
    Let body, Let_rec, Match arm body, With body) hide names from the
    rewrite. *)
 let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
+  (* Rename a free name (Var, Constr, Record_lit, P_constr, P_record). For
+     Var the name is shadowable by let-bound names; for Constr / Record /
+     pattern names, shadowing doesn't apply (they're constants of the
+     type system, not value bindings).  *)
+  let lookup_simple n = match lookup n with Some n' -> n' | None -> n in
+  let rec go_pat (p : pattern) : pattern =
+    match p.pnode with
+    | P_constr (c, sub) ->
+      { p with pnode = P_constr (lookup_simple c, Option.map go_pat sub) }
+    | P_record (rn, fields) ->
+      let fields' = List.map (fun (f, sub) -> (f, go_pat sub)) fields in
+      { p with pnode = P_record (lookup_simple rn, fields') }
+    | P_tuple ps -> { p with pnode = P_tuple (List.map go_pat ps) }
+    | P_as (inner, n) -> { p with pnode = P_as (go_pat inner, n) }
+    | P_or (a, b) -> { p with pnode = P_or (go_pat a, go_pat b) }
+    | P_var _ | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> p
+  in
   let rec go shadowed e =
     let n_or_e n =
       if List.mem n shadowed then e
@@ -330,7 +378,7 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
     | Let (pat, value, body) ->
       let value' = go shadowed value in
       let body' = with_shadow (pattern_vars pat) body in
-      { e with node = Let (pat, value', body') }
+      { e with node = Let (go_pat pat, value', body') }
     | Let_rec (bindings, body) ->
       let names = List.map fst bindings in
       let bindings' =
@@ -351,15 +399,17 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
       { e with node = App (go shadowed f, go shadowed a) }
     | Annot (inner, t) ->
       { e with node = Annot (go shadowed inner, t) }
-    | Constr (c, None) -> { e with node = Constr (c, None) }
-    | Constr (c, Some a) -> { e with node = Constr (c, Some (go shadowed a)) }
+    | Constr (c, None) ->
+      { e with node = Constr (lookup_simple c, None) }
+    | Constr (c, Some a) ->
+      { e with node = Constr (lookup_simple c, Some (go shadowed a)) }
     | Match (scrut, arms) ->
       let scrut' = go shadowed scrut in
       let arms' = List.map (fun (p, guard, body) ->
         let pv = pattern_vars p in
         let guard' = Option.map (with_shadow pv) guard in
         let body' = with_shadow pv body in
-        (p, guard', body')
+        (go_pat p, guard', body')
       ) arms in
       { e with node = Match (scrut', arms') }
     | Tuple es ->
@@ -370,7 +420,7 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
       { e with node = Ref (mode, r, go shadowed inner) }
     | Record_lit (name, fields) ->
       let fields' = List.map (fun (f, ex) -> (f, go shadowed ex)) fields in
-      { e with node = Record_lit (name, fields') }
+      { e with node = Record_lit (lookup_simple name, fields') }
     | Field_get (inner, f) ->
       { e with node = Field_get (go shadowed inner, f) }
     | Record_update (base, updates) ->
@@ -394,4 +444,6 @@ let desugar_program (prog : program) : expr =
     | Top_type_alias _ -> body
     | Top_view _ -> body
     | Top_drop _ -> body
+    | Top_ctor_alias _ -> body
+    | Top_record_alias _ -> body
   ) prog.decls prog.main

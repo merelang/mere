@@ -79,6 +79,10 @@ let infer_program source =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_ctor_alias (alias, target) ->
+      Typer.alias_ctor alias target
+    | Ast.Top_record_alias (alias, target) ->
+      Typer.alias_record alias target
   ) prog.decls;
   let main_ty =
     Typer.infer !type_env (Ast.desugar_program prog)

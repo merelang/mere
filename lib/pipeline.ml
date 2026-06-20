@@ -68,6 +68,10 @@ let process_decls eval_env type_env decls =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_ctor_alias (alias, target) ->
+      Typer.alias_ctor alias target
+    | Ast.Top_record_alias (alias, target) ->
+      Typer.alias_record alias target
   ) decls
 
 let process ?base_dir s =
@@ -137,6 +141,10 @@ let type_of s =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_ctor_alias (alias, target) ->
+      Typer.alias_ctor alias target
+    | Ast.Top_record_alias (alias, target) ->
+      Typer.alias_record alias target
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 

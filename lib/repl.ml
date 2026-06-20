@@ -137,6 +137,12 @@ let process_decl eval_env type_env decl =
     Typer.register_drop_type name;
     Printf.printf "drop type %s registered\n" name;
     []
+  | Ast.Top_ctor_alias (alias, target) ->
+    Typer.alias_ctor alias target;
+    []
+  | Ast.Top_record_alias (alias, target) ->
+    Typer.alias_record alias target;
+    []
 
 (* No-op now that the parser natively allows decls-only programs;
    kept as an identity wrapper for backwards-compat with existing tests

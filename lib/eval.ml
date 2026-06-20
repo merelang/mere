@@ -1303,8 +1303,10 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
   | Ast.P_bool b, V_bool b' when b = b' -> Some []
   | Ast.P_str s, V_str s' when s = s' -> Some []
   | Ast.P_unit, V_unit -> Some []
-  | Ast.P_constr (c, None), V_constr (c', None) when c = c' -> Some []
-  | Ast.P_constr (c, Some sub_p), V_constr (c', Some sub_v) when c = c' ->
+  | Ast.P_constr (c, None), V_constr (c', None)
+    when Ast.canonical_ctor c = c' -> Some []
+  | Ast.P_constr (c, Some sub_p), V_constr (c', Some sub_v)
+    when Ast.canonical_ctor c = c' ->
     match_pattern sub_p sub_v
   | Ast.P_tuple ps, V_tuple vs when List.length ps = List.length vs ->
     let rec combine acc ps vs =
@@ -1474,10 +1476,15 @@ let rec eval_in (env : env) (e : Ast.expr) =
        fn v
      | _ -> type_error e.Ast.loc "applying non-function")
   | Ast.Annot (inner, _) -> eval_in env inner
-  | Ast.Constr (name, None) -> V_constr (name, None)
+  | Ast.Constr (name, None) ->
+    (* Phase 18.1: canonicalize so M.Red and Red both become the bare
+       canonical name (= the one originally declared). Pattern matching
+       compares by string, so values constructed via qualified syntax
+       must match unqualified patterns and vice versa. *)
+    V_constr (Ast.canonical_ctor name, None)
   | Ast.Constr (name, Some arg) ->
     let v = eval_in env arg in
-    V_constr (name, Some v)
+    V_constr (Ast.canonical_ctor name, Some v)
   | Ast.Match (scrut, arms) ->
     let v = eval_in env scrut in
     let rec try_arms = function

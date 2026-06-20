@@ -602,6 +602,47 @@ let rec parse_program_internal tokens =
           | _ -> raise (Parse_error (pos_of toks, "expected ')' in tuple pattern")))
        | (_, T_rparen) :: rest -> first, rest
        | _ -> raise (Parse_error (pos_of toks, "expected ',' or ')' in pattern")))
+    | (pos, T_ident m) :: (_, T_dot) :: (_, T_ident x) :: rest
+      when starts_with_upper m && Hashtbl.mem module_names m
+           && starts_with_upper x ->
+      (* Phase 18.1: qualified pattern `M.X` — Constr or Record pattern. *)
+      let full = m ^ "." ^ x in
+      if Hashtbl.mem records full then begin
+        match rest with
+        | (_, T_lbrace) :: body_rest ->
+          let rec parse_fpats acc toks =
+            match toks with
+            | (_, T_rbrace) :: rest -> List.rev acc, rest
+            | (_, T_ident fname) :: (_, T_eq) :: rest ->
+              let p, rest = pattern rest in
+              let acc = (fname, p) :: acc in
+              (match rest with
+               | (_, T_comma) :: rest -> parse_fpats acc rest
+               | (_, T_rbrace) :: rest -> List.rev acc, rest
+               | _ ->
+                 raise (Parse_error (pos_of rest,
+                   "expected ',' or '}' in record pattern")))
+            | _ ->
+              raise (Parse_error (pos_of toks,
+                "expected 'field = pat' in record pattern"))
+          in
+          let fpats, rest = parse_fpats [] body_rest in
+          mkp pos (Ast.P_record (full, fpats)), rest
+        | _ ->
+          raise (Parse_error (pos, "expected '{' for record pattern"))
+      end else
+      let arity = match lookup_constr full with Some a -> a | None -> 0 in
+      if arity = 0 then
+        mkp pos (Ast.P_constr (full, None)), rest
+      else begin
+        match rest with
+        | (_, (T_int _ | T_float _ | T_string _ | T_true | T_false
+              | T_underscore | T_lparen | T_ident _)) :: _ ->
+          let sub, rest = pattern rest in
+          mkp pos (Ast.P_constr (full, Some sub)), rest
+        | _ ->
+          mkp pos (Ast.P_constr (full, None)), rest
+      end
     | (pos, T_ident name) :: rest when starts_with_upper name ->
       (* Record pattern:  Name { f1 = pat, f2 = pat, ... } *)
       if Hashtbl.mem records name then begin
@@ -758,7 +799,11 @@ let rec parse_program_internal tokens =
         (* Module-qualified name? If the lhs is a bare `Var "M"` and `M`
            is in `module_names`, treat `M.f` as a single qualified Var
            (and absorb the chain start so subsequent `.` continue as
-           field access on the resolved value). *)
+           field access on the resolved value).
+           Phase 18.1: if the qualified name `M.f` is a known constructor
+           (registered when `module M { type ... }` ran through
+           `prefix_module_decls`), parse as `Ast.Constr` instead, with
+           greedy payload parsing for arity-1 ctors. *)
         let qualified =
           match v.Ast.node with
           | Ast.Var n when Hashtbl.mem module_names n ->
@@ -767,7 +812,50 @@ let rec parse_program_internal tokens =
         in
         (match qualified with
          | Some m ->
-           field_chain (mk pos (Ast.Var (m ^ "." ^ f))) rest
+           let full = m ^ "." ^ f in
+           (* Phase 18.1: also recognize `M.Pt { ... }` as record literal. *)
+           if Hashtbl.mem records full then begin
+             match rest with
+             | (_, T_lbrace) :: body_rest ->
+               let rec parse_fields acc toks =
+                 match toks with
+                 | (_, T_rbrace) :: rest -> List.rev acc, rest
+                 | (_, T_ident fname) :: (_, T_eq) :: rest ->
+                   let e, rest = expr rest in
+                   let acc = (fname, e) :: acc in
+                   (match rest with
+                    | (_, T_comma) :: rest -> parse_fields acc rest
+                    | (_, T_rbrace) :: rest -> List.rev acc, rest
+                    | _ ->
+                      raise (Parse_error (pos_of rest,
+                        "expected ',' or '}' in record literal")))
+                 | _ ->
+                   raise (Parse_error (pos_of toks,
+                     "expected 'field = expr' in record literal"))
+               in
+               let fields, rest = parse_fields [] body_rest in
+               field_chain (mk pos (Ast.Record_lit (full, fields))) rest
+             | _ ->
+               (* No `{` follows — treat as a bare type name reference
+                  (unusual but parseable as Var). *)
+               field_chain (mk pos (Ast.Var full)) rest
+           end
+           else
+           (match lookup_constr full with
+            | Some 0 ->
+              field_chain (mk pos (Ast.Constr (full, None))) rest
+            | Some _ ->
+              (* Arity-1 ctor: greedily parse next atom as payload, mirroring
+                 the unqualified `Constr name arg` syntax. *)
+              (match rest with
+               | (_, (T_int _ | T_float _ | T_string _ | T_ident _ | T_lparen
+                     | T_true | T_false)) :: _ ->
+                 let arg, rest = atom rest in
+                 field_chain (mk pos (Ast.Constr (full, Some arg))) rest
+               | _ ->
+                 field_chain (mk pos (Ast.Constr (full, None))) rest)
+            | None ->
+              field_chain (mk pos (Ast.Var full)) rest)
          | None ->
            field_chain (mk pos (Ast.Field_get (v, f))) rest)
       | _ -> v, toks
@@ -1061,20 +1149,88 @@ let rec parse_program_internal tokens =
     let direct_names =
       List.filter (fun n -> not (String.contains n '.')) names in
     Hashtbl.replace module_bindings m_name direct_names;
-    let rename = List.map (fun n -> (n, m_name ^ "." ^ n)) names in
+    (* Phase 18.1 / DEFERRED §4.1 残: gather type / record / constructor
+       names from this module's Top_type / Top_record / Top_type_alias
+       decls, so we can M-prefix them and rewrite internal references.
+       Backward compat: also keep the bare (unqualified) registration
+       so existing `Status94.label (Err94 "boom")` style usage still
+       works; new code can write `M.Err94` for disambiguation. *)
+    let type_names = ref [] in
+    let record_names = ref [] in
+    let ctor_arities = ref [] in
+    List.iter (fun decl ->
+      match decl with
+      | Ast.Top_type (name, _, variants) ->
+        type_names := name :: !type_names;
+        List.iter (fun (cname, payload) ->
+          ctor_arities := (cname, match payload with None -> 0 | _ -> 1) :: !ctor_arities
+        ) variants
+      | Ast.Top_record (name, _, _) ->
+        record_names := name :: !record_names
+      | Ast.Top_type_alias (name, _, _) ->
+        type_names := name :: !type_names
+      | _ -> ()
+    ) decls;
+    (* Register M-prefixed names in parser-side `constructors` / `records`
+       tables so `M.Foo` parses as Constr / Record_lit. Bare names stay
+       (already registered at parse time of `type` / `record` decls) for
+       backward compat. *)
+    List.iter (fun (cname, arity) ->
+      Hashtbl.replace constructors (m_name ^ "." ^ cname) arity
+    ) !ctor_arities;
+    List.iter (fun rname ->
+      match Hashtbl.find_opt records rname with
+      | Some fields -> Hashtbl.replace records (m_name ^ "." ^ rname) fields
+      | None -> ()
+    ) !record_names;
+    (* Build rename map: bare → M.prefixed. Includes type / record / ctor
+       names (so internal body references get qualified) and the regular
+       let-binding names. *)
+    let symbol_rename =
+      List.map (fun n -> (n, m_name ^ "." ^ n))
+        (!type_names @ !record_names @ List.map fst !ctor_arities)
+    in
+    let rename = symbol_rename @ List.map (fun n -> (n, m_name ^ "." ^ n)) names in
     let lookup n = List.assoc_opt n rename in
-    List.map (function
-      | Ast.Top_let ({ pnode = Ast.P_var n; ploc }, value) ->
-        let new_pat = { Ast.ploc; pnode = Ast.P_var (m_name ^ "." ^ n) } in
-        let new_value = Ast.rename_free_vars lookup value in
-        Ast.Top_let (new_pat, new_value)
-      | Ast.Top_let_rec bindings ->
-        let new_bindings = List.map (fun (n, v) ->
-          (m_name ^ "." ^ n, Ast.rename_free_vars lookup v)
-        ) bindings in
-        Ast.Top_let_rec new_bindings
-      | d -> d
-    ) decls
+    (* Emit Top_ctor_alias / Top_record_alias decls so the typer also
+       knows about the qualified names (parser registers in its own
+       constructors hashtbl, but typer needs its own entry). The bare
+       Top_type / Top_record stays unchanged — typer keeps the canonical
+       under bare name, prefixed is a typer-side alias. *)
+    let alias_decls =
+      List.map (fun (cname, _) ->
+        Ast.Top_ctor_alias (m_name ^ "." ^ cname, cname)
+      ) !ctor_arities
+      @ List.map (fun rname ->
+          Ast.Top_record_alias (m_name ^ "." ^ rname, rname)
+        ) !record_names
+    in
+    let prefixed_decls =
+      List.map (function
+        | Ast.Top_let ({ pnode = Ast.P_var n; ploc }, value) ->
+          let new_pat = { Ast.ploc; pnode = Ast.P_var (m_name ^ "." ^ n) } in
+          let new_value = Ast.rename_free_vars lookup value in
+          Ast.Top_let (new_pat, new_value)
+        | Ast.Top_let_rec bindings ->
+          let new_bindings = List.map (fun (n, v) ->
+            (m_name ^ "." ^ n, Ast.rename_free_vars lookup v)
+          ) bindings in
+          Ast.Top_let_rec new_bindings
+        | d -> d
+      ) decls
+    in
+    (* Order requirement: type / record / type-alias / view / drop decls
+       must be processed FIRST (they register canonical bare names in
+       the typer), THEN the M-prefixed alias decls (which look up the
+       bare name and create the qualified alias), THEN let / let_rec
+       which may reference qualified names in their bodies. *)
+    let is_type_decl = function
+      | Ast.Top_type _ | Ast.Top_record _ | Ast.Top_type_alias _
+      | Ast.Top_view _ | Ast.Top_drop _ | Ast.Top_signature _ -> true
+      | _ -> false
+    in
+    let type_decls, value_decls = List.partition is_type_decl prefixed_decls in
+    type_decls @ alias_decls @ value_decls
   in
   (* Parse a `module M { ... }` body. Only `let` / `let rec` / nested
      `module N { ... }` decls are accepted (type/record at module scope
