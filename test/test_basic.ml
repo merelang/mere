@@ -4267,6 +4267,37 @@ let () =
   check "vec_concat type"
     (Pipeline.type_of "vec_concat")
     "(Vec['b, 'a] -> (Vec['b, 'a] -> Vec['b, 'a]))";
+
+  check "vec_sort: ascending int"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 3; vec_push v 1; vec_push v 4; vec_push v 1; vec_push v 5; \
+          vec_sort v (fn a -> fn b -> a - b); \
+          vec_get v 0 * 10000 + vec_get v 1 * 1000 + vec_get v 2 * 100 \
+            + vec_get v 3 * 10 + vec_get v 4 }") "11345";
+  check "vec_sort: descending via b - a"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 3; vec_push v 1; vec_push v 4; \
+          vec_sort v (fn a -> fn b -> b - a); \
+          vec_get v 0 * 100 + vec_get v 1 * 10 + vec_get v 2 }") "431";
+  check "vec_sort: empty Vec → no-op"
+    (Pipeline.process
+       "let v = vec_new () in let __ = vec_sort v (fn a -> fn b -> a - b) in \
+        (vec_len v : int)") "0";
+  check "vec_sort: single element → identity"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 42; vec_sort v (fn a -> fn b -> a - b); vec_get v 0 }") "42";
+  check "vec_sort: already sorted"
+    (Pipeline.process
+       "let v = vec_new () in \
+        { vec_push v 1; vec_push v 2; vec_push v 3; \
+          vec_sort v (fn a -> fn b -> a - b); \
+          vec_get v 0 * 100 + vec_get v 1 * 10 + vec_get v 2 }") "123";
+  check "vec_sort type"
+    (Pipeline.type_of "vec_sort")
+    "(Vec['b, 'a] -> (('a -> ('a -> int)) -> unit))";
   check "vec: polymorphic — str Vec"
     (Pipeline.process
        "let v = vec_new () in \

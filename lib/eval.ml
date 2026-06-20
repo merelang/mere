@@ -1022,6 +1022,23 @@ let builtin_vec_concat =
         | _ -> failwith "vec_concat: 2nd arg expected Vec")
     | _ -> failwith "vec_concat: 1st arg expected Vec")
 
+(* Phase 19.3: vec_sort — in-place sort with comparator (T -> T -> int).
+   Negative/0/positive convention like strcmp. *)
+let builtin_vec_sort =
+  V_builtin ("vec_sort", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("vec_sort_p1", fun cmp ->
+        let compare_v a b =
+          let inner = !apply_value_ref cmp a in
+          match !apply_value_ref inner b with
+          | V_int n -> n
+          | _ -> failwith "vec_sort: comparator must return int"
+        in
+        Array.sort compare_v !arr;
+        V_unit)
+    | _ -> failwith "vec_sort: expected Vec")
+
 (* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。 *)
 let builtin_vec_filter =
   V_builtin ("vec_filter", fun v ->
@@ -1405,6 +1422,7 @@ let initial_env : env =
     ("vec_set",  ref builtin_vec_set);
     ("vec_reverse", ref builtin_vec_reverse);
     ("vec_concat",  ref builtin_vec_concat);
+    ("vec_sort",    ref builtin_vec_sort);
     ("vec_filter",   ref builtin_vec_filter);
     ("vec_to_list",  ref builtin_vec_to_list);
     ("vec_to_owned", ref builtin_vec_to_owned);

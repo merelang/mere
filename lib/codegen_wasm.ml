@@ -552,7 +552,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_reverse" || name = "vec_concat"
+       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -703,6 +703,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr a_e;
     emit_expr b_e;
     emit_instr "call $mere_vec_concat"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_sort"; _ }, vec_e); _ }, cmp_e) ->
+    (* Phase 19.3: vec_sort v cmp — closure dispatch via call_indirect.
+       In-place insertion sort with comparator returning int. *)
+    vec_used := true;
+    vec_higher_order_used := true;
+    emit_expr vec_e;
+    emit_expr cmp_e;
+    emit_instr "call $mere_vec_sort"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_iter"; _ }, vec_e); _ }, fn_e) ->
     (* Phase 15.5: vec_iter v f *)
     vec_used := true;
@@ -1860,6 +1868,57 @@ let vec_runtime = {|
         (local.set $lo (i32.add (local.get $lo) (i32.const 1)))
         (local.set $hi (i32.sub (local.get $hi) (i32.const 1)))
         (br $lp)))
+    (i32.const 0))
+  ;; Phase 19.3: vec_sort — in-place insertion sort.
+  ;; cmp: closure_T_(closure_T_int). outer_fn(env, a) → inner closure_T_int,
+  ;; inner_fn(inner.env, b) → i32 (negative/0/positive).
+  (func $mere_vec_sort (param $v i32) (param $cmp i32) (result i32)
+    (local $i i32) (local $j i32) (local $len i32) (local $buf i32)
+    (local $outer_env i32) (local $outer_fn i32)
+    (local $key i32) (local $j_val i32)
+    (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32)
+    (local $cmp_res i32)
+    (local.set $len (i32.load offset=4 (local.get $v)))
+    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $outer_env (i32.load offset=0 (local.get $cmp)))
+    (local.set $outer_fn  (i32.load offset=4 (local.get $cmp)))
+    (local.set $i (i32.const 1))
+    (block $end_outer
+      (loop $lp_outer
+        (br_if $end_outer (i32.ge_s (local.get $i) (local.get $len)))
+        (local.set $key (i32.load
+          (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $j (i32.sub (local.get $i) (i32.const 1)))
+        (block $end_inner
+          (loop $lp_inner
+            (br_if $end_inner (i32.lt_s (local.get $j) (i32.const 0)))
+            (local.set $j_val (i32.load
+              (i32.add (local.get $buf) (i32.mul (local.get $j) (i32.const 4)))))
+            (local.set $inner_cl
+              (call_indirect (type $cl)
+                (local.get $outer_env) (local.get $j_val) (local.get $outer_fn)))
+            (local.set $inner_env (i32.load offset=0 (local.get $inner_cl)))
+            (local.set $inner_fn  (i32.load offset=4 (local.get $inner_cl)))
+            (local.set $cmp_res
+              (call_indirect (type $cl)
+                (local.get $inner_env) (local.get $key) (local.get $inner_fn)))
+            (br_if $end_inner (i32.le_s (local.get $cmp_res) (i32.const 0)))
+            ;; shift: data[j+1] = data[j]
+            (i32.store
+              (i32.add (local.get $buf)
+                       (i32.mul (i32.add (local.get $j) (i32.const 1))
+                                (i32.const 4)))
+              (local.get $j_val))
+            (local.set $j (i32.sub (local.get $j) (i32.const 1)))
+            (br $lp_inner)))
+        ;; place key at j+1
+        (i32.store
+          (i32.add (local.get $buf)
+                   (i32.mul (i32.add (local.get $j) (i32.const 1))
+                            (i32.const 4)))
+          (local.get $key))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_outer)))
     (i32.const 0))
   ;; Phase 19.3: vec_concat — new Vec, copy a then b.
   (func $mere_vec_concat (param $a i32) (param $b i32) (result i32)

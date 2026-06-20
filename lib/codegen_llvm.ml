@@ -118,6 +118,9 @@ let vec_iter_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 19.2: map_iter helper instances, keyed by "<K_tag>__<V_tag>". *)
 let map_iter_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
+
+(* Phase 19.3: vec_sort helper instances, keyed by element T tag. *)
+let vec_sort_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_fold_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 15.6: vec_map per-(T, U) and vec_filter per-T helper instances. *)
@@ -1568,7 +1571,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
-       || name = "vec_reverse" || name = "vec_concat"
+       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
        || name = "owned_vec_new" || name = "owned_vec_push"
@@ -1852,6 +1855,22 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call ptr @mere_vec_%s_concat(ptr %s, ptr %s)"
                   r elem_tag av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_sort"; _ }, vec_e); _ }, cmp_e) ->
+    (* Phase 19.3: vec_sort v cmp — per-T helper, in-place insertion sort.
+       comparator: T -> T -> int (curried). *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    if not (Hashtbl.mem vec_sort_instances elem_tag) then
+      Hashtbl.add vec_sort_instances elem_tag elem_ty;
+    let av = emit_expr env vec_e in
+    let cv = emit_expr env cmp_e in
+    let outer_cl = closure_struct_name elem_ty
+      (Ast.TyArrow (elem_ty, Ast.TyInt)) in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_vec_%s_sort(ptr %s, %%%s %s)"
+                  r elem_tag av outer_cl cv);
     r
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
     (* Phase 15.9: strbuf_new () — result type の TyCon arg から region を
@@ -3381,6 +3400,70 @@ let emit_vec_concat_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
+(* Phase 19.3: vec_sort helper per element T — in-place insertion sort.
+   Signature: i32 @mere_vec_<T>_sort(ptr v, %closure_<T>_<closure_<T>_int> cmp) *)
+let emit_vec_sort_helper_llvm (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let c_elem = llvm_ty_of elem_ty in
+  let struct_name = "mere_vec_" ^ tag in
+  let inner_cl = closure_struct_name elem_ty Ast.TyInt in
+  let outer_cl = closure_struct_name elem_ty
+    (Ast.TyArrow (elem_ty, Ast.TyInt)) in
+  String.concat "\n"
+    [ Printf.sprintf "define i32 @mere_vec_%s_sort(ptr %%v, %%%s %%cmp) {"
+        tag outer_cl;
+      "entry:";
+      Printf.sprintf "  %%outer_env = extractvalue %%%s %%cmp, 0" outer_cl;
+      Printf.sprintf "  %%outer_fn = extractvalue %%%s %%cmp, 1" outer_cl;
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      "  br label %outer_check";
+      "outer_check:";
+      "  %i = phi i32 [ 1, %entry ], [ %i_next, %outer_done ]";
+      "  %i_lt_len = icmp slt i32 %i, %len";
+      "  br i1 %i_lt_len, label %outer_body, label %end";
+      "outer_body:";
+      Printf.sprintf "  %%key_slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%key = load %s, ptr %%key_slot" c_elem;
+      "  %j_init = sub i32 %i, 1";
+      "  br label %inner_check";
+      "inner_check:";
+      "  %j = phi i32 [ %j_init, %outer_body ], [ %j_next, %shift ]";
+      "  %j_ge_0 = icmp sge i32 %j, 0";
+      "  br i1 %j_ge_0, label %do_cmp, label %finalize";
+      "do_cmp:";
+      Printf.sprintf "  %%j_slot = getelementptr %s, ptr %%data, i32 %%j" c_elem;
+      Printf.sprintf "  %%j_val = load %s, ptr %%j_slot" c_elem;
+      Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%j_val)"
+        inner_cl c_elem;
+      Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
+      Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
+      Printf.sprintf "  %%cmp_res = call i32 %%inner_fn(ptr %%inner_env, %s %%key)"
+        c_elem;
+      "  %need_shift = icmp sgt i32 %cmp_res, 0";
+      "  br i1 %need_shift, label %shift, label %finalize";
+      "shift:";
+      "  %j_plus_1 = add i32 %j, 1";
+      Printf.sprintf "  %%j1_slot = getelementptr %s, ptr %%data, i32 %%j_plus_1"
+        c_elem;
+      Printf.sprintf "  store %s %%j_val, ptr %%j1_slot" c_elem;
+      "  %j_next = sub i32 %j, 1";
+      "  br label %inner_check";
+      "finalize:";
+      "  %dst_idx = add i32 %j, 1";
+      Printf.sprintf "  %%dst_slot = getelementptr %s, ptr %%data, i32 %%dst_idx"
+        c_elem;
+      Printf.sprintf "  store %s %%key, ptr %%dst_slot" c_elem;
+      "  br label %outer_done";
+      "outer_done:";
+      "  %i_next = add i32 %i, 1";
+      "  br label %outer_check";
+      "end:";
+      "  ret i32 0";
+      "}" ]
+
 (* Phase 15.5: vec_iter helper per element type T.
    Signature: i32 @mere_vec_<T>_iter(ptr v, %closure_<T>_unit cl)
    Emits a basic-block-style loop calling the closure for each element. *)
@@ -4442,6 +4525,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_instances;
   Hashtbl.reset vec_iter_instances;
   Hashtbl.reset map_iter_instances;
+  Hashtbl.reset vec_sort_instances;
   Hashtbl.reset vec_fold_instances;
   Hashtbl.reset vec_map_instances;
   Hashtbl.reset vec_filter_instances;
@@ -4747,6 +4831,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       :: emit_vec_concat_helper_llvm elem_ty
       :: acc) vec_instances []
   in
+  let vec_sort_helpers =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_vec_sort_helper_llvm elem_ty :: acc) vec_sort_instances []
+  in
   let vec_iter_helpers =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_vec_iter_helper_llvm elem_ty :: acc) vec_iter_instances []
@@ -4849,6 +4937,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if vec_reverse_concat_helpers = [] then []
        else vec_reverse_concat_helpers @ [""])
+    @ (if vec_sort_helpers = [] then [] else vec_sort_helpers @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
