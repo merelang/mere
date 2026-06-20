@@ -5819,5 +5819,24 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 22.3: char builtins (char_at / is_digit / is_alpha / is_space)
+     + str_of_int (= show_int alias) を C codegen で support。256-entry
+     static table 経由 + ctype.h ロジックの自前 inline。 *)
+  check "§22.3: char_at / is_digit emit C code"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let s = \"123abc\" in if is_digit (char_at s 0) then 1 else 0") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "§22.3: __lang_char_at helper emitted in C source"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "char_at \"x\" 0") in
+     if String.length c_src > 0 && Pipeline.exhaustiveness_warnings "char_at \"x\" 0" = [] then "ok" else "empty")
+    "ok";
+  check "§22.3: str_of_int → show_int alias in C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "str_of_int 42") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

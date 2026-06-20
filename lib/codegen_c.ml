@@ -800,6 +800,19 @@ let rec emit_expr (e : Ast.expr) : string =
           the needle. Emits a call to the runtime helper. *)
        Printf.sprintf "__lang_str_index_of(%s, %s)"
          (emit_expr h_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
+       (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
+       Printf.sprintf "__lang_char_at(%s, %s)"
+         (emit_expr s_e) (emit_expr arg)
+     | Ast.Var "is_digit" ->
+       Printf.sprintf "__lang_is_digit(%s)" (emit_expr arg)
+     | Ast.Var "is_alpha" ->
+       Printf.sprintf "__lang_is_alpha(%s)" (emit_expr arg)
+     | Ast.Var "is_space" ->
+       Printf.sprintf "__lang_is_space(%s)" (emit_expr arg)
+     | Ast.Var "str_of_int" ->
+       (* Phase 22.3: str_of_int は show_int と同じ。alias として emit。 *)
+       Printf.sprintf "show_int(%s)" (emit_expr arg)
      | Ast.Var "fst" ->
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
@@ -1996,6 +2009,37 @@ let str_concat_helper =
       "  if (n[0] == '\\0') return 0;";
       "  const char* p = strstr(h, n);";
       "  return p == NULL ? -1 : (int)(p - h);";
+      "}";
+      "";
+      (* Phase 22.3: char-string helpers. Mere の char は single-char
+         str として表現される。256-entry static table で per-char
+         pointer を持ち、char_at は table から該当 entry を返す。
+         is_digit / is_alpha / is_space は first byte を ctype.h で判定。 *)
+      "static char __lang_char_table[256][2];";
+      "static int __lang_char_table_init = 0;";
+      "static void __lang_char_table_setup(void) {";
+      "  if (__lang_char_table_init) return;";
+      "  for (int k = 0; k < 256; k++) {";
+      "    __lang_char_table[k][0] = (char)k;";
+      "    __lang_char_table[k][1] = '\\0';";
+      "  }";
+      "  __lang_char_table_init = 1;";
+      "}";
+      "static const char* __lang_char_at(const char* s, int i) {";
+      "  __lang_char_table_setup();";
+      "  return __lang_char_table[(unsigned char)s[i]];";
+      "}";
+      "static int __lang_is_digit(const char* s) {";
+      "  unsigned char c = (unsigned char)s[0];";
+      "  return c >= '0' && c <= '9';";
+      "}";
+      "static int __lang_is_alpha(const char* s) {";
+      "  unsigned char c = (unsigned char)s[0];";
+      "  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');";
+      "}";
+      "static int __lang_is_space(const char* s) {";
+      "  unsigned char c = (unsigned char)s[0];";
+      "  return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r';";
       "}" ]
 
 (* Region runtime: a bump allocator. `region R { body }` initializes a
