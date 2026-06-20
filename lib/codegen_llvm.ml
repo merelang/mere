@@ -1525,10 +1525,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        || name = "map_has" || name = "map_len" then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.3〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "vec_to_list"
-       || name = "len" then
+    if name = "len" then
       unsupported e.Ast.loc
-        (name ^ " (vec_to_list / len are interpreter-only)");
+        (name ^ " as a value (Phase 15.11: len は直接 application のみ対応)");
+    if name = "vec_to_list" then
+      unsupported e.Ast.loc
+        (name ^ " (vec_to_list is interpreter-only)");
     (* If a local binding shadows a top-level fn, prefer it. Otherwise,
        if the name resolves to a known top-level fn, materialize the
        closure value `{ ptr null, ptr @<name>_closure_fn }` inline. *)
@@ -1805,6 +1807,58 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i32 @mere_strbuf_push(ptr %s, ptr %s)"
                   r sv xv);
     r
+  | Ast.App ({ node = Ast.Var "len"; _ }, arg) ->
+    (* Phase 15.11: len ad-hoc dispatch — arg.ty に基づいてコンパイル時に
+       対応する _len ヘルパに routing。 *)
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported arg.Ast.loc "len: missing arg type info"
+    in
+    (match arg_ty with
+     | Ast.TyCon ("Vec", _) ->
+       let t_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       let av = emit_expr env arg in
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf
+                     "  %s = call i32 @mere_vec_%s_len(ptr %s)" r t_tag av);
+       r
+     | Ast.TyCon ("OwnedVec", _) ->
+       let t_tag = owned_vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       let av = emit_expr env arg in
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf
+                     "  %s = call i32 @mere_owned_vec_%s_len(ptr %s)" r t_tag av);
+       r
+     | Ast.TyCon ("StrBuf", _) ->
+       strbuf_used := true;
+       let av = emit_expr env arg in
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf
+                     "  %s = call i32 @mere_strbuf_len(ptr %s)" r av);
+       r
+     | Ast.TyCon ("Map", _) ->
+       let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+       let av = emit_expr env arg in
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf
+                     "  %s = call i32 @mere_map_%s_%s_len(ptr %s)"
+                     r k_tag v_tag av);
+       r
+     | Ast.TyStr ->
+       let av = emit_expr env arg in
+       let raw = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" raw av);
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r raw);
+       r
+     | Ast.TyTuple ts ->
+       (* Static arity. Emit arg for side effects (but tuples have none). *)
+       let _ = emit_expr env arg in
+       string_of_int (List.length ts)
+     | _ ->
+       unsupported e.Ast.loc
+         "len: arg type has no codegen-defined length")
   | Ast.App ({ node = Ast.Var "map_new"; _ }, _arg) ->
     (* Phase 15.10: map_new () — region と (K, V) を result type から取り出す。 *)
     let (k_tag, v_tag) = map_kv_tags_of e.Ast.ty e.Ast.loc in
