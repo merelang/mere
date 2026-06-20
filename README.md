@@ -1,5 +1,7 @@
 # Mere
 
+> *Make Explicit Region-bound Effects.*
+
 新プログラミング言語 **Mere** (古英語の「湖」、4 文字、region メタファー)
 の OCaml 実装。ML 系 mini lang として実用域に到達し、メモリモデル
 (region/view/Trivial[R])・エフェクトシステム (cap passing + 借用注釈
