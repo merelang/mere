@@ -611,6 +611,14 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
          name value_c name name body_c
+     | Ast.P_wild | Ast.P_unit ->
+       (* Phase 21.1 (DEFERRED §1.7) fix: `let _ = E in B` / `let () = E in B`
+          — evaluate E for side effects then continue with B. Block sequence
+          `{ a; b }` parses to `let _ = a in b`, so this also unblocks
+          stmt-sequence form in arms / fn bodies. *)
+       let value_c = emit_expr value in
+       let body_c = emit_expr body in
+       Printf.sprintf "({ (void)(%s); %s; })" value_c body_c
      | _ -> unsupported pat.ploc "non-variable let pattern")
   (* Unsupported nodes *)
   | Ast.Float_lit _   -> unsupported e.loc "float literals"
@@ -1631,7 +1639,16 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       if ty_is_concrete fun_ty then fun_ty
       else
         match find_concrete_arrow s.sname root with
-        | Some t -> t
+        | Some t ->
+          (* Phase 21.1 (DEFERRED §1.7) fix: unify the binding-site Fun.ty
+             with the concrete use-site type. This links the body's tyvars
+             (which share identity with fun_ty's tyvars from infer under
+             env_rec) to concrete types, so emit_expr can resolve every
+             `.ty` annotation inside the body without hitting "'a".
+             Same trick as resolve_vec_let_types. *)
+          (try Typer.unify Loc.dummy fun_ty t
+           with _ -> ());
+          t
         | None ->
           raise (Codegen_error (s.sfun.Ast.loc,
             Printf.sprintf

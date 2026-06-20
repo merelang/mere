@@ -470,7 +470,13 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       if ty_is_concrete fun_ty then fun_ty
       else
         match find_concrete_arrow s.sname root with
-        | Some t -> t
+        | Some t ->
+          (* Phase 21.1 (DEFERRED §1.7) fix: unify binding-site Fun.ty
+             with the concrete use-site type so the body's tyvars get
+             linked. See codegen_c.ml for design notes. *)
+          (try Typer.unify Loc.dummy fun_ty t
+           with _ -> ());
+          t
         | None ->
           raise (Codegen_error (s.sfun.Ast.loc,
             Printf.sprintf
