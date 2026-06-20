@@ -1,0 +1,62 @@
+// Phase 19.1 + 19.2 で追加した str_split / map_iter / Map[R, str, int]
+// を組み合わせた小さな word frequency counter。
+//
+// 目的: Phase 16 第 1 (todo_app) と同じ路線で「新規 primitive を実用例
+// に投入して摩擦を炙り出す」。Phase 19 (stdlib 充実) の中盤検証。
+//
+// **実行モード**: interpreter のみ (str_split / list_iter / 多相
+// let-rec が現状 C/LLVM/Wasm codegen 未対応、Phase 19.x 続編で対応予定)
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/word_freq.mere
+//   # 期待出力 (順序は Map iter の実装依存、insertion order に近い):
+//   #   the: 3
+//   #   quick: 2
+//   #   brown: 1
+//   #   fox: 2
+//   #   jumps: 1 / over: 1 / lazy: 1 / dog: 1
+//
+// 摩擦点 (Phase 19 で発掘されたもの):
+//   #1 (★高): list_iter / list_fold が builtin / stdlib に無い
+//      → 自前 recursive fn を書くしかない。prelude (Phase 19.4) で
+//        書ければ users 全員が共有できる
+//   #2 (★高): str_split / list_iter のような **多相 user 定義 let-rec を
+//      使うと codegen が "unsupported: 'a"** で落ちる。type annotation を
+//      付けても "non-variable let pattern" (block seq の wild let) で
+//      別エラー。実用的には interpreter 専用。Phase 19.x 続編で
+//      monomorphization 拡張が必要
+//   #3 (中): 頻度降順表示の手段が無い (vec_sort 未実装、Phase 19.3)
+//      → 現状は Map iter のままの順 (= Hashtbl bucket order、unspecified)
+//   #4 (中): str_split が `str list` を返すので、`type 'a list` を
+//      毎回 declare する必要がある (prelude あれば 1 回で済む)
+//   #5 (低): `if map_has m w then ... else ...` が冗長
+//      → `map_update` / `map_inc` のような higher-level helper が欲しい
+//   #6 (低): word count 表示で `show v` (int) と str を `++` するのが
+//      慣れない。`fmt!("...")` 風の format builtin があると楽
+
+type 'a list = Nil | Cons of 'a * 'a list;
+
+// 摩擦点 #1: list 用の汎用 iter が無いので自前で。
+let rec list_iter = fn xs -> fn f ->
+  match xs with
+  | Nil -> ()
+  | Cons (h, t) -> { f h; list_iter t f }
+in
+
+let text = "the quick brown fox jumps over the lazy dog the quick fox" in
+
+region R {
+  let m = map_new () in
+  let words = str_split text " " in
+
+  // 各 word を Map に count up。摩擦点 #4 の if-else パターン。
+  let __ = list_iter words (fn w ->
+    if map_has m w then
+      map_set m w (map_get m w + 1)
+    else
+      map_set m w 1) in
+
+  // Map をそのまま iter で表示。摩擦点 #2: 順序保証なし。
+  map_iter m (fn k -> fn v ->
+    print (k ++ ": " ++ show v))
+}
