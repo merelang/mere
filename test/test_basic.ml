@@ -3154,7 +3154,7 @@ let () =
     (llvm_with_decls
       "type 'a LCgOpt = LCgN | LCgS of 'a;\n\
        match LCgS 42 with | LCgN -> 0 | LCgS n -> n")
-    "%LCgOpt_int = type { i32, i32 }";
+    "%LCgOpt_int = type { i32, ptr }";  (* Phase 25.0: boxed payload *)
   assert_contains "llvm: poly variant Constr uses mono name"
     (llvm_with_decls
       "type 'a LCgOpt2 = LCgN2 | LCgS2 of 'a;\n\
@@ -3197,7 +3197,7 @@ let () =
     (llvm_with_decls
       "type LCgIList = LCgINil | LCgICons of int * LCgIList;\n\
        LCgICons (1, LCgINil)")
-    "%LCgIList_node = type { i32, %tuple_int_LCgIList }";
+    "%LCgIList_node = type { i32, ptr }";  (* Phase 25.0: boxed payload *)
   assert_contains "llvm: recursive Constr allocs via region"
     (llvm_with_decls
       "type LCgIList2 = LCgINil2 | LCgICons2 of int * LCgIList2;\n\
@@ -3215,7 +3215,7 @@ let () =
          | LCgNil -> 0\n\
          | LCgCons (h, t) -> h + sum t\n\
        in sum (LCgCons (1, LCgCons (2, LCgNil)))")
-    "%LCgList_int_node = type { i32, %tuple_int_LCgList_int }";
+    "%LCgList_int_node = type { i32, ptr }";  (* Phase 25.0: boxed payload *)
   assert_contains "llvm: P_tuple sub-pattern extracts via extractvalue"
     (llvm_with_decls
       "type LCgIList4 = LCgINil4 | LCgICons4 of int * LCgIList4;\n\

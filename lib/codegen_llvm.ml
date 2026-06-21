@@ -849,79 +849,55 @@ let variant_shape (name : string) : (string * Ast.ty option) list =
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unknown variant type `%s` at LLVM codegen" name))
 
-(* Decide the single payload type for a variant (Phase 5.6 MVP only
-   handles all-nullary or single-payload-type). Returns None if all
-   constructors are nullary. *)
-let variant_payload_ty (name : string) : Ast.ty option =
+(* Phase 25.0: variant payload is now BOXED (always ptr).
+   Each constructor's payload is heap-allocated in the region and the
+   variant struct stores `{ i32 tag, ptr payload }`. This removes the
+   Phase 5 MVP restriction that all constructors must share a payload
+   type — different-typed payloads now work because they're stored
+   uniformly as pointers (with per-ctor bitcast at Constr / Match). *)
+let variant_has_any_payload (name : string) : bool =
   let vs = variant_shape name in
-  let payloads =
-    List.filter_map (fun (_, p) -> p) vs
-  in
-  match payloads with
-  | [] -> None
-  | first :: rest ->
-    let first_tag = ty_tag (Ast.walk first) in
-    if List.for_all (fun p -> ty_tag (Ast.walk p) = first_tag) rest then
-      Some first
-    else
-      raise (Codegen_error (Loc.dummy,
-        Printf.sprintf
-          "variant `%s` has constructors with different payload types — \
-           Phase 5 MVP needs all payloads to be the same type" name))
+  List.exists (fun (_, p) -> p <> None) vs
 
 let emit_variant_typedef (name : string) : string =
   let vs = variant_shape name in
   List.iteri (fun i (cname, _) ->
     Hashtbl.replace variant_tags cname i) vs;
-  if is_recursive_variant_name name then begin
-    (* Recursive: emit `%name_node = type { i32, T }` — the on-heap
-       node. The "value" of the variant at this point is `ptr` (handled
-       by llvm_ty_of). *)
-    let payload =
-      match variant_payload_ty name with
-      | None -> ""
-      | Some t -> Printf.sprintf ", %s" (llvm_ty_of t)
-    in
-    Printf.sprintf "%%%s_node = type { i32%s }" name payload
-  end
+  let has_payload = variant_has_any_payload name in
+  if is_recursive_variant_name name then
+    if has_payload then Printf.sprintf "%%%s_node = type { i32, ptr }" name
+    else Printf.sprintf "%%%s_node = type { i32 }" name
   else
-    match variant_payload_ty name with
-    | None -> Printf.sprintf "%%%s = type { i32 }" name
-    | Some t -> Printf.sprintf "%%%s = type { i32, %s }" name (llvm_ty_of t)
+    if has_payload then Printf.sprintf "%%%s = type { i32, ptr }" name
+    else Printf.sprintf "%%%s = type { i32 }" name
 
 (* Variant payload type for an already-substituted variant list (used by
    mono-instance codegen, where we've already applied param→arg subst). *)
-let variant_payload_ty_of (variants : (string * Ast.ty option) list)
-    : Ast.ty option =
-  let payloads = List.filter_map (fun (_, p) -> p) variants in
-  match payloads with
-  | [] -> None
-  | first :: rest ->
-    let first_tag = ty_tag (Ast.walk first) in
-    if List.for_all (fun p -> ty_tag (Ast.walk p) = first_tag) rest then
-      Some first
-    else
-      raise (Codegen_error (Loc.dummy,
-        "variant has constructors with different payload types — \
-         Phase 5 MVP needs all payloads to be the same type"))
+let variant_has_any_payload_of (variants : (string * Ast.ty option) list)
+    : bool =
+  List.exists (fun (_, p) -> p <> None) variants
+
+(* Phase 25.0: per-constructor payload type lookup (replaces the shared
+   variant_payload_ty / variant_payload_ty_of). The boxed-payload
+   representation lets each constructor have its own type, accessed via
+   bitcast at Constr / Match. *)
+let ctor_payload_ty (cname : string) : Ast.ty option =
+  match Hashtbl.find_opt Typer.constructors cname with
+  | Some info -> info.Typer.arg
+  | None -> None
 
 (* Specialized typedef for a polymorphic variant instance. *)
 let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : string =
   let mono_name = mono_variant_name variant_name args in
   let (params, variants) = Hashtbl.find polymorphic_variants variant_name in
   let svariants = subst_variants params args variants in
-  if is_recursive_variant_name mono_name then begin
-    let payload =
-      match variant_payload_ty_of svariants with
-      | None -> ""
-      | Some t -> Printf.sprintf ", %s" (llvm_ty_of t)
-    in
-    Printf.sprintf "%%%s_node = type { i32%s }" mono_name payload
-  end
+  let has_payload = variant_has_any_payload_of svariants in
+  if is_recursive_variant_name mono_name then
+    if has_payload then Printf.sprintf "%%%s_node = type { i32, ptr }" mono_name
+    else Printf.sprintf "%%%s_node = type { i32 }" mono_name
   else
-    match variant_payload_ty_of svariants with
-    | None -> Printf.sprintf "%%%s = type { i32 }" mono_name
-    | Some t -> Printf.sprintf "%%%s = type { i32, %s }" mono_name (llvm_ty_of t)
+    if has_payload then Printf.sprintf "%%%s = type { i32, ptr }" mono_name
+    else Printf.sprintf "%%%s = type { i32 }" mono_name
 
 (* Specialized typedef for a polymorphic record instance. *)
 let emit_mono_record_typedef (record_name : string) (args : Ast.ty list) : string =
@@ -2637,7 +2613,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Some t -> t
       | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
     in
-    let struct_name, payload_ty =
+    let struct_name =
       if Hashtbl.mem polymorphic_variants type_name then begin
         let args =
           match e.Ast.ty with
@@ -2648,16 +2624,56 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                       "Constr: type info missing concrete args")
           | None -> unsupported e.Ast.loc "Constr: missing inferred type"
         in
-        let mono = mono_variant_name type_name args in
-        let (params, variants) = Hashtbl.find polymorphic_variants type_name in
-        let sv = subst_variants params args variants in
-        (mono, variant_payload_ty_of sv)
+        mono_variant_name type_name args
       end else
-        (type_name, variant_payload_ty type_name)
+        type_name
+    in
+    (* Phase 25.0: per-ctor payload type. For poly variants, substitute
+       type params with concrete args (computed from e.Ast.ty above). *)
+    let ctor_pty =
+      match info.Typer.arg with
+      | None -> None
+      | Some t ->
+        if Hashtbl.mem polymorphic_variants type_name then begin
+          let args =
+            match e.Ast.ty with
+            | Some et ->
+              (match Ast.walk et with
+               | Ast.TyCon (n, ts) when n = type_name -> List.map Ast.walk ts
+               | _ -> [])
+            | None -> []
+          in
+          let (params, _) = Hashtbl.find polymorphic_variants type_name in
+          let mapping = List.combine params args in
+          Some (Ast.walk (subst_params mapping t))
+        end
+        else Some (Ast.walk t)
+    in
+    (* Box the payload (if any) into a region-allocated ptr. *)
+    let box_payload () =
+      match arg_opt, ctor_pty with
+      | None, _ -> None
+      | Some arg, Some pty ->
+        let av = emit_expr env arg in
+        let pty_llvm = llvm_ty_of pty in
+        (* alloc + store + return ptr *)
+        let size_p = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
+                      size_p pty_llvm);
+        let size = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
+        let p = fresh_reg () in
+        emit_instr (Printf.sprintf
+                      "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                      p size);
+        emit_instr (Printf.sprintf "  store %s %s, ptr %s" pty_llvm av p);
+        Some p
+      | Some _, None ->
+        unsupported e.Ast.loc
+          (Printf.sprintf "constructor `%s` has payload but type info missing payload type"
+             cname)
     in
     if is_recursive_variant_name struct_name then begin
-      (* Recursive variant: allocate a node in the default region, write
-         tag (+ optional payload) via getelementptr + store, return ptr. *)
       let node_ty = "%" ^ struct_name ^ "_node" in
       let size_p = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
@@ -2672,39 +2688,26 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
                     tag_p node_ty p);
       emit_instr (Printf.sprintf "  store i32 %d, ptr %s" tag tag_p);
-      (match arg_opt, payload_ty with
-       | None, _ -> ()
-       | Some arg, Some pty ->
-         let av = emit_expr env arg in
+      (match box_payload () with
+       | None -> ()
+       | Some boxed ->
          let pl_p = fresh_reg () in
          emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
                        pl_p node_ty p);
-         emit_instr (Printf.sprintf "  store %s %s, ptr %s"
-                       (llvm_ty_of pty) av pl_p)
-       | Some _, None ->
-         unsupported e.Ast.loc
-           (Printf.sprintf
-              "constructor `%s` has payload but variant lowered as nullary-only"
-              cname));
+         emit_instr (Printf.sprintf "  store ptr %s, ptr %s" boxed pl_p));
       p
     end
     else begin
       let r0 = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, i32 %d, 0"
                     r0 struct_name tag);
-      match arg_opt, payload_ty with
-      | None, _ -> r0
-      | Some arg, Some pty ->
-        let av = emit_expr env arg in
+      match box_payload () with
+      | None -> r0
+      | Some boxed ->
         let r1 = fresh_reg () in
-        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, 1"
-                      r1 struct_name r0 (llvm_ty_of pty) av);
+        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr %s, 1"
+                      r1 struct_name r0 boxed);
         r1
-      | Some _, None ->
-        unsupported e.Ast.loc
-          (Printf.sprintf
-             "constructor `%s` has payload but variant lowered as nullary-only"
-             cname)
     end
   | Ast.Match (scrut, arms) ->
     let scrut_ty =
@@ -2828,15 +2831,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
         in
         let type_name = info.Typer.type_name in
-        let struct_name, payload_ty =
+        let struct_name =
           match Ast.walk v_ty with
           | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
-            let args = List.map Ast.walk args in
-            let mono = mono_variant_name n args in
-            let (params, variants) = Hashtbl.find polymorphic_variants n in
-            let sv = subst_variants params args variants in
-            (mono, variant_payload_ty_of sv)
-          | _ -> (type_name, variant_payload_ty type_name)
+            mono_variant_name n (List.map Ast.walk args)
+          | _ -> type_name
+        in
+        (* Phase 25.0: per-ctor payload type. For poly variants, walk
+           the scrutinee type to extract concrete args and substitute. *)
+        let ctor_pty =
+          match info.Typer.arg with
+          | None -> None
+          | Some t ->
+            (match Ast.walk v_ty with
+             | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+               let args = List.map Ast.walk args in
+               let (params, _) = Hashtbl.find polymorphic_variants n in
+               let mapping = List.combine params args in
+               Some (Ast.walk (subst_params mapping t))
+             | _ -> Some (Ast.walk t))
         in
         let recursive = is_recursive_variant_name struct_name in
         let node_ty = "%" ^ struct_name ^ "_node" in
@@ -2856,24 +2869,29 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                         tag_reg struct_name v_reg);
         let tag_cond = fresh_reg () in
         emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" tag_cond tag_reg tag);
-        (match sub, payload_ty with
+        (match sub, ctor_pty with
          | None, _ -> (tag_cond, [], [])
          | Some sub_pat, Some pty ->
-           let payload_reg = fresh_reg () in
+           (* Phase 25.0: payload is boxed (ptr). Load the ptr, then
+              dereference to get the payload value. *)
+           let ptr_reg = fresh_reg () in
            if recursive then begin
              let p = fresh_reg () in
              emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
                            p node_ty v_reg);
-             emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
-                           payload_reg (llvm_ty_of pty) p)
+             emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" ptr_reg p)
            end else
              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
-                           payload_reg struct_name v_reg);
+                           ptr_reg struct_name v_reg);
+           (* Load the actual payload value from the boxed ptr. *)
+           let payload_reg = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                         payload_reg (llvm_ty_of pty) ptr_reg);
            let (c, bs, tys) = compile_pat sub_pat payload_reg pty in
            (and_cond tag_cond c, bs, tys)
          | Some _, None ->
            unsupported pat.Ast.ploc
-             "pattern has payload but variant has no payload type")
+             "pattern has payload but constructor has no payload type")
       | Ast.P_or _ ->
         unsupported pat.Ast.ploc "P_or should have been flattened"
     in
