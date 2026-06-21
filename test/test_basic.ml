@@ -6389,6 +6389,40 @@ let () =
      if has "static int total;" && has "total = 42;" then "globalized"
      else "not-globalized")
     "globalized";
+  check "§30.2: LLVM codegen — top-level let referenced in fn body becomes @global"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let total = 42;\n\
+        let check = fn (n: int) -> total + n;\n\
+        check 100") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "@total = internal global" && has "store i32 " && has ", ptr @total" then "globalized"
+     else "not-globalized")
+    "globalized";
+  check "§30.2: Wasm codegen — top-level let referenced in fn body becomes (global)"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let total = 42;\n\
+        let check = fn (n: int) -> total + n;\n\
+        check 100") in
+     let nlen = String.length wat in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "(global $total (mut i32)" && has "global.set $total" then "globalized"
+     else "not-globalized")
+    "globalized";
 
   (* Phase 30.1 (DEFERRED §1.11 fix): closure 内で captured 名を let で
      shadow する時、body 内の Var 参照は env access ではなく local を見る。

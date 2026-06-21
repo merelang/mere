@@ -89,6 +89,12 @@ type fn_decl = {
 
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 30.2c (DEFERRED §1.10 fix, Wasm): top-level 非-fn let の名前を保持。
+   Wasm では値は全て i32 (literal int / ptr to linear memory) なので
+   (global $<name> (mut i32) (i32.const 0)) として宣言、main 開始時に
+   `global.set` で初期化。emit_expr Var "name" は `global.get $<name>`。 *)
+let top_globals_wasm : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 15.4: Vec[R, T] runtime used flag. All Mere values lower to a
    4-byte i32 in Wasm (scalars are direct, structured types are linear-
    memory offsets), so a single $mere_vec_* runtime handles every element
@@ -955,6 +961,9 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "i32.const %d" idx);
        emit_instr "i32.store offset=4";
        emit_instr (Printf.sprintf "local.get %d" base)
+     | None when Hashtbl.mem top_globals_wasm name ->
+       (* Phase 30.2c: top-level non-fn let as a Wasm global *)
+       emit_instr (Printf.sprintf "global.get $%s" name)
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
@@ -3872,6 +3881,37 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   resolve_vec_let_types main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  (* Phase 30.2c (DEFERRED §1.10): extract top-level non-fn let が skels の
+     fn body で参照されるものを Wasm `(global $name (mut i32))` にする。 *)
+  let fvs_used_in_skels_wasm =
+    List.fold_left (fun acc s ->
+      let fvs = free_vars s.sbody [s.sparam] in
+      List.sort_uniq compare (fvs @ acc))
+      [] skels
+  in
+  let needs_global_wasm name = List.mem name fvs_used_in_skels_wasm in
+  let top_globals_list, body_expr =
+    let rec go e =
+      match e.Ast.node with
+      | Ast.Let (pat, value, rest) ->
+        (match pat.Ast.pnode with
+         | Ast.P_var name when needs_global_wasm name ->
+           (match value.Ast.node with
+            | Ast.Fun _ ->
+              let gs, rest' = go rest in
+              gs, { e with Ast.node = Ast.Let (pat, value, rest') }
+            | _ ->
+              let gs, rest' = go rest in
+              (name, value) :: gs, rest')
+         | _ ->
+           let gs, rest' = go rest in
+           gs, { e with Ast.node = Ast.Let (pat, value, rest') })
+      | _ -> [], e
+    in
+    go body_expr
+  in
+  Hashtbl.reset top_globals_wasm;
+  List.iter (fun (n, _) -> Hashtbl.add top_globals_wasm n ()) top_globals_list;
   let fns = resolve_fn_types skels main_expr in
   (* Phase 26.3 (port of LLVM Phase 25.7): dedupe by name, keeping the
      LAST occurrence — when user defines a name that's also in stdlib
@@ -3916,6 +3956,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   (* Reset counters for the main body. *)
   reset ();
+  (* Phase 30.2c: initialize top-level globals BEFORE the main body. *)
+  List.iter (fun (name, value_expr) ->
+    emit_expr value_expr;
+    emit_instr (Printf.sprintf "global.set $%s" name))
+    top_globals_list;
   emit_expr body_expr;
   (* Phase 27.2: print main's result to stdout via $puts so wasm runtime
      output matches interp's `Pipeline.process s |> print_endline`. The
@@ -4079,6 +4124,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         inc_prefix_off rec_prefix_off eq_off rec_inner inc_idx rec_outer
     end
   in
+  (* Phase 30.2c: declare top-level non-fn lets as Wasm globals (mut i32).
+     All Mere values are i32 in Wasm (literal int or ptr into linear memory),
+     so a single uniform i32 global per let works. *)
+  let top_globals_section =
+    if top_globals_list = [] then ""
+    else
+      String.concat "\n"
+        (List.map (fun (name, _) ->
+          Printf.sprintf "  (global $%s (mut i32) (i32.const 0))" name)
+          top_globals_list) ^ "\n"
+  in
   let fn_section =
     let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ show_fn_defs in
     let all =
@@ -4230,10 +4286,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     file_io_imports
     table_section bump_init char_table_offset
+    top_globals_section
     data_section runtime_helpers
     list_str_runtime_section
     vec_runtime_section

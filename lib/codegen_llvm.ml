@@ -423,6 +423,10 @@ type fn_decl = {
 (* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 30.2b (DEFERRED §1.10 fix, LLVM): top-level 非-fn let の名前と型を
+   保持。emit_expr Var "name" は @name を load する。 *)
+let top_globals_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 25.5: per-instantiation specialization (LLVM port of Phase 23.3).
    If a poly fn is called at 2+ distinct concrete arrow types, it's emitted
    once per instantiation with a mangled name (`base__T1__T2__...`).
@@ -2020,6 +2024,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s_closure_fn, 1"
                      r1 cname r0 dispatch_name);
        r1
+     | None when Hashtbl.mem top_globals_llvm name ->
+       (* Phase 30.2b: top-level non-fn let は file-scope global @name に
+          初期化済。Load して register に。 *)
+       let ty = Hashtbl.find top_globals_llvm name in
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) name);
+       r
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
@@ -4041,6 +4052,13 @@ let runtime_decls =
       "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
       "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
       "@__lang_fail_jmpbuf_set = global i32 0" ]
+(* Phase 30.2b: top-level non-fn let を @name LLVM global として宣言。
+   各 entry を `@name = internal global <type> zeroinitializer` で emit。
+   main 開始時に store で初期化される。 *)
+let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string list =
+  List.map (fun (name, _value, ty) ->
+    Printf.sprintf "@%s = internal global %s zeroinitializer"
+      name (llvm_ty_of ty)) lst
 
 (* Region runtime — mirrors codegen_c's region_runtime_helpers but
    expressed in LLVM IR. Uses an 8-byte aligned bump-pointer allocator.
@@ -6088,6 +6106,41 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  (* Phase 30.2b (DEFERRED §1.10): extract top-level non-fn let が skels の
+     fn body から参照されるものを @name LLVM global にする。referenced され
+     ないものは body 内 let-in のまま (= alloca / register)。 *)
+  let fvs_used_in_skels_llvm =
+    List.fold_left (fun acc s ->
+      let fvs = free_vars s.sbody [s.sparam] in
+      List.sort_uniq compare (fvs @ acc))
+      [] skels
+  in
+  let needs_global_llvm name = List.mem name fvs_used_in_skels_llvm in
+  let top_globals_list, body_expr =
+    let rec go e =
+      match e.Ast.node with
+      | Ast.Let (pat, value, rest) ->
+        (match pat.Ast.pnode with
+         | Ast.P_var name when needs_global_llvm name ->
+           (match value.Ast.node with
+            | Ast.Fun _ ->
+              let gs, rest' = go rest in
+              gs, { e with Ast.node = Ast.Let (pat, value, rest') }
+            | _ ->
+              let ty = match value.Ast.ty with
+                | Some t -> Ast.walk t | None -> Ast.TyInt
+              in
+              let gs, rest' = go rest in
+              (name, value, ty) :: gs, rest')
+         | _ ->
+           let gs, rest' = go rest in
+           gs, { e with Ast.node = Ast.Let (pat, value, rest') })
+      | _ -> [], e
+    in
+    go body_expr
+  in
+  Hashtbl.reset top_globals_llvm;
+  List.iter (fun (n, _, ty) -> Hashtbl.add top_globals_llvm n ty) top_globals_list;
   let fns = resolve_fn_types skels main_expr in
   (* Phase 25.7: dedupe by name, keeping the LAST occurrence — when user
      defines a name (e.g. `let rec list_rev_into = ...`) that's also in the
@@ -6225,6 +6278,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";
+  (* Phase 30.2b: initialize top-level globals BEFORE the rest of main. *)
+  List.iter (fun (name, value_expr, ty) ->
+    let init_r = emit_expr [] value_expr in
+    emit_instr
+      (Printf.sprintf "  store %s %s, ptr @%s"
+         (llvm_ty_of ty) init_r name))
+    top_globals_list;
   let r = emit_expr [] body_expr in
   (* Optional printf of main result. *)
   let print_lines =
@@ -6425,6 +6485,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_filter_helpers = [] then [] else vec_filter_helpers @ [""])
     @ (if vec_to_owned_helpers = [] then [] else vec_to_owned_helpers @ [""])
     @ (if owned_vec_to_vec_helpers = [] then [] else owned_vec_to_vec_helpers @ [""])
+    @ (if top_globals_list = [] then []
+       else "; Phase 30.2b: top-level non-fn let values as LLVM globals"
+            :: emit_top_globals_llvm top_globals_list @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if lifted_defs = [] then [] else lifted_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
