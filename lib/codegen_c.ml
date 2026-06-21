@@ -131,6 +131,12 @@ let strbuf_used = ref false
 let logger_used = ref false
 let metrics_used = ref false
 
+(* Phase 24.3: str_split / str_join C codegen usage flags. Emit the
+   runtime helpers (which reference list_str_node) AFTER the mono variant
+   bodies. *)
+let str_split_used = ref false
+let str_join_used = ref false
+
 (* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key は int / str
    のみサポート、value は codegen の任意 concrete 型。線形スキャン。
    キーは ty_tag、value は ty_tag で `mere_map_<K_tag>_<V_tag>` を
@@ -887,6 +893,16 @@ let rec emit_expr (e : Ast.expr) : string =
           the needle. Emits a call to the runtime helper. *)
        Printf.sprintf "__lang_str_index_of(%s, %s)"
          (emit_expr h_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_split"; _ }, s_e) ->
+       (* Phase 24.3: str_split s delim — curried. Returns list_str. *)
+       str_split_used := true;
+       Printf.sprintf "__lang_str_split(%s, %s)"
+         (emit_expr s_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_join"; _ }, sep_e) ->
+       (* Phase 24.3: str_join sep xs — curried. xs : str list. *)
+       str_join_used := true;
+       Printf.sprintf "__lang_str_join(%s, %s)"
+         (emit_expr sep_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
        (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
        Printf.sprintf "__lang_char_at(%s, %s)"
@@ -2800,6 +2816,95 @@ let metrics_runtime =
       "  };";
       "}" ]
 
+(* Phase 24.3: str_split / str_join helpers.
+   list_str = list_str_node* (mono variant typedef、prelude の type 'a list
+   = Nil | Cons of 'a * 'a list が 'str に instantiate されたもの)。
+   tag 0 = Nil、tag 1 = Cons (typer の register_type が source 順で割当)。 *)
+let str_list_helpers =
+  String.concat "\n"
+    [ "/* Phase 24.3: str_split builds a list_str by tokenizing s by delim. */";
+      "static list_str __lang_str_split(const char* s, const char* delim) {";
+      "  size_t slen = strlen(s);";
+      "  size_t dlen = strlen(delim);";
+      "  list_str nil_node = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "  nil_node->tag = 0;";
+      "  if (dlen == 0) {";
+      "    /* empty delim: 全文字列を 1 element として返す (interp と同様) */";
+      "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    cons->tag = 1;";
+      "    cons->payload.Cons.f0 = s;";
+      "    cons->payload.Cons.f1 = nil_node;";
+      "    return cons;";
+      "  }";
+      "  /* count tokens */";
+      "  size_t n = 1;";
+      "  for (size_t i = 0; i + dlen <= slen; ) {";
+      "    if (memcmp(s + i, delim, dlen) == 0) { n++; i += dlen; }";
+      "    else i++;";
+      "  }";
+      "  /* allocate cons cells */";
+      "  list_str* cells = (list_str*)__lang_region_alloc(&__lang_default_region, n * sizeof(list_str));";
+      "  for (size_t k = 0; k < n; k++) {";
+      "    cells[k] = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    cells[k]->tag = 1;";
+      "  }";
+      "  /* fill tokens + link */";
+      "  size_t start = 0, idx = 0;";
+      "  for (size_t i = 0; i + dlen <= slen; ) {";
+      "    if (memcmp(s + i, delim, dlen) == 0) {";
+      "      size_t tlen = i - start;";
+      "      char* tok = (char*)__lang_region_alloc(&__lang_default_region, tlen + 1);";
+      "      memcpy(tok, s + start, tlen);";
+      "      tok[tlen] = '\\0';";
+      "      cells[idx]->payload.Cons.f0 = tok;";
+      "      cells[idx]->payload.Cons.f1 = cells[idx + 1];";
+      "      idx++;";
+      "      start = i + dlen;";
+      "      i = start;";
+      "    } else i++;";
+      "  }";
+      "  /* last token */";
+      "  size_t tlen = slen - start;";
+      "  char* tok = (char*)__lang_region_alloc(&__lang_default_region, tlen + 1);";
+      "  memcpy(tok, s + start, tlen);";
+      "  tok[tlen] = '\\0';";
+      "  cells[idx]->payload.Cons.f0 = tok;";
+      "  cells[idx]->payload.Cons.f1 = nil_node;";
+      "  return cells[0];";
+      "}";
+      "";
+      "/* Phase 24.3: str_join sep xs — concat list_str elements with sep. */";
+      "static const char* __lang_str_join(const char* sep, list_str xs) {";
+      "  if (xs->tag == 0) return \"\";";
+      "  size_t seplen = strlen(sep);";
+      "  size_t total = 0;";
+      "  int first = 1;";
+      "  list_str cur = xs;";
+      "  while (cur->tag == 1) {";
+      "    if (!first) total += seplen;";
+      "    total += strlen(cur->payload.Cons.f0);";
+      "    first = 0;";
+      "    cur = cur->payload.Cons.f1;";
+      "  }";
+      "  char* r = (char*)__lang_region_alloc(&__lang_default_region, total + 1);";
+      "  size_t pos = 0;";
+      "  first = 1;";
+      "  cur = xs;";
+      "  while (cur->tag == 1) {";
+      "    if (!first) {";
+      "      memcpy(r + pos, sep, seplen);";
+      "      pos += seplen;";
+      "    }";
+      "    size_t l = strlen(cur->payload.Cons.f0);";
+      "    memcpy(r + pos, cur->payload.Cons.f0, l);";
+      "    pos += l;";
+      "    first = 0;";
+      "    cur = cur->payload.Cons.f1;";
+      "  }";
+      "  r[pos] = '\\0';";
+      "  return r;";
+      "}" ]
+
 (* Phase 15.8: 全 OwnedVec を tracking する registry。`owned_vec_new` /
    `vec_to_owned` で確保された struct を全部 thread-local list に登録、
    main 関数末で `__mere_owned_vec_free_all` が iterate して
@@ -3685,6 +3790,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   strbuf_used := false;
   logger_used := false;
   metrics_used := false;
+  str_split_used := false;
+  str_join_used := false;
   let variant_decls =
     List.filter_map (fun decl ->
       match decl with
@@ -4187,6 +4294,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        closure_int_unit typedefs, so emit after struct bodies. *)
     @ (if !logger_used then [logger_runtime; ""] else [])
     @ (if !metrics_used then [metrics_runtime; ""] else [])
+    (* Phase 24.3: str_split / str_join — references list_str_node so
+       emit after mono variant bodies (= list_str). *)
+    @ (if !str_split_used || !str_join_used then [str_list_helpers; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ [ "int main(void) {";
