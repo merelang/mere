@@ -23,12 +23,15 @@ type value =
        内部は OCaml Buffer、文字列の bytes を保持。Trivial 扱いなので
        region に置ける。型は TyCon ("StrBuf", [TyRef BR R TyUnit])
        (region marker 1-arg、view 型と同じ慣例)。 *)
-  | V_map of (value, value) Hashtbl.t
+  | V_map of (value, value) Hashtbl.t * value list ref
     (* `Map[R, K, V]` — region-aware mutable associative map (Phase 12.10,
        Q-010 narrowed). 設計 doc 13_region_std_types.md §5 の最小実装。
        内部は OCaml Hashtbl で polymorphic hash / eq を使う (closures /
        refs を含む key は識別が ref 単位、注意)。型は TyCon ("Map",
-       [TyRef BR R TyUnit; K; V])。 *)
+       [TyRef BR R TyUnit; K; V])。
+       Phase 27.1: 2nd component は insertion order の key list
+       (map_iter が deterministic 順で iterate するため)。Hashtbl 自体は
+       lookup の O(1) を保つ。 *)
 
 and env = (string * value ref) list
 
@@ -74,9 +77,10 @@ and to_string = function
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
   | V_strbuf buf ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
-  | V_map tbl ->
-    let entries = Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl [] in
-    let parts = List.map (fun (k, v) -> to_string k ^ " => " ^ to_string v) entries in
+  | V_map (tbl, keys) ->
+    let parts = List.map (fun k ->
+      let v = Hashtbl.find tbl k in
+      to_string k ^ " => " ^ to_string v) !keys in
     "Map[" ^ String.concat ", " parts ^ "]"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
@@ -805,7 +809,7 @@ let builtin_len =
     match v with
     | V_vec arr -> V_int (Array.length !arr)
     | V_strbuf buf -> V_int (Buffer.length buf)
-    | V_map tbl -> V_int (Hashtbl.length tbl)
+    | V_map (tbl, _) -> V_int (Hashtbl.length tbl)
     | V_str s -> V_int (String.length s)
     | V_tuple es -> V_int (List.length es)
     | V_constr _ ->
@@ -940,15 +944,18 @@ let builtin_strbuf_len =
 let builtin_map_new =
   V_builtin ("map_new", fun v ->
     match v with
-    | V_unit -> V_map (Hashtbl.create 16)
+    | V_unit -> V_map (Hashtbl.create 16, ref [])
     | _ -> failwith "map_new: expected unit")
 
 let builtin_map_set =
   V_builtin ("map_set", fun v ->
     match v with
-    | V_map tbl ->
+    | V_map (tbl, keys) ->
       V_builtin ("map_set_p1", fun k ->
         V_builtin ("map_set_p2", fun vv ->
+          (* Phase 27.1: track insertion order. Only append to keys list
+             for NEW keys; existing keys keep their original position. *)
+          if not (Hashtbl.mem tbl k) then keys := !keys @ [k];
           Hashtbl.replace tbl k vv;
           V_unit))
     | _ -> failwith "map_set: expected Map")
@@ -956,7 +963,7 @@ let builtin_map_set =
 let builtin_map_get =
   V_builtin ("map_get", fun v ->
     match v with
-    | V_map tbl ->
+    | V_map (tbl, _) ->
       V_builtin ("map_get_p1", fun k ->
         match Hashtbl.find_opt tbl k with
         | Some vv -> vv
@@ -968,7 +975,7 @@ let builtin_map_get =
 let builtin_map_has =
   V_builtin ("map_has", fun v ->
     match v with
-    | V_map tbl ->
+    | V_map (tbl, _) ->
       V_builtin ("map_has_p1", fun k ->
         V_bool (Hashtbl.mem tbl k))
     | _ -> failwith "map_has: expected Map")
@@ -976,7 +983,7 @@ let builtin_map_has =
 let builtin_map_len =
   V_builtin ("map_len", fun v ->
     match v with
-    | V_map tbl -> V_int (Hashtbl.length tbl)
+    | V_map (tbl, _) -> V_int (Hashtbl.length tbl)
     | _ -> failwith "map_len: expected Map")
 
 (* Phase 19.2: map_iter — apply (K -> V -> unit) to each entry.
@@ -1071,12 +1078,15 @@ let builtin_vec_fold =
 let builtin_map_iter =
   V_builtin ("map_iter", fun v ->
     match v with
-    | V_map tbl ->
+    | V_map (tbl, keys) ->
       V_builtin ("map_iter_p1", fun f ->
-        Hashtbl.iter (fun k vv ->
+        (* Phase 27.1: iterate in insertion order so output matches
+           C / LLVM / Wasm Map runtime (which all use parallel arrays). *)
+        List.iter (fun k ->
+          let vv = Hashtbl.find tbl k in
           let f_k = !apply_value_ref f k in
           ignore (!apply_value_ref f_k vv)
-        ) tbl;
+        ) !keys;
         V_unit)
     | _ -> failwith "map_iter: expected Map")
 

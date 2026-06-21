@@ -6223,6 +6223,23 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 27.1: interp Map iter order を insertion order に固定。
+     C / LLVM / Wasm の Map runtime (parallel arrays) と揃えて、全 backend
+     で word_freq / mini_shell が PERFECT 一致するように。 *)
+  check "§27.1: interp Map iter follows insertion order"
+    (Pipeline.process
+       "region R {\n\
+        let m = map_new () in\n\
+        let _ = map_set m \"c\" 1 in\n\
+        let _ = map_set m \"a\" 2 in\n\
+        let _ = map_set m \"b\" 3 in\n\
+        let buf = strbuf_new () in\n\
+        let _ = map_iter m (fn k -> fn v ->\n\
+          let _ = strbuf_push buf (k ++ \"=\" ++ show v ++ \";\") in ()) in\n\
+        strbuf_to_str buf\n\
+        }")
+    "\"c=1;a=2;b=3;\"";
+
   (* Phase 26.6: Wasm polishing — Var shadowing for stdlib builtins
      (template_engine unlock) + str_escape via show_str. *)
   check "§26.6: Wasm Var shadowing — local `let len = ...` shadows stdlib"
