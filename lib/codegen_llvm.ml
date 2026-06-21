@@ -1452,8 +1452,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       let pl_p = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1"
                     pl_p node_ty cur);
+      (* Phase 25.0: payload is boxed (ptr). Load the ptr, then load the
+         tuple struct from it. *)
+      let pl_box = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" pl_box pl_p);
       let pl = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = load %s, ptr %s" pl payload_struct pl_p);
+      emit_instr (Printf.sprintf "  %s = load %s, ptr %s" pl payload_struct pl_box);
       let h = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 0" h payload_struct pl);
       let t = fresh_reg () in
@@ -1529,15 +1533,19 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
           | None ->
             "@.s_ctor_" ^ cname
           | Some pty ->
-            let p_reg = fresh_reg () in
+            (* Phase 25.0: payload is boxed (ptr). Load the ptr, then
+               dereference to get the payload value. *)
+            let ptr_reg = fresh_reg () in
             if recursive then begin
               let pp = fresh_reg () in
               emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %%x, i32 0, i32 1"
                             pp node_ty);
-              emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
-                            p_reg (llvm_ty_of pty) pp)
+              emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" ptr_reg pp)
             end else
-              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 1" p_reg mono);
+              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 1" ptr_reg mono);
+            let p_reg = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                          p_reg (llvm_ty_of pty) ptr_reg);
             let ps = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
                           ps (ty_tag pty) (llvm_ty_of pty) p_reg);
@@ -1596,15 +1604,19 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
           match arg_opt with
           | None -> "@.s_ctor_" ^ cname
           | Some pty ->
-            let p_reg = fresh_reg () in
+            (* Phase 25.0: payload is boxed (ptr). Load the ptr, then
+               dereference to get the payload value. *)
+            let ptr_reg = fresh_reg () in
             if recursive then begin
               let pp = fresh_reg () in
               emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %%x, i32 0, i32 1"
                             pp node_ty);
-              emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
-                            p_reg (llvm_ty_of pty) pp)
+              emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" ptr_reg pp)
             end else
-              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 1" p_reg n);
+              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, 1" ptr_reg n);
+            let p_reg = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
+                          p_reg (llvm_ty_of pty) ptr_reg);
             let ps = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
                           ps (ty_tag pty) (llvm_ty_of pty) p_reg);
@@ -2031,6 +2043,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @atoi(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "str_unescape"; _ }, arg) ->
+    (* Phase 25.4: str_unescape — backslash-escape sequences を実際の
+       文字に解釈、他はそのまま。json_parser 等で使用。 *)
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_unescape(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
     let av = emit_expr env arg in
@@ -5135,6 +5154,63 @@ let str_concat_helper =
       "  %srcp = getelementptr i8, ptr %s, i64 %start64";
       "  call ptr @memcpy(ptr %r, ptr %srcp, i64 %len64)";
       "  %endp = getelementptr i8, ptr %r, i64 %len64";
+      "  store i8 0, ptr %endp";
+      "  ret ptr %r";
+      "}";
+      "";
+      (* Phase 25.4: str_unescape — backslash-escape sequences
+         (n / t / r / quote / backslash / slash) を実際の文字に解釈、
+         他はそのまま。json_parser 等で string literal の escape 処理。
+         region に alloc。 *)
+      "define ptr @__lang_str_unescape(ptr %s) {";
+      "entry:";
+      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %cap = add i64 %n64, 1";
+      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [0, %entry], [%i_next, %cont]";
+      "  %j = phi i64 [0, %entry], [%j_next, %cont]";
+      "  %done = icmp uge i64 %i, %n64";
+      "  br i1 %done, label %finish, label %step";
+      "step:";
+      "  %sp = getelementptr i8, ptr %s, i64 %i";
+      "  %c = load i8, ptr %sp";
+      "  %is_bs = icmp eq i8 %c, 92";
+      "  %i_plus_1 = add i64 %i, 1";
+      "  %has_next = icmp ult i64 %i_plus_1, %n64";
+      "  %can_esc = and i1 %is_bs, %has_next";
+      "  br i1 %can_esc, label %esc, label %plain";
+      "plain:";
+      "  %dp1 = getelementptr i8, ptr %r, i64 %j";
+      "  store i8 %c, ptr %dp1";
+      "  %i_plain = add i64 %i, 1";
+      "  %j_plain = add i64 %j, 1";
+      "  br label %cont_plain";
+      "cont_plain:";
+      "  br label %cont";
+      "esc:";
+      "  %ep = getelementptr i8, ptr %s, i64 %i_plus_1";
+      "  %ec = load i8, ptr %ep";
+      "  %is_n = icmp eq i8 %ec, 110";
+      "  %is_t = icmp eq i8 %ec, 116";
+      "  %is_r = icmp eq i8 %ec, 114";
+      "  %sel1 = select i1 %is_n, i8 10, i8 %ec";
+      "  %sel2 = select i1 %is_t, i8 9, i8 %sel1";
+      "  %sel3 = select i1 %is_r, i8 13, i8 %sel2";
+      "  %dp2 = getelementptr i8, ptr %r, i64 %j";
+      "  store i8 %sel3, ptr %dp2";
+      "  %i_esc = add i64 %i, 2";
+      "  %j_esc = add i64 %j, 1";
+      "  br label %cont_esc";
+      "cont_esc:";
+      "  br label %cont";
+      "cont:";
+      "  %i_next = phi i64 [%i_plain, %cont_plain], [%i_esc, %cont_esc]";
+      "  %j_next = phi i64 [%j_plain, %cont_plain], [%j_esc, %cont_esc]";
+      "  br label %loop";
+      "finish:";
+      "  %endp = getelementptr i8, ptr %r, i64 %j";
       "  store i8 0, ptr %endp";
       "  ret ptr %r";
       "}" ]

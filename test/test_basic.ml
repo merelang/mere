@@ -6037,5 +6037,39 @@ let () =
      if String.length ll > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 25.4: LLVM str_unescape runtime helper + show_<variant> の
+     Phase 25.0 boxed payload load bug fix。show fn が payload field を
+     2-step load (load ptr, then load value) するように修正。 *)
+  check "§25.4: LLVM str_unescape emits runtime helper"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "str_unescape \"a\\nb\"") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "__lang_str_unescape" then "ok" else "missing-helper")
+    "ok";
+  check "§25.4: show of variant payload deref via boxed ptr"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "type opt = N | S of int;\n\
+        show (S 42)") in
+     (* show_arm for S should do: load ptr first, then load i32. *)
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "@show_opt" && has "load ptr" then "ok" else "missing")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
