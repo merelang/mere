@@ -1844,6 +1844,71 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @show_int(i32 %s)" r av);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e); _ }, default_e) ->
+    (* Phase 25.2: try_or fn default — setjmp + longjmp で fail を catch。
+       fn の呼出 (= apply to unit) を try ブランチ、failed なら default
+       を使う。jmpbuf set フラグを save/restore で nesting 対応。 *)
+    let result_ty =
+      match e.Ast.ty with Some t -> llvm_ty_of (Ast.walk t) | None -> "i32"
+    in
+    let l_try_ok = fresh_label "try_ok_" in
+    let l_try_failed = fresh_label "try_failed_" in
+    let l_try_done = fresh_label "try_done_" in
+    (* Save state *)
+    let saved_set_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
+    let saved_buf_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = alloca [200 x i8], align 16" saved_buf_reg);
+    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr @__lang_fail_jmpbuf, i64 200)" saved_buf_reg);
+    emit_instr "  store i32 1, ptr @__lang_fail_jmpbuf_set";
+    (* setjmp *)
+    let sj_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @setjmp(ptr @__lang_fail_jmpbuf)" sj_reg);
+    let from_jmp_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" from_jmp_reg sj_reg);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                  from_jmp_reg l_try_failed l_try_ok);
+    (* try_ok block: invoke fn () via closure dispatch *)
+    emit_label l_try_ok;
+    let fn_v = emit_expr env fn_e in
+    (* fn_v is a closure_unit_<R>. Extract env and fn pointer, call. *)
+    let cl_struct_name =
+      match fn_e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyArrow (p, r) -> closure_struct_name p r
+         | _ -> unsupported e.Ast.loc "try_or: fn arg has non-arrow type")
+      | None -> unsupported e.Ast.loc "try_or: fn arg missing type"
+    in
+    let env_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" env_reg cl_struct_name fn_v);
+    let fnp_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnp_reg cl_struct_name fn_v);
+    let ok_result_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, i32 0)"
+                  ok_result_reg result_ty fnp_reg env_reg);
+    let l_try_ok_end = fresh_label "try_ok_end_" in
+    emit_instr (Printf.sprintf "  br label %%%s" l_try_ok_end);
+    emit_label l_try_ok_end;
+    emit_instr (Printf.sprintf "  br label %%%s" l_try_done);
+    (* try_failed block: emit default *)
+    emit_label l_try_failed;
+    let default_v = emit_expr env default_e in
+    let l_try_failed_end = fresh_label "try_failed_end_" in
+    emit_instr (Printf.sprintf "  br label %%%s" l_try_failed_end);
+    emit_label l_try_failed_end;
+    emit_instr (Printf.sprintf "  br label %%%s" l_try_done);
+    (* try_done block: phi *)
+    emit_label l_try_done;
+    let result_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = phi %s [%s, %%%s], [%s, %%%s]"
+                  result_reg result_ty
+                  ok_result_reg l_try_ok_end
+                  default_v l_try_failed_end);
+    (* Restore state *)
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
+    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr @__lang_fail_jmpbuf, ptr %s, i64 200)" saved_buf_reg);
+    result_reg
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
     let result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
@@ -3331,7 +3396,11 @@ let runtime_decls =
       "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()";
       "declare i32 @atoi(ptr)";
-      "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"" ]
+      "declare i32 @setjmp(ptr) returns_twice";
+      "declare void @longjmp(ptr, i32) noreturn";
+      "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
+      "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
+      "@__lang_fail_jmpbuf_set = global i32 0" ]
 
 (* Region runtime — mirrors codegen_c's region_runtime_helpers but
    expressed in LLVM IR. Uses an 8-byte aligned bump-pointer allocator.
@@ -4676,12 +4745,17 @@ let str_concat_helper =
       "  ret i32 %r";
       "}";
       "";
-      (* Phase 25.1: fail builtin — print msg to stdout then abort.
-         (Skip stderr globals for simplicity; mere's interp also goes to
-         stdout via print. try_or rescue is not yet supported in LLVM,
-         so fail always terminates.) *)
+      (* Phase 25.1 + 25.2: fail builtin. If try_or's jmpbuf is set,
+         longjmp to it (rescue). Otherwise: print msg + abort. *)
       "define void @__lang_fail_impl(ptr %msg) noreturn {";
       "entry:";
+      "  %set = load i32, ptr @__lang_fail_jmpbuf_set";
+      "  %active = icmp ne i32 %set, 0";
+      "  br i1 %active, label %do_jmp, label %do_abort";
+      "do_jmp:";
+      "  call void @longjmp(ptr @__lang_fail_jmpbuf, i32 1)";
+      "  unreachable";
+      "do_abort:";
       "  %p1 = call ptr @__lang_str_concat(ptr @.fail_prefix, ptr %msg)";
       "  call i32 @puts(ptr %p1)";
       "  call void @abort()";
