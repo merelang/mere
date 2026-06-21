@@ -6160,6 +6160,31 @@ let () =
         0") in
      if String.length ll > 0 then "ok" else "empty")
     "ok";
+  (* Phase 25.8: short-circuit P_constr tag check before payload deref. *)
+  check "§25.8: LLVM nested P_constr no longer SEGVs on tag mismatch"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        type sexpr = SInt of int | SSym of str | SList of sexpr list;\n\
+        let test = fn (items: sexpr list) ->\n\
+        \  match items with\n\
+        \  | Nil -> 0\n\
+        \  | Cons (SSym \"if\", Cons (c, Cons (t, Cons (f, Nil)))) -> 1\n\
+        \  | Cons (SSym op, args) -> 2\n\
+        \  | _ -> 3;\n\
+        test (Cons (SSym \"+\", Cons (SInt 1, Cons (SInt 2, Nil))))") in
+     (* Look for the short-circuit branch label "tag_ok_" emitted by compile_pat. *)
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "tag_ok_" then "ok" else "no-short-circuit")
+    "ok";
+
   check "§25.7: LLVM fn dedup — user-defined name shadows stdlib"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "type 'a list = Nil | Cons of 'a * 'a list;\n\

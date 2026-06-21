@@ -3352,7 +3352,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        extractvalue / load and AND together. Bindings accumulate as
        (name, register). For nested constructors / tuples / records,
        sub-patterns recurse on extracted sub-values. *)
+    (* Phase 25.8: compile_pat now takes a `fail_label` and emits
+       short-circuit branches for P_constr — when the outer tag doesn't
+       match, jump to fail_label BEFORE dereferencing the payload.
+       Returns (cond, bindings, var_tys); for atomic patterns the cond
+       is the final i1 check (caller does br); for nested P_constr,
+       intermediate tag checks already branched to fail_label inside,
+       so the returned cond is just the final pattern's check (or "1"). *)
     let rec compile_pat (pat : Ast.pattern) (v_reg : string) (v_ty : Ast.ty)
+      (fail_label : string)
       : string * (string * string) list * (string * Ast.ty) list =
       match pat.Ast.pnode with
       | Ast.P_wild -> ("1", [], [])
@@ -3374,7 +3382,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r cmp);
         (r, [], [])
       | Ast.P_as (inner, n) ->
-        let (c, bs, tys) = compile_pat inner v_reg v_ty in
+        let (c, bs, tys) = compile_pat inner v_reg v_ty fail_label in
         (c, (n, v_reg) :: bs, (n, v_ty) :: tys)
       | Ast.P_tuple pats ->
         let elem_tys =
@@ -3389,7 +3397,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
             let er = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
                           er tname v_reg i);
-            let (c, bs, tys) = compile_pat p er ety in
+            let (c, bs, tys) = compile_pat p er ety fail_label in
             go (i + 1) (and_cond acc_cond c)
               (List.rev_append bs acc_bs) (List.rev_append tys acc_tys) rest
         in
@@ -3423,7 +3431,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
             let fr = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d"
                           fr struct_name v_reg i);
-            let (c, bs, tys) = compile_pat sub_p fr ft in
+            let (c, bs, tys) = compile_pat sub_p fr ft fail_label in
             go (and_cond acc_cond c)
               (List.rev_append bs acc_bs) (List.rev_append tys acc_tys) rest
         in
@@ -3441,8 +3449,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
             mono_variant_name n (List.map Ast.walk args)
           | _ -> type_name
         in
-        (* Phase 25.0: per-ctor payload type. For poly variants, walk
-           the scrutinee type to extract concrete args and substitute. *)
         let ctor_pty =
           match info.Typer.arg with
           | None -> None
@@ -3476,8 +3482,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         (match sub, ctor_pty with
          | None, _ -> (tag_cond, [], [])
          | Some sub_pat, Some pty ->
-           (* Phase 25.0: payload is boxed (ptr). Load the ptr, then
-              dereference to get the payload value. *)
+           (* Phase 25.8: short-circuit on tag mismatch before deref —
+              without this guard, a nested pattern would unconditionally
+              load the payload field which is uninitialized for variants
+              of a different tag (e.g. Nil), causing SIGSEGV. *)
+           let ok_label = fresh_label "tag_ok_" in
+           emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                         tag_cond ok_label fail_label);
+           emit_label ok_label;
            let ptr_reg = fresh_reg () in
            if recursive then begin
              let p = fresh_reg () in
@@ -3487,12 +3499,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
            end else
              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1"
                            ptr_reg struct_name v_reg);
-           (* Load the actual payload value from the boxed ptr. *)
            let payload_reg = fresh_reg () in
            emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
                          payload_reg (llvm_ty_of pty) ptr_reg);
-           let (c, bs, tys) = compile_pat sub_pat payload_reg pty in
-           (and_cond tag_cond c, bs, tys)
+           let (c, bs, tys) = compile_pat sub_pat payload_reg pty fail_label in
+           (c, bs, tys)
          | Some _, None ->
            unsupported pat.Ast.ploc
              "pattern has payload but constructor has no payload type")
@@ -3513,9 +3524,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         emit_instr "  call void @abort()";
         emit_instr "  unreachable"
       | (pat, guard, body) :: rest ->
-        let (cond, bindings, var_tys) = compile_pat pat scrut_v scrut_ty in
         let arm_label = fresh_label "arm_" in
         let next_label = fresh_label "next_" in
+        let (cond, bindings, var_tys) = compile_pat pat scrut_v scrut_ty next_label in
         emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
                       cond arm_label next_label);
         emit_label arm_label;
