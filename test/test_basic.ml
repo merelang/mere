@@ -6160,6 +6160,22 @@ let () =
         0") in
      if String.length ll > 0 then "ok" else "empty")
     "ok";
+  (* Phase 25.11: LLVM prints "()" for unit main_ty to match interp. *)
+  check "§25.11: LLVM emits @.fmt_unit and printf for unit main"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyUnit (typed_prog
+       "print \"hi\"") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "@.fmt_unit" && has "call i32 (ptr, ...) @printf(ptr @.fmt_unit)" then "ok" else "missing")
+    "ok";
+
   (* Phase 25.10: Var-shadowing for stdlib builtins (template_engine). *)
   check "§25.10: local `let len = ...` shadows stdlib len"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog

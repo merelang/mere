@@ -3975,13 +3975,14 @@ let emit_fn_def (f : fn_decl) : string =
     (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
 
 (* Convert the program's main result type to (LLVM type, printf format).
-   `unit` skips printing entirely. `str` uses %s. *)
+   Phase 25.11: `unit` now prints "()" to match interp's behavior
+   (interp's Eval.to_string V_unit = "()" gets print_endline'd). *)
 let main_format_of (t : Ast.ty) : (string * string) option =
   match Ast.walk t with
   | Ast.TyInt -> Some ("i32", "%d")
   | Ast.TyBool -> Some ("i32", "%d")  (* zext from i1 *)
   | Ast.TyStr -> Some ("ptr", "%s")
-  | Ast.TyUnit -> None
+  | Ast.TyUnit -> Some ("unit", "()")  (* Phase 25.11: print "()" for unit main *)
   | _ -> Some ("i32", "%d")
 
 (* Runtime helpers emitted as LLVM IR. Mirrors codegen_c's runtime
@@ -6196,6 +6197,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let print_lines =
     match main_format_of main_ty with
     | None -> []
+    | Some ("unit", _) ->
+      (* Phase 25.11: print literal "()" for unit-typed main, matching
+         interp's Eval.to_string V_unit. *)
+      [ "  call i32 (ptr, ...) @printf(ptr @.fmt_unit)" ]
     | Some (ty, fmt) ->
       let widen =
         if ty = "i32" && (match Ast.walk main_ty with Ast.TyBool -> true | _ -> false) then
@@ -6240,6 +6245,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [ "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"" ]
     | Some (_, "%s") ->
       [ "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"" ]
+    | Some ("unit", _) ->
+      (* Phase 25.11: "()\n\0" — 4 bytes. *)
+      [ "@.fmt_unit = private constant [4 x i8] c\"()\\0A\\00\"" ]
     | _ -> []
   in
   (* Phase 15.3: Vec[R, T] runtime — emit one struct typedef + 4 helper
