@@ -3795,6 +3795,15 @@ let emit_anon_adapter (ce : closure_emission) : string =
   current_var_types :=
     (ce.ce_param, ce.ce_param_ty) ::
     List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
+  (* Phase 25.7: the body's inferred type might still hold free TyVars
+     left over from let-poly generalization that weren't reachable via the
+     containing fn's surface arrow (e.g., a fresh tyvar from a Nil
+     pattern instantiation never tied back to the outer's elem type).
+     Unify body.ty with ce_return_ty to propagate concrete types. *)
+  (match ce.ce_body.Ast.ty with
+   | Some t ->
+     (try Typer.unify Loc.dummy t ce.ce_return_ty with _ -> ())
+   | None -> ());
   let rv = emit_expr env ce.ce_body in
   emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of ce.ce_return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
@@ -5648,6 +5657,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
+  (* Phase 25.7: dedupe by name, keeping the LAST occurrence — when user
+     defines a name (e.g. `let rec list_rev_into = ...`) that's also in the
+     stdlib prelude, the user's definition (later in the let chain) should
+     shadow the stdlib one. Without this, both would emit and cause a
+     redefinition error at link time. *)
+  let fns =
+    let seen : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    List.rev (
+      List.fold_left (fun acc f ->
+        if Hashtbl.mem seen f.name then acc
+        else begin Hashtbl.add seen f.name (); f :: acc end
+      ) [] (List.rev fns)
+    )
+  in
   (* Discover mono variant / record instances + mark recursive ones
      BEFORE any typedef emission. Also collect show types now (their
      instances need to flow into mono_variant_instances so emit picks

@@ -6147,5 +6147,63 @@ let () =
      if has "call ptr @__lang_str_escape" then "ok" else "show-str-not-wired")
     "ok";
 
+  (* Phase 25.7: anon-adapter body-type unify + fn dedup by name. *)
+  check "§25.7: LLVM compiles poly list fn (Nil instantiation tyvar fix)"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let rec rev_aux = fn (acc) -> fn (xs) ->\n\
+          match xs with\n\
+          | Nil -> acc\n\
+          | Cons (h, t) -> rev_aux (Cons (h, acc)) t;\n\
+        let rev = fn (l) -> rev_aux Nil l;\n\
+        let _ = rev (Cons (1, Cons (2, Nil)));\n\
+        0") in
+     if String.length ll > 0 then "ok" else "empty")
+    "ok";
+  check "§25.7: LLVM fn dedup — user-defined name shadows stdlib"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let rec list_rev_into = fn (acc) -> fn (xs) ->\n\
+          match xs with\n\
+          | Nil -> acc\n\
+          | Cons (h, t) -> list_rev_into (Cons (h, acc)) t;\n\
+        let list_reverse = fn (l) -> list_rev_into Nil l;\n\
+        let _ = list_reverse (Cons (1, Cons (2, Nil)));\n\
+        0") in
+     (* Count occurrences of `define %... @list_rev_into(` — must be 1. *)
+     let count_define name =
+       let needle = "@" ^ name ^ "(" in
+       let nlen = String.length ll and plen = String.length needle in
+       let rec scan i acc =
+         if i + plen > nlen then acc
+         else if String.sub ll i plen = needle then begin
+           (* Only count if preceded by "define ". *)
+           let starts_with_define =
+             i >= 7 + 21 (* approximate length of "define %... " *) &&
+             (try String.sub ll (i - 7) 7 = "define " ||
+                  (i >= 30 && String.sub ll (i - 30) 7 = "define ")
+              with _ -> false)
+           in
+           let acc' = if starts_with_define then acc + 1 else acc in
+           scan (i + plen) acc'
+         end else scan (i + 1) acc
+       in
+       scan 0 0
+     in
+     let _ = count_define in
+     (* Simpler check: just look for the function appearing as a definition once. *)
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then 0
+         else if String.sub ll i plen = p then 1 + scan (i + plen)
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "define %closure_list_int_list_int @list_rev_into(" = 1 then "ok"
+     else "duplicate-or-missing")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
