@@ -235,9 +235,33 @@ let intern_show_str (s : string) : int =
     Hashtbl.add show_str_offsets s off;
     off
 
-(* Single payload type for a variant (None if all-nullary). Mirrors the
-   LLVM backend's `variant_payload_ty_of`: all payload-bearing
-   constructors must share one payload type or we raise. *)
+(* Phase 26.0: variant payload "presence" check (not type) — returns
+   true if any ctor has a payload, false if all-nullary. Used to decide
+   the variant cell size (8 bytes if any payload, else 4).
+   In Wasm, all i32-wide values fit at offset 4 regardless of static
+   type, so unlike Phase 6 MVP we no longer require uniform payload
+   types — per-ctor type info is recovered via ctor_payload_ty at each
+   constr / match site. Mirrors LLVM Phase 25.0 (boxed payload). *)
+let variant_has_payload (vname : string) : bool =
+  match Hashtbl.find_opt Exhaustive.type_variants vname with
+  | None ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "unknown variant type `%s` at Wasm codegen" vname))
+  | Some vs ->
+    List.exists (fun (_, p) -> p <> None) vs
+
+(* Phase 26.0: per-ctor payload type. Used by Constr emit (to size the
+   boxed payload alloc) and by match P_constr (to compile sub-patterns
+   with the correct type). For poly variants the caller substitutes
+   type params with concrete args from the surrounding context. *)
+let ctor_payload_ty (cname : string) : Ast.ty option =
+  match Hashtbl.find_opt Typer.constructors cname with
+  | None -> None
+  | Some info -> info.Typer.arg
+
+(* Kept for backwards compatibility with code that hasn't been ported
+   to per-ctor lookup yet; returns the first payload type seen across
+   the variant's ctors, ignoring shape mismatches. *)
 let variant_payload_ty (vname : string) : Ast.ty option =
   match Hashtbl.find_opt Exhaustive.type_variants vname with
   | None ->
@@ -245,17 +269,7 @@ let variant_payload_ty (vname : string) : Ast.ty option =
       Printf.sprintf "unknown variant type `%s` at Wasm codegen" vname))
   | Some vs ->
     let payloads = List.filter_map (fun (_, p) -> p) vs in
-    (match payloads with
-     | [] -> None
-     | first :: rest ->
-       (* Compare by string representation as a cheap shape test. *)
-       let same = List.for_all (fun p -> p = first) rest in
-       if same then Some first
-       else
-         raise (Codegen_error (Loc.dummy,
-           Printf.sprintf
-             "variant `%s` has constructors with different payload types — \
-              Phase 6 MVP needs all payloads to be the same type" vname)))
+    (match payloads with [] -> None | p :: _ -> Some p)
 
 (* Stable name fragment per type for show fn naming. Mirrors C/LLVM
    codegen's ty_tag so e.g. `int list` lowers to `show_list_int`. *)
@@ -1093,8 +1107,13 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some t -> t
       | None -> unsupported e.Ast.loc ("constructor without tag: " ^ cname)
     in
-    let payload_ty = variant_payload_ty type_name in
-    let n_bytes = match payload_ty with None -> 4 | Some _ -> 8 in
+    (* Phase 26.0: cell size is 8 bytes whenever the variant has any
+       payload-bearing ctor (uniform layout `{i32 tag, i32 payload_i32}`).
+       The payload_i32 holds either an inline value (int / bool / str ptr)
+       or a pointer to a separately-allocated tuple/record (already a
+       Wasm-side pointer, so no extra boxing is needed). *)
+    let has_payload = variant_has_payload type_name in
+    let n_bytes = if has_payload then 8 else 4 in
     let base_slot = fresh_local () in
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" base_slot);
@@ -1106,17 +1125,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" base_slot);
     emit_instr (Printf.sprintf "i32.const %d" tag);
     emit_instr "i32.store offset=0";
-    (match arg_opt, payload_ty with
-     | None, _ -> ()
-     | Some arg, Some _ ->
+    (match arg_opt with
+     | None -> ()
+     | Some arg ->
        emit_instr (Printf.sprintf "local.get %d" base_slot);
        emit_expr arg;
-       emit_instr "i32.store offset=4"
-     | Some _, None ->
-       unsupported e.Ast.loc
-         (Printf.sprintf
-            "constructor `%s` has payload but variant lowered as nullary-only"
-            cname));
+       emit_instr "i32.store offset=4");
     emit_instr (Printf.sprintf "local.get %d" base_slot)
   | Ast.Match (scrut, arms) ->
     let scrut_ty =
@@ -1228,8 +1242,22 @@ let rec emit_expr (e : Ast.expr) : unit =
           | Some i -> i
           | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ cname)
         in
-        let type_name = info.Typer.type_name in
-        let payload_ty = variant_payload_ty type_name in
+        let _type_name = info.Typer.type_name in
+        (* Phase 26.0: per-ctor payload type. For poly variants, walk
+           the scrutinee type to extract concrete args and substitute
+           the ctor's declared type params. *)
+        let pty_opt =
+          match info.Typer.arg with
+          | None -> None
+          | Some t ->
+            (match Ast.walk v_ty, info.Typer.params with
+             | Ast.TyCon (_n, args), params
+               when List.length args = List.length params && params <> [] ->
+               let args = List.map Ast.walk args in
+               let mapping = List.combine params args in
+               Some (Ast.walk (subst_params mapping t))
+             | _ -> Some (Ast.walk t))
+        in
         let tag =
           match Hashtbl.find_opt variant_tags cname with
           | Some t -> t
@@ -1241,7 +1269,7 @@ let rec emit_expr (e : Ast.expr) : unit =
         emit_instr (Printf.sprintf "i32.const %d" tag);
         emit_instr "i32.eq";
         emit_instr (Printf.sprintf "local.set %d" tag_cond);
-        (match sub, payload_ty with
+        (match sub, pty_opt with
          | None, _ -> (tag_cond, [])
          | Some sub_pat, Some pty ->
            let pl_slot = fresh_local () in
@@ -1252,7 +1280,8 @@ let rec emit_expr (e : Ast.expr) : unit =
            (combine_and tag_cond sub_cond, sub_bs)
          | Some _, None ->
            unsupported pat.Ast.ploc
-             "pattern has payload but variant has no payload type")
+             ("pattern has payload but constructor `" ^ cname ^
+              "` has no payload type"))
       | Ast.P_or _ ->
         unsupported pat.Ast.ploc "P_or should have been flattened"
     in

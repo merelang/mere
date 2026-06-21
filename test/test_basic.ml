@@ -6160,6 +6160,21 @@ let () =
         0") in
      if String.length ll > 0 then "ok" else "empty")
     "ok";
+  (* Phase 26.0: Wasm variant boxed payload — no longer requires uniform
+     payload types across ctors (mirrors LLVM Phase 25.0). *)
+  check "§26.0: Wasm emits variant with mixed payload types"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "type mixed = A of int | B of str;\n\
+        match A 42 with | A n -> show n | B s -> s") in
+     if String.length wat > 0 then "ok" else "empty")
+    "ok";
+  check "§26.0: Wasm emits poly variant (json-style nested)"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "type myjson = JNum of int | JBool of bool | JStr of str;\n\
+        match JNum 42 with | JNum n -> show n | JBool b -> show b | JStr s -> s") in
+     if String.length wat > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 25.12: closure-call arrow_ty fallback from current_var_types
      for polymorphic callback dispatch (word_freq). *)
   check "§25.12: LLVM closure call recovers concrete arrow from arg's var binding"
