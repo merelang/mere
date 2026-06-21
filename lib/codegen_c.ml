@@ -3103,7 +3103,7 @@ let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> Some "%d"
   | Ast.TyStr -> Some "%s"
-  | Ast.TyUnit -> None
+  | Ast.TyUnit -> Some "()"  (* Phase 27.0: print "()" to match interp *)
   | _ -> Some "%d"  (* best-effort; type-checker should have caught issues *)
 
 (* Compile a whole program: flatten top-decls into nested lets, lift
@@ -4278,6 +4278,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let main_stmt =
     match main_format_of main_ty with
     | None -> "  (void)(" ^ main_body ^ ");  /* unit result */"
+    | Some "()" ->
+      (* Phase 27.0: unit main — evaluate body for side effects, then
+         print "()\n" to match interp's Eval.to_string V_unit output. *)
+      "  (void)(" ^ main_body ^ ");\n  printf(\"()\\n\");"
     | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
   in
   let parts =

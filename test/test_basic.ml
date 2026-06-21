@@ -2341,8 +2341,10 @@ let () =
     (codegen "\"a\" ++ \"b\"") "__lang_str_concat(\"a\", \"b\")";
   assert_contains "codegen: print → puts inside statement expression"
     (codegen "print \"hi\"") "puts(\"hi\")";
-  assert_contains "codegen: unit-typed main skips printf"
-    (codegen "print \"hi\"") "/* unit result */";
+  (* Phase 27.0: C codegen now prints "()" for unit-typed main to match
+     interp (was: no printf at all). *)
+  assert_contains "codegen: unit-typed main prints \"()\""
+    (codegen "print \"hi\"") "printf(\"()\\n\")";
   assert_contains "codegen: helper __lang_str_concat is injected"
     (codegen "1") "__lang_str_concat";  (* always emitted, even if unused *)
 
