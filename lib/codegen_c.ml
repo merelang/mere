@@ -3802,6 +3802,21 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   resolve_vec_let_types main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
+  (* Phase 24.2: dedup skels by name keeping the LAST occurrence — this
+     handles shadowing (e.g., user defines `let rec list_iter = ...` that
+     shadows the prelude's `list_iter`). Without dedup, both end up in
+     `fns` with the same name, the prelude's body would emit and the
+     user's body would emit a duplicate (with possibly unresolved tyvars
+     since find_concrete_arrow only links the first). *)
+  let skels =
+    let seen : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+    List.rev (
+      List.filter (fun s ->
+        if Hashtbl.mem seen s.sname then false
+        else (Hashtbl.add seen s.sname (); true)
+      ) (List.rev skels)
+    )
+  in
   let fns = resolve_fn_types skels main_expr in
   (* Populate toplevel_fn_names so emit_expr can pick direct vs closure
      call and value-position references can use the closure wrapper. *)
