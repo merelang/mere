@@ -121,7 +121,7 @@ let show_tok = fn (t: tok) ->
   | TEnd      -> "End";
 
 // === Char helpers ===
-let is_alpha = fn (c: str) ->
+let is_letter_or_under = fn (c: str) ->
   (c == "a" || c == "b" || c == "c" || c == "d" || c == "e" ||
    c == "f" || c == "g" || c == "h" || c == "i" || c == "j" ||
    c == "k" || c == "l" || c == "m" || c == "n" || c == "o" ||
@@ -135,7 +135,7 @@ let is_alpha = fn (c: str) ->
    c == "U" || c == "V" || c == "W" || c == "X" || c == "Y" ||
    c == "Z" || c == "_");
 
-let is_alnum = fn (c: str) -> is_alpha c || is_digit c;
+let is_alnum = fn (c: str) -> is_letter_or_under c || is_digit c;
 
 let is_ws = fn (c: str) -> c == " " || c == "\t" || c == "\n";
 
@@ -235,7 +235,7 @@ let rec tokenize_aux = fn (src: str) -> fn (i: int) -> fn (acc: tok list) ->
     else if is_digit c then
       let (n, j) = read_int src i in
       tokenize_aux src j (Cons (TIntLit n, acc))
-    else if is_alpha c then
+    else if is_letter_or_under c then
       let (id, j) = read_ident src i in
       let t = if is_keyword id then TKW (to_upper id) else TIdent id in
       tokenize_aux src j (Cons (t, acc))
@@ -872,15 +872,132 @@ let exec_select_single = fn cat -> fn storage -> fn (cs: cols) -> fn (tbl: str) 
     let projected = project filtered cs Nil in
     ERows projected;
 
-// 単一テーブル SELECT のみ (JOIN は Phase 29.3 で)
+// list concat helper (prelude に無いので自前)
+let rec list_append = fn (xs: 'a list) -> fn (ys: 'a list) ->
+  match xs with
+  | Nil -> ys
+  | Cons (h, t) -> Cons (h, list_append t ys);
+
+// === JOIN (Phase 29.3) ===
+//   nested-loop join: left の各行 × right の各行を qualify + concat。
+//   ON / WHERE の `CQual (t, n)` は `t.n` で resolve、fallback で `n`。
+//   project_row の出力は qualifier を剥がした key で見やすく。
+
+// row の column 名を `prefix.name` に書き換える
+let rec qualify_row = fn (prefix: str) -> fn (row: (str * value) list) -> fn (acc: (str * value) list) ->
+  match row with
+  | Nil -> rev acc
+  | Cons ((k, v), rest) -> qualify_row prefix rest (Cons ((prefix ++ "." ++ k, v), acc));
+
+let rec qualify_all = fn (rows: (str * value) list list) -> fn (prefix: str) -> fn (acc: (str * value) list list) ->
+  match rows with
+  | Nil -> rev acc
+  | Cons (r, rest) -> qualify_all rest prefix (Cons (qualify_row prefix r Nil, acc));
+
+// JOIN 後の row で `t.n` キー検索、無ければ unqualified の `n` を fallback
+let resolve_col_join = fn (cref: col_ref) -> fn (row: (str * value) list) ->
+  match cref with
+  | CName n         -> row_get row n
+  | CQual (t, n)    ->
+    (match row_get row (t ++ "." ++ n) with
+     | Some v -> Some v
+     | None   -> row_get row n);
+
+let eval_on = fn (c1: col_ref) -> fn (c2: col_ref) -> fn (row: (str * value) list) ->
+  match resolve_col_join c1 row with
+  | None -> false
+  | Some v1 ->
+    match resolve_col_join c2 row with
+    | None -> false
+    | Some v2 -> value_eq v1 v2;
+
+let rec join_inner = fn (lrow: (str * value) list) -> fn (right_rows: (str * value) list list) -> fn (c1: col_ref) -> fn (c2: col_ref) -> fn (acc: (str * value) list list) ->
+  match right_rows with
+  | Nil -> acc
+  | Cons (rrow, rest_r) ->
+    let combined = list_append lrow rrow in
+    if eval_on c1 c2 combined then
+      join_inner lrow rest_r c1 c2 (Cons (combined, acc))
+    else
+      join_inner lrow rest_r c1 c2 acc;
+
+let rec join_outer = fn (left_rows: (str * value) list list) -> fn (right_rows: (str * value) list list) -> fn (c1: col_ref) -> fn (c2: col_ref) -> fn (acc: (str * value) list list) ->
+  match left_rows with
+  | Nil -> rev acc
+  | Cons (lrow, rest_l) ->
+    let acc2 = join_inner lrow right_rows c1 c2 acc in
+    join_outer rest_l right_rows c1 c2 acc2;
+
+// JOIN 結果の row を project する時、CQual はそのまま `t.n` で解決し、
+// 表示用キーは `n` (unqualified) に剥がす。
+let rec project_row_join = fn (cs: col_ref list) -> fn (row: (str * value) list) -> fn (acc: (str * value) list) ->
+  match cs with
+  | Nil -> rev acc
+  | Cons (c, rest) ->
+    let cn = match c with CName n -> n | CQual (_, n) -> n in
+    (match resolve_col_join c row with
+     | None    -> project_row_join rest row acc
+     | Some v  -> project_row_join rest row (Cons ((cn, v), acc)));
+
+// JOIN 結果用 project: cs = CAll の時は qualifier 込みのまま (test 用)、
+// CList の時は qualifier 剥がして表示
+let rec project_join = fn (rows: (str * value) list list) -> fn (cs: cols) -> fn (acc: (str * value) list list) ->
+  match rows with
+  | Nil -> rev acc
+  | Cons (r, rest) ->
+    let r2 =
+      match cs with
+      | CAll        -> r
+      | CList cols  -> project_row_join cols r Nil
+    in
+    project_join rest cs (Cons (r2, acc));
+
+// JOIN 結果用 filter (WHERE は CQual も `t.n` resolve)
+let eval_where_term_join = fn (wt: where_term) -> fn (row: (str * value) list) ->
+  match wt with
+  | WT (cref, op, v) ->
+    match resolve_col_join cref row with
+    | None -> false
+    | Some av -> eval_op op av v;
+
+let rec eval_where_join = fn (w: where_clause) -> fn (row: (str * value) list) ->
+  match w with
+  | WAll             -> true
+  | WOne wt          -> eval_where_term_join wt row
+  | WAnd (wt, rest)  ->
+    if eval_where_term_join wt row then eval_where_join rest row else false;
+
+let rec filter_rows_join = fn (rows: (str * value) list list) -> fn (w: where_clause) -> fn (acc: (str * value) list list) ->
+  match rows with
+  | Nil -> rev acc
+  | Cons (r, rest) ->
+    if eval_where_join w r then filter_rows_join rest w (Cons (r, acc))
+    else filter_rows_join rest w acc;
+
+let exec_select_join = fn cat -> fn storage -> fn (cs: cols) -> fn (lt: str) -> fn (rt: str) -> fn (c1: col_ref) -> fn (c2: col_ref) -> fn (w: where_clause) ->
+  match get_meta cat lt with
+  | None -> EErr ("no such table: " ++ lt)
+  | Some (TMeta (l_id, _)) ->
+    match get_meta cat rt with
+    | None -> EErr ("no such table: " ++ rt)
+    | Some (TMeta (r_id, _)) ->
+      let l_rows = scan_table storage l_id in
+      let r_rows = scan_table storage r_id in
+      let l_q = qualify_all l_rows lt Nil in
+      let r_q = qualify_all r_rows rt Nil in
+      let joined = join_outer l_q r_q c1 c2 Nil in
+      let filtered = filter_rows_join joined w Nil in
+      let projected = project_join filtered cs Nil in
+      ERows projected;
+
 let exec_stmt = fn cat -> fn storage -> fn (next_id: int) -> fn (st: stmt) ->
   match st with
   | SCreate (name, decls) -> exec_create cat next_id name decls
   | SInsert (name, vals)  -> (next_id, exec_insert cat storage name vals)
   | SSelect (cs, tbl, j, w) ->
     match j with
-    | JNone        -> (next_id, exec_select_single cat storage cs tbl w)
-    | JOn (_, _, _) -> (next_id, EErr "JOIN not yet implemented (Phase 29.3)");
+    | JNone               -> (next_id, exec_select_single cat storage cs tbl w)
+    | JOn (rt, c1, c2)    -> (next_id, exec_select_join cat storage cs tbl rt c1 c2 w);
 
 // === Result show ===
 let rec show_row_aux = fn (row: (str * value) list) -> fn (acc: str) ->
@@ -958,5 +1075,93 @@ let _ =
   ();
 
 let _ = log.info "=== Phase 29.2 done ===";
+
+// === Phase 29.3 self-tests: JOIN ===
+let _ = log.info "=== JOIN tests ===";
+
+let cat2 = new_catalog ();
+let st2  = new_storage ();
+
+// 別 catalog/storage で JOIN シナリオ用 schema 構築 (col 名は意図的に
+// 衝突しない: users.uid / orders.uid で「比較対象」だけ同名)
+let _ =
+  let (n1, r1) = run_stmt cat2 st2 1 "CREATE TABLE users (uid int, name str)" in
+  let _ = check "join-create-users" r1 "affected:0" in
+  let (n2, r2) = run_stmt cat2 st2 n1 "CREATE TABLE orders (oid int, uid int, total int)" in
+  let _ = check "join-create-orders" r2 "affected:0" in
+  let (n3, _r) = run_stmt cat2 st2 n2 "INSERT INTO users VALUES (1, 'Alice')" in
+  let (n4, _r) = run_stmt cat2 st2 n3 "INSERT INTO users VALUES (2, 'Bob')" in
+  let (n5, _r) = run_stmt cat2 st2 n4 "INSERT INTO users VALUES (3, 'Carol')" in
+  let (n6, _r) = run_stmt cat2 st2 n5 "INSERT INTO orders VALUES (101, 1, 50)" in
+  let (n7, _r) = run_stmt cat2 st2 n6 "INSERT INTO orders VALUES (102, 1, 75)" in
+  let (n8, _r) = run_stmt cat2 st2 n7 "INSERT INTO orders VALUES (103, 2, 100)" in
+  // basic JOIN: Carol は orders 無いので 1+1+1 = 3 行のみ。CAll は qualified key で返す
+  let (n9, r9) = run_stmt cat2 st2 n8 "SELECT * FROM users JOIN orders ON users.uid = orders.uid" in
+  let _ = check "join-star"
+    r9
+    "rows:[{users.uid=1,users.name='Alice',orders.oid=101,orders.uid=1,orders.total=50};{users.uid=1,users.name='Alice',orders.oid=102,orders.uid=1,orders.total=75};{users.uid=2,users.name='Bob',orders.oid=103,orders.uid=2,orders.total=100}]" in
+  // projection: name + total (qualifier 必須、出力 key は剥がす)
+  let (nA, rA) = run_stmt cat2 st2 n9 "SELECT users.name, orders.total FROM users JOIN orders ON users.uid = orders.uid" in
+  let _ = check "join-project"
+    rA
+    "rows:[{name='Alice',total=50};{name='Alice',total=75};{name='Bob',total=100}]" in
+  // JOIN + WHERE (WHERE では qualifier 無し、fallback で resolve)
+  let (nB, rB) = run_stmt cat2 st2 nA "SELECT users.name, orders.total FROM users JOIN orders ON users.uid = orders.uid WHERE orders.total > 60" in
+  let _ = check "join-where"
+    rB
+    "rows:[{name='Alice',total=75};{name='Bob',total=100}]" in
+  // empty intersection
+  let (nC, _r) = run_stmt cat2 st2 nB "CREATE TABLE empty_t (x int)" in
+  let (nD, rD) = run_stmt cat2 st2 nC "SELECT * FROM users JOIN empty_t ON users.uid = empty_t.x" in
+  let _ = check "join-empty-right" rD "rows:[]" in
+  // missing table
+  let (nE, rE) = run_stmt cat2 st2 nD "SELECT * FROM users JOIN nope ON users.uid = nope.x" in
+  let _ = check "join-missing-table" rE "error:no such table: nope" in
+  ();
+
+let _ = log.info "=== Phase 29.3 done ===";
+
+// === N1 / N2 / N3 dogfood observation ===
+//
+// 1043 LoC、tokenizer + parser + executor + JOIN を 4 backend で動作させた
+// 結果、N1 (OwnedVec auto Drop) / N2 (NLL borrow) / N3 (Linear types) の
+// 需要を以下のように観測した。
+//
+// === N1 (OwnedVec auto Drop) ===
+// signal: 弱 — storage 用の OwnedVec は 1 つだけで、main 末まで生かす設計。
+// 「query 結果ごとに一時 OwnedVec を作って捨てる」use case は ERows で
+// list を返したので発生しなかった。
+//   実害なし。ただし「複数 user/session 毎に temporary storage を作る」
+//   ような stateful アプリでは N1 が痛みになる予感。
+//
+// === N2 (NLL borrow) ===
+// signal: ほぼ 0 — catalog / storage への access は全て mutate (map_set /
+// owned_vec_push) で borrow checker を経由していない。Mere の cap-passing
+// + Map/OwnedVec の builtin が「lexical 借用すら気にしないで動く」設計
+// なので、NLL の必要性が露呈しなかった。
+//   実害なし。本格的に &shared write R + 並行 cap を使うサーバ風コードで
+//   初めて出る。
+//
+// === N3 (Linear types) ===
+// signal: 中 — 真の痛みは別経路から出た。**toy_sql 開発中に C codegen 2 件
+// の rebinding / capture バグ (DEFERRED §1.10 / §1.11)** を発掘。Linear
+// types が直接の解決策ではないが、これらは N1/N2/N3 と関連する binding /
+// alias 系統の codegen 課題で、N3 (move semantics) があれば「`let (a, b)
+// = ... b` の rebinding を型システムで明示できる」可能性がある。
+//
+// === 別系統で発掘した痛み (本来の N1/N2/N3 とは違う) ===
+// 1. 値の str 比較が 4 backend で揃わない (interp 拡張のみ str_compare 有り)
+// 2. C codegen の tuple destructure 同名 rebind (DEFERRED §1.11)
+// 3. C codegen の 多段 nested lambda + record field call capture (§1.10)
+// 4. C codegen が builtin (is_alpha 等) を user-defined fn より優先する
+//    (DEFERRED §1.12; LLVM Phase 25.7 fn dedup の C 未対応)
+// 5. Wasm のデフォルト 1 page memory が string-heavy app に不足 (1→16 に拡張)
+//
+// === 結論 ===
+// 1043 LoC の dogfood で N1/N2/N3 の need は **依然顕在化していない**。
+// 痛みは binding / codegen の足回りに集中。real-world systems 用途
+// (database server, 並行 cap server) を書くには 5000-10000 LoC 級が必要
+// と推察。短期的には B1 (NLL/Linear types) より A (codegen 残務) と
+// C (FFI / REPL polish) を進める方が ROI が高い。
 
 0
