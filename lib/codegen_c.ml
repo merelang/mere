@@ -903,6 +903,15 @@ let rec emit_expr (e : Ast.expr) : string =
        str_join_used := true;
        Printf.sprintf "__lang_str_join(%s, %s)"
          (emit_expr sep_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_count"; _ }, s_e) ->
+       Printf.sprintf "__lang_str_count(%s, %s)"
+         (emit_expr s_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "write_file"; _ }, path_e) ->
+       (* Phase 24.4: write_file path content — curried. *)
+       Printf.sprintf "__lang_write_file(%s, %s)"
+         (emit_expr path_e) (emit_expr arg)
+     | Ast.Var "read_file" ->
+       Printf.sprintf "__lang_read_file(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
        (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
        Printf.sprintf "__lang_char_at(%s, %s)"
@@ -1828,17 +1837,20 @@ type fn_skel = {
 let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
   let rec go (e : Ast.expr) =
     match e.Ast.node with
-    | Ast.Let (pat, value, rest)
-      when (match pat.Ast.pnode with Ast.P_var _ -> true | _ -> false) ->
-      (match value.Ast.node with
-       | Ast.Fun (param, _, fn_body) ->
-         let name =
-           match pat.Ast.pnode with Ast.P_var n -> n | _ -> assert false
-         in
+    | Ast.Let (pat, value, rest) ->
+      (* Phase 24.4: walk through ALL top-level Let chains so a non-Fun
+         Let (e.g., `let path = "/tmp/x"`) doesn't break the chain and
+         block subsequent `let rec` from being lifted. Fun-valued Lets
+         with P_var → extract as skel + drop from body. Other Lets →
+         keep in body + walk rest. *)
+      (match pat.Ast.pnode, value.Ast.node with
+       | Ast.P_var name, Ast.Fun (param, _, fn_body) ->
          let more, rest' = go rest in
          { sname = name; sparam = param; sbody = fn_body; sfun = value }
          :: more, rest'
-       | _ -> [], e)
+       | _ ->
+         let more, rest' = go rest in
+         more, { e with Ast.node = Ast.Let (pat, value, rest') })
     | Ast.Let_rec (bindings, rest) ->
       let skels =
         List.map (fun (n, v) ->
@@ -2513,6 +2525,43 @@ let str_concat_helper =
       "  }";
       "  r[j] = '\\0';";
       "  return r;";
+      "}";
+      "";
+      (* Phase 24.4: str_count s needle — non-overlapping count. *)
+      "static int __lang_str_count(const char* s, const char* n) {";
+      "  if (n[0] == '\\0') return 0;";
+      "  size_t slen = strlen(s);";
+      "  size_t nlen = strlen(n);";
+      "  int acc = 0;";
+      "  for (size_t i = 0; i + nlen <= slen; ) {";
+      "    if (memcmp(s + i, n, nlen) == 0) { acc++; i += nlen; }";
+      "    else i++;";
+      "  }";
+      "  return acc;";
+      "}";
+      "";
+      (* Phase 24.4: read_file / write_file — stdio wrapping with region
+         alloc for read_file's returned buffer. Errors → fail via
+         __lang_fail_impl which longjmps if try_or is active. *)
+      "static const char* __lang_read_file(const char* path) {";
+      "  FILE* f = fopen(path, \"rb\");";
+      "  if (!f) __lang_fail_impl(path);";
+      "  fseek(f, 0, SEEK_END);";
+      "  long len = ftell(f);";
+      "  fseek(f, 0, SEEK_SET);";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, (size_t)len + 1);";
+      "  if (len > 0) { size_t r = fread(buf, 1, (size_t)len, f); (void)r; }";
+      "  buf[len] = '\\0';";
+      "  fclose(f);";
+      "  return buf;";
+      "}";
+      "static int __lang_write_file(const char* path, const char* content) {";
+      "  FILE* f = fopen(path, \"wb\");";
+      "  if (!f) __lang_fail_impl(path);";
+      "  size_t len = strlen(content);";
+      "  if (len > 0) { size_t w = fwrite(content, 1, len, f); (void)w; }";
+      "  fclose(f);";
+      "  return 0;";
       "}";
       "";
       (* Phase 22.6: str_unescape — backslash escapes (n / t / r / backslash
