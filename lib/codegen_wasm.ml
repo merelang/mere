@@ -109,6 +109,12 @@ let strbuf_used = ref false
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
 let logger_used = ref false
 let metrics_used = ref false
+(* Phase 26.1: stdlib builtin usage flags for Wasm. *)
+let char_table_used = ref false
+let fail_used = ref false
+let substring_used = ref false
+let int_of_str_used = ref false
+let str_unescape_used = ref false
 
 (* Phase 15.10/15.14: Map[R, K, V] — Wasm では値が全部 i32 なので per-V
    は不要、per-K のみ。K の型を `map_key_types` に登録、emit_program で
@@ -630,9 +636,21 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr b;
     emit_instr (wasm_binop op)
   | Ast.Cmp (op, a, b) ->
-    emit_expr a;
-    emit_expr b;
-    emit_instr (wasm_cmp op)
+    (* Phase 26.1: TyStr comparison via $__lang_streq (eq/ne only — the
+       other ops would need a 3-way compare runtime helper). *)
+    let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+    (match a_ty, op with
+     | Ast.TyStr, Ast.Eq ->
+       emit_expr a; emit_expr b;
+       emit_instr "call $__lang_streq"
+     | Ast.TyStr, Ast.Ne ->
+       emit_expr a; emit_expr b;
+       emit_instr "call $__lang_streq";
+       emit_instr "i32.eqz"
+     | _ ->
+       emit_expr a;
+       emit_expr b;
+       emit_instr (wasm_cmp op))
   | Ast.Logic (op, a, b) ->
     emit_expr a;
     emit_expr b;
@@ -734,6 +752,44 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr h_e;
     emit_expr n_e;
     emit_instr "call $__lang_str_index_of"
+  (* Phase 26.1: fail / char / substring / int_of_str / str_of_int /
+     str_unescape — LLVM Phase 25.1 / 25.4 の Wasm 版。 *)
+  | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
+    fail_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_fail"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "char_at"; _ }, s_e); _ }, i_e) ->
+    char_table_used := true;
+    emit_expr s_e;
+    emit_expr i_e;
+    emit_instr "call $__lang_char_at"
+  | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_is_digit"
+  | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_is_alpha"
+  | Ast.App ({ node = Ast.Var "is_space"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_is_space"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
+    substring_used := true;
+    emit_expr s_e;
+    emit_expr start_e;
+    emit_expr end_e;
+    emit_instr "call $__lang_substring"
+  | Ast.App ({ node = Ast.Var "int_of_str"; _ }, arg) ->
+    int_of_str_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_int_of_str"
+  | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
+    (* str_of_int is an alias for show_int. *)
+    emit_expr arg;
+    emit_instr "call $show_int"
+  | Ast.App ({ node = Ast.Var "str_unescape"; _ }, arg) ->
+    str_unescape_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_str_unescape"
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.4: vec_new () — region は無視 (Wasm の bump はグローバル
        で一本)、要素は全て 4 byte i32 なので単一 runtime で OK。
@@ -1847,7 +1903,140 @@ let runtime_helpers = {|
         (if (local.get $match) (then (return (local.get $i))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_outer)))
-    (i32.const -1))|}
+    (i32.const -1))
+  ;; Phase 26.1: fail msg — print "fail: <msg>\n" and trap. No setjmp/longjmp
+  ;; in Wasm MVP, so we just `unreachable` (trap). Phase 26.2 will revisit
+  ;; for try_or via a different mechanism. Returns i32 (any expected type)
+  ;; via the trap — the result value is never observed.
+  (func $__lang_fail (param $msg i32) (result i32)
+    (call $puts (local.get $msg))
+    (unreachable))
+  ;; Phase 26.1: char_at s i — return pointer to a single-byte string
+  ;; (preallocated 256-entry static char_table). Mirrors C/LLVM.
+  ;; The table itself is set up at module-init by storing 256 pairs of
+  ;; (char, \0) starting at the global offset $__lang_char_table.
+  (func $__lang_char_at_setup
+    (local $k i32) (local $base i32)
+    (if (i32.eqz (global.get $__lang_char_table_initialized))
+      (then
+        (global.set $__lang_char_table_initialized (i32.const 1))
+        (local.set $base (global.get $__lang_char_table))
+        (local.set $k (i32.const 0))
+        (block $end
+          (loop $lp
+            (br_if $end (i32.eq (local.get $k) (i32.const 256)))
+            (i32.store8 (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 2)))
+                        (local.get $k))
+            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 2))) (i32.const 1))
+                        (i32.const 0))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br $lp))))))
+  (func $__lang_char_at (param $s i32) (param $i i32) (result i32)
+    (call $__lang_char_at_setup)
+    (i32.add (global.get $__lang_char_table)
+             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 2))))
+  (func $__lang_is_digit (param $s i32) (result i32)
+    (local $c i32)
+    (local.set $c (i32.load8_u (local.get $s)))
+    (i32.and (i32.ge_s (local.get $c) (i32.const 48))
+             (i32.le_s (local.get $c) (i32.const 57))))
+  (func $__lang_is_alpha (param $s i32) (result i32)
+    (local $c i32)
+    (local.set $c (i32.load8_u (local.get $s)))
+    (i32.or
+      (i32.and (i32.ge_s (local.get $c) (i32.const 97))
+               (i32.le_s (local.get $c) (i32.const 122)))
+      (i32.and (i32.ge_s (local.get $c) (i32.const 65))
+               (i32.le_s (local.get $c) (i32.const 90)))))
+  (func $__lang_is_space (param $s i32) (result i32)
+    (local $c i32)
+    (local.set $c (i32.load8_u (local.get $s)))
+    (i32.or
+      (i32.or (i32.eq (local.get $c) (i32.const 32))
+              (i32.eq (local.get $c) (i32.const 9)))
+      (i32.or (i32.eq (local.get $c) (i32.const 10))
+              (i32.eq (local.get $c) (i32.const 13)))))
+  ;; Phase 26.1: substring s start end_ — region alloc + memcpy.
+  (func $__lang_substring (param $s i32) (param $start i32) (param $end_ i32) (result i32)
+    (local $len i32) (local $r i32) (local $i i32)
+    (local.set $len (i32.sub (local.get $end_) (local.get $start)))
+    (if (i32.lt_s (local.get $len) (i32.const 0))
+      (then (local.set $len (i32.const 0))))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (i32.store8 (i32.add (local.get $r) (local.get $i))
+                    (i32.load8_u (i32.add (local.get $s)
+                                          (i32.add (local.get $start) (local.get $i)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (local.get $r))
+  ;; Phase 26.1: int_of_str s — parse leading sign + digits. Stops at
+  ;; first non-digit byte. Mirrors atoi semantics.
+  (func $__lang_int_of_str (param $s i32) (result i32)
+    (local $i i32) (local $sign i32) (local $acc i32) (local $c i32)
+    (local.set $i (i32.const 0))
+    (local.set $sign (i32.const 1))
+    (local.set $acc (i32.const 0))
+    (local.set $c (i32.load8_u (local.get $s)))
+    (if (i32.eq (local.get $c) (i32.const 45))  ;; '-'
+      (then
+        (local.set $sign (i32.const -1))
+        (local.set $i (i32.const 1))))
+    (block $end
+      (loop $lp
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (br_if $end (i32.eqz (local.get $c)))
+        (br_if $end (i32.or
+          (i32.lt_s (local.get $c) (i32.const 48))
+          (i32.gt_s (local.get $c) (i32.const 57))))
+        (local.set $acc (i32.add
+          (i32.mul (local.get $acc) (i32.const 10))
+          (i32.sub (local.get $c) (i32.const 48))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.mul (local.get $acc) (local.get $sign)))
+  ;; Phase 26.1: str_unescape s — replace backslash-escape sequences
+  ;; (\n, \t, \r, \\ , \", \/) with the actual byte. Region-allocated.
+  (func $__lang_str_unescape (param $s i32) (result i32)
+    (local $n i32) (local $r i32) (local $i i32) (local $j i32)
+    (local $c i32) (local $ec i32)
+    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (local.set $j (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.ge_s (local.get $i) (local.get $n)))
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (if (i32.and
+              (i32.eq (local.get $c) (i32.const 92))  ;; '\\'
+              (i32.lt_s (i32.add (local.get $i) (i32.const 1)) (local.get $n)))
+          (then
+            (local.set $ec (i32.load8_u (i32.add (local.get $s) (i32.add (local.get $i) (i32.const 1)))))
+            (if (i32.eq (local.get $ec) (i32.const 110))      ;; 'n'
+              (then (local.set $ec (i32.const 10)))
+              (else (if (i32.eq (local.get $ec) (i32.const 116))  ;; 't'
+                (then (local.set $ec (i32.const 9)))
+                (else (if (i32.eq (local.get $ec) (i32.const 114))  ;; 'r'
+                  (then (local.set $ec (i32.const 13))))))))
+            (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $ec))
+            (local.set $i (i32.add (local.get $i) (i32.const 2)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1))))
+          (else
+            (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $c))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))))
+        (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
+    (local.get $r))|}
 
 (* Phase 15.4: Vec[R, T] runtime — all element types share one
    implementation because every Mere value lowers to a 4-byte i32 in
@@ -2761,6 +2950,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   strbuf_used := false;
   logger_used := false;
   metrics_used := false;
+  char_table_used := false;
+  fail_used := false;
+  substring_used := false;
+  int_of_str_used := false;
+  str_unescape_used := false;
   map_int_used := false;
   map_str_used := false;
   Hashtbl.reset map_key_types;
@@ -3055,7 +3249,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "  (table 0 funcref)\n"
     else ""
   in
-  let bump_init = !str_offset_counter in
+  (* Phase 26.1: reserve 512 bytes for __lang_char_table (256 * 2-byte cells).
+     Always reserved (low overhead) so the char_at helper can lazy-init it
+     on first call without needing per-module conditional layout. *)
+  let char_table_offset = !str_offset_counter in
+  let bump_init = !str_offset_counter + 512 in
   let vec_runtime_section = if !vec_used then vec_runtime else "" in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
@@ -3141,6 +3339,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      \  (memory (export \"memory\") 1)\n\
      %s\
      \  (global $__lang_bump (mut i32) (i32.const %d))\n\
+     \  (global $__lang_char_table i32 (i32.const %d))\n\
+     \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      %s\
      %s\
      %s\
@@ -3153,7 +3353,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
-    table_section bump_init data_section runtime_helpers vec_runtime_section
+    table_section bump_init char_table_offset
+    data_section runtime_helpers vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     vec_to_list_section list_len_section
     fn_section local_decl indented_body

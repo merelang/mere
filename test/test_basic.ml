@@ -6168,6 +6168,73 @@ let () =
         match A 42 with | A n -> show n | B s -> s") in
      if String.length wat > 0 then "ok" else "empty")
     "ok";
+  (* Phase 26.1: Wasm stdlib builtins (LLVM Phase 25.1/25.4 の Wasm 版). *)
+  check "§26.1: Wasm emits fail builtin (unreachable trap)"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "if true then 1 else fail \"never\"") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_fail" then "ok" else "missing")
+    "ok";
+  check "§26.1: Wasm emits char_at + is_digit"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyBool (typed_prog
+       "is_digit (char_at \"a1\" 1)") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_char_at" && has "$__lang_is_digit" then "ok" else "missing")
+    "ok";
+  check "§26.1: Wasm emits substring + int_of_str"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "int_of_str (substring \"123abc\" 0 3)") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_substring" && has "$__lang_int_of_str" then "ok" else "missing")
+    "ok";
+  check "§26.1: Wasm emits str_unescape"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "str_unescape \"a\\\\nb\"") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_str_unescape" then "ok" else "missing")
+    "ok";
+  check "§26.1: Wasm emits strcmp for TyStr eq"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyBool (typed_prog
+       "\"hello\" == \"hello\"") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "call $__lang_streq" then "ok" else "missing")
+    "ok";
+
   check "§26.0: Wasm emits poly variant (json-style nested)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
        "type myjson = JNum of int | JBool of bool | JStr of str;\n\
