@@ -6005,5 +6005,37 @@ let () =
      if has "id__int" && has "id__str" then "ok" else "missing-spec")
     "ok";
 
+  (* Phase 25.3: LLVM inner let-rec lifting. C codegen の inner-fn lift を
+     LLVM codegen に移植。anonymous closure を per-host scope で drain
+     できるよう ce_host を closure_emission に追加。mini_calc が LLVM
+     codegen 完全動作 (interp と diff = 0)。 *)
+  check "§25.3: LLVM inner let-rec lifts (self-recursive)"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let sum_to = fn (n: int) ->\n\
+       \  let rec go = fn (i: int) ->\n\
+       \    if i > n then 0 else i + go (i + 1)\n\
+       \  in go 1;\n\
+        sum_to 10") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "__lifted_go_" then "ok" else "no-lift")
+    "ok";
+  check "§25.3: LLVM inner-lifted call inside anonymous closure body"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let host = fn (n: int) ->\n\
+       \  let rec loop = fn (acc: int) -> fn (k: int) ->\n\
+       \    if k == 0 then acc else (loop (acc + k)) (k - 1)\n\
+       \  in (loop 0) n;\n\
+        host 5") in
+     if String.length ll > 0 then "ok" else "empty")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

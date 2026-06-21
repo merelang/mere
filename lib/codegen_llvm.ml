@@ -418,6 +418,50 @@ type fn_decl = {
 (* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 25.3: inner-fn lifting (port from codegen_c). Inner Let-bound
+   fns / Let_rec are lifted out to top-level @-named fns at codegen
+   time, with their captured free vars prepended as parameters. The
+   in-body Var dispatch uses inner_lifts to find the lifted name + capture
+   list. Per-host scope (inner_lifts_by_host) avoids name clashes when
+   two host fns both have `let rec loop = ...`. *)
+type lifted_inner_llvm = {
+  lifted_name : string;
+  captures    : (string * Ast.ty) list;
+}
+let inner_lifts_llvm : (string, lifted_inner_llvm) Hashtbl.t = Hashtbl.create 8
+let inner_lifts_by_host_llvm : (string, (string, lifted_inner_llvm) Hashtbl.t) Hashtbl.t =
+  Hashtbl.create 8
+let set_inner_lifts_for_host_llvm (host : string) : unit =
+  Hashtbl.reset inner_lifts_llvm;
+  (match Hashtbl.find_opt inner_lifts_by_host_llvm host with
+   | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts_llvm k v) tbl
+   | None -> ())
+
+type lifted_fn_llvm = {
+  l_name      : string;
+  l_captures  : (string * Ast.ty) list;
+  l_param     : string;
+  l_param_ty  : Ast.ty;
+  l_body      : Ast.expr;
+  l_return_ty : Ast.ty;
+  l_host      : string;
+}
+
+let inner_fn_counter_llvm = ref 0
+let fresh_inner_name_llvm (base : string) : string =
+  let n = !inner_fn_counter_llvm in
+  incr inner_fn_counter_llvm;
+  Printf.sprintf "__lifted_%s_%d" base n
+
+(* Phase 25.3: collect lifted_fn_llvm during walk; emit them at the end
+   of emit_program (similar to top-level fns). *)
+let lifted_fns_llvm : lifted_fn_llvm list ref = ref []
+
+(* Phase 25.3: name of the currently-emitting top-level (or lifted) fn,
+   so anonymous-Fun closures queued in pending_closures can remember
+   which host scope they belong to (their inner_lifts_llvm view). *)
+let current_host_fn_llvm : string ref = ref ""
+
 (* Concrete LLVM-side types of in-scope name bindings. Used to recover
    concrete arrow types when an inner App's head Var still has a
    polymorphic `.ty` from let-poly generalization. Saved/restored
@@ -539,6 +583,7 @@ type closure_emission = {
   ce_param_ty     : Ast.ty;
   ce_return_ty    : Ast.ty;
   ce_body         : Ast.expr;
+  mutable ce_host : string;  (* Phase 25.3: host scope at queue time *)
 }
 let pending_closures : closure_emission list ref = ref []
 let anon_env_typedefs : string list ref = ref []
@@ -658,6 +703,148 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       raise (Codegen_error (s.sfun.Ast.loc,
         Printf.sprintf "function `%s` has non-arrow inferred type" s.sname))
   ) skels
+
+(* Phase 25.3: lookup a free var's concrete type by scanning the inner
+   fn body. Mirrors codegen_c's lookup_var_ty. *)
+let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
+  let found = ref Ast.TyUnit in
+  let stop = ref false in
+  let rec go (e : Ast.expr) =
+    if !stop then () else
+    match e.Ast.node with
+    | Ast.Var n when n = name ->
+      (match e.Ast.ty with
+       | Some t when ty_is_concrete (Ast.walk t) ->
+         found := Ast.walk t; stop := true
+       | _ -> ())
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s; List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, _, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go body; !found
+
+(* Phase 25.3: lift inner Let-Fun / Let_rec to top-level lifted fns.
+   Same algorithm as codegen_c's lift_inner_fns, adapted to populate
+   inner_lifts_by_host_llvm + lifted_fns_llvm. *)
+let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : unit =
+  Hashtbl.reset inner_lifts_llvm;
+  Hashtbl.reset inner_lifts_by_host_llvm;
+  inner_fn_counter_llvm := 0;
+  lifted_fns_llvm := [];
+  let builtin_names = List.map fst Typer.initial_env in
+  let known = ref (toplevel_names @ builtin_names) in
+  let current_host = ref "" in
+  let lift_one _host_param host_locals n p fn_body value_loc value_ty =
+    let effective_known =
+      List.filter (fun k -> not (List.mem k host_locals)) !known
+    in
+    let body_fvs = free_vars fn_body (p :: effective_known) in
+    let captures =
+      List.map (fun fv ->
+        let ty = lookup_var_ty_llvm fn_body fv in
+        (fv, ty)) body_fvs
+    in
+    let lifted_name = fresh_inner_name_llvm n in
+    let return_ty, param_ty =
+      match value_ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyArrow (a, b) -> (Ast.walk b, Ast.walk a)
+         | _ -> raise (Codegen_error (value_loc, "inner fn has non-arrow type")))
+      | None -> raise (Codegen_error (value_loc, "inner fn missing type"))
+    in
+    let lf = {
+      l_name = lifted_name; l_captures = captures;
+      l_param = p; l_param_ty = param_ty;
+      l_body = fn_body; l_return_ty = return_ty;
+      l_host = !current_host;
+    } in
+    lifted_fns_llvm := lf :: !lifted_fns_llvm;
+    let entry = { lifted_name; captures } in
+    Hashtbl.replace inner_lifts_llvm n entry;
+    let host_tbl =
+      match Hashtbl.find_opt inner_lifts_by_host_llvm !current_host with
+      | Some t -> t
+      | None ->
+        let t = Hashtbl.create 4 in
+        Hashtbl.add inner_lifts_by_host_llvm !current_host t;
+        t
+    in
+    Hashtbl.replace host_tbl n entry;
+    known := lifted_name :: !known;
+    fn_body
+  in
+  let rec walk (host_param : string) (host_locals : string list) (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Let (pat, value, body) ->
+      (match pat.Ast.pnode, value.Ast.node with
+       | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
+         let fn_body = lift_one host_param host_locals n p fn_body value.Ast.loc value.Ast.ty in
+         walk p [] fn_body;
+         walk host_param (n :: host_locals) body
+       | _ ->
+         walk host_param host_locals value;
+         walk host_param (pattern_vars pat @ host_locals) body)
+    | Ast.Let_rec (bindings, body) ->
+      let rec_names = List.map fst bindings in
+      let fn_specs = List.map (fun (n, value) ->
+        match value.Ast.node with
+        | Ast.Fun (p, _, fn_body) ->
+          (n, p, fn_body, value.Ast.loc, value.Ast.ty)
+        | _ ->
+          raise (Codegen_error (value.Ast.loc,
+            "inner let-rec binding must be a single-arg fn"))) bindings
+      in
+      known := rec_names @ !known;
+      List.iter (fun (n, p, fb, loc, vty) ->
+        let _ = lift_one host_param host_locals n p fb loc vty in ()) fn_specs;
+      List.iter (fun (_, p, fb, _, _) -> walk p [] fb) fn_specs;
+      walk host_param (rec_names @ host_locals) body
+    | Ast.Fun (_, _, b) -> walk host_param host_locals b
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk host_param host_locals a; walk host_param host_locals b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk host_param host_locals a
+    | Ast.With (_, v, b) -> walk host_param host_locals v; walk host_param host_locals b
+    | Ast.If (c, t, e_) -> walk host_param host_locals c; walk host_param host_locals t; walk host_param host_locals e_
+    | Ast.Constr (_, Some a) -> walk host_param host_locals a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk host_param host_locals s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk host_param host_locals ge | None -> ());
+        walk host_param host_locals b) arms
+    | Ast.Tuple es -> List.iter (walk host_param host_locals) es
+    | Ast.Region_block (_, b) -> walk host_param host_locals b
+    | Ast.Ref (_, _, a) -> walk host_param host_locals a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk host_param host_locals e) fs
+    | Ast.Field_get (a, _) -> walk host_param host_locals a
+    | Ast.Record_update (a, fs) ->
+      walk host_param host_locals a;
+      List.iter (fun (_, e) -> walk host_param host_locals e) fs
+  in
+  List.iter (fun (f : fn_decl) ->
+    current_host := f.name;
+    walk f.param [f.param] f.body) fns
 
 (* Walk a typed AST + fn signatures to collect every concrete tuple shape
    so we can emit `%tuple_int_str = type { i32, ptr }` for each. *)
@@ -1674,6 +1861,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   | Ast.Let (pat, value, body) ->
     (match pat.Ast.pnode with
+     | Ast.P_var name when
+         (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
+         && Hashtbl.mem inner_lifts_llvm name ->
+       (* Phase 25.3: inner-lifted fn binding — body holds the call sites,
+          the definition lives at top level (lifted). Just emit body. *)
+       emit_expr env body
      | Ast.P_var name ->
        let rv = emit_expr env value in
        let saved = !current_var_types in
@@ -2429,6 +2622,36 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     ignore inner_cl_name;
     r
   | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem inner_lifts_llvm name ->
+    (* Phase 25.3: inner-lifted fn call. Prepend captures (by name from env)
+       then the arg. *)
+    let li = Hashtbl.find inner_lifts_llvm name in
+    let av = emit_expr env arg in
+    let arg_ty_str =
+      match arg.Ast.ty with
+      | Some t -> llvm_ty_of (Ast.walk t)
+      | None -> "i32"
+    in
+    let cap_args =
+      List.map (fun (cn, cty) ->
+        let cv =
+          match List.assoc_opt cn env with
+          | Some v -> v
+          | None -> "%" ^ cn  (* fallback *)
+        in
+        Printf.sprintf "%s %s" (llvm_ty_of cty) cv
+      ) li.captures
+    in
+    let all_args = String.concat ", " (cap_args @ [Printf.sprintf "%s %s" arg_ty_str av]) in
+    let ret_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of (Ast.walk t)
+      | None -> "i32"
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s @%s(%s)" r ret_ty li.lifted_name all_args);
+    r
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     let av = emit_expr env arg in
     let ret_ty =
@@ -3135,6 +3358,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       ce_param_ty = param_ty;
       ce_return_ty = return_ty;
       ce_body = fn_body;
+      ce_host = !current_host_fn_llvm;
     } :: !pending_closures;
     (* Env struct typedef (even when empty — only emit if captures > 0). *)
     if captures <> [] then begin
@@ -3287,8 +3511,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_instr (Printf.sprintf "  store ptr null, ptr %s" dp)
      | _ -> ());
     body_v
-  | Ast.Float_lit _
-  | Ast.Let_rec _ ->
+  | Ast.Let_rec (bindings, body) ->
+    (* Phase 25.3: inner let-rec lifting. If all bindings are registered
+       in inner_lifts_llvm (= lifted to top level), just emit body. *)
+    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_llvm n) bindings then
+      emit_expr env body
+    else
+      unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
+  | Ast.Float_lit _ ->
     unsupported e.Ast.loc "node kind not yet in Phase 5 MVP"
 
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture
@@ -3299,6 +3529,11 @@ let emit_anon_adapter (ce : closure_emission) : string =
   let saved_reg = !reg_counter and saved_lbl = !label_counter in
   let saved_vt = !current_var_types in
   let saved_exp = !current_expected_ty in
+  let saved_host = !current_host_fn_llvm in
+  (* Phase 25.3: restore the host scope this closure was queued under,
+     so its body can resolve recursive calls into inner-lifted siblings. *)
+  set_inner_lifts_for_host_llvm ce.ce_host;
+  current_host_fn_llvm := ce.ce_host;
   reg_counter := 0;
   label_counter := 0;
   instrs := [];
@@ -3330,10 +3565,49 @@ let emit_anon_adapter (ce : closure_emission) : string =
   label_counter := saved_lbl;
   current_var_types := saved_vt;
   current_expected_ty := saved_exp;
+  current_host_fn_llvm := saved_host;
   Printf.sprintf
     "define %s @%s(ptr %%env_self, %s %%%s) {\n%s\n}"
     (llvm_ty_of ce.ce_return_ty) ce.ce_adapter_name
     (llvm_ty_of ce.ce_param_ty) ce.ce_param body
+
+(* Phase 25.3: emit a lifted inner fn as top-level @-named LLVM IR.
+   Captures + param prepended as parameters. The body's free vars resolve
+   to either capture parameters or to recursive inner-lifted calls (via
+   inner_lifts_llvm, set up by set_inner_lifts_for_host_llvm). *)
+let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
+  set_inner_lifts_for_host_llvm lf.l_host;
+  reg_counter := 0;
+  label_counter := 0;
+  let saved_instrs = !instrs in
+  let saved_vt = !current_var_types in
+  let saved_exp = !current_expected_ty in
+  let saved_host = !current_host_fn_llvm in
+  instrs := [];
+  current_expected_ty := Some lf.l_return_ty;
+  current_host_fn_llvm := lf.l_host;
+  emit_instr "entry:";
+  let env =
+    List.map (fun (n, _) -> (n, "%" ^ n)) lf.l_captures
+    @ [(lf.l_param, "%" ^ lf.l_param)]
+  in
+  current_var_types :=
+    List.map (fun (n, t) -> (n, t)) lf.l_captures
+    @ [(lf.l_param, lf.l_param_ty)];
+  let rv = emit_expr env lf.l_body in
+  emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of lf.l_return_ty) rv);
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs;
+  current_var_types := saved_vt;
+  current_expected_ty := saved_exp;
+  current_host_fn_llvm := saved_host;
+  let params =
+    String.concat ", "
+      (List.map (fun (n, t) -> Printf.sprintf "%s %%%s" (llvm_ty_of t) n)
+         (lf.l_captures @ [(lf.l_param, lf.l_param_ty)]))
+  in
+  Printf.sprintf "define %s @%s(%s) {\n%s\n}"
+    (llvm_ty_of lf.l_return_ty) lf.l_name params body
 
 (* Env-ignoring adapter so the top-level fn `f` can be used as a closure
    value: `T2 @f_closure_fn(ptr unused, T1 %x) { ret T2 @f(T1 %x); }`. *)
@@ -3355,9 +3629,11 @@ let emit_fn_def (f : fn_decl) : string =
   let saved = !instrs in
   let saved_types = !current_var_types in
   let saved_exp = !current_expected_ty in
+  let saved_host = !current_host_fn_llvm in
   instrs := [];
   current_var_types := [(f.param, f.param_ty)];
   current_expected_ty := Some f.return_ty;
+  current_host_fn_llvm := f.name;
   emit_instr "entry:";
   let env = [(f.param, "%" ^ f.param)] in
   let rv = emit_expr env f.body in
@@ -3366,6 +3642,7 @@ let emit_fn_def (f : fn_decl) : string =
   instrs := saved;
   current_var_types := saved_types;
   current_expected_ty := saved_exp;
+  current_host_fn_llvm := saved_host;
   Printf.sprintf "define %s @%s(%s %%%s) {\n%s\n}"
     (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
 
@@ -5113,7 +5390,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let show_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
   in
-  let fn_defs = List.map emit_fn_def fns in
+  (* Phase 25.3: lift inner fns to top-level. Must run BEFORE
+     emit_fn_def so emit_expr can see inner_lifts_llvm during body emit. *)
+  let toplevel_names = List.map (fun f -> f.name) fns in
+  lift_inner_fns_llvm toplevel_names fns;
+  let fn_defs =
+    List.map (fun f ->
+      set_inner_lifts_for_host_llvm f.name;
+      emit_fn_def f) fns
+  in
+  let lifted_defs = List.map emit_lifted_fn_llvm !lifted_fns_llvm in
   let closure_adapters = List.map emit_closure_adapter fns in
   (* Reset counters for the main body. *)
   reg_counter := 0;
@@ -5312,6 +5598,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_to_owned_helpers = [] then [] else vec_to_owned_helpers @ [""])
     @ (if owned_vec_to_vec_helpers = [] then [] else owned_vec_to_vec_helpers @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
+    @ (if lifted_defs = [] then [] else lifted_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
     @ (if anon_adapters = [] then [] else anon_adapters @ [""])
