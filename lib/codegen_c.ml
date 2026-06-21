@@ -589,13 +589,23 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s -> Ast.escape_string s
   | Ast.Var name ->
+    (* Phase 24.1: shadowing check — if the name is bound as a local
+       (in current_var_types) or by a captured env field
+       (current_env_subst), treat it as a regular var, NOT the builtin.
+       Otherwise template_engine's `let len = str_len template in` would
+       trip the "len as a value" guard below. *)
+    let is_shadowed =
+      List.mem_assoc name !current_var_types
+      || List.mem_assoc name !current_env_subst
+    in
     (* Vec builtins are interpreter-only (Phase 12.1). Reject early in
        codegen with a clear message rather than emitting code that
        fails at C compile time with undeclared-identifier errors. *)
     (* Phase 15.1: vec_new / vec_push / vec_get / vec_len は App
        handler の special-case で直接 emit する。first-class value 用法
        (let f = vec_new in ...) はまだ未対応で、ここで reject される。 *)
-    if name = "vec_new" || name = "vec_push"
+    if not is_shadowed && (
+       name = "vec_new" || name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
        || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
@@ -606,10 +616,10 @@ let rec emit_expr (e : Ast.expr) : string =
        || name = "strbuf_new" || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
        || name = "map_new" || name = "map_set" || name = "map_get"
-       || name = "map_has" || name = "map_len" || name = "map_iter" then
+       || name = "map_has" || name = "map_len" || name = "map_iter") then
       unsupported e.loc
         (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
-    if name = "len" || name = "vec_to_list" then
+    if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
     (* If we're inside a closure adapter and this name is one of the
@@ -2973,22 +2983,27 @@ let lift_inner_fns
      initial env). Closure captures must exclude these. *)
   let builtin_names = List.map fst Typer.initial_env in
   let known = ref (toplevel_names @ builtin_names) in
-  let lift_one host_param n p fn_body value_loc value_ty =
-    let body_fvs = free_vars fn_body (p :: !known) in
+  let lift_one host_param host_locals n p fn_body value_loc value_ty =
+    (* Phase 24.1: subtract host_locals from `known` so that builtins
+       shadowed by a local `let` in the host fn (e.g., `let len = ...`)
+       are NOT excluded from free_vars — they should be captured. *)
+    let effective_known =
+      List.filter (fun k -> not (List.mem k host_locals)) !known
+    in
+    let body_fvs = free_vars fn_body (p :: effective_known) in
     let captures =
       List.map (fun fv ->
         let ty = lookup_var_ty fn_body fv in
         (fv, ty)) body_fvs
     in
-    List.iter (fun (_, ty) ->
-      match Ast.walk ty with
-      | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
-      | _ ->
-        raise (Codegen_error (value_loc,
-          Printf.sprintf
-            "closure capture of non-primitive type `%s` not yet supported"
-            (Ast.pp_ty ty))))
-      captures;
+    (* Phase 24.1: previously restricted captures to primitive types
+       (int / bool / str / unit). Anonymous closures (pending_closures
+       path) have always supported all types via c_type_of, so the
+       same should work for inner-lifted fns. Allow all types that
+       can be emitted by c_type_of; defer the check to env struct
+       emission where c_type_of will raise on truly-unsupported types
+       (e.g., float). *)
+    List.iter (fun (_, _ty) -> ()) captures;
     let lifted_name = fresh_inner_name n in
     let return_ty, param_ty =
       match value_ty with
@@ -3023,31 +3038,24 @@ let lift_inner_fns
     known := lifted_name :: !known;
     (host_param, fn_body)
   in
-  let rec walk_in_fn (host_param : string) (e : Ast.expr) =
+  let rec walk_in_fn (host_param : string) (host_locals : string list) (e : Ast.expr) =
     match e.Ast.node with
     | Ast.Let (pat, value, body) ->
       (match pat.Ast.pnode, value.Ast.node with
        | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
          let (host_param, fn_body) =
-           lift_one host_param n p fn_body value.Ast.loc value.Ast.ty
+           lift_one host_param host_locals n p fn_body value.Ast.loc value.Ast.ty
          in
-         walk_in_fn p fn_body;
-         walk_in_fn host_param body
+         walk_in_fn p [] fn_body;
+         walk_in_fn host_param (n :: host_locals) body
        | _ ->
-         walk_in_fn host_param value;
-         walk_in_fn host_param body)
+         walk_in_fn host_param host_locals value;
+         (* Phase 24.1: extend host_locals with the pattern's bound names
+            so inner fns lifted in `body` can detect shadowed builtins. *)
+         walk_in_fn host_param (pattern_vars pat @ host_locals) body)
     | Ast.Let_rec (bindings, body) ->
-      (* Phase 22.2: inner let-rec lifting. For each binding (n, Fun (p, _, body))
-         in this Let_rec, register its lifted name in inner_lifts BEFORE
-         walking any body — so recursive (and mutual) calls resolve via
-         the standard inner-lifts call-site rewriting. Captures for each
-         binding exclude all rec names introduced here (they become globals
-         after lifting). *)
       let rec_names = List.map fst bindings in
       let known_before = !known in
-      (* First pass: provisionally compute captures + register all rec
-         names in `known` so recursive calls don't count themselves /
-         each other as captures. *)
       let fn_specs = List.map (fun (n, value) ->
         match value.Ast.node with
         | Ast.Fun (p, _, fn_body) ->
@@ -3056,58 +3064,52 @@ let lift_inner_fns
           raise (Codegen_error (value.Ast.loc,
             "inner let-rec binding must be a single-arg function"))
       ) bindings in
-      (* Pretend each rec name is "known" (so they're excluded from
-         each other's free-var sets). *)
       known := rec_names @ !known;
       List.iter (fun (n, p, fn_body, loc, vty) ->
-        let _ = lift_one host_param n p fn_body loc vty in ()
+        let _ = lift_one host_param host_locals n p fn_body loc vty in ()
       ) fn_specs;
-      (* Walk each lifted body now that all rec names are in inner_lifts. *)
       List.iter (fun (_, p, fn_body, _, _) ->
-        walk_in_fn p fn_body) fn_specs;
-      (* Restore known prefix — the rec names are still in `known` because
-         they were appended in `lift_one`, but we drop the temporary
-         pre-registration. (The lifted_name entries remain.) *)
+        walk_in_fn p [] fn_body) fn_specs;
       let _ = known_before in
-      walk_in_fn host_param body
+      walk_in_fn host_param (rec_names @ host_locals) body
     | Ast.Fun (_, _, body) ->
-      (* Anonymous Fun in expression position — handled by emit_expr
-         as a closure value (Phase B). Just recurse so deeper Funs are
-         walked too. *)
-      walk_in_fn host_param body
-    | _ -> walk_children walk_in_fn host_param e
-  and walk_children walker host_param e =
+      walk_in_fn host_param host_locals body
+    | _ -> walk_children walk_in_fn host_param host_locals e
+  and walk_children walker host_param host_locals e =
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> ()
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-    | Ast.App (a, b) -> walker host_param a; walker host_param b
-    | Ast.Neg a | Ast.Annot (a, _) -> walker host_param a
-    | Ast.Let (_, v, b) -> walker host_param v; walker host_param b
+    | Ast.App (a, b) -> walker host_param host_locals a; walker host_param host_locals b
+    | Ast.Neg a | Ast.Annot (a, _) -> walker host_param host_locals a
+    | Ast.Let (_, v, b) -> walker host_param host_locals v; walker host_param host_locals b
     | Ast.Let_rec (bs, b) ->
-      List.iter (fun (_, v) -> walker host_param v) bs;
-      walker host_param b
-    | Ast.With (_, v, b) -> walker host_param v; walker host_param b
-    | Ast.If (c, t, e_) -> walker host_param c; walker host_param t; walker host_param e_
-    | Ast.Fun (_, _, b) -> walker host_param b
-    | Ast.Constr (_, Some a) -> walker host_param a
+      List.iter (fun (_, v) -> walker host_param host_locals v) bs;
+      walker host_param host_locals b
+    | Ast.With (_, v, b) -> walker host_param host_locals v; walker host_param host_locals b
+    | Ast.If (c, t, e_) ->
+      walker host_param host_locals c;
+      walker host_param host_locals t;
+      walker host_param host_locals e_
+    | Ast.Fun (_, _, b) -> walker host_param host_locals b
+    | Ast.Constr (_, Some a) -> walker host_param host_locals a
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
-      walker host_param s;
+      walker host_param host_locals s;
       List.iter (fun (_, g, b) ->
-        (match g with Some ge -> walker host_param ge | None -> ());
-        walker host_param b) arms
-    | Ast.Tuple es -> List.iter (walker host_param) es
-    | Ast.Region_block (_, b) -> walker host_param b
-    | Ast.Ref (_, _, a) -> walker host_param a
-    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walker host_param e) fs
-    | Ast.Field_get (a, _) -> walker host_param a
+        (match g with Some ge -> walker host_param host_locals ge | None -> ());
+        walker host_param host_locals b) arms
+    | Ast.Tuple es -> List.iter (walker host_param host_locals) es
+    | Ast.Region_block (_, b) -> walker host_param host_locals b
+    | Ast.Ref (_, _, a) -> walker host_param host_locals a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walker host_param host_locals e) fs
+    | Ast.Field_get (a, _) -> walker host_param host_locals a
     | Ast.Record_update (a, fs) ->
-      walker host_param a; List.iter (fun (_, e) -> walker host_param e) fs
+      walker host_param host_locals a; List.iter (fun (_, e) -> walker host_param host_locals e) fs
   in
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
-    walk_in_fn f.param f.body) fns;
+    walk_in_fn f.param [f.param] f.body) fns;
   List.rev !lifted
 
 
