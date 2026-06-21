@@ -6221,6 +6221,22 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 26.2: Wasm try_or via fail flag + active-counter. *)
+  check "§26.2: Wasm try_or catches fail and returns default"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "try_or (fn () -> fail \"bad\") 42") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "$__lang_fail_active" && has "$__lang_fail_flag"
+        && has "call_indirect" then "ok" else "missing")
+    "ok";
+
   check "§26.1: Wasm emits strcmp for TyStr eq"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyBool (typed_prog
        "\"hello\" == \"hello\"") in

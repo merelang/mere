@@ -790,6 +790,44 @@ let rec emit_expr (e : Ast.expr) : unit =
     str_unescape_used := true;
     emit_expr arg;
     emit_instr "call $__lang_str_unescape"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e); _ }, default_e) ->
+    (* Phase 26.2: try_or fn default — Wasm 版。setjmp/longjmp が無いので
+       fail を flag-based の non-trapping mode に切り替え、try_or scope を
+       global active counter で管理。inner closure 呼出後に flag を check し、
+       set されていれば default を返す。 *)
+    fail_used := true;
+    (* Save active counter (depth) — using a fresh local. *)
+    let saved_active = fresh_local () in
+    let result_slot = fresh_local () in
+    emit_instr "global.get $__lang_fail_active";
+    emit_instr (Printf.sprintf "local.set %d" saved_active);
+    emit_instr "i32.const 1";
+    emit_instr "global.set $__lang_fail_active";
+    emit_instr "i32.const 0";
+    emit_instr "global.set $__lang_fail_flag";
+    (* Call fn () via closure indirect — fn_e is a closure value. *)
+    let cl_slot = fresh_local () in
+    emit_expr fn_e;
+    emit_instr (Printf.sprintf "local.set %d" cl_slot);
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.load offset=0";   (* env *)
+    emit_instr "i32.const 0";          (* unit arg *)
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.load offset=4";   (* fn_idx *)
+    emit_instr "call_indirect (type $cl)";
+    emit_instr (Printf.sprintf "local.set %d" result_slot);
+    (* Restore active counter. *)
+    emit_instr (Printf.sprintf "local.get %d" saved_active);
+    emit_instr "global.set $__lang_fail_active";
+    (* If fail flag set, drop result + emit default; else use result. *)
+    emit_instr "global.get $__lang_fail_flag";
+    emit_instr "if (result i32)";
+    emit_instr "i32.const 0";
+    emit_instr "global.set $__lang_fail_flag";
+    emit_expr default_e;
+    emit_instr "else";
+    emit_instr (Printf.sprintf "local.get %d" result_slot);
+    emit_instr "end"
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.4: vec_new () — region は無視 (Wasm の bump はグローバル
        で一本)、要素は全て 4 byte i32 なので単一 runtime で OK。
@@ -1904,11 +1942,15 @@ let runtime_helpers = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_outer)))
     (i32.const -1))
-  ;; Phase 26.1: fail msg — print "fail: <msg>\n" and trap. No setjmp/longjmp
-  ;; in Wasm MVP, so we just `unreachable` (trap). Phase 26.2 will revisit
-  ;; for try_or via a different mechanism. Returns i32 (any expected type)
-  ;; via the trap — the result value is never observed.
+  ;; Phase 26.1/26.2: fail msg — if a try_or scope is active, set the
+  ;; failure flag and return 0 (the caller's expected result type is i32
+  ;; for everything in Wasm). Otherwise print + trap. The flag /
+  ;; active-counter globals are declared at module level.
   (func $__lang_fail (param $msg i32) (result i32)
+    (if (global.get $__lang_fail_active)
+      (then
+        (global.set $__lang_fail_flag (i32.const 1))
+        (return (i32.const 0))))
     (call $puts (local.get $msg))
     (unreachable))
   ;; Phase 26.1: char_at s i — return pointer to a single-byte string
@@ -3341,6 +3383,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      \  (global $__lang_bump (mut i32) (i32.const %d))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
+     \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\
+     \  (global $__lang_fail_active (mut i32) (i32.const 0))\n\
      %s\
      %s\
      %s\
