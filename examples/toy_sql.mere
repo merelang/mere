@@ -253,6 +253,314 @@ let rev = fn (xs: 'a list) -> rev_aux xs Nil;
 
 let tokenize = fn (src: str) -> rev (tokenize_aux src 0 Nil);
 
+// === AST types (Phase 29.1) ===
+//   - col_ref: 名前 "name" or 修飾 "t.name"
+//   - oper:    = / < / >
+//   - where_clause: なし / 単項 / AND 連鎖
+//   - col_decl: CREATE TABLE 内の "name type"
+//   - cols:    SELECT の "*" or 列リスト
+//   - join:    JOIN 句あり / なし
+//   - stmt:    CREATE / INSERT / SELECT
+
+type col_ref =
+  | CName of str
+  | CQual of (str * str);  // (table_alias, col)
+
+type oper =
+  | OEq
+  | OLt
+  | OGt;
+
+type where_term = WT of (col_ref * oper * value);
+
+type where_clause =
+  | WAll
+  | WOne of where_term
+  | WAnd of (where_term * where_clause);
+
+type col_decl = CDecl of (str * col_type);
+
+type cols =
+  | CAll
+  | CList of col_ref list;
+
+type join =
+  | JNone
+  | JOn of (str * col_ref * col_ref);  // (table2, left_col, right_col)
+
+type stmt =
+  | SCreate of (str * col_decl list)
+  | SInsert of (str * value list)
+  | SSelect of (cols * str * join * where_clause);
+
+// === AST show (debug / test) ===
+let show_col_ref = fn (c: col_ref) ->
+  match c with
+  | CName n      -> n
+  | CQual (t, n) -> t ++ "." ++ n;
+
+let show_oper = fn (o: oper) ->
+  match o with
+  | OEq -> "="
+  | OLt -> "<"
+  | OGt -> ">";
+
+let show_where_term = fn (wt: where_term) ->
+  match wt with
+  | WT (c, op, v) -> show_col_ref c ++ show_oper op ++ show_value v;
+
+let rec show_where_rest = fn (w: where_clause) ->
+  match w with
+  | WAll             -> ""
+  | WOne wt          -> " AND " ++ show_where_term wt
+  | WAnd (wt, rest)  -> " AND " ++ show_where_term wt ++ show_where_rest rest;
+
+let show_where = fn (w: where_clause) ->
+  match w with
+  | WAll             -> ""
+  | WOne wt          -> " WHERE " ++ show_where_term wt
+  | WAnd (wt, rest)  -> " WHERE " ++ show_where_term wt ++ show_where_rest rest;
+
+let rec show_col_decls = fn (cds: col_decl list) -> fn (acc: str) ->
+  match cds with
+  | Nil -> acc
+  | Cons (CDecl (n, t), rest) ->
+    let sep = if acc == "" then "" else "," in
+    show_col_decls rest (acc ++ sep ++ n ++ ":" ++ show_col_type t);
+
+let rec show_value_list = fn (vs: value list) -> fn (acc: str) ->
+  match vs with
+  | Nil -> acc
+  | Cons (v, rest) ->
+    let sep = if acc == "" then "" else "," in
+    show_value_list rest (acc ++ sep ++ show_value v);
+
+let rec show_col_refs = fn (cs: col_ref list) -> fn (acc: str) ->
+  match cs with
+  | Nil -> acc
+  | Cons (c, rest) ->
+    let sep = if acc == "" then "" else "," in
+    show_col_refs rest (acc ++ sep ++ show_col_ref c);
+
+let show_cols = fn (c: cols) ->
+  match c with
+  | CAll      -> "*"
+  | CList xs  -> show_col_refs xs "";
+
+let show_join = fn (j: join) ->
+  match j with
+  | JNone               -> ""
+  | JOn (t2, c1, c2)    -> " JOIN " ++ t2 ++ " ON " ++ show_col_ref c1 ++ "=" ++ show_col_ref c2;
+
+let show_stmt = fn (s: stmt) ->
+  match s with
+  | SCreate (name, decls) -> "CREATE " ++ name ++ "(" ++ show_col_decls decls "" ++ ")"
+  | SInsert (name, vs)    -> "INSERT " ++ name ++ "(" ++ show_value_list vs "" ++ ")"
+  | SSelect (cs, tbl, j, w) ->
+    "SELECT " ++ show_cols cs ++ " FROM " ++ tbl ++ show_join j ++ show_where w;
+
+// === Parser (Phase 29.1) ===
+//   continuation 流: parse_X : tok list -> (X, tok list)
+//   失敗時は print + デフォルト返し (堅牢な error 設計は dogfood 対象外)。
+
+let parse_err = fn (msg: str) -> fn (got: tok) ->
+  let _ = print ("PARSE ERROR: " ++ msg ++ " got " ++ show_tok got) in
+  ();
+
+// expect specific KW
+let expect_kw = fn (k: str) -> fn (toks: tok list) ->
+  match toks with
+  | Cons (TKW name, rest) ->
+    if name == k then rest
+    else let _ = parse_err ("expected KW " ++ k) (TKW name) in toks
+  | Cons (other, _) ->
+    let _ = parse_err ("expected KW " ++ k) other in toks
+  | Nil -> toks;
+
+let expect_tok = fn (need: tok) -> fn (label: str) -> fn (toks: tok list) ->
+  match toks with
+  | Cons (t, rest) ->
+    let ok =
+      match t with
+      | TLparen -> (match need with TLparen -> true | _ -> false)
+      | TRparen -> (match need with TRparen -> true | _ -> false)
+      | TComma  -> (match need with TComma  -> true | _ -> false)
+      | TStar   -> (match need with TStar   -> true | _ -> false)
+      | TEq     -> (match need with TEq     -> true | _ -> false)
+      | _       -> false
+    in
+    if ok then rest
+    else let _ = parse_err ("expected " ++ label) t in toks
+  | Nil -> toks;
+
+let parse_value_tok = fn (toks: tok list) ->
+  match toks with
+  | Cons (TIntLit n, rest) -> (VInt n, rest)
+  | Cons (TStrLit s, rest) -> (VStr s, rest)
+  | Cons (other, _)        ->
+    let _ = parse_err "expected literal value" other in (VInt 0, toks)
+  | Nil                    -> (VInt 0, toks);
+
+let parse_col_ref_tok = fn (toks: tok list) ->
+  match toks with
+  | Cons (TIdent name, rest) ->
+    // peek: もし次が "." なら qualified
+    (match rest with
+     | Cons (TDot, Cons (TIdent col, rest2)) -> (CQual (name, col), rest2)
+     | _ -> (CName name, rest))
+  | Cons (other, _) ->
+    let _ = parse_err "expected column name" other in (CName "?", toks)
+  | Nil -> (CName "?", toks);
+
+let parse_oper_tok = fn (toks: tok list) ->
+  match toks with
+  | Cons (TEq, rest) -> (OEq, rest)
+  | Cons (TLt, rest) -> (OLt, rest)
+  | Cons (TGt, rest) -> (OGt, rest)
+  | Cons (other, _)  ->
+    let _ = parse_err "expected operator" other in (OEq, toks)
+  | Nil              -> (OEq, toks);
+
+// CREATE TABLE の "(name type, ...)" を読む
+let rec parse_col_decls_rest = fn (toks: tok list) -> fn (acc: col_decl list) ->
+  match toks with
+  | Cons (TIdent name, Cons (TKW ty_kw, rest)) ->
+    let ty = if ty_kw == "INT" then TyInt
+             else if ty_kw == "STR" then TyStr
+             else let _ = parse_err "unknown col type" (TKW ty_kw) in TyInt
+    in
+    let acc2 = Cons (CDecl (name, ty), acc) in
+    (match rest with
+     | Cons (TComma, rest2) -> parse_col_decls_rest rest2 acc2
+     | Cons (TRparen, rest2) -> (rev acc2, rest2)
+     | Cons (other, _) ->
+       let _ = parse_err "expected , or )" other in (rev acc2, rest)
+     | Nil -> (rev acc2, rest))
+  | Cons (other, _) ->
+    let _ = parse_err "expected col name" other in (rev acc, toks)
+  | Nil -> (rev acc, toks);
+
+let parse_col_decls = fn (toks: tok list) ->
+  let toks = expect_tok TLparen "(" toks in
+  parse_col_decls_rest toks Nil;
+
+let rec parse_values_rest = fn (toks: tok list) -> fn (acc: value list) ->
+  let (v, toks2) = parse_value_tok toks in
+  let acc2 = Cons (v, acc) in
+  match toks2 with
+  | Cons (TComma, rest) -> parse_values_rest rest acc2
+  | Cons (TRparen, rest) -> (rev acc2, rest)
+  | Cons (other, _) ->
+    let _ = parse_err "expected , or ) in VALUES" other in (rev acc2, toks2)
+  | Nil -> (rev acc2, toks2);
+
+let parse_value_list = fn (toks: tok list) ->
+  let toks = expect_tok TLparen "(" toks in
+  parse_values_rest toks Nil;
+
+// SELECT cols: '*' or comma-separated col_ref
+let rec parse_cols_rest = fn (toks: tok list) -> fn (acc: col_ref list) ->
+  let (c, tt) = parse_col_ref_tok toks in
+  let acc2 = Cons (c, acc) in
+  match tt with
+  | Cons (TComma, rest) -> parse_cols_rest rest acc2
+  | _ -> (rev acc2, tt);
+
+let parse_cols_tok = fn (toks: tok list) ->
+  match toks with
+  | Cons (TStar, rest) -> (CAll, rest)
+  | _ ->
+    let (lst, rest) = parse_cols_rest toks Nil in
+    (CList lst, rest);
+
+// WHERE 句: col op value [AND col op value]...
+let parse_where_term = fn (toks: tok list) ->
+  let (c, toks) = parse_col_ref_tok toks in
+  let (op, toks) = parse_oper_tok toks in
+  let (v, toks) = parse_value_tok toks in
+  (WT (c, op, v), toks);
+
+let rec parse_where_rest = fn (toks: tok list) ->
+  match toks with
+  | Cons (TKW "AND", rest) ->
+    let (wt, toks) = parse_where_term rest in
+    let (chain, toks) = parse_where_rest toks in
+    (WAnd (wt, chain), toks)
+  | _ -> (WAll, toks);
+
+let parse_where = fn (toks: tok list) ->
+  match toks with
+  | Cons (TKW "WHERE", rest) ->
+    let (wt, toks) = parse_where_term rest in
+    (match toks with
+     | Cons (TKW "AND", _) ->
+       let (chain, toks) = parse_where_rest toks in
+       (WAnd (wt, chain), toks)
+     | _ -> (WOne wt, toks))
+  | _ -> (WAll, toks);
+
+let parse_join = fn (toks: tok list) ->
+  match toks with
+  | Cons (TKW "JOIN", Cons (TIdent t2, rest)) ->
+    let rest = expect_kw "ON" rest in
+    let (c1, rest) = parse_col_ref_tok rest in
+    let rest = expect_tok TEq "=" rest in
+    let (c2, rest) = parse_col_ref_tok rest in
+    (JOn (t2, c1, c2), rest)
+  | _ -> (JNone, toks);
+
+let parse_select = fn (toks: tok list) ->
+  let toks = expect_kw "SELECT" toks in
+  let (cs, toks) = parse_cols_tok toks in
+  let toks = expect_kw "FROM" toks in
+  match toks with
+  | Cons (TIdent tbl, toks) ->
+    let (j, toks) = parse_join toks in
+    let (w, toks) = parse_where toks in
+    (SSelect (cs, tbl, j, w), toks)
+  | _ ->
+    let _ = parse_err "expected table name after FROM" TEnd in
+    (SSelect (CAll, "?", JNone, WAll), toks);
+
+let parse_create = fn (toks: tok list) ->
+  let toks = expect_kw "CREATE" toks in
+  let toks = expect_kw "TABLE" toks in
+  match toks with
+  | Cons (TIdent name, toks) ->
+    let (decls, toks) = parse_col_decls toks in
+    (SCreate (name, decls), toks)
+  | _ ->
+    let _ = parse_err "expected table name after CREATE TABLE" TEnd in
+    (SCreate ("?", Nil), toks);
+
+let parse_insert = fn (toks: tok list) ->
+  let toks = expect_kw "INSERT" toks in
+  let toks = expect_kw "INTO" toks in
+  match toks with
+  | Cons (TIdent name, toks) ->
+    let toks = expect_kw "VALUES" toks in
+    let (vs, toks) = parse_value_list toks in
+    (SInsert (name, vs), toks)
+  | _ ->
+    let _ = parse_err "expected table name after INSERT INTO" TEnd in
+    (SInsert ("?", Nil), toks);
+
+let parse_stmt = fn (toks: tok list) ->
+  match toks with
+  | Cons (TKW "CREATE", _) -> parse_create toks
+  | Cons (TKW "INSERT", _) -> parse_insert toks
+  | Cons (TKW "SELECT", _) -> parse_select toks
+  | Cons (other, _) ->
+    let _ = parse_err "expected CREATE/INSERT/SELECT" other in
+    (SSelect (CAll, "?", JNone, WAll), toks)
+  | Nil ->
+    (SSelect (CAll, "?", JNone, WAll), toks);
+
+// 高位の helper: src 文字列を 1 stmt にパース
+let parse_one = fn (src: str) ->
+  let (st, _) = parse_stmt (tokenize src) in
+  st;
+
 // === Self-test scaffolding ===
 //   N1/N2/N3 dogfood note: mk_metrics + nested lambda の組合せで C codegen
 //   の closure capture バグを踏んだので、counting は print に絞った
@@ -346,5 +654,62 @@ let _ = check "value-lt-str"   (show (value_lt (VStr "a") (VStr "b"))) "false"; 
 let _ = check "value-gt"       (show (value_gt (VInt 5) (VInt 3)))  "true";
 
 let _ = log.info "=== Phase 29.0 done ===";
+
+// === Phase 29.1 self-tests: parser ===
+let _ = log.info "=== parser tests ===";
+
+let _ = check "create-simple"
+  (show_stmt (parse_one "CREATE TABLE users (id int, name str)"))
+  "CREATE users(id:int,name:str)";
+
+let _ = check "create-1col"
+  (show_stmt (parse_one "CREATE TABLE t (x int)"))
+  "CREATE t(x:int)";
+
+let _ = check "insert-1"
+  (show_stmt (parse_one "INSERT INTO t VALUES (1, 'a')"))
+  "INSERT t(1,'a')";
+
+let _ = check "insert-multi"
+  (show_stmt (parse_one "INSERT INTO users VALUES (1, 'Alice')"))
+  "INSERT users(1,'Alice')";
+
+let _ = check "select-star"
+  (show_stmt (parse_one "SELECT * FROM users"))
+  "SELECT * FROM users";
+
+let _ = check "select-cols"
+  (show_stmt (parse_one "SELECT id, name FROM users"))
+  "SELECT id,name FROM users";
+
+let _ = check "select-where-eq"
+  (show_stmt (parse_one "SELECT * FROM users WHERE id = 1"))
+  "SELECT * FROM users WHERE id=1";
+
+let _ = check "select-where-lt"
+  (show_stmt (parse_one "SELECT * FROM users WHERE age < 30"))
+  "SELECT * FROM users WHERE age<30";
+
+let _ = check "select-where-str"
+  (show_stmt (parse_one "SELECT * FROM users WHERE name = 'Alice'"))
+  "SELECT * FROM users WHERE name='Alice'";
+
+let _ = check "select-where-and"
+  (show_stmt (parse_one "SELECT * FROM users WHERE age > 18 AND age < 65"))
+  "SELECT * FROM users WHERE age>18 AND age<65";
+
+let _ = check "select-join"
+  (show_stmt (parse_one "SELECT * FROM users JOIN orders ON users.id = orders.uid"))
+  "SELECT * FROM users JOIN orders ON users.id=orders.uid";
+
+let _ = check "select-join-cols"
+  (show_stmt (parse_one "SELECT u.name, o.total FROM users JOIN orders ON u.id = o.uid"))
+  "SELECT u.name,o.total FROM users JOIN orders ON u.id=o.uid";
+
+let _ = check "select-join-where"
+  (show_stmt (parse_one "SELECT * FROM a JOIN b ON a.id = b.id WHERE a.x = 1"))
+  "SELECT * FROM a JOIN b ON a.id=b.id WHERE a.x=1";
+
+let _ = log.info "=== Phase 29.1 done ===";
 
 0

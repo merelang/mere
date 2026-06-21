@@ -3457,7 +3457,7 @@ let () =
      bump pointer global で動的 alloc、$__lang_strlen / $__lang_str_concat
      を WAT 内に inline 定義、print は host import (env.puts)。 *)
   assert_contains "wasm: memory declared + exported"
-    (wasm "\"hi\"") "(memory (export \"memory\") 1)";
+    (wasm "\"hi\"") "(memory (export \"memory\") 16)";
   assert_contains "wasm: bump pointer global declared"
     (wasm "\"hi\"") "(global $__lang_bump (mut i32)";
   assert_contains "wasm: puts imported"

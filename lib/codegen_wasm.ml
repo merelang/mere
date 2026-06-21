@@ -4208,7 +4208,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
      \  (import \"env\" \"puts\" (func $puts (param i32)))\n\
      %s\
-     \  (memory (export \"memory\") 1)\n\
+     \  (memory (export \"memory\") 16)\n\
      %s\
      \  (global $__lang_bump (mut i32) (i32.const %d))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
