@@ -6115,5 +6115,37 @@ let () =
      if has "rev__list_int" && has "rev__list_str" then "ok" else "missing-spec")
     "ok";
 
+  (* Phase 25.6: LLVM __lang_str_escape runtime + show_str 経由。
+     show_str が backslash-escape (newline / tab / cr / backslash / quote)
+     を interp と同じに出力する。 *)
+  check "§25.6: LLVM str_escape runtime helper emitted"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "show \"hi\"") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "__lang_str_escape" then "ok" else "missing-helper")
+    "ok";
+  check "§25.6: LLVM show_str goes through str_escape"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "show \"hi\"") in
+     let has p =
+       let nlen = String.length ll and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "call ptr @__lang_str_escape" then "ok" else "show-str-not-wired")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

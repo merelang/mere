@@ -1552,7 +1552,19 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
                     "  %s = select i1 %%x, ptr @.s_true, ptr @.s_false" r);
       r
     | Ast.TyStr ->
-      emit_asprintf "show_str" "ptr %x"
+      (* Phase 25.6: run %x through __lang_str_escape first so output
+         matches interp's show_str (backslash-escapes newline / tab /
+         backslash / double-quote). *)
+      let esc = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_escape(ptr %%x)" esc);
+      let p = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = alloca ptr" p);
+      emit_instr (Printf.sprintf
+                    "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_show_str, ptr %s)"
+                    p esc);
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+      r
     | Ast.TyUnit ->
       "@.s_unit"
     | Ast.TyTuple ts ->
@@ -5415,6 +5427,65 @@ let str_concat_helper =
       "cont:";
       "  %i_next = phi i64 [%i_plain, %cont_plain], [%i_esc, %cont_esc]";
       "  %j_next = phi i64 [%j_plain, %cont_plain], [%j_esc, %cont_esc]";
+      "  br label %loop";
+      "finish:";
+      "  %endp = getelementptr i8, ptr %r, i64 %j";
+      "  store i8 0, ptr %endp";
+      "  ret ptr %r";
+      "}";
+      "";
+      (* Phase 25.6: str_escape — show_str がこれを通して output、
+         改行 / タブ / バックスラッシュ / ダブルクオートをバックスラッシュ
+         エスケープ形式に変換。interp の show_str との一致を保つ。
+         worst case で 2x の領域、region に alloc。 *)
+      "define ptr @__lang_str_escape(ptr %s) {";
+      "entry:";
+      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %n2 = mul i64 %n64, 2";
+      "  %cap = add i64 %n2, 1";
+      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [0, %entry], [%i_next, %cont]";
+      "  %j = phi i64 [0, %entry], [%j_next, %cont]";
+      "  %done = icmp uge i64 %i, %n64";
+      "  br i1 %done, label %finish, label %step";
+      "step:";
+      "  %sp = getelementptr i8, ptr %s, i64 %i";
+      "  %c = load i8, ptr %sp";
+      "  %is_n = icmp eq i8 %c, 10";
+      "  %is_t = icmp eq i8 %c, 9";
+      "  %is_r = icmp eq i8 %c, 13";
+      "  %is_bs = icmp eq i8 %c, 92";
+      "  %is_q = icmp eq i8 %c, 34";
+      "  %is_nt = or i1 %is_n, %is_t";
+      "  %is_ntr = or i1 %is_nt, %is_r";
+      "  %is_ntrb = or i1 %is_ntr, %is_bs";
+      "  %is_special = or i1 %is_ntrb, %is_q";
+      "  br i1 %is_special, label %esc, label %plain";
+      "plain:";
+      "  %dp1 = getelementptr i8, ptr %r, i64 %j";
+      "  store i8 %c, ptr %dp1";
+      "  %j_plain = add i64 %j, 1";
+      "  br label %cont_plain";
+      "cont_plain:";
+      "  br label %cont";
+      "esc:";
+      "  %dp2a = getelementptr i8, ptr %r, i64 %j";
+      "  store i8 92, ptr %dp2a";
+      "  %j_plus_1 = add i64 %j, 1";
+      "  %dp2b = getelementptr i8, ptr %r, i64 %j_plus_1";
+      "  %sel1 = select i1 %is_n, i8 110, i8 %c";
+      "  %sel2 = select i1 %is_t, i8 116, i8 %sel1";
+      "  %sel3 = select i1 %is_r, i8 114, i8 %sel2";
+      "  store i8 %sel3, ptr %dp2b";
+      "  %j_esc = add i64 %j, 2";
+      "  br label %cont_esc";
+      "cont_esc:";
+      "  br label %cont";
+      "cont:";
+      "  %j_next = phi i64 [%j_plain, %cont_plain], [%j_esc, %cont_esc]";
+      "  %i_next = add i64 %i, 1";
       "  br label %loop";
       "finish:";
       "  %endp = getelementptr i8, ptr %r, i64 %j";
