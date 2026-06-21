@@ -324,10 +324,17 @@ let variant_payload_ty (vname : string) : Ast.ty option =
    codegen's ty_tag so e.g. `int list` lowers to `show_list_int`. *)
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
-  | Ast.TyCon ("OwnedVec", _)
-  | Ast.TyCon ("StrBuf", _) | Ast.TyCon ("Map", _) ->
+  | Ast.TyCon ("OwnedVec", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in Wasm codegen subset: OwnedVec / StrBuf / Map (interpreter-only)"))
+      "unsupported in Wasm codegen subset: OwnedVec (Phase 15 では Wasm 未実装)"))
+  | Ast.TyCon ("StrBuf", _) ->
+    (* Phase 27.3: StrBuf は Wasm でも mere_strbuf_* runtime で実装済。
+       ty_tag を返せるようにして、tuple/variant payload type 経由でも
+       使えるように。 *)
+    "strbuf"
+  | Ast.TyCon ("Map", _) ->
+    raise (Codegen_error (Loc.dummy,
+      "unsupported in Wasm codegen subset: Map (Wasm 側で map_runtime 未統合)"))
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"

@@ -6223,6 +6223,15 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 27.3: Wasm ty_tag が StrBuf を許可。mere_strbuf runtime は
+     Phase 15.9 で実装済だが ty_tag が interpreter-only として早期 reject
+     していた。json_writer の StrBuf in tuple/variant 用法を unlock。 *)
+  check "§27.3: Wasm StrBuf ty_tag returns strbuf"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
+       "region R { let buf = strbuf_new () in let _ = strbuf_push buf \"hi\" in strbuf_to_str buf }") in
+     if String.length wat > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 27.2: Wasm main_ty で `()` を print し、auto-print のため
      show_<main_ty> を強制登録。runtime 実行 (Node.js host harness) で
      interp と PERFECT 一致するように。 *)
