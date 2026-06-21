@@ -6221,6 +6221,45 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
+  (* Phase 26.3: Wasm inner let-rec lifting (LLVM Phase 25.3 の Wasm 版). *)
+  check "§26.3: Wasm inner let-rec lifts (self-recursive)"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let sum_to = fn (n: int) ->\n\
+       \  let rec go = fn (i: int) ->\n\
+       \    if i > n then 0 else i + go (i + 1)\n\
+       \  in go 1;\n\
+        sum_to 10") in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "__lifted_go_" then "ok" else "no-lift")
+    "ok";
+  check "§26.3: Wasm fn dedup — user-defined name shadows stdlib"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "type 'a list = Nil | Cons of 'a * 'a list;\n\
+        let rec list_rev_into = fn (acc) -> fn (xs) ->\n\
+          match xs with\n\
+          | Nil -> acc\n\
+          | Cons (h, t) -> list_rev_into (Cons (h, acc)) t;\n\
+        let _ = list_rev_into Nil (Cons (1, Nil));\n\
+        0") in
+     (* Count $list_rev_into definitions — must be 1. *)
+     let count p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i acc =
+         if i + plen > nlen then acc
+         else if String.sub wat i plen = p then scan (i + plen) (acc + 1)
+         else scan (i + 1) acc
+       in scan 0 0
+     in
+     if count "(func $list_rev_into " = 1 then "ok" else "dup-or-missing")
+    "ok";
+
   (* Phase 26.2: Wasm try_or via fail flag + active-counter. *)
   check "§26.2: Wasm try_or catches fail and returns default"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog

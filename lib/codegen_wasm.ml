@@ -215,6 +215,7 @@ type closure_emission = {
   ce_body         : Ast.expr;
   ce_captures     : (string * int) list;  (* (name, source local slot) *)
   ce_table_idx    : int;
+  mutable ce_host : string;  (* Phase 26.3: host scope at queue time *)
 }
 let pending_closures : closure_emission list ref = ref []
 let anon_counter = ref 0
@@ -222,6 +223,43 @@ let fresh_anon_name () =
   let n = !anon_counter in
   incr anon_counter;
   Printf.sprintf "anon_%d_fn" n
+
+(* Phase 26.3: inner-fn lifting (port from codegen_llvm Phase 25.3).
+   Inner `let X = fn ...` / `let rec X = fn ... and Y = ...` are lifted
+   to top-level Wasm fns; captures are prepended as i32 params. *)
+type lifted_inner_wasm = {
+  lifted_name : string;
+  captures    : string list;  (* free var names in order *)
+}
+let inner_lifts_wasm : (string, lifted_inner_wasm) Hashtbl.t = Hashtbl.create 8
+let inner_lifts_by_host_wasm : (string, (string, lifted_inner_wasm) Hashtbl.t) Hashtbl.t =
+  Hashtbl.create 8
+let set_inner_lifts_for_host_wasm (host : string) : unit =
+  Hashtbl.reset inner_lifts_wasm;
+  (match Hashtbl.find_opt inner_lifts_by_host_wasm host with
+   | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts_wasm k v) tbl
+   | None -> ())
+
+type lifted_fn_wasm = {
+  l_name     : string;
+  l_captures : string list;
+  l_param    : string;
+  l_body     : Ast.expr;
+  l_host     : string;
+}
+
+let inner_fn_counter_wasm = ref 0
+let fresh_inner_name_wasm (base : string) : string =
+  let n = !inner_fn_counter_wasm in
+  incr inner_fn_counter_wasm;
+  Printf.sprintf "__lifted_%s_%d" base n
+
+let lifted_fns_wasm : lifted_fn_wasm list ref = ref []
+
+(* Phase 26.3: name of the currently-emitting top-level (or lifted) fn,
+   so anonymous-Fun closures queued in pending_closures can remember
+   their host scope for inner_lifts dispatch. *)
+let current_host_fn_wasm : string ref = ref ""
 
 (* Each variant constructor → integer tag. Populated up front from
    Exhaustive.type_variants. *)
@@ -516,6 +554,100 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
         Printf.sprintf "function `%s` has non-arrow inferred type" s.sname))
   ) skels
 
+(* Phase 26.3: lift inner Let-Fun / Let_rec to top-level Wasm fns.
+   Mirrors codegen_llvm.lift_inner_fns_llvm. Populates inner_lifts_wasm /
+   inner_lifts_by_host_wasm + lifted_fns_wasm. *)
+let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : unit =
+  Hashtbl.reset inner_lifts_wasm;
+  Hashtbl.reset inner_lifts_by_host_wasm;
+  inner_fn_counter_wasm := 0;
+  lifted_fns_wasm := [];
+  let builtin_names = List.map fst Typer.initial_env in
+  let known = ref (toplevel_names @ builtin_names) in
+  let current_host = ref "" in
+  let lift_one _host_param host_locals n p fn_body =
+    let effective_known =
+      List.filter (fun k -> not (List.mem k host_locals)) !known
+    in
+    let body_fvs = free_vars fn_body (p :: effective_known) in
+    let lifted_name = fresh_inner_name_wasm n in
+    let lf = {
+      l_name = lifted_name; l_captures = body_fvs;
+      l_param = p; l_body = fn_body;
+      l_host = !current_host;
+    } in
+    lifted_fns_wasm := lf :: !lifted_fns_wasm;
+    let entry = { lifted_name; captures = body_fvs } in
+    Hashtbl.replace inner_lifts_wasm n entry;
+    let host_tbl =
+      match Hashtbl.find_opt inner_lifts_by_host_wasm !current_host with
+      | Some t -> t
+      | None ->
+        let t = Hashtbl.create 4 in
+        Hashtbl.add inner_lifts_by_host_wasm !current_host t;
+        t
+    in
+    Hashtbl.replace host_tbl n entry;
+    known := lifted_name :: !known;
+    fn_body
+  in
+  let rec walk (host_param : string) (host_locals : string list) (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Let (pat, value, body) ->
+      (match pat.Ast.pnode, value.Ast.node with
+       | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
+         let fn_body = lift_one host_param host_locals n p fn_body in
+         walk p [] fn_body;
+         walk host_param (n :: host_locals) body
+       | _ ->
+         walk host_param host_locals value;
+         walk host_param (pattern_vars pat @ host_locals) body)
+    | Ast.Let_rec (bindings, body) ->
+      let rec_names = List.map fst bindings in
+      let fn_specs = List.map (fun (n, value) ->
+        match value.Ast.node with
+        | Ast.Fun (p, _, fn_body) -> (n, p, fn_body)
+        | _ ->
+          raise (Codegen_error (value.Ast.loc,
+            "inner let-rec binding must be a single-arg fn"))) bindings
+      in
+      known := rec_names @ !known;
+      List.iter (fun (n, p, fb) ->
+        let _ = lift_one host_param host_locals n p fb in ()) fn_specs;
+      List.iter (fun (_, p, fb) -> walk p [] fb) fn_specs;
+      walk host_param (rec_names @ host_locals) body
+    | Ast.Fun (_, _, b) -> walk host_param host_locals b
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk host_param host_locals a; walk host_param host_locals b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk host_param host_locals a
+    | Ast.With (_, v, b) -> walk host_param host_locals v; walk host_param host_locals b
+    | Ast.If (c, t, e_) ->
+      walk host_param host_locals c;
+      walk host_param host_locals t;
+      walk host_param host_locals e_
+    | Ast.Constr (_, Some a) -> walk host_param host_locals a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk host_param host_locals s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk host_param host_locals ge | None -> ());
+        walk host_param host_locals b) arms
+    | Ast.Tuple es -> List.iter (walk host_param host_locals) es
+    | Ast.Region_block (_, b) -> walk host_param host_locals b
+    | Ast.Ref (_, _, a) -> walk host_param host_locals a
+    | Ast.Record_lit (_, fs) ->
+      List.iter (fun (_, e) -> walk host_param host_locals e) fs
+    | Ast.Field_get (a, _) -> walk host_param host_locals a
+    | Ast.Record_update (a, fs) ->
+      walk host_param host_locals a;
+      List.iter (fun (_, e) -> walk host_param host_locals e) fs
+  in
+  List.iter (fun (f : fn_decl) ->
+    current_host := f.name;
+    walk f.param [f.param] f.body) fns
+
 (* Map Lang binop / cmp / logic to Wasm opcodes. All operands are i32
    (bool also widens to i32). *)
 let wasm_binop = function
@@ -664,6 +796,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "end"
   | Ast.Let (pat, value, body) ->
     (match pat.Ast.pnode with
+     | Ast.P_var name when Hashtbl.mem inner_lifts_wasm name ->
+       (* Phase 26.3: inner Let-bound Fun lifted to top-level. The Fun
+          value has been pushed up; just emit the body, which will dispatch
+          via App-Var to the lifted name. *)
+       emit_expr body
      | Ast.P_var name ->
        let slot = fresh_local () in
        emit_expr value;
@@ -716,6 +853,13 @@ let rec emit_expr (e : Ast.expr) : unit =
        locals := prev
      | _ ->
        unsupported pat.Ast.ploc "non-P_var let pattern — Phase 6 later slice")
+  | Ast.Let_rec (bindings, body) ->
+    (* Phase 26.3: inner let-rec lifting. If all bindings are registered
+       in inner_lifts_wasm (= lifted to top level), just emit body. *)
+    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_wasm n) bindings then
+      emit_expr body
+    else
+      unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
   | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
     let arg_ty =
       match arg.Ast.ty with
@@ -1044,6 +1188,19 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "snd"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load offset=4"
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem inner_lifts_wasm name ->
+    (* Phase 26.3: inner-lifted call — emit captures (looked up via
+       current locals) + arg, then call $<lifted_name>. *)
+    let li = Hashtbl.find inner_lifts_wasm name in
+    List.iter (fun cap ->
+      match List.assoc_opt cap !locals with
+      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
+      | None -> unsupported e.Ast.loc
+          (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
+    ) li.captures;
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $%s" li.lifted_name)
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     emit_expr arg;
@@ -1441,7 +1598,8 @@ let rec emit_expr (e : Ast.expr) : unit =
         ce_param = param;
         ce_body = fn_body;
         ce_captures = captures;
-        ce_table_idx = table_idx }
+        ce_table_idx = table_idx;
+        ce_host = !current_host_fn_wasm }
       :: !pending_closures;
     let env_slot = fresh_local () in
     let cl_slot = fresh_local () in
@@ -1564,7 +1722,20 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr "drop";               (* discard close's return *)
        emit_instr (Printf.sprintf "local.get %d" result_slot))
   | _ ->
-    unsupported e.Ast.loc "node kind not yet in Phase 6 MVP"
+    let node_name = match e.Ast.node with
+      | Ast.Int_lit _ -> "Int_lit" | Ast.Float_lit _ -> "Float_lit"
+      | Ast.Bool_lit _ -> "Bool_lit" | Ast.Str_lit _ -> "Str_lit"
+      | Ast.Unit_lit -> "Unit_lit" | Ast.Var _ -> "Var"
+      | Ast.Bin _ -> "Bin" | Ast.Cmp _ -> "Cmp" | Ast.Logic _ -> "Logic"
+      | Ast.App _ -> "App" | Ast.Neg _ -> "Neg" | Ast.Annot _ -> "Annot"
+      | Ast.Let _ -> "Let" | Ast.Let_rec _ -> "Let_rec"
+      | Ast.With _ -> "With" | Ast.If _ -> "If" | Ast.Fun _ -> "Fun"
+      | Ast.Constr _ -> "Constr" | Ast.Match _ -> "Match"
+      | Ast.Tuple _ -> "Tuple" | Ast.Region_block _ -> "Region_block"
+      | Ast.Ref _ -> "Ref" | Ast.Record_lit _ -> "Record_lit"
+      | Ast.Field_get _ -> "Field_get" | Ast.Record_update _ -> "Record_update"
+    in
+    unsupported e.Ast.loc ("node kind not yet in Phase 6 MVP: " ^ node_name)
 
 (* Emit one top-level fn definition. Params are positional locals
    starting at slot 0; let-binding locals are mint-ed afterwards.
@@ -1573,6 +1744,9 @@ let emit_fn_def (f : fn_decl) : string =
   let saved_instrs = !instrs in
   let saved_local_counter = !local_counter in
   let saved_locals = !locals in
+  let saved_host = !current_host_fn_wasm in
+  set_inner_lifts_for_host_wasm f.name;
+  current_host_fn_wasm := f.name;
   instrs := [];
   (* Param sits at slot 0. let-bindings start from slot 1. *)
   local_counter := 1;
@@ -1583,6 +1757,7 @@ let emit_fn_def (f : fn_decl) : string =
   instrs := saved_instrs;
   local_counter := saved_local_counter;
   locals := saved_locals;
+  current_host_fn_wasm := saved_host;
   let local_decl =
     if extra_locals <= 0 then ""
     else
@@ -1597,6 +1772,46 @@ let emit_fn_def (f : fn_decl) : string =
   Printf.sprintf
     "  (func $%s (param i32) (result i32)\n%s%s)"
     f.name local_decl indented_body
+
+(* Phase 26.3: emit a lifted inner fn as top-level Wasm fn. Captures
+   come before the original param as i32 locals (positional). The body
+   resolves recursive lifted siblings via set_inner_lifts_for_host_wasm. *)
+let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
+  set_inner_lifts_for_host_wasm lf.l_host;
+  let saved_instrs = !instrs in
+  let saved_local_counter = !local_counter in
+  let saved_locals = !locals in
+  let saved_host = !current_host_fn_wasm in
+  instrs := [];
+  current_host_fn_wasm := lf.l_host;
+  (* Allocate slots: captures at 0..N-1, param at N. *)
+  let n_caps = List.length lf.l_captures in
+  local_counter := n_caps + 1;
+  let cap_locals = List.mapi (fun i n -> (n, i)) lf.l_captures in
+  locals := (lf.l_param, n_caps) :: cap_locals;
+  emit_expr lf.l_body;
+  let body_instrs = List.rev !instrs in
+  let extra_locals = !local_counter - (n_caps + 1) in
+  instrs := saved_instrs;
+  local_counter := saved_local_counter;
+  locals := saved_locals;
+  current_host_fn_wasm := saved_host;
+  let param_decls =
+    String.concat " "
+      (List.init (n_caps + 1) (fun _ -> "(param i32)"))
+  in
+  let local_decl =
+    if extra_locals <= 0 then ""
+    else
+      Printf.sprintf "    (local%s)\n"
+        (String.concat "" (List.init extra_locals (fun _ -> " i32")))
+  in
+  let indented_body =
+    String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
+  in
+  Printf.sprintf
+    "  (func $%s %s (result i32)\n%s%s)"
+    lf.l_name param_decls local_decl indented_body
 
 (* Env-ignoring adapter so top-level fn `f` can be used as a closure
    value: `(env, x) -> result` that just calls `$f(x)`. *)
@@ -1613,6 +1828,11 @@ let emit_anon_adapter (ce : closure_emission) : string =
   let saved_instrs = !instrs in
   let saved_local_counter = !local_counter in
   let saved_locals = !locals in
+  let saved_host = !current_host_fn_wasm in
+  (* Phase 26.3: restore the host scope this closure was queued under so
+     its body can resolve recursive calls into inner-lifted siblings. *)
+  set_inner_lifts_for_host_wasm ce.ce_host;
+  current_host_fn_wasm := ce.ce_host;
   instrs := [];
   let env_slot = 0 in
   let param_slot = 1 in
@@ -1634,6 +1854,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
   instrs := saved_instrs;
   local_counter := saved_local_counter;
   locals := saved_locals;
+  current_host_fn_wasm := saved_host;
   let local_decl =
     if extra_locals <= 0 then ""
     else
@@ -2985,6 +3206,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   table_entries := [];
   pending_closures := [];
   anon_counter := 0;
+  Hashtbl.reset inner_lifts_wasm;
+  Hashtbl.reset inner_lifts_by_host_wasm;
+  inner_fn_counter_wasm := 0;
+  lifted_fns_wasm := [];
+  current_host_fn_wasm := "";
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
   vec_used := false;
@@ -3107,8 +3333,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   let fns = resolve_fn_types skels main_expr in
+  (* Phase 26.3 (port of LLVM Phase 25.7): dedupe by name, keeping the
+     LAST occurrence — when user defines a name that's also in stdlib
+     prelude, user's def (later in chain) should shadow. *)
+  let fns =
+    let seen : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    List.rev (
+      List.fold_left (fun acc f ->
+        if Hashtbl.mem seen f.name then acc
+        else begin Hashtbl.add seen f.name (); f :: acc end
+      ) [] (List.rev fns)
+    )
+  in
   collect_show_types main_expr fns;
+  (* Phase 26.3: lift inner fns to top-level. Must run BEFORE emit_fn_def
+     so emit_expr can see inner_lifts_wasm during body emit. *)
+  let toplevel_names = List.map (fun f -> f.name) fns in
+  lift_inner_fns_wasm toplevel_names fns;
   let fn_defs = List.map emit_fn_def fns in
+  let lifted_defs = List.map emit_lifted_fn_wasm !lifted_fns_wasm in
   (* Register top-level closure adapters in the table and remember
      their indices so `Var name` (value position) can find them. *)
   let top_adapters =
@@ -3258,7 +3501,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     end
   in
   let fn_section =
-    let all = fn_defs @ top_adapters @ anon_adapters @ show_fn_defs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ show_fn_defs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all
