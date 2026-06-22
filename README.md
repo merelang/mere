@@ -10,16 +10,21 @@ feature-parity で動く段階。
 
 旧仮称: `lang-ml` (2026-06-19 に Mere に確定、NAMING.md 参照)。
 
-## ステータス (2026-06-19 時点)
+## ステータス (2026-06-22 時点)
 
-- **1268 tests passing**
-- ツリーウォーキング interpreter + **C / LLVM IR / Wasm の 3 backend** が
-  feature parity で動く (同じ Mere プログラムから 3 種のバイナリを出せる)
+- **1480 tests passing**
+- **4 backend feature parity**: interp + C / LLVM IR / Wasm runtime
+  すべてが 16 realistic examples (~1500 LoC) で **diff = 0 PERFECT 一致**
+  (Phase 24-27)
 - メモリモデル: region / view / Trivial[R] / `with` Drop が型・interpreter・
-  3 backend codegen すべてで動く
-- エフェクトシステム: cap-passing パターン + `using [cap]` sugar + builtin Logger / Metrics
-- 借用注釈の細分化: `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` の 4 mode + borrow checker (place expression + if/match 分岐の伝播)
-- Q-010 標準コレクション: `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` (interpreter)
+  3 codegen backend すべてで動く
+- エフェクトシステム: cap-passing パターン + `signature ... = (...)` 引数束ね + `using [cap]` sugar + builtin Logger / Metrics
+- 借用注釈の細分化: `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` の 4 mode + borrow checker (place expression + if/match 分岐の伝播 + conflict matrix 完全網羅)
+- Q-010 標準コレクション: `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` が **interpreter + 3 backend** で動作 (Phase 15.x)
+- ポリモーフィズム: HM 推論 + let-poly + **多相 user let-rec の per-instantiation 特殊化** (Phase 23.3 / 25.5 / 26.4)
+- inner-fn lifting: `let rec inner = fn ... -> ...` を top-level に持ち上げ + 自由変数を prepend (Phase 25.3 / 26.3)
+- top-level 値 binding: `let total = mk_metrics();` のような非-fn let を fn body から参照可 (Phase 30.2 で 3 backend に global 化)
+- Wasm runtime: `scripts/run_wasm.js` (Node.js host harness, puts / read_file / write_file) で runtime 実行検証 (Phase 27.2)
 - 言語 surface: `module M { ... }` (入れ子可) + `M.f` qualified access、`import "./path";` (importer-relative + canonical) によるファイル分割、`open M;`
 - REPL: multi-line 入力、`:env` / `:show` / `:load` / `:reset`、Rust 風 code frame でエラー表示
 - 設計コンテキストは別リポ `internal design notes` (private)
@@ -38,13 +43,14 @@ feature-parity で動く段階。
 | 名前管理 | `let _ = ...;` `let (a, b) = ...;` `signature`、`type X = T` (alias) |
 | メモリモデル | region (`region R { ... }`) / view (`view V[R] of T { ... }`) / `&R T` 参照 / escape check / Trivial[R] 制約 / `R.alloc(v)` sugar |
 | 借用注釈 | `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` + borrow checker (place + if/match 伝播) |
-| エフェクト | capability passing (cap = record の値)、`using [cap]` sugar、builtin Logger / Metrics |
+| エフェクト | capability passing (cap = record の値)、`signature` 引数束ね + spread、`using [cap]` sugar、builtin Logger / Metrics |
 | with Drop | `with c = ... in body` で scope 末に `close` field 自動呼出、複数 binding は LIFO |
+| エラー処理 | `Result` 型 + `result_map` / `result_and_then` / `result_or_else` (prelude)、`fail "msg"` / `try_or default fn` で例外的 fail catch |
 | モジュール | `module M { ... }` (入れ子)・`M.f` 参照・内部短縮名 rewrite・`open M;`・module 内 type/record OK |
 | import | `import "./path";` で別ファイル取込み (importer-relative + canonical) |
-| collection | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + 高階 API (iter/map/fold/filter/to_list/to_owned) |
-| stdlib | 90+ 種の builtin: I/O / 変換 / 文字列 / 数値 / 多相 helper / float / error / Logger・Metrics |
-| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く (詳細は [codegen.md](docs/codegen.md))。Q-010 collection 4 種 (Vec / OwnedVec / StrBuf / Map) + 高階 API (vec_set / iter / fold / map / filter) + 変換 (vec_to_owned / owned_vec_to_vec / **vec_to_list**) + `len` ad-hoc polymorphism (Vec / OwnedVec / StrBuf / Map / str / tuple / **list**) がすべて 3 backend で動作 (Phase 15.2 〜 15.12) |
+| collection | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + 高階 API (iter/map/fold/filter/to_list/to_owned) — **insertion-order な Map iter** (Phase 27.1) |
+| stdlib | 90+ 種の builtin: I/O / 変換 / 文字列 (`str_split` / `str_join` / `str_compare` / `str_index_of` 等) / 数値 / 多相 helper / float / error / Logger・Metrics |
+| codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く + Wasm runtime 実行検証 (詳細は [codegen.md](docs/codegen.md))。Q-010 collection 4 種 + 高階 API + 変換 + `len` ad-hoc poly + 多相 user let-rec の per-instantiation 特殊化 (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level 値 binding を file-scope global 化 (Phase 30.2) |
 | REPL | 永続 env、multi-line 入力、`:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | エラー UX | Rust 風 multi-line code frame、ANSI 色 (TTY 時)、Levenshtein による typo 提案 (record field / qualified name 含む)、型変換 hint |
 
@@ -71,6 +77,10 @@ $ dune exec ./bin/mere.exe -- examples/json_parser.mere
 
 $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 # region/view/effect/with の全機能を組合せた realistic example
+
+$ dune exec ./bin/mere.exe -- examples/toy_sql.mere
+# 1165 行の toy SQL engine (tokenizer + parser + executor + JOIN)、
+# 4 backend (interp + C + LLVM + Wasm) で 59 tests を diff=0 一致
 ```
 
 ## ドキュメント
@@ -82,10 +92,14 @@ $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 - **[Memory model](docs/memory-model.md)** — メモリ管理の比較・region/view・現状と将来
 - **[Codegen](docs/codegen.md)** — C / LLVM IR / Wasm の 3 backend 戦略 + slice 表
 - **[Changelog](docs/changelog.md)** — 着手日 (2026-06-06) からの主要マイルストーン
-- `examples/` — 動く `.mere` ファイル群 (45+ 本、[examples/README.md](examples/README.md) で
+- `examples/` — 動く `.mere` ファイル群 (61 本、[examples/README.md](examples/README.md) で
   カテゴリ別索引)。基本的な FizzBuzz / JSON parser / word count から、
-  Q-010 collection の 3 backend codegen demo (`vec_codegen_*.mere` /
-  `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`) まで
+  Q-010 collection の codegen demo (`vec_codegen_*.mere` /
+  `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`)、
+  realistic application (16 examples が 4 backend で PERFECT 一致): `json_parser` /
+  `template_engine` / `word_freq` / `mini_shell` / `json_writer` / `chained_parse` /
+  `state_machine` / `ini_parser` / `regex_lite` まで、そして **1165 行の `toy_sql`**
+  (toy SQL engine — Phase 29 dogfood で書いた 59 tests、4 backend PERFECT)
 
 ## ビルド・実行
 
@@ -95,7 +109,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1268 tests
+dune runtest                                         # 1480 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -108,18 +122,16 @@ clang sum.s -o sum && ./sum                          # → 7
 # Wasm codegen (要 wabt / Node.js)
 dune exec ./bin/mere.exe -- -we '1 + 2 * 3' > sum.wat
 wat2wasm sum.wat -o sum.wasm
-node -e 'WebAssembly.instantiate(require("fs").readFileSync("sum.wasm"))
-  .then(r => console.log(r.instance.exports.main()))'   # → 7
+node scripts/run_wasm.js sum.wasm                    # → 7 (host harness 経由)
 ```
 
 3 backend (C / LLVM / Wasm) はすべて feature parity で、int / 関数 / 文字列 /
 tuple / record / variant / closure / 多相 / 再帰 variant / 複雑 pattern /
-show / region / view / `with` Drop / list pretty-print まで通る。
-(OwnedVec / StrBuf / Map は interpreter-only。`Vec[R, T]` は Phase 15.2 / 15.3
-/ 15.4 で **3 backend (C / LLVM / Wasm) すべて** が要素型 T を一般化 —
-int / bool / str / tuple / record / variant 全対応。例:
-`examples/vec_codegen_c.mere` / `vec_codegen_c_typed.mere` /
-`vec_codegen_llvm_typed.mere` / `vec_codegen_wasm_typed.mere`)
+show / region / view / `with` Drop / list pretty-print / Q-010 collection 4 種
+(Vec / OwnedVec / StrBuf / Map) / 多相 user let-rec / inner-fn lifting /
+top-level 値 binding の global 化 / `str_compare` の sign-normalized 出力
+まで通る (Phase 15.x 〜 31.0 で逐次 parity 化、16 realistic examples で
+diff = 0 PERFECT 一致を維持)。
 
 ## レイアウト
 
@@ -137,7 +149,8 @@ mere/
 │   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 1268 tests
+├── test/test_basic.ml  # 1480 tests
+├── scripts/run_wasm.js # Wasm runtime host harness (Node.js, puts / read_file / write_file)
 ├── examples/           # *.mere サンプル群
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
 ```
