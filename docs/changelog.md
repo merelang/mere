@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-06-22 (続き — Phase 38.C multi-arg curried builtin first-class)
+
+Phase 37 完了後、 公開準備セッションのまま **DEFERRED §1.2 A2 を消化**。
+3 backend で multi-arg curried builtin が value 位置 / partial app 位置で
+動くように。 **1511 → 1515 tests**。
+
+- **設計判断**: 当初想定の per-builtin × per-arity な closure adapter テンプレ
+  生成 (Phase 35.1 nullary の延長線) は **廃案**。 boilerplate が builtin × 段
+  数 × backend で爆発するため。 代わりに各 codegen に **AST 局所 synthesize**
+  helper (`synthesize_curried_eta` / `_llvm` / `_wasm`) を導入し、 Var handler
+  で multi-arg curried builtin が value 位置にあるのを検出したら、 その場で
+  `fn __arg0 -> fn __arg1 -> ... -> builtin __arg0 ... __argN` という fully
+  eta-expanded Fun chain を生成して emit_expr に再投入。 既存の anonymous
+  Fun adapter machinery (Phase 5.7-b) が closure 構築を担当、 inner の
+  nested App は各 builtin の direct-call fast path に乗る。
+- **対応 builtin (9 個)**: `owned_vec_push` / `owned_vec_get` / `vec_push` /
+  `vec_get` / `vec_set` / `strbuf_push` / `map_get` / `map_has` / `map_set`
+- **使用例**:
+  ```
+  let push_v = owned_vec_push v in
+  let _ = push_v 1 in
+  let _ = push_v 2 in ...
+
+  let set_in_m = map_set m in            // 3-arg の 1-arg partial
+  let _ = set_in_m "a" 1 in ...
+  ```
+- **制限事項**: fully unapplied (`let push = owned_vec_push`) は let-poly
+  後の型が polymorphic になるため、 use 側で `Annot` か concrete arg 渡しで
+  型を固定する必要あり (Phase 35 nullary と同じ制約)
+- **slice 構成**: `46b2704` Phase 38.C-1 spike (C / owned_vec_push) /
+  `24ff513` 38.C-2 (C / 残り 2-arg) / `a6fb4bf` 38.C-3 (C / 3-arg) /
+  `8265992` 38.C-4/5 (LLVM + Wasm port)
+
+---
+
 ## 2026-06-22 (続き — Phase 37 公開準備)
 
 Phase 36 syntactic sugar 完了後、 mere を public 化するための準備スプリント。
