@@ -1,0 +1,107 @@
+// matrix_2d: 1D OwnedVec[int] + (row, col) index 計算で 2D matrix (Phase 36)
+//
+// 目的: examples roadmap H2。2D 行列を 1 次元 OwnedVec で持ち、index を
+//   `r * cols + c` で計算するパターン。matrix add / transpose / pretty
+//   print を 4 backend で dogfood。
+//
+// 設計:
+//   - matrix を `(rows, cols, data: OwnedVec[int])` の record に
+//   - data.len = rows * cols
+//   - get / set は idx = r * cols + c
+//   - nested Vec[Vec[int]] は region escape を解決できず本例では避けた
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type Matrix = { rows: int, cols: int, data: OwnedVec[int] };
+
+// 1D index で get (OwnedVec は set 未対応なので addition / transpose は
+// 新しい OwnedVec を build し直す)
+let get = fn (m: Matrix) -> fn (r: int) -> fn (c: int) ->
+  owned_vec_get m.data (r * m.cols + c);
+
+// matrix を行ごとに add (要素同士)
+let mk_add = fn (a: Matrix) -> fn (b: Matrix) ->
+  let d = owned_vec_new () in
+  let rec loop = fn (i: int) ->
+    if i >= a.rows * a.cols then ()
+    else
+      let _ = owned_vec_push d (owned_vec_get a.data i + owned_vec_get b.data i) in
+      loop (i + 1) in
+  let _ = loop 0 in
+  Matrix { rows = a.rows, cols = a.cols, data = d };
+
+// transpose: row/col を入れ替えた新 matrix
+let mk_transpose = fn (m: Matrix) ->
+  let d = owned_vec_new () in
+  let rec outer = fn (c: int) ->
+    if c >= m.cols then ()
+    else
+      let rec inner = fn (r: int) ->
+        if r >= m.rows then ()
+        else
+          let _ = owned_vec_push d (get m r c) in
+          inner (r + 1) in
+      let _ = inner 0 in
+      outer (c + 1) in
+  let _ = outer 0 in
+  Matrix { rows = m.cols, cols = m.rows, data = d };
+
+let pad3 = fn (n: int) ->
+  if n >= 100 then show n
+  else if n >= 10 then " " ++ show n
+  else if n >= 0 then "  " ++ show n
+  else if n > (-10) then " " ++ show n
+  else show n;
+
+let print_mat = fn (m: Matrix) ->
+  region R {
+    let b = strbuf_new () in
+    let rec row_loop = fn (r: int) ->
+      if r >= m.rows then ()
+      else
+        let rec col_loop = fn (c: int) ->
+          if c >= m.cols then ()
+          else
+            let _ = strbuf_push b (pad3 (get m r c)) in
+            let _ = if c + 1 < m.cols then strbuf_push b " " else strbuf_push b "" in
+            col_loop (c + 1) in
+        let _ = col_loop 0 in
+        let _ = strbuf_push b "\n" in
+        row_loop (r + 1) in
+    let _ = row_loop 0 in
+    let s = strbuf_to_str b in
+    print s
+  };
+
+let _ = print "=== matrix_2d (Phase 36) ===";
+
+// 3x3 行列 A: 0..8
+let a_data = owned_vec_new ();
+let rec push_a = fn (i: int) ->
+  if i >= 9 then ()
+  else
+    let _ = owned_vec_push a_data i in
+    push_a (i + 1);
+let _ = push_a 0;
+let a = Matrix { rows = 3, cols = 3, data = a_data };
+
+// B = 全部 1 の 3x3
+let b_data = owned_vec_new ();
+let rec push_b = fn (i: int) ->
+  if i >= 9 then ()
+  else
+    let _ = owned_vec_push b_data 1 in
+    push_b (i + 1);
+let _ = push_b 0;
+let b = Matrix { rows = 3, cols = 3, data = b_data };
+
+let _ = print "--- A ---";
+let _ = print_mat a;
+let _ = print "--- B (all 1) ---";
+let _ = print_mat b;
+let _ = print "--- A + B ---";
+let _ = print_mat (mk_add a b);
+let _ = print "--- transpose(A) ---";
+let _ = print_mat (mk_transpose a);
+
+0

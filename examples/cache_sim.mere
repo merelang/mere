@@ -1,0 +1,112 @@
+// cache_sim: capacity 制限付き FIFO cache の simulation (Phase 36)
+//
+// 目的: examples roadmap A4。Map[str, str] が **`map_remove` を持たない**
+//   制約下で eviction policy を表現する練習。`alive_keys` という
+//   OwnedVec[str] を別途持って「生きている key」を限定し、Map の値を
+//   そのまま温存することで FIFO eviction を擬似する。LRU まで踏み込まず
+//   FIFO に留める (LRU は recency 更新が要り Vec の中央移動が必要)。
+//
+// 設計:
+//   - cache: Map[str, str] (任意 key → 任意 value)
+//   - alive: OwnedVec[str] (現在 cache に存在する key を insertion order
+//     で保持)。alive に無い key は cache に値があっても miss 扱い
+//   - put k v: alive に既にあれば値を上書き、無ければ末尾に push して
+//     alive.len > capacity なら先頭を logical drop (= alive のみ rebuild、
+//     map_remove はしない)
+//   - get k: alive に key があれば map_get、無ければ "MISS"
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let capacity = 3;
+
+let cache = map_new ();
+let alive = owned_vec_new ();
+
+// 注: lifted inner let-rec から top-level global を参照すると LLVM codegen
+// が "use of undefined value %alive" で落ちる (Phase 30.2 lift heuristic
+// と Phase 25.3 inner let-rec lift の相互作用バグ、DEFERRED §1.14)。
+// `alive` を関数引数で明示的に受け渡せば回避できる。
+let owned_vec_contains = fn (v: OwnedVec[str]) -> fn (k: str) ->
+  let n = owned_vec_len v in
+  let rec loop = fn (i: int) ->
+    if i >= n then false
+    else if owned_vec_get v i == k then true
+    else loop (i + 1) in
+  loop 0;
+
+let alive_contains = fn (k: str) -> owned_vec_contains alive k;
+
+// `evicted` Map で「論理的に消えた key」を records する。alive Vec は
+// append-only に保ち、map_remove も owned_vec_set も無い制約を回避。
+let evicted = map_new ();
+
+// 同様に alive / evicted を関数引数で渡して global 参照を避ける
+let live_count_in = fn (a: OwnedVec[str]) -> fn evicted_map ->
+  let n = owned_vec_len a in
+  let rec count = fn (i: int) -> fn (acc: int) ->
+    if i >= n then acc
+    else
+      let key = owned_vec_get a i in
+      if map_has evicted_map key then count (i + 1) acc
+      else count (i + 1) (acc + 1) in
+  count 0 0;
+
+let evict_oldest_in = fn (a: OwnedVec[str]) -> fn evicted_map ->
+  let n = owned_vec_len a in
+  let rec find = fn (i: int) ->
+    if i >= n then ()
+    else
+      let key = owned_vec_get a i in
+      if map_has evicted_map key then find (i + 1)
+      else
+        let _ = map_set evicted_map key 1 in
+        () in
+  find 0;
+
+let put = fn (k: str) -> fn (v: str) ->
+  let _ = map_set cache k v in
+  // alive に未登録なら push
+  if alive_contains k then
+    ()
+  else
+    let _ = owned_vec_push alive k in
+    // capacity を超えたら最古を evicted に記録
+    if live_count_in alive evicted > capacity then
+      evict_oldest_in alive evicted
+    else
+      ();
+
+let get = fn (k: str) ->
+  if alive_contains k && (map_has cache k) && (map_has evicted k == false) then
+    "HIT(" ++ (map_get cache k : str) ++ ")"
+  else
+    "MISS";
+
+let _ = print "=== cache_sim (Phase 36, capacity=3) ===";
+
+let _ = put "a" "1";
+let _ = put "b" "2";
+let _ = put "c" "3";
+let _ = print ("get a: " ++ get "a");   // HIT 1
+let _ = print ("get b: " ++ get "b");   // HIT 2
+let _ = print ("get c: " ++ get "c");   // HIT 3
+
+let _ = print "--- add d (capacity exceeded, oldest = a evicted) ---";
+let _ = put "d" "4";
+let _ = print ("get a: " ++ get "a");   // MISS
+let _ = print ("get b: " ++ get "b");   // HIT 2
+let _ = print ("get c: " ++ get "c");   // HIT 3
+let _ = print ("get d: " ++ get "d");   // HIT 4
+
+let _ = print "--- update existing key b ---";
+let _ = put "b" "22";
+let _ = print ("get b: " ++ get "b");   // HIT 22 (alive 位置は変わらず)
+
+let _ = print "--- add e (evicts b) ---";
+let _ = put "e" "5";
+let _ = print ("get b: " ++ get "b");   // MISS
+let _ = print ("get c: " ++ get "c");   // HIT
+let _ = print ("get d: " ++ get "d");   // HIT
+let _ = print ("get e: " ++ get "e");   // HIT
+
+0

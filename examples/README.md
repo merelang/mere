@@ -112,6 +112,10 @@ backend いずれかへ codegen。
 | [csv_writer.mere](csv_writer.mere) ⭐ | record list → CSV string via StrBuf。`,` `"` を含む field は `"..."` quote + 内部 `"` を `""` doubling (str_replace 未対応のため char_at で自前 escape) (B2) |
 | [markdown_to_text.mere](markdown_to_text.mere) ⭐ | char_at 1 文字単位 scan + StrBuf で markdown 装飾 (`#` heading / `*` `_` 強調 / `` ` `` code / `>` quote) を剥がす (B5) |
 | [calendar_lite.mere](calendar_lite.mere) ⭐ | 年月から日曜始まりの月カレンダーを ASCII で出力。閏年判定 + Zeller の合同式 + StrBuf で 7 列 grid 組み立て (G3) |
+| [matrix_2d.mere](matrix_2d.mere) ⭐ | 2D matrix を 1D OwnedVec[int] + `r * cols + c` index で表現。matrix add / transpose / pretty print。nested Vec[Vec[int]] は region escape が解けず本例では避けた (H2) |
+| [borrow_chain.mere](borrow_chain.mere) | 同じ `&shared write R Logger` 借用を 3 つの helper を呼ぶ pipeline で再利用 (Phase 17.1 borrow tracking の demo)。**interp only** (`&shared write R` の codegen 未対応、borrow_modes.mere と同様、F3) |
+| [cache_sim.mere](cache_sim.mere) ⭐ | capacity=3 の FIFO cache 擬似実装。`map_remove` / `owned_vec_set` を持たない制約下で、`alive` Vec + `evicted` Map を分けて FIFO eviction を表現。**新摩擦 (DEFERRED §1.14)**: inner let-rec が global を参照すると LLVM が落ちるバグを発掘、引数渡しで workaround (A4) |
+| [simple_query.mere](simple_query.mere) ⭐ | SELECT * FROM users WHERE col op value の最小実装 (tokenize / parse / execute、~150 LoC)。toy_sql.mere の 1165 LoC から大幅に削った教材版 (I3) |
 
 ### Q-010 collection 基本
 

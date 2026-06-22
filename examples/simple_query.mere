@@ -1,0 +1,159 @@
+// simple_query: SELECT * FROM users WHERE col op value の最小実装 (Phase 36)
+//
+// 目的: examples roadmap I3。tokenize → parse → execute の典型的な
+//   query interpreter mini を 4 backend で動かす。toy_sql.mere の 1165 LoC
+//   から大きく削った教材向け版 (~150 LoC)。
+//
+// scope:
+//   - 単一テーブル `users { id, name, age }` (in-memory fixed list)
+//   - `SELECT * FROM users` (WHERE optional)
+//   - `WHERE col op value` ただし col ∈ {id, name, age}、op ∈ {=, !=, <, >}
+//   - quote 無し、文字列は単語として
+//   - 失敗時は ParseErr / RunErr の variant で返す
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type User = { id: int, name: str, age: int };
+
+type op = OpEq | OpNe | OpLt | OpGt;
+
+type cond = NoCond | Cond of (str * op * str);
+
+type query = Query of (str * cond);   // (table, cond)
+
+type qresult = QOk of query | QErr of str;
+
+// === tokenizer: 空白で分割。str_split " " を活用 ===
+let tokenize = fn (s: str) -> str_split s " ";
+
+// === helpers ===
+let parse_op = fn (s: str) ->
+  if s == "="  then Some OpEq
+  else if s == "!=" then Some OpNe
+  else if s == "<"  then Some OpLt
+  else if s == ">"  then Some OpGt
+  else None;
+
+// list helper: nth (0-indexed)、無ければ None
+let rec nth = fn (xs: str list) -> fn (i: int) ->
+  match xs with
+  | Nil       -> None
+  | Cons (h, t) -> if i == 0 then Some h else nth t (i - 1);
+
+// list helper: 長さ
+let rec llen = fn (xs: str list) ->
+  match xs with
+  | Nil         -> 0
+  | Cons (_, t) -> 1 + llen t;
+
+// 大文字小文字を区別せず比較したいが str_lower 等が codegen 未対応なので、
+// 入力 SQL は UPPERCASE 前提とする。
+let parse_query = fn (sql: str) ->
+  let toks = tokenize sql in
+  let n = llen toks in
+  if n < 4 then QErr "too few tokens"
+  else
+    match nth toks 0 with
+    | None -> QErr "empty query"
+    | Some sel ->
+      if sel != "SELECT" then QErr ("expected SELECT, got: " ++ sel)
+      else
+        match nth toks 1 with
+        | None -> QErr "missing column list"
+        | Some col ->
+          if col != "*" then QErr ("only `*` supported, got: " ++ col)
+          else
+            match nth toks 2 with
+            | None -> QErr "missing FROM"
+            | Some from_kw ->
+              if from_kw != "FROM" then QErr ("expected FROM, got: " ++ from_kw)
+              else
+                match nth toks 3 with
+                | None -> QErr "missing table name"
+                | Some table ->
+                  if n == 4 then QOk (Query (table, NoCond))
+                  else if n == 8 then
+                    match nth toks 4 with
+                    | None -> QErr "<unreachable>"
+                    | Some where_kw ->
+                      if where_kw != "WHERE" then QErr ("expected WHERE, got: " ++ where_kw)
+                      else
+                        match nth toks 5 with
+                        | None -> QErr "missing WHERE col"
+                        | Some wcol ->
+                          match nth toks 6 with
+                          | None -> QErr "missing WHERE op"
+                          | Some wop ->
+                            match parse_op wop with
+                            | None    -> QErr ("unknown op: " ++ wop)
+                            | Some op_v ->
+                              match nth toks 7 with
+                              | None -> QErr "missing WHERE value"
+                              | Some wval -> QOk (Query (table, Cond (wcol, op_v, wval)))
+                  else QErr ("malformed query, " ++ show n ++ " tokens");
+
+// === executor ===
+let users_table =
+  [User { id = 1, name = "alice",   age = 30 },
+   User { id = 2, name = "bob",     age = 25 },
+   User { id = 3, name = "carol",   age = 40 },
+   User { id = 4, name = "dave",    age = 22 },
+   User { id = 5, name = "eve",     age = 35 }];
+
+let field_str = fn (u: User) -> fn (col: str) ->
+  if col == "id"   then show u.id
+  else if col == "name" then u.name
+  else if col == "age"  then show u.age
+  else "<unknown>";
+
+// 比較を文字列同士で行う。op が < / > のときは int 比較 (toi で変換)
+let toi = fn (s: str) -> int_of_str s;
+
+let match_cond = fn (u: User) -> fn (col: str) -> fn (op_v: op) -> fn (val: str) ->
+  let lhs = field_str u col in
+  match op_v with
+  | OpEq -> lhs == val
+  | OpNe -> lhs != val
+  | OpLt -> toi lhs < toi val
+  | OpGt -> toi lhs > toi val;
+
+let print_row = fn (u: User) ->
+  print (show u.id ++ " | " ++ u.name ++ " | " ++ show u.age);
+
+let exec_query = fn (q: query) ->
+  match q with
+  | Query (table, cnd) ->
+    if table != "users" then
+      print ("ERROR: unknown table: " ++ table)
+    else
+      let _ = print "id | name | age" in
+      list_iter users_table (fn (u: User) ->
+        match cnd with
+        | NoCond -> print_row u
+        | Cond (col, op_v, val) ->
+          if match_cond u col op_v val then print_row u
+          else ());
+
+let run = fn (sql: str) ->
+  let _ = print ("> " ++ sql) in
+  match parse_query sql with
+  | QErr msg -> print ("ERROR: " ++ msg)
+  | QOk q    -> exec_query q;
+
+let _ = print "=== simple_query (Phase 36) ===";
+
+let _ = run "SELECT * FROM users";
+let _ = print "";
+let _ = run "SELECT * FROM users WHERE age > 25";
+let _ = print "";
+let _ = run "SELECT * FROM users WHERE name = bob";
+let _ = print "";
+let _ = run "SELECT * FROM users WHERE id != 3";
+let _ = print "";
+let _ = run "SELECT * FROM orders";       // unknown table
+let _ = print "";
+let _ = run "DELETE FROM users";          // syntax error
+let _ = print "";
+let _ = run "SELECT * FROM users WHERE age >> 30";   // unknown op
+
+0
