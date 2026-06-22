@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-06-22 (続き — Phase 37 公開準備)
+
+Phase 36 syntactic sugar 完了後、 mere を public 化するための準備スプリント。
+**LICENSE 採択 + CI 整備 + 実装 polish B/A 完了**。 1488 → **1498 tests**。
+
+- **LICENSE 採択 (MIT 単独)**: `LICENSE` (MIT) + `CONTRIBUTING.md` で
+  future MIT OR Apache-2.0 dual の余地を contributor に予告。 OCaml lang 系
+  (Lua / Zig / Julia / Nim / F#) の主流 license と一致。 戦略経緯は
+  `internal design notes` Section F
+- **GitHub Actions CI**: ubuntu + macos × OCaml 5.1/5.4 で
+  `dune build` + `dune runtest`。 README に CI / License バッジ追加
+- **Phase 37.B 網羅性検査 Phase 2**: `is_total_pattern` を tuple / record に
+  再帰 (`(a, b)` や `{ x = a, y = b }` は total として認識)、 int / str /
+  float / tuple / record の wildcard 警告に type hint を付与
+  (`"no wildcard arm for int"` 等)。 1488 → 1494 tests
+- **Phase 37.A `while` at top-level (3 backend)**: `let _ = while cond do
+  body;` が main 直下でも動くよう、 C / LLVM / Wasm の `lift_fn_skels` を
+  拡張。 `Let (P_*, Let_rec (bs, lr_body), rest)` を見つけたら bs を
+  top-level fn skel に lift して value を lr_body に置換。 1494 → 1498 tests
+- **Phase 37.C multi-arg curried builtin first-class**: DEFERRED §1.2 A2
+  残り。 実装規模を再見積もりして **Phase 38.C へ defer** (2-arg curried
+  builtin の closure-form 化は outer / inner adapter の 2 段生成が必要、
+  vec_push / map_set 等 10+ builtin × 3 backend で boilerplate が大きい)
+- **`.gitignore` / `.gitattributes`**: editor / OS / codegen 出力を ignore、
+  `*.mere linguist-language=OCaml` で Linguist 登録までの暫定ハイライト
+- **CLI ergonomics polish**: `--version` / `-v` flag 追加、 unknown flag に
+  明示エラー、 help を 4 backend feature parity 反映 (旧
+  "Phase N prep, int subset" 表記を削除)、 help 末尾に docs / examples の
+  場所を追記
+- **opam package 化**: `dune-project` に `(package mere)` 宣言 + `bin/dune`
+  に `(public_name mere)`。 `generate_opam_files true` で `mere.opam`
+  auto-generate。 `opam install .` が動くように
+
+---
+
 ## 2026-06-22 (続き — Phase 36 syntactic sugar + dogfood examples)
 
 Phase 32 (FFI) 完了後、Phase 33 (dogfood example バッチ + did-you-mean

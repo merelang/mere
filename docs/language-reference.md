@@ -516,7 +516,7 @@ signature ctx = (db: int, log: int);
 
 ## 9. ステータス概要
 
-- **1488 tests passing** (test/test_basic.ml)
+- **1498 tests passing** (test/test_basic.ml)
 - **4 backend feature parity**: interpreter + C / LLVM IR / Wasm runtime
 - 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) で **diff = 0 PERFECT 一致**
 - 詳細は [Changelog](changelog.md) / [Codegen](codegen.md) を参照
