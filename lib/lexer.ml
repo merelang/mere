@@ -44,6 +44,8 @@ type token =
   | T_question        (* ?  — Option early-return (`let x = e? in body`) (Phase 36) *)
   | T_question_bang   (* ?! — Result early-return (`let x = e?! in body`) (Phase 36) *)
   | T_lt_minus        (* <- — list comprehension generator `[e | x <- xs]` (Phase 36) *)
+  | T_for             (* for — `for x in xs do body` (Phase 36) *)
+  | T_do              (* do  — same *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -351,6 +353,8 @@ let rec tokenize s =
           | "if" -> T_if
           | "then" -> T_then
           | "else" -> T_else
+          | "for" -> T_for       (* Phase 36: `for x in xs do body` *)
+          | "do" -> T_do
           | "true" -> T_true
           | "false" -> T_false
           | "fn" -> T_fn

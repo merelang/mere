@@ -1,0 +1,38 @@
+// for_loop_demo: Phase 36 で導入した `for x in xs do body` の demo
+//
+// 構文: `for x in xs do body` は `list_iter xs (\x -> body)` の sugar。
+//   for 文がほしい場面で procedural-style に書ける。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== for_loop_demo (Phase 36) ===";
+
+// 数値 range
+let _ = print "--- 1..5 ---";
+let _ = for x in 1..5 do print "{show x}";
+
+// 文字列 list
+let _ = print "--- words ---";
+let _ = for w in ["hello", "world", "mere"] do print w;
+
+// list comprehension の結果を iter
+let _ = print "--- squares of evens 2..10 ---";
+let _ = for n in [x * x | x <- 2..10, x % 2 == 0] do print "{show n}";
+
+// nested for
+let _ = print "--- multiplication table 1..3 ---";
+let _ = for a in 1..3 do
+          for b in 1..3 do
+            print "{show a} * {show b} = {show (a * b)}";
+
+// 副作用累積: Map に build up
+let visitors = map_new ();
+let _ = for name in ["alice", "bob", "alice", "carol", "bob", "alice"] do
+  let cur = if map_has visitors name then map_get visitors name else 0 in
+  let _ = map_set visitors name (cur + 1) in
+  ();
+
+let _ = print "--- visitor count ---";
+let _ = map_iter visitors (\name n -> print "{name}: {show n}");
+
+0

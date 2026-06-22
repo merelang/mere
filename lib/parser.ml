@@ -300,6 +300,18 @@ let rec parse_program_internal tokens =
     | _ -> inner, toks
   and base_expr toks =
     match toks with
+    (* Phase 36: `for x in xs do body` desugars to
+         list_iter xs (\x -> body) *)
+    | (pos, T_for) :: (_, T_ident name) :: (_, T_in) :: rest ->
+      let xs_expr, after_xs = expr rest in
+      (match after_xs with
+       | (_, T_do) :: after_do ->
+         let body, toks = expr after_do in
+         let lambda = mk pos (Ast.Fun (name, None, body)) in
+         mk pos (Ast.App (
+           mk pos (Ast.App (mk pos (Ast.Var "list_iter"), xs_expr)),
+           lambda)), toks
+       | _ -> raise (Parse_error (pos_of after_xs, "expected 'do' after `for x in xs`")))
     | (pos, T_if) :: (_, T_let) :: rest ->
       (* Phase 36: `if let pat = e then t else f` desugars to
            match e with | pat -> t | _ -> f

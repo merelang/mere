@@ -142,6 +142,7 @@ backend いずれかへ codegen。
 | [comprehension.mere](comprehension.mere) ⭐ | Phase 36 で導入した **list comprehension** `[expr \| x <- xs, cond, y <- ys, ...]` の demo。Haskell 風の **multi-generator** + filter を任意順で組み合わせ、Pythagorean triples (3 gen + filter) まで書ける |
 | [statistics.mere](statistics.mere) ⭐ | int list の基本統計量を Phase 36 で追加した **prelude helper を combined で dogfood**。count / sum / mean / min / max / variance / stddev (newton sqrt) / median (sort) / mode (Map) / outliers (filter)。`list_zip` / `list_for_all` / `list_any` / `list_member` も使う |
 | [if_let_demo.mere](if_let_demo.mere) ⭐ | Phase 36 で導入した **`if let pat = e then ... else ...`** の demo。Option / Result の条件分岐 + variant destructure (Circle / Square / Rect) で簡潔に書ける |
+| [for_loop_demo.mere](for_loop_demo.mere) ⭐ | Phase 36 で導入した **`for x in xs do body`** の demo。range / 文字列 list / list comprehension の結果 / nested for / Map 累積を procedural-style に。`list_iter xs (\x -> body)` の sugar |
 
 ### Q-010 collection 基本
 
