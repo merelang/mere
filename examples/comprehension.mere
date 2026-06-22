@@ -1,0 +1,50 @@
+// comprehension: Phase 36 で導入した list comprehension の demo
+//
+// 構文:
+//   `[ expr | x <- xs ]`           → `list_map xs (\x -> expr)`
+//   `[ expr | x <- xs, cond ]`     → `list_map (list_filter xs (\x -> cond)) (\x -> expr)`
+//
+// 注: list_filter は prelude には未投入なのでこの example の冒頭で定義
+//   (将来 prelude 化候補)。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let rec list_filter = \xs p ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) -> if p h then h :: list_filter t p else list_filter t p;
+
+let _ = print "=== comprehension (Phase 36) ===";
+
+// シンプル map
+let _ = print "--- squares 1..5 ---";
+let _ = list_iter [x * x | x <- 1..5] (\v -> print "{show v}");
+
+// filter
+let _ = print "--- even numbers 1..10 ---";
+let _ = list_iter [x | x <- 1..10, x % 2 == 0] (\v -> print "{show v}");
+
+// map + filter
+let _ = print "--- triples of multiples of 3 in 1..15 ---";
+let _ = list_iter [x * 3 | x <- 1..15, x % 3 == 0] (\v -> print "{show v}");
+
+// 文字列処理
+let _ = print "--- uppercased words ---";
+let _ = list_iter [to_upper w | w <- ["hello", "world", "mere"]] (\w -> print w);
+
+// list が string list の場合 + section との combo
+let _ = print "--- long words only ---";
+let words = ["I", "love", "the", "Mere", "programming", "language"];
+let _ = list_iter [w | w <- words, str_len w > 3] (\w -> print w);
+
+// Tuple list との組合せ
+let _ = print "--- positive only from signed list ---";
+let nums = (-3) :: 5 :: (-1) :: 7 :: (-2) :: 9 :: Nil;
+let _ = list_iter [n | n <- nums, n > 0] (\n -> print "{show n}");
+
+// nested with list_fold
+let _ = print "--- sum of squares 1..10 ---";
+let sq_sum = list_fold [x * x | x <- 1..10] 0 (\a x -> a + x);
+let _ = print "sum = {show sq_sum}";
+
+0

@@ -1035,21 +1035,58 @@ let rec parse_program_internal tokens =
       (* `[]` desugars to Nil *)
       mk pos (Ast.Constr ("Nil", None)), rest
     | (pos, T_lbracket) :: rest ->
-      (* `[e1, e2, ...]` desugars to Cons (e1, Cons (e2, ... Nil)) *)
-      let rec parse_elems acc toks =
-        let e, toks = expr toks in
-        let acc = e :: acc in
-        match toks with
-        | (_, T_comma) :: rest -> parse_elems acc rest
-        | (_, T_rbracket) :: rest -> List.rev acc, rest
-        | _ -> raise (Parse_error (pos_of toks, "expected ',' or ']' in list literal"))
-      in
-      let elems, rest = parse_elems [] rest in
-      let nil = mk pos (Ast.Constr ("Nil", None)) in
-      let result = List.fold_right (fun e acc ->
-        mk pos (Ast.Constr ("Cons", Some (mk pos (Ast.Tuple [e; acc]))))
-      ) elems nil in
-      result, rest
+      (* `[e1, e2, ...]` desugars to Cons (e1, Cons (e2, ... Nil)).
+         Phase 36: list comprehension `[expr | x <- xs]` and
+         `[expr | x <- xs, cond]` desugar to list_map / list_filter. *)
+      let first, after_first = expr rest in
+      (match after_first with
+       | (_, T_pipe) :: (_, T_ident gen_var) :: (_, T_lt_minus) :: gen_rest ->
+         (* Phase 36: list comprehension. We've parsed `expr` (= first) +
+            `| name <-`. Now parse the source list, then optional `, cond`. *)
+         let src, after_src = expr gen_rest in
+         let cond_opt, after_cond =
+           match after_src with
+           | (_, T_comma) :: rest2 ->
+             let c, r = expr rest2 in Some c, r
+           | _ -> None, after_src
+         in
+         (match after_cond with
+          | (_, T_rbracket) :: rest' ->
+            let var_e = mk pos (Ast.Var gen_var) in
+            (* lambda for body: \gen_var -> first *)
+            let body_fn = mk pos (Ast.Fun (gen_var, None, first)) in
+            let src' =
+              match cond_opt with
+              | None -> src
+              | Some cond ->
+                let pred = mk pos (Ast.Fun (gen_var, None, cond)) in
+                let _ = var_e in
+                (* list_filter src pred *)
+                mk pos (Ast.App (
+                  mk pos (Ast.App (mk pos (Ast.Var "list_filter"), src)),
+                  pred))
+            in
+            mk pos (Ast.App (
+              mk pos (Ast.App (mk pos (Ast.Var "list_map"), src')),
+              body_fn)), rest'
+          | _ ->
+            raise (Parse_error (pos_of after_cond, "expected ']' in list comprehension")))
+       | _ ->
+         (* Regular list literal: continue parsing `, e2, e3, ...]`. *)
+         let rec parse_elems acc toks =
+           match toks with
+           | (_, T_comma) :: rest ->
+             let e, toks = expr rest in
+             parse_elems (e :: acc) toks
+           | (_, T_rbracket) :: rest -> List.rev acc, rest
+           | _ -> raise (Parse_error (pos_of toks, "expected ',' or ']' in list literal"))
+         in
+         let elems, rest = parse_elems [first] after_first in
+         let nil = mk pos (Ast.Constr ("Nil", None)) in
+         let result = List.fold_right (fun e acc ->
+           mk pos (Ast.Constr ("Cons", Some (mk pos (Ast.Tuple [e; acc]))))
+         ) elems nil in
+         result, rest)
     | (pos, T_int n) :: rest -> mk pos (Ast.Int_lit n), rest
     | (pos, T_float f) :: rest -> mk pos (Ast.Float_lit f), rest
     | (pos, T_string s) :: rest -> mk pos (Ast.Str_lit s), rest

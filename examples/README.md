@@ -139,6 +139,7 @@ backend いずれかへ codegen。
 | [sugar_demo.mere](sugar_demo.mere) ⭐ | Phase 36 で追加した **lambda shorthand `\x -> body`** / **`@@` low-precedence app** / **string interpolation `"hello {name}"`** の demo。`\{` で literal brace を escape |
 | [question_demo.mere](question_demo.mere) ⭐ | Phase 36 で導入した **`?` Option early-return** + **`?!` Result early-return** の demo。Rust の `?` 風に Option / Result chain が書ける |
 | [sugar_showcase.mere](sugar_showcase.mere) ⭐ | Phase 36 で追加した **全 9 sugar** (range / op section / `::` / `<|` / `@@` / `\` / string interp / `?` / `?!`) を combined で使ったショーケース。prime sieve / inventory lookup / Result chain / 1 行 fold |
+| [comprehension.mere](comprehension.mere) ⭐ | Phase 36 で導入した **list comprehension** `[expr \| x <- xs, cond]` の demo。Haskell 風の generator + filter で map/filter chain を 1 行で表現 |
 
 ### Q-010 collection 基本
 

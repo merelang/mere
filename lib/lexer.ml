@@ -43,6 +43,7 @@ type token =
   | T_at_at           (* @@ — low-precedence application (Phase 36) *)
   | T_question        (* ?  — Option early-return (`let x = e? in body`) (Phase 36) *)
   | T_question_bang   (* ?! — Result early-return (`let x = e?! in body`) (Phase 36) *)
+  | T_lt_minus        (* <- — list comprehension generator `[e | x <- xs]` (Phase 36) *)
   | T_arrow
   | T_eq
   | T_eq_eq
@@ -148,6 +149,9 @@ let rec tokenize s =
       | '<' when i + 1 < len && s.[i + 1] = '|' ->
         (* Phase 36: `<|` reverse function application. *)
         advance 2; aux (i + 2) ((pos, T_lt_pipe) :: acc)
+      | '<' when i + 1 < len && s.[i + 1] = '-' ->
+        (* Phase 36: `<-` generator arrow for list comprehension. *)
+        advance 2; aux (i + 2) ((pos, T_lt_minus) :: acc)
       | '<' -> advance 1; aux (i + 1) ((pos, T_lt) :: acc)
       | '>' when i + 1 < len && s.[i + 1] = '=' ->
         advance 2; aux (i + 2) ((pos, T_gt_eq) :: acc)
