@@ -1,6 +1,6 @@
 # Mere examples
 
-Mere の動く `.mere` プログラム群 (118 本、Phase 36 で 47 本追加)。`dune exec ./bin/mere.exe -- examples/<file>.mere`
+Mere の動く `.mere` プログラム群 (123 本、Phase 36 で 47 本 + Phase 37/38 で 5 本追加)。`dune exec ./bin/mere.exe -- examples/<file>.mere`
 で interpreter 実行、`-c` / `-ll` / `-w` flag で C / LLVM IR / Wasm の 3
 backend いずれかへ codegen。
 
@@ -242,6 +242,21 @@ interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) と
 | [rps_game.mere](rps_game.mere) | じゃんけん |
 | [scoreboard.mere](scoreboard.mere) | スコアボード更新 |
 | [factory_value.mere](factory_value.mere) | Phase 35 — first-class factory builtin の demo (`let mk = map_new`) |
+
+### Phase 37/38 — partial app + auto-Drop + while top-level dogfood (5 本)
+
+Phase 37.A (`while` at top-level) / Phase 37.B (網羅性 Phase 2) / Phase 38.C
+(multi-arg curried builtin first-class) / Phase 38.G-1 (OwnedVec auto
+scope-bound Drop) の新機能を combined dogfood した example 群。 すべて
+4 backend (interp + C + LLVM + Wasm) で diff = 0。
+
+| ファイル | 内容 |
+|---|---|
+| [memo_fib.mere](memo_fib.mere) | メモ化 Fibonacci。 Phase 38.C: `let lookup = map_get cache` / `let store = map_set cache` の partial app で 2-arg / 3-arg curried builtin を closure 化 |
+| [process_queue.mere](process_queue.mere) | キュー処理。 Phase 37.A: `let _ = while (head < tail) do ...` を main 直下に直接書ける |
+| [event_aggregator.mere](event_aggregator.mere) | Phase 38.G-1: 関数の内部で `let v = owned_vec_new ()` を作って統計だけ return、 scope 末で auto-Drop。 + Phase 38.C partial app との両立 |
+| [poly_horner.mere](poly_horner.mere) | Horner 法による多項式評価。 partial app + auto-Drop combo |
+| [histogram_buckets.mere](histogram_buckets.mere) | 数列のバケット集計 + ASCII bar chart。 Map の closure 経由更新 |
 
 ## codegen の試し方
 

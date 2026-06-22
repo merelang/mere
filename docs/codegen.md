@@ -86,7 +86,7 @@ interpreter 方式だと「Mere は OCaml の上で動く」状態。codegen で
 interpreter で書ける Mere プログラムの**主要構文ほぼ全て** + **Q-010
 collection (Vec / OwnedVec / StrBuf / Map)** + **FFI (`extern fn`)** +
 **float (3 backend)** + **Phase 36 の 13 syntactic sugar** が 3 backend
-(C / LLVM IR / Wasm) で native compile + 実行可能。テスト **1526 件 passing**、E2E では
+(C / LLVM IR / Wasm) で native compile + 実行可能。テスト **1529 件 passing**、E2E では
 factorial / fibonacci / 連結リスト sum / make_adder closure / 多相
 variant + record / pattern match (nested / guard / or) に加えて、Phase 15
 で Vec[R, T] の全要素型 / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K =

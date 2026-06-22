@@ -1,0 +1,52 @@
+// histogram_buckets: 数列を bucket (区間) ごとに数えるヒストグラム
+//
+// 各値 x を `bucket_key x` で str に変換 (例: "0-9" / "10-19" / ... / "90-99")、
+// Map<str, int> でカウント。 `let inc = fn key -> map_set bucket_map key (...)` の
+// closure と `let get = map_get bucket_map` の partial app を活用。
+//
+// 内部の Map は scope を超えて使うので auto-Drop しない (まあそもそも Map は
+// Phase 38.G-1 の対象ではないので問題なし)。 OwnedVec は使わない単純例。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let bucket_key = fn x ->
+  let lo = (x / 10) * 10 in
+  let hi = lo + 9 in
+  show lo ++ "-" ++ show hi;
+
+let count_buckets = fn data ->
+  let counts = map_new () in
+  let _ = list_iter data (fn x ->
+    let key = bucket_key x in
+    let prev = if map_has counts key then map_get counts key else 0 in
+    let _ = map_set counts key (prev + 1) in
+    ()) in
+  counts;
+
+let show_buckets = fn buckets ->
+  // 0-9 から 90-99 までの bucket を順に表示
+  let rec loop = fn lo ->
+    if lo > 90 then ()
+    else
+      let key = show lo ++ "-" ++ show (lo + 9) in
+      let count = if map_has buckets key then map_get buckets key else 0 in
+      let bar =
+        let rec repeat = fn n -> if n <= 0 then "" else "#" ++ repeat (n - 1) in
+        repeat count in
+      let _ = print (key ++ " | " ++ bar ++ " (" ++ show count ++ ")") in
+      loop (lo + 10) in
+  loop 0;
+
+let _ = print "=== exam scores histogram ===";
+let scores = [42, 67, 89, 91, 73, 55, 48, 92, 81, 76, 65, 58, 72, 84, 95, 39, 60, 71, 88, 99];
+let _ = print ("scores: " ++ show (list_len scores) ++ " students");
+let b1 = count_buckets scores;
+let _ = show_buckets b1;
+
+let _ = print "=== ages histogram ===";
+let ages = [25, 33, 41, 58, 22, 67, 34, 45, 29, 38, 51, 44, 36, 28, 49, 31, 62, 24];
+let _ = print ("ages: " ++ show (list_len ages) ++ " people");
+let b2 = count_buckets ages;
+let _ = show_buckets b2;
+
+0

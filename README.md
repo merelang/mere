@@ -15,7 +15,7 @@ feature-parity で動く段階。
 
 ## ステータス (2026-06-22 時点)
 
-- **1526 tests passing**
+- **1529 tests passing**
 - **4 backend feature parity**: interp + C / LLVM IR / Wasm runtime
   すべてが 16 realistic examples (~1500 LoC) で **diff = 0 PERFECT 一致**
   (Phase 24-27)、Phase 36 で実例集を 118 本まで拡張
@@ -129,7 +129,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # 型表示
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1526 tests
+dune runtest                                         # 1529 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -169,7 +169,7 @@ mere/
 │   ├── repl.ml         # 対話実行 (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust 風 code frame + ANSI 色付け
 │   └── version.ml
-├── test/test_basic.ml  # 1526 tests
+├── test/test_basic.ml  # 1529 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js, puts / read_file / write_file)
 ├── examples/           # *.mere サンプル群
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog

@@ -1,0 +1,58 @@
+// event_aggregator: Phase 38.G-1 OwnedVec auto scope-bound Drop showcase
+//
+// 関数 aggregate の内部で OwnedVec を作り、 すべての input イベントを push、
+// 統計 (count / total / max) を **scalar の tuple として return** する。
+// `let v = owned_vec_new () in body` の body の tail は `(count, total, max)`
+// で OwnedVec を含まないので、 静的解析が auto-Drop 安全と判定 → scope 末で
+// `free(v->data)` が emit される。
+//
+// メリット: 各 aggregate 呼出ごとに OwnedVec を作って捨てる典型パターンが、
+// main 末まで vector data を持ち続けないので memory-efficient。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let aggregate = fn raw_data ->
+  let v = owned_vec_new () in
+  // Phase 38.C: push は partial app で closure 化
+  let push = owned_vec_push v in
+  let _ = list_iter raw_data push in
+  let get = owned_vec_get v in
+  let n = owned_vec_len v in
+  // total を再帰で集計
+  let rec sum = fn i -> fn acc ->
+    if i >= n then acc
+    else sum (i + 1) (acc + get i) in
+  let total = sum 0 0 in
+  // max を再帰で計算
+  let rec find_max = fn i -> fn best ->
+    if i >= n then best
+    else
+      let here = get i in
+      if here > best then find_max (i + 1) here
+      else find_max (i + 1) best in
+  let max_val = if n == 0 then 0 else find_max 0 (get 0) in
+  // body の tail は tuple of int → Phase 38.G-1 が auto-Drop を emit
+  (n, total, max_val);
+
+let _ = print "=== run 1: small dataset ===";
+let r1 = aggregate [3, 7, 12, 5, 9];
+let (c1, t1, m1) = r1;
+let _ = print ("count = " ++ show c1);
+let _ = print ("total = " ++ show t1);
+let _ = print ("max   = " ++ show m1);
+
+let _ = print "=== run 2: larger dataset ===";
+let r2 = aggregate [100, 50, 200, 25, 300, 75, 150];
+let (c2, t2, m2) = r2;
+let _ = print ("count = " ++ show c2);
+let _ = print ("total = " ++ show t2);
+let _ = print ("max   = " ++ show m2);
+let avg2 = t2 / c2;
+let _ = print ("avg   = " ++ show avg2);
+
+let _ = print "=== run 3: empty ===";
+let r3 = aggregate [];
+let (c3, t3, m3) = r3;
+let _ = print ("count = " ++ show c3 ++ ", total = " ++ show t3 ++ ", max = " ++ show m3);
+
+0

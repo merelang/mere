@@ -1,0 +1,42 @@
+// poly_horner: 多項式の Horner 法による評価 (Phase 38.C partial app + 38.G-1 auto-Drop)
+//
+// eval_poly coeffs x = a₀ + a₁x + a₂x² + ... + aₙxⁿ
+// Horner 法: (...((aₙ·x + aₙ₋₁)·x + aₙ₋₂)·x + ... ) + a₀
+//
+// 内部で OwnedVec を作って coeffs を順番に push、 計算後は scope 末で auto-Drop。
+// `let push = owned_vec_push v` と `let get = owned_vec_get v` で partial app。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let eval_poly = fn coeffs -> fn x ->
+  // Phase 38.G-1: v は scope 末で auto-Drop される (body の tail は int)
+  let v = owned_vec_new () in
+  // Phase 38.C: partial app で push / get を closure として束縛
+  let push = owned_vec_push v in
+  let _ = list_iter coeffs push in
+  let get = owned_vec_get v in
+  let n = owned_vec_len v in
+  // Horner 法: 高次の係数から累積
+  let rec horner = fn i -> fn acc ->
+    if i < 0 then acc
+    else horner (i - 1) (acc * x + get i) in
+  horner (n - 1) 0;
+
+let _ = print "=== poly p(x) = 1 + 2x + 3x² ===";
+let _ = print ("p(0) = " ++ show (eval_poly [1, 2, 3] 0));
+let _ = print ("p(1) = " ++ show (eval_poly [1, 2, 3] 1));
+let _ = print ("p(2) = " ++ show (eval_poly [1, 2, 3] 2));
+let _ = print ("p(3) = " ++ show (eval_poly [1, 2, 3] 3));
+let _ = print ("p(5) = " ++ show (eval_poly [1, 2, 3] 5));
+
+let _ = print "=== poly q(x) = 5 - 3x + x² - x³ + 2x⁴ ===";
+let _ = print ("q(0) = " ++ show (eval_poly [5, -3, 1, -1, 2] 0));
+let _ = print ("q(1) = " ++ show (eval_poly [5, -3, 1, -1, 2] 1));
+let _ = print ("q(2) = " ++ show (eval_poly [5, -3, 1, -1, 2] 2));
+let _ = print ("q(3) = " ++ show (eval_poly [5, -3, 1, -1, 2] 3));
+
+let _ = print "=== degenerate: constant 42 ===";
+let _ = print ("c(0) = " ++ show (eval_poly [42] 0));
+let _ = print ("c(99) = " ++ show (eval_poly [42] 99));
+
+0

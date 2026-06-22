@@ -1,0 +1,45 @@
+// process_queue: `while cond do body` を top-level で使うキュー処理 (Phase 37.A showcase)
+//
+// Mere は immutable なので「mutable container を Map / OwnedVec で持ち、 head /
+// tail カウンタを update しつつ消化する」のが典型的な while パターン。
+// Phase 37.A で top-level (main 直下) の `let _ = while ... do ...;` が
+// 動くようになった。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// queue 状態を Map で表現: "head" / "tail" がポインタ、 "0" "1" "2" ... が要素
+let q = map_new ();
+let _ = map_set q "head" 0;
+let _ = map_set q "tail" 5;
+let _ = map_set q "0" 100;
+let _ = map_set q "1" 200;
+let _ = map_set q "2" 300;
+let _ = map_set q "3" 400;
+let _ = map_set q "4" 500;
+
+// 処理結果を別の Map に蓄積 (immutable で sum を取るためのトリック)
+let acc = map_new ();
+let _ = map_set acc "sum" 0;
+let _ = map_set acc "count" 0;
+
+let _ = print "=== queue draining ===";
+
+let _ = while (map_get q "head") < (map_get q "tail") do
+  let h = map_get q "head" in
+  let key = show h in
+  let item = map_get q key in
+  let log_msg = "processing item " ++ show item ++ " at index " ++ show h in
+  let _ = print log_msg in
+  let _ = map_set acc "sum" ((map_get acc "sum") + item) in
+  let _ = map_set acc "count" ((map_get acc "count") + 1) in
+  map_set q "head" (h + 1);
+
+let _ = print "=== summary ===";
+let total_sum = map_get acc "sum";
+let total_count = map_get acc "count";
+let avg = total_sum / total_count;
+let _ = print "count = {show total_count}";
+let _ = print "sum   = {show total_sum}";
+let _ = print "avg   = {show avg}";
+
+0
