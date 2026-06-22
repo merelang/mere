@@ -120,6 +120,10 @@ backend いずれかへ codegen。
 | [fraction.mere](fraction.mere) ⭐ | 有理数 record `Frac { n, d }` の加減乗除 + 自動約分 (`gcd` 利用、Phase 36 新規)。canonical sign の正規化込み。注: 関数名は `divf` (C の `div` libc と衝突するため) |
 | [roman_numerals.mere](roman_numerals.mere) ⭐ | 整数 ⇄ ローマ数字 (1..3999) の双方向変換。greedy で `(int * str) list` を消費する典型アルゴリズム + 文字単位パーサ |
 | [password_strength.mere](password_strength.mere) ⭐ | パスワード強度 0..5 採点 (長さ / digit / lower / upper)。`is_digit` / `ord` / `char_at` の 1 文字単位走査 |
+| [brackets_balance.mere](brackets_balance.mere) ⭐ | 括弧の対応チェック (`()` `[]` `{}`)。linked-list `'a stk` で stack を表現、char_at で 1 文字 scan + match で push/pop。非括弧文字は skip |
+| [morse_code.mere](morse_code.mere) ⭐ | A-Z + 0-9 をモールス符号に encode / decode。Map[str, str] 2 つで往復辞書を構築。Phase 36 dogfood で C codegen の 2 つの摩擦 (§1.15 深い list literal、§1.16 region 内 strbuf escape) を発掘 |
+| [luhn_check.mere](luhn_check.mere) ⭐ | クレジットカード番号の Luhn チェックサム。char_at + is_digit + ord で 1 桁 int 変換、非数字 (space / hyphen) skip 対応 |
+| [tic_tac_toe.mere](tic_tac_toe.mere) ⭐ | 3x3 ボード + 勝敗判定 (8 ライン)。OwnedVec[cell] + variant + match の組合せ、5 シナリオを pretty print。Phase 36 dogfood で C codegen が `type result` rebind を List.combine で落とす bug を発掘 (§1.17) |
 
 ### Q-010 collection 基本
 

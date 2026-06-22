@@ -1,0 +1,90 @@
+// morse_code: 英大文字を Morse code に encode / decode (Phase 36)
+//
+// 目的: Map[str, str] で文字 → モールス符号の辞書を構築し、A-Z + 0-9 を
+//   往復変換する。to_upper / char_at / str_split + 自前 list iteration の
+//   組合せ dogfood。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 注: 36 ペアを `[(...), (...), ...]` の list 構文で書くと現状の C codegen
+// が `Cons (...)` の深い nesting (>20 段) で指数的に遅くなる (DEFERRED §1.15)。
+// 回避策として個別 map_set を bind する helper を使う。
+let to_morse = map_new ();
+let from_morse = map_new ();
+
+let bind = fn (ch: str) -> fn (code: str) ->
+  let _ = map_set to_morse ch code in
+  let _ = map_set from_morse code ch in
+  ();
+
+let _ = bind "A" ".-";    let _ = bind "B" "-...";  let _ = bind "C" "-.-.";  let _ = bind "D" "-..";
+let _ = bind "E" ".";     let _ = bind "F" "..-.";  let _ = bind "G" "--.";   let _ = bind "H" "....";
+let _ = bind "I" "..";    let _ = bind "J" ".---";  let _ = bind "K" "-.-";   let _ = bind "L" ".-..";
+let _ = bind "M" "--";    let _ = bind "N" "-.";    let _ = bind "O" "---";   let _ = bind "P" ".--.";
+let _ = bind "Q" "--.-";  let _ = bind "R" ".-.";   let _ = bind "S" "...";   let _ = bind "T" "-";
+let _ = bind "U" "..-";   let _ = bind "V" "...-";  let _ = bind "W" ".--";   let _ = bind "X" "-..-";
+let _ = bind "Y" "-.--";  let _ = bind "Z" "--..";
+let _ = bind "0" "-----"; let _ = bind "1" ".----"; let _ = bind "2" "..---"; let _ = bind "3" "...--";
+let _ = bind "4" "....-"; let _ = bind "5" "....."; let _ = bind "6" "-...."; let _ = bind "7" "--...";
+let _ = bind "8" "---.."; let _ = bind "9" "----.";
+
+// 文字列を encode: 各文字を to_morse で lookup、文字間は space、空白は "/" に
+// 注: region R { strbuf_to_str b } で str を返すと、region 終了時に
+// 開放されたメモリへの dangling pointer になる (Phase 36 dogfood で
+// DEFERRED §1.16 として記録)。回避策として __heap region (annotation
+// 省略時の default) の StrBuf を使う。
+let encode = fn (s: str) ->
+  let upper = to_upper s in
+  let b = strbuf_new () in
+  let n = str_len upper in
+  let rec loop = fn (i: int) -> fn (first: bool) ->
+    if i >= n then ()
+    else
+      let c = char_at upper i in
+      if c == " " then
+        let _ = strbuf_push b (if first then "/" else " /") in
+        loop (i + 1) false
+      else if map_has to_morse c then
+        let _ = strbuf_push b (if first then "" else " ") in
+        let _ = strbuf_push b (map_get to_morse c) in
+        loop (i + 1) false
+      else
+        // 未対応文字は skip
+        loop (i + 1) first in
+  let _ = loop 0 true in
+  strbuf_to_str b;
+
+// decode: space で分割した token を順に lookup、"/" は空白扱い
+let decode = fn (morse: str) ->
+  let toks = str_split morse " " in
+  let b = strbuf_new () in
+  let rec walk = fn (xs: str list) ->
+    match xs with
+    | Nil -> ()
+    | Cons (t, rest) ->
+      if t == "/" then
+        let _ = strbuf_push b " " in
+        walk rest
+      else if t == "" then walk rest
+      else if map_has from_morse t then
+        let _ = strbuf_push b (map_get from_morse t) in
+        walk rest
+      else
+        walk rest in
+  let _ = walk toks in
+  strbuf_to_str b;
+
+let check = fn (s: str) ->
+  let enc = encode s in
+  let dec = decode enc in
+  let _ = print ("\"" ++ s ++ "\" -> " ++ enc) in
+  print ("              back -> \"" ++ dec ++ "\"");
+
+let _ = print "=== morse_code (Phase 36) ===";
+let _ = check "SOS";
+let _ = check "HELLO";
+let _ = check "HELLO WORLD";
+let _ = check "MERE 2026";
+let _ = check "abc xyz";    // 小文字も to_upper で対応
+
+0

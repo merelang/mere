@@ -1,0 +1,119 @@
+// tic_tac_toe: 3x3 ボード + 勝敗判定 (Phase 36)
+//
+// 目的: variant (cell: Empty | X | O) + 1D OwnedVec で 3x3 を表現、8 本
+//   (3 row + 3 col + 2 diag) をチェックして勝者を判定する。pretty-print
+//   込み。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type cell = Empty | X | O;
+// 注: 型名は `result` を避ける (Mere の builtin `Result` と衝突して
+// C codegen が List.combine で落ちる、DEFERRED §1.17)。
+type game_state = Won of cell | Draw | Ongoing;
+
+let cell_str = fn (c: cell) ->
+  match c with
+  | Empty -> "."
+  | X     -> "X"
+  | O     -> "O";
+
+// 3 セルが同一かつ Empty でなければ勝者
+let line_winner = fn (a: cell) -> fn (b: cell) -> fn (c: cell) ->
+  match a with
+  | Empty -> Empty
+  | X     -> if (match b with X -> true | _ -> false) && (match c with X -> true | _ -> false) then X else Empty
+  | O     -> if (match b with O -> true | _ -> false) && (match c with O -> true | _ -> false) then O else Empty;
+
+let get = fn (board: OwnedVec[cell]) -> fn (i: int) ->
+  owned_vec_get board i;
+
+// 全 8 ラインを順に確認
+let winner_of = fn (b: OwnedVec[cell]) ->
+  // 行
+  let r0 = line_winner (get b 0) (get b 1) (get b 2) in
+  let r1 = line_winner (get b 3) (get b 4) (get b 5) in
+  let r2 = line_winner (get b 6) (get b 7) (get b 8) in
+  // 列
+  let c0 = line_winner (get b 0) (get b 3) (get b 6) in
+  let c1 = line_winner (get b 1) (get b 4) (get b 7) in
+  let c2 = line_winner (get b 2) (get b 5) (get b 8) in
+  // 対角
+  let d0 = line_winner (get b 0) (get b 4) (get b 8) in
+  let d1 = line_winner (get b 2) (get b 4) (get b 6) in
+  let pick = fn (a: cell) -> fn (b: cell) ->
+    match a with Empty -> b | _ -> a in
+  pick r0 (pick r1 (pick r2 (pick c0 (pick c1 (pick c2 (pick d0 d1))))));
+
+// 空マスが残っているか
+let has_empty = fn (b: OwnedVec[cell]) ->
+  let rec loop = fn (i: int) ->
+    if i >= owned_vec_len b then false
+    else
+      match owned_vec_get b i with
+      | Empty -> true
+      | _     -> loop (i + 1) in
+  loop 0;
+
+let evaluate = fn (b: OwnedVec[cell]) ->
+  let w = winner_of b in
+  match w with
+  | Empty -> if has_empty b then Ongoing else Draw
+  | _     -> Won w;
+
+let print_board = fn (b: OwnedVec[cell]) ->
+  let row = fn (i: int) ->
+    cell_str (get b (i * 3)) ++ " "
+    ++ cell_str (get b (i * 3 + 1)) ++ " "
+    ++ cell_str (get b (i * 3 + 2)) in
+  let _ = print (row 0) in
+  let _ = print (row 1) in
+  print (row 2);
+
+let mk_board = fn (cells: cell list) ->
+  let v = owned_vec_new () in
+  let rec fill = fn (xs: cell list) ->
+    match xs with
+    | Nil -> ()
+    | Cons (h, t) ->
+      let _ = owned_vec_push v h in
+      fill t in
+  let _ = fill cells in
+  v;
+
+let show_result = fn (r: game_state) ->
+  match r with
+  | Won c   -> "Winner: " ++ cell_str c
+  | Draw    -> "Draw"
+  | Ongoing -> "Ongoing";
+
+let scenarios =
+  [("row of X",   [X, X, X,
+                   O, O, Empty,
+                   Empty, Empty, Empty]),
+   ("diag of O",  [O, X, X,
+                   X, O, Empty,
+                   Empty, Empty, O]),
+   ("col of X",   [X, O, Empty,
+                   X, O, Empty,
+                   X, Empty, Empty]),
+   ("draw",       [X, O, X,
+                   X, X, O,
+                   O, X, O]),
+   ("ongoing",    [X, Empty, O,
+                   Empty, X, Empty,
+                   O, Empty, Empty])];
+
+let rec run = fn (xs: (str * cell list) list) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((label, cells), rest) ->
+    let b = mk_board cells in
+    let _ = print ("--- " ++ label ++ " ---") in
+    let _ = print_board b in
+    let _ = print (show_result (evaluate b)) in
+    run rest;
+
+let _ = print "=== tic_tac_toe (Phase 36) ===";
+let _ = run scenarios;
+
+0

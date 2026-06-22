@@ -1,0 +1,51 @@
+// luhn_check: クレジットカード番号の Luhn チェックサム (Phase 36)
+//
+// 目的: 桁ごとの walk + 偶数位置を 2 倍 + 桁和 を計算するクラシックな
+//   バリデーションアルゴリズム。char_at + is_digit + ord で 1 桁を int に
+//   変換するパターンを 4 backend で dogfood。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 桁文字を int に。非数字は -1。
+let digit_of = fn (c: str) ->
+  if is_digit c then ord c - 48 else -1;
+
+// Luhn: 末尾から見て 1, 2, 4, ... の偶数位置にあたる桁を 2 倍にして
+// 各桁の和を取り、合計が 10 で割り切れたら valid。
+let luhn = fn (card: str) ->
+  let n = str_len card in
+  let rec loop = fn (i: int) -> fn (acc: int) -> fn (parity: int) ->
+    if i < 0 then acc
+    else
+      let d = digit_of (char_at card i) in
+      if d < 0 then
+        // 非数字 (スペース / ハイフン等) は skip、parity はそのまま
+        loop (i - 1) acc parity
+      else
+        let doubled =
+          if parity == 1 then
+            let dd = d * 2 in
+            if dd > 9 then dd - 9 else dd
+          else d in
+        loop (i - 1) (acc + doubled) (1 - parity) in
+  let sum = loop (n - 1) 0 0 in
+  sum % 10 == 0;
+
+let check = fn (card: str) ->
+  print (card ++ " => " ++ (if luhn card then "VALID" else "invalid"));
+
+let _ = print "=== luhn_check (Phase 36) ===";
+
+// 有名なテスト用 valid 番号
+let _ = check "4539578763621486";    // Visa
+let _ = check "5500000000000004";    // MasterCard
+let _ = check "340000000000009";     // Amex
+let _ = check "6011000000000004";    // Discover
+// スペース / ハイフン入りも対応 (非数字 skip)
+let _ = check "4539-5787-6362-1486";
+let _ = check "4539 5787 6362 1486";
+// 無効: 末尾を 1 ずらす
+let _ = check "4539578763621487";
+let _ = check "1234567890123456";
+
+0
