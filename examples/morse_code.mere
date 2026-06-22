@@ -6,27 +6,31 @@
 //
 // 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
 
-// 注: 36 ペアを `[(...), (...), ...]` の list 構文で書くと現状の C codegen
-// が `Cons (...)` の深い nesting (>20 段) で指数的に遅くなる (DEFERRED §1.15)。
-// 回避策として個別 map_set を bind する helper を使う。
+// (文字, モールス) の対応表
+let pairs =
+  [("A", ".-"),    ("B", "-..."),  ("C", "-.-."),  ("D", "-.."),
+   ("E", "."),     ("F", "..-."),  ("G", "--."),   ("H", "...."),
+   ("I", ".."),    ("J", ".---"),  ("K", "-.-"),   ("L", ".-.."),
+   ("M", "--"),    ("N", "-."),    ("O", "---"),   ("P", ".--."),
+   ("Q", "--.-"),  ("R", ".-."),   ("S", "..."),   ("T", "-"),
+   ("U", "..-"),   ("V", "...-"),  ("W", ".--"),   ("X", "-..-"),
+   ("Y", "-.--"),  ("Z", "--.."),
+   ("0", "-----"), ("1", ".----"), ("2", "..---"), ("3", "...--"),
+   ("4", "....-"), ("5", "....."), ("6", "-...."), ("7", "--..."),
+   ("8", "---.."), ("9", "----.")];
+
 let to_morse = map_new ();
 let from_morse = map_new ();
 
-let bind = fn (ch: str) -> fn (code: str) ->
-  let _ = map_set to_morse ch code in
-  let _ = map_set from_morse code ch in
-  ();
+let rec build = fn (ps: (str * str) list) ->
+  match ps with
+  | Nil -> ()
+  | Cons ((ch, code), rest) ->
+    let _ = map_set to_morse ch code in
+    let _ = map_set from_morse code ch in
+    build rest;
 
-let _ = bind "A" ".-";    let _ = bind "B" "-...";  let _ = bind "C" "-.-.";  let _ = bind "D" "-..";
-let _ = bind "E" ".";     let _ = bind "F" "..-.";  let _ = bind "G" "--.";   let _ = bind "H" "....";
-let _ = bind "I" "..";    let _ = bind "J" ".---";  let _ = bind "K" "-.-";   let _ = bind "L" ".-..";
-let _ = bind "M" "--";    let _ = bind "N" "-.";    let _ = bind "O" "---";   let _ = bind "P" ".--.";
-let _ = bind "Q" "--.-";  let _ = bind "R" ".-.";   let _ = bind "S" "...";   let _ = bind "T" "-";
-let _ = bind "U" "..-";   let _ = bind "V" "...-";  let _ = bind "W" ".--";   let _ = bind "X" "-..-";
-let _ = bind "Y" "-.--";  let _ = bind "Z" "--..";
-let _ = bind "0" "-----"; let _ = bind "1" ".----"; let _ = bind "2" "..---"; let _ = bind "3" "...--";
-let _ = bind "4" "....-"; let _ = bind "5" "....."; let _ = bind "6" "-...."; let _ = bind "7" "--...";
-let _ = bind "8" "---.."; let _ = bind "9" "----.";
+let _ = build pairs;
 
 // 文字列を encode: 各文字を to_morse で lookup、文字間は space、空白は "/" に
 let encode = fn (s: str) ->

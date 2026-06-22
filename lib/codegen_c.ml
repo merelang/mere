@@ -1730,11 +1730,15 @@ let rec emit_expr (e : Ast.expr) : string =
         | None -> type_name
       else type_name
     in
-    let payload_str =
+    (* Phase 36 (DEFERRED §1.15 fix): emit the payload arg ONCE.
+       The old code called `emit_expr arg` from both the payload_str
+       initializer (used by the non-recursive branch) AND from the
+       recursive branch's `__p->payload` assignment, so nested Cons
+       triggered exponential 2^N re-emission. *)
+    let arg_c_opt =
       match arg_opt with
-      | None -> ""
-      | Some arg ->
-        Printf.sprintf ", .payload.%s = %s" name (emit_expr arg)
+      | None -> None
+      | Some arg -> Some (emit_expr arg)
     in
     if is_recursive_variant actual_type_name then
       (* Recursive variant: allocate a node in the default region and
@@ -1745,11 +1749,15 @@ let rec emit_expr (e : Ast.expr) : string =
         "({ %s* __p = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); \
          __p->tag = %d%s; __p; })"
         node node node tag
-        (match arg_opt with
+        (match arg_c_opt with
          | None -> ""
-         | Some arg -> "; __p->payload." ^ name ^ " = " ^ emit_expr arg)
+         | Some arg_c -> "; __p->payload." ^ name ^ " = " ^ arg_c)
     else
-      let _ = payload_str in
+      let payload_str =
+        match arg_c_opt with
+        | None -> ""
+        | Some arg_c -> Printf.sprintf ", .payload.%s = %s" name arg_c
+      in
       Printf.sprintf "((%s){.tag = %d%s})" actual_type_name tag payload_str
   | Ast.Match (scrut, arms) ->
     let scrut_c = emit_expr scrut in
