@@ -1,6 +1,6 @@
 # Mere examples
 
-Mere の動く `.mere` プログラム群 (61 本)。`dune exec ./bin/mere.exe -- examples/<file>.mere`
+Mere の動く `.mere` プログラム群 (118 本、Phase 36 で 47 本追加)。`dune exec ./bin/mere.exe -- examples/<file>.mere`
 で interpreter 実行、`-c` / `-ll` / `-w` flag で C / LLVM IR / Wasm の 3
 backend いずれかへ codegen。
 
@@ -173,6 +173,75 @@ backend いずれかへ codegen。
 | [owned_vec_codegen.mere](owned_vec_codegen.mere) | OwnedVec + Vec ⇄ OwnedVec 変換の codegen demo |
 | [strbuf_codegen.mere](strbuf_codegen.mere) | StrBuf の codegen demo |
 | [map_codegen.mere](map_codegen.mere) | Map の codegen demo (str→int / int→str / region 内) |
+
+### Phase 36 — syntactic sugar dogfood (47 本)
+
+13 syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` / string
+interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) と
+16 prelude entry (list_filter / range / list_sum 等) を combined dogfood
+した example 群。すべて 4 backend (interp + C + LLVM + Wasm) で diff = 0。
+
+#### sugar showcase
+
+| ファイル | 内容 |
+|---|---|
+| [range_demo.mere](range_demo.mere) | `0..n` range literal |
+| [sections.mere](sections.mere) | operator section `(+ 1)` |
+| [cons_pipe_demo.mere](cons_pipe_demo.mere) | `::` cons / `<|` reverse pipe / `@@` apply |
+| [sugar_demo.mere](sugar_demo.mere) | lambda shorthand `\x -> ...` + string interp |
+| [question_demo.mere](question_demo.mere) | `?` / `?!` early-return |
+| [sugar_showcase.mere](sugar_showcase.mere) | 13 sugar の combined demo |
+| [comprehension.mere](comprehension.mere) | list comprehension multi-gen |
+| [if_let_demo.mere](if_let_demo.mere) | `if let pat = e then ... else ...` |
+| [for_loop_demo.mere](for_loop_demo.mere) | `for x in xs do body` |
+| [while_loop_demo.mere](while_loop_demo.mere) | `while cond do body` |
+| [statistics.mere](statistics.mere) | Phase 36 prelude (list_sum / list_max / list_min 等) |
+
+#### dogfood (アルゴリズム・データ処理)
+
+| ファイル | 内容 |
+|---|---|
+| [calc.mere](calc.mere) | operator-precedence な recursive descent parser + evaluator (`?!` Result chain、138 行) |
+| [maze_solver.mere](maze_solver.mere) | ASCII 8x12 maze の BFS pathfinding + path 可視化 |
+| [game_of_life.mere](game_of_life.mere) | Conway's Game of Life (8x12 grid、glider) |
+| [sudoku_check.mere](sudoku_check.mere) | 9x9 sudoku 解答の validity check (row/col/box) |
+| [tic_tac_toe.mere](tic_tac_toe.mere) | 三目並べ (board variant + win detection) |
+| [eight_queens.mere](eight_queens.mere) | 8-queens solver (backtracking) |
+| [knapsack.mere](knapsack.mere) | 0-1 knapsack DP |
+| [collatz.mere](collatz.mere) | Collatz sequence |
+| [bin_tree_traversal.mere](bin_tree_traversal.mere) | 二分木の pre/in/post-order |
+| [csv_summary.mere](csv_summary.mere) | CSV 集計 (Map + reduce) |
+| [markdown_to_text.mere](markdown_to_text.mere) | markdown のヘッダ・bold を素テキストへ |
+| [matrix_2d.mere](matrix_2d.mere) | 2D matrix 操作 (transpose / scale) |
+| [borrow_chain.mere](borrow_chain.mere) | 借用 mode chain demo |
+| [cache_sim.mere](cache_sim.mere) | LRU cache 簡易シミュレータ |
+| [simple_query.mere](simple_query.mere) | tiny query engine |
+| [config_loader.mere](config_loader.mere) | key=value config の parse |
+| [csv_writer.mere](csv_writer.mere) | record → CSV string |
+| [calendar_lite.mere](calendar_lite.mere) | カレンダー出力 |
+| [html_builder.mere](html_builder.mere) | tag combinator で HTML 文字列 |
+| [event_counter.mere](event_counter.mere) | event log の頻度集計 |
+| [traffic_light.mere](traffic_light.mere) | 信号機の状態遷移 |
+| [histogram.mere](histogram.mere) | int リストの ASCII histogram |
+| [fallible_lookup.mere](fallible_lookup.mere) | Option chain demo |
+
+#### dogfood (ゲーム・文字列処理)
+
+| ファイル | 内容 |
+|---|---|
+| [caesar_cipher.mere](caesar_cipher.mere) | Caesar 暗号 encode/decode |
+| [fraction.mere](fraction.mere) | 有理数 + reduce (`divf` を使うことで C libc `div` と衝突回避) |
+| [roman_numerals.mere](roman_numerals.mere) | int ↔ roman 数字変換 |
+| [password_strength.mere](password_strength.mere) | パスワード強度判定 |
+| [brackets_balance.mere](brackets_balance.mere) | 括弧の対応 check |
+| [morse_code.mere](morse_code.mere) | text → morse code 変換 |
+| [luhn_check.mere](luhn_check.mere) | クレジットカード番号の Luhn validation |
+| [palindrome.mere](palindrome.mere) | 回文判定 |
+| [anagram.mere](anagram.mere) | アナグラム判定 |
+| [base_conv.mere](base_conv.mere) | 任意 base 進数変換 |
+| [rps_game.mere](rps_game.mere) | じゃんけん |
+| [scoreboard.mere](scoreboard.mere) | スコアボード更新 |
+| [factory_value.mere](factory_value.mere) | Phase 35 — first-class factory builtin の demo (`let mk = map_new`) |
 
 ## codegen の試し方
 
