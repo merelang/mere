@@ -808,16 +808,54 @@ REPL で対話的に試したいときは:
 mere -r
 ```
 
-## 13. ネイティブコンパイル (C / LLVM / Wasm の 3 backend)
+## 12.5. 外部 C 関数 (FFI、Phase 32)
 
-Mere プログラムは 3 つの backend で codegen できる。すべて feature parity
-で動き、同じ Mere ソースから 3 種のネイティブ / portable バイナリを出せる。
+Mere は `extern fn` 構文で **libc / libm / OS の関数を直接呼べる**。
+1 行 `extern fn time: ...;` と書くだけで、4 backend いずれでも呼出可能。
+
+```mere
+extern fn getpid:  unit -> int;
+extern fn setenv:  str -> str -> int -> int;   // multi-arg curried
+extern fn getenv:  str -> str;
+
+let _ = setenv "MERE_VAR" "hello" 1 in
+print (getenv "MERE_VAR")                       // → "hello"
+```
+
+backend ごとの仕組み:
+- **interpreter**: `eval.ml` の `lookup_extern` に OCaml ミラー実装
+  (Unix module 経由)。4 backend parity を取るため hardcoded mock
+- **C codegen**: `extern <ret> <name>(<args>);` 宣言 + direct call、
+  clang が libc から自動リンク
+- **LLVM codegen**: `declare <ret> @<name>(<args>)` + LLVM call instruction
+- **Wasm codegen**: `(import "env" <name> ...)` env host import 経由、
+  `scripts/run_wasm.js` (Node.js host harness) が JS 実装を注入
+
+MVP 型範囲: `int` / `bool` / `str` / `unit` の組合せ (arrow chain)。
+`float` / `tuple` / `record` / `variant` / callback は次 phase 以降に defer。
+
+```mere
+extern fn getppid: unit -> int;
+let pid  = getpid () in
+let ppid = getppid () in
+print (show pid ++ " " ++ show ppid)             // → "<pid> <ppid>"
+```
+
+詳細・設計判断は [internal design notes] (private repo) を参照。
+
+## 13. ネイティブコンパイル (C / LLVM / Wasm — interp と合わせて 4 backend feature parity)
+
+Mere プログラムは 3 codegen backend で出力でき、interpreter と合わせて
+**4 backend (interp + C + LLVM + Wasm)** で feature parity 動作。
+Phase 24-27 で 12 examples、Phase 28 で +4 examples、**16 realistic
+examples (~2500 LoC; toy_sql.mere 単独で 1165 LoC)** が diff = 0 で
+完全一致する状態に到達 (2026-06-21〜22)。
 
 | flag | backend | 出力 |
 |---|---|---|
 | `-c` / `-ce` | C source | `clang` で native binary 化 |
-| `-ll` / `-lle` | LLVM IR | `llc` + `clang` で native binary 化 |
-| `-w` / `-we` | Wasm (WAT) | `wat2wasm` で `.wasm`、Node.js などで実行 |
+| `-ll` / `-lle` | LLVM IR | `clang` (or `llc` + `clang`) で native binary 化 |
+| `-w` / `-we` | Wasm (WAT) | `wat2wasm` で `.wasm`、`scripts/run_wasm.js` (Node.js) で実行 |
 
 `*.mere` ファイルから C を出す例:
 
@@ -862,18 +900,22 @@ wat2wasm fact.wat -o fact.wasm    # 別途 wabt が必要
 詳細は [codegen.md](codegen.md) を参照。
 
 interpreter モード (`mere file.mere`) と codegen の出力は同じプログラム
-なら一致する (`[1, 2, 3]` 等の整形も同じ)。3 backend は feature parity で、
+なら一致する (`[1, 2, 3]` 等の整形も同じ)。**4 backend feature parity** で、
 int / 関数 / 文字列 / tuple / record / variant / closure / 多相 / 再帰
 variant / 複雑 pattern / show / region / view / `with` Drop / list
-pretty-print に加えて、**Phase 15 で Q-010 collection** (Vec / OwnedVec /
-StrBuf / Map) + 高階 API + 変換 + len + with-Drop までもが 3 backend で
-動く。
+pretty-print / Q-010 collection (Vec / OwnedVec / StrBuf / Map) +
+高階 API + 変換 + len + with-Drop / signature spread / Result helpers /
+try_or / inner-fn lifting / top-level 値 binding global 化 / str_compare /
+FFI (extern fn) までが動く (Phase 15 〜 32 で段階的に到達)。
 
-interpreter / 3 backend の **feature parity ギャップ** は現在:
+interpreter / 3 codegen backend の **feature parity ギャップ** は現在
+ほぼ無く、残るのは:
 - builtin の **first-class value 用法** (`let f = vec_new in ...`) は
-  interpreter のみ
+  interpreter のみ (DEFERRED §1.2、将来対応予定)
 - **OwnedVec の自動 scope-bound Drop** は未対応 (`with` 明示か main 末
-  一括 free のみ)
+  一括 free のみ。DEFERRED §1.3、B1 NLL/Linear types の paper trial 段階)
+- `float` / `'a list`-typed builtin (`read_lines` / `args` / `env_var` /
+  `file_exists` 等) は **interpreter のみ** (codegen は別 phase)
 - LLVM / Wasm の **Map K の payload-mixed variant** は uniform payload
   のみ受理 (C は mixed OK)
 
