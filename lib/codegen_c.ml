@@ -4116,6 +4116,14 @@ let emit_variant_typedef (name : string) (params : string list)
     ""
   end
   else
+  let () =
+    (* Phase 36 (DEFERRED §1.17 fix): user shadowing a builtin polymorphic
+       variant (e.g. `type result = Won | Draw`) — drop the stale builtin
+       entry so later lookups don't see params=['a, 'e] mismatched with
+       the 0-arg shadowing. *)
+    if Hashtbl.mem polymorphic_variants name then
+      Hashtbl.remove polymorphic_variants name
+  in
   let recursive = variant_is_recursive name variants in
   if recursive then Hashtbl.replace recursive_variants name ();
   let node_name = if recursive then name ^ "_node" else name in
@@ -4280,10 +4288,23 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_split_used := false;
   str_join_used := false;
   let variant_decls =
-    List.filter_map (fun decl ->
+    (* Phase 36 (DEFERRED §1.17 fix): dedupe by name keeping LAST occurrence
+       so user-side `type result = ...` shadows the builtin entry. *)
+    let raw = List.filter_map (fun decl ->
       match decl with
       | Ast.Top_type (name, params, variants) -> Some (name, params, variants)
       | _ -> None) prog.decls
+    in
+    let last_of_name = Hashtbl.create 16 in
+    List.iter (fun ((name, _, _) as e) ->
+      Hashtbl.replace last_of_name name e) raw;
+    let emitted = Hashtbl.create 16 in
+    List.filter (fun (name, _, _) ->
+      if Hashtbl.mem emitted name then false
+      else begin
+        Hashtbl.add emitted name ();
+        true
+      end) (List.map (fun (n, _, _) -> Hashtbl.find last_of_name n) raw)
   in
   let variant_typedefs =
     List.map (fun (name, params, variants) ->

@@ -7,8 +7,6 @@
 // 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
 
 type cell = Empty | X | O;
-// 注: 型名は `result` を避ける (Mere の builtin `Result` と衝突して
-// C codegen が List.combine で落ちる、DEFERRED §1.17)。
 type game_state = Won of cell | Draw | Ongoing;
 
 let cell_str = fn (c: cell) ->

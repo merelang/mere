@@ -123,7 +123,7 @@ backend いずれかへ codegen。
 | [brackets_balance.mere](brackets_balance.mere) ⭐ | 括弧の対応チェック (`()` `[]` `{}`)。linked-list `'a stk` で stack を表現、char_at で 1 文字 scan + match で push/pop。非括弧文字は skip |
 | [morse_code.mere](morse_code.mere) ⭐ | A-Z + 0-9 をモールス符号に encode / decode。Map[str, str] 2 つで往復辞書を構築。Phase 36 dogfood で C codegen の 2 つの摩擦 (§1.15 深い list literal、§1.16 region 内 strbuf escape) を発掘 |
 | [luhn_check.mere](luhn_check.mere) ⭐ | クレジットカード番号の Luhn チェックサム。char_at + is_digit + ord で 1 桁 int 変換、非数字 (space / hyphen) skip 対応 |
-| [tic_tac_toe.mere](tic_tac_toe.mere) ⭐ | 3x3 ボード + 勝敗判定 (8 ライン)。OwnedVec[cell] + variant + match の組合せ、5 シナリオを pretty print。Phase 36 dogfood で C codegen が `type result` rebind を List.combine で落とす bug を発掘 (§1.17) |
+| [tic_tac_toe.mere](tic_tac_toe.mere) ⭐ | 3x3 ボード + 勝敗判定 (8 ライン)。OwnedVec[cell] + variant + match の組合せ、5 シナリオを pretty print。Phase 36 dogfood で発掘した C codegen の §1.17 (`type result` rebind が List.combine で落ちる) は **後勝ち dedupe で解消** |
 
 ### Q-010 collection 基本
 
