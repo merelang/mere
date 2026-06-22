@@ -1,0 +1,39 @@
+// ffi_demo: extern fn で libc 関数を呼ぶ demo (Phase 32 = C1 FFI)
+//
+// 目的: Outlook §C1 FFI の第一歩。`extern fn` 構文で libc 関数を宣言し、
+//   4 backend (interp + C + LLVM + Wasm) すべてで動作させる。
+//
+// Mere 構文:
+//   extern fn <name>: <type>;
+//
+// type は MVP 段階では int / bool / str / unit の組合せ (TyArrow chain) のみ。
+// 関数の "C 側の本物" は当該 backend が解決する:
+//   - C codegen: clang が libc から自動リンク
+//   - LLVM codegen: `declare` を emit、clang が libc から自動リンク
+//   - Wasm codegen: env host imports として scripts/run_wasm.js から JS 実装注入
+//   - interpreter: eval.ml の lookup_extern で OCaml ミラー実装を呼ぶ
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/ffi_demo.mere
+
+extern fn getpid:  unit -> int;
+extern fn getppid: unit -> int;
+
+let _ = print "=== FFI demo (Phase 32) ===";
+
+// process id を取得 — 0 でなく正の int が返るはず
+let _ = print ("pid > 0: " ++ show (getpid () > 0));
+
+// parent process id — 同じく正の int
+let _ = print ("ppid > 0: " ++ show (getppid () > 0));
+
+// pid と ppid は通常異なる (中には同じケースもあるが大抵 ppid < pid 等)
+let _ =
+  let pid = getpid () in
+  let ppid = getppid () in
+  print ("pid != ppid: " ++ show (pid != ppid));
+
+let _ = print "=== done ===";
+0

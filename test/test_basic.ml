@@ -6372,6 +6372,61 @@ let () =
   (* Phase 30.2 (DEFERRED §1.10 fix, C only): top-level 非-fn let が
      top-level fn body 内から参照されると C codegen が global として宣言。
      LLVM / Wasm はまだ別経路で "unbound variable" を投げる. *)
+  (* Phase 32.1-32.4: C1 FFI (extern fn). 4 backend で同じ extern fn を
+     declaration → codegen 経路でテスト。interp は lookup_extern の mock を
+     経由、3 codegen はそれぞれの dispatch 経路。 *)
+  check "§32.1: extern fn parse + interp mock (getpid)"
+    (Pipeline.process
+       "extern fn getpid: unit -> int;\n\
+        getpid () > 0")
+    "true";
+  check "§32.2: C codegen emits extern declaration + direct call"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "extern fn getpid: unit -> int;\n\
+        getpid ()") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "extern int getpid(void);" && has "getpid()" then "ok" else "no")
+    "ok";
+  check "§32.3: LLVM codegen emits declare + call"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "extern fn getpid: unit -> int;\n\
+        getpid ()") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "declare i32 @getpid()" && has "call i32 @getpid(" then "ok" else "no")
+    "ok";
+  check "§32.4: Wasm codegen emits (import) + call"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "extern fn getpid: unit -> int;\n\
+        getpid ()") in
+     let nlen = String.length wat in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "(import \"env\" \"getpid\" (func $getpid (result i32)))"
+        && has "call $getpid" then "ok" else "no")
+    "ok";
+
   check "§30.2: C codegen — top-level let referenced in fn body becomes global"
     (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let total = 42;\n\

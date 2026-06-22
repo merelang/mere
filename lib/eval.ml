@@ -1435,6 +1435,60 @@ let builtin_char_at =
         | _ -> failwith "char_at: 2nd arg expected int")
     | _ -> failwith "char_at: 1st arg expected str")
 
+(* Phase 32.1 (C1 FFI): extern fn 用の OCaml mock 実装。codegen は
+   3 backend で本物の C 関数を呼ぶが、interp は eval-time にこの mock を
+   経由して 4 backend parity を保つ。未知の extern 名は lookup_extern が
+   親切エラーで reject。 *)
+let lookup_extern (name : string) (_ty : Ast.ty) : value =
+  match name with
+  | "getpid" ->
+    V_builtin ("getpid", fun v ->
+      match v with
+      | V_unit -> V_int (Unix.getpid ())
+      | _ -> failwith "getpid: expected unit")
+  | "getenv" ->
+    V_builtin ("getenv", fun v ->
+      match v with
+      | V_str s -> (try V_str (Sys.getenv s) with Not_found -> V_str "")
+      | _ -> failwith "getenv: expected str")
+  | "system" ->
+    V_builtin ("system", fun v ->
+      match v with
+      | V_str s -> V_int (Sys.command s)
+      | _ -> failwith "system: expected str")
+  | "sleep" ->
+    V_builtin ("sleep", fun v ->
+      match v with
+      | V_int n -> Unix.sleep n; V_int 0
+      | _ -> failwith "sleep: expected int")
+  | "srand" ->
+    V_builtin ("srand", fun v ->
+      match v with
+      | V_int n -> Random.init n; V_unit
+      | _ -> failwith "srand: expected int")
+  | "rand" ->
+    V_builtin ("rand", fun v ->
+      match v with
+      | V_unit -> V_int (Random.int max_int)
+      | _ -> failwith "rand: expected unit")
+  | "unix_time" ->
+    V_builtin ("unix_time", fun v ->
+      match v with
+      | V_unit -> V_int (int_of_float (Unix.time ()))
+      | _ -> failwith "unix_time: expected unit")
+  | "getppid" ->
+    V_builtin ("getppid", fun v ->
+      match v with
+      | V_unit -> V_int (Unix.getppid ())
+      | _ -> failwith "getppid: expected unit")
+  | _ ->
+    (* Phase 32.1: unknown extern は lookup ではなく call で fail に
+       (program 解析だけ通したい場合 / codegen で実行する場合に妨げない)。 *)
+    V_builtin (name, fun _v ->
+      failwith (Printf.sprintf
+        "extern fn %S: no interp mock implementation. Add a case to \
+         Eval.lookup_extern, or run via codegen (-c / -ll / -w)." name))
+
 let initial_env : env =
   [ ("print", ref builtin_print);
     ("read_line", ref builtin_read_line);

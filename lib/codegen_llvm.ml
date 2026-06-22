@@ -427,6 +427,10 @@ let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
    保持。emit_expr Var "name" は @name を load する。 *)
 let top_globals_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 32.3 (C1 FFI, LLVM): extern fn 宣言。emit_expr の App handler が
+   App (Var name, arg) を `call <ret> @name(<arg>)` に dispatch。 *)
+let extern_fn_decls_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 25.5: per-instantiation specialization (LLVM port of Phase 23.3).
    If a poly fn is called at 2+ distinct concrete arrow types, it's emitted
    once per instantiation with a mangled name (`base__T1__T2__...`).
@@ -2208,6 +2212,35 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
                   r tag (llvm_ty_of arg_ty) av);
     r
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem extern_fn_decls_llvm name ->
+    (* Phase 32.3 (C1 FFI): direct call to declared C function. *)
+    let ret_ty =
+      match Hashtbl.find extern_fn_decls_llvm name with
+      | Ast.TyArrow (_, r) -> Ast.walk r
+      | _ -> Ast.TyInt
+    in
+    let arg_ll =
+      match arg.Ast.node with
+      | Ast.Unit_lit -> ""
+      | _ ->
+        let arg_v = emit_expr env arg in
+        let arg_ty =
+          match arg.Ast.ty with
+          | Some t -> Ast.walk t | None -> Ast.TyInt
+        in
+        Printf.sprintf "%s %s" (llvm_ty_of arg_ty) arg_v
+    in
+    (match ret_ty with
+     | Ast.TyUnit ->
+       emit_instr (Printf.sprintf "  call void @%s(%s)" name arg_ll);
+       (* Mere の unit は i32 0 として扱う (内部整合性のため) *)
+       "0"
+     | _ ->
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call %s @%s(%s)"
+                     r (llvm_ty_of ret_ty) name arg_ll);
+       r)
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
@@ -6121,6 +6154,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     walk root
   in
   resolve_vec_let_types main_expr;
+  (* Phase 32.3 (C1 FFI): walk prog.decls to register extern fn names. *)
+  Hashtbl.reset extern_fn_decls_llvm;
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_extern (name, ty) ->
+      Hashtbl.replace extern_fn_decls_llvm name (Ast.walk ty)
+    | _ -> ()
+  ) prog.decls;
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
@@ -6503,6 +6544,28 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_filter_helpers = [] then [] else vec_filter_helpers @ [""])
     @ (if vec_to_owned_helpers = [] then [] else vec_to_owned_helpers @ [""])
     @ (if owned_vec_to_vec_helpers = [] then [] else owned_vec_to_vec_helpers @ [""])
+    @ (let extern_declares =
+         Hashtbl.fold (fun name ty acc ->
+           let rec flatten t =
+             match Ast.walk t with
+             | Ast.TyArrow (p, r) ->
+               let args, ret = flatten r in
+               Ast.walk p :: args, ret
+             | _ -> [], Ast.walk t
+           in
+           let args, ret = flatten ty in
+           let ll_ret = match ret with
+             | Ast.TyUnit -> "void"
+             | t -> llvm_ty_of t
+           in
+           let real_args = List.filter (fun t -> t <> Ast.TyUnit) args in
+           let ll_args = String.concat ", " (List.map llvm_ty_of real_args) in
+           Printf.sprintf "declare %s @%s(%s)" ll_ret name ll_args :: acc)
+           extern_fn_decls_llvm []
+       in
+       if extern_declares = [] then []
+       else "; Phase 32.3 (C1 FFI): extern fn declarations"
+            :: extern_declares @ [""])
     @ (if top_globals_list = [] then []
        else "; Phase 30.2b: top-level non-fn let values as LLVM globals"
             :: emit_top_globals_llvm top_globals_list @ [""])

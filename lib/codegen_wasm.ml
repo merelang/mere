@@ -95,6 +95,11 @@ let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
    `global.set` で初期化。emit_expr Var "name" は `global.get $<name>`。 *)
 let top_globals_wasm : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 32.4 (C1 FFI, Wasm): extern fn を env host imports として宣言、
+   `call $<name>` で呼び出す。Node.js host harness (scripts/run_wasm.js)
+   が env に default impl (getpid / getppid 等) を提供。 *)
+let extern_fn_decls_wasm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 15.4: Vec[R, T] runtime used flag. All Mere values lower to a
    4-byte i32 in Wasm (scalars are direct, structured types are linear-
    memory offsets), so a single $mere_vec_* runtime handles every element
@@ -1080,6 +1085,22 @@ let rec emit_expr (e : Ast.expr) : unit =
     let tag = ty_tag arg_ty in
     emit_expr arg;
     emit_instr (Printf.sprintf "call $show_%s" tag)
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem extern_fn_decls_wasm name ->
+    (* Phase 32.4 (C1 FFI): direct call to extern fn (env host import).
+       unit 引数は無視、unit return は i32 0 を push (Mere の内部整合)。 *)
+    let ret_ty =
+      match Hashtbl.find extern_fn_decls_wasm name with
+      | Ast.TyArrow (_, r) -> Ast.walk r
+      | _ -> Ast.TyInt
+    in
+    (match arg.Ast.node with
+     | Ast.Unit_lit -> ()
+     | _ -> emit_expr arg);
+    emit_instr (Printf.sprintf "call $%s" name);
+    (match ret_ty with
+     | Ast.TyUnit -> emit_instr "i32.const 0"
+     | _ -> ())
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $puts";
@@ -3902,6 +3923,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     walk root
   in
   resolve_vec_let_types main_expr;
+  (* Phase 32.4 (C1 FFI): walk prog.decls to register extern fn names. *)
+  Hashtbl.reset extern_fn_decls_wasm;
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_extern (name, ty) ->
+      Hashtbl.replace extern_fn_decls_wasm name (Ast.walk ty)
+    | _ -> ()
+  ) prog.decls;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   (* Phase 30.2c (DEFERRED §1.10): extract top-level non-fn let が skels の
@@ -4208,6 +4237,37 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       \  (import \"env\" \"write_file\" (func $__lang_write_file (param i32) (param i32) (result i32)))\n"
     else ""
   in
+  (* Phase 32.4 (C1 FFI): extern fn を env host imports として宣言。
+     str / bool / int / unit を全て i32 として表現。unit 引数は param なし、
+     unit return は result なし。 *)
+  let extern_imports =
+    Hashtbl.fold (fun name ty acc ->
+      let rec flatten t =
+        match Ast.walk t with
+        | Ast.TyArrow (p, r) ->
+          let args, ret = flatten r in
+          Ast.walk p :: args, ret
+        | _ -> [], Ast.walk t
+      in
+      let args, ret = flatten ty in
+      let params =
+        args
+        |> List.filter (fun t -> t <> Ast.TyUnit)
+        |> List.map (fun _ -> " (param i32)")
+        |> String.concat ""
+      in
+      let result =
+        match ret with
+        | Ast.TyUnit -> ""
+        | _ -> " (result i32)"
+      in
+      Printf.sprintf "  (import \"env\" \"%s\" (func $%s%s%s))\n"
+        name name params result
+      :: acc)
+      extern_fn_decls_wasm []
+  in
+  let extern_imports = String.concat "" extern_imports in
+  let file_io_imports = file_io_imports ^ extern_imports in
   let vec_runtime_section = if !vec_used then vec_runtime else "" in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""

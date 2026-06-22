@@ -91,6 +91,13 @@ let process_decls eval_env type_env decls =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_extern (name, ty) ->
+      (* Phase 32.1 (FFI): extern fn を type env と eval env の両方に登録。
+         typer 側は型を加えるだけ。eval 側は extern_mocks の hardcoded
+         OCaml impl を Eval.lookup_extern で参照、未対応名は eval-time の
+         clear エラーに。 *)
+      type_env := (name, Typer.mono ty) :: !type_env;
+      eval_env := (name, ref (Eval.lookup_extern name ty)) :: !eval_env
     | Ast.Top_ctor_alias (alias, target) ->
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->
@@ -164,6 +171,8 @@ let type_of s =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_extern (name, ty) ->
+      type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_ctor_alias (alias, target) ->
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->

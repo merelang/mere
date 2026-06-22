@@ -50,6 +50,10 @@ let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
    c_safe_name に fall through し、file-scope global を参照する。 *)
 let top_globals : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 32.2 (C1 FFI): extern fn 宣言。emit_expr の App handler が
+   App (Var name, arg) を直接 C 関数呼出に dispatch。 *)
+let extern_fn_decls : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 23.3: poly fns that need per-instantiation specialization.
    Key = fn name (e.g., "rev_aux"). Value = list of distinct concrete
    arrow types observed at use sites. Each entry causes resolve_fn_types
@@ -951,6 +955,25 @@ let rec emit_expr (e : Ast.expr) : string =
         env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
     (match f.node with
+     | Ast.Var name when Hashtbl.mem extern_fn_decls name ->
+       (* Phase 32.2 (C1 FFI): direct C function call。
+          unit 引数は () に変換、他は emit_expr で展開。 *)
+       let arg_c =
+         match arg.Ast.node with
+         | Ast.Unit_lit -> ""
+         | _ -> emit_expr arg
+       in
+       let ret_ty =
+         match Hashtbl.find extern_fn_decls name with
+         | Ast.TyArrow (_, r) -> Ast.walk r
+         | _ -> Ast.TyInt
+       in
+       (* unit return: emit `(<name>(arg), 0)` so 式の値が int 0 になる *)
+       (match ret_ty with
+        | Ast.TyUnit ->
+          Printf.sprintf "(%s(%s), 0)" name arg_c
+        | _ ->
+          Printf.sprintf "%s(%s)" name arg_c)
      | Ast.Var "print" ->
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
      | Ast.Var "str_len" ->
@@ -3925,6 +3948,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_instances;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset map_instances;
+  Hashtbl.reset extern_fn_decls;
+  (* Phase 32.2 (C1 FFI): walk prog.decls to register extern fn names + types. *)
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_extern (name, ty) ->
+      Hashtbl.replace extern_fn_decls name (Ast.walk ty)
+    | _ -> ()
+  ) prog.decls;
   strbuf_used := false;
   logger_used := false;
   metrics_used := false;
@@ -4493,6 +4524,44 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        emit after mono variant bodies (= list_str). *)
     @ (if !str_split_used || !str_join_used then [str_list_helpers; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
+    @ (let extern_decls =
+         Hashtbl.fold (fun name ty acc ->
+           (* Map a Mere arrow type to a C extern declaration.
+              int -> int      becomes  int <name>(int);
+              unit -> int     becomes  int <name>(void);
+              int -> unit     becomes  void <name>(int);
+              str -> int      becomes  int <name>(const char ptr); *)
+           let rec flatten t =
+             match Ast.walk t with
+             | Ast.TyArrow (p, r) ->
+               let args, ret = flatten r in
+               Ast.walk p :: args, ret
+             | _ -> [], Ast.walk t
+           in
+           let args, ret = flatten ty in
+           let c_param_ty = function
+             | Ast.TyStr -> "const char*"
+             | t -> c_type_of t
+           in
+           (* Phase 32.2: return str を `char*` にする (libc の getenv 等
+              は char* を返す。Mere 内部は const char* なので auto-add
+              const で吸収)。unit return は void。 *)
+           let c_ret = match ret with
+             | Ast.TyUnit -> "void"
+             | Ast.TyStr -> "char*"
+             | t -> c_type_of t
+           in
+           let c_args =
+             let real_args = List.filter (fun t -> t <> Ast.TyUnit) args in
+             if real_args = [] then "void"
+             else String.concat ", " (List.map c_param_ty real_args)
+           in
+           Printf.sprintf "extern %s %s(%s);" c_ret name c_args :: acc)
+           extern_fn_decls []
+       in
+       if extern_decls = [] then []
+       else "/* Phase 32.2 (C1 FFI): extern fn declarations */"
+            :: extern_decls @ [""])
     @ (if top_global_decls = [] then []
        else "/* Phase 30.2: top-level non-fn let values as file-scope globals */"
             :: top_global_decls @ [""])

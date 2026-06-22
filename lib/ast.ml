@@ -101,6 +101,11 @@ type top_decl =
     (* alias name * type params * aliased type — parse-time substitution *)
   | Top_view of string * string * (string * ty) list
     (* view name * region param * fields (can reference the region via &R T) *)
+  | Top_extern of string * ty
+    (* Phase 32 (C1 FFI): `extern fn <name>: <ty>;` で外部 C 関数を宣言。
+       MVP は int / bool / str / unit からなる arrow type のみ対応。
+       interp は eval.ml の extern_mocks に hardcoded mock を用意、
+       codegen は 3 backend それぞれに forward decl / declare / import を emit。 *)
   | Top_drop of string
     (* Marks an existing type/record name as having Drop semantics.
        Emitted by the parser when it sees `drop type ...` or `drop type =
@@ -444,6 +449,7 @@ let desugar_program (prog : program) : expr =
     | Top_type_alias _ -> body
     | Top_view _ -> body
     | Top_drop _ -> body
+    | Top_extern _ -> body
     | Top_ctor_alias _ -> body
     | Top_record_alias _ -> body
   ) prog.decls prog.main

@@ -56,6 +56,15 @@ const wasmPath = process.argv[2];
         return 1;
       }
     },
+    // Phase 32.4 (C1 FFI): default impls for common libc functions that
+    // Mere programs declare via `extern fn`. Add more as needed.
+    getpid: () => process.pid,
+    getppid: () => process.ppid,
+    unix_time: () => Math.floor(Date.now() / 1000),
+    rand: () => Math.floor(Math.random() * 0x7fffffff),
+    srand: (_seed) => {},  // JS Math.random can't be seeded; no-op
+    sleep: (_n) => 0,       // skip blocking sleep in JS context
+    abs_int: (n) => Math.abs(n | 0),
   };
 
   // Allocate bytes by bumping the `__lang_bump` mutable global.

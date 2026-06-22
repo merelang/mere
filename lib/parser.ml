@@ -1434,6 +1434,18 @@ let rec parse_program_internal tokens =
     | (pos, T_drop) :: _ ->
       raise (Parse_error (pos,
         "expected `type` after `drop`"))
+    | (_, T_extern) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
+      (* Phase 32.1 (C1 FFI): `extern fn <name>: <ty>;` parse. *)
+      let t, after_ty = ty rest in
+      (match after_ty with
+       | (_, T_semi) :: rest ->
+         parse_decls (Ast.Top_extern (name, t) :: decls) rest
+       | _ ->
+         raise (Parse_error (pos_of after_ty,
+           "expected ';' after extern fn declaration")))
+    | (pos, T_extern) :: _ ->
+      raise (Parse_error (pos,
+        "expected `fn NAME : TY ;` after `extern`"))
     | (_, T_signature) :: (_, T_ident name) :: (_, T_eq) :: rest ->
       let params, toks = parse_signature_params rest in
       Hashtbl.replace signatures name params;

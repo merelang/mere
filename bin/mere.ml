@@ -79,6 +79,8 @@ let infer_program source =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_extern (name, ty) ->
+      type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_ctor_alias (alias, target) ->
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->

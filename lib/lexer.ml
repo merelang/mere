@@ -27,6 +27,7 @@ type token =
   | T_module          (* module keyword (top-level module declarations) *)
   | T_import          (* import keyword (load decls from another file) *)
   | T_open            (* open keyword (bring module bindings into scope) *)
+  | T_extern          (* extern keyword (FFI declaration: `extern fn name: ty;`、Phase 32) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -251,6 +252,7 @@ let tokenize s =
           | "module" -> T_module
           | "import" -> T_import
           | "open" -> T_open
+          | "extern" -> T_extern
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when

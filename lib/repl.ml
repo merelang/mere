@@ -137,6 +137,12 @@ let process_decl eval_env type_env decl =
     Typer.register_drop_type name;
     Printf.printf "drop type %s registered\n" name;
     []
+  | Ast.Top_extern (name, ty) ->
+    (* Phase 32.1 (C1 FFI): REPL でも extern fn を受け付ける *)
+    type_env := (name, Typer.mono ty) :: !type_env;
+    eval_env := (name, ref (Eval.lookup_extern name ty)) :: !eval_env;
+    Printf.printf "extern fn %s : %s registered\n" name (Ast.pp_ty ty);
+    []
   | Ast.Top_ctor_alias (alias, target) ->
     Typer.alias_ctor alias target;
     []
