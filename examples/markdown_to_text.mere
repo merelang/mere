@@ -1,0 +1,76 @@
+// markdown_to_text: Markdown 風の text を plain text に変換 (Phase 36)
+//
+// 目的: examples roadmap B5。char_at による 1 文字単位 scan + StrBuf で
+//   markdown 装飾を剥がす。実用 markdown parser ではなく「inline marker
+//   を除去するだけ」の限定版。
+//
+// 対応する markdown:
+//   - 行頭 `#` / `##` / `###` を除去 (heading)
+//   - 行頭 `- ` をそのまま (リストは保持)
+//   - 行頭 `> ` を `| ` に置換 (引用は記号変換)
+//   - inline `*`、`_`、`` ` `` を除去 (bold / italic / code 装飾)
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 行頭の `#` 連続を skip
+let rec skip_hashes = fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then i
+  else if char_at s i == "#" then skip_hashes s (i + 1)
+  else i;
+
+// 行頭の空白を skip
+let rec skip_spaces = fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then i
+  else if char_at s i == " " then skip_spaces s (i + 1)
+  else i;
+
+// inline marker 除去 (`*`, `_`, `` ` `` を捨てて他は append)
+let rec strip_inline = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
+  if i >= str_len s then acc
+  else
+    let c = char_at s i in
+    if c == "*" || c == "_" || c == "`" then strip_inline s (i + 1) acc
+    else strip_inline s (i + 1) (acc ++ c);
+
+let starts_with2 = fn (s: str) -> fn (prefix: str) ->
+  str_len s >= str_len prefix && substring s 0 (str_len prefix) == prefix;
+
+let convert_line = fn (line: str) ->
+  if str_len line == 0 then ""
+  else if char_at line 0 == "#" then
+    // heading: # の連続をスキップ、空白もスキップしてから inline strip
+    let h_end = skip_hashes line 0 in
+    let body_start = skip_spaces line h_end in
+    strip_inline line body_start ""
+  else if starts_with2 line "> " then
+    "| " ++ strip_inline line 2 ""
+  else
+    // 通常行 (`-` のリストもそのまま)
+    strip_inline line 0 "";
+
+let render = fn (lines: str list) ->
+  region R {
+    let b = strbuf_new () in
+    let _ = list_iter lines (fn (line: str) ->
+      let _ = strbuf_push b (convert_line line) in
+      strbuf_push b "\n") in
+    strbuf_to_str b
+  };
+
+let _ = print "=== markdown_to_text (Phase 36) ===";
+
+let md =
+  ["# Daily Notes",
+   "",
+   "## Tasks",
+   "- Buy *milk* and **bread**",
+   "- Call `Alice` about the meeting",
+   "",
+   "> Remember: keep the code _simple_.",
+   "",
+   "### Misc",
+   "  Plain paragraph with *no* heading."];
+
+let _ = print (render md);
+
+0

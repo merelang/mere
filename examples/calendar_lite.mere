@@ -1,0 +1,75 @@
+// calendar_lite: 月カレンダーを ASCII で出力 (Phase 36)
+//
+// 目的: examples roadmap G3。年/月から「日曜始まり」で 7 列の月カレンダー
+//   を組み立てる。閏年判定 + 月の日数 + Zeller の合同式で 1 日目の曜日。
+//
+// 設計:
+//   - is_leap: 4 で割り切れ、100 で割り切れず、または 400 で割り切れる
+//   - days_in_month: month -> int (閏年判定込み)
+//   - day_of_week: Zeller (year, month, day) -> 0..6 (0 = 日曜)
+//   - render: 各日を右寄せ 2 桁、7 列で改行
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let is_leap = fn (y: int) ->
+  (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+
+let days_in_month = fn (y: int) -> fn (m: int) ->
+  if m == 1 || m == 3 || m == 5 || m == 7 || m == 8 || m == 10 || m == 12 then 31
+  else if m == 4 || m == 6 || m == 9 || m == 11 then 30
+  else if is_leap y then 29
+  else 28;
+
+// Zeller の合同式 (Gregorian)。1, 2 月は前年の 13, 14 月扱い。
+// 返り値: 0=日, 1=月, ..., 6=土
+let day_of_week = fn (y: int) -> fn (m: int) -> fn (d: int) ->
+  let yy = if m < 3 then y - 1 else y in
+  let mm = if m < 3 then m + 12 else m in
+  let k = yy % 100 in
+  let j = yy / 100 in
+  // Zeller: h = (d + floor(13(m+1)/5) + K + floor(K/4) + floor(J/4) + 5J) mod 7
+  // h: 0=土, 1=日, 2=月, ..., 6=金 → 日始まりに揃え直す
+  let h = (d + (13 * (mm + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7 in
+  // h を 0=日 始まりに正規化
+  (h + 6) % 7;
+
+let pad2 = fn (n: int) ->
+  if n < 10 then " " ++ show n else show n;
+
+let render_month = fn (y: int) -> fn (m: int) ->
+  region R {
+    let b = strbuf_new () in
+    let _ = strbuf_push b (show y ++ "-" ++ pad2 m) in
+    let _ = strbuf_push b "\n" in
+    let _ = strbuf_push b "Su Mo Tu We Th Fr Sa\n" in
+    let first_dow = day_of_week y m 1 in
+    let total = days_in_month y m in
+    // 先頭の空白埋め (Su 列 - first_dow)
+    let rec pad_lead = fn (n: int) ->
+      if n <= 0 then ()
+      else
+        let _ = strbuf_push b "   " in
+        pad_lead (n - 1) in
+    let _ = pad_lead first_dow in
+    // 1..total を順に push、7 列ごとに改行
+    let rec emit_day = fn (d: int) -> fn (col: int) ->
+      if d > total then
+        if col == 0 then () else strbuf_push b "\n"
+      else
+        let _ = strbuf_push b (pad2 d) in
+        let next_col = (col + 1) % 7 in
+        let _ = if next_col == 0 then strbuf_push b "\n" else strbuf_push b " " in
+        emit_day (d + 1) next_col in
+    let _ = emit_day 1 first_dow in
+    strbuf_to_str b
+  };
+
+let _ = print "=== calendar_lite (Phase 36) ===";
+
+let _ = print (render_month 2026 6);
+let _ = print "";
+let _ = print (render_month 2024 2);   // 閏年 2 月
+let _ = print "";
+let _ = print (render_month 2100 2);   // 100 で割れて 400 で割れない → 非閏
+
+0

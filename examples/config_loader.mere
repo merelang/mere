@@ -1,0 +1,98 @@
+// config_loader: key=value 形式の設定文字列を Map[str, str] に load (Phase 36)
+//
+// 目的: examples roadmap A3。複数行の text を parse して Map に格納する
+//   典型的な処理。`#` で始まる行をコメント、空行を skip、`key=value` を
+//   trim して登録、最後に lookup demo。
+//
+// 設計:
+//   - input は str list (1 行 = 1 要素)。ファイル I/O 抜きで deterministic
+//   - parse_line で line を分類: コメント / 空 / key=value
+//   - str_index_of "=" で "=" の位置を求めて key / value に分割
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type line_kind = Empty | Comment | Pair of (str * str);
+
+// str_trim / str_starts_with は C/LLVM/Wasm codegen 未対応 (interpreter only)
+// なので、4 backend で動かすため char_at / substring で自前 helper を用意。
+
+let is_space = fn (c: str) ->
+  c == " " || c == "\t";
+
+// 先頭空白の数
+let rec lead_spaces = fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then i
+  else if is_space (char_at s i) then lead_spaces s (i + 1)
+  else i;
+
+// 末尾空白の直前 index + 1 (= valid 範囲の終端 exclusive)
+let rec trail_end = fn (s: str) -> fn (j: int) ->
+  if j <= 0 then 0
+  else if is_space (char_at s (j - 1)) then trail_end s (j - 1)
+  else j;
+
+let my_trim = fn (s: str) ->
+  let i = lead_spaces s 0 in
+  let j = trail_end s (str_len s) in
+  if j <= i then "" else substring s i j;
+
+let starts_with_hash = fn (s: str) ->
+  if str_len s == 0 then false
+  else char_at s 0 == "#";
+
+let parse_line = fn (line: str) ->
+  let trimmed = my_trim line in
+  if str_len trimmed == 0 then Empty
+  else if starts_with_hash trimmed then Comment
+  else
+    let eq = str_index_of trimmed "=" in
+    if eq < 0 then
+      // `=` が無い場合は Comment 扱い (実用 INI parser なら error)
+      Comment
+    else
+      let key = my_trim (substring trimmed 0 eq) in
+      let value = my_trim (substring trimmed (eq + 1) (str_len trimmed)) in
+      Pair (key, value);
+
+let config = map_new ();
+
+let absorb = fn (line: str) ->
+  match parse_line line with
+  | Pair (k, v) -> let _ = map_set config k v in ()
+  | Empty       -> ()
+  | Comment     -> ();
+
+let _ = print "=== config_loader (Phase 36) ===";
+
+let lines =
+  ["# global server config",
+   "host = example.com",
+   "port = 8080",
+   "",
+   "# auth",
+   "user_name = admin",
+   "  password   =   s3cret  ",
+   "",
+   "max_conn=128"];
+
+let _ = list_iter lines absorb;
+
+// lookup demo
+let show_key = fn (k: str) ->
+  if map_has config k then
+    print (k ++ " = " ++ (map_get config k : str))
+  else
+    print (k ++ " = <unset>");
+
+let _ = print "--- loaded ---";
+let _ = show_key "host";
+let _ = show_key "port";
+let _ = show_key "user_name";
+let _ = show_key "password";
+let _ = show_key "max_conn";
+let _ = show_key "missing_key";
+
+// 総 entry 数
+let _ = print ("entries = " ++ show (map_len config));
+
+0

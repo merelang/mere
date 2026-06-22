@@ -1,0 +1,59 @@
+// csv_writer: record list を CSV 文字列に書き出す (Phase 36)
+//
+// 目的: examples roadmap B2。StrBuf + record list で CSV row を組み立てる
+//   demo。quote / カンマ escape を最低限実装し、4 backend で diff = 0。
+//
+// 設計:
+//   - record `Person { name; age; city }`
+//   - Person list → CSV string
+//   - field に `,` `"` を含むなら `"..."` で囲み、内部 `"` は `""` に
+//   - 改行は今回の test data に出さないので扱わない
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type Person = { name: str, age: int, city: str };
+
+// str_replace は C/LLVM/Wasm codegen 未対応なので char_at で自前 doubling
+let rec double_quotes = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
+  if i >= str_len s then acc
+  else
+    let c = char_at s i in
+    if c == "\"" then double_quotes s (i + 1) (acc ++ "\"\"")
+    else double_quotes s (i + 1) (acc ++ c);
+
+let needs_quote = fn (s: str) ->
+  str_index_of s "," >= 0 || str_index_of s "\"" >= 0;
+
+let escape_field = fn (s: str) ->
+  if needs_quote s then
+    "\"" ++ double_quotes s 0 "" ++ "\""
+  else
+    s;
+
+let row_of = fn (p: Person) ->
+  escape_field p.name ++ "," ++ show p.age ++ "," ++ escape_field p.city;
+
+let header = "name,age,city";
+
+let render = fn (rows: Person list) ->
+  region R {
+    let b = strbuf_new () in
+    let _ = strbuf_push b header in
+    let _ = strbuf_push b "\n" in
+    let _ = list_iter rows (fn (p: Person) ->
+      let _ = strbuf_push b (row_of p) in
+      strbuf_push b "\n") in
+    strbuf_to_str b
+  };
+
+let _ = print "=== csv_writer (Phase 36) ===";
+
+let people =
+  [Person { name = "Alice", age = 30, city = "Tokyo" },
+   Person { name = "Bob, Jr.", age = 25, city = "Osaka" },
+   Person { name = "Carol", age = 40, city = "He said \"hi\"" }];
+
+let csv = render people;
+let _ = print csv;
+
+0
