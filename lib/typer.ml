@@ -52,15 +52,62 @@ let suggest_name (target : string) (candidates : string list) : string option =
     ) scored in
     Some (snd (List.hd sorted))
 
+(* Phase 33.0 (DEFERRED §5.1): top N candidates within max_dist。
+   ties: 短い名前を優先、距離が同じなら alphabetical で安定化。
+   重複は除去。 *)
+let suggest_names_n (target : string) (candidates : string list) (n : int)
+  : string list =
+  let max_dist =
+    if String.length target <= 3 then 1
+    else if String.length target <= 6 then 2
+    else 3
+  in
+  let scored =
+    List.filter_map (fun c ->
+      let d = levenshtein target c in
+      if d <= max_dist && d > 0 then Some (d, c) else None
+    ) candidates
+    |> List.sort_uniq (fun (d1, n1) (d2, n2) ->
+      let c = compare d1 d2 in
+      if c <> 0 then c
+      else let c = compare (String.length n1) (String.length n2) in
+      if c <> 0 then c else compare n1 n2)
+  in
+  let rec take k = function
+    | _ when k <= 0 -> []
+    | [] -> []
+    | (_, x) :: rest -> x :: take (k - 1) rest
+  in
+  take n scored
+
+(* Format a multi-candidate did-you-mean hint. With 1 candidate the
+   existing single-name form is preserved; 2+ uses an Oxford-ish list. *)
+let format_did_you_mean (cands : string list) : string option =
+  match cands with
+  | [] -> None
+  | [x] -> Some (Printf.sprintf "did you mean `%s`?" x)
+  | [a; b] -> Some (Printf.sprintf "did you mean `%s` or `%s`?" a b)
+  | xs ->
+    (* `a`, `b`, or `c` *)
+    let rec join = function
+      | [] -> ""
+      | [last] -> Printf.sprintf "or `%s`" last
+      | x :: rest -> Printf.sprintf "`%s`, %s" x (join rest)
+    in
+    Some (Printf.sprintf "did you mean %s?" (join xs))
+
 (* Append a `help:` hint line to a Type_error message. Diagnostic.format
    recognizes `\nhelp: ...` and renders it below the code frame. *)
 let with_hint (msg : string) (hint : string) : string =
   msg ^ "\nhelp: " ^ hint
 
 let raise_with_suggestion loc kind target candidates =
+  (* Phase 33.0: try top 3 candidates first; falls back to single suggestion
+     if format_did_you_mean returns None (= no candidates within distance). *)
   let msg =
-    match suggest_name target candidates with
-    | Some n -> with_hint (kind ^ ": " ^ target) (Printf.sprintf "did you mean `%s`?" n)
+    let cands3 = suggest_names_n target candidates 3 in
+    match format_did_you_mean cands3 with
+    | Some hint -> with_hint (kind ^ ": " ^ target) hint
     | None -> kind ^ ": " ^ target
   in
   raise (Type_error (loc, msg))

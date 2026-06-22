@@ -3843,9 +3843,19 @@ let () =
   assert_no_contains "diag: distant name → no suggestion"
     (infer_err "zzzzzz")
     "did you mean";
+
+  (* Phase 33.0 (DEFERRED §5.1): multi-candidate did-you-mean. 複数の近い
+     候補があれば top 3 を listing で表示。 *)
+  assert_contains "diag: multi-candidate did-you-mean shows alternatives"
+    (infer_err "let factorial = fn n -> n in\nlet facoriall = fn x -> x in\nlet foctorial = fn y -> y in\nfactrial 5")
+    "did you mean `factorial`, `facoriall`, or `foctorial`?";
+  assert_contains "diag: 2-candidate did-you-mean uses `a` or `b`"
+    (infer_err "let foo = 1 in let foa = 2 in foe")
+    "did you mean";  (* 2 candidates: foo, foa (close to foe) *)
+
   assert_contains "diag: unknown constructor suggests close ctor"
     (infer_err_with_decls "type Color7 = Red7 | Green7 | Blue7;\nlet c = Greeen7 in c")
-    "did you mean `Green7`?";
+    "did you mean `Green7`";  (* Phase 33.0: 複数候補表示で末尾は `?` / ` or ...?` どちらも有り得るため部分一致のみ *)
 
   (* --- ANSI color output (Phase 7.4) ---
      `use_color` defaults to false (set by CLI when stderr is a TTY).
