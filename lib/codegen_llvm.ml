@@ -432,6 +432,11 @@ let top_globals_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    App (Var name, arg) を `call <ret> @name(<arg>)` に dispatch。 *)
 let extern_fn_decls_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Phase 35.2 (DEFERRED §1.2 fix): eta-wrap した nullary factory builtin の
+   registry。emit_program で各 entry を `define ... @<name>_<tag>_closure_fn`
+   + `@<name>_<tag>_as_value = constant ...` で emit。 *)
+let eta_adapters_llvm : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Phase 25.5: per-instantiation specialization (LLVM port of Phase 23.3).
    If a poly fn is called at 2+ distinct concrete arrow types, it's emitted
    once per instantiation with a mangled name (`base__T1__T2__...`).
@@ -1982,26 +1987,76 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       List.mem_assoc name env
       || List.mem_assoc name !current_var_types
     in
-    (* Phase 15.3: vec_new / vec_push / vec_get / vec_len は App handler
-       で special-case 処理。first-class value 用法のみここで reject。 *)
+    (* Phase 35.2: nullary factory builtins as first-class value (eta-wrap).
+       value 位置の vec_new / owned_vec_new / strbuf_new / map_new で
+       具体的な ret_ty が分かるなら eta adapter を register、
+       `@<name>_<tag>_as_value` を return。polymorphic な場合は次の
+       unsupported guard に流れる。 *)
+    let is_nullary_factory = name = "vec_new" || name = "owned_vec_new"
+                              || name = "strbuf_new" || name = "map_new" in
+    let eta_value_str_opt =
+      if (not is_shadowed) && is_nullary_factory then
+        match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyArrow (_, ret_ty) when ty_is_concrete (Ast.walk ret_ty) ->
+             let ret_ty = Ast.walk ret_ty in
+             let ret_tag = ty_tag ret_ty in
+             (* Register Vec / OwnedVec / Map / StrBuf so runtime gets emitted *)
+             (match Ast.walk ret_ty with
+              | Ast.TyCon ("Vec", [_; et]) ->
+                let et = Ast.walk et in
+                if not (Hashtbl.mem vec_instances (ty_tag et)) then
+                  Hashtbl.add vec_instances (ty_tag et) et
+              | Ast.TyCon ("OwnedVec", [et]) ->
+                let et = Ast.walk et in
+                if not (Hashtbl.mem owned_vec_instances (ty_tag et)) then
+                  Hashtbl.add owned_vec_instances (ty_tag et) et
+              | Ast.TyCon ("StrBuf", _) ->
+                strbuf_used := true
+              | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
+                let k_ty = Ast.walk k_ty and v_ty = Ast.walk v_ty in
+                let kvtag = ty_tag k_ty ^ "__" ^ ty_tag v_ty in
+                if not (Hashtbl.mem map_instances kvtag) then
+                  Hashtbl.add map_instances kvtag (k_ty, v_ty)
+              | _ -> ());
+             let adapter = name ^ "_" ^ ret_tag in
+             if not (Hashtbl.mem eta_adapters_llvm adapter) then
+               Hashtbl.add eta_adapters_llvm adapter (name, ret_ty);
+             let cstruct = closure_struct_name Ast.TyUnit ret_ty in
+             let r = fresh_reg () in
+             emit_instr (Printf.sprintf "  %s = load %%%s, ptr @%s_as_value" r cstruct adapter);
+             Some r
+           | _ -> None)
+        | None -> None
+      else None
+    in
     if not is_shadowed && (
-       name = "vec_new" || name = "vec_push"
+       (* vec_push / vec_get / ... の curried 多引数は依然 first-class 不可 *)
+       name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
        || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
-       || name = "owned_vec_new" || name = "owned_vec_push"
+       || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
-       || name = "strbuf_new" || name = "strbuf_push"
+       || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
-       || name = "map_new" || name = "map_set" || name = "map_get"
+       || name = "map_set" || name = "map_get"
        || name = "map_has" || name = "map_len" || name = "map_iter") then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応、first-class value 用法は未対応)");
+        (name ^ " as a value (Phase 15.3〜15.10: curried 多引数 builtin は直接 application のみ対応)");
+    if not is_shadowed && is_nullary_factory && eta_value_str_opt = None then
+      unsupported e.Ast.loc
+        (name ^ " as a value: return type is polymorphic, can't monomorphize \
+                 (Phase 35.2 MVP: use direct app or manual eta `fn () -> vec_new ()`)");
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
+    (match eta_value_str_opt with
+     | Some v -> v
+     | None ->
     (* Phase 34.2: float constants *)
     if not is_shadowed && name = "pi" then "0x400921FB54442D18"
     else if not is_shadowed && name = "e" then "0x4005BF0A8B145769"
@@ -2040,7 +2095,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) name);
        r
-     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))
+     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
     let v = emit_expr env inner in
@@ -6372,6 +6427,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   Hashtbl.reset top_globals_llvm;
   List.iter (fun (n, _, ty) -> Hashtbl.add top_globals_llvm n ty) top_globals_list;
+  Hashtbl.reset eta_adapters_llvm;
   let fns = resolve_fn_types skels main_expr in
   (* Phase 25.7: dedupe by name, keeping the LAST occurrence — when user
      defines a name (e.g. `let rec list_rev_into = ...`) that's also in the
@@ -6755,6 +6811,53 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
     @ (if anon_adapters = [] then [] else anon_adapters @ [""])
+    @ (let eta_lines =
+         Hashtbl.fold (fun adapter (builtin, ret_ty) acc ->
+           let ret_ll = llvm_ty_of ret_ty in
+           let cstruct = closure_struct_name Ast.TyUnit ret_ty in
+           let body_code =
+             match builtin with
+             | "vec_new" ->
+               let elem_tag = match Ast.walk ret_ty with
+                 | Ast.TyCon ("Vec", [_; et]) -> ty_tag (Ast.walk et)
+                 | _ -> "?"
+               in
+               Printf.sprintf
+                 "  %%r = call ptr @mere_vec_%s_new(ptr @__lang_default_region)"
+                 elem_tag
+             | "owned_vec_new" ->
+               let elem_tag = match Ast.walk ret_ty with
+                 | Ast.TyCon ("OwnedVec", [et]) -> ty_tag (Ast.walk et)
+                 | _ -> "?"
+               in
+               Printf.sprintf "  %%r = call ptr @mere_owned_vec_%s_new()" elem_tag
+             | "strbuf_new" ->
+               "  %r = call ptr @mere_strbuf_new(ptr @__lang_default_region)"
+             | "map_new" ->
+               let kvtag = match Ast.walk ret_ty with
+                 | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
+                   ty_tag (Ast.walk k_ty) ^ "_" ^ ty_tag (Ast.walk v_ty)
+                 | _ -> "?"
+               in
+               Printf.sprintf
+                 "  %%r = call ptr @mere_map_%s_new(ptr @__lang_default_region)"
+                 kvtag
+             | _ -> "  %r = i32 0"
+           in
+           let fn_def = Printf.sprintf
+             "define %s @%s_closure_fn(ptr %%env_unused, i32 %%u_unused) {\nentry:\n%s\n  ret %s %%r\n}"
+             ret_ll adapter body_code ret_ll
+           in
+           let const_def = Printf.sprintf
+             "@%s_as_value = internal constant %%%s { ptr null, ptr @%s_closure_fn }"
+             adapter cstruct adapter
+           in
+           fn_def :: const_def :: acc)
+           eta_adapters_llvm []
+       in
+       if eta_lines = [] then []
+       else "; Phase 35.2: nullary factory builtins as first-class values"
+            :: eta_lines @ [""])
     @ [ "define i32 @main() {";
         body;
         "}";

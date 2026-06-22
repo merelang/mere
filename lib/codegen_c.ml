@@ -696,7 +696,7 @@ let rec emit_expr (e : Ast.expr) : string =
                 strbuf_used := true
               | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
                 let k_ty = Ast.walk k_ty and v_ty = Ast.walk v_ty in
-                let kvtag = ty_tag k_ty ^ "_" ^ ty_tag v_ty in
+                let kvtag = ty_tag k_ty ^ "__" ^ ty_tag v_ty in
                 if not (Hashtbl.mem map_instances kvtag) then
                   Hashtbl.add map_instances kvtag (k_ty, v_ty)
               | _ -> ());

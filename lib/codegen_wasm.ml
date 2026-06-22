@@ -234,6 +234,12 @@ let register_in_table (name : string) : int =
    when we emit the per-top-level-fn `<name>_closure` wrapper. *)
 let fn_closure_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
 
+(* Phase 35.3: eta-wrapped nullary factory adapters (vec_new / owned_vec_new
+   / strbuf_new / map_new_<k_tag>) used as first-class values. Key = adapter
+   slug, value = (builtin name, ret_ty, table_idx). *)
+let eta_adapters_wasm : (string, string * Ast.ty * int) Hashtbl.t =
+  Hashtbl.create 4
+
 (* Anonymous-Fun closure emission state. *)
 type closure_emission = {
   ce_adapter_name : string;
@@ -970,28 +976,93 @@ let rec emit_expr (e : Ast.expr) : unit =
        Treat as regular var if shadowed; only reject if it's the actual
        stdlib builtin as a value. *)
     let is_shadowed = List.mem_assoc name !locals in
-    (* Phase 15.4: vec_new / vec_push / vec_get / vec_len は App handler
-       で special-case 処理。first-class value 用法のみここで reject。 *)
+    (* Phase 35.3: nullary factory builtins as first-class values via
+       eta-wrap. Compute adapter slug + register a `(func $eta_<slug>` that
+       will be emitted by emit_program. *)
+    let is_nullary_factory = name = "vec_new" || name = "owned_vec_new"
+                              || name = "strbuf_new" || name = "map_new" in
+    let eta_table_idx_opt =
+      if (not is_shadowed) && is_nullary_factory then
+        match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyArrow (_, ret_ty) when ty_is_concrete (Ast.walk ret_ty) ->
+             let ret_ty = Ast.walk ret_ty in
+             (* Pick adapter slug + set runtime usage flags *)
+             let slug =
+               match name, Ast.walk ret_ty with
+               | "vec_new", _ -> vec_used := true; "vec_new"
+               | "owned_vec_new", _ -> vec_used := true; "owned_vec_new"
+               | "strbuf_new", _ -> strbuf_used := true; "strbuf_new"
+               | "map_new", Ast.TyCon ("Map", [_; k_ty; _]) ->
+                 let k_tag =
+                   match Ast.walk k_ty with
+                   | Ast.TyInt -> map_int_used := true; "int"
+                   | Ast.TyStr -> map_str_used := true; "str"
+                   | _ -> "?"
+                 in
+                 "map_new_" ^ k_tag
+               | _ -> "?"
+             in
+             let idx =
+               match Hashtbl.find_opt eta_adapters_wasm slug with
+               | Some (_, _, i) -> i
+               | None ->
+                 let i = register_in_table ("eta_" ^ slug) in
+                 Hashtbl.add eta_adapters_wasm slug (name, ret_ty, i);
+                 i
+             in
+             Some idx
+           | _ -> None)
+        | None -> None
+      else None
+    in
+    (* Phase 15.4: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数
+       builtin は依然 first-class 不可 (eta は nullary factory のみ)。 *)
     if not is_shadowed && (
-       name = "vec_new" || name = "vec_push"
+       name = "vec_push"
        || name = "vec_get" || name = "vec_len"
        || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
        || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
        || name = "vec_map" || name = "vec_filter"
        || name = "vec_to_owned" || name = "owned_vec_to_vec"
-       || name = "owned_vec_new" || name = "owned_vec_push"
+       || name = "owned_vec_push"
        || name = "owned_vec_get" || name = "owned_vec_len"
-       || name = "strbuf_new" || name = "strbuf_push"
+       || name = "strbuf_push"
        || name = "strbuf_to_str" || name = "strbuf_len"
-       || name = "map_new" || name = "map_set" || name = "map_get" || name = "map_iter"
+       || name = "map_set" || name = "map_get" || name = "map_iter"
        || name = "map_has" || name = "map_len") then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4〜15.10: vec_* / owned_vec_* / strbuf_* / map_* は直接 application のみ対応)"));
+        ^ " as a value (Phase 15.4〜15.10: curried 多引数 builtin は直接 application のみ対応)"));
+    if not is_shadowed && is_nullary_factory && eta_table_idx_opt = None then
+      raise (Codegen_error (e.Ast.loc,
+        "unsupported in Wasm codegen subset: " ^ name
+        ^ " as a value: return type is polymorphic, can't monomorphize \
+           (Phase 35.3 MVP: use direct app or manual eta `fn () -> " ^ name ^ " ()`)"));
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)"));
+    (match eta_table_idx_opt with
+     | Some idx ->
+       (* Allocate a closure value `{ env = 0, fn_idx = idx }` on the
+          bump heap, just like the toplevel-fn case below. *)
+       let base = fresh_local () in
+       emit_instr "global.get $__lang_bump";
+       emit_instr (Printf.sprintf "local.set %d" base);
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr "i32.const 8";
+       emit_instr "i32.add";
+       emit_instr "global.set $__lang_bump";
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr "i32.const 0";
+       emit_instr "i32.store offset=0";
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr (Printf.sprintf "i32.const %d" idx);
+       emit_instr "i32.store offset=4";
+       emit_instr (Printf.sprintf "local.get %d" base)
+     | None ->
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
      | None when Hashtbl.mem fn_closure_table_idx name ->
@@ -1015,7 +1086,7 @@ let rec emit_expr (e : Ast.expr) : unit =
      | None when Hashtbl.mem top_globals_wasm name ->
        (* Phase 30.2c: top-level non-fn let as a Wasm global *)
        emit_instr (Printf.sprintf "global.get $%s" name)
-     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))
+     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
     emit_instr "i32.const 0";
@@ -2238,6 +2309,30 @@ let emit_top_adapter (f : fn_decl) : string =
     "  (func $%s_closure (param i32) (param i32) (result i32)\n\
      \    local.get 1\n\
      \    call $%s)" f.name f.name
+
+(* Phase 35.3: eta adapter for a nullary factory builtin used as a value.
+   `slug` is the registered key in [eta_adapters_wasm]; `builtin` is the
+   underlying name (vec_new / owned_vec_new / strbuf_new / map_new). The
+   adapter ignores both arguments (env, unit) and calls the appropriate
+   runtime helper. *)
+let emit_eta_adapter_wasm (slug : string) (builtin : string) : string =
+  let body =
+    match builtin with
+    | "vec_new" | "owned_vec_new" -> "call $mere_vec_new"
+    | "strbuf_new" -> "call $mere_strbuf_new"
+    | "map_new" ->
+      let k_tag =
+        if String.length slug > 8
+           && String.sub slug 0 8 = "map_new_"
+        then String.sub slug 8 (String.length slug - 8)
+        else "int"
+      in
+      Printf.sprintf "call $mere_map_%s_new" k_tag
+    | _ -> "unreachable"
+  in
+  Printf.sprintf
+    "  (func $eta_%s (param i32) (param i32) (result i32)\n\
+     \    %s)" slug body
 
 (* Adapter for an anonymous Fun. Slot 0 = env ptr, slot 1 = param;
    capture locals start at slot 2. Loads each capture from env at the
@@ -3927,6 +4022,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
   Hashtbl.reset fn_closure_table_idx;
+  Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
   Hashtbl.reset show_str_offsets;
   table_entries := [];
@@ -4337,8 +4433,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           Printf.sprintf "  (global $%s (mut i32) (i32.const 0))" name)
           top_globals_list) ^ "\n"
   in
+  let eta_adapters =
+    Hashtbl.fold (fun slug (builtin, _ret_ty, _idx) acc ->
+      emit_eta_adapter_wasm slug builtin :: acc)
+      eta_adapters_wasm []
+  in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ show_fn_defs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all

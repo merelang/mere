@@ -1,0 +1,57 @@
+// factory_value: nullary factory builtin を first-class value として
+// HOF に渡す (Phase 35)
+//
+// 目的: Phase 35 で 4 backend に投入した eta-wrap (vec_new /
+//   owned_vec_new / strbuf_new / map_new を value 位置で書けるようにする)
+//   を combined で dogfood。`apply_factory` のような HOF に factory 関数を
+//   そのまま渡し、内部で `()` 適用して空 container を作って書き込む。
+//
+// 制約 (Phase 35 MVP): factory が値として現れる箇所の戻り型は型注釈等で
+//   monomorphic に絞れる必要がある。今回は HOF 側の引数注釈で固定。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/factory_value.mere
+
+let _ = print "=== factory_value (Phase 35) ===";
+
+// Vec[__heap, int] を返す factory を HOF に渡す
+let with_vec = fn (f: unit -> Vec[__heap, int]) ->
+  let v = f () in
+  let _ = vec_push v 10 in
+  let _ = vec_push v 20 in
+  let _ = vec_push v 30 in
+  vec_len v;
+
+let _ = print ("vec_new via HOF: len = " ++ show (with_vec vec_new));   // 3
+
+// StrBuf[__heap] を返す factory
+let with_buf = fn (f: unit -> StrBuf[__heap]) ->
+  let b = f () in
+  let _ = strbuf_push b "hello, " in
+  let _ = strbuf_push b "world!" in
+  strbuf_to_str b;
+
+let _ = print ("strbuf_new via HOF: " ++ with_buf strbuf_new);   // hello, world!
+
+// Map[__heap, str, int] を返す factory
+let with_map = fn (f: unit -> Map[__heap, str, int]) ->
+  let m = f () in
+  let _ = map_set m "a" 1 in
+  let _ = map_set m "b" 2 in
+  let _ = map_set m "c" 3 in
+  map_len m;
+
+let _ = print ("map_new via HOF: size = " ++ show (with_map map_new));   // 3
+
+// OwnedVec[int] を返す factory
+let with_owned = fn (f: unit -> OwnedVec[int]) ->
+  let v = f () in
+  let _ = owned_vec_push v 100 in
+  let _ = owned_vec_push v 200 in
+  owned_vec_len v;
+
+let _ = print ("owned_vec_new via HOF: len = " ++ show (with_owned owned_vec_new));   // 2
+
+0
