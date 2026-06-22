@@ -17,13 +17,21 @@ let register_variants name variants =
 
 (* A pattern is "total" if it covers all values of any type at the top level —
    wildcards, variable patterns, unit literals, and as-patterns / or-patterns
-   built from totals. *)
+   built from totals.
+
+   Phase 2 extension (2026-06-22): tuple / record patterns are total when
+   all sub-patterns are total (`(a, b)` covers every pair; `{ x = a, y = b }`
+   covers every record).  This eliminates false-positive "no wildcard arm"
+   warnings for the common destructure form. *)
 let rec is_total_pattern (p : Ast.pattern) =
   match p.pnode with
   | Ast.P_wild | Ast.P_var _ -> true
   | Ast.P_unit -> true   (* unit has only one value *)
   | Ast.P_as (inner, _) -> is_total_pattern inner
   | Ast.P_or (p1, p2) -> is_total_pattern p1 || is_total_pattern p2
+  | Ast.P_tuple ps -> List.for_all is_total_pattern ps
+  | Ast.P_record (_, fields) ->
+    List.for_all (fun (_, p) -> is_total_pattern p) fields
   | _ -> false
 
 (* For variant types: collect which constructor names appear at the top of
@@ -88,13 +96,23 @@ let check_match (loc : Loc.t)
           "%s: warning: non-exhaustive match (missing %s%s)"
           (Loc.to_string loc) vname p_str
       ) missing
-    | _ ->
-      (* For other types (int, str, float, tuple, record, etc.), patterns
-         are typically exhaustive only with a wildcard arm.  Without one we
-         flag it. *)
+    | other_ty ->
+      (* Phase 2: for other types (int, str, float, tuple, record, etc.),
+         patterns are typically exhaustive only with a wildcard arm.  When
+         the scrutinee type is identifiable, mention it in the warning so
+         the user knows what kind of value might be uncovered. *)
+      let ty_hint =
+        match other_ty with
+        | Ast.TyInt -> " for int"
+        | Ast.TyStr -> " for str"
+        | Ast.TyFloat -> " for float"
+        | Ast.TyTuple _ -> " for tuple"
+        | Ast.TyCon (n, _) -> " for " ^ n
+        | _ -> ""
+      in
       [Printf.sprintf
-         "%s: warning: non-exhaustive match (no wildcard arm)"
-         (Loc.to_string loc)]
+         "%s: warning: non-exhaustive match (no wildcard arm%s)"
+         (Loc.to_string loc) ty_hint]
 
 (* Global mutable accumulator: Typer's infer pass appends warnings here
    as it visits Match nodes (it already has the scrutinee type at that point,

@@ -1878,6 +1878,26 @@ let () =
        | None          -> 0
        | Some n as all -> n") "";
 
+  (* --- exhaustiveness Phase 2 (tuple / record / typed wildcard hint) --- *)
+  check "Phase 2: tuple destructure is total (no warning)"
+    (warnings_of "match (1, 2) with | (a, b) -> a + b") "";
+  check "Phase 2: nested tuple destructure is total"
+    (warnings_of "match ((1, 2), 3) with | ((a, b), c) -> a + b + c") "";
+  check "Phase 2: tuple with literal sub-pattern is NOT total"
+    (warnings_of "match (1, 2) with | (0, b) -> b")
+    "line 1, col 1: warning: non-exhaustive match (no wildcard arm for tuple)";
+  check "Phase 2: record destructure is total"
+    (warnings_of
+      "type Pt = { x: int, y: int };
+       let p = Pt { x = 3, y = 4 } in
+       match p with | Pt { x = a, y = b } -> a + b") "";
+  check "Phase 2: int match without wildcard gets type hint"
+    (warnings_of "match 42 with | 0 -> \"zero\"")
+    "line 1, col 1: warning: non-exhaustive match (no wildcard arm for int)";
+  check "Phase 2: str match without wildcard gets type hint"
+    (warnings_of "match \"hi\" with | \"hello\" -> 1")
+    "line 1, col 1: warning: non-exhaustive match (no wildcard arm for str)";
+
   (* --- region / &R T : Phase 1 (syntactic only) --- *)
   check "region block basic"
     (Pipeline.process "region R { 42 }") "42";
