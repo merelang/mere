@@ -636,6 +636,13 @@ let vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
 let rec emit_expr (e : Ast.expr) : string =
   match e.node with
   | Ast.Int_lit n -> string_of_int n
+  | Ast.Float_lit f ->
+    (* Phase 34.1: emit as C double literal。`%.17g` で round-trip 安全。
+       NaN / Infinity は C 標準の NAN / INFINITY マクロ。 *)
+    if f <> f then "(0.0/0.0)"  (* NaN *)
+    else if f = infinity then "(1.0/0.0)"
+    else if f = neg_infinity then "(-1.0/0.0)"
+    else Printf.sprintf "%.17g" f
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s -> Ast.escape_string s
   | Ast.Var name ->
@@ -672,6 +679,12 @@ let rec emit_expr (e : Ast.expr) : string =
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
+    (* Phase 34.1: float constants — interp 側の builtin と完全一致 *)
+    if not is_shadowed && name = "pi" then
+      "(3.14159265358979323846)"
+    else if not is_shadowed && name = "e" then
+      "(2.7182818284590452354)"
+    else
     (* If we're inside a closure adapter and this name is one of the
        captured vars, rewrite to env access. *)
     (match List.assoc_opt name !current_env_subst with
@@ -834,7 +847,7 @@ let rec emit_expr (e : Ast.expr) : string =
          value_c bind_stmts body_c
      | _ -> unsupported pat.ploc "non-variable let pattern")
   (* Unsupported nodes *)
-  | Ast.Float_lit _   -> unsupported e.loc "float literals"
+  (* Phase 34.1: Float_lit handled at top of emit_expr now *)
   | Ast.Unit_lit      -> "0"  (* unit becomes int 0 in C *)
   | Ast.Let_rec (bindings, body) ->
     (* Phase 22.2: inner let-rec lifting. If lift_inner_fns has registered
@@ -1000,6 +1013,42 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ int __r = strcmp(%s, %s); __r < 0 ? -1 : (__r > 0 ? 1 : 0); })"
          (emit_expr a_e) (emit_expr arg)
+     (* Phase 34.1: float arithmetic + comparison + unary *)
+     | Ast.App ({ node = Ast.Var "f_add"; _ }, a_e) ->
+       Printf.sprintf "((%s) + (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_sub"; _ }, a_e) ->
+       Printf.sprintf "((%s) - (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_mul"; _ }, a_e) ->
+       Printf.sprintf "((%s) * (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_div"; _ }, a_e) ->
+       Printf.sprintf "((%s) / (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_lt"; _ }, a_e) ->
+       Printf.sprintf "((%s) < (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_le"; _ }, a_e) ->
+       Printf.sprintf "((%s) <= (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_gt"; _ }, a_e) ->
+       Printf.sprintf "((%s) > (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_ge"; _ }, a_e) ->
+       Printf.sprintf "((%s) >= (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_min"; _ }, a_e) ->
+       Printf.sprintf "({ double __a = (%s); double __b = (%s); __a < __b ? __a : __b; })"
+         (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f_max"; _ }, a_e) ->
+       Printf.sprintf "({ double __a = (%s); double __b = (%s); __a > __b ? __a : __b; })"
+         (emit_expr a_e) (emit_expr arg)
+     | Ast.Var "f_neg" ->
+       Printf.sprintf "(-(%s))" (emit_expr arg)
+     | Ast.Var "f_abs" ->
+       Printf.sprintf "((%s) < 0.0 ? -(%s) : (%s))"
+         (emit_expr arg) (emit_expr arg) (emit_expr arg)
+     | Ast.Var "float_of_int" ->
+       Printf.sprintf "((double)(%s))" (emit_expr arg)
+     | Ast.Var "int_of_float" ->
+       Printf.sprintf "((int)(%s))" (emit_expr arg)
+     | Ast.Var "str_of_float" ->
+       Printf.sprintf "__lang_str_of_float(%s)" (emit_expr arg)
+     | Ast.Var "float_of_str" ->
+       Printf.sprintf "(atof(%s))" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_split"; _ }, s_e) ->
        (* Phase 24.3: str_split s delim — curried. Returns list_str. *)
        str_split_used := true;
@@ -1910,6 +1959,7 @@ let rec c_type_of (t : Ast.ty) : string =
        raise (Codegen_error (Loc.dummy,
          "unsupported in C codegen subset: Map[<unresolved>] (K and V must be concrete)")))
   | Ast.TyInt | Ast.TyBool -> "int"
+  | Ast.TyFloat -> "double"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyTuple ts -> tuple_struct_name ts
@@ -2712,6 +2762,26 @@ let str_concat_helper =
       "  }";
       "  r[j] = '\\0';";
       "  return r;";
+      "}";
+      "";
+      (* Phase 34.1: str_of_float — OCaml の string_of_float と format を
+         合わせる (%.12g + 整数値なら末尾 `.` を付加)。 *)
+      "static const char* __lang_str_of_float(double f) {";
+      "  char* buf;";
+      "  asprintf(&buf, \"%.12g\", f);";
+      "  int has_dot = 0;";
+      "  for (char* p = buf; *p; p++) {";
+      "    if (*p == '.' || *p == 'e' || *p == 'E' || *p == 'n' || *p == 'i') {";
+      "      has_dot = 1; break;";
+      "    }";
+      "  }";
+      "  if (!has_dot) {";
+      "    char* buf2;";
+      "    asprintf(&buf2, \"%s.\", buf);";
+      "    free(buf);";
+      "    return (const char*) buf2;";
+      "  }";
+      "  return (const char*) buf;";
       "}" ]
 
 (* Region runtime: a bump allocator. `region R { body }` initializes a
@@ -3224,6 +3294,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> Some "%d"
+  | Ast.TyFloat -> Some "%g"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> Some "%s"
   | Ast.TyUnit -> Some "()"  (* Phase 27.0: print "()" to match interp *)
   | _ -> Some "%d"  (* best-effort; type-checker should have caught issues *)
@@ -4465,6 +4536,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (* Phase 27.0: unit main — evaluate body for side effects, then
          print "()\n" to match interp's Eval.to_string V_unit output. *)
       "  (void)(" ^ main_body ^ ");\n  printf(\"()\\n\");"
+    | Some "%g" ->
+      (* Phase 34.1: float main — interp の string_of_float (OCaml の
+         %.12g + 整数値なら末尾 `.`) と format を合わせるため
+         __lang_str_of_float ヘルパを経由。 *)
+      "  puts(__lang_str_of_float(" ^ main_body ^ "));"
     | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
   in
   let parts =
