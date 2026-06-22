@@ -56,6 +56,37 @@ const wasmPath = process.argv[2];
         return 1;
       }
     },
+    // Phase 34.3 (Wasm float): str_of_float / float_of_str host imports.
+    // OCaml string_of_float の format (%.12g + 整数値なら trailing ".")
+    // にできるだけ近づける。
+    __lang_str_of_float: (f) => {
+      let s;
+      if (Number.isNaN(f)) s = "nan";
+      else if (f === Infinity) s = "inf";
+      else if (f === -Infinity) s = "-inf";
+      else {
+        // %.12g equivalent: 12 significant digits, strip trailing zeros
+        s = f.toPrecision(12);
+        // Strip trailing zeros in fractional part (mimics %g)
+        if (s.includes('e') || s.includes('E')) {
+          // 1.23000000000e+10 → 1.23e+10
+          s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, '$1$2').replace(/\.(e[+-]?\d+)/i, '$1');
+        } else if (s.includes('.')) {
+          s = s.replace(/\.?0+$/, '');
+          if (s === '' || s === '-') s = '0';
+        }
+        // OCaml: append "." for plain integer-valued floats
+        if (!/[.eEni]/.test(s)) s += '.';
+      }
+      const bytes = Buffer.from(s + '\0', 'utf8');
+      const ptr = bumpAlloc(bytes.length);
+      new Uint8Array(memory.buffer).set(bytes, ptr);
+      return ptr;
+    },
+    __lang_float_of_str: (ptr) => {
+      const s = readCStr(ptr);
+      return parseFloat(s);
+    },
     // Phase 32.4 (C1 FFI): default impls for common libc functions that
     // Mere programs declare via `extern fn`. Add more as needed.
     getpid: () => process.pid,

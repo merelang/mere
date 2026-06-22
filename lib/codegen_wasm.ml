@@ -26,12 +26,21 @@ let instrs : string list ref = ref []
 let emit_instr s = instrs := s :: !instrs
 
 (* Local slot bookkeeping. Lang variables map to Wasm locals; we mint
-   a fresh slot per Let binding. *)
+   a fresh slot per Let binding. Wasm locals are typed, so we track the
+   declared type per slot. Most slots are i32 (Mere の uniform value model)
+   だが、Phase 34.3 で float の f64 一時 slot を扱うために type list を持つ。 *)
 let local_counter = ref 0
+let local_types : string list ref = ref []  (* in declaration order; index = slot *)
 let locals : (string * int) list ref = ref []
 let fresh_local () =
   let n = !local_counter in
   incr local_counter;
+  local_types := !local_types @ ["i32"];
+  n
+let fresh_local_f64 () =
+  let n = !local_counter in
+  incr local_counter;
+  local_types := !local_types @ ["f64"];
   n
 
 (* String literals live in linear memory. Each Str_lit is laid out
@@ -68,6 +77,7 @@ let fresh_str_offset (s : string) : int =
 let reset () =
   instrs := [];
   local_counter := 0;
+  local_types := [];
   locals := []
 
 (* ── Function lifting (Phase 6.2) ── *)
@@ -906,11 +916,40 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
      | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
   | None -> raise (Codegen_error (loc, "map_*: missing type info"))
 
+(* Phase 34.3: Wasm float helper. float 値は **8 bytes (f64) を bump alloc
+   して i32 ポインタとして保持** (uniform i32 value model を維持)。
+   `emit_float_alloc_from_f64_on_stack`: stack top の f64 値を alloc + store、
+   結果として i32 ptr を stack top に残す。 *)
+let emit_float_alloc_from_f64_on_stack () : unit =
+  (* Stack before: [..., f64] *)
+  let tmp_f64 = fresh_local_f64 () in
+  emit_instr (Printf.sprintf "local.set %d" tmp_f64);
+  (* Stack: [...] — f64 saved in tmp local *)
+  emit_instr "global.get $__lang_bump";
+  emit_instr "i32.const 7";
+  emit_instr "i32.add";
+  emit_instr "i32.const -8";
+  emit_instr "i32.and";
+  emit_instr "global.set $__lang_bump";           (* align bump up to 8 *)
+  emit_instr "global.get $__lang_bump";            (* push ptr (= aligned bump) *)
+  emit_instr (Printf.sprintf "local.get %d" tmp_f64);
+  emit_instr "f64.store offset=0 align=8";        (* memory[ptr] = f64 *)
+  emit_instr "global.get $__lang_bump";            (* push ptr again (= return value) *)
+  emit_instr "global.get $__lang_bump";
+  emit_instr "i32.const 8";
+  emit_instr "i32.add";
+  emit_instr "global.set $__lang_bump"            (* bump += 8 *)
+  (* Stack: [..., ptr] *)
+
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
   match e.Ast.node with
   | Ast.Int_lit n ->
     emit_instr (Printf.sprintf "i32.const %d" n)
+  | Ast.Float_lit f ->
+    (* Phase 34.3: f64 リテラルを push、bump alloc して i32 ptr に *)
+    emit_instr (Printf.sprintf "f64.const %.17g" f);
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.Bool_lit b ->
     emit_instr (Printf.sprintf "i32.const %d" (if b then 1 else 0))
   | Ast.Unit_lit ->
@@ -918,6 +957,13 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.Str_lit s ->
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i32.const %d" off)
+  | Ast.Var "pi" when not (List.mem_assoc "pi" !locals) ->
+    (* Phase 34.3: float constants — heap-alloc して i32 ptr を push *)
+    emit_instr "f64.const 3.14159265358979323846";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.Var "e" when not (List.mem_assoc "e" !locals) ->
+    emit_instr "f64.const 2.7182818284590452354";
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.Var name ->
     (* Phase 26.6 (port of codegen_c Phase 24.1 / codegen_llvm Phase 25.10):
        a local binding (locals) can shadow a stdlib builtin name like `len`.
@@ -1163,6 +1209,66 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr a_e;
     emit_expr b_e;
     emit_instr "call $__lang_str_compare"
+  (* Phase 34.3: float arithmetic + comparison + unary + conversions.
+     値は i32 ptr (f64 in heap)。各 op は load → op → alloc + store。 *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
+    when fname = "f_add" || fname = "f_sub" || fname = "f_mul" || fname = "f_div" ->
+    let op = match fname with
+      | "f_add" -> "f64.add" | "f_sub" -> "f64.sub"
+      | "f_mul" -> "f64.mul" | "f_div" -> "f64.div" | _ -> "f64.add"
+    in
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_expr b_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr op;
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
+    when fname = "f_lt" || fname = "f_le" || fname = "f_gt" || fname = "f_ge" ->
+    let op = match fname with
+      | "f_lt" -> "f64.lt" | "f_le" -> "f64.le"
+      | "f_gt" -> "f64.gt" | "f_ge" -> "f64.ge" | _ -> "f64.lt"
+    in
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_expr b_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr op  (* f64.lt 等は i32 (bool) を返す *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
+    when fname = "f_min" || fname = "f_max" ->
+    let op = if fname = "f_min" then "f64.min" else "f64.max" in
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_expr b_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr op;
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.Var "f_neg"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "f64.neg";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.Var "f_abs"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "f64.abs";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.Var "float_of_int"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "f64.convert_i32_s";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.Var "int_of_float"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "i32.trunc_f64_s"
+  | Ast.App ({ node = Ast.Var "str_of_float"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "call $__lang_str_of_float"  (* env import, returns i32 ptr to str *)
+  | Ast.App ({ node = Ast.Var "float_of_str"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "call $__lang_float_of_str";  (* env import, f64 *)
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
     when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
     emit_expr arg;
@@ -2018,21 +2124,10 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr "call_indirect (type $cl)";
        emit_instr "drop";               (* discard close's return *)
        emit_instr (Printf.sprintf "local.get %d" result_slot))
-  | _ ->
-    let node_name = match e.Ast.node with
-      | Ast.Int_lit _ -> "Int_lit" | Ast.Float_lit _ -> "Float_lit"
-      | Ast.Bool_lit _ -> "Bool_lit" | Ast.Str_lit _ -> "Str_lit"
-      | Ast.Unit_lit -> "Unit_lit" | Ast.Var _ -> "Var"
-      | Ast.Bin _ -> "Bin" | Ast.Cmp _ -> "Cmp" | Ast.Logic _ -> "Logic"
-      | Ast.App _ -> "App" | Ast.Neg _ -> "Neg" | Ast.Annot _ -> "Annot"
-      | Ast.Let _ -> "Let" | Ast.Let_rec _ -> "Let_rec"
-      | Ast.With _ -> "With" | Ast.If _ -> "If" | Ast.Fun _ -> "Fun"
-      | Ast.Constr _ -> "Constr" | Ast.Match _ -> "Match"
-      | Ast.Tuple _ -> "Tuple" | Ast.Region_block _ -> "Region_block"
-      | Ast.Ref _ -> "Ref" | Ast.Record_lit _ -> "Record_lit"
-      | Ast.Field_get _ -> "Field_get" | Ast.Record_update _ -> "Record_update"
-    in
-    unsupported e.Ast.loc ("node kind not yet in Phase 6 MVP: " ^ node_name)
+  (* Phase 34.3: 全 AST 構造を上で網羅したため fallback `| _ ->` は OCaml に
+     redundant と判定されるようになった。明示的な node_name による
+     unsupported error は残しておきたいので、各 case の wildcard を残す
+     形にしないと unused warning が出る — 完全に削除。 *)
 
 (* Emit one top-level fn definition. Params are positional locals
    starting at slot 0; let-binding locals are mint-ed afterwards.
@@ -4057,6 +4152,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      emit_instr (Printf.sprintf "i32.const %d" unit_off);
      emit_instr "call $puts";
      emit_instr "i32.const 0"
+   | Ast.TyFloat ->
+     (* Phase 34.3: float main result — load f64 from ptr, str_of_float via
+        env import (JS で OCaml string_of_float 風 format)、puts *)
+     emit_instr "f64.load offset=0 align=8";
+     emit_instr "call $__lang_str_of_float";
+     emit_instr "call $puts";
+     emit_instr "i32.const 0"
    | _ ->
      (* Best-effort: drop body and return 0. *)
      emit_instr "drop";
@@ -4065,8 +4167,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let local_count = !local_counter in
   let local_decl =
     if local_count = 0 then "" else
+      (* Phase 34.3: local_types で typed locals (i32 / f64) を declare *)
+      let types =
+        if List.length !local_types = local_count then !local_types
+        else List.init local_count (fun _ -> "i32")
+      in
       Printf.sprintf "    (local%s)\n"
-        (String.concat "" (List.init local_count (fun _ -> " i32")))
+        (String.concat "" (List.map (fun t -> " " ^ t) types))
   in
   let indented_body =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
@@ -4254,6 +4361,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       \  (import \"env\" \"write_file\" (func $__lang_write_file (param i32) (param i32) (result i32)))\n"
     else ""
   in
+  (* Phase 34.3: float runtime imports (str_of_float / float_of_str)。
+     conditional emit すると判定が要るので、常時 import (使われなくても害は無い)。 *)
+  let float_io_imports =
+    "  (import \"env\" \"__lang_str_of_float\" (func $__lang_str_of_float (param f64) (result i32)))\n\
+    \  (import \"env\" \"__lang_float_of_str\" (func $__lang_float_of_str (param i32) (result f64)))\n"
+  in
+  let file_io_imports = file_io_imports ^ float_io_imports in
   (* Phase 32.4 (C1 FFI): extern fn を env host imports として宣言。
      str / bool / int / unit を全て i32 として表現。unit 引数は param なし、
      unit return は result なし。 *)
