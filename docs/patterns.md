@@ -448,6 +448,65 @@ fn (p: Point) -> { p | x = 0 }          // 注釈で OK
 ```
 row polymorphism がないので、関数引数の record は注釈必須。
 
+### 5. top-level fn 名が libc / libm のシンボルと衝突する (C codegen)
+
+C codegen は top-level fn を C 関数として直接 emit するため、 macOS / Linux
+の libc / libm にすでに存在する名前と被ると compile error になる。 衝突した
+例 (Phase 32 〜 38 で実際にぶつかったもの):
+
+| Mere の名前 | 衝突先 |
+|---|---|
+| `div` | `stdlib.h` の `div(int, int)` (商と剰余を返す) |
+| `mergesort` | macOS BSD `stdlib.h` の `mergesort(...)` |
+| `pow` / `sqrt` / `sin` / `cos` / `exp` / `log` | `math.h` の libm 関数 |
+| `system` / `getenv` / `setenv` / `rand` / `srand` | `stdlib.h` |
+| `time` / `clock` | `time.h` |
+| `read` / `write` / `open` / `close` | POSIX I/O |
+
+**回避策**: 1-2 文字短くする (`mergesort` → `msort`、 `div` → `divi`)、 動詞句に
+する (`sort_list` / `power_int`)、 接頭辞 (`mere_sort`) など。 interpreter は
+影響を受けないので動作確認はできるが、 codegen を試した時に発覚する。
+
+### 6. 空 list literal `[]` は polymorphic `'a list` で codegen NG
+
+```mere
+let xs = [];          // 推論: 'a list
+let _ = some_use xs;  // 後で int に推論されても、 codegen は xs の型を見て 'a leak
+```
+
+C / LLVM codegen は concrete element type が要るが、 narrow value restriction
+(Phase 36) が空 list に対しても generalize するため leak する。 **回避**:
+
+```mere
+let xs = (Nil: int list);                     // 推奨: explicit annotation
+let xs: int list = Nil;                       // 同等 (片方が動けば良い)
+```
+
+empty list を bind するときは「最初の要素の型」を annotation で固定する。
+非空 list (`[1, 2, 3]`) は要素から推論されるため annotation 不要。
+
+### 7. `Map[K, V]` は 2 つしか書けない、 必要なのは `Map[R, K, V]` (3 引数)
+
+Mere の Map は region パラメータを持つ。 だから type annotation には R を
+入れる必要がある:
+
+```mere
+// NG
+let f = fn (m: Map[str, int]) -> map_get m "k";
+// type error: expected `Map['c, 'b, 'a]`, got `(str, int) Map`
+
+// 通る (R は型変数として書く)
+let f = fn (m: Map[R, str, int]) -> map_get m "k";
+// → ただし R が actual region に合わないと別の型エラーになるケースも
+
+// 一番楽: 注釈を書かず推論に任せる
+let f = fn m -> map_get m "k";
+```
+
+ML 系の経験者は K と V だけで書きがちだが、 Mere は region 必須なので
+3 引数。 公開時に user の最初の躓きどころなので、 patterns / tutorial に
+明記しておく。
+
 ---
 
 ## 関連ドキュメント
