@@ -5719,9 +5719,10 @@ let () =
     (let prog = Pipeline.parse_program "42" in
      (* Phase 19.5: 3 types (list / option / result)
         + Phase 21.2: 6 list helpers
-        + Phase 23.2: 3 option + 5 result helpers = 17 total *)
+        + Phase 23.2: 3 option + 5 result helpers
+        + Phase 33.1: 1 option_and_then = 18 total *)
      string_of_int (List.length prog.Ast.decls))
-    "17";
+    "18";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"

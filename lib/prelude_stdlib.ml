@@ -72,6 +72,12 @@ let rec option_is_some = fn opt ->
   | None -> false
   | Some _ -> true;
 
+// Phase 33.1: monadic bind / flat_map。Option chain で None を伝搬。
+let rec option_and_then = fn opt -> fn f ->
+  match opt with
+  | None -> None
+  | Some v -> f v;
+
 // === Result helpers ===
 
 let rec result_map = fn r -> fn f ->

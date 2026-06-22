@@ -90,6 +90,8 @@ backend いずれかへ codegen。
 | [toy_sql.mere](toy_sql.mere) ⭐ | **1165 LoC toy SQL engine** (tokenizer + AST + parser + Catalog Map + Storage OwnedVec + INSERT / SELECT / WHERE / JOIN + 59 self-tests)。N1/N2/N3 dogfood で 4 件の codegen bug を発掘 + Phase 30 で fix |
 | **Phase 32 (2026-06-22) 追加 — FFI** | |
 | [ffi_demo.mere](ffi_demo.mere) ⭐ | `extern fn <name>: <ty>;` で libc 関数 (getpid / getppid / setenv / getenv) を 4 backend から直接呼ぶ demo。multi-arg curried も対応 |
+| **Phase 33 (2026-06-22) 追加 — Option / UX polish** | |
+| [option_pipeline.mere](option_pipeline.mere) ⭐ | Option chain (option_map / option_and_then / option_default / option_is_some) を 3 段 lookup pipeline で dogfood。`option_and_then` を prelude に新規追加。D3 |
 
 ### Q-010 collection 基本
 
