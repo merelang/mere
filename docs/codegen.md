@@ -125,6 +125,7 @@ shadow / §1.12 builtin shadow) → 全部 fix (3 backend で揃えた)。Phase 
 | closure 内 captured 名の let shadow (env_subst dance) | 30.1 (C) | C |
 | top-level 非-fn let を file-scope global 化 | 30.2a (C) / 30.2b (LLVM) / 30.2c (Wasm) | 3 backend |
 | Wasm memory 1 → 16 pages (1MB) | 29.1 | Wasm |
+| `extern fn <name>: <ty>;` (FFI、libc 関数呼出、curried multi-arg) | 32.0-32.6 | 4 backend |
 
 ### 動くこと
 

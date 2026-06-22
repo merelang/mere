@@ -1085,18 +1085,35 @@ let rec emit_expr (e : Ast.expr) : unit =
     let tag = ty_tag arg_ty in
     emit_expr arg;
     emit_instr (Printf.sprintf "call $show_%s" tag)
-  | Ast.App ({ node = Ast.Var name; _ }, arg)
-    when Hashtbl.mem extern_fn_decls_wasm name ->
-    (* Phase 32.4 (C1 FFI): direct call to extern fn (env host import).
-       unit 引数は無視、unit return は i32 0 を push (Mere の内部整合)。 *)
-    let ret_ty =
-      match Hashtbl.find extern_fn_decls_wasm name with
-      | Ast.TyArrow (_, r) -> Ast.walk r
-      | _ -> Ast.TyInt
+  | Ast.App _ as outer_app when
+    (let rec head_is_extern e =
+       match e.Ast.node with
+       | Ast.App (f, _) -> head_is_extern f
+       | Ast.Var name -> Hashtbl.mem extern_fn_decls_wasm name
+       | _ -> false
+     in head_is_extern { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc }) ->
+    (* Phase 32.6 (C1 FFI multi-arg Wasm): curried App chain を collect、
+       全 args を push してから call $<name> 1 つに集約。 *)
+    let rec collect e acc =
+      match e.Ast.node with
+      | Ast.App (f, a) -> collect f (a :: acc)
+      | Ast.Var name -> name, acc
+      | _ -> failwith "unreachable"
     in
-    (match arg.Ast.node with
-     | Ast.Unit_lit -> ()
-     | _ -> emit_expr arg);
+    let name, args =
+      collect { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc } []
+    in
+    let rec result_ty t =
+      match Ast.walk t with
+      | Ast.TyArrow (_, r) -> result_ty r
+      | t -> t
+    in
+    let ret_ty = result_ty (Hashtbl.find extern_fn_decls_wasm name) in
+    List.iter (fun a ->
+      match a.Ast.node with
+      | Ast.Unit_lit -> ()
+      | _ -> emit_expr a)
+      args;
     emit_instr (Printf.sprintf "call $%s" name);
     (match ret_ty with
      | Ast.TyUnit -> emit_instr "i32.const 0"

@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-06-22 (続き — Phase 32 C1 FFI)
+
+Phase 31 直後、Outlook §C1 (FFI = 外部 C 関数呼出) を 5 slice + 1 polish で
+連続走破。**1480 → 1486 tests**、`extern fn <name>: <ty>;` 構文で libc
+関数を 4 backend から直接呼べるようになった。Mere を「単独で動く実験
+言語」から「外と話せる実用言語」へ進化させる第一歩。
+
+- **Phase 32.6**: multi-arg curried extern (`extern fn setenv: str -> str
+  -> int -> int;`) を 3 backend で動かす。collect_extern helper で App
+  chain を walk して全 args を集める。getenv / setenv / system も
+  scripts/run_wasm.js に default JS impl 追加。`examples/ffi_demo.mere`
+  に 3-arg setenv example を追加、4 backend で diff = 0
+- **Phase 32.5**: §32.1-32.4 + §32.6 の test を 4 + 2 件追加 (1484 → 1486)
+  + `examples/ffi_demo.mere` 作成
+- **Phase 32.4**: Wasm codegen で `(import "env" <name> ...)` env host
+  import + `call $<name>`、scripts/run_wasm.js に getpid/getppid 等の
+  default JS impl 注入
+- **Phase 32.3**: LLVM codegen で `declare <ret> @<name>(<args>)` + call
+- **Phase 32.2**: C codegen で `extern <ret> <name>(<args>);` 宣言 +
+  direct call。unit 引数 → ()、unit return → (call, 0) で int 化
+- **Phase 32.1**: lexer (T_extern) + AST (Top_extern) + parser + typer
+  + pipeline + repl + bin + eval.ml の lookup_extern で 9 mock
+  (getpid / getppid / getenv / setenv / system / sleep / srand / rand
+  / unix_time)
+- **Phase 32.0**: `40_ffi_design.md` paper trial — 構文 / 型 / ABI /
+  per-backend 戦略を確定。MVP 型範囲は int / bool / str / unit のみ、
+  float / tuple / record / variant / callback は defer
+
 ## 2026-06-22
 
 Phase 29-31 を深夜跨ぎで 11 slice。**4 backend で 16 examples PERFECT** を

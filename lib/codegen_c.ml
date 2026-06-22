@@ -954,26 +954,36 @@ let rec emit_expr (e : Ast.expr) : string =
         "({ %s* __env = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s (%s){.env = __env, .fn = %s}; })"
         env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
-    (match f.node with
-     | Ast.Var name when Hashtbl.mem extern_fn_decls name ->
-       (* Phase 32.2 (C1 FFI): direct C function call。
-          unit 引数は () に変換、他は emit_expr で展開。 *)
-       let arg_c =
-         match arg.Ast.node with
-         | Ast.Unit_lit -> ""
-         | _ -> emit_expr arg
+    (* Phase 32.6 (C1 FFI multi-arg): curried App chain の head が extern fn
+       なら、全引数を collect して direct C call に変換。1-arg は collect [a]
+       で、N-arg は collect [a1; ...; aN] で同じ path を通る。 *)
+    let rec collect_extern e acc =
+      match e.Ast.node with
+      | Ast.App (f', a) -> collect_extern f' (a :: acc)
+      | Ast.Var name when Hashtbl.mem extern_fn_decls name -> Some (name, acc)
+      | _ -> None
+    in
+    (match collect_extern (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) [] with
+     | Some (name, args) ->
+       let arg_strs =
+         List.filter_map (fun a ->
+           match a.Ast.node with
+           | Ast.Unit_lit -> None
+           | _ -> Some (emit_expr a))
+           args
        in
-       let ret_ty =
-         match Hashtbl.find extern_fn_decls name with
-         | Ast.TyArrow (_, r) -> Ast.walk r
-         | _ -> Ast.TyInt
+       let call_str = Printf.sprintf "%s(%s)" name (String.concat ", " arg_strs) in
+       let rec result_ty t =
+         match Ast.walk t with
+         | Ast.TyArrow (_, r) -> result_ty r
+         | t -> t
        in
-       (* unit return: emit `(<name>(arg), 0)` so 式の値が int 0 になる *)
+       let ret_ty = result_ty (Hashtbl.find extern_fn_decls name) in
        (match ret_ty with
-        | Ast.TyUnit ->
-          Printf.sprintf "(%s(%s), 0)" name arg_c
-        | _ ->
-          Printf.sprintf "%s(%s)" name arg_c)
+        | Ast.TyUnit -> Printf.sprintf "(%s, 0)" call_str
+        | _ -> call_str)
+     | None ->
+    (match f.node with
      | Ast.Var "print" ->
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
      | Ast.Var "str_len" ->
@@ -1521,7 +1531,7 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Closure dispatch via the closure value's fn pointer + env. *)
        Printf.sprintf
          "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
-         (emit_expr f) (emit_expr arg))
+         (emit_expr f) (emit_expr arg)))
   | Ast.Constr (name, arg_opt) ->
     let info =
       try Hashtbl.find Typer.constructors name

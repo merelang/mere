@@ -88,6 +88,8 @@ backend いずれかへ codegen。
 | [regex_lite.mere](regex_lite.mere) ⭐ | minimal regex matcher (`. ^ $ * + ?` + concat + backtracking)、C5 |
 | **Phase 29 (2026-06-22) 追加 — 大型 dogfood** | |
 | [toy_sql.mere](toy_sql.mere) ⭐ | **1165 LoC toy SQL engine** (tokenizer + AST + parser + Catalog Map + Storage OwnedVec + INSERT / SELECT / WHERE / JOIN + 59 self-tests)。N1/N2/N3 dogfood で 4 件の codegen bug を発掘 + Phase 30 で fix |
+| **Phase 32 (2026-06-22) 追加 — FFI** | |
+| [ffi_demo.mere](ffi_demo.mere) ⭐ | `extern fn <name>: <ty>;` で libc 関数 (getpid / getppid / setenv / getenv) を 4 backend から直接呼ぶ demo。multi-arg curried も対応 |
 
 ### Q-010 collection 基本
 

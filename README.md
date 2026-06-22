@@ -25,6 +25,7 @@ feature-parity で動く段階。
 - inner-fn lifting: `let rec inner = fn ... -> ...` を top-level に持ち上げ + 自由変数を prepend (Phase 25.3 / 26.3)
 - top-level 値 binding: `let total = mk_metrics();` のような非-fn let を fn body から参照可 (Phase 30.2 で 3 backend に global 化)
 - Wasm runtime: `scripts/run_wasm.js` (Node.js host harness, puts / read_file / write_file) で runtime 実行検証 (Phase 27.2)
+- FFI: `extern fn <name>: <ty>;` で libc 関数を 4 backend から直接呼出 (Phase 32、curried multi-arg 対応、int/bool/str/unit 型のみ MVP)
 - 言語 surface: `module M { ... }` (入れ子可) + `M.f` qualified access、`import "./path";` (importer-relative + canonical) によるファイル分割、`open M;`
 - REPL: multi-line 入力、`:env` / `:show` / `:load` / `:reset`、Rust 風 code frame でエラー表示
 - 設計コンテキストは別リポ `internal design notes` (private)
@@ -51,6 +52,7 @@ feature-parity で動く段階。
 | collection | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + 高階 API (iter/map/fold/filter/to_list/to_owned) — **insertion-order な Map iter** (Phase 27.1) |
 | stdlib | 90+ 種の builtin: I/O / 変換 / 文字列 (`str_split` / `str_join` / `str_compare` / `str_index_of` 等) / 数値 / 多相 helper / float / error / Logger・Metrics |
 | codegen | C / LLVM IR / Wasm (WAT) の 3 backend が parity で動く + Wasm runtime 実行検証 (詳細は [codegen.md](docs/codegen.md))。Q-010 collection 4 種 + 高階 API + 変換 + `len` ad-hoc poly + 多相 user let-rec の per-instantiation 特殊化 (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level 値 binding を file-scope global 化 (Phase 30.2) |
+| FFI | `extern fn <name>: <ty>;` で libc 関数を 4 backend (interp + C/LLVM/Wasm) から呼出。curried multi-arg、int / bool / str / unit 型 (Phase 32) |
 | REPL | 永続 env、multi-line 入力、`:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | エラー UX | Rust 風 multi-line code frame、ANSI 色 (TTY 時)、Levenshtein による typo 提案 (record field / qualified name 含む)、型変換 hint |
 

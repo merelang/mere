@@ -20,6 +20,8 @@
 
 extern fn getpid:  unit -> int;
 extern fn getppid: unit -> int;
+extern fn setenv:  str -> str -> int -> int;
+extern fn getenv:  str -> str;
 
 let _ = print "=== FFI demo (Phase 32) ===";
 
@@ -29,11 +31,16 @@ let _ = print ("pid > 0: " ++ show (getpid () > 0));
 // parent process id — 同じく正の int
 let _ = print ("ppid > 0: " ++ show (getppid () > 0));
 
-// pid と ppid は通常異なる (中には同じケースもあるが大抵 ppid < pid 等)
+// pid と ppid は通常異なる
 let _ =
   let pid = getpid () in
   let ppid = getppid () in
   print ("pid != ppid: " ++ show (pid != ppid));
+
+// Phase 32.6: multi-arg (3-arg) curried extern を試す
+let _ = print "--- multi-arg (setenv 3 args) ---";
+let _ = print ("setenv result: " ++ show (setenv "MERE_FFI_DEMO" "hello" 1));
+let _ = print ("getenv result: " ++ getenv "MERE_FFI_DEMO");
 
 let _ = print "=== done ===";
 0

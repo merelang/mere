@@ -6410,6 +6410,30 @@ let () =
      in
      if has "declare i32 @getpid()" && has "call i32 @getpid(" then "ok" else "no")
     "ok";
+  check "§32.6: multi-arg curried extern interp (setenv + getenv roundtrip)"
+    (Pipeline.process
+       "extern fn setenv: str -> str -> int -> int;\n\
+        extern fn getenv: str -> str;\n\
+        let _ = setenv \"MERE_TEST_X\" \"abc\" 1 in\n\
+        getenv \"MERE_TEST_X\"")
+    "\"abc\"";
+  check "§32.6: C codegen multi-arg extern decl + call"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "extern fn setenv: str -> str -> int -> int;\n\
+        setenv \"K\" \"V\" 1") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "extern int setenv(const char*, const char*, int);"
+        && has "setenv(\"K\", \"V\", 1)" then "ok" else "no")
+    "ok";
+
   check "§32.4: Wasm codegen emits (import) + call"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "extern fn getpid: unit -> int;\n\

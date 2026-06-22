@@ -1481,6 +1481,21 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
       match v with
       | V_unit -> V_int (Unix.getppid ())
       | _ -> failwith "getppid: expected unit")
+  | "setenv" ->
+    (* setenv: str -> str -> int -> int — curried 3-arg *)
+    V_builtin ("setenv", fun a ->
+      match a with
+      | V_str name ->
+        V_builtin ("setenv1", fun b ->
+          match b with
+          | V_str value ->
+            V_builtin ("setenv2", fun c ->
+              match c with
+              | V_int _overwrite ->
+                Unix.putenv name value; V_int 0
+              | _ -> failwith "setenv: 3rd arg expected int")
+          | _ -> failwith "setenv: 2nd arg expected str")
+      | _ -> failwith "setenv: 1st arg expected str")
   | _ ->
     (* Phase 32.1: unknown extern は lookup ではなく call で fail に
        (program 解析だけ通したい場合 / codegen で実行する場合に妨げない)。 *)

@@ -2212,29 +2212,47 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
                   r tag (llvm_ty_of arg_ty) av);
     r
-  | Ast.App ({ node = Ast.Var name; _ }, arg)
-    when Hashtbl.mem extern_fn_decls_llvm name ->
-    (* Phase 32.3 (C1 FFI): direct call to declared C function. *)
-    let ret_ty =
-      match Hashtbl.find extern_fn_decls_llvm name with
-      | Ast.TyArrow (_, r) -> Ast.walk r
-      | _ -> Ast.TyInt
+  | Ast.App _ as outer_app when
+    (let rec head_is_extern e =
+       match e.Ast.node with
+       | Ast.App (f, _) -> head_is_extern f
+       | Ast.Var name -> Hashtbl.mem extern_fn_decls_llvm name
+       | _ -> false
+     in head_is_extern { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc }) ->
+    (* Phase 32.6 (C1 FFI multi-arg LLVM): curried App chain を collect、
+       direct LLVM call instruction を 1 つ emit。 *)
+    let rec collect e acc =
+      match e.Ast.node with
+      | Ast.App (f, a) -> collect f (a :: acc)
+      | Ast.Var name -> name, acc
+      | _ -> failwith "unreachable"
     in
-    let arg_ll =
-      match arg.Ast.node with
-      | Ast.Unit_lit -> ""
-      | _ ->
-        let arg_v = emit_expr env arg in
-        let arg_ty =
-          match arg.Ast.ty with
-          | Some t -> Ast.walk t | None -> Ast.TyInt
-        in
-        Printf.sprintf "%s %s" (llvm_ty_of arg_ty) arg_v
+    let name, args =
+      collect { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc } []
     in
+    let rec result_ty t =
+      match Ast.walk t with
+      | Ast.TyArrow (_, r) -> result_ty r
+      | t -> t
+    in
+    let ret_ty = result_ty (Hashtbl.find extern_fn_decls_llvm name) in
+    let arg_ll_list =
+      List.filter_map (fun a ->
+        match a.Ast.node with
+        | Ast.Unit_lit -> None
+        | _ ->
+          let v = emit_expr env a in
+          let t =
+            match a.Ast.ty with
+            | Some t -> Ast.walk t | None -> Ast.TyInt
+          in
+          Some (Printf.sprintf "%s %s" (llvm_ty_of t) v))
+        args
+    in
+    let arg_ll = String.concat ", " arg_ll_list in
     (match ret_ty with
      | Ast.TyUnit ->
        emit_instr (Printf.sprintf "  call void @%s(%s)" name arg_ll);
-       (* Mere の unit は i32 0 として扱う (内部整合性のため) *)
        "0"
      | _ ->
        let r = fresh_reg () in

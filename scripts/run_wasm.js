@@ -65,6 +65,30 @@ const wasmPath = process.argv[2];
     srand: (_seed) => {},  // JS Math.random can't be seeded; no-op
     sleep: (_n) => 0,       // skip blocking sleep in JS context
     abs_int: (n) => Math.abs(n | 0),
+    getenv: (namePtr) => {
+      const name = readCStr(namePtr);
+      const v = process.env[name];
+      if (v === undefined) return 0;  // NULL — Mere expects str, segfault risk
+      const bytes = Buffer.from(v + "\0", "utf8");
+      const ptr = bumpAlloc(bytes.length);
+      new Uint8Array(memory.buffer).set(bytes, ptr);
+      return ptr;
+    },
+    setenv: (namePtr, valuePtr, _overwrite) => {
+      const name = readCStr(namePtr);
+      const value = readCStr(valuePtr);
+      process.env[name] = value;
+      return 0;
+    },
+    system: (cmdPtr) => {
+      const cmd = readCStr(cmdPtr);
+      try {
+        require("child_process").execSync(cmd, { stdio: "inherit" });
+        return 0;
+      } catch (e) {
+        return e.status || 1;
+      }
+    },
   };
 
   // Allocate bytes by bumping the `__lang_bump` mutable global.
