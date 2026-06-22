@@ -1177,6 +1177,19 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "ord" ->
        (* Phase 36: ord s — single-byte str → int *)
        Printf.sprintf "((int)(unsigned char)((%s)[0]))" (emit_expr arg)
+     | Ast.Var "to_upper" ->
+       Printf.sprintf "__lang_to_upper(%s)" (emit_expr arg)
+     | Ast.Var "to_lower" ->
+       Printf.sprintf "__lang_to_lower(%s)" (emit_expr arg)
+     | Ast.Var "even" ->
+       Printf.sprintf "(((%s) %% 2) == 0)" (emit_expr arg)
+     | Ast.Var "odd" ->
+       Printf.sprintf "(((%s) %% 2) != 0)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "gcd"; _ }, a_e) ->
+       Printf.sprintf "__lang_gcd(%s, %s)" (emit_expr a_e) (emit_expr arg)
+     | Ast.Var "bool_of_str" ->
+       (* Phase 36: bool_of_str s — "true" → true, others → false (matches interp) *)
+       Printf.sprintf "(strcmp(%s, \"true\") == 0)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file"; _ }, path_e) ->
        (* Phase 24.4: write_file path content — curried. *)
        Printf.sprintf "__lang_write_file(%s, %s)"
@@ -2881,6 +2894,36 @@ let str_concat_helper =
       "static const char* __lang_char_at_chr(int n) {";
       "  __lang_char_table_setup();";
       "  return __lang_char_table[(unsigned char)n];";
+      "}";
+      "";
+      (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
+      "static const char* __lang_to_upper(const char* s) {";
+      "  size_t sl = strlen(s);";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, sl + 1);";
+      "  for (size_t i = 0; i < sl; i++) {";
+      "    char c = s[i];";
+      "    buf[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;";
+      "  }";
+      "  buf[sl] = '\\0';";
+      "  return buf;";
+      "}";
+      "static const char* __lang_to_lower(const char* s) {";
+      "  size_t sl = strlen(s);";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, sl + 1);";
+      "  for (size_t i = 0; i < sl; i++) {";
+      "    char c = s[i];";
+      "    buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;";
+      "  }";
+      "  buf[sl] = '\\0';";
+      "  return buf;";
+      "}";
+      "";
+      (* Phase 36: gcd via Euclid (abs(a), abs(b)) *)
+      "static int __lang_gcd(int a, int b) {";
+      "  if (a < 0) a = -a;";
+      "  if (b < 0) b = -b;";
+      "  while (b != 0) { int t = b; b = a % b; a = t; }";
+      "  return a;";
       "}";
       "";
       (* Phase 36: str_replace — return s with all non-overlapping occurrences

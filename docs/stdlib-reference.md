@@ -116,8 +116,9 @@ str_index_of "hello" "xyz"                     // -1
 str_split / str_join、Phase 26.5 で Wasm 全 str ops、Phase 31.0 で
 str_compare、Phase 36 で str_trim / starts_with / ends_with / contains /
 replace / repeat / rev を追加)。`not` / `abs` / `min` / `max` / `clamp` /
-`chr` / `ord` も Phase 36 で 3 backend に揃った。`fn (_: unit) -> body`
-の wildcard parameter も Phase 36 で parser fix。
+`chr` / `ord` / `to_upper` / `to_lower` / `even` / `odd` / `gcd` /
+`bool_of_str` も Phase 36 で 3 backend に揃った。
+`fn (_: unit) -> body` の wildcard parameter も Phase 36 で parser fix。
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"

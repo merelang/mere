@@ -2638,6 +2638,45 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = load i8, ptr %s" bv sv);
     emit_instr (Printf.sprintf "  %s = zext i8 %s to i32" r bv);
     r
+  | Ast.App ({ node = Ast.Var "to_upper"; _ }, s_e) ->
+    let sv = emit_expr env s_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_to_upper(ptr %s)" r sv);
+    r
+  | Ast.App ({ node = Ast.Var "to_lower"; _ }, s_e) ->
+    let sv = emit_expr env s_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_to_lower(ptr %s)" r sv);
+    r
+  | Ast.App ({ node = Ast.Var "even"; _ }, n_e) ->
+    let nv = emit_expr env n_e in
+    let rem = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = srem i32 %s, 2" rem nv);
+    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r rem);
+    r
+  | Ast.App ({ node = Ast.Var "odd"; _ }, n_e) ->
+    let nv = emit_expr env n_e in
+    let rem = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = srem i32 %s, 2" rem nv);
+    emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" r rem);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "gcd"; _ }, a_e); _ }, b_e) ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_gcd(i32 %s, i32 %s)" r av bv);
+    r
+  | Ast.App ({ node = Ast.Var "bool_of_str"; _ }, s_e) ->
+    (* Phase 36: bool_of_str — strcmp s "true". 専用 const を使い回す *)
+    let true_label = fresh_str_global "true" in
+    let sv = emit_expr env s_e in
+    let pr = fresh_reg () in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" pr sv true_label);
+    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r pr);
+    r
   | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
     (* Phase 25.9: read_file path — returns str (region-allocated buffer). *)
     file_io_used_llvm := true;
@@ -5943,6 +5982,84 @@ let str_concat_helper =
       "  %n64 = sext i32 %n to i64";
       "  %p = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %n64";
       "  ret ptr %p";
+      "}";
+      "";
+      (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
+      "define ptr @__lang_to_upper(ptr %s) {";
+      "entry:";
+      "  %sl  = call i64 @strlen(ptr %s)";
+      "  %cap = add i64 %sl, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [ 0, %entry ], [ %inext, %body ]";
+      "  %done = icmp uge i64 %i, %sl";
+      "  br i1 %done, label %finish, label %body";
+      "body:";
+      "  %sp = getelementptr i8, ptr %s, i64 %i";
+      "  %c  = load i8, ptr %sp";
+      "  %ge = icmp uge i8 %c, 97";
+      "  %le = icmp ule i8 %c, 122";
+      "  %lo = and i1 %ge, %le";
+      "  %cm = sub i8 %c, 32";
+      "  %nc = select i1 %lo, i8 %cm, i8 %c";
+      "  %dp = getelementptr i8, ptr %buf, i64 %i";
+      "  store i8 %nc, ptr %dp";
+      "  %inext = add i64 %i, 1";
+      "  br label %loop";
+      "finish:";
+      "  %tp = getelementptr i8, ptr %buf, i64 %sl";
+      "  store i8 0, ptr %tp";
+      "  ret ptr %buf";
+      "}";
+      "define ptr @__lang_to_lower(ptr %s) {";
+      "entry:";
+      "  %sl  = call i64 @strlen(ptr %s)";
+      "  %cap = add i64 %sl, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [ 0, %entry ], [ %inext, %body ]";
+      "  %done = icmp uge i64 %i, %sl";
+      "  br i1 %done, label %finish, label %body";
+      "body:";
+      "  %sp = getelementptr i8, ptr %s, i64 %i";
+      "  %c  = load i8, ptr %sp";
+      "  %ge = icmp uge i8 %c, 65";
+      "  %le = icmp ule i8 %c, 90";
+      "  %up = and i1 %ge, %le";
+      "  %cm = add i8 %c, 32";
+      "  %nc = select i1 %up, i8 %cm, i8 %c";
+      "  %dp = getelementptr i8, ptr %buf, i64 %i";
+      "  store i8 %nc, ptr %dp";
+      "  %inext = add i64 %i, 1";
+      "  br label %loop";
+      "finish:";
+      "  %tp = getelementptr i8, ptr %buf, i64 %sl";
+      "  store i8 0, ptr %tp";
+      "  ret ptr %buf";
+      "}";
+      "";
+      (* Phase 36: gcd via iterative Euclid on |a|, |b|. *)
+      "define i32 @__lang_gcd(i32 %a0, i32 %b0) {";
+      "entry:";
+      "  %aneg = icmp slt i32 %a0, 0";
+      "  %na   = sub i32 0, %a0";
+      "  %a1   = select i1 %aneg, i32 %na, i32 %a0";
+      "  %bneg = icmp slt i32 %b0, 0";
+      "  %nb   = sub i32 0, %b0";
+      "  %b1   = select i1 %bneg, i32 %nb, i32 %b0";
+      "  br label %loop";
+      "loop:";
+      "  %a = phi i32 [ %a1, %entry ], [ %b, %step ]";
+      "  %b = phi i32 [ %b1, %entry ], [ %r, %step ]";
+      "  %zz = icmp eq i32 %b, 0";
+      "  br i1 %zz, label %done, label %step";
+      "step:";
+      "  %r = srem i32 %a, %b";
+      "  br label %loop";
+      "done:";
+      "  ret i32 %a";
       "}";
       "";
       (* Phase 36: str_replace — replace all non-overlapping occurrences of

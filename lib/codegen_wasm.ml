@@ -1320,6 +1320,30 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "ord"; _ }, arg) ->
     emit_expr arg;
     emit_instr "i32.load8_u"
+  | Ast.App ({ node = Ast.Var "to_upper"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_to_upper"
+  | Ast.App ({ node = Ast.Var "to_lower"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_to_lower"
+  | Ast.App ({ node = Ast.Var "even"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "i32.const 2";
+    emit_instr "i32.rem_s";
+    emit_instr "i32.eqz"
+  | Ast.App ({ node = Ast.Var "odd"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "i32.const 2";
+    emit_instr "i32.rem_s";
+    emit_instr "i32.const 0";
+    emit_instr "i32.ne"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "gcd"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e;
+    emit_expr b_e;
+    emit_instr "call $__lang_gcd"
+  | Ast.App ({ node = Ast.Var "bool_of_str"; _ }, arg) ->
+    emit_expr arg;
+    emit_instr "call $__lang_bool_of_str"
   (* Phase 26.1: fail / char / substring / int_of_str / str_of_int /
      str_unescape — LLVM Phase 25.1 / 25.4 の Wasm 版。 *)
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
@@ -2908,6 +2932,70 @@ let runtime_helpers = {|
     (if (i32.gt_s (local.get $x) (local.get $hi))
       (then (return (local.get $hi))))
     (local.get $x))
+  ;; Phase 36: to_upper / to_lower — ASCII case conversion
+  (func $__lang_to_upper (param $s i32) (result i32)
+    (local $sl i32) (local $r i32) (local $i i32) (local $c i32)
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $sl)))
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (if (i32.and (i32.ge_u (local.get $c) (i32.const 97))
+                     (i32.le_u (local.get $c) (i32.const 122)))
+          (then (local.set $c (i32.sub (local.get $c) (i32.const 32)))))
+        (i32.store8 (i32.add (local.get $r) (local.get $i)) (local.get $c))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (local.get $r))
+  (func $__lang_to_lower (param $s i32) (result i32)
+    (local $sl i32) (local $r i32) (local $i i32) (local $c i32)
+    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $sl)))
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (if (i32.and (i32.ge_u (local.get $c) (i32.const 65))
+                     (i32.le_u (local.get $c) (i32.const 90)))
+          (then (local.set $c (i32.add (local.get $c) (i32.const 32)))))
+        (i32.store8 (i32.add (local.get $r) (local.get $i)) (local.get $c))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (local.get $r))
+  ;; Phase 36: gcd via iterative Euclid on |a|, |b|
+  (func $__lang_gcd (param $a0 i32) (param $b0 i32) (result i32)
+    (local $a i32) (local $b i32) (local $t i32)
+    (local.set $a (local.get $a0))
+    (local.set $b (local.get $b0))
+    (if (i32.lt_s (local.get $a) (i32.const 0))
+      (then (local.set $a (i32.sub (i32.const 0) (local.get $a)))))
+    (if (i32.lt_s (local.get $b) (i32.const 0))
+      (then (local.set $b (i32.sub (i32.const 0) (local.get $b)))))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eqz (local.get $b)))
+        (local.set $t (local.get $b))
+        (local.set $b (i32.rem_s (local.get $a) (local.get $b)))
+        (local.set $a (local.get $t))
+        (br $lp)))
+    (local.get $a))
+  ;; Phase 36: bool_of_str — "true" → 1, それ以外 → 0
+  (func $__lang_bool_of_str (param $s i32) (result i32)
+    (if (i32.ne (i32.load8_u (local.get $s)) (i32.const 116)) (then (return (i32.const 0))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.const 114)) (then (return (i32.const 0))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 2))) (i32.const 117)) (then (return (i32.const 0))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 3))) (i32.const 101)) (then (return (i32.const 0))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 4))) (i32.const 0)) (then (return (i32.const 0))))
+    (i32.const 1))
   ;; Phase 36: str_replace s old new — replace all non-overlapping occurrences
   (func $__lang_str_replace (param $s i32) (param $old i32) (param $new i32) (result i32)
     (local $slen i32) (local $olen i32) (local $nlen i32)
