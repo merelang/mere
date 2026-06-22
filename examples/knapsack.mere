@@ -1,0 +1,80 @@
+// knapsack: 0/1 ナップサック問題を再帰 + memoize で解く (Phase 36)
+//
+// 目的: 古典 DP 問題。Map[str, int] で memo を作って (i, w) → max_value を
+//   キャッシュ。アイテム数 5 個、容量 10 で最適解を求める。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// item = (weight, value)
+let weights = [3, 4, 7, 8, 9];
+let values  = [4, 5, 10, 11, 13];
+
+let rec nth = fn (xs: int list) -> fn (i: int) ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> if i == 0 then h else nth t (i - 1);
+
+let memo = map_new ();
+
+let memo_key = fn (i: int) -> fn (w: int) ->
+  show i ++ "," ++ show w;
+
+let rec solve = fn (i: int) -> fn (w: int) ->
+  if i < 0 then 0
+  else if w <= 0 then 0
+  else
+    let k = memo_key i w in
+    if map_has memo k then map_get memo k
+    else
+      let wi = nth weights i in
+      let vi = nth values i in
+      let without_it = solve (i - 1) w in
+      let with_it =
+        if wi > w then 0
+        else vi + solve (i - 1) (w - wi) in
+      let best = if with_it > without_it then with_it else without_it in
+      let _ = map_set memo k best in
+      best;
+
+// 何を選んだか復元
+let rec reconstruct = fn (i: int) -> fn (w: int) -> fn (acc: int list) ->
+  if i < 0 then acc
+  else
+    let total = solve i w in
+    let prev = solve (i - 1) w in
+    if total == prev then reconstruct (i - 1) w acc
+    else
+      let wi = nth weights i in
+      reconstruct (i - 1) (w - wi) (Cons (i, acc));
+
+let format_choice = fn (xs: int list) ->
+  let b = strbuf_new () in
+  let _ = strbuf_push b "[" in
+  let rec loop = fn (ys: int list) -> fn (first: bool) ->
+    match ys with
+    | Nil -> ()
+    | Cons (i, rest) ->
+      let _ = strbuf_push b (if first then "" else ", ") in
+      let _ = strbuf_push b ("item#" ++ show i
+                              ++ " (w=" ++ show (nth weights i)
+                              ++ ", v=" ++ show (nth values i) ++ ")") in
+      loop rest false in
+  let _ = loop xs true in
+  let _ = strbuf_push b "]" in
+  strbuf_to_str b;
+
+let n = list_len weights;
+
+let run = fn (cap: int) ->
+  let best = solve (n - 1) cap in
+  let chosen = reconstruct (n - 1) cap Nil in
+  let _ = print ("cap=" ++ show cap ++ " best=" ++ show best) in
+  print ("  chosen: " ++ format_choice chosen);
+
+let _ = print "=== knapsack (Phase 36) ===";
+let _ = run 5;
+let _ = run 10;
+let _ = run 15;
+let _ = run 20;
+
+0

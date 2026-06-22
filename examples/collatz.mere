@@ -1,0 +1,51 @@
+// collatz: コラッツ予想の数列を生成 (Phase 36)
+//
+// 目的: 単純な再帰 + 偶奇判定の demo。各 n から 1 までの軌跡を返す。
+//   even n → n/2、odd n → 3n+1。step 数も計測。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 1 ステップ進める
+let next_collatz = fn (n: int) ->
+  if even n then n / 2
+  else 3 * n + 1;
+
+// 1 に到達するまでの step 数
+let rec steps = fn (n: int) -> fn (count: int) ->
+  if n <= 1 then count
+  else steps (next_collatz n) (count + 1);
+
+// 軌跡を StrBuf に書き出す
+let trace = fn (start: int) ->
+  let b = strbuf_new () in
+  let rec loop = fn (n: int) -> fn (first: bool) ->
+    let _ = strbuf_push b (if first then "" else " -> ") in
+    let _ = strbuf_push b (show n) in
+    if n <= 1 then ()
+    else loop (next_collatz n) false in
+  let _ = loop start true in
+  strbuf_to_str b;
+
+let report = fn (n: int) ->
+  let s = steps n 0 in
+  print (show n ++ ": " ++ show s ++ " steps -- " ++ trace n);
+
+let _ = print "=== collatz (Phase 36) ===";
+let _ = report 1;        // already at 1
+let _ = report 2;
+let _ = report 7;        // 7 -> 22 -> 11 -> ... -> 1
+let _ = report 27;       // famous long trajectory
+let _ = report 100;
+
+// 1..20 の中で最も step 数が多い n を探す
+let _ = print "--- max steps in 1..20 ---";
+let rec find_max = fn (i: int) -> fn (best_n: int) -> fn (best_s: int) ->
+  if i > 20 then (best_n, best_s)
+  else
+    let s = steps i 0 in
+    if s > best_s then find_max (i + 1) i s
+    else find_max (i + 1) best_n best_s;
+let result = find_max 1 1 0;
+let _ = print ("best: n=" ++ show (fst result) ++ " steps=" ++ show (snd result));
+
+0

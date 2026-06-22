@@ -1,0 +1,78 @@
+// bin_tree_traversal: 二分木の 3 種類の走査 (Phase 36)
+//
+// 目的: 再帰 variant `BTree` + recursive descent で pre/in/post-order
+//   走査を実装。木の構築と print を分離して再利用。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+type btree = BLeaf | BNode of (int * btree * btree);
+
+let leaf = BLeaf;
+let node = fn (v: int) -> fn (l: btree) -> fn (r: btree) ->
+  BNode (v, l, r);
+
+// (5)
+//       (3)         (8)
+//    (1) (4)     (7)  (9)
+let sample =
+  node 5
+    (node 3 (node 1 leaf leaf) (node 4 leaf leaf))
+    (node 8 (node 7 leaf leaf) (node 9 leaf leaf));
+
+let rec preorder = fn (t: btree) -> fn b ->
+  match t with
+  | BLeaf -> ()
+  | BNode (v, l, r) ->
+    let _ = strbuf_push b (show v) in
+    let _ = strbuf_push b " " in
+    let _ = preorder l b in
+    preorder r b;
+
+let rec inorder = fn (t: btree) -> fn b ->
+  match t with
+  | BLeaf -> ()
+  | BNode (v, l, r) ->
+    let _ = inorder l b in
+    let _ = strbuf_push b (show v) in
+    let _ = strbuf_push b " " in
+    inorder r b;
+
+let rec postorder = fn (t: btree) -> fn b ->
+  match t with
+  | BLeaf -> ()
+  | BNode (v, l, r) ->
+    let _ = postorder l b in
+    let _ = postorder r b in
+    let _ = strbuf_push b (show v) in
+    let _ = strbuf_push b " " in
+    ();
+
+let render = fn (label: str) -> fn walker ->
+  let b = strbuf_new () in
+  let _ = walker sample b in
+  print (label ++ ": " ++ str_trim (strbuf_to_str b));
+
+let _ = print "=== bin_tree_traversal (Phase 36) ===";
+let _ = render "pre-order " preorder;
+let _ = render "in-order  " inorder;
+let _ = render "post-order" postorder;
+
+// 木の高さ (再帰関数の基本例)
+let rec height = fn (t: btree) ->
+  match t with
+  | BLeaf -> 0
+  | BNode (_, l, r) ->
+    let hl = height l in
+    let hr = height r in
+    1 + (if hl > hr then hl else hr);
+
+// ノード数
+let rec count = fn (t: btree) ->
+  match t with
+  | BLeaf -> 0
+  | BNode (_, l, r) -> 1 + count l + count r;
+
+let _ = print ("height = " ++ show (height sample));
+let _ = print ("nodes  = " ++ show (count sample));
+
+0
