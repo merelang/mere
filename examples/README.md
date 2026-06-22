@@ -1,8 +1,11 @@
 # Mere examples
 
-Mere の動く `.mere` プログラム群。`dune exec ./bin/mere.exe -- examples/<file>.mere`
-で interpreter 実行、`-c` / `-ll` / `-w` flag で 3 backend のいずれかへ
-codegen。
+Mere の動く `.mere` プログラム群 (61 本)。`dune exec ./bin/mere.exe -- examples/<file>.mere`
+で interpreter 実行、`-c` / `-ll` / `-w` flag で C / LLVM IR / Wasm の 3
+backend いずれかへ codegen。
+
+**Phase 27 (2026-06-21) で 4 backend feature parity が完成**。16 examples が
+**interp + C + LLVM + Wasm runtime** で diff = 0 PERFECT 一致 (印は ⭐)。
 
 ## カテゴリ
 
@@ -14,7 +17,7 @@ codegen。
 | [factorial.mere](factorial.mere) | 階乗 (recursive fn) |
 | [fibonacci.mere](fibonacci.mere) | フィボナッチ |
 | [fizzbuzz.mere](fizzbuzz.mere) | FizzBuzz |
-| [mini_calc.mere](mini_calc.mere) | 簡易計算プログラム |
+| [mini_calc.mere](mini_calc.mere) ⭐ | 簡易計算プログラム |
 | [mutual_rec.mere](mutual_rec.mere) | `let rec f = ... and g = ...` の相互再帰 |
 | [higher_order.mere](higher_order.mere) | 高階関数 |
 | [pipe.mere](pipe.mere) | `|>` パイプ演算子 |
@@ -33,6 +36,7 @@ codegen。
 | [list_literal.mere](list_literal.mere) | `[1, 2, 3]` 構文糖 |
 | [poly_list.mere](poly_list.mere) | 多相 `'a list` |
 | [tree.mere](tree.mere) | 二分木 (再帰 variant) |
+| [state_machine.mere](state_machine.mere) ⭐ | variant + match transition (信号機 + 歩行者ボタン)、Phase 28.0 C1 |
 
 ### メモリモデル (region / Drop / 借用)
 
@@ -49,6 +53,7 @@ codegen。
 | [effects.mere](effects.mere) | capability passing パターン |
 | [signature.mere](signature.mere) | signature alias で cap bundle |
 | [with_caps.mere](with_caps.mere) | `with c = ... in body` で Drop cap |
+| [cap_handler.mere](cap_handler.mere) ⭐ | `&shared write` で複数 handler が同じ Logger / Metrics を共有書き込み |
 
 ### モジュール / import
 
@@ -56,30 +61,35 @@ codegen。
 |---|---|
 | [module_basic.mere](module_basic.mere) | `module M { ... }` + `M.f` 参照 |
 | [module_nested.mere](module_nested.mere) | 入れ子 module + `open M;` |
+| [module_scoping.mere](module_scoping.mere) | 2 module で同名 ctor を qualified 形式で disambiguate (Phase 18) |
 | [import_demo.mere](import_demo.mere) | `import "./lib_list_ops.mere";` (要 `lib_list_ops.mere`) |
 | [lib_list_ops.mere](lib_list_ops.mere) | import 用のライブラリ |
 
-### 実用プログラム
+### 実用プログラム (16 examples が 4 backend で PERFECT 一致 ⭐)
 
 | ファイル | 内容 |
 |---|---|
-| [json_parser.mere](json_parser.mere) | JSON パーサ (140 行) のセルフテスト |
-| [csv_parser.mere](csv_parser.mere) | CSV パーサ |
-| [word_count.mere](word_count.mere) | 単語カウント |
-| [pipeline.mere](pipeline.mere) | region / view / cap / with を組合せた realistic な処理 |
-| [arith_eval.mere](arith_eval.mere) | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価。**Phase 23 完成後 C codegen と interp が完全一致** (Phase 24.0 検証)。Phase 20.2 / examples roadmap C3 |
-| [s_expression.mere](s_expression.mere) | S 式 (Lisp 風) parser + printer + 簡易 eval (`+ - * / = <`, `if`, `let`)。**interpreter only** (同上)。Phase 20.3 / examples roadmap I4 |
-| [template_engine.mere](template_engine.mere) | mustache 風 `{{KEY}}` 置換 engine。Map[R, str, str] + StrBuf[R] + str_index_of の組合せ demo。未定義 key は soft fail で literal を残す。**interpreter only** (DEFERRED §1.7)。Phase 20.4 / examples roadmap B1 |
-| [mini_shell.mere](mini_shell.mere) | 簡易 shell の batch evaluator。variant command + str_split parse + dispatch + state (env Map + history Vec + exit flag)。echo / set / get / list / add / history / help / exit を実装。**interpreter only** (DEFERRED §1.7)。Phase 20.5 / examples roadmap G1 |
-| [todo_app.mere](todo_app.mere) | TODO リスト管理 (OwnedVec[Task] + Logger + vec_map / fold)。Phase 16 第 1 スライスでの試作、Phase 16-17 fix で **4 backend 完全対応** |
-| [word_freq.mere](word_freq.mere) | 単語頻度カウンタ (Map[R, str, int] + str_split + map_iter)。**interpreter only** (多相 let-rec の codegen 未対応)。Phase 19.1+19.2 後の摩擦炙り出し |
-| [safe_div.mere](safe_div.mere) | `(int, str) result` を使った失敗を値で返すパターン。**interpreter only**。Phase 19.5 prelude の Result demo |
-| [module_scoping.mere](module_scoping.mere) | 2 module で同名 ctor を qualified 形式で disambiguate + nested `open A.B;`。**interpreter only** (codegen が M-prefix pattern 未対応)。Phase 18 demo |
-| [json_writer.mere](json_writer.mere) | StrBuf[R] + recursive variant (json ADT) で compact / pretty-print。**interpreter only** (多相 user 定義 let-rec の codegen 未対応、§1.7)。Phase 19.3 (StrBuf) demo |
-| [cap_handler.mere](cap_handler.mere) | `&shared write` で複数 handler が同じ Logger / Metrics を共有書き込みする app 風 demo。**4 backend 対応** (Phase 19.x で borrow 越し Field_get を C/LLVM/Wasm に対応)。Phase 17 / borrow_modes 延長 |
-| [inventory.mere](inventory.mere) | 在庫管理 (Map[R, str, int] + Vec[R, Tx] + tx_kind variant)。Phase 19.2 (map_iter) / 19.3 (vec_sort) を実用 task に投入。Phase 20.1 で **4 backend 完全対応** (variant→record field の typedef 順序 fix) |
+| [arith_eval.mere](arith_eval.mere) ⭐ | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価 |
+| [json_parser.mere](json_parser.mere) ⭐ | JSON パーサ (140 行) のセルフテスト |
+| [s_expression.mere](s_expression.mere) ⭐ | S 式 (Lisp 風) parser + printer + 簡易 eval (`+ - * / = <`, `if`, `let`) |
+| [csv_parser.mere](csv_parser.mere) ⭐ | CSV パーサ |
+| [word_count.mere](word_count.mere) ⭐ | 単語カウント |
+| [template_engine.mere](template_engine.mere) ⭐ | mustache 風 `{{KEY}}` 置換 engine (Map + StrBuf + str_index_of) |
+| [json_writer.mere](json_writer.mere) ⭐ | StrBuf + 再帰 variant (json ADT) で compact / pretty-print |
+| [inventory.mere](inventory.mere) ⭐ | 在庫管理 (Map + Vec + variant) |
+| [word_freq.mere](word_freq.mere) ⭐ | 単語頻度カウンタ (Map + str_split + map_iter)、insertion order |
+| [mini_shell.mere](mini_shell.mere) ⭐ | 簡易 shell batch evaluator (variant command + state) |
+| [pipeline.mere](pipeline.mere) | region / view / cap / with を組合せた realistic な処理 (interp 主、3 backend 動作) |
+| [todo_app.mere](todo_app.mere) | TODO リスト管理 (OwnedVec + Logger + vec_map / fold)、4 backend 対応 |
+| [safe_div.mere](safe_div.mere) | `(int, str) result` を使った失敗を値で返すパターン |
+| **Phase 28 (2026-06-21) 追加** | |
+| [chained_parse.mere](chained_parse.mere) ⭐ | Result chain idiom (result_and_then / result_map / result_or_else)、D2 |
+| [ini_parser.mere](ini_parser.mere) ⭐ | INI parser、Phase 27.1 Map insertion order dogfood、I1 |
+| [regex_lite.mere](regex_lite.mere) ⭐ | minimal regex matcher (`. ^ $ * + ?` + concat + backtracking)、C5 |
+| **Phase 29 (2026-06-22) 追加 — 大型 dogfood** | |
+| [toy_sql.mere](toy_sql.mere) ⭐ | **1165 LoC toy SQL engine** (tokenizer + AST + parser + Catalog Map + Storage OwnedVec + INSERT / SELECT / WHERE / JOIN + 59 self-tests)。N1/N2/N3 dogfood で 4 件の codegen bug を発掘 + Phase 30 で fix |
 
-### Q-010 collection (Phase 12 — interpreter)
+### Q-010 collection 基本
 
 | ファイル | 内容 |
 |---|---|
@@ -89,7 +99,7 @@ codegen。
 | [strbuf_basics.mere](strbuf_basics.mere) | `StrBuf[R]` の基本 |
 | [map_basics.mere](map_basics.mere) | `Map[R, K, V]` の基本 |
 
-### Q-010 collection codegen (Phase 15 — 3 backend)
+### Q-010 collection codegen (3 backend)
 
 | ファイル | 内容 |
 |---|---|
@@ -107,22 +117,22 @@ codegen。
 
 ```sh
 # C source → native binary
-dune exec ./bin/mere.exe -- -c examples/vec_codegen_c.mere > /tmp/v.c
-clang /tmp/v.c -o /tmp/v && /tmp/v        # → 95
+dune exec ./bin/mere.exe -- -c examples/toy_sql.mere > /tmp/sql.c
+clang /tmp/sql.c -o /tmp/sql && /tmp/sql
 
 # LLVM IR → native binary
-dune exec ./bin/mere.exe -- -ll examples/owned_vec_codegen.mere > /tmp/v.ll
-clang /tmp/v.ll -o /tmp/v && /tmp/v       # → 67
+dune exec ./bin/mere.exe -- -ll examples/toy_sql.mere > /tmp/sql.ll
+clang /tmp/sql.ll -o /tmp/sql && /tmp/sql
 
-# Wasm (要 wabt / Node.js)
-dune exec ./bin/mere.exe -- -w examples/map_codegen.mere > /tmp/v.wat
-wat2wasm /tmp/v.wat -o /tmp/v.wasm
-node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/v.wasm"),
-  { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
-# → 640
+# Wasm (要 wabt / Node.js)。Phase 27.2 で scripts/run_wasm.js を追加
+dune exec ./bin/mere.exe -- -w examples/toy_sql.mere > /tmp/sql.wat
+wat2wasm /tmp/sql.wat -o /tmp/sql.wasm
+node scripts/run_wasm.js /tmp/sql.wasm   # puts / read_file / write_file の env imports 付き
 ```
 
-各 codegen example の冒頭コメントに、想定される実行結果を記載。
+⭐ 印の 16 examples は **interp と 3 backend の出力が diff = 0 で一致**
+することを `diff` で検証済 (Phase 27 完了 + Phase 28 追加 + Phase 30 codegen
+fix 後維持)。
 
 ## REPL session の記録
 

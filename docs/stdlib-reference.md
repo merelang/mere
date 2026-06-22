@@ -1,10 +1,11 @@
 # Stdlib reference (mere)
 
-`initial_env` で常に使える 56 個の builtin。型は `mere -te NAME` で確認可。
+`initial_env` で常に使える 106 個の builtin。型は `mere -te NAME` で確認可。
 
 凡例:
 - ⚡ = `Eval_error` を raise する可能性あり
 - ★ = 多相 (let-poly に乗らない、builtin-level 多相)
+- 🌐 = 4 backend (interp + C + LLVM + Wasm) で動作 (Phase 22-31 で順次対応)
 
 ---
 
@@ -33,11 +34,12 @@ read_lines "data.txt"               // → ["line1", "line2", ...]
 args ()                             // → ["foo", "bar"] (mere prog -- foo bar)
 ```
 
-**★ codegen 状況**: Phase 19.6 では **interpreter のみ**。`read_lines` /
-`args` は `'a list` 構築、`env_var` は `'a option` 構築が必要で、これらの
-codegen は DEFERRED §1.7 (多相 let-rec / 多相 variant の codegen
-monomorphize) 解決後に Phase 19.6.1 で対応予定。`file_exists` は scalar
-返り値で簡単だが、対セットで follow-up。
+**★ codegen 状況**: `print` / `print_no_nl` / `print_int` / `print_bool` /
+`print_err` / `read_file` / `write_file` は 3 backend で動作 (Wasm は host
+imports 経由、`scripts/run_wasm.js` で puts / read_file / write_file を提供)。
+`read_lines` / `args` / `env_var` / `file_exists` は **interpreter のみ**
+(codegen で `'a list` / `'a option` 構築 + 系統的に外界アクセスが必要、
+Phase 22-31 では未着手)。
 
 ```
 let _ = print "Hello";
@@ -83,7 +85,7 @@ bool_of_str "true"   // true
 | `str_index_of` ★ | `str -> str -> int` | needle の最初の位置、無ければ -1。empty needle は 0 (Phase 19.1) |
 | `str_split` ★ | `str -> str -> str list` | delimiter で分割、`str list` 返却。`type 'a list = ...` の declare が必要。empty delimiter は単一要素 list を返す (Phase 19.1) |
 | `str_join` ★ | `str -> str list -> str` | separator で結合。空 list は空文字列 (Phase 19.1) |
-| `str_compare` | `str -> str -> int` | 辞書順 -1 / 0 / 1 |
+| `str_compare` 🌐 | `str -> str -> int` | 辞書順 -1 / 0 / 1 (Phase 31.0 で 3 backend に移植、sign-normalized) |
 | `str_repeat` ⚡ | `str -> int -> str` | N 回繰り返し、N<0 で raise |
 | `str_replace` | `str -> str -> str -> str` | 全置換、empty needle は変化なし |
 | `str_rev` | `str -> str` | 文字列反転 |
@@ -107,7 +109,10 @@ str_index_of "hello world" "world"             // 6
 str_index_of "hello" "xyz"                     // -1
 ```
 
-**★ codegen 状況**: `str_index_of` は **4 backend 全部で動く** (Phase 19.1.1 で対応完了)。`str_split` / `str_join` は **interpreter only** (codegen は recursive variant `list` 構築が必要で、Phase 19.1.2 で対応予定)。
+**★ codegen 状況**: `str_index_of` / `str_split` / `str_join` / `str_count` /
+`str_compare` はすべて **4 backend 全部で動く** (Phase 19.1.1 で str_index_of、
+Phase 22 で str_split / str_join、Phase 26.5 で Wasm 全 str ops、Phase 31.0
+で str_compare 移植 sign-normalize 完了)。
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"

@@ -81,11 +81,11 @@ interpreter 方式だと「Mere は OCaml の上で動く」状態。codegen で
 
 ---
 
-## 4. mere での現状 (2026-06-20、Phase 4〜6 + Phase 15 完了段階)
+## 4. mere での現状 (2026-06-22、Phase 4〜31 完了段階)
 
 interpreter で書ける Mere プログラムの**主要構文ほぼ全て** + **Q-010
 collection (Vec / OwnedVec / StrBuf / Map)** が 3 backend (C / LLVM IR /
-Wasm) で native compile + 実行可能。テスト **1268 件 passing**、E2E では
+Wasm) で native compile + 実行可能。テスト **1480 件 passing**、E2E では
 factorial / fibonacci / 連結リスト sum / make_adder closure / 多相
 variant + record / pattern match (nested / guard / or) に加えて、Phase 15
 で Vec[R, T] の全要素型 / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K =
@@ -93,6 +93,38 @@ int / bool / str / tuple / record / 全 variant) / 高階 API (vec_set / iter
 / fold / map / filter) / 変換 (vec_to_owned / owned_vec_to_vec /
 vec_to_list) / len ad-hoc polymorphism / with-OwnedVec scope-Drop までが
 3 backend で動く。
+
+**Phase 24-27 (2026-06-21、29 slice 連続) で 4 backend feature parity を
+達成**: 16 realistic examples (~2500 LoC; 内 toy_sql.mere は単独で 1165
+LoC) が **interp + C + LLVM + Wasm runtime で diff = 0 PERFECT 一致**。
+Phase 27.2 で `scripts/run_wasm.js` (Node.js host harness with puts /
+read_file / write_file imports) を追加、Wasm が実 runtime で実行検証
+できるように。Phase 28-30 で dogfood (toy_sql) → codegen bug 3 件発掘
+(DEFERRED §1.10 record field × nested lambda capture / §1.11 env_subst
+shadow / §1.12 builtin shadow) → 全部 fix (3 backend で揃えた)。Phase 31.0
+で str_compare を 3 backend に移植 (sign-normalize -1/0/1)。
+
+### Phase 22-31 で追加された codegen capability
+
+| 機能 | Phase | backend 状況 |
+|---|---|---|
+| `try_or` (fail catch) | 22.2 (C) / 25.2 (LLVM) / 26.2 (Wasm) | 4 backend |
+| str_split / str_join / str_count | 22 (C) / 25.9 (LLVM) / 26.5 (Wasm) | 4 backend |
+| str_compare (sign-normalize -1/0/1) | 31.0 | 4 backend |
+| 多相 user let-rec の per-instantiation specialization | 23.3 (C) / 25.5 (LLVM) / 26.4 (Wasm) | 4 backend |
+| show_str escape (`\n`, `\"` 等) | 23.5 (C) / 25.6 (LLVM) / 26.6 (Wasm) | 4 backend |
+| variant boxed payload (`{i32 tag, ptr payload}`) | 24 (C 統一) / 25.0 (LLVM) / 26.0 (Wasm) | 4 backend |
+| inner let-rec lifting (anon closure 経由でも sibling 解決) | 22.2 (C) / 25.3 (LLVM) / 26.3 (Wasm) | 4 backend |
+| skel dedup (user-def が prelude を shadow) | 24.2 (C) / 25.7 (LLVM) / 26.3 (Wasm) | 4 backend |
+| Map iter insertion order | 27.1 (interp 統一で 3 backend に波及) | 4 backend |
+| Wasm runtime auto-print main result | 27.2 | Wasm |
+| unit main_ty で `"()"` を print | 25.11 (LLVM) / 27.0 (C 逆移植) / 26.x (Wasm) | 4 backend |
+| Wasm の StrBuf 内包 (StrBuf in variant payload) | 27.3 | Wasm |
+| pattern binding を arm body の current_var_types に prepend | 28.1 (C、LLVM Phase 25.3 の逆移植) | 4 backend |
+| builtin (is_alpha/is_digit/is_space) を user-def が shadow | 30.0 | 3 backend (C/LLVM/Wasm) |
+| closure 内 captured 名の let shadow (env_subst dance) | 30.1 (C) | C |
+| top-level 非-fn let を file-scope global 化 | 30.2a (C) / 30.2b (LLVM) / 30.2c (Wasm) | 3 backend |
+| Wasm memory 1 → 16 pages (1MB) | 29.1 | Wasm |
 
 ### 動くこと
 
@@ -130,8 +162,11 @@ vec_to_list) / len ad-hoc polymorphism / with-OwnedVec scope-Drop までが
 - closure capture の非プリミティブ型 (tuple/record の capture。closure 値 capture は OK)
 - float (`f_add` 等の float builtin と `Float_lit` / `f_neg` 全般)
 - nested or-pattern (or 内に constructor / tuple / record)
-- ほとんどの stdlib builtin (`print` / `str_len` / `fst` / `snd` / `show`
-  / `vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` / `len` のみ wired up)
+- 一部の stdlib builtin (`read_lines` / `args` / `env_var` / `file_exists` の
+  4 件と、`sin` / `cos` / `tan` / `atan2` / `random_int` / `random_float`
+  等の float 系) は **interpreter のみ**。それ以外の I/O / 文字列 / 数値 /
+  show / collection / Logger / Metrics 周りは 3 backend (C/LLVM/Wasm) で
+  揃っている (Phase 22-31)
 - 文字列・closure env・variant node の GC (現状 region arena 一括解放、
   短時間実行向け)
 - LLVM / Wasm の Map K の payload-mixed variant (uniform payload のみ)
