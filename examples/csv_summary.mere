@@ -30,22 +30,23 @@ let raw =
 
 type Row = { name: str, area: str, amount: int };
 
-// 注: parse 失敗を Option<Row> で表すと C codegen の forward decl bug
-// (polymorphic variant 内 user record) を踏むので、ここでは入力が
-// well-formed と仮定し直接 Row を生成する。
+// "k,v,w" → Some Row { ... } / None on malformed
 let parse_row = fn (line: str) ->
   let parts = str_split line "," in
-  let rec nth = fn (xs: str list) -> fn (i: int) ->
-    match xs with
-    | Nil -> ""
-    | Cons (h, t) -> if i == 0 then h else nth t (i - 1) in
-  Row {
-    name = nth parts 0,
-    area = nth parts 1,
-    amount = int_of_str (nth parts 2)
-  };
+  match parts with
+  | Cons (n, rest1) ->
+    (match rest1 with
+     | Cons (r, rest2) ->
+       (match rest2 with
+        | Cons (a, _) -> Some (Row { name = n, area = r, amount = int_of_str a })
+        | _ -> None)
+     | _ -> None)
+  | _ -> None;
 
-let rows = list_map raw parse_row;
+let opts = list_map raw parse_row;
+let some_only = fn o -> match o with | Some _ -> true | None -> false;
+let unwrap_row = fn o -> match o with | Some r -> r | None -> fail "unwrap";
+let rows = list_map (list_filter opts some_only) unwrap_row;
 
 let _ = print "=== csv_summary (Phase 36) ===";
 let _ = print "--- parsed rows ---";

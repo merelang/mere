@@ -4523,20 +4523,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _ (vn, args) acc ->
       emit_mono_variant_typedef vn args :: acc) mono_variant_instances []
   in
-  let mono_variant_struct_bodies =
-    Hashtbl.fold (fun _ (vn, args) acc ->
-      match emit_mono_variant_struct_body vn args with
-      | Some s -> s :: acc
-      | None -> acc) mono_variant_instances []
-  in
+  (* Phase 36 (DEFERRED §1.20 fix): mono variant / record struct bodies
+     are now emitted through the unified topo-sorted pipeline below, not
+     here. Keep this empty to avoid duplicate emission. *)
+  let mono_variant_struct_bodies = ([] : string list) in
   let mono_record_typedefs =
     Hashtbl.fold (fun _ (rn, args) acc ->
       emit_mono_record_typedef rn args :: acc) mono_record_instances []
   in
-  let mono_record_struct_bodies =
-    Hashtbl.fold (fun _ (rn, args) acc ->
-      emit_mono_record_struct_body rn args :: acc) mono_record_instances []
-  in
+  let mono_record_struct_bodies = ([] : string list) in
   (* Tuple shape collection: walk the (now typer-annotated) AST plus the
      resolved fn signatures. *)
   let tuple_shapes =
@@ -4614,6 +4609,21 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let ty_deps (t : Ast.ty) : string list =
     match Ast.walk t with
     | Ast.TyTuple ts -> [tuple_struct_name ts]
+    (* Phase 36 (DEFERRED §1.20 fix): polymorphic variant / record
+       instances must use their mono struct name (e.g. option_Row),
+       not the type-cons name (opt). Check polymorphic_variants /
+       polymorphic_records BEFORE the variant_decls / records check. *)
+    | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+      let args' = List.map Ast.walk args in
+      if List.for_all ty_is_concrete args'
+         && not (is_recursive_variant (mono_variant_name n args'))
+      then [mono_variant_name n args']
+      else []
+    | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+      let args' = List.map Ast.walk args in
+      if List.for_all ty_is_concrete args'
+      then [mono_record_name n args']
+      else []
     | Ast.TyCon (n, _) when is_recursive_variant n -> []  (* pointer *)
     | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n -> [n]
     | Ast.TyCon (n, _) when List.exists (fun (vn, _, _) -> vn = n) variant_decls -> [n]
@@ -4662,6 +4672,43 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       nodes := (n, body, deps) :: !nodes
     end
   ) record_names;
+  (* Phase 36 (DEFERRED §1.20 fix): mono polymorphic variant / record
+     bodies (e.g. option_Row) also participate in the topo sort. Without
+     this, tuple/record bodies that have an option_Row field get emitted
+     before option_Row itself → "field has incomplete type" at clang. *)
+  Hashtbl.iter (fun _ (vn, args) ->
+    match emit_mono_variant_struct_body vn args with
+    | Some body ->
+      let svariants =
+        let (params, variants) = Hashtbl.find polymorphic_variants vn in
+        subst_variants params args variants
+      in
+      let recursive = mono_variant_is_recursive vn args svariants in
+      let node_name =
+        if recursive then mono_variant_name vn args ^ "_node"
+        else mono_variant_name vn args
+      in
+      let deps =
+        List.concat_map (fun (_, arg_opt) ->
+          match arg_opt with
+          | None -> []
+          | Some t -> ty_deps t) svariants
+      in
+      nodes := (node_name, body, deps) :: !nodes
+    | None -> ()
+  ) mono_variant_instances;
+  Hashtbl.iter (fun _ (rn, args) ->
+    let body = emit_mono_record_struct_body rn args in
+    if body <> "" then begin
+      let (params, fields) = Hashtbl.find polymorphic_records rn in
+      let mapping = List.combine params args in
+      let deps =
+        List.concat_map (fun (_, ft) ->
+          ty_deps (subst_params mapping ft)) fields
+      in
+      nodes := (mono_record_name rn args, body, deps) :: !nodes
+    end
+  ) mono_record_instances;
   (* Topo sort *)
   let name_to_node : (string, string * string list) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun (n, b, d) -> Hashtbl.add name_to_node n (b, d)) !nodes;
