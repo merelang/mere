@@ -144,6 +144,7 @@ backend いずれかへ codegen。
 | [if_let_demo.mere](if_let_demo.mere) ⭐ | Phase 36 で導入した **`if let pat = e then ... else ...`** の demo。Option / Result の条件分岐 + variant destructure (Circle / Square / Rect) で簡潔に書ける |
 | [for_loop_demo.mere](for_loop_demo.mere) ⭐ | Phase 36 で導入した **`for x in xs do body`** の demo。range / 文字列 list / list comprehension の結果 / nested for / Map 累積を procedural-style に。`list_iter xs (\x -> body)` の sugar |
 | [while_loop_demo.mere](while_loop_demo.mere) ⭐ | Phase 36 で導入した **`while cond do body`** の demo。Map[str, int] を mutable cell として使い、count up / powers of 2 / Collatz step counter を procedural-style に。**注: codegen は fn body 内のみ対応** (top-level main では inner let-rec lift が効かない) |
+| [csv_summary.mere](csv_summary.mere) ⭐ | Phase 36 で追加した sugar / prelude helper を combined で realistic に使う dogfood。CSV 風 sales records (name, area, amount) を parse → 集計 → ランキング表示。**新摩擦 (DEFERRED §1.20)**: C codegen で `Row opt` のような polymorphic variant 内 user record の forward decl 順序 bug を発掘、Option 介さず restructure で workaround |
 
 ### Q-010 collection 基本
 
