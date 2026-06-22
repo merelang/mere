@@ -146,6 +146,7 @@ backend いずれかへ codegen。
 | [while_loop_demo.mere](while_loop_demo.mere) ⭐ | Phase 36 で導入した **`while cond do body`** の demo。Map[str, int] を mutable cell として使い、count up / powers of 2 / Collatz step counter を procedural-style に。**注: codegen は fn body 内のみ対応** (top-level main では inner let-rec lift が効かない) |
 | [csv_summary.mere](csv_summary.mere) ⭐ | Phase 36 で追加した sugar / prelude helper を combined で realistic に使う dogfood。CSV 風 sales records (name, area, amount) を parse (`Row opt` で失敗扱い) → filter unwrap → 集計 → ランキング表示。Phase 36 で発掘した DEFERRED §1.20 (polymorphic variant 内 user record の forward decl bug) は **mono struct を unified topo-sort に組み込んで解消** |
 | [game_of_life.mere](game_of_life.mere) ⭐ | Conway's Game of Life (8x12 grid)。OwnedVec[int] で 1D flatten した cell 状態 + 8 近傍走査で time evolution。glider pattern (5 cell) の 4 step migration を visualize、各 gen の live count も出力 |
+| [sudoku_check.mere](sudoku_check.mere) ⭐ | 9x9 sudoku 盤面の valid 性検証。9 row + 9 col + 9 (3x3 box) について 1..9 が網羅されているかチェック。`list_for_all` + `list_member` + list comprehension で box cells を生成、3 シナリオ (正解 / 行重複 / 列重複) で検証 |
 
 ### Q-010 collection 基本
 
