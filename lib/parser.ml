@@ -300,6 +300,33 @@ let rec parse_program_internal tokens =
     | _ -> inner, toks
   and base_expr toks =
     match toks with
+    | (pos, T_if) :: (_, T_let) :: rest ->
+      (* Phase 36: `if let pat = e then t else f` desugars to
+           match e with | pat -> t | _ -> f
+         The pattern must be exhaustive on the matched arm; the `_`
+         catches everything else. Common use: `if let Some x = opt then ...`. *)
+      let pat, after_pat = pattern rest in
+      (match after_pat with
+       | (_, T_eq) :: after_eq ->
+         let scrut, after_scrut = expr after_eq in
+         (match after_scrut with
+          | (_, T_then) :: after_then ->
+            let then_branch, after_then2 = expr after_then in
+            (match after_then2 with
+             | (_, T_else) :: after_else ->
+               let else_branch, toks = expr after_else in
+               let wild_pat = mkp pos Ast.P_wild in
+               mk pos (Ast.Match (scrut,
+                 [(pat, None, then_branch);
+                  (wild_pat, None, else_branch)])), toks
+             | _ ->
+               let else_branch = mk pos Ast.Unit_lit in
+               let wild_pat = mkp pos Ast.P_wild in
+               mk pos (Ast.Match (scrut,
+                 [(pat, None, then_branch);
+                  (wild_pat, None, else_branch)])), after_then2)
+          | _ -> raise (Parse_error (pos_of after_scrut, "expected 'then' after 'if let pat = e'")))
+       | _ -> raise (Parse_error (pos_of after_pat, "expected '=' in 'if let pat'")))
     | (pos, T_if) :: rest ->
       let cond, toks = expr rest in
       (match toks with

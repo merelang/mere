@@ -1,0 +1,88 @@
+// if_let_demo: Phase 36 で導入した `if let` の demo
+//
+// 構文:
+//   `if let pat = e then t else f` は
+//   `match e with | pat -> t | _ -> f` の sugar。
+//   else 省略時は unit が default。
+//
+//   Rust の `if let` と同じ感覚で、Option/Result の chain 等に便利。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== if_let_demo (Phase 36) ===";
+
+// --- Option lookup ---
+let dict = map_new ();
+let _ = map_set dict "one" 1;
+let _ = map_set dict "two" 2;
+let _ = map_set dict "three" 3;
+
+let lookup = \k -> if map_has dict k then Some (map_get dict k) else None;
+
+let _ = print "--- Option lookup ---";
+
+let _ = if let Some n = lookup "two" then
+          print "two = {show n}"
+        else
+          print "miss two";
+
+let _ = if let Some n = lookup "missing" then
+          print "missing = {show n}"
+        else
+          print "miss missing";
+
+// --- Result chain ---
+let _ = print "--- Result chain ---";
+let parse = \s ->
+  if s == "42" then Ok 42
+  else if s == "0"  then Ok 0
+  else Err ("can't parse: " ++ s);
+
+let _ = if let Ok n = parse "42" then
+          print "ok 42 -> {show n}"
+        else
+          print "err 42";
+
+let _ = if let Err msg = parse "abc" then
+          print "err msg: {msg}"
+        else
+          print "ok abc";
+
+// --- Variant destructure ---
+type Shape = Circle of int | Rect of (int * int) | Square of int;
+
+let area = \s ->
+  if let Circle r = s then 3 * r * r          // π ≈ 3 で簡略化
+  else if let Square w = s then w * w
+  else if let Rect dims = s then fst dims * snd dims
+  else 0;
+
+let _ = print "--- shapes ---";
+let _ = print "circle r=5  area = {show (area (Circle 5))}";
+let _ = print "square 4    area = {show (area (Square 4))}";
+let _ = print "rect 3x7    area = {show (area (Rect (3, 7)))}";
+
+// --- nested if let chain ---
+let _ = print "--- nested chain ---";
+let parse_pair = \xs ys ->
+  if let Ok a = parse xs then
+    if let Ok b = parse ys then
+      Ok (a + b)
+    else
+      Err "second failed"
+  else
+    Err "first failed";
+
+let show_r = \r ->
+  match r with
+  | Ok n  -> "ok " ++ show n
+  | Err e -> "err: " ++ e;
+
+let r1 = parse_pair "42" "0";
+let r2 = parse_pair "42" "x";
+let r3 = parse_pair "x" "0";
+let _ = print "42+0  = {show_r r1}";
+let _ = print "42+x  = {show_r r2}";
+let _ = print "x+0   = {show_r r3}";
+
+0
