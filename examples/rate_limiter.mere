@@ -1,0 +1,82 @@
+// rate_limiter: 固定 window rate limiter (Phase 33.3)
+//
+// 目的: examples roadmap G5。Map[R, str, int] 2 つで key → (window_start,
+//   count) を管理、固定 60 秒 window で limit を超えたら reject。timestamp
+//   を引数で受け取る形にして 4 backend で deterministic test。FFI 連携 (libc
+//   の time(2) を呼ぶ wrapper) はコメントで示すだけにとどめる。
+//
+// 設計:
+//   - window_starts: key → 最初のリクエストの epoch 秒
+//   - counts:        key → current window 内のリクエスト数
+//   - rate_check_at key limit now:  既存 (or 期限切れ) window を判定、count
+//     を更新し true/false を返す
+//   - rate_check key limit:         unix_time () を呼んで rate_check_at を
+//     wrap (実時間版、デモ用)
+//
+// 4 backend で diff = 0 にするため timestamp は引数で渡す。real-time 版を
+// 作るには `extern fn time: unit -> int = "time";` のような C alias 構文が
+// 要る (Phase 32 MVP は同名 only、libc time が builtin と被るため)。
+//
+// 使い方:
+//   dune exec ./bin/mere.exe -- examples/rate_limiter.mere
+
+// State (top-level mutable Map、Phase 30.2 で codegen global 化)
+let window_starts = map_new ();
+let counts        = map_new ();
+
+let window_sec = 60;
+
+// 既存 window のリクエスト数を 1 増やし、limit 以下なら true
+let rate_check_at = fn (key: str) -> fn (limit: int) -> fn (now: int) ->
+  if map_has window_starts key then
+    let start = map_get window_starts key in
+    if now - start < window_sec then
+      // 同じ window 内 — count を増やす
+      let new_count = (map_get counts key) + 1 in
+      let _ = map_set counts key new_count in
+      new_count <= limit
+    else
+      // window 切れ — reset
+      let _ = map_set window_starts key now in
+      let _ = map_set counts key 1 in
+      true
+  else
+    // 初回 request
+    let _ = map_set window_starts key now in
+    let _ = map_set counts key 1 in
+    true;
+
+// === Self-tests with explicit time (4 backend で deterministic) ===
+let _ = print "=== rate_limiter (Phase 33.3) ===";
+
+// alice: limit 3 in 60s window
+//   t=100 1st →  true (count 1)
+//   t=105 2nd →  true (count 2)
+//   t=110 3rd →  true (count 3, at limit)
+//   t=115 4th →  false (count 4, over limit)
+//   t=125 5th →  false (count 5, still in window)
+//   t=200 new → true (window reset, count 1)
+let _ =
+  let r1 = rate_check_at "alice" 3 100 in
+  let _  = print ("alice t=100 1st: " ++ show r1) in
+  let r2 = rate_check_at "alice" 3 105 in
+  let _  = print ("alice t=105 2nd: " ++ show r2) in
+  let r3 = rate_check_at "alice" 3 110 in
+  let _  = print ("alice t=110 3rd: " ++ show r3) in
+  let r4 = rate_check_at "alice" 3 115 in
+  let _  = print ("alice t=115 4th: " ++ show r4) in
+  let r5 = rate_check_at "alice" 3 125 in
+  let _  = print ("alice t=125 5th: " ++ show r5) in
+  let r6 = rate_check_at "alice" 3 200 in
+  print ("alice t=200 new: " ++ show r6);
+
+// bob と alice は独立 state を持つ (Map のキー分離)
+let _ =
+  let b1 = rate_check_at "bob" 2 200 in
+  let _  = print ("bob t=200 1st: " ++ show b1) in
+  let b2 = rate_check_at "bob" 2 210 in
+  let _  = print ("bob t=210 2nd: " ++ show b2) in
+  let b3 = rate_check_at "bob" 2 220 in
+  print ("bob t=220 3rd (over limit 2): " ++ show b3);
+
+0
