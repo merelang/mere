@@ -116,6 +116,10 @@ backend いずれかへ codegen。
 | [borrow_chain.mere](borrow_chain.mere) | 同じ `&shared write R Logger` 借用を 3 つの helper を呼ぶ pipeline で再利用 (Phase 17.1 borrow tracking の demo)。**interp only** (`&shared write R` の codegen 未対応、borrow_modes.mere と同様、F3) |
 | [cache_sim.mere](cache_sim.mere) ⭐ | capacity=3 の FIFO cache 擬似実装。`map_remove` / `owned_vec_set` を持たない制約下で、`alive` Vec + `evicted` Map を分けて FIFO eviction を表現。Phase 36 で発掘した DEFERRED §1.14 (lifted closure が global capture できない LLVM/Wasm bug) は **両 backend に load / global.get 経路を追加して解消**、自然なコードに戻った (A4) |
 | [simple_query.mere](simple_query.mere) ⭐ | SELECT * FROM users WHERE col op value の最小実装 (tokenize / parse / execute、~150 LoC)。toy_sql.mere の 1165 LoC から大幅に削った教材版 (I3) |
+| [caesar_cipher.mere](caesar_cipher.mere) ⭐ | 古典的シーザー暗号の encode / decode。`chr` / `ord` (Phase 36 新規) + char_at + StrBuf で 1 文字 transform、ROT13 / 負 shift / 大 shift も処理 |
+| [fraction.mere](fraction.mere) ⭐ | 有理数 record `Frac { n, d }` の加減乗除 + 自動約分 (`gcd` 利用、Phase 36 新規)。canonical sign の正規化込み。注: 関数名は `divf` (C の `div` libc と衝突するため) |
+| [roman_numerals.mere](roman_numerals.mere) ⭐ | 整数 ⇄ ローマ数字 (1..3999) の双方向変換。greedy で `(int * str) list` を消費する典型アルゴリズム + 文字単位パーサ |
+| [password_strength.mere](password_strength.mere) ⭐ | パスワード強度 0..5 採点 (長さ / digit / lower / upper)。`is_digit` / `ord` / `char_at` の 1 文字単位走査 |
 
 ### Q-010 collection 基本
 

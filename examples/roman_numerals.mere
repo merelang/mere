@@ -1,0 +1,83 @@
+// roman_numerals: 整数 ⇄ ローマ数字の双方向変換 (Phase 36)
+//
+// 目的: list of (value, symbol) を greedy で消費する典型的アルゴリズム +
+//   parser をマッチで実装。
+//
+// 範囲: 1..3999 (古典 Roman の標準範囲)
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// (値, 記号) を降順で並べる。subtractive 形 (IV, IX, etc.) も含める。
+let pairs =
+  [(1000, "M"),  (900, "CM"), (500, "D"),  (400, "CD"),
+   (100, "C"),   (90, "XC"),  (50, "L"),   (40, "XL"),
+   (10, "X"),    (9, "IX"),   (5, "V"),    (4, "IV"),
+   (1, "I")];
+
+// to_roman: greedy で大きい値から消費して文字列を組み立てる
+let to_roman = fn (n: int) ->
+  if n <= 0 then ""
+  else
+    region R {
+      let b = strbuf_new () in
+      let rec consume = fn (rest: int) -> fn (ps: (int * str) list) ->
+        if rest <= 0 then ()
+        else
+          match ps with
+          | Nil -> ()
+          | Cons ((v, sym), tail) ->
+            if rest >= v then
+              let _ = strbuf_push b sym in
+              consume (rest - v) ps
+            else
+              consume rest tail in
+      let _ = consume n pairs in
+      strbuf_to_str b
+    };
+
+// value_of_sym: 1〜2 文字の roman 記号の値を返す (-1 if unknown)
+let value_of_sym = fn (s: str) ->
+  if s == "M" then 1000
+  else if s == "D" then 500
+  else if s == "C" then 100
+  else if s == "L" then 50
+  else if s == "X" then 10
+  else if s == "V" then 5
+  else if s == "I" then 1
+  else -1;
+
+// of_roman: 左から走査、各文字の値を見て次より小さければ減算、それ以外加算
+let of_roman = fn (s: str) ->
+  let n = str_len s in
+  let rec loop = fn (i: int) -> fn (acc: int) ->
+    if i >= n then acc
+    else
+      let cur = value_of_sym (char_at s i) in
+      let next_idx = i + 1 in
+      if next_idx < n then
+        let nxt = value_of_sym (char_at s next_idx) in
+        if cur < nxt then loop (i + 1) (acc - cur)
+        else loop (i + 1) (acc + cur)
+      else loop (i + 1) (acc + cur) in
+  loop 0 0;
+
+let check = fn (n: int) ->
+  let r = to_roman n in
+  let back = of_roman r in
+  print (show n ++ " -> " ++ r ++ " -> " ++ show back
+         ++ (if back == n then "" else " (MISMATCH)"));
+
+let _ = print "=== roman_numerals (Phase 36) ===";
+let _ = check 1;       // I
+let _ = check 4;       // IV
+let _ = check 9;       // IX
+let _ = check 14;      // XIV
+let _ = check 40;      // XL
+let _ = check 90;      // XC
+let _ = check 99;      // XCIX
+let _ = check 444;     // CDXLIV
+let _ = check 1994;    // MCMXCIV
+let _ = check 3888;    // MMMDCCCLXXXVIII (longest 1..3999)
+let _ = check 2026;    // MMXXVI
+
+0

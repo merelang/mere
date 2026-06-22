@@ -1,0 +1,62 @@
+// caesar_cipher: 古典的シーザー暗号の encode / decode (Phase 36)
+//
+// 目的: chr / ord / char_at + StrBuf を組み合わせて 1 文字単位 transform
+//   の典型を 4 backend で dogfood。大文字小文字を保持、非英字はそのまま。
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// 文字 c を shift する。'A'..'Z' / 'a'..'z' のみ shift、それ以外はそのまま。
+// shift は 0..25 に正規化される。
+let shift_char = fn (c: str) -> fn (k: int) ->
+  let code = ord c in
+  if code >= 65 && code <= 90 then
+    // uppercase
+    chr (65 + ((code - 65 + k) % 26))
+  else if code >= 97 && code <= 122 then
+    // lowercase
+    chr (97 + ((code - 97 + k) % 26))
+  else
+    c;
+
+// 負の shift は 26 加算で正に正規化 (mod の semantics は -1 % 26 == -1)
+let normalize_shift = fn (k: int) ->
+  let m = k % 26 in
+  if m < 0 then m + 26 else m;
+
+let encode = fn (s: str) -> fn (k: int) ->
+  let kk = normalize_shift k in
+  region R {
+    let b = strbuf_new () in
+    let n = str_len s in
+    let rec loop = fn (i: int) ->
+      if i >= n then ()
+      else
+        let _ = strbuf_push b (shift_char (char_at s i) kk) in
+        loop (i + 1) in
+    let _ = loop 0 in
+    strbuf_to_str b
+  };
+
+let decode = fn (s: str) -> fn (k: int) -> encode s (- k);
+
+let _ = print "=== caesar_cipher (Phase 36) ===";
+
+let plain = "Attack at dawn!";
+let enc = encode plain 3;
+let _ = print ("plain   : " ++ plain);
+let _ = print ("encoded : " ++ enc);
+let _ = print ("decoded : " ++ decode enc 3);
+
+// ROT13: 自己逆な変換
+let _ = print "--- ROT13 ---";
+let rot13_msg = encode "Hello, World!" 13;
+let _ = print ("ROT13   : " ++ rot13_msg);
+let _ = print ("ROT13^2 : " ++ encode rot13_msg 13);
+
+// 大きな shift / 負の shift も処理
+let _ = print "--- big / negative shift ---";
+let _ = print (encode "ZAza" 1);     // AbAb
+let _ = print (encode "ABCD" 30);    // 30 % 26 = 4 → EFGH
+let _ = print (encode "ABC" (-1));   // ZAB
+
+0
