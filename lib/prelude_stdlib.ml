@@ -92,6 +92,24 @@ let rec list_find = fn xs -> fn p ->
   | Nil -> None
   | Cons (h, t) -> if p h then Some h else list_find t p;
 
+// Phase 36: list 連結 (a ++ b)。Mere の `++` は str only なので別関数。
+let rec list_append = fn xs -> fn ys ->
+  match xs with
+  | Nil -> ys
+  | Cons (h, t) -> Cons (h, list_append t ys);
+
+// Phase 36: 'a list list を flatten して 'a list に
+let rec list_concat = fn xss ->
+  match xss with
+  | Nil -> Nil
+  | Cons (h, t) -> list_append h (list_concat t);
+
+// Phase 36: list_map した結果を flatten (multi-gen comprehension の desugar 対象)
+let rec list_flat_map = fn xs -> fn f ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) -> list_append (f h) (list_flat_map t f);
+
 // === Option helpers ===
 
 let rec option_map = fn opt -> fn f ->

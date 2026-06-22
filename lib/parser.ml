@@ -1040,37 +1040,83 @@ let rec parse_program_internal tokens =
          `[expr | x <- xs, cond]` desugar to list_map / list_filter. *)
       let first, after_first = expr rest in
       (match after_first with
-       | (_, T_pipe) :: (_, T_ident gen_var) :: (_, T_lt_minus) :: gen_rest ->
-         (* Phase 36: list comprehension. We've parsed `expr` (= first) +
-            `| name <-`. Now parse the source list, then optional `, cond`. *)
-         let src, after_src = expr gen_rest in
-         let cond_opt, after_cond =
-           match after_src with
-           | (_, T_comma) :: rest2 ->
-             let c, r = expr rest2 in Some c, r
-           | _ -> None, after_src
+       | (_, T_pipe) :: gen_rest ->
+         (* Phase 36: list comprehension `[expr | gens...]`. Supports
+            multiple generators (`x <- xs`) and filter conditions (any
+            other expression) in any order. Desugared right-to-left:
+              [e | x <- xs]        = list_map xs (\x -> e)
+              [e | x <- xs, p]     = list_map (list_filter xs (\x -> p)) (\x -> e)
+              [e | x <- xs, y<-ys] = list_flat_map xs (\x ->
+                                        list_map ys (\y -> e))
+              [e | x <- xs, p, y <- ys]
+                = list_flat_map (list_filter xs (\x -> p)) (\x ->
+                    list_map ys (\y -> e))
+            等。`Generator (var, src)` と `Filter cond` の 2 種類の
+            qualifier を逐次 parse して、最後の generator の body は
+            list_map、それより前の generator は list_flat_map で合成する。
+            Filter は直前の generator の source を list_filter で絞り込む。 *)
+         let parse_qual toks =
+           match toks with
+           | (_, T_ident name) :: (_, T_lt_minus) :: rest2 ->
+             let src, rest2 = expr rest2 in
+             `Gen (name, src), rest2
+           | _ ->
+             let cond, rest2 = expr toks in
+             `Filt cond, rest2
          in
-         (match after_cond with
+         let rec parse_quals toks =
+           let q, toks' = parse_qual toks in
+           match toks' with
+           | (_, T_comma) :: rest2 ->
+             let qs, rest3 = parse_quals rest2 in
+             q :: qs, rest3
+           | _ -> [q], toks'
+         in
+         let quals, after_quals = parse_quals gen_rest in
+         (match after_quals with
           | (_, T_rbracket) :: rest' ->
-            let var_e = mk pos (Ast.Var gen_var) in
-            (* lambda for body: \gen_var -> first *)
-            let body_fn = mk pos (Ast.Fun (gen_var, None, first)) in
-            let src' =
-              match cond_opt with
-              | None -> src
-              | Some cond ->
-                let pred = mk pos (Ast.Fun (gen_var, None, cond)) in
-                let _ = var_e in
-                (* list_filter src pred *)
-                mk pos (Ast.App (
-                  mk pos (Ast.App (mk pos (Ast.Var "list_filter"), src)),
-                  pred))
+            (* attach filters to the immediately-preceding Gen as a
+               wrapping `list_filter` on its source. *)
+            let rec attach_filters acc cur = function
+              | [] -> List.rev (cur :: acc)
+              | `Filt cond :: more ->
+                (match cur with
+                 | `Gen (name, src) ->
+                   let pred = mk pos (Ast.Fun (name, None, cond)) in
+                   let src' = mk pos (Ast.App (
+                     mk pos (Ast.App (mk pos (Ast.Var "list_filter"), src)),
+                     pred))
+                   in
+                   attach_filters acc (`Gen (name, src')) more
+                 | _ -> raise (Parse_error (pos, "filter must follow a generator")))
+              | (`Gen _) as g :: more ->
+                attach_filters (cur :: acc) g more
             in
-            mk pos (Ast.App (
-              mk pos (Ast.App (mk pos (Ast.Var "list_map"), src')),
-              body_fn)), rest'
+            let normalized = match quals with
+              | `Filt _ :: _ ->
+                raise (Parse_error (pos, "first qualifier must be `x <- xs`"))
+              | (`Gen _) as g :: rest_q -> attach_filters [] g rest_q
+              | [] -> raise (Parse_error (pos, "empty list comprehension"))
+            in
+            (* Desugar generators right-to-left: last gen uses list_map
+               on `first`; earlier ones use list_flat_map. *)
+            let rec build = function
+              | [] -> assert false
+              | [`Gen (name, src)] ->
+                let body_fn = mk pos (Ast.Fun (name, None, first)) in
+                mk pos (Ast.App (
+                  mk pos (Ast.App (mk pos (Ast.Var "list_map"), src)),
+                  body_fn))
+              | `Gen (name, src) :: more ->
+                let inner = build more in
+                let body_fn = mk pos (Ast.Fun (name, None, inner)) in
+                mk pos (Ast.App (
+                  mk pos (Ast.App (mk pos (Ast.Var "list_flat_map"), src)),
+                  body_fn))
+            in
+            build normalized, rest'
           | _ ->
-            raise (Parse_error (pos_of after_cond, "expected ']' in list comprehension")))
+            raise (Parse_error (pos_of after_quals, "expected ']' in list comprehension")))
        | _ ->
          (* Regular list literal: continue parsing `, e2, e3, ...]`. *)
          let rec parse_elems acc toks =
