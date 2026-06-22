@@ -134,6 +134,7 @@ backend いずれかへ codegen。
 | [bin_tree_traversal.mere](bin_tree_traversal.mere) ⭐ | 二分木 (recursive variant `btree`) の pre/in/post-order 走査 + height / count。`render` で walker fn を HOF で受ける |
 | [knapsack.mere](knapsack.mere) ⭐ | 0/1 ナップサック問題を memoize DP で解く。Map[str, int] で `(i, w) → max_value` をキャッシュ、選択アイテムの復元 (`reconstruct`) も実装 |
 | [range_demo.mere](range_demo.mere) ⭐ | Phase 36 で導入した **range literal `a..b`** の demo。`1..10` は `range 1 10` の syntactic sugar、int list を返す。factorial / sum_sq 等を fold で実装 |
+| [sections.mere](sections.mere) ⭐ | Phase 36 で導入した **operator section** の demo。`(+ 1)` は `fn x -> x + 1` の sugar。HOF と組合せて簡潔な map / filter が書ける。+ * / % == != < <= > >= ++ の 11 演算子に対応 |
 
 ### Q-010 collection 基本
 

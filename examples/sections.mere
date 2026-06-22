@@ -1,0 +1,45 @@
+// sections: Phase 36 で導入した operator section の demo
+//
+// 構文: `(+ 1)` は `fn x -> x + 1` の sugar (right section)。
+//   高階関数と組合せると簡潔に書ける。
+//
+// 対応 operator: + * / %  ==  !=  <  <=  >  >=  ++
+// (`-` は単項マイナス `(-3)` との衝突を避けるため未対応)
+//
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+let _ = print "=== sections (Phase 36) ===";
+
+// 算術 section と range / list_map の組合せ
+let _ = print "--- 1..5 + 10 ---";
+let _ = list_iter (list_map (1..5) (+ 10)) (fn (x: int) -> print (show x));
+
+let _ = print "--- 1..5 * 2 ---";
+let _ = list_iter (list_map (1..5) (* 2)) (fn (x: int) -> print (show x));
+
+// 比較 section + 自前 list_filter (prelude に未投入)
+let rec list_filter = fn xs -> fn p ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    if p h then Cons (h, list_filter t p)
+    else list_filter t p;
+
+let _ = print "--- 1..20 の > 10 だけ ---";
+let _ = list_iter (list_filter (1..20) (> 10)) (fn (x: int) -> print (show x));
+
+let _ = print "--- 1..10 で odd だけ (% 2 != 0) ---";
+let is_odd = fn (x: int) -> (% 2) x != 0;
+let _ = list_iter (list_filter (1..10) is_odd) (fn (x: int) -> print (show x));
+
+// str concat section: 接尾辞付け
+let _ = print "--- string suffix ---";
+let exclaim = (++ "!");
+let _ = print (exclaim "hello");
+let _ = print (exclaim "world");
+
+// 比較で「特定の値か」フィルタ
+let _ = print "--- find 3 in 1..5 ---";
+let _ = list_iter (list_filter (1..5) (== 3)) (fn (x: int) -> print (show x));
+
+0

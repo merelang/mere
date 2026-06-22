@@ -984,6 +984,111 @@ let rec parse_program_internal tokens =
     | (pos, T_true) :: rest -> mk pos (Ast.Bool_lit true), rest
     | (pos, T_false) :: rest -> mk pos (Ast.Bool_lit false), rest
     | (pos, T_lparen) :: (_, T_rparen) :: rest -> mk pos Ast.Unit_lit, rest
+    (* Phase 36: operator sections (Haskell-style). `(+1)` desugars to
+       `fn __sec -> __sec + 1`. Supports right-sections for +, *, /, %,
+       ++, ==, !=, <, <=, >, >=. `(- N)` would conflict with unary neg
+       so excluded — users should write `fn x -> x - N`.
+       Left sections like `(2 +)` are also supported when the open paren
+       is followed by an expression and then a binary op then ')'. *)
+    | (pos, T_lparen) :: (_, T_plus_plus) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Bin (Ast.Concat,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_plus) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Bin (Ast.Add,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_star) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Bin (Ast.Mul,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_slash) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Bin (Ast.Div,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_percent) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Bin (Ast.Mod,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_eq_eq) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Cmp (Ast.Eq,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_bang_eq) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Cmp (Ast.Ne,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_lt) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Cmp (Ast.Lt,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_lt_eq) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Cmp (Ast.Le,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_gt) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Cmp (Ast.Gt,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
+    | (pos, T_lparen) :: (_, T_gt_eq) :: rest ->
+      let arg, toks = expr rest in
+      (match toks with
+       | (_, T_rparen) :: rest' ->
+         let var = "__sec" in
+         let body = mk pos (Ast.Cmp (Ast.Ge,
+                                     mk pos (Ast.Var var), arg)) in
+         mk pos (Ast.Fun (var, None, body)), rest'
+       | _ -> raise (Parse_error (pos_of toks, "expected ')' after operator section")))
     | (pos, T_lparen) :: rest ->
       let first, toks = expr rest in
       (match toks with
