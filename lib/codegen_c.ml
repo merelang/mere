@@ -785,10 +785,13 @@ let rec emit_expr (e : Ast.expr) : string =
        Fun adapter + direct-call fast paths. 38.C-1 で owned_vec_push の
        spike を確認後、 38.C-2 で 2-arg curried collection accessor 群へ展開。 *)
     let is_phase38c_target =
+      (* 2-arg curried (38.C-1 / 38.C-2) *)
       name = "owned_vec_push" || name = "owned_vec_get"
       || name = "vec_push" || name = "vec_get"
       || name = "strbuf_push"
       || name = "map_get" || name = "map_has"
+      (* 3-arg curried (38.C-3) *)
+      || name = "map_set" || name = "vec_set"
     in
     let try_eta () =
       match e.Ast.ty with

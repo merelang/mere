@@ -5921,6 +5921,42 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
+  (* Phase 38.C-3: 3-arg curried builtins (map_set / vec_set) *)
+  check "Phase 38.C-3: map_set 1-arg partial app (interp)"
+    (Pipeline.process
+       "let m = map_new () in
+        let set_in_m = map_set m in
+        let _ = set_in_m \"a\" 1 in
+        let _ = set_in_m \"b\" 2 in
+        map_len m")
+    "2";
+  check "Phase 38.C-3: vec_set 1-arg partial app (interp)"
+    (Pipeline.process
+       "let v = vec_new () in
+        let _ = vec_push v 10 in
+        let _ = vec_push v 20 in
+        let set_in_v = vec_set v in
+        let _ = set_in_v 0 100 in
+        vec_get v 0 + vec_get v 1")
+    "120";
+  check "Phase 38.C-3: map_set 3-arg partial emits C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let m = map_new () in
+        let set_in_m = map_set m in
+        let _ = set_in_m \"k\" 1 in
+        map_len m") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+  check "Phase 38.C-3: vec_set 3-arg partial emits C codegen"
+    (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let v = vec_new () in
+        let _ = vec_push v 0 in
+        let set_in_v = vec_set v in
+        let _ = set_in_v 0 7 in
+        vec_get v 0") in
+     if String.length c_src > 0 then "ok" else "empty")
+    "ok";
+
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
      `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
      per-field 取り出しを emit。 *)
