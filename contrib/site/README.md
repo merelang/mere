@@ -28,10 +28,12 @@ dune exec mere -- contrib/site/build.mere docs _site
 | input dir の `*.md` 列挙 | ✓ (`list_dir` + `Path.has_ext`) |
 | markdown → HTML 変換 | ✓ (`MarkdownHtml.render`) |
 | page title 抽出 (先頭 `# Title` 行 or ファイル名) | ✓ |
-| 共通 template (header / nav / footer) | ✓ (inline 100 行の CSS) |
-| navigation menu (全 pages を横並び) | ✓ |
+| 共通 template (header / nav / footer) | ✓ (外部 `style.css` + `<link>` 参照) |
+| navigation menu (全 pages 横並び、 current page は `active` class で highlight) | ✓ |
 | `index.html` (page list) | ✓ |
 | output dir 自動作成 | ✓ (`mkdir_p`) |
+| 外部 `style.css` 自動生成 (60+ 行、 nav / table / code / blockquote / list 等のスタイル) | ✓ |
+| fenced code block の language class (`<code class="language-mere">` 等) | ✓ (`mere`/`sh`/`ml` 等) |
 
 ## 非 MVP (将来 Phase)
 

@@ -361,9 +361,18 @@ let render = fn (lines: str list) ->
       let _ = close_table_if_open state out in
       let _ = close_list_if_open state out in
       // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
+      // Phase 44.5: ```<lang> なら <code class="language-<lang>"> として emit
       if in_code == 0 then
         let _ = map_set state "in_code" 1 in
-        let _ = strbuf_push out "<pre><code>" in
+        let lang = str_trim (substring line 3 (str_len line)) in
+        let _ = if str_len lang > 0 then
+                  let _ = strbuf_push out "<pre><code class=\"language-" in
+                  let _ = strbuf_push out lang in
+                  let _ = strbuf_push out "\">" in
+                  ()
+                else
+                  let _ = strbuf_push out "<pre><code>" in
+                  () in
         let _ = strbuf_push out "\n" in
         ()
       else
@@ -453,7 +462,7 @@ let doc = [
   "",
   "### Code example",
   "",
-  "```",
+  "```mere",
   "let x = 1 + 2 in",
   "print (show x)",
   "```",
