@@ -39,6 +39,40 @@ import "../path/path.mere";
 let is_md_file = fn (name: str) ->
   Path.has_ext name ".md";
 
+// front matter (YAML 縮小: `key: value` のみ) を parse
+//   入力: 全行 list、 出力: (metadata Map[str, str], remaining_lines str list)
+//   先頭行が `---` でなければ metadata は空 + 元 lines をそのまま返す
+let parse_front_matter = fn (lines: str list) ->
+  match lines with
+  | Nil ->
+    let m = map_new () in
+    (m, Nil)
+  | Cons (first, rest) ->
+    if first != "---" then
+      let m = map_new () in
+      (m, lines)
+    else
+      // `---` の next `---` までを metadata block として処理
+      let m = map_new () in
+      let rec parse_until_close = fn (xs) ->
+        match xs with
+        | Nil -> Nil
+        | Cons (line, rest_lines) ->
+          if line == "---" then rest_lines
+          else
+            // `key: value` 形式で分解 (最初の `:` で split)
+            let colon_idx = str_index_of line ":" in
+            let _ = if colon_idx > 0 then
+                      let key = str_trim (substring line 0 colon_idx) in
+                      let value = str_trim
+                        (substring line (colon_idx + 1) (str_len line)) in
+                      let _ = map_set m key value in ()
+                    else () in
+            parse_until_close rest_lines
+      in
+      let remaining = parse_until_close rest in
+      (m, remaining);
+
 // markdown 内の first `# Title` 行を探して title 文字列を返す
 //   見つからなければファイル名から ext を除いたものを default に
 let extract_title = fn (lines: str list) -> fn (default: str) ->
@@ -54,6 +88,91 @@ let extract_title = fn (lines: str list) -> fn (default: str) ->
 // するようになったため、 SSG 側の post-process pass は不要。 no-op として残置
 // (将来の追加 rewrite 用 hook)。
 let rewrite_links = fn (html: str) -> html;
+
+// id 用 slug: ASCII 英数字以外は `-` に、 連続 `-` は 1 つに、 lowercase
+let slugify = fn (s: str) ->
+  let n = str_len s in
+  let buf = strbuf_new () in
+  let rec loop = fn i -> fn prev_dash ->
+    if i >= n then ()
+    else
+      let c = char_at s i in
+      let is_ok = is_alpha c || is_digit c in
+      if is_ok then
+        let _ = strbuf_push buf (to_lower c) in
+        loop (i + 1) false
+      else if prev_dash then loop (i + 1) true
+      else
+        let _ = strbuf_push buf "-" in
+        loop (i + 1) true in
+  let _ = loop 0 true in
+  let raw = strbuf_to_str buf in
+  // 末尾の `-` を除去 (素朴に: trim でなくて再 scan)
+  let m = str_len raw in
+  if m > 0 && char_at raw (m - 1) == "-" then substring raw 0 (m - 1)
+  else raw;
+
+// markdown lines から h2/h3 heading を抽出し TOC の HTML を生成
+//   各 heading の slug を id にし、 anchor link で目次から飛べるように
+//   見出しがなければ "" を返す (TOC は空)
+let build_toc_html = fn (lines: str list) ->
+  let buf = strbuf_new () in
+  let _ = strbuf_push buf "<details class=\"toc\"><summary>Contents</summary><ul>" in
+  // counter で「目次に何か入れたか」 を追跡
+  let counter = map_new () in
+  let _ = map_set counter "n" 0 in
+  let _ = list_iter lines (fn line ->
+    let n = str_len line in
+    if n >= 4 && substring line 0 4 == "### " then
+      let text = substring line 4 n in
+      let slug = slugify text in
+      let _ = strbuf_push buf
+        ("<li style=\"margin-left:1em\"><a href=\"#" ++ slug ++ "\">"
+         ++ text ++ "</a></li>") in
+      let _ = map_set counter "n" (map_get counter "n" + 1) in
+      ()
+    else if n >= 3 && substring line 0 3 == "## " then
+      let text = substring line 3 n in
+      let slug = slugify text in
+      let _ = strbuf_push buf
+        ("<li><a href=\"#" ++ slug ++ "\">" ++ text ++ "</a></li>") in
+      let _ = map_set counter "n" (map_get counter "n" + 1) in
+      ()
+    else ()) in
+  let _ = strbuf_push buf "</ul></details>" in
+  if map_get counter "n" == 0 then ""
+  else strbuf_to_str buf;
+
+// rendered HTML の `<h2>TEXT</h2>` / `<h3>TEXT</h3>` を `id="slug"` 付き form に
+// 後段 str_replace。 TEXT は render_inline 通過後の HTML 文字列。
+// 各 h2/h3 行を上から順に走査し、 該当 heading の rendered HTML を作って
+// 1 回ずつ str_replace で置換する。 同じ heading text が複数ある場合は
+// 最初の出現のみ id 化される (MVP 制約、 大半の docs では問題なし)。
+let inject_heading_ids = fn (html: str) -> fn (lines: str list) ->
+  // 累積 string を Map に貯める (Mere には mutable string が無いので
+  // strbuf に push せず str_replace 結果を Map に保持)
+  let cur = map_new () in
+  let _ = map_set cur "html" html in
+  let _ = list_iter lines (fn line ->
+    let n = str_len line in
+    let level_text =
+      if n >= 4 && substring line 0 4 == "### " then
+        (3, substring line 4 n)
+      else if n >= 3 && substring line 0 3 == "## " then
+        (2, substring line 3 n)
+      else (0, "") in
+    let (level, text) = level_text in
+    if level == 0 then ()
+    else
+      let rendered = MarkdownHtml.render_inline text in
+      let tag = if level == 2 then "h2" else "h3" in
+      let old_html = "<" ++ tag ++ ">" ++ rendered ++ "</" ++ tag ++ ">" in
+      let new_html = "<" ++ tag ++ " id=\"" ++ slugify text ++ "\">"
+                     ++ rendered ++ "</" ++ tag ++ ">" in
+      let _ = map_set cur "html"
+                (str_replace (map_get cur "html") old_html new_html) in
+      ()) in
+  map_get cur "html";
 
 // JSON 用 string escape: `"` `\` `\n` `\t` を実体に変換、 制御文字は \uXXXX
 // 化せず (MVP) ASCII printable のみそのまま。 control char は space に
@@ -168,7 +287,17 @@ let style_css =
   "  overflow-y: auto;\n" ++
   "}\n" ++
   "#search-results ul \{ list-style: none; padding-left: 0; margin: 0; }\n" ++
-  "#search-results li \{ margin: 0.4em 0; }\n";
+  "#search-results li \{ margin: 0.4em 0; }\n" ++
+  ".toc \{\n" ++
+  "  background: #f7fafc;\n" ++
+  "  border: 1px solid #e2e8f0;\n" ++
+  "  border-radius: 4px;\n" ++
+  "  padding: 0.5em 1em;\n" ++
+  "  margin-bottom: 2em;\n" ++
+  "}\n" ++
+  ".toc summary \{ cursor: pointer; font-weight: 600; color: #1a202c; }\n" ++
+  ".toc ul \{ list-style: none; padding-left: 0.5em; margin: 0.5em 0; }\n" ++
+  ".toc li \{ margin: 0.2em 0; font-size: 0.95em; }\n";
 
 // search.json を fetch + substring filter で簡易検索する vanilla JS
 //   nav の search input に typing すると 100ms debounce で search.json を fetch、
@@ -269,16 +398,24 @@ let render_nav = fn (pages: str list) -> fn (current_name: str) ->
 
 // 1 file を変換: input_dir/name.md → output_dir/name.html
 //   nav は per-page で render (current page を active にするため)
+//   front matter (`--- title: ... ---`) があれば title を上書き
 let process_page = fn (dev_mode: bool) -> fn (input_dir: str) ->
                    fn (output_dir: str) -> fn (pages: str list) -> fn (name: str) ->
   let in_path = Path.join input_dir name in
   let out_name = Path.drop_ext name ++ ".html" in
   let out_path = Path.join output_dir out_name in
   let content = read_file in_path in
-  let lines = str_split content "\n" in
-  let title = extract_title lines (Path.drop_ext name) in
+  let all_lines = str_split content "\n" in
+  let (meta, lines) = parse_front_matter all_lines in
+  // title 優先順: front matter `title:` > 先頭 `# ...` 行 > ファイル名
+  let title =
+    if map_has meta "title" then map_get meta "title"
+    else extract_title lines (Path.drop_ext name) in
+  let toc = build_toc_html lines in
   let body = MarkdownHtml.render lines in
+  let body = inject_heading_ids body lines in
   let body = rewrite_links body in
+  let body = toc ++ body in
   let nav_html = render_nav pages (Path.drop_ext name) in
   let html = html_template dev_mode title nav_html body in
   let _ = write_file out_path html in
@@ -303,17 +440,23 @@ let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
 
 // 1 page の search index entry を JSON object 文字列で組み立てる:
 //   `{"name":"tutorial","title":"...","url":"tutorial.html","content":"..."}`
+//   title は front matter `title:` 優先、 content は body のみ (front matter は除外)
 let build_search_entry = fn (input_dir: str) -> fn (name: str) ->
   let in_path = Path.join input_dir name in
   let content = read_file in_path in
-  let lines = str_split content "\n" in
+  let all_lines = str_split content "\n" in
+  let (meta, lines) = parse_front_matter all_lines in
   let label = Path.drop_ext name in
-  let title = extract_title lines label in
+  let title =
+    if map_has meta "title" then map_get meta "title"
+    else extract_title lines label in
+  // body content だけを join (front matter は search 対象外)
+  let body_content = str_join "\n" lines in
   let url = label ++ ".html" in
   "\{\"name\":\"" ++ escape_json_str label ++ "\","
   ++ "\"title\":\"" ++ escape_json_str title ++ "\","
   ++ "\"url\":\"" ++ escape_json_str url ++ "\","
-  ++ "\"content\":\"" ++ escape_json_str content ++ "\"}";
+  ++ "\"content\":\"" ++ escape_json_str body_content ++ "\"}";
 
 // 全 page の search index を JSON array 文字列に
 let build_search_index_json = fn (input_dir: str) -> fn (pages: str list) ->
@@ -331,7 +474,23 @@ let build_search_index_json = fn (input_dir: str) -> fn (pages: str list) ->
   let _ = strbuf_push buf "]" in
   strbuf_to_str buf;
 
-// 1 回 build (一連の page conversion + style.css + index.html + search.json)
+// sitemap.xml を組み立てる (`base_url` は env / config から取れない MVP では
+// 相対 URL のみ。 GH Pages 等で絶対 URL が要る場合は user 側で post-process)
+let build_sitemap_xml = fn (pages: str list) ->
+  let buf = strbuf_new () in
+  let _ = strbuf_push buf "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" in
+  let _ = strbuf_push buf "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" in
+  let _ = strbuf_push buf "  <url><loc>index.html</loc></url>\n" in
+  let _ = list_iter pages (fn name ->
+    let label = Path.drop_ext name in
+    let _ = strbuf_push buf
+      ("  <url><loc>" ++ label ++ ".html</loc></url>\n") in
+    ()) in
+  let _ = strbuf_push buf "</urlset>\n" in
+  strbuf_to_str buf;
+
+// 1 回 build (一連の page conversion + style.css + index.html + search.json
+// + sitemap.xml + .nojekyll)
 let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str) ->
   let _ = mkdir_p output_dir in
   let all_entries = list_dir input_dir in
@@ -341,6 +500,11 @@ let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str
   let _ = render_index dev_mode output_dir pages in
   let _ = write_file (Path.join output_dir "search.json")
                      (build_search_index_json input_dir pages) in
+  // sitemap.xml — SEO / crawler 用
+  let _ = write_file (Path.join output_dir "sitemap.xml")
+                     (build_sitemap_xml pages) in
+  // .nojekyll — GitHub Pages が Jekyll 処理をスキップする marker file
+  let _ = write_file (Path.join output_dir ".nojekyll") "" in
   print ("Done. " ++ show (list_len pages) ++ " pages converted.");
 
 // 全 .md の mtime を str に集約 (snapshot signature)

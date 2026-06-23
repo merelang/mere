@@ -40,6 +40,10 @@ dune exec mere -- contrib/site/build.mere --watch docs _site
 | 外部 `style.css` 自動生成 (60+ 行、 nav / table / code / blockquote / list / search 等のスタイル) | ✓ |
 | fenced code block の language class (`<code class="language-mere">` 等) | ✓ (`mere`/`sh`/`ml` 等) |
 | クライアントサイド検索 (`search.json` + vanilla JS で全文検索 + 抜粋表示) | ✓ |
+| front matter (YAML 縮小: `--- title: ... date: ... ---`) | ✓ (title 上書き対応) |
+| per-page TOC (h2/h3 から自動生成、 anchor link 付き、 `<details>` で collapse) | ✓ (ASCII 英数字以外は `-` に slugify、 Japanese 等は同一 slug 衝突可能性あり) |
+| `sitemap.xml` 自動生成 | ✓ (相対 URL、 SEO / crawler 用) |
+| `.nojekyll` 自動配置 (GitHub Pages の Jekyll 処理抑止) | ✓ |
 
 ## 非 MVP (将来 Phase)
 
