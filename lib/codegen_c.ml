@@ -1061,6 +1061,25 @@ let rec emit_expr (e : Ast.expr) : string =
          | _ -> None)
       | _ -> None
     in
+    (* Phase 38.A1: 単引数 builtin (int_of_str / str_len / not / ord 等) も
+       value 位置で使えるよう eta synthesis 対象に。 同じ synthesize_curried_eta
+       が arity 1 でも動くので、 各 builtin の直接呼出 fast path (line 1614 等)
+       に inner App が乗る。 *)
+    let is_single_arg_value_builtin =
+      name = "int_of_str" || name = "str_of_int"
+      || name = "str_len" || name = "str_rev" || name = "str_trim"
+      || name = "str_unescape"
+      || name = "ord" || name = "chr"
+      || name = "to_upper" || name = "to_lower"
+      || name = "not" || name = "abs" || name = "even" || name = "odd"
+      || name = "bool_of_str"
+      || name = "float_of_int" || name = "int_of_float"
+      || name = "str_of_float" || name = "float_of_str"
+      || name = "f_neg" || name = "f_abs"
+      || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "print" || name = "fail"
+      || name = "fst" || name = "snd"
+    in
     if not is_shadowed && is_curried_collection_builtin && is_phase38c_target then
       (match try_eta () with
        | Some s -> s
@@ -1070,6 +1089,12 @@ let rec emit_expr (e : Ast.expr) : string =
     else if not is_shadowed && is_curried_collection_builtin then
       unsupported e.loc
         (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数 builtin は直接 application のみ対応、first-class value 用法は Phase 38.C で進行中、 現状 owned_vec_push のみ spike 実装済)")
+    else if not is_shadowed && is_single_arg_value_builtin then
+      (match try_eta () with
+       | Some s -> s
+       | None ->
+         unsupported e.loc
+           (name ^ " as a value: type is polymorphic, can't monomorphize (Phase 38.A1 MVP: use a fn wrapper `fn x -> " ^ name ^ " x` or constrain types at use site)"))
     else if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.loc
         (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)")

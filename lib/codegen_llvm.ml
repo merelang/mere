@@ -2334,13 +2334,35 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          | _ -> None)
       | _ -> None
     in
+    (* Phase 38.A1: 単引数 builtin の value 化 *)
+    let is_single_arg_value_builtin =
+      name = "int_of_str" || name = "str_of_int"
+      || name = "str_len" || name = "str_rev" || name = "str_trim"
+      || name = "str_unescape"
+      || name = "ord" || name = "chr"
+      || name = "to_upper" || name = "to_lower"
+      || name = "not" || name = "abs" || name = "even" || name = "odd"
+      || name = "bool_of_str"
+      || name = "float_of_int" || name = "int_of_float"
+      || name = "str_of_float" || name = "float_of_str"
+      || name = "f_neg" || name = "f_abs"
+      || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "print" || name = "fail"
+      || name = "fst" || name = "snd"
+    in
     let eta38c_opt =
       if not is_shadowed && is_curried_collection_builtin && is_phase38c_target
-      then try_eta_llvm () else None
+      then try_eta_llvm ()
+      else if not is_shadowed && is_single_arg_value_builtin
+      then try_eta_llvm ()
+      else None
     in
     if not is_shadowed && is_curried_collection_builtin && eta38c_opt = None then
       unsupported e.Ast.loc
         (name ^ " as a value (Phase 15.3〜15.10: curried 多引数 builtin は直接 application のみ対応、 Phase 38.C で部分対応中)");
+    if not is_shadowed && is_single_arg_value_builtin && eta38c_opt = None then
+      unsupported e.Ast.loc
+        (name ^ " as a value: type is polymorphic (Phase 38.A1 MVP: `fn x -> " ^ name ^ " x` で wrap して回避)");
     if not is_shadowed && is_nullary_factory && eta_value_str_opt = None then
       unsupported e.Ast.loc
         (name ^ " as a value: return type is polymorphic, can't monomorphize \

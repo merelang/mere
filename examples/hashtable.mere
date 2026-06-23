@@ -29,13 +29,13 @@ let vs_key = fn (b: int) -> "b" ++ show b ++ "_v";
 let ht_keys_in_bucket = fn h -> fn (b: int) ->
   if map_has h (ks_key b) then
     let s = map_get h (ks_key b) in
-    list_map (str_split s ",") (fn x -> int_of_str x)
+    list_map (str_split s ",") int_of_str
   else (Nil: int list);
 
 let ht_values_in_bucket = fn h -> fn (b: int) ->
   if map_has h (vs_key b) then
     let s = map_get h (vs_key b) in
-    list_map (str_split s ",") (fn x -> int_of_str x)
+    list_map (str_split s ",") int_of_str
   else (Nil: int list);
 
 let join_ints = fn (xs: int list) ->

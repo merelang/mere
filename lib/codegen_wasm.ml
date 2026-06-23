@@ -1098,9 +1098,30 @@ let rec emit_expr (e : Ast.expr) : unit =
       || name = "map_get" || name = "map_has"
       || name = "map_set" || name = "vec_set"
     in
+    (* Phase 38.A1: 単引数 builtin の value 化 *)
+    let is_single_arg_value_builtin =
+      name = "int_of_str" || name = "str_of_int"
+      || name = "str_len" || name = "str_rev" || name = "str_trim"
+      || name = "str_unescape"
+      || name = "ord" || name = "chr"
+      || name = "to_upper" || name = "to_lower"
+      || name = "not" || name = "abs" || name = "even" || name = "odd"
+      || name = "bool_of_str"
+      || name = "float_of_int" || name = "int_of_float"
+      || name = "str_of_float" || name = "float_of_str"
+      || name = "f_neg" || name = "f_abs"
+      || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "print" || name = "fail"
+      || name = "fst" || name = "snd"
+    in
     let phase38c_emittable =
-      if not is_shadowed && is_curried_collection_builtin && is_phase38c_target
-      then
+      let curried_ok =
+        not is_shadowed && is_curried_collection_builtin && is_phase38c_target
+      in
+      let single_ok =
+        not is_shadowed && is_single_arg_value_builtin
+      in
+      if curried_ok || single_ok then
         match e.Ast.ty with
         | Some t when ty_is_concrete (Ast.walk t) ->
           (match Ast.walk t with
@@ -1113,6 +1134,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.4〜15.10: curried 多引数 builtin は直接 application のみ対応、 Phase 38.C で部分対応中)"));
+    if not is_shadowed && is_single_arg_value_builtin && not phase38c_emittable then
+      raise (Codegen_error (e.Ast.loc,
+        "unsupported in Wasm codegen subset: " ^ name
+        ^ " as a value: type is polymorphic (Phase 38.A1 MVP: `fn x -> " ^ name ^ " x` で wrap)"));
     if not is_shadowed && is_nullary_factory && eta_table_idx_opt = None then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
