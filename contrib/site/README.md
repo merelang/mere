@@ -54,14 +54,12 @@ binary `.wasm` の cp を組み合わせた wrapper (Mere の `read_file` / `wri
 
 ## 非 MVP (将来 Phase)
 
-- front matter (YAML 縮小) で metadata
-- `[X](foo.md)` → `<a href="foo.html">X</a>` link rewrite (現状 markdown converter が link 未対応のため pass-through)
-- syntax highlight (code block)
-- asset copy (`style.css` / images の static copy)
-- 検索 index (lunr.js 風)
-- multi-version / i18n
-- live reload / dev server
-- code block (` ``` ` fenced) 対応 (MarkdownHtml の課題)
+- multi-version / i18n (語族別 docs、 versioned URL)
+- live reload — websocket-based push reload (現状は polling watch mode)
+- images の static copy (現状 `style.css` のみ auto-emit、 docs に画像追加時に必要)
+- 検索 index の lunr.js 化 (現状 substring filter、 大規模 docs で重くなったら)
+- katex / mathjax 等の math 数式レンダリング
+- mermaid 等の diagram レンダリング
 
 ## 構成
 
