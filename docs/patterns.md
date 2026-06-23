@@ -514,6 +514,14 @@ ML 系の経験者は K と V だけで書きがちだが、 Mere は region 必
 
 ### 8. inner-lifted fn の closure capture が anonymous Fun 経由で漏れる
 
+⚠️ **2026-06-23 Phase 38 セッション時点で defer**: 3 backend で per-use-site の
+adapter generation + env allocation を実装する必要があり、 Phase 38.C の
+synthesize approach では captures が free_vars に上がらないため不十分。
+patterns §8 の workaround (iterative / explicit state-passing / mutual
+recursion) で十分に書けるため、 dogfood で痛みが顕在化するまで defer。
+DEFERRED に Phase 39.A2 として追跡。
+
+
 関数の中で `let rec foo = fn ...` を定義し、 そこから outer scope の変数を
 参照しつつ、 `list_iter ... (fn v -> foo v)` のような anonymous closure
 経由で呼ぶと、 C codegen が `foo` 内の closure capture を anonymous closure
