@@ -5,10 +5,9 @@
 // のみ)。 実用には α-rename が要るが、 demo の Church numeral では衝突回避
 // 可能な named scheme で書く。
 //
-// 実行モード: interp + C + LLVM で diff = 0。 Wasm は深い variant 再帰で
-// 現状 runtime trap (要調査、 Wasm の stack / heap limit 周り疑い)。
-// `step` の Lam 再帰節を外せば Wasm でも HNF まで動くが、 完全な normal
-// form が出ないため demo の Church arithmetic が成立しない。
+// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// (Phase 38.C1 で Wasm の nested constructor pattern unconditional deref
+// バグを fix した後、 4 backend parity 達成)。
 
 type lambda =
   | Var of str

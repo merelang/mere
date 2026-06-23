@@ -2230,12 +2230,26 @@ let rec emit_expr (e : Ast.expr) : unit =
         (match sub, pty_opt with
          | None, _ -> (tag_cond, [])
          | Some sub_pat, Some pty ->
+           (* Phase 38.C1 fix: sub-pattern の payload deref を outer tag
+              チェックでガード。 unconditional load offset=4 + 更に深い deref
+              は、 outer tag が不一致のとき間違った memory を読みに行って
+              trap する (lambda_calc.mere の `LApp (Lam (x, b), arg)` で
+              発覚)。 `if tag_cond then sub_cond else 0 end` で sub-pattern
+              の load / dereference を tag 一致時のみ実行する。 *)
            let pl_slot = fresh_local () in
+           let result_slot = fresh_local () in
+           emit_instr (Printf.sprintf "local.get %d" tag_cond);
+           emit_instr "if (result i32)";
            emit_instr (Printf.sprintf "local.get %d" v_slot);
            emit_instr "i32.load offset=4";
            emit_instr (Printf.sprintf "local.set %d" pl_slot);
            let (sub_cond, sub_bs) = compile_pat sub_pat pl_slot pty in
-           (combine_and tag_cond sub_cond, sub_bs)
+           emit_instr (Printf.sprintf "local.get %d" sub_cond);
+           emit_instr "else";
+           emit_instr "i32.const 0";
+           emit_instr "end";
+           emit_instr (Printf.sprintf "local.set %d" result_slot);
+           (result_slot, sub_bs)
          | Some _, None ->
            unsupported pat.Ast.ploc
              ("pattern has payload but constructor `" ^ cname ^
