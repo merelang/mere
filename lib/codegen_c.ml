@@ -2040,6 +2040,11 @@ let rec emit_expr (e : Ast.expr) : string =
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_has(%s, %s)"
          k_tag v_tag (emit_expr m_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "map_delete"; _ }, m_e) ->
+       (* Phase 39.A' #2: map_delete m k — runtime helper を呼ぶ。 *)
+       let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_delete(%s, %s)"
+         k_tag v_tag (emit_expr m_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e) ->
        (* map_set m k v : outer arg = v、inner App arg = k、innermost = m *)
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
@@ -3665,7 +3670,24 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "";
       (* len *)
       Printf.sprintf "static int %s_len(%s* m) { return m->len; }"
-        struct_name struct_name ]
+        struct_name struct_name;
+      "";
+      (* Phase 39.A' #2: delete — 該当 key を keys / values array から
+         shift して詰める。 不在は no-op。 *)
+      Printf.sprintf "static int %s_delete(%s* m, %s k) {"
+        struct_name struct_name c_k;
+      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "    if (%s) {" (key_eq_expr "m->keys[i]" "k");
+      "      for (int j = i; j < m->len - 1; j++) {";
+      "        m->keys[j] = m->keys[j+1];";
+      "        m->values[j] = m->values[j+1];";
+      "      }";
+      "      m->len--;";
+      "      return 0;";
+      "    }";
+      "  }";
+      "  return 0;";
+      "}" ]
 
 (* Phase 15.9: StrBuf[R] runtime — region-allocated mutable string buffer.
    Single-instance (StrBuf has no element type parameter, it's always bytes).

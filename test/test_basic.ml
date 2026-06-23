@@ -2768,11 +2768,13 @@ let () =
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "} __anon_6_env;";
+    "  closure_int_int f;\n} __anon_7_env;";   (* Phase 39.A' で list_sort_by / list_sort_insert / list_sort
+                             の lambda が 6 slot 消費し、user の `fn x -> f x` (captures f) は
+                             slot 7 (env field `closure_int_int f` で唯一識別可能) *)
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "static int __anon_6_fn(void* __env_self_void, int x)";
+    "static int __anon_7_fn(void* __env_self_void, int x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -4947,6 +4949,29 @@ let () =
     (Pipeline.process
        "let m = map_new () in { map_set m \"a\" 1; map_set m \"b\" 2; len m }") "2";
 
+  (* --- Phase 39.A' #2: map_delete (K to remove an entry) --- *)
+  check "map_delete: removes key, map_has returns false"
+    (Pipeline.process
+       "let m = map_new () in \
+        let __ = map_set m \"a\" 1 in \
+        let __ = map_set m \"b\" 2 in \
+        let __ = map_delete m \"a\" in \
+        if map_has m \"a\" then 0 else 1") "1";
+  check "map_delete: map_len decreases after delete"
+    (Pipeline.process
+       "let m = map_new () in \
+        let __ = map_set m \"a\" 1 in \
+        let __ = map_set m \"b\" 2 in \
+        let __ = map_set m \"c\" 3 in \
+        let __ = map_delete m \"b\" in \
+        map_len m") "2";
+  check "map_delete: deleting missing key is a no-op"
+    (Pipeline.process
+       "let m = map_new () in \
+        let __ = map_set m \"a\" 1 in \
+        let __ = map_delete m \"absent\" in \
+        map_len m") "1";
+
   (* --- Phase 19.2: map_iter (K -> V -> unit, applied to each entry) --- *)
   check "map_iter: type"
     (Pipeline.type_of "map_iter")
@@ -5757,9 +5782,32 @@ let () =
         + Phase 36 (sugar 期): 1 range + 4 list helpers + 3 flatten
         + Phase 36 (helper batch): 8 helpers
           (list_zip / list_for_all / list_any / list_member /
-           list_sum / list_product / list_max / list_min) = 34 total *)
+           list_sum / list_product / list_max / list_min)
+        + Phase 39.A' (sort helpers): 3 (list_sort_insert / list_sort_by /
+           list_sort) = 37 total *)
      string_of_int (List.length prog.Ast.decls))
-    "34";
+    "37";
+
+  (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
+  check "list_sort_by: ascending int sort"
+    (Pipeline.process
+       "let xs = list_sort_by (fn a -> fn b -> a < b) (Cons (3, Cons (1, Cons (2, Nil)))) in \
+        match xs with \
+        | Cons (a, Cons (b, Cons (c, Nil))) -> a * 100 + b * 10 + c \
+        | _ -> -1") "123";
+  check "list_sort_by: descending int sort"
+    (Pipeline.process
+       "let xs = list_sort_by (fn a -> fn b -> a > b) (Cons (1, Cons (3, Cons (2, Nil)))) in \
+        match xs with \
+        | Cons (a, Cons (b, Cons (c, Nil))) -> a * 100 + b * 10 + c \
+        | _ -> -1") "321";
+  check "list_sort: natural-order shorthand"
+    (Pipeline.process
+       "let xs = list_sort (Cons (5, Cons (2, Cons (4, Cons (1, Cons (3, Nil)))))) in \
+        list_fold xs 0 (fn acc -> fn x -> acc * 10 + x)") "12345";
+  check "list_sort: empty list"
+    (Pipeline.process
+       "match list_sort (Nil: int list) with | Nil -> 0 | Cons _ -> -1") "0";
 
   (* Phase 19.5: Option / Result also available without declare. *)
   check "prelude: Option (Some / None) works without declare"

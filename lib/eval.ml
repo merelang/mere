@@ -986,6 +986,20 @@ let builtin_map_len =
     | V_map (tbl, _) -> V_int (Hashtbl.length tbl)
     | _ -> failwith "map_len: expected Map")
 
+(* Phase 39.A' #2: map_delete — Hashtbl.remove。 key 不在は no-op。
+   Phase 27.1 insertion-order を維持するため、 keys list からも除去。 *)
+let builtin_map_delete =
+  V_builtin ("map_delete", fun v ->
+    match v with
+    | V_map (tbl, keys) ->
+      V_builtin ("map_delete_p1", fun k ->
+        if Hashtbl.mem tbl k then begin
+          Hashtbl.remove tbl k;
+          keys := List.filter (fun kk -> kk <> k) !keys
+        end;
+        V_unit)
+    | _ -> failwith "map_delete: expected Map")
+
 (* Phase 19.2: map_iter — apply (K -> V -> unit) to each entry.
    Note: defined here for grouping with other map_* builtins, but
    uses apply_value_ref which is defined later. The forward-reference
@@ -1638,6 +1652,7 @@ let initial_env : env =
     ("map_get",        ref builtin_map_get);
     ("map_has",        ref builtin_map_has);
     ("map_len",        ref builtin_map_len);
+    ("map_delete",     ref builtin_map_delete);
     ("len",            ref builtin_len);
   ]
 

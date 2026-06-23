@@ -1894,6 +1894,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr m_e;
     emit_expr k_e;
     emit_instr (Printf.sprintf "call $mere_map_%s_has" k_tag)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_delete"; _ }, m_e); _ }, k_e) ->
+    (* Phase 39.A' #2: map_delete m k *)
+    let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr m_e;
+    emit_expr k_e;
+    emit_instr (Printf.sprintf "call $mere_map_%s_delete" k_tag)
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e); _ }, v_e) ->
     let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
@@ -4330,8 +4337,40 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
                 (i32.load offset=4 (local.get $inner_cl))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
+    (i32.const 0))
+  ;; Phase 39.A' #2: map_delete — key 一致したら keys/values を shift して詰める
+  (func $mere_map_%s_delete (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $find_done
+      (loop $find_lp
+        (br_if $find_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $mere_map_key_eq_%s
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            (local.set $j (local.get $i))
+            (block $shift_done
+              (loop $shift_lp
+                (br_if $shift_done (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
+                (i32.store
+                  (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 4)))
+                  (i32.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (i32.store
+                  (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 4)))
+                  (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                (br $shift_lp)))
+            (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
+            (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $find_lp)))
     (i32.const 0))"
-    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
 let map_int_runtime_wasm = {|
   (func $mere_map_int_new (result i32)
@@ -4446,7 +4485,39 @@ let map_int_runtime_wasm = {|
         (br $scan_lp)))
     (i32.const 0))
   (func $mere_map_int_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))|}
+    (i32.load offset=8 (local.get $m)))
+  ;; Phase 39.A' #2: map_delete (int key 版)
+  (func $mere_map_int_delete (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $find_done
+      (loop $find_lp
+        (br_if $find_done (i32.eq (local.get $i) (local.get $len)))
+        (if (i32.eq
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            (local.set $j (local.get $i))
+            (block $shift_done
+              (loop $shift_lp
+                (br_if $shift_done (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
+                (i32.store
+                  (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 4)))
+                  (i32.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (i32.store
+                  (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 4)))
+                  (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                (br $shift_lp)))
+            (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
+            (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $find_lp)))
+    (i32.const 0))|}
 
 (* Same shape with $__lang_streq for key comparison (str keys). *)
 let map_str_runtime_wasm = {|
@@ -4564,7 +4635,40 @@ let map_str_runtime_wasm = {|
         (br $scan_lp)))
     (i32.const 0))
   (func $mere_map_str_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))|}
+    (i32.load offset=8 (local.get $m)))
+  ;; Phase 39.A' #2: map_delete (str key 版) — key 一致したら keys/values を shift
+  (func $mere_map_str_delete (param $m i32) (param $k i32) (result i32)
+    (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (block $find_done
+      (loop $find_lp
+        (br_if $find_done (i32.eq (local.get $i) (local.get $len)))
+        (if (call $__lang_streq
+              (i32.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 4))))
+              (local.get $k))
+          (then
+            ;; shift from i to len-1
+            (local.set $j (local.get $i))
+            (block $shift_done
+              (loop $shift_lp
+                (br_if $shift_done (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
+                (i32.store
+                  (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 4)))
+                  (i32.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (i32.store
+                  (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 4)))
+                  (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                (br $shift_lp)))
+            (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
+            (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $find_lp)))
+    (i32.const 0))|}
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;

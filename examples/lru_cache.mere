@@ -29,20 +29,20 @@ let bump_tick = fn access ->
 // 痛み観察 (dogfood note #1): Map V 型は uniform。 key (str) と min_tick (int)
 // を 1 Map に同居できないので、 2 つの Map で分けるか str に encode する必要
 // あり。 ad-hoc multi-value Map / sum-typed Map value が欲しくなる場面。
+//
+// 2026-06-23 update (Phase 39.A' #2): map_delete builtin が追加されたので、
+// sentinel value (-1) で削除を表現する hack は不要になった。 単純な
+// "v < min" 比較で OK (deleted key は access から消えているので比較に出てこない)。
 let find_lru_key = fn access ->
   let best_key = map_new () in
   let best_tick = map_new () in
   let _ = map_set best_key "k" "" in
   let _ = map_set best_tick "t" 999999 in
-  // 痛み観察 (dogfood note #2): map_delete builtin が無いため、 削除を
-  // sentinel value (-1) で表現。 find_lru_key は v > 0 でフィルタする必要あり。
-  // user-defined Map なら delete 操作を持てるが、 builtin Map に delete を
-  // 追加すべき trigger としては存在。
   let _ = map_iter access (fn k -> fn v ->
     let starts_underscore =
       if str_len k == 0 then false
       else char_at k 0 == "_" in
-    if not starts_underscore && v > 0 then
+    if not starts_underscore then
       if v < (map_get best_tick "t") then
         let _ = map_set best_key "k" k in
         let _ = map_set best_tick "t" v in
@@ -67,10 +67,9 @@ let put = fn cache -> fn (key: str) -> fn (value: str) ->
     let cap = map_get access "_cap" in
     if user_count > cap then
       let lru = find_lru_key access in
-      let _ = map_set storage lru "" in     // 削除を表現する placeholder
-      // 真の delete が無いので "_deleted_<key>" flag に倒す
-      let _ = map_set access lru (0 - 1) in  // mark as deleted (negative tick)
-      let _ = map_set access ("_deleted_" ++ lru) 1 in
+      // Phase 39.A' #2: map_delete を使う (旧 sentinel hack を撤去)
+      let _ = map_delete storage lru in
+      let _ = map_delete access lru in
       ()
     else ()
   else ();
@@ -78,7 +77,7 @@ let put = fn cache -> fn (key: str) -> fn (value: str) ->
 let get = fn cache -> fn (key: str) ->
   let storage = fst cache in
   let access = snd cache in
-  if map_has storage key && (map_get access key) > 0 then
+  if map_has storage key then
     let t = bump_tick access in
     let _ = map_set access key t in
     Some (map_get storage key)

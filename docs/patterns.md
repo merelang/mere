@@ -603,6 +603,32 @@ closure 化を担当して正しく動く。 1 文字増えるだけの軽い wo
 将来的には Phase 38.C の synthesize_curried_eta を 1-arg builtin にも拡張
 すれば不要になる (low-priority、 issue 駆動)。
 
+### 12. list literal 内 record literal は `Type {…}` 必須 (型名 prefix を付ける)
+
+list literal 中の record literal は **必ず `TypeName { ... }` の形** で書く。
+field-only の `{ x = 1, y = 2 }` だと parse 時に「list の構造の途中」と読まれて
+意図と違う場所で literal が途切れる:
+
+```mere
+type Point = { x: int, y: int };
+
+// NG (parse error または奇妙な型エラー)
+let ps = [{ x = 1, y = 2 }, { x = 3, y = 4 }];
+
+// OK: 各 record literal に Type prefix
+let ps = [Point { x = 1, y = 2 }, Point { x = 3, y = 4 }];
+```
+
+理由: `[` の直後の `{ … }` を独立 record literal として recover する経路が
+parser にない。 record literal を expression として確実に閉じるには `TypeName {`
+が必要で、 mid-list の record でも同じく prefix が要る。
+
+**さらに**: record type 名は **大文字始まり** (`Point` / `Task` / `User`) で書くと
+literal-only contexts (list element / match arm の右辺) で曖昧性が出にくく、
+patterns / examples とも一貫する。 小文字始まりの型名 (`type point = { ... }`)
+は constructor 構文と区別しづらく、 task_scheduler.mere で `type task` から
+`type Task` への rewrite が必要になった (2026-06-23 dogfood)。
+
 ### 11. 3-tuple 以上の destructure は `fst`/`snd` でなく `let (a, b, c) = ...`
 
 `fst` / `snd` は 2-tuple 専用。 3-tuple 以上のアクセスはパターンで

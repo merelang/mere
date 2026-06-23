@@ -3501,6 +3501,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i1 @mere_map_%s_%s_has(ptr %s, %s %s)"
                   r k_tag v_tag av (llvm_ty_of k_ty) kv);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_delete"; _ }, m_e); _ }, k_e) ->
+    (* Phase 39.A' #2: map_delete m k *)
+    let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
+    let (k_ty, _) = Hashtbl.find map_instances (k_tag ^ "__" ^ v_tag) in
+    let av = emit_expr env m_e in
+    let kv = emit_expr env k_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_map_%s_%s_delete(ptr %s, %s %s)"
+                  r k_tag v_tag av (llvm_ty_of k_ty) kv);
+    r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e); _ }, v_e) ->
     (* map_set m k v *)
     let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
@@ -6020,6 +6031,55 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len = load i32, ptr %lp";
       "  ret i32 %len";
+      "}";
+      "";
+      (* Phase 39.A' #2: delete — key を keys/values から shift して詰める *)
+      Printf.sprintf "define i32 @%s_delete(ptr %%m, %s %%k) {" fn_prefix c_k;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" struct_name;
+      "  %values = load ptr, ptr %vp";
+      "  br label %find_check";
+      "find_check:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %find_cont ]";
+      "  %done = icmp sge i32 %i, %len";
+      "  br i1 %done, label %not_found, label %find_body";
+      "find_body:";
+      Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%i" c_k;
+      Printf.sprintf "  %%cur_k = load %s, ptr %%kslot" c_k;
+      emit_key_eq "%cur_k" "%k" "%eq";
+      "  br i1 %eq, label %shift_init, label %find_cont";
+      "find_cont:";
+      "  %i_next = add i32 %i, 1";
+      "  br label %find_check";
+      "shift_init:";
+      "  %found_at = phi i32 [ %i, %find_body ]";
+      "  br label %shift_check";
+      "shift_check:";
+      "  %j = phi i32 [ %found_at, %shift_init ], [ %j_next, %shift_body ]";
+      "  %j1 = add i32 %j, 1";
+      "  %shift_done = icmp sge i32 %j1, %len";
+      "  br i1 %shift_done, label %decrement, label %shift_body";
+      "shift_body:";
+      Printf.sprintf "  %%dst_k = getelementptr %s, ptr %%keys, i32 %%j" c_k;
+      Printf.sprintf "  %%src_k = getelementptr %s, ptr %%keys, i32 %%j1" c_k;
+      Printf.sprintf "  %%v_k = load %s, ptr %%src_k" c_k;
+      Printf.sprintf "  store %s %%v_k, ptr %%dst_k" c_k;
+      Printf.sprintf "  %%dst_v = getelementptr %s, ptr %%values, i32 %%j" c_v;
+      Printf.sprintf "  %%src_v = getelementptr %s, ptr %%values, i32 %%j1" c_v;
+      Printf.sprintf "  %%v_v = load %s, ptr %%src_v" c_v;
+      Printf.sprintf "  store %s %%v_v, ptr %%dst_v" c_v;
+      "  %j_next = add i32 %j, 1";
+      "  br label %shift_check";
+      "decrement:";
+      "  %newlen = sub i32 %len, 1";
+      "  store i32 %newlen, ptr %lp";
+      "  ret i32 0";
+      "not_found:";
+      "  ret i32 0";
       "}" ]
 
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic type. Region-

@@ -17,27 +17,13 @@ type Task = { id: int, name: str, priority: int, duration: int };
 // task の比較: 高 priority が先、 同 priority なら低 id が先
 // (痛み観察 #3: 比較関数を毎回手書きする必要。 trait Ord があれば
 // `task: Ord` と書くだけで sort などに渡せる。 現状は explicit に渡す)
+//
+// 2026-06-23 update (Phase 39.A' #4): list_sort_by が prelude に追加されたので
+// 自前 insertion sort (旧 insert_task / sort_tasks_aux / sort_tasks) は撤去。
+// 比較関数だけ user が書けば prelude の list_sort_by に渡せる。
 let task_higher_priority = fn (a: Task) -> fn (b: Task) ->
   if a.priority != b.priority then a.priority > b.priority
   else a.id < b.id;
-
-// 比較関数を使って int list を sort (insertion sort)
-// (痛み観察 #4: list_sort 等の generic sort builtin がない。
-// 比較関数を毎回手書きする必要)
-let rec insert_task = fn (cmp: Task -> Task -> bool) -> fn (xs: Task list) -> fn (x: Task) ->
-  match xs with
-  | Nil -> Cons (x, Nil)
-  | Cons (h, t) ->
-    if cmp x h then Cons (x, xs)
-    else Cons (h, insert_task cmp t x);
-
-let rec sort_tasks_aux = fn (cmp: Task -> Task -> bool) -> fn (xs: Task list) -> fn (acc: Task list) ->
-  match xs with
-  | Nil -> acc
-  | Cons (h, t) -> sort_tasks_aux cmp t (insert_task cmp acc h);
-
-let sort_tasks = fn (cmp: Task -> Task -> bool) -> fn (xs: Task list) ->
-  sort_tasks_aux cmp xs (Nil: Task list);
 
 // 実行シミュレータ
 let simulate = fn (tasks: Task list) ->
@@ -45,8 +31,8 @@ let simulate = fn (tasks: Task list) ->
   let clock = map_new () in
   let _ = map_set clock "now" 0 in
   let _ = strbuf_push log "[scheduler start]\n" in
-  // sort して priority 高い順
-  let sorted = sort_tasks task_higher_priority tasks in
+  // sort して priority 高い順 (prelude list_sort_by を使う)
+  let sorted = list_sort_by task_higher_priority tasks in
   let _ = list_iter sorted (fn (t: Task) ->
     let start = map_get clock "now" in
     let finish = start + t.duration in

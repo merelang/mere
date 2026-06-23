@@ -951,6 +951,21 @@ let map_len_scheme =
       Ast.TyCon ("Map", [_map_len_region; _map_len_k; _map_len_v]),
       Ast.TyInt) }
 
+(* Phase 39.A' #2: map_delete — `Map[R, K, V] -> K -> unit`。 該当 key を
+   削除。 key が無い場合は no-op。 lru_cache.mere の sentinel-value workaround を
+   解消するため追加。 *)
+let _map_delete_region = fresh_var ()
+let _map_delete_k = fresh_var ()
+let _map_delete_v = fresh_var ()
+let map_delete_scheme =
+  let rid = match _map_delete_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_delete_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_delete_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_delete_region; _map_delete_k; _map_delete_v]),
+      Ast.TyArrow (_map_delete_k, Ast.TyUnit)) }
+
 (* Phase 19.2: map_iter — call (K -> V -> unit) on each entry. *)
 let _map_iter_region = fresh_var ()
 let _map_iter_k = fresh_var ()
@@ -1141,6 +1156,7 @@ let initial_env : env =
     ("map_get",        map_get_scheme);
     ("map_has",        map_has_scheme);
     ("map_len",        map_len_scheme);
+    ("map_delete",     map_delete_scheme);
     ("map_iter",       map_iter_scheme);
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);

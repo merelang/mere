@@ -164,6 +164,31 @@ let rec list_min = fn xs ->
       let m = list_min t in
       if h < m then h else m;
 
+// Phase 39.A' #4: comparator 付き insertion sort。 cmp は「a が b の前に
+// 来るべきなら true」 を返す全順序述語。 stable (cmp が false なら順序維持)。
+//
+//   list_sort_by (fn a b -> a < b) [3, 1, 2] = [1, 2, 3]
+//   list_sort_by (fn a b -> a > b) [3, 1, 2] = [3, 2, 1]
+//
+// task_scheduler.mere 等で「自前 insertion sort」 を毎回書く手間を解消。
+let rec list_sort_insert = fn cmp -> fn xs -> fn x ->
+  match xs with
+  | Nil -> Cons (x, Nil)
+  | Cons (h, t) ->
+    if cmp x h then Cons (x, xs)
+    else Cons (h, list_sort_insert cmp t x);
+
+let rec list_sort_by = fn cmp -> fn xs ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) -> list_sort_insert cmp (list_sort_by cmp t) h;
+
+// shorthand: int / str / float の自然順 sort
+// `let rec` で書く理由は test/test_basic.ml の codegen_with_decls helper が
+// Top_let_rec を skip するため、 list_sort (let) が list_sort_by (let rec) を
+// 参照すると test 環境で unbound になる。 prelude 全体を let rec に統一する。
+let rec list_sort = fn xs -> list_sort_by (fn a -> fn b -> a < b) xs;
+
 // === Option helpers ===
 
 let rec option_map = fn opt -> fn f ->
