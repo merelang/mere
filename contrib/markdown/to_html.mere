@@ -118,6 +118,47 @@ let render_inline = fn (s: str) ->
   let _ = go 0 in
   strbuf_to_str out;
 
+// 数字 + `. ` で始まる ordered list 行か。 真なら (true, prefix_len) を返し、
+// 偽なら (false, 0)
+let detect_ol_prefix = fn (line: str) ->
+  let n = str_len line in
+  let rec scan = fn i ->
+    if i >= n then -1
+    else if is_digit (char_at line i) then scan (i + 1)
+    else i
+  in
+  let end_digits = scan 0 in
+  if end_digits <= 0 then (false, 0)
+  else if end_digits + 1 >= n then (false, 0)
+  else if char_at line end_digits == "." && char_at line (end_digits + 1) == " "
+  then (true, end_digits + 2)
+  else (false, 0);
+
+// indent 2 文字でネストした list 行を検出
+//   - 2 space + "- text"  → nested ul
+//   - 2 space + "N. text"  → nested ol
+let detect_nested_ul = fn (line: str) ->
+  let n = str_len line in
+  if n >= 4 && substring line 0 4 == "  - " then true
+  else false;
+
+let detect_nested_ol = fn (line: str) ->
+  let n = str_len line in
+  if n < 5 then (false, 0)
+  else if substring line 0 2 != "  " then (false, 0)
+  else
+    let rec scan = fn i ->
+      if i >= n then -1
+      else if is_digit (char_at line i) then scan (i + 1)
+      else i
+    in
+    let end_digits = scan 2 in
+    if end_digits <= 2 then (false, 0)
+    else if end_digits + 1 >= n then (false, 0)
+    else if char_at line end_digits == "." && char_at line (end_digits + 1) == " "
+    then (true, end_digits + 2)
+    else (false, 0);
+
 // 行が `|` で始まる table row か
 let is_table_row = fn (line: str) ->
   let n = str_len line in
@@ -163,7 +204,8 @@ let is_hr = fn (line: str) ->
       in check 0;
 
 // substring s start end (end は exclusive)
-// 行を HTML 1 ブロックに変換 (見出し / リスト / 段落 / 空 / 引用 / HR)
+// 行を HTML 1 ブロックに変換 (見出し / 段落 / 空 / 引用 / HR)。
+// list 項目 (`- ` / `N. `) は render 側の state machine で扱うのでここでは処理しない。
 let render_line = fn (line: str) ->
   let n = str_len line in
   if n == 0 then ""
@@ -174,8 +216,6 @@ let render_line = fn (line: str) ->
     "<h2>" ++ render_inline (substring line 3 n) ++ "</h2>"
   else if starts_with line "# " then
     "<h1>" ++ render_inline (substring line 2 n) ++ "</h1>"
-  else if starts_with line "- " then
-    "<li>" ++ render_inline (substring line 2 n) ++ "</li>"
   else if starts_with line "> " then
     "<blockquote>" ++ render_inline (substring line 2 n) ++ "</blockquote>"
   else
@@ -211,29 +251,106 @@ let render_table_row = fn (line: str) -> fn (cell_tag: str) ->
   let _ = strbuf_push buf "</tr>" in
   strbuf_to_str buf;
 
+// ===== render helpers (module 内 module-level fn として、 inner-lifted fn
+//       同士の相互参照 (DEFERRED §8) を回避) =====
+
+// 非 table 行に来た時、 table を閉じる
+let close_table_if_open = fn state -> fn out ->
+  let phase = map_get state "table_phase" in
+  if phase == 2 then
+    let _ = strbuf_push out "</tbody></table>\n" in
+    let _ = map_set state "table_phase" 0 in ()
+  else if phase == 1 then
+    let _ = strbuf_push out "</thead></table>\n" in
+    let _ = map_set state "table_phase" 0 in ()
+  else ();
+
+// 現在の nested list を閉じる
+let close_nest = fn state -> fn out ->
+  let nk = map_get state "nest_kind" in
+  if nk == 1 then
+    let _ = strbuf_push out "</ul>" in
+    let _ = map_set state "nest_kind" 0 in ()
+  else if nk == 2 then
+    let _ = strbuf_push out "</ol>" in
+    let _ = map_set state "nest_kind" 0 in ()
+  else ();
+
+// 現在の top-level <li> を閉じる (nest があれば先に閉じる)
+let close_li = fn state -> fn out ->
+  let _ = close_nest state out in
+  if map_get state "li_open" == 1 then
+    let _ = strbuf_push out "</li>\n" in
+    let _ = map_set state "li_open" 0 in ()
+  else ();
+
+// 現在の top-level list を閉じる
+let close_list_if_open = fn state -> fn out ->
+  let _ = close_li state out in
+  let lk = map_get state "list_kind" in
+  if lk == 1 then
+    let _ = strbuf_push out "</ul>\n" in
+    let _ = map_set state "list_kind" 0 in ()
+  else if lk == 2 then
+    let _ = strbuf_push out "</ol>\n" in
+    let _ = map_set state "list_kind" 0 in ()
+  else ();
+
+// top-level list 項目を emit (kind = 1 → ul、 2 → ol)
+let emit_top_item = fn state -> fn out -> fn (kind: int) -> fn (text: str) ->
+  let _ = close_li state out in
+  // 異 kind の top list が開いていれば閉じる
+  let lk = map_get state "list_kind" in
+  let _ = if lk != 0 && lk != kind then
+            let _ = if lk == 1 then strbuf_push out "</ul>\n"
+                    else strbuf_push out "</ol>\n" in
+            let _ = map_set state "list_kind" 0 in ()
+          else () in
+  // list が閉じていれば開ける
+  let lk2 = map_get state "list_kind" in
+  let _ = if lk2 == 0 then
+            let _ = if kind == 1 then strbuf_push out "<ul>\n"
+                    else strbuf_push out "<ol>\n" in
+            let _ = map_set state "list_kind" kind in ()
+          else () in
+  let _ = strbuf_push out ("<li>" ++ render_inline text) in
+  let _ = map_set state "li_open" 1 in
+  ();
+
+// nested list 項目を emit (top-level li の **中** に置く前提)
+let emit_nest_item = fn state -> fn out -> fn (kind: int) -> fn (text: str) ->
+  let lk = map_get state "list_kind" in
+  if lk == 0 then
+    // top list の外で nested 項目が来たら top として fallback
+    emit_top_item state out kind text
+  else
+    let nk = map_get state "nest_kind" in
+    let _ = if nk != 0 && nk != kind then
+              let _ = close_nest state out in ()
+            else () in
+    let nk2 = map_get state "nest_kind" in
+    let _ = if nk2 == 0 then
+              let _ = if kind == 1 then strbuf_push out "\n<ul>"
+                      else strbuf_push out "\n<ol>" in
+              let _ = map_set state "nest_kind" kind in ()
+            else () in
+    let _ = strbuf_push out ("<li>" ++ render_inline text ++ "</li>") in
+    ();
+
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
-  // state Map: in_code / table_phase
-  //   table_phase: 0 = not in table、 1 = thead written (待 separator)、
-  //                2 = tbody (本体 row)
+  // state Map: in_code / table_phase / list_kind / li_open / nest_kind
   let state = map_new () in
   let _ = map_set state "in_code" 0 in
   let _ = map_set state "table_phase" 0 in
-  // 非 table 行に来た時、 table を閉じる helper
-  let close_table_if_open = fn () ->
-    let phase = map_get state "table_phase" in
-    if phase == 2 then
-      let _ = strbuf_push out "</tbody></table>\n" in
-      let _ = map_set state "table_phase" 0 in ()
-    else if phase == 1 then
-      // 単 row だけで終わった table — `</thead></table>` で閉じる
-      let _ = strbuf_push out "</thead></table>\n" in
-      let _ = map_set state "table_phase" 0 in ()
-    else () in
+  let _ = map_set state "list_kind" 0 in
+  let _ = map_set state "li_open" 0 in
+  let _ = map_set state "nest_kind" 0 in
   let _ = list_iter lines (fn line ->
     let in_code = map_get state "in_code" in
     if starts_with line "```" then
-      let _ = close_table_if_open () in
+      let _ = close_table_if_open state out in
+      let _ = close_list_if_open state out in
       // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
       if in_code == 0 then
         let _ = map_set state "in_code" 1 in
@@ -251,21 +368,19 @@ let render = fn (lines: str list) ->
       let _ = strbuf_push out "\n" in
       ()
     else if is_table_row line then
+      let _ = close_list_if_open state out in
       let phase = map_get state "table_phase" in
       if phase == 0 then
-        // 新しい table 開始 — header row
         let _ = strbuf_push out "<table>\n<thead>" in
         let _ = strbuf_push out (render_table_row line "th") in
         let _ = strbuf_push out "</thead>\n" in
         let _ = map_set state "table_phase" 1 in
         ()
       else if phase == 1 && is_table_sep line then
-        // separator row — tbody 開始
         let _ = strbuf_push out "<tbody>" in
         let _ = map_set state "table_phase" 2 in
         ()
       else
-        // body row (phase 2、 または phase 1 で separator がなかった case も body 扱い)
         let _ = if phase == 1 then
                   let _ = strbuf_push out "<tbody>" in
                   let _ = map_set state "table_phase" 2 in ()
@@ -273,15 +388,41 @@ let render = fn (lines: str list) ->
         let _ = strbuf_push out (render_table_row line "td") in
         let _ = strbuf_push out "\n" in
         ()
+    else if detect_nested_ul line then
+      let _ = close_table_if_open state out in
+      let text = substring line 4 (str_len line) in
+      let _ = emit_nest_item state out 1 text in
+      ()
     else
-      let _ = close_table_if_open () in
-      let html = render_line line in
-      if str_len html > 0 then
-        let _ = strbuf_push out html in
-        let _ = strbuf_push out "\n" in
+      let (is_nest_ol, nest_ol_pref) = detect_nested_ol line in
+      if is_nest_ol then
+        let _ = close_table_if_open state out in
+        let text = substring line nest_ol_pref (str_len line) in
+        let _ = emit_nest_item state out 2 text in
         ()
-      else ()) in
-  let _ = close_table_if_open () in
+      else if starts_with line "- " then
+        let _ = close_table_if_open state out in
+        let text = substring line 2 (str_len line) in
+        let _ = emit_top_item state out 1 text in
+        ()
+      else
+        let (is_ol, ol_pref) = detect_ol_prefix line in
+        if is_ol then
+          let _ = close_table_if_open state out in
+          let text = substring line ol_pref (str_len line) in
+          let _ = emit_top_item state out 2 text in
+          ()
+        else
+          let _ = close_table_if_open state out in
+          let _ = close_list_if_open state out in
+          let html = render_line line in
+          if str_len html > 0 then
+            let _ = strbuf_push out html in
+            let _ = strbuf_push out "\n" in
+            ()
+          else ()) in
+  let _ = close_table_if_open state out in
+  let _ = close_list_if_open state out in
   strbuf_to_str out;
 
 };   // end of `module MarkdownHtml`
@@ -301,6 +442,16 @@ let doc = [
   "- **Bold** and *italic*",
   "- Multiple list items",
   "- See [tutorial](tutorial.md) for details",
+  "  - nested item 1",
+  "  - nested item 2",
+  "",
+  "### Numbered steps",
+  "",
+  "1. First step",
+  "2. Second step",
+  "3. Third step",
+  "  1. nested numbered",
+  "  2. another nested",
   "",
   "### Code example",
   "",
