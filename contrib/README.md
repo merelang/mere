@@ -57,13 +57,15 @@ inject される。 名前衝突を避けるため、 contrib の lib は **pref
 | lib | path | 機能 | module 化 |
 |---|---|---|---|
 | **json** | `contrib/json/` | JSON parse (`Json.parse_json`) + write (compact / pretty) | parser のみ |
-| **markdown** | `contrib/markdown/` | Markdown 部分集合 → HTML / 平文 / TOC | (top-level、 module 化は将来) |
+| **markdown** | `contrib/markdown/` | Markdown 部分集合 → HTML (`MarkdownHtml.render`) / 平文 / TOC | to_html.mere ✓、 to_text / toc は top-level |
 | **csv** | `contrib/csv/` | CSV parse (`Csv.parse_csv`、 RFC 4180 縮小) + writer (`CsvWriter.render` Person bound) | ✓ both |
 | **argparse** | `contrib/argparse/` | CLI 引数 parser (`Argparse.parse` flag/opt/positional) | ✓ module |
 | **regex** | `contrib/regex/` | minimal regex (`Regex.parse_re` + `Regex.match_re`、 `. ^ $ * + ?` + concat) | ✓ module |
 | **test** | `contrib/test/` | unit test framework (`Test.assert_eq` + `Test.summary` + `Test.exit_status`) | ✓ module |
 | **time** | `contrib/time/` | 経過秒 format helpers (`Time.format_elapsed` 等)。 Wasm 当面 unsupported | ✓ module (3 backend) |
 | **option** | `contrib/option/` | prelude 補完 helpers (`Option.zip` / `filter` / `or_else` / `is_none` / `unwrap_or_fail`) | ✓ module |
+| **path** | `contrib/path/` | POSIX path 操作 (`Path.join` / `basename` / `dirname` / `ext` / `drop_ext` / `has_ext`) | ✓ module |
+| **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index)。 interp + C のみ | CLI script |
 
 将来追加候補は `internal design notes` §3 参照。
 

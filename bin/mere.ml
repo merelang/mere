@@ -163,6 +163,13 @@ let () =
        resolves relative to the running file. *)
     let base = Filename.dirname path in
     run_action (Mere.Pipeline.process ~base_dir:base) path source
+  | _ :: path :: _rest_args when String.length path > 0 && path.[0] <> '-' ->
+    (* Phase 44: `mere <path> arg1 arg2 ...` — program に余分な args を渡す。
+       Sys.argv は OCaml runtime が保持しているので、 eval の `args ()`
+       builtin が rest_args を見える状態。 ここでは file 実行のみ。 *)
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (Mere.Pipeline.process ~base_dir:base) path source
   | _ ->
     usage ();
     exit 1

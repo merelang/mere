@@ -1,0 +1,114 @@
+// contrib/path/path.mere — POSIX path manipulation helpers
+//
+// `module Path { join, basename, dirname, ext, drop_ext, has_ext }` を
+// Mere 純で実装 (builtin 追加なし)。 string 操作 (`str_len` / `str_index_of` /
+// `substring` / `char_at` / `str_join` / `str_split`) のみで構成。
+//
+// POSIX 規約: separator は `/`、 Windows path (backslash) は当面非対応
+//
+// 使い方:
+//   import "contrib/path/path.mere";
+//   Path.join "docs" "tutorial.md"      // "docs/tutorial.md"
+//   Path.basename "docs/foo.md"          // "foo.md"
+//   Path.dirname "docs/foo.md"           // "docs"
+//   Path.ext "foo.md"                    // ".md"  (no ext は "")
+//   Path.drop_ext "foo.md"               // "foo"
+//   Path.has_ext "foo.md" ".md"          // true
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+
+module Path {
+
+// 2 path 要素を `/` で連結。 a が空なら b、 b が空なら a、 a の末尾が `/`
+// なら重ねない、 b の先頭が `/` ならそのまま使う (絶対 path 優先)
+let join = fn (a: str) -> fn (b: str) ->
+  let la = str_len a in
+  let lb = str_len b in
+  if la == 0 then b
+  else if lb == 0 then a
+  else if char_at b 0 == "/" then b
+  else if char_at a (la - 1) == "/" then a ++ b
+  else a ++ "/" ++ b;
+
+// 最後の `/` 以降を返す (`/` 含まなければ s 全体)
+let basename = fn (s: str) ->
+  let n = str_len s in
+  let rec last_slash = fn i ->
+    if i < 0 then -1
+    else if char_at s i == "/" then i
+    else last_slash (i - 1)
+  in
+  let idx = last_slash (n - 1) in
+  if idx < 0 then s
+  else substring s (idx + 1) n;
+
+// 最後の `/` までを返す (`/` 含まなければ "")
+let dirname = fn (s: str) ->
+  let n = str_len s in
+  let rec last_slash = fn i ->
+    if i < 0 then -1
+    else if char_at s i == "/" then i
+    else last_slash (i - 1)
+  in
+  let idx = last_slash (n - 1) in
+  if idx < 0 then ""
+  else if idx == 0 then "/"
+  else substring s 0 idx;
+
+// basename の最後の `.` 以降を返す (`.` 含まなければ "")。 dot prefix は ext
+// として扱わない (`.hidden` の ext は "")
+let ext = fn (s: str) ->
+  let b = basename s in
+  let n = str_len b in
+  let rec last_dot = fn i ->
+    if i <= 0 then -1   // index 0 の `.` は dot-prefix なので除外
+    else if char_at b i == "." then i
+    else last_dot (i - 1)
+  in
+  let idx = last_dot (n - 1) in
+  if idx < 0 then ""
+  else substring b idx n;
+
+// ext を取り除く (Path.drop_ext "foo.md" = "foo")
+let drop_ext = fn (s: str) ->
+  let e = ext s in
+  let n = str_len s in
+  let elen = str_len e in
+  if elen == 0 then s
+  else substring s 0 (n - elen);
+
+// 指定拡張子か否か (Path.has_ext "foo.md" ".md" = true)
+let has_ext = fn (s: str) -> fn (e: str) ->
+  ext s == e;
+
+};   // end of `module Path`
+
+// === Self-tests ===
+
+let _ = print "=== Path helpers demo ===";
+
+let _ = print ("join 'docs' 'tutorial.md' -> " ++ Path.join "docs" "tutorial.md");
+let _ = print ("join 'docs/' 'tutorial.md' -> " ++ Path.join "docs/" "tutorial.md");
+let _ = print ("join '' 'foo' -> " ++ Path.join "" "foo");
+let _ = print ("join 'a' '/abs' -> " ++ Path.join "a" "/abs");
+
+let _ = print ("basename 'docs/foo.md' -> " ++ Path.basename "docs/foo.md");
+let _ = print ("basename 'foo.md'      -> " ++ Path.basename "foo.md");
+let _ = print ("basename '/etc/hosts'  -> " ++ Path.basename "/etc/hosts");
+let _ = print ("basename '/'           -> " ++ Path.basename "/");
+
+let _ = print ("dirname 'docs/foo.md'  -> " ++ Path.dirname "docs/foo.md");
+let _ = print ("dirname 'foo.md'       -> '" ++ Path.dirname "foo.md" ++ "'");
+let _ = print ("dirname '/etc/hosts'   -> " ++ Path.dirname "/etc/hosts");
+let _ = print ("dirname '/foo'         -> " ++ Path.dirname "/foo");
+
+let _ = print ("ext 'foo.md'           -> '" ++ Path.ext "foo.md" ++ "'");
+let _ = print ("ext 'archive.tar.gz'   -> '" ++ Path.ext "archive.tar.gz" ++ "'");
+let _ = print ("ext 'noext'            -> '" ++ Path.ext "noext" ++ "'");
+let _ = print ("ext '.hidden'          -> '" ++ Path.ext ".hidden" ++ "'");
+
+let _ = print ("drop_ext 'foo.md'      -> " ++ Path.drop_ext "foo.md");
+let _ = print ("has_ext 'foo.md' '.md' -> " ++ show (Path.has_ext "foo.md" ".md"));
+let _ = print ("has_ext 'foo.md' '.py' -> " ++ show (Path.has_ext "foo.md" ".py"));
+
+0

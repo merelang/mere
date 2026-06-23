@@ -1,4 +1,9 @@
-// markdown_to_html: Markdown 部分集合を HTML に変換
+// contrib/markdown/to_html.mere — Markdown 部分集合を HTML に変換
+//
+// Phase 44 で `module MarkdownHtml { ... }` で wrap。
+// `find_double` / `find_single` は inner-lifted fn 同士の相互参照が必要なので
+// module の **外側** に置いて top-level fn として扱う (DEFERRED §8、 同じ
+// constraint が module wrap 中でも変わらない)。
 //
 // 対応 syntax:
 //   # H1
@@ -9,29 +14,33 @@
 //   段落区切り (空行)
 //
 // 入力は文字列 list (line-by-line)、 出力は連結された HTML 文字列。
-// regex_lite.mere の進化版だが、 本格 parser ではなく state machine 的に
-// 行ごとに transform する素朴な実装。
+//
+// 使い方:
+//   import "contrib/markdown/to_html.mere";
+//   let html = MarkdownHtml.render ["# Title", "paragraph"];
 //
 // 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+
+// Note: inner-lifted fn 同士で互いを参照する (go が find_double / find_single
+// を call) 場合、 capture chain が複雑になるため module の外側に top-level fn
+// として書く。 Phase 39.A2 は「inner-lifted fn を value 位置で」に対応したが、
+// inner-lifted fn 同士の相互参照は依然 workaround が必要。
+let rec __md_find_double = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
+  if j + 1 >= n then j
+  else if char_at s j == c && char_at s (j + 1) == c then j
+  else __md_find_double s n c (j + 1);
+
+let rec __md_find_single = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
+  if j >= n then j
+  else if char_at s j == c then j
+  else __md_find_single s n c (j + 1);
+
+module MarkdownHtml {
 
 let starts_with = fn (s: str) -> fn (p: str) ->
   let lp = str_len p in
   if str_len s < lp then false
   else substring s 0 lp == p;
-
-// Note: inner-lifted fn 同士で互いを参照する (go が find_double / find_single
-// を call) 場合、 capture chain が複雑になるため top-level fn として書く。
-// Phase 39.A2 は「inner-lifted fn を value 位置で」に対応したが、 inner-lifted
-// fn 同士の相互参照は依然 workaround が必要。
-let rec find_double = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
-  if j + 1 >= n then j
-  else if char_at s j == c && char_at s (j + 1) == c then j
-  else find_double s n c (j + 1);
-
-let rec find_single = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
-  if j >= n then j
-  else if char_at s j == c then j
-  else find_single s n c (j + 1);
 
 let render_inline = fn (s: str) ->
   let n = str_len s in
@@ -42,19 +51,19 @@ let render_inline = fn (s: str) ->
       let c = char_at s i in
       if c == "*" && i + 1 < n && char_at s (i + 1) == "*" then
         let _ = strbuf_push out "<strong>" in
-        let e = find_double s n "*" (i + 2) in
+        let e = __md_find_double s n "*" (i + 2) in
         let _ = strbuf_push out (substring s (i + 2) e) in
         let _ = strbuf_push out "</strong>" in
         go (e + 2)
       else if c == "*" then
         let _ = strbuf_push out "<em>" in
-        let e = find_single s n "*" (i + 1) in
+        let e = __md_find_single s n "*" (i + 1) in
         let _ = strbuf_push out (substring s (i + 1) e) in
         let _ = strbuf_push out "</em>" in
         go (e + 1)
       else if c == "`" then
         let _ = strbuf_push out "<code>" in
-        let e = find_single s n "`" (i + 1) in
+        let e = __md_find_single s n "`" (i + 1) in
         let _ = strbuf_push out (substring s (i + 1) e) in
         let _ = strbuf_push out "</code>" in
         go (e + 1)
@@ -91,7 +100,11 @@ let render = fn (lines: str list) ->
     else ()) in
   strbuf_to_str out;
 
-let _ = print "=== markdown_to_html ===";
+};   // end of `module MarkdownHtml`
+
+// === Self-tests (module の外側、 実 use 時は削除) ===
+
+let _ = print "=== markdown_to_html (module MarkdownHtml) ===";
 
 let doc = [
   "# Welcome to Mere",
@@ -109,6 +122,6 @@ let doc = [
   "End of document."
 ];
 
-let _ = print (render doc);
+let _ = print (MarkdownHtml.render doc);
 
 0
