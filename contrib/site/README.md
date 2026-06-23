@@ -13,18 +13,23 @@ Mere 自身で書かれた docs site builder。 markdown 集合 → HTML pages +
 ## 使い方
 
 ```sh
-# 1 回 build
+# 1 回 build (markdown のみ; playground/*.wasm は別途 cp 必要)
 dune exec mere -- contrib/site/build.mere docs _site
 
+# 完全 build (Wasm playground 含む) — shell wrapper を経由
+sh contrib/site/build_full.sh docs _site
+
 # dev mode: HTML に <meta refresh content="2"> を inject (browser 2 秒毎に reload)
-dune exec mere -- contrib/site/build.mere --dev docs _site
+sh contrib/site/build_full.sh docs _site --dev
 
 # watch mode: dev mode + 500ms polling で docs/ の mtime 変化を検知して自動 rebuild
-dune exec mere -- contrib/site/build.mere --watch docs _site
+sh contrib/site/build_full.sh docs _site --watch
 # 別 terminal で `python -m http.server -d _site 8000` → http://localhost:8000/
 ```
 
-引数省略時は `docs/` → `_site/` がデフォルト。
+引数省略時は `docs/` → `_site/` がデフォルト。 `build_full.sh` は Mere SSG +
+binary `.wasm` の cp を組み合わせた wrapper (Mere の `read_file` / `write_file`
+が UTF-8 string ベースで binary copy できないため)。
 
 ## MVP scope
 
@@ -44,6 +49,7 @@ dune exec mere -- contrib/site/build.mere --watch docs _site
 | per-page TOC (h2/h3 から自動生成、 anchor link 付き、 `<details>` で collapse) | ✓ (ASCII 英数字以外は `-` に slugify、 Japanese 等は同一 slug 衝突可能性あり) |
 | `sitemap.xml` 自動生成 | ✓ (相対 URL、 SEO / crawler 用) |
 | `.nojekyll` 自動配置 (GitHub Pages の Jekyll 処理抑止) | ✓ |
+| **Wasm playground** (事前 compile 済 Mere → Wasm + browser-side loader) | ✓ (`playground/*.html` + `*.wat` は SSG が copy、 `*.wasm` は `build_full.sh` 経由で cp) |
 
 ## 非 MVP (将来 Phase)
 

@@ -433,6 +433,8 @@ let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
     let _ = strbuf_push buf ("  <li><a href=\"" ++ href ++ "\">" ++ label ++ "</a></li>\n") in
     ()) in
   let _ = strbuf_push buf "</ul>\n" in
+  let _ = strbuf_push buf "<h2>Try Mere in your browser</h2>\n" in
+  let _ = strbuf_push buf "<p>Pre-compiled <a href=\"playground/playground.html\">Mere → Wasm demos</a> running directly in your browser.</p>\n" in
   let body = strbuf_to_str buf in
   let html = html_template dev_mode "Index" nav_html body in
   let _ = write_file (Path.join output_dir "index.html") html in
@@ -505,6 +507,26 @@ let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str
                      (build_sitemap_xml pages) in
   // .nojekyll — GitHub Pages が Jekyll 処理をスキップする marker file
   let _ = write_file (Path.join output_dir ".nojekyll") "" in
+  // Phase 45.5: playground (事前 compile 済 Mere → Wasm + HTML loader)
+  // contrib/site/playground/ 配下の HTML + wasm を output_dir/playground/ に copy
+  let playground_src = "contrib/site/playground" in
+  let playground_dst = Path.join output_dir "playground" in
+  let _ = if file_exists playground_src then
+            let _ = mkdir_p playground_dst in
+            let entries = list_dir playground_src in
+            let _ = list_iter entries (fn name ->
+              let src = Path.join playground_src name in
+              let dst = Path.join playground_dst name in
+              // .wasm は read_file/write_file が UTF-8 文字列前提なので
+              // text file (.html / .wat) のみ copy。 .wasm は user 側で
+              // 別途 cp する想定 (将来 binary copy builtin 追加で改善)
+              if Path.has_ext name ".html" || Path.has_ext name ".wat" then
+                let content = read_file src in
+                let _ = write_file dst content in
+                print ("  playground/" ++ name)
+              else ()) in
+            ()
+          else () in
   print ("Done. " ++ show (list_len pages) ++ " pages converted.");
 
 // 全 .md の mtime を str に集約 (snapshot signature)
