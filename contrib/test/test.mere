@@ -1,0 +1,115 @@
+// contrib/test/test.mere — minimal unit test framework for Mere
+//
+// Phase 42 後の dogfood lib。 `module Test { ... }` で名前空間化。
+// `show` builtin (多相) を使うことで `assert_eq` 1 つで int / str / bool /
+// variant / tuple すべて比較できる。
+//
+// 使い方:
+//   import "contrib/test/test.mere";
+//   let s = Test.new_suite () in
+//   let _ = Test.assert_eq s "1 + 1 = 2" 2 (1 + 1) in
+//   let _ = Test.assert_eq s "hello"   "hi" ("h" ++ "i") in
+//   let _ = Test.summary s in
+//   Test.exit_status s
+//
+// 設計:
+//   - suite = (counters: Map[str, int], log: StrBuf)
+//     - counters["pass"] / counters["fail"] でカウント
+//     - log は FAIL の expected / actual を結合した文字列
+//   - assert_eq は `show x == show y` で比較 (poly な type 比較を回避)
+//   - summary は pass/fail/total を print、 fail log があれば print
+//   - exit_status は all pass で 0、 fail あれば 1 (CI / shell 連動用)
+//
+// 限定事項 (MVP):
+//   - test の grouping (describe/context) なし
+//   - parallel execution なし (Mere に thread がない)
+//   - setup/teardown hook なし (test fn が region ごとに資源を取る)
+//   - 例外 catch は `try_or` builtin 経由 — 各 assert で内部的に try_or 不要
+//     (Mere 例外は `fail` のみ、 user code が fail すれば test runner も落ちる
+//     - 将来 try_or で wrap して continue する option を入れる)
+//
+// backend サポート: interp / C / LLVM の **3 backend で diff = 0**。 Wasm は
+// 当面非対応 (suite tuple `(Map, StrBuf)` が closure env に乗ると Wasm 側の
+// map_runtime に統合されておらず codegen error — Wasm の Map 統合は別 Phase)。
+
+module Test {
+
+let new_suite = fn () ->
+  let counters = map_new () in
+  let _ = map_set counters "pass" 0 in
+  let _ = map_set counters "fail" 0 in
+  let log = strbuf_new () in
+  (counters, log);
+
+// poly assert: show で文字列化して比較。 expected と actual が同じ型なら OK
+let assert_eq = fn suite -> fn (label: str) -> fn expected -> fn actual ->
+  let (counters, log) = suite in
+  let e = show expected in
+  let a = show actual in
+  if e == a then
+    let _ = map_set counters "pass" (map_get counters "pass" + 1) in
+    print ("  ok | " ++ label)
+  else
+    let _ = map_set counters "fail" (map_get counters "fail" + 1) in
+    let _ = strbuf_push log ("FAIL | " ++ label ++ "\n") in
+    let _ = strbuf_push log ("  expected: " ++ e ++ "\n") in
+    let _ = strbuf_push log ("  actual:   " ++ a ++ "\n") in
+    print ("FAIL | " ++ label);
+
+// bool true assertion — assert_eq の中身を inline (DEFERRED §1.7 多 instantiation
+// codegen 制約を回避、 assert_eq[int] と assert_eq[bool] を同 program で同居
+// させると C 4 backend で fail するため)
+let assert_true = fn suite -> fn (label: str) -> fn (cond: bool) ->
+  let (counters, log) = suite in
+  if cond == true then
+    let _ = map_set counters "pass" (map_get counters "pass" + 1) in
+    print ("  ok | " ++ label)
+  else
+    let _ = map_set counters "fail" (map_get counters "fail" + 1) in
+    let _ = strbuf_push log ("FAIL | " ++ label ++ " (expected true)\n") in
+    print ("FAIL | " ++ label);
+
+let assert_false = fn suite -> fn (label: str) -> fn (cond: bool) ->
+  let (counters, log) = suite in
+  if cond == false then
+    let _ = map_set counters "pass" (map_get counters "pass" + 1) in
+    print ("  ok | " ++ label)
+  else
+    let _ = map_set counters "fail" (map_get counters "fail" + 1) in
+    let _ = strbuf_push log ("FAIL | " ++ label ++ " (expected false)\n") in
+    print ("FAIL | " ++ label);
+
+// pass/fail/total を出力。 fail があれば log を吐く
+let summary = fn suite ->
+  let (counters, log) = suite in
+  let pass = map_get counters "pass" in
+  let fail = map_get counters "fail" in
+  let total = pass + fail in
+  let _ = print "" in
+  let _ = print ("--- " ++ show pass ++ "/" ++ show total ++ " passed ---") in
+  let logstr = strbuf_to_str log in
+  if str_len logstr > 0 then print logstr else ();
+
+// CI 用 exit code: all pass = 0、 fail あり = 1
+let exit_status = fn suite ->
+  let (counters, _) = suite in
+  if map_get counters "fail" == 0 then 0 else 1;
+
+};   // end of `module Test`
+
+// === Self-tests (module の外側、 demo として残置) ===
+
+let _ = print "=== test framework demo ===";
+let s = Test.new_suite ();
+
+let _ = Test.assert_eq s "1 + 1 = 2" 2 (1 + 1);
+let _ = Test.assert_eq s "string concat" "hi" ("h" ++ "i");
+let _ = Test.assert_eq s "list length" 3 (list_len (Cons (1, Cons (2, Cons (3, Nil)))));
+let _ = Test.assert_true s "5 > 3" (5 > 3);
+let _ = Test.assert_false s "5 < 3" (5 < 3);
+
+// 意図的に 1 件 fail させる (assert_eq の挙動を見る)
+let _ = Test.assert_eq s "(意図的 fail) 2 = 3" 2 3;
+
+let _ = Test.summary s;
+Test.exit_status s

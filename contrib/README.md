@@ -61,6 +61,7 @@ inject される。 名前衝突を避けるため、 contrib の lib は **pref
 | **csv** | `contrib/csv/` | CSV parse (`Csv.parse_csv`、 RFC 4180 縮小) + writer (`CsvWriter.render` Person bound) | ✓ both |
 | **argparse** | `contrib/argparse/` | CLI 引数 parser (`Argparse.parse` flag/opt/positional) | ✓ module |
 | **regex** | `contrib/regex/` | minimal regex (`Regex.parse_re` + `Regex.match_re`、 `. ^ $ * + ?` + concat) | ✓ module |
+| **test** | `contrib/test/` | unit test framework (`Test.assert_eq` + `Test.summary` + `Test.exit_status`)。 Wasm 当面 unsupported | ✓ module (3 backend) |
 
 将来追加候補は `internal design notes` §3 参照。
 
