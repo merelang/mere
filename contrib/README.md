@@ -65,6 +65,7 @@ inject される。 名前衝突を避けるため、 contrib の lib は **pref
 | **time** | `contrib/time/` | 経過秒 format helpers (`Time.format_elapsed` 等)。 Wasm 当面 unsupported | ✓ module (3 backend) |
 | **option** | `contrib/option/` | prelude 補完 helpers (`Option.zip` / `filter` / `or_else` / `is_none` / `unwrap_or_fail`) | ✓ module |
 | **path** | `contrib/path/` | POSIX path 操作 (`Path.join` / `basename` / `dirname` / `ext` / `drop_ext` / `has_ext`) | ✓ module |
+| **toml** | `contrib/toml/` | TOML 1.0 縮小 parser (`Toml.parse_toml` int / str / bool / array + nested section、 dotted key へ flatten) | ✓ module |
 | **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index)。 interp + C のみ | CLI script |
 
 将来追加候補は `internal design notes` §3 参照。
