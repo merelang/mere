@@ -37,8 +37,9 @@ dune exec mere -- contrib/site/build.mere --watch docs _site
 | navigation menu (全 pages 横並び、 current page は `active` class で highlight) | ✓ |
 | `index.html` (page list) | ✓ |
 | output dir 自動作成 | ✓ (`mkdir_p`) |
-| 外部 `style.css` 自動生成 (60+ 行、 nav / table / code / blockquote / list 等のスタイル) | ✓ |
+| 外部 `style.css` 自動生成 (60+ 行、 nav / table / code / blockquote / list / search 等のスタイル) | ✓ |
 | fenced code block の language class (`<code class="language-mere">` 等) | ✓ (`mere`/`sh`/`ml` 等) |
+| クライアントサイド検索 (`search.json` + vanilla JS で全文検索 + 抜粋表示) | ✓ |
 
 ## 非 MVP (将来 Phase)
 

@@ -55,6 +55,24 @@ let extract_title = fn (lines: str list) -> fn (default: str) ->
 // (将来の追加 rewrite 用 hook)。
 let rewrite_links = fn (html: str) -> html;
 
+// JSON 用 string escape: `"` `\` `\n` `\t` を実体に変換、 制御文字は \uXXXX
+// 化せず (MVP) ASCII printable のみそのまま。 control char は space に
+let escape_json_str = fn (s: str) ->
+  let buf = strbuf_new () in
+  let n = str_len s in
+  let rec loop = fn i ->
+    if i >= n then ()
+    else
+      let c = char_at s i in
+      let _ = if c == "\"" then strbuf_push buf "\\\""
+              else if c == "\\" then strbuf_push buf "\\\\"
+              else if c == "\n" then strbuf_push buf "\\n"
+              else if c == "\t" then strbuf_push buf "\\t"
+              else strbuf_push buf c in
+      loop (i + 1) in
+  let _ = loop 0 in
+  strbuf_to_str buf;
+
 // 外部 CSS の内容 (build 時に output dir に `style.css` として書き出される)
 //   Phase 36 lex 制約: `{` は文字列補間開始と解釈されるので CSS には `\{` で escape
 let style_css =
@@ -130,11 +148,82 @@ let style_css =
   "  padding-top: 1rem;\n" ++
   "  color: #718096;\n" ++
   "  font-size: 0.9em;\n" ++
-  "}\n";
+  "}\n" ++
+  "#search-input \{\n" ++
+  "  margin-top: 0.5rem;\n" ++
+  "  padding: 0.4em 0.8em;\n" ++
+  "  width: 100%;\n" ++
+  "  max-width: 300px;\n" ++
+  "  border: 1px solid #cbd5e0;\n" ++
+  "  border-radius: 4px;\n" ++
+  "  font-size: 0.95em;\n" ++
+  "}\n" ++
+  "#search-results \{\n" ++
+  "  margin-top: 0.5rem;\n" ++
+  "  padding: 0.5em 1em;\n" ++
+  "  background: #f7fafc;\n" ++
+  "  border: 1px solid #e2e8f0;\n" ++
+  "  border-radius: 4px;\n" ++
+  "  max-height: 300px;\n" ++
+  "  overflow-y: auto;\n" ++
+  "}\n" ++
+  "#search-results ul \{ list-style: none; padding-left: 0; margin: 0; }\n" ++
+  "#search-results li \{ margin: 0.4em 0; }\n";
+
+// search.json を fetch + substring filter で簡易検索する vanilla JS
+//   nav の search input に typing すると 100ms debounce で search.json を fetch、
+//   title / content に query が含まれる pages を `#search-results` に list 化
+let search_script =
+  "<script>\n" ++
+  "(function() \{\n" ++
+  "  var input = document.getElementById('search-input');\n" ++
+  "  var results = document.getElementById('search-results');\n" ++
+  "  if (!input || !results) return;\n" ++
+  "  var index = null;\n" ++
+  "  var debounce_t = null;\n" ++
+  "  function render(query) \{\n" ++
+  "    if (!query) \{ results.innerHTML = ''; results.style.display = 'none'; return; }\n" ++
+  "    var q = query.toLowerCase();\n" ++
+  "    var matches = index.filter(function(p) \{\n" ++
+  "      return p.title.toLowerCase().indexOf(q) >= 0 ||\n" ++
+  "             p.content.toLowerCase().indexOf(q) >= 0;\n" ++
+  "    });\n" ++
+  "    if (matches.length === 0) \{\n" ++
+  "      results.innerHTML = '<p style=\"color:#888\">No matches for \"' + query + '\"</p>';\n" ++
+  "    } else \{\n" ++
+  "      results.innerHTML = '<ul>' + matches.map(function(p) \{\n" ++
+  "        var excerpt = '';\n" ++
+  "        var idx = p.content.toLowerCase().indexOf(q);\n" ++
+  "        if (idx >= 0) \{\n" ++
+  "          var start = Math.max(0, idx - 40);\n" ++
+  "          var end = Math.min(p.content.length, idx + 80);\n" ++
+  "          excerpt = (start > 0 ? '…' : '') +\n" ++
+  "                    p.content.substring(start, end) +\n" ++
+  "                    (end < p.content.length ? '…' : '');\n" ++
+  "        }\n" ++
+  "        return '<li><a href=\"' + p.url + '\">' + p.title + '</a>' +\n" ++
+  "               (excerpt ? '<br><small style=\"color:#888\">' + excerpt + '</small>' : '') +\n" ++
+  "               '</li>';\n" ++
+  "      }).join('') + '</ul>';\n" ++
+  "    }\n" ++
+  "    results.style.display = 'block';\n" ++
+  "  }\n" ++
+  "  input.addEventListener('input', function() \{\n" ++
+  "    var v = input.value;\n" ++
+  "    clearTimeout(debounce_t);\n" ++
+  "    debounce_t = setTimeout(function() \{\n" ++
+  "      if (!index) \{\n" ++
+  "        fetch('search.json').then(function(r) \{ return r.json(); })\n" ++
+  "          .then(function(data) \{ index = data; render(v); });\n" ++
+  "      } else \{ render(v); }\n" ++
+  "    }, 100);\n" ++
+  "  });\n" ++
+  "})();\n" ++
+  "</script>\n";
 
 // 共通 page template (header + nav + content + footer)
 //   dev_mode が true なら `<meta http-equiv="refresh" content="2">` を inject し、
-//   browser が 2 秒ごとに re-fetch する形で auto-reload (watch.mere との組合せ用)
+//   browser が 2 秒ごとに re-fetch する形で auto-reload
 let html_template = fn (dev_mode: bool) -> fn (title: str) ->
                     fn (nav_html: str) -> fn (body_html: str) ->
   let dev_meta = if dev_mode then
@@ -150,9 +239,14 @@ let html_template = fn (dev_mode: bool) -> fn (title: str) ->
   "  <link rel=\"stylesheet\" href=\"style.css\">\n" ++
   "</head>\n" ++
   "<body>\n" ++
-  "  <nav>" ++ nav_html ++ "</nav>\n" ++
+  "  <nav>\n" ++
+  "    <div class=\"nav-links\">" ++ nav_html ++ "</div>\n" ++
+  "    <input type=\"search\" id=\"search-input\" placeholder=\"Search docs…\" autocomplete=\"off\">\n" ++
+  "    <div id=\"search-results\" style=\"display:none\"></div>\n" ++
+  "  </nav>\n" ++
   "  <main>\n" ++ body_html ++ "  </main>\n" ++
   "  <footer>Generated by Mere SSG (contrib/site/build.mere)</footer>\n" ++
+  search_script ++
   "</body>\n" ++
   "</html>\n";
 
@@ -207,7 +301,37 @@ let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
   let _ = write_file (Path.join output_dir "index.html") html in
   print ("  index.html -> " ++ Path.join output_dir "index.html");
 
-// 1 回 build (一連の page conversion + style.css + index.html を実行)
+// 1 page の search index entry を JSON object 文字列で組み立てる:
+//   `{"name":"tutorial","title":"...","url":"tutorial.html","content":"..."}`
+let build_search_entry = fn (input_dir: str) -> fn (name: str) ->
+  let in_path = Path.join input_dir name in
+  let content = read_file in_path in
+  let lines = str_split content "\n" in
+  let label = Path.drop_ext name in
+  let title = extract_title lines label in
+  let url = label ++ ".html" in
+  "\{\"name\":\"" ++ escape_json_str label ++ "\","
+  ++ "\"title\":\"" ++ escape_json_str title ++ "\","
+  ++ "\"url\":\"" ++ escape_json_str url ++ "\","
+  ++ "\"content\":\"" ++ escape_json_str content ++ "\"}";
+
+// 全 page の search index を JSON array 文字列に
+let build_search_index_json = fn (input_dir: str) -> fn (pages: str list) ->
+  let buf = strbuf_new () in
+  let _ = strbuf_push buf "[" in
+  // first を skip するため index counter を Map で管理
+  let counter = map_new () in
+  let _ = map_set counter "n" 0 in
+  let _ = list_iter pages (fn name ->
+    let i = map_get counter "n" in
+    let _ = if i > 0 then strbuf_push buf "," else () in
+    let _ = strbuf_push buf (build_search_entry input_dir name) in
+    let _ = map_set counter "n" (i + 1) in
+    ()) in
+  let _ = strbuf_push buf "]" in
+  strbuf_to_str buf;
+
+// 1 回 build (一連の page conversion + style.css + index.html + search.json)
 let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str) ->
   let _ = mkdir_p output_dir in
   let all_entries = list_dir input_dir in
@@ -215,6 +339,8 @@ let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str
   let _ = write_file (Path.join output_dir "style.css") style_css in
   let _ = list_iter pages (process_page dev_mode input_dir output_dir pages) in
   let _ = render_index dev_mode output_dir pages in
+  let _ = write_file (Path.join output_dir "search.json")
+                     (build_search_index_json input_dir pages) in
   print ("Done. " ++ show (list_len pages) ++ " pages converted.");
 
 // 全 .md の mtime を str に集約 (snapshot signature)
