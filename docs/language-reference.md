@@ -499,6 +499,17 @@ signature ctx = (db: int, log: int);
 - **closure 取り込み** は値参照 (環境を closure に閉じ込める)
 - **エラー**: 型エラーは compile-time、`fail`/`assert`/`div by zero`/`unmatched match` 等は実行時 `Eval_error`
 
+### Copy セマンティクス (暗黙的にデフォルト)
+
+Mere は Rust の `Copy` trait のような explicit な「コピー可能型」 マーカーを **持たない**。 代わりに以下の暗黙ルール:
+
+- **値型 (int / float / bool / str / unit / list / tuple / variant / record / closure)**: `let x = v in ...` で同名 / 別名のリバインドが自由、 引数として何度も渡せる ("Copy" 扱い)。 実装的には immutable な値の **構造共有 + GC なし region alloc** で実現
+- **region-bound 参照型 (`&R T` / `Vec[R, T]` / `Map[R, K, V]` / `StrBuf[R]`)**: region の生存期間中は自由に複製可能 (内部はポインタ + region 一括解放)
+- **`drop type ...` で宣言された Drop 型 (`Conn` / `File` 等)**: region に置けない (Trivial[R] 違反)、 `with` 構文で scope-bound に管理。 ただし region 外では **let rebind 可能** (Linear 強制無し、 close は scope 末で自動)
+- **`OwnedVec[T]`**: linear-ish。 Phase 38.G-1 Level 1 で auto Drop (lexical scope 末で `free`)、 `let v2 = v1` のような alias は構文上可能だが Drop が二重に走る等の問題があり、 user 側で `vec_to_owned` 等で明示変換するイディオムを推奨
+
+つまり Mere の Copy/Linear 区別は **Drop 型 / OwnedVec / それ以外** の 3 層で実現済で、 explicit Copy/Linear trait annotation は不要。 将来 `T: Copy` / `T: Linear` の type bound を導入する設計余地は残しているが (trait システム §3.1 と連動)、 dogfood signal 不在のため defer 確定 (同 §6.4)。
+
 ---
 
 ## 8. 既知の制約 (2026-06-22)
