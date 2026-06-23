@@ -2185,15 +2185,21 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
          (emit_expr f) (emit_expr arg)))
   | Ast.Constr (raw_name, arg_opt) ->
-    (* Phase 41: qualified ctor (`M.Foo`) を canonical (`Foo`) に正規化してから
-       Typer.constructors / variant_tags を引く。 これで module 内の type 宣言
-       で構築される alias 経由の qualified call が 4 backend で動くようになる。 *)
-    let name = Ast.canonical_ctor raw_name in
+    (* Phase 41 + 42: alias_ctor は `Traffic.Red` も Typer.constructors に
+       register するので、 qualified raw_name を **先に** lookup する (2 module
+       が同名 ctor `Red` を持つときに Light/Red と Color/Red を disambiguate
+       するため)。 raw lookup miss なら canonical (`Red`) を fallback。
+       variant_tags は bare 名 key だけなので canonical を使う。 *)
     let info =
-      try Hashtbl.find Typer.constructors name
-      with Not_found ->
-        unsupported e.loc ("unknown constructor: " ^ raw_name)
+      match Hashtbl.find_opt Typer.constructors raw_name with
+      | Some i -> i
+      | None ->
+        let cname = Ast.canonical_ctor raw_name in
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some i -> i
+         | None -> unsupported e.loc ("unknown constructor: " ^ raw_name))
     in
+    let name = Ast.canonical_ctor raw_name in
     let tag = Hashtbl.find variant_tags name in
     let type_name = info.Typer.type_name in
     (* If this constructor belongs to a polymorphic variant, pick the
@@ -2370,7 +2376,9 @@ let rec emit_expr (e : Ast.expr) : string =
         name name region name name (String.concat ", " parts)
     end
     else begin
-      (* Regular record literal. Use mono name if polymorphic. *)
+      (* Regular record literal. Use mono name if polymorphic.
+         Phase 42: M-qualified record 名 (`Shapes.Rect`) は c_safe_name で
+         C identifier 化 (`Shapes__Rect`)。 *)
       let cstruct =
         if Hashtbl.mem polymorphic_records name then
           match e.Ast.ty with
@@ -2378,9 +2386,9 @@ let rec emit_expr (e : Ast.expr) : string =
             (match Ast.walk t with
              | Ast.TyCon (n, args) when n = name ->
                mono_record_name n (List.map Ast.walk args)
-             | _ -> name)
-          | None -> name
-        else name
+             | _ -> c_safe_name name)
+          | None -> c_safe_name name
+        else c_safe_name name
       in
       "((" ^ cstruct ^ "){" ^ String.concat ", " parts ^ "})"
     end
@@ -2427,7 +2435,8 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     (Printf.sprintf "(strcmp((%s), %s) == 0)" v_c (Ast.escape_string s), "")
   | Ast.P_unit -> ("1", "")
   | Ast.P_constr (raw_cname, sub_opt) ->
-    (* Phase 41: qualified ctor pattern (`| M.Foo -> ...`) を canonical 化 *)
+    (* Phase 41 + 42: qualified ctor pattern (`| M.Foo -> ...`)。
+       variant_tags は bare 名 key なので canonical で lookup。 *)
     let cname = Ast.canonical_ctor raw_cname in
     let tag =
       try Hashtbl.find variant_tags cname
@@ -2593,16 +2602,19 @@ let rec c_type_of (t : Ast.ty) : string =
     (* Polymorphic record instantiation. *)
     mono_record_name name (List.map Ast.walk args)
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
-    (* Monomorphic user-declared record type. *)
-    name
+    (* Monomorphic user-declared record type. Phase 42: M-qualified の場合
+       `Shapes.Rect` を C identifier `Shapes__Rect` に変換。 *)
+    c_safe_name name
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_variants name ->
     (* Polymorphic variant instantiation — pick the specialized name
        (`list_int`, `opt_str`, ...). For recursive instantiations this
        name is the ptr typedef; for non-recursive it's the struct. *)
     mono_variant_name name (List.map Ast.walk args)
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.types name ->
-    (* Monomorphic user-declared variant type. *)
-    name
+    (* Monomorphic user-declared variant type. Phase 42: M-qualified type 名
+       (将来想定) も sanitize する。 現状 variant alias は parser 側で bare
+       名 (Light) に正規化されるが、 record と同様に防御的に通す。 *)
+    c_safe_name name
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf
@@ -4585,8 +4597,10 @@ let emit_record_typedef (name : string) : string =
   else
     (* Forward decl form so closure typedefs that reference this struct
        can be emitted before the struct body (function-pointer return
-       types accept forward-declared structs). *)
-    Printf.sprintf "typedef struct %s %s;" name name
+       types accept forward-declared structs). Phase 42: M-qualified record
+       type 名 (`Shapes.Rect`) を C identifier 化 (`Shapes__Rect`)。 *)
+    let cn = c_safe_name name in
+    Printf.sprintf "typedef struct %s %s;" cn cn
 
 let emit_record_struct_body (name : string) : string =
   let info = Hashtbl.find Typer.records name in
@@ -4596,7 +4610,8 @@ let emit_record_struct_body (name : string) : string =
       List.map (fun (fname, ft) ->
         Printf.sprintf "  %s %s;" (c_type_of ft) fname) info.Typer.r_fields
     in
-    Printf.sprintf "struct %s {\n%s\n};" name (String.concat "\n" fields)
+    Printf.sprintf "struct %s {\n%s\n};" (c_safe_name name)
+      (String.concat "\n" fields)
 
 (* Emit specialized typedef for a polymorphic record instance. *)
 let emit_mono_record_typedef (record_name : string) (args : Ast.ty list) : string =

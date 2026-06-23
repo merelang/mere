@@ -4124,12 +4124,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     apply bv updates
   | Ast.Constr (raw_cname, arg_opt) ->
-    (* Phase 41: canonicalize `M.Foo` for Typer / variant_tags lookups *)
+    (* Phase 42: try raw qualified lookup first (preserves multi-module
+       disambiguation `Traffic.Red` → Light/Red vs `Mood.Red` → Color/Red);
+       fall back to canonical bare name. *)
     let cname = Ast.canonical_ctor raw_cname in
     let info =
-      match Hashtbl.find_opt Typer.constructors cname with
+      match Hashtbl.find_opt Typer.constructors raw_cname with
       | Some i -> i
-      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ raw_cname)
+      | None ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some i -> i
+         | None -> unsupported e.Ast.loc ("unknown constructor: " ^ raw_cname))
     in
     let type_name = info.Typer.type_name in
     if not (Hashtbl.mem Typer.types type_name) then
@@ -4359,19 +4364,27 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         in
         go "1" [] [] sub_fields
       | Ast.P_constr (raw_cname, sub) ->
-        (* Phase 41: canonicalize `M.Foo` pattern → `Foo` for ctor lookup *)
+        (* Phase 41 + 42: try raw qualified ctor lookup first (preserves
+           multi-module disambiguation `Traffic.Red` vs `Mood.Red`), fall back
+           to canonical bare name. *)
         let cname = Ast.canonical_ctor raw_cname in
         let info =
-          match Hashtbl.find_opt Typer.constructors cname with
+          match Hashtbl.find_opt Typer.constructors raw_cname with
           | Some i -> i
-          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ raw_cname)
+          | None ->
+            (match Hashtbl.find_opt Typer.constructors cname with
+             | Some i -> i
+             | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ raw_cname))
         in
-        let type_name = info.Typer.type_name in
+        (* Phase 42: prefer the scrutinee's type for struct_name (so the
+           pattern resolves to the actual variant being matched against,
+           not the alias overwrite). info.type_name is only used as fallback. *)
         let struct_name =
           match Ast.walk v_ty with
           | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
             mono_variant_name n (List.map Ast.walk args)
-          | _ -> type_name
+          | Ast.TyCon (n, _) -> n
+          | _ -> info.Typer.type_name
         in
         let ctor_pty =
           match info.Typer.arg with

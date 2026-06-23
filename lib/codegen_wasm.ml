@@ -2124,12 +2124,16 @@ let rec emit_expr (e : Ast.expr) : unit =
     ) decl_fields;
     emit_instr (Printf.sprintf "local.get %d" dst_slot)
   | Ast.Constr (raw_cname, arg_opt) ->
-    (* Phase 41: canonicalize `M.Foo` for Typer / variant_tags lookups *)
+    (* Phase 42: try raw qualified lookup first for disambiguation, fall back
+       to canonical. variant_tags は bare 名 key なので canonical を使う。 *)
     let cname = Ast.canonical_ctor raw_cname in
     let info =
-      match Hashtbl.find_opt Typer.constructors cname with
+      match Hashtbl.find_opt Typer.constructors raw_cname with
       | Some i -> i
-      | None -> unsupported e.Ast.loc ("unknown constructor: " ^ raw_cname)
+      | None ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some i -> i
+         | None -> unsupported e.Ast.loc ("unknown constructor: " ^ raw_cname))
     in
     let type_name = info.Typer.type_name in
     let tag =
@@ -2267,12 +2271,16 @@ let rec emit_expr (e : Ast.expr) : unit =
         let bs = List.concat_map snd conds_bs in
         (cond, bs)
       | Ast.P_constr (raw_cname, sub) ->
-        (* Phase 41: canonicalize `M.Foo` pattern → `Foo` for ctor lookup *)
+        (* Phase 41 + 42: try raw qualified ctor lookup first for
+           multi-module disambiguation, fall back to canonical. *)
         let cname = Ast.canonical_ctor raw_cname in
         let info =
-          match Hashtbl.find_opt Typer.constructors cname with
+          match Hashtbl.find_opt Typer.constructors raw_cname with
           | Some i -> i
-          | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ raw_cname)
+          | None ->
+            (match Hashtbl.find_opt Typer.constructors cname with
+             | Some i -> i
+             | None -> unsupported pat.Ast.ploc ("unknown ctor: " ^ raw_cname))
         in
         let _type_name = info.Typer.type_name in
         (* Phase 26.0: per-ctor payload type. For poly variants, walk

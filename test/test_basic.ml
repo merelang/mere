@@ -4171,6 +4171,29 @@ let () =
         prog))
     "Color__to_int";
 
+  (* --- Phase 42: 2 module 同名 ctor disambiguation (DEFERRED §4.1 残課題)
+     `Traffic.Red` と `Mood.Red` を別 type に対する別物として扱う。 codegen
+     site で `Typer.constructors[raw_qualified]` を先に lookup することで
+     alias 上書き (constructors[Red] が後勝ち) を bypass。 *)
+  check "module: 2 modules with same ctor name (interp disambiguates)"
+    (Pipeline.process
+       "module Traffic { type Light = Red | Yellow | Green; let label = fn (l: Light) -> match l with | Red -> 1 | Yellow -> 2 | Green -> 3; };\n\
+        module Mood { type Color = Red | Blue | Purple; let label = fn (c: Color) -> match c with | Red -> 10 | Blue -> 20 | Purple -> 30; };\n\
+        Traffic.label Traffic.Red + Mood.label Mood.Red") "11";
+  check "module: 2 modules same ctor + qualified pattern match"
+    (Pipeline.process
+       "module Foo { type t = X | Y; };\n\
+        module Bar { type t = X | Z; };\n\
+        let a = Foo.X in let b = Bar.X in\n\
+        (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)") "11";
+  (* Phase 42 (b): M-qualified record type が interp で動く (codegen は
+     module_scoping.mere の 4 backend smoke で確認済) *)
+  check "module: qualified record literal + field access (interp)"
+    (Pipeline.process
+       "module Shapes { type Rect = { w: int, h: int }; };\n\
+        let r = Shapes.Rect { w = 3, h = 4 } in show (r.w * r.h)")
+    "\"12\"";
+
   (* --- Phase 11.1: 借用注釈の細分化 (Q-004 narrowed) --- *)
   (* デフォルト `&R T` は BorrowedRead (shared read)、syntax 上は無印。 *)
   check "borrow: &R T parses as default (borrowed/shared-read)"
