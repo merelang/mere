@@ -1707,6 +1707,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     file_io_used := true;
     emit_expr path_e;
     emit_instr "call $__lang_read_file"
+  | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
+    (* Phase 44: list_dir は Wasm では未実装 (WASI fd_readdir 経由の対応は別 Phase)。
+       SSG MVP は C codegen で十分なので defer。 *)
+    unsupported e.Ast.loc
+      "list_dir is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
+  | Ast.App ({ node = Ast.Var "mkdir_p"; _ }, _path_e) ->
+    unsupported e.Ast.loc
+      "mkdir_p is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
     file_io_used := true;
     emit_expr path_e;

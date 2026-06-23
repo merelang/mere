@@ -999,6 +999,11 @@ let initial_env : env =
     (* Phase 19.6: I/O 拡張。prelude が `'a list` / `'a option` を提供。 *)
     ("read_lines",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
+    (* Phase 44: docs site SSG 用 file system primitives (paper-trial doc 47) *)
+    ("list_dir",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
+    ("mkdir_p",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit)));
     ("file_exists",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
     ("env_var",

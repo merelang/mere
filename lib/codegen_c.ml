@@ -211,6 +211,7 @@ let metrics_used = ref false
    bodies. *)
 let str_split_used = ref false
 let str_join_used = ref false
+let list_dir_used = ref false   (* Phase 44 *)
 
 (* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key は int / str
    のみサポート、value は codegen の任意 concrete 型。線形スキャン。
@@ -1671,6 +1672,14 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr path_e) (emit_expr arg)
      | Ast.Var "read_file" ->
        Printf.sprintf "__lang_read_file(%s)" (emit_expr arg)
+     | Ast.Var "list_dir" ->
+       (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`)、
+          interp と diff = 0。 list_str を返すので gating flag を立てる *)
+       list_dir_used := true;
+       Printf.sprintf "__lang_list_dir(%s)" (emit_expr arg)
+     | Ast.Var "mkdir_p" ->
+       (* Phase 44: mkdir -p 相当、 既存ならスキップ *)
+       Printf.sprintf "__lang_mkdir_p(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
        (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
        Printf.sprintf "__lang_char_at(%s, %s)"
@@ -3517,6 +3526,30 @@ let str_concat_helper =
       "  return 0;";
       "}";
       "";
+      (* Phase 44: mkdir_p は list_str に依存しないので header に置ける *)
+      "#include <sys/stat.h>";
+      "#include <errno.h>";
+      "static int __lang_mkdir_p(const char* path) {";
+      "  /* recursive mkdir -p: 既存ならスキップ、 失敗時は __lang_fail_impl */";
+      "  size_t n = strlen(path);";
+      "  if (n == 0) return 0;";
+      "  char* buf = (char*)malloc(n + 1);";
+      "  memcpy(buf, path, n + 1);";
+      "  for (size_t i = 1; i <= n; i++) {";
+      "    if (buf[i] == '/' || buf[i] == '\\0') {";
+      "      char saved = buf[i];";
+      "      buf[i] = '\\0';";
+      "      if (mkdir(buf, 0755) != 0 && errno != EEXIST) {";
+      "        free(buf);";
+      "        __lang_fail_impl(path);";
+      "      }";
+      "      buf[i] = saved;";
+      "    }";
+      "  }";
+      "  free(buf);";
+      "  return 0;";
+      "}";
+      "";
       (* Phase 22.6: str_unescape — backslash escapes (n / t / r / backslash
          / quote / slash) を解釈、他はそのまま出力。json_parser 等で string
          literal 内の escape を処理。 *)
@@ -3945,6 +3978,43 @@ let str_list_helpers =
       "  }";
       "  r[pos] = '\\0';";
       "  return r;";
+      "}";
+      "";
+      (* Phase 44: list_dir — dir entries (sorted、 `.` `..` 除外) を list_str に。
+         interp (eval.ml) と diff = 0 を保証するため qsort で安定順序。 *)
+      "#include <dirent.h>";
+      "static int __lang_list_dir_qsort(const void* a, const void* b) {";
+      "  return strcmp(*(const char* const*)a, *(const char* const*)b);";
+      "}";
+      "static list_str __lang_list_dir(const char* path) {";
+      "  DIR* d = opendir(path);";
+      "  if (!d) __lang_fail_impl(path);";
+      "  size_t cap = 16, n = 0;";
+      "  const char** arr = (const char**)malloc(cap * sizeof(char*));";
+      "  struct dirent* ent;";
+      "  while ((ent = readdir(d)) != NULL) {";
+      "    if (strcmp(ent->d_name, \".\") == 0 || strcmp(ent->d_name, \"..\") == 0) continue;";
+      "    if (n == cap) { cap *= 2; arr = (const char**)realloc(arr, cap * sizeof(char*)); }";
+      "    size_t nlen = strlen(ent->d_name);";
+      "    char* copy = (char*)__lang_region_alloc(&__lang_default_region, nlen + 1);";
+      "    memcpy(copy, ent->d_name, nlen + 1);";
+      "    arr[n++] = copy;";
+      "  }";
+      "  closedir(d);";
+      "  qsort(arr, n, sizeof(char*), __lang_list_dir_qsort);";
+      "  list_str nil_node = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "  nil_node->tag = 0;";
+      "  list_str head = nil_node;";
+      "  for (size_t k = 0; k < n; k++) {";
+      "    size_t i = n - 1 - k;";
+      "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    cons->tag = 1;";
+      "    cons->payload.Cons.f0 = arr[i];";
+      "    cons->payload.Cons.f1 = head;";
+      "    head = cons;";
+      "  }";
+      "  free(arr);";
+      "  return head;";
       "}" ]
 
 (* Phase 15.8: 全 OwnedVec を tracking する registry。`owned_vec_new` /
@@ -4856,6 +4926,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   metrics_used := false;
   str_split_used := false;
   str_join_used := false;
+  list_dir_used := false;
   let variant_decls =
     (* Phase 36 (DEFERRED §1.17 fix): dedupe by name keeping LAST occurrence
        so user-side `type result = ...` shadows the builtin entry. *)
@@ -5541,7 +5612,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !metrics_used then [metrics_runtime; ""] else [])
     (* Phase 24.3: str_split / str_join — references list_str_node so
        emit after mono variant bodies (= list_str). *)
-    @ (if !str_split_used || !str_join_used then [str_list_helpers; ""] else [])
+    @ (if !str_split_used || !str_join_used || !list_dir_used then [str_list_helpers; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (let extern_decls =
          Hashtbl.fold (fun name ty acc ->

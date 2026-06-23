@@ -222,6 +222,45 @@ let builtin_file_exists =
     | V_str path -> V_bool (Sys.file_exists path)
     | _ -> failwith "file_exists: expected str")
 
+(* Phase 44: docs site SSG 用 fs primitives *)
+let builtin_list_dir =
+  V_builtin ("list_dir", fun v ->
+    match v with
+    | V_str path ->
+      (try
+         let entries = Sys.readdir path in
+         (* `.` と `..` は除外。 sort して安定順序にする *)
+         let lst = Array.to_list entries
+                   |> List.filter (fun n -> n <> "." && n <> "..")
+                   |> List.sort compare in
+         str_list_to_v_local lst
+       with Sys_error msg ->
+         raise (Eval_error (Loc.dummy, "list_dir: " ^ msg)))
+    | _ -> failwith "list_dir: expected str")
+
+let builtin_mkdir_p =
+  V_builtin ("mkdir_p", fun v ->
+    match v with
+    | V_str path ->
+      (* `mkdir -p` 相当: 中間 dir も含めて作成、 既存ならエラー無視 *)
+      let rec mk p =
+        if p = "" || p = "/" || p = "." then ()
+        else if Sys.file_exists p then ()
+        else begin
+          mk (Filename.dirname p);
+          try Unix.mkdir p 0o755 with
+          | Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+          | Unix.Unix_error (e, _, _) ->
+            raise (Eval_error (Loc.dummy,
+              "mkdir_p: " ^ Unix.error_message e ^ ": " ^ p))
+        end
+      in
+      (try mk path; V_unit
+       with Eval_error _ as e -> raise e
+          | Sys_error msg ->
+            raise (Eval_error (Loc.dummy, "mkdir_p: " ^ msg)))
+    | _ -> failwith "mkdir_p: expected str")
+
 let builtin_env_var =
   V_builtin ("env_var", fun v ->
     match v with
@@ -1530,6 +1569,8 @@ let initial_env : env =
     ("read_file", ref builtin_read_file);
     ("write_file", ref builtin_write_file);
     ("read_lines", ref builtin_read_lines);
+    ("list_dir", ref builtin_list_dir);
+    ("mkdir_p", ref builtin_mkdir_p);
     ("file_exists", ref builtin_file_exists);
     ("env_var", ref builtin_env_var);
     ("args", ref builtin_args);

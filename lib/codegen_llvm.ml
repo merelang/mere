@@ -3129,6 +3129,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_read_file(ptr %s)" r pv);
     r
+  | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
+    (* Phase 44: list_dir は LLVM では未実装 (interp / C のみ対応)。
+       SSG MVP は C codegen で十分なので defer。 *)
+    unsupported e.Ast.loc
+      "list_dir is unsupported in LLVM codegen (Phase 44 MVP scope = interp + C only)"
+  | Ast.App ({ node = Ast.Var "mkdir_p"; _ }, _path_e) ->
+    unsupported e.Ast.loc
+      "mkdir_p is unsupported in LLVM codegen (Phase 44 MVP scope = interp + C only)"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
     (* Phase 25.9: write_file path content — curried、unit (i32 0) を返す。 *)
     file_io_used_llvm := true;

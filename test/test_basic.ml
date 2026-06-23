@@ -1679,6 +1679,35 @@ let () =
        "match env_var \"MERE_DEFINITELY_UNSET_XYZ_123\" with \
         | None -> \"none\" | Some _ -> \"some\"")
     "\"none\"";
+
+  (* --- Phase 44: list_dir / mkdir_p (docs site SSG 用 fs primitives) --- *)
+  check "list_dir / mkdir_p: type signatures"
+    (Pipeline.type_of "list_dir") "(str -> str list)";
+  check "mkdir_p: type signature"
+    (Pipeline.type_of "mkdir_p") "(str -> unit)";
+  check "list_dir + mkdir_p: roundtrip (create dir + populate + list)"
+    (let base = Filename.concat (Filename.get_temp_dir_name ())
+                  (Printf.sprintf "mere_phase44_%d" (Random.int 1000000)) in
+     Pipeline.process
+       (Printf.sprintf
+          "{ mkdir_p %S; \
+             write_file %S \"alpha\"; \
+             write_file %S \"beta\"; \
+             match list_dir %S with \
+             | Cons (a, Cons (b, Nil)) -> a ++ \",\" ++ b \
+             | _ -> \"unexpected\" }"
+          base
+          (Filename.concat base "a.txt")
+          (Filename.concat base "b.txt")
+          base))
+    "\"a.txt,b.txt\"";
+  check "mkdir_p: nested (creates intermediate dirs)"
+    (let base = Filename.concat (Filename.get_temp_dir_name ())
+                  (Printf.sprintf "mere_phase44_nested_%d/a/b/c" (Random.int 1000000)) in
+     Pipeline.process
+       (Printf.sprintf
+          "{ mkdir_p %S; file_exists %S }" base base))
+    "true";
   (* args は Sys.argv 依存なので結果は test runner の起動方法次第。
      evaluation が落ちないことを確認するだけ。 *)
   (try
