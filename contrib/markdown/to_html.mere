@@ -287,8 +287,20 @@ let close_blockquote_if_open = fn state -> fn out ->
 // として join される (例: 3 行の soft-wrap → 1 個の `<p>line1 line2 line3</p>`)。
 // 空行 / 他 block 要素 (heading / hr / list / table / blockquote / code) が来た
 // 時に close する。
-let close_paragraph_if_open = fn state -> fn out ->
+//
+// paragraph 内の inline 解析 (\`**\` / `*` / `` ` `` / `[...](...)`) は cross-line
+// に渡る場合があるため、 paragraph の text は専用 strbuf に accumulate し、
+// close 時に **全体に対して render_inline を 1 度だけ呼ぶ** (per-line 適用だと
+// soft-wrap した bold ペアが正しく match しない)。 strbuf は 1 つを使い回し、
+// 各 paragraph の start offset (\`para_start\`) を state で track して
+// substring で切り出す。
+let close_paragraph_if_open = fn state -> fn out -> fn para_buf ->
   if map_get state "para_open" == 1 then
+    let total = strbuf_to_str para_buf in
+    let start = map_get state "para_start" in
+    let para_text = substring total start (str_len total) in
+    let _ = strbuf_push out "<p>" in
+    let _ = strbuf_push out (render_inline para_text) in
     let _ = strbuf_push out "</p>\n" in
     let _ = map_set state "para_open" 0 in ()
   else ();
@@ -372,20 +384,26 @@ let emit_list_item = fn state -> fn out -> fn (depth: int) ->
 
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
-  // state Map: in_code / table_phase / list_depth (+ kind_<i> per depth) / bq_open / para_open
+  // paragraph 用 strbuf — close 時に `para_start..len` を切り出して
+  // render_inline を 1 回適用 (cross-line bold/italic/code を正しく match)。
+  // strbuf に clear が無いため accumulate-only、 各 paragraph の開始 offset を
+  // state["para_start"] で追跡する。
+  let para_buf = strbuf_new () in
+  // state Map: in_code / table_phase / list_depth (+ kind_<i> per depth) / bq_open / para_open / para_start
   let state = map_new () in
   let _ = map_set state "in_code" 0 in
   let _ = map_set state "table_phase" 0 in
   let _ = map_set state "list_depth" 0 in
   let _ = map_set state "bq_open" 0 in
   let _ = map_set state "para_open" 0 in
+  let _ = map_set state "para_start" 0 in
   let _ = list_iter lines (fn line ->
     let in_code = map_get state "in_code" in
     if starts_with line "```" then
       let _ = close_table_if_open state out in
       let _ = close_list_if_open state out in
       let _ = close_blockquote_if_open state out in
-      let _ = close_paragraph_if_open state out in
+      let _ = close_paragraph_if_open state out para_buf in
       // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
       // Phase 44.5: ```<lang> なら <code class="language-<lang>"> として emit
       if in_code == 0 then
@@ -414,7 +432,7 @@ let render = fn (lines: str list) ->
     else if is_table_row line then
       let _ = close_list_if_open state out in
       let _ = close_blockquote_if_open state out in
-      let _ = close_paragraph_if_open state out in
+      let _ = close_paragraph_if_open state out para_buf in
       let phase = map_get state "table_phase" in
       if phase == 0 then
         let _ = strbuf_push out "<table>\n<thead>" in
@@ -438,7 +456,7 @@ let render = fn (lines: str list) ->
       // 連続する `> ` 行は単一の `<blockquote>` に集約。 行間は space 区切り。
       let _ = close_table_if_open state out in
       let _ = close_list_if_open state out in
-      let _ = close_paragraph_if_open state out in
+      let _ = close_paragraph_if_open state out para_buf in
       let bq = map_get state "bq_open" in
       let _ = if bq == 0 then
                 let _ = strbuf_push out "<blockquote>" in
@@ -452,7 +470,7 @@ let render = fn (lines: str list) ->
       if is_list then
         let _ = close_table_if_open state out in
         let _ = close_blockquote_if_open state out in
-        let _ = close_paragraph_if_open state out in
+        let _ = close_paragraph_if_open state out para_buf in
         let text = substring line content_off (str_len line) in
         // depth は detect から 0-indexed なので 1-indexed に変換
         let _ = emit_list_item state out (list_depth + 1) list_kind text in
@@ -464,27 +482,30 @@ let render = fn (lines: str list) ->
         let html = render_line line in
         if str_len html > 0 then
           // 単一行 block (heading / hr) は paragraph を閉じてから直接 emit
-          let _ = close_paragraph_if_open state out in
+          let _ = close_paragraph_if_open state out para_buf in
           let _ = strbuf_push out html in
           let _ = strbuf_push out "\n" in
           ()
         else if str_len line == 0 then
           // 空行: paragraph を閉じる (CommonMark の段落境界)
-          let _ = close_paragraph_if_open state out in ()
+          let _ = close_paragraph_if_open state out para_buf in ()
         else
-          // 通常の段落 line: open paragraph (or space-join) + render_inline
+          // 通常の段落 line: para_buf に append (close 時に render_inline)。
+          // 開始時は para_start を strbuf 現在長に固定 (それ以前の paragraph 領域を
+          // 切り出しから除外)、 継続時は " " separator を先に挿入してから line。
           let p = map_get state "para_open" in
           let _ = if p == 0 then
-                    let _ = strbuf_push out "<p>" in
-                    let _ = map_set state "para_open" 1 in ()
+                    let _ = map_set state "para_open" 1 in
+                    let _ = map_set state "para_start" (strbuf_len para_buf) in
+                    let _ = strbuf_push para_buf line in ()
                   else
-                    let _ = strbuf_push out " " in () in
-          let _ = strbuf_push out (render_inline line) in
+                    let _ = strbuf_push para_buf " " in
+                    let _ = strbuf_push para_buf line in () in
           ()) in
   let _ = close_table_if_open state out in
   let _ = close_list_if_open state out in
   let _ = close_blockquote_if_open state out in
-  let _ = close_paragraph_if_open state out in
+  let _ = close_paragraph_if_open state out para_buf in
   strbuf_to_str out;
 
 };   // end of `module MarkdownHtml`
@@ -503,6 +524,12 @@ let doc = [
   "Mere docs often hard-wrap source lines around col 80,",
   "but the rendered HTML should join them into a single",
   "`<p>` block (CommonMark behavior).",
+  "",
+  "Cross-line **bold spanning",
+  "two source lines** still matches correctly,",
+  "as does *italic across",
+  "lines* and `code spanning",
+  "lines`.",
   "",
   "## Features",
   "",
