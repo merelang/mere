@@ -273,10 +273,25 @@ let n = Node { ... }            // ERROR: must be inside a region block
 - [x] `Trivial[R]` 型制約 (`drop type Name = ...` で Drop 型を宣言、region 配置時に Drop 型を含むと型エラー、Phase 2.6、2026-06-17)
 
 ### Phase 3 (大型、設計再開も必要)
-- [ ] 借用注釈の細分化 `&shared write` / `&exclusive write` (Q-004 narrowed)
+- [x] 借用注釈の細分化 `&shared write` / `&exclusive write` (Q-004 resolved Phase 11.1-11.3、 borrow checker は Phase 17.1/17.2 で 4 mode × 4 mode = 10 ペアの conflict matrix 網羅)
 - [ ] 子 region と promote (`region S of R`、`R.promote(...)`)
 - [ ] `Vec[R, T]` / `StrBuf[R]` 等の region 版 std 型 (Q-010 narrowed)
 - [ ] `with` + Drop ordering の統合実装 (Q-011 resolved の機械化)
+
+### 借用 mode の現状と並行安全性 (2026-06-23 update)
+
+借用注釈 4 mode の syntax / borrow checker は完了済 (Phase 11-17)。 ただし
+**並行実行 backend が未実装** のため、 `&shared write R T` で T が「内部安全」
+(Rust の Send/Sync 相当) かどうかの型レベル要求は **現状 enforce していない**:
+
+| mode | 並行安全性要求 (将来) |
+|---|---|
+| `&R T` (default = shared read) | 安全 — read-only access は immutable T で OK |
+| `&shared write R T` | **要求: T が internally safe** (atomic / Mutex 等) — 現状未 enforce |
+| `&exclusive R T` (= read 排他) | 安全 — single thread のみ access |
+| `&mut R T` (= write 排他) | 安全 — single thread のみ access |
+
+並行 backend (将来) の入り口要件は DEFERRED §2.4 に集約。 現状 Mere は **single-threaded interpreter + 3 backend (C / LLVM / Wasm) はすべて single-threaded 実行**、 `&shared write` は構文区別のみで runtime 上は通常の `&R T` と同じポインタ。 並行実行 backend (例: OCaml domains 経由 / Wasm threads) を入れる Phase で T の Send/Sync 相当 type bound を導入する設計余地。
 
 ### Phase 4 (codegen)
 
