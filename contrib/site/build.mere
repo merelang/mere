@@ -308,7 +308,10 @@ let style_css =
   ".token.operator, .token.punctuation \{ color: #586069; background: transparent; }\n" ++
   ".token.builtin \{ color: #6f42c1; }\n" ++
   ".token.constructor, .token.class-name \{ color: #e36209; }\n" ++
-  ".token.tyvar, .token.symbol \{ color: #005cc5; font-style: italic; }\n";
+  ".token.tyvar, .token.symbol \{ color: #005cc5; font-style: italic; }\n" ++
+  "/* GFM task list (`- [ ]` / `- [x]`) — bullet を消して checkbox 左寄せ */\n" ++
+  "li.task-list-item \{ list-style: none; margin-left: -1.5em; }\n" ++
+  "li.task-list-item input[type=\"checkbox\"] \{ margin-right: 0.4em; }\n";
 
 // search.json を fetch + substring filter で簡易検索する vanilla JS
 //   nav の search input に typing すると 100ms debounce で search.json を fetch、

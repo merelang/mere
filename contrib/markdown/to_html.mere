@@ -63,6 +63,13 @@ let render_inline = fn (s: str) ->
         let _ = strbuf_push out (substring s (i + 2) e) in
         let _ = strbuf_push out "</strong>" in
         go (e + 2)
+      else if c == "~" && i + 1 < n && char_at s (i + 1) == "~" then
+        // GFM strikethrough: ~~text~~ → <del>text</del>
+        let _ = strbuf_push out "<del>" in
+        let e = __md_find_double s n "~" (i + 2) in
+        let _ = strbuf_push out (substring s (i + 2) e) in
+        let _ = strbuf_push out "</del>" in
+        go (e + 2)
       else if c == "*" then
         let _ = strbuf_push out "<em>" in
         let e = __md_find_single s n "*" (i + 1) in
@@ -378,7 +385,27 @@ let emit_list_item = fn state -> fn out -> fn (depth: int) ->
             let _ = map_set state ("li_open_" ++ show depth) 0 in ()
           else () in
   // (5) 新規 <li> を emit (open)
-  let _ = strbuf_push out ("<li>" ++ render_inline text) in
+  //   GFM task list: `- [ ] text` / `- [x] text` / `- [X] text` を check box に。
+  //   ul のみ対象 (ol with task list は標準外)。
+  let tlen = str_len text in
+  let is_task_unchecked = kind == 1 && tlen >= 4
+                          && substring text 0 4 == "[ ] " in
+  let is_task_checked = kind == 1 && tlen >= 4
+                        && (substring text 0 4 == "[x] "
+                            || substring text 0 4 == "[X] ") in
+  let _ = if is_task_unchecked then
+            let _ = strbuf_push out
+              "<li class=\"task-list-item\"><input type=\"checkbox\" disabled> " in
+            let _ = strbuf_push out (render_inline (substring text 4 tlen)) in
+            ()
+          else if is_task_checked then
+            let _ = strbuf_push out
+              "<li class=\"task-list-item\"><input type=\"checkbox\" checked disabled> " in
+            let _ = strbuf_push out (render_inline (substring text 4 tlen)) in
+            ()
+          else
+            let _ = strbuf_push out ("<li>" ++ render_inline text) in
+            () in
   let _ = map_set state ("li_open_" ++ show depth) 1 in
   ();
 
@@ -529,7 +556,8 @@ let doc = [
   "two source lines** still matches correctly,",
   "as does *italic across",
   "lines* and `code spanning",
-  "lines`.",
+  "lines`. Strikethrough: ~~deleted~~ + ~~cross",
+  "line~~ also works.",
   "",
   "## Features",
   "",
@@ -552,6 +580,13 @@ let doc = [
   "    - mixed ul nested",
   "    - another mixed ul",
   "  2. another nested",
+  "",
+  "### Task list (GFM)",
+  "",
+  "- [ ] open task",
+  "- [x] done task",
+  "- [X] also done",
+  "- plain item (no checkbox)",
   "",
   "### Code example",
   "",
