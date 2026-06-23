@@ -29,6 +29,8 @@ let help_text =
   \  :env             list current bindings with their types\n\
   \  :show NAME       show one binding's type AND value\n\
   \  :load FILE       load decls from FILE into the REPL env\n\
+  \  :save FILE       save serializable user bindings as Mere source\n\
+  \                   (closures / Vec / StrBuf / Map are skipped with comments)\n\
   \  :reset           clear all user bindings (back to builtin env)\n\
   \  :help | :h       this help\n\
    Multi-line: if input is incomplete, you'll get a `..>` continuation\n\
@@ -247,6 +249,59 @@ let format_show eval_env type_env name =
 let print_show eval_env type_env name =
   print_endline (format_show eval_env type_env name)
 
+(* Phase 45.1 (DEFERRED §5.3): `:save FILE` — user bindings を Mere source
+   として書き出し、 `:load FILE` で再構成可能にする。
+
+   値の serializable / unserializable:
+     int / float / bool / str / unit / list / tuple / constructor /
+     record: Eval.to_string が Mere 構文と互換な文字列を返すのでそのまま使う。
+     closure / builtin / Vec / StrBuf / Map: serialize 不可、 コメント行で skip。
+   record は to_string 出力 (`Foo { x = 1 }`) が docs/patterns.md §12 の
+   「list literal 内 record literal は TypeName { ... } 必須」 も満たすので OK。 *)
+let rec is_serializable = function
+  | Eval.V_int _ | Eval.V_float _ | Eval.V_bool _
+  | Eval.V_str _ | Eval.V_unit -> true
+  | Eval.V_closure _ | Eval.V_builtin _ -> false
+  | Eval.V_vec _ | Eval.V_strbuf _ | Eval.V_map _ -> false
+  | Eval.V_constr (_, None) -> true
+  | Eval.V_constr (_, Some inner) -> is_serializable inner
+  | Eval.V_tuple vs -> List.for_all is_serializable vs
+  | Eval.V_record (_, fields) ->
+    List.for_all (fun (_, v) -> is_serializable v) fields
+
+let save_to_file eval_env type_env path =
+  let bs = user_bindings type_env in
+  let oc = open_out path in
+  Printf.fprintf oc "// Saved by Mere REPL :save\n";
+  Printf.fprintf oc "// Bindings: %d (closures and runtime collections are skipped)\n\n"
+    (List.length bs);
+  let saved = ref 0 in
+  let skipped = ref 0 in
+  List.iter (fun (n, _sch) ->
+    match List.assoc_opt n eval_env with
+    | None ->
+      Printf.fprintf oc "// skipped: %s (no value)\n" n;
+      incr skipped
+    | Some r ->
+      if is_serializable !r then begin
+        Printf.fprintf oc "let %s = %s;\n" n (Eval.to_string !r);
+        incr saved
+      end else begin
+        let kind = match !r with
+          | Eval.V_closure _ -> "closure"
+          | Eval.V_builtin _ -> "builtin"
+          | Eval.V_vec _ -> "Vec (runtime)"
+          | Eval.V_strbuf _ -> "StrBuf (runtime)"
+          | Eval.V_map _ -> "Map (runtime)"
+          | _ -> "non-serializable"
+        in
+        Printf.fprintf oc "// skipped: %s (%s)\n" n kind;
+        incr skipped
+      end
+  ) bs;
+  close_out oc;
+  (!saved, !skipped)
+
 (* Reset both envs to their initial (builtin-only) state. *)
 let do_reset eval_env type_env =
   eval_env := Eval.initial_env;
@@ -360,6 +415,18 @@ let run () =
            let source = try In_channel.with_open_text path In_channel.input_all
                         with _ -> "" in
            print_endline (format_diag ~source e));
+        loop ()
+      end
+      else if starts_with ":save " trimmed then begin
+        let path = String.trim (String.sub trimmed 6 (String.length trimmed - 6)) in
+        if path = "" then print_endline "usage: :save FILE"
+        else begin
+          try
+            let (saved, skipped) = save_to_file !eval_env !type_env path in
+            Printf.printf "saved %d bindings to %s (%d skipped)\n"
+              saved path skipped
+          with Sys_error msg -> Printf.printf "io error: %s\n" msg
+        end;
         loop ()
       end
       else if starts_with ":" trimmed then begin
