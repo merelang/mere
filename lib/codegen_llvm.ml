@@ -65,6 +65,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit"
+  | Ast.TyFloat -> "float"   (* Phase 43.1: float を fn signature tag に使えるよう *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
@@ -234,12 +235,12 @@ let mono_variant_is_recursive
 (* Probe: is the type fully resolved (no tyvars / params / floats)? *)
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
   | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
-  | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+  | Ast.TyVar _ | Ast.TyParam _ -> false  (* Phase 43.1: TyFloat was incorrectly listed as poly *)
 
 (* Walk a Lang type to its LLVM type. Tuples / monomorphic records /
    variants lower to named-struct references (`%tuple_int_int`,
@@ -396,12 +397,12 @@ let fresh_str_global (s : string) : string =
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
   | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
-  | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+  | Ast.TyVar _ | Ast.TyParam _ -> false  (* Phase 43.1: TyFloat was incorrectly listed as poly *)
 
 (* Top-level fn binding extracted from main: `let name = fn param -> body in ...`.
    We keep the original Fun expr so we can read its typer-set `.ty`. *)

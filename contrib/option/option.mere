@@ -1,0 +1,100 @@
+// contrib/option/option.mere — Option type の追加 helper
+//
+// Mere prelude には既に option_map / option_default / option_is_some /
+// option_and_then が含まれている。 本 lib は prelude を補完する **追加 helpers**
+// を `module Option { ... }` でまとめる。
+//
+// 使い方:
+//   import "contrib/option/option.mere";
+//   let result = Option.zip (Some 1) (Some "a") in   // Some (1, "a")
+//   match result with
+//   | Some (n, s) -> ...
+//   | None -> ...
+//
+// 提供 API (prelude にない補完 helpers):
+//   - `Option.zip:    'a opt -> 'b opt -> ('a * 'b) opt`  両方 Some なら tuple
+//   - `Option.filter: 'a opt -> ('a -> bool) -> 'a opt`   述語不一致なら None に
+//   - `Option.or_else: 'a opt -> 'a opt -> 'a opt`        左が None なら右
+//   - `Option.is_none: 'a opt -> bool`                   inverse of is_some
+//   - `Option.unwrap_or_fail: 'a opt -> str -> 'a`       None なら fail
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+
+module Option {
+
+// 両方 Some なら (a, b) を Some で包む。 どちらか None なら None
+let zip = fn (a) -> fn (b) ->
+  match a with
+  | None -> None
+  | Some x ->
+    match b with
+    | None -> None
+    | Some y -> Some (x, y);
+
+// pred が true なら値そのまま、 false / None なら None に倒す
+let filter = fn (opt) -> fn (pred) ->
+  match opt with
+  | None -> None
+  | Some v -> if pred v then Some v else None;
+
+// 左が None なら右を返す (短絡)
+let or_else = fn (a) -> fn (b) ->
+  match a with
+  | None -> b
+  | Some _ -> a;
+
+// inverse of option_is_some
+let is_none = fn (opt) ->
+  match opt with
+  | None -> true
+  | Some _ -> false;
+
+// None なら fail (panic)、 Some なら取り出す。 lib 内部 invariant を保証する場面で
+let unwrap_or_fail = fn (opt) -> fn (msg: str) ->
+  match opt with
+  | None -> fail msg
+  | Some v -> v;
+
+};   // end of `module Option`
+
+// === demo で使う unwrap_or_fail の concrete instantiation (codegen に poly fn を
+//     残さないため、 demo で int / str 用に呼び出す) ===
+let _ = Option.unwrap_or_fail (Some 42) "should not fail";
+let _ = Option.unwrap_or_fail (Some "ok") "should not fail";
+
+// === Self-tests (module の外側、 実 use 時は削除) ===
+
+let _ = print "=== Option helpers demo ===";
+
+// describe を介して表示 (match 表現を let で抽出)
+let describe_int = fn opt ->
+  match opt with
+  | None -> "None"
+  | Some n -> "Some " ++ show n;
+
+let describe_pair = fn opt ->
+  match opt with
+  | None -> "None"
+  | Some (n, s) -> "Some (" ++ show n ++ ", " ++ s ++ ")";
+
+// 注意: `None` を annotation なしで lib helper に渡すと、 codegen 環境で
+// 多 instantiation が解決できず `'a` leak になることがある。 demo では
+// `(None : str option)` のように明示 annotation を付けて回避。
+
+// zip
+let _ = print ("zip (Some 1) (Some \"a\") -> " ++ describe_pair (Option.zip (Some 1) (Some "a")));
+let _ = print ("zip (Some 1) None        -> " ++ describe_pair (Option.zip (Some 1) (None: str option)));
+
+// filter
+let _ = print ("filter (Some 5) (>3) -> " ++ describe_int (Option.filter (Some 5) (fn n -> n > 3)));
+let _ = print ("filter (Some 2) (>3) -> " ++ describe_int (Option.filter (Some 2) (fn n -> n > 3)));
+
+// or_else
+let _ = print ("or_else (Some 1) (Some 2) -> " ++ describe_int (Option.or_else (Some 1) (Some 2)));
+let _ = print ("or_else None     (Some 2) -> " ++ describe_int (Option.or_else (None: int option) (Some 2)));
+
+// is_none
+let _ = print ("is_none (Some 1) -> " ++ show (Option.is_none (Some 1)));
+let _ = print ("is_none None     -> " ++ show (Option.is_none (None: int option)));
+
+0

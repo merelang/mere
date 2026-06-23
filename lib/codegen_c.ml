@@ -356,7 +356,11 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
   | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
-  | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+  | Ast.TyFloat -> true   (* Phase 43.1 fix: TyFloat is fully concrete, the previous
+                              `false` was a typo that prevented `float`-参の fn を fn_decl
+                              として emit する path に乗らず、 call site のみ emit されて
+                              compile fail していた *)
+  | Ast.TyVar _ | Ast.TyParam _ -> false
 
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
@@ -364,6 +368,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit"
+  | Ast.TyFloat -> "float"   (* Phase 43.1: float を fn signature tag に使えるよう *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) ->
     (* Recursive arrow → use the same naming used by closure_struct_name. *)

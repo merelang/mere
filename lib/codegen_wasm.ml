@@ -420,6 +420,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit"
+  | Ast.TyFloat -> "float"   (* Phase 43.1: float fn signature tag *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
@@ -437,12 +438,12 @@ let rec ty_tag (t : Ast.ty) : string =
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
   | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
-  | Ast.TyVar _ | Ast.TyParam _ | Ast.TyFloat -> false
+  | Ast.TyVar _ | Ast.TyParam _ -> false  (* Phase 43.1: TyFloat was incorrectly listed as poly *)
 
 (* Substitute TyParam → concrete throughout `t`. Used by add_show_type
    to specialize variant payloads / record fields against the actual

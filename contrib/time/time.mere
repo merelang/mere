@@ -1,0 +1,67 @@
+// contrib/time/time.mere — time format helpers (codegen 4 backend 対応)
+//
+// MVP scope: 経過秒 (float) を人間可読 string に format するだけ。 `time` builtin
+// (interp で動くが C/LLVM/Wasm 未対応) を直接呼ぶ helper (`now` / `since` /
+// `bench`) は当面除外。 これら 4 backend 対応を待つ Phase 候補。
+//
+// 使い方 (interp only で benchmark したい場合):
+//   import "contrib/time/time.mere";
+//   let t0 = time () in   // builtin、 interp 専用
+//   ... 重い処理 ...
+//   let dt = f_sub (time ()) t0 in
+//   print (Time.format_elapsed dt)
+//
+// 使い方 (codegen 含む 4 backend で format だけ使う場合):
+//   import "contrib/time/time.mere";
+//   print (Time.format_elapsed 1.25);    // "1.25s"
+//   print (Time.format_elapsed 0.005);   // "5ms"
+//
+// 実行モード: interp / C / LLVM の **3 backend で diff = 0**。 Wasm は当面
+// non-supported — user-defined fn が float parameter を持つ case で codegen_wasm
+// 側が param を i32 hardcode しているため (lib/codegen_wasm.ml:2587)。 Wasm の
+// float fn signature 対応は別 Phase 候補。
+
+module Time {
+
+// 経過秒 (float) を人間可読 string に
+//   < 1.0 sec: "Nms" (整数化)
+//   >= 1.0 sec: "N.NNs" (小数 2 桁)
+let format_elapsed = fn (sec: float) ->
+  if f_lt sec 1.0 then
+    let ms = int_of_float (f_mul sec 1000.0) in
+    show ms ++ "ms"
+  else
+    // 小数 2 桁: floor (sec * 100) / 100
+    let cents = int_of_float (f_mul sec 100.0) in
+    let int_part = cents / 100 in
+    let frac = cents - int_part * 100 in
+    // frac が 0..9 の場合は "0" 詰め
+    let frac_str = if frac < 10 then "0" ++ show frac else show frac in
+    show int_part ++ "." ++ frac_str ++ "s";
+
+// 経過秒を ms 単位の整数に (CI / log 出力で扱いやすい)
+let to_ms = fn (sec: float) ->
+  int_of_float (f_mul sec 1000.0);
+
+// 経過秒を us (マイクロ秒) 単位の整数に
+let to_us = fn (sec: float) ->
+  int_of_float (f_mul sec 1000000.0);
+
+};   // end of `module Time`
+
+// === Self-tests (module の外側、 実 use 時は削除) ===
+
+let _ = print "=== Time helpers demo ===";
+
+// elapsed 秒の format check (実時間に依存しないよう固定値で)
+let _ = print ("0.5s     -> " ++ Time.format_elapsed 0.5);
+let _ = print ("1.25s    -> " ++ Time.format_elapsed 1.25);
+let _ = print ("12.34s   -> " ++ Time.format_elapsed 12.34);
+let _ = print ("0.003s   -> " ++ Time.format_elapsed 0.003);
+let _ = print ("0.0001s  -> " ++ Time.format_elapsed 0.0001);
+
+// 整数変換
+let _ = print ("1.5s in ms = " ++ show (Time.to_ms 1.5));
+let _ = print ("0.001234s in us = " ++ show (Time.to_us 0.001234));
+
+0

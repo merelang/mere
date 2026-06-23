@@ -62,6 +62,8 @@ inject される。 名前衝突を避けるため、 contrib の lib は **pref
 | **argparse** | `contrib/argparse/` | CLI 引数 parser (`Argparse.parse` flag/opt/positional) | ✓ module |
 | **regex** | `contrib/regex/` | minimal regex (`Regex.parse_re` + `Regex.match_re`、 `. ^ $ * + ?` + concat) | ✓ module |
 | **test** | `contrib/test/` | unit test framework (`Test.assert_eq` + `Test.summary` + `Test.exit_status`) | ✓ module |
+| **time** | `contrib/time/` | 経過秒 format helpers (`Time.format_elapsed` 等)。 Wasm 当面 unsupported | ✓ module (3 backend) |
+| **option** | `contrib/option/` | prelude 補完 helpers (`Option.zip` / `filter` / `or_else` / `is_none` / `unwrap_or_fail`) | ✓ module |
 
 将来追加候補は `internal design notes` §3 参照。
 
