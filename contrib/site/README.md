@@ -50,6 +50,7 @@ binary `.wasm` の cp を組み合わせた wrapper (Mere の `read_file` / `wri
 | `sitemap.xml` 自動生成 | ✓ (相対 URL、 SEO / crawler 用) |
 | `.nojekyll` 自動配置 (GitHub Pages の Jekyll 処理抑止) | ✓ |
 | **Wasm playground** (事前 compile 済 Mere → Wasm + browser-side loader) | ✓ (`playground/*.html` + `*.wat` は SSG が copy、 `*.wasm` は `build_full.sh` 経由で cp) |
+| **シンタックスハイライト** (Prism.js + 自前の `prism-mere.js`) | ✓ (CDN core + clike + bash + ocaml + 自前 Mere 定義、 docs パレットに合わせた CSS override) |
 
 ## 非 MVP (将来 Phase)
 
