@@ -9,7 +9,7 @@ stdlib (`str_*` / `char_at` / `is_*`) だけで完結。
 | file | export | 行数 |
 |---|---|---|
 | `parser.mere` | `module Csv { parse_csv: str -> str list list }` | 約 140 行 |
-| `writer.mere` | `to_csv_str: Person list -> str` (top-level、 record `Person` に bound) | 約 55 行 |
+| `writer.mere` | `type Person` + `module CsvWriter { needs_quote, escape_field, row_of, render }` | 約 60 行 |
 
 ## 使い方
 
@@ -39,8 +39,7 @@ cp contrib/csv/parser.mere my_project/
 ## 既知の制約
 
 - CRLF (`\r\n`) 非対応
-- `writer.mere` は `Person { name; age; city }` 固定 record にバインド — 汎用化は将来 (record 単位の polymorphism 未実装、 `record_to_csv` のような generic API は trait / row poly 待ち)
-- `writer.mere` はまだ `module` 化していない (Phase 41 後の todo)
+- `writer.mere` は `Person { name; age; city }` 固定 record にバインド — 汎用化は将来 (record 単位の polymorphism 未実装、 `record_to_csv` のような generic API は trait / row poly 待ち)。 Phase 42 で record type in module の C codegen が解禁されたため、 helpers は `module CsvWriter` で wrap 済
 
 ## 位置付け
 

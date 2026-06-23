@@ -22,8 +22,15 @@
 //   - regex AST = recursive variant
 //   - match_re re s = bool (s 全体が re にマッチするか)
 //   - parse_re src = regex (簡易 parser)
-
-type 'a list = Nil | Cons of 'a * 'a list;
+//
+// Phase 42 (contrib): examples/regex_lite.mere から移設、 `module Regex { ... }`
+// で wrap。 `type regex = RChar | RDot | ...` は module の外側に残し
+// (recursive variant の codegen 安定性のため)、 関数群を module 内に置く。
+//
+// 使い方:
+//   import "contrib/regex/regex.mere";
+//   let re = Regex.parse_re "a.+z$" in
+//   if Regex.match_re re "anything-then-z" then ... else ...
 
 // regex AST
 //   RChar c    : 1 文字リテラル
@@ -43,6 +50,8 @@ type regex =
   | RPlus  of regex
   | ROpt   of regex
   | RSeq   of regex list;
+
+module Regex {
 
 // --- Parser (極簡易) ---
 //   parse は文字単位で線形に進み、直前 atom に */+/? を post-fix
@@ -201,34 +210,36 @@ let match_re = fn (pat: regex) -> fn (s: str) ->
       try_pos 0
   | _ -> match_seq (Cons (pat, Nil)) s 0;
 
-// === Self-tests ===
+};   // end of `module Regex`
 
-let case = fn (label: str) -> fn (pat_src: str) -> fn (subject: str) -> fn (expected: bool) ->
-  let pat = parse_re pat_src in
-  let actual = match_re pat subject in
+// === Self-tests (module の外側、 実 use 時は削除) ===
+
+let run_case = fn (label: str) -> fn (pat_src: str) -> fn (subject: str) -> fn (expected: bool) ->
+  let pat = Regex.parse_re pat_src in
+  let actual = Regex.match_re pat subject in
   let mark = if actual == expected then "ok " else "FAIL" in
   print (mark ++ " | " ++ label ++ " | /" ++ pat_src ++ "/ " ++ subject ++ " => " ++ show actual);
 
-let _ = case "literal-hit"   "abc"    "abc"      true;
-let _ = case "literal-prefix" "abc"   "abcde"    true;
-let _ = case "literal-mid"   "bc"     "abcde"    true;
-let _ = case "literal-no"    "xyz"    "abc"      false;
-let _ = case "dot-mid"       "a.c"    "abc"      true;
-let _ = case "dot-no-empty"  "a.c"    "ac"       false;
-let _ = case "star-zero"     "ab*c"   "ac"       true;
-let _ = case "star-many"     "ab*c"   "abbbc"    true;
-let _ = case "star-mid"      "a.*z"   "anything-then-z"  true;
-let _ = case "plus-one"      "ab+c"   "abc"      true;
-let _ = case "plus-many"     "ab+c"   "abbbc"    true;
-let _ = case "plus-zero-no"  "ab+c"   "ac"       false;
-let _ = case "opt-zero"      "ab?c"   "ac"       true;
-let _ = case "opt-one"       "ab?c"   "abc"      true;
-let _ = case "opt-two-no"    "ab?c"   "abbc"     false;
-let _ = case "start-yes"     "^abc"   "abcdef"   true;
-let _ = case "start-no"      "^abc"   "xabc"     false;
-let _ = case "end-yes"       "abc$"   "xabc"     true;
-let _ = case "end-no"        "abc$"   "abcx"     false;
-let _ = case "full-yes"      "^a.+z$" "anything-then-z" true;
-let _ = case "full-no"       "^a.+z$" "a-then-y"  false;
+let _ = run_case"literal-hit"   "abc"    "abc"      true;
+let _ = run_case"literal-prefix" "abc"   "abcde"    true;
+let _ = run_case"literal-mid"   "bc"     "abcde"    true;
+let _ = run_case"literal-no"    "xyz"    "abc"      false;
+let _ = run_case"dot-mid"       "a.c"    "abc"      true;
+let _ = run_case"dot-no-empty"  "a.c"    "ac"       false;
+let _ = run_case"star-zero"     "ab*c"   "ac"       true;
+let _ = run_case"star-many"     "ab*c"   "abbbc"    true;
+let _ = run_case"star-mid"      "a.*z"   "anything-then-z"  true;
+let _ = run_case"plus-one"      "ab+c"   "abc"      true;
+let _ = run_case"plus-many"     "ab+c"   "abbbc"    true;
+let _ = run_case"plus-zero-no"  "ab+c"   "ac"       false;
+let _ = run_case"opt-zero"      "ab?c"   "ac"       true;
+let _ = run_case"opt-one"       "ab?c"   "abc"      true;
+let _ = run_case"opt-two-no"    "ab?c"   "abbc"     false;
+let _ = run_case"start-yes"     "^abc"   "abcdef"   true;
+let _ = run_case"start-no"      "^abc"   "xabc"     false;
+let _ = run_case"end-yes"       "abc$"   "xabc"     true;
+let _ = run_case"end-no"        "abc$"   "abcx"     false;
+let _ = run_case"full-yes"      "^a.+z$" "anything-then-z" true;
+let _ = run_case"full-no"       "^a.+z$" "a-then-y"  false;
 
 0

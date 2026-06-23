@@ -85,7 +85,7 @@ backend いずれかへ codegen。
 | **Phase 28 (2026-06-21) 追加** | |
 | [chained_parse.mere](chained_parse.mere) ⭐ | Result chain idiom (result_and_then / result_map / result_or_else)、D2 |
 | [ini_parser.mere](ini_parser.mere) ⭐ | INI parser、Phase 27.1 Map insertion order dogfood、I1 |
-| [regex_lite.mere](regex_lite.mere) ⭐ | minimal regex matcher (`. ^ $ * + ?` + concat + backtracking)、C5 |
+| ~~`regex_lite.mere`~~ | **Phase 42 で [contrib/regex/regex.mere](../contrib/regex/regex.mere) に格上げ** (module Regex で wrap) |
 | **Phase 29 (2026-06-22) 追加 — 大型 dogfood** | |
 | [toy_sql.mere](toy_sql.mere) ⭐ | **1165 LoC toy SQL engine** (tokenizer + AST + parser + Catalog Map + Storage OwnedVec + INSERT / SELECT / WHERE / JOIN + 59 self-tests)。N1/N2/N3 dogfood で 4 件の codegen bug を発掘 + Phase 30 で fix |
 | **Phase 32 (2026-06-22) 追加 — FFI** | |
@@ -318,7 +318,7 @@ interpreter / pretty printer / regex / markdown converter まで。
 |---|---|
 | ~~`markdown_to_html.mere`~~ | → [contrib/markdown/to_html.mere](../contrib/markdown/to_html.mere) |
 | [prettyprinter.mere](prettyprinter.mere) | Wadler 風 pretty printer combinator (variant doc + group/nest/line) |
-| [regex_engine.mere](regex_engine.mere) | NFA-based regex engine (Thompson 構成法、 backtracking matcher、 `.`/`*`/`+`/`?`/`|` 対応) |
+| ~~`regex_engine.mere`~~ | → [contrib/regex/engine.mere](../contrib/regex/engine.mere) (NFA-based 試作) |
 
 ## codegen の試し方
 

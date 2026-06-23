@@ -1,17 +1,28 @@
-// csv_writer: record list を CSV 文字列に書き出す (Phase 36)
+// contrib/csv/writer.mere — CSV writer (record `Person` bound)
 //
-// 目的: examples roadmap B2。StrBuf + record list で CSV row を組み立てる
-//   demo。quote / カンマ escape を最低限実装し、4 backend で diff = 0。
+// Phase 42 後の dogfood: `module CsvWriter { ... }` で名前空間化。
+// `type Person` は module の外側に残し、 lib functions (`escape_field` /
+// `row_of` / `render`) は module 内に置く。 これで `CsvWriter.escape_field`
+// などが qualified call できる (Phase 42 で record type in module が
+// 4 backend codegen に対応した後)。
 //
 // 設計:
-//   - record `Person { name; age; city }`
+//   - record `Person { name; age; city }` は user 側の domain 型
 //   - Person list → CSV string
-//   - field に `,` `"` を含むなら `"..."` で囲み、内部 `"` は `""` に
-//   - 改行は今回の test data に出さないので扱わない
+//   - field に `,` `"` を含むなら `"..."` で囲み、 内部 `"` は `""` に
+//   - 改行は当面扱わない (record literal に `\n` を含まない前提)
+//
+// 限定事項 (MVP):
+//   - record polymorphism がない (Mere 仕様の現状) ので、 別 record 型ごとに
+//     row_of / render を書き直す必要あり。 将来 trait / row poly が入れば
+//     `CsvWriter.render: ('a -> str list) -> 'a list -> str` のような
+//     generic API になる
 //
 // 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
 
 type Person = { name: str, age: int, city: str };
+
+module CsvWriter {
 
 let needs_quote = fn (s: str) ->
   str_index_of s "," >= 0 || str_index_of s "\"" >= 0;
@@ -38,14 +49,18 @@ let render = fn (rows: Person list) ->
     strbuf_to_str b
   };
 
-let _ = print "=== csv_writer (Phase 36) ===";
+};   // end of `module CsvWriter`
+
+// === Self-tests (module の外側、 実 use 時は削除) ===
+
+let _ = print "=== csv_writer (module CsvWriter) ===";
 
 let people =
   [Person { name = "Alice", age = 30, city = "Tokyo" },
    Person { name = "Bob, Jr.", age = 25, city = "Osaka" },
    Person { name = "Carol", age = 40, city = "He said \"hi\"" }];
 
-let csv = render people;
+let csv = CsvWriter.render people;
 let _ = print csv;
 
 0
