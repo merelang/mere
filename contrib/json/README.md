@@ -9,7 +9,7 @@ Mere で書かれた JSON parse / serialize ライブラリ。 stdlib (`str_*` /
 | file | export | 行数 |
 |---|---|---|
 | `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JStr \| JArr \| JObj; parse_json: str -> json }` | 約 180 行 |
-| `writer.mere` | `to_json_str: json -> str` + `to_pretty_str: json -> str` (top-level、 module 化は将来) | 約 130 行 |
+| `writer.mere` | `type json` (top-level) + `module JsonWriter { to_json_str, to_pretty_str }` | 約 135 行 |
 
 ## 使い方 (pkg manager 完成前)
 
@@ -34,10 +34,12 @@ cp contrib/json/writer.mere  my_project/
 各ファイル末尾の self-test ブロック (`run_case` で始まる demo / `let doc = …` 等)
 は実 use 時に削除して良い。
 
-`writer.mere` はまだ `module` 化していない (top-level に `to_json_str` /
-`to_pretty_str` を export)。 これは旧 `examples/` 時代の構造で、 Phase 41 で
-qualified pattern match が 4 backend codegen に対応したため、 将来は writer も
-`module JsonWriter { ... }` に書き直す予定。
+`writer.mere` は Phase 43 で `module JsonWriter { ... }` で wrap 完了。 ただし
+`type json` は **module の外側** に置いている (parser の `module Json
+{ type json = ... }` と単一 file 内で共存はできないが、 別 file としては独立に
+使える)。 parser + writer を 1 program で round-trip させる場合は user 側で
+`type json` 衝突を回避する必要あり (parser だけ or writer だけ either-or の運用
+が当面 expected)。
 
 ## サポート範囲
 

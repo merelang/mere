@@ -1,24 +1,24 @@
-// JSON ライター - StrBuf[R] + ADT (json variant) を使った pretty-print。
-// json_parser.mere とペアで考えると round-trip 可能。
+// contrib/json/writer.mere — JSON writer (compact + pretty)
 //
-// 目的: examples roadmap B4。Phase 19 で追加された StrBuf primitive を
-// 使って、recursive な値を文字列に整形する典型パターン。
-//
-// 実行モード: interpreter のみ
-//   (recursive variant + 多相 user 定義 let-rec を使うので
-//    DEFERRED §1.7 解決後の codegen 対応)
+// StrBuf + ADT (json variant) を使った recursive write。 contrib/json/json.mere
+// (parser) と pair で考えると round-trip 可能。 ただし parser とは独立に使える
+// よう、 本 file は `type json` を top-level で declare し、 helpers を
+// `module JsonWriter { ... }` で wrap。
 //
 // 使い方:
-//   dune exec ./bin/mere.exe -- examples/json_writer.mere
-//   # 期待出力:
-//   #   compact: {"name":"alice","age":30,"tags":["a","b"],"active":true}
-//   #   pretty:
-//   #   {
-//   #     "name": "alice",
-//   #     "age": 30,
-//   #     "tags": ["a", "b"],
-//   #     "active": true
-//   #   }
+//   // 単独 use:
+//   import "contrib/json/writer.mere";
+//   let v = JArr (Cons (JNum 1, Cons (JNum 2, Nil))) in
+//   print (JsonWriter.to_json_str v);
+//
+//   // 注意: parser (`contrib/json/json.mere`) と round-trip する場合は、
+//   // parser.mere の `module Json { type json = ... }` と本 file の
+//   // top-level `type json` が衝突するため、 当面 either-or で使う想定。
+//   // 統合的に round-trip したい場合は parser.mere の type 宣言を
+//   // module 外に出すか、 user 側で AST 変換 fn を書く。
+//
+// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// (Phase 43 で multi instantiation codegen が安定したため)
 
 type json =
   | JNull
@@ -28,10 +28,9 @@ type json =
   | JArr  of json list
   | JObj  of (str * json) list;
 
-// === ヘルパ ===
+module JsonWriter {
 
-// list を join: 各要素を fn で書き出し、要素間に sep を挟む。
-// list_iter / list_fold は prelude 未収載 (DEFERRED §1.7 待ち) なので自前。
+// list を join: 各要素を fn で書き出し、 要素間に sep を挟む
 let rec write_join = fn (sb) -> fn (items) -> fn (sep) -> fn (write_item) ->
   match items with
   | Nil -> ()
@@ -40,7 +39,7 @@ let rec write_join = fn (sb) -> fn (items) -> fn (sep) -> fn (write_item) ->
                    let __ = strbuf_push sb sep in
                    write_join sb t sep write_item;
 
-// str escape (\ と " のみ最小限。\n /\t 等は今回 skip)
+// str escape (`\` と `"` のみ最小限。 `\n` `\t` 等は今回 skip)
 let escape_str = fn (s: str) ->
   let buf = strbuf_new () in
   let n = str_len s in
@@ -92,7 +91,7 @@ let to_json_str = fn (v) ->
   let __ = write_json buf v in
   strbuf_to_str buf;
 
-// === pretty writer (1 階層インデント、配列は inline) ===
+// === pretty writer (1 階層インデント、 配列は inline) ===
 
 let rec write_pretty = fn (sb) -> fn (v) ->
   match v with
@@ -116,7 +115,9 @@ let to_pretty_str = fn (v) ->
   let __ = write_pretty buf v in
   strbuf_to_str buf;
 
-// === main ===
+};   // end of `module JsonWriter`
+
+// === Self-tests (module の外側、 demo として残置) ===
 
 let doc =
   JObj (Cons (("name", JStr "alice"),
@@ -126,7 +127,7 @@ let doc =
         Nil))))) in
 
 {
-  print ("compact: " ++ to_json_str doc);
+  print ("compact: " ++ JsonWriter.to_json_str doc);
   print "pretty:";
-  print (to_pretty_str doc)
+  print (JsonWriter.to_pretty_str doc)
 }
