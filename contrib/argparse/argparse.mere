@@ -1,0 +1,144 @@
+// contrib/argparse/argparse.mere — minimal CLI argument parser
+//
+// Phase 41 後の dogfood lib。 `module Argparse { ... }` で名前空間化し、
+// `import "contrib/argparse/argparse.mere"; let r = Argparse.parse ...` で使う。
+//
+// 設計:
+//   - **flag**: `--verbose` のような boolean option。 spec に名前を渡すと
+//     argv 中で `--verbose` が出現したら flag_map に entry が立つ
+//   - **opt**: `--name alice` または `--name=alice` のような value 付き option。
+//     spec に名前を渡すと argv 中の次の token (=区切りなら同 token 内) を
+//     値として opts_map に格納
+//   - **positional**: それ以外の token は順序を保って list で返す
+//   - `--` 以降は全部 positional 扱い (POSIX convention)
+//
+// 戻り値: tuple `(flags: Map[str, int], opts: Map[str, str], pos: str list)`。
+//   - flags[name] == 1 (entry あり) で flag 立った状態を示す
+//   - opts[name] == "value" で value
+//   - pos は宣言順で残り
+//
+// 限定事項 (MVP):
+//   - 短名 (`-v`) は当面 unsupported。 long name (`--verbose`) のみ。
+//   - 型変換は user 側で (`int_of_str (Argparse.get_opt r "n")` 等)
+//   - help message 自動生成なし
+//
+// 実装メモ: 当初 `let push_pos = fn s -> ...` で inner helper を作っていたが、
+// DEFERRED §8 (inner-lifted fn の closure capture が anonymous Fun 経由で
+// 漏れる) のため C codegen で fail。 strbuf_push を inline 呼出に書き戻して回避。
+// positional は `\n` 区切りで strbuf に連結 → 末尾で再 split で復元。
+
+module Argparse {
+
+// list 中に target がある?
+let rec list_has = fn xs -> fn target ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == target then true else list_has t target;
+
+// `--name` から先頭 2 文字を剥がす。 `--name` 以外なら None。
+let strip_double_dash = fn (s: str) ->
+  if str_len s >= 3 && str_starts_with s "--"
+  then Some (substring s 2 (str_len s))
+  else None;
+
+// `name=value` を (name, Some value) に分割。 `=` なしなら (s, None)。
+let split_eq = fn (s: str) ->
+  let i = str_index_of s "=" in
+  if i < 0 then (s, None)
+  else (substring s 0 i, Some (substring s (i + 1) (str_len s)));
+
+// argv を順に消化し、 flags / opts / positional を組み立てる
+let parse = fn (flag_specs: str list) -> fn (opt_specs: str list) -> fn (argv: str list) ->
+  let flags = map_new () in
+  let opts = map_new () in
+  let pos = strbuf_new () in
+  // argv を消化する loop
+  // state: rest = 残り token、 saw_dashdash = `--` 以降のモード
+  let rec loop = fn (rest: str list) -> fn (saw_dashdash: bool) ->
+    match rest with
+    | Nil -> ()
+    | Cons (tok, more) ->
+      if saw_dashdash then
+        let _ = strbuf_push pos tok in
+        let _ = strbuf_push pos "\n" in
+        loop more saw_dashdash
+      else if tok == "--" then
+        loop more true
+      else
+        match strip_double_dash tok with
+        | None ->
+          let _ = strbuf_push pos tok in
+          let _ = strbuf_push pos "\n" in
+          loop more saw_dashdash
+        | Some name_eq ->
+          let (name, val_opt) = split_eq name_eq in
+          if list_has flag_specs name then
+            let _ = map_set flags name 1 in
+            loop more saw_dashdash
+          else if list_has opt_specs name then
+            match val_opt with
+            | Some v ->
+              let _ = map_set opts name v in
+              loop more saw_dashdash
+            | None ->
+              match more with
+              | Cons (v, rest2) ->
+                let _ = map_set opts name v in
+                loop rest2 saw_dashdash
+              | Nil -> ()    // value 取れず: ignore (将来 error 化)
+          else
+            // 知らない `--xxx`: positional 扱い (将来 error 化)
+            let _ = strbuf_push pos tok in
+            let _ = strbuf_push pos "\n" in
+            loop more saw_dashdash
+  in
+  let _ = loop argv false in
+  // positional を "\n" で再 split (末尾 \n があるので filter で empty を除く)
+  let raw = strbuf_to_str pos in
+  let parts = str_split raw "\n" in
+  let positional = list_filter parts (fn s -> str_len s > 0) in
+  (flags, opts, positional);
+
+// ヘルパ: flag 立っているか。 注釈なしで推論
+let has_flag = fn parsed -> fn (name: str) ->
+  let (flags, _, _) = parsed in
+  map_has flags name;
+
+// ヘルパ: option 値を取る (なければ dflt — `default` は C 予約語のため避ける)
+let get_opt = fn parsed -> fn (name: str) -> fn (dflt: str) ->
+  let (_, opts, _) = parsed in
+  if map_has opts name then map_get opts name else dflt;
+
+// ヘルパ: positional 取得
+let get_pos = fn parsed ->
+  let (_, _, pos) = parsed in
+  pos;
+
+};   // end of `module Argparse`
+
+// === Self-tests (module の外側、 実 use 時は削除) ===
+
+let _ = print "=== argparse demo ===";
+
+// 仮の argv: ["build", "--verbose", "--name=alice", "input.txt", "--output", "out.bin", "extra"]
+let argv =
+  Cons ("build",
+   Cons ("--verbose",
+    Cons ("--name=alice",
+     Cons ("input.txt",
+      Cons ("--output",
+       Cons ("out.bin",
+        Cons ("extra", Nil)))))));
+
+let flag_specs = Cons ("verbose", Cons ("dry-run", Nil));
+let opt_specs = Cons ("name", Cons ("output", Nil));
+let r = Argparse.parse flag_specs opt_specs argv;
+
+let _ = print ("verbose flag: " ++ show (Argparse.has_flag r "verbose"));
+let _ = print ("dry-run flag: " ++ show (Argparse.has_flag r "dry-run"));
+let _ = print ("name opt: " ++ Argparse.get_opt r "name" "<none>");
+let _ = print ("output opt: " ++ Argparse.get_opt r "output" "<none>");
+let _ = print ("missing opt: " ++ Argparse.get_opt r "missing" "<none>");
+let _ = print ("positional: " ++ show (Argparse.get_pos r));
+
+0
