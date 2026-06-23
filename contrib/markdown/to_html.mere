@@ -203,8 +203,9 @@ let is_hr = fn (line: str) ->
       in check 0;
 
 // substring s start end (end は exclusive)
-// 行を HTML 1 ブロックに変換 (見出し / 段落 / 空 / 引用 / HR)。
-// list 項目 (`- ` / `N. `) は render 側の state machine で扱うのでここでは処理しない。
+// 行を HTML 1 ブロックに変換 (見出し / 段落 / 空 / HR)。
+// list 項目 (`- ` / `N. `) と blockquote (`> `) は render 側の state machine で
+// 扱うのでここでは処理しない。
 let render_line = fn (line: str) ->
   let n = str_len line in
   if n == 0 then ""
@@ -215,8 +216,6 @@ let render_line = fn (line: str) ->
     "<h2>" ++ render_inline (substring line 3 n) ++ "</h2>"
   else if starts_with line "# " then
     "<h1>" ++ render_inline (substring line 2 n) ++ "</h1>"
-  else if starts_with line "> " then
-    "<blockquote>" ++ render_inline (substring line 2 n) ++ "</blockquote>"
   else
     "<p>" ++ render_inline line ++ "</p>";
 
@@ -269,6 +268,14 @@ let close_table_if_open = fn state -> fn out ->
   else if phase == 1 then
     let _ = strbuf_push out "</thead></table>\n" in
     let _ = map_set state "table_phase" 0 in ()
+  else ();
+
+// 非 blockquote 行に来た時、 blockquote を閉じる。 連続する `> ` 行は
+// 1 つの `<blockquote>...</blockquote>` にまとめる (CommonMark 準拠)。
+let close_blockquote_if_open = fn state -> fn out ->
+  if map_get state "bq_open" == 1 then
+    let _ = strbuf_push out "</blockquote>\n" in
+    let _ = map_set state "bq_open" 0 in ()
   else ();
 
 // 最深 (depth = list_depth) の list を 1 階層 close する。
@@ -350,16 +357,18 @@ let emit_list_item = fn state -> fn out -> fn (depth: int) ->
 
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
-  // state Map: in_code / table_phase / list_depth (+ kind_<i> per depth)
+  // state Map: in_code / table_phase / list_depth (+ kind_<i> per depth) / bq_open
   let state = map_new () in
   let _ = map_set state "in_code" 0 in
   let _ = map_set state "table_phase" 0 in
   let _ = map_set state "list_depth" 0 in
+  let _ = map_set state "bq_open" 0 in
   let _ = list_iter lines (fn line ->
     let in_code = map_get state "in_code" in
     if starts_with line "```" then
       let _ = close_table_if_open state out in
       let _ = close_list_if_open state out in
+      let _ = close_blockquote_if_open state out in
       // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
       // Phase 44.5: ```<lang> なら <code class="language-<lang>"> として emit
       if in_code == 0 then
@@ -387,6 +396,7 @@ let render = fn (lines: str list) ->
       ()
     else if is_table_row line then
       let _ = close_list_if_open state out in
+      let _ = close_blockquote_if_open state out in
       let phase = map_get state "table_phase" in
       if phase == 0 then
         let _ = strbuf_push out "<table>\n<thead>" in
@@ -406,10 +416,23 @@ let render = fn (lines: str list) ->
         let _ = strbuf_push out (render_table_row line "td") in
         let _ = strbuf_push out "\n" in
         ()
+    else if starts_with line "> " then
+      // 連続する `> ` 行は単一の `<blockquote>` に集約。 行間は space 区切り。
+      let _ = close_table_if_open state out in
+      let _ = close_list_if_open state out in
+      let bq = map_get state "bq_open" in
+      let _ = if bq == 0 then
+                let _ = strbuf_push out "<blockquote>" in
+                let _ = map_set state "bq_open" 1 in ()
+              else
+                let _ = strbuf_push out " " in () in
+      let _ = strbuf_push out (render_inline (substring line 2 (str_len line))) in
+      ()
     else
       let (is_list, list_depth, list_kind, content_off) = detect_list_item line in
       if is_list then
         let _ = close_table_if_open state out in
+        let _ = close_blockquote_if_open state out in
         let text = substring line content_off (str_len line) in
         // depth は detect から 0-indexed なので 1-indexed に変換
         let _ = emit_list_item state out (list_depth + 1) list_kind text in
@@ -417,6 +440,7 @@ let render = fn (lines: str list) ->
       else
         let _ = close_table_if_open state out in
         let _ = close_list_if_open state out in
+        let _ = close_blockquote_if_open state out in
         let html = render_line line in
         if str_len html > 0 then
           let _ = strbuf_push out html in
@@ -425,6 +449,7 @@ let render = fn (lines: str list) ->
         else ()) in
   let _ = close_table_if_open state out in
   let _ = close_list_if_open state out in
+  let _ = close_blockquote_if_open state out in
   strbuf_to_str out;
 
 };   // end of `module MarkdownHtml`
@@ -470,6 +495,10 @@ let doc = [
   "### Quote and HR",
   "",
   "> This is a blockquote line.",
+  "",
+  "> Multi-line quote: line 1",
+  "> continued line 2",
+  "> and line 3 with **bold** + `code`",
   "",
   "---",
   "",
