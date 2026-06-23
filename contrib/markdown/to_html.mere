@@ -118,46 +118,45 @@ let render_inline = fn (s: str) ->
   let _ = go 0 in
   strbuf_to_str out;
 
-// 数字 + `. ` で始まる ordered list 行か。 真なら (true, prefix_len) を返し、
-// 偽なら (false, 0)
-let detect_ol_prefix = fn (line: str) ->
+// 行の leading space 数を返す
+let count_leading_spaces = fn (line: str) ->
   let n = str_len line in
   let rec scan = fn i ->
-    if i >= n then -1
-    else if is_digit (char_at line i) then scan (i + 1)
+    if i >= n then i
+    else if char_at line i == " " then scan (i + 1)
     else i
   in
-  let end_digits = scan 0 in
-  if end_digits <= 0 then (false, 0)
-  else if end_digits + 1 >= n then (false, 0)
-  else if char_at line end_digits == "." && char_at line (end_digits + 1) == " "
-  then (true, end_digits + 2)
-  else (false, 0);
+  scan 0;
 
-// indent 2 文字でネストした list 行を検出
-//   - 2 space + "- text"  → nested ul
-//   - 2 space + "N. text"  → nested ol
-let detect_nested_ul = fn (line: str) ->
+// list item を検出: indent (= 2 空白単位の depth) + kind + content offset を返す
+//   戻り値: (is_list, depth, kind, content_offset)
+//     is_list: 真なら list 項目
+//     depth: 0 = top、 1 = 2-space indent、 2 = 4-space indent、 ...
+//     kind: 1 = ul (`-`)、 2 = ol (digits + `.`)
+//     content_offset: line 内 text の start index
+let detect_list_item = fn (line: str) ->
   let n = str_len line in
-  if n >= 4 && substring line 0 4 == "  - " then true
-  else false;
-
-let detect_nested_ol = fn (line: str) ->
-  let n = str_len line in
-  if n < 5 then (false, 0)
-  else if substring line 0 2 != "  " then (false, 0)
-  else
+  let lead = count_leading_spaces line in
+  // indent は 2 空白の倍数で depth を決める
+  let depth = lead / 2 in
+  let body_start = lead in
+  if body_start >= n then (false, 0, 0, 0)
+  else if char_at line body_start == "-"
+       && body_start + 1 < n && char_at line (body_start + 1) == " " then
+    (true, depth, 1, body_start + 2)
+  else if is_digit (char_at line body_start) then
     let rec scan = fn i ->
       if i >= n then -1
       else if is_digit (char_at line i) then scan (i + 1)
       else i
     in
-    let end_digits = scan 2 in
-    if end_digits <= 2 then (false, 0)
-    else if end_digits + 1 >= n then (false, 0)
+    let end_digits = scan body_start in
+    if end_digits <= body_start then (false, 0, 0, 0)
+    else if end_digits + 1 >= n then (false, 0, 0, 0)
     else if char_at line end_digits == "." && char_at line (end_digits + 1) == " "
-    then (true, end_digits + 2)
-    else (false, 0);
+    then (true, depth, 2, end_digits + 2)
+    else (false, 0, 0, 0)
+  else (false, 0, 0, 0);
 
 // 行が `|` で始まる table row か
 let is_table_row = fn (line: str) ->
@@ -251,8 +250,15 @@ let render_table_row = fn (line: str) -> fn (cell_tag: str) ->
   let _ = strbuf_push buf "</tr>" in
   strbuf_to_str buf;
 
-// ===== render helpers (module 内 module-level fn として、 inner-lifted fn
-//       同士の相互参照 (DEFERRED §8) を回避) =====
+// ===== render helpers (module-level fn として lift、 DEFERRED §8 回避) =====
+//
+// 任意深さの nested list を扱うため、 state に以下を持つ:
+//   "list_depth": 現在開いている list の深さ (0 = 無 list、 N = N 階層)
+//   "kind_<i>":   depth i (1..list_depth) の list kind (1=ul、 2=ol)
+//
+// 各深さで「最後に emit した <li> は open」 状態。 nested list が来る
+// 場合は その <li> の中に <ul>/<ol> を続けて emit、 同 depth の次 item や
+// 上位 depth に戻る時に `</li>` で閉じる。
 
 // 非 table 行に来た時、 table を閉じる
 let close_table_if_open = fn state -> fn out ->
@@ -265,87 +271,90 @@ let close_table_if_open = fn state -> fn out ->
     let _ = map_set state "table_phase" 0 in ()
   else ();
 
-// 現在の nested list を閉じる
-let close_nest = fn state -> fn out ->
-  let nk = map_get state "nest_kind" in
-  if nk == 1 then
-    let _ = strbuf_push out "</ul>" in
-    let _ = map_set state "nest_kind" 0 in ()
-  else if nk == 2 then
-    let _ = strbuf_push out "</ol>" in
-    let _ = map_set state "nest_kind" 0 in ()
-  else ();
+// 最深 (depth = list_depth) の list を 1 階層 close する。
+//   open な `<li>` があれば `</li>` を emit してから `</ul>` or `</ol>` を emit。
+let pop_one_list_level = fn state -> fn out ->
+  let d = map_get state "list_depth" in
+  if d <= 0 then ()
+  else
+    let k = map_get state ("kind_" ++ show d) in
+    let _ = if map_get state ("li_open_" ++ show d) == 1 then
+              let _ = strbuf_push out "</li>\n" in
+              let _ = map_set state ("li_open_" ++ show d) 0 in ()
+            else () in
+    let _ = if k == 1 then strbuf_push out "</ul>\n"
+            else strbuf_push out "</ol>\n" in
+    let _ = map_set state "list_depth" (d - 1) in
+    ();
 
-// 現在の top-level <li> を閉じる (nest があれば先に閉じる)
-let close_li = fn state -> fn out ->
-  let _ = close_nest state out in
-  if map_get state "li_open" == 1 then
-    let _ = strbuf_push out "</li>\n" in
-    let _ = map_set state "li_open" 0 in ()
-  else ();
-
-// 現在の top-level list を閉じる
+// list が開いていれば全部 close
 let close_list_if_open = fn state -> fn out ->
-  let _ = close_li state out in
-  let lk = map_get state "list_kind" in
-  if lk == 1 then
-    let _ = strbuf_push out "</ul>\n" in
-    let _ = map_set state "list_kind" 0 in ()
-  else if lk == 2 then
-    let _ = strbuf_push out "</ol>\n" in
-    let _ = map_set state "list_kind" 0 in ()
-  else ();
+  let rec loop = fn () ->
+    if map_get state "list_depth" <= 0 then ()
+    else
+      let _ = pop_one_list_level state out in
+      loop ()
+  in loop ();
 
-// top-level list 項目を emit (kind = 1 → ul、 2 → ol)
-let emit_top_item = fn state -> fn out -> fn (kind: int) -> fn (text: str) ->
-  let _ = close_li state out in
-  // 異 kind の top list が開いていれば閉じる
-  let lk = map_get state "list_kind" in
-  let _ = if lk != 0 && lk != kind then
-            let _ = if lk == 1 then strbuf_push out "</ul>\n"
-                    else strbuf_push out "</ol>\n" in
-            let _ = map_set state "list_kind" 0 in ()
+// depth `target` まで、 list を pop して下げる
+let pop_until_depth = fn state -> fn out -> fn (target: int) ->
+  let rec loop = fn () ->
+    if map_get state "list_depth" <= target then ()
+    else
+      let _ = pop_one_list_level state out in
+      loop ()
+  in loop ();
+
+// list item を emit (depth = 1-indexed、 kind = 1/2、 text = inline content)
+let emit_list_item = fn state -> fn out -> fn (depth: int) ->
+                     fn (kind: int) -> fn (text: str) ->
+  let cur = map_get state "list_depth" in
+  // (1) 深い方に open する case: 必要なだけ新規 list を open。
+  // 親 li は open のまま (中に新規 list を入れる)。
+  let _ = if depth > cur then
+            let rec open_levels = fn () ->
+              if map_get state "list_depth" >= depth then ()
+              else
+                let new_d = map_get state "list_depth" + 1 in
+                let _ = if kind == 1 then strbuf_push out "\n<ul>\n"
+                        else strbuf_push out "\n<ol>\n" in
+                let _ = map_set state ("kind_" ++ show new_d) kind in
+                let _ = map_set state ("li_open_" ++ show new_d) 0 in
+                let _ = map_set state "list_depth" new_d in
+                open_levels ()
+            in open_levels ()
           else () in
-  // list が閉じていれば開ける
-  let lk2 = map_get state "list_kind" in
-  let _ = if lk2 == 0 then
+  // (2) 浅い方に戻る case: pop。 pop した後の current depth は parent で、
+  // その <li> はまだ open。
+  let _ = pop_until_depth state out depth in
+  // (3) 同 depth で kind が違うなら、 list を close + 新規 open
+  let _ = let cur_k = map_get state ("kind_" ++ show depth) in
+          if cur_k != kind then
+            let _ = pop_one_list_level state out in
             let _ = if kind == 1 then strbuf_push out "<ul>\n"
                     else strbuf_push out "<ol>\n" in
-            let _ = map_set state "list_kind" kind in ()
+            let _ = map_set state ("kind_" ++ show depth) kind in
+            let _ = map_set state ("li_open_" ++ show depth) 0 in
+            let _ = map_set state "list_depth" depth in
+            ()
           else () in
+  // (4) 同 depth に既に open な <li> があれば閉じる
+  let _ = if map_get state ("li_open_" ++ show depth) == 1 then
+            let _ = strbuf_push out "</li>\n" in
+            let _ = map_set state ("li_open_" ++ show depth) 0 in ()
+          else () in
+  // (5) 新規 <li> を emit (open)
   let _ = strbuf_push out ("<li>" ++ render_inline text) in
-  let _ = map_set state "li_open" 1 in
+  let _ = map_set state ("li_open_" ++ show depth) 1 in
   ();
-
-// nested list 項目を emit (top-level li の **中** に置く前提)
-let emit_nest_item = fn state -> fn out -> fn (kind: int) -> fn (text: str) ->
-  let lk = map_get state "list_kind" in
-  if lk == 0 then
-    // top list の外で nested 項目が来たら top として fallback
-    emit_top_item state out kind text
-  else
-    let nk = map_get state "nest_kind" in
-    let _ = if nk != 0 && nk != kind then
-              let _ = close_nest state out in ()
-            else () in
-    let nk2 = map_get state "nest_kind" in
-    let _ = if nk2 == 0 then
-              let _ = if kind == 1 then strbuf_push out "\n<ul>"
-                      else strbuf_push out "\n<ol>" in
-              let _ = map_set state "nest_kind" kind in ()
-            else () in
-    let _ = strbuf_push out ("<li>" ++ render_inline text ++ "</li>") in
-    ();
 
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
-  // state Map: in_code / table_phase / list_kind / li_open / nest_kind
+  // state Map: in_code / table_phase / list_depth (+ kind_<i> per depth)
   let state = map_new () in
   let _ = map_set state "in_code" 0 in
   let _ = map_set state "table_phase" 0 in
-  let _ = map_set state "list_kind" 0 in
-  let _ = map_set state "li_open" 0 in
-  let _ = map_set state "nest_kind" 0 in
+  let _ = map_set state "list_depth" 0 in
   let _ = list_iter lines (fn line ->
     let in_code = map_get state "in_code" in
     if starts_with line "```" then
@@ -388,39 +397,23 @@ let render = fn (lines: str list) ->
         let _ = strbuf_push out (render_table_row line "td") in
         let _ = strbuf_push out "\n" in
         ()
-    else if detect_nested_ul line then
-      let _ = close_table_if_open state out in
-      let text = substring line 4 (str_len line) in
-      let _ = emit_nest_item state out 1 text in
-      ()
     else
-      let (is_nest_ol, nest_ol_pref) = detect_nested_ol line in
-      if is_nest_ol then
+      let (is_list, list_depth, list_kind, content_off) = detect_list_item line in
+      if is_list then
         let _ = close_table_if_open state out in
-        let text = substring line nest_ol_pref (str_len line) in
-        let _ = emit_nest_item state out 2 text in
-        ()
-      else if starts_with line "- " then
-        let _ = close_table_if_open state out in
-        let text = substring line 2 (str_len line) in
-        let _ = emit_top_item state out 1 text in
+        let text = substring line content_off (str_len line) in
+        // depth は detect から 0-indexed なので 1-indexed に変換
+        let _ = emit_list_item state out (list_depth + 1) list_kind text in
         ()
       else
-        let (is_ol, ol_pref) = detect_ol_prefix line in
-        if is_ol then
-          let _ = close_table_if_open state out in
-          let text = substring line ol_pref (str_len line) in
-          let _ = emit_top_item state out 2 text in
+        let _ = close_table_if_open state out in
+        let _ = close_list_if_open state out in
+        let html = render_line line in
+        if str_len html > 0 then
+          let _ = strbuf_push out html in
+          let _ = strbuf_push out "\n" in
           ()
-        else
-          let _ = close_table_if_open state out in
-          let _ = close_list_if_open state out in
-          let html = render_line line in
-          if str_len html > 0 then
-            let _ = strbuf_push out html in
-            let _ = strbuf_push out "\n" in
-            ()
-          else ()) in
+        else ()) in
   let _ = close_table_if_open state out in
   let _ = close_list_if_open state out in
   strbuf_to_str out;
@@ -444,6 +437,9 @@ let doc = [
   "- See [tutorial](tutorial.md) for details",
   "  - nested item 1",
   "  - nested item 2",
+  "    - deeply nested A",
+  "    - deeply nested B",
+  "  - back to depth 2",
   "",
   "### Numbered steps",
   "",
@@ -451,6 +447,8 @@ let doc = [
   "2. Second step",
   "3. Third step",
   "  1. nested numbered",
+  "    - mixed ul nested",
+  "    - another mixed ul",
   "  2. another nested",
   "",
   "### Code example",

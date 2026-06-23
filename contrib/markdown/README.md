@@ -26,7 +26,7 @@ cp contrib/markdown/to_html.mere  my_project/
 | heading `# ## ###` 〜 `######` | ✓ | ✓ | ✓ |
 | unordered list `- foo` (`<ul>`/`<li>` wrapping) | ✓ | ✓ | ✗ |
 | ordered list `1. foo` / `2. foo` (`<ol>`/`<li>` wrapping) | ✓ | ✗ | ✗ |
-| nested list (2-space indent、 1 階層) | ✓ | ✗ | ✗ |
+| nested list (2-space indent、 **任意深さ**) | ✓ | ✗ | ✗ |
 | **bold** (`**…**`) | ✓ | ✓ | ✗ |
 | *italic* (`*…*` / `_…_`) | ✓ | ✓ | ✗ |
 | inline code `` `…` `` | ✓ | ✓ | ✗ |
@@ -37,7 +37,7 @@ cp contrib/markdown/to_html.mere  my_project/
 | horizontal rule `---` / `***` / `___` | ✓ | ✗ | ✗ |
 | table `\| col \| col \|` + separator row | ✓ | ✗ | ✗ |
 | paragraph (空行区切り) | ✓ | ✓ | ✗ |
-| **非対応** (将来拡張): 2 階層以上の nest / footnote / definition list / autolink | | | |
+| **非対応** (将来拡張): footnote / definition list / autolink / strikethrough | | | |
 
 ## 位置付け
 
