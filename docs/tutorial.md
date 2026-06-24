@@ -928,6 +928,29 @@ The **feature-parity gap** between interpreter and the 3 codegen backends is now
 - `float` / `'a list`-typed builtins (`read_lines` / `args` / `env_var` / `file_exists` etc.) are **interpreter-only** (codegen comes in a separate phase).
 - LLVM / Wasm accept only **uniform payload for Map K with payload variants** (C allows mixed).
 
+## 14. Formatting source (`mere fmt`)
+
+The built-in pretty-printer normalizes style — 2-space indent, operator-precedence-driven paren insertion, `else if` chains flattened, `Cons` / `Nil` chains reconstructed into list literals, `range a b` rendered as `a..b`.
+
+```sh
+mere fmt foo.mere                 # write formatted source to stdout
+mere fmt -i src/*.mere            # rewrite in place (one or more files)
+mere fmt --check src/*.mere       # exit 1 if any file would change (CI / pre-commit)
+```
+
+`--check` prints the path of each file that would be reformatted but doesn't touch anything — convenient for a git pre-commit hook:
+
+```sh
+#!/bin/sh
+files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.mere$')
+[ -z "$files" ] || mere fmt --check $files
+```
+
+Known MVP limitations:
+- **Comments are not preserved** (the lexer discards them).
+- **`module M { ... }` blocks** are flattened to `M.foo` bindings.
+- A handful of Phase 36 sugars (operator sections, string interpolation) are emitted in their desugared form. Common ones (`a..b`, list literals, `\x y -> ...` lambda shorthand) are reconstructed.
+
 ## Next steps
 
 - Full feature reference: [language-reference.md](language-reference.md)

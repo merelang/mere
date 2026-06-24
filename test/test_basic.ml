@@ -7479,5 +7479,18 @@ let () =
   check_fmt_parses "shared write borrow"
     "let r = &shared write R 1 in 0";
 
+  (* Phase 47 follow-up (A): formatter `--check` mode equivalence. We don't
+     test the CLI here, but the underlying invariant is: a file is
+     "already formatted" iff `fmt_src src = src` (modulo a single trailing
+     newline that the formatter always emits). *)
+  let check_already_formatted name src =
+    let formatted = fmt_src src in
+    let result = if formatted = src then "stable" else "changed" in
+    check ("already-formatted: " ^ name) result "stable"
+  in
+  check_already_formatted "canonical int literal" "42\n";
+  check_already_formatted "canonical binop" "1 + 2 * 3\n";
+  check_already_formatted "canonical list literal" "[1, 2, 3]\n";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

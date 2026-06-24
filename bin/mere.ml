@@ -13,8 +13,9 @@ let usage () =
   print_endline "  mere -w <file.mere>   emit Wasm (WAT, use wat2wasm + Node.js)";
   print_endline "  mere -we <expr>       emit Wasm (WAT) for an inline expression";
   print_endline "  mere -r               start interactive REPL";
-  print_endline "  mere fmt <file.mere>  format source (writes to stdout)";
-  print_endline "  mere fmt -i <file>    format in place";
+  print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
+  print_endline "  mere fmt -i <files...>        format in place (one or more)";
+  print_endline "  mere fmt --check <files...>   exit 1 if any file needs formatting";
   print_endline "  mere -v | --version   print version";
   print_endline "  mere -h | --help      show this help";
   print_endline "";
@@ -134,6 +135,58 @@ let format_source ~base_dir source =
   in
   Mere.Formatter.format_program { prog with decls = user_decls }
 
+(* Apply [f] to each file path; collect any lex/parse failures and
+   report them with a code frame, then exit 1. Continues past
+   individual file errors so the user sees all problems at once. *)
+let fmt_each_file paths f =
+  let had_error = ref false in
+  List.iter (fun path ->
+    try f path with
+    | Mere.Lexer.Lex_error (loc, msg) ->
+      had_error := true;
+      let source = try read_file path with _ -> "" in
+      prerr_endline (Mere.Diagnostic.format ~source ~filename:path loc "lex error" msg)
+    | Mere.Parser.Parse_error (loc, msg) ->
+      had_error := true;
+      let source = try read_file path with _ -> "" in
+      prerr_endline (Mere.Diagnostic.format ~source ~filename:path loc "parse error" msg)
+    | Sys_error msg ->
+      had_error := true;
+      Printf.eprintf "io error: %s\n" msg
+  ) paths;
+  if !had_error then exit 1
+
+(* --check: print each file that would be reformatted and exit 1 if any
+   differ. Mirrors `gofmt -l` / `rustfmt --check`. *)
+let fmt_check_files paths =
+  let any_differs = ref false in
+  fmt_each_file paths (fun path ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    let formatted = format_source ~base_dir:base source in
+    if formatted <> source then begin
+      any_differs := true;
+      print_endline path
+    end);
+  if !any_differs then exit 1
+
+(* -i: rewrite each file in place. *)
+let fmt_inplace_files paths =
+  fmt_each_file paths (fun path ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    let formatted = format_source ~base_dir:base source in
+    if formatted <> source then
+      Out_channel.with_open_text path (fun oc ->
+        Out_channel.output_string oc formatted))
+
+(* Default mode: write to stdout. Only one path allowed (multi-file
+   stdout would just concatenate, which is rarely what users want). *)
+let fmt_to_stdout path =
+  let source = read_file path in
+  let base = Filename.dirname path in
+  run_action (format_source ~base_dir:base) path source
+
 (* Enable ANSI color in diagnostics when stderr is a TTY and the
    environment hasn't opted out via NO_COLOR (https://no-color.org/). *)
 let () =
@@ -151,22 +204,22 @@ let () =
   | [_; "-h"] | [_; "--help"] -> usage ()
   | [_; "-v"] | [_; "--version"] -> version ()
   | [_; "-r"] -> Mere.Repl.run ()
-  | [_; "fmt"; "-i"; path] ->
-    let source = read_file path in
-    let base = Filename.dirname path in
-    (try
-       let formatted = format_source ~base_dir:base source in
-       Out_channel.with_open_text path (fun oc ->
-         Out_channel.output_string oc formatted)
-     with
-     | Mere.Lexer.Lex_error (loc, msg) ->
-       report_and_exit ~source ~filename:path loc "lex error" msg
-     | Mere.Parser.Parse_error (loc, msg) ->
-       report_and_exit ~source ~filename:path loc "parse error" msg)
+  | _ :: "fmt" :: "-i" :: (_ :: _ as paths) ->
+    fmt_inplace_files paths
+  | _ :: "fmt" :: "--check" :: (_ :: _ as paths) ->
+    fmt_check_files paths
   | [_; "fmt"; path] ->
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (format_source ~base_dir:base) path source
+    fmt_to_stdout path
+  | _ :: "fmt" :: (_ :: _ :: _ as paths) ->
+    Printf.eprintf
+      "error: `mere fmt` writes to stdout and only accepts one file.\n\
+       Use `mere fmt -i <files...>` to format in place, or\n\
+       `mere fmt --check <files...>` to check without rewriting.\n";
+    let _ = paths in
+    exit 1
+  | [_; "fmt"] ->
+    prerr_endline "error: `mere fmt` requires a file path";
+    exit 1
   | [_; "-e"; expr] ->
     run_action Mere.Pipeline.process "<inline>" expr
   | [_; "-te"; expr] ->

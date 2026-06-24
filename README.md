@@ -11,7 +11,7 @@ Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 
 ## Status (as of 2026-06-24)
 
-- **1551 tests passing**
+- **1573 tests passing**
 - **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); subsequent phases grew the example set to 136.
 - Memory model: region / view / Trivial[R] / `with` Drop work at the type level, in the interpreter, and in all three codegen backends.
 - Effect system: capability-passing pattern + `signature ... = (...)` argument bundling + `using [cap]` sugar + builtin Logger / Metrics.
@@ -110,7 +110,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # print the type
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1551 tests
+dune runtest                                         # 1573 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -128,6 +128,27 @@ node scripts/run_wasm.js sum.wasm                    # → 7 (via the host harne
 
 All three backends (C / LLVM / Wasm) match at feature parity — ints, functions, strings, tuples, records, variants, closures, polymorphism, recursive variants, complex patterns, `show`, region, view, `with` Drop, list pretty-printing, the four Q-010 collections (Vec / OwnedVec / StrBuf / Map), polymorphic user let-recs, inner-fn lifting, top-level value bindings globalized, and `str_compare`'s sign-normalized output (parity reached incrementally through Phases 15.x → 31.0; 16 realistic examples retain diff = 0 PERFECT).
 
+## Formatting (`mere fmt`)
+
+A built-in pretty-printer normalizes source style — 2-space indent, operator-precedence-driven paren insertion, `else if` chain flattening, list / range / lambda-shorthand sugar reconstruction.
+
+```sh
+dune exec mere -- fmt examples/factorial.mere       # write formatted to stdout
+dune exec mere -- fmt -i src/foo.mere src/bar.mere  # rewrite in place
+dune exec mere -- fmt --check src/*.mere            # exit 1 if any file differs
+```
+
+`--check` lists files that would change and is suitable for CI / pre-commit:
+
+```sh
+# .git/hooks/pre-commit (example)
+#!/bin/sh
+files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.mere$')
+[ -z "$files" ] || dune exec mere -- fmt --check $files
+```
+
+Known MVP limitations: comments are dropped (the lexer discards them), `module M { ... }` blocks are emitted as flat `M.foo` bindings, and a few Phase 36 sugars (operator sections, string interpolation) are emitted in their desugared form.
+
 ## Layout
 
 ```
@@ -142,9 +163,10 @@ mere/
 │   ├── codegen_wasm.ml # Wasm (WAT) codegen
 │   ├── pipeline.ml     # process / type_of (?base_dir for importer-relative)
 │   ├── repl.ml         # interactive REPL (multi-line / :env / :show / :load / :reset)
+│   ├── formatter.ml    # `mere fmt` pretty-printer
 │   ├── diagnostic.ml   # Rust-style code frame + ANSI colors
 │   └── version.ml
-├── test/test_basic.ml  # 1551 tests
+├── test/test_basic.ml  # 1573 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
 ├── examples/           # *.mere sample programs
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog

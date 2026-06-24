@@ -520,7 +520,7 @@ Items previously listed as "not implemented" were implemented incrementally thro
 
 ## 9. Status summary
 
-- **1551 tests passing** (test/test_basic.ml).
+- **1573 tests passing** (test/test_basic.ml).
 - **4-backend feature parity**: interpreter + C / LLVM IR / Wasm runtime.
 - 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) match **diff = 0 PERFECT**.
 - See [Changelog](changelog.md) / [Codegen](codegen.md) for details.
