@@ -27,8 +27,8 @@ let emit_instr s = instrs := s :: !instrs
 
 (* Local slot bookkeeping. Lang variables map to Wasm locals; we mint
    a fresh slot per Let binding. Wasm locals are typed, so we track the
-   declared type per slot. Most slots are i32 (Mere の uniform value model)
-   だが、Phase 34.3 で float の f64 一時 slot を扱うために type list を持つ。 *)
+   declared type per slot. Most slots are i32 (Mere's uniform value model),
+   but we keep a type list to handle Phase 34.3's f64 temp slots for float. *)
 let local_counter = ref 0
 let local_types : string list ref = ref []  (* in declaration order; index = slot *)
 let locals : (string * int) list ref = ref []
@@ -99,15 +99,16 @@ type fn_decl = {
 
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 30.2c (DEFERRED §1.10 fix, Wasm): top-level 非-fn let の名前を保持。
-   Wasm では値は全て i32 (literal int / ptr to linear memory) なので
-   (global $<name> (mut i32) (i32.const 0)) として宣言、main 開始時に
-   `global.set` で初期化。emit_expr Var "name" は `global.get $<name>`。 *)
+(* Phase 30.2c (DEFERRED §1.10 fix, Wasm): keep the names of top-level
+   non-fn lets. In Wasm all values are i32 (literal int / ptr to linear
+   memory), so declare them as (global $<name> (mut i32) (i32.const 0)) and
+   initialize via `global.set` at the start of main. emit_expr Var "name"
+   becomes `global.get $<name>`. *)
 let top_globals_wasm : (string, unit) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 32.4 (C1 FFI, Wasm): extern fn を env host imports として宣言、
-   `call $<name>` で呼び出す。Node.js host harness (scripts/run_wasm.js)
-   が env に default impl (getpid / getppid 等) を提供。 *)
+(* Phase 32.4 (C1 FFI, Wasm): declare extern fns as env host imports and
+   call them via `call $<name>`. The Node.js host harness
+   (scripts/run_wasm.js) provides default impls in env (getpid / getppid etc.). *)
 let extern_fn_decls_wasm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
 (* Phase 15.4: Vec[R, T] runtime used flag. All Mere values lower to a
@@ -142,16 +143,18 @@ let str_join_used = ref false
 let str_count_used = ref false
 let file_io_used = ref false
 
-(* Phase 15.10/15.14: Map[R, K, V] — Wasm では値が全部 i32 なので per-V
-   は不要、per-K のみ。K の型を `map_key_types` に登録、emit_program で
-   per-K helper を 1 セットずつ emit。`map_int_used` / `map_str_used` は
-   後方互換 (新規 code はテーブル経由)。 *)
+(* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
+   is needed; only per-K. Register K's type in `map_key_types`, and
+   emit_program emits one set of per-K helpers per entry. `map_int_used` /
+   `map_str_used` are kept for backward compatibility (new code goes
+   through the table). *)
 let map_int_used = ref false
 let map_str_used = ref false
 let map_key_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
-(* Phase 15.12: vec_to_list と len-on-list で同じ list 構造を扱うため、
-   どちらか使われたら runtime を emit。tag 値は codegen 時に確定。 *)
+(* Phase 15.12: vec_to_list and len-on-list share the same list structure,
+   so emit the runtime if either is used. Tag values are determined at codegen
+   time. *)
 let vec_to_list_used = ref false
 let list_len_used = ref false
 
@@ -237,10 +240,10 @@ let fn_closure_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
 (* Phase 35.3: eta-wrapped nullary factory adapters (vec_new / owned_vec_new
    / strbuf_new / map_new_<k_tag>) used as first-class values. Key = adapter
    slug, value = (builtin name, ret_ty, table_idx). *)
-(* Phase 38.C (DEFERRED §1.2 A2): multi-arg curried builtin が value 位置で
-   使われた時の syntactic eta-expansion (codegen_c / codegen_llvm の同名
-   helper と同一ロジック)。 anonymous Fun adapter + 各 builtin の direct-call
-   fast path (line 1653 等) に乗せる。 *)
+(* Phase 38.C (DEFERRED §1.2 A2): syntactic eta-expansion for multi-arg curried
+   builtins used in value position (same logic as the helper of the same name
+   in codegen_c / codegen_llvm). Routes through an anonymous Fun adapter +
+   each builtin's direct-call fast path (line 1653 etc.). *)
 let synthesize_curried_eta_wasm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
     : Ast.expr =
   let mk node ty = Ast.{ node; ty = Some ty; loc } in
@@ -309,9 +312,10 @@ let inner_lifts_wasm : (string, lifted_inner_wasm) Hashtbl.t = Hashtbl.create 8
 let inner_lifts_by_host_wasm : (string, (string, lifted_inner_wasm) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
 
-(* Phase 39.A2 (Wasm port): inner-lifted fn を value 位置で。 各 fn 1 つに対し
-   adapter を fn table に登録、 use 位置で env を bump heap に alloc + capture
-   を store + closure 値 (env_offset, table_idx) を memory に書く。 *)
+(* Phase 39.A2 (Wasm port): inner-lifted fn at value position. For each fn,
+   register an adapter in the fn table; at the use site, alloc env in the bump
+   heap + store captures + write the closure value (env_offset, table_idx) to
+   memory. *)
 let inner_lift_closures_emitted_wasm : (string, int) Hashtbl.t = Hashtbl.create 4
 let inner_lift_closure_pending_wasm :
   (string * string list * int) list ref = ref []
@@ -402,20 +406,21 @@ let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("OwnedVec", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in Wasm codegen subset: OwnedVec (Phase 15 では Wasm 未実装)"))
+      "unsupported in Wasm codegen subset: OwnedVec (not implemented for Wasm in Phase 15)"))
   | Ast.TyCon ("StrBuf", _) ->
-    (* Phase 27.3: StrBuf は Wasm でも mere_strbuf_* runtime で実装済。
-       ty_tag を返せるようにして、tuple/variant payload type 経由でも
-       使えるように。 *)
+    (* Phase 27.3: StrBuf is implemented in Wasm too via the mere_strbuf_*
+       runtime. Make ty_tag return a value so it can also be used via tuple
+       / variant payload types. *)
     "strbuf"
   | Ast.TyCon ("Map", [_region; k_ty; v_ty]) ->
-    (* Phase 43: Wasm でも Map は i32 ポインタなので、 tuple / closure env /
-       variant payload で carrier として扱えるよう ty_tag を返す。 K / V tag
-       で識別子の重複を防ぐ (`map_str_int` vs `map_int_str`)。 *)
+    (* Phase 43: In Wasm too, Map is an i32 pointer, so return a ty_tag so
+       it can be treated as a carrier in tuple / closure env / variant
+       payload. The K / V tags prevent identifier collisions
+       (`map_str_int` vs `map_int_str`). *)
     "map_" ^ ty_tag k_ty ^ "_" ^ ty_tag v_ty
   | Ast.TyCon ("Map", _) ->
     raise (Codegen_error (Loc.dummy,
-      "unsupported in Wasm codegen subset: Map (region / K / V が概念的 でない場合)"))
+      "unsupported in Wasm codegen subset: Map (when region / K / V is not concrete)"))
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
@@ -427,10 +432,10 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyCon (name, args) ->
     name ^ "_" ^ String.concat "_" (List.map ty_tag args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
-    (* Region marker — region 名そのものを tag に (C / LLVM と同じ). *)
+    (* Region marker — use the region name itself as the tag (same as C / LLVM). *)
     r
   | Ast.TyRef (_, _, inner) ->
-    (* Phase 19.x: borrow 型は inner の tag をそのまま使う (C / LLVM と同じ). *)
+    (* Phase 19.x: borrow types use the inner type's tag as-is (same as C / LLVM). *)
     ty_tag inner
   | _ ->
     raise (Codegen_error (Loc.dummy,
@@ -633,9 +638,10 @@ let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
   go root;
   !found
 
-(* Phase 26.4: multi-instantiation specialization (LLVM Phase 25.5 の Wasm 版).
-   Wasm IR は i32 統一なので static specialization は技術的には不要だが、
-   将来の polymorphic `show`/`print`/etc. 用に LLVM と同じ infra を整える。 *)
+(* Phase 26.4: multi-instantiation specialization (Wasm version of LLVM
+   Phase 25.5). Since Wasm IR uniformly uses i32, static specialization is
+   technically unnecessary, but we set up the same infra as LLVM for future
+   polymorphic `show`/`print`/etc. *)
 let multi_inst_fns_wasm : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4
 
 let mangled_inst_name_wasm (base : string) (arrow : Ast.ty) : string =
@@ -764,14 +770,14 @@ let clone_with_fresh_tyvars_wasm (e : Ast.expr) : Ast.expr =
 
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   (* Phase 21.2 multi-pass + Phase 26.4 multi-instantiation specialization
-     (LLVM Phase 25.5 の Wasm 版). *)
+     (Wasm version of LLVM Phase 25.5). *)
   let resolved : (string, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
   let progress = ref true in
   Hashtbl.reset multi_inst_fns_wasm;
   let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
     Hashtbl.create 4
   in
-  (* Phase 43: chained poly inst の re-scan support (see codegen_c.ml の解説) *)
+  (* Phase 43: re-scan support for chained poly inst (see codegen_c.ml for the explanation) *)
   let make_spec arrow s =
     let cloned_fun = clone_with_fresh_tyvars_wasm s.sfun in
     let clone_fun_ty =
@@ -959,12 +965,12 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : un
     current_host := f.name;
     walk f.param [f.param] f.body) fns;
   (* Phase 45 (DEFERRED §8): transitive capture closure for mutually-called
-     inner-lifted fns。 詳細は codegen_c.ml の同 phase コメント参照 *)
+     inner-lifted fns. See the same-phase comment in codegen_c.ml for details *)
   let all_lifted = !lifted_fns_wasm in
   let mere_to_lifted : (string, string) Hashtbl.t = Hashtbl.create 8 in
   Hashtbl.iter (fun mname entry ->
     Hashtbl.replace mere_to_lifted mname entry.lifted_name) inner_lifts_wasm;
-  (* Wasm の captures は string list なので型が違う点に注意 *)
+  (* Note that Wasm captures are a string list, so the type differs *)
   let captures_map : (string, string list) Hashtbl.t =
     Hashtbl.create 8
   in
@@ -1060,8 +1066,8 @@ let wasm_cmp = function
   | Ast.Gt -> "i32.gt_s"
   | Ast.Ge -> "i32.ge_s"
 
-(* Phase 15.10: Wasm では値が全部 i32 なので per-V 不要、K (int / str)
-   のみで helper を分岐。 *)
+(* Phase 15.10: In Wasm all values are i32 so per-V is unnecessary; only
+   branch helpers on K (int / str). *)
 let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
   match ty_opt with
   | Some t ->
@@ -1093,10 +1099,10 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
      | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
   | None -> raise (Codegen_error (loc, "map_*: missing type info"))
 
-(* Phase 34.3: Wasm float helper. float 値は **8 bytes (f64) を bump alloc
-   して i32 ポインタとして保持** (uniform i32 value model を維持)。
-   `emit_float_alloc_from_f64_on_stack`: stack top の f64 値を alloc + store、
-   結果として i32 ptr を stack top に残す。 *)
+(* Phase 34.3: Wasm float helper. Float values are **bump-alloc'd as 8 bytes
+   (f64) and held as i32 pointers** (preserving the uniform i32 value model).
+   `emit_float_alloc_from_f64_on_stack`: alloc + store the f64 value at the
+   stack top, leaving an i32 ptr at the stack top. *)
 let emit_float_alloc_from_f64_on_stack () : unit =
   (* Stack before: [..., f64] *)
   let tmp_f64 = fresh_local_f64 () in
@@ -1124,7 +1130,7 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.Int_lit n ->
     emit_instr (Printf.sprintf "i32.const %d" n)
   | Ast.Float_lit f ->
-    (* Phase 34.3: f64 リテラルを push、bump alloc して i32 ptr に *)
+    (* Phase 34.3: push the f64 literal, bump alloc to get an i32 ptr *)
     emit_instr (Printf.sprintf "f64.const %.17g" f);
     emit_float_alloc_from_f64_on_stack ()
   | Ast.Bool_lit b ->
@@ -1135,7 +1141,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i32.const %d" off)
   | Ast.Var "pi" when not (List.mem_assoc "pi" !locals) ->
-    (* Phase 34.3: float constants — heap-alloc して i32 ptr を push *)
+    (* Phase 34.3: float constants — heap-alloc and push an i32 ptr *)
     emit_instr "f64.const 3.14159265358979323846";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.Var "e" when not (List.mem_assoc "e" !locals) ->
@@ -1188,8 +1194,9 @@ let rec emit_expr (e : Ast.expr) : unit =
         | None -> None
       else None
     in
-    (* Phase 15.4: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数
-       builtin は依然 first-class 不可 (eta は nullary factory のみ)。 *)
+    (* Phase 15.4: curried multi-arg builtins like vec_*, owned_vec_*,
+       strbuf_*, map_* are still not first-class (eta is for nullary
+       factories only). *)
     let is_curried_collection_builtin =
       name = "vec_push"
       || name = "vec_get" || name = "vec_len"
@@ -1211,7 +1218,7 @@ let rec emit_expr (e : Ast.expr) : unit =
       || name = "map_get" || name = "map_has"
       || name = "map_set" || name = "vec_set"
     in
-    (* Phase 38.A1: 単引数 builtin の value 化 *)
+    (* Phase 38.A1: value-ification of single-arg builtins *)
     let is_single_arg_value_builtin =
       name = "int_of_str" || name = "str_of_int"
       || name = "str_len" || name = "str_rev" || name = "str_trim"
@@ -1246,11 +1253,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     if not is_shadowed && is_curried_collection_builtin && not phase38c_emittable then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.4〜15.10: curried 多引数 builtin は直接 application のみ対応、 Phase 38.C で部分対応中)"));
+        ^ " as a value (Phase 15.4-15.10: curried multi-arg builtin only supports direct application, partial support in progress in Phase 38.C)"));
     if not is_shadowed && is_single_arg_value_builtin && not phase38c_emittable then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value: type is polymorphic (Phase 38.A1 MVP: `fn x -> " ^ name ^ " x` で wrap)"));
+        ^ " as a value: type is polymorphic (Phase 38.A1 MVP: wrap with `fn x -> " ^ name ^ " x`)"));
     if not is_shadowed && is_nullary_factory && eta_table_idx_opt = None then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
@@ -1259,7 +1266,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
-        ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)"));
+        ^ " as a value (Phase 15.11/15.12: len / vec_to_list only support direct application)"));
     if phase38c_emittable then begin
       (* Phase 38.C-5: emit the synthesized eta-expanded Fun chain.
          Inner App nodes hit the existing direct-call fast paths
@@ -1314,9 +1321,9 @@ let rec emit_expr (e : Ast.expr) : unit =
        (* Phase 30.2c: top-level non-fn let as a Wasm global *)
        emit_instr (Printf.sprintf "global.get $%s" name)
      | None when Hashtbl.mem inner_lifts_wasm name ->
-       (* Phase 39.A2: inner-lifted fn を value 位置で materialize。
-          env を bump heap に alloc + capture を store + closure 値
-          (env_offset, fn_idx) を 8 bytes 構造体として bump heap に書く。 *)
+       (* Phase 39.A2: materialize inner-lifted fn at value position.
+          Alloc env in the bump heap + store captures + write the closure
+          value (env_offset, fn_idx) as an 8-byte struct to the bump heap. *)
        let li = Hashtbl.find inner_lifts_wasm name in
        let cap_count = List.length li.captures in
        let env_size = max 4 (cap_count * 4) in
@@ -1332,7 +1339,7 @@ let rec emit_expr (e : Ast.expr) : unit =
              :: !inner_lift_closure_pending_wasm;
            idx
        in
-       (* env 領域確保 *)
+       (* Reserve the env area *)
        let env_base = fresh_local () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" env_base);
@@ -1340,21 +1347,21 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "i32.const %d" env_size);
        emit_instr "i32.add";
        emit_instr "global.set $__lang_bump";
-       (* 各 capture を env field に store *)
+       (* Store each capture into an env field *)
        List.iteri (fun i cn ->
          let cv_slot =
            match List.assoc_opt cn !locals with
            | Some s -> s
            | None ->
              unsupported e.Ast.loc
-               ("inner-lifted fn `" ^ name ^ "` の capture `" ^ cn
-                ^ "` を解決できません (Wasm Phase 39.A2 MVP — local のみ対応)")
+               ("inner-lifted fn `" ^ name ^ "`: cannot resolve capture `" ^ cn
+                ^ "` (Wasm Phase 39.A2 MVP — only locals are supported)")
          in
          emit_instr (Printf.sprintf "local.get %d" env_base);
          emit_instr (Printf.sprintf "local.get %d" cv_slot);
          emit_instr (Printf.sprintf "i32.store offset=%d" (i * 4))
        ) li.captures;
-       (* closure value `{env_offset, fn_table_idx}` を bump heap に *)
+       (* closure value `{env_offset, fn_table_idx}` written to the bump heap *)
        let cl_base = fresh_local () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" cl_base);
@@ -1499,8 +1506,8 @@ let rec emit_expr (e : Ast.expr) : unit =
        | Ast.Var name -> Hashtbl.mem extern_fn_decls_wasm name
        | _ -> false
      in head_is_extern { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc }) ->
-    (* Phase 32.6 (C1 FFI multi-arg Wasm): curried App chain を collect、
-       全 args を push してから call $<name> 1 つに集約。 *)
+    (* Phase 32.6 (C1 FFI multi-arg Wasm): collect the curried App chain;
+       push all args, then collapse into a single call $<name>. *)
     let rec collect e acc =
       match e.Ast.node with
       | Ast.App (f, a) -> collect f (a :: acc)
@@ -1635,7 +1642,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "call $__lang_bool_of_str"
   (* Phase 26.1: fail / char / substring / int_of_str / str_of_int /
-     str_unescape — LLVM Phase 25.1 / 25.4 の Wasm 版。 *)
+     str_unescape — Wasm version of LLVM Phase 25.1 / 25.4. *)
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
     fail_used := true;
     emit_expr arg;
@@ -1645,15 +1652,15 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr s_e;
     emit_expr i_e;
     emit_instr "call $__lang_char_at"
-  (* Phase 30.0 (DEFERRED §1.12 fix): user-defined shadow を尊重 *)
+  (* Phase 30.0 (DEFERRED §1.12 fix): respect user-defined shadow *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
-    (* Phase 31.0: str_compare a b — 3 backend で interp と一致する
-       sign-normalized -1/0/1 を返す。 *)
+    (* Phase 31.0: str_compare a b — across all 3 backends, return the
+       sign-normalized -1/0/1 that matches interp. *)
     emit_expr a_e;
     emit_expr b_e;
     emit_instr "call $__lang_str_compare"
   (* Phase 34.3: float arithmetic + comparison + unary + conversions.
-     値は i32 ptr (f64 in heap)。各 op は load → op → alloc + store。 *)
+     Values are i32 ptr (f64 in heap). Each op is load → op → alloc + store. *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
     when fname = "f_add" || fname = "f_sub" || fname = "f_mul" || fname = "f_div" ->
     let op = match fname with
@@ -1676,7 +1683,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "f64.load offset=0 align=8";
     emit_expr b_e;
     emit_instr "f64.load offset=0 align=8";
-    emit_instr op  (* f64.lt 等は i32 (bool) を返す *)
+    emit_instr op  (* f64.lt etc. return i32 (bool) *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
     when fname = "f_min" || fname = "f_max" ->
     let op = if fname = "f_min" then "f64.min" else "f64.max" in
@@ -1712,7 +1719,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr a_e;
     emit_instr "call $__lang_float_of_str";  (* env import, f64 *)
     emit_float_alloc_from_f64_on_stack ()
-  (* Phase 34.4: libm functions — Wasm intrinsic は sqrt のみ、他は host import *)
+  (* Phase 34.4: libm functions — only sqrt is a Wasm intrinsic; others are host imports *)
   | Ast.App ({ node = Ast.Var "sqrt"; _ }, a_e) ->
     emit_expr a_e;
     emit_instr "f64.load offset=0 align=8";
@@ -1775,7 +1782,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr delim_e;
     emit_instr "call $__lang_str_split"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_join"; _ }, sep_e); _ }, xs_e) ->
-    (* Phase 26.5: str_join — list_str を sep 区切りで連結。 *)
+    (* Phase 26.5: str_join — concatenate list_str separated by sep. *)
     str_join_used := true;
     emit_expr sep_e;
     emit_expr xs_e;
@@ -1808,10 +1815,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr content_e;
     emit_instr "call $__lang_write_file"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e); _ }, default_e) ->
-    (* Phase 26.2: try_or fn default — Wasm 版。setjmp/longjmp が無いので
-       fail を flag-based の non-trapping mode に切り替え、try_or scope を
-       global active counter で管理。inner closure 呼出後に flag を check し、
-       set されていれば default を返す。 *)
+    (* Phase 26.2: try_or fn default — Wasm version. Since there's no
+       setjmp/longjmp, switch fail to a flag-based non-trapping mode and
+       manage the try_or scope with a global active counter. After calling
+       the inner closure, check the flag; if set, return default. *)
     fail_used := true;
     (* Save active counter (depth) — using a fresh local. *)
     let saved_active = fresh_local () in
@@ -1846,9 +1853,9 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" result_slot);
     emit_instr "end"
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
-    (* Phase 15.4: vec_new () — region は無視 (Wasm の bump はグローバル
-       で一本)、要素は全て 4 byte i32 なので単一 runtime で OK。
-       arg は unit literal なので積まない。 *)
+    (* Phase 15.4: vec_new () — ignore region (Wasm's bump is a single
+       global), and since all elements are 4-byte i32 a single runtime
+       suffices. arg is a unit literal so don't push it. *)
     vec_used := true;
     emit_instr "call $mere_vec_new"
   | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
@@ -1921,8 +1928,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr fn_e;
     emit_instr "call $mere_vec_filter"
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
-    (* Phase 15.7: Wasm では OwnedVec も Vec も同じ bump runtime を使うので
-       owned_vec_new = $mere_vec_new (alias)。 *)
+    (* Phase 15.7: In Wasm, OwnedVec and Vec use the same bump runtime, so
+       owned_vec_new = $mere_vec_new (alias). *)
     vec_used := true;
     emit_instr "call $mere_vec_new"
   | Ast.App ({ node = Ast.Var "owned_vec_len"; _ }, arg) ->
@@ -1940,8 +1947,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr idx_e;
     emit_instr "call $mere_vec_get"
   | Ast.App ({ node = Ast.Var "vec_to_owned"; _ }, vec_e) ->
-    (* Phase 15.7: Wasm では Vec と OwnedVec の runtime 表現は同じなので、
-       $mere_vec_clone で deep copy するだけ。 *)
+    (* Phase 15.7: In Wasm the runtime representations of Vec and OwnedVec
+       are the same, so just deep-copy with $mere_vec_clone. *)
     vec_used := true;
     emit_expr vec_e;
     emit_instr "call $mere_vec_clone"
@@ -1950,8 +1957,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr owned_e;
     emit_instr "call $mere_vec_clone"
   | Ast.App ({ node = Ast.Var "len"; _ }, arg) ->
-    (* Phase 15.11: len ad-hoc dispatch — arg.ty に基づいて対応する
-       _len ヘルパに routing。Wasm では値は全て i32。 *)
+    (* Phase 15.11: len ad-hoc dispatch — route to the corresponding _len
+       helper based on arg.ty. In Wasm all values are i32. *)
     let arg_ty =
       match arg.Ast.ty with
       | Some t -> Ast.walk t
@@ -1975,7 +1982,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr arg;
        emit_instr "call $__lang_strlen"
      | Ast.TyTuple ts ->
-       (* Static arity。arg は side-effectful の可能性があるので drop。 *)
+       (* Static arity. arg may be side-effectful, so drop it. *)
        emit_expr arg;
        emit_instr "drop";
        emit_instr (Printf.sprintf "i32.const %d" (List.length ts))
@@ -1991,7 +1998,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        raise (Codegen_error (e.Ast.loc,
          "len: arg type has no codegen-defined length")))
   | Ast.App ({ node = Ast.Var "map_new"; _ }, _arg) ->
-    (* Phase 15.10: map_new () — Wasm では region 無視、key 型のみ pick. *)
+    (* Phase 15.10: map_new () — in Wasm ignore region, pick only the key type. *)
     let k_tag = map_key_tag_of_wasm e.Ast.ty e.Ast.loc in
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
     emit_instr (Printf.sprintf "call $mere_map_%s_new" k_tag)
@@ -2045,8 +2052,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr vec_e;
     emit_instr "call $mere_vec_to_list"
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
-    (* Phase 15.9: strbuf_new () — region は無視 (Wasm の bump はグローバル
-       1 本)。 *)
+    (* Phase 15.9: strbuf_new () — ignore region (Wasm's bump is a single
+       global). *)
     strbuf_used := true;
     emit_instr "call $mere_strbuf_new"
   | Ast.App ({ node = Ast.Var "strbuf_len"; _ }, arg) ->
@@ -2077,8 +2084,8 @@ let rec emit_expr (e : Ast.expr) : unit =
       match List.assoc_opt cap !locals with
       | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
       | None when Hashtbl.mem top_globals_wasm cap ->
-        (* Phase 36 (DEFERRED §1.14 fix): captured free var が
-           top-level global の場合は global.get で値を取り出す。 *)
+        (* Phase 36 (DEFERRED §1.14 fix): if a captured free var is a
+           top-level global, fetch the value via global.get. *)
         emit_instr (Printf.sprintf "global.get $%s" cap)
       | None -> unsupported e.Ast.loc
           (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
@@ -2174,9 +2181,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "field access: missing inner type"
     in
-    (* Phase 19.x: borrow 越し field access — TyRef を unwrap して
-       inner T の record として扱う。Wasm はすべて i32 (ptr) なので
-       record の値表現は変わらず、field access は同じ手順で動く。 *)
+    (* Phase 19.x: field access through a borrow — unwrap TyRef and treat
+       as the inner T's record. In Wasm everything is i32 (ptr) so the
+       record's value representation is unchanged and field access uses
+       the same steps. *)
     let inner_ty =
       match raw_ty with
       | Ast.TyRef (_, _, t) -> Ast.walk t
@@ -2198,8 +2206,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     let idx = find_idx 0 fields in
     emit_expr inner;
-    (* Phase 19.x: borrow 越し (raw_ty が TyRef) なら Ref が 4-byte box を
-       追加しているので、unbox の extra i32.load が要る。 *)
+    (* Phase 19.x: if through a borrow (raw_ty is TyRef), Ref has added a
+       4-byte box, so we need an extra i32.load to unbox. *)
     (match raw_ty with
      | Ast.TyRef _ -> emit_instr "i32.load offset=0"
      | _ -> ());
@@ -2243,7 +2251,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" dst_slot)
   | Ast.Constr (raw_cname, arg_opt) ->
     (* Phase 42: try raw qualified lookup first for disambiguation, fall back
-       to canonical. variant_tags は bare 名 key なので canonical を使う。 *)
+       to canonical. variant_tags is keyed by bare names, so use canonical. *)
     let cname = Ast.canonical_ctor raw_cname in
     let info =
       match Hashtbl.find_opt Typer.constructors raw_cname with
@@ -2430,12 +2438,13 @@ let rec emit_expr (e : Ast.expr) : unit =
         (match sub, pty_opt with
          | None, _ -> (tag_cond, [])
          | Some sub_pat, Some pty ->
-           (* Phase 38.C1 fix: sub-pattern の payload deref を outer tag
-              チェックでガード。 unconditional load offset=4 + 更に深い deref
-              は、 outer tag が不一致のとき間違った memory を読みに行って
-              trap する (lambda_calc.mere の `LApp (Lam (x, b), arg)` で
-              発覚)。 `if tag_cond then sub_cond else 0 end` で sub-pattern
-              の load / dereference を tag 一致時のみ実行する。 *)
+           (* Phase 38.C1 fix: guard the sub-pattern's payload deref with
+              the outer tag check. An unconditional load offset=4 + deeper
+              deref would read wrong memory and trap when the outer tag
+              mismatches (discovered with `LApp (Lam (x, b), arg)` in
+              lambda_calc.mere). With `if tag_cond then sub_cond else 0 end`,
+              the sub-pattern's load / dereference runs only when the tag
+              matches. *)
            let pl_slot = fresh_local () in
            let result_slot = fresh_local () in
            emit_instr (Printf.sprintf "local.get %d" tag_cond);
@@ -2642,10 +2651,10 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr "call_indirect (type $cl)";
        emit_instr "drop";               (* discard close's return *)
        emit_instr (Printf.sprintf "local.get %d" result_slot))
-  (* Phase 34.3: 全 AST 構造を上で網羅したため fallback `| _ ->` は OCaml に
-     redundant と判定されるようになった。明示的な node_name による
-     unsupported error は残しておきたいので、各 case の wildcard を残す
-     形にしないと unused warning が出る — 完全に削除。 *)
+  (* Phase 34.3: since the entire AST structure is now covered above, OCaml
+     considers the fallback `| _ ->` redundant. We'd like to keep explicit
+     unsupported errors tagged by node_name, but leaving a wildcard in each
+     case would produce unused warnings — so completely removed. *)
 
 (* Emit one top-level fn definition. Params are positional locals
    starting at slot 0; let-binding locals are mint-ed afterwards.
@@ -3323,7 +3332,7 @@ let runtime_helpers = {|
         (local.set $a (local.get $t))
         (br $lp)))
     (local.get $a))
-  ;; Phase 36: bool_of_str — "true" → 1, それ以外 → 0
+  ;; Phase 36: bool_of_str — "true" → 1, otherwise → 0
   (func $__lang_bool_of_str (param $s i32) (result i32)
     (if (i32.ne (i32.load8_u (local.get $s)) (i32.const 116)) (then (return (i32.const 0))))
     (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.const 114)) (then (return (i32.const 0))))
@@ -3884,10 +3893,10 @@ let vec_runtime = {|
       (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))
       (local.get $x))
     (i32.const 0))
-  ;; Phase 15.7: OwnedVec の helpers — Wasm では値が全部 i32 で
-  ;; bump アロケータも共有なので、Vec と OwnedVec のランタイム表現は
-  ;; 同じ。owned_vec_* は $mere_vec_* に thin wrapper として alias。
-  ;; deep copy (vec_to_owned / owned_vec_to_vec) は $mere_vec_clone を使う。
+  ;; Phase 15.7: OwnedVec helpers — in Wasm all values are i32 and the
+  ;; bump allocator is also shared, so the runtime representations of Vec
+  ;; and OwnedVec are the same. owned_vec_* aliases as a thin wrapper to
+  ;; $mere_vec_*. Deep copy (vec_to_owned / owned_vec_to_vec) uses $mere_vec_clone.
   (func $mere_vec_clone (param $src i32) (result i32)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
     (local.set $new (call $mere_vec_new))
@@ -4113,8 +4122,8 @@ let vec_higher_order_runtime = {|
     (local.get $new))|}
 
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic helper set.
-   Wasm の bump アロケータ ($__lang_bump) を使う。Layout:
-   { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 byte (Vec と同じ). *)
+   Uses Wasm's bump allocator ($__lang_bump). Layout:
+   { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 bytes (same as Vec). *)
 let strbuf_runtime_wasm = {|
   (func $mere_strbuf_new (result i32)
     (local $sb i32) (local $buf i32)
@@ -4191,9 +4200,10 @@ let strbuf_runtime_wasm = {|
   (func $mere_strbuf_len (param $sb i32) (result i32)
     (i32.load offset=4 (local.get $sb)))|}
 
-(* Phase 15.10: Map[R, K, V] runtime — per-K only (V は i32 共通)。
-   Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 byte。
-   線形スキャン、cap 到達時は新配列を bump で確保 (arena semantics). *)
+(* Phase 15.10: Map[R, K, V] runtime — per-K only (V is i32 for all).
+   Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 bytes.
+   Linear scan; on reaching cap, allocate a new array via bump
+   (arena semantics). *)
 
 (* Phase 15.14: emit a key-equality WAT function for K type. K can be
    int / bool / str / tuple (recursive over tuple). Result is `i32`
@@ -4468,7 +4478,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i32.const 0))
-  ;; Phase 39.A' #2: map_delete — key 一致したら keys/values を shift して詰める
+  ;; Phase 39.A' #2: map_delete — when the key matches, shift keys/values down
   (func $mere_map_%s_delete (param $m i32) (param $k i32) (result i32)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
     (local.set $len (i32.load offset=8 (local.get $m)))
@@ -4616,7 +4626,7 @@ let map_int_runtime_wasm = {|
     (i32.const 0))
   (func $mere_map_int_len (param $m i32) (result i32)
     (i32.load offset=8 (local.get $m)))
-  ;; Phase 39.A' #2: map_delete (int key 版)
+  ;; Phase 39.A' #2: map_delete (int-key variant)
   (func $mere_map_int_delete (param $m i32) (param $k i32) (result i32)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
     (local.set $len (i32.load offset=8 (local.get $m)))
@@ -4766,7 +4776,7 @@ let map_str_runtime_wasm = {|
     (i32.const 0))
   (func $mere_map_str_len (param $m i32) (result i32)
     (i32.load offset=8 (local.get $m)))
-  ;; Phase 39.A' #2: map_delete (str key 版) — key 一致したら keys/values を shift
+  ;; Phase 39.A' #2: map_delete (str-key variant) — when the key matches, shift keys/values
   (func $mere_map_str_delete (param $m i32) (param $k i32) (result i32)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
     (local.set $len (i32.load offset=8 (local.get $m)))
@@ -4953,8 +4963,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ) prog.decls;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
-  (* Phase 30.2c (DEFERRED §1.10): extract top-level non-fn let が skels の
-     fn body で参照されるものを Wasm `(global $name (mut i32))` にする。 *)
+  (* Phase 30.2c (DEFERRED §1.10): make those top-level non-fn lets that are
+     referenced from skels' fn bodies into Wasm `(global $name (mut i32))`. *)
   let fvs_used_in_skels_wasm =
     List.fold_left (fun acc s ->
       let fvs = free_vars s.sbody [s.sparam] in
@@ -5061,7 +5071,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      emit_instr "i32.const 0"
    | Ast.TyFloat ->
      (* Phase 34.3: float main result — load f64 from ptr, str_of_float via
-        env import (JS で OCaml string_of_float 風 format)、puts *)
+        env import (JS formats like OCaml's string_of_float), then puts *)
      emit_instr "f64.load offset=0 align=8";
      emit_instr "call $__lang_str_of_float";
      emit_instr "call $puts";
@@ -5074,7 +5084,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let local_count = !local_counter in
   let local_decl =
     if local_count = 0 then "" else
-      (* Phase 34.3: local_types で typed locals (i32 / f64) を declare *)
+      (* Phase 34.3: declare typed locals (i32 / f64) via local_types *)
       let types =
         if List.length !local_types = local_count then !local_types
         else List.init local_count (fun _ -> "i32")
@@ -5098,9 +5108,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   drain ();
   let anon_adapters = List.rev !anon_adapters in
-  (* Phase 39.A2: Inner-lifted fn 用 adapter を WAT として生成。
-     adapter は env_offset + arg を受けて、 env から caps を load し、
-     lifted fn を caps... + arg で call する。 *)
+  (* Phase 39.A2: generate adapters for Inner-lifted fns as WAT.
+     The adapter takes env_offset + arg, loads caps from env, and calls the
+     lifted fn with caps... + arg. *)
   let inner_lift_adapter_strs =
     List.rev_map (fun (lifted_name, captures, _idx) ->
       let load_caps =
@@ -5291,14 +5301,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       \  (import \"env\" \"write_file\" (func $__lang_write_file (param i32) (param i32) (result i32)))\n"
     else ""
   in
-  (* Phase 34.3: float runtime imports (str_of_float / float_of_str)。
-     conditional emit すると判定が要るので、常時 import (使われなくても害は無い)。 *)
+  (* Phase 34.3: float runtime imports (str_of_float / float_of_str).
+     Conditional emit would require a check, so always import (harmless
+     even when unused). *)
   let float_io_imports =
     "  (import \"env\" \"__lang_str_of_float\" (func $__lang_str_of_float (param f64) (result i32)))\n\
     \  (import \"env\" \"__lang_float_of_str\" (func $__lang_float_of_str (param i32) (result f64)))\n"
   in
-  (* Phase 34.4: libm host imports (sin / cos / tan / pow / atan2)。sqrt は
-     Wasm intrinsic で済むので host import 不要。 *)
+  (* Phase 34.4: libm host imports (sin / cos / tan / pow / atan2). sqrt
+     uses the Wasm intrinsic, so no host import is needed. *)
   let libm_imports =
     "  (import \"env\" \"__lang_sin\" (func $__lang_sin (param f64) (result f64)))\n\
     \  (import \"env\" \"__lang_cos\" (func $__lang_cos (param f64) (result f64)))\n\
@@ -5307,9 +5318,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     \  (import \"env\" \"__lang_atan2\" (func $__lang_atan2 (param f64) (param f64) (result f64)))\n"
   in
   let file_io_imports = file_io_imports ^ float_io_imports ^ libm_imports in
-  (* Phase 32.4 (C1 FFI): extern fn を env host imports として宣言。
-     str / bool / int / unit を全て i32 として表現。unit 引数は param なし、
-     unit return は result なし。 *)
+  (* Phase 32.4 (C1 FFI): declare extern fns as env host imports.
+     Represent str / bool / int / unit all as i32. Unit arguments produce
+     no param; unit return produces no result. *)
   let extern_imports =
     Hashtbl.fold (fun name ty acc ->
       let rec flatten t =
@@ -5359,8 +5370,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      the table is the authoritative source. *)
   let _ = !map_int_used and _ = !map_str_used in
   ignore map_int_runtime_wasm; ignore map_str_runtime_wasm;
-  (* Phase 15.12: vec_to_list / list_len helpers. tag 値は variant_tags
-     から codegen 時に取り出して baked-in. *)
+  (* Phase 15.12: vec_to_list / list_len helpers. Tag values are taken from
+     variant_tags at codegen time and baked-in. *)
   let cons_tag_v =
     try Hashtbl.find variant_tags "Cons" with Not_found -> 1
   in

@@ -45,29 +45,30 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 30.2 (DEFERRED §1.10 fix): top-level 非-fn let value 名を file-scope
-   C global として宣言、main 開始時に初期化。emit_expr Var "name" は通常の
-   c_safe_name に fall through し、file-scope global を参照する。 *)
+(* Phase 30.2 (DEFERRED §1.10 fix): declare top-level non-fn let value names as
+   file-scope C globals, initialized at the start of main. emit_expr Var "name"
+   falls through to the usual c_safe_name path and references the file-scope
+   global. *)
 let top_globals : (string, unit) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 32.2 (C1 FFI): extern fn 宣言。emit_expr の App handler が
-   App (Var name, arg) を直接 C 関数呼出に dispatch。 *)
+(* Phase 32.2 (C1 FFI): extern fn declarations. The App handler in emit_expr
+   dispatches App (Var name, arg) directly to a C function call. *)
 let extern_fn_decls : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 35.1 (DEFERRED §1.2 fix): builtin が first-class value 位置で
-   使われた時 (`let f = vec_new in f ()`) に生成する eta adapter の registry。
-   key = adapter name (例 "vec_new_int")、value = (builtin_name, ret_ty)。
-   emit_program で各 entry に static adapter 関数 + const 値を emit。 *)
+(* Phase 35.1 (DEFERRED §1.2 fix): registry of eta adapters generated when a
+   builtin is used in first-class value position (`let f = vec_new in f ()`).
+   key = adapter name (e.g. "vec_new_int"), value = (builtin_name, ret_ty).
+   emit_program emits a static adapter function + const value for each entry. *)
 let eta_adapters : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 38.C (DEFERRED §1.2 A2): multi-arg curried builtin が value 位置で
-   使われた時に、syntactic な fully eta-expanded Fun chain を synthesize して
-   返す。例えば `owned_vec_push : OwnedVec[int] -> int -> unit` を value 位置で
-   使うと、 `fn __arg0 -> fn __arg1 -> owned_vec_push __arg0 __arg1` を生成。
-   生成した AST は anonymous Fun adapter machinery (Phase 5.7-b) で closure 値
-   になり、 inner の nested App は direct-call fast path に乗る — per-builtin
-   の closure boilerplate を一切書かずに 1 つの synthesizer で全 multi-arg
-   curried builtin をサポートできる。 *)
+(* Phase 38.C (DEFERRED §1.2 A2): when a multi-arg curried builtin is used in
+   value position, synthesize and return a syntactically fully eta-expanded Fun
+   chain. For example, `owned_vec_push : OwnedVec[int] -> int -> unit` used in
+   value position generates `fn __arg0 -> fn __arg1 -> owned_vec_push __arg0 __arg1`.
+   The generated AST becomes a closure value via the anonymous Fun adapter
+   machinery (Phase 5.7-b), and the inner nested App hits the direct-call fast
+   path -- a single synthesizer supports all multi-arg curried builtins without
+   any per-builtin closure boilerplate. *)
 let synthesize_curried_eta (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
     : Ast.expr =
   let mk node ty = Ast.{ node; ty = Some ty; loc } in
@@ -130,9 +131,10 @@ let c_reserved_keywords =
    "_Thread_local"; "_Alignas"; "_Alignof"; "_Generic"; "_Noreturn";
    "main"]
 let c_safe_name (n : string) : string =
-  (* Phase 41: module-qualified name (`M.foo`) を C 識別子に変換。 `.` は
-     C で識別子に使えないので `__` に置換 (`M.foo` → `M__foo`)。 入れ子
-     module (`A.B.foo`) も同様に `A__B__foo` に flatten される。 *)
+  (* Phase 41: convert module-qualified name (`M.foo`) to a C identifier.
+     Since `.` is not allowed in C identifiers, replace it with `__`
+     (`M.foo` -> `M__foo`). Nested modules (`A.B.foo`) flatten similarly
+     to `A__B__foo`. *)
   let n =
     if String.contains n '.' then begin
       let b = Buffer.create (String.length n) in
@@ -213,10 +215,9 @@ let str_split_used = ref false
 let str_join_used = ref false
 let list_dir_used = ref false   (* Phase 44 *)
 
-(* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key は int / str
-   のみサポート、value は codegen の任意 concrete 型。線形スキャン。
-   キーは ty_tag、value は ty_tag で `mere_map_<K_tag>_<V_tag>` を
-   作る。 *)
+(* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key supports only
+   int / str; value can be any concrete type in codegen. Linear scan.
+   Builds `mere_map_<K_tag>_<V_tag>` using ty_tag for both key and value. *)
 let map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Substitute TyParam names → concrete types throughout `t`. *)
@@ -266,11 +267,11 @@ let inner_lifts_by_host : (string, (string, lifted_inner) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
 let current_host_fn : string ref = ref ""
 
-(* Phase 39.A2 (DEFERRED patterns.md §8): inner-lifted fn を value 位置で
-   使えるよう、 per-fn の env 構造体 + adapter 関数を一度だけ emit する。
-   emit_expr は c_type_of の前で定義されているため、 各 use 位置で
-   (lifted_name, captures, arg_ty, ret_ty) を pending list に積み、
-   emit_program で typedef + adapter 本体を生成する。 *)
+(* Phase 39.A2 (DEFERRED patterns.md §8): to allow an inner-lifted fn to be
+   used in value position, emit a per-fn env struct + adapter function once.
+   Since emit_expr is defined before c_type_of, each use site pushes
+   (lifted_name, captures, arg_ty, ret_ty) onto a pending list, and emit_program
+   generates the typedef + adapter body. *)
 let inner_lift_closures_emitted : (string, unit) Hashtbl.t = Hashtbl.create 4
 let inner_lift_closure_pending :
   (string * (string * Ast.ty) list * Ast.ty * Ast.ty) list ref = ref []
@@ -357,10 +358,10 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
   | Ast.TyRef (_, _, inner) -> ty_is_concrete inner
-  | Ast.TyFloat -> true   (* Phase 43.1 fix: TyFloat is fully concrete, the previous
-                              `false` was a typo that prevented `float`-参の fn を fn_decl
-                              として emit する path に乗らず、 call site のみ emit されて
-                              compile fail していた *)
+  | Ast.TyFloat -> true   (* Phase 43.1 fix: TyFloat is fully concrete; the previous
+                              `false` was a typo that prevented a fn taking a `float` arg
+                              from being emitted via the fn_decl path, so only the call
+                              site was emitted and compilation failed *)
   | Ast.TyVar _ | Ast.TyParam _ -> false
 
 let rec ty_tag (t : Ast.ty) : string =
@@ -369,7 +370,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit"
-  | Ast.TyFloat -> "float"   (* Phase 43.1: float を fn signature tag に使えるよう *)
+  | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used in fn signature tags *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) ->
     (* Recursive arrow → use the same naming used by closure_struct_name. *)
@@ -377,17 +378,18 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyCon (name, []) -> name
   | Ast.TyCon (name, args) ->
     (* Polymorphic instantiation (e.g., `int list` → `list_int`).
-       Phase 15.1: Vec[R, T] の region marker (TyRef _ R TyUnit) は
-       region 名だけを tag に。 *)
+       Phase 15.1: for Vec[R, T]'s region marker (TyRef _ R TyUnit),
+       use only the region name as the tag. *)
     name ^ "_" ^ String.concat "_" (List.map ty_tag args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
-    (* Region marker — region 名そのものを tag に使う。 *)
+    (* Region marker — use the region name itself as the tag. *)
     r
   | Ast.TyRef (_, _, inner) ->
-    (* Phase 19.x: borrow 型 `&[mode] R T` の tag は inner T の tag をそのまま
-       使う。mode / region は静的情報のみ。typer の auto-deref で field access
-       も透過するので、tag レベルでも T と区別しない方が、後段の lookup
-       (closure_struct_name 等) が一致して都合がよい。 *)
+    (* Phase 19.x: for borrow type `&[mode] R T`, the tag uses the inner T's
+       tag as-is. mode / region are purely static info. The typer's auto-deref
+       makes field access transparent, so not distinguishing from T at the tag
+       level is convenient — downstream lookups (closure_struct_name, etc.)
+       then match cleanly. *)
     ty_tag inner
   | other ->
     raise (Codegen_error (Loc.dummy,
@@ -409,8 +411,9 @@ let mangled_inst_name (base : string) (arrow : Ast.ty) : string =
     | _ -> List.rev (t :: acc)
   in
   let tys = collect_tys arrow [] in
-  (* Phase 41: base が module-qualified (`Json.rev_aux`) なら C identifier 化
-     してから mono suffix を付ける (`Json__rev_aux__list_json__...`)。 *)
+  (* Phase 41: if base is module-qualified (`Json.rev_aux`), convert it to a
+     C identifier first, then append the mono suffix
+     (`Json__rev_aux__list_json__...`). *)
   c_safe_name base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
 
 (* Specialized struct name for a polymorphic variant at given args. *)
@@ -575,9 +578,10 @@ let pattern_vars_with_types (p : Ast.pattern) (scrut_ty : Ast.ty)
        | Some pt -> go sub pt
        | None -> [])
     | Ast.P_record (_, fs) ->
-      (* Record の field type lookup は payload_ty_for_ctor 経由ではないので
-         省略。最低限の closure-capture 修正には field 単位の正確な型は
-         不要 (field 値そのもの) なので scrut_ty を流用する保守的実装。 *)
+      (* Record field type lookup does not go through payload_ty_for_ctor, so
+         skip it. The minimum closure-capture fix doesn't need a precise
+         per-field type (the field value itself suffices), so conservatively
+         reuse scrut_ty. *)
       List.concat_map (fun (_, sub) -> go sub t) fs
   in
   go p scrut_ty
@@ -923,7 +927,7 @@ let map_kv_tags_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * string =
          in
          if not (is_key_supported k_ty) then
            raise (Codegen_error (loc,
-             "Map key type must be int / bool / str / tuple / record / variant in C codegen (Phase 15.10〜15.16)"));
+             "Map key type must be int / bool / str / tuple / record / variant in C codegen (Phase 15.10-15.16)"));
          let k_tag = ty_tag k_ty in
          let v_tag = ty_tag v_ty in
          let key = k_tag ^ "__" ^ v_tag in
@@ -981,8 +985,8 @@ let rec emit_expr (e : Ast.expr) : string =
   match e.node with
   | Ast.Int_lit n -> string_of_int n
   | Ast.Float_lit f ->
-    (* Phase 34.1: emit as C double literal。`%.17g` で round-trip 安全。
-       NaN / Infinity は C 標準の NAN / INFINITY マクロ。 *)
+    (* Phase 34.1: emit as C double literal. `%.17g` is safe for round-trip.
+       NaN / Infinity use the standard C NAN / INFINITY macros. *)
     if f <> f then "(0.0/0.0)"  (* NaN *)
     else if f = infinity then "(1.0/0.0)"
     else if f = neg_infinity then "(-1.0/0.0)"
@@ -1002,9 +1006,9 @@ let rec emit_expr (e : Ast.expr) : string =
     (* Vec builtins are interpreter-only (Phase 12.1). Reject early in
        codegen with a clear message rather than emitting code that
        fails at C compile time with undeclared-identifier errors. *)
-    (* Phase 15.1: vec_new / vec_push / vec_get / vec_len は App
-       handler の special-case で直接 emit する。first-class value 用法
-       (let f = vec_new in ...) はまだ未対応で、ここで reject される。 *)
+    (* Phase 15.1: vec_new / vec_push / vec_get / vec_len are emitted
+       directly via App handler special cases. First-class value usage
+       (let f = vec_new in ...) is not yet supported and is rejected here. *)
     (* Phase 35.1: nullary factory builtins as first-class value.
        eta-expand to a closure adapter (registered in eta_adapters Hashtbl,
        emitted at file scope in emit_program). *)
@@ -1072,8 +1076,9 @@ let rec emit_expr (e : Ast.expr) : string =
     (* Phase 38.C (DEFERRED §1.2 A2): try eta-expansion before rejecting.
        If e.ty is a concrete arrow chain, synthesize the curried Fun chain
        and recurse — the resulting AST goes through the existing anonymous
-       Fun adapter + direct-call fast paths. 38.C-1 で owned_vec_push の
-       spike を確認後、 38.C-2 で 2-arg curried collection accessor 群へ展開。 *)
+       Fun adapter + direct-call fast paths. After confirming the
+       owned_vec_push spike in 38.C-1, 38.C-2 extends this to the
+       group of 2-arg curried collection accessors. *)
     let is_phase38c_target =
       (* 2-arg curried (38.C-1 / 38.C-2) *)
       name = "owned_vec_push" || name = "owned_vec_get"
@@ -1092,10 +1097,10 @@ let rec emit_expr (e : Ast.expr) : string =
          | _ -> None)
       | _ -> None
     in
-    (* Phase 38.A1: 単引数 builtin (int_of_str / str_len / not / ord 等) も
-       value 位置で使えるよう eta synthesis 対象に。 同じ synthesize_curried_eta
-       が arity 1 でも動くので、 各 builtin の直接呼出 fast path (line 1614 等)
-       に inner App が乗る。 *)
+    (* Phase 38.A1: also make single-arg builtins (int_of_str / str_len / not /
+       ord etc.) eta-synthesis targets so they can be used in value position.
+       The same synthesize_curried_eta works for arity 1, so the inner App
+       rides each builtin's direct-call fast path (e.g. line 1614). *)
     let is_single_arg_value_builtin =
       name = "int_of_str" || name = "str_of_int"
       || name = "str_len" || name = "str_rev" || name = "str_trim"
@@ -1119,7 +1124,7 @@ let rec emit_expr (e : Ast.expr) : string =
            (name ^ " as a value: type is polymorphic, can't monomorphize (Phase 38.C-1 MVP: use a fn wrapper or constrain types at use site)"))
     else if not is_shadowed && is_curried_collection_builtin then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.1〜15.10: vec_* / owned_vec_* / strbuf_* / map_* の curried 多引数 builtin は直接 application のみ対応、first-class value 用法は Phase 38.C で進行中、 現状 owned_vec_push のみ spike 実装済)")
+        (name ^ " as a value (Phase 15.1-15.10: curried multi-arg builtins vec_* / owned_vec_* / strbuf_* / map_* support direct application only; first-class value use is in progress under Phase 38.C, currently only owned_vec_push is spike-implemented)")
     else if not is_shadowed && is_single_arg_value_builtin then
       (match try_eta () with
        | Some s -> s
@@ -1128,8 +1133,8 @@ let rec emit_expr (e : Ast.expr) : string =
            (name ^ " as a value: type is polymorphic, can't monomorphize (Phase 38.A1 MVP: use a fn wrapper `fn x -> " ^ name ^ " x` or constrain types at use site)"))
     else if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.loc
-        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)")
-    (* Phase 34.1: float constants — interp 側の builtin と完全一致 *)
+        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list support direct application only)")
+    (* Phase 34.1: float constants — exactly matches the interp-side builtins *)
     else if not is_shadowed && name = "pi" then
       "(3.14159265358979323846)"
     else if not is_shadowed && name = "e" then
@@ -1142,10 +1147,10 @@ let rec emit_expr (e : Ast.expr) : string =
      | None ->
        if Hashtbl.mem toplevel_fn_names name then c_safe_name name ^ "_as_value"
        else if Hashtbl.mem inner_lifts name then
-         (* Phase 39.A2 (DEFERRED patterns.md §8): inner-lifted fn を value
-            位置で使えるよう materialize。 env 構造体に capture を詰めて
-            closure 値 `{env_ptr, &adapter_fn}` を返す。 adapter は env を
-            unpack して lifted_name(cap1, ..., arg) を呼ぶ。 *)
+         (* Phase 39.A2 (DEFERRED patterns.md §8): materialize the inner-lifted
+            fn so it can be used in value position. Pack the captures into an
+            env struct and return the closure value `{env_ptr, &adapter_fn}`.
+            The adapter unpacks env and calls lifted_name(cap1, ..., arg). *)
          let li = Hashtbl.find inner_lifts name in
          (match e.Ast.ty with
           | Some t ->
@@ -1155,15 +1160,15 @@ let rec emit_expr (e : Ast.expr) : string =
                let ret_ty = Ast.walk ret_ty in
                let env_struct_name = li.lifted_name ^ "_env" in
                let adapter_name = li.lifted_name ^ "_inner_closure_fn" in
-               (* per-fn で 1 度だけ pending に積む (emit_program で c_type_of
-                  経由で env typedef + adapter 本体を生成) *)
+               (* Push once per fn onto the pending list (emit_program then
+                  generates the env typedef + adapter body via c_type_of) *)
                if not (Hashtbl.mem inner_lift_closures_emitted li.lifted_name) then begin
                  Hashtbl.add inner_lift_closures_emitted li.lifted_name ();
                  inner_lift_closure_pending :=
                    (li.lifted_name, li.captures, arg_ty, ret_ty)
                    :: !inner_lift_closure_pending
                end;
-               (* 使用位置: env alloc + 各 capture の現在値を store + closure 値 *)
+               (* Use site: env alloc + store the current value of each capture + closure value *)
                let closure_struct = closure_struct_name arg_ty ret_ty in
                let store_caps =
                  String.concat " "
@@ -1176,9 +1181,9 @@ let rec emit_expr (e : Ast.expr) : string =
                       Printf.sprintf "__env_local->%s = %s;" (c_safe_name n) v)
                       li.captures)
                in
-               (* GCC statement expression: 最後の expression が値、
-                  semicolon は問題なし。 0-capture でも store_caps が空文字
-                  なら ` ` の隙間が入るだけで構文 OK。 *)
+               (* GCC statement expression: the last expression is the value,
+                  semicolons are fine. Even with 0 captures, if store_caps is
+                  the empty string we just get an extra ` ` gap — still syntactically OK. *)
                Printf.sprintf
                  "({ %s* __env_local = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s(%s){.env = __env_local, .fn = %s}; })"
                  env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
@@ -1346,9 +1351,9 @@ let rec emit_expr (e : Ast.expr) : string =
              "nested pattern in let-tuple not supported in C codegen subset \
               — use `match` for non-flat destructuring"))
        ) ps in
-       (* Phase 30.1 (DEFERRED §1.11 fix): tuple destructure も同様に
-          env_subst から shadow 名を消す。`let (v, toks) = ... toks` で
-          新 toks が closure env の古い toks を覆い隠す。 *)
+       (* Phase 30.1 (DEFERRED §1.11 fix): similarly, remove shadowed names
+          from env_subst for tuple destructure. In `let (v, toks) = ... toks`
+          the new toks shadows the old toks in the closure env. *)
        let shadow_names =
          List.filter_map (fun (n_opt, _, _) -> n_opt) bindings_info
        in
@@ -1501,9 +1506,9 @@ let rec emit_expr (e : Ast.expr) : string =
         "({ %s* __env = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s (%s){.env = __env, .fn = %s}; })"
         env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
-    (* Phase 32.6 (C1 FFI multi-arg): curried App chain の head が extern fn
-       なら、全引数を collect して direct C call に変換。1-arg は collect [a]
-       で、N-arg は collect [a1; ...; aN] で同じ path を通る。 *)
+    (* Phase 32.6 (C1 FFI multi-arg): if the head of a curried App chain is an
+       extern fn, collect all arguments and convert to a direct C call. 1-arg
+       collects [a], N-arg collects [a1; ...; aN] — both go through the same path. *)
     let rec collect_extern e acc =
       match e.Ast.node with
       | Ast.App (f', a) -> collect_extern f' (a :: acc)
@@ -1541,9 +1546,9 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "__lang_str_index_of(%s, %s)"
          (emit_expr h_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e) ->
-       (* Phase 31.0: str_compare a b — interp の `compare s t` (OCaml) は
-          -1/0/1 を返す。strcmp の生値を sign-normalize して 3 backend で
-          挙動を揃える。 *)
+       (* Phase 31.0: str_compare a b — interp's `compare s t` (OCaml) returns
+          -1/0/1. Sign-normalize strcmp's raw value to align behavior across
+          the 3 backends. *)
        Printf.sprintf
          "({ int __r = strcmp(%s, %s); __r < 0 ? -1 : (__r > 0 ? 1 : 0); })"
          (emit_expr a_e) (emit_expr arg)
@@ -1583,7 +1588,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "__lang_str_of_float(%s)" (emit_expr arg)
      | Ast.Var "float_of_str" ->
        Printf.sprintf "(atof(%s))" (emit_expr arg)
-     (* Phase 34.4: libm math functions — clang -lm で自動リンク *)
+     (* Phase 34.4: libm math functions — auto-linked via clang -lm *)
      | Ast.Var "sqrt" ->
        Printf.sprintf "sqrt(%s)" (emit_expr arg)
      | Ast.Var "sin" ->
@@ -1644,7 +1649,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "({ int __a = (%s); int __b = (%s); __a > __b ? __a : __b; })"
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "clamp"; _ }, lo_e); _ }, hi_e) ->
-       (* Phase 36: clamp lo hi x — curried 3-arg、interp と同じ順 *)
+       (* Phase 36: clamp lo hi x — curried 3-arg, same order as interp *)
        Printf.sprintf "({ int __lo = (%s); int __hi = (%s); int __x = (%s); __x < __lo ? __lo : (__x > __hi ? __hi : __x); })"
          (emit_expr lo_e) (emit_expr hi_e) (emit_expr arg)
      | Ast.Var "chr" ->
@@ -1673,31 +1678,31 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "read_file" ->
        Printf.sprintf "__lang_read_file(%s)" (emit_expr arg)
      | Ast.Var "list_dir" ->
-       (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`)、
-          interp と diff = 0。 list_str を返すので gating flag を立てる *)
+       (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
+          with interp. Returns list_str, so set the gating flag *)
        list_dir_used := true;
        Printf.sprintf "__lang_list_dir(%s)" (emit_expr arg)
      | Ast.Var "mkdir_p" ->
-       (* Phase 44: mkdir -p 相当、 既存ならスキップ *)
+       (* Phase 44: equivalent to mkdir -p; skip if already exists *)
        Printf.sprintf "__lang_mkdir_p(%s)" (emit_expr arg)
      | Ast.Var "file_mtime" ->
-       (* Phase 44.6: stat(path).st_mtime を float (秒) で返す *)
+       (* Phase 44.6: return stat(path).st_mtime as float (seconds) *)
        Printf.sprintf "__lang_file_mtime(%s)" (emit_expr arg)
      | Ast.Var "sleep_ms" ->
-       (* Phase 44.6: usleep(ms * 1000) を unit (0) で返す *)
+       (* Phase 44.6: usleep(ms * 1000), returning unit (0) *)
        Printf.sprintf "__lang_sleep_ms(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
-       (* Phase 22.3: char_at s i — curried、static 256-entry table 経由。 *)
+       (* Phase 22.3: char_at s i — curried, via a static 256-entry table *)
        Printf.sprintf "__lang_char_at(%s, %s)"
          (emit_expr s_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e) ->
-       (* Phase 22.5: substring s start end_ — 3-arg curried。 *)
+       (* Phase 22.5: substring s start end_ — 3-arg curried *)
        Printf.sprintf "__lang_substring(%s, %s, %s)"
          (emit_expr s_e) (emit_expr start_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e) ->
-       (* Phase 22.5: try_or fn default — setjmp で fail を catch、
-          失敗時は default を返す。__lang_fail_impl は jmpbuf set 時に
-          longjmp、unset 時は abort。nested 用に save/restore。 *)
+       (* Phase 22.5: try_or fn default — catch fail via setjmp and return
+          default on failure. __lang_fail_impl does longjmp when jmpbuf is set,
+          abort when unset. Save/restore to support nesting. *)
        let default_c = emit_expr arg in
        let fn_invoke_c =
          Printf.sprintf "({ __auto_type __c = %s; __c.fn(__c.env, 0); })"
@@ -1714,9 +1719,9 @@ let rec emit_expr (e : Ast.expr) : string =
              memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
              __res; })"
          default_c fn_invoke_c
-     (* Phase 30.0 (DEFERRED §1.12 fix): user-defined fn が同名で存在する
-        場合は builtin ディスパッチを skip して通常の user fn call path に
-        fall through。LLVM Phase 25.7 の C 版。 *)
+     (* Phase 30.0 (DEFERRED §1.12 fix): if a user-defined fn exists with the
+        same name, skip builtin dispatch and fall through to the regular user
+        fn call path. C version of LLVM Phase 25.7. *)
      | Ast.Var "is_digit" when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
        Printf.sprintf "__lang_is_digit(%s)" (emit_expr arg)
      | Ast.Var "is_alpha" when not (Hashtbl.mem toplevel_fn_names "is_alpha") ->
@@ -1724,19 +1729,20 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "is_space" when not (Hashtbl.mem toplevel_fn_names "is_space") ->
        Printf.sprintf "__lang_is_space(%s)" (emit_expr arg)
      | Ast.Var "str_of_int" ->
-       (* Phase 22.3: str_of_int は show_int と同じ。alias として emit。 *)
+       (* Phase 22.3: str_of_int is the same as show_int. Emit as an alias. *)
        Printf.sprintf "show_int(%s)" (emit_expr arg)
      | Ast.Var "int_of_str" ->
-       (* Phase 22.5: int_of_str s — atoi 経由 (符号 + digits)。
-          fail handling は省略 (atoi は不正入力で 0 を返す silent failure)。 *)
+       (* Phase 22.5: int_of_str s — via atoi (sign + digits). Fail handling
+          is omitted (atoi silently returns 0 on invalid input). *)
        Printf.sprintf "atoi(%s)" (emit_expr arg)
      | Ast.Var "str_unescape" ->
        Printf.sprintf "__lang_str_unescape(%s)" (emit_expr arg)
      | Ast.Var "fail" ->
-       (* Phase 22.4/22.5: fail msg — noreturn helper + 文脈期待型に
-          応じた default literal を後置。primitive 型は専用 helper、
-          非 primitive (tuple / record / variant) は inline c_type_of で
-          型名を取って (TY){0} compound literal を後置。 *)
+       (* Phase 22.4/22.5: fail msg — noreturn helper followed by a default
+          literal chosen based on the expected context type. Primitive types
+          use dedicated helpers; non-primitive (tuple / record / variant)
+          types resolve the type name via inline c_type_of and append a
+          (TY){0} compound literal. *)
        let result_ty =
          match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
        in
@@ -1788,11 +1794,11 @@ let rec emit_expr (e : Ast.expr) : string =
        metrics_used := true;
        Printf.sprintf "__mere_mk_metrics(%s)" (emit_expr arg)
      | Ast.Var "vec_new" ->
-       (* Phase 15.1/15.2: vec_new () — region と要素型を result type の
-          TyCon args から取り出す。region = __heap なら default region、
-          それ以外は __region_<R>。要素型を ty_tag でサニタイズし、
-          `mere_vec_<tag>_new` の helper 名にする (登録は c_type_of に
-          委ねる — c_type_of がここでも先に呼ばれる)。 *)
+       (* Phase 15.1/15.2: vec_new () — extract the region and element type
+          from the result type's TyCon args. region = __heap uses the default
+          region; otherwise use __region_<R>. Sanitize the element type via
+          ty_tag and build the helper name `mere_vec_<tag>_new` (registration
+          is delegated to c_type_of — c_type_of runs first here too). *)
        let (region_name, elem_tag) =
          match e.Ast.ty with
          | Some t ->
@@ -1818,8 +1824,8 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "mere_vec_%s_len(%s)" elem_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
        (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
-          ここの outer App は inner = App (Var "vec_push", vec_e)、
-          arg = x。返り値は unit (int 0)。 *)
+          The outer App here has inner = App (Var "vec_push", vec_e) and
+          arg = x. Return value is unit (int 0). *)
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_vec_%s_push(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
@@ -1908,9 +1914,9 @@ let rec emit_expr (e : Ast.expr) : string =
           } 0; })"
          (emit_expr vec_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e) ->
-       (* Phase 15.6: vec_map v f — region-preserving 新 Vec を返す。
-          v の要素型 T と結果 Vec の要素型 U はそれぞれ AST から取り出す。
-          GCC/Clang の statement expression で inline emit。 *)
+       (* Phase 15.6: vec_map v f — returns a region-preserving new Vec.
+          Extract v's element type T and the result Vec's element type U
+          from the AST. Emit inline via a GCC/Clang statement expression. *)
        let t_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        let u_tag = vec_elem_tag_of e.Ast.ty e.Ast.loc in
        Printf.sprintf
@@ -1921,8 +1927,8 @@ let rec emit_expr (e : Ast.expr) : string =
           } __new; })"
          (emit_expr vec_e) (emit_expr arg) u_tag u_tag u_tag t_tag
      | Ast.Var "owned_vec_new" ->
-       (* Phase 15.7: owned_vec_new () — heap-allocated。要素型 T は
-          結果の OwnedVec[T] から取り出す。 *)
+       (* Phase 15.7: owned_vec_new () — heap-allocated. Extract the element
+          type T from the resulting OwnedVec[T]. *)
        let elem_tag = owned_vec_elem_tag_of e.Ast.ty e.Ast.loc in
        Printf.sprintf "mere_owned_vec_%s_new()" elem_tag
      | Ast.Var "owned_vec_len" ->
@@ -1937,10 +1943,10 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "mere_owned_vec_%s_get(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.Var "vec_to_list" ->
-       (* Phase 15.12: vec_to_list v — region Vec[R, T] を `T list` に
-          deep copy。インラインで Cons chain を bottom-up に構築する。
-          要素型 T、result の mono name (`list_<T>`)、Cons/Nil の tag、
-          Cons の tuple struct 名は全て codegen 時に解決。 *)
+       (* Phase 15.12: vec_to_list v — deep-copy region Vec[R, T] into a
+          `T list`. Build the Cons chain inline, bottom-up. The element type
+          T, result mono name (`list_<T>`), Cons/Nil tags, and Cons tuple
+          struct name are all resolved at codegen time. *)
        let t_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        let t_ty = Hashtbl.find vec_instances t_tag in
        let result_ty =
@@ -1990,8 +1996,8 @@ let rec emit_expr (e : Ast.expr) : string =
          t_tag
          |> fun s -> ignore tup_name; s
      | Ast.Var "vec_to_owned" ->
-       (* Phase 15.7: vec_to_owned v — region 内 Vec を heap OwnedVec に
-          deep copy。要素型 T は v から取り出す。 *)
+       (* Phase 15.7: vec_to_owned v — deep-copy a Vec in a region into a heap
+          OwnedVec. Extract the element type T from v. *)
        let t_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        (* Result is OwnedVec[T] — register that too. *)
        (try
@@ -2006,9 +2012,9 @@ let rec emit_expr (e : Ast.expr) : string =
           } __new; })"
          (emit_expr arg) t_tag t_tag t_tag
      | Ast.Var "len" ->
-       (* Phase 15.11: len は arg.ty に基づくコンパイル時 dispatch。
-          Vec / OwnedVec / StrBuf / Map → 既存の _len ヘルパに routing、
-          str → strlen、tuple → 静的 arity 定数。 *)
+       (* Phase 15.11: len dispatches at compile time based on arg.ty.
+          Vec / OwnedVec / StrBuf / Map → route to the existing _len helpers;
+          str → strlen; tuple → static arity constant. *)
        let arg_ty =
          match arg.Ast.ty with
          | Some t -> Ast.walk t
@@ -2050,7 +2056,7 @@ let rec emit_expr (e : Ast.expr) : string =
           unsupported e.loc
             "len: arg type has no codegen-defined length (use vec_len / strbuf_len / map_len / str_len for specific types)")
      | Ast.Var "map_new" ->
-       (* Phase 15.10: map_new () — region と (K, V) を result type から取り出す。 *)
+       (* Phase 15.10: map_new () — extract region and (K, V) from the result type. *)
        let (k_tag, v_tag) = map_kv_tags_of e.Ast.ty e.Ast.loc in
        let region_name =
          match e.Ast.ty with
@@ -2077,12 +2083,12 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "mere_map_%s_%s_has(%s, %s)"
          k_tag v_tag (emit_expr m_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "map_delete"; _ }, m_e) ->
-       (* Phase 39.A' #2: map_delete m k — runtime helper を呼ぶ。 *)
+       (* Phase 39.A' #2: map_delete m k — call the runtime helper. *)
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_delete(%s, %s)"
          k_tag v_tag (emit_expr m_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e) ->
-       (* map_set m k v : outer arg = v、inner App arg = k、innermost = m *)
+       (* map_set m k v : outer arg = v, inner App arg = k, innermost = m *)
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_set(%s, %s, %s)"
          k_tag v_tag (emit_expr m_e) (emit_expr k_e) (emit_expr arg)
@@ -2100,8 +2106,8 @@ let rec emit_expr (e : Ast.expr) : string =
           } 0; })"
          (emit_expr m_e) (emit_expr arg)
      | Ast.Var "strbuf_new" ->
-       (* Phase 15.9: strbuf_new () — region は result type の TyCon arg
-          から取り出す。Vec[R, T] と同じ慣例。 *)
+       (* Phase 15.9: strbuf_new () — extract the region from the result type's
+          TyCon arg. Same convention as Vec[R, T]. *)
        strbuf_used := true;
        let region_name =
          match e.Ast.ty with
@@ -2127,8 +2133,8 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "mere_strbuf_push(%s, %s)"
          (emit_expr sb_e) (emit_expr arg)
      | Ast.Var "owned_vec_to_vec" ->
-       (* Phase 15.7: owned_vec_to_vec o — heap OwnedVec を region Vec に
-          deep copy。region は結果 Vec の TyRef marker から取り出す。 *)
+       (* Phase 15.7: owned_vec_to_vec o — deep-copy a heap OwnedVec into a
+          region Vec. Extract the region from the result Vec's TyRef marker. *)
        let t_tag = owned_vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        let region_name =
          match e.Ast.ty with
@@ -2155,9 +2161,10 @@ let rec emit_expr (e : Ast.expr) : string =
           } __new; })"
          (emit_expr arg) t_tag region_var t_tag t_tag
      | Ast.App ({ node = Ast.Var "vec_filter"; _ }, vec_e) ->
-       (* Phase 15.6: vec_filter v f — region-preserving、predicate true の
-          要素のみ残す。要素型 T は v と結果で同じ。__auto_type で C 型
-          解決を compiler に委ねる (c_type_of がここから見えない都合)。 *)
+       (* Phase 15.6: vec_filter v f — region-preserving; keep only elements
+          where the predicate is true. Element type T is the same for v and
+          the result. Use __auto_type to defer C type resolution to the
+          compiler (since c_type_of is not visible from here). *)
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf
          "({ __auto_type __vc = %s; __auto_type __cl = %s; \
@@ -2205,11 +2212,12 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
          (emit_expr f) (emit_expr arg)))
   | Ast.Constr (raw_name, arg_opt) ->
-    (* Phase 41 + 42: alias_ctor は `Traffic.Red` も Typer.constructors に
-       register するので、 qualified raw_name を **先に** lookup する (2 module
-       が同名 ctor `Red` を持つときに Light/Red と Color/Red を disambiguate
-       するため)。 raw lookup miss なら canonical (`Red`) を fallback。
-       variant_tags は bare 名 key だけなので canonical を使う。 *)
+    (* Phase 41 + 42: since alias_ctor also registers `Traffic.Red` in
+       Typer.constructors, look up the qualified raw_name **first** (to
+       disambiguate Light/Red vs Color/Red when two modules share a ctor
+       name `Red`). If the raw lookup misses, fall back to the canonical
+       name (`Red`). variant_tags is keyed only by bare names, so use the
+       canonical name there. *)
     let info =
       match Hashtbl.find_opt Typer.constructors raw_name with
       | Some i -> i
@@ -2397,8 +2405,8 @@ let rec emit_expr (e : Ast.expr) : string =
     end
     else begin
       (* Regular record literal. Use mono name if polymorphic.
-         Phase 42: M-qualified record 名 (`Shapes.Rect`) は c_safe_name で
-         C identifier 化 (`Shapes__Rect`)。 *)
+         Phase 42: convert M-qualified record names (`Shapes.Rect`) to a
+         C identifier via c_safe_name (`Shapes__Rect`). *)
       let cstruct =
         if Hashtbl.mem polymorphic_records name then
           match e.Ast.ty with
@@ -2455,8 +2463,8 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     (Printf.sprintf "(strcmp((%s), %s) == 0)" v_c (Ast.escape_string s), "")
   | Ast.P_unit -> ("1", "")
   | Ast.P_constr (raw_cname, sub_opt) ->
-    (* Phase 41 + 42: qualified ctor pattern (`| M.Foo -> ...`)。
-       variant_tags は bare 名 key なので canonical で lookup。 *)
+    (* Phase 41 + 42: qualified ctor pattern (`| M.Foo -> ...`).
+       variant_tags is keyed by bare names, so look up using canonical. *)
     let cname = Ast.canonical_ctor raw_cname in
     let tag =
       try Hashtbl.find variant_tags cname
@@ -2540,10 +2548,10 @@ type fn_decl = {
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("Vec", args) ->
-    (* Phase 15.2: Vec[R, T] — T を concrete に展開して `mere_vec_<tag>*`。
-       args は walk されていないので、ここで walk してから判定。
-       要素型は ty_tag でサニタイズし、`vec_instances` に登録 (runtime
-       生成は emit_program 側で一括 emit)。 *)
+    (* Phase 15.2: Vec[R, T] — expand T to a concrete type and produce
+       `mere_vec_<tag>*`. args have not been walked yet, so walk them here
+       before inspection. Sanitize the element type via ty_tag and register
+       it in `vec_instances` (runtime generation is batched in emit_program). *)
     (match List.map Ast.walk args with
      | [_; elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
@@ -2552,10 +2560,11 @@ let rec c_type_of (t : Ast.ty) : string =
        "mere_vec_" ^ tag ^ "*"
      | _ ->
        raise (Codegen_error (Loc.dummy,
-         "unsupported in C codegen subset: Vec[R, <unresolved>] (element type must be concrete; tyvar に残った場合は monomorphize 失敗)")))
+         "unsupported in C codegen subset: Vec[R, <unresolved>] (element type must be concrete; monomorphize failed if a tyvar remains)")))
   | Ast.TyCon ("OwnedVec", args) ->
-    (* Phase 15.7: OwnedVec[T] — heap-allocated、要素型 T を walk して
-       `mere_owned_vec_<tag>*` を返す。Vec[R, T] と並列の monomorphize。 *)
+    (* Phase 15.7: OwnedVec[T] — heap-allocated. Walk the element type T and
+       return `mere_owned_vec_<tag>*`. Monomorphization runs in parallel with
+       Vec[R, T]. *)
     (match List.map Ast.walk args with
      | [elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
@@ -2566,13 +2575,13 @@ let rec c_type_of (t : Ast.ty) : string =
        raise (Codegen_error (Loc.dummy,
          "unsupported in C codegen subset: OwnedVec[<unresolved>] (element type must be concrete)")))
   | Ast.TyCon ("StrBuf", _) ->
-    (* Phase 15.9: StrBuf[R] — single non-polymorphic type、`mere_strbuf*`。
-       region marker は使わず (Vec と違い)、struct 内 region ptr で
-       追跡。 *)
+    (* Phase 15.9: StrBuf[R] — single non-polymorphic type, `mere_strbuf*`.
+       Unlike Vec, the region marker is not used; tracking is done via a
+       region ptr inside the struct. *)
     strbuf_used := true;
     "mere_strbuf*"
   | Ast.TyCon ("Map", args) ->
-    (* Phase 15.10/15.14/15.15: Map[R, K, V] — per-(K, V) monomorphize。
+    (* Phase 15.10/15.14/15.15: Map[R, K, V] — per-(K, V) monomorphize.
        K = int / bool / str / tuple / record / nullary variant. *)
     (match List.map Ast.walk args with
      | [_; k_ty; v_ty]
@@ -2596,7 +2605,7 @@ let rec c_type_of (t : Ast.ty) : string =
        in
        if not (is_key_supported k_ty) then
          raise (Codegen_error (Loc.dummy,
-           "Map key type must be int / bool / str / tuple / record / variant in C codegen (Phase 15.10〜15.16)"));
+           "Map key type must be int / bool / str / tuple / record / variant in C codegen (Phase 15.10-15.16)"));
        let key = k_tag ^ "__" ^ v_tag in
        if not (Hashtbl.mem map_instances key) then
          Hashtbl.add map_instances key (k_ty, v_ty);
@@ -2622,8 +2631,8 @@ let rec c_type_of (t : Ast.ty) : string =
     (* Polymorphic record instantiation. *)
     mono_record_name name (List.map Ast.walk args)
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
-    (* Monomorphic user-declared record type. Phase 42: M-qualified の場合
-       `Shapes.Rect` を C identifier `Shapes__Rect` に変換。 *)
+    (* Monomorphic user-declared record type. Phase 42: for M-qualified
+       names, convert `Shapes.Rect` to the C identifier `Shapes__Rect`. *)
     c_safe_name name
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_variants name ->
     (* Polymorphic variant instantiation — pick the specialized name
@@ -2631,9 +2640,10 @@ let rec c_type_of (t : Ast.ty) : string =
        name is the ptr typedef; for non-recursive it's the struct. *)
     mono_variant_name name (List.map Ast.walk args)
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.types name ->
-    (* Monomorphic user-declared variant type. Phase 42: M-qualified type 名
-       (将来想定) も sanitize する。 現状 variant alias は parser 側で bare
-       名 (Light) に正規化されるが、 record と同様に防御的に通す。 *)
+    (* Monomorphic user-declared variant type. Phase 42: also sanitize any
+       M-qualified type name (anticipated for future). Currently variant
+       aliases are normalized to the bare name (Light) by the parser, but
+       we run them through defensively just like records. *)
     c_safe_name name
   | other ->
     raise (Codegen_error (Loc.dummy,
@@ -3209,8 +3219,8 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         subst_variants params args vs
       else
         Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
-          (* Phase 41: alias_ctor が `Json.JNull` も registers するので、
-             show fn の iteration では canonical bare name のみ採用して重複を避ける。 *)
+          (* Phase 41: since alias_ctor also registers `Json.JNull`, the show
+             fn iteration accepts only the canonical bare name to avoid duplicates. *)
           if info.type_name = name && Ast.canonical_ctor cname = cname
           then (cname, info.arg) :: acc
           else acc)
@@ -3302,10 +3312,10 @@ let str_concat_helper =
       "  return p == NULL ? -1 : (int)(p - h);";
       "}";
       "";
-      (* Phase 22.3: char-string helpers. Mere の char は single-char
-         str として表現される。256-entry static table で per-char
-         pointer を持ち、char_at は table から該当 entry を返す。
-         is_digit / is_alpha / is_space は first byte を ctype.h で判定。 *)
+      (* Phase 22.3: char-string helpers. In Mere a char is represented as a
+         single-character str. A 256-entry static table holds a per-char
+         pointer, and char_at returns the matching entry from the table.
+         is_digit / is_alpha / is_space classify the first byte via ctype.h. *)
       "static char __lang_char_table[256][2];";
       "static int __lang_char_table_init = 0;";
       "static void __lang_char_table_setup(void) {";
@@ -3333,13 +3343,14 @@ let str_concat_helper =
       "  return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r';";
       "}";
       "";
-      (* Phase 22.4: fail builtin — print to stderr + abort. noreturn 属性
-         で C compiler に unreachable と伝えるが、callsite では (void
-         expr) として包んで expected return 型に応じた default 値を
-         並べる必要がある。ここでは int (= 0) を返す static helper にし、
-         callsite で必要なら cast する。show 系と組合せる場合は str 返却
-         が必要なので、return 型に応じて 2 種類 (__lang_fail_int /
-         __lang_fail_str) を提供。 *)
+      (* Phase 22.4: fail builtin — print to stderr + abort. The noreturn
+         attribute tells the C compiler this is unreachable, but each call
+         site still needs to be wrapped as a (void expr) followed by a
+         default value matching the expected return type. We provide a
+         static helper that returns int (= 0) and let the call site cast as
+         needed. When combined with show-style helpers we need to return a
+         str, so we provide two variants (__lang_fail_int / __lang_fail_str)
+         depending on the return type. *)
       "static int __lang_fail_jmpbuf_set = 0;";
       "static jmp_buf __lang_fail_jmpbuf;";
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
@@ -3354,7 +3365,7 @@ let str_concat_helper =
       "  __lang_fail_impl(msg); return \"\";";
       "}";
       "";
-      (* Phase 22.5: substring s start end_ — region alloc + memcpy。 *)
+      (* Phase 22.5: substring s start end_ — region alloc + memcpy. *)
       "static const char* __lang_substring(const char* s, int start, int end_) {";
       "  int len = end_ - start;";
       "  if (len < 0) len = 0;";
@@ -3364,9 +3375,9 @@ let str_concat_helper =
       "  return r;";
       "}";
       "";
-      (* Phase 23.5: str_escape — show_str がこれを通して output、
-         改行 / タブ / バックスラッシュ / ダブルクオートをバックスラッシュ
-         エスケープ形式に変換。interp の show_str との一致を保つ。 *)
+      (* Phase 23.5: str_escape — show_str outputs through this helper.
+         Convert newline / tab / backslash / double-quote into backslash
+         escape form. Stays consistent with interp's show_str. *)
       "static const char* __lang_str_escape(const char* s) {";
       "  size_t n = strlen(s);";
       "  char* r = (char*) __lang_region_alloc(&__lang_default_region, n * 2 + 1);";
@@ -3532,7 +3543,7 @@ let str_concat_helper =
       "  return 0;";
       "}";
       "";
-      (* Phase 44: mkdir_p は list_str に依存しないので header に置ける *)
+      (* Phase 44: mkdir_p doesn't depend on list_str, so it can live in the header *)
       "#include <sys/stat.h>";
       "#include <errno.h>";
       "#include <unistd.h>";   (* Phase 44.6: usleep *)
@@ -3547,7 +3558,7 @@ let str_concat_helper =
       "  return 0;";
       "}";
       "static int __lang_mkdir_p(const char* path) {";
-      "  /* recursive mkdir -p: 既存ならスキップ、 失敗時は __lang_fail_impl */";
+      "  /* recursive mkdir -p: skip if exists; on failure call __lang_fail_impl */";
       "  size_t n = strlen(path);";
       "  if (n == 0) return 0;";
       "  char* buf = (char*)malloc(n + 1);";
@@ -3567,9 +3578,9 @@ let str_concat_helper =
       "  return 0;";
       "}";
       "";
-      (* Phase 22.6: str_unescape — backslash escapes (n / t / r / backslash
-         / quote / slash) を解釈、他はそのまま出力。json_parser 等で string
-         literal 内の escape を処理。 *)
+      (* Phase 22.6: str_unescape — interpret backslash escapes (n / t / r /
+         backslash / quote / slash); pass others through unchanged. Handles
+         escapes inside string literals for json_parser and the like. *)
       "static const char* __lang_str_unescape(const char* s) {";
       "  size_t n = strlen(s);";
       "  char* r = (char*) __lang_region_alloc(&__lang_default_region, n + 1);";
@@ -3595,8 +3606,8 @@ let str_concat_helper =
       "  return r;";
       "}";
       "";
-      (* Phase 34.1: str_of_float — OCaml の string_of_float と format を
-         合わせる (%.12g + 整数値なら末尾 `.` を付加)。 *)
+      (* Phase 34.1: str_of_float — match OCaml's string_of_float format
+         (%.12g + append trailing `.` for integer-valued floats). *)
       "static const char* __lang_str_of_float(double f) {";
       "  char* buf;";
       "  asprintf(&buf, \"%.12g\", f);";
@@ -3652,9 +3663,9 @@ let region_runtime_helpers =
       "static __lang_region __lang_default_region;" ]
 
 (* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan
-   associative array. K は int / str のみ、V は任意 concrete 型。
-   storage は 2 つの並列配列 (keys[], values[]) で、cap 到達時は同
-   region に新配列を確保 (arena semantics)。 *)
+   associative array. K supports only int / str; V is any concrete type.
+   Storage is two parallel arrays (keys[], values[]); when cap is hit, a
+   new array is allocated in the same region (arena semantics). *)
 let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   let v_tag = ty_tag v_ty in
@@ -3729,7 +3740,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  return m;";
       "}";
       "";
-      (* set: 既存 key なら置き換え、なければ append (cap 到達なら配列拡張) *)
+      (* set: replace if key exists, otherwise append (grow the array on cap hit) *)
       Printf.sprintf "static int %s_set(%s* m, %s k, %s v) {"
         struct_name struct_name c_k c_v;
       "  for (int i = 0; i < m->len; i++) {";
@@ -3779,8 +3790,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "static int %s_len(%s* m) { return m->len; }"
         struct_name struct_name;
       "";
-      (* Phase 39.A' #2: delete — 該当 key を keys / values array から
-         shift して詰める。 不在は no-op。 *)
+      (* Phase 39.A' #2: delete — remove the matching key by shifting the
+         keys / values arrays. No-op if the key is absent. *)
       Printf.sprintf "static int %s_delete(%s* m, %s k) {"
         struct_name struct_name c_k;
       "  for (int i = 0; i < m->len; i++) {";
@@ -3844,22 +3855,22 @@ let strbuf_runtime =
       "";
       "static int mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
 
-(* Phase 16.3 / DEFERRED §1.5: mk_logger / mk_metrics の codegen runtime。
-   interpreter で V_builtin として実装されている cap を C 側でも使える
-   ように、Logger/Metrics の struct 型 (typer で register 済み、record
-   として codegen される) を返す factory 関数を提供する。
+(* Phase 16.3 / DEFERRED §1.5: codegen runtime for mk_logger / mk_metrics.
+   To expose the cap (implemented as V_builtin in the interpreter) on the C
+   side too, provide factory functions returning the Logger / Metrics struct
+   types (already registered by the typer and codegen'd as records).
 
-   Logger の 3 field (info / warn / error) は全部 `closure_str_unit`
-   (= `{ void* env, int (*fn)(void*, const char*) }`)。env は prefix
-   文字列を直接持たせる (string literal なのでコピー不要)。
+   The 3 fields of Logger (info / warn / error) are all `closure_str_unit`
+   (= `{ void* env, int (*fn)(void*, const char*) }`). The env stores the
+   prefix string directly (it's a string literal, so no copy needed).
 
-   Metrics の `record` は `str -> int -> unit` の curried 形なので、
-   外側 closure は inner closure を返す。inner の env で field 名を
-   持つ必要があるが、default region から alloc して使い回す。 *)
+   Metrics' `record` is in curried form `str -> int -> unit`, so the outer
+   closure returns the inner closure. The inner closure's env must carry the
+   field name; allocate it from the default region and reuse. *)
 let logger_runtime =
   String.concat "\n"
-    [ "/* Phase 16.3: mk_logger runtime — 3 closure_str_unit field を持つ";
-      "   Logger record を返す。prefix は env として bind。 */";
+    [ "/* Phase 16.3: mk_logger runtime — returns a Logger record holding";
+      "   3 closure_str_unit fields. The prefix is bound as env. */";
       "static int __mere_logger_info_fn(void* env, const char* msg) {";
       "  printf(\"%s [INFO] %s\\n\", (const char*)env, msg);";
       "  return 0;";
@@ -3882,9 +3893,9 @@ let logger_runtime =
 
 let metrics_runtime =
   String.concat "\n"
-    [ "/* Phase 16.3: mk_metrics runtime — Metrics record (inc / record)。";
-      "   record は curried (str -> int -> unit)、inner closure の env";
-      "   に field 名を持たせる。 */";
+    [ "/* Phase 16.3: mk_metrics runtime — Metrics record (inc / record).";
+      "   record is curried (str -> int -> unit); the inner closure's env";
+      "   carries the field name. */";
       "static int __mere_metrics_inc_fn(void* env, const char* name) {";
       "  (void)env;";
       "  printf(\"[METRIC] inc %s\\n\", name);";
@@ -3896,8 +3907,8 @@ let metrics_runtime =
       "}";
       "static closure_int_unit __mere_metrics_record_outer_fn(void* env, const char* name) {";
       "  (void)env;";
-      "  /* name は string literal を想定 (interpreter と同じ前提)、";
-      "     コピー不要で env に直接持たせる。 */";
+      "  /* Assume name is a string literal (same assumption as interpreter);";
+      "     no copy needed, hand it directly to env. */";
       "  return (closure_int_unit){.env = (void*)name, .fn = __mere_metrics_record_inner_fn};";
       "}";
       "static Metrics __mere_mk_metrics(int unit_arg) {";
@@ -3909,9 +3920,10 @@ let metrics_runtime =
       "}" ]
 
 (* Phase 24.3: str_split / str_join helpers.
-   list_str = list_str_node* (mono variant typedef、prelude の type 'a list
-   = Nil | Cons of 'a * 'a list が 'str に instantiate されたもの)。
-   tag 0 = Nil、tag 1 = Cons (typer の register_type が source 順で割当)。 *)
+   list_str = list_str_node* (a mono variant typedef; the prelude's
+   `type 'a list = Nil | Cons of 'a * 'a list` instantiated at 'str).
+   tag 0 = Nil, tag 1 = Cons (assigned in source order by the typer's
+   register_type). *)
 let str_list_helpers =
   String.concat "\n"
     [ "/* Phase 24.3: str_split builds a list_str by tokenizing s by delim. */";
@@ -3921,7 +3933,7 @@ let str_list_helpers =
       "  list_str nil_node = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
       "  nil_node->tag = 0;";
       "  if (dlen == 0) {";
-      "    /* empty delim: 全文字列を 1 element として返す (interp と同様) */";
+      "    /* empty delim: return the whole string as a single element (matches interp) */";
       "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
       "    cons->tag = 1;";
       "    cons->payload.Cons.f0 = s;";
@@ -3997,8 +4009,9 @@ let str_list_helpers =
       "  return r;";
       "}";
       "";
-      (* Phase 44: list_dir — dir entries (sorted、 `.` `..` 除外) を list_str に。
-         interp (eval.ml) と diff = 0 を保証するため qsort で安定順序。 *)
+      (* Phase 44: list_dir — turn dir entries (sorted, excluding `.` / `..`)
+         into a list_str. Use qsort for a stable order to guarantee diff = 0
+         with interp (eval.ml). *)
       "#include <dirent.h>";
       "static int __lang_list_dir_qsort(const void* a, const void* b) {";
       "  return strcmp(*(const char* const*)a, *(const char* const*)b);";
@@ -4034,17 +4047,17 @@ let str_list_helpers =
       "  return head;";
       "}" ]
 
-(* Phase 15.8: 全 OwnedVec を tracking する registry。`owned_vec_new` /
-   `vec_to_owned` で確保された struct を全部 thread-local list に登録、
-   main 関数末で `__mere_owned_vec_free_all` が iterate して
-   `free(v->data); free(v);` を呼ぶ。これで valgrind 等のメモリ解析が
-   クリーンになる (process exit に任せた状態だと「リーク」として報告
-   される)。全 mere_owned_vec_<T> は同じ struct layout `{ T*, int, int }`
-   なので、第一 field の void* data を generic に読み出せる。 *)
+(* Phase 15.8: registry that tracks all OwnedVecs. Every struct allocated by
+   `owned_vec_new` / `vec_to_owned` is registered in a thread-local list;
+   at the end of main, `__mere_owned_vec_free_all` iterates and calls
+   `free(v->data); free(v);`. This keeps memory analyzers like valgrind
+   clean (leaving it to process exit would be reported as a "leak"). All
+   mere_owned_vec_<T> share the same struct layout `{ T*, int, int }`, so
+   the first field's void* data can be read generically. *)
 let owned_vec_registry_runtime =
   String.concat "\n"
-    [ "/* Phase 15.8: heap-allocated OwnedVec の registry。プロセス末で";
-      "   一括 free する。 */";
+    [ "/* Phase 15.8: registry of heap-allocated OwnedVecs. Bulk-freed at";
+      "   process end. */";
       "typedef struct __mere_owned_vec_base {";
       "  void* data;";
       "  int len;";
@@ -4345,26 +4358,27 @@ let lift_inner_fns
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
     walk_in_fn f.param [f.param] f.body) fns;
-  (* Phase 45 (DEFERRED §8): inner-lifted fn 同士の相互参照を解消するため、
-     transitive capture closure を計算する。
+  (* Phase 45 (DEFERRED §8): compute transitive capture closure to resolve
+     mutual references between inner-lifted fns.
 
-     問題: lifted fn A が lifted fn B を call し、 B が `base` を capture する場合、
-     A の body 内で `__lifted_B(base, ...)` を emit するが、 `base` は A の
-     scope に存在しないため C compile error。
+     Problem: when lifted fn A calls lifted fn B and B captures `base`,
+     A's body emits `__lifted_B(base, ...)`, but `base` is not in A's
+     scope so the C compile fails.
 
-     解決: A も `base` を transitive に capture するようにする。 A の captures
-     を direct captures + ⋃ (called inner fns' captures) で拡張、 fixpoint
-     まで繰り返す。 これで A の env に `base` field が追加され、 A の body 内で
-     `env_self->base` 経由でアクセス可能になる。 *)
+     Solution: make A also capture `base` transitively. Extend A's
+     captures to direct captures + ⋃ (called inner fns' captures) and
+     iterate to fixpoint. This adds a `base` field to A's env so A's
+     body can access it via `env_self->base`. *)
   let all_lifted = List.rev !lifted in
-  (* Mere name → lifted_name の逆引き (body 内の Var をたどるため) *)
+  (* Reverse map from Mere name to lifted_name (used to walk Vars in bodies) *)
   let mere_to_lifted : (string, string) Hashtbl.t = Hashtbl.create 8 in
   Hashtbl.iter (fun mname entry ->
     Hashtbl.replace mere_to_lifted mname entry.lifted_name) inner_lifts;
-  (* lifted_name → captures の最新版を保持する Hashtbl
-     ★ direct captures から inner-lifted fn 名を除外する (それらは runtime
-        value ではなく、 emit_expr 側で `__lifted_X(caps, arg)` 形で展開される。
-        capture として持つと「helper という識別子を C で参照」 して fail する) *)
+  (* Hashtbl holding the latest captures for each lifted_name.
+     NOTE: exclude inner-lifted fn names from direct captures (they are not
+        runtime values; emit_expr expands them inline as `__lifted_X(caps, arg)`.
+        Carrying them as captures would try to reference the helper identifier
+        in C and fail). *)
   let captures_map : (string, (string * Ast.ty) list) Hashtbl.t =
     Hashtbl.create 8
   in
@@ -4378,7 +4392,7 @@ let lift_inner_fns
   while !changed do
     changed := false;
     List.iter (fun lf ->
-      (* lf の body 中で参照される他の inner-lifted fn 名を集める *)
+      (* Collect names of other inner-lifted fns referenced in lf's body *)
       let called_inner = ref [] in
       let rec scan (e : Ast.expr) =
         (match e.Ast.node with
@@ -4396,10 +4410,10 @@ let lift_inner_fns
       List.iter (fun called_lifted_name ->
         let other_caps = Hashtbl.find captures_map called_lifted_name in
         List.iter (fun (cap_n, cap_t) ->
-          (* cap_n が lf の param と一致するなら skip (param は capture 不要)
-             cap_n が他の inner-lifted fn 名なら skip (transitive で別 path
-             から拾われる)
-             cap_n が既に new_caps にあれば skip *)
+          (* skip if cap_n matches lf's param (params don't need to be captured)
+             skip if cap_n is another inner-lifted fn name (will be picked up
+             transitively via another path)
+             skip if cap_n is already in new_caps *)
           if cap_n = lf.l_param then ()
           else if Hashtbl.mem mere_to_lifted cap_n then ()
           else if List.mem_assoc cap_n !new_caps then ()
@@ -4412,7 +4426,7 @@ let lift_inner_fns
       Hashtbl.replace captures_map lf.l_name !new_caps
     ) all_lifted
   done;
-  (* 拡張済 captures を all_lifted + inner_lifts_by_host に反映 *)
+  (* Reflect the extended captures into all_lifted + inner_lifts_by_host *)
   let updated_lifted = List.map (fun lf ->
     let new_caps = Hashtbl.find captures_map lf.l_name in
     { lf with l_captures = new_caps }) all_lifted
@@ -4422,7 +4436,7 @@ let lift_inner_fns
       let new_caps = Hashtbl.find captures_map entry.lifted_name in
       Hashtbl.replace tbl mere_n { entry with captures = new_caps }
     ) tbl) inner_lifts_by_host;
-  (* 旧 inner_lifts (last-write) も同期 — emit_expr が直接見るので *)
+  (* Also sync the old inner_lifts (last-write) — emit_expr reads it directly *)
   Hashtbl.iter (fun mere_n entry ->
     let new_caps = Hashtbl.find captures_map entry.lifted_name in
     Hashtbl.replace inner_lifts mere_n { entry with captures = new_caps }
@@ -4603,9 +4617,9 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyCon (name, args) ->
       List.iter walk_ty args;
-      (* Phase 16.3: 既知 record の field 型もたどる。Logger / Metrics
-         のように field が closure 型を持つ record では、field 経由でしか
-         登場しない closure_X_Y を arrow_pairs に拾わせる必要がある。 *)
+      (* Phase 16.3: also walk the field types of known records. For records
+         like Logger / Metrics whose fields hold closure types, closure_X_Y
+         only appears via a field, so we need arrow_pairs to pick those up. *)
       if Hashtbl.mem Typer.records name
          && not (Hashtbl.mem seen_records name)
       then begin
@@ -4785,8 +4799,9 @@ let emit_record_typedef (name : string) : string =
   else
     (* Forward decl form so closure typedefs that reference this struct
        can be emitted before the struct body (function-pointer return
-       types accept forward-declared structs). Phase 42: M-qualified record
-       type 名 (`Shapes.Rect`) を C identifier 化 (`Shapes__Rect`)。 *)
+       types accept forward-declared structs). Phase 42: convert
+       M-qualified record type names (`Shapes.Rect`) to C identifiers
+       (`Shapes__Rect`). *)
     let cn = c_safe_name name in
     Printf.sprintf "typedef struct %s %s;" cn cn
 
@@ -5540,7 +5555,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     List.rev_map (fun (lifted_name, captures, _arg_ty, _ret_ty) ->
       let env_struct_name = lifted_name ^ "_env" in
       let env_fields =
-        if captures = [] then "char __unused;"  (* 0-capture でも sizeof > 0 *)
+        if captures = [] then "char __unused;"  (* ensure sizeof > 0 even with 0 captures *)
         else
           String.concat " "
             (List.map (fun (n, ty) ->
@@ -5637,9 +5652,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          print "()\n" to match interp's Eval.to_string V_unit output. *)
       "  (void)(" ^ main_body ^ ");\n  printf(\"()\\n\");"
     | Some "%g" ->
-      (* Phase 34.1: float main — interp の string_of_float (OCaml の
-         %.12g + 整数値なら末尾 `.`) と format を合わせるため
-         __lang_str_of_float ヘルパを経由。 *)
+      (* Phase 34.1: float main — go through the __lang_str_of_float helper
+         to match interp's string_of_float (OCaml's %.12g + a trailing `.`
+         for integer-valued floats). *)
       "  puts(__lang_str_of_float(" ^ main_body ^ "));"
     | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
   in
@@ -5698,7 +5713,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else inner_lift_closure_decls @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /
-       record / variant bodies. OwnedVec registry先行 (各 _new が参照)。 *)
+       record / variant bodies. OwnedVec registry first (each _new references it). *)
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
@@ -5732,9 +5747,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
              | Ast.TyStr -> "const char*"
              | t -> c_type_of t
            in
-           (* Phase 32.2: return str を `char*` にする (libc の getenv 等
-              は char* を返す。Mere 内部は const char* なので auto-add
-              const で吸収)。unit return は void。 *)
+           (* Phase 32.2: emit return str as `char*` (libc functions like
+              getenv return char*; Mere internally uses const char*, so the
+              implicit const conversion absorbs the difference). unit return
+              becomes void. *)
            let c_ret = match ret with
              | Ast.TyUnit -> "void"
              | Ast.TyStr -> "char*"

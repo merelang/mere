@@ -1648,7 +1648,7 @@ let () =
   check_raises "read_file missing"
     (fun () -> Pipeline.process "read_file \"/nonexistent/no/such/file\"");
 
-  (* --- Phase 19.6: I/O 拡張 (read_lines / file_exists / env_var / args) --- *)
+  (* --- Phase 19.6: I/O extensions (read_lines / file_exists / env_var / args) --- *)
   check "read_lines type"
     (Pipeline.type_of "read_lines") "(str -> str list)";
   check "file_exists type"
@@ -1680,7 +1680,7 @@ let () =
         | None -> \"none\" | Some _ -> \"some\"")
     "\"none\"";
 
-  (* --- Phase 44: list_dir / mkdir_p (docs site SSG 用 fs primitives) --- *)
+  (* --- Phase 44: list_dir / mkdir_p (fs primitives for docs site SSG) --- *)
   check "list_dir / mkdir_p: type signatures"
     (Pipeline.type_of "list_dir") "(str -> str list)";
   check "mkdir_p: type signature"
@@ -1708,8 +1708,8 @@ let () =
        (Printf.sprintf
           "{ mkdir_p %S; file_exists %S }" base base))
     "true";
-  (* args は Sys.argv 依存なので結果は test runner の起動方法次第。
-     evaluation が落ちないことを確認するだけ。 *)
+  (* args depends on Sys.argv, so the result varies by how the test runner is invoked.
+     We only check that evaluation does not crash. *)
   (try
     let _ = Pipeline.process "args ()" in
     incr pass;
@@ -1792,7 +1792,7 @@ let () =
   check "int_max > int_min"
     (Pipeline.process "int_max > int_min") "true";
   check "min init pattern"
-    (* よくある最小値初期化パターン *)
+    (* common min-value initialization pattern *)
     (Pipeline.process
       "let candidate = 42 in
        if candidate < int_max then candidate else int_max") "42";
@@ -1819,10 +1819,10 @@ let () =
 
   check "sqrt type"    (Pipeline.type_of "sqrt") "(float -> float)";
   check "pi >> sqrt"
-    (* sqrt pi ~= 1.7725、pipe + curry なので `f_lt 1.7 (sqrt pi)` = `1.7 < 1.7725` *)
+    (* sqrt pi ~= 1.7725; with pipe + curry, `f_lt 1.7 (sqrt pi)` = `1.7 < 1.7725` *)
     (Pipeline.process "sqrt pi |> f_lt 1.7") "true";
 
-  (* --- Phase 19.7: 数学拡張 (log / exp / 三角 / f_min_max / f_pow / random) --- *)
+  (* --- Phase 19.7: math extensions (log / exp / trig / f_min_max / f_pow / random) --- *)
   check "log e == 1"    (Pipeline.process "log e") "1.";
   check "exp 0 == 1"    (Pipeline.process "exp 0.0") "1.";
   check "log type"      (Pipeline.type_of "log") "(float -> float)";
@@ -1889,7 +1889,7 @@ let () =
        match Red with | Red -> 0 | Green -> 1")
     "line 2, col 8: warning: non-exhaustive match (missing Blue)";
   check "guarded arm doesn't count as exhaustive"
-    (* guard 付き arm は実行時 false 可能性があるので保守的に「カバーしてない」扱い *)
+    (* a guarded arm may be false at runtime, so we conservatively treat it as not covering *)
     (warnings_of
       "type 'a opt = None | Some of 'a;
        match Some 5 with
@@ -1916,8 +1916,8 @@ let () =
          map_set counter \"n\" ((map_get counter \"n\") - 1);
        map_get counter \"n\"")
     "0";
-  (* codegen 側 (C/LLVM/Wasm) の emit 検証は scope の都合で typed_prog
-     helpers が見える後段 (vec/map codegen sections) で実施。 *)
+  (* codegen-side (C/LLVM/Wasm) emit verification is done later (in the vec/map codegen
+     sections) where typed_prog helpers are visible, due to scope reasons. *)
 
   (* --- exhaustiveness Phase 2 (tuple / record / typed wildcard hint) --- *)
   check "Phase 2: tuple destructure is total (no warning)"
@@ -2029,9 +2029,9 @@ let () =
        region Outer { region Inner { let t = Tag { mark = &Inner 9 } in 0 } }")
     "0";
 
-  (* --- view field access: region 伝播 (Phase 2.4) ---
-     view 値の TyCon に構築時 region が埋め込まれており、field access で
-     宣言時の R を実際の region に置換して返す。 *)
+  (* --- view field access: region propagation (Phase 2.4) ---
+     The TyCon of a view value embeds the region at construction time, and
+     field access substitutes the declared R with the actual region. *)
   check "view int field access (region-free field)"
     (Pipeline.process
       "view Cell[R] of int { v: int };\n\
@@ -2324,19 +2324,19 @@ let () =
   assert_contains "codegen: let + if uses statement-expr"
     (codegen "let x = 5 in if x < 10 then x * 2 else 0")
     "__let_tmp_x = 5";
-  (* Phase 16 第 2 / DEFERRED §1.4: 同名 rebinding `let x = f x` で右辺の
-     旧 x が新 x で覆われて自己参照になっていた問題の regression test。
-     2-step 形 (__let_tmp_<name> 経由) で右辺評価時点では旧 binding が
-     見える、を保証する。 *)
+  (* Phase 16, part 2 / DEFERRED §1.4: regression test for the bug where same-name
+     rebinding `let x = f x` had the old x on the RHS overwritten by the new x,
+     causing self-reference. The 2-step form (via __let_tmp_<name>) ensures that
+     the old binding is visible at the time the RHS is evaluated. *)
   assert_contains "codegen: same-name rebinding uses tmp var"
     (codegen "let x = 1 in let x = x + 10 in x")
     "__let_tmp_x = (x + 10)";
-  (* Phase 16.3 / DEFERRED §1.5: mk_logger / mk_metrics の codegen 対応。
-     interpreter only だった cap builtin を C codegen でも printf-based
-     で動かす。Logger record + 3 closure_str_unit field、Metrics record
-     + (inc / record) curried closure。
-     注: 前段 test で `type Logger = { debug: ... }` を declare している
-     ので、builtin field を re-register してから検査する。 *)
+  (* Phase 16.3 / DEFERRED §1.5: codegen support for mk_logger / mk_metrics.
+     Make the cap builtin, previously interpreter-only, work in C codegen too via
+     printf-based emission. Logger record + 3 closure_str_unit fields, Metrics
+     record + (inc / record) curried closures.
+     Note: a previous test declares `type Logger = { debug: ... }`, so we
+     re-register the builtin fields before checking. *)
   Typer.register_record "Logger" []
     [("info",  Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
      ("warn",  Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
@@ -2791,15 +2791,16 @@ let () =
     "apply(inc_as_value)";
 
   (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) ---
-     Phase 36 で prelude に追加した helpers が __anon counter を消費する
-     ため、user 由来の anon adapter slot は前進する (substring match で
-     最新 slot を選ぶ)。 *)
+     The helpers added to prelude in Phase 36 consume the __anon counter, so
+     user-defined anon adapter slots are advanced (we pick the latest slot via
+     substring match). *)
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "  closure_int_int f;\n} __anon_7_env;";   (* Phase 39.A' で list_sort_by / list_sort_insert / list_sort
-                             の lambda が 6 slot 消費し、user の `fn x -> f x` (captures f) は
-                             slot 7 (env field `closure_int_int f` で唯一識別可能) *)
+    "  closure_int_int f;\n} __anon_7_env;";   (* Under Phase 39.A', the lambdas of
+                             list_sort_by / list_sort_insert / list_sort consume 6 slots, so the user's
+                             `fn x -> f x` (captures f) is slot 7 (uniquely identifiable by the
+                             env field `closure_int_int f`) *)
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -2968,7 +2969,7 @@ let () =
   assert_contains "llvm: ret 0 at main end"
     (llvm "1") "ret i32 0";
 
-  (* --- LLVM IR codegen: 関数 lifting + recursion (Phase 5.2) --- *)
+  (* --- LLVM IR codegen: function lifting + recursion (Phase 5.2) --- *)
   assert_contains "llvm: top-level fn lifted to @name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "define i32 @inc(i32 %x)";
@@ -2992,13 +2993,13 @@ let () =
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "add i32 %x, 1";
 
-  (* --- LLVM IR codegen: 文字列 / print / ++ / str_len (Phase 5.3) --- *)
+  (* --- LLVM IR codegen: strings / print / ++ / str_len (Phase 5.3) --- *)
   assert_contains "llvm: str literal global"
-    (llvm "\"hi\"") "@.str_2 = private constant [3 x i8] c\"hi\\00\"";   (* Phase 36: prelude list_min/list_max が str_0, str_1 を消費 *)
+    (llvm "\"hi\"") "@.str_2 = private constant [3 x i8] c\"hi\\00\"";   (* Phase 36: prelude list_min/list_max consume str_0, str_1 *)
   assert_contains "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
   assert_contains "llvm: str passed as ptr to printf"
-    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_2)";   (* Phase 36: prelude list_min/list_max が先に str_0, str_1 を取る *)
+    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_2)";   (* Phase 36: prelude list_min/list_max claim str_0, str_1 first *)
   assert_contains "llvm: print emits puts call"
     (llvm "print \"hi\"") "call i32 @puts(ptr ";
   assert_contains "llvm: ++ lowers to __lang_str_concat"
@@ -3214,7 +3215,7 @@ let () =
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "= call ptr @malloc(i64 %t";
 
-  (* --- LLVM IR codegen: 多相 variant / record の monomorphization (Phase 5.9) ---
+  (* --- LLVM IR codegen: polymorphic variant / record monomorphization (Phase 5.9) ---
      `'a opt`, `'a Box` etc. get a specialized struct per concrete
      instantiation (`%opt_int`, `%Box_str`). Constr / Record_lit /
      Field_get / Match use the mono name. *)
@@ -3256,7 +3257,7 @@ let () =
        str_len bs.v + bi.v")
     "%LCgBox4_str = type { ptr }";
 
-  (* --- LLVM IR codegen: 再帰 variant (Phase 5.10) ---
+  (* --- LLVM IR codegen: recursive variant (Phase 5.10) ---
      Recursive variants (e.g. `'a list`, self-referential `ilist`) lower
      to heap-allocated nodes via region alloc; values are `ptr` to the
      node, accessed via getelementptr + load. P_tuple sub-pattern in Cons
@@ -3293,7 +3294,7 @@ let () =
        in sum (LCgICons4 (1, LCgINil4))")
     "extractvalue %tuple_int_LCgIList4";
 
-  (* --- LLVM IR codegen: 複雑な pattern (Phase 5.11) ---
+  (* --- LLVM IR codegen: complex pattern (Phase 5.11) ---
      P_int / P_bool / P_str (via @strcmp) / P_unit / P_record / P_as /
      or-pattern (pre-flattened) / guard (and-ed with arm test). *)
   assert_contains "llvm: strcmp declared"
@@ -3328,12 +3329,12 @@ let () =
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
     "guard_pass_";
 
-  (* --- LLVM IR codegen: show 汎用 builtin (Phase 5.12) ---
-     `show : 'a -> str` を呼出ごとに引数型から `show_T` を specialize、
-     int/bool/str/unit/tuple/record/variant (mono + poly + recursive) 対応。
-     `@asprintf` ベースで型ごとに dedicated 関数を生成、collect_show_types
-     で必要な型を発見、`App (Var "show", arg)` を `call ptr @show_<tag>` に
-     dispatch。 *)
+  (* --- LLVM IR codegen: generic `show` builtin (Phase 5.12) ---
+     Specialize `show : 'a -> str` to a `show_T` per call site based on the argument
+     type, supporting int/bool/str/unit/tuple/record/variant (mono + poly +
+     recursive). Generate a dedicated function per type via `@asprintf`,
+     discover required types via collect_show_types, and dispatch
+     `App (Var "show", arg)` to `call ptr @show_<tag>`. *)
   assert_contains "llvm: asprintf declared"
     (llvm "print (show 42)") "declare i32 @asprintf(ptr, ptr, ...)";
   assert_contains "llvm: show_int defined"
@@ -3363,11 +3364,11 @@ let () =
     "define ptr @show_LCgPt6";
 
   (* --- LLVM IR codegen: region runtime (Region_block + Ref) + with Drop +
-       view 構築 (Phase 5.13) ---
-     `region R { body }` を __lang_region_init + body + __lang_region_free に
-     compile、`&R v` を region_alloc + store で ptr return、`with c = v in body`
-     を bind + body + auto-close、view 構築は region_alloc + insertvalue + store
-     + ptr return。 *)
+       view construction (Phase 5.13) ---
+     Compile `region R { body }` to __lang_region_init + body + __lang_region_free,
+     `&R v` to region_alloc + store returning a ptr, `with c = v in body` to
+     bind + body + auto-close, and view construction to region_alloc + insertvalue
+     + store + ptr return. *)
   assert_contains "llvm: Region_block calls __lang_region_init"
     (llvm "region R { let x = &R 5 in 42 }")
     "call void @__lang_region_init(ptr ";
@@ -3399,10 +3400,10 @@ let () =
        region R { let c = LCgCellA { v = 7 } in c.v }")
     "getelementptr %LCgCellA, ptr ";
 
-  (* --- LLVM IR codegen: list show を [a, b, c] 形式に (Phase 5.14) ---
-     `'a list` を recursive variant の generic show より special-case で
-     `[1, 2, 3]` 形式で表示。show_list_<T> 内で alloca/load/store + ループ
-     で各要素 show_T を呼んで __lang_str_concat で繋ぐ。 *)
+  (* --- LLVM IR codegen: list show in [a, b, c] format (Phase 5.14) ---
+     Special-case `'a list` instead of the generic recursive-variant show, printing
+     it in `[1, 2, 3]` form. Inside show_list_<T>, use alloca/load/store and a loop
+     to call show_T on each element and concatenate via __lang_str_concat. *)
   assert_contains "llvm: list show emits [ prefix"
     (llvm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
@@ -3496,10 +3497,10 @@ let () =
   assert_contains "wasm: and lowers to i32.and"
     (wasm "true && false") "i32.and";
 
-  (* --- Wasm codegen: 関数 lifting + recursion (Phase 6.2) ---
-     top-level fn が `(func $name (param i32) (result i32))` に lift、
-     直接呼出は `call $name`、相互再帰も同モジュール内で動く (Wasm は
-     前方参照可)。 *)
+  (* --- Wasm codegen: function lifting + recursion (Phase 6.2) ---
+     Top-level fns lift to `(func $name (param i32) (result i32))`, direct calls
+     become `call $name`, and mutual recursion works within the same module
+     (Wasm allows forward references). *)
   assert_contains "wasm: top-level fn lifted to (func $name)"
     (wasm "let inc = fn x -> x + 1 in inc 5")
     "(func $inc (param i32) (result i32)";
@@ -3518,10 +3519,10 @@ let () =
            in is_even 4")
     "(func $is_odd";
 
-  (* --- Wasm codegen: 文字列対応 (Phase 6.3) ---
-     文字列は linear memory に置く: Str_lit は data セグメント、
-     bump pointer global で動的 alloc、$__lang_strlen / $__lang_str_concat
-     を WAT 内に inline 定義、print は host import (env.puts)。 *)
+  (* --- Wasm codegen: string support (Phase 6.3) ---
+     Strings live in linear memory: Str_lit goes into a data segment, dynamic
+     allocation uses a bump-pointer global, $__lang_strlen / $__lang_str_concat
+     are defined inline in WAT, and print uses a host import (env.puts). *)
   assert_contains "wasm: memory declared + exported"
     (wasm "\"hi\"") "(memory (export \"memory\") 64)";
   assert_contains "wasm: bump pointer global declared"
@@ -3547,10 +3548,10 @@ let () =
     (wasm "str_index_of \"hi\" \"i\"") "(func $__lang_str_index_of";
 
   (* --- Wasm codegen: tuple (Phase 6.4) ---
-     tuple は linear memory に置く: 各要素 4 bytes (i32 / offset)、
-     base offset を一旦 local に保存して bump を即座に進める (nested
-     tuple や ++ がスタンプを advance してもメモリが重ならない)、
-     fst/snd は i32.load offset で取得。 *)
+     Tuples live in linear memory: each element is 4 bytes (i32 / offset);
+     the base offset is saved into a local immediately and bump is advanced
+     right away (so nested tuples or ++ advancing the bump do not overlap);
+     fst/snd are retrieved via i32.load offset. *)
   assert_contains "wasm: tuple stores via i32.store offset"
     (wasm "let p = (1, 2) in fst p + snd p")
     "i32.store offset=0";
@@ -3568,9 +3569,10 @@ let () =
     "global.set $__lang_bump";
 
   (* --- Wasm codegen: record (Phase 6.5) ---
-     Record も tuple と同じ linear memory レイアウト。Record_lit は宣言順に
-     i32.store、Field_get は field index から i32.load offset、Record_update
-     は新 buffer に reserve + 更新 field 以外は load コピー。 *)
+     Records share the same linear-memory layout as tuples. Record_lit emits
+     i32.store in declaration order, Field_get becomes i32.load offset from the
+     field index, and Record_update reserves a new buffer and copies non-updated
+     fields via load. *)
   assert_contains "wasm: record literal stores fields at offset"
     (wasm_with_decls
       "type WCgRect = { w: int, h: int };\n\
@@ -3593,9 +3595,9 @@ let () =
     "(func $mk (param i32) (result i32)";
 
   (* --- Wasm codegen: variant + match (Phase 6.6) ---
-     Variant も linear memory に: {i32 tag} (nullary) or {i32 tag, i32 payload}。
-     Constr で alloc + store tag (+ payload)、Match は tag load + 入れ子の
-     if/else チェーン、fallthrough は unreachable で trap。 *)
+     Variants live in linear memory too: {i32 tag} (nullary) or {i32 tag, i32 payload}.
+     Constr does alloc + store tag (+ payload); Match does tag load + a nested
+     if/else chain; fallthrough traps via unreachable. *)
   assert_contains "wasm: nullary variant Constr stores tag"
     (wasm_with_decls
       "type WCgCol1 = WCgR1 | WCgG1 | WCgB1;\n\
@@ -3684,10 +3686,10 @@ let () =
 
   (* --- Wasm codegen: poly variant/record + recursive variant + P_tuple
      sub-pattern (Phase 6.9) ---
-     Wasm の memory layout は uniform (どの値も i32 = 4 bytes) なので、
-     多相 variant/record は monomorphization 不要、recursive variant
-     (`'a list` の Cons) も同じ memory レイアウト。Match の Cons (h, t) も
-     payload を tuple offset として読んで extractvalue 連鎖。 *)
+     Wasm's memory layout is uniform (every value is i32 = 4 bytes), so
+     polymorphic variants/records need no monomorphization, and recursive variants
+     (e.g. `'a list`'s Cons) share the same memory layout. Match's Cons (h, t)
+     also reads the payload as a tuple offset, chaining extractvalues. *)
   assert_contains "wasm: polymorphic variant works without specialization"
     (wasm_with_decls
       "type 'a WCgOpt = WCgN | WCgS of 'a;\n\
@@ -3712,7 +3714,7 @@ let () =
        in sum (WCgCons2 (1, WCgNil2))")
     "i32.load offset=0";
 
-  (* --- Wasm codegen: 複雑な pattern (Phase 6.10) ---
+  (* --- Wasm codegen: complex pattern (Phase 6.10) ---
      P_int / P_bool / P_str (via @__lang_streq) / P_unit / P_record / P_as /
      nested ctor / or-pattern (pre-flattened) / guard. *)
   assert_contains "wasm: streq runtime helper emitted"
@@ -3750,10 +3752,10 @@ let () =
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
     "if (result i32)";
 
-  (* --- Wasm codegen: show 汎用 builtin (Phase 6.11) ---
-     LLVM Phase 5.12 相当。show は self-contained: int→string conversion
-     も Wasm 内で実装、文字列/タプル/レコード/variant の合成は
-     __lang_str_concat で。 *)
+  (* --- Wasm codegen: generic `show` builtin (Phase 6.11) ---
+     Equivalent to LLVM Phase 5.12. show is self-contained: int->string
+     conversion is implemented inside Wasm too, and composition of
+     strings/tuples/records/variants is done via __lang_str_concat. *)
   assert_contains "wasm: show_int defined"
     (wasm "show 42") "(func $show_int";
   assert_contains "wasm: show int call site"
@@ -3780,9 +3782,9 @@ let () =
        show (WCgPt6 { x = 1, y = 2 })")
     "(func $show_WCgPt6";
 
-  (* --- Wasm codegen: list show を `[a, b, c]` 形式に (Phase 6.12) ---
-     `'a list = Nil | Cons of 'a * 'a list` を special-case で配列形式の
-     文字列に。 *)
+  (* --- Wasm codegen: list show in `[a, b, c]` format (Phase 6.12) ---
+     Special-case `'a list = Nil | Cons of 'a * 'a list` to render as an
+     array-style string. *)
   assert_contains "wasm: list show uses loop / block"
     (wasm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
@@ -3813,19 +3815,19 @@ let () =
     (wasm "let m = mk_metrics () in m.inc \"x\"")
     "call $__mere_mk_metrics";
 
-  (* Phase 16.4 / DEFERRED §1.6: Region_block で bump save/restore を
-     していたのを止めて arena-leak セマンティクスに揃えた。region 内で
-     allocate して外に escape させる値 (e.g. `let v = region R {
-     vec_to_owned ... }` の OwnedVec) が後続 allocation で上書きされない
-     ことを保証する。 *)
+  (* Phase 16.4 / DEFERRED §1.6: stopped doing bump save/restore in Region_block
+     to align with arena-leak semantics. This ensures values allocated inside a
+     region that escape to the outside (e.g. the OwnedVec from
+     `let v = region R { vec_to_owned ... }`) are not overwritten by
+     subsequent allocations. *)
   assert_contains "wasm: Region_block emits body directly (no save/restore)"
     (wasm "region R { 42 }")
     "(func $main";
   assert_no_contains "wasm: Region_block does not save bump in main body"
-    (* main の (local.set N (global.get $__lang_bump)) save 構文は、
-       fix 前は emit されていた。fix 後は main 内で出ない。 *)
+    (* The (local.set N (global.get $__lang_bump)) save form was emitted in main
+       before the fix; after the fix it no longer appears inside main. *)
     (let w = wasm "region R { 42 }" in
-     (* main function 部分だけ取り出す: "(func $main" 以降。 *)
+     (* Extract only the main function: everything from "(func $main" onward. *)
      let needle = "(func $main" in
      let nl = String.length needle and wl = String.length w in
      let rec find i =
@@ -3910,8 +3912,8 @@ let () =
     (infer_err "zzzzzz")
     "did you mean";
 
-  (* Phase 33.0 (DEFERRED §5.1): multi-candidate did-you-mean. 複数の近い
-     候補があれば top 3 を listing で表示。 *)
+  (* Phase 33.0 (DEFERRED §5.1): multi-candidate did-you-mean. If there are
+     multiple close candidates, show the top 3 in a listing. *)
   assert_contains "diag: multi-candidate did-you-mean shows alternatives"
     (infer_err "let factorial = fn n -> n in\nlet facoriall = fn x -> x in\nlet foctorial = fn y -> y in\nfactrial 5")
     "did you mean `factorial`, `facoriall`, or `foctorial`?";
@@ -3921,7 +3923,7 @@ let () =
 
   assert_contains "diag: unknown constructor suggests close ctor"
     (infer_err_with_decls "type Color7 = Red7 | Green7 | Blue7;\nlet c = Greeen7 in c")
-    "did you mean `Green7`";  (* Phase 33.0: 複数候補表示で末尾は `?` / ` or ...?` どちらも有り得るため部分一致のみ *)
+    "did you mean `Green7`";  (* Phase 33.0: with multi-candidate display the tail can be either `?` or ` or ...?`, so only substring-match *)
 
   (* --- ANSI color output (Phase 7.4) ---
      `use_color` defaults to false (set by CLI when stderr is a TTY).
@@ -4169,9 +4171,10 @@ let () =
       Pipeline.process
         "import \"/nonexistent/path/foo.lang\";\n42");
 
-  (* --- Phase 41: qualified ctor pattern in 4 backend codegen (Ast.canonical_ctor
-     を Constr / P_constr lookup に適用したので `match v with | M.A -> ...` が
-     C / LLVM / Wasm で動く。 DEFERRED §4.1 の qualified pattern gap fix。 *)
+  (* --- Phase 41: qualified ctor pattern in 4-backend codegen. We apply
+     Ast.canonical_ctor to Constr / P_constr lookup so `match v with | M.A -> ...`
+     works in C / LLVM / Wasm. This is the qualified-pattern gap fix from
+     DEFERRED §4.1. *)
   check "module: qualified ctor construction + pattern (interp)"
     (Pipeline.process
        "module Color { type t = Red | Green | Blue | Mix of int; };\n\
@@ -4190,7 +4193,7 @@ let () =
     (Pipeline.process
        "module Color { type t = Red | Green; };\n\
         let c = Red in match c with | Red -> 1 | Green -> 2") "1";
-  (* C codegen でも qualified pattern が emit されることを確認 *)
+  (* Confirm that qualified patterns are emitted in C codegen too *)
   assert_contains "module: C codegen — qualified ctor name uses `__` separator"
     (Codegen_c.emit_program ~main_ty:Ast.TyInt
        (let prog = Pipeline.parse_program
@@ -4200,10 +4203,11 @@ let () =
         prog))
     "Color__to_int";
 
-  (* --- Phase 42: 2 module 同名 ctor disambiguation (DEFERRED §4.1 残課題)
-     `Traffic.Red` と `Mood.Red` を別 type に対する別物として扱う。 codegen
-     site で `Typer.constructors[raw_qualified]` を先に lookup することで
-     alias 上書き (constructors[Red] が後勝ち) を bypass。 *)
+  (* --- Phase 42: same-name ctor disambiguation across 2 modules (remaining
+     work from DEFERRED §4.1). Treat `Traffic.Red` and `Mood.Red` as distinct
+     things belonging to different types. At codegen sites we look up
+     `Typer.constructors[raw_qualified]` first to bypass alias overwrites
+     (where constructors[Red] is last-write-wins). *)
   check "module: 2 modules with same ctor name (interp disambiguates)"
     (Pipeline.process
        "module Traffic { type Light = Red | Yellow | Green; let label = fn (l: Light) -> match l with | Red -> 1 | Yellow -> 2 | Green -> 3; };\n\
@@ -4215,18 +4219,18 @@ let () =
         module Bar { type t = X | Z; };\n\
         let a = Foo.X in let b = Bar.X in\n\
         (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)") "11";
-  (* Phase 42 (b): M-qualified record type が interp で動く (codegen は
-     module_scoping.mere の 4 backend smoke で確認済) *)
+  (* Phase 42 (b): M-qualified record type works in interp (codegen is
+     covered by the 4-backend smoke test in module_scoping.mere) *)
   check "module: qualified record literal + field access (interp)"
     (Pipeline.process
        "module Shapes { type Rect = { w: int, h: int }; };\n\
         let r = Shapes.Rect { w = 3, h = 4 } in show (r.w * r.h)")
     "\"12\"";
 
-  (* --- Phase 43 (DEFERRED §1.7): 多 instantiation codegen — chained poly
-     `let bool_eq = fn b -> poly_eq true b` のような呼び出しで poly_eq の
-     bool 版が後の pass で発見されても spec list に追加されるよう、 各 pass で
-     既存 multi_specs を re-scan する。 *)
+  (* --- Phase 43 (DEFERRED §1.7): multi-instantiation codegen — chained poly.
+     For a call like `let bool_eq = fn b -> poly_eq true b`, ensure that the
+     bool version of poly_eq is added to the spec list even if discovered in a
+     later pass, by re-scanning the existing multi_specs in each pass. *)
   check "multi_inst: chained poly call adds new instantiation (interp)"
     (Pipeline.process
        "let poly_eq = fn x -> fn y -> if show x == show y then 1 else 0 in\n\
@@ -4242,8 +4246,8 @@ let () =
         prog))
     "poly_eq__bool__bool__int";
 
-  (* --- Phase 11.1: 借用注釈の細分化 (Q-004 narrowed) --- *)
-  (* デフォルト `&R T` は BorrowedRead (shared read)、syntax 上は無印。 *)
+  (* --- Phase 11.1: refinement of borrow annotations (Q-004 narrowed) --- *)
+  (* The default `&R T` is BorrowedRead (shared read), with no syntactic mark. *)
   check "borrow: &R T parses as default (borrowed/shared-read)"
     (Pipeline.type_of "fn (x: &R int) -> 1") "(&R int -> int)";
   check "borrow: &mut R T = exclusive write"
@@ -4255,9 +4259,9 @@ let () =
     (Pipeline.type_of "fn (x: &exclusive R int) -> 1")
     "(&exclusive R int -> int)";
 
-  (* 値レベル `&R v` も同じく 4 modes をパース。region から抜けると
-     region escape になるので、annotation で mode をピン留めして
-     region 内で消費するパターンで検証する。 *)
+  (* Value-level `&R v` also parses all 4 modes. Escaping the region triggers
+     a region-escape error, so we verify by pinning the mode via annotation
+     and consuming inside the region. *)
   check "borrow: value-level &R v defaults to borrowed read"
     (Pipeline.process
        "region R { let _ = (&R 5 : &R int) in 42 }") "42";
@@ -4270,13 +4274,13 @@ let () =
   check "borrow: value-level &exclusive R v"
     (Pipeline.process
        "region R { let _ = (&exclusive R 5 : &exclusive R int) in 42 }") "42";
-  (* annotation で mode を強制 → mismatch なら型エラー *)
+  (* Force the mode via annotation - on mismatch it's a type error *)
   check_raises "borrow: value-level mode mismatch fails (&R 5 : &mut R int)"
     (fun () ->
       Pipeline.process
         "region R { let _ = (&R 5 : &mut R int) in 42 }");
 
-  (* Unify は mode を区別する (subtyping なし、strict equality) *)
+  (* Unify distinguishes modes (no subtyping, strict equality) *)
   check_raises "borrow: &R != &mut R (caller passes &R to &mut R param)"
     (fun () ->
       Pipeline.process
@@ -4292,7 +4296,7 @@ let () =
         "let f = fn (x: &shared write R int) -> 1 in \
          region R { f (&exclusive R 5) }");
 
-  (* 同じ mode 同士は通る *)
+  (* Same mode on both sides passes *)
   check "borrow: same-mode call type-checks (mut → mut)"
     (Pipeline.process
        "let f = fn (x: &mut R int) -> 42 in region R { f (&mut R 5) }")
@@ -4302,7 +4306,7 @@ let () =
        "let f = fn (x: &shared write R int) -> 42 in \
         region R { f (&shared write R 5) }") "42";
 
-  (* --- Phase 11.3: &R T を介した field access の auto-deref --- *)
+  (* --- Phase 11.3: auto-deref of field access through &R T --- *)
   check "borrow: field access through &R (auto-deref)"
     (Pipeline.process
        "type Pt = { x: int, y: int };\n\
@@ -4339,7 +4343,7 @@ let () =
     "(&R Lg11r -> (str -> unit))";
 
   (* --- Phase 11.4: borrow checker --- *)
-  (* 並存 OK: shared read 同士、shared write 同士 *)
+  (* Coexistence OK: shared read with shared read, shared write with shared write *)
   check "borrow checker: multiple &R on same var → OK"
     (Pipeline.process
        "region R { let v = 5 in let a = &R v in let b = &R v in 42 }")
@@ -4351,36 +4355,36 @@ let () =
         let b = &shared write R v in 42 }")
     "42";
 
-  (* 衝突: &R + &mut R *)
+  (* Conflict: &R + &mut R *)
   check_raises "borrow checker: &R + &mut R on same var → conflict"
     (fun () ->
       Pipeline.process
         "region R { let v = 5 in \
          let a = &R v in let b = &mut R v in 42 }");
 
-  (* 衝突: &mut R + &mut R (排他) *)
+  (* Conflict: &mut R + &mut R (exclusive) *)
   check_raises "borrow checker: &mut R + &mut R → conflict"
     (fun () ->
       Pipeline.process
         "region R { let v = 5 in \
          let a = &mut R v in let b = &mut R v in 42 }");
 
-  (* 衝突: &R + &shared write R (shared read invalidated by shared write) *)
+  (* Conflict: &R + &shared write R (shared read invalidated by shared write) *)
   check_raises "borrow checker: &R + &shared write → conflict"
     (fun () ->
       Pipeline.process
         "region R { let v = 5 in \
          let a = &R v in let b = &shared write R v in 42 }");
 
-  (* 衝突: &exclusive R は他とどれとも共存不可 *)
+  (* Conflict: &exclusive R cannot coexist with anything else *)
   check_raises "borrow checker: &exclusive + &R → conflict"
     (fun () ->
       Pipeline.process
         "region R { let v = 5 in \
          let a = &exclusive R v in let b = &R v in 42 }");
 
-  (* Phase 17.2 / DEFERRED §2.5: conflict matrix の残り 4 ペア (full
-     10 ペア = 4 mode × 4 mode の対称行列を埋める) *)
+  (* Phase 17.2 / DEFERRED §2.5: the remaining 4 pairs of the conflict matrix
+     (filling the full 10 pairs = symmetric 4 mode x 4 mode matrix) *)
   check_raises "borrow checker: &shared write + &exclusive → conflict"
     (fun () ->
       Pipeline.process
@@ -4402,15 +4406,15 @@ let () =
         "region R { let v = 5 in \
          let a = &exclusive R v in let b = &mut R v in 42 }");
 
-  (* 異なる region なら同じ変数でも衝突しない (region 隔離) *)
+  (* Different regions don't conflict even for the same variable (region isolation) *)
   check "borrow checker: same var in different regions → OK"
     (Pipeline.process
        "region R { region S { let v = 5 in \
         let a = &R v in let b = &mut S v in 42 } }")
     "42";
 
-  (* Phase 17.2: tuple 内に conflicting な 2 borrow を書くと検出される
-     (1 つ目を eval → active に追加 → 2 つ目を eval) *)
+  (* Phase 17.2: two conflicting borrows inside a tuple are detected
+     (eval the first -> add to active -> eval the second) *)
   check_raises "borrow checker (tuple): (&R v, &mut R v) → conflict"
     (fun () ->
       Pipeline.process
@@ -4427,15 +4431,15 @@ let () =
         let _t = (&R v, &R v) in 42 }")
     "42";
 
-  (* 異なる変数なら衝突しない *)
+  (* Different variables don't conflict *)
   check "borrow checker: different vars don't conflict"
     (Pipeline.process
        "region R { let x = 1 in let y = 2 in \
         let a = &R x in let b = &mut R y in 42 }")
     "42";
 
-  (* Phase 19.x: borrow 越し field access の codegen 対応。
-     ty_tag (TyRef) と Field_get (auto-deref) が 3 backend 全部で動く。 *)
+  (* Phase 19.x: codegen support for field access through a borrow.
+     ty_tag (TyRef) and Field_get (auto-deref) work across all 3 backends. *)
   let borrow_field_src =
     "let use_log = fn (lg: &shared write R Logger) -> \
        let __ = lg.info \"hello\" in lg.warn \"world\";\n\
@@ -4463,7 +4467,7 @@ let () =
      Codegen_wasm.emit_program ~main_ty:Ast.TyUnit prog)
     "$use_log";
 
-  (* 衝突メッセージに「previous borrow at」note が含まれる *)
+  (* The conflict message includes a "previous borrow at" note *)
   let conflict_msg =
     try
       let _ = Pipeline.process
@@ -4474,7 +4478,7 @@ let () =
   assert_contains "borrow checker: error message points to previous borrow"
     conflict_msg "previous borrow at";
 
-  (* --- Phase 12.1: `'a Vec` 最小ハーネス (Q-010 narrowed 実装第一段階) --- *)
+  (* --- Phase 12.1: minimal `'a Vec` harness (first implementation step of Q-010 narrowed) --- *)
   check "vec: vec_new : unit -> Vec[r, elem]"
     (Pipeline.type_of "vec_new") "(unit -> Vec['b, 'a])";
   check "vec: vec_push : Vec[r, a] -> a -> unit"
@@ -4571,13 +4575,14 @@ let () =
   check_raises "vec: vec_get out-of-bounds raises eval error"
     (fun () ->
       Pipeline.process "let v = vec_new () in vec_get v 0");
-  (* Codegen 状況 (Phase 15.1 〜 15.4):
-     - C / LLVM: Vec[R, T] が要素型 T を一般化 — int / bool / str / tuple /
-       record / variant 全対応 (Phase 15.2 / 15.3)。OwnedVec / StrBuf / Map
-       は引き続き reject。
-     - Wasm: Vec[R, T] 対応 (Phase 15.4)。Wasm では値がすべて 4-byte i32
-       なので per-T monomorphize 不要、単一 $mere_vec_* runtime で扱う。 *)
-  (* Phase 15.1: Vec[R, int] は C codegen で動く (e2e は examples/vec_codegen_c.mere) *)
+  (* Codegen status (Phases 15.1 - 15.4):
+     - C / LLVM: Vec[R, T] generalizes over the element type T — supports
+       int / bool / str / tuple / record / variant (Phase 15.2 / 15.3).
+       OwnedVec / StrBuf / Map remain rejected.
+     - Wasm: Vec[R, T] supported (Phase 15.4). In Wasm every value is a 4-byte
+       i32, so no per-T monomorphization is needed; a single $mere_vec_*
+       runtime handles all element types. *)
+  (* Phase 15.1: Vec[R, int] works in C codegen (e2e: examples/vec_codegen_c.mere) *)
   (* Test helper: process top-level decls (Top_type / Top_record / etc.)
      before typing the main expr — needed for user-defined types. *)
   let typed_prog src =
@@ -4615,9 +4620,9 @@ let () =
   in
   assert_contains "vec: C codegen binds vec_new inside region R to that region"
     c_src_region_R "mere_vec_int_new(&__region_R)";
-  (* Phase 15.2: Vec[R, T] は T が codegen 対応の concrete type ならすべて
-     対応 — int / bool / str / tuple / record / variant。下は str / tuple
-     / 多相 record を例に accept を確認。 *)
+  (* Phase 15.2: Vec[R, T] supports any T that is a codegen-supported concrete
+     type — int / bool / str / tuple / record / variant. Below we confirm
+     acceptance for str / tuple / polymorphic record as examples. *)
   let c_src_str = vec_codegen_c
     "let v = vec_new () in let r = vec_push v \"hi\" in vec_len v"
   in
@@ -4628,7 +4633,7 @@ let () =
   in
   assert_contains "vec: C codegen accepts Vec[R, tuple]"
     c_src_tup "mere_vec_tuple_int_int";
-  (* Phase 15.3: LLVM IR codegen も Vec[R, T] を要素型一般化で対応。 *)
+  (* Phase 15.3: LLVM IR codegen also supports Vec[R, T] generalized over element type. *)
   let vec_codegen_llvm src =
     let prog = typed_prog src in
     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog
@@ -4653,9 +4658,9 @@ let () =
     (vec_codegen_llvm
        "region R { let v = vec_new () in let r = vec_push v 7 in vec_len v }")
     "@mere_vec_int_new";
-  (* Phase 15.4: Wasm backend も Vec[R, T] を accept。Wasm では値が
-     すべて 4-byte i32 なので per-T monomorphize 不要、単一の
-     $mere_vec_* runtime で全要素型を扱う。 *)
+  (* Phase 15.4: the Wasm backend also accepts Vec[R, T]. In Wasm every value
+     is a 4-byte i32, so per-T monomorphization is unnecessary and a single
+     $mere_vec_* runtime handles all element types. *)
   let vec_codegen_wasm src =
     let prog = typed_prog src in
     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog
@@ -4675,7 +4680,7 @@ let () =
     (vec_codegen_wasm
        "let v = vec_new () in let r = vec_push v (1, 2) in vec_len v")
     "$mere_vec_push";
-  (* --- Phase 15.5: 高階 API (vec_set / vec_iter / vec_fold) の codegen --- *)
+  (* --- Phase 15.5: codegen of higher-order API (vec_set / vec_iter / vec_fold) --- *)
   let src_set =
     "let v = vec_new () in let __ = vec_push v 10 in \
      let __ = vec_push v 20 in let __ = vec_set v 0 99 in vec_get v 0"
@@ -4718,7 +4723,7 @@ let () =
     (Pipeline.process src_iter) "23";
   check "vec_fold: interpreter parity"
     (Pipeline.process src_fold) "14";
-  (* --- Phase 15.6: vec_map / vec_filter の 3 backend codegen --- *)
+  (* --- Phase 15.6: 3-backend codegen of vec_map / vec_filter --- *)
   let src_map =
     "let v = vec_new () in let __ = vec_push v 1 in \
      let __ = vec_push v 2 in let __ = vec_push v 3 in \
@@ -4796,7 +4801,7 @@ let () =
     (Pipeline.process src_to_owned) "5";
   check "owned_vec_to_vec: interpreter parity"
     (Pipeline.process src_o2v) "5";
-  (* --- Phase 15.8: OwnedVec の main 末一括 free (registry) --- *)
+  (* --- Phase 15.8: bulk free of OwnedVec at end of main (registry) --- *)
   assert_contains "owned_vec: C codegen emits registry"
     (vec_codegen_c src_owned) "__mere_owned_vec_register";
   assert_contains "owned_vec: C codegen calls free_all in main"
@@ -4805,8 +4810,8 @@ let () =
     (vec_codegen_llvm src_owned) "@__mere_owned_vec_register";
   assert_contains "owned_vec: LLVM codegen calls free_all in main"
     (vec_codegen_llvm src_owned) "@__mere_owned_vec_free_all";
-  (* Wasm では malloc が無い (linear memory なので process exit で OS が
-     一括解放) — registry / free_all は emit されないこと。 *)
+  (* Wasm has no malloc (linear memory is bulk-released by the OS on process exit),
+     so registry / free_all should not be emitted. *)
   let wat_owned = vec_codegen_wasm src_owned in
   if
     (try ignore (String.length wat_owned); false with _ -> true)
@@ -4821,9 +4826,9 @@ let () =
   else ()
   ;
 
-  (* --- Phase 12.2: Vec[R, T] 構文 (Q-010 narrowed → 実装第二段階) --- *)
-  (* 軽量版: パース受付のみ。R は型表現上ドロップされ、`T Vec` と
-     同一の TyCon になる (forward-compatible)。 *)
+  (* --- Phase 12.2: Vec[R, T] syntax (Q-010 narrowed -> second implementation step) --- *)
+  (* Lightweight version: parse-only. R is dropped from the type representation
+     and becomes the same TyCon as `T Vec` (forward-compatible). *)
   check "vec[R, T]: type-annotation prints as Vec[R, int]"
     (Pipeline.type_of "fn (v: Vec[R, int]) -> vec_len v")
     "(Vec[R, int] -> int)";
@@ -4845,7 +4850,7 @@ let () =
   check "vec[R, T]: vec_new outside region defaults to __heap"
     (Pipeline.type_of "vec_new ()") "Vec[__heap, 'a]";
 
-  (* --- Phase 12.5: OwnedVec[T] (Q-010 narrowed (b) 別型分離) --- *)
+  (* --- Phase 12.5: OwnedVec[T] (Q-010 narrowed (b) — separated type) --- *)
   check "owned_vec: owned_vec_new : unit -> 'a OwnedVec"
     (Pipeline.type_of "owned_vec_new") "(unit -> 'a OwnedVec)";
   check "owned_vec: basic push/len round-trip"
@@ -4857,12 +4862,12 @@ let () =
        "let v = owned_vec_new () in \
         { owned_vec_push v \"a\"; owned_vec_push v \"b\"; \
           owned_vec_get v 0 ++ owned_vec_get v 1 }") "\"ab\"";
-  (* 設計の核: OwnedVec は Drop なので region に置けない *)
+  (* Core of the design: OwnedVec is Drop, so it cannot be placed in a region *)
   check_raises "owned_vec: cannot be placed in a region (Drop)"
     (fun () ->
       Pipeline.process
         "region R { let v = owned_vec_new () in &R v }");
-  (* 対照: Vec[R, T] は Trivial なので region に置ける *)
+  (* Contrast: Vec[R, T] is Trivial, so it can be placed in a region *)
   check "owned_vec: contrast — Vec[R, T] still goes in region"
     (Pipeline.process
        "region R { let v = vec_new () in \
@@ -4899,7 +4904,7 @@ let () =
       let prog = Pipeline.parse_program "len \"hi\"" in
       let _ = Codegen_c.emit_program ~main_ty:Ast.TyInt prog in ());
 
-  (* --- Phase 12.7: StrBuf[R] (region 内可変文字列バッファ) --- *)
+  (* --- Phase 12.7: StrBuf[R] (mutable string buffer inside a region) --- *)
   check "strbuf: strbuf_new : unit -> StrBuf['r]"
     (Pipeline.type_of "strbuf_new") "(unit -> StrBuf['a])";
   check "strbuf: push + to_str round-trip"
@@ -4927,7 +4932,7 @@ let () =
   check "strbuf: polymorphic len works on StrBuf"
     (Pipeline.process
        "let b = strbuf_new () in { strbuf_push b \"hello\"; len b }") "5";
-  (* Phase 15.9: 3 backend で StrBuf[R] codegen を accept する。 *)
+  (* Phase 15.9: all 3 backends accept StrBuf[R] codegen. *)
   let strbuf_src =
     "let b = strbuf_new () in let __ = strbuf_push b \"hi\" in strbuf_len b"
   in
@@ -4949,7 +4954,7 @@ let () =
   check "strbuf: interpreter parity"
     (Pipeline.process strbuf_src) "2";
 
-  (* --- Phase 12.9: Vec の高階 API (iter / map / fold / set) --- *)
+  (* --- Phase 12.9: Vec higher-order API (iter / map / fold / set) --- *)
   check "vec_iter: type signature"
     (Pipeline.type_of "vec_iter")
     "(Vec['b, 'a] -> (('a -> unit) -> unit))";
@@ -4963,7 +4968,7 @@ let () =
     (Pipeline.type_of "vec_set")
     "(Vec['b, 'a] -> (int -> ('a -> unit)))";
 
-  (* runtime 動作 *)
+  (* runtime behavior *)
   check "vec_map: doubling ints"
     (Pipeline.process
        "let v = vec_new () in \
@@ -5001,7 +5006,7 @@ let () =
           { vec_iter src (fn x -> vec_push acc (x * 100)); \
             vec_fold acc 0 (fn s -> fn y -> s + y) } }") "6000";
 
-  (* region 内で vec_map 結果も同じ region *)
+  (* Inside a region, vec_map's result is in the same region *)
   check "vec_map: result Vec shares the source's region"
     (Pipeline.type_of
        "fn () -> region R { \
@@ -5094,7 +5099,7 @@ let () =
         let __ = map_iter m (fn k -> fn vv -> vec_push v 1) in \
         vec_len v")
     "0";
-  (* Phase 15.10: 3 backend で Map[R, int / str, V] codegen を accept する。 *)
+  (* Phase 15.10: all 3 backends accept Map[R, int / str, V] codegen. *)
   let map_str_src =
     "let m = map_new () in let __ = map_set m \"a\" 10 in \
      let __ = map_set m \"b\" 20 in map_get m \"a\" + map_get m \"b\" + map_len m"
@@ -5138,7 +5143,7 @@ let () =
   check "map[int, int]: interpreter parity"
     (Pipeline.process map_int_src) "302";
 
-  (* Phase 19.2: map_iter codegen の 3 backend assertion *)
+  (* Phase 19.2: 3-backend assertions for map_iter codegen *)
   let map_iter_src =
     "let m = map_new () in let __ = map_set m \"a\" 1 in \
      let __ = map_set m \"b\" 2 in let v = vec_new () in \
@@ -5160,7 +5165,7 @@ let () =
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
     "$mere_map_str_iter";
-  (* --- Phase 15.11: ad-hoc polymorphic `len` の codegen --- *)
+  (* --- Phase 15.11: codegen of ad-hoc polymorphic `len` --- *)
   let len_src =
     "let v = vec_new () in let __ = vec_push v 1 in \
      let __ = vec_push v 2 in let __ = vec_push v 3 in \
@@ -5189,7 +5194,7 @@ let () =
     "$mere_vec_len";
   check "len: interpreter parity"
     (Pipeline.process len_src) "12";  (* 3 + 5 + 4 *)
-  (* --- Phase 15.12: vec_to_list + len on list の 3 backend codegen --- *)
+  (* --- Phase 15.12: 3-backend codegen of vec_to_list + len on list --- *)
   let v2l_src =
     "type 'a list = Nil | Cons of 'a * 'a list;\n\
      let v = vec_new () in let __ = vec_push v 10 in \
@@ -5229,7 +5234,7 @@ let () =
     "$mere_list_len";
   check "vec_to_list + len-on-list: interpreter parity"
     (Pipeline.process v2l_src) "13";  (* len 3 + head 10 = 13 *)
-  (* --- Phase 15.13: with-OwnedVec で scope 末 free --- *)
+  (* --- Phase 15.13: scope-end free for with-OwnedVec --- *)
   let with_src =
     "with o = owned_vec_new () in \
      let __ = owned_vec_push o 10 in \
@@ -5248,7 +5253,7 @@ let () =
     "store ptr null, ptr";
   check "with-OwnedVec: interpreter parity"
     (Pipeline.process with_src) "30";
-  (* --- Phase 15.14: Map K 拡張 (bool / tuple keys) --- *)
+  (* --- Phase 15.14: Map K extension (bool / tuple keys) --- *)
   let map_bool_src =
     "let m = map_new () in let __ = map_set m true 100 in \
      let __ = map_set m false 200 in \
@@ -5293,7 +5298,7 @@ let () =
     (Pipeline.process map_bool_src) "302";
   check "map[tuple]: interpreter parity"
     (Pipeline.process map_tup_src) "121";
-  (* --- Phase 15.15: Map K の record / nullary variant 拡張 --- *)
+  (* --- Phase 15.15: Map K extension for record / nullary variant --- *)
   let map_var_src =
     "type Color = Red | Green | Blue;\n\
      let m = map_new () in let __ = map_set m Red 1 in \
@@ -5323,7 +5328,7 @@ let () =
     (Pipeline.process map_var_src) "9";
   check "map[record]: interpreter parity"
     (Pipeline.process map_rec_src) "1000";
-  (* --- Phase 15.16: Map K の payload 付き variant 拡張 --- *)
+  (* --- Phase 15.16: Map K extension for variants with payload --- *)
   (* C: mixed-payload variant OK *)
   let map_varp_mixed_src =
     "type TagMixed = AMixed of int | BMixed of str | CMixed;\n\
@@ -5336,7 +5341,7 @@ let () =
     "mere_map_TagMixed_int";
   check "map[payload variant, mixed]: C interpreter parity"
     (Pipeline.process map_varp_mixed_src) "603";
-  (* LLVM / Wasm: uniform-payload variant (MVP 制約に従う) *)
+  (* LLVM / Wasm: uniform-payload variant (subject to MVP constraints) *)
   let map_varp_uniform_src =
     "type TagU = AU of int | BU of int | CU;\n\
      let m = map_new () in let __ = map_set m (AU 10) 100 in \
@@ -5353,8 +5358,8 @@ let () =
   check "map[payload variant, uniform]: interpreter parity"
     (Pipeline.process map_varp_uniform_src) "1502";
 
-  (* --- Phase 11.5: borrow checker — 複雑式 (field chain) の追跡 --- *)
-  (* 同じ field を 2 つの非互換 mode で借りると衝突検出 *)
+  (* --- Phase 11.5: borrow checker — tracking complex expressions (field chains) --- *)
+  (* Borrowing the same field with two incompatible modes is detected as a conflict *)
   check_raises "borrow checker (place): &R p.x + &mut R p.x → conflict"
     (fun () ->
       Pipeline.process
@@ -5363,7 +5368,7 @@ let () =
            let p = Pt115a { x = 3, y = 4 } in\n\
            let a = &R p.x in let b = &mut R p.x in 42\n\
          }");
-  (* 異なる field なら衝突しない *)
+  (* Different fields don't conflict *)
   check "borrow checker (place): &R p.x + &mut R p.y → OK (different fields)"
     (Pipeline.process
        "type Pt115b = { x: int, y: int };\n\
@@ -5371,15 +5376,15 @@ let () =
           let p = Pt115b { x = 3, y = 4 } in\n\
           let a = &R p.x in let b = &mut R p.y in 42\n\
         }") "42";
-  (* shared read 同士は OK *)
-  check "borrow checker (place): &R p.x + &R p.x → OK (shared read 同士)"
+  (* Shared reads coexist OK *)
+  check "borrow checker (place): &R p.x + &R p.x -> OK (both shared read)"
     (Pipeline.process
        "type Pt115c = { x: int, y: int };\n\
         region R {\n\
           let p = Pt115c { x = 3, y = 4 } in\n\
           let a = &R p.x in let b = &R p.x in 42\n\
         }") "42";
-  (* nested field chain (p.q.r) も追跡される *)
+  (* Nested field chains (p.q.r) are also tracked *)
   check_raises "borrow checker (place): nested field — p.q.r conflict"
     (fun () ->
       Pipeline.process
@@ -5389,15 +5394,15 @@ let () =
            let o = Outer115 { inner = Inner115 { v = 1 } } in\n\
            let a = &R o.inner.v in let b = &mut R o.inner.v in 42\n\
          }");
-  (* 親 と 子 path は独立に追跡 (制約緩い、現状の単純な比較) *)
-  check "borrow checker (place): p と p.x は別 place として扱われる"
+  (* Parent and child paths are tracked independently (loose, simple comparison for now) *)
+  check "borrow checker (place): p and p.x are treated as distinct places"
     (Pipeline.process
        "type Pt115d = { x: int, y: int };\n\
         region R {\n\
           let p = Pt115d { x = 3, y = 4 } in\n\
           let a = &R p in let b = &mut R p.x in 42\n\
         }") "42";
-  (* エラーメッセージは place ID (`p.x`) を含む *)
+  (* The error message includes the place ID (e.g. `p.x`) *)
   let conflict_msg =
     try
       let _ = Pipeline.process
@@ -5412,7 +5417,7 @@ let () =
   assert_contains "borrow checker (place): error mentions field-place path"
     conflict_msg "p.x";
 
-  (* --- Phase 11.6: borrow checker — if 分岐を介した borrow 伝播 --- *)
+  (* --- Phase 11.6: borrow checker — borrow propagation through if branches --- *)
   (* let r = if ... then &R x else &R x in let m = &mut R x → conflict *)
   check_raises "borrow checker (if): &R x captured via if then conflict"
     (fun () ->
@@ -5422,7 +5427,7 @@ let () =
            let r = if 1 < 2 then &R x else &R x in\n\
            let m = &mut R x in 0\n\
          }");
-  (* 両分岐の borrow が union として伝播 (片方だけのケースでも検出) *)
+  (* Borrows from both branches propagate as a union (detected even with only one branch) *)
   check_raises "borrow checker (if): borrow from else-branch also tracked"
     (fun () ->
       Pipeline.process
@@ -5439,7 +5444,7 @@ let () =
            let r = if 1 < 2 then &R x else &R y in\n\
            let m = &mut R x in 0\n\
          }");
-  (* if-borrow が非衝突なら通る *)
+  (* Non-conflicting if-borrows pass *)
   check "borrow checker (if): if-borrow vs unrelated var → OK"
     (Pipeline.process
        "region R {\n\
@@ -5447,7 +5452,7 @@ let () =
           let r = if 1 < 2 then &R x else &R y in\n\
           let m = &mut R z in 42\n\
         }") "42";
-  (* nested let inside if value も追跡される *)
+  (* Nested let inside an if value is also tracked *)
   check_raises "borrow checker (if): nested let-in-if propagates borrow"
     (fun () ->
       Pipeline.process
@@ -5460,8 +5465,8 @@ let () =
            let m = &mut R x in 0\n\
          }");
 
-  (* --- Phase 11.7: match arm からの borrow 伝播 --- *)
-  check_raises "borrow checker (match): arm からの borrow が active に"
+  (* --- Phase 11.7: borrow propagation from match arms --- *)
+  check_raises "borrow checker (match): borrow from arm becomes active"
     (fun () ->
       Pipeline.process
         "type 'a opt117 = N117 | S117 of 'a;\n\
@@ -5473,7 +5478,7 @@ let () =
            in\n\
            let m = &mut R x in 0\n\
          }");
-  (* --- Phase 9.3: 入れ子 module + `open M;` --- *)
+  (* --- Phase 9.3: nested modules + `open M;` --- *)
   check "module nested: M.N.f access"
     (Pipeline.process
        "module MNest {\n\
@@ -5522,7 +5527,7 @@ let () =
         open Box93;\n\
         v + Box93.v") "200";
 
-  (* --- Phase 18.2 / DEFERRED §4.1 残: `open A.B;` nested path --- *)
+  (* --- Phase 18.2 / DEFERRED §4.1 remaining: `open A.B;` nested path --- *)
   check "open nested: open A.B brings A.B's bindings unqualified"
     (Pipeline.process
        "module An182 {\n\
@@ -5551,7 +5556,7 @@ let () =
          open Xn184.NotThere;\n\
          v");
 
-  (* --- Phase 9.4: module 内での type / record declare --- *)
+  (* --- Phase 9.4: type / record declarations inside a module --- *)
   check "module-type: record declared inside module body"
     (Pipeline.process
        "module M94 {\n\
@@ -5574,11 +5579,11 @@ let () =
         };\n\
         Status94.label (Err94 \"boom\")") "\"boom\"";
 
-  (* --- Phase 18.1 / DEFERRED §4.1 残: module constructor / record の
-     M-prefix scoping。bare 名は backward compat で動き、`M.X` qualified
-     access も動く。typer 側の alias 経由で同じ ctor / record として
-     扱われ、eval は ctor 名を canonical (bare) に正規化して保持する
-     ので pattern match も自然に動く。 *)
+  (* --- Phase 18.1 / DEFERRED §4.1 remaining: M-prefix scoping for module
+     constructors / records. Bare names still work for backward compatibility,
+     and `M.X` qualified access works too. On the typer side they are treated
+     as the same ctor / record via aliases, and eval normalizes the ctor name
+     to its canonical (bare) form, so pattern matching also works naturally. *)
   check "module ctor: qualified access M.X works"
     (Pipeline.process
        "module Mq1 { type T1q = Red1q | Blue1q; };\n\
@@ -5633,7 +5638,7 @@ let () =
   let alt_a = Filename.concat tmpdir "ax.lang" in
   let alt_b_relative = "./ax.lang" in
   write alt_a "let alt_val95 = 42;";
-  (* alt_a 経由と alt_b_relative 経由は canonical 同じ → 1 度のみ読込 *)
+  (* Via alt_a and via alt_b_relative are canonically equal -> loaded only once *)
   check "import95: canonical equality across relative / absolute forms"
     (Pipeline.process ~base_dir:tmpdir
        (Printf.sprintf
@@ -5701,7 +5706,7 @@ let () =
            let o = vec_to_owned v in &R o \
          }");
 
-  (* --- Phase 13: 型エラー UX 続編 — record field + qualified name typo --- *)
+  (* --- Phase 13: type-error UX, continued — record field + qualified name typo --- *)
   let field_typo_msg =
     try
       let _ = Pipeline.process
@@ -5748,8 +5753,8 @@ let () =
   assert_contains "qualified name typo: did-you-mean across module path"
     qname_typo_msg "did you mean `MathT.factorial`?";
 
-  (* --- Phase 12.12: 逆向き owned_vec_to_vec --- *)
-  check "owned_vec_to_vec: scheme (region は active_regions から)"
+  (* --- Phase 12.12: reverse direction owned_vec_to_vec --- *)
+  check "owned_vec_to_vec: scheme (region from active_regions)"
     (Pipeline.type_of "owned_vec_to_vec")
     "('a OwnedVec -> Vec['b, 'a])";
   check "owned_vec_to_vec: inside region R, returns Vec[R, T]"
@@ -5783,7 +5788,7 @@ let () =
           vec_len v * 10 + vec_get v 0 \
         }") "120";
 
-  check_raises "borrow checker (match): 別 arm 同士の union も active"
+  check_raises "borrow checker (match): the union of distinct arms is also active"
     (fun () ->
       Pipeline.process
         "type 'a opt117b = N117b | S117b of 'a;\n\
@@ -5795,7 +5800,7 @@ let () =
            in\n\
            let m = &mut R y in 0\n\
          }");
-  check "borrow checker (match): 関係ない var との非衝突は OK"
+  check "borrow checker (match): non-conflict with an unrelated var is OK"
     (Pipeline.process
        "type 'a opt117c = N117c | S117c of 'a;\n\
         region R {\n\
@@ -5807,7 +5812,7 @@ let () =
           let m = &mut R z in 42\n\
         }") "42";
 
-  (* --- Phase 17.1 / DEFERRED §2.1 残: 関数返り値の borrow 追跡 --- *)
+  (* --- Phase 17.1 / DEFERRED §2.1 remaining: borrow tracking of function return values --- *)
   check_raises "borrow checker (app-result): &mut R r when r came from fn returning &R T"
     (fun () ->
       Pipeline.process
@@ -5852,8 +5857,8 @@ let () =
      Buffer.contents buf)
     "`rrr` is already borrowed";
 
-  (* --- Phase 19.4: prelude 機構 (`type 'a list` を自動 import) --- *)
-  (* prelude 入った状態で、Nil / Cons をユーザコードで宣言せずに使える *)
+  (* --- Phase 19.4: prelude machinery (auto-import `type 'a list`) --- *)
+  (* With prelude enabled, Nil / Cons are usable without user declarations *)
   check "prelude: Cons / Nil work without explicit type declare"
     (Pipeline.process "Cons (1, Cons (2, Cons (3, Nil)))")
     "[1, 2, 3]";
@@ -5867,12 +5872,12 @@ let () =
     "\"a\"";
   check "prelude: pattern match on Nil works"
     (Pipeline.process "match Nil with | Nil -> 1 | _ -> 0") "1";
-  (* user の同名 redeclare は backward compat で動く *)
+  (* User redeclaration with the same name works for backward compatibility *)
   check "prelude: user redeclare of `type 'a list` is harmless"
     (Pipeline.process
        "type 'a list = Nil | Cons of 'a * 'a list;\n\
         Cons (42, Nil)") "[42]";
-  (* prelude を opt-out すると AST に prelude decls が prepend されない *)
+  (* Opting out of prelude omits prepending the prelude decls to the AST *)
   check "prelude: ?prelude:false omits prelude decls"
     (let prog = Pipeline.parse_program ~prelude:false "42" in
      string_of_int (List.length prog.Ast.decls))
@@ -5881,7 +5886,7 @@ let () =
     (let prog = Pipeline.parse_program "42" in
      (* Phase 19.5: 3 types + Phase 21.2: 6 list helpers
         + Phase 23.2: 3 option + 5 result helpers + Phase 33.1: 1
-        + Phase 36 (sugar 期): 1 range + 4 list helpers + 3 flatten
+        + Phase 36 (sugar phase): 1 range + 4 list helpers + 3 flatten
         + Phase 36 (helper batch): 8 helpers
           (list_zip / list_for_all / list_any / list_member /
            list_sum / list_product / list_max / list_min)
@@ -5920,9 +5925,9 @@ let () =
     (Pipeline.process
        "match Err \"bad\" with | Ok n -> n | Err _ -> -1") "-1";
 
-  (* Phase 21.1 (DEFERRED §1.7): 多相 user 定義 let-rec の codegen
-     monomorphization. resolve_fn_types で binding-site Fun.ty を
-     concrete use-site と unify することで body の tyvar が解決される。 *)
+  (* Phase 21.1 (DEFERRED §1.7): codegen monomorphization of polymorphic
+     user-defined let-rec. In resolve_fn_types, unifying the binding-site
+     Fun.ty with the concrete use-site resolves the body's tyvars. *)
   let typed_prog src =
     let prog = Pipeline.parse_program src in
     let eval_env = ref Eval.initial_env in
@@ -5964,7 +5969,7 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 37.A: while at top-level の codegen 検証 (Let_rec lifting
+  (* Phase 37.A: codegen verification of while at top-level (Let_rec lifting
      from Let value position) *)
   let while_top_src =
     "let counter = map_new ();
@@ -5986,11 +5991,11 @@ let () =
      if String.length wat_src > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 38.C-1: multi-arg curried builtin first-class value 化
-     (DEFERRED §1.2 A2 残りの spike — owned_vec_push のみ C で対応)
-     value 位置で synthesize_curried_eta が `fn __arg0 -> fn __arg1 ->
-     owned_vec_push __arg0 __arg1` を生成、 anonymous Fun adapter machinery
-     + direct-call fast path に乗る。 *)
+  (* Phase 38.C-1: turning multi-arg curried builtins into first-class values
+     (remaining spike from DEFERRED §1.2 A2 — only owned_vec_push covered in C).
+     At a value position, synthesize_curried_eta generates `fn __arg0 -> fn __arg1 ->
+     owned_vec_push __arg0 __arg1`, which rides on the anonymous Fun adapter
+     machinery and the direct-call fast path. *)
   check "Phase 38.C-1: owned_vec_push fully unapplied (interp)"
     (Pipeline.process
        "let v = owned_vec_new () in
@@ -6027,7 +6032,7 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 38.C-2: 2-arg curried collection builtins への展開
+  (* Phase 38.C-2: extension to 2-arg curried collection builtins
      (owned_vec_get / vec_push / vec_get / strbuf_push / map_get / map_has) *)
   check "Phase 38.C-2: owned_vec_get partial app (interp)"
     (Pipeline.process
@@ -6107,7 +6112,7 @@ let () =
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 38.C-4/5: LLVM / Wasm に port *)
+  (* Phase 38.C-4/5: port to LLVM / Wasm *)
   check "Phase 38.C-4: owned_vec_push partial emits LLVM IR"
     (let ll_src = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let v = owned_vec_new () in
@@ -6145,11 +6150,11 @@ let () =
     "ok";
 
   (* Phase 38.G-1: OwnedVec auto scope-bound Drop (DEFERRED §1.3 Level 1)
-     `let v = owned_vec_new () in body` で body が v を escape させない時、
-     scope 末で `free(v->data)` を auto-emit。 conservative 静的解析
-     (no_value_leak + tail_does_not_return_v + value is fresh owned_vec_new
-     factory call) を満たせば auto-Drop、 さもなければ既存の registry +
-     main-end sweep にフォールバック。 *)
+     When body in `let v = owned_vec_new () in body` does not let v escape,
+     auto-emit `free(v->data)` at scope end. If the conservative static
+     analysis (no_value_leak + tail_does_not_return_v + value is a fresh
+     owned_vec_new factory call) is satisfied, auto-Drop; otherwise fall back
+     to the existing registry + main-end sweep. *)
   let count_owned_vec_free_c src =
     let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog src) in
     let needle = "free(((__mere_owned_vec_base*)" in
@@ -6258,7 +6263,7 @@ let () =
         let _ = owned_vec_push v 1 in
         v" then "main has free" else "ok")
     "ok";
-  check "Phase 38.G-1: Phase 38.C partial app + auto-Drop は両立"
+  check "Phase 38.G-1: Phase 38.C partial app + auto-Drop coexist"
     (string_of_int (count_owned_vec_free_c
        "let v = owned_vec_new () in
         let _ = owned_vec_push v 0 in
@@ -6268,9 +6273,10 @@ let () =
         owned_vec_len v"))
     "1";
 
-  (* Phase 38.G-1 soundness: closure capturing v が body の tail で返るとき
-     auto-Drop すると use-after-free 発生。 taint 伝播で防止すること。 *)
-  check "Phase 38.G-1: 返される closure が v を capture → NO auto-Drop"
+  (* Phase 38.G-1 soundness: when a closure capturing v is returned at the tail
+     of the body, auto-Drop would cause use-after-free. Prevent it via taint
+     propagation. *)
+  check "Phase 38.G-1: returned closure captures v -> NO auto-Drop"
     (string_of_int (count_owned_vec_free_c
        "let make_getter = fn () ->
           let v = owned_vec_new () in
@@ -6280,7 +6286,7 @@ let () =
         let g = make_getter () in
         g 0"))
     "0";
-  check "Phase 38.G-1: tuple stash via let の transitive 検出"
+  check "Phase 38.G-1: transitive detection of tuple stash via let"
     (string_of_int (count_owned_vec_free_c
        "let make_pair = fn () ->
           let v = owned_vec_new () in
@@ -6290,7 +6296,7 @@ let () =
         let p = make_pair () in
         snd p"))
     "0";
-  check "Phase 38.G-1: scalar 派生 (len v) は taint 伝播しない"
+  check "Phase 38.G-1: scalar derivation (len v) does not propagate taint"
     (string_of_int (count_owned_vec_free_c
        "let v = owned_vec_new () in
         let _ = owned_vec_push v 1 in
@@ -6300,8 +6306,8 @@ let () =
     "1";
 
   (* Phase 22.1: P_tuple let pattern in C / LLVM / Wasm codegen.
-     `let (a, b) = E in B` で E が tuple 型のとき、tuple struct から
-     per-field 取り出しを emit。 *)
+     When E is a tuple type in `let (a, b) = E in B`, emit per-field
+     extraction from the tuple struct. *)
   check "§22.1: let (a, b) = E in B works in interpreter"
     (Pipeline.process "let (a, b) = (3, 4) in a + b") "7";
   check "§22.1: nested let-tuple chain works in interpreter"
@@ -6330,9 +6336,9 @@ let () =
     "ok";
 
   (* Phase 22.2: inner let-rec lifting in C codegen.
-     `let host = fn x -> let rec go = ... in go ...` を C codegen で
-     support。lift_inner_fns に Let_rec ケースを追加し、再帰 / 相互再帰
-     bindings を top-level lifted_fn に lift + 呼出を rewrite。 *)
+     Support `let host = fn x -> let rec go = ... in go ...` in C codegen.
+     Add a Let_rec case to lift_inner_fns to lift recursive / mutually
+     recursive bindings to top-level lifted_fn and rewrite call sites. *)
   check "§22.2: inner let-rec lifts in C codegen (self-recursive)"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let sum_to = fn (n: int) ->\n\
@@ -6355,8 +6361,8 @@ let () =
     "ok";
 
   (* Phase 22.3: char builtins (char_at / is_digit / is_alpha / is_space)
-     + str_of_int (= show_int alias) を C codegen で support。256-entry
-     static table 経由 + ctype.h ロジックの自前 inline。 *)
+     + str_of_int (alias for show_int) supported in C codegen. Use a
+     256-entry static table + inlined ctype.h logic. *)
   check "§22.3: char_at / is_digit emit C code"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let s = \"123abc\" in if is_digit (char_at s 0) then 1 else 0") in
@@ -6374,8 +6380,8 @@ let () =
     "ok";
 
   (* Phase 22.4: tuple struct body topo sort + fail builtin in C codegen.
-     ネストした tuple (tuple of tuple や record with tuple field) で
-     forward decl 順序を topo sort、fail を noreturn helper として emit。 *)
+     Topo-sort forward-decl order for nested tuples (tuple of tuple or
+     record with tuple field), and emit fail as a noreturn helper. *)
   check "§22.4: nested tuple struct topo sort (no incomplete type)"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let outer = ((\"x\", 1), 2) in let (inner, n) = outer in n") in
@@ -6394,7 +6400,7 @@ let () =
 
   (* Phase 22.5: substring / try_or / int_of_str builtins + unified
      struct body topo sort + str == strcmp + match abort cast + per-host
-     inner_lifts scope. mini_calc が C codegen 完全動作したマイルストーン。 *)
+     inner_lifts scope. Milestone where mini_calc fully works on C codegen. *)
   check "§22.5: substring emits in C codegen"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyStr (typed_prog
        "substring \"hello world\" 0 5") in
@@ -6540,10 +6546,10 @@ let () =
      if has "id__int" && has "id__str" then "ok" else "missing-spec")
     "ok";
 
-  (* Phase 25.3: LLVM inner let-rec lifting. C codegen の inner-fn lift を
-     LLVM codegen に移植。anonymous closure を per-host scope で drain
-     できるよう ce_host を closure_emission に追加。mini_calc が LLVM
-     codegen 完全動作 (interp と diff = 0)。 *)
+  (* Phase 25.3: LLVM inner let-rec lifting. Port the C codegen inner-fn lift
+     to LLVM codegen. Add ce_host to closure_emission so anonymous closures
+     can be drained per-host scope. Milestone where mini_calc fully works in
+     LLVM codegen (diff = 0 against interp). *)
   check "§25.3: LLVM inner let-rec lifts (self-recursive)"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let sum_to = fn (n: int) ->\n\
@@ -6572,9 +6578,9 @@ let () =
      if String.length ll > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 45 (DEFERRED §8): inner-lifted fn 同士の相互参照を transitive capture
-     で解決。 helper が base を capture し、 caller が helper を呼ぶ場合、 caller
-     も base を transitive 経由で capture する。 *)
+  (* Phase 45 (DEFERRED §8): resolve mutual references between inner-lifted fns
+     via transitive capture. If helper captures base and caller calls helper,
+     then caller transitively captures base too. *)
   check "§45: inner-lifted mutual reference (interp)"
     (Pipeline.process
        "let outer = fn (n: int) ->\n\
@@ -6601,9 +6607,9 @@ let () =
        \  find_a 0 in\n\
         scanner \"xyzbabc\"") "3";
 
-  (* Phase 25.4: LLVM str_unescape runtime helper + show_<variant> の
-     Phase 25.0 boxed payload load bug fix。show fn が payload field を
-     2-step load (load ptr, then load value) するように修正。 *)
+  (* Phase 25.4: LLVM str_unescape runtime helper + Phase 25.0 boxed-payload
+     load bug fix in show_<variant>. Fixed so that the show fn reads payload
+     fields with a 2-step load (load ptr, then load value). *)
   check "§25.4: LLVM str_unescape emits runtime helper"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
        "str_unescape \"a\\nb\"") in
@@ -6679,9 +6685,9 @@ let () =
      if has "rev__list_int" && has "rev__list_str" then "ok" else "missing-spec")
     "ok";
 
-  (* Phase 25.6: LLVM __lang_str_escape runtime + show_str 経由。
-     show_str が backslash-escape (newline / tab / cr / backslash / quote)
-     を interp と同じに出力する。 *)
+  (* Phase 25.6: LLVM __lang_str_escape runtime + show_str route.
+     show_str outputs backslash-escape (newline / tab / cr / backslash / quote)
+     the same way as interp. *)
   check "§25.6: LLVM str_escape runtime helper emitted"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog
        "show \"hi\"") in
@@ -6732,7 +6738,7 @@ let () =
         match A 42 with | A n -> show n | B s -> s") in
      if String.length wat > 0 then "ok" else "empty")
     "ok";
-  (* Phase 26.1: Wasm stdlib builtins (LLVM Phase 25.1/25.4 の Wasm 版). *)
+  (* Phase 26.1: Wasm stdlib builtins (Wasm version of LLVM Phases 25.1/25.4). *)
   check "§26.1: Wasm emits fail builtin (unreachable trap)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "if true then 1 else fail \"never\"") in
@@ -6785,18 +6791,19 @@ let () =
      in
      if has "$__lang_str_unescape" then "ok" else "missing")
     "ok";
-  (* Phase 27.3: Wasm ty_tag が StrBuf を許可。mere_strbuf runtime は
-     Phase 15.9 で実装済だが ty_tag が interpreter-only として早期 reject
-     していた。json_writer の StrBuf in tuple/variant 用法を unlock。 *)
+  (* Phase 27.3: Wasm ty_tag permits StrBuf. The mere_strbuf runtime was
+     already implemented in Phase 15.9, but ty_tag had been early-rejecting it
+     as interpreter-only. This unlocks the StrBuf-in-tuple/variant use
+     in json_writer. *)
   check "§27.3: Wasm StrBuf ty_tag returns strbuf"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyStr (typed_prog
        "region R { let buf = strbuf_new () in let _ = strbuf_push buf \"hi\" in strbuf_to_str buf }") in
      if String.length wat > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 27.2: Wasm main_ty で `()` を print し、auto-print のため
-     show_<main_ty> を強制登録。runtime 実行 (Node.js host harness) で
-     interp と PERFECT 一致するように。 *)
+  (* Phase 27.2: Wasm prints `()` for main_ty and force-registers
+     show_<main_ty> for auto-print, so that the runtime execution
+     (Node.js host harness) PERFECTLY matches interp. *)
   check "§27.2: Wasm main_ty=int auto-prints via show_int + puts"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let _ = print \"hi\" in 42") in
@@ -6824,9 +6831,9 @@ let () =
      if has "drop" && has "call $puts" then "ok" else "missing")
     "ok";
 
-  (* Phase 27.1: interp Map iter order を insertion order に固定。
-     C / LLVM / Wasm の Map runtime (parallel arrays) と揃えて、全 backend
-     で word_freq / mini_shell が PERFECT 一致するように。 *)
+  (* Phase 27.1: pin interp Map iter order to insertion order, to match the
+     C / LLVM / Wasm Map runtime (parallel arrays) so word_freq / mini_shell
+     match PERFECTLY across all backends. *)
   check "§27.1: interp Map iter follows insertion order"
     (Pipeline.process
        "region R {\n\
@@ -6894,7 +6901,7 @@ let () =
     "ok";
 
   (* Phase 26.4: Wasm multi-instantiation specialization
-     (LLVM Phase 25.5 の Wasm 版). *)
+     (Wasm version of LLVM Phase 25.5). *)
   check "§26.4: Wasm multi-inst poly fn emits 2 specs (int + str)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let rec id = fn x -> x in\n\
@@ -6913,7 +6920,7 @@ let () =
      if has "$id__int" && has "$id__str" then "ok" else "missing-spec")
     "ok";
 
-  (* Phase 26.3: Wasm inner let-rec lifting (LLVM Phase 25.3 の Wasm 版). *)
+  (* Phase 26.3: Wasm inner let-rec lifting (Wasm version of LLVM Phase 25.3). *)
   check "§26.3: Wasm inner let-rec lifts (self-recursive)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let sum_to = fn (n: int) ->\n\
@@ -6931,12 +6938,12 @@ let () =
      in
      if has "__lifted_go_" then "ok" else "no-lift")
     "ok";
-  (* Phase 30.2 (DEFERRED §1.10 fix, C only): top-level 非-fn let が
-     top-level fn body 内から参照されると C codegen が global として宣言。
-     LLVM / Wasm はまだ別経路で "unbound variable" を投げる. *)
-  (* Phase 32.1-32.4: C1 FFI (extern fn). 4 backend で同じ extern fn を
-     declaration → codegen 経路でテスト。interp は lookup_extern の mock を
-     経由、3 codegen はそれぞれの dispatch 経路。 *)
+  (* Phase 30.2 (DEFERRED §1.10 fix, C only): when a top-level non-fn let is
+     referenced from inside a top-level fn body, C codegen declares it as a
+     global. LLVM / Wasm still throw "unbound variable" via a different path. *)
+  (* Phase 32.1-32.4: C1 FFI (extern fn). Test the same extern fn across all
+     4 backends through the declaration -> codegen path. interp goes through
+     the lookup_extern mock; the 3 codegens each use their own dispatch path. *)
   check "§32.1: extern fn parse + interp mock (getpid)"
     (Pipeline.process
        "extern fn getpid: unit -> int;\n\
@@ -7047,7 +7054,7 @@ let () =
      if has "@total = internal global" && has "store i32 " && has ", ptr @total" then "globalized"
      else "not-globalized")
     "globalized";
-  (* Phase 31.0: str_compare を 3 backend に移植 (interp のみだったのを揃える) *)
+  (* Phase 31.0: port str_compare to the 3 backends (align what was interp-only) *)
   check "§31.0: interp str_compare returns -1/0/1"
     (Pipeline.process "(str_compare \"a\" \"b\", str_compare \"a\" \"a\", str_compare \"b\" \"a\")")
     "(-1, 0, 1)";
@@ -7112,10 +7119,11 @@ let () =
      else "not-globalized")
     "globalized";
 
-  (* Phase 30.1 (DEFERRED §1.11 fix): closure 内で captured 名を let で
-     shadow する時、body 内の Var 参照は env access ではなく local を見る。
-     C codegen の emit を直接検査: tuple destructure 後の recursive call が
-     `__env_self->xs` ではなく local `xs` を使うことを確認。 *)
+  (* Phase 30.1 (DEFERRED §1.11 fix): when a captured name in a closure is
+     shadowed by a let, body-internal Var references should look at the local
+     rather than env access. Directly inspect the C codegen emit: confirm that
+     the recursive call after tuple destructure uses local `xs` rather than
+     `__env_self->xs`. *)
   check "§30.1: C codegen — P_tuple rebind shadows captured env access"
     (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "type 'a list = Nil | Cons of 'a * 'a list;\n\
@@ -7132,9 +7140,9 @@ let () =
             let (h, xs) = parse_head xs in\n\
             sum_aux xs (acc + h);\n\
         sum_aux (Cons (TInt 1, Cons (TInt 2, Cons (TInt 3, Nil)))) 0") in
-     (* anon closure body は `__let_tup` で destructure し、recursive call は
-        local `xs` を使うはず。`sum_aux((__env_self->xs))` は古い captured xs
-        への leak で bug を示す。 *)
+     (* The anon closure body should destructure via `__let_tup` and use local
+        `xs` for the recursive call. `sum_aux((__env_self->xs))` would indicate
+        a bug leaking to the old captured xs. *)
      let nlen = String.length c in
      let has needle =
        let plen = String.length needle in
@@ -7144,16 +7152,16 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     (* bug 状態: closure body 内に sum_aux((__env_self->xs)) — env からの読み *)
-     (* 修正後: sum_aux(xs) — local rebinding を使う *)
+     (* Bug state: closure body contains sum_aux((__env_self->xs)) — read from env *)
+     (* After fix: sum_aux(xs) — uses local rebinding *)
      if has "sum_aux((__env_self->xs))" then "env-leak"
      else if has "sum_aux(xs)" then "local-shadow"
      else "neither")
     "local-shadow";
 
-  (* Phase 30.0 (DEFERRED §1.12 fix): builtin の hardcoded dispatch を
-     user-defined fn が shadow できることを検証。is_alpha が builtin だが
-     user 定義があれば builtin 呼び出しを skip して user fn にディスパッチ。 *)
+  (* Phase 30.0 (DEFERRED §1.12 fix): verify that a user-defined fn can shadow
+     a builtin's hardcoded dispatch. is_alpha is a builtin, but when a user
+     definition exists, skip the builtin call and dispatch to the user fn. *)
   check "§30.0: C codegen — user-defined is_alpha shadows __lang_is_alpha"
     (let c = Codegen_c.emit_program ~main_ty:Ast.TyBool (typed_prog
        "let is_alpha = fn (c: str) -> c == \"_\";\n\

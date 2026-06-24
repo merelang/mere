@@ -65,17 +65,17 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit"
-  | Ast.TyFloat -> "float"   (* Phase 43.1: float を fn signature tag に使えるよう *)
+  | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used as an fn signature tag *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
   | Ast.TyCon (name, args) -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
-    (* Region marker — region 名そのものを tag に使う (codegen_c と同じ). *)
+    (* Region marker — use the region name itself as the tag (same as codegen_c). *)
     r
   | Ast.TyRef (_, _, inner) ->
-    (* Phase 19.x: borrow 型 `&[mode] R T` の tag は inner T のものを使う。
-       codegen_c と同じ方針。 *)
+    (* Phase 19.x: for borrow types `&[mode] R T`, use the tag of the inner T.
+       Same policy as codegen_c. *)
     ty_tag inner
   | other ->
     raise (Codegen_error (Loc.dummy,
@@ -249,9 +249,10 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
 let rec llvm_ty_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("Vec", args) ->
-    (* Phase 15.3: Vec[R, T] — element type T (= ty_tag-sanitized name)
-       で `%mere_vec_<tag>*` (LLVM opaque pointer なのでただの ptr) を返す。
-       要素型を vec_instances に登録すれば runtime ジェネレータが拾う。 *)
+    (* Phase 15.3: Vec[R, T] — return `%mere_vec_<tag>*` (just `ptr` since
+       LLVM pointers are opaque) using the element type T (= ty_tag-sanitized
+       name). Registering the element type in vec_instances lets the runtime
+       generator pick it up. *)
     (match List.map Ast.walk args with
      | [_; elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
@@ -266,8 +267,8 @@ let rec llvm_ty_of (t : Ast.ty) : string =
        raise (Codegen_error (Loc.dummy,
          "unsupported in LLVM codegen subset: Vec[R, <unresolved>] (element type must be concrete)")))
   | Ast.TyCon ("OwnedVec", args) ->
-    (* Phase 15.7: OwnedVec[T] — heap-allocated、要素型 T を walk して
-       opaque ptr を返す。`owned_vec_instances` に登録。 *)
+    (* Phase 15.7: OwnedVec[T] — heap-allocated; walk the element type T
+       and return an opaque ptr. Register in `owned_vec_instances`. *)
     (match List.map Ast.walk args with
      | [elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
@@ -425,23 +426,23 @@ type fn_decl = {
 (* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 30.2b (DEFERRED §1.10 fix, LLVM): top-level 非-fn let の名前と型を
-   保持。emit_expr Var "name" は @name を load する。 *)
+(* Phase 30.2b (DEFERRED §1.10 fix, LLVM): keep the names and types of
+   top-level non-fn lets. emit_expr Var "name" loads @name. *)
 let top_globals_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 32.3 (C1 FFI, LLVM): extern fn 宣言。emit_expr の App handler が
-   App (Var name, arg) を `call <ret> @name(<arg>)` に dispatch。 *)
+(* Phase 32.3 (C1 FFI, LLVM): extern fn declarations. emit_expr's App handler
+   dispatches App (Var name, arg) to `call <ret> @name(<arg>)`. *)
 let extern_fn_decls_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 35.2 (DEFERRED §1.2 fix): eta-wrap した nullary factory builtin の
-   registry。emit_program で各 entry を `define ... @<name>_<tag>_closure_fn`
-   + `@<name>_<tag>_as_value = constant ...` で emit。 *)
+(* Phase 35.2 (DEFERRED §1.2 fix): registry of eta-wrapped nullary factory
+   builtins. emit_program emits each entry as
+   `define ... @<name>_<tag>_closure_fn` + `@<name>_<tag>_as_value = constant ...`. *)
 let eta_adapters_llvm : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
 
-(* Phase 38.C (DEFERRED §1.2 A2): multi-arg curried builtin が value 位置で
-   使われた時の syntactic eta-expansion (codegen_c.ml の同名 helper と同一
-   ロジック)。 anonymous Fun adapter + 各 builtin の direct-call fast path
-   (line 3104 / 3147 等) に乗せる。 *)
+(* Phase 38.C (DEFERRED §1.2 A2): syntactic eta-expansion for multi-arg curried
+   builtins when used in value position (same logic as the helper of the same
+   name in codegen_c.ml). Routes through an anonymous Fun adapter + each
+   builtin's direct-call fast path (line 3104 / 3147 etc.). *)
 let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
     : Ast.expr =
   let mk node ty = Ast.{ node; ty = Some ty; loc } in
@@ -511,8 +512,8 @@ let inner_lifts_llvm : (string, lifted_inner_llvm) Hashtbl.t = Hashtbl.create 8
 let inner_lifts_by_host_llvm : (string, (string, lifted_inner_llvm) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
 
-(* Phase 39.A2 (LLVM port): per-fn の env struct + adapter を生成。 各 use 位置
-   で env を alloc + capture 値を store + closure 値を構築。 *)
+(* Phase 39.A2 (LLVM port): generate per-fn env struct + adapter. At each use
+   site, alloc the env, store capture values, and build the closure value. *)
 let inner_lift_closures_emitted_llvm : (string, unit) Hashtbl.t = Hashtbl.create 4
 let inner_lift_closure_pending_llvm :
   (string * (string * Ast.ty) list * Ast.ty * Ast.ty) list ref = ref []
@@ -1357,8 +1358,9 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
     walk f.param [f.param] f.body) fns;
-  (* Phase 45 (DEFERRED §8): inner-lifted fn 同士の相互参照のため transitive
-     capture closure を計算 (codegen_c と同じアルゴリズム)。 詳細はそちら参照。 *)
+  (* Phase 45 (DEFERRED §8): compute the transitive capture closure to handle
+     mutual references between inner-lifted fns (same algorithm as codegen_c).
+     See there for details. *)
   let all_lifted = !lifted_fns_llvm in
   let mere_to_lifted : (string, string) Hashtbl.t = Hashtbl.create 8 in
   Hashtbl.iter (fun mname entry ->
@@ -1711,9 +1713,9 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
     | Ast.TyTuple ts -> List.iter walk_ty ts
     | Ast.TyCon (name, args) ->
       List.iter walk_ty args;
-      (* Phase 16.3: 既知 record の field 型もたどる。Logger / Metrics
-         のように field が closure 型を持つ record で、field 経由でしか
-         登場しない closure 型を arrow_pairs に拾わせる。 *)
+      (* Phase 16.3: also walk into known record field types. For records like
+         Logger / Metrics that have closure-typed fields, this lets arrow_pairs
+         pick up closure types that only appear through the field. *)
       if Hashtbl.mem Typer.records name
          && not (Hashtbl.mem seen_records name)
       then begin
@@ -2371,10 +2373,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       || List.mem_assoc name !current_var_types
     in
     (* Phase 35.2: nullary factory builtins as first-class value (eta-wrap).
-       value 位置の vec_new / owned_vec_new / strbuf_new / map_new で
-       具体的な ret_ty が分かるなら eta adapter を register、
-       `@<name>_<tag>_as_value` を return。polymorphic な場合は次の
-       unsupported guard に流れる。 *)
+       For vec_new / owned_vec_new / strbuf_new / map_new in value position,
+       if the concrete ret_ty is known, register an eta adapter and return
+       `@<name>_<tag>_as_value`. If polymorphic, fall through to the next
+       unsupported guard. *)
     let is_nullary_factory = name = "vec_new" || name = "owned_vec_new"
                               || name = "strbuf_new" || name = "map_new" in
     let eta_value_str_opt =
@@ -2444,7 +2446,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          | _ -> None)
       | _ -> None
     in
-    (* Phase 38.A1: 単引数 builtin の value 化 *)
+    (* Phase 38.A1: value-ification of single-arg builtins *)
     let is_single_arg_value_builtin =
       name = "int_of_str" || name = "str_of_int"
       || name = "str_len" || name = "str_rev" || name = "str_trim"
@@ -2469,17 +2471,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     if not is_shadowed && is_curried_collection_builtin && eta38c_opt = None then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.3〜15.10: curried 多引数 builtin は直接 application のみ対応、 Phase 38.C で部分対応中)");
+        (name ^ " as a value (Phase 15.3-15.10: curried multi-arg builtin only supports direct application, partial support in progress in Phase 38.C)");
     if not is_shadowed && is_single_arg_value_builtin && eta38c_opt = None then
       unsupported e.Ast.loc
-        (name ^ " as a value: type is polymorphic (Phase 38.A1 MVP: `fn x -> " ^ name ^ " x` で wrap して回避)");
+        (name ^ " as a value: type is polymorphic (Phase 38.A1 MVP: work around by wrapping with `fn x -> " ^ name ^ " x`)");
     if not is_shadowed && is_nullary_factory && eta_value_str_opt = None then
       unsupported e.Ast.loc
         (name ^ " as a value: return type is polymorphic, can't monomorphize \
                  (Phase 35.2 MVP: use direct app or manual eta `fn () -> vec_new ()`)");
     if not is_shadowed && (name = "len" || name = "vec_to_list") then
       unsupported e.Ast.loc
-        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list は直接 application のみ対応)");
+        (name ^ " as a value (Phase 15.11/15.12: len / vec_to_list only support direct application)");
     (match eta38c_opt with
      | Some v -> v
      | None ->
@@ -2518,16 +2520,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                      r1 cname r0 dispatch_name);
        r1
      | None when Hashtbl.mem top_globals_llvm name ->
-       (* Phase 30.2b: top-level non-fn let は file-scope global @name に
-          初期化済。Load して register に。 *)
+       (* Phase 30.2b: top-level non-fn let is already initialized in the
+          file-scope global @name. Load it into a register. *)
        let ty = Hashtbl.find top_globals_llvm name in
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) name);
        r
      | None when Hashtbl.mem inner_lifts_llvm name ->
-       (* Phase 39.A2: inner-lifted fn を value 位置で materialize。
-          env を default region に alloc + capture を store + closure 値を
-          insertvalue 連鎖で構築。 *)
+       (* Phase 39.A2: materialize inner-lifted fn at value position.
+          Alloc env in the default region, store captures, and build the
+          closure value via a chain of insertvalues. *)
        let li = Hashtbl.find inner_lifts_llvm name in
        (match e.Ast.ty with
         | Some t ->
@@ -2556,17 +2558,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
              emit_instr (Printf.sprintf
                            "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
                            env_p size_int);
-             (* 各 capture を env field に store *)
+             (* Store each capture into an env field *)
              List.iteri (fun i (cn, cty) ->
                let cv =
                  match List.assoc_opt cn env with
                  | Some r -> r
                  | None ->
-                   (* 自由変数: 上位スコープから resolve できないので unsupported
-                      にする。 これは synthesize 側の制限 (Phase 39.A2 MVP)。 *)
+                   (* Free variable: can't resolve from an outer scope, so
+                      mark as unsupported. This is a limitation on the
+                      synthesize side (Phase 39.A2 MVP). *)
                    unsupported e.Ast.loc
                      ("inner-lifted fn `" ^ name
-                      ^ "` の capture `" ^ cn ^ "` を解決できません (Phase 39.A2 MVP)")
+                      ^ "`: cannot resolve capture `" ^ cn ^ "` (Phase 39.A2 MVP)")
                in
                let gep = fresh_reg () in
                emit_instr (Printf.sprintf
@@ -2575,7 +2578,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                emit_instr (Printf.sprintf "  store %s %s, ptr %s"
                              (llvm_ty_of cty) cv gep)
              ) li.captures;
-             (* closure 値: {env=env_p, fn=&adapter} *)
+             (* closure value: {env=env_p, fn=&adapter} *)
              let cname = closure_struct_name arg_ty ret_ty in
              let r0 = fresh_reg () in
              emit_instr (Printf.sprintf
@@ -2587,9 +2590,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                            r1 cname r0 adapter_name);
              r1
            | _ -> unsupported e.Ast.loc
-                    ("inner-lifted fn `" ^ name ^ "` 型が arrow でない"))
+                    ("inner-lifted fn `" ^ name ^ "`: type is not an arrow"))
         | None -> unsupported e.Ast.loc
-                    ("inner-lifted fn `" ^ name ^ "` の type が unknown"))
+                    ("inner-lifted fn `" ^ name ^ "`: type is unknown"))
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
@@ -2806,8 +2809,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        | Ast.Var name -> Hashtbl.mem extern_fn_decls_llvm name
        | _ -> false
      in head_is_extern { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc }) ->
-    (* Phase 32.6 (C1 FFI multi-arg LLVM): curried App chain を collect、
-       direct LLVM call instruction を 1 つ emit。 *)
+    (* Phase 32.6 (C1 FFI multi-arg LLVM): collect the curried App chain and
+       emit a single direct LLVM call instruction. *)
     let rec collect e acc =
       match e.Ast.node with
       | Ast.App (f, a) -> collect f (a :: acc)
@@ -2882,8 +2885,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   r hv nv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
-    (* Phase 31.0: str_compare a b — strcmp の生値を sign-normalize (-1/0/1)。
-       interp の `compare s t` (OCaml) と一致させる。 *)
+    (* Phase 31.0: str_compare a b — sign-normalize the raw strcmp value to
+       (-1/0/1). Matches the interp's `compare s t` (OCaml). *)
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
     let raw = fresh_reg () in
@@ -2969,7 +2972,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | "sqrt" -> "@llvm.sqrt.f64"
       | "sin" -> "@llvm.sin.f64"
       | "cos" -> "@llvm.cos.f64"
-      | "tan" -> "@tan"  (* tan は LLVM intrinsic に無いので libm *)
+      | "tan" -> "@tan"  (* tan has no LLVM intrinsic, so use libm *)
       | _ -> "@sqrt"
     in
     let av = emit_expr env a_e in
@@ -3004,8 +3007,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at(ptr %s, i32 %s)" r sv iv);
     r
-  (* Phase 30.0 (DEFERRED §1.12 fix): user-defined fn が同名で存在する
-     場合は builtin ディスパッチを skip、通常 user fn call path に fall through *)
+  (* Phase 30.0 (DEFERRED §1.12 fix): when a user-defined fn with the same
+     name exists, skip the builtin dispatch and fall through to the normal
+     user fn call path *)
   | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
     when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
     let av = emit_expr env arg in
@@ -3030,14 +3034,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i32 @atoi(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "str_unescape"; _ }, arg) ->
-    (* Phase 25.4: str_unescape — backslash-escape sequences を実際の
-       文字に解釈、他はそのまま。json_parser 等で使用。 *)
+    (* Phase 25.4: str_unescape — interpret backslash-escape sequences into
+       the actual characters; leave other characters as-is. Used by
+       json_parser etc. *)
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_unescape(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_split"; _ }, s_e); _ }, delim_e) ->
-    (* Phase 25.9: str_split s delim — curried、list_str (list ptr) を返す。 *)
+    (* Phase 25.9: str_split s delim — curried; returns list_str (list ptr). *)
     str_split_used_llvm := true;
     let sv = emit_expr env s_e in
     let dv = emit_expr env delim_e in
@@ -3045,7 +3050,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_split(ptr %s, ptr %s)" r sv dv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_join"; _ }, sep_e); _ }, xs_e) ->
-    (* Phase 25.9: str_join sep xs — curried、xs: list_str。 *)
+    (* Phase 25.9: str_join sep xs — curried; xs: list_str. *)
     str_join_used_llvm := true;
     let sv = emit_expr env sep_e in
     let xv = emit_expr env xs_e in
@@ -3196,7 +3201,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i32 @__lang_gcd(i32 %s, i32 %s)" r av bv);
     r
   | Ast.App ({ node = Ast.Var "bool_of_str"; _ }, s_e) ->
-    (* Phase 36: bool_of_str — strcmp s "true". 専用 const を使い回す *)
+    (* Phase 36: bool_of_str — strcmp s "true". Reuse the dedicated const *)
     let true_label = fresh_str_global "true" in
     let sv = emit_expr env s_e in
     let pr = fresh_reg () in
@@ -3224,7 +3229,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     unsupported e.Ast.loc
       "sleep_ms is unsupported in LLVM codegen (Phase 44.6 MVP = interp + C only)"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
-    (* Phase 25.9: write_file path content — curried、unit (i32 0) を返す。 *)
+    (* Phase 25.9: write_file path content — curried; returns unit (i32 0). *)
     file_io_used_llvm := true;
     let pv = emit_expr env path_e in
     let cv = emit_expr env content_e in
@@ -3237,9 +3242,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call ptr @show_int(i32 %s)" r av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e); _ }, default_e) ->
-    (* Phase 25.2: try_or fn default — setjmp + longjmp で fail を catch。
-       fn の呼出 (= apply to unit) を try ブランチ、failed なら default
-       を使う。jmpbuf set フラグを save/restore で nesting 対応。 *)
+    (* Phase 25.2: try_or fn default — catch fail via setjmp + longjmp.
+       The fn invocation (= apply to unit) is the try branch; on failure use
+       default. Save/restore the jmpbuf-set flag to handle nesting. *)
     let result_ty =
       match e.Ast.ty with Some t -> llvm_ty_of (Ast.walk t) | None -> "i32"
     in
@@ -3334,10 +3339,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let _ = other in
        "undef")
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
-    (* Phase 15.3: vec_new () — region と要素型を result type の TyCon
-       args から取り出し、`@mere_vec_<tag>_new` runtime を call。
-       region binding が __heap なら @__lang_default_region、それ以外は
-       %__region_<R> (Region_block で alloca された SSA register)。 *)
+    (* Phase 15.3: vec_new () — extract the region and element type from
+       the result type's TyCon args and call the `@mere_vec_<tag>_new`
+       runtime. If the region binding is __heap, use @__lang_default_region;
+       otherwise use %__region_<R> (the SSA register alloca'd by Region_block). *)
     let (region_reg, elem_tag) =
       match e.Ast.ty with
       | Some t ->
@@ -3442,8 +3447,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   r elem_tag av outer_cl cv);
     r
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
-    (* Phase 15.9: strbuf_new () — result type の TyCon arg から region を
-       取り出して @mere_strbuf_new に渡す。 *)
+    (* Phase 15.9: strbuf_new () — extract the region from the result type's
+       TyCon arg and pass it to @mere_strbuf_new. *)
     strbuf_used := true;
     let region_name =
       match e.Ast.ty with
@@ -3490,8 +3495,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   r sv xv);
     r
   | Ast.App ({ node = Ast.Var "len"; _ }, arg) ->
-    (* Phase 15.11: len ad-hoc dispatch — arg.ty に基づいてコンパイル時に
-       対応する _len ヘルパに routing。 *)
+    (* Phase 15.11: len ad-hoc dispatch — at compile time, route to the
+       corresponding _len helper based on arg.ty. *)
     let arg_ty =
       match arg.Ast.ty with
       | Some t -> Ast.walk t
@@ -3566,7 +3571,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        unsupported e.Ast.loc
          "len: arg type has no codegen-defined length")
   | Ast.App ({ node = Ast.Var "map_new"; _ }, _arg) ->
-    (* Phase 15.10: map_new () — region と (K, V) を result type から取り出す。 *)
+    (* Phase 15.10: map_new () — extract the region and (K, V) from the result type. *)
     let (k_tag, v_tag) = map_kv_tags_of e.Ast.ty e.Ast.loc in
     let region_name =
       match e.Ast.ty with
@@ -3657,8 +3662,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   r k_tag v_tag av outer_cl cv);
     r
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
-    (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T]。
-       要素型 T を e.ty (result Vec の TyCon arg) から取り出す。 *)
+    (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T].
+       Extract the element type T from e.ty (the result Vec's TyCon arg). *)
     let elem_tag = owned_vec_elem_tag_of e.Ast.ty e.Ast.loc in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @mere_owned_vec_%s_new()" r elem_tag);
@@ -3715,8 +3720,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   r t_tag av);
     r
   | Ast.App ({ node = Ast.Var "vec_to_owned"; _ }, vec_e) ->
-    (* Phase 15.7: vec_to_owned v — region Vec[R, T] を heap OwnedVec[T] に
-       deep copy。 *)
+    (* Phase 15.7: vec_to_owned v — deep copy a region Vec[R, T] to a heap
+       OwnedVec[T]. *)
     let t_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let elem_ty = Hashtbl.find vec_instances t_tag in
     if not (Hashtbl.mem owned_vec_instances t_tag) then
@@ -3728,8 +3733,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   r t_tag av);
     r
   | Ast.App ({ node = Ast.Var "owned_vec_to_vec"; _ }, owned_e) ->
-    (* Phase 15.7: owned_vec_to_vec o — heap OwnedVec[T] を region Vec[R, T]
-       に deep copy。region は e.ty の TyRef marker から取り出す。 *)
+    (* Phase 15.7: owned_vec_to_vec o — deep copy a heap OwnedVec[T] to a
+       region Vec[R, T]. Extract the region from e.ty's TyRef marker. *)
     let t_tag = owned_vec_elem_tag_of owned_e.Ast.ty owned_e.Ast.loc in
     let elem_ty = Hashtbl.find owned_vec_instances t_tag in
     if not (Hashtbl.mem vec_instances t_tag) then
@@ -3848,9 +3853,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           match List.assoc_opt cn env with
           | Some v -> v
           | None when Hashtbl.mem top_globals_llvm cn ->
-            (* Phase 36 (DEFERRED §1.14 fix): captured free var が
-               top-level global の場合は load してから渡す。
-               `ptr %cn` (register) ではなく `ptr @cn` の load 値。 *)
+            (* Phase 36 (DEFERRED §1.14 fix): if a captured free var is a
+               top-level global, load it before passing.
+               Pass the loaded value of `ptr @cn`, not `ptr %cn` (register). *)
             let r = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
                           r (llvm_ty_of cty) cn);
@@ -4128,9 +4133,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "field access: missing inner type"
     in
-    (* Phase 19.x: borrow 越し field access。&[mode] R T は LLVM では
-       ptr 値、unwrap して inner T の record 型として扱う (view と同じ
-       GEP+load 経路を辿る)。 *)
+    (* Phase 19.x: field access through a borrow. In LLVM, &[mode] R T is a
+       ptr value; unwrap and treat as the inner T's record type (follows the
+       same GEP+load path as view). *)
     let inner_ty, via_borrow =
       match raw_ty with
       | Ast.TyRef (_, _, t) -> (Ast.walk t, true)
@@ -4819,9 +4824,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
   | Ast.Float_lit f ->
-    (* Phase 34.2: LLVM IR の double リテラル。LLVM は integer-valued な
-       float でも decimal point を要求するので、bit pattern を直接 hex で
-       emit する (roundtrip 安全 + format 不要)。 *)
+    (* Phase 34.2: LLVM IR double literal. LLVM requires a decimal point even
+       for integer-valued floats, so emit the bit pattern directly as hex
+       (roundtrip-safe and no formatting required). *)
     if f <> f then "0x7FF8000000000000"  (* canonical NaN *)
     else if f = infinity then "0x7FF0000000000000"
     else if f = neg_infinity then "0xFFF0000000000000"
@@ -5008,9 +5013,9 @@ let runtime_decls =
       "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
       "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
       "@__lang_fail_jmpbuf_set = global i32 0" ]
-(* Phase 30.2b: top-level non-fn let を @name LLVM global として宣言。
-   各 entry を `@name = internal global <type> zeroinitializer` で emit。
-   main 開始時に store で初期化される。 *)
+(* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
+   Emit each entry as `@name = internal global <type> zeroinitializer`.
+   They are initialized by store at the start of main. *)
 let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string list =
   List.map (fun (name, _value, ty) ->
     Printf.sprintf "@%s = internal global %s zeroinitializer"
@@ -5440,7 +5445,7 @@ let emit_vec_fold_helper_llvm (elem_ty : Ast.ty) (acc_ty : Ast.ty) : string =
 
 (* Phase 15.6: vec_map per-(T, U) helper.
    Signature: ptr @mere_vec_<T>_map_<U>(ptr v, %closure_<T>_<U> cl)
-   Region-preserving: 結果 Vec の region は v->region から取得。 *)
+   Region-preserving: the result Vec's region comes from v->region. *)
 let emit_vec_map_helper_llvm (elem_ty : Ast.ty) (out_ty : Ast.ty) : string =
   let t_tag = ty_tag elem_ty in
   let u_tag = ty_tag out_ty in
@@ -5481,7 +5486,7 @@ let emit_vec_map_helper_llvm (elem_ty : Ast.ty) (out_ty : Ast.ty) : string =
 
 (* Phase 15.6: vec_filter per-T helper.
    Signature: ptr @mere_vec_<T>_filter(ptr v, %closure_<T>_bool cl)
-   Region-preserving。closure 返り値 i1 を icmp / br で分岐。 *)
+   Region-preserving. Branch on the closure's i1 return value via icmp / br. *)
 let emit_vec_filter_helper_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_t = llvm_ty_of elem_ty in
@@ -5522,13 +5527,13 @@ let emit_vec_filter_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
-(* Phase 15.8: OwnedVec registry — main 末で一括 free するための tracking。
-   ptr の動的配列 + count / cap を file-scope globals に置く。各
-   `@mere_owned_vec_<T>_new` が register を call、`@main` 末で
-   `@__mere_owned_vec_free_all` を call。 *)
+(* Phase 15.8: OwnedVec registry — tracking for bulk-freeing at the end of
+   main. Place a dynamic array of ptr + count / cap in file-scope globals.
+   Each `@mere_owned_vec_<T>_new` calls register, and at the end of `@main`
+   `@__mere_owned_vec_free_all` is called. *)
 let owned_vec_registry_runtime_llvm =
   String.concat "\n"
-    [ "; Phase 15.8: OwnedVec registry (process末で一括 free)";
+    [ "; Phase 15.8: OwnedVec registry (bulk-free at process end)";
       "@__mere_owned_vec_registry = internal global ptr null";
       "@__mere_owned_vec_count = internal global i32 0";
       "@__mere_owned_vec_cap = internal global i32 0";
@@ -5573,7 +5578,7 @@ let owned_vec_registry_runtime_llvm =
       "body:";
       "  %slot = getelementptr ptr, ptr %reg, i32 %i";
       "  %v = load ptr, ptr %slot";
-      "  ; mere_owned_vec_<T> の最初の field は data ptr。全 T で同じ layout。";
+      "  ; The first field of mere_owned_vec_<T> is the data ptr. Same layout for all T.";
       "  %dp = load ptr, ptr %v";
       "  call void @free(ptr %dp)";
       "  call void @free(ptr %v)";
@@ -5677,7 +5682,7 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       "}" ]
 
 (* Phase 15.7: vec_to_owned helper per-T.
-   入力 Vec[R, T] → 出力 OwnedVec[T] への deep copy。 *)
+   Deep copy from input Vec[R, T] to output OwnedVec[T]. *)
 let emit_vec_to_owned_helper_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = llvm_ty_of elem_ty in
@@ -5706,7 +5711,7 @@ let emit_vec_to_owned_helper_llvm (elem_ty : Ast.ty) : string =
       "}" ]
 
 (* Phase 15.7: owned_vec_to_vec helper per-T.
-   入力 OwnedVec[T] + region → 出力 Vec[R, T] への deep copy。 *)
+   Deep copy from input OwnedVec[T] + region to output Vec[R, T]. *)
 let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = llvm_ty_of elem_ty in
@@ -6166,7 +6171,7 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  ret i32 %len";
       "}";
       "";
-      (* Phase 39.A' #2: delete — key を keys/values から shift して詰める *)
+      (* Phase 39.A' #2: delete — shift keys/values down to remove the key *)
       Printf.sprintf "define i32 @%s_delete(ptr %%m, %s %%k) {" fn_prefix c_k;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
@@ -6304,10 +6309,10 @@ let strbuf_runtime_llvm =
       "  ret i32 %len";
       "}" ]
 
-(* Phase 16.3 / DEFERRED §1.5: Logger / Metrics の LLVM IR runtime。
-   C 側と同じ printf-based 実装を IR で表現する。Logger 構造体は
-   既に %Logger = type { %closure_str_unit, %closure_str_unit,
-   %closure_str_unit } が record typedef 経由で emit されている前提。 *)
+(* Phase 16.3 / DEFERRED §1.5: LLVM IR runtime for Logger / Metrics.
+   Express the same printf-based implementation as the C side in IR. Assumes
+   the Logger struct %Logger = type { %closure_str_unit, %closure_str_unit,
+   %closure_str_unit } has already been emitted via record typedef. *)
 let logger_runtime_llvm =
   String.concat "\n"
     [ "@.__logger_fmt_info = private constant [14 x i8] c\"%s [INFO] %s\\0A\\00\"";
@@ -6370,8 +6375,8 @@ let metrics_runtime_llvm =
       "}" ]
 
 (* Phase 34.2: float → string with interp parity (%.12g + trailing "." for
-   whole numbers). asprintf で format → strchr 風 loop で special chars 検出 →
-   無ければ "." 追加 asprintf。 *)
+   whole numbers). asprintf to format → strchr-like loop to detect special
+   chars → if none, asprintf with "." appended. *)
 let float_helpers_llvm =
   String.concat "\n"
     [ "@.fmt_12g = private constant [6 x i8] c\"%.12g\\00\"";
@@ -6854,10 +6859,10 @@ let str_concat_helper =
       "  ret ptr %r";
       "}";
       "";
-      (* Phase 25.4: str_unescape — backslash-escape sequences
-         (n / t / r / quote / backslash / slash) を実際の文字に解釈、
-         他はそのまま。json_parser 等で string literal の escape 処理。
-         region に alloc。 *)
+      (* Phase 25.4: str_unescape — interpret backslash-escape sequences
+         (n / t / r / quote / backslash / slash) into the actual characters;
+         leave others as-is. Used by json_parser etc. for string literal
+         escape processing. Allocated in a region. *)
       "define ptr @__lang_str_unescape(ptr %s) {";
       "entry:";
       "  %n64 = call i64 @strlen(ptr %s)";
@@ -6911,10 +6916,10 @@ let str_concat_helper =
       "  ret ptr %r";
       "}";
       "";
-      (* Phase 25.6: str_escape — show_str がこれを通して output、
-         改行 / タブ / バックスラッシュ / ダブルクオートをバックスラッシュ
-         エスケープ形式に変換。interp の show_str との一致を保つ。
-         worst case で 2x の領域、region に alloc。 *)
+      (* Phase 25.6: str_escape — show_str outputs through this; convert
+         newline / tab / backslash / double-quote to backslash-escape form.
+         Keeps parity with interp's show_str. Worst case 2x size; allocated
+         in a region. *)
       "define ptr @__lang_str_escape(ptr %s) {";
       "entry:";
       "  %n64 = call i64 @strlen(ptr %s)";
@@ -7011,9 +7016,9 @@ let str_count_runtime_llvm =
       "  ret i32 %acc";
       "}" ]
 
-(* Phase 25.9: str_split / str_join — list_str (recursive variant) を
-   region に alloc して構築。Cons cell の payload は boxed (Phase 25.0)
-   = `%tuple_str_list_str_node = { ptr_str, ptr_node }` への ptr。 *)
+(* Phase 25.9: str_split / str_join — construct list_str (recursive variant)
+   alloc'd in a region. The Cons cell's payload is boxed (Phase 25.0) =
+   a ptr to `%tuple_str_list_str_node = { ptr_str, ptr_node }`. *)
 let str_split_runtime_llvm =
   String.concat "\n"
     [ (* Helper: alloc + init a Nil cell. Returns ptr. *)
@@ -7450,9 +7455,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
-  (* Phase 30.2b (DEFERRED §1.10): extract top-level non-fn let が skels の
-     fn body から参照されるものを @name LLVM global にする。referenced され
-     ないものは body 内 let-in のまま (= alloca / register)。 *)
+  (* Phase 30.2b (DEFERRED §1.10): make those top-level non-fn lets that are
+     referenced from skels' fn bodies into @name LLVM globals. Unreferenced
+     ones stay as let-in in the body (= alloca / register). *)
   let fvs_used_in_skels_llvm =
     List.fold_left (fun acc s ->
       let fvs = free_vars s.sbody [s.sparam] in
@@ -7636,9 +7641,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          interp's Eval.to_string V_unit. *)
       [ "  call i32 (ptr, ...) @printf(ptr @.fmt_unit)" ]
     | Some ("double", _) ->
-      (* Phase 34.2: float main — interp の string_of_float (OCaml の
-         %.12g + 整数値なら末尾 ".") と format を合わせるため
-         __lang_str_of_float ヘルパを経由して puts。 *)
+      (* Phase 34.2: float main — to match the format of interp's
+         string_of_float (OCaml's %.12g + trailing "." for whole numbers),
+         go through the __lang_str_of_float helper then puts. *)
       let str_r = fresh_reg () in
       [ Printf.sprintf "  %s = call ptr @__lang_str_of_float(double %s)" str_r r;
         Printf.sprintf "  call i32 @puts(ptr %s)" str_r ]

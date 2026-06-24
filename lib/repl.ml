@@ -140,7 +140,7 @@ let process_decl eval_env type_env decl =
     Printf.printf "drop type %s registered\n" name;
     []
   | Ast.Top_extern (name, ty) ->
-    (* Phase 32.1 (C1 FFI): REPL でも extern fn を受け付ける *)
+    (* Phase 32.1 (C1 FFI): also accept extern fn in the REPL *)
     type_env := (name, Typer.mono ty) :: !type_env;
     eval_env := (name, ref (Eval.lookup_extern name ty)) :: !eval_env;
     Printf.printf "extern fn %s : %s registered\n" name (Ast.pp_ty ty);
@@ -249,15 +249,15 @@ let format_show eval_env type_env name =
 let print_show eval_env type_env name =
   print_endline (format_show eval_env type_env name)
 
-(* Phase 45.1 (DEFERRED §5.3): `:save FILE` — user bindings を Mere source
-   として書き出し、 `:load FILE` で再構成可能にする。
+(* Phase 45.1 (DEFERRED §5.3): `:save FILE` — writes user bindings out as
+   Mere source so that `:load FILE` can reconstruct them.
 
-   値の serializable / unserializable:
+   Serializable / unserializable values:
      int / float / bool / str / unit / list / tuple / constructor /
-     record: Eval.to_string が Mere 構文と互換な文字列を返すのでそのまま使う。
-     closure / builtin / Vec / StrBuf / Map: serialize 不可、 コメント行で skip。
-   record は to_string 出力 (`Foo { x = 1 }`) が docs/patterns.md §12 の
-   「list literal 内 record literal は TypeName { ... } 必須」 も満たすので OK。 *)
+     record: Eval.to_string returns a string compatible with Mere syntax, so use it directly.
+     closure / builtin / Vec / StrBuf / Map: not serializable; skip as a comment line.
+   For records, the to_string output (`Foo { x = 1 }`) also satisfies
+   docs/patterns.md §12 "record literals inside list literals must use TypeName { ... }", so it is OK. *)
 let rec is_serializable = function
   | Eval.V_int _ | Eval.V_float _ | Eval.V_bool _
   | Eval.V_str _ | Eval.V_unit -> true

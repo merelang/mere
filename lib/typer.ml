@@ -52,9 +52,9 @@ let suggest_name (target : string) (candidates : string list) : string option =
     ) scored in
     Some (snd (List.hd sorted))
 
-(* Phase 33.0 (DEFERRED §5.1): top N candidates within max_dist。
-   ties: 短い名前を優先、距離が同じなら alphabetical で安定化。
-   重複は除去。 *)
+(* Phase 33.0 (DEFERRED §5.1): top N candidates within max_dist.
+   Tie-breaking: prefer shorter names; stabilise alphabetically when
+   distance is equal. Duplicates are removed. *)
 let suggest_names_n (target : string) (candidates : string list) (n : int)
   : string list =
   let max_dist =
@@ -379,7 +379,7 @@ let register_record type_name params fields =
   Hashtbl.replace types type_name (List.length params);
   Hashtbl.replace records type_name { r_params = params; r_fields = fields }
 
-(* Phase 18.1 / DEFERRED §4.1 残: register `alias` as a constructor with
+(* Phase 18.1 / DEFERRED §4.1 remaining: register `alias` as a constructor with
    the same variant info as `target`. Used to give module-internal
    constructors a qualified name (`M.Red`) while keeping the unqualified
    one (`Red`) for backward compat. Also populates `Ast.ctor_aliases`
@@ -506,7 +506,8 @@ let show_scheme =
 
 (* `len : 'a -> int` (Phase 12.6) — ad-hoc polymorphic builtin that
    dispatches at runtime over Vec[R, T] / OwnedVec[T] / 'a list / str /
-   tuple. Type-system level it is just `'a -> int` (same枠 as `show`);
+   tuple. At the type-system level it is just `'a -> int` (in the same
+   bucket as `show`);
    illegal argument types surface as runtime errors. A future slice may
    replace this with a proper trait-based dispatch. *)
 let _len_alpha = fresh_var ()
@@ -605,17 +606,19 @@ let exit_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyInt, _exit_alpha) }
 
-(* --- Vec builtins (Q-010 narrowed → 実装、Phase 12.1〜12.3) ---
-   `Vec[R, T]` は region-aware な可変長 vector。型は 2-arg TyCon
-   `TyCon ("Vec", [TyRef BorrowedRead R TyUnit; T])`:
-     - 第 1 引数: region marker (`TyRef` を介して region 名を埋め込む、
-       view 型と同じ慣例)
-     - 第 2 引数: 要素型
-   Trivial 扱いなので Trivial[R'] が破れない限り region に置ける。
+(* --- Vec builtins (Q-010 narrowed -> implementation, Phase 12.1..12.3) ---
+   `Vec[R, T]` is a region-aware growable vector. The type is a 2-arg
+   TyCon `TyCon ("Vec", [TyRef BorrowedRead R TyUnit; T])`:
+     - 1st arg: region marker (embeds the region name via `TyRef`,
+       same convention as view types)
+     - 2nd arg: element type
+   Treated as Trivial, so it can be placed in a region as long as
+   Trivial[R'] is not broken.
 
-   Schemes は region 位置に TyVar を置く: 各呼出ごとに「任意の region
-   marker」と unify される。具体的な region 名は scheme 内で固定せず、
-   call site の Vec 値から伝搬する。 *)
+   Schemes place a TyVar in the region position: at each call it is
+   unified with "any region marker". Specific region names are not
+   fixed within the scheme; they propagate from the Vec value at the
+   call site. *)
 let _vec_new_elem = fresh_var ()
 let _vec_new_region = fresh_var ()
 let vec_new_scheme =
@@ -659,8 +662,8 @@ let vec_len_scheme =
    synthetic `__heap`). *)
 let () = Hashtbl.replace types "Vec" 2
 
-(* --- Vec の高階 API (Phase 12.9) ---
-   region-polymorphic、element-type-polymorphic な schemes。
+(* --- Higher-order Vec API (Phase 12.9) ---
+   Schemes that are region-polymorphic and element-type-polymorphic.
      vec_iter : forall R T. Vec[R, T] -> (T -> unit) -> unit
      vec_map  : forall R T U. Vec[R, T] -> (T -> U) -> Vec[R, U]
      vec_fold : forall R T U. Vec[R, T] -> U -> (U -> T -> U) -> U
@@ -756,10 +759,10 @@ let vec_sort_scheme =
           Ast.TyArrow (_vec_sort_elem, Ast.TyInt)),
         Ast.TyUnit)) }
 
-(* Phase 12.11: vec_filter / vec_to_list / vec_to_owned。
-   - vec_filter は region-preserving (source の R を結果も持つ)
-   - vec_to_list は `'a list` (user-declared または builtin) に変換
-   - vec_to_owned は region 内 Vec を heap-allocated OwnedVec に deep copy *)
+(* Phase 12.11: vec_filter / vec_to_list / vec_to_owned.
+   - vec_filter is region-preserving (the result has the source's R)
+   - vec_to_list converts to `'a list` (user-declared or builtin)
+   - vec_to_owned deep-copies an in-region Vec into a heap-allocated OwnedVec *)
 let _vec_filter_elem = fresh_var ()
 let _vec_filter_region = fresh_var ()
 let vec_filter_scheme =
@@ -792,9 +795,10 @@ let vec_to_owned_scheme =
       Ast.TyCon ("Vec", [_vec_to_owned_region; _vec_to_owned_elem]),
       Ast.TyCon ("OwnedVec", [_vec_to_owned_elem])) }
 
-(* Phase 12.12: 逆向き OwnedVec[T] → Vec[R, T]。region は call site の
-   active_regions から App ハンドラの special-case で inject される
-   (vec_new / strbuf_new / map_new と同じパターン)。 *)
+(* Phase 12.12: the reverse direction OwnedVec[T] -> Vec[R, T]. The
+   region is injected from the call site's active_regions by an App
+   handler special-case (the same pattern as vec_new / strbuf_new /
+   map_new). *)
 let _ovec_to_vec_elem = fresh_var ()
 let _ovec_to_vec_region = fresh_var ()
 let owned_vec_to_vec_scheme =
@@ -805,15 +809,17 @@ let owned_vec_to_vec_scheme =
       Ast.TyCon ("OwnedVec", [_ovec_to_vec_elem]),
       Ast.TyCon ("Vec", [_ovec_to_vec_region; _ovec_to_vec_elem])) }
 
-(* --- OwnedVec[T] (Phase 12.5, Q-010 narrowed → 設計 (b) 別型分離) ---
-   `OwnedVec[T]` は heap-allocated, Drop あり vector。`Vec[R, T]`
-   (region 内、Trivial) と対照的に、Drop 型として登録されるので
-   region に置けない (`Trivial[R]` を破る)。Runtime 実装は `V_vec` を
-   共有 — 型システム上だけ区別される。
+(* --- OwnedVec[T] (Phase 12.5, Q-010 narrowed -> design (b) separate-type split) ---
+   `OwnedVec[T]` is a heap-allocated vector with Drop. In contrast to
+   `Vec[R, T]` (in-region, Trivial), it is registered as a Drop type
+   and therefore cannot be placed in a region (it would break
+   `Trivial[R]`). The runtime implementation shares `V_vec` — they
+   are only distinguished at the type-system level.
 
-   設計コンテキスト: 13_region_std_types.md §9「(b) 別型 + trait で
-   API 統一」。本 slice は (b) の「別型」部分のみ、trait による API
-   統一は後続 slice。 *)
+   Design context: 13_region_std_types.md §9 "(b) separate type +
+   trait-based API unification". This slice covers only the
+   "separate type" part of (b); trait-based API unification is a
+   later slice. *)
 let _ovec_new_alpha = fresh_var ()
 let owned_vec_new_scheme =
   let aid = match _ovec_new_alpha with Ast.TyVar v -> v.id | _ -> assert false in
@@ -842,20 +848,22 @@ let owned_vec_len_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("OwnedVec", [_ovec_len_alpha]), Ast.TyInt) }
 
-(* OwnedVec[T] (arity 1) を pre-register + drop type 登録。
-   drop_types の効果: `&R (vec : T OwnedVec)` のように region に置こうとする
-   と `Trivial[R] violated: cannot place value of type `T OwnedVec` into
-   region — type contains a Drop type` で reject。 *)
+(* Pre-register OwnedVec[T] (arity 1) and register it as a drop type.
+   Effect of drop_types: attempts to put it in a region, such as
+   `&R (vec : T OwnedVec)`, are rejected with `Trivial[R] violated:
+   cannot place value of type `T OwnedVec` into region — type contains
+   a Drop type`. *)
 let () =
   Hashtbl.replace types "OwnedVec" 1;
   Hashtbl.replace drop_types "OwnedVec" ()
 
 (* --- StrBuf[R] (Phase 12.7, Q-010 narrowed) ---
-   region 内可変文字列バッファ。型は 1-arg `TyCon ("StrBuf",
-   [TyRef BorrowedRead R TyUnit])` (region marker のみ、view 型と同じ
-   慣例)。Trivial 扱いで region に置ける。`vec_new` と同じく `App
-   (Var "strbuf_new", _)` を typer の special handler で active_regions
-   から region を bind する。 *)
+   An in-region mutable string buffer. The type is 1-arg
+   `TyCon ("StrBuf", [TyRef BorrowedRead R TyUnit])` (region marker
+   only, same convention as view types). Treated as Trivial and can
+   be placed in a region. Just like `vec_new`, a typer special
+   handler for `App (Var "strbuf_new", _)` binds the region from
+   active_regions. *)
 let _strbuf_new_region = fresh_var ()
 let strbuf_new_scheme =
   let rid = match _strbuf_new_region with Ast.TyVar v -> v.id | _ -> assert false in
@@ -888,9 +896,10 @@ let strbuf_len_scheme =
 let () = Hashtbl.replace types "StrBuf" 1
 
 (* --- Map[R, K, V] (Phase 12.10, Q-010 narrowed) ---
-   region-aware mutable map。型は 3-arg `TyCon ("Map", [TyRef BR R TyUnit;
-   K; V])`、region marker + key 型 + value 型。schemes は region / K / V
-   それぞれ多相 (TyVar)。`map_new` は active_regions から region binding。 *)
+   A region-aware mutable map. The type is the 3-arg
+   `TyCon ("Map", [TyRef BR R TyUnit; K; V])`: region marker + key
+   type + value type. Schemes are polymorphic in each of region / K
+   / V (TyVar). `map_new` binds the region from active_regions. *)
 let _map_new_region = fresh_var ()
 let _map_new_k = fresh_var ()
 let _map_new_v = fresh_var ()
@@ -951,9 +960,9 @@ let map_len_scheme =
       Ast.TyCon ("Map", [_map_len_region; _map_len_k; _map_len_v]),
       Ast.TyInt) }
 
-(* Phase 39.A' #2: map_delete — `Map[R, K, V] -> K -> unit`。 該当 key を
-   削除。 key が無い場合は no-op。 lru_cache.mere の sentinel-value workaround を
-   解消するため追加。 *)
+(* Phase 39.A' #2: map_delete — `Map[R, K, V] -> K -> unit`. Removes
+   the given key. No-op when the key is absent. Added to remove the
+   sentinel-value workaround in lru_cache.mere. *)
 let _map_delete_region = fresh_var ()
 let _map_delete_k = fresh_var ()
 let _map_delete_v = fresh_var ()
@@ -996,15 +1005,15 @@ let initial_env : env =
     ("read_file",   mono (Ast.TyArrow (Ast.TyStr,  Ast.TyStr)));
     ("write_file",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
-    (* Phase 19.6: I/O 拡張。prelude が `'a list` / `'a option` を提供。 *)
+    (* Phase 19.6: I/O extensions. The prelude provides `'a list` / `'a option`. *)
     ("read_lines",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
-    (* Phase 44: docs site SSG 用 file system primitives (paper-trial doc 47) *)
+    (* Phase 44: file system primitives for the docs site SSG (paper-trial doc 47) *)
     ("list_dir",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
     ("mkdir_p",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyUnit)));
-    (* Phase 44.6: dev server / watch 用 *)
+    (* Phase 44.6: for dev server / watch *)
     ("file_mtime",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyFloat)));
     ("sleep_ms",
@@ -1036,7 +1045,7 @@ let initial_env : env =
     ("floor",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("ceil",        mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("round",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
-    (* Phase 19.7: 数学拡張 *)
+    (* Phase 19.7: math extensions *)
     ("log",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("exp",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("sin",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
@@ -1371,8 +1380,8 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | Ast.Var "owned_vec_to_vec" ->
-       (* Phase 12.12: OwnedVec → Vec の region は active_regions から
-          inject。outside any region なら __heap。 *)
+       (* Phase 12.12: the region for OwnedVec -> Vec is injected from
+          active_regions. Outside any region, it becomes __heap. *)
        let active_region =
          match !active_regions with
          | r :: _ -> r
@@ -1383,11 +1392,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        in
        let elem = fresh_var () in
        let result_ty = Ast.TyCon ("Vec", [marker; elem]) in
-       (* arg は OwnedVec[T] と unify する必要があるので、scheme と
-          同じ shape の関数型を構築して unify。 *)
+       (* arg must unify with OwnedVec[T], so construct a function type
+          with the same shape as the scheme and unify. *)
        unify e.loc tf
          (Ast.TyArrow (Ast.TyCon ("OwnedVec", [elem]), result_ty));
-       (* arg の型を確認 (ta は既に inferred、 unify に通す) *)
+       (* Verify the arg's type (ta is already inferred; run through unify) *)
        unify arg.loc (Ast.TyCon ("OwnedVec", [elem])) ta;
        result_ty
      | _ ->
@@ -1729,11 +1738,11 @@ let mode_label = function
   | Ast.ExclusiveRead -> "&exclusive R"
   | Ast.ExclusiveWrite -> "&mut R"
 
-(* Phase 11.5: 借用 target の identity を抽出するヘルパ。Var だけでなく
-   `p.field` / `p.q.r` のような Field_get chain も追跡対象にする。
-   Returns Some "<dotted>" or None when the borrowee is something more
-   complex (a function call result, a literal, etc.) — None だと borrow
-   tracking の対象外 (= 衝突検出なし) になる。 *)
+(* Phase 11.5: helper to extract the identity of a borrow target. In
+   addition to Var, also tracks Field_get chains like `p.field` /
+   `p.q.r`. Returns Some "<dotted>" or None when the borrowee is
+   something more complex (a function call result, a literal, etc.) —
+   None means it is outside borrow tracking (= no conflict detection). *)
 let rec place_id (e : Ast.expr) : string option =
   match e.Ast.node with
   | Ast.Var n -> Some n
@@ -1762,15 +1771,18 @@ let check_borrow_conflict active region place mode loc =
     end
   ) active
 
-(* Phase 11.6: 制御フロー解析の最小版。式が「let の右辺として bind
-   された時に、上に伝播し得る borrow」のリストを抽出する。
-   - Ref (mode, region, inner): その borrow を 1 つ返す (place が
-     追跡可能なら)
-   - If (cond, t, e): 両分岐から抽出した borrow を union (どちらに
-     なるかは runtime 依存なので保守的に両方とも active と見なす)
-   - Let (_, _, body): body から抽出 (let-in を value 位置に書いた場合)
-   - Annot (inner, _): inner から抽出
-   - それ以外: 空リスト *)
+(* Phase 11.6: minimal control-flow analysis. Extracts the list of
+   "borrows that may propagate upward when the expression is bound as
+   the rhs of a let".
+   - Ref (mode, region, inner): returns that one borrow (if the place
+     is trackable)
+   - If (cond, t, e): unions the borrows extracted from both arms
+     (which one is taken depends on runtime, so conservatively
+     consider both active)
+   - Let (_, _, body): extract from body (when let-in is written in
+     value position)
+   - Annot (inner, _): extract from inner
+   - otherwise: empty list *)
 let rec extract_borrows (e : Ast.expr) : (string * string * Ast.borrow_mode * Loc.t) list =
   match e.Ast.node with
   | Ast.Ref (mode, region, inner) ->
@@ -1852,7 +1864,7 @@ let rec check_borrows active (e : Ast.expr) : unit =
       match pat.Ast.pnode with
       | Ast.P_var name ->
         let new_borrows = extract_borrows value in
-        (* Phase 17.1 / DEFERRED §2.1 残: if `value` has type `&R T` but
+        (* Phase 17.1 / DEFERRED §2.1 remaining: if `value` has type `&R T` but
            extract_borrows returned no borrow (= the source is a
            function call / complex expr without a stable place_id),
            treat the let-binding name itself as a borrow place. This

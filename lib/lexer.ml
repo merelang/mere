@@ -216,8 +216,8 @@ let rec tokenize s =
            counter. `\{` escapes the literal brace. *)
         let buf = Buffer.create 16 in
         let parts = ref [] in
-        (* parts は逆順: 最後に T_string で push されるか、interp で T_plus_plus
-           で挟まれる。 *)
+        (* parts is in reverse order: finally pushed as T_string, or sandwiched
+           with T_plus_plus for interpolation. *)
         let flush_lit () =
           let s_part = Buffer.contents buf in
           Buffer.clear buf;
@@ -293,7 +293,7 @@ let rec tokenize s =
           let lparen_tok = (with_width pos w, T_lparen) in
           let rparen_tok = (with_width pos w, T_rparen) in
           let strip_eof toks =
-            (* tokenize 末尾の T_eof は外側 stream で邪魔なので落とす。 *)
+            (* The trailing T_eof from tokenize is dropped because it gets in the way of the outer stream. *)
             List.filter (fun (_, t) -> t <> T_eof) toks
           in
           let rec emit = function

@@ -33,15 +33,15 @@ let module_bindings : (string, string list) Hashtbl.t = Hashtbl.create 4
 
 (* Import registry: canonicalised file path -> ().  Populated when
    `import "path";` is processed; consumed to skip subsequent imports
-   of the same file (cycle guard). Phase 9.5 で canonicalisation
-   (Unix.realpath) を入れたので、同一ファイルへの異なる relative path
-   表記でも 1 度だけ読まれる。 *)
+   of the same file (cycle guard). Phase 9.5 introduced canonicalisation
+   (Unix.realpath), so the same file is read only once even when reached
+   via different relative path representations. *)
 let imported_files : (string, unit) Hashtbl.t = Hashtbl.create 4
 
-(* Phase 9.5: importer-relative path resolution の基準ディレクトリ。
-   `parse_program ~base_dir` で top-level に設定、`import "path";` を
-   処理するたびに 「import 先ファイルのディレクトリ」を一時的に push
-   する (recursive imports で正しく辿るため)。 *)
+(* Phase 9.5: base directory for importer-relative path resolution.
+   Set at the top level by `parse_program ~base_dir`, and temporarily
+   pushed to "the directory of the imported file" each time
+   `import "path";` is processed (so recursive imports resolve correctly). *)
 let current_base_dir : string ref = ref ""
 
 (* Region name stack — pushed when entering a `region NAME { ... }` body
@@ -305,8 +305,8 @@ let rec parse_program_internal tokens =
            if cond then let _ = body in __loop ()
            else ()
          in __loop ()
-       Mere は immutable なので `while` の典型用途は Map/OwnedVec の
-       mutable container を更新するパターン。 *)
+       Since Mere is immutable, the typical use of `while` is the pattern
+       of updating a mutable container like Map/OwnedVec. *)
     | (pos, T_while) :: rest ->
       let cond, after_cond = expr rest in
       (match after_cond with
@@ -1120,10 +1120,10 @@ let rec parse_program_internal tokens =
               [e | x <- xs, p, y <- ys]
                 = list_flat_map (list_filter xs (\x -> p)) (\x ->
                     list_map ys (\y -> e))
-            等。`Generator (var, src)` と `Filter cond` の 2 種類の
-            qualifier を逐次 parse して、最後の generator の body は
-            list_map、それより前の generator は list_flat_map で合成する。
-            Filter は直前の generator の source を list_filter で絞り込む。 *)
+            etc. We parse the two kinds of qualifiers — `Generator (var, src)`
+            and `Filter cond` — sequentially. The body of the last generator
+            becomes a list_map; earlier generators compose via list_flat_map.
+            A Filter narrows the source of the immediately preceding generator with list_filter. *)
          let parse_qual toks =
            match toks with
            | (_, T_ident name) :: (_, T_lt_minus) :: rest2 ->
@@ -1508,7 +1508,7 @@ let rec parse_program_internal tokens =
        module), m_name IS the full path. *)
     if full_path <> "" && full_path <> m_name then
       Hashtbl.replace module_bindings full_path direct_names;
-    (* Phase 18.1 / DEFERRED §4.1 残: gather type / record / constructor
+    (* Phase 18.1 / DEFERRED §4.1 remaining: gather type / record / constructor
        names from this module's Top_type / Top_record / Top_type_alias
        decls, so we can M-prefix them and rewrite internal references.
        Backward compat: also keep the bare (unqualified) registration

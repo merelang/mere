@@ -17,7 +17,7 @@ let usage () =
   print_endline "  mere -h | --help      show this help";
   print_endline "";
   print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
-  print_endline "Examples: examples/ (118 .mere files、 examples/README.md でカテゴリ別索引)"
+  print_endline "Examples: examples/ (118 .mere files; see examples/README.md for category index)"
 
 let version () =
   Printf.printf "mere v%s\n" Mere.Version.v
@@ -164,9 +164,9 @@ let () =
     let base = Filename.dirname path in
     run_action (Mere.Pipeline.process ~base_dir:base) path source
   | _ :: path :: _rest_args when String.length path > 0 && path.[0] <> '-' ->
-    (* Phase 44: `mere <path> arg1 arg2 ...` — program に余分な args を渡す。
-       Sys.argv は OCaml runtime が保持しているので、 eval の `args ()`
-       builtin が rest_args を見える状態。 ここでは file 実行のみ。 *)
+    (* Phase 44: `mere <path> arg1 arg2 ...` — pass extra args to the program.
+       Since Sys.argv is retained by the OCaml runtime, eval's `args ()`
+       builtin can see rest_args. Only file execution is handled here. *)
     let source = read_file path in
     let base = Filename.dirname path in
     run_action (Mere.Pipeline.process ~base_dir:base) path source

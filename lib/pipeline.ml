@@ -1,9 +1,9 @@
 (* Source string -> ... convenience functions.
    Handles top-level decls (let, let rec, type) in order. *)
 
-(* Phase 19.4: 自動 import される prelude を parse して decls を返す。
-   ユーザの parse 開始時に、これらの decls が user decls の先頭に
-   挿入される。`?prelude:false` で無効化 (テスト・debug 用)。 *)
+(* Phase 19.4: parses the auto-imported prelude and returns its decls.
+   When the user's parse starts, these decls are inserted at the front of
+   the user decls. Disabled by `?prelude:false` (for tests / debug). *)
 let parse_prelude () : Ast.top_decl list =
   let tokens = Lexer.tokenize Prelude_stdlib.contents in
   let prog = Parser.parse_program tokens in
@@ -35,10 +35,10 @@ let parse_only s =
   Ast.desugar_program prog
 
 (* Process top-decls in order, updating envs and the typer's constructor table. *)
-(* Phase 38.A3: top-level fn 名が libc / libm / C キーワードと衝突すると
-   C codegen 時 compile error になる。 typer / eval は影響を受けないが、
-   parser を通った段階で warning を出して user を助ける。 詳細は
-   docs/patterns.md §5 参照。 *)
+(* Phase 38.A3: a top-level fn name that collides with libc / libm / C
+   keywords causes a C codegen compile error. typer / eval are unaffected,
+   but we emit a warning at the parser stage to help the user. See
+   docs/patterns.md §5 for details. *)
 let reserved_c_names =
   [
     (* C keywords *)
@@ -77,8 +77,8 @@ let warn_reserved_name loc name =
   if List.mem name reserved_c_names then
     Printf.eprintf
       "%s: warning: top-level name `%s` collides with a C keyword or libc/libm \
-       symbol — codegen に出すと compile error になります。 名前を変える \
-       (例: `%s_` / `m_%s` / `%s_v`) ことを推奨 (docs/patterns.md §5 参照)\n%!"
+       symbol — this will be a compile error at codegen. Renaming is \
+       recommended (e.g. `%s_` / `m_%s` / `%s_v`) (see docs/patterns.md §5)\n%!"
       (Loc.to_string loc) name name name name
 
 let rec warn_reserved_in_pattern (p : Ast.pattern) : unit =
@@ -154,10 +154,10 @@ let process_decls eval_env type_env decls =
     | Ast.Top_drop name ->
       Typer.register_drop_type name
     | Ast.Top_extern (name, ty) ->
-      (* Phase 32.1 (FFI): extern fn を type env と eval env の両方に登録。
-         typer 側は型を加えるだけ。eval 側は extern_mocks の hardcoded
-         OCaml impl を Eval.lookup_extern で参照、未対応名は eval-time の
-         clear エラーに。 *)
+      (* Phase 32.1 (FFI): register extern fn in both the type env and the eval env.
+         The typer side just adds the type. The eval side references the
+         hardcoded OCaml impl in extern_mocks via Eval.lookup_extern, and
+         unsupported names become a clear eval-time error. *)
       type_env := (name, Typer.mono ty) :: !type_env;
       eval_env := (name, ref (Eval.lookup_extern name ty)) :: !eval_env
     | Ast.Top_ctor_alias (alias, target) ->

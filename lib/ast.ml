@@ -22,7 +22,7 @@ and borrow_mode =
   | BorrowedRead    (* default; shared, read-only — written `&R T` *)
   | SharedWrite     (* `&shared write R T` — shared, write OK (cap-internal lock) *)
   | ExclusiveRead   (* `&exclusive R T` — exclusive, read-only (rare) *)
-  | ExclusiveWrite  (* `&mut R T` — exclusive, write OK (Rust `&mut` 相当) *)
+  | ExclusiveWrite  (* `&mut R T` — exclusive, write OK (equivalent to Rust's `&mut`) *)
 
 type expr = {
   loc : Loc.t;
@@ -102,17 +102,17 @@ type top_decl =
   | Top_view of string * string * (string * ty) list
     (* view name * region param * fields (can reference the region via &R T) *)
   | Top_extern of string * ty
-    (* Phase 32 (C1 FFI): `extern fn <name>: <ty>;` で外部 C 関数を宣言。
-       MVP は int / bool / str / unit からなる arrow type のみ対応。
-       interp は eval.ml の extern_mocks に hardcoded mock を用意、
-       codegen は 3 backend それぞれに forward decl / declare / import を emit。 *)
+    (* Phase 32 (C1 FFI): `extern fn <name>: <ty>;` declares an external C function.
+       The MVP only supports arrow types built from int / bool / str / unit.
+       interp provides hardcoded mocks via extern_mocks in eval.ml, and
+       codegen emits a forward decl / declare / import in each of the 3 backends. *)
   | Top_drop of string
     (* Marks an existing type/record name as having Drop semantics.
        Emitted by the parser when it sees `drop type ...` or `drop type =
        { ... }` form. The typer uses this to enforce the Trivial[R]
        constraint on region-tagged values. *)
   | Top_ctor_alias of string * string
-    (* Phase 18.1 / DEFERRED §4.1 残: typer-side aliasing of constructor
+    (* Phase 18.1 / DEFERRED §4.1 remaining: typer-side aliasing of constructor
        names. Emitted by parser's `prefix_module_decls` for each ctor in
        a module: `Top_ctor_alias ("M.Red", "Red")` registers `M.Red` as
        another name pointing to the same variant info as `Red`. Allows
@@ -127,7 +127,7 @@ type program = {
   main : expr;
 }
 
-(* Phase 18.1 / DEFERRED §4.1 残: Global alias maps for ctor / record
+(* Phase 18.1 / DEFERRED §4.1 remaining: Global alias maps for ctor / record
    names. Populated by Pipeline / Typer.alias_ctor / Typer.alias_record
    via Top_ctor_alias / Top_record_alias decls.
 

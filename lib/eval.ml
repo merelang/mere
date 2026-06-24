@@ -15,23 +15,25 @@ type value =
   | V_record of string * (string * value) list
   | V_vec of value array ref
     (* `'a Vec` — region-aware growable vector (Phase 12.1, Q-010
-       narrowed → 実装第一段階).  Backed by a mutable array ref;
+       narrowed -> first implementation stage). Backed by a mutable array ref;
        push reallocates. Trivial[R] when element type is Trivial[R]. *)
   | V_strbuf of Buffer.t
     (* `StrBuf[R]` — region-aware mutable string buffer (Phase 12.7,
-       Q-010 narrowed). 設計 doc 13_region_std_types.md §4 の最小実装。
-       内部は OCaml Buffer、文字列の bytes を保持。Trivial 扱いなので
-       region に置ける。型は TyCon ("StrBuf", [TyRef BR R TyUnit])
-       (region marker 1-arg、view 型と同じ慣例)。 *)
+       Q-010 narrowed). Minimal implementation of design doc
+       13_region_std_types.md §4. Internally an OCaml Buffer holding
+       the string's bytes. Treated as Trivial, so it can live in a
+       region. The type is TyCon ("StrBuf", [TyRef BR R TyUnit])
+       (1-arg region marker, the same convention as view types). *)
   | V_map of (value, value) Hashtbl.t * value list ref
     (* `Map[R, K, V]` — region-aware mutable associative map (Phase 12.10,
-       Q-010 narrowed). 設計 doc 13_region_std_types.md §5 の最小実装。
-       内部は OCaml Hashtbl で polymorphic hash / eq を使う (closures /
-       refs を含む key は識別が ref 単位、注意)。型は TyCon ("Map",
-       [TyRef BR R TyUnit; K; V])。
-       Phase 27.1: 2nd component は insertion order の key list
-       (map_iter が deterministic 順で iterate するため)。Hashtbl 自体は
-       lookup の O(1) を保つ。 *)
+       Q-010 narrowed). Minimal implementation of design doc
+       13_region_std_types.md §5. Internally an OCaml Hashtbl using
+       polymorphic hash / eq (note: keys containing closures / refs are
+       identified per-ref). The type is TyCon ("Map",
+       [TyRef BR R TyUnit; K; V]).
+       Phase 27.1: the 2nd component is the insertion-order key list
+       (so that map_iter iterates in deterministic order). The Hashtbl
+       itself preserves O(1) lookup. *)
 
 and env = (string * value ref) list
 
@@ -189,9 +191,9 @@ let builtin_read_file =
          raise (Eval_error (Loc.dummy, "read_file: " ^ msg)))
     | _ -> failwith "read_file: expected str")
 
-(* Phase 19.6: I/O 拡張。read_lines, file_exists, env_var, args.
-   read_lines / args は str list を返すので prelude の `type 'a list`
-   に依存。env_var は str option を返す (prelude の `'a option`)。 *)
+(* Phase 19.6: I/O extensions. read_lines, file_exists, env_var, args.
+   read_lines / args return str list, so they depend on the prelude's
+   `type 'a list`. env_var returns str option (the prelude's `'a option`). *)
 
 let rec str_list_to_v_local = function
   | [] -> V_constr ("Nil", None)
@@ -222,14 +224,14 @@ let builtin_file_exists =
     | V_str path -> V_bool (Sys.file_exists path)
     | _ -> failwith "file_exists: expected str")
 
-(* Phase 44: docs site SSG 用 fs primitives *)
+(* Phase 44: fs primitives for the docs site SSG *)
 let builtin_list_dir =
   V_builtin ("list_dir", fun v ->
     match v with
     | V_str path ->
       (try
          let entries = Sys.readdir path in
-         (* `.` と `..` は除外。 sort して安定順序にする *)
+         (* Exclude `.` and `..`. Sort for a stable order. *)
          let lst = Array.to_list entries
                    |> List.filter (fun n -> n <> "." && n <> "..")
                    |> List.sort compare in
@@ -238,7 +240,7 @@ let builtin_list_dir =
          raise (Eval_error (Loc.dummy, "list_dir: " ^ msg)))
     | _ -> failwith "list_dir: expected str")
 
-(* Phase 44.6: file_mtime / sleep_ms — dev server / watch 用 *)
+(* Phase 44.6: file_mtime / sleep_ms — for dev server / watch *)
 let builtin_file_mtime =
   V_builtin ("file_mtime", fun v ->
     match v with
@@ -261,7 +263,7 @@ let builtin_mkdir_p =
   V_builtin ("mkdir_p", fun v ->
     match v with
     | V_str path ->
-      (* `mkdir -p` 相当: 中間 dir も含めて作成、 既存ならエラー無視 *)
+      (* Equivalent to `mkdir -p`: create intermediate dirs as well; ignore errors if already exists *)
       let rec mk p =
         if p = "" || p = "/" || p = "." then ()
         else if Sys.file_exists p then ()
@@ -293,8 +295,9 @@ let builtin_args =
   V_builtin ("args", fun v ->
     match v with
     | V_unit ->
-      (* OCaml Sys.argv[0] は実行ファイル名 — Mere program 視点では
-         「program 自身の args」(argv[1..]) を返すのが自然。 *)
+      (* OCaml's Sys.argv[0] is the executable name — from the Mere
+         program's perspective, returning "the program's own args"
+         (argv[1..]) is the natural choice. *)
       let argv = Sys.argv in
       let n = Array.length argv in
       let args = if n <= 1 then [] else
@@ -452,7 +455,7 @@ let builtin_round =
     | V_float f -> V_float (Float.round f)
     | _ -> failwith "round: expected float")
 
-(* Phase 19.7: 数学拡張 — 自然対数 / 指数 / 三角 / 比較 / random。 *)
+(* Phase 19.7: math extensions — natural log / exp / trig / comparisons / random. *)
 
 let unary_float name f =
   V_builtin (name, fun v ->
@@ -481,7 +484,7 @@ let builtin_f_min = binary_float "f_min" Float.min
 let builtin_f_max = binary_float "f_max" Float.max
 let builtin_f_pow = binary_float "f_pow" Float.pow
 
-(* random_int n: 0..n-1 の int を返す。n <= 0 で raise。 *)
+(* random_int n: returns an int in 0..n-1. Raises when n <= 0. *)
 let builtin_random_int =
   V_builtin ("random_int", fun v ->
     match v with
@@ -492,7 +495,7 @@ let builtin_random_int =
       else V_int (Random.int n)
     | _ -> failwith "random_int: expected int")
 
-(* random_float (): 0.0 <= x < 1.0 の float を返す。 *)
+(* random_float (): returns a float with 0.0 <= x < 1.0. *)
 let builtin_random_float =
   V_builtin ("random_float", fun v ->
     match v with
@@ -844,18 +847,19 @@ let builtin_fail =
 let builtin_show =
   V_builtin ("show", fun v -> V_str (to_string v))
 
-(* Phase 12.6 — Q-010 narrowed: trait-style API unification の最初の
-   一歩。`len` を `'a -> int` の polymorphic builtin として追加、
-   runtime に値の variant を見て dispatch:
-     - V_vec       → array length (Vec[R, T] と OwnedVec[T] が共有する
-                     V_vec runtime をカバー)
-     - V_str       → byte length
-     - V_constr (Nil/Cons …) → list traversal で要素数
-     - V_tuple     → arity
-     - else        → eval error
-   これは ad-hoc polymorphism (show と同じ枠) — 完全な trait システム
-   ではないが、`Vec[R, T] / OwnedVec[T] / list / str / tuple` に対して
-   単一の API を提供する。本格的な trait は将来 slice で。 *)
+(* Phase 12.6 — Q-010 narrowed: the first step toward trait-style API
+   unification. Adds `len` as a polymorphic `'a -> int` builtin that
+   dispatches at runtime by looking at the value variant:
+     - V_vec       -> array length (covers the V_vec runtime that
+                     Vec[R, T] and OwnedVec[T] share)
+     - V_str       -> byte length
+     - V_constr (Nil/Cons ...) -> element count via list traversal
+     - V_tuple     -> arity
+     - else        -> eval error
+   This is ad-hoc polymorphism (same bucket as show) — not a full
+   trait system, but it provides a single API for
+   `Vec[R, T] / OwnedVec[T] / list / str / tuple`. A proper trait
+   system will come in a future slice. *)
 let rec vec_len_via_constr v =
   match v with
   | V_constr ("Nil", None) -> 0
@@ -921,14 +925,16 @@ let builtin_vec_len =
     | V_vec arr -> V_int (Array.length !arr)
     | _ -> failwith "vec_len: expected Vec")
 
-(* Vec の高階 API (Phase 12.9) は apply_value_ref が必要なため、
-   apply_value_ref 定義のあとに配置 (`builtin_vec_iter` etc. を後述)。
-   in-place mutation の `vec_set` は apply_value_ref 不要だが、Phase 12.9
-   グループとして同じ場所に置く。 *)
+(* The higher-order Vec API (Phase 12.9) requires apply_value_ref, so
+   it is placed after apply_value_ref is defined (`builtin_vec_iter`
+   etc. appear later). The in-place mutation `vec_set` does not need
+   apply_value_ref, but is placed together as part of the Phase 12.9
+   group. *)
 
-(* OwnedVec[T] (Phase 12.5) — runtime は V_vec を共有。型システム上だけ
-   別型として扱われる。`Vec[R, T]` との対比は、OwnedVec が Drop 型として
-   登録されていて region に置けない点で表現される。 *)
+(* OwnedVec[T] (Phase 12.5) — the runtime shares V_vec. Only the type
+   system treats it as a separate type. The contrast with `Vec[R, T]`
+   is expressed by the fact that OwnedVec is registered as a Drop type
+   and so cannot live in a region. *)
 let builtin_owned_vec_new =
   V_builtin ("owned_vec_new", fun v ->
     match v with
@@ -965,8 +971,9 @@ let builtin_owned_vec_len =
     | V_vec arr -> V_int (Array.length !arr)
     | _ -> failwith "owned_vec_len: expected OwnedVec")
 
-(* StrBuf[R] builtins (Phase 12.7) — region 内可変文字列バッファ。
-   実装は OCaml Buffer で、push は append、to_str で snapshot を返す。 *)
+(* StrBuf[R] builtins (Phase 12.7) — a mutable string buffer inside a
+   region. Implemented as an OCaml Buffer; push appends, and to_str
+   returns a snapshot. *)
 let builtin_strbuf_new =
   V_builtin ("strbuf_new", fun v ->
     match v with
@@ -995,10 +1002,11 @@ let builtin_strbuf_len =
     | V_strbuf buf -> V_int (Buffer.length buf)
     | _ -> failwith "strbuf_len: expected StrBuf")
 
-(* Map[R, K, V] builtins (Phase 12.10). 内部は OCaml Hashtbl (polymorphic
-   hash/eq)。Lang 値 (V_int / V_str / V_bool / V_tuple of primitives) を
-   key として使う想定。closures や refs を含む key は識別が ref 単位
-   になるため、用法には注意。 *)
+(* Map[R, K, V] builtins (Phase 12.10). Internally an OCaml Hashtbl
+   (polymorphic hash/eq). Designed to use Lang values
+   (V_int / V_str / V_bool / V_tuple of primitives) as keys. Be careful
+   with keys containing closures or refs — they are identified
+   per-ref. *)
 let builtin_map_new =
   V_builtin ("map_new", fun v ->
     match v with
@@ -1044,8 +1052,9 @@ let builtin_map_len =
     | V_map (tbl, _) -> V_int (Hashtbl.length tbl)
     | _ -> failwith "map_len: expected Map")
 
-(* Phase 39.A' #2: map_delete — Hashtbl.remove。 key 不在は no-op。
-   Phase 27.1 insertion-order を維持するため、 keys list からも除去。 *)
+(* Phase 39.A' #2: map_delete — Hashtbl.remove. No-op if the key is
+   absent. To preserve Phase 27.1 insertion order, also removes from
+   the keys list. *)
 let builtin_map_delete =
   V_builtin ("map_delete", fun v ->
     match v with
@@ -1112,8 +1121,8 @@ let builtin_try_or =
       try !apply_value_ref f V_unit
       with Eval_error _ -> default))
 
-(* Phase 12.9: Vec の高階 API (iter / map / fold / set)。
-   apply_value_ref を介して user functions (V_closure / V_builtin) を呼ぶ。 *)
+(* Phase 12.9: higher-order Vec API (iter / map / fold / set).
+   Calls user functions (V_closure / V_builtin) via apply_value_ref. *)
 let builtin_vec_iter =
   V_builtin ("vec_iter", fun v ->
     match v with
@@ -1258,9 +1267,10 @@ let builtin_vec_to_owned =
       V_vec (ref (Array.copy !arr))
     | _ -> failwith "vec_to_owned: expected Vec")
 
-(* Phase 12.12: 逆向き OwnedVec[T] → Vec[R, T]。region は呼出位置の
-   active_regions から typer の special-case で注入される。runtime は
-   単純な deep copy (V_vec を共有しているため、Array.copy で独立化)。 *)
+(* Phase 12.12: the reverse direction OwnedVec[T] -> Vec[R, T]. The
+   region is injected by a typer special-case from the call site's
+   active_regions. The runtime is a simple deep copy (since V_vec is
+   shared, Array.copy makes it independent). *)
 let builtin_owned_vec_to_vec =
   V_builtin ("owned_vec_to_vec", fun v ->
     match v with
@@ -1507,10 +1517,11 @@ let builtin_char_at =
         | _ -> failwith "char_at: 2nd arg expected int")
     | _ -> failwith "char_at: 1st arg expected str")
 
-(* Phase 32.1 (C1 FFI): extern fn 用の OCaml mock 実装。codegen は
-   3 backend で本物の C 関数を呼ぶが、interp は eval-time にこの mock を
-   経由して 4 backend parity を保つ。未知の extern 名は lookup_extern が
-   親切エラーで reject。 *)
+(* Phase 32.1 (C1 FFI): OCaml mock implementations for extern fns. The
+   3 codegen backends call the real C functions, but the interpreter
+   goes through this mock at eval time to maintain 4-backend parity.
+   Unknown extern names are rejected by lookup_extern with a helpful
+   error. *)
 let lookup_extern (name : string) (_ty : Ast.ty) : value =
   match name with
   | "getpid" ->
@@ -1569,8 +1580,9 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
           | _ -> failwith "setenv: 2nd arg expected str")
       | _ -> failwith "setenv: 1st arg expected str")
   | _ ->
-    (* Phase 32.1: unknown extern は lookup ではなく call で fail に
-       (program 解析だけ通したい場合 / codegen で実行する場合に妨げない)。 *)
+    (* Phase 32.1: unknown extern fails at call time rather than lookup
+       (so that program analysis can still pass / running via codegen
+       is not blocked). *)
     V_builtin (name, fun _v ->
       failwith (Printf.sprintf
         "extern fn %S: no interp mock implementation. Add a case to \
