@@ -1,0 +1,34 @@
+// contrib/dom — minimal DOM bindings for browser-side Mere code.
+//
+// Provides four extern fns that the user's HTML host must wire up via
+// `contrib/dom/dom.glue.js` (or an equivalent module) before
+// instantiating the Wasm module. See `contrib/dom/README.md` for the
+// integration recipe.
+//
+// extern type JsRef is an opaque handle to a JavaScript object. The
+// only producers are the extern fns below; the typer prevents code
+// from fabricating a JsRef from a plain integer.
+
+extern type JsRef;
+
+// Wrapper around `document.getElementById`. Returns an opaque handle
+// to the matched element, or a host-defined sentinel (usually handle
+// index 0, treated by the glue as a no-op target) when no element
+// matches the id.
+extern fn dom_get_by_id: str -> JsRef;
+
+// Equivalent of `element.textContent = s`. The string is read from
+// Wasm linear memory and copied into the DOM.
+extern fn dom_set_text: JsRef -> str -> unit;
+
+// Equivalent of `element.addEventListener("click", handler)`. The
+// closure runs the next time the element is clicked; its env lives in
+// the Wasm module's bump arena and survives for the page lifetime, so
+// captured values stay alive between event firings.
+extern fn dom_on_click: JsRef -> (unit -> unit) -> unit;
+
+// Read `element.value` from `<input>` / `<textarea>`. The returned
+// string is copied into a host-managed scratch buffer in linear memory
+// and is only valid until the next `dom_input_value` call — copy via
+// `str_*` builtins if you need to retain it past that point.
+extern fn dom_input_value: JsRef -> str;

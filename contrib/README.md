@@ -67,6 +67,7 @@ naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 | **path** | `contrib/path/` | POSIX path operations (`Path.join` / `basename` / `dirname` / `ext` / `drop_ext` / `has_ext`) | ✓ module |
 | **toml** | `contrib/toml/` | TOML 1.0 reduced parser (`Toml.parse_toml` int / str / bool / array + nested section, flattened to dotted key) | ✓ module |
 | **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index). interp + C only | CLI script |
+| **dom** | `contrib/dom/` | minimal browser DOM bindings (`dom_get_by_id` / `dom_set_text` / `dom_on_click` / `dom_input_value`). Wasm + `dom.glue.js` host | extern fn (Phase 48 C2 MVP) |
 
 Future candidates: see internal design notes §3.
 
