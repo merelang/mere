@@ -7,12 +7,12 @@
 
 OCaml implementation of **Mere**, a new programming language (Old English for "lake"; 4 letters; region metaphor). An ML-family mini language that has reached a practical level — its memory model (region / view / Trivial[R]), effect system (capability passing + refined borrow annotations), and three codegen backends (C / LLVM IR / Wasm) all work at feature parity.
 
-Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19; see NAMING.md).
+Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 
-## Status (as of 2026-06-22)
+## Status (as of 2026-06-24)
 
-- **1529 tests passing**
-- **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); Phase 36 expanded the example set to 118.
+- **1551 tests passing**
+- **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); subsequent phases grew the example set to 136.
 - Memory model: region / view / Trivial[R] / `with` Drop work at the type level, in the interpreter, and in all three codegen backends.
 - Effect system: capability-passing pattern + `signature ... = (...)` argument bundling + `using [cap]` sugar + builtin Logger / Metrics.
 - Refined borrow annotations: 4 modes `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` + borrow checker (place expressions + if/match branch propagation + full conflict matrix coverage).
@@ -110,7 +110,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # print the type
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1529 tests
+dune runtest                                         # 1551 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -144,7 +144,7 @@ mere/
 │   ├── repl.ml         # interactive REPL (multi-line / :env / :show / :load / :reset)
 │   ├── diagnostic.ml   # Rust-style code frame + ANSI colors
 │   └── version.ml
-├── test/test_basic.ml  # 1529 tests
+├── test/test_basic.ml  # 1551 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
 ├── examples/           # *.mere sample programs
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog

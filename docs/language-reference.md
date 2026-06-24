@@ -1,6 +1,6 @@
 # Language reference (mere)
 
-The syntax and semantics of Mere as currently implemented (as of 2026-06-22 / Phase 36). `&T` references / `region` / `view` / effects / FFI / 4-backend codegen are all implemented. Phase 36 added 13 kinds of syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` / `for-in-do` / `while-do`), substantially improving ergonomics in the ML-family tradition.
+The syntax and semantics of Mere as currently implemented (as of 2026-06-24 / Phase 46). `&T` references / `region` / `view` / effects / FFI / 4-backend codegen are all implemented. Phase 36 added 13 kinds of syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` / `for-in-do` / `while-do`), substantially improving ergonomics in the ML-family tradition.
 
 ---
 
@@ -503,7 +503,7 @@ So Mere's Copy/Linear distinction is realized via three layers — **Drop types 
 
 ---
 
-## 8. Known constraints (2026-06-22)
+## 8. Known constraints (2026-06-24)
 
 Items previously listed as "not implemented" were implemented incrementally through Phases 14-36; the following remain:
 
@@ -520,7 +520,7 @@ Items previously listed as "not implemented" were implemented incrementally thro
 
 ## 9. Status summary
 
-- **1529 tests passing** (test/test_basic.ml).
+- **1551 tests passing** (test/test_basic.ml).
 - **4-backend feature parity**: interpreter + C / LLVM IR / Wasm runtime.
 - 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) match **diff = 0 PERFECT**.
 - See [Changelog](changelog.md) / [Codegen](codegen.md) for details.

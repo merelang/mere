@@ -102,7 +102,7 @@ with db = Database.connect(...) in
 
 ---
 
-## 4. Current state in mere (as of 2026-06-22, Phase 36)
+## 4. Current state in mere (as of 2026-06-24, Phase 46)
 
 The "Phase 2" section below is a record of the first implementation slices (the region/view syntax layer). **Phase 11 → 31 implemented the 4 borrow modes (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) + borrow checker + `with` Drop integration + the 4 Q-010 collections (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + 4-backend codegen (interp + C / LLVM / Wasm) parity.** Details: [language-reference.md §3 region/view/with](language-reference.md) / [codegen.md §4](codegen.md).
 
