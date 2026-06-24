@@ -1797,6 +1797,16 @@ let rec parse_program_internal tokens =
        | _ ->
          raise (Parse_error (pos_of after_ty,
            "expected ';' after extern fn declaration")))
+    | (_, T_extern) :: (_, T_type) :: (_, T_ident type_name) :: (_, T_semi) :: rest ->
+      (* Phase 48.1 (C2 frontend FFI): `extern type <Name>;` declares an
+         opaque handle type. Register it in the parser's `types`-equivalent
+         knowledge by routing through Top_extern_type — the typer side
+         calls `register_type type_name [] []` so subsequent `ty`
+         occurrences of <Name> resolve to TyCon (Name, []). *)
+      parse_decls (Ast.Top_extern_type type_name :: decls) rest
+    | (pos, T_extern) :: (_, T_type) :: _ ->
+      raise (Parse_error (pos,
+        "expected `<Name>;` after `extern type`"))
     | (pos, T_extern) :: _ ->
       raise (Parse_error (pos,
         "expected `fn NAME : TY ;` after `extern`"))

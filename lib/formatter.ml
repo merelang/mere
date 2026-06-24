@@ -519,6 +519,9 @@ let fmt_top_view name region fields =
 let fmt_top_extern name t =
   "extern fn " ^ name ^ ": " ^ fmt_ty t ^ ";"
 
+let fmt_top_extern_type type_name =
+  "extern type " ^ type_name ^ ";"
+
 let fmt_top_drop name = "drop type " ^ name ^ ";"
 
 let fmt_top_decl d =
@@ -535,6 +538,7 @@ let fmt_top_decl d =
   | Top_view (name, region, fields) ->
     Some (fmt_top_view name region fields)
   | Top_extern (name, t) -> Some (fmt_top_extern name t)
+  | Top_extern_type type_name -> Some (fmt_top_extern_type type_name)
   | Top_drop name -> Some (fmt_top_drop name)
   (* These aliases are injected by the parser for `module M { ... }`
      blocks. They have no surface syntax of their own — skip them so the

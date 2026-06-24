@@ -106,6 +106,13 @@ type top_decl =
        The MVP only supports arrow types built from int / bool / str / unit.
        interp provides hardcoded mocks via extern_mocks in eval.ml, and
        codegen emits a forward decl / declare / import in each of the 3 backends. *)
+  | Top_extern_type of string
+    (* Phase 48.1 (C2 frontend FFI): `extern type <Name>;` declares an opaque
+       handle type. At codegen time it lowers to a host-side handle (i32 in
+       Wasm, void* in C, ptr in LLVM). On the typer side it's a distinct
+       0-arity TyCon that won't unify with `int` etc., so user code can't
+       fabricate a handle from a plain integer. The only producers are
+       `extern fn` declarations whose result type names the opaque type. *)
   | Top_drop of string
     (* Marks an existing type/record name as having Drop semantics.
        Emitted by the parser when it sees `drop type ...` or `drop type =
@@ -450,6 +457,7 @@ let desugar_program (prog : program) : expr =
     | Top_view _ -> body
     | Top_drop _ -> body
     | Top_extern _ -> body
+    | Top_extern_type _ -> body
     | Top_ctor_alias _ -> body
     | Top_record_alias _ -> body
   ) prog.decls prog.main

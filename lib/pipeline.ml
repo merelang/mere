@@ -160,6 +160,11 @@ let process_decls eval_env type_env decls =
          unsupported names become a clear eval-time error. *)
       type_env := (name, Typer.mono ty) :: !type_env;
       eval_env := (name, ref (Eval.lookup_extern name ty)) :: !eval_env
+    | Ast.Top_extern_type type_name ->
+      (* Phase 48.1 (C2): register opaque type so subsequent `ty`
+         references resolve. Zero variants, zero params; no value-side
+         construction is possible from Mere source. *)
+      Typer.register_type type_name [] []
     | Ast.Top_ctor_alias (alias, target) ->
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->
@@ -238,6 +243,8 @@ let type_of s =
       Typer.register_drop_type name
     | Ast.Top_extern (name, ty) ->
       type_env := (name, Typer.mono ty) :: !type_env
+    | Ast.Top_extern_type type_name ->
+      Typer.register_type type_name [] []
     | Ast.Top_ctor_alias (alias, target) ->
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->

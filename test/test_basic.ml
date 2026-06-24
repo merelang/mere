@@ -7492,5 +7492,59 @@ let () =
   check_already_formatted "canonical binop" "1 + 2 * 3\n";
   check_already_formatted "canonical list literal" "[1, 2, 3]\n";
 
+  (* Phase 48.1 Stage 1: extern type — opaque handle declaration. The
+     type is a distinct 0-arity TyCon registered via `register_type`, so
+     it interoperates with the existing typer + Wasm codegen (i32
+     pass-through for the host import signature). *)
+  check "extern type: parses + types via extern fn"
+    (Pipeline.type_of
+       "extern type JsRef; \
+        extern fn dom_get_by_id: str -> JsRef; \
+        let r = dom_get_by_id \"main\" in 0")
+    "int";
+  check_raises "extern type: rejects int -> JsRef coercion via annot"
+    (fun () ->
+      Pipeline.type_of "extern type JsRef; let r = (42 : JsRef) in 0");
+  check_raises "extern type: rejects passing int where JsRef expected"
+    (fun () ->
+      Pipeline.type_of
+        "extern type JsRef; \
+         extern fn use_ref: JsRef -> int; \
+         let _ = use_ref 42 in 0");
+  check "extern type: two distinct opaque types don't unify"
+    (try
+       let _ = Pipeline.type_of
+         "extern type JsRef; \
+          extern type DomNode; \
+          extern fn get: str -> JsRef; \
+          extern fn want_node: DomNode -> int; \
+          let _ = want_node (get \"x\") in 0"
+       in
+       "no-error"
+     with _ -> "rejected")
+    "rejected";
+  check "extern type: Wasm codegen emits i32 host import for opaque param"
+    (let wat =
+       let prog =
+         Pipeline.parse_program ~prelude:false
+           "extern type JsRef; \
+            extern fn dom_set_text: JsRef -> str -> unit; \
+            ()"
+       in
+       Codegen_wasm.emit_program ~main_ty:Ast.TyUnit prog
+     in
+     let has p =
+       let nlen = String.length wat and plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = p then true
+         else scan (i + 1)
+       in
+       scan 0
+     in
+     if has "(import \"env\" \"dom_set_text\" (func $dom_set_text (param i32) (param i32)))"
+     then "ok" else "missing-or-wrong")
+    "ok";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

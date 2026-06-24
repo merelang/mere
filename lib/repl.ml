@@ -145,6 +145,13 @@ let process_decl eval_env type_env decl =
     eval_env := (name, ref (Eval.lookup_extern name ty)) :: !eval_env;
     Printf.printf "extern fn %s : %s registered\n" name (Ast.pp_ty ty);
     []
+  | Ast.Top_extern_type type_name ->
+    (* Phase 48.1 (C2 frontend FFI): opaque handle type. Register at the
+       typer level so subsequent declarations can name it; no value-side
+       registration since the only producers are extern fns. *)
+    Typer.register_type type_name [] [];
+    Printf.printf "extern type %s registered\n" type_name;
+    []
   | Ast.Top_ctor_alias (alias, target) ->
     Typer.alias_ctor alias target;
     []
