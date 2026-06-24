@@ -1,17 +1,17 @@
-// comprehension: Phase 36 で導入した list comprehension の demo
+// comprehension: demo of list comprehensions introduced in Phase 36
 //
-// 構文:
-//   `[ expr | x <- xs ]`           → `list_map xs (\x -> expr)`
-//   `[ expr | x <- xs, cond ]`     → `list_map (list_filter xs (\x -> cond)) (\x -> expr)`
+// Syntax:
+//   `[ expr | x <- xs ]`           -> `list_map xs (\x -> expr)`
+//   `[ expr | x <- xs, cond ]`     -> `list_map (list_filter xs (\x -> cond)) (\x -> expr)`
 //
-// 注: list_filter / list_take / list_drop / list_find は Phase 36 で
-//   prelude に投入済 (`a..b` の `range` と同じバッチ)。
+// Note: list_filter / list_take / list_drop / list_find were added to the
+//   prelude in Phase 36 (the same batch as the `range` operator `a..b`).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 let _ = print "=== comprehension (Phase 36) ===";
 
-// シンプル map
+// Simple map
 let _ = print "--- squares 1..5 ---";
 let _ = list_iter [x * x | x <- 1..5] (\v -> print "{show v}");
 
@@ -23,16 +23,16 @@ let _ = list_iter [x | x <- 1..10, x % 2 == 0] (\v -> print "{show v}");
 let _ = print "--- triples of multiples of 3 in 1..15 ---";
 let _ = list_iter [x * 3 | x <- 1..15, x % 3 == 0] (\v -> print "{show v}");
 
-// 文字列処理
+// String processing
 let _ = print "--- uppercased words ---";
 let _ = list_iter [to_upper w | w <- ["hello", "world", "mere"]] (\w -> print w);
 
-// list が string list の場合 + section との combo
+// String-list case combined with sections
 let _ = print "--- long words only ---";
 let words = ["I", "love", "the", "Mere", "programming", "language"];
 let _ = list_iter [w | w <- words, str_len w > 3] (\w -> print w);
 
-// Tuple list との組合せ
+// Combined with a tuple list
 let _ = print "--- positive only from signed list ---";
 let nums = (-3) :: 5 :: (-1) :: 7 :: (-2) :: 9 :: Nil;
 let _ = list_iter [n | n <- nums, n > 0] (\n -> print "{show n}");

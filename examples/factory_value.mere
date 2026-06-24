@@ -1,22 +1,24 @@
-// factory_value: nullary factory builtin を first-class value として
-// HOF に渡す (Phase 35)
+// factory_value: pass a nullary factory builtin as a first-class value
+// to an HOF (Phase 35)
 //
-// 目的: Phase 35 で 4 backend に投入した eta-wrap (vec_new /
-//   owned_vec_new / strbuf_new / map_new を value 位置で書けるようにする)
-//   を combined で dogfood。`apply_factory` のような HOF に factory 関数を
-//   そのまま渡し、内部で `()` 適用して空 container を作って書き込む。
+// Purpose: combined dogfood of the eta-wrap introduced across all 4
+//   backends in Phase 35 (allowing vec_new / owned_vec_new / strbuf_new /
+//   map_new to be written at value position). Pass a factory function as
+//   is to an HOF like `apply_factory`, which applies `()` internally to
+//   create an empty container and write into it.
 //
-// 制約 (Phase 35 MVP): factory が値として現れる箇所の戻り型は型注釈等で
-//   monomorphic に絞れる必要がある。今回は HOF 側の引数注釈で固定。
+// Constraint (Phase 35 MVP): wherever the factory appears as a value, the
+//   return type must be narrowed to monomorphic via a type annotation or
+//   similar. Here we pin it via the HOF's parameter annotation.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/factory_value.mere
 
 let _ = print "=== factory_value (Phase 35) ===";
 
-// Vec[__heap, int] を返す factory を HOF に渡す
+// Pass a factory returning Vec[__heap, int] to an HOF
 let with_vec = fn (f: unit -> Vec[__heap, int]) ->
   let v = f () in
   let _ = vec_push v 10 in
@@ -26,7 +28,7 @@ let with_vec = fn (f: unit -> Vec[__heap, int]) ->
 
 let _ = print ("vec_new via HOF: len = " ++ show (with_vec vec_new));   // 3
 
-// StrBuf[__heap] を返す factory
+// Factory returning StrBuf[__heap]
 let with_buf = fn (f: unit -> StrBuf[__heap]) ->
   let b = f () in
   let _ = strbuf_push b "hello, " in
@@ -35,7 +37,7 @@ let with_buf = fn (f: unit -> StrBuf[__heap]) ->
 
 let _ = print ("strbuf_new via HOF: " ++ with_buf strbuf_new);   // hello, world!
 
-// Map[__heap, str, int] を返す factory
+// Factory returning Map[__heap, str, int]
 let with_map = fn (f: unit -> Map[__heap, str, int]) ->
   let m = f () in
   let _ = map_set m "a" 1 in
@@ -45,7 +47,7 @@ let with_map = fn (f: unit -> Map[__heap, str, int]) ->
 
 let _ = print ("map_new via HOF: size = " ++ show (with_map map_new));   // 3
 
-// OwnedVec[int] を返す factory
+// Factory returning OwnedVec[int]
 let with_owned = fn (f: unit -> OwnedVec[int]) ->
   let v = f () in
   let _ = owned_vec_push v 100 in

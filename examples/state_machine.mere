@@ -1,45 +1,46 @@
-// state_machine: variant + match transition の demo
+// state_machine: demo of variant + match transition
 //
-// 目的: examples roadmap C1。「状態 = ADT」「遷移 = pattern match」で
-//   不正状態を type-level で防ぐ書き方を示す。typer の exhaustiveness
-//   check (Phase 13) が漏れを検出することを意図的に活用。
+// Purpose: examples roadmap C1. Show a style of "state = ADT" /
+//   "transition = pattern match" that prevents invalid states at the type
+//   level. Intentionally leverages the typer's exhaustiveness check
+//   (Phase 13) to catch missing cases.
 //
-// モデル: 信号機 (Red / Yellow / Green) + 歩行者ボタン (Pending true/false)
-//   - Red → Green (button が押されていれば Yellow を skip して Green へ)
-//   - Red → Green via Yellow (通常)
-//   - Green → Yellow
-//   - Yellow → Red
+// Model: traffic light (Red / Yellow / Green) + pedestrian button (Pending true/false)
+//   - Red -> Green (if the button was pressed, skip Yellow and go straight to Green)
+//   - Red -> Green via Yellow (normal)
+//   - Green -> Yellow
+//   - Yellow -> Red
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp / C / LLVM / Wasm)
 
-// 信号の色 (nullary variant の集合 = enum 相当)
+// Signal color (set of nullary variants = equivalent to an enum)
 type light = Red | Yellow | Green;
 
-// 状態 = 色 + 歩行者ボタン押下フラグ
+// State = color + pedestrian-button-pressed flag
 type state = State of (light * bool);
 
-// 1 tick 進める。tick = 経過時間 (ms) みたいなもの、ここでは数値 dispatch
+// Advance by 1 tick. tick = something like elapsed time (ms); here numeric dispatch.
 let step = fn (s: state) ->
   match s with
-  | State (Red, true)    -> State (Green, false)   // ボタン押されていたら即 Green、フラグリセット
-  | State (Red, false)   -> State (Yellow, false)  // 通常 Yellow へ
-  | State (Yellow, _)    -> State (Red, false)     // Yellow → Red (button フラグは無視)
-  | State (Green, _)     -> State (Yellow, false); // Green → Yellow
+  | State (Red, true)    -> State (Green, false)   // If the button was pressed, go straight to Green and reset the flag
+  | State (Red, false)   -> State (Yellow, false)  // Normally transition to Yellow
+  | State (Yellow, _)    -> State (Red, false)     // Yellow -> Red (button flag is ignored)
+  | State (Green, _)     -> State (Yellow, false); // Green -> Yellow
 
-// 歩行者ボタンを押す (Red 中だけ受け付ける、それ以外は state そのまま)
+// Press the pedestrian button (only accepted during Red; otherwise state is unchanged)
 let press_button = fn (s: state) ->
   match s with
   | State (Red, _) -> State (Red, true)
   | State (other, p) -> State (other, p);
 
-// light を表示用文字列に
+// Format a light as a display string
 let show_light = fn (l: light) ->
   match l with
   | Red -> "RED"
   | Yellow -> "YEL"
   | Green -> "GRN";
 
-// state を表示用に整形
+// Format a state for display
 let show_state = fn (s: state) ->
   match s with
   | State (l, true)  -> show_light l ++ " (button)"
@@ -79,7 +80,7 @@ let _ = print ("t=1 (try press): " ++ show_state m1);
 let m2 = step m1;
 let _ = print ("t=2 (step): " ++ show_state m2);
 
-// 連続 N tick を回す helper (let rec で再帰)
+// Helper to run N ticks in a row (recursive via let rec)
 let rec run_n = fn (s: state) -> fn (n: int) ->
   if n <= 0 then s
   else

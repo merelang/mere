@@ -1,16 +1,17 @@
-// graph_bfs: 幅優先探索 (BFS) on directed graph (Phase 33.7)
+// graph_bfs: breadth-first search (BFS) on a directed graph (Phase 33.7)
 //
-// 目的: examples roadmap H3。Map[int, int list] で隣接リスト形のグラフを
-//   表現、BFS で到達可能ノードを訪問順に列挙。
+// Purpose: examples roadmap H3. Represent a graph in adjacency-list form via
+//   Map[int, int list], and enumerate reachable nodes in BFS visit order.
 //
-// 簡素化: dist (距離マップ) は省略 — 単に visited Map + 訪問順 list のみ
-//   track する。複数 Map (visited Map[int, bool] + adjacency Map[int, int list])
-//   を curried 関数に渡すパターンは Mere codegen が苦手 (multi-Map context で
-//   monomorphize が止まる) なので、最小構成で 4 backend 対応を取る。
+// Simplification: dist (distance map) is omitted — we just track a visited Map
+//   + visit-order list. The pattern of passing multiple Maps (visited
+//   Map[int, bool] + adjacency Map[int, int list]) through curried functions
+//   trips up the Mere codegen (monomorphization stalls in multi-Map contexts),
+//   so we take a minimal config that runs on all 4 backends.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/graph_bfs.mere
 
 // list utilities (rev / append)
@@ -38,7 +39,7 @@ let rec list_show_int = fn (xs: int list) -> fn (acc: str) ->
     let sep = if acc == "" then "" else " " in
     list_show_int t (acc ++ sep ++ show h);
 
-// 未訪問 neighbor を enqueue 用 list に集める (visited はクロージャ経由で見る)
+// Collect unvisited neighbors into the enqueue list (visited is captured via closure)
 let rec filter_unvisited = fn (visited) -> fn (ns: int list) -> fn (acc: int list) ->
   match ns with
   | Nil -> rev acc
@@ -46,7 +47,7 @@ let rec filter_unvisited = fn (visited) -> fn (ns: int list) -> fn (acc: int lis
     if map_has visited m then filter_unvisited visited ts acc
     else filter_unvisited visited ts (Cons (m, acc));
 
-// BFS loop: graph + visited Map を参照しつつ queue を消費
+// BFS loop: consume the queue while referencing graph + visited Map
 let rec bfs_loop = fn (g) -> fn (visited) -> fn (visit_order: int list) -> fn (queue: int list) ->
   match queue with
   | Nil -> rev visit_order
@@ -60,12 +61,12 @@ let rec bfs_loop = fn (g) -> fn (visited) -> fn (visit_order: int list) -> fn (q
       let merged_q = append rest new_q in
       bfs_loop g visited (Cons (n, visit_order)) merged_q;
 
-// 始点 start から BFS、訪問順 list を返す
+// BFS from the start node, returning the visit-order list
 let bfs = fn (g) -> fn (start: int) ->
   let visited = map_new () in
   bfs_loop g visited Nil (Cons (start, Nil));
 
-// グラフ登録 helper
+// Helper to register graph edges
 let add_edges = fn g -> fn (node: int) -> fn (neighbors: int list) ->
   let _ = map_set g node neighbors in
   ();
@@ -84,23 +85,23 @@ let _ = add_edges g 6 Nil;
 let _ = add_edges g 7 (Cons (8, Nil));
 let _ = add_edges g 8 Nil;
 
-// start = 1 から BFS
+// BFS from start = 1
 let _ = print "--- BFS from node 1 ---";
 let _ =
   let order1 = bfs g 1 in
   let _ = print ("visit order: " ++ list_show_int order1 "") in
-  print ("count: " ++ show (list_len_int order1 0));   // 期待: 6
+  print ("count: " ++ show (list_len_int order1 0));   // expected: 6
 
 let _ = print "--- BFS from node 7 ---";
 let _ =
   let order2 = bfs g 7 in
   let _ = print ("visit order: " ++ list_show_int order2 "") in
-  print ("count: " ++ show (list_len_int order2 0));   // 期待: 2
+  print ("count: " ++ show (list_len_int order2 0));   // expected: 2
 
 let _ = print "--- BFS from node 6 (leaf) ---";
 let _ =
   let order3 = bfs g 6 in
   let _ = print ("visit order: " ++ list_show_int order3 "") in
-  print ("count: " ++ show (list_len_int order3 0));   // 期待: 1
+  print ("count: " ++ show (list_len_int order3 0));   // expected: 1
 
 0

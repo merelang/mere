@@ -1,27 +1,29 @@
-// stack_calc: RPN (逆ポーランド記法) 電卓 (Phase 33.4)
+// stack_calc: RPN (reverse Polish notation) calculator (Phase 33.4)
 //
-// 目的: examples roadmap C4。Vec[int] stack + variant op (Add/Sub/Mul/Div)
-//   で逆ポーランド記法を評価。stack mutate (vec_push / vec_pop 代替) と
-//   variant dispatch の典型イディオムを demo。
+// Purpose: examples roadmap C4. Evaluate RPN with a Vec[int] stack +
+//   variant op (Add/Sub/Mul/Div). Demonstrates the typical idiom of
+//   stack mutation (an alternative to vec_push / vec_pop) and variant
+//   dispatch.
 //
-// 入力: token list (`Push n` か `Op kind`)
-// 出力: stack top (= 最終結果)
+// Input: list of tokens (`Push n` or `Op kind`)
+// Output: stack top (= final result)
 //
-// 例: 3 4 + 2 *  =>  Push 3, Push 4, Op Add, Push 2, Op Mul  =>  14
-//     (3 + 4) * 2 = 14
+// Example: 3 4 + 2 *  =>  Push 3, Push 4, Op Add, Push 2, Op Mul  =>  14
+//          (3 + 4) * 2 = 14
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/stack_calc.mere
 
 type op_kind = Add | Sub | Mul | Div;
 type tok = Push of int | Op of op_kind;
 
-// Mere の Vec は vec_pop が無いので、最後の要素を取って len を減らす
-// 真の pop は無いので "peek + remove" を vec_set + len 管理で simulate
-//   → Phase 33.4 の workaround: stack 用に "head index" を別 var で持つ
-// もっと簡単: stack は list (Cons + Nil) で扱う
+// Mere's Vec has no vec_pop, so the workaround is to read the last element
+// and decrement len. There is no true pop, so "peek + remove" must be
+// simulated via vec_set + len management.
+//   -> Phase 33.4 workaround: keep a separate "head index" var for the stack
+// Even simpler: handle the stack as a list (Cons + Nil).
 type 'a stk = SNil | SCons of 'a * 'a stk;
 
 let push = fn (n: int) -> fn (s: int stk) -> SCons (n, s);
@@ -36,7 +38,7 @@ let apply_op = fn (k: op_kind) -> fn (a: int) -> fn (b: int) ->
   | Add -> a + b
   | Sub -> a - b
   | Mul -> a * b
-  | Div -> if b == 0 then 0 else a / b;  // div-by-zero は 0 で fallback
+  | Div -> if b == 0 then 0 else a / b;  // div-by-zero falls back to 0
 
 let show_op = fn (k: op_kind) ->
   match k with
@@ -57,17 +59,17 @@ let rec show_toks = fn (toks: tok list) -> fn (acc: str) ->
     let sep = if acc == "" then "" else " " in
     show_toks rest (acc ++ sep ++ show_tok t);
 
-// 1 トークンを stack に適用
+// Apply one token to the stack
 let step = fn (t: tok) -> fn (s: int stk) ->
   match t with
   | Push n -> push n s
   | Op k ->
-    // pop 2 (右オペランド先)、apply、push
+    // pop 2 (right operand first), apply, push
     let (b, s1) = pop s in
     let (a, s2) = pop s1 in
     push (apply_op k a b) s2;
 
-// token 列を順に処理して最終 stack を返す
+// Process the token sequence in order and return the final stack
 let rec run = fn (toks: tok list) -> fn (s: int stk) ->
   match toks with
   | Nil -> s
@@ -75,7 +77,7 @@ let rec run = fn (toks: tok list) -> fn (s: int stk) ->
 
 let eval = fn (toks: tok list) ->
   match run toks SNil with
-  | SNil -> 0  // 空 stack fallback
+  | SNil -> 0  // empty-stack fallback
   | SCons (n, _) -> n;
 
 // === Self-tests ===
@@ -111,7 +113,7 @@ let _ = case "div" (Cons (Push 20, Cons (Push 4, Cons (Op Div, Nil)))) 5;
 // 20 / 0  =>  0 (fallback)
 let _ = case "div-zero" (Cons (Push 20, Cons (Push 0, Cons (Op Div, Nil)))) 0;
 
-// 単項 (1 要素 stack): Push のみ
+// Unary (1-element stack): Push only
 let _ = case "push-only" (Cons (Push 42, Nil)) 42;
 
 // 5 1 2 + 4 * + 3 -  =>  5 + (1+2) * 4 - 3 = 5 + 12 - 3 = 14

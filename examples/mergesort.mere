@@ -1,11 +1,12 @@
-// msort: 安定 merge sort を `int list` の上で実装
+// msort: stable merge sort implemented over `int list`
 //
-// アルゴリズム: list を半分に split → 各 half を再帰的に sort → merge。
-// 比較が要らない位置の要素もそのままなので **stable** (同じキーの相対順序を保つ)。
+// Algorithm: split the list in half -> recursively sort each half -> merge.
+// Elements at positions that don't need comparison stay put, so the sort is
+// **stable** (preserves relative order of equal keys).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// merge: 2 つの sorted list を 1 つの sorted list に merge
+// merge: merge two sorted lists into one sorted list
 let rec merge = fn (xs: int list) -> fn (ys: int list) ->
   match xs with
   | Nil -> ys
@@ -16,7 +17,7 @@ let rec merge = fn (xs: int list) -> fn (ys: int list) ->
       if x <= y then Cons (x, merge xs_rest ys)
       else Cons (y, merge xs ys_rest);
 
-// split: list を 2 つにほぼ半分に分割
+// split: divide list into two roughly equal halves
 let rec split = fn (xs: int list) ->
   match xs with
   | Nil -> (Nil: int list, Nil: int list)
@@ -44,8 +45,8 @@ let show_list = fn (xs: int list) ->
       prefix ++ show h ++ go t false in
   "[" ++ go xs true ++ "]";
 
-// Note: top-level fn 名は `msort` を使う — `mergesort` は macOS libc の
-// 既存シンボルで C codegen 時に collision するため (Phase 32 FFI と同じ理由)。
+// Note: the top-level fn name is `msort` — `mergesort` is an existing symbol
+// in macOS libc and would collide during C codegen (same reason as Phase 32 FFI).
 let _ = print "=== mergesort showcase ===";
 
 let xs1 = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9];
@@ -64,7 +65,7 @@ let xs4 = [100, 50, 75, 25, 200, 150];
 let _ = print ("input:  " ++ show_list xs4);
 let _ = print ("sorted: " ++ show_list (msort xs4));
 
-// merge 部分だけテスト
+// test merge subroutine in isolation
 let _ = print "=== merge sub-routine ===";
 let _ = print ("merge [1,3,5] [2,4,6] = " ++ show_list (merge [1, 3, 5] [2, 4, 6]));
 let _ = print ("merge [1,2,3] []      = " ++ show_list (merge [1, 2, 3] (Nil: int list)));

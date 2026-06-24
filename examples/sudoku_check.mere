@@ -1,19 +1,19 @@
-// sudoku_check: 9x9 sudoku 盤面が valid な解答か検証 (Phase 36)
+// sudoku_check: verify whether a 9x9 sudoku board is a valid solution (Phase 36)
 //
-// ルール: 各 row / col / 3x3 box に 1..9 が 1 度ずつ。
+// Rule: each row / col / 3x3 box must contain 1..9 exactly once.
 //
-// 実装: OwnedVec[int] (81 cells、row-major) で盤面を持ち、9 row + 9 col +
-//   9 box の各 9 cell 集合に 1..9 が揃うかチェック。1..9 セットの判定は
-//   `[1..9] = sort group` で。
+// Implementation: store the board as OwnedVec[int] (81 cells, row-major),
+//   and check that each of the 9 rows + 9 cols + 9 boxes covers 1..9.
+//   The 1..9-set check is done via `[1..9] = sort group`.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
 let n = 9;
 
 // 1D index helper
 let idx = fn (r: int) -> fn (c: int) -> r * n + c;
 
-// Board を OwnedVec[int] に: 行ごとの 9 int list を flat に push。
+// Build the board into an OwnedVec[int]: push each row's 9-int list flat.
 let mk_board = fn (rows: int list list) ->
   let b = owned_vec_new () in
   let _ = list_iter rows (fn (row: int list) ->
@@ -23,20 +23,20 @@ let mk_board = fn (rows: int list list) ->
 let cell = fn (b: OwnedVec[int]) -> fn (r: int) -> fn (c: int) ->
   owned_vec_get b (idx r c);
 
-// 9 個の値が 1..9 を網羅しているか
+// Whether 9 values cover 1..9
 let is_one_to_nine = fn (xs: int list) ->
   list_len xs == 9
   && list_for_all (1..9) (fn (v: int) -> list_member xs v);
 
-// 行 r の値を list で
+// Values of row r as a list
 let row_values = fn (b: OwnedVec[int]) -> fn (r: int) ->
   list_map (0..(n - 1)) (fn (c: int) -> cell b r c);
 
-// 列 c の値を list で
+// Values of column c as a list
 let col_values = fn (b: OwnedVec[int]) -> fn (c: int) ->
   list_map (0..(n - 1)) (fn (r: int) -> cell b r c);
 
-// (box_r, box_c) (0..2) の 3x3 box の値を list で
+// Values of the 3x3 box at (box_r, box_c) (0..2) as a list
 let box_values = fn (b: OwnedVec[int]) -> fn (br: int) -> fn (bc: int) ->
   let cells = [(r, c) | r <- (br * 3)..(br * 3 + 2), c <- (bc * 3)..(bc * 3 + 2)] in
   list_map cells (fn (p: int * int) -> cell b (fst p) (snd p));
@@ -55,7 +55,7 @@ let report = fn (label: str) -> fn (b: OwnedVec[int]) ->
 
 let _ = print "=== sudoku_check (Phase 36) ===";
 
-// 正解パズル (有名な solution)
+// Correct puzzle (a well-known solution)
 let solved =
   mk_board
     [[5, 3, 4, 6, 7, 8, 9, 1, 2],
@@ -70,10 +70,10 @@ let solved =
 
 let _ = report "solved" solved;
 
-// 行内重複 (4 列目の 2 セルを同じ値に)
+// In-row duplicate (two cells in column 4 set to the same value)
 let dup_row =
   mk_board
-    [[5, 3, 4, 6, 7, 8, 9, 1, 5],     // <- last cell broken (5 重複)
+    [[5, 3, 4, 6, 7, 8, 9, 1, 5],     // <- last cell broken (duplicate 5)
      [6, 7, 2, 1, 9, 5, 3, 4, 8],
      [1, 9, 8, 3, 4, 2, 5, 6, 7],
      [8, 5, 9, 7, 6, 1, 4, 2, 3],
@@ -85,12 +85,12 @@ let dup_row =
 
 let _ = report "dup in row 0" dup_row;
 
-// 列内重複 (col 0 の row 0 と row 1 を入れ替えて 5/6 が同じ列にあるが、
-// 重複させる: row 1 の col 0 を 5 にする)
+// In-column duplicate (swapping row 0 and row 1 in col 0 puts 5/6 in the
+// same column; create duplicates by setting col 0 of row 1 to 5)
 let dup_col =
   mk_board
     [[5, 3, 4, 6, 7, 8, 9, 1, 2],
-     [5, 7, 2, 1, 9, 6, 3, 4, 8],     // <- col 0 で 5 重複、col 5 で 6 重複
+     [5, 7, 2, 1, 9, 6, 3, 4, 8],     // <- duplicate 5 in col 0, duplicate 6 in col 5
      [1, 9, 8, 3, 4, 2, 5, 6, 7],
      [8, 5, 9, 7, 6, 1, 4, 2, 3],
      [4, 2, 6, 8, 5, 3, 7, 9, 1],
@@ -101,6 +101,6 @@ let dup_col =
 
 let _ = report "dup in col 0" dup_col;
 
-// box 内重複だが行・列は OK にする難しいケースは作りづらいので skip。
+// Skipping the trickier case where the box has a duplicate but rows and cols are OK (hard to construct).
 
 0

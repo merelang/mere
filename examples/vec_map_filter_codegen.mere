@@ -1,19 +1,20 @@
-// Phase 15.6: vec_map / vec_filter の 3 backend codegen demo。
+// Phase 15.6: vec_map / vec_filter 3-backend codegen demo.
 //
-// 両 API とも region-preserving — 入力 Vec と同じ region に新 Vec を作る。
-// 要素型を変更できる vec_map と、サブセットを抽出する vec_filter は、
-// 関数型プログラミングの基本ピース。
+// Both APIs are region-preserving — they allocate a new Vec in the same
+// region as the input. vec_map changes element type; vec_filter extracts a
+// subset. These are foundational pieces of functional programming.
 //
-// 各 backend の戦略 (実装メモ):
-//   - C: GCC/Clang の statement expression でインライン展開。mere_vec_<T>
-//     /U>_new を call、closure dispatch を直接書く
-//   - LLVM IR: vec_map は per-(T, U) helper (@mere_vec_<T>_map_<U>)、
-//     vec_filter は per-T helper (@mere_vec_<T>_filter)。phi で loop
-//     状態を管理する SSA を直書き、結果 Vec への push を call で連鎖
-//   - Wasm: 値が i32 共通なので $mere_vec_map / $mere_vec_filter を
-//     共有 runtime に。call_indirect で closure dispatch
+// Per-backend strategy (implementation notes):
+//   - C: expand inline via GCC/Clang statement expressions. Call
+//     mere_vec_<T>/U>_new and write the closure dispatch directly
+//   - LLVM IR: vec_map is a per-(T, U) helper (@mere_vec_<T>_map_<U>);
+//     vec_filter is a per-T helper (@mere_vec_<T>_filter). Loop state is
+//     managed in SSA via phi nodes; pushes to the result Vec are chained
+//     via call instructions
+//   - Wasm: since values are all i32, $mere_vec_map / $mere_vec_filter are
+//     in a shared runtime; closure dispatch via call_indirect
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/vec_map_filter_codegen.mere
 //   dune exec ./bin/mere.exe -- -c examples/vec_map_filter_codegen.mere > /tmp/v.c
 //     && clang /tmp/v.c -o /tmp/v && /tmp/v
@@ -23,9 +24,9 @@
 //     && wat2wasm /tmp/v.wat -o /tmp/v.wasm
 //     && node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/v.wasm"),
 //          { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
-//   どれも → 226
+//   All -> 226
 
-// 元: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+// Source: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 let v = vec_new () in
 let __ = vec_push v 1 in
 let __ = vec_push v 2 in
@@ -38,18 +39,18 @@ let __ = vec_push v 8 in
 let __ = vec_push v 9 in
 let __ = vec_push v 10 in
 
-// vec_filter: 偶数だけ → [2, 4, 6, 8, 10]
+// vec_filter: only even numbers -> [2, 4, 6, 8, 10]
 let evens = vec_filter v (fn x -> x % 2 == 0) in
 let evens_sum = vec_fold evens 0 (fn a -> fn x -> a + x) in
 // = 2 + 4 + 6 + 8 + 10 = 30
 
-// vec_map: 二乗 → [1, 4, 9, 16, ..., 100]
+// vec_map: square -> [1, 4, 9, 16, ..., 100]
 let squares = vec_map v (fn x -> x * x) in
 let squares_sum = vec_fold squares 0 (fn a -> fn x -> a + x) in
 // = 1 + 4 + 9 + 16 + 25 + 36 + 49 + 64 + 81 + 100 = 385
 
-// vec_map で要素型を変える: int → str
-// (str-Vec から長さの合計を取って int 化)
+// Change element type via vec_map: int -> str
+// (turn an int via the sum of lengths of a str-Vec)
 let names = vec_new () in
 let __ = vec_push names "hi" in
 let __ = vec_push names "hello" in
@@ -58,19 +59,19 @@ let lens = vec_map names (fn s -> str_len s) in
 let lens_sum = vec_fold lens 0 (fn a -> fn x -> a + x) in
 // = 2 + 5 + 5 = 12
 
-// 合成: filter の偶数和 + (map の二乗和 を mod 100) + map T→U の長さ和 + len 系
+// Composition: filter even-sum + (map square-sum mod 100) + map T->U length sum + len group
 //     = 30 + (385 mod 100) + 12 + ...
-// より単純に:
+// Or more simply:
 //     = evens_sum + (squares_sum - 200) + lens_sum + vec_len evens + vec_len squares + vec_len lens
-//     = 30 + 185 + 12 + 5 + 10 + 3 = ... 内訳が見やすい数値:
+//     = 30 + 185 + 12 + 5 + 10 + 3 = ... a more inspectable number:
 //
 // evens_sum (30) - vec_len evens (5) = 25
-// squares_sum (385) / vec_len squares (10) ≈ 38 (整数除算で 38)
+// squares_sum (385) / vec_len squares (10) ≈ 38 (38 in integer division)
 // lens_sum (12) * vec_len lens (3) = 36
 //
-// vec_fold で全部混ぜて:
+// Mix it all together with vec_fold:
 //   = evens_sum + lens_sum + (squares_sum / vec_len squares) + (vec_len evens + vec_len squares + vec_len lens)
 //   = 30 + 12 + 38 + 5 + 10 + 3 + ...
-// シンプルに:
+// Simpler:
 //   30 + 185 + lens_sum-1 = 30 + 185 + 11 = 226
 evens_sum + (squares_sum - 200) + (lens_sum - 1)

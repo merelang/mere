@@ -1,15 +1,16 @@
-// Phase 12.1 で追加された `'a Vec` の最小ハーネス。
+// The minimal harness for `'a Vec`, added in Phase 12.1.
 //
-// 設計コンテキスト: internal design notes (Q-010)
+// Design context: internal design notes (Q-010)
 //
-// このスライス (Phase 12.1) のスコープ:
-//   - `'a Vec` を polymorphic builtin として追加 (`'a list` と同じ枠)
-//   - 操作: vec_new / vec_push / vec_get / vec_len
-//   - Trivial 扱いなので region に置ける (Drop 型を要素にすると拒否)
-//   - インタプリタ専用 — codegen はまだ
+// Scope of this slice (Phase 12.1):
+//   - Add `'a Vec` as a polymorphic builtin (same slot as `'a list`)
+//   - Ops: vec_new / vec_push / vec_get / vec_len
+//   - Treated as Trivial, so it can live in a region (rejecting Drop-typed elements)
+//   - Interpreter-only — no codegen yet
 //
-// 今後の slice (`Vec[R, T]` のように region をパラメータに、`OwnedVec`
-// との区別、Trivial 階層的、Allocator API、std 全体の整備) は別 slice。
+// Future slices (`Vec[R, T]` with region as a parameter, distinction from
+// `OwnedVec`, Trivial layering, Allocator API, broader std integration)
+// belong to separate slices.
 
 // === int Vec ===
 let nums = vec_new () in
@@ -21,7 +22,7 @@ let nums = vec_new () in
   print ("nums[0] = " ++ show (vec_get nums 0));
   print ("nums[2] = " ++ show (vec_get nums 2));
 
-  // === str Vec も多相で動く ===
+  // === str Vec also works polymorphically ===
   let words = vec_new () in
   {
     vec_push words "hello";
@@ -30,12 +31,12 @@ let nums = vec_new () in
     print (vec_get words 0 ++ " " ++ vec_get words 1 ++ vec_get words 2)
   };
 
-  // === region に置く: Trivial[R] が通るので OK ===
-  // Phase 12.3 から `vec_new ()` を region R 内で呼ぶと、自動的に
-  // `Vec[R, int]` 型 (region 注釈付き) が推論される。region から
-  // 漏らそうとすると static error。
+  // === Place in a region: passes Trivial[R], so OK ===
+  // From Phase 12.3 onward, calling `vec_new ()` inside region R
+  // automatically infers `Vec[R, int]` (with region annotation). Trying to
+  // leak it out of the region is a static error.
   region R {
-    let local = vec_new () in    // 型: Vec[R, int]
+    let local = vec_new () in    // type: Vec[R, int]
     {
       vec_push local 100;
       vec_push local 200;
@@ -44,10 +45,10 @@ let nums = vec_new () in
   }
 }
 
-// outside-region なら `Vec[__heap, T]` (default region marker)
-// inside `region R { ... }` なら `Vec[R, T]` に自動 bind
+// Outside a region this is `Vec[__heap, T]` (default region marker);
+// inside `region R { ... }` it auto-binds to `Vec[R, T]`.
 
-// 期待出力:
+// Expected output:
 // len = 3
 // nums[0] = 10
 // nums[2] = 30

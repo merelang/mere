@@ -1,17 +1,17 @@
-// luhn_check: クレジットカード番号の Luhn チェックサム (Phase 36)
+// luhn_check: Luhn checksum for credit card numbers (Phase 36)
 //
-// 目的: 桁ごとの walk + 偶数位置を 2 倍 + 桁和 を計算するクラシックな
-//   バリデーションアルゴリズム。char_at + is_digit + ord で 1 桁を int に
-//   変換するパターンを 4 backend で dogfood。
+// Purpose: classic validation algorithm that walks each digit, doubles even
+//   positions, and sums digits. Dogfoods the char_at + is_digit + ord pattern
+//   to convert one digit to int across 4 backends.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
-// 桁文字を int に。非数字は -1。
+// Convert a digit char to int. Non-digits return -1.
 let digit_of = fn (c: str) ->
   if is_digit c then ord c - 48 else -1;
 
-// Luhn: 末尾から見て 1, 2, 4, ... の偶数位置にあたる桁を 2 倍にして
-// 各桁の和を取り、合計が 10 で割り切れたら valid。
+// Luhn: counting from the right, double the digits at even positions (1, 2, 4, ...),
+// then sum every digit; valid if the total is divisible by 10.
 let luhn = fn (card: str) ->
   let n = str_len card in
   let rec loop = fn (i: int) -> fn (acc: int) -> fn (parity: int) ->
@@ -19,7 +19,7 @@ let luhn = fn (card: str) ->
     else
       let d = digit_of (char_at card i) in
       if d < 0 then
-        // 非数字 (スペース / ハイフン等) は skip、parity はそのまま
+        // Skip non-digits (spaces / hyphens / etc.), leave parity unchanged
         loop (i - 1) acc parity
       else
         let doubled =
@@ -36,15 +36,15 @@ let check = fn (card: str) ->
 
 let _ = print "=== luhn_check (Phase 36) ===";
 
-// 有名なテスト用 valid 番号
+// Well-known valid test numbers
 let _ = check "4539578763621486";    // Visa
 let _ = check "5500000000000004";    // MasterCard
 let _ = check "340000000000009";     // Amex
 let _ = check "6011000000000004";    // Discover
-// スペース / ハイフン入りも対応 (非数字 skip)
+// Handles input with spaces / hyphens (non-digits are skipped)
 let _ = check "4539-5787-6362-1486";
 let _ = check "4539 5787 6362 1486";
-// 無効: 末尾を 1 ずらす
+// Invalid: last digit shifted by 1
 let _ = check "4539578763621487";
 let _ = check "1234567890123456";
 

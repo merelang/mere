@@ -1,17 +1,18 @@
-// Phase 15.9: StrBuf[R] の 3 backend codegen demo。
+// Phase 15.9: StrBuf[R] 3-backend codegen demo.
 //
-// region 内 mutable 文字列バッファ。strbuf_push で文字列を追加、
-// strbuf_to_str で連結結果を取り出す。Vec[R, T] と同じ region-binding。
+// A mutable string buffer inside a region. Append strings with strbuf_push,
+// extract the concatenated result with strbuf_to_str. Same region-binding
+// model as Vec[R, T].
 //
-// 各 backend の戦略:
-//   - C: mere_strbuf struct + 4 helpers (new/push/to_str/len)、region
-//     アロケータから確保、push の realloc は同 region で
-//   - LLVM IR: %mere_strbuf = type { ptr, i32, i32, ptr } + 4 helpers、
-//     memcpy で文字列コピー
-//   - Wasm: $mere_strbuf_new / push / to_str / len を共有 runtime に。
-//     bump アロケータ ($__lang_bump) から確保、文字列は i8 store/load
+// Per-backend strategy:
+//   - C: mere_strbuf struct + 4 helpers (new/push/to_str/len); allocates
+//     from the region allocator; push's realloc stays in the same region
+//   - LLVM IR: %mere_strbuf = type { ptr, i32, i32, ptr } + 4 helpers;
+//     strings copied with memcpy
+//   - Wasm: $mere_strbuf_new / push / to_str / len in a shared runtime.
+//     Allocates from the bump allocator ($__lang_bump); strings via i8 store/load
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/strbuf_codegen.mere
 //   dune exec ./bin/mere.exe -- -c examples/strbuf_codegen.mere > /tmp/v.c
 //     && clang /tmp/v.c -o /tmp/v && /tmp/v
@@ -21,9 +22,9 @@
 //     && wat2wasm /tmp/v.wat -o /tmp/v.wasm
 //     && node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/v.wasm"),
 //          { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
-//   どれも → 48
+//   All -> 48
 
-// __heap で短い文字列を組み立てる
+// Build a short string in __heap
 let sb1 = strbuf_new () in
 let __ = strbuf_push sb1 "hello" in
 let __ = strbuf_push sb1 ", " in
@@ -32,24 +33,24 @@ let __ = strbuf_push sb1 "!" in
 let s1 = strbuf_to_str sb1 in
 // s1 = "hello, world!" — 13 chars
 
-// region 内で同じことをする
+// Same thing inside a region
 let s2_len = region R {
   let sb2 = strbuf_new () in
   let __ = strbuf_push sb2 "abc" in
   let __ = strbuf_push sb2 "DEF" in
   let __ = strbuf_push sb2 "ghij" in
-  // realloc trigger: cap=16 → 32 (合計 13 chars だけど初期 cap=16 内に収まる、ok)
-  let __ = strbuf_push sb2 "klmn" in  // 17 chars だと 16 を超えるので growth
+  // realloc trigger: cap=16 -> 32 (13 chars total fit within initial cap=16, ok)
+  let __ = strbuf_push sb2 "klmn" in  // 17 chars exceeds 16, so growth occurs
   let __ = strbuf_push sb2 "opqrstuv" in
   strbuf_len sb2
 } in
 
-// 最終: s1 の長さ + s2 の長さ + sb1 の strbuf_len
+// Final: len of s1 + len of s2 + strbuf_len of sb1
 //   = 13 + (3+3+4+4+8 = 22) + 13 = 48
 //
-// 確認用に return:
+// Return for verification:
 str_len s1 + s2_len + strbuf_len sb1
 //   str_len s1     = 13 ("hello, world!")
-//   s2_len         = 22 ("abcDEFghijklmnopqrstuv" — 3+3+4+4+8 文字)
-//   strbuf_len sb1 = 13 (sb1 自身、to_str しても len は変わらず)
+//   s2_len         = 22 ("abcDEFghijklmnopqrstuv" — 3+3+4+4+8 chars)
+//   strbuf_len sb1 = 13 (sb1 itself; calling to_str does not change len)
 // = 13 + 22 + 13 = 48

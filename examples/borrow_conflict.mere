@@ -1,25 +1,25 @@
-// Phase 11.4 で実装した borrow checker が、同じ region 内の同一変数への
-// 衝突する borrow を静的に拒否することを示す demo。**意図的に型エラーで
-// 落ちる**。
+// Demo that the borrow checker added in Phase 11.4 statically rejects
+// conflicting borrows of the same variable inside the same region. This
+// **intentionally fails with a type error**.
 //
 //   dune exec bin/mere.exe -- examples/borrow_conflict.mere
 //
-// 出力 (抜粋):
+// Output (excerpt):
 //   type error: borrow conflict: `v` is already borrowed as `&R v` here,
 //     cannot reborrow as `&mut R v`
 //     note: previous borrow at line N, col N
 //
-// ルール (mode 並存可能なペアのみ):
-//   &R              + &R              → OK (shared read 同士)
-//   &shared write R + &shared write R → OK (shared write 同士、cap-内部 lock 前提)
-//   それ以外の組合せはすべて衝突
+// Rules (only the pairs that may coexist):
+//   &R              + &R              -> OK (two shared reads)
+//   &shared write R + &shared write R -> OK (two shared writes; cap-internal locking assumed)
+//   any other combination conflicts.
 //
-// このファイルは shared read (`&R v`) が active な間に exclusive write
-// (`&mut R v`) を取ろうとして拒否される。
+// This file is rejected because it tries to take an exclusive write
+// (`&mut R v`) while a shared read (`&R v`) is still active.
 
 region R {
   let v = 5 in
   let a = &R v in          // shared read
-  let b = &mut R v in      // ← exclusive write を取ろうとする → 衝突
+  let b = &mut R v in      // <- trying to take an exclusive write -> conflict
   42
 }

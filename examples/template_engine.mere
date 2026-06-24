@@ -1,20 +1,22 @@
-// 簡易 mustache 風 template engine
+// Simple mustache-style template engine
 //
-// `Hello {{name}}, you are {{age}} years old.` のような template と
-// Map[R, str, str] の変数辞書を受け取り、`{{KEY}}` を変数値に置換した
-// 文字列を返す。未定義の key はそのまま `{{KEY}}` を残す (soft fail)。
+// Takes a template like `Hello {{name}}, you are {{age}} years old.` and a
+// Map[R, str, str] variable dictionary, and returns the string with
+// `{{KEY}}` replaced by the variable's value. Undefined keys are left as
+// `{{KEY}}` (soft fail).
 //
-// 目的: examples roadmap B1。Map[R, str, str] + StrBuf[R] + str_index_of
-// の組合せで text processing の典型を 1 file に。
+// Purpose: examples roadmap B1. Show a typical text-processing combo of
+// Map[R, str, str] + StrBuf[R] + str_index_of in a single file.
 //
-// 実行モード: interpreter のみ
-//   - render は str / StrBuf / Map を扱う多相 user 定義関数。
-//     DEFERRED §1.7 解決後に codegen 再評価。
-//   - wildcard `let _ = ...` も C codegen 未対応 (mini_calc と同様)。
+// Execution mode: interpreter only
+//   - render is a polymorphic user-defined function over str / StrBuf / Map.
+//     Re-evaluate codegen after DEFERRED §1.7 is resolved.
+//   - wildcard `let _ = ...` is also unsupported in C codegen (same as
+//     mini_calc).
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/template_engine.mere
-//   # 期待出力:
+//   # Expected output:
 //   #   --- greeting ---
 //   #   Hello Alice! You are 30 years old and live in Tokyo.
 //   #   --- partial (unknown key) ---
@@ -25,7 +27,7 @@
 //   #     - banana x 5 @ 50yen
 //   #     Total: 550yen.
 
-// {{KEY}} を vars[KEY] に置換。未定義の KEY はそのまま残す。
+// Replace {{KEY}} with vars[KEY]. Leave undefined KEYs as-is.
 let render = fn (template: str) -> fn vars ->
   region BUF {
     let buf = strbuf_new () in
@@ -36,14 +38,14 @@ let render = fn (template: str) -> fn vars ->
         let rest = substring template i len in
         let open_off = str_index_of rest "{{" in
         if open_off < 0 then
-          // もう placeholder 無し: 残りを丸ごと append
+          // No more placeholders: append the rest in one go
           let __ = strbuf_push buf rest in
           strbuf_to_str buf
         else
           let abs_open = i + open_off in
-          // {{ 直前までの literal text を append
+          // Append the literal text up to {{
           let __ = strbuf_push buf (substring template i abs_open) in
-          // {{ の後ろ (= abs_open + 2) から }} を探す
+          // Search for }} starting after {{ (= abs_open + 2)
           let after_open = substring template (abs_open + 2) len in
           let close_off = str_index_of after_open "}}" in
           if close_off < 0 then fail "unclosed {{ in template"
@@ -72,12 +74,12 @@ region R {
   let __ = print "--- greeting ---" in
   let __ = print (render greeting_tpl vars) in
 
-  // username だけ未定義 → そのまま残る
+  // Only username is undefined -> left as-is
   let partial_tpl = "Welcome {{username}} (unknown left as-is)." in
   let __ = print "--- partial (unknown key) ---" in
   let __ = print (render partial_tpl vars) in
 
-  // 複数行 + 同じ key の繰り返し
+  // Multi-line + repeated keys
   let order = map_new () in
   let __ = map_set order "id" "1042" in
   let __ = map_set order "buyer" "Bob" in

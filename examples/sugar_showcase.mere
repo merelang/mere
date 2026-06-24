@@ -1,6 +1,6 @@
-// sugar_showcase: Phase 36 で追加した全 sugar を combined で使うショーケース
+// sugar_showcase: a showcase combining all sugars added in Phase 36
 //
-// 投入されている sugar:
+// Sugars in play:
 //   - `a..b`        range literal
 //   - `(op X)`      operator section
 //   - `h :: t`      cons
@@ -11,11 +11,11 @@
 //   - `e?`          Option early-return
 //   - `e?!`         Result early-return
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 let _ = print "=== sugar_showcase (Phase 36) ===";
 
-// 数論 + range + section + sum
+// Number theory + range + section + sum
 let _ = print "--- prime sieve via fold ---";
 let is_prime = \n ->
   if n < 2 then false
@@ -27,7 +27,7 @@ let is_prime = \n ->
       | Cons (h, t) -> if n % h == 0 then true else any_divisor t in
     not (any_divisor candidates);
 
-// section + filter (list_filter は Phase 36 で prelude に投入済)
+// section + filter (list_filter was added to the prelude in Phase 36)
 let primes_under = \n -> list_filter (2..n) is_prime;
 let _ = list_iter (primes_under 30) <| \p -> print "{show p}";
 
@@ -40,7 +40,7 @@ let _ = map_set stock "cherry" 30;
 
 let lookup = \k -> if map_has stock k then Some (map_get stock k) else None;
 
-// `?` で 2 段検索を chain
+// Chain a 2-stage lookup with `?`
 let total_2 = \a b ->
   let x = lookup a? in
   let y = lookup b? in
@@ -72,7 +72,7 @@ let c2 = calc "2" "x";
 let _ = print "2*10*100 {show_r c1}";
 let _ = print "2*x*100  {show_r c2}";
 
-// cons + lambda + pipe で 1 行 fold
+// cons + lambda + pipe for a 1-line fold
 let _ = print "--- one-line fold ---";
 let sum = list_fold (1 :: 2 :: 3 :: 4 :: 5 :: Nil) 0 (\a x -> a + x);
 let _ = print "sum = {show sum}";

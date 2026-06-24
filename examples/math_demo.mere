@@ -1,18 +1,18 @@
-// math_demo: float + libm 関数で簡単な数学を実演 (Phase 34.5)
+// math_demo: simple math using float + libm functions (Phase 34.5)
 //
-// 目的: Phase 34 で 3 backend に投入した float (TyFloat / Float_lit / f_*
-//   演算) と libm (sqrt / sin / cos / tan / f_pow / atan2) を combined で
-//   dogfood。Pythagorean theorem, 三角関数の identity, べき乗計算等を
-//   4 backend で diff = 0 一致させる。
+// Purpose: combined dogfood of float (TyFloat / Float_lit / f_* operations)
+//   and libm (sqrt / sin / cos / tan / f_pow / atan2) that Phase 34 brought
+//   to 3 backends. Align Pythagorean theorem, trig identities, exponentiation,
+//   etc. across 4 backends with diff = 0.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/math_demo.mere
 
 let _ = print "=== math_demo (Phase 34) ===";
 
-// pi / e 定数
+// pi / e constants
 let _ = print ("pi    = " ++ str_of_float pi);
 let _ = print ("e     = " ++ str_of_float e);
 
@@ -50,12 +50,12 @@ let _ = print ("float_of_int 42       = " ++ str_of_float (float_of_int 42));   
 let _ = print ("int_of_float 3.7      = " ++ show (int_of_float 3.7));          // 3
 let _ = print ("int_of_float (-2.9)   = " ++ show (int_of_float (f_neg 2.9)));  // -2
 
-// Atan2 (4 象限)
+// Atan2 (4 quadrants)
 let _ = print "--- atan2 (in radians) ---";
 let _ = print ("atan2(1, 1) = pi/4 ≈ " ++ str_of_float (atan2 1.0 1.0));   // ~0.785
 let _ = print ("atan2(1, 0) = pi/2 ≈ " ++ str_of_float (atan2 1.0 0.0));   // ~1.571
 
-// 円周 + 面積
+// Circumference + area
 let _ =
   let r = 5.0 in
   let circumference = f_mul (f_mul 2.0 pi) r in

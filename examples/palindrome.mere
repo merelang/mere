@@ -1,11 +1,12 @@
-// palindrome: 回文判定 (Phase 36)
+// palindrome: palindrome detection (Phase 36)
 //
-// 目的: str_rev (Phase 36 で 3 backend に追加) と to_lower の組合せで、
-//   英大文字小文字区別なし・記号スペース無視の回文を判定。
+// Purpose: combine str_rev (added to 3 backends in Phase 36) and to_lower
+//   to detect palindromes case-insensitively while ignoring punctuation and
+//   spaces.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// アルファベットと数字のみを抽出した小文字文字列を作る
+// Build a lowercase string containing only alphanumeric characters
 let canonical = fn (s: str) ->
   let lo = to_lower s in
   let n = str_len lo in
@@ -39,6 +40,6 @@ let _ = check "Madam, I'm Adam";
 let _ = check "12321";
 let _ = check "12345";
 let _ = check "hello";
-let _ = check "";          // 空文字列は trivially 回文
+let _ = check "";          // empty string is trivially a palindrome
 
 0

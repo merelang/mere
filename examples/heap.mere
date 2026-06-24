@@ -1,13 +1,13 @@
-// heap: 配列ベースの min-heap (Map[str, int] を配列代わりに使用)
+// heap: array-based min-heap (Map[str, int] used in place of an array)
 //
-// OwnedVec は append-only で要素更新が無いため、 swap が必要な sift-up /
-// sift-down は Map[str, int] を疑似配列として使う。 key "0", "1", "2", ... が
-// インデックス、 "size" が現在のサイズ。
+// OwnedVec is append-only with no element updates, so sift-up / sift-down which
+// need swaps use Map[str, int] as a pseudo array. Keys "0", "1", "2", ... are
+// the indices, and "size" holds the current size.
 //
-// 操作: heap_push (O(log n)) / heap_pop_min (O(log n)) / heap_peek (O(1))
-// 応用: heap_sort
+// Operations: heap_push (O(log n)) / heap_pop_min (O(log n)) / heap_peek (O(1))
+// Application: heap_sort
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let heap_new = fn () ->
   let h = map_new () in
@@ -18,7 +18,7 @@ let heap_size = fn h -> map_get h "size";
 let heap_get = fn h -> fn i -> map_get h (show i);
 let heap_set = fn h -> fn i -> fn v -> map_set h (show i) v;
 
-// sift_up: 子ノード i から親方向に min-heap 性質を回復
+// sift_up: restore min-heap property from child node i upward toward the parent
 let rec sift_up = fn h -> fn i ->
   if i == 0 then ()
   else
@@ -31,7 +31,7 @@ let rec sift_up = fn h -> fn i ->
       sift_up h p
     else ();
 
-// sift_down: 根 i から子方向に min-heap 性質を回復
+// sift_down: restore min-heap property from root i downward toward children
 let rec sift_down = fn h -> fn i ->
   let n = heap_size h in
   let l = 2 * i + 1 in
@@ -72,7 +72,7 @@ let heap_pop_min = fn h ->
   let _ = if n > 1 then sift_down h 0 else () in
   top;
 
-// heap_sort: list → heap に全部 push → 順に pop して新 list 構築
+// heap_sort: list → push everything into a heap → pop in order to build a new list
 let heap_sort = fn (xs: int list) ->
   let h = heap_new () in
   let _ = list_iter xs (fn x -> heap_push h x) in

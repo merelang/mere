@@ -1,12 +1,12 @@
-// kmp: Knuth-Morris-Pratt 文字列検索 (O(N+M))
+// kmp: Knuth-Morris-Pratt string search (O(N+M))
 //
-// 失敗関数 (failure function / prefix function) を pattern から事前計算、
-// text を 1 pass で走査して mismatch 時に shift。
+// Precompute the failure function (a.k.a. prefix function) from the pattern,
+// then scan text in a single pass, shifting on mismatch.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
-// pat の failure function を Map で計算: fail[i] = pat[0..i-1] の最長
-// proper prefix && suffix の長さ
+// Compute the failure function of pat in a Map: fail[i] = length of the longest
+// proper prefix && suffix of pat[0..i-1]
 let compute_fail = fn (pat: str) ->
   let m = str_len pat in
   let fail = map_new () in
@@ -18,7 +18,7 @@ let compute_fail = fn (pat: str) ->
       let pi = char_at pat i in
       let pk = char_at pat k in
       if k > 0 && pi != pk then
-        // mismatch: 失敗関数を辿って k を減らす
+        // mismatch: follow the failure function to reduce k
         build i (map_get fail (show k))
       else
         let new_k = if pi == pk then k + 1 else 0 in
@@ -27,7 +27,7 @@ let compute_fail = fn (pat: str) ->
   let _ = build 1 0 in
   fail;
 
-// pat を text 内で検索、 見つけた全 index の list (左端) を返す
+// Search pat in text, returning the list of all match indices (leftmost positions)
 let kmp_search = fn (text: str) -> fn (pat: str) ->
   let n = str_len text in
   let m = str_len pat in

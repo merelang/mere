@@ -1,9 +1,9 @@
-// edit_distance: Levenshtein distance (insert / delete / substitute = each cost 1)
+// edit_distance: Levenshtein distance (insert / delete / substitute = cost 1 each)
 //
-// 古典的 DP: D[i][j] = min(D[i-1][j]+1, D[i][j-1]+1, D[i-1][j-1] + (a[i]==b[j] ? 0 : 1))
-// Map[str, int] を 2D table として使用 (key は "i,j")。
+// Classic DP: D[i][j] = min(D[i-1][j]+1, D[i][j-1]+1, D[i-1][j-1] + (a[i]==b[j] ? 0 : 1))
+// Uses Map[str, int] as a 2D table (key is "i,j").
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 let min3 = fn (a: int) -> fn (b: int) -> fn (c: int) ->
   let ab = if a < b then a else b in
@@ -15,7 +15,7 @@ let edit_distance = fn (a: str) -> fn (b: str) ->
   let m = str_len a in
   let n = str_len b in
   let dp = map_new () in
-  // 境界: D[0][j] = j, D[i][0] = i
+  // Boundary: D[0][j] = j, D[i][0] = i
   let rec init_col = fn j ->
     if j > n then ()
     else

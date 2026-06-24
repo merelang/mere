@@ -1,18 +1,19 @@
-// hashtable: 自前 hash table 実装 (チェイニング、 OwnedVec で bucket 管理)
+// hashtable: hand-rolled hash table (chaining, OwnedVec for bucket management)
 //
-// Map builtin は stdlib に存在するが、 教育的価値として「ハッシュ関数 +
-// バケット + collision 解決」を自前で書く。 OwnedVec[int] を bucket array、
-// list-encode された (key, value) ペア を Map[str, str] に格納するハイブリッド。
+// The Map builtin exists in stdlib, but for educational value we implement
+// "hash function + buckets + collision resolution" by hand. A hybrid that uses
+// OwnedVec[int] as the bucket array and stores list-encoded (key, value) pairs
+// in a Map[str, str].
 //
-// 簡略化のため: key/value は両方 int、 hash は単純な mod n、 collision は
-// 「key list と value list を別 Map に蓄積」で chain。
+// For simplicity: both key and value are int, hash is simply mod n, collisions
+// are chained by "accumulating a key list and a value list in separate Map".
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let bucket_count = 7;
 
-// 注: Map[R, K, V] は V が uniform 型のため、 ここでは値を全て str で
-// 統一する (int は show / int_of_str で encode/decode)。
+// Note: since Map[R, K, V] requires V to be a uniform type, we unify all values
+// as str here (int is encoded/decoded with show / int_of_str).
 let ht_new = fn () ->
   let h = map_new () in
   let _ = map_set h "_count" "0" in
@@ -25,7 +26,7 @@ let bucket_of = fn (k: int) ->
 let ks_key = fn (b: int) -> "b" ++ show b ++ "_k";
 let vs_key = fn (b: int) -> "b" ++ show b ++ "_v";
 
-// bucket b の key list / value list を取得 (無ければ [])
+// Get bucket b's key list / value list (return [] if missing)
 let ht_keys_in_bucket = fn h -> fn (b: int) ->
   if map_has h (ks_key b) then
     let s = map_get h (ks_key b) in
@@ -47,7 +48,7 @@ let join_ints = fn (xs: int list) ->
       p ++ show h ++ go t false in
   go xs true;
 
-// key を bucket から外して新 list を返す (見つからなければ None 相当だが int で代用)
+// Remove key from bucket and return a new list (no-match returns None-equivalent, here represented by int)
 let rec remove_at = fn (ks: int list) -> fn (vs: int list) -> fn (target: int)
   -> fn (acc_k: int list) -> fn (acc_v: int list) ->
   match ks with
@@ -66,7 +67,7 @@ let ht_put = fn h -> fn (k: int) -> fn (v: int) ->
   let b = bucket_of k in
   let ks = ht_keys_in_bucket h b in
   let vs = ht_values_in_bucket h b in
-  // key 既存ならまず削除 (置換のため count を増やさない)
+  // If key already exists, remove it first (do not bump count, since this is replacement)
   let (ks2, vs2, removed) = remove_at ks vs k (Nil: int list) (Nil: int list) in
   let _ = if removed then () else
     let cur = int_of_str (map_get h "_count") in
@@ -102,8 +103,8 @@ let ht_size = fn h -> int_of_str (map_get h "_count");
 let _ = print "=== hashtable showcase ===";
 let h = ht_new ();
 let _ = ht_put h 1 100;
-let _ = ht_put h 8 200;        // 8 % 7 = 1、 1 と collision
-let _ = ht_put h 15 300;       // 15 % 7 = 1、 さらに collision
+let _ = ht_put h 8 200;        // 8 % 7 = 1, collides with 1
+let _ = ht_put h 15 300;       // 15 % 7 = 1, another collision
 let _ = ht_put h 2 999;
 let _ = ht_put h 9 888;
 let _ = ht_put h 100 9999;
@@ -117,7 +118,7 @@ let _ = print ("ht_get 100 = " ++ show (ht_get h 100));
 let _ = print ("ht_has 1 = " ++ (if ht_has h 1 then "true" else "false"));
 let _ = print ("ht_has 999 = " ++ (if ht_has h 999 then "true" else "false"));
 
-// 置換 (同じ key で put し直し → count は増えない)
+// Replacement (re-put with the same key → count does not increase)
 let _ = ht_put h 1 1111;
 let _ = print ("after re-put 1 = 1111: size = " ++ show (ht_size h) ++ ", get 1 = " ++ show (ht_get h 1));
 

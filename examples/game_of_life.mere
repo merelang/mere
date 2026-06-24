@@ -1,11 +1,11 @@
 // game_of_life: Conway's Game of Life (Phase 36)
 //
-// 目的: 2D grid + neighborhood iteration + 時間発展 の典型を Phase 36
-//   の sugar combined で書く demo。
-//   セル状態を OwnedVec[int] (1D flatten、live=1/dead=0) で保持し、step
-//   ごとに新 grid を構築する。
+// Purpose: a demo that writes the typical 2D grid + neighborhood iteration
+//   + time evolution pattern using Phase 36 sugar combined.
+//   Cell state is held in an OwnedVec[int] (1D flattened, live=1 / dead=0),
+//   and a new grid is built each step.
 //
-// 構文使用:
+// Syntax used:
 //   - `for x in xs do body`
 //   - `if let pat = e then ... else ...`
 //   - `[expr | x <- xs, cond]` list comp
@@ -13,16 +13,16 @@
 //   - `"... {expr} ..."` string interp
 //   - `f <| x` reverse pipe
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 let rows = 8;
 let cols = 12;
 
 let idx = fn (r: int) -> fn (c: int) -> r * cols + c;
 
-// 1D で grid を構築。`live_cells` は初期生存セルの (row, col) list。
-// OwnedVec に set が無いので、全 N セルを iterate して live かチェック
-// した値を push する。
+// Build the grid as 1D. `live_cells` is the list of initial live cells
+// as (row, col). Because OwnedVec has no set, iterate over all N cells
+// and push the value after checking whether each is live.
 let is_live_in = fn (live_cells: (int * int) list) -> fn (r: int) -> fn (c: int) ->
   list_any live_cells (fn (p: int * int) -> fst p == r && snd p == c);
 
@@ -52,7 +52,7 @@ let neighbors = fn (g: OwnedVec[int]) -> fn (r: int) -> fn (c: int) ->
                ( 1, -1), ( 1, 0), ( 1, 1)] in
   list_sum (list_map pairs (fn (d: int * int) -> cell g (r + fst d) (c + snd d)));
 
-// 1 step 進める
+// Advance 1 step
 let step = fn (g: OwnedVec[int]) ->
   let next = owned_vec_new () in
   let rec walk = fn (r: int) ->

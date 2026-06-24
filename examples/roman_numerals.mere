@@ -1,20 +1,21 @@
-// roman_numerals: 整数 ⇄ ローマ数字の双方向変換 (Phase 36)
+// roman_numerals: bidirectional conversion between integers and Roman numerals (Phase 36)
 //
-// 目的: list of (value, symbol) を greedy で消費する典型的アルゴリズム +
-//   parser をマッチで実装。
+// Purpose: typical algorithm of greedily consuming a list of (value, symbol)
+//   pairs + a parser implemented with match.
 //
-// 範囲: 1..3999 (古典 Roman の標準範囲)
+// Range: 1..3999 (standard classical Roman range)
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// (値, 記号) を降順で並べる。subtractive 形 (IV, IX, etc.) も含める。
+// (value, symbol) sorted in descending order. Includes subtractive forms
+// (IV, IX, etc.).
 let pairs =
   [(1000, "M"),  (900, "CM"), (500, "D"),  (400, "CD"),
    (100, "C"),   (90, "XC"),  (50, "L"),   (40, "XL"),
    (10, "X"),    (9, "IX"),   (5, "V"),    (4, "IV"),
    (1, "I")];
 
-// to_roman: greedy で大きい値から消費して文字列を組み立てる
+// to_roman: greedily consume from the largest value to build the string
 let to_roman = fn (n: int) ->
   if n <= 0 then ""
   else
@@ -35,7 +36,7 @@ let to_roman = fn (n: int) ->
       strbuf_to_str b
     };
 
-// value_of_sym: 1〜2 文字の roman 記号の値を返す (-1 if unknown)
+// value_of_sym: return the value of a 1- or 2-character Roman symbol (-1 if unknown)
 let value_of_sym = fn (s: str) ->
   if s == "M" then 1000
   else if s == "D" then 500
@@ -46,7 +47,7 @@ let value_of_sym = fn (s: str) ->
   else if s == "I" then 1
   else -1;
 
-// of_roman: 左から走査、各文字の値を見て次より小さければ減算、それ以外加算
+// of_roman: scan from the left; if a character's value is smaller than the next, subtract, otherwise add
 let of_roman = fn (s: str) ->
   let n = str_len s in
   let rec loop = fn (i: int) -> fn (acc: int) ->

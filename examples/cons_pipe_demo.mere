@@ -1,29 +1,29 @@
-// cons_pipe_demo: `::` cons と `<|` reverse pipe の demo (Phase 36)
+// cons_pipe_demo: demo of `::` cons and `<|` reverse pipe (Phase 36)
 //
-// 新規構文:
-//   - `h :: t` は `Cons (h, t)` の sugar、right-associative
+// New syntax:
+//   - `h :: t` is sugar for `Cons (h, t)`, right-associative
 //     `1 :: 2 :: xs` = `1 :: (2 :: xs)` = `Cons (1, Cons (2, xs))`
-//   - `f <| x` は `f x` の sugar、right-associative
-//     `f <| g <| x` = `f (g x)` (低優先度の関数適用)
+//   - `f <| x` is sugar for `f x`, right-associative
+//     `f <| g <| x` = `f (g x)` (low-precedence function application)
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 let _ = print "=== cons_pipe_demo (Phase 36) ===";
 
-// `::` で list を組み立てる: head から prepend していく自然な順
+// Build a list with `::`: natural head-first prepending
 let _ = print "--- :: cons ---";
 let primes = 2 :: 3 :: 5 :: 7 :: 11 :: 13 :: Nil;
 let _ = list_iter primes (fn (p: int) -> print (show p));
 
-// `<|` で paren を減らす
+// Reduce parens with `<|`
 let _ = print "--- <| reverse pipe ---";
 let inc = fn (x: int) -> x + 1;
 let dbl = fn (x: int) -> x * 2;
-// 旧: print (show (dbl (inc 20)))
-// 新:
+// Old: print (show (dbl (inc 20)))
+// New:
 let _ = print <| show <| dbl <| inc <| 20;
 
-// Combine: range と cons の比較
+// Combined: compare range with cons
 let _ = print "--- range vs cons ---";
 let r = 1..5;
 let c = 1 :: 2 :: 3 :: 4 :: 5 :: Nil;
@@ -31,7 +31,7 @@ let _ = list_iter r (fn (x: int) -> print (show x));
 let _ = print "--- (same via cons) ---";
 let _ = list_iter c (fn (x: int) -> print (show x));
 
-// HOF + section + cons + reverse pipe を全部使った行
+// A single line that uses HOF + section + cons + reverse pipe together
 let _ = print "--- combined ---";
 let xs = 1 :: 2 :: 3 :: 4 :: 5 :: Nil;
 let _ = list_iter (list_map xs (* 10)) (fn (x: int) -> print <| show x);

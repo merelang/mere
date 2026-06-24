@@ -1,9 +1,10 @@
-// bin_tree_traversal: 二分木の 3 種類の走査 (Phase 36)
+// bin_tree_traversal: 3 traversal orders on a binary tree (Phase 36)
 //
-// 目的: 再帰 variant `BTree` + recursive descent で pre/in/post-order
-//   走査を実装。木の構築と print を分離して再利用。
+// Purpose: Implement pre/in/post-order traversals via the recursive variant
+//   `BTree` + recursive descent. Tree construction and printing are
+//   separated for reuse.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type btree = BLeaf | BNode of (int * btree * btree);
 
@@ -57,7 +58,7 @@ let _ = render "pre-order " preorder;
 let _ = render "in-order  " inorder;
 let _ = render "post-order" postorder;
 
-// 木の高さ (再帰関数の基本例)
+// Tree height (a basic recursive function example)
 let rec height = fn (t: btree) ->
   match t with
   | BLeaf -> 0
@@ -66,7 +67,7 @@ let rec height = fn (t: btree) ->
     let hr = height r in
     1 + (if hl > hr then hl else hr);
 
-// ノード数
+// Node count
 let rec count = fn (t: btree) ->
   match t with
   | BLeaf -> 0

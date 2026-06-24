@@ -1,21 +1,22 @@
-// 小さな TODO リスト管理を Mere で書く実用デモ。
+// A small TODO list manager — a practical demo written in Mere.
 //
-// 目的: OwnedVec / record / cap-passing (Logger) / vec_map / vec_iter /
-// vec_fold / region を組み合わせて、Phase 16 第 1 スライスで「現実使用で
-// 何が摩擦になるか」を炙り出す。
+// Purpose: combine OwnedVec / record / cap-passing (Logger) / vec_map /
+// vec_iter / vec_fold / region so that in the first slice of Phase 16, we
+// expose "what becomes frictional in real use".
 //
-// 構成:
-//   - Task は record { id, text, done }
-//   - 一覧は OwnedVec[Task] (heap、複数の関数を跨いで保持したい)
-//   - Logger cap で操作を記録
+// Structure:
+//   - Task is a record { id, text, done }
+//   - The list is OwnedVec[Task] (heap; we want to keep it across multiple
+//     functions)
+//   - Operations are logged via the Logger cap
 //
-// **実行モード**: interpreter + C + LLVM + Wasm で動く (Phase 16.3 で
-// `mk_logger` / `mk_metrics` を 3 backend codegen 対応、Phase 16.4 で
-// Wasm の OwnedVec escape バグを fix した)。
+// **Execution mode**: works on interpreter + C + LLVM + Wasm (Phase 16.3
+// added `mk_logger` / `mk_metrics` 3-backend codegen support, Phase 16.4
+// fixed a Wasm OwnedVec escape bug).
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/todo_app.mere
-//   # 期待出力:
+//   # Expected output:
 //   # todo [INFO] added 4 tasks
 //   # todo [INFO] [ ] 1: buy milk  ...
 //   # todo [INFO] undone count = 2
@@ -23,7 +24,7 @@
 
 type Task = { id: int, text: str, done: bool };
 
-// 各 task を新規 id 付きで追加。次の id は OwnedVec の len + 1 で十分単純。
+// Add a task with a fresh id. The next id is OwnedVec len + 1 — simple enough.
 let add_task = fn tasks -> fn text ->
   let next_id = owned_vec_len tasks + 1 in
   let t = Task { id = next_id, text = text, done = false } in
@@ -31,10 +32,11 @@ let add_task = fn tasks -> fn text ->
   next_id
 in
 
-// 未完了の数を数える: fold 風に進めたいが OwnedVec には fold が無いので
-// owned_vec_to_vec で region 内 Vec に持ち出して vec_fold する経路。
-// 摩擦点 #3: vec_fold の closure 内で `t.done` の型推論が届かないので
-// (t: Task) 明示注釈が必要。
+// Count incomplete tasks: we'd like to advance fold-style, but OwnedVec has
+// no fold, so the route is to bring it into a region-local Vec via
+// owned_vec_to_vec and use vec_fold.
+// Friction #3: inside the vec_fold closure, type inference for `t.done`
+// doesn't reach, so an explicit (t: Task) annotation is needed.
 let count_undone = fn tasks ->
   region R {
     let v = owned_vec_to_vec tasks in
@@ -43,10 +45,10 @@ let count_undone = fn tasks ->
   }
 in
 
-// 一覧を Logger に流す (vec_iter で side effect)
-// 摩擦点 #4: lg: Logger を明示しないと、関数 body 内の lg.info で
-// field access 推論が失敗する (引数型が tyvar のまま、HM が field 名
-// から逆引きしない)
+// Stream the list to the Logger (side effect via vec_iter).
+// Friction #4: without spelling out lg: Logger, the lg.info field access
+// inference inside the body fails (the parameter type stays a tyvar, since
+// HM doesn't back-infer from field names).
 let dump_tasks = fn (lg: Logger) -> fn tasks ->
   region R {
     let v = owned_vec_to_vec tasks in
@@ -56,25 +58,24 @@ let dump_tasks = fn (lg: Logger) -> fn tasks ->
   }
 in
 
-// 仕事を「完了」にする方法 — 設計摩擦点 #1:
-//   OwnedVec[T] / Vec[R, T] は append-only (vec_set は Vec のみ)、
-//   record は immutable。なので「id N の task を done = true にする」
-//   というのは:
-//     a. 全要素を読み、新 OwnedVec を作って入れ替え (現状)
-//     b. (理想) owned_vec_set があれば in-place update
-//     c. (理想) struct field の直接 mutation
-//   ここでは (a) パターンを実装する。
+// How to mark a task "done" — design friction #1:
+//   OwnedVec[T] / Vec[R, T] is append-only (vec_set is Vec-only),
+//   and records are immutable. So "set id N's task done = true" means:
+//     a. Read all elements, build a new OwnedVec, and swap (current)
+//     b. (ideal) in-place update with owned_vec_set
+//     c. (ideal) direct mutation of struct fields
+//   Here we implement pattern (a).
 let mark_done = fn tasks -> fn target_id ->
   let n = owned_vec_len tasks in
   region R {
-    // 既存を Vec に移して、更新後の Vec を作り、最後に OwnedVec に戻す
+    // Move existing to a Vec, build an updated Vec, finally back to OwnedVec
     let src = owned_vec_to_vec tasks in
     let dst = vec_map src (fn (t: Task) ->
       if t.id == target_id then
         Task { id = t.id, text = t.text, done = true }
       else t) in
-    // OwnedVec を新規に作る。元の tasks を「クリア」できないので、
-    // この設計だと caller が新 OwnedVec を受け取る必要がある。摩擦点 #2。
+    // Allocate a new OwnedVec. The original tasks can't be "cleared", so in
+    // this design the caller must receive the new OwnedVec. Friction #2.
     let new_tasks = vec_to_owned dst in
     let __ = n in
     new_tasks
@@ -83,10 +84,10 @@ in
 
 // === main ===
 
-// Logger cap を構築
+// Build the Logger cap
 let lg = mk_logger "todo" in
 
-// タスクをいくつか追加
+// Add a few tasks
 let tasks = owned_vec_new () in
 let __ = add_task tasks "buy milk" in
 let __ = add_task tasks "write report" in
@@ -96,10 +97,11 @@ let __ = add_task tasks "go run" in
 let __ = lg.info ("added " ++ show (owned_vec_len tasks) ++ " tasks") in
 let __ = dump_tasks lg tasks in
 
-// 2 と 4 を完了にする (mark_done が新 OwnedVec を返す — 摩擦点 #2)
-// 摩擦点 #5 (DEFERRED §1.4 で fix): 同名 rebinding `let tasks = mark_done
-// tasks ...` は Phase 16 第 2 スライスで codegen を 2-step 形に直したので
-// 動くようになった。interpreter でも codegen でも自然に書ける。
+// Mark 2 and 4 done (mark_done returns a new OwnedVec — friction #2)
+// Friction #5 (fixed in DEFERRED §1.4): the same-name rebinding
+// `let tasks = mark_done tasks ...` was reworked into 2-step form in the
+// second slice of Phase 16, so it now works in both interpreter and codegen
+// — natural to write either way.
 let tasks = mark_done tasks 2 in
 let tasks = mark_done tasks 4 in
 

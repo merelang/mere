@@ -1,8 +1,8 @@
-// シグネチャエイリアス (Q-005 narrowed, slice A)
-// 共通の引数リスト (ケイパビリティ束) を名前で再利用できる。
+// Signature aliases (Q-005 narrowed, slice A)
+// Reuse a common argument list (a bundle of capabilities) by name.
 //
-// signature decl は parse 時に展開され、ランタイムには現れない。
-// 「...sig」で param list を展開、cascade 可。
+// signature decls are expanded at parse time and never appear at runtime.
+// Use `...sig` to splice the param list; cascading is allowed.
 
 signature ctx = (db: int, log: int);
 
@@ -12,7 +12,7 @@ let save_order = fn (...ctx, order: int) ->
 let log_event = fn (...ctx, event: int) ->
   log + event;
 
-// 2 つの signature を同時に spread
+// Spread two signatures at once
 signature counters = (x: int);
 signature totals   = (y: int);
 

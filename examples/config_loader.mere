@@ -1,15 +1,17 @@
-// config_loader: key=value 形式の設定文字列を Map[str, str] に load (Phase 36)
+// config_loader: load a key=value style config string into Map[str, str] (Phase 36)
 //
-// 目的: examples roadmap A3。複数行の text を parse して Map に格納する
-//   典型的な処理。`#` で始まる行をコメント、空行を skip、`key=value` を
-//   trim して登録、最後に lookup demo。
+// Purpose: examples roadmap A3. The typical pattern of parsing multi-line
+//   text into a Map. Treat lines starting with `#` as comments, skip empty
+//   lines, trim and register `key=value` lines, and finish with a lookup
+//   demo.
 //
-// 設計:
-//   - input は str list (1 行 = 1 要素)。ファイル I/O 抜きで deterministic
-//   - parse_line で line を分類: コメント / 空 / key=value
-//   - str_index_of "=" で "=" の位置を求めて key / value に分割
+// Design:
+//   - Input is str list (1 line per element). Avoiding file I/O keeps it
+//     deterministic.
+//   - parse_line classifies the line as Comment / Empty / key=value.
+//   - Use str_index_of "=" to locate the "=" and split key / value.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type line_kind = Empty | Comment | Pair of (str * str);
 
@@ -20,7 +22,7 @@ let parse_line = fn (line: str) ->
   else
     let eq = str_index_of trimmed "=" in
     if eq < 0 then
-      // `=` が無い場合は Comment 扱い (実用 INI parser なら error)
+      // Treat lines without `=` as Comment (a real INI parser would error)
       Comment
     else
       let key = str_trim (substring trimmed 0 eq) in
@@ -65,7 +67,7 @@ let _ = show_key "password";
 let _ = show_key "max_conn";
 let _ = show_key "missing_key";
 
-// 総 entry 数
+// Total entries
 let _ = print ("entries = " ++ show (map_len config));
 
 0

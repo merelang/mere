@@ -1,20 +1,21 @@
-// borrow_chain: 同じ borrow を複数関数で受け渡す demo (Phase 36)
+// borrow_chain: demo of passing the same borrow across multiple functions (Phase 36)
 //
-// 目的: examples roadmap F3。1 つの `&shared write R Logger` 借用を、
-//   3 つの関数 `step1` / `step2` / `step3` を呼ぶ pipeline で順次再利用。
-//   Phase 17.1 で App 返り値 borrow tracking が入って以降、関数を跨いだ
-//   borrow chain が型安全に書ける。
+// Purpose: examples roadmap F3. Reuse a single `&shared write R Logger`
+//   borrow in turn through a pipeline that calls 3 functions
+//   `step1` / `step2` / `step3`. Since Phase 17.1 added App return-value
+//   borrow tracking, a borrow chain that crosses function boundaries can
+//   be written in a type-safe way.
 //
-// 設計:
-//   - pipeline (lg: &shared write R Logger) は 3 つの helper を順に呼ぶ
-//   - 同じ borrow を 3 箇所で使えることを実証
-//   - borrow_modes.mere との違い: あちらは 4 mode を 1 度だけ示す、
-//     こちらは 1 mode を chain で何度も使う
+// Design:
+//   - pipeline (lg: &shared write R Logger) calls 3 helpers in sequence
+//   - Demonstrates that the same borrow is usable in 3 places
+//   - Difference from borrow_modes.mere: that file showcases all 4 modes
+//     once; this one uses a single mode repeatedly in a chain.
 //
-// 実行モード: interpreter のみ (`&shared write R Logger` は codegen 未対応、
-//   borrow_modes.mere と同じ理由)。
+// Execution mode: interpreter only (`&shared write R Logger` is not yet
+//   codegen-supported, same reason as borrow_modes.mere).
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/borrow_chain.mere
 
 let step1 = fn (lg: &shared write R Logger) -> fn (req_id: int) ->
@@ -26,7 +27,7 @@ let step2 = fn (lg: &shared write R Logger) -> fn (req_id: int) ->
 let step3 = fn (lg: &shared write R Logger) -> fn (req_id: int) ->
   lg.info ("[step3] persisted request " ++ show req_id);
 
-// pipeline は同じ logger 借用を 3 つの step に渡す
+// pipeline passes the same logger borrow to 3 steps
 let pipeline = fn (lg: &shared write R Logger) -> fn (req_id: int) ->
   let _ = step1 lg req_id in
   let _ = step2 lg req_id in

@@ -1,7 +1,7 @@
-// レコード型 (slice D) — view 型/cap 型表現の基礎
+// Record types (slice D) — foundation for view-type / cap-type representations
 //
-// 名前付きフィールドを持つ構造体。多相も可、パターンマッチで分解可。
-// 型は capitalized (Point, Logger, ...) で declare する。
+// Structs with named fields. Polymorphism supported, destructurable via
+// pattern matching. Types are declared with capitalized names (Point, Logger, ...).
 
 type Point = { x: int, y: int };
 
@@ -11,18 +11,18 @@ let p1     = Point { x = 3, y = 4 };
 let dist_squared = fn (p: Point) ->
   p.x * p.x + p.y * p.y;
 
-// 多相レコード — cap 型のラッパや Box 的なものに使う
+// Polymorphic record — used for cap-type wrappers, Box-like values, etc.
 type 'a Boxed = { value: 'a };
 
 let int_box = Boxed { value = 42 };
 let str_box = Boxed { value = "hello" };
 
-// パターンマッチ
+// Pattern matching
 let extract = fn (b) ->
   match b with
   | Boxed { value = v } -> v;
 
-// ネスト
+// Nested
 type Pair = { first: int, second: Point };
 
 let pair = Pair { first = 100, second = Point { x = 1, y = 2 } };

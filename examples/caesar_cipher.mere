@@ -1,12 +1,13 @@
-// caesar_cipher: 古典的シーザー暗号の encode / decode (Phase 36)
+// caesar_cipher: classic Caesar cipher encode / decode (Phase 36)
 //
-// 目的: chr / ord / char_at + StrBuf を組み合わせて 1 文字単位 transform
-//   の典型を 4 backend で dogfood。大文字小文字を保持、非英字はそのまま。
+// Purpose: 4-backend dogfood of the typical "per-character transform"
+//   pattern combining chr / ord / char_at + StrBuf. Case is preserved
+//   and non-alphabetic characters pass through unchanged.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
-// 文字 c を shift する。'A'..'Z' / 'a'..'z' のみ shift、それ以外はそのまま。
-// shift は 0..25 に正規化される。
+// Shift character c. Only 'A'..'Z' / 'a'..'z' are shifted; everything else
+// is left as-is. shift is normalized to 0..25.
 let shift_char = fn (c: str) -> fn (k: int) ->
   let code = ord c in
   if code >= 65 && code <= 90 then
@@ -18,7 +19,7 @@ let shift_char = fn (c: str) -> fn (k: int) ->
   else
     c;
 
-// 負の shift は 26 加算で正に正規化 (mod の semantics は -1 % 26 == -1)
+// Normalize a negative shift to a positive value by adding 26 (mod semantics: -1 % 26 == -1)
 let normalize_shift = fn (k: int) ->
   let m = k % 26 in
   if m < 0 then m + 26 else m;
@@ -47,13 +48,13 @@ let _ = print ("plain   : " ++ plain);
 let _ = print ("encoded : " ++ enc);
 let _ = print ("decoded : " ++ decode enc 3);
 
-// ROT13: 自己逆な変換
+// ROT13: a self-inverse transformation
 let _ = print "--- ROT13 ---";
 let rot13_msg = encode "Hello, World!" 13;
 let _ = print ("ROT13   : " ++ rot13_msg);
 let _ = print ("ROT13^2 : " ++ encode rot13_msg 13);
 
-// 大きな shift / 負の shift も処理
+// Handle large / negative shifts as well
 let _ = print "--- big / negative shift ---";
 let _ = print (encode "ZAza" 1);     // AbAb
 let _ = print (encode "ABCD" 30);    // 30 % 26 = 4 → EFGH

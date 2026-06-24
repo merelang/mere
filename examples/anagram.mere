@@ -1,11 +1,12 @@
-// anagram: 2 文字列がアナグラム関係か判定 (Phase 36)
+// anagram: determine whether 2 strings are anagrams of each other (Phase 36)
 //
-// 目的: Map[str, int] で文字頻度を集計し、両者が一致するかで判定する
-//   典型的アルゴリズム。大文字小文字とスペースを正規化。
+// Purpose: Build a character frequency table with Map[str, int] and check
+//   whether both tables match. A classic algorithm. Normalizes case and
+//   strips spaces.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
-// 文字 → 出現回数の頻度表を作る (空白は除外、小文字に正規化)
+// Build a character -> count frequency table (skip whitespace, lowercase normalize)
 let freq_of = fn (s: str) ->
   let lo = to_lower s in
   let n = str_len lo in
@@ -22,14 +23,14 @@ let freq_of = fn (s: str) ->
   let _ = loop 0 in
   m;
 
-// 2 つの map_str_int が key/値ともに一致しているか
+// Check whether 2 map_str_int values match on both keys and values
 let freqs_equal = fn a -> fn b ->
   if map_len a != map_len b then false
   else
-    // a の全 key について b に同じ value があるか線形 scan
-    // (map_iter は each 要素を visit する)
+    // Linear scan: for every key in a, check that b has the same value
+    // (map_iter visits each entry)
     let ok = map_new () in
-    let _ = map_set ok "v" 1 in   // single-cell flag、1 = まだ ok
+    let _ = map_set ok "v" 1 in   // single-cell flag, 1 = still ok
     let _ = map_iter a (fn (k: str) -> fn (v: int) ->
       if map_has b k && map_get b k == v then ()
       else let _ = map_set ok "v" 0 in ()) in

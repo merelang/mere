@@ -1,34 +1,34 @@
-// chained_parse: Result chain idiom を realistic に demo する例
+// chained_parse: a realistic demo of the Result chain idiom
 //
-// 目的: examples roadmap D2。Phase 23.2 で prelude に追加した
-//   result_map / result_and_then / result_or_else を realistic な
-//   パイプラインで使う。`"name:Alice,age:30"` のような文字列を分解し、
-//   user record を構成する流れで Result<T, str> を連鎖。
+// Purpose: examples roadmap D2. Use result_map / result_and_then /
+//   result_or_else (added to the prelude in Phase 23.2) in a realistic
+//   pipeline. Chain Result<T, str> through the flow of parsing a string
+//   like `"name:Alice,age:30"` into a user record.
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
-//   (Phase 27 達成の 4 backend feature parity を流用)
+// Execution mode: 4 backends (interp / C / LLVM / Wasm), diff = 0
+//   (leverages the Phase 27 4-backend feature parity)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/chained_parse.mere
 //
-// パターン:
+// Patterns:
 //   1. parse_field s = Result (key, value)
-//   2. parse_int s = Result int       (atoi 失敗で Err)
+//   2. parse_int s = Result int       (Err on atoi failure)
 //   3. require_field key map = Result value
 //   4. validate_user fields = Result user_record
-//   5. result_and_then で連鎖、result_or_else で fallback、
-//      result_map で純粋変換
+//   5. Chain with result_and_then, fall back with result_or_else,
+//      transform purely with result_map.
 //
-// Phase 22-27 で固めた:
-//   - prelude の result_* helpers (Phase 23.2)
-//   - 多相 user let-rec の multi-instantiation (Phase 23.3 / 25.5 / 26.4)
-//   - polymorphic ('a list / Result 等) を 3 backend で具体型に展開
+// Solidified in Phase 22-27:
+//   - prelude result_* helpers (Phase 23.2)
+//   - multi-instantiation of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4)
+//   - 3-backend specialization of polymorphic types ('a list / Result etc.)
 //   - show_str escape (Phase 23.5 / 25.6 / 26.6)
 
-// 簡単 user record (record type を使わず variant + tuple で素朴に書く)
+// Simple user record (no record type; encode it as variant + tuple)
 type user = User of (str * int);  // (name, age)
 
-// 1) 単一 "key:value" を分解。空文字 / ':' 無し / 不正 key は Err。
+// 1) Split a single "key:value". Err on empty string / missing ':' / invalid key.
 let parse_field = fn (raw: str) ->
   let n = str_len raw in
   if n == 0 then Err "empty field"
@@ -41,7 +41,7 @@ let parse_field = fn (raw: str) ->
       let value = substring raw (colon + 1) n in
       Ok (key, value);
 
-// 2) 文字列を int に。数字以外を含む / 空 → Err。
+// 2) String to int. Returns Err on empty input or any non-digit character.
 let parse_int_str = fn (s: str) ->
   let n = str_len s in
   if n == 0 then Err "expected integer but got empty"
@@ -54,7 +54,7 @@ let parse_int_str = fn (s: str) ->
     if all_digits 0 then Ok (int_of_str s)
     else Err ("not a valid integer: " ++ s);
 
-// 3) (key, value) tuple 列から指定 key を探す (linear scan)。
+// 3) Find a specified key in a list of (key, value) tuples (linear scan).
 let rec find_field = fn (key: str) -> fn (fields: (str * str) list) ->
   match fields with
   | Nil -> Err ("missing field: " ++ key)
@@ -62,10 +62,11 @@ let rec find_field = fn (key: str) -> fn (fields: (str * str) list) ->
     if k == key then Ok v
     else find_field key rest;
 
-// 4) raw "k1:v1,k2:v2" を分解 → list of (key, value)。
-//    1 個でも parse_field が Err なら全体 Err (result_and_then 連鎖)。
-//    Phase 28.1 で C codegen の deep nested lambda capture が動くようになった
-//    ので、本来の result_and_then 連鎖で書ける。
+// 4) Split raw "k1:v1,k2:v2" into a list of (key, value).
+//    If parse_field returns Err for any chunk, the whole thing is Err
+//    (chained via result_and_then). Phase 28.1 made deep nested lambda
+//    capture work in C codegen, so we can write the natural
+//    result_and_then chain.
 let rec parse_pairs = fn (chunks: str list) ->
   match chunks with
   | Nil -> Ok Nil
@@ -74,19 +75,19 @@ let rec parse_pairs = fn (chunks: str list) ->
       result_and_then (parse_pairs rest) (fn tail ->
         Ok (Cons (pair, tail))));
 
-// 5) 全体 pipeline: "name:Alice,age:30" → User ("Alice", 30)
+// 5) Full pipeline: "name:Alice,age:30" -> User ("Alice", 30)
 let parse_user = fn (raw: str) ->
   let chunks = str_split raw "," in
-  // ステップ 1: 全 chunk を parse_field で (key, value) tuple list に
+  // Step 1: turn every chunk into a (key, value) tuple list via parse_field
   result_and_then (parse_pairs chunks) (fn fields ->
-  // ステップ 2: name field を取得 (Result<str, str>)
+  // Step 2: fetch the name field (Result<str, str>)
   result_and_then (find_field "name" fields) (fn name ->
-  // ステップ 3: age field を取得し int 化
+  // Step 3: fetch the age field and parse it as int
   result_and_then (find_field "age" fields) (fn age_str ->
   result_map (parse_int_str age_str) (fn age ->
     User (name, age)))));
 
-// helper: Result の中身を表示用文字列に。
+// helper: render the Result content as a display string.
 let show_user_result = fn (r) ->
   match r with
   | Err msg -> "error: " ++ msg
@@ -106,7 +107,7 @@ let _ = case "empty"          "";
 let _ = case "no-colon"       "name=Eve";
 let _ = case "empty-value"    "name:,age:99";
 
-// result_or_else で default 値に救う使い方:
+// Using result_or_else to fall back to a default value:
 let _ = print "";
 let _ = print "--- default fallback (result_or_else) ---";
 let default_user = User ("anonymous", 0);

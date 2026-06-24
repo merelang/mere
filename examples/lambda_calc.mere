@@ -1,13 +1,13 @@
-// lambda_calc: 純粋無型 λ計算の interpreter (normal-order substitution)
+// lambda_calc: interpreter for pure untyped λ-calculus (normal-order substitution)
 //
 // AST: Var (name) | Lam (name, body) | LApp (f, arg)
-// 簡略化のため capture-avoiding substitution は無し (variable shadowing 制御
-// のみ)。 実用には α-rename が要るが、 demo の Church numeral では衝突回避
-// 可能な named scheme で書く。
+// For simplicity, no capture-avoiding substitution (only variable-shadowing
+// control). Real use needs α-renaming, but the demo Church numerals use a
+// named scheme arranged to avoid collisions.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
-// (Phase 38.C1 で Wasm の nested constructor pattern unconditional deref
-// バグを fix した後、 4 backend parity 達成)。
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
+// (4-backend parity achieved after Phase 38.C1 fixed the Wasm nested
+// constructor pattern unconditional-deref bug).
 
 type lambda =
   | Var of str
@@ -19,11 +19,11 @@ let rec sub = fn (x: str) -> fn (replacement: lambda) -> fn (expr: lambda) ->
   match expr with
   | Var y -> if x == y then replacement else expr
   | Lam (y, body) ->
-    if x == y then expr  // y が x を shadow している
+    if x == y then expr  // y shadows x
     else Lam (y, sub x replacement body)
   | LApp (f, a) -> LApp (sub x replacement f, sub x replacement a);
 
-// 1 step β reduction (normal-order: leftmost-outermost redex を 1 つ縮約)
+// One-step β reduction (normal-order: contract a single leftmost-outermost redex)
 let rec step = fn (e: lambda) ->
   match e with
   | LApp (Lam (x, body), arg) -> sub x arg body
@@ -43,7 +43,7 @@ and eq_expr = fn (a: lambda) -> fn (b: lambda) ->
   | LApp (f1, a1) ->
     (match b with | LApp (f2, a2) -> eq_expr f1 f2 && eq_expr a1 a2 | _ -> false);
 
-// max_steps 回まで step、 fixed point に達したら停止
+// Step up to max_steps times, stopping at a fixed point
 let rec normalize = fn (e: lambda) -> fn (n: int) ->
   if n <= 0 then e
   else
@@ -67,11 +67,11 @@ let one = Lam ("f", Lam ("x", LApp (Var "f", Var "x")));
 let two = Lam ("f", Lam ("x", LApp (Var "f", LApp (Var "f", Var "x"))));
 let three = Lam ("f", Lam ("x", LApp (Var "f", LApp (Var "f", LApp (Var "f", Var "x")))));
 
-// 後者関数: succ = λn.λf.λx.f (n f x)
+// Successor function: succ = λn.λf.λx.f (n f x)
 let succ_e = Lam ("n", Lam ("f", Lam ("x",
   LApp (Var "f", LApp (LApp (Var "n", Var "f"), Var "x")))));
 
-// 加算: add = λm.λn.λf.λx.m f (n f x)
+// Addition: add = λm.λn.λf.λx.m f (n f x)
 let add_e = Lam ("m", Lam ("n", Lam ("f", Lam ("x",
   LApp (LApp (Var "m", Var "f"),
     LApp (LApp (Var "n", Var "f"), Var "x"))))));
@@ -92,7 +92,7 @@ let _ = print "=== add 1 2 (= 3) ===";
 let _ = print ("add 1 2 = " ++ show_lambda (normalize (LApp (LApp (add_e, one), two)) 80));
 let _ = print ("(eq 3)    " ++ show_lambda three);
 
-let _ = print "=== identity I = λx.x、 (I I) = I ===";
+let _ = print "=== identity I = λx.x, (I I) = I ===";
 let id_e = Lam ("x", Var "x");
 let _ = print ("(I I) = " ++ show_lambda (normalize (LApp (id_e, id_e)) 5));
 

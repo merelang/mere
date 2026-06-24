@@ -1,18 +1,19 @@
-// base_conv: int を 2 進 / 8 進 / 16 進 文字列に変換 + 逆変換 (Phase 36)
+// base_conv: convert int to binary / octal / hex strings + inverse (Phase 36)
 //
-// 目的: 数値処理 + char_at + chr/ord + str_rev (Phase 36 で 3 backend に
-//   揃った) を combined dogfood。Newton 等のアルゴリズムは使わず、桁ごとに
-//   割り算 / 余りで分解する古典実装。
+// Purpose: combined dogfood of numeric processing + char_at + chr/ord +
+//   str_rev (which Phase 36 brought into parity across 3 backends).
+//   Uses the classic digit-by-digit division/remainder decomposition rather
+//   than algorithms like Newton.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
-// 0..15 を hex 1 文字に
+// Convert 0..15 to a single hex character
 let hex_digit = fn (n: int) ->
   if n >= 0 && n <= 9 then chr (48 + n)        // '0'..'9'
   else if n >= 10 && n <= 15 then chr (87 + n) // 'a'..'f' (87 + 10 = 97)
   else "?";
 
-// int n を base で文字列化。n < 0 は - prefix。
+// Stringify int n in the given base. Negative n gets a "-" prefix.
 let to_base = fn (n: int) -> fn (base: int) ->
   if n == 0 then "0"
   else
@@ -32,7 +33,7 @@ let to_bin = fn (n: int) -> to_base n 2;
 let to_oct = fn (n: int) -> to_base n 8;
 let to_hex = fn (n: int) -> to_base n 16;
 
-// 1 文字を 0..15 (base 範囲内) に。失敗で -1。
+// Convert a single character to 0..15 (within base range). Returns -1 on failure.
 let digit_value = fn (c: str) ->
   let o = ord c in
   if o >= 48 && o <= 57 then o - 48          // 0..9

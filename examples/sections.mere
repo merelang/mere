@@ -1,23 +1,23 @@
-// sections: Phase 36 で導入した operator section の demo
+// sections: demo of operator sections introduced in Phase 36
 //
-// 構文: `(+ 1)` は `fn x -> x + 1` の sugar (right section)。
-//   高階関数と組合せると簡潔に書ける。
+// Syntax: `(+ 1)` is sugar for `fn x -> x + 1` (right section).
+//   Combined with higher-order functions, code becomes concise.
 //
-// 対応 operator: + * / %  ==  !=  <  <=  >  >=  ++
-// (`-` は単項マイナス `(-3)` との衝突を避けるため未対応)
+// Supported operators: + * / %  ==  !=  <  <=  >  >=  ++
+// (`-` is unsupported to avoid conflict with unary minus `(-3)`.)
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 let _ = print "=== sections (Phase 36) ===";
 
-// 算術 section と range / list_map の組合せ
+// Arithmetic section combined with range / list_map
 let _ = print "--- 1..5 + 10 ---";
 let _ = list_iter (list_map (1..5) (+ 10)) (fn (x: int) -> print (show x));
 
 let _ = print "--- 1..5 * 2 ---";
 let _ = list_iter (list_map (1..5) (* 2)) (fn (x: int) -> print (show x));
 
-// 比較 section + 自前 list_filter (prelude に未投入)
+// Comparison section + a local list_filter (not yet in prelude)
 let rec list_filter = fn xs -> fn p ->
   match xs with
   | Nil -> Nil
@@ -25,20 +25,20 @@ let rec list_filter = fn xs -> fn p ->
     if p h then Cons (h, list_filter t p)
     else list_filter t p;
 
-let _ = print "--- 1..20 の > 10 だけ ---";
+let _ = print "--- only > 10 from 1..20 ---";
 let _ = list_iter (list_filter (1..20) (> 10)) (fn (x: int) -> print (show x));
 
-let _ = print "--- 1..10 で odd だけ (% 2 != 0) ---";
+let _ = print "--- only odd from 1..10 (% 2 != 0) ---";
 let is_odd = fn (x: int) -> (% 2) x != 0;
 let _ = list_iter (list_filter (1..10) is_odd) (fn (x: int) -> print (show x));
 
-// str concat section: 接尾辞付け
+// String concat section: suffix appending
 let _ = print "--- string suffix ---";
 let exclaim = (++ "!");
 let _ = print (exclaim "hello");
 let _ = print (exclaim "world");
 
-// 比較で「特定の値か」フィルタ
+// Filter "equals a specific value" via comparison
 let _ = print "--- find 3 in 1..5 ---";
 let _ = list_iter (list_filter (1..5) (== 3)) (fn (x: int) -> print (show x));
 

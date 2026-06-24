@@ -1,17 +1,18 @@
-// bank_account: functional な銀行口座 (Phase 33.6)
+// bank_account: a functional-style bank account (Phase 33.6)
 //
-// 目的: examples roadmap G4。Mere の immutable record + record update +
-//   Vec[R, Tx] で銀行口座を表現。変更は record-update style
-//   `{ acc | balance = new_bal, history = ... }` で新しい record を返す
-//   functional 流。トランザクションは region 内 Vec に append。
+// Purpose: examples roadmap G4. Represent a bank account with Mere's
+//   immutable record + record update + Vec[R, Tx]. Mutations use
+//   record-update style `{ acc | balance = new_bal, history = ... }` that
+//   returns a new record (functional flavor). Transactions are appended
+//   to a Vec inside a region.
 //
-// Mere の record は immutable なので `&mut R Account` は使わず、関数が
-// 「新しい account を返す」style で書く (Rust 風 `&mut` ではなく、Haskell /
-// OCaml 風の state-passing)。
+// Mere records are immutable, so we avoid `&mut R Account` and instead
+// write functions that "return a new account" (state-passing in the
+// Haskell / OCaml style rather than Rust-style `&mut`).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/bank_account.mere
 
 type tx_kind = Deposit | Withdraw | Transfer;
@@ -47,14 +48,14 @@ let withdraw = fn (a: account) -> fn (amt: int) ->
   match a with
   | Account (o, b) ->
     if b >= amt then Account (o, b - amt)
-    else a;  // 残高不足 → 変更なし
+    else a;  // insufficient funds -> no change
 
 // === Apply a transaction (return new account) ===
 let apply_tx = fn (a: account) -> fn (t: tx) ->
   match t with
   | Tx (Deposit,  amt, _) -> deposit a amt
   | Tx (Withdraw, amt, _) -> withdraw a amt
-  | Tx (Transfer, amt, _) -> withdraw a amt;  // 送金は出金側のみここで処理
+  | Tx (Transfer, amt, _) -> withdraw a amt;  // transfer: only the withdraw side is handled here
 
 // === Replay a transaction list ===
 let rec replay = fn (a: account) -> fn (txs: tx list) ->
@@ -69,7 +70,7 @@ let _ = print "=== bank_account (Phase 33.6) ===";
 let alice0 = mk_account "Alice";
 let _ = print ("init: " ++ owner_of alice0 ++ ", balance=" ++ show (balance_of alice0));
 
-// 単発操作
+// single operations
 let alice1 = deposit alice0 1000;
 let _ = print ("after deposit 1000: balance=" ++ show (balance_of alice1));
 
@@ -79,7 +80,7 @@ let _ = print ("after withdraw 300: balance=" ++ show (balance_of alice2));
 let alice3 = withdraw alice2 10000;
 let _ = print ("after withdraw 10000 (over): balance=" ++ show (balance_of alice3));
 
-// Tx list を replay (chain of state-passing)
+// Replay a Tx list (chain of state-passing)
 let txs1 = Cons (Tx (Deposit, 500, "salary"),
             Cons (Tx (Withdraw, 100, "groceries"),
              Cons (Tx (Deposit, 200, "refund"),
@@ -101,7 +102,7 @@ let rec show_txs = fn (xs: tx list) -> fn (acc: str) ->
     show_txs rest (acc ++ sep ++ show_tx t);
 let _ = print (show_txs txs1 "");
 
-// region 内 Vec[R, tx] にも対応 — 実用上は append-only ledger に
+// Also works with Vec[R, tx] inside a region -- in practice as an append-only ledger
 let _ = print "--- ledger via Vec ---";
 let _ =
   region R {

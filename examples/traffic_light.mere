@@ -1,10 +1,10 @@
-// traffic_light: 最小 enum + cycle (Phase 36)
+// traffic_light: minimal enum + cycle (Phase 36)
 //
-// 目的: examples roadmap C2。最小の nullary variant (= enum) demo。
-//   `state_machine.mere` の信号機より単純で、ADT の入門教材として
-//   読みやすさを優先。
+// Purpose: examples roadmap C2. A minimal nullary-variant (= enum) demo.
+//   Simpler than `state_machine.mere`'s traffic light, prioritizing
+//   readability as an ADT introduction.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 type light = Red | Yellow | Green;
 

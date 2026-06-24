@@ -1,8 +1,8 @@
-// Phase 9.3: 入れ子 module + `open M;` のデモ。
+// Phase 9.3: nested module + `open M;` demo.
 //
-// `module M { module N { let f = ... } }` で `M.N.f` 形式の qualified
-// access が動く。`open M;` で M の direct bindings を unqualified に
-// 取り込める (let alias chain に脱糖)。
+// `module M { module N { let f = ... } }` enables qualified access in the
+// form `M.N.f`. `open M;` brings M's direct bindings in unqualified (it
+// desugars to a chain of let aliases).
 
 module Math {
   let inc = fn x -> x + 1;
@@ -16,25 +16,25 @@ module Math {
   let inc_then_square = fn x -> Adv.square (inc x);
 };
 
-// `open Math;` で direct binding (inc / dbl / inc_then_square) を取込み。
-// nested module の Adv は対象外 (Math.Adv のまま使う)。
+// `open Math;` brings in direct bindings (inc / dbl / inc_then_square).
+// The nested module Adv is not affected (use Math.Adv as-is).
 open Math;
 
 {
-  // qualified access (Math.foo) と unqualified (foo) を混在させる
+  // mix qualified access (Math.foo) with unqualified (foo)
   print ("Math.inc 10 = " ++ show (Math.inc 10));
   print ("Math.Adv.square 7 = " ++ show (Math.Adv.square 7));
   print ("Math.Adv.cube 3 = " ++ show (Math.Adv.cube 3));
   print ("Math.inc_then_square 4 = " ++ show (Math.inc_then_square 4));
-  // open 後の短縮形
+  // shortened forms after open
   print ("after open: inc 5 = " ++ show (inc 5));
   print ("after open: dbl 5 = " ++ show (dbl 5));
-  // nested は qualified のまま
+  // nested remains qualified
   print ("after open: Math.Adv.cube 2 = " ++ show (Math.Adv.cube 2));
   print "done"
 }
 
-// 期待出力:
+// Expected output:
 // Math.inc 10 = 11
 // Math.Adv.square 7 = 49
 // Math.Adv.cube 3 = 27

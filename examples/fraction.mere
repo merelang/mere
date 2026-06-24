@@ -1,14 +1,15 @@
-// fraction: 有理数の加減乗除 + 約分 (gcd 利用) (Phase 36)
+// fraction: rational-number arithmetic + reduction via gcd (Phase 36)
 //
-// 目的: gcd builtin (Phase 36 で 3 backend に追加) を使って Rational
-//   number 計算を最小限実装。tuple of (num, den) で表現、show は
-//   "n/d" 形式。約分は gcd で自動。
+// Purpose: minimal rational-number arithmetic using the gcd builtin
+//   (added to 3 backends in Phase 36). Represented as a tuple of
+//   (num, den), shown as "n/d". Reduction is automatic via gcd.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type Frac = { n: int, d: int };
 
-// (a/b) を約分し、denominator が負なら numerator に符号を寄せて canonical 化
+// Reduce (a/b); if the denominator is negative, move the sign onto the
+// numerator for a canonical representation.
 let reduce = fn (a: int) -> fn (b: int) ->
   let g = gcd a b in
   let n = a / g in
@@ -39,7 +40,7 @@ let divf =fn (a: Frac) -> fn (b: Frac) ->
 let _ = print "=== fraction (Phase 36) ===";
 
 let a = frac 1 3;     // 1/3
-let b = frac 2 6;     // 2/6 → 1/3
+let b = frac 2 6;     // 2/6 -> 1/3
 let c = frac 5 4;     // 5/4
 let d = frac (-3) 8;  // -3/8
 
@@ -55,11 +56,11 @@ let _ = print ("c * c   = " ++ show_frac (mul c c));        // 25/16
 let _ = print ("c / a   = " ++ show_frac (divf c a));       // 15/4
 let _ = print ("d * 2/1 = " ++ show_frac (mul d (frac 2 1)));  // -3/4
 
-// 整数化される場合 (d=1 で hide)
+// When the result is an integer (hide d when d=1)
 let _ = print "--- integer result ---";
 let _ = print ("2/3 * 3/1 = " ++ show_frac (mul (frac 2 3) (frac 3 1)));  // 2
 
-// 負の分母も canonical 化
+// Canonicalize negative denominators too
 let _ = print "--- canonical signs ---";
 let _ = print ("1/-2 = " ++ show_frac (frac 1 (-2)));    // -1/2
 let _ = print ("(-1)/(-2) = " ++ show_frac (frac (-1) (-2)));   // 1/2

@@ -1,22 +1,23 @@
-// poly_horner: 多項式の Horner 法による評価 (Phase 38.C partial app + 38.G-1 auto-Drop)
+// poly_horner: polynomial evaluation via Horner's method (Phase 38.C partial app + 38.G-1 auto-Drop)
 //
-// eval_poly coeffs x = a₀ + a₁x + a₂x² + ... + aₙxⁿ
-// Horner 法: (...((aₙ·x + aₙ₋₁)·x + aₙ₋₂)·x + ... ) + a₀
+// eval_poly coeffs x = a_0 + a_1 x + a_2 x^2 + ... + a_n x^n
+// Horner's method: (...((a_n * x + a_(n-1)) * x + a_(n-2)) * x + ... ) + a_0
 //
-// 内部で OwnedVec を作って coeffs を順番に push、 計算後は scope 末で auto-Drop。
-// `let push = owned_vec_push v` と `let get = owned_vec_get v` で partial app。
+// Internally builds an OwnedVec, pushing coeffs in order; after the computation
+// it is auto-Dropped at scope end. Partial app via `let push = owned_vec_push v`
+// and `let get = owned_vec_get v`.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
 let eval_poly = fn coeffs -> fn x ->
-  // Phase 38.G-1: v は scope 末で auto-Drop される (body の tail は int)
+  // Phase 38.G-1: v is auto-Dropped at scope end (body's tail is int)
   let v = owned_vec_new () in
-  // Phase 38.C: partial app で push / get を closure として束縛
+  // Phase 38.C: bind push / get as closures via partial app
   let push = owned_vec_push v in
   let _ = list_iter coeffs push in
   let get = owned_vec_get v in
   let n = owned_vec_len v in
-  // Horner 法: 高次の係数から累積
+  // Horner's method: accumulate starting from the highest-degree coefficient
   let rec horner = fn i -> fn acc ->
     if i < 0 then acc
     else horner (i - 1) (acc * x + get i) in

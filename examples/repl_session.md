@@ -1,7 +1,7 @@
-# REPL セッションの例
+# Example REPL session
 
-`mere -r` で起動して以下のように対話。`> ` は通常プロンプト、`..>` は
-multi-line 継続プロンプト。
+Launch with `mere -r` and interact as below. `> ` is the normal prompt;
+`..>` is the multi-line continuation prompt.
 
 ```
 $ mere -r
@@ -55,20 +55,21 @@ val ListOps.map : (('a -> 'b) -> ('a list -> 'b list))
 $
 ```
 
-## コマンドまとめ
+## Command summary
 
-| コマンド | 動作 |
+| Command | Action |
 |---|---|
-| `:help` / `:h` | help 表示 |
-| `:quit` / `:q` | exit |
-| `:type EXPR` | EXPR の型推論結果のみ表示 (eval しない) |
-| `:env` | 現在の user bindings を `val name : ty` で列挙 |
-| `:show NAME` | NAME の型と値を同時に表示 |
-| `:load FILE` | FILE の decls を REPL env に取り込み |
-| `:reset` | 全 user bindings をクリア |
+| `:help` / `:h` | Show help |
+| `:quit` / `:q` | Exit |
+| `:type EXPR` | Show only the inferred type of EXPR (no eval) |
+| `:env` | List current user bindings as `val name : ty` |
+| `:show NAME` | Show NAME's type and value together |
+| `:load FILE` | Load FILE's decls into the REPL env |
+| `:reset` | Clear all user bindings |
 
-## Multi-line のしくみ
+## How multi-line works
 
-入力が parser から見て「途中で終わっている」(T_eof 位置でエラー) と判定された
-ら継続プロンプト `..>` が表示される。継続中に空行を打つか `:` で始まる行を
-打つと buffer は破棄される (`(input aborted)`)。
+If the parser sees the input as "incomplete" (an error at the T_eof
+position), the continuation prompt `..>` is shown. During continuation,
+typing a blank line or a line starting with `:` discards the buffer
+(`(input aborted)`).

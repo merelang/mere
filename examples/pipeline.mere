@@ -1,15 +1,16 @@
-// 統合 example: region + view + effect (cap passing + using sugar + builtin
-// Logger/Metrics) + with Drop semantics を組合せた realistic example。
+// Integration example: a realistic example combining region + view + effect
+// (cap passing + `using` sugar + builtin Logger/Metrics) + with-Drop semantics.
 //
-// シナリオ: 簡易ビルドパイプライン。
-//   - ユーザのセッションを `with session = ...` で開き、scope 末に close
-//   - 各タスクを `region R { ... }` で region に閉じて処理
-//   - region 内で view (Task[R]) を組み立て、計算結果 (Trivial int) を返す
-//   - Logger / Metrics を cap として passing (using sugar で簡潔化)
+// Scenario: a simplified build pipeline.
+//   - open a user session with `with session = ...`, closed at scope end
+//   - run each task inside `region R { ... }` to confine it to a region
+//   - build a view (Task[R]) inside the region and return the computed
+//     result (Trivial int) out
+//   - pass Logger / Metrics as caps (concise via `using` sugar)
 //
-// 設計 doc: 05_effect_system.md (cap passing) + 12_drop_and_with.md (案 i,
-// region は Trivial 厳格、Drop は with) + 14_view_types.md (view 型 3 公理)
-// を一つの例題で実証。
+// Design docs: 05_effect_system.md (cap passing) + 12_drop_and_with.md
+// (option i; regions are strictly Trivial, Drop is `with`) + 14_view_types.md
+// (the three view-type axioms) — all demonstrated in a single example.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 
@@ -17,8 +18,8 @@ let rec iter = fn f -> fn xs -> match xs with
   | []        -> ()
   | [h, ...t] -> { f h; iter f t };
 
-// === Drop ありリソース: Session ===
-// open 時に session 開始を log、close 時に session 終了を log。
+// === Drop-bearing resource: Session ===
+// Log session start on open, log session end on close.
 drop type Session = {
   user_id: int,
   close:   unit -> unit,
@@ -32,9 +33,10 @@ let open_session = fn uid using [logger: Logger] -> {
   }
 };
 
-// === region 内で view を組み立てて 1 タスクを処理 ===
-// Task[R] は region R 上の view。region 内で計算用 scratch として使い、
-// 計算結果 (size: int) だけ region 外に返す (Task[R] 自体は escape 不可)。
+// === Build a view inside the region and process one task ===
+// Task[R] is a view over region R. Used as scratch inside the region for
+// computation, only the result (size: int) is returned outside the region
+// (Task[R] itself cannot escape).
 view Task[R] of int { size: int };
 
 let process_task =
@@ -51,7 +53,7 @@ let process_task =
       scratch.size
     };
 
-// === メイン ===
+// === Main ===
 let tasks = ["build", "test", "lint", "deploy"];
 
 let logger  = mk_logger "pipeline";

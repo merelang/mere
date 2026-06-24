@@ -1,9 +1,9 @@
-// knapsack: 0/1 ナップサック問題を再帰 + memoize で解く (Phase 36)
+// knapsack: solve the 0/1 knapsack problem with recursion + memoization (Phase 36)
 //
-// 目的: 古典 DP 問題。Map[str, int] で memo を作って (i, w) → max_value を
-//   キャッシュ。アイテム数 5 個、容量 10 で最適解を求める。
+// Purpose: classic DP problem. Build a memo with Map[str, int] that caches
+//   (i, w) → max_value. Finds the optimum for 5 items and capacity 10.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 // item = (weight, value)
 let weights = [3, 4, 7, 8, 9];
@@ -36,7 +36,7 @@ let rec solve = fn (i: int) -> fn (w: int) ->
       let _ = map_set memo k best in
       best;
 
-// 何を選んだか復元
+// Reconstruct which items were chosen
 let rec reconstruct = fn (i: int) -> fn (w: int) -> fn (acc: int list) ->
   if i < 0 then acc
   else

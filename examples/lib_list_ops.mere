@@ -1,8 +1,8 @@
-// import 専用ライブラリの例 — decls-only ファイル (末尾に main 式
-// を置かない) を import 元から取り込む形。
+// Example of an import-only library — a decls-only file (no trailing main
+// expression) consumed by an importer.
 //
-// 注: slice 1 では module 内で type / record を declare できないので、
-// 'a list 型は module の外で宣言してから ListOps で使う。
+// Note: in slice 1, types / records cannot be declared inside a module, so
+// the 'a list type is declared outside the module and then used by ListOps.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 

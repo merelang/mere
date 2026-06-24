@@ -1,25 +1,25 @@
-// Phase 15.1/15.2: Vec[R, T] の C codegen 対応 (DEFERRED §1.1 の段階的解決)。
+// Phase 15.1/15.2: Vec[R, T] C codegen support (the staged resolution of DEFERRED §1.1).
 //
-// `vec_new / vec_push / vec_get / vec_len` を C コードに落とせる。
-// region 内 / region 外いずれも対応 (`__heap` 既定 region か、user の
-// `region R { ... }` 内なら R 内アロケータを使う)。
+// `vec_new / vec_push / vec_get / vec_len` can be lowered to C code.
+// Both inside and outside a region are supported (uses the default `__heap`
+// region, or an allocator within the user's `region R { ... }`).
 //
-// Phase 15.2 で要素型 T を一般化 — codegen がサポートする任意の
-// concrete type が使える: int / bool / str / tuple / record / variant。
-// monomorphize で `mere_vec_<tag>` struct + 4 helpers を生成 (例:
-// `mere_vec_int` / `mere_vec_str` / `mere_vec_tuple_int_int` / `mere_vec_Pt`)。
+// Phase 15.2 generalizes element type T — any concrete type supported by
+// codegen can be used: int / bool / str / tuple / record / variant.
+// Monomorphization emits a `mere_vec_<tag>` struct + 4 helpers (e.g.
+// `mere_vec_int` / `mere_vec_str` / `mere_vec_tuple_int_int` / `mere_vec_Pt`).
 //
-// 制限 (引き続き):
-//   - 高階 API (vec_iter / vec_map / vec_fold / vec_filter / vec_to_list
-//     / vec_to_owned / vec_set) は対象外。
-//   - vec_* の first-class value 用法 (`let f = vec_new in ...`) は未対応。
-//   - OwnedVec / StrBuf / Map は interpreter-only。
-//   - LLVM / Wasm backend は引き続き全 Vec を reject。
+// Limitations (still):
+//   - Higher-order APIs (vec_iter / vec_map / vec_fold / vec_filter /
+//     vec_to_list / vec_to_owned / vec_set) are out of scope.
+//   - First-class value use of vec_* (`let f = vec_new in ...`) is unsupported.
+//   - OwnedVec / StrBuf / Map are interpreter-only.
+//   - LLVM / Wasm backends still reject all Vec usage.
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- -c examples/vec_codegen_c.mere > /tmp/vec.c
 //   clang /tmp/vec.c -o /tmp/vec && /tmp/vec
-//   # → 95
+//   # -> 95
 
 let v = vec_new () in
 let r1 = vec_push v 10 in

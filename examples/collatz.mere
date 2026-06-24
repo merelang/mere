@@ -1,21 +1,22 @@
-// collatz: コラッツ予想の数列を生成 (Phase 36)
+// collatz: generate sequences from the Collatz conjecture (Phase 36)
 //
-// 目的: 単純な再帰 + 偶奇判定の demo。各 n から 1 までの軌跡を返す。
-//   even n → n/2、odd n → 3n+1。step 数も計測。
+// Purpose: a simple recursion + parity-check demo. Return the trajectory
+//   from each n down to 1. even n -> n/2, odd n -> 3n+1. Also measures
+//   the step count.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
-// 1 ステップ進める
+// Advance one step
 let next_collatz = fn (n: int) ->
   if even n then n / 2
   else 3 * n + 1;
 
-// 1 に到達するまでの step 数
+// Number of steps to reach 1
 let rec steps = fn (n: int) -> fn (count: int) ->
   if n <= 1 then count
   else steps (next_collatz n) (count + 1);
 
-// 軌跡を StrBuf に書き出す
+// Write the trajectory into a StrBuf
 let trace = fn (start: int) ->
   let b = strbuf_new () in
   let rec loop = fn (n: int) -> fn (first: bool) ->
@@ -37,7 +38,7 @@ let _ = report 7;        // 7 -> 22 -> 11 -> ... -> 1
 let _ = report 27;       // famous long trajectory
 let _ = report 100;
 
-// 1..20 の中で最も step 数が多い n を探す
+// Find the n in 1..20 with the largest step count
 let _ = print "--- max steps in 1..20 ---";
 let rec find_max = fn (i: int) -> fn (best_n: int) -> fn (best_s: int) ->
   if i > 20 then (best_n, best_s)

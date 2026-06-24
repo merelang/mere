@@ -1,22 +1,23 @@
-// dijkstra: 重み付きグラフ上の単一始点最短経路 (Dijkstra)
+// dijkstra: single-source shortest path on a weighted graph (Dijkstra)
 //
-// グラフは `edge = E of (from, to, weight)` の list で表現、 dist / visited は
-// Map[R, str, int] で管理 (key は node id を str 化したもの)。
+// The graph is represented as a list of `edge = E of (from, to, weight)`;
+// dist / visited are managed via Map[R, str, int] (keys are stringified
+// node ids).
 //
-// アルゴリズム:
-//   - dist[s] = 0、 他は ∞
-//   - n 回の loop:
-//       1. 未訪問の中で最小 dist を持つ node u を選ぶ
-//       2. u を visited にする
-//       3. u から出る全 edge について dist[v] を更新
+// Algorithm:
+//   - dist[s] = 0, all others = infinity
+//   - Loop n times:
+//       1. Pick the unvisited node u with the minimum dist
+//       2. Mark u as visited
+//       3. Update dist[v] for every edge out of u
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type edge = E of int * int * int;  // src, dst, weight
 
 let infinity = 999999;
 
-// 辺リストから「指定 from の隣接 edge だけ」を抽出
+// Extract "only the adjacency edges from the given source" from the edge list
 let rec neighbors = fn (edges: edge list) -> fn (from: int) ->
   match edges with
   | Nil -> Nil
@@ -24,7 +25,7 @@ let rec neighbors = fn (edges: edge list) -> fn (from: int) ->
     if a == from then Cons (E (a, b, w), neighbors rest from)
     else neighbors rest from;
 
-// 未訪問 node の中で最小 dist を持つ id を返す (- 1 if all visited)
+// Return the unvisited node id with the smallest dist (-1 if all visited)
 let rec pick_min = fn dist -> fn visited ->
   fn (i: int) -> fn (n: int) -> fn (best_i: int) -> fn (best_v: int) ->
   if i >= n then best_i
@@ -39,7 +40,7 @@ let rec pick_min = fn dist -> fn visited ->
       else
         pick_min dist visited (i + 1) n best_i best_v;
 
-// dist[v] を min(dist[v], dist[u] + w) で relax
+// Relax dist[v] to min(dist[v], dist[u] + w)
 let relax_edge = fn dist -> fn (e: edge) ->
   match e with
   | E (u, v, w) ->
@@ -54,7 +55,7 @@ let relax_edge = fn dist -> fn (e: edge) ->
 let dijkstra = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
   let dist = map_new () in
   let visited = map_new () in
-  // 初期化: source = 0、 他は ∞、 visited はすべて 0
+  // Initialize: source = 0, others = infinity, all visited = 0
   let rec init = fn i ->
     if i >= n then ()
     else
@@ -63,7 +64,7 @@ let dijkstra = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
       let _ = map_set visited (show i) 0 in
       init (i + 1) in
   let _ = init 0 in
-  // n 回の loop (各 iter で 1 node を visit)
+  // Loop n times (each iteration visits 1 node)
   let rec loop = fn iter ->
     if iter >= n then ()
     else
@@ -78,7 +79,7 @@ let dijkstra = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
   dist;
 
 let _ = print "=== Dijkstra example: 6-node graph ===";
-//   グラフ図 (重み):
+//   Graph (edge weights):
 //          (4)
 //       0 ───── 1
 //       │      ╱│
@@ -100,7 +101,7 @@ let edges = [
   E (4, 5, 6)
 ];
 
-// 結果表示用の汎用 helper
+// Generic helper for displaying results
 let print_dists = fn dist -> fn (n: int) ->
   let rec go = fn i ->
     if i >= n then ()

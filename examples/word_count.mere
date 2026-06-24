@@ -1,5 +1,6 @@
-// word_count: ファイルを読み、行数 / 単語数 / 文字数を表示
-// 標準的な `wc` の縮小版。引数を取らずに固定パスを使う簡易版。
+// word_count: read a file and print line / word / character counts.
+// A reduced version of standard `wc`. A simplified form that uses a fixed
+// path without taking arguments.
 //
 // Usage:
 //   echo "hello world\nlang ml" > /tmp/input.txt
@@ -7,7 +8,7 @@
 
 let path = "/tmp/input.txt";
 
-// 入力が存在しない場合は default を書き込む
+// If input doesn't exist, write a default
 let _ =
   try_or
     (fn () -> { let _ = read_file path in () })
@@ -15,13 +16,13 @@ let _ =
 
 let content = read_file path;
 
-// 文字数 = byte length
+// Character count = byte length
 let char_count = str_len content;
 
-// 改行をカウント (末尾改行で行数が変わる場合は +1 不要)
+// Count newlines (no +1 needed if the line count changes based on a trailing newline)
 let line_count = str_count content "\n";
 
-// 単語数: 空白で区切られた連続 non-space 列の数
+// Word count: number of contiguous non-space runs separated by whitespace
 let rec count_words = fn (s: str, i: int, in_word: bool, acc: int) ->
   if i >= str_len s then
     if in_word then acc + 1 else acc

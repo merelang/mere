@@ -1,17 +1,18 @@
-// Phase 12.5: Vec[R, T] (region 内、Trivial) と OwnedVec[T] (heap、Drop あり)
-// の対比デモ。設計 doc 13_region_std_types.md §9「(b) 別型 + trait で
-// API 統一」の「別型」部分を実装。
+// Phase 12.5: Demo contrasting Vec[R, T] (in-region, Trivial) with
+// OwnedVec[T] (heap, with Drop). Implements the "separate types" part of
+// the design doc 13_region_std_types.md §9 "(b) separate types + trait
+// for unified API".
 //
-// - Vec[R, T]:  region に置ける、scope 末で一括解放、Trivial
-// - OwnedVec[T]: heap-allocated、Drop 型、region に置けない
+// - Vec[R, T]:  placeable in a region; freed in bulk at end of scope; Trivial
+// - OwnedVec[T]: heap-allocated; Drop type; not placeable in a region
 //
-// 内部実装は同じ V_vec (mutable array)。型システム上だけ別物として
-// 扱われる。
+// Internal implementation is the same V_vec (mutable array). They are
+// treated as separate things only at the type-system level.
 
-// === パターン 1: 一時的な作業用 — region 内の Vec[R, T] ===
+// === Pattern 1: temporary scratch — Vec[R, T] inside a region ===
 let regional_sum =
   region R {
-    let v = vec_new () in    // 型: Vec[R, int] (region R に bind)
+    let v = vec_new () in    // type: Vec[R, int] (bound to region R)
     {
       vec_push v 1;
       vec_push v 2;
@@ -20,20 +21,20 @@ let regional_sum =
     }
   } in
 
-// region を出た瞬間に v は無効。escape を試すと型エラー:
+// The moment you leave the region, v is invalid. Trying to escape is a type error:
 //   region R { let v = vec_new () in &R v }
-//   ↑ region escape: value of type `Vec[R, int]` cannot leave region
+//   ^ region escape: value of type `Vec[R, int]` cannot leave region
 
-// === パターン 2: 長期保持 — heap の OwnedVec[T] ===
-let lasting = owned_vec_new () in   // 型: int OwnedVec
+// === Pattern 2: long-term hold — heap OwnedVec[T] ===
+let lasting = owned_vec_new () in   // type: int OwnedVec
 {
   owned_vec_push lasting 100;
   owned_vec_push lasting 200;
   owned_vec_push lasting 300;
 
-  // OwnedVec は Drop 型なので region に置けない:
+  // OwnedVec is a Drop type, so it can't be placed in a region:
   //   region R { let v = owned_vec_new () in &R v }
-  //   ↑ Trivial[R] violated: cannot place value of type `'a OwnedVec`
+  //   ^ Trivial[R] violated: cannot place value of type `'a OwnedVec`
   //     into region — type contains a Drop type
 
   print ("regional_sum = " ++ show regional_sum);
@@ -41,7 +42,7 @@ let lasting = owned_vec_new () in   // 型: int OwnedVec
   print ("lasting[1]   = " ++ show (owned_vec_get lasting 1))
 }
 
-// 期待出力:
+// Expected output:
 // regional_sum = 6
 // lasting len  = 3
 // lasting[1]   = 200

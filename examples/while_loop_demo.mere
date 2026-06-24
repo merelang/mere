@@ -1,23 +1,23 @@
-// while_loop_demo: Phase 36 で導入した `while cond do body` の demo
+// while_loop_demo: demo of `while cond do body` introduced in Phase 36
 //
-// 構文: `while cond do body` は次の再帰 helper に desugar される:
+// Syntax: `while cond do body` desugars to the following recursive helper:
 //   let rec __while = fn () ->
 //     if cond then let _ = body in __while ()
 //     else ()
 //   in __while ()
 //
-// 注: codegen の制約で、`while` は **fn body の中**で使う必要がある
-//   (top-level main では `let rec` の inner lift が効かないため)。
-//   interp では top-level でも動く。
+// Note: due to codegen constraints, `while` must be used **inside a fn body**
+//   (top-level main has no inner let-rec lift). interp supports it at top
+//   level too.
 //
-// 典型用途: Mere は immutable なので Map / OwnedVec を mutable cell として
-//   使い、`while` で side-effect ループを回す。
+// Typical use: since Mere is immutable, use Map / OwnedVec as a mutable
+//   cell and spin a side-effecting loop with `while`.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 let _ = print "=== while_loop_demo (Phase 36) ===";
 
-// --- 5 回カウントアップ ---
+// --- count up 5 times ---
 let count_up = \n ->
   let cell = map_new () in
   let _ = map_set cell "i" 0 in
@@ -31,7 +31,7 @@ let count_up = \n ->
 let _ = print "--- count up 5 ---";
 let _ = count_up 5;
 
-// --- べき乗チェーン (1, 2, 4, ..., 32) ---
+// --- power chain (1, 2, 4, ..., 32) ---
 let _ = print "--- powers of 2 <= 32 ---";
 let powers = \limit ->
   let cell = map_new () in
@@ -44,7 +44,7 @@ let powers = \limit ->
   ();
 let _ = powers 32;
 
-// --- Collatz sequence までの step 数 (count via while) ---
+// --- step count to reach 1 in Collatz sequence (count via while) ---
 let _ = print "--- Collatz of 27 (step count) ---";
 let collatz_steps = \start ->
   let cell = map_new () in

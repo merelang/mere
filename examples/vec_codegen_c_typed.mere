@@ -1,39 +1,40 @@
-// Phase 15.2: Vec[R, T] の C codegen が要素型 T を一般化したことの demo。
-// 同じ program 中で 4 種類の Vec instance を作り、それぞれ別の
-// `mere_vec_<tag>` runtime に monomorphize されることを示す。
+// Phase 15.2: Demo that Vec[R, T]'s C codegen has been generalized over
+// element type T. In a single program, build 4 different Vec instances and
+// show that each is monomorphized to a different `mere_vec_<tag>` runtime.
 //
-//   - Vec[__heap, int]   → mere_vec_int
-//   - Vec[__heap, str]   → mere_vec_str
-//   - Vec[__heap, tuple] → mere_vec_tuple_int_int
-//   - Vec[__heap, Tag]   → mere_vec_Tag (user 型 variant)
+//   - Vec[__heap, int]   -> mere_vec_int
+//   - Vec[__heap, str]   -> mere_vec_str
+//   - Vec[__heap, tuple] -> mere_vec_tuple_int_int
+//   - Vec[__heap, Tag]   -> mere_vec_Tag (user variant type)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- -c examples/vec_codegen_c_typed.mere > /tmp/vt.c
 //   clang /tmp/vt.c -o /tmp/vt && /tmp/vt
-//   # → 252
+//   # -> 252
 
 type Tag = Lo of int | Hi of int;
 
-// int Vec — 普通のスカラー要素。
+// int Vec — ordinary scalar element.
 let ints = vec_new () in
 let __ = vec_push ints 1 in
 let __ = vec_push ints 2 in
 let __ = vec_push ints 3 in
 let ints_sum = vec_get ints 0 + vec_get ints 1 + vec_get ints 2 in
 
-// str Vec — 要素は `const char*` として配列化される。
+// str Vec — elements stored as a `const char*` array.
 let words = vec_new () in
 let __ = vec_push words "hi" in
 let __ = vec_push words "you" in
 let strs_len = str_len (vec_get words 0) + str_len (vec_get words 1) in
 
-// tuple Vec — `mere_vec_tuple_int_int` 専用 struct + 値配列に展開される。
+// tuple Vec — expanded into a `mere_vec_tuple_int_int` dedicated struct +
+// value array.
 let pairs = vec_new () in
 let __ = vec_push pairs (10, 100) in
 let __ = vec_push pairs (20, 200) in
 let pairs_sum = fst (vec_get pairs 0) + snd (vec_get pairs 1) in
 
-// user variant Vec — `Tag` の tagged-union が配列要素として並ぶ。
+// user variant Vec — tagged-union of `Tag` laid out as array elements.
 let tags = (vec_new () : Tag Vec) in
 let __ = vec_push tags (Lo 7) in
 let __ = vec_push tags (Hi 15) in

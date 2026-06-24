@@ -1,10 +1,10 @@
-// import "./path"; で別ファイルの decls を取り込む。同じファイルが
-// (直接 / 間接で) 2 回以上参照されても cycle guard でちょうど 1 回だけ
-// 取り込まれる。
+// `import "./path";` brings in decls from another file. Even if the same file
+// is referenced (directly or indirectly) more than once, the cycle guard
+// ensures it is imported exactly once.
 //
-// このファイルから lib_list_ops.mere を参照する場合、
+// To reference lib_list_ops.mere from this file, run with:
 // dune exec bin/mere.exe -- examples/import_demo.mere
-// と run する想定 (パスは cwd 基準で resolve)。
+// (paths resolve relative to cwd).
 
 import "examples/lib_list_ops.mere";
 

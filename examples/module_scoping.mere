@@ -1,36 +1,36 @@
-// Phase 18.1 / 18.2 で実装した module proper scoping の demo。
+// Demo of module proper scoping implemented in Phase 18.1 / 18.2.
 //
-// 機能 (Phase 18 系):
-//   - module 内 ctor / record / type が **M-prefix scoping**
-//   - 2 module 間で同名 ctor を持っても disambiguate 可能
+// Features (Phase 18 family):
+//   - ctor / record / type inside a module use **M-prefix scoping**
+//   - two modules can have ctors of the same name and be disambiguated
 //     (`A.Red` vs `B.Red`)
-//   - `M.Pt { ... }` qualified record literal (単一 nest 階層)
+//   - `M.Pt { ... }` qualified record literal (single nest level)
 //   - `match v with | M.Red -> ...` qualified pattern
-//   - `open A.B;` で nested module の binding を unqualified import
-//   - bare 名は backward compat で動く (typer の alias 経由、eval は
-//     V_constr を canonical name に正規化)
+//   - `open A.B;` brings the nested module's bindings in unqualified
+//   - bare names still work for backward compat (via typer alias; eval
+//     normalizes V_constr to the canonical name)
 //
-// 実行モード: interpreter のみ
-//   (codegen は M-prefix の pattern matching が未対応、
-//    Phase 18.x 後続で対応予定)
+// Execution mode: interpreter only
+//   (codegen does not yet support M-prefix pattern matching,
+//    planned for later Phase 18.x slices)
 //
-// 既知の制約:
-//   - 2 階層以上 nested module の record literal `A.B.Rec { ... }` は
-//     parse できない (parser-side records は最終 nest のみ M-prefix
-//     登録)。Phase 18.x 後続 slice で対応予定 — 当面は最後の module を
-//     `open A.B;` してから `Rec { ... }` で OK
+// Known limitations:
+//   - record literals nested two levels deep `A.B.Rec { ... }` do not
+//     parse (parser-side records only M-prefix register the innermost
+//     nest). Planned for later Phase 18.x slices — for now, `open A.B;`
+//     the deepest module first and then `Rec { ... }` works fine
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/module_scoping.mere
-//   # 期待出力:
+//   # expected output:
 //   #   Traffic.Red = stop
 //   #   Mood.Red = passionate
 //   #   pt: (3, 4) area = 12
 //   #   nested.greet = hello world
 
-// === パターン 1: 2 module が同名 ctor (Red) を持つ ===
-// Phase 18.1 がなかった時代は、後の declare が前の Red を黙って上書き
-// していた。今は qualified 形式で別物として扱える。
+// === Pattern 1: two modules sharing a ctor name (Red) ===
+// Before Phase 18.1, a later declare silently overrode the prior Red.
+// Now the qualified form treats them as distinct.
 
 module Traffic {
   type Light = Red | Yellow | Green;
@@ -50,20 +50,21 @@ module Mood {
     | Purple -> "dreamy";
 };
 
-// === パターン 2: 単一 nest module + qualified record literal ===
-// Phase 18.1 で `M.Pt { ... }` が動く (1 階層まで)。
+// === Pattern 2: single-nest module + qualified record literal ===
+// Phase 18.1 makes `M.Pt { ... }` work (up to 1 level).
 
 module Shapes {
   type Rect = { w: int, h: int };
 };
 
-// 摩擦点 (Phase 18.x): module 内で `let area = fn (r: Rect) -> r.w * r.h`
-// と書くと、`r: Rect` の bare 型注釈が typer 側で `Shapes.Rect` と
-// 別物扱いされ、外から呼べない (alias は記録されているが unify は別)。
-// 当面は area を main 側で inline 計算する。要 Phase 18.x 後続対応。
+// Friction point (Phase 18.x): writing `let area = fn (r: Rect) -> r.w * r.h`
+// inside the module makes the typer treat the bare `r: Rect` annotation as
+// distinct from `Shapes.Rect`, so it cannot be called from outside (the alias
+// is recorded but unify treats them as separate). For now, area is computed
+// inline on the main side. Needs follow-up in later Phase 18.x.
 
-// === パターン 3: nested module + `open A.B;` ===
-// Phase 18.2 で `open A.B;` (nested path への open) が動く。
+// === Pattern 3: nested module + `open A.B;` ===
+// Phase 18.2 makes `open A.B;` (open to a nested path) work.
 
 module Greet {
   module Inner {
@@ -71,23 +72,23 @@ module Greet {
   };
 };
 
-// Greet.Inner の direct bindings (= 短い名前) を unqualified に import。
+// Import Greet.Inner's direct bindings (= short names) unqualified.
 open Greet.Inner;
 
 // === main ===
-// すべてのデモを順に実行。block 内の `;` で副作用 sequence。
+// Run all demos in order. `;` inside the block sequences side effects.
 
 {
-  // 両 module の Red を qualified で disambiguate
+  // Disambiguate the two modules' Red with qualified names
   print ("Traffic.Red = " ++ Traffic.label Traffic.Red);
   print ("Mood.Red = " ++ Mood.label Mood.Red);
 
-  // 単一階層 qualified record literal で構築 + field access
-  // (area は inline 計算、上記摩擦点を回避)
+  // Construct and access fields with a single-level qualified record literal
+  // (area is computed inline to dodge the friction point above)
   let pt = Shapes.Rect { w = 3, h = 4 } in
   print ("pt: (" ++ show pt.w ++ ", " ++ show pt.h
        ++ ") area = " ++ show (pt.w * pt.h));
 
-  // open Greet.Inner で `greet` が unqualified に
+  // After `open Greet.Inner`, `greet` is available unqualified
   print ("nested.greet = " ++ greet "world")
 }

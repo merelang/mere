@@ -1,22 +1,23 @@
-// eight_queens: N-Queens 問題の解を列挙 (Phase 36)
+// eight_queens: enumerate solutions to the N-Queens problem (Phase 36)
 //
-// 目的: backtracking algorithm の典型例。各 row に置いたクイーンの列番号
-//   を int list で管理し、再帰で全探索。N=6 で 4 つの解、N=8 で 92 解。
-//   配置数を数えるだけで、最初の数解だけを print する。
+// Purpose: a typical example of a backtracking algorithm. Track the
+//   column index of the queens placed so far in an int list and explore
+//   exhaustively via recursion. N=6 has 4 solutions, N=8 has 92.
+//   We just count placements and print only the first few solutions.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
-// queens: 既に配置されたクイーンの列 list (新しいクイーンを先頭に push する形)
-// safe?: クイーン c を新しい row に置く際、既存の queens と衝突しないか
+// queens: the column list of queens already placed (new queens pushed at the head)
+// safe?: when placing queen c on a new row, does it conflict with any existing queen?
 let rec safe = fn (c: int) -> fn (queens: int list) -> fn (dist: int) ->
   match queens with
   | Nil -> true
   | Cons (q, rest) ->
-    if q == c then false                 // 同じ列
-    else if (q - c == dist) || (c - q == dist) then false   // 対角
+    if q == c then false                 // same column
+    else if (q - c == dist) || (c - q == dist) then false   // diagonal
     else safe c rest (dist + 1);
 
-// 解の数を共有する単一セル Map (mutable cell の代わり)
+// Single-cell Map that shares the solution count (in place of a mutable cell)
 let counter = map_new ();
 let display_limit = 3;
 

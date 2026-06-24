@@ -1,17 +1,17 @@
-// Phase 15.4: Vec[R, T] の Wasm codegen 対応 (3 backend 完全 parity)。
+// Phase 15.4: Vec[R, T] Wasm codegen support (full 3-backend parity).
 //
-// Wasm では Mere の値はすべて 4-byte i32 (スカラーは直接、構造化型は
-// linear memory 内の offset) として表現されるため、要素型 T ごとに
-// 別 runtime を作る必要がない (C / LLVM とは違う設計判断)。単一の
-// $mere_vec_new / push / get / len で int / str / tuple / record /
-// variant すべてを扱う。
+// In Wasm, every Mere value is represented as a 4-byte i32 (scalars
+// directly; structured types as offsets into linear memory), so there is no
+// need for a separate runtime per element type T (a different design
+// decision from C / LLVM). A single $mere_vec_new / push / get / len
+// handles int / str / tuple / record / variant alike.
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- -w examples/vec_codegen_wasm_typed.mere > /tmp/vt.wat
 //   wat2wasm /tmp/vt.wat -o /tmp/vt.wasm
 //   node -e 'WebAssembly.instantiate(require("fs").readFileSync("/tmp/vt.wasm"),
 //     { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
-//   # → 252
+//   # -> 252
 
 type Tag = Lo of int | Hi of int;
 

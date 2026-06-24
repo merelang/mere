@@ -1,35 +1,38 @@
-// Phase 11 で追加された借用注釈の 4 mode を、Logger / Metrics
-// (組込み cap) と組み合わせて使い分けるデモ。Phase 11.3 で `&R T` を
-// 介した field access の auto-deref が動くようになったので、
-// signature だけでなく **実際の cap method 呼出** まで動く。
+// Demo combining the 4 borrow-annotation modes added in Phase 11 with the
+// builtin Logger / Metrics caps. Since Phase 11.3 made auto-deref work for
+// field access through `&R T`, this exercises not only signatures but also
+// **actual cap method calls**.
 //
-// 設計コンテキスト: internal design notes (Q-004)
+// Design context: internal design notes (Q-004)
 //
-// 4 mode と、それぞれが解く問題:
+// The 4 modes and the problem each one solves:
 //
 //   &R T              shared read (default)
-//                     設定値・読み取り専用 cap (`Config`, `Users`)
+//                     config values, read-only caps (`Config`, `Users`)
 //
-//   &shared write R T shared, write OK (cap 側で安全性保証)
-//                     ← これが Logger 問題の解。複数の caller が同時に
-//                       書ける (内部 lock / lock-free queue 前提)
+//   &shared write R T shared, write OK (safety guaranteed by the cap)
+//                     <- this is the answer to the Logger problem. Multiple
+//                        callers can write concurrently (assumes internal
+//                        locking / lock-free queue).
 //
-//   &exclusive R T    exclusive read (稀、排他読み)
-//                     read だが他の borrow と同時取得不可
+//   &exclusive R T    exclusive read (rare; exclusive even for read)
+//                     read-only but cannot coexist with other borrows
 //
-//   &mut R T          exclusive write (Rust の `&mut` 相当)
-//                     1 度に 1 caller、Database 接続の transaction 等
+//   &mut R T          exclusive write (equivalent to Rust's `&mut`)
+//                     one caller at a time, e.g. database transactions
 
-// === パターン 1: shared write (Logger) ===
-// 複数 handler から同じ logger に並行書き込み。内部 lock は cap 側 (今回は
-// builtin mk_logger) で透過。field access はborrow 越しに直接呼べる。
+// === Pattern 1: shared write (Logger) ===
+// Multiple handlers write concurrently to the same logger. Internal locking
+// is handled by the cap side (here the builtin mk_logger) transparently.
+// Field access can be invoked directly through the borrow.
 
 let log_action = fn (lg: &shared write R Logger) -> fn (action: str) ->
   lg.info ("action: " ++ action);
 
-// === パターン 2: exclusive write (Database 風) ===
-// 排他 write 必要なリソース。`&mut` を要求するので、shared な借用を渡すと
-// 型エラーになる (詳細は borrow_modes_typeerror.mere)。
+// === Pattern 2: exclusive write (Database-like) ===
+// A resource that requires exclusive writes. It demands `&mut`, so passing
+// a shared borrow is a type error (see borrow_modes_typeerror.mere for the
+// detailed message).
 
 type DbHandle = { id: int, exec: str -> int };
 
@@ -42,15 +45,16 @@ let mk_db = fn id ->
 let db_run = fn (db: &mut R DbHandle) -> fn (sql: str) ->
   db.exec sql;
 
-// === パターン 3: shared read (Config 風) ===
-// 設定値など読み取り専用。複数 caller が同時取得できる。
+// === Pattern 3: shared read (Config-like) ===
+// Read-only data like configuration values. Multiple callers can hold it
+// simultaneously.
 
 type AppConfig = { name: str, threads: int };
 
 let show_config = fn (cfg: &R AppConfig) ->
   print (cfg.name ++ " threads=" ++ show cfg.threads);
 
-// === 実行: 4 mode を全部 region 内で構築 ===
+// === Execution: construct all 4 modes inside one region ===
 region R {
   let logger = mk_logger "app" in
   let db = mk_db 7 in
@@ -62,14 +66,14 @@ region R {
 
   {
     log_action lg_ref "save_order";
-    log_action lg_ref "process_user";   // 別 caller が同じ logger を共有 write
+    log_action lg_ref "process_user";   // another caller shares the same logger for writing
     let n = db_run db_ref "UPDATE orders SET status = 'paid'" in
     print ("rows affected: " ++ show n);
     show_config cfg_ref
   }
 }
 
-// 期待出力:
+// Expected output:
 // app [INFO] action: save_order
 // app [INFO] action: process_user
 // [db 7] UPDATE orders SET status = 'paid'

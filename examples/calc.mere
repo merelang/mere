@@ -1,17 +1,17 @@
-// calc: operator-precedence な arithmetic parser + evaluator (Phase 36)
+// calc: operator-precedence arithmetic parser + evaluator (Phase 36)
 //
-// 文法 (recursive descent):
+// Grammar (recursive descent):
 //   expr   = term ( ('+' | '-') term )*
 //   term   = factor ( ('*' | '/') factor )*
 //   factor = '-'? primary
 //   primary = number | '(' expr ')'
 //
-// 例: `1 + 2 * 3 - 4 / 2` = 5、`-(3 + 4) * 2` = -14
+// Examples: `1 + 2 * 3 - 4 / 2` = 5, `-(3 + 4) * 2` = -14
 //
-// Phase 36 sugar の dogfood: `?!` Result chain / lambda / interp /
-//   `for x in xs do body` / `let .. = .. ?!` early-return。
+// Dogfoods Phase 36 sugar: `?!` Result chain / lambda / string interp /
+//   `for x in xs do body` / `let .. = .. ?!` early-return.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 // === Tokenizer ===
 type tok = TNum of int | TPlus | TMinus | TStar | TSlash | TLParen | TRParen;
@@ -32,7 +32,7 @@ let digit_value = fn (c: str) ->
 
 let is_space_c = fn (c: str) -> c == " " || c == "\t";
 
-// "1+2 * 3 -4" → [TNum 1; TPlus; TNum 2; TStar; TNum 3; TMinus; TNum 4]
+// "1+2 * 3 -4" -> [TNum 1; TPlus; TNum 2; TStar; TNum 3; TMinus; TNum 4]
 let tokenize = fn (s: str) ->
   let n = str_len s in
   let acc = owned_vec_new () in
@@ -54,7 +54,7 @@ let tokenize = fn (s: str) ->
       else if c == ")" then
         let _ = owned_vec_push acc TRParen in scan (i + 1)
       else if is_digit c then
-        // 連続する数字を集約
+        // Collect consecutive digits
         let rec collect = fn (j: int) -> fn (v: int) ->
           if j >= n then (v, j)
           else
@@ -65,7 +65,7 @@ let tokenize = fn (s: str) ->
         let _ = owned_vec_push acc (TNum (fst pair)) in
         scan (snd pair)
       else
-        // 不明な文字は skip (簡略化)
+        // Skip unknown characters (simplification)
         scan (i + 1) in
   let _ = scan 0 in
   acc;
@@ -83,7 +83,7 @@ let bump = fn (_unused: unit) ->
   let _ = map_set pos_cell "i" (map_get pos_cell "i" + 1) in
   ();
 
-// 結果: Result (int, str)
+// Result: Result (int, str)
 let rec parse_expr = fn (toks: OwnedVec[tok]) ->
   let lhs = parse_term toks?! in
   parse_expr_tail toks lhs

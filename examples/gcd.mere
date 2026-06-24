@@ -1,10 +1,10 @@
-// gcd: 最大公約数 (Euclidean algorithm) + lcm + extended Euclidean
+// gcd: greatest common divisor (Euclidean algorithm) + lcm + extended Euclidean
 //
-// gcd a b = gcd b (a mod b)、 b == 0 で a を返す
+// gcd a b = gcd b (a mod b), returning a when b == 0
 // lcm a b = a * b / gcd a b
-// extended Euclidean: gcd と同時に (x, y) such that a*x + b*y = gcd を計算
+// extended Euclidean: compute (x, y) such that a*x + b*y = gcd alongside gcd
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let rec gcdi = fn (a: int) -> fn (b: int) ->
   if b == 0 then (if a < 0 then 0 - a else a)
@@ -14,7 +14,7 @@ let lcm = fn (a: int) -> fn (b: int) ->
   if a == 0 || b == 0 then 0
   else (a * b) / gcdi a b;
 
-// extended Euclidean: a*x + b*y = gcd(a, b) となる (gcd, x, y) を返す
+// extended Euclidean: return (gcd, x, y) such that a*x + b*y = gcd(a, b)
 let rec ext_gcd = fn (a: int) -> fn (b: int) ->
   if b == 0 then (a, 1, 0)
   else
@@ -29,7 +29,7 @@ let _ = print ("gcd 0 5 = " ++ show (gcdi 0 5));
 let _ = print ("lcm 4 6 = " ++ show (lcm 4 6));
 let _ = print ("lcm 12 18 = " ++ show (lcm 12 18));
 
-// 三つ組を文字列化 + 検証する helper
+// Helper to stringify the triple + verify it
 let report_ext = fn (a: int) -> fn (b: int) ->
   let (g, x, y) = ext_gcd a b in
   let _ = print ("ext_gcd " ++ show a ++ " " ++ show b ++ " = (" ++ show g ++ ", " ++ show x ++ ", " ++ show y ++ ")") in

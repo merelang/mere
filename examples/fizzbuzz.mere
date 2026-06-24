@@ -1,5 +1,5 @@
 // FizzBuzz: demonstrates / % && || comparison operators + stdlib (print/print_int/str_of_int).
-// 1..15 を順に走査して fizz/buzz/fizzbuzz/数値を表示。
+// Walks 1..15 in order and prints fizz/buzz/fizzbuzz/the number.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 

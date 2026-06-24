@@ -1,37 +1,40 @@
-// task_scheduler: 優先度付きタスクスケジューラ
+// task_scheduler: priority-based task scheduler
 //
-// task は variant ではなく record:
+// task is a record (not a variant):
 //   type Task = { id: int, name: str, priority: int, duration: int }
 //
-// priority が高いタスクを先に実行。 同じ priority なら id が小さい方を先に。
-// duration の経過で current_time を進めつつ、 各タスクの開始 / 完了を logger
-// に記録。
+// Higher-priority tasks run first. Among equal priority, lower id runs
+// first. As duration elapses, advance current_time and log each task's
+// start / completion to the logger.
 //
-// dogfood goal: 比較関数の渡し方 / Map[str, str] と Map[str, int] の併用 /
-// 多 cap の signature alias などで「trait / effect / NLL の痛みが出るか」 を観察。
+// dogfood goal: observe whether "trait / effect / NLL pain" surfaces from
+// passing comparison functions, using Map[str, str] alongside Map[str, int],
+// and signature aliases over multiple caps.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 type Task = { id: int, name: str, priority: int, duration: int };
 
-// task の比較: 高 priority が先、 同 priority なら低 id が先
-// (痛み観察 #3: 比較関数を毎回手書きする必要。 trait Ord があれば
-// `task: Ord` と書くだけで sort などに渡せる。 現状は explicit に渡す)
+// Comparison for tasks: higher priority first; on tie, lower id first
+// (Pain observation #3: comparison functions must be written by hand each
+// time. With a trait Ord, you could just write `task: Ord` and pass to
+// sort etc. Currently it's passed explicitly.)
 //
-// 2026-06-23 update (Phase 39.A' #4): list_sort_by が prelude に追加されたので
-// 自前 insertion sort (旧 insert_task / sort_tasks_aux / sort_tasks) は撤去。
-// 比較関数だけ user が書けば prelude の list_sort_by に渡せる。
+// 2026-06-23 update (Phase 39.A' #4): list_sort_by was added to the
+// prelude, so the hand-rolled insertion sort (old insert_task /
+// sort_tasks_aux / sort_tasks) was removed. The user only needs to write
+// the comparison function and pass it to prelude's list_sort_by.
 let task_higher_priority = fn (a: Task) -> fn (b: Task) ->
   if a.priority != b.priority then a.priority > b.priority
   else a.id < b.id;
 
-// 実行シミュレータ
+// Execution simulator
 let simulate = fn (tasks: Task list) ->
   let log = strbuf_new () in
   let clock = map_new () in
   let _ = map_set clock "now" 0 in
   let _ = strbuf_push log "[scheduler start]\n" in
-  // sort して priority 高い順 (prelude list_sort_by を使う)
+  // Sort in high-priority-first order (using prelude list_sort_by)
   let sorted = list_sort_by task_higher_priority tasks in
   let _ = list_iter sorted (fn (t: Task) ->
     let start = map_get clock "now" in
@@ -46,8 +49,9 @@ let simulate = fn (tasks: Task list) ->
   strbuf_to_str log;
 
 let _ = print "=== task scheduler ===";
-// 痛み観察 (dogfood note #5): list literal の中の record literal は `{ ... }`
-// がブロック式と曖昧。 record の type-name prefix が必要 (`task { ... }`)。
+// Pain observation (dogfood note #5): a record literal inside a list
+// literal is ambiguous with a `{ ... }` block expression. A record
+// type-name prefix is required (`task { ... }`).
 let tasks = [
   Task { id = 1, name = "build",  priority = 3, duration = 5 },
   Task { id = 2, name = "lint",   priority = 1, duration = 2 },

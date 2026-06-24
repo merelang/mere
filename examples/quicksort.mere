@@ -1,12 +1,12 @@
-// quicksort: 古典的 quicksort を `'a list` の上で実装
+// quicksort: classic quicksort implemented over `'a list`
 //
-// アルゴリズム: pivot として head を選び、 tail を `< pivot` と `>= pivot` に
-// 分割、 両方を再帰的に sort して結合。 immutable list version。
+// Algorithm: pick head as the pivot, partition tail into `< pivot` and
+// `>= pivot`, recursively sort both, and concatenate. Immutable list version.
 //
-// Phase 36 sugar (list comprehension / range) と Phase 38 helpers (list_filter)
-// を活用してコンパクトに。
+// Compact thanks to Phase 36 sugar (list comprehension / range) and Phase 38
+// helpers (list_filter).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
 let rec quicksort = fn (xs: int list) ->
   match xs with

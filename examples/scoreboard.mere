@@ -1,12 +1,12 @@
-// scoreboard: プレイヤースコア集計 + 降順ランキング (Phase 36)
+// scoreboard: aggregate player scores + descending ranking (Phase 36)
 //
-// 目的: Map[str, int] でスコア集計 → (name, score) list に変換 → 降順
-//   selection sort で並べる典型処理。`map_iter` + OwnedVec の往復が
-//   実用的な dogfood。
+// Purpose: typical pattern of aggregating scores in Map[str, int], converting
+//   to a (name, score) list, and sorting with descending selection sort.
+//   `map_iter` + round-trip through OwnedVec is a practical dogfood.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// 試合結果: (player, points) の list
+// Match results: list of (player, points)
 let matches =
   [("alice", 10),  ("bob",   5),   ("alice", 15),
    ("carol", 20),  ("bob",  25),   ("alice", 5),
@@ -28,7 +28,7 @@ let rec absorb = fn (xs: (str * int) list) ->
 
 let _ = absorb matches;
 
-// Map[str, int] → 2 つの OwnedVec (names, points) に変換
+// Convert Map[str, int] -> two OwnedVecs (names, points)
 let names = owned_vec_new ();
 let points = owned_vec_new ();
 let _ = map_iter scores (fn (n: str) -> fn (p: int) ->

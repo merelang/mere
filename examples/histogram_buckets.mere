@@ -1,13 +1,15 @@
-// histogram_buckets: 数列を bucket (区間) ごとに数えるヒストグラム
+// histogram_buckets: histogram that counts values per bucket (interval)
 //
-// 各値 x を `bucket_key x` で str に変換 (例: "0-9" / "10-19" / ... / "90-99")、
-// Map<str, int> でカウント。 `let inc = fn key -> map_set bucket_map key (...)` の
-// closure と `let get = map_get bucket_map` の partial app を活用。
+// Convert each value x to a str via `bucket_key x` (e.g. "0-9" / "10-19" / ...
+// / "90-99") and count with Map<str, int>. Uses the closure
+// `let inc = fn key -> map_set bucket_map key (...)` together with the partial
+// application `let get = map_get bucket_map`.
 //
-// 内部の Map は scope を超えて使うので auto-Drop しない (まあそもそも Map は
-// Phase 38.G-1 の対象ではないので問題なし)。 OwnedVec は使わない単純例。
+// The inner Map is used beyond its scope so it does not auto-Drop (Map is not
+// a target of Phase 38.G-1 anyway, so this is fine). A simple example that
+// does not use OwnedVec.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let bucket_key = fn x ->
   let lo = (x / 10) * 10 in
@@ -24,7 +26,7 @@ let count_buckets = fn data ->
   counts;
 
 let show_buckets = fn buckets ->
-  // 0-9 から 90-99 までの bucket を順に表示
+  // Display buckets in order from 0-9 through 90-99
   let rec loop = fn lo ->
     if lo > 90 then ()
     else

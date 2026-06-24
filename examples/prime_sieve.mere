@@ -1,25 +1,27 @@
-// prime_sieve: エラトステネスのふるい (Phase 33.2)
+// prime_sieve: Sieve of Eratosthenes (Phase 33.2)
 //
-// 目的: examples roadmap H1。Vec[R, bool] を使った素数ふるいの demo。
-//   region 内 alloc、bool 要素型 Vec、in-place mutation (vec_set)、
-//   `let rec` 内で side-effect loop を組む典型イディオムを 1 file で実証。
+// Purpose: examples roadmap H1. Demo of the prime sieve using Vec[R, bool].
+//   Demonstrates region-internal allocation, bool-element Vec, in-place
+//   mutation (vec_set), and the typical idiom of running a side-effect loop
+//   inside `let rec`, all in a single file.
 //
-// アルゴリズム (Sieve of Eratosthenes):
-//   1. 長さ N の bool 配列 (`sieve[i]` = "i は素数候補") を全て true で初期化
-//   2. 0, 1 は非素数 → false
-//   3. p = 2 から √N まで:
-//        sieve[p] が true なら、p*p, p*p + p, p*p + 2p, ... を false に
-//   4. 残った true の index が素数
+// Algorithm (Sieve of Eratosthenes):
+//   1. Initialize a bool array of length N (`sieve[i]` = "i is a prime
+//      candidate") with all true
+//   2. 0 and 1 are not prime -> false
+//   3. From p = 2 up to sqrt(N):
+//        if sieve[p] is true, set p*p, p*p + p, p*p + 2p, ... to false
+//   4. The remaining indices where sieve is true are primes
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/prime_sieve.mere
 
-// ふるいの上限 (含まない)
+// Sieve upper bound (exclusive)
 let n = 50;
 
-// 配列を作って初期化 (true で埋める)
+// Create the array and initialize (fill with true)
 let sieve = vec_new ();
 let rec fill = fn (i: int) ->
   if i >= n then ()
@@ -28,18 +30,18 @@ let rec fill = fn (i: int) ->
     fill (i + 1);
 let _ = fill 0;
 
-// 0 と 1 は素数でない
+// 0 and 1 are not prime
 let _ = vec_set sieve 0 false;
 let _ = vec_set sieve 1 false;
 
-// p*p から始めて p の倍数をマーク
+// Starting from p*p, mark multiples of p
 let rec mark_multiples = fn (p: int) -> fn (k: int) ->
   if k >= n then ()
   else
     let _ = vec_set sieve k false in
     mark_multiples p (k + p);
 
-// p = 2 から √n まで scan、true なら multiples を false にマーク
+// Scan p = 2 up to sqrt(n); if true, mark multiples as false
 let rec sieve_loop = fn (p: int) ->
   if p * p >= n then ()
   else
@@ -51,7 +53,7 @@ let rec sieve_loop = fn (p: int) ->
     sieve_loop (p + 1);
 let _ = sieve_loop 2;
 
-// 結果: i = 0..n-1 で sieve[i] = true な i を space 区切りで出力
+// Result: print i values where sieve[i] = true for i = 0..n-1, separated by spaces
 let rec collect_primes = fn (i: int) -> fn (acc: str) ->
   if i >= n then acc
   else if vec_get sieve i then
@@ -62,7 +64,7 @@ let rec collect_primes = fn (i: int) -> fn (acc: str) ->
 let primes = collect_primes 0 "";
 let _ = print ("primes under " ++ show n ++ ": " ++ primes);
 
-// 件数も表示 (Phase 27 Map 等の dogfood ではないが、純粋計算 demo として)
+// Also print the count (not a dogfood of Phase 27 Map etc., but as a pure-computation demo)
 let rec count_primes = fn (i: int) -> fn (acc: int) ->
   if i >= n then acc
   else if vec_get sieve i then count_primes (i + 1) (acc + 1)

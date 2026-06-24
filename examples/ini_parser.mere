@@ -1,25 +1,25 @@
 // ini_parser: section + key=value ini file parser
 //
-// 目的: examples roadmap I1。json_parser とは別系統の parser パターン:
-//   - 行指向 (改行で chunk)
+// Purpose: examples roadmap I1. A parser pattern distinct from json_parser:
+//   - line-oriented (chunked by newlines)
 //   - section header [name]
-//   - コメント (; or #)
+//   - comments (; or #)
 //   - key=value
-//   - 順序を保持
+//   - order preserving
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// Execution mode: interp / C / LLVM / Wasm, diff = 0 across all 4 backends
 //
-// INI モデル:
+// INI model:
 //   ini = list of (section_name, list of (key, value))
-//   section_name "" = "default" section (header 前の entries)
+//   section_name "" = the "default" section (entries before any header)
 //
-// Phase 27.1 で interp Map iter order を insertion order にしたので、
-// このような順序依存の parse + emit を全 backend で同じ stdout に揃え
-// られる (Phase 27.0/27.1 のドッグフード)。
+// Phase 27.1 made interp Map iter order insertion order, so order-sensitive
+// parse + emit like this aligns to the same stdout across all backends
+// (dogfood of Phase 27.0/27.1).
 
 type 'a list = Nil | Cons of 'a * 'a list;
 
-// 文字列の trim (前後の空白 / タブを除去)
+// Trim a string (remove leading/trailing spaces / tabs)
 let trim = fn (s: str) ->
   let n = str_len s in
   let rec skip_left = fn (i: int) ->
@@ -40,21 +40,21 @@ let trim = fn (s: str) ->
   let r = skip_right n in
   if l >= r then "" else substring s l r;
 
-// 文字列が指定 prefix で始まるかチェック
+// Check whether a string starts with the given prefix
 let starts_with = fn (s: str) -> fn (prefix: str) ->
   let sn = str_len s in
   let pn = str_len prefix in
   if sn < pn then false
   else substring s 0 pn == prefix;
 
-// 文字列が指定 suffix で終わるかチェック
+// Check whether a string ends with the given suffix
 let ends_with = fn (s: str) -> fn (suffix: str) ->
   let sn = str_len s in
   let xn = str_len suffix in
   if sn < xn then false
   else substring s (sn - xn) sn == suffix;
 
-// 1 行を分類して section / kv / empty / comment のいずれかに
+// Classify a line into section / kv / empty / comment
 type line_kind =
   | LSection of str
   | LKV of (str * str)
@@ -71,30 +71,30 @@ let classify_line = fn (raw: str) ->
       LSection (trim (substring line 1 (n - 1)))
     else
       let eq = str_index_of line "=" in
-      if eq < 0 then LSkip  // "=" 無しの行はスキップ (parse error にはしない)
+      if eq < 0 then LSkip  // skip lines without "=" (do not treat as parse error)
       else
         let key = trim (substring line 0 eq) in
         let value = trim (substring line (eq + 1) n) in
         LKV (key, value);
 
-// (section_name, key-value list) のペアを保持する型
+// Type holding (section_name, key-value list) pairs
 type section = Sect of (str * (str * str) list);
 
-// reverse helper (prelude に無いので自前)
+// reverse helper (not in prelude, so define our own)
 let rec rev_aux = fn (l: 'a list) -> fn (acc: 'a list) ->
   match l with
   | Nil -> acc
   | Cons (h, t) -> rev_aux t (Cons (h, acc));
 let rev = fn (l: 'a list) -> rev_aux l Nil;
 
-// メイン parse: 行 list を受け取り、section list を返す。
-//   - 1 つ目の section header より前の entry は "" section に入れる
-//   - 各 section の entries は出現順 (reverse の result_順序保持)
+// Main parse: takes a list of lines, returns a list of sections.
+//   - entries before the first section header go into the "" section
+//   - entries inside each section keep appearance order (preserved via reverse)
 let parse_ini = fn (lines: str list) ->
   let rec walk = fn (lines: str list) -> fn (cur_name: str) -> fn (cur_entries: (str * str) list) -> fn (done_sections: section list) ->
     match lines with
     | Nil ->
-      // 最後の section を done に push して reverse
+      // push the final section into done, then reverse
       let final_sect = Sect (cur_name, rev cur_entries) in
       rev (Cons (final_sect, done_sections))
     | Cons (raw, rest) ->
@@ -126,7 +126,7 @@ let rec print_sections = fn (sects: section list) ->
 
 // === Self-tests ===
 
-// テスト 1: 標準的な ini
+// Test 1: standard ini
 let lines1 = Cons ("# leading comment", Cons ("[server]", Cons ("host = localhost", Cons ("port = 8080", Cons ("", Cons ("[database]", Cons ("; comment in section", Cons ("name = mydb", Cons ("user = admin", Nil)))))))));
 let lines2 = Cons ("global_key = global_value", Cons ("[section_a]", Cons ("a_key = a_value", Nil)));
 let lines3 = Cons ("  ", Cons ("# only comment", Cons ("[neat]", Cons ("  spaced_key   =   value with trailing   ", Cons ("bare_line_no_eq", Cons (";; another comment", Cons ("ok = yes", Nil)))))));

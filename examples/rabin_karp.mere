@@ -1,16 +1,16 @@
-// rabin_karp: Rabin-Karp 文字列検索 (rolling hash)
+// rabin_karp: Rabin-Karp string search (rolling hash)
 //
-// pattern の hash と text の window hash を比較。 hash 一致したときだけ
-// 文字単位で検証。 average O(N+M)、 worst O(NM)。
+// Compare the pattern's hash against the text's window hash. Verify
+// character-by-character only when hashes match. Average O(N+M), worst O(NM).
 //
-// hash: polynomial rolling hash h = c0 + c1*B + c2*B² + ... mod P
+// hash: polynomial rolling hash h = c0 + c1*B + c2*B^2 + ... mod P
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
 let base = 257;
-let prime = 100003;   // C int32 で base * prime が溢れない範囲
+let prime = 100003;   // base * prime fits in C int32 without overflow
 
-// 文字列 s[i..i+len-1] の hash (initial computation、 後は rolling で更新)
+// Hash of substring s[i..i+len-1] (initial computation; updated via rolling thereafter)
 let initial_hash = fn (s: str) -> fn (start: int) -> fn (sub_len: int) ->
   let rec go = fn i -> fn h ->
     if i >= sub_len then h
@@ -19,21 +19,21 @@ let initial_hash = fn (s: str) -> fn (start: int) -> fn (sub_len: int) ->
       go (i + 1) ((h * base + c) % prime) in
   go 0 0;
 
-// 文字列等価判定 (hash 衝突時の確認用): s[si..si+len-1] == t[ti..ti+len-1]
+// String equality check (for hash-collision verification): s[si..si+len-1] == t[ti..ti+len-1]
 let rec str_eq_range = fn (s: str) -> fn (si: int) ->
   fn (t: str) -> fn (ti: int) -> fn (sub_len: int) ->
   if sub_len <= 0 then true
   else if char_at s si != char_at t ti then false
   else str_eq_range s (si + 1) t (ti + 1) (sub_len - 1);
 
-// base^(m-1) mod prime を事前計算
+// Precompute base^(m-1) mod prime
 let pow_base = fn (m: int) ->
   let rec go = fn i -> fn p ->
     if i >= m - 1 then p
     else go (i + 1) ((p * base) % prime) in
   if m <= 1 then 1 else go 0 1;
 
-// hash を rolling: 古い文字 c_old を引き、 新文字 c_new を足す
+// Roll the hash: subtract the old character c_old and add the new character c_new
 let roll = fn (h: int) -> fn (c_old: int) -> fn (c_new: int) -> fn (high: int) ->
   // h = (h - c_old * high) * base + c_new
   let sub = (c_old * high) % prime in

@@ -1,348 +1,355 @@
 # Mere examples
 
-Mere の動く `.mere` プログラム群 (142 本、Phase 36 で 47 本 + Phase 37/38 で 5 本 + アルゴリズム 5 本 + 拡張 algorithm 14 本追加)。`dune exec ./bin/mere.exe -- examples/<file>.mere`
-で interpreter 実行、`-c` / `-ll` / `-w` flag で C / LLVM IR / Wasm の 3
-backend いずれかへ codegen。
+A collection of runnable `.mere` programs for Mere (142 total: 47 in
+Phase 36 + 5 in Phase 37/38 + 5 algorithms + 14 extended algorithms added
+later). Run with `dune exec ./bin/mere.exe -- examples/<file>.mere`
+to execute via the interpreter, or use the `-c` / `-ll` / `-w` flags to
+codegen to one of the C / LLVM IR / Wasm backends.
 
-**Phase 27 (2026-06-21) で 4 backend feature parity が完成**。16 examples が
-**interp + C + LLVM + Wasm runtime** で diff = 0 PERFECT 一致 (印は ⭐)。
+**Phase 27 (2026-06-21) completed 4-backend feature parity**. 16 examples
+have PERFECT diff = 0 across **interp + C + LLVM + Wasm runtime** (marked
+with ⭐).
 
-## カテゴリ
+## Categories
 
-### 入門・言語の基本
+### Introduction / language basics
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
 | [hello.mere](hello.mere) | "Hello, world!" |
-| [factorial.mere](factorial.mere) | 階乗 (recursive fn) |
-| [fibonacci.mere](fibonacci.mere) | フィボナッチ |
+| [factorial.mere](factorial.mere) | factorial (recursive fn) |
+| [fibonacci.mere](fibonacci.mere) | Fibonacci |
 | [fizzbuzz.mere](fizzbuzz.mere) | FizzBuzz |
-| [mini_calc.mere](mini_calc.mere) ⭐ | 簡易計算プログラム |
-| [mutual_rec.mere](mutual_rec.mere) | `let rec f = ... and g = ...` の相互再帰 |
-| [higher_order.mere](higher_order.mere) | 高階関数 |
-| [pipe.mere](pipe.mere) | `|>` パイプ演算子 |
-| [typed.mere](typed.mere) | 型注釈の例 |
-| [let_pattern.mere](let_pattern.mere) | `let (a, b) = ...` パターン |
-| [top_decls.mere](top_decls.mere) | top-level let / let-rec の使用例 |
+| [mini_calc.mere](mini_calc.mere) ⭐ | small calculator program |
+| [mutual_rec.mere](mutual_rec.mere) | mutual recursion via `let rec f = ... and g = ...` |
+| [higher_order.mere](higher_order.mere) | higher-order functions |
+| [pipe.mere](pipe.mere) | `|>` pipe operator |
+| [typed.mere](typed.mere) | type annotation examples |
+| [let_pattern.mere](let_pattern.mere) | `let (a, b) = ...` pattern |
+| [top_decls.mere](top_decls.mere) | top-level let / let-rec usage |
 
-### データ型
+### Data types
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [records.mere](records.mere) | record (mono / 多相) |
-| [options.mere](options.mere) | `'a opt` / Option パターン |
-| [list.mere](list.mere) | 単相 `intlist`、明示的 Cons / Nil |
-| [list_lib.mere](list_lib.mere) | リスト操作ライブラリ |
-| [list_literal.mere](list_literal.mere) | `[1, 2, 3]` 構文糖 |
-| [poly_list.mere](poly_list.mere) | 多相 `'a list` |
-| [tree.mere](tree.mere) | 二分木 (再帰 variant) |
-| [state_machine.mere](state_machine.mere) ⭐ | variant + match transition (信号機 + 歩行者ボタン)、Phase 28.0 C1 |
+| [records.mere](records.mere) | record (mono / polymorphic) |
+| [options.mere](options.mere) | `'a opt` / Option pattern |
+| [list.mere](list.mere) | monomorphic `intlist`, explicit Cons / Nil |
+| [list_lib.mere](list_lib.mere) | list manipulation library |
+| [list_literal.mere](list_literal.mere) | `[1, 2, 3]` sugar |
+| [poly_list.mere](poly_list.mere) | polymorphic `'a list` |
+| [tree.mere](tree.mere) | binary tree (recursive variant) |
+| [state_machine.mere](state_machine.mere) ⭐ | variant + match transition (traffic light + pedestrian button), Phase 28.0 C1 |
 
-### メモリモデル (region / Drop / 借用)
+### Memory model (region / Drop / borrow)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [borrow_modes.mere](borrow_modes.mere) | 借用注釈 4 mode の realistic demo (Logger / DbHandle / Config) |
-| [borrow_modes_typeerror.mere](borrow_modes_typeerror.mere) | 借用 mode mismatch の意図的型エラー |
-| [borrow_conflict.mere](borrow_conflict.mere) | borrow checker の意図的衝突 demo |
+| [borrow_modes.mere](borrow_modes.mere) | realistic demo of the 4 borrow annotation modes (Logger / DbHandle / Config) |
+| [borrow_modes_typeerror.mere](borrow_modes_typeerror.mere) | intentional type error on borrow mode mismatch |
+| [borrow_conflict.mere](borrow_conflict.mere) | intentional borrow checker conflict demo |
 
-### エフェクト
+### Effects
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [effects.mere](effects.mere) | capability passing パターン |
-| [signature.mere](signature.mere) | signature alias で cap bundle |
-| [with_caps.mere](with_caps.mere) | `with c = ... in body` で Drop cap |
-| [cap_handler.mere](cap_handler.mere) ⭐ | `&shared write` で複数 handler が同じ Logger / Metrics を共有書き込み |
+| [effects.mere](effects.mere) | capability-passing pattern |
+| [signature.mere](signature.mere) | cap bundle via signature alias |
+| [with_caps.mere](with_caps.mere) | Drop cap with `with c = ... in body` |
+| [cap_handler.mere](cap_handler.mere) ⭐ | multiple handlers share-write the same Logger / Metrics via `&shared write` |
 
-### モジュール / import
+### Modules / import
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [module_basic.mere](module_basic.mere) | `module M { ... }` + `M.f` 参照 |
-| [module_nested.mere](module_nested.mere) | 入れ子 module + `open M;` |
-| [module_scoping.mere](module_scoping.mere) | 2 module で同名 ctor を qualified 形式で disambiguate (Phase 18) |
-| [import_demo.mere](import_demo.mere) | `import "./lib_list_ops.mere";` (要 `lib_list_ops.mere`) |
-| [lib_list_ops.mere](lib_list_ops.mere) | import 用のライブラリ |
+| [module_basic.mere](module_basic.mere) | `module M { ... }` + `M.f` reference |
+| [module_nested.mere](module_nested.mere) | nested module + `open M;` |
+| [module_scoping.mere](module_scoping.mere) | disambiguate same-name ctors across 2 modules via qualified form (Phase 18) |
+| [import_demo.mere](import_demo.mere) | `import "./lib_list_ops.mere";` (needs `lib_list_ops.mere`) |
+| [lib_list_ops.mere](lib_list_ops.mere) | a library for import |
 
-### 実用プログラム (16 examples が 4 backend で PERFECT 一致 ⭐)
+### Practical programs (16 examples PERFECT-aligned on 4 backends ⭐)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [arith_eval.mere](arith_eval.mere) ⭐ | mini functional lang (算術 + if + 1st-class fn + closure) を AST から評価 |
-| ~~`json_parser.mere`~~ | **Phase 40 で [contrib/json/json.mere](../contrib/json/json.mere) に格上げ** (再利用前提の lib として `contrib/` 配下へ移設) |
-| [s_expression.mere](s_expression.mere) ⭐ | S 式 (Lisp 風) parser + printer + 簡易 eval (`+ - * / = <`, `if`, `let`) |
-| ~~`csv_parser.mere`~~ | **Phase 41 で [contrib/csv/parser.mere](../contrib/csv/parser.mere) に格上げ** (module Csv で wrap) |
-| [word_count.mere](word_count.mere) ⭐ | 単語カウント |
-| [template_engine.mere](template_engine.mere) ⭐ | mustache 風 `{{KEY}}` 置換 engine (Map + StrBuf + str_index_of) |
-| ~~`json_writer.mere`~~ | **Phase 40 で [contrib/json/writer.mere](../contrib/json/writer.mere) に格上げ** |
-| [inventory.mere](inventory.mere) ⭐ | 在庫管理 (Map + Vec + variant) |
-| [word_freq.mere](word_freq.mere) ⭐ | 単語頻度カウンタ (Map + str_split + map_iter)、insertion order |
-| [mini_shell.mere](mini_shell.mere) ⭐ | 簡易 shell batch evaluator (variant command + state) |
-| [pipeline.mere](pipeline.mere) | region / view / cap / with を組合せた realistic な処理 (interp 主、3 backend 動作) |
-| [todo_app.mere](todo_app.mere) | TODO リスト管理 (OwnedVec + Logger + vec_map / fold)、4 backend 対応 |
-| [safe_div.mere](safe_div.mere) | `(int, str) result` を使った失敗を値で返すパターン |
-| **Phase 28 (2026-06-21) 追加** | |
-| [chained_parse.mere](chained_parse.mere) ⭐ | Result chain idiom (result_and_then / result_map / result_or_else)、D2 |
-| [ini_parser.mere](ini_parser.mere) ⭐ | INI parser、Phase 27.1 Map insertion order dogfood、I1 |
-| ~~`regex_lite.mere`~~ | **Phase 42 で [contrib/regex/regex.mere](../contrib/regex/regex.mere) に格上げ** (module Regex で wrap) |
-| **Phase 29 (2026-06-22) 追加 — 大型 dogfood** | |
-| [toy_sql.mere](toy_sql.mere) ⭐ | **1165 LoC toy SQL engine** (tokenizer + AST + parser + Catalog Map + Storage OwnedVec + INSERT / SELECT / WHERE / JOIN + 59 self-tests)。N1/N2/N3 dogfood で 4 件の codegen bug を発掘 + Phase 30 で fix |
-| **Phase 32 (2026-06-22) 追加 — FFI** | |
-| [ffi_demo.mere](ffi_demo.mere) ⭐ | `extern fn <name>: <ty>;` で libc 関数 (getpid / getppid / setenv / getenv) を 4 backend から直接呼ぶ demo。multi-arg curried も対応 |
-| **Phase 33 (2026-06-22) 追加 — Option / UX polish** | |
-| [option_pipeline.mere](option_pipeline.mere) ⭐ | Option chain (option_map / option_and_then / option_default / option_is_some) を 3 段 lookup pipeline で dogfood。`option_and_then` を prelude に新規追加。D3 |
-| [prime_sieve.mere](prime_sieve.mere) ⭐ | エラトステネスのふるい (Vec[R, bool] + vec_set + let rec loop、50 未満の素数 15 個を抽出)。H1 |
-| [rate_limiter.mere](rate_limiter.mere) ⭐ | 固定 60 秒 window の rate limiter (2 つの Map で window_start + count を保持)。Phase 30.2 top-level global を 2 つ dogfood、4 backend で diff = 0。G5 |
-| [stack_calc.mere](stack_calc.mere) ⭐ | RPN evaluator (tok variant + op_kind variant + `'a stk` linked list stack)。div-by-zero fallback、8 test cases。C4 |
-| ~~`markdown_toc.mere`~~ | **Phase 40 で [contrib/markdown/toc.mere](../contrib/markdown/toc.mere) に格上げ** |
-| [bank_account.mere](bank_account.mere) ⭐ | functional な銀行口座 (account variant + tx variant + state-passing replay + Vec[R, tx] ledger)。G4 |
-| [graph_bfs.mere](graph_bfs.mere) ⭐ | 有向グラフの BFS (Map[int, int list] 隣接 + Map[int, bool] visited)。3 component シナリオを 4 backend で検証。H3 |
-| **Phase 34 (2026-06-22) 追加 — float + libm** | |
-| [math_demo.mere](math_demo.mere) ⭐ | float の四則演算 + sqrt / sin / cos / tan / f_pow / atan2 を combined で dogfood。Pythagorean / 三角恒等式 / 円周計算等。4 backend で diff = 0 |
-| **Phase 35 (2026-06-22) 追加 — first-class builtin (DEFERRED §1.2 A1)** | |
-| [factory_value.mere](factory_value.mere) ⭐ | nullary factory builtin (vec_new / owned_vec_new / strbuf_new / map_new) を first-class value として HOF に渡す。Phase 35 eta-wrap で 4 backend 対応 (MVP は HOF 引数注釈で ret_ty を固定する必要あり) |
-| **Phase 36 (2026-06-22) 追加 — example batch** | |
-| [histogram.mere](histogram.mere) ⭐ | Map[int, int] bucket カウンタ + 最頻 bucket 検出。10 単位 bucket に 20 件の観測値を accumulate、map_iter で線形 scan して mode を求める。Phase 36 で発掘した DEFERRED §1.13 (let-poly 'a 化) は **narrow value restriction を typer に入れて解消**、`(... : int)` 注釈不要に |
-| [traffic_light.mere](traffic_light.mere) ⭐ | 最小 enum (`Red \| Yellow \| Green`) + `next` / `cycle` recursion。ADT 入門教材として最も単純な variant demo (C2) |
-| [event_counter.mere](event_counter.mere) ⭐ | Map[event, int] — variant を Map key にする dogfood (Phase 15.15/15.16 機能の使用例)。Login / Click / Purchase / Logout の集計 (A2) |
-| [html_builder.mere](html_builder.mere) ⭐ | StrBuf + tag 関数 helper で nested HTML 構築。region 内 StrBuf に `<ul><li>...</li></ul>` を畳み込む (B3) |
-| [fallible_lookup.mere](fallible_lookup.mere) ⭐ | Map[str, str] 2 段を `result_and_then` で chain。user→email→role の連鎖 lookup と `result_default` の fallback パターン (D4) |
-| [config_loader.mere](config_loader.mere) ⭐ | `key = value` 形式の text を Map[str, str] に load。コメント / 空行 / 前後 trim 対応。Phase 36 で `str_trim` / `str_starts_with` を 3 backend に追加したので、prelude の builtin を直接使う自然なコードに (A3) |
-| ~~`csv_writer.mere`~~ | **Phase 41 で [contrib/csv/writer.mere](../contrib/csv/writer.mere) に格上げ** (top-level、 module 化は将来) |
-| ~~`markdown_to_text.mere`~~ | **Phase 40 で [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere) に格上げ** |
-| [calendar_lite.mere](calendar_lite.mere) ⭐ | 年月から日曜始まりの月カレンダーを ASCII で出力。閏年判定 + Zeller の合同式 + StrBuf で 7 列 grid 組み立て (G3) |
-| [matrix_2d.mere](matrix_2d.mere) ⭐ | 2D matrix を 1D OwnedVec[int] + `r * cols + c` index で表現。matrix add / transpose / pretty print。nested Vec[Vec[int]] は region escape が解けず本例では避けた (H2) |
-| [borrow_chain.mere](borrow_chain.mere) | 同じ `&shared write R Logger` 借用を 3 つの helper を呼ぶ pipeline で再利用 (Phase 17.1 borrow tracking の demo)。**interp only** (`&shared write R` の codegen 未対応、borrow_modes.mere と同様、F3) |
-| [cache_sim.mere](cache_sim.mere) ⭐ | capacity=3 の FIFO cache 擬似実装。`map_remove` / `owned_vec_set` を持たない制約下で、`alive` Vec + `evicted` Map を分けて FIFO eviction を表現。Phase 36 で発掘した DEFERRED §1.14 (lifted closure が global capture できない LLVM/Wasm bug) は **両 backend に load / global.get 経路を追加して解消**、自然なコードに戻った (A4) |
-| [simple_query.mere](simple_query.mere) ⭐ | SELECT * FROM users WHERE col op value の最小実装 (tokenize / parse / execute、~150 LoC)。toy_sql.mere の 1165 LoC から大幅に削った教材版 (I3) |
-| [caesar_cipher.mere](caesar_cipher.mere) ⭐ | 古典的シーザー暗号の encode / decode。`chr` / `ord` (Phase 36 新規) + char_at + StrBuf で 1 文字 transform、ROT13 / 負 shift / 大 shift も処理 |
-| [fraction.mere](fraction.mere) ⭐ | 有理数 record `Frac { n, d }` の加減乗除 + 自動約分 (`gcd` 利用、Phase 36 新規)。canonical sign の正規化込み。注: 関数名は `divf` (C の `div` libc と衝突するため) |
-| [roman_numerals.mere](roman_numerals.mere) ⭐ | 整数 ⇄ ローマ数字 (1..3999) の双方向変換。greedy で `(int * str) list` を消費する典型アルゴリズム + 文字単位パーサ |
-| [password_strength.mere](password_strength.mere) ⭐ | パスワード強度 0..5 採点 (長さ / digit / lower / upper)。`is_digit` / `ord` / `char_at` の 1 文字単位走査 |
-| [brackets_balance.mere](brackets_balance.mere) ⭐ | 括弧の対応チェック (`()` `[]` `{}`)。linked-list `'a stk` で stack を表現、char_at で 1 文字 scan + match で push/pop。非括弧文字は skip |
-| [morse_code.mere](morse_code.mere) ⭐ | A-Z + 0-9 をモールス符号に encode / decode。Map[str, str] 2 つで往復辞書を構築。Phase 36 dogfood で C codegen の 2 つの摩擦 (§1.15 深い list literal、§1.16 region 内 strbuf escape) を発掘 |
-| [luhn_check.mere](luhn_check.mere) ⭐ | クレジットカード番号の Luhn チェックサム。char_at + is_digit + ord で 1 桁 int 変換、非数字 (space / hyphen) skip 対応 |
-| [tic_tac_toe.mere](tic_tac_toe.mere) ⭐ | 3x3 ボード + 勝敗判定 (8 ライン)。OwnedVec[cell] + variant + match の組合せ、5 シナリオを pretty print。Phase 36 dogfood で発掘した C codegen の §1.17 (`type result` rebind が List.combine で落ちる) は **後勝ち dedupe で解消** |
-| [palindrome.mere](palindrome.mere) ⭐ | 回文判定。大文字小文字 / 記号 / スペースを無視、`str_rev` (Phase 36) + `to_lower` + `is_alpha` の組合せ |
-| [anagram.mere](anagram.mere) ⭐ | 2 文字列がアナグラム関係か判定。Map[str, int] で文字頻度を集計、`map_iter` で両 freq を線形 scan |
-| [base_conv.mere](base_conv.mere) ⭐ | int を 2/8/16 進文字列に変換 + 逆変換 (round-trip 確認)。`chr` / `ord` / `str_rev` / `char_at` の数値処理 dogfood、負数 prefix `-` 対応 |
-| [rps_game.mere](rps_game.mere) ⭐ | じゃんけんの勝敗判定 + best-of-5 集計。variant + nested match の 3x3 dispatch demo |
-| [scoreboard.mere](scoreboard.mere) ⭐ | Map[str, int] スコア集計 → 降順ランキング (selection scan)。Phase 36 dogfood で Phase 30.2 top-level global の初期化順 bug を発掘 (DEFERRED §1.18) |
-| [eight_queens.mere](eight_queens.mere) ⭐ | N-Queens (N=4..8) の全解列挙 + backtracking。`safe` 関数 + mutually recursive `try_col` / `solve`、最初の 3 解を print。N=8 で 92 解 |
-| [collatz.mere](collatz.mere) ⭐ | コラッツ予想の軌跡を文字列化 + step 数計測。`even` (Phase 36 新規) + recursive 関数の demo。1..20 で最も step 数が多い n も探索 |
-| [bin_tree_traversal.mere](bin_tree_traversal.mere) ⭐ | 二分木 (recursive variant `btree`) の pre/in/post-order 走査 + height / count。`render` で walker fn を HOF で受ける |
-| [knapsack.mere](knapsack.mere) ⭐ | 0/1 ナップサック問題を memoize DP で解く。Map[str, int] で `(i, w) → max_value` をキャッシュ、選択アイテムの復元 (`reconstruct`) も実装 |
-| [range_demo.mere](range_demo.mere) ⭐ | Phase 36 で導入した **range literal `a..b`** の demo。`1..10` は `range 1 10` の syntactic sugar、int list を返す。factorial / sum_sq 等を fold で実装 |
-| [sections.mere](sections.mere) ⭐ | Phase 36 で導入した **operator section** の demo。`(+ 1)` は `fn x -> x + 1` の sugar。HOF と組合せて簡潔な map / filter が書ける。+ * / % == != < <= > >= ++ の 11 演算子に対応 |
-| [cons_pipe_demo.mere](cons_pipe_demo.mere) ⭐ | Phase 36 で導入した **`::` cons** + **`<|` reverse pipe** の demo。`h :: t` は `Cons (h, t)` の sugar、`f <| x` は `f x` の sugar (右側に fn/let/match も書ける) |
-| [sugar_demo.mere](sugar_demo.mere) ⭐ | Phase 36 で追加した **lambda shorthand `\x -> body`** / **`@@` low-precedence app** / **string interpolation `"hello {name}"`** の demo。`\{` で literal brace を escape |
-| [question_demo.mere](question_demo.mere) ⭐ | Phase 36 で導入した **`?` Option early-return** + **`?!` Result early-return** の demo。Rust の `?` 風に Option / Result chain が書ける |
-| [sugar_showcase.mere](sugar_showcase.mere) ⭐ | Phase 36 で追加した **全 9 sugar** (range / op section / `::` / `<|` / `@@` / `\` / string interp / `?` / `?!`) を combined で使ったショーケース。prime sieve / inventory lookup / Result chain / 1 行 fold |
-| [comprehension.mere](comprehension.mere) ⭐ | Phase 36 で導入した **list comprehension** `[expr \| x <- xs, cond, y <- ys, ...]` の demo。Haskell 風の **multi-generator** + filter を任意順で組み合わせ、Pythagorean triples (3 gen + filter) まで書ける |
-| [statistics.mere](statistics.mere) ⭐ | int list の基本統計量を Phase 36 で追加した **prelude helper を combined で dogfood**。count / sum / mean / min / max / variance / stddev (newton sqrt) / median (sort) / mode (Map) / outliers (filter)。`list_zip` / `list_for_all` / `list_any` / `list_member` も使う |
-| [if_let_demo.mere](if_let_demo.mere) ⭐ | Phase 36 で導入した **`if let pat = e then ... else ...`** の demo。Option / Result の条件分岐 + variant destructure (Circle / Square / Rect) で簡潔に書ける |
-| [for_loop_demo.mere](for_loop_demo.mere) ⭐ | Phase 36 で導入した **`for x in xs do body`** の demo。range / 文字列 list / list comprehension の結果 / nested for / Map 累積を procedural-style に。`list_iter xs (\x -> body)` の sugar |
-| [while_loop_demo.mere](while_loop_demo.mere) ⭐ | Phase 36 で導入した **`while cond do body`** の demo。Map[str, int] を mutable cell として使い、count up / powers of 2 / Collatz step counter を procedural-style に。**注: codegen は fn body 内のみ対応** (top-level main では inner let-rec lift が効かない) |
-| [csv_summary.mere](csv_summary.mere) ⭐ | Phase 36 で追加した sugar / prelude helper を combined で realistic に使う dogfood。CSV 風 sales records (name, area, amount) を parse (`Row opt` で失敗扱い) → filter unwrap → 集計 → ランキング表示。Phase 36 で発掘した DEFERRED §1.20 (polymorphic variant 内 user record の forward decl bug) は **mono struct を unified topo-sort に組み込んで解消** |
-| [game_of_life.mere](game_of_life.mere) ⭐ | Conway's Game of Life (8x12 grid)。OwnedVec[int] で 1D flatten した cell 状態 + 8 近傍走査で time evolution。glider pattern (5 cell) の 4 step migration を visualize、各 gen の live count も出力 |
-| [sudoku_check.mere](sudoku_check.mere) ⭐ | 9x9 sudoku 盤面の valid 性検証。9 row + 9 col + 9 (3x3 box) について 1..9 が網羅されているかチェック。`list_for_all` + `list_member` + list comprehension で box cells を生成、3 シナリオ (正解 / 行重複 / 列重複) で検証 |
-| [calc.mere](calc.mere) ⭐ | operator-precedence な arithmetic parser + evaluator。tokenize → recursive descent (expr / term / factor / primary) → eval。`+ - * /` の優先順位、unary minus、ネストした paren に対応。`?!` Result chain で error 伝播。10 ケース検証 (除算 by zero / syntax error 含む) |
-| [maze_solver.mere](maze_solver.mere) ⭐ | ASCII maze (8x12) の BFS pathfinding。`#` = 壁 / `S` = start / `G` = goal。OwnedVec[str] を queue、Map を dist + prev に。最短距離を計算し path を `*` で可視化 |
+| [arith_eval.mere](arith_eval.mere) ⭐ | evaluate a mini functional lang (arithmetic + if + 1st-class fn + closure) from AST |
+| ~~`json_parser.mere`~~ | **Promoted in Phase 40 to [contrib/json/json.mere](../contrib/json/json.mere)** (moved under `contrib/` as a reusable lib) |
+| [s_expression.mere](s_expression.mere) ⭐ | S-expression (Lisp-style) parser + printer + simple eval (`+ - * / = <`, `if`, `let`) |
+| ~~`csv_parser.mere`~~ | **Promoted in Phase 41 to [contrib/csv/parser.mere](../contrib/csv/parser.mere)** (wrapped in module Csv) |
+| [word_count.mere](word_count.mere) ⭐ | word count |
+| [template_engine.mere](template_engine.mere) ⭐ | mustache-like `{{KEY}}` substitution engine (Map + StrBuf + str_index_of) |
+| ~~`json_writer.mere`~~ | **Promoted in Phase 40 to [contrib/json/writer.mere](../contrib/json/writer.mere)** |
+| [inventory.mere](inventory.mere) ⭐ | inventory management (Map + Vec + variant) |
+| [word_freq.mere](word_freq.mere) ⭐ | word frequency counter (Map + str_split + map_iter), insertion order |
+| [mini_shell.mere](mini_shell.mere) ⭐ | a simple shell batch evaluator (variant command + state) |
+| [pipeline.mere](pipeline.mere) | realistic processing combining region / view / cap / with (mainly interp; runs on 3 backends) |
+| [todo_app.mere](todo_app.mere) | TODO list management (OwnedVec + Logger + vec_map / fold), 4 backends |
+| [safe_div.mere](safe_div.mere) | pattern for returning failure as a value using `(int, str) result` |
+| **Phase 28 (2026-06-21) additions** | |
+| [chained_parse.mere](chained_parse.mere) ⭐ | Result chain idiom (result_and_then / result_map / result_or_else), D2 |
+| [ini_parser.mere](ini_parser.mere) ⭐ | INI parser, dogfooding Phase 27.1 Map insertion order, I1 |
+| ~~`regex_lite.mere`~~ | **Promoted in Phase 42 to [contrib/regex/regex.mere](../contrib/regex/regex.mere)** (wrapped in module Regex) |
+| **Phase 29 (2026-06-22) additions — large-scale dogfood** | |
+| [toy_sql.mere](toy_sql.mere) ⭐ | **1165 LoC toy SQL engine** (tokenizer + AST + parser + Catalog Map + Storage OwnedVec + INSERT / SELECT / WHERE / JOIN + 59 self-tests). N1/N2/N3 dogfood uncovered 4 codegen bugs + fixed in Phase 30 |
+| **Phase 32 (2026-06-22) additions — FFI** | |
+| [ffi_demo.mere](ffi_demo.mere) ⭐ | demo calling libc functions (getpid / getppid / setenv / getenv) directly from 4 backends via `extern fn <name>: <ty>;`. Supports multi-arg curried |
+| **Phase 33 (2026-06-22) additions — Option / UX polish** | |
+| [option_pipeline.mere](option_pipeline.mere) ⭐ | dogfood Option chain (option_map / option_and_then / option_default / option_is_some) in a 3-stage lookup pipeline. Adds `option_and_then` to the prelude. D3 |
+| [prime_sieve.mere](prime_sieve.mere) ⭐ | Sieve of Eratosthenes (Vec[R, bool] + vec_set + let rec loop; extracts the 15 primes under 50). H1 |
+| [rate_limiter.mere](rate_limiter.mere) ⭐ | fixed 60-second window rate limiter (2 Maps holding window_start + count). Dogfoods 2 Phase 30.2 top-level globals; diff = 0 across 4 backends. G5 |
+| [stack_calc.mere](stack_calc.mere) ⭐ | RPN evaluator (tok variant + op_kind variant + `'a stk` linked-list stack). div-by-zero fallback, 8 test cases. C4 |
+| ~~`markdown_toc.mere`~~ | **Promoted in Phase 40 to [contrib/markdown/toc.mere](../contrib/markdown/toc.mere)** |
+| [bank_account.mere](bank_account.mere) ⭐ | a functional bank account (account variant + tx variant + state-passing replay + Vec[R, tx] ledger). G4 |
+| [graph_bfs.mere](graph_bfs.mere) ⭐ | BFS on a directed graph (Map[int, int list] adjacency + Map[int, bool] visited). 3 component scenarios verified on 4 backends. H3 |
+| **Phase 34 (2026-06-22) additions — float + libm** | |
+| [math_demo.mere](math_demo.mere) ⭐ | dogfood float arithmetic + sqrt / sin / cos / tan / f_pow / atan2 combined. Pythagorean / trig identities / circumference, etc. diff = 0 across 4 backends |
+| **Phase 35 (2026-06-22) additions — first-class builtin (DEFERRED §1.2 A1)** | |
+| [factory_value.mere](factory_value.mere) ⭐ | pass nullary factory builtins (vec_new / owned_vec_new / strbuf_new / map_new) as first-class values to HOFs. Phase 35 eta-wrap enables 4-backend support (MVP requires fixing ret_ty via HOF parameter annotation) |
+| **Phase 36 (2026-06-22) additions — example batch** | |
+| [histogram.mere](histogram.mere) ⭐ | Map[int, int] bucket counter + mode detection. Accumulates 20 observations into 10-unit buckets, then linear-scans with map_iter to find the mode. The DEFERRED §1.13 (let-poly 'a-ification) issue uncovered in Phase 36 was **resolved by adding a narrow value restriction to the typer**, eliminating the need for `(... : int)` annotation |
+| [traffic_light.mere](traffic_light.mere) ⭐ | minimal enum (`Red \| Yellow \| Green`) + `next` / `cycle` recursion. The simplest variant demo as ADT introductory material (C2) |
+| [event_counter.mere](event_counter.mere) ⭐ | Map[event, int] — dogfood using variants as Map keys (a usage example of Phase 15.15/15.16 features). Tallies Login / Click / Purchase / Logout (A2) |
+| [html_builder.mere](html_builder.mere) ⭐ | build nested HTML with StrBuf + tag function helpers. Fold `<ul><li>...</li></ul>` into a StrBuf inside a region (B3) |
+| [fallible_lookup.mere](fallible_lookup.mere) ⭐ | chain a 2-stage Map[str, str] with `result_and_then`. Chained lookup user->email->role and the `result_default` fallback pattern (D4) |
+| [config_loader.mere](config_loader.mere) ⭐ | load `key = value` text into Map[str, str]. Handles comments / blank lines / leading-trailing trim. Phase 36 added `str_trim` / `str_starts_with` to 3 backends, so the code is now natural, directly using prelude builtins (A3) |
+| ~~`csv_writer.mere`~~ | **Promoted in Phase 41 to [contrib/csv/writer.mere](../contrib/csv/writer.mere)** (top-level; module-wrapping is future work) |
+| ~~`markdown_to_text.mere`~~ | **Promoted in Phase 40 to [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere)** |
+| [calendar_lite.mere](calendar_lite.mere) ⭐ | print a Sunday-starting month calendar as ASCII from year + month. Leap year + Zeller's congruence + StrBuf to build a 7-column grid (G3) |
+| [matrix_2d.mere](matrix_2d.mere) ⭐ | represent a 2D matrix via a 1D OwnedVec[int] + `r * cols + c` indexing. Matrix add / transpose / pretty-print. Nested Vec[Vec[int]] hits region escape; avoided here (H2) |
+| [borrow_chain.mere](borrow_chain.mere) | reuse the same `&shared write R Logger` borrow across a pipeline calling 3 helpers (demo of Phase 17.1 borrow tracking). **interp only** (no codegen for `&shared write R`; same as borrow_modes.mere, F3) |
+| [cache_sim.mere](cache_sim.mere) ⭐ | a mock FIFO cache with capacity=3. Without `map_remove` / `owned_vec_set`, it expresses FIFO eviction by separating an `alive` Vec + `evicted` Map. The DEFERRED §1.14 (lifted closure can't capture globals — LLVM/Wasm bug) uncovered in Phase 36 was **resolved by adding load / global.get paths to both backends**, allowing the natural code (A4) |
+| [simple_query.mere](simple_query.mere) ⭐ | minimal SELECT * FROM users WHERE col op value (tokenize / parse / execute, ~150 LoC). A teaching version greatly trimmed from toy_sql.mere's 1165 LoC (I3) |
+| [caesar_cipher.mere](caesar_cipher.mere) ⭐ | encode/decode the classic Caesar cipher. `chr` / `ord` (new in Phase 36) + char_at + StrBuf transform one character at a time; handles ROT13 / negative shifts / large shifts |
+| [fraction.mere](fraction.mere) ⭐ | rational record `Frac { n, d }` add/sub/mul/div + auto reduction (via `gcd`, new in Phase 36). Includes canonical sign normalization. Note: the function is named `divf` (to avoid clashing with C's libc `div`) |
+| [roman_numerals.mere](roman_numerals.mere) ⭐ | bidirectional conversion between int and Roman numerals (1..3999). A typical greedy algorithm consuming `(int * str) list` + a character-level parser |
+| [password_strength.mere](password_strength.mere) ⭐ | rate password strength 0..5 (length / digit / lower / upper). Single-character traversal via `is_digit` / `ord` / `char_at` |
+| [brackets_balance.mere](brackets_balance.mere) ⭐ | bracket balance check (`()` `[]` `{}`). Represent the stack with linked-list `'a stk`; scan char-by-char with char_at + push/pop via match. Skips non-bracket characters |
+| [morse_code.mere](morse_code.mere) ⭐ | encode/decode A-Z + 0-9 as Morse code. Builds round-trip dictionaries with 2 Map[str, str]. Phase 36 dogfood uncovered 2 C codegen frictions (§1.15 deep list literal, §1.16 strbuf escape inside region) |
+| [luhn_check.mere](luhn_check.mere) ⭐ | Luhn checksum for credit card numbers. char_at + is_digit + ord for single-digit int conversion; skips non-digits (space / hyphen) |
+| [tic_tac_toe.mere](tic_tac_toe.mere) ⭐ | 3x3 board + win detection (8 lines). Combines OwnedVec[cell] + variant + match; pretty-prints 5 scenarios. The Phase 36 C-codegen issue §1.17 uncovered via dogfood (`type result` rebind fails in List.combine) was **resolved with later-wins dedupe** |
+| [palindrome.mere](palindrome.mere) ⭐ | palindrome detection. Ignores case / punctuation / whitespace via `str_rev` (Phase 36) + `to_lower` + `is_alpha` |
+| [anagram.mere](anagram.mere) ⭐ | judge whether two strings are anagrams. Tally character frequencies into Map[str, int]; linear-scan both freqs with `map_iter` |
+| [base_conv.mere](base_conv.mere) ⭐ | convert int to base 2/8/16 string + reverse (round-trip check). Dogfoods numeric processing with `chr` / `ord` / `str_rev` / `char_at`; supports negative prefix `-` |
+| [rps_game.mere](rps_game.mere) ⭐ | rock-paper-scissors outcome judgment + best-of-5 aggregation. variant + nested match 3x3 dispatch demo |
+| [scoreboard.mere](scoreboard.mere) ⭐ | Map[str, int] score aggregation -> descending ranking (selection scan). Phase 36 dogfood uncovered an initialization-order bug for Phase 30.2 top-level globals (DEFERRED §1.18) |
+| [eight_queens.mere](eight_queens.mere) ⭐ | enumerate all solutions to N-Queens (N=4..8) + backtracking. `safe` function + mutually recursive `try_col` / `solve`; print the first 3 solutions. N=8 yields 92 solutions |
+| [collatz.mere](collatz.mere) ⭐ | stringify a Collatz trajectory + count steps. `even` (new in Phase 36) + recursive function demo. Also searches for the n in 1..20 with the most steps |
+| [bin_tree_traversal.mere](bin_tree_traversal.mere) ⭐ | pre/in/post-order traversal + height / count for a binary tree (recursive variant `btree`). `render` takes the walker fn as an HOF |
+| [knapsack.mere](knapsack.mere) ⭐ | solve the 0/1 knapsack problem with memoized DP. Cache `(i, w) -> max_value` in Map[str, int]; also implements selected-item reconstruction (`reconstruct`) |
+| [range_demo.mere](range_demo.mere) ⭐ | demo of the **range literal `a..b`** introduced in Phase 36. `1..10` is syntactic sugar for `range 1 10`, returning an int list. Implements factorial / sum_sq, etc., via fold |
+| [sections.mere](sections.mere) ⭐ | demo of **operator sections** introduced in Phase 36. `(+ 1)` is sugar for `fn x -> x + 1`. Combined with HOFs, concise map / filter is possible. Supports 11 operators: + * / % == != < <= > >= ++ |
+| [cons_pipe_demo.mere](cons_pipe_demo.mere) ⭐ | demo of **`::` cons** + **`<|` reverse pipe** introduced in Phase 36. `h :: t` is sugar for `Cons (h, t)`; `f <| x` is sugar for `f x` (the right side can be fn/let/match) |
+| [sugar_demo.mere](sugar_demo.mere) ⭐ | demo of **lambda shorthand `\x -> body`** / **`@@` low-precedence app** / **string interpolation `"hello {name}"`** added in Phase 36. Use `\{` to escape a literal brace |
+| [question_demo.mere](question_demo.mere) ⭐ | demo of **`?` Option early-return** + **`?!` Result early-return** introduced in Phase 36. Allows writing Option / Result chains Rust-style with `?` |
+| [sugar_showcase.mere](sugar_showcase.mere) ⭐ | a showcase using **all 9 sugars** (range / op section / `::` / `<|` / `@@` / `\` / string interp / `?` / `?!`) added in Phase 36, combined. prime sieve / inventory lookup / Result chain / 1-line fold |
+| [comprehension.mere](comprehension.mere) ⭐ | demo of **list comprehension** `[expr \| x <- xs, cond, y <- ys, ...]` introduced in Phase 36. Haskell-style **multi-generator** + filter in any order; can express Pythagorean triples (3 gens + filter) |
+| [statistics.mere](statistics.mere) ⭐ | dogfood the Phase 36 added **prelude helpers combined** for basic statistics of an int list. count / sum / mean / min / max / variance / stddev (Newton sqrt) / median (sort) / mode (Map) / outliers (filter). Also uses `list_zip` / `list_for_all` / `list_any` / `list_member` |
+| [if_let_demo.mere](if_let_demo.mere) ⭐ | demo of **`if let pat = e then ... else ...`** introduced in Phase 36. Concise conditional branching for Option / Result + variant destructure (Circle / Square / Rect) |
+| [for_loop_demo.mere](for_loop_demo.mere) ⭐ | demo of **`for x in xs do body`** introduced in Phase 36. range / string list / list comprehension result / nested for / Map accumulation in a procedural style. Sugar for `list_iter xs (\x -> body)` |
+| [while_loop_demo.mere](while_loop_demo.mere) ⭐ | demo of **`while cond do body`** introduced in Phase 36. Use Map[str, int] as a mutable cell to express count up / powers of 2 / Collatz step counter procedurally. **Note: codegen only supports inside fn body** (top-level main can't lift inner let-rec) |
+| [csv_summary.mere](csv_summary.mere) ⭐ | dogfood combining the Phase 36 added sugar / prelude helpers in realistic use. Parse CSV-like sales records (name, area, amount) (`Row opt` to mark failure) -> filter unwrap -> aggregate -> ranking output. The DEFERRED §1.20 uncovered in Phase 36 (forward decl bug for user record inside polymorphic variant) was **resolved by integrating mono struct into unified topo-sort** |
+| [game_of_life.mere](game_of_life.mere) ⭐ | Conway's Game of Life (8x12 grid). Time evolution via 8-neighbor traversal of a 1D-flattened cell state in OwnedVec[int]. Visualizes the 4-step migration of a glider pattern (5 cells); also outputs each gen's live count |
+| [sudoku_check.mere](sudoku_check.mere) ⭐ | validity check of a 9x9 sudoku board. Check that 1..9 are exhaustively present for 9 rows + 9 cols + 9 (3x3 boxes). Generate box cells via `list_for_all` + `list_member` + list comprehension; verify with 3 scenarios (correct / row dup / col dup) |
+| [calc.mere](calc.mere) ⭐ | operator-precedence arithmetic parser + evaluator. tokenize -> recursive descent (expr / term / factor / primary) -> eval. Handles `+ - * /` precedence, unary minus, and nested parentheses. Error propagation via `?!` Result chain. Verifies 10 cases (incl. division by zero / syntax error) |
+| [maze_solver.mere](maze_solver.mere) ⭐ | BFS pathfinding on an ASCII maze (8x12). `#` = wall, `S` = start, `G` = goal. OwnedVec[str] as queue, Maps for dist + prev. Computes shortest distance and visualizes path with `*` |
 
-### Q-010 collection 基本
+### Q-010 collection basics
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [vec_basics.mere](vec_basics.mere) | `'a Vec` の基本操作 (push / get / len / region 内) |
-| [vec_vs_owned_vec.mere](vec_vs_owned_vec.mere) | `Vec[R, T]` (短命) vs `OwnedVec[T]` (長命) の対比 demo |
+| [vec_basics.mere](vec_basics.mere) | basic operations on `'a Vec` (push / get / len / inside region) |
+| [vec_vs_owned_vec.mere](vec_vs_owned_vec.mere) | demo contrasting `Vec[R, T]` (short-lived) vs `OwnedVec[T]` (long-lived) |
 | [vec_higher_order.mere](vec_higher_order.mere) | `vec_iter` / `vec_map` / `vec_fold` / `vec_set` |
-| [strbuf_basics.mere](strbuf_basics.mere) | `StrBuf[R]` の基本 |
-| [map_basics.mere](map_basics.mere) | `Map[R, K, V]` の基本 |
+| [strbuf_basics.mere](strbuf_basics.mere) | basics of `StrBuf[R]` |
+| [map_basics.mere](map_basics.mere) | basics of `Map[R, K, V]` |
 
-### Q-010 collection codegen (3 backend)
+### Q-010 collection codegen (3 backends)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [vec_codegen_c.mere](vec_codegen_c.mere) | `Vec[R, int]` の C codegen (Phase 15.1、最小) |
-| [vec_codegen_c_typed.mere](vec_codegen_c_typed.mere) | C codegen で int / str / tuple / variant 混在 |
-| [vec_codegen_llvm_typed.mere](vec_codegen_llvm_typed.mere) | 同じく LLVM IR 版 |
-| [vec_codegen_wasm_typed.mere](vec_codegen_wasm_typed.mere) | 同じく Wasm 版 |
-| [vec_higher_order_codegen.mere](vec_higher_order_codegen.mere) | vec_set / iter / fold の 3 backend codegen demo |
-| [vec_map_filter_codegen.mere](vec_map_filter_codegen.mere) | vec_map / vec_filter の 3 backend codegen demo |
-| [owned_vec_codegen.mere](owned_vec_codegen.mere) | OwnedVec + Vec ⇄ OwnedVec 変換の codegen demo |
-| [strbuf_codegen.mere](strbuf_codegen.mere) | StrBuf の codegen demo |
-| [map_codegen.mere](map_codegen.mere) | Map の codegen demo (str→int / int→str / region 内) |
+| [vec_codegen_c.mere](vec_codegen_c.mere) | `Vec[R, int]` C codegen (Phase 15.1, minimal) |
+| [vec_codegen_c_typed.mere](vec_codegen_c_typed.mere) | C codegen with mixed int / str / tuple / variant |
+| [vec_codegen_llvm_typed.mere](vec_codegen_llvm_typed.mere) | same in LLVM IR |
+| [vec_codegen_wasm_typed.mere](vec_codegen_wasm_typed.mere) | same in Wasm |
+| [vec_higher_order_codegen.mere](vec_higher_order_codegen.mere) | 3-backend codegen demo for vec_set / iter / fold |
+| [vec_map_filter_codegen.mere](vec_map_filter_codegen.mere) | 3-backend codegen demo for vec_map / vec_filter |
+| [owned_vec_codegen.mere](owned_vec_codegen.mere) | codegen demo for OwnedVec + Vec <-> OwnedVec conversion |
+| [strbuf_codegen.mere](strbuf_codegen.mere) | StrBuf codegen demo |
+| [map_codegen.mere](map_codegen.mere) | Map codegen demo (str->int / int->str / inside region) |
 
-### Phase 36 — syntactic sugar dogfood (47 本)
+### Phase 36 — syntactic sugar dogfood (47 files)
 
-13 syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` / string
-interp / `?` / `?!` / list comp / `if let` / `for in do` / `while do`) と
-16 prelude entry (list_filter / range / list_sum 等) を combined dogfood
-した example 群。すべて 4 backend (interp + C + LLVM + Wasm) で diff = 0。
+A set of examples combined-dogfooding 13 syntactic sugars (range / op
+section / `::` / `<|` / `@@` / `\` / string interp / `?` / `?!` / list
+comp / `if let` / `for in do` / `while do`) with 16 prelude entries
+(list_filter / range / list_sum, etc.). All have diff = 0 across 4
+backends (interp + C + LLVM + Wasm).
 
 #### sugar showcase
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
 | [range_demo.mere](range_demo.mere) | `0..n` range literal |
 | [sections.mere](sections.mere) | operator section `(+ 1)` |
 | [cons_pipe_demo.mere](cons_pipe_demo.mere) | `::` cons / `<|` reverse pipe / `@@` apply |
 | [sugar_demo.mere](sugar_demo.mere) | lambda shorthand `\x -> ...` + string interp |
 | [question_demo.mere](question_demo.mere) | `?` / `?!` early-return |
-| [sugar_showcase.mere](sugar_showcase.mere) | 13 sugar の combined demo |
+| [sugar_showcase.mere](sugar_showcase.mere) | combined demo of 13 sugars |
 | [comprehension.mere](comprehension.mere) | list comprehension multi-gen |
 | [if_let_demo.mere](if_let_demo.mere) | `if let pat = e then ... else ...` |
 | [for_loop_demo.mere](for_loop_demo.mere) | `for x in xs do body` |
 | [while_loop_demo.mere](while_loop_demo.mere) | `while cond do body` |
-| [statistics.mere](statistics.mere) | Phase 36 prelude (list_sum / list_max / list_min 等) |
+| [statistics.mere](statistics.mere) | Phase 36 prelude (list_sum / list_max / list_min, etc.) |
 
-#### dogfood (アルゴリズム・データ処理)
+#### dogfood (algorithms / data processing)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [calc.mere](calc.mere) | operator-precedence な recursive descent parser + evaluator (`?!` Result chain、138 行) |
-| [maze_solver.mere](maze_solver.mere) | ASCII 8x12 maze の BFS pathfinding + path 可視化 |
-| [game_of_life.mere](game_of_life.mere) | Conway's Game of Life (8x12 grid、glider) |
-| [sudoku_check.mere](sudoku_check.mere) | 9x9 sudoku 解答の validity check (row/col/box) |
-| [tic_tac_toe.mere](tic_tac_toe.mere) | 三目並べ (board variant + win detection) |
+| [calc.mere](calc.mere) | operator-precedence recursive descent parser + evaluator (`?!` Result chain, 138 lines) |
+| [maze_solver.mere](maze_solver.mere) | BFS pathfinding on an ASCII 8x12 maze + path visualization |
+| [game_of_life.mere](game_of_life.mere) | Conway's Game of Life (8x12 grid, glider) |
+| [sudoku_check.mere](sudoku_check.mere) | validity check for a 9x9 sudoku solution (row/col/box) |
+| [tic_tac_toe.mere](tic_tac_toe.mere) | tic-tac-toe (board variant + win detection) |
 | [eight_queens.mere](eight_queens.mere) | 8-queens solver (backtracking) |
 | [knapsack.mere](knapsack.mere) | 0-1 knapsack DP |
 | [collatz.mere](collatz.mere) | Collatz sequence |
-| [bin_tree_traversal.mere](bin_tree_traversal.mere) | 二分木の pre/in/post-order |
-| [csv_summary.mere](csv_summary.mere) | CSV 集計 (Map + reduce) |
-| ~~`markdown_to_text.mere`~~ | → [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere) |
-| [matrix_2d.mere](matrix_2d.mere) | 2D matrix 操作 (transpose / scale) |
-| [borrow_chain.mere](borrow_chain.mere) | 借用 mode chain demo |
-| [cache_sim.mere](cache_sim.mere) | LRU cache 簡易シミュレータ |
+| [bin_tree_traversal.mere](bin_tree_traversal.mere) | binary tree pre/in/post-order |
+| [csv_summary.mere](csv_summary.mere) | CSV aggregation (Map + reduce) |
+| ~~`markdown_to_text.mere`~~ | -> [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere) |
+| [matrix_2d.mere](matrix_2d.mere) | 2D matrix operations (transpose / scale) |
+| [borrow_chain.mere](borrow_chain.mere) | borrow mode chain demo |
+| [cache_sim.mere](cache_sim.mere) | a simple LRU cache simulator |
 | [simple_query.mere](simple_query.mere) | tiny query engine |
-| [config_loader.mere](config_loader.mere) | key=value config の parse |
-| ~~`csv_writer.mere`~~ | → [contrib/csv/writer.mere](../contrib/csv/writer.mere) |
-| [calendar_lite.mere](calendar_lite.mere) | カレンダー出力 |
-| [html_builder.mere](html_builder.mere) | tag combinator で HTML 文字列 |
-| [event_counter.mere](event_counter.mere) | event log の頻度集計 |
-| [traffic_light.mere](traffic_light.mere) | 信号機の状態遷移 |
-| [histogram.mere](histogram.mere) | int リストの ASCII histogram |
+| [config_loader.mere](config_loader.mere) | parse key=value config |
+| ~~`csv_writer.mere`~~ | -> [contrib/csv/writer.mere](../contrib/csv/writer.mere) |
+| [calendar_lite.mere](calendar_lite.mere) | calendar output |
+| [html_builder.mere](html_builder.mere) | HTML string via tag combinator |
+| [event_counter.mere](event_counter.mere) | event log frequency aggregation |
+| [traffic_light.mere](traffic_light.mere) | traffic light state transitions |
+| [histogram.mere](histogram.mere) | ASCII histogram of an int list |
 | [fallible_lookup.mere](fallible_lookup.mere) | Option chain demo |
 
-#### dogfood (ゲーム・文字列処理)
+#### dogfood (games / string processing)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [caesar_cipher.mere](caesar_cipher.mere) | Caesar 暗号 encode/decode |
-| [fraction.mere](fraction.mere) | 有理数 + reduce (`divf` を使うことで C libc `div` と衝突回避) |
-| [roman_numerals.mere](roman_numerals.mere) | int ↔ roman 数字変換 |
-| [password_strength.mere](password_strength.mere) | パスワード強度判定 |
-| [brackets_balance.mere](brackets_balance.mere) | 括弧の対応 check |
-| [morse_code.mere](morse_code.mere) | text → morse code 変換 |
-| [luhn_check.mere](luhn_check.mere) | クレジットカード番号の Luhn validation |
-| [palindrome.mere](palindrome.mere) | 回文判定 |
-| [anagram.mere](anagram.mere) | アナグラム判定 |
-| [base_conv.mere](base_conv.mere) | 任意 base 進数変換 |
-| [rps_game.mere](rps_game.mere) | じゃんけん |
-| [scoreboard.mere](scoreboard.mere) | スコアボード更新 |
-| [factory_value.mere](factory_value.mere) | Phase 35 — first-class factory builtin の demo (`let mk = map_new`) |
+| [caesar_cipher.mere](caesar_cipher.mere) | Caesar cipher encode/decode |
+| [fraction.mere](fraction.mere) | rational + reduce (uses `divf` to avoid clashing with C libc `div`) |
+| [roman_numerals.mere](roman_numerals.mere) | int <-> roman numeral conversion |
+| [password_strength.mere](password_strength.mere) | password strength evaluation |
+| [brackets_balance.mere](brackets_balance.mere) | bracket balance check |
+| [morse_code.mere](morse_code.mere) | text -> Morse code conversion |
+| [luhn_check.mere](luhn_check.mere) | credit card number Luhn validation |
+| [palindrome.mere](palindrome.mere) | palindrome detection |
+| [anagram.mere](anagram.mere) | anagram detection |
+| [base_conv.mere](base_conv.mere) | arbitrary base conversion |
+| [rps_game.mere](rps_game.mere) | rock-paper-scissors |
+| [scoreboard.mere](scoreboard.mere) | scoreboard update |
+| [factory_value.mere](factory_value.mere) | Phase 35 — demo of first-class factory builtin (`let mk = map_new`) |
 
-### Phase 37/38 — partial app + auto-Drop + while top-level dogfood (5 本)
+### Phase 37/38 — partial app + auto-Drop + while top-level dogfood (5 files)
 
-Phase 37.A (`while` at top-level) / Phase 37.B (網羅性 Phase 2) / Phase 38.C
+A set of examples combined-dogfooding the new features of Phase 37.A
+(`while` at top-level) / Phase 37.B (exhaustiveness Phase 2) / Phase 38.C
 (multi-arg curried builtin first-class) / Phase 38.G-1 (OwnedVec auto
-scope-bound Drop) の新機能を combined dogfood した example 群。 すべて
-4 backend (interp + C + LLVM + Wasm) で diff = 0。
+scope-bound Drop). All have diff = 0 across 4 backends
+(interp + C + LLVM + Wasm).
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [memo_fib.mere](memo_fib.mere) | メモ化 Fibonacci。 Phase 38.C: `let lookup = map_get cache` / `let store = map_set cache` の partial app で 2-arg / 3-arg curried builtin を closure 化 |
-| [process_queue.mere](process_queue.mere) | キュー処理。 Phase 37.A: `let _ = while (head < tail) do ...` を main 直下に直接書ける |
-| [event_aggregator.mere](event_aggregator.mere) | Phase 38.G-1: 関数の内部で `let v = owned_vec_new ()` を作って統計だけ return、 scope 末で auto-Drop。 + Phase 38.C partial app との両立 |
-| [poly_horner.mere](poly_horner.mere) | Horner 法による多項式評価。 partial app + auto-Drop combo |
-| [histogram_buckets.mere](histogram_buckets.mere) | 数列のバケット集計 + ASCII bar chart。 Map の closure 経由更新 |
+| [memo_fib.mere](memo_fib.mere) | memoized Fibonacci. Phase 38.C: partial-app `let lookup = map_get cache` / `let store = map_set cache` turns 2-arg / 3-arg curried builtins into closures |
+| [process_queue.mere](process_queue.mere) | queue processing. Phase 37.A: can write `let _ = while (head < tail) do ...` directly under main |
+| [event_aggregator.mere](event_aggregator.mere) | Phase 38.G-1: inside a function, create `let v = owned_vec_new ()`, return only statistics, auto-Drop at scope end. Also combines with Phase 38.C partial app |
+| [poly_horner.mere](poly_horner.mere) | polynomial evaluation via Horner's method. partial app + auto-Drop combo |
+| [histogram_buckets.mere](histogram_buckets.mere) | sequence bucket aggregation + ASCII bar chart. Update Map via closures |
 
-### アルゴリズム・データ構造 (5 本)
+### Algorithms / data structures (5 files)
 
-古典的な algorithm / data structure を Mere で実装した「他言語と比較しやすい」
-リファレンス群。 すべて 4 backend (interp + C + LLVM + Wasm) で diff = 0。
+A reference set of classical algorithms / data structures implemented in
+Mere — "easy to compare with other languages". All have diff = 0 across 4
+backends (interp + C + LLVM + Wasm).
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [quicksort.mere](quicksort.mere) | 古典 quicksort (pivot + list_filter で分割)。 `'a list` 上 |
-| [mergesort.mere](mergesort.mere) | 安定 merge sort (split + merge)。 注: top-level fn 名は `msort` (macOS libc `mergesort` との衝突回避) |
-| [bst.mere](bst.mere) | 二分探索木 (variant `btree`、 insert / lookup / inorder / count / depth) |
-| [heap.mere](heap.mere) | 配列ベース min-heap (Map[str, int] を疑似配列に。 sift_up / sift_down / heap_sort) |
-| [dijkstra.mere](dijkstra.mere) | 重み付きグラフの単一始点最短経路 (variant edge + Map で dist/visited 管理) |
+| [quicksort.mere](quicksort.mere) | classic quicksort (pivot + partition via list_filter). On `'a list` |
+| [mergesort.mere](mergesort.mere) | stable merge sort (split + merge). Note: top-level fn name is `msort` (avoids macOS libc `mergesort` collision) |
+| [bst.mere](bst.mere) | binary search tree (variant `btree`; insert / lookup / inorder / count / depth) |
+| [heap.mere](heap.mere) | array-based min-heap (Map[str, int] as a pseudo-array. sift_up / sift_down / heap_sort) |
+| [dijkstra.mere](dijkstra.mere) | single-source shortest path on a weighted graph (variant edge + Maps for dist/visited) |
 
-### 拡張 algorithm / interpreter / data structure (14 本)
+### Extended algorithms / interpreters / data structures (14 files)
 
-iconic な algorithm を更に網羅。 数論 / 文字列検索 / グラフ / lambda calculus
-interpreter / pretty printer / regex / markdown converter まで。
+Further coverage of iconic algorithms. Number theory / string search /
+graphs / lambda calculus interpreter / pretty printer / regex / markdown
+converter.
 
-#### 数論 (2 本)
+#### Number theory (2 files)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [gcd.mere](gcd.mere) | gcd / lcm / extended Euclidean (Bézout 係数を計算) |
-| [fast_pow.mere](fast_pow.mere) | 高速冪乗 (二乗法、 O(log n)) + modular exponentiation (RSA の核) |
+| [gcd.mere](gcd.mere) | gcd / lcm / extended Euclidean (compute Bézout coefficients) |
+| [fast_pow.mere](fast_pow.mere) | fast power (squaring, O(log n)) + modular exponentiation (the core of RSA) |
 
-#### 文字列検索 (3 本)
+#### String search (3 files)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [edit_distance.mere](edit_distance.mere) | Levenshtein 編集距離 (古典 2D DP、 Map[str, int] table) |
-| [kmp.mere](kmp.mere) | Knuth-Morris-Pratt 検索 (failure function 事前計算、 O(N+M)) |
-| [rabin_karp.mere](rabin_karp.mere) | Rabin-Karp 検索 (rolling hash、 hash 衝突時に str_eq_range で確認) |
+| [edit_distance.mere](edit_distance.mere) | Levenshtein edit distance (classic 2D DP, Map[str, int] table) |
+| [kmp.mere](kmp.mere) | Knuth-Morris-Pratt search (precompute failure function, O(N+M)) |
+| [rabin_karp.mere](rabin_karp.mere) | Rabin-Karp search (rolling hash; verify with str_eq_range on hash collision) |
 
-#### グラフ追加 (2 本)
+#### Graphs (additional) (2 files)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [topological_sort.mere](topological_sort.mere) | Kahn のトポロジカルソート (Map で入次数管理 + queue) |
-| [dfs_bfs.mere](dfs_bfs.mere) | DFS と BFS の比較 (両方とも iterative stack/queue で実装) |
+| [topological_sort.mere](topological_sort.mere) | Kahn's topological sort (Map for in-degree management + queue) |
+| [dfs_bfs.mere](dfs_bfs.mere) | DFS vs BFS comparison (both implemented as iterative stack/queue) |
 
-#### データ構造 (2 本)
+#### Data structures (2 files)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [trie.mere](trie.mere) | prefix tree (Map[str, int] でフラット表現)、 insert / search / starts_with |
-| [hashtable.mere](hashtable.mere) | 自前 hash table (チェイニング、 bucket は str エンコードした int list) |
+| [trie.mere](trie.mere) | prefix tree (flat representation in Map[str, int]); insert / search / starts_with |
+| [hashtable.mere](hashtable.mere) | hand-rolled hash table (chaining; buckets are int lists encoded as str) |
 
-#### Interpreter / 言語処理系 (2 本)
+#### Interpreters / language processors (2 files)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [stack_machine.mere](stack_machine.mere) | 簡易 RPN VM (variant instr + Map[str, int] スタック)。 Push/Add/Sub/Mul/Div/Neg/Dup/Swap |
-| [lambda_calc.mere](lambda_calc.mere) | 純粋無型 λ計算 interpreter (substitution-based、 Church numeral 加算デモ)。 Wasm は深い再帰で trap (interp + C + LLVM では diff = 0) |
+| [stack_machine.mere](stack_machine.mere) | simple RPN VM (variant instr + Map[str, int] stack). Push/Add/Sub/Mul/Div/Neg/Dup/Swap |
+| [lambda_calc.mere](lambda_calc.mere) | pure untyped λ-calculus interpreter (substitution-based; Church numeral addition demo). Wasm traps on deep recursion (diff = 0 on interp + C + LLVM) |
 
-#### Document 処理系 (3 本)
+#### Document processors (3 files)
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| ~~`markdown_to_html.mere`~~ | → [contrib/markdown/to_html.mere](../contrib/markdown/to_html.mere) |
-| [prettyprinter.mere](prettyprinter.mere) | Wadler 風 pretty printer combinator (variant doc + group/nest/line) |
-| ~~`regex_engine.mere`~~ | → [contrib/regex/engine.mere](../contrib/regex/engine.mere) (NFA-based 試作) |
+| ~~`markdown_to_html.mere`~~ | -> [contrib/markdown/to_html.mere](../contrib/markdown/to_html.mere) |
+| [prettyprinter.mere](prettyprinter.mere) | Wadler-style pretty printer combinator (variant doc + group/nest/line) |
+| ~~`regex_engine.mere`~~ | -> [contrib/regex/engine.mere](../contrib/regex/engine.mere) (NFA-based prototype) |
 
-## codegen の試し方
+## How to try codegen
 
 ```sh
-# C source → native binary
+# C source -> native binary
 dune exec ./bin/mere.exe -- -c examples/toy_sql.mere > /tmp/sql.c
 clang /tmp/sql.c -o /tmp/sql && /tmp/sql
 
-# LLVM IR → native binary
+# LLVM IR -> native binary
 dune exec ./bin/mere.exe -- -ll examples/toy_sql.mere > /tmp/sql.ll
 clang /tmp/sql.ll -o /tmp/sql && /tmp/sql
 
-# Wasm (要 wabt / Node.js)。Phase 27.2 で scripts/run_wasm.js を追加
+# Wasm (requires wabt / Node.js). Phase 27.2 added scripts/run_wasm.js
 dune exec ./bin/mere.exe -- -w examples/toy_sql.mere > /tmp/sql.wat
 wat2wasm /tmp/sql.wat -o /tmp/sql.wasm
-node scripts/run_wasm.js /tmp/sql.wasm   # puts / read_file / write_file の env imports 付き
+node scripts/run_wasm.js /tmp/sql.wasm   # with env imports for puts / read_file / write_file
 ```
 
-⭐ 印の 16 examples は **interp と 3 backend の出力が diff = 0 で一致**
-することを `diff` で検証済 (Phase 27 完了 + Phase 28 追加 + Phase 30 codegen
-fix 後維持)。
+The 16 ⭐ examples have been verified with `diff` to **produce output
+matching across interp and all 3 backends with diff = 0** (preserved
+after Phase 27 completion + Phase 28 additions + Phase 30 codegen fixes).
 
-## REPL session の記録
+## REPL session record
 
-| ファイル | 内容 |
+| File | Content |
 |---|---|
-| [repl_session.md](repl_session.md) | REPL の使用例 |
+| [repl_session.md](repl_session.md) | REPL usage examples |

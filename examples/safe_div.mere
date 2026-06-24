@@ -1,40 +1,41 @@
-// Phase 19.5 で prelude に追加した `('a, 'e) result` 型を使った demo。
-// 「失敗を値として返す」エラー処理パターンの最小例。
+// Demo using the `('a, 'e) result` type added to the prelude in Phase 19.5.
+// A minimal example of the "return failure as a value" error-handling pattern.
 //
-// 目的: examples roadmap D1。Result idiom を Mere で書く際の典型形を
-// 示す。prelude のおかげで `type ('a, 'e) result` の declare が不要、
-// `Ok x` / `Err msg` をそのまま使える。
+// Purpose: examples roadmap D1. Show the typical shape of writing the Result
+// idiom in Mere. Thanks to the prelude, declaring `type ('a, 'e) result` is
+// unnecessary, and `Ok x` / `Err msg` can be used directly.
 //
-// 実行モード: interpreter のみ (多相 user 定義 let-rec の codegen が
-// DEFERRED §1.7 で未対応、Phase 20.1 で fix 予定)
+// Execution mode: interpreter only (codegen for polymorphic user-defined
+// let-rec is unsupported per DEFERRED §1.7; fix planned for Phase 20.1)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/safe_div.mere
-//   # 期待出力:
+//   # Expected output:
 //   # 10 / 3 = 3
 //   # 10 / 0 = error: division by zero
 //   # 100 / 5 / 4 = 5
 //   # 100 / 0 / 4 = error: outer division failed
 //
-// パターン:
+// Pattern:
 //   1. safe_div : int -> int -> (int, str) result
-//   2. match で Ok / Err を分解、Err は文字列メッセージで再構築
-//   3. 連鎖は match のネストで書く (`?` operator は未実装、Phase 19.x 続編)
+//   2. destructure Ok / Err with match; rebuild Err with a string message
+//   3. chain by nesting match (`?` operator not implemented yet; later in
+//      Phase 19.x)
 
 let safe_div = fn (a: int) -> fn (b: int) ->
   if b == 0 then Err "division by zero"
   else Ok (a / b);
 
-// Result を表示用文字列に変換する helper (Mere に組込みの
-// `result_to_str` のような builtin は未実装、自前で書く)。
+// Helper to convert a Result to a display string (Mere has no builtin
+// like `result_to_str` yet, so we write it ourselves).
 let show_div = fn (r) ->
   match r with
   | Ok n -> show n
   | Err msg -> "error: " ++ msg;
 
-// 連鎖: a / b / c を safe に。途中で Err が出たら全体を Err に。
-// (option_map / result_and_then 等の helper は prelude 機構が
-// monomorphize 対応した後で追加予定、現状は match で chain)
+// Chain: compute a / b / c safely. If Err appears mid-chain, the whole thing
+// is Err. (Helpers like option_map / result_and_then are planned for after
+// the prelude machinery supports monomorphize; for now we chain with match.)
 let chain_div = fn (a: int) -> fn (b: int) -> fn (c: int) ->
   match safe_div a b with
   | Err _ -> Err "outer division failed"

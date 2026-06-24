@@ -1,14 +1,14 @@
-// 借用注釈 mismatch が型エラーとして検出されることを示す demo。
-// この example は **意図的に型エラーで落ちる**。
+// Demo showing that borrow-annotation mismatches are detected as type errors.
+// This example **intentionally fails with a type error**.
 //
 //   dune exec bin/mere.exe -- examples/borrow_modes_typeerror.mere
 //
-// 出力 (抜粋):
+// Output (excerpt):
 //   type error: expected `&mut R DbHandle`, got `&R DbHandle`
 //
-// db_exec は `&mut R DbHandle` (exclusive write) を要求するが、
-// caller は `&R db` (default = shared read) を渡している。
-// 型 mode が違うので unify が拒否。
+// db_exec requires `&mut R DbHandle` (exclusive write), but the caller
+// passes `&R db` (default = shared read). The borrow modes differ, so
+// unification rejects the call.
 
 type DbHandle = { id: int };
 
@@ -17,7 +17,7 @@ let db_exec = fn (db: &mut R DbHandle) -> fn (sql: str) ->
 
 region R {
   let db = DbHandle { id = 42 } in
-  let db_borrowed = &R db in       // ← shared read で借りた
-  let _ = db_exec db_borrowed "X"  // ← exclusive write を要求 → mismatch
+  let db_borrowed = &R db in       // <- borrowed as shared read
+  let _ = db_exec db_borrowed "X"  // <- requires exclusive write -> mismatch
   in 0
 }

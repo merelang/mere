@@ -1,13 +1,13 @@
-// trie: prefix tree (Trie) を Map[str, int] で表現
+// trie: prefix tree (Trie) represented with Map[str, int]
 //
-// Trie のノードを「path 文字列 → ノード ID」 でフラットに管理。
-//   - "node_<id>_terminal" = 1 ならその ID で終端する単語あり
-//   - "node_<id>_<char>" = 次ノードの ID (存在しなければ key 未登録)
-//   - "node_count" = これまで作成したノード総数
+// Manage Trie nodes flatly via "path string -> node ID":
+//   - "node_<id>_terminal" = 1 means a word ends at that ID
+//   - "node_<id>_<char>" = next node ID (key absent if it doesn't exist)
+//   - "node_count" = total number of nodes created so far
 //
-// 操作: insert (O(L))、 search (O(L))、 starts_with (O(L))、 collect_words
+// Operations: insert (O(L)), search (O(L)), starts_with (O(L)), collect_words
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 let trie_new = fn () ->
   let t = map_new () in
@@ -36,7 +36,7 @@ let rec insert = fn t -> fn (word: str) -> fn (node_id: int) -> fn (i: int) ->
         new_id in
     insert t word next_id (i + 1);
 
-// 辿りつけた node_id を返す (- 1 if absent)
+// Returns the node_id reached (-1 if absent)
 let rec walk = fn t -> fn (word: str) -> fn (node_id: int) -> fn (i: int) ->
   let len_w = str_len word in
   if i >= len_w then node_id

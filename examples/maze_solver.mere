@@ -1,20 +1,21 @@
-// maze_solver: grid maze の BFS pathfinding (Phase 36)
+// maze_solver: BFS pathfinding on a grid maze (Phase 36)
 //
-// 入力: ASCII maze。`#` = 壁, `.` = 通路, `S` = start, `G` = goal。
-// 出力: S から G までの最短距離 + 経路の可視化。
+// Input: ASCII maze. `#` = wall, `.` = passage, `S` = start, `G` = goal.
+// Output: shortest distance from S to G + path visualization.
 //
-// アルゴリズム: BFS で各セルの distance を Map に記録、goal に着いたら
-//   prev Map から逆引きで path を復元。
+// Algorithm: BFS records each cell's distance in a Map, and once the goal
+//   is reached the path is reconstructed by walking back through the prev Map.
 //
 // Phase 36 sugar combined dogfood:
 //   - `for r in 0..rows do for c in 0..cols do ...`
 //   - `if let Some d = ... then ... else ...`
-//   - `[(dr, dc) | dr <- -1..1, dc <- -1..1, ...]` (4 近傍を作るが今回は固定)
+//   - `[(dr, dc) | dr <- -1..1, dc <- -1..1, ...]` (builds 4-neighborhood, but
+//     here it's hardcoded)
 //   - string interpolation
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// Maze (固定 8x12)
+// Maze (fixed 8x12)
 let raw_maze =
   ["############",
    "#S.........#",
@@ -44,7 +45,7 @@ let is_open = fn (r: int) -> fn (c: int) ->
     let c_str = cell_at r c in
     c_str != "#";
 
-// start / goal を探す
+// find start / goal
 let find_char = fn (target: str) ->
   let cell = map_new () in
   let _ = map_set cell "r" (-1) in
@@ -66,14 +67,14 @@ let _ = print "rows = {show rows}, cols = {show cols}";
 let _ = print "start = ({show (fst start)}, {show (snd start)})";
 let _ = print "goal  = ({show (fst goal)}, {show (snd goal)})";
 
-// BFS: queue は OwnedVec[str] (key)、distance + prev は Map で
+// BFS: queue is OwnedVec[str] (keys); distance + prev are stored in Maps
 let dist = map_new ();
 let prev = map_new ();
 
 let push = fn (q: OwnedVec[str]) -> fn (v: str) ->
   let _ = owned_vec_push q v in ();
 
-// queue head position を Map で管理 (OwnedVec に shift が無いため)
+// track queue head position in a Map (OwnedVec has no shift)
 let qhead = map_new ();
 let _ = map_set qhead "i" 0;
 
@@ -84,7 +85,7 @@ let _ = map_set dist start_key 0;
 
 let goal_key = key (fst goal) (snd goal);
 
-// 4 近傍の (dr, dc)
+// (dr, dc) for the 4-neighborhood
 let dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
 let parse_key = fn (k: str) ->
@@ -93,14 +94,14 @@ let parse_key = fn (k: str) ->
   | Cons (rs, Cons (cs, _)) -> (int_of_str rs, int_of_str cs)
   | _ -> (-1, -1);
 
-// BFS body は再帰で
+// BFS body via recursion
 let rec bfs = fn (_unused: unit) ->
   let i = map_get qhead "i" in
   if i >= owned_vec_len queue then ()
   else
     let _ = map_set qhead "i" (i + 1) in
     let here = owned_vec_get queue i in
-    if here == goal_key then ()    // 早期終了 (continue でも可)
+    if here == goal_key then ()    // early termination (continue also works)
     else
       let coord = parse_key here in
       let r = fst coord in
@@ -127,7 +128,7 @@ let _ = if map_has dist goal_key then
 else
   print "no path";
 
-// path 復元
+// path reconstruction
 let rec collect_path = fn (k: str) -> fn (acc: str list) ->
   if k == start_key then Cons (k, acc)
   else if map_has prev k then
@@ -137,7 +138,7 @@ let rec collect_path = fn (k: str) -> fn (acc: str list) ->
 let path =
   if map_has dist goal_key then collect_path goal_key Nil else Nil;
 
-// 経路を Map に登録
+// register path cells in a Map
 let on_path = map_new ();
 let _ = list_iter path (fn (k: str) -> let _ = map_set on_path k 1 in ());
 

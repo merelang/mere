@@ -1,9 +1,9 @@
-// rps_game: じゃんけんゲームの勝敗判定 (Phase 36)
+// rps_game: rock-paper-scissors outcome judgment (Phase 36)
 //
-// 目的: variant + nested match の dispatch 例。3x3 = 9 通りの組み合わせを
-//   1 関数で網羅、シンプルな adt demo。
+// Purpose: variant + nested match dispatch example. Cover all 3x3 = 9
+//   combinations in a single function — a simple ADT demo.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 type hand = Rock | Paper | Scissors;
 type outcome = WinA | WinB | Tie;
@@ -53,7 +53,7 @@ let _ = play Rock Rock;
 let _ = play Paper Paper;
 let _ = play Scissors Scissors;
 
-// ベスト・オブ・5 サンプル: hand list を畳んで勝敗数を集計
+// Best-of-5 sample: fold a hand list and tally win counts
 let rec tally = fn (rounds: (hand * hand) list) -> fn (a_score: int) -> fn (b_score: int) ->
   match rounds with
   | Nil -> (a_score, b_score)

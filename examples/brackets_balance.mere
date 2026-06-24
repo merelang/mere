@@ -1,16 +1,16 @@
-// brackets_balance: 括弧の対応チェック (Phase 36)
+// brackets_balance: bracket-matching check (Phase 36)
 //
-// 目的: linked list を stack として、`(`/`[`/`{` を push、`)`/`]`/`}` で
-//   pop + match を確認するアルゴリズム。char_at で文字単位 scan、
-//   開閉対応外の文字は無視。
+// Purpose: classic algorithm using a linked list as a stack -- push on
+//   `(`/`[`/`{`, pop and verify on `)`/`]`/`}`. Scans character by
+//   character with char_at and ignores any character that is not a bracket.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type 'a stk = SEmpty | SCons of ('a * 'a stk);
 
 let push = fn (s: str stk) -> fn (c: str) -> SCons (c, s);
 
-// 期待される閉じ括弧を返す。それ以外は ""。
+// Return the expected closing bracket. Empty string otherwise.
 let close_of = fn (c: str) ->
   if c == "(" then ")"
   else if c == "[" then "]"
@@ -23,25 +23,25 @@ let is_open = fn (c: str) ->
 let is_close = fn (c: str) ->
   c == ")" || c == "]" || c == "}";
 
-// 1 文字ずつ処理: open は push、close は top と一致するか確認
+// Process one character at a time: push on open, verify match against top on close
 let check = fn (s: str) ->
   let n = str_len s in
   let rec loop = fn (i: int) -> fn (stack: str stk) ->
     if i >= n then
       match stack with
       | SEmpty -> true
-      | SCons _ -> false   // 未閉のままなら不一致
+      | SCons _ -> false   // still unclosed -> not balanced
     else
       let c = char_at s i in
       if is_open c then loop (i + 1) (push stack c)
       else if is_close c then
         match stack with
-        | SEmpty -> false   // 余分な閉じ
+        | SEmpty -> false   // extra closing
         | SCons (top, rest) ->
           if close_of top == c then loop (i + 1) rest
           else false        // mismatch
       else
-        // それ以外の文字は skip
+        // skip any other character
         loop (i + 1) stack in
   loop 0 SEmpty;
 
@@ -54,9 +54,9 @@ let _ = report "()[]{}";             // balanced
 let _ = report "([])";               // balanced
 let _ = report "({[]})";             // balanced
 let _ = report "(]";                 // unbalanced (mismatch)
-let _ = report "((";                 // unbalanced (未閉)
-let _ = report "))";                 // unbalanced (余分)
-let _ = report "if (a[0] == {x}) {}";   // balanced (非括弧文字 skip)
+let _ = report "((";                 // unbalanced (unclosed)
+let _ = report "))";                 // unbalanced (extra)
+let _ = report "if (a[0] == {x}) {}";   // balanced (non-bracket chars skipped)
 let _ = report "let f = fn (x: int) -> [x, x + 1] in f 3";  // balanced
 let _ = report "";                   // balanced (empty)
 

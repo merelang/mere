@@ -1,13 +1,13 @@
 // let pattern: destructure on the left of `let ... in ...`
 //
-//   - 変数 (`let x = ...`)
-//   - ワイルドカード (`let _ = ...`)
-//   - タプル分解 (`let (a, b) = ...`)
-//   - ネスト (`let (a, (b, c)) = ...`)
+//   - variable (`let x = ...`)
+//   - wildcard (`let _ = ...`)
+//   - tuple destructuring (`let (a, b) = ...`)
+//   - nested (`let (a, (b, c)) = ...`)
 //   - unit (`let () = ...`)
 //
-// 現状の制約: 上記は expression 形式 (let ... in ...) のみ。
-// top-level decl 形式 (let ... ;) は ident のみ対応。
+// Current limitation: the above only works in expression form
+// (let ... in ...). Top-level decl form (let ... ;) only supports idents.
 
 let pair = (10, 20);
 

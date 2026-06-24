@@ -1,21 +1,21 @@
-// &shared write を本格使用した demo — 複数 handler が同じ cap (Logger /
-// Metrics) を共有書き込みするパターン。
+// Serious use of &shared write -- the pattern where multiple handlers
+// share-write to the same cap (Logger / Metrics).
 //
-// 目的: examples roadmap F1。borrow_modes.mere の延長で「実際の
-// アプリ風」シナリオを書く: HTTP request 処理を模した複数 handler が
-// 共通の Logger / Metrics を扱う。
+// Purpose: examples roadmap F1. An "app-like" extension of
+// borrow_modes.mere: multiple handlers mimicking HTTP request handling
+// that all share a common Logger / Metrics.
 //
-// Phase 17.1/17.2 で borrow checker が conflict matrix を完全網羅
-// したので、`&shared write` 同士は衝突せず並存できる (この example で
-// 検証される)。
+// Since the borrow checker fully covers the conflict matrix as of
+// Phase 17.1/17.2, two `&shared write` borrows can coexist without
+// conflict (verified by this example).
 //
-// 実行モード: interpreter + C codegen 動作確認済 (Phase 19.x で
-// `&[mode] R T` の ty_tag / Field_get 対応を追加、Logger 以外の
-// record (Metrics 等) も borrow 越し field access が動くように)。
+// Execution mode: confirmed on interpreter + C codegen (Phase 19.x added
+// ty_tag / Field_get support for `&[mode] R T`, so field access through
+// borrows works on records other than Logger -- e.g. Metrics -- as well).
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/cap_handler.mere
-//   # 期待出力:
+//   # Expected output:
 //   #   svc [INFO] handle: login(user=alice)
 //   #   [METRIC] inc requests
 //   #   svc [INFO] handle: search(q=mere lang)
@@ -24,8 +24,9 @@
 //   #   [METRIC] inc requests
 //   #   svc [INFO] total handled: 3
 
-// 「signature alias」で各 handler の共通 cap 束を再利用 (cap-passing
-// パターン)。`...svc_ctx` で展開、handler は各 cap を直接受け取る。
+// Use a "signature alias" to reuse the common cap bundle of each handler
+// (cap-passing pattern). `...svc_ctx` expands it so each handler receives
+// the individual caps directly.
 signature svc_ctx = (
   lg: &shared write R Logger,
   met: &shared write R Metrics

@@ -1,6 +1,6 @@
-// 算術式 + let バインディング + 変数の評価器 in Lang
+// Arithmetic expressions + let bindings + variables evaluator in Lang
 //
-// 文法:
+// Grammar:
 //   expr   := "let" ident "=" expr "in" expr
 //           | term (("+" | "-") term)*
 //   term   := factor (("*" | "/") factor)*
@@ -8,7 +8,7 @@
 //   ident  := letter (letter | digit)*
 //   number := digit+
 //
-// AST + parser + env-based eval を ~150 行で。
+// AST + parser + env-based eval in ~150 lines.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 
@@ -30,8 +30,8 @@ let rec skip_ws = fn (s: str, i: int) ->
   else i;
 
 // === Identifier scanner ===
-// 先頭は letter、続きは letter or digit。
-// `let` `in` キーワードは ident として一旦読んだ後で分岐。
+// First char is a letter, subsequent chars are letter or digit.
+// `let` and `in` keywords are read as ident first, then branched on.
 
 let rec scan_ident = fn (s: str, i: int) ->
   if i >= str_len s then i
@@ -170,7 +170,7 @@ let run = fn (input: str) ->
   let result = try_or (fn () -> show (eval [] (parse input))) "<error>" in
   print (input ++ "  =>  " ++ result);
 
-// arithmetic (mini_calc 既存テスト)
+// arithmetic (existing mini_calc tests)
 let _ = run "1 + 2";
 let _ = run "2 * 3 + 4";
 let _ = run "1 + 2 * 3";
@@ -178,14 +178,14 @@ let _ = run "(1 + 2) * 3";
 let _ = run "-5 + 10";
 let _ = run "((1 + 2) * 3 - 4) / 5";
 
-// let バインディング
+// let bindings
 let _ = run "let x = 10 in x + 5";
 let _ = run "let x = 3 in let y = 4 in x * y";
 let _ = run "let x = 2 in x * x * x";
 let _ = run "let a = 10 in let b = a * 2 in a + b";
 let _ = run "let x = 5 in (let x = 100 in x) + x";  // shadowing
 
-// エラー
+// errors
 let _ = run "1 / 0";
 let _ = run "unbound";
 let _ = run "let x = 1";   // missing in

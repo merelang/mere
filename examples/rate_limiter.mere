@@ -1,61 +1,63 @@
-// rate_limiter: 固定 window rate limiter (Phase 33.3)
+// rate_limiter: fixed-window rate limiter (Phase 33.3)
 //
-// 目的: examples roadmap G5。Map[R, str, int] 2 つで key → (window_start,
-//   count) を管理、固定 60 秒 window で limit を超えたら reject。timestamp
-//   を引数で受け取る形にして 4 backend で deterministic test。FFI 連携 (libc
-//   の time(2) を呼ぶ wrapper) はコメントで示すだけにとどめる。
+// Purpose: examples roadmap G5. Manage key -> (window_start, count) with
+//   two Map[R, str, int]s, and reject once the limit is exceeded within a
+//   fixed 60-second window. Pass timestamps as arguments to get deterministic
+//   tests across the 4 backends. FFI integration (a wrapper calling libc's
+//   time(2)) is only sketched in comments.
 //
-// 設計:
-//   - window_starts: key → 最初のリクエストの epoch 秒
-//   - counts:        key → current window 内のリクエスト数
-//   - rate_check_at key limit now:  既存 (or 期限切れ) window を判定、count
-//     を更新し true/false を返す
-//   - rate_check key limit:         unix_time () を呼んで rate_check_at を
-//     wrap (実時間版、デモ用)
+// Design:
+//   - window_starts: key -> epoch seconds of the first request
+//   - counts:        key -> request count in the current window
+//   - rate_check_at key limit now:  classify against the existing (or
+//     expired) window, update count, and return true/false
+//   - rate_check key limit:         wraps rate_check_at by calling
+//     unix_time () (real-time variant, for demo)
 //
-// 4 backend で diff = 0 にするため timestamp は引数で渡す。real-time 版を
-// 作るには `extern fn time: unit -> int = "time";` のような C alias 構文が
-// 要る (Phase 32 MVP は同名 only、libc time が builtin と被るため)。
+// To keep diff = 0 across the 4 backends, timestamps are passed in. A real-
+// time variant would need C alias syntax like
+// `extern fn time: unit -> int = "time";` (the Phase 32 MVP only supports
+// same-name FFI, and libc time collides with the builtin).
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/rate_limiter.mere
 
-// State (top-level mutable Map、Phase 30.2 で codegen global 化)
+// State (top-level mutable Maps; made codegen-global in Phase 30.2)
 let window_starts = map_new ();
 let counts        = map_new ();
 
 let window_sec = 60;
 
-// 既存 window のリクエスト数を 1 増やし、limit 以下なら true
+// Increment the request count for the existing window by 1; true if at or below limit
 let rate_check_at = fn (key: str) -> fn (limit: int) -> fn (now: int) ->
   if map_has window_starts key then
     let start = map_get window_starts key in
     if now - start < window_sec then
-      // 同じ window 内 — count を増やす
+      // Same window -- bump the count
       let new_count = (map_get counts key) + 1 in
       let _ = map_set counts key new_count in
       new_count <= limit
     else
-      // window 切れ — reset
+      // Window expired -- reset
       let _ = map_set window_starts key now in
       let _ = map_set counts key 1 in
       true
   else
-    // 初回 request
+    // First request
     let _ = map_set window_starts key now in
     let _ = map_set counts key 1 in
     true;
 
-// === Self-tests with explicit time (4 backend で deterministic) ===
+// === Self-tests with explicit time (deterministic across 4 backends) ===
 let _ = print "=== rate_limiter (Phase 33.3) ===";
 
 // alice: limit 3 in 60s window
-//   t=100 1st →  true (count 1)
-//   t=105 2nd →  true (count 2)
-//   t=110 3rd →  true (count 3, at limit)
-//   t=115 4th →  false (count 4, over limit)
-//   t=125 5th →  false (count 5, still in window)
-//   t=200 new → true (window reset, count 1)
+//   t=100 1st ->  true (count 1)
+//   t=105 2nd ->  true (count 2)
+//   t=110 3rd ->  true (count 3, at limit)
+//   t=115 4th ->  false (count 4, over limit)
+//   t=125 5th ->  false (count 5, still in window)
+//   t=200 new -> true (window reset, count 1)
 let _ =
   let r1 = rate_check_at "alice" 3 100 in
   let _  = print ("alice t=100 1st: " ++ show r1) in
@@ -70,7 +72,7 @@ let _ =
   let r6 = rate_check_at "alice" 3 200 in
   print ("alice t=200 new: " ++ show r6);
 
-// bob と alice は独立 state を持つ (Map のキー分離)
+// bob and alice keep independent state (Map keys are separate)
 let _ =
   let b1 = rate_check_at "bob" 2 200 in
   let _  = print ("bob t=200 1st: " ++ show b1) in

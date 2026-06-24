@@ -1,16 +1,16 @@
-// memo_fib: メモ化付き Fibonacci (Phase 38.C partial app showcase)
+// memo_fib: memoized Fibonacci (Phase 38.C partial app showcase)
 //
-// `let lookup = map_get cache` で 2-arg curried builtin を partial 適用、
-// `let store = map_set cache` で 3-arg curried builtin を 1-arg partial 適用、
-// fib の中で lookup / store を closure として渡せる。
+// `let lookup = map_get cache` partially applies a 2-arg curried builtin,
+// `let store = map_set cache` partially applies one arg of a 3-arg curried
+// builtin, so that lookup / store can be passed around as closures inside fib.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
 let cache = map_new ();
 let _ = map_set cache "0" 0;
 let _ = map_set cache "1" 1;
 
-// Phase 38.C: 2-arg と 3-arg の partial app
+// Phase 38.C: partial app of 2-arg and 3-arg builtins
 let lookup = map_get cache;
 let has = map_has cache;
 let store = map_set cache;

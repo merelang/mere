@@ -1,24 +1,25 @@
-// question_demo: Phase 36 で導入した `?` Option early-return の demo
+// question_demo: demo of the `?` Option early-return introduced in Phase 36
 //
-// 新規構文:
-//   `let x = e? in body` は次のように desugar される:
+// New syntax:
+//   `let x = e? in body` desugars to:
 //
 //   match e with
 //   | None   -> None
 //   | Some x -> body
 //
-//   `e` が None なら関数全体が即 `None` を返す。Rust の `?` operator や
-//   Haskell の do-notation `<-` に近い感覚で early-return 連鎖が書ける。
+//   If `e` is None, the entire function returns `None` immediately. You can
+//   write early-return chains in a style similar to Rust's `?` operator or
+//   Haskell's do-notation `<-`.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
 let _ = print "=== question_demo (Phase 36) ===";
 
-// --- 安全な除算: 0 で割ったら None ---
+// --- Safe division: None when dividing by 0 ---
 let safe_div = \a b -> if b == 0 then None else Some (a / b);
 
-// チェーン: a / x / 2 / 5 を全部安全に計算
-// 旧スタイル (without `?`):
+// Chain: compute a / x / 2 / 5 safely all the way through
+// Old style (without `?`):
 let calc_old = \x ->
   match safe_div 100 x with
   | None -> None
@@ -28,19 +29,19 @@ let calc_old = \x ->
     | Some b ->
       Some (b + 1);
 
-// 新スタイル (with `?`):
+// New style (with `?`):
 let calc_new = \x ->
   let a = safe_div 100 x? in
   let b = safe_div a 2? in
   Some (b + 1);
 
-// 両方とも同じ動き
+// Both behave the same
 let show_opt = \o ->
   match o with
   | None -> "none"
   | Some n -> show n;
 
-// 文字列値用 (show str は quote-wrap するので raw を返す版)
+// For string values (show str quote-wraps, so this returns the raw)
 let show_opt_str = \o ->
   match o with
   | None -> "none"
@@ -52,7 +53,7 @@ let _ = print "calc(5)  new: {show_opt (calc_new 5)}";   // 11
 let _ = print "calc(0)  old: {show_opt (calc_old 0)}";   // none
 let _ = print "calc(0)  new: {show_opt (calc_new 0)}";   // none
 
-// --- Map lookup の連鎖 ---
+// --- Chained Map lookups ---
 let users = map_new ();
 let _ = map_set users "alice" "alice@example.com";
 let _ = map_set users "bob"   "bob@example.com";

@@ -1,25 +1,25 @@
-// matrix_2d: 1D OwnedVec[int] + (row, col) index 計算で 2D matrix (Phase 36)
+// matrix_2d: 2D matrix backed by 1D OwnedVec[int] + (row, col) index math (Phase 36)
 //
-// 目的: examples roadmap H2。2D 行列を 1 次元 OwnedVec で持ち、index を
-//   `r * cols + c` で計算するパターン。matrix add / transpose / pretty
-//   print を 4 backend で dogfood。
+// Purpose: examples roadmap H2. Pattern of holding a 2D matrix in a 1D OwnedVec
+//   and computing the index as `r * cols + c`. Dogfoods matrix add / transpose
+//   / pretty print across 4 backends.
 //
-// 設計:
-//   - matrix を `(rows, cols, data: OwnedVec[int])` の record に
+// Design:
+//   - Matrix as a record `(rows, cols, data: OwnedVec[int])`
 //   - data.len = rows * cols
-//   - get / set は idx = r * cols + c
-//   - nested Vec[Vec[int]] は region escape を解決できず本例では避けた
+//   - get / set use idx = r * cols + c
+//   - nested Vec[Vec[int]] cannot resolve region escape and is avoided here
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 type Matrix = { rows: int, cols: int, data: OwnedVec[int] };
 
-// 1D index で get (OwnedVec は set 未対応なので addition / transpose は
-// 新しい OwnedVec を build し直す)
+// Get by 1D index (OwnedVec does not support set, so addition / transpose
+// rebuild a fresh OwnedVec)
 let get = fn (m: Matrix) -> fn (r: int) -> fn (c: int) ->
   owned_vec_get m.data (r * m.cols + c);
 
-// matrix を行ごとに add (要素同士)
+// Add two matrices row by row (element-wise)
 let mk_add = fn (a: Matrix) -> fn (b: Matrix) ->
   let d = owned_vec_new () in
   let rec loop = fn (i: int) ->
@@ -30,7 +30,7 @@ let mk_add = fn (a: Matrix) -> fn (b: Matrix) ->
   let _ = loop 0 in
   Matrix { rows = a.rows, cols = a.cols, data = d };
 
-// transpose: row/col を入れ替えた新 matrix
+// transpose: new matrix with row/col swapped
 let mk_transpose = fn (m: Matrix) ->
   let d = owned_vec_new () in
   let rec outer = fn (c: int) ->
@@ -75,7 +75,7 @@ let print_mat = fn (m: Matrix) ->
 
 let _ = print "=== matrix_2d (Phase 36) ===";
 
-// 3x3 行列 A: 0..8
+// 3x3 matrix A: 0..8
 let a_data = owned_vec_new ();
 let rec push_a = fn (i: int) ->
   if i >= 9 then ()
@@ -85,7 +85,7 @@ let rec push_a = fn (i: int) ->
 let _ = push_a 0;
 let a = Matrix { rows = 3, cols = 3, data = a_data };
 
-// B = 全部 1 の 3x3
+// B = 3x3 of all 1s
 let b_data = owned_vec_new ();
 let rec push_b = fn (i: int) ->
   if i >= 9 then ()

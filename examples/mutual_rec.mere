@@ -1,6 +1,6 @@
-// 相互再帰 `let rec ... and ...`
-// 既知の制約だった「単一の再帰のみ」を解消。
-// 2 関数以上を同時に再帰的に定義できる。
+// Mutual recursion with `let rec ... and ...`
+// Lifts the previously known "single recursion only" restriction.
+// Two or more functions can now be defined recursively at the same time.
 
 let rec is_even = fn n ->
   if n == 0 then true
@@ -9,16 +9,16 @@ and is_odd = fn n ->
   if n == 0 then false
   else is_even (n - 1);
 
-// 3 関数の相互再帰: a -> b -> c -> a -> ...
+// Mutual recursion among 3 functions: a -> b -> c -> a -> ...
 let rec a = fn n -> if n == 0 then 100 else b (n - 1)
 and b = fn n -> if n == 0 then 200 else c (n - 1)
 and c = fn n -> if n == 0 then 300 else a (n - 1);
 
-// even/odd の組み合わせと 3-way の合計
+// even/odd combinations and 3-way sum
 let r1 = if is_even 42 then 1 else 0;
 let r2 = if is_odd  17 then 10 else 0;
-let r3 = a 5;    // 5 = 3*1 + 2 → b (a(b(c(a(b 0)))))) → ... a→b→c→a→b→c→200
-let r4 = b 3;    // b→c→a→b(0) → 200
-let r5 = c 1;    // c→a(0) → 100
+let r3 = a 5;    // 5 = 3*1 + 2 -> b (a(b(c(a(b 0)))))) -> ... a->b->c->a->b->c->200
+let r4 = b 3;    // b->c->a->b(0) -> 200
+let r5 = c 1;    // c->a(0) -> 100
 
 r1 + r2 + r3 + r4 + r5

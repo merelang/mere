@@ -1,13 +1,13 @@
-// if_let_demo: Phase 36 で導入した `if let` の demo
+// if_let_demo: demo of `if let` introduced in Phase 36
 //
-// 構文:
-//   `if let pat = e then t else f` は
-//   `match e with | pat -> t | _ -> f` の sugar。
-//   else 省略時は unit が default。
+// Syntax:
+//   `if let pat = e then t else f` is sugar for
+//   `match e with | pat -> t | _ -> f`.
+//   When else is omitted, unit is the default.
 //
-//   Rust の `if let` と同じ感覚で、Option/Result の chain 等に便利。
+//   Same feel as Rust's `if let`, handy for chaining Option/Result etc.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let _ = print "=== if_let_demo (Phase 36) ===";
 
@@ -52,7 +52,7 @@ let _ = if let Err msg = parse "abc" then
 type Shape = Circle of int | Rect of (int * int) | Square of int;
 
 let area = \s ->
-  if let Circle r = s then 3 * r * r          // π ≈ 3 で簡略化
+  if let Circle r = s then 3 * r * r          // simplified with π ≈ 3
   else if let Square w = s then w * w
   else if let Rect dims = s then fst dims * snd dims
   else 0;

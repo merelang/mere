@@ -1,32 +1,32 @@
-// 簡易 shell の batch evaluator
+// Batch evaluator for a tiny shell
 //
-// 行ごとのコマンド (list of str) を順に parse → variant に分類 →
-// dispatch して env / history を更新する小さな state machine。
-// 対話的 (REPL) には せず、入力 list を fold する batch 形式 で
-// Mere の interpreter で素直に動く形に。
+// A small state machine that parses each line of commands (list of str),
+// classifies it into a variant, dispatches, and updates env / history.
+// Not interactive (no REPL); structured as a batch fold over an input list
+// so it runs cleanly under Mere's interpreter.
 //
-// 含むコマンド:
-//   echo MSG          - メッセージ表示
-//   set NAME VAL      - env に NAME=VAL を記録
-//   get NAME          - env から取得 (未定義は <unset>)
-//   list              - env を全部表示 (key 順は insertion 順)
-//   add A B           - 整数加算 (A, B は数字)
-//   history           - これまでの入力ライン表示
-//   help              - コマンド一覧
-//   exit              - 以降のコマンドは無視
-//   (それ以外)        - "unknown command: ..." を表示
+// Commands included:
+//   echo MSG          - print a message
+//   set NAME VAL      - record NAME=VAL in env
+//   get NAME          - read from env (<unset> if undefined)
+//   list              - show entire env (in insertion order)
+//   add A B           - integer addition (A, B are digits)
+//   history           - show entered lines
+//   help              - command list
+//   exit              - ignore subsequent commands
+//   (anything else)   - print "unknown command: ..."
 //
-// 目的: examples roadmap G1。variant command + str_split parse +
-// dispatch + state (env + history + exit flag) の組合せ demo。
+// Purpose: examples roadmap G1. Demo of variant command + str_split parse
+// + dispatch + state (env + history + exit flag) combined.
 //
-// 実行モード: interpreter のみ
-//   - 多相 user 定義関数 (parse_cmd / dispatch / fold over cmds) の
-//     codegen monomorphize gap (DEFERRED §1.7)。
-//   - wildcard `let _ = ...` も C codegen 未対応。
+// Execution mode: interpreter only
+//   - polymorphic user-defined functions (parse_cmd / dispatch / fold over
+//     cmds) hit the codegen monomorphize gap (DEFERRED §1.7).
+//   - wildcard `let _ = ...` is also unsupported in C codegen.
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/mini_shell.mere
-//   # 期待出力 (抜粋):
+//   # Expected output (excerpt):
 //   #   $ echo hello world
 //   #   hello world
 //   #   $ set name Alice
@@ -54,7 +54,7 @@ let parse_cmd = fn (line: str) ->
   | Nil           -> CUnknown ""
   | Cons (head, rest) ->
     if head == "echo" then
-      // echo の引数は残り全部を再結合
+      // echo's argument is everything that follows, rejoined
       CEcho (str_join " " rest)
     else if head == "set" then
       match rest with
@@ -102,8 +102,8 @@ let exec = fn env -> fn history -> fn (cmd: command) ->
   | CExit              -> ()
   | CUnknown line      -> print ("unknown command: " ++ line);
 
-// 1 line を処理。exit 後は何もしない。
-// 戻り値は "exit 済か" の bool。
+// Process one line. After exit, does nothing.
+// Returns a bool indicating "already exited?".
 let step = fn env -> fn history -> fn (exited: bool) -> fn (line: str) ->
   if exited then exited
   else
@@ -115,7 +115,7 @@ let step = fn env -> fn history -> fn (exited: bool) -> fn (line: str) ->
     | CExit -> true
     | _     -> false;
 
-// 入力 list を順に step に流す。
+// Feed input list into step in sequence.
 let rec run_lines = fn env -> fn history -> fn (exited: bool) -> fn lines ->
   match lines with
   | Nil -> exited

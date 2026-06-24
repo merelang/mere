@@ -1,15 +1,17 @@
-// dfs_bfs: グラフ走査 DFS と BFS の比較
+// dfs_bfs: comparison of DFS and BFS graph traversal
 //
-// 同じ無向グラフを source から DFS / BFS で訪問し、 訪問順を出力。
-// グラフ表現: edge list (E of int * int) を「両方向」 として扱う。
+// Visit the same undirected graph from a source via DFS / BFS and print
+// the visit order.
+// Graph representation: edge list (E of int * int), treated as bidirectional.
 //
-// DFS は再帰 + visited Map で実装、 BFS は queue を Map で管理。
+// DFS is implemented recursively with a visited Map; BFS uses a queue
+// managed via a Map.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type edge = E of int * int;
 
-// 両方向の隣接 (graph は無向と想定)
+// Bidirectional neighbors (graph is assumed undirected)
 let rec neighbors = fn (edges: edge list) -> fn (u: int) ->
   match edges with
   | Nil -> Nil
@@ -18,9 +20,9 @@ let rec neighbors = fn (edges: edge list) -> fn (u: int) ->
     else if b == u then Cons (a, neighbors rest u)
     else neighbors rest u;
 
-// DFS: 再帰版 (Phase 39.A2 で inner-lifted fn を value 位置で使えるよう
-// なったため、 visited / order を closure に capture した visit を
-// list_iter に直接渡せる natural style)。
+// DFS: recursive version. Since Phase 39.A2 inner-lifted fns can be used
+// at value position, a `visit` that captures visited / order in its
+// closure can be passed directly to list_iter in natural style.
 let dfs = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
   let visited = map_new () in
   let order = map_new () in
@@ -37,7 +39,7 @@ let dfs = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
   let _ = n in
   order;
 
-// BFS: queue を Map で管理 (head / tail / value at key)
+// BFS: manage the queue via a Map (head / tail / value at key)
 let bfs = fn (n: int) -> fn (edges: edge list) -> fn (source: int) ->
   let visited = map_new () in
   let q = map_new () in
@@ -96,7 +98,7 @@ let _ = print ("BFS from 0: " ++ show_order (bfs 8 edges 0));
 
 let _ = print "=== with cycle ===";
 let edges2 = [
-  E (0, 1), E (1, 2), E (2, 0),  // 三角形
+  E (0, 1), E (1, 2), E (2, 0),  // triangle
   E (2, 3), E (3, 4)
 ];
 let _ = print ("DFS from 0: " ++ show_order (dfs 5 edges2 0));

@@ -1,17 +1,19 @@
-// bst: 二分探索木 (Binary Search Tree)
+// bst: Binary Search Tree
 //
-// `type btree = BNil | BNode of int * btree * btree` の variant で再帰的に
-// 表現。 insert / lookup / inorder traversal / count / depth を実装。
-// immutable: insert は新しい tree を返す (path copy)。
+// Represented recursively as the variant
+// `type btree = BNil | BNode of int * btree * btree`.
+// Implements insert / lookup / inorder traversal / count / depth.
+// Immutable: insert returns a new tree (path copy).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 type btree = BNil | BNode of int * btree * btree;
 
-// 新規 BST の空木
+// Empty BST
 let empty_bst = BNil;
 
-// insert: BST 順序を保って x を挿入。 既存と等しければそのまま (重複なし)
+// insert: insert x preserving BST order. If equal to an existing value,
+// return the tree unchanged (no duplicates).
 let rec insert = fn (t: btree) -> fn (x: int) ->
   match t with
   | BNil -> BNode (x, BNil, BNil)
@@ -20,7 +22,7 @@ let rec insert = fn (t: btree) -> fn (x: int) ->
     else if x > v then BNode (v, l, insert r x)
     else t;
 
-// lookup: x が tree にあるか
+// lookup: is x in the tree?
 let rec lookup = fn (t: btree) -> fn (x: int) ->
   match t with
   | BNil -> false
@@ -29,20 +31,20 @@ let rec lookup = fn (t: btree) -> fn (x: int) ->
     else if x < v then lookup l x
     else lookup r x;
 
-// inorder: 中順走査で sorted list を得る (BST の性質で必ず sorted)
+// inorder: in-order traversal yields a sorted list (BST invariant)
 let rec inorder = fn (t: btree) ->
   match t with
   | BNil -> Nil
   | BNode (v, l, r) ->
     list_append (inorder l) (Cons (v, inorder r));
 
-// count: ノード数
+// count: number of nodes
 let rec count = fn (t: btree) ->
   match t with
   | BNil -> 0
   | BNode (_, l, r) -> 1 + count l + count r;
 
-// depth: 最大深さ
+// depth: maximum depth
 let rec depth = fn (t: btree) ->
   match t with
   | BNil -> 0
@@ -51,7 +53,7 @@ let rec depth = fn (t: btree) ->
     let dr = depth r in
     1 + (if dl > dr then dl else dr);
 
-// 複数の値を順に insert していくヘルパー
+// Helper that inserts multiple values in order
 let rec insert_all = fn (t: btree) -> fn (xs: int list) ->
   match xs with
   | Nil -> t

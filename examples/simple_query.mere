@@ -1,17 +1,15 @@
-// simple_query: SELECT * FROM users WHERE col op value の最小実装 (Phase 36)
+// simple_query: minimal implementation of SELECT * FROM users WHERE col op value (Phase 36)
 //
-// 目的: examples roadmap I3。tokenize → parse → execute の典型的な
-//   query interpreter mini を 4 backend で動かす。toy_sql.mere の 1165 LoC
-//   から大きく削った教材向け版 (~150 LoC)。
+// Purpose: examples roadmap I3. Run a typical tokenize -> parse -> execute
+//   mini query interpreter on the 4 backends. A teaching-oriented version
+//   (~150 LoC) cut down significantly from toy_sql.mere's 1165 LoC.
 //
-// scope:
-//   - 単一テーブル `users { id, name, age }` (in-memory fixed list)
+// Scope:
+//   - single table `users { id, name, age }` (in-memory fixed list)
 //   - `SELECT * FROM users` (WHERE optional)
-//   - `WHERE col op value` ただし col ∈ {id, name, age}、op ∈ {=, !=, <, >}
-//   - quote 無し、文字列は単語として
-//   - 失敗時は ParseErr / RunErr の variant で返す
-//
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+//   - `WHERE col op value` where col is in {id, name, age}, op in {=, !=, <, >}
+//   - no quotes; strings are treated as words
+//   - failures returned as ParseErr / RunErr variants
 
 type User = { id: int, name: str, age: int };
 
@@ -23,7 +21,7 @@ type query = Query of (str * cond);   // (table, cond)
 
 type qresult = QOk of query | QErr of str;
 
-// === tokenizer: 空白で分割。str_split " " を活用 ===
+// === tokenizer: split on whitespace. Uses str_split " " ===
 let tokenize = fn (s: str) -> str_split s " ";
 
 // === helpers ===
@@ -34,20 +32,20 @@ let parse_op = fn (s: str) ->
   else if s == ">"  then Some OpGt
   else None;
 
-// list helper: nth (0-indexed)、無ければ None
+// list helper: nth (0-indexed); None if missing
 let rec nth = fn (xs: str list) -> fn (i: int) ->
   match xs with
   | Nil       -> None
   | Cons (h, t) -> if i == 0 then Some h else nth t (i - 1);
 
-// list helper: 長さ
+// list helper: length
 let rec llen = fn (xs: str list) ->
   match xs with
   | Nil         -> 0
   | Cons (_, t) -> 1 + llen t;
 
-// 大文字小文字を区別せず比較したいが str_lower 等が codegen 未対応なので、
-// 入力 SQL は UPPERCASE 前提とする。
+// We'd like to compare case-insensitively, but str_lower etc. are not
+// codegen-supported yet, so we assume input SQL is in UPPERCASE.
 let parse_query = fn (sql: str) ->
   let toks = tokenize sql in
   let n = llen toks in
@@ -106,7 +104,7 @@ let field_str = fn (u: User) -> fn (col: str) ->
   else if col == "age"  then show u.age
   else "<unknown>";
 
-// 比較を文字列同士で行う。op が < / > のときは int 比較 (toi で変換)
+// Compare as strings. For op < / >, compare as int (via toi)
 let toi = fn (s: str) -> int_of_str s;
 
 let match_cond = fn (u: User) -> fn (col: str) -> fn (op_v: op) -> fn (val: str) ->

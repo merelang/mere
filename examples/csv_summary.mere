@@ -1,10 +1,10 @@
-// csv_summary: CSV 風データの集計レポート (Phase 36)
+// csv_summary: aggregation report on CSV-like data (Phase 36)
 //
-// 目的: Phase 36 で追加した sugar / prelude helper を combined で使った
-//   realistic な data processing 例。
-//   sales records (name, area, amount) を parse → 集計 → ランキング表示。
+// Purpose: a realistic data-processing example that combines the sugar /
+//   prelude helpers added in Phase 36.
+//   Parse sales records (name, area, amount) -> aggregate -> display rankings.
 //
-// 使う sugar:
+// Sugar used:
 //   - `for x in xs do body`
 //   - `if let pat = e then ... else ...`
 //   - `[expr | x <- xs, cond]` (list comprehension + filter)
@@ -13,9 +13,9 @@
 //   - `f @@ x` low-prec application
 //   - `let v = e? in body` Option early-return
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
-// CSV 行 (name,area,amount)。space を含めない簡略形式。
+// CSV row (name,area,amount). Simplified form without spaces.
 let raw =
   ["alice,west,120",
    "bob,east,85",
@@ -30,7 +30,7 @@ let raw =
 
 type Row = { name: str, area: str, amount: int };
 
-// "k,v,w" → Some Row { ... } / None on malformed
+// "k,v,w" -> Some Row { ... } / None on malformed input
 let parse_row = fn (line: str) ->
   let parts = str_split line "," in
   match parts with
@@ -54,7 +54,7 @@ let print_row = fn (r: Row) ->
   print "{r.name} [{r.area}] = {show r.amount}";
 let _ = for r in rows do print_row r;
 
-// area ごとの合計を Map に集計
+// Aggregate totals per area into a Map
 let _ = print "--- totals by area ---";
 let totals = map_new ();
 let accum = fn (r: Row) ->
@@ -65,7 +65,7 @@ let _ = for r in rows do accum r;
 
 let _ = map_iter totals (\area t -> print "{area}: {show t}");
 
-// 全体統計 (Phase 36 prelude helpers)
+// Overall statistics (Phase 36 prelude helpers)
 let _ = print "--- overall stats ---";
 let get_amount = fn (r: Row) -> r.amount;
 let amounts = list_map rows get_amount;
@@ -74,7 +74,7 @@ let _ = print "mean  = {show (list_sum amounts / list_len amounts)}";
 let _ = print "max   = {show (list_max amounts)}";
 let _ = print "min   = {show (list_min amounts)}";
 
-// 高額顧客 (amount >= 150) を filter で抽出
+// Extract VIPs (amount >= 150) via filter
 let _ = print "--- VIP (amount >= 150) ---";
 let is_vip = fn (r: Row) -> r.amount >= 150;
 let get_name = fn (r: Row) -> r.name;
@@ -82,21 +82,22 @@ let vips = list_filter rows is_vip;
 let vip_names = list_map vips get_name;
 let _ = for n in vip_names do print "  - {n}";
 
-// area west のみ + ランキング (selection sort 風)
+// Area "west" only + ranking (selection-sort flavor)
 let _ = print "--- west ranking ---";
 let is_west = fn (r: Row) -> r.area == "west";
 let west_rows = list_filter rows is_west;
 
-// 「最大値の Row を 1 つ取り、残りを返す」を 2 つの list で表現
-// (Option<Row> の C codegen は polymorphic variant 内 record で
-//  forward decl issue が出るため避け、tuple のみで構成)
+// Express "take one Row with the maximum value, return the rest" using
+// two lists.
+// (We avoid Option<Row>: in C codegen, polymorphic variants containing a
+//  record run into a forward-decl issue, so we stay tuple-only.)
 let rec sort_desc = fn (xs: Row list) ->
   match xs with
   | Nil -> Nil
   | Cons _ ->
     let amounts = list_map xs get_amount in
     let max_amt = list_max amounts in
-    // best_first: 最初の max を Cons の先頭に持ってくる
+    // best_first: pull the first max to the head of the Cons
     let rec to_front = fn (ys: Row list) ->
       match ys with
       | Nil -> Nil

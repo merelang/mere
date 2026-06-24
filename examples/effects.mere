@@ -1,10 +1,12 @@
-// Capability passing パターンのデモ。
+// Demo of the capability-passing pattern.
 //
-// Lang のエフェクトシステムは「副作用 = ケイパビリティを値として引数で渡す」設計
-// (設計 doc: 05_effect_system.md, 10_effect_trial_findings.md)。HM + 関数引数だけで
-// 成立し、副作用情報は型に出さない。
+// Mere's effect system is designed around "side effect = pass a capability
+// as a value argument" (see internal design notes 05_effect_system.md,
+// 10_effect_trial_findings.md). It works on HM + function arguments alone,
+// and effect information does not appear in types.
 //
-// このファイルは Lang の現状機能だけで cap-passing が書けることを実証する例題。
+// This file demonstrates that cap-passing can be written using only the
+// language's currently available features.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 
@@ -16,19 +18,22 @@ let rec map = fn f -> fn xs -> match xs with
   | []        -> []
   | [h, ...t] -> Cons (f h, map f t);
 
-// === ケイパビリティ型 (builtin) ===
-// `Logger` / `Metrics` は builtin の cap 型 (typer/eval が事前に登録)。
-// 構築は `mk_logger : str -> Logger` / `mk_metrics : unit -> Metrics`。
+// === Capability types (builtin) ===
+// `Logger` / `Metrics` are builtin cap types (pre-registered by typer/eval).
+// Construct them with `mk_logger : str -> Logger` /
+// `mk_metrics : unit -> Metrics`.
 //
-// 内訳:
+// Breakdown:
 //   Logger { info: str -> unit, warn: str -> unit, error: str -> unit }
 //   Metrics { inc: str -> unit, record: str -> int -> unit }
 //
-// 自作 cap も同じパターン: `type MyCap = { ... }` + `let mk_mycap = fn -> ...`。
+// User-defined caps follow the same pattern:
+// `type MyCap = { ... }` + `let mk_mycap = fn -> ...`.
 
-// === パターン 1: 低階関数で cap を直接使用 ===
-// cap は引数で受け取り、使う側で .field 経由で呼び出す。
-// シグネチャを見れば「この関数は Logger と Metrics を使う」が一目でわかる。
+// === Pattern 1: use the cap directly in a first-order function ===
+// Receive the cap as an argument and call it through .field on the call site.
+// The signature makes it obvious at a glance that "this function uses
+// Logger and Metrics".
 
 let save_order = fn (logger: Logger) -> fn (metrics: Metrics) -> fn (order_id: int) -> {
   logger.info ("saving order " ++ show order_id);
@@ -36,9 +41,10 @@ let save_order = fn (logger: Logger) -> fn (metrics: Metrics) -> fn (order_id: i
   metrics.record "orders.id" order_id;
 };
 
-// === パターン 2: バケツリレー (intermediate 関数) ===
-// process_user は metrics を直接使わないが、save_order に渡すために受け取る。
-// これは Lang の哲学では「機能ではなくバグ」ではなく、「副作用経路の可視化」。
+// === Pattern 2: bucket relay (intermediate function) ===
+// process_user does not use metrics directly but receives it in order to
+// pass it through to save_order. In Mere's philosophy this is not "a bug
+// rather than a feature" but "visibility of the effect path".
 
 let process_user =
   fn (logger: Logger) -> fn (metrics: Metrics) ->
@@ -47,21 +53,22 @@ let process_user =
     save_order logger metrics order_id;
   };
 
-// === パターン 3: 高階関数 + partial application で cap を閉じ込める ===
-// iter のような高階関数は cap を知らない (汎用)。cap を使う関数は partial app で
-// あらかじめ cap を埋めてから渡す。これが Q-003/Q-006 の解。
+// === Pattern 3: close over caps with HOF + partial application ===
+// A higher-order function like iter is cap-agnostic (generic). Functions
+// that use caps are partially applied first to bake the caps in, then
+// passed in. This is the answer to Q-003 / Q-006.
 //
-// `using [cap]` 構文糖を使うと、cap を outer curry param に上げられる:
-//   `fn x using [logger] -> body` ≡ `fn logger -> fn x -> body`
-// これで `f cap` で cap を閉じ込めた `T -> U` を得られ、高階関数に渡しやすい。
+// The `using [cap]` sugar lifts caps up to outer curry params:
+//   `fn x using [logger] -> body` is equivalent to `fn logger -> fn x -> body`
+// so `f cap` yields a `T -> U` with the cap baked in, easy to pass to HOFs.
 
 let handle_orders =
   fn order_ids using [logger: Logger, metrics: Metrics, user_id: int] ->
-    // caps を partial app で閉じ込めて、iter に渡せる `int -> unit` を作る。
+    // Bake the caps in via partial app to produce an `int -> unit` for iter.
     let handle_one = fn id -> process_user logger metrics user_id id in
     iter handle_one order_ids;
 
-// === 実行 ===
+// === Execution ===
 
 let logger  = mk_logger "app";
 let metrics = mk_metrics ();

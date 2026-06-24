@@ -1,29 +1,30 @@
 // event_aggregator: Phase 38.G-1 OwnedVec auto scope-bound Drop showcase
 //
-// 関数 aggregate の内部で OwnedVec を作り、 すべての input イベントを push、
-// 統計 (count / total / max) を **scalar の tuple として return** する。
-// `let v = owned_vec_new () in body` の body の tail は `(count, total, max)`
-// で OwnedVec を含まないので、 静的解析が auto-Drop 安全と判定 → scope 末で
-// `free(v->data)` が emit される。
+// Inside the `aggregate` function, build an OwnedVec, push every input event,
+// and **return the statistics (count / total / max) as a tuple of scalars**.
+// The body tail of `let v = owned_vec_new () in body` is `(count, total, max)`
+// which does not contain the OwnedVec, so static analysis judges it auto-Drop
+// safe → `free(v->data)` is emitted at scope end.
 //
-// メリット: 各 aggregate 呼出ごとに OwnedVec を作って捨てる典型パターンが、
-// main 末まで vector data を持ち続けないので memory-efficient。
+// Benefit: the typical pattern of creating and discarding an OwnedVec on each
+// aggregate call does not hold vector data alive until the end of main, which
+// is memory-efficient.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let aggregate = fn raw_data ->
   let v = owned_vec_new () in
-  // Phase 38.C: push は partial app で closure 化
+  // Phase 38.C: turn push into a closure via partial application
   let push = owned_vec_push v in
   let _ = list_iter raw_data push in
   let get = owned_vec_get v in
   let n = owned_vec_len v in
-  // total を再帰で集計
+  // Accumulate total recursively
   let rec sum = fn i -> fn acc ->
     if i >= n then acc
     else sum (i + 1) (acc + get i) in
   let total = sum 0 0 in
-  // max を再帰で計算
+  // Compute max recursively
   let rec find_max = fn i -> fn best ->
     if i >= n then best
     else
@@ -31,7 +32,7 @@ let aggregate = fn raw_data ->
       if here > best then find_max (i + 1) here
       else find_max (i + 1) best in
   let max_val = if n == 0 then 0 else find_max 0 (get 0) in
-  // body の tail は tuple of int → Phase 38.G-1 が auto-Drop を emit
+  // The body tail is tuple of int → Phase 38.G-1 emits auto-Drop
   (n, total, max_val);
 
 let _ = print "=== run 1: small dataset ===";

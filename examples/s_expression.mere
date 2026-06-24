@@ -1,19 +1,21 @@
-// S 式 (Lisp 風) の parser + printer + 簡易 evaluator
+// S-expression (Lisp-style) parser + printer + simple evaluator
 //
-// (+ 1 (* 2 3)) のような S 式を read し、compact / pretty 形式で
-// print し、組込み演算子 (+ - * / = <) と特殊形 (if let) で eval する。
+// Reads S-expressions like (+ 1 (* 2 3)), prints them in compact / pretty
+// form, and evaluates them with built-in operators (+ - * / = <) and special
+// forms (if, let).
 //
-// 目的: examples roadmap I4。recursive variant + Lisp eval を 1 file
-//   で。arith_eval.mere の表記違い兄弟版で、parser 込みなのが差分。
+// Purpose: examples roadmap I4. Recursive variant + Lisp eval in a single
+//   file. A notation-different sibling of arith_eval.mere, distinguished by
+//   including a parser.
 //
-// 実行モード: interpreter のみ
-//   - 多相 user 定義 let-rec (parse_sexpr / show_sexpr / eval) の
-//     codegen monomorphize gap (DEFERRED §1.7) に該当。
-//   - wildcard `let _ = ...` も C codegen 未対応。
+// Execution mode: interpreter only
+//   - polymorphic user-defined let-rec (parse_sexpr / show_sexpr / eval) hits
+//     the codegen monomorphize gap (DEFERRED §1.7).
+//   - wildcard `let _ = ...` is also unsupported in C codegen.
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/s_expression.mere
-//   # 期待出力:
+//   # Expected output:
 //   #   parsed:   (+ 1 (* 2 3))
 //   #   eval:     (+ 1 (* 2 3))                =  7
 //   #   eval:     (- 10 3 2)                   =  5
@@ -30,7 +32,7 @@ type sexpr =
   | SSym  of str
   | SList of sexpr list;
 
-// === list utilities (Mere stdlib に list_reverse が無いので自前) ===
+// === list utilities (Mere stdlib has no list_reverse, so we provide our own) ===
 
 let rec list_rev_into = fn (acc) -> fn (xs) ->
   match xs with
@@ -75,7 +77,7 @@ let rec parse_sexpr = fn (s: str, i0: int) ->
 and parse_list = fn (s: str, i: int) ->
   let rec loop = fn (acc: sexpr list, k: int) ->
     let k = skip_ws s k in
-    if k >= str_len s then fail "unmatched '(' — EOF before ')'"
+    if k >= str_len s then fail "unmatched '(' -- EOF before ')'"
     else if char_at s k == ')' then (SList (list_reverse acc), k + 1)
     else
       let (item, k2) = parse_sexpr s k in
@@ -107,8 +109,8 @@ and show_sexpr_items = fn (items: sexpr list) ->
 
 let rec pad = fn n -> if n <= 0 then "" else " " ++ pad (n - 1);
 
-// `(head a b c)` 形式で head が `let` / `if` の場合のみ改行つき pretty に。
-// 簡略実装: head の名前を見て一定パターンを認識。
+// For `(head a b c)` forms, pretty-print with newlines only when head is
+// `let` / `if`. Simplified implementation: recognize fixed patterns by head name.
 let rec pretty_sexpr = fn (indent: int) -> fn (e: sexpr) ->
   match e with
   | SInt _    -> show_sexpr_compact e
@@ -119,7 +121,7 @@ let rec pretty_sexpr = fn (indent: int) -> fn (e: sexpr) ->
       "(let\n" ++ pad (indent + 2) ++ pretty_sexpr (indent + 2) bindings
         ++ "\n" ++ pad (indent + 2) ++ pretty_sexpr (indent + 2) body ++ ")"
     | Cons (SList _, _) ->
-      // bindings ((x 5) (y 7)) のような list-of-lists
+      // bindings such as ((x 5) (y 7)) -- a list of lists
       "(" ++ pretty_items indent items ++ ")"
     | _ -> show_sexpr_compact (SList items)
 

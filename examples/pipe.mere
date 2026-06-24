@@ -1,23 +1,23 @@
-// パイプ演算子 |> (Q-005 補助、構文糖)
-// f (g (h x))  を  x |> h |> g |> f  と書ける
+// Pipe operator |> (auxiliary to Q-005, syntactic sugar)
+// f (g (h x))  can be written as  x |> h |> g |> f
 //
-// signature alias + |> で cap-passing パターンが読みやすくなる
+// signature alias + |> makes the cap-passing pattern more readable
 
 let inc = fn x -> x + 1;
 let dbl = fn x -> x * 2;
 let neg = fn x -> 0 - x;
 
-// 関数チェーン: ((10 + 1) * 2) を負に
+// Function chain: ((10 + 1) * 2) negated
 let chained = 10 |> inc |> dbl |> neg;
 
-// パイプは curry と相性が良い: 5 |> add 3  ≡  add 3 5
+// Pipes pair well with curry: 5 |> add 3  ≡  add 3 5
 let add = fn (a: int, b: int) -> a + b;
 let summed = 5 |> add 3;
 
-// stdlib との組み合わせ
+// Combined with stdlib
 let shown = 42 |> str_of_int;
 
-// 算術より低優先度
+// Lower precedence than arithmetic
 let mixed = 1 + 2 |> dbl;
 
 chained + summed + mixed

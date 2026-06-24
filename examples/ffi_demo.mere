@@ -1,21 +1,24 @@
-// ffi_demo: extern fn で libc 関数を呼ぶ demo (Phase 32 = C1 FFI)
+// ffi_demo: demo of calling libc functions via extern fn (Phase 32 = C1 FFI)
 //
-// 目的: Outlook §C1 FFI の第一歩。`extern fn` 構文で libc 関数を宣言し、
-//   4 backend (interp + C + LLVM + Wasm) すべてで動作させる。
+// Purpose: first step of Outlook §C1 FFI. Declare libc functions with the
+//   `extern fn` syntax and run them on all 4 backends (interp + C + LLVM
+//   + Wasm).
 //
-// Mere 構文:
+// Mere syntax:
 //   extern fn <name>: <type>;
 //
-// type は MVP 段階では int / bool / str / unit の組合せ (TyArrow chain) のみ。
-// 関数の "C 側の本物" は当該 backend が解決する:
-//   - C codegen: clang が libc から自動リンク
-//   - LLVM codegen: `declare` を emit、clang が libc から自動リンク
-//   - Wasm codegen: env host imports として scripts/run_wasm.js から JS 実装注入
-//   - interpreter: eval.ml の lookup_extern で OCaml ミラー実装を呼ぶ
+// At the MVP stage, the type is restricted to combinations of int / bool /
+// str / unit (a TyArrow chain). The "real C-side" function is resolved
+// per backend:
+//   - C codegen: clang auto-links against libc
+//   - LLVM codegen: emit `declare`; clang auto-links against libc
+//   - Wasm codegen: env host imports, injected as JS implementations from
+//     scripts/run_wasm.js
+//   - interpreter: eval.ml's lookup_extern calls the OCaml mirror impl
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp / C / LLVM / Wasm), diff = 0
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/ffi_demo.mere
 
 extern fn getpid:  unit -> int;
@@ -25,19 +28,19 @@ extern fn getenv:  str -> str;
 
 let _ = print "=== FFI demo (Phase 32) ===";
 
-// process id を取得 — 0 でなく正の int が返るはず
+// Get the process id -- expect a positive int, not 0
 let _ = print ("pid > 0: " ++ show (getpid () > 0));
 
-// parent process id — 同じく正の int
+// Parent process id -- also a positive int
 let _ = print ("ppid > 0: " ++ show (getppid () > 0));
 
-// pid と ppid は通常異なる
+// pid and ppid are usually different
 let _ =
   let pid = getpid () in
   let ppid = getppid () in
   print ("pid != ppid: " ++ show (pid != ppid));
 
-// Phase 32.6: multi-arg (3-arg) curried extern を試す
+// Phase 32.6: try a multi-arg (3-arg) curried extern
 let _ = print "--- multi-arg (setenv 3 args) ---";
 let _ = print ("setenv result: " ++ show (setenv "MERE_FFI_DEMO" "hello" 1));
 let _ = print ("getenv result: " ++ getenv "MERE_FFI_DEMO");

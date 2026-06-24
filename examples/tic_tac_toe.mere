@@ -1,10 +1,10 @@
-// tic_tac_toe: 3x3 ボード + 勝敗判定 (Phase 36)
+// tic_tac_toe: 3x3 board + win detection (Phase 36)
 //
-// 目的: variant (cell: Empty | X | O) + 1D OwnedVec で 3x3 を表現、8 本
-//   (3 row + 3 col + 2 diag) をチェックして勝者を判定する。pretty-print
-//   込み。
+// Purpose: represent a 3x3 grid via variant (cell: Empty | X | O) + 1D
+//   OwnedVec, then check 8 lines (3 row + 3 col + 2 diag) to decide the
+//   winner. Includes pretty-print.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 type cell = Empty | X | O;
 type game_state = Won of cell | Draw | Ongoing;
@@ -15,7 +15,7 @@ let cell_str = fn (c: cell) ->
   | X     -> "X"
   | O     -> "O";
 
-// 3 セルが同一かつ Empty でなければ勝者
+// 3 cells are a winning line if they are equal and not Empty
 let line_winner = fn (a: cell) -> fn (b: cell) -> fn (c: cell) ->
   match a with
   | Empty -> Empty
@@ -25,24 +25,24 @@ let line_winner = fn (a: cell) -> fn (b: cell) -> fn (c: cell) ->
 let get = fn (board: OwnedVec[cell]) -> fn (i: int) ->
   owned_vec_get board i;
 
-// 全 8 ラインを順に確認
+// Check all 8 lines in order
 let winner_of = fn (b: OwnedVec[cell]) ->
-  // 行
+  // rows
   let r0 = line_winner (get b 0) (get b 1) (get b 2) in
   let r1 = line_winner (get b 3) (get b 4) (get b 5) in
   let r2 = line_winner (get b 6) (get b 7) (get b 8) in
-  // 列
+  // columns
   let c0 = line_winner (get b 0) (get b 3) (get b 6) in
   let c1 = line_winner (get b 1) (get b 4) (get b 7) in
   let c2 = line_winner (get b 2) (get b 5) (get b 8) in
-  // 対角
+  // diagonals
   let d0 = line_winner (get b 0) (get b 4) (get b 8) in
   let d1 = line_winner (get b 2) (get b 4) (get b 6) in
   let pick = fn (a: cell) -> fn (b: cell) ->
     match a with Empty -> b | _ -> a in
   pick r0 (pick r1 (pick r2 (pick c0 (pick c1 (pick c2 (pick d0 d1))))));
 
-// 空マスが残っているか
+// Are there any empty cells left?
 let has_empty = fn (b: OwnedVec[cell]) ->
   let rec loop = fn (i: int) ->
     if i >= owned_vec_len b then false

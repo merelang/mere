@@ -1,18 +1,18 @@
-// prettyprinter: Wadler-style pretty printer combinator (簡略版)
+// prettyprinter: Wadler-style pretty printer combinators (simplified)
 //
-// 文献: Philip Wadler, "A prettier printer" (2003)
-// document を combinator で記述、 layout 戦略 (line break vs space) を
-// width に基づいて自動選択。
+// Reference: Philip Wadler, "A prettier printer" (2003)
+// Describe a document via combinators; layout strategy (line break vs space)
+// is chosen automatically based on width.
 //
 // doc:
-//   Empty             - 空
-//   Text s            - 文字列
-//   Line              - 改行 (group 内では space)
-//   Concat (d1, d2)   - 連結
-//   Nest (n, d)       - インデント +n
-//   Group d           - flat (1 行) or break (改行) を選択
+//   Empty             - empty
+//   Text s            - string
+//   Line              - line break (space inside a group)
+//   Concat (d1, d2)   - concatenation
+//   Nest (n, d)       - indent +n
+//   Group d           - choose flat (single line) or break (line break)
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 type doc =
   | DEmpty
@@ -22,15 +22,15 @@ type doc =
   | DNest of int * doc
   | DGroup of doc;
 
-// 「flat = true なら DLine を space に、 false なら改行 + indent に」 で
-// レイアウト。 width はここでは固定 fitsCheck (簡略)。
+// Layout rule: "if flat = true, DLine becomes a space; if false, line break +
+// indent". width here uses a fixed fitsCheck (simplified).
 let space_chars = fn (n: int) ->
   let rec go = fn i -> fn acc ->
     if i <= 0 then acc
     else go (i - 1) (acc ++ " ") in
   go n "";
 
-// document を flat にしたときの長さ (DLine は 1 char = space として算入)
+// Length of the document when flattened (DLine counted as 1 char = space)
 let rec doc_width = fn (d: doc) ->
   match d with
   | DEmpty -> 0
@@ -40,8 +40,8 @@ let rec doc_width = fn (d: doc) ->
   | DNest (_, d2) -> doc_width d2
   | DGroup d2 -> doc_width d2;
 
-// d を indent level=k で render。 各 DLine で改行 + indent。 ただし
-// enclosing group が fit するなら flat (space に).
+// Render d at indent level=k. Each DLine becomes a line break + indent, but
+// if the enclosing group fits, render flat (DLine as space).
 let rec layout = fn (d: doc) -> fn (k: int) -> fn (width: int) -> fn (col: int) ->
   match d with
   | DEmpty -> ""
@@ -50,12 +50,12 @@ let rec layout = fn (d: doc) -> fn (k: int) -> fn (width: int) -> fn (col: int) 
   | DConcat (a, b) ->
     let sa = layout a k width col in
     let len_a = str_len sa in
-    // col after sa: 改行があれば再計算が面倒なので簡略化 (col 追跡しない)
+    // col after sa: recomputing across line breaks is tedious, so simplified (col not tracked)
     let _ = len_a in
     sa ++ layout b k width col
   | DNest (n, d2) -> layout d2 (k + n) width col
   | DGroup d2 ->
-    // remaining width で d2 が flat に収まるか
+    // does d2 fit flat within the remaining width?
     if col + doc_width d2 <= width then
       flat d2
     else
@@ -73,7 +73,7 @@ and flat = fn (d: doc) ->
 let pretty = fn (width: int) -> fn (d: doc) ->
   layout d 0 width 0;
 
-// よく使う combinators
+// Common combinators
 let text = fn s -> DText s;
 let line = DLine;
 let concat = fn d1 -> fn d2 -> DConcat (d1, d2);
@@ -81,13 +81,13 @@ let nest = fn n -> fn d -> DNest (n, d);
 let group = fn d -> DGroup d;
 let empty = DEmpty;
 
-// 複数 doc を [d1, d2, ...] で渡せる helper
+// Helper letting you pass multiple docs as [d1, d2, ...]
 let rec concat_all = fn (xs: doc list) ->
   match xs with
   | Nil -> empty
   | Cons (h, t) -> concat h (concat_all t);
 
-// 区切り sep を間に挟む
+// Insert separator sep between items
 let rec join_with = fn (sep: doc) -> fn (xs: doc list) ->
   match xs with
   | Nil -> empty
@@ -119,8 +119,9 @@ let big_doc = group (concat_all [
 ]);
 let _ = print (pretty 40 big_doc);
 
-// Note: 簡略化のため col 追跡を実装していないので、 group 判定は doc 全体の
-// flat 幅 vs width のみで判断する。 完全な Wadler 流アルゴリズムは
-// 39 行目以降の Daan Leijen "Wadler/Leijen pp" を参照。
+// Note: for simplicity, col tracking is not implemented, so group decisions
+// are based only on the doc's overall flat width vs width. For the full
+// Wadler-style algorithm see Daan Leijen's "Wadler/Leijen pp" referenced
+// from line 39 onward.
 
 0

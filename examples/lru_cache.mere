@@ -1,15 +1,15 @@
-// lru_cache: 容量制限付き LRU (Least Recently Used) キャッシュ
+// lru_cache: capacity-limited LRU (Least Recently Used) cache
 //
-// 実装:
-//   - storage: Map[str, str]  キー → 値
-//   - access:  Map[str, int]  キー → 最終アクセス時刻 (tick)
-//   - tick:    Map[str, int]  "tick" → 現在の時刻カウンタ
+// Implementation:
+//   - storage: Map[str, str]  key → value
+//   - access:  Map[str, int]  key → last-access time (tick)
+//   - tick:    Map[str, int]  "tick" → current time counter
 //
-// 容量超過時、 最も古い access の key を evict。
+// On overflow, evict the key with the oldest access.
 //
-// dogfood goal: NLL / trait / effect の痛みが顕在化するか観察
+// Dogfood goal: observe whether the pain of NLL / trait / effect surfaces
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 let cache_new = fn (cap: int) ->
   let storage = map_new () in
@@ -18,21 +18,23 @@ let cache_new = fn (cap: int) ->
   let _ = map_set access "_cap" cap in
   (storage, access);
 
-// 次の tick を発行
+// Issue the next tick
 let bump_tick = fn access ->
   let t = (map_get access "_tick") + 1 in
   let _ = map_set access "_tick" t in
   t;
 
-// 最も古い access の key を探す ("_" 始まりの内部 key は除外)
+// Find the key with the oldest access (excluding internal keys starting with "_")
 //
-// 痛み観察 (dogfood note #1): Map V 型は uniform。 key (str) と min_tick (int)
-// を 1 Map に同居できないので、 2 つの Map で分けるか str に encode する必要
-// あり。 ad-hoc multi-value Map / sum-typed Map value が欲しくなる場面。
+// Pain observation (dogfood note #1): Map V is a uniform type. Key (str) and
+// min_tick (int) cannot coexist in a single Map, so they must be split into
+// two Maps or encoded into str. A situation that makes you want an ad-hoc
+// multi-value Map or sum-typed Map value.
 //
-// 2026-06-23 update (Phase 39.A' #2): map_delete builtin が追加されたので、
-// sentinel value (-1) で削除を表現する hack は不要になった。 単純な
-// "v < min" 比較で OK (deleted key は access から消えているので比較に出てこない)。
+// 2026-06-23 update (Phase 39.A' #2): the map_delete builtin was added, so the
+// hack of expressing deletion with a sentinel value (-1) is no longer needed.
+// A plain "v < min" comparison is fine (deleted keys are gone from access,
+// so they no longer appear in the comparison).
 let find_lru_key = fn access ->
   let best_key = map_new () in
   let best_tick = map_new () in
@@ -54,20 +56,20 @@ let find_lru_key = fn access ->
 let put = fn cache -> fn (key: str) -> fn (value: str) ->
   let storage = fst cache in
   let access = snd cache in
-  // 既存 key の更新 or 新規追加
+  // Update existing key, or add new
   let exists = map_has storage key in
   let _ = map_set storage key value in
   let t = bump_tick access in
   let _ = map_set access key t in
-  // 容量チェック (実 user key の数 = access 全 entry から内部 _key を引く)
+  // Capacity check (real user key count = all access entries minus internal _keys)
   if not exists then
     let total = map_len access in
-    // _tick / _cap の 2 つを除外
+    // Exclude _tick / _cap (2 entries)
     let user_count = total - 2 in
     let cap = map_get access "_cap" in
     if user_count > cap then
       let lru = find_lru_key access in
-      // Phase 39.A' #2: map_delete を使う (旧 sentinel hack を撤去)
+      // Phase 39.A' #2: use map_delete (the old sentinel hack is gone)
       let _ = map_delete storage lru in
       let _ = map_delete access lru in
       ()
@@ -98,7 +100,7 @@ let _ = print ("size after 3 inserts: a/b/c");
 let _ = print ("get a = " ++ show_get c "a");  // hit, refresh a
 let _ = print ("get b = " ++ show_get c "b");  // hit, refresh b
 
-// "d" を追加すると、 access 最古の "c" が evict されるはず
+// Inserting "d" should evict "c" (oldest access)
 let _ = put c "d" "date";
 let _ = print "--- after insert d (c should be evicted) ---";
 let _ = print ("get a = " ++ show_get c "a");  // hit
@@ -106,7 +108,7 @@ let _ = print ("get b = " ++ show_get c "b");  // hit
 let _ = print ("get c = " ++ show_get c "c");  // miss (evicted)
 let _ = print ("get d = " ++ show_get c "d");  // hit
 
-// "e" を追加すると、 a が最古 (b/d より前にアクセス) なので a が evict
+// Inserting "e" evicts "a", since a is oldest (accessed before b/d)
 let _ = put c "e" "elderberry";
 let _ = print "--- after insert e (a should be evicted) ---";
 let _ = print ("get a = " ++ show_get c "a");  // miss

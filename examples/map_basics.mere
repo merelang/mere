@@ -1,22 +1,23 @@
-// Phase 12.10: Map[R, K, V] — region-aware mutable associative map。
+// Phase 12.10: Map[R, K, V] — region-aware mutable associative map.
 //
-// 設計コンテキスト: internal design notes §5
+// Design context: internal design notes §5
 //
-// `Map[R, K, V]` は region 内可変連想配列。Vec[R, T] / StrBuf[R] と
-// 同じ construction-time binding パターン。内部は OCaml Hashtbl
-// (polymorphic hash/eq) で、Lang の primitive value (int / str / bool
-// / tuple of primitives) を key として使う想定。
+// `Map[R, K, V]` is a region-scoped mutable associative array. It follows
+// the same construction-time binding pattern as Vec[R, T] / StrBuf[R].
+// Internally it uses OCaml Hashtbl (polymorphic hash/eq), with the
+// expectation that Lang's primitive values (int / str / bool / tuple of
+// primitives) are used as keys.
 //
 // API:
-//   map_new : unit -> Map[R, K, V]       (region に bind、外なら __heap)
+//   map_new : unit -> Map[R, K, V]       (binds to region, or __heap if outside)
 //   map_set : Map[R, K, V] -> K -> V -> unit
-//   map_get : Map[R, K, V] -> K -> V     (キー不在は eval error)
+//   map_get : Map[R, K, V] -> K -> V     (eval error if key is absent)
 //   map_has : Map[R, K, V] -> K -> bool
 //   map_len : Map[R, K, V] -> int
-//   len (polymorphic) : Map[R, K, V] -> int も同じく動く
+//   len (polymorphic) : Map[R, K, V] -> int also works the same way
 
 {
-  // === パターン 1: str → int の単純 map ===
+  // === Pattern 1: simple str -> int map ===
   let counts = map_new () in
   let _ = map_set counts "apple" 3 in
   let _ = map_set counts "banana" 5 in
@@ -27,7 +28,7 @@
   ) in
   let _ = print ("map_len = " ++ show (map_len counts)) in
 
-  // === パターン 2: map_has で存在チェックしてから安全に get ===
+  // === Pattern 2: safely get after checking existence with map_has ===
   let lookup =
     if map_has counts "apple" then map_get counts "apple"
     else 0 in
@@ -37,28 +38,29 @@
   let _ = print ("present  = " ++ show lookup) in
   let _ = print ("missing  = " ++ show missing_ok) in
 
-  // === パターン 3: int → str (型は逆でも自然に動く) ===
+  // === Pattern 3: int -> str (works naturally with reversed types) ===
   let codes = map_new () in
   let _ = map_set codes 1 "ok" in
   let _ = map_set codes 404 "not found" in
   let _ = map_set codes 500 "server error" in
   let _ = print ("status 404 = " ++ map_get codes 404) in
 
-  // === パターン 4: region 内で短命に作る ===
+  // === Pattern 4: build a short-lived map inside a region ===
   let summary =
     region R {
-      let acc = map_new () in           // 型: Map[R, str, int]
+      let acc = map_new () in           // type: Map[R, str, int]
       let _ = map_set acc "a" 1 in
       let _ = map_set acc "b" 2 in
       let _ = map_set acc "c" 3 in
-      // map は region 末で一括解放 (Trivial)、結果だけ str にして持ち出す
+      // the map is bulk-freed at the end of the region (Trivial); only the
+      // result is converted to str and carried out
       "items=" ++ show (len acc)
     }
   in
   print summary
 }
 
-// 期待出力:
+// Expected output:
 // apple count = 3
 // total = 10
 // map_len = 3

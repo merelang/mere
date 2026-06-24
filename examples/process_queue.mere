@@ -1,13 +1,13 @@
-// process_queue: `while cond do body` を top-level で使うキュー処理 (Phase 37.A showcase)
+// process_queue: queue processing using `while cond do body` at top level (Phase 37.A showcase)
 //
-// Mere は immutable なので「mutable container を Map / OwnedVec で持ち、 head /
-// tail カウンタを update しつつ消化する」のが典型的な while パターン。
-// Phase 37.A で top-level (main 直下) の `let _ = while ... do ...;` が
-// 動くようになった。
+// Mere is immutable, so the typical while pattern is to hold a mutable
+// container in a Map / OwnedVec and consume it while updating head / tail
+// counters. Phase 37.A enabled `let _ = while ... do ...;` at top level
+// (directly under main).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// queue 状態を Map で表現: "head" / "tail" がポインタ、 "0" "1" "2" ... が要素
+// Represent queue state in a Map: "head" / "tail" are pointers; "0" "1" "2" ... are elements
 let q = map_new ();
 let _ = map_set q "head" 0;
 let _ = map_set q "tail" 5;
@@ -17,7 +17,7 @@ let _ = map_set q "2" 300;
 let _ = map_set q "3" 400;
 let _ = map_set q "4" 500;
 
-// 処理結果を別の Map に蓄積 (immutable で sum を取るためのトリック)
+// Accumulate processing results in another Map (a trick for summing in an immutable language)
 let acc = map_new ();
 let _ = map_set acc "sum" 0;
 let _ = map_set acc "count" 0;

@@ -1,32 +1,31 @@
-// histogram: int bucket カウンタ + 最頻値検出 (Phase 36)
+// histogram: int bucket counter + mode detection (Phase 36)
 //
-// 目的: examples roadmap A5。Map[int, int] (key = bucket、value = count)
-//   を使った accumulate / max-finding パターンを 4 backend で dogfood。
-//   テストデータは固定 list で deterministic、prelude の list_fold を
-//   再利用。
+// Purpose: examples roadmap A5. Dogfood the accumulate / max-finding pattern
+//   using Map[int, int] (key = bucket, value = count) across 4 backends.
+//   Test data is a fixed deterministic list; reuses prelude's list_fold.
 //
-// 設計:
-//   - sample: int list — 観測値
-//   - bucket_of: 観測値を bucket index に丸める (例: 10 単位の bucket)
+// Design:
+//   - sample: int list — observed values
+//   - bucket_of: round observation to a bucket index (e.g. buckets of size 10)
 //   - hist: Map[int, int] — bucket → count
-//   - max bucket は map_iter で線形 scan
+//   - max bucket via linear scan with map_iter
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/histogram.mere
 
 let _ = print "=== histogram (Phase 36) ===";
 
-// 10 単位の bucket。`23` は bucket 20、`47` は bucket 40 など
+// Buckets of size 10. `23` -> bucket 20, `47` -> bucket 40, etc.
 let bucket_of = fn (x: int) -> (x / 10) * 10;
 
-// テストデータ: 観測 20 件
+// Test data: 20 observations
 let samples =
   [3, 7, 12, 15, 22, 23, 24, 28, 31, 32,
    42, 45, 47, 48, 51, 52, 53, 67, 71, 99];
 
-// list_iter で Map に累積。Map は call-by-ref で mutate される。
+// Accumulate into Map via list_iter. Map is mutated by reference.
 let hist = map_new ();
 
 let bump = fn (b: int) ->
@@ -40,9 +39,9 @@ let bump = fn (b: int) ->
 
 let _ = list_iter samples (fn (x: int) -> bump (bucket_of x));
 
-// bucket を昇順に走査するため、samples 由来の bucket 集合を整序した
-// list を別途構築する。map_iter は insertion order なので、ここでは
-// 0, 10, 20, ..., 90 を試して存在する bucket のみ print する。
+// To iterate buckets in ascending order, build a sorted list of buckets
+// derived from samples separately. Since map_iter is insertion order, here
+// we try 0, 10, 20, ..., 90 and print only the buckets that exist.
 let print_bucket = fn (b: int) ->
   if map_has hist b then
     print (show b ++ "-" ++ show (b + 9) ++ ": " ++ show (map_get hist b))
@@ -61,8 +60,8 @@ let _ = print_bucket 70;
 let _ = print_bucket 80;
 let _ = print_bucket 90;
 
-// 最頻 bucket を線形 scan で求める。Map を mutable な 1-cell
-// container として再利用 (key "count" と "bucket" に最大値を保持)。
+// Find the modal bucket via linear scan. Reuse Map as a mutable 1-cell
+// container (key "count" and "bucket" hold the running max).
 let _ = print "--- max bucket ---";
 
 let max_state = map_new ();
@@ -84,7 +83,7 @@ let _ =
   print ("most common: " ++ show mb ++ "-" ++ show (mb + 9)
          ++ " (" ++ show mn ++ " obs)");
 
-// total 件数 (Phase 19.4 prelude の list_len)
+// Total count (list_len from Phase 19.4 prelude)
 let total = list_len samples;
 let _ = print ("total samples = " ++ show total);
 

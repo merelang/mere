@@ -1,68 +1,68 @@
-// option_pipeline: Option idiom を chain で使う demo (Phase 33.1)
+// option_pipeline: demo of chaining the Option idiom (Phase 33.1)
 //
-// 目的: examples roadmap D3。Phase 23.2 で prelude に追加した
-//   option_map / option_default / option_is_some + Phase 33.1 で追加した
-//   option_and_then を使い、None 伝搬の chain を idiomatic に書く。
+// Purpose: examples roadmap D3. Use option_map / option_default /
+//   option_is_some (added to the prelude in Phase 23.2) + option_and_then
+//   (added in Phase 33.1) to write None-propagation chains idiomatically.
 //
-// シナリオ:
-//   user profile を 3 段の lookup で取得:
-//   1. id -> user_id (login → id 変換)
+// Scenario:
+//   fetch a user profile through three lookup stages:
+//   1. id -> user_id (login -> id conversion)
 //   2. user_id -> profile_id
 //   3. profile_id -> display_name
-//   どれかが None なら全体 None。`option_and_then` で連鎖、最後の
-//   表示で `option_default` で fallback。
+//   If any stage is None, the whole thing is None. Chain with
+//   `option_and_then`, and fall back with `option_default` at display time.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/option_pipeline.mere
 
-// === lookup の各段 (Option を返す素朴な実装) ===
-// id 表: "alice" → 1, "bob" → 2, "carol" → 3、他は None
+// === Each lookup stage (naive implementations returning Option) ===
+// id table: "alice" -> 1, "bob" -> 2, "carol" -> 3, others None
 let lookup_user_id = fn (login: str) ->
   if login == "alice" then Some 1
   else if login == "bob"   then Some 2
   else if login == "carol" then Some 3
   else None;
 
-// user_id 表: 1 → 100, 2 → 200、3 は profile 未設定 (None)
+// user_id table: 1 -> 100, 2 -> 200; 3 has no profile (None)
 let lookup_profile_id = fn (user_id: int) ->
   if user_id == 1 then Some 100
   else if user_id == 2 then Some 200
   else None;
 
-// profile_id 表: 100 → "Alice the Architect", 200 → "Bob the Builder"
+// profile_id table: 100 -> "Alice the Architect", 200 -> "Bob the Builder"
 let lookup_display_name = fn (profile_id: int) ->
   if profile_id == 100 then Some "Alice the Architect"
   else if profile_id == 200 then Some "Bob the Builder"
   else None;
 
-// === 1 段の pipeline: login -> display_name ===
-//   `option_and_then` 連鎖で None を自然に伝搬
+// === Single pipeline: login -> display_name ===
+//   `option_and_then` chains naturally propagate None
 let display_name_of = fn (login: str) ->
   option_and_then (lookup_user_id login) (fn uid ->
     option_and_then (lookup_profile_id uid) (fn pid ->
       lookup_display_name pid));
 
-// === 安全な fallback 付き表示 helper ===
+// === Display helper with safe fallback ===
 let show_display_name = fn (login: str) ->
   let name = option_default (display_name_of login) "<no profile>" in
   print (login ++ " => " ++ name);
 
-// === option_map: ある場合のみ変換 ===
-//   user_id を 10 倍にして表示用に
+// === option_map: transform only when present ===
+//   multiply user_id by 10 for display
 let user_id_x10_str = fn (login: str) ->
   match option_map (lookup_user_id login) (fn n -> n * 10) with
   | None -> "<unknown user>"
   | Some n -> "x10=" ++ show n;
 
-// === 各 helper の自己テスト ===
+// === Self-test for each helper ===
 
 let _ = print "=== option_pipeline (Phase 33.1) ===";
-let _ = show_display_name "alice";    // 期待: Alice the Architect
-let _ = show_display_name "bob";      // 期待: Bob the Builder
-let _ = show_display_name "carol";    // 期待: <no profile> (carol has no profile_id)
-let _ = show_display_name "dave";     // 期待: <no profile> (unknown login)
+let _ = show_display_name "alice";    // expected: Alice the Architect
+let _ = show_display_name "bob";      // expected: Bob the Builder
+let _ = show_display_name "carol";    // expected: <no profile> (carol has no profile_id)
+let _ = show_display_name "dave";     // expected: <no profile> (unknown login)
 
 let _ = print "--- option_map demo ---";
 let _ = print ("alice " ++ user_id_x10_str "alice");   // x10=10

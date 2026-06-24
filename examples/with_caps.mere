@@ -1,12 +1,13 @@
-// `with` 式: Drop ありリソースのスコープ束縛 (Phase 3.1)。
+// `with` expression: scope-binding for resources with Drop (Phase 3.1).
 //
-// `let` が Trivial 値 (デストラクタ不要) 用なのに対し、`with` は Drop ありの
-// cap (DB connection / file handle / mutex 等) 用。Drop 型として宣言された
-// 値だけが with 束縛できる。スコープ末で値の `close: unit -> unit` field が
-// 呼ばれる (無ければ no-op)。複数 binding は LIFO 順で close される。
+// Whereas `let` is for Trivial values (no destructor needed), `with` is for
+// caps with Drop (DB connection / file handle / mutex, etc.). Only values
+// declared as Drop types can be bound by with. At end of scope, the value's
+// `close: unit -> unit` field is called (no-op if absent). Multiple bindings
+// are closed in LIFO order.
 //
-// 設計 doc: 12_drop_and_with.md 案 (i)「region は Trivial 厳格、Drop ありは
-// with で管理」を実装。
+// Design doc: draft 12_drop_and_with.md, plan (i): "region is strictly
+// Trivial; manage values with Drop via with" implemented.
 
 drop type Conn = {
   id:    int,
@@ -19,21 +20,21 @@ let mk_conn = fn id ->
     close = fn () -> print ("close conn " ++ show id),
   };
 
-// 単一 with: スコープ末で close 1 が呼ばれる
+// Single with: close 1 is called at end of scope
 let r1 =
   with c = mk_conn 1 in
     c.id * 10;
 
-// 複数 with: LIFO 順、c2 → c1 で close
+// Multiple with: LIFO order; close c2 then c1
 let r2 =
   with c1 = mk_conn 1,
        c2 = mk_conn 2 in
     c1.id + c2.id;
 
-// 期待出力:
+// Expected output:
 // close conn 1
 // close conn 2
 // close conn 1
-// 結果は (r1, r2) = (10, 3)
+// Result is (r1, r2) = (10, 3)
 
 (r1, r2)

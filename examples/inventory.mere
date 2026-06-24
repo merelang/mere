@@ -1,19 +1,20 @@
-// 在庫管理ミニアプリ - Map[R, str, int] (在庫数) + Vec[R, Tx] (履歴) +
-// record (Tx) の組合せ。Phase 19.2 (map_iter) / 19.3 (vec_sort) /
-// prelude (Result) を実用 task に投入する demo。
+// Inventory management mini-app — combines Map[R, str, int] (stock counts) +
+// Vec[R, Tx] (history) + record (Tx). A demo putting Phase 19.2 (map_iter) /
+// 19.3 (vec_sort) / prelude (Result) to work on a practical task.
 //
-// 目的: examples roadmap G2。倉庫の在庫を増減し、履歴を残し、最終的に
-// 上位 3 商品を表示する。
+// Purpose: examples roadmap G2. Increment/decrement warehouse stock, keep a
+// history, and finally display the top 3 items.
 //
-// 実行モード: 4 backend 完全対応 (Phase 20.1 fix 済)
-//   - C codegen: typedef 順序を「tuple → variant → record」へ修正、
-//     record が variant field を持つ場合でも variant struct body が
-//     先に出るように (DEFERRED §1.8)
-//   - LLVM / Wasm: 元から動作 (型 emit のタイミングが C ほど厳しくない)
+// Execution mode: all 4 backends fully supported (fixed in Phase 20.1)
+//   - C codegen: typedef order fixed to "tuple → variant → record" so that
+//     even when a record has a variant field, the variant struct body comes
+//     first (DEFERRED §1.8)
+//   - LLVM / Wasm: worked from the start (type-emit timing is less strict
+//     than in C)
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/inventory.mere
-//   # 期待出力:
+//   # expected output:
 //   #   tx#1: stock_add apple +10
 //   #   tx#2: stock_add banana +5
 //   #   tx#3: stock_add apple +3
@@ -29,7 +30,7 @@ type tx_kind = StockAdd | StockSub;
 
 type Tx = { id: int, item: str, delta: int, kind: tx_kind };
 
-// 取引を 1 件記録: Map 更新 + history Vec に push。
+// Record a single transaction: update Map + push onto the history Vec.
 let apply_tx = fn (stock) -> fn (history) -> fn (next_id) -> fn (item: str) -> fn (delta: int) -> fn (kind) ->
   let prev = if map_has stock item then map_get stock item else 0 in
   let __ = map_set stock item (prev + delta) in
@@ -47,7 +48,7 @@ region R {
   let stock = map_new () in
   let history = vec_new () in
 
-  // 取引を 4 件流す
+  // Run 4 transactions
   let id = apply_tx stock history 1 "apple" 10 StockAdd in
   let id = apply_tx stock history id "banana" 5 StockAdd in
   let id = apply_tx stock history id "apple" 3 StockAdd in
@@ -57,9 +58,10 @@ region R {
   let __ = map_iter stock (fn k -> fn v ->
     print (k ++ ": " ++ show v)) in
 
-  // Map → Vec[(str, int)] 化して頻度降順 sort (上位 2 商品)。
-  // 摩擦点: Map.entries / keys / values が未実装 (Phase 19.2 でスキップ)
-  // なので、map_iter で side-effect 的に Vec へ集める。
+  // Turn the Map into a Vec[(str, int)] and sort by frequency descending
+  // (top 2 items).
+  // Friction point: Map.entries / keys / values is unimplemented (skipped in
+  // Phase 19.2), so we collect into a Vec by side effect via map_iter.
   let entries = vec_new () in
   let __ = map_iter stock (fn k -> fn v ->
     vec_push entries (k, v)) in
@@ -72,6 +74,6 @@ region R {
   let __ = print ("2. " ++ fst (vec_get entries 1)
                 ++ " (" ++ show (snd (vec_get entries 1)) ++ ")") in
 
-  // 履歴の件数も表示
+  // Also display the history count
   print ("total transactions: " ++ show (vec_len history))
 }

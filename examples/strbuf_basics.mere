@@ -1,20 +1,21 @@
-// Phase 12.7: StrBuf[R] — region 内可変文字列バッファ。
+// Phase 12.7: StrBuf[R] — a mutable string buffer inside a region.
 //
-// 設計コンテキスト: internal design notes §4
+// Design context: internal design notes §4
 //
-// `StrBuf[R]` は region 内で文字列を逐次組み立てる用途。Trivial 扱い
-// なので region に置ける。region 末で一括解放される (scope を出ると
-// 値も無効、escape は static error)。
+// `StrBuf[R]` is for building a string incrementally inside a region. It is
+// treated as Trivial, so it can live in a region. It is freed all at once at
+// region end (leaving the scope makes the value invalid; escape is a static
+// error).
 //
 // API:
-//   strbuf_new    : unit -> StrBuf[R]   (region に bind、外なら __heap)
+//   strbuf_new    : unit -> StrBuf[R]   (binds to region; defaults to __heap)
 //   strbuf_push   : StrBuf[R] -> str -> unit
-//   strbuf_to_str : StrBuf[R] -> str     (snapshot を str として取り出す)
+//   strbuf_to_str : StrBuf[R] -> str     (extract a snapshot as str)
 //   strbuf_len    : StrBuf[R] -> int
-//   len (polymorphic) : StrBuf[R] -> int も同じく動く
+//   len (polymorphic) : StrBuf[R] -> int also works
 
 {
-  // === パターン 1: outside any region — default `__heap` で動く ===
+  // === Pattern 1: outside any region — works with the default `__heap` ===
   let greet = strbuf_new () in
   {
     strbuf_push greet "Hello";
@@ -24,22 +25,22 @@
     print ("len = " ++ show (strbuf_len greet))
   };
 
-  // === パターン 2: region 内で短命に組み立てる ===
+  // === Pattern 2: build short-lived inside a region ===
   let report =
     region R {
-      let buf = strbuf_new () in    // 型: StrBuf[R]
+      let buf = strbuf_new () in    // type: StrBuf[R]
       {
         strbuf_push buf "report: ";
         strbuf_push buf (show 42);
         strbuf_push buf " ok";
-        // strbuf を region 外に持ち出すには内容を str にコピーする:
+        // To carry strbuf contents out of the region, copy them to a str:
         strbuf_to_str buf
       }
     }
   in
   print report;
 
-  // === パターン 3: polymorphic `len` でも長さが取れる ===
+  // === Pattern 3: length also works via polymorphic `len` ===
   let counted = strbuf_new () in
   {
     strbuf_push counted "abc";
@@ -48,7 +49,7 @@
   }
 }
 
-// 期待出力:
+// Expected output:
 // Hello, world!
 // len = 13
 // report: 42 ok

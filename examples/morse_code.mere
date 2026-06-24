@@ -1,12 +1,12 @@
-// morse_code: 英大文字を Morse code に encode / decode (Phase 36)
+// morse_code: encode / decode uppercase letters to Morse code (Phase 36)
 //
-// 目的: Map[str, str] で文字 → モールス符号の辞書を構築し、A-Z + 0-9 を
-//   往復変換する。to_upper / char_at / str_split + 自前 list iteration の
-//   組合せ dogfood。
+// Purpose: build a dictionary of character -> Morse code using Map[str, str]
+//   and round-trip A-Z + 0-9. Dogfood combination of to_upper / char_at /
+//   str_split + hand-rolled list iteration.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution modes: diff = 0 across the 4 backends (interp + C + LLVM + Wasm)
 
-// (文字, モールス) の対応表
+// (character, Morse) lookup table
 let pairs =
   [("A", ".-"),    ("B", "-..."),  ("C", "-.-."),  ("D", "-.."),
    ("E", "."),     ("F", "..-."),  ("G", "--."),   ("H", "...."),
@@ -32,7 +32,8 @@ let rec build = fn (ps: (str * str) list) ->
 
 let _ = build pairs;
 
-// 文字列を encode: 各文字を to_morse で lookup、文字間は space、空白は "/" に
+// Encode a string: look up each character via to_morse, separate characters
+// with space, and use "/" for spaces.
 let encode = fn (s: str) ->
   let upper = to_upper s in
   region R {
@@ -50,13 +51,13 @@ let encode = fn (s: str) ->
           let _ = strbuf_push b (map_get to_morse c) in
           loop (i + 1) false
         else
-          // 未対応文字は skip
+          // skip unsupported characters
           loop (i + 1) first in
     let _ = loop 0 true in
     strbuf_to_str b
   };
 
-// decode: space で分割した token を順に lookup、"/" は空白扱い
+// decode: look up tokens split by space in order; "/" is treated as a space
 let decode = fn (morse: str) ->
   let toks = str_split morse " " in
   region R {
@@ -89,6 +90,6 @@ let _ = check "SOS";
 let _ = check "HELLO";
 let _ = check "HELLO WORLD";
 let _ = check "MERE 2026";
-let _ = check "abc xyz";    // 小文字も to_upper で対応
+let _ = check "abc xyz";    // lowercase also handled via to_upper
 
 0

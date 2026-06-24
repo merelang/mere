@@ -1,10 +1,10 @@
-// リストリテラル `[1, 2, 3]` (Cons/Nil チェインの構文糖)
+// List literal `[1, 2, 3]` (syntactic sugar for a Cons/Nil chain)
 //
 // `[]`       → Nil
 // `[e1, ...]` → Cons (e1, Cons (..., Nil))
 //
-// 'a list 型を declare すれば list literal が使える。
-// 多相 (int / str / list of list) も自然に推論される。
+// Declaring the 'a list type lets you use list literals.
+// Polymorphism (int / str / list of list) is inferred naturally.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 
@@ -25,7 +25,7 @@ let xs = [10, 20, 30, 40, 50];
 let ys = ["red", "green", "blue"];
 let nested = [[1], [2, 3], [4, 5, 6], []];
 
-// sum + len + nested の項目数の合計
+// Sum + len + nested item count totals
 let s = sum xs;          // 150
 let l = len ys;          // 3
 let n = len nested;      // 4

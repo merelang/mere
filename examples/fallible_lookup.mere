@@ -1,21 +1,21 @@
-// fallible_lookup: Map lookup を Result chain で連結 (Phase 36)
+// fallible_lookup: chain Map lookups via Result (Phase 36)
 //
-// 目的: examples roadmap D4。`Map + Result` の連鎖 dogfood。
-//   user_id -> email -> role の 2 段 lookup を `result_and_then` で
-//   chain し、途中で見つからなければ Err を返す。
+// Purpose: examples roadmap D4. Dogfood `Map + Result` chaining.
+//   Two-stage lookup user_id -> email -> role chained with `result_and_then`,
+//   returning Err if any stage fails.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
 type 'a opt = None | Some of 'a;
 
-// Map[str, str] から値を `(str, str) result` で取り出す helper
+// Helper to fetch a value from Map[str, str] as `(str, str) result`
 let lookup = fn m -> fn (k: str) -> fn (err_msg: str) ->
   if map_has m k then
     Ok (map_get m k)
   else
     Err err_msg;
 
-// データ: name -> email, email -> role
+// Data: name -> email, email -> role
 let emails = map_new ();
 let _ = map_set emails "alice" "alice@example.com";
 let _ = map_set emails "bob"   "bob@example.com";
@@ -24,10 +24,10 @@ let _ = map_set emails "carol" "carol@example.com";
 let roles = map_new ();
 let _ = map_set roles "alice@example.com" "admin";
 let _ = map_set roles "bob@example.com"   "user";
-// carol は roles に未登録 → 2 段目で Err
+// carol is not registered in roles → second stage returns Err
 
-// name -> role を 2 段 chain で求める。result_and_then で email を取り出し
-// てから roles map に lookup。
+// Get name -> role via two-stage chain. Extract email with result_and_then,
+// then look it up in the roles map.
 let find_role = fn (name: str) ->
   let r1 = lookup emails name ("unknown user: " ++ name) in
   result_and_then r1 (fn (email: str) ->
@@ -44,7 +44,7 @@ let _ = print_lookup "bob";      // Ok "user"
 let _ = print_lookup "carol";    // Err "no role for carol@example.com"
 let _ = print_lookup "dave";     // Err "unknown user: dave"
 
-// result_default で fallback 値で書き直す
+// Rewrite using result_default to provide a fallback value
 let role_or_default = fn (name: str) ->
   result_default (find_role name) "guest";
 

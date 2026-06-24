@@ -1,21 +1,24 @@
-// cache_sim: capacity 制限付き FIFO cache の simulation (Phase 36)
+// cache_sim: simulation of a capacity-limited FIFO cache (Phase 36)
 //
-// 目的: examples roadmap A4。Map[str, str] が **`map_remove` を持たない**
-//   制約下で eviction policy を表現する練習。`alive_keys` という
-//   OwnedVec[str] を別途持って「生きている key」を限定し、Map の値を
-//   そのまま温存することで FIFO eviction を擬似する。LRU まで踏み込まず
-//   FIFO に留める (LRU は recency 更新が要り Vec の中央移動が必要)。
+// Purpose: examples roadmap A4. Practice expressing an eviction policy
+//   under the constraint that Map[str, str] **has no `map_remove`**.
+//   Maintain a separate OwnedVec[str] of "alive_keys" to limit which keys
+//   are considered live, and emulate FIFO eviction while leaving the Map's
+//   values untouched. We stop at FIFO and don't go further to LRU (LRU
+//   would need recency updates that require moving elements in the middle
+//   of the Vec).
 //
-// 設計:
-//   - cache: Map[str, str] (任意 key → 任意 value)
-//   - alive: OwnedVec[str] (現在 cache に存在する key を insertion order
-//     で保持)。alive に無い key は cache に値があっても miss 扱い
-//   - put k v: alive に既にあれば値を上書き、無ければ末尾に push して
-//     alive.len > capacity なら先頭を logical drop (= alive のみ rebuild、
-//     map_remove はしない)
-//   - get k: alive に key があれば map_get、無ければ "MISS"
+// Design:
+//   - cache: Map[str, str] (arbitrary key -> arbitrary value)
+//   - alive: OwnedVec[str] (keys currently present in cache, in insertion
+//     order). Keys not in alive are treated as misses even if their value
+//     still lives in the Map.
+//   - put k v: if k is already in alive, overwrite the value; otherwise
+//     push to the tail; if alive.len > capacity, logically drop the front
+//     (= rebuild alive only; never call map_remove).
+//   - get k: if key is in alive, return map_get; otherwise "MISS".
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 let capacity = 3;
 
@@ -30,20 +33,21 @@ let alive_contains = fn (k: str) ->
     else loop (i + 1) in
   loop 0;
 
-// `evicted` Map で「論理的に消えた key」を records する。alive Vec は
-// append-only に保ち、map_remove も owned_vec_set も無い制約を回避。
+// Record "logically removed keys" in an `evicted` Map. Keep alive as an
+// append-only Vec to work around the absence of both map_remove and
+// owned_vec_set.
 let evicted = map_new ();
 
 let put = fn (k: str) -> fn (v: str) ->
   let _ = map_set cache k v in
-  // alive に未登録なら push
+  // Push to alive if not already registered
   if alive_contains k then
     ()
   else
     let _ = owned_vec_push alive k in
-    // capacity を超えたら最古を evicted に記録
+    // If we exceed capacity, mark the oldest as evicted
     let live_count = (
-      // alive 内で evicted に無い要素を数える
+      // Count elements in alive that aren't in evicted
       let n = owned_vec_len alive in
       let rec count = fn (i: int) -> fn (acc: int) ->
         if i >= n then acc
@@ -54,7 +58,7 @@ let put = fn (k: str) -> fn (v: str) ->
       count 0 0
     ) in
     if live_count > capacity then
-      // 最古の alive (= 最初に live な要素) を evicted へ
+      // Move the oldest alive (= first live element) into evicted
       let n = owned_vec_len alive in
       let rec find = fn (i: int) ->
         if i >= n then ()
@@ -92,7 +96,7 @@ let _ = print ("get d: " ++ get "d");   // HIT 4
 
 let _ = print "--- update existing key b ---";
 let _ = put "b" "22";
-let _ = print ("get b: " ++ get "b");   // HIT 22 (alive 位置は変わらず)
+let _ = print ("get b: " ++ get "b");   // HIT 22 (position in alive is unchanged)
 
 let _ = print "--- add e (evicts b) ---";
 let _ = put "e" "5";

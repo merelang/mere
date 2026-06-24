@@ -1,6 +1,6 @@
-// module で名前空間を切る。bindings は `M.name` 形式で外から見える。
-// モジュール内の短縮名 (`inc`, `square`) は parse 時に `Math.inc`,
-// `Math.square` に書き換わるので、相互参照は自然に動く。
+// module creates a namespace. Bindings are visible from outside as `M.name`.
+// Short names inside the module (`inc`, `square`) are rewritten to
+// `Math.inc`, `Math.square` at parse time, so cross-references work naturally.
 
 module Math {
   let inc = fn x -> x + 1;

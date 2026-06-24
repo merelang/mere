@@ -1,11 +1,11 @@
-// List ユーティリティを Lang 自身で実装した library
+// A library implementing List utilities in Lang itself
 //
-// stdlib に builtin map/filter/fold を入れる代わりに、ユーザ側で書ける見本。
-// `type 'a list = Nil | Cons of 'a * 'a list;` 前提。
+// A user-side example of writing map/filter/fold instead of having them as
+// stdlib builtins. Assumes `type 'a list = Nil | Cons of 'a * 'a list;`.
 
 type 'a list = Nil | Cons of 'a * 'a list;
 
-// === 基本 ===
+// === Basics ===
 
 let rec length = fn (xs) -> match xs with
   | []        -> 0
@@ -17,7 +17,7 @@ let rec rev_aux = fn (xs, acc) -> match xs with
 
 let rev = fn (xs) -> rev_aux xs [];
 
-// === 高階 ===
+// === Higher-order ===
 
 let rec map = fn (f, xs) -> match xs with
   | []        -> []
@@ -43,7 +43,7 @@ let rec any = fn (p, xs) -> match xs with
   | []        -> false
   | [h, ...t] -> if p h then true else any p t;
 
-// === 切り出し ===
+// === Slicing ===
 
 let rec take = fn (n, xs) ->
   if n <= 0 then []
@@ -57,7 +57,7 @@ let rec drop = fn (n, xs) ->
     | []        -> []
     | [_, ...t] -> drop (n - 1) t;
 
-// === 生成 ===
+// === Generation ===
 
 let rec range = fn (lo: int, hi: int) ->
   if lo > hi then []
@@ -86,7 +86,7 @@ let _ = print ("drop 3 = " ++ show (drop 3 xs));         // [4,5]
 let _ = print ("range  = " ++ show (range 1 5));         // [1,2,3,4,5]
 let _ = print ("rep    = " ++ show (replicate 4 "x"));   // ["x","x","x","x"]
 
-// Composition demo: 1..10 から偶数を 2 乗して合計
+// Composition demo: square the evens in 1..10 and sum them
 let _ = print "---";
 let _ = print
   ("sum-of-squares-of-evens 1..10 = " ++

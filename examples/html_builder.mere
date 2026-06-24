@@ -1,17 +1,18 @@
-// html_builder: StrBuf を使った小さな HTML 組み立て (Phase 36)
+// html_builder: small HTML assembly with StrBuf (Phase 36)
 //
-// 目的: examples roadmap B3。StrBuf + 関数 helper で nested HTML を構築
-//   する例。tag の開閉を pure functional な builder で表現。
+// Purpose: examples roadmap B3. Example of constructing nested HTML with StrBuf
+//   + function helpers. Represent tag open/close as a pure functional builder.
 //
-// 設計:
-//   - tag name inner -> "<name>inner</name>" 形式の文字列を返す
-//   - escape は `<` `>` `&` の最低限のみ
-//   - ページ全体は region 内 StrBuf に蓄積、最後に str に変換して print
+// Design:
+//   - tag name inner -> returns a string of the form "<name>inner</name>"
+//   - minimal escape only for `<` `>` `&`
+//   - accumulate the whole page in a StrBuf inside a region, then convert to
+//     str at the end and print
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: interp + C + LLVM + Wasm, diff = 0 across all 4 backends
 
-// Phase 36 で str_replace を 3 backend に追加したので、本格的な escape
-// を実装できる。順序大事 (& を先に処理しないと自身が再 escape される)。
+// Phase 36 added str_replace on 3 backends, enabling proper escape.
+// Order matters: process & first or & will re-escape itself.
 let escape = fn (s: str) ->
   let s1 = str_replace s "&" "&amp;" in
   let s2 = str_replace s1 "<" "&lt;" in
@@ -22,7 +23,7 @@ let tag = fn (name: str) -> fn (inner: str) ->
 
 let li = fn (item: str) -> tag "li" (escape item);
 
-// region 内で StrBuf に list 要素を畳み込む
+// Fold list elements into a StrBuf inside a region
 let render_list = fn (items: str list) ->
   region R {
     let b = strbuf_new () in
@@ -32,7 +33,7 @@ let render_list = fn (items: str list) ->
     strbuf_to_str b
   };
 
-// 1 ページぶんの HTML
+// HTML for one page
 let render_page = fn (title: str) -> fn (heading: str) -> fn (items: str list) ->
   region R {
     let b = strbuf_new () in
@@ -49,7 +50,7 @@ let items = ["Apple", "Banana <fresh>", "Cherry & Plum"];
 let html = render_page "My Page" "Fruit basket" items;
 let _ = print html;
 
-// 単体の tag helper も verify
+// Also verify the standalone tag helper
 let _ = print (tag "p" (escape "1 < 2 && 3 > 2"));
 
 0

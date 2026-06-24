@@ -1,25 +1,26 @@
-// mini functional language の interpreter
+// Interpreter for a mini functional language
 //
-// mini_calc.mere の発展形。算術 + let に加えて
-//   - if cond then a else b (bool は VBool で表現、比較演算 ==, <, > を導入)
-//   - fn x -> body / 関数適用 f arg (1st-class function、closure)
-// を持つ小さな functional language を AST から評価する。
+// An extension of mini_calc.mere. In addition to arithmetic + let, it has:
+//   - if cond then a else b (bool represented as VBool, with == / < / >)
+//   - fn x -> body / function application f arg (first-class functions, closures)
+// This evaluates a small functional language directly from its AST.
 //
-// 目的: examples roadmap C3。recursive variant + closure + env-passing
-//   eval を 1 file で示し、tree.mere → mini_calc.mere の延長線として
-//   "言語を language で書く" 練習場。
+// Purpose: examples roadmap C3. A single-file demo of recursive variant +
+//   closure + env-passing eval, serving as a practice ground for "writing
+//   a language in the language", continuing from tree.mere -> mini_calc.mere.
 //
-// 実行モード: interpreter のみ
-//   - parser を内包せず AST を直接組み立てる demo に絞ることで、Phase
-//     19.x までの interpreter 機能だけで通る形に。
-//   - C codegen 未対応の理由: (a) `let _ = ...` の wildcard pattern が
-//     C codegen 未対応 (mini_calc.mere と同様)、(b) closure を持つ
-//     value 型が自己再帰 + (str * value) list を持つため多相 user 定義
-//     関数 (lookup / eval) の codegen monomorphize gap (DEFERRED §1.7)。
+// Execution mode: interpreter only
+//   - Skips a parser and builds the AST directly so the demo fits within
+//     interpreter features available through Phase 19.x.
+//   - Why no C codegen: (a) `let _ = ...` wildcard pattern is not yet
+//     supported by C codegen (same as mini_calc.mere); (b) the value type
+//     carries closures, so it is self-recursive and contains a
+//     (str * value) list, which hits the monomorphize gap for polymorphic
+//     user-defined functions (lookup / eval) in codegen (DEFERRED §1.7).
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/arith_eval.mere
-//   # 期待出力:
+//   # Expected output:
 //   #   1 + 2 * 3                                      = 7
 //   #   if 1 < 2 then 10 else 20                       = 10
 //   #   let x = 5 in x * x                             = 25
@@ -42,14 +43,14 @@ type expr =
   | EFun  of str * expr
   | EApp  of expr * expr;
 
-// value: VInt / VBool / VClosure (param, body, captured env)。
-// env は (str, value) list を 'a list (prelude) で再利用。
+// value: VInt / VBool / VClosure (param, body, captured env).
+// env reuses the prelude's 'a list as a (str, value) list.
 type value =
   | VInt     of int
   | VBool    of bool
   | VClosure of str * expr * (str * value) list;
 
-// === env 操作 ===
+// === env operations ===
 
 let rec lookup = fn (env: (str * value) list) -> fn (name: str) ->
   match env with
@@ -60,7 +61,7 @@ let rec lookup = fn (env: (str * value) list) -> fn (name: str) ->
 let extend = fn (env: (str * value) list) -> fn (name: str) -> fn (v: value) ->
   Cons ((name, v), env);
 
-// === 表示 ===
+// === Display ===
 
 let show_value = fn (v: value) ->
   match v with
@@ -140,10 +141,10 @@ let _ = run "let add = fn x -> fn y -> x + y in add 3 4"
     EFun ("x", EFun ("y", EAdd (EVar "x", EVar "y"))),
     EApp (EApp (EVar "add", ENum 3), ENum 4)));
 
-// factorial 6: let rec を持たないので、Y-combinator を avoid して
-// "f を引数に取って f を applied する" self-application trick で再帰。
+// factorial 6: since we have no `let rec`, avoid the Y-combinator and use
+// the self-application trick of "take f as an argument and apply f to f".
 // fact = fn n -> if n == 0 then 1 else n * fact (n - 1)
-// → let fact_step = fn rec_fn -> fn n -> if n == 0 then 1
+// -> let fact_step = fn rec_fn -> fn n -> if n == 0 then 1
 //        else n * (rec_fn rec_fn (n - 1))
 //   in let fact = fn n -> fact_step fact_step n
 //   in fact 6

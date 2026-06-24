@@ -1,24 +1,25 @@
-// stack_machine: 簡易 RPN (逆ポーランド記法) VM
+// stack_machine: a simple RPN (reverse Polish notation) VM
 //
-// 命令を順に実行する小さなスタックマシン。 命令は variant `instr` で表現、
-// stack は Map[str, int] を「LIFO 配列」として使う (top カウンタ + 数値 slot)。
+// A small stack machine that executes instructions sequentially. Instructions
+// are represented by the variant `instr`, and the stack is a Map[str, int]
+// used as a "LIFO array" (a top counter + numeric slots).
 //
-// 命令セット:
-//   Push n      — n を push
-//   Add         — top 2 つを add してその結果を push
-//   Sub / Mul / Div  同様
-//   Neg         — top の符号反転
-//   Dup         — top を複製
-//   Swap        — top 2 つを入れ替え
+// Instruction set:
+//   Push n      — push n
+//   Add         — add the top 2 and push the result
+//   Sub / Mul / Div  similarly
+//   Neg         — negate the top
+//   Dup         — duplicate the top
+//   Swap        — swap the top 2
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 type instr =
   | Push of int
   | Add
   | Sub
   | Mul
-  | Divv     // `div` は libc にあるので `divv` (docs/patterns.md §5)
+  | Divv     // `div` exists in libc, so use `divv` (docs/patterns.md §5)
   | Neg
   | Dup
   | Swap;
@@ -78,7 +79,7 @@ let run = fn (prog: instr list) ->
   if (map_get s "top") == 0 then 0
   else st_pop s;
 
-// 表示用
+// For display
 let show_instr = fn (i: instr) ->
   match i with
   | Push n -> "Push " ++ show n

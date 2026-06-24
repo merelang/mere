@@ -1,13 +1,14 @@
-// Phase 12.9: Vec の高階 API (iter / map / fold / set)。
+// Phase 12.9: Vec higher-order APIs (iter / map / fold / set).
 //
-// すべて region-polymorphic で element type も多相。`vec_map` の結果
-// Vec は source と同じ region に置かれる。`vec_set` は in-place mutation。
+// All are region-polymorphic and element-type-polymorphic. The result of
+// `vec_map` is placed in the same region as the source. `vec_set` is
+// in-place mutation.
 //
-// 設計コンテキスト: internal design notes §3 の
-// Vec API 拡張。
+// Design context: internal design notes §3
+// Vec API extension.
 
 {
-  // === パターン 1: map で要素を変換 (int → int) ===
+  // === Pattern 1: transform elements with map (int -> int) ===
   let xs = vec_new () in
   let _ = vec_push xs 1 in
   let _ = vec_push xs 2 in
@@ -18,7 +19,7 @@
   let _ = print ("xs:      " ++ show xs) in
   let _ = print ("squared: " ++ show squared) in
 
-  // === パターン 2: map で型を変える (int → str) ===
+  // === Pattern 2: change type with map (int -> str) ===
   let nums = vec_new () in
   let _ = vec_push nums 10 in
   let _ = vec_push nums 20 in
@@ -27,7 +28,7 @@
   let _ = print ("labels[0] = " ++ vec_get labels 0) in
   let _ = print ("labels[2] = " ++ vec_get labels 2) in
 
-  // === パターン 3: fold で集約 ===
+  // === Pattern 3: aggregate with fold ===
   let v = vec_new () in
   let _ = vec_push v 1 in
   let _ = vec_push v 2 in
@@ -40,7 +41,7 @@
   let _ = print ("sum = " ++ show total) in
   let _ = print ("max = " ++ show max_val) in
 
-  // === パターン 4: vec_set で in-place mutation + vec_iter ===
+  // === Pattern 4: in-place mutation via vec_set + vec_iter ===
   let buf = vec_new () in
   let _ = vec_push buf "alpha" in
   let _ = vec_push buf "beta" in
@@ -48,7 +49,7 @@
   let _ = vec_set buf 1 "BETA" in
   let _ = vec_iter buf (fn s -> print s) in
 
-  // === パターン 5: region 内で chain ===
+  // === Pattern 5: chain inside a region ===
   let summary =
     region R {
       let raw = vec_new () in
@@ -57,14 +58,14 @@
       let _ = vec_push raw 3 in
       // raw : Vec[R, int]
       let doubled = vec_map raw (fn x -> x * 2) in
-      // doubled : Vec[R, int] (同じ region R)
+      // doubled : Vec[R, int] (same region R)
       vec_fold doubled 0 (fn acc -> fn x -> acc + x)
     }
   in
   print ("region-local sum of doubled = " ++ show summary)
 }
 
-// 期待出力:
+// Expected output:
 // xs:      Vec[1, 2, 3, 4, 5]
 // squared: Vec[1, 4, 9, 16, 25]
 // labels[0] = n=10

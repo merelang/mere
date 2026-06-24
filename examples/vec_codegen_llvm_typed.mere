@@ -1,15 +1,15 @@
-// Phase 15.3: Vec[R, T] の LLVM IR codegen 対応 (Phase 15.2 と feature parity)。
+// Phase 15.3: Vec[R, T] LLVM IR codegen support (feature parity with Phase 15.2).
 //
-// C backend (Phase 15.2) と同じ形で 4 種類の Vec instance を作り、
-// それぞれ別の `%mere_vec_<tag>` LLVM IR runtime に monomorphize される
-// ことを確認する program。allocator は region (C 版と同じ
-// `__lang_region_alloc` を共有)、要素型ごとに struct typedef +
-// 4 helper define を 1 セット emit。
+// In the same shape as the C backend (Phase 15.2), this program creates 4
+// kinds of Vec instances and verifies each is monomorphized to a different
+// `%mere_vec_<tag>` LLVM IR runtime. The allocator uses regions (shares
+// the same `__lang_region_alloc` as the C version), and per element type
+// it emits one set of struct typedef + 4 helper defines.
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- -ll examples/vec_codegen_llvm_typed.mere > /tmp/vt.ll
 //   clang /tmp/vt.ll -o /tmp/vt && /tmp/vt
-//   # → 252
+//   # -> 252
 
 type Tag = Lo of int | Hi of int;
 
