@@ -7523,15 +7523,57 @@ let () =
        "no-error"
      with _ -> "rejected")
     "rejected";
+  (* Type the program before passing to codegen — codegen reads `.ty`
+     fields on each AST node. *)
+  let typed_for_codegen ?(prelude = false) src =
+    let prog = Pipeline.parse_program ~prelude src in
+    let type_env = ref Typer.initial_env in
+    List.iter (fun decl ->
+      match decl with
+      | Ast.Top_let (pat, value) ->
+        let outer_env = !type_env in
+        let t = Typer.infer outer_env value in
+        let bindings = Typer.check_pattern pat t in
+        type_env := List.fold_left (fun acc (n, ty) ->
+          let sch = Typer.generalize outer_env ty in
+          (n, sch) :: acc) outer_env bindings
+      | Ast.Top_let_rec bindings ->
+        let outer_env = !type_env in
+        let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.mono a) :: acc) outer_env bindings alphas in
+        List.iter2 (fun (_, value) alpha ->
+          let t = Typer.infer env_rec value in
+          Typer.unify value.Ast.loc alpha t) bindings alphas;
+        type_env := List.fold_left2 (fun acc (n, _) a ->
+          let sch = Typer.generalize outer_env a in
+          (n, sch) :: acc) outer_env bindings alphas
+      | Ast.Top_type (name, params, variants) ->
+        Typer.register_type name params variants
+      | Ast.Top_record (name, params, fields) ->
+        Typer.register_record name params fields
+      | Ast.Top_view (name, region, fields) ->
+        Typer.register_view name region fields
+      | Ast.Top_drop name -> Typer.register_drop_type name
+      | Ast.Top_extern (name, ty) ->
+        type_env := (name, Typer.mono ty) :: !type_env
+      | Ast.Top_extern_type tn -> Typer.register_type tn [] []
+      | Ast.Top_signature _ | Ast.Top_type_alias _
+      | Ast.Top_ctor_alias _ | Ast.Top_record_alias _ -> ()
+    ) prog.decls;
+    let main_ty =
+      Typer.infer !type_env (Ast.desugar_program prog)
+    in
+    prog, main_ty
+  in
   check "extern type: Wasm codegen emits i32 host import for opaque param"
     (let wat =
-       let prog =
-         Pipeline.parse_program ~prelude:false
-           "extern type JsRef; \
-            extern fn dom_set_text: JsRef -> str -> unit; \
-            ()"
+       let prog, main_ty = typed_for_codegen
+         "extern type JsRef; \
+          extern fn dom_set_text: JsRef -> str -> unit; \
+          ()"
        in
-       Codegen_wasm.emit_program ~main_ty:Ast.TyUnit prog
+       Codegen_wasm.emit_program ~main_ty prog
      in
      let has p =
        let nlen = String.length wat and plen = String.length p in
@@ -7544,6 +7586,38 @@ let () =
      in
      if has "(import \"env\" \"dom_set_text\" (func $dom_set_text (param i32) (param i32)))"
      then "ok" else "missing-or-wrong")
+    "ok";
+
+  (* Phase 48.2 Stage 2: closure -> JS callback. Wasm modules now export
+     `__indirect_function_table` so host glue can pull a Mere closure out
+     of the table and invoke it. Passing a `(T -> U)` closure to an
+     extern fn pushes the closure pointer (an i32 to the {env, fn_idx}
+     record) onto the stack just like any other i32 arg. *)
+  let wat_has src needle =
+    let prog, main_ty = typed_for_codegen src in
+    let wat = Codegen_wasm.emit_program ~main_ty prog in
+    let nlen = String.length wat and plen = String.length needle in
+    let rec scan i =
+      if i + plen > nlen then false
+      else if String.sub wat i plen = needle then true
+      else scan (i + 1)
+    in
+    scan 0
+  in
+  check "C2 Stage 2: __indirect_function_table is exported"
+    (if wat_has "let inc = fn x -> x + 1 in inc 5"
+         "(export \"__indirect_function_table\" (table 0))"
+     then "exported" else "missing")
+    "exported";
+  check "C2 Stage 2: closure-typed extern fn arg accepted as i32 pointer"
+    (if wat_has
+        "extern type JsRef; \
+         extern fn dom_on_click: JsRef -> (unit -> unit) -> unit; \
+         extern fn dom_get_by_id: str -> JsRef; \
+         let btn = dom_get_by_id \"go\" in \
+         let _ = dom_on_click btn (fn (u: unit) -> ()) in 0"
+        "(import \"env\" \"dom_on_click\" (func $dom_on_click (param i32) (param i32)))"
+     then "ok" else "missing")
     "ok";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;

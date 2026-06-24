@@ -142,6 +142,28 @@ const wasmPath = process.argv[2];
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
   memory = instance.exports.memory;
 
+  // Phase 48.2 (C2 Stage 2): helper for invoking a Mere closure value
+  // (an i32 pointer to a 2-word { env, fn_idx } record in linear memory)
+  // from JS. Hosts that wire `extern fn ... -> (T -> U) -> ...` should
+  // hold onto the closure pointer the Wasm code passes, then use this
+  // helper from event callbacks etc.
+  //
+  // Usage from a host import:
+  //   env.dom_on_click = (btnPtr, closurePtr) => {
+  //     document.getElementById(...).addEventListener('click', () =>
+  //       callMereClosure(closurePtr, /* arg */ 0));
+  //   };
+  const table = instance.exports.__indirect_function_table;
+  const callMereClosure = (closurePtr, arg = 0) => {
+    if (!table) throw new Error("Wasm module did not export __indirect_function_table");
+    const view = new Int32Array(memory.buffer);
+    const env = view[closurePtr >> 2];
+    const fnIdx = view[(closurePtr + 4) >> 2];
+    return table.get(fnIdx)(env, arg);
+  };
+  // Expose for hosts that bind extra env imports later (e.g. DOM glue).
+  globalThis.__mere_call_closure = callMereClosure;
+
   // Initialize scratch to start at the END of currently-allocated memory.
   // Wasm memory starts at 1 page = 64KB and grows. Use offset 56KB as
   // scratch (safe for most small examples).
