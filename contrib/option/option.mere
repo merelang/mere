@@ -1,28 +1,28 @@
-// contrib/option/option.mere — Option type の追加 helper
+// contrib/option/option.mere — additional helpers for the Option type
 //
-// Mere prelude には既に option_map / option_default / option_is_some /
-// option_and_then が含まれている。 本 lib は prelude を補完する **追加 helpers**
-// を `module Option { ... }` でまとめる。
+// The Mere prelude already provides option_map / option_default /
+// option_is_some / option_and_then. This lib gathers **additional helpers**
+// that complement the prelude into `module Option { ... }`.
 //
-// 使い方:
+// Usage:
 //   import "contrib/option/option.mere";
 //   let result = Option.zip (Some 1) (Some "a") in   // Some (1, "a")
 //   match result with
 //   | Some (n, s) -> ...
 //   | None -> ...
 //
-// 提供 API (prelude にない補完 helpers):
-//   - `Option.zip:    'a opt -> 'b opt -> ('a * 'b) opt`  両方 Some なら tuple
-//   - `Option.filter: 'a opt -> ('a -> bool) -> 'a opt`   述語不一致なら None に
-//   - `Option.or_else: 'a opt -> 'a opt -> 'a opt`        左が None なら右
+// API provided (helpers complementing what is not in the prelude):
+//   - `Option.zip:    'a opt -> 'b opt -> ('a * 'b) opt`  Some tuple when both are Some
+//   - `Option.filter: 'a opt -> ('a -> bool) -> 'a opt`   None when the predicate fails
+//   - `Option.or_else: 'a opt -> 'a opt -> 'a opt`        right side if left is None
 //   - `Option.is_none: 'a opt -> bool`                   inverse of is_some
-//   - `Option.unwrap_or_fail: 'a opt -> str -> 'a`       None なら fail
+//   - `Option.unwrap_or_fail: 'a opt -> str -> 'a`       fail if None
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends — interp / C / LLVM / Wasm.
 
 module Option {
 
-// 両方 Some なら (a, b) を Some で包む。 どちらか None なら None
+// If both are Some, wrap (a, b) in Some. If either is None, return None.
 let zip = fn (a) -> fn (b) ->
   match a with
   | None -> None
@@ -31,13 +31,13 @@ let zip = fn (a) -> fn (b) ->
     | None -> None
     | Some y -> Some (x, y);
 
-// pred が true なら値そのまま、 false / None なら None に倒す
+// If pred is true, keep the value as-is; if false / None, collapse to None
 let filter = fn (opt) -> fn (pred) ->
   match opt with
   | None -> None
   | Some v -> if pred v then Some v else None;
 
-// 左が None なら右を返す (短絡)
+// If left is None, return right (short-circuit)
 let or_else = fn (a) -> fn (b) ->
   match a with
   | None -> b
@@ -49,7 +49,7 @@ let is_none = fn (opt) ->
   | None -> true
   | Some _ -> false;
 
-// None なら fail (panic)、 Some なら取り出す。 lib 内部 invariant を保証する場面で
+// fail (panic) on None, return the value on Some. Useful when guaranteeing lib-internal invariants
 let unwrap_or_fail = fn (opt) -> fn (msg: str) ->
   match opt with
   | None -> fail msg
@@ -57,16 +57,16 @@ let unwrap_or_fail = fn (opt) -> fn (msg: str) ->
 
 };   // end of `module Option`
 
-// === demo で使う unwrap_or_fail の concrete instantiation (codegen に poly fn を
-//     残さないため、 demo で int / str 用に呼び出す) ===
+// === Concrete instantiations of unwrap_or_fail used in the demo
+//     (calling it on int / str in the demo so codegen does not retain a poly fn) ===
 let _ = Option.unwrap_or_fail (Some 42) "should not fail";
 let _ = Option.unwrap_or_fail (Some "ok") "should not fail";
 
-// === Self-tests (module の外側、 実 use 時は削除) ===
+// === Self-tests (outside the module; remove in actual use) ===
 
 let _ = print "=== Option helpers demo ===";
 
-// describe を介して表示 (match 表現を let で抽出)
+// Display via describe (extracting the match expression with let)
 let describe_int = fn opt ->
   match opt with
   | None -> "None"
@@ -77,9 +77,9 @@ let describe_pair = fn opt ->
   | None -> "None"
   | Some (n, s) -> "Some (" ++ show n ++ ", " ++ s ++ ")";
 
-// 注意: `None` を annotation なしで lib helper に渡すと、 codegen 環境で
-// 多 instantiation が解決できず `'a` leak になることがある。 demo では
-// `(None : str option)` のように明示 annotation を付けて回避。
+// Note: passing `None` to a lib helper without annotation may fail to resolve
+// multi-instantiation in the codegen environment and leak `'a`. The demo
+// works around this with explicit annotations like `(None : str option)`.
 
 // zip
 let _ = print ("zip (Some 1) (Some \"a\") -> " ++ describe_pair (Option.zip (Some 1) (Some "a")));

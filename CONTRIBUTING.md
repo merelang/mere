@@ -1,48 +1,48 @@
 # Contributing to Mere
 
-Mere への contribution、歓迎します。
+Contributions to Mere are welcome.
 
-## License (重要)
+## License (Important)
 
-Mere は現在 **MIT License** で公開されています ([LICENSE](LICENSE) 参照)。
+Mere is currently released under the **MIT License** (see [LICENSE](LICENSE)).
 
-このプロジェクトは将来、**MIT OR Apache-2.0 dual license** へ移行する可能性が
-あります。そのため、pull request / patch / commit を提出した時点で、
-contributor は以下に同意したものと見なします:
+This project may in the future transition to a **MIT OR Apache-2.0 dual
+license**. Therefore, by submitting a pull request / patch / commit, you
+are deemed to agree to the following:
 
-1. あなたの contribution は **MIT License** のもとで配布される
-2. 将来 Mere が Apache License 2.0 を追加して dual license 化する場合、
-   あなたの contribution は **Apache License 2.0** のもとでも配布される
+1. Your contribution will be distributed under the **MIT License**.
+2. If Mere later adds Apache License 2.0 and becomes dual-licensed,
+   your contribution will also be distributed under the **Apache License 2.0**.
 
-これは公開直後にプロジェクトの license 戦略を再検討する余地を確保するための
-ものです。現状の利用者にとっては MIT License のみが effective です。
+This is to preserve room to reconsider the project's license strategy
+shortly after public release. For current users, only the MIT License is
+effective.
 
-## 開発フロー
+## Development Flow
 
-1. Fork して branch を切る (`git checkout -b your-feature`)
-2. 変更を加える + テスト (`dune runtest`) を pass させる
-3. Pull request を出す
+1. Fork and create a branch (`git checkout -b your-feature`)
+2. Make your changes and ensure tests (`dune runtest`) pass
+3. Open a pull request
 
-PR には:
-- 変更の動機 (どんな問題を解決するか / どんな機能を追加するか)
-- 4 backend (interp + C + LLVM + Wasm) のうちどれに影響するか
-- 新しいテストを追加した場合はその内容
+Please include in your PR:
+- The motivation for the change (what problem it solves / what feature it adds)
+- Which of the 4 backends (interp + C + LLVM + Wasm) are affected
+- A description of any new tests you added
 
-を含めてください。
+## Bug Reports / Feature Requests
 
-## バグ報告 / 機能要望
+Please file them on GitHub Issues. Reproduction steps plus the output of
+`dune exec ./bin/mere.exe -- --version` are helpful.
 
-GitHub Issues でお知らせください。再現手順 + `dune exec ./bin/mere.exe --
---version` の出力があると助かります。
+## Design Discussions
 
-## 設計に関する議論
+Language-design OPEN_QUESTIONS and paper-validated decisions are
+managed in a separate repository (see the README for details). Proposals
+that involve large design changes should first be discussed in an Issue
+before opening a PR.
 
-言語設計の OPEN_QUESTIONS や paper-validated な意思決定は別リポジトリで
-管理されています (詳細は README 参照)。大きな設計変更を伴う提案は、まず
-Issue で議論してから PR を出してください。
+## Code Style
 
-## コードスタイル
-
-- OCaml 本体は dune の標準フォーマット (`dune fmt`)
-- `.mere` example は既存ファイルのスタイルに合わせる (4 backend で
-  diff = 0 を維持するためのテストが要る場合あり)
+- The OCaml core uses dune's standard formatting (`dune fmt`)
+- `.mere` examples should follow the style of existing files (a test to
+  maintain diff = 0 across the 4 backends may be required)

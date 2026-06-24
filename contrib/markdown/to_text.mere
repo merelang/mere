@@ -1,30 +1,30 @@
-// markdown_to_text: Markdown 風の text を plain text に変換 (Phase 36)
+// markdown_to_text: convert Markdown-like text to plain text (Phase 36)
 //
-// 目的: examples roadmap B5。char_at による 1 文字単位 scan + StrBuf で
-//   markdown 装飾を剥がす。実用 markdown parser ではなく「inline marker
-//   を除去するだけ」の限定版。
+// Purpose: examples roadmap B5. Strip markdown decorations by scanning one
+//   character at a time with char_at and a StrBuf. Not a practical markdown
+//   parser — a limited "just remove inline markers" variant.
 //
-// 対応する markdown:
-//   - 行頭 `#` / `##` / `###` を除去 (heading)
-//   - 行頭 `- ` をそのまま (リストは保持)
-//   - 行頭 `> ` を `| ` に置換 (引用は記号変換)
-//   - inline `*`、`_`、`` ` `` を除去 (bold / italic / code 装飾)
+// Supported markdown:
+//   - strip leading `#` / `##` / `###` (heading)
+//   - keep leading `- ` as-is (lists are preserved)
+//   - replace leading `> ` with `| ` (quote symbol conversion)
+//   - remove inline `*`, `_`, `` ` `` (bold / italic / code decoration)
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends — interp + C + LLVM + Wasm.
 
-// 行頭の `#` 連続を skip
+// Skip consecutive `#` at the start of the line
 let rec skip_hashes = fn (s: str) -> fn (i: int) ->
   if i >= str_len s then i
   else if char_at s i == "#" then skip_hashes s (i + 1)
   else i;
 
-// 行頭の空白を skip
+// Skip leading spaces
 let rec skip_spaces = fn (s: str) -> fn (i: int) ->
   if i >= str_len s then i
   else if char_at s i == " " then skip_spaces s (i + 1)
   else i;
 
-// inline marker 除去 (`*`, `_`, `` ` `` を捨てて他は append)
+// Strip inline markers (drop `*`, `_`, `` ` ``, append everything else)
 let rec strip_inline = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
   if i >= str_len s then acc
   else
@@ -35,14 +35,14 @@ let rec strip_inline = fn (s: str) -> fn (i: int) -> fn (acc: str) ->
 let convert_line = fn (line: str) ->
   if str_len line == 0 then ""
   else if str_starts_with line "#" then
-    // heading: # の連続をスキップ、空白もスキップしてから inline strip
+    // heading: skip consecutive #'s and spaces, then strip inline markers
     let h_end = skip_hashes line 0 in
     let body_start = skip_spaces line h_end in
     strip_inline line body_start ""
   else if str_starts_with line "> " then
     "| " ++ strip_inline line 2 ""
   else
-    // 通常行 (`-` のリストもそのまま)
+    // Regular line (`-` lists also pass through as-is)
     strip_inline line 0 "";
 
 let render = fn (lines: str list) ->

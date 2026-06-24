@@ -1,26 +1,27 @@
 // contrib/path/path.mere — POSIX path manipulation helpers
 //
-// `module Path { join, basename, dirname, ext, drop_ext, has_ext }` を
-// Mere 純で実装 (builtin 追加なし)。 string 操作 (`str_len` / `str_index_of` /
-// `substring` / `char_at` / `str_join` / `str_split`) のみで構成。
+// Implements `module Path { join, basename, dirname, ext, drop_ext, has_ext }`
+// in pure Mere (no added builtins). Built solely from string operations
+// (`str_len` / `str_index_of` / `substring` / `char_at` / `str_join` / `str_split`).
 //
-// POSIX 規約: separator は `/`、 Windows path (backslash) は当面非対応
+// POSIX convention: separator is `/`; Windows paths (backslash) are unsupported for now.
 //
-// 使い方:
+// Usage:
 //   import "contrib/path/path.mere";
 //   Path.join "docs" "tutorial.md"      // "docs/tutorial.md"
 //   Path.basename "docs/foo.md"          // "foo.md"
 //   Path.dirname "docs/foo.md"           // "docs"
-//   Path.ext "foo.md"                    // ".md"  (no ext は "")
+//   Path.ext "foo.md"                    // ".md"  (no ext returns "")
 //   Path.drop_ext "foo.md"               // "foo"
 //   Path.has_ext "foo.md" ".md"          // true
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends — interp / C / LLVM / Wasm.
 
 module Path {
 
-// 2 path 要素を `/` で連結。 a が空なら b、 b が空なら a、 a の末尾が `/`
-// なら重ねない、 b の先頭が `/` ならそのまま使う (絶対 path 優先)
+// Join two path components with `/`. If a is empty, return b; if b is empty,
+// return a. Avoid duplication when a ends with `/`. If b starts with `/`, use
+// it as-is (absolute path takes priority).
 let join = fn (a: str) -> fn (b: str) ->
   let la = str_len a in
   let lb = str_len b in
@@ -30,7 +31,7 @@ let join = fn (a: str) -> fn (b: str) ->
   else if char_at a (la - 1) == "/" then a ++ b
   else a ++ "/" ++ b;
 
-// 最後の `/` 以降を返す (`/` 含まなければ s 全体)
+// Return everything after the last `/` (entire s if no `/`)
 let basename = fn (s: str) ->
   let n = str_len s in
   let rec last_slash = fn i ->
@@ -42,7 +43,7 @@ let basename = fn (s: str) ->
   if idx < 0 then s
   else substring s (idx + 1) n;
 
-// 最後の `/` までを返す (`/` 含まなければ "")
+// Return everything up to the last `/` ("" if no `/`)
 let dirname = fn (s: str) ->
   let n = str_len s in
   let rec last_slash = fn i ->
@@ -55,13 +56,13 @@ let dirname = fn (s: str) ->
   else if idx == 0 then "/"
   else substring s 0 idx;
 
-// basename の最後の `.` 以降を返す (`.` 含まなければ "")。 dot prefix は ext
-// として扱わない (`.hidden` の ext は "")
+// Return everything from the last `.` in the basename ("" if no `.`).
+// A dot-prefix is not treated as an extension (the ext of `.hidden` is "").
 let ext = fn (s: str) ->
   let b = basename s in
   let n = str_len b in
   let rec last_dot = fn i ->
-    if i <= 0 then -1   // index 0 の `.` は dot-prefix なので除外
+    if i <= 0 then -1   // a `.` at index 0 is a dot-prefix and excluded
     else if char_at b i == "." then i
     else last_dot (i - 1)
   in
@@ -69,7 +70,7 @@ let ext = fn (s: str) ->
   if idx < 0 then ""
   else substring b idx n;
 
-// ext を取り除く (Path.drop_ext "foo.md" = "foo")
+// Drop the extension (Path.drop_ext "foo.md" = "foo")
 let drop_ext = fn (s: str) ->
   let e = ext s in
   let n = str_len s in
@@ -77,7 +78,7 @@ let drop_ext = fn (s: str) ->
   if elen == 0 then s
   else substring s 0 (n - elen);
 
-// 指定拡張子か否か (Path.has_ext "foo.md" ".md" = true)
+// Whether the file has the given extension (Path.has_ext "foo.md" ".md" = true)
 let has_ext = fn (s: str) -> fn (e: str) ->
   ext s == e;
 

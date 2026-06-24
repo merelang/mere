@@ -1,20 +1,22 @@
-// contrib/toml/toml.mere — TOML 1.0 縮小 parser
+// contrib/toml/toml.mere — minimal TOML 1.0 parser
 //
-// 対応 subset (TOML 1.0 から minimal):
+// Supported subset (minimal from TOML 1.0):
 //   - key/value: `key = value`
-//   - section: `[section]` / `[a.b.c]` (dotted で nested、 fully-qualified key に flatten)
-//   - 値: int / str (basic double-quoted、 escape は `\"` `\\` `\n` `\t`) / bool / array
-//   - comment: `#` から行末 (string 内は除外)
-//   - empty line / leading whitespace は skip
+//   - section: `[section]` / `[a.b.c]` (dotted = nested; flattened to a
+//     fully-qualified key)
+//   - values: int / str (basic double-quoted; escapes `\"` `\\` `\n` `\t`)
+//     / bool / array
+//   - comment: `#` to end of line (skipped except inside a string)
+//   - empty lines / leading whitespace are skipped
 //
-// 非対応 (将来 Phase or 別 lib):
+// Not supported (future Phase or separate lib):
 //   - datetime (RFC 3339)
 //   - multi-line string (`"""..."""` / `'''...'''`)
 //   - literal string (`'...'`)
-//   - dotted key (`a.b = 1`)、 inline table (`{ k = v }`)、 table array (`[[name]]`)
-//   - hex / octal / binary integer、 float exponent、 underscore separator
+//   - dotted key (`a.b = 1`), inline table (`{ k = v }`), table array (`[[name]]`)
+//   - hex / octal / binary integer, float exponent, underscore separator
 //
-// 使い方:
+// Usage:
 //   import "contrib/toml/toml.mere";
 //   let doc = Toml.parse_toml "
 //   [server]
@@ -25,8 +27,8 @@
 //   | Toml.TStr s -> print s
 //   | _ -> ();
 //
-// 出力は `(str * toml_value) list` で、 key は section path で qualified
-// (例: section `[server]` 配下の `port` は "server.port")。
+// The output is `(str * toml_value) list`, with the key qualified by the
+// section path (e.g. `port` under section `[server]` becomes "server.port").
 
 module Toml {
 
@@ -36,7 +38,7 @@ type toml_value =
   | TBool of bool
   | TArr  of toml_value list;
 
-// rev (accumulator-style parsing 用)
+// rev (for accumulator-style parsing)
 let rec rev_aux = fn (xs, acc) ->
   match xs with
   | [] -> acc
@@ -44,7 +46,7 @@ let rec rev_aux = fn (xs, acc) ->
 
 let rev = fn xs -> rev_aux xs Nil;
 
-// `#` から行末を除去 (ただし basic string 内の `#` は保持)
+// strip `#` to end of line (but keep `#` inside a basic string)
 let strip_comment = fn (line: str) ->
   let n = str_len line in
   let rec scan = fn (i: int) -> fn (in_str: bool) ->
@@ -61,7 +63,7 @@ let strip_comment = fn (line: str) ->
   let end_pos = scan 0 false in
   str_trim (substring line 0 end_pos);
 
-// basic string の escape を decode (\" → "、 \\ → \、 \n → newline、 \t → tab)
+// decode escapes in a basic string (\" -> ", \\ -> \, \n -> newline, \t -> tab)
 let decode_basic_str = fn (s: str) ->
   let n = str_len s in
   let buf = strbuf_new () in
@@ -85,11 +87,11 @@ let decode_basic_str = fn (s: str) ->
   let _ = loop 0 in
   strbuf_to_str buf;
 
-// 文字列を top-level `,` で split (簡易: ネスト array / 文字列内の `,` は無視)。
-// 戻り値は trim 済 part の list (出現順)。
+// Split a string on top-level `,` (simple: `,` inside nested arrays or
+// strings is ignored). Returns the trimmed parts in original order.
 let split_top_comma = fn (s: str) ->
   let n = str_len s in
-  // accumulator-style: 末尾 cons + 最後に reverse
+  // accumulator-style: cons at end + reverse at the finish
   let rec loop = fn (i: int) -> fn (start: int) -> fn (depth: int) ->
                  fn (in_str: bool) -> fn (acc: str list) ->
     if i >= n then
@@ -111,7 +113,7 @@ let split_top_comma = fn (s: str) ->
       else loop (i + 1) start depth in_str acc in
   rev (loop 0 0 0 false Nil);
 
-// 値を parse: `42` / `true` / `false` / `"str"` / `[1, 2]`
+// Parse a value: `42` / `true` / `false` / `"str"` / `[1, 2]`
 let rec parse_value = fn (raw: str) ->
   let s = str_trim raw in
   let n = str_len s in
@@ -119,7 +121,8 @@ let rec parse_value = fn (raw: str) ->
   else if s == "true" then TBool true
   else if s == "false" then TBool false
   else if char_at s 0 == "\"" then
-    // basic string: end quote を末尾から逆方向で。 単純化のため line 内完結を仮定。
+    // basic string: find the end quote from the tail. For simplicity we
+    // assume it is completed within one line.
     if n < 2 || char_at s (n - 1) != "\"" then
       fail ("unterminated string: " ++ s)
     else
@@ -133,7 +136,7 @@ let rec parse_value = fn (raw: str) ->
       let parts = split_top_comma inner in
       TArr (list_map parts parse_value)
   else
-    // integer (negative も sign char check)
+    // integer (also handle a leading sign char for negatives)
     let first = char_at s 0 in
     let body_ok =
       if first == "-" || first == "+" then n > 1 && is_digit (char_at s 1)
@@ -141,10 +144,10 @@ let rec parse_value = fn (raw: str) ->
     if body_ok then TInt (int_of_str s)
     else fail ("unknown TOML value: " ++ s);
 
-// 1 行を解釈し、 (current_section, results) を更新して返す。
-//   - section header `[a.b]` → current_section を `"a.b"` に変更、 results 不変
-//   - key/value `k = v` → results に `(prefix + k, parsed value)` を append
-//   - 空行 / comment-only → 不変
+// Interpret one line and return an updated (current_section, results).
+//   - section header `[a.b]` -> change current_section to `"a.b"`, results unchanged
+//   - key/value `k = v` -> append `(prefix + k, parsed value)` to results
+//   - blank line / comment-only -> unchanged
 let parse_line = fn (line: str) -> fn (state: (str * (str * toml_value) list)) ->
   let (current_section, results) = state in
   let stripped = strip_comment line in
@@ -168,7 +171,7 @@ let parse_line = fn (line: str) -> fn (state: (str * (str * toml_value) list)) -
                       else key in
       (current_section, Cons ((qualified, v), results));
 
-// メイン entry: input str → (str * toml_value) list (順序保持、 出現順)
+// Main entry: input str -> (str * toml_value) list (preserves source order)
 let parse_toml = fn (input: str) ->
   let lines = str_split input "\n" in
   let init = ("", Nil) in
@@ -177,7 +180,7 @@ let parse_toml = fn (input: str) ->
   let (_, results) = final_state in
   rev results;
 
-// key lookup helper (見つからなければ fail)
+// key lookup helper (fails if not found)
 let rec get = fn (doc: (str * toml_value) list) -> fn (key: str) ->
   match doc with
   | [] -> fail ("TOML key not found: " ++ key)

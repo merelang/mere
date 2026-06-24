@@ -1,13 +1,14 @@
 // contrib/json/json.mere — JSON parser
 //
-// stdlib (str ops + is_digit + try_or + fail) と user-defined sum types
-// + 多相 list / pattern matching + 相互再帰 fn の組み合わせで実装。
+// Implemented by combining stdlib (str ops + is_digit + try_or + fail) with
+// user-defined sum types, polymorphic list / pattern matching, and mutually
+// recursive fns.
 //
-// Phase 40 (contrib stage 2): examples/json_parser.mere から移設。
-// Phase 41: qualified pattern match の 4 backend codegen 対応に伴い、
-// 本 lib を `module Json { ... }` で wrap して名前空間化。
+// Phase 40 (contrib stage 2): moved from examples/json_parser.mere.
+// Phase 41: with qualified pattern match now supported across all 4 backend
+// codegens, this lib is wrapped in `module Json { ... }` for namespacing.
 //
-// 使い方:
+// Usage:
 //   import "contrib/json/json.mere";
 //   let v = Json.parse_json "[1, 2]";
 //   match v with
@@ -15,8 +16,8 @@
 //   | Json.JNull -> ...
 //   | _ -> ...
 //
-// 末尾の self-test ブロック (`let run_case = ...` 以下) は demo として残し、
-// `Json` module の外側に書いてある。 実 use 時に削除して構わない。
+// The trailing self-test block (`let run_case = ...` and below) is kept as a
+// demo and lives outside the `Json` module. Feel free to remove it in real use.
 
 module Json {
 
@@ -162,7 +163,7 @@ let parse_json = fn (s: str) ->
 
 };   // end of `module Json`
 
-// === Self-tests (module の外側、 demo として残置。 実 use 時は削除) ===
+// === Self-tests (outside the module; kept as a demo. Remove in actual use) ===
 
 let run_case = fn (name: str, s: str) ->
   let result = try_or (fn () -> show (Json.parse_json s)) "<error>" in
@@ -176,7 +177,7 @@ let _ = run_case "str"      "\"hello\"";
 let _ = run_case "arr-empty" "[]";
 let _ = run_case "arr-flat"  "[1, 2, 3]";
 let _ = run_case "arr-mix"   "[true, \"x\", -5, null]";
-// Phase 36 lex 制約 workaround: `"{...}"` は補間として解釈されるので `\{` で escape
+// Phase 36 lex constraint workaround: `"{...}"` is interpreted as interpolation, so escape with `\{`
 let _ = run_case "obj-empty" "\{}";
 let _ = run_case "obj-flat"  "\{\"a\": 1, \"b\": 2}";
 let _ = run_case "nested"    "\{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";

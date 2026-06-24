@@ -1,10 +1,10 @@
-// markdown_toc: Markdown ドキュメントから TOC (目次) を生成 (Phase 33.5)
+// markdown_toc: generate a TOC (table of contents) from a Markdown document (Phase 33.5)
 //
-// 目的: examples roadmap G6。Markdown 入力 (str) を行に str_split で分割し、
-//   行頭の `#` を数えて見出しの depth を判定。depth + text を `(int * str)`
-//   tuple の list に集約、StrBuf で TOC を組み立てる。
+// Purpose: examples roadmap G6. Split the Markdown input (str) into lines with
+//   str_split, count leading `#` to determine heading depth, collect (depth, text)
+//   into a list of `(int * str)` tuples, then assemble the TOC via StrBuf.
 //
-// 入力例:
+// Sample input:
 //   # Title
 //   ## Section 1
 //   Some body text.
@@ -13,7 +13,7 @@
 //   ### Subsection 2.2
 //   # Appendix
 //
-// 出力 (TOC):
+// Output (TOC):
 //   - Title
 //     - Section 1
 //     - Section 2
@@ -21,22 +21,24 @@
 //       - Subsection 2.2
 //   - Appendix
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends — interp + C + LLVM + Wasm.
 //
-// 使い方:
+// Usage:
 //   dune exec ./bin/mere.exe -- examples/markdown_toc.mere
 
-// 行頭の `#` の連続数を返す (見出し depth)。`# ` の後に空白 (or 終端) なら 1、
-// `## ` なら 2、…。見出しでない行は 0。
+// Returns the count of consecutive `#` at the start of the line (heading depth).
+// 1 if `# ` is followed by a space (or end of line), 2 for `## `, etc.
+// Non-heading lines return 0.
 let rec count_hash = fn (line: str) -> fn (i: int) ->
   let n = str_len line in
   if i >= n then i
   else if char_at line i == "#" then count_hash line (i + 1)
   else i;
 
-// 見出しの depth (0 = 見出しでない、1+ = #/##/...)
-//   `# Title` のように `#` の後に space が要る (Markdown 仕様)
-//   末尾だけ `#` の行 (e.g., `###`) は depth 3 として受理 (緩い実装)
+// Heading depth (0 = not a heading, 1+ = #/##/...)
+//   Markdown spec requires a space after `#` (e.g. `# Title`).
+//   Lines containing only trailing `#`s (e.g. `###`) are accepted as depth 3
+//   (a loose implementation).
 let heading_depth = fn (line: str) ->
   let n = str_len line in
   if n == 0 then 0
@@ -47,21 +49,21 @@ let heading_depth = fn (line: str) ->
     else if char_at line h == " " then h
     else 0;
 
-// `# Title` の `Title` 部分 (`#` を depth 個 + space 1 個飛ばした残り) を返す。
-// 末尾だけ `#` の行は空文字。
+// Returns the `Title` part of `# Title` (the remainder after skipping `#`s and one space).
+// For lines that are only `#`s, returns the empty string.
 let heading_text = fn (line: str) -> fn (depth: int) ->
   let n = str_len line in
   if depth + 1 >= n then ""
   else substring line (depth + 1) n;
 
-// list 反転 helper (prelude の list_rev は別名、ここで自前 rev を使う)
+// List reversal helper (the prelude's list_rev has a different name; using our own rev here)
 let rec rev_aux = fn (l: 'a list) -> fn (acc: 'a list) ->
   match l with
   | Nil -> acc
   | Cons (h, t) -> rev_aux t (Cons (h, acc));
 let rev = fn (l: 'a list) -> rev_aux l Nil;
 
-// 全行を見出しだけにフィルタ + (depth, text) tuple list に集約
+// Filter all lines down to headings only and collect them into a (depth, text) tuple list
 let rec collect_headings = fn (lines: str list) -> fn (acc: (int * str) list) ->
   match lines with
   | Nil -> rev acc
@@ -72,13 +74,13 @@ let rec collect_headings = fn (lines: str list) -> fn (acc: (int * str) list) ->
       let t = heading_text line d in
       collect_headings rest (Cons ((d, t), acc));
 
-// depth N の indent (N-1 個の "  " + "- ") を返す
-//   depth=1 → "- ", depth=2 → "  - ", depth=3 → "    - "
+// Returns the indent for depth N: (N-1) copies of "  " followed by "- "
+//   depth=1 -> "- ", depth=2 -> "  - ", depth=3 -> "    - "
 let rec make_indent = fn (depth: int) -> fn (acc: str) ->
   if depth <= 1 then acc ++ "- "
   else make_indent (depth - 1) (acc ++ "  ");
 
-// region 内で StrBuf を作って TOC を組み立てる
+// Build the TOC inside a region by creating a StrBuf
 let build_toc = fn (headings: (int * str) list) ->
   region R {
     let buf = strbuf_new () in
@@ -109,18 +111,18 @@ let rec count_list = fn (xs: 'a list) -> fn (acc: int) ->
   match xs with
   | Nil -> acc
   | Cons (_, t) -> count_list t (acc + 1);
-let _ = print (show (count_list h1 0));  // 期待: 6 (Title + Section 1 + Section 2 + Sub 2.1 + Sub 2.2 + Appendix)
+let _ = print (show (count_list h1 0));  // Expected: 6 (Title + Section 1 + Section 2 + Sub 2.1 + Sub 2.2 + Appendix)
 
 let _ = print "=== TOC ===";
 let _ = print (build_toc h1);
 
-// 別ケース: 見出し無し
+// Another case: no headings
 let src2 = "Just body text.\nNo headings here.\nAnother line.";
 let h2 = collect_headings (str_split src2 "\n") Nil;
 let _ = print "empty TOC (no headings):";
 let _ = print ("[" ++ build_toc h2 ++ "]");
 
-// 別ケース: 深いネスト
+// Another case: deep nesting
 let src3 = "# A\n## B\n### C\n#### D\n##### E";
 let h3 = collect_headings (str_split src3 "\n") Nil;
 let _ = print "=== deep nest TOC ===";

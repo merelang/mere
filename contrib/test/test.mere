@@ -1,10 +1,10 @@
 // contrib/test/test.mere — minimal unit test framework for Mere
 //
-// Phase 42 後の dogfood lib。 `module Test { ... }` で名前空間化。
-// `show` builtin (多相) を使うことで `assert_eq` 1 つで int / str / bool /
-// variant / tuple すべて比較できる。
+// A post-Phase-42 dogfood library. Namespaced as `module Test { ... }`.
+// By using the (polymorphic) `show` builtin, a single `assert_eq` can
+// compare int / str / bool / variant / tuple uniformly.
 //
-// 使い方:
+// Usage:
 //   import "contrib/test/test.mere";
 //   let s = Test.new_suite () in
 //   let _ = Test.assert_eq s "1 + 1 = 2" 2 (1 + 1) in
@@ -12,25 +12,27 @@
 //   let _ = Test.summary s in
 //   Test.exit_status s
 //
-// 設計:
+// Design:
 //   - suite = (counters: Map[str, int], log: StrBuf)
-//     - counters["pass"] / counters["fail"] でカウント
-//     - log は FAIL の expected / actual を結合した文字列
-//   - assert_eq は `show x == show y` で比較 (poly な type 比較を回避)
-//   - summary は pass/fail/total を print、 fail log があれば print
-//   - exit_status は all pass で 0、 fail あれば 1 (CI / shell 連動用)
+//     - counters["pass"] / counters["fail"] hold the counts
+//     - log is a string accumulating expected / actual from FAILs
+//   - assert_eq compares with `show x == show y` (avoids polymorphic type compare)
+//   - summary prints pass/fail/total, and prints the fail log if any
+//   - exit_status returns 0 on all-pass, 1 if there is any fail
+//     (intended for CI / shell pipelines)
 //
-// 限定事項 (MVP):
-//   - test の grouping (describe/context) なし
-//   - parallel execution なし (Mere に thread がない)
-//   - setup/teardown hook なし (test fn が region ごとに資源を取る)
-//   - 例外 catch は `try_or` builtin 経由 — 各 assert で内部的に try_or 不要
-//     (Mere 例外は `fail` のみ、 user code が fail すれば test runner も落ちる
-//     - 将来 try_or で wrap して continue する option を入れる)
+// Limitations (MVP):
+//   - No test grouping (describe/context)
+//   - No parallel execution (Mere has no threads)
+//   - No setup/teardown hooks (each test fn acquires resources per region)
+//   - Exception catch goes through the `try_or` builtin — each assert does
+//     not internally need try_or (the only Mere exception is `fail`; if
+//     user code fails the test runner crashes too — a future option will
+//     wrap with try_or and continue)
 //
-// backend サポート: interp / C / LLVM / Wasm の **4 backend で diff = 0**
-// (Phase 43 で codegen_wasm.ml の ty_tag に Map case を追加し、 closure env /
-// tuple slot で Map を carrier として扱えるようになった)。
+// Backend support: **diff = 0 across the 4 backends** interp / C / LLVM / Wasm
+// (in Phase 43, a Map case was added to `ty_tag` in codegen_wasm.ml so that
+// Map can be used as a carrier in closure env / tuple slots).
 
 module Test {
 
@@ -41,7 +43,7 @@ let new_suite = fn () ->
   let log = strbuf_new () in
   (counters, log);
 
-// poly assert: show で文字列化して比較。 expected と actual が同じ型なら OK
+// poly assert: stringify with `show` and compare. OK if expected and actual have the same type.
 let assert_eq = fn suite -> fn (label: str) -> fn expected -> fn actual ->
   let (counters, log) = suite in
   let e = show expected in
@@ -56,16 +58,16 @@ let assert_eq = fn suite -> fn (label: str) -> fn expected -> fn actual ->
     let _ = strbuf_push log ("  actual:   " ++ a ++ "\n") in
     print ("FAIL | " ++ label);
 
-// bool true assertion — Phase 43 で DEFERRED §1.7 多 instantiation codegen を
-// fix したので、 内部で assert_eq を call できるようになった (旧 inline 実装は
-// 撤去、 簡潔さ復活)
+// bool-true assertion — Phase 43 fixed DEFERRED §1.7 (multi-instantiation
+// codegen), so we can now internally call assert_eq (the old inline
+// implementation is removed, restoring brevity).
 let assert_true = fn suite -> fn (label: str) -> fn (cond: bool) ->
   assert_eq suite label true cond;
 
 let assert_false = fn suite -> fn (label: str) -> fn (cond: bool) ->
   assert_eq suite label false cond;
 
-// pass/fail/total を出力。 fail があれば log を吐く
+// Print pass/fail/total. If there are fails, emit the log.
 let summary = fn suite ->
   let (counters, log) = suite in
   let pass = map_get counters "pass" in
@@ -76,14 +78,14 @@ let summary = fn suite ->
   let logstr = strbuf_to_str log in
   if str_len logstr > 0 then print logstr else ();
 
-// CI 用 exit code: all pass = 0、 fail あり = 1
+// Exit code for CI: all pass = 0, any fail = 1
 let exit_status = fn suite ->
   let (counters, _) = suite in
   if map_get counters "fail" == 0 then 0 else 1;
 
 };   // end of `module Test`
 
-// === Self-tests (module の外側、 demo として残置) ===
+// === Self-tests (outside the module, kept as a demo) ===
 
 let _ = print "=== test framework demo ===";
 let s = Test.new_suite ();
@@ -94,8 +96,8 @@ let _ = Test.assert_eq s "list length" 3 (list_len (Cons (1, Cons (2, Cons (3, N
 let _ = Test.assert_true s "5 > 3" (5 > 3);
 let _ = Test.assert_false s "5 < 3" (5 < 3);
 
-// 意図的に 1 件 fail させる (assert_eq の挙動を見る)
-let _ = Test.assert_eq s "(意図的 fail) 2 = 3" 2 3;
+// Intentionally fail one case (to demonstrate assert_eq behavior)
+let _ = Test.assert_eq s "(intentional fail) 2 = 3" 2 3;
 
 let _ = Test.summary s;
 Test.exit_status s

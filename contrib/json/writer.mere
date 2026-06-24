@@ -1,24 +1,25 @@
 // contrib/json/writer.mere — JSON writer (compact + pretty)
 //
-// StrBuf + ADT (json variant) を使った recursive write。 contrib/json/json.mere
-// (parser) と pair で考えると round-trip 可能。 ただし parser とは独立に使える
-// よう、 本 file は `type json` を top-level で declare し、 helpers を
-// `module JsonWriter { ... }` で wrap。
+// Recursive write using StrBuf + ADT (json variant). Pairs with
+// contrib/json/json.mere (parser) for round-trip. However, to allow standalone
+// use independent of the parser, this file declares `type json` at the top
+// level and wraps the helpers in `module JsonWriter { ... }`.
 //
-// 使い方:
-//   // 単独 use:
+// Usage:
+//   // Standalone use:
 //   import "contrib/json/writer.mere";
 //   let v = JArr (Cons (JNum 1, Cons (JNum 2, Nil))) in
 //   print (JsonWriter.to_json_str v);
 //
-//   // 注意: parser (`contrib/json/json.mere`) と round-trip する場合は、
-//   // parser.mere の `module Json { type json = ... }` と本 file の
-//   // top-level `type json` が衝突するため、 当面 either-or で使う想定。
-//   // 統合的に round-trip したい場合は parser.mere の type 宣言を
-//   // module 外に出すか、 user 側で AST 変換 fn を書く。
+//   // Note: when round-tripping with the parser (`contrib/json/json.mere`),
+//   // the parser's `module Json { type json = ... }` collides with this
+//   // file's top-level `type json`, so for now they are intended to be used
+//   // either-or. To round-trip integrally, either move parser.mere's type
+//   // declaration out of the module, or write an AST conversion fn on the
+//   // user side.
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
-// (Phase 43 で multi instantiation codegen が安定したため)
+// Execution mode: diff = 0 across all 4 backends — interp / C / LLVM / Wasm
+// (since Phase 43 stabilized multi-instantiation codegen).
 
 type json =
   | JNull
@@ -30,7 +31,7 @@ type json =
 
 module JsonWriter {
 
-// list を join: 各要素を fn で書き出し、 要素間に sep を挟む
+// Join a list: emit each element via fn, interleaving sep between elements
 let rec write_join = fn (sb) -> fn (items) -> fn (sep) -> fn (write_item) ->
   match items with
   | Nil -> ()
@@ -39,7 +40,7 @@ let rec write_join = fn (sb) -> fn (items) -> fn (sep) -> fn (write_item) ->
                    let __ = strbuf_push sb sep in
                    write_join sb t sep write_item;
 
-// str escape (`\` と `"` のみ最小限。 `\n` `\t` 等は今回 skip)
+// str escape (minimal: just `\` and `"`; `\n`, `\t`, etc. are skipped here)
 let escape_str = fn (s: str) ->
   let buf = strbuf_new () in
   let n = str_len s in
@@ -75,8 +76,9 @@ let rec write_json = fn (sb) -> fn (v) ->
       let __ = write_join sb items "," (fn sb2 -> fn item -> write_json sb2 item) in
       strbuf_push sb "]"
   | JObj pairs ->
-      // Phase 36 lex 制約 workaround: `"{"` は文字列補間開始と解釈されるので
-      // `"\{"` (= 1 文字 `{`) でエスケープ。 `}` は plain で OK。
+      // Phase 36 lex constraint workaround: `"{"` is interpreted as the start
+      // of string interpolation, so escape it with `"\{"` (= the single char `{`).
+      // `}` works fine as plain.
       let __ = strbuf_push sb "\{" in
       let __ = write_join sb pairs "," (fn sb2 -> fn p ->
         let __ = strbuf_push sb2 "\"" in
@@ -91,7 +93,7 @@ let to_json_str = fn (v) ->
   let __ = write_json buf v in
   strbuf_to_str buf;
 
-// === pretty writer (1 階層インデント、 配列は inline) ===
+// === pretty writer (one-level indent; arrays remain inline) ===
 
 let rec write_pretty = fn (sb) -> fn (v) ->
   match v with
@@ -100,7 +102,7 @@ let rec write_pretty = fn (sb) -> fn (v) ->
       let __ = write_join sb items ", " (fn sb2 -> fn item -> write_pretty sb2 item) in
       strbuf_push sb "]"
   | JObj pairs ->
-      let __ = strbuf_push sb "\{\n" in   // Phase 36 lex 制約 workaround
+      let __ = strbuf_push sb "\{\n" in   // Phase 36 lex constraint workaround
       let __ = write_join sb pairs ",\n" (fn sb2 -> fn p ->
         let __ = strbuf_push sb2 "  \"" in
         let __ = strbuf_push sb2 (escape_str (fst p)) in
@@ -117,7 +119,7 @@ let to_pretty_str = fn (v) ->
 
 };   // end of `module JsonWriter`
 
-// === Self-tests (module の外側、 demo として残置) ===
+// === Self-tests (outside the module; kept as a demo) ===
 
 let doc =
   JObj (Cons (("name", JStr "alice"),

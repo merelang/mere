@@ -1,12 +1,13 @@
-// contrib/markdown/to_html.mere — Markdown 部分集合を HTML に変換
+// contrib/markdown/to_html.mere — convert a subset of Markdown to HTML
 //
-// Phase 44 で `module MarkdownHtml { ... }` で wrap、 Phase 44.1 で
-// fenced code block (` ``` `) と link (`[X](Y)`、 `.md` → `.html` 自動 rewrite)
-// を追加。 `find_double` / `find_single` は inner-lifted fn 同士の相互参照が
-// 必要なので module の **外側** に置いて top-level fn として扱う (DEFERRED §8、
-// 同じ constraint が module wrap 中でも変わらない)。
+// Phase 44 wrapped this in `module MarkdownHtml { ... }`; Phase 44.1 added
+// fenced code blocks (` ``` `) and links (`[X](Y)`, with automatic `.md`
+// -> `.html` rewriting). `find_double` / `find_single` need to refer to
+// each other as inner-lifted fns, so they are placed **outside** the
+// module as top-level fns (DEFERRED §8; the same constraint still
+// applies even when wrapped in a module).
 //
-// 対応 syntax:
+// Supported syntax:
 //   # H1
 //   ## H2 / ### H3
 //   - bullet point
@@ -15,25 +16,27 @@
 //   ```
 //   fenced code block
 //   ```
-//   [link text](target.md)   // .md は .html に自動 rewrite
-//   段落区切り (空行)
+//   [link text](target.md)   // .md is rewritten to .html automatically
+//   paragraph break (blank line)
 //
-// 入力は文字列 list (line-by-line)、 出力は連結された HTML 文字列。
+// Input is a list of strings (line-by-line); output is a single concatenated HTML string.
 //
-// 使い方:
+// Usage:
 //   import "contrib/markdown/to_html.mere";
 //   let html = MarkdownHtml.render ["# Title", "paragraph"];
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across the 4 backends interp + C + LLVM + Wasm
 
-// Note: inner-lifted fn 同士で互いを参照する (go が find_double / find_single
-// を call) 場合、 capture chain が複雑になるため module の外側に top-level fn
-// として書く。 Phase 39.A2 は「inner-lifted fn を value 位置で」に対応したが、
-// inner-lifted fn 同士の相互参照は依然 workaround が必要。
+// Note: when inner-lifted fns refer to each other (here `go` calls
+// `find_double` / `find_single`), the capture chain becomes complex, so
+// we write them as top-level fns outside the module. Phase 39.A2 added
+// support for "inner-lifted fn in a value position", but mutual
+// references between inner-lifted fns still require this workaround.
 let rec __md_find_double = fn (s: str) -> fn (n: int) -> fn (c: str) -> fn (j: int) ->
-  // 未マッチ時は `n` を返す (= 文字列終端)。 `j + 1 >= n` で `j` を返すと
-  // off-by-one で末尾 1 byte が落ち、 UTF-8 multi-byte 文字を corrupt する
-  // (例: 末尾 `に` (E3 81 AB) が `E3 81` だけ残り `�` 化)
+  // On no-match, return `n` (= end of string). If we returned `j` on
+  // `j + 1 >= n`, an off-by-one would drop the trailing byte and corrupt
+  // a UTF-8 multi-byte character (e.g. a trailing 3-byte char E3 81 AB
+  // would be left as E3 81 and become a replacement char).
   if j + 1 >= n then n
   else if char_at s j == c && char_at s (j + 1) == c then j
   else __md_find_double s n c (j + 1);
@@ -64,7 +67,7 @@ let render_inline = fn (s: str) ->
         let _ = strbuf_push out "</strong>" in
         go (e + 2)
       else if c == "~" && i + 1 < n && char_at s (i + 1) == "~" then
-        // GFM strikethrough: ~~text~~ → <del>text</del>
+        // GFM strikethrough: ~~text~~ -> <del>text</del>
         let _ = strbuf_push out "<del>" in
         let e = __md_find_double s n "~" (i + 2) in
         let _ = strbuf_push out (substring s (i + 2) e) in
@@ -83,7 +86,7 @@ let render_inline = fn (s: str) ->
         let _ = strbuf_push out "</code>" in
         go (e + 1)
       else if c == "!" && i + 1 < n && char_at s (i + 1) == "[" then
-        // ![alt](url) を <img alt="alt" src="url"> に
+        // turn ![alt](url) into <img alt="alt" src="url">
         let close_bracket = __md_find_single s n "]" (i + 2) in
         if close_bracket >= n then
           let _ = strbuf_push out c in go (i + 1)
@@ -100,7 +103,7 @@ let render_inline = fn (s: str) ->
                                      ++ url ++ "\">") in
             go (close_paren + 1)
       else if c == "[" then
-        // [text](url) を <a href="url">text</a> に。 url の `.md` は `.html` に rewrite
+        // turn [text](url) into <a href="url">text</a>; rewrite `.md` urls to `.html`
         let close_bracket = __md_find_single s n "]" (i + 1) in
         if close_bracket >= n then
           let _ = strbuf_push out c in go (i + 1)
@@ -113,7 +116,7 @@ let render_inline = fn (s: str) ->
           else
             let text = substring s (i + 1) close_bracket in
             let url = substring s (close_bracket + 2) close_paren in
-            // .md で終わるなら .html に rewrite (SSG での link 解決)
+            // if it ends with .md, rewrite to .html (for SSG link resolution)
             let url_len = str_len url in
             let final_url =
               if url_len >= 3 && substring url (url_len - 3) url_len == ".md"
@@ -128,7 +131,7 @@ let render_inline = fn (s: str) ->
   let _ = go 0 in
   strbuf_to_str out;
 
-// 行の leading space 数を返す
+// return the number of leading spaces in a line
 let count_leading_spaces = fn (line: str) ->
   let n = str_len line in
   let rec scan = fn i ->
@@ -138,16 +141,16 @@ let count_leading_spaces = fn (line: str) ->
   in
   scan 0;
 
-// list item を検出: indent (= 2 空白単位の depth) + kind + content offset を返す
-//   戻り値: (is_list, depth, kind, content_offset)
-//     is_list: 真なら list 項目
-//     depth: 0 = top、 1 = 2-space indent、 2 = 4-space indent、 ...
-//     kind: 1 = ul (`-`)、 2 = ol (digits + `.`)
-//     content_offset: line 内 text の start index
+// detect a list item: returns indent (depth in 2-space units) + kind + content offset
+//   return: (is_list, depth, kind, content_offset)
+//     is_list: true if this is a list item
+//     depth: 0 = top, 1 = 2-space indent, 2 = 4-space indent, ...
+//     kind: 1 = ul (`-`), 2 = ol (digits + `.`)
+//     content_offset: start index of text within the line
 let detect_list_item = fn (line: str) ->
   let n = str_len line in
   let lead = count_leading_spaces line in
-  // indent は 2 空白の倍数で depth を決める
+  // depth is determined by indent in multiples of 2 spaces
   let depth = lead / 2 in
   let body_start = lead in
   if body_start >= n then (false, 0, 0, 0)
@@ -168,14 +171,14 @@ let detect_list_item = fn (line: str) ->
     else (false, 0, 0, 0)
   else (false, 0, 0, 0);
 
-// 行が `|` で始まる table row か
+// whether a line is a table row starting with `|`
 let is_table_row = fn (line: str) ->
   let n = str_len line in
   if n < 1 then false
   else char_at line 0 == "|";
 
-// 行が table の separator row (`|----|----|` 等) か。
-// `|`, `-`, `:`, ` ` のみで構成され、 少なくとも 1 個の `-` を含む
+// whether a line is a table separator row (e.g. `|----|----|`).
+// Must consist only of `|`, `-`, `:`, ` ` and contain at least one `-`.
 let is_table_sep = fn (line: str) ->
   let n = str_len line in
   if n < 3 then false
@@ -190,15 +193,15 @@ let is_table_sep = fn (line: str) ->
         else false
     in check 0 false;
 
-// table row を cell list に分解 (`| a | b |` → ["a", "b"])
-// 各 cell は前後の空白を trim
+// split a table row into a list of cells (`| a | b |` -> ["a", "b"]).
+// Each cell has leading/trailing whitespace trimmed.
 let parse_cells = fn (line: str) ->
   let parts = str_split line "|" in
-  // str_split が leading `|` で empty string を返すので filter
+  // str_split returns an empty string for the leading `|`, so filter it out
   let nonempty = list_filter parts (fn s -> str_len (str_trim s) > 0) in
   list_map nonempty str_trim;
 
-// 行が `---` / `***` / `___` のみで構成されているか (HR 判定)
+// whether the line consists solely of `---` / `***` / `___` (HR detection)
 let is_hr = fn (line: str) ->
   let n = str_len line in
   if n < 3 then false
@@ -212,12 +215,12 @@ let is_hr = fn (line: str) ->
         else false
       in check 0;
 
-// substring s start end (end は exclusive)
-// 単一行で完結する block (見出し / HR) を HTML に変換。
-// 段落 (`<p>`) は render 側の state machine で複数 soft-wrap 行を集約する。
-// list 項目 (`- ` / `N. `) と blockquote (`> `) も同じく state machine 担当。
-// paragraph line / empty line の場合は "" を返し、 呼出側が state machine で
-// 扱う signal にする。
+// substring s start end (end is exclusive)
+// Convert a single-line block (heading / HR) to HTML.
+// Paragraphs (`<p>`) are aggregated from multiple soft-wrap lines by the
+// render-side state machine. List items (`- ` / `N. `) and blockquotes
+// (`> `) are also handled by the state machine. For paragraph lines and
+// empty lines, this returns "" as a signal for the caller's state machine.
 let render_line = fn (line: str) ->
   let n = str_len line in
   if n == 0 then ""
@@ -229,9 +232,9 @@ let render_line = fn (line: str) ->
   else if starts_with line "# " then
     "<h1>" ++ render_inline (substring line 2 n) ++ "</h1>"
   else
-    "";   // paragraph line — caller の state machine が <p> を構築する
+    "";   // paragraph line — the caller's state machine builds the <p>
 
-// HTML 文字 escape (code block 内で `<` `>` `&` を表示するため)
+// HTML character escape (to render `<` `>` `&` literally inside code blocks)
 let escape_html = fn (s: str) ->
   let buf = strbuf_new () in
   let n = str_len s in
@@ -247,8 +250,9 @@ let escape_html = fn (s: str) ->
   let _ = loop 0 in
   strbuf_to_str buf;
 
-// 1 行を cell list として `<tr><CELL_TAG>...</CELL_TAG></tr>` の row HTML に
-// (CELL_TAG = "th" / "td"。 separator row は呼出側で skip 済前提)
+// Render one line of cells as a row HTML `<tr><CELL_TAG>...</CELL_TAG></tr>`
+// (CELL_TAG = "th" / "td"; the caller is expected to have skipped any
+// separator row).
 let render_table_row = fn (line: str) -> fn (cell_tag: str) ->
   let cells = parse_cells line in
   let buf = strbuf_new () in
@@ -261,17 +265,18 @@ let render_table_row = fn (line: str) -> fn (cell_tag: str) ->
   let _ = strbuf_push buf "</tr>" in
   strbuf_to_str buf;
 
-// ===== render helpers (module-level fn として lift、 DEFERRED §8 回避) =====
+// ===== render helpers (lifted as module-level fns to avoid DEFERRED §8) =====
 //
-// 任意深さの nested list を扱うため、 state に以下を持つ:
-//   "list_depth": 現在開いている list の深さ (0 = 無 list、 N = N 階層)
-//   "kind_<i>":   depth i (1..list_depth) の list kind (1=ul、 2=ol)
+// To handle arbitrarily nested lists, the state carries:
+//   "list_depth": current open-list depth (0 = no list, N = N nested levels)
+//   "kind_<i>":   list kind at depth i (1..list_depth) (1=ul, 2=ol)
 //
-// 各深さで「最後に emit した <li> は open」 状態。 nested list が来る
-// 場合は その <li> の中に <ul>/<ol> を続けて emit、 同 depth の次 item や
-// 上位 depth に戻る時に `</li>` で閉じる。
+// At each depth, the most recently emitted <li> is in the "open" state.
+// When a nested list appears, we emit a <ul>/<ol> inside that <li>; when
+// the next item at the same depth comes, or when we return to a shallower
+// depth, we close with `</li>`.
 
-// 非 table 行に来た時、 table を閉じる
+// when a non-table line arrives, close the table
 let close_table_if_open = fn state -> fn out ->
   let phase = map_get state "table_phase" in
   if phase == 2 then
@@ -282,25 +287,28 @@ let close_table_if_open = fn state -> fn out ->
     let _ = map_set state "table_phase" 0 in ()
   else ();
 
-// 非 blockquote 行に来た時、 blockquote を閉じる。 連続する `> ` 行は
-// 1 つの `<blockquote>...</blockquote>` にまとめる (CommonMark 準拠)。
+// When a non-blockquote line arrives, close the blockquote. Consecutive
+// `> ` lines are merged into a single `<blockquote>...</blockquote>`
+// (CommonMark-compliant).
 let close_blockquote_if_open = fn state -> fn out ->
   if map_get state "bq_open" == 1 then
     let _ = strbuf_push out "</blockquote>\n" in
     let _ = map_set state "bq_open" 0 in ()
   else ();
 
-// paragraph (`<p>`) を閉じる。 CommonMark では soft-wrap した非空行は同一段落
-// として join される (例: 3 行の soft-wrap → 1 個の `<p>line1 line2 line3</p>`)。
-// 空行 / 他 block 要素 (heading / hr / list / table / blockquote / code) が来た
-// 時に close する。
+// Close the paragraph (`<p>`). In CommonMark, soft-wrapped non-empty
+// lines are joined into the same paragraph (e.g. 3 soft-wrapped lines
+// -> a single `<p>line1 line2 line3</p>`). Close on a blank line or
+// when another block element (heading / hr / list / table / blockquote /
+// code) appears.
 //
-// paragraph 内の inline 解析 (\`**\` / `*` / `` ` `` / `[...](...)`) は cross-line
-// に渡る場合があるため、 paragraph の text は専用 strbuf に accumulate し、
-// close 時に **全体に対して render_inline を 1 度だけ呼ぶ** (per-line 適用だと
-// soft-wrap した bold ペアが正しく match しない)。 strbuf は 1 つを使い回し、
-// 各 paragraph の start offset (\`para_start\`) を state で track して
-// substring で切り出す。
+// Inline parsing within a paragraph (\`**\` / `*` / `` ` `` / `[...](...)`)
+// may span multiple lines, so we accumulate the paragraph text into a
+// dedicated strbuf and **call render_inline once on the entire content**
+// at close time (applying it per line would fail to match a soft-wrapped
+// bold pair). We reuse a single strbuf and track the start offset
+// (\`para_start\`) of each paragraph in state, then carve it out with
+// substring.
 let close_paragraph_if_open = fn state -> fn out -> fn para_buf ->
   if map_get state "para_open" == 1 then
     let total = strbuf_to_str para_buf in
@@ -312,8 +320,8 @@ let close_paragraph_if_open = fn state -> fn out -> fn para_buf ->
     let _ = map_set state "para_open" 0 in ()
   else ();
 
-// 最深 (depth = list_depth) の list を 1 階層 close する。
-//   open な `<li>` があれば `</li>` を emit してから `</ul>` or `</ol>` を emit。
+// Close one level of the deepest (depth = list_depth) list.
+//   If a `<li>` is open, emit `</li>` first, then emit `</ul>` or `</ol>`.
 let pop_one_list_level = fn state -> fn out ->
   let d = map_get state "list_depth" in
   if d <= 0 then ()
@@ -328,7 +336,7 @@ let pop_one_list_level = fn state -> fn out ->
     let _ = map_set state "list_depth" (d - 1) in
     ();
 
-// list が開いていれば全部 close
+// close all open list levels
 let close_list_if_open = fn state -> fn out ->
   let rec loop = fn () ->
     if map_get state "list_depth" <= 0 then ()
@@ -337,7 +345,7 @@ let close_list_if_open = fn state -> fn out ->
       loop ()
   in loop ();
 
-// depth `target` まで、 list を pop して下げる
+// pop list levels until reaching depth `target`
 let pop_until_depth = fn state -> fn out -> fn (target: int) ->
   let rec loop = fn () ->
     if map_get state "list_depth" <= target then ()
@@ -346,12 +354,12 @@ let pop_until_depth = fn state -> fn out -> fn (target: int) ->
       loop ()
   in loop ();
 
-// list item を emit (depth = 1-indexed、 kind = 1/2、 text = inline content)
+// emit a list item (depth = 1-indexed, kind = 1/2, text = inline content)
 let emit_list_item = fn state -> fn out -> fn (depth: int) ->
                      fn (kind: int) -> fn (text: str) ->
   let cur = map_get state "list_depth" in
-  // (1) 深い方に open する case: 必要なだけ新規 list を open。
-  // 親 li は open のまま (中に新規 list を入れる)。
+  // (1) Going deeper: open as many new lists as needed.
+  //     The parent <li> stays open (the new list lives inside it).
   let _ = if depth > cur then
             let rec open_levels = fn () ->
               if map_get state "list_depth" >= depth then ()
@@ -365,10 +373,10 @@ let emit_list_item = fn state -> fn out -> fn (depth: int) ->
                 open_levels ()
             in open_levels ()
           else () in
-  // (2) 浅い方に戻る case: pop。 pop した後の current depth は parent で、
-  // その <li> はまだ open。
+  // (2) Going shallower: pop. After popping, the current depth is the
+  //     parent, and its <li> is still open.
   let _ = pop_until_depth state out depth in
-  // (3) 同 depth で kind が違うなら、 list を close + 新規 open
+  // (3) Same depth but different kind: close the list and open a new one
   let _ = let cur_k = map_get state ("kind_" ++ show depth) in
           if cur_k != kind then
             let _ = pop_one_list_level state out in
@@ -379,14 +387,14 @@ let emit_list_item = fn state -> fn out -> fn (depth: int) ->
             let _ = map_set state "list_depth" depth in
             ()
           else () in
-  // (4) 同 depth に既に open な <li> があれば閉じる
+  // (4) If a <li> is already open at the same depth, close it
   let _ = if map_get state ("li_open_" ++ show depth) == 1 then
             let _ = strbuf_push out "</li>\n" in
             let _ = map_set state ("li_open_" ++ show depth) 0 in ()
           else () in
-  // (5) 新規 <li> を emit (open)
-  //   GFM task list: `- [ ] text` / `- [x] text` / `- [X] text` を check box に。
-  //   ul のみ対象 (ol with task list は標準外)。
+  // (5) Emit a new <li> (open)
+  //     GFM task list: `- [ ] text` / `- [x] text` / `- [X] text` -> checkbox.
+  //     ul only (task list inside ol is non-standard).
   let tlen = str_len text in
   let is_task_unchecked = kind == 1 && tlen >= 4
                           && substring text 0 4 == "[ ] " in
@@ -411,10 +419,10 @@ let emit_list_item = fn state -> fn out -> fn (depth: int) ->
 
 let render = fn (lines: str list) ->
   let out = strbuf_new () in
-  // paragraph 用 strbuf — close 時に `para_start..len` を切り出して
-  // render_inline を 1 回適用 (cross-line bold/italic/code を正しく match)。
-  // strbuf に clear が無いため accumulate-only、 各 paragraph の開始 offset を
-  // state["para_start"] で追跡する。
+  // strbuf for paragraphs — at close time we slice `para_start..len` and
+  // apply render_inline once (so cross-line bold/italic/code match
+  // correctly). Since strbuf has no clear, this is accumulate-only; the
+  // start offset of each paragraph is tracked in state["para_start"].
   let para_buf = strbuf_new () in
   // state Map: in_code / table_phase / list_depth (+ kind_<i> per depth) / bq_open / para_open / para_start
   let state = map_new () in
@@ -431,8 +439,8 @@ let render = fn (lines: str list) ->
       let _ = close_list_if_open state out in
       let _ = close_blockquote_if_open state out in
       let _ = close_paragraph_if_open state out para_buf in
-      // toggle: 開始時は <pre><code> を吐く、 終了時は </code></pre>
-      // Phase 44.5: ```<lang> なら <code class="language-<lang>"> として emit
+      // toggle: on start emit <pre><code>, on end emit </code></pre>
+      // Phase 44.5: ```<lang> emits <code class="language-<lang>">
       if in_code == 0 then
         let _ = map_set state "in_code" 1 in
         let lang = str_trim (substring line 3 (str_len line)) in
@@ -452,7 +460,7 @@ let render = fn (lines: str list) ->
         let _ = strbuf_push out "\n" in
         ()
     else if in_code == 1 then
-      // code block 内: escape + そのまま追加 (markdown 解釈しない)
+      // inside a code block: escape and append as-is (no markdown interpretation)
       let _ = strbuf_push out (escape_html line) in
       let _ = strbuf_push out "\n" in
       ()
@@ -480,7 +488,7 @@ let render = fn (lines: str list) ->
         let _ = strbuf_push out "\n" in
         ()
     else if starts_with line "> " then
-      // 連続する `> ` 行は単一の `<blockquote>` に集約。 行間は space 区切り。
+      // Consecutive `> ` lines are merged into a single `<blockquote>`. Lines are joined with a space.
       let _ = close_table_if_open state out in
       let _ = close_list_if_open state out in
       let _ = close_paragraph_if_open state out para_buf in
@@ -499,7 +507,7 @@ let render = fn (lines: str list) ->
         let _ = close_blockquote_if_open state out in
         let _ = close_paragraph_if_open state out para_buf in
         let text = substring line content_off (str_len line) in
-        // depth は detect から 0-indexed なので 1-indexed に変換
+        // depth from detect is 0-indexed, so convert to 1-indexed
         let _ = emit_list_item state out (list_depth + 1) list_kind text in
         ()
       else
@@ -508,18 +516,19 @@ let render = fn (lines: str list) ->
         let _ = close_blockquote_if_open state out in
         let html = render_line line in
         if str_len html > 0 then
-          // 単一行 block (heading / hr) は paragraph を閉じてから直接 emit
+          // single-line block (heading / hr): close paragraph then emit directly
           let _ = close_paragraph_if_open state out para_buf in
           let _ = strbuf_push out html in
           let _ = strbuf_push out "\n" in
           ()
         else if str_len line == 0 then
-          // 空行: paragraph を閉じる (CommonMark の段落境界)
+          // blank line: close the paragraph (CommonMark paragraph boundary)
           let _ = close_paragraph_if_open state out para_buf in ()
         else
-          // 通常の段落 line: para_buf に append (close 時に render_inline)。
-          // 開始時は para_start を strbuf 現在長に固定 (それ以前の paragraph 領域を
-          // 切り出しから除外)、 継続時は " " separator を先に挿入してから line。
+          // normal paragraph line: append to para_buf (render_inline runs on close).
+          // On start, fix para_start to the current strbuf length (so the
+          // previous paragraph region is excluded from the slice); on
+          // continuation, insert a " " separator first, then the line.
           let p = map_get state "para_open" in
           let _ = if p == 0 then
                     let _ = map_set state "para_open" 1 in
@@ -537,7 +546,7 @@ let render = fn (lines: str list) ->
 
 };   // end of `module MarkdownHtml`
 
-// === Self-tests (module の外側、 実 use 時は削除) ===
+// === Self-tests (outside the module; remove when actually using) ===
 
 let _ = print "=== markdown_to_html (module MarkdownHtml) ===";
 

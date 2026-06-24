@@ -1,18 +1,19 @@
-// regex_engine: NFA-based regex engine (Thompson 構成法 + backtracking)
+// regex_engine: NFA-based regex engine (Thompson construction + backtracking)
 //
-// サポート構文:
-//   c      - リテラル文字
-//   .      - 任意文字
-//   *      - 0 回以上
-//   +      - 1 回以上
-//   ?      - 0 or 1 回
-//   ab     - 連接
-//   a|b    - 選択
+// Supported syntax:
+//   c      - literal character
+//   .      - any character
+//   *      - zero or more
+//   +      - one or more
+//   ?      - zero or one
+//   ab     - concatenation
+//   a|b    - alternation
 //
-// AST → 簡易 backtracking matcher。 NFA simulation でも書けるが、 ここでは
-// 教育的に「AST recurse」 を採用 (worst-case exponential、 でも分かりやすい)。
+// AST -> simple backtracking matcher. We could also write an NFA simulation,
+// but for didactic reasons we use direct AST recursion (worst-case exponential,
+// but easy to follow).
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across the 4 backends interp + C + LLVM + Wasm
 
 type re =
   | RChar of str
@@ -23,9 +24,9 @@ type re =
   | RSeq of re * re
   | RAlt of re * re;
 
-// re_match e s i ⇒ (matched, end_pos)
-// e: regex AST、 s: 文字列、 i: 開始位置
-// 成功時 (true, j) で j はマッチ終端 (exclusive)。 失敗時 (false, _)
+// re_match e s i => (matched, end_pos)
+// e: regex AST, s: string, i: start position
+// On success: (true, j) where j is the match end (exclusive). On failure: (false, _).
 let rec re_match = fn (e: re) -> fn (s: str) -> fn (i: int) ->
   let n = str_len s in
   match e with
@@ -45,7 +46,7 @@ let rec re_match = fn (e: re) -> fn (s: str) -> fn (i: int) ->
     if fst ra then ra
     else re_match b s i
   | RStar inner ->
-    // 0 回以上: greedy backtracking
+    // zero or more: greedy backtracking
     let r1 = re_match inner s i in
     if fst r1 && snd r1 > i then
       let r2 = re_match (RStar inner) s (snd r1) in
@@ -53,7 +54,7 @@ let rec re_match = fn (e: re) -> fn (s: str) -> fn (i: int) ->
       else (true, snd r1)
     else (true, i)
   | RPlus inner ->
-    // 1 回以上: a · a*
+    // one or more: a . a*
     let r1 = re_match inner s i in
     if fst r1 && snd r1 > i then re_match (RStar inner) s (snd r1)
     else (false, i)
@@ -62,7 +63,7 @@ let rec re_match = fn (e: re) -> fn (s: str) -> fn (i: int) ->
     if fst r1 then r1
     else (true, i);
 
-// テキスト内 search: マッチが見つかる最初の位置を返す (- 1 if none)
+// search within text: returns the first position where a match is found (-1 if none)
 let regex_search = fn (e: re) -> fn (s: str) ->
   let n = str_len s in
   let rec go = fn i ->
@@ -83,20 +84,20 @@ let report = fn (label: str) -> fn (pat: re) -> fn (s: str) ->
 
 let _ = print "=== regex engine: NFA backtracking matcher ===";
 
-// "ab+c" — a, 1 個以上の b, c
+// "ab+c" — a, one or more b, c
 let r1 = RSeq (RChar "a", RSeq (RPlus (RChar "b"), RChar "c"));
 let _ = report "ab+c" r1 "abc";        // match @0, full=yes
 let _ = report "ab+c" r1 "abbbc";       // match @0, full=yes
 let _ = report "ab+c" r1 "ac";          // no
 let _ = report "ab+c" r1 "xxabbcyy";    // match @2, full=no
 
-// "a.*b" — a, 任意, b
+// "a.*b" — a, anything, b
 let r2 = RSeq (RChar "a", RSeq (RStar RAny, RChar "b"));
 let _ = report "a.*b" r2 "ab";          // match @0
 let _ = report "a.*b" r2 "axxxxb";       // match @0
 let _ = report "a.*b" r2 "aa";          // no
 
-// "(yes|no)" 形式 = "y" alt "n"
+// "(yes|no)" form = "y" alt "n"
 let r3 = RAlt (RChar "y", RChar "n");
 let _ = report "y|n" r3 "yyy";          // match @0
 let _ = report "y|n" r3 "nnn";          // match @0

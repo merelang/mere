@@ -1,17 +1,18 @@
 // contrib/csv/parser.mere — CSV parser
 //
-// 仕様 (RFC 4180 縮小版):
-//   - field 区切りは `,`
-//   - 行区切りは `\n`
-//   - field は quote `"..."` 可、quote 内では `""` で literal quote
-//   - quote 外の field は trim しない (CRLF も対応せず単純化)
+// Spec (reduced RFC 4180):
+//   - field separator is `,`
+//   - row separator is `\n`
+//   - fields can be quoted `"..."`; inside quotes `""` denotes a literal quote
+//   - fields outside quotes are not trimmed (CRLF is not handled either, for simplicity)
 //
-// 結果は `str list list` (行のリスト、各行は field のリスト)
+// Result is `str list list` (a list of rows, each row a list of fields).
 //
-// Phase 41 (contrib): examples/csv_parser.mere から移設し `module Csv { ... }`
-// で wrap。 prelude が `type 'a list` を提供するので redundant な再宣言を削除。
+// Phase 41 (contrib): moved from examples/csv_parser.mere and wrapped in
+// `module Csv { ... }`. The prelude provides `type 'a list`, so the redundant
+// redeclaration was removed.
 //
-// 使い方:
+// Usage:
 //   import "contrib/csv/parser.mere";
 //   let rows = Csv.parse_csv "a,b\n1,2";
 
@@ -25,7 +26,7 @@ let rec rev_aux = fn (xs, acc) ->
 let rev = fn (xs) -> rev_aux xs [];
 
 // === field parser: quoted or bare ===
-// 戻り値: (field, next_pos)
+// Returns: (field, next_pos)
 
 let parse_quoted = fn (s: str, i: int) ->
   // s[i] == '"'.  Scan until next un-paired '"', interpreting "" as literal ".
@@ -94,7 +95,7 @@ let parse_csv = fn (s: str) ->
 
 };   // end of `module Csv`
 
-// === Self-tests (module の外側、 demo として残置) ===
+// === Self-tests (outside the module; kept as a demo) ===
 
 let run_case = fn (name: str, input: str) ->
   let result = try_or (fn () -> show (Csv.parse_csv input)) "<error>" in

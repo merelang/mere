@@ -1,46 +1,47 @@
 // regex_lite: minimal regex matcher with backtracking
 //
-// 目的: examples roadmap C5。recursive variant (regex AST) + NFA-ish な
-//   backtracking matching を Mere で書く。Phase 22-27 で固めた多相
-//   user let-rec + nested P_constr + str ops を実投入。
+// Purpose: examples roadmap C5. Write a recursive-variant (regex AST) +
+//   NFA-ish backtracking matcher in Mere. Exercises the polymorphic user
+//   let-rec + nested P_constr + str ops stabilized in Phase 22-27.
 //
-// サポートする regex 構文 (小さく絞る):
-//   c       文字リテラル (ascii 1 byte)
-//   .       任意 1 文字
-//   ^       行頭アンカー
-//   $       行末アンカー
-//   c*      0 回以上の繰り返し (greedy)
-//   c+      1 回以上の繰り返し (greedy)
-//   c?      0 or 1 回 (optional)
-//   ab      連結 (concat)
+// Supported regex syntax (kept small):
+//   c       character literal (ascii 1 byte)
+//   .       any single character
+//   ^       start-of-line anchor
+//   $       end-of-line anchor
+//   c*      zero or more (greedy)
+//   c+      one or more (greedy)
+//   c?      zero or one (optional)
+//   ab      concatenation
 //
-// 対応しない: グループ (), 文字クラス [...], 選択 |
+// Not supported: groups (), character classes [...], alternation |
 //
-// 実行モード: interp / C / LLVM / Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across the 4 backends interp / C / LLVM / Wasm
 //
-// 設計:
+// Design:
 //   - regex AST = recursive variant
-//   - match_re re s = bool (s 全体が re にマッチするか)
-//   - parse_re src = regex (簡易 parser)
+//   - match_re re s = bool (whether the whole of s matches re)
+//   - parse_re src = regex (simple parser)
 //
-// Phase 42 (contrib): examples/regex_lite.mere から移設、 `module Regex { ... }`
-// で wrap。 `type regex = RChar | RDot | ...` は module の外側に残し
-// (recursive variant の codegen 安定性のため)、 関数群を module 内に置く。
+// Phase 42 (contrib): moved from examples/regex_lite.mere and wrapped in
+// `module Regex { ... }`. `type regex = RChar | RDot | ...` is kept outside
+// the module (for recursive-variant codegen stability), with the functions
+// placed inside.
 //
-// 使い方:
+// Usage:
 //   import "contrib/regex/regex.mere";
 //   let re = Regex.parse_re "a.+z$" in
 //   if Regex.match_re re "anything-then-z" then ... else ...
 
 // regex AST
-//   RChar c    : 1 文字リテラル
-//   RDot       : 任意 1 文字
-//   RStart     : ^ アンカー
-//   RDollar    : $ アンカー
+//   RChar c    : single-char literal
+//   RDot       : any single character
+//   RStart     : ^ anchor
+//   RDollar    : $ anchor
 //   RStar atom : atom*
 //   RPlus atom : atom+
 //   ROpt atom  : atom?
-//   RSeq xs    : 連結 (list of atoms)
+//   RSeq xs    : concatenation (list of atoms)
 type regex =
   | RChar  of str
   | RDot
@@ -53,29 +54,30 @@ type regex =
 
 module Regex {
 
-// --- Parser (極簡易) ---
-//   parse は文字単位で線形に進み、直前 atom に */+/? を post-fix
+// --- Parser (very simple) ---
+//   Parses character-by-character linearly, applying */+/? as a post-fix
+//   to the immediately preceding atom.
 //
 //   parse_atoms : str list -> int -> regex list -> regex list
-//   各 char を 1 atom にし、次 char が */+/? なら quantify
+//   Each char becomes one atom; if the next char is */+/? we quantify.
 
-// 1 文字 c を atom に
+// turn a single char c into an atom
 let char_to_atom = fn (c: str) ->
   if c == "." then RDot
   else if c == "^" then RStart
   else if c == "$" then RDollar
   else RChar c;
 
-// (再帰で atoms を構築。post-fix 演算子は直前 atom を変換)
+// (recursively build atoms; post-fix operators rewrite the preceding atom)
 let rec parse_atoms = fn (src: str) -> fn (i: int) -> fn (acc: regex list) ->
   let n = str_len src in
   if i >= n then acc
   else
     let c = char_at src i in
     if c == "*" || c == "+" || c == "?" then
-      // 直前 atom を quantify (acc は逆順なので head = 直前)
+      // quantify the previous atom (acc is reversed, so head = previous)
       match acc with
-      | Nil -> parse_atoms src (i + 1) acc  // 先頭 quantifier は無視
+      | Nil -> parse_atoms src (i + 1) acc  // ignore a leading quantifier
       | Cons (h, t) ->
         let q =
           if c == "*" then RStar h
@@ -84,11 +86,11 @@ let rec parse_atoms = fn (src: str) -> fn (i: int) -> fn (acc: regex list) ->
         in
         parse_atoms src (i + 1) (Cons (q, t))
     else
-      // 通常 atom を積む
+      // push a regular atom
       let atom = char_to_atom c in
       parse_atoms src (i + 1) (Cons (atom, acc));
 
-// list を逆順にする
+// reverse a list
 let rec rev_aux = fn (l: 'a list) -> fn (acc: 'a list) ->
   match l with
   | Nil -> acc
@@ -101,12 +103,13 @@ let parse_re = fn (src: str) ->
 
 // --- Matcher ---
 //   match_seq : regex list -> str -> int -> bool
-//     atoms を順に消費しつつ s の位置 i を進める。
-//     match 不成立で false (backtrack は star/plus 内のみ)
+//     Consume atoms in order while advancing position i in s.
+//     Returns false if the match fails (backtracking only happens
+//     inside star/plus).
 //
 //   match_atom : regex -> str -> int -> int (= new position or -1)
-//     1 atom が i から match できればその後の位置、不成立なら -1
-//     star/plus は内部で greedy + backtrack
+//     If one atom matches starting at i, returns the position after it;
+//     -1 on failure. Star/plus do greedy match + backtrack internally.
 
 let rec match_atom = fn (re: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: regex list) ->
   let n = str_len s in
@@ -130,7 +133,7 @@ let rec match_atom = fn (re: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: r
       if match_seq rest s i then i else -1
     else -1
   | RStar inner ->
-    // greedy: できる限り match して backtrack
+    // greedy: match as much as possible, then backtrack
     match_star inner s i rest
   | RPlus inner ->
     // a+ = a a*
@@ -138,7 +141,7 @@ let rec match_atom = fn (re: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: r
     if first < 0 then -1
     else match_star inner s first rest
   | ROpt inner ->
-    // 1 回試して失敗したら 0 回で続行
+    // try once; if it fails, continue with zero matches
     let one = match_one inner s i in
     if one >= 0 then
       if match_seq rest s one then one
@@ -146,7 +149,7 @@ let rec match_atom = fn (re: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: r
     else
       if match_seq rest s i then i else -1
   | RSeq atoms ->
-    // RSeq inside an atom slot は無いはず、念のため
+    // RSeq inside an atom slot shouldn't happen, but handle defensively
     if match_seq atoms s i then i else -1
 
 and match_one = fn (re: regex) -> fn (s: str) -> fn (i: int) ->
@@ -160,20 +163,21 @@ and match_one = fn (re: regex) -> fn (s: str) -> fn (i: int) ->
     if i >= n then -1 else i + 1
   | RStart -> if i == 0 then i else -1
   | RDollar -> if i == n then i else -1
-  | RStar _ -> i  // 0 回 match で常に true、位置不変
-  | RPlus _ -> match_one re s i  // ここには本来来ないが安全側で
+  | RStar _ -> i  // zero matches always succeed, position unchanged
+  | RPlus _ -> match_one re s i  // shouldn't reach here, but be safe
   | ROpt _ -> i
   | RSeq _ -> i
 
 and match_star = fn (inner: regex) -> fn (s: str) -> fn (i: int) -> fn (rest: regex list) ->
-  // greedy: できる限り match を集め、後で 1 つずつ戻して rest match を試す
+  // greedy: collect as many matches as possible, then back off one by
+  // one and try matching `rest` from each position.
   let rec collect = fn (pos: int) -> fn (acc: int list) ->
     let next = match_one inner s pos in
     if next > pos then collect next (Cons (next, acc))
     else acc
   in
   let positions = Cons (i, collect i Nil) in
-  // positions = [..., greedy_max, ..., i] (前が long match)
+  // positions = [..., greedy_max, ..., i] (front = longest match)
   let rec try_each = fn (poss: int list) ->
     match poss with
     | Nil -> -1
@@ -190,17 +194,18 @@ and match_seq = fn (atoms: regex list) -> fn (s: str) -> fn (i: int) ->
     let next = match_atom atom s i rest in
     next >= 0;
 
-// 全体 match: ^ や $ アンカーを意識しつつ 0..n の任意位置から match を試す
+// whole-string match: respects ^ and $ anchors, otherwise tries any
+// starting position in 0..n
 let match_re = fn (pat: regex) -> fn (s: str) ->
   match pat with
   | RSeq atoms ->
     match atoms with
     | Nil -> true
     | Cons (RStart, rest) ->
-      // ^ anchored — 位置 0 のみ
+      // ^ anchored — only position 0
       match_seq rest s 0
     | _ ->
-      // 任意位置から match を試す
+      // try matching from every starting position
       let n = str_len s in
       let rec try_pos = fn (i: int) ->
         if i > n then false
@@ -212,7 +217,7 @@ let match_re = fn (pat: regex) -> fn (s: str) ->
 
 };   // end of `module Regex`
 
-// === Self-tests (module の外側、 実 use 時は削除) ===
+// === Self-tests (outside the module; remove when actually using) ===
 
 let run_case = fn (label: str) -> fn (pat_src: str) -> fn (subject: str) -> fn (expected: bool) ->
   let pat = Regex.parse_re pat_src in

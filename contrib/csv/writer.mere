@@ -1,24 +1,24 @@
 // contrib/csv/writer.mere — CSV writer (record `Person` bound)
 //
-// Phase 42 後の dogfood: `module CsvWriter { ... }` で名前空間化。
-// `type Person` は module の外側に残し、 lib functions (`escape_field` /
-// `row_of` / `render`) は module 内に置く。 これで `CsvWriter.escape_field`
-// などが qualified call できる (Phase 42 で record type in module が
-// 4 backend codegen に対応した後)。
+// Post-Phase 42 dogfood: namespaced as `module CsvWriter { ... }`.
+// `type Person` is kept outside the module, while the lib functions
+// (`escape_field` / `row_of` / `render`) live inside it. This allows
+// qualified calls like `CsvWriter.escape_field` (after Phase 42, when
+// record types declared in modules became supported by all 4 backend codegens).
 //
-// 設計:
-//   - record `Person { name; age; city }` は user 側の domain 型
-//   - Person list → CSV string
-//   - field に `,` `"` を含むなら `"..."` で囲み、 内部 `"` は `""` に
-//   - 改行は当面扱わない (record literal に `\n` を含まない前提)
+// Design:
+//   - record `Person { name; age; city }` is a user-side domain type
+//   - Person list -> CSV string
+//   - if a field contains `,` or `"`, wrap it in `"..."` and replace inner `"` with `""`
+//   - newlines are not handled for now (assumes record literals contain no `\n`)
 //
-// 限定事項 (MVP):
-//   - record polymorphism がない (Mere 仕様の現状) ので、 別 record 型ごとに
-//     row_of / render を書き直す必要あり。 将来 trait / row poly が入れば
-//     `CsvWriter.render: ('a -> str list) -> 'a list -> str` のような
-//     generic API になる
+// Limitations (MVP):
+//   - No record polymorphism (current Mere spec), so row_of / render must be
+//     rewritten for each record type. When traits / row polymorphism are
+//     introduced later, the API can become a generic
+//     `CsvWriter.render: ('a -> str list) -> 'a list -> str`.
 //
-// 実行モード: interp + C + LLVM + Wasm の 4 backend で diff = 0
+// Execution mode: diff = 0 across all 4 backends — interp + C + LLVM + Wasm.
 
 type Person = { name: str, age: int, city: str };
 
@@ -51,7 +51,7 @@ let render = fn (rows: Person list) ->
 
 };   // end of `module CsvWriter`
 
-// === Self-tests (module の外側、 実 use 時は削除) ===
+// === Self-tests (outside the module; remove in actual use) ===
 
 let _ = print "=== csv_writer (module CsvWriter) ===";
 
