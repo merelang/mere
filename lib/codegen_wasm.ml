@@ -5273,8 +5273,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       let elem_names =
         String.concat " " (List.map (fun s -> "$" ^ s) !table_entries)
       in
+      (* Phase 48.2 (C2 Stage 2): export the table as
+         `__indirect_function_table` so JS host glue can pull a Mere
+         closure out of the table and call it back. The export name
+         matches the wasm-bindgen / LLVM convention. *)
       Printf.sprintf
         "  (table %d funcref)\n\
+        \  (export \"__indirect_function_table\" (table 0))\n\
         \  (elem (i32.const 0) %s)\n"
         n elem_names
     end
@@ -5282,7 +5287,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (* No closure adapters in the table but the higher-order Vec
          helpers reference (type $cl) + call_indirect, which require a
          table. Declare a zero-element one. *)
-      "  (table 0 funcref)\n"
+      "  (table 0 funcref)\n\
+      \  (export \"__indirect_function_table\" (table 0))\n"
     else ""
   in
   (* Phase 26.1: reserve 512 bytes for __lang_char_table (256 * 2-byte cells).
