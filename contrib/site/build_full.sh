@@ -32,6 +32,15 @@ if [ -d "$PLAYGROUND_OUT" ]; then
       echo "  warning: wat2wasm not in PATH, skipping $wat" >&2
     fi
   done
+
+  # 3. Copy contrib/dom/dom.glue.js next to the playground HTML so
+  #    counter.html's `import "./dom.glue.js"` resolves on the deployed
+  #    site. The SSG itself only walks contrib/site/playground/, so
+  #    sibling contrib/ libs need to be staged from the shell layer.
+  if [ -f contrib/dom/dom.glue.js ]; then
+    cp contrib/dom/dom.glue.js "$PLAYGROUND_OUT/dom.glue.js"
+    echo "  cp contrib/dom/dom.glue.js -> playground/dom.glue.js"
+  fi
 fi
 
 echo "Full build complete."
