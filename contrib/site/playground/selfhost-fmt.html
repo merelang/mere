@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere fmt in Mere — self-host demo</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      margin: 1.5rem 0 0.5rem;
+    }
+    #run {
+      padding: 0.6em 1.4em;
+      font-size: 1em;
+      background: #2b6cb0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #run:hover { background: #2c5282; }
+    #run:disabled { background: #a0aec0; cursor: not-allowed; }
+    #output {
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 1em;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      min-height: 14em;
+      max-height: 28em;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    .source-block {
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 1em;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="echo.html">echo</a>
+      <a href="selfhost-fmt.html" class="active">self-host fmt</a>
+    </div>
+  </nav>
+  <main>
+    <h1>Mere fmt — written in Mere</h1>
+
+    <p>
+      This page runs <strong>Mere code that pretty-prints Mere
+      AST</strong>. The Wasm module below was built from
+      <a href="https://github.com/merelang/mere/blob/main/contrib/fmt/fmt.mere"><code>contrib/fmt/fmt.mere</code></a>
+      (~510 lines of Mere) — a port of the OCaml
+      <code>Mere.Formatter</code> covering precedence-driven paren
+      insertion, block-form layout, <code>else if</code> chain
+      flattening, and sugar reconstruction
+      (<code>range a b</code> → <code>a..b</code>, Cons/Nil chain
+      → list literal, <code>fn x -&gt; fn y -&gt; body</code>
+      → <code>\x y -&gt; body</code>).
+    </p>
+
+    <p>
+      Click <strong>Run</strong> to instantiate the Wasm module and
+      execute its built-in demo: it formats six hand-coded ASTs and
+      prints the results. The output is what the self-host fmt produces
+      from each AST literal.
+    </p>
+
+    <div class="controls">
+      <button id="run">Run self-host fmt demo</button>
+    </div>
+
+    <pre id="output">// click "Run" to instantiate the Wasm module and execute the demo</pre>
+
+    <h2>Cross-validation</h2>
+    <p>
+      For the factorial AST below, the self-host fmt produces
+      <em>byte-identical</em> output to <code>mere fmt</code> on the
+      equivalent source. Run the demo to verify the right-hand side
+      matches the left.
+    </p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+      <div>
+        <strong><code>mere fmt</code> (OCaml side, run separately):</strong>
+        <pre class="source-block">$ echo 'let rec fact = fn n -> if n &lt; 1 then 1 else n * fact (n - 1) in fact 10' \
+  | mere fmt /dev/stdin
+
+let rec fact = fn n -&gt; if n &lt; 1 then 1 else n * fact (n - 1) in
+fact 10</pre>
+      </div>
+      <div>
+        <strong>Mere self-host fmt (this page's "factorial" line):</strong>
+        <pre class="source-block">let rec fact = fn n -&gt; if n &lt; 1 then 1 else n * fact (n - 1) in
+fact 10</pre>
+      </div>
+    </div>
+
+    <h2>Why this matters</h2>
+    <p>
+      Self-hosting the formatter is the first concrete step of Mere's
+      Phase 49 / §S1 plan
+      (<a href="https://github.com/merelang/mere/blob/main/contrib/fmt/README.md">contrib/fmt/README.md</a>):
+    </p>
+    <ul>
+      <li><strong>Stage 49a</strong> — Mere AST expressed as a Mere variant tree</li>
+      <li><strong>Stage 49b</strong> — full pretty-printer ported from OCaml</li>
+      <li><strong>Stage 49d</strong> — this page (Wasm + browser demo)</li>
+      <li><strong>Stage 49c</strong> — Mere parser written in Mere (Phase 50; would let this demo accept arbitrary source instead of hand-coded AST literals)</li>
+    </ul>
+    <p>
+      The parser is the real self-host bottleneck. Once it lands, this
+      page becomes a real in-browser <code>mere fmt</code> — type
+      source, see formatted output, no server round-trip.
+    </p>
+  </main>
+  <footer>Phase 49 self-host §S1 — Stages 49a / 49b / 49d complete</footer>
+
+  <script type="module">
+    const wasmBytes = await fetch("./selfhost-fmt.wasm").then(r => r.arrayBuffer());
+    const outputEl = document.getElementById("output");
+    const runBtn = document.getElementById("run");
+
+    const decodeCStr = (memory, ptr) => {
+      const bytes = new Uint8Array(memory.buffer);
+      let end = ptr;
+      while (end < bytes.length && bytes[end] !== 0) end++;
+      return new TextDecoder("utf-8").decode(bytes.subarray(ptr, end));
+    };
+
+    runBtn.addEventListener("click", async () => {
+      runBtn.disabled = true;
+      outputEl.textContent = "";
+      let memory;
+      const env = {
+        // Forward the Mere `puts` builtin (and `print`, which lowers to
+        // puts) into the output pane.
+        puts: (ptr) => {
+          outputEl.textContent += decodeCStr(memory, ptr) + "\n";
+        },
+        // Stub the imports fmt.mere doesn't use but the prelude pulls in.
+        read_file: () => 0,
+        write_file: () => 0,
+        __lang_str_of_float: () => 0,
+        __lang_float_of_str: () => 0.0,
+        __lang_sin: Math.sin,
+        __lang_cos: Math.cos,
+        __lang_tan: Math.tan,
+        __lang_f_pow: Math.pow,
+        __lang_atan2: Math.atan2,
+      };
+      try {
+        const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+        memory = instance.exports.memory;
+        instance.exports.main();
+      } catch (e) {
+        outputEl.textContent += "\n[runtime error] " + e.message;
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

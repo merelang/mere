@@ -19,8 +19,17 @@ set -e
 #    + copies playground/*.html + *.wat
 dune exec mere -- contrib/site/build.mere "$INPUT_DIR" "$OUTPUT_DIR" $MODE_FLAG
 
-# 2. Playground asset generation: compile .wat to .wasm via wat2wasm
+# 2. Regenerate playground/selfhost-fmt.wat from contrib/fmt/fmt.mere so
+#    the Wasm artifact tracks the canonical fmt source. The .wat file in
+#    contrib/site/playground/ is committed for review readability but is
+#    a derived artifact.
 PLAYGROUND_OUT="$OUTPUT_DIR/playground"
+if [ -f contrib/fmt/fmt.mere ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w contrib/fmt/fmt.mere > "$PLAYGROUND_OUT/selfhost-fmt.wat"
+  echo "  mere -w contrib/fmt/fmt.mere -> playground/selfhost-fmt.wat"
+fi
+
+# 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do
     [ -f "$wat" ] || continue
@@ -33,7 +42,7 @@ if [ -d "$PLAYGROUND_OUT" ]; then
     fi
   done
 
-  # 3. Copy contrib/dom/dom.glue.js next to the playground HTML so
+  # 4. Copy contrib/dom/dom.glue.js next to the playground HTML so
   #    counter.html's `import "./dom.glue.js"` resolves on the deployed
   #    site. The SSG itself only walks contrib/site/playground/, so
   #    sibling contrib/ libs need to be staged from the shell layer.

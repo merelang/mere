@@ -21,6 +21,10 @@ a.out
 *.wat.out
 *.s
 
+# Auto-regenerated from contrib/fmt/fmt.mere by build_full.sh; not
+# checked in because every fmt.mere edit would change it.
+contrib/site/playground/selfhost-fmt.wat
+
 # Editor / IDE
 .vscode/
 .idea/

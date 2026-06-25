@@ -20,7 +20,7 @@ for the multi-phase plan.
 |---|---|---|
 | **49a** | AST variant declarations + minimal `fmt_expr` (int / var / binop / let / if / fn / app) + hand-coded demos | **complete** |
 | **49b** | Full pretty-printer: precedence-driven paren insertion, block-form layout, `else if` chain flattening, sugar reconstruction (range / Cons-Nil list literal / lambda shorthand), full pattern coverage | **complete** |
-| **49d** | Wasm-compile 49a + 49b and wire up a browser playground demo | future |
+| **49d** | Wasm-compile 49a + 49b and wire up a browser playground demo | **complete** — [merelang.github.io/mere/playground/selfhost-fmt.html](https://merelang.github.io/mere/playground/selfhost-fmt.html) |
 | **49c** | Mere parser written in Mere (the real self-host bottleneck — ~800 lines) | deferred to Phase 50 |
 
 ### Cross-validation against OCaml side
