@@ -69,6 +69,7 @@ naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 | **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index). interp + C only | CLI script |
 | **dom** | `contrib/dom/` | minimal browser DOM bindings (`dom_get_by_id` / `dom_set_text` / `dom_on_click` / `dom_input_value`). Wasm + `dom.glue.js` host | extern fn (Phase 48 C2 MVP) |
 | **fmt** | `contrib/fmt/` | Mere AST as a Mere variant tree + (in progress) Mere self-host of `Mere.Formatter`. Stage 49a: minimal `fmt_expr` + hand-coded demo | top-level (Phase 49 in progress) |
+| **parser** | `contrib/parser/` | (in progress) Mere self-host of `Mere.Lexer` + `Mere.Parser`. Stage 50a: tokenizer | top-level (Phase 50 in progress) |
 
 Future candidates: see internal design notes §3.
 
