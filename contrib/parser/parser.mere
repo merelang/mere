@@ -40,6 +40,32 @@ type cmpop =
 type logicop =
   | OpAnd | OpOr;
 
+// Type expressions. The variants use a `Ty` prefix instead of the bare
+// `T` prefix that contrib/fmt/fmt.mere uses, because this file imports
+// lexer.mere — and the lexer's `TInt` / `TStr` / `TArrow` token tags
+// would collide with `TInt` / `TStr` / `TArrow` ty tags. When the AST
+// is eventually factored out into a shared `ast.mere` (no lexer
+// dependency), it can adopt fmt.mere's prefix and the parser will
+// follow.
+//
+// `TyVar` is included for shape-compatibility with fmt.mere even though
+// slice 50d's source grammar doesn't accept `'a` style tyvars — the
+// lexer has no `T_tyvar` token yet. `TyCon` covers all named types
+// (`int`, `bool`, `str`, `unit`, `float` are recognised by name; other
+// lowercase idents become 0-arg `TyCon`). Postfix application
+// (`int list`) builds 1-arg `TyCon`.
+type ty =
+  | TyInt
+  | TyBool
+  | TyStr
+  | TyUnit
+  | TyFloat
+  | TyArrow of ty * ty
+  | TyTuple of ty list
+  | TyVar of str
+  | TyCon of str * ty list
+  ;
+
 // Pattern grammar — slice 3 (Stage 50c) fills out the remaining
 // variants. Mirrors contrib/fmt/fmt.mere except PRecord is deferred
 // (records aren't in the expr parser yet).
@@ -75,13 +101,15 @@ type expr =
   // even though slice 2 only emits 1-element lists (mutual recursion via
   // `let rec ... and ...` is deferred to Stage 50e top-level decls).
   | ELetRec of (str * expr) list * expr
-  // EFun in fmt.mere is `str * ty option * expr`. Slice 2 leaves out the
-  // `ty option` annotation because Stage 50d owns the type parser; the
-  // shape will widen to match once that lands.
-  | EFun of str * expr
+  // `EFun (name, ty option, body)` — the optional annotation carries the
+  // type written in source for `fn (x: ty) -> body`. Plain `fn x -> body`
+  // emits `None`.
+  | EFun of str * ty option * expr
   // Arms are `(pat, guard, body)` — guard is `Some g` for `pat when g ->`
   // arms, `None` otherwise. Matches fmt.mere's `EMatch` exactly.
   | EMatch of expr * (pattern * expr option * expr) list
+  // `(e : ty)` — explicit type ascription. Mirrors fmt.mere's `EAnnot`.
+  | EAnnot of expr * ty
   ;
 
 // === Token / line helpers =================================================
@@ -180,6 +208,18 @@ let expect_with = fn (toks: pos_token list) ->
       | _ -> fail ("line " ++ show line ++ ": expected `with`"))
   | Nil -> fail "expected `with` but got EOF";
 
+let expect_colon = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TColon -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `:`"))
+  | Nil -> fail "expected `:` but got EOF";
+
+let is_primitive_type_name = fn (s: str) ->
+  s == "int" || s == "bool" || s == "str" || s == "unit" || s == "float";
+
 // `let rec NAME = ...` requires a plain identifier (PWild isn't allowed
 // for rec bindings since the name has to be self-referenceable).
 let expect_ident = fn (toks: pos_token list) ->
@@ -260,20 +300,44 @@ and parse_let = fn (toks: pos_token list) ->
       let (body, toks5) = parse_expr toks4 in
       (ELet (pat, value, body), toks5))
 
-// `fn x [y z ...] -> body`. Multi-arg lambdas desugar to a chain of
-// single-arg EFun nodes. Type annotations on the arguments are deferred
-// to Stage 50d (when the type parser lands); slice 2 only accepts bare
-// identifiers.
+// Lambda parser. Three accepted shapes:
+//
+//   fn x -> body           (single ident)
+//   fn x y z -> body       (multi-ident curry, no annotations)
+//   fn (x: ty) -> body     (single annotated arg)
+//   fn () -> body          (unit param — synthesised as `_u: unit`,
+//                           matching OCaml-side `lib/parser.ml`)
+//
+// `fn (x: ty1, y: ty2) -> body` (comma-separated annotated params in one
+// paren) is the OCaml side's other form but deferred here — users can
+// always chain `fn (x: ty1) -> fn (y: ty2) -> body`.
 and parse_fn = fn (toks: pos_token list) ->
-  let (names, toks1) = parse_fn_arg_names toks in
-  (match names with
-    | Nil ->
-      fail ("line " ++ show (peek_line toks1)
-            ++ ": `fn` requires at least one argument")
-    | _ ->
+  (match peek_tok toks with
+    | TLParen -> parse_fn_paren_arg (advance toks)
+    | TIdent _ ->
+      let (names, toks1) = parse_fn_arg_names toks in
       let toks2 = expect_arrow toks1 in
       let (body, toks3) = parse_expr toks2 in
-      (build_fn names body, toks3))
+      (build_fn names body, toks3)
+    | _ ->
+      fail ("line " ++ show (peek_line toks)
+            ++ ": `fn` requires at least one argument"))
+
+and parse_fn_paren_arg = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRParen ->
+      let toks1 = advance toks in
+      let toks2 = expect_arrow toks1 in
+      let (body, toks3) = parse_expr toks2 in
+      (EFun ("_u", Some TyUnit, body), toks3)
+    | _ ->
+      let (name, toks1) = expect_ident toks in
+      let toks2 = expect_colon toks1 in
+      let (t, toks3) = parse_type toks2 in
+      let toks4 = expect_rparen toks3 in
+      let toks5 = expect_arrow toks4 in
+      let (body, toks6) = parse_expr toks5 in
+      (EFun (name, Some t, body), toks6))
 
 and parse_fn_arg_names = fn (toks: pos_token list) ->
   (match toks with
@@ -289,8 +353,8 @@ and parse_fn_arg_names = fn (toks: pos_token list) ->
 and build_fn = fn (names: str list) -> fn (body: expr) ->
   (match names with
     | Nil -> body
-    | Cons (n, Nil) -> EFun (n, body)
-    | Cons (n, rest) -> EFun (n, build_fn rest body))
+    | Cons (n, Nil) -> EFun (n, None, body)
+    | Cons (n, rest) -> EFun (n, None, build_fn rest body))
 
 and parse_or = fn (toks: pos_token list) ->
   let (lhs, toks1) = parse_and toks in
@@ -448,9 +512,14 @@ and parse_paren_body = fn (toks: pos_token list) ->
           let (rest_elems, toks2) = parse_comma_seq (advance toks1) in
           let toks3 = expect_rparen toks2 in
           (ETuple (Cons (e1, rest_elems)), toks3)
+        // `(e : ty)` — explicit type ascription.
+        | TColon ->
+          let (t, toks2) = parse_type (advance toks1) in
+          let toks3 = expect_rparen toks2 in
+          (EAnnot (e1, t), toks3)
         | _ ->
           fail ("line " ++ show (peek_line toks1)
-                ++ ": expected `,` or `)`")))
+                ++ ": expected `,` or `)` or `:`")))
 
 // Read `e1, e2, ..., eN` (no trailing comma). Stops as soon as the
 // next token isn't a `,`. The caller is responsible for the closing
@@ -612,7 +681,84 @@ and parse_or_pattern_tail = fn (acc: pattern) -> fn (toks: pos_token list) ->
     | TPipe ->
       let (rhs, rest) = parse_pattern (advance toks) in
       parse_or_pattern_tail (POr (acc, rhs)) rest
-    | _ -> (acc, toks));
+    | _ -> (acc, toks))
+
+// === Type parser ============================================================
+//
+// Cascade (low -> high precedence, matching OCaml-side `lib/parser.ml`):
+//
+//   ty       := tuple_ty ('->' ty)?         (-> is right-associative)
+//   tuple_ty := app_ty ('*' app_ty)+ | app_ty
+//   app_ty   := atom_ty (IDENT_NON_PRIMITIVE)*    (postfix `int list`)
+//   atom_ty  := 'int' | 'bool' | 'str' | 'unit' | 'float'
+//             | IDENT_NON_PRIMITIVE     (0-arg TyCon)
+//             | '(' ty ')'
+//
+// `'a` tyvars and `&R T` borrow refs from OCaml-side are deferred —
+// the lexer doesn't tokenise either yet. Bracket forms like `Vec[R, T]`
+// are also out of scope (Stage 50d ships the MVP that real annotations
+// like `fn (s: str) -> ...` and `fn (f: int -> str) -> ...` need).
+
+and parse_type = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_type_tuple toks in
+  (match peek_tok toks1 with
+    | TArrow ->
+      let (rhs, rest) = parse_type (advance toks1) in
+      (TyArrow (lhs, rhs), rest)
+    | _ -> (lhs, toks1))
+
+and parse_type_tuple = fn (toks: pos_token list) ->
+  let (first, toks1) = parse_type_app toks in
+  (match peek_tok toks1 with
+    | TStar ->
+      let (rest_tys, toks2) = parse_tuple_star_seq (advance toks1) in
+      (TyTuple (Cons (first, rest_tys)), toks2)
+    | _ -> (first, toks1))
+
+and parse_tuple_star_seq = fn (toks: pos_token list) ->
+  let (ty1, toks1) = parse_type_app toks in
+  (match peek_tok toks1 with
+    | TStar ->
+      let (rest, toks2) = parse_tuple_star_seq (advance toks1) in
+      (Cons (ty1, rest), toks2)
+    | _ -> (Cons (ty1, Nil), toks1))
+
+// Postfix application: `int list` -> `TyCon ("list", [TyInt])`.
+// Chains left-associatively: `int list option` -> `TyCon ("option",
+// [TyCon ("list", [TyInt])])`.
+and parse_type_app = fn (toks: pos_token list) ->
+  let (base, toks1) = parse_type_atom toks in
+  parse_type_app_tail base toks1
+
+and parse_type_app_tail = fn (acc: ty) -> fn (toks: pos_token list) ->
+  (match toks with
+    | Cons (pt, rest) ->
+      let (_, t) = pt in
+      (match t with
+        | TIdent name ->
+          if is_primitive_type_name name then (acc, toks)
+          else parse_type_app_tail (TyCon (name, Cons (acc, Nil))) rest
+        | _ -> (acc, toks))
+    | Nil -> (acc, toks))
+
+and parse_type_atom = fn (toks: pos_token list) ->
+  (match toks with
+    | Nil -> fail "expected type but got EOF"
+    | Cons (pt, rest) ->
+      let (line, t) = pt in
+      (match t with
+        | TIdent name ->
+          (if name == "int" then (TyInt, rest)
+          else if name == "bool" then (TyBool, rest)
+          else if name == "str" then (TyStr, rest)
+          else if name == "unit" then (TyUnit, rest)
+          else if name == "float" then (TyFloat, rest)
+          else (TyCon (name, Nil), rest))
+        | TLParen ->
+          let (inner, rest2) = parse_type rest in
+          let rest3 = expect_rparen rest2 in
+          (inner, rest3)
+        | _ -> fail ("line " ++ show line ++ ": expected type")));
 
 // === Pretty-print for tests ================================================
 
@@ -638,6 +784,26 @@ let logicop_str = fn (op: logicop) ->
   match op with
   | OpAnd -> "&&"
   | OpOr -> "||";
+
+let rec ty_to_str = fn (t: ty) ->
+  (match t with
+    | TyInt -> "Int"
+    | TyBool -> "Bool"
+    | TyStr -> "Str"
+    | TyUnit -> "Unit"
+    | TyFloat -> "Float"
+    | TyArrow (a, b) ->
+      "Arrow(" ++ ty_to_str a ++ ", " ++ ty_to_str b ++ ")"
+    | TyTuple ts ->
+      let parts = list_map ts (fn (x: ty) -> ty_to_str x) in
+      "Tuple[" ++ str_join ", " parts ++ "]"
+    | TyVar v -> "Var(" ++ v ++ ")"
+    | TyCon (name, args) ->
+      (match args with
+        | Nil -> "Con(" ++ name ++ ")"
+        | _ ->
+          let parts = list_map args (fn (x: ty) -> ty_to_str x) in
+          "Con(" ++ name ++ ", [" ++ str_join ", " parts ++ "])"));
 
 let rec pattern_to_str = fn (p: pattern) ->
   (match p with
@@ -693,8 +859,13 @@ let rec expr_to_str = fn (e: expr) ->
       let parts = list_map bindings (fn (b: str * expr) ->
         let (n, v) = b in n ++ " = " ++ expr_to_str v) in
       "LetRec([" ++ str_join "; " parts ++ "], " ++ expr_to_str body ++ ")"
-    | EFun (arg, body) ->
-      "Fun(" ++ arg ++ ", " ++ expr_to_str body ++ ")"
+    | EFun (arg, ty_opt, body) ->
+      let ty_str = (match ty_opt with
+        | None -> ""
+        | Some t -> " : " ++ ty_to_str t) in
+      "Fun(" ++ arg ++ ty_str ++ ", " ++ expr_to_str body ++ ")"
+    | EAnnot (e, t) ->
+      "Annot(" ++ expr_to_str e ++ ", " ++ ty_to_str t ++ ")"
     | EMatch (scrutinee, arms) ->
       let arm_strs = list_map arms (fn (a: pattern * expr option * expr) ->
         let (p, g, b) = a in
@@ -764,4 +935,19 @@ let _ = print ("f9  (bool/unit pat): " ++ parse_str "match v with | () -> 0 | _ 
 let _ = print ("f10 (nested constr): " ++ parse_str "match r with | Some (Cons (h, _)) -> h | _ -> 0") in
 let _ = print ("f11 (let constr):    " ++ parse_str "let Some (x) = opt in x") in
 let _ = print ("f12 (no-pipe lead):  " ++ parse_str "match n with 0 -> 1 | _ -> 2") in
+let _ = print "" in
+let _ = print "=== Stage 50d parser demos (types) ===" in
+let _ = print ("g1  (fn no anno):    " ++ parse_str "fn x -> x") in
+let _ = print ("g2  (fn anno int):   " ++ parse_str "fn (x: int) -> x + 1") in
+let _ = print ("g3  (fn unit):       " ++ parse_str "fn () -> 0") in
+let _ = print ("g4  (fn anno str):   " ++ parse_str "fn (s: str) -> s") in
+let _ = print ("g5  (fn arrow ty):   " ++ parse_str "fn (f: int -> str) -> f 1") in
+let _ = print ("g6  (fn tuple ty):   " ++ parse_str "fn (p: int * str) -> p") in
+let _ = print ("g7  (fn arrow*tup):  " ++ parse_str "fn (g: int * int -> bool) -> g") in
+let _ = print ("g8  (fn ty con):     " ++ parse_str "fn (xs: int list) -> xs") in
+let _ = print ("g9  (fn paren ty):   " ++ parse_str "fn (h: (int -> str) -> bool) -> h") in
+let _ = print ("g10 (annot expr):    " ++ parse_str "(42 : int)") in
+let _ = print ("g11 (annot complex): " ++ parse_str "(fn x -> x + 1 : int -> int)") in
+let _ = print ("g12 (curry mixed):   " ++ parse_str "fn (a: int) -> fn b -> a + b") in
+let _ = print ("g13 (lexer chunk):   " ++ parse_str "fn (c: str) -> let o = ord c in o >= 65 && o <= 90 || c == \"_\"") in
 0
