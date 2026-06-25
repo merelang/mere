@@ -136,7 +136,7 @@ dom_on_click: (handleIdx, closurePtr) =&gt; {
   <footer>Phase 48 C2 frontend FFI MVP — Stage 4 of 4</footer>
 
   <script type="module">
-    import { makeDomGlue } from "../../dom/dom.glue.js";
+    import { makeDomGlue } from "./dom.glue.js";
 
     const wasmBytes = await fetch("./counter.wasm").then(r => r.arrayBuffer());
     const { glue, attach } = makeDomGlue();
