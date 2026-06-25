@@ -1,30 +1,28 @@
-// contrib/fmt — Mere AST + (in-progress) self-hosted pretty-printer.
+// contrib/fmt — Mere self-hosted pretty-printer (Phase 49, Stage 49b).
 //
-// Stage 49a (this file's current scope): declare the Mere AST as a Mere
-// variant tree and provide a small `fmt_expr` that covers the
-// hand-coded demos at the bottom. The full pretty-printer will land in
-// Stage 49b — see internal design notes for
-// the multi-stage plan.
+// Port of OCaml `Mere.Formatter` (lib/formatter.ml). Same precedence
+// model, same block-form layout, same selective sugar reversal
+// (range / cons / list literal / lambda shorthand). The AST type
+// below mirrors `lib/ast.ml` minus the `loc` and `mutable ty` fields
+// the pipeline carries — a pure formatter doesn't need them.
 //
-// The shape mirrors `lib/ast.ml` (the OCaml reference) but drops the
-// `loc` and `mutable ty` fields that the OCaml AST carries through the
-// pipeline. A pure formatter doesn't need either, so the self-host
-// version keeps the tree minimal.
+// What's deliberately NOT in this file yet:
+// - A parser. Source `.mere` strings can't enter; only hand-coded
+//   AST literals (or, eventually, ASTs produced by the OCaml parser
+//   and passed in some other way) reach fmt_expr. Parser self-host
+//   is Stage 49c / Phase 50.
+// - Comment preservation. Same as the OCaml side — comments are
+//   discarded by the lexer.
+//
+// See internal design notes for the full
+// staging plan.
 
 // === Types =================================================================
-//
-// Mere has no implicit forward references between `type` declarations,
-// so order them dependency-first: binop / cmpop / logicop, then ty,
-// then pattern, then expr. expr is the only one with cross-type
-// dependencies (it references both pattern and ty).
 
 type binop = OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
 type cmpop = OpEq | OpNe | OpLt | OpLe | OpGt | OpGe;
 type logicop = OpAnd | OpOr;
 
-// `ty` covers the types the formatter actually re-emits. TyVar / TyParam
-// are kept as a single TVar carrying the source-level name; the OCaml
-// side distinguishes them for unification, but the printer doesn't.
 type ty =
   | TInt
   | TBool
@@ -37,8 +35,6 @@ type ty =
   | TCon of str * ty list
   ;
 
-// Patterns. No `loc` field; same shape as OCaml minus the wrapping
-// record. Self-references only — patterns don't embed expressions.
 type pattern =
   | PWild
   | PVar of str
@@ -53,9 +49,6 @@ type pattern =
   | POr of pattern * pattern
   ;
 
-// Expressions. References pattern (via ELet / EMatch arms) and ty
-// (via EAnnot / EFun's optional annotation). Match arms are
-// (pattern * guard_opt * body) triples — exactly the OCaml shape.
 type expr =
   | EInt of int
   | EFloat of float
@@ -81,12 +74,30 @@ type expr =
   | ERecordUpdate of expr * (str * expr) list
   ;
 
-// === Minimal pretty-printer ================================================
+// === Precedence ============================================================
 //
-// Stage 49a only covers what the demo at the bottom needs (int / var /
-// binop / let / if / fn / app). Stage 49b will widen the coverage to
-// match OCaml's `Mere.Formatter` and add precedence-driven paren
-// insertion, block-form layout, and sugar reconstruction.
+// Higher = binds tighter. A child whose precedence is strictly LESS
+// than the parent's needs parens. Same numbering as OCaml side.
+
+let prec_top = 0;       // let / if / fn / match / etc.
+let prec_pipe = 1;      // |>  <|  @@  (not constructible in this AST yet)
+let prec_compose = 2;   // << >>
+let prec_or = 3;        // ||
+let prec_and = 4;       // &&
+let prec_cmp = 5;       // == != < <= > >=
+let prec_range = 6;     // .. ::
+let prec_sum = 7;       // + - ++
+let prec_term = 8;      // * / %
+let prec_unary = 9;     // -e
+let prec_app = 10;      // f a
+let prec_atom = 11;     // literal, Var, paren, tuple
+
+// === String helpers ========================================================
+
+let wrap = fn (need: bool) -> fn (s: str) ->
+  if need then "(" ++ s ++ ")" else s;
+
+let indent_str = fn (n: int) -> str_repeat "  " n;
 
 let binop_str = fn (op: binop) -> match op with
   | OpAdd -> "+"
@@ -97,67 +108,401 @@ let binop_str = fn (op: binop) -> match op with
   | OpConcat -> "++"
   ;
 
+let cmpop_str = fn (op: cmpop) -> match op with
+  | OpEq -> "=="
+  | OpNe -> "!="
+  | OpLt -> "<"
+  | OpLe -> "<="
+  | OpGt -> ">"
+  | OpGe -> ">="
+  ;
+
+let logicop_str = fn (op: logicop) -> match op with
+  | OpAnd -> "&&"
+  | OpOr -> "||"
+  ;
+
+let binop_prec = fn (op: binop) -> match op with
+  | OpAdd -> prec_sum
+  | OpSub -> prec_sum
+  | OpConcat -> prec_sum
+  | OpMul -> prec_term
+  | OpDiv -> prec_term
+  | OpMod -> prec_term
+  ;
+
+// Escape a string for re-emission. Matches the OCaml side: `{` becomes
+// `\{` so Phase 36 string-interpolation lexing doesn't grab the literal
+// brace as the start of an interpolation expression.
+let escape_string_for_fmt = fn (s: str) ->
+  let n = str_len s in
+  let buf = strbuf_new () in
+  let _ = strbuf_push buf "\{" in
+  let rec loop = fn (i: int) ->
+    if i >= n then ()
+    else
+      let c = char_at s i in
+      let _ =
+        if c == "\"" then strbuf_push buf "\\\""
+        else if c == "\\" then strbuf_push buf "\\\\"
+        else if c == "\n" then strbuf_push buf "\\n"
+        else if c == "\t" then strbuf_push buf "\\t"
+        else if c == "\{" then strbuf_push buf "\\\{"
+        else strbuf_push buf c
+      in
+      loop (i + 1)
+  in
+  let _ = loop 0 in
+  let _ = strbuf_push buf "\"" in
+  strbuf_to_str buf;
+
+// === Sugar reversal (selective) ============================================
+//
+// `EApp (EApp (EVar "range", a), b)` -> Some (a, b). Reverse for the
+// `a..b` form when the user's AST happens to be a 2-arg range call.
+
+let try_match_range = fn (e: expr) -> match e with
+  | EApp (EApp (EVar "range", a), b) -> Some (a, b)
+  | _ -> None
+  ;
+
+// Walk a `Cons` chain. If it terminates in `Nil`, return the element
+// list (Some); otherwise None (so the printer falls back to `h :: t`).
+// Mere's pattern parser doesn't accept `ETuple [h, t]` literally inside
+// a constructor payload, so we destructure the payload list explicitly.
+let rec walk_cons_chain = fn (acc: expr list) -> fn (e: expr) -> match e with
+  | EConstr ("Nil", None) -> Some (list_rev acc)
+  | EConstr ("Cons", Some (ETuple (Cons (h, Cons (t, Nil))))) ->
+    walk_cons_chain (Cons (h, acc)) t
+  | _ -> None
+  ;
+
+let try_match_list_literal = fn (e: expr) -> walk_cons_chain Nil e;
+
+let cons_parts = fn (e: expr) -> match e with
+  | EConstr ("Cons", Some (ETuple (Cons (h, Cons (t, Nil))))) -> Some (h, t)
+  | _ -> None
+  ;
+
+// === Type printing =========================================================
+//
+// 3-level precedence for types:
+//   0 = top (TArrow chain)
+//   1 = tuple element
+//   2 = atom
+
+let rec fmt_ty = fn (p: int) -> fn (t: ty) -> match t with
+  | TInt -> "int"
+  | TBool -> "bool"
+  | TStr -> "str"
+  | TUnit -> "unit"
+  | TFloat -> "float"
+  | TVar n -> "'" ++ n
+  | TArrow (a, b) ->
+    let s = fmt_ty 1 a ++ " -> " ++ fmt_ty 0 b in
+    wrap (p > 0) s
+  | TTuple ts ->
+    let parts = list_map ts (fn (t1: ty) -> fmt_ty 2 t1) in
+    let s = str_join " * " parts in
+    wrap (p > 1) s
+  | TCon (name, args) -> match args with
+    | Nil -> name
+    | Cons (a, Nil) -> fmt_ty 2 a ++ " " ++ name
+    | _ ->
+      let parts = list_map args (fn (t1: ty) -> fmt_ty 0 t1) in
+      "(" ++ str_join ", " parts ++ ") " ++ name
+  ;
+
+// === Pattern printing ======================================================
+
 let rec fmt_pattern = fn (p: pattern) -> match p with
   | PWild -> "_"
   | PVar n -> n
   | PInt n -> show n
   | PBool b -> if b then "true" else "false"
-  | PStr s -> "\"" ++ s ++ "\""
+  | PStr s -> escape_string_for_fmt s
   | PUnit -> "()"
-  // Wider pattern coverage (PConstr / PTuple / PRecord / PAs / POr)
-  // arrives in Stage 49b. For now the demo only exercises PVar.
-  | _ -> "<pattern>"
+  | PConstr (c, None) -> c
+  | PConstr (c, Some sub) -> c ++ " " ++ fmt_pattern_atom sub
+  | PTuple ps ->
+    let parts = list_map ps fmt_pattern in
+    "(" ++ str_join ", " parts ++ ")"
+  | PRecord (name, fields) ->
+    let parts = list_map fields (fn (entry: str * pattern) ->
+      let (f, sub) = entry in f ++ " = " ++ fmt_pattern sub
+    ) in
+    name ++ " \{ " ++ str_join ", " parts ++ " }"
+  | PAs (inner, name) -> fmt_pattern inner ++ " as " ++ name
+  | POr (a, b) -> fmt_pattern a ++ " | " ++ fmt_pattern b
+
+and fmt_pattern_atom = fn (p: pattern) -> match p with
+  | POr _ -> "(" ++ fmt_pattern p ++ ")"
+  | PAs _ -> "(" ++ fmt_pattern p ++ ")"
+  | PConstr (_, Some _) -> "(" ++ fmt_pattern p ++ ")"
+  | _ -> fmt_pattern p
   ;
 
-let rec fmt_expr = fn (e: expr) -> match e with
+// === Block predicate =======================================================
+//
+// Block forms (let / if / match) want their own line; non-block forms
+// stay inline.
+
+let is_block = fn (e: expr) -> match e with
+  | ELet _ -> true
+  | ELetRec _ -> true
+  | EIf _ -> true
+  | EMatch _ -> true
+  | _ -> false
+  ;
+
+// Does this expression END in an EMatch (possibly through let / if
+// chains)? Used to wrap a `match` arm body in parens so the outer
+// match doesn't steal the inner arms.
+let rec trailing_match = fn (e: expr) -> match e with
+  | EMatch _ -> true
+  | ELet (_, _, body) -> trailing_match body
+  | ELetRec (_, body) -> trailing_match body
+  | EIf (_, t, el) -> if trailing_match t then true else trailing_match el
+  | _ -> false
+  ;
+
+// === Expression printing ===================================================
+//
+// The body uses mutual recursion via `let rec ... and ...`. fmt_expr
+// handles precedence + parens; fmt_block handles let / if / match
+// layout; fmt_fun_chain collapses chains of un-annotated `fn` into
+// the `\x y z -> body` lambda-shorthand form.
+
+let rec fmt_expr = fn (p: int) -> fn (ind: int) -> fn (e: expr) -> match e with
+  // Atoms
   | EInt n -> show n
+  | EFloat f ->
+    let s = str_of_float f in
+    let n = str_len s in
+    if n > 0 && char_at s (n - 1) == "." then s ++ "0" else s
   | EBool b -> if b then "true" else "false"
-  | EStr s -> "\"" ++ s ++ "\""
+  | EStr s -> escape_string_for_fmt s
   | EUnit -> "()"
   | EVar n -> n
+  | EConstr ("Nil", None) -> "[]"
+  | EConstr (c, None) -> c
+  // List literal (Cons/Nil chain that terminates in Nil)
+  | EConstr ("Cons", Some _) ->
+    (match try_match_list_literal e with
+      | Some xs ->
+        let parts = list_map xs (fn (x: expr) -> fmt_expr prec_top ind x) in
+        "[" ++ str_join ", " parts ++ "]"
+      | None ->
+        (match cons_parts e with
+          | Some (h, t) ->
+            let s = fmt_expr (prec_range + 1) ind h ++ " :: "
+                  ++ fmt_expr prec_range ind t in
+            wrap (p > prec_range) s
+          | None -> "<cons?>"))
+  | EConstr (c, Some arg) ->
+    let s = c ++ " " ++ fmt_expr (prec_app + 1) ind arg in
+    wrap (p > prec_app) s
+  // Negation
+  | ENeg a ->
+    let s = "-" ++ fmt_expr prec_unary ind a in
+    wrap (p > prec_unary) s
+  // Binary operators
   | EBin (op, a, b) ->
-    fmt_expr a ++ " " ++ binop_str op ++ " " ++ fmt_expr b
+    let bp = binop_prec op in
+    let s = fmt_expr bp ind a ++ " " ++ binop_str op ++ " "
+          ++ fmt_expr (bp + 1) ind b in
+    wrap (p > bp) s
+  | ECmp (op, a, b) ->
+    let s = fmt_expr (prec_cmp + 1) ind a ++ " " ++ cmpop_str op ++ " "
+          ++ fmt_expr (prec_cmp + 1) ind b in
+    wrap (p > prec_cmp) s
+  | ELogic (op, a, b) ->
+    let bp = match op with OpAnd -> prec_and | OpOr -> prec_or in
+    let s = fmt_expr bp ind a ++ " " ++ logicop_str op ++ " "
+          ++ fmt_expr (bp + 1) ind b in
+    wrap (p > bp) s
+  // Range sugar reversal (wrap nested matches in parens so the outer
+  // fmt_expr's later arms aren't consumed by the inner match).
+  | EApp _ ->
+    (match try_match_range e with
+      | Some (a, b) ->
+        let s = fmt_expr (prec_range + 1) ind a ++ ".."
+              ++ fmt_expr (prec_range + 1) ind b in
+        wrap (p > prec_range) s
+      | None ->
+        (match e with
+          | EApp (f, arg) ->
+            let s = fmt_expr prec_app ind f ++ " "
+                  ++ fmt_expr (prec_app + 1) ind arg in
+            wrap (p > prec_app) s
+          | _ -> "<?>"))
+  | EAnnot (inner, t) ->
+    "(" ++ fmt_expr prec_atom ind inner ++ " : " ++ fmt_ty 0 t ++ ")"
+  // Tuples / records
+  | ETuple es ->
+    let parts = list_map es (fn (x: expr) -> fmt_expr prec_top ind x) in
+    "(" ++ str_join ", " parts ++ ")"
+  | ERecordLit (name, fields) ->
+    let parts = list_map fields (fn (entry: str * expr) ->
+      let (f, x) = entry in f ++ " = " ++ fmt_expr prec_top ind x
+    ) in
+    name ++ " \{ " ++ str_join ", " parts ++ " }"
+  | EFieldGet (a, f) -> fmt_expr prec_atom ind a ++ "." ++ f
+  | ERecordUpdate (base, updates) ->
+    let parts = list_map updates (fn (entry: str * expr) ->
+      let (f, x) = entry in f ++ " = " ++ fmt_expr prec_top ind x
+    ) in
+    "\{ " ++ fmt_expr prec_top ind base ++ " | "
+        ++ str_join ", " parts ++ " }"
+  // Functions
+  | EFun _ ->
+    let s = fmt_fun_chain ind e in
+    wrap (p > prec_top) s
+  // Block forms
+  | ELet _ -> let s = fmt_block ind e in wrap (p > prec_top) s
+  | ELetRec _ -> let s = fmt_block ind e in wrap (p > prec_top) s
+  | EIf _ -> let s = fmt_block ind e in wrap (p > prec_top) s
+  | EMatch _ -> let s = fmt_block ind e in wrap (p > prec_top) s
+
+// Lambda-shorthand collapse: `fn x -> fn y -> body` becomes
+// `\x y -> body` when no inner Fun carries a type annotation. The
+// parser only accepts un-annotated multi-param via the `\` shorthand
+// (`fn x y -> body` is rejected).
+and fmt_fun_chain = fn (ind: int) -> fn (e: expr) -> match e with
+  | EFun (x, Some t, body) ->
+    "fn (" ++ x ++ ": " ++ fmt_ty 0 t ++ ") -> "
+    ++ fmt_expr prec_top ind body
+  | EFun (x, None, body) ->
+    let rec collect = fn (acc: str list) -> fn (e1: expr) -> match e1 with
+      | EFun (n, None, b) -> collect (Cons (n, acc)) b
+      | _ -> (list_rev acc, e1)
+    in
+    let (params, inner) = collect (Cons (x, Nil)) body in
+    (match params with
+      | Cons (n, Nil) ->
+        "fn " ++ n ++ " -> " ++ fmt_expr prec_top ind inner
+      | _ ->
+        "\\" ++ str_join " " params ++ " -> "
+        ++ fmt_expr prec_top ind inner)
+  | _ -> fmt_expr prec_top ind e
+
+// Multi-line layout for the block forms (let / if / match / let rec).
+and fmt_block = fn (ind: int) -> fn (e: expr) -> match e with
   | ELet (pat, value, body) ->
-    "let " ++ fmt_pattern pat ++ " = " ++ fmt_expr value
-    ++ " in " ++ fmt_expr body
-  | EIf (c, t, el) ->
-    "if " ++ fmt_expr c ++ " then " ++ fmt_expr t ++ " else " ++ fmt_expr el
-  | EFun (param, _, body) ->
-    "fn " ++ param ++ " -> " ++ fmt_expr body
-  | EApp (f, arg) ->
-    fmt_expr f ++ " " ++ fmt_expr arg
-  // Stage 49a leaves the rest as a placeholder; 49b widens this match.
-  | _ -> "<expr>"
+    let value_s =
+      if is_block value then
+        "\n" ++ indent_str (ind + 1)
+        ++ fmt_expr prec_top (ind + 1) value
+      else " " ++ fmt_expr prec_top ind value
+    in
+    "let " ++ fmt_pattern pat ++ " =" ++ value_s ++ " in\n"
+    ++ indent_str ind ++ fmt_expr prec_top ind body
+  | ELetRec (bindings, body) ->
+    let parts = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in
+      let v_s =
+        if is_block v then
+          "\n" ++ indent_str (ind + 1)
+          ++ fmt_expr prec_top (ind + 1) v
+        else " " ++ fmt_expr prec_top ind v
+      in
+      n ++ " =" ++ v_s
+    ) in
+    let joined = str_join ("\n" ++ indent_str ind ++ "and ") parts in
+    "let rec " ++ joined ++ " in\n"
+    ++ indent_str ind ++ fmt_expr prec_top ind body
+  | EIf (cond, then_, else_) ->
+    let cond_s = fmt_expr prec_top ind cond in
+    if not (is_block then_) && not (is_block else_) then
+      let then_s = fmt_expr prec_top ind then_ in
+      let else_s = fmt_expr prec_top ind else_ in
+      let single = "if " ++ cond_s ++ " then " ++ then_s ++ " else " ++ else_s in
+      if str_len single + ind * 2 <= 80 then single
+      else fmt_if_multiline ind cond_s then_ else_
+    else fmt_if_multiline ind cond_s then_ else_
+  | EMatch (scrut, arms) ->
+    // arm_s is hoisted to a sibling helper (fmt_match_arm) instead of
+    // a local closure: Wasm Phase 39.A2 only supports captures of
+    // locals, not top-level lets like prec_top.
+    let lines = list_map arms (fn (arm: pattern * expr option * expr) ->
+      fmt_match_arm ind arm
+    ) in
+    "match " ++ fmt_expr prec_top ind scrut ++ " with\n"
+    ++ str_join "\n" lines
+  | _ -> fmt_expr prec_top ind e
+
+and fmt_match_arm = fn (ind: int) -> fn (arm: pattern * expr option * expr) ->
+  let (pat, guard, body) = arm in
+  let g_s = match guard with
+    | None -> ""
+    | Some g -> " when " ++ fmt_expr prec_top (ind + 1) g
+  in
+  let needs_paren = trailing_match body in
+  let body_s = fmt_expr prec_top (ind + 1) body in
+  let body_s = if needs_paren then "(" ++ body_s ++ ")" else body_s in
+  indent_str ind ++ "| " ++ fmt_pattern pat ++ g_s ++ " -> " ++ body_s
+
+// Multi-line if with `else if` chain flattening:
+//   if c1 then T1 else if c2 then T2 else E
+and fmt_if_multiline = fn (ind: int) -> fn (cond_s: str)
+                       -> fn (then_: expr) -> fn (else_: expr) ->
+  let then_body = fmt_expr prec_top (ind + 1) then_ in
+  "if " ++ cond_s ++ " then\n"
+  ++ indent_str (ind + 1) ++ then_body ++ "\n"
+  ++ fmt_else_chain ind else_
+
+and fmt_else_chain = fn (ind: int) -> fn (else_: expr) -> match else_ with
+  | EIf (cond, then_, else_inner) ->
+    let cond_s = fmt_expr prec_top ind cond in
+    let then_body = fmt_expr prec_top (ind + 1) then_ in
+    indent_str ind ++ "else if " ++ cond_s ++ " then\n"
+    ++ indent_str (ind + 1) ++ then_body ++ "\n"
+    ++ fmt_else_chain ind else_inner
+  | _ ->
+    let body = fmt_expr prec_top (ind + 1) else_ in
+    indent_str ind ++ "else\n" ++ indent_str (ind + 1) ++ body
   ;
 
-// === Demos (Stage 49a sanity checks) =======================================
-//
-// Hand-coded AST literals exercise the fmt path end-to-end without
-// needing a Mere parser (parser self-host is Stage 49c / Phase 50).
-// Each `expect` line shows the string we want fmt to produce.
+// === Entry point ===========================================================
 
-let demo1 =
-  ELet (PVar "x", EInt 42, EVar "x");
-// expect: let x = 42 in x
+let format_expr = fn (e: expr) -> fmt_expr prec_top 0 e;
 
-let demo2 =
-  EBin (OpAdd, EInt 1, EBin (OpMul, EInt 2, EInt 3));
-// expect: 1 + 2 * 3   (precedence ignored at Stage 49a — Stage 49b adds it)
+// === Demos =================================================================
 
-let demo3 =
-  EIf (
-    ECmp (OpLt, EVar "n", EInt 1),
-    EInt 1,
-    EBin (OpMul, EVar "n", EApp (EVar "fact", EBin (OpSub, EVar "n", EInt 1))));
-// expect (approx): if n < 1 then 1 else n * fact n - 1
-// (ECmp is hit by the wildcard arm in fmt_expr until 49b)
+let demo_simple = ELet (PVar "x", EInt 42, EVar "x");
+let demo_prec = EBin (OpAdd, EInt 1, EBin (OpMul, EInt 2, EInt 3));
+let demo_paren_needed =
+  EBin (OpMul, EBin (OpAdd, EInt 1, EInt 2), EInt 3);
+let demo_fact =
+  ELetRec (
+    Cons (("fact",
+      EFun ("n", None,
+        EIf (
+          ECmp (OpLt, EVar "n", EInt 1),
+          EInt 1,
+          EBin (OpMul, EVar "n",
+                EApp (EVar "fact", EBin (OpSub, EVar "n", EInt 1)))))),
+      Nil),
+    EApp (EVar "fact", EInt 10));
+// [1, 2, 3] via explicit Cons/Nil + tuple pairs (mere parser doesn't
+// allow a newline between a 1-arg constructor and its list arg, so
+// inline the structure).
+let cons_pair = fn (h: expr) -> fn (t: expr) ->
+  EConstr ("Cons", Some (ETuple (Cons (h, Cons (t, Nil)))));
+let nil_e = EConstr ("Nil", None);
+let demo_list = cons_pair (EInt 1) (cons_pair (EInt 2) (cons_pair (EInt 3) nil_e));
+let demo_range = EApp (EApp (EVar "range", EInt 1), EInt 10);
+let demo_lambda =
+  EFun ("x", None, EFun ("y", None, EBin (OpAdd, EVar "x", EVar "y")));
 
-let demo4 =
-  EFun ("x", None, EBin (OpAdd, EVar "x", EInt 1));
-// expect: fn x -> x + 1
-
-let _ = print ("demo1: " ++ fmt_expr demo1) in
-let _ = print ("demo2: " ++ fmt_expr demo2) in
-let _ = print ("demo3: " ++ fmt_expr demo3) in
-let _ = print ("demo4: " ++ fmt_expr demo4) in
+let _ = print "=== Stage 49b pretty-printer demos ===" in
+let _ = print ("simple:        " ++ format_expr demo_simple) in
+let _ = print ("prec (no par): " ++ format_expr demo_prec) in
+let _ = print ("paren needed:  " ++ format_expr demo_paren_needed) in
+let _ = print ("list literal:  " ++ format_expr demo_list) in
+let _ = print ("range sugar:   " ++ format_expr demo_range) in
+let _ = print ("lambda chain:  " ++ format_expr demo_lambda) in
+let _ = print "" in
+let _ = print "factorial:" in
+let _ = print (format_expr demo_fact) in
 0

@@ -18,10 +18,23 @@ for the multi-phase plan.
 
 | Stage | Content | Status |
 |---|---|---|
-| **49a** | AST variant declarations + minimal `fmt_expr` (int / var / binop / let / if / fn / app) + hand-coded demos | **complete** (this commit) |
-| **49b** | Full pretty-printer: precedence-driven paren insertion, block-form layout, sugar reconstruction, full pattern coverage | future |
+| **49a** | AST variant declarations + minimal `fmt_expr` (int / var / binop / let / if / fn / app) + hand-coded demos | **complete** |
+| **49b** | Full pretty-printer: precedence-driven paren insertion, block-form layout, `else if` chain flattening, sugar reconstruction (range / Cons-Nil list literal / lambda shorthand), full pattern coverage | **complete** |
 | **49d** | Wasm-compile 49a + 49b and wire up a browser playground demo | future |
 | **49c** | Mere parser written in Mere (the real self-host bottleneck — ~800 lines) | deferred to Phase 50 |
+
+### Cross-validation against OCaml side
+
+For an AST that round-trips through `mere fmt` (e.g. `let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10`), the Mere self-host produces **byte-identical** output:
+
+```
+=== OCaml fmt ===
+let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in
+fact 10
+=== Mere self-host ===
+let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in
+fact 10
+```
 
 ## Running the Stage 49a demo
 
