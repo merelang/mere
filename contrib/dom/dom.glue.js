@@ -97,7 +97,20 @@ export function makeDomGlue() {
         console.warn("contrib/dom: dom_on_click on null handle", { handleIdx, closurePtr });
         return;
       }
-      el.addEventListener("click", () => callClosure(closurePtr));
+      // Snapshot the closure record at registration time so we can detect
+      // memory rewrites between register and click.
+      const view = new Int32Array(memory.buffer);
+      const envAtReg = view[closurePtr >> 2];
+      const fnIdxAtReg = view[(closurePtr + 4) >> 2];
+      console.log("dom_on_click register:", { handleIdx, closurePtr, envAtReg, fnIdxAtReg });
+      el.addEventListener("click", () => {
+        const view2 = new Int32Array(memory.buffer);
+        const envNow = view2[closurePtr >> 2];
+        const fnIdxNow = view2[(closurePtr + 4) >> 2];
+        console.log("dom_on_click fire:", { closurePtr, envNow, fnIdxNow,
+          changedSinceReg: envNow !== envAtReg || fnIdxNow !== fnIdxAtReg });
+        callClosure(closurePtr);
+      });
     },
     dom_input_value: (handleIdx) => {
       const el = handles[handleIdx];
