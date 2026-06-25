@@ -156,9 +156,12 @@ const wasmPath = process.argv[2];
   const table = instance.exports.__indirect_function_table;
   const callMereClosure = (closurePtr, arg = 0) => {
     if (!table) throw new Error("Wasm module did not export __indirect_function_table");
-    const view = new Int32Array(memory.buffer);
-    const env = view[closurePtr >> 2];
-    const fnIdx = view[(closurePtr + 4) >> 2];
+    // Mere's bump allocator does not enforce 4-byte alignment, so the
+    // closure record's offset may be misaligned. Int32Array indexing
+    // rounds the byte offset to a 4-byte boundary; DataView accepts any.
+    const view = new DataView(memory.buffer);
+    const env = view.getInt32(closurePtr, true);
+    const fnIdx = view.getInt32(closurePtr + 4, true);
     return table.get(fnIdx)(env, arg);
   };
   // Expose for hosts that bind extra env imports later (e.g. DOM glue).
