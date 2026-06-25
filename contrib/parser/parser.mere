@@ -112,6 +112,30 @@ type expr =
   | EAnnot of expr * ty
   ;
 
+// Top-level declarations — what `let X = e;`, `let rec X = e and Y = e;`,
+// and `type T = | A | B of ty;` parse to. Mirrors a subset of OCaml-side
+// `Ast.top_decl`; `Top_record` / `Top_extern[_type]` / `Top_view` /
+// `Top_module` / `Top_signature` / `Top_drop` / `Top_type_alias` /
+// `Top_ctor_alias` / `Top_record_alias` are deferred — none of them
+// appear in self-host fmt's own source, which is the immediate dogfood
+// target.
+type top_decl =
+  | TopLet of pattern * expr
+  // Multi-binding list; single `let rec X = e;` becomes a 1-element list.
+  | TopLetRec of (str * expr) list
+  // `(name, type_params, variants)` where each variant is
+  // `(ctor_name, payload_ty_option)`. Type params (`'a` style) aren't
+  // tokenised yet, so the list is always empty for now — kept on the
+  // shape for forward-compat with fmt.mere.
+  | TopType of str * str list * (str * ty option) list
+  ;
+
+// Mirrors OCaml-side `Ast.program = { decls; main }`. Every Mere file
+// has both a (possibly empty) decl list and a main expression — files
+// that end with a trailing `;` synthesise `EUnit` as the main, matching
+// OCaml-side behaviour.
+type program = top_decl list * expr;
+
 // === Token / line helpers =================================================
 
 let is_upper_first_c = fn (s: str) ->
@@ -217,6 +241,15 @@ let expect_colon = fn (toks: pos_token list) ->
       | _ -> fail ("line " ++ show line ++ ": expected `:`"))
   | Nil -> fail "expected `:` but got EOF";
 
+let expect_semi = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TSemi -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `;`"))
+  | Nil -> fail "expected `;` but got EOF";
+
 let is_primitive_type_name = fn (s: str) ->
   s == "int" || s == "bool" || s == "str" || s == "unit" || s == "float";
 
@@ -279,19 +312,18 @@ and parse_if = fn (toks: pos_token list) ->
   let (else_e, toks5) = parse_expr toks4 in
   (EIf (cond, then_e, else_e), toks5)
 
-// `let [rec] pat = value in body`. Slice 50c lifts the LHS to the full
-// pattern parser (so `let (a, b) = …` and `let Cons (h, t) = …` work);
-// `let rec` still requires a bare identifier since the body must reference
-// the binding by name. Mutual `let rec … and …` defers to Stage 50e.
+// `let [rec] … in body`. The non-rec form takes a full pattern
+// (`let (a, b) = …`, `let Cons (h, t) = …` both work); `let rec` takes
+// one-or-more `NAME = value` bindings separated by `and`, sharing the
+// `parse_letrec_bindings` helper with the top-level parser (Stage 50e
+// added the multi-binding form here once `and` chaining landed).
 and parse_let = fn (toks: pos_token list) ->
   (match peek_tok toks with
     | TRec ->
-      let (name, toks1) = expect_ident (advance toks) in
-      let toks2 = expect_eq toks1 in
-      let (value, toks3) = parse_expr toks2 in
-      let toks4 = expect_in toks3 in
-      let (body, toks5) = parse_expr toks4 in
-      (ELetRec (Cons ((name, value), Nil), body), toks5)
+      let (bindings, toks1) = parse_letrec_bindings (advance toks) in
+      let toks2 = expect_in toks1 in
+      let (body, toks3) = parse_expr toks2 in
+      (ELetRec (bindings, body), toks3)
     | _ ->
       let (pat, toks1) = parse_pattern toks in
       let toks2 = expect_eq toks1 in
@@ -299,6 +331,20 @@ and parse_let = fn (toks: pos_token list) ->
       let toks4 = expect_in toks3 in
       let (body, toks5) = parse_expr toks4 in
       (ELet (pat, value, body), toks5))
+
+// `NAME = value [and NAME = value [and ...]]`. Shared between the
+// expression-level `let rec ... in body` and the top-level
+// `let rec ... ;` / `let rec ... in main`. The bindings are accumulated
+// in source order — single-binding case yields a 1-element list.
+and parse_letrec_bindings = fn (toks: pos_token list) ->
+  let (name, toks1) = expect_ident toks in
+  let toks2 = expect_eq toks1 in
+  let (value, toks3) = parse_expr toks2 in
+  (match peek_tok toks3 with
+    | TAnd ->
+      let (rest, toks4) = parse_letrec_bindings (advance toks3) in
+      (Cons ((name, value), rest), toks4)
+    | _ -> (Cons ((name, value), Nil), toks3))
 
 // Lambda parser. Three accepted shapes:
 //
@@ -760,6 +806,88 @@ and parse_type_atom = fn (toks: pos_token list) ->
           (inner, rest3)
         | _ -> fail ("line " ++ show line ++ ": expected type")));
 
+// === Top-level parser ======================================================
+//
+// `parse_program` consumes a stream of top-level declarations (`let …;`,
+// `let rec … and …;`, `type T = | … ;`) followed by an optional main
+// expression. Matches OCaml-side `parse_decls` shape; main = EUnit if
+// the file ends with a trailing `;` (no main expr).
+//
+// Top-level `let` / `let rec` reuse the expression-level pattern + value
+// + letrec-binding parsers, then branch on the post-binding token:
+// `;` -> top decl, `in` -> the binding becomes a `Let` / `Let_rec`
+// expression that serves as the main.
+
+let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TEof -> ((list_rev acc, EUnit), toks)
+    | TLet ->
+      let toks1 = advance toks in
+      (match peek_tok toks1 with
+        | TRec ->
+          let (bindings, toks2) = parse_letrec_bindings (advance toks1) in
+          (match peek_tok toks2 with
+            | TSemi ->
+              parse_decls (Cons (TopLetRec bindings, acc)) (advance toks2)
+            | TIn ->
+              let (body, toks3) = parse_expr (advance toks2) in
+              ((list_rev acc, ELetRec (bindings, body)), toks3)
+            | _ ->
+              fail ("line " ++ show (peek_line toks2)
+                    ++ ": expected `;` or `in` after `let rec` binding"))
+        | _ ->
+          let (pat, toks2) = parse_pattern toks1 in
+          let toks3 = expect_eq toks2 in
+          let (value, toks4) = parse_expr toks3 in
+          (match peek_tok toks4 with
+            | TSemi ->
+              parse_decls (Cons (TopLet (pat, value), acc)) (advance toks4)
+            | TIn ->
+              let (body, toks5) = parse_expr (advance toks4) in
+              ((list_rev acc, ELet (pat, value, body)), toks5)
+            | _ ->
+              fail ("line " ++ show (peek_line toks4)
+                    ++ ": expected `;` or `in` after let binding")))
+    | TType ->
+      let (decl, toks1) = parse_type_decl (advance toks) in
+      parse_decls (Cons (decl, acc)) toks1
+    | _ ->
+      // C codegen mangles a local `main` inconsistently (binds `main`,
+      // uses `main_`), so name the trailing expr something else.
+      let (main_expr, toks1) = parse_expr toks in
+      ((list_rev acc, main_expr), toks1))
+
+// `type NAME = [|] CTOR [of TY] (| CTOR [of TY])* ;`. Type parameters
+// (`type T 'a = ...`) are out of scope until the lexer learns
+// `T_tyvar` — slice 50e keeps `params` as the empty list. Records
+// (`type T = { f: ty, ... };`) ride along with their expr-side form in
+// a future slice.
+and parse_type_decl = fn (toks: pos_token list) ->
+  let (name, toks1) = expect_ident toks in
+  let toks2 = expect_eq toks1 in
+  let toks3 = (match peek_tok toks2 with
+    | TPipe -> advance toks2
+    | _ -> toks2) in
+  let (variants, toks4) = parse_variant_seq toks3 in
+  let toks5 = expect_semi toks4 in
+  (TopType (name, Nil, variants), toks5)
+
+and parse_variant_seq = fn (toks: pos_token list) ->
+  let (head, toks1) = parse_one_variant toks in
+  (match peek_tok toks1 with
+    | TPipe ->
+      let (rest, toks2) = parse_variant_seq (advance toks1) in
+      (Cons (head, rest), toks2)
+    | _ -> (Cons (head, Nil), toks1))
+
+and parse_one_variant = fn (toks: pos_token list) ->
+  let (name, toks1) = expect_ident toks in
+  (match peek_tok toks1 with
+    | TOf ->
+      let (t, toks2) = parse_type (advance toks1) in
+      ((name, Some t), toks2)
+    | _ -> ((name, None), toks1));
+
 // === Pretty-print for tests ================================================
 
 let binop_str = fn (op: binop) ->
@@ -887,6 +1015,41 @@ let parse_str = fn (src: str) ->
     | _ -> fail ("line " ++ show (peek_line rest)
                  ++ ": unexpected token after expression"));
 
+let top_decl_to_str = fn (d: top_decl) ->
+  match d with
+  | TopLet (pat, value) ->
+    "TopLet(" ++ pattern_to_str pat ++ ", " ++ expr_to_str value ++ ")"
+  | TopLetRec bindings ->
+    let parts = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in n ++ " = " ++ expr_to_str v) in
+    "TopLetRec([" ++ str_join "; " parts ++ "])"
+  | TopType (name, _params, variants) ->
+    let parts = list_map variants (fn (v: str * ty option) ->
+      let (n, payload) = v in
+      (match payload with
+        | None -> n
+        | Some t -> n ++ " of " ++ ty_to_str t)) in
+    "TopType(" ++ name ++ ", [" ++ str_join " | " parts ++ "])";
+
+// `main` is a reserved C identifier and the C backend's escape pass is
+// inconsistent (binds `main`, uses `main_`); destructure into a renamed
+// local to keep all three backends portable.
+let program_to_str = fn (p: program) ->
+  let (decls, main_expr) = p in
+  let decl_strs = list_map decls (fn (d: top_decl) -> top_decl_to_str d) in
+  let head = (match decls with
+    | Nil -> ""
+    | _ -> str_join "; " decl_strs ++ "; ") in
+  "Program(" ++ head ++ "main = " ++ expr_to_str main_expr ++ ")";
+
+let parse_str_program = fn (src: str) ->
+  let toks = tokenize src in
+  let (result, rest) = parse_decls Nil toks in
+  (match peek_tok rest with
+    | TEof -> program_to_str result
+    | _ -> fail ("line " ++ show (peek_line rest)
+                 ++ ": unexpected token after program"));
+
 // === Demos =================================================================
 
 let _ = print "=== Stage 50b slice 1 parser demos ===" in
@@ -950,4 +1113,19 @@ let _ = print ("g10 (annot expr):    " ++ parse_str "(42 : int)") in
 let _ = print ("g11 (annot complex): " ++ parse_str "(fn x -> x + 1 : int -> int)") in
 let _ = print ("g12 (curry mixed):   " ++ parse_str "fn (a: int) -> fn b -> a + b") in
 let _ = print ("g13 (lexer chunk):   " ++ parse_str "fn (c: str) -> let o = ord c in o >= 65 && o <= 90 || c == \"_\"") in
+let _ = print "" in
+let _ = print "=== Stage 50e parser demos (top-level + program) ===" in
+let _ = print ("h1  (one decl):       " ++ parse_str_program "let x = 1; x") in
+let _ = print ("h2  (two decls):      " ++ parse_str_program "let x = 1; let y = 2; x + y") in
+let _ = print ("h3  (decls only):     " ++ parse_str_program "let x = 1;") in
+let _ = print ("h4  (let rec single): " ++ parse_str_program "let rec f = fn n -> if n == 0 then 0 else f (n - 1); f 5") in
+let _ = print ("h5  (let rec mutual): " ++ parse_str_program "let rec even = fn n -> if n == 0 then true else odd (n - 1) and odd = fn n -> if n == 0 then false else even (n - 1); even 10") in
+let _ = print ("h6  (type bare):      " ++ parse_str_program "type color = | Red | Green | Blue; Red") in
+let _ = print ("h7  (type payload):   " ++ parse_str_program "type opt = | Just of int | Nothing; Just (42)") in
+let _ = print ("h8  (type no lead |): " ++ parse_str_program "type bit = Zero | One; Zero") in
+let _ = print ("h9  (pattern let):    " ++ parse_str_program "let (a, b) = (1, 2); a + b") in
+let _ = print ("h10 (mix decls):      " ++ parse_str_program "type opt = | Just of int | Nothing; let x = Just (1); let rec f = fn n -> n + 1; f 0") in
+let _ = print ("h11 (let in main):    " ++ parse_str_program "let x = 1 in x + 1") in
+let _ = print ("h12 (annotated decl): " ++ parse_str_program "let add = fn (x: int) -> fn (y: int) -> x + y; add 1 2") in
+let _ = print ("h13 (full program):   " ++ parse_str_program "type mylist = | MyNil | MyCons of int * mylist; let rec sum = fn (xs: mylist) -> match xs with | MyNil -> 0 | MyCons (h, t) -> h + sum t; sum (MyCons (1, MyCons (2, MyCons (3, MyNil))))") in
 0
