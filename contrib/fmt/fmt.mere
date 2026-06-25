@@ -1,0 +1,163 @@
+// contrib/fmt — Mere AST + (in-progress) self-hosted pretty-printer.
+//
+// Stage 49a (this file's current scope): declare the Mere AST as a Mere
+// variant tree and provide a small `fmt_expr` that covers the
+// hand-coded demos at the bottom. The full pretty-printer will land in
+// Stage 49b — see internal design notes for
+// the multi-stage plan.
+//
+// The shape mirrors `lib/ast.ml` (the OCaml reference) but drops the
+// `loc` and `mutable ty` fields that the OCaml AST carries through the
+// pipeline. A pure formatter doesn't need either, so the self-host
+// version keeps the tree minimal.
+
+// === Types =================================================================
+//
+// Mere has no implicit forward references between `type` declarations,
+// so order them dependency-first: binop / cmpop / logicop, then ty,
+// then pattern, then expr. expr is the only one with cross-type
+// dependencies (it references both pattern and ty).
+
+type binop = OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
+type cmpop = OpEq | OpNe | OpLt | OpLe | OpGt | OpGe;
+type logicop = OpAnd | OpOr;
+
+// `ty` covers the types the formatter actually re-emits. TyVar / TyParam
+// are kept as a single TVar carrying the source-level name; the OCaml
+// side distinguishes them for unification, but the printer doesn't.
+type ty =
+  | TInt
+  | TBool
+  | TStr
+  | TUnit
+  | TFloat
+  | TArrow of ty * ty
+  | TTuple of ty list
+  | TVar of str
+  | TCon of str * ty list
+  ;
+
+// Patterns. No `loc` field; same shape as OCaml minus the wrapping
+// record. Self-references only — patterns don't embed expressions.
+type pattern =
+  | PWild
+  | PVar of str
+  | PInt of int
+  | PBool of bool
+  | PStr of str
+  | PUnit
+  | PConstr of str * pattern option
+  | PTuple of pattern list
+  | PRecord of str * (str * pattern) list
+  | PAs of pattern * str
+  | POr of pattern * pattern
+  ;
+
+// Expressions. References pattern (via ELet / EMatch arms) and ty
+// (via EAnnot / EFun's optional annotation). Match arms are
+// (pattern * guard_opt * body) triples — exactly the OCaml shape.
+type expr =
+  | EInt of int
+  | EFloat of float
+  | EBool of bool
+  | EStr of str
+  | EUnit
+  | EVar of str
+  | EBin of binop * expr * expr
+  | ECmp of cmpop * expr * expr
+  | ELogic of logicop * expr * expr
+  | ENeg of expr
+  | ELet of pattern * expr * expr
+  | ELetRec of (str * expr) list * expr
+  | EIf of expr * expr * expr
+  | EFun of str * ty option * expr
+  | EApp of expr * expr
+  | EAnnot of expr * ty
+  | EConstr of str * expr option
+  | EMatch of expr * (pattern * expr option * expr) list
+  | ETuple of expr list
+  | ERecordLit of str * (str * expr) list
+  | EFieldGet of expr * str
+  | ERecordUpdate of expr * (str * expr) list
+  ;
+
+// === Minimal pretty-printer ================================================
+//
+// Stage 49a only covers what the demo at the bottom needs (int / var /
+// binop / let / if / fn / app). Stage 49b will widen the coverage to
+// match OCaml's `Mere.Formatter` and add precedence-driven paren
+// insertion, block-form layout, and sugar reconstruction.
+
+let binop_str = fn (op: binop) -> match op with
+  | OpAdd -> "+"
+  | OpSub -> "-"
+  | OpMul -> "*"
+  | OpDiv -> "/"
+  | OpMod -> "%"
+  | OpConcat -> "++"
+  ;
+
+let rec fmt_pattern = fn (p: pattern) -> match p with
+  | PWild -> "_"
+  | PVar n -> n
+  | PInt n -> show n
+  | PBool b -> if b then "true" else "false"
+  | PStr s -> "\"" ++ s ++ "\""
+  | PUnit -> "()"
+  // Wider pattern coverage (PConstr / PTuple / PRecord / PAs / POr)
+  // arrives in Stage 49b. For now the demo only exercises PVar.
+  | _ -> "<pattern>"
+  ;
+
+let rec fmt_expr = fn (e: expr) -> match e with
+  | EInt n -> show n
+  | EBool b -> if b then "true" else "false"
+  | EStr s -> "\"" ++ s ++ "\""
+  | EUnit -> "()"
+  | EVar n -> n
+  | EBin (op, a, b) ->
+    fmt_expr a ++ " " ++ binop_str op ++ " " ++ fmt_expr b
+  | ELet (pat, value, body) ->
+    "let " ++ fmt_pattern pat ++ " = " ++ fmt_expr value
+    ++ " in " ++ fmt_expr body
+  | EIf (c, t, el) ->
+    "if " ++ fmt_expr c ++ " then " ++ fmt_expr t ++ " else " ++ fmt_expr el
+  | EFun (param, _, body) ->
+    "fn " ++ param ++ " -> " ++ fmt_expr body
+  | EApp (f, arg) ->
+    fmt_expr f ++ " " ++ fmt_expr arg
+  // Stage 49a leaves the rest as a placeholder; 49b widens this match.
+  | _ -> "<expr>"
+  ;
+
+// === Demos (Stage 49a sanity checks) =======================================
+//
+// Hand-coded AST literals exercise the fmt path end-to-end without
+// needing a Mere parser (parser self-host is Stage 49c / Phase 50).
+// Each `expect` line shows the string we want fmt to produce.
+
+let demo1 =
+  ELet (PVar "x", EInt 42, EVar "x");
+// expect: let x = 42 in x
+
+let demo2 =
+  EBin (OpAdd, EInt 1, EBin (OpMul, EInt 2, EInt 3));
+// expect: 1 + 2 * 3   (precedence ignored at Stage 49a — Stage 49b adds it)
+
+let demo3 =
+  EIf (
+    ECmp (OpLt, EVar "n", EInt 1),
+    EInt 1,
+    EBin (OpMul, EVar "n", EApp (EVar "fact", EBin (OpSub, EVar "n", EInt 1))));
+// expect (approx): if n < 1 then 1 else n * fact n - 1
+// (ECmp is hit by the wildcard arm in fmt_expr until 49b)
+
+let demo4 =
+  EFun ("x", None, EBin (OpAdd, EVar "x", EInt 1));
+// expect: fn x -> x + 1
+
+let _ = print ("demo1: " ++ fmt_expr demo1) in
+let _ = print ("demo2: " ++ fmt_expr demo2) in
+let _ = print ("demo3: " ++ fmt_expr demo3) in
+let _ = print ("demo4: " ++ fmt_expr demo4) in
+0
