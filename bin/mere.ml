@@ -55,9 +55,9 @@ let run_action action label source =
     Printf.eprintf "io error: %s\n" msg;
     exit 1
 
-let infer_program source =
+let infer_program ?base_dir source =
   let open Mere in
-  let prog = Pipeline.parse_program source in
+  let prog = Pipeline.parse_program ?base_dir source in
   let type_env = ref Typer.initial_env in
   List.iter (fun decl ->
     match decl with
@@ -103,19 +103,19 @@ let infer_program source =
   in
   (prog, main_ty)
 
-let compile_to_c source =
+let compile_to_c ?base_dir source =
   let open Mere in
-  let (prog, main_ty) = infer_program source in
+  let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_c.emit_program ~main_ty prog
 
-let compile_to_llvm source =
+let compile_to_llvm ?base_dir source =
   let open Mere in
-  let (prog, main_ty) = infer_program source in
+  let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_llvm.emit_program ~main_ty prog
 
-let compile_to_wasm source =
+let compile_to_wasm ?base_dir source =
   let open Mere in
-  let (prog, main_ty) = infer_program source in
+  let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_wasm.emit_program ~main_ty prog
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
@@ -230,17 +230,20 @@ let () =
     run_action compile_to_c "<inline>" expr
   | [_; "-c"; path] ->
     let source = read_file path in
-    run_action compile_to_c path source
+    let base = Filename.dirname path in
+    run_action (compile_to_c ~base_dir:base) path source
   | [_; "-lle"; expr] ->
     run_action compile_to_llvm "<inline>" expr
   | [_; "-ll"; path] ->
     let source = read_file path in
-    run_action compile_to_llvm path source
+    let base = Filename.dirname path in
+    run_action (compile_to_llvm ~base_dir:base) path source
   | [_; "-we"; expr] ->
     run_action compile_to_wasm "<inline>" expr
   | [_; "-w"; path] ->
     let source = read_file path in
-    run_action compile_to_wasm path source
+    let base = Filename.dirname path in
+    run_action (compile_to_wasm ~base_dir:base) path source
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Mere.Pipeline.type_of path source

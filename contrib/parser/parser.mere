@@ -1,0 +1,293 @@
+// contrib/parser — Mere self-hosted parser (Phase 50).
+// This file: Stage 50b slice 1 — expression parser MVP.
+//
+// Covers the bottom half of the 12-level precedence cascade:
+//   atom -> apply -> factor -> term -> sum
+// where:
+//   atom    : literal, ident / constructor, paren / tuple, list
+//   apply   : juxtaposition (left-associative function application)
+//   factor  : unary `-`
+//   term    : `* / %` (left-associative)
+//   sum     : `+ - ++` (left-associative)
+//
+// Slice 2 (Stage 50b-2) will extend the entry point to thread through
+// cmp / logic / range / `\` compose / `|>` pipe and the control-flow
+// keywords (`if`, `let`, `fn`, `match`).
+//
+// See internal design notes for the
+// full multi-stage plan; the AST shape mirrors contrib/fmt/fmt.mere
+// so the eventual parse -> format pipe shares one definition (the full
+// set of variants — cmpop, EIf, EMatch, ... — is added in later slices).
+
+import "lexer.mere";
+
+// === AST subset ============================================================
+
+type binop =
+  | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
+
+type expr =
+  | EInt of int
+  | EBool of bool
+  | EStr of str
+  | EUnit
+  | EVar of str
+  | EBin of binop * expr * expr
+  | ENeg of expr
+  | EApp of expr * expr
+  | ETuple of expr list
+  | EConstr of str * expr option
+  ;
+
+// === Token / line helpers =================================================
+
+let is_upper_first_c = fn (s: str) ->
+  let o = ord (char_at s 0) in
+  o >= 65 && o <= 90;
+
+let peek_tok = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, _) -> let (_, t) = pt in t
+  | Nil -> TEof;
+
+let peek_line = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, _) -> let (l, _) = pt in l
+  | Nil -> 0;
+
+let advance = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (_, rest) -> rest
+  | Nil -> Nil;
+
+let expect_rparen = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TRParen -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `)`"))
+  | Nil -> fail "expected `)` but got EOF";
+
+let expect_rbracket = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TRBracket -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `]`"))
+  | Nil -> fail "expected `]` but got EOF";
+
+// True when `t` can begin an atom. parse_apply uses this to decide
+// whether the next token is another function argument or a binder /
+// operator / closing delimiter.
+let is_atom_start = fn (t: token) ->
+  match t with
+  | TInt _ -> true
+  | TStr _ -> true
+  | TIdent _ -> true
+  | TTrue -> true
+  | TFalse -> true
+  | TLParen -> true
+  | TLBracket -> true
+  | _ -> false;
+
+// === Parser ================================================================
+//
+// State-passing recursive descent. Every parse_X takes a token list
+// and returns (parsed, remaining). The OCaml side's ref-based scanner
+// becomes pure return-value threading.
+
+let rec parse_expr = fn (toks: pos_token list) ->
+  parse_sum toks
+
+and parse_sum = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_term toks in
+  parse_sum_tail lhs toks1
+
+and parse_sum_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TPlus ->
+      let (rhs, rest) = parse_term (advance toks) in
+      parse_sum_tail (EBin (OpAdd, acc, rhs)) rest
+    | TMinus ->
+      let (rhs, rest) = parse_term (advance toks) in
+      parse_sum_tail (EBin (OpSub, acc, rhs)) rest
+    | TPlusPlus ->
+      let (rhs, rest) = parse_term (advance toks) in
+      parse_sum_tail (EBin (OpConcat, acc, rhs)) rest
+    | _ -> (acc, toks))
+
+and parse_term = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_factor toks in
+  parse_term_tail lhs toks1
+
+and parse_term_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TStar ->
+      let (rhs, rest) = parse_factor (advance toks) in
+      parse_term_tail (EBin (OpMul, acc, rhs)) rest
+    | TSlash ->
+      let (rhs, rest) = parse_factor (advance toks) in
+      parse_term_tail (EBin (OpDiv, acc, rhs)) rest
+    | TPercent ->
+      let (rhs, rest) = parse_factor (advance toks) in
+      parse_term_tail (EBin (OpMod, acc, rhs)) rest
+    | _ -> (acc, toks))
+
+and parse_factor = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TMinus ->
+      let (e, rest) = parse_factor (advance toks) in
+      (ENeg e, rest)
+    | _ -> parse_apply toks)
+
+and parse_apply = fn (toks: pos_token list) ->
+  let (head, toks1) = parse_atom toks in
+  parse_apply_tail head toks1
+
+and parse_apply_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
+  if is_atom_start (peek_tok toks) then
+    let (arg, rest) = parse_atom toks in
+    parse_apply_tail (EApp (acc, arg)) rest
+  else (acc, toks)
+
+and parse_atom = fn (toks: pos_token list) ->
+  (match toks with
+    | Nil -> fail "unexpected EOF in expression"
+    | Cons (pt, rest) ->
+      let (line, t) = pt in
+      (match t with
+        | TInt n -> (EInt n, rest)
+        | TStr s -> (EStr s, rest)
+        | TTrue -> (EBool true, rest)
+        | TFalse -> (EBool false, rest)
+        | TIdent name ->
+          // Uppercase ident = constructor. `Foo (x, y)` eagerly swallows
+          // the paren payload so the AST mirrors OCaml's `Constr (..)`
+          // shape. Bare `Foo` becomes a no-arg constructor; if followed
+          // by another atom (lowercase ident, number, ...), parse_apply
+          // glues it as a function-style application. Non-paren payloads
+          // like `Some 1` are deferred to slice 2.
+          (if is_upper_first_c name then
+            (match peek_tok rest with
+              | TLParen ->
+                let (payload, rest2) = parse_paren_body (advance rest) in
+                (EConstr (name, Some payload), rest2)
+              | _ -> (EConstr (name, None), rest))
+          else
+            (EVar name, rest))
+        | TLParen -> parse_paren_body rest
+        | TLBracket -> parse_list_literal rest
+        | _ -> fail ("line " ++ show line ++ ": unexpected token in atom")))
+
+// Read the contents of `( ... )` after the opening paren has been
+// consumed. Returns:
+//   `()`           -> EUnit
+//   `(e)`          -> e
+//   `(e1, e2,...)` -> ETuple [e1; e2; ...]
+and parse_paren_body = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRParen -> (EUnit, advance toks)
+    | _ ->
+      let (e1, toks1) = parse_expr toks in
+      (match peek_tok toks1 with
+        | TRParen -> (e1, advance toks1)
+        | TComma ->
+          let (rest_elems, toks2) = parse_comma_seq (advance toks1) in
+          let toks3 = expect_rparen toks2 in
+          (ETuple (Cons (e1, rest_elems)), toks3)
+        | _ ->
+          fail ("line " ++ show (peek_line toks1)
+                ++ ": expected `,` or `)`")))
+
+// Read `e1, e2, ..., eN` (no trailing comma). Stops as soon as the
+// next token isn't a `,`. The caller is responsible for the closing
+// delimiter.
+and parse_comma_seq = fn (toks: pos_token list) ->
+  let (e, toks1) = parse_expr toks in
+  (match peek_tok toks1 with
+    | TComma ->
+      let (rest, toks2) = parse_comma_seq (advance toks1) in
+      (Cons (e, rest), toks2)
+    | _ -> (Cons (e, Nil), toks1))
+
+// `[e1, ..., eN]` desugars to right-nested Cons cells, matching how
+// the OCaml-side mere parser does it. Empty `[]` is `Nil`.
+and parse_list_literal = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBracket -> (EConstr ("Nil", None), advance toks)
+    | _ ->
+      let (elems, toks1) = parse_comma_seq toks in
+      let toks2 = expect_rbracket toks1 in
+      (desugar_list elems, toks2))
+
+and desugar_list = fn (elems: expr list) ->
+  (match elems with
+    | Nil -> EConstr ("Nil", None)
+    | Cons (h, t) ->
+      EConstr ("Cons",
+        Some (ETuple (Cons (h, Cons (desugar_list t, Nil))))));
+
+// === Pretty-print for tests ================================================
+
+let binop_str = fn (op: binop) ->
+  match op with
+  | OpAdd -> "+"
+  | OpSub -> "-"
+  | OpMul -> "*"
+  | OpDiv -> "/"
+  | OpMod -> "%"
+  | OpConcat -> "++";
+
+let rec expr_to_str = fn (e: expr) ->
+  (match e with
+    | EInt n -> "Int(" ++ show n ++ ")"
+    | EBool b -> if b then "Bool(true)" else "Bool(false)"
+    | EStr s -> "Str(\"" ++ s ++ "\")"
+    | EUnit -> "Unit"
+    | EVar x -> "Var(" ++ x ++ ")"
+    | EBin (op, l, r) ->
+      "Bin(" ++ binop_str op ++ ", " ++ expr_to_str l
+      ++ ", " ++ expr_to_str r ++ ")"
+    | ENeg e -> "Neg(" ++ expr_to_str e ++ ")"
+    | EApp (f, a) ->
+      "App(" ++ expr_to_str f ++ ", " ++ expr_to_str a ++ ")"
+    | ETuple es ->
+      let parts = list_map es (fn (x: expr) -> expr_to_str x) in
+      "Tuple[" ++ str_join ", " parts ++ "]"
+    | EConstr (name, payload) ->
+      (match payload with
+        | None -> "Constr(" ++ name ++ ")"
+        | Some p -> "Constr(" ++ name ++ ", " ++ expr_to_str p ++ ")"));
+
+// Convenience: parse a source string and stringify the result. Errors
+// if the parser leaves anything but TEof after the expression — the
+// slice 1 entry point only accepts a single top-level expression.
+let parse_str = fn (src: str) ->
+  let toks = tokenize src in
+  let (e, rest) = parse_expr toks in
+  (match peek_tok rest with
+    | TEof -> expr_to_str e
+    | _ -> fail ("line " ++ show (peek_line rest)
+                 ++ ": unexpected token after expression"));
+
+// === Demos =================================================================
+
+let _ = print "=== Stage 50b slice 1 parser demos ===" in
+let _ = print ("d1  (sum):       " ++ parse_str "1 + 2") in
+let _ = print ("d2  (prec):      " ++ parse_str "1 + 2 * 3") in
+let _ = print ("d3  (left-asc):  " ++ parse_str "10 - 3 - 2") in
+let _ = print ("d4  (paren):     " ++ parse_str "(1 + 2) * 3") in
+let _ = print ("d5  (unary):     " ++ parse_str "-5 + 3") in
+let _ = print ("d6  (apply):     " ++ parse_str "f a b") in
+let _ = print ("d7  (apply mix): " ++ parse_str "f (1 + 2) g") in
+let _ = print ("d8  (unit):      " ++ parse_str "()") in
+let _ = print ("d9  (tuple):     " ++ parse_str "(1, 2, 3)") in
+let _ = print ("d10 (concat):    " ++ parse_str "\"hi\" ++ name") in
+let _ = print ("d11 (bool):      " ++ parse_str "true") in
+let _ = print ("d12 (list nil):  " ++ parse_str "[]") in
+let _ = print ("d13 (list):      " ++ parse_str "[1, 2, 3]") in
+let _ = print ("d14 (cons):      " ++ parse_str "Cons (1, Nil)") in
+let _ = print ("d15 (just):      " ++ parse_str "Just (42)") in
+0

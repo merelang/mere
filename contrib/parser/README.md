@@ -15,19 +15,23 @@ self-host plan (see
 | file | scope | lines |
 |---|---|---|
 | `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords, the 12-precedence operator set, and standard punctuation (Stage 50a). | ~332 |
+| `parser.mere` | Expression parser: token list → `expr`. Covers the bottom half of the 12-level cascade — `atom → apply → factor → term → sum`, plus paren / unit / tuple / list literal / constructor with paren payload (Stage 50b slice 1). | ~280 |
 
 ## Status
 
 | Stage | Content | Status |
 |---|---|---|
-| **50a** | Lexer MVP — token type + tokenize + 9 hand-coded demos | **complete** (this commit) |
-| **50b** | Expression parser (recursive descent over the 12-level precedence cascade) | future |
+| **50a** | Lexer MVP — token type + tokenize + 9 hand-coded demos | **complete** |
+| **50b-1** | Expression parser slice 1 — atom / apply / factor / term / sum (arithmetic, unary `-`, paren, tuple, list, constructor) + 15 demos | **complete** (this commit) |
+| **50b-2** | Expression parser slice 2 — extend to cmp / logic / range / `\` compose / `\|>` pipe + control-flow (`if` / `let` / `fn` / `match`) | future |
 | **50c** | Pattern parser | future |
 | **50d** | Type parser (for `Annot`) | future |
 | **50e** | Top-level decls (`Top_let` / `Top_let_rec` / `Top_type`) | future |
 | **50f** | Browser integration — textarea → tokenize + parse + fmt → display | future |
 
-## Running the Stage 50a demos
+## Running the demos
+
+Stage 50a (lexer):
 
 ```sh
 dune exec mere -- contrib/parser/lexer.mere
@@ -41,10 +45,25 @@ demo2 (fn arrow):  Fn Ident(x) Arrow Ident(x) Star Ident(x) Eof
 ...
 ```
 
-Also runs in Wasm via `mere -w contrib/parser/lexer.mere | wat2wasm` +
-`node scripts/run_wasm.js`.
+Stage 50b-1 (parser; imports the lexer):
 
-## What's covered
+```sh
+dune exec mere -- contrib/parser/parser.mere
+```
+
+Expected (excerpt):
+
+```
+d2  (prec):      Bin(+, Int(1), Bin(*, Int(2), Int(3)))
+d3  (left-asc):  Bin(-, Bin(-, Int(10), Int(3)), Int(2))
+d6  (apply):     App(App(Var(f), Var(a)), Var(b))
+d13 (list):      Constr(Cons, Tuple[Int(1), Constr(Cons, Tuple[Int(2), ...])])
+```
+
+Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
+`wat2wasm` + `node scripts/run_wasm.js`).
+
+## Lexer scope (Stage 50a)
 
 | Group | Tokens |
 |---|---|
@@ -54,6 +73,21 @@ Also runs in Wasm via `mere -w contrib/parser/lexer.mere | wat2wasm` +
 | Punctuation | `(` `)` `[` `]` `{` `}` `,` `;` `:` `::` `\|` `.` `..` `_` `->` |
 | Comments | `// ... \n` skipped |
 | Strings | `"..."` with `\n` `\t` `\"` `\\` `\{` escapes |
+
+## Parser scope (Stage 50b slice 1)
+
+| Layer | Productions |
+|---|---|
+| `atom` | int / str / bool / unit / var / `Foo` / `Foo (…)` constructor / `(e)` paren / `(e1, …)` tuple / `[e1, …]` list (desugared to nested `Cons`) |
+| `apply` | left-associative juxtaposition `f a b` |
+| `factor` | unary `-` (right-associative) |
+| `term` | `* / %` (left-associative) |
+| `sum` | `+ - ++` (left-associative) |
+
+`parse_expr` currently aliases `parse_sum` — slice 2 will reroute it
+through the upper half of the cascade (cmp / logic / range / `\` compose
+/ `\|>` pipe) and the control-flow keywords (`if` / `let` / `fn` /
+`match`).
 
 ## What's deferred (per the §S1 paper trial)
 
@@ -79,6 +113,11 @@ A few Mere-side limitations that surfaced during the port:
   higher-order parameters** (`pred: str -> bool`). `read_run`'s pred
   is duplicated into `read_ident_run` and `read_digit_run` to keep
   the code portable across all backends.
+- **Stage 50b drive-by fix**: `mere -c / -ll / -w <path>` did not
+  forward the file's directory as the `import` base, so any source
+  using `import "neighbour.mere"` only resolved on the interp path.
+  `parser.mere`'s `import "lexer.mere"` made this surface; `bin/mere.ml`
+  now threads `~base_dir` through the three codegen entry points.
 
 ## Position
 
