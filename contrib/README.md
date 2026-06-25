@@ -10,7 +10,7 @@ programs**, not "demos to observe behavior standalone".
 |---|---|---|
 | 1. example | `examples/foo.mere` | demo to observe behavior via standalone run |
 | **2. contrib (incubation)** | `contrib/foo/` | **library candidate. Lives in main repo so it can be refactored atomically with core changes** |
-| 3. separate repo | `github.com/284km/mere-foo` | independent versioning / issues / PRs |
+| 3. separate repo | `github.com/merelang/mere-foo` | independent versioning / issues / PRs |
 
 Conditions for graduation stage 2 → 3:
 - Mere core ships a **pkg manager** that can resolve external deps via `mere fetch`

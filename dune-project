@@ -3,7 +3,7 @@
 (generate_opam_files true)
 
 (source
- (github 284km/mere))
+ (github merelang/mere))
 
 (license MIT)
 (authors "Kazuma Furuhashi <k.furuhashi10@gmail.com>")
