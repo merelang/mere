@@ -64,9 +64,14 @@ export function makeDomGlue() {
       console.error("contrib/dom: callClosure invoked before attach()", { memory, table });
       return;
     }
-    const view = new Int32Array(memory.buffer);
-    const env = view[closurePtr >> 2];
-    const fnIdx = view[(closurePtr + 4) >> 2];
+    // Mere's bump allocator does not enforce 4-byte alignment, so the
+    // closure record's start offset can be misaligned. Int32Array's
+    // indexing rounds the byte offset down to the nearest 4-byte
+    // boundary, which would read the wrong bytes. DataView accepts any
+    // byte offset (littleEndian: Wasm's native byte order).
+    const view = new DataView(memory.buffer);
+    const env = view.getInt32(closurePtr, true);
+    const fnIdx = view.getInt32(closurePtr + 4, true);
     const fn = table.get(fnIdx);
     if (typeof fn !== "function") {
       console.error("contrib/dom: closure fn_idx not in table", { closurePtr, env, fnIdx, fn });
@@ -97,20 +102,7 @@ export function makeDomGlue() {
         console.warn("contrib/dom: dom_on_click on null handle", { handleIdx, closurePtr });
         return;
       }
-      // Snapshot the closure record at registration time so we can detect
-      // memory rewrites between register and click.
-      const view = new Int32Array(memory.buffer);
-      const envAtReg = view[closurePtr >> 2];
-      const fnIdxAtReg = view[(closurePtr + 4) >> 2];
-      console.log("dom_on_click register:", { handleIdx, closurePtr, envAtReg, fnIdxAtReg });
-      el.addEventListener("click", () => {
-        const view2 = new Int32Array(memory.buffer);
-        const envNow = view2[closurePtr >> 2];
-        const fnIdxNow = view2[(closurePtr + 4) >> 2];
-        console.log("dom_on_click fire:", { closurePtr, envNow, fnIdxNow,
-          changedSinceReg: envNow !== envAtReg || fnIdxNow !== fnIdxAtReg });
-        callClosure(closurePtr);
-      });
+      el.addEventListener("click", () => callClosure(closurePtr));
     },
     dom_input_value: (handleIdx) => {
       const el = handles[handleIdx];
