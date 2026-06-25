@@ -15,7 +15,7 @@ self-host plan (see
 | file | scope | lines |
 |---|---|---|
 | `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords, the 12-precedence operator set, and standard punctuation (Stage 50a). | ~336 |
-| `parser.mere` | Expression parser: token list → `expr`. Full 12-level precedence cascade, control-flow keywords (`if` / `let [rec]` / `fn` / `match`), pattern parser, type parser, and `EAnnot` ascription (Stages 50b + 50c + 50d). | ~870 |
+| `parser.mere` | Full Mere program parser: tokens → `program = (top_decl list, expr)`. Expression / pattern / type / top-level decl all in one file, mirroring contrib/fmt/fmt.mere's AST shape. | ~1080 |
 
 ## Status
 
@@ -25,8 +25,8 @@ self-host plan (see
 | **50b-1** | Expression parser slice 1 — atom / apply / factor / term / sum (arithmetic, unary `-`, paren, tuple, list, constructor) + 15 demos | **complete** |
 | **50b-2** | Expression parser slice 2 — range / cmp / `&&` / `\|\|` + `if` / `let [rec]` / `fn` (multi-arg curry) + minimal `PWild` / `PVar` patterns + 14 more demos | **complete** |
 | **50c** | Pattern parser (`PInt` / `PBool` / `PStr` / `PUnit` / `PConstr` / `PTuple` / `PAs` / `POr`, list-pattern desugar) + `match expr with \| pat [when g] -> body \| …` + 12 more demos. `PRecord` deferred. | **complete** |
-| **50d** | Type parser (arrow / tuple / postfix-app / paren / 5 primitives) + `fn (x: ty) -> body` annotated lambdas + `fn () -> body` unit param + `(e : ty)` `EAnnot` ascription + 13 more demos. | **complete** (this commit) |
-| **50e** | Top-level decls (`Top_let` / `Top_let_rec` / `Top_type`) + mutual recursion via `let rec ... and ...` + record types & literals | future |
+| **50d** | Type parser (arrow / tuple / postfix-app / paren / 5 primitives) + `fn (x: ty) -> body` annotated lambdas + `fn () -> body` unit param + `(e : ty)` `EAnnot` ascription + 13 more demos. | **complete** |
+| **50e** | Top-level decls — `TopLet pat = e ;` / `TopLetRec NAME = e (and NAME = e)* ;` / `TopType NAME = [\|] CTOR [of ty] (\| CTOR [of ty])* ;` — plus `program = (decls, main)` shape and end-to-end `parse_str_program`. 13 more demos including a full recursive list-sum program. Records / extern / view / module deferred. | **complete** (this commit) |
 | **50f** | Browser integration — textarea → tokenize + parse + fmt → display | future |
 
 ## Running the demos
@@ -58,10 +58,11 @@ d2  (prec):          Bin(+, Int(1), Bin(*, Int(2), Int(3)))
 e4  (or prec):       Logic(||, Logic(&&, Var(a), Var(b)), Var(c))
 e6  (range):         App(App(Var(range), Int(1)), Int(10))
 f5  (match guard):   Match(Var(n), [Var(x) when Cmp(>, Var(x), Int(0)) -> Var(x) | _ -> Int(0)])
-f6  (or-pattern):    Match(Var(c), [Or(Or(Str("a"), Str("b")), Str("c")) -> Int(1) | _ -> Int(0)])
 g5  (fn arrow ty):   Fun(f : Arrow(Int, Str), App(Var(f), Int(1)))
 g10 (annot expr):    Annot(Int(42), Int)
-g13 (lexer chunk):   Fun(c : Str, Let(Var(o), App(Var(ord), Var(c)), Logic(||, Logic(&&, Cmp(>=, ...), Cmp(<=, ...)), Cmp(==, Var(c), Str("_")))))
+h5  (let rec mutual): Program(TopLetRec([even = Fun(n, If(...)); odd = Fun(n, If(...))]); main = App(Var(even), Int(10)))
+h7  (type payload):   Program(TopType(opt, [Just of Int | Nothing]); main = Constr(Just, Int(42)))
+h13 (full program):   Program(TopType(mylist, [MyNil | MyCons of Tuple[Int, Con(mylist)]]); TopLetRec([sum = Fun(xs : ..., Match(...))]); main = App(Var(sum), ...))
 ```
 
 Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
@@ -78,7 +79,7 @@ Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
 | Comments | `// ... \n` skipped |
 | Strings | `"..."` with `\n` `\t` `\"` `\\` `\{` escapes |
 
-## Parser scope (Stage 50b + 50c + 50d)
+## Parser scope (Stage 50b + 50c + 50d + 50e)
 
 | Layer | Productions |
 |---|---|
@@ -120,6 +121,21 @@ Type grammar (slice 50d) — `parse_type`:
 points; `fn () -> body` synthesises an `_u: unit` parameter to match
 OCaml-side behaviour.
 
+Top-level grammar (slice 50e) — `parse_decls` / `parse_str_program`:
+
+| Form | Result |
+|---|---|
+| `let pat = e ;` | `TopLet (pat, e)` |
+| `let rec NAME = e (and NAME = e)* ;` | `TopLetRec [(name, e); …]` |
+| `type NAME = [\|] CTOR [of ty] (\| CTOR [of ty])* ;` | `TopType (name, [], [(ctor, ty?)…])` |
+| `let pat = e in body` (at top level) | becomes the program's `main = ELet (pat, e, body)` |
+| trailing expression | becomes `main` |
+| no trailing expression | synthesised `main = EUnit` (matches OCaml side) |
+
+Each decl is `;`-terminated; the disambiguation between top-level
+`let X = e ;` and expression-level `let X = e in body` is by the
+post-binding token — same as OCaml's `lib/parser.ml`.
+
 Productions still deferred:
 
 - `'a` style type variables (`TyVar`) — needs a new `T_tyvar` lex token.
@@ -127,11 +143,17 @@ Productions still deferred:
   belongs in a much later phase.
 - `fn (x: ty1, y: ty2) -> body` (comma-separated annotated params in
   one paren) — users can chain `fn (x: ty1) -> fn (y: ty2) -> body`.
-- `Name { f1 = pat, … }` record patterns + `EFieldGet` / `ERecordLit` /
-  `ERecordUpdate` expressions — ride along with Stage 50e Top-level.
+- Records: `type T = { f: ty, … };` declarations, `Name { f = e, … }`
+  literals, `e.f` field access, `Name { … with f = e }` updates, and
+  `Name { f = pat, … }` patterns — the whole record story rides on one
+  follow-up slice once self-host fmt itself needs them.
 - `[a, b, ...rest]` cons-tail sugar in list patterns — Phase 36 sugar.
-- `let rec f = … and g = …` mutual recursion — Stage 50e (currently
-  `let rec` accepts a single binding only).
+- `type T 'a = ...` parameterised type decls — waits on the tyvar
+  lexer token.
+- `extern fn` / `extern type` / `module M { ... }` / `import` /
+  `open` / `view` / `drop` / `signature` — all out of self-host fmt's
+  scope (the parser deals with the source forms that fmt itself
+  formats).
 - Phase 36 operator family beyond `..` and `\` lambda shorthand
   (`<\|` / `\|>` / `<<` / `>>` / `@@` / `?` / `?!` / `<-`) — add as
   dogfood demands.
@@ -171,6 +193,11 @@ A few Mere-side limitations that surfaced during the port:
   resolves this in its keyword table; `keyword_of` in `lexer.mere` now
   does the same so `let _ = …` correctly emits `TUnderscore` while
   identifiers like `_foo` stay as `TIdent "_foo"`.
+- **Stage 50e C-codegen note**: a local variable named `main` is
+  mangled inconsistently by the C backend (bound as `main`, used as
+  `main_`) — that triggers an "undeclared identifier" cc error. Two
+  locals had to be renamed (`main_expr`) to keep the C build clean.
+  Worth fixing in `lib/codegen_c.ml` so other code doesn't trip on it.
 
 ## Position
 
