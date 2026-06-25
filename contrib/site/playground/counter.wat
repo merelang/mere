@@ -759,6 +759,12 @@
     i32.const 0
     local.set 2
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 3
     local.get 3
     i32.const 8
@@ -791,6 +797,12 @@
     local.get 0
     i32.store offset=0
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 2
     local.get 2
     i32.const 8
@@ -814,6 +826,12 @@
     local.get 1
     local.get 0
     i32.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
     global.get $__lang_bump
     local.set 2
     local.get 2
@@ -1044,6 +1062,12 @@
     i32.const 0
     local.set 3
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 4
     local.get 4
     i32.const 8
@@ -1076,6 +1100,12 @@
     i32.const 0
     local.set 3
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 4
     local.get 4
     i32.const 8
@@ -1103,6 +1133,12 @@
     local.get 0
     i32.store offset=0
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 2
     local.get 2
     i32.const 8
@@ -1126,6 +1162,12 @@
     local.get 1
     local.get 0
     i32.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
     global.get $__lang_bump
     local.set 2
     local.get 2
@@ -1209,6 +1251,12 @@
     local.get 3
     local.get 1
     i32.store offset=4
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
     global.get $__lang_bump
     local.set 4
     local.get 4
@@ -1380,6 +1428,12 @@
     local.get 1
     i32.store offset=0
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 3
     local.get 3
     i32.const 8
@@ -1411,6 +1465,12 @@
     local.get 2
     local.get 1
     i32.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
     global.get $__lang_bump
     local.set 3
     local.get 3
@@ -1449,6 +1509,12 @@
     local.get 3
     local.get 2
     i32.store offset=4
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
     global.get $__lang_bump
     local.set 4
     local.get 4
@@ -1740,6 +1806,12 @@
     local.get 1
     i32.store offset=0
     global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
     local.set 3
     local.get 3
     i32.const 8
@@ -1823,6 +1895,12 @@
     local.get 3
     local.get 0
     i32.store offset=4
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
     global.get $__lang_bump
     local.set 4
     local.get 4
