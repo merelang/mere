@@ -15,7 +15,8 @@ self-host plan (see
 | file | scope | lines |
 |---|---|---|
 | `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords, the 12-precedence operator set, and standard punctuation (Stage 50a). | ~336 |
-| `parser.mere` | Full Mere program parser: tokens → `program = (top_decl list, expr)`. Expression / pattern / type / top-level decl all in one file, mirroring contrib/fmt/fmt.mere's AST shape. | ~1080 |
+| `ast.mere` | Shared AST type definitions (`binop` / `cmpop` / `logicop` / `ty` / `pattern` / `expr` / `top_decl` / `program`). Imported by both `parser.mere` and `contrib/fmt/fmt.mere` so the two ends of the self-host pipeline share one definition. Type-only — no functions, no demos. | ~90 |
+| `parser.mere` | Full Mere program parser: tokens → `program = (top_decl list, expr)`. Imports `ast.mere` for the type definitions. | ~1010 |
 
 ## Status
 
@@ -26,8 +27,9 @@ self-host plan (see
 | **50b-2** | Expression parser slice 2 — range / cmp / `&&` / `\|\|` + `if` / `let [rec]` / `fn` (multi-arg curry) + minimal `PWild` / `PVar` patterns + 14 more demos | **complete** |
 | **50c** | Pattern parser (`PInt` / `PBool` / `PStr` / `PUnit` / `PConstr` / `PTuple` / `PAs` / `POr`, list-pattern desugar) + `match expr with \| pat [when g] -> body \| …` + 12 more demos. `PRecord` deferred. | **complete** |
 | **50d** | Type parser (arrow / tuple / postfix-app / paren / 5 primitives) + `fn (x: ty) -> body` annotated lambdas + `fn () -> body` unit param + `(e : ty)` `EAnnot` ascription + 13 more demos. | **complete** |
-| **50e** | Top-level decls — `TopLet pat = e ;` / `TopLetRec NAME = e (and NAME = e)* ;` / `TopType NAME = [\|] CTOR [of ty] (\| CTOR [of ty])* ;` — plus `program = (decls, main)` shape and end-to-end `parse_str_program`. 13 more demos including a full recursive list-sum program. Records / extern / view / module deferred. | **complete** (this commit) |
-| **50f** | Browser integration — textarea → tokenize + parse + fmt → display | future |
+| **50e** | Top-level decls — `TopLet pat = e ;` / `TopLetRec NAME = e (and NAME = e)* ;` / `TopType NAME = [\|] CTOR [of ty] (\| CTOR [of ty])* ;` — plus `program = (decls, main)` shape and end-to-end `parse_str_program`. 13 more demos including a full recursive list-sum program. Records / extern / view / module deferred. | **complete** |
+| **50f-1** | Lift AST type definitions out of `parser.mere` and `contrib/fmt/fmt.mere` into a shared `ast.mere` so both ends of the self-host pipeline can be imported together. fmt.mere's `TInt` / `TArrow` / … ty constructors renamed to `TyInt` / `TyArrow` / … (matching the prefix the parser had to use to dodge the lexer's `TInt` token tag). Both files' demos byte-identical on interp + wasm after the refactor. | **complete** (this commit) |
+| **50f-2** | Browser integration — textarea → tokenize + parse + fmt → display | future |
 
 ## Running the demos
 
@@ -198,6 +200,14 @@ A few Mere-side limitations that surfaced during the port:
   `main_`) — that triggers an "undeclared identifier" cc error. Two
   locals had to be renamed (`main_expr`) to keep the C build clean.
   Worth fixing in `lib/codegen_c.ml` so other code doesn't trip on it.
+- **Stage 50f-1 C-codegen regression**: after pulling in ast.mere's
+  superset of variants (records / EFloat / etc.), the C backend stops
+  compiling parser.mere and fmt.mere because `collect_tuple_shapes` in
+  `lib/codegen_c.ml` doesn't walk into the new monomorphic variant
+  payloads — same pre-existing bug noted in Phase 49.1. Interp and Wasm
+  both compile cleanly; the browser pipeline only needs Wasm so the
+  Stage 50f-2 path is unblocked. Fix lives on the same C-codegen
+  follow-up as the `main` rename above.
 
 ## Position
 

@@ -18,61 +18,23 @@
 // staging plan.
 
 // === Types =================================================================
+//
+// AST type definitions live in contrib/parser/ast.mere — see that file
+// for the full set. Sharing the AST between fmt and parser is what
+// makes the live in-browser `mere fmt` (Stage 50f) possible: parser
+// emits values typed by ast.mere's `expr` / `program`, and fmt's
+// `format_expr` / `format_program` consume them with no translation
+// layer.
+//
+// Phase 50.7 lifted the shared definitions out of this file. Before
+// that, fmt.mere kept its own copy with a bare `T` prefix on ty
+// variants (`TInt`, `TArrow`, ...); the lifted ast.mere standardises
+// on the `Ty` prefix that the parser was already using (the lexer's
+// `TInt` token tag forces the parser's hand). Each `TInt` / `TBool` /
+// ... / `TCon` reference below now reads as `TyInt` / `TyBool` / ... /
+// `TyCon`.
 
-type binop = OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
-type cmpop = OpEq | OpNe | OpLt | OpLe | OpGt | OpGe;
-type logicop = OpAnd | OpOr;
-
-type ty =
-  | TInt
-  | TBool
-  | TStr
-  | TUnit
-  | TFloat
-  | TArrow of ty * ty
-  | TTuple of ty list
-  | TVar of str
-  | TCon of str * ty list
-  ;
-
-type pattern =
-  | PWild
-  | PVar of str
-  | PInt of int
-  | PBool of bool
-  | PStr of str
-  | PUnit
-  | PConstr of str * pattern option
-  | PTuple of pattern list
-  | PRecord of str * (str * pattern) list
-  | PAs of pattern * str
-  | POr of pattern * pattern
-  ;
-
-type expr =
-  | EInt of int
-  | EFloat of float
-  | EBool of bool
-  | EStr of str
-  | EUnit
-  | EVar of str
-  | EBin of binop * expr * expr
-  | ECmp of cmpop * expr * expr
-  | ELogic of logicop * expr * expr
-  | ENeg of expr
-  | ELet of pattern * expr * expr
-  | ELetRec of (str * expr) list * expr
-  | EIf of expr * expr * expr
-  | EFun of str * ty option * expr
-  | EApp of expr * expr
-  | EAnnot of expr * ty
-  | EConstr of str * expr option
-  | EMatch of expr * (pattern * expr option * expr) list
-  | ETuple of expr list
-  | ERecordLit of str * (str * expr) list
-  | EFieldGet of expr * str
-  | ERecordUpdate of expr * (str * expr) list
-  ;
+import "../parser/ast.mere";
 
 // === Precedence ============================================================
 //
@@ -192,20 +154,20 @@ let cons_parts = fn (e: expr) -> match e with
 //   2 = atom
 
 let rec fmt_ty = fn (p: int) -> fn (t: ty) -> match t with
-  | TInt -> "int"
-  | TBool -> "bool"
-  | TStr -> "str"
-  | TUnit -> "unit"
-  | TFloat -> "float"
-  | TVar n -> "'" ++ n
-  | TArrow (a, b) ->
+  | TyInt -> "int"
+  | TyBool -> "bool"
+  | TyStr -> "str"
+  | TyUnit -> "unit"
+  | TyFloat -> "float"
+  | TyVar n -> "'" ++ n
+  | TyArrow (a, b) ->
     let s = fmt_ty 1 a ++ " -> " ++ fmt_ty 0 b in
     wrap (p > 0) s
-  | TTuple ts ->
+  | TyTuple ts ->
     let parts = list_map ts (fn (t1: ty) -> fmt_ty 2 t1) in
     let s = str_join " * " parts in
     wrap (p > 1) s
-  | TCon (name, args) -> match args with
+  | TyCon (name, args) -> match args with
     | Nil -> name
     | Cons (a, Nil) -> fmt_ty 2 a ++ " " ++ name
     | _ ->
