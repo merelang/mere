@@ -1,0 +1,332 @@
+// contrib/parser — Mere self-hosted parser (Phase 50).
+// This file: Stage 50a — lexer MVP.
+//
+// Tokenizes a Mere source string into a (line, token) list. Scope is
+// what the self-host fmt's AST covers: literals, identifiers, the
+// 12-precedence-level operator set, the standard keywords, and the
+// common punctuation. Out of scope (deferred per the §S1 paper trial):
+// `module` / `import` / `open` / `extern` / `region` / `view` / Phase
+// 36 sugars beyond `..` and `\` lambda shorthand.
+//
+// The output feeds the parser stages (50b/c/d/e) that come next.
+// See aidocs/projects/lang/50_self_hosted_parser_paper.md for the
+// full multi-stage plan.
+
+// === Token type ============================================================
+
+type token =
+  // Literals
+  | TInt of int
+  | TStr of str
+  | TIdent of str
+  // Keywords
+  | TLet | TRec | TAnd | TIn
+  | TIf | TThen | TElse
+  | TFn | TArrow
+  | TMatch | TWith | TWhen | TOf
+  | TType | TAs
+  | TTrue | TFalse
+  // Operators
+  | TEq | TEqEq | TBangEq
+  | TLt | TLe | TGt | TGe
+  | TPlus | TMinus | TStar | TSlash | TPercent | TPlusPlus
+  | TPipePipe | TAmpAmp
+  | TBackslash
+  // Punctuation
+  | TLParen | TRParen
+  | TLBracket | TRBracket
+  | TLBrace | TRBrace
+  | TComma | TSemi
+  | TColon | TColonColon
+  | TPipe
+  | TDot | TDotDot
+  | TUnderscore
+  | TEof
+  ;
+
+// A (line, token) pair. Line numbers start at 1; column / width are
+// dropped for the MVP — error messages just say "line N".
+type pos_token = int * token;
+
+// === Char-class predicates ================================================
+
+let is_digit_c = fn (c: str) ->
+  c == "0" || c == "1" || c == "2" || c == "3" || c == "4"
+  || c == "5" || c == "6" || c == "7" || c == "8" || c == "9";
+
+let is_alpha_c = fn (c: str) ->
+  let o = ord c in
+  (o >= 65 && o <= 90) || (o >= 97 && o <= 122) || c == "_";
+
+let is_ident_cont_c = fn (c: str) ->
+  is_alpha_c c || is_digit_c c || c == "'";
+
+let is_space_c = fn (c: str) ->
+  // Mere's string-literal lexer doesn't accept `\r`; compare by ord
+  // (CR = 13) instead. Tab is 9, newline 10, space 32.
+  c == " " || c == "\t" || c == "\n" || ord c == 13;
+
+// === Keyword lookup ========================================================
+//
+// After reading an ident, decide whether it's a keyword.
+
+let keyword_of = fn (s: str) ->
+  if s == "let" then Some TLet
+  else if s == "rec" then Some TRec
+  else if s == "and" then Some TAnd
+  else if s == "in" then Some TIn
+  else if s == "if" then Some TIf
+  else if s == "then" then Some TThen
+  else if s == "else" then Some TElse
+  else if s == "fn" then Some TFn
+  else if s == "match" then Some TMatch
+  else if s == "with" then Some TWith
+  else if s == "when" then Some TWhen
+  else if s == "of" then Some TOf
+  else if s == "type" then Some TType
+  else if s == "as" then Some TAs
+  else if s == "true" then Some TTrue
+  else if s == "false" then Some TFalse
+  else None;
+
+// === Scanning helpers ======================================================
+//
+// State-passing style: each helper takes (s, i, line) and returns the
+// updated (i, line) plus whatever it produced. `s` is the source
+// string, `i` the current byte index, `line` the current line number.
+
+// Skip whitespace and `//` line comments. Returns the new (i, line).
+let rec skip_ws_and_comments = fn (s: str) -> fn (n: int)
+                              -> fn (i: int) -> fn (line: int) ->
+  if i >= n then (i, line)
+  else
+    let c = char_at s i in
+    if c == "\n" then skip_ws_and_comments s n (i + 1) (line + 1)
+    else if is_space_c c then skip_ws_and_comments s n (i + 1) line
+    else if c == "/" && i + 1 < n && char_at s (i + 1) == "/" then
+      // line comment — skip to next \n or EOF
+      let rec skip_to_eol = fn (j: int) ->
+        if j >= n then j
+        else if char_at s j == "\n" then j
+        else skip_to_eol (j + 1)
+      in
+      skip_ws_and_comments s n (skip_to_eol (i + 2)) line
+    else (i, line);
+
+// Read a contiguous run of chars. Inlined for each predicate because
+// Wasm's Phase 6.1 codegen doesn't support inner-lifted captures of a
+// higher-order `pred: str -> bool` parameter — passing the predicate
+// through the recursive loop pushes it into a closure env that the
+// codegen rejects. Two small specialized functions keep the lexer
+// portable across all backends.
+let read_ident_run = fn (s: str) -> fn (n: int) -> fn (i: int) ->
+  let rec loop = fn (j: int) ->
+    if j >= n then j
+    else if is_ident_cont_c (char_at s j) then loop (j + 1)
+    else j
+  in
+  let end_i = loop i in
+  (substring s i end_i, end_i);
+
+let read_digit_run = fn (s: str) -> fn (n: int) -> fn (i: int) ->
+  let rec loop = fn (j: int) ->
+    if j >= n then j
+    else if is_digit_c (char_at s j) then loop (j + 1)
+    else j
+  in
+  let end_i = loop i in
+  (substring s i end_i, end_i);
+
+// Read a quoted string literal. Assumes `s[i] == '"'`. Returns the
+// decoded string (escapes processed) and the index right after the
+// closing `"`. Supports `\n` `\t` `\"` `\\` `\{`.
+let read_string_lit = fn (s: str) -> fn (n: int) -> fn (i: int) ->
+  let buf = strbuf_new () in
+  let rec loop = fn (j: int) ->
+    if j >= n then fail "unterminated string literal"
+    else
+      let c = char_at s j in
+      if c == "\"" then j + 1
+      else if c == "\\" && j + 1 < n then
+        let esc = char_at s (j + 1) in
+        let _ =
+          if esc == "n" then strbuf_push buf "\n"
+          else if esc == "t" then strbuf_push buf "\t"
+          else if esc == "\"" then strbuf_push buf "\""
+          else if esc == "\\" then strbuf_push buf "\\"
+          else if esc == "\{" then strbuf_push buf "\{"
+          else strbuf_push buf esc
+        in
+        loop (j + 2)
+      else
+        let _ = strbuf_push buf c in
+        loop (j + 1)
+  in
+  let end_i = loop (i + 1) in
+  (strbuf_to_str buf, end_i);
+
+// === Multi-char operator lookahead =========================================
+//
+// Given `s[i]`, try the longest operator first (==, !=, ++, <=, >=,
+// ->, ||, &&, ::, ..) before falling back to single-char.
+
+let try_multi_op = fn (s: str) -> fn (n: int) -> fn (i: int) ->
+  if i + 1 >= n then None
+  else
+    let c = char_at s i in
+    let c2 = char_at s (i + 1) in
+    if c == "=" && c2 == "=" then Some (TEqEq, i + 2)
+    else if c == "!" && c2 == "=" then Some (TBangEq, i + 2)
+    else if c == "+" && c2 == "+" then Some (TPlusPlus, i + 2)
+    else if c == "<" && c2 == "=" then Some (TLe, i + 2)
+    else if c == ">" && c2 == "=" then Some (TGe, i + 2)
+    else if c == "-" && c2 == ">" then Some (TArrow, i + 2)
+    else if c == "|" && c2 == "|" then Some (TPipePipe, i + 2)
+    else if c == "&" && c2 == "&" then Some (TAmpAmp, i + 2)
+    else if c == ":" && c2 == ":" then Some (TColonColon, i + 2)
+    else if c == "." && c2 == "." then Some (TDotDot, i + 2)
+    else None;
+
+// === Main tokenize loop ====================================================
+
+let tokenize = fn (s: str) ->
+  let n = str_len s in
+  let rec loop = fn (i: int) -> fn (line: int) -> fn (acc: pos_token list) ->
+    let (i, line) = skip_ws_and_comments s n i line in
+    if i >= n then list_rev (Cons ((line, TEof), acc))
+    else
+      let c = char_at s i in
+      // Identifier or keyword
+      if is_alpha_c c then
+        let (text, j) = read_ident_run s n i in
+        let tok = match keyword_of text with
+          | Some t -> t
+          | None -> TIdent text
+        in
+        loop j line (Cons ((line, tok), acc))
+      // Integer literal
+      else if is_digit_c c then
+        let (text, j) = read_digit_run s n i in
+        loop j line (Cons ((line, TInt (int_of_str text)), acc))
+      // String literal
+      else if c == "\"" then
+        let (text, j) = read_string_lit s n i in
+        loop j line (Cons ((line, TStr text), acc))
+      // Underscore (must be checked before alpha-as-ident because `_`
+      // is treated specially even though alpha_c includes it)
+      else if c == "_" && (i + 1 >= n || not (is_ident_cont_c (char_at s (i + 1)))) then
+        loop (i + 1) line (Cons ((line, TUnderscore), acc))
+      else
+        // Multi-char operator?
+        (match try_multi_op s n i with
+          | Some (tok, j) -> loop j line (Cons ((line, tok), acc))
+          | None ->
+            // Single-char token
+            let tok_opt =
+              if c == "+" then Some TPlus
+              else if c == "-" then Some TMinus
+              else if c == "*" then Some TStar
+              else if c == "/" then Some TSlash
+              else if c == "%" then Some TPercent
+              else if c == "=" then Some TEq
+              else if c == "<" then Some TLt
+              else if c == ">" then Some TGt
+              else if c == "(" then Some TLParen
+              else if c == ")" then Some TRParen
+              else if c == "[" then Some TLBracket
+              else if c == "]" then Some TRBracket
+              else if c == "\{" then Some TLBrace
+              else if c == "}" then Some TRBrace
+              else if c == "," then Some TComma
+              else if c == ";" then Some TSemi
+              else if c == ":" then Some TColon
+              else if c == "|" then Some TPipe
+              else if c == "." then Some TDot
+              else if c == "\\" then Some TBackslash
+              else None
+            in
+            match tok_opt with
+              | Some t -> loop (i + 1) line (Cons ((line, t), acc))
+              | None -> fail ("line " ++ show line ++ ": unexpected char `" ++ c ++ "`"))
+  in
+  loop 0 1 Nil;
+
+// === Pretty-print for tests ================================================
+//
+// Render a (line, token) list as a compact string so the demo block
+// below can `print` the result of tokenize and we can eyeball it.
+
+let token_str = fn (t: token) -> match t with
+  | TInt n -> "Int(" ++ show n ++ ")"
+  | TStr s -> "Str(\"" ++ s ++ "\")"
+  | TIdent s -> "Ident(" ++ s ++ ")"
+  | TLet -> "Let" | TRec -> "Rec" | TAnd -> "And" | TIn -> "In"
+  | TIf -> "If" | TThen -> "Then" | TElse -> "Else"
+  | TFn -> "Fn" | TArrow -> "Arrow"
+  | TMatch -> "Match" | TWith -> "With" | TWhen -> "When" | TOf -> "Of"
+  | TType -> "Type" | TAs -> "As"
+  | TTrue -> "True" | TFalse -> "False"
+  | TEq -> "Eq" | TEqEq -> "EqEq" | TBangEq -> "BangEq"
+  | TLt -> "Lt" | TLe -> "Le" | TGt -> "Gt" | TGe -> "Ge"
+  | TPlus -> "Plus" | TMinus -> "Minus"
+  | TStar -> "Star" | TSlash -> "Slash" | TPercent -> "Percent"
+  | TPlusPlus -> "PlusPlus"
+  | TPipePipe -> "PipePipe" | TAmpAmp -> "AmpAmp"
+  | TBackslash -> "Backslash"
+  | TLParen -> "LParen" | TRParen -> "RParen"
+  | TLBracket -> "LBracket" | TRBracket -> "RBracket"
+  | TLBrace -> "LBrace" | TRBrace -> "RBrace"
+  | TComma -> "Comma" | TSemi -> "Semi"
+  | TColon -> "Colon" | TColonColon -> "ColonColon"
+  | TPipe -> "Pipe"
+  | TDot -> "Dot" | TDotDot -> "DotDot"
+  | TUnderscore -> "Underscore"
+  | TEof -> "Eof"
+  ;
+
+let dump_tokens = fn (toks: pos_token list) ->
+  let parts = list_map toks (fn (pt: pos_token) ->
+    let (line, t) = pt in token_str t
+  ) in
+  str_join " " parts;
+
+// === Demos =================================================================
+
+let demo1 = tokenize "let x = 1 + 2 in x";
+// expect: Let Ident(x) Eq Int(1) Plus Int(2) In Ident(x) Eof
+
+let demo2 = tokenize "fn x -> x * x";
+// expect: Fn Ident(x) Arrow Ident(x) Star Ident(x) Eof
+
+let demo3 = tokenize "if n <= 1 then 1 else n * fact (n - 1)";
+// expect: If Ident(n) Le Int(1) Then Int(1) Else Ident(n) Star Ident(fact) LParen Ident(n) Minus Int(1) RParen Eof
+
+let demo4 = tokenize "match xs with | Nil -> 0 | Cons (h, t) -> h + sum t";
+// expect: Match Ident(xs) With Pipe Ident(Nil) Arrow Int(0) Pipe Ident(Cons) LParen Ident(h) Comma Ident(t) RParen Arrow Ident(h) Plus Ident(sum) Ident(t) Eof
+
+let demo5 = tokenize "let xs = [1, 2, 3] in xs";
+// expect: Let Ident(xs) Eq LBracket Int(1) Comma Int(2) Comma Int(3) RBracket In Ident(xs) Eof
+
+let demo6 = tokenize "// a comment\nlet a = 1\n// another\nin a";
+// expect: Let Ident(a) Eq Int(1) In Ident(a) Eof
+
+let demo7 = tokenize "\"hello \\\"world\\\"\"";
+// expect: Str("hello "world"") Eof
+
+let demo8 = tokenize "1..10";
+// expect: Int(1) DotDot Int(10) Eof
+
+let demo9 = tokenize "\\x y -> x + y";
+// expect: Backslash Ident(x) Ident(y) Arrow Ident(x) Plus Ident(y) Eof
+
+let _ = print "=== Stage 50a lexer demos ===" in
+let _ = print ("demo1 (let in):    " ++ dump_tokens demo1) in
+let _ = print ("demo2 (fn arrow):  " ++ dump_tokens demo2) in
+let _ = print ("demo3 (if/else):   " ++ dump_tokens demo3) in
+let _ = print ("demo4 (match):     " ++ dump_tokens demo4) in
+let _ = print ("demo5 (list lit):  " ++ dump_tokens demo5) in
+let _ = print ("demo6 (comments):  " ++ dump_tokens demo6) in
+let _ = print ("demo7 (str esc):   " ++ dump_tokens demo7) in
+let _ = print ("demo8 (range):     " ++ dump_tokens demo8) in
+let _ = print ("demo9 (lambda):    " ++ dump_tokens demo9) in
+0
