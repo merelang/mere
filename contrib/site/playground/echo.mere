@@ -1,0 +1,16 @@
+// echo — Phase 48 C2 frontend FFI dogfood for `dom_input_value`.
+//
+// Reads from the textarea on each button click and mirrors the text
+// into the display area. Exercises the JS-to-Mere string boundary in
+// addition to the Mere-to-JS side that the counter demo covers.
+
+import "contrib/dom/dom.mere";
+
+let input = dom_get_by_id "input" in
+let display = dom_get_by_id "display" in
+let btn = dom_get_by_id "go" in
+let _ = dom_on_click btn (fn (u: unit) ->
+  let s = dom_input_value input in
+  dom_set_text display s
+) in
+0

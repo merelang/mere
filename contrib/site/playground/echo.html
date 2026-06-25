@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere Echo — input dogfood</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .echo-app {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      padding: 1.5rem;
+      margin: 2rem 0;
+      background: #f7fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+    #input {
+      width: 100%;
+      min-height: 4em;
+      padding: 0.7em;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.95em;
+      border: 1px solid #cbd5e0;
+      border-radius: 4px;
+      resize: vertical;
+    }
+    #go {
+      align-self: flex-start;
+      padding: 0.6em 1.4em;
+      font-size: 1em;
+      background: #2b6cb0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #go:hover { background: #2c5282; }
+    #display {
+      min-height: 4em;
+      padding: 1em;
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.95em;
+      white-space: pre-wrap;
+      color: #2d3748;
+    }
+    .source-block {
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 1em;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="echo.html" class="active">echo</a>
+    </div>
+  </nav>
+  <main>
+    <h1>Echo — JS → Mere → JS strings</h1>
+
+    <p>
+      A small dogfood for the JS-to-Mere string boundary in
+      <a href="https://github.com/merelang/mere/blob/main/contrib/dom/dom.mere">contrib/dom</a>.
+      Type into the textarea and press the button: the Mere closure
+      reads <code>dom_input_value</code>, then writes it back via
+      <code>dom_set_text</code>. The counter demo only crosses the
+      boundary in the Mere → JS direction; this one closes the loop.
+    </p>
+
+    <div class="echo-app">
+      <textarea id="input" placeholder="Type something here..."></textarea>
+      <button id="go">Echo</button>
+      <div id="display">(output will appear here)</div>
+    </div>
+
+    <h2>Source (<code>echo.mere</code>)</h2>
+    <pre class="source-block">import "contrib/dom/dom.mere";
+
+let input = dom_get_by_id "input" in
+let display = dom_get_by_id "display" in
+let btn = dom_get_by_id "go" in
+let _ = dom_on_click btn (fn (u: unit) -&gt;
+  let s = dom_input_value input in
+  dom_set_text display s
+) in
+0</pre>
+
+    <h2>The JS → Mere string path</h2>
+    <p>
+      <code>dom_input_value</code> reads <code>element.value</code> in JS,
+      encodes the string as UTF-8, copies the bytes into a high-memory
+      scratch buffer inside Wasm linear memory (starting at 56KB by
+      default), and returns the offset:
+    </p>
+    <pre class="source-block">// inside dom.glue.js
+dom_input_value: (handleIdx) =&gt; {
+  const el = handles[handleIdx];
+  if (!el) return writeStr("");
+  return writeStr(el.value !== undefined ? el.value : "");
+},
+
+// writeStr copies UTF-8 + null terminator into the scratch region
+// and returns the byte offset (which Mere treats as a `str` value).</pre>
+    <p>
+      The returned offset is an ordinary Mere <code>str</code> value
+      — once it's in <code>s</code>, the rest of the program (and
+      <code>str_*</code> builtins) treat it like any other string.
+      The scratch buffer is overwritten on the next
+      <code>dom_input_value</code> call, so retain via
+      <code>substring</code> / <code>str_concat</code> if you need it
+      past the current event.
+    </p>
+  </main>
+  <footer>Phase 48 C2 frontend FFI MVP — dogfood</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./echo.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();
+  </script>
+</body>
+</html>
