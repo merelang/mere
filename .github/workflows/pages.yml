@@ -1,0 +1,57 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Required for GitHub Pages deploy via the official actions.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy at a time. Cancel in-progress on push but let
+# the active one finish (so a half-deployed site isn't left behind).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.1"
+
+      - name: Install dependencies
+        run: opam install . --deps-only
+
+      - name: Install wabt (wat2wasm)
+        run: sudo apt-get update && sudo apt-get install -y wabt
+
+      - name: Build mere
+        run: opam exec -- dune build
+
+      - name: Build docs site (mere SSG + wat2wasm)
+        run: opam exec -- sh contrib/site/build_full.sh docs _site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

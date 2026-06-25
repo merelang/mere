@@ -1,7 +1,10 @@
 # Mere
 
 [![CI](https://github.com/merelang/mere/actions/workflows/ci.yml/badge.svg)](https://github.com/merelang/mere/actions/workflows/ci.yml)
+[![Pages](https://github.com/merelang/mere/actions/workflows/pages.yml/badge.svg)](https://github.com/merelang/mere/actions/workflows/pages.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**Docs / playground:** [merelang.github.io/mere](https://merelang.github.io/mere/) — tutorial, language reference, and a Wasm playground with an interactive [counter demo](https://merelang.github.io/mere/playground/counter.html) wired through the Phase 48 frontend FFI.
 
 > *Make Explicit Region-bound Effects.*
 
