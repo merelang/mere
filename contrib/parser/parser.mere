@@ -40,13 +40,20 @@ type cmpop =
 type logicop =
   | OpAnd | OpOr;
 
-// Patterns — slice 2 only emits PWild / PVar; the rest are placeholders
-// kept in scope so the variant tags stay stable when Stage 50c expands
-// the parser without renumbering. (No constructor here references the
-// other variants yet, so the typer is fine with this subset.)
+// Pattern grammar — slice 3 (Stage 50c) fills out the remaining
+// variants. Mirrors contrib/fmt/fmt.mere except PRecord is deferred
+// (records aren't in the expr parser yet).
 type pattern =
   | PWild
   | PVar of str
+  | PInt of int
+  | PBool of bool
+  | PStr of str
+  | PUnit
+  | PConstr of str * pattern option
+  | PTuple of pattern list
+  | PAs of pattern * str
+  | POr of pattern * pattern
   ;
 
 type expr =
@@ -72,6 +79,9 @@ type expr =
   // `ty option` annotation because Stage 50d owns the type parser; the
   // shape will widen to match once that lands.
   | EFun of str * expr
+  // Arms are `(pat, guard, body)` — guard is `Some g` for `pat when g ->`
+  // arms, `None` otherwise. Matches fmt.mere's `EMatch` exactly.
+  | EMatch of expr * (pattern * expr option * expr) list
   ;
 
 // === Token / line helpers =================================================
@@ -161,6 +171,15 @@ let expect_arrow = fn (toks: pos_token list) ->
       | _ -> fail ("line " ++ show line ++ ": expected `->`"))
   | Nil -> fail "expected `->` but got EOF";
 
+let expect_with = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TWith -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `with`"))
+  | Nil -> fail "expected `with` but got EOF";
+
 // `let rec NAME = ...` requires a plain identifier (PWild isn't allowed
 // for rec bindings since the name has to be self-referenceable).
 let expect_ident = fn (toks: pos_token list) ->
@@ -207,6 +226,7 @@ and parse_expr_top = fn (toks: pos_token list) ->
     | TIf -> parse_if (advance toks)
     | TLet -> parse_let (advance toks)
     | TFn -> parse_fn (advance toks)
+    | TMatch -> parse_match (advance toks)
     | _ -> parse_or toks)
 
 // `if cond then t else e` — both `then` and `else` are required (no
@@ -219,9 +239,10 @@ and parse_if = fn (toks: pos_token list) ->
   let (else_e, toks5) = parse_expr toks4 in
   (EIf (cond, then_e, else_e), toks5)
 
-// `let [rec] x = value in body`. Slice 2 supports only a single binding
-// (no `and`), and only PWild / PVar for the bound pattern. `let rec`
-// requires a plain identifier because the body references it by name.
+// `let [rec] pat = value in body`. Slice 50c lifts the LHS to the full
+// pattern parser (so `let (a, b) = …` and `let Cons (h, t) = …` work);
+// `let rec` still requires a bare identifier since the body must reference
+// the binding by name. Mutual `let rec … and …` defers to Stage 50e.
 and parse_let = fn (toks: pos_token list) ->
   (match peek_tok toks with
     | TRec ->
@@ -232,24 +253,12 @@ and parse_let = fn (toks: pos_token list) ->
       let (body, toks5) = parse_expr toks4 in
       (ELetRec (Cons ((name, value), Nil), body), toks5)
     | _ ->
-      let (pat, toks1) = parse_simple_pat toks in
+      let (pat, toks1) = parse_pattern toks in
       let toks2 = expect_eq toks1 in
       let (value, toks3) = parse_expr toks2 in
       let toks4 = expect_in toks3 in
       let (body, toks5) = parse_expr toks4 in
       (ELet (pat, value, body), toks5))
-
-and parse_simple_pat = fn (toks: pos_token list) ->
-  (match toks with
-    | Cons (pt, rest) ->
-      let (line, t) = pt in
-      (match t with
-        | TUnderscore -> (PWild, rest)
-        | TIdent name -> (PVar name, rest)
-        | _ ->
-          fail ("line " ++ show line
-                ++ ": expected identifier or `_` (full patterns: Stage 50c)"))
-    | Nil -> fail "expected pattern but got EOF")
 
 // `fn x [y z ...] -> body`. Multi-arg lambdas desugar to a chain of
 // single-arg EFun nodes. Type annotations on the arguments are deferred
@@ -469,7 +478,141 @@ and desugar_list = fn (elems: expr list) ->
     | Nil -> EConstr ("Nil", None)
     | Cons (h, t) ->
       EConstr ("Cons",
-        Some (ETuple (Cons (h, Cons (desugar_list t, Nil))))));
+        Some (ETuple (Cons (h, Cons (desugar_list t, Nil))))))
+
+// === Pattern parser =========================================================
+//
+// `parse_pattern` wraps `parse_pattern_base` with an optional trailing
+// `as IDENT`. Or-patterns (`p1 | p2`) are collected only by `parse_arms`
+// — at this layer a bare `|` would belong to the surrounding context
+// (e.g., the next match arm).
+//
+// Constructor payloads here only support the paren-wrapped form
+// (`Cons (h, t)`), mirroring slice 50b-1's `EConstr` rule. An atom-style
+// payload (`Some 1`) needs a constr-arity table the self-host parser
+// doesn't carry; users can paren-wrap.
+
+and parse_pattern = fn (toks: pos_token list) ->
+  let (p, toks1) = parse_pattern_base toks in
+  (match peek_tok toks1 with
+    | TAs ->
+      let (name, toks2) = expect_ident (advance toks1) in
+      (PAs (p, name), toks2)
+    | _ -> (p, toks1))
+
+and parse_pattern_base = fn (toks: pos_token list) ->
+  (match toks with
+    | Nil -> fail "expected pattern but got EOF"
+    | Cons (pt, rest) ->
+      let (line, t) = pt in
+      (match t with
+        | TUnderscore -> (PWild, rest)
+        | TInt n -> (PInt n, rest)
+        | TStr s -> (PStr s, rest)
+        | TTrue -> (PBool true, rest)
+        | TFalse -> (PBool false, rest)
+        | TLParen -> parse_paren_pattern rest
+        | TLBracket -> parse_list_pattern rest
+        | TIdent name ->
+          (if is_upper_first_c name then
+            (match peek_tok rest with
+              | TLParen ->
+                let (payload, rest2) = parse_paren_pattern (advance rest) in
+                (PConstr (name, Some payload), rest2)
+              | _ -> (PConstr (name, None), rest))
+          else
+            (PVar name, rest))
+        | _ -> fail ("line " ++ show line ++ ": expected pattern")))
+
+// Contents of `( ... )` in pattern position. Returns:
+//   `()`           -> PUnit
+//   `(p)`          -> p
+//   `(p1, p2,...)` -> PTuple [...]
+and parse_paren_pattern = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRParen -> (PUnit, advance toks)
+    | _ ->
+      let (p1, toks1) = parse_pattern toks in
+      (match peek_tok toks1 with
+        | TRParen -> (p1, advance toks1)
+        | TComma ->
+          let (rest_pats, toks2) = parse_pattern_comma_seq (advance toks1) in
+          let toks3 = expect_rparen toks2 in
+          (PTuple (Cons (p1, rest_pats)), toks3)
+        | _ ->
+          fail ("line " ++ show (peek_line toks1)
+                ++ ": expected `,` or `)` in pattern")))
+
+and parse_pattern_comma_seq = fn (toks: pos_token list) ->
+  let (p, toks1) = parse_pattern toks in
+  (match peek_tok toks1 with
+    | TComma ->
+      let (rest, toks2) = parse_pattern_comma_seq (advance toks1) in
+      (Cons (p, rest), toks2)
+    | _ -> (Cons (p, Nil), toks1))
+
+// `[p1, ..., pN]` desugars to right-nested `PConstr ("Cons", ...)`
+// cells — same shape as the expression-side list literal.
+// (`[a, b, ...rest]` cons-tail sugar is deferred.)
+and parse_list_pattern = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBracket -> (PConstr ("Nil", None), advance toks)
+    | _ ->
+      let (elems, toks1) = parse_pattern_comma_seq toks in
+      let toks2 = expect_rbracket toks1 in
+      (desugar_list_pattern elems, toks2))
+
+and desugar_list_pattern = fn (elems: pattern list) ->
+  (match elems with
+    | Nil -> PConstr ("Nil", None)
+    | Cons (h, t) ->
+      PConstr ("Cons",
+        Some (PTuple (Cons (h, Cons (desugar_list_pattern t, Nil))))))
+
+// === Match expression =======================================================
+//
+// `match expr with | pat -> body | pat when guard -> body | ...`
+// The leading `|` is optional. Or-patterns `p1 | p2 | p3 -> body` are
+// collected at arm scope, left-associatively. Match arms greedily consume
+// `|`-separated arms — nested `match` therefore needs paren-wrapping by
+// the user (`match outer with | A -> (match inner with | ... ) | B -> …`),
+// matching OCaml-side behaviour.
+
+and parse_match = fn (toks: pos_token list) ->
+  let (scrutinee, toks1) = parse_expr toks in
+  let toks2 = expect_with toks1 in
+  let (arms, toks3) = parse_arms toks2 in
+  (EMatch (scrutinee, arms), toks3)
+
+and parse_arms = fn (toks: pos_token list) ->
+  // Optional leading `|`
+  let toks0 = (match peek_tok toks with
+    | TPipe -> advance toks
+    | _ -> toks) in
+  parse_arms_loop Nil toks0
+
+and parse_arms_loop = fn (acc: (pattern * expr option * expr) list)
+                     -> fn (toks: pos_token list) ->
+  let (pat, toks1) = parse_pattern toks in
+  let (pat2, toks2) = parse_or_pattern_tail pat toks1 in
+  let (guard, toks3) = (match peek_tok toks2 with
+    | TWhen ->
+      let (g, toks_g) = parse_expr (advance toks2) in
+      (Some g, toks_g)
+    | _ -> (None, toks2)) in
+  let toks4 = expect_arrow toks3 in
+  let (body, toks5) = parse_expr toks4 in
+  let acc2 = Cons ((pat2, guard, body), acc) in
+  (match peek_tok toks5 with
+    | TPipe -> parse_arms_loop acc2 (advance toks5)
+    | _ -> (list_rev acc2, toks5))
+
+and parse_or_pattern_tail = fn (acc: pattern) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TPipe ->
+      let (rhs, rest) = parse_pattern (advance toks) in
+      parse_or_pattern_tail (POr (acc, rhs)) rest
+    | _ -> (acc, toks));
 
 // === Pretty-print for tests ================================================
 
@@ -496,10 +639,23 @@ let logicop_str = fn (op: logicop) ->
   | OpAnd -> "&&"
   | OpOr -> "||";
 
-let pattern_to_str = fn (p: pattern) ->
-  match p with
-  | PWild -> "_"
-  | PVar x -> "Var(" ++ x ++ ")";
+let rec pattern_to_str = fn (p: pattern) ->
+  (match p with
+    | PWild -> "_"
+    | PVar x -> "Var(" ++ x ++ ")"
+    | PInt n -> "Int(" ++ show n ++ ")"
+    | PBool b -> if b then "Bool(true)" else "Bool(false)"
+    | PStr s -> "Str(\"" ++ s ++ "\")"
+    | PUnit -> "Unit"
+    | PConstr (name, payload) ->
+      (match payload with
+        | None -> "Constr(" ++ name ++ ")"
+        | Some sub -> "Constr(" ++ name ++ ", " ++ pattern_to_str sub ++ ")")
+    | PTuple ps ->
+      let parts = list_map ps (fn (x: pattern) -> pattern_to_str x) in
+      "Tuple[" ++ str_join ", " parts ++ "]"
+    | PAs (sub, name) -> "As(" ++ pattern_to_str sub ++ ", " ++ name ++ ")"
+    | POr (l, r) -> "Or(" ++ pattern_to_str l ++ ", " ++ pattern_to_str r ++ ")");
 
 let rec expr_to_str = fn (e: expr) ->
   (match e with
@@ -538,7 +694,16 @@ let rec expr_to_str = fn (e: expr) ->
         let (n, v) = b in n ++ " = " ++ expr_to_str v) in
       "LetRec([" ++ str_join "; " parts ++ "], " ++ expr_to_str body ++ ")"
     | EFun (arg, body) ->
-      "Fun(" ++ arg ++ ", " ++ expr_to_str body ++ ")");
+      "Fun(" ++ arg ++ ", " ++ expr_to_str body ++ ")"
+    | EMatch (scrutinee, arms) ->
+      let arm_strs = list_map arms (fn (a: pattern * expr option * expr) ->
+        let (p, g, b) = a in
+        let guard_str = (match g with
+          | None -> ""
+          | Some ge -> " when " ++ expr_to_str ge) in
+        pattern_to_str p ++ guard_str ++ " -> " ++ expr_to_str b) in
+      "Match(" ++ expr_to_str scrutinee
+      ++ ", [" ++ str_join " | " arm_strs ++ "])");
 
 // Convenience: parse a source string and stringify the result. Errors
 // if the parser leaves anything but TEof after the expression — the
@@ -585,4 +750,18 @@ let _ = print ("e11 (fn1):       " ++ parse_str "fn x -> x + 1") in
 let _ = print ("e12 (fn curry):  " ++ parse_str "fn x y -> x * y") in
 let _ = print ("e13 (let rec):   " ++ parse_str "let rec f = fn n -> if n == 0 then 1 else n * f (n - 1) in f 5") in
 let _ = print ("e14 (if in let): " ++ parse_str "let r = if x > 0 then x else 0 - x in r") in
+let _ = print "" in
+let _ = print "=== Stage 50c parser demos (pattern + match) ===" in
+let _ = print ("f1  (let tuple):     " ++ parse_str "let (a, b) = p in a + b") in
+let _ = print ("f2  (match lit):     " ++ parse_str "match n with | 0 -> true | _ -> false") in
+let _ = print ("f3  (match constr):  " ++ parse_str "match xs with | Nil -> 0 | Cons (h, t) -> h") in
+let _ = print ("f4  (match str):     " ++ parse_str "match s with | \"yes\" -> 1 | \"no\" -> 0 | _ -> -1") in
+let _ = print ("f5  (match guard):   " ++ parse_str "match n with | x when x > 0 -> x | _ -> 0") in
+let _ = print ("f6  (or-pattern):    " ++ parse_str "match c with | \"a\" | \"b\" | \"c\" -> 1 | _ -> 0") in
+let _ = print ("f7  (as-pattern):    " ++ parse_str "match v with | Cons (h, t) as l -> l | _ -> Nil") in
+let _ = print ("f8  (list pat):      " ++ parse_str "match xs with | [1, 2] -> true | _ -> false") in
+let _ = print ("f9  (bool/unit pat): " ++ parse_str "match v with | () -> 0 | _ -> 1") in
+let _ = print ("f10 (nested constr): " ++ parse_str "match r with | Some (Cons (h, _)) -> h | _ -> 0") in
+let _ = print ("f11 (let constr):    " ++ parse_str "let Some (x) = opt in x") in
+let _ = print ("f12 (no-pipe lead):  " ++ parse_str "match n with 0 -> 1 | _ -> 2") in
 0

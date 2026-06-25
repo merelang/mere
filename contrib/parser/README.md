@@ -15,7 +15,7 @@ self-host plan (see
 | file | scope | lines |
 |---|---|---|
 | `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords, the 12-precedence operator set, and standard punctuation (Stage 50a). | ~336 |
-| `parser.mere` | Expression parser: token list → `expr`. Full 12-level precedence cascade — `atom → apply → factor → term → sum → range → cmp → and → or → expr_top` — plus control-flow keywords `if-then-else` / `let [rec]` / `fn` (Stage 50b slices 1 + 2). | ~500 |
+| `parser.mere` | Expression parser: token list → `expr`. Full 12-level precedence cascade — `atom → apply → factor → term → sum → range → cmp → and → or → expr_top` — plus control-flow keywords `if-then-else` / `let [rec]` / `fn` / `match` and a full pattern parser (Stage 50b + 50c). | ~700 |
 
 ## Status
 
@@ -23,8 +23,8 @@ self-host plan (see
 |---|---|---|
 | **50a** | Lexer MVP — token type + tokenize + 9 hand-coded demos | **complete** |
 | **50b-1** | Expression parser slice 1 — atom / apply / factor / term / sum (arithmetic, unary `-`, paren, tuple, list, constructor) + 15 demos | **complete** |
-| **50b-2** | Expression parser slice 2 — range / cmp / `&&` / `\|\|` + `if` / `let [rec]` / `fn` (multi-arg curry) + minimal `PWild` / `PVar` patterns + 14 more demos | **complete** (this commit) |
-| **50c** | Pattern parser (full set: `PInt` / `PBool` / `PStr` / `PUnit` / `PConstr` / `PTuple` / `PRecord` / `PAs` / `POr`) + `match` expression in parser | future |
+| **50b-2** | Expression parser slice 2 — range / cmp / `&&` / `\|\|` + `if` / `let [rec]` / `fn` (multi-arg curry) + minimal `PWild` / `PVar` patterns + 14 more demos | **complete** |
+| **50c** | Pattern parser (`PInt` / `PBool` / `PStr` / `PUnit` / `PConstr` / `PTuple` / `PAs` / `POr`, plus list-pattern desugar to nested `Cons`) + `match expr with \| pat [when g] -> body \| …` + 12 more demos. `PRecord` deferred until the expr parser learns record literals. | **complete** (this commit) |
 | **50d** | Type parser (for `EAnnot` + `EFun`'s `ty option` argument) | future |
 | **50e** | Top-level decls (`Top_let` / `Top_let_rec` / `Top_type`) + mutual recursion via `let rec ... and ...` | future |
 | **50f** | Browser integration — textarea → tokenize + parse + fmt → display | future |
@@ -51,15 +51,18 @@ Stage 50b (parser; imports the lexer):
 dune exec mere -- contrib/parser/parser.mere
 ```
 
-Expected (slice 1 + slice 2 excerpt):
+Expected (slice 1 + slice 2 + slice 3 excerpt):
 
 ```
-d2  (prec):     Bin(+, Int(1), Bin(*, Int(2), Int(3)))
-d6  (apply):    App(App(Var(f), Var(a)), Var(b))
-e1  (cmp):      Cmp(==, Bin(+, Int(1), Int(2)), Int(3))
-e4  (or prec):  Logic(||, Logic(&&, Var(a), Var(b)), Var(c))
-e6  (range):    App(App(Var(range), Int(1)), Int(10))
-e13 (let rec):  LetRec([f = Fun(n, If(Cmp(==, Var(n), Int(0)), Int(1), ...))], App(Var(f), Int(5)))
+d2  (prec):          Bin(+, Int(1), Bin(*, Int(2), Int(3)))
+d6  (apply):         App(App(Var(f), Var(a)), Var(b))
+e1  (cmp):           Cmp(==, Bin(+, Int(1), Int(2)), Int(3))
+e4  (or prec):       Logic(||, Logic(&&, Var(a), Var(b)), Var(c))
+e6  (range):         App(App(Var(range), Int(1)), Int(10))
+e13 (let rec):       LetRec([f = Fun(n, If(...))], App(Var(f), Int(5)))
+f3  (match constr):  Match(Var(xs), [Constr(Nil) -> Int(0) | Constr(Cons, Tuple[Var(h), Var(t)]) -> Var(h)])
+f5  (match guard):   Match(Var(n), [Var(x) when Cmp(>, Var(x), Int(0)) -> Var(x) | _ -> Int(0)])
+f6  (or-pattern):    Match(Var(c), [Or(Or(Str("a"), Str("b")), Str("c")) -> Int(1) | _ -> Int(0)])
 ```
 
 Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
@@ -76,7 +79,7 @@ Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
 | Comments | `// ... \n` skipped |
 | Strings | `"..."` with `\n` `\t` `\"` `\\` `\{` escapes |
 
-## Parser scope (Stage 50b slices 1 + 2)
+## Parser scope (Stage 50b + 50c)
 
 | Layer | Productions |
 |---|---|
@@ -89,13 +92,28 @@ Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
 | `cmp` | `== != < <= > >=` (left-associative; non-associative-style chaining isn't enforced) |
 | `and` | `&&` (left-associative) |
 | `or` | `\|\|` (left-associative) |
-| `expr_top` | `if cond then t else e` / `let [rec] pat = v in body` / `fn x [y …] -> body` — control-flow keywords |
+| `expr_top` | `if cond then t else e` / `let [rec] pat = v in body` / `fn x [y …] -> body` / `match e with [\|] pat [when g] -> body [\| …]` — control-flow keywords |
 
-The full cascade is now in place — `parse_expr` enters at
-`parse_expr_top`. Productions still deferred from the OCaml-side
-parser:
+Patterns (slice 50c) accept the same shape as the OCaml side except
+records:
 
-- `match` expression — needs the full pattern parser, hence Stage 50c.
+| Form | Result |
+|---|---|
+| `_` | `PWild` |
+| `x` (lowercase) | `PVar x` |
+| `42` / `"hi"` / `true` / `()` | `PInt` / `PStr` / `PBool` / `PUnit` |
+| `(p1, p2, …)` | `PTuple` |
+| `[p1, …, pN]` | nested `PConstr ("Cons", Some (PTuple [pi, …]))`, terminated by `PConstr ("Nil", None)` |
+| `Foo` / `Foo (sub)` | `PConstr` (paren-wrapped payload only — atom-style `Some 1` needs the OCaml side's constr-arity table, which the self-host parser doesn't carry, so use `Some (1)`) |
+| `p as name` | `PAs (p, name)` |
+| `p1 \| p2 \| p3` (inside match arm only) | left-associative `POr` |
+
+Productions still deferred:
+
+- `Name { f1 = pat, … }` record patterns + `EFieldGet` / `ERecordLit` /
+  `ERecordUpdate` expressions — needs the record-aware expr parser,
+  ride along with Stage 50e Top-level.
+- `[a, b, ...rest]` cons-tail sugar in list patterns — Phase 36 sugar.
 - `fn (x: ty) -> body` type annotations on lambda arguments — Stage 50d.
 - `let rec f = … and g = …` mutual recursion — Stage 50e (currently
   `let rec` accepts a single binding only).
