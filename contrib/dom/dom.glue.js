@@ -60,11 +60,23 @@ export function makeDomGlue() {
   };
 
   const callClosure = (closurePtr) => {
-    if (!memory || !table) return;
+    if (!memory || !table) {
+      console.error("contrib/dom: callClosure invoked before attach()", { memory, table });
+      return;
+    }
     const view = new Int32Array(memory.buffer);
     const env = view[closurePtr >> 2];
     const fnIdx = view[(closurePtr + 4) >> 2];
-    table.get(fnIdx)(env, 0);
+    const fn = table.get(fnIdx);
+    if (typeof fn !== "function") {
+      console.error("contrib/dom: closure fn_idx not in table", { closurePtr, env, fnIdx, fn });
+      return;
+    }
+    try {
+      fn(env, 0);
+    } catch (e) {
+      console.error("contrib/dom: Mere closure threw", { closurePtr, env, fnIdx, error: e });
+    }
   };
 
   const glue = {
@@ -81,7 +93,11 @@ export function makeDomGlue() {
     },
     dom_on_click: (handleIdx, closurePtr) => {
       const el = handles[handleIdx];
-      if (el) el.addEventListener("click", () => callClosure(closurePtr));
+      if (!el) {
+        console.warn("contrib/dom: dom_on_click on null handle", { handleIdx, closurePtr });
+        return;
+      }
+      el.addEventListener("click", () => callClosure(closurePtr));
     },
     dom_input_value: (handleIdx) => {
       const el = handles[handleIdx];
