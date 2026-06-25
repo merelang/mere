@@ -87,6 +87,11 @@ let keyword_of = fn (s: str) ->
   else if s == "as" then Some TAs
   else if s == "true" then Some TTrue
   else if s == "false" then Some TFalse
+  // `_` is read by `read_ident_run` (alpha-class includes it), so the
+  // bare-underscore TUnderscore branch in the main loop never fires.
+  // Detect it post-hoc here so `_foo` stays an identifier while `_`
+  // becomes the wild-pattern token — matches OCaml-side lexer.ml.
+  else if s == "_" then Some TUnderscore
   else None;
 
 // === Scanning helpers ======================================================

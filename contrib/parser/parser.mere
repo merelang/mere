@@ -1,23 +1,31 @@
 // contrib/parser — Mere self-hosted parser (Phase 50).
-// This file: Stage 50b slice 1 — expression parser MVP.
+// This file: Stage 50b — expression parser.
 //
-// Covers the bottom half of the 12-level precedence cascade:
-//   atom -> apply -> factor -> term -> sum
-// where:
-//   atom    : literal, ident / constructor, paren / tuple, list
-//   apply   : juxtaposition (left-associative function application)
-//   factor  : unary `-`
-//   term    : `* / %` (left-associative)
-//   sum     : `+ - ++` (left-associative)
+// Implements the full 12-level precedence cascade in two slices:
 //
-// Slice 2 (Stage 50b-2) will extend the entry point to thread through
-// cmp / logic / range / `\` compose / `|>` pipe and the control-flow
-// keywords (`if`, `let`, `fn`, `match`).
+//   slice 1 (atom .. sum):
+//     atom    : literal, ident / constructor, paren / tuple, list
+//     apply   : juxtaposition (left-associative function application)
+//     factor  : unary `-`
+//     term    : `* / %` (left-associative)
+//     sum     : `+ - ++` (left-associative)
 //
-// See internal design notes for the
-// full multi-stage plan; the AST shape mirrors contrib/fmt/fmt.mere
-// so the eventual parse -> format pipe shares one definition (the full
-// set of variants — cmpop, EIf, EMatch, ... — is added in later slices).
+//   slice 2 (range .. expr_top):
+//     range   : `a..b` (desugared to `range a b` to match OCaml-side mere)
+//     cmp     : `== != < <= > >=` (left-associative)
+//     and     : `&&` (left-associative)
+//     or      : `||` (left-associative)
+//     expr_top: control-flow keywords — `if-then-else`, `let [rec] x = e in body`,
+//               `fn x [y ...] -> body`. `match` is deferred to Stage 50c
+//               because it needs the full pattern parser.
+//
+// Slice 2 also drags in minimal pattern (PWild / PVar) for `let`'s bound
+// name. The remaining 9 pattern variants stay in Stage 50c.
+//
+// See internal design notes for the full
+// multi-stage plan. The AST shape mirrors contrib/fmt/fmt.mere so the
+// eventual parse -> format pipe shares one definition — variants not yet
+// emitted by this slice (EMatch, EAnnot, ERecord*, EFieldGet) live there.
 
 import "lexer.mere";
 
@@ -26,6 +34,21 @@ import "lexer.mere";
 type binop =
   | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
 
+type cmpop =
+  | OpEq | OpNe | OpLt | OpLe | OpGt | OpGe;
+
+type logicop =
+  | OpAnd | OpOr;
+
+// Patterns — slice 2 only emits PWild / PVar; the rest are placeholders
+// kept in scope so the variant tags stay stable when Stage 50c expands
+// the parser without renumbering. (No constructor here references the
+// other variants yet, so the typer is fine with this subset.)
+type pattern =
+  | PWild
+  | PVar of str
+  ;
+
 type expr =
   | EInt of int
   | EBool of bool
@@ -33,10 +56,22 @@ type expr =
   | EUnit
   | EVar of str
   | EBin of binop * expr * expr
+  | ECmp of cmpop * expr * expr
+  | ELogic of logicop * expr * expr
   | ENeg of expr
   | EApp of expr * expr
   | ETuple of expr list
   | EConstr of str * expr option
+  | EIf of expr * expr * expr
+  | ELet of pattern * expr * expr
+  // ELetRec mirrors fmt.mere's shape — a list of (name, value) bindings
+  // even though slice 2 only emits 1-element lists (mutual recursion via
+  // `let rec ... and ...` is deferred to Stage 50e top-level decls).
+  | ELetRec of (str * expr) list * expr
+  // EFun in fmt.mere is `str * ty option * expr`. Slice 2 leaves out the
+  // `ty option` annotation because Stage 50d owns the type parser; the
+  // shape will widen to match once that lands.
+  | EFun of str * expr
   ;
 
 // === Token / line helpers =================================================
@@ -78,6 +113,65 @@ let expect_rbracket = fn (toks: pos_token list) ->
       | _ -> fail ("line " ++ show line ++ ": expected `]`"))
   | Nil -> fail "expected `]` but got EOF";
 
+// Pure-keyword consumers — variants can't be compared with `==`, so each
+// expected token kind gets its own match.
+
+let expect_then = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TThen -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `then`"))
+  | Nil -> fail "expected `then` but got EOF";
+
+let expect_else = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TElse -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `else`"))
+  | Nil -> fail "expected `else` but got EOF";
+
+let expect_in = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TIn -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `in`"))
+  | Nil -> fail "expected `in` but got EOF";
+
+let expect_eq = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TEq -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `=`"))
+  | Nil -> fail "expected `=` but got EOF";
+
+let expect_arrow = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TArrow -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `->`"))
+  | Nil -> fail "expected `->` but got EOF";
+
+// `let rec NAME = ...` requires a plain identifier (PWild isn't allowed
+// for rec bindings since the name has to be self-referenceable).
+let expect_ident = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TIdent name -> (name, rest)
+      | _ -> fail ("line " ++ show line ++ ": expected identifier"))
+  | Nil -> fail "expected identifier but got EOF";
+
 // True when `t` can begin an atom. parse_apply uses this to decide
 // whether the next token is another function argument or a binder /
 // operator / closing delimiter.
@@ -98,8 +192,156 @@ let is_atom_start = fn (t: token) ->
 // and returns (parsed, remaining). The OCaml side's ref-based scanner
 // becomes pure return-value threading.
 
+// Entry point. Threads through the full cascade:
+//   expr -> expr_top -> or -> and -> cmp -> range -> sum -> term -> factor
+//        -> apply -> atom
+//
+// expr_top recognises control-flow keywords (`if` / `let` / `fn`); the
+// rest of the cascade is plain operator precedence.
+
 let rec parse_expr = fn (toks: pos_token list) ->
-  parse_sum toks
+  parse_expr_top toks
+
+and parse_expr_top = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TIf -> parse_if (advance toks)
+    | TLet -> parse_let (advance toks)
+    | TFn -> parse_fn (advance toks)
+    | _ -> parse_or toks)
+
+// `if cond then t else e` — both `then` and `else` are required (no
+// statement-form `if` without else in slice 2).
+and parse_if = fn (toks: pos_token list) ->
+  let (cond, toks1) = parse_expr toks in
+  let toks2 = expect_then toks1 in
+  let (then_e, toks3) = parse_expr toks2 in
+  let toks4 = expect_else toks3 in
+  let (else_e, toks5) = parse_expr toks4 in
+  (EIf (cond, then_e, else_e), toks5)
+
+// `let [rec] x = value in body`. Slice 2 supports only a single binding
+// (no `and`), and only PWild / PVar for the bound pattern. `let rec`
+// requires a plain identifier because the body references it by name.
+and parse_let = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRec ->
+      let (name, toks1) = expect_ident (advance toks) in
+      let toks2 = expect_eq toks1 in
+      let (value, toks3) = parse_expr toks2 in
+      let toks4 = expect_in toks3 in
+      let (body, toks5) = parse_expr toks4 in
+      (ELetRec (Cons ((name, value), Nil), body), toks5)
+    | _ ->
+      let (pat, toks1) = parse_simple_pat toks in
+      let toks2 = expect_eq toks1 in
+      let (value, toks3) = parse_expr toks2 in
+      let toks4 = expect_in toks3 in
+      let (body, toks5) = parse_expr toks4 in
+      (ELet (pat, value, body), toks5))
+
+and parse_simple_pat = fn (toks: pos_token list) ->
+  (match toks with
+    | Cons (pt, rest) ->
+      let (line, t) = pt in
+      (match t with
+        | TUnderscore -> (PWild, rest)
+        | TIdent name -> (PVar name, rest)
+        | _ ->
+          fail ("line " ++ show line
+                ++ ": expected identifier or `_` (full patterns: Stage 50c)"))
+    | Nil -> fail "expected pattern but got EOF")
+
+// `fn x [y z ...] -> body`. Multi-arg lambdas desugar to a chain of
+// single-arg EFun nodes. Type annotations on the arguments are deferred
+// to Stage 50d (when the type parser lands); slice 2 only accepts bare
+// identifiers.
+and parse_fn = fn (toks: pos_token list) ->
+  let (names, toks1) = parse_fn_arg_names toks in
+  (match names with
+    | Nil ->
+      fail ("line " ++ show (peek_line toks1)
+            ++ ": `fn` requires at least one argument")
+    | _ ->
+      let toks2 = expect_arrow toks1 in
+      let (body, toks3) = parse_expr toks2 in
+      (build_fn names body, toks3))
+
+and parse_fn_arg_names = fn (toks: pos_token list) ->
+  (match toks with
+    | Cons (pt, rest) ->
+      let (_, t) = pt in
+      (match t with
+        | TIdent name ->
+          let (rest_names, toks2) = parse_fn_arg_names rest in
+          (Cons (name, rest_names), toks2)
+        | _ -> (Nil, toks))
+    | Nil -> (Nil, toks))
+
+and build_fn = fn (names: str list) -> fn (body: expr) ->
+  (match names with
+    | Nil -> body
+    | Cons (n, Nil) -> EFun (n, body)
+    | Cons (n, rest) -> EFun (n, build_fn rest body))
+
+and parse_or = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_and toks in
+  parse_or_tail lhs toks1
+
+and parse_or_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TPipePipe ->
+      let (rhs, rest) = parse_and (advance toks) in
+      parse_or_tail (ELogic (OpOr, acc, rhs)) rest
+    | _ -> (acc, toks))
+
+and parse_and = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_cmp toks in
+  parse_and_tail lhs toks1
+
+and parse_and_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TAmpAmp ->
+      let (rhs, rest) = parse_cmp (advance toks) in
+      parse_and_tail (ELogic (OpAnd, acc, rhs)) rest
+    | _ -> (acc, toks))
+
+and parse_cmp = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_range toks in
+  parse_cmp_tail lhs toks1
+
+and parse_cmp_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TEqEq ->
+      let (rhs, rest) = parse_range (advance toks) in
+      parse_cmp_tail (ECmp (OpEq, acc, rhs)) rest
+    | TBangEq ->
+      let (rhs, rest) = parse_range (advance toks) in
+      parse_cmp_tail (ECmp (OpNe, acc, rhs)) rest
+    | TLt ->
+      let (rhs, rest) = parse_range (advance toks) in
+      parse_cmp_tail (ECmp (OpLt, acc, rhs)) rest
+    | TLe ->
+      let (rhs, rest) = parse_range (advance toks) in
+      parse_cmp_tail (ECmp (OpLe, acc, rhs)) rest
+    | TGt ->
+      let (rhs, rest) = parse_range (advance toks) in
+      parse_cmp_tail (ECmp (OpGt, acc, rhs)) rest
+    | TGe ->
+      let (rhs, rest) = parse_range (advance toks) in
+      parse_cmp_tail (ECmp (OpGe, acc, rhs)) rest
+    | _ -> (acc, toks))
+
+// `a..b` desugars to `App (App (Var "range", a), b)` — matches the
+// OCaml-side mere parser exactly (lib/parser.ml's range_expr) so the
+// formatter's `extract_range` pattern in contrib/fmt/fmt.mere still
+// recognises it. Non-associative: at most one `..` per level.
+and parse_range = fn (toks: pos_token list) ->
+  let (lhs, toks1) = parse_sum toks in
+  (match peek_tok toks1 with
+    | TDotDot ->
+      let (rhs, toks2) = parse_sum (advance toks1) in
+      (EApp (EApp (EVar "range", lhs), rhs), toks2)
+    | _ -> (lhs, toks1))
 
 and parse_sum = fn (toks: pos_token list) ->
   let (lhs, toks1) = parse_term toks in
@@ -240,6 +482,25 @@ let binop_str = fn (op: binop) ->
   | OpMod -> "%"
   | OpConcat -> "++";
 
+let cmpop_str = fn (op: cmpop) ->
+  match op with
+  | OpEq -> "=="
+  | OpNe -> "!="
+  | OpLt -> "<"
+  | OpLe -> "<="
+  | OpGt -> ">"
+  | OpGe -> ">=";
+
+let logicop_str = fn (op: logicop) ->
+  match op with
+  | OpAnd -> "&&"
+  | OpOr -> "||";
+
+let pattern_to_str = fn (p: pattern) ->
+  match p with
+  | PWild -> "_"
+  | PVar x -> "Var(" ++ x ++ ")";
+
 let rec expr_to_str = fn (e: expr) ->
   (match e with
     | EInt n -> "Int(" ++ show n ++ ")"
@@ -250,6 +511,12 @@ let rec expr_to_str = fn (e: expr) ->
     | EBin (op, l, r) ->
       "Bin(" ++ binop_str op ++ ", " ++ expr_to_str l
       ++ ", " ++ expr_to_str r ++ ")"
+    | ECmp (op, l, r) ->
+      "Cmp(" ++ cmpop_str op ++ ", " ++ expr_to_str l
+      ++ ", " ++ expr_to_str r ++ ")"
+    | ELogic (op, l, r) ->
+      "Logic(" ++ logicop_str op ++ ", " ++ expr_to_str l
+      ++ ", " ++ expr_to_str r ++ ")"
     | ENeg e -> "Neg(" ++ expr_to_str e ++ ")"
     | EApp (f, a) ->
       "App(" ++ expr_to_str f ++ ", " ++ expr_to_str a ++ ")"
@@ -259,7 +526,19 @@ let rec expr_to_str = fn (e: expr) ->
     | EConstr (name, payload) ->
       (match payload with
         | None -> "Constr(" ++ name ++ ")"
-        | Some p -> "Constr(" ++ name ++ ", " ++ expr_to_str p ++ ")"));
+        | Some p -> "Constr(" ++ name ++ ", " ++ expr_to_str p ++ ")")
+    | EIf (c, t, e) ->
+      "If(" ++ expr_to_str c ++ ", " ++ expr_to_str t
+      ++ ", " ++ expr_to_str e ++ ")"
+    | ELet (pat, v, body) ->
+      "Let(" ++ pattern_to_str pat ++ ", " ++ expr_to_str v
+      ++ ", " ++ expr_to_str body ++ ")"
+    | ELetRec (bindings, body) ->
+      let parts = list_map bindings (fn (b: str * expr) ->
+        let (n, v) = b in n ++ " = " ++ expr_to_str v) in
+      "LetRec([" ++ str_join "; " parts ++ "], " ++ expr_to_str body ++ ")"
+    | EFun (arg, body) ->
+      "Fun(" ++ arg ++ ", " ++ expr_to_str body ++ ")");
 
 // Convenience: parse a source string and stringify the result. Errors
 // if the parser leaves anything but TEof after the expression — the
@@ -290,4 +569,20 @@ let _ = print ("d12 (list nil):  " ++ parse_str "[]") in
 let _ = print ("d13 (list):      " ++ parse_str "[1, 2, 3]") in
 let _ = print ("d14 (cons):      " ++ parse_str "Cons (1, Nil)") in
 let _ = print ("d15 (just):      " ++ parse_str "Just (42)") in
+let _ = print "" in
+let _ = print "=== Stage 50b slice 2 parser demos ===" in
+let _ = print ("e1  (cmp):       " ++ parse_str "1 + 2 == 3") in
+let _ = print ("e2  (cmp lt):    " ++ parse_str "x <= 10") in
+let _ = print ("e3  (and):       " ++ parse_str "a && b") in
+let _ = print ("e4  (or prec):   " ++ parse_str "a && b || c") in
+let _ = print ("e5  (mixed):     " ++ parse_str "x > 0 && x < 10") in
+let _ = print ("e6  (range):     " ++ parse_str "1..10") in
+let _ = print ("e7  (if):        " ++ parse_str "if x == 0 then 1 else 2") in
+let _ = print ("e8  (let):       " ++ parse_str "let x = 1 + 2 in x * x") in
+let _ = print ("e9  (let wild):  " ++ parse_str "let _ = 1 in 2") in
+let _ = print ("e10 (let chain): " ++ parse_str "let x = 1 in let y = 2 in x + y") in
+let _ = print ("e11 (fn1):       " ++ parse_str "fn x -> x + 1") in
+let _ = print ("e12 (fn curry):  " ++ parse_str "fn x y -> x * y") in
+let _ = print ("e13 (let rec):   " ++ parse_str "let rec f = fn n -> if n == 0 then 1 else n * f (n - 1) in f 5") in
+let _ = print ("e14 (if in let): " ++ parse_str "let r = if x > 0 then x else 0 - x in r") in
 0
