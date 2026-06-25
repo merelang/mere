@@ -477,7 +477,12 @@ let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
     ()) in
   let _ = strbuf_push buf "</ul>\n" in
   let _ = strbuf_push buf "<h2>Try Mere in your browser</h2>\n" in
-  let _ = strbuf_push buf "<p>Pre-compiled <a href=\"playground/playground.html\">Mere -&gt; Wasm demos</a> running directly in your browser.</p>\n" in
+  let _ = strbuf_push buf "<p>Pre-compiled Mere programs running directly in your browser via Wasm:</p>\n" in
+  let _ = strbuf_push buf "<ul>\n" in
+  let _ = strbuf_push buf "  <li><a href=\"playground/playground.html\">playground</a> &mdash; hello / fizzbuzz / fibonacci, captured stdout</li>\n" in
+  let _ = strbuf_push buf "  <li><a href=\"playground/counter.html\">counter</a> &mdash; button-driven counter; Mere closure dispatched back from JS (Phase 48 frontend FFI)</li>\n" in
+  let _ = strbuf_push buf "  <li><a href=\"playground/echo.html\">echo</a> &mdash; mirrors textarea input; exercises the JS &rarr; Mere string boundary</li>\n" in
+  let _ = strbuf_push buf "</ul>\n" in
   let body = strbuf_to_str buf in
   let html = html_template dev_mode "Index" nav_html body in
   let _ = write_file (Path.join output_dir "index.html") html in
