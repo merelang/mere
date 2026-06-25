@@ -1,0 +1,90 @@
+// contrib/parser/ast.mere — shared Mere AST for the self-host pipeline.
+//
+// Type definitions only. No functions, no demos. The point is that this
+// file can be `import`-ed by both contrib/parser/parser.mere (which
+// also pulls in lexer.mere's token type) AND contrib/fmt/fmt.mere
+// (which doesn't), without either declaration colliding with the
+// other.
+//
+// The original collision: fmt.mere used a bare `T` prefix on ty
+// variants (`TInt`, `TArrow`, ...) while the lexer's token tags used
+// the same names. Phase 50.5 worked around it inside parser.mere by
+// using a `Ty` prefix; Phase 50.7 (this file) lifts that convention to
+// the shared layer and fmt.mere now follows it too.
+//
+// Variant superset matches contrib/fmt/fmt.mere's set (so fmt's
+// pattern matches stay exhaustive). The parser doesn't construct
+// `EFloat` / `ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`
+// yet — those wait on a follow-up record slice — but they're declared
+// here so fmt can format them when other producers eventually do.
+
+type binop =
+  | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
+
+type cmpop =
+  | OpEq | OpNe | OpLt | OpLe | OpGt | OpGe;
+
+type logicop =
+  | OpAnd | OpOr;
+
+type ty =
+  | TyInt
+  | TyBool
+  | TyStr
+  | TyUnit
+  | TyFloat
+  | TyArrow of ty * ty
+  | TyTuple of ty list
+  | TyVar of str
+  | TyCon of str * ty list
+  ;
+
+type pattern =
+  | PWild
+  | PVar of str
+  | PInt of int
+  | PBool of bool
+  | PStr of str
+  | PUnit
+  | PConstr of str * pattern option
+  | PTuple of pattern list
+  | PRecord of str * (str * pattern) list
+  | PAs of pattern * str
+  | POr of pattern * pattern
+  ;
+
+type expr =
+  | EInt of int
+  | EFloat of float
+  | EBool of bool
+  | EStr of str
+  | EUnit
+  | EVar of str
+  | EBin of binop * expr * expr
+  | ECmp of cmpop * expr * expr
+  | ELogic of logicop * expr * expr
+  | ENeg of expr
+  | ELet of pattern * expr * expr
+  | ELetRec of (str * expr) list * expr
+  | EIf of expr * expr * expr
+  | EFun of str * ty option * expr
+  | EApp of expr * expr
+  | EAnnot of expr * ty
+  | EConstr of str * expr option
+  | EMatch of expr * (pattern * expr option * expr) list
+  | ETuple of expr list
+  | ERecordLit of str * (str * expr) list
+  | EFieldGet of expr * str
+  | ERecordUpdate of expr * (str * expr) list
+  ;
+
+// Top-level declarations and a whole-file `program`. The parser builds
+// these; fmt will gain a `format_program` in a follow-up slice once the
+// browser bridge needs it.
+type top_decl =
+  | TopLet of pattern * expr
+  | TopLetRec of (str * expr) list
+  | TopType of str * str list * (str * ty option) list
+  ;
+
+type program = top_decl list * expr;

@@ -28,113 +28,16 @@
 // emitted by this slice (EMatch, EAnnot, ERecord*, EFieldGet) live there.
 
 import "lexer.mere";
+import "ast.mere";
 
-// === AST subset ============================================================
-
-type binop =
-  | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpConcat;
-
-type cmpop =
-  | OpEq | OpNe | OpLt | OpLe | OpGt | OpGe;
-
-type logicop =
-  | OpAnd | OpOr;
-
-// Type expressions. The variants use a `Ty` prefix instead of the bare
-// `T` prefix that contrib/fmt/fmt.mere uses, because this file imports
-// lexer.mere — and the lexer's `TInt` / `TStr` / `TArrow` token tags
-// would collide with `TInt` / `TStr` / `TArrow` ty tags. When the AST
-// is eventually factored out into a shared `ast.mere` (no lexer
-// dependency), it can adopt fmt.mere's prefix and the parser will
-// follow.
-//
-// `TyVar` is included for shape-compatibility with fmt.mere even though
-// slice 50d's source grammar doesn't accept `'a` style tyvars — the
-// lexer has no `T_tyvar` token yet. `TyCon` covers all named types
-// (`int`, `bool`, `str`, `unit`, `float` are recognised by name; other
-// lowercase idents become 0-arg `TyCon`). Postfix application
-// (`int list`) builds 1-arg `TyCon`.
-type ty =
-  | TyInt
-  | TyBool
-  | TyStr
-  | TyUnit
-  | TyFloat
-  | TyArrow of ty * ty
-  | TyTuple of ty list
-  | TyVar of str
-  | TyCon of str * ty list
-  ;
-
-// Pattern grammar — slice 3 (Stage 50c) fills out the remaining
-// variants. Mirrors contrib/fmt/fmt.mere except PRecord is deferred
-// (records aren't in the expr parser yet).
-type pattern =
-  | PWild
-  | PVar of str
-  | PInt of int
-  | PBool of bool
-  | PStr of str
-  | PUnit
-  | PConstr of str * pattern option
-  | PTuple of pattern list
-  | PAs of pattern * str
-  | POr of pattern * pattern
-  ;
-
-type expr =
-  | EInt of int
-  | EBool of bool
-  | EStr of str
-  | EUnit
-  | EVar of str
-  | EBin of binop * expr * expr
-  | ECmp of cmpop * expr * expr
-  | ELogic of logicop * expr * expr
-  | ENeg of expr
-  | EApp of expr * expr
-  | ETuple of expr list
-  | EConstr of str * expr option
-  | EIf of expr * expr * expr
-  | ELet of pattern * expr * expr
-  // ELetRec mirrors fmt.mere's shape — a list of (name, value) bindings
-  // even though slice 2 only emits 1-element lists (mutual recursion via
-  // `let rec ... and ...` is deferred to Stage 50e top-level decls).
-  | ELetRec of (str * expr) list * expr
-  // `EFun (name, ty option, body)` — the optional annotation carries the
-  // type written in source for `fn (x: ty) -> body`. Plain `fn x -> body`
-  // emits `None`.
-  | EFun of str * ty option * expr
-  // Arms are `(pat, guard, body)` — guard is `Some g` for `pat when g ->`
-  // arms, `None` otherwise. Matches fmt.mere's `EMatch` exactly.
-  | EMatch of expr * (pattern * expr option * expr) list
-  // `(e : ty)` — explicit type ascription. Mirrors fmt.mere's `EAnnot`.
-  | EAnnot of expr * ty
-  ;
-
-// Top-level declarations — what `let X = e;`, `let rec X = e and Y = e;`,
-// and `type T = | A | B of ty;` parse to. Mirrors a subset of OCaml-side
-// `Ast.top_decl`; `Top_record` / `Top_extern[_type]` / `Top_view` /
-// `Top_module` / `Top_signature` / `Top_drop` / `Top_type_alias` /
-// `Top_ctor_alias` / `Top_record_alias` are deferred — none of them
-// appear in self-host fmt's own source, which is the immediate dogfood
-// target.
-type top_decl =
-  | TopLet of pattern * expr
-  // Multi-binding list; single `let rec X = e;` becomes a 1-element list.
-  | TopLetRec of (str * expr) list
-  // `(name, type_params, variants)` where each variant is
-  // `(ctor_name, payload_ty_option)`. Type params (`'a` style) aren't
-  // tokenised yet, so the list is always empty for now — kept on the
-  // shape for forward-compat with fmt.mere.
-  | TopType of str * str list * (str * ty option) list
-  ;
-
-// Mirrors OCaml-side `Ast.program = { decls; main }`. Every Mere file
-// has both a (possibly empty) decl list and a main expression — files
-// that end with a trailing `;` synthesise `EUnit` as the main, matching
-// OCaml-side behaviour.
-type program = top_decl list * expr;
+// AST type definitions live in contrib/parser/ast.mere — see that file
+// for the full set. We import it here (and fmt.mere does the same) so
+// both producers and consumers share one definition. Until Phase 50.7
+// extracted the shared layer, each file kept its own copy: parser.mere
+// used a `Ty` prefix on ty variants to dodge the lexer's `TInt` /
+// `TStr` / `TArrow` token tags, while fmt.mere used a bare `T` prefix.
+// ast.mere standardises on the `Ty` prefix (the parser-side constraint
+// is fundamental; fmt's `T` was the legacy form).
 
 // === Token / line helpers =================================================
 
@@ -949,7 +852,14 @@ let rec pattern_to_str = fn (p: pattern) ->
       let parts = list_map ps (fn (x: pattern) -> pattern_to_str x) in
       "Tuple[" ++ str_join ", " parts ++ "]"
     | PAs (sub, name) -> "As(" ++ pattern_to_str sub ++ ", " ++ name ++ ")"
-    | POr (l, r) -> "Or(" ++ pattern_to_str l ++ ", " ++ pattern_to_str r ++ ")");
+    | POr (l, r) -> "Or(" ++ pattern_to_str l ++ ", " ++ pattern_to_str r ++ ")"
+    // PRecord lives in the shared AST so fmt can pattern-match on it,
+    // but the parser doesn't construct one yet (records ride along with
+    // their expr-side syntax in a follow-up slice).
+    | PRecord (name, fields) ->
+      let parts = list_map fields (fn (f: str * pattern) ->
+        let (fn_, p) = f in fn_ ++ " = " ++ pattern_to_str p) in
+      "Record(" ++ name ++ ", \{" ++ str_join ", " parts ++ "})");
 
 let rec expr_to_str = fn (e: expr) ->
   (match e with
@@ -1002,7 +912,23 @@ let rec expr_to_str = fn (e: expr) ->
           | Some ge -> " when " ++ expr_to_str ge) in
         pattern_to_str p ++ guard_str ++ " -> " ++ expr_to_str b) in
       "Match(" ++ expr_to_str scrutinee
-      ++ ", [" ++ str_join " | " arm_strs ++ "])");
+      ++ ", [" ++ str_join " | " arm_strs ++ "])"
+    // The four cases below live in the shared AST for fmt's benefit but
+    // the parser doesn't construct them yet — formatted as placeholders
+    // so exhaustive-match warnings stay quiet. EFloat needs a lexer
+    // token; records ride along with their expr-side syntax in a
+    // follow-up slice.
+    | EFloat _ -> "Float(...)"
+    | ERecordLit (name, fields) ->
+      let parts = list_map fields (fn (f: str * expr) ->
+        let (fn_, e) = f in fn_ ++ " = " ++ expr_to_str e) in
+      "RecordLit(" ++ name ++ ", \{" ++ str_join ", " parts ++ "})"
+    | EFieldGet (e, fname) ->
+      "FieldGet(" ++ expr_to_str e ++ ", " ++ fname ++ ")"
+    | ERecordUpdate (e, fields) ->
+      let parts = list_map fields (fn (f: str * expr) ->
+        let (fn_, ev) = f in fn_ ++ " = " ++ expr_to_str ev) in
+      "RecordUpdate(" ++ expr_to_str e ++ ", \{" ++ str_join ", " parts ++ "})");
 
 // Convenience: parse a source string and stringify the result. Errors
 // if the parser leaves anything but TEof after the expression — the

@@ -12,7 +12,14 @@ for the multi-phase plan.
 
 | file | scope | lines |
 |---|---|---|
-| `fmt.mere` | Mere AST as a Mere variant tree + a minimal `fmt_expr` exercised by hand-coded demos (Stage 49a) | ~160 |
+| `fmt.mere` | Pretty-printer. Imports [`contrib/parser/ast.mere`](../parser/ast.mere) for AST type definitions so the parser and the formatter share one `expr` / `program` definition. | ~480 |
+
+The AST definitions live in `contrib/parser/ast.mere` since Phase 50.7
+— fmt.mere used to keep its own copy with a bare `T` prefix on ty
+variants, but lifting them out lets the parser and the formatter be
+imported into the same browser bridge without colliding on names.
+Variants renamed to match the parser's `Ty` prefix convention
+(`TInt` → `TyInt`, etc.).
 
 ## Status
 
