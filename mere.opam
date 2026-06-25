@@ -7,8 +7,8 @@ description:
 maintainer: ["Kazuma Furuhashi <k.furuhashi10@gmail.com>"]
 authors: ["Kazuma Furuhashi <k.furuhashi10@gmail.com>"]
 license: "MIT"
-homepage: "https://github.com/284km/mere"
-bug-reports: "https://github.com/284km/mere/issues"
+homepage: "https://github.com/merelang/mere"
+bug-reports: "https://github.com/merelang/mere/issues"
 depends: [
   "ocaml" {>= "5.1"}
   "dune" {>= "3.0" & >= "3.0"}
@@ -28,4 +28,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/284km/mere.git"
+dev-repo: "git+https://github.com/merelang/mere.git"

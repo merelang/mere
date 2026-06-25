@@ -5,7 +5,7 @@ For readers with ML-family experience. About a 15-minute read.
 ## 0. Install and run
 
 ```sh
-git clone git@github.com:284km/mere
+git clone git@github.com:merelang/mere
 cd mere
 dune build
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'   # → 7
