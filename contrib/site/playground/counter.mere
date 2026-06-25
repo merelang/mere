@@ -1,0 +1,22 @@
+// counter — minimal interactive demo for the Phase 48 C2 frontend FFI.
+//
+// Wires a button to a numeric display: each click increments the count
+// and updates the DOM through `contrib/dom/dom.mere`. Mere has no
+// first-class mutable cell, so the counter state lives in a single-slot
+// `vec_new ()` allocated once in the default arena. The vec survives
+// across event firings because Wasm's bump arena is page-lifetime.
+
+import "contrib/dom/dom.mere";
+
+let display = dom_get_by_id "count" in
+let btn = dom_get_by_id "tick" in
+let counter = vec_new () in
+let _ = vec_push counter 0 in
+let _ = dom_set_text display "0" in
+let _ = dom_on_click btn (fn (u: unit) ->
+  let cur = vec_get counter 0 in
+  let next = cur + 1 in
+  let _ = vec_set counter 0 next in
+  dom_set_text display (show next)
+) in
+0

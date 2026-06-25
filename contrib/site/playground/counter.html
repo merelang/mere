@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere Counter — DOM bindings demo</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .counter-app {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 2rem;
+      margin: 2rem 0;
+      background: #f7fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+    #count {
+      font-size: 4rem;
+      font-weight: 600;
+      color: #2b6cb0;
+      font-variant-numeric: tabular-nums;
+    }
+    #tick {
+      padding: 0.7em 1.6em;
+      font-size: 1.1em;
+      background: #2b6cb0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #tick:hover { background: #2c5282; }
+    #tick:active { transform: translateY(1px); }
+    .source-block {
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 1em;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html" class="active">counter</a>
+    </div>
+  </nav>
+  <main>
+    <h1>Counter — Mere &rarr; DOM</h1>
+
+    <p>
+      A minimal interactive demo for the
+      <a href="https://github.com/284km/mere">Mere</a> frontend FFI
+      (Phase 48). The button below is wired to the count through
+      <code>contrib/dom/dom.mere</code>: the click handler is a Mere
+      closure compiled to Wasm, dispatched back from JavaScript via the
+      exported function table.
+    </p>
+
+    <div class="counter-app">
+      <div id="count">…</div>
+      <button id="tick">Click me</button>
+    </div>
+
+    <h2>Source (<code>counter.mere</code>)</h2>
+    <pre class="source-block">import "contrib/dom/dom.mere";
+
+let display = dom_get_by_id "count" in
+let btn = dom_get_by_id "tick" in
+let counter = vec_new () in
+let _ = vec_push counter 0 in
+let _ = dom_set_text display "0" in
+let _ = dom_on_click btn (fn (u: unit) -&gt;
+  let cur = vec_get counter 0 in
+  let next = cur + 1 in
+  let _ = vec_set counter 0 next in
+  dom_set_text display (show next)
+) in
+0</pre>
+
+    <h2>What's happening</h2>
+    <ol>
+      <li>
+        <code>mere -w counter.mere &gt; counter.wat</code> produces
+        WebAssembly text format containing 4 host imports
+        (<code>dom_get_by_id</code>, <code>dom_set_text</code>,
+        <code>dom_on_click</code>, <code>dom_input_value</code>) plus
+        an export of <code>__indirect_function_table</code>.
+      </li>
+      <li>
+        <code>wat2wasm counter.wat -o counter.wasm</code> assembles
+        the binary (~6KB).
+      </li>
+      <li>
+        The page below loads <code>counter.wasm</code> and wires the
+        env imports to real DOM operations via
+        <code>contrib/dom/dom.glue.js</code>.
+      </li>
+      <li>
+        When you click, the Mere closure runs:
+        <code>vec_get</code> / <code>+ 1</code> / <code>vec_set</code> /
+        <code>dom_set_text</code>. The counter state lives in a single
+        slot of <code>vec_new ()</code> in the Wasm bump arena, which
+        persists for the page lifetime.
+      </li>
+    </ol>
+
+    <h2>How JS sees the closure</h2>
+    <p>
+      <code>dom_on_click</code> receives the closure as an
+      <code>i32</code> pointer to a 2-word record
+      <code>{ env, fn_idx }</code> in linear memory. The host glue
+      reads both words and dispatches through the exported
+      <code>__indirect_function_table</code>:
+    </p>
+    <pre class="source-block">// inside dom.glue.js
+dom_on_click: (handleIdx, closurePtr) =&gt; {
+  const view = new Int32Array(memory.buffer);
+  const env = view[closurePtr &gt;&gt; 2];
+  const fnIdx = view[(closurePtr + 4) &gt;&gt; 2];
+  el.addEventListener("click", () =&gt;
+    table.get(fnIdx)(env, 0)
+  );
+},</pre>
+  </main>
+  <footer>Phase 48 C2 frontend FFI MVP — Stage 4 of 4</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "../../dom/dom.glue.js";
+
+    const wasmBytes = await fetch("./counter.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    // Stub out the imports the playground demos use but counter doesn't
+    // need. (Mere's prelude pulls in show / list helpers that reference
+    // the float / libm imports even when unused, so they must exist.)
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();
+  </script>
+</body>
+</html>
