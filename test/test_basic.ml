@@ -7620,5 +7620,22 @@ let () =
      then "ok" else "missing")
     "ok";
 
+  (* Phase 48.5: closure record allocations align __lang_bump to 4 bytes
+     before reserving the 8-byte {env, fn_idx} struct. Without this, a
+     misaligned closure pointer forces host glue to read via DataView
+     (since JS Int32Array indexing rounds the byte offset down). The
+     alignment dance is `i32.const 3; i32.add; i32.const -4; i32.and;
+     global.set $__lang_bump` — distinctive enough to grep for. *)
+  check "C2 Stage 5: closure record alloc aligns __lang_bump to 4 bytes"
+    (if wat_has
+        "extern type JsRef; \
+         extern fn dom_on_click: JsRef -> (unit -> unit) -> unit; \
+         extern fn dom_get_by_id: str -> JsRef; \
+         let btn = dom_get_by_id \"go\" in \
+         let _ = dom_on_click btn (fn (u: unit) -> ()) in 0"
+        "i32.const -4\n    i32.and\n    global.set $__lang_bump"
+     then "aligned" else "missing")
+    "aligned";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

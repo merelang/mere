@@ -1099,6 +1099,23 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
      | _ -> raise (Codegen_error (loc, "map_* expected a Map value")))
   | None -> raise (Codegen_error (loc, "map_*: missing type info"))
 
+(* Phase 48.5: round `__lang_bump` up to the next 4-byte boundary.
+   Wasm's `i32.store` / `i32.load` handle unaligned access transparently,
+   so internal Mere code doesn't care, but host code that reads
+   closure records via `Int32Array` would land on the wrong word if
+   the record sat at an odd offset. Call this immediately before
+   bump-allocating a closure record (8-byte { env, fn_idx } struct)
+   so the pointer handed to host glue is always 4-byte aligned.
+   See contrib/dom/dom.glue.js for the JS side (which now uses
+   DataView anyway, but alignment is the proper Mere-side fix). *)
+let emit_align_bump_4 () : unit =
+  emit_instr "global.get $__lang_bump";
+  emit_instr "i32.const 3";
+  emit_instr "i32.add";
+  emit_instr "i32.const -4";
+  emit_instr "i32.and";
+  emit_instr "global.set $__lang_bump"
+
 (* Phase 34.3: Wasm float helper. Float values are **bump-alloc'd as 8 bytes
    (f64) and held as i32 pointers** (preserving the uniform i32 value model).
    `emit_float_alloc_from_f64_on_stack`: alloc + store the f64 value at the
@@ -1282,6 +1299,7 @@ let rec emit_expr (e : Ast.expr) : unit =
      | Some idx ->
        (* Allocate a closure value `{ env = 0, fn_idx = idx }` on the
           bump heap, just like the toplevel-fn case below. *)
+       emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
        let base = fresh_local () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" base);
@@ -1303,6 +1321,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        (* Top-level fn as a value: materialize a closure
           `{ env = 0, fn_idx = table_idx }`. *)
        let idx = Hashtbl.find fn_closure_table_idx name in
+       emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
        let base = fresh_local () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" base);
@@ -1362,6 +1381,7 @@ let rec emit_expr (e : Ast.expr) : unit =
          emit_instr (Printf.sprintf "i32.store offset=%d" (i * 4))
        ) li.captures;
        (* closure value `{env_offset, fn_table_idx}` written to the bump heap *)
+       emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
        let cl_base = fresh_local () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" cl_base);
@@ -2550,6 +2570,7 @@ let rec emit_expr (e : Ast.expr) : unit =
       ) captures
     end;
     (* Build closure value: { env, fn_idx } at fresh memory slot. *)
+    emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" cl_slot);
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
