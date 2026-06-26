@@ -19,14 +19,18 @@ set -e
 #    + copies playground/*.html + *.wat
 dune exec mere -- contrib/site/build.mere "$INPUT_DIR" "$OUTPUT_DIR" $MODE_FLAG
 
-# 2. Regenerate playground/selfhost-fmt.wat from contrib/fmt/fmt.mere so
-#    the Wasm artifact tracks the canonical fmt source. The .wat file in
-#    contrib/site/playground/ is committed for review readability but is
-#    a derived artifact.
+# 2. Regenerate playground/selfhost-fmt.wat from
+#    contrib/site/playground/selfhost-fmt.mere — the Stage 50f-2 bridge
+#    that wires `tokenize -> parse_expr -> format_expr` end-to-end with
+#    the textarea via contrib/dom. The bridge transitively imports
+#    parser.mere + fmt.mere + lexer.mere + ast.mere, so the resulting
+#    Wasm carries the full self-host pipeline. The .wat file in
+#    contrib/site/playground/ is a derived artifact.
 PLAYGROUND_OUT="$OUTPUT_DIR/playground"
-if [ -f contrib/fmt/fmt.mere ] && [ -d "$PLAYGROUND_OUT" ]; then
-  dune exec mere -- -w contrib/fmt/fmt.mere > "$PLAYGROUND_OUT/selfhost-fmt.wat"
-  echo "  mere -w contrib/fmt/fmt.mere -> playground/selfhost-fmt.wat"
+SELFHOST_SRC="contrib/site/playground/selfhost-fmt.mere"
+if [ -f "$SELFHOST_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w "$SELFHOST_SRC" > "$PLAYGROUND_OUT/selfhost-fmt.wat"
+  echo "  mere -w $SELFHOST_SRC -> playground/selfhost-fmt.wat"
 fi
 
 # 3. Compile each .wat to .wasm via wat2wasm.
