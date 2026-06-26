@@ -1294,9 +1294,21 @@ let rec emit_expr (e : Ast.expr) : string =
          && (not (Hashtbl.mem top_globals name))
          && owned_vec_safe_to_drop_at_scope body name
        in
+       (* DEFERRED §8.3 fix (2026-06-26): bindings AND references must
+          agree on the mangled C identifier. `Ast.Var name` emission
+          (line 1198) already goes through `c_safe_name`, so when the
+          user names a local `main` (or any other C reserved word in
+          `c_reserved_keywords`) the references read `main_` but the
+          old code below was emitting the binders as raw `main` — cc
+          would then complain about "undeclared identifier main_". Use
+          the safe form on both sides. The internal temp names
+          (`__let_tmp_<n>`, `__let_result_<n>`) keep the raw Mere name
+          for readability; they're scoped to this expression and don't
+          collide with anything. *)
+       let safe = c_safe_name name in
        if Hashtbl.mem top_globals name then
          Printf.sprintf
-           "({ %s = %s; %s; })" (c_safe_name name) value_c body_c
+           "({ %s = %s; %s; })" safe value_c body_c
        else if do_auto_drop then
          (* Mirror the Phase 15.13 `with` shape: bind, evaluate body, free
             v's data buffer at scope end, return the body's result.
@@ -1307,11 +1319,11 @@ let rec emit_expr (e : Ast.expr) : string =
             free(((__mere_owned_vec_base*)%s)->data); \
             ((__mere_owned_vec_base*)%s)->data = NULL; \
             __let_result_%s; })"
-           name value_c name name name body_c name name name
+           name value_c safe name name body_c safe safe name
        else
          Printf.sprintf
            "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
-           name value_c name name body_c
+           name value_c safe name body_c
      | Ast.P_wild | Ast.P_unit ->
        (* Phase 21.1 (DEFERRED §1.7) fix: `let _ = E in B` / `let () = E in B`
           — evaluate E for side effects then continue with B. Block sequence
@@ -1374,11 +1386,14 @@ let rec emit_expr (e : Ast.expr) : string =
            current_env_subst := prev_subst;
            raise ex
        in
+       (* Same DEFERRED §8.3 fix as above: tuple destructure also needs
+          to bind under c_safe_name so references resolve consistently. *)
        let bind_stmts =
          String.concat " " (List.filter_map (fun (n_opt, _, i) ->
            match n_opt with
            | Some n ->
-             Some (Printf.sprintf "__auto_type %s = (__let_tup).f%d;" n i)
+             Some (Printf.sprintf "__auto_type %s = (__let_tup).f%d;"
+                     (c_safe_name n) i)
            | None -> None
          ) bindings_info)
        in
@@ -4520,8 +4535,16 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
   List.iter (fun f -> walk_expr f.body) fns
 
 (* Walk a typed AST + fn signatures to find every concrete instantiation
-   of a polymorphic variant. Populates `mono_variant_instances`. *)
-let collect_mono_variant_instances (root : Ast.expr) (fns : fn_decl list) : unit =
+   of a polymorphic variant. Populates `mono_variant_instances`.
+   `variant_decls` is the list of `Top_type (name, params, variants)`
+   from the program — payload types declared there may contain
+   polymorphic instantiations (`list (str * expr)`, `option pattern`,
+   ...) that the expression-tree walk never sees, so the function also
+   walks them. DEFERRED §8.3 fix (2026-06-26). *)
+let collect_mono_variant_instances
+    (root : Ast.expr) (fns : fn_decl list)
+    (variant_decls : (string * string list * (string * Ast.ty option) list) list)
+    : unit =
   let add name args =
     if List.for_all ty_is_concrete args then begin
       if Hashtbl.mem polymorphic_variants name
@@ -4575,9 +4598,21 @@ let collect_mono_variant_instances (root : Ast.expr) (fns : fn_decl list) : unit
   in
   walk_expr root;
   List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty) fns;
+  (* DEFERRED §8.3 fix: monomorphic variant decls (`type expr = | ELetRec
+     of (str * expr) list * expr | ...`) declare payload types
+     containing concrete `list T` / `option T` specializations whose
+     typedefs the program never directly constructs. Walking the
+     declarations here registers them. *)
+  List.iter (fun (_name, params, variants) ->
+    if params = [] then
+      List.iter (fun (_cname, arg_opt) ->
+        match arg_opt with Some t -> walk_ty t | None -> ()) variants
+  ) variant_decls;
   (* Also walk substituted payload types of each collected instance so
      tuples that appear only inside variant payloads (e.g.
-     `tuple_int_list_int` inside Cons) get found by later collectors. *)
+     `tuple_int_list_int` inside Cons) get found by later collectors.
+     Run this AFTER the variant_decls walk so newly-registered
+     specializations have their inner payloads walked too. *)
   Hashtbl.iter (fun _ (name, args) ->
     let (params, variants) = Hashtbl.find polymorphic_variants name in
     let svariants = subst_variants params args variants in
@@ -4666,6 +4701,34 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
        fn_decls whose top-level arrow isn't visible in the original
        AST's annotations (since cloning happened in codegen). *)
     add (Ast.walk f.param_ty) (Ast.walk f.return_ty)) fns;
+  List.rev !order
+
+(* Walk a single type and return every concrete tuple shape it contains.
+   Used at the call site in emit_program to register tuples that appear
+   in monomorphic variant payload types (`ELogic of logicop * expr * expr`
+   declares `tuple_logicop_expr_expr` even if no expression in the
+   program annotates with that exact shape). Without this, the typedef
+   would be missing and cc would complain about an undeclared type. *)
+let collect_tuple_shapes_in_ty (root_ty : Ast.ty) : Ast.ty list list =
+  let order = ref [] in
+  let seen = Hashtbl.create 4 in
+  let rec walk t =
+    match Ast.walk t with
+    | Ast.TyTuple ts ->
+      if List.for_all ty_is_concrete ts then begin
+        let key = tuple_struct_name ts in
+        if not (Hashtbl.mem seen key) then begin
+          Hashtbl.add seen key ();
+          order := ts :: !order
+        end
+      end;
+      List.iter walk ts
+    | Ast.TyArrow (a, b) -> walk a; walk b
+    | Ast.TyCon (_, args) -> List.iter walk args
+    | Ast.TyRef (_, _, inner) -> walk inner
+    | _ -> ()
+  in
+  walk root_ty;
   List.rev !order
 
 (* Walk a typed AST and collect every distinct tuple shape encountered
@@ -5249,7 +5312,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       Hashtbl.replace polymorphic_records rname
         (info.r_params, info.r_fields))
     Typer.records;
-  collect_mono_variant_instances main_expr fns;
+  collect_mono_variant_instances main_expr fns variant_decls;
   collect_show_types main_expr fns;
   let mono_variant_typedefs =
     Hashtbl.fold (fun _ (vn, args) acc ->
@@ -5291,7 +5354,29 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           | None -> acc) acc variants
       ) mono_variant_instances []
     in
-    let all = from_expr @ from_fns @ from_variants in
+    (* DEFERRED §8.3 fix (2026-06-26): also pull tuple shapes out of
+       MONOMORPHIC variant declarations. `collect_tuple_shapes` walks
+       expression `.ty` annotations and fn signatures, but a variant
+       declared `EBin of binop * expr * expr` registers a struct field
+       of type `tuple_binop_expr_expr` regardless of whether the
+       program's expression tree ever annotates a node with that exact
+       shape — so without this step, `emit_variant_typedef` emits a
+       struct referencing an undeclared tuple typedef. Phase 49.1's
+       original bug (`tuple_logicop_expr_expr`) regressed in 50.7 when
+       ast.mere lifted the parser's superset of variants into shared
+       scope; this restores the C backend for parser.mere + fmt.mere. *)
+    let from_variant_decls =
+      List.concat_map (fun (_name, params, variants) ->
+        if params <> [] then []
+        else
+          List.concat_map (fun (_cname, arg_opt) ->
+            match arg_opt with
+            | Some t -> collect_tuple_shapes_in_ty t
+            | None -> []
+          ) variants
+      ) variant_decls
+    in
+    let all = from_expr @ from_fns @ from_variants @ from_variant_decls in
     (* Dedup by struct name. *)
     let seen = Hashtbl.create 8 in
     let deduped =
