@@ -755,10 +755,8 @@ let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
       let (decl, toks1) = parse_type_decl (advance toks) in
       parse_decls (Cons (decl, acc)) toks1
     | _ ->
-      // C codegen mangles a local `main` inconsistently (binds `main`,
-      // uses `main_`), so name the trailing expr something else.
-      let (main_expr, toks1) = parse_expr toks in
-      ((list_rev acc, main_expr), toks1))
+      let (main, toks1) = parse_expr toks in
+      ((list_rev acc, main), toks1))
 
 // `type NAME = [|] CTOR [of TY] (| CTOR [of TY])* ;`. Type parameters
 // (`type T 'a = ...`) are out of scope until the lexer learns
@@ -957,16 +955,13 @@ let top_decl_to_str = fn (d: top_decl) ->
         | Some t -> n ++ " of " ++ ty_to_str t)) in
     "TopType(" ++ name ++ ", [" ++ str_join " | " parts ++ "])";
 
-// `main` is a reserved C identifier and the C backend's escape pass is
-// inconsistent (binds `main`, uses `main_`); destructure into a renamed
-// local to keep all three backends portable.
 let program_to_str = fn (p: program) ->
-  let (decls, main_expr) = p in
+  let (decls, main) = p in
   let decl_strs = list_map decls (fn (d: top_decl) -> top_decl_to_str d) in
   let head = (match decls with
     | Nil -> ""
     | _ -> str_join "; " decl_strs ++ "; ") in
-  "Program(" ++ head ++ "main = " ++ expr_to_str main_expr ++ ")";
+  "Program(" ++ head ++ "main = " ++ expr_to_str main ++ ")";
 
 let parse_str_program = fn (src: str) ->
   let toks = tokenize src in

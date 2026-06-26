@@ -195,19 +195,22 @@ A few Mere-side limitations that surfaced during the port:
   resolves this in its keyword table; `keyword_of` in `lexer.mere` now
   does the same so `let _ = …` correctly emits `TUnderscore` while
   identifiers like `_foo` stay as `TIdent "_foo"`.
-- **Stage 50e C-codegen note**: a local variable named `main` is
-  mangled inconsistently by the C backend (bound as `main`, used as
-  `main_`) — that triggers an "undeclared identifier" cc error. Two
-  locals had to be renamed (`main_expr`) to keep the C build clean.
-  Worth fixing in `lib/codegen_c.ml` so other code doesn't trip on it.
-- **Stage 50f-1 C-codegen regression**: after pulling in ast.mere's
-  superset of variants (records / EFloat / etc.), the C backend stops
-  compiling parser.mere and fmt.mere because `collect_tuple_shapes` in
-  `lib/codegen_c.ml` doesn't walk into the new monomorphic variant
-  payloads — same pre-existing bug noted in Phase 49.1. Interp and Wasm
-  both compile cleanly; the browser pipeline only needs Wasm so the
-  Stage 50f-2 path is unblocked. Fix lives on the same C-codegen
-  follow-up as the `main` rename above.
+- ~~**Stage 50e C-codegen note**: a local variable named `main` is~~
+  ✅ **fixed in `lib/codegen_c.ml`** (2026-06-26). The `Let` and
+  tuple-`Let` emit sites now route the binder name through
+  `c_safe_name`, matching the variable-reference path. `main` (and any
+  other entry in `c_reserved_keywords`) works as a local Mere binding
+  name.
+- ~~**Stage 50f-1 C-codegen regression**: after pulling in ast.mere's~~
+  ✅ **fixed in `lib/codegen_c.ml`** (2026-06-26). Two pieces:
+  `collect_tuple_shapes_in_ty` walks each monomorphic variant
+  declaration's payload to register tuple typedefs (`ELogic of
+  logicop * expr * expr` registers `tuple_logicop_expr_expr`), and
+  `collect_mono_variant_instances` now takes `variant_decls` so
+  polymorphic specializations declared inside monomorphic payloads
+  (e.g. `(str * expr) list` inside `ELetRec`'s tuple) get registered
+  in `mono_variant_instances`. parser.mere + fmt.mere now compile on
+  the C backend with byte-identical output to interp + Wasm.
 
 ## Position
 
