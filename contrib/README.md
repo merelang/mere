@@ -68,8 +68,9 @@ naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 | **toml** | `contrib/toml/` | TOML 1.0 reduced parser (`Toml.parse_toml` int / str / bool / array + nested section, flattened to dotted key) | ✓ module |
 | **site** | `contrib/site/` | docs site SSG (markdown dir → HTML pages + index). interp + C only | CLI script |
 | **dom** | `contrib/dom/` | minimal browser DOM bindings (`dom_get_by_id` / `dom_set_text` / `dom_on_click` / `dom_input_value`). Wasm + `dom.glue.js` host | extern fn (Phase 48 C2 MVP) |
-| **fmt** | `contrib/fmt/` | Mere AST as a Mere variant tree + (in progress) Mere self-host of `Mere.Formatter`. Stage 49a: minimal `fmt_expr` + hand-coded demo | top-level (Phase 49 in progress) |
-| **parser** | `contrib/parser/` | (in progress) Mere self-host of `Mere.Lexer` + `Mere.Parser`. Stage 50a: tokenizer | top-level (Phase 50 in progress) |
+| **fmt** | `contrib/fmt/` | Mere self-host of `Mere.Formatter` — `format_expr` + `format_program` (Phase 49 + Stage 50g). Imports AST defs from `contrib/parser/ast.mere`. | top-level |
+| **parser** | `contrib/parser/` | Mere self-host of `Mere.Lexer` + `Mere.Parser` — `tokenize` + `parse_decls` (Phase 50). Plus shared `ast.mere` consumed by fmt + eval. | top-level |
+| **eval** | `contrib/eval/` | (in progress) Mere self-host of `Mere.Eval` — tree-walking interpreter over `ast.mere`'s `expr`. Stage 51a: literals / var / binop / cmpop / logicop / neg / if (Phase 51 in progress). | top-level |
 
 Future candidates: see internal design notes §3.
 
