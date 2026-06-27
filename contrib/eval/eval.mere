@@ -1,0 +1,212 @@
+// contrib/eval — Mere self-hosted evaluator (Phase 51).
+// This file: Stage 51a — minimal eval MVP.
+//
+// Tree-walking interpreter for the Mere AST defined in
+// `contrib/parser/ast.mere`. Stage 51a covers literals, variables, the
+// binary / comparison / logical operator groups, unary negation, and
+// `if`. Subsequent stages add:
+//   - 51b: closures (`fn`), `EApp`, `ELet`, `EMatch`, `ELetRec`
+//   - 51c: constructors / tuples / list literal reconstruction
+//   - 51d: full pattern coverage + records
+//   - 51e: minimal builtins (extern fn) + top-level decl integration
+//   - 51f: browser bridge — live in-browser Mere REPL
+//
+// See aidocs/projects/lang/51_self_hosted_eval_paper.md for the full
+// multi-stage plan. The AST shape is the same one parser.mere builds
+// and fmt.mere consumes (ast.mere is the shared definition).
+
+import "../parser/ast.mere";
+
+// === Value representation ==================================================
+//
+// Immutable variant. Mutable containers (Vec / OwnedVec / Map / StrBuf)
+// are deferred — Mere's `fn` is pure and the self-host eval doesn't
+// emit any. `VRecord`, `VFloat`, and the mutual-recursion `VRecGroup`
+// shape land in later stages.
+
+type value =
+  | VInt of int
+  | VBool of bool
+  | VStr of str
+  | VUnit
+  | VConstr of str * value option
+  | VTuple of value list
+  // VClosure carries the captured environment as a list. The OCaml side
+  // uses an `env ref` so a `let rec` body can reference itself before
+  // the binding is fully built; the self-host substitutes a future
+  // `VRecGroup` shape (Stage 51b) so the env stays immutable.
+  | VClosure of str * expr * (str * value) list
+  ;
+
+// === Environment ===========================================================
+
+type env = (str * value) list;
+
+let rec lookup_env = fn (name: str) -> fn (e: env) ->
+  match e with
+  | Nil -> fail ("unbound variable: " ++ name)
+  | Cons (b, rest) ->
+    let (n, v) = b in
+    if n == name then v
+    else lookup_env name rest
+  ;
+
+// === Debug printing (value -> str) =========================================
+//
+// Mirrors `Eval.to_string` from OCaml-side `lib/eval.ml`, minus the
+// `[1, 2, 3]` reconstruction over `Cons` / `Nil` chains (that lands in
+// Stage 51c when list values actually start flowing).
+
+let rec value_to_str = fn (v: value) ->
+  match v with
+  | VInt n -> show n
+  | VBool b -> if b then "true" else "false"
+  | VStr s -> "\"" ++ s ++ "\""
+  | VUnit -> "()"
+  | VConstr (name, None) -> name
+  | VConstr (name, Some payload) ->
+    name ++ " " ++ value_to_str payload
+  | VTuple vs ->
+    let parts = list_map vs (fn (v: value) -> value_to_str v) in
+    "(" ++ str_join ", " parts ++ ")"
+  | VClosure _ -> "<closure>"
+  ;
+
+// === Operator dispatch =====================================================
+//
+// `eval_binop` / `eval_cmpop` take pre-evaluated `value`s so they don't
+// need to know about env or expr. Logical ops aren't here — they need
+// short-circuit semantics, so the dispatch lives inline in `eval`.
+
+let eval_binop = fn (op: binop) -> fn (a: value) -> fn (b: value) ->
+  match (op, a, b) with
+  | (OpAdd, VInt x, VInt y) -> VInt (x + y)
+  | (OpSub, VInt x, VInt y) -> VInt (x - y)
+  | (OpMul, VInt x, VInt y) -> VInt (x * y)
+  | (OpDiv, VInt x, VInt y) -> VInt (x / y)
+  | (OpMod, VInt x, VInt y) -> VInt (x % y)
+  | (OpConcat, VStr x, VStr y) -> VStr (x ++ y)
+  | _ -> fail "binop: type mismatch (stage 51a only handles int / str)"
+  ;
+
+let eval_cmpop = fn (op: cmpop) -> fn (a: value) -> fn (b: value) ->
+  match (op, a, b) with
+  | (OpEq, VInt x, VInt y) -> VBool (x == y)
+  | (OpEq, VBool x, VBool y) -> VBool (x == y)
+  | (OpEq, VStr x, VStr y) -> VBool (x == y)
+  | (OpNe, VInt x, VInt y) -> VBool (x != y)
+  | (OpNe, VBool x, VBool y) -> VBool (x != y)
+  | (OpNe, VStr x, VStr y) -> VBool (x != y)
+  | (OpLt, VInt x, VInt y) -> VBool (x < y)
+  | (OpLe, VInt x, VInt y) -> VBool (x <= y)
+  | (OpGt, VInt x, VInt y) -> VBool (x > y)
+  | (OpGe, VInt x, VInt y) -> VBool (x >= y)
+  // Mere's `< <= > >=` are int-only — strings only support `== !=`.
+  | _ -> fail "cmpop: type mismatch"
+  ;
+
+// === Eval dispatcher =======================================================
+//
+// Stage 51a scope. Branches not yet handled (`EFun`, `EApp`, `ELet`,
+// `ELetRec`, `EMatch`, `EConstr`, `ETuple`, `ERecord*`, `EFieldGet`,
+// `EFloat`) fall through to a `fail` that names the stage they unlock.
+
+// Note: the match arm pattern variables avoid shadowing the outer
+// `e` parameter — naming an arm-bound inner expression `e` confuses
+// the C codegen into looping (it picks the wrong binding and
+// `eval e env` recurses on itself, segfaulting). Inner uses `inner` /
+// `cond` / etc. instead.
+let rec eval = fn (e: expr) -> fn (env: env) ->
+  match e with
+  | EInt n -> VInt n
+  | EBool b -> VBool b
+  | EStr s -> VStr s
+  | EUnit -> VUnit
+  | EVar name -> lookup_env name env
+  | EBin (op, a, b) -> eval_binop op (eval a env) (eval b env)
+  | ECmp (op, a, b) -> eval_cmpop op (eval a env) (eval b env)
+  // `&&` and `||` short-circuit, so the dispatch is inline (don't
+  // evaluate the RHS unless needed). Matches OCaml-side semantics.
+  | ELogic (OpAnd, a, b) ->
+    (match eval a env with
+      | VBool false -> VBool false
+      | VBool true -> eval b env
+      | _ -> fail "&&: expected bool on lhs")
+  | ELogic (OpOr, a, b) ->
+    (match eval a env with
+      | VBool true -> VBool true
+      | VBool false -> eval b env
+      | _ -> fail "||: expected bool on lhs")
+  | ENeg inner ->
+    (match eval inner env with
+      | VInt n -> VInt (0 - n)
+      | _ -> fail "neg: expected int")
+  | EIf (cond, then_e, else_e) ->
+    (match eval cond env with
+      | VBool true -> eval then_e env
+      | VBool false -> eval else_e env
+      | _ -> fail "if: expected bool condition")
+  // EAnnot is transparent at eval — the annotation only matters to the
+  // (future) typer.
+  | EAnnot (annotated, _ty) -> eval annotated env
+  | _ -> fail "eval: stage 51a doesn't handle this expr (closures / let / match / records come in 51b-51d)"
+  ;
+
+// === Demos =================================================================
+//
+// Hand-coded AST literals for now. Once parse + eval are wired together
+// (Stage 51e), the demos can be source strings driven through
+// tokenize + parse_decls.
+
+// `Nil : env` keeps the binding monomorphic (`env`) instead of
+// generalizing to `'a list`, which the C codegen can't monomorphize at
+// a top-level value position.
+let empty_env = (Nil : env);
+
+// d1: `42`
+let d1 = EInt 42;
+// d2: `1 + 2`
+let d2 = EBin (OpAdd, EInt 1, EInt 2);
+// d3: `3 * (4 + 5)`
+let d3 = EBin (OpMul, EInt 3, EBin (OpAdd, EInt 4, EInt 5));
+// d4: `if 1 < 2 then "less" else "not less"`
+let d4 = EIf (ECmp (OpLt, EInt 1, EInt 2),
+              EStr "less",
+              EStr "not less");
+// d5: `-5`
+let d5 = ENeg (EInt 5);
+// d6: `true && false`
+let d6 = ELogic (OpAnd, EBool true, EBool false);
+// d7: `1 == 1 || false`
+let d7 = ELogic (OpOr,
+                 ECmp (OpEq, EInt 1, EInt 1),
+                 EBool false);
+// d8: `"hello, " ++ "world"`
+let d8 = EBin (OpConcat, EStr "hello, ", EStr "world");
+// d9: with env { x = 10, y = 20 }, evaluate `x + y` -> 30
+let env_xy = Cons (("x", VInt 10), Cons (("y", VInt 20), Nil));
+let d9_expr = EBin (OpAdd, EVar "x", EVar "y");
+// d10: nested precedence — `if x > 0 then x else -x` with env { x = -7 }
+let env_neg = Cons (("x", VInt (0 - 7)), Nil);
+let d10_expr =
+  EIf (ECmp (OpGt, EVar "x", EInt 0), EVar "x", ENeg (EVar "x"));
+// d11: short-circuit — `false && (1/0)` should NOT crash on div-by-zero
+// because the lhs is false and we never evaluate the rhs. Verifies the
+// inline ELogic dispatch is actually short-circuiting.
+let d11 = ELogic (OpAnd,
+                  EBool false,
+                  EBin (OpDiv, EInt 1, EInt 0));
+
+let _ = print "=== Stage 51a eval demos ===" in
+let _ = print ("d1  (literal 42):       " ++ value_to_str (eval d1 empty_env)) in
+let _ = print ("d2  (1 + 2):            " ++ value_to_str (eval d2 empty_env)) in
+let _ = print ("d3  (3 * (4 + 5)):      " ++ value_to_str (eval d3 empty_env)) in
+let _ = print ("d4  (if cmp lt):        " ++ value_to_str (eval d4 empty_env)) in
+let _ = print ("d5  (-5):               " ++ value_to_str (eval d5 empty_env)) in
+let _ = print ("d6  (true && false):    " ++ value_to_str (eval d6 empty_env)) in
+let _ = print ("d7  (eq || false):      " ++ value_to_str (eval d7 empty_env)) in
+let _ = print ("d8  (str concat):       " ++ value_to_str (eval d8 empty_env)) in
+let _ = print ("d9  (env x+y, 10+20):   " ++ value_to_str (eval d9_expr env_xy)) in
+let _ = print ("d10 (if x>0 ... else):  " ++ value_to_str (eval d10_expr env_neg)) in
+let _ = print ("d11 (short-circuit):    " ++ value_to_str (eval d11 empty_env)) in
+0
