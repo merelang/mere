@@ -429,6 +429,119 @@ and fmt_else_chain = fn (ind: int) -> fn (else_: expr) -> match else_ with
 
 let format_expr = fn (e: expr) -> fmt_expr prec_top 0 e;
 
+// === Top-level decl printing ===============================================
+//
+// Port of OCaml lib/formatter.ml's `fmt_top_let` / `fmt_top_let_rec` /
+// `fmt_top_type` / `format_program`. The shared `ast.mere` exposes
+// three `top_decl` variants (`TopLet` / `TopLetRec` / `TopType`); the
+// OCaml side's records / extern / view / signature / module / drop /
+// type_alias are not in scope yet — they ride along when the parser
+// learns them.
+
+// `let pat = value;`. Bodies that are themselves block-form (`let`,
+// `if`, `match`) drop to a new line with one indent, matching the
+// OCaml side's `is_block` branch.
+let fmt_top_let = fn (pat: pattern) -> fn (value: expr) ->
+  (match value with
+    | EFun _ ->
+      (match pat with
+        | PVar _ ->
+          "let " ++ fmt_pattern pat ++ " = " ++ fmt_fun_chain 0 value ++ ";"
+        | _ ->
+          "let " ++ fmt_pattern pat ++ " = "
+          ++ fmt_expr prec_top 0 value ++ ";")
+    | _ ->
+      if is_block value then
+        "let " ++ fmt_pattern pat ++ " =\n"
+        ++ indent_str 1 ++ fmt_expr prec_top 1 value ++ ";"
+      else
+        "let " ++ fmt_pattern pat ++ " = "
+        ++ fmt_expr prec_top 0 value ++ ";")
+  ;
+
+// `let rec n = v [and n = v]*;`. Multi-binding `and` chains line up one
+// per line. The leading binding gets `let rec `, subsequent ones `and `.
+let fmt_top_let_rec_binding = fn (kw: str) -> fn (n: str) -> fn (v: expr) ->
+  let body_s = (match v with
+    | EFun _ -> fmt_fun_chain 0 v
+    | _ ->
+      if is_block v then
+        "\n" ++ indent_str 1 ++ fmt_expr prec_top 1 v
+      else fmt_expr prec_top 0 v) in
+  // If the body starts with `\n`, the `=` is on the same line as the
+  // name (no trailing space); otherwise `= ` followed by inline body.
+  let starts_with_nl =
+    str_len body_s > 0 && char_at body_s 0 == "\n" in
+  let sep = if starts_with_nl then "=" else "= " in
+  kw ++ n ++ " " ++ sep ++ body_s;
+
+// Mere prelude doesn't ship `list_mapi`, so the index-aware walk is
+// inlined here.
+let rec fmt_top_let_rec_walk = fn (idx: int)
+                             -> fn (bs: (str * expr) list) ->
+  match bs with
+  | Nil -> Nil
+  | Cons (b, rest) ->
+    let (n, v) = b in
+    let kw = if idx == 0 then "let rec " else "and " in
+    Cons (fmt_top_let_rec_binding kw n v,
+          fmt_top_let_rec_walk (idx + 1) rest);
+
+let fmt_top_let_rec = fn (bindings: (str * expr) list) ->
+  str_join "\n" (fmt_top_let_rec_walk 0 bindings) ++ ";";
+
+// Type parameters — `'a `, `('a, 'b) `, or empty. The parser doesn't
+// tokenize `'a` yet so `params` is always [] in practice, but the
+// emitter mirrors the OCaml side so it works the moment that lands.
+let fmt_type_params = fn (params: str list) ->
+  match params with
+  | Nil -> ""
+  | Cons (p, Nil) -> "'" ++ p ++ " "
+  | _ ->
+    let prefixed = list_map params (fn (p: str) -> "'" ++ p) in
+    "(" ++ str_join ", " prefixed ++ ") ";
+
+// `type [params] NAME = [|] CTOR [of TY] (| CTOR [of TY])* ;`.
+// Mirrors OCaml `fmt_top_type` exactly; variants are `|`-joined on one
+// line (line-wrap heuristics live on a follow-up slice if needed).
+let fmt_top_type = fn (name: str) -> fn (params: str list)
+                 -> fn (variants: (str * ty option) list) ->
+  let var_strs = list_map variants (fn (v: str * ty option) ->
+    let (c, payload) = v in
+    match payload with
+    | None -> c
+    | Some t -> c ++ " of " ++ fmt_ty 0 t) in
+  "type " ++ fmt_type_params params ++ name ++ " = "
+  ++ str_join " | " var_strs ++ ";";
+
+let fmt_top_decl = fn (d: top_decl) ->
+  match d with
+  | TopLet (pat, value) -> fmt_top_let pat value
+  | TopLetRec bindings -> fmt_top_let_rec bindings
+  | TopType (name, params, variants) -> fmt_top_type name params variants
+  ;
+
+// `program = (decls, main)`. Decls are joined with a blank line, then a
+// blank line and the main expression. Decls-only programs (synthesized
+// `EUnit` main) drop the trailing blank+main. Output ends with a
+// trailing newline so `mere fmt` style is preserved.
+let format_program = fn (p: program) ->
+  let (decls, main) = p in
+  let decl_strs = list_map decls (fn (d: top_decl) -> fmt_top_decl d) in
+  let decls_s = str_join "\n\n" decl_strs in
+  let main_s = (match main with
+    | EUnit -> ""
+    | _ -> fmt_expr prec_top 0 main) in
+  match decls with
+  | Nil ->
+    (match main with
+      | EUnit -> "()\n"
+      | _ -> main_s ++ "\n")
+  | _ ->
+    (match main with
+      | EUnit -> decls_s ++ "\n"
+      | _ -> decls_s ++ "\n\n" ++ main_s ++ "\n");
+
 // === Demos =================================================================
 
 let demo_simple = ELet (PVar "x", EInt 42, EVar "x");
@@ -457,6 +570,48 @@ let demo_range = EApp (EApp (EVar "range", EInt 1), EInt 10);
 let demo_lambda =
   EFun ("x", None, EFun ("y", None, EBin (OpAdd, EVar "x", EVar "y")));
 
+// Stage 50g demos — exercise the `format_program` entry point on
+// hand-coded `program` values (decls + main pairs).
+
+let demo_one_decl =
+  (Cons (TopLet (PVar "x", EInt 1), Nil), EVar "x");
+
+let demo_let_rec_prog =
+  (Cons (TopLetRec (Cons (("fact",
+    EFun ("n", None,
+      EIf (
+        ECmp (OpLt, EVar "n", EInt 1),
+        EInt 1,
+        EBin (OpMul, EVar "n",
+              EApp (EVar "fact", EBin (OpSub, EVar "n", EInt 1)))))),
+    Nil)), Nil),
+   EApp (EVar "fact", EInt 10));
+
+let demo_type_prog =
+  (Cons (TopType ("color", Nil,
+    Cons (("Red", None),
+      Cons (("Green", None),
+        Cons (("Blue", None), Nil)))), Nil),
+   EConstr ("Red", None));
+
+let demo_type_payload =
+  (Cons (TopType ("opt", Nil,
+    Cons (("Just", Some TyInt),
+      Cons (("Nothing", None), Nil))), Nil),
+   EConstr ("Just", Some (EInt 42)));
+
+let demo_decls_only =
+  (Cons (TopLet (PVar "x", EInt 1), Nil), EUnit);
+
+let demo_multi =
+  (Cons (TopType ("opt", Nil,
+    Cons (("Just", Some TyInt), Cons (("Nothing", None), Nil))),
+    Cons (TopLet (PVar "x", EConstr ("Just", Some (EInt 1))),
+      Cons (TopLetRec (Cons (("f", EFun ("n", None,
+        EBin (OpAdd, EVar "n", EInt 1))), Nil)),
+        Nil))),
+   EApp (EVar "f", EInt 0));
+
 let _ = print "=== Stage 49b pretty-printer demos ===" in
 let _ = print ("simple:        " ++ format_expr demo_simple) in
 let _ = print ("prec (no par): " ++ format_expr demo_prec) in
@@ -467,4 +622,18 @@ let _ = print ("lambda chain:  " ++ format_expr demo_lambda) in
 let _ = print "" in
 let _ = print "factorial:" in
 let _ = print (format_expr demo_fact) in
+let _ = print "" in
+let _ = print "=== Stage 50g format_program demos ===" in
+let _ = print "one decl:" in
+let _ = print (format_program demo_one_decl) in
+let _ = print "let rec factorial program:" in
+let _ = print (format_program demo_let_rec_prog) in
+let _ = print "type color program:" in
+let _ = print (format_program demo_type_prog) in
+let _ = print "type with payload:" in
+let _ = print (format_program demo_type_payload) in
+let _ = print "decls-only (no main):" in
+let _ = print (format_program demo_decls_only) in
+let _ = print "multi-decl program:" in
+let _ = print (format_program demo_multi) in
 0

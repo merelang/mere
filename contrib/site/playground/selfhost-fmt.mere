@@ -1,40 +1,37 @@
-// contrib/site/playground/selfhost-fmt.mere — Phase 50.8 (Stage 50f-2).
-//
-// Final piece of the §S1 self-host plan: a single Wasm module that
-// runs end-to-end `tokenize -> parse_expr -> format_expr` in the
-// browser. The textarea in selfhost-fmt.html is the source, the
-// formatted output goes to the `<pre>` next to it.
+// contrib/site/playground/selfhost-fmt.mere — Phase 50.8+ (Stages 50f-2,
+// 50g). Wires a single Wasm module that runs end-to-end `tokenize ->
+// parse_decls -> format_program` in the browser. The textarea in
+// selfhost-fmt.html is the source; the formatted output goes to the
+// `<pre>` next to it.
 //
 // Wiring:
-//   contrib/dom/dom.mere     - extern fn dom_get_by_id / dom_set_text /
-//                              dom_on_click / dom_input_value
-//   contrib/parser/parser.mere - tokenize + parse_expr (transitively
-//                              pulls in lexer.mere + ast.mere)
-//   contrib/fmt/fmt.mere     - format_expr (pulls in ast.mere; the
-//                              second import is no-op'd by the parser
-//                              import cycle guard)
+//   contrib/dom/dom.mere       - extern fn dom_get_by_id / dom_set_text
+//                                / dom_on_click / dom_input_value
+//   contrib/parser/parser.mere - tokenize + parse_decls (transitively
+//                                pulls in lexer.mere + ast.mere)
+//   contrib/fmt/fmt.mere       - format_program (pulls in ast.mere; the
+//                                second import is no-op'd by the parser
+//                                import cycle guard)
 //
-// `format_str` enforces that the input was a single expression — the
-// existing self-host fmt only knows `format_expr`, so a top-level decl
-// stream needs a future `format_program`. For now the page documents
-// "type any Mere expression".
+// Stage 50g lifted the bridge from `parse_expr + format_expr` (single
+// expression only) to `parse_decls + format_program`, so users can now
+// paste a full Mere file with top-level `let X = …;` / `let rec …;` /
+// `type T = …;` declarations.
 
 import "../../dom/dom.mere";
 import "../../parser/parser.mere";
 import "../../fmt/fmt.mere";
 
-// Single-expression pipeline. Mirrors `parse_str` but pipes the parsed
-// AST through `format_expr` instead of `expr_to_str`.
+// Full-file pipeline. Tokenize, parse a `program` (decls + main), then
+// run it through `format_program`.
 let format_str = fn (src: str) ->
   let toks = tokenize src in
-  let (e, rest) = parse_expr toks in
+  let (prog, rest) = parse_decls Nil toks in
   match peek_tok rest with
-  | TEof -> format_expr e
+  | TEof -> format_program prog
   | _ ->
     "[parse error] line " ++ show (peek_line rest)
-    ++ ": unexpected token after expression "
-    ++ "(self-host fmt only formats a single expression — "
-    ++ "top-level decls aren't supported yet)";
+    ++ ": unexpected token after program";
 
 // On click: read textarea, run the pipeline, write to the output pane.
 let input_el = dom_get_by_id "input" in

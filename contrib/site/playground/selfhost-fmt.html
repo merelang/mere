@@ -90,10 +90,12 @@
     <h1>Mere fmt — written in Mere, running in the browser</h1>
 
     <p>
-      Type a Mere expression on the left and press
+      Paste a Mere expression or a full file on the left and press
       <strong>Format</strong>. The Wasm module on this page tokenizes,
       parses, and pretty-prints your input — all written in Mere itself,
-      no server round-trip.
+      no server round-trip. Top-level <code>let X = … ;</code> /
+      <code>let rec … ;</code> / <code>type T = … ;</code> declarations
+      and a trailing main expression both work.
     </p>
 
     <p>
@@ -116,11 +118,18 @@
       <button class="example-btn" data-example="match xs with | Nil -> 0 | Cons (h, t) -> h + sum t">match</button>
       <button class="example-btn" data-example="[1, 2, 3]">list</button>
       <button class="example-btn" data-example="1..10">range</button>
+      <button class="example-btn" data-example="type opt = | Just of int | Nothing;
+let x = Just (42);
+let rec sum = fn (xs: int list) -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t;
+sum [1, 2, 3]">full file</button>
     </div>
 
     <div class="fmt-app">
-      <textarea id="input" placeholder="Type a Mere expression here..."
-      >let rec fact = fn n -> if n &lt; 1 then 1 else n * fact (n - 1) in fact 10</textarea>
+      <textarea id="input" placeholder="Type a Mere expression or full file here..."
+      >type opt = | Just of int | Nothing;
+let x = Just (42);
+let rec sum = fn (xs: int list) -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t;
+sum [1, 2, 3]</textarea>
       <pre id="output">(click Format to see the formatted output)</pre>
     </div>
 
@@ -144,20 +153,50 @@
 
     <h2>What this page formats</h2>
     <p>
-      The textarea accepts a single Mere expression. Top-level decls
-      (<code>let x = …;</code> / <code>type T = …;</code>) parse fine,
-      but <code>fmt</code> doesn't have <code>format_program</code> yet
-      — the next slice will add it so a whole file can be pasted in.
+      Single expressions <em>and</em> full files both work. A full file
+      looks like a sequence of <code>let X = e ;</code> /
+      <code>let rec X = e ;</code> / <code>type T = … ;</code>
+      declarations followed by a main expression — the same shape Mere
+      itself uses. The output is byte-identical to running
+      <code>mere fmt</code> on the OCaml side for the slice of syntax
+      both formatters cover (see "Limitations" below for what's still
+      out of scope).
     </p>
     <p>
-      Things you can try right now: arithmetic with precedence,
-      <code>let</code> / <code>let rec</code> bindings, <code>if</code>
-      / <code>match</code> control flow, curried lambdas (the formatter
-      reverses the chain back into <code>\x y -&gt; body</code>
-      shorthand), constructor patterns, list literals, ranges. The
-      pre-set example is a recursive factorial that exercises most of
-      the cascade.
+      Things to try: arithmetic with precedence, <code>let</code> /
+      <code>let rec</code> bindings, <code>if</code> / <code>match</code>
+      control flow, curried lambdas (the formatter reverses the chain
+      back into <code>\x y -&gt; body</code> shorthand), constructor
+      patterns, list literals, ranges, variant type declarations,
+      annotated lambdas like <code>fn (n: int) -&gt; n + 1</code>.
     </p>
+
+    <h3>Limitations</h3>
+    <ul>
+      <li>
+        Records (<code>type T = { f: ty };</code> / <code>T { f = e }</code>
+        / <code>e.f</code> / <code>T { … with f = e }</code>) — the
+        AST declares them but the parser doesn't accept them yet.
+      </li>
+      <li>
+        <code>'a</code> style type variables in declarations / annotations.
+      </li>
+      <li>
+        <code>extern fn</code> / <code>extern type</code> /
+        <code>module M { … }</code> / <code>import</code> /
+        <code>open</code> / <code>view</code> / <code>drop</code> /
+        <code>signature</code> — full OCaml-side syntax not yet ported
+        to the self-host parser.
+      </li>
+      <li>
+        Phase 36 sugar operators (<code>|&gt;</code> / <code>&lt;|</code> /
+        <code>&lt;&lt;</code> / <code>&gt;&gt;</code> / <code>@@</code> /
+        <code>?</code> / <code>?!</code> / <code>&lt;-</code>) — same.
+      </li>
+      <li>
+        Comments — the lexer discards them.
+      </li>
+    </ul>
 
     <h2>Why this matters</h2>
     <p>
@@ -173,7 +212,7 @@
       <li><strong>Stage 50f-2</strong> — <strong>this page</strong>: live in-browser <code>mere fmt</code></li>
     </ul>
   </main>
-  <footer>Phase 50 self-host §S1 — Stages 50a / 50b / 50c / 50d / 50e / 50f complete</footer>
+  <footer>Phase 50 self-host §S1 — Stages 50a / 50b / 50c / 50d / 50e / 50f / 50g complete</footer>
 
   <script type="module">
     import { makeDomGlue } from "./dom.glue.js";
