@@ -7637,5 +7637,96 @@ let () =
      then "aligned" else "missing")
     "aligned";
 
+  (* Phase 50.10 / Stage 50h — self-host fmt cross-validation.
+     For each sample, compute `Formatter.format_program (parse_program s)`
+     on the OCaml side, then run the same source through the Mere
+     self-host pipeline (`tokenize` + `parse_decls` + `format_program`,
+     all defined in contrib/parser/parser.mere + contrib/fmt/fmt.mere),
+     and assert byte-identical output. The two pipelines share neither
+     code nor AST representation — they only agree on the surface syntax
+     — so this is the strongest dogfood we have that the self-host port
+     is faithful. *)
+
+  (* Walk up from cwd until we find the project's dune-project. Dune
+     runs the test binary from `_build/default/test`, so the source
+     tree's `contrib/` is up the tree somewhere. *)
+  let project_root =
+    let rec walk d =
+      if Sys.file_exists (Filename.concat d "dune-project") then d
+      else
+        let parent = Filename.dirname d in
+        if parent = d then failwith "could not locate dune-project"
+        else walk parent
+    in
+    walk (Sys.getcwd ())
+  in
+
+  let ocaml_format input =
+    Exhaustive.reset ();
+    let prelude_decls = Pipeline.parse_prelude () in
+    let n_prelude = List.length prelude_decls in
+    let prog = Pipeline.parse_program input in
+    let rec drop n xs = if n <= 0 then xs else match xs with
+      | [] -> []
+      | _ :: rest -> drop (n - 1) rest
+    in
+    let user_decls = drop n_prelude prog.decls in
+    Formatter.format_program { prog with decls = user_decls }
+  in
+
+  let self_host_format input =
+    (* Write the input to a tmpfile so the bridge can read it via
+       `read_file`. Avoids the gnarly escape pass needed to inline an
+       arbitrary Mere source as a string literal inside another Mere
+       file. *)
+    let tmp = Filename.temp_file "selfhost_fmt_input_" ".mere" in
+    let oc = open_out tmp in
+    output_string oc input;
+    close_out oc;
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/parser/parser.mere\";\n\
+       import \"%s/contrib/fmt/fmt.mere\";\n\
+       let src = read_file \"%s\" in\n\
+       let toks = tokenize src in\n\
+       let (prog, _rest) = parse_decls Nil toks in\n\
+       format_program prog\n"
+      project_root project_root tmp
+    in
+    let result =
+      Exhaustive.reset ();
+      let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+      let eval_env = ref Eval.initial_env in
+      let type_env = ref Typer.initial_env in
+      Pipeline.process_decls eval_env type_env prog.decls;
+      let _ = Typer.infer !type_env prog.main in
+      match Eval.eval_in !eval_env prog.main with
+      | Eval.V_str s -> s
+      | other -> failwith ("self_host_format: expected V_str, got " ^ Eval.to_string other)
+    in
+    Sys.remove tmp;
+    result
+  in
+
+  let cross_validate name input =
+    let expected = ocaml_format input in
+    let actual = self_host_format input in
+    check ("self-host fmt cross: " ^ name) actual expected
+  in
+
+  cross_validate "simple expr" "1 + 2 * 3";
+  cross_validate "let-in" "let x = 1 + 2 in x * x";
+  cross_validate "curried fn" "fn x -> fn y -> x + y";
+  cross_validate "factorial" "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10";
+  cross_validate "match" "match xs with | Nil -> 0 | Cons (h, t) -> h + sum t";
+  cross_validate "list" "[1, 2, 3]";
+  cross_validate "range" "1..10";
+  cross_validate "annotated lambda" "fn (n: int) -> n + 1";
+  cross_validate "top-level let" "let x = 1; let y = 2; x + y";
+  cross_validate "top-level type" "type color = | Red | Green | Blue; Red";
+  cross_validate "type with payload" "type opt = | Just of int | Nothing; Just (42)";
+  cross_validate "top let rec" "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1); fact 10";
+  cross_validate "multi-decl program"
+    "type opt = | Just of int | Nothing; let x = Just (42); let rec sum = fn (xs: int list) -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t; sum [1, 2, 3]";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
