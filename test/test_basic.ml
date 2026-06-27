@@ -7739,5 +7739,54 @@ let () =
   cross_validate "record pattern"
     "type Point = { x: int, y: int }; let p = Point { x = 0, y = 0 } in match p with | Point { x = 0, y = 0 } -> 0 | _ -> 1";
 
+  (* Phase 50.12 / Stage 50j — "self-host parses self-host". The
+     ultimate dogfood: feed contrib/parser/{lexer,parser}.mere and
+     contrib/fmt/fmt.mere through the self-host pipeline and verify it
+     produces a non-empty formatted string. We don't byte-compare
+     against `mere fmt` here — OCaml-side expands `import` decls
+     (inlining the imported file) and resolves type aliases (`pos_token`
+     -> `(int * token)`), and the self-host parser doesn't (yet) do
+     either. The parse-and-format-without-failing test is the
+     load-bearing one: if any of these files starts using syntax the
+     self-host can't handle, this catches it. *)
+  let self_host_parses_self file =
+    let abs_path = Filename.concat project_root file in
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/parser/parser.mere\";\n\
+       import \"%s/contrib/fmt/fmt.mere\";\n\
+       let src = read_file \"%s\" in\n\
+       let toks = tokenize src in\n\
+       let (prog, _rest) = parse_decls Nil toks in\n\
+       format_program prog\n"
+      project_root project_root abs_path
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s when String.length s > 0 -> "ok:" ^ string_of_int (String.length s)
+    | Eval.V_str _ -> "empty output"
+    | _ -> "non-string result"
+  in
+
+  let check_self_host name file =
+    let result = self_host_parses_self file in
+    let ok = String.length result >= 4 && String.sub result 0 3 = "ok:" in
+    if ok then begin
+      incr pass;
+      Printf.printf "PASS  self-host parses %s (%s chars)\n"
+        name (String.sub result 3 (String.length result - 3))
+    end else begin
+      incr fail;
+      Printf.printf "FAIL  self-host parses %s — %s\n" name result
+    end
+  in
+  check_self_host "lexer.mere" "contrib/parser/lexer.mere";
+  check_self_host "parser.mere" "contrib/parser/parser.mere";
+  check_self_host "fmt.mere" "contrib/fmt/fmt.mere";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

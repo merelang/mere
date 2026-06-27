@@ -620,10 +620,35 @@ and parse_pattern_base = fn (toks: pos_token list) ->
               | TLBrace ->
                 let (fields, rest2) = parse_record_pat_fields (advance rest) in
                 (PRecord (name, fields), rest2)
-              | _ -> (PConstr (name, None), rest))
+              | other ->
+                // Atom-style payload (`Some t`, `Some 1`, `Cons Nil`,
+                // ...): if the next token can start a pattern atom,
+                // greedily consume it as the constructor's payload.
+                // OCaml side uses a constr-arity table here; we don't
+                // carry one, but in pattern context there's no function-
+                // application alternative, so the greedy rule is safe.
+                if is_pat_atom_start other then
+                  let (sub, rest2) = parse_pattern rest in
+                  (PConstr (name, Some sub), rest2)
+                else (PConstr (name, None), rest))
           else
             (PVar name, rest))
         | _ -> fail ("line " ++ show line ++ ": expected pattern")))
+
+// True when `t` can start a pattern atom — used by the uppercase-ident
+// branch above to decide whether to eagerly consume the next token as
+// a constructor payload.
+and is_pat_atom_start = fn (t: token) ->
+  match t with
+  | TInt _ -> true
+  | TStr _ -> true
+  | TTrue -> true
+  | TFalse -> true
+  | TUnderscore -> true
+  | TLParen -> true
+  | TLBracket -> true
+  | TIdent _ -> true
+  | _ -> false
 
 // Contents of `( ... )` in pattern position. Returns:
 //   `()`           -> PUnit
@@ -824,7 +849,40 @@ and parse_type_atom = fn (toks: pos_token list) ->
 // `;` -> top decl, `in` -> the binding becomes a `Let` / `Let_rec`
 // expression that serves as the main.
 
+// Detects an `import "path";` decl. OCaml-side `lib/parser.ml`
+// processes these eagerly (reads the file + splices its decls) — the
+// self-host parser doesn't load files, just acknowledges the import
+// and skips past `import IDENT_TOKEN STR_TOKEN SEMI` so the rest of
+// the file parses. The caller is expected to have already pulled in
+// the referenced contents through a real `import` (e.g. when running
+// the bridge). Returns Some `rest` if matched, None otherwise.
+let try_consume_import = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt1, r1) ->
+    let (_, t1) = pt1 in
+    (match t1 with
+      | TIdent "import" ->
+        (match r1 with
+          | Cons (pt2, r2) ->
+            let (_, t2) = pt2 in
+            (match t2 with
+              | TStr _ ->
+                (match r2 with
+                  | Cons (pt3, r3) ->
+                    let (_, t3) = pt3 in
+                    (match t3 with
+                      | TSemi -> Some r3
+                      | _ -> None)
+                  | Nil -> None)
+              | _ -> None)
+          | Nil -> None)
+      | _ -> None)
+  | Nil -> None;
+
 let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
+  (match try_consume_import toks with
+    | Some rest -> parse_decls acc rest
+    | None ->
   (match peek_tok toks with
     | TEof -> ((list_rev acc, EUnit), toks)
     | TLet ->
@@ -859,16 +917,21 @@ let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
       parse_decls (Cons (decl, acc)) toks1
     | _ ->
       let (main, toks1) = parse_expr toks in
-      ((list_rev acc, main), toks1))
+      ((list_rev acc, main), toks1)))
 
-// `type NAME = [|] CTOR [of TY] (| CTOR [of TY])* ;` (variant) or
-// `type NAME = { f1: ty, f2: ty, ... };` (record, Stage 50i). The two
-// shapes are disambiguated by the token right after `=`: `{` opens a
-// record field list, anything else (`|` or an uppercase ident) starts
-// a variant list.
+// `type NAME = …;`. Three body shapes:
+//   `{ f1: ty, f2: ty, ... }`              -> TopRecord
+//   `[|] CTOR [of TY] (| CTOR [of TY])*`   -> TopType (variant)
+//   `TY`                                   -> TopTypeAlias
+// Disambiguation matches OCaml-side `parse_type_decl_after_keyword`:
+//   - `{` opens a record
+//   - leading `|`, or an uppercase ident followed by `|` / `of`, is
+//     a variant constructor list
+//   - anything else (lowercase ident, `(`, primitive type name, etc.)
+//     is a type alias whose body is parsed as a `ty`
 //
-// Type parameters (`type T 'a = ...`) are still out of scope — the
-// lexer doesn't tokenize `'a` yet — so `params` stays the empty list.
+// Type parameters (`type T 'a = ...`) are still out of scope until
+// the lexer tokenizes `'a`; `params` stays the empty list.
 and parse_type_decl = fn (toks: pos_token list) ->
   let (name, toks1) = expect_ident toks in
   let toks2 = expect_eq toks1 in
@@ -878,12 +941,40 @@ and parse_type_decl = fn (toks: pos_token list) ->
       let toks4 = expect_semi toks3 in
       (TopRecord (name, Nil, fields), toks4)
     | _ ->
-      let toks3 = (match peek_tok toks2 with
-        | TPipe -> advance toks2
-        | _ -> toks2) in
-      let (variants, toks4) = parse_variant_seq toks3 in
-      let toks5 = expect_semi toks4 in
-      (TopType (name, Nil, variants), toks5))
+      if is_variant_body_start toks2 then
+        let toks3 = (match peek_tok toks2 with
+          | TPipe -> advance toks2
+          | _ -> toks2) in
+        let (variants, toks4) = parse_variant_seq toks3 in
+        let toks5 = expect_semi toks4 in
+        (TopType (name, Nil, variants), toks5)
+      else
+        let (t, toks3) = parse_type toks2 in
+        let toks4 = expect_semi toks3 in
+        (TopTypeAlias (name, Nil, t), toks4))
+
+// Variant decls are recognized by either a leading `|` (explicit
+// variant list opener) or an uppercase ident followed by `|` / `of`.
+// Anything else falls through to type alias.
+and is_variant_body_start = fn (toks: pos_token list) ->
+  (match toks with
+    | Cons (pt1, rest) ->
+      let (_, t1) = pt1 in
+      (match t1 with
+        | TPipe -> true
+        | TIdent name ->
+          if is_upper_first_c name then
+            (match rest with
+              | Cons (pt2, _) ->
+                let (_, t2) = pt2 in
+                (match t2 with
+                  | TPipe -> true
+                  | TOf -> true
+                  | _ -> false)
+              | Nil -> false)
+          else false
+        | _ -> false)
+    | Nil -> false)
 
 // `f1: ty1, f2: ty2, ... }` (the leading `{` has already been
 // consumed). Trailing `,` before `}` is rejected — matches the OCaml
@@ -1089,7 +1180,9 @@ let top_decl_to_str = fn (d: top_decl) ->
   | TopRecord (name, _params, fields) ->
     let parts = list_map fields (fn (f: str * ty) ->
       let (fname, fty) = f in fname ++ ": " ++ ty_to_str fty) in
-    "TopRecord(" ++ name ++ ", \{" ++ str_join ", " parts ++ "})";
+    "TopRecord(" ++ name ++ ", \{" ++ str_join ", " parts ++ "})"
+  | TopTypeAlias (name, _params, aliased) ->
+    "TopTypeAlias(" ++ name ++ " = " ++ ty_to_str aliased ++ ")";
 
 let program_to_str = fn (p: program) ->
   let (decls, main) = p in

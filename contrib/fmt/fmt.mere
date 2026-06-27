@@ -99,7 +99,11 @@ let binop_prec = fn (op: binop) -> match op with
 let escape_string_for_fmt = fn (s: str) ->
   let n = str_len s in
   let buf = strbuf_new () in
-  let _ = strbuf_push buf "\{" in
+  // Opening quote. (The previous code here pushed `"\{"` — a literal
+  // `{` — by mistake; it parsed and ran but emitted `{0"` instead of
+  // `"0"`. Caught when feeding lexer.mere through the self-host fmt:
+  // every string literal came out malformed.)
+  let _ = strbuf_push buf "\"" in
   let rec loop = fn (i: int) ->
     if i >= n then ()
     else
@@ -524,12 +528,21 @@ let fmt_top_record = fn (name: str) -> fn (params: str list)
   "type " ++ fmt_type_params params ++ name ++ " = \{ "
   ++ str_join ", " field_strs ++ " };";
 
+// `type [params] NAME = TY;`. Same shape as variant/record decls but
+// the body is a plain type expression.
+let fmt_top_type_alias = fn (name: str) -> fn (params: str list)
+                       -> fn (aliased: ty) ->
+  "type " ++ fmt_type_params params ++ name ++ " = "
+  ++ fmt_ty 0 aliased ++ ";";
+
 let fmt_top_decl = fn (d: top_decl) ->
   match d with
   | TopLet (pat, value) -> fmt_top_let pat value
   | TopLetRec bindings -> fmt_top_let_rec bindings
   | TopType (name, params, variants) -> fmt_top_type name params variants
   | TopRecord (name, params, fields) -> fmt_top_record name params fields
+  | TopTypeAlias (name, params, aliased) ->
+    fmt_top_type_alias name params aliased
   ;
 
 // `program = (decls, main)`. Decls are joined with a blank line, then a
