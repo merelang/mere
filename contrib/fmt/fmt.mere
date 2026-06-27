@@ -514,11 +514,22 @@ let fmt_top_type = fn (name: str) -> fn (params: str list)
   "type " ++ fmt_type_params params ++ name ++ " = "
   ++ str_join " | " var_strs ++ ";";
 
+// `type [params] NAME = { f1: ty1, f2: ty2, ... };`. Same as
+// `fmt_top_type` but with `,`-separated `field: ty` pairs inside
+// braces instead of `|`-separated variants.
+let fmt_top_record = fn (name: str) -> fn (params: str list)
+                   -> fn (fields: (str * ty) list) ->
+  let field_strs = list_map fields (fn (f: str * ty) ->
+    let (fname, fty) = f in fname ++ ": " ++ fmt_ty 0 fty) in
+  "type " ++ fmt_type_params params ++ name ++ " = \{ "
+  ++ str_join ", " field_strs ++ " };";
+
 let fmt_top_decl = fn (d: top_decl) ->
   match d with
   | TopLet (pat, value) -> fmt_top_let pat value
   | TopLetRec bindings -> fmt_top_let_rec bindings
   | TopType (name, params, variants) -> fmt_top_type name params variants
+  | TopRecord (name, params, fields) -> fmt_top_record name params fields
   ;
 
 // `program = (decls, main)`. Decls are joined with a blank line, then a

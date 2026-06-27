@@ -153,6 +153,24 @@ let expect_semi = fn (toks: pos_token list) ->
       | _ -> fail ("line " ++ show line ++ ": expected `;`"))
   | Nil -> fail "expected `;` but got EOF";
 
+let expect_rbrace = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TRBrace -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `}`"))
+  | Nil -> fail "expected `}` but got EOF";
+
+let expect_pipe = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TPipe -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `|`"))
+  | Nil -> fail "expected `|` but got EOF";
+
 let is_primitive_type_name = fn (s: str) ->
   s == "int" || s == "bool" || s == "str" || s == "unit" || s == "float";
 
@@ -416,7 +434,20 @@ and parse_apply_tail = fn (acc: expr) -> fn (toks: pos_token list) ->
     parse_apply_tail (EApp (acc, arg)) rest
   else (acc, toks)
 
+// Postfix field access (`e.f`, chained left-associatively as `e.f.g`).
+// Binds tighter than application, so `f.g x` parses as `(f.g) x`.
 and parse_atom = fn (toks: pos_token list) ->
+  let (e, toks1) = parse_atom_raw toks in
+  parse_field_postfix e toks1
+
+and parse_field_postfix = fn (acc: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TDot ->
+      let (fname, toks1) = expect_ident (advance toks) in
+      parse_field_postfix (EFieldGet (acc, fname)) toks1
+    | _ -> (acc, toks))
+
+and parse_atom_raw = fn (toks: pos_token list) ->
   (match toks with
     | Nil -> fail "unexpected EOF in expression"
     | Cons (pt, rest) ->
@@ -429,20 +460,34 @@ and parse_atom = fn (toks: pos_token list) ->
         | TIdent name ->
           // Uppercase ident = constructor. `Foo (x, y)` eagerly swallows
           // the paren payload so the AST mirrors OCaml's `Constr (..)`
-          // shape. Bare `Foo` becomes a no-arg constructor; if followed
-          // by another atom (lowercase ident, number, ...), parse_apply
-          // glues it as a function-style application. Non-paren payloads
-          // like `Some 1` are deferred to slice 2.
+          // shape. `Foo { f = e }` / `Foo { e with f = e' }` is record
+          // literal / record update (Stage 50i). Bare `Foo` becomes a
+          // no-arg constructor; if followed by another atom (lowercase
+          // ident, number, ...), parse_apply glues it as a function-
+          // style application. Non-paren constructor payloads like
+          // `Some 1` are deferred (constr-arity table not available).
           (if is_upper_first_c name then
             (match peek_tok rest with
               | TLParen ->
                 let (payload, rest2) = parse_paren_body (advance rest) in
                 (EConstr (name, Some payload), rest2)
+              | TLBrace ->
+                // `Name { f = e, ... }` record literal. The `Name { base
+                // with ... }` form ISN'T Mere syntax — OCaml side uses
+                // `{ base | f = e, ... }` (bare braces, `|` separator)
+                // for record update, which lands in the TLBrace branch
+                // below.
+                parse_record_lit_body name (advance rest)
               | _ -> (EConstr (name, None), rest))
           else
             (EVar name, rest))
         | TLParen -> parse_paren_body rest
         | TLBracket -> parse_list_literal rest
+        // `{ base | f = e, ... }` record update — OCaml-side syntax.
+        // `{}` (unit literal) and `{ e1; e2; ... }` (block expressions)
+        // are deferred until a future slice; for now, anything starting
+        // with `{` that isn't `Name {` must be a record update.
+        | TLBrace -> parse_record_update_form rest
         | _ -> fail ("line " ++ show line ++ ": unexpected token in atom")))
 
 // Read the contents of `( ... )` after the opening paren has been
@@ -498,6 +543,41 @@ and desugar_list = fn (elems: expr list) ->
       EConstr ("Cons",
         Some (ETuple (Cons (h, Cons (desugar_list t, Nil))))))
 
+// `Name {` has been consumed — parse the body of a record literal.
+// Empty `Name { }` is a 0-field literal.
+and parse_record_lit_body = fn (name: str)
+                          -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBrace -> (ERecordLit (name, Nil), advance toks)
+    | _ ->
+      let (fields, toks1) = parse_record_field_inits toks in
+      let toks2 = expect_rbrace toks1 in
+      (ERecordLit (name, fields), toks2))
+
+// `{` has been consumed — parse `BASE | f1 = e1, ... }` record update.
+// Matches OCaml-side `lib/parser.ml` syntax: the type name is omitted
+// (inferred from BASE), fields are separated by `,` after a leading
+// `|` that follows the base expression.
+and parse_record_update_form = fn (toks: pos_token list) ->
+  let (base, toks1) = parse_expr toks in
+  let toks2 = expect_pipe toks1 in
+  let (fields, toks3) = parse_record_field_inits toks2 in
+  let toks4 = expect_rbrace toks3 in
+  (ERecordUpdate (base, fields), toks4)
+
+// `f1 = e1, f2 = e2, ...` — caller handles the closing `}`. Used by
+// both record literals (`Name { f = e, ... }`) and record updates
+// (`{ base | f = e, ... }`).
+and parse_record_field_inits = fn (toks: pos_token list) ->
+  let (fname, toks1) = expect_ident toks in
+  let toks2 = expect_eq toks1 in
+  let (value, toks3) = parse_expr toks2 in
+  (match peek_tok toks3 with
+    | TComma ->
+      let (rest, toks4) = parse_record_field_inits (advance toks3) in
+      (Cons ((fname, value), rest), toks4)
+    | _ -> (Cons ((fname, value), Nil), toks3))
+
 // === Pattern parser =========================================================
 //
 // `parse_pattern` wraps `parse_pattern_base` with an optional trailing
@@ -537,6 +617,9 @@ and parse_pattern_base = fn (toks: pos_token list) ->
               | TLParen ->
                 let (payload, rest2) = parse_paren_pattern (advance rest) in
                 (PConstr (name, Some payload), rest2)
+              | TLBrace ->
+                let (fields, rest2) = parse_record_pat_fields (advance rest) in
+                (PRecord (name, fields), rest2)
               | _ -> (PConstr (name, None), rest))
           else
             (PVar name, rest))
@@ -586,6 +669,26 @@ and desugar_list_pattern = fn (elems: pattern list) ->
     | Cons (h, t) ->
       PConstr ("Cons",
         Some (PTuple (Cons (h, Cons (desugar_list_pattern t, Nil))))))
+
+// `f1 = pat1, f2 = pat2, ... }` (the leading `{` has already been
+// consumed). Same shape as `parse_record_field_inits` but for patterns
+// instead of expressions. Empty `{ }` produces a 0-field PRecord.
+and parse_record_pat_fields = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBrace -> (Nil, advance toks)
+    | _ ->
+      let (fname, toks1) = expect_ident toks in
+      let toks2 = expect_eq toks1 in
+      let (p, toks3) = parse_pattern toks2 in
+      (match peek_tok toks3 with
+        | TComma ->
+          let (rest, toks4) = parse_record_pat_fields (advance toks3) in
+          (Cons ((fname, p), rest), toks4)
+        | TRBrace ->
+          (Cons ((fname, p), Nil), advance toks3)
+        | _ ->
+          fail ("line " ++ show (peek_line toks3)
+                ++ ": expected `,` or `}` in record pattern fields")))
 
 // === Match expression =======================================================
 //
@@ -758,20 +861,49 @@ let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
       let (main, toks1) = parse_expr toks in
       ((list_rev acc, main), toks1))
 
-// `type NAME = [|] CTOR [of TY] (| CTOR [of TY])* ;`. Type parameters
-// (`type T 'a = ...`) are out of scope until the lexer learns
-// `T_tyvar` — slice 50e keeps `params` as the empty list. Records
-// (`type T = { f: ty, ... };`) ride along with their expr-side form in
-// a future slice.
+// `type NAME = [|] CTOR [of TY] (| CTOR [of TY])* ;` (variant) or
+// `type NAME = { f1: ty, f2: ty, ... };` (record, Stage 50i). The two
+// shapes are disambiguated by the token right after `=`: `{` opens a
+// record field list, anything else (`|` or an uppercase ident) starts
+// a variant list.
+//
+// Type parameters (`type T 'a = ...`) are still out of scope — the
+// lexer doesn't tokenize `'a` yet — so `params` stays the empty list.
 and parse_type_decl = fn (toks: pos_token list) ->
   let (name, toks1) = expect_ident toks in
   let toks2 = expect_eq toks1 in
-  let toks3 = (match peek_tok toks2 with
-    | TPipe -> advance toks2
-    | _ -> toks2) in
-  let (variants, toks4) = parse_variant_seq toks3 in
-  let toks5 = expect_semi toks4 in
-  (TopType (name, Nil, variants), toks5)
+  (match peek_tok toks2 with
+    | TLBrace ->
+      let (fields, toks3) = parse_record_field_decls (advance toks2) in
+      let toks4 = expect_semi toks3 in
+      (TopRecord (name, Nil, fields), toks4)
+    | _ ->
+      let toks3 = (match peek_tok toks2 with
+        | TPipe -> advance toks2
+        | _ -> toks2) in
+      let (variants, toks4) = parse_variant_seq toks3 in
+      let toks5 = expect_semi toks4 in
+      (TopType (name, Nil, variants), toks5))
+
+// `f1: ty1, f2: ty2, ... }` (the leading `{` has already been
+// consumed). Trailing `,` before `}` is rejected — matches the OCaml
+// side, where field separators are strictly between fields.
+and parse_record_field_decls = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBrace -> (Nil, advance toks)
+    | _ ->
+      let (fname, toks1) = expect_ident toks in
+      let toks2 = expect_colon toks1 in
+      let (t, toks3) = parse_type toks2 in
+      (match peek_tok toks3 with
+        | TComma ->
+          let (rest, toks4) = parse_record_field_decls (advance toks3) in
+          (Cons ((fname, t), rest), toks4)
+        | TRBrace ->
+          (Cons ((fname, t), Nil), advance toks3)
+        | _ ->
+          fail ("line " ++ show (peek_line toks3)
+                ++ ": expected `,` or `}` in record field decls")))
 
 and parse_variant_seq = fn (toks: pos_token list) ->
   let (head, toks1) = parse_one_variant toks in
@@ -953,7 +1085,11 @@ let top_decl_to_str = fn (d: top_decl) ->
       (match payload with
         | None -> n
         | Some t -> n ++ " of " ++ ty_to_str t)) in
-    "TopType(" ++ name ++ ", [" ++ str_join " | " parts ++ "])";
+    "TopType(" ++ name ++ ", [" ++ str_join " | " parts ++ "])"
+  | TopRecord (name, _params, fields) ->
+    let parts = list_map fields (fn (f: str * ty) ->
+      let (fname, fty) = f in fname ++ ": " ++ ty_to_str fty) in
+    "TopRecord(" ++ name ++ ", \{" ++ str_join ", " parts ++ "})";
 
 let program_to_str = fn (p: program) ->
   let (decls, main) = p in
@@ -1049,4 +1185,18 @@ let _ = print ("h10 (mix decls):      " ++ parse_str_program "type opt = | Just 
 let _ = print ("h11 (let in main):    " ++ parse_str_program "let x = 1 in x + 1") in
 let _ = print ("h12 (annotated decl): " ++ parse_str_program "let add = fn (x: int) -> fn (y: int) -> x + y; add 1 2") in
 let _ = print ("h13 (full program):   " ++ parse_str_program "type mylist = | MyNil | MyCons of int * mylist; let rec sum = fn (xs: mylist) -> match xs with | MyNil -> 0 | MyCons (h, t) -> h + sum t; sum (MyCons (1, MyCons (2, MyCons (3, MyNil))))") in
+let _ = print "" in
+let _ = print "=== Stage 50i parser demos (records) ===" in
+let _ = print ("i1  (record decl):   " ++ parse_str_program "type Point = \{ x: int, y: int };") in
+let _ = print ("i2  (record empty):  " ++ parse_str_program "type Empty = \{ };") in
+let _ = print ("i3  (record lit):    " ++ parse_str_program "Point \{ x = 1, y = 2 }") in
+let _ = print ("i4  (record lit 0):  " ++ parse_str_program "Empty \{ }") in
+let _ = print ("i5  (field access):  " ++ parse_str_program "p.x") in
+let _ = print ("i6  (field chain):   " ++ parse_str_program "p.x.y.z") in
+let _ = print ("i7  (apply on fld):  " ++ parse_str_program "p.f a") in
+let _ = print ("i8  (record update): " ++ parse_str_program "\{ p | x = 10 }") in
+let _ = print ("i9  (rec upd multi): " ++ parse_str_program "\{ p | x = 10, y = 20 }") in
+let _ = print ("i10 (record pat):    " ++ parse_str_program "match p with | Point \{ x = 0, y = 0 } -> 0 | _ -> 1") in
+let _ = print ("i11 (let rec pat):   " ++ parse_str_program "let Point \{ x = a, y = b } = p in a + b") in
+let _ = print ("i12 (whole pgm):     " ++ parse_str_program "type Point = \{ x: int, y: int }; let origin = Point \{ x = 0, y = 0 }; origin.x + origin.y") in
 0

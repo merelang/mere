@@ -85,6 +85,11 @@ type top_decl =
   | TopLet of pattern * expr
   | TopLetRec of (str * expr) list
   | TopType of str * str list * (str * ty option) list
+  // `type T = { f: ty, ... };`. Stage 50i added the parser side; the
+  // fmt side already handled records via the field-keyed `pattern` /
+  // `expr` variants since Phase 49b, so this completes the record
+  // story end-to-end.
+  | TopRecord of str * str list * (str * ty) list
   ;
 
 type program = top_decl list * expr;

@@ -7728,5 +7728,16 @@ let () =
   cross_validate "multi-decl program"
     "type opt = | Just of int | Nothing; let x = Just (42); let rec sum = fn (xs: int list) -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t; sum [1, 2, 3]";
 
+  (* Stage 50i — records. *)
+  cross_validate "record decl" "type Point = { x: int, y: int }; ()";
+  cross_validate "record literal"
+    "type Point = { x: int, y: int }; let p = Point { x = 1, y = 2 }; p.x";
+  cross_validate "record field chain"
+    "type Pair = { fst: int, snd: int }; let p = Pair { fst = 1, snd = 2 }; p.fst + p.snd";
+  cross_validate "record update"
+    "type Point = { x: int, y: int }; let origin = Point { x = 0, y = 0 }; { origin | x = 10 }";
+  cross_validate "record pattern"
+    "type Point = { x: int, y: int }; let p = Point { x = 0, y = 0 } in match p with | Point { x = 0, y = 0 } -> 0 | _ -> 1";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
