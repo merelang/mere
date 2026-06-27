@@ -90,6 +90,10 @@ type top_decl =
   // `expr` variants since Phase 49b, so this completes the record
   // story end-to-end.
   | TopRecord of str * str list * (str * ty) list
+  // `type T = TY;` (Stage 50j). Type aliases are common in real Mere
+  // source — `type pos_token = int * token;` in lexer.mere is the
+  // first one self-host parser tripped on when fed its own input.
+  | TopTypeAlias of str * str list * ty
   ;
 
 type program = top_decl list * expr;
