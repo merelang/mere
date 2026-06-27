@@ -21,10 +21,11 @@ Together with `contrib/parser/` (Phase 50) and `contrib/fmt/`
 
 | Stage | Content | Status |
 |---|---|---|
-| **51a** | value type + env + minimal eval (literal / var / binop / cmpop / logicop / neg / if / annot) + 11 hand-coded demos | **complete** (this commit) |
-| **51b** | closures (`EFun` + `EApp`), `ELet`, `EMatch`, `ELetRec` (with `VRecGroup` for mutual recursion) | future |
-| **51c** | constructors / tuples / list literal reconstruction in `value_to_str` | future |
-| **51d** | full pattern coverage + records (`VRecord`) | future |
+| **51a** | value type + env + minimal eval (literal / var / binop / cmpop / logicop / neg / if / annot) + 11 hand-coded demos | **complete** |
+| **51b-1** | closures (`EFun` + `EApp`), `ELet`, `EMatch` + full `match_pattern` (PWild / PVar / PInt / PBool / PStr / PUnit / PConstr / PTuple / PAs / POr), `EConstr`, `ETuple` + 12 more demos | **complete** (this commit) |
+| **51b-2** | `ELetRec` with `VRecGroup` for mutual recursion (factorial / mutual `even` `odd`) | future |
+| **51c** | list literal reconstruction in `value_to_str` (`Cons` / `Nil` chain → `[1, 2, 3]`) | future |
+| **51d** | records (`VRecord` + `PRecord` + `ERecordLit` / `EFieldGet` / `ERecordUpdate`) | future |
 | **51e** | minimal builtins (extern fn) + top-level decl integration (`TopLet` / `TopLetRec` / `TopType` / `TopRecord`) | future |
 | **51f** | Browser bridge — paste source, run, see result; **live in-browser Mere REPL** | future |
 
@@ -48,7 +49,7 @@ d4  (if cmp lt):        "less"
 Runs identically on interp / C (`mere -c` + `cc`) / Wasm
 (`mere -w` + `wat2wasm` + `node scripts/run_wasm.js`).
 
-## Stage 51a scope
+## Eval scope (Stage 51a + 51b-1)
 
 | Form | Behaviour |
 |---|---|
@@ -60,9 +61,18 @@ Runs identically on interp / C (`mere -c` + `cc`) / Wasm
 | `ENeg e` | unary minus on `VInt` |
 | `EIf (c, t, e)` | branch on `VBool` |
 | `EAnnot (e, _ty)` | transparent (annotation ignored at eval time) |
+| `EFun (arg, _ty, body)` | build `VClosure (arg, body, env)` (51b-1) |
+| `EApp (f, a)` | apply `VClosure` — `eval body (Cons ((arg, av), captured))` (51b-1) |
+| `ELet (pat, v, body)` | match `pat` against `eval v`, extend env, eval body (51b-1) |
+| `EMatch (e, arms)` | iterate arms; first matching `(pat, guard, body)` wins (51b-1) |
+| `EConstr (name, payload?)` | build `VConstr` (51b-1) |
+| `ETuple es` | `VTuple (list_map …)` (51b-1) |
 
-Everything else (`EFun`, `EApp`, `ELet`, `ELetRec`, `EMatch`,
-`EConstr`, `ETuple`, `ERecordLit`, `EFieldGet`, `ERecordUpdate`,
+Patterns covered (`match_pattern`): `PWild`, `PVar`, `PInt`, `PBool`,
+`PStr`, `PUnit`, `PConstr`, `PTuple`, `PAs`, `POr`. `PRecord` falls
+through to `None` until Stage 51d introduces `VRecord`.
+
+Everything else (`ELetRec`, `ERecordLit`, `EFieldGet`, `ERecordUpdate`,
 `EFloat`) falls through to a `fail` that names the upcoming stage.
 
 ## Notes on the port

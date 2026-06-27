@@ -72,6 +72,85 @@ let rec value_to_str = fn (v: value) ->
   | VClosure _ -> "<closure>"
   ;
 
+// === Pattern matching ======================================================
+//
+// `match_pattern p v` -> `Some bindings` if `v` matches `p`, `None`
+// otherwise. Mirrors OCaml-side `Eval.match_pattern`. The `bindings`
+// list shape `(str * value) list` is the same as `env`, so the caller
+// can prepend it directly.
+//
+// `PRecord` is in `ast.mere` but not handled here — `VRecord` doesn't
+// exist until Stage 51d. The fall-through `_` arm covers it (no
+// match).
+
+let rec match_pattern = fn (p: pattern) -> fn (v: value) ->
+  match p with
+  | PWild -> Some Nil
+  | PVar name -> Some (Cons ((name, v), Nil))
+  | PInt n ->
+    (match v with
+      | VInt m -> if n == m then Some Nil else None
+      | _ -> None)
+  | PBool b ->
+    (match v with
+      | VBool b2 -> if b == b2 then Some Nil else None
+      | _ -> None)
+  | PStr s ->
+    (match v with
+      | VStr s2 -> if s == s2 then Some Nil else None
+      | _ -> None)
+  | PUnit ->
+    (match v with
+      | VUnit -> Some Nil
+      | _ -> None)
+  | PConstr (cname, sub_p_opt) ->
+    (match v with
+      | VConstr (vname, sub_v_opt) ->
+        if cname == vname then
+          (match (sub_p_opt, sub_v_opt) with
+            | (None, None) -> Some Nil
+            | (Some sub_p, Some sub_v) -> match_pattern sub_p sub_v
+            | _ -> None)
+        else None
+      | _ -> None)
+  | PTuple ps ->
+    (match v with
+      | VTuple vs -> match_pattern_list ps vs
+      | _ -> None)
+  | PAs (sub_p, name) ->
+    (match match_pattern sub_p v with
+      | None -> None
+      | Some bs -> Some (Cons ((name, v), bs)))
+  | POr (p1, p2) ->
+    (match match_pattern p1 v with
+      | Some bs -> Some bs
+      | None -> match_pattern p2 v)
+  | _ -> None  // PRecord — VRecord lands in Stage 51d
+
+and match_pattern_list = fn (ps: pattern list) -> fn (vs: value list) ->
+  match (ps, vs) with
+  | (Nil, Nil) -> Some Nil
+  | (Cons (ph, pt), Cons (vh, vt)) ->
+    (match match_pattern ph vh with
+      | None -> None
+      | Some bs1 ->
+        (match match_pattern_list pt vt with
+          | None -> None
+          | Some bs2 -> Some (concat_bindings bs1 bs2)))
+  | _ -> None
+
+and concat_bindings = fn (a: (str * value) list) -> fn (b: (str * value) list) ->
+  match a with
+  | Nil -> b
+  | Cons (h, t) -> Cons (h, concat_bindings t b);
+
+// Prepend a list of bindings to an env (left-most binding wins on
+// lookup since `lookup_env` is linear-left-to-right).
+let rec extend_env = fn (bindings: (str * value) list) -> fn (e: env) ->
+  match bindings with
+  | Nil -> e
+  | Cons (b, rest) -> Cons (b, extend_env rest e);
+
 // === Operator dispatch =====================================================
 //
 // `eval_binop` / `eval_cmpop` take pre-evaluated `value`s so they don't
@@ -149,7 +228,52 @@ let rec eval = fn (e: expr) -> fn (env: env) ->
   // EAnnot is transparent at eval — the annotation only matters to the
   // (future) typer.
   | EAnnot (annotated, _ty) -> eval annotated env
-  | _ -> fail "eval: stage 51a doesn't handle this expr (closures / let / match / records come in 51b-51d)"
+  // Stage 51b-1: closures + let + match + constructor / tuple.
+  | EFun (arg_name, _ty_opt, body) ->
+    VClosure (arg_name, body, env)
+  | EApp (f, arg) ->
+    (match eval f env with
+      | VClosure (arg_name, body, captured) ->
+        let av = eval arg env in
+        eval body (Cons ((arg_name, av), captured))
+      | _ -> fail "app: not a closure")
+  | ELet (pat, value_expr, body) ->
+    let v = eval value_expr env in
+    (match match_pattern pat v with
+      | None -> fail "let: pattern mismatch"
+      | Some bindings -> eval body (extend_env bindings env))
+  | EMatch (scrutinee, arms) ->
+    try_match_arms arms (eval scrutinee env) env
+  | EConstr (name, payload_expr) ->
+    (match payload_expr with
+      | None -> VConstr (name, None)
+      | Some pe -> VConstr (name, Some (eval pe env)))
+  | ETuple exprs ->
+    VTuple (list_map exprs (fn (ex: expr) -> eval ex env))
+  | _ -> fail "eval: ELetRec / records / EFloat land in 51b-2 / 51d"
+
+// `EMatch` arm iteration. For each arm, try `match_pattern`; if it
+// matches and the optional guard evaluates to `VBool true`, eval the
+// body. Otherwise move on. Crashes if no arm matches — mirrors the
+// OCaml side's "Match_failure"-style exit but with a single `fail`.
+and try_match_arms = fn (arms: (pattern * expr option * expr) list)
+                    -> fn (v: value) -> fn (env: env) ->
+  match arms with
+  | Nil -> fail "match: no arm matched"
+  | Cons (arm, rest) ->
+    let (pat, guard_opt, body) = arm in
+    (match match_pattern pat v with
+      | None -> try_match_arms rest v env
+      | Some bindings ->
+        let arm_env = extend_env bindings env in
+        let guard_ok = (match guard_opt with
+          | None -> true
+          | Some g ->
+            (match eval g arm_env with
+              | VBool b -> b
+              | _ -> fail "match guard: expected bool")) in
+        if guard_ok then eval body arm_env
+        else try_match_arms rest v env)
   ;
 
 // === Demos =================================================================
@@ -197,6 +321,58 @@ let d11 = ELogic (OpAnd,
                   EBool false,
                   EBin (OpDiv, EInt 1, EInt 0));
 
+// === Stage 51b-1 demo data =================================================
+
+// e1: `let x = 5 in x + 1` -> VInt 6
+let e1 = ELet (PVar "x", EInt 5,
+               EBin (OpAdd, EVar "x", EInt 1));
+// e2: `(fn x -> x + 1) 5` -> VInt 6
+let e2 = EApp (EFun ("x", None, EBin (OpAdd, EVar "x", EInt 1)),
+               EInt 5);
+// e3: closure capture — `let y = 10 in (fn x -> x + y) 3` -> VInt 13
+let e3 = ELet (PVar "y", EInt 10,
+               EApp (EFun ("x", None, EBin (OpAdd, EVar "x", EVar "y")),
+                     EInt 3));
+// e4: `let inc = fn x -> x + 1 in inc (inc 10)` -> VInt 12
+let e4 = ELet (PVar "inc",
+               EFun ("x", None, EBin (OpAdd, EVar "x", EInt 1)),
+               EApp (EVar "inc",
+                     EApp (EVar "inc", EInt 10)));
+// e5: `match 0 with | 0 -> "zero" | _ -> "other"` -> "zero"
+let e5 = EMatch (EInt 0,
+                 Cons ((PInt 0, None, EStr "zero"),
+                   Cons ((PWild, None, EStr "other"), Nil)));
+// e6: tuple destructure — `let (a, b) = (3, 4) in a + b` -> VInt 7
+let e6 = ELet (PTuple (Cons (PVar "a", Cons (PVar "b", Nil))),
+               ETuple (Cons (EInt 3, Cons (EInt 4, Nil))),
+               EBin (OpAdd, EVar "a", EVar "b"));
+// e7: constructor + match — `match Some(42) with | Some n -> n | None -> 0` -> 42
+let e7 = EMatch (EConstr ("Some", Some (EInt 42)),
+                 Cons ((PConstr ("Some", Some (PVar "n")), None, EVar "n"),
+                   Cons ((PConstr ("None", None), None, EInt 0), Nil)));
+// e8: as-pattern — `match 5 with | n as x -> n + x` -> 10
+let e8 = EMatch (EInt 5,
+                 Cons ((PAs (PVar "n", "x"), None,
+                        EBin (OpAdd, EVar "n", EVar "x")), Nil));
+// e9: or-pattern — `match 2 with | 1 | 2 | 3 -> "low" | _ -> "high"` -> "low"
+let e9 = EMatch (EInt 2,
+                 Cons ((POr (POr (PInt 1, PInt 2), PInt 3), None,
+                        EStr "low"),
+                   Cons ((PWild, None, EStr "high"), Nil)));
+// e10: guard — `match 7 with | n when n > 0 -> "pos" | _ -> "nonpos"` -> "pos"
+let e10 = EMatch (EInt 7,
+                  Cons ((PVar "n",
+                         Some (ECmp (OpGt, EVar "n", EInt 0)),
+                         EStr "pos"),
+                    Cons ((PWild, None, EStr "nonpos"), Nil)));
+// e11: nested constr — `Some (Some 1)` matched -> 1
+let e11 = EMatch (EConstr ("Some", Some (EConstr ("Some", Some (EInt 1)))),
+                  Cons ((PConstr ("Some", Some (PConstr ("Some", Some (PVar "n")))),
+                         None, EVar "n"),
+                    Cons ((PWild, None, EInt 0), Nil)));
+// e12: closure that ignores its arg — `(fn _ -> 42) 99` -> 42
+let e12 = EApp (EFun ("_u", None, EInt 42), EInt 99);
+
 let _ = print "=== Stage 51a eval demos ===" in
 let _ = print ("d1  (literal 42):       " ++ value_to_str (eval d1 empty_env)) in
 let _ = print ("d2  (1 + 2):            " ++ value_to_str (eval d2 empty_env)) in
@@ -209,4 +385,18 @@ let _ = print ("d8  (str concat):       " ++ value_to_str (eval d8 empty_env)) i
 let _ = print ("d9  (env x+y, 10+20):   " ++ value_to_str (eval d9_expr env_xy)) in
 let _ = print ("d10 (if x>0 ... else):  " ++ value_to_str (eval d10_expr env_neg)) in
 let _ = print ("d11 (short-circuit):    " ++ value_to_str (eval d11 empty_env)) in
+let _ = print "" in
+let _ = print "=== Stage 51b-1 eval demos (closures + let + match) ===" in
+let _ = print ("e1  (let x = 5 in x+1):       " ++ value_to_str (eval e1 empty_env)) in
+let _ = print ("e2  ((fn x->x+1) 5):          " ++ value_to_str (eval e2 empty_env)) in
+let _ = print ("e3  (closure capture):        " ++ value_to_str (eval e3 empty_env)) in
+let _ = print ("e4  (inc (inc 10)):           " ++ value_to_str (eval e4 empty_env)) in
+let _ = print ("e5  (match int):              " ++ value_to_str (eval e5 empty_env)) in
+let _ = print ("e6  (let tuple destructure):  " ++ value_to_str (eval e6 empty_env)) in
+let _ = print ("e7  (match Some/None):        " ++ value_to_str (eval e7 empty_env)) in
+let _ = print ("e8  (as-pattern):             " ++ value_to_str (eval e8 empty_env)) in
+let _ = print ("e9  (or-pattern):             " ++ value_to_str (eval e9 empty_env)) in
+let _ = print ("e10 (guard):                  " ++ value_to_str (eval e10 empty_env)) in
+let _ = print ("e11 (nested constr):          " ++ value_to_str (eval e11 empty_env)) in
+let _ = print ("e12 (ignored arg):            " ++ value_to_str (eval e12 empty_env)) in
 0
