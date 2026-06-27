@@ -1,3 +1,9 @@
 (test
  (name test_basic)
- (libraries mere))
+ (libraries mere)
+ ; Cross-validation tests (Phase 50.10) need to read contrib/parser/*.mere
+ ; and contrib/fmt/*.mere via Mere's `import` machinery. Dune runs the
+ ; test binary from `_build/default/test`, so the test resolves the
+ ; project root at runtime by walking up to the first ancestor
+ ; containing `dune-project`.
+ (deps (source_tree ../contrib) (source_tree ../scripts)))
