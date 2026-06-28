@@ -33,6 +33,16 @@ if [ -f "$SELFHOST_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w $SELFHOST_SRC -> playground/selfhost-fmt.wat"
 fi
 
+# Same idea for the REPL bridge — Phase 51.7 (Stage 51f). Pulls
+# contrib/eval/eval.mere + contrib/parser/parser.mere + lexer + ast,
+# so the resulting Wasm carries the full self-host PARSE + EVAL
+# pipeline (the format pipe lives in the previous selfhost-fmt.wat).
+SELFHOST_REPL_SRC="contrib/site/playground/selfhost-repl.mere"
+if [ -f "$SELFHOST_REPL_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w "$SELFHOST_REPL_SRC" > "$PLAYGROUND_OUT/selfhost-repl.wat"
+  echo "  mere -w $SELFHOST_REPL_SRC -> playground/selfhost-repl.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do

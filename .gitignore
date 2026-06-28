@@ -24,6 +24,8 @@ a.out
 # Auto-regenerated from contrib/fmt/fmt.mere by build_full.sh; not
 # checked in because every fmt.mere edit would change it.
 contrib/site/playground/selfhost-fmt.wat
+# Same shape — regenerated from contrib/site/playground/selfhost-repl.mere.
+contrib/site/playground/selfhost-repl.wat
 
 # Editor / IDE
 .vscode/

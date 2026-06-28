@@ -1,0 +1,37 @@
+// contrib/site/playground/selfhost-repl.mere — Phase 51.7 (Stage 51f).
+//
+// Live in-browser Mere REPL. A textarea feeds Mere source through
+// `tokenize -> parse_decls -> run_program`, the result value flows
+// back as text through `dom_set_text`. Calls to the Mere prelude's
+// `print` flow through `puts`, which the host glue (HTML) wires to a
+// separate "console" pane so the user sees both `print` side effects
+// and the evaluated value.
+//
+// Wiring:
+//   contrib/dom/dom.mere    - DOM extern fns (already used by counter
+//                              / echo / selfhost-fmt).
+//   contrib/eval/eval.mere  - `parse_and_eval` + `value_to_str`. Pulls
+//                              `contrib/parser/parser.mere` (+ lexer +
+//                              ast) transitively.
+//
+// The selfhost-fmt browser bridge gave us "live in-browser mere fmt";
+// this gives us "live in-browser mere REPL". §S2.A self-host eval
+// closes once this lands.
+
+import "../../dom/dom.mere";
+import "../../eval/eval.mere";
+
+let input_el = dom_get_by_id "input" in
+let result_el = dom_get_by_id "result" in
+let console_el = dom_get_by_id "console-out" in
+let btn = dom_get_by_id "run-btn" in
+let _ = dom_on_click btn (fn (u: unit) ->
+  // Clear the previous run's console output. `dom_set_text` REPLACES
+  // textContent, so subsequent `print` calls (which append via the
+  // host's `puts` glue) start from a clean slate.
+  let _ = dom_set_text console_el "" in
+  let src = dom_input_value input_el in
+  let result_str = value_to_str (parse_and_eval src) in
+  dom_set_text result_el result_str
+) in
+0
