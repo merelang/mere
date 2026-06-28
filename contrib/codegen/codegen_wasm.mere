@@ -40,7 +40,14 @@ type EmitState = {
   local_tys: str list,
   local_counter: int,
   fn_counter: int,
-  table_entries: str list,
+  // `table_entries` is keyed by fn_idx: each lift prepends
+  // `(fn_idx, fn_name)`, and the module wrapper rebuilds the elem
+  // line by walking 0..fn_counter and looking up each. This is
+  // necessary because completion order ≠ fn_idx assignment order in
+  // mutual rec (lifts happen sequentially in declaration order but
+  // assign indices ahead of time), and nested EFun has the opposite
+  // pattern. Indexing explicitly handles both.
+  table_entries: (int * str) list,
   variant_tags: (str * int) list,
   lifted_fns: str list,
   captures: (str * int) list,
@@ -237,7 +244,16 @@ let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
       | Some p -> free_vars p bound)
   | EMatch (scrutinee, arms) ->
     union_strs (free_vars scrutinee bound) (free_vars_arms arms bound)
-  | _ -> Nil  // ERecordLit / ELetRec / etc. land in later stages.
+  | ELetRec (bindings, body) ->
+    // All rec names are in scope for both the value expressions
+    // (mutual recursion) and the body. Free vars = union of
+    // (each value's free vars) ∪ (body's free vars), minus the
+    // bound names.
+    let names = letrec_names bindings in
+    let bound2 = union_strs names bound in
+    union_strs (free_vars_letrec_vals bindings bound2)
+               (free_vars body bound2)
+  | _ -> Nil  // ERecordLit / etc. land in later stages.
 
 and free_vars_list = fn (es: expr list) -> fn (bound: str list) ->
   match es with
@@ -278,6 +294,22 @@ and pattern_bindings_list = fn (ps: pattern list) ->
   match ps with
   | Nil -> Nil
   | Cons (h, t) -> union_strs (pattern_bindings h) (pattern_bindings_list t)
+
+and letrec_names = fn (bindings: (str * expr) list) ->
+  match bindings with
+  | Nil -> Nil
+  | Cons (b, rest) ->
+    let (name, _) = b in
+    Cons (name, letrec_names rest)
+
+and free_vars_letrec_vals = fn (bindings: (str * expr) list)
+                         -> fn (bound: str list) ->
+  match bindings with
+  | Nil -> Nil
+  | Cons (b, rest) ->
+    let (_name, val_expr) = b in
+    union_strs (free_vars val_expr bound)
+               (free_vars_letrec_vals rest bound)
   ;
 
 // `build_offsets caps 0` assigns each captured name a 4-byte slot in
@@ -546,7 +578,7 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
       captures = s.captures,
       fn_counter = inner_done.fn_counter,
       lifted_fns = Cons (fn_def, inner_done.lifted_fns),
-      table_entries = Cons (fn_name, inner_done.table_entries) } : EmitState) in
+      table_entries = Cons ((fn_idx, fn_name), inner_done.table_entries) } : EmitState) in
     let s_with_env = emit_build_env captures_list s_after_lift in
     emit_alloc_closure fn_idx s_with_env
   | EApp (f, x) ->
@@ -603,7 +635,14 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let (s_tmp, s2) = alloc_tmp_local s1 in
     let s3 = push_instr ("local.set " ++ show s_tmp) s2 in
     emit_match_arms arms s_tmp s3
-  | _ -> fail "codegen_wasm: stage 53d doesn't handle this expr yet"
+  | ELetRec (bindings, body) ->
+    // Closure-env backpatching: pre-alloc each rec binding's 8-byte
+    // closure record and bind the name to its slot so the body and
+    // sibling values can reference it. Then lift each function and
+    // patch its env_ptr + fn_idx into the pre-allocated record.
+    let s1 = emit_letrec_bindings bindings s in
+    emit_expr body s1
+  | _ -> fail "codegen_wasm: stage 53e-2 doesn't handle this expr yet"
 
 // `emit_build_env caps s` allocates a 4×N byte env record, walks each
 // captured name and emits its value via the regular EVar dispatch
@@ -786,6 +825,106 @@ and emit_match_arms = fn (arms: (pattern * expr option * expr) list)
     let s6 = ({ s5 | locals = outer_locals } : EmitState) in
     let s7 = emit_match_arms rest slot s6 in
     push_instr "end" s7
+
+// === let-rec (Stage 53e-2) =================================================
+//
+// Recursive bindings need the closure record to exist BEFORE the
+// function body is emitted, so the body's captures can resolve `name`
+// to a local that already holds the closure pointer. The trick:
+//
+//   1. Pre-allocate an empty 8-byte closure record per binding, save
+//      the pointer to a local that becomes `name`'s slot. The body's
+//      view of `name` is now "load this pointer" — which works as
+//      soon as we patch the env+fn_idx in step 3.
+//
+//   2. For each binding, lift the fn body into `$anon_N_fn`. The
+//      lifted body's `EVar name` falls through `locals` (empty inside
+//      the lift) → `captures` (which includes `name` at some offset)
+//      → `local.get 0; i32.load offset=N`.
+//
+//   3. Build the env record using the outer-state locals (so `name`
+//      resolves to the pre-allocated slot's value — the closure
+//      pointer itself). Store env_ptr at slot+0 and fn_idx at slot+4
+//      — overwriting the pre-allocation. Now the closure is fully
+//      formed and references itself + siblings transitively.
+//
+// Mutual recursion just iterates this for every (name, fn_expr) pair.
+// Non-function rec values aren't allowed (would need lazy thunks);
+// `let rec x = 5 in ...` raises a runtime fail.
+
+and emit_letrec_bindings = fn (bindings: (str * expr) list)
+                        -> fn (s: EmitState) ->
+  let (preallocated, s1) = preallocate_letrec bindings s in
+  emit_letrec_lifts preallocated s1
+
+and preallocate_letrec = fn (bindings: (str * expr) list)
+                     -> fn (s: EmitState) ->
+  match bindings with
+  | Nil -> ((Nil, s) : ((str * expr * int) list * EmitState))
+  | Cons (b, rest) ->
+    let (name, fn_expr) = b in
+    let s1 = emit_bump_alloc 8 s in
+    let s2 = alloc_local name s1 in
+    let slot = s2.local_counter - 1 in
+    let s3 = push_instr ("local.set " ++ show slot) s2 in
+    let (rest_alloc, s4) = preallocate_letrec rest s3 in
+    (Cons ((name, fn_expr, slot), rest_alloc), s4)
+
+and emit_letrec_lifts = fn (allocs: (str * expr * int) list)
+                    -> fn (s: EmitState) ->
+  match allocs with
+  | Nil -> s
+  | Cons (a, rest) ->
+    let (_name, fn_expr, slot) = a in
+    let s1 = lift_and_patch_closure fn_expr slot s in
+    emit_letrec_lifts rest s1
+
+and lift_and_patch_closure = fn (fn_expr: expr) -> fn (slot: int)
+                          -> fn (s: EmitState) ->
+  match fn_expr with
+  | EFun (arg, _ty_opt, body) ->
+    let captures_list = free_vars body (Cons (arg, Nil)) in
+    let env_offsets = build_offsets captures_list 0 in
+    let fn_idx = s.fn_counter in
+    let inner = ({ s |
+      instrs = Nil,
+      locals = Cons ((arg, 1), Nil),
+      local_tys = Nil,
+      local_counter = 2,
+      captures = env_offsets,
+      fn_counter = fn_idx + 1 } : EmitState) in
+    let inner_done = emit_expr body inner in
+    let fn_name = "$anon_" ++ show fn_idx ++ "_fn" in
+    let inner_local_decls = join_local_decls (list_reverse inner_done.local_tys) in
+    let inner_body = join_indented (list_reverse inner_done.instrs) in
+    let fn_def =
+      "  (func " ++ fn_name ++ " (param i32) (param i32) (result i32)\n" ++
+      inner_local_decls ++ inner_body ++ ")\n" in
+    let s_after_lift = ({ inner_done |
+      instrs = s.instrs,
+      locals = s.locals,
+      local_tys = s.local_tys,
+      local_counter = s.local_counter,
+      captures = s.captures,
+      fn_counter = inner_done.fn_counter,
+      lifted_fns = Cons (fn_def, inner_done.lifted_fns),
+      table_entries = Cons ((fn_idx, fn_name), inner_done.table_entries) } : EmitState) in
+    // Build env at the outer site. Captures may reference the rec
+    // name itself — `name` is in s.locals (alloc_local added it
+    // during preallocate_letrec), so emit_build_env's EVar dispatch
+    // resolves it to the pre-allocated closure pointer.
+    let s_env = emit_build_env captures_list s_after_lift in
+    // Patch: store env_ptr at slot+0, fn_idx at slot+4 — overwriting
+    // the placeholder bytes left by emit_bump_alloc.
+    let (env_tmp, s_e1) = alloc_tmp_local s_env in
+    let s_e2 = push_instr ("local.set " ++ show env_tmp) s_e1 in
+    let s_e3 = push_instr ("local.get " ++ show slot) s_e2 in
+    let s_e4 = push_instr ("local.get " ++ show env_tmp) s_e3 in
+    let s_e5 = push_instr "i32.store offset=0" s_e4 in
+    let s_e6 = push_instr ("local.get " ++ show slot) s_e5 in
+    let s_e7 = push_instr ("i32.const " ++ show fn_idx) s_e6 in
+    push_instr "i32.store offset=4" s_e7
+  | _ -> fail "codegen_wasm: let rec rhs must be a function literal"
   ;
 
 // === Module wrapper ========================================================
@@ -809,14 +948,32 @@ let rec concat_strs = fn (xs: str list) ->
   | Cons (h, rest) -> h ++ concat_strs rest
   ;
 
-// Build the `(elem (i32.const 0) $anon_0 $anon_1 ...)` line from the
-// list of table_entries. table_entries is reverse-order; flip first
-// so $anon_0 sits at slot 0.
-let rec join_space = fn (xs: str list) ->
+// Build the `(elem (i32.const 0) $anon_0 $anon_1 ...)` line by
+// walking 0..fn_counter and looking up each fn_idx in the
+// `(int * str) list` table_entries. Order in the list is irrelevant
+// — the lookup re-derives the canonical fn_idx -> name order. Two
+// different emit shapes (nested EFun vs sequential let-rec) end up
+// with the list in opposite orders; walking by index handles both.
+
+let rec lookup_int_str = fn (n: int) -> fn (xs: (int * str) list) ->
   match xs with
-  | Nil -> ""
-  | Cons (h, Nil) -> h
-  | Cons (h, rest) -> h ++ " " ++ join_space rest
+  | Nil -> fail ("codegen_wasm: missing table_entries fn_idx " ++ show n)
+  | Cons (b, rest) ->
+    let (i, name) = b in
+    if i == n then name else lookup_int_str n rest
+  ;
+
+let rec build_elem_line = fn (i: int) -> fn (n: int)
+                       -> fn (entries: (int * str) list) ->
+  if i >= n then ""
+  else if i == n - 1 then lookup_int_str i entries
+  else lookup_int_str i entries ++ " " ++ build_elem_line (i + 1) n entries
+  ;
+
+let rec list_length_pair = fn (xs: (int * str) list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_length_pair t
   ;
 
 let wrap_module = fn (locals_decl: str) -> fn (body: str)
@@ -909,8 +1066,7 @@ let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
         let (val_slot, s2) = alloc_tmp_local s1 in
         let s3 = push_instr ("local.set " ++ show val_slot) s2 in
         emit_bind_pattern pat val_slot s3)
-  | TopLetRec _ ->
-    fail "codegen_wasm: TopLetRec lands in stage 53e-2 (backpatching closure env)"
+  | TopLetRec bindings -> emit_letrec_bindings bindings s
   | TopType (_name, _vars, ctors) -> register_ctor_tags ctors s
   | TopRecord (_name, _vars, _fields) -> s
   | TopTypeAlias (_name, _vars, _ty) -> s
@@ -936,8 +1092,8 @@ let emit_program = fn (prog: program) ->
   // reversing would swap the table — exactly the bug surfaced by
   // `((fn x -> fn y -> x + y) 3) 4` in Stage 53c-3 testing.
   let lifted_str = concat_strs s.lifted_fns in
-  let table_size = list_length s.table_entries in
-  let elem_line = join_space s.table_entries in
+  let table_size = list_length_pair s.table_entries in
+  let elem_line = build_elem_line 0 table_size s.table_entries in
   // `data` is built reverse via Cons-prepend in alloc_str_literal —
   // flip to emit in offset order (cleaner for readers; wasm doesn't
   // care).
@@ -1079,4 +1235,16 @@ let _ = print (parse_and_emit "\"hello\"") in
 let _ = print "---" in
 // String interning — two identical literals collapse to one segment.
 let _ = print (parse_and_emit "let (a, b) = (\"hi\", \"hi\") in a") in
+let _ = print "=== Stage 53e-2 codegen_wasm demos (let rec) ===" in
+// Single-binding inner let-rec — `fact` captures itself, body uses it.
+let _ = print (parse_and_emit "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5") in
+let _ = print "---" in
+// Top-level let-rec then apply in main.
+let _ = print (parse_and_emit "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1); fact 6") in
+let _ = print "---" in
+// Mutual recursion (even / odd).
+let _ = print (parse_and_emit "let rec even = fn n -> if n == 0 then 1 else odd (n - 1) and odd = fn n -> if n == 0 then 0 else even (n - 1); even 10") in
+let _ = print "---" in
+// let rec returning poly fn (used here at one type).
+let _ = print (parse_and_emit "let rec id = fn x -> x in id 42") in
 0
