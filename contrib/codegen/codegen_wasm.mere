@@ -88,15 +88,70 @@ let rec join_indented = fn (xs: str list) ->
   | Cons (h, rest) -> "    " ++ h ++ "\n" ++ join_indented rest
   ;
 
-// === Expression emission (Stage 53a scope) =================================
+// === Op → WAT instruction tables ==========================================
 //
-// Only `EInt n` is handled. Everything else falls into the `_ -> fail`
-// arm — that's what Stage 53b onward chips away at.
+// Mere's `bool` lowers to i32 (0/1), so logical ops are bitwise i32.and
+// / i32.or — same convention the OCaml side uses. `OpConcat` (string
+// `++`) lowers to a call into the runtime helper `$__lang_str_concat`,
+// which the stdlib preamble lands in Stage 53e along with the data
+// segment infrastructure; until then it's a Stage 53b marker fail.
+
+let binop_instr = fn (op: binop) ->
+  match op with
+  | OpAdd -> "i32.add"
+  | OpSub -> "i32.sub"
+  | OpMul -> "i32.mul"
+  | OpDiv -> "i32.div_s"
+  | OpMod -> "i32.rem_s"
+  | OpConcat -> fail "codegen_wasm: str ++ str (OpConcat) lands in stage 53e (data segments + extern fns)"
+  ;
+
+let cmpop_instr = fn (op: cmpop) ->
+  match op with
+  | OpEq -> "i32.eq"
+  | OpNe -> "i32.ne"
+  | OpLt -> "i32.lt_s"
+  | OpLe -> "i32.le_s"
+  | OpGt -> "i32.gt_s"
+  | OpGe -> "i32.ge_s"
+  ;
+
+let logicop_instr = fn (op: logicop) ->
+  match op with
+  | OpAnd -> "i32.and"
+  | OpOr -> "i32.or"
+  ;
+
+// === Expression emission (Stage 53b scope) =================================
+//
+// Adds primitives that compile to a fixed instruction sequence. The
+// dispatch follows typer.mere's `infer` / eval.mere's `eval` shape so
+// future stages slot in the same way.
 
 let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
   match e with
   | EInt n -> push_instr ("i32.const " ++ show n) s
-  | _ -> fail "codegen_wasm: stage 53a only handles EInt"
+  | EBool b ->
+    push_instr ("i32.const " ++ (if b then "1" else "0")) s
+  | EBin (op, a, b) ->
+    let s1 = emit_expr a s in
+    let s2 = emit_expr b s1 in
+    push_instr (binop_instr op) s2
+  | ECmp (op, a, b) ->
+    let s1 = emit_expr a s in
+    let s2 = emit_expr b s1 in
+    push_instr (cmpop_instr op) s2
+  | ELogic (op, a, b) ->
+    let s1 = emit_expr a s in
+    let s2 = emit_expr b s1 in
+    push_instr (logicop_instr op) s2
+  | ENeg inner ->
+    // `-x` lowers to `0 - x`. Wasm has no i32.neg.
+    let s1 = push_instr "i32.const 0" s in
+    let s2 = emit_expr inner s1 in
+    push_instr "i32.sub" s2
+  | EAnnot (inner, _) -> emit_expr inner s
+  | _ -> fail "codegen_wasm: stage 53b doesn't handle this expr yet"
   ;
 
 // === Module wrapper ========================================================
@@ -140,4 +195,29 @@ let _ = print "---" in
 let _ = print (parse_and_emit "0") in
 let _ = print "---" in
 let _ = print (parse_and_emit "100") in
+let _ = print "=== Stage 53b codegen_wasm demos (arith + cmp + logic + neg) ===" in
+// Arithmetic — precedence handled by the parser.
+let _ = print (parse_and_emit "1 + 2 * 3") in
+let _ = print "---" in
+let _ = print (parse_and_emit "10 - 4") in
+let _ = print "---" in
+let _ = print (parse_and_emit "100 / 4") in
+let _ = print "---" in
+let _ = print (parse_and_emit "17 % 5") in
+let _ = print "---" in
+// Comparison — both sides int, result is bool (i32 0/1).
+let _ = print (parse_and_emit "1 < 2") in
+let _ = print "---" in
+let _ = print (parse_and_emit "3 == 3") in
+let _ = print "---" in
+// Logic on bools (which are i32 in lowered form).
+let _ = print (parse_and_emit "true && false") in
+let _ = print "---" in
+let _ = print (parse_and_emit "true || false") in
+let _ = print "---" in
+// Negation desugars to `0 - x`.
+let _ = print (parse_and_emit "-5") in
+let _ = print "---" in
+// Annotation passthrough — the codegen ignores the type.
+let _ = print (parse_and_emit "(42 : int)") in
 0
