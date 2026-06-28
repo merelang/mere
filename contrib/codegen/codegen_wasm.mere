@@ -228,9 +228,54 @@ let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
       | PVar name -> Cons (name, bound)
       | _ -> bound) in
     union_strs fv_v (free_vars body bound2)
-  | _ -> Nil  // ETuple / EMatch / ERecordLit / EConstr / ELetRec etc.
-              // land in Stage 53d/53e; their free-var contributions
-              // get filled in then.
+  | ETuple es -> free_vars_list es bound
+  | EConstr (_name, payload_opt) ->
+    (match payload_opt with
+      | None -> Nil
+      | Some p -> free_vars p bound)
+  | EMatch (scrutinee, arms) ->
+    union_strs (free_vars scrutinee bound) (free_vars_arms arms bound)
+  | _ -> Nil  // ERecordLit / ELetRec / etc. land in later stages.
+
+and free_vars_list = fn (es: expr list) -> fn (bound: str list) ->
+  match es with
+  | Nil -> Nil
+  | Cons (h, t) -> union_strs (free_vars h bound) (free_vars_list t bound)
+
+// For match arms, each arm contributes free vars from the guard +
+// body minus the names that the pattern binds. Approximated by
+// collecting `pattern_bindings p` and recursing.
+and free_vars_arms = fn (arms: (pattern * expr option * expr) list)
+                  -> fn (bound: str list) ->
+  match arms with
+  | Nil -> Nil
+  | Cons (arm, rest) ->
+    let (pat, guard_opt, body) = arm in
+    let arm_bound = union_strs (pattern_bindings pat) bound in
+    let fv_guard = (match guard_opt with
+      | None -> Nil
+      | Some g -> free_vars g arm_bound) in
+    let fv_body = free_vars body arm_bound in
+    union_strs (union_strs fv_guard fv_body) (free_vars_arms rest bound)
+
+// Collect every name a pattern binds (PVar / PAs only; PTuple /
+// PConstr recurse). Used by free_vars_arms to extend `bound` when
+// scanning the arm body.
+and pattern_bindings = fn (p: pattern) ->
+  match p with
+  | PVar n -> Cons (n, Nil)
+  | PAs (sub, n) -> Cons (n, pattern_bindings sub)
+  | PTuple ps -> pattern_bindings_list ps
+  | PConstr (_, payload_opt) ->
+    (match payload_opt with
+      | None -> Nil
+      | Some sub -> pattern_bindings sub)
+  | _ -> Nil
+
+and pattern_bindings_list = fn (ps: pattern list) ->
+  match ps with
+  | Nil -> Nil
+  | Cons (h, t) -> union_strs (pattern_bindings h) (pattern_bindings_list t)
   ;
 
 // `build_offsets caps 0` assigns each captured name a 4-byte slot in
@@ -300,6 +345,30 @@ let emit_alloc_closure = fn (fn_idx: int) -> fn (s: EmitState) ->
   // closure pointer on top
   push_instr ("local.get " ++ show cl_tmp) s11;
 
+// === Variant tag allocation (Stage 53d) ====================================
+//
+// Without a TopType registry (lands in 53e), constructor tags are
+// assigned lazily on first encounter — `EConstr` at construction sites
+// and `PConstr` at pattern sites both consult / extend the same table.
+// First `Some` seen ⇒ tag 0, second distinct name (`None`?) ⇒ tag 1,
+// etc. This matches the permissive 52d / 52e approach the self-host
+// typer takes.
+
+let rec list_length_variants = fn (xs: (str * int) list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_length_variants t
+  ;
+
+let lookup_or_alloc_variant_tag = fn (name: str) -> fn (s: EmitState) ->
+  match lookup_assoc name s.variant_tags with
+  | Some t -> ((t, s) : (int * EmitState))
+  | None ->
+    let tag = list_length_variants s.variant_tags in
+    let s2 = ({ s | variant_tags = Cons ((name, tag), s.variant_tags) } : EmitState) in
+    (tag, s2)
+  ;
+
 // === Expression emission (Stage 53c-2 scope) ===============================
 //
 // Layers `EFun` (lifts to a static `$anon_N_fn` + leaves a closure
@@ -364,7 +433,17 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = emit_expr value_expr s in
         let s2 = push_instr "drop" s1 in
         emit_expr body s2
-      | _ -> fail "codegen_wasm: let with non-PVar pattern lands in stage 53d/53e")
+      | _ ->
+        // Stage 53d enables destructuring lets via the pattern-bind
+        // helpers. The let-binding is unconditional (the typer has
+        // validated structure), so no `emit_check_pattern` is needed
+        // — we just stash the value into a tmp slot and walk the
+        // pattern with `emit_bind_pattern`.
+        let s1 = emit_expr value_expr s in
+        let (val_slot, s2) = alloc_tmp_local s1 in
+        let s3 = push_instr ("local.set " ++ show val_slot) s2 in
+        let s4 = emit_bind_pattern pat val_slot s3 in
+        emit_expr body s4)
   | EIf (cond, then_e, else_e) ->
     // (cond) if (result i32) (then_e) else (else_e) end. The condition
     // i32 is consumed; both branches must push exactly one i32 result.
@@ -443,7 +522,44 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s7 = push_instr ("local.get " ++ show tmp) s6 in
     let s8 = push_instr "i32.load offset=4" s7 in
     push_instr "call_indirect (type $cl)" s8
-  | _ -> fail "codegen_wasm: stage 53c-3 doesn't handle this expr yet"
+  | ETuple es ->
+    // Bump-alloc N*4 bytes, store each element at offset i*4, leave
+    // the tuple pointer on top. Sub-expr emit order = source order so
+    // side effects in fields evaluate left-to-right (matches eval.mere).
+    let n = list_length_e es in
+    let s1 = emit_bump_alloc (n * 4) s in
+    let (tup_slot, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.set " ++ show tup_slot) s2 in
+    let s4 = emit_tuple_stores es 0 tup_slot s3 in
+    push_instr ("local.get " ++ show tup_slot) s4
+  | EConstr (name, payload_opt) ->
+    // Variant record layout: (tag at offset 0, payload at offset 4).
+    // For nullary constructors the payload is `i32.const 0`. Tag
+    // allocated lazily — see lookup_or_alloc_variant_tag.
+    let (tag, s1) = lookup_or_alloc_variant_tag name s in
+    let s2 = emit_bump_alloc 8 s1 in
+    let (v_slot, s3) = alloc_tmp_local s2 in
+    let s4 = push_instr ("local.set " ++ show v_slot) s3 in
+    let s5 = push_instr ("local.get " ++ show v_slot) s4 in
+    let s6 = push_instr ("i32.const " ++ show tag) s5 in
+    let s7 = push_instr "i32.store offset=0" s6 in
+    let s8 = push_instr ("local.get " ++ show v_slot) s7 in
+    let s9 = (match payload_opt with
+      | None -> push_instr "i32.const 0" s8
+      | Some payload -> emit_expr payload s8) in
+    let s10 = push_instr "i32.store offset=4" s9 in
+    push_instr ("local.get " ++ show v_slot) s10
+  | EMatch (scrutinee, arms) ->
+    // Stash scrutinee in a tmp local, then walk arms left-to-right
+    // as a chain of `(cond) if (result i32) <bind+body> else <next>
+    // end` nests. The terminal `else` traps with `unreachable` —
+    // exhaustive matches never hit it, non-exhaustive ones get a
+    // wasm trap instead of silent fallthrough.
+    let s1 = emit_expr scrutinee s in
+    let (s_tmp, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.set " ++ show s_tmp) s2 in
+    emit_match_arms arms s_tmp s3
+  | _ -> fail "codegen_wasm: stage 53d doesn't handle this expr yet"
 
 // `emit_build_env caps s` allocates a 4×N byte env record, walks each
 // captured name and emits its value via the regular EVar dispatch
@@ -481,6 +597,151 @@ and list_length_str = fn (xs: str list) ->
   match xs with
   | Nil -> 0
   | Cons (_, t) -> 1 + list_length_str t
+
+// === Match / variant / tuple helpers (Stage 53d) ===========================
+
+and list_length_e = fn (xs: expr list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_length_e t
+
+// Store each tuple element at offset i*4 inside the parent slot. The
+// expr sub-emit may itself allocate locals / tmps; that's fine
+// because the parent slot already holds the tuple pointer.
+and emit_tuple_stores = fn (es: expr list) -> fn (i: int)
+                     -> fn (parent_slot: int) -> fn (s: EmitState) ->
+  match es with
+  | Nil -> s
+  | Cons (e, rest) ->
+    let s1 = push_instr ("local.get " ++ show parent_slot) s in
+    let s2 = emit_expr e s1 in
+    let s3 = push_instr ("i32.store offset=" ++ show (i * 4)) s2 in
+    emit_tuple_stores rest (i + 1) parent_slot s3
+
+// Pattern match: `emit_check_pattern p slot s` leaves an i32 0/1 on
+// top of the stack indicating whether the value at `slot` matches
+// `p`. PVar / PWild always push 1 (binding happens in
+// emit_bind_pattern). PInt / PBool compare. PTuple ANDs sub-checks.
+// PConstr checks the variant tag and (if has payload) the sub.
+and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
+                      -> fn (s: EmitState) ->
+  match p with
+  | PWild -> push_instr "i32.const 1" s
+  | PVar _ -> push_instr "i32.const 1" s
+  | PUnit -> push_instr "i32.const 1" s
+  | PInt n ->
+    let s1 = push_instr ("local.get " ++ show slot) s in
+    let s2 = push_instr ("i32.const " ++ show n) s1 in
+    push_instr "i32.eq" s2
+  | PBool b ->
+    let s1 = push_instr ("local.get " ++ show slot) s in
+    let s2 = push_instr ("i32.const " ++ (if b then "1" else "0")) s1 in
+    push_instr "i32.eq" s2
+  | PTuple ps -> emit_tuple_checks ps 0 slot s
+  | PConstr (name, payload_opt) ->
+    let (tag, s1) = lookup_or_alloc_variant_tag name s in
+    let s2 = push_instr ("local.get " ++ show slot) s1 in
+    let s3 = push_instr "i32.load offset=0" s2 in
+    let s4 = push_instr ("i32.const " ++ show tag) s3 in
+    let s5 = push_instr "i32.eq" s4 in
+    (match payload_opt with
+      | None -> s5
+      | Some sub_p ->
+        let (sub_slot, s6) = alloc_tmp_local s5 in
+        let s7 = push_instr ("local.get " ++ show slot) s6 in
+        let s8 = push_instr "i32.load offset=4" s7 in
+        let s9 = push_instr ("local.set " ++ show sub_slot) s8 in
+        let s10 = emit_check_pattern sub_p sub_slot s9 in
+        push_instr "i32.and" s10)
+  | PAs (sub, _name) ->
+    // PAs check is just the sub-pattern's check; the name binds in
+    // emit_bind_pattern only.
+    emit_check_pattern sub slot s
+  | _ -> fail "codegen_wasm: stage 53d unsupported pattern in check (PStr / PRecord / POr)"
+
+// AND-fold the checks for tuple components. Each component reads the
+// parent's offset, stashes to a fresh tmp local, recurses. Always
+// pushes an i32 0/1 on top.
+and emit_tuple_checks = fn (ps: pattern list) -> fn (i: int)
+                     -> fn (parent_slot: int) -> fn (s: EmitState) ->
+  match ps with
+  | Nil -> push_instr "i32.const 1" s
+  | Cons (p, rest) ->
+    let (elem_slot, s1) = alloc_tmp_local s in
+    let s2 = push_instr ("local.get " ++ show parent_slot) s1 in
+    let s3 = push_instr ("i32.load offset=" ++ show (i * 4)) s2 in
+    let s4 = push_instr ("local.set " ++ show elem_slot) s3 in
+    let s5 = emit_check_pattern p elem_slot s4 in
+    let s6 = emit_tuple_checks rest (i + 1) parent_slot s5 in
+    push_instr "i32.and" s6
+
+// After a pattern check succeeds, bind any names it introduces by
+// allocating fresh locals and `local.set`ing them. PVar binds the
+// current slot directly. PTuple recurses with per-element slots
+// (re-loaded from the parent). PConstr binds against the payload
+// pointer. PInt / PBool / PWild / PUnit introduce no bindings.
+and emit_bind_pattern = fn (p: pattern) -> fn (slot: int)
+                     -> fn (s: EmitState) ->
+  match p with
+  | PWild -> s
+  | PInt _ -> s
+  | PBool _ -> s
+  | PUnit -> s
+  | PVar name ->
+    let s1 = alloc_local name s in
+    let idx = s1.local_counter - 1 in
+    let s2 = push_instr ("local.get " ++ show slot) s1 in
+    push_instr ("local.set " ++ show idx) s2
+  | PTuple ps -> emit_tuple_binds ps 0 slot s
+  | PConstr (_name, payload_opt) ->
+    (match payload_opt with
+      | None -> s
+      | Some sub_p ->
+        let (sub_slot, s1) = alloc_tmp_local s in
+        let s2 = push_instr ("local.get " ++ show slot) s1 in
+        let s3 = push_instr "i32.load offset=4" s2 in
+        let s4 = push_instr ("local.set " ++ show sub_slot) s3 in
+        emit_bind_pattern sub_p sub_slot s4)
+  | PAs (sub, name) ->
+    let s1 = emit_bind_pattern sub slot s in
+    let s2 = alloc_local name s1 in
+    let idx = s2.local_counter - 1 in
+    let s3 = push_instr ("local.get " ++ show slot) s2 in
+    push_instr ("local.set " ++ show idx) s3
+  | _ -> fail "codegen_wasm: stage 53d unsupported pattern in bind"
+
+and emit_tuple_binds = fn (ps: pattern list) -> fn (i: int)
+                    -> fn (parent_slot: int) -> fn (s: EmitState) ->
+  match ps with
+  | Nil -> s
+  | Cons (p, rest) ->
+    let (elem_slot, s1) = alloc_tmp_local s in
+    let s2 = push_instr ("local.get " ++ show parent_slot) s1 in
+    let s3 = push_instr ("i32.load offset=" ++ show (i * 4)) s2 in
+    let s4 = push_instr ("local.set " ++ show elem_slot) s3 in
+    let s5 = emit_bind_pattern p elem_slot s4 in
+    emit_tuple_binds rest (i + 1) parent_slot s5
+
+// Walk match arms left-to-right as a chain of nested `if (result i32)
+// ... else ... end` blocks. The terminal `else` traps with
+// `unreachable`. Pattern bindings live only inside their arm's
+// then-branch — outer `locals` is restored before recursing into the
+// next arm so the binding names don't leak.
+and emit_match_arms = fn (arms: (pattern * expr option * expr) list)
+                   -> fn (slot: int) -> fn (s: EmitState) ->
+  match arms with
+  | Nil -> push_instr "unreachable" s
+  | Cons (arm, rest) ->
+    let (pat, _guard_opt, body) = arm in
+    let s1 = emit_check_pattern pat slot s in
+    let s2 = push_instr "if (result i32)" s1 in
+    let outer_locals = s2.locals in
+    let s3 = emit_bind_pattern pat slot s2 in
+    let s4 = emit_expr body s3 in
+    let s5 = push_instr "else" s4 in
+    let s6 = ({ s5 | locals = outer_locals } : EmitState) in
+    let s7 = emit_match_arms rest slot s6 in
+    push_instr "end" s7
   ;
 
 // === Module wrapper ========================================================
@@ -517,18 +778,22 @@ let rec join_space = fn (xs: str list) ->
 let wrap_module = fn (locals_decl: str) -> fn (body: str)
               -> fn (lifted: str) -> fn (table_size: int)
               -> fn (elem_line: str) ->
-  let preamble =
+  // Stage 53d onward: tuples, variants, and closures all use the
+  // bump-alloc global, so emit `$__lang_bump` unconditionally. The
+  // closure-specific `(type $cl)` / `(table)` / `(elem)` lines only
+  // appear when at least one lambda was lifted.
+  let closure_decls =
     if table_size > 0 then
       "  (type $cl (func (param i32) (param i32) (result i32)))\n" ++
-      "  (memory (export \"memory\") 1)\n" ++
-      "  (global $__lang_bump (mut i32) (i32.const 32))\n" ++
       "  (table " ++ show table_size ++ " funcref)\n" ++
       "  (elem (i32.const 0) " ++ elem_line ++ ")\n"
     else
-      "  (memory (export \"memory\") 1)\n"
+      ""
   in
   "(module\n" ++
-  preamble ++
+  "  (memory (export \"memory\") 1)\n" ++
+  "  (global $__lang_bump (mut i32) (i32.const 32))\n" ++
+  closure_decls ++
   lifted ++
   "  (func $main (export \"main\") (result i32)\n" ++
   locals_decl ++
@@ -651,4 +916,27 @@ let _ = print (parse_and_emit "let a = 7 in let b = 6 in (fn z -> a * b + z) 0")
 let _ = print "---" in
 // Closure stored in a let, then applied (let-bound captured closure).
 let _ = print (parse_and_emit "let n = 100 in let add_n = fn x -> x + n in add_n 23") in
+let _ = print "=== Stage 53d codegen_wasm demos (match + variant + tuple) ===" in
+// Tuple literal + destructure via let.
+let _ = print (parse_and_emit "let (a, b) = (3, 4) in a + b") in
+let _ = print "---" in
+// Tuple in a match.
+let _ = print (parse_and_emit "match (1, 2) with | (a, b) -> a + b") in
+let _ = print "---" in
+// Int literal patterns.
+let _ = print (parse_and_emit "match 2 with | 1 -> 10 | 2 -> 20 | _ -> 99") in
+let _ = print "---" in
+// Bool literal patterns.
+let _ = print (parse_and_emit "match true with | true -> 100 | false -> 200") in
+let _ = print "---" in
+// PAs binding.
+let _ = print (parse_and_emit "match (5, 6) with | (a, _) as p -> a") in
+let _ = print "---" in
+// Variant: Some/None (tags allocated lazily). The self-host parser
+// requires parenthesized constructor payload — `Some 42` would parse
+// as `EApp (Some, 42)`.
+let _ = print (parse_and_emit "match Some (42) with | Some n -> n | None -> 0") in
+let _ = print "---" in
+// Variant: nullary alternative wins.
+let _ = print (parse_and_emit "match None with | Some n -> n | None -> 99") in
 0
