@@ -7788,5 +7788,59 @@ let () =
   check_self_host "parser.mere" "contrib/parser/parser.mere";
   check_self_host "fmt.mere" "contrib/fmt/fmt.mere";
 
+  (* Phase 51.6 — self-host eval cross-validation. Run a Mere source
+     string through both OCaml-side `Pipeline.process` (which is
+     parse + typer + eval) and the self-host `tokenize + parse_decls +
+     run_program`, then compare the displayed result. OCaml's
+     `to_string` and self-host's `value_to_str` were modelled on each
+     other, so primitive results match exactly. *)
+  let self_host_eval input =
+    let escaped =
+      let b = Buffer.create (String.length input) in
+      String.iter (fun c ->
+        match c with
+        | '\\' -> Buffer.add_string b "\\\\"
+        | '"' -> Buffer.add_string b "\\\""
+        | '\n' -> Buffer.add_string b "\\n"
+        | '\t' -> Buffer.add_string b "\\t"
+        | '{' -> Buffer.add_string b "\\{"
+        | c -> Buffer.add_char b c) input;
+      Buffer.contents b
+    in
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/eval/eval.mere\";\n\
+       value_to_str (parse_and_eval \"%s\")\n"
+      project_root escaped
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+
+  let cross_eval name input =
+    let ocaml_result = Pipeline.process input in
+    let self_result = self_host_eval input in
+    check ("self-host eval cross: " ^ name) self_result ocaml_result
+  in
+
+  cross_eval "int arithmetic" "1 + 2 * 3";
+  cross_eval "let-in" "let x = 5 in x + 1";
+  cross_eval "factorial"
+    "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5";
+  cross_eval "mutual rec"
+    "let rec even = fn n -> if n == 0 then true else odd (n - 1) and odd = fn n -> if n == 0 then false else even (n - 1) in even 10";
+  cross_eval "list sum"
+    "let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t in sum [1, 2, 3, 4]";
+  cross_eval "match int"
+    "match 2 with | 1 -> \"one\" | 2 -> \"two\" | _ -> \"other\"";
+  cross_eval "str concat" "\"hello, \" ++ \"world\"";
+  cross_eval "tuple destructure" "let (a, b) = (3, 4) in a + b";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
