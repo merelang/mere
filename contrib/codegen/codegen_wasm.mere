@@ -122,11 +122,39 @@ let logicop_instr = fn (op: logicop) ->
   | OpOr -> "i32.or"
   ;
 
-// === Expression emission (Stage 53b scope) =================================
+// === Local slot management (Stage 53c-1) ===================================
 //
-// Adds primitives that compile to a fixed instruction sequence. The
-// dispatch follows typer.mere's `infer` / eval.mere's `eval` shape so
-// future stages slot in the same way.
+// Wasm functions declare their locals up front via `(local i32)` and
+// reference them by zero-based index. `EmitState.locals` is the
+// name → index lookup, `local_tys` (in declaration order) becomes the
+// `(local <ty>)` declaration list at module wrap time, and
+// `local_counter` mints the next index.
+//
+// For Stage 53c-1, every local is `i32` (Mere's int / bool / ptr all
+// fit). Stage 53c-2 (closure ABI) and Stage 53e (float / string) will
+// extend the local_tys list with `f64` etc.
+
+let alloc_local = fn (name: str) -> fn (s: EmitState) ->
+  let idx = s.local_counter in
+  ({ s |
+     locals = Cons ((name, idx), s.locals),
+     local_tys = Cons ("i32", s.local_tys),
+     local_counter = idx + 1 } : EmitState);
+
+let rec lookup_local = fn (name: str) -> fn (env: (str * int) list) ->
+  match env with
+  | Nil -> fail ("codegen_wasm: unbound local " ++ name ++ " (params land in Stage 53c-2)")
+  | Cons (b, rest) ->
+    let (n, idx) = b in
+    if n == name then idx else lookup_local name rest
+  ;
+
+// === Expression emission (Stage 53c-1 scope) ===============================
+//
+// Adds `let` (single PVar / PWild binding), `if`, and `EVar` lookup
+// against the locals table. Pattern-let with destructure (PTuple etc.),
+// `fn` / `app`, and `let rec` are deferred — they need the closure ABI
+// machinery that lands in 53c-2.
 
 let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
   match e with
@@ -151,7 +179,40 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s2 = emit_expr inner s1 in
     push_instr "i32.sub" s2
   | EAnnot (inner, _) -> emit_expr inner s
-  | _ -> fail "codegen_wasm: stage 53b doesn't handle this expr yet"
+  | EVar name ->
+    let idx = lookup_local name s.locals in
+    push_instr ("local.get " ++ show idx) s
+  | ELet (pat, value_expr, body) ->
+    // 53c-1 only handles PVar (one new local) and PWild (no binding).
+    // Destructure patterns (PTuple etc.) land in 53d / 53e once we have
+    // multi-value layout in linear memory.
+    (match pat with
+      | PVar name ->
+        let s1 = emit_expr value_expr s in
+        let s2 = alloc_local name s1 in
+        // The freshly-allocated index is on top of `s2.locals` (Cons
+        // head). alloc_local pre-incremented the counter so the new
+        // index is `s2.local_counter - 1`.
+        let idx = s2.local_counter - 1 in
+        let s3 = push_instr ("local.set " ++ show idx) s2 in
+        emit_expr body s3
+      | PWild ->
+        // `let _ = e in body` — emit e, drop it, then emit body. wasm's
+        // `drop` consumes one stack value.
+        let s1 = emit_expr value_expr s in
+        let s2 = push_instr "drop" s1 in
+        emit_expr body s2
+      | _ -> fail "codegen_wasm: let with non-PVar pattern lands in stage 53d/53e")
+  | EIf (cond, then_e, else_e) ->
+    // (cond) if (result i32) (then_e) else (else_e) end. The condition
+    // i32 is consumed; both branches must push exactly one i32 result.
+    let s1 = emit_expr cond s in
+    let s2 = push_instr "if (result i32)" s1 in
+    let s3 = emit_expr then_e s2 in
+    let s4 = push_instr "else" s3 in
+    let s5 = emit_expr else_e s4 in
+    push_instr "end" s5
+  | _ -> fail "codegen_wasm: stage 53c-1 doesn't handle this expr yet"
   ;
 
 // === Module wrapper ========================================================
@@ -162,22 +223,32 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
 // / char table / bump allocator) lives behind stdlib feature flags
 // that 53a never trips.
 
-let wrap_module = fn (body: str) ->
+// Render the `(local ...)` declarations from `local_tys` (in
+// declaration order — local_tys is built reverse, so flip first).
+let rec join_local_decls = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, rest) -> "    (local " ++ h ++ ")\n" ++ join_local_decls rest
+  ;
+
+let wrap_module = fn (locals_decl: str) -> fn (body: str) ->
   "(module\n" ++
   "  (memory (export \"memory\") 1)\n" ++
   "  (func $main (export \"main\") (result i32)\n" ++
+  locals_decl ++
   body ++ ")\n" ++
   ")\n";
 
 // `emit_program prog` runs codegen over a parsed `program` (decls +
-// main) and returns the WAT source as a string. 53a ignores decls
+// main) and returns the WAT source as a string. 53a-53c ignore decls
 // entirely — they land in 53e.
 
 let emit_program = fn (prog: program) ->
   let (_decls, main_expr) = prog in
   let s = emit_expr main_expr initial_emit_state in
+  let locals_decl = join_local_decls (list_reverse s.local_tys) in
   let body = join_indented (list_reverse s.instrs) in
-  wrap_module body;
+  wrap_module locals_decl body;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
@@ -220,4 +291,22 @@ let _ = print (parse_and_emit "-5") in
 let _ = print "---" in
 // Annotation passthrough — the codegen ignores the type.
 let _ = print (parse_and_emit "(42 : int)") in
+let _ = print "=== Stage 53c-1 codegen_wasm demos (let + if + EVar) ===" in
+// Single let, EVar resolves to a local slot.
+let _ = print (parse_and_emit "let x = 5 in x + 1") in
+let _ = print "---" in
+// Multiple locals, nested let.
+let _ = print (parse_and_emit "let a = 1 in let b = 2 in a + b") in
+let _ = print "---" in
+// PWild — value computed and dropped, body runs.
+let _ = print (parse_and_emit "let _ = 99 in 42") in
+let _ = print "---" in
+// if/else returning an int.
+let _ = print (parse_and_emit "if 1 < 2 then 10 else 20") in
+let _ = print "---" in
+// if/else with local in scope on both arms.
+let _ = print (parse_and_emit "let x = 7 in if x < 10 then x * 2 else x") in
+let _ = print "---" in
+// Nested if (else branch contains another if).
+let _ = print (parse_and_emit "if 3 == 3 then if 1 < 2 then 100 else 50 else 0") in
 0
