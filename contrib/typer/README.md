@@ -13,14 +13,14 @@ the same type inferencer. §S2.B closes once 52a–52g land.
 
 | file | scope | lines |
 |---|---|---|
-| `typer.mere` | Unification machinery — `subst` + `apply_subst` + `occurs` + `unify` + `fresh_var` (Stage 52a). 11 hand-coded demos. | ~270 |
+| `typer.mere` | Unification machinery (Stage 52a) + monomorphic `infer` dispatcher (Stage 52b) + `parse_and_infer` glue for end-to-end demos. | ~450 |
 
 ## Status
 
 | Stage | Content | Status |
 |---|---|---|
-| **52a** | `TyMeta of int` added to `ast.mere`; substitution as `(int * ty) list`; `resolve_meta` + `apply_subst` + `occurs` + `unify` + `unify_list` + `fresh_var`. 11 unification demos covering primitive equality, meta binding, arrow / tuple / TyCon, occurs check, chained metas, arity mismatch. | **complete** (this commit) |
-| **52b** | Monomorphic `infer` over the expression AST (literal / var / fn / app / if / bin / cmp). state-passing `(counter, subst)`. | future |
+| **52a** | `TyMeta of int` added to `ast.mere`; substitution as `(int * ty) list`; `resolve_meta` + `apply_subst` + `occurs` + `unify` + `unify_list` + `fresh_var`. 11 unification demos covering primitive equality, meta binding, arrow / tuple / TyCon, occurs check, chained metas, arity mismatch. | **complete** |
+| **52b** | Monomorphic `infer` over the expression AST: literals, `EVar`, `EBin` (int / str arith), `ECmp` (int order + polymorphic eq), `ELogic`, `ENeg`, `EIf`, `EFun` (incl. type annotation), `EApp`, `EAnnot`. State-passing `(counter, subst)` via `infer_state`. `parse_and_infer src` glues parser + typer for end-to-end demos. 15 source-string demos cover `fn x -> x + 1` → `(int -> int)`, `fn x -> x` → `('_0 -> '_0)`, `fn (x: int) -> x` → `(int -> int)`, application, conditionals, polymorphic equality, annotation. | **complete** (this commit) |
 | **52c** | `let` polymorphism — `mono` / `generalize` / `instantiate` / `freshen_params`. `type_env = (str * scheme) list`. | future |
 | **52d** | Pattern type checking + `EConstr` + `ETuple` + `EMatch`. | future |
 | **52e** | Records (`ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`) + `EAnnot`. | future |

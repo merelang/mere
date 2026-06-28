@@ -25,6 +25,10 @@
 //     "did you mean"). MVP is `fail msg`.
 
 import "../parser/ast.mere";
+// Stage 52b: pull in parser.mere so end-to-end `parse_and_infer src`
+// demos can drive real source strings through tokenize + parse_decls
+// + infer. Same pattern as eval.mere; lexer rides along.
+import "../parser/parser.mere";
 
 // === Substitution =========================================================
 //
@@ -161,6 +165,140 @@ and unify_list = fn (s: subst) -> fn (xs: ty list) -> fn (ys: ty list) ->
 
 let fresh_var = fn (n: int) -> (TyMeta n, n + 1);
 
+// === Inference machinery (Stage 52b) ======================================
+//
+// State-passing: each `infer` call threads `(counter, subst)` through
+// to its callees and returns `(inferred_ty, new_state)`. No mutation;
+// no globals. Mirrors the self-host parser / eval's state-passing
+// style.
+
+type infer_state = int * subst;
+
+let counter_of = fn (s: infer_state) -> let (c, _) = s in c;
+let subst_of = fn (s: infer_state) -> let (_, sub) = s in sub;
+
+// Allocate a fresh meta-variable from the state.
+let fresh_meta = fn (s: infer_state) ->
+  let (c, sub) = s in (TyMeta c, (c + 1, sub));
+
+// Run `unify` and commit the resulting subst into the state. Failure
+// is a hard `fail` for the MVP; future slices may surface this as a
+// Result so the browser can display "expected X got Y".
+let unify_state = fn (s: infer_state) -> fn (t1: ty) -> fn (t2: ty) ->
+  match unify (subst_of s) t1 t2 with
+  | Some new_sub -> (counter_of s, new_sub)
+  | None ->
+    fail ("type mismatch — cannot unify the two operand types")
+  ;
+
+// `type_env` is mono for Stage 52b — Stage 52c lifts the codomain to
+// `scheme` for proper Hindley-Milner let-polymorphism.
+type type_env = (str * ty) list;
+
+let rec lookup_type = fn (name: str) -> fn (env: type_env) ->
+  match env with
+  | Nil -> fail ("unbound variable in typer: " ++ name)
+  | Cons (b, rest) ->
+    let (n, t) = b in
+    if n == name then t
+    else lookup_type name rest
+  ;
+
+// Binary operator types. `+ - * / %` are int -> int -> int;
+// `++` is str -> str -> str.
+let binop_return_ty = fn (op: binop) ->
+  match op with
+  | OpAdd -> TyInt | OpSub -> TyInt | OpMul -> TyInt
+  | OpDiv -> TyInt | OpMod -> TyInt
+  | OpConcat -> TyStr
+  ;
+
+let binop_operand_ty = fn (op: binop) ->
+  match op with
+  | OpConcat -> TyStr
+  | _ -> TyInt
+  ;
+
+// Comparison operator constraint shape. `< <= > >=` need both
+// operands to be `int` (Mere doesn't allow string ordering).
+// `== !=` are polymorphic on both sides as long as both share a type
+// — we model that by introducing a fresh meta that unifies with both.
+let cmp_needs_int = fn (op: cmpop) ->
+  match op with
+  | OpLt -> true | OpLe -> true | OpGt -> true | OpGe -> true
+  | _ -> false
+  ;
+
+// === Inference dispatcher =================================================
+
+let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
+  match e with
+  | EInt _ -> (TyInt, s)
+  | EBool _ -> (TyBool, s)
+  | EStr _ -> (TyStr, s)
+  | EUnit -> (TyUnit, s)
+  | EVar name -> (lookup_type name env, s)
+  | EBin (op, a, b) ->
+    let operand_ty = binop_operand_ty op in
+    let (ta, s1) = infer env s a in
+    let s2 = unify_state s1 ta operand_ty in
+    let (tb, s3) = infer env s2 b in
+    let s4 = unify_state s3 tb operand_ty in
+    (binop_return_ty op, s4)
+  | ECmp (op, a, b) ->
+    let (ta, s1) = infer env s a in
+    let (tb, s2) = infer env s1 b in
+    if cmp_needs_int op then
+      let s3 = unify_state s2 ta TyInt in
+      let s4 = unify_state s3 tb TyInt in
+      (TyBool, s4)
+    else
+      // `== !=` — operands must share a type but can be anything Mere
+      // supports for equality. Unifying ta with tb threads through any
+      // metas on either side.
+      let s3 = unify_state s2 ta tb in
+      (TyBool, s3)
+  | ELogic (_op, a, b) ->
+    let (ta, s1) = infer env s a in
+    let s2 = unify_state s1 ta TyBool in
+    let (tb, s3) = infer env s2 b in
+    let s4 = unify_state s3 tb TyBool in
+    (TyBool, s4)
+  | ENeg e ->
+    let (te, s1) = infer env s e in
+    let s2 = unify_state s1 te TyInt in
+    (TyInt, s2)
+  | EIf (c, t, el) ->
+    let (tc, s1) = infer env s c in
+    let s2 = unify_state s1 tc TyBool in
+    let (tt, s3) = infer env s2 t in
+    let (te, s4) = infer env s3 el in
+    let s5 = unify_state s4 tt te in
+    (apply_subst (subst_of s5) tt, s5)
+  | EFun (arg, ty_opt, body) ->
+    // Allocate a fresh meta for the parameter type. If the source
+    // had a type annotation (`fn (x: int) -> …`), unify the fresh
+    // meta with it immediately so the body sees a concretized type.
+    let (arg_ty, s1) = fresh_meta s in
+    let s2 = (match ty_opt with
+      | None -> s1
+      | Some t -> unify_state s1 arg_ty t) in
+    let env2 = Cons ((arg, arg_ty), env) in
+    let (body_ty, s3) = infer env2 s2 body in
+    (apply_subst (subst_of s3) (TyArrow (arg_ty, body_ty)), s3)
+  | EApp (f, x) ->
+    let (tf, s1) = infer env s f in
+    let (tx, s2) = infer env s1 x in
+    let (result_ty, s3) = fresh_meta s2 in
+    let s4 = unify_state s3 tf (TyArrow (tx, result_ty)) in
+    (apply_subst (subst_of s4) result_ty, s4)
+  | EAnnot (inner, t) ->
+    let (te, s1) = infer env s inner in
+    let s2 = unify_state s1 te t in
+    (apply_subst (subst_of s2) t, s2)
+  | _ -> fail "typer: stage 52b doesn't handle this expr yet"
+  ;
+
 // === Debug printing =======================================================
 
 let rec ty_to_str = fn (t: ty) ->
@@ -193,6 +331,26 @@ let unify_to_str = fn (r: subst option) ->
       let (k, v) = b in "'_" ++ show k ++ " = " ++ ty_to_str v) in
     "[" ++ str_join ", " parts ++ "]"
   ;
+
+// === Top-level entry ======================================================
+//
+// `parse_and_infer src` glues parser + typer for end-to-end demos. It
+// only types the program's `main` expression for now — top-level
+// decls (`TopLet` / `TopLetRec` / `TopType` / `TopRecord` /
+// `TopTypeAlias`) land in Stage 52f along with the cross-validation
+// harness against OCaml's `Pipeline.type_of`.
+
+let initial_state = ((0, Nil) : infer_state);
+let initial_type_env = (Nil : type_env);
+
+let parse_and_infer = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _rest) = parse_decls Nil toks in
+  let (_decls, main_expr) = prog in
+  let (t, s) = infer initial_type_env initial_state main_expr in
+  // Shake the substitution into the result so external printers see
+  // bound metas resolved.
+  ty_to_str (apply_subst (subst_of s) t);
 
 // === Demos ================================================================
 //
@@ -255,4 +413,21 @@ let _ = print ("d8  (chained metas):      " ++ unify_to_str d8) in
 let _ = print ("d9  (TyCon arg infer):    " ++ unify_to_str d9) in
 let _ = print ("d10 (TyCon name diff):    " ++ unify_to_str d10) in
 let _ = print ("d11 (apply_subst):        " ++ ty_to_str d11) in
+let _ = print "" in
+let _ = print "=== Stage 52b typer demos (monomorphic infer) ===" in
+let _ = print ("i1  (literal 42):           " ++ parse_and_infer "42") in
+let _ = print ("i2  (true && false):        " ++ parse_and_infer "true && false") in
+let _ = print ("i3  (string lit):           " ++ parse_and_infer "\"hi\"") in
+let _ = print ("i4  (1 + 2 * 3):            " ++ parse_and_infer "1 + 2 * 3") in
+let _ = print ("i5  (1 < 2):                " ++ parse_and_infer "1 < 2") in
+let _ = print ("i6  (\"a\" == \"b\"):           " ++ parse_and_infer "\"a\" == \"b\"") in
+let _ = print ("i7  (\"a\" ++ \"b\"):           " ++ parse_and_infer "\"a\" ++ \"b\"") in
+let _ = print ("i8  (-5):                   " ++ parse_and_infer "-5") in
+let _ = print ("i9  (if 1<2 then 1 else 2): " ++ parse_and_infer "if 1 < 2 then 1 else 2") in
+let _ = print ("i10 (fn x -> x + 1):        " ++ parse_and_infer "fn x -> x + 1") in
+let _ = print ("i11 (fn x -> x):            " ++ parse_and_infer "fn x -> x") in
+let _ = print ("i12 ((fn x -> x + 1) 5):    " ++ parse_and_infer "(fn x -> x + 1) 5") in
+let _ = print ("i13 (fn x -> if x then 1 else 0): " ++ parse_and_infer "fn x -> if x then 1 else 0") in
+let _ = print ("i14 (annot int):            " ++ parse_and_infer "(42 : int)") in
+let _ = print ("i15 (fn (x: int) -> x):     " ++ parse_and_infer "fn (x: int) -> x") in
 0
