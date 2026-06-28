@@ -43,6 +43,7 @@ type EmitState = {
   table_entries: str list,
   variant_tags: (str * int) list,
   lifted_fns: str list,
+  captures: (str * int) list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -61,6 +62,7 @@ let initial_emit_state = EmitState {
   table_entries = Nil,
   variant_tags = Nil,
   lifted_fns = Nil,
+  captures = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -163,12 +165,80 @@ let alloc_tmp_local = fn (s: EmitState) ->
     local_counter = idx + 1 } : EmitState) in
   ((idx, s2) : (int * EmitState));
 
-let rec lookup_local = fn (name: str) -> fn (env: (str * int) list) ->
+// Option-returning name lookup over a `(name, idx)` association list.
+// Same shape covers both the locals table (Stage 53c-1) and the
+// captures table (Stage 53c-3) — only the *meaning* of the int (local
+// slot vs byte offset in env record) differs at the use site.
+let rec lookup_assoc = fn (name: str) -> fn (env: (str * int) list) ->
   match env with
-  | Nil -> fail ("codegen_wasm: unbound local " ++ name ++ " (params land in Stage 53c-2)")
+  | Nil -> None
   | Cons (b, rest) ->
     let (n, idx) = b in
-    if n == name then idx else lookup_local name rest
+    if n == name then Some idx else lookup_assoc name rest
+  ;
+
+// === Free-variable analysis (Stage 53c-3) ==================================
+//
+// EFun lifts to a top-level `(func ...)`, so any name referenced in
+// its body that isn't either (a) the lambda's own argument, (b) a let
+// introduced inside the body, or (c) bound by a nested lambda must be
+// *captured* — copied into a heap env record at construction time and
+// fetched via `i32.load offset=N` from `local.get 0` inside the
+// lifted body.
+//
+// `free_vars body bound` returns the set of names used inside `body`
+// that aren't in `bound`, preserving first-seen order so the env
+// offsets are deterministic.
+
+let rec member_str = fn (n: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == n then true else member_str n t
+  ;
+
+let cons_unique = fn (n: str) -> fn (xs: str list) ->
+  if member_str n xs then xs else Cons (n, xs);
+
+let rec union_strs = fn (xs: str list) -> fn (acc: str list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> union_strs t (cons_unique h acc)
+  ;
+
+let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
+  match e with
+  | EInt _ -> Nil
+  | EBool _ -> Nil
+  | EStr _ -> Nil
+  | EUnit -> Nil
+  | EVar n -> if member_str n bound then Nil else Cons (n, Nil)
+  | EBin (_, a, b) -> union_strs (free_vars a bound) (free_vars b bound)
+  | ECmp (_, a, b) -> union_strs (free_vars a bound) (free_vars b bound)
+  | ELogic (_, a, b) -> union_strs (free_vars a bound) (free_vars b bound)
+  | ENeg inner -> free_vars inner bound
+  | EAnnot (inner, _) -> free_vars inner bound
+  | EApp (f, x) -> union_strs (free_vars f bound) (free_vars x bound)
+  | EIf (c, t, el) ->
+    union_strs (free_vars c bound)
+      (union_strs (free_vars t bound) (free_vars el bound))
+  | EFun (a, _, body) -> free_vars body (Cons (a, bound))
+  | ELet (pat, value_expr, body) ->
+    let fv_v = free_vars value_expr bound in
+    let bound2 = (match pat with
+      | PVar name -> Cons (name, bound)
+      | _ -> bound) in
+    union_strs fv_v (free_vars body bound2)
+  | _ -> Nil  // ETuple / EMatch / ERecordLit / EConstr / ELetRec etc.
+              // land in Stage 53d/53e; their free-var contributions
+              // get filled in then.
+  ;
+
+// `build_offsets caps 0` assigns each captured name a 4-byte slot in
+// the env record: first capture at offset 0, second at offset 4, etc.
+let rec build_offsets = fn (xs: str list) -> fn (n: int) ->
+  match xs with
+  | Nil -> (Nil : (str * int) list)
+  | Cons (h, t) -> Cons ((h, n), build_offsets t (n + 4))
   ;
 
 // === Closure ABI (Stage 53c-2) =============================================
@@ -193,24 +263,42 @@ let rec lookup_local = fn (name: str) -> fn (env: (str * int) list) ->
 // Stage 53c-2 scope: capture-less lambdas only. Free-variable scanning
 // + env layout lands in 53c-3.
 
-// Emit the 11-instruction sequence that bump-allocates an 8-byte
-// closure record `(env_ptr=0, fn_idx=N)` and leaves the closure
-// pointer on top of the stack.
-let emit_alloc_closure = fn (fn_idx: int) -> fn (s: EmitState) ->
+// Bump-alloc N bytes and leave the resulting pointer on top of the
+// stack. Used for both the closure record (always 8 bytes) and the
+// per-EFun env record (4 bytes per captured var). Internally uses a
+// tmp local to save the pre-bump pointer for the final result push.
+let emit_bump_alloc = fn (nbytes: int) -> fn (s: EmitState) ->
   let (tmp, s1) = alloc_tmp_local s in
   let s2 = push_instr "global.get $__lang_bump" s1 in
   let s3 = push_instr ("local.set " ++ show tmp) s2 in
   let s4 = push_instr ("local.get " ++ show tmp) s3 in
-  let s5 = push_instr "i32.const 8" s4 in
+  let s5 = push_instr ("i32.const " ++ show nbytes) s4 in
   let s6 = push_instr "i32.add" s5 in
   let s7 = push_instr "global.set $__lang_bump" s6 in
-  let s8 = push_instr ("local.get " ++ show tmp) s7 in
-  let s9 = push_instr "i32.const 0" s8 in
-  let s10 = push_instr "i32.store offset=0" s9 in
-  let s11 = push_instr ("local.get " ++ show tmp) s10 in
-  let s12 = push_instr ("i32.const " ++ show fn_idx) s11 in
-  let s13 = push_instr "i32.store offset=4" s12 in
-  push_instr ("local.get " ++ show tmp) s13;
+  push_instr ("local.get " ++ show tmp) s7;
+
+// `emit_alloc_closure fn_idx s` assumes the env_ptr is already on top
+// of the stack (an `i32.const 0` for capture-less lambdas, or a real
+// pointer built by `emit_build_env` for captures). It stashes that
+// env_ptr, bump-allocs the 8-byte closure record, stores env+fn_idx,
+// and leaves the closure pointer on top.
+let emit_alloc_closure = fn (fn_idx: int) -> fn (s: EmitState) ->
+  let (env_tmp, s1) = alloc_tmp_local s in
+  let s2 = push_instr ("local.set " ++ show env_tmp) s1 in
+  // bump-alloc 8 bytes → closure pointer on top
+  let s3 = emit_bump_alloc 8 s2 in
+  let (cl_tmp, s4) = alloc_tmp_local s3 in
+  let s5 = push_instr ("local.set " ++ show cl_tmp) s4 in
+  // store env_ptr at offset 0
+  let s6 = push_instr ("local.get " ++ show cl_tmp) s5 in
+  let s7 = push_instr ("local.get " ++ show env_tmp) s6 in
+  let s8 = push_instr "i32.store offset=0" s7 in
+  // store fn_idx at offset 4
+  let s9 = push_instr ("local.get " ++ show cl_tmp) s8 in
+  let s10 = push_instr ("i32.const " ++ show fn_idx) s9 in
+  let s11 = push_instr "i32.store offset=4" s10 in
+  // closure pointer on top
+  push_instr ("local.get " ++ show cl_tmp) s11;
 
 // === Expression emission (Stage 53c-2 scope) ===============================
 //
@@ -244,8 +332,18 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     push_instr "i32.sub" s2
   | EAnnot (inner, _) -> emit_expr inner s
   | EVar name ->
-    let idx = lookup_local name s.locals in
-    push_instr ("local.get " ++ show idx) s
+    // Locals win over captures (a let-rebind inside a fn body
+    // shadows the captured outer name). Captures load from
+    // `local.get 0` (env_ptr) + `i32.load offset=N`.
+    (match lookup_assoc name s.locals with
+      | Some idx -> push_instr ("local.get " ++ show idx) s
+      | None ->
+        (match lookup_assoc name s.captures with
+          | Some off ->
+            let s1 = push_instr "local.get 0" s in
+            push_instr ("i32.load offset=" ++ show off) s1
+          | None ->
+            fail ("codegen_wasm: unbound var " ++ name)))
   | ELet (pat, value_expr, body) ->
     // 53c-1 only handles PVar (one new local) and PWild (no binding).
     // Destructure patterns (PTuple etc.) land in 53d / 53e once we have
@@ -277,26 +375,39 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s5 = emit_expr else_e s4 in
     push_instr "end" s5
   | EFun (arg, _ty_opt, body) ->
-    // 1. Stash outer per-function state (instrs / locals / local_tys /
-    //    local_counter). Everything else (data / str_offset /
-    //    fn_counter / table_entries / variant_tags / lifted_fns) is
-    //    module-global and threads straight through.
-    // 2. Build the inner per-function state: arg sits at param 1 (env
-    //    is param 0), the locals table starts with just (arg, 1), and
-    //    local_counter starts at 2 to skip both params.
-    // 3. Emit body in the inner state.
-    // 4. Wrap the inner instrs + local declarations into a complete
-    //    `(func $anon_N_fn ...)` definition and prepend it to
-    //    `lifted_fns`. Add the symbol to `table_entries` and bump
-    //    `fn_counter`.
-    // 5. Restore the outer per-fn state and emit the closure-record
-    //    allocation at the caller's emit point.
+    // 1. Scan the body for free vars (excluding `arg`) and lay them
+    //    out into an env record: first capture at byte 0, second at
+    //    byte 4, etc. Captures preserve first-seen order so the
+    //    emitted offsets are deterministic.
+    // 2. Save outer per-function state, build the inner state with
+    //    `arg` at param 1 (env_ptr is param 0) and `captures = env_offsets`
+    //    so the body's EVar dispatch can resolve free names via
+    //    `local.get 0; i32.load offset=N`.
+    // 3. Emit body in the inner state. Lift the result into
+    //    `(func $anon_N_fn ...)`, prepend to `lifted_fns`, add the
+    //    symbol to `table_entries`, bump `fn_counter`.
+    // 4. Restore outer per-fn state. At the caller's emit point,
+    //    build the env record by emitting each captured name's value
+    //    (which itself uses the OUTER locals/captures tables — that's
+    //    why the order matters) and storing it to env+offset.
+    // 5. Leave env_ptr on the stack, then call emit_alloc_closure to
+    //    wrap (env_ptr, fn_idx) into the 8-byte closure record.
+    let captures_list = free_vars body (Cons (arg, Nil)) in
+    let env_offsets = build_offsets captures_list 0 in
     let fn_idx = s.fn_counter in
+    // Reserve `fn_idx` for *this* lambda by bumping the counter in the
+    // inner state, so any nested EFun in `body` allocates from
+    // fn_idx+1 onward. After the body emits we adopt
+    // `inner_done.fn_counter` (which has absorbed all nested
+    // allocations) — taking `fn_idx + 1` here would overwrite nested
+    // increments and produce duplicate `$anon_N_fn` definitions.
     let inner = ({ s |
       instrs = Nil,
       locals = Cons ((arg, 1), Nil),
       local_tys = Nil,
-      local_counter = 2 } : EmitState) in
+      local_counter = 2,
+      captures = env_offsets,
+      fn_counter = fn_idx + 1 } : EmitState) in
     let inner_done = emit_expr body inner in
     let fn_name = "$anon_" ++ show fn_idx ++ "_fn" in
     let inner_local_decls = join_local_decls (list_reverse inner_done.local_tys) in
@@ -309,10 +420,12 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
       locals = s.locals,
       local_tys = s.local_tys,
       local_counter = s.local_counter,
-      fn_counter = fn_idx + 1,
+      captures = s.captures,
+      fn_counter = inner_done.fn_counter,
       lifted_fns = Cons (fn_def, inner_done.lifted_fns),
       table_entries = Cons (fn_name, inner_done.table_entries) } : EmitState) in
-    emit_alloc_closure fn_idx s_after_lift
+    let s_with_env = emit_build_env captures_list s_after_lift in
+    emit_alloc_closure fn_idx s_with_env
   | EApp (f, x) ->
     // Capture-less call site:
     //   <emit f>                ;; closure ptr
@@ -330,7 +443,44 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s7 = push_instr ("local.get " ++ show tmp) s6 in
     let s8 = push_instr "i32.load offset=4" s7 in
     push_instr "call_indirect (type $cl)" s8
-  | _ -> fail "codegen_wasm: stage 53c-2 doesn't handle this expr yet"
+  | _ -> fail "codegen_wasm: stage 53c-3 doesn't handle this expr yet"
+
+// `emit_build_env caps s` allocates a 4×N byte env record, walks each
+// captured name and emits its value via the regular EVar dispatch
+// (which reads from the *outer* locals/captures tables — that's why
+// the outer state is what's threaded in), stores it to env+offset,
+// and finally leaves the env pointer on the stack ready for
+// emit_alloc_closure.
+//
+// For zero captures, this skips the bump-alloc entirely and pushes
+// `i32.const 0` as the env_ptr sentinel — same convention the OCaml
+// side uses.
+and emit_build_env = fn (caps: str list) -> fn (s: EmitState) ->
+  match caps with
+  | Nil -> push_instr "i32.const 0" s
+  | _ ->
+    let n = list_length_str caps in
+    let nbytes = n * 4 in
+    let s1 = emit_bump_alloc nbytes s in
+    let (env_tmp, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.set " ++ show env_tmp) s2 in
+    let s4 = emit_store_captures caps 0 env_tmp s3 in
+    push_instr ("local.get " ++ show env_tmp) s4
+
+and emit_store_captures = fn (caps: str list) -> fn (offset: int)
+                       -> fn (env_tmp: int) -> fn (s: EmitState) ->
+  match caps with
+  | Nil -> s
+  | Cons (name, rest) ->
+    let s1 = push_instr ("local.get " ++ show env_tmp) s in
+    let s2 = emit_expr (EVar name) s1 in
+    let s3 = push_instr ("i32.store offset=" ++ show offset) s2 in
+    emit_store_captures rest (offset + 4) env_tmp s3
+
+and list_length_str = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_length_str t
   ;
 
 // === Module wrapper ========================================================
@@ -400,10 +550,16 @@ let emit_program = fn (prog: program) ->
   let s = emit_expr main_expr initial_emit_state in
   let locals_decl = join_local_decls (list_reverse s.local_tys) in
   let body = join_indented (list_reverse s.instrs) in
-  let lifted_str = concat_strs (list_reverse s.lifted_fns) in
-  let entries = list_reverse s.table_entries in
-  let table_size = list_length entries in
-  let elem_line = join_space entries in
+  // `table_entries` and `lifted_fns` are NOT reversed here. With
+  // nested `EFun`s, the inner lambda's emit completes BEFORE the
+  // outer's, so the inner's name is appended first; the outer's
+  // Cons-prepend then puts itself at the head. That ordering already
+  // matches `fn_idx` order (outer = 0 at head, inner = 1 next), and
+  // reversing would swap the table — exactly the bug surfaced by
+  // `((fn x -> fn y -> x + y) 3) 4` in Stage 53c-3 testing.
+  let lifted_str = concat_strs s.lifted_fns in
+  let table_size = list_length s.table_entries in
+  let elem_line = join_space s.table_entries in
   wrap_module locals_decl body lifted_str table_size elem_line;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
@@ -480,4 +636,19 @@ let _ = print (parse_and_emit "(fn _x -> 42) 0") in
 let _ = print "---" in
 // Lambda whose body uses an if.
 let _ = print (parse_and_emit "(fn b -> if b then 10 else 20) true") in
+let _ = print "=== Stage 53c-3 codegen_wasm demos (closures with capture) ===" in
+// Lambda captures one outer let-bound var.
+let _ = print (parse_and_emit "let x = 10 in (fn y -> x + y) 5") in
+let _ = print "---" in
+// Curried fn: outer fn returns inner closure that captures the outer arg.
+let _ = print (parse_and_emit "((fn x -> fn y -> x + y) 3) 4") in
+let _ = print "---" in
+// Three-level capture chain (inner captures both outer args).
+let _ = print (parse_and_emit "(((fn x -> fn y -> fn z -> x + y + z) 1) 2) 3") in
+let _ = print "---" in
+// Capture multiple outer lets.
+let _ = print (parse_and_emit "let a = 7 in let b = 6 in (fn z -> a * b + z) 0") in
+let _ = print "---" in
+// Closure stored in a let, then applied (let-bound captured closure).
+let _ = print (parse_and_emit "let n = 100 in let add_n = fn x -> x + n in add_n 23") in
 0
