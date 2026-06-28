@@ -45,6 +45,11 @@ type value =
   // resolution allocates a new closure, which is fine; the binding
   // is shared by reference (Mere lists are immutable).
   | VRecBinding of str * (str * expr) list * (str * value) list
+  // Stage 51d: record value. Mirrors OCaml-side `V_record (name,
+  // fields)` — carries the type name so `value_to_str` can emit
+  // `Name { f1 = v1, … }` and `match_pattern`'s `PRecord` branch can
+  // assert name equality before matching fields.
+  | VRecord of str * (str * value) list
   ;
 
 // === Environment ===========================================================
@@ -96,6 +101,10 @@ let rec value_to_str = fn (v: value) ->
     "(" ++ str_join ", " parts ++ ")"
   | VClosure _ -> "<closure>"
   | VRecBinding (name, _, _) -> "<rec:" ++ name ++ ">"
+  | VRecord (name, fields) ->
+    let parts = list_map fields (fn (f: str * value) ->
+      let (fname, fv) = f in fname ++ " = " ++ value_to_str fv) in
+    name ++ " \{ " ++ str_join ", " parts ++ " }"
   ;
 
 // === Pattern matching ======================================================
@@ -151,7 +160,39 @@ let rec match_pattern = fn (p: pattern) -> fn (v: value) ->
     (match match_pattern p1 v with
       | Some bs -> Some bs
       | None -> match_pattern p2 v)
-  | _ -> None  // PRecord — VRecord lands in Stage 51d
+  // Stage 51d: PRecord matches against VRecord with the same type
+  // name. The pattern only mentions the subset of fields it cares
+  // about; unmentioned fields are ignored.
+  | PRecord (name, fpats) ->
+    (match v with
+      | VRecord (vname, fields) ->
+        if name == vname then match_record_fields fpats fields
+        else None
+      | _ -> None)
+
+and match_record_fields = fn (fpats: (str * pattern) list)
+                       -> fn (fields: (str * value) list) ->
+  match fpats with
+  | Nil -> Some Nil
+  | Cons (fp, rest) ->
+    let (fname, sub_p) = fp in
+    (match lookup_field fname fields with
+      | None -> None
+      | Some fv ->
+        (match match_pattern sub_p fv with
+          | None -> None
+          | Some bs1 ->
+            (match match_record_fields rest fields with
+              | None -> None
+              | Some bs2 -> Some (concat_bindings bs1 bs2))))
+
+and lookup_field = fn (name: str) -> fn (fields: (str * value) list) ->
+  match fields with
+  | Nil -> None
+  | Cons (f, rest) ->
+    let (fname, fv) = f in
+    if fname == name then Some fv
+    else lookup_field name rest
 
 and match_pattern_list = fn (ps: pattern list) -> fn (vs: value list) ->
   match (ps, vs) with
@@ -287,7 +328,26 @@ let rec eval = fn (e: expr) -> fn (env: env) ->
   | ELetRec (bindings, body) ->
     let rec_env = make_rec_env bindings env in
     eval body rec_env
-  | _ -> fail "eval: records / EFloat land in 51d (or unparseable)"
+  // Stage 51d: records.
+  | ERecordLit (name, field_exprs) ->
+    let field_vals = list_map field_exprs (fn (f: str * expr) ->
+      let (fname, fexpr) = f in (fname, eval fexpr env)) in
+    VRecord (name, field_vals)
+  | EFieldGet (record_expr, fname) ->
+    (match eval record_expr env with
+      | VRecord (_, fields) ->
+        (match lookup_field fname fields with
+          | Some v -> v
+          | None -> fail ("field not found: " ++ fname))
+      | _ -> fail "field access: expected record")
+  | ERecordUpdate (base_expr, updates) ->
+    (match eval base_expr env with
+      | VRecord (rname, fields) ->
+        let update_vals = list_map updates (fn (u: str * expr) ->
+          let (uname, uexpr) = u in (uname, eval uexpr env)) in
+        VRecord (rname, apply_record_updates fields update_vals)
+      | _ -> fail "record update: expected record on LHS")
+  | _ -> fail "eval: EFloat (or unparseable expression)"
 
 // `EMatch` arm iteration. For each arm, try `match_pattern`; if it
 // matches and the optional guard evaluates to `VBool true`, eval the
@@ -360,6 +420,22 @@ and find_rec_body = fn (name: str) -> fn (bindings: (str * expr) list) ->
     let (n, body) = b in
     if n == name then body
     else find_rec_body name rest
+
+// `{ base | f1 = e1, f2 = e2 }` keeps the field order of the base
+// record. For each base field, if an update overrides it, use the new
+// value; otherwise keep the original. Unknown update keys are silently
+// ignored — the OCaml side relies on the typer to reject them, and
+// the self-host eval is post-typer (or pre-typer-aware MVP).
+and apply_record_updates = fn (base: (str * value) list)
+                        -> fn (updates: (str * value) list) ->
+  match base with
+  | Nil -> Nil
+  | Cons (f, rest) ->
+    let (fname, fval) = f in
+    let new_val = (match lookup_field fname updates with
+      | Some v -> v
+      | None -> fval) in
+    Cons ((fname, new_val), apply_record_updates rest updates)
   ;
 
 // === Demos =================================================================
@@ -555,6 +631,38 @@ let rev_aux_body =
 let e20 = ELetRec (Cons (("rev_aux", rev_aux_body), Nil),
                    EApp (EApp (EVar "rev_aux", list_123), nil_e));
 
+// === Stage 51d demo data (records) =========================================
+//
+// e21: `Point { x = 1, y = 2 }` -> VRecord
+let e21 = ERecordLit ("Point",
+  Cons (("x", EInt 1), Cons (("y", EInt 2), Nil)));
+// e22: field access — `(Point { x = 3, y = 4 }).x` -> 3
+let e22 = EFieldGet (
+  ERecordLit ("Point",
+    Cons (("x", EInt 3), Cons (("y", EInt 4), Nil))),
+  "x");
+// e23: record update — `let p = Point { x = 0, y = 0 } in { p | x = 10 }`
+//      -> Point { x = 10, y = 0 }
+let e23 = ELet (PVar "p",
+  ERecordLit ("Point",
+    Cons (("x", EInt 0), Cons (("y", EInt 0), Nil))),
+  ERecordUpdate (EVar "p", Cons (("x", EInt 10), Nil)));
+// e24: pattern match — `match Point { x = 0, y = 5 } with
+//      | Point { x = 0 } -> "on-y-axis" | _ -> "off-axis"`
+let e24 = EMatch (
+  ERecordLit ("Point",
+    Cons (("x", EInt 0), Cons (("y", EInt 5), Nil))),
+  Cons ((PRecord ("Point", Cons (("x", PInt 0), Nil)),
+         None, EStr "on-y-axis"),
+    Cons ((PWild, None, EStr "off-axis"), Nil)));
+// e25: destructure in let — `let Point { x = a, y = b } = Point { x = 7, y = 8 }
+//      in a + b` -> 15
+let e25 = ELet (
+  PRecord ("Point", Cons (("x", PVar "a"), Cons (("y", PVar "b"), Nil))),
+  ERecordLit ("Point",
+    Cons (("x", EInt 7), Cons (("y", EInt 8), Nil))),
+  EBin (OpAdd, EVar "a", EVar "b"));
+
 let _ = print "=== Stage 51a eval demos ===" in
 let _ = print ("d1  (literal 42):       " ++ value_to_str (eval d1 empty_env)) in
 let _ = print ("d2  (1 + 2):            " ++ value_to_str (eval d2 empty_env)) in
@@ -593,4 +701,11 @@ let _ = print ("e17 (empty list):             " ++ value_to_str (eval e17 empty_
 let _ = print ("e18 (list [1,2,3]):           " ++ value_to_str (eval e18 empty_env)) in
 let _ = print ("e19 (mklist 5):               " ++ value_to_str (eval e19 empty_env)) in
 let _ = print ("e20 (rev [1,2,3]):            " ++ value_to_str (eval e20 empty_env)) in
+let _ = print "" in
+let _ = print "=== Stage 51d eval demos (records) ===" in
+let _ = print ("e21 (record literal):         " ++ value_to_str (eval e21 empty_env)) in
+let _ = print ("e22 (field access .x):        " ++ value_to_str (eval e22 empty_env)) in
+let _ = print ("e23 (record update):          " ++ value_to_str (eval e23 empty_env)) in
+let _ = print ("e24 (record pat match):       " ++ value_to_str (eval e24 empty_env)) in
+let _ = print ("e25 (let record destructure): " ++ value_to_str (eval e25 empty_env)) in
 0
