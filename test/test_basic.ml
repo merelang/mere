@@ -7842,5 +7842,61 @@ let () =
   cross_eval "str concat" "\"hello, \" ++ \"world\"";
   cross_eval "tuple destructure" "let (a, b) = (3, 4) in a + b";
 
+  (* Phase 52.6 — self-host typer cross-validation. Runs a Mere source
+     string through both `Pipeline.type_of` (OCaml typer) and the
+     self-host `parse_and_infer`, then compares the displayed type.
+     Only monomorphic results are compared — the self-host prints
+     metas as `'_0` while OCaml `pp_ty` prints them as `'a`, so
+     polymorphic cases would diverge on the var name. *)
+  let self_host_type input =
+    let escaped =
+      let b = Buffer.create (String.length input) in
+      String.iter (fun c ->
+        match c with
+        | '\\' -> Buffer.add_string b "\\\\"
+        | '"' -> Buffer.add_string b "\\\""
+        | '\n' -> Buffer.add_string b "\\n"
+        | '\t' -> Buffer.add_string b "\\t"
+        | '{' -> Buffer.add_string b "\\{"
+        | c -> Buffer.add_char b c) input;
+      Buffer.contents b
+    in
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/typer/typer.mere\";\n\
+       parse_and_infer \"%s\"\n"
+      project_root escaped
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+
+  let cross_type name input =
+    let ocaml_result = Pipeline.type_of input in
+    let self_result = self_host_type input in
+    check ("self-host type cross: " ^ name) self_result ocaml_result
+  in
+
+  cross_type "int literal" "42";
+  cross_type "int arith" "1 + 2 * 3";
+  cross_type "str literal" "\"hi\"";
+  cross_type "bool cmp" "1 < 2";
+  cross_type "annotated lambda" "fn (x: int) -> x + 1";
+  cross_type "let-in int" "let x = 5 in x + 1";
+  cross_type "let-rec factorial"
+    "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5";
+  cross_type "mutual rec bool"
+    "let rec even = fn n -> if n == 0 then true else odd (n - 1) and odd = fn n -> if n == 0 then false else even (n - 1) in even 10";
+  cross_type "tuple literal" "(1, 2)";
+  cross_type "tuple destructure" "let (a, b) = (3, 4) in a + b";
+  cross_type "match int" "match 1 with | 0 -> \"z\" | _ -> \"o\"";
+  cross_type "match with guard" "match 5 with | n when n > 0 -> 1 | _ -> 0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

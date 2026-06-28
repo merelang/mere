@@ -734,23 +734,58 @@ let unify_to_str = fn (r: subst option) ->
 
 // === Top-level entry ======================================================
 //
-// `parse_and_infer src` glues parser + typer for end-to-end demos. It
-// only types the program's `main` expression for now — top-level
-// decls (`TopLet` / `TopLetRec` / `TopType` / `TopRecord` /
-// `TopTypeAlias`) land in Stage 52f along with the cross-validation
-// harness against OCaml's `Pipeline.type_of`.
+// `parse_and_infer src` glues parser + typer for end-to-end demos.
+// Stage 52f adds `infer_decl` / `infer_decls` that thread top-level
+// `TopLet` / `TopLetRec` bindings into the type_env before the `main`
+// expression is typed. Type decls (`TopType` / `TopRecord` /
+// `TopTypeAlias`) currently carry no info into the typer — the
+// permissive `EConstr` / record handling treats their names nominally.
+// A real registry-aware pass lands once mutual borrow-checker work
+// settles; until then we just no-op them.
 
 let initial_state = ((0, Nil) : infer_state);
 let initial_type_env = (Nil : type_env);
 
+let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
+                  -> fn (s: infer_state) ->
+  match d with
+  | TopLet (pat, e) ->
+    let (vt, s1) = infer env s e in
+    (match pat with
+      | PVar name ->
+        let sch = generalize env (subst_of s1) vt in
+        (Cons ((name, sch), env), s1)
+      | PWild -> (env, s1)
+      | _ ->
+        let (binds, s2) = check_pattern pat vt s1 in
+        (concat_scheme_bindings binds env, s2))
+  | TopLetRec bindings ->
+    let (pre_env, s1) = bind_rec_metas bindings env s in
+    let s2 = infer_rec_bodies bindings pre_env s1 in
+    let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
+    (final_env, s2)
+  | TopType _ -> (env, s)
+  | TopRecord _ -> (env, s)
+  | TopTypeAlias _ -> (env, s)
+
+and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
+               -> fn (s: infer_state) ->
+  match decls with
+  | Nil -> ((env, s) : (type_env * infer_state))
+  | Cons (d, rest) ->
+    let (env1, s1) = infer_decl d env s in
+    infer_decls rest env1 s1
+  ;
+
+// Thread decls through env+state, then type `main` in the final env.
+// Returns the displayed result type — meta-resolved.
 let parse_and_infer = fn (src: str) ->
   let toks = tokenize src in
   let (prog, _rest) = parse_decls Nil toks in
-  let (_decls, main_expr) = prog in
-  let (t, s) = infer initial_type_env initial_state main_expr in
-  // Shake the substitution into the result so external printers see
-  // bound metas resolved.
-  ty_to_str (apply_subst (subst_of s) t);
+  let (decls, main_expr) = prog in
+  let (env1, s1) = infer_decls decls initial_type_env initial_state in
+  let (t, s2) = infer env1 s1 main_expr in
+  ty_to_str (apply_subst (subst_of s2) t);
 
 // === Demos ================================================================
 //
@@ -888,4 +923,23 @@ let _ = print ("l6  (match Point \{ x }):              " ++ parse_and_infer "mat
 let _ = print ("l7  ((Point \{...} : Point)):          " ++ parse_and_infer "(Point \{ x = 1, y = 2 } : Point)") in
 // EAnnot still works inside an application context.
 let _ = print ("l8  ((fn (x: int) -> x) 5):           " ++ parse_and_infer "(fn (x: int) -> x) 5") in
+let _ = print "" in
+let _ = print "=== Stage 52f typer demos (top-level decls) ===" in
+// Top-level `let x = 5;` referenced from main.
+let _ = print ("m1  (top-let int + main):             " ++ parse_and_infer "let x = 5; x + 1") in
+// Top-level fn bound, applied in main — main type is the fn's return.
+let _ = print ("m2  (top-let fn + apply):             " ++ parse_and_infer "let inc = fn x -> x + 1; inc 41") in
+// Top-level `let rec` referenced from main.
+let _ = print ("m3  (top-let rec fact):               " ++ parse_and_infer "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1); fact 5") in
+// Top-level mutual rec.
+let _ = print ("m4  (top mutual rec even/odd):        " ++ parse_and_infer "let rec even = fn n -> if n == 0 then true else odd (n - 1) and odd = fn n -> if n == 0 then false else even (n - 1); even 10") in
+// Top-level poly id used at two types in main.
+let _ = print ("m5  (top poly id, int + bool use):    " ++ parse_and_infer "let id = fn x -> x; if (id true) then id 1 else 0") in
+// Top-level `type` decl that the typer no-ops, then a record literal
+// in main referring to that nominal name.
+let _ = print ("m6  (TopType no-op + EConstr in main):" ++ parse_and_infer "type Color = | Red | Green | Blue; Red") in
+// Top-level record decl + record literal in main.
+let _ = print ("m7  (TopRecord no-op + record main):  " ++ parse_and_infer "type Point = \{ x: int, y: int }; Point \{ x = 1, y = 2 }") in
+// Multiple top-level decls cascading.
+let _ = print ("m8  (cascading top decls):            " ++ parse_and_infer "let x = 5; let y = x + 1; let z = y * 2; z") in
 0
