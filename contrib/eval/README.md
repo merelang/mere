@@ -23,8 +23,8 @@ Together with `contrib/parser/` (Phase 50) and `contrib/fmt/`
 |---|---|---|
 | **51a** | value type + env + minimal eval (literal / var / binop / cmpop / logicop / neg / if / annot) + 11 hand-coded demos | **complete** |
 | **51b-1** | closures (`EFun` + `EApp`), `ELet`, `EMatch` + full `match_pattern` (PWild / PVar / PInt / PBool / PStr / PUnit / PConstr / PTuple / PAs / POr), `EConstr`, `ETuple` + 12 more demos | **complete** |
-| **51b-2** | `ELetRec` via `VRecBinding` placeholder env entries — pure-functional mutual recursion, no `ref` needed. Factorial / mutual `even`/`odd` / Fibonacci / list-sum (over `Cons`/`Nil` chain) all evaluate. 4 more demos. | **complete** (this commit) |
-| **51c** | list literal reconstruction in `value_to_str` (`Cons` / `Nil` chain → `[1, 2, 3]`) | future |
+| **51b-2** | `ELetRec` via `VRecBinding` placeholder env entries — pure-functional mutual recursion, no `ref` needed. Factorial / mutual `even`/`odd` / Fibonacci / list-sum (over `Cons`/`Nil` chain) all evaluate. 4 more demos. | **complete** |
+| **51c** | `try_as_list` walks `Cons`/`Nil` chains so `value_to_str` renders `[1, 2, 3]` instead of `Cons (1, Cons (2, Cons (3, Nil)))`. Empty list `[]`, `mklist n`, and a tail-recursive `rev` over a 3-element list all render. 4 more demos. | **complete** (this commit) |
 | **51d** | records (`VRecord` + `PRecord` + `ERecordLit` / `EFieldGet` / `ERecordUpdate`) | future |
 | **51e** | minimal builtins (extern fn) + top-level decl integration (`TopLet` / `TopLetRec` / `TopType` / `TopRecord`) | future |
 | **51f** | Browser bridge — paste source, run, see result; **live in-browser Mere REPL** | future |

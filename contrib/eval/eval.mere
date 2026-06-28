@@ -57,9 +57,23 @@ type env = (str * value) list;
 
 // === Debug printing (value -> str) =========================================
 //
-// Mirrors `Eval.to_string` from OCaml-side `lib/eval.ml`, minus the
-// `[1, 2, 3]` reconstruction over `Cons` / `Nil` chains (that lands in
-// Stage 51c when list values actually start flowing).
+// Mirrors `Eval.to_string` from OCaml-side `lib/eval.ml`, including
+// `[1, 2, 3]` reconstruction over `Cons` / `Nil` chains (Stage 51c).
+// A well-formed `Cons (h, t) … Cons (h, Nil)` chain becomes
+// `[h, …, h]`; a malformed chain falls back to constructor-syntax
+// `Cons (...)`.
+
+// Walk a `Cons` chain. Returns `Some elems` if the chain terminates in
+// `Nil` (well-formed list), `None` otherwise.
+let rec try_as_list = fn (v: value) ->
+  match v with
+  | VConstr ("Nil", None) -> Some Nil
+  | VConstr ("Cons", Some (VTuple (Cons (h, Cons (t, Nil))))) ->
+    (match try_as_list t with
+      | None -> None
+      | Some rest -> Some (Cons (h, rest)))
+  | _ -> None
+  ;
 
 let rec value_to_str = fn (v: value) ->
   match v with
@@ -67,11 +81,18 @@ let rec value_to_str = fn (v: value) ->
   | VBool b -> if b then "true" else "false"
   | VStr s -> "\"" ++ s ++ "\""
   | VUnit -> "()"
+  | VConstr ("Nil", None) -> "[]"
   | VConstr (name, None) -> name
   | VConstr (name, Some payload) ->
-    name ++ " " ++ value_to_str payload
+    // If this is a well-formed Cons chain, render as `[e1, e2, ...]`.
+    // Otherwise fall back to `Name payload` constructor syntax.
+    (match try_as_list v with
+      | Some elems ->
+        let parts = list_map elems (fn (e: value) -> value_to_str e) in
+        "[" ++ str_join ", " parts ++ "]"
+      | None -> name ++ " " ++ value_to_str payload)
   | VTuple vs ->
-    let parts = list_map vs (fn (v: value) -> value_to_str v) in
+    let parts = list_map vs (fn (v2: value) -> value_to_str v2) in
     "(" ++ str_join ", " parts ++ ")"
   | VClosure _ -> "<closure>"
   | VRecBinding (name, _, _) -> "<rec:" ++ name ++ ">"
@@ -496,6 +517,44 @@ let list_123 = cons_pair (EInt 1) (cons_pair (EInt 2) (cons_pair (EInt 3) nil_e)
 let e16 = ELetRec (Cons (("sum", sum_body), Nil),
                    EApp (EVar "sum", list_123));
 
+// === Stage 51c demos (list literal reconstruction) =========================
+
+// e17: bare empty list -> "[]"
+let e17 = nil_e;
+// e18: bare list literal -> "[1, 2, 3]"
+let e18 = list_123;
+// e19: build a list with `let rec mklist = fn n -> if n < 1 then Nil
+//      else Cons (n, mklist (n - 1)) in mklist 5` -> "[5, 4, 3, 2, 1]"
+let mklist_body =
+  EFun ("n", None,
+    EIf (ECmp (OpLt, EVar "n", EInt 1),
+         EConstr ("Nil", None),
+         EConstr ("Cons",
+           Some (ETuple (Cons (EVar "n",
+                          Cons (EApp (EVar "mklist",
+                                      EBin (OpSub, EVar "n", EInt 1)),
+                            Nil)))))));
+let e19 = ELetRec (Cons (("mklist", mklist_body), Nil),
+                   EApp (EVar "mklist", EInt 5));
+// e20: list reverse — `let rec rev_aux = fn xs -> fn acc -> match xs
+//      with | Nil -> acc | Cons (h, t) -> rev_aux t (Cons (h, acc)) in
+//      rev_aux [1, 2, 3] Nil` -> "[3, 2, 1]"
+let cons_h_acc =
+  EConstr ("Cons", Some (ETuple (Cons (EVar "h",
+                              Cons (EVar "acc", Nil)))));
+let rev_aux_body =
+  EFun ("xs", None,
+    EFun ("acc", None,
+      EMatch (EVar "xs",
+        Cons ((PConstr ("Nil", None), None, EVar "acc"),
+          Cons ((PConstr ("Cons", Some (PTuple (Cons (PVar "h",
+                                                Cons (PVar "t", Nil))))),
+                 None,
+                 EApp (EApp (EVar "rev_aux", EVar "t"), cons_h_acc)),
+            Nil)))));
+let e20 = ELetRec (Cons (("rev_aux", rev_aux_body), Nil),
+                   EApp (EApp (EVar "rev_aux", list_123), nil_e));
+
 let _ = print "=== Stage 51a eval demos ===" in
 let _ = print ("d1  (literal 42):       " ++ value_to_str (eval d1 empty_env)) in
 let _ = print ("d2  (1 + 2):            " ++ value_to_str (eval d2 empty_env)) in
@@ -528,4 +587,10 @@ let _ = print ("e13 (factorial 5):            " ++ value_to_str (eval e13 empty_
 let _ = print ("e14 (mutual even 10):         " ++ value_to_str (eval e14 empty_env)) in
 let _ = print ("e15 (fib 8):                  " ++ value_to_str (eval e15 empty_env)) in
 let _ = print ("e16 (list sum [1,2,3]):       " ++ value_to_str (eval e16 empty_env)) in
+let _ = print "" in
+let _ = print "=== Stage 51c eval demos (list literal reconstruction) ===" in
+let _ = print ("e17 (empty list):             " ++ value_to_str (eval e17 empty_env)) in
+let _ = print ("e18 (list [1,2,3]):           " ++ value_to_str (eval e18 empty_env)) in
+let _ = print ("e19 (mklist 5):               " ++ value_to_str (eval e19 empty_env)) in
+let _ = print ("e20 (rev [1,2,3]):            " ++ value_to_str (eval e20 empty_env)) in
 0
