@@ -335,6 +335,29 @@ let instantiate = fn (sch: scheme) -> fn (s: infer_state) ->
   (subst_quants m body, s1)
   ;
 
+// Allocate n fresh metas, returned as a `ty list`. Used by check_pattern's
+// PTuple case to materialise the expected element types when the scrutinee
+// type isn't already known to be a TyTuple.
+let rec alloc_fresh_n = fn (n: int) -> fn (s: infer_state) ->
+  if n <= 0 then ((Nil, s) : (ty list * infer_state))
+  else
+    let (h, s1) = fresh_meta s in
+    let (rest, s2) = alloc_fresh_n (n - 1) s1 in
+    (Cons (h, rest), s2)
+  ;
+
+let rec list_len = fn (xs: ty list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_len t
+  ;
+
+let rec list_len_p = fn (xs: pattern list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_len_p t
+  ;
+
 // Binary operator types. `+ - * / %` are int -> int -> int;
 // `++` is str -> str -> str.
 let binop_return_ty = fn (op: binop) ->
@@ -358,6 +381,76 @@ let cmp_needs_int = fn (op: cmpop) ->
   match op with
   | OpLt -> true | OpLe -> true | OpGt -> true | OpGe -> true
   | _ -> false
+  ;
+
+// === Pattern type checking (Stage 52d) ====================================
+//
+// `check_pattern p expected_ty s` -> `(new_bindings, infer_state)`.
+// Walks a pattern, unifying it structurally against the expected
+// type, returning the (str * scheme) bindings the pattern introduces.
+// Used by `ELet (pat, …)` and by `EMatch` arms.
+//
+// Constructor patterns (`PConstr name [payload]`) are deliberately
+// permissive — without a constructor registry (Stage 52f), we don't
+// know what type `Some` / `Cons` belong to. The MVP treats them as
+// fresh metas and only checks the payload. This means a match with
+// mixed-variant patterns (`| Some x -> … | Nil -> …`) won't be
+// rejected by the typer, but pattern bindings are still extracted
+// correctly. Stage 52f tightens this once `TopType` decls flow in.
+
+let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
+                     -> fn (s: infer_state) ->
+  match p with
+  | PWild -> ((Nil, s) : ((str * scheme) list * infer_state))
+  | PVar name -> (Cons ((name, mono expected), Nil), s)
+  | PInt _ -> (Nil, unify_state s expected TyInt)
+  | PBool _ -> (Nil, unify_state s expected TyBool)
+  | PStr _ -> (Nil, unify_state s expected TyStr)
+  | PUnit -> (Nil, unify_state s expected TyUnit)
+  | PTuple ps ->
+    // Materialise element-typed metas, unify expected with the tuple,
+    // then walk each element pattern.
+    let n = list_len_p ps in
+    let (elem_tys, s1) = alloc_fresh_n n s in
+    let s2 = unify_state s1 expected (TyTuple elem_tys) in
+    check_pattern_list ps elem_tys s2
+  | PAs (sub, name) ->
+    let (sub_binds, s1) = check_pattern sub expected s in
+    (Cons ((name, mono expected), sub_binds), s1)
+  | POr (p1, _p2) ->
+    // MVP: trust the user that both branches bind the same names with
+    // the same types. We just check the left branch and assume the
+    // right matches structurally. Proper OR pattern type checking
+    // would unify bindings on both sides — Stage 52f / 52e fodder.
+    check_pattern p1 expected s
+  | PConstr (_name, sub_opt) ->
+    // Permissive — no constructor registry yet. The expected type is
+    // left unconstrained against the constructor itself; only the
+    // payload (if any) is type-checked against a fresh meta so any
+    // sub-pattern's bindings still flow.
+    (match sub_opt with
+      | None -> (Nil, s)
+      | Some sub_p ->
+        let (a, s1) = fresh_meta s in
+        check_pattern sub_p a s1)
+  | PRecord _ ->
+    fail "typer: PRecord land in Stage 52e (record type checking)"
+
+and check_pattern_list = fn (ps: pattern list) -> fn (ts: ty list)
+                      -> fn (s: infer_state) ->
+  match (ps, ts) with
+  | (Nil, Nil) -> ((Nil, s) : ((str * scheme) list * infer_state))
+  | (Cons (p, ps_rest), Cons (t, ts_rest)) ->
+    let (bs1, s1) = check_pattern p t s in
+    let (bs2, s2) = check_pattern_list ps_rest ts_rest s1 in
+    (concat_scheme_bindings bs1 bs2, s2)
+  | _ -> fail "check_pattern_list: pattern/type arity mismatch"
+
+and concat_scheme_bindings = fn (a: (str * scheme) list)
+                          -> fn (b: (str * scheme) list) ->
+  match a with
+  | Nil -> b
+  | Cons (h, t) -> Cons (h, concat_scheme_bindings t b)
   ;
 
 // === Inference dispatcher =================================================
@@ -420,18 +513,24 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let (body_ty, s3) = infer env2 s2 body in
     (apply_subst (subst_of s3) (TyArrow (arg_ty, body_ty)), s3)
   | ELet (pat, value_expr, body) ->
-    // Stage 52c: PVar / PWild only. Full pattern type checking
-    // (PTuple / PConstr / PRecord) lands in 52d.
     let (vt, s1) = infer env s value_expr in
     (match pat with
       | PVar name ->
+        // PVar lets generalize (HM let-poly). Richer patterns can't
+        // be safely generalized in general (value restriction etc.),
+        // so they go through check_pattern as mono bindings.
         let sch = generalize env (subst_of s1) vt in
         let env2 = Cons ((name, sch), env) in
         infer env2 s1 body
       | PWild ->
-        // Just evaluate the value for its constraints, ignore binding.
         infer env s1 body
-      | _ -> fail "typer: stage 52c only handles `let PVar = …` / `let _ = …`")
+      | _ ->
+        // Richer patterns (PTuple / PAs / POr / PConstr / PInt / PBool /
+        // PStr / PUnit) check against the inferred value type and prepend
+        // their bindings as mono schemes — no generalization for these.
+        let (binds, s2) = check_pattern pat vt s1 in
+        let env2 = concat_scheme_bindings binds env in
+        infer env2 s2 body)
   | ELetRec (bindings, body) ->
     // Pre-bind each rec name with a fresh meta wrapped in a mono
     // scheme, infer each body in that env, unify the result with the
@@ -451,7 +550,28 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let (te, s1) = infer env s inner in
     let s2 = unify_state s1 te t in
     (apply_subst (subst_of s2) t, s2)
-  | _ -> fail "typer: stage 52c doesn't handle this expr yet"
+  | ETuple es ->
+    let (tys, s1) = infer_list env s es in
+    (apply_subst (subst_of s1) (TyTuple tys), s1)
+  | EConstr (_name, payload_opt) ->
+    // Permissive type checking until Stage 52f wires the TopType
+    // registry: any constructor produces a fresh meta, and any payload
+    // is recursively inferred (its type is unconstrained — the result
+    // is unrelated to the payload type for now).
+    (match payload_opt with
+      | None ->
+        let (a, s1) = fresh_meta s in
+        (a, s1)
+      | Some payload ->
+        let (_pt, s1) = infer env s payload in
+        let (a, s2) = fresh_meta s1 in
+        (a, s2))
+  | EMatch (scrutinee, arms) ->
+    let (ts, s1) = infer env s scrutinee in
+    let (result_ty, s2) = fresh_meta s1 in
+    let s3 = infer_arms env arms ts result_ty s2 in
+    (apply_subst (subst_of s3) result_ty, s3)
+  | _ -> fail "typer: stage 52d doesn't handle this expr yet"
 
 // `bind_rec_metas`: for each `(name, _body)` in the rec group,
 // allocate a fresh meta and prepend `(name, mono meta)` to env. Used
@@ -499,6 +619,38 @@ and generalize_rec_bindings = fn (bindings: (str * expr) list)
     let sch = generalize outer_env sub name_ty in
     let outer_env2 = Cons ((name, sch), outer_env) in
     generalize_rec_bindings rest pre_env sub outer_env2
+
+// Sequence inference over a list of exprs, accumulating types and
+// threading the infer_state. Used by ETuple.
+and infer_list = fn (env: type_env) -> fn (s: infer_state)
+              -> fn (es: expr list) ->
+  match es with
+  | Nil -> ((Nil, s) : (ty list * infer_state))
+  | Cons (e, rest) ->
+    let (te, s1) = infer env s e in
+    let (ts, s2) = infer_list env s1 rest in
+    (Cons (te, ts), s2)
+
+// Type-check each match arm: pattern against scrutinee type, optional
+// bool guard, body against the unified result_ty.
+and infer_arms = fn (env: type_env)
+              -> fn (arms: (pattern * expr option * expr) list)
+              -> fn (scrutinee_ty: ty) -> fn (result_ty: ty)
+              -> fn (s: infer_state) ->
+  match arms with
+  | Nil -> s
+  | Cons (arm, rest) ->
+    let (pat, guard_opt, body) = arm in
+    let (binds, s1) = check_pattern pat scrutinee_ty s in
+    let env2 = concat_scheme_bindings binds env in
+    let s2 = (match guard_opt with
+      | None -> s1
+      | Some g ->
+        let (gt, sg) = infer env2 s1 g in
+        unify_state sg gt TyBool) in
+    let (bt, s3) = infer env2 s2 body in
+    let s4 = unify_state s3 bt result_ty in
+    infer_arms env rest scrutinee_ty result_ty s4
   ;
 
 // === Debug printing =======================================================
@@ -649,4 +801,26 @@ let _ = print ("j8  (let rec poly identity-ish):     " ++ parse_and_infer "let r
 let _ = print ("j9  (nested let):                    " ++ parse_and_infer "let a = 1 in let b = 2 in a + b") in
 let _ = print ("j10 (let with fn):                   " ++ parse_and_infer "let inc = fn x -> x + 1 in inc 10") in
 let _ = print ("j11 (shadowing):                     " ++ parse_and_infer "let x = 1 in let x = \"hi\" in x") in
+let _ = print "" in
+let _ = print "=== Stage 52d typer demos (patterns + ETuple + EConstr + EMatch) ===" in
+// Tuple literal — both elements concrete.
+let _ = print ("k1  ((1, 2)):                        " ++ parse_and_infer "(1, 2)") in
+// Tuple with mixed concrete types.
+let _ = print ("k2  ((1, true, \"hi\")):               " ++ parse_and_infer "(1, true, \"hi\")") in
+// Tuple destructure via let pattern.
+let _ = print ("k3  (let (a, b) = (1, 2) in a + b):  " ++ parse_and_infer "let (a, b) = (1, 2) in a + b") in
+// Nested tuple destructure.
+let _ = print ("k4  (let (a, (b, c)) = (1,(2,3))):   " ++ parse_and_infer "let (a, (b, c)) = (1, (2, 3)) in a + b + c") in
+// Match on int with int + wildcard arms — result int.
+let _ = print ("k5  (match int -> int):              " ++ parse_and_infer "match 1 with | 0 -> \"zero\" | _ -> \"other\"") in
+// Match returning bool; scrutinee constrained to int via literal arm.
+let _ = print ("k6  (match int -> bool):             " ++ parse_and_infer "match 1 with | 0 -> true | _ -> false") in
+// Match destructure tuple — binds names that flow into body.
+let _ = print ("k7  (match tuple destructure):       " ++ parse_and_infer "match (1, 2) with | (a, b) -> a + b") in
+// Match with a guard.
+let _ = print ("k8  (match with guard):              " ++ parse_and_infer "match 5 with | n when n > 0 -> 1 | _ -> 0") in
+// PAs binding alongside a destructure.
+let _ = print ("k9  (PAs in match):                  " ++ parse_and_infer "match (1, 2) with | (a, _) as p -> a") in
+// Constructor (permissive — payload inferred but result is a fresh meta).
+let _ = print ("k10 (EConstr Some 5):                " ++ parse_and_infer "Some 5") in
 0
