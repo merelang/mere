@@ -44,6 +44,7 @@ type EmitState = {
   variant_tags: (str * int) list,
   lifted_fns: str list,
   captures: (str * int) list,
+  str_offsets: (str * int) list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -63,6 +64,7 @@ let initial_emit_state = EmitState {
   variant_tags = Nil,
   lifted_fns = Nil,
   captures = Nil,
+  str_offsets = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -369,6 +371,42 @@ let lookup_or_alloc_variant_tag = fn (name: str) -> fn (s: EmitState) ->
     (tag, s2)
   ;
 
+// === String literal interning (Stage 53e) ==================================
+//
+// Each `EStr s` lowers to an `i32.const <ptr>` where `<ptr>` is the
+// byte offset of `s`'s data segment in linear memory. Duplicate
+// literals collapse to one segment via the `str_offsets` lookup
+// table. The string is NUL-terminated to play nicely with extern fns
+// that expect C-style buffers (e.g., `puts`).
+
+// Build the `(data (i32.const N) "...")` declaration for a single
+// string. wat syntax accepts `\"`/`\\` for literal `"` and `\` and
+// `\NN` (hex) for arbitrary bytes — for MVP we escape only `"` and
+// `\` and rely on the source string staying ASCII-printable.
+// Newlines / tabs / etc. inside `EStr` source aren't reached by
+// current demos; full escaping lands when needed.
+let wat_escape_str = fn (s: str) ->
+  let s1 = str_replace s "\\" "\\\\" in
+  let s2 = str_replace s1 "\"" "\\\"" in
+  s2;
+
+let alloc_str_literal = fn (s: str) -> fn (st: EmitState) ->
+  match lookup_assoc s st.str_offsets with
+  | Some off -> ((off, st) : (int * EmitState))
+  | None ->
+    let off = st.str_offset in
+    // `+ 1` for the NUL terminator that wat_escape_str doesn't emit.
+    let new_off = off + str_len s + 1 in
+    let data_decl =
+      "  (data (i32.const " ++ show off ++ ") \"" ++
+      wat_escape_str s ++ "\\00\")\n" in
+    let st2 = ({ st |
+      str_offsets = Cons ((s, off), st.str_offsets),
+      data = Cons (data_decl, st.data),
+      str_offset = new_off } : EmitState) in
+    (off, st2)
+  ;
+
 // === Expression emission (Stage 53c-2 scope) ===============================
 //
 // Layers `EFun` (lifts to a static `$anon_N_fn` + leaves a closure
@@ -382,6 +420,12 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
   | EInt n -> push_instr ("i32.const " ++ show n) s
   | EBool b ->
     push_instr ("i32.const " ++ (if b then "1" else "0")) s
+  | EStr lit ->
+    // Intern the literal into a data segment, push its byte offset.
+    // Repeated literals collapse to one segment.
+    let (off, s1) = alloc_str_literal lit s in
+    push_instr ("i32.const " ++ show off) s1
+  | EUnit -> push_instr "i32.const 0" s
   | EBin (op, a, b) ->
     let s1 = emit_expr a s in
     let s2 = emit_expr b s1 in
@@ -777,11 +821,14 @@ let rec join_space = fn (xs: str list) ->
 
 let wrap_module = fn (locals_decl: str) -> fn (body: str)
               -> fn (lifted: str) -> fn (table_size: int)
-              -> fn (elem_line: str) ->
+              -> fn (elem_line: str) -> fn (data_decls: str)
+              -> fn (bump_start: int) ->
   // Stage 53d onward: tuples, variants, and closures all use the
   // bump-alloc global, so emit `$__lang_bump` unconditionally. The
   // closure-specific `(type $cl)` / `(table)` / `(elem)` lines only
-  // appear when at least one lambda was lifted.
+  // appear when at least one lambda was lifted. `bump_start` is the
+  // emit-time `str_offset` so the bump allocator picks up past any
+  // data segments emitted in Stage 53e.
   let closure_decls =
     if table_size > 0 then
       "  (type $cl (func (param i32) (param i32) (result i32)))\n" ++
@@ -792,8 +839,9 @@ let wrap_module = fn (locals_decl: str) -> fn (body: str)
   in
   "(module\n" ++
   "  (memory (export \"memory\") 1)\n" ++
-  "  (global $__lang_bump (mut i32) (i32.const 32))\n" ++
+  "  (global $__lang_bump (mut i32) (i32.const " ++ show bump_start ++ "))\n" ++
   closure_decls ++
+  data_decls ++
   lifted ++
   "  (func $main (export \"main\") (result i32)\n" ++
   locals_decl ++
@@ -810,9 +858,74 @@ let rec list_length = fn (xs: str list) ->
 // main) and returns the WAT source as a string. 53a-53c ignore decls
 // entirely — they land in 53e.
 
+// === Top-level decl emission (Stage 53e) ===================================
+//
+// `TopLet (PVar n, e)` lowers like an inner `ELet (PVar n, ...)`: emit
+// the value, allocate a local slot, store, register the binding. The
+// binding stays in scope for the rest of the decls and the main
+// expression — naturally implemented by threading the same EmitState
+// through `emit_decls` and into the main emit.
+//
+// `TopLet (PWild, e)` evaluates for side effects, drops the result.
+// `TopLet (other_pat, e)` reuses the 53d destructure path
+// (`emit_bind_pattern` on a tmp slot — no check needed at the top
+// level).
+//
+// `TopType (_name, _vars, ctors)` pre-registers every constructor
+// name in `variant_tags` via the same lookup_or_alloc helper that
+// EConstr / PConstr use. This makes the codegen deterministic even
+// when source-order EConstr appearances diverge from declaration
+// order — a `Some` appearing before its `type Option = Some of int |
+// None;` decl would otherwise get a different tag.
+//
+// `TopRecord` and `TopTypeAlias` are no-ops here — the permissive
+// codegen takes the same shape as the 52d/52e typer; field-by-field
+// codegen lives behind a future TopRecord-aware slice.
+
+let rec register_ctor_tags = fn (ctors: (str * ty option) list)
+                          -> fn (s: EmitState) ->
+  match ctors with
+  | Nil -> s
+  | Cons (c, rest) ->
+    let (name, _payload_ty) = c in
+    let (_tag, s1) = lookup_or_alloc_variant_tag name s in
+    register_ctor_tags rest s1
+  ;
+
+let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
+  match d with
+  | TopLet (pat, value_expr) ->
+    (match pat with
+      | PVar name ->
+        let s1 = emit_expr value_expr s in
+        let s2 = alloc_local name s1 in
+        let idx = s2.local_counter - 1 in
+        push_instr ("local.set " ++ show idx) s2
+      | PWild ->
+        let s1 = emit_expr value_expr s in
+        push_instr "drop" s1
+      | _ ->
+        let s1 = emit_expr value_expr s in
+        let (val_slot, s2) = alloc_tmp_local s1 in
+        let s3 = push_instr ("local.set " ++ show val_slot) s2 in
+        emit_bind_pattern pat val_slot s3)
+  | TopLetRec _ ->
+    fail "codegen_wasm: TopLetRec lands in stage 53e-2 (backpatching closure env)"
+  | TopType (_name, _vars, ctors) -> register_ctor_tags ctors s
+  | TopRecord (_name, _vars, _fields) -> s
+  | TopTypeAlias (_name, _vars, _ty) -> s
+  ;
+
+let rec emit_decls = fn (decls: top_decl list) -> fn (s: EmitState) ->
+  match decls with
+  | Nil -> s
+  | Cons (d, rest) -> emit_decls rest (emit_decl d s)
+  ;
+
 let emit_program = fn (prog: program) ->
-  let (_decls, main_expr) = prog in
-  let s = emit_expr main_expr initial_emit_state in
+  let (decls, main_expr) = prog in
+  let s_after_decls = emit_decls decls initial_emit_state in
+  let s = emit_expr main_expr s_after_decls in
   let locals_decl = join_local_decls (list_reverse s.local_tys) in
   let body = join_indented (list_reverse s.instrs) in
   // `table_entries` and `lifted_fns` are NOT reversed here. With
@@ -825,7 +938,14 @@ let emit_program = fn (prog: program) ->
   let lifted_str = concat_strs s.lifted_fns in
   let table_size = list_length s.table_entries in
   let elem_line = join_space s.table_entries in
-  wrap_module locals_decl body lifted_str table_size elem_line;
+  // `data` is built reverse via Cons-prepend in alloc_str_literal —
+  // flip to emit in offset order (cleaner for readers; wasm doesn't
+  // care).
+  let data_str = concat_strs (list_reverse s.data) in
+  // Round bump start up so the allocator never overlaps the data
+  // region. `str_offset` already sits just past the last NUL byte.
+  let bump_start = s.str_offset in
+  wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
@@ -939,4 +1059,24 @@ let _ = print (parse_and_emit "match Some (42) with | Some n -> n | None -> 0") 
 let _ = print "---" in
 // Variant: nullary alternative wins.
 let _ = print (parse_and_emit "match None with | Some n -> n | None -> 99") in
+let _ = print "=== Stage 53e codegen_wasm demos (top-level decls + EStr) ===" in
+// Top-level let, main references it.
+let _ = print (parse_and_emit "let x = 5; x + 1") in
+let _ = print "---" in
+// Cascading top-lets.
+let _ = print (parse_and_emit "let a = 7; let b = 3; a * b") in
+let _ = print "---" in
+// Top-level fn applied in main.
+let _ = print (parse_and_emit "let inc = fn x -> x + 1; inc 41") in
+let _ = print "---" in
+// TopType pre-registers tags — Color literal works without seeing
+// a prior EConstr in source.
+let _ = print (parse_and_emit "type Color = | Red | Green | Blue; match Green with | Red -> 1 | Green -> 2 | Blue -> 3") in
+let _ = print "---" in
+// String literal — returns the offset in linear memory. main()'s
+// numeric result is just `str_offset`.
+let _ = print (parse_and_emit "\"hello\"") in
+let _ = print "---" in
+// String interning — two identical literals collapse to one segment.
+let _ = print (parse_and_emit "let (a, b) = (\"hi\", \"hi\") in a") in
 0
