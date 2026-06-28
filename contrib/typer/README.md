@@ -13,15 +13,15 @@ the same type inferencer. §S2.B closes once 52a–52g land.
 
 | file | scope | lines |
 |---|---|---|
-| `typer.mere` | Unification machinery (Stage 52a) + monomorphic `infer` dispatcher (Stage 52b) + `parse_and_infer` glue for end-to-end demos. | ~450 |
+| `typer.mere` | Unification (Stage 52a) + monomorphic `infer` (52b) + Hindley-Milner `scheme` / `generalize` / `instantiate` + `ELet` / `ELetRec` (52c) + `parse_and_infer` glue. | ~650 |
 
 ## Status
 
 | Stage | Content | Status |
 |---|---|---|
 | **52a** | `TyMeta of int` added to `ast.mere`; substitution as `(int * ty) list`; `resolve_meta` + `apply_subst` + `occurs` + `unify` + `unify_list` + `fresh_var`. 11 unification demos covering primitive equality, meta binding, arrow / tuple / TyCon, occurs check, chained metas, arity mismatch. | **complete** |
-| **52b** | Monomorphic `infer` over the expression AST: literals, `EVar`, `EBin` (int / str arith), `ECmp` (int order + polymorphic eq), `ELogic`, `ENeg`, `EIf`, `EFun` (incl. type annotation), `EApp`, `EAnnot`. State-passing `(counter, subst)` via `infer_state`. `parse_and_infer src` glues parser + typer for end-to-end demos. 15 source-string demos cover `fn x -> x + 1` → `(int -> int)`, `fn x -> x` → `('_0 -> '_0)`, `fn (x: int) -> x` → `(int -> int)`, application, conditionals, polymorphic equality, annotation. | **complete** (this commit) |
-| **52c** | `let` polymorphism — `mono` / `generalize` / `instantiate` / `freshen_params`. `type_env = (str * scheme) list`. | future |
+| **52b** | Monomorphic `infer` over the expression AST: literals, `EVar`, `EBin` (int / str arith), `ECmp` (int order + polymorphic eq), `ELogic`, `ENeg`, `EIf`, `EFun` (incl. type annotation), `EApp`, `EAnnot`. State-passing `(counter, subst)` via `infer_state`. `parse_and_infer src` glues parser + typer for end-to-end demos. 15 source-string demos cover `fn x -> x + 1` → `(int -> int)`, `fn x -> x` → `('_0 -> '_0)`, `fn (x: int) -> x` → `(int -> int)`, application, conditionals, polymorphic equality, annotation. | **complete** |
+| **52c** | Hindley-Milner let-polymorphism: `scheme = (int list, ty)` (quantified meta ids + body), `mono` / `generalize` / `instantiate` / `subst_quants`. `type_env` lifts to `(str * scheme) list`. New AST cases: `ELet (PVar / PWild)` (generalize at let-binding) and `ELetRec` (pre-bind fresh metas, infer bodies, unify, generalize against outer env). 11 demos including `let id = fn x -> x in if (id true) then id 1 else 0` — `id` used at both `bool -> bool` and `int -> int` in the same body. | **complete** (this commit) |
 | **52d** | Pattern type checking + `EConstr` + `ETuple` + `EMatch`. | future |
 | **52e** | Records (`ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`) + `EAnnot`. | future |
 | **52f** | Top-level decl integration + cross-validation in `dune runtest` against OCaml `Pipeline.type_of`. | future |

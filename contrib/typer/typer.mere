@@ -191,17 +191,148 @@ let unify_state = fn (s: infer_state) -> fn (t1: ty) -> fn (t2: ty) ->
     fail ("type mismatch — cannot unify the two operand types")
   ;
 
-// `type_env` is mono for Stage 52b — Stage 52c lifts the codomain to
-// `scheme` for proper Hindley-Milner let-polymorphism.
-type type_env = (str * ty) list;
+// === Type schemes (Stage 52c) =============================================
+//
+// `scheme = (quantified meta ids, body type)`. Hindley-Milner stores
+// the result of `let` generalization here; each `EVar` lookup
+// `instantiate`s the scheme into a fresh `ty` so independent uses
+// don't share their meta resolutions.
 
-let rec lookup_type = fn (name: str) -> fn (env: type_env) ->
+type scheme = int list * ty;
+
+let mono = fn (t: ty) -> ((Nil, t) : scheme);
+
+// `type_env` is now scheme-valued. Lambda parameters bind as
+// `mono fresh_meta`; `let` bindings bind to a generalized scheme.
+type type_env = (str * scheme) list;
+
+let rec lookup_scheme = fn (name: str) -> fn (env: type_env) ->
   match env with
   | Nil -> fail ("unbound variable in typer: " ++ name)
   | Cons (b, rest) ->
-    let (n, t) = b in
-    if n == name then t
-    else lookup_type name rest
+    let (n, sch) = b in
+    if n == name then sch
+    else lookup_scheme name rest
+  ;
+
+// Free-meta collection ------------------------------------------------------
+//
+// `collect_metas` walks a `ty` and accumulates its `TyMeta n` ids.
+// Used both by generalization (to decide what to quantify) and by
+// `env_free_metas` (to compute which metas are still free in the env
+// and therefore NOT generalizable in the binding being added).
+
+let rec member_int = fn (n: int) -> fn (xs: int list) ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == n then true else member_int n t
+  ;
+
+let rec collect_metas = fn (t: ty) -> fn (acc: int list) ->
+  match t with
+  | TyMeta n -> if member_int n acc then acc else Cons (n, acc)
+  | TyArrow (a, b) -> collect_metas b (collect_metas a acc)
+  | TyTuple ts -> collect_metas_list ts acc
+  | TyCon (_, args) -> collect_metas_list args acc
+  | _ -> acc
+
+and collect_metas_list = fn (ts: ty list) -> fn (acc: int list) ->
+  match ts with
+  | Nil -> acc
+  | Cons (h, rest) -> collect_metas_list rest (collect_metas h acc)
+  ;
+
+// Free metas of a scheme: collect from body, minus quantified ones.
+let rec filter_not_member = fn (xs: int list) -> fn (excl: int list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    if member_int h excl then filter_not_member t excl
+    else Cons (h, filter_not_member t excl)
+  ;
+
+let scheme_free_metas = fn (sch: scheme) -> fn (sub: subst) ->
+  let (quants, body) = sch in
+  let body_resolved = apply_subst sub body in
+  let all_metas = collect_metas body_resolved Nil in
+  filter_not_member all_metas quants
+  ;
+
+// Union ints into acc (de-duped via member_int).
+let rec union_into = fn (xs: int list) -> fn (acc: int list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) ->
+    if member_int h acc then union_into t acc
+    else union_into t (Cons (h, acc))
+  ;
+
+let rec env_free_metas = fn (env: type_env) -> fn (sub: subst)
+                      -> fn (acc: int list) ->
+  match env with
+  | Nil -> acc
+  | Cons (b, rest) ->
+    let (_, sch) = b in
+    let free = scheme_free_metas sch sub in
+    env_free_metas rest sub (union_into free acc)
+  ;
+
+// `generalize env sub t` — produce a scheme by quantifying every
+// meta in `apply_subst sub t` that is NOT free in `env`. Mirrors
+// `Typer.generalize`. The metas free in env are "captured" by the
+// surrounding scope and must not be generalized.
+let generalize = fn (env: type_env) -> fn (sub: subst) -> fn (t: ty) ->
+  let resolved = apply_subst sub t in
+  let t_metas = collect_metas resolved Nil in
+  let env_metas = env_free_metas env sub Nil in
+  let quantified = filter_not_member t_metas env_metas in
+  ((quantified, resolved) : scheme)
+  ;
+
+// Instantiation -------------------------------------------------------------
+//
+// `instantiate sch s` replaces each quantified meta in `sch` with a
+// FRESH meta drawn from the state, then returns the resulting body
+// type. This is what makes `let id = fn x -> x in (id 1, id "a")`
+// work: each `EVar "id"` instantiates separately, so the two uses
+// get distinct fresh metas that can unify with `int` and `str`
+// independently.
+
+let rec alloc_fresh_for_each = fn (ids: int list) -> fn (s: infer_state) ->
+  match ids with
+  | Nil -> ((Nil, s) : ((int * ty) list * infer_state))
+  | Cons (id, rest) ->
+    let (fresh_ty, s1) = fresh_meta s in
+    let (rest_map, s2) = alloc_fresh_for_each rest s1 in
+    (Cons ((id, fresh_ty), rest_map), s2)
+  ;
+
+let rec lookup_int_id = fn (id: int) -> fn (m: (int * ty) list) ->
+  match m with
+  | Nil -> None
+  | Cons (b, rest) ->
+    let (k, v) = b in
+    if k == id then Some v
+    else lookup_int_id id rest
+  ;
+
+let rec subst_quants = fn (m: (int * ty) list) -> fn (t: ty) ->
+  match t with
+  | TyMeta n ->
+    (match lookup_int_id n m with
+      | Some replacement -> replacement
+      | None -> TyMeta n)
+  | TyArrow (a, b) -> TyArrow (subst_quants m a, subst_quants m b)
+  | TyTuple ts -> TyTuple (list_map ts (fn (t1: ty) -> subst_quants m t1))
+  | TyCon (name, args) ->
+    TyCon (name, list_map args (fn (t1: ty) -> subst_quants m t1))
+  | _ -> t
+  ;
+
+let instantiate = fn (sch: scheme) -> fn (s: infer_state) ->
+  let (quants, body) = sch in
+  let (m, s1) = alloc_fresh_for_each quants s in
+  (subst_quants m body, s1)
   ;
 
 // Binary operator types. `+ - * / %` are int -> int -> int;
@@ -237,7 +368,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
   | EBool _ -> (TyBool, s)
   | EStr _ -> (TyStr, s)
   | EUnit -> (TyUnit, s)
-  | EVar name -> (lookup_type name env, s)
+  | EVar name -> instantiate (lookup_scheme name env) s
   | EBin (op, a, b) ->
     let operand_ty = binop_operand_ty op in
     let (ta, s1) = infer env s a in
@@ -279,13 +410,37 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     // Allocate a fresh meta for the parameter type. If the source
     // had a type annotation (`fn (x: int) -> …`), unify the fresh
     // meta with it immediately so the body sees a concretized type.
+    // Lambda parameters are bound as a `mono` scheme — they're not
+    // generalized (HM's value restriction style).
     let (arg_ty, s1) = fresh_meta s in
     let s2 = (match ty_opt with
       | None -> s1
       | Some t -> unify_state s1 arg_ty t) in
-    let env2 = Cons ((arg, arg_ty), env) in
+    let env2 = Cons ((arg, mono arg_ty), env) in
     let (body_ty, s3) = infer env2 s2 body in
     (apply_subst (subst_of s3) (TyArrow (arg_ty, body_ty)), s3)
+  | ELet (pat, value_expr, body) ->
+    // Stage 52c: PVar / PWild only. Full pattern type checking
+    // (PTuple / PConstr / PRecord) lands in 52d.
+    let (vt, s1) = infer env s value_expr in
+    (match pat with
+      | PVar name ->
+        let sch = generalize env (subst_of s1) vt in
+        let env2 = Cons ((name, sch), env) in
+        infer env2 s1 body
+      | PWild ->
+        // Just evaluate the value for its constraints, ignore binding.
+        infer env s1 body
+      | _ -> fail "typer: stage 52c only handles `let PVar = …` / `let _ = …`")
+  | ELetRec (bindings, body) ->
+    // Pre-bind each rec name with a fresh meta wrapped in a mono
+    // scheme, infer each body in that env, unify the result with the
+    // fresh meta, THEN generalize each binding. Matches OCaml-side
+    // ref-based logic via list operations.
+    let (pre_env, s1) = bind_rec_metas bindings env s in
+    let s2 = infer_rec_bodies bindings pre_env s1 in
+    let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
+    infer final_env s2 body
   | EApp (f, x) ->
     let (tf, s1) = infer env s f in
     let (tx, s2) = infer env s1 x in
@@ -296,7 +451,54 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let (te, s1) = infer env s inner in
     let s2 = unify_state s1 te t in
     (apply_subst (subst_of s2) t, s2)
-  | _ -> fail "typer: stage 52b doesn't handle this expr yet"
+  | _ -> fail "typer: stage 52c doesn't handle this expr yet"
+
+// `bind_rec_metas`: for each `(name, _body)` in the rec group,
+// allocate a fresh meta and prepend `(name, mono meta)` to env. Used
+// both as the "infer in" env and as the lookup table for which meta
+// belongs to which rec name.
+and bind_rec_metas = fn (bindings: (str * expr) list)
+                  -> fn (env: type_env) -> fn (s: infer_state) ->
+  match bindings with
+  | Nil -> ((env, s) : (type_env * infer_state))
+  | Cons (b, rest) ->
+    let (name, _body) = b in
+    let (m_ty, s1) = fresh_meta s in
+    let env2 = Cons ((name, mono m_ty), env) in
+    bind_rec_metas rest env2 s1
+
+// Infer each binding's body in the pre-extended env, then unify the
+// result with the meta the name was pre-bound to.
+and infer_rec_bodies = fn (bindings: (str * expr) list)
+                    -> fn (pre_env: type_env)
+                    -> fn (s: infer_state) ->
+  match bindings with
+  | Nil -> s
+  | Cons (b, rest) ->
+    let (name, body) = b in
+    let (bt, s1) = infer pre_env s body in
+    let sch = lookup_scheme name pre_env in
+    let (_q, name_ty) = sch in
+    let s2 = unify_state s1 bt name_ty in
+    infer_rec_bodies rest pre_env s2
+
+// After all bodies infer, generalize each binding's type relative to
+// the OUTER env (the one before the rec group was bound) — generalizing
+// against `pre_env` would treat the rec names' own metas as captured.
+// Each binding becomes a separate scheme in the returned env.
+and generalize_rec_bindings = fn (bindings: (str * expr) list)
+                           -> fn (pre_env: type_env)
+                           -> fn (sub: subst)
+                           -> fn (outer_env: type_env) ->
+  match bindings with
+  | Nil -> outer_env
+  | Cons (b, rest) ->
+    let (name, _body) = b in
+    let sch_pre = lookup_scheme name pre_env in
+    let (_q, name_ty) = sch_pre in
+    let sch = generalize outer_env sub name_ty in
+    let outer_env2 = Cons ((name, sch), outer_env) in
+    generalize_rec_bindings rest pre_env sub outer_env2
   ;
 
 // === Debug printing =======================================================
@@ -430,4 +632,21 @@ let _ = print ("i12 ((fn x -> x + 1) 5):    " ++ parse_and_infer "(fn x -> x + 1
 let _ = print ("i13 (fn x -> if x then 1 else 0): " ++ parse_and_infer "fn x -> if x then 1 else 0") in
 let _ = print ("i14 (annot int):            " ++ parse_and_infer "(42 : int)") in
 let _ = print ("i15 (fn (x: int) -> x):     " ++ parse_and_infer "fn (x: int) -> x") in
+let _ = print "" in
+let _ = print "=== Stage 52c typer demos (let-poly + let rec) ===" in
+let _ = print ("j1  (let x = 5 in x):                " ++ parse_and_infer "let x = 5 in x") in
+let _ = print ("j2  (let x = 5 in x + 1):            " ++ parse_and_infer "let x = 5 in x + 1") in
+let _ = print ("j3  (let _ = 1 in 2):                " ++ parse_and_infer "let _ = 1 in 2") in
+// The hallmark of let-polymorphism: `id` used at TWO different types.
+let _ = print ("j4  (poly id, int + str use):        " ++ parse_and_infer "let id = fn x -> x in if (id true) then id 1 else 0") in
+let _ = print ("j5  (poly compose with apps):        " ++ parse_and_infer "let id = fn x -> x in id (id 42)") in
+// `fact` referencing itself — single-binding let rec.
+let _ = print ("j6  (let rec fact):                  " ++ parse_and_infer "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5") in
+// Mutual recursion — env entries cross-reference.
+let _ = print ("j7  (mutual rec even/odd):           " ++ parse_and_infer "let rec even = fn n -> if n == 0 then true else odd (n - 1) and odd = fn n -> if n == 0 then false else even (n - 1) in even 10") in
+// Polymorphic let rec — `loop` taking int and returning bool.
+let _ = print ("j8  (let rec poly identity-ish):     " ++ parse_and_infer "let rec id = fn x -> x in id 42") in
+let _ = print ("j9  (nested let):                    " ++ parse_and_infer "let a = 1 in let b = 2 in a + b") in
+let _ = print ("j10 (let with fn):                   " ++ parse_and_infer "let inc = fn x -> x + 1 in inc 10") in
+let _ = print ("j11 (shadowing):                     " ++ parse_and_infer "let x = 1 in let x = \"hi\" in x") in
 0
