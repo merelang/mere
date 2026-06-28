@@ -433,8 +433,25 @@ let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
       | Some sub_p ->
         let (a, s1) = fresh_meta s in
         check_pattern sub_p a s1)
-  | PRecord _ ->
-    fail "typer: PRecord land in Stage 52e (record type checking)"
+  | PRecord (name, field_pats) ->
+    // Permissive — no record registry yet. Unify expected with the
+    // nominal record type (TyCon name []) so two records with different
+    // names don't silently merge, then walk each field pattern against
+    // a fresh meta to collect bindings. Stage 52f tightens this once
+    // `TopRecord` decls feed the typer's field-table.
+    let s1 = unify_state s expected (TyCon (name, Nil)) in
+    check_record_field_pats field_pats s1
+
+and check_record_field_pats = fn (fps: (str * pattern) list)
+                           -> fn (s: infer_state) ->
+  match fps with
+  | Nil -> ((Nil, s) : ((str * scheme) list * infer_state))
+  | Cons (fp, rest) ->
+    let (_field_name, sub_p) = fp in
+    let (a, s1) = fresh_meta s in
+    let (bs1, s2) = check_pattern sub_p a s1 in
+    let (bs2, s3) = check_record_field_pats rest s2 in
+    (concat_scheme_bindings bs1 bs2, s3)
 
 and check_pattern_list = fn (ps: pattern list) -> fn (ts: ty list)
                       -> fn (s: infer_state) ->
@@ -571,7 +588,25 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let (result_ty, s2) = fresh_meta s1 in
     let s3 = infer_arms env arms ts result_ty s2 in
     (apply_subst (subst_of s3) result_ty, s3)
-  | _ -> fail "typer: stage 52d doesn't handle this expr yet"
+  | ERecordLit (name, fields) ->
+    // Permissive until Stage 52f wires the TopRecord registry: every
+    // field expr is inferred (so its meta-flow still works), but the
+    // overall record type is just the nominal `TyCon name []`. Field
+    // types aren't checked against the declared record shape.
+    let s1 = infer_record_fields env s fields in
+    (TyCon (name, Nil), s1)
+  | EFieldGet (e, _field) ->
+    let (_te, s1) = infer env s e in
+    let (a, s2) = fresh_meta s1 in
+    (a, s2)
+  | ERecordUpdate (e, fields) ->
+    // `e` is the record being updated; the update returns the same
+    // nominal type. Each field expr is still inferred (catches plain
+    // type errors inside the field exprs).
+    let (te, s1) = infer env s e in
+    let s2 = infer_record_fields env s1 fields in
+    (apply_subst (subst_of s2) te, s2)
+  | _ -> fail "typer: stage 52e doesn't handle this expr yet"
 
 // `bind_rec_metas`: for each `(name, _body)` in the rec group,
 // allocate a fresh meta and prepend `(name, mono meta)` to env. Used
@@ -651,6 +686,17 @@ and infer_arms = fn (env: type_env)
     let (bt, s3) = infer env2 s2 body in
     let s4 = unify_state s3 bt result_ty in
     infer_arms env rest scrutinee_ty result_ty s4
+
+// Walk a `(field_name, expr) list`, inferring each expr and threading
+// the state. Field name → type validation lives in Stage 52f.
+and infer_record_fields = fn (env: type_env) -> fn (s: infer_state)
+                       -> fn (fields: (str * expr) list) ->
+  match fields with
+  | Nil -> s
+  | Cons (f, rest) ->
+    let (_name, e) = f in
+    let (_te, s1) = infer env s e in
+    infer_record_fields env s1 rest
   ;
 
 // === Debug printing =======================================================
@@ -823,4 +869,23 @@ let _ = print ("k8  (match with guard):              " ++ parse_and_infer "match
 let _ = print ("k9  (PAs in match):                  " ++ parse_and_infer "match (1, 2) with | (a, _) as p -> a") in
 // Constructor (permissive — payload inferred but result is a fresh meta).
 let _ = print ("k10 (EConstr Some 5):                " ++ parse_and_infer "Some 5") in
+let _ = print "" in
+let _ = print "=== Stage 52e typer demos (records + EAnnot) ===" in
+// Record literal — nominal type from the constructor name.
+// (Mere strings treat `{` as interpolation start, so demo source uses `\{` escapes.)
+let _ = print ("l1  (Point \{ x = 1, y = 2 }):         " ++ parse_and_infer "Point \{ x = 1, y = 2 }") in
+// Empty-field record literal.
+let _ = print ("l2  (Empty \{}):                       " ++ parse_and_infer "Empty \{}") in
+// Field access — permissive, fresh meta result.
+let _ = print ("l3  (p.x where p = Point):            " ++ parse_and_infer "let p = Point \{ x = 1, y = 2 } in p.x") in
+// Record literal nested as a let-binding type.
+let _ = print ("l4  (let p = Point \{...}; p):         " ++ parse_and_infer "let p = Point \{ x = 1, y = 2 } in p") in
+// Record update — same nominal type as base.
+let _ = print ("l5  (record update):                  " ++ parse_and_infer "let p = Point \{ x = 1, y = 2 } in \{ p | x = 99 }") in
+// PRecord pattern — match a record by constructor, bind a field.
+let _ = print ("l6  (match Point \{ x }):              " ++ parse_and_infer "match Point \{ x = 1, y = 2 } with | Point \{ x = a, y = b } -> a + b") in
+// EAnnot tightening — annotating a record literal pins its type.
+let _ = print ("l7  ((Point \{...} : Point)):          " ++ parse_and_infer "(Point \{ x = 1, y = 2 } : Point)") in
+// EAnnot still works inside an application context.
+let _ = print ("l8  ((fn (x: int) -> x) 5):           " ++ parse_and_infer "(fn (x: int) -> x) 5") in
 0
