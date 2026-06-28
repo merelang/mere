@@ -37,6 +37,14 @@ type ty =
   | TyTuple of ty list
   | TyVar of str
   | TyCon of str * ty list
+  // Stage 52a (§S2.B): inference-only meta-variable. `TyVar` keeps
+  // its meaning as the explicit `'a` the parser reads from source;
+  // `TyMeta n` is a unification placeholder the typer allocates via
+  // `fresh_var`. Parser doesn't emit TyMeta; fmt / eval don't
+  // construct TyMeta either (their match arms accept it via a
+  // catch-all so the inference path can flow values through without
+  // crashing exhaustiveness).
+  | TyMeta of int
   ;
 
 type pattern =

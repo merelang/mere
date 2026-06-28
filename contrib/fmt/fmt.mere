@@ -164,6 +164,11 @@ let rec fmt_ty = fn (p: int) -> fn (t: ty) -> match t with
   | TyUnit -> "unit"
   | TyFloat -> "float"
   | TyVar n -> "'" ++ n
+  // Stage 52a (§S2.B): `TyMeta n` is the typer's unification
+  // placeholder. The parser never produces one and fmt rarely sees
+  // one — but if the typer's output is ever fed back through, show
+  // it as `'_n` to distinguish from explicit `'a` tyvars.
+  | TyMeta n -> "'_" ++ show n
   | TyArrow (a, b) ->
     let s = fmt_ty 1 a ++ " -> " ++ fmt_ty 0 b in
     wrap (p > 0) s

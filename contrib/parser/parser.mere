@@ -1050,6 +1050,7 @@ let rec ty_to_str = fn (t: ty) ->
       let parts = list_map ts (fn (x: ty) -> ty_to_str x) in
       "Tuple[" ++ str_join ", " parts ++ "]"
     | TyVar v -> "Var(" ++ v ++ ")"
+    | TyMeta n -> "Meta(" ++ show n ++ ")"
     | TyCon (name, args) ->
       (match args with
         | Nil -> "Con(" ++ name ++ ")"

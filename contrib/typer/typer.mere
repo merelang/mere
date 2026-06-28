@@ -1,0 +1,258 @@
+// contrib/typer — Mere self-hosted Hindley-Milner type inference
+// (Phase 52). This file: Stage 52a — unifier MVP.
+//
+// Core unification machinery, mirroring the OCaml side's
+// `lib/typer.ml`. Subsequent stages extend it into a full HM type
+// inferencer:
+//
+//   52a: fresh_var + occurs + unify              (this file)
+//   52b: monomorphic infer (literal / var / fn / app / if / bin / cmp)
+//   52c: let + generalization + instantiation (HM let-polymorphism)
+//   52d: pattern type checking + constructor + tuple
+//   52e: records + EAnnot
+//   52f: top-level + cross-validation harness
+//   52g: browser bridge — live in-browser type-checker
+//
+// See internal design notes for the full
+// plan. The AST shape is `contrib/parser/ast.mere`'s `ty` plus the new
+// `TyMeta of int` variant introduced for inference.
+//
+// What this file is NOT:
+//   - It does NOT yet implement `infer` — that lands in 52b.
+//   - It does NOT cover borrow checker / region / capability / effect
+//     — those are deferred per the paper trial (Phase 11 / 36 territory).
+//   - It does NOT carry typer-side error suggestions (levenshtein
+//     "did you mean"). MVP is `fail msg`.
+
+import "../parser/ast.mere";
+
+// === Substitution =========================================================
+//
+// `(int, ty) list` association list, threaded through inference. Each
+// unification step extends the substitution with one or more
+// (TyMeta_id, resolved_ty) pairs. `apply_subst` walks a `ty`,
+// resolving `TyMeta` references whose ids appear in the subst.
+
+type subst = (int * ty) list;
+
+// Resolve a single TyMeta id to its bound type, if any. Walks through
+// chained bindings — if id N maps to TyMeta M, recurse to resolve M.
+// Returns Some final_ty if eventually concrete, or Some (TyMeta last_id)
+// if the chain ends at an unbound meta.
+let rec resolve_meta = fn (s: subst) -> fn (id: int) ->
+  match s with
+  | Nil -> None
+  | Cons (b, rest) ->
+    let (k, v) = b in
+    if k == id then
+      (match v with
+        | TyMeta m -> (match resolve_meta s m with
+                        | Some t -> Some t
+                        | None -> Some (TyMeta m))
+        | _ -> Some v)
+    else resolve_meta rest id
+  ;
+
+// Walk a type, replacing every TyMeta n that's bound in subst with
+// its resolved value. Used to "shake out" the substitution into a
+// concrete-looking type.
+let rec apply_subst = fn (s: subst) -> fn (t: ty) ->
+  match t with
+  | TyMeta n ->
+    (match resolve_meta s n with
+      | None -> TyMeta n
+      | Some resolved -> apply_subst s resolved)
+  | TyArrow (a, b) -> TyArrow (apply_subst s a, apply_subst s b)
+  | TyTuple ts ->
+    TyTuple (list_map ts (fn (t1: ty) -> apply_subst s t1))
+  | TyCon (name, args) ->
+    TyCon (name, list_map args (fn (t1: ty) -> apply_subst s t1))
+  | _ -> t
+  ;
+
+// === Occurs check =========================================================
+//
+// `occurs id t s` returns true if `TyMeta id` appears anywhere in `t`
+// after substitution resolution. Prevents creating infinite types like
+// `TyMeta 0 = TyArrow (TyMeta 0, TyInt)`.
+
+let rec occurs = fn (id: int) -> fn (t: ty) -> fn (s: subst) ->
+  match t with
+  | TyMeta n ->
+    if n == id then true
+    else (match resolve_meta s n with
+            | None -> false
+            | Some resolved -> occurs id resolved s)
+  | TyArrow (a, b) -> occurs id a s || occurs id b s
+  | TyTuple ts -> occurs_list id ts s
+  | TyCon (_, args) -> occurs_list id args s
+  | _ -> false
+
+and occurs_list = fn (id: int) -> fn (ts: ty list) -> fn (s: subst) ->
+  match ts with
+  | Nil -> false
+  | Cons (h, rest) -> occurs id h s || occurs_list id rest s
+  ;
+
+// === Unification ==========================================================
+//
+// `unify s t1 t2` returns `Some new_subst` if `t1` and `t2` can be made
+// equal under some extension of `s`, or `None` if they are
+// incompatible. The new subst extends `s` with bindings that resolve
+// meta-variables in `t1` and `t2`.
+//
+// Standard HM unification: resolve metas first, then case-analyse:
+//   - meta-vs-anything: bind (after occurs check)
+//   - identical primitives: success without extending
+//   - structural (Arrow / Tuple / Con): recurse on parts
+//   - otherwise: fail
+
+let rec unify = fn (s: subst) -> fn (t1: ty) -> fn (t2: ty) ->
+  let r1 = (match t1 with
+    | TyMeta n -> (match resolve_meta s n with
+                    | Some t -> t
+                    | None -> TyMeta n)
+    | _ -> t1) in
+  let r2 = (match t2 with
+    | TyMeta n -> (match resolve_meta s n with
+                    | Some t -> t
+                    | None -> TyMeta n)
+    | _ -> t2) in
+  match (r1, r2) with
+  // Same meta on both sides — already unified, no extension needed.
+  | (TyMeta a, TyMeta b) -> if a == b then Some s else Some (Cons ((a, TyMeta b), s))
+  | (TyMeta a, _) ->
+    if occurs a r2 s then None
+    else Some (Cons ((a, r2), s))
+  | (_, TyMeta b) ->
+    if occurs b r1 s then None
+    else Some (Cons ((b, r1), s))
+  | (TyInt, TyInt) -> Some s
+  | (TyBool, TyBool) -> Some s
+  | (TyStr, TyStr) -> Some s
+  | (TyUnit, TyUnit) -> Some s
+  | (TyFloat, TyFloat) -> Some s
+  | (TyVar a, TyVar b) -> if a == b then Some s else None
+  | (TyArrow (a1, b1), TyArrow (a2, b2)) ->
+    (match unify s a1 a2 with
+      | None -> None
+      | Some s1 -> unify s1 b1 b2)
+  | (TyTuple xs, TyTuple ys) -> unify_list s xs ys
+  | (TyCon (n1, args1), TyCon (n2, args2)) ->
+    if n1 == n2 then unify_list s args1 args2 else None
+  | _ -> None
+
+and unify_list = fn (s: subst) -> fn (xs: ty list) -> fn (ys: ty list) ->
+  match (xs, ys) with
+  | (Nil, Nil) -> Some s
+  | (Cons (x, xt), Cons (y, yt)) ->
+    (match unify s x y with
+      | None -> None
+      | Some s1 -> unify_list s1 xt yt)
+  | _ -> None
+  ;
+
+// === Fresh-var allocation =================================================
+//
+// State-passing counter. `fresh_var n` returns `(TyMeta n, n + 1)`.
+// Each inference step that needs a placeholder threads the counter
+// alongside the substitution (a shape that becomes `infer_state` in
+// Stage 52b).
+
+let fresh_var = fn (n: int) -> (TyMeta n, n + 1);
+
+// === Debug printing =======================================================
+
+let rec ty_to_str = fn (t: ty) ->
+  match t with
+  | TyInt -> "int"
+  | TyBool -> "bool"
+  | TyStr -> "str"
+  | TyUnit -> "unit"
+  | TyFloat -> "float"
+  | TyVar n -> "'" ++ n
+  | TyMeta n -> "'_" ++ show n
+  | TyArrow (a, b) -> "(" ++ ty_to_str a ++ " -> " ++ ty_to_str b ++ ")"
+  | TyTuple ts ->
+    let parts = list_map ts (fn (t1: ty) -> ty_to_str t1) in
+    "(" ++ str_join " * " parts ++ ")"
+  | TyCon (name, args) ->
+    (match args with
+      | Nil -> name
+      | _ ->
+        let parts = list_map args (fn (t1: ty) -> ty_to_str t1) in
+        "(" ++ str_join ", " parts ++ ") " ++ name)
+  ;
+
+// Render a unification result for the demo prints.
+let unify_to_str = fn (r: subst option) ->
+  match r with
+  | None -> "FAIL"
+  | Some s ->
+    let parts = list_map s (fn (b: int * ty) ->
+      let (k, v) = b in "'_" ++ show k ++ " = " ++ ty_to_str v) in
+    "[" ++ str_join ", " parts ++ "]"
+  ;
+
+// === Demos ================================================================
+//
+// Hand-coded unifications exercising the cases above. Future stages
+// will drive these through actual inference.
+
+let empty_s = (Nil : subst);
+
+// d1: unify two identical primitives -> Some []
+let d1 = unify empty_s TyInt TyInt;
+// d2: unify two different primitives -> None
+let d2 = unify empty_s TyInt TyStr;
+// d3: unify a fresh meta with a primitive -> bind it
+let d3 = unify empty_s (TyMeta 0) TyInt;
+// d4: unify arrow shapes — '_0 -> '_1  vs  int -> str -> 0='int, 1='str
+let d4 = unify empty_s
+  (TyArrow (TyMeta 0, TyMeta 1))
+  (TyArrow (TyInt, TyStr));
+// d5: occurs check — unify '_0 with '_0 -> int -> FAIL (no infinite types)
+let d5 = unify empty_s
+  (TyMeta 0)
+  (TyArrow (TyMeta 0, TyInt));
+// d6: tuple unification of differing arity -> None
+let d6 = unify empty_s
+  (TyTuple (Cons (TyInt, Cons (TyStr, Nil))))
+  (TyTuple (Cons (TyInt, Nil)));
+// d7: tuple unification — same arity, mixed metas
+let d7 = unify empty_s
+  (TyTuple (Cons (TyMeta 0, Cons (TyBool, Nil))))
+  (TyTuple (Cons (TyInt, Cons (TyMeta 1, Nil))));
+// d8: chained metas — unify '_0 with '_1, then '_1 with int -> both resolve
+let d8 = (match unify empty_s (TyMeta 0) (TyMeta 1) with
+  | None -> None
+  | Some s1 -> unify s1 (TyMeta 1) TyInt);
+// d9: TyCon args — unify `int list` with `'_0 list` -> 0='int
+let d9 = unify empty_s
+  (TyCon ("list", Cons (TyInt, Nil)))
+  (TyCon ("list", Cons (TyMeta 0, Nil)));
+// d10: TyCon name mismatch — `int list` vs `int option` -> None
+let d10 = unify empty_s
+  (TyCon ("list", Cons (TyInt, Nil)))
+  (TyCon ("option", Cons (TyInt, Nil)));
+
+// apply_subst smoke — d4's '_0 -> '_1  shaken out
+let d11_subst = (match d4 with
+  | Some s -> s
+  | None -> Nil);
+let d11_input = TyArrow (TyMeta 0, TyMeta 1);
+let d11 = apply_subst d11_subst d11_input;
+
+let _ = print "=== Stage 52a typer demos (unify) ===" in
+let _ = print ("d1  (int = int):          " ++ unify_to_str d1) in
+let _ = print ("d2  (int = str):          " ++ unify_to_str d2) in
+let _ = print ("d3  ('_0 = int):          " ++ unify_to_str d3) in
+let _ = print ("d4  ('_0 -> '_1 = i->s):  " ++ unify_to_str d4) in
+let _ = print ("d5  (occurs check):       " ++ unify_to_str d5) in
+let _ = print ("d6  (tuple arity diff):   " ++ unify_to_str d6) in
+let _ = print ("d7  (tuple mixed metas):  " ++ unify_to_str d7) in
+let _ = print ("d8  (chained metas):      " ++ unify_to_str d8) in
+let _ = print ("d9  (TyCon arg infer):    " ++ unify_to_str d9) in
+let _ = print ("d10 (TyCon name diff):    " ++ unify_to_str d10) in
+let _ = print ("d11 (apply_subst):        " ++ ty_to_str d11) in
+0
