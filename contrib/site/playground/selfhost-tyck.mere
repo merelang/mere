@@ -1,0 +1,29 @@
+// contrib/site/playground/selfhost-tyck.mere — Phase 52.7 (Stage 52g).
+//
+// Live in-browser Mere type-checker. A textarea feeds Mere source
+// through `tokenize -> parse_decls -> infer_decls -> infer main`, the
+// inferred type flows back as text through `dom_set_text`.
+//
+// Wiring:
+//   contrib/dom/dom.mere      - DOM extern fns (shared with the other
+//                                playground pages).
+//   contrib/typer/typer.mere  - `parse_and_infer`. Pulls
+//                                `contrib/parser/parser.mere` (+ lexer +
+//                                ast) transitively.
+//
+// selfhost-fmt gave us "live in-browser mere fmt"; selfhost-repl gave
+// us "live in-browser mere REPL"; this gives us "live in-browser mere
+// type-checker". §S2.B (Phase 52) closes once this lands.
+
+import "../../dom/dom.mere";
+import "../../typer/typer.mere";
+
+let input_el = dom_get_by_id "input" in
+let result_el = dom_get_by_id "result" in
+let btn = dom_get_by_id "tyck-btn" in
+let _ = dom_on_click btn (fn (u: unit) ->
+  let src = dom_input_value input_el in
+  let ty_str = parse_and_infer src in
+  dom_set_text result_el ty_str
+) in
+0

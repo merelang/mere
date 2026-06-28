@@ -43,6 +43,16 @@ if [ -f "$SELFHOST_REPL_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w $SELFHOST_REPL_SRC -> playground/selfhost-repl.wat"
 fi
 
+# Same idea for the type-checker bridge — Phase 52.7 (Stage 52g).
+# Pulls contrib/typer/typer.mere + contrib/parser/parser.mere + lexer +
+# ast, so the resulting Wasm carries the full self-host PARSE + TYPER
+# pipeline. Closes §S2.B in the browser.
+SELFHOST_TYCK_SRC="contrib/site/playground/selfhost-tyck.mere"
+if [ -f "$SELFHOST_TYCK_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w "$SELFHOST_TYCK_SRC" > "$PLAYGROUND_OUT/selfhost-tyck.wat"
+  echo "  mere -w $SELFHOST_TYCK_SRC -> playground/selfhost-tyck.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do

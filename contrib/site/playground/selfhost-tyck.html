@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere type-checker in Mere — self-host typer demo</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .tyck-app {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin: 1.5rem 0;
+    }
+    #input {
+      width: 100%;
+      min-height: 14em;
+      padding: 0.7em;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      border: 1px solid #cbd5e0;
+      border-radius: 4px;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    .output-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .output-label {
+      font-size: 0.8em;
+      color: #4a5568;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    #result {
+      margin: 0;
+      padding: 0.7em 1em;
+      background: #1a202c;
+      color: #e2e8f0;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      white-space: pre-wrap;
+      overflow: auto;
+      box-sizing: border-box;
+      min-height: 4em;
+      border-left: 3px solid #805ad5;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 0.5rem 0 1rem;
+    }
+    #tyck-btn {
+      padding: 0.6em 1.4em;
+      font-size: 1em;
+      background: #6b46c1;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #tyck-btn:hover { background: #553c9a; }
+    #tyck-btn:disabled { background: #a0aec0; cursor: not-allowed; }
+    .example-btn {
+      padding: 0.4em 0.8em;
+      font-size: 0.85em;
+      background: #edf2f7;
+      color: #2d3748;
+      border: 1px solid #cbd5e0;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+    }
+    .example-btn:hover { background: #e2e8f0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="echo.html">echo</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+      <a href="selfhost-repl.html">self-host REPL</a>
+      <a href="selfhost-tyck.html" class="active">self-host type-checker</a>
+    </div>
+  </nav>
+  <main>
+    <h1>Mere type-checker — written in Mere, running in the browser</h1>
+
+    <p>
+      Paste a Mere expression or a full file on the left and press
+      <strong>Infer</strong>. The Wasm module on this page tokenizes,
+      parses, <em>and runs Hindley–Milner inference</em> on your input
+      — all written in Mere itself, no server round-trip. The companion
+      pages <a href="selfhost-fmt.html">self-host fmt</a> and
+      <a href="selfhost-repl.html">self-host REPL</a> cover the
+      <em>format</em> and <em>evaluate</em> sides of the pipeline; this
+      one closes the §S2.B loop.
+    </p>
+
+    <p>
+      Source:
+      <a href="https://github.com/merelang/mere/blob/main/contrib/typer/typer.mere"><code>typer.mere</code></a>
+      (HM unifier + generalize / instantiate + decl driver),
+      <a href="https://github.com/merelang/mere/blob/main/contrib/parser/parser.mere"><code>parser.mere</code></a>,
+      <a href="https://github.com/merelang/mere/blob/main/contrib/parser/lexer.mere"><code>lexer.mere</code></a>,
+      bridged by
+      <a href="https://github.com/merelang/mere/blob/main/contrib/site/playground/selfhost-tyck.mere"><code>selfhost-tyck.mere</code></a>.
+      The shared AST lives in
+      <a href="https://github.com/merelang/mere/blob/main/contrib/parser/ast.mere"><code>contrib/parser/ast.mere</code></a>.
+    </p>
+
+    <div class="controls">
+      <button id="tyck-btn">Infer</button>
+      <button class="example-btn" data-example="1 + 2 * 3">1 + 2 * 3</button>
+      <button class="example-btn" data-example="fn x -> x + 1">int fn</button>
+      <button class="example-btn" data-example="fn x -> x">poly id</button>
+      <button class="example-btn" data-example="fn (x: int) -> x">annotated</button>
+      <button class="example-btn" data-example="let rec fact = fn n -> if n &lt; 1 then 1 else n * fact (n - 1) in fact 5">factorial</button>
+      <button class="example-btn" data-example="let id = fn x -> x in if (id true) then id 1 else 0">poly use</button>
+      <button class="example-btn" data-example="match (1, 2) with | (a, b) -> a + b">tuple match</button>
+      <button class="example-btn" data-example="let x = 5;
+let y = x + 1;
+let z = y * 2;
+z">top decls</button>
+    </div>
+
+    <div class="tyck-app">
+      <textarea id="input" placeholder="Type a Mere expression or full file here..."
+      >let rec fact = fn n -> if n &lt; 1 then 1 else n * fact (n - 1) in fact 5</textarea>
+      <div class="output-stack">
+        <div>
+          <div class="output-label">Inferred type</div>
+          <pre id="result">(press Infer to type-check)</pre>
+        </div>
+      </div>
+    </div>
+
+    <h2>Pipeline</h2>
+    <p>
+      Four contrib libraries combine into the Wasm running on this
+      page:
+    </p>
+    <ol>
+      <li><code>lexer.mere</code> — source → tokens</li>
+      <li><code>parser.mere</code> — tokens → AST</li>
+      <li><code>typer.mere</code> — AST → type (this stage)</li>
+      <li><code>selfhost-tyck.mere</code> — DOM glue (textarea →
+        <code>parse_and_infer</code> → output)</li>
+    </ol>
+    <p>
+      <code>typer.mere</code> implements a textbook Hindley–Milner
+      type inferencer with explicit substitutions (<code>(int, ty)
+      list</code>), monomorphic <code>infer</code> over the expression
+      AST, let-polymorphism via <code>scheme = int list * ty</code>
+      and <code>generalize</code> / <code>instantiate</code>, pattern
+      type checking that flows mono bindings through <code>match</code>
+      arms and destructure-lets, permissive constructor / record
+      handling (the field-by-field registry check is deferred — see
+      "Limitations"), and top-level decl threading via
+      <code>infer_decl</code> / <code>infer_decls</code>.
+    </p>
+
+    <h2>Cross-validation</h2>
+    <p>
+      <code>dune runtest</code> runs the self-host typer side-by-side
+      with the OCaml-side <code>Pipeline.type_of</code> on a set of
+      monomorphic source strings and asserts the displayed type strings
+      match. As of the closing Stage 52f commit there are 12 such
+      cross-validation cases — they're the same harness pattern the
+      §S2.A self-host evaluator uses.
+    </p>
+
+    <h2>Limitations</h2>
+    <ul>
+      <li>
+        <strong>Permissive constructors and records.</strong> Without
+        a registry of <code>TopType</code> / <code>TopRecord</code>
+        declarations, the typer treats any constructor as producing a
+        fresh meta and any record literal as the nominal <code>TyCon
+        name []</code>. Field types and constructor argument types
+        aren't checked. This is enough to type the §S2.A REPL programs
+        but doesn't reject mistakes that the OCaml-side typer would.
+      </li>
+      <li>
+        <strong>No effect / borrow / capability inference.</strong>
+        The self-host typer covers the core HM slice. Phase 11+
+        borrow-check, Phase 36 effects, and Phase 8 capability
+        inference are deferred — see
+        <a href="https://github.com/merelang/mere/blob/main/internal design notes">DEFERRED.md §8.5</a>.
+      </li>
+      <li>
+        <strong>Errors abort the Wasm instance.</strong> Unbound
+        variables, occurs-check failures, and type mismatches surface
+        as <code>fail</code> calls that trap the Wasm. Reload the page
+        to recover.
+      </li>
+      <li>
+        <strong>Type variable names differ from the OCaml side.</strong>
+        The self-host prints unresolved metas as <code>'_0</code>,
+        <code>'_1</code>, …; the OCaml side uses <code>'a</code>,
+        <code>'b</code>, …. Same semantics, different pretty-printer.
+      </li>
+    </ul>
+
+    <h2>Why this matters</h2>
+    <p>
+      Phase 52 closes §S2.B — the self-host type-checker. Combined with
+      §S1 (parser + fmt, Phase 49–50) and §S2.A (evaluator, Phase 51),
+      Mere can now parse, format, type-check, AND evaluate its own
+      source code, in the browser, with no server round-trip.
+    </p>
+  </main>
+  <footer>Phase 52 self-host §S2.B — Stages 52a / 52b / 52c / 52d / 52e / 52f / 52g complete</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./selfhost-tyck.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    const resultEl = document.getElementById("result");
+
+    const stub = () => 0;
+    // `puts` shouldn't fire for this module (selfhost-tyck.mere never
+    // calls print at the surface), but the prelude pulls in the
+    // import so stub it out.
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    try {
+      const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+      attach(instance);
+      instance.exports.main();
+    } catch (e) {
+      resultEl.textContent = "[runtime error] " + e.message;
+    }
+
+    // Example buttons populate the textarea then auto-Infer.
+    document.querySelectorAll(".example-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const src = btn.getAttribute("data-example");
+        document.getElementById("input").value = src;
+        document.getElementById("tyck-btn").click();
+      });
+    });
+  </script>
+</body>
+</html>
