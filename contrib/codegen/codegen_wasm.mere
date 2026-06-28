@@ -1,0 +1,143 @@
+// contrib/codegen/codegen_wasm.mere — Phase 53 (§S3) self-host Wasm
+// codegen. The OCaml `Mere.Codegen_wasm` (`lib/codegen_wasm.ml`, 5491
+// lines) is the reference implementation; this file holds the
+// in-progress Mere self-host of the same emitter. §S3 closes once 53a–
+// 53g land.
+//
+// Stage 53a: WAT skeleton + int literal. The MVP emits a minimal
+// module that returns a single `i32.const N` and nothing else — no
+// stdlib helpers, no extern fn imports, no string handling, no
+// closures. Future stages layer in arith (53b), let/if/fn/app with
+// closure ABI (53c), match (53d), top-level decls (53e),
+// cross-validation (53f), and a browser bridge (53g).
+//
+// Wiring:
+//   contrib/parser/parser.mere - tokenize + parse_decls (transitively
+//                                pulls in lexer + ast)
+
+import "../parser/parser.mere";
+
+// === emit_state ============================================================
+//
+// State-passing record, threaded through every emit_* function. Mere
+// has no refs, so the OCaml side's Hashtbl + ref soup becomes one big
+// immutable record + state-passing convention (same trick we used in
+// eval.mere / typer.mere).
+//
+// `instrs` is the per-function instruction accumulator (reverse order
+// — `Cons` to the head, then `list_reverse` at emit time). `data` is
+// the per-module `(data ...)` declaration list; same reversal trick.
+// `str_offset` tracks the next free byte in linear memory for string
+// literals. Stage 53a only uses `instrs`; the other fields land as
+// stages 53b–53e populate them (declared early so the record shape
+// stays stable across the trial).
+
+type EmitState = {
+  instrs: str list,
+  data: str list,
+  str_offset: int,
+  locals: (str * int) list,
+  local_tys: str list,
+  local_counter: int,
+  fn_counter: int,
+  table_entries: str list,
+  variant_tags: (str * int) list,
+};
+
+// Initial offset for string-literal data segments. Matches the OCaml
+// side's `str_initial_offset = 16` so the first 16 bytes of linear
+// memory remain a no-go zone.
+let str_initial_offset = 16;
+
+let initial_emit_state = EmitState {
+  instrs = Nil,
+  data = Nil,
+  str_offset = str_initial_offset,
+  locals = Nil,
+  local_tys = Nil,
+  local_counter = 0,
+  fn_counter = 0,
+  table_entries = Nil,
+  variant_tags = Nil,
+};
+
+// === Instruction emission ==================================================
+//
+// `push_instr` prepends one instruction line to the per-function
+// accumulator. Output later flips the list and joins with newlines.
+
+let push_instr = fn (i: str) -> fn (s: EmitState) ->
+  { s | instrs = Cons (i, s.instrs) };
+
+// Render the accumulated `instrs` into the body of a `(func ...)`:
+// reverse to get source order, then prefix every line with `    `
+// indentation and separate with `\n`.
+
+let rec list_reverse_acc = fn (xs: str list) -> fn (acc: str list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> list_reverse_acc t (Cons (h, acc))
+  ;
+
+let list_reverse = fn (xs: str list) -> list_reverse_acc xs Nil;
+
+let rec join_indented = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, Nil) -> "    " ++ h
+  | Cons (h, rest) -> "    " ++ h ++ "\n" ++ join_indented rest
+  ;
+
+// === Expression emission (Stage 53a scope) =================================
+//
+// Only `EInt n` is handled. Everything else falls into the `_ -> fail`
+// arm — that's what Stage 53b onward chips away at.
+
+let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
+  match e with
+  | EInt n -> push_instr ("i32.const " ++ show n) s
+  | _ -> fail "codegen_wasm: stage 53a only handles EInt"
+  ;
+
+// === Module wrapper ========================================================
+//
+// Stage 53a's MVP module skeleton — no stdlib, no extern fn imports,
+// no globals, no table, no data, just `(func $main (export "main")
+// (result i32) <instrs>)`. The OCaml side's preamble (puts / show_int
+// / char table / bump allocator) lives behind stdlib feature flags
+// that 53a never trips.
+
+let wrap_module = fn (body: str) ->
+  "(module\n" ++
+  "  (memory (export \"memory\") 1)\n" ++
+  "  (func $main (export \"main\") (result i32)\n" ++
+  body ++ ")\n" ++
+  ")\n";
+
+// `emit_program prog` runs codegen over a parsed `program` (decls +
+// main) and returns the WAT source as a string. 53a ignores decls
+// entirely — they land in 53e.
+
+let emit_program = fn (prog: program) ->
+  let (_decls, main_expr) = prog in
+  let s = emit_expr main_expr initial_emit_state in
+  let body = join_indented (list_reverse s.instrs) in
+  wrap_module body;
+
+// End-to-end convenience: source string -> emitted WAT. Same pattern
+// as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
+
+let parse_and_emit = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _rest) = parse_decls Nil toks in
+  emit_program prog;
+
+// === Demos ================================================================
+
+let _ = print "=== Stage 53a codegen_wasm demos (int literal MVP) ===" in
+let _ = print (parse_and_emit "42") in
+let _ = print "---" in
+let _ = print (parse_and_emit "0") in
+let _ = print "---" in
+let _ = print (parse_and_emit "100") in
+0
