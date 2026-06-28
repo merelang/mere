@@ -33,23 +33,27 @@ type value =
   | VTuple of value list
   // VClosure carries the captured environment as a list. The OCaml side
   // uses an `env ref` so a `let rec` body can reference itself before
-  // the binding is fully built; the self-host substitutes a future
-  // `VRecGroup` shape (Stage 51b) so the env stays immutable.
+  // the binding is fully built; the self-host uses VRecBinding (below)
+  // to keep the env immutable.
   | VClosure of str * expr * (str * value) list
+  // Stage 51b-2: placeholder env entry for a `let rec` binding. Stores
+  // the binding's own name, the full rec-group bindings list (all
+  // mutually-recursive names + their body exprs), and the outer env
+  // (the env BEFORE the let rec). `lookup_env` resolves a VRecBinding
+  // by rebuilding a fresh "rec env" — each rec-group name re-bound to
+  // VRecBinding — and evaluating the binding's body in it. Each
+  // resolution allocates a new closure, which is fine; the binding
+  // is shared by reference (Mere lists are immutable).
+  | VRecBinding of str * (str * expr) list * (str * value) list
   ;
 
 // === Environment ===========================================================
 
 type env = (str * value) list;
 
-let rec lookup_env = fn (name: str) -> fn (e: env) ->
-  match e with
-  | Nil -> fail ("unbound variable: " ++ name)
-  | Cons (b, rest) ->
-    let (n, v) = b in
-    if n == name then v
-    else lookup_env name rest
-  ;
+// `lookup_env` lives in the `eval` let-rec chain below — it needs to
+// call `eval` to resolve `VRecBinding` placeholders introduced by
+// `let rec`. See the chain near the bottom of this file.
 
 // === Debug printing (value -> str) =========================================
 //
@@ -70,6 +74,7 @@ let rec value_to_str = fn (v: value) ->
     let parts = list_map vs (fn (v: value) -> value_to_str v) in
     "(" ++ str_join ", " parts ++ ")"
   | VClosure _ -> "<closure>"
+  | VRecBinding (name, _, _) -> "<rec:" ++ name ++ ">"
   ;
 
 // === Pattern matching ======================================================
@@ -250,7 +255,18 @@ let rec eval = fn (e: expr) -> fn (env: env) ->
       | Some pe -> VConstr (name, Some (eval pe env)))
   | ETuple exprs ->
     VTuple (list_map exprs (fn (ex: expr) -> eval ex env))
-  | _ -> fail "eval: ELetRec / records / EFloat land in 51b-2 / 51d"
+  // Stage 51b-2: `let rec NAME = e (and NAME = e)* in body`. The
+  // OCaml side uses `env ref` to create a cycle (each binding's
+  // closure references an env that already contains it). The
+  // self-host keeps `env` immutable by recording placeholder
+  // `VRecBinding` entries that `lookup_env` resolves on demand by
+  // re-building the rec env and evaluating the binding body. Mutual
+  // recursion falls out for free because all rec-group names are
+  // bound to placeholders carrying the SAME bindings list.
+  | ELetRec (bindings, body) ->
+    let rec_env = make_rec_env bindings env in
+    eval body rec_env
+  | _ -> fail "eval: records / EFloat land in 51d (or unparseable)"
 
 // `EMatch` arm iteration. For each arm, try `match_pattern`; if it
 // matches and the optional guard evaluates to `VBool true`, eval the
@@ -274,6 +290,55 @@ and try_match_arms = fn (arms: (pattern * expr option * expr) list)
               | _ -> fail "match guard: expected bool")) in
         if guard_ok then eval body arm_env
         else try_match_arms rest v env)
+
+// Lookup a name in env. When the entry is a `VRecBinding` (placeholder
+// introduced by `let rec`), resolve it on-the-fly: build a fresh rec
+// env (each rec-group name re-bound to VRecBinding) and evaluate the
+// binding's body in it. The body is typically `EFun`, so resolution
+// yields a `VClosure` whose captured env IS the rec env — meaning
+// recursive calls inside the body find the rec names via the same
+// resolution path.
+and lookup_env = fn (name: str) -> fn (e: env) ->
+  match e with
+  | Nil -> fail ("unbound variable: " ++ name)
+  | Cons (b, rest) ->
+    let (n, v) = b in
+    if n == name then
+      (match v with
+        | VRecBinding (bname, bindings, outer) ->
+          let body = find_rec_body bname bindings in
+          let rec_env = make_rec_env bindings outer in
+          eval body rec_env
+        | _ -> v)
+    else lookup_env name rest
+
+// Build the rec env: each binding name maps to `VRecBinding`,
+// prepended to the outer env. All placeholders point at the SAME full
+// bindings list (not a shrinking tail), so mutual recursion works:
+// when `odd` is resolved, the rec env it builds still contains `even`.
+and make_rec_env = fn (bindings: (str * expr) list) -> fn (outer: env) ->
+  make_rec_env_loop bindings bindings outer
+
+// `all_bindings` is the full rec-group; `remaining` shrinks each step
+// only to drive the iteration. Each VRecBinding records `all_bindings`
+// so resolution still sees every group member.
+and make_rec_env_loop = fn (all_bindings: (str * expr) list)
+                     -> fn (remaining: (str * expr) list)
+                     -> fn (outer: env) ->
+  match remaining with
+  | Nil -> outer
+  | Cons (b, rest) ->
+    let (name, _body) = b in
+    Cons ((name, VRecBinding (name, all_bindings, outer)),
+          make_rec_env_loop all_bindings rest outer)
+
+and find_rec_body = fn (name: str) -> fn (bindings: (str * expr) list) ->
+  match bindings with
+  | Nil -> fail ("rec body not found: " ++ name)
+  | Cons (b, rest) ->
+    let (n, body) = b in
+    if n == name then body
+    else find_rec_body name rest
   ;
 
 // === Demos =================================================================
@@ -373,6 +438,64 @@ let e11 = EMatch (EConstr ("Some", Some (EConstr ("Some", Some (EInt 1)))),
 // e12: closure that ignores its arg — `(fn _ -> 42) 99` -> 42
 let e12 = EApp (EFun ("_u", None, EInt 42), EInt 99);
 
+// === Stage 51b-2 demo data (let rec) =======================================
+//
+// e13: factorial — `let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5` -> 120
+let fact_body =
+  EFun ("n", None,
+    EIf (ECmp (OpLt, EVar "n", EInt 1),
+         EInt 1,
+         EBin (OpMul, EVar "n",
+               EApp (EVar "fact",
+                     EBin (OpSub, EVar "n", EInt 1)))));
+let e13 = ELetRec (Cons (("fact", fact_body), Nil),
+                   EApp (EVar "fact", EInt 5));
+
+// e14: mutual recursion — `let rec even = ... and odd = ... in even 10` -> true
+let even_body =
+  EFun ("n", None,
+    EIf (ECmp (OpEq, EVar "n", EInt 0),
+         EBool true,
+         EApp (EVar "odd",
+               EBin (OpSub, EVar "n", EInt 1))));
+let odd_body =
+  EFun ("n", None,
+    EIf (ECmp (OpEq, EVar "n", EInt 0),
+         EBool false,
+         EApp (EVar "even",
+               EBin (OpSub, EVar "n", EInt 1))));
+let e14 = ELetRec (Cons (("even", even_body),
+                     Cons (("odd", odd_body), Nil)),
+                   EApp (EVar "even", EInt 10));
+
+// e15: Fibonacci — `let rec fib = fn n -> if n < 2 then n else fib (n-1) + fib (n-2) in fib 8` -> 21
+let fib_body =
+  EFun ("n", None,
+    EIf (ECmp (OpLt, EVar "n", EInt 2),
+         EVar "n",
+         EBin (OpAdd,
+               EApp (EVar "fib", EBin (OpSub, EVar "n", EInt 1)),
+               EApp (EVar "fib", EBin (OpSub, EVar "n", EInt 2)))));
+let e15 = ELetRec (Cons (("fib", fib_body), Nil),
+                   EApp (EVar "fib", EInt 8));
+
+// e16: list sum — `let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t in sum (Cons(1, Cons(2, Cons(3, Nil))))`
+let sum_body =
+  EFun ("xs", None,
+    EMatch (EVar "xs",
+      Cons ((PConstr ("Nil", None), None, EInt 0),
+        Cons ((PConstr ("Cons", Some (PTuple (Cons (PVar "h",
+                                                Cons (PVar "t", Nil))))),
+               None,
+               EBin (OpAdd, EVar "h", EApp (EVar "sum", EVar "t"))),
+          Nil))));
+let cons_pair = fn (h: expr) -> fn (t: expr) ->
+  EConstr ("Cons", Some (ETuple (Cons (h, Cons (t, Nil)))));
+let nil_e = EConstr ("Nil", None);
+let list_123 = cons_pair (EInt 1) (cons_pair (EInt 2) (cons_pair (EInt 3) nil_e));
+let e16 = ELetRec (Cons (("sum", sum_body), Nil),
+                   EApp (EVar "sum", list_123));
+
 let _ = print "=== Stage 51a eval demos ===" in
 let _ = print ("d1  (literal 42):       " ++ value_to_str (eval d1 empty_env)) in
 let _ = print ("d2  (1 + 2):            " ++ value_to_str (eval d2 empty_env)) in
@@ -399,4 +522,10 @@ let _ = print ("e9  (or-pattern):             " ++ value_to_str (eval e9 empty_e
 let _ = print ("e10 (guard):                  " ++ value_to_str (eval e10 empty_env)) in
 let _ = print ("e11 (nested constr):          " ++ value_to_str (eval e11 empty_env)) in
 let _ = print ("e12 (ignored arg):            " ++ value_to_str (eval e12 empty_env)) in
+let _ = print "" in
+let _ = print "=== Stage 51b-2 eval demos (let rec) ===" in
+let _ = print ("e13 (factorial 5):            " ++ value_to_str (eval e13 empty_env)) in
+let _ = print ("e14 (mutual even 10):         " ++ value_to_str (eval e14 empty_env)) in
+let _ = print ("e15 (fib 8):                  " ++ value_to_str (eval e15 empty_env)) in
+let _ = print ("e16 (list sum [1,2,3]):       " ++ value_to_str (eval e16 empty_env)) in
 0

@@ -22,8 +22,8 @@ Together with `contrib/parser/` (Phase 50) and `contrib/fmt/`
 | Stage | Content | Status |
 |---|---|---|
 | **51a** | value type + env + minimal eval (literal / var / binop / cmpop / logicop / neg / if / annot) + 11 hand-coded demos | **complete** |
-| **51b-1** | closures (`EFun` + `EApp`), `ELet`, `EMatch` + full `match_pattern` (PWild / PVar / PInt / PBool / PStr / PUnit / PConstr / PTuple / PAs / POr), `EConstr`, `ETuple` + 12 more demos | **complete** (this commit) |
-| **51b-2** | `ELetRec` with `VRecGroup` for mutual recursion (factorial / mutual `even` `odd`) | future |
+| **51b-1** | closures (`EFun` + `EApp`), `ELet`, `EMatch` + full `match_pattern` (PWild / PVar / PInt / PBool / PStr / PUnit / PConstr / PTuple / PAs / POr), `EConstr`, `ETuple` + 12 more demos | **complete** |
+| **51b-2** | `ELetRec` via `VRecBinding` placeholder env entries — pure-functional mutual recursion, no `ref` needed. Factorial / mutual `even`/`odd` / Fibonacci / list-sum (over `Cons`/`Nil` chain) all evaluate. 4 more demos. | **complete** (this commit) |
 | **51c** | list literal reconstruction in `value_to_str` (`Cons` / `Nil` chain → `[1, 2, 3]`) | future |
 | **51d** | records (`VRecord` + `PRecord` + `ERecordLit` / `EFieldGet` / `ERecordUpdate`) | future |
 | **51e** | minimal builtins (extern fn) + top-level decl integration (`TopLet` / `TopLetRec` / `TopType` / `TopRecord`) | future |
@@ -67,13 +67,43 @@ Runs identically on interp / C (`mere -c` + `cc`) / Wasm
 | `EMatch (e, arms)` | iterate arms; first matching `(pat, guard, body)` wins (51b-1) |
 | `EConstr (name, payload?)` | build `VConstr` (51b-1) |
 | `ETuple es` | `VTuple (list_map …)` (51b-1) |
+| `ELetRec (bindings, body)` | introduces `VRecBinding` placeholders in env; `lookup_env` resolves them on demand by rebuilding the rec env and evaluating the binding body (51b-2) |
 
 Patterns covered (`match_pattern`): `PWild`, `PVar`, `PInt`, `PBool`,
 `PStr`, `PUnit`, `PConstr`, `PTuple`, `PAs`, `POr`. `PRecord` falls
 through to `None` until Stage 51d introduces `VRecord`.
 
-Everything else (`ELetRec`, `ERecordLit`, `EFieldGet`, `ERecordUpdate`,
-`EFloat`) falls through to a `fail` that names the upcoming stage.
+Everything else (`ERecordLit`, `EFieldGet`, `ERecordUpdate`, `EFloat`)
+falls through to a `fail` that names the upcoming stage.
+
+### How `ELetRec` works without `ref`
+
+OCaml-side `lib/eval.ml` builds a recursive env via `ref` —  each rec
+binding's closure captures an `env ref` that's mutated after the
+bindings are built, so the body can reference its own name. Mere is
+pure, so we use a different trick:
+
+1. `ELetRec (bindings, body)` calls `make_rec_env bindings env`, which
+   prepends a `VRecBinding (name, all_bindings, outer_env)` entry for
+   each rec-group name to the outer env. Every placeholder carries the
+   **full** bindings list and the SAME outer env.
+2. The body is evaluated in this new env. When a rec-group name like
+   `fact` is looked up, `lookup_env` notices the `VRecBinding` and
+   resolves it: re-runs `make_rec_env` (producing the same rec env)
+   and evaluates the binding's body in it. For an `EFun`-shaped body,
+   this yields a `VClosure` whose captured env IS the rec env — so
+   recursive calls inside the closure go through the same resolution
+   path again.
+3. Mutual recursion just falls out: `even`'s resolution builds a rec
+   env that contains a `VRecBinding` for `odd` (and vice-versa), so
+   the inter-name calls work without any cycle in the env.
+
+The cost is that each lookup re-allocates the closure; for typical
+recursive code this is fine (closures don't escape across deep
+recursion). The previous bug — `make_rec_env` recursing with `rest`
+instead of carrying the full `all_bindings` — only surfaced once
+mutual recursion was exercised; the factorial case worked because the
+group has only one member.
 
 ## Notes on the port
 
