@@ -25,8 +25,8 @@ Together with `contrib/parser/` (Phase 50) and `contrib/fmt/`
 | **51b-1** | closures (`EFun` + `EApp`), `ELet`, `EMatch` + full `match_pattern` (PWild / PVar / PInt / PBool / PStr / PUnit / PConstr / PTuple / PAs / POr), `EConstr`, `ETuple` + 12 more demos | **complete** |
 | **51b-2** | `ELetRec` via `VRecBinding` placeholder env entries — pure-functional mutual recursion, no `ref` needed. Factorial / mutual `even`/`odd` / Fibonacci / list-sum (over `Cons`/`Nil` chain) all evaluate. 4 more demos. | **complete** |
 | **51c** | `try_as_list` walks `Cons`/`Nil` chains so `value_to_str` renders `[1, 2, 3]` instead of `Cons (1, Cons (2, Cons (3, Nil)))`. Empty list `[]`, `mklist n`, and a tail-recursive `rev` over a 3-element list all render. 4 more demos. | **complete** |
-| **51d** | `VRecord of str * (str * value) list` + `PRecord` matching (subset of fields) + `ERecordLit` / `EFieldGet` / `ERecordUpdate` evaluation. Record update keeps the base record's field order. `value_to_str` emits `Name { f1 = v1, f2 = v2 }`. 5 more demos. | **complete** (this commit) |
-| **51e** | minimal builtins (extern fn) + top-level decl integration (`TopLet` / `TopLetRec` / `TopType` / `TopRecord`) | future |
+| **51d** | `VRecord of str * (str * value) list` + `PRecord` matching (subset of fields) + `ERecordLit` / `EFieldGet` / `ERecordUpdate` evaluation. Record update keeps the base record's field order. `value_to_str` emits `Name { f1 = v1, f2 = v2 }`. 5 more demos. | **complete** |
+| **51e** | `VBuiltin` + `apply_builtin` (MVP set: `print`, `show`) + `initial_env` seeding. `apply_decls` + `run_program` over `program = (decls, main)`. **`parse_and_eval`**: imports `contrib/parser/parser.mere`, so a Mere source string runs end-to-end through `tokenize + parse_decls + run_program`. 8 cross-validation tests against OCaml `Pipeline.process`. | **complete** (this commit) |
 | **51f** | Browser bridge — paste source, run, see result; **live in-browser Mere REPL** | future |
 
 ## Running the Stage 51a demos

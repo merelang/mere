@@ -16,6 +16,11 @@
 // and fmt.mere consumes (ast.mere is the shared definition).
 
 import "../parser/ast.mere";
+// Stage 51e: pull the parser in so we can write `parse_and_eval`. Heavy
+// dep, but the alternative (hand-coding ASTs forever) doesn't compose
+// with the browser bridge we want for 51f. `lexer.mere` rides along
+// transitively through `parser.mere`.
+import "../parser/parser.mere";
 
 // === Value representation ==================================================
 //
@@ -50,6 +55,11 @@ type value =
   // `Name { f1 = v1, … }` and `match_pattern`'s `PRecord` branch can
   // assert name equality before matching fields.
   | VRecord of str * (str * value) list
+  // Stage 51e: built-in (host-provided) function reference. The value
+  // is just a name; `apply_builtin` (in `eval`'s `EApp` arm) dispatches
+  // to the OCaml-side primitives via the Mere prelude. Multi-arg
+  // builtins aren't supported yet — the MVP set is `print` and `show`.
+  | VBuiltin of str
   ;
 
 // === Environment ===========================================================
@@ -105,6 +115,7 @@ let rec value_to_str = fn (v: value) ->
     let parts = list_map fields (fn (f: str * value) ->
       let (fname, fv) = f in fname ++ " = " ++ value_to_str fv) in
     name ++ " \{ " ++ str_join ", " parts ++ " }"
+  | VBuiltin name -> "<builtin:" ++ name ++ ">"
   ;
 
 // === Pattern matching ======================================================
@@ -299,11 +310,13 @@ let rec eval = fn (e: expr) -> fn (env: env) ->
   | EFun (arg_name, _ty_opt, body) ->
     VClosure (arg_name, body, env)
   | EApp (f, arg) ->
-    (match eval f env with
+    let fv = eval f env in
+    let av = eval arg env in
+    (match fv with
       | VClosure (arg_name, body, captured) ->
-        let av = eval arg env in
         eval body (Cons ((arg_name, av), captured))
-      | _ -> fail "app: not a closure")
+      | VBuiltin name -> apply_builtin name av
+      | _ -> fail "app: not a closure or builtin")
   | ELet (pat, value_expr, body) ->
     let v = eval value_expr env in
     (match match_pattern pat v with
@@ -436,7 +449,73 @@ and apply_record_updates = fn (base: (str * value) list)
       | Some v -> v
       | None -> fval) in
     Cons ((fname, new_val), apply_record_updates rest updates)
+
+// Dispatch a host-provided builtin by name. Calls the Mere prelude's
+// own builtins under the hood — `print` is the prelude's `print`,
+// `show` is the prelude's `show`. The MVP set is small; multi-arg
+// builtins (`str_concat`, `list_map`, ...) require partial application
+// machinery and ride on a future slice. Most useful work flows
+// through `EBin OpConcat` / `ECmp` / `ELogic` / `EApp VClosure`
+// anyway, so this minimal builtin set takes us a long way.
+and apply_builtin = fn (name: str) -> fn (v: value) ->
+  if name == "print" then
+    (match v with
+      | VStr s -> let _ = print s in VUnit
+      | _ -> fail "print: expected str")
+  else if name == "show" then
+    VStr (value_to_str v)
+  else fail ("unknown builtin: " ++ name)
   ;
+
+// === Top-level + builtins ==================================================
+//
+// `initial_env` seeds the evaluator with host-provided builtin
+// references. The user's source can call `print` / `show` directly;
+// `eval`'s `EApp` arm dispatches via `apply_builtin`.
+
+let initial_env =
+  (Cons (("print", VBuiltin "print"),
+   Cons (("show", VBuiltin "show"),
+   Nil)) : env);
+
+// Apply one top-level decl, returning the updated env. Type decls
+// (`TopType` / `TopRecord` / `TopTypeAlias`) carry no runtime
+// information and are no-ops here — the parser already grouped them
+// into the program shape, and constructors flow through the AST as
+// `EConstr` nodes.
+let apply_decl = fn (d: top_decl) -> fn (env: env) ->
+  match d with
+  | TopLet (pat, e) ->
+    let v = eval e env in
+    (match match_pattern pat v with
+      | None -> fail "TopLet: pattern mismatch"
+      | Some bs -> extend_env bs env)
+  | TopLetRec bindings -> make_rec_env bindings env
+  | TopType _ -> env
+  | TopRecord _ -> env
+  | TopTypeAlias _ -> env
+  ;
+
+let rec apply_decls = fn (decls: top_decl list) -> fn (env: env) ->
+  match decls with
+  | Nil -> env
+  | Cons (d, rest) -> apply_decls rest (apply_decl d env)
+  ;
+
+// Run a parsed program. Threads decls through the env left-to-right
+// (with TopLetRec opening a rec-group), then evaluates `main` in the
+// final env.
+let run_program = fn (p: program) ->
+  let (decls, main_expr) = p in
+  let final_env = apply_decls decls initial_env in
+  eval main_expr final_env;
+
+// End-to-end convenience: source string -> evaluated value. Uses the
+// imported `tokenize` + `parse_decls` from `contrib/parser`.
+let parse_and_eval = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _rest) = parse_decls Nil toks in
+  run_program prog;
 
 // === Demos =================================================================
 //
@@ -708,4 +787,24 @@ let _ = print ("e22 (field access .x):        " ++ value_to_str (eval e22 empty_
 let _ = print ("e23 (record update):          " ++ value_to_str (eval e23 empty_env)) in
 let _ = print ("e24 (record pat match):       " ++ value_to_str (eval e24 empty_env)) in
 let _ = print ("e25 (let record destructure): " ++ value_to_str (eval e25 empty_env)) in
+let _ = print "" in
+let _ = print "=== Stage 51e eval demos (parse + run_program) ===" in
+// f1: simplest source -> value
+let _ = print ("f1  (1 + 2 * 3):              " ++ value_to_str (parse_and_eval "1 + 2 * 3")) in
+// f2: let + main
+let _ = print ("f2  (let x = 5; x + 1):       " ++ value_to_str (parse_and_eval "let x = 5; x + 1")) in
+// f3: factorial via let rec
+let _ = print ("f3  (let rec fact ...):       " ++ value_to_str (parse_and_eval "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1); fact 5")) in
+// f4: variant type + match
+let _ = print ("f4  (type opt + match):       " ++ value_to_str (parse_and_eval "type opt = | Just of int | Nothing; match Just (42) with | Just (n) -> n | Nothing -> 0")) in
+// f5: list construction + sum
+let _ = print ("f5  (list sum):               " ++ value_to_str (parse_and_eval "let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t; sum [1, 2, 3, 4]")) in
+// f6: record literal + field
+let _ = print ("f6  (record + field access):  " ++ value_to_str (parse_and_eval "type Point = \{ x: int, y: int }; let p = Point \{ x = 3, y = 4 }; p.x + p.y")) in
+// f7: builtin call — `print "hello"` returns unit, but the side effect
+//     should fire. The displayed value is `()`.
+let _ = print "f7  (print \"hello\"):" in
+let _ = print ("    [side effect] " ++ value_to_str (parse_and_eval "print \"hello\"")) in
+// f8: show + str concat
+let _ = print ("f8  (show + concat):          " ++ value_to_str (parse_and_eval "\"answer: \" ++ show 42")) in
 0
