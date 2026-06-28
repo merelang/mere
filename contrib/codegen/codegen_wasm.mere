@@ -42,6 +42,7 @@ type EmitState = {
   fn_counter: int,
   table_entries: str list,
   variant_tags: (str * int) list,
+  lifted_fns: str list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -59,6 +60,7 @@ let initial_emit_state = EmitState {
   fn_counter = 0,
   table_entries = Nil,
   variant_tags = Nil,
+  lifted_fns = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -86,6 +88,16 @@ let rec join_indented = fn (xs: str list) ->
   | Nil -> ""
   | Cons (h, Nil) -> "    " ++ h
   | Cons (h, rest) -> "    " ++ h ++ "\n" ++ join_indented rest
+  ;
+
+// Render the `(local ...)` declarations from `local_tys` (in
+// declaration order — local_tys is built reverse, so flip first).
+// Lives here (not in the module wrapper section below) because the
+// lifted-fn emitter in `emit_expr (EFun ...)` needs it too.
+let rec join_local_decls = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, rest) -> "    (local " ++ h ++ ")\n" ++ join_local_decls rest
   ;
 
 // === Op → WAT instruction tables ==========================================
@@ -141,6 +153,16 @@ let alloc_local = fn (name: str) -> fn (s: EmitState) ->
      local_tys = Cons ("i32", s.local_tys),
      local_counter = idx + 1 } : EmitState);
 
+// Mint an i32 local with no name. Used for compiler-internal stash
+// slots (closure pointers around EApp, bump-alloc scratch in
+// emit_alloc_closure).
+let alloc_tmp_local = fn (s: EmitState) ->
+  let idx = s.local_counter in
+  let s2 = ({ s |
+    local_tys = Cons ("i32", s.local_tys),
+    local_counter = idx + 1 } : EmitState) in
+  ((idx, s2) : (int * EmitState));
+
 let rec lookup_local = fn (name: str) -> fn (env: (str * int) list) ->
   match env with
   | Nil -> fail ("codegen_wasm: unbound local " ++ name ++ " (params land in Stage 53c-2)")
@@ -149,12 +171,54 @@ let rec lookup_local = fn (name: str) -> fn (env: (str * int) list) ->
     if n == name then idx else lookup_local name rest
   ;
 
-// === Expression emission (Stage 53c-1 scope) ===============================
+// === Closure ABI (Stage 53c-2) =============================================
 //
-// Adds `let` (single PVar / PWild binding), `if`, and `EVar` lookup
-// against the locals table. Pattern-let with destructure (PTuple etc.),
-// `fn` / `app`, and `let rec` are deferred — they need the closure ABI
-// machinery that lands in 53c-2.
+// Mere lambdas lower to:
+//
+// 1. A *lifted* `(func $anon_N (param i32) (param i32) (result i32))`
+//    sitting at module scope. param 0 is the env pointer, param 1 is
+//    the user-visible argument. The body uses `local.get 1` for the
+//    arg; declared locals start at index 2.
+//
+// 2. At construction sites, an 8-byte closure record allocated by the
+//    `$__lang_bump` bump allocator: offset 0 holds the env pointer
+//    (0 in the MVP — captures land in Stage 53c-3), offset 4 holds
+//    the table index of the lifted fn.
+//
+// 3. At call sites (`EApp f x`), the closure pointer is stashed in a
+//    tmp local, the env_ptr is loaded for param 0, the arg is
+//    emitted, and `call_indirect (type $cl)` consumes
+//    `(env_ptr, arg, fn_idx)` from the stack.
+//
+// Stage 53c-2 scope: capture-less lambdas only. Free-variable scanning
+// + env layout lands in 53c-3.
+
+// Emit the 11-instruction sequence that bump-allocates an 8-byte
+// closure record `(env_ptr=0, fn_idx=N)` and leaves the closure
+// pointer on top of the stack.
+let emit_alloc_closure = fn (fn_idx: int) -> fn (s: EmitState) ->
+  let (tmp, s1) = alloc_tmp_local s in
+  let s2 = push_instr "global.get $__lang_bump" s1 in
+  let s3 = push_instr ("local.set " ++ show tmp) s2 in
+  let s4 = push_instr ("local.get " ++ show tmp) s3 in
+  let s5 = push_instr "i32.const 8" s4 in
+  let s6 = push_instr "i32.add" s5 in
+  let s7 = push_instr "global.set $__lang_bump" s6 in
+  let s8 = push_instr ("local.get " ++ show tmp) s7 in
+  let s9 = push_instr "i32.const 0" s8 in
+  let s10 = push_instr "i32.store offset=0" s9 in
+  let s11 = push_instr ("local.get " ++ show tmp) s10 in
+  let s12 = push_instr ("i32.const " ++ show fn_idx) s11 in
+  let s13 = push_instr "i32.store offset=4" s12 in
+  push_instr ("local.get " ++ show tmp) s13;
+
+// === Expression emission (Stage 53c-2 scope) ===============================
+//
+// Layers `EFun` (lifts to a static `$anon_N_fn` + leaves a closure
+// record pointer on the stack) and `EApp` (calls a closure via
+// `call_indirect (type $cl)`) on top of the 53c-1 dispatch. Multi-arg
+// lambdas work via the standard curried desugaring (each EFun lifts
+// one arg); captures land in Stage 53c-3.
 
 let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
   match e with
@@ -212,7 +276,61 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s4 = push_instr "else" s3 in
     let s5 = emit_expr else_e s4 in
     push_instr "end" s5
-  | _ -> fail "codegen_wasm: stage 53c-1 doesn't handle this expr yet"
+  | EFun (arg, _ty_opt, body) ->
+    // 1. Stash outer per-function state (instrs / locals / local_tys /
+    //    local_counter). Everything else (data / str_offset /
+    //    fn_counter / table_entries / variant_tags / lifted_fns) is
+    //    module-global and threads straight through.
+    // 2. Build the inner per-function state: arg sits at param 1 (env
+    //    is param 0), the locals table starts with just (arg, 1), and
+    //    local_counter starts at 2 to skip both params.
+    // 3. Emit body in the inner state.
+    // 4. Wrap the inner instrs + local declarations into a complete
+    //    `(func $anon_N_fn ...)` definition and prepend it to
+    //    `lifted_fns`. Add the symbol to `table_entries` and bump
+    //    `fn_counter`.
+    // 5. Restore the outer per-fn state and emit the closure-record
+    //    allocation at the caller's emit point.
+    let fn_idx = s.fn_counter in
+    let inner = ({ s |
+      instrs = Nil,
+      locals = Cons ((arg, 1), Nil),
+      local_tys = Nil,
+      local_counter = 2 } : EmitState) in
+    let inner_done = emit_expr body inner in
+    let fn_name = "$anon_" ++ show fn_idx ++ "_fn" in
+    let inner_local_decls = join_local_decls (list_reverse inner_done.local_tys) in
+    let inner_body = join_indented (list_reverse inner_done.instrs) in
+    let fn_def =
+      "  (func " ++ fn_name ++ " (param i32) (param i32) (result i32)\n" ++
+      inner_local_decls ++ inner_body ++ ")\n" in
+    let s_after_lift = ({ inner_done |
+      instrs = s.instrs,
+      locals = s.locals,
+      local_tys = s.local_tys,
+      local_counter = s.local_counter,
+      fn_counter = fn_idx + 1,
+      lifted_fns = Cons (fn_def, inner_done.lifted_fns),
+      table_entries = Cons (fn_name, inner_done.table_entries) } : EmitState) in
+    emit_alloc_closure fn_idx s_after_lift
+  | EApp (f, x) ->
+    // Capture-less call site:
+    //   <emit f>                ;; closure ptr
+    //   local.set $tmp
+    //   local.get $tmp; i32.load offset=0   ;; env_ptr
+    //   <emit x>                ;; arg
+    //   local.get $tmp; i32.load offset=4   ;; fn_idx
+    //   call_indirect (type $cl)
+    let s1 = emit_expr f s in
+    let (tmp, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.set " ++ show tmp) s2 in
+    let s4 = push_instr ("local.get " ++ show tmp) s3 in
+    let s5 = push_instr "i32.load offset=0" s4 in
+    let s6 = emit_expr x s5 in
+    let s7 = push_instr ("local.get " ++ show tmp) s6 in
+    let s8 = push_instr "i32.load offset=4" s7 in
+    push_instr "call_indirect (type $cl)" s8
+  | _ -> fail "codegen_wasm: stage 53c-2 doesn't handle this expr yet"
   ;
 
 // === Module wrapper ========================================================
@@ -223,21 +341,55 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
 // / char table / bump allocator) lives behind stdlib feature flags
 // that 53a never trips.
 
-// Render the `(local ...)` declarations from `local_tys` (in
-// declaration order — local_tys is built reverse, so flip first).
-let rec join_local_decls = fn (xs: str list) ->
+// These helpers are also used inside `emit_expr (EFun ...)` (where the
+// lifted-fn body's local declarations are rendered immediately), so
+// they have to live above the `let rec emit_expr` block.
+
+// Concatenate the lifted-fn definitions (each already a complete
+// `(func $anon_N_fn ...)`). lifted_fns is built reverse — flip first
+// so the table indices line up with definition order.
+let rec concat_strs = fn (xs: str list) ->
   match xs with
   | Nil -> ""
-  | Cons (h, rest) -> "    (local " ++ h ++ ")\n" ++ join_local_decls rest
+  | Cons (h, rest) -> h ++ concat_strs rest
   ;
 
-let wrap_module = fn (locals_decl: str) -> fn (body: str) ->
+// Build the `(elem (i32.const 0) $anon_0 $anon_1 ...)` line from the
+// list of table_entries. table_entries is reverse-order; flip first
+// so $anon_0 sits at slot 0.
+let rec join_space = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, Nil) -> h
+  | Cons (h, rest) -> h ++ " " ++ join_space rest
+  ;
+
+let wrap_module = fn (locals_decl: str) -> fn (body: str)
+              -> fn (lifted: str) -> fn (table_size: int)
+              -> fn (elem_line: str) ->
+  let preamble =
+    if table_size > 0 then
+      "  (type $cl (func (param i32) (param i32) (result i32)))\n" ++
+      "  (memory (export \"memory\") 1)\n" ++
+      "  (global $__lang_bump (mut i32) (i32.const 32))\n" ++
+      "  (table " ++ show table_size ++ " funcref)\n" ++
+      "  (elem (i32.const 0) " ++ elem_line ++ ")\n"
+    else
+      "  (memory (export \"memory\") 1)\n"
+  in
   "(module\n" ++
-  "  (memory (export \"memory\") 1)\n" ++
+  preamble ++
+  lifted ++
   "  (func $main (export \"main\") (result i32)\n" ++
   locals_decl ++
   body ++ ")\n" ++
   ")\n";
+
+let rec list_length = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_length t
+  ;
 
 // `emit_program prog` runs codegen over a parsed `program` (decls +
 // main) and returns the WAT source as a string. 53a-53c ignore decls
@@ -248,7 +400,11 @@ let emit_program = fn (prog: program) ->
   let s = emit_expr main_expr initial_emit_state in
   let locals_decl = join_local_decls (list_reverse s.local_tys) in
   let body = join_indented (list_reverse s.instrs) in
-  wrap_module locals_decl body;
+  let lifted_str = concat_strs (list_reverse s.lifted_fns) in
+  let entries = list_reverse s.table_entries in
+  let table_size = list_length entries in
+  let elem_line = join_space entries in
+  wrap_module locals_decl body lifted_str table_size elem_line;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
@@ -309,4 +465,19 @@ let _ = print (parse_and_emit "let x = 7 in if x < 10 then x * 2 else x") in
 let _ = print "---" in
 // Nested if (else branch contains another if).
 let _ = print (parse_and_emit "if 3 == 3 then if 1 < 2 then 100 else 50 else 0") in
+let _ = print "=== Stage 53c-2 codegen_wasm demos (fn + app, capture-less) ===" in
+// Simplest application — anonymous lambda invoked immediately.
+let _ = print (parse_and_emit "(fn x -> x + 1) 5") in
+let _ = print "---" in
+// Let-bound function, then applied.
+let _ = print (parse_and_emit "let inc = fn x -> x + 1 in inc 41") in
+let _ = print "---" in
+// Lambda body with arithmetic on the param.
+let _ = print (parse_and_emit "(fn n -> n * n) 7") in
+let _ = print "---" in
+// Lambda that ignores its arg.
+let _ = print (parse_and_emit "(fn _x -> 42) 0") in
+let _ = print "---" in
+// Lambda whose body uses an if.
+let _ = print (parse_and_emit "(fn b -> if b then 10 else 20) true") in
 0
