@@ -1,0 +1,31 @@
+// contrib/site/playground/selfhost-compile.mere — Phase 53.10 (Stage 53g).
+//
+// Live in-browser Mere compiler. A textarea feeds Mere source through
+// `tokenize -> parse_decls -> emit_program`, the resulting WAT module
+// text flows back as the `<pre>` payload so the user can copy it or
+// pipe it through wat2wasm + node manually.
+//
+// Wiring:
+//   contrib/dom/dom.mere       - DOM extern fns (shared with the other
+//                                playground pages).
+//   contrib/codegen/codegen_wasm.mere - `parse_and_emit`. Pulls
+//                                `contrib/parser/parser.mere` (+ lexer
+//                                + ast) transitively.
+//
+// selfhost-fmt gave us "live in-browser mere fmt"; selfhost-repl gave
+// us "live in-browser mere REPL"; selfhost-tyck gave us "live
+// in-browser mere type-checker"; this gives us "live in-browser mere
+// compiler". §S3 (Phase 53) closes once this lands.
+
+import "../../dom/dom.mere";
+import "../../codegen/codegen_wasm.mere";
+
+let input_el = dom_get_by_id "input" in
+let result_el = dom_get_by_id "result" in
+let btn = dom_get_by_id "compile-btn" in
+let _ = dom_on_click btn (fn (u: unit) ->
+  let src = dom_input_value input_el in
+  let wat = parse_and_emit src in
+  dom_set_text result_el wat
+) in
+0

@@ -53,6 +53,16 @@ if [ -f "$SELFHOST_TYCK_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w $SELFHOST_TYCK_SRC -> playground/selfhost-tyck.wat"
 fi
 
+# Same idea for the codegen bridge — Phase 53.10 (Stage 53g). Pulls
+# contrib/codegen/codegen_wasm.mere + contrib/parser/parser.mere +
+# lexer + ast, so the resulting Wasm carries the full self-host PARSE
+# + CODEGEN pipeline. Closes §S3 in the browser.
+SELFHOST_COMPILE_SRC="contrib/site/playground/selfhost-compile.mere"
+if [ -f "$SELFHOST_COMPILE_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w "$SELFHOST_COMPILE_SRC" > "$PLAYGROUND_OUT/selfhost-compile.wat"
+  echo "  mere -w $SELFHOST_COMPILE_SRC -> playground/selfhost-compile.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do

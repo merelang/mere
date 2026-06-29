@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere compiler in Mere — self-host codegen demo</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .compile-app {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin: 1.5rem 0;
+    }
+    #input {
+      width: 100%;
+      min-height: 18em;
+      padding: 0.7em;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      border: 1px solid #cbd5e0;
+      border-radius: 4px;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    .output-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .output-label {
+      font-size: 0.8em;
+      color: #4a5568;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    #result {
+      margin: 0;
+      padding: 0.7em 1em;
+      background: #1a202c;
+      color: #e2e8f0;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      white-space: pre-wrap;
+      overflow: auto;
+      box-sizing: border-box;
+      min-height: 18em;
+      border-left: 3px solid #d53f8c;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 0.5rem 0 1rem;
+    }
+    #compile-btn {
+      padding: 0.6em 1.4em;
+      font-size: 1em;
+      background: #b83280;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #compile-btn:hover { background: #97266d; }
+    #compile-btn:disabled { background: #a0aec0; cursor: not-allowed; }
+    .example-btn {
+      padding: 0.4em 0.8em;
+      font-size: 0.85em;
+      background: #edf2f7;
+      color: #2d3748;
+      border: 1px solid #cbd5e0;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+    }
+    .example-btn:hover { background: #e2e8f0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="echo.html">echo</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+      <a href="selfhost-repl.html">self-host REPL</a>
+      <a href="selfhost-tyck.html">self-host type-checker</a>
+      <a href="selfhost-compile.html" class="active">self-host compiler</a>
+    </div>
+  </nav>
+  <main>
+    <h1>Mere compiler — written in Mere, running in the browser</h1>
+
+    <p>
+      Paste a Mere expression or a full file on the left and press
+      <strong>Compile</strong>. The Wasm module on this page tokenizes,
+      parses, <em>and emits a fresh Wasm module</em> for your input —
+      all written in Mere itself, no server round-trip. The companion
+      pages <a href="selfhost-fmt.html">self-host fmt</a>,
+      <a href="selfhost-repl.html">self-host REPL</a>, and
+      <a href="selfhost-tyck.html">self-host type-checker</a> cover
+      the <em>format</em>, <em>evaluate</em>, and <em>type-check</em>
+      sides of the pipeline; this one closes §S3 and completes the
+      Mere-bootstraps-Mere story end-to-end.
+    </p>
+
+    <p>
+      Source:
+      <a href="https://github.com/merelang/mere/blob/main/contrib/codegen/codegen_wasm.mere"><code>codegen_wasm.mere</code></a>
+      (WAT emitter — int / arith / let / if / fn (closure ABI + free-var
+      capture) / match / variant / tuple / top-level / strings / let-rec
+      backpatching),
+      <a href="https://github.com/merelang/mere/blob/main/contrib/parser/parser.mere"><code>parser.mere</code></a>,
+      <a href="https://github.com/merelang/mere/blob/main/contrib/parser/lexer.mere"><code>lexer.mere</code></a>,
+      bridged by
+      <a href="https://github.com/merelang/mere/blob/main/contrib/site/playground/selfhost-compile.mere"><code>selfhost-compile.mere</code></a>.
+      The shared AST lives in
+      <a href="https://github.com/merelang/mere/blob/main/contrib/parser/ast.mere"><code>contrib/parser/ast.mere</code></a>.
+    </p>
+
+    <div class="controls">
+      <button id="compile-btn">Compile</button>
+      <button class="example-btn" data-example="1 + 2 * 3">arith</button>
+      <button class="example-btn" data-example="let x = 5 in x + 1">let</button>
+      <button class="example-btn" data-example="(fn x -> x + 1) 41">lambda</button>
+      <button class="example-btn" data-example="((fn x -> fn y -> x + y) 3) 4">curried</button>
+      <button class="example-btn" data-example="let rec fact = fn n -> if n &lt; 1 then 1 else n * fact (n - 1) in fact 5">factorial</button>
+      <button class="example-btn" data-example="let rec even = fn n -> if n == 0 then 1 else odd (n - 1) and odd = fn n -> if n == 0 then 0 else even (n - 1); even 10">mutual rec</button>
+      <button class="example-btn" data-example="match (1, 2) with | (a, b) -> a + b">match tuple</button>
+      <button class="example-btn" data-example="match Some (42) with | Some n -> n | None -> 0">variant</button>
+      <button class="example-btn" data-example="let x = 5; let y = x + 1; y * 2">top decls</button>
+    </div>
+
+    <div class="compile-app">
+      <textarea id="input" placeholder="Type a Mere expression or full file here..."
+      >let rec fact = fn n -> if n &lt; 1 then 1 else n * fact (n - 1) in fact 5</textarea>
+      <div class="output-stack">
+        <div>
+          <div class="output-label">Emitted WAT</div>
+          <pre id="result">(press Compile to see the emitted Wasm Text)</pre>
+        </div>
+      </div>
+    </div>
+
+    <h2>Pipeline</h2>
+    <p>
+      Four contrib libraries combine into the Wasm running on this
+      page:
+    </p>
+    <ol>
+      <li><code>lexer.mere</code> — source → tokens</li>
+      <li><code>parser.mere</code> — tokens → AST</li>
+      <li><code>codegen_wasm.mere</code> — AST → Wasm text (this stage)</li>
+      <li><code>selfhost-compile.mere</code> — DOM glue (textarea →
+        <code>parse_and_emit</code> → output)</li>
+    </ol>
+    <p>
+      <code>codegen_wasm.mere</code> emits the Wasm Text Format
+      (`.wat`) — what <code>wat2wasm</code> compiles into binary
+      `.wasm`. It covers int literals + arithmetic / comparison /
+      logical / negation; `let` with full pattern destructure; `if`;
+      `fn` + `app` with a 2-word closure ABI (env pointer + function
+      table index, bump-alloc'd on a per-module heap); free-variable
+      capture (closures over outer scope); `match` as a nested
+      `if (result i32)` cascade with pattern checks and bindings;
+      tuples and variants as heap records; top-level decls with
+      lazy variant-tag allocation; string literals interned into
+      <code>(data ...)</code> segments; and <code>let rec</code>
+      (including mutual recursion) via closure-env backpatching.
+    </p>
+
+    <h2>Try it out</h2>
+    <p>
+      The output panel shows the raw Wasm Text. To actually run the
+      compiled module:
+    </p>
+    <ol>
+      <li>Copy the emitted WAT.</li>
+      <li>Save it as <code>out.wat</code>.</li>
+      <li><code>wat2wasm out.wat -o out.wasm</code> — produces a
+        binary Wasm module.</li>
+      <li><code>node -e "WebAssembly.instantiate(require('fs').readFileSync('out.wasm'),{env:{}}).then(({instance})=>console.log(instance.exports.main()))"</code></li>
+    </ol>
+    <p>
+      The printed integer is the result of evaluating the source
+      expression. For example,
+      <code>let rec fact = ... in fact 5</code> prints
+      <code>120</code>.
+    </p>
+
+    <h2>Cross-validation</h2>
+    <p>
+      <code>dune runtest</code> exercises this pipeline on 14
+      source-string fixtures. The harness feeds each through the
+      self-host <code>parse_and_emit</code> (running on the OCaml
+      interpreter), shells out to <code>wat2wasm</code> + <code>node</code>,
+      and asserts the printed integer matches an expected value.
+      As of the closing Stage 53f commit, all 14 cases pass — the
+      self-host codegen is end-to-end correct on the slice it covers.
+    </p>
+
+    <h2>Limitations</h2>
+    <ul>
+      <li>
+        <strong>No stdlib codegen.</strong> Functions like
+        <code>print</code>, <code>show</code>, <code>str_concat</code>,
+        <code>vec_*</code>, <code>map_*</code>, <code>file_*</code>
+        aren't emitted — the OCaml-side codegen ships ~2000 lines of
+        runtime helpers for these. The self-host MVP would call them
+        via <code>(import "env" ...)</code> declarations + extern fn
+        stubs in the host's `env` table; this is the standard pattern
+        but isn't wired into the demos yet.
+      </li>
+      <li>
+        <strong>No polymorphic monomorphization.</strong> Mere's
+        let-poly types `let id = fn x -> x in id 1, id "a"` need
+        type-driven monomorphization on the codegen side. The MVP
+        uses i32 uniform representation, so this works at runtime
+        but isn't type-correct.
+      </li>
+      <li>
+        <strong>No optimisation pass.</strong> Tail calls aren't
+        optimised; closure records are never reused; constant folding
+        only happens at the parser level.
+      </li>
+      <li>
+        <strong>Errors abort the Wasm instance.</strong> Unbound vars
+        and unsupported patterns surface as <code>fail</code> calls
+        that trap the host Wasm; reload to recover.
+      </li>
+    </ul>
+
+    <h2>Why this matters</h2>
+    <p>
+      Phase 53 closes §S3 — the self-host code generator. Combined
+      with §S1 (parser + fmt, Phase 49–50), §S2.A (evaluator, Phase
+      51), and §S2.B (type-checker, Phase 52), <strong>Mere can now
+      parse, format, type-check, evaluate, AND compile its own source
+      code to a Wasm binary, in the browser, with no server
+      round-trip.</strong> The full toolchain is Mere all the way down
+      — the OCaml runtime remains only as the extern-fn host for I/O
+      primitives.
+    </p>
+  </main>
+  <footer>Phase 53 self-host §S3 — Stages 53a / 53b / 53c (1-3) / 53d / 53e (1-2) / 53f / 53g complete</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./selfhost-compile.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    const resultEl = document.getElementById("result");
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    try {
+      const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+      attach(instance);
+      instance.exports.main();
+    } catch (e) {
+      resultEl.textContent = "[runtime error] " + e.message;
+    }
+
+    document.querySelectorAll(".example-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const src = btn.getAttribute("data-example");
+        document.getElementById("input").value = src;
+        document.getElementById("compile-btn").click();
+      });
+    });
+  </script>
+</body>
+</html>
