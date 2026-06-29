@@ -308,6 +308,7 @@ and pattern_bindings = fn (p: pattern) ->
       | None -> Nil
       | Some sub -> pattern_bindings sub)
   | PRecord (_name, fps) -> pattern_bindings_fps fps
+  | POr (p1, _p2) -> pattern_bindings p1
   | _ -> Nil
 
 and pattern_bindings_fps = fn (fps: (str * pattern) list) ->
@@ -841,7 +842,26 @@ and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
     // field's load. Same shape as PTuple but uses field name → offset
     // instead of positional index.
     emit_record_pat_checks field_pats slot s
-  | _ -> fail "codegen_wasm: stage 53h-fix unsupported pattern in check (PStr / POr)"
+  | PStr lit ->
+    // Stage 53h-fix-2: permissive string-literal pattern match via
+    // pointer equality. With string interning, two `"hi"` literals
+    // collapse to the same offset, so equal-literal compare just
+    // works. Strings coming from runtime concatenation / extern fns
+    // would need a real byte-compare (extern fn `__lang_str_eq`) —
+    // defer to the §S3 stdlib codegen slice.
+    let (off, s1) = alloc_str_literal lit s in
+    let s2 = push_instr ("local.get " ++ show slot) s1 in
+    let s3 = push_instr ("i32.const " ++ show off) s2 in
+    push_instr "i32.eq" s3
+  | POr (p1, p2) ->
+    // Stage 53h-fix-2: `p1 | p2`. Both branches must bind the same
+    // set of names (typer-enforced). Check is `check p1 OR check p2`;
+    // bind from the LEFT branch only (right is structurally
+    // equivalent so bindings are the same names).
+    let s1 = emit_check_pattern p1 slot s in
+    let s2 = emit_check_pattern p2 slot s1 in
+    push_instr "i32.or" s2
+  | _ -> fail "codegen_wasm: stage 53h-fix-2 unsupported pattern in check"
 
 // AND-fold the checks for tuple components. Each component reads the
 // parent's offset, stashes to a fresh tmp local, recurses. Always
@@ -894,7 +914,13 @@ and emit_bind_pattern = fn (p: pattern) -> fn (slot: int)
     push_instr ("local.set " ++ show idx) s3
   | PRecord (_name, field_pats) ->
     emit_record_pat_binds field_pats slot s
-  | _ -> fail "codegen_wasm: stage 53h-fix unsupported pattern in bind"
+  | PStr _ -> s  // literal pattern, no bindings
+  | POr (p1, _p2) ->
+    // Bind from the LEFT branch only — POr requires both branches to
+    // bind the same names (typer-enforced), so structurally either is
+    // fine. The right branch's variant of the bindings is identical.
+    emit_bind_pattern p1 slot s
+  | _ -> fail "codegen_wasm: stage 53h-fix-2 unsupported pattern in bind"
 
 and emit_tuple_binds = fn (ps: pattern list) -> fn (i: int)
                     -> fn (parent_slot: int) -> fn (s: EmitState) ->

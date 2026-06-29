@@ -8024,7 +8024,18 @@ let () =
     cross_emit "when-guard hit"
       "match 5 with | n when n > 0 -> 1 | _ -> 0" "1";
     cross_emit "when-guard false"
-      "match (-3) with | n when n > 0 -> 1 | _ -> 0" "0"
+      "match (-3) with | n when n > 0 -> 1 | _ -> 0" "0";
+    (* Phase 53.13 dogfood pass 2: POr + PStr (F9 + F8 fixed in same
+       commit), plus a deep dogfood sample (mini Mere evaluator). *)
+    cross_emit "POr"
+      "match 2 with | 1 | 2 | 3 -> 100 | _ -> 200" "100";
+    cross_emit "POr cascade"
+      "match 7 with | 5 | 6 | 7 -> 1 | 8 | 9 -> 2 | _ -> 0" "1";
+    cross_emit "PStr"
+      "match \"hi\" with | \"hi\" -> 1 | _ -> 0" "1";
+    cross_emit "mini Mere eval (variants + closures)"
+      "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
+      "42"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
