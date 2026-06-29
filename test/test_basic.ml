@@ -7898,5 +7898,113 @@ let () =
   cross_type "match int" "match 1 with | 0 -> \"z\" | _ -> \"o\"";
   cross_type "match with guard" "match 5 with | n when n > 0 -> 1 | _ -> 0";
 
+  (* Phase 53.9 — self-host codegen cross-validation. Runs a Mere source
+     string through:
+       1. the self-host `parse_and_emit` (via the OCaml interpreter) to
+          obtain a WAT module string
+       2. `wat2wasm` (shell) to compile WAT → wasm binary
+       3. `node` (shell) to instantiate and call `main()`
+       4. compare the printed i32 against an expected value
+     This proves the *generated* wasm runs correctly end-to-end. The
+     check is "same value out of main()" rather than byte-identical
+     WAT — the self-host emits canonical-but-slightly-different shape
+     vs the OCaml-side codegen_wasm.ml.
+
+     Requires `wat2wasm` and `node` in PATH (matches the GitHub Pages
+     CI image; locally `opam install wabt` + standard node install). *)
+  let self_host_emit input =
+    let escaped =
+      let b = Buffer.create (String.length input) in
+      String.iter (fun c ->
+        match c with
+        | '\\' -> Buffer.add_string b "\\\\"
+        | '"' -> Buffer.add_string b "\\\""
+        | '\n' -> Buffer.add_string b "\\n"
+        | '\t' -> Buffer.add_string b "\\t"
+        | '{' -> Buffer.add_string b "\\{"
+        | c -> Buffer.add_char b c) input;
+      Buffer.contents b
+    in
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/codegen/codegen_wasm.mere\";\n\
+       parse_and_emit \"%s\"\n"
+      project_root escaped
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+
+  let have_wat2wasm =
+    Sys.command "command -v wat2wasm > /dev/null 2>&1" = 0 in
+  let have_node =
+    Sys.command "command -v node > /dev/null 2>&1" = 0 in
+
+  let run_wasm wat =
+    let wat_path = Filename.temp_file "mere_cross_" ".wat" in
+    let wasm_path = wat_path ^ ".wasm" in
+    let oc = open_out wat_path in
+    output_string oc wat;
+    close_out oc;
+    let wat2wasm_cmd = Printf.sprintf
+      "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+    if Sys.command wat2wasm_cmd <> 0 then
+      (Sys.remove wat_path; "<wat2wasm-failed>")
+    else
+      let runner = Printf.sprintf
+        "node -e \"const fs=require('fs'); \
+         WebAssembly.instantiate(fs.readFileSync('%s'), {env:{}}) \
+         .then(({instance})=>console.log(instance.exports.main())) \
+         .catch(e=>console.log('TRAP:'+e.message));\""
+        wasm_path in
+      let ic = Unix.open_process_in runner in
+      let line = try input_line ic with End_of_file -> "" in
+      let _ = Unix.close_process_in ic in
+      Sys.remove wat_path;
+      (try Sys.remove wasm_path with _ -> ());
+      String.trim line
+  in
+
+  let cross_emit name input expected =
+    let wat = self_host_emit input in
+    (* The bridge returns just the WAT string produced by
+       `parse_and_emit`, no extra wrapping. Pass it straight through. *)
+    let actual = run_wasm wat in
+    check ("self-host codegen cross: " ^ name) actual expected
+  in
+
+  if have_wat2wasm && have_node then begin
+    cross_emit "int literal" "42" "42";
+    cross_emit "int arith" "1 + 2 * 3" "7";
+    cross_emit "int div + mod" "(17 / 4) + (17 % 4)" "5";
+    cross_emit "let-in" "let x = 5 in x + 1" "6";
+    cross_emit "nested let" "let a = 1 in let b = 2 in a + b" "3";
+    cross_emit "if" "if 1 < 2 then 10 else 20" "10";
+    cross_emit "lambda apply" "(fn x -> x + 1) 41" "42";
+    cross_emit "curried apply" "((fn x -> fn y -> x + y) 3) 4" "7";
+    cross_emit "let-rec factorial"
+      "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5"
+      "120";
+    cross_emit "mutual rec int"
+      "let rec even = fn n -> if n == 0 then 1 else odd (n - 1) and odd = fn n -> if n == 0 then 0 else even (n - 1) in even 10"
+      "1";
+    cross_emit "tuple destructure"
+      "let (a, b) = (3, 4) in a + b" "7";
+    cross_emit "match int"
+      "match 2 with | 1 -> 10 | 2 -> 20 | _ -> 99" "20";
+    cross_emit "variant match"
+      "match Some (42) with | Some n -> n | None -> 0" "42";
+    cross_emit "top-let cascade"
+      "let x = 5; let y = x + 1; y * 2" "12"
+  end else
+    Printf.printf
+      "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
