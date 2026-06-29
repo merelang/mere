@@ -8011,7 +8011,20 @@ let () =
       "30";
     cross_emit "quicksort sum"
       "let rec qsort = fn xs -> match xs with | Nil -> Nil | Cons (p, t) -> let rec partition = fn ys -> fn lo -> fn hi -> match ys with | Nil -> (lo, hi) | Cons (h, ts) -> if h < p then partition ts (Cons (h, lo)) hi else partition ts lo (Cons (h, hi)) in let (lo, hi) = partition t Nil Nil in let rec append = fn a -> fn b -> match a with | Nil -> b | Cons (h, t) -> Cons (h, append t b) in append (qsort lo) (Cons (p, qsort hi)) in let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t in sum (qsort [5, 2, 8, 1, 9, 3])"
-      "28"
+      "28";
+    (* Phase 53.12 (Stage 53h-fix): records (F1) + when-guards (F2). *)
+    cross_emit "record literal + field access"
+      "let p = Point { x = 3, y = 4 } in p.x + p.y" "7";
+    cross_emit "record update"
+      "let p = Point { x = 10, y = 20 } in let q = { p | x = 99 } in q.x + q.y" "119";
+    cross_emit "PRecord destructure"
+      "match Point { x = 3, y = 4 } with | Point { x = a, y = b } -> a + b" "7";
+    cross_emit "when-guard skip"
+      "match 5 with | n when n > 100 -> 999 | _ -> 7" "7";
+    cross_emit "when-guard hit"
+      "match 5 with | n when n > 0 -> 1 | _ -> 0" "1";
+    cross_emit "when-guard false"
+      "match (-3) with | n when n > 0 -> 1 | _ -> 0" "0"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

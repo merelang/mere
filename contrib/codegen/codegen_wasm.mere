@@ -52,6 +52,12 @@ type EmitState = {
   lifted_fns: str list,
   captures: (str * int) list,
   str_offsets: (str * int) list,
+  // Record field name → byte offset in the heap record. Allocated
+  // lazily on first encounter (same shape as `variant_tags`). Two
+  // records sharing a field name (e.g., `Point { x, y }` and
+  // `Vec3 { x, y, z }`) end up at the same offsets — fine in
+  // practice since fields tend to be named for what they hold.
+  field_offsets: (str * int) list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -72,6 +78,7 @@ let initial_emit_state = EmitState {
   lifted_fns = Nil,
   captures = Nil,
   str_offsets = Nil,
+  field_offsets = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -259,7 +266,13 @@ let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
     let bound2 = union_strs names bound in
     union_strs (free_vars_letrec_vals bindings bound2)
                (free_vars body bound2)
-  | _ -> Nil  // ERecordLit / etc. land in later stages.
+  | ERecordLit (_name, fields) ->
+    free_vars_record_fields fields bound
+  | EFieldGet (e, _field) -> free_vars e bound
+  | ERecordUpdate (e, fields) ->
+    union_strs (free_vars e bound)
+               (free_vars_record_fields fields bound)
+  | _ -> Nil  // currently nothing else falls through.
 
 and free_vars_list = fn (es: expr list) -> fn (bound: str list) ->
   match es with
@@ -294,7 +307,15 @@ and pattern_bindings = fn (p: pattern) ->
     (match payload_opt with
       | None -> Nil
       | Some sub -> pattern_bindings sub)
+  | PRecord (_name, fps) -> pattern_bindings_fps fps
   | _ -> Nil
+
+and pattern_bindings_fps = fn (fps: (str * pattern) list) ->
+  match fps with
+  | Nil -> Nil
+  | Cons (fp, rest) ->
+    let (_name, sub) = fp in
+    union_strs (pattern_bindings sub) (pattern_bindings_fps rest)
 
 and pattern_bindings_list = fn (ps: pattern list) ->
   match ps with
@@ -316,6 +337,15 @@ and free_vars_letrec_vals = fn (bindings: (str * expr) list)
     let (_name, val_expr) = b in
     union_strs (free_vars val_expr bound)
                (free_vars_letrec_vals rest bound)
+
+and free_vars_record_fields = fn (fields: (str * expr) list)
+                           -> fn (bound: str list) ->
+  match fields with
+  | Nil -> Nil
+  | Cons (f, rest) ->
+    let (_name, value_expr) = f in
+    union_strs (free_vars value_expr bound)
+               (free_vars_record_fields rest bound)
   ;
 
 // `build_offsets caps 0` assigns each captured name a 4-byte slot in
@@ -407,6 +437,23 @@ let lookup_or_alloc_variant_tag = fn (name: str) -> fn (s: EmitState) ->
     let tag = list_length_variants s.variant_tags in
     let s2 = ({ s | variant_tags = Cons ((name, tag), s.variant_tags) } : EmitState) in
     (tag, s2)
+  ;
+
+// Record field name → byte offset in the heap record. Lazy allocation
+// (first encounter wins offset 0, second wins 4, etc.). Used by
+// `ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord` — same
+// lookup at all four sites so offsets stay consistent across read /
+// write / pattern paths.
+let lookup_or_alloc_field_offset = fn (field: str) -> fn (s: EmitState) ->
+  match lookup_assoc field s.field_offsets with
+  | Some off -> ((off, s) : (int * EmitState))
+  | None ->
+    let off = list_length_variants s.field_offsets in
+    let off_bytes = off * 4 in
+    let s2 = ({ s |
+      field_offsets = Cons ((field, off_bytes), s.field_offsets)
+    } : EmitState) in
+    (off_bytes, s2)
   ;
 
 // === String literal interning (Stage 53e) ==================================
@@ -648,7 +695,50 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     // patch its env_ptr + fn_idx into the pre-allocated record.
     let s1 = emit_letrec_bindings bindings s in
     emit_expr body s1
-  | _ -> fail "codegen_wasm: stage 53e-2 doesn't handle this expr yet"
+  | ERecordLit (_name, fields) ->
+    // Stage 53h-fix: records via global lazy field-offset allocation.
+    // Each (field_name, value) pair stores `value` at the offset that
+    // `lookup_or_alloc_field_offset` returns for `field_name`. The
+    // record name itself isn't tracked at codegen time — two
+    // different records that share a field name reuse the same
+    // offset, which works in practice since fields are named for
+    // their semantic role.
+    let max_off = max_field_offset fields s in
+    let nbytes = max_off + 4 in
+    let s1 = emit_bump_alloc nbytes s in
+    let (rec_slot, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.set " ++ show rec_slot) s2 in
+    let s4 = emit_record_field_stores fields rec_slot s3 in
+    push_instr ("local.get " ++ show rec_slot) s4
+  | EFieldGet (e, field) ->
+    // `e` produces a record pointer; load the i32 at the field's
+    // pre-allocated offset.
+    let s1 = emit_expr e s in
+    let (off, s2) = lookup_or_alloc_field_offset field s1 in
+    push_instr ("i32.load offset=" ++ show off) s2
+  | ERecordUpdate (e, fields) ->
+    // `{ base | f1 = e1, f2 = e2 }`: alloc a fresh record (same size
+    // as base), copy each base field that *isn't* being updated,
+    // store each updated field. Size unknown without the typer's
+    // record table — so we conservatively size it as `max(base's
+    // currently-used offsets, fields' offsets) + 4` by treating
+    // ALL known field_offsets entries as "potentially in base".
+    // Wasteful when base has fewer fields than the global registry,
+    // but correct.
+    let s1 = emit_expr e s in
+    let (base_slot, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.set " ++ show base_slot) s2 in
+    // Pre-allocate offsets for any new fields and figure out total size
+    let s4 = (preallocate_update_fields fields s3 : EmitState) in
+    let total_bytes = list_length_variants s4.field_offsets * 4 in
+    let s5 = emit_bump_alloc total_bytes s4 in
+    let (new_slot, s6) = alloc_tmp_local s5 in
+    let s7 = push_instr ("local.set " ++ show new_slot) s6 in
+    // Copy every known field from base, then overwrite with updates
+    let s8 = emit_copy_record base_slot new_slot s7.field_offsets s7 in
+    let s9 = emit_record_field_stores fields new_slot s8 in
+    push_instr ("local.get " ++ show new_slot) s9
+  | _ -> fail "codegen_wasm: stage 53h-fix doesn't handle this expr yet"
 
 // `emit_build_env caps s` allocates a 4×N byte env record, walks each
 // captured name and emits its value via the regular EVar dispatch
@@ -746,7 +836,12 @@ and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
     // PAs check is just the sub-pattern's check; the name binds in
     // emit_bind_pattern only.
     emit_check_pattern sub slot s
-  | _ -> fail "codegen_wasm: stage 53d unsupported pattern in check (PStr / PRecord / POr)"
+  | PRecord (_name, field_pats) ->
+    // Stage 53h-fix: AND-fold the sub-pattern checks against each
+    // field's load. Same shape as PTuple but uses field name → offset
+    // instead of positional index.
+    emit_record_pat_checks field_pats slot s
+  | _ -> fail "codegen_wasm: stage 53h-fix unsupported pattern in check (PStr / POr)"
 
 // AND-fold the checks for tuple components. Each component reads the
 // parent's offset, stashes to a fresh tmp local, recurses. Always
@@ -797,7 +892,9 @@ and emit_bind_pattern = fn (p: pattern) -> fn (slot: int)
     let idx = s2.local_counter - 1 in
     let s3 = push_instr ("local.get " ++ show slot) s2 in
     push_instr ("local.set " ++ show idx) s3
-  | _ -> fail "codegen_wasm: stage 53d unsupported pattern in bind"
+  | PRecord (_name, field_pats) ->
+    emit_record_pat_binds field_pats slot s
+  | _ -> fail "codegen_wasm: stage 53h-fix unsupported pattern in bind"
 
 and emit_tuple_binds = fn (ps: pattern list) -> fn (i: int)
                     -> fn (parent_slot: int) -> fn (s: EmitState) ->
@@ -821,12 +918,27 @@ and emit_match_arms = fn (arms: (pattern * expr option * expr) list)
   match arms with
   | Nil -> push_instr "unreachable" s
   | Cons (arm, rest) ->
-    let (pat, _guard_opt, body) = arm in
+    let (pat, guard_opt, body) = arm in
     let s1 = emit_check_pattern pat slot s in
     let s2 = push_instr "if (result i32)" s1 in
     let outer_locals = s2.locals in
     let s3 = emit_bind_pattern pat slot s2 in
-    let s4 = emit_expr body s3 in
+    // Stage 53h-fix: `when`-guards. Evaluate the guard in the
+    // pattern-bound scope; if false, recurse into the remaining arms
+    // (duplicated below the guard-failed `else` for fall-through —
+    // cheap enough for typical match sizes, and avoids the wasm
+    // block/br_if dance that fall-through across nested `if`s would
+    // normally need).
+    let s4 = (match guard_opt with
+      | None -> emit_expr body s3
+      | Some g ->
+        let sg = emit_expr g s3 in
+        let sg2 = push_instr "if (result i32)" sg in
+        let sg3 = emit_expr body sg2 in
+        let sg4 = push_instr "else" sg3 in
+        let sg5 = ({ sg4 | locals = outer_locals } : EmitState) in
+        let sg6 = emit_match_arms rest slot sg5 in
+        push_instr "end" sg6) in
     let s5 = push_instr "else" s4 in
     let s6 = ({ s5 | locals = outer_locals } : EmitState) in
     let s7 = emit_match_arms rest slot s6 in
@@ -931,6 +1043,118 @@ and lift_and_patch_closure = fn (fn_expr: expr) -> fn (slot: int)
     let s_e7 = push_instr ("i32.const " ++ show fn_idx) s_e6 in
     push_instr "i32.store offset=4" s_e7
   | _ -> fail "codegen_wasm: let rec rhs must be a function literal"
+
+// === Record helpers (Stage 53h-fix) ========================================
+
+// Compute the highest byte offset used by `fields` after allocating
+// any new field names. Returns just the offset (a state update for
+// new fields happens inside the lookup).
+and max_field_offset = fn (fields: (str * expr) list) -> fn (s: EmitState) ->
+  match fields with
+  | Nil -> 0
+  | _ ->
+    let s1 = (preallocate_record_fields fields s : EmitState) in
+    max_field_offset_pure fields s1.field_offsets 0
+
+and max_field_offset_pure = fn (fields: (str * expr) list)
+                         -> fn (offs: (str * int) list)
+                         -> fn (acc: int) ->
+  match fields with
+  | Nil -> acc
+  | Cons (f, rest) ->
+    let (name, _) = f in
+    let off = (match lookup_assoc name offs with
+      | Some n -> n
+      | None -> 0) in
+    let next = if off > acc then off else acc in
+    max_field_offset_pure rest offs next
+
+// Walk the literal's fields, pre-allocating offsets for any that
+// haven't been seen yet (so the next max_field_offset can read
+// authoritative numbers).
+and preallocate_record_fields = fn (fields: (str * expr) list)
+                             -> fn (s: EmitState) ->
+  match fields with
+  | Nil -> s
+  | Cons (f, rest) ->
+    let (name, _) = f in
+    let (_off, s1) = lookup_or_alloc_field_offset name s in
+    preallocate_record_fields rest s1
+
+// Store each (name, value) at the field's offset within the record
+// at `rec_slot`. Value is emitted via the regular emit_expr dispatch.
+and emit_record_field_stores = fn (fields: (str * expr) list)
+                            -> fn (rec_slot: int)
+                            -> fn (s: EmitState) ->
+  match fields with
+  | Nil -> s
+  | Cons (f, rest) ->
+    let (name, value_expr) = f in
+    let (off, s1) = lookup_or_alloc_field_offset name s in
+    let s2 = push_instr ("local.get " ++ show rec_slot) s1 in
+    let s3 = emit_expr value_expr s2 in
+    let s4 = push_instr ("i32.store offset=" ++ show off) s3 in
+    emit_record_field_stores rest rec_slot s4
+
+// Pre-allocate any missing field offsets so total size is known
+// before bump-alloc. Used by ERecordUpdate.
+and preallocate_update_fields = fn (fields: (str * expr) list)
+                             -> fn (s: EmitState) ->
+  match fields with
+  | Nil -> s
+  | Cons (f, rest) ->
+    let (name, _) = f in
+    let (_off, s1) = lookup_or_alloc_field_offset name s in
+    preallocate_update_fields rest s1
+
+// Copy every known field from `base_slot` into `new_slot`. The
+// update's overwrite pass runs after this. Iterates over the global
+// field_offsets list.
+and emit_copy_record = fn (base_slot: int) -> fn (new_slot: int)
+                    -> fn (offs: (str * int) list)
+                    -> fn (s: EmitState) ->
+  match offs with
+  | Nil -> s
+  | Cons (b, rest) ->
+    let (_name, off) = b in
+    let s1 = push_instr ("local.get " ++ show new_slot) s in
+    let s2 = push_instr ("local.get " ++ show base_slot) s1 in
+    let s3 = push_instr ("i32.load offset=" ++ show off) s2 in
+    let s4 = push_instr ("i32.store offset=" ++ show off) s3 in
+    emit_copy_record base_slot new_slot rest s4
+
+// === Pattern helpers for records (Stage 53h-fix) ==========================
+
+and emit_record_pat_checks = fn (fps: (str * pattern) list)
+                          -> fn (slot: int)
+                          -> fn (s: EmitState) ->
+  match fps with
+  | Nil -> push_instr "i32.const 1" s
+  | Cons (fp, rest) ->
+    let (name, sub_p) = fp in
+    let (off, s1) = lookup_or_alloc_field_offset name s in
+    let (sub_slot, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.get " ++ show slot) s2 in
+    let s4 = push_instr ("i32.load offset=" ++ show off) s3 in
+    let s5 = push_instr ("local.set " ++ show sub_slot) s4 in
+    let s6 = emit_check_pattern sub_p sub_slot s5 in
+    let s7 = emit_record_pat_checks rest slot s6 in
+    push_instr "i32.and" s7
+
+and emit_record_pat_binds = fn (fps: (str * pattern) list)
+                         -> fn (slot: int)
+                         -> fn (s: EmitState) ->
+  match fps with
+  | Nil -> s
+  | Cons (fp, rest) ->
+    let (name, sub_p) = fp in
+    let (off, s1) = lookup_or_alloc_field_offset name s in
+    let (sub_slot, s2) = alloc_tmp_local s1 in
+    let s3 = push_instr ("local.get " ++ show slot) s2 in
+    let s4 = push_instr ("i32.load offset=" ++ show off) s3 in
+    let s5 = push_instr ("local.set " ++ show sub_slot) s4 in
+    let s6 = emit_bind_pattern sub_p sub_slot s5 in
+    emit_record_pat_binds rest slot s6
   ;
 
 // === Module wrapper ========================================================
@@ -1253,4 +1477,19 @@ let _ = print (parse_and_emit "let rec even = fn n -> if n == 0 then 1 else odd 
 let _ = print "---" in
 // let rec returning poly fn (used here at one type).
 let _ = print (parse_and_emit "let rec id = fn x -> x in id 42") in
+let _ = print "=== Stage 53h-fix codegen_wasm demos (records + when-guards) ===" in
+// Record literal + field access.
+let _ = print (parse_and_emit "let p = Point \{ x = 3, y = 4 } in p.x + p.y") in
+let _ = print "---" in
+// Record update.
+let _ = print (parse_and_emit "let p = Point \{ x = 10, y = 20 } in let q = \{ p | x = 99 } in q.x + q.y") in
+let _ = print "---" in
+// PRecord destructure in match.
+let _ = print (parse_and_emit "match Point \{ x = 3, y = 4 } with | Point \{ x = a, y = b } -> a + b") in
+let _ = print "---" in
+// when-guard skip (first arm fails guard, falls to default).
+let _ = print (parse_and_emit "match 5 with | n when n > 100 -> 999 | _ -> 7") in
+let _ = print "---" in
+// when-guard cascade (skip first, hit second).
+let _ = print (parse_and_emit "match 7 with | n when n > 100 -> 999 | n when n > 5 -> 2 | _ -> 99") in
 0
