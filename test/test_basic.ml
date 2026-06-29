@@ -8001,7 +8001,17 @@ let () =
     cross_emit "variant match"
       "match Some (42) with | Some n -> n | None -> 0" "42";
     cross_emit "top-let cascade"
-      "let x = 5; let y = x + 1; y * 2" "12"
+      "let x = 5; let y = x + 1; y * 2" "12";
+    (* Phase 53.11 dogfood regression: `let (a, b) = ... in ...` nested
+       inside an EFun used to fail because free_vars dropped the
+       pattern's bindings from `bound`, surfacing `a` / `b` as bogus
+       captures. Caught by quicksort. *)
+    cross_emit "destructure-let in fn body"
+      "let f = fn n -> let (a, b) = (n, n + 1) in a * b in f 5"
+      "30";
+    cross_emit "quicksort sum"
+      "let rec qsort = fn xs -> match xs with | Nil -> Nil | Cons (p, t) -> let rec partition = fn ys -> fn lo -> fn hi -> match ys with | Nil -> (lo, hi) | Cons (h, ts) -> if h < p then partition ts (Cons (h, lo)) hi else partition ts lo (Cons (h, hi)) in let (lo, hi) = partition t Nil Nil in let rec append = fn a -> fn b -> match a with | Nil -> b | Cons (h, t) -> Cons (h, append t b) in append (qsort lo) (Cons (p, qsort hi)) in let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t in sum (qsort [5, 2, 8, 1, 9, 3])"
+      "28"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

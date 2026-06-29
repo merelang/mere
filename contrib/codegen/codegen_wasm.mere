@@ -232,10 +232,16 @@ let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
       (union_strs (free_vars t bound) (free_vars el bound))
   | EFun (a, _, body) -> free_vars body (Cons (a, bound))
   | ELet (pat, value_expr, body) ->
+    // The pattern introduces zero or more names; all of them must be
+    // added to `bound` when scanning body's free vars. The earlier
+    // shortcut "only add PVar" was correct for the trivial cases but
+    // broke destructuring lets like `let (a, b) = ... in a + b` — the
+    // body's references to `a` / `b` would otherwise look free,
+    // surface them as captures when this ELet sits inside an EFun
+    // body, and then the env-build at construction time would try to
+    // resolve names that don't exist in any outer scope.
     let fv_v = free_vars value_expr bound in
-    let bound2 = (match pat with
-      | PVar name -> Cons (name, bound)
-      | _ -> bound) in
+    let bound2 = union_strs (pattern_bindings pat) bound in
     union_strs fv_v (free_vars body bound2)
   | ETuple es -> free_vars_list es bound
   | EConstr (_name, payload_opt) ->
