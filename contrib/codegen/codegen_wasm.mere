@@ -58,6 +58,11 @@ type EmitState = {
   // `Vec3 { x, y, z }`) end up at the same offsets — fine in
   // practice since fields tend to be named for what they hold.
   field_offsets: (str * int) list,
+  // Stage 53i: track which extern fns the program uses so the module
+  // wrapper can emit only the needed `(import "env" ...)` lines. Each
+  // entry is a builtin name (e.g., "print"); the wrap module knows
+  // each builtin's import shape.
+  extern_uses: str list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -79,6 +84,7 @@ let initial_emit_state = EmitState {
   captures = Nil,
   str_offsets = Nil,
   field_offsets = Nil,
+  extern_uses = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -440,6 +446,20 @@ let lookup_or_alloc_variant_tag = fn (name: str) -> fn (s: EmitState) ->
     (tag, s2)
   ;
 
+// Stage 53i: register that the program calls a particular extern
+// builtin (e.g., "print"). Dedupes so we only emit each `(import ...)`
+// line once. (Inline membership check — `member_str` lives in the
+// and-chain below, after this top-level let.)
+let rec extern_already_noted = fn (name: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == name then true else extern_already_noted name t
+  ;
+
+let note_extern_use = fn (name: str) -> fn (s: EmitState) ->
+  if extern_already_noted name s.extern_uses then s
+  else ({ s | extern_uses = Cons (name, s.extern_uses) } : EmitState);
+
 // Record field name → byte offset in the heap record. Lazy allocation
 // (first encounter wins offset 0, second wins 4, etc.). Used by
 // `ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord` — same
@@ -636,22 +656,37 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s_with_env = emit_build_env captures_list s_after_lift in
     emit_alloc_closure fn_idx s_with_env
   | EApp (f, x) ->
-    // Capture-less call site:
-    //   <emit f>                ;; closure ptr
-    //   local.set $tmp
-    //   local.get $tmp; i32.load offset=0   ;; env_ptr
-    //   <emit x>                ;; arg
-    //   local.get $tmp; i32.load offset=4   ;; fn_idx
-    //   call_indirect (type $cl)
-    let s1 = emit_expr f s in
-    let (tmp, s2) = alloc_tmp_local s1 in
-    let s3 = push_instr ("local.set " ++ show tmp) s2 in
-    let s4 = push_instr ("local.get " ++ show tmp) s3 in
-    let s5 = push_instr "i32.load offset=0" s4 in
-    let s6 = emit_expr x s5 in
-    let s7 = push_instr ("local.get " ++ show tmp) s6 in
-    let s8 = push_instr "i32.load offset=4" s7 in
-    push_instr "call_indirect (type $cl)" s8
+    // Stage 53i: short-circuit direct calls to known extern fns
+    // (`print "hi"` etc.). These don't fit the regular closure ABI —
+    // they live in the host's `env` table and have ad-hoc signatures.
+    // Anything else (variables / lambdas / curried apps) falls
+    // through to the regular call_indirect path.
+    (match f with
+      | EVar "print" ->
+        // `print : str -> unit` → host `puts(ptr)`. Push the string
+        // pointer, call $puts, then push unit (i32.const 0) since the
+        // overall expression must leave one i32 on the stack.
+        let s1 = note_extern_use "print" s in
+        let s2 = emit_expr x s1 in
+        let s3 = push_instr "call $puts" s2 in
+        push_instr "i32.const 0" s3
+      | _ ->
+        // Capture-less call site:
+        //   <emit f>                ;; closure ptr
+        //   local.set $tmp
+        //   local.get $tmp; i32.load offset=0   ;; env_ptr
+        //   <emit x>                ;; arg
+        //   local.get $tmp; i32.load offset=4   ;; fn_idx
+        //   call_indirect (type $cl)
+        let s1 = emit_expr f s in
+        let (tmp, s2) = alloc_tmp_local s1 in
+        let s3 = push_instr ("local.set " ++ show tmp) s2 in
+        let s4 = push_instr ("local.get " ++ show tmp) s3 in
+        let s5 = push_instr "i32.load offset=0" s4 in
+        let s6 = emit_expr x s5 in
+        let s7 = push_instr ("local.get " ++ show tmp) s6 in
+        let s8 = push_instr "i32.load offset=4" s7 in
+        push_instr "call_indirect (type $cl)" s8)
   | ETuple es ->
     // Bump-alloc N*4 bytes, store each element at offset i*4, leave
     // the tuple pointer on top. Sub-expr emit order = source order so
@@ -1232,10 +1267,27 @@ let rec list_length_pair = fn (xs: (int * str) list) ->
   | Cons (_, t) -> 1 + list_length_pair t
   ;
 
+// Stage 53i: build the `(import "env" ...)` declarations for the
+// extern fns the program touched. Each builtin has a hardcoded
+// signature; the host JS / wasm runtime side must provide a matching
+// implementation. Only "print" → "puts" is wired right now; future
+// stdlib expansion (str_concat, show_int, etc.) extends this table.
+let extern_import_line = fn (name: str) ->
+  if name == "print" then
+    "  (import \"env\" \"puts\" (func $puts (param i32)))\n"
+  else
+    fail ("codegen_wasm: unknown extern fn " ++ name);
+
+let rec build_extern_imports = fn (uses: str list) ->
+  match uses with
+  | Nil -> ""
+  | Cons (h, t) -> extern_import_line h ++ build_extern_imports t
+  ;
+
 let wrap_module = fn (locals_decl: str) -> fn (body: str)
               -> fn (lifted: str) -> fn (table_size: int)
               -> fn (elem_line: str) -> fn (data_decls: str)
-              -> fn (bump_start: int) ->
+              -> fn (bump_start: int) -> fn (extern_imports: str) ->
   // Stage 53d onward: tuples, variants, and closures all use the
   // bump-alloc global, so emit `$__lang_bump` unconditionally. The
   // closure-specific `(type $cl)` / `(table)` / `(elem)` lines only
@@ -1251,6 +1303,7 @@ let wrap_module = fn (locals_decl: str) -> fn (body: str)
       ""
   in
   "(module\n" ++
+  extern_imports ++
   "  (memory (export \"memory\") 1)\n" ++
   "  (global $__lang_bump (mut i32) (i32.const " ++ show bump_start ++ "))\n" ++
   closure_decls ++
@@ -1357,7 +1410,8 @@ let emit_program = fn (prog: program) ->
   // Round bump start up so the allocator never overlaps the data
   // region. `str_offset` already sits just past the last NUL byte.
   let bump_start = s.str_offset in
-  wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start;
+  let extern_imports = build_extern_imports s.extern_uses in
+  wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
@@ -1518,4 +1572,11 @@ let _ = print (parse_and_emit "match 5 with | n when n > 100 -> 999 | _ -> 7") i
 let _ = print "---" in
 // when-guard cascade (skip first, hit second).
 let _ = print (parse_and_emit "match 7 with | n when n > 100 -> 999 | n when n > 5 -> 2 | _ -> 99") in
+let _ = print "=== Stage 53i codegen_wasm demos (extern fn: print) ===" in
+// `print "hello"` lowers to `i32.const <ptr>; call $puts`. Module
+// preamble grows an `(import "env" "puts" ...)` line.
+let _ = print (parse_and_emit "let _ = print \"hello, world\" in 42") in
+let _ = print "---" in
+// Multiple prints — extern import dedupe keeps just one (import ...).
+let _ = print (parse_and_emit "let _ = print \"a\" in let _ = print \"b\" in 0") in
 0
