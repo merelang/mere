@@ -8208,6 +8208,34 @@ let () =
       "str_len (str_join \",\" Nil)" "0";
     cross_emit "prelude str_join single"
       "str_len (str_join \"---\" (Cons (\"x\", Nil)))" "1";
+    (* Phase 54.11: StrBuf — mutable buffer with push/to_str/len. *)
+    cross_emit "strbuf empty len"
+      "let b = strbuf_new () in strbuf_len b" "0";
+    cross_emit "strbuf push len"
+      "let b = strbuf_new () in let _ = strbuf_push b \"hello\" in strbuf_len b" "5";
+    cross_emit "strbuf multi push len"
+      "let b = strbuf_new () in let _ = strbuf_push b \"abc\" in let _ = strbuf_push b \"de\" in strbuf_len b" "5";
+    cross_emit "strbuf snapshot via str_len"
+      "let b = strbuf_new () in let _ = strbuf_push b \"hi\" in let _ = strbuf_push b \"!\" in str_len (strbuf_to_str b)" "3";
+    cross_emit "strbuf grow past initial 64"
+      (* push 8 chars * 10 = 80 bytes, exceeds 64-byte initial cap *)
+      "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in strbuf_len b" "80";
+    cross_emit "not true"
+      "if not true then 1 else 0" "0";
+    cross_emit "not false"
+      "if not false then 1 else 0" "1";
+    cross_emit "not on expr"
+      "if not (1 == 2) then 1 else 0" "1";
+    cross_emit "prelude list_rev"
+      "let xs = Cons (1, Cons (2, Cons (3, Nil))) in match list_rev xs with | Cons (h, _) -> h | _ -> -1" "3";
+    cross_emit "prelude list_len"
+      "list_len (Cons (1, Cons (2, Cons (3, Cons (4, Cons (5, Nil))))))" "5";
+    cross_emit "prelude list_fold sum"
+      "list_fold (Cons (1, Cons (2, Cons (3, Nil)))) 0 (fn a -> fn x -> a + x)" "6";
+    cross_emit "prelude list_append len"
+      "list_len (list_append (Cons (1, Cons (2, Nil))) (Cons (3, Cons (4, Cons (5, Nil)))))" "5";
+    cross_emit "strbuf grow content intact"
+      "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"

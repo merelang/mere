@@ -253,7 +253,10 @@ let is_builtin = fn (n: str) ->
   n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space" ||
   n == "str_starts_with" || n == "substring" ||
   n == "str_index_of" || n == "str_repeat" || n == "int_of_str" ||
-  n == "str_unescape" || n == "try_or";
+  n == "str_unescape" || n == "try_or" ||
+  n == "strbuf_new" || n == "strbuf_push" ||
+  n == "strbuf_to_str" || n == "strbuf_len" ||
+  n == "not";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -888,6 +891,34 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = note_helper_use "str_unescape" s0 in
         let s2 = emit_expr x s1 in
         push_instr "call $str_unescape" s2
+      | EVar "strbuf_new" ->
+        // Phase 54.11: `strbuf_new ()` — the unit arg is x (matched by
+        // the surrounding EApp). Emit-and-drop x for side-effect
+        // compatibility; the helper takes no params.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "drop" s1 in
+        let s3 = note_helper_use "strbuf_new" s2 in
+        push_instr "call $strbuf_new" s3
+      | EApp (EVar "strbuf_push", buf_expr) ->
+        // Phase 54.11: `strbuf_push buf s` — curried 2-arg, mutates
+        // buf in place. Grows the data buffer (geometric realloc) if
+        // it would overflow. Returns 0 (unit).
+        let s0 = note_helper_use "strlen" s in
+        let s1 = note_helper_use "strbuf_push" s0 in
+        let s2 = emit_expr buf_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $strbuf_push" s3
+      | EVar "strbuf_to_str" ->
+        // Phase 54.11: `strbuf_to_str buf` — bump-alloc'd NUL-terminated
+        // snapshot of the StrBuf's current data. Doesn't reset the buf.
+        let s1 = note_helper_use "strbuf_to_str" s in
+        let s2 = emit_expr x s1 in
+        push_instr "call $strbuf_to_str" s2
+      | EVar "strbuf_len" ->
+        // Phase 54.11: `strbuf_len buf` — current byte length (cheap:
+        // load offset=4 of the record).
+        let s1 = emit_expr x s in
+        push_instr "i32.load offset=4" s1
       | EApp (EVar "try_or", thunk_expr) ->
         // Phase 54.8: `try_or thunk default`. Wasm 1.0 has no exception
         // recovery (our `fail` traps the whole module), so lower this
@@ -940,6 +971,11 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr x s1 in
         let s3 = push_instr "i32.load8_u" s2 in
         push_instr "call $is_space" s3
+      | EVar "not" ->
+        // Phase 54.11: `not b` — boolean negation. b is i32 (0 or 1).
+        // `i32.eqz` produces 1 if zero, 0 otherwise — exactly NOT.
+        let s1 = emit_expr x s in
+        push_instr "i32.eqz" s1
       | EVar "fst" ->
         // Stage 53j: tuples lay out elements at i*4. `fst t` is just
         // i32.load offset=0 of the tuple pointer.
@@ -1703,6 +1739,83 @@ let helper_decl_str_repeat =
   "               (i32.const 1)))\n" ++
   "    (local.get $r))\n";
 
+// Phase 54.11: StrBuf — a small heap record (cap / len / data_ptr) +
+// a separately bump-allocated data buffer. Mutation in place; grow on
+// overflow by bump-allocating a new buffer and copying old bytes. The
+// old buffer is leaked (the bump allocator never reclaims), which is
+// fine for the typical "build a string, snapshot once" use pattern.
+
+let helper_decl_strbuf_new =
+  "  (func $strbuf_new (result i32)\n" ++
+  "    (local $rec i32) (local $data i32)\n" ++
+  "    (local.set $rec (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $rec) (i32.const 12)))\n" ++
+  "    (local.set $data (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $data) (i32.const 64)))\n" ++
+  "    (i32.store offset=0 (local.get $rec) (i32.const 64))\n" ++
+  "    (i32.store offset=4 (local.get $rec) (i32.const 0))\n" ++
+  "    (i32.store offset=8 (local.get $rec) (local.get $data))\n" ++
+  "    (local.get $rec))\n";
+
+let helper_decl_strbuf_push =
+  "  (func $strbuf_push (param $rec i32) (param $s i32) (result i32)\n" ++
+  "    (local $slen i32) (local $cur_len i32) (local $cur_cap i32)\n" ++
+  "    (local $new_len i32) (local $new_cap i32) (local $data i32)\n" ++
+  "    (local $new_data i32) (local $i i32)\n" ++
+  "    (local.set $slen (call $__lang_strlen (local.get $s)))\n" ++
+  "    (local.set $cur_len (i32.load offset=4 (local.get $rec)))\n" ++
+  "    (local.set $cur_cap (i32.load offset=0 (local.get $rec)))\n" ++
+  "    (local.set $new_len (i32.add (local.get $cur_len) (local.get $slen)))\n" ++
+  "    (if (i32.gt_u (local.get $new_len) (local.get $cur_cap))\n" ++
+  "      (then\n" ++
+  "        (local.set $new_cap (i32.mul (local.get $new_len) (i32.const 2)))\n" ++
+  "        (local.set $new_data (global.get $__lang_bump))\n" ++
+  "        (global.set $__lang_bump (i32.add (local.get $new_data) (local.get $new_cap)))\n" ++
+  "        (local.set $data (i32.load offset=8 (local.get $rec)))\n" ++
+  "        (local.set $i (i32.const 0))\n" ++
+  "        (block $copy_end\n" ++
+  "          (loop $copy_lp\n" ++
+  "            (br_if $copy_end (i32.eq (local.get $i) (local.get $cur_len)))\n" ++
+  "            (i32.store8 (i32.add (local.get $new_data) (local.get $i))\n" ++
+  "              (i32.load8_u (i32.add (local.get $data) (local.get $i))))\n" ++
+  "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "            (br $copy_lp)))\n" ++
+  "        (i32.store offset=0 (local.get $rec) (local.get $new_cap))\n" ++
+  "        (i32.store offset=8 (local.get $rec) (local.get $new_data))\n" ++
+  "        (local.set $data (local.get $new_data)))\n" ++
+  "      (else\n" ++
+  "        (local.set $data (i32.load offset=8 (local.get $rec)))))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $app_end\n" ++
+  "      (loop $app_lp\n" ++
+  "        (br_if $app_end (i32.eq (local.get $i) (local.get $slen)))\n" ++
+  "        (i32.store8\n" ++
+  "          (i32.add (local.get $data) (i32.add (local.get $cur_len) (local.get $i)))\n" ++
+  "          (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $app_lp)))\n" ++
+  "    (i32.store offset=4 (local.get $rec) (local.get $new_len))\n" ++
+  "    (i32.const 0))\n";
+
+let helper_decl_strbuf_to_str =
+  "  (func $strbuf_to_str (param $rec i32) (result i32)\n" ++
+  "    (local $cur_len i32) (local $data i32) (local $out i32) (local $i i32)\n" ++
+  "    (local.set $cur_len (i32.load offset=4 (local.get $rec)))\n" ++
+  "    (local.set $data (i32.load offset=8 (local.get $rec)))\n" ++
+  "    (local.set $out (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump\n" ++
+  "      (i32.add (i32.add (local.get $out) (local.get $cur_len)) (i32.const 1)))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $cp_end\n" ++
+  "      (loop $cp_lp\n" ++
+  "        (br_if $cp_end (i32.eq (local.get $i) (local.get $cur_len)))\n" ++
+  "        (i32.store8 (i32.add (local.get $out) (local.get $i))\n" ++
+  "          (i32.load8_u (i32.add (local.get $data) (local.get $i))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $cp_lp)))\n" ++
+  "    (i32.store8 (i32.add (local.get $out) (local.get $cur_len)) (i32.const 0))\n" ++
+  "    (local.get $out))\n";
+
 // Phase 54.8: `$str_unescape s` — walk bytes, replace recognized escape
 // sequences (\\n \\t \\r \\\\ \\" \\/) with the literal byte; pass other
 // bytes through unchanged. Unknown escape `\\X` is passed through as X
@@ -1901,6 +2014,9 @@ let helper_body = fn (name: str) ->
   else if name == "str_repeat" then helper_decl_str_repeat
   else if name == "int_of_str" then helper_decl_int_of_str
   else if name == "str_unescape" then helper_decl_str_unescape
+  else if name == "strbuf_new" then helper_decl_strbuf_new
+  else if name == "strbuf_push" then helper_decl_strbuf_push
+  else if name == "strbuf_to_str" then helper_decl_strbuf_to_str
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
@@ -2069,6 +2185,28 @@ let selfhost_prelude =
   "  match xs with\n" ++
   "  | Nil -> Nil\n" ++
   "  | Cons (h, t) -> Cons (f h, list_map t f);\n" ++
+  "let rec list_rev_into = fn acc -> fn xs ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> acc\n" ++
+  "  | Cons (h, t) -> list_rev_into (Cons (h, acc)) t;\n" ++
+  "let rec list_rev = fn xs -> list_rev_into Nil xs;\n" ++
+  "let rec list_fold = fn xs -> fn acc -> fn f ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> acc\n" ++
+  "  | Cons (h, t) -> list_fold t (f acc h) f;\n" ++
+  "let rec list_len = fn xs ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> 0\n" ++
+  "  | Cons (_, t) -> 1 + list_len t;\n" ++
+  "let rec list_append = fn xs -> fn ys ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> ys\n" ++
+  "  | Cons (h, t) -> Cons (h, list_append t ys);\n" ++
+  "let rec list_mapi_aux = fn xs -> fn f -> fn i ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> Nil\n" ++
+  "  | Cons (h, t) -> Cons (f i h, list_mapi_aux t f (i + 1));\n" ++
+  "let rec list_mapi = fn xs -> fn f -> list_mapi_aux xs f 0;\n" ++
   "let rec str_join = fn sep -> fn xs ->\n" ++
   "  match xs with\n" ++
   "  | Nil -> \"\"\n" ++
