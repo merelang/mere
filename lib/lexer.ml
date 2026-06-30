@@ -184,8 +184,8 @@ let rec tokenize s =
            The char form requires the closing `'` at a specific offset. *)
         if i + 3 < len && s.[i + 1] = '\\' && s.[i + 3] = '\'' then begin
           let actual = match s.[i + 2] with
-            | 'n' -> '\n' | 't' -> '\t' | '\\' -> '\\'
-            | '\'' -> '\'' | '"' -> '"'
+            | 'n' -> '\n' | 't' -> '\t' | 'r' -> '\r' | '0' -> '\000'
+            | '\\' -> '\\' | '\'' -> '\'' | '"' -> '"'
             | c -> raise (Lex_error (pos,
                 Printf.sprintf "unknown escape in char literal: '\\%c'" c))
           in
@@ -235,6 +235,8 @@ let rec tokenize s =
               let actual = match esc with
                 | 'n' -> '\n'
                 | 't' -> '\t'
+                | 'r' -> '\r'
+                | '0' -> '\000'
                 | '\\' -> '\\'
                 | '"' -> '"'
                 | '{' -> '{'        (* escape interpolation *)

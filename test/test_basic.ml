@@ -8131,6 +8131,18 @@ let () =
       "let rec sum = fn xs -> match xs with | [] -> 0 | [h, ...t] -> h + sum t in sum (Cons (1, Cons (2, Cons (3, Nil))))" "6";
     cross_emit "cons-tail pattern two heads"
       "let rec take2sum = fn xs -> match xs with | [a, b, ...rest] -> a + b + take2sum rest | _ -> 0 in take2sum (Cons (10, Cons (20, Cons (30, Cons (40, Nil)))))" "100";
+    (* Phase 54.5: char-class builtins lowered inline (or via $is_space).
+       Returns 1 / 0 wasm-side; we sum to make a single i32 check. *)
+    cross_emit "ord builtin"
+      "ord \"A\"" "65";
+    cross_emit "is_digit builtin"
+      "(if is_digit \"7\" then 1 else 0) + (if is_digit \"a\" then 10 else 0)" "1";
+    cross_emit "is_alpha builtin"
+      "(if is_alpha \"a\" then 1 else 0) + (if is_alpha \"Z\" then 2 else 0) + (if is_alpha \"5\" then 100 else 0)" "3";
+    cross_emit "is_space builtin"
+      "(if is_space \" \" then 1 else 0) + (if is_space \"\\n\" then 2 else 0) + (if is_space \"x\" then 100 else 0)" "3";
+    cross_emit "str_of_int alias of show"
+      "str_len (str_of_int 12345)" "5";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"

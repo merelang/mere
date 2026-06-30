@@ -247,8 +247,10 @@ let rec union_strs = fn (xs: str list) -> fn (acc: str list) ->
 // would scan `show` / `print` as free vars and try to capture them
 // from a scope that doesn't have them.
 let is_builtin = fn (n: str) ->
-  n == "print" || n == "show" || n == "str_len" || n == "char_at" ||
-  n == "fst" || n == "snd" || n == "fail";
+  n == "print" || n == "show" || n == "str_of_int" ||
+  n == "str_len" || n == "char_at" ||
+  n == "fst" || n == "snd" || n == "fail" ||
+  n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -524,7 +526,13 @@ let lookup_or_alloc_field_offset = fn (field: str) -> fn (s: EmitState) ->
 let wat_escape_str = fn (s: str) ->
   let s1 = str_replace s "\\" "\\\\" in
   let s2 = str_replace s1 "\"" "\\\"" in
-  s2;
+  // Phase 54.5: control bytes (newline / CR / tab) would break the
+  // surrounding `"..."` literal in WAT. wat2wasm accepts `\HH` hex
+  // escapes for any byte, so map the common ones explicitly.
+  let s3 = str_replace s2 "\n" "\\0a" in
+  let s4 = str_replace s3 "\r" "\\0d" in
+  let s5 = str_replace s4 "\t" "\\09" in
+  s5;
 
 let alloc_str_literal = fn (s: str) -> fn (st: EmitState) ->
   match lookup_assoc s st.str_offsets with
@@ -805,6 +813,12 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = note_helper_use "show_int" s in
         let s2 = emit_expr x s1 in
         push_instr "call $show_int" s2
+      | EVar "str_of_int" ->
+        // Phase 54.5: `str_of_int n` is the explicit-int form of
+        // `show`. Lowers to the same `$show_int` helper.
+        let s1 = note_helper_use "show_int" s in
+        let s2 = emit_expr x s1 in
+        push_instr "call $show_int" s2
       | EVar "str_len" ->
         // Stage 53j: `str_len s` → `$__lang_strlen` (the same helper
         // str_concat uses internally; both pull "strlen").
@@ -819,6 +833,39 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr s_expr s1 in
         let s3 = emit_expr x s2 in
         push_instr "call $char_at" s3
+      | EVar "ord" ->
+        // Phase 54.5: `ord s` — byte code of a 1-char string. Strings
+        // are NUL-terminated heap buffers; the first byte IS the char.
+        let s1 = emit_expr x s in
+        push_instr "i32.load8_u" s1
+      | EVar "is_digit" ->
+        // Phase 54.5: `is_digit s` — true iff first byte is '0'..'9'.
+        // Idiomatic in-bounds check via unsigned subtract + compare.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "i32.load8_u" s1 in
+        let s3 = push_instr "i32.const 48" s2 in
+        let s4 = push_instr "i32.sub" s3 in
+        let s5 = push_instr "i32.const 10" s4 in
+        push_instr "i32.lt_u" s5
+      | EVar "is_alpha" ->
+        // Phase 54.5: `is_alpha s` — true iff first byte is a-zA-Z.
+        // Bit-or 0x20 normalizes to lowercase, then a-z range check.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "i32.load8_u" s1 in
+        let s3 = push_instr "i32.const 32" s2 in
+        let s4 = push_instr "i32.or" s3 in
+        let s5 = push_instr "i32.const 97" s4 in
+        let s6 = push_instr "i32.sub" s5 in
+        let s7 = push_instr "i32.const 26" s6 in
+        push_instr "i32.lt_u" s7
+      | EVar "is_space" ->
+        // Phase 54.5: `is_space s` — true iff first byte is one of
+        // ' ' / '\t' / '\n' / '\r'. Use a `$is_space` helper to keep
+        // the call site small (4 comparisons would be 12+ instrs).
+        let s1 = note_helper_use "is_space" s in
+        let s2 = emit_expr x s1 in
+        let s3 = push_instr "i32.load8_u" s2 in
+        push_instr "call $is_space" s3
       | EVar "fst" ->
         // Stage 53j: tuples lay out elements at i*4. `fst t` is just
         // i32.load offset=0 of the tuple pointer.
@@ -1492,6 +1539,18 @@ let helper_decl_char_at =
   "  (func $char_at (param $s i32) (param $i i32) (result i32)\n" ++
   "    (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n";
 
+// Phase 54.5: `$is_space b` — true iff byte b is ' ' / '\t' / '\n' / '\r'.
+// Inlined here rather than at the call site to keep is_space callsites small.
+let helper_decl_is_space =
+  "  (func $is_space (param $b i32) (result i32)\n" ++
+  "    (i32.or\n" ++
+  "      (i32.or\n" ++
+  "        (i32.eq (local.get $b) (i32.const 32))\n" ++
+  "        (i32.eq (local.get $b) (i32.const 9)))\n" ++
+  "      (i32.or\n" ++
+  "        (i32.eq (local.get $b) (i32.const 10))\n" ++
+  "        (i32.eq (local.get $b) (i32.const 13)))))\n";
+
 // Stage 53j-2: `$__lang_streq a b` — byte-by-byte NUL-terminated
 // string equality. Returns 1 if equal, 0 otherwise. Mirrors the
 // OCaml side's helper line-for-line.
@@ -1581,6 +1640,7 @@ let helper_body = fn (name: str) ->
   else if name == "show_int" then helper_decl_show_int
   else if name == "char_at" then helper_decl_char_at
   else if name == "streq" then helper_decl_streq
+  else if name == "is_space" then helper_decl_is_space
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
