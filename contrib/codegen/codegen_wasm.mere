@@ -63,6 +63,12 @@ type EmitState = {
   // entry is a builtin name (e.g., "print"); the wrap module knows
   // each builtin's import shape.
   extern_uses: str list,
+  // Stage 53i-2: track which *embedded* runtime helpers are needed.
+  // Unlike extern_uses (which lowers to host-provided JS fns via
+  // `(import ...)`), these are wasm functions whose bodies are
+  // generated into the module itself. Currently: "str_concat" (which
+  // pulls in $__lang_strlen too).
+  helpers_used: str list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -85,6 +91,7 @@ let initial_emit_state = EmitState {
   str_offsets = Nil,
   field_offsets = Nil,
   extern_uses = Nil,
+  helpers_used = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -460,6 +467,11 @@ let note_extern_use = fn (name: str) -> fn (s: EmitState) ->
   if extern_already_noted name s.extern_uses then s
   else ({ s | extern_uses = Cons (name, s.extern_uses) } : EmitState);
 
+// Stage 53i-2: same shape for embedded runtime helpers.
+let note_helper_use = fn (name: str) -> fn (s: EmitState) ->
+  if extern_already_noted name s.helpers_used then s
+  else ({ s | helpers_used = Cons (name, s.helpers_used) } : EmitState);
+
 // Record field name → byte offset in the heap record. Lazy allocation
 // (first encounter wins offset 0, second wins 4, etc.). Used by
 // `ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord` — same
@@ -533,9 +545,19 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     push_instr ("i32.const " ++ show off) s1
   | EUnit -> push_instr "i32.const 0" s
   | EBin (op, a, b) ->
-    let s1 = emit_expr a s in
-    let s2 = emit_expr b s1 in
-    push_instr (binop_instr op) s2
+    // Stage 53i-2: `str ++ str` short-circuits to the embedded
+    // runtime helper, which the module wrapper emits on demand. Other
+    // binops dispatch through the simple `binop_instr` lookup table.
+    (match op with
+      | OpConcat ->
+        let s1 = note_helper_use "str_concat" s in
+        let s2 = emit_expr a s1 in
+        let s3 = emit_expr b s2 in
+        push_instr "call $__lang_str_concat" s3
+      | _ ->
+        let s1 = emit_expr a s in
+        let s2 = emit_expr b s1 in
+        push_instr (binop_instr op) s2)
   | ECmp (op, a, b) ->
     let s1 = emit_expr a s in
     let s2 = emit_expr b s1 in
@@ -1284,10 +1306,64 @@ let rec build_extern_imports = fn (uses: str list) ->
   | Cons (h, t) -> extern_import_line h ++ build_extern_imports t
   ;
 
+// Stage 53i-2: embed runtime helper `(func ...)` bodies on demand.
+// Mirrors the OCaml-side `lib/codegen_wasm.ml`'s `runtime_helpers`
+// section. NB: `$__lang_str_concat` uses `$__lang_bump` directly to
+// stake out fresh memory, so the helper composes with all the other
+// `emit_bump_alloc`-emitted stores in the program.
+let helper_decl_str_concat =
+  "  (func $__lang_strlen (param $s i32) (result i32)\n" ++
+  "    (local $i i32)\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $end\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (local.get $i))\n" ++
+  "  (func $__lang_str_concat (param $a i32) (param $b i32) (result i32)\n" ++
+  "    (local $la i32) (local $lb i32) (local $r i32) (local $i i32)\n" ++
+  "    (local.set $la (call $__lang_strlen (local.get $a)))\n" ++
+  "    (local.set $lb (call $__lang_strlen (local.get $b)))\n" ++
+  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $end_a\n" ++
+  "      (loop $lp_a\n" ++
+  "        (br_if $end_a (i32.eq (local.get $i) (local.get $la)))\n" ++
+  "        (i32.store8 (i32.add (local.get $r) (local.get $i))\n" ++
+  "                    (i32.load8_u (i32.add (local.get $a) (local.get $i))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $lp_a)))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $end_b\n" ++
+  "      (loop $lp_b\n" ++
+  "        (br_if $end_b (i32.eq (local.get $i) (local.get $lb)))\n" ++
+  "        (i32.store8 (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $i))\n" ++
+  "                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $lp_b)))\n" ++
+  "    (i32.store8 (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))\n" ++
+  "                (i32.const 0))\n" ++
+  "    (global.set $__lang_bump\n" ++
+  "      (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))\n" ++
+  "               (i32.const 1)))\n" ++
+  "    (local.get $r))\n";
+
+let helper_body = fn (name: str) ->
+  if name == "str_concat" then helper_decl_str_concat
+  else fail ("codegen_wasm: unknown embedded helper " ++ name);
+
+let rec build_helper_decls = fn (uses: str list) ->
+  match uses with
+  | Nil -> ""
+  | Cons (h, t) -> helper_body h ++ build_helper_decls t
+  ;
+
 let wrap_module = fn (locals_decl: str) -> fn (body: str)
               -> fn (lifted: str) -> fn (table_size: int)
               -> fn (elem_line: str) -> fn (data_decls: str)
-              -> fn (bump_start: int) -> fn (extern_imports: str) ->
+              -> fn (bump_start: int) -> fn (extern_imports: str)
+              -> fn (helper_decls: str) ->
   // Stage 53d onward: tuples, variants, and closures all use the
   // bump-alloc global, so emit `$__lang_bump` unconditionally. The
   // closure-specific `(type $cl)` / `(table)` / `(elem)` lines only
@@ -1308,6 +1384,7 @@ let wrap_module = fn (locals_decl: str) -> fn (body: str)
   "  (global $__lang_bump (mut i32) (i32.const " ++ show bump_start ++ "))\n" ++
   closure_decls ++
   data_decls ++
+  helper_decls ++
   lifted ++
   "  (func $main (export \"main\") (result i32)\n" ++
   locals_decl ++
@@ -1411,7 +1488,8 @@ let emit_program = fn (prog: program) ->
   // region. `str_offset` already sits just past the last NUL byte.
   let bump_start = s.str_offset in
   let extern_imports = build_extern_imports s.extern_uses in
-  wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports;
+  let helper_decls = build_helper_decls s.helpers_used in
+  wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports helper_decls;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
@@ -1579,4 +1657,10 @@ let _ = print (parse_and_emit "let _ = print \"hello, world\" in 42") in
 let _ = print "---" in
 // Multiple prints — extern import dedupe keeps just one (import ...).
 let _ = print (parse_and_emit "let _ = print \"a\" in let _ = print \"b\" in 0") in
+let _ = print "=== Stage 53i-2 codegen_wasm demos (str ++) ===" in
+// str ++ str → embedded $__lang_str_concat helper.
+let _ = print (parse_and_emit "let _ = print (\"hello, \" ++ \"world\") in 0") in
+let _ = print "---" in
+// Chained ++ and recursive build-up.
+let _ = print (parse_and_emit "let join = fn a -> fn b -> a ++ \"/\" ++ b in let _ = print (join \"src\" \"main\") in 0") in
 0

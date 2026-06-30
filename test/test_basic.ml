@@ -8044,6 +8044,17 @@ let () =
       "let _ = print \"hi\" in 42" "42";
     cross_emit "multiple prints"
       "let _ = print \"a\" in let _ = print \"b\" in 7" "7";
+    (* Phase 53.15 (Stage 53i-2): embedded $__lang_str_concat helper
+       for `str ++ str`. Module wrapper emits the helper body only
+       when the program touches OpConcat. *)
+    cross_emit "str ++ + print"
+      "let _ = print (\"hello, \" ++ \"world\") in 42" "42";
+    cross_emit "3-way ++"
+      "let _ = print (\"a\" ++ \"b\" ++ \"c\") in 1" "1";
+    cross_emit "let-bound concat"
+      "let s = \"foo\" ++ \"bar\" in let _ = print s in 9" "9";
+    cross_emit "fn that concats"
+      "let join = fn a -> fn b -> a ++ \"/\" ++ b in let _ = print (join \"src\" \"main\") in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
       "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
       "42"
