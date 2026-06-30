@@ -250,7 +250,8 @@ let is_builtin = fn (n: str) ->
   n == "print" || n == "show" || n == "str_of_int" ||
   n == "str_len" || n == "char_at" ||
   n == "fst" || n == "snd" || n == "fail" ||
-  n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space";
+  n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space" ||
+  n == "str_starts_with" || n == "substring";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -833,6 +834,23 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr s_expr s1 in
         let s3 = emit_expr x s2 in
         push_instr "call $char_at" s3
+      | EApp (EVar "str_starts_with", s_expr) ->
+        // Phase 54.6: `str_starts_with s prefix` — 2-arg curried.
+        // Returns 1 if prefix is a prefix of s (byte-by-byte).
+        let s1 = note_helper_use "str_starts_with" s in
+        let s2 = emit_expr s_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $str_starts_with" s3
+      | EApp (EApp (EVar "substring", s_expr), st_expr) ->
+        // Phase 54.6: `substring s start end` — 3-arg curried.
+        // Outer EApp sees `EApp (EApp (EVar "substring", s), start)` as f,
+        // with end as x. Bump-allocs a new NUL-terminated string for
+        // bytes [start, end).
+        let s1 = note_helper_use "substring" s in
+        let s2 = emit_expr s_expr s1 in
+        let s3 = emit_expr st_expr s2 in
+        let s4 = emit_expr x s3 in
+        push_instr "call $substring" s4
       | EVar "ord" ->
         // Phase 54.5: `ord s` — byte code of a 1-char string. Strings
         // are NUL-terminated heap buffers; the first byte IS the char.
@@ -1551,6 +1569,45 @@ let helper_decl_is_space =
   "        (i32.eq (local.get $b) (i32.const 10))\n" ++
   "        (i32.eq (local.get $b) (i32.const 13)))))\n";
 
+// Phase 54.6: `$str_starts_with a b` — true iff b is a prefix of a.
+// Walks b byte-by-byte; returns 1 when b's NUL is reached, 0 if a byte
+// differs (a's NUL also differs since b's byte at that index is non-NUL).
+let helper_decl_str_starts_with =
+  "  (func $str_starts_with (param $a i32) (param $b i32) (result i32)\n" ++
+  "    (local $i i32) (local $ba i32) (local $bb i32)\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (loop $lp\n" ++
+  "      (local.set $bb (i32.load8_u (i32.add (local.get $b) (local.get $i))))\n" ++
+  "      (if (i32.eqz (local.get $bb))\n" ++
+  "        (then (return (i32.const 1))))\n" ++
+  "      (local.set $ba (i32.load8_u (i32.add (local.get $a) (local.get $i))))\n" ++
+  "      (if (i32.ne (local.get $ba) (local.get $bb))\n" ++
+  "        (then (return (i32.const 0))))\n" ++
+  "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "      (br $lp))\n" ++
+  "    (i32.const 0))\n";
+
+// Phase 54.6: `$substring s st ed` — bump-allocs a new NUL-terminated
+// string with bytes s[st..ed). No bounds check (matches the lib/eval.ml
+// API contract: caller must ensure 0 <= st <= ed <= str_len s).
+let helper_decl_substring =
+  "  (func $substring (param $s i32) (param $st i32) (param $ed i32) (result i32)\n" ++
+  "    (local $len i32) (local $r i32) (local $i i32)\n" ++
+  "    (local.set $len (i32.sub (local.get $ed) (local.get $st)))\n" ++
+  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $end\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $end (i32.eq (local.get $i) (local.get $len)))\n" ++
+  "        (i32.store8 (i32.add (local.get $r) (local.get $i))\n" ++
+  "          (i32.load8_u (i32.add (i32.add (local.get $s) (local.get $st)) (local.get $i))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))\n" ++
+  "    (global.set $__lang_bump\n" ++
+  "      (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))\n" ++
+  "    (local.get $r))\n";
+
 // Stage 53j-2: `$__lang_streq a b` — byte-by-byte NUL-terminated
 // string equality. Returns 1 if equal, 0 otherwise. Mirrors the
 // OCaml side's helper line-for-line.
@@ -1641,6 +1698,8 @@ let helper_body = fn (name: str) ->
   else if name == "char_at" then helper_decl_char_at
   else if name == "streq" then helper_decl_streq
   else if name == "is_space" then helper_decl_is_space
+  else if name == "str_starts_with" then helper_decl_str_starts_with
+  else if name == "substring" then helper_decl_substring
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
