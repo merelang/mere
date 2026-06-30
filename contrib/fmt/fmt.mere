@@ -548,6 +548,12 @@ let fmt_top_decl = fn (d: top_decl) ->
   | TopRecord (name, params, fields) -> fmt_top_record name params fields
   | TopTypeAlias (name, params, aliased) ->
     fmt_top_type_alias name params aliased
+  | TopModule (_name, _sub_decls) ->
+    // Phase 54.1: fmt for modules is a placeholder. The parser's
+    // `flatten_and_resolve` collapses modules into flat decls before
+    // any consumer sees them, so this arm fires only if some caller
+    // bypasses flatten. For now, emit a stub marker.
+    "/* TopModule (flattening expected) */"
   ;
 
 // `program = (decls, main)`. Decls are joined with a blank line, then a

@@ -1571,6 +1571,11 @@ let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
   | TopType (_name, _vars, ctors) -> register_ctor_tags ctors s
   | TopRecord (_name, _vars, _fields) -> s
   | TopTypeAlias (_name, _vars, _ty) -> s
+  | TopModule _ ->
+    // Phase 54.1: the parser's `flatten_and_resolve` collapses
+    // modules into flat decls before they reach codegen. If a
+    // TopModule slips through, the upstream pipeline is broken.
+    fail "codegen_wasm: TopModule reached codegen — parser flatten missing?"
   ;
 
 let rec emit_decls = fn (decls: top_decl list) -> fn (s: EmitState) ->
@@ -1612,7 +1617,9 @@ let emit_program = fn (prog: program) ->
 let parse_and_emit = fn (src: str) ->
   let toks = tokenize src in
   let (prog, _rest) = parse_decls Nil toks in
-  emit_program prog;
+  // Phase 54.1: flatten any `module M { ... }` decls and rewrite
+  // `M.f` field-access references into qualified `EVar "M.f"`.
+  emit_program (flatten_and_resolve prog);
 
 // === Demos ================================================================
 

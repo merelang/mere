@@ -915,6 +915,34 @@ let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
     | TType ->
       let (decl, toks1) = parse_type_decl (advance toks) in
       parse_decls (Cons (decl, acc)) toks1
+    | TModule ->
+      // Phase 54.1: `module Name { ...decls };`. Parse the inner decl
+      // list with the same recursion, ending on the matching `}`.
+      let toks1 = advance toks in  // consume `module`
+      let name = (match peek_tok toks1 with
+        | TIdent n -> n
+        | _ -> fail ("line " ++ show (peek_line toks1)
+                     ++ ": expected module name after `module`")) in
+      let toks2 = advance toks1 in  // consume Name
+      let toks3 = (match peek_tok toks2 with
+        | TLBrace -> advance toks2
+        | _ -> fail ("line " ++ show (peek_line toks2)
+                     ++ ": expected `\{` after module name")) in
+      let (sub_prog, toks4) = parse_decls Nil toks3 in
+      let (sub_decls, _sub_main) = sub_prog in
+      let toks5 = (match peek_tok toks4 with
+        | TRBrace -> advance toks4
+        | _ -> fail ("line " ++ show (peek_line toks4)
+                     ++ ": expected `}` closing module body")) in
+      let toks6 = (match peek_tok toks5 with
+        | TSemi -> advance toks5
+        | _ -> toks5) in
+      parse_decls (Cons (TopModule (name, sub_decls), acc)) toks6
+    | TRBrace ->
+      // End of an enclosing `module Name { ... }` block. Signal upward
+      // by returning the accumulated decls; the caller (TModule arm
+      // above) consumes the `}`.
+      ((list_rev acc, EUnit), toks)
     | _ ->
       let (main, toks1) = parse_expr toks in
       ((list_rev acc, main), toks1)))
@@ -1163,7 +1191,7 @@ let parse_str = fn (src: str) ->
     | _ -> fail ("line " ++ show (peek_line rest)
                  ++ ": unexpected token after expression"));
 
-let top_decl_to_str = fn (d: top_decl) ->
+let rec top_decl_to_str = fn (d: top_decl) ->
   match d with
   | TopLet (pat, value) ->
     "TopLet(" ++ pattern_to_str pat ++ ", " ++ expr_to_str value ++ ")"
@@ -1183,7 +1211,13 @@ let top_decl_to_str = fn (d: top_decl) ->
       let (fname, fty) = f in fname ++ ": " ++ ty_to_str fty) in
     "TopRecord(" ++ name ++ ", \{" ++ str_join ", " parts ++ "})"
   | TopTypeAlias (name, _params, aliased) ->
-    "TopTypeAlias(" ++ name ++ " = " ++ ty_to_str aliased ++ ")";
+    "TopTypeAlias(" ++ name ++ " = " ++ ty_to_str aliased ++ ")"
+  | TopModule (name, sub_decls) ->
+    // After `flatten_modules` runs, TopModule never reaches consumers
+    // — but keep this arm for completeness (e.g., debugging an
+    // un-flattened parse output).
+    let sub_strs = list_map sub_decls (fn (d: top_decl) -> top_decl_to_str d) in
+    "TopModule(" ++ name ++ ", [" ++ str_join "; " sub_strs ++ "])";
 
 let program_to_str = fn (p: program) ->
   let (decls, main) = p in
@@ -1193,11 +1227,274 @@ let program_to_str = fn (p: program) ->
     | _ -> str_join "; " decl_strs ++ "; ") in
   "Program(" ++ head ++ "main = " ++ expr_to_str main ++ ")";
 
+// === Module flatten + qualified-name resolution (Phase 54.1) ===============
+//
+// After parse_decls returns, modules are nested via TopModule. The
+// post-pass below flattens them into a flat decl list (prefixing each
+// inner decl's name with `M.`) and rewrites every `M.f` access in
+// expressions / patterns into a single `EVar "M.f"` / `PVar "M.f"`
+// — provided `M` is a known module. The result is that downstream
+// consumers (fmt / eval / typer / codegen) see only flat decls and
+// dot-bearing identifiers as opaque strings, with no module-aware
+// logic of their own.
+
+let rec collect_module_names = fn (decls: top_decl list) -> fn (acc: str list) ->
+  match decls with
+  | Nil -> acc
+  | Cons (d, rest) ->
+    let acc2 = (match d with
+      | TopModule (name, _) -> Cons (name, acc)
+      | _ -> acc) in
+    collect_module_names rest acc2;
+
+let rec is_module_name = fn (n: str) -> fn (names: str list) ->
+  match names with
+  | Nil -> false
+  | Cons (h, t) -> if h == n then true else is_module_name n t;
+
+// Rewrite a name in the context of a known module set. If `name`
+// looks like a qualified `M.f`, ... actually we handle the rewrite
+// at the EFieldGet level (parser produces EFieldGet for `M.f`
+// initially). For PVar/etc. we leave names alone — module-qualified
+// patterns are rare; defer.
+
+// Walk an expression tree, rewriting `EFieldGet (EVar M, f)` →
+// `EVar "M.f"` when M is a known module. Other field accesses
+// (real record field reads) flow through unchanged.
+let rec rewrite_expr = fn (e: expr) -> fn (mods: str list) ->
+  match e with
+  | EInt _ -> e
+  | EFloat _ -> e
+  | EBool _ -> e
+  | EStr _ -> e
+  | EUnit -> e
+  | EVar _ -> e
+  | EBin (op, a, b) -> EBin (op, rewrite_expr a mods, rewrite_expr b mods)
+  | ECmp (op, a, b) -> ECmp (op, rewrite_expr a mods, rewrite_expr b mods)
+  | ELogic (op, a, b) -> ELogic (op, rewrite_expr a mods, rewrite_expr b mods)
+  | ENeg inner -> ENeg (rewrite_expr inner mods)
+  | EAnnot (inner, t) -> EAnnot (rewrite_expr inner mods, t)
+  | EApp (f, x) -> EApp (rewrite_expr f mods, rewrite_expr x mods)
+  | EFun (arg, ty_opt, body) -> EFun (arg, ty_opt, rewrite_expr body mods)
+  | ELet (pat, value, body) ->
+    ELet (pat, rewrite_expr value mods, rewrite_expr body mods)
+  | ELetRec (bindings, body) ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (n, rewrite_expr v mods)) in
+    ELetRec (bs2, rewrite_expr body mods)
+  | EIf (c, t, el) ->
+    EIf (rewrite_expr c mods, rewrite_expr t mods, rewrite_expr el mods)
+  | EMatch (scrutinee, arms) ->
+    let arms2 = list_map arms (fn (arm: pattern * expr option * expr) ->
+      let (p, g, b) = arm in
+      let g2 = (match g with
+        | None -> None
+        | Some ge -> Some (rewrite_expr ge mods)) in
+      (p, g2, rewrite_expr b mods)) in
+    EMatch (rewrite_expr scrutinee mods, arms2)
+  | EConstr (name, payload_opt) ->
+    (match payload_opt with
+      | None -> e
+      | Some p -> EConstr (name, Some (rewrite_expr p mods)))
+  | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rewrite_expr e2 mods))
+  | ERecordLit (name, fields) ->
+    let fs2 = list_map fields (fn (f: str * expr) ->
+      let (fname, fv) = f in (fname, rewrite_expr fv mods)) in
+    ERecordLit (name, fs2)
+  | EFieldGet (recv, field) ->
+    // Key rewrite: if receiver names a known module, collapse
+    // `M.field` to a single qualified identifier. Module names are
+    // conventionally capitalized in Mere, so the parser actually
+    // produces `EConstr (M, None)` — not `EVar "M"`. Handle both
+    // shapes. Other receivers stay as real field accesses.
+    (match recv with
+      | EVar m ->
+        if is_module_name m mods then EVar (m ++ "." ++ field)
+        else EFieldGet (rewrite_expr recv mods, field)
+      | EConstr (m, None) ->
+        if is_module_name m mods then EVar (m ++ "." ++ field)
+        else EFieldGet (rewrite_expr recv mods, field)
+      | _ -> EFieldGet (rewrite_expr recv mods, field))
+  | ERecordUpdate (base, fields) ->
+    let fs2 = list_map fields (fn (f: str * expr) ->
+      let (fname, fv) = f in (fname, rewrite_expr fv mods)) in
+    ERecordUpdate (rewrite_expr base mods, fs2);
+
+// Apply rewrite_expr to all expressions inside a top_decl.
+let rewrite_decl = fn (d: top_decl) -> fn (mods: str list) ->
+  match d with
+  | TopLet (pat, e) -> TopLet (pat, rewrite_expr e mods)
+  | TopLetRec bindings ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (n, rewrite_expr v mods)) in
+    TopLetRec bs2
+  | _ -> d;
+
+// Prefix a single decl's binding names with `M.` so the flat output
+// stays unambiguous. TopType / TopRecord / TopTypeAlias also get
+// their type-name prefix.
+let prefix_decl = fn (m: str) -> fn (d: top_decl) ->
+  match d with
+  | TopLet (pat, e) ->
+    (match pat with
+      | PVar n -> TopLet (PVar (m ++ "." ++ n), e)
+      | _ -> d)  // non-PVar lets in a module body are rare; leave alone
+  | TopLetRec bindings ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (m ++ "." ++ n, v)) in
+    TopLetRec bs2
+  | TopType (n, params, ctors) -> TopType (m ++ "." ++ n, params, ctors)
+  | TopRecord (n, params, fields) -> TopRecord (m ++ "." ++ n, params, fields)
+  | TopTypeAlias (n, params, ty) -> TopTypeAlias (m ++ "." ++ n, params, ty)
+  | TopModule _ -> d;  // nested modules — flatten_decls handles recursion
+
+let rec list_append = fn (xs: top_decl list) -> fn (ys: top_decl list) ->
+  match xs with
+  | Nil -> ys
+  | Cons (h, t) -> Cons (h, list_append t ys);
+
+// === Intra-module bare-name rewrite =======================================
+//
+// Inside `module M { let inc = ...; let twice = fn x -> inc (inc x); ... }`,
+// the body of `twice` calls `inc` by its bare (unqualified) name. After
+// the outer flatten/prefix step turns those into `M.inc` / `M.twice`, the
+// bare `inc` reference inside `twice`'s body would resolve to nothing.
+// This pass walks each module-internal decl's body and rewrites every
+// `EVar n` where `n` matches a sibling binding into `EVar "M.n"`. Same
+// idea for the `EConstr (m, None)` shape used by uppercase identifiers.
+
+let rec lookup_str_str = fn (k: str) -> fn (xs: (str * str) list) ->
+  match xs with
+  | Nil -> None
+  | Cons (b, rest) ->
+    let (a, b2) = b in
+    if a == k then Some b2 else lookup_str_str k rest;
+
+let decl_binding_name = fn (d: top_decl) ->
+  match d with
+  | TopLet (PVar n, _) -> Some n
+  | TopLetRec bindings ->
+    // multi-binding: return the first; the caller handles per-binding
+    // names separately for the rec rename map
+    (match bindings with
+      | Nil -> None
+      | Cons (b, _) -> let (n, _) = b in Some n)
+  | TopType (n, _, _) -> Some n
+  | TopRecord (n, _, _) -> Some n
+  | TopTypeAlias (n, _, _) -> Some n
+  | _ -> None;
+
+// Build the `bare → M.bare` rename map for one module's decls. For
+// TopLetRec each binding name contributes its own entry.
+let rec build_rename_map = fn (m: str) -> fn (decls: top_decl list)
+                       -> fn (acc: (str * str) list) ->
+  match decls with
+  | Nil -> acc
+  | Cons (d, rest) ->
+    let acc2 = (match d with
+      | TopLetRec bindings ->
+        list_fold bindings acc (fn (a: (str * str) list)
+                             -> fn (b: str * expr) ->
+          let (n, _) = b in Cons ((n, m ++ "." ++ n), a))
+      | _ ->
+        (match decl_binding_name d with
+          | Some n -> Cons ((n, m ++ "." ++ n), acc)
+          | None -> acc)) in
+    build_rename_map m rest acc2;
+
+// Walker: rewrite `EVar n` → `EVar n_qualified` for every n in `renames`.
+// Mirrors `rewrite_expr`'s shape but operates on the rename map.
+let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) ->
+  match e with
+  | EInt _ -> e
+  | EFloat _ -> e
+  | EBool _ -> e
+  | EStr _ -> e
+  | EUnit -> e
+  | EVar n ->
+    (match lookup_str_str n renames with
+      | Some n2 -> EVar n2
+      | None -> e)
+  | EBin (op, a, b) -> EBin (op, rename_expr a renames, rename_expr b renames)
+  | ECmp (op, a, b) -> ECmp (op, rename_expr a renames, rename_expr b renames)
+  | ELogic (op, a, b) -> ELogic (op, rename_expr a renames, rename_expr b renames)
+  | ENeg inner -> ENeg (rename_expr inner renames)
+  | EAnnot (inner, t) -> EAnnot (rename_expr inner renames, t)
+  | EApp (f, x) -> EApp (rename_expr f renames, rename_expr x renames)
+  | EFun (arg, ty_opt, body) -> EFun (arg, ty_opt, rename_expr body renames)
+  | ELet (pat, value, body) ->
+    ELet (pat, rename_expr value renames, rename_expr body renames)
+  | ELetRec (bindings, body) ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (n, rename_expr v renames)) in
+    ELetRec (bs2, rename_expr body renames)
+  | EIf (c, t, el) ->
+    EIf (rename_expr c renames, rename_expr t renames, rename_expr el renames)
+  | EMatch (scrutinee, arms) ->
+    let arms2 = list_map arms (fn (arm: pattern * expr option * expr) ->
+      let (p, g, b) = arm in
+      let g2 = (match g with
+        | None -> None
+        | Some ge -> Some (rename_expr ge renames)) in
+      (p, g2, rename_expr b renames)) in
+    EMatch (rename_expr scrutinee renames, arms2)
+  | EConstr (name, payload_opt) ->
+    (match payload_opt with
+      | None -> e
+      | Some p -> EConstr (name, Some (rename_expr p renames)))
+  | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rename_expr e2 renames))
+  | ERecordLit (name, fields) ->
+    let fs2 = list_map fields (fn (f: str * expr) ->
+      let (fname, fv) = f in (fname, rename_expr fv renames)) in
+    ERecordLit (name, fs2)
+  | EFieldGet (recv, field) ->
+    EFieldGet (rename_expr recv renames, field)
+  | ERecordUpdate (base, fields) ->
+    let fs2 = list_map fields (fn (f: str * expr) ->
+      let (fname, fv) = f in (fname, rename_expr fv renames)) in
+    ERecordUpdate (rename_expr base renames, fs2);
+
+// Apply rename_expr to all expressions inside a top_decl.
+let rename_decl = fn (d: top_decl) -> fn (renames: (str * str) list) ->
+  match d with
+  | TopLet (pat, e) -> TopLet (pat, rename_expr e renames)
+  | TopLetRec bindings ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (n, rename_expr v renames)) in
+    TopLetRec bs2
+  | _ -> d;
+
+// Flatten the decl list: expand each TopModule into prefixed inner
+// decls. Recurse on inner decls so nested `module A { module B { ... }
+// }` flattens into `A.B.f` etc. Each module's sub-decls also go
+// through `rename_decl` with a `bare → M.bare` map so intra-module
+// references stay resolvable after prefixing.
+let rec flatten_decls = fn (decls: top_decl list) ->
+  match decls with
+  | Nil -> Nil
+  | Cons (d, rest) ->
+    let expanded = (match d with
+      | TopModule (name, sub_decls) ->
+        let flat_sub = flatten_decls sub_decls in
+        let renames = build_rename_map name flat_sub Nil in
+        let renamed = list_map flat_sub (fn (sd: top_decl) -> rename_decl sd renames) in
+        list_map renamed (fn (sd: top_decl) -> prefix_decl name sd)
+      | _ -> Cons (d, Nil)) in
+    list_append expanded (flatten_decls rest);
+
+let flatten_and_resolve = fn (prog: program) ->
+  let (decls, main) = prog in
+  let mods = collect_module_names decls Nil in
+  let flat = flatten_decls decls in
+  let resolved_decls = list_map flat (fn (d: top_decl) -> rewrite_decl d mods) in
+  let resolved_main = rewrite_expr main mods in
+  ((resolved_decls, resolved_main) : program);
+
 let parse_str_program = fn (src: str) ->
   let toks = tokenize src in
   let (result, rest) = parse_decls Nil toks in
   (match peek_tok rest with
-    | TEof -> program_to_str result
+    | TEof -> program_to_str (flatten_and_resolve result)
     | _ -> fail ("line " ++ show (peek_line rest)
                  ++ ": unexpected token after program"));
 

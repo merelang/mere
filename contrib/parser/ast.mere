@@ -102,6 +102,12 @@ type top_decl =
   // source — `type pos_token = int * token;` in lexer.mere is the
   // first one self-host parser tripped on when fed its own input.
   | TopTypeAlias of str * str list * ty
+  // `module M { ... };` (Phase 54.1). Holds a list of nested top-level
+  // decls. Parser flattens at output time by prefixing each nested
+  // decl name with `M.` and rewriting `M.f` field-access references
+  // into qualified `EVar "M.f"`, so consumers (fmt / eval / typer /
+  // codegen) see a flat namespace and don't need module-aware logic.
+  | TopModule of str * top_decl list
   ;
 
 type program = top_decl list * expr;
