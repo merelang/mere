@@ -251,7 +251,8 @@ let is_builtin = fn (n: str) ->
   n == "str_len" || n == "char_at" ||
   n == "fst" || n == "snd" || n == "fail" ||
   n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space" ||
-  n == "str_starts_with" || n == "substring";
+  n == "str_starts_with" || n == "substring" ||
+  n == "str_index_of" || n == "str_repeat" || n == "int_of_str";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -851,6 +852,32 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s3 = emit_expr st_expr s2 in
         let s4 = emit_expr x s3 in
         push_instr "call $substring" s4
+      | EApp (EVar "str_index_of", h_expr) ->
+        // Phase 54.7: `str_index_of haystack needle` — 2-arg curried.
+        // Pulls strlen too (helper body calls $__lang_strlen).
+        let s0 = note_helper_use "strlen" s in
+        let s1 = note_helper_use "str_index_of" s0 in
+        let s2 = emit_expr h_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $str_index_of" s3
+      | EApp (EVar "str_repeat", s_expr) ->
+        // Phase 54.7: `str_repeat s n` — 2-arg curried. Bump-allocs
+        // n*str_len(s)+1 bytes. Helper pulls strlen.
+        let s0 = note_helper_use "strlen" s in
+        let s1 = note_helper_use "str_repeat" s0 in
+        let s2 = emit_expr s_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $str_repeat" s3
+      | EVar "int_of_str" ->
+        // Phase 54.7: `int_of_str s` — single arg. Skips leading
+        // whitespace (so the helper depends on $is_space), optional
+        // minus, accumulates decimal digits. Returns 0 on no-digit
+        // input (the OCaml side raises; we choose lenient here so a
+        // missing field in user code doesn't trap the whole module).
+        let s0 = note_helper_use "is_space" s in
+        let s1 = note_helper_use "int_of_str" s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $int_of_str" s2
       | EVar "ord" ->
         // Phase 54.5: `ord s` — byte code of a 1-char string. Strings
         // are NUL-terminated heap buffers; the first byte IS the char.
@@ -1587,6 +1614,98 @@ let helper_decl_str_starts_with =
   "      (br $lp))\n" ++
   "    (i32.const 0))\n";
 
+// Phase 54.7: `$str_index_of h n` — first byte-index of n in h, or -1.
+// Empty needle returns 0 (matches OCaml semantics).
+let helper_decl_str_index_of =
+  "  (func $str_index_of (param $h i32) (param $n i32) (result i32)\n" ++
+  "    (local $hl i32) (local $nl i32) (local $i i32) (local $j i32) (local $ok i32)\n" ++
+  "    (local.set $hl (call $__lang_strlen (local.get $h)))\n" ++
+  "    (local.set $nl (call $__lang_strlen (local.get $n)))\n" ++
+  "    (if (i32.eqz (local.get $nl)) (then (return (i32.const 0))))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (block $outer_end\n" ++
+  "      (loop $outer\n" ++
+  "        (br_if $outer_end\n" ++
+  "          (i32.gt_s (i32.add (local.get $i) (local.get $nl)) (local.get $hl)))\n" ++
+  "        (local.set $j (i32.const 0))\n" ++
+  "        (local.set $ok (i32.const 1))\n" ++
+  "        (block $inner_end\n" ++
+  "          (loop $inner\n" ++
+  "            (br_if $inner_end (i32.eq (local.get $j) (local.get $nl)))\n" ++
+  "            (if (i32.ne\n" ++
+  "                   (i32.load8_u (i32.add (local.get $h) (i32.add (local.get $i) (local.get $j))))\n" ++
+  "                   (i32.load8_u (i32.add (local.get $n) (local.get $j))))\n" ++
+  "              (then (local.set $ok (i32.const 0)) (br $inner_end)))\n" ++
+  "            (local.set $j (i32.add (local.get $j) (i32.const 1)))\n" ++
+  "            (br $inner)))\n" ++
+  "        (if (local.get $ok) (then (return (local.get $i))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $outer)))\n" ++
+  "    (i32.const -1))\n";
+
+// Phase 54.7: `$str_repeat s n` — bump-allocs s repeated n times +
+// NUL terminator. n=0 yields an empty string (1-byte NUL only).
+let helper_decl_str_repeat =
+  "  (func $str_repeat (param $s i32) (param $n i32) (result i32)\n" ++
+  "    (local $slen i32) (local $r i32) (local $k i32) (local $i i32)\n" ++
+  "    (local.set $slen (call $__lang_strlen (local.get $s)))\n" ++
+  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $k (i32.const 0))\n" ++
+  "    (block $end_k\n" ++
+  "      (loop $lp_k\n" ++
+  "        (br_if $end_k (i32.eq (local.get $k) (local.get $n)))\n" ++
+  "        (local.set $i (i32.const 0))\n" ++
+  "        (block $end_i\n" ++
+  "          (loop $lp_i\n" ++
+  "            (br_if $end_i (i32.eq (local.get $i) (local.get $slen)))\n" ++
+  "            (i32.store8\n" ++
+  "              (i32.add (local.get $r)\n" ++
+  "                (i32.add (i32.mul (local.get $k) (local.get $slen)) (local.get $i)))\n" ++
+  "              (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
+  "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "            (br $lp_i)))\n" ++
+  "        (local.set $k (i32.add (local.get $k) (i32.const 1)))\n" ++
+  "        (br $lp_k)))\n" ++
+  "    (i32.store8\n" ++
+  "      (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $slen)))\n" ++
+  "      (i32.const 0))\n" ++
+  "    (global.set $__lang_bump\n" ++
+  "      (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $slen)))\n" ++
+  "               (i32.const 1)))\n" ++
+  "    (local.get $r))\n";
+
+// Phase 54.7: `$int_of_str s` — parse leading [ws*][-]?[0-9]* as signed
+// decimal int. Stops at first non-digit. Returns 0 if no digits found
+// (lenient vs OCaml-side raise). Depends on $is_space for ws skip.
+let helper_decl_int_of_str =
+  "  (func $int_of_str (param $s i32) (result i32)\n" ++
+  "    (local $i i32) (local $acc i32) (local $neg i32) (local $b i32)\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (local.set $acc (i32.const 0))\n" ++
+  "    (local.set $neg (i32.const 0))\n" ++
+  "    (block $ws_done\n" ++
+  "      (loop $ws\n" ++
+  "        (local.set $b (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
+  "        (br_if $ws_done (i32.eqz (call $is_space (local.get $b))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $ws)))\n" ++
+  "    (if (i32.eq (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 45))\n" ++
+  "      (then\n" ++
+  "        (local.set $neg (i32.const 1))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))))\n" ++
+  "    (block $end\n" ++
+  "      (loop $lp\n" ++
+  "        (local.set $b (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
+  "        (br_if $end (i32.eqz (i32.lt_u (i32.sub (local.get $b) (i32.const 48)) (i32.const 10))))\n" ++
+  "        (local.set $acc\n" ++
+  "          (i32.add (i32.mul (local.get $acc) (i32.const 10))\n" ++
+  "                   (i32.sub (local.get $b) (i32.const 48))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (if (result i32) (local.get $neg)\n" ++
+  "      (then (i32.sub (i32.const 0) (local.get $acc)))\n" ++
+  "      (else (local.get $acc))))\n";
+
 // Phase 54.6: `$substring s st ed` — bump-allocs a new NUL-terminated
 // string with bytes s[st..ed). No bounds check (matches the lib/eval.ml
 // API contract: caller must ensure 0 <= st <= ed <= str_len s).
@@ -1700,6 +1819,9 @@ let helper_body = fn (name: str) ->
   else if name == "is_space" then helper_decl_is_space
   else if name == "str_starts_with" then helper_decl_str_starts_with
   else if name == "substring" then helper_decl_substring
+  else if name == "str_index_of" then helper_decl_str_index_of
+  else if name == "str_repeat" then helper_decl_str_repeat
+  else if name == "int_of_str" then helper_decl_int_of_str
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->

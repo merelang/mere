@@ -8158,6 +8158,27 @@ let () =
       "str_len (substring \"abcdefgh\" 2 5)" "3";
     cross_emit "substring as prefix"
       "if str_starts_with (substring \"abcdefgh\" 0 3) \"abc\" then 1 else 0" "1";
+    (* Phase 54.7: int_of_str / str_index_of / str_repeat *)
+    cross_emit "int_of_str positive"
+      "int_of_str \"12345\"" "12345";
+    cross_emit "int_of_str negative"
+      "int_of_str \"-42\"" "-42";
+    cross_emit "int_of_str leading whitespace"
+      "int_of_str \"   77\"" "77";
+    cross_emit "int_of_str no digits"
+      "int_of_str \"abc\"" "0";
+    cross_emit "str_index_of found"
+      "str_index_of \"hello world\" \"wor\"" "6";
+    cross_emit "str_index_of not found"
+      "str_index_of \"hello\" \"xyz\"" "-1";
+    cross_emit "str_index_of empty needle"
+      "str_index_of \"hello\" \"\"" "0";
+    cross_emit "str_repeat 3x"
+      "str_len (str_repeat \"ab\" 3)" "6";
+    cross_emit "str_repeat 0x"
+      "str_len (str_repeat \"abc\" 0)" "0";
+    cross_emit "str_repeat content check"
+      "if str_starts_with (str_repeat \"xy\" 4) \"xyxyxyxy\" then 1 else 0" "1";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
