@@ -8179,6 +8179,20 @@ let () =
       "str_len (str_repeat \"abc\" 0)" "0";
     cross_emit "str_repeat content check"
       "if str_starts_with (str_repeat \"xy\" 4) \"xyxyxyxy\" then 1 else 0" "1";
+    (* Phase 54.8: str_unescape — recognized escapes mapped to byte,
+       others passed through. *)
+    cross_emit "str_unescape newline"
+      "ord (str_unescape \"\\\\n\")" "10";
+    cross_emit "str_unescape tab"
+      "ord (str_unescape \"\\\\t\")" "9";
+    cross_emit "str_unescape mixed"
+      "str_len (str_unescape \"a\\\\nb\\\\tc\")" "5";
+    cross_emit "str_unescape no escapes"
+      "str_len (str_unescape \"hello\")" "5";
+    cross_emit "try_or success"
+      "try_or (fn () -> 42) 0" "42";
+    cross_emit "try_or default discarded but evaluated"
+      "let r = try_or (fn () -> 7) (1 + 2) in r" "7";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
