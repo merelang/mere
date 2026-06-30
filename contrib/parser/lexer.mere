@@ -19,6 +19,10 @@ type token =
   | TInt of int
   | TStr of str
   | TIdent of str
+  // `'a` — type variable token. Phase 54.4: recognized in type
+  // annotations like `fn (l: 'a list) -> ...`. The string is the
+  // name without the leading apostrophe.
+  | TTyVar of str
   // Keywords
   | TLet | TRec | TAnd | TIn
   | TIf | TThen | TElse
@@ -40,7 +44,7 @@ type token =
   | TComma | TSemi
   | TColon | TColonColon
   | TPipe
-  | TDot | TDotDot
+  | TDot | TDotDot | TDotDotDot
   | TUnderscore
   | TEof
   ;
@@ -192,7 +196,10 @@ let try_multi_op = fn (s: str) -> fn (n: int) -> fn (i: int) ->
     else if c == "|" && c2 == "|" then Some (TPipePipe, i + 2)
     else if c == "&" && c2 == "&" then Some (TAmpAmp, i + 2)
     else if c == ":" && c2 == ":" then Some (TColonColon, i + 2)
-    else if c == "." && c2 == "." then Some (TDotDot, i + 2)
+    else if c == "." && c2 == "." then
+      // `...` (TDotDotDot) takes priority over `..` (TDotDot)
+      if i + 2 < n && char_at s (i + 2) == "." then Some (TDotDotDot, i + 3)
+      else Some (TDotDot, i + 2)
     else None;
 
 // === Main tokenize loop ====================================================
@@ -224,6 +231,32 @@ let tokenize = fn (s: str) ->
       // is treated specially even though alpha_c includes it)
       else if c == "_" && (i + 1 >= n || not (is_ident_cont_c (char_at s (i + 1)))) then
         loop (i + 1) line (Cons ((line, TUnderscore), acc))
+      // Phase 54.4: char literal `'X'` — lex as an `int` token with
+      // the byte code of X. Must come BEFORE the `'a`-tyvar case
+      // because `'a` and `'a'` are both possible. Detection: any
+      // single non-apostrophe char followed by a closing `'`.
+      // Escapes (`'\n'`, `'\t'`, `'\''`, `'\\'`) are MVP-supported.
+      else if c == "'" && i + 2 < n && char_at s (i + 2) == "'" && char_at s (i + 1) != "\\" then
+        let ch = char_at s (i + 1) in
+        loop (i + 3) line (Cons ((line, TInt (ord ch)), acc))
+      else if c == "'" && i + 3 < n && char_at s (i + 1) == "\\" && char_at s (i + 3) == "'" then
+        let esc = char_at s (i + 2) in
+        let code = (if esc == "n" then 10
+                    else if esc == "t" then 9
+                    else if esc == "r" then 13
+                    else if esc == "0" then 0
+                    else if esc == "'" then 39
+                    else if esc == "\\" then 92
+                    else if esc == "\"" then 34
+                    else ord esc) in
+        loop (i + 4) line (Cons ((line, TInt code), acc))
+      // Phase 54.4: `'a` style type variable. The `'` starts a token
+      // only when followed by an alpha (otherwise it'd be confused
+      // with the ident-continuation use of `'` like `foo'`, which is
+      // handled inside read_ident_run).
+      else if c == "'" && i + 1 < n && is_alpha_c (char_at s (i + 1)) then
+        let (text, j) = read_ident_run s n (i + 1) in
+        loop j line (Cons ((line, TTyVar text), acc))
       else
         // Multi-char operator?
         (match try_multi_op s n i with
@@ -268,6 +301,7 @@ let token_str = fn (t: token) -> match t with
   | TInt n -> "Int(" ++ show n ++ ")"
   | TStr s -> "Str(\"" ++ s ++ "\")"
   | TIdent s -> "Ident(" ++ s ++ ")"
+  | TTyVar s -> "TyVar(" ++ s ++ ")"
   | TLet -> "Let" | TRec -> "Rec" | TAnd -> "And" | TIn -> "In"
   | TIf -> "If" | TThen -> "Then" | TElse -> "Else"
   | TFn -> "Fn" | TArrow -> "Arrow"
@@ -288,7 +322,7 @@ let token_str = fn (t: token) -> match t with
   | TComma -> "Comma" | TSemi -> "Semi"
   | TColon -> "Colon" | TColonColon -> "ColonColon"
   | TPipe -> "Pipe"
-  | TDot -> "Dot" | TDotDot -> "DotDot"
+  | TDot -> "Dot" | TDotDot -> "DotDot" | TDotDotDot -> "DotDotDot"
   | TUnderscore -> "Underscore"
   | TEof -> "Eof"
   ;
