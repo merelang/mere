@@ -248,7 +248,7 @@ let rec union_strs = fn (xs: str list) -> fn (acc: str list) ->
 // from a scope that doesn't have them.
 let is_builtin = fn (n: str) ->
   n == "print" || n == "show" || n == "str_len" || n == "char_at" ||
-  n == "fst" || n == "snd";
+  n == "fst" || n == "snd" || n == "fail";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -827,6 +827,20 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
       | EVar "snd" ->
         let s1 = emit_expr x s in
         push_instr "i32.load offset=4" s1
+      | EVar "fail" ->
+        // Phase 54.3: `fail msg` lowers to `unreachable` (which traps
+        // the wasm instance). The msg arg is emitted (and dropped)
+        // for side-effect compatibility — if it's a literal it just
+        // sits in a data segment unused. Returns i32 sentinel since
+        // the host expects a value type on stack before the trap.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "drop" s1 in
+        let s3 = push_instr "unreachable" s2 in
+        // Push a phantom int — the unreachable above guarantees we
+        // never get here at runtime, but the wasm type checker needs
+        // a stack value to match the surrounding expression's i32
+        // expectation.
+        push_instr "i32.const 0" s3
       | _ ->
         // Capture-less call site:
         //   <emit f>                ;; closure ptr

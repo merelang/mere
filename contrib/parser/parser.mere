@@ -281,6 +281,15 @@ and parse_letrec_bindings = fn (toks: pos_token list) ->
 and parse_fn = fn (toks: pos_token list) ->
   (match peek_tok toks with
     | TLParen -> parse_fn_paren_arg (advance toks)
+    | TUnderscore ->
+      // Phase 54.3 (Stage 54d-1): `fn _ -> body` — wildcard arg.
+      // Bind to literal `_` so emit_bind etc. don't treat it as a
+      // real name. Mere's `_` ident is already special-cased in the
+      // lexer (TUnderscore).
+      let toks1 = advance toks in
+      let toks2 = expect_arrow toks1 in
+      let (body, toks3) = parse_expr toks2 in
+      (EFun ("_", None, body), toks3)
     | TIdent _ ->
       let (names, toks1) = parse_fn_arg_names toks in
       let toks2 = expect_arrow toks1 in
@@ -299,12 +308,25 @@ and parse_fn_paren_arg = fn (toks: pos_token list) ->
       (EFun ("_u", Some TyUnit, body), toks3)
     | _ ->
       let (name, toks1) = expect_ident toks in
-      let toks2 = expect_colon toks1 in
-      let (t, toks3) = parse_type toks2 in
-      let toks4 = expect_rparen toks3 in
-      let toks5 = expect_arrow toks4 in
-      let (body, toks6) = parse_expr toks5 in
-      (EFun (name, Some t, body), toks6))
+      // Phase 54.3 (Stage 54d-1): `fn (a) -> body` — paren-around-var
+      // without type annotation. Distinguish by what follows: `:` →
+      // annotated, `)` → bare. Anything else is a parse error.
+      (match peek_tok toks1 with
+        | TColon ->
+          let toks2 = advance toks1 in
+          let (t, toks3) = parse_type toks2 in
+          let toks4 = expect_rparen toks3 in
+          let toks5 = expect_arrow toks4 in
+          let (body, toks6) = parse_expr toks5 in
+          (EFun (name, Some t, body), toks6)
+        | TRParen ->
+          let toks2 = advance toks1 in
+          let toks3 = expect_arrow toks2 in
+          let (body, toks4) = parse_expr toks3 in
+          (EFun (name, None, body), toks4)
+        | _ ->
+          fail ("line " ++ show (peek_line toks1)
+                ++ ": expected `:` or `)` after fn parameter")))
 
 and parse_fn_arg_names = fn (toks: pos_token list) ->
   (match toks with
