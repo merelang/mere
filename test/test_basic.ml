@@ -8055,6 +8055,14 @@ let () =
       "let s = \"foo\" ++ \"bar\" in let _ = print s in 9" "9";
     cross_emit "fn that concats"
       "let join = fn a -> fn b -> a ++ \"/\" ++ b in let _ = print (join \"src\" \"main\") in 0" "0";
+    (* Phase 53.16 (Stage 53i-3): embedded $show_int helper for `show`
+       on int. End-to-end captures "fact 5 = 120". *)
+    cross_emit "show int + print"
+      "let _ = print (show 42) in 0" "0";
+    cross_emit "fact 5 with show"
+      "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in let _ = print (\"fact 5 = \" ++ show (fact 5)) in 0" "0";
+    cross_emit "show negative"
+      "let _ = print (show (0 - 42)) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
       "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
       "42"
