@@ -8081,6 +8081,15 @@ let () =
     cross_emit "fst / snd" "let p = (10, 20) in fst p + snd p" "30";
     cross_emit "str_len on concat"
       "let s = \"hi\" ++ \"!\" in str_len s" "3";
+    (* Phase 53.19 (Stage 53j-2): real byte-by-byte $__lang_streq for
+       PStr — works on runtime-constructed strings (from ++ etc.),
+       not just interned literals. *)
+    cross_emit "PStr on runtime concat"
+      "match (\"h\" ++ \"i\") with | \"hi\" -> 1 | _ -> 0" "1";
+    cross_emit "PStr rejects mismatch"
+      "match (\"a\" ++ \"b\") with | \"hi\" -> 1 | _ -> 0" "0";
+    cross_emit "PStr empty literal"
+      "match \"\" with | \"\" -> 1 | _ -> 0" "1";
     cross_emit "mini Mere eval (variants + closures)"
       "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
       "42"

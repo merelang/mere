@@ -947,16 +947,15 @@ and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
     // instead of positional index.
     emit_record_pat_checks field_pats slot s
   | PStr lit ->
-    // Stage 53h-fix-2: permissive string-literal pattern match via
-    // pointer equality. With string interning, two `"hi"` literals
-    // collapse to the same offset, so equal-literal compare just
-    // works. Strings coming from runtime concatenation / extern fns
-    // would need a real byte-compare (extern fn `__lang_str_eq`) —
-    // defer to the §S3 stdlib codegen slice.
-    let (off, s1) = alloc_str_literal lit s in
+    // Stage 53j-2: full byte-by-byte compare via `$__lang_streq` so
+    // runtime-constructed strings (e.g., from `++`) match against
+    // pattern literals correctly. Pointer equality from
+    // Stage 53h-fix-2 only worked for interned literals.
+    let s0 = note_helper_use "streq" s in
+    let (off, s1) = alloc_str_literal lit s0 in
     let s2 = push_instr ("local.get " ++ show slot) s1 in
     let s3 = push_instr ("i32.const " ++ show off) s2 in
-    push_instr "i32.eq" s3
+    push_instr "call $__lang_streq" s3
   | POr (p1, p2) ->
     // Stage 53h-fix-2: `p1 | p2`. Both branches must bind the same
     // set of names (typer-enforced). Check is `check p1 OR check p2`;
@@ -1378,6 +1377,24 @@ let helper_decl_char_at =
   "  (func $char_at (param $s i32) (param $i i32) (result i32)\n" ++
   "    (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n";
 
+// Stage 53j-2: `$__lang_streq a b` — byte-by-byte NUL-terminated
+// string equality. Returns 1 if equal, 0 otherwise. Mirrors the
+// OCaml side's helper line-for-line.
+let helper_decl_streq =
+  "  (func $__lang_streq (param $a i32) (param $b i32) (result i32)\n" ++
+  "    (local $ba i32) (local $bb i32)\n" ++
+  "    (block $not_eq\n" ++
+  "      (loop $lp\n" ++
+  "        (local.set $ba (i32.load8_u (local.get $a)))\n" ++
+  "        (local.set $bb (i32.load8_u (local.get $b)))\n" ++
+  "        (br_if $not_eq (i32.ne (local.get $ba) (local.get $bb)))\n" ++
+  "        (if (i32.eqz (local.get $ba))\n" ++
+  "          (then (return (i32.const 1))))\n" ++
+  "        (local.set $a (i32.add (local.get $a) (i32.const 1)))\n" ++
+  "        (local.set $b (i32.add (local.get $b) (i32.const 1)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (i32.const 0))\n";
+
 let helper_decl_str_concat =
   "  (func $__lang_str_concat (param $a i32) (param $b i32) (result i32)\n" ++
   "    (local $la i32) (local $lb i32) (local $r i32) (local $i i32)\n" ++
@@ -1448,6 +1465,7 @@ let helper_body = fn (name: str) ->
   else if name == "str_concat" then helper_decl_str_concat
   else if name == "show_int" then helper_decl_show_int
   else if name == "char_at" then helper_decl_char_at
+  else if name == "streq" then helper_decl_streq
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
