@@ -494,6 +494,7 @@ let apply_decl = fn (d: top_decl) -> fn (env: env) ->
   | TopType _ -> env
   | TopRecord _ -> env
   | TopTypeAlias _ -> env
+  | TopModule _ -> fail "eval: TopModule reached eval — parser flatten missing?"
   ;
 
 let rec apply_decls = fn (decls: top_decl list) -> fn (env: env) ->
@@ -515,7 +516,8 @@ let run_program = fn (p: program) ->
 let parse_and_eval = fn (src: str) ->
   let toks = tokenize src in
   let (prog, _rest) = parse_decls Nil toks in
-  run_program prog;
+  // Phase 54.1: flatten any `module M { ... }` decls.
+  run_program (flatten_and_resolve prog);
 
 // === Demos =================================================================
 //

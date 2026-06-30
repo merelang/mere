@@ -767,6 +767,7 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
   | TopType _ -> (env, s)
   | TopRecord _ -> (env, s)
   | TopTypeAlias _ -> (env, s)
+  | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
 
 and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
                -> fn (s: infer_state) ->
@@ -782,7 +783,8 @@ and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
 let parse_and_infer = fn (src: str) ->
   let toks = tokenize src in
   let (prog, _rest) = parse_decls Nil toks in
-  let (decls, main_expr) = prog in
+  // Phase 54.1: flatten any `module M { ... }` decls.
+  let (decls, main_expr) = flatten_and_resolve prog in
   let (env1, s1) = infer_decls decls initial_type_env initial_state in
   let (t, s2) = infer env1 s1 main_expr in
   ty_to_str (apply_subst (subst_of s2) t);

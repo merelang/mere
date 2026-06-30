@@ -8091,6 +8091,15 @@ let () =
     cross_emit "PStr empty literal"
       "match \"\" with | \"\" -> 1 | _ -> 0" "1";
     (* Phase 53.20 dogfood pass 6: substantial real-world programs. *)
+    (* Phase 54.1 (Stage 54a): module M { } decl support — parser
+       flatten + intra-module rename. Codegen sees a flat decl list
+       with dot-qualified identifiers. *)
+    cross_emit "module M two fns"
+      "module M { let f = fn x -> x + 1; let g = fn x -> x * 2; }; (M.f 5) + (M.g 10)" "26";
+    cross_emit "module intra-rec"
+      "module M { let inc = fn x -> x + 1; let twice = fn x -> inc (inc x); }; M.twice 10" "12";
+    cross_emit "module let rec"
+      "module M { let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1); }; M.fact 5" "120";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
