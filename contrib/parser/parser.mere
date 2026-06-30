@@ -307,26 +307,42 @@ and parse_fn_paren_arg = fn (toks: pos_token list) ->
       let (body, toks3) = parse_expr toks2 in
       (EFun ("_u", Some TyUnit, body), toks3)
     | _ ->
-      let (name, toks1) = expect_ident toks in
-      // Phase 54.3 (Stage 54d-1): `fn (a) -> body` — paren-around-var
-      // without type annotation. Distinguish by what follows: `:` →
-      // annotated, `)` → bare. Anything else is a parse error.
-      (match peek_tok toks1 with
-        | TColon ->
-          let toks2 = advance toks1 in
-          let (t, toks3) = parse_type toks2 in
-          let toks4 = expect_rparen toks3 in
-          let toks5 = expect_arrow toks4 in
-          let (body, toks6) = parse_expr toks5 in
-          (EFun (name, Some t, body), toks6)
-        | TRParen ->
-          let toks2 = advance toks1 in
-          let toks3 = expect_arrow toks2 in
-          let (body, toks4) = parse_expr toks3 in
-          (EFun (name, None, body), toks4)
+      // Phase 54.3 / 54.4: parse `name [: ty]` then either continue
+      // with `, more...` (tuple destructure, possibly annotated) or
+      // close with `)` (single arg, annotated or bare).
+      let (names_and_tys, toks1) = parse_fn_paren_arg_list toks in
+      let toks2 = expect_arrow toks1 in
+      let (body, toks3) = parse_expr toks2 in
+      (match names_and_tys with
+        | Cons ((name, ty_opt), Nil) ->
+          (EFun (name, ty_opt, body), toks3)
         | _ ->
-          fail ("line " ++ show (peek_line toks1)
-                ++ ": expected `:` or `)` after fn parameter")))
+          // tuple destructure shorthand:
+          // `fn (a, b, c) -> body` → `fn __tup -> let (a, b, c) = __tup in body`
+          let pat = PTuple (list_map names_and_tys
+            (fn (nt: (str * ty option)) -> let (n, _) = nt in PVar n)) in
+          let tmp = "__tup" in
+          (EFun (tmp, None, ELet (pat, EVar tmp, body)), toks3)))
+
+// Parse `name [: ty] (, name [: ty])* )` — leading paren already consumed
+// by parse_fn_paren_arg. Returns the list of (name, ty_opt) pairs and
+// the tokens after the closing `)`.
+and parse_fn_paren_arg_list = fn (toks: pos_token list) ->
+  let (name, toks1) = expect_ident toks in
+  let (ty_opt, toks2) = (match peek_tok toks1 with
+    | TColon ->
+      let (t, ts) = parse_type (advance toks1) in
+      (Some t, ts)
+    | _ -> (None, toks1)) in
+  (match peek_tok toks2 with
+    | TRParen ->
+      (Cons ((name, ty_opt), Nil), advance toks2)
+    | TComma ->
+      let (rest, toks3) = parse_fn_paren_arg_list (advance toks2) in
+      (Cons ((name, ty_opt), rest), toks3)
+    | _ ->
+      fail ("line " ++ show (peek_line toks2)
+            ++ ": expected `,` or `)` in fn parameter list"))
 
 and parse_fn_arg_names = fn (toks: pos_token list) ->
   (match toks with
@@ -701,21 +717,39 @@ and parse_pattern_comma_seq = fn (toks: pos_token list) ->
 
 // `[p1, ..., pN]` desugars to right-nested `PConstr ("Cons", ...)`
 // cells — same shape as the expression-side list literal.
-// (`[a, b, ...rest]` cons-tail sugar is deferred.)
+// `[a, b, ...rest]` (Phase 54.4) treats `rest` as the tail directly:
+// `Cons (a, Cons (b, rest))` instead of nesting a fresh `Nil`.
 and parse_list_pattern = fn (toks: pos_token list) ->
   (match peek_tok toks with
     | TRBracket -> (PConstr ("Nil", None), advance toks)
     | _ ->
-      let (elems, toks1) = parse_pattern_comma_seq toks in
+      let (elems, tail, toks1) = parse_pattern_list_elems toks in
       let toks2 = expect_rbracket toks1 in
-      (desugar_list_pattern elems, toks2))
+      (desugar_list_pattern_with_tail elems tail, toks2))
 
-and desugar_list_pattern = fn (elems: pattern list) ->
+// Walk a `[ ... ]` body collecting comma-separated patterns until either
+// `]` or `, ...tail]`. Returns `(elems, tail)` where `tail` is the
+// explicit cons-tail pattern (defaults to `PConstr ("Nil", None)`).
+and parse_pattern_list_elems = fn (toks: pos_token list) ->
+  let (p, toks1) = parse_pattern toks in
+  (match peek_tok toks1 with
+    | TComma ->
+      let toks2 = advance toks1 in
+      (match peek_tok toks2 with
+        | TDotDotDot ->
+          let (tail, toks3) = parse_pattern (advance toks2) in
+          (Cons (p, Nil), tail, toks3)
+        | _ ->
+          let (rest, tail, toks3) = parse_pattern_list_elems toks2 in
+          (Cons (p, rest), tail, toks3))
+    | _ -> (Cons (p, Nil), PConstr ("Nil", None), toks1))
+
+and desugar_list_pattern_with_tail = fn (elems: pattern list) -> fn (tail: pattern) ->
   (match elems with
-    | Nil -> PConstr ("Nil", None)
+    | Nil -> tail
     | Cons (h, t) ->
       PConstr ("Cons",
-        Some (PTuple (Cons (h, Cons (desugar_list_pattern t, Nil))))))
+        Some (PTuple (Cons (h, Cons (desugar_list_pattern_with_tail t tail, Nil))))))
 
 // `f1 = pat1, f2 = pat2, ... }` (the leading `{` has already been
 // consumed). Same shape as `parse_record_field_inits` but for patterns
@@ -857,6 +891,12 @@ and parse_type_atom = fn (toks: pos_token list) ->
           let (inner, rest2) = parse_type rest in
           let rest3 = expect_rparen rest2 in
           (inner, rest3)
+        | TTyVar name ->
+          // Phase 54.4: `'a` type variable in annotations like
+          // `fn (l: 'a list) -> ...`. Codegen treats type vars as
+          // i32 (uniform representation), so this is purely a parse
+          // / typer concern.
+          (TyVar name, rest)
         | _ -> fail ("line " ++ show line ++ ": expected type")));
 
 // === Top-level parser ======================================================

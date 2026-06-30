@@ -8125,6 +8125,12 @@ let () =
       "let z = fn (a) -> fn (b) -> a + b in z 3 4" "7";
     cross_emit "fail not reached"
       "let f = fn n -> if n > 0 then n else fail \"neg\" in f 7" "7";
+    (* Phase 54.4 (Stage 54d-2): cons-tail sugar `[h, ...t]` in patterns.
+       Desugars to `Cons (h, t)` directly — no fresh Nil at the tail. *)
+    cross_emit "cons-tail pattern single head"
+      "let rec sum = fn xs -> match xs with | [] -> 0 | [h, ...t] -> h + sum t in sum (Cons (1, Cons (2, Cons (3, Nil))))" "6";
+    cross_emit "cons-tail pattern two heads"
+      "let rec take2sum = fn xs -> match xs with | [a, b, ...rest] -> a + b + take2sum rest | _ -> 0 in take2sum (Cons (10, Cons (20, Cons (30, Cons (40, Nil)))))" "100";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
