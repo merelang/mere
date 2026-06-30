@@ -8073,6 +8073,14 @@ let () =
       "let rec fizz = fn n -> fn max -> if n > max then 0 else let s = if n % 15 == 0 then \"FizzBuzz\" else if n % 3 == 0 then \"Fizz\" else if n % 5 == 0 then \"Buzz\" else show n in let _ = print s in fizz (n + 1) max in fizz 1 15" "0";
     cross_emit "quicksort + render"
       "let rec quicksort = fn xs -> match xs with | Nil -> Nil | Cons (p, t) -> let rec partition = fn ys -> fn lo -> fn hi -> match ys with | Nil -> (lo, hi) | Cons (h, ts) -> if h < p then partition ts (Cons (h, lo)) hi else partition ts lo (Cons (h, hi)) in let (lo, hi) = partition t Nil Nil in let rec append = fn a -> fn b -> match a with | Nil -> b | Cons (h, t) -> Cons (h, append t b) in append (quicksort lo) (Cons (p, quicksort hi)) in let rec render = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> show h | Cons (h, t) -> (show h) ++ \", \" ++ (render t) in let _ = print (\"sorted = [\" ++ (render (quicksort [5, 2, 8, 1, 9, 3, 7, 4, 6])) ++ \"]\") in 0" "0";
+    (* Phase 53.18 (Stage 53j) dogfood pass 4: extra prelude builtins
+       — str_len / char_at / fst / snd. Unlocks contrib/regex/engine
+       and similar real-world Mere files. *)
+    cross_emit "str_len" "str_len \"hello\"" "5";
+    cross_emit "char_at" "char_at \"abc\" 1" "98";
+    cross_emit "fst / snd" "let p = (10, 20) in fst p + snd p" "30";
+    cross_emit "str_len on concat"
+      "let s = \"hi\" ++ \"!\" in str_len s" "3";
     cross_emit "mini Mere eval (variants + closures)"
       "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
       "42"

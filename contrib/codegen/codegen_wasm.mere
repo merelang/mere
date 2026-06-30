@@ -241,7 +241,8 @@ let rec union_strs = fn (xs: str list) -> fn (acc: str list) ->
 // would scan `show` / `print` as free vars and try to capture them
 // from a scope that doesn't have them.
 let is_builtin = fn (n: str) ->
-  n == "print" || n == "show";
+  n == "print" || n == "show" || n == "str_len" || n == "char_at" ||
+  n == "fst" || n == "snd";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -561,7 +562,11 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     // binops dispatch through the simple `binop_instr` lookup table.
     (match op with
       | OpConcat ->
-        let s1 = note_helper_use "str_concat" s in
+        // `str_concat` depends on `strlen`; pull both so the wrapper
+        // emits them in the right order regardless of which helper
+        // was noted first.
+        let s0 = note_helper_use "strlen" s in
+        let s1 = note_helper_use "str_concat" s0 in
         let s2 = emit_expr a s1 in
         let s3 = emit_expr b s2 in
         push_instr "call $__lang_str_concat" s3
@@ -712,6 +717,28 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = note_helper_use "show_int" s in
         let s2 = emit_expr x s1 in
         push_instr "call $show_int" s2
+      | EVar "str_len" ->
+        // Stage 53j: `str_len s` → `$__lang_strlen` (the same helper
+        // str_concat uses internally; both pull "strlen").
+        let s1 = note_helper_use "strlen" s in
+        let s2 = emit_expr x s1 in
+        push_instr "call $__lang_strlen" s2
+      | EApp (EVar "char_at", s_expr) ->
+        // Stage 53j: `char_at s i` is curried — outer EApp sees
+        // `EApp (EVar "char_at", s)` as its `f`. Emit both args
+        // together so we can drop them straight into `$char_at`.
+        let s1 = note_helper_use "char_at" s in
+        let s2 = emit_expr s_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $char_at" s3
+      | EVar "fst" ->
+        // Stage 53j: tuples lay out elements at i*4. `fst t` is just
+        // i32.load offset=0 of the tuple pointer.
+        let s1 = emit_expr x s in
+        push_instr "i32.load offset=0" s1
+      | EVar "snd" ->
+        let s1 = emit_expr x s in
+        push_instr "i32.load offset=4" s1
       | _ ->
         // Capture-less call site:
         //   <emit f>                ;; closure ptr
@@ -1331,7 +1358,11 @@ let rec build_extern_imports = fn (uses: str list) ->
 // section. NB: `$__lang_str_concat` uses `$__lang_bump` directly to
 // stake out fresh memory, so the helper composes with all the other
 // `emit_bump_alloc`-emitted stores in the program.
-let helper_decl_str_concat =
+//
+// Stage 53j: split `$__lang_strlen` into its own helper so it can be
+// pulled in independently (by `str_len` etc.) without dragging in
+// the full str_concat body. `str_concat` notes both helpers' use.
+let helper_decl_strlen =
   "  (func $__lang_strlen (param $s i32) (result i32)\n" ++
   "    (local $i i32)\n" ++
   "    (local.set $i (i32.const 0))\n" ++
@@ -1340,7 +1371,14 @@ let helper_decl_str_concat =
   "        (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))\n" ++
   "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
   "        (br $lp)))\n" ++
-  "    (local.get $i))\n" ++
+  "    (local.get $i))\n";
+
+// Stage 53j: `$char_at s i` — load the byte at offset i of string s.
+let helper_decl_char_at =
+  "  (func $char_at (param $s i32) (param $i i32) (result i32)\n" ++
+  "    (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n";
+
+let helper_decl_str_concat =
   "  (func $__lang_str_concat (param $a i32) (param $b i32) (result i32)\n" ++
   "    (local $la i32) (local $lb i32) (local $r i32) (local $i i32)\n" ++
   "    (local.set $la (call $__lang_strlen (local.get $a)))\n" ++
@@ -1406,8 +1444,10 @@ let helper_decl_show_int =
   "    (i32.add (local.get $buf) (local.get $i)))\n";
 
 let helper_body = fn (name: str) ->
-  if name == "str_concat" then helper_decl_str_concat
+  if name == "strlen" then helper_decl_strlen
+  else if name == "str_concat" then helper_decl_str_concat
   else if name == "show_int" then helper_decl_show_int
+  else if name == "char_at" then helper_decl_char_at
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
