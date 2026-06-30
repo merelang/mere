@@ -69,6 +69,11 @@ type EmitState = {
   // generated into the module itself. Currently: "str_concat" (which
   // pulls in $__lang_strlen too).
   helpers_used: str list,
+  // Phase 54.2: user-declared `extern fn name : ty;` decls. Each
+  // entry populates a wasm import `(import "env" "<name>" ...)` and
+  // gives EApp dispatch a direct `call $<name>` path. Multi-arg
+  // (curried) extern fns are handled by walking the EApp spine.
+  extern_decls: (str * ty) list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -92,6 +97,7 @@ let initial_emit_state = EmitState {
   field_offsets = Nil,
   extern_uses = Nil,
   helpers_used = Nil,
+  extern_decls = Nil,
 };
 
 // === Instruction emission ==================================================
@@ -537,6 +543,71 @@ let alloc_str_literal = fn (s: str) -> fn (st: EmitState) ->
     (off, st2)
   ;
 
+// === Stage 54.2: extern fn helpers (need to come before emit_expr) ========
+//
+// Walk a declared `ty` (TyArrow chain) and emit a matching wasm
+// import signature. Mere's uniform i32 representation collapses
+// str / int / bool / opaque-pointer / unit all to i32 at the wasm
+// level. Unit-returning fns become wasm fns with no result; everything
+// else returns i32.
+
+let rec ty_param_count = fn (t: ty) ->
+  match t with
+  | TyArrow (_, b) -> 1 + ty_param_count b
+  | _ -> 0;
+
+let rec ty_result = fn (t: ty) ->
+  match t with
+  | TyArrow (_, b) -> ty_result b
+  | _ -> t;
+
+let rec repeat_param = fn (n: int) ->
+  if n <= 0 then ""
+  else "(param i32) " ++ repeat_param (n - 1);
+
+let extern_decl_import = fn (name: str) -> fn (sig_ty: ty) ->
+  let n_params = ty_param_count sig_ty in
+  let res_ty = ty_result sig_ty in
+  let result_str = (match res_ty with
+    | TyUnit -> ""
+    | _ -> "(result i32)") in
+  "  (import \"env\" \"" ++ name ++ "\" (func $" ++ name ++ " "
+    ++ repeat_param n_params ++ result_str ++ "))\n";
+
+let rec build_extern_decl_imports = fn (decls: (str * ty) list) ->
+  match decls with
+  | Nil -> ""
+  | Cons (b, rest) ->
+    let (name, ty) = b in
+    extern_decl_import name ty ++ build_extern_decl_imports rest;
+
+// Lookup an extern fn declaration by name; returns Some ty if declared.
+let rec lookup_extern_decl = fn (name: str)
+                          -> fn (decls: (str * ty) list) ->
+  match decls with
+  | Nil -> None
+  | Cons (b, rest) ->
+    let (n, t) = b in
+    if n == name then Some t else lookup_extern_decl name rest;
+
+// Walk EApp left-spine to collect (head, args-in-source-order).
+let rec spine_collect = fn (e: expr) -> fn (acc: expr list) ->
+  match e with
+  | EApp (f, x) -> spine_collect f (Cons (x, acc))
+  | _ -> ((e, acc) : (expr * expr list));
+
+// Filter out extern fn names from a captures list — they're never
+// real values to load from an env record, just symbolic references
+// the EApp short-circuit resolves on the fly.
+let rec filter_extern_captures = fn (caps: str list)
+                              -> fn (decls: (str * ty) list) ->
+  match caps with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    (match lookup_extern_decl h decls with
+      | Some _ -> filter_extern_captures t decls
+      | None -> Cons (h, filter_extern_captures t decls));
+
 // === Expression emission (Stage 53c-2 scope) ===============================
 //
 // Layers `EFun` (lifts to a static `$anon_N_fn` + leaves a closure
@@ -659,7 +730,8 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     //    why the order matters) and storing it to env+offset.
     // 5. Leave env_ptr on the stack, then call emit_alloc_closure to
     //    wrap (env_ptr, fn_idx) into the 8-byte closure record.
-    let captures_list = free_vars body (Cons (arg, Nil)) in
+    let captures_raw = free_vars body (Cons (arg, Nil)) in
+    let captures_list = filter_extern_captures captures_raw s.extern_decls in
     let env_offsets = build_offsets captures_list 0 in
     let fn_idx = s.fn_counter in
     // Reserve `fn_idx` for *this* lambda by bumping the counter in the
@@ -694,11 +766,27 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s_with_env = emit_build_env captures_list s_after_lift in
     emit_alloc_closure fn_idx s_with_env
   | EApp (f, x) ->
-    // Stage 53i: short-circuit direct calls to known extern fns
-    // (`print "hi"` etc.). These don't fit the regular closure ABI —
-    // they live in the host's `env` table and have ad-hoc signatures.
-    // Anything else (variables / lambdas / curried apps) falls
-    // through to the regular call_indirect path.
+    // Stage 54.2: walk the left-spine to check for declared extern
+    // fns FIRST. `dom_set_text btn s` is `EApp (EApp (EVar
+    // "dom_set_text", btn), s)` — spine_collect surfaces the head +
+    // args. Direct dispatch via `call $name` if the head is a
+    // declared extern. Otherwise the legacy print/show/closure-ABI
+    // checks below fire.
+    let (spine_head, spine_args) = spine_collect (EApp (f, x)) Nil in
+    let extern_match = (match spine_head with
+      | EVar nm -> lookup_extern_decl nm s.extern_decls
+      | _ -> None) in
+    (match extern_match with
+      | Some sig_ty ->
+        let extern_name = (match spine_head with
+          | EVar nm -> nm
+          | _ -> fail "unreachable") in
+        let s_args = emit_extern_args spine_args s in
+        let s_call = push_instr ("call $" ++ extern_name) s_args in
+        (match ty_result sig_ty with
+          | TyUnit -> push_instr "i32.const 0" s_call
+          | _ -> s_call)
+      | None ->
     (match f with
       | EVar "print" ->
         // `print : str -> unit` → host `puts(ptr)`. Push the string
@@ -755,7 +843,7 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s6 = emit_expr x s5 in
         let s7 = push_instr ("local.get " ++ show tmp) s6 in
         let s8 = push_instr "i32.load offset=4" s7 in
-        push_instr "call_indirect (type $cl)" s8)
+        push_instr "call_indirect (type $cl)" s8))
   | ETuple es ->
     // Bump-alloc N*4 bytes, store each element at offset i*4, leave
     // the tuple pointer on top. Sub-expr emit order = source order so
@@ -901,6 +989,15 @@ and emit_tuple_stores = fn (es: expr list) -> fn (i: int)
     let s2 = emit_expr e s1 in
     let s3 = push_instr ("i32.store offset=" ++ show (i * 4)) s2 in
     emit_tuple_stores rest (i + 1) parent_slot s3
+
+// Stage 54.2: emit each extern fn arg in source order, leaving them
+// stacked for the subsequent `call $name`.
+and emit_extern_args = fn (args: expr list) -> fn (s: EmitState) ->
+  match args with
+  | Nil -> s
+  | Cons (a, rest) ->
+    let s1 = emit_expr a s in
+    emit_extern_args rest s1
 
 // Pattern match: `emit_check_pattern p slot s` leaves an i32 0/1 on
 // top of the stack indicating whether the value at `slot` matches
@@ -1130,7 +1227,8 @@ and lift_and_patch_closure = fn (fn_expr: expr) -> fn (slot: int)
                           -> fn (s: EmitState) ->
   match fn_expr with
   | EFun (arg, _ty_opt, body) ->
-    let captures_list = free_vars body (Cons (arg, Nil)) in
+    let captures_raw = free_vars body (Cons (arg, Nil)) in
+    let captures_list = filter_extern_captures captures_raw s.extern_decls in
     let env_offsets = build_offsets captures_list 0 in
     let fn_idx = s.fn_counter in
     let inner = ({ s |
@@ -1351,6 +1449,9 @@ let rec build_extern_imports = fn (uses: str list) ->
   | Nil -> ""
   | Cons (h, t) -> extern_import_line h ++ build_extern_imports t
   ;
+
+// (Stage 54.2 helpers moved earlier in the file — see the block right
+// after `EmitState` initialization.)
 
 // Stage 53i-2: embed runtime helper `(func ...)` bodies on demand.
 // Mirrors the OCaml-side `lib/codegen_wasm.ml`'s `runtime_helpers`
@@ -1576,6 +1677,13 @@ let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
     // modules into flat decls before they reach codegen. If a
     // TopModule slips through, the upstream pipeline is broken.
     fail "codegen_wasm: TopModule reached codegen — parser flatten missing?"
+  | TopExternFn (name, sig_ty) ->
+    // Phase 54.2: register the extern fn so wrap_module emits its
+    // import line and EApp dispatch can short-circuit calls.
+    ({ s | extern_decls = Cons ((name, sig_ty), s.extern_decls) } : EmitState)
+  | TopExternType _ ->
+    // Opaque type marker; uniform i32 representation handles it.
+    s
   ;
 
 let rec emit_decls = fn (decls: top_decl list) -> fn (s: EmitState) ->
@@ -1607,7 +1715,12 @@ let emit_program = fn (prog: program) ->
   // Round bump start up so the allocator never overlaps the data
   // region. `str_offset` already sits just past the last NUL byte.
   let bump_start = s.str_offset in
-  let extern_imports = build_extern_imports s.extern_uses in
+  // Phase 54.2: also emit imports for declared extern fns. The two
+  // import streams (built-ins like `print`, declared externs like
+  // `dom_get_by_id`) concatenate; wat2wasm doesn't care about order.
+  let extern_imports =
+    build_extern_imports s.extern_uses
+    ++ build_extern_decl_imports s.extern_decls in
   let helper_decls = build_helper_decls s.helpers_used in
   wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports helper_decls;
 

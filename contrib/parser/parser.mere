@@ -943,6 +943,42 @@ let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
       // by returning the accumulated decls; the caller (TModule arm
       // above) consumes the `}`.
       ((list_rev acc, EUnit), toks)
+    | TExtern ->
+      // Phase 54.2: `extern fn name : ty ;` or `extern type Name ;`.
+      let toks1 = advance toks in  // consume `extern`
+      (match peek_tok toks1 with
+        | TFn ->
+          let toks2 = advance toks1 in  // consume `fn`
+          let name = (match peek_tok toks2 with
+            | TIdent n -> n
+            | _ -> fail ("line " ++ show (peek_line toks2)
+                         ++ ": expected fn name after `extern fn`")) in
+          let toks3 = advance toks2 in
+          let toks4 = (match peek_tok toks3 with
+            | TColon -> advance toks3
+            | _ -> fail ("line " ++ show (peek_line toks3)
+                         ++ ": expected `:` after extern fn name")) in
+          let (sig_ty, toks5) = parse_type toks4 in
+          let toks6 = (match peek_tok toks5 with
+            | TSemi -> advance toks5
+            | _ -> fail ("line " ++ show (peek_line toks5)
+                         ++ ": expected `;` after extern fn signature")) in
+          parse_decls (Cons (TopExternFn (name, sig_ty), acc)) toks6
+        | TType ->
+          let toks2 = advance toks1 in  // consume `type`
+          let name = (match peek_tok toks2 with
+            | TIdent n -> n
+            | _ -> fail ("line " ++ show (peek_line toks2)
+                         ++ ": expected type name after `extern type`")) in
+          let toks3 = advance toks2 in
+          let toks4 = (match peek_tok toks3 with
+            | TSemi -> advance toks3
+            | _ -> fail ("line " ++ show (peek_line toks3)
+                         ++ ": expected `;` after extern type name")) in
+          parse_decls (Cons (TopExternType name, acc)) toks4
+        | _ ->
+          fail ("line " ++ show (peek_line toks1)
+                ++ ": expected `fn` or `type` after `extern`"))
     | _ ->
       let (main, toks1) = parse_expr toks in
       ((list_rev acc, main), toks1)))
@@ -1217,7 +1253,11 @@ let rec top_decl_to_str = fn (d: top_decl) ->
     // — but keep this arm for completeness (e.g., debugging an
     // un-flattened parse output).
     let sub_strs = list_map sub_decls (fn (d: top_decl) -> top_decl_to_str d) in
-    "TopModule(" ++ name ++ ", [" ++ str_join "; " sub_strs ++ "])";
+    "TopModule(" ++ name ++ ", [" ++ str_join "; " sub_strs ++ "])"
+  | TopExternFn (name, sig_ty) ->
+    "TopExternFn(" ++ name ++ " : " ++ ty_to_str sig_ty ++ ")"
+  | TopExternType name ->
+    "TopExternType(" ++ name ++ ")";
 
 let program_to_str = fn (p: program) ->
   let (decls, main) = p in
@@ -1346,7 +1386,9 @@ let prefix_decl = fn (m: str) -> fn (d: top_decl) ->
   | TopType (n, params, ctors) -> TopType (m ++ "." ++ n, params, ctors)
   | TopRecord (n, params, fields) -> TopRecord (m ++ "." ++ n, params, fields)
   | TopTypeAlias (n, params, ty) -> TopTypeAlias (m ++ "." ++ n, params, ty)
-  | TopModule _ -> d;  // nested modules — flatten_decls handles recursion
+  | TopModule _ -> d  // nested modules — flatten_decls handles recursion
+  | TopExternFn _ -> d  // extern decls aren't prefixed; their host name matters
+  | TopExternType _ -> d;
 
 let rec list_append = fn (xs: top_decl list) -> fn (ys: top_decl list) ->
   match xs with

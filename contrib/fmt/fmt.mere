@@ -554,6 +554,8 @@ let fmt_top_decl = fn (d: top_decl) ->
     // any consumer sees them, so this arm fires only if some caller
     // bypasses flatten. For now, emit a stub marker.
     "/* TopModule (flattening expected) */"
+  | TopExternFn (_, _) -> "/* TopExternFn */"
+  | TopExternType _ -> "/* TopExternType */"
   ;
 
 // `program = (decls, main)`. Decls are joined with a blank line, then a

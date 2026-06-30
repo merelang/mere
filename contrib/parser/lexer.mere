@@ -26,7 +26,7 @@ type token =
   | TMatch | TWith | TWhen | TOf
   | TType | TAs
   | TTrue | TFalse
-  | TModule
+  | TModule | TExtern
   // Operators
   | TEq | TEqEq | TBangEq
   | TLt | TLe | TGt | TGe
@@ -89,6 +89,7 @@ let keyword_of = fn (s: str) ->
   else if s == "true" then Some TTrue
   else if s == "false" then Some TFalse
   else if s == "module" then Some TModule
+  else if s == "extern" then Some TExtern
   // `_` is read by `read_ident_run` (alpha-class includes it), so the
   // bare-underscore TUnderscore branch in the main loop never fires.
   // Detect it post-hoc here so `_foo` stays an identifier while `_`
@@ -273,7 +274,7 @@ let token_str = fn (t: token) -> match t with
   | TMatch -> "Match" | TWith -> "With" | TWhen -> "When" | TOf -> "Of"
   | TType -> "Type" | TAs -> "As"
   | TTrue -> "True" | TFalse -> "False"
-  | TModule -> "Module"
+  | TModule -> "Module" | TExtern -> "Extern"
   | TEq -> "Eq" | TEqEq -> "EqEq" | TBangEq -> "BangEq"
   | TLt -> "Lt" | TLe -> "Le" | TGt -> "Gt" | TGe -> "Ge"
   | TPlus -> "Plus" | TMinus -> "Minus"

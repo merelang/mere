@@ -108,6 +108,16 @@ type top_decl =
   // into qualified `EVar "M.f"`, so consumers (fmt / eval / typer /
   // codegen) see a flat namespace and don't need module-aware logic.
   | TopModule of str * top_decl list
+  // `extern fn name : ty ;` (Phase 54.2). Declares a host-provided fn
+  // available via wasm import. Codegen emits `(import "env" "<name>"
+  // ...)` based on the declared signature and dispatches direct calls
+  // to it via `call $<name>` (no closure-ABI involvement).
+  | TopExternFn of str * ty
+  // `extern type Name ;` (Phase 54.2). Opaque type marker. No runtime
+  // impact — Mere's uniform i32 representation treats opaque pointers
+  // as i32 regardless. The typer's permissive `TyCon name []` handling
+  // means the type name isn't validated either.
+  | TopExternType of str
   ;
 
 type program = top_decl list * expr;

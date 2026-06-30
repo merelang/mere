@@ -7962,9 +7962,15 @@ let () =
          nothing — `cross_emit` only checks main()'s return value, not
          stdout. A separate `cross_print` could capture text if/when
          we cross-validate side effects. *)
+      (* Stage 54.2: extern fn cross-validation cases may declare
+         arbitrary import names (host_log / make_handle / etc.) that
+         the harness can't enumerate ahead of time. Use a Proxy to
+         auto-stub any access — returns a fn that ignores args and
+         returns 0. Still works for the print / show / etc. cases
+         that just need puts. *)
       let runner = Printf.sprintf
         "node -e \"const fs=require('fs'); \
-         const env = { puts: () => 0 }; \
+         const env = new Proxy({}, { get: () => () => 0 }); \
          WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
          .then(({instance})=>console.log(instance.exports.main())) \
          .catch(e=>console.log('TRAP:'+e.message));\""
@@ -8100,6 +8106,15 @@ let () =
       "module M { let inc = fn x -> x + 1; let twice = fn x -> inc (inc x); }; M.twice 10" "12";
     cross_emit "module let rec"
       "module M { let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1); }; M.fact 5" "120";
+    (* Phase 54.2 (Stage 54b): extern fn / extern type declarations.
+       Multi-arg externs flow through the EApp spine walker; unit-
+       returning externs emit `i32.const 0` so the stack stays
+       balanced. cross_emit's stub `puts` doesn't matter — these
+       cases only check the return of main(). *)
+    cross_emit "extern fn 1-arg unit return"
+      "extern fn host_log: int -> unit; let _ = host_log 42 in 99" "99";
+    cross_emit "extern type + multi-arg"
+      "extern type Handle; extern fn make_handle: int -> Handle; extern fn use_handle: Handle -> int -> unit; let h = make_handle 7 in let _ = use_handle h 100 in 0" "0";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"

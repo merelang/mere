@@ -768,6 +768,11 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
   | TopRecord _ -> (env, s)
   | TopTypeAlias _ -> (env, s)
   | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
+  // Phase 54.2: extern fn — bind name with its declared scheme so
+  // downstream EVar references type-check. Permissive: no scheme
+  // generalization beyond the declared type.
+  | TopExternFn (name, sig_ty) -> (Cons ((name, mono sig_ty), env), s)
+  | TopExternType _ -> (env, s)
 
 and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
                -> fn (s: infer_state) ->

@@ -495,6 +495,12 @@ let apply_decl = fn (d: top_decl) -> fn (env: env) ->
   | TopRecord _ -> env
   | TopTypeAlias _ -> env
   | TopModule _ -> fail "eval: TopModule reached eval — parser flatten missing?"
+  // Phase 54.2: extern fns aren't executable in the self-host eval
+  // (they need a wasm host). Treat as no-op so files with extern
+  // declarations can still be parse + type-checked + eval-d through
+  // for fragments that don't actually call them.
+  | TopExternFn _ -> env
+  | TopExternType _ -> env
   ;
 
 let rec apply_decls = fn (decls: top_decl list) -> fn (env: env) ->
