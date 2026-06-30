@@ -252,7 +252,8 @@ let is_builtin = fn (n: str) ->
   n == "fst" || n == "snd" || n == "fail" ||
   n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space" ||
   n == "str_starts_with" || n == "substring" ||
-  n == "str_index_of" || n == "str_repeat" || n == "int_of_str";
+  n == "str_index_of" || n == "str_repeat" || n == "int_of_str" ||
+  n == "str_unescape" || n == "try_or";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -878,6 +879,34 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = note_helper_use "int_of_str" s0 in
         let s2 = emit_expr x s1 in
         push_instr "call $int_of_str" s2
+      | EVar "str_unescape" ->
+        // Phase 54.8: `str_unescape s` — walk bytes, replace recognized
+        // escapes (\\n \\t \\r \\\\ \\" \\/) with the literal byte; copy
+        // others through. Bump-allocs an output buffer of input length.
+        // Pulls strlen for the input length read.
+        let s0 = note_helper_use "strlen" s in
+        let s1 = note_helper_use "str_unescape" s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $str_unescape" s2
+      | EApp (EVar "try_or", thunk_expr) ->
+        // Phase 54.8: `try_or thunk default`. Wasm 1.0 has no exception
+        // recovery (our `fail` traps the whole module), so lower this
+        // leniently: emit-and-drop the default (preserves side effects),
+        // then call thunk () via the closure ABI and use its result.
+        // If the thunk traps, the whole module dies — same as without
+        // try_or wrapping. Good enough for code where try_or wraps a
+        // pure parse that rarely fails on well-formed input.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "drop" s1 in
+        let s3 = emit_expr thunk_expr s2 in
+        let (tmp, s4) = alloc_tmp_local s3 in
+        let s5 = push_instr ("local.set " ++ show tmp) s4 in
+        let s6 = push_instr ("local.get " ++ show tmp) s5 in
+        let s7 = push_instr "i32.load offset=0" s6 in
+        let s8 = push_instr "i32.const 0" s7 in
+        let s9 = push_instr ("local.get " ++ show tmp) s8 in
+        let s10 = push_instr "i32.load offset=4" s9 in
+        push_instr "call_indirect (type $cl)" s10
       | EVar "ord" ->
         // Phase 54.5: `ord s` — byte code of a 1-char string. Strings
         // are NUL-terminated heap buffers; the first byte IS the char.
@@ -1674,6 +1703,55 @@ let helper_decl_str_repeat =
   "               (i32.const 1)))\n" ++
   "    (local.get $r))\n";
 
+// Phase 54.8: `$str_unescape s` — walk bytes, replace recognized escape
+// sequences (\\n \\t \\r \\\\ \\" \\/) with the literal byte; pass other
+// bytes through unchanged. Unknown escape `\\X` is passed through as X
+// (lenient vs OCaml-side raise — keeps the module trap-free).
+let helper_decl_str_unescape =
+  "  (func $str_unescape (param $s i32) (result i32)\n" ++
+  "    (local $slen i32) (local $r i32) (local $i i32) (local $j i32)\n" ++
+  "    (local $b i32) (local $b2 i32) (local $out i32)\n" ++
+  "    (local.set $slen (call $__lang_strlen (local.get $s)))\n" ++
+  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $i (i32.const 0))\n" ++
+  "    (local.set $j (i32.const 0))\n" ++
+  "    (block $end\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $end (i32.eq (local.get $i) (local.get $slen)))\n" ++
+  "        (local.set $b (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
+  "        (if (i32.eq (local.get $b) (i32.const 92))\n" ++
+  "          (then\n" ++
+  "            (if (i32.lt_u (i32.add (local.get $i) (i32.const 1)) (local.get $slen))\n" ++
+  "              (then\n" ++
+  "                (local.set $b2\n" ++
+  "                  (i32.load8_u (i32.add (local.get $s) (i32.add (local.get $i) (i32.const 1)))))\n" ++
+  "                (local.set $out\n" ++
+  "                  (if (result i32) (i32.eq (local.get $b2) (i32.const 110))\n" ++
+  "                    (then (i32.const 10))\n" ++
+  "                    (else\n" ++
+  "                      (if (result i32) (i32.eq (local.get $b2) (i32.const 116))\n" ++
+  "                        (then (i32.const 9))\n" ++
+  "                        (else\n" ++
+  "                          (if (result i32) (i32.eq (local.get $b2) (i32.const 114))\n" ++
+  "                            (then (i32.const 13))\n" ++
+  "                            (else (local.get $b2))))))))\n" ++
+  "                (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $out))\n" ++
+  "                (local.set $j (i32.add (local.get $j) (i32.const 1)))\n" ++
+  "                (local.set $i (i32.add (local.get $i) (i32.const 2))))\n" ++
+  "              (else\n" ++
+  "                (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $b))\n" ++
+  "                (local.set $j (i32.add (local.get $j) (i32.const 1)))\n" ++
+  "                (local.set $i (i32.add (local.get $i) (i32.const 1))))))\n" ++
+  "          (else\n" ++
+  "            (i32.store8 (i32.add (local.get $r) (local.get $j)) (local.get $b))\n" ++
+  "            (local.set $j (i32.add (local.get $j) (i32.const 1)))\n" ++
+  "            (local.set $i (i32.add (local.get $i) (i32.const 1)))))\n" ++
+  "        (br $lp)))\n" ++
+  "    (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))\n" ++
+  "    (global.set $__lang_bump\n" ++
+  "      (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))\n" ++
+  "    (local.get $r))\n";
+
 // Phase 54.7: `$int_of_str s` — parse leading [ws*][-]?[0-9]* as signed
 // decimal int. Stops at first non-digit. Returns 0 if no digits found
 // (lenient vs OCaml-side raise). Depends on $is_space for ws skip.
@@ -1822,6 +1900,7 @@ let helper_body = fn (name: str) ->
   else if name == "str_index_of" then helper_decl_str_index_of
   else if name == "str_repeat" then helper_decl_str_repeat
   else if name == "int_of_str" then helper_decl_int_of_str
+  else if name == "str_unescape" then helper_decl_str_unescape
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
