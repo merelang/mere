@@ -8193,6 +8193,21 @@ let () =
       "try_or (fn () -> 42) 0" "42";
     cross_emit "try_or default discarded but evaluated"
       "let r = try_or (fn () -> 7) (1 + 2) in r" "7";
+    (* Phase 54.9: selfhost_prelude prepends list_map + str_join so
+       contrib code can use them without a per-file definition. *)
+    cross_emit "prelude list_map sum"
+      "let xs = Cons (1, Cons (2, Cons (3, Nil))) in let ys = list_map xs (fn x -> x * 10) in match ys with | Cons (a, Cons (b, Cons (c, Nil))) -> a + b + c | _ -> -1" "60";
+    cross_emit "prelude list_map empty"
+      (* `Nil (fn ...)` self-host-parses as Nil-with-payload (no arity
+         table); use a let-bound empty list, matching real contrib
+         usage where list_map gets a variable, not a bare constructor. *)
+      "let xs = Nil in match list_map xs (fn x -> x + 1) with | Nil -> 1 | _ -> 0" "1";
+    cross_emit "prelude str_join basic"
+      "str_len (str_join \",\" (Cons (\"ab\", Cons (\"cd\", Cons (\"ef\", Nil)))))" "8";
+    cross_emit "prelude str_join empty list"
+      "str_len (str_join \",\" Nil)" "0";
+    cross_emit "prelude str_join single"
+      "str_len (str_join \"---\" (Cons (\"x\", Nil)))" "1";
     cross_emit "JSON renderer"
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"

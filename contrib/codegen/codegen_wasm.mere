@@ -2058,11 +2058,28 @@ let emit_program = fn (prog: program) ->
   let helper_decls = build_helper_decls s.helpers_used in
   wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports helper_decls;
 
+// Phase 54.9: a tiny prelude prepended to every input. Keeps the
+// self-host emit pipeline closer to OCaml-side compile (which auto-
+// inserts lib/prelude_stdlib.ml). We only ship the helpers that
+// actually have contrib consumers — list_map (typer/eval), str_join
+// (typer/eval). Adding more is incremental — keep it small so the
+// emitted module stays slim for tiny inputs.
+let selfhost_prelude =
+  "let rec list_map = fn xs -> fn f ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> Nil\n" ++
+  "  | Cons (h, t) -> Cons (f h, list_map t f);\n" ++
+  "let rec str_join = fn sep -> fn xs ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> \"\"\n" ++
+  "  | Cons (h, Nil) -> h\n" ++
+  "  | Cons (h, t) -> h ++ sep ++ str_join sep t;\n";
+
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
 
 let parse_and_emit = fn (src: str) ->
-  let toks = tokenize src in
+  let toks = tokenize (selfhost_prelude ++ src) in
   let (prog, _rest) = parse_decls Nil toks in
   // Phase 54.1: flatten any `module M { ... }` decls and rewrite
   // `M.f` field-access references into qualified `EVar "M.f"`.
