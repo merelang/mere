@@ -8236,6 +8236,14 @@ let () =
       "list_fold (Cons (1, Cons (2, Cons (3, Nil)))) 0 (fn a -> fn x -> a + x)" "6";
     cross_emit "prelude list_append len"
       "list_len (list_append (Cons (1, Cons (2, Nil))) (Cons (3, Cons (4, Cons (5, Nil)))))" "5";
+    (* Phase 54.13: constructor-arity rewrite. Without it, `Some 42`
+       parses as EApp(EConstr Some None, EInt 42) — a function call
+       that traps at runtime. With the rewrite, it becomes the proper
+       EConstr("Some", Some (EInt 42)). *)
+    cross_emit "bare ctor arity Some"
+      "type opt = None | Some of int; match Some 42 with | Some n -> n | None -> 0" "42";
+    cross_emit "bare ctor arity Cons"
+      "let xs = Cons 1 in match xs with | Cons n -> n | _ -> -1" "1";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"

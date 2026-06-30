@@ -1586,13 +1586,126 @@ let rec flatten_decls = fn (decls: top_decl list) ->
       | _ -> Cons (d, Nil)) in
     list_append expanded (flatten_decls rest);
 
+// === Phase 54.13: constructor-arity rewrite ================================
+//
+// The atom-level parser produces bare-constructor applications as
+// EApp(EConstr name None, arg) — it doesn't know that `Some` takes a
+// payload. The OCaml-side parser knows from the `type T = | C of ...`
+// declarations and emits `EConstr (name, Some arg)` directly. This
+// post-pass walks all top_decls' TopType bodies to build an arity map,
+// then rewrites every `EApp (EConstr name None, x)` (when arity[name] = 1)
+// into `EConstr (name, Some x)`. Without this, `Some TLet` lowers to a
+// runtime call_indirect using the SomeTok cell's tag as env_ptr — trap.
+
+let rec lookup_arity = fn (name: str) -> fn (m: (str * int) list) ->
+  match m with
+  | Nil -> 0
+  | Cons (h, t) ->
+    let (n, a) = h in
+    if n == name then a else lookup_arity name t;
+
+let rec has_arity = fn (name: str) -> fn (m: (str * int) list) ->
+  match m with
+  | Nil -> false
+  | Cons (h, t) ->
+    let (n, _) = h in
+    if n == name then true else has_arity name t;
+
+let rec collect_arities_from_decls = fn (decls: top_decl list) ->
+  fn (acc: (str * int) list) ->
+  match decls with
+  | Nil -> acc
+  | Cons (d, rest) ->
+    let acc2 = (match d with
+      | TopType (_, _, variants) ->
+        list_fold variants acc (fn (m: (str * int) list)
+                              -> fn (v: str * ty option) ->
+          let (name, ty_opt) = v in
+          let ar = (match ty_opt with
+            | None -> 0
+            | Some _ -> 1) in
+          Cons ((name, ar), m))
+      | _ -> acc) in
+    collect_arities_from_decls rest acc2;
+
+let rec rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
+  match e with
+  | EInt _ -> e
+  | EFloat _ -> e
+  | EBool _ -> e
+  | EStr _ -> e
+  | EUnit -> e
+  | EVar _ -> e
+  | EBin (op, a, b) -> EBin (op, rewrite_constrs_expr a m, rewrite_constrs_expr b m)
+  | ECmp (op, a, b) -> ECmp (op, rewrite_constrs_expr a m, rewrite_constrs_expr b m)
+  | ELogic (op, a, b) -> ELogic (op, rewrite_constrs_expr a m, rewrite_constrs_expr b m)
+  | ENeg inner -> ENeg (rewrite_constrs_expr inner m)
+  | EAnnot (inner, t) -> EAnnot (rewrite_constrs_expr inner m, t)
+  | EApp (f, x) ->
+    let f2 = rewrite_constrs_expr f m in
+    let x2 = rewrite_constrs_expr x m in
+    // The key rewrite: bare-ctor application becomes payload-bearing
+    // constructor when the ctor's arity is 1.
+    (match f2 with
+      | EConstr (name, None) ->
+        if has_arity name m && lookup_arity name m == 1 then
+          EConstr (name, Some x2)
+        else
+          EApp (f2, x2)
+      | _ -> EApp (f2, x2))
+  | EFun (arg, ty_opt, body) -> EFun (arg, ty_opt, rewrite_constrs_expr body m)
+  | ELet (pat, value, body) ->
+    ELet (pat, rewrite_constrs_expr value m, rewrite_constrs_expr body m)
+  | ELetRec (bindings, body) ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (n, rewrite_constrs_expr v m)) in
+    ELetRec (bs2, rewrite_constrs_expr body m)
+  | EIf (c, t, el) ->
+    EIf (rewrite_constrs_expr c m, rewrite_constrs_expr t m, rewrite_constrs_expr el m)
+  | EMatch (scrutinee, arms) ->
+    let arms2 = list_map arms (fn (arm: pattern * expr option * expr) ->
+      let (p, g, b) = arm in
+      let g2 = (match g with
+        | None -> None
+        | Some ge -> Some (rewrite_constrs_expr ge m)) in
+      (p, g2, rewrite_constrs_expr b m)) in
+    EMatch (rewrite_constrs_expr scrutinee m, arms2)
+  | EConstr (name, payload_opt) ->
+    (match payload_opt with
+      | None -> e
+      | Some p -> EConstr (name, Some (rewrite_constrs_expr p m)))
+  | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rewrite_constrs_expr e2 m))
+  | ERecordLit (name, fields) ->
+    let fs2 = list_map fields (fn (f: str * expr) ->
+      let (fname, fv) = f in (fname, rewrite_constrs_expr fv m)) in
+    ERecordLit (name, fs2)
+  | EFieldGet (recv, field) -> EFieldGet (rewrite_constrs_expr recv m, field)
+  | ERecordUpdate (base, fields) ->
+    let fs2 = list_map fields (fn (f: str * expr) ->
+      let (fname, fv) = f in (fname, rewrite_constrs_expr fv m)) in
+    ERecordUpdate (rewrite_constrs_expr base m, fs2);
+
+let rewrite_constrs_decl = fn (d: top_decl) -> fn (m: (str * int) list) ->
+  match d with
+  | TopLet (pat, e) -> TopLet (pat, rewrite_constrs_expr e m)
+  | TopLetRec bindings ->
+    let bs2 = list_map bindings (fn (b: str * expr) ->
+      let (n, v) = b in (n, rewrite_constrs_expr v m)) in
+    TopLetRec bs2
+  | _ -> d;
+
 let flatten_and_resolve = fn (prog: program) ->
   let (decls, main) = prog in
   let mods = collect_module_names decls Nil in
   let flat = flatten_decls decls in
   let resolved_decls = list_map flat (fn (d: top_decl) -> rewrite_decl d mods) in
   let resolved_main = rewrite_expr main mods in
-  ((resolved_decls, resolved_main) : program);
+  // Phase 54.13: now that module rewrites are done, build the
+  // constructor-arity map and fix up bare-ctor applications.
+  let arities = collect_arities_from_decls resolved_decls Nil in
+  let decls2 = list_map resolved_decls (fn (d: top_decl) -> rewrite_constrs_decl d arities) in
+  let main2 = rewrite_constrs_expr resolved_main arities in
+  ((decls2, main2) : program);
 
 let parse_str_program = fn (src: str) ->
   let toks = tokenize src in

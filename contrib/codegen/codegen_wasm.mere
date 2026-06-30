@@ -2213,6 +2213,16 @@ let emit_program = fn (prog: program) ->
 // (typer/eval). Adding more is incremental — keep it small so the
 // emitted module stays slim for tiny inputs.
 let selfhost_prelude =
+  // Phase 54.13: type decls so the parser's constructor-arity rewrite
+  // (collect_arities_from_decls / rewrite_constrs_expr) knows that
+  // Some/Ok/Err/Cons take a payload. Without these the post-pass sees
+  // an empty arity map and leaves `Some x` as `EApp(EConstr Some, x)`,
+  // which traps at runtime. Non-parametric form is intentional — the
+  // self-host parser doesn't support `'a` parameters in decl heads
+  // yet, and the codegen treats all payloads uniformly as i32 anyway.
+  "type __list_t = Nil | Cons of int;\n" ++
+  "type __option_t = None | Some of int;\n" ++
+  "type __result_t = Ok of int | Err of int;\n" ++
   "let rec list_map = fn xs -> fn f ->\n" ++
   "  match xs with\n" ++
   "  | Nil -> Nil\n" ++
