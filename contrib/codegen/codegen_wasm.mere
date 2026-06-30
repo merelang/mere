@@ -2075,6 +2075,103 @@ let selfhost_prelude =
   "  | Cons (h, Nil) -> h\n" ++
   "  | Cons (h, t) -> h ++ sep ++ str_join sep t;\n";
 
+// === Phase 54.10: import resolution ========================================
+//
+// The self-host parser skips `import "path";` decls (see
+// try_consume_import in parser.mere) — it can't read files, so it just
+// assumes the caller pre-inlined the contents. parse_and_emit_file
+// does that inlining: read the entry source, recursively inline each
+// `import "..."` against its containing file's directory, and feed the
+// result to parse_and_emit. Cycles are broken by a visited set
+// (later imports of an already-loaded file expand to "").
+
+let dirname = fn (path: str) ->
+  let rec find_last_slash = fn (i: int) -> fn (best: int) ->
+    if i >= str_len path then best
+    else if char_at path i == "/" then find_last_slash (i + 1) i
+    else find_last_slash (i + 1) best
+  in
+  let last = find_last_slash 0 (-1) in
+  if last < 0 then "."
+  else substring path 0 last;
+
+let resolve_import_path = fn (base_dir: str) -> fn (relative: str) ->
+  if str_len relative > 0 && char_at relative 0 == "/" then relative
+  else base_dir ++ "/" ++ relative;
+
+let rec member_str_path = fn (p: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == p then true else member_str_path p t;
+
+// Scan src starting at i for the next `import "PATH";`. Returns
+// (start, end_after_semi, path) on a hit, or None when no more imports
+// are found. The matcher is strict: `import` (literal letters), one or
+// more spaces, `"PATH"` (no escapes), optional spaces, `;`. Anything
+// inside `// ... \n` or `/* ... */` is intentionally NOT skipped here —
+// the parser handles those, and a stray "import" inside a comment that
+// isn't followed by `"..."` is a no-match.
+let rec find_next_import = fn (src: str) -> fn (i: int) ->
+  let n = str_len src in
+  if i + 8 > n then None
+  // Only match at column 0 of a line. All real contrib imports are
+  // un-indented; this avoids false hits like the literal string
+  // `import "env"` that appears in code comments referring to the
+  // wasm import directive.
+  else if i > 0 && char_at src (i - 1) != "\n" then
+    find_next_import src (i + 1)
+  else if substring src i (i + 8) == "import \"" then
+    let path_start = i + 8 in
+    let rec find_quote = fn (j: int) ->
+      if j >= n then -1
+      else if char_at src j == "\"" then j
+      else find_quote (j + 1)
+    in
+    let path_end = find_quote path_start in
+    if path_end < 0 then None
+    else
+      let path = substring src path_start path_end in
+      // Skip past closing quote and any spaces + `;`
+      let rec skip_to_semi = fn (j: int) ->
+        if j >= n then -1
+        else if char_at src j == ";" then j + 1
+        else skip_to_semi (j + 1)
+      in
+      let after_semi = skip_to_semi (path_end + 1) in
+      if after_semi < 0 then None
+      else Some ((i, after_semi, path) : (int * int * str))
+  else find_next_import src (i + 1);
+
+// Inline imports in a source string. base_dir is the directory the
+// source was read from (used to resolve relative paths). visited
+// tracks already-inlined absolute paths so a diamond import expands
+// once.
+let rec inline_imports_in = fn (src: str) -> fn (base_dir: str)
+                         -> fn (visited: str list) ->
+  let rec loop = fn (i: int) -> fn (acc: str) -> fn (vis: str list) ->
+    match find_next_import src i with
+    | None ->
+      // Copy the rest of src
+      let acc2 = acc ++ substring src i (str_len src) in
+      (acc2, vis)
+    | Some triple ->
+      let (start, end_pos, rel_path) = triple in
+      let resolved = resolve_import_path base_dir rel_path in
+      let prefix = substring src i start in
+      let acc1 = acc ++ prefix in
+      if member_str_path resolved vis then
+        // Already inlined — skip the import line.
+        loop end_pos acc1 vis
+      else
+        let imported_src = read_file resolved in
+        let imported_dir = dirname resolved in
+        let vis2 = Cons (resolved, vis) in
+        let (inlined, vis3) = inline_imports_in imported_src imported_dir vis2 in
+        let acc2 = acc1 ++ inlined ++ "\n" in
+        loop end_pos acc2 vis3
+  in
+  loop 0 "" visited;
+
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.
 
@@ -2084,6 +2181,15 @@ let parse_and_emit = fn (src: str) ->
   // Phase 54.1: flatten any `module M { ... }` decls and rewrite
   // `M.f` field-access references into qualified `EVar "M.f"`.
   emit_program (flatten_and_resolve prog);
+
+// Entry point: read `path` and recursively inline its imports, then
+// run the full emit pipeline. Use this from bridges instead of
+// `read_file path |> parse_and_emit` when the file uses `import`.
+let parse_and_emit_file = fn (path: str) ->
+  let src = read_file path in
+  let base = dirname path in
+  let (inlined, _) = inline_imports_in src base (Cons (path, Nil)) in
+  parse_and_emit inlined;
 
 // === Demos ================================================================
 
