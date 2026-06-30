@@ -234,13 +234,24 @@ let rec union_strs = fn (xs: str list) -> fn (acc: str list) ->
   | Cons (h, t) -> union_strs t (cons_unique h acc)
   ;
 
+// Builtins handled specially at the `EApp` dispatch site (see
+// `print` / `show` short-circuits). They never need to be captured
+// inside lifted lambdas — the call site emits the import / helper
+// directly. Without this hatch, an inner `fn lo -> print (show lo)`
+// would scan `show` / `print` as free vars and try to capture them
+// from a scope that doesn't have them.
+let is_builtin = fn (n: str) ->
+  n == "print" || n == "show";
+
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
   | EInt _ -> Nil
   | EBool _ -> Nil
   | EStr _ -> Nil
   | EUnit -> Nil
-  | EVar n -> if member_str n bound then Nil else Cons (n, Nil)
+  | EVar n ->
+    if member_str n bound || is_builtin n then Nil
+    else Cons (n, Nil)
   | EBin (_, a, b) -> union_strs (free_vars a bound) (free_vars b bound)
   | ECmp (_, a, b) -> union_strs (free_vars a bound) (free_vars b bound)
   | ELogic (_, a, b) -> union_strs (free_vars a bound) (free_vars b bound)
