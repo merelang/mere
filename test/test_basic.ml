@@ -8083,7 +8083,9 @@ let () =
        — str_len / char_at / fst / snd. Unlocks contrib/regex/engine
        and similar real-world Mere files. *)
     cross_emit "str_len" "str_len \"hello\"" "5";
-    cross_emit "char_at" "char_at \"abc\" 1" "98";
+    (* Phase 54.12: char_at returns a 1-byte str now (matching OCaml side).
+       Wrap with ord for an int-returning expression. *)
+    cross_emit "char_at" "ord (char_at \"abc\" 1)" "98";
     cross_emit "fst / snd" "let p = (10, 20) in fst p + snd p" "30";
     cross_emit "str_len on concat"
       "let s = \"hi\" ++ \"!\" in str_len s" "3";

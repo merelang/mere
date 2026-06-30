@@ -660,9 +660,31 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr b s1 in
         push_instr (binop_instr op) s2)
   | ECmp (op, a, b) ->
-    let s1 = emit_expr a s in
-    let s2 = emit_expr b s1 in
-    push_instr (cmpop_instr op) s2
+    // Phase 54.12: when either operand is a string literal and the op
+    // is == or !=, lower as $__lang_streq (byte-by-byte). Without this,
+    // `c == \"X\"` would do pointer equality and silently always be
+    // false at runtime (the runtime-allocated c never aliases the
+    // literal's data-segment ptr). For other comparisons or when both
+    // sides are non-EStr, fall back to the integer cmpop.
+    let is_str_lit = fn (e: expr) -> match e with
+      | EStr _ -> true
+      | _ -> false in
+    let is_eq_op = match op with
+      | OpEq -> true
+      | OpNe -> true
+      | _ -> false in
+    if is_eq_op && (is_str_lit a || is_str_lit b) then
+      let s0 = note_helper_use "streq" s in
+      let s1 = emit_expr a s0 in
+      let s2 = emit_expr b s1 in
+      let s3 = push_instr "call $__lang_streq" s2 in
+      (match op with
+        | OpEq -> s3
+        | _ -> push_instr "i32.eqz" s3)
+    else
+      let s1 = emit_expr a s in
+      let s2 = emit_expr b s1 in
+      push_instr (cmpop_instr op) s2
   | ELogic (op, a, b) ->
     let s1 = emit_expr a s in
     let s2 = emit_expr b s1 in
@@ -1644,10 +1666,20 @@ let helper_decl_strlen =
   "        (br $lp)))\n" ++
   "    (local.get $i))\n";
 
-// Stage 53j: `$char_at s i` — load the byte at offset i of string s.
+// Phase 54.12: `$char_at s i` — return a 1-byte NUL-terminated string
+// containing s[i]. Matches OCaml-side `V_str (String.make 1 c)`
+// semantics, so contrib code like `c == \"X\"` and `ord c` works the
+// same way through both backends. Allocates 2 bytes (char + NUL) per
+// call; for typical lexer use that's O(source-length) bump alloc.
 let helper_decl_char_at =
   "  (func $char_at (param $s i32) (param $i i32) (result i32)\n" ++
-  "    (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n";
+  "    (local $r i32)\n" ++
+  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $r) (i32.const 2)))\n" ++
+  "    (i32.store8 (local.get $r)\n" ++
+  "      (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
+  "    (i32.store8 (i32.add (local.get $r) (i32.const 1)) (i32.const 0))\n" ++
+  "    (local.get $r))\n";
 
 // Phase 54.5: `$is_space b` — true iff byte b is ' ' / '\t' / '\n' / '\r'.
 // Inlined here rather than at the call site to keep is_space callsites small.
