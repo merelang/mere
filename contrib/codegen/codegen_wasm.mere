@@ -692,6 +692,15 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr x s1 in
         let s3 = push_instr "call $puts" s2 in
         push_instr "i32.const 0" s3
+      | EVar "show" ->
+        // Stage 53i-3: `show n : int -> str` lowers to embedded
+        // `$show_int`. Polymorphic `show` for bool / str / variant /
+        // record needs typed AST to dispatch — defer; current usage
+        // assumes the arg is int (typer would have caught a mismatch
+        // upstream when codegen runs over already-checked code).
+        let s1 = note_helper_use "show_int" s in
+        let s2 = emit_expr x s1 in
+        push_instr "call $show_int" s2
       | _ ->
         // Capture-less call site:
         //   <emit f>                ;; closure ptr
@@ -1349,8 +1358,45 @@ let helper_decl_str_concat =
   "               (i32.const 1)))\n" ++
   "    (local.get $r))\n";
 
+// Stage 53i-3: `$show_int` — int → decimal C-string via a fresh
+// 16-byte buffer, digits written right-to-left, returns pointer to
+// the first digit. Mirrors `lib/codegen_wasm.ml`'s `show_int`.
+let helper_decl_show_int =
+  "  (func $show_int (param $n i32) (result i32)\n" ++
+  "    (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)\n" ++
+  "    (local.set $buf (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 16)))\n" ++
+  "    (local.set $i (i32.const 15))\n" ++
+  "    (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 0))\n" ++
+  "    (if (i32.lt_s (local.get $n) (i32.const 0))\n" ++
+  "      (then\n" ++
+  "        (local.set $neg (i32.const 1))\n" ++
+  "        (local.set $abs (i32.sub (i32.const 0) (local.get $n))))\n" ++
+  "      (else\n" ++
+  "        (local.set $neg (i32.const 0))\n" ++
+  "        (local.set $abs (local.get $n))))\n" ++
+  "    (if (i32.eqz (local.get $abs))\n" ++
+  "      (then\n" ++
+  "        (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))\n" ++
+  "        (return (i32.add (local.get $buf) (local.get $i)))))\n" ++
+  "    (block $end\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $end (i32.eqz (local.get $abs)))\n" ++
+  "        (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (local.get $i))\n" ++
+  "          (i32.add (i32.const 48) (i32.rem_u (local.get $abs) (i32.const 10))))\n" ++
+  "        (local.set $abs (i32.div_u (local.get $abs) (i32.const 10)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (if (local.get $neg)\n" ++
+  "      (then\n" ++
+  "        (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))\n" ++
+  "    (i32.add (local.get $buf) (local.get $i)))\n";
+
 let helper_body = fn (name: str) ->
   if name == "str_concat" then helper_decl_str_concat
+  else if name == "show_int" then helper_decl_show_int
   else fail ("codegen_wasm: unknown embedded helper " ++ name);
 
 let rec build_helper_decls = fn (uses: str list) ->
@@ -1663,4 +1709,10 @@ let _ = print (parse_and_emit "let _ = print (\"hello, \" ++ \"world\") in 0") i
 let _ = print "---" in
 // Chained ++ and recursive build-up.
 let _ = print (parse_and_emit "let join = fn a -> fn b -> a ++ \"/\" ++ b in let _ = print (join \"src\" \"main\") in 0") in
+let _ = print "=== Stage 53i-3 codegen_wasm demos (show on int) ===" in
+// `show` on int → embedded $show_int helper.
+let _ = print (parse_and_emit "let _ = print (show 42) in 0") in
+let _ = print "---" in
+// Canonical: factorial then format the result.
+let _ = print (parse_and_emit "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in let _ = print (\"fact 5 = \" ++ show (fact 5)) in 0") in
 0
