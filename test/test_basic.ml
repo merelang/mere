@@ -8063,6 +8063,16 @@ let () =
       "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in let _ = print (\"fact 5 = \" ++ show (fact 5)) in 0" "0";
     cross_emit "show negative"
       "let _ = print (show (0 - 42)) in 0" "0";
+    (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
+       (caught by FizzBuzz / print_range / list rendering) used to
+       crash because free_vars treated them as free vars and tried to
+       capture them. Fixed via `is_builtin` hatch. *)
+    cross_emit "print_range"
+      "let rec print_range = fn lo -> fn hi -> if lo > hi then 0 else let _ = print (show lo) in print_range (lo + 1) hi in print_range 1 5" "0";
+    cross_emit "FizzBuzz 1..15"
+      "let rec fizz = fn n -> fn max -> if n > max then 0 else let s = if n % 15 == 0 then \"FizzBuzz\" else if n % 3 == 0 then \"Fizz\" else if n % 5 == 0 then \"Buzz\" else show n in let _ = print s in fizz (n + 1) max in fizz 1 15" "0";
+    cross_emit "quicksort + render"
+      "let rec quicksort = fn xs -> match xs with | Nil -> Nil | Cons (p, t) -> let rec partition = fn ys -> fn lo -> fn hi -> match ys with | Nil -> (lo, hi) | Cons (h, ts) -> if h < p then partition ts (Cons (h, lo)) hi else partition ts lo (Cons (h, hi)) in let (lo, hi) = partition t Nil Nil in let rec append = fn a -> fn b -> match a with | Nil -> b | Cons (h, t) -> Cons (h, append t b) in append (quicksort lo) (Cons (p, quicksort hi)) in let rec render = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> show h | Cons (h, t) -> (show h) ++ \", \" ++ (render t) in let _ = print (\"sorted = [\" ++ (render (quicksort [5, 2, 8, 1, 9, 3, 7, 4, 6])) ++ \"]\") in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
       "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
       "42"
