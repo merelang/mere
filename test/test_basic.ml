@@ -8025,6 +8025,42 @@ let () =
     check ("self-host bootstrap: " ^ name) actual expected
   in
 
+  (* Phase 54.21: compile-time self-host bootstrap. Feed a contrib
+     file through parse_and_emit_file and verify the resulting WAT
+     is (a) reasonably long, and (b) at least parses back through
+     wat2wasm without error. This is the durable CI check for the
+     54.19 milestone: "the self-host codegen can compile itself". *)
+  let bootstrap_wat_ok name path min_len =
+    let wat = self_host_emit_file path in
+    let len = String.length wat in
+    if len < min_len then begin
+      incr fail;
+      Printf.printf "FAIL  self-host wat-ok: %s (WAT length %d < %d)\n"
+        name len min_len
+    end else begin
+      (* Verify wat2wasm accepts the output — proves the emitted WAT
+         is at least syntactically valid. *)
+      let wat_path = Filename.temp_file "mere_selfemit_" ".wat" in
+      let wasm_path = wat_path ^ ".wasm" in
+      let oc = open_out wat_path in
+      output_string oc wat;
+      close_out oc;
+      let cmd = Printf.sprintf "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      let ok = Sys.command cmd = 0 in
+      Sys.remove wat_path;
+      (try Sys.remove wasm_path with _ -> ());
+      if ok then begin
+        incr pass;
+        Printf.printf "PASS  self-host wat-ok: %s (%d bytes WAT, wat2wasm accepted)\n"
+          name len
+      end else begin
+        incr fail;
+        Printf.printf "FAIL  self-host wat-ok: %s (%d bytes WAT, wat2wasm rejected)\n"
+          name len
+      end
+    end
+  in
+
   if have_wat2wasm && have_node then begin
     cross_emit "int literal" "42" "42";
     cross_emit "int arith" "1 + 2 * 3" "7";
@@ -8395,7 +8431,14 @@ let () =
         "import \"%s/typer/typer.mere\";\n\
          str_len (parse_and_infer \"let x = 5 in x + 1\")\n"
         contrib)
-      "3"
+      "3";
+    (* Phase 54.21: compile-time self-host bootstrap. codegen_wasm.mere
+       compiling ITSELF. Threshold set well below the observed
+       ~1.5 MB output; wat2wasm accepting the result proves syntactic
+       validity of the self-emitted module. *)
+    bootstrap_wat_ok "codegen self-emit"
+      (project_root ^ "/contrib/codegen/codegen_wasm.mere")
+      1_000_000
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
