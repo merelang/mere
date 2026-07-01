@@ -8345,6 +8345,19 @@ let () =
       "str_len (str_trim \"   hello   \")" "5";
     cross_emit "prelude str_trim empty"
       "str_len (str_trim \"     \")" "0";
+    (* Phase 54.28: Map — assoc-list backed mutable cell. *)
+    cross_emit "map_new + has empty"
+      "let m = map_new () in if map_has m \"x\" then 1 else 0" "0";
+    cross_emit "map_set + get"
+      "let m = map_new () in let _ = map_set m \"answer\" 42 in map_get m \"answer\"" "42";
+    cross_emit "map_set + has"
+      "let m = map_new () in let _ = map_set m \"k\" 99 in if map_has m \"k\" then 1 else 0" "1";
+    cross_emit "map_set overwrite"
+      "let m = map_new () in let _ = map_set m \"k\" 1 in let _ = map_set m \"k\" 2 in map_get m \"k\"" "2";
+    cross_emit "map_get missing lenient 0"
+      "let m = map_new () in map_get m \"missing\"" "0";
+    cross_emit "map multiple keys"
+      "let m = map_new () in let _ = map_set m \"a\" 10 in let _ = map_set m \"b\" 20 in let _ = map_set m \"c\" 30 in map_get m \"a\" + map_get m \"b\" + map_get m \"c\"" "60";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"
