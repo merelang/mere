@@ -487,6 +487,16 @@ let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
   let _ = strbuf_push buf "  <li><a href=\"playground/selfhost-tyck.html\">self-host type-checker</a> &mdash; Mere HM type inferencer written in Mere, running in browser (Phase 52 §S2.B)</li>\n" in
   let _ = strbuf_push buf "  <li><a href=\"playground/selfhost-compile.html\">self-host compiler</a> &mdash; Mere Wasm codegen written in Mere, running in browser (Phase 53 §S3)</li>\n" in
   let _ = strbuf_push buf "</ul>\n" in
+  let _ = strbuf_push buf "<h2>Run a Mere web backend</h2>\n" in
+  let _ = strbuf_push buf "<p>Real HTTP servers written in Mere (Phase 54.35). Run under Node.js locally &mdash; see <a href=\"https://github.com/merelang/mere/tree/main/examples\"><code>examples/</code></a> and <a href=\"https://github.com/merelang/mere/tree/main/contrib/http\"><code>contrib/http/</code></a>:</p>\n" in
+  let _ = strbuf_push buf "<ul>\n" in
+  let _ = strbuf_push buf "  <li><code>http_echo_server.mere</code> &mdash; minimal HTTP echo</li>\n" in
+  let _ = strbuf_push buf "  <li><code>http_json_api.mere</code> &mdash; six-endpoint JSON REST API with CORS via <code>http_set_header</code></li>\n" in
+  let _ = strbuf_push buf "  <li><code>http_todo_api.mere</code> &mdash; in-memory TODO CRUD with top-level mutable <code>Map[str, str]</code> state</li>\n" in
+  let _ = strbuf_push buf "  <li><code>http_docs_server.mere</code> &mdash; serves this repo's own docs via <code>read_file</code></li>\n" in
+  let _ = strbuf_push buf "  <li><code>http_fmt_service.mere</code> &mdash; self-host formatter (parser + fmt) exposed over HTTP</li>\n" in
+  let _ = strbuf_push buf "  <li><code>http_fmt_webapp.mere</code> &mdash; single-file web app: HTML UI + <code>/fmt</code> API in one wasm binary</li>\n" in
+  let _ = strbuf_push buf "</ul>\n" in
   let body = strbuf_to_str buf in
   let html = html_template dev_mode "Index" nav_html body in
   let _ = write_file (Path.join output_dir "index.html") html in
