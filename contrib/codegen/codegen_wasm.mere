@@ -2333,6 +2333,43 @@ let selfhost_prelude =
   "  | Nil -> Nil\n" ++
   "  | Cons (h, t) -> Cons (f i h, list_mapi_aux t f (i + 1));\n" ++
   "let rec list_mapi = fn xs -> fn f -> list_mapi_aux xs f 0;\n" ++
+  // Phase 54.27: list_filter — keep only elements where p returns true.
+  "let rec list_filter = fn xs -> fn p ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> Nil\n" ++
+  "  | Cons (h, t) -> if p h then Cons (h, list_filter t p) else list_filter t p;\n" ++
+  // Phase 54.27: list_iter — apply f to each element for side effects.
+  "let rec list_iter = fn xs -> fn f ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> ()\n" ++
+  "  | Cons (h, t) -> let __ = f h in list_iter t f;\n" ++
+  // Phase 54.27: list_any / list_all — search predicates.
+  "let rec list_any = fn xs -> fn p ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> false\n" ++
+  "  | Cons (h, t) -> if p h then true else list_any t p;\n" ++
+  "let rec list_all = fn xs -> fn p ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> true\n" ++
+  "  | Cons (h, t) -> if p h then list_all t p else false;\n" ++
+  // Phase 54.27: str_trim — strip leading + trailing whitespace via
+  // is_space. Built from substring + is_space + str_len; safe on
+  // empty or all-whitespace input.
+  "let str_trim = fn (s: str) ->\n" ++
+  "  let n = str_len s in\n" ++
+  "  let rec skip_l = fn (i: int) ->\n" ++
+  "    if i >= n then i\n" ++
+  "    else if is_space (char_at s i) then skip_l (i + 1)\n" ++
+  "    else i\n" ++
+  "  in\n" ++
+  "  let rec skip_r = fn (j: int) ->\n" ++
+  "    if j <= 0 then 0\n" ++
+  "    else if is_space (char_at s (j - 1)) then skip_r (j - 1)\n" ++
+  "    else j\n" ++
+  "  in\n" ++
+  "  let l = skip_l 0 in\n" ++
+  "  let r = skip_r n in\n" ++
+  "  if l >= r then \"\" else substring s l r;\n" ++
   "let rec str_join = fn sep -> fn xs ->\n" ++
   "  match xs with\n" ++
   "  | Nil -> \"\"\n" ++
@@ -2357,7 +2394,26 @@ let selfhost_prelude =
   "        let __r = strbuf_push buf (char_at s i) in\n" ++
   "        loop (i + 1)\n" ++
   "    in\n" ++
-  "    loop 0;\n";
+  "    loop 0;\n" ++
+  // Phase 54.27: str_split — split str s by delim, return str list.
+  // Empty delim -> single-element list [s]. Built on str_index_of +
+  // substring + list_rev. Used by markdown/to_html.mere among others.
+  "let str_split = fn (s: str) -> fn (delim: str) ->\n" ++
+  "  let n = str_len s in\n" ++
+  "  let dl = str_len delim in\n" ++
+  "  if dl == 0 then Cons (s, Nil)\n" ++
+  "  else\n" ++
+  "    let rec loop = fn (start: int) -> fn (acc: str list) ->\n" ++
+  "      if start > n then list_rev acc\n" ++
+  "      else\n" ++
+  "        let rest = substring s start n in\n" ++
+  "        let idx = str_index_of rest delim in\n" ++
+  "        if idx < 0 then list_rev (Cons (rest, acc))\n" ++
+  "        else\n" ++
+  "          let part = substring s start (start + idx) in\n" ++
+  "          loop (start + idx + dl) (Cons (part, acc))\n" ++
+  "    in\n" ++
+  "    loop 0 Nil;\n";
 
 // === Phase 54.10: import resolution ========================================
 //

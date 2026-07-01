@@ -8329,6 +8329,22 @@ let () =
       "ord (chr 65)" "65";
     cross_emit "chr round-trip"
       "if str_eq (chr 97) \"a\" then 1 else 0" "1";
+    (* Phase 54.27: prelude expansion — str_split / list_filter / list_iter /
+       list_any / list_all / str_trim. *)
+    cross_emit "prelude str_split"
+      "let rec count = fn xs -> match xs with | Nil -> 0 | Cons (_, t) -> 1 + count t in count (str_split \"a,b,c\" \",\")" "3";
+    cross_emit "prelude str_split empty delim"
+      "let rec count = fn xs -> match xs with | Nil -> 0 | Cons (_, t) -> 1 + count t in count (str_split \"abc\" \"\")" "1";
+    cross_emit "prelude list_filter"
+      "let rec sum = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t in sum (list_filter (Cons (1, Cons (2, Cons (3, Cons (4, Nil))))) (fn n -> n > 2))" "7";
+    cross_emit "prelude list_any"
+      "if list_any (Cons (1, Cons (2, Cons (3, Nil)))) (fn n -> n == 2) then 1 else 0" "1";
+    cross_emit "prelude list_all"
+      "if list_all (Cons (1, Cons (2, Cons (3, Nil)))) (fn n -> n > 0) then 1 else 0" "1";
+    cross_emit "prelude str_trim basic"
+      "str_len (str_trim \"   hello   \")" "5";
+    cross_emit "prelude str_trim empty"
+      "str_len (str_trim \"     \")" "0";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"
