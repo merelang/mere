@@ -8524,6 +8524,18 @@ let () =
       (project_root ^ "/contrib/markdown/to_text.mere") 50_000;
     bootstrap_wat_ok "compile: markdown toc"
       (project_root ^ "/contrib/markdown/toc.mere") 50_000;
+    (* Phase 54.33: time.mere unlocked via float codegen. Also cements
+       the "18/18 contribs self-host compilable" milestone. *)
+    bootstrap_wat_ok "compile: time"
+      (project_root ^ "/contrib/time/time.mere") 40_000;
+    (* Phase 54.34: fill in the CI-verified list to cover every
+       self-host contrib. Runtime bootstrap harness already exercises
+       lexer / parser / typer / eval / fmt end-to-end; adding wat_ok
+       for the smaller regex.engine + test rounds out the coverage. *)
+    bootstrap_wat_ok "compile: regex engine"
+      (project_root ^ "/contrib/regex/engine.mere") 60_000;
+    bootstrap_wat_ok "compile: test"
+      (project_root ^ "/contrib/test/test.mere") 50_000;
     (* Phase 54.22: fmt bootstrap. format_program compiled to wasm;
        we return the length of the formatted output. *)
     bootstrap_emit "fmt bootstrap int"
