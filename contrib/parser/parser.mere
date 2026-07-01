@@ -191,6 +191,7 @@ let expect_ident = fn (toks: pos_token list) ->
 let is_atom_start = fn (t: token) ->
   match t with
   | TInt _ -> true
+  | TFloat _ -> true
   | TStr _ -> true
   | TIdent _ -> true
   | TTrue -> true
@@ -492,6 +493,7 @@ and parse_atom_raw = fn (toks: pos_token list) ->
       let (line, t) = pt in
       (match t with
         | TInt n -> (EInt n, rest)
+        | TFloat s -> (EFloat s, rest)
         | TStr s -> (EStr s, rest)
         | TTrue -> (EBool true, rest)
         | TFalse -> (EBool false, rest)
@@ -1329,7 +1331,7 @@ let rec expr_to_str = fn (e: expr) ->
     // so exhaustive-match warnings stay quiet. EFloat needs a lexer
     // token; records ride along with their expr-side syntax in a
     // follow-up slice.
-    | EFloat _ -> "Float(...)"
+    | EFloat s -> "Float(" ++ s ++ ")"
     | ERecordLit (name, fields) ->
       let parts = list_map fields (fn (f: str * expr) ->
         let (fn_, e) = f in fn_ ++ " = " ++ expr_to_str e) in

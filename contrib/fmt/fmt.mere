@@ -247,10 +247,11 @@ let rec trailing_match = fn (e: expr) -> match e with
 let rec fmt_expr = fn (p: int) -> fn (ind: int) -> fn (e: expr) -> match e with
   // Atoms
   | EInt n -> show n
-  | EFloat f ->
-    let s = str_of_float f in
-    let n = str_len s in
-    if n > 0 && char_at s (n - 1) == "." then s ++ "0" else s
+  // Phase 54.33: EFloat now holds the source-text representation
+  // ("42.5"), so fmt just echoes it. The old parsed-float path used
+  // str_of_float and appended ".0" if the print dropped the trailing
+  // 0 — no longer needed since the source text is preserved verbatim.
+  | EFloat s -> s
   | EBool b -> if b then "true" else "false"
   | EStr s -> escape_string_for_fmt s
   | EUnit -> "()"

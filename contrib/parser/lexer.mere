@@ -17,6 +17,10 @@
 type token =
   // Literals
   | TInt of int
+  // Phase 54.33: TFloat holds the source-text representation of a
+  // float literal (e.g. "42.5" or "3.14"). Parser produces
+  // `EFloat text`; codegen emits `f64.const <text>` unchanged.
+  | TFloat of str
   | TStr of str
   | TIdent of str
   // `'a` — type variable token. Phase 54.4: recognized in type
@@ -219,19 +223,17 @@ let tokenize = fn (s: str) ->
           | None -> TIdent text
         in
         loop j line (Cons ((line, tok), acc))
-      // Integer literal (or float — Phase 54.29: consume optional
-      // `.NNN` fractional part but discard it, emitting TInt of the
-      // integer portion. The self-host codegen has no real float
-      // support anyway, so this lets contrib code that mentions
-      // floats (time.mere, fmt.mere) at least parse. Actual float
-      // semantics get a separate slice.)
+      // Integer literal (or float — Phase 54.33: consume optional
+      // `.NNN` fractional part and emit TFloat of the full source
+      // text ("42.5") so codegen can emit `f64.const 42.5` unchanged.
+      // Bare integers stay TInt.
       else if is_digit_c c then
         let (text, j) = read_digit_run s n i in
-        let j2 = (if j + 1 < n && char_at s j == "." && is_digit_c (char_at s (j + 1)) then
-                    let (_frac, k) = read_digit_run s n (j + 1) in
-                    k
-                  else j) in
-        loop j2 line (Cons ((line, TInt (int_of_str text)), acc))
+        if j + 1 < n && char_at s j == "." && is_digit_c (char_at s (j + 1)) then
+          let (frac, k) = read_digit_run s n (j + 1) in
+          loop k line (Cons ((line, TFloat (text ++ "." ++ frac)), acc))
+        else
+          loop j line (Cons ((line, TInt (int_of_str text)), acc))
       // String literal
       else if c == "\"" then
         let (text, j) = read_string_lit s n i in
@@ -308,6 +310,7 @@ let tokenize = fn (s: str) ->
 
 let token_str = fn (t: token) -> match t with
   | TInt n -> "Int(" ++ show n ++ ")"
+  | TFloat s -> "Float(" ++ s ++ ")"
   | TStr s -> "Str(\"" ++ s ++ "\")"
   | TIdent s -> "Ident(" ++ s ++ ")"
   | TTyVar s -> "TyVar(" ++ s ++ ")"

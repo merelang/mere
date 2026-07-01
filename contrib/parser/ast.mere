@@ -63,7 +63,11 @@ type pattern =
 
 type expr =
   | EInt of int
-  | EFloat of float
+  // Phase 54.33: store the float literal's source text (e.g. "42.5")
+  // rather than a parsed Mere float. The codegen emits `f64.const <s>`
+  // verbatim into WAT, so no runtime float parsing is needed at
+  // compile time. `fmt` just echoes the string.
+  | EFloat of str
   | EBool of bool
   | EStr of str
   | EUnit

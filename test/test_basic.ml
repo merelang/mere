@@ -8366,11 +8366,19 @@ let () =
        application (would need arity table integration). *)
     cross_emit "Module.Ctor pattern"
       "match Toml.TInt (42) with | Toml.TInt n -> n | _ -> -1" "42";
-    (* Phase 54.29: float literal — lexer consumes `NNN.NNN` and emits
-       TInt of the integer part. Fractional dropped; codegen for real
-       floats is a separate slice. *)
-    cross_emit "float literal fractional dropped"
-      "let x = 42.5 in x" "42";
+    (* Phase 54.33: float literal now stored as source-text in EFloat
+       and emitted as `f64.const N.M` (Phase 54.29's discard-fractional
+       heuristic is replaced). Use int_of_float to observe the value. *)
+    cross_emit "float literal + int_of_float"
+      "int_of_float 42.5" "42";
+    cross_emit "float arith f_mul + int_of_float"
+      "int_of_float (f_mul 3.14 100.0)" "314";
+    cross_emit "float cmp f_lt"
+      "if f_lt 1.5 2.5 then 1 else 0" "1";
+    cross_emit "float cmp f_gt"
+      "if f_gt 1.5 2.5 then 1 else 0" "0";
+    cross_emit "float_of_int round trip"
+      "int_of_float (float_of_int 99)" "99";
     (* Phase 54.30: `region R { <expr> }` — permissive parse (region
        metadata discarded, body treated as plain expression). Matches
        markdown/to_text.mere and markdown/toc.mere shape. *)
