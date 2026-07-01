@@ -1,0 +1,27 @@
+// http_echo_body: HTTP echo server that also mirrors the request body.
+//
+// Purpose: Stage A follow-up demo. Uses `http_current_body ()` to pull
+// the POST/PUT payload into Mere, then returns a response that includes
+// both the request line and the body. Verifies that the per-request
+// body slot pattern (see contrib/http/README.md) works end to end.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_echo_body.mere > /tmp/eb.wat
+//   wat2wasm /tmp/eb.wat -o /tmp/eb.wasm
+//   node scripts/run_http_server.js /tmp/eb.wasm
+//   # in another terminal:
+//   curl -X POST -d 'hello mere' http://localhost:8080/msg
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+
+let handle = fn req ->
+  let body = http_current_body () in
+  "line=" ++ req ++ "\nbody=" ++ body ++ "\n"
+in
+
+let _ = print "starting http server on :8080 ..." in
+let _ = http_serve 8080 handle in
+0

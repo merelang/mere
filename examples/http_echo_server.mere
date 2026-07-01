@@ -1,0 +1,29 @@
+// http_echo_server: minimal HTTP echo server driven by Mere.
+//
+// Purpose: Stage A of "Mere for web backends". Register a Mere handler
+// that Node's `http.createServer` calls for each request; return an
+// echo of the request line as the response body.
+//
+// This dogfoods:
+//   - `extern fn` with a function-typed argument (`str -> str`)
+//     — the same Wasm closure ABI as `contrib/dom`.
+//   - The `__indirect_function_table` export path used by any host
+//     glue that dispatches back into Mere.
+//
+// Execution mode: Wasm only, run under Node with the contrib/http glue.
+//
+// Usage:
+//   dune exec ./bin/mere.exe -- -w -o echo.wat examples/http_echo_server.mere
+//   wat2wasm echo.wat -o echo.wasm
+//   node scripts/run_http_server.js echo.wasm
+//   # then:  curl http://localhost:8080/hello
+
+extern fn http_serve: int -> (str -> str) -> unit;
+
+let handle = fn req ->
+  "Hello from Mere! You asked: " ++ req ++ "\n"
+in
+
+let _ = print "starting http server on :8080 ..." in
+let _ = http_serve 8080 handle in
+0

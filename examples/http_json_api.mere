@@ -1,0 +1,61 @@
+// http_json_api: small JSON REST API driven by Mere.
+//
+// Purpose: Stage A end-to-end demo. Combines the four extern fns from
+// `contrib/http/http.mere`:
+//   - `http_serve`         — start the server, register handler
+//   - `http_current_body`  — read POST/PUT body
+//   - `http_set_status`    — return 404 for unknown routes
+//   - `http_set_content_type` — send application/json where appropriate
+//
+// Endpoints:
+//   GET  /                → 200 text/plain, welcome banner
+//   GET  /users           → 200 application/json, array of {id,name}
+//   GET  /users/1         → 200 application/json, {id:1,name:"alice"}
+//   GET  /users/2         → 200 application/json, {id:2,name:"bob"}
+//   POST /echo            → 200 application/json, {"echo": <body>}
+//   anything else         → 404 text/plain, "not found: <req>"
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_json_api.mere > /tmp/api.wat
+//   wat2wasm /tmp/api.wat -o /tmp/api.wasm
+//   node scripts/run_http_server.js /tmp/api.wasm
+//   # in another terminal:
+//   curl -sS http://localhost:8080/users
+//   curl -sS http://localhost:8080/users/1
+//   curl -sS -X POST -d 'hi mere' http://localhost:8080/echo
+//   curl -isS http://localhost:8080/nope   # observe HTTP/1.1 404
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+
+let json = fn () -> http_set_content_type "application/json" in
+
+let handle = fn req ->
+  // CORS on every response; browsers hitting the API from another
+  // origin need this. Uses `http_set_header` (Phase 54 Stage A).
+  let _ = http_set_header "Access-Control-Allow-Origin" "*" in
+  if str_eq req "GET /" then
+    "Mere HTTP JSON API demo\n"
+  else if str_eq req "GET /users" then
+    let _ = json () in
+    "[\{\"id\":1,\"name\":\"alice\"},\{\"id\":2,\"name\":\"bob\"}]"
+  else if str_eq req "GET /users/1" then
+    let _ = json () in
+    "\{\"id\":1,\"name\":\"alice\"}"
+  else if str_eq req "GET /users/2" then
+    let _ = json () in
+    "\{\"id\":2,\"name\":\"bob\"}"
+  else if str_eq req "POST /echo" then
+    let _ = json () in
+    "\{\"echo\":\"" ++ http_current_body () ++ "\"}"
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ req ++ "\n"
+in
+
+let _ = print "starting json api server on :8080 ..." in
+let _ = http_serve 8080 handle in
+0

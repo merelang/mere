@@ -1,0 +1,51 @@
+// http_fmt_service: Mere's own self-host formatter, exposed as an HTTP
+// service.
+//
+// Purpose: full-stack dogfood combining the two Phase-54 milestones
+//   - `contrib/parser` + `contrib/fmt` (self-host lexer / parser / fmt,
+//     confirmed running under wasm at Phase 54.22)
+//   - `contrib/http` (Node-hosted HTTP server, Phase 54.35)
+//
+// The Mere source of the compiler pipeline running inside its own
+// wasm-compiled binary, driving a real HTTP endpoint. This is what
+// the self-host bootstrap unlocks in practice.
+//
+// Endpoints:
+//   GET  /                  → usage banner (text/plain)
+//   POST /fmt   body=<src>  → formatted Mere source (text/plain)
+//
+// Usage:
+//   dune exec ./bin/mere.exe -- -w examples/http_fmt_service.mere > /tmp/fmt.wat
+//   wat2wasm /tmp/fmt.wat -o /tmp/fmt.wasm
+//   node scripts/run_http_server.js /tmp/fmt.wasm
+//   # in another terminal:
+//   curl -sS -X POST --data-raw 'let x=1+2*3 in x' http://localhost:8080/fmt
+
+import "../contrib/parser/parser.mere";
+import "../contrib/fmt/fmt.mere";
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_status: int -> unit;
+
+let format_source = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _) = parse_decls Nil toks in
+  format_program prog
+in
+
+let handle = fn req ->
+  if str_eq req "POST /fmt" then
+    let _ = http_set_content_type "text/plain; charset=utf-8" in
+    format_source (http_current_body ())
+  else if str_eq req "GET /" then
+    "Mere self-host formatter service\n\nPOST /fmt with Mere source in body.\n\nExample:\n  curl -X POST --data-raw 'let x=1+2*3 in x' http://localhost:8080/fmt\n"
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ req ++ "\n"
+in
+
+let _ = print "starting mere fmt service on :8080 ..." in
+let _ = http_serve 8080 handle in
+0

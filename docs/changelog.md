@@ -4,6 +4,63 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-02 — Phase 54.35 web backend Stage A (contrib/http)
+
+First Node-hosted HTTP server bindings for Mere. Answers the question
+"can I write a real web backend in Mere today?" — yes.
+
+**Added**:
+
+- `contrib/http/http.mere` — five extern fns:
+  - `http_serve: int -> (str -> str) -> unit` — register handler, start server
+  - `http_current_body: unit -> str` — read POST/PUT body
+  - `http_set_status: int -> unit` — override response status
+  - `http_set_content_type: str -> unit` — override `Content-Type`
+  - `http_set_header: str -> str -> unit` — add arbitrary response header
+- `contrib/http/http.glue.js` — Node glue with per-request slots for
+  body / status / content-type / headers. Uses the same closure ABI
+  as `contrib/dom` (Phase 48 C2 MVP): DataView-based `{env, fn_idx}`
+  dispatch through the exported `__indirect_function_table`.
+- `scripts/run_http_server.js` — reference host that merges standard
+  env imports (`puts`, libc stubs, math) with the http glue.
+- Four examples exercising the stack:
+  - `examples/http_echo_server.mere` — minimal echo (~30 LoC)
+  - `examples/http_echo_body.mere` — POST body via `http_current_body`
+  - `examples/http_json_api.mere` ⭐ — six-endpoint JSON REST API with
+    CORS via `http_set_header`, 404s via `http_set_status`
+  - `examples/http_todo_api.mere` ⭐ — in-memory TODO CRUD with
+    routing, top-level mutable `Map[str, str]` state, POST / GET /
+    PUT / DELETE + 404s on missing ids
+- README entries in `contrib/README.md` and `examples/README.md`
+- Detailed `contrib/http/README.md` with API table, integration
+  recipe, and MVP limitations
+
+**Non-obvious gotcha caught in testing**: `http_current_body ()`
+returns a pointer into a per-request scratch buffer that gets
+overwritten at the start of the next request. Storing that pointer
+directly in a `Map` for later reads returns garbage. Fix: copy the
+bytes into the stable bump arena via `strbuf` before storing —
+
+```mere
+let buf = strbuf_new () in
+let _ = strbuf_push buf (http_current_body ()) in
+let text = strbuf_to_str buf in
+map_set store id text
+```
+
+Documented in `contrib/http/README.md`.
+
+**MVP limitations (documented)**: Node-only host, no streaming /
+binary payloads, no custom request-header access, single scratch
+buffer shared across servers.
+
+**Position**: Stage 2 contrib (incubation), sibling of `contrib/dom`
+on the server side. Graduation target is `mere-http` (separate repo)
+once the package manager lands. A future lower-level `contrib/net`
+(raw sockets over a C runtime) will slot in below this one.
+
+---
+
 ## 2026-06-30 → 2026-07-01 — Phase 54 self-host bootstrap loop closes
 
 Over 32 incremental slices (Phase 54.1 → 54.32) the Mere source of the

@@ -1,0 +1,50 @@
+// http_docs_server: serve the mere repo's own docs over HTTP.
+//
+// Purpose: real-world use of `contrib/http` combined with the builtin
+// `read_file` — spin up a local docs viewer for the mere repository.
+// Handy when hacking on docs offline (no Pages required) and a small
+// dogfood for "actual file serving from a Mere program".
+//
+// Routes:
+//   GET /            → README.md            (text/markdown)
+//   GET /changelog   → docs/changelog.md    (text/markdown)
+//   GET /tutorial    → docs/tutorial.md     (text/markdown)
+//   GET /reference   → docs/language-reference.md (text/markdown)
+//   GET /license     → LICENSE              (text/plain)
+//   anything else    → 404 text/plain
+//
+// Since paths are relative, run from the mere repo root:
+//   dune exec ./bin/mere.exe -- -w examples/http_docs_server.mere > /tmp/docs.wat
+//   wat2wasm /tmp/docs.wat -o /tmp/docs.wasm
+//   node scripts/run_http_server.js /tmp/docs.wasm
+//   # in another terminal:
+//   curl -sS http://localhost:8080/           # README.md
+//   curl -sS http://localhost:8080/changelog  # docs/changelog.md
+//
+// Execution mode: Wasm only, run under Node with the contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+let markdown = fn () -> http_set_content_type "text/markdown; charset=utf-8" in
+
+let handle = fn req ->
+  if str_eq req "GET /" then
+    let _ = markdown () in read_file "README.md"
+  else if str_eq req "GET /changelog" then
+    let _ = markdown () in read_file "docs/changelog.md"
+  else if str_eq req "GET /tutorial" then
+    let _ = markdown () in read_file "docs/tutorial.md"
+  else if str_eq req "GET /reference" then
+    let _ = markdown () in read_file "docs/language-reference.md"
+  else if str_eq req "GET /license" then
+    read_file "LICENSE"
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ req ++ "\n"
+in
+
+let _ = print "serving mere docs on :8080 ..." in
+let _ = http_serve 8080 handle in
+0

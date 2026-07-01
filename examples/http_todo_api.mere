@@ -1,0 +1,129 @@
+// http_todo_api: in-memory TODO REST API driven by Mere.
+//
+// Purpose: prove that a real stateful backend can be written in Mere
+// today. Combines everything in Stage A:
+//   - `http_serve` + closure dispatch
+//   - `http_current_body` for POST bodies
+//   - `http_set_status` for 404
+//   - `http_set_content_type` for application/json
+//   - top-level mutable `Map[str, str]` as the in-memory store
+//     (using the pattern from examples/rate_limiter.mere)
+//
+// Endpoints:
+//   POST   /todos           body=<text>   → 201, {"id":"N","text":"..."}
+//   GET    /todos                         → 200, [{"id":"1","text":"..."}, ...]
+//   GET    /todos/N                       → 200, {"id":"N","text":"..."} | 404
+//   PUT    /todos/N         body=<text>   → 200, {"id":"N","text":"..."} | 404
+//   DELETE /todos/N                       → 200, {"deleted":"N"}         | 404
+//
+// NB: body / text is passed through verbatim; if the client posts a raw
+// quote or backslash, the returned JSON will not be valid. A real
+// implementation would json-escape via the contrib/json writer.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_todo_api.mere > /tmp/todo.wat
+//   wat2wasm /tmp/todo.wat -o /tmp/todo.wasm
+//   node scripts/run_http_server.js /tmp/todo.wasm
+//   # in another terminal:
+//   curl -sS -X POST -d 'buy milk'      http://localhost:8080/todos
+//   curl -sS -X POST -d 'walk the dog'  http://localhost:8080/todos
+//   curl -sS       http://localhost:8080/todos
+//   curl -sS       http://localhost:8080/todos/1
+//   curl -sS -X PUT -d 'buy oat milk'   http://localhost:8080/todos/1
+//   curl -isS      http://localhost:8080/todos/99
+//   curl -sS -X DELETE http://localhost:8080/todos/1
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+// Top-level mutable state. Phase 30.2 codegen makes these globals
+// visible to nested closures (see examples/rate_limiter.mere).
+let todos   = map_new ();   // id_str -> text
+let counter = map_new ();   // "next"  -> next_id (int)
+let _ = map_set counter "next" 1;
+
+let json = fn () -> http_set_content_type "application/json" in
+
+let obj_of = fn id -> fn text ->
+  "\{\"id\":\"" ++ id ++ "\",\"text\":\"" ++ text ++ "\"}"
+in
+
+// List all todos as a JSON array. Iterates the map, pushing each entry
+// into a strbuf with a leading comma when needed.
+let list_todos = fn () ->
+  let buf = strbuf_new () in
+  let first_slot = map_new () in
+  let _ = map_set first_slot "f" 1 in
+  let _ = strbuf_push buf "[" in
+  let _ = map_iter todos (fn k -> fn v ->
+    let is_first = map_get first_slot "f" in
+    let _ = if is_first == 1 then
+              map_set first_slot "f" 0
+            else
+              strbuf_push buf ","
+    in
+    strbuf_push buf (obj_of k v)
+  ) in
+  let _ = strbuf_push buf "]" in
+  strbuf_to_str buf
+in
+
+let handle = fn req ->
+  if str_eq req "POST /todos" then
+    let n = map_get counter "next" in
+    let _ = map_set counter "next" (n + 1) in
+    let id = show n in
+    // http_current_body's pointer lives in a per-request scratch that
+    // gets overwritten between requests. Copy into the stable bump
+    // arena via strbuf before storing.
+    let buf = strbuf_new () in
+    let _ = strbuf_push buf (http_current_body ()) in
+    let text = strbuf_to_str buf in
+    let _ = map_set todos id text in
+    let _ = http_set_status 201 in
+    let _ = json () in
+    obj_of id text
+  else if str_eq req "GET /todos" then
+    let _ = json () in
+    list_todos ()
+  else if str_starts_with req "GET /todos/" then
+    let id = substring req 11 (str_len req) in
+    if map_has todos id then
+      let _ = json () in
+      obj_of id (map_get todos id)
+    else
+      let _ = http_set_status 404 in
+      "not found: " ++ id ++ "\n"
+  else if str_starts_with req "PUT /todos/" then
+    let id = substring req 11 (str_len req) in
+    if map_has todos id then
+      // Same strbuf-into-bump-arena copy as POST — the raw
+      // http_current_body pointer lives in per-request scratch.
+      let buf = strbuf_new () in
+      let _ = strbuf_push buf (http_current_body ()) in
+      let text = strbuf_to_str buf in
+      let _ = map_set todos id text in
+      let _ = json () in
+      obj_of id text
+    else
+      let _ = http_set_status 404 in
+      "not found: " ++ id ++ "\n"
+  else if str_starts_with req "DELETE /todos/" then
+    let id = substring req 14 (str_len req) in
+    if map_has todos id then
+      let _ = map_delete todos id in
+      let _ = json () in
+      "\{\"deleted\":\"" ++ id ++ "\"}"
+    else
+      let _ = http_set_status 404 in
+      "not found: " ++ id ++ "\n"
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ req ++ "\n"
+in
+
+let _ = print "starting todo api server on :8080 ..." in
+let _ = http_serve 8080 handle in
+0

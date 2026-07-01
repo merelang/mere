@@ -12,10 +12,11 @@ OCaml implementation of **Mere**, a new programming language (Old English for "l
 
 Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 
-## Status (as of 2026-07-01)
+## Status (as of 2026-07-02)
 
 - **1778 tests passing**
 - **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **All 18 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc` / `time`. 13 of the 18 have CI compile-time verification via `bootstrap_wat_ok` (wat2wasm-checks the emitted module).
+- **🌐 Web backend Stage A** (Phase 54.35, 2026-07-02): `contrib/http/` adds Node-hosted HTTP server bindings via five extern fns (`http_serve` + `http_current_body` + `http_set_status` + `http_set_content_type` + `http_set_header`), sibling of `contrib/dom` for the server side. Real HTTP JSON REST APIs are now expressible in Mere — see `examples/http_todo_api.mere` (in-memory CRUD with routing, status codes, JSON, and top-level mutable `Map` state) and `examples/http_json_api.mere` (six endpoints incl. CORS).
 - **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); subsequent phases grew the example set to 136.
 - Memory model: region / view / Trivial[R] / `with` Drop work at the type level, in the interpreter, and in all three codegen backends.
 - Effect system: capability-passing pattern + `signature ... = (...)` argument bundling + `using [cap]` sugar + builtin Logger / Metrics.

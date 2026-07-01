@@ -71,6 +71,7 @@ naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 | **fmt** | `contrib/fmt/` | Mere self-host of `Mere.Formatter` — `format_expr` + `format_program` (Phase 49 + Stage 50g). Imports AST defs from `contrib/parser/ast.mere`. | top-level |
 | **parser** | `contrib/parser/` | Mere self-host of `Mere.Lexer` + `Mere.Parser` — `tokenize` + `parse_decls` (Phase 50). Plus shared `ast.mere` consumed by fmt + eval. | top-level |
 | **eval** | `contrib/eval/` | (in progress) Mere self-host of `Mere.Eval` — tree-walking interpreter over `ast.mere`'s `expr`. Stage 51a: literals / var / binop / cmpop / logicop / neg / if (Phase 51 in progress). | top-level |
+| **http** | `contrib/http/` | minimal HTTP server bindings for Node-hosted Mere (`http_serve` + `http_current_body` + `http_set_status` + `http_set_content_type` + `http_set_header`). Wasm + `http.glue.js` host. Server-side sibling of `contrib/dom`. | extern fn (Phase 54 Stage A) |
 
 Future candidates: see internal design notes §3.
 

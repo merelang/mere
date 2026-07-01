@@ -1,0 +1,54 @@
+// contrib/http — minimal HTTP server bindings for Node-hosted Mere.
+//
+// One `extern fn` that lets Mere code register a request handler and
+// start a Node `http` server. Intended as the "Stage A" backend demo:
+// prove that a Mere program compiled to Wasm can drive real HTTP
+// traffic, without pulling in a full sockets API yet.
+//
+// See `contrib/http/README.md` for the integration recipe and the
+// Node-side companion glue in `contrib/http/http.glue.js`.
+
+// Start an HTTP server on the given port and dispatch each request to
+// the handler.
+//
+// The handler receives the request line as a single string in the form
+// `"<METHOD> <URL>"` (e.g. `"GET /hello"`). Its return value becomes
+// the response body; the host wraps it with an `HTTP/1.1 200 OK` +
+// `Content-Type: text/plain` header pair.
+//
+// If the handler needs the request body (POST / PUT etc.), it can call
+// `http_current_body ()` while inside the dispatch — the glue keeps
+// the body of the in-flight request in a per-request slot.
+//
+// Returns immediately after the listen call; the Node event loop keeps
+// the process alive as long as the server is bound.
+extern fn http_serve: int -> (str -> str) -> unit;
+
+// Return the request body of the HTTP request currently being handled.
+// Only valid to call from inside the `http_serve` handler closure; at
+// any other time it returns an empty string.
+//
+// The pointer is stable for the duration of the handler call and is
+// overwritten at the start of the next request — copy via `strbuf` /
+// `substring` if you need to retain it past the handler.
+extern fn http_current_body: unit -> str;
+
+// Override the HTTP status code the host will use when sending the
+// response for the request currently being handled. Defaults to 200.
+// Only valid to call from inside the `http_serve` handler closure.
+extern fn http_set_status: int -> unit;
+
+// Override the `Content-Type` header the host will use when sending
+// the response for the request currently being handled. Defaults to
+// `text/plain; charset=utf-8`. Only valid to call from inside the
+// `http_serve` handler closure.
+extern fn http_set_content_type: str -> unit;
+
+// Add or overwrite an arbitrary response header for the request
+// currently being handled (e.g. `Access-Control-Allow-Origin: *`,
+// `Cache-Control: no-store`, `Set-Cookie: session=…`). Only valid to
+// call from inside the `http_serve` handler closure. Prefer
+// `http_set_content_type` for the `Content-Type` header — using
+// `http_set_header "Content-Type" …` works too but bypasses the
+// content-type slot the glue tracks separately.
+extern fn http_set_header: str -> str -> unit;
