@@ -258,7 +258,7 @@ let is_builtin = fn (n: str) ->
   n == "str_unescape" || n == "try_or" ||
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
-  n == "not" || n == "str_eq" || n == "read_file";
+  n == "not" || n == "str_eq" || n == "read_file" || n == "str_of_float";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -846,6 +846,16 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
       | EVar "str_of_int" ->
         // Phase 54.5: `str_of_int n` is the explicit-int form of
         // `show`. Lowers to the same `$show_int` helper.
+        let s1 = note_helper_use "show_int" s in
+        let s2 = emit_expr x s1 in
+        push_instr "call $show_int" s2
+      | EVar "str_of_float" ->
+        // Phase 54.22: float support is minimal in the self-host
+        // codegen — every value is i32. Lower str_of_float the same
+        // way as str_of_int / show so contrib fmt code that just
+        // references it compiles. Actual float values would print
+        // as their bit pattern; contrib code that hits this path
+        // for real floats will need proper float codegen later.
         let s1 = note_helper_use "show_int" s in
         let s2 = emit_expr x s1 in
         push_instr "call $show_int" s2

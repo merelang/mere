@@ -8438,7 +8438,36 @@ let () =
        validity of the self-emitted module. *)
     bootstrap_wat_ok "codegen self-emit"
       (project_root ^ "/contrib/codegen/codegen_wasm.mere")
-      1_000_000
+      1_000_000;
+    (* Phase 54.22: fmt bootstrap. format_program compiled to wasm;
+       we return the length of the formatted output. *)
+    bootstrap_emit "fmt bootstrap int"
+      (Printf.sprintf
+        "import \"%s/fmt/fmt.mere\";\n\
+         import \"%s/parser/parser.mere\";\n\
+         let toks = tokenize \"42\" in\n\
+         let (prog, _) = parse_decls Nil toks in\n\
+         str_len (format_program prog)\n"
+        contrib contrib)
+      "3";
+    bootstrap_emit "fmt bootstrap arith"
+      (Printf.sprintf
+        "import \"%s/fmt/fmt.mere\";\n\
+         import \"%s/parser/parser.mere\";\n\
+         let toks = tokenize \"1 + 2 * 3\" in\n\
+         let (prog, _) = parse_decls Nil toks in\n\
+         str_len (format_program prog)\n"
+        contrib contrib)
+      "10";
+    bootstrap_emit "fmt bootstrap let-in"
+      (Printf.sprintf
+        "import \"%s/fmt/fmt.mere\";\n\
+         import \"%s/parser/parser.mere\";\n\
+         let toks = tokenize \"let x = 1 in x\" in\n\
+         let (prog, _) = parse_decls Nil toks in\n\
+         str_len (format_program prog)\n"
+        contrib contrib)
+      "15"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
