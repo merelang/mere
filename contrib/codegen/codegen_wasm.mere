@@ -424,15 +424,36 @@ let rec build_offsets = fn (xs: str list) -> fn (n: int) ->
 // stack. Used for both the closure record (always 8 bytes) and the
 // per-EFun env record (4 bytes per captured var). Internally uses a
 // tmp local to save the pre-bump pointer for the final result push.
+// Phase 54.24: grow-on-demand — before advancing bump, check if the
+// new bump would exceed current memory size. If so, memory.grow the
+// pages needed. This makes bump-alloc safe under arbitrary use even
+// beyond the initial memory pages, at the cost of an extra load +
+// branch per allocation.
 let emit_bump_alloc = fn (nbytes: int) -> fn (s: EmitState) ->
   let (tmp, s1) = alloc_tmp_local s in
   let s2 = push_instr "global.get $__lang_bump" s1 in
   let s3 = push_instr ("local.set " ++ show tmp) s2 in
+  // Ensure we have enough memory. If bump + nbytes > memory size,
+  // memory.grow by enough pages. 65536 = wasm page size.
   let s4 = push_instr ("local.get " ++ show tmp) s3 in
   let s5 = push_instr ("i32.const " ++ show nbytes) s4 in
   let s6 = push_instr "i32.add" s5 in
-  let s7 = push_instr "global.set $__lang_bump" s6 in
-  push_instr ("local.get " ++ show tmp) s7;
+  let s7 = push_instr "memory.size" s6 in
+  let s8 = push_instr "i32.const 65536" s7 in
+  let s9 = push_instr "i32.mul" s8 in
+  let s10 = push_instr "i32.gt_u" s9 in
+  let s11 = push_instr "if" s10 in
+  // Not enough — grow by 1 page (nbytes < 64KB always in practice).
+  let s12 = push_instr "  i32.const 1" s11 in
+  let s13 = push_instr "  memory.grow" s12 in
+  let s14 = push_instr "  drop" s13 in
+  let s15 = push_instr "end" s14 in
+  // Advance bump.
+  let s16 = push_instr ("local.get " ++ show tmp) s15 in
+  let s17 = push_instr ("i32.const " ++ show nbytes) s16 in
+  let s18 = push_instr "i32.add" s17 in
+  let s19 = push_instr "global.set $__lang_bump" s18 in
+  push_instr ("local.get " ++ show tmp) s19;
 
 // `emit_alloc_closure fn_idx s` assumes the env_ptr is already on top
 // of the stack (an `i32.const 0` for capture-less lambdas, or a real
