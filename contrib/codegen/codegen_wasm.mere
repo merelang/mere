@@ -97,7 +97,7 @@ let initial_emit_state = EmitState {
   field_offsets = Nil,
   extern_uses = Nil,
   helpers_used = Nil,
-  extern_decls = Nil,
+  extern_decls = Nil
 };
 
 // === Instruction emission ==================================================
@@ -258,7 +258,7 @@ let is_builtin = fn (n: str) ->
   n == "str_unescape" || n == "try_or" ||
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
-  n == "not" || n == "str_eq";
+  n == "not" || n == "str_eq" || n == "read_file";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -1008,6 +1008,15 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr x s1 in
         let s3 = push_instr "i32.load8_u" s2 in
         push_instr "call $is_space" s3
+      | EVar "read_file" ->
+        // Phase 54.19: read_file lowers to a host extern. When the
+        // wasm module actually calls it, the host must provide a
+        // real (path: i32) -> (i32 str_ptr) impl. For test harnesses
+        // that never invoke read_file (e.g., emit demos), the Proxy
+        // env stub returns 0 which is a valid empty-string ptr.
+        let s0 = note_extern_use "read_file" s in
+        let s1 = emit_expr x s0 in
+        push_instr "call $read_file" s1
       | EVar "not" ->
         // Phase 54.11: `not b` — boolean negation. b is i32 (0 or 1).
         // `i32.eqz` produces 1 if zero, 0 otherwise — exactly NOT.
@@ -1649,6 +1658,10 @@ let rec list_length_pair = fn (xs: (int * str) list) ->
 let extern_import_line = fn (name: str) ->
   if name == "print" then
     "  (import \"env\" \"puts\" (func $puts (param i32)))\n"
+  else if name == "read_file" then
+    // Phase 54.19: (path: i32 str_ptr) -> (i32 str_ptr). Host provides
+    // the actual implementation (or returns 0 for a null-string stub).
+    "  (import \"env\" \"read_file\" (func $read_file (param i32) (result i32)))\n"
   else
     fail ("codegen_wasm: unknown extern fn " ++ name);
 
@@ -2272,7 +2285,27 @@ let selfhost_prelude =
   "  match xs with\n" ++
   "  | Nil -> \"\"\n" ++
   "  | Cons (h, Nil) -> h\n" ++
-  "  | Cons (h, t) -> h ++ sep ++ str_join sep t;\n";
+  "  | Cons (h, t) -> h ++ sep ++ str_join sep t;\n" ++
+  // Phase 54.19: str_replace as a Mere-level prelude fn, built on
+  // strbuf + substring + str_eq (all builtins). Codegen_wasm.mere
+  // uses it heavily for wat_escape_str, so it needs to be in scope
+  // when codegen_wasm bootstraps itself.
+  "let str_replace = fn (s: str) -> fn (old: str) -> fn (new_str: str) ->\n" ++
+  "  let n = str_len s in\n" ++
+  "  let ol = str_len old in\n" ++
+  "  if ol == 0 then s\n" ++
+  "  else\n" ++
+  "    let buf = strbuf_new () in\n" ++
+  "    let rec loop = fn (i: int) ->\n" ++
+  "      if i >= n then strbuf_to_str buf\n" ++
+  "      else if i + ol <= n && str_eq (substring s i (i + ol)) old then\n" ++
+  "        let __r = strbuf_push buf new_str in\n" ++
+  "        loop (i + ol)\n" ++
+  "      else\n" ++
+  "        let __r = strbuf_push buf (char_at s i) in\n" ++
+  "        loop (i + 1)\n" ++
+  "    in\n" ++
+  "    loop 0;\n";
 
 // === Phase 54.10: import resolution ========================================
 //
@@ -2323,7 +2356,16 @@ let str_index_of_from = fn (src: str) -> fn (needle: str) -> fn (start: int) ->
   scan start;
 
 let strip_import_main = fn (src: str) ->
-  let marker_pos = str_index_of_from src "// === Demo" 0 in
+  // Require the marker at column 0 (preceded by \n or at position 0)
+  // so it doesn't false-match on string literals or doc comments
+  // that mention the marker text.
+  let rec find_line_marker = fn (start: int) ->
+    let hit = str_index_of_from src "// === Demos ===" start in
+    if hit < 0 then -1
+    else if hit == 0 || str_eq (char_at src (hit - 1)) "\n" then hit
+    else find_line_marker (hit + 1)
+  in
+  let marker_pos = find_line_marker 0 in
   if marker_pos >= 0 then substring src 0 marker_pos
   else
     let n = str_len src in
