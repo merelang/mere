@@ -2564,44 +2564,52 @@ let rec member_str_path = fn (p: str) -> fn (xs: str list) ->
 // Both are conventionally introduced by a `// === Demo` header.
 // Truncate there if found; otherwise fall back to the older
 // last-top-level-`;` heuristic (drops trailing main, keeps decls).
+// Phase 54.32: OCaml wasm codegen (Phase 6.1 MVP) can't resolve some
+// let-bound captures from an inner-lifted rec fn — the compiled
+// contrib/site/playground/selfhost-compile.mere fails with
+// "inner-lifted capture `nl` not in scope". Workaround: pass the
+// captures (n / nl / src / needle) as explicit args to the inner
+// loop so it doesn't rely on closure capture at all.
+let rec str_index_of_from_loop = fn (src: str) -> fn (needle: str)
+                              -> fn (n: int) -> fn (nl: int)
+                              -> fn (i: int) ->
+  if i + nl > n then -1
+  else if str_eq (substring src i (i + nl)) needle then i
+  else str_index_of_from_loop src needle n nl (i + 1);
+
 let str_index_of_from = fn (src: str) -> fn (needle: str) -> fn (start: int) ->
-  let n = str_len src in
-  let nl = str_len needle in
-  let rec scan = fn (i: int) ->
-    if i + nl > n then -1
-    else if str_eq (substring src i (i + nl)) needle then i
-    else scan (i + 1)
-  in
-  scan start;
+  str_index_of_from_loop src needle (str_len src) (str_len needle) start;
+
+// Phase 54.32: hoist recursive loops to top level and pass captures
+// as explicit args, working around OCaml wasm codegen (Phase 6.1)
+// "inner-lifted capture not in scope" for let-bound captures.
+
+let rec strip_marker_scan = fn (src: str) -> fn (start: int) ->
+  let hit = str_index_of_from src "// === Demos ===" start in
+  if hit < 0 then -1
+  else if hit == 0 || str_eq (char_at src (hit - 1)) "\n" then hit
+  else strip_marker_scan src (hit + 1);
+
+let rec strip_top_semi_scan = fn (src: str) -> fn (n: int) -> fn (i: int)
+                           -> fn (in_str: bool) -> fn (best: int) ->
+  if i >= n then best
+  else
+    let c = char_at src i in
+    if in_str then
+      if str_eq c "\\" && i + 1 < n then strip_top_semi_scan src n (i + 2) true best
+      else if str_eq c "\"" then strip_top_semi_scan src n (i + 1) false best
+      else strip_top_semi_scan src n (i + 1) true best
+    else
+      if str_eq c "\"" then strip_top_semi_scan src n (i + 1) true best
+      else if str_eq c ";" then strip_top_semi_scan src n (i + 1) false (i + 1)
+      else strip_top_semi_scan src n (i + 1) false best;
 
 let strip_import_main = fn (src: str) ->
-  // Require the marker at column 0 (preceded by \n or at position 0)
-  // so it doesn't false-match on string literals or doc comments
-  // that mention the marker text.
-  let rec find_line_marker = fn (start: int) ->
-    let hit = str_index_of_from src "// === Demos ===" start in
-    if hit < 0 then -1
-    else if hit == 0 || str_eq (char_at src (hit - 1)) "\n" then hit
-    else find_line_marker (hit + 1)
-  in
-  let marker_pos = find_line_marker 0 in
+  let marker_pos = strip_marker_scan src 0 in
   if marker_pos >= 0 then substring src 0 marker_pos
   else
     let n = str_len src in
-    let rec scan = fn (i: int) -> fn (in_str: bool) -> fn (best: int) ->
-      if i >= n then best
-      else
-        let c = char_at src i in
-        if in_str then
-          if str_eq c "\\" && i + 1 < n then scan (i + 2) true best
-          else if str_eq c "\"" then scan (i + 1) false best
-          else scan (i + 1) true best
-        else
-          if str_eq c "\"" then scan (i + 1) true best
-          else if str_eq c ";" then scan (i + 1) false (i + 1)
-          else scan (i + 1) false best
-    in
-    let cut = scan 0 false 0 in
+    let cut = strip_top_semi_scan src n 0 false 0 in
     if cut <= 0 then src
     else substring src 0 cut;
 
@@ -2647,36 +2655,36 @@ let rec find_next_import = fn (src: str) -> fn (i: int) ->
 // source was read from (used to resolve relative paths). visited
 // tracks already-inlined absolute paths so a diamond import expands
 // once.
-let rec inline_imports_in = fn (src: str) -> fn (base_dir: str)
-                         -> fn (visited: str list) ->
-  let rec loop = fn (i: int) -> fn (acc: str) -> fn (vis: str list) ->
-    match find_next_import src i with
-    | None ->
-      // Copy the rest of src
-      let acc2 = acc ++ substring src i (str_len src) in
-      (acc2, vis)
-    | Some triple ->
-      let (start, end_pos, rel_path) = triple in
-      let resolved = resolve_import_path base_dir rel_path in
-      let prefix = substring src i start in
-      let acc1 = acc ++ prefix in
-      if member_str_path resolved vis then
-        // Already inlined — skip the import line.
-        loop end_pos acc1 vis
-      else
-        let imported_raw = read_file resolved in
-        // Phase 54.15: strip the imported file's trailing main
-        // expression (its demo `let _ = print ... in 0` chain) so
-        // ONLY its decls contribute. Without this the imported main
-        // masks the top-level program's own tail.
-        let imported_src = strip_import_main imported_raw in
-        let imported_dir = dirname resolved in
-        let vis2 = Cons (resolved, vis) in
-        let (inlined, vis3) = inline_imports_in imported_src imported_dir vis2 in
-        let acc2 = acc1 ++ inlined ++ "\n" in
-        loop end_pos acc2 vis3
-  in
-  loop 0 "" visited;
+// Phase 54.32: hoist `inline_imports_in`'s inner loop to a top-level
+// mutually-recursive fn, threading `src` / `base_dir` explicitly so
+// no let-bound captures cross the closure boundary. Same OCaml wasm
+// codegen workaround as strip_import_main above.
+let rec inline_imports_in_loop = fn (src: str) -> fn (base_dir: str)
+                              -> fn (i: int) -> fn (acc: str)
+                              -> fn (vis: str list) ->
+  match find_next_import src i with
+  | None ->
+    let acc2 = acc ++ substring src i (str_len src) in
+    (acc2, vis)
+  | Some triple ->
+    let (start, end_pos, rel_path) = triple in
+    let resolved = resolve_import_path base_dir rel_path in
+    let prefix = substring src i start in
+    let acc1 = acc ++ prefix in
+    if member_str_path resolved vis then
+      inline_imports_in_loop src base_dir end_pos acc1 vis
+    else
+      let imported_raw = read_file resolved in
+      let imported_src = strip_import_main imported_raw in
+      let imported_dir = dirname resolved in
+      let vis2 = Cons (resolved, vis) in
+      let (inlined, vis3) = inline_imports_in imported_src imported_dir vis2 in
+      let acc2 = acc1 ++ inlined ++ "\n" in
+      inline_imports_in_loop src base_dir end_pos acc2 vis3
+
+and inline_imports_in = fn (src: str) -> fn (base_dir: str)
+                     -> fn (visited: str list) ->
+  inline_imports_in_loop src base_dir 0 "" visited;
 
 // End-to-end convenience: source string -> emitted WAT. Same pattern
 // as eval.mere's `parse_and_eval` and typer.mere's `parse_and_infer`.

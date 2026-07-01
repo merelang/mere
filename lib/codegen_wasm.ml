@@ -1679,6 +1679,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr a_e;
     emit_expr b_e;
     emit_instr "call $__lang_str_compare"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_eq"; _ }, a_e); _ }, b_e) ->
+    (* Phase 54.17 (OCaml side): str_eq a b — explicit content-equality
+       for two runtime str values. Uses the same $__lang_streq helper
+       as the polymorphic ==/!= path. *)
+    emit_expr a_e;
+    emit_expr b_e;
+    emit_instr "call $__lang_streq"
   (* Phase 34.3: float arithmetic + comparison + unary + conversions.
      Values are i32 ptr (f64 in heap). Each op is load → op → alloc + store. *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
