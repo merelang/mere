@@ -259,7 +259,8 @@ let is_builtin = fn (n: str) ->
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
   n == "not" || n == "str_eq" || n == "read_file" || n == "str_of_float" ||
-  n == "chr";
+  n == "chr" ||
+  n == "map_new" || n == "map_set" || n == "map_get" || n == "map_has";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -1018,6 +1019,41 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = note_helper_use "chr" s in
         let s2 = emit_expr x s1 in
         push_instr "call $chr" s2
+      | EVar "map_new" ->
+        // Phase 54.28: `map_new ()` — allocate a 4-byte mutable cell
+        // holding a pointer to a Nil variant. The map's list is an
+        // assoc-list of (key, value) tuples wrapped in Cons cells.
+        // Ignores the unit arg x. Depends on the prelude's TopType
+        // pre-registration so Nil = tag 0 and Cons = tag 1 always.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "drop" s1 in
+        let s3 = note_helper_use "map_new" s2 in
+        push_instr "call $map_new" s3
+      | EApp (EApp (EVar "map_set", m_expr), k_expr) ->
+        // Phase 54.28: `map_set m k v` — prepend (k, v) to the map's
+        // assoc-list, updating m's cell in place. Returns unit.
+        // 3-arg curried: outer EApp binds v as x, inner two bind m + k.
+        let s0 = note_helper_use "streq" s in
+        let s1 = note_helper_use "map_set" s0 in
+        let s2 = emit_expr m_expr s1 in
+        let s3 = emit_expr k_expr s2 in
+        let s4 = emit_expr x s3 in
+        push_instr "call $map_set" s4
+      | EApp (EVar "map_get", m_expr) ->
+        // Phase 54.28: `map_get m k` — walk assoc-list, return value
+        // at first key match; 0 (lenient) if missing (OCaml raises).
+        let s0 = note_helper_use "streq" s in
+        let s1 = note_helper_use "map_get" s0 in
+        let s2 = emit_expr m_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $map_get" s3
+      | EApp (EVar "map_has", m_expr) ->
+        // Phase 54.28: `map_has m k` — walk, return 1 if present, 0 else.
+        let s0 = note_helper_use "streq" s in
+        let s1 = note_helper_use "map_has" s0 in
+        let s2 = emit_expr m_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $map_has" s3
       | EVar "is_digit" ->
         // Phase 54.5: `is_digit s` — true iff first byte is '0'..'9'.
         // Idiomatic in-bounds check via unsigned subtract + compare.
@@ -1732,6 +1768,77 @@ let helper_decl_strlen =
   "        (br $lp)))\n" ++
   "    (local.get $i))\n";
 
+// Phase 54.28: Map — assoc-list backed by a 4-byte mutable cell that
+// holds a pointer to the current list head. The list is a chain of
+// Cons cells whose payload is a (key, value) 2-tuple. Insert prepends
+// unconditionally (last write wins on lookup); on duplicate keys the
+// old entry stays alive but shadowed. Hardcodes Nil = tag 0 and
+// Cons = tag 1 — safe because the selfhost_prelude's TopType
+// declarations register those tags first, before any user code.
+
+let helper_decl_map_new =
+  "  (func $map_new (result i32)\n" ++
+  "    (local $cell i32) (local $nil i32)\n" ++
+  "    (local.set $nil (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $nil) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $nil) (i32.const 0))\n" ++
+  "    (i32.store offset=4 (local.get $nil) (i32.const 0))\n" ++
+  "    (local.set $cell (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 4)))\n" ++
+  "    (i32.store offset=0 (local.get $cell) (local.get $nil))\n" ++
+  "    (local.get $cell))\n";
+
+let helper_decl_map_set =
+  "  (func $map_set (param $m i32) (param $k i32) (param $v i32) (result i32)\n" ++
+  "    (local $tuple i32) (local $cons_pl i32) (local $cons i32) (local $old i32)\n" ++
+  "    (local.set $tuple (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $tuple) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $tuple) (local.get $k))\n" ++
+  "    (i32.store offset=4 (local.get $tuple) (local.get $v))\n" ++
+  "    (local.set $old (i32.load offset=0 (local.get $m)))\n" ++
+  "    (local.set $cons_pl (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $cons_pl) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $cons_pl) (local.get $tuple))\n" ++
+  "    (i32.store offset=4 (local.get $cons_pl) (local.get $old))\n" ++
+  "    (local.set $cons (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $cons) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $cons) (i32.const 1))\n" ++
+  "    (i32.store offset=4 (local.get $cons) (local.get $cons_pl))\n" ++
+  "    (i32.store offset=0 (local.get $m) (local.get $cons))\n" ++
+  "    (i32.const 0))\n";
+
+let helper_decl_map_get =
+  "  (func $map_get (param $m i32) (param $k i32) (result i32)\n" ++
+  "    (local $node i32) (local $pl i32) (local $pair i32)\n" ++
+  "    (local.set $node (i32.load offset=0 (local.get $m)))\n" ++
+  "    (block $done\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $done (i32.eqz (i32.load offset=0 (local.get $node))))\n" ++
+  "        (local.set $pl (i32.load offset=4 (local.get $node)))\n" ++
+  "        (local.set $pair (i32.load offset=0 (local.get $pl)))\n" ++
+  "        (if (call $__lang_streq\n" ++
+  "               (local.get $k) (i32.load offset=0 (local.get $pair)))\n" ++
+  "          (then (return (i32.load offset=4 (local.get $pair)))))\n" ++
+  "        (local.set $node (i32.load offset=4 (local.get $pl)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (i32.const 0))\n";
+
+let helper_decl_map_has =
+  "  (func $map_has (param $m i32) (param $k i32) (result i32)\n" ++
+  "    (local $node i32) (local $pl i32) (local $pair i32)\n" ++
+  "    (local.set $node (i32.load offset=0 (local.get $m)))\n" ++
+  "    (block $done\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $done (i32.eqz (i32.load offset=0 (local.get $node))))\n" ++
+  "        (local.set $pl (i32.load offset=4 (local.get $node)))\n" ++
+  "        (local.set $pair (i32.load offset=0 (local.get $pl)))\n" ++
+  "        (if (call $__lang_streq\n" ++
+  "               (local.get $k) (i32.load offset=0 (local.get $pair)))\n" ++
+  "          (then (return (i32.const 1))))\n" ++
+  "        (local.set $node (i32.load offset=4 (local.get $pl)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (i32.const 0))\n";
+
 // Phase 54.26: `$chr n` — inverse of ord. Returns a 1-byte
 // NUL-terminated string with byte value n. Same shape as \$char_at
 // output. n must be in [0,255]; out-of-range values are silently
@@ -2118,6 +2225,10 @@ let helper_body = fn (name: str) ->
   else if name == "show_int" then helper_decl_show_int
   else if name == "char_at" then helper_decl_char_at
   else if name == "chr" then helper_decl_chr
+  else if name == "map_new" then helper_decl_map_new
+  else if name == "map_set" then helper_decl_map_set
+  else if name == "map_get" then helper_decl_map_get
+  else if name == "map_has" then helper_decl_map_has
   else if name == "streq" then helper_decl_streq
   else if name == "is_space" then helper_decl_is_space
   else if name == "str_starts_with" then helper_decl_str_starts_with
