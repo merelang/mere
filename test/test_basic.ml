@@ -8371,6 +8371,13 @@ let () =
        floats is a separate slice. *)
     cross_emit "float literal fractional dropped"
       "let x = 42.5 in x" "42";
+    (* Phase 54.30: `region R { <expr> }` — permissive parse (region
+       metadata discarded, body treated as plain expression). Matches
+       markdown/to_text.mere and markdown/toc.mere shape. *)
+    cross_emit "region block body value"
+      "region R { let x = 10 in x + 5 }" "15";
+    cross_emit "region block nested"
+      "region R { let b = strbuf_new () in let _ = strbuf_push b \"hi\" in strbuf_len b }" "2";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"

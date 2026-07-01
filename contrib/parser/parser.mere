@@ -496,6 +496,35 @@ and parse_atom_raw = fn (toks: pos_token list) ->
         | TTrue -> (EBool true, rest)
         | TFalse -> (EBool false, rest)
         | TIdent name ->
+          // Phase 54.30: `region R { <expr> }` — treat the region as
+          // a permissive scope (region metadata discarded), and the
+          // brace body as just the wrapped expression. This lets
+          // contrib code that uses region syntax (toc.mere,
+          // to_text.mere) parse without proper region tracking; the
+          // codegen falls back to the default __heap. Runtime scope-
+          // bound Drop is a separate slice — permissive is fine for
+          // dogfood purposes.
+          (if str_eq name "region" then
+            (match rest with
+              | Cons (pt2, r1) ->
+                let (_, t2) = pt2 in
+                (match t2 with
+                  | TIdent _region_name ->
+                    (match peek_tok r1 with
+                      | TLBrace ->
+                        let (body, r2) = parse_expr (advance r1) in
+                        let r3 = (match peek_tok r2 with
+                          | TRBrace -> advance r2
+                          | _ -> fail ("line " ++ show line
+                                       ++ ": expected close-brace after region body")) in
+                        (body, r3)
+                      | _ ->
+                        fail ("line " ++ show line
+                              ++ ": expected open-brace after region name"))
+                  | _ ->
+                    fail ("line " ++ show line
+                          ++ ": expected region name after `region`"))
+              | Nil -> fail ("line " ++ show line ++ ": unexpected EOF after `region`"))
           // Uppercase ident = constructor. `Foo (x, y)` eagerly swallows
           // the paren payload so the AST mirrors OCaml's `Constr (..)`
           // shape. `Foo { f = e }` / `Foo { e with f = e' }` is record
@@ -504,7 +533,7 @@ and parse_atom_raw = fn (toks: pos_token list) ->
           // ident, number, ...), parse_apply glues it as a function-
           // style application. Non-paren constructor payloads like
           // `Some 1` are deferred (constr-arity table not available).
-          (if is_upper_first_c name then
+          else if is_upper_first_c name then
             // Phase 54.29: `Module.Ctor` on expression side — same
             // treatment as parse_pattern_base above. Match Uppercase.
             // Uppercase and glue into one qualified constructor name.
