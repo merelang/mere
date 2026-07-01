@@ -7991,6 +7991,40 @@ let () =
     check ("self-host codegen cross: " ^ name) actual expected
   in
 
+  (* Phase 54.15: bootstrap harness. Write `source` to a tempfile,
+     then invoke `parse_and_emit_file` on it via the OCaml interp.
+     That exercises the full self-host pipeline including recursive
+     import inlining, prelude prepending, arity rewrite, and codegen.
+     Use for tests that need `import "..."` or that want to prove the
+     compiled WAT runs correctly under wasm at runtime. *)
+  let self_host_emit_file path =
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/codegen/codegen_wasm.mere\";\n\
+       parse_and_emit_file \"%s\"\n"
+      project_root path
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+
+  let bootstrap_emit name source expected =
+    let src_path = Filename.temp_file "mere_bootstrap_" ".mere" in
+    let oc = open_out src_path in
+    output_string oc source;
+    close_out oc;
+    let wat = self_host_emit_file src_path in
+    let actual = run_wasm wat in
+    Sys.remove src_path;
+    check ("self-host bootstrap: " ^ name) actual expected
+  in
+
   if have_wat2wasm && have_node then begin
     cross_emit "int literal" "42" "42";
     cross_emit "int arith" "1 + 2 * 3" "7";
@@ -8250,7 +8284,40 @@ let () =
       "type Json = | JNull | JBool of bool | JInt of int | JStr of str | JArr of (Json list) | JObj of ((str * Json) list); let rec render = fn v -> match v with | JNull -> \"null\" | JBool b -> if b then \"true\" else \"false\" | JInt n -> show n | JStr s -> \"\\\"\" ++ s ++ \"\\\"\" | JArr items -> \"[\" ++ render_items items ++ \"]\" | JObj fields -> \"{\" ++ render_fields fields ++ \"}\" and render_items = fn xs -> match xs with | Nil -> \"\" | Cons (h, Nil) -> render h | Cons (h, t) -> render h ++ \", \" ++ render_items t and render_fields = fn fs -> match fs with | Nil -> \"\" | Cons ((k, v), Nil) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v | Cons ((k, v), t) -> \"\\\"\" ++ k ++ \"\\\": \" ++ render v ++ \", \" ++ render_fields t in let doc = JObj (Cons ((\"x\", JInt (42)), Cons ((\"on\", JBool (true)), Nil))) in let _ = print (render doc) in 0" "0";
     cross_emit "mini Mere eval (variants + closures)"
       "type Expr = | EInt of int | EBool of bool | EVar of str | EFn of (str * Expr) | EApp of (Expr * Expr) | EIf of (Expr * Expr * Expr); type Val = | VInt of int | VBool of bool | VFn of (str * Expr); let rec lookup = fn k -> fn env -> match env with | Nil -> VInt (0) | Cons ((k2, v), t) -> if k == k2 then v else lookup k t in let rec eval = fn e -> fn env -> match e with | EInt n -> VInt (n) | EBool b -> VBool (b) | EVar n -> lookup n env | EFn (param, body) -> VFn (param, body) | EApp (f, arg) -> let fv = eval f env in let av = eval arg env in (match fv with | VFn (param, body) -> eval body (Cons ((param, av), env)) | _ -> VInt (-1)) | EIf (c, t, el) -> (match eval c env with | VBool (true) -> eval t env | _ -> eval el env) in let r = eval (EApp (EFn (\"x\", EApp (EFn (\"y\", EVar (\"x\")), EInt (99))), EInt (42))) Nil in match r with | VInt n -> n | _ -> -1"
-      "42"
+      "42";
+    (* Phase 54.15: bootstrap harness — exercise parse_and_emit_file
+       end-to-end. Feeds a tempfile through recursive import inlining
+       + arity rewrite + codegen; the resulting WAT is compiled and
+       run under node. These prove the self-host lexer and parser
+       execute correctly under wasm at runtime, not just compile. *)
+    let contrib = project_root ^ "/contrib" in
+    bootstrap_emit "lexer bootstrap tokenize count"
+      (Printf.sprintf
+        "import \"%s/parser/lexer.mere\";\n\
+         let rec count_toks = fn (xs: pos_token list) ->\n\
+           match xs with\n\
+           | Nil -> 0\n\
+           | Cons (_, t) -> 1 + count_toks t\n\
+         in\n\
+         count_toks (tokenize \"let x = 1 in x\")\n"
+        contrib)
+      "7";
+    bootstrap_emit "parser bootstrap parse_decls count"
+      (Printf.sprintf
+        "import \"%s/parser/ast.mere\";\n\
+         import \"%s/parser/lexer.mere\";\n\
+         import \"%s/parser/parser.mere\";\n\
+         let rec count_decls = fn (xs: top_decl list) ->\n\
+           match xs with\n\
+           | Nil -> 0\n\
+           | Cons (_, t) -> 1 + count_decls t\n\
+         in\n\
+         let toks = tokenize \"let x = 1; let y = 2; let z = 3;\" in\n\
+         let (prog, _) = parse_decls Nil toks in\n\
+         let (decls, _) = prog in\n\
+         count_decls decls\n"
+        contrib contrib contrib)
+      "3"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

@@ -2288,6 +2288,33 @@ let rec member_str_path = fn (p: str) -> fn (xs: str list) ->
   | Nil -> false
   | Cons (h, t) -> if h == p then true else member_str_path p t;
 
+// Phase 54.15: strip an imported file's trailing main expression.
+// A `.mere` file that runs standalone typically ends with a
+// `let _ = print ... in ... 0` chain — a single expression that has
+// no terminating `;`. When we inline that file into a bootstrap
+// program, the trailing main becomes the main of the WHOLE parse,
+// masking the user's own tail expression. Truncate at the last
+// top-level `;` so only the decls survive. String-literal aware to
+// avoid a false match on a `;` inside a `\"...\"` chunk.
+let strip_import_main = fn (src: str) ->
+  let n = str_len src in
+  let rec scan = fn (i: int) -> fn (in_str: bool) -> fn (best: int) ->
+    if i >= n then best
+    else
+      let c = char_at src i in
+      if in_str then
+        if c == "\\" && i + 1 < n then scan (i + 2) true best
+        else if c == "\"" then scan (i + 1) false best
+        else scan (i + 1) true best
+      else
+        if c == "\"" then scan (i + 1) true best
+        else if c == ";" then scan (i + 1) false (i + 1)
+        else scan (i + 1) false best
+  in
+  let cut = scan 0 false 0 in
+  if cut <= 0 then src
+  else substring src 0 cut;
+
 // Scan src starting at i for the next `import "PATH";`. Returns
 // (start, end_after_semi, path) on a hit, or None when no more imports
 // are found. The matcher is strict: `import` (literal letters), one or
@@ -2347,7 +2374,12 @@ let rec inline_imports_in = fn (src: str) -> fn (base_dir: str)
         // Already inlined — skip the import line.
         loop end_pos acc1 vis
       else
-        let imported_src = read_file resolved in
+        let imported_raw = read_file resolved in
+        // Phase 54.15: strip the imported file's trailing main
+        // expression (its demo `let _ = print ... in 0` chain) so
+        // ONLY its decls contribute. Without this the imported main
+        // masks the top-level program's own tail.
+        let imported_src = strip_import_main imported_raw in
         let imported_dir = dirname resolved in
         let vis2 = Cons (resolved, vis) in
         let (inlined, vis3) = inline_imports_in imported_src imported_dir vis2 in
