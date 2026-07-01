@@ -8278,6 +8278,16 @@ let () =
       "type opt = None | Some of int; match Some 42 with | Some n -> n | None -> 0" "42";
     cross_emit "bare ctor arity Cons"
       "let xs = Cons 1 in match xs with | Cons n -> n | _ -> -1" "1";
+    (* Phase 54.16: str_eq builtin for runtime string content equality.
+       `==` on two non-literal strs falls back to i32.eq (pointer),
+       which fails for equal content at different heap addresses.
+       str_eq is the explicit content-compare escape hatch. *)
+    cross_emit "str_eq equal literals"
+      "if str_eq \"abc\" \"abc\" then 1 else 0" "1";
+    cross_emit "str_eq unequal"
+      "if str_eq \"abc\" \"abd\" then 1 else 0" "0";
+    cross_emit "str_eq runtime built"
+      "let s = \"hel\" ++ \"lo\" in if str_eq s \"hello\" then 1 else 0" "1";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"
@@ -8317,7 +8327,28 @@ let () =
          let (decls, _) = prog in\n\
          count_decls decls\n"
         contrib contrib contrib)
-      "3"
+      "3";
+    (* Phase 54.16: eval bootstrap. Works for expressions that don't
+       need runtime string equality (arithmetic, if). let-in currently
+       traps because lookup_env's `n == name` compares string pointers
+       instead of contents — needs str_eq (added this slice) once
+       eval.mere is patched to use it. *)
+    bootstrap_emit "eval bootstrap arithmetic"
+      (Printf.sprintf
+        "import \"%s/eval/eval.mere\";\n\
+         match parse_and_eval \"1 + 2 * 3\" with\n\
+         | VInt n -> n\n\
+         | _ -> -1\n"
+        contrib)
+      "7";
+    bootstrap_emit "eval bootstrap if"
+      (Printf.sprintf
+        "import \"%s/eval/eval.mere\";\n\
+         match parse_and_eval \"if 1 < 2 then 100 else 200\" with\n\
+         | VInt n -> n\n\
+         | _ -> -1\n"
+        contrib)
+      "100"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

@@ -256,7 +256,7 @@ let is_builtin = fn (n: str) ->
   n == "str_unescape" || n == "try_or" ||
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
-  n == "not";
+  n == "not" || n == "str_eq";
 
 let rec free_vars = fn (e: expr) -> fn (bound: str list) ->
   match e with
@@ -861,6 +861,19 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr s_expr s1 in
         let s3 = emit_expr x s2 in
         push_instr "call $char_at" s3
+      | EApp (EVar "str_eq", a_expr) ->
+        // Phase 54.16: explicit string content equality. `==` on two
+        // runtime strings can't be detected as string-typed (no type
+        // info in codegen) and falls back to i32.eq (pointer compare),
+        // which fails silently for equal contents at different heap
+        // addresses. `str_eq a b` is the escape hatch — always calls
+        // \$__lang_streq. Contrib code that compares strings whose
+        // sources aren't literal (env keys, hashmap keys, etc.) must
+        // use this instead of `==`.
+        let s0 = note_helper_use "streq" s in
+        let s1 = emit_expr a_expr s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $__lang_streq" s2
       | EApp (EVar "str_starts_with", s_expr) ->
         // Phase 54.6: `str_starts_with s prefix` — 2-arg curried.
         // Returns 1 if prefix is a prefix of s (byte-by-byte).
