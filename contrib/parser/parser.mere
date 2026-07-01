@@ -505,18 +505,35 @@ and parse_atom_raw = fn (toks: pos_token list) ->
           // style application. Non-paren constructor payloads like
           // `Some 1` are deferred (constr-arity table not available).
           (if is_upper_first_c name then
-            (match peek_tok rest with
+            // Phase 54.29: `Module.Ctor` on expression side — same
+            // treatment as parse_pattern_base above. Match Uppercase.
+            // Uppercase and glue into one qualified constructor name.
+            // Lowercase after `.` stays as a field access via the
+            // existing flatten_and_resolve path.
+            let (ctor_name, after_qual) = (match peek_tok rest with
+              | TDot ->
+                (match rest with
+                  | Cons (_, r1) ->
+                    (match peek_tok r1 with
+                      | TIdent right ->
+                        if is_upper_first_c right then
+                          (name ++ "." ++ right, advance r1)
+                        else (name, rest)
+                      | _ -> (name, rest))
+                  | Nil -> (name, rest))
+              | _ -> (name, rest)) in
+            (match peek_tok after_qual with
               | TLParen ->
-                let (payload, rest2) = parse_paren_body (advance rest) in
-                (EConstr (name, Some payload), rest2)
+                let (payload, rest2) = parse_paren_body (advance after_qual) in
+                (EConstr (ctor_name, Some payload), rest2)
               | TLBrace ->
                 // `Name { f = e, ... }` record literal. The `Name { base
                 // with ... }` form ISN'T Mere syntax — OCaml side uses
                 // `{ base | f = e, ... }` (bare braces, `|` separator)
                 // for record update, which lands in the TLBrace branch
                 // below.
-                parse_record_lit_body name (advance rest)
-              | _ -> (EConstr (name, None), rest))
+                parse_record_lit_body ctor_name (advance after_qual)
+              | _ -> (EConstr (ctor_name, None), after_qual))
           else
             (EVar name, rest))
         | TLParen -> parse_paren_body rest
@@ -651,13 +668,30 @@ and parse_pattern_base = fn (toks: pos_token list) ->
         | TLBracket -> parse_list_pattern rest
         | TIdent name ->
           (if is_upper_first_c name then
-            (match peek_tok rest with
+            // Phase 54.29: recognize `Module.Ctor` in patterns — an
+            // uppercase ident followed by `.` then another uppercase
+            // ident becomes one qualified constructor name. Matches
+            // toml.mere's `| Toml.TInt n -> ...` shape. Falls back to
+            // the bare-ctor rule otherwise.
+            let (ctor_name, after_qual) = (match peek_tok rest with
+              | TDot ->
+                (match rest with
+                  | Cons (_, r1) ->
+                    (match peek_tok r1 with
+                      | TIdent right ->
+                        if is_upper_first_c right then
+                          (name ++ "." ++ right, advance r1)
+                        else (name, rest)
+                      | _ -> (name, rest))
+                  | Nil -> (name, rest))
+              | _ -> (name, rest)) in
+            (match peek_tok after_qual with
               | TLParen ->
-                let (payload, rest2) = parse_paren_pattern (advance rest) in
-                (PConstr (name, Some payload), rest2)
+                let (payload, rest2) = parse_paren_pattern (advance after_qual) in
+                (PConstr (ctor_name, Some payload), rest2)
               | TLBrace ->
-                let (fields, rest2) = parse_record_pat_fields (advance rest) in
-                (PRecord (name, fields), rest2)
+                let (fields, rest2) = parse_record_pat_fields (advance after_qual) in
+                (PRecord (ctor_name, fields), rest2)
               | other ->
                 // Atom-style payload (`Some t`, `Some 1`, `Cons Nil`,
                 // ...): if the next token can start a pattern atom,
@@ -666,9 +700,9 @@ and parse_pattern_base = fn (toks: pos_token list) ->
                 // carry one, but in pattern context there's no function-
                 // application alternative, so the greedy rule is safe.
                 if is_pat_atom_start other then
-                  let (sub, rest2) = parse_pattern rest in
-                  (PConstr (name, Some sub), rest2)
-                else (PConstr (name, None), rest))
+                  let (sub, rest2) = parse_pattern after_qual in
+                  (PConstr (ctor_name, Some sub), rest2)
+                else (PConstr (ctor_name, None), after_qual))
           else
             (PVar name, rest))
         | _ -> fail ("line " ++ show line ++ ": expected pattern")))

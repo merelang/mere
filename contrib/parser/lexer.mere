@@ -219,10 +219,19 @@ let tokenize = fn (s: str) ->
           | None -> TIdent text
         in
         loop j line (Cons ((line, tok), acc))
-      // Integer literal
+      // Integer literal (or float — Phase 54.29: consume optional
+      // `.NNN` fractional part but discard it, emitting TInt of the
+      // integer portion. The self-host codegen has no real float
+      // support anyway, so this lets contrib code that mentions
+      // floats (time.mere, fmt.mere) at least parse. Actual float
+      // semantics get a separate slice.)
       else if is_digit_c c then
         let (text, j) = read_digit_run s n i in
-        loop j line (Cons ((line, TInt (int_of_str text)), acc))
+        let j2 = (if j + 1 < n && char_at s j == "." && is_digit_c (char_at s (j + 1)) then
+                    let (_frac, k) = read_digit_run s n (j + 1) in
+                    k
+                  else j) in
+        loop j2 line (Cons ((line, TInt (int_of_str text)), acc))
       // String literal
       else if c == "\"" then
         let (text, j) = read_string_lit s n i in

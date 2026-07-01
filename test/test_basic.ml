@@ -8358,6 +8358,19 @@ let () =
       "let m = map_new () in map_get m \"missing\"" "0";
     cross_emit "map multiple keys"
       "let m = map_new () in let _ = map_set m \"a\" 10 in let _ = map_set m \"b\" 20 in let _ = map_set m \"c\" 30 in map_get m \"a\" + map_get m \"b\" + map_get m \"c\"" "60";
+    (* Phase 54.29: module-qualified constructor pattern
+       (`| M.C p -> ...`) parses as a single qualified name — matches
+       toml.mere's `| Toml.TInt n -> ...` shape. Requires paren'd
+       payload on the expression side so the parser produces a
+       payload-bearing EConstr; bare `Toml.TInt 42` is a function
+       application (would need arity table integration). *)
+    cross_emit "Module.Ctor pattern"
+      "match Toml.TInt (42) with | Toml.TInt n -> n | _ -> -1" "42";
+    (* Phase 54.29: float literal — lexer consumes `NNN.NNN` and emits
+       TInt of the integer part. Fractional dropped; codegen for real
+       floats is a separate slice. *)
+    cross_emit "float literal fractional dropped"
+      "let x = 42.5 in x" "42";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"
