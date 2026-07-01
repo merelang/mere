@@ -8324,6 +8324,11 @@ let () =
       "if str_eq \"abc\" \"abd\" then 1 else 0" "0";
     cross_emit "str_eq runtime built"
       "let s = \"hel\" ++ \"lo\" in if str_eq s \"hello\" then 1 else 0" "1";
+    (* Phase 54.26: chr — inverse of ord *)
+    cross_emit "chr basic"
+      "ord (chr 65)" "65";
+    cross_emit "chr round-trip"
+      "if str_eq (chr 97) \"a\" then 1 else 0" "1";
     cross_emit "strbuf grow content intact"
       "let b = strbuf_new () in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in let _ = strbuf_push b \"01234567\" in if str_starts_with (strbuf_to_str b) \"012345670123456701\" then 1 else 0" "1";
     cross_emit "JSON renderer"
