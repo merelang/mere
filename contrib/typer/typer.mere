@@ -211,7 +211,10 @@ let rec lookup_scheme = fn (name: str) -> fn (env: type_env) ->
   | Nil -> fail ("unbound variable in typer: " ++ name)
   | Cons (b, rest) ->
     let (n, sch) = b in
-    if n == name then sch
+    // Phase 54.17: str_eq for env-key comparison. `==` on two runtime
+    // strs falls back to pointer eq under wasm codegen, which silently
+    // misses equal-content-but-different-heap-alloc pairs.
+    if str_eq n name then sch
     else lookup_scheme name rest
   ;
 

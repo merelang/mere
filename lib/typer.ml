@@ -1080,6 +1080,8 @@ let initial_env : env =
                 Ast.TyStr))));
     ("str_compare",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
+    ("str_eq",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
     ("str_starts_with",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyBool))));
     ("str_ends_with",

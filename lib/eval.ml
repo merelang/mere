@@ -1300,6 +1300,16 @@ let builtin_assert =
         | _ -> failwith "assert: 2nd arg expected str")
     | _ -> failwith "assert: 1st arg expected bool")
 
+let builtin_str_eq =
+  V_builtin ("str_eq", fun a_val ->
+    match a_val with
+    | V_str a ->
+      V_builtin ("str_eq_partial", fun b_val ->
+        match b_val with
+        | V_str b -> V_bool (a = b)
+        | _ -> failwith "str_eq: 2nd arg expected str")
+    | _ -> failwith "str_eq: 1st arg expected str")
+
 let builtin_str_starts_with =
   V_builtin ("str_starts_with", fun s_val ->
     match s_val with
@@ -1651,6 +1661,7 @@ let initial_env : env =
     ("str_split", ref builtin_str_split);
     ("str_join", ref builtin_str_join);
     ("str_compare", ref builtin_str_compare);
+    ("str_eq",         ref builtin_str_eq);
     ("str_starts_with", ref builtin_str_starts_with);
     ("str_ends_with", ref builtin_str_ends_with);
     ("str_repeat", ref builtin_str_repeat);

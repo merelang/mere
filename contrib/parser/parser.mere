@@ -1602,14 +1602,15 @@ let rec lookup_arity = fn (name: str) -> fn (m: (str * int) list) ->
   | Nil -> 0
   | Cons (h, t) ->
     let (n, a) = h in
-    if n == name then a else lookup_arity name t;
+    // Phase 54.17: str_eq for content compare (wasm safety).
+    if str_eq n name then a else lookup_arity name t;
 
 let rec has_arity = fn (name: str) -> fn (m: (str * int) list) ->
   match m with
   | Nil -> false
   | Cons (h, t) ->
     let (n, _) = h in
-    if n == name then true else has_arity name t;
+    if str_eq n name then true else has_arity name t;
 
 let rec collect_arities_from_decls = fn (decls: top_decl list) ->
   fn (acc: (str * int) list) ->

@@ -8348,7 +8348,33 @@ let () =
          | VInt n -> n\n\
          | _ -> -1\n"
         contrib)
-      "100"
+      "100";
+    (* Phase 54.17: full eval bootstrap works after switching env
+       lookups to str_eq. These would trap on unreachable before. *)
+    bootstrap_emit "eval bootstrap let-in"
+      (Printf.sprintf
+        "import \"%s/eval/eval.mere\";\n\
+         match parse_and_eval \"let x = 5 in x + 1\" with\n\
+         | VInt n -> n\n\
+         | _ -> -1\n"
+        contrib)
+      "6";
+    bootstrap_emit "eval bootstrap lambda apply"
+      (Printf.sprintf
+        "import \"%s/eval/eval.mere\";\n\
+         match parse_and_eval \"(fn x -> x + 1) 41\" with\n\
+         | VInt n -> n\n\
+         | _ -> -1\n"
+        contrib)
+      "42";
+    bootstrap_emit "eval bootstrap letrec factorial"
+      (Printf.sprintf
+        "import \"%s/eval/eval.mere\";\n\
+         match parse_and_eval \"let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5\" with\n\
+         | VInt n -> n\n\
+         | _ -> -1\n"
+        contrib)
+      "120"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

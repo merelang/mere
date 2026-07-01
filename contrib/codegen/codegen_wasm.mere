@@ -209,7 +209,9 @@ let rec lookup_assoc = fn (name: str) -> fn (env: (str * int) list) ->
   | Nil -> None
   | Cons (b, rest) ->
     let (n, idx) = b in
-    if n == name then Some idx else lookup_assoc name rest
+    // Phase 54.17: str_eq for env-key comparison (self-host wasm
+    // needs content compare; `==` falls back to pointer eq).
+    if str_eq n name then Some idx else lookup_assoc name rest
   ;
 
 // === Free-variable analysis (Stage 53c-3) ==================================
@@ -486,7 +488,7 @@ let lookup_or_alloc_variant_tag = fn (name: str) -> fn (s: EmitState) ->
 let rec extern_already_noted = fn (name: str) -> fn (xs: str list) ->
   match xs with
   | Nil -> false
-  | Cons (h, t) -> if h == name then true else extern_already_noted name t
+  | Cons (h, t) -> if str_eq h name then true else extern_already_noted name t
   ;
 
 let note_extern_use = fn (name: str) -> fn (s: EmitState) ->
@@ -602,7 +604,7 @@ let rec lookup_extern_decl = fn (name: str)
   | Nil -> None
   | Cons (b, rest) ->
     let (n, t) = b in
-    if n == name then Some t else lookup_extern_decl name rest;
+    if str_eq n name then Some t else lookup_extern_decl name rest;
 
 // Walk EApp left-spine to collect (head, args-in-source-order).
 let rec spine_collect = fn (e: expr) -> fn (acc: expr list) ->

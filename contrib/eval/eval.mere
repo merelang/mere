@@ -152,7 +152,8 @@ let rec match_pattern = fn (p: pattern) -> fn (v: value) ->
   | PConstr (cname, sub_p_opt) ->
     (match v with
       | VConstr (vname, sub_v_opt) ->
-        if cname == vname then
+        // Phase 54.17: str_eq — see lookup_env note.
+        if str_eq cname vname then
           (match (sub_p_opt, sub_v_opt) with
             | (None, None) -> Some Nil
             | (Some sub_p, Some sub_v) -> match_pattern sub_p sub_v
@@ -177,7 +178,7 @@ let rec match_pattern = fn (p: pattern) -> fn (v: value) ->
   | PRecord (name, fpats) ->
     (match v with
       | VRecord (vname, fields) ->
-        if name == vname then match_record_fields fpats fields
+        if str_eq name vname then match_record_fields fpats fields
         else None
       | _ -> None)
 
@@ -202,7 +203,7 @@ and lookup_field = fn (name: str) -> fn (fields: (str * value) list) ->
   | Nil -> None
   | Cons (f, rest) ->
     let (fname, fv) = f in
-    if fname == name then Some fv
+    if str_eq fname name then Some fv
     else lookup_field name rest
 
 and match_pattern_list = fn (ps: pattern list) -> fn (vs: value list) ->
@@ -397,7 +398,13 @@ and lookup_env = fn (name: str) -> fn (e: env) ->
   | Nil -> fail ("unbound variable: " ++ name)
   | Cons (b, rest) ->
     let (n, v) = b in
-    if n == name then
+    // Phase 54.17: use str_eq for content comparison. `==` on two
+    // runtime strs falls back to i32.eq under wasm codegen (no type
+    // dispatch), so equal contents at different heap addresses would
+    // silently fail to match. str_eq is a self-host builtin that
+    // unconditionally calls $__lang_streq; OCaml-side is an alias
+    // for content ==.
+    if str_eq n name then
       (match v with
         | VRecBinding (bname, bindings, outer) ->
           let body = find_rec_body bname bindings in
@@ -431,7 +438,8 @@ and find_rec_body = fn (name: str) -> fn (bindings: (str * expr) list) ->
   | Nil -> fail ("rec body not found: " ++ name)
   | Cons (b, rest) ->
     let (n, body) = b in
-    if n == name then body
+    // Phase 54.17: str_eq — see lookup_env note above.
+    if str_eq n name then body
     else find_rec_body name rest
 
 // `{ base | f1 = e1, f2 = e2 }` keeps the field order of the base
