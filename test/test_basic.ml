@@ -8493,6 +8493,29 @@ let () =
     bootstrap_wat_ok "codegen self-emit"
       (project_root ^ "/contrib/codegen/codegen_wasm.mere")
       1_000_000;
+    (* Phase 54.31: broader compile-time coverage. Every contrib that
+       currently self-emits should stay compiling; add wat_ok checks
+       for a spread of them so regressions surface. Thresholds are
+       set to ~half the observed size so minor codegen changes have
+       headroom but structural breakage catches. *)
+    bootstrap_wat_ok "compile: json"
+      (project_root ^ "/contrib/json/json.mere") 80_000;
+    bootstrap_wat_ok "compile: path"
+      (project_root ^ "/contrib/path/path.mere") 50_000;
+    bootstrap_wat_ok "compile: option"
+      (project_root ^ "/contrib/option/option.mere") 50_000;
+    bootstrap_wat_ok "compile: regex"
+      (project_root ^ "/contrib/regex/regex.mere") 80_000;
+    bootstrap_wat_ok "compile: argparse"
+      (project_root ^ "/contrib/argparse/argparse.mere") 60_000;
+    bootstrap_wat_ok "compile: toml"
+      (project_root ^ "/contrib/toml/toml.mere") 80_000;
+    bootstrap_wat_ok "compile: markdown to_html"
+      (project_root ^ "/contrib/markdown/to_html.mere") 140_000;
+    bootstrap_wat_ok "compile: markdown to_text"
+      (project_root ^ "/contrib/markdown/to_text.mere") 50_000;
+    bootstrap_wat_ok "compile: markdown toc"
+      (project_root ^ "/contrib/markdown/toc.mere") 50_000;
     (* Phase 54.22: fmt bootstrap. format_program compiled to wasm;
        we return the length of the formatted output. *)
     bootstrap_emit "fmt bootstrap int"
