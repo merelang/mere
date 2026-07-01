@@ -2078,7 +2078,11 @@ let wrap_module = fn (locals_decl: str) -> fn (body: str)
   in
   "(module\n" ++
   extern_imports ++
-  "  (memory (export \"memory\") 1)\n" ++
+  // Phase 54.14: allocate 16 initial pages (1 MiB) so bootstrap demos
+  // that carry the full self-host pipeline don't blow past 64 KiB
+  // just loading the module. Growth-on-demand would be cleaner but
+  // requires memory.grow calls in the bump allocator — deferred.
+  "  (memory (export \"memory\") 16)\n" ++
   "  (global $__lang_bump (mut i32) (i32.const " ++ show bump_start ++ "))\n" ++
   closure_decls ++
   data_decls ++
