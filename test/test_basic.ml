@@ -8374,7 +8374,28 @@ let () =
          | VInt n -> n\n\
          | _ -> -1\n"
         contrib)
-      "120"
+      "120";
+    (* Phase 54.18: typer bootstrap. parse_and_infer compiled to
+       wasm; the inferred type is a str, so we return its length to
+       give the harness an int to compare. int -> 3, bool -> 4. *)
+    bootstrap_emit "typer bootstrap int"
+      (Printf.sprintf
+        "import \"%s/typer/typer.mere\";\n\
+         str_len (parse_and_infer \"42\")\n"
+        contrib)
+      "3";
+    bootstrap_emit "typer bootstrap bool"
+      (Printf.sprintf
+        "import \"%s/typer/typer.mere\";\n\
+         str_len (parse_and_infer \"true\")\n"
+        contrib)
+      "4";
+    bootstrap_emit "typer bootstrap let-in"
+      (Printf.sprintf
+        "import \"%s/typer/typer.mere\";\n\
+         str_len (parse_and_infer \"let x = 5 in x + 1\")\n"
+        contrib)
+      "3"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

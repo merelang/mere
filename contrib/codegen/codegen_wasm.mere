@@ -2301,34 +2301,48 @@ let resolve_import_path = fn (base_dir: str) -> fn (relative: str) ->
 let rec member_str_path = fn (p: str) -> fn (xs: str list) ->
   match xs with
   | Nil -> false
-  | Cons (h, t) -> if h == p then true else member_str_path p t;
+  | Cons (h, t) -> if str_eq h p then true else member_str_path p t;
 
-// Phase 54.15: strip an imported file's trailing main expression.
-// A `.mere` file that runs standalone typically ends with a
-// `let _ = print ... in ... 0` chain — a single expression that has
-// no terminating `;`. When we inline that file into a bootstrap
-// program, the trailing main becomes the main of the WHOLE parse,
-// masking the user's own tail expression. Truncate at the last
-// top-level `;` so only the decls survive. String-literal aware to
-// avoid a false match on a `;` inside a `\"...\"` chunk.
-let strip_import_main = fn (src: str) ->
+// Phase 54.15 / 54.18: strip everything from an imported file that
+// isn't a library decl. Two things need removing:
+//   (a) the trailing `let _ = print ... in ... 0` main expression
+//   (b) demo decls that call heavy library fns at module init
+//       (e.g. typer.mere's `let d11 = apply_subst d11_subst ...;`
+//       which runs apply_subst before main starts)
+// Both are conventionally introduced by a `// === Demo` header.
+// Truncate there if found; otherwise fall back to the older
+// last-top-level-`;` heuristic (drops trailing main, keeps decls).
+let str_index_of_from = fn (src: str) -> fn (needle: str) -> fn (start: int) ->
   let n = str_len src in
-  let rec scan = fn (i: int) -> fn (in_str: bool) -> fn (best: int) ->
-    if i >= n then best
-    else
-      let c = char_at src i in
-      if in_str then
-        if c == "\\" && i + 1 < n then scan (i + 2) true best
-        else if c == "\"" then scan (i + 1) false best
-        else scan (i + 1) true best
-      else
-        if c == "\"" then scan (i + 1) true best
-        else if c == ";" then scan (i + 1) false (i + 1)
-        else scan (i + 1) false best
+  let nl = str_len needle in
+  let rec scan = fn (i: int) ->
+    if i + nl > n then -1
+    else if str_eq (substring src i (i + nl)) needle then i
+    else scan (i + 1)
   in
-  let cut = scan 0 false 0 in
-  if cut <= 0 then src
-  else substring src 0 cut;
+  scan start;
+
+let strip_import_main = fn (src: str) ->
+  let marker_pos = str_index_of_from src "// === Demo" 0 in
+  if marker_pos >= 0 then substring src 0 marker_pos
+  else
+    let n = str_len src in
+    let rec scan = fn (i: int) -> fn (in_str: bool) -> fn (best: int) ->
+      if i >= n then best
+      else
+        let c = char_at src i in
+        if in_str then
+          if str_eq c "\\" && i + 1 < n then scan (i + 2) true best
+          else if str_eq c "\"" then scan (i + 1) false best
+          else scan (i + 1) true best
+        else
+          if str_eq c "\"" then scan (i + 1) true best
+          else if str_eq c ";" then scan (i + 1) false (i + 1)
+          else scan (i + 1) false best
+    in
+    let cut = scan 0 false 0 in
+    if cut <= 0 then src
+    else substring src 0 cut;
 
 // Scan src starting at i for the next `import "PATH";`. Returns
 // (start, end_after_semi, path) on a hit, or None when no more imports
