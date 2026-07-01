@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere Formatter — HTTP web app</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 900px;
+      margin: 2em auto;
+      padding: 0 1.2em;
+      color: #2d3748;
+      line-height: 1.5;
+    }
+    h1 { margin-bottom: 0.2em; }
+    .lede { color: #4a5568; margin-top: 0; margin-bottom: 1.5em; }
+    .app { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    #input, #output {
+      width: 100%;
+      min-height: 22em;
+      padding: 0.7em;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      border-radius: 4px;
+      box-sizing: border-box;
+      white-space: pre-wrap;
+    }
+    #input {
+      border: 1px solid #cbd5e0;
+      resize: vertical;
+    }
+    #output {
+      margin: 0;
+      background: #1a202c;
+      color: #e2e8f0;
+      overflow: auto;
+    }
+    .controls { display: flex; gap: 0.5rem; margin: 1em 0 0.5em; flex-wrap: wrap; }
+    button {
+      padding: 0.6em 1.4em;
+      font-size: 1em;
+      background: #2b6cb0;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background: #2c5282; }
+    button:disabled { background: #a0aec0; cursor: not-allowed; }
+    .example-btn {
+      padding: 0.4em 0.8em;
+      font-size: 0.85em;
+      background: #edf2f7;
+      color: #2d3748;
+      border: 1px solid #cbd5e0;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+    }
+    .example-btn:hover { background: #e2e8f0; }
+    .stack { margin-top: 2em; padding-top: 1em; border-top: 1px solid #e2e8f0; font-size: 0.9em; color: #4a5568; }
+    .stack code { background: #edf2f7; padding: 0.1em 0.3em; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Mere Formatter</h1>
+  <p class="lede">A live Mere source formatter served by a Mere-authored HTTP backend. Both the page you're reading and the <code>/fmt</code> endpoint below are handled by a single wasm binary compiled from Mere.</p>
+
+  <div class="controls">
+    <button id="format-btn">Format</button>
+    <button class="example-btn" data-example="1+2*3">arith</button>
+    <button class="example-btn" data-example="let x = 1 + 2 in x * x">let-in</button>
+    <button class="example-btn" data-example="fn x -> fn y -> x + y">curried fn</button>
+    <button class="example-btn" data-example="let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 10">factorial</button>
+    <button class="example-btn" data-example="match xs with | Nil -> 0 | Cons (h, t) -> h + sum t">match</button>
+    <button class="example-btn" data-example="[1, 2, 3]">list</button>
+  </div>
+
+  <div class="app">
+    <textarea id="input" spellcheck="false" autocomplete="off">let x = 1 + 2 * 3 in x</textarea>
+    <pre id="output">(click Format to see the formatted output)</pre>
+  </div>
+
+  <div class="stack">
+    <p><strong>Stack</strong> (all Mere-authored, all in this repo):</p>
+    <ul>
+      <li><code>contrib/parser/</code> — self-host lexer + parser (Phase 50)</li>
+      <li><code>contrib/fmt/</code> — self-host formatter (Phase 49)</li>
+      <li><code>contrib/http/</code> — Node-hosted HTTP server bindings (Phase 54.35)</li>
+      <li><code>examples/http_fmt_webapp.mere</code> — this app (imports the three above)</li>
+      <li><code>examples/http_fmt_webapp.html</code> — the page you're viewing (served by <code>read_file</code>)</li>
+    </ul>
+  </div>
+
+  <script>
+    async function format() {
+      const btn = document.getElementById("format-btn");
+      const output = document.getElementById("output");
+      const src = document.getElementById("input").value;
+      btn.disabled = true;
+      output.textContent = "formatting…";
+      try {
+        const res = await fetch("/fmt", { method: "POST", body: src });
+        const text = await res.text();
+        output.textContent = text || "(empty)";
+      } catch (e) {
+        output.textContent = "[error] " + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    document.getElementById("format-btn").addEventListener("click", format);
+    document.querySelectorAll(".example-btn").forEach(b => {
+      b.addEventListener("click", () => {
+        document.getElementById("input").value = b.getAttribute("data-example");
+        format();
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+// http_fmt_webapp: Mere serves both the HTML UI and the /fmt API in
+// one wasm binary. Point a browser at localhost:8080 and get a live
+// Mere formatter.
+//
+// Contrast with:
+//   - examples/http_fmt_service.mere  → API only (POST /fmt over curl)
+//   - contrib/site/playground/selfhost-fmt.html → in-browser, no
+//     server (uses contrib/dom to wire DOM ↔ wasm client-side)
+//
+// This example is the third leg of the tripod: the same self-host
+// formatter, this time driven by a Mere-authored HTTP backend
+// serving a small JS UI. Full stack (parser + fmt + http +
+// static file serve + JSON-free JSON-style REST) in one file.
+//
+// Routes:
+//   GET  /                → text/html   (formatter UI, read from disk)
+//   POST /fmt  body=<src> → text/plain  (formatted Mere source)
+//   anything else         → 404
+//
+// Usage (from mere repo root, so read_file resolves the .html):
+//   dune exec ./bin/mere.exe -- -w examples/http_fmt_webapp.mere > /tmp/fw.wat
+//   wat2wasm /tmp/fw.wat -o /tmp/fw.wasm
+//   node scripts/run_http_server.js /tmp/fw.wasm
+//   # then open http://localhost:8080 in a browser.
+
+import "../contrib/parser/parser.mere";
+import "../contrib/fmt/fmt.mere";
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+let format_source = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _) = parse_decls Nil toks in
+  format_program prog
+in
+
+let handle = fn req ->
+  if str_eq req "GET /" then
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    read_file "examples/http_fmt_webapp.html"
+  else if str_eq req "POST /fmt" then
+    let _ = http_set_content_type "text/plain; charset=utf-8" in
+    format_source (http_current_body ())
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ req ++ "\n"
+in
+
+let _ = print "mere fmt webapp on http://localhost:8080 ..." in
+let _ = http_serve 8080 handle in
+0
