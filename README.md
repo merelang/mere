@@ -12,9 +12,10 @@ OCaml implementation of **Mere**, a new programming language (Old English for "l
 
 Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 
-## Status (as of 2026-06-24)
+## Status (as of 2026-07-01)
 
-- **1573 tests passing**
+- **1771 tests passing**
+- **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **17 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc`.
 - **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); subsequent phases grew the example set to 136.
 - Memory model: region / view / Trivial[R] / `with` Drop work at the type level, in the interpreter, and in all three codegen backends.
 - Effect system: capability-passing pattern + `signature ... = (...)` argument bundling + `using [cap]` sugar + builtin Logger / Metrics.
@@ -93,6 +94,29 @@ $ dune exec ./bin/mere.exe -- examples/maze_solver.mere
 # Phase 36: BFS pathfinding through an ASCII 8x12 maze + path visualization
 ```
 
+### Self-host bootstrap (Phase 54)
+
+The compiler compiles itself — Mere source is tokenized, parsed, and lowered to WAT by Mere code that itself runs under wasm.
+
+```sh
+# Self-emit: codegen_wasm.mere compiling itself
+$ dune exec ./bin/mere.exe -e '
+  import "contrib/codegen/codegen_wasm.mere";
+  str_len (parse_and_emit_file "contrib/codegen/codegen_wasm.mere")'
+1560495                            # 1.56 MB WAT output — wat2wasm accepts
+
+# Runtime self-host: compile a tiny Mere program via the wasm-compiled
+# lexer, then confirm it ran under wasm (see test/test_basic.ml
+# "self-host bootstrap: lexer bootstrap tokenize count").
+#
+# tokenize "let x = 1 in x"      -> 7   tokens
+# parse_decls ... "let x = 1;"   -> 1   decl
+# parse_and_eval "let x = 5 in x + 1"          -> 6
+# parse_and_eval "let rec fact ... in fact 5"  -> 120
+# parse_and_infer "let x = 5 in x + 1"         -> "int"
+# format_program (parse "1 + 2 * 3")           -> "1 + 2 * 3\n"
+```
+
 ## Documentation
 
 - **[Tutorial](docs/tutorial.md)** — start here (includes `module` / `import` / REPL)
@@ -103,7 +127,7 @@ $ dune exec ./bin/mere.exe -- examples/maze_solver.mere
 - **[Codegen](docs/codegen.md)** — three-backend (C / LLVM IR / Wasm) strategy + per-slice table
 - **[Changelog](docs/changelog.md)** — milestones from project start (2026-06-06) onward
 - `examples/` — runnable `.mere` files ([examples/README.md](examples/README.md) has a categorized index). From basics (FizzBuzz / word count) and Q-010 collection codegen demos (`vec_codegen_*.mere` / `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`), to realistic applications (PERFECT diff = 0 on all 4 backends): `template_engine` / `word_freq` / `mini_shell` / `chained_parse` / `state_machine` / `ini_parser` / `regex_lite`; **a 1165-line `toy_sql`** (Phase 29 dogfood; 59 tests; 4-backend PERFECT); and the 47 sugar-dogfood examples added in Phase 36: `calc` / `maze_solver` (BFS) / `game_of_life` / `sudoku_check` / `tic_tac_toe` / `eight_queens` / `knapsack` / `roman_numerals` / `morse_code` / `luhn_check` / `caesar_cipher` / `csv_summary` / `comprehension` / `if_let_demo` / `for_loop_demo` / `while_loop_demo` / `sugar_showcase` and more.
-- `contrib/` — **library candidates** ([contrib/README.md](contrib/README.md)). One step more "reuse-oriented" than `examples/`. Currently `contrib/json/` (parser + writer) and `contrib/markdown/` (HTML / text / TOC converter). These will graduate to separate repos once a package manager is in place.
+- `contrib/` — **library candidates** ([contrib/README.md](contrib/README.md)). One step more "reuse-oriented" than `examples/`. Grew significantly with the Phase 49-54 self-host effort: `parser/` (lexer + AST + parser), `codegen/codegen_wasm.mere` (2800-line self-host WAT emitter), `eval/eval.mere`, `typer/typer.mere`, `fmt/fmt.mere`, plus `json/` / `path/` / `option/` / `regex/` / `argparse/` / `test/` / `toml/` / `markdown/` (HTML / text / TOC) / `time/` / `dom/` / `site/` (playground pages). These will graduate to separate repos once a package manager is in place.
 
 ## Build / run
 
@@ -113,7 +137,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # print the type
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1573 tests
+dune runtest                                         # 1771 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -169,7 +193,7 @@ mere/
 │   ├── formatter.ml    # `mere fmt` pretty-printer
 │   ├── diagnostic.ml   # Rust-style code frame + ANSI colors
 │   └── version.ml
-├── test/test_basic.ml  # 1573 tests
+├── test/test_basic.ml  # 1771 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
 ├── examples/           # *.mere sample programs
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog

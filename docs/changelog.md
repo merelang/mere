@@ -4,6 +4,70 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-06-30 → 2026-07-01 — Phase 54 self-host bootstrap loop closes
+
+Over 32 incremental slices (Phase 54.1 → 54.32) the Mere source of the
+compiler pipeline was made to compile itself. **1622 → 1771 tests**. 17
+contrib libraries are now self-host-compilable and go end-to-end through
+`parse_and_emit_file → wat2wasm → node`.
+
+**Milestones achieved**:
+
+- **Compile-time self-compile loop closes**: `codegen_wasm.mere` (~2800
+  lines) compiles itself through `parse_and_emit_file` to 1,560,495 bytes
+  of valid WAT; `wat2wasm` accepts the output. CI-verified.
+- **Runtime self-host of 5 major components**: `lexer`, `parser`,
+  `evaluator`, `type inferencer`, and `formatter` all compile via the
+  self-host pipeline AND run correctly under wasm. Ten bootstrap harness
+  tests exercise real workloads:
+  - `tokenize "let x = 1 in x"` → 7 tokens
+  - `parse_decls (tokenize "let x = 1; let y = 2; let z = 3;")` → 3 decls
+  - `parse_and_eval "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5"` → 120
+  - `parse_and_infer "let x = 5 in x + 1"` → "int"
+  - `format_program (parse "1 + 2 * 3")` → "1 + 2 * 3\n"
+- **17 contribs self-host-compilable**: `ast` / `lexer` / `parser` /
+  `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` /
+  `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` /
+  `markdown/to_text` / `markdown/toc`. `time.mere` still needs float
+  codegen. 10 of the 17 have `bootstrap_wat_ok` CI checks.
+
+**Key infrastructure added**:
+
+- `parse_and_emit_file path` (Phase 54.10): recursive `import "..."` inline
+  with cycle detection + column-0 marker scan.
+- `selfhost_prelude` (Phase 54.9 + 54.11 + 54.27): auto-prepended Mere
+  source with `list_map` / `list_rev` / `list_fold` / `list_len` /
+  `list_append` / `list_mapi` / `list_filter` / `list_iter` / `list_any` /
+  `list_all` / `str_join` / `str_split` / `str_trim` / `str_replace`, plus
+  `type __list_t = Nil | Cons of int;` / option / result so tags register
+  deterministically.
+- Constructor-arity rewrite (Phase 54.13): parser post-pass that walks
+  `TopType` decls, builds an arity map, and rewrites
+  `EApp(EConstr name None, x)` → `EConstr(name, Some x)` when arity is 1 —
+  fixes the `Some x` bare-app trap the atom-level parser can't disambiguate.
+- Stdlib builtins in `codegen_wasm.mere`: `ord` / `chr` / `is_digit` /
+  `is_alpha` / `is_space` / `str_len` / `char_at` / `str_starts_with` /
+  `substring` / `str_index_of` / `str_repeat` / `int_of_str` / `str_unescape` /
+  `str_eq` / `strbuf_new` / `strbuf_push` / `strbuf_to_str` / `strbuf_len` /
+  `map_new` / `map_set` / `map_get` / `map_has` / `read_file` / `not` /
+  `fail`; every one gets a WAT helper.
+- Semantic fixes: `$char_at` returns a 1-byte str (matching OCaml
+  `V_str`), `==`/`!=` on any `EStr` literal lower to `$__lang_streq`, and
+  `str_eq` provides explicit content equality for two runtime strings.
+- Parser extensions: `module M { }` / `extern fn` / `fn _` / `fn (a: t)` /
+  cons-tail `[h, ...t]` / `'a` tyvar / char literal / `'X'` / tuple
+  destructure shorthand / `Module.Ctor` in patterns and expressions /
+  float literal skip (integer part only) / `region R { <expr> }`
+  permissive.
+
+**Outstanding**: runtime self-compile of the codegen itself
+(`parse_and_emit` running inside the compiled wasm) traps in an isolated
+8-line region — a wasm-level bug that shows up specifically with 6+
+character identifier names. Documented reproduction; needs interactive
+wasm memory inspection to close. Time.mere waits on proper float codegen.
+
+---
+
 ## 2026-06-22 (cont. — Phase 38.G-1 OwnedVec auto scope-bound Drop)
 
 After Phase 38.C finished, during the public-release prep session we consumed
