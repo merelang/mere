@@ -1629,7 +1629,45 @@ let rec collect_arities_from_decls = fn (decls: top_decl list) ->
       | _ -> acc) in
     collect_arities_from_decls rest acc2;
 
-let rec rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
+// Phase 54.23: helper walkers using explicit recursion instead of
+// higher-order list_map. The compiled wasm from a higher-order
+// list_map + closure trips a runtime OOB in $anon_225_fn (see 54.20).
+// Explicit tail-recursive walkers keep the code first-order and
+// avoid that compiled pattern entirely.
+let rec rewrite_constrs_arms = fn (arms: (pattern * expr option * expr) list)
+                        -> fn (m: (str * int) list) ->
+  match arms with
+  | Nil -> Nil
+  | Cons (arm, rest) ->
+    let (p, g, b) = arm in
+    let g2 = (match g with
+      | None -> None
+      | Some ge -> Some (rewrite_constrs_expr ge m)) in
+    Cons ((p, g2, rewrite_constrs_expr b m), rewrite_constrs_arms rest m)
+
+and rewrite_constrs_bindings = fn (bs: (str * expr) list)
+                            -> fn (m: (str * int) list) ->
+  match bs with
+  | Nil -> Nil
+  | Cons (b, rest) ->
+    let (n, v) = b in
+    Cons ((n, rewrite_constrs_expr v m), rewrite_constrs_bindings rest m)
+
+and rewrite_constrs_exprs = fn (es: expr list) -> fn (m: (str * int) list) ->
+  match es with
+  | Nil -> Nil
+  | Cons (e, rest) ->
+    Cons (rewrite_constrs_expr e m, rewrite_constrs_exprs rest m)
+
+and rewrite_constrs_fields = fn (fs: (str * expr) list)
+                          -> fn (m: (str * int) list) ->
+  match fs with
+  | Nil -> Nil
+  | Cons (f, rest) ->
+    let (fname, fv) = f in
+    Cons ((fname, rewrite_constrs_expr fv m), rewrite_constrs_fields rest m)
+
+and rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
   match e with
   | EInt _ -> e
   | EFloat _ -> e
@@ -1658,27 +1696,18 @@ let rec rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
   | ELet (pat, value, body) ->
     ELet (pat, rewrite_constrs_expr value m, rewrite_constrs_expr body m)
   | ELetRec (bindings, body) ->
-    let bs2 = list_map bindings (fn (b: str * expr) ->
-      let (n, v) = b in (n, rewrite_constrs_expr v m)) in
-    ELetRec (bs2, rewrite_constrs_expr body m)
+    ELetRec (rewrite_constrs_bindings bindings m, rewrite_constrs_expr body m)
   | EIf (c, t, el) ->
     EIf (rewrite_constrs_expr c m, rewrite_constrs_expr t m, rewrite_constrs_expr el m)
   | EMatch (scrutinee, arms) ->
-    let arms2 = list_map arms (fn (arm: pattern * expr option * expr) ->
-      let (p, g, b) = arm in
-      let g2 = (match g with
-        | None -> None
-        | Some ge -> Some (rewrite_constrs_expr ge m)) in
-      (p, g2, rewrite_constrs_expr b m)) in
-    EMatch (rewrite_constrs_expr scrutinee m, arms2)
+    EMatch (rewrite_constrs_expr scrutinee m, rewrite_constrs_arms arms m)
   | EConstr (name, payload_opt) ->
     (match payload_opt with
       | None -> e
       | Some p -> EConstr (name, Some (rewrite_constrs_expr p m)))
-  | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rewrite_constrs_expr e2 m))
+  | ETuple es -> ETuple (rewrite_constrs_exprs es m)
   | ERecordLit (name, fields) ->
-    let fs2 = list_map fields (fn (f: str * expr) ->
-      let (fname, fv) = f in (fname, rewrite_constrs_expr fv m)) in
+    let fs2 = rewrite_constrs_fields fields m in
     ERecordLit (name, fs2)
   | EFieldGet (recv, field) -> EFieldGet (rewrite_constrs_expr recv m, field)
   | ERecordUpdate (base, fields) ->
@@ -1690,21 +1719,35 @@ let rewrite_constrs_decl = fn (d: top_decl) -> fn (m: (str * int) list) ->
   match d with
   | TopLet (pat, e) -> TopLet (pat, rewrite_constrs_expr e m)
   | TopLetRec bindings ->
-    let bs2 = list_map bindings (fn (b: str * expr) ->
-      let (n, v) = b in (n, rewrite_constrs_expr v m)) in
-    TopLetRec bs2
+    // Phase 54.23: use the explicit-recursion helper instead of
+    // list_map + closure (see the note above rewrite_constrs_arms).
+    TopLetRec (rewrite_constrs_bindings bindings m)
   | _ -> d;
+
+// Phase 54.23: explicit walkers for the two list_map calls in
+// flatten_and_resolve. Same rationale as rewrite_constrs_arms —
+// keep the loop first-order to avoid the compiled-wasm OOB in
+// $anon_225_fn.
+let rec rewrite_decls_with_mods = fn (ds: top_decl list) -> fn (mods: str list) ->
+  match ds with
+  | Nil -> Nil
+  | Cons (d, rest) -> Cons (rewrite_decl d mods, rewrite_decls_with_mods rest mods);
+
+let rec rewrite_constrs_decls = fn (ds: top_decl list) -> fn (m: (str * int) list) ->
+  match ds with
+  | Nil -> Nil
+  | Cons (d, rest) -> Cons (rewrite_constrs_decl d m, rewrite_constrs_decls rest m);
 
 let flatten_and_resolve = fn (prog: program) ->
   let (decls, main) = prog in
   let mods = collect_module_names decls Nil in
   let flat = flatten_decls decls in
-  let resolved_decls = list_map flat (fn (d: top_decl) -> rewrite_decl d mods) in
+  let resolved_decls = rewrite_decls_with_mods flat mods in
   let resolved_main = rewrite_expr main mods in
   // Phase 54.13: now that module rewrites are done, build the
   // constructor-arity map and fix up bare-ctor applications.
   let arities = collect_arities_from_decls resolved_decls Nil in
-  let decls2 = list_map resolved_decls (fn (d: top_decl) -> rewrite_constrs_decl d arities) in
+  let decls2 = rewrite_constrs_decls resolved_decls arities in
   let main2 = rewrite_constrs_expr resolved_main arities in
   ((decls2, main2) : program);
 
