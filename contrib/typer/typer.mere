@@ -1106,7 +1106,10 @@ let initial_type_env =
    Cons (("is_digit", mono (TyArrow (TyStr, TyBool))),
    Cons (("is_alpha", mono (TyArrow (TyStr, TyBool))),
    Cons (("is_space", mono (TyArrow (TyStr, TyBool))),
-   Nil))))))))))))))))))))) : type_env);
+   Cons (("str_unescape", mono (TyArrow (TyStr, TyStr))),
+   // try_or : (unit -> 'a) -> 'a -> 'a (Phase 54.8 lenient escape hatch)
+   Cons (("try_or", ((Cons (1002, Nil), TyArrow (TyArrow (TyUnit, TyMeta 1002), TyArrow (TyMeta 1002, TyMeta 1002))) : scheme)),
+   Nil))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
