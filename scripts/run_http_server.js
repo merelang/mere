@@ -125,6 +125,19 @@ const wasmPath = process.argv[2];
         return e.status || 1;
       }
     },
+    // sha256_hex : str -> str (64-char lowercase hex). Small, sync,
+    // no dependencies beyond Node stdlib. Suitable for password
+    // hashing in demos — real production should use a slow hash
+    // (bcrypt / argon2) plus a per-user salt, both of which we can
+    // layer on top once the extern fn exists.
+    sha256_hex: (ptr) => {
+      const s = readCStr(ptr);
+      const hex = require("crypto").createHash("sha256").update(s).digest("hex");
+      const bytes = Buffer.from(hex + "\0", "utf8");
+      const outPtr = bumpAlloc(bytes.length);
+      new Uint8Array(memory.buffer).set(bytes, outPtr);
+      return outPtr;
+    },
     ...httpGlue,
   };
 
