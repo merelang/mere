@@ -1,0 +1,55 @@
+// contrib/http/cors.mere — CORS middleware.
+//
+// Wraps a `str -> str` handler so:
+//
+//   - `OPTIONS *` preflight requests short-circuit with 204 + the
+//     usual `Access-Control-Allow-*` headers, without ever calling
+//     the inner handler.
+//   - Non-preflight requests (GET / POST / etc.) get the
+//     `Access-Control-Allow-Origin` header set on the response
+//     before the inner handler runs; the inner handler can still
+//     override it via a subsequent `http_set_header` call.
+//
+// Composes with `with_access_log` (from `contrib/http/access_log.mere`):
+//
+//   http_serve 8080 (with_access_log (with_cors "*" handle))
+//
+// Order matters here — outer wrappers wrap inner ones. Above,
+// `with_access_log` sees the CORS-final response status; if you
+// swap the order (CORS outside access_log), the access log would
+// record the 204 that CORS itself returned.
+//
+// Public API:
+//
+//   with_cors : str -> (str -> str) -> (str -> str)
+//     first arg = allowed origin ("*" for anywhere, or specific URL)
+//
+//   cors_preflight_methods : str  (default methods list, override
+//                                  via http_set_header inside your
+//                                  own middleware if you need
+//                                  something else)
+
+extern fn http_set_status: int -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_set_content_type: str -> unit;
+
+let cors_preflight_methods = "GET, POST, PUT, DELETE, PATCH, OPTIONS";
+let cors_preflight_headers = "Content-Type, Authorization, X-Requested-With";
+let cors_preflight_max_age = "86400";
+
+let with_cors = fn (origin: str) -> fn (inner: str -> str) -> fn (req: str) ->
+  // Always set Allow-Origin on the response — the browser needs it
+  // on the actual API response, not just the preflight.
+  let _ = http_set_header "Access-Control-Allow-Origin" origin in
+  let _ = http_set_header "Vary" "Origin" in
+  let sp = str_index_of req " " in
+  let method = if sp < 0 then req else substring req 0 sp in
+  if str_eq method "OPTIONS" then
+    // Preflight short-circuit — no inner call.
+    let _ = http_set_status 204 in
+    let _ = http_set_header "Access-Control-Allow-Methods" cors_preflight_methods in
+    let _ = http_set_header "Access-Control-Allow-Headers" cors_preflight_headers in
+    let _ = http_set_header "Access-Control-Max-Age" cors_preflight_max_age in
+    let _ = http_set_content_type "text/plain" in
+    ""
+  else inner req;
