@@ -218,6 +218,19 @@ let rec lookup_scheme = fn (name: str) -> fn (env: type_env) ->
     else lookup_scheme name rest
   ;
 
+// Phase 55c: non-failing variant used by EConstr (and later ERecordLit)
+// to fall back to permissive typing when a constructor isn't in the
+// TopType registry. The permissive path preserves pre-55c behaviour so
+// hand-written test code with undeclared ctors keeps working.
+let rec lookup_scheme_opt = fn (name: str) -> fn (env: type_env) ->
+  match env with
+  | Nil -> ((None : scheme option))
+  | Cons (b, rest) ->
+    let (n, sch) = b in
+    if str_eq n name then Some sch
+    else lookup_scheme_opt name rest
+  ;
+
 // Free-meta collection ------------------------------------------------------
 //
 // `collect_metas` walks a `ty` and accumulates its `TyMeta n` ids.
@@ -347,6 +360,146 @@ let rec alloc_fresh_n = fn (n: int) -> fn (s: infer_state) ->
     let (h, s1) = fresh_meta s in
     let (rest, s2) = alloc_fresh_n (n - 1) s1 in
     (Cons (h, rest), s2)
+  ;
+
+// Phase 55c: allocate fresh int ids for TopType param instantiation.
+// The ctor scheme's quantifier list is `int list`, so we need the raw
+// counter values rather than the TyMeta-wrapped tys `alloc_fresh_n`
+// returns.
+let rec alloc_fresh_ids_n = fn (n: int) -> fn (s: infer_state) ->
+  if n <= 0 then ((Nil, s) : (int list * infer_state))
+  else
+    let c = counter_of s in
+    let sub = subst_of s in
+    let s1 = ((c + 1, sub) : infer_state) in
+    let (rest, s2) = alloc_fresh_ids_n (n - 1) s1 in
+    (Cons (c, rest), s2)
+  ;
+
+// Phase 55c: str-keyed int lookup, mirror of lookup_int_id (which is
+// int-keyed). Used to resolve `TyVar name → fresh meta id` per TopType
+// param during ctor scheme construction.
+let rec lookup_str_int = fn (name: str) -> fn (m: (str * int) list) ->
+  match m with
+  | Nil -> ((None : int option))
+  | Cons (b, rest) ->
+    let (k, v) = b in
+    if str_eq k name then Some v
+    else lookup_str_int name rest
+  ;
+
+// Phase 55c: substitute `TyVar name` with `TyMeta id` in a ty, using
+// the TopType-param name-to-id mapping. Applied when building the
+// scheme body for each ctor of a polymorphic type, so unify sees a
+// fresh meta at each use (via `instantiate`) rather than a rigid var.
+let rec subst_tyvars_in_ty = fn (m: (str * int) list) -> fn (t: ty) ->
+  match t with
+  | TyVar name ->
+    (match lookup_str_int name m with
+      | Some id -> TyMeta id
+      | None -> t)
+  | TyArrow (a, b) ->
+    TyArrow (subst_tyvars_in_ty m a, subst_tyvars_in_ty m b)
+  | TyTuple ts ->
+    TyTuple (list_map ts (fn (t1: ty) -> subst_tyvars_in_ty m t1))
+  | TyCon (name, args) ->
+    TyCon (name, list_map args (fn (t1: ty) -> subst_tyvars_in_ty m t1))
+  | _ -> t
+  ;
+
+// Phase 55c: zip a list of param-names with their freshly-allocated
+// meta ids into `(name, id) list`. Consumes both lists in lockstep.
+let rec zip_params_ids = fn (names: str list) -> fn (ids: int list) ->
+  match (names, ids) with
+  | (Nil, Nil) -> ((Nil : (str * int) list))
+  | (Cons (n, ns), Cons (i, is)) -> Cons ((n, i), zip_params_ids ns is)
+  | _ -> fail "zip_params_ids: length mismatch"
+  ;
+
+// Phase 55c: build TyMeta list from int ids (for the TyCon type-args
+// in the ctor's return type).
+let rec ids_to_tymeta_list = fn (ids: int list) ->
+  match ids with
+  | Nil -> ((Nil : ty list))
+  | Cons (i, rest) -> Cons (TyMeta i, ids_to_tymeta_list rest)
+  ;
+
+// Phase 55c: length of a str list (used for TopType.params count).
+let rec list_len_names = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + list_len_names t
+  ;
+
+// Phase 55c: append unique str (set-style add). The self-host parser
+// doesn't emit `type opt 'a = ...` decl heads (yet) — polymorphic
+// types come in as `type opt = | Some of 'a`, with TyVars only in the
+// ctor payloads. To make those usable, we auto-collect TyVars from
+// ctor payloads and treat them as implicit params.
+let rec add_unique_str = fn (name: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> Cons (name, Nil)
+  | Cons (h, t) ->
+    if str_eq h name then xs
+    else Cons (h, add_unique_str name t)
+  ;
+
+let rec collect_tyvars_in_ty = fn (t: ty) -> fn (acc: str list) ->
+  match t with
+  | TyVar name -> add_unique_str name acc
+  | TyArrow (a, b) -> collect_tyvars_in_ty b (collect_tyvars_in_ty a acc)
+  | TyTuple ts -> collect_tyvars_in_tys ts acc
+  | TyCon (_, args) -> collect_tyvars_in_tys args acc
+  | _ -> acc
+
+and collect_tyvars_in_tys = fn (ts: ty list) -> fn (acc: str list) ->
+  match ts with
+  | Nil -> acc
+  | Cons (t, rest) -> collect_tyvars_in_tys rest (collect_tyvars_in_ty t acc)
+  ;
+
+let rec collect_tyvars_in_ctors = fn (ctors: (str * ty option) list)
+                              -> fn (acc: str list) ->
+  match ctors with
+  | Nil -> acc
+  | Cons (c, rest) ->
+    let (_cname, payload_opt) = c in
+    let acc2 = (match payload_opt with
+      | None -> acc
+      | Some pty -> collect_tyvars_in_ty pty acc) in
+    collect_tyvars_in_ctors rest acc2
+  ;
+
+// Union of two str lists via set-style add (preserves order of the
+// first list; appends only names not already present).
+let rec union_str_names = fn (xs: str list) -> fn (ys: str list) ->
+  match ys with
+  | Nil -> xs
+  | Cons (h, t) -> union_str_names (add_unique_str h xs) t
+  ;
+
+// Phase 55c: register a list of constructors into the env. Each ctor
+// gets a scheme quantified over the parent type's param ids, so
+// polymorphic ctors freshen at each use via `instantiate`.
+//
+// - Nullary ctor (`| None`): scheme body = ret_ty
+// - Payload ctor (`| Some of ty`): scheme body = TyArrow(subst_tyvars_in_ty
+//   param_map ty, ret_ty)
+let rec register_ctors = fn (ctors: (str * ty option) list)
+                     -> fn (param_ids: int list)
+                     -> fn (param_map: (str * int) list)
+                     -> fn (ret_ty: ty)
+                     -> fn (env: type_env) ->
+  match ctors with
+  | Nil -> env
+  | Cons (c, rest) ->
+    let (cname, payload_opt) = c in
+    let body_ty = (match payload_opt with
+      | None -> ret_ty
+      | Some pty -> TyArrow (subst_tyvars_in_ty param_map pty, ret_ty)) in
+    let sch = ((param_ids, body_ty) : scheme) in
+    let env2 = Cons ((cname, sch), env) in
+    register_ctors rest param_ids param_map ret_ty env2
   ;
 
 let rec list_len = fn (xs: ty list) ->
@@ -574,19 +727,44 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
   | ETuple es ->
     let (tys, s1) = infer_list env s es in
     (apply_subst (subst_of s1) (TyTuple tys), s1)
-  | EConstr (_name, payload_opt) ->
-    // Permissive type checking until Stage 52f wires the TopType
-    // registry: any constructor produces a fresh meta, and any payload
-    // is recursively inferred (its type is unconstrained — the result
-    // is unrelated to the payload type for now).
-    (match payload_opt with
+  | EConstr (name, payload_opt) ->
+    // Phase 55c: if the ctor was registered via a TopType decl, look
+    // up its scheme, instantiate (freshening any quantified param
+    // metas), and unify the payload with the ctor's declared payload
+    // type. Fallback to the pre-55c permissive path if the ctor isn't
+    // in env (allows hand-written test code with undeclared ctors).
+    (match lookup_scheme_opt name env with
+      | Some sch ->
+        let (ct, s1) = instantiate sch s in
+        (match (ct, payload_opt) with
+          // Nullary ctor, no payload — return type directly.
+          | (TyCon _, None) -> (apply_subst (subst_of s1) ct, s1)
+          | (_, None) ->
+            // Ctor was declared with a payload but used nullary. Fall
+            // through to fresh meta; user will get a downstream mismatch.
+            let (a, s2) = fresh_meta s1 in
+            (a, s2)
+          | (TyArrow (payload_ty, ret_ty), Some payload) ->
+            let (pt, s2) = infer env s1 payload in
+            let s3 = unify_state s2 pt payload_ty in
+            (apply_subst (subst_of s3) ret_ty, s3)
+          | (_, Some payload) ->
+            // Ctor was declared nullary but used with a payload. Still
+            // infer the payload to catch nested errors, then return
+            // permissive fresh meta.
+            let (_pt, s2) = infer env s1 payload in
+            let (a, s3) = fresh_meta s2 in
+            (a, s3))
       | None ->
-        let (a, s1) = fresh_meta s in
-        (a, s1)
-      | Some payload ->
-        let (_pt, s1) = infer env s payload in
-        let (a, s2) = fresh_meta s1 in
-        (a, s2))
+        // Undeclared ctor — permissive fallback (pre-55c behaviour).
+        (match payload_opt with
+          | None ->
+            let (a, s1) = fresh_meta s in
+            (a, s1)
+          | Some payload ->
+            let (_pt, s1) = infer env s payload in
+            let (a, s2) = fresh_meta s1 in
+            (a, s2)))
   | EMatch (scrutinee, arms) ->
     let (ts, s1) = infer env s scrutinee in
     let (result_ty, s2) = fresh_meta s1 in
@@ -793,7 +971,25 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let s2 = infer_rec_bodies bindings pre_env s1 in
     let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
     (final_env, s2)
-  | TopType _ -> (env, s)
+  | TopType (name, params, ctors) ->
+    // Phase 55c: register each constructor as a scheme in the env so
+    // `EConstr (name, payload)` inference can look it up and unify
+    // payload types. Params come from two sources: (a) explicit
+    // decl-head params (currently the self-host parser doesn't emit
+    // these — kept for future compat), (b) TyVars auto-collected from
+    // ctor payloads. Both sources unify into a single param set with
+    // fresh meta ids that get quantified over. Each ctor use
+    // `instantiate`s the scheme, freshening the quantified metas so
+    // polymorphism composes correctly across use sites.
+    let ctor_tyvars = collect_tyvars_in_ctors ctors Nil in
+    let all_params = union_str_names params ctor_tyvars in
+    let n_params = list_len_names all_params in
+    let (param_ids, s1) = alloc_fresh_ids_n n_params s in
+    let param_map = zip_params_ids all_params param_ids in
+    let param_metas = ids_to_tymeta_list param_ids in
+    let ret_ty = TyCon (name, param_metas) in
+    let env2 = register_ctors ctors param_ids param_map ret_ty env in
+    (env2, s1)
   | TopRecord _ -> (env, s)
   | TopTypeAlias _ -> (env, s)
   | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
