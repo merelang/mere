@@ -8379,6 +8379,21 @@ let () =
     typed_cross_stdout "show variant int payload negative"
       "type opt = | Some of int | None; let _ = print (show (Some (0 - 5))) in 0"
       "Some(-5)";
+    (* Phase 55d-3: bool / str payload rendering. Same shape as int
+       payload but calls $show_bool / $show_str instead of $show_int
+       from the concat chain. show_str keeps its double-quote wrap,
+       so a str payload renders as `SomeS("hi")` — the quotes are
+       inherited from the show_str behavior, not added by the variant
+       branch. *)
+    typed_cross_stdout "show variant bool payload true"
+      "type maybe_bool = | SomeB of bool | NoneB; let _ = print (show (SomeB true)) in 0"
+      "SomeB(true)";
+    typed_cross_stdout "show variant bool payload false"
+      "type maybe_bool = | SomeB of bool | NoneB; let _ = print (show (SomeB false)) in 0"
+      "SomeB(false)";
+    typed_cross_stdout "show variant str payload"
+      "type maybe_str = | SomeS of str | NoneS; let _ = print (show (SomeS \"hi\")) in 0"
+      "SomeS(\"hi\")";
     (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
        (caught by FizzBuzz / print_range / list rendering) used to
        crash because free_vars treated them as free vars and tried to
