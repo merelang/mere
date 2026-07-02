@@ -1,0 +1,152 @@
+// contrib/http/query.mere — URL / query-string parsing helpers.
+//
+// Pure Mere (no extern fns). Companion to `http.mere`'s HTTP server
+// bindings — parses `?a=1&b=2&c=hello%20world` style query strings
+// coming out of the request URL, so handlers don't have to hand-roll
+// str_index_of / substring chains.
+//
+// Public API (all functions live at the top level of the importing
+// module — this file has no `module { ... }` wrapping since the
+// self-host parser flattens single-decl imports and `module` blocks
+// require Phase 54.1 flatten, which is already covered by the
+// pipeline — but we keep the surface flat to match the shape of
+// other contrib files like `contrib/option/option.mere`):
+//
+//   split_url  : str -> (str, str)               // ("/foo", "a=1&b=2")
+//   url_decode : str -> str                       // "%20" → " ", "+" → " "
+//   url_encode : str -> str                       // inverse of url_decode
+//                                                //   (only the reserved-in-query
+//                                                //    subset — enough for round-trips
+//                                                //    of parse_query output)
+//   parse_query : str -> (str * str) list          // ["a"→"1", "b"→"2"]
+//   query_get  : (str * str) list -> str -> str    // "" if missing
+//
+// The `hex_digit` / `hex_encode_byte` helpers stay internal (leading
+// underscore convention). Callers usually just want `split_url` +
+// `parse_query` + `query_get`.
+
+// Return the hex value (0..15) of a single-char hex digit, or -1 for
+// non-hex. Uses `ord` (byte value) so both cases work uniformly.
+let _hex_digit = fn (c: str) ->
+  let n = ord c in
+  if n >= 48 && n <= 57 then n - 48
+  else if n >= 65 && n <= 70 then n - 55
+  else if n >= 97 && n <= 102 then n - 87
+  else 0 - 1;
+
+// URL-decode a str: `%XX` → the byte with hex value XX, `+` → space,
+// any other byte is passed through unchanged. Invalid `%` sequences
+// (fewer than 2 hex chars after, or non-hex chars) are left as-is.
+// Inner loop is lifted to `_decode_walk` for the same "inner-lifted
+// capture" reason as `_encode_walk` below.
+let rec _decode_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    if str_eq c "%" && i + 2 < n then
+      let hi = _hex_digit (char_at s (i + 1)) in
+      let lo = _hex_digit (char_at s (i + 2)) in
+      if hi >= 0 && lo >= 0 then
+        let _ = strbuf_push buf (chr (hi * 16 + lo)) in
+        _decode_walk s buf (i + 3) n
+      else
+        let _ = strbuf_push buf c in
+        _decode_walk s buf (i + 1) n
+    else if str_eq c "+" then
+      let _ = strbuf_push buf " " in
+      _decode_walk s buf (i + 1) n
+    else
+      let _ = strbuf_push buf c in
+      _decode_walk s buf (i + 1) n;
+
+let url_decode = fn (s: str) ->
+  let buf = strbuf_new () in
+  _decode_walk s buf 0 (str_len s);
+
+// Encode a single byte as either its literal char (if it's an
+// unreserved query-safe char: alnum / `-` / `_` / `.` / `~`) or as
+// `%XX` (uppercase hex).
+let _hex_encode_byte = fn (n: int) ->
+  let unreserved = (n >= 48 && n <= 57)     // 0-9
+                || (n >= 65 && n <= 90)     // A-Z
+                || (n >= 97 && n <= 122)    // a-z
+                || n == 45 || n == 95       // - _
+                || n == 46 || n == 126 in   // . ~
+  if unreserved then chr n
+  else
+    let hi = n / 16 in
+    let lo = n % 16 in
+    let hex_char = fn (d: int) ->
+      if d < 10 then chr (48 + d)
+      else chr (55 + d) in
+    "%" ++ hex_char hi ++ hex_char lo;
+
+// URL-encode a str: alnum + `-_.~` pass through, everything else
+// becomes `%XX`. Matches the query-string reserved set (not path).
+// Inner loop is lifted to a top-level rec fn (see `_encode_walk`) so
+// the wasm codegen doesn't hit the "inner-lifted capture" Phase 6.1
+// limitation.
+let rec _encode_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let byte = ord (char_at s i) in
+    let _ = strbuf_push buf (_hex_encode_byte byte) in
+    _encode_walk s buf (i + 1) n;
+
+let url_encode = fn (s: str) ->
+  let buf = strbuf_new () in
+  _encode_walk s buf 0 (str_len s);
+
+// Split a URL into (path, query). The `?` is dropped. If no `?` is
+// present, query is "". `#fragment` is left on whatever side it
+// lands (path if no `?`, query if `?` present) — HTTP clients
+// shouldn't send fragments to servers, so this is fine in practice.
+let split_url = fn (url: str) ->
+  let idx = str_index_of url "?" in
+  if idx < 0 then (url, "")
+  else (substring url 0 idx,
+        substring url (idx + 1) (str_len url));
+
+// Parse a single `k=v` (or bare `k`) pair, url-decoding both sides.
+let _parse_pair = fn (s: str) ->
+  let eq = str_index_of s "=" in
+  if eq < 0 then (url_decode s, "")
+  else (url_decode (substring s 0 eq),
+        url_decode (substring s (eq + 1) (str_len s)));
+
+// Parse a query string like `a=1&b=hello%20world&c` into a list of
+// `(name, value)` pairs. Bare names (`c` in the example above) map
+// to the empty string. Both name and value are url-decoded. An empty
+// input yields Nil.
+let parse_query = fn (q: str) ->
+  if str_len q == 0 then Nil
+  else list_map (str_split q "&") _parse_pair;
+
+// Look up a key in a parsed query. Returns the value, or "" if the
+// key is absent. Multiple entries with the same key: returns the
+// first (first-write-wins is the HTTP convention).
+let rec query_get = fn (qs: (str * str) list) -> fn (name: str) ->
+  match qs with
+  | Nil -> ""
+  | Cons (p, rest) ->
+    let (k, v) = p in
+    if str_eq k name then v
+    else query_get rest name;
+
+// Encode a (name, value) list back into a query string. Order is
+// preserved. Both name and value are url-encoded. Loop lifted for
+// the same reason as `_decode_walk` / `_encode_walk`.
+let rec _encode_query_walk = fn buf -> fn (ps: (str * str) list) -> fn (first: bool) ->
+  match ps with
+  | Nil -> strbuf_to_str buf
+  | Cons (p, rest) ->
+    let (k, v) = p in
+    let _ = if first then 0 else let _ = strbuf_push buf "&" in 0 in
+    let _ = strbuf_push buf (url_encode k) in
+    let _ = strbuf_push buf "=" in
+    let _ = strbuf_push buf (url_encode v) in
+    _encode_query_walk buf rest false;
+
+let encode_query = fn (qs: (str * str) list) ->
+  let buf = strbuf_new () in
+  _encode_query_walk buf qs true;
