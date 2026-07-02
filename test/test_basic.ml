@@ -7957,6 +7957,18 @@ let () =
     "Cons (1, Cons (2, Nil))";
   cross_type "list Cons str"
     "Cons (\"a\", Cons (\"b\", Nil))";
+  (* Phase 55f continued (part 4): built-in Some / None polymorphic
+     ctors + parser arity seed for the built-in ctor names. `Some 42`
+     now type-checks to `int option` without needing a user-side
+     `type option 'a = ...` decl. *)
+  cross_type "option Some int"
+    "Some 42";
+  cross_type "option Some str"
+    "Some \"hi\"";
+  cross_type "option nested with list"
+    "Some (Cons (1, Cons (2, Nil)))";
+  cross_type "option match with payload"
+    "match Some 42 with | Some x -> x + 1 | None -> 0";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
