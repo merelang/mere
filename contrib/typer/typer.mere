@@ -846,9 +846,29 @@ let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr
     let (b_r, s2) = annotate_expr env s1 b in
     (EBin (op, a_r, b_r), s2)
   | ECmp (op, a, b) ->
+    // Phase 55b (typed AST 配管 part 2): for `==` / `!=` on str
+    // operands, wrap both sides in `EAnnot (_, TyStr)` so codegen can
+    // switch from the default `i32.eq` (pointer compare — wrong for
+    // runtime-built strings) to `$__lang_streq` (byte-by-byte).
+    // Ordering ops (<, <=, >, >=) require int operands so no wrap
+    // needed. Non-str `==` / `!=` (int / bool / etc.) also skip the
+    // wrap — codegen's default `i32.eq` handles them fine.
+    let is_eq_op = (match op with
+      | OpEq -> true
+      | OpNe -> true
+      | _ -> false) in
     let (a_r, s1) = annotate_expr env s a in
     let (b_r, s2) = annotate_expr env s1 b in
-    (ECmp (op, a_r, b_r), s2)
+    if is_eq_op then
+      let (a_ty, s3) = infer env s2 a in
+      let resolved_a = apply_subst (subst_of s3) a_ty in
+      (match resolved_a with
+        | TyStr ->
+          let a_ann = EAnnot (a_r, TyStr) in
+          let b_ann = EAnnot (b_r, TyStr) in
+          ((ECmp (op, a_ann, b_ann), s3) : (expr * infer_state))
+        | _ -> (ECmp (op, a_r, b_r), s3))
+    else (ECmp (op, a_r, b_r), s2)
   | ELogic (op, a, b) ->
     let (a_r, s1) = annotate_expr env s a in
     let (b_r, s2) = annotate_expr env s1 b in

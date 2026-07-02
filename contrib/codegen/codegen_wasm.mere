@@ -702,16 +702,26 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     // is == or !=, lower as $__lang_streq (byte-by-byte). Without this,
     // `c == \"X\"` would do pointer equality and silently always be
     // false at runtime (the runtime-allocated c never aliases the
-    // literal's data-segment ptr). For other comparisons or when both
-    // sides are non-EStr, fall back to the integer cmpop.
+    // literal's data-segment ptr).
+    //
+    // Phase 55b (typed AST 配管 part 2): also honour `EAnnot (_, TyStr)`
+    // wrappings that the typer's annotate pass inserts around both
+    // operands when they resolved to str. This unblocks non-literal
+    // str comparisons like `let a = read_file "..." in a == b` — the
+    // old is_str_lit heuristic missed those and fell through to
+    // pointer eq, silently returning false for equal-content runtime
+    // strings.
     let is_str_lit = fn (e: expr) -> match e with
       | EStr _ -> true
+      | _ -> false in
+    let is_str_annot = fn (e: expr) -> match e with
+      | EAnnot (_, TyStr) -> true
       | _ -> false in
     let is_eq_op = match op with
       | OpEq -> true
       | OpNe -> true
       | _ -> false in
-    if is_eq_op && (is_str_lit a || is_str_lit b) then
+    if is_eq_op && (is_str_lit a || is_str_lit b || is_str_annot a || is_str_annot b) then
       let s0 = note_helper_use "streq" s in
       let s1 = emit_expr a s0 in
       let s2 = emit_expr b s1 in

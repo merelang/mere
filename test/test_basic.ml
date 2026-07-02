@@ -8314,6 +8314,26 @@ let () =
       "let b = true in let _ = print (show b) in 0" "true";
     typed_cross_stdout "show int fallback (untyped path preserved)"
       "let _ = print (show 42) in 0" "42";
+    (* Phase 55b: non-literal str comparison via EAnnot(TyStr). Pre-55b
+       these fell through to i32.eq (pointer compare) and returned
+       false for equal-content runtime strings. The `let _ = print
+       (show ...) in 0` wrapper turns the bool into a "true" / "false"
+       stdout line so run_wasm_stdout can assert on it. *)
+    typed_cross_stdout "str == runtime-built (equal)"
+      "let a = \"foo\" ++ \"bar\" in let b = \"foobar\" in let _ = print (show (a == b)) in 0"
+      "true";
+    typed_cross_stdout "str == runtime-built (unequal)"
+      "let a = \"foo\" ++ \"bar\" in let b = \"foobaz\" in let _ = print (show (a == b)) in 0"
+      "false";
+    typed_cross_stdout "str != runtime-built (equal → false)"
+      "let a = \"hi\" ++ \"\" in let b = \"hi\" in let _ = print (show (a != b)) in 0"
+      "false";
+    typed_cross_stdout "str != runtime-built (unequal → true)"
+      "let a = \"hi\" in let b = \"lo\" in let _ = print (show (a != b)) in 0"
+      "true";
+    typed_cross_stdout "str == literal-only path unchanged"
+      "let s = \"x\" in let _ = print (show (s == \"x\")) in 0"
+      "true";
     (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
        (caught by FizzBuzz / print_range / list rendering) used to
        crash because free_vars treated them as free vars and tried to
