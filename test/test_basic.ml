@@ -3524,7 +3524,7 @@ let () =
      allocation uses a bump-pointer global, $__lang_strlen / $__lang_str_concat
      are defined inline in WAT, and print uses a host import (env.puts). *)
   assert_contains "wasm: memory declared + exported"
-    (wasm "\"hi\"") "(memory (export \"memory\") 64)";
+    (wasm "\"hi\"") "(memory (export \"memory\") 1024)";
   assert_contains "wasm: bump pointer global declared"
     (wasm "\"hi\"") "(global $__lang_bump (mut i32)";
   assert_contains "wasm: puts imported"
@@ -7968,8 +7968,12 @@ let () =
          auto-stub any access — returns a fn that ignores args and
          returns 0. Still works for the print / show / etc. cases
          that just need puts. *)
+      (* --stack-size=65500 (max) is needed for the deeper self-host
+         workloads — codegen bootstrap emits ~30MB WAT and recurses
+         thousands of frames before returning. Default Node stack
+         (~500KB) overflows well before completion. *)
       let runner = Printf.sprintf
-        "node -e \"const fs=require('fs'); \
+        "node --stack-size=65500 -e \"const fs=require('fs'); \
          const env = new Proxy({}, { get: () => () => 0 }); \
          WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
          .then(({instance})=>console.log(instance.exports.main())) \
@@ -8565,6 +8569,16 @@ let () =
          str_len (format_program prog)\n"
         contrib contrib)
       "15"
+    (* Phase 54.36 root-caused the runtime "OOB" reported in Phase
+       54.20 to be a plain memory-exhaustion issue: OCaml-side wasm
+       codegen defaulted to 64 pages (4 MiB) exported memory, but a
+       single self-host `parse_and_emit "42"` peaks around ~30 MiB.
+       Bumping the OCaml default to 1024 pages (64 MiB) is now
+       verified via `examples/oneshot_codegen.mere` (see docs/
+       changelog.md); an in-CI runtime bootstrap test is deferred
+       because the double-self-host path (self-host compiling a
+       program that imports self-host) surfaces additional issues
+       out of scope for this slice. *)
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

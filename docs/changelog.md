@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-02 — Phase 54.36 runtime codegen bootstrap unblocked
+
+Root-caused the "runtime OOB" that had been the last unresolved self-host
+gap since Phase 54.20 — turned out not to be a codegen bug but plain
+memory exhaustion.
+
+**Root cause**: OCaml-side wasm codegen defaulted to `(memory (export
+"memory") 64)` — 64 pages = 4 MiB. Self-host `parse_and_emit "42"`
+allocates ~30 MiB at peak (prelude tokens + parsed AST + emit strbuf).
+The bump allocator has no `memory.grow`, so writes past 4 MiB trap.
+
+Phase 54.20's 5/6-char boundary observation was a red herring: the
+allocation crossed the 4 MiB line at a specific input-dependent point
+that happened to correlate with name length in the isolation harness.
+Phase 54.23's higher-order-list_map hypothesis was similarly incidental.
+
+**Fix**:
+- `lib/codegen_wasm.ml` — default memory 64 → 1024 pages (64 MiB)
+- `contrib/codegen/codegen_wasm.mere` — same bump for the self-host
+  codegen's own memory-line emission (16 → 1024)
+- `test/test_basic.ml` — updated the "wasm: memory declared + exported"
+  snapshot to expect 1024. `run_wasm` also now passes
+  `node --stack-size=65500` because self-host workloads recurse
+  thousands of frames before returning (default Node stack ~500 KB).
+
+**Verified**: `examples/oneshot_codegen.mere` (imports the self-host
+codegen and calls `parse_and_emit "42"`) now runs end-to-end under
+Node, emits 80,744 bytes of WAT, exits cleanly. Previously trapped
+with either "call stack size exceeded" or "memory access out of
+bounds" depending on which limit hit first.
+
+**Deferred**:
+- CI test for runtime codegen bootstrap. The obvious harness (embed a
+  `parse_and_emit "42"` call inside a `bootstrap_emit` fixture) has
+  to go through the double-self-host path (self-host codegen
+  compiling a program that imports self-host codegen), which surfaces
+  additional issues out of scope for this slice. `examples/
+  oneshot_codegen.mere` serves as the manual verifier for now.
+- `memory.grow` in the bump allocator. Bumping the default fixes the
+  common case but doesn't help workloads > 64 MiB. Growth-on-demand
+  needs instrumentation at every bump-alloc site — invasive rewrite
+  in `lib/codegen_wasm.ml`.
+
+dune runtest: 1778 passing (unchanged from Phase 54.35).
+
+---
+
 ## 2026-07-02 — Phase 54.35 web backend Stage A (contrib/http)
 
 First Node-hosted HTTP server bindings for Mere. Answers the question
