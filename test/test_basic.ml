@@ -7906,6 +7906,16 @@ let () =
   cross_type "TopType enum ctor" "type color = | Red | Green | Blue; Red";
   cross_type "TopType nullary ctor" "type maybe_int = | None | Some of int; None";
   cross_type "TopType payload ctor int" "type maybe_int = | None | Some of int; Some 42";
+  (* Phase 55c-2: TopRecord registry — record literal returns the
+     declared record's TyCon, and each field's expr type is unified
+     with the declared field ty. Case-sensitive name matching: the
+     record decl and the ERecordLit's tag must use the same
+     capitalization. *)
+  cross_type "TopRecord literal"
+    "type Point = { x: int, y: int }; Point { x = 1, y = 2 }";
+  cross_type "TopRecord let-bound"
+    "type Point = { x: int, y: int }; let p = Point { x = 3, y = 4 } in p";
+
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
      decl-head params). OCaml rejects this same input as a rigid-var
