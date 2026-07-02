@@ -8924,6 +8924,10 @@ let () =
       "contrib/option/option.mere" 30000;
     typed_wat_ok "typed compile: path"
       "contrib/path/path.mere" 20000;
+    (* Phase 55f part 7: time.mere unlocked via float builtin additions
+       (f_add / f_sub / f_lt etc. registered polymorphically). *)
+    typed_wat_ok "typed compile: time"
+      "contrib/time/time.mere" 5000;
     bootstrap_wat_ok "compile: option"
       (project_root ^ "/contrib/option/option.mere") 50_000;
     bootstrap_wat_ok "compile: regex"

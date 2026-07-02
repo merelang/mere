@@ -1170,7 +1170,20 @@ let initial_type_env =
    Cons (("list_all", ((Cons (1016, Nil),
      TyArrow (TyCon ("list", Cons (TyMeta 1016, Nil)),
        TyArrow (TyArrow (TyMeta 1016, TyBool), TyBool))) : scheme)),
-   Nil)))))))))))))))))))))))))))))))))))) : type_env);
+   // Float arithmetic + comparison + conversion (Phase 54.33 in codegen).
+   Cons (("f_add", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyFloat)))),
+   Cons (("f_sub", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyFloat)))),
+   Cons (("f_mul", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyFloat)))),
+   Cons (("f_div", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyFloat)))),
+   Cons (("f_lt", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyBool)))),
+   Cons (("f_le", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyBool)))),
+   Cons (("f_gt", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyBool)))),
+   Cons (("f_ge", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyBool)))),
+   Cons (("f_neg", mono (TyArrow (TyFloat, TyFloat))),
+   Cons (("f_abs", mono (TyArrow (TyFloat, TyFloat))),
+   Cons (("float_of_int", mono (TyArrow (TyInt, TyFloat))),
+   Cons (("int_of_float", mono (TyArrow (TyFloat, TyInt))),
+   Nil)))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
