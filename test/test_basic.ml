@@ -8364,9 +8364,21 @@ let () =
     typed_cross_stdout "show variant nullary None"
       "type opt = | Some of int | None; let _ = print (show None) in 0"
       "None";
-    typed_cross_stdout "show variant payload ctor (name only)"
+    (* Phase 55d-2: `$show_variant` now renders int payloads as
+       `Name(<int>)` via a str_concat chain (name ++ "(" ++ show_int
+       payload ++ ")"). Nullary ctors still render name-only. Non-int
+       payload types (variant/record/tuple) fall back to name-only for
+       this MVP — proper recursive show for those needs additional
+       ty threading. *)
+    typed_cross_stdout "show variant int payload positive"
       "type opt = | Some of int | None; let _ = print (show (Some 42)) in 0"
-      "Some";
+      "Some(42)";
+    typed_cross_stdout "show variant int payload zero"
+      "type opt = | Some of int | None; let _ = print (show (Some 0)) in 0"
+      "Some(0)";
+    typed_cross_stdout "show variant int payload negative"
+      "type opt = | Some of int | None; let _ = print (show (Some (0 - 5))) in 0"
+      "Some(-5)";
     (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
        (caught by FizzBuzz / print_range / list rendering) used to
        crash because free_vars treated them as free vars and tried to

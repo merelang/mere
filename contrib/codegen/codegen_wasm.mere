@@ -74,6 +74,12 @@ type EmitState = {
   // gives EApp dispatch a direct `call $<name>` path. Multi-arg
   // (curried) extern fns are handled by walking the EApp spine.
   extern_decls: (str * ty) list,
+  // Phase 55d-2: track payload type for each declared ctor so
+  // $show_variant can render `Some(42)`-style output for ctors with
+  // int payloads. Populated by `register_ctor_tags` from `TopType`
+  // decls; ctors introduced lazily via EConstr use (not seen in any
+  // TopType) are absent and get rendered as name-only.
+  ctor_payload_tys: (str * ty option) list,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -97,7 +103,8 @@ let initial_emit_state = EmitState {
   field_offsets = Nil,
   extern_uses = Nil,
   helpers_used = Nil,
-  extern_decls = Nil
+  extern_decls = Nil,
+  ctor_payload_tys = Nil
 };
 
 // === Instruction emission ==================================================
@@ -212,6 +219,18 @@ let rec lookup_assoc = fn (name: str) -> fn (env: (str * int) list) ->
     // Phase 54.17: str_eq for env-key comparison (self-host wasm
     // needs content compare; `==` falls back to pointer eq).
     if str_eq n name then Some idx else lookup_assoc name rest
+  ;
+
+// Phase 55d-2: str-keyed lookup for `(str * ty option) list` assoc
+// (ctor_payload_tys). Same shape as lookup_assoc but with a different
+// value type.
+let rec lookup_payload_ty = fn (name: str)
+                         -> fn (env: (str * ty option) list) ->
+  match env with
+  | Nil -> ((None : ty option))
+  | Cons (b, rest) ->
+    let (n, pty) = b in
+    if str_eq n name then pty else lookup_payload_ty name rest
   ;
 
 // === Free-variable analysis (Stage 53c-3) ==================================
@@ -903,8 +922,19 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
             let s1 = emit_expr x s0b in
             push_instr "call $show_str" s1
           | EAnnot (_, TyCon (_, _)) ->
+            // Phase 55d-2: also register str_concat + strlen + show_int
+            // + pre-alloc "(" and ")" so build_show_variant_helper can
+            // render `Some(42)`-style output for int payloads. Nullary
+            // ctors still render as name-only; non-int payload types
+            // (variant / record / tuple) fall back to name-only for
+            // this MVP.
             let s0 = note_helper_use "show_variant" s in
-            let s1 = emit_expr x s0 in
+            let s0a = note_helper_use "strlen" s0 in
+            let s0b = note_helper_use "str_concat" s0a in
+            let s0c = note_helper_use "show_int" s0b in
+            let (_lp_off, s0d) = alloc_str_literal "(" s0c in
+            let (_rp_off, s0e) = alloc_str_literal ")" s0d in
+            let s1 = emit_expr x s0e in
             push_instr "call $show_variant" s1
           | _ ->
             let s1 = note_helper_use "show_int" s in
@@ -2378,31 +2408,58 @@ let helper_decl_show_str =
 // small in practice — <20 in typical Mere programs). Base case is
 // `unreachable` since a variant value carrying an unregistered tag
 // would be a codegen bug, not a user error.
+// Phase 55d-2: per-ctor branch body. Nullary ctors return just the
+// name pointer. Int-payload ctors render `Name(<int>)` by chaining
+// str_concat calls: name ++ "(" ++ show_int(payload) ++ ")". Payload
+// value lives at offset=4 of the variant record. Non-int payload
+// types fall back to name-only (recursive show for variant/record
+// payloads is a later slice — needs proper type threading).
+let build_show_variant_branch = fn (name_off: int)
+                             -> fn (payload_ty: ty option)
+                             -> fn (lp_off: int) -> fn (rp_off: int) ->
+  match payload_ty with
+  | Some TyInt ->
+    "        (call $__lang_str_concat\n" ++
+    "          (call $__lang_str_concat\n" ++
+    "            (call $__lang_str_concat (i32.const " ++ show name_off ++ ") (i32.const " ++ show lp_off ++ "))\n" ++
+    "            (call $show_int (i32.load offset=4 (local.get $v))))\n" ++
+    "          (i32.const " ++ show rp_off ++ "))\n"
+  | _ ->
+    "        (i32.const " ++ show name_off ++ ")\n"
+  ;
+
 let rec build_show_variant_cases = fn (entries: (str * int) list)
-                                -> fn (offsets: (str * int) list) ->
+                                -> fn (offsets: (str * int) list)
+                                -> fn (payload_tys: (str * ty option) list)
+                                -> fn (lp_off: int) -> fn (rp_off: int) ->
   match entries with
   | Nil -> "    (unreachable)\n"
   | Cons (e, rest) ->
     let (name, tag) = e in
-    let off = (match lookup_assoc name offsets with
+    let name_off = (match lookup_assoc name offsets with
       | Some o -> o
       | None -> 0) in
+    let payload_ty = lookup_payload_ty name payload_tys in
     "    (if (result i32) (i32.eq (local.get $tag) (i32.const " ++
       show tag ++ "))\n" ++
-    "      (then (i32.const " ++ show off ++ "))\n" ++
+    "      (then\n" ++
+    build_show_variant_branch name_off payload_ty lp_off rp_off ++
+    "      )\n" ++
     "      (else\n" ++
-    build_show_variant_cases rest offsets ++
+    build_show_variant_cases rest offsets payload_tys lp_off rp_off ++
     "      ))\n"
   ;
 
 let build_show_variant_helper = fn (s: EmitState) ->
-  // `variant_tags` is Cons-prepended, so reverse for tag-ascending order.
-  // The tag-0 entry ends up outer-most in the if-chain, which is arbitrary
-  // (each branch tests i32.eq against a constant tag). Order affects
-  // readability, not semantics.
   // Order in variant_tags doesn't affect correctness — each branch is
   // an independent `i32.eq $tag <const>` test. Skip reversal.
-  let cases = build_show_variant_cases s.variant_tags s.str_offsets in
+  let lp_off = (match lookup_assoc "(" s.str_offsets with
+    | Some o -> o
+    | None -> 0) in
+  let rp_off = (match lookup_assoc ")" s.str_offsets with
+    | Some o -> o
+    | None -> 0) in
+  let cases = build_show_variant_cases s.variant_tags s.str_offsets s.ctor_payload_tys lp_off rp_off in
   "  (func $show_variant (param $v i32) (result i32)\n" ++
   "    (local $tag i32)\n" ++
   "    (local.set $tag (i32.load offset=0 (local.get $v)))\n" ++
@@ -2520,14 +2577,18 @@ let rec register_ctor_tags = fn (ctors: (str * ty option) list)
   match ctors with
   | Nil -> s
   | Cons (c, rest) ->
-    let (name, _payload_ty) = c in
+    let (name, payload_ty) = c in
     let (_tag, s1) = lookup_or_alloc_variant_tag name s in
     // Phase 55d: pre-allocate the ctor name string in the data
     // segment so `$show_variant` (which is generated at emit_program
-    // finalization) has stable offsets baked-in. Small footprint —
-    // one NUL-terminated str per ctor.
+    // finalization) has stable offsets baked-in.
     let (_off, s2) = alloc_str_literal name s1 in
-    register_ctor_tags rest s2
+    // Phase 55d-2: track payload ty so show_variant can render
+    // `Some(42)`-style output for int payloads. Nullary ctors keep
+    // their `None` here and render as name-only.
+    let s3 = ({ s2 |
+      ctor_payload_tys = Cons ((name, payload_ty), s2.ctor_payload_tys) } : EmitState) in
+    register_ctor_tags rest s3
   ;
 
 let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
