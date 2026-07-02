@@ -7924,6 +7924,13 @@ let () =
     "type Point = { x: int, y: int }; let p = Point { x = 3, y = 4 } in p.x";
   cross_type "EFieldGet sum"
     "type Point = { x: int, y: int }; let p = Point { x = 1, y = 2 } in p.x + p.y";
+  (* Phase 55c-2c: PRecord pattern field check. `match Point { ... }
+     with | Point { x = a, y = b } -> ...` binds `a` and `b` to the
+     declared field tys (int/int for Point) rather than fresh metas.
+     Required threading `env` through `check_pattern` /
+     `check_record_field_pats` / `check_pattern_list`. *)
+  cross_type "PRecord pattern destructure"
+    "type Point = { x: int, y: int }; match Point { x = 3, y = 4 } with | Point { x = a, y = b } -> a + b";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
