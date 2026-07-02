@@ -1,0 +1,64 @@
+// contrib/log/log.mere — minimal structured logger (JSON lines).
+//
+// Emits one JSON object per log call to stdout via `print`, with a
+// unix timestamp, a level string, the message, and optional key /
+// value fields. Suitable for shipping to `jq`, journald, or a
+// log-aggregation stack that expects one JSON object per line.
+//
+// Format (one line, no leading indent):
+//
+//   {"ts":1699999999,"level":"info","msg":"logged in","user":"alice"}
+//
+// Public API:
+//
+//   log_debug msg
+//   log_info  msg
+//   log_warn  msg
+//   log_error msg
+//   log_with  level msg [(k,v); ...]      // arbitrary fields
+//
+// Message and field values are minimally JSON-escaped: `"` → `\"`,
+// `\` → `\\`, newlines / control chars pass through (this is a
+// demo-grade logger — real production should use a full JSON
+// encoder, e.g. contrib/json's forthcoming render side).
+
+extern fn unix_time: unit -> int;
+
+// Escape a JSON string body — swaps `"` and `\` for their escape
+// sequences. Everything else is passed through as-is.
+let rec _esc_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then
+      let _ = strbuf_push buf "\\\"" in 0
+    else if str_eq c "\\" then
+      let _ = strbuf_push buf "\\\\" in 0
+    else
+      let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n;
+
+let _esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _esc_walk s buf 0 (str_len s);
+
+// Fold field list into `,"k":"v"` segments appended to `acc`. Both
+// key and value are escaped.
+let rec _append_fields = fn (fields: (str * str) list) -> fn (acc: str) ->
+  match fields with
+  | Nil -> acc
+  | Cons (kv, rest) ->
+    let (k, v) = kv in
+    let seg = ",\"" ++ _esc k ++ "\":\"" ++ _esc v ++ "\"" in
+    _append_fields rest (acc ++ seg);
+
+let log_with = fn (level: str) -> fn (msg: str) -> fn (fields: (str * str) list) ->
+  let ts = show (unix_time ()) in
+  let base = "\{\"ts\":" ++ ts ++ ",\"level\":\"" ++ level ++
+    "\",\"msg\":\"" ++ _esc msg ++ "\"" in
+  print (_append_fields fields base ++ "}");
+
+let log_debug = fn (msg: str) -> log_with "debug" msg Nil;
+let log_info  = fn (msg: str) -> log_with "info"  msg Nil;
+let log_warn  = fn (msg: str) -> log_with "warn"  msg Nil;
+let log_error = fn (msg: str) -> log_with "error" msg Nil;
