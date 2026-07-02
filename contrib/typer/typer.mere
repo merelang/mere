@@ -1105,6 +1105,8 @@ let initial_type_env =
    Cons (("str_starts_with", mono (TyArrow (TyStr, TyArrow (TyStr, TyBool)))),
    Cons (("str_repeat", mono (TyArrow (TyStr, TyArrow (TyInt, TyStr)))),
    Cons (("str_join", mono (TyArrow (TyStr, TyArrow (TyCon ("list", Cons (TyStr, Nil)), TyStr)))),
+   Cons (("str_split", mono (TyArrow (TyStr, TyArrow (TyStr, TyCon ("list", Cons (TyStr, Nil)))))),
+   Cons (("str_trim", mono (TyArrow (TyStr, TyStr))),
    Cons (("int_of_str", mono (TyArrow (TyStr, TyInt))),
    Cons (("is_digit", mono (TyArrow (TyStr, TyBool))),
    Cons (("is_alpha", mono (TyArrow (TyStr, TyBool))),
@@ -1170,6 +1172,12 @@ let initial_type_env =
    Cons (("list_all", ((Cons (1016, Nil),
      TyArrow (TyCon ("list", Cons (TyMeta 1016, Nil)),
        TyArrow (TyArrow (TyMeta 1016, TyBool), TyBool))) : scheme)),
+   // list_len : 'a list -> int  ;  list_has : 'a list -> 'a -> bool
+   Cons (("list_len", ((Cons (1033, Nil),
+     TyArrow (TyCon ("list", Cons (TyMeta 1033, Nil)), TyInt)) : scheme)),
+   Cons (("list_has", ((Cons (1034, Nil),
+     TyArrow (TyCon ("list", Cons (TyMeta 1034, Nil)),
+       TyArrow (TyMeta 1034, TyBool))) : scheme)),
    // Float arithmetic + comparison + conversion (Phase 54.33 in codegen).
    Cons (("f_add", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyFloat)))),
    Cons (("f_sub", mono (TyArrow (TyFloat, TyArrow (TyFloat, TyFloat)))),
@@ -1183,7 +1191,41 @@ let initial_type_env =
    Cons (("f_abs", mono (TyArrow (TyFloat, TyFloat))),
    Cons (("float_of_int", mono (TyArrow (TyInt, TyFloat))),
    Cons (("int_of_float", mono (TyArrow (TyFloat, TyInt))),
-   Nil)))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
+   // StrBuf (region-parameterized mutable string buffer). Region is
+   // an opaque type param the typer freshens per use — no real
+   // region tracking, just symbol consistency.
+   //   strbuf_new    : unit -> StrBuf 'r
+   //   strbuf_push   : StrBuf 'r -> str -> unit
+   //   strbuf_to_str : StrBuf 'r -> str
+   //   strbuf_len    : StrBuf 'r -> int
+   Cons (("strbuf_new", ((Cons (1017, Nil),
+     TyArrow (TyUnit, TyCon ("StrBuf", Cons (TyMeta 1017, Nil)))) : scheme)),
+   Cons (("strbuf_push", ((Cons (1018, Nil),
+     TyArrow (TyCon ("StrBuf", Cons (TyMeta 1018, Nil)),
+       TyArrow (TyStr, TyUnit))) : scheme)),
+   Cons (("strbuf_to_str", ((Cons (1019, Nil),
+     TyArrow (TyCon ("StrBuf", Cons (TyMeta 1019, Nil)), TyStr)) : scheme)),
+   Cons (("strbuf_len", ((Cons (1020, Nil),
+     TyArrow (TyCon ("StrBuf", Cons (TyMeta 1020, Nil)), TyInt)) : scheme)),
+   // Map[R, K, V] — 3 type params.
+   //   map_new : unit -> Map R K V
+   //   map_set : Map R K V -> K -> V -> unit
+   //   map_get : Map R K V -> K -> V
+   //   map_has : Map R K V -> K -> bool
+   Cons (("map_new", ((Cons (1021, Cons (1022, Cons (1023, Nil))),
+     TyArrow (TyUnit,
+       TyCon ("Map", Cons (TyMeta 1021, Cons (TyMeta 1022, Cons (TyMeta 1023, Nil)))))) : scheme)),
+   Cons (("map_set", ((Cons (1024, Cons (1025, Cons (1026, Nil))),
+     TyArrow (TyCon ("Map", Cons (TyMeta 1024, Cons (TyMeta 1025, Cons (TyMeta 1026, Nil)))),
+       TyArrow (TyMeta 1025,
+         TyArrow (TyMeta 1026, TyUnit)))) : scheme)),
+   Cons (("map_get", ((Cons (1027, Cons (1028, Cons (1029, Nil))),
+     TyArrow (TyCon ("Map", Cons (TyMeta 1027, Cons (TyMeta 1028, Cons (TyMeta 1029, Nil)))),
+       TyArrow (TyMeta 1028, TyMeta 1029))) : scheme)),
+   Cons (("map_has", ((Cons (1030, Cons (1031, Cons (1032, Nil))),
+     TyArrow (TyCon ("Map", Cons (TyMeta 1030, Cons (TyMeta 1031, Cons (TyMeta 1032, Nil)))),
+       TyArrow (TyMeta 1031, TyBool))) : scheme)),
+   Nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
