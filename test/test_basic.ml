@@ -7949,6 +7949,14 @@ let () =
     "snd (1, \"hi\")";
   cross_type "fst + snd arith"
     "let p = (10, 20) in fst p + snd p";
+  (* Phase 55f continued: polymorphic Cons / Nil in initial_type_env
+     so real code that uses lists inference-checks against `'a list`
+     rather than falling to permissive fresh metas. Verifies
+     `Cons (1, Nil)` types as `int list`. *)
+  cross_type "list Cons int"
+    "Cons (1, Cons (2, Nil))";
+  cross_type "list Cons str"
+    "Cons (\"a\", Cons (\"b\", Nil))";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit

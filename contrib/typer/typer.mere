@@ -1033,8 +1033,11 @@ let rec ty_to_str = fn (t: ty) ->
     let parts = list_map ts (fn (t1: ty) -> ty_to_str t1) in
     "(" ++ str_join " * " parts ++ ")"
   | TyCon (name, args) ->
+    // Match OCaml Ast.pp_ty conventions: `name` for 0 args, `arg
+    // name` (no parens) for 1 arg, `(arg1, arg2) name` for 2+ args.
     (match args with
       | Nil -> name
+      | Cons (a, Nil) -> ty_to_str a ++ " " ++ name
       | _ ->
         let parts = list_map args (fn (t1: ty) -> ty_to_str t1) in
         "(" ++ str_join ", " parts ++ ") " ++ name)
@@ -1112,7 +1115,18 @@ let initial_type_env =
    // fst / snd : polymorphic tuple projections
    Cons (("fst", ((Cons (1003, Cons (1004, Nil)), TyArrow (TyTuple (Cons (TyMeta 1003, Cons (TyMeta 1004, Nil))), TyMeta 1003)) : scheme)),
    Cons (("snd", ((Cons (1003, Cons (1004, Nil)), TyArrow (TyTuple (Cons (TyMeta 1003, Cons (TyMeta 1004, Nil))), TyMeta 1004)) : scheme)),
-   Nil))))))))))))))))))))))))) : type_env);
+   // Polymorphic list ctors — the parser produces `EConstr ("Cons",
+   // Some (ETuple [h, t]))` so Cons's payload ty is a tuple. Freshens
+   // 'a at each use via instantiate, giving `Cons (1, Nil) : list int`
+   // etc.
+   //   Nil  : 'a list
+   //   Cons : ('a, 'a list) -> 'a list
+   Cons (("Nil", ((Cons (1005, Nil), TyCon ("list", Cons (TyMeta 1005, Nil))) : scheme)),
+   Cons (("Cons", ((Cons (1006, Nil),
+     TyArrow (
+       TyTuple (Cons (TyMeta 1006, Cons (TyCon ("list", Cons (TyMeta 1006, Nil)), Nil))),
+       TyCon ("list", Cons (TyMeta 1006, Nil)))) : scheme)),
+   Nil))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
