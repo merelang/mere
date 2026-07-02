@@ -47,6 +47,7 @@ extern fn http_get_header: str -> str;
 extern fn sha256_hex: str -> str;
 
 import "../contrib/http/query.mere";
+import "../contrib/http/json_body.mere";
 import "../contrib/kv/kv.mere";
 
 let db_path = "/tmp/users.db" in
@@ -85,17 +86,28 @@ let json_users = fn (u: unit) ->
   render ks true "["
 in
 
+// Prefer the query-string value when both are supplied, so curl-
+// friendly `?user=alice&pass=secret` demos still work while JSON
+// bodies also do. Empty body → empty list. Lifted to a top-level
+// helper because the wasm codegen Phase 6.1 MVP can't lift a nested
+// closure that captures both `parsed` and `body_parsed`.
+let field_of = fn (parsed: (str * str) list) -> fn (body_parsed: (str * str) list) -> fn (name: str) ->
+  let qv = query_get parsed name in
+  if str_eq qv "" then json_get body_parsed name else qv
+in
+
 let handle = fn (req: str) ->
   let sp = str_index_of req " " in
   let method = substring req 0 sp in
   let url = substring req (sp + 1) (str_len req) in
   let (path, qs) = split_url url in
   let parsed = parse_query qs in
+  let body_parsed = parse_json_body (http_current_body ()) in
   let user = current_user () in
 
   if str_eq path "/signup" && str_eq method "POST" then
-    let u = query_get parsed "user" in
-    let p = query_get parsed "pass" in
+    let u = field_of parsed body_parsed "user" in
+    let p = field_of parsed body_parsed "pass" in
     if str_eq u "" || str_eq p "" then
       let _ = http_set_status 400 in
       "missing user / pass\n"
@@ -112,8 +124,8 @@ let handle = fn (req: str) ->
       "created: " ++ u ++ "\n"
 
   else if str_eq path "/login" && str_eq method "POST" then
-    let u = query_get parsed "user" in
-    let p = query_get parsed "pass" in
+    let u = field_of parsed body_parsed "user" in
+    let p = field_of parsed body_parsed "pass" in
     if kv_has users u && str_eq (kv_get users u) (sha256_hex p) then
       let sid = "sess-" ++ u in           // trivially derived session id
       let _ = map_set sessions sid u in
@@ -135,7 +147,7 @@ let handle = fn (req: str) ->
     "logged out\n"
 
   else if str_eq path "/delete" && str_eq method "POST" then
-    let u = query_get parsed "user" in
+    let u = field_of parsed body_parsed "user" in
     if str_eq user "" then
       let _ = http_set_status 401 in
       "login required\n"
