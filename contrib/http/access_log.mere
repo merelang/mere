@@ -23,6 +23,13 @@
 
 extern fn now_ms: unit -> int;
 extern fn http_current_status: unit -> int;
+// Generate a 16-char lowercase hex correlation ID (8 random bytes).
+// Injected on every request as `X-Request-Id` and included in the
+// access-log line so operators can stitch server-side logs to
+// individual client requests (and to any downstream calls the
+// handler makes with the same ID).
+extern fn gen_request_id: unit -> str;
+extern fn http_set_header: str -> str -> unit;
 
 import "../log/log.mere";
 
@@ -36,18 +43,37 @@ let _split_req_line = fn (req: str) ->
   if sp < 0 then (req, "")
   else (substring req 0 sp, substring req (sp + 1) (str_len req));
 
-// Wrap an existing handler with access logging. The wrapper is a
-// plain `str -> str` fn matching the shape `http_serve` expects, so
-// it drops in wherever the raw handler used to go.
+// Wrap an existing handler with access logging + request ID
+// injection. The wrapper is a plain `str -> str` fn matching the
+// shape `http_serve` expects, so it drops in wherever the raw
+// handler used to go.
+//
+// Sequence per request:
+//   1. Generate a fresh request_id (16-char hex, ~8 bytes entropy)
+//   2. Set `X-Request-Id` on the response so clients can echo it
+//      back in bug reports / support tickets
+//   3. Run the inner handler
+//   4. Emit one JSON log line with request_id / method / path /
+//      status / ms
+//
+// Callers who want the request_id inside their own log lines can
+// call `gen_request_id ()` themselves and include it as a field.
+// Multiple calls produce independent IDs — sharing the middleware's
+// ID with the inner handler would require an extra extern to read
+// the current response's X-Request-Id back, which we deliberately
+// defer.
 let with_access_log = fn (inner: str -> str) -> fn (req: str) ->
+  let request_id = gen_request_id () in
+  let _ = http_set_header "X-Request-Id" request_id in
   let start = now_ms () in
   let resp = inner req in
   let elapsed = now_ms () - start in
   let (method, path) = _split_req_line req in
   let status = show (http_current_status ()) in
   let _ = log_with "info" "access" (
+    Cons (("request_id", request_id),
     Cons (("method", method),
     Cons (("path", path),
     Cons (("status", status),
-    Cons (("ms", show elapsed), Nil))))) in
+    Cons (("ms", show elapsed), Nil)))))) in
   resp;

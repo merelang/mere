@@ -170,6 +170,14 @@ const wasmPath = process.argv[2];
       new Uint8Array(memory.buffer).set(bytes, outPtr);
       return outPtr;
     },
+    // gen_request_id : unit -> str. Returns a fresh 16-char lowercase
+    // hex string (8 random bytes from Node's crypto.randomBytes),
+    // suitable for a per-request correlation ID. Not a UUID — no
+    // format markers — but sufficient entropy for log stitching.
+    gen_request_id: () => {
+      const hex = require("crypto").randomBytes(8).toString("hex");
+      return writeStr(hex);
+    },
     // http_fetch : str -> str -> str -> str  (method, url, body → body)
     // Synchronous outbound HTTP via `curl` (spawnSync). Body is sent
     // verbatim as `--data-binary` when non-empty. Status code is
