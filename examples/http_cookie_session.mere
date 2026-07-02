@@ -1,0 +1,108 @@
+// http_cookie_session: minimal cookie-backed session demo.
+//
+// Purpose: Phase 55f web-app follow-up. Demonstrates the new
+// `http_get_header` extern fn (contrib/http Stage A extension) by
+// wiring up:
+//
+//   POST /login       → Set-Cookie: session=<id> + reply "logged in"
+//   GET  /whoami      → check Cookie header, reply "you=<id>" or "anonymous"
+//   POST /logout      → Set-Cookie: session=; Max-Age=0 (delete)
+//   GET  /            → tiny inline HTML page with fetch-based demo UI
+//
+// Sessions are stored in-memory (Map[str, str], session_id → username).
+// Fixed session id `"demo-abc"` for simplicity — real code would
+// generate a random token and store more per-session state.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_cookie_session.mere > /tmp/cs.wat
+//   wat2wasm /tmp/cs.wat -o /tmp/cs.wasm
+//   node scripts/run_http_server.js /tmp/cs.wasm
+//   # then in another terminal:
+//   curl -i -c cookies.txt -X POST http://localhost:8080/login
+//   curl -i -b cookies.txt http://localhost:8080/whoami
+//   curl -i -b cookies.txt -X POST http://localhost:8080/logout
+//   curl -i -b cookies.txt http://localhost:8080/whoami
+//   # or open http://localhost:8080/ in a browser for the fetch demo
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+
+// Fixed session id — real code would randomize this per login.
+let session_id = "demo-abc" in
+
+// In-memory session store: session_id → username.
+let sessions = map_new () in
+
+// Extract the value of a single cookie by name from the raw Cookie
+// header. Handles the standard `name=value; name2=value2` shape.
+// Returns "" if the name is not present.
+let cookie_get = fn (cookies: str) -> fn (name: str) ->
+  let pairs = str_split cookies "; " in
+  let target = name ++ "=" in
+  let tlen = str_len target in
+  let rec find = fn (ps: str list) ->
+    match ps with
+    | Nil -> ""
+    | Cons (p, rest) ->
+      if str_starts_with p target then substring p tlen (str_len p)
+      else find rest in
+  find pairs
+in
+
+let handle = fn (req: str) ->
+  // req is "METHOD /path" — split into pieces.
+  let sp = str_index_of req " " in
+  let method = substring req 0 sp in
+  let path = substring req (sp + 1) (str_len req) in
+  let cookie_hdr = http_get_header "Cookie" in
+  let current_user = cookie_get cookie_hdr "session" in
+
+  if str_eq path "/login" && str_eq method "POST" then
+    let _ = map_set sessions session_id "alice" in
+    let _ = http_set_header "Set-Cookie" ("session=" ++ session_id ++ "; Path=/; HttpOnly") in
+    let _ = http_set_content_type "text/plain" in
+    "logged in as alice\n"
+
+  else if str_eq path "/logout" && str_eq method "POST" then
+    let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+    let _ = http_set_content_type "text/plain" in
+    "logged out\n"
+
+  else if str_eq path "/whoami" && str_eq method "GET" then
+    let _ = http_set_content_type "text/plain" in
+    if str_eq current_user "" then "anonymous\n"
+    else if map_has sessions current_user then
+      "you=" ++ (map_get sessions current_user) ++ " (session=" ++ current_user ++ ")\n"
+    else "anonymous (stale cookie)\n"
+
+  else if str_eq path "/" && str_eq method "GET" then
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>cookie session demo</title>" ++
+    "<h1>cookie session demo</h1>" ++
+    "<button id=login>login</button> " ++
+    "<button id=who>whoami</button> " ++
+    "<button id=logout>logout</button>" ++
+    "<pre id=out></pre>" ++
+    "<script>" ++
+    "const out=document.getElementById(\"out\");" ++
+    "const call=(m,p)=>fetch(p,\{method:m,credentials:\"same-origin\"}).then(r=>r.text()).then(t=>out.textContent=t);" ++
+    "login.onclick=()=>call(\"POST\",\"/login\");" ++
+    "who.onclick=()=>call(\"GET\",\"/whoami\");" ++
+    "logout.onclick=()=>call(\"POST\",\"/logout\");" ++
+    "</script>\n"
+
+  else
+    let _ = http_set_status 404 in
+    let _ = http_set_content_type "text/plain" in
+    "not found: " ++ method ++ " " ++ path ++ "\n"
+in
+
+let _ = print "starting cookie-session demo on :8080 ..." in
+let _ = http_serve 8080 handle in
+0
