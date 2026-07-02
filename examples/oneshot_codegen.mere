@@ -1,0 +1,32 @@
+// oneshot_codegen: runtime self-host codegen bootstrap verifier.
+//
+// Purpose: exercise the self-host Wasm codegen (contrib/codegen/
+// codegen_wasm.mere) at runtime under Node — imports it, calls
+// `parse_and_emit "42"`, and prints the emitted WAT length. Serves
+// as the manual verifier for Phase 54.36's memory-bump fix (the
+// "runtime OOB" that had been deferred since Phase 54.20 turned out
+// to be a plain memory-exhaustion issue; the OCaml wasm codegen's
+// default 64-page memory was too small for a single self-host
+// emit's ~30 MiB peak arena).
+//
+// Not yet wired into CI — the obvious harness (bootstrap_emit with a
+// codegen import) goes through a double-self-host path that surfaces
+// additional issues out of scope for Phase 54.36. See docs/
+// changelog.md for context.
+//
+// Usage (from mere repo root):
+//   dune exec ./bin/mere.exe -- -w examples/oneshot_codegen.mere > /tmp/oc.wat
+//   wat2wasm /tmp/oc.wat -o /tmp/oc.wasm
+//   node --stack-size=65500 scripts/run_wasm.js /tmp/oc.wasm
+//   # expect: "start" then "output length: 80744" then exit 0
+//
+// Note: `node --stack-size=65500` is required — self-host workloads
+// recurse thousands of frames before returning, easily blowing the
+// default Node stack (~500 KB).
+
+import "../contrib/codegen/codegen_wasm.mere";
+
+let _ = print "start" in
+let out = parse_and_emit "42" in
+let _ = print ("output length: " ++ show (str_len out)) in
+0
