@@ -7941,6 +7941,14 @@ let () =
     "type opt = | Some of int | None; match Some 5 with | Some x -> x + 1 | None -> 0";
   cross_type "PConstr pattern nullary only"
     "type flag = | On | Off; match On with | On -> 1 | Off -> 0";
+  (* Phase 55f continued: fst / snd as polymorphic builtins so real
+     contrib code that uses them type-checks. *)
+  cross_type "fst polymorphic int-str"
+    "fst (1, \"hi\")";
+  cross_type "snd polymorphic int-str"
+    "snd (1, \"hi\")";
+  cross_type "fst + snd arith"
+    "let p = (10, 20) in fst p + snd p";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
