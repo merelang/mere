@@ -8243,6 +8243,61 @@ let () =
      is (a) reasonably long, and (b) at least parses back through
      wat2wasm without error. This is the durable CI check for the
      54.19 milestone: "the self-host codegen can compile itself". *)
+  (* Phase 55f dogfood: like `bootstrap_wat_ok` but routes through the
+     typed pipeline — reads a real contrib file, inlines imports, then
+     runs `parse_and_annotate` (typer) → `emit_program` (codegen)
+     rather than `parse_and_emit`. Surfaces any real-world code that
+     the stricter typer catches (or that the annotate pass trips on).
+     Asserts the WAT is at least `min_len` bytes and wat2wasm accepts
+     it. *)
+  let typed_wat_ok name path min_len =
+    let abs_path = Filename.concat project_root path in
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/typer/typer.mere\";\n\
+       import \"%s/contrib/codegen/codegen_wasm.mere\";\n\
+       let __p = \"%s\" in\n\
+       let __src = read_file __p in\n\
+       let __base = dirname __p in\n\
+       let (__inlined, ___) = inline_imports_in __src __base (Cons (__p, Nil)) in\n\
+       emit_program (parse_and_annotate __inlined)\n"
+      project_root project_root abs_path
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    let wat = (match Eval.eval_in !eval_env prog.main with
+      | Eval.V_str s -> s
+      | _ -> "<not-a-string>") in
+    let len = String.length wat in
+    if len < min_len then begin
+      incr fail;
+      Printf.printf "FAIL  typed wat-ok: %s (WAT length %d < %d)\n"
+        name len min_len
+    end else begin
+      let wat_path = Filename.temp_file "mere_typed_" ".wat" in
+      let wasm_path = wat_path ^ ".wasm" in
+      let oc = open_out wat_path in
+      output_string oc wat;
+      close_out oc;
+      let cmd = Printf.sprintf "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      let ok = Sys.command cmd = 0 in
+      Sys.remove wat_path;
+      (try Sys.remove wasm_path with _ -> ());
+      if ok then begin
+        incr pass;
+        Printf.printf "PASS  typed wat-ok: %s (%d bytes WAT, wat2wasm accepted)\n"
+          name len
+      end else begin
+        incr fail;
+        Printf.printf "FAIL  typed wat-ok: %s (%d bytes WAT, wat2wasm rejected)\n"
+          name len
+      end
+    end
+  in
+
   let bootstrap_wat_ok name path min_len =
     let wat = self_host_emit_file path in
     let len = String.length wat in
@@ -8814,6 +8869,16 @@ let () =
       (project_root ^ "/contrib/json/json.mere") 80_000;
     bootstrap_wat_ok "compile: path"
       (project_root ^ "/contrib/path/path.mere") 50_000;
+    (* Phase 55f dogfood: exercise the typed pipeline against real
+       contrib files. option / path pass through cleanly with the
+       Stage 55c-3 registry work — proves the annotate + emit chain
+       doesn't regress on realistic inputs. regex / json / bigger
+       contribs still trip our stricter typer (deferred — need
+       polymorphic gap fix + a couple more builtins). *)
+    typed_wat_ok "typed compile: option"
+      "contrib/option/option.mere" 30000;
+    typed_wat_ok "typed compile: path"
+      "contrib/path/path.mere" 20000;
     bootstrap_wat_ok "compile: option"
       (project_root ^ "/contrib/option/option.mere") 50_000;
     bootstrap_wat_ok "compile: regex"

@@ -1075,6 +1075,12 @@ let initial_state = ((0, Nil) : infer_state);
 let show_scheme =
   ((Cons (1000, Nil), TyArrow (TyMeta 1000, TyStr)) : scheme);
 
+// Phase 55f dogfood: `fail : str -> 'a` — polymorphic return so it
+// composes with any expression context (`if cond then 42 else fail
+// "boom"` unifies the return meta with TyInt via the branch).
+let fail_scheme =
+  ((Cons (1001, Nil), TyArrow (TyStr, TyMeta 1001)) : scheme);
+
 let initial_type_env =
   (Cons (("print", mono (TyArrow (TyStr, TyUnit))),
    Cons (("show", show_scheme),
@@ -1082,12 +1088,25 @@ let initial_type_env =
    Cons (("str_of_float", mono (TyArrow (TyFloat, TyStr))),
    Cons (("str_eq", mono (TyArrow (TyStr, TyArrow (TyStr, TyBool)))),
    Cons (("str_len", mono (TyArrow (TyStr, TyInt))),
-   Cons (("char_at", mono (TyArrow (TyStr, TyArrow (TyInt, TyInt)))),
+   Cons (("char_at", mono (TyArrow (TyStr, TyArrow (TyInt, TyStr)))),
    Cons (("chr", mono (TyArrow (TyInt, TyStr))),
    Cons (("ord", mono (TyArrow (TyStr, TyInt))),
    Cons (("not", mono (TyArrow (TyBool, TyBool))),
    Cons (("read_file", mono (TyArrow (TyStr, TyStr))),
-   Nil))))))))))) : type_env);
+   Cons (("fail", fail_scheme),
+   // Phase 55f dogfood: additional builtins that show up in real
+   // contrib code (path.mere, regex.mere, etc.). Types match OCaml
+   // side's initial_env — see lib/typer.ml.
+   Cons (("substring", mono (TyArrow (TyStr, TyArrow (TyInt, TyArrow (TyInt, TyStr))))),
+   Cons (("str_index_of", mono (TyArrow (TyStr, TyArrow (TyStr, TyInt)))),
+   Cons (("str_starts_with", mono (TyArrow (TyStr, TyArrow (TyStr, TyBool)))),
+   Cons (("str_repeat", mono (TyArrow (TyStr, TyArrow (TyInt, TyStr)))),
+   Cons (("str_join", mono (TyArrow (TyStr, TyArrow (TyCon ("list", Cons (TyStr, Nil)), TyStr)))),
+   Cons (("int_of_str", mono (TyArrow (TyStr, TyInt))),
+   Cons (("is_digit", mono (TyArrow (TyStr, TyBool))),
+   Cons (("is_alpha", mono (TyArrow (TyStr, TyBool))),
+   Cons (("is_space", mono (TyArrow (TyStr, TyBool))),
+   Nil))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
