@@ -7969,6 +7969,13 @@ let () =
     "Some (Cons (1, Cons (2, Nil)))";
   cross_type "option match with payload"
     "match Some 42 with | Some x -> x + 1 | None -> 0";
+  (* Phase 55f continued (part 5): built-in Ok / Err with 2 type
+     params. Each ctor use freshens its own (id_a, id_b) so
+     `if cond then Ok 42 else Err "bad"` unifies to `(int, str) result`. *)
+  cross_type "result if-branches unify"
+    "if true then Ok 42 else Err \"bad\"";
+  cross_type "result Ok match"
+    "match Ok 42 with | Ok x -> x | Err _ -> 0";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
