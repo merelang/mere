@@ -7915,6 +7915,15 @@ let () =
     "type Point = { x: int, y: int }; Point { x = 1, y = 2 }";
   cross_type "TopRecord let-bound"
     "type Point = { x: int, y: int }; let p = Point { x = 3, y = 4 } in p";
+  (* Phase 55c-2b: EFieldGet resolves the field ty from the record's
+     TyCon name. Pre-55c-2b `p.x` inferred to a fresh meta (`'_0`);
+     with the registry in place it resolves to `int`. Test both a
+     bare field access and one embedded in an arithmetic expression
+     so the result ty (int) actually gets used. *)
+  cross_type "EFieldGet single"
+    "type Point = { x: int, y: int }; let p = Point { x = 3, y = 4 } in p.x";
+  cross_type "EFieldGet sum"
+    "type Point = { x: int, y: int }; let p = Point { x = 1, y = 2 } in p.x + p.y";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
