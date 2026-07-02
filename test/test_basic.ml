@@ -8297,6 +8297,13 @@ let () =
      it. *)
   let typed_wat_ok name path min_len =
     let abs_path = Filename.concat project_root path in
+    (* Phase 55f part 8 attempt: prepending selfhost_prelude_fns caused
+       an existing test to hang (~9 min at 100% CPU on test_basic.exe).
+       Reverted to plain __inlined for now — the prelude fns are only
+       needed for real contribs that reference list_iter / list_map at
+       source level, and the tests currently in the harness (option /
+       path / time) don't need them. When we reintroduce prelude
+       prepend, first bisect what's causing the loop. *)
     let bridge = Printf.sprintf
       "import \"%s/contrib/typer/typer.mere\";\n\
        import \"%s/contrib/codegen/codegen_wasm.mere\";\n\

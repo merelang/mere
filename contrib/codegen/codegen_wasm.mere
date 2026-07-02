@@ -2752,7 +2752,13 @@ let emit_program = fn (prog: program) ->
 // actually have contrib consumers — list_map (typer/eval), str_join
 // (typer/eval). Adding more is incremental — keep it small so the
 // emitted module stays slim for tiny inputs.
-let selfhost_prelude =
+// Phase 55f part 8: split the prelude into a "types" part (monomorphic
+// TopType decls for codegen's arity map) and a "fns" part (helper
+// definitions). The typed pipeline (parse_and_annotate) uses `_fns`
+// alone — Phase 55f's initial_type_env already has polymorphic Nil /
+// Cons / None / Some / Ok / Err, so the monomorphic types would
+// shadow those and force everything to `list int` etc.
+let selfhost_prelude_types =
   // Phase 54.13: type decls so the parser's constructor-arity rewrite
   // (collect_arities_from_decls / rewrite_constrs_expr) knows that
   // Some/Ok/Err/Cons take a payload. Without these the post-pass sees
@@ -2762,7 +2768,9 @@ let selfhost_prelude =
   // yet, and the codegen treats all payloads uniformly as i32 anyway.
   "type __list_t = Nil | Cons of int;\n" ++
   "type __option_t = None | Some of int;\n" ++
-  "type __result_t = Ok of int | Err of int;\n" ++
+  "type __result_t = Ok of int | Err of int;\n";
+
+let selfhost_prelude_fns =
   "let rec list_map = fn xs -> fn f ->\n" ++
   "  match xs with\n" ++
   "  | Nil -> Nil\n" ++
@@ -2870,6 +2878,12 @@ let selfhost_prelude =
   "          loop (start + idx + dl) (Cons (part, acc))\n" ++
   "    in\n" ++
   "    loop 0 Nil;\n";
+
+// Phase 55f part 8: full prelude (types + fns) — used by parse_and_emit
+// which needs the type decls for codegen's arity map. The typed
+// pipeline (parse_and_annotate) uses `selfhost_prelude_fns` alone
+// (see typed_wat_ok bridge in test/test_basic.ml).
+let selfhost_prelude = selfhost_prelude_types ++ selfhost_prelude_fns;
 
 // === Phase 54.10: import resolution ========================================
 //
