@@ -48,11 +48,17 @@ extern fn sha256_hex: str -> str;
 
 import "../contrib/http/query.mere";
 import "../contrib/http/json_body.mere";
+import "../contrib/http/ratelimit.mere";
 import "../contrib/kv/kv.mere";
 
 let db_path = "/tmp/users.db" in
 let users = kv_load db_path in         // persistent user directory
 let sessions = map_new () in            // in-memory session_id → username
+
+// Brute-force login throttle: max 5 failed attempts per 60s per user.
+let login_limiter = rate_new () in
+let login_window = 60 in
+let login_max = 5 in
 
 // Extract the "session" cookie value from the raw Cookie header.
 let cookie_get_session = fn (cookies: str) ->
@@ -126,12 +132,18 @@ let handle = fn (req: str) ->
   else if str_eq path "/login" && str_eq method "POST" then
     let u = field_of parsed body_parsed "user" in
     let p = field_of parsed body_parsed "pass" in
-    if kv_has users u && str_eq (kv_get users u) (sha256_hex p) then
+    if rate_over_limit login_limiter u login_window login_max then
+      let _ = http_set_status 429 in
+      let _ = http_set_header "Retry-After" (show login_window) in
+      "too many failed login attempts; try again later\n"
+    else if kv_has users u && str_eq (kv_get users u) (sha256_hex p) then
+      let _ = rate_reset login_limiter u in
       let sid = "sess-" ++ u in           // trivially derived session id
       let _ = map_set sessions sid u in
       let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
       "logged in as " ++ u ++ "\n"
     else
+      let _ = rate_bump login_limiter u login_window in
       let _ = http_set_status 401 in
       "invalid credentials\n"
 

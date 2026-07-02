@@ -1,0 +1,87 @@
+// contrib/http/ratelimit.mere — fixed-window per-key rate limiter.
+//
+// Pure Mere plus the `unix_time` extern (Node stdlib, already in
+// the run_http_server.js env). Simple counter that resets when the
+// window rolls; use for brute-force login throttling, request
+// rate caps per user, cheap DoS deflection.
+//
+// Model: for each key, track (count, window_start_unix_ts). On each
+// call:
+//   - if now - start >= window_seconds, reset (count = 1, start = now)
+//   - else if count >= max, over-limit
+//   - else increment
+//
+// State layout: two `Map[str, str]` maps side by side — one for
+// counts, one for window starts. Values are stringified ints
+// because Map values in Mere self-host are typed uniformly and
+// there's no straightforward int-valued Map in the prelude. The
+// int_of_str / show round-trip is fast enough for the scale
+// where fixed-window is appropriate (a few hundred keys, single
+// process).
+//
+// Public API:
+//
+//   rate_new         : unit -> ratelimiter
+//   rate_over_limit  : ratelimiter -> str -> int -> int -> bool
+//                       (state, key, window_seconds, max_requests) → true if blocked
+//   rate_bump        : ratelimiter -> str -> unit
+//                       records a hit (called by handler for failed attempts)
+//
+// The split (`over_limit` returns without incrementing, `bump`
+// increments) matches the common brute-force login pattern:
+//
+//   if rate_over_limit lim user 60 5 then 429
+//   else if valid_credentials then success
+//   else
+//     let _ = rate_bump lim user in
+//     401
+
+extern fn unix_time: unit -> int;
+
+// A ratelimiter is a pair of Maps.
+let rate_new = fn (u: unit) ->
+  let counts = map_new () in
+  let starts = map_new () in
+  (counts, starts);
+
+// Look up the current (count, start) for key. Returns (0, 0) when
+// the key has never been touched.
+let _read_state = fn (lim) -> fn (key: str) ->
+  let (counts, starts) = lim in
+  if map_has starts key then
+    let c = int_of_str (map_get counts key) in
+    let s = int_of_str (map_get starts key) in
+    (c, s)
+  else (0, 0);
+
+// True if key has exceeded `max` requests within the last `window`
+// seconds. Does NOT increment — callers should call `rate_bump`
+// separately to record a hit.
+let rate_over_limit = fn (lim) -> fn (key: str) -> fn (window: int) -> fn (max: int) ->
+  let (c, s) = _read_state lim key in
+  let now = unix_time () in
+  if s == 0 then false
+  else if now - s >= window then false
+  else c >= max;
+
+// Record one hit for `key`. If the window has rolled since the last
+// hit, restart the counter at 1 with a fresh start-timestamp.
+let rate_bump = fn (lim) -> fn (key: str) -> fn (window: int) ->
+  let (counts, starts) = lim in
+  let (c, s) = _read_state lim key in
+  let now = unix_time () in
+  if s == 0 || now - s >= window then
+    let _ = map_set counts key "1" in
+    let _ = map_set starts key (show now) in
+    ()
+  else
+    let _ = map_set counts key (show (c + 1)) in
+    ();
+
+// Convenience: reset a key (e.g. on successful login) so a subsequent
+// wrong-password attempt doesn't inherit the old count.
+let rate_reset = fn (lim) -> fn (key: str) ->
+  let (counts, starts) = lim in
+  let _ = map_set counts key "0" in
+  let _ = map_set starts key "0" in
+  ();
