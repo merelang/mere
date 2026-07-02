@@ -1,0 +1,80 @@
+// http_search_api: query-string parsing demo (?q=..&sort=..&limit=..).
+//
+// Purpose: Phase 55f web-app follow-up. Demonstrates
+// `contrib/http/query.mere`'s `split_url` + `parse_query` +
+// `query_get` by handling a search endpoint that:
+//
+//   GET /search?q=hello+world&sort=asc&limit=10
+//   → JSON reply echoing the parsed q / sort / limit
+//
+//   GET /encode?q=cafe&city=Tokyo
+//   → returns encode_query round-tripped result (verifies encoder)
+//
+//   GET /
+//   → tiny HTML UI with a form + fetch
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_search_api.mere > /tmp/sr.wat
+//   wat2wasm /tmp/sr.wat -o /tmp/sr.wasm
+//   node scripts/run_http_server.js /tmp/sr.wasm
+//   # in another terminal:
+//   curl 'http://localhost:8080/search?q=hello+world&sort=asc&limit=10'
+//   curl 'http://localhost:8080/encode?q=cafe&city=Tokyo'
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+
+import "../contrib/http/query.mere";
+
+let handle = fn (req: str) ->
+  let sp = str_index_of req " " in
+  let method = substring req 0 sp in
+  let url = substring req (sp + 1) (str_len req) in
+  let (path, qs) = split_url url in
+  let parsed = parse_query qs in
+
+  if str_eq path "/search" && str_eq method "GET" then
+    let q = query_get parsed "q" in
+    let sort = query_get parsed "sort" in
+    let limit = query_get parsed "limit" in
+    let _ = http_set_content_type "application/json" in
+    "\{\"q\": \"" ++ q ++ "\", \"sort\": \"" ++ sort ++ "\", \"limit\": \"" ++ limit ++ "\"}\n"
+
+  else if str_eq path "/encode" && str_eq method "GET" then
+    let _ = http_set_content_type "text/plain" in
+    "roundtrip: " ++ encode_query parsed ++ "\n"
+
+  else if str_eq path "/" && str_eq method "GET" then
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>search api demo</title>" ++
+    "<h1>search api demo</h1>" ++
+    "<form id=f>" ++
+    "q: <input name=q value=\"hello world\"> " ++
+    "sort: <input name=sort value=asc> " ++
+    "limit: <input name=limit value=10> " ++
+    "<button>search</button>" ++
+    "</form>" ++
+    "<pre id=out></pre>" ++
+    "<script>" ++
+    "const out=document.getElementById(\"out\");" ++
+    "const f=document.getElementById(\"f\");" ++
+    "f.onsubmit=e=>\{e.preventDefault();" ++
+    "const p=new URLSearchParams(new FormData(f)).toString();" ++
+    "fetch(\"/search?\"+p).then(r=>r.text()).then(t=>out.textContent=t);};" ++
+    "</script>\n"
+
+  else
+    let _ = http_set_status 404 in
+    let _ = http_set_content_type "text/plain" in
+    "not found: " ++ method ++ " " ++ path ++ "\n"
+in
+
+let _ = print "starting search-api demo on :8080 ..." in
+let _ = http_serve 8080 handle in
+0
