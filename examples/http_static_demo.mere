@@ -1,0 +1,72 @@
+// http_static_demo: static-file serving demo.
+//
+// Shows `serve_static_fallback` from `contrib/http/static.mere`
+// serving CSS and JS from disk while inline HTML links to them.
+// Assets live in `examples/static_public/`.
+//
+// Middleware stack (outer → inner):
+//   access_log → security_headers → cors "*" → serve_static → router
+//
+// The static layer sits above the router so `/static/style.css`
+// hits the filesystem before any 404 fallback. Requests outside
+// `/static/` fall through to the router.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_static_demo.mere > /tmp/sd.wat
+//   wat2wasm /tmp/sd.wat -o /tmp/sd.wasm
+//   node scripts/run_http_server.js /tmp/sd.wasm
+//   curl http://localhost:8080/                    # HTML with links
+//   curl -i http://localhost:8080/static/style.css # served from disk
+//   curl -i http://localhost:8080/static/app.js
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+
+import "../contrib/http/router.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><meta charset=utf-8><title>static demo</title>" ++
+  "<link rel=stylesheet href=/static/style.css>" ++
+  "<script src=/static/app.js defer></script>" ++
+  "<h1>static file demo</h1>" ++
+  "<p>the CSS below is served from <code>examples/static_public/style.css</code>," ++
+  " the JS from <code>examples/static_public/app.js</code>.</p>" ++
+  "<p>Click any <code>code</code> tag to copy it — the JS registered a click handler on load.</p>" ++
+  "<h2>try:</h2>" ++
+  "<ul>" ++
+  "<li><code>curl -i http://localhost:8080/static/style.css</code></li>" ++
+  "<li><code>curl -i http://localhost:8080/static/app.js</code></li>" ++
+  "<li><code>curl http://localhost:8080/static/missing.txt</code> (404)</li>" ++
+  "</ul>\n";
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found: " ++ req ++ "\n";
+
+let routes =
+  Cons (route "GET" "/" home,
+  Nil) in
+
+// Route table first (inner), then static layer wraps it, then the
+// middleware stack. When a `/static/…` request comes in, the
+// static middleware handles it; every other URL falls through to
+// the router (which knows about "/") and then to `not_found`.
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/static_public" handle_routed in
+
+let _ = print "starting static demo on :8080 ..." in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0

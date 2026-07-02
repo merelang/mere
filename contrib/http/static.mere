@@ -1,0 +1,102 @@
+// contrib/http/static.mere — static-file serving middleware.
+//
+// Serves files from a filesystem root at a URL prefix. Wraps a
+// fallback handler so requests that don't match the prefix pass
+// through untouched. Content-Type is inferred from the file
+// extension via a small built-in table.
+//
+// Usage — put static serving at the bottom of the middleware stack
+// (below business routes) so real routes always take precedence:
+//
+//   let handle = router routes not_found in
+//   let handle_with_static = serve_static_fallback "/static/" "./public" handle in
+//   http_serve 8080 (with_access_log handle_with_static)
+//
+// A request for `GET /static/style.css` reads `./public/style.css`
+// and returns its bytes with `Content-Type: text/css`. Anything
+// outside the `/static/` prefix falls through to `handle`.
+//
+// Path-traversal defence: request paths containing `..` are
+// rejected (404). Not bulletproof — real production should also
+// canonicalise the filesystem path — but stops the common
+// `?../../../etc/passwd` attack.
+//
+// Empty file contents are treated as 404 (a compromise since our
+// `read_file` extern returns "" for ENOENT; distinguishing genuinely
+// empty files needs a `file_exists` extern which we haven't added).
+//
+// Public API:
+//
+//   serve_static_fallback : str -> str -> (str -> str) -> (str -> str)
+//     args = (url_prefix, fs_root, fallback_handler)
+//
+//   mime_of : str -> str
+//     returns a Content-Type string for a filename by extension.
+//     Falls back to "application/octet-stream" for unknown types.
+
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "./query.mere";
+
+// Suffix check — string endsWith equivalent. Not in the prelude, so
+// we roll it here.
+let str_ends_with = fn (s: str) -> fn (suffix: str) ->
+  let ns = str_len s in
+  let nx = str_len suffix in
+  if nx > ns then false
+  else str_eq (substring s (ns - nx) ns) suffix;
+
+// Contains check for path-traversal detection.
+let str_contains = fn (s: str) -> fn (needle: str) ->
+  str_index_of s needle >= 0;
+
+// Content-Type by filename extension. Handles the common web assets;
+// unknown extensions get the standard fallback which browsers will
+// generally treat as "download this".
+let mime_of = fn (path: str) ->
+  if str_ends_with path ".html" then "text/html; charset=utf-8"
+  else if str_ends_with path ".htm" then "text/html; charset=utf-8"
+  else if str_ends_with path ".css" then "text/css; charset=utf-8"
+  else if str_ends_with path ".js" then "application/javascript; charset=utf-8"
+  else if str_ends_with path ".mjs" then "application/javascript; charset=utf-8"
+  else if str_ends_with path ".json" then "application/json; charset=utf-8"
+  else if str_ends_with path ".txt" then "text/plain; charset=utf-8"
+  else if str_ends_with path ".md" then "text/markdown; charset=utf-8"
+  else if str_ends_with path ".svg" then "image/svg+xml"
+  else if str_ends_with path ".png" then "image/png"
+  else if str_ends_with path ".jpg" then "image/jpeg"
+  else if str_ends_with path ".jpeg" then "image/jpeg"
+  else if str_ends_with path ".gif" then "image/gif"
+  else if str_ends_with path ".ico" then "image/x-icon"
+  else if str_ends_with path ".webp" then "image/webp"
+  else if str_ends_with path ".woff" then "font/woff"
+  else if str_ends_with path ".woff2" then "font/woff2"
+  else "application/octet-stream";
+
+let serve_static_fallback = fn (url_prefix: str) -> fn (fs_root: str) -> fn (inner: str -> str) -> fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then inner req
+  else
+    let method = substring req 0 sp in
+    let url = substring req (sp + 1) (str_len req) in
+    let (path, _qs) = split_url url in
+    if not (str_eq method "GET") || not (str_starts_with path url_prefix) then
+      inner req
+    else if str_contains path ".." then
+      // Path-traversal guard. 404 rather than 400 so we don't
+      // advertise the check to attackers.
+      let _ = http_set_status 404 in
+      let _ = http_set_content_type "text/plain" in
+      "not found\n"
+    else
+      let rel = substring path (str_len url_prefix) (str_len path) in
+      let full = fs_root ++ "/" ++ rel in
+      let content = read_file full in
+      if str_len content == 0 then
+        let _ = http_set_status 404 in
+        let _ = http_set_content_type "text/plain" in
+        "not found: " ++ path ++ "\n"
+      else
+        let _ = http_set_content_type (mime_of rel) in
+        content;
