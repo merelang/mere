@@ -8351,6 +8351,22 @@ let () =
     typed_cross_stdout "str == literal-only path unchanged"
       "let s = \"x\" in let _ = print (show (s == \"x\")) in 0"
       "true";
+    (* Phase 55d: `show` on a variant value emits `call $show_variant`,
+       a state-built if-chain over the final `variant_tags` mapping
+       each tag to its ctor name pointer. MVP shows the ctor name only
+       (payload rendering like "Some(42)" is a later slice). *)
+    typed_cross_stdout "show variant nullary Red"
+      "type color = | Red | Green | Blue; let _ = print (show Red) in 0"
+      "Red";
+    typed_cross_stdout "show variant nullary Blue"
+      "type color = | Red | Green | Blue; let _ = print (show Blue) in 0"
+      "Blue";
+    typed_cross_stdout "show variant nullary None"
+      "type opt = | Some of int | None; let _ = print (show None) in 0"
+      "None";
+    typed_cross_stdout "show variant payload ctor (name only)"
+      "type opt = | Some of int | None; let _ = print (show (Some 42)) in 0"
+      "Some";
     (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
        (caught by FizzBuzz / print_range / list rendering) used to
        crash because free_vars treated them as free vars and tried to
@@ -8785,7 +8801,7 @@ let () =
        valid program at runtime — closes the last unresolved gap
        from Phase 54.20. *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "80746"
+      "examples/oneshot_codegen.mere" "80946"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

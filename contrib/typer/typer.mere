@@ -1205,7 +1205,21 @@ let rec annotate_decl = fn (d: top_decl) -> fn (env: type_env)
     let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
     let (bindings_r, s3) = annotate_bindings bindings pre_env s2 in
     (TopLetRec bindings_r, final_env, s3)
-  | TopType _ -> (d, env, s)
+  | TopType (name, params, ctors) ->
+    // Phase 55d: annotate_decl must mirror infer_decl's env extension
+    // for TopType so downstream annotate_expr calls (on main / later
+    // decls) can resolve ctor names to their proper TyCon type. Without
+    // this, `show Red` sees Red as an unresolved TyMeta and codegen
+    // falls back to `$show_int` — losing the whole point of Stage 55d.
+    let ctor_tyvars = collect_tyvars_in_ctors ctors Nil in
+    let all_params = union_str_names params ctor_tyvars in
+    let n_params = list_len_names all_params in
+    let (param_ids, s1) = alloc_fresh_ids_n n_params s in
+    let param_map = zip_params_ids all_params param_ids in
+    let param_metas = ids_to_tymeta_list param_ids in
+    let ret_ty = TyCon (name, param_metas) in
+    let env2 = register_ctors ctors param_ids param_map ret_ty env in
+    (d, env2, s1)
   | TopRecord _ -> (d, env, s)
   | TopTypeAlias _ -> (d, env, s)
   | TopModule _ -> (d, env, s)

@@ -885,6 +885,11 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         // meaning the typer's annotate pass ran and attached a resolved
         // ty — dispatch on the ty. Otherwise fall back to `$show_int`
         // (the pre-Phase-55 behaviour that assumes int arg).
+        // Phase 55d: TyCon (variant type from Phase 55c registry)
+        // dispatches to `$show_variant`, a tag→ctor-name if-chain
+        // built at emit_program finalization from the final
+        // variant_tags. Payload rendering (`"Some(42)"`) is deferred —
+        // MVP just shows the ctor name.
         (match x with
           | EAnnot (_, TyBool) ->
             let s0 = note_helper_use "show_bool" s in
@@ -897,6 +902,10 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
             let s0b = note_helper_use "show_str" s0a in
             let s1 = emit_expr x s0b in
             push_instr "call $show_str" s1
+          | EAnnot (_, TyCon (_, _)) ->
+            let s0 = note_helper_use "show_variant" s in
+            let s1 = emit_expr x s0 in
+            push_instr "call $show_variant" s1
           | _ ->
             let s1 = note_helper_use "show_int" s in
             let s2 = emit_expr x s1 in
@@ -2363,12 +2372,51 @@ let helper_decl_show_str =
   "      (call $__lang_str_concat (local.get $q) (local.get $s))\n" ++
   "      (local.get $q)))\n";
 
+// Phase 55d: build the `$show_variant` helper WAT lazily at emit_program
+// time, using the final variant_tags + str_offsets from EmitState.
+// Ctor tag → ctor name pointer is a nested if-chain (linear on N ctors,
+// small in practice — <20 in typical Mere programs). Base case is
+// `unreachable` since a variant value carrying an unregistered tag
+// would be a codegen bug, not a user error.
+let rec build_show_variant_cases = fn (entries: (str * int) list)
+                                -> fn (offsets: (str * int) list) ->
+  match entries with
+  | Nil -> "    (unreachable)\n"
+  | Cons (e, rest) ->
+    let (name, tag) = e in
+    let off = (match lookup_assoc name offsets with
+      | Some o -> o
+      | None -> 0) in
+    "    (if (result i32) (i32.eq (local.get $tag) (i32.const " ++
+      show tag ++ "))\n" ++
+    "      (then (i32.const " ++ show off ++ "))\n" ++
+    "      (else\n" ++
+    build_show_variant_cases rest offsets ++
+    "      ))\n"
+  ;
+
+let build_show_variant_helper = fn (s: EmitState) ->
+  // `variant_tags` is Cons-prepended, so reverse for tag-ascending order.
+  // The tag-0 entry ends up outer-most in the if-chain, which is arbitrary
+  // (each branch tests i32.eq against a constant tag). Order affects
+  // readability, not semantics.
+  // Order in variant_tags doesn't affect correctness — each branch is
+  // an independent `i32.eq $tag <const>` test. Skip reversal.
+  let cases = build_show_variant_cases s.variant_tags s.str_offsets in
+  "  (func $show_variant (param $v i32) (result i32)\n" ++
+  "    (local $tag i32)\n" ++
+  "    (local.set $tag (i32.load offset=0 (local.get $v)))\n" ++
+  cases ++
+  "  )\n";
+
 let helper_body = fn (name: str) ->
   if name == "strlen" then helper_decl_strlen
   else if name == "str_concat" then helper_decl_str_concat
   else if name == "show_int" then helper_decl_show_int
   else if name == "show_bool" then helper_decl_show_bool
   else if name == "show_str" then helper_decl_show_str
+  // show_variant is state-dependent — handled at emit_program level.
+  else if name == "show_variant" then ""
   else if name == "char_at" then helper_decl_char_at
   else if name == "chr" then helper_decl_chr
   else if name == "float_box" then helper_decl_float_box
@@ -2474,7 +2522,12 @@ let rec register_ctor_tags = fn (ctors: (str * ty option) list)
   | Cons (c, rest) ->
     let (name, _payload_ty) = c in
     let (_tag, s1) = lookup_or_alloc_variant_tag name s in
-    register_ctor_tags rest s1
+    // Phase 55d: pre-allocate the ctor name string in the data
+    // segment so `$show_variant` (which is generated at emit_program
+    // finalization) has stable offsets baked-in. Small footprint —
+    // one NUL-terminated str per ctor.
+    let (_off, s2) = alloc_str_literal name s1 in
+    register_ctor_tags rest s2
   ;
 
 let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
@@ -2547,7 +2600,14 @@ let emit_program = fn (prog: program) ->
   let extern_imports =
     build_extern_imports s.extern_uses
     ++ build_extern_decl_imports s.extern_decls in
-  let helper_decls = build_helper_decls s.helpers_used in
+  let helper_decls_base = build_helper_decls s.helpers_used in
+  // Phase 55d: `show_variant` needs access to the final `variant_tags`
+  // and `str_offsets`, so build its WAT here (helper_body returns ""
+  // for the "show_variant" name — the state-aware builder replaces it).
+  let show_variant_decl = (match extern_already_noted "show_variant" s.helpers_used with
+    | true -> build_show_variant_helper s
+    | false -> "") in
+  let helper_decls = helper_decls_base ++ show_variant_decl in
   wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports helper_decls;
 
 // Phase 54.9: a tiny prelude prepended to every input. Keeps the
