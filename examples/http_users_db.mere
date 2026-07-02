@@ -40,6 +40,11 @@ extern fn http_set_status: int -> unit;
 extern fn http_set_content_type: str -> unit;
 extern fn http_set_header: str -> str -> unit;
 extern fn http_get_header: str -> str;
+// Provided by scripts/run_http_server.js — SHA-256 of the input,
+// returned as a 64-char lowercase hex string. Used below to hash
+// passwords before they hit the on-disk KV log. For real production
+// this should be bcrypt / argon2 with a per-user salt.
+extern fn sha256_hex: str -> str;
 
 import "../contrib/http/query.mere";
 import "../contrib/kv/kv.mere";
@@ -98,7 +103,10 @@ let handle = fn (req: str) ->
       let _ = http_set_status 409 in
       "user already exists: " ++ u ++ "\n"
     else
-      let _ = kv_set users u p in
+      // Store the SHA-256 hex digest, never the plaintext. Demo-grade
+      // (real code needs bcrypt / argon2 + per-user salt), but at
+      // least the on-disk KV log doesn't leak the raw password.
+      let _ = kv_set users u (sha256_hex p) in
       let _ = kv_save users db_path in
       let _ = http_set_status 201 in
       "created: " ++ u ++ "\n"
@@ -106,7 +114,7 @@ let handle = fn (req: str) ->
   else if str_eq path "/login" && str_eq method "POST" then
     let u = query_get parsed "user" in
     let p = query_get parsed "pass" in
-    if kv_has users u && str_eq (kv_get users u) p then
+    if kv_has users u && str_eq (kv_get users u) (sha256_hex p) then
       let sid = "sess-" ++ u in           // trivially derived session id
       let _ = map_set sessions sid u in
       let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
