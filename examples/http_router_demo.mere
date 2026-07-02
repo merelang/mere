@@ -1,0 +1,89 @@
+// http_router_demo: showcase the router + middleware stack pattern.
+//
+// Same architecture as http_users_db.mere but with the routing
+// table lifted out of the if-else chain into a declarative
+// `route_entry list`. Uses a small handful of endpoints so the
+// pattern is easy to eyeball.
+//
+// Endpoints:
+//   GET  /               → landing page (HTML)
+//   GET  /hello          → plain-text hello
+//   GET  /hello?name=…   → hello, <name>
+//   POST /echo           → echo the request body
+//   GET  /healthz        → 200 "ok" (K8s / load-balancer liveness)
+//   *    anything else   → 404 fallback
+//
+// Middleware stack (outer → inner):
+//   access_log  →  security_headers  →  cors "*"  →  router
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_router_demo.mere > /tmp/rd.wat
+//   wat2wasm /tmp/rd.wat -o /tmp/rd.wasm
+//   node scripts/run_http_server.js /tmp/rd.wasm
+//   curl http://localhost:8080/hello?name=Mere
+//   curl -X POST -d 'ping' http://localhost:8080/echo
+//   curl http://localhost:8080/healthz
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+
+import "../contrib/http/query.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><meta charset=utf-8><title>router demo</title>" ++
+  "<h1>router demo</h1>" ++
+  "<ul>" ++
+  "<li><a href=/hello>/hello</a></li>" ++
+  "<li><a href=\"/hello?name=Mere\">/hello?name=Mere</a></li>" ++
+  "<li>POST /echo (curl)</li>" ++
+  "<li><a href=/healthz>/healthz</a></li>" ++
+  "</ul>\n";
+
+let hello = fn (req: str) ->
+  // Pull ?name= if present, default to "world".
+  let sp = str_index_of req " " in
+  let url = substring req (sp + 1) (str_len req) in
+  let (_path, qs) = split_url url in
+  let parsed = parse_query qs in
+  let name = query_get parsed "name" in
+  let who = if str_eq name "" then "world" else name in
+  let _ = http_set_content_type "text/plain" in
+  "hello, " ++ who ++ "\n";
+
+let echo = fn (req: str) ->
+  let body = http_current_body () in
+  let _ = http_set_content_type "text/plain" in
+  "echo: " ++ body ++ "\n";
+
+let healthz = fn (req: str) ->
+  let _ = http_set_content_type "text/plain" in
+  "ok\n";
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found: " ++ req ++ "\n";
+
+// The route table — declarative, easy to eyeball.
+let routes =
+  Cons (route "GET"  "/"        home,
+  Cons (route "GET"  "/hello"   hello,
+  Cons (route "POST" "/echo"    echo,
+  Cons (route "GET"  "/healthz" healthz,
+  Nil)))) in
+
+let handle = router routes not_found in
+
+let _ = print "starting router demo on :8080 ..." in
+let _ = http_serve 8080 (with_access_log (with_security_headers (with_cors "*" handle))) in
+0

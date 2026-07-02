@@ -1,0 +1,71 @@
+// contrib/http/router.mere — minimal method + exact-path router.
+//
+// Turns the if-else chain that dispatches request lines into a
+// declarative `(method, path, handler) list` — useful when the
+// number of endpoints grows past 3-4 and pattern coverage becomes
+// harder to eyeball.
+//
+// Scope: exact-path matches only. No path parameters (`/users/:id`),
+// no globs, no prefix routes. Real code that needs those can
+// preprocess the URL inside a fallback handler or write its own
+// matcher on top of this — the routing DSL is deliberately kept
+// tiny so anyone reading it can guess how it behaves.
+//
+// Query strings are stripped before matching, so a route entry for
+// `/search` catches `GET /search?q=hi`. Handlers still receive the
+// full request line and can call `split_url` themselves to pull
+// the query out.
+//
+// Public API:
+//
+//   route         : str -> str -> (str -> str) -> route_entry
+//                    (helper to build a route entry — just a
+//                     triple, but the named constructor reads
+//                     better in tables)
+//
+//   router        : route_entry list -> (str -> str) -> (str -> str)
+//                    first arg  = route table
+//                    second arg = fallback handler (called on no
+//                                                   match, typically
+//                                                   returns 404)
+//
+// Usage (in your main file):
+//
+//   let routes = Cons (route "GET"  "/"       home_handler,
+//                Cons (route "POST" "/signup" signup_handler,
+//                Cons (route "POST" "/login"  login_handler,
+//                Nil))) in
+//
+//   let handle = router routes not_found in
+//   http_serve 8080 (with_access_log handle);
+//
+// Composes with the other middleware (access_log, cors, security,
+// etc.) — router is itself a `str -> str` fn, so all the
+// `with_*` wrappers layer on top exactly the same way.
+
+// Route entry = (method, path, handler). Alias for readability.
+type route_entry = str * str * (str -> str);
+
+let route = fn (method: str) -> fn (path: str) -> fn (handler: str -> str) ->
+  ((method, path, handler) : route_entry);
+
+// Try each entry in order, calling the first whose method AND path
+// exactly match. On no match, invoke the fallback.
+let rec _try = fn (rs: route_entry list) -> fn (method: str) -> fn (path: str) -> fn (req: str) -> fn (fallback: str -> str) ->
+  match rs with
+  | Nil -> fallback req
+  | Cons (r, rest) ->
+    let (m, p, h) = r in
+    if str_eq m method && str_eq p path then h req
+    else _try rest method path req fallback;
+
+let router = fn (routes: route_entry list) -> fn (fallback: str -> str) -> fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then fallback req
+  else
+    let method = substring req 0 sp in
+    let url = substring req (sp + 1) (str_len req) in
+    // Strip the query string so `/search` matches `/search?q=hi`.
+    let path = let q = str_index_of url "?" in
+               if q < 0 then url else substring url 0 q in
+    _try routes method path req fallback;
