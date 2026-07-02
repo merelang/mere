@@ -622,14 +622,43 @@ let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
     (Cons ((name, mono expected), sub_binds), s1)
   | POr (p1, _p2) ->
     check_pattern p1 expected env s
-  | PConstr (_name, sub_opt) ->
-    // Still permissive at the ctor level here — 55c-3 wires the
-    // ctor scheme lookup into patterns.
-    (match sub_opt with
-      | None -> (Nil, s)
-      | Some sub_p ->
-        let (a, s1) = fresh_meta s in
-        check_pattern sub_p a env s1)
+  | PConstr (name, sub_opt) ->
+    // Phase 55c-3: if the ctor was registered via TopType, look up
+    // its scheme, instantiate (freshening quantified param metas),
+    // and use the scheme's shape to type both `expected` and the
+    // sub-pattern. Undeclared ctors fall through to the pre-55c-3
+    // permissive path so hand-written match arms with unregistered
+    // ctor names still check.
+    (match lookup_scheme_opt name env with
+      | Some sch ->
+        let (ct, s1) = instantiate sch s in
+        (match (ct, sub_opt) with
+          | (TyCon _, None) ->
+            // Nullary ctor scheme (`| None`): unify the scrutinee's
+            // expected ty with the ctor's ret ty.
+            let s2 = unify_state s1 expected ct in
+            (Nil, s2)
+          | (TyArrow (payload_ty, ret_ty), Some sub_p) ->
+            // Payload ctor scheme (`| Some of ty`): unify expected
+            // with ret_ty and check the sub-pattern against the
+            // declared payload ty so sub-bindings pick up the right
+            // ty (e.g. `x: int` in `| Some x -> ...`).
+            let s2 = unify_state s1 expected ret_ty in
+            check_pattern sub_p payload_ty env s2
+          | (_, None) ->
+            // Ctor declared with payload but used nullary — permissive
+            (Nil, s1)
+          | (_, Some sub_p) ->
+            // Ctor declared nullary but used with payload — permissive
+            let (a, s2) = fresh_meta s1 in
+            check_pattern sub_p a env s2)
+      | None ->
+        // Undeclared ctor — pre-55c-3 permissive path
+        (match sub_opt with
+          | None -> (Nil, s)
+          | Some sub_p ->
+            let (a, s1) = fresh_meta s in
+            check_pattern sub_p a env s1))
   | PRecord (name, field_pats) ->
     let s1 = unify_state s expected (TyCon (name, Nil)) in
     check_record_field_pats field_pats name env s1
