@@ -50,6 +50,7 @@ import "../contrib/http/query.mere";
 import "../contrib/http/json_body.mere";
 import "../contrib/http/ratelimit.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
 
 let db_path = "/tmp/users.db" in
 let users = kv_load db_path in         // persistent user directory
@@ -126,6 +127,7 @@ let handle = fn (req: str) ->
       // least the on-disk KV log doesn't leak the raw password.
       let _ = kv_set users u (sha256_hex p) in
       let _ = kv_save users db_path in
+      let _ = log_with "info" "signup" (Cons (("user", u), Nil)) in
       let _ = http_set_status 201 in
       "created: " ++ u ++ "\n"
 
@@ -133,6 +135,7 @@ let handle = fn (req: str) ->
     let u = field_of parsed body_parsed "user" in
     let p = field_of parsed body_parsed "pass" in
     if rate_over_limit login_limiter u login_window login_max then
+      let _ = log_with "warn" "login_blocked" (Cons (("user", u), Nil)) in
       let _ = http_set_status 429 in
       let _ = http_set_header "Retry-After" (show login_window) in
       "too many failed login attempts; try again later\n"
@@ -141,9 +144,11 @@ let handle = fn (req: str) ->
       let sid = "sess-" ++ u in           // trivially derived session id
       let _ = map_set sessions sid u in
       let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+      let _ = log_with "info" "login_success" (Cons (("user", u), Nil)) in
       "logged in as " ++ u ++ "\n"
     else
       let _ = rate_bump login_limiter u login_window in
+      let _ = log_with "warn" "login_failed" (Cons (("user", u), Nil)) in
       let _ = http_set_status 401 in
       "invalid credentials\n"
 
