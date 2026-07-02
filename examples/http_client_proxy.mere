@@ -1,0 +1,89 @@
+// http_client_proxy: outbound HTTP client demo.
+//
+// Purpose: Phase 55f web-app follow-up. Shows the new `http_fetch`
+// extern fn (contrib/http/client.mere) by exposing three endpoints
+// that call external services synchronously from inside the wasm
+// request handler:
+//
+//   GET /repo/<name>   → fetches https://api.github.com/repos/merelang/<name>
+//                        and returns { name, stars, size } summary
+//   GET /ip            → fetches https://httpbin.org/ip, echoes response body
+//   POST /echo         → forwards the request body to https://httpbin.org/anything
+//                        and returns the response body verbatim
+//   GET /              → tiny HTML+fetch UI
+//
+// Needs `curl` on PATH and outbound network access. Response times
+// depend on the remote — if the wasm frame blocks for too long the
+// per-request timeout applies (10s in the runner).
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_client_proxy.mere > /tmp/cp.wat
+//   wat2wasm /tmp/cp.wat -o /tmp/cp.wasm
+//   node scripts/run_http_server.js /tmp/cp.wasm
+//   curl http://localhost:8080/repo/mere
+//   curl http://localhost:8080/ip
+//   curl -X POST -d 'hello outbound' http://localhost:8080/echo
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../contrib/http/client.mere";
+
+let handle = fn (req: str) ->
+  let sp = str_index_of req " " in
+  let method = substring req 0 sp in
+  let path = substring req (sp + 1) (str_len req) in
+
+  if str_eq method "GET" && str_starts_with path "/repo/" then
+    let repo = substring path 6 (str_len path) in
+    let url = "https://api.github.com/repos/merelang/" ++ repo in
+    let body = http_get url in
+    let code = http_fetch_status () in
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_status code in
+    body
+
+  else if str_eq path "/ip" && str_eq method "GET" then
+    let body = http_get "https://httpbin.org/ip" in
+    let code = http_fetch_status () in
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_status code in
+    body
+
+  else if str_eq path "/echo" && str_eq method "POST" then
+    let payload = http_current_body () in
+    let body = http_post_json "https://httpbin.org/anything" payload in
+    let code = http_fetch_status () in
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_status code in
+    body
+
+  else if str_eq path "/" && str_eq method "GET" then
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>outbound http demo</title>" ++
+    "<h1>outbound http demo</h1>" ++
+    "<p>Mere → curl → external API, synchronously from inside the wasm handler.</p>" ++
+    "<button id=repo>fetch /repo/mere</button> " ++
+    "<button id=ip>fetch /ip</button> " ++
+    "<button id=echo>POST /echo hello</button>" ++
+    "<pre id=out></pre>" ++
+    "<script>" ++
+    "const out=document.getElementById(\"out\");" ++
+    "const show=(p,init)=>fetch(p,init||\{}).then(r=>r.text()).then(t=>out.textContent=t);" ++
+    "document.getElementById(\"repo\").onclick=()=>show(\"/repo/mere\");" ++
+    "document.getElementById(\"ip\").onclick=()=>show(\"/ip\");" ++
+    "document.getElementById(\"echo\").onclick=()=>show(\"/echo\",\{method:\"POST\",body:\"hello outbound\"});" ++
+    "</script>\n"
+
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ method ++ " " ++ path ++ "\n"
+in
+
+let _ = print "starting outbound-http-proxy demo on :8080 ..." in
+let _ = http_serve 8080 handle in
+0
