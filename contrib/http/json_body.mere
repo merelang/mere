@@ -1,0 +1,149 @@
+// contrib/http/json_body.mere — minimal flat-JSON-object parser.
+//
+// Pure Mere (no extern fns). Intended for the common case where an
+// HTTP handler receives a request body like:
+//
+//   {"user": "alice", "pass": "secret"}
+//
+// and just wants to pluck out the field values. Handles:
+//
+//   - top-level object only (must start with `{` and end with `}`)
+//   - string keys (double-quoted, standard \" and \\ escapes)
+//   - string values (same escapes as keys) — non-string values are
+//     read to the next `,` or `}` and returned as raw text (so
+//     numbers / bools / null come through as their literal form)
+//   - whitespace anywhere between tokens
+//
+// Does NOT handle:
+//   - nested objects or arrays (they'd read as raw text up to the
+//     next top-level `,` or `}`, which is usually not what you want)
+//   - unicode escape sequences (\uXXXX) — passed through as-is
+//   - duplicate keys (later ones overwrite earlier via list order)
+//
+// Public API:
+//
+//   parse_json_body : str -> (str * str) list
+//   json_get        : (str * str) list -> str -> str
+//
+// For richer needs use `contrib/json/json.mere` (full recursive
+// parser with proper AST). This helper is for the 80% case where
+// you just want two or three fields out of a flat login/signup body.
+
+// Skip whitespace starting at position i, return the new position.
+let rec _json_skip_ws = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then i
+  else
+    let c = char_at s i in
+    if str_eq c " " || str_eq c "\t" || str_eq c "\n" || str_eq c "\r" then
+      _json_skip_ws s (i + 1) n
+    else i;
+
+// Parse a `"..."` string literal starting at position `i` (which
+// must point at the opening `"`). Returns (parsed_value, position
+// just past the closing `"`). Handles \" and \\ escapes; other
+// backslash sequences are passed through verbatim.
+let rec _json_parse_str_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn buf ->
+  if i >= n then (strbuf_to_str buf, i)
+  else
+    let c = char_at s i in
+    if str_eq c "\"" then (strbuf_to_str buf, i + 1)
+    else if str_eq c "\\" && i + 1 < n then
+      let next = char_at s (i + 1) in
+      let decoded = if str_eq next "n" then "\n"
+                    else if str_eq next "t" then "\t"
+                    else if str_eq next "r" then "\r"
+                    else if str_eq next "\"" then "\""
+                    else if str_eq next "\\" then "\\"
+                    else next in
+      let _ = strbuf_push buf decoded in
+      _json_parse_str_loop s (i + 2) n buf
+    else
+      let _ = strbuf_push buf c in
+      _json_parse_str_loop s (i + 1) n buf;
+
+let _json_parse_str = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let buf = strbuf_new () in
+  _json_parse_str_loop s (i + 1) n buf;
+
+// Parse a non-string value: read up to the next top-level `,` or
+// `}`, trim trailing whitespace, return the raw text. Doesn't
+// account for nested structures — a value like `{"nested":1}` would
+// read `{"nested":1` (up to the outer `}`). For the flat-object
+// use case that's fine.
+let rec _json_parse_bare_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn buf ->
+  if i >= n then (strbuf_to_str buf, i)
+  else
+    let c = char_at s i in
+    if str_eq c "," || str_eq c "}" then
+      (strbuf_to_str buf, i)
+    else
+      let _ = strbuf_push buf c in
+      _json_parse_bare_loop s (i + 1) n buf;
+
+let _json_parse_bare = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let buf = strbuf_new () in
+  let (raw, j) = _json_parse_bare_loop s i n buf in
+  // trim trailing whitespace so `"x": 1 ,` yields "1" not "1 "
+  let rec trim = fn (t: str) ->
+    let l = str_len t in
+    if l == 0 then t
+    else
+      let last = char_at t (l - 1) in
+      if str_eq last " " || str_eq last "\t" || str_eq last "\n" || str_eq last "\r" then
+        trim (substring t 0 (l - 1))
+      else t in
+  (trim raw, j);
+
+// Parse a single (key, value) pair at position `i` where the key
+// is expected to start. Returns ((key, value), position past the
+// value with trailing whitespace consumed).
+let _json_parse_pair = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let i1 = _json_skip_ws s i n in
+  if i1 >= n then (("", ""), i1)
+  else if str_eq (char_at s i1) "\"" then
+    let (k, i2) = _json_parse_str s i1 n in
+    let i3 = _json_skip_ws s i2 n in
+    // expect ':'
+    if i3 < n && str_eq (char_at s i3) ":" then
+      let i4 = _json_skip_ws s (i3 + 1) n in
+      if i4 < n && str_eq (char_at s i4) "\"" then
+        let (v, i5) = _json_parse_str s i4 n in
+        ((k, v), _json_skip_ws s i5 n)
+      else
+        let (v, i5) = _json_parse_bare s i4 n in
+        ((k, v), _json_skip_ws s i5 n)
+    else (("", ""), i3)
+  else (("", ""), i1);
+
+// Walk pairs starting at `i`, returning them in source order. Stops
+// at the closing `}` or end of input.
+let rec _json_walk_pairs = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: (str * str) list) ->
+  let i1 = _json_skip_ws s i n in
+  if i1 >= n then acc
+  else
+    let c = char_at s i1 in
+    if str_eq c "}" then acc
+    else if str_eq c "," then _json_walk_pairs s (i1 + 1) n acc
+    else
+      let (kv, i2) = _json_parse_pair s i1 n in
+      let (k, _v) = kv in
+      if str_eq k "" then acc
+      else _json_walk_pairs s i2 n (list_append acc (Cons (kv, Nil)));
+
+// Parse a flat JSON object body. Empty / non-object input yields Nil.
+let parse_json_body = fn (body: str) ->
+  let n = str_len body in
+  let i0 = _json_skip_ws body 0 n in
+  if i0 >= n then Nil
+  else if str_eq (char_at body i0) "\{" then
+    _json_walk_pairs body (i0 + 1) n Nil
+  else Nil;
+
+// Look up `name` in a parsed body. Returns "" if missing.
+let rec json_get = fn (kvs: (str * str) list) -> fn (name: str) ->
+  match kvs with
+  | Nil -> ""
+  | Cons (p, rest) ->
+    let (k, v) = p in
+    if str_eq k name then v
+    else json_get rest name;
