@@ -1,0 +1,57 @@
+// contrib/http/security.mere — OWASP-recommended response-header middleware.
+//
+// Sets the response headers that hardening guides call "the default
+// defence against low-effort browser-side attacks" — MIME sniffing
+// (via `X-Content-Type-Options`), clickjacking (`X-Frame-Options`),
+// and referer leakage (`Referrer-Policy`).
+//
+// Skipped by default:
+//   - `Content-Security-Policy` — too context-dependent; a strict
+//     `default-src 'self'` breaks inline scripts (which our HTML+fetch
+//     demos rely on). Callers who want it should set it explicitly
+//     via `http_set_header` inside their own middleware.
+//   - `Strict-Transport-Security` — meaningless over plain HTTP,
+//     and can lock users out of a site if set wrong. Enable via
+//     `with_hsts max_age include_subdomains` when running behind
+//     HTTPS.
+//   - `Permissions-Policy` — modern spec, needs per-app tuning.
+//
+// Compose with the other middleware; typical stack:
+//
+//   http_serve 8080 (with_access_log (with_security_headers (with_cors "*" handle)))
+//
+// Public API:
+//
+//   with_security_headers : (str -> str) -> (str -> str)
+//   with_hsts             : int -> bool -> (str -> str) -> (str -> str)
+//     first arg  = max-age seconds (typical: 31536000 = 1y)
+//     second arg = include subdomains?
+
+extern fn http_set_header: str -> str -> unit;
+
+let with_security_headers = fn (inner: str -> str) -> fn (req: str) ->
+  // Prevent browsers from guessing the response's MIME type when the
+  // server sets one — thwarts `<script>` tags loading arbitrary files.
+  let _ = http_set_header "X-Content-Type-Options" "nosniff" in
+  // Block the page from being embedded in any iframe — clickjacking.
+  // `DENY` is stricter than `SAMEORIGIN`; users who need same-origin
+  // iframes can override with their own set_header call.
+  let _ = http_set_header "X-Frame-Options" "DENY" in
+  // Don't leak the referring URL to outbound requests (link clicks,
+  // image loads, etc.). Good default for auth-heavy apps.
+  let _ = http_set_header "Referrer-Policy" "no-referrer" in
+  // The historical `X-XSS-Protection` header has been deprecated in
+  // favour of CSP — Chrome explicitly recommends `0` to disable the
+  // legacy filter that caused more problems than it solved.
+  let _ = http_set_header "X-XSS-Protection" "0" in
+  inner req;
+
+// Add `Strict-Transport-Security` on top of the base headers. Only
+// meaningful when the server is fronted by HTTPS (raw HTTP responses
+// with HSTS still work but browsers only honour the header from
+// HTTPS origins).
+let with_hsts = fn (max_age: int) -> fn (include_subdomains: bool) -> fn (inner: str -> str) -> fn (req: str) ->
+  let base = "max-age=" ++ show max_age in
+  let value = if include_subdomains then base ++ "; includeSubDomains" else base in
+  let _ = http_set_header "Strict-Transport-Security" value in
+  inner req;
