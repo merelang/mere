@@ -600,7 +600,11 @@ let cmp_needs_int = fn (op: cmpop) ->
 // correctly. Stage 52f tightens this once `TopType` decls flow in.
 
 let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
-                     -> fn (s: infer_state) ->
+                     -> fn (env: type_env) -> fn (s: infer_state) ->
+  // Phase 55c-2c: env threaded through so PRecord can look up the
+  // declared field tys via the same __record_field__ sentinel keys
+  // ERecordLit uses. env doesn't grow during pattern check (bindings
+  // are collected and returned; caller extends the outer env after).
   match p with
   | PWild -> ((Nil, s) : ((str * scheme) list * infer_state))
   | PVar name -> (Cons ((name, mono expected), Nil), s)
@@ -609,58 +613,56 @@ let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
   | PStr _ -> (Nil, unify_state s expected TyStr)
   | PUnit -> (Nil, unify_state s expected TyUnit)
   | PTuple ps ->
-    // Materialise element-typed metas, unify expected with the tuple,
-    // then walk each element pattern.
     let n = list_len_p ps in
     let (elem_tys, s1) = alloc_fresh_n n s in
     let s2 = unify_state s1 expected (TyTuple elem_tys) in
-    check_pattern_list ps elem_tys s2
+    check_pattern_list ps elem_tys env s2
   | PAs (sub, name) ->
-    let (sub_binds, s1) = check_pattern sub expected s in
+    let (sub_binds, s1) = check_pattern sub expected env s in
     (Cons ((name, mono expected), sub_binds), s1)
   | POr (p1, _p2) ->
-    // MVP: trust the user that both branches bind the same names with
-    // the same types. We just check the left branch and assume the
-    // right matches structurally. Proper OR pattern type checking
-    // would unify bindings on both sides — Stage 52f / 52e fodder.
-    check_pattern p1 expected s
+    check_pattern p1 expected env s
   | PConstr (_name, sub_opt) ->
-    // Permissive — no constructor registry yet. The expected type is
-    // left unconstrained against the constructor itself; only the
-    // payload (if any) is type-checked against a fresh meta so any
-    // sub-pattern's bindings still flow.
+    // Still permissive at the ctor level here — 55c-3 wires the
+    // ctor scheme lookup into patterns.
     (match sub_opt with
       | None -> (Nil, s)
       | Some sub_p ->
         let (a, s1) = fresh_meta s in
-        check_pattern sub_p a s1)
+        check_pattern sub_p a env s1)
   | PRecord (name, field_pats) ->
-    // Permissive — no record registry yet. Unify expected with the
-    // nominal record type (TyCon name []) so two records with different
-    // names don't silently merge, then walk each field pattern against
-    // a fresh meta to collect bindings. Stage 52f tightens this once
-    // `TopRecord` decls feed the typer's field-table.
     let s1 = unify_state s expected (TyCon (name, Nil)) in
-    check_record_field_pats field_pats s1
+    check_record_field_pats field_pats name env s1
 
 and check_record_field_pats = fn (fps: (str * pattern) list)
+                           -> fn (record_name: str)
+                           -> fn (env: type_env)
                            -> fn (s: infer_state) ->
+  // Phase 55c-2c: for each field, if the record was registered via
+  // TopRecord, fetch the declared field ty (via instantiate) and use
+  // it as the expected ty for the sub-pattern. Undeclared records
+  // fall through to the pre-55c-2c fresh_meta path so hand-written
+  // test code with unregistered types still checks.
   match fps with
   | Nil -> ((Nil, s) : ((str * scheme) list * infer_state))
   | Cons (fp, rest) ->
-    let (_field_name, sub_p) = fp in
-    let (a, s1) = fresh_meta s in
-    let (bs1, s2) = check_pattern sub_p a s1 in
-    let (bs2, s3) = check_record_field_pats rest s2 in
+    let (field_name, sub_p) = fp in
+    let key = make_record_field_key record_name field_name in
+    let (a, s1) = (match lookup_scheme_opt key env with
+      | Some sch -> instantiate sch s
+      | None -> fresh_meta s) in
+    let (bs1, s2) = check_pattern sub_p a env s1 in
+    let (bs2, s3) = check_record_field_pats rest record_name env s2 in
     (concat_scheme_bindings bs1 bs2, s3)
 
 and check_pattern_list = fn (ps: pattern list) -> fn (ts: ty list)
+                      -> fn (env: type_env)
                       -> fn (s: infer_state) ->
   match (ps, ts) with
   | (Nil, Nil) -> ((Nil, s) : ((str * scheme) list * infer_state))
   | (Cons (p, ps_rest), Cons (t, ts_rest)) ->
-    let (bs1, s1) = check_pattern p t s in
-    let (bs2, s2) = check_pattern_list ps_rest ts_rest s1 in
+    let (bs1, s1) = check_pattern p t env s in
+    let (bs2, s2) = check_pattern_list ps_rest ts_rest env s1 in
     (concat_scheme_bindings bs1 bs2, s2)
   | _ -> fail "check_pattern_list: pattern/type arity mismatch"
 
@@ -747,7 +749,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
         // Richer patterns (PTuple / PAs / POr / PConstr / PInt / PBool /
         // PStr / PUnit) check against the inferred value type and prepend
         // their bindings as mono schemes — no generalization for these.
-        let (binds, s2) = check_pattern pat vt s1 in
+        let (binds, s2) = check_pattern pat vt env s1 in
         let env2 = concat_scheme_bindings binds env in
         infer env2 s2 body)
   | ELetRec (bindings, body) ->
@@ -937,7 +939,7 @@ and infer_arms = fn (env: type_env)
   | Nil -> s
   | Cons (arm, rest) ->
     let (pat, guard_opt, body) = arm in
-    let (binds, s1) = check_pattern pat scrutinee_ty s in
+    let (binds, s1) = check_pattern pat scrutinee_ty env s in
     let env2 = concat_scheme_bindings binds env in
     let s2 = (match guard_opt with
       | None -> s1
@@ -1069,7 +1071,7 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
         (Cons ((name, sch), env), s1)
       | PWild -> (env, s1)
       | _ ->
-        let (binds, s2) = check_pattern pat vt s1 in
+        let (binds, s2) = check_pattern pat vt env s1 in
         (concat_scheme_bindings binds env, s2))
   | TopLetRec bindings ->
     let (pre_env, s1) = bind_rec_metas bindings env s in
@@ -1211,7 +1213,7 @@ let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr
         ((Cons ((name, sch), env), s1) : (type_env * infer_state))
       | PWild -> (env, s1)
       | _ ->
-        let (binds, sX) = check_pattern pat vt s1 in
+        let (binds, sX) = check_pattern pat vt env s1 in
         (concat_scheme_bindings binds env, sX)) in
     let (v_r, s3) = annotate_expr env s2 v in
     let (body_r, s4) = annotate_expr env2 s3 body in
@@ -1271,7 +1273,7 @@ and annotate_arms = fn (env: type_env) -> fn (s: infer_state)
   | Nil -> ((Nil, s) : ((pattern * expr option * expr) list * infer_state))
   | Cons (arm, rest) ->
     let (pat, guard_opt, body) = arm in
-    let (binds, s1) = check_pattern pat scrut_ty s in
+    let (binds, s1) = check_pattern pat scrut_ty env s in
     let env2 = concat_scheme_bindings binds env in
     let (guard_opt_r, s2) = (match guard_opt with
       | None -> ((None : expr option), s1)
@@ -1313,7 +1315,7 @@ let rec annotate_decl = fn (d: top_decl) -> fn (env: type_env)
         ((Cons ((name, sch), env), s1) : (type_env * infer_state))
       | PWild -> (env, s1)
       | _ ->
-        let (binds, sX) = check_pattern pat vt s1 in
+        let (binds, sX) = check_pattern pat vt env s1 in
         (concat_scheme_bindings binds env, sX)) in
     let (e_r, s3) = annotate_expr env s2 e in
     ((TopLet (pat, e_r), env2, s3) : (top_decl * type_env * infer_state))
