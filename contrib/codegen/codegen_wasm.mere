@@ -871,14 +871,26 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s3 = push_instr "call $puts" s2 in
         push_instr "i32.const 0" s3
       | EVar "show" ->
-        // Stage 53i-3: `show n : int -> str` lowers to embedded
-        // `$show_int`. Polymorphic `show` for bool / str / variant /
-        // record needs typed AST to dispatch — defer; current usage
-        // assumes the arg is int (typer would have caught a mismatch
-        // upstream when codegen runs over already-checked code).
-        let s1 = note_helper_use "show_int" s in
-        let s2 = emit_expr x s1 in
-        push_instr "call $show_int" s2
+        // Phase 55a (typed AST 配管): if the arg is `EAnnot (_, ty)` —
+        // meaning the typer's annotate pass ran and attached a resolved
+        // ty — dispatch on the ty. Otherwise fall back to `$show_int`
+        // (the pre-Phase-55 behaviour that assumes int arg).
+        (match x with
+          | EAnnot (_, TyBool) ->
+            let s0 = note_helper_use "show_bool" s in
+            let s1 = emit_expr x s0 in
+            push_instr "call $show_bool" s1
+          | EAnnot (_, TyStr) ->
+            // show_str wraps in quotes via str_concat + bump-allocated `"`
+            let s0 = note_helper_use "strlen" s in
+            let s0a = note_helper_use "str_concat" s0 in
+            let s0b = note_helper_use "show_str" s0a in
+            let s1 = emit_expr x s0b in
+            push_instr "call $show_str" s1
+          | _ ->
+            let s1 = note_helper_use "show_int" s in
+            let s2 = emit_expr x s1 in
+            push_instr "call $show_int" s2)
       | EVar "str_of_int" ->
         // Phase 54.5: `str_of_int n` is the explicit-int form of
         // `show`. Lowers to the same `$show_int` helper.
@@ -2298,10 +2310,55 @@ let helper_decl_show_int =
   "        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))\n" ++
   "    (i32.add (local.get $buf) (local.get $i)))\n";
 
+// Phase 55a: `$show_bool` — bool → "true" / "false" C-string. Bytes are
+// written into a fresh bump-allocated buffer (8 bytes reserved for
+// alignment; "true\0" is 5, "false\0" is 6). Mirrors OCaml
+// `lib/codegen_wasm.ml`'s show_bool but self-contained (no data
+// segment interning — helper stays state-independent).
+let helper_decl_show_bool =
+  "  (func $show_bool (param $b i32) (result i32)\n" ++
+  "    (local $buf i32)\n" ++
+  "    (local.set $buf (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 8)))\n" ++
+  "    (if (result i32) (local.get $b)\n" ++
+  "      (then\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 0)) (i32.const 116))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 1)) (i32.const 114))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 2)) (i32.const 117))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 3)) (i32.const 101))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 4)) (i32.const 0))\n" ++
+  "        (local.get $buf))\n" ++
+  "      (else\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 0)) (i32.const 102))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 1)) (i32.const 97))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 2)) (i32.const 108))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 3)) (i32.const 115))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 4)) (i32.const 101))\n" ++
+  "        (i32.store8 (i32.add (local.get $buf) (i32.const 5)) (i32.const 0))\n" ++
+  "        (local.get $buf))))\n";
+
+// Phase 55a: `$show_str` — str → `"..."` (wrap in double-quotes) via
+// str_concat with a bump-allocated `"` string. Depends on `str_concat`
+// + `strlen` helpers (registered by the caller in the show branch).
+// Note: doesn't escape embedded quotes / backslashes. Full escape
+// support (matching OCaml's str_escape) is deferred to a later slice.
+let helper_decl_show_str =
+  "  (func $show_str (param $s i32) (result i32)\n" ++
+  "    (local $q i32)\n" ++
+  "    (local.set $q (global.get $__lang_bump))\n" ++
+  "    (i32.store8 (local.get $q) (i32.const 34))\n" ++
+  "    (i32.store8 (i32.add (local.get $q) (i32.const 1)) (i32.const 0))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $q) (i32.const 2)))\n" ++
+  "    (call $__lang_str_concat\n" ++
+  "      (call $__lang_str_concat (local.get $q) (local.get $s))\n" ++
+  "      (local.get $q)))\n";
+
 let helper_body = fn (name: str) ->
   if name == "strlen" then helper_decl_strlen
   else if name == "str_concat" then helper_decl_str_concat
   else if name == "show_int" then helper_decl_show_int
+  else if name == "show_bool" then helper_decl_show_bool
+  else if name == "show_str" then helper_decl_show_str
   else if name == "char_at" then helper_decl_char_at
   else if name == "chr" then helper_decl_chr
   else if name == "float_box" then helper_decl_float_box

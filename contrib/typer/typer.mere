@@ -478,6 +478,7 @@ and concat_scheme_bindings = fn (a: (str * scheme) list)
 let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
   match e with
   | EInt _ -> (TyInt, s)
+  | EFloat _ -> (TyFloat, s)
   | EBool _ -> (TyBool, s)
   | EStr _ -> (TyStr, s)
   | EUnit -> (TyUnit, s)
@@ -747,7 +748,32 @@ let unify_to_str = fn (r: subst option) ->
 // settles; until then we just no-op them.
 
 let initial_state = ((0, Nil) : infer_state);
-let initial_type_env = (Nil : type_env);
+
+// Phase 55a: seed a minimal set of builtins so the annotate pass can
+// resolve their types. Full builtin table (OCaml `Typer.initial_env`
+// has ~50 entries) is deferred — we only add what Stage 55a demos
+// need. Extend incrementally as more contrib code enters the typed
+// pipeline.
+//
+// Quantifier ids for polymorphic schemes are chosen outside the range
+// `fresh_meta` naturally allocates (which starts at 0 and grows). Using
+// 1000+ keeps them clearly distinguishable in ty_to_str output.
+let show_scheme =
+  ((Cons (1000, Nil), TyArrow (TyMeta 1000, TyStr)) : scheme);
+
+let initial_type_env =
+  (Cons (("print", mono (TyArrow (TyStr, TyUnit))),
+   Cons (("show", show_scheme),
+   Cons (("str_of_int", mono (TyArrow (TyInt, TyStr))),
+   Cons (("str_of_float", mono (TyArrow (TyFloat, TyStr))),
+   Cons (("str_eq", mono (TyArrow (TyStr, TyArrow (TyStr, TyBool)))),
+   Cons (("str_len", mono (TyArrow (TyStr, TyInt))),
+   Cons (("char_at", mono (TyArrow (TyStr, TyArrow (TyInt, TyInt)))),
+   Cons (("chr", mono (TyArrow (TyInt, TyStr))),
+   Cons (("ord", mono (TyArrow (TyStr, TyInt))),
+   Cons (("not", mono (TyArrow (TyBool, TyBool))),
+   Cons (("read_file", mono (TyArrow (TyStr, TyStr))),
+   Nil))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
@@ -785,6 +811,211 @@ and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
     let (env1, s1) = infer_decl d env s in
     infer_decls rest env1 s1
   ;
+
+// === Stage 55a: annotate pass ============================================
+//
+// After inference, walk expr and wrap sub-expressions that codegen wants
+// type info for. Current target: `EApp (EVar "show", arg)` — wrap arg in
+// `EAnnot (arg, resolved_ty)` so codegen can dispatch `$show_int` /
+// `$show_bool` / `$show_str` based on the ty.
+//
+// Threads env + state exactly like `infer` does (so nested lets / lambdas
+// / matches extend env correctly). State threading here is just for env
+// housekeeping — annotate itself doesn't produce new subst entries, but
+// the internal calls to `infer` at target sites do (their subst is
+// harmlessly merged into ours).
+
+let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
+  match e with
+  // ── target site: wrap show's arg in EAnnot ──
+  | EApp (EVar "show", arg) ->
+    let (arg_ty, s1) = infer env s arg in
+    let resolved = apply_subst (subst_of s1) arg_ty in
+    let (arg_r, s2) = annotate_expr env s1 arg in
+    ((EApp (EVar "show", EAnnot (arg_r, resolved)), s2) : (expr * infer_state))
+  // ── leaves ──
+  | EInt _ -> (e, s)
+  | EFloat _ -> (e, s)
+  | EBool _ -> (e, s)
+  | EStr _ -> (e, s)
+  | EUnit -> (e, s)
+  | EVar _ -> (e, s)
+  // ── recurse into children ──
+  | EBin (op, a, b) ->
+    let (a_r, s1) = annotate_expr env s a in
+    let (b_r, s2) = annotate_expr env s1 b in
+    (EBin (op, a_r, b_r), s2)
+  | ECmp (op, a, b) ->
+    let (a_r, s1) = annotate_expr env s a in
+    let (b_r, s2) = annotate_expr env s1 b in
+    (ECmp (op, a_r, b_r), s2)
+  | ELogic (op, a, b) ->
+    let (a_r, s1) = annotate_expr env s a in
+    let (b_r, s2) = annotate_expr env s1 b in
+    (ELogic (op, a_r, b_r), s2)
+  | ENeg inner ->
+    let (inner_r, s1) = annotate_expr env s inner in
+    (ENeg inner_r, s1)
+  | EIf (c, t, el) ->
+    let (c_r, s1) = annotate_expr env s c in
+    let (t_r, s2) = annotate_expr env s1 t in
+    let (el_r, s3) = annotate_expr env s2 el in
+    (EIf (c_r, t_r, el_r), s3)
+  | EApp (f, x) ->
+    let (f_r, s1) = annotate_expr env s f in
+    let (x_r, s2) = annotate_expr env s1 x in
+    (EApp (f_r, x_r), s2)
+  | EAnnot (inner, t) ->
+    let (inner_r, s1) = annotate_expr env s inner in
+    (EAnnot (inner_r, t), s1)
+  | ELet (pat, v, body) ->
+    // Mirror `infer`'s env-extension logic for ELet.
+    let (vt, s1) = infer env s v in
+    let (env2, s2) = (match pat with
+      | PVar name ->
+        let sch = generalize env (subst_of s1) vt in
+        ((Cons ((name, sch), env), s1) : (type_env * infer_state))
+      | PWild -> (env, s1)
+      | _ ->
+        let (binds, sX) = check_pattern pat vt s1 in
+        (concat_scheme_bindings binds env, sX)) in
+    let (v_r, s3) = annotate_expr env s2 v in
+    let (body_r, s4) = annotate_expr env2 s3 body in
+    (ELet (pat, v_r, body_r), s4)
+  | ELetRec (bindings, body) ->
+    let (pre_env, s1) = bind_rec_metas bindings env s in
+    let s2 = infer_rec_bodies bindings pre_env s1 in
+    let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
+    let (bindings_r, s3) = annotate_bindings bindings pre_env s2 in
+    let (body_r, s4) = annotate_expr final_env s3 body in
+    (ELetRec (bindings_r, body_r), s4)
+  | EFun (arg, ty_opt, body) ->
+    let (arg_ty, s1) = fresh_meta s in
+    let s2 = (match ty_opt with
+      | None -> s1
+      | Some t -> unify_state s1 arg_ty t) in
+    let env2 = Cons ((arg, mono arg_ty), env) in
+    let (body_r, s3) = annotate_expr env2 s2 body in
+    (EFun (arg, ty_opt, body_r), s3)
+  | EMatch (scrut, arms) ->
+    let (ts, s1) = infer env s scrut in
+    let (scrut_r, s2) = annotate_expr env s1 scrut in
+    let (arms_r, s3) = annotate_arms env s2 arms ts in
+    (EMatch (scrut_r, arms_r), s3)
+  | ETuple es ->
+    let (es_r, s1) = annotate_exprs env s es in
+    (ETuple es_r, s1)
+  | EConstr (name, None) -> (EConstr (name, None), s)
+  | EConstr (name, Some p) ->
+    let (p_r, s1) = annotate_expr env s p in
+    (EConstr (name, Some p_r), s1)
+  | ERecordLit (name, fields) ->
+    let (fields_r, s1) = annotate_fields env s fields in
+    (ERecordLit (name, fields_r), s1)
+  | EFieldGet (e_in, f) ->
+    let (e_in_r, s1) = annotate_expr env s e_in in
+    (EFieldGet (e_in_r, f), s1)
+  | ERecordUpdate (e_in, fields) ->
+    let (e_in_r, s1) = annotate_expr env s e_in in
+    let (fields_r, s2) = annotate_fields env s1 fields in
+    (ERecordUpdate (e_in_r, fields_r), s2)
+
+and annotate_bindings = fn (bindings: (str * expr) list)
+                     -> fn (env: type_env) -> fn (s: infer_state) ->
+  match bindings with
+  | Nil -> ((Nil, s) : ((str * expr) list * infer_state))
+  | Cons (b, rest) ->
+    let (name, body) = b in
+    let (body_r, s1) = annotate_expr env s body in
+    let (rest_r, s2) = annotate_bindings rest env s1 in
+    (Cons ((name, body_r), rest_r), s2)
+
+and annotate_arms = fn (env: type_env) -> fn (s: infer_state)
+                 -> fn (arms: (pattern * expr option * expr) list)
+                 -> fn (scrut_ty: ty) ->
+  match arms with
+  | Nil -> ((Nil, s) : ((pattern * expr option * expr) list * infer_state))
+  | Cons (arm, rest) ->
+    let (pat, guard_opt, body) = arm in
+    let (binds, s1) = check_pattern pat scrut_ty s in
+    let env2 = concat_scheme_bindings binds env in
+    let (guard_opt_r, s2) = (match guard_opt with
+      | None -> ((None : expr option), s1)
+      | Some g ->
+        let (g_r, sX) = annotate_expr env2 s1 g in
+        (Some g_r, sX)) in
+    let (body_r, s3) = annotate_expr env2 s2 body in
+    let (rest_r, s4) = annotate_arms env s3 rest scrut_ty in
+    (Cons ((pat, guard_opt_r, body_r), rest_r), s4)
+
+and annotate_exprs = fn (env: type_env) -> fn (s: infer_state)
+                  -> fn (es: expr list) ->
+  match es with
+  | Nil -> ((Nil, s) : (expr list * infer_state))
+  | Cons (e, rest) ->
+    let (e_r, s1) = annotate_expr env s e in
+    let (rest_r, s2) = annotate_exprs env s1 rest in
+    (Cons (e_r, rest_r), s2)
+
+and annotate_fields = fn (env: type_env) -> fn (s: infer_state)
+                   -> fn (fields: (str * expr) list) ->
+  match fields with
+  | Nil -> ((Nil, s) : ((str * expr) list * infer_state))
+  | Cons (f, rest) ->
+    let (name, e_in) = f in
+    let (e_in_r, s1) = annotate_expr env s e_in in
+    let (rest_r, s2) = annotate_fields env s1 rest in
+    (Cons ((name, e_in_r), rest_r), s2)
+  ;
+
+let rec annotate_decl = fn (d: top_decl) -> fn (env: type_env)
+                     -> fn (s: infer_state) ->
+  match d with
+  | TopLet (pat, e) ->
+    let (vt, s1) = infer env s e in
+    let (env2, s2) = (match pat with
+      | PVar name ->
+        let sch = generalize env (subst_of s1) vt in
+        ((Cons ((name, sch), env), s1) : (type_env * infer_state))
+      | PWild -> (env, s1)
+      | _ ->
+        let (binds, sX) = check_pattern pat vt s1 in
+        (concat_scheme_bindings binds env, sX)) in
+    let (e_r, s3) = annotate_expr env s2 e in
+    ((TopLet (pat, e_r), env2, s3) : (top_decl * type_env * infer_state))
+  | TopLetRec bindings ->
+    let (pre_env, s1) = bind_rec_metas bindings env s in
+    let s2 = infer_rec_bodies bindings pre_env s1 in
+    let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
+    let (bindings_r, s3) = annotate_bindings bindings pre_env s2 in
+    (TopLetRec bindings_r, final_env, s3)
+  | TopType _ -> (d, env, s)
+  | TopRecord _ -> (d, env, s)
+  | TopTypeAlias _ -> (d, env, s)
+  | TopModule _ -> (d, env, s)
+  | TopExternFn (name, sig_ty) -> (d, Cons ((name, mono sig_ty), env), s)
+  | TopExternType _ -> (d, env, s)
+
+and annotate_decls = fn (decls: top_decl list) -> fn (env: type_env)
+                  -> fn (s: infer_state) ->
+  match decls with
+  | Nil -> ((Nil, env, s) : (top_decl list * type_env * infer_state))
+  | Cons (d, rest) ->
+    let (d_r, env1, s1) = annotate_decl d env s in
+    let (rest_r, env2, s2) = annotate_decls rest env1 s1 in
+    (Cons (d_r, rest_r), env2, s2)
+  ;
+
+// Full pipeline: parse → infer → annotate. Returns a `program`
+// (`(decls, main_expr)`) with target sub-expressions wrapped in
+// `EAnnot`. Codegen consumes this to dispatch polymorphic `show`.
+let parse_and_annotate = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _rest) = parse_decls Nil toks in
+  let (decls, main_expr) = flatten_and_resolve prog in
+  let (decls_r, env1, s1) = annotate_decls decls initial_type_env initial_state in
+  let (main_expr_r, _s2) = annotate_expr env1 s1 main_expr in
+  ((decls_r, main_expr_r) : program);
 
 // Thread decls through env+state, then type `main` in the final env.
 // Returns the displayed result type — meta-resolved.
