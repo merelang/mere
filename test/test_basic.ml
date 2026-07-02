@@ -7995,6 +7995,87 @@ let () =
     check ("self-host codegen cross: " ^ name) actual expected
   in
 
+  (* Phase 55a (typed AST 配管): mirror `self_host_emit` but chain
+     `parse_and_annotate` (typer) → `emit_program` (codegen). Exercises
+     the typed-pipeline end-to-end so codegen can dispatch polymorphic
+     `show` on ty from EAnnot wrappings. *)
+  let self_host_emit_typed input =
+    let escaped =
+      let b = Buffer.create (String.length input) in
+      String.iter (fun c ->
+        match c with
+        | '\\' -> Buffer.add_string b "\\\\"
+        | '"' -> Buffer.add_string b "\\\""
+        | '\n' -> Buffer.add_string b "\\n"
+        | '\t' -> Buffer.add_string b "\\t"
+        | '{' -> Buffer.add_string b "\\{"
+        | c -> Buffer.add_char b c) input;
+      Buffer.contents b
+    in
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/typer/typer.mere\";\n\
+       import \"%s/contrib/codegen/codegen_wasm.mere\";\n\
+       emit_program (parse_and_annotate \"%s\")\n"
+      project_root project_root escaped
+    in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+
+  (* Run WAT and capture the LAST puts-stdout line instead of main's
+     return value. Show-family tests print via puts (side effect) and
+     return 0 from main, so main-return can't distinguish outcomes. *)
+  let run_wasm_stdout wat =
+    let wat_path = Filename.temp_file "mere_typed_" ".wat" in
+    let wasm_path = wat_path ^ ".wasm" in
+    let oc = open_out wat_path in
+    output_string oc wat;
+    close_out oc;
+    let wat2wasm_cmd = Printf.sprintf
+      "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+    if Sys.command wat2wasm_cmd <> 0 then
+      (Sys.remove wat_path; "<wat2wasm-failed>")
+    else
+      let runner = Printf.sprintf
+        "node --stack-size=65500 -e \"const fs=require('fs'); \
+         let mem; \
+         const readCStr = p => { const b = new Uint8Array(mem.buffer); \
+           let e = p; while (e < b.length && b[e] !== 0) e++; \
+           return Buffer.from(b.subarray(p, e)).toString('utf8'); }; \
+         const env = new Proxy({ \
+           puts: p => process.stdout.write(readCStr(p) + '\\\\n') \
+         }, { get: (o, k) => k in o ? o[k] : () => 0 }); \
+         WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
+         .then(({instance})=>{ mem=instance.exports.memory; instance.exports.main(); }) \
+         .catch(e=>console.log('TRAP:'+e.message));\""
+        wasm_path in
+      let ic = Unix.open_process_in runner in
+      let buf = Buffer.create 64 in
+      (try while true do
+        Buffer.add_string buf (input_line ic);
+        Buffer.add_char buf '\n'
+      done with End_of_file -> ());
+      let _ = Unix.close_process_in ic in
+      Sys.remove wat_path;
+      (try Sys.remove wasm_path with _ -> ());
+      let lines = String.split_on_char '\n' (String.trim (Buffer.contents buf)) in
+      List.fold_left (fun acc l ->
+        if String.trim l = "" then acc else String.trim l) "" lines
+  in
+
+  let typed_cross_stdout name input expected =
+    let wat = self_host_emit_typed input in
+    let actual = run_wasm_stdout wat in
+    check ("typed pipeline cross: " ^ name) actual expected
+  in
+
   (* Phase 54.15: bootstrap harness. Write `source` to a tempfile,
      then invoke `parse_and_emit_file` on it via the OCaml interp.
      That exercises the full self-host pipeline including recursive
@@ -8218,6 +8299,21 @@ let () =
       "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in let _ = print (\"fact 5 = \" ++ show (fact 5)) in 0" "0";
     cross_emit "show negative"
       "let _ = print (show (0 - 42)) in 0" "0";
+    (* Phase 55a: typed AST 配管 — polymorphic show dispatch via
+       EAnnot from the typer's annotate pass. int/bool/str are the
+       initial 3 dispatch targets; variant/record/tuple lands in
+       Stage 55d. Uses `typed_cross_stdout` since these programs
+       return 0 from main but emit the interesting output via puts. *)
+    typed_cross_stdout "show true"
+      "let _ = print (show true) in 0" "true";
+    typed_cross_stdout "show false"
+      "let _ = print (show false) in 0" "false";
+    typed_cross_stdout "show str literal"
+      "let _ = print (show \"hi\") in 0" "\"hi\"";
+    typed_cross_stdout "show bool via let-bound var"
+      "let b = true in let _ = print (show b) in 0" "true";
+    typed_cross_stdout "show int fallback (untyped path preserved)"
+      "let _ = print (show 42) in 0" "42";
     (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
        (caught by FizzBuzz / print_range / list rendering) used to
        crash because free_vars treated them as free vars and tried to
