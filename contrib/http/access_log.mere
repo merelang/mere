@@ -1,0 +1,53 @@
+// contrib/http/access_log.mere — request-timing access-log middleware.
+//
+// Wraps a `str -> str` HTTP handler so each request produces one
+// structured log line to stdout: method, path, response status
+// (whatever the inner handler set via `http_set_status`, or 200 by
+// default), and elapsed milliseconds.
+//
+// Output shape (JSON-line, one per request):
+//
+//   {"ts":1699999999,"level":"info","msg":"access",
+//    "method":"POST","path":"/login","status":"200","ms":"7"}
+//
+// Usage:
+//
+//   import "../contrib/http/access_log.mere";
+//
+//   let inner = fn (req: str) -> ...normal handler... in
+//   let _ = http_serve 8080 (with_access_log inner) in 0
+//
+// Depends on `contrib/log/log.mere` (for `log_with`) and two extern
+// fns: `now_ms` (from `scripts/run_http_server.js`) and
+// `http_current_status` (from `contrib/http/http.glue.js`).
+
+extern fn now_ms: unit -> int;
+extern fn http_current_status: unit -> int;
+
+import "../log/log.mere";
+
+// Split the request line `"METHOD /path"` into (method, path). If
+// the space is missing (shouldn't happen in a well-formed request),
+// we degrade to (req, ""). Cheap prefix split — no query-string
+// stripping. Callers wanting just the path (without `?...`) can
+// pipe this through `split_url` from `contrib/http/query.mere`.
+let _split_req_line = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then (req, "")
+  else (substring req 0 sp, substring req (sp + 1) (str_len req));
+
+// Wrap an existing handler with access logging. The wrapper is a
+// plain `str -> str` fn matching the shape `http_serve` expects, so
+// it drops in wherever the raw handler used to go.
+let with_access_log = fn (inner: str -> str) -> fn (req: str) ->
+  let start = now_ms () in
+  let resp = inner req in
+  let elapsed = now_ms () - start in
+  let (method, path) = _split_req_line req in
+  let status = show (http_current_status ()) in
+  let _ = log_with "info" "access" (
+    Cons (("method", method),
+    Cons (("path", path),
+    Cons (("status", status),
+    Cons (("ms", show elapsed), Nil))))) in
+  resp;

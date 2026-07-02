@@ -49,6 +49,7 @@ extern fn sha256_hex: str -> str;
 import "../contrib/http/query.mere";
 import "../contrib/http/json_body.mere";
 import "../contrib/http/ratelimit.mere";
+import "../contrib/http/access_log.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/log/log.mere";
 
@@ -216,5 +217,5 @@ let handle = fn (req: str) ->
 in
 
 let _ = print ("starting users-db demo on :8080 (persisting to " ++ db_path ++ ") ...") in
-let _ = http_serve 8080 handle in
+let _ = http_serve 8080 (with_access_log handle) in
 0

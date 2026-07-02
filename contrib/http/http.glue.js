@@ -135,6 +135,11 @@ function makeHttpGlue() {
       if (Array.isArray(val)) return writeStr(val.join(", "));
       return writeStr(String(val));
     },
+    // Read the current response status code (as set by
+    // `http_set_status` earlier in the same handler, or 200 by
+    // default). Useful for access-log middleware that wants to
+    // record the outcome after the inner handler runs.
+    http_current_status: () => currentStatus,
   };
 
   const attach = (instance) => {

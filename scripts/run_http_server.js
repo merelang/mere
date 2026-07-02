@@ -28,8 +28,19 @@ const wasmPath = process.argv[2];
     return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
   };
 
-  let scratchOffset = 56 * 1024;
+  // Runner-side scratch region: sits ABOVE the http glue's 56K..60K
+  // reserved slice so we don't step on the reqPtr / body pointers
+  // that the glue writes at request-dispatch time. Grows within
+  // 60K..64K per request; wraps if too many writeStr calls happen
+  // in a single handler (rare in practice — sha256_hex, now_ms
+  // constants, and small responses fit comfortably).
+  const RUNNER_SCRATCH_START = 60 * 1024;
+  const RUNNER_SCRATCH_LIMIT = 64 * 1024;
+  let scratchOffset = RUNNER_SCRATCH_START;
   const bumpAlloc = (n) => {
+    if (scratchOffset + n > RUNNER_SCRATCH_LIMIT) {
+      scratchOffset = RUNNER_SCRATCH_START;
+    }
     const ptr = scratchOffset;
     scratchOffset += (n + 7) & ~7;
     return ptr;
@@ -111,6 +122,13 @@ const wasmPath = process.argv[2];
     getpid: () => process.pid,
     getppid: () => process.ppid,
     unix_time: () => Math.floor(Date.now() / 1000),
+    // Monotonic milliseconds since process start, truncated to i32.
+    // Uses performance.now() so subtracting two samples always gives
+    // the correct elapsed even if the wall clock jumps. Stays in
+    // i32 range for ~24 days of uptime — beyond that it wraps but
+    // subtractions of nearby samples remain correct via i32
+    // arithmetic overflow behaviour.
+    now_ms: () => Math.floor(require("perf_hooks").performance.now()) | 0,
     rand: () => Math.floor(Math.random() * 0x7fffffff),
     srand: (_seed) => {},
     sleep: (_n) => 0,
