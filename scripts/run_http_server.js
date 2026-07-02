@@ -35,6 +35,20 @@ const wasmPath = process.argv[2];
     return ptr;
   };
 
+  // Copy a JS string into a fresh scratch slot and return the ptr.
+  // Used by extern fns that need to hand a str back to Mere.
+  const writeStr = (s) => {
+    const utf8 = Buffer.from((s || "") + "\0", "utf8");
+    const ptr = bumpAlloc(utf8.length);
+    new Uint8Array(memory.buffer).set(utf8, ptr);
+    return ptr;
+  };
+
+  // Slot for `http_fetch_status ()` — the HTTP status code of the
+  // last `http_fetch` call. Reset per request implicitly by the
+  // extern fn on entry.
+  let lastFetchStatus = 0;
+
   const { glue: httpGlue, attach: attachHttp } = makeHttpGlue();
 
   // Reuse the same set of env imports as scripts/run_wasm.js so any
@@ -138,6 +152,43 @@ const wasmPath = process.argv[2];
       new Uint8Array(memory.buffer).set(bytes, outPtr);
       return outPtr;
     },
+    // http_fetch : str -> str -> str -> str  (method, url, body → body)
+    // Synchronous outbound HTTP via `curl` (spawnSync). Body is sent
+    // verbatim as `--data-binary` when non-empty. Status code is
+    // stashed on `lastFetchStatus` (read via `http_fetch_status ()`).
+    // Empty return on network error or non-zero curl exit; caller
+    // should check status when it matters.
+    //
+    // Depends on `curl` being on PATH (macOS / Linux default, most
+    // Docker base images have it). Production would use a proper
+    // Node http client with async event-loop integration, but the
+    // wasm-called-from-JS execution model forces sync here.
+    http_fetch: (methodPtr, urlPtr, bodyPtr) => {
+      const method = readCStr(methodPtr) || "GET";
+      const url = readCStr(urlPtr);
+      const body = readCStr(bodyPtr);
+      const { spawnSync } = require("child_process");
+      const args = ["-sS", "-w", "\n__STATUS__%{http_code}", "-X", method];
+      if (body && body.length > 0) args.push("--data-binary", body);
+      args.push(url);
+      const result = spawnSync("curl", args, {
+        encoding: "utf8",
+        timeout: 10000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      if (result.status !== 0 || !result.stdout) {
+        lastFetchStatus = 0;
+        return writeStr("");
+      }
+      const marker = result.stdout.lastIndexOf("\n__STATUS__");
+      if (marker < 0) {
+        lastFetchStatus = 0;
+        return writeStr(result.stdout);
+      }
+      lastFetchStatus = parseInt(result.stdout.substring(marker + 11), 10) || 0;
+      return writeStr(result.stdout.substring(0, marker));
+    },
+    http_fetch_status: () => lastFetchStatus,
     ...httpGlue,
   };
 
