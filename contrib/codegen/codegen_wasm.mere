@@ -922,19 +922,23 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
             let s1 = emit_expr x s0b in
             push_instr "call $show_str" s1
           | EAnnot (_, TyCon (_, _)) ->
-            // Phase 55d-2: also register str_concat + strlen + show_int
-            // + pre-alloc "(" and ")" so build_show_variant_helper can
-            // render `Some(42)`-style output for int payloads. Nullary
-            // ctors still render as name-only; non-int payload types
-            // (variant / record / tuple) fall back to name-only for
-            // this MVP.
+            // Phase 55d-2/3: register the helpers show_variant may call
+            // to render int / bool / str payloads. We register all three
+            // unconditionally when show_variant is used — the concrete
+            // ctor set + their payload_ty determine which branches
+            // actually invoke them, but wat2wasm still needs the funcs
+            // present. Small footprint (~120 bytes WAT for the two
+            // unused helpers when only int payloads are in play). Also
+            // pre-alloc "(" and ")" strings for the concat chain.
             let s0 = note_helper_use "show_variant" s in
             let s0a = note_helper_use "strlen" s0 in
             let s0b = note_helper_use "str_concat" s0a in
             let s0c = note_helper_use "show_int" s0b in
-            let (_lp_off, s0d) = alloc_str_literal "(" s0c in
-            let (_rp_off, s0e) = alloc_str_literal ")" s0d in
-            let s1 = emit_expr x s0e in
+            let s0d = note_helper_use "show_bool" s0c in
+            let s0e = note_helper_use "show_str" s0d in
+            let (_lp_off, s0f) = alloc_str_literal "(" s0e in
+            let (_rp_off, s0g) = alloc_str_literal ")" s0f in
+            let s1 = emit_expr x s0g in
             push_instr "call $show_variant" s1
           | _ ->
             let s1 = note_helper_use "show_int" s in
@@ -2417,13 +2421,18 @@ let helper_decl_show_str =
 let build_show_variant_branch = fn (name_off: int)
                              -> fn (payload_ty: ty option)
                              -> fn (lp_off: int) -> fn (rp_off: int) ->
-  match payload_ty with
-  | Some TyInt ->
+  // The renderer shape is identical across payload types — only the
+  // inner show_* fn name differs. Factor it into a helper string.
+  let render_with = fn (show_fn: str) ->
     "        (call $__lang_str_concat\n" ++
     "          (call $__lang_str_concat\n" ++
     "            (call $__lang_str_concat (i32.const " ++ show name_off ++ ") (i32.const " ++ show lp_off ++ "))\n" ++
-    "            (call $show_int (i32.load offset=4 (local.get $v))))\n" ++
-    "          (i32.const " ++ show rp_off ++ "))\n"
+    "            (call $" ++ show_fn ++ " (i32.load offset=4 (local.get $v))))\n" ++
+    "          (i32.const " ++ show rp_off ++ "))\n" in
+  match payload_ty with
+  | Some TyInt -> render_with "show_int"
+  | Some TyBool -> render_with "show_bool"
+  | Some TyStr -> render_with "show_str"
   | _ ->
     "        (i32.const " ++ show name_off ++ ")\n"
   ;
