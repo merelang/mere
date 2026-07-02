@@ -1811,7 +1811,25 @@ let flatten_and_resolve = fn (prog: program) ->
   let resolved_main = rewrite_expr main mods in
   // Phase 54.13: now that module rewrites are done, build the
   // constructor-arity map and fix up bare-ctor applications.
-  let arities = collect_arities_from_decls resolved_decls Nil in
+  // Phase 55f+: seed the arity map with the built-in constructors
+  // that our typer's initial_type_env knows (Nil / Cons / None / Some
+  // / Ok / Err). Without this seed, `Some 42` stays as
+  // `EApp(EConstr("Some", None), 42)` — the typer then dispatches
+  // `EConstr(_, None)` to the fresh-meta permissive path and drops
+  // the payload's ty. With the seed, `Some 42` rewrites to
+  // `EConstr("Some", Some 42)` and typer unifies the payload against
+  // 'a. User TopType decls (whose ctors collide) still take
+  // precedence because they're appended AFTER these built-ins and
+  // `lookup_arity` finds the last-added first.
+  let builtin_arities =
+    Cons (("Nil", 0),
+    Cons (("None", 0),
+    Cons (("Cons", 1),
+    Cons (("Some", 1),
+    Cons (("Ok", 1),
+    Cons (("Err", 1),
+    Nil)))))) in
+  let arities = collect_arities_from_decls resolved_decls builtin_arities in
   let decls2 = rewrite_constrs_decls resolved_decls arities in
   let main2 = rewrite_constrs_expr resolved_main arities in
   ((decls2, main2) : program);

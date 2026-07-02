@@ -1126,7 +1126,15 @@ let initial_type_env =
      TyArrow (
        TyTuple (Cons (TyMeta 1006, Cons (TyCon ("list", Cons (TyMeta 1006, Nil)), Nil))),
        TyCon ("list", Cons (TyMeta 1006, Nil)))) : scheme)),
-   Nil))))))))))))))))))))))))))) : type_env);
+   // Polymorphic option ctors — similarly parametric.
+   //   None : 'a option
+   //   Some : 'a -> 'a option
+   // User `type option 'a = ...` decls shadow via env-prepending
+   // (their TopRecord/TopType schemes go to the head of the list).
+   Cons (("None", ((Cons (1007, Nil), TyCon ("option", Cons (TyMeta 1007, Nil))) : scheme)),
+   Cons (("Some", ((Cons (1008, Nil),
+     TyArrow (TyMeta 1008, TyCon ("option", Cons (TyMeta 1008, Nil)))) : scheme)),
+   Nil))))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
