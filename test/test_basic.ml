@@ -7897,6 +7897,23 @@ let () =
   cross_type "tuple destructure" "let (a, b) = (3, 4) in a + b";
   cross_type "match int" "match 1 with | 0 -> \"z\" | _ -> \"o\"";
   cross_type "match with guard" "match 5 with | n when n > 0 -> 1 | _ -> 0";
+  (* Phase 55c: TopType decls populate the ctor registry so `EConstr`
+     inference returns the parent type name instead of a fresh meta.
+     Before 55c, all four below returned `'_0` from parse_and_infer;
+     after 55c they return the proper TyCon name. `cross_type`
+     compares against OCaml Pipeline.type_of which has always done
+     this — the check is that self-host has caught up. *)
+  cross_type "TopType enum ctor" "type color = | Red | Green | Blue; Red";
+  cross_type "TopType nullary ctor" "type maybe_int = | None | Some of int; None";
+  cross_type "TopType payload ctor int" "type maybe_int = | None | Some of int; Some 42";
+  (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
+     auto-generalizes TyVars from ctor payloads (parser doesn't emit
+     decl-head params). OCaml rejects this same input as a rigid-var
+     mismatch, so we skip cross-validation here — verified by hand via
+     `mere.exe` + parse_and_infer. Adding TopType polymorphic cases to
+     cross_type requires the self-host parser gaining `type opt 'a =
+     ...` syntax first. *)
+
 
   (* Phase 53.9 — self-host codegen cross-validation. Runs a Mere source
      string through:
