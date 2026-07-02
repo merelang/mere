@@ -1134,7 +1134,20 @@ let initial_type_env =
    Cons (("None", ((Cons (1007, Nil), TyCon ("option", Cons (TyMeta 1007, Nil))) : scheme)),
    Cons (("Some", ((Cons (1008, Nil),
      TyArrow (TyMeta 1008, TyCon ("option", Cons (TyMeta 1008, Nil)))) : scheme)),
-   Nil))))))))))))))))))))))))))))) : type_env);
+   // Polymorphic result ctors — 2 type params. Ok / Err schemes each
+   // quantify over the same 2 ids but the ids are just placeholders
+   // within a scheme (`instantiate` freshens them at each use). Two
+   // sibling uses of `Ok` in different call sites get independent
+   // freshening.
+   //   Ok  : 'a -> ('a, 'b) result
+   //   Err : 'b -> ('a, 'b) result
+   Cons (("Ok", ((Cons (1009, Cons (1010, Nil)),
+     TyArrow (TyMeta 1009,
+       TyCon ("result", Cons (TyMeta 1009, Cons (TyMeta 1010, Nil))))) : scheme)),
+   Cons (("Err", ((Cons (1009, Cons (1010, Nil)),
+     TyArrow (TyMeta 1010,
+       TyCon ("result", Cons (TyMeta 1009, Cons (TyMeta 1010, Nil))))) : scheme)),
+   Nil))))))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
