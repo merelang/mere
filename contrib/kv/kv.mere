@@ -1,0 +1,154 @@
+// contrib/kv/kv.mere — minimal append-only key-value store in pure Mere.
+//
+// Pure Mere (no extern fns beyond the existing read_file / write_file
+// primitives). Level 1 of the "Mere-native mini DB" design: an
+// in-memory strbuf that holds the entire log-structured KV, with
+// disk save / load via read_file / write_file.
+//
+// Storage model: append-only log. Each `kv_set` appends a `key\tvalue\n`
+// line to the buffer. `kv_get` scans the log and returns the LAST
+// occurrence of `key` — so overwrites work naturally without a real
+// index. `kv_delete` appends a tombstone (see `_DELETED` below).
+//
+// Trade-offs:
+//   + zero host dependencies (just read_file / write_file)
+//   + tiny code footprint (~150 lines Mere)
+//   + append-write is O(1)
+//   - lookup / has / delete are O(N) linear scans
+//   - the on-disk log grows monotonically until `kv_compact` is called
+//   - keys must not contain TAB; values must not contain LF
+//     (users can url_encode via contrib/http/query.mere for full safety)
+//
+// Suitable for: session store (small N sessions), user directory
+// (dozens to a few hundred rows), config, cache. Not suitable for:
+// millions of rows, concurrent writers, full-text search.
+//
+// Public API:
+//
+//   kv_new       : unit -> kv                       // in-memory only
+//   kv_load      : str -> kv                        // read from file (or empty)
+//   kv_save      : kv -> str -> unit                // write to file
+//   kv_get       : kv -> str -> str                 // latest value, "" if missing
+//   kv_has       : kv -> str -> bool
+//   kv_set       : kv -> str -> str -> unit         // append
+//   kv_delete    : kv -> str -> unit                // append tombstone
+//   kv_keys      : kv -> str list                   // unique live keys
+//   kv_compact   : kv -> kv                         // rebuild from current values
+
+// Sentinel used to mark a deleted entry. Any real value that equals
+// this literal would collide — callers must not store it. In
+// practice `__KV_TOMBSTONE__` is safe.
+let _KV_TOMBSTONE = "__KV_TOMBSTONE__";
+
+// Create an empty KV. Just an alias for `strbuf_new`.
+let kv_new = fn (u: unit) -> strbuf_new ();
+
+// Load from disk. If the file doesn't exist, `read_file` returns "" —
+// we build an empty log from that. (The host's read_file traps on
+// missing files; in Node the glue in scripts/run_http_server.js
+// returns "" for ENOENT, so this is safe under the demo runner.)
+let kv_load = fn (path: str) ->
+  let buf = strbuf_new () in
+  let content = read_file path in
+  let _ = strbuf_push buf content in
+  buf;
+
+// Save the current log to disk.
+let kv_save = fn (kv) -> fn (path: str) ->
+  write_file path (strbuf_to_str kv);
+
+// Append a `key\tvalue\n` line. Overwrites propagate because `kv_get`
+// takes the last occurrence.
+let kv_set = fn (kv) -> fn (key: str) -> fn (value: str) ->
+  let _ = strbuf_push kv key in
+  let _ = strbuf_push kv "\t" in
+  let _ = strbuf_push kv value in
+  let _ = strbuf_push kv "\n" in
+  ();
+
+// Append a tombstone. Subsequent `kv_get` returns "", `kv_has` returns
+// false. The on-disk log still carries the history — call `kv_compact`
+// to garbage-collect.
+let kv_delete = fn (kv) -> fn (key: str) ->
+  kv_set kv key _KV_TOMBSTONE;
+
+// Scan the log left-to-right, updating `last_val` each time we see a
+// match. Returns the last-seen value (or "" if never seen).
+let rec _scan_last = fn (lines: str list) -> fn (key: str) -> fn (last_val: str) ->
+  match lines with
+  | Nil -> last_val
+  | Cons (line, rest) ->
+    let tab_idx = str_index_of line "\t" in
+    if tab_idx < 0 then _scan_last rest key last_val
+    else
+      let k = substring line 0 tab_idx in
+      if str_eq k key then
+        let v = substring line (tab_idx + 1) (str_len line) in
+        _scan_last rest key v
+      else _scan_last rest key last_val;
+
+// Lookup the latest value for `key`. Returns "" if the key was never
+// set, or if the latest write was a tombstone.
+let kv_get = fn (kv) -> fn (key: str) ->
+  let content = strbuf_to_str kv in
+  let lines = str_split content "\n" in
+  let raw = _scan_last lines key "" in
+  if str_eq raw _KV_TOMBSTONE then "" else raw;
+
+// Does the key have a live (non-tombstoned) value?
+let kv_has = fn (kv) -> fn (key: str) ->
+  let content = strbuf_to_str kv in
+  let lines = str_split content "\n" in
+  let raw = _scan_last lines key "" in
+  if str_eq raw "" then false
+  else if str_eq raw _KV_TOMBSTONE then false
+  else true;
+
+// Extract the `key` prefix from a `key\tvalue` line.
+let _line_key = fn (line: str) ->
+  let tab_idx = str_index_of line "\t" in
+  if tab_idx < 0 then ""
+  else substring line 0 tab_idx;
+
+// Add str to acc if not already present (linear check; small N).
+let rec _add_unique = fn (name: str) -> fn (acc: str list) ->
+  match acc with
+  | Nil -> Cons (name, Nil)
+  | Cons (h, t) ->
+    if str_eq h name then acc
+    else Cons (h, _add_unique name t);
+
+// Walk lines and collect keys that have a live (non-tombstoned) value
+// as of the LAST occurrence. Returns unique keys in first-seen order.
+let rec _collect_keys = fn (lines: str list) -> fn (kv) -> fn (acc: str list) ->
+  match lines with
+  | Nil -> acc
+  | Cons (line, rest) ->
+    let k = _line_key line in
+    if str_eq k "" then _collect_keys rest kv acc
+    else if kv_has kv k then _collect_keys rest kv (_add_unique k acc)
+    else _collect_keys rest kv acc;
+
+// Return the current set of live keys. Order is first-insertion.
+let kv_keys = fn (kv) ->
+  let content = strbuf_to_str kv in
+  let lines = str_split content "\n" in
+  _collect_keys lines kv Nil;
+
+// Rebuild `kv` in-place after garbage-collecting tombstones and older
+// versions. Walks the current key set once, reading the current value
+// for each, then rewrites the log with a single-write-per-key trailer.
+// Returns a fresh strbuf; the caller should treat the input as
+// invalidated after the call.
+let rec _rewrite = fn (keys: str list) -> fn (kv_src) -> fn (kv_dst) ->
+  match keys with
+  | Nil -> kv_dst
+  | Cons (k, rest) ->
+    let v = kv_get kv_src k in
+    let _ = kv_set kv_dst k v in
+    _rewrite rest kv_src kv_dst;
+
+let kv_compact = fn (kv) ->
+  let ks = kv_keys kv in
+  let fresh = strbuf_new () in
+  _rewrite ks kv fresh;

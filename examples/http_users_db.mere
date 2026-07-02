@@ -1,0 +1,183 @@
+// http_users_db: persistent users table with signup + login + delete.
+//
+// Purpose: Phase 55f web-app follow-up. Ties together the three
+// building blocks shipped in this session:
+//
+//   - contrib/http/http.mere      — HTTP server + Cookie header read
+//   - contrib/http/query.mere     — query-string parsing
+//   - contrib/kv/kv.mere          — append-only KV store with disk persist
+//
+// The users "database" is a KV log on disk (default /tmp/users.db).
+// Signup writes the new user, login checks the stored password.
+// Sessions map cookie session_id → username (in-memory).
+//
+// Endpoints:
+//   POST /signup?user=alice&pass=secret   → creates user, returns 201
+//   POST /login?user=alice&pass=secret    → sets session cookie
+//   GET  /whoami                          → reads cookie, returns username or 401
+//   POST /logout                          → clears session cookie
+//   POST /delete?user=alice               → removes user from KV (must be logged in as alice)
+//   GET  /users                           → JSON array of usernames (any live session)
+//   GET  /                                → tiny HTML+fetch UI
+//
+// The KV log survives server restarts — kill the process, restart it,
+// signed-up users are still there.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_users_db.mere > /tmp/ud.wat
+//   wat2wasm /tmp/ud.wat -o /tmp/ud.wasm
+//   node scripts/run_http_server.js /tmp/ud.wasm
+//   # then in another terminal:
+//   curl -X POST 'http://localhost:8080/signup?user=alice&pass=secret'
+//   curl -c cookies -X POST 'http://localhost:8080/login?user=alice&pass=secret'
+//   curl -b cookies http://localhost:8080/whoami
+//
+// Execution mode: Wasm only, run under Node with contrib/http glue.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+
+import "../contrib/http/query.mere";
+import "../contrib/kv/kv.mere";
+
+let db_path = "/tmp/users.db" in
+let users = kv_load db_path in         // persistent user directory
+let sessions = map_new () in            // in-memory session_id → username
+
+// Extract the "session" cookie value from the raw Cookie header.
+let cookie_get_session = fn (cookies: str) ->
+  let pairs = str_split cookies "; " in
+  let target = "session=" in
+  let tlen = str_len target in
+  let rec find = fn (ps: str list) ->
+    match ps with
+    | Nil -> ""
+    | Cons (p, rest) ->
+      if str_starts_with p target then substring p tlen (str_len p)
+      else find rest in
+  find pairs
+in
+
+let current_user = fn (u: unit) ->
+  let sid = cookie_get_session (http_get_header "Cookie") in
+  if str_eq sid "" then ""
+  else if map_has sessions sid then map_get sessions sid
+  else ""
+in
+
+let json_users = fn (u: unit) ->
+  let ks = kv_keys users in
+  let rec render = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (h, t) ->
+      let sep = if first then "" else "," in
+      render t false (acc ++ sep ++ "\"" ++ h ++ "\"") in
+  render ks true "["
+in
+
+let handle = fn (req: str) ->
+  let sp = str_index_of req " " in
+  let method = substring req 0 sp in
+  let url = substring req (sp + 1) (str_len req) in
+  let (path, qs) = split_url url in
+  let parsed = parse_query qs in
+  let user = current_user () in
+
+  if str_eq path "/signup" && str_eq method "POST" then
+    let u = query_get parsed "user" in
+    let p = query_get parsed "pass" in
+    if str_eq u "" || str_eq p "" then
+      let _ = http_set_status 400 in
+      "missing user / pass\n"
+    else if kv_has users u then
+      let _ = http_set_status 409 in
+      "user already exists: " ++ u ++ "\n"
+    else
+      let _ = kv_set users u p in
+      let _ = kv_save users db_path in
+      let _ = http_set_status 201 in
+      "created: " ++ u ++ "\n"
+
+  else if str_eq path "/login" && str_eq method "POST" then
+    let u = query_get parsed "user" in
+    let p = query_get parsed "pass" in
+    if kv_has users u && str_eq (kv_get users u) p then
+      let sid = "sess-" ++ u in           // trivially derived session id
+      let _ = map_set sessions sid u in
+      let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+      "logged in as " ++ u ++ "\n"
+    else
+      let _ = http_set_status 401 in
+      "invalid credentials\n"
+
+  else if str_eq path "/whoami" && str_eq method "GET" then
+    if str_eq user "" then
+      let _ = http_set_status 401 in
+      "anonymous\n"
+    else
+      "you=" ++ user ++ "\n"
+
+  else if str_eq path "/logout" && str_eq method "POST" then
+    let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+    "logged out\n"
+
+  else if str_eq path "/delete" && str_eq method "POST" then
+    let u = query_get parsed "user" in
+    if str_eq user "" then
+      let _ = http_set_status 401 in
+      "login required\n"
+    else if not (str_eq user u) then
+      let _ = http_set_status 403 in
+      "can only delete your own account\n"
+    else
+      let _ = kv_delete users u in
+      let _ = kv_save users db_path in
+      "deleted: " ++ u ++ "\n"
+
+  else if str_eq path "/users" && str_eq method "GET" then
+    let _ = http_set_content_type "application/json" in
+    json_users () ++ "\n"
+
+  else if str_eq path "/" && str_eq method "GET" then
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>users db demo</title>" ++
+    "<h1>users db demo</h1>" ++
+    "<p>persistent user directory backed by contrib/kv (log-structured, on-disk)</p>" ++
+    "<form id=f>" ++
+    "user: <input name=user value=alice> " ++
+    "pass: <input name=pass value=secret> " ++
+    "<button data-a=signup>signup</button> " ++
+    "<button data-a=login>login</button>" ++
+    "</form>" ++
+    "<p>" ++
+    "<button id=who>whoami</button> " ++
+    "<button id=list>list users</button> " ++
+    "<button id=logout>logout</button>" ++
+    "</p>" ++
+    "<pre id=out></pre>" ++
+    "<script>" ++
+    "const out=document.getElementById(\"out\");" ++
+    "const f=document.getElementById(\"f\");" ++
+    "const call=(m,p,c)=>fetch(p,\{method:m,credentials:\"same-origin\"}).then(r=>r.text()).then(t=>out.textContent=(c||\"\")+t);" ++
+    "f.onsubmit=e=>\{e.preventDefault();};" ++
+    "for(const b of f.querySelectorAll(\"button\"))b.onclick=e=>\{e.preventDefault();" ++
+    "const q=new URLSearchParams(new FormData(f)).toString();" ++
+    "call(\"POST\",\"/\"+b.dataset.a+\"?\"+q, b.dataset.a+\": \");};" ++
+    "document.getElementById(\"who\").onclick=()=>call(\"GET\",\"/whoami\", \"whoami: \");" ++
+    "document.getElementById(\"list\").onclick=()=>call(\"GET\",\"/users\", \"users: \");" ++
+    "document.getElementById(\"logout\").onclick=()=>call(\"POST\",\"/logout\", \"logout: \");" ++
+    "</script>\n"
+
+  else
+    let _ = http_set_status 404 in
+    "not found: " ++ method ++ " " ++ path ++ "\n"
+in
+
+let _ = print ("starting users-db demo on :8080 (persisting to " ++ db_path ++ ") ...") in
+let _ = http_serve 8080 handle in
+0
