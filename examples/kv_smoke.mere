@@ -1,0 +1,43 @@
+// kv_smoke: sanity check for contrib/kv/kv.mere.
+//
+// Not an HTTP demo — pure CLI. Exercises set / get / has / delete /
+// keys / save / load / compact against a temp file.
+//
+// Run:
+//   dune exec ./bin/mere.exe -- examples/kv_smoke.mere
+// (interpreter mode; no wasm build needed since we only test the API)
+
+import "../contrib/kv/kv.mere";
+
+let kv = kv_new () in
+let _ = kv_set kv "alice" "Hello" in
+let _ = kv_set kv "bob" "Hi" in
+let _ = kv_set kv "alice" "Konnichiwa" in     // overwrite
+let _ = kv_delete kv "bob" in                 // tombstone
+
+let _ = print ("alice = " ++ kv_get kv "alice") in
+let _ = print ("bob = " ++ kv_get kv "bob") in
+let _ = print ("charlie = " ++ kv_get kv "charlie") in
+let _ = print ("has alice = " ++ show (kv_has kv "alice")) in
+let _ = print ("has bob = " ++ show (kv_has kv "bob")) in
+
+let _ = print "--- keys ---" in
+let ks = kv_keys kv in
+let rec show_keys = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> let _ = print (" - " ++ h) in show_keys t in
+let _ = show_keys ks in
+
+let _ = print "--- save + reload ---" in
+let path = "/tmp/kv_smoke.db" in
+let _ = kv_save kv path in
+let kv2 = kv_load path in
+let _ = print ("reloaded alice = " ++ kv_get kv2 "alice") in
+let _ = print ("reloaded bob = " ++ kv_get kv2 "bob") in
+
+let _ = print "--- compact ---" in
+let kv3 = kv_compact kv2 in
+let _ = print ("compacted alice = " ++ kv_get kv3 "alice") in
+let _ = print ("compacted bob = " ++ kv_get kv3 "bob") in
+0
