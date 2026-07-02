@@ -7931,6 +7931,16 @@ let () =
      `check_record_field_pats` / `check_pattern_list`. *)
   cross_type "PRecord pattern destructure"
     "type Point = { x: int, y: int }; match Point { x = 3, y = 4 } with | Point { x = a, y = b } -> a + b";
+  (* Phase 55c-3: PConstr pattern lookup — payload sub-pattern binds
+     with the declared ctor payload ty. `match Some 42 with | Some x
+     -> x | None -> 0` used to bind `x` as fresh meta; now `x: int`
+     from `Some of int`, so arithmetic on x resolves cleanly. *)
+  cross_type "PConstr pattern binds payload"
+    "type opt = | Some of int | None; match Some 42 with | Some x -> x | None -> 0";
+  cross_type "PConstr pattern payload arith"
+    "type opt = | Some of int | None; match Some 5 with | Some x -> x + 1 | None -> 0";
+  cross_type "PConstr pattern nullary only"
+    "type flag = | On | Off; match On with | On -> 1 | Off -> 0";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit
