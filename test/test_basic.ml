@@ -7976,6 +7976,16 @@ let () =
     "if true then Ok 42 else Err \"bad\"";
   cross_type "result Ok match"
     "match Ok 42 with | Ok x -> x | Err _ -> 0";
+  (* Phase 55f continued (part 6): higher-order list helpers from
+     selfhost_prelude, now polymorphically typed in initial_type_env.
+     Each ctor's fresh quantifier gives independent freshening per
+     use site. *)
+  cross_type "list_map with anon fn"
+    "list_map (Cons (1, Nil)) (fn x -> x + 1)";
+  cross_type "list_filter with pred"
+    "list_filter (Cons (1, Cons (2, Nil))) (fn x -> x > 0)";
+  cross_type "list_any"
+    "list_any (Cons (1, Nil)) (fn x -> x > 0)";
 
   (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
      auto-generalizes TyVars from ctor payloads (parser doesn't emit

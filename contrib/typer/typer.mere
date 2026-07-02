@@ -1147,7 +1147,30 @@ let initial_type_env =
    Cons (("Err", ((Cons (1009, Cons (1010, Nil)),
      TyArrow (TyMeta 1010,
        TyCon ("result", Cons (TyMeta 1009, Cons (TyMeta 1010, Nil))))) : scheme)),
-   Nil))))))))))))))))))))))))))))))) : type_env);
+   // Polymorphic higher-order list helpers from selfhost_prelude.
+   //   list_map    : 'a list -> ('a -> 'b) -> 'b list
+   //   list_filter : 'a list -> ('a -> bool) -> 'a list
+   //   list_iter   : 'a list -> ('a -> unit) -> unit
+   //   list_any    : 'a list -> ('a -> bool) -> bool
+   //   list_all    : 'a list -> ('a -> bool) -> bool
+   Cons (("list_map", ((Cons (1011, Cons (1012, Nil)),
+     TyArrow (TyCon ("list", Cons (TyMeta 1011, Nil)),
+       TyArrow (TyArrow (TyMeta 1011, TyMeta 1012),
+         TyCon ("list", Cons (TyMeta 1012, Nil))))) : scheme)),
+   Cons (("list_filter", ((Cons (1013, Nil),
+     TyArrow (TyCon ("list", Cons (TyMeta 1013, Nil)),
+       TyArrow (TyArrow (TyMeta 1013, TyBool),
+         TyCon ("list", Cons (TyMeta 1013, Nil))))) : scheme)),
+   Cons (("list_iter", ((Cons (1014, Nil),
+     TyArrow (TyCon ("list", Cons (TyMeta 1014, Nil)),
+       TyArrow (TyArrow (TyMeta 1014, TyUnit), TyUnit))) : scheme)),
+   Cons (("list_any", ((Cons (1015, Nil),
+     TyArrow (TyCon ("list", Cons (TyMeta 1015, Nil)),
+       TyArrow (TyArrow (TyMeta 1015, TyBool), TyBool))) : scheme)),
+   Cons (("list_all", ((Cons (1016, Nil),
+     TyArrow (TyCon ("list", Cons (TyMeta 1016, Nil)),
+       TyArrow (TyArrow (TyMeta 1016, TyBool), TyBool))) : scheme)),
+   Nil)))))))))))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
