@@ -52,3 +52,21 @@ extern fn http_set_content_type: str -> unit;
 // `http_set_header "Content-Type" …` works too but bypasses the
 // content-type slot the glue tracks separately.
 extern fn http_set_header: str -> str -> unit;
+
+// Read a request header by name (case-insensitive) from the request
+// currently being handled. Returns the value, or the empty string if
+// the header wasn't sent. Only valid to call from inside the
+// `http_serve` handler closure.
+//
+// Multi-value headers (rare on the request side beyond Set-Cookie,
+// which appears on responses) are joined with `, ` — split on that
+// delimiter if you need each value individually. Standard cases:
+//
+//   http_get_header "Cookie"          // "session=abc; theme=dark"
+//   http_get_header "Authorization"   // "Bearer eyJ..."
+//   http_get_header "User-Agent"      // "curl/7.81.0"
+//
+// The returned pointer lives in the same per-request scratch region
+// as `http_current_body ()`; copy it via `strbuf_push + strbuf_to_str`
+// if you need to keep it past this request.
+extern fn http_get_header: str -> str;

@@ -79,6 +79,10 @@ function makeHttpGlue() {
   let currentStatus = 200;
   let currentContentType = "text/plain; charset=utf-8";
   let currentHeaders = {};
+  // Request-side headers, populated per request from `req.headers`
+  // (already lowercase-keyed by Node). Read via `http_get_header name`
+  // (case-insensitive lookup — we lowercase the name before indexing).
+  let currentReqHeaders = {};
 
   const glue = {
     http_serve: (port, closurePtr) => {
@@ -89,6 +93,7 @@ function makeHttpGlue() {
         currentStatus = 200;
         currentContentType = "text/plain; charset=utf-8";
         currentHeaders = {};
+        currentReqHeaders = req.headers || {};
         const chunks = [];
         req.on("data", (c) => chunks.push(c));
         req.on("end", () => {
@@ -116,6 +121,19 @@ function makeHttpGlue() {
     http_set_content_type: (ptr) => { currentContentType = readCStr(ptr); },
     http_set_header: (namePtr, valuePtr) => {
       currentHeaders[readCStr(namePtr)] = readCStr(valuePtr);
+    },
+    // Read a request header by name (case-insensitive). Returns a
+    // pointer to a NUL-terminated str with the value, or empty string
+    // if the header wasn't set. Node normalizes header keys to
+    // lowercase, so we lowercase the name before indexing. Multi-value
+    // headers (Set-Cookie / etc.) join on ", " by default from Node —
+    // callers wanting individual values need to split.
+    http_get_header: (namePtr) => {
+      const name = readCStr(namePtr).toLowerCase();
+      const val = currentReqHeaders[name];
+      if (val === undefined || val === null) return writeStr("");
+      if (Array.isArray(val)) return writeStr(val.join(", "));
+      return writeStr(String(val));
     },
   };
 
