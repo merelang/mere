@@ -8394,6 +8394,19 @@ let () =
     typed_cross_stdout "show variant str payload"
       "type maybe_str = | SomeS of str | NoneS; let _ = print (show (SomeS \"hi\")) in 0"
       "SomeS(\"hi\")";
+    (* Phase 55d-5: tuple show, generated inline at the call site. Each
+       element ty (TyInt / TyBool / TyStr) dispatches to the matching
+       $show_*; the resulting str_concat chain wraps them with "(",
+       ", ", ")". No per-arity helper — the S-expr fits on one line
+       for any tuple size. *)
+    typed_cross_stdout "show tuple (int, int)"
+      "let _ = print (show (1, 2)) in 0" "(1, 2)";
+    typed_cross_stdout "show tuple (int, bool)"
+      "let _ = print (show (42, true)) in 0" "(42, true)";
+    typed_cross_stdout "show tuple (int, str)"
+      "let _ = print (show (7, \"hi\")) in 0" "(7, \"hi\")";
+    typed_cross_stdout "show tuple 3-arity"
+      "let _ = print (show (1, 2, 3)) in 0" "(1, 2, 3)";
     (* Phase 53.17 dogfood pass 3: `show` / `print` inside a fn body
        (caught by FizzBuzz / print_range / list rendering) used to
        crash because free_vars treated them as free vars and tried to

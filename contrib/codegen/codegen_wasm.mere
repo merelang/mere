@@ -671,6 +671,51 @@ let rec filter_extern_captures = fn (caps: str list)
       | Some _ -> filter_extern_captures t decls
       | None -> Cons (h, filter_extern_captures t decls));
 
+// Phase 55d-5: build the per-element show-fn call as a WAT S-expr.
+// Reads tuple field at offset `i * 4` and calls `$show_<ty>` on it.
+// TyInt / TyBool / TyStr are the currently-supported element types;
+// others fall through to $show_int (renders whatever integer value
+// is at that offset — safe but visually wrong for the caller).
+let elem_show_expr = fn (i: int) -> fn (t: ty) -> fn (tup_slot: int) ->
+  let show_fn = (match t with
+    | TyInt -> "show_int"
+    | TyBool -> "show_bool"
+    | TyStr -> "show_str"
+    | _ -> "show_int") in
+  "(call $" ++ show_fn ++ " (i32.load offset=" ++ show (i * 4) ++
+    " (local.get " ++ show tup_slot ++ ")))"
+  ;
+
+// Phase 55d-5: build the interior of `(elem0, elem1, ...)` as a
+// left-folded str_concat chain — starting from the open-paren, then
+// each element followed by ", " (except after the last). Uses S-expr
+// syntax so the whole chain can be pushed as a single instruction.
+let rec build_tuple_show_acc = fn (elems: ty list) -> fn (i: int)
+                            -> fn (tup_slot: int)
+                            -> fn (comma_off: int)
+                            -> fn (acc: str) ->
+  match elems with
+  | Nil -> acc
+  | Cons (t, rest) ->
+    let acc_with_sep = if i > 0 then
+      "(call $__lang_str_concat " ++ acc ++
+        " (i32.const " ++ show comma_off ++ "))"
+    else acc in
+    let elem = elem_show_expr i t tup_slot in
+    let acc_with_elem = "(call $__lang_str_concat " ++ acc_with_sep ++
+      " " ++ elem ++ ")" in
+    build_tuple_show_acc rest (i + 1) tup_slot comma_off acc_with_elem
+  ;
+
+let build_tuple_show_expr = fn (elems: ty list) -> fn (tup_slot: int)
+                         -> fn (lp_off: int) -> fn (rp_off: int)
+                         -> fn (comma_off: int) ->
+  let start = "(i32.const " ++ show lp_off ++ ")" in
+  let middle = build_tuple_show_acc elems 0 tup_slot comma_off start in
+  "(call $__lang_str_concat " ++ middle ++
+    " (i32.const " ++ show rp_off ++ "))"
+  ;
+
 // === Expression emission (Stage 53c-2 scope) ===============================
 //
 // Layers `EFun` (lifts to a static `$anon_N_fn` + leaves a closure
@@ -921,6 +966,27 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
             let s0b = note_helper_use "show_str" s0a in
             let s1 = emit_expr x s0b in
             push_instr "call $show_str" s1
+          | EAnnot (_, TyTuple ts) ->
+            // Phase 55d-5: tuple show, generated inline. Register the
+            // usual show helpers, pre-alloc separators, emit the inner
+            // expr (leaves tuple ptr on stack), stash it in a tmp
+            // local, then push the concat-chain S-expr that reads each
+            // element and calls the appropriate `$show_*`. No dedicated
+            // helper — one S-expr per show call site is small and
+            // stays close to the type info at emit time.
+            let s0 = note_helper_use "strlen" s in
+            let s0a = note_helper_use "str_concat" s0 in
+            let s0b = note_helper_use "show_int" s0a in
+            let s0c = note_helper_use "show_bool" s0b in
+            let s0d = note_helper_use "show_str" s0c in
+            let (lp_off, s0e) = alloc_str_literal "(" s0d in
+            let (rp_off, s0f) = alloc_str_literal ")" s0e in
+            let (comma_off, s0g) = alloc_str_literal ", " s0f in
+            let s1 = emit_expr x s0g in
+            let (tup_slot, s2) = alloc_tmp_local s1 in
+            let s3 = push_instr ("local.set " ++ show tup_slot) s2 in
+            let chain = build_tuple_show_expr ts tup_slot lp_off rp_off comma_off in
+            push_instr chain s3
           | EAnnot (_, TyCon (_, _)) ->
             // Phase 55d-2/3: register the helpers show_variant may call
             // to render int / bool / str payloads. We register all three
