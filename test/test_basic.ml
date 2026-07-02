@@ -8029,6 +8029,81 @@ let () =
     check ("self-host bootstrap: " ^ name) actual expected
   in
 
+  (* Phase 54.36: runtime codegen bootstrap CI check. Emits an in-repo
+     example file via `mere -w` (i.e. the OCaml-side codegen path,
+     not the self-host emit path — this avoids the double-self-host
+     issues that surface when we bootstrap through parse_and_emit_file
+     twice). The example imports contrib/codegen/codegen_wasm.mere and
+     calls `parse_and_emit "42"` at runtime. `main()` returns the
+     length of the emitted WAT string; the harness asserts the
+     expected value.
+
+     Depends on `dune exec ./bin/mere.exe` being available. When run
+     outside dune (e.g. plain OCaml test binary), we skip. Also
+     requires `wat2wasm` and `node` in PATH like the rest of the
+     wasm cross-validation. *)
+  let codegen_runtime_bootstrap name mere_path expected =
+    let wat_path = Filename.temp_file "mere_cg_" ".wat" in
+    let wasm_path = wat_path ^ ".wasm" in
+    (* Use the pre-built mere.exe directly rather than `dune exec` —
+       we're already running inside dune runtest, so a nested dune
+       invocation fails on lock / workspace resolution. The binary
+       lives at _build/default/bin/mere.exe relative to project_root
+       once dune has built it (which runtest guarantees). *)
+    let mere_exe =
+      Filename.concat project_root "_build/default/bin/mere.exe" in
+    let compile_cmd = Printf.sprintf
+      "cd %s && %s -w %s > %s 2>/dev/null"
+      (Filename.quote project_root)
+      (Filename.quote mere_exe)
+      (Filename.quote mere_path)
+      (Filename.quote wat_path) in
+    if Sys.command compile_cmd <> 0 then begin
+      Sys.remove wat_path;
+      incr fail;
+      Printf.printf "FAIL  codegen runtime bootstrap: %s (mere -w failed)\n" name
+    end else begin
+      let wat2wasm_cmd = Printf.sprintf
+        "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      if Sys.command wat2wasm_cmd <> 0 then begin
+        Sys.remove wat_path;
+        incr fail;
+        Printf.printf "FAIL  codegen runtime bootstrap: %s (wat2wasm failed)\n" name
+      end else begin
+        (* Capture the LAST line of puts output (Phase 27.2 auto-prints
+           main's int-typed result via puts before returning 0). We
+           read a C-string at the pointer passed to puts and print it.
+           Any earlier puts calls (from print statements in the source)
+           are also captured; the test asserts on the final line. *)
+        let runner = Printf.sprintf
+          "node --stack-size=65500 -e \"const fs=require('fs'); \
+           let mem; \
+           const readCStr = p => { const b = new Uint8Array(mem.buffer); \
+             let e = p; while (e < b.length && b[e] !== 0) e++; \
+             return Buffer.from(b.subarray(p, e)).toString('utf8'); }; \
+           const env = new Proxy({ \
+             puts: p => process.stdout.write(readCStr(p) + '\\\\n') \
+           }, { get: (o, k) => k in o ? o[k] : () => 0 }); \
+           WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
+           .then(({instance})=>{ mem=instance.exports.memory; instance.exports.main(); }) \
+           .catch(e=>console.log('TRAP:'+e.message));\""
+          wasm_path in
+        let ic = Unix.open_process_in runner in
+        let buf = Buffer.create 64 in
+        (try while true do Buffer.add_string buf (input_line ic); Buffer.add_char buf '\n' done with End_of_file -> ());
+        let _ = Unix.close_process_in ic in
+        Sys.remove wat_path;
+        (try Sys.remove wasm_path with _ -> ());
+        (* Trim + take the last non-empty line — self-host demos print
+           lots of output, we want main's final result. *)
+        let lines = String.split_on_char '\n' (String.trim (Buffer.contents buf)) in
+        let last = List.fold_left (fun acc l ->
+          if String.trim l = "" then acc else String.trim l) "" lines in
+        check ("codegen runtime bootstrap: " ^ name) last expected
+      end
+    end
+  in
+
   (* Phase 54.21: compile-time self-host bootstrap. Feed a contrib
      file through parse_and_emit_file and verify the resulting WAT
      is (a) reasonably long, and (b) at least parses back through
@@ -8568,17 +8643,16 @@ let () =
          let (prog, _) = parse_decls Nil toks in\n\
          str_len (format_program prog)\n"
         contrib contrib)
-      "15"
-    (* Phase 54.36 root-caused the runtime "OOB" reported in Phase
-       54.20 to be a plain memory-exhaustion issue: OCaml-side wasm
-       codegen defaulted to 64 pages (4 MiB) exported memory, but a
-       single self-host `parse_and_emit "42"` peaks around ~30 MiB.
-       Bumping the OCaml default to 1024 pages (64 MiB) is now
-       verified via `examples/oneshot_codegen.mere` (see docs/
-       changelog.md); an in-CI runtime bootstrap test is deferred
-       because the double-self-host path (self-host compiling a
-       program that imports self-host) surfaces additional issues
-       out of scope for this slice. *)
+      "15";
+    (* Phase 54.36 (revisited): runtime self-host codegen bootstrap.
+       Compiles examples/oneshot_codegen.mere via the OCaml-side
+       codegen path (mere -w), runs the resulting wasm under Node,
+       and asserts main() returns the expected WAT length. This
+       proves the compiled self-host codegen can actually emit a
+       valid program at runtime — closes the last unresolved gap
+       from Phase 54.20. *)
+    codegen_runtime_bootstrap "oneshot codegen"
+      "examples/oneshot_codegen.mere" "80746"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";

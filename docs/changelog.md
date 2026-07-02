@@ -36,18 +36,21 @@ with either "call stack size exceeded" or "memory access out of
 bounds" depending on which limit hit first.
 
 **Deferred**:
-- CI test for runtime codegen bootstrap. The obvious harness (embed a
-  `parse_and_emit "42"` call inside a `bootstrap_emit` fixture) has
-  to go through the double-self-host path (self-host codegen
-  compiling a program that imports self-host codegen), which surfaces
-  additional issues out of scope for this slice. `examples/
-  oneshot_codegen.mere` serves as the manual verifier for now.
 - `memory.grow` in the bump allocator. Bumping the default fixes the
   common case but doesn't help workloads > 64 MiB. Growth-on-demand
   needs instrumentation at every bump-alloc site — invasive rewrite
   in `lib/codegen_wasm.ml`.
 
-dune runtest: 1778 passing (unchanged from Phase 54.35).
+**Follow-up (same day)**: `codegen_runtime_bootstrap` CI helper added
+in `test/test_basic.ml`. Compiles `examples/oneshot_codegen.mere` via
+the pre-built `_build/default/bin/mere.exe` (avoiding nested `dune
+exec` inside `dune runtest`), runs the wasm under Node with a puts
+hook that captures the auto-printed main result, and asserts the
+expected value (80746 bytes for `parse_and_emit "42"`). This closes
+the previously-deferred CI gap — regressions in the runtime
+self-host path now fail CI immediately.
+
+dune runtest: 1778 → **1779 passing**.
 
 ---
 

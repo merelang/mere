@@ -18,7 +18,7 @@
 //   dune exec ./bin/mere.exe -- -w examples/oneshot_codegen.mere > /tmp/oc.wat
 //   wat2wasm /tmp/oc.wat -o /tmp/oc.wasm
 //   node --stack-size=65500 scripts/run_wasm.js /tmp/oc.wasm
-//   # expect: "start" then "output length: 80744" then exit 0
+//   # expect: main() returns 80744 (the WAT length for parse_and_emit "42")
 //
 // Note: `node --stack-size=65500` is required — self-host workloads
 // recurse thousands of frames before returning, easily blowing the
@@ -28,5 +28,4 @@ import "../contrib/codegen/codegen_wasm.mere";
 
 let _ = print "start" in
 let out = parse_and_emit "42" in
-let _ = print ("output length: " ++ show (str_len out)) in
-0
+str_len out
