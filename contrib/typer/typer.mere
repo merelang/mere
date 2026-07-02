@@ -823,10 +823,37 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     // Undeclared records fall back to the pre-55c-2 permissive path.
     let s1 = infer_record_fields_strict env name fields s in
     (TyCon (name, Nil), s1)
-  | EFieldGet (e, _field) ->
-    let (_te, s1) = infer env s e in
-    let (a, s2) = fresh_meta s1 in
-    (a, s2)
+  | EFieldGet (e, field) ->
+    // Phase 55c-2b: resolve field ty from the receiver's record. Infer
+    // the receiver, apply subst; if the result is `TyCon (name, _)`
+    // and `__record_field__<name>__<field>` is in env, instantiate the
+    // field's scheme and return its ty. Otherwise permissive
+    // (pre-55c-2 behaviour) — fresh meta so the surrounding expression
+    // still type-checks even when the field wasn't declared.
+    //
+    // Polymorphic records (`type box = { value: 'a }`) render `box`
+    // as `TyCon ("box", [TyMeta_N])` post-unification. The field
+    // scheme is quantified over the record's param ids so
+    // `instantiate` produces a fresh meta for `'a`. Ideally we'd
+    // unify that meta with the receiver's arg to propagate the
+    // resolved element ty — deferred (small gap: `p.x` on a
+    // polymorphic record still infers to a fresh meta rather than
+    // the concrete arg. Monomorphic records work fully).
+    let (te, s1) = infer env s e in
+    let resolved = apply_subst (subst_of s1) te in
+    (match resolved with
+      | TyCon (record_name, _args) ->
+        let key = make_record_field_key record_name field in
+        (match lookup_scheme_opt key env with
+          | Some sch ->
+            let (ft, s2) = instantiate sch s1 in
+            (apply_subst (subst_of s2) ft, s2)
+          | None ->
+            let (a, s2) = fresh_meta s1 in
+            (a, s2))
+      | _ ->
+        let (a, s2) = fresh_meta s1 in
+        (a, s2))
   | ERecordUpdate (e, fields) ->
     // `e` is the record being updated; the update returns the same
     // nominal type. Phase 55c-2: infer_record_fields_strict picks up
