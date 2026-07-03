@@ -86,43 +86,6 @@ let is_admin = fn (u: unit) ->
   else map_has sessions sid
 in
 
-// contrib/kv splits records on `\n`, so any value we store that
-// contains a newline needs to be escaped. Convention: `\` → `\\`,
-// `\n` → `\n` (backslash + literal 'n'), reversed on read. Same
-// trick as the C string escape and JSON's serialization.
-let rec _kv_esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
-            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _kv_esc_walk s buf (i + 1) n
-in
-let kv_esc = fn (s: str) ->
-  let buf = strbuf_new () in
-  _kv_esc_walk s buf 0 (str_len s)
-in
-
-let rec _kv_unesc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    if str_eq c "\\" && i + 1 < n then
-      let nxt = char_at s (i + 1) in
-      let _ = if str_eq nxt "n" then let _ = strbuf_push buf "\n" in 0
-              else if str_eq nxt "\\" then let _ = strbuf_push buf "\\" in 0
-              else let _ = strbuf_push buf nxt in 0 in
-      _kv_unesc_walk s buf (i + 2) n
-    else
-      let _ = strbuf_push buf c in
-      _kv_unesc_walk s buf (i + 1) n
-in
-let kv_unesc = fn (s: str) ->
-  let buf = strbuf_new () in
-  _kv_unesc_walk s buf 0 (str_len s)
-in
-
 let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
   a ++ "|" ++ b ++ "|" ++ c
 in
@@ -213,8 +176,7 @@ in
 
 // Returns list of (slug, created_at, title, body) tuples for each
 // post/ key, freshest-first is NOT guaranteed — log-structured KV
-// keys arrive in insertion order. Body is unescaped from the KV
-// storage form (see kv_esc above).
+// keys arrive in insertion order.
 let all_posts = fn (u: unit) ->
   let prefix = "post/" in
   let plen = str_len prefix in
@@ -226,8 +188,8 @@ let all_posts = fn (u: unit) ->
       if str_starts_with k prefix then
         let slug = substring k plen (str_len k) in
         let v = kv_get posts k in
-        let (created, title, body_esc) = split3 v in
-        collect rest (Cons ((slug, created, title, kv_unesc body_esc), acc))
+        let (created, title, body) = split3 v in
+        collect rest (Cons ((slug, created, title, body), acc))
       else collect rest acc in
   collect ks Nil
 in
@@ -272,7 +234,7 @@ let post_create_h = fn (req: str) ->
       let created = if kv_has posts k then
                       let (c, _t, _b) = split3 (kv_get posts k) in c
                     else "2026-07-03" in
-      let _ = kv_set posts k (pack3 created title (kv_esc body)) in
+      let _ = kv_set posts k (pack3 created title body) in
       let _ = kv_save posts posts_db_path in
       let _ = log_with "info" "post_saved"
         (Cons (("slug", slug), Cons (("title", title), Nil))) in
@@ -418,8 +380,7 @@ let post_page_h = fn (slug: str) ->
     "post not found: " ++ slug ++ "\n"
   else
     let v = kv_get posts k in
-    let (created, title, body_esc) = split3 v in
-    let body = kv_unesc body_esc in
+    let (created, title, body) = split3 v in
     let rendered = MarkdownHtml.render (split_lines body) in
     let _ = http_set_content_type "text/html; charset=utf-8" in
     "<!doctype html><meta charset=utf-8><title>" ++ html_esc title ++

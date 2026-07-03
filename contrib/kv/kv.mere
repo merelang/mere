@@ -16,8 +16,13 @@
 //   + append-write is O(1)
 //   - lookup / has / delete are O(N) linear scans
 //   - the on-disk log grows monotonically until `kv_compact` is called
-//   - keys must not contain TAB; values must not contain LF
-//     (users can url_encode via contrib/http/query.mere for full safety)
+//
+// Keys and values may contain ANY byte, including `\t` and `\n`.
+// Internally each is escaped on write (`\` → `\\`, `\t` → `\t`,
+// `\n` → `\n` — same convention as the C string escape) and
+// unescaped on read. Users pass and receive raw strings; the log
+// record format stays LF-terminated so kv_load / kv_save read
+// line-by-line.
 //
 // Suitable for: session store (small N sessions), user directory
 // (dozens to a few hundred rows), config, cache. Not suitable for:
@@ -40,6 +45,43 @@
 // practice `__KV_TOMBSTONE__` is safe.
 let _KV_TOMBSTONE = "__KV_TOMBSTONE__";
 
+// Escape a string so it can live as a `key\tvalue\n` cell without
+// confusing the log parser. `\` doubles up first (so the sentinel
+// `\t` / `\n` sequences we introduce can be unambiguously undone).
+let rec _kv_esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\t" then let _ = strbuf_push buf "\\t" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _kv_esc_walk s buf (i + 1) n;
+let _kv_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _kv_esc_walk s buf 0 (str_len s);
+
+// Undo the above. Any lone `\` followed by an unknown next char
+// passes the next char through unchanged — old logs that predate
+// escaping only round-trip cleanly if they didn't contain `\`.
+let rec _kv_unesc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    if str_eq c "\\" && i + 1 < n then
+      let nxt = char_at s (i + 1) in
+      let _ = if str_eq nxt "n" then let _ = strbuf_push buf "\n" in 0
+              else if str_eq nxt "t" then let _ = strbuf_push buf "\t" in 0
+              else if str_eq nxt "\\" then let _ = strbuf_push buf "\\" in 0
+              else let _ = strbuf_push buf nxt in 0 in
+      _kv_unesc_walk s buf (i + 2) n
+    else
+      let _ = strbuf_push buf c in
+      _kv_unesc_walk s buf (i + 1) n;
+let _kv_unesc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _kv_unesc_walk s buf 0 (str_len s);
+
 // Create an empty KV. Just an alias for `strbuf_new`.
 let kv_new = fn (u: unit) -> strbuf_new ();
 
@@ -58,11 +100,12 @@ let kv_save = fn (kv) -> fn (path: str) ->
   write_file path (strbuf_to_str kv);
 
 // Append a `key\tvalue\n` line. Overwrites propagate because `kv_get`
-// takes the last occurrence.
+// takes the last occurrence. Key and value are escaped so arbitrary
+// bytes (including tabs and newlines) round-trip safely.
 let kv_set = fn (kv) -> fn (key: str) -> fn (value: str) ->
-  let _ = strbuf_push kv key in
+  let _ = strbuf_push kv (_kv_esc key) in
   let _ = strbuf_push kv "\t" in
-  let _ = strbuf_push kv value in
+  let _ = strbuf_push kv (_kv_esc value) in
   let _ = strbuf_push kv "\n" in
   ();
 
@@ -73,7 +116,11 @@ let kv_delete = fn (kv) -> fn (key: str) ->
   kv_set kv key _KV_TOMBSTONE;
 
 // Scan the log left-to-right, updating `last_val` each time we see a
-// match. Returns the last-seen value (or "" if never seen).
+// match. Returns the last-seen value (or "" if never seen). `key`
+// arrives pre-escaped from the callers so the byte compare against
+// the (escaped) line prefix is a straight str_eq. `last_val` is
+// returned still-escaped; kv_get / kv_has do the unescape once
+// downstream.
 let rec _scan_last = fn (lines: str list) -> fn (key: str) -> fn (last_val: str) ->
   match lines with
   | Nil -> last_val
@@ -92,23 +139,28 @@ let rec _scan_last = fn (lines: str list) -> fn (key: str) -> fn (last_val: str)
 let kv_get = fn (kv) -> fn (key: str) ->
   let content = strbuf_to_str kv in
   let lines = str_split content "\n" in
-  let raw = _scan_last lines key "" in
-  if str_eq raw _KV_TOMBSTONE then "" else raw;
+  let raw = _scan_last lines (_kv_esc key) "" in
+  if str_eq raw "" then ""
+  else
+    let v = _kv_unesc raw in
+    if str_eq v _KV_TOMBSTONE then "" else v;
 
 // Does the key have a live (non-tombstoned) value?
 let kv_has = fn (kv) -> fn (key: str) ->
   let content = strbuf_to_str kv in
   let lines = str_split content "\n" in
-  let raw = _scan_last lines key "" in
+  let raw = _scan_last lines (_kv_esc key) "" in
   if str_eq raw "" then false
-  else if str_eq raw _KV_TOMBSTONE then false
+  else if str_eq (_kv_unesc raw) _KV_TOMBSTONE then false
   else true;
 
-// Extract the `key` prefix from a `key\tvalue` line.
+// Extract the `key` prefix from a `key\tvalue` line. Returns the
+// UNESCAPED user-facing key so kv_keys downstream can hand it back
+// to the caller as-is.
 let _line_key = fn (line: str) ->
   let tab_idx = str_index_of line "\t" in
   if tab_idx < 0 then ""
-  else substring line 0 tab_idx;
+  else _kv_unesc (substring line 0 tab_idx);
 
 // Add str to acc if not already present (linear check; small N).
 let rec _add_unique = fn (name: str) -> fn (acc: str list) ->
