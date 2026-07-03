@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere mini blog</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<header>
+  <h1><a href="/">Mere mini blog</a></h1>
+  <p class="subtitle">A single-author blog served straight out of a
+    Mere binary. Public read, admin write. RSS feed at
+    <a href="/feed.xml">/feed.xml</a> — round-trip verified against
+    the <code>http_feed_reader</code> demo.</p>
+</header>
+
+<main>
+  <section id="posts-section">
+    <h2>posts</h2>
+    <ul id="post-list"><!--POSTS--></ul>
+    <p id="empty" style="color:#888">
+      No posts yet. Log in as admin (password: <code>admin</code>)
+      to write one.
+    </p>
+  </section>
+
+  <section id="admin" hidden>
+    <h2>admin — new / edit post</h2>
+    <label>slug <input id="new-slug" placeholder="my-first-post"></label>
+    <label>title <input id="new-title" placeholder="Hello Mere" size="40"></label>
+    <textarea id="new-body" rows="10" cols="70"
+      placeholder="Markdown here.
+
+# Section
+Regular *inline* **markdown**.
+
+- lists
+- work"></textarea>
+    <div>
+      <button id="btn-save">save</button>
+      <button id="btn-logout" class="secondary">log out</button>
+    </div>
+  </section>
+
+  <section id="login-box">
+    <h2>admin login</h2>
+    <input id="admin-pass" type="password" placeholder="admin password" value="admin">
+    <button id="btn-login">log in</button>
+  </section>
+</main>
+
+<pre id="log"></pre>
