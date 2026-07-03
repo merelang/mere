@@ -672,26 +672,51 @@ let _send_parse = fn (fd: int) -> fn (name: str) -> fn (sql: str) ->
   tcp_write fd buf total
   ;
 
-// Bind ('B') — portal "", stmt "", all params as text, all results as text.
-let _send_bind = fn (fd: int) -> fn (params: str option list) ->
+// Bind ('B') — portal "", stmt = `stmt_name` (empty means anonymous
+// prepared statement), all params as text, all results as text.
+let _send_bind_named = fn (fd: int) -> fn (stmt_name: str)
+                    -> fn (params: str option list) ->
+  let stmt_len = str_len stmt_name in
   let num_params = _list_len params in
   let params_bytes = _sum_param_lens params in
-  // 4 (len) + 1 (portal "\0") + 1 (stmt "\0")
+  // 4 (len) + 1 (portal "\0") + stmt_len + 1 (stmt name + \0)
   //   + 2 (num param fmt codes = 0)
   //   + 2 (num params)
   //   + num_params * 4 (length prefixes) + params_bytes
   //   + 2 (num result fmt codes = 0)
-  let msg_len = 4 + 1 + 1 + 2 + 2 + 4 * num_params + params_bytes + 2 in
+  let msg_len = 4 + 1 + stmt_len + 1 + 2 + 2 + 4 * num_params + params_bytes + 2 in
   let total = 1 + msg_len in
   let buf = mem_alloc total in
   let _ = mem_set_u8 buf 0 66 in                        // 'B'
   let _ = mem_set_u32be buf 1 msg_len in
   let _ = mem_set_u8 buf 5 0 in                         // portal = ""
-  let _ = mem_set_u8 buf 6 0 in                         // stmt = ""
-  let _ = mem_set_u16be buf 7 0 in                      // 0 param fmt codes
-  let _ = mem_set_u16be buf 9 num_params in
-  let end_off = _write_params buf 11 params in
+  let off_stmt = mem_copy_str buf 6 stmt_name in
+  let _ = mem_set_u8 buf off_stmt 0 in                  // stmt NUL
+  let _ = mem_set_u16be buf (off_stmt + 1) 0 in         // 0 param fmt codes
+  let _ = mem_set_u16be buf (off_stmt + 3) num_params in
+  let end_off = _write_params buf (off_stmt + 5) params in
   let _ = mem_set_u16be buf end_off 0 in                // 0 result fmt codes
+  tcp_write fd buf total
+  ;
+
+// Backwards-compat shim for anonymous Bind (kept because pg_query_params
+// callers path through it).
+let _send_bind = fn (fd: int) -> fn (params: str option list) ->
+  _send_bind_named fd "" params
+  ;
+
+// Close ('C') — subtype 'S' releases a prepared statement, subtype 'P'
+// releases a portal. We only expose statement-close via pg_deallocate.
+let _send_close_stmt = fn (fd: int) -> fn (name: str) ->
+  let name_len = str_len name in
+  let msg_len = 4 + 1 + name_len + 1 in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 67 in                        // 'C'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let _ = mem_set_u8 buf 5 83 in                        // 'S' — statement
+  let off = mem_copy_str buf 6 name in
+  let _ = mem_set_u8 buf off 0 in
   tcp_write fd buf total
   ;
 
@@ -745,6 +770,64 @@ let pg_query_params_meta = fn (fd: int) -> fn (sql: str)
   let _ = _send_sync fd in
   let (cols, rev_rows) = _collect_result fd Nil Nil in
   (cols, _rev_rows rev_rows Nil)
+  ;
+
+// ---- Named prepared statements ------------------------------------------
+//
+// pg_query_params above always uses the unnamed prepared statement
+// (name = ""), so every call re-parses the SQL text server-side.
+// For hot paths — think "insert 1000 rows in a loop" — that's several
+// hundred wasted microseconds per row. Named prepared statements let
+// the caller Parse once and Execute many times.
+//
+//   let stmt = pg_prepare fd "insert_user"
+//     "INSERT INTO users VALUES ($1::int, $2)" in
+//   let _ = pg_execute fd stmt (Cons (Some "1", Cons (Some "alice", Nil))) in
+//   let _ = pg_execute fd stmt (Cons (Some "2", Cons (Some "bob",   Nil))) in
+//   ...
+//   let _ = pg_deallocate fd stmt in
+//
+// The returned handle is the name string itself; treat it opaquely so
+// the module can switch to a different representation later.
+
+// Send Parse + Sync and wait for ParseComplete + ReadyForQuery.
+// Returns the name unchanged as a statement handle.
+let pg_prepare = fn (fd: int) -> fn (name: str) -> fn (sql: str) ->
+  let _ = _send_parse fd name sql in
+  let _ = _send_sync fd in
+  let (_c, _r) = _collect_result fd Nil Nil in
+  name
+  ;
+
+// Execute a named prepared statement. Skips Parse — the server already
+// has the SQL cached under `stmt`.
+let pg_execute = fn (fd: int) -> fn (stmt: str)
+              -> fn (params: str option list) ->
+  let _ = _send_bind_named fd stmt params in
+  let _ = _send_execute fd 0 in
+  let _ = _send_sync fd in
+  let (_c, rev_rows) = _collect_result fd Nil Nil in
+  _rev_rows rev_rows Nil
+  ;
+
+// Same but also returns the RowDescription-derived columns.
+let pg_execute_meta = fn (fd: int) -> fn (stmt: str)
+                   -> fn (params: str option list) ->
+  let _ = _send_bind_named fd stmt params in
+  let _ = _send_execute fd 0 in
+  let _ = _send_sync fd in
+  let (cols, rev_rows) = _collect_result fd Nil Nil in
+  (cols, _rev_rows rev_rows Nil)
+  ;
+
+// Release the server-side cache entry for a named prepared statement.
+// Optional — closing the connection also frees everything — but useful
+// if a long-lived connection prepares many transient statements.
+let pg_deallocate = fn (fd: int) -> fn (stmt: str) ->
+  let _ = _send_close_stmt fd stmt in
+  let _ = _send_sync fd in
+  let (_c, _r) = _collect_result fd Nil Nil in
+  ()
   ;
 
 // ---- Transactions -------------------------------------------------------
