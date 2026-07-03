@@ -195,15 +195,15 @@ function tcpCall(op, arg1, arg2) {
       tcpData.set(bytes, 0);
       return tcpCall(TCP_OP.CONNECT, bytes.length, port | 0) | 0;
     },
-    // tcp_write(fd, bufPtr, len) -> int (bytes written, -1 on error).
-    // Assumes buf is a raw byte pointer (not necessarily NUL-terminated).
+    // tcp_write(fd, buf_ptr: int, len: int) -> int (bytes written, -1 on error).
+    // buf_ptr is a raw byte pointer into Wasm linear memory — obtain from
+    // mem_alloc or str_ptr. Binary-safe (NUL bytes pass through).
     tcp_write: (fd, bufPtr, len) => {
       const src = new Uint8Array(memory.buffer, bufPtr, len);
       tcpData.set(src, 0);
       return tcpCall(TCP_OP.WRITE, fd | 0, len | 0) | 0;
     },
-    // tcp_read(fd, bufPtr, cap) -> int (bytes read, 0=EOF, -1=error).
-    // Copies at most cap bytes from the socket's rx queue into Wasm memory.
+    // tcp_read(fd, buf_ptr: int, cap: int) -> int (bytes read, 0=EOF, -1=error).
     tcp_read: (fd, bufPtr, cap) => {
       const capped = Math.min(cap | 0, TCP_BUF_BYTES);
       const n = tcpCall(TCP_OP.READ, fd | 0, capped) | 0;
@@ -215,6 +215,61 @@ function tcpCall(op, arg1, arg2) {
     },
     tcp_close: (fd) => { tcpCall(TCP_OP.CLOSE, fd | 0, 0); return 0; },
     tcp_set_timeout: (fd, ms) => { tcpCall(TCP_OP.SET_TIMEOUT, fd | 0, ms | 0); return 0; },
+
+    // ---- Byte-buffer primitives for binary protocols ---------------------
+    // Mere `str` is C-string (NUL-terminated), so binary framing needs a
+    // raw-pointer path. These are thin wrappers over the bump allocator
+    // and DataView reads/writes.
+
+    // str_ptr(s: str) -> int  — coerce a str value to its raw pointer.
+    // At the Wasm level this is a no-op (`str` IS an i32 pointer); the
+    // extern boundary is what lets the type-checker accept it.
+    str_ptr: (ptr) => ptr,
+
+    // mem_alloc(n: int) -> int  — bump-allocate n bytes, returns pointer.
+    // Contents are undefined; caller writes via mem_set_* before use.
+    mem_alloc: (n) => bumpAlloc(n | 0),
+
+    // Byte / u32 accessors — offsets are byte offsets from the pointer.
+    mem_set_u8: (ptr, off, b) => {
+      new Uint8Array(memory.buffer)[(ptr | 0) + (off | 0)] = b & 0xff;
+      return 0;
+    },
+    mem_get_u8: (ptr, off) => {
+      return new Uint8Array(memory.buffer)[(ptr | 0) + (off | 0)] | 0;
+    },
+    mem_set_u32be: (ptr, off, val) => {
+      new DataView(memory.buffer).setUint32((ptr | 0) + (off | 0), val >>> 0, false);
+      return 0;
+    },
+    mem_get_u32be: (ptr, off) => {
+      // Coerce back to signed i32 — PG lengths fit comfortably in 31 bits.
+      return new DataView(memory.buffer).getInt32((ptr | 0) + (off | 0), false);
+    },
+
+    // mem_copy_str(dst: int, off: int, s: str) -> int
+    //   Copies s's bytes (up to but excluding its terminating NUL) into
+    //   dst starting at dst+off. Returns the new offset past the copy.
+    mem_copy_str: (dst, off, srcPtr) => {
+      const bytes = new Uint8Array(memory.buffer);
+      let src = srcPtr | 0;
+      let d = (dst | 0) + (off | 0);
+      while (bytes[src] !== 0) bytes[d++] = bytes[src++];
+      return d - (dst | 0);
+    },
+
+    // mem_to_str(ptr: int, len: int) -> str
+    //   Materialize a Mere str by copying len bytes and appending a NUL.
+    //   Callers must ensure the bytes are text (embedded NUL truncates
+    //   the resulting str when used with str_len / concat).
+    mem_to_str: (ptr, len) => {
+      const n = len | 0;
+      const dst = bumpAlloc(n + 1);
+      const bytes = new Uint8Array(memory.buffer);
+      bytes.copyWithin(dst, ptr | 0, (ptr | 0) + n);
+      bytes[dst + n] = 0;
+      return dst;
+    },
   };
 
   // Allocate on the shared Mere heap by advancing `$__lang_bump`
