@@ -49,11 +49,20 @@ extern fn mem_get_u8: int -> int -> int;
 extern fn mem_to_str: int -> int -> str;
 
 type redis_reply =
-  | RRStr  of str
-  | RRErr  of str
-  | RRInt  of int
-  | RRBulk of (str option)
-  | RRArr  of (redis_reply list);
+  | RRStr    of str
+  | RRErr    of str
+  | RRInt    of int
+  | RRBulk   of (str option)
+  | RRArr    of (redis_reply list)
+  // ---- RESP3 additions -------------------------------------------------
+  | RRNull                                     // `_\r\n`
+  | RRDouble of str                            // `,3.14\r\n` — kept as
+                                               //   text to sidestep the
+                                               //   float codegen path
+  | RRBool   of bool                           // `#t\r\n` / `#f\r\n`
+  | RRMap    of ((redis_reply * redis_reply) list)
+                                               // `%N\r\n` + 2N replies
+  | RRSet    of (redis_reply list);            // `~N\r\n` + N replies
 
 // ---- Low-level byte reader --------------------------------------------
 
@@ -103,11 +112,11 @@ let _r_read_bulk = fn (fd: int) -> fn (n: int) ->
 let rec _r_read_reply = fn (fd: int) ->
   let ty = _r_read_byte fd in
   if ty < 0 then RRErr "short read"
-  else if ty == 43 then                                    // '+'
+  else if ty == 43 then                                    // '+' simple str
     RRStr (_r_read_line fd)
-  else if ty == 45 then                                    // '-'
+  else if ty == 45 then                                    // '-' error
     RRErr (_r_read_line fd)
-  else if ty == 58 then                                    // ':'
+  else if ty == 58 then                                    // ':' integer
     RRInt (int_of_str (_r_read_line fd))
   else if ty == 36 then                                    // '$' bulk
     let len = int_of_str (_r_read_line fd) in
@@ -121,6 +130,21 @@ let rec _r_read_reply = fn (fd: int) ->
     let cnt = int_of_str (_r_read_line fd) in
     if cnt < 0 then RRArr Nil
     else RRArr (_r_rev_arr (_r_read_array_elts fd cnt Nil) Nil)
+  else if ty == 95 then                                    // '_' null (RESP3)
+    let _ = _r_read_line fd in                              // consume the CRLF terminator
+    RRNull
+  else if ty == 44 then                                    // ',' double (RESP3)
+    RRDouble (_r_read_line fd)
+  else if ty == 35 then                                    // '#' bool (RESP3)
+    RRBool (str_eq (_r_read_line fd) "t")
+  else if ty == 37 then                                    // '%' map (RESP3)
+    let cnt = int_of_str (_r_read_line fd) in
+    if cnt < 0 then RRMap Nil
+    else RRMap (_r_rev_pairs (_r_read_map_pairs fd cnt Nil) Nil)
+  else if ty == 126 then                                   // '~' set (RESP3)
+    let cnt = int_of_str (_r_read_line fd) in
+    if cnt < 0 then RRSet Nil
+    else RRSet (_r_rev_arr (_r_read_array_elts fd cnt Nil) Nil)
   else
     RRErr ("unknown RESP type byte " ++ show ty)
 
@@ -133,6 +157,20 @@ and _r_rev_arr = fn (xs: redis_reply list) -> fn (acc: redis_reply list) ->
   match xs with
   | Nil -> acc
   | Cons (h, t) -> _r_rev_arr t (Cons (h, acc))
+
+and _r_read_map_pairs = fn (fd: int) -> fn (n: int)
+                     -> fn (acc: (redis_reply * redis_reply) list) ->
+  if n <= 0 then acc
+  else
+    let k = _r_read_reply fd in
+    let v = _r_read_reply fd in
+    _r_read_map_pairs fd (n - 1) (Cons ((k, v), acc))
+
+and _r_rev_pairs = fn (xs: (redis_reply * redis_reply) list)
+                -> fn (acc: (redis_reply * redis_reply) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _r_rev_pairs t (Cons (h, acc))
   ;
 
 // ---- Command building ------------------------------------------------
@@ -255,6 +293,19 @@ let redis_connect_ssl_verify = fn (host: str) -> fn (port: int) -> fn (ca_pem: s
     let _ = tcp_close fd in
     0 - 1
   else fd
+  ;
+
+// Upgrade the connection to RESP3. Redis 6+ speaks it after receiving
+// `HELLO 3`; the reply itself already comes back in the new protocol
+// (an RRMap of server info). Returns true if the server acknowledged.
+// Callers that also want to authenticate can send AUTH afterwards —
+// or use the `AUTH <user> <pass>` argv form supported by HELLO itself
+// via redis_command.
+let redis_hello3 = fn (fd: int) ->
+  match redis_command fd (Cons ("HELLO", Cons ("3", Nil))) with
+  | RRMap _ -> true
+  | RRArr _ -> true                                        // legacy RESP2 array
+  | _ -> false
   ;
 
 // Send AUTH. `username` may be empty for legacy password-only auth
@@ -390,7 +441,28 @@ let redis_as_bulk = fn (r) ->
 let redis_as_arr = fn (r) ->
   match r with
   | RRArr xs -> Some xs
+  | RRSet xs -> Some xs
   | _ -> None
+  ;
+
+// RESP3 extractors — return None on a RESP2 reply of a different shape.
+let redis_as_bool = fn (r) ->
+  match r with
+  | RRBool b -> Some b
+  | _ -> None
+  ;
+
+let redis_as_map = fn (r) ->
+  match r with
+  | RRMap kvs -> Some kvs
+  | _ -> None
+  ;
+
+let redis_is_null = fn (r) ->
+  match r with
+  | RRNull -> true
+  | RRBulk None -> true                                    // RESP2 nil
+  | _ -> false
   ;
 
 let redis_is_ok = fn (r) ->
@@ -399,7 +471,8 @@ let redis_is_ok = fn (r) ->
   | _ -> false
   ;
 
-// Pretty-printer for demos. Recursive so it can flatten nested arrays.
+// Pretty-printer for demos. Recursive so it can flatten nested arrays,
+// maps, and sets.
 let rec redis_show = fn (r) ->
   match r with
   | RRStr s -> "+" ++ s
@@ -408,6 +481,11 @@ let rec redis_show = fn (r) ->
   | RRBulk None -> "(nil)"
   | RRBulk (Some s) -> "\"" ++ s ++ "\""
   | RRArr xs -> "[" ++ redis_show_arr xs true ++ "]"
+  | RRNull -> "(null)"
+  | RRDouble s -> s
+  | RRBool b -> if b then "true" else "false"
+  | RRMap kvs -> "\{" ++ redis_show_map kvs true ++ "}"
+  | RRSet xs -> "#\{" ++ redis_show_arr xs true ++ "}"
 
 and redis_show_arr = fn (xs) -> fn (first: bool) ->
   match xs with
@@ -415,4 +493,12 @@ and redis_show_arr = fn (xs) -> fn (first: bool) ->
   | Cons (h, rest) ->
     let sep = if first then "" else ", " in
     sep ++ redis_show h ++ redis_show_arr rest false
+
+and redis_show_map = fn (kvs) -> fn (first: bool) ->
+  match kvs with
+  | Nil -> ""
+  | Cons ((k, v), rest) ->
+    let sep = if first then "" else ", " in
+    sep ++ redis_show k ++ ": " ++ redis_show v ++
+      redis_show_map rest false
   ;

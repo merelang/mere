@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 27
+The rest of this page walks the stack top-down, then catalogs the 28
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -35,8 +35,8 @@ The rest of this page walks the stack top-down, then catalogs the 27
 │                                                                    │
 │  contrib/db/redis.mere                                             │
 │  ─────────────────────                                             │
-│  RESP2 protocol (Simple string / Error / Integer / Bulk / Array)   │
-│  redis_command + typed extractors + AUTH                           │
+│  RESP2 + RESP3 (Null / Double / Bool / Map / Set adds)             │
+│  redis_command + typed extractors + AUTH + HELLO 3                 │
 │  PUB/SUB (SUBSCRIBE / PSUBSCRIBE / redis_wait_message)             │
 │  Pipelining (N commands / N replies in one round trip)             │
 │  TLS (redis_connect_ssl / _verify — direct handshake, no in-band)  │
@@ -261,6 +261,7 @@ command needed) and cleans up on process exit.
 | [db_redis_pubsub](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub.mere) | Redis PUB/SUB — SUBSCRIBE + `redis_wait_message` on one connection, PUBLISH on another |
 | [db_redis_pipeline](https://github.com/merelang/mere/blob/main/examples/db_redis_pipeline.mere) | `redis_pipeline` — 100 INCRs in one round trip; mixed SET/GET batch replies in order |
 | [db_redis_ssl](https://github.com/merelang/mere/blob/main/examples/db_redis_ssl.mere) | Redis 7 over TLS — permissive / system-CA reject / custom-CA accept |
+| [db_redis_resp3](https://github.com/merelang/mere/blob/main/examples/db_redis_resp3.mere) | `HELLO 3` upgrade — HGETALL → `RRMap`, SMEMBERS → `RRSet`, `RRNull` |
 
 ## Limitations and future work
 
@@ -298,14 +299,16 @@ command needed) and cleans up on process exit.
   TLS is wired (`mysql_connect_ssl` / `?ssl=true`). `LISTEN`-style
   pub/sub is not — MySQL has no server-side pub/sub (`NOTIFY` is a PG
   feature).
-- **Redis client is MVP**: `redis_command` speaks RESP2 with all five
-  reply types (simple string / error / integer / bulk / array), plus
-  PUB/SUB (`redis_subscribe` / `redis_psubscribe` / `redis_wait_message`
-  / `redis_publish`), pipelining (`redis_pipeline`), and TLS
-  (`redis_connect_ssl` / `redis_connect_ssl_verify`). Not yet: RESP3
-  features (attributes / maps / sets / bignum / verbatim / doubles /
-  bools) and binary-safe command args (currently keys/values can't
-  contain embedded NULs on the send side).
+- **Redis client**: `redis_command` speaks RESP2 out of the box; call
+  `redis_hello3` to upgrade the connection and pick up the RESP3
+  reply types (`RRNull`, `RRDouble`, `RRBool`, `RRMap`, `RRSet`). Also
+  wired: PUB/SUB (`redis_subscribe` / `redis_psubscribe` /
+  `redis_wait_message` / `redis_publish`), pipelining
+  (`redis_pipeline`), TLS (`redis_connect_ssl` /
+  `redis_connect_ssl_verify`). Not yet: RESP3 attributes / big-numbers
+  / verbatim strings / server pushes, and binary-safe command args
+  (currently keys/values can't contain embedded NULs on the send
+  side).
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).
