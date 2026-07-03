@@ -1,0 +1,235 @@
+// contrib/db/redis_cluster.mere — Redis Cluster (multi-shard) client.
+//
+// The cluster wire protocol is identical to standalone RESP2/RESP3 —
+// what changes is where each command has to be sent. Keys are hashed
+// (CRC16-XMODEM & 0x3FFF, giving one of 16384 slots) and each slot is
+// owned by a specific master. The client is responsible for routing
+// commands to the right master; the server responds with a MOVED
+// error if the slot has migrated.
+//
+// MVP scope:
+//   - `CLUSTER SLOTS` bootstrap → slot ranges + master addresses
+//   - Slot calculation with hash-tag support (`{foo}bar` → hash "foo")
+//   - Per-node fd cache; connect lazily on first use
+//   - Single-key command routing via redis_cluster_command
+//   - MOVED redirection: parse `MOVED <slot> <host>:<port>`, update
+//     the slot table, reissue against the new node
+// Not yet:
+//   - ASK redirection (one-off routing to a specific node for a
+//     particular key while a resharding is in flight)
+//   - Multi-key commands where all keys share a slot (works if the
+//     caller uses hash tags but no explicit checking)
+//   - Cluster replicas / read scaling
+//   - TLS on the cluster path (would compose with tcp_starttls)
+//   - Pipelining across nodes
+
+import "redis.mere";
+
+extern fn crc16_xmodem: str -> int;
+
+// Compute the Redis Cluster slot number for `key`. If the key contains
+// a `{tag}` substring, only the tag itself is hashed — that's how
+// callers force multi-key commands to land on the same shard.
+let redis_slot = fn (key: str) ->
+  let open_pos = str_index_of key "\{" in
+  if open_pos < 0 then crc16_xmodem key % 16384
+  else
+    let after = open_pos + 1 in
+    let rest = substring key after (str_len key) in
+    let close_off = str_index_of rest "}" in
+    if close_off <= 0 then crc16_xmodem key % 16384
+    else
+      let tag = substring rest 0 close_off in
+      crc16_xmodem tag % 16384
+  ;
+
+// ---- Slot table parsing ---------------------------------------------
+//
+// `CLUSTER SLOTS` reply shape:
+//   RRArr [ RRArr [ RRInt slot_start,
+//                   RRInt slot_end,
+//                   RRArr [ RRBulk host, RRInt port, RRBulk node_id ],
+//                   ...replicas ],
+//           ... ]
+// We keep only (start, end, "host:port") for each master — replicas
+// aren't used by the MVP router.
+
+let rec _rc_parse_slots = fn (rows: redis_reply list)
+                       -> fn (acc: (int * int * str) list) ->
+  match rows with
+  | Nil -> acc
+  | Cons (RRArr (Cons (RRInt s,
+             Cons (RRInt e,
+             Cons (RRArr (Cons (RRBulk (Some (host, _)),
+                          Cons (RRInt port, _))),
+             _)))),
+          rest) ->
+    let addr = host ++ ":" ++ show port in
+    _rc_parse_slots rest (Cons ((s, e, addr), acc))
+  | Cons (_, rest) -> _rc_parse_slots rest acc
+  ;
+
+let rec _rc_rev_ranges = fn (xs: (int * int * str) list)
+                     -> fn (acc: (int * int * str) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rc_rev_ranges t (Cons (h, acc))
+  ;
+
+let rec _rc_find_addr = fn (slot: int)
+                    -> fn (ranges: (int * int * str) list) ->
+  match ranges with
+  | Nil -> ""
+  | Cons ((s, e, addr), rest) ->
+    if slot >= s && slot <= e then addr
+    else _rc_find_addr slot rest
+  ;
+
+// Parse a `MOVED <slot> host:port` error message. Returns
+// (slot, addr) or None if the shape doesn't match.
+let _rc_parse_moved = fn (msg: str) ->
+  if not (str_starts_with msg "MOVED ") then None
+  else
+    let body = substring msg 6 (str_len msg) in
+    let sp = str_index_of body " " in
+    if sp < 0 then None
+    else
+      let slot = int_of_str (substring body 0 sp) in
+      let addr = substring body (sp + 1) (str_len body) in
+      Some (slot, addr)
+  ;
+
+// Parse `host:port` — trailing port is decimal. Returns (host, port).
+let _rc_split_addr = fn (addr: str) ->
+  let colon = str_index_of addr ":" in
+  if colon < 0 then (addr, 6379)
+  else
+    (substring addr 0 colon,
+     int_of_str (substring addr (colon + 1) (str_len addr)))
+  ;
+
+// ---- Cluster state --------------------------------------------------
+//
+// Held opaquely as a tuple of the slot ranges + a per-address fd cache
+// (Map<str, int>). Callers get one of these back from redis_cluster_open
+// and treat it as a black box aside from cluster_close / _command.
+
+// Cluster state carries a mutable `Map<str, int>` for the fd cache
+// AND a StrBuf storing "addr\n" for each address opened — the buf
+// gives us an iteration path at close-time (Mere maps don't expose
+// keys). Kept in sync via _rc_fd_for.
+
+let redis_cluster_open = fn (seed_host: str) -> fn (seed_port: int) ->
+  let seed = redis_connect seed_host seed_port in
+  if seed < 0 then
+    let _ = print "cluster: seed connect failed" in
+    (Nil, map_new (), strbuf_new ())
+  else
+    let slots_reply = redis_command seed
+      (Cons ("CLUSTER", Cons ("SLOTS", Nil))) in
+    let _ = redis_close seed in
+    match slots_reply with
+    | RRArr rows ->
+      let ranges = _rc_rev_ranges (_rc_parse_slots rows Nil) Nil in
+      (ranges, map_new (), strbuf_new ())
+    | _ ->
+      let _ = print "cluster: CLUSTER SLOTS reply not an array" in
+      (Nil, map_new (), strbuf_new ())
+  ;
+
+// Look up (or open) the fd for a given "host:port" address. Cached
+// in the state's second component. Returns -1 on connect failure.
+// Appends to the seen-buf on new opens so close-time can walk them.
+let _rc_fd_for = fn (state) -> fn (addr: str) ->
+  let (_ranges, cache, seen) = state in
+  if map_has cache addr then map_get cache addr
+  else
+    let (host, port) = _rc_split_addr addr in
+    let fd = redis_connect host port in
+    if fd < 0 then 0 - 1
+    else
+      let _ = map_set cache addr fd in
+      let _ = strbuf_push seen (addr ++ "\n") in
+      fd
+  ;
+
+// Update the slot → addr table after a MOVED redirection. We do a
+// wholesale re-fetch of CLUSTER SLOTS from the target node; that's
+// simpler than surgically replacing a single range and correct even
+// if the cluster underwent resharding while we were away.
+let _rc_refresh_from = fn (state) -> fn (fd: int) ->
+  let slots_reply = redis_command fd
+    (Cons ("CLUSTER", Cons ("SLOTS", Nil))) in
+  match slots_reply with
+  | RRArr rows ->
+    let (_, cache, seen) = state in
+    (_rc_rev_ranges (_rc_parse_slots rows Nil) Nil, cache, seen)
+  | _ -> state
+  ;
+
+// Send a single-key command to the correct shard. On MOVED, refresh
+// the slot table via the new node and retry once. Additional MOVEDs
+// after the retry surface as an RRErr to the caller.
+let redis_cluster_command = fn (state) -> fn (args: str list) ->
+  match args with
+  | Nil -> (RRErr "empty command", state)
+  | Cons (_cmd, Nil) ->
+    // Command with no key — send to any known master (first range).
+    let (ranges, _cache, _seen) = state in
+    (match ranges with
+     | Nil -> (RRErr "cluster state empty", state)
+     | Cons ((_, _, addr), _) ->
+       let fd = _rc_fd_for state addr in
+       if fd < 0 then (RRErr ("cluster: connect failed to " ++ addr), state)
+       else (redis_command fd args, state))
+  | Cons (_cmd, Cons (key, _)) ->
+    let (ranges, _cache, _seen) = state in
+    let slot = redis_slot key in
+    let addr = _rc_find_addr slot ranges in
+    if str_eq addr "" then
+      (RRErr ("cluster: no slot mapping for " ++ show slot), state)
+    else
+      let fd = _rc_fd_for state addr in
+      if fd < 0 then (RRErr ("cluster: connect failed to " ++ addr), state)
+      else
+        let reply = redis_command fd args in
+        match reply with
+        | RRErr msg ->
+          (match _rc_parse_moved msg with
+           | None -> (reply, state)
+           | Some (_slot, new_addr) ->
+             // Reconnect to the new node, refresh slot table there,
+             // and retry the original command once.
+             let new_fd = _rc_fd_for state new_addr in
+             if new_fd < 0 then
+               (RRErr ("cluster: MOVED to unreachable " ++ new_addr), state)
+             else
+               let state2 = _rc_refresh_from state new_fd in
+               (redis_command new_fd args, state2))
+        | _ -> (reply, state)
+  ;
+
+// Close every fd we opened. Callers keep the state around; the fds
+// inside just become invalid.
+let rec _rc_close_all = fn (addrs: str list) -> fn (cache) ->
+  match addrs with
+  | Nil -> ()
+  | Cons (a, rest) ->
+    let fd = map_get cache a in
+    let _ = if fd > 0 then redis_close fd else () in
+    _rc_close_all rest cache
+  ;
+
+let rec _rc_filter_nonempty = fn (xs: str list) -> fn (acc: str list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) ->
+    if str_eq h "" then _rc_filter_nonempty t acc
+    else _rc_filter_nonempty t (Cons (h, acc))
+  ;
+
+let redis_cluster_close = fn (state) ->
+  let (_, cache, seen) = state in
+  let all = str_split (strbuf_to_str seen) "\n" in
+  _rc_close_all (_rc_filter_nonempty all Nil) cache
+  ;

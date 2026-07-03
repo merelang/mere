@@ -1,0 +1,75 @@
+// examples/db_redis_cluster.mere — Redis Cluster slot mapping + MOVED
+// redirection scaffolding.
+//
+// Full cluster verification needs a 6-node cluster (3 masters + 3
+// replicas) — too much docker setup for the demo suite. Instead this
+// file exercises the two Mere-side pieces that can be tested without
+// a live cluster:
+//
+//   1. `redis_slot` — CRC16-XMODEM hash + `{tag}` extraction, using
+//      the same slot numbers the Redis reference test suite quotes.
+//   2. Live cluster hook — attempts to open a cluster at
+//      127.0.0.1:7000; skips gracefully if there's no cluster running.
+//
+// To exercise the live path, spin up a cluster with:
+//
+//   redis-cli --cluster create \
+//     127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+//     127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
+//     --cluster-replicas 1
+//
+// or use bitnami/redis-cluster / docker-compose with 6 instances.
+//
+// Usage:
+//   ./mere -w examples/db_redis_cluster.mere > /tmp/dbrc.wat
+//   wat2wasm --enable-tail-call /tmp/dbrc.wat -o /tmp/dbrc.wasm
+//   node scripts/run_wasm.js /tmp/dbrc.wasm
+
+import "../contrib/db/redis_cluster.mere";
+
+let expect_slot = fn (key: str) -> fn (want: int) ->
+  let got = redis_slot key in
+  print ("  " ++ key ++ " → " ++ show got ++
+    (if got == want then "  ok" else "  WANT " ++ show want))
+  ;
+
+let _ = print "== redis_slot / CRC16-XMODEM ==" in
+// Slot values below cross-checked against
+//   docker run --rm redis:7 --cluster-enabled yes
+//   redis-cli CLUSTER KEYSLOT <key>
+let _ = expect_slot "foo"     12182 in
+let _ = expect_slot "bar"     5061 in
+let _ = expect_slot "hello"   866 in
+let _ = expect_slot ""        0 in                            // empty → slot 0
+
+let _ = print "" in
+let _ = print "== hash-tag extraction (both keys hash the same slot) ==" in
+// `{user1000}.followers` and `{user1000}.following` both hash the
+// tag `user1000`, so they share slot 3443 — a Redis Cluster property
+// specifically designed to let multi-key commands stay on one shard.
+let _ = expect_slot "\{user1000}.followers" 3443 in
+let _ = expect_slot "\{user1000}.following" 3443 in
+// Empty tag `{}` doesn't count — hash whole key. redis-cli confirms
+// slot 9500 for `{}foo`.
+let _ = expect_slot "\{}foo" 9500 in
+
+let _ = print "" in
+let _ = print "== live cluster (skipped if 127.0.0.1:7000 unreachable) ==" in
+let state = redis_cluster_open "127.0.0.1" 7000 in
+let (ranges, _cache, _seen) = state in
+match ranges with
+| Nil -> print "  no cluster running at :7000 — skipping"
+| _ ->
+  let (r1, _s) = redis_cluster_command state
+    (Cons ("SET", Cons ("foo", Cons ("hello", Nil)))) in
+  let _ = print ("  SET foo hello → " ++ redis_show r1) in
+  let (r2, _s) = redis_cluster_command state
+    (Cons ("GET", Cons ("foo", Nil))) in
+  let _ = print ("  GET foo → " ++ redis_show r2) in
+  let (r3, _s) = redis_cluster_command state
+    (Cons ("SET", Cons ("bar", Cons ("world", Nil)))) in
+  let _ = print ("  SET bar world → " ++ redis_show r3) in
+  let (r4, _s) = redis_cluster_command state
+    (Cons ("GET", Cons ("bar", Nil))) in
+  let _ = print ("  GET bar → " ++ redis_show r4) in
+  redis_cluster_close state
