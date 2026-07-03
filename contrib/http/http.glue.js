@@ -98,6 +98,16 @@ function makeHttpGlue() {
   // (or the server) closes it.
   const sseChannels = new Map();  // channel → Set<res>
 
+  // Streaming-response state. When the Mere handler decides its
+  // output is too big to buffer (large CSV export, tail -f style
+  // log stream, etc.) it can call `http_stream_start ct status` to
+  // send headers immediately, then repeatedly `http_stream_write s`
+  // to push bytes as they're generated. On handler return the glue
+  // finalizes with res.end() rather than the normal "one buffered
+  // body then end" path.
+  let activeRes = null;
+  let streamStarted = false;
+
   const glue = {
     http_serve: (port, closurePtr) => {
       const http = require("http");
@@ -133,6 +143,8 @@ function makeHttpGlue() {
         currentContentType = "text/plain; charset=utf-8";
         currentHeaders = {};
         currentReqHeaders = req.headers || {};
+        activeRes = res;
+        streamStarted = false;
         const chunks = [];
         req.on("data", (c) => chunks.push(c));
         req.on("end", () => {
@@ -143,9 +155,20 @@ function makeHttpGlue() {
           const respPtr = callClosure(closurePtr, reqPtr);
           const respBody = readCStr(respPtr);
           currentBodyPtr = 0;
-          const headers = { ...currentHeaders, "Content-Type": currentContentType };
-          res.writeHead(currentStatus, headers);
-          res.end(respBody);
+          if (streamStarted) {
+            // Handler already sent headers + one or more chunks via
+            // http_stream_start / http_stream_write. Its return value
+            // (respBody) is a final trailing chunk — empty means the
+            // handler wrote everything itself.
+            if (respBody.length > 0) res.write(respBody);
+            res.end();
+          } else {
+            const headers = { ...currentHeaders, "Content-Type": currentContentType };
+            res.writeHead(currentStatus, headers);
+            res.end(respBody);
+          }
+          activeRes = null;
+          streamStarted = false;
         });
       });
       server.on("error", (e) => {
@@ -159,6 +182,32 @@ function makeHttpGlue() {
     // subscribed to `channel`. Payload with embedded newlines is split
     // into multiple `data:` lines per the SSE spec. Called from Mere
     // via `extern fn sse_broadcast: str -> str -> unit`.
+    // Begin a streaming response. Sends `HTTP/1.1 <status> ...` +
+    // headers immediately, then leaves the connection open for
+    // subsequent `http_stream_write` calls. Content-Type is set
+    // from the arg; the extra Transfer-Encoding: chunked lets the
+    // client start reading before the body length is known.
+    // After this, the handler's normal `http_set_status` /
+    // `http_set_header` / return-body are ignored (headers have
+    // already flushed) — its return value is treated as one final
+    // trailing chunk.
+    http_stream_start: (ctPtr, statusCode) => {
+      if (!activeRes || streamStarted) return;
+      const ct = readCStr(ctPtr);
+      const headers = {
+        ...currentHeaders,
+        "Content-Type": ct,
+      };
+      activeRes.writeHead(statusCode | 0 || 200, headers);
+      streamStarted = true;
+    },
+    // Write one chunk to the active streaming response. Silently
+    // no-ops if the handler forgot to call http_stream_start first
+    // (or was already responding buffered).
+    http_stream_write: (ptr) => {
+      if (!activeRes || !streamStarted) return;
+      try { activeRes.write(readCStr(ptr)); } catch (e) { /* client gone */ }
+    },
     sse_broadcast: (channelPtr, payloadPtr) => {
       const channel = readCStr(channelPtr);
       const payload = readCStr(payloadPtr);
