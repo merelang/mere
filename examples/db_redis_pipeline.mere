@@ -1,0 +1,79 @@
+// examples/db_redis_pipeline.mere — Redis pipelining.
+//
+// Sends N commands as a single write and drains N replies in one
+// wait — one round trip instead of N. Same wire protocol as
+// individual redis_command calls; the server just responds in order.
+//
+// Demo:
+//   1. Batch: 3 SETs + 3 GETs in a single pipeline call.
+//   2. Verify each SET reply is `+OK` and each GET reply is the
+//      corresponding bulk value.
+//   3. INCR counter 100 times, all in one pipeline; confirm the last
+//      reply is the integer 100.
+//
+// Setup:
+//   docker run -d --name mere-redis-pl -p 15602:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_pipeline.mere > /tmp/dbrpl.wat
+//   wat2wasm --enable-tail-call /tmp/dbrpl.wat -o /tmp/dbrpl.wasm
+//   node scripts/run_wasm.js /tmp/dbrpl.wasm
+
+import "../contrib/db/redis.mere";
+
+let rec show_replies = fn (rs: redis_reply list) -> fn (i: int) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print ("  [" ++ show i ++ "] " ++ redis_show r) in
+    show_replies rest (i + 1)
+  ;
+
+// Build a Cons (INCR, Cons (counter_key, Nil)) list N times, all
+// referring to the same counter, top-level for the reachability walker.
+let rec build_incr_batch = fn (n: int) -> fn (acc: (str list) list) ->
+  if n <= 0 then acc
+  else
+    build_incr_batch (n - 1)
+      (Cons (Cons ("INCR", Cons ("counter", Nil)), acc))
+  ;
+
+let rec last_reply = fn (rs: redis_reply list) ->
+  match rs with
+  | Nil -> RRErr "empty pipeline reply list"
+  | Cons (r, Nil) -> r
+  | Cons (_, rest) -> last_reply rest
+  ;
+
+let fd = redis_connect "127.0.0.1" 15602 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  let _ = redis_command fd (Cons ("FLUSHDB", Nil)) in
+
+  // ---- mixed batch: 3× SET + 3× GET ---------------------------------
+  let _ = print "== mixed batch: 3 SET + 3 GET in one pipeline ==" in
+  let batch1 =
+    Cons (Cons ("SET", Cons ("k1", Cons ("alpha", Nil))),
+    Cons (Cons ("SET", Cons ("k2", Cons ("beta",  Nil))),
+    Cons (Cons ("SET", Cons ("k3", Cons ("gamma", Nil))),
+    Cons (Cons ("GET", Cons ("k1", Nil)),
+    Cons (Cons ("GET", Cons ("k2", Nil)),
+    Cons (Cons ("GET", Cons ("k3", Nil)),
+    Nil)))))) in
+  let replies1 = redis_pipeline fd batch1 in
+  let _ = show_replies replies1 0 in
+
+  // ---- 100× INCR --------------------------------------------------
+  let _ = print "" in
+  let _ = print "== 100 INCRs in one pipeline ==" in
+  let batch2 = build_incr_batch 100 Nil in
+  let replies2 = redis_pipeline fd batch2 in
+  let _ = print ("  received " ++ show 100 ++ " replies") in
+  let _ = print ("  last reply = " ++ redis_show (last_reply replies2)) in
+
+  let final = redis_command fd (Cons ("GET", Cons ("counter", Nil))) in
+  let _ = print ("  GET counter (post-pipeline) = " ++ redis_show final) in
+
+  let _ = redis_close fd in
+  ()

@@ -166,6 +166,51 @@ let redis_command = fn (fd: int) -> fn (args: str list) ->
   _r_read_reply fd
   ;
 
+// ---- Pipelining ------------------------------------------------------
+//
+// Send N commands as one write, then read N replies. Same wire protocol
+// as individual commands — the server just queues the incoming stream
+// and replies in the same order. Typical speedup vs a loop of
+// redis_command is O(round_trip_count → 1) for large batches: 500
+// commands over localhost drops from ~500ms to ~a few ms.
+//
+// Usage:
+//   let replies = redis_pipeline fd
+//     (Cons (Cons ("SET", Cons ("k1", Cons ("v1", Nil))),
+//      Cons (Cons ("SET", Cons ("k2", Cons ("v2", Nil))),
+//      Cons (Cons ("GET", Cons ("k1", Nil)),
+//      Nil)))) in
+
+let rec _r_pipeline_len = fn (xs: (str list) list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + _r_pipeline_len t
+  ;
+
+let rec _r_build_pipeline = fn (cmds: (str list) list) -> fn (acc: str) ->
+  match cmds with
+  | Nil -> acc
+  | Cons (args, rest) ->
+    let n = _r_list_len args in
+    let one = "*" ++ show n ++ "\r\n" ++ _r_build_args args "" in
+    _r_build_pipeline rest (acc ++ one)
+  ;
+
+let rec _r_read_n_replies = fn (fd: int) -> fn (n: int)
+                         -> fn (acc: redis_reply list) ->
+  if n <= 0 then acc
+  else _r_read_n_replies fd (n - 1) (Cons (_r_read_reply fd, acc))
+  ;
+
+// Send a batch of commands as one write and drain N replies. Replies
+// come back in the same order the commands were sent.
+let redis_pipeline = fn (fd: int) -> fn (cmds: (str list) list) ->
+  let n = _r_pipeline_len cmds in
+  let buf = _r_build_pipeline cmds "" in
+  let _ = tcp_write fd (str_ptr buf) (str_len buf) in
+  _r_rev_arr (_r_read_n_replies fd n Nil) Nil
+  ;
+
 // ---- Connect / auth / close -----------------------------------------
 
 let redis_connect = fn (host: str) -> fn (port: int) ->

@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 25
+The rest of this page walks the stack top-down, then catalogs the 26
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -38,6 +38,7 @@ The rest of this page walks the stack top-down, then catalogs the 25
 │  RESP2 protocol (Simple string / Error / Integer / Bulk / Array)   │
 │  redis_command + typed extractors + AUTH                           │
 │  PUB/SUB (SUBSCRIBE / PSUBSCRIBE / redis_wait_message)             │
+│  Pipelining (N commands / N replies in one round trip)             │
 ├────────────────────────────────────────────────────────────────────┤
 │  Crypto helpers                                                    │
 │  sha256, hmac_sha256, pbkdf2_sha256, base64_encode/decode,         │
@@ -257,6 +258,7 @@ command needed) and cleans up on process exit.
 | [db_ssl_verify](https://github.com/merelang/mere/blob/main/examples/db_ssl_verify.mere) | Cert-chain verification — accept-any / system CAs / custom CA |
 | [db_redis](https://github.com/merelang/mere/blob/main/examples/db_redis.mere) | Redis 7 — RESP2 replies (str / err / int / bulk / array), typed extractors |
 | [db_redis_pubsub](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub.mere) | Redis PUB/SUB — SUBSCRIBE + `redis_wait_message` on one connection, PUBLISH on another |
+| [db_redis_pipeline](https://github.com/merelang/mere/blob/main/examples/db_redis_pipeline.mere) | `redis_pipeline` — 100 INCRs in one round trip; mixed SET/GET batch replies in order |
 
 ## Limitations and future work
 
@@ -295,12 +297,13 @@ command needed) and cleans up on process exit.
   pub/sub is not — MySQL has no server-side pub/sub (`NOTIFY` is a PG
   feature).
 - **Redis client is MVP**: `redis_command` speaks RESP2 with all five
-  reply types (simple string / error / integer / bulk / array), plus
-  a PUB/SUB path (`redis_subscribe` / `redis_psubscribe` /
-  `redis_wait_message` / `redis_publish`). Not yet: RESP3 features
-  (attributes / maps / sets / bignum / verbatim / doubles / bools),
-  pipelining, TLS (Redis 6+ exposes `--tls-port` — needs its own
-  `redis_connect_ssl` wired against the shared `tcp_starttls`
+  reply types (simple string / error / integer / bulk / array),
+  plus a PUB/SUB path (`redis_subscribe` / `redis_psubscribe` /
+  `redis_wait_message` / `redis_publish`) and a `redis_pipeline` batch
+  primitive that collapses N commands into one round trip. Not yet:
+  RESP3 features (attributes / maps / sets / bignum / verbatim /
+  doubles / bools), TLS (Redis 6+ exposes `--tls-port` — needs its
+  own `redis_connect_ssl` wired against the shared `tcp_starttls`
   primitive), and binary-safe command args (currently keys/values
   can't contain embedded NULs on the send side).
 - **SQLite**: not implemented. Would need either a fresh Mere
