@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere wiki</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<h1>Mere wiki</h1>
+<p class="subtitle">
+  A tiny anonymous-edit wiki. Every save is a new revision — the
+  log-structured KV under this demo keeps ALL past versions, so
+  clicking <em>history</em> on any page shows the full edit trail.
+</p>
+
+<h2>pages</h2>
+<ul id="page-list"><!--PAGES--></ul>
+
+<h2>new page</h2>
+<form id="new-form">
+  <label>slug <input id="new-slug" placeholder="my-first-page" required></label>
+  <label>title <input id="new-title" placeholder="Hello Wiki" size="40" required></label>
+  <label>author <input id="new-author" placeholder="alice"></label>
+  <textarea id="new-body" rows="8" required
+    placeholder="Markdown body.
+
+# Section
+Regular *inline* **markdown**.
+
+- lists
+- work"></textarea>
+  <button type="submit">create</button>
+</form>
+
+<pre id="log"></pre>
+
+<script>
+document.getElementById('new-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const slug = document.getElementById('new-slug').value.trim();
+  const title = document.getElementById('new-title').value.trim();
+  const author = document.getElementById('new-author').value.trim();
+  const body = document.getElementById('new-body').value;
+  const resp = await fetch('/api/pages', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({slug, title, body, author}),
+  });
+  const t = await resp.text();
+  document.getElementById('log').textContent += `POST /api/pages → ${resp.status} ${t}\n`;
+  if (resp.status === 201) location.href = '/page/' + slug;
+});
+</script>

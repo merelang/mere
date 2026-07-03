@@ -1,0 +1,92 @@
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  max-width: 46em;
+  margin: 2em auto;
+  padding: 0 1em;
+  color: #1e293b;
+  background: #f8fafc;
+  line-height: 1.55;
+}
+h1 { color: #0369a1; margin-bottom: 0.3em; }
+h2 { color: #075985; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.2em; margin-top: 1.5em; }
+h3 { color: #075985; margin-top: 1em; }
+a { color: #0369a1; text-decoration: none; }
+a:hover { text-decoration: underline; }
+nav {
+  padding: 0.5em 0;
+  color: #64748b;
+  font-size: 0.9em;
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: 1em;
+}
+nav a { color: #64748b; }
+.subtitle { color: #64748b; font-size: 0.9em; }
+code {
+  background: #e2e8f0;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.88em;
+}
+article pre { background: #0f172a; color: #e2e8f0; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+article code { color: #0369a1; }
+article pre code { color: inherit; background: transparent; padding: 0; }
+.meta { color: #94a3b8; font-size: 0.85em; }
+.banner {
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+  padding: 0.6em 1em;
+  border-radius: 3px;
+  color: #78350f;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+input, textarea, button {
+  font: inherit;
+  padding: 0.4em 0.6em;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+}
+label {
+  display: block;
+  margin: 0.5em 0;
+  color: #475569;
+  font-size: 0.9em;
+}
+input[type=text], input:not([type]) { min-width: 20em; }
+textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  margin: 0.5em 0;
+}
+button {
+  background: #0369a1;
+  color: white;
+  border-color: #0369a1;
+  cursor: pointer;
+}
+button:hover { background: #075985; }
+ul { padding-left: 1.5em; }
+ul#page-list, ul.history { list-style: none; padding: 0; }
+ul#page-list li, ul.history li {
+  padding: 0.5em 0.6em;
+  border-bottom: 1px solid #e2e8f0;
+  background: #fff;
+}
+ul#page-list li:first-child, ul.history li:first-child { border-radius: 3px 3px 0 0; }
+ul#page-list li:last-child, ul.history li:last-child { border-radius: 0 0 3px 3px; border-bottom: none; }
+#log {
+  background: #0f172a;
+  color: #cbd5e1;
+  padding: 0.6em;
+  border-radius: 3px;
+  font-size: 0.75em;
+  max-height: 8em;
+  overflow: auto;
+  margin-top: 2em;
+  font-family: ui-monospace, monospace;
+}
+form label { display: block; }
