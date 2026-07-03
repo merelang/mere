@@ -1,0 +1,7 @@
+let rec sum = fn (xs: int list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> h + sum t
+in
+let xs = Cons (1, Cons (2, Cons (3, Cons (4, Nil)))) in
+let _ = print (show (sum xs)) in ()

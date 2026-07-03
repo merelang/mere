@@ -1,0 +1,2 @@
+let n = 3 in
+let _ = print (show (n * n + 1)) in ()

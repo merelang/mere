@@ -1,0 +1,2 @@
+let g = fn (name: str) -> "Hi, " ++ name ++ "!" in
+let _ = print (g "Mere") in ()
