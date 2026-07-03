@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere feed reader</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere feed reader</h1>
+<p class="subtitle">
+  Signup + login + multi-user subscriptions.
+  Each refresh spawns <code>curl</code> from the Wasm process, parses
+  RSS 2.0 / Atom feeds in pure Mere, and caches entries per user.
+  Full stack: <code>contrib/http</code>, <code>contrib/xml</code>,
+  <code>contrib/feed</code>, <code>contrib/kv</code>.
+</p>
+
+<section id="auth">
+  <div id="who"></div>
+
+  <div id="login-box">
+    <h2>login / signup</h2>
+    <input id="user" placeholder="user" value="alice">
+    <input id="pass" type="password" placeholder="pass" value="secret">
+    <button id="btn-signup">signup</button>
+    <button id="btn-login">login</button>
+  </div>
+
+  <div id="logout-box" hidden>
+    <button id="btn-logout">logout</button>
+  </div>
+</section>
+
+<section id="feeds" hidden>
+  <h2>your feeds</h2>
+  <div>
+    <input id="new-url" placeholder="https://example.com/feed.xml">
+    <button id="btn-subscribe">subscribe</button>
+    <button id="btn-refresh">refresh all</button>
+  </div>
+  <ul id="feed-list"></ul>
+</section>
+
+<section id="entries-section" hidden>
+  <h2>latest entries</h2>
+  <ul id="entry-list"></ul>
+</section>
+
+<pre id="log"></pre>

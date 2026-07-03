@@ -1,0 +1,382 @@
+// http_feed_reader: a minimal multi-user RSS/Atom reader.
+//
+// Dogfoods the contrib/http/client outbound HTTP glue that the
+// todo demo left unused — every "refresh" call spawns a curl to
+// fetch each subscription, then feeds the raw XML through
+// `Feed.parse_feed` from contrib/feed/feed.mere.
+//
+// Middleware stack (outer → inner):
+//   access_log → security_headers → cors "*" → serve_static → router
+//
+// Endpoints:
+//   GET  /                       → static index.html
+//   GET  /static/*               → static assets
+//   POST /api/signup             → JSON {user, pass}
+//   POST /api/login              → JSON {user, pass}, sets session cookie
+//   POST /api/logout             → clears session cookie
+//   GET  /api/me                 → whoami (401 if not logged in)
+//   GET  /api/feeds              → JSON [{ url, title }]
+//   POST /api/feeds              → JSON {url}, subscribe
+//   POST /api/feeds/delete       → JSON {url}, unsubscribe
+//   POST /api/feeds/refresh      → fetch all subs, cache entries
+//   GET  /api/entries            → JSON [{ feed, title, link, date, summary }]
+//
+// Data model (log-structured KV):
+//   users_db          user → sha256(pw)
+//   subs_db           subs/<user>/<url_sha256> → `<url>|<feed_title>`
+//   entries_db        entries/<user>/<url_sha256>/<entry_sha256>
+//                       → `<title>|<link>|<date>|<summary>` (| escaped as \x7c)
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_feed_reader.mere > /tmp/fr.wat
+//   wat2wasm /tmp/fr.wat -o /tmp/fr.wasm
+//   node scripts/run_http_server.js /tmp/fr.wasm
+//   # open http://localhost:8080/ in a browser
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/client.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+import "../contrib/feed/feed.mere";
+
+let users_db_path = "/tmp/mere_feed_users.db" in
+let subs_db_path = "/tmp/mere_feed_subs.db" in
+let entries_db_path = "/tmp/mere_feed_entries.db" in
+
+let users = kv_load users_db_path in
+let subs = kv_load subs_db_path in
+let entries = kv_load entries_db_path in
+let sessions = map_new () in
+
+// ---- helpers ------------------------------------------------------
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+let session_id = fn (u: unit) ->
+  let cookie = http_get_header "Cookie" in
+  let target = "session=" in
+  let tlen = str_len target in
+  let pairs = str_split cookie "; " in
+  let rec sess_find = fn (ps: str list) ->
+    match ps with
+    | Nil -> ""
+    | Cons (p, rest) ->
+      if str_starts_with p target then substring p tlen (str_len p)
+      else sess_find rest in
+  sess_find pairs
+in
+
+let current_user = fn (u: unit) ->
+  let sid = session_id () in
+  if str_eq sid "" then ""
+  else if map_has sessions sid then map_get sessions sid
+  else ""
+in
+
+// KV key builders. `url_hash` is sha256(url) so URLs with slashes /
+// colons don't confuse the key layout.
+let sub_key = fn (user: str) -> fn (url: str) ->
+  "subs/" ++ user ++ "/" ++ sha256_hex url
+in
+
+let entry_key_prefix = fn (user: str) -> fn (url: str) ->
+  "entries/" ++ user ++ "/" ++ sha256_hex url ++ "/"
+in
+
+// Serialize/parse pipe-separated triples/quads. We assume the fields
+// don't contain literal `|` — for a demo good enough, though a real
+// impl would escape.
+let pack2 = fn (a: str) -> fn (b: str) -> a ++ "|" ++ b in
+let pack4 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) ->
+  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d
+in
+
+// Split at the first `|`, returning (before, after).
+let split1 = fn (s: str) ->
+  let bar = str_index_of s "|" in
+  if bar < 0 then (s, "")
+  else (substring s 0 bar, substring s (bar + 1) (str_len s))
+in
+
+// Split at each `|` (up to 4 fields). Missing tail fields → "".
+let split4 = fn (s: str) ->
+  let (a, r1) = split1 s in
+  let (b, r2) = split1 r1 in
+  let (c, d) = split1 r2 in
+  (a, b, c, d)
+in
+
+// ---- JSON emission helpers ----------------------------------------
+
+let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else if str_eq c "\r" then let _ = strbuf_push buf "\\r" in 0
+            else if str_eq c "\t" then let _ = strbuf_push buf "\\t" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
+in
+
+// ---- handlers -----------------------------------------------------
+
+let signup_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  if str_eq u "" || str_eq p "" then
+    let _ = http_set_status 400 in "missing user or pass\n"
+  else if str_index_of u "/" >= 0 then
+    let _ = http_set_status 400 in "user must not contain '/'\n"
+  else if kv_has users u then
+    let _ = http_set_status 409 in "user exists: " ++ u ++ "\n"
+  else
+    let _ = kv_set users u (sha256_hex p) in
+    let _ = kv_save users users_db_path in
+    let _ = http_set_status 201 in
+    "created: " ++ u ++ "\n"
+in
+
+let login_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  if kv_has users u && str_eq (kv_get users u) (sha256_hex p) then
+    let sid = "s-" ++ u in
+    let _ = map_set sessions sid u in
+    let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+    "logged in as " ++ u ++ "\n"
+  else
+    let _ = http_set_status 401 in
+    "invalid credentials\n"
+in
+
+let logout_h = fn (req: str) ->
+  let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+  "logged out\n"
+in
+
+let me_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else user
+in
+
+// Return the current user's subscriptions as a JSON array of
+// { url, title } objects.
+let feeds_list_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "[]\n"
+  else
+    let prefix = "subs/" ++ user ++ "/" in
+    let plen = str_len prefix in
+    let _ = plen in
+    let ks = kv_keys subs in
+    let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+      match xs with
+      | Nil -> acc ++ "]"
+      | Cons (k, rest) ->
+        if str_starts_with k prefix then
+          let v = kv_get subs k in
+          let (url, title) = split1 v in
+          let sep = if first then "" else "," in
+          let row = "\{\"url\":" ++ jstr url ++ ",\"title\":" ++ jstr title ++ "}" in
+          build rest false (acc ++ sep ++ row)
+        else build rest first acc in
+    let _ = http_set_content_type "application/json" in
+    build ks true "[" ++ "\n"
+in
+
+let feeds_add_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else
+    let url = body_field "url" in
+    if str_eq url "" then
+      let _ = http_set_status 400 in "missing url\n"
+    else
+      let k = sub_key user url in
+      // Initial title = the URL. Refresh will fill in the feed title
+      // once we actually fetch it.
+      let _ = kv_set subs k (pack2 url url) in
+      let _ = kv_save subs subs_db_path in
+      let _ = log_with "info" "feed_add" (Cons (("user", user), Cons (("url", url), Nil))) in
+      let _ = http_set_status 201 in
+      "subscribed: " ++ url ++ "\n"
+in
+
+let feeds_delete_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else
+    let url = body_field "url" in
+    let k = sub_key user url in
+    if not (kv_has subs k) then
+      let _ = http_set_status 404 in "no such subscription\n"
+    else
+      // Also clear cached entries for this feed.
+      let prefix = entry_key_prefix user url in
+      let rec drop_entries = fn (xs: str list) -> fn (dropped: int) ->
+        match xs with
+        | Nil -> dropped
+        | Cons (kk, rest) ->
+          if str_starts_with kk prefix then
+            let _ = kv_delete entries kk in
+            drop_entries rest (dropped + 1)
+          else drop_entries rest dropped in
+      let _ = drop_entries (kv_keys entries) 0 in
+      let _ = kv_delete subs k in
+      let _ = kv_save subs subs_db_path in
+      let _ = kv_save entries entries_db_path in
+      "unsubscribed\n"
+in
+
+// Fetch one feed, parse it, replace cached entries for that URL under
+// the given user. Returns the number of entries stored.
+let refresh_one = fn (user: str) -> fn (url: str) ->
+  let body = http_get url in
+  let status = http_fetch_status () in
+  if status < 200 || status >= 300 then
+    let _ = log_with "warn" "fetch_failed"
+      (Cons (("url", url), Cons (("status", show status), Nil))) in 0
+  else
+    let doc = Feed.parse_feed body in
+    // Update sub row with the freshly-parsed feed title (fallback to URL).
+    let feed_title = if str_eq doc.title "" then url else doc.title in
+    let _ = kv_set subs (sub_key user url) (pack2 url feed_title) in
+    // Clear old cached entries for this feed, then insert current set.
+    let prefix = entry_key_prefix user url in
+    let rec drop_old = fn (xs: str list) ->
+      match xs with
+      | Nil -> 0
+      | Cons (k, rest) ->
+        if str_starts_with k prefix then let _ = kv_delete entries k in drop_old rest
+        else drop_old rest in
+    let _ = drop_old (kv_keys entries) in
+    let rec insert = fn (xs: Entry list) -> fn (count: int) ->
+      match xs with
+      | Nil -> count
+      | Cons (e, rest) ->
+        let eid = sha256_hex (e.link ++ "|" ++ e.title) in
+        let k = prefix ++ eid in
+        let _ = kv_set entries k (pack4 e.title e.link e.date e.summary) in
+        insert rest (count + 1) in
+    let stored = insert doc.entries 0 in
+    let _ = log_with "info" "feed_refreshed"
+      (Cons (("user", user), Cons (("url", url),
+        Cons (("entries", show stored), Nil)))) in
+    stored
+in
+
+// POST /api/feeds/refresh — fetch every subscription of the current
+// user, update cached entries, return {refreshed, entries}.
+let feeds_refresh_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else
+    let prefix = "subs/" ++ user ++ "/" in
+    let ks = kv_keys subs in
+    let rec walk_subs = fn (xs: str list) -> fn (n_feeds: int) -> fn (n_entries: int) ->
+      match xs with
+      | Nil -> (n_feeds, n_entries)
+      | Cons (k, rest) ->
+        if str_starts_with k prefix then
+          let v = kv_get subs k in
+          let (url, _title) = split1 v in
+          let added = refresh_one user url in
+          walk_subs rest (n_feeds + 1) (n_entries + added)
+        else walk_subs rest n_feeds n_entries in
+    let (nf, ne) = walk_subs ks 0 0 in
+    let _ = kv_save subs subs_db_path in
+    let _ = kv_save entries entries_db_path in
+    let _ = http_set_content_type "application/json" in
+    "\{\"feeds\":" ++ show nf ++ ",\"entries\":" ++ show ne ++ "}\n"
+in
+
+// GET /api/entries — flat list of all cached entries for the current
+// user, JSON-formatted.
+let entries_list_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "[]\n"
+  else
+    let prefix = "entries/" ++ user ++ "/" in
+    let ks = kv_keys entries in
+    let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+      match xs with
+      | Nil -> acc ++ "]"
+      | Cons (k, rest) ->
+        if str_starts_with k prefix then
+          let v = kv_get entries k in
+          let (title, link, date, summary) = split4 v in
+          let sep = if first then "" else "," in
+          let row = "\{\"title\":" ++ jstr title ++
+                    ",\"link\":" ++ jstr link ++
+                    ",\"date\":" ++ jstr date ++
+                    ",\"summary\":" ++ jstr summary ++ "}" in
+          build rest false (acc ++ sep ++ row)
+        else build rest first acc in
+    let _ = http_set_content_type "application/json" in
+    build ks true "[" ++ "\n"
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/feed_reader/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                     home_h,
+  Cons (route "POST" "/api/signup"           signup_h,
+  Cons (route "POST" "/api/login"            login_h,
+  Cons (route "POST" "/api/logout"           logout_h,
+  Cons (route "GET"  "/api/me"               me_h,
+  Cons (route "GET"  "/api/feeds"            feeds_list_h,
+  Cons (route "POST" "/api/feeds"            feeds_add_h,
+  Cons (route "POST" "/api/feeds/delete"     feeds_delete_h,
+  Cons (route "POST" "/api/feeds/refresh"    feeds_refresh_h,
+  Cons (route "GET"  "/api/entries"          entries_list_h,
+  Nil)))))))))) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/feed_reader" handle_routed in
+
+let _ = print ("starting feed reader on :8080 (users=" ++ users_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0
