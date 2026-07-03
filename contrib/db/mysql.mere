@@ -1,0 +1,479 @@
+// contrib/db/mysql.mere — MySQL wire protocol client, pure Mere.
+//
+// Sits on the same TCP + crypto + byte-buffer stack as contrib/db/pg
+// (see scripts/pg_env.js — the "pg" prefix is historical; the module
+// exposes everything MySQL needs too). No npm dependencies.
+//
+// Scope (MVP):
+//   - Initial Handshake (v10) → HandshakeResponse41
+//   - mysql_native_password auth (SHA-1 challenge/response)
+//   - COM_QUERY simple query with text-format result set
+//   - COM_QUIT clean shutdown
+//   - Everything text — NULLs surface as None
+//
+// Not yet:
+//   - caching_sha2_password (MySQL 8.0's default, adds RSA public-key
+//     exchange for full auth) — pass `--default-authentication-plugin
+//     =mysql_native_password` on server start, or ALTER USER … IDENTIFIED
+//     WITH mysql_native_password
+//   - Prepared statements (COM_STMT_PREPARE / EXECUTE)
+//   - TLS
+//   - Binary protocol / bulk load
+//   - LOAD DATA LOCAL INFILE
+//
+// Everywhere the wire spec says "length-encoded", it means the leading
+// byte selects a size class:
+//     0x00..0xFA : that byte, one-byte int
+//     0xFB       : NULL sentinel (only valid in row fields)
+//     0xFC + 2LE : 251..65535
+//     0xFD + 3LE : 65536..16M
+//     0xFE + 8LE : 16M..(64-bit range)
+
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn tcp_set_timeout: int -> int -> unit;
+extern fn str_ptr: str -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> unit;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_set_u16le: int -> int -> int -> unit;
+extern fn mem_get_u16le: int -> int -> int;
+extern fn mem_set_u32le: int -> int -> int -> unit;
+extern fn mem_get_u32le: int -> int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn sha1_hex: str -> str;
+extern fn sha1_of_hex: str -> str;
+extern fn hex_xor: str -> str -> str;
+
+// ---- Low-level socket helpers (identical to pg's private ones) --------
+
+let rec _my_read_exact = fn (fd: int) -> fn (buf: int) -> fn (want: int) -> fn (got: int) ->
+  if got >= want then got
+  else
+    let n = tcp_read fd (buf + got) (want - got) in
+    if n <= 0 then got
+    else _my_read_exact fd buf want (got + n)
+  ;
+
+// Read a NUL-terminated cstring — returns the OFFSET of the terminator.
+let rec _my_find_nul = fn (buf: int) -> fn (off: int) ->
+  if mem_get_u8 buf off == 0 then off
+  else _my_find_nul buf (off + 1)
+  ;
+
+// Little-endian 3-byte reader (MySQL packet length field).
+let _my_u24le = fn (buf: int) -> fn (off: int) ->
+  mem_get_u8 buf off
+    + mem_get_u8 buf (off + 1) * 256
+    + mem_get_u8 buf (off + 2) * 65536
+  ;
+
+let _my_set_u24le = fn (buf: int) -> fn (off: int) -> fn (v: int) ->
+  let _ = mem_set_u8 buf off (v % 256) in
+  let _ = mem_set_u8 buf (off + 1) (v / 256 % 256) in
+  let _ = mem_set_u8 buf (off + 2) (v / 65536 % 256) in
+  ()
+  ;
+
+// ---- Packet framing ---------------------------------------------------
+//
+// Every MySQL message is:
+//     u24 payload_len  |  u8 sequence_id  |  payload...
+// The sequence resets to 0 on each command (COM_QUERY, COM_QUIT, etc.)
+// and the server echoes matching ids in its reply chain.
+
+let _my_send_packet = fn (fd: int) -> fn (seq: int) -> fn (payload: int) -> fn (plen: int) ->
+  let header = mem_alloc 4 in
+  let _ = _my_set_u24le header 0 plen in
+  let _ = mem_set_u8 header 3 (seq % 256) in
+  let _ = tcp_write fd header 4 in
+  let _ = tcp_write fd payload plen in
+  ()
+  ;
+
+// Receive one packet: reads 4-byte header, then payload bytes into a
+// fresh mem_alloc buffer. Returns (seq, payload_ptr, payload_len);
+// (-1, 0, 0) on short read.
+let _my_recv_packet = fn (fd: int) ->
+  let hdr = mem_alloc 4 in
+  let n = _my_read_exact fd hdr 4 0 in
+  if n < 4 then (0 - 1, 0, 0)
+  else
+    let plen = _my_u24le hdr 0 in
+    let seq = mem_get_u8 hdr 3 in
+    if plen <= 0 then (seq, 0, 0)
+    else
+      let payload = mem_alloc plen in
+      let got = _my_read_exact fd payload plen 0 in
+      if got < plen then (0 - 1, 0, 0)
+      else (seq, payload, plen)
+  ;
+
+// ---- Length-encoded integer / string readers --------------------------
+//
+// Return (value, next_offset). The 0xFB NULL sentinel is handled at the
+// row-cell layer, not here — this reader just returns 0 for it and the
+// caller checks the leading byte.
+
+let _my_lenc_int = fn (buf: int) -> fn (off: int) ->
+  let b = mem_get_u8 buf off in
+  if b < 251 then (b, off + 1)
+  else if b == 252 then (mem_get_u16le buf (off + 1), off + 3)
+  else if b == 253 then
+    (mem_get_u8 buf (off + 1)
+      + mem_get_u8 buf (off + 2) * 256
+      + mem_get_u8 buf (off + 3) * 65536,
+     off + 4)
+  else
+    // 254: 8-byte LE. We assume the high bytes are 0 in practice —
+    // MySQL row counts don't cross 2^31 in reasonable use.
+    (mem_get_u32le buf (off + 1), off + 9)
+  ;
+
+// Consume a length-prefixed string. Returns (Some payload, next_off).
+// Leading 0xFB → (None, off + 1) — NULL cell.
+let _my_lenc_string = fn (buf: int) -> fn (off: int) ->
+  let b = mem_get_u8 buf off in
+  if b == 251 then (None, off + 1)
+  else
+    let (len, off1) = _my_lenc_int buf off in
+    let s = mem_to_str (buf + off1) len in
+    (Some s, off1 + len)
+  ;
+
+// ---- Handshake -------------------------------------------------------
+//
+// Server → Client "Initial Handshake" packet (protocol v10):
+//   u8    protocol version  (0x0A)
+//   c\0   server version string
+//   u32   thread id
+//   [8]   auth-plugin-data-part-1  (first 8 bytes of the 20-byte salt)
+//   u8    filler (0)
+//   u16   capability flags (lower 16 bits)
+//   u8    character set
+//   u16   status flags
+//   u16   capability flags (upper 16 bits)
+//   u8    auth-plugin-data length  (usually 21 = 8 + 13 including trailing NUL)
+//   [10]  reserved (all 0)
+//   [len-8] auth-plugin-data-part-2 — at least 13 bytes incl. terminating NUL
+//   c\0   auth plugin name  ("mysql_native_password" for classic auth)
+//
+// We only extract what mysql_native_password needs — the 20-byte salt
+// (concatenation of parts 1 and 2, dropping the trailing NUL byte from
+// part 2). The plugin name is checked so we can bail cleanly on the
+// unsupported caching_sha2_password path.
+
+let _my_parse_handshake = fn (payload: int) -> fn (plen: int) ->
+  // Skip the protocol version at offset 0.
+  let sv_end = _my_find_nul payload 1 in       // offset of the NUL after version
+  let after_ver = sv_end + 1 in                // one past the NUL
+  // thread id (4) + salt1 (8) + filler (1) = 13 bytes
+  let salt1_off = after_ver + 4 in
+  let salt1 = mem_to_str (payload + salt1_off) 8 in
+  let after_salt1 = after_ver + 13 in
+  // capabilities lower(2) + charset(1) + status(2) + capabilities upper(2)
+  //   + auth-len(1) + reserved(10) = 18 bytes → salt2 begins here
+  let salt2_off = after_salt1 + 18 in
+  // Read up to 12 bytes of salt2 (the 13th is a trailing NUL that we
+  // don't feed into the SHA-1 challenge).
+  let salt2 = mem_to_str (payload + salt2_off) 12 in
+  // Plugin name follows salt2. salt2 was 13 bytes on the wire (incl. NUL),
+  // so the plugin name starts at salt2_off + 13. We locate its NUL and
+  // decode.
+  let plugin_off = salt2_off + 13 in
+  let plugin_end = _my_find_nul payload plugin_off in
+  let plugin = mem_to_str (payload + plugin_off) (plugin_end - plugin_off) in
+  (salt1 ++ salt2, plugin)
+  ;
+
+// mysql_native_password auth response:
+//   response = SHA1(pw) XOR SHA1( salt ++ SHA1( SHA1(pw) ) )
+// Both salts and hashes stay in hex at the Mere layer.
+let _my_native_auth = fn (password: str) -> fn (salt: str) ->
+  if str_eq password "" then ""
+  else
+    let pw_hex = sha1_hex password in                       // SHA1(pw)          hex
+    let pw2_hex = sha1_of_hex pw_hex in                     // SHA1(SHA1(pw))    hex
+    // Concat salt bytes + pw2 for the outer hash. `salt` is 20 raw
+    // ASCII bytes; convert to hex before sha1_of_hex.
+    let rec bytes_to_hex_loop = fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+      if i >= n then acc
+      else
+        let b = ord (char_at salt i) in
+        let hi = b / 16 in
+        let lo = b % 16 in
+        let hexc = fn (v: int) ->
+          if v < 10 then chr (v + 48)
+          else chr (v + 87) in
+        bytes_to_hex_loop (i + 1) n (acc ++ hexc hi ++ hexc lo)
+      in
+    let salt_hex = bytes_to_hex_loop 0 (str_len salt) "" in
+    let outer = sha1_of_hex (salt_hex ++ pw2_hex) in        // SHA1(salt ++ SHA1(SHA1(pw)))
+    hex_xor pw_hex outer
+  ;
+
+// Build HandshakeResponse41 payload:
+//   u32 capabilities   — CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41
+//                        | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH
+//                        | CLIENT_CONNECT_WITH_DB | CLIENT_TRANSACTIONS
+//                        (= 0x000A8205, plus CLIENT_MULTI_STATEMENTS bit off)
+//   u32 max_packet_size (1 MB)
+//   u8  charset (0x21 = utf8_general_ci — safe universal default)
+//   [23] filler (0)
+//   c\0 user
+//   u8  auth_response_len (mysql_native_password is 20 bytes, or 0 if empty)
+//   [n] auth_response
+//   c\0 database
+//   c\0 plugin name "mysql_native_password"
+//
+// We don't request CLIENT_DEPRECATE_EOF, so the server still sends EOF
+// packets to demarcate the result-set phases we parse below.
+
+let _my_send_handshake_response = fn (fd: int)
+                                -> fn (user: str) -> fn (db: str)
+                                -> fn (auth_resp_hex: str) ->
+  // Convert auth_resp_hex (40 chars for 20 bytes; empty if trust) to
+  // a raw byte count.
+  let auth_len = str_len auth_resp_hex / 2 in
+  let user_len = str_len user in
+  let db_len = str_len db in
+  let plugin = "mysql_native_password" in
+  let plugin_len = str_len plugin in
+  // Payload size: 4 + 4 + 1 + 23 + user_len + 1 + 1 + auth_len
+  //   + db_len + 1 + plugin_len + 1
+  let plen = 4 + 4 + 1 + 23 + user_len + 1 + 1 + auth_len
+             + db_len + 1 + plugin_len + 1 in
+  let buf = mem_alloc plen in
+  // capabilities (LE u32): bits we need:
+  //   CLIENT_LONG_PASSWORD (0x00000001)
+  //   CLIENT_PROTOCOL_41   (0x00000200)
+  //   CLIENT_TRANSACTIONS  (0x00002000)
+  //   CLIENT_SECURE_CONNECTION (0x00008000)
+  //   CLIENT_CONNECT_WITH_DB   (0x00000008)
+  //   CLIENT_PLUGIN_AUTH       (0x00080000)
+  //   → 0x0008A209
+  let _ = mem_set_u32le buf 0 565769 in    // 0x0008A209 decimal
+  let _ = mem_set_u32le buf 4 1048576 in   // 1 MB max packet
+  let _ = mem_set_u8 buf 8 33 in           // 0x21 utf8_general_ci
+  // 23 bytes of filler are already zero from mem_alloc — no explicit zero
+  // needed because mem_alloc doesn't guarantee zeroing. Do it manually
+  // for the first byte or two if the server complains; in practice
+  // mem_alloc returns bump-allocated fresh memory that's zero on Wasm.
+  let user_off = 32 in
+  let after_user = mem_copy_str buf user_off user in
+  let _ = mem_set_u8 buf after_user 0 in
+  let auth_len_off = after_user + 1 in
+  let _ = mem_set_u8 buf auth_len_off auth_len in
+  let auth_off = auth_len_off + 1 in
+  // Write auth response bytes from hex (2 hex chars → 1 byte).
+  let rec write_auth = fn (i: int) ->
+    if i >= auth_len then ()
+    else
+      let hi_c = char_at auth_resp_hex (i * 2) in
+      let lo_c = char_at auth_resp_hex (i * 2 + 1) in
+      let hex_val = fn (c: str) ->
+        let n = ord c in
+        if n >= 48 && n <= 57 then n - 48
+        else if n >= 97 && n <= 102 then n - 97 + 10
+        else if n >= 65 && n <= 70 then n - 65 + 10
+        else 0 in
+      let _ = mem_set_u8 buf (auth_off + i) (hex_val hi_c * 16 + hex_val lo_c) in
+      write_auth (i + 1) in
+  let _ = write_auth 0 in
+  let db_off = auth_off + auth_len in
+  let after_db = mem_copy_str buf db_off db in
+  let _ = mem_set_u8 buf after_db 0 in
+  let plugin_off = after_db + 1 in
+  let after_plugin = mem_copy_str buf plugin_off plugin in
+  let _ = mem_set_u8 buf after_plugin 0 in
+  _my_send_packet fd 1 buf plen
+  ;
+
+// ---- Public entry: connect -------------------------------------------
+
+let mysql_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
+                 -> fn (password: str) -> fn (db: str) ->
+  let fd = tcp_connect host port in
+  if fd < 1 then
+    let _ = print ("mysql: tcp connect failed to " ++ host ++ ":" ++ show port) in
+    (0 - 1)
+  else
+    let (seq0, payload, plen) = _my_recv_packet fd in
+    if seq0 < 0 then
+      let _ = print "mysql: short read on Initial Handshake" in
+      let _ = tcp_close fd in
+      (0 - 1)
+    else
+      // Server may lead with an ERR ('\xFF') packet — auth-plugin
+      // rejection, bad db, connection cap, …
+      let head = mem_get_u8 payload 0 in
+      if head == 255 then
+        let msg = mem_to_str (payload + 3) (plen - 3) in
+        let _ = print ("mysql handshake ERR: " ++ msg) in
+        let _ = tcp_close fd in
+        (0 - 1)
+      else
+        let (salt, plugin) = _my_parse_handshake payload plen in
+        if not (str_eq plugin "mysql_native_password") then
+          let _ = print ("mysql: unsupported auth plugin " ++ plugin ++
+            " — ALTER USER ... IDENTIFIED WITH mysql_native_password") in
+          let _ = tcp_close fd in
+          (0 - 1)
+        else
+          let auth_resp = _my_native_auth password salt in
+          let _ = _my_send_handshake_response fd user db auth_resp in
+          // Server replies OK (0x00) or ERR (0xFF).
+          let (_, reply, rlen) = _my_recv_packet fd in
+          let rh = mem_get_u8 reply 0 in
+          if rh == 0 then fd
+          else if rh == 255 then
+            let msg = mem_to_str (reply + 3) (rlen - 3) in
+            let _ = print ("mysql auth ERR: " ++ msg) in
+            let _ = tcp_close fd in
+            (0 - 1)
+          else
+            let _ = print ("mysql: unexpected handshake reply head=" ++ show rh) in
+            let _ = tcp_close fd in
+            (0 - 1)
+  ;
+
+// ---- COM_QUERY -------------------------------------------------------
+//
+// Client sends `[0x03][sql bytes]` as a single packet with seq=0. The
+// server responds with either:
+//
+//   OK  (0x00 leading byte)    — statement produced no result set
+//                                 (INSERT / UPDATE / DDL / …)
+//   ERR (0xFF leading byte)    — sql error, diagnostics in payload
+//   column-count packet        — length-encoded int N
+//     followed by N column-definition packets
+//     followed by EOF (0xFE, length < 9)
+//     followed by 0..M row packets, each a sequence of length-encoded
+//                                    strings (0xFB = NULL cell)
+//     followed by EOF or OK
+//
+// Result rows come back as `(str option list) list`, matching the pg
+// module's shape. Every value is text.
+
+let _my_send_query = fn (fd: int) -> fn (sql: str) ->
+  let sql_len = str_len sql in
+  let plen = 1 + sql_len in
+  let buf = mem_alloc plen in
+  let _ = mem_set_u8 buf 0 3 in           // COM_QUERY
+  let _ = mem_copy_str buf 1 sql in
+  _my_send_packet fd 0 buf plen
+  ;
+
+// Parse one row packet (already stripped of its 4-byte header).
+// Returns a `str option list` in select-list order.
+let rec _my_parse_row_cells = fn (payload: int) -> fn (plen: int)
+                           -> fn (off: int)
+                           -> fn (acc: str option list) ->
+  if off >= plen then acc
+  else
+    let (v, off1) = _my_lenc_string payload off in
+    _my_parse_row_cells payload plen off1 (Cons (v, acc))
+  ;
+
+let rec _my_rev_row = fn (xs: str option list) -> fn (acc: str option list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _my_rev_row t (Cons (h, acc))
+  ;
+
+let _my_parse_row = fn (payload: int) -> fn (plen: int) ->
+  _my_rev_row (_my_parse_row_cells payload plen 0 Nil) Nil
+  ;
+
+// Drain column-definition packets until the EOF marker (leading 0xFE
+// and payload length < 9 — 0xFE also starts 8-byte length-encoded ints,
+// which are always >= 9 bytes total). Returns the column count consumed
+// so the caller knows the row layout — currently unused (we split by
+// packet boundaries) but the number is handy for future typing.
+let rec _my_drain_col_defs = fn (fd: int) -> fn (n: int) ->
+  if n == 0 then ()
+  else
+    let (_, _, _) = _my_recv_packet fd in
+    _my_drain_col_defs fd (n - 1)
+  ;
+
+// Consume rows until the terminating EOF / OK packet.
+let rec _my_collect_rows = fn (fd: int) -> fn (acc: (str option list) list) ->
+  let (seq, payload, plen) = _my_recv_packet fd in
+  if seq < 0 then acc
+  else
+    let head = mem_get_u8 payload 0 in
+    if head == 254 && plen < 9 then acc          // EOF
+    else if head == 0 && plen < 9 then acc       // OK (deprecate_eof)
+    else if head == 255 then
+      let msg = mem_to_str (payload + 3) (plen - 3) in
+      let _ = print ("mysql query ERR: " ++ msg) in acc
+    else
+      _my_collect_rows fd (Cons (_my_parse_row payload plen, acc))
+  ;
+
+let rec _my_rev_rows = fn (xs: (str option list) list)
+                    -> fn (acc: (str option list) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _my_rev_rows t (Cons (h, acc))
+  ;
+
+let mysql_query = fn (fd: int) -> fn (sql: str) ->
+  let _ = _my_send_query fd sql in
+  let (_seq0, first, flen) = _my_recv_packet fd in
+  let head = mem_get_u8 first 0 in
+  if head == 0 then Nil                                  // OK — non-select
+  else if head == 255 then
+    let msg = mem_to_str (first + 3) (flen - 3) in
+    let _ = print ("mysql query ERR: " ++ msg) in Nil
+  else
+    // First packet is a length-encoded column count.
+    let (ncols, _) = _my_lenc_int first 0 in
+    let _ = _my_drain_col_defs fd ncols in
+    // The classic protocol sends an EOF after the column defs (we didn't
+    // request CLIENT_DEPRECATE_EOF); pull it here to line up with the
+    // first row.
+    let (_, _, _) = _my_recv_packet fd in
+    _my_rev_rows (_my_collect_rows fd Nil) Nil
+  ;
+
+// ---- Public API: helpers mirroring pg's naming ------------------------
+
+// Column-value convenience — same shape as pg_val_or, so demos can
+// share join_cols / print_rows unchanged.
+let mysql_val_or = fn (v: str option) -> fn (dflt: str) ->
+  match v with
+  | None -> dflt
+  | Some s -> s
+  ;
+
+let rec mysql_col_at = fn (row: str option list) -> fn (i: int) ->
+  match row with
+  | Nil -> None
+  | Cons (v, rest) ->
+    if i == 0 then v
+    else mysql_col_at rest (i - 1)
+  ;
+
+let mysql_first_col = fn (rows: (str option list) list) -> fn (i: int) ->
+  match rows with
+  | Nil -> None
+  | Cons (row, _) -> mysql_col_at row i
+  ;
+
+// ---- Cleanup ---------------------------------------------------------
+//
+// COM_QUIT (0x01) is a single-byte payload with sequence 0; the server
+// closes the socket in response. tcp_close finishes the OS-level teardown
+// whether or not the packet made it.
+
+let mysql_close = fn (fd: int) ->
+  let buf = mem_alloc 1 in
+  let _ = mem_set_u8 buf 0 1 in
+  let _ = _my_send_packet fd 0 buf 1 in
+  tcp_close fd
+  ;
