@@ -1,0 +1,221 @@
+// http_ci_dashboard: multi-repo CI job status board.
+//
+// A step past http_webhook_receiver — instead of just verifying,
+// summarizing, and forwarding webhooks, this example tracks
+// per-workflow state from GitHub's `workflow_run` events and
+// serves a dashboard that shows the current job status for every
+// (repo, branch, workflow) tuple the receiver has seen.
+//
+// This is the shape of what CI teams typically wire up ("is main
+// green?", "which PRs are red right now?"). It exercises the
+// nested-JSON extraction helper in contrib/webhook (real GitHub
+// payloads are deeply nested — the flat json_body parser we use
+// elsewhere can't reach `workflow_run.conclusion`).
+//
+// Endpoints:
+//   POST /webhooks/github        signature-verified event ingress
+//   GET  /api/jobs               JSON of every tracked run
+//   GET  /                       HTML dashboard (auto-refreshes)
+//
+// Data model (log-structured KV):
+//   jobs_db  key `job/<repo>/<branch>/<workflow>` → value
+//              `<status>|<conclusion>|<actor>|<url>|<updated_at>`
+//
+// The tracked event is `workflow_run` (action = completed /
+// requested / in_progress); other events (ping, push, pull_request)
+// are accepted + logged so the receiver looks the same to GitHub's
+// delivery UI, but they don't affect the dashboard.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_ci_dashboard.mere > /tmp/ci.wat
+//   wat2wasm --enable-tail-call /tmp/ci.wat -o /tmp/ci.wasm
+//   node scripts/run_http_server.js /tmp/ci.wasm
+//
+//   # send a synthetic workflow_run event:
+//   BODY='{"action":"completed","workflow_run":{"name":"CI","head_branch":"main","status":"completed","conclusion":"success","html_url":"https://github.com/foo/bar/actions/runs/1","actor":{"login":"alice"}},"repository":{"full_name":"foo/bar"}}'
+//   SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac dev-secret -hex | awk '{print $NF}')"
+//   curl -X POST -H 'Content-Type: application/json' \
+//     -H 'X-GitHub-Event: workflow_run' -H "X-Hub-Signature-256: $SIG" \
+//     -H 'X-GitHub-Delivery: ci-1' -d "$BODY" http://localhost:8080/webhooks/github
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+import "../contrib/webhook/github.mere";
+
+let config_db_path = "/tmp/mere_ci_config.db" in
+let jobs_db_path = "/tmp/mere_ci_jobs.db" in
+
+let config = kv_load config_db_path in
+let jobs = kv_load jobs_db_path in
+
+let _ = if not (kv_has config "secret/shared") then
+          let _ = kv_set config "secret/shared" "dev-secret" in
+          let _ = kv_save config config_db_path in
+          ()
+        else () in
+
+let get_secret = fn (u: unit) ->
+  if kv_has config "secret/shared" then kv_get config "secret/shared"
+  else "dev-secret"
+in
+
+// ---- JSON emission helpers ----------------------------------------
+
+let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
+in
+
+// ---- pipe-separated value packing ---------------------------------
+
+let pack5 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) -> fn (e: str) ->
+  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d ++ "|" ++ e
+in
+
+let split1 = fn (s: str) ->
+  let bar = str_index_of s "|" in
+  if bar < 0 then (s, "")
+  else (substring s 0 bar, substring s (bar + 1) (str_len s))
+in
+
+let split5 = fn (s: str) ->
+  let (a, r1) = split1 s in
+  let (b, r2) = split1 r1 in
+  let (c, r3) = split1 r2 in
+  let (d, e) = split1 r3 in
+  (a, b, c, d, e)
+in
+
+// ---- webhook handler ----------------------------------------------
+
+let record_workflow_run = fn (body: str) ->
+  // GitHub `workflow_run` payload — pull the fields we care about
+  // out of the raw JSON via GhWebhook.find_str_value. All nested
+  // (`workflow_run.name`, `repository.full_name`, `actor.login`)
+  // but the field names are unique enough to grab by top-level scan.
+  let name = GhWebhook.find_str_value body "name" in
+  let branch = GhWebhook.find_str_value body "head_branch" in
+  let status = GhWebhook.find_str_value body "status" in
+  let conclusion = GhWebhook.find_str_value body "conclusion" in
+  let url = GhWebhook.find_str_value body "html_url" in
+  let repo = GhWebhook.find_str_value body "full_name" in
+  let actor = GhWebhook.find_str_value body "login" in
+  let updated_at = GhWebhook.find_str_value body "updated_at" in
+  if str_eq repo "" || str_eq name "" then
+    let _ = log_with "warn" "workflow_missing_fields"
+      (Cons (("repo", repo), Cons (("name", name), Nil))) in 0
+  else
+    let key = "job/" ++ repo ++ "/" ++ branch ++ "/" ++ name in
+    let value = pack5 status conclusion actor url updated_at in
+    let _ = kv_set jobs key value in
+    let _ = kv_save jobs jobs_db_path in
+    let _ = log_with "info" "workflow_recorded"
+      (Cons (("repo", repo),
+        Cons (("branch", branch),
+          Cons (("workflow", name),
+            Cons (("status", status),
+              Cons (("conclusion", conclusion), Nil)))))) in
+    1
+in
+
+let webhook_h = fn (req: str) ->
+  let body = http_current_body () ++ "" in
+  let event = http_get_header "X-GitHub-Event" ++ "" in
+  let sig = http_get_header "X-Hub-Signature-256" ++ "" in
+  let delivery = http_get_header "X-GitHub-Delivery" ++ "" in
+  let secret = get_secret () in
+  if str_eq sig "" then
+    let _ = http_set_status 401 in "missing X-Hub-Signature-256\n"
+  else if not (GhWebhook.verify_signature secret body sig) then
+    let _ = log_with "warn" "webhook_bad_sig"
+      (Cons (("event", event), Cons (("delivery", delivery), Nil))) in
+    let _ = http_set_status 401 in "signature mismatch\n"
+  else
+    let recorded =
+      if str_eq event "workflow_run" then record_workflow_run body
+      else 0 in
+    let _ = log_with "info" "webhook_ok"
+      (Cons (("event", event),
+        Cons (("delivery", delivery),
+          Cons (("recorded", show recorded), Nil)))) in
+    let _ = http_set_content_type "application/json" in
+    "\{\"ok\":true,\"event\":" ++ jstr event ++
+    ",\"recorded\":" ++ show recorded ++ "}\n"
+in
+
+// ---- jobs listing -------------------------------------------------
+
+let jobs_list_h = fn (req: str) ->
+  let ks = kv_keys jobs in
+  let prefix = "job/" in
+  let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (k, rest) ->
+      if str_starts_with k prefix then
+        let v = kv_get jobs k in
+        let (status, conclusion, actor, url, updated_at) = split5 v in
+        // key is `job/<repo>/<branch>/<workflow>` — reconstruct.
+        let after = substring k (str_len prefix) (str_len k) in
+        let sep = if first then "" else "," in
+        let row = "\{\"key\":" ++ jstr after ++
+                  ",\"status\":" ++ jstr status ++
+                  ",\"conclusion\":" ++ jstr conclusion ++
+                  ",\"actor\":" ++ jstr actor ++
+                  ",\"url\":" ++ jstr url ++
+                  ",\"updated_at\":" ++ jstr updated_at ++ "}" in
+        build rest false (acc ++ sep ++ row)
+      else build rest first acc in
+  let _ = http_set_content_type "application/json" in
+  build ks true "[" ++ "\n"
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/ci_dashboard/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                     home_h,
+  Cons (route "POST" "/webhooks/github"      webhook_h,
+  Cons (route "GET"  "/api/jobs"             jobs_list_h,
+  Nil))) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/ci_dashboard" handle_routed in
+
+let _ = print ("starting CI dashboard on :8080 (jobs=" ++ jobs_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0

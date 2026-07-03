@@ -1,0 +1,81 @@
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 64em;
+  margin: 2em auto;
+  padding: 0 1em;
+  color: #1a1a1a;
+  background: #f4f6f8;
+}
+h1 { color: #0d4d33; margin-bottom: 0.2em; }
+.subtitle { color: #666; font-size: 0.9em; line-height: 1.5; }
+code { background: #e6ecef; padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }
+button {
+  font: inherit;
+  padding: 0.4em 0.8em;
+  border: 1px solid #0d4d33;
+  border-radius: 3px;
+  background: #0d4d33;
+  color: white;
+  cursor: pointer;
+}
+button:hover { background: #094028; }
+#controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 1em 0 0.5em;
+}
+#count { color: #666; font-size: 0.9em; }
+table {
+  width: 100%;
+  background: #fff;
+  border-collapse: collapse;
+  border-radius: 3px;
+  overflow: hidden;
+}
+th, td {
+  padding: 0.5em 0.8em;
+  text-align: left;
+  border-bottom: 1px solid #e6ecef;
+  font-size: 0.9em;
+}
+th {
+  background: #e6ecef;
+  color: #333;
+  font-weight: 600;
+}
+tbody tr:hover { background: #f9fbfc; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: white;
+}
+.badge.success   { background: #22863a; }
+.badge.failure   { background: #cb2431; }
+.badge.cancelled { background: #6a737d; }
+.badge.pending   { background: #dbab09; color: #24292e; }
+.badge.completed { background: #22863a; }
+.badge.in_progress { background: #0366d6; }
+.badge.queued    { background: #6a737d; }
+.badge.default   { background: #ddd; color: #444; }
+#empty {
+  margin-top: 2em;
+  color: #888;
+  text-align: center;
+  padding: 2em;
+  background: #fff;
+  border-radius: 3px;
+}
+#log {
+  background: #1a1a1a;
+  color: #ddd;
+  padding: 0.8em;
+  border-radius: 3px;
+  font-size: 0.75em;
+  max-height: 10em;
+  overflow: auto;
+  margin-top: 2em;
+}
