@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere file upload</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere file upload</h1>
+<p class="subtitle">
+  Multipart/form-data POST parsed on the Mere side by
+  <code>contrib/http/multipart.mere</code>. Uploaded files are
+  stored in a log-structured KV and served back via
+  <code>GET /files/&lt;id&gt;</code> with the right Content-Type.
+</p>
+<p class="warn">
+  Text files only for this demo (<code>.txt</code>, <code>.md</code>,
+  <code>.json</code>, <code>.csv</code>, <code>.html</code>, <code>.log</code>).
+  Binary formats break the UTF-8 round-trip through Mere strings —
+  a base64 wrapper would fix it but isn't wired up yet.
+</p>
+
+<section id="upload-box">
+  <h2>upload</h2>
+  <form id="upload-form">
+    <input type="file" id="file-input" accept=".txt,.md,.markdown,.json,.csv,.html,.htm,.log,text/*" required>
+    <button type="submit">upload</button>
+  </form>
+</section>
+
+<section id="files-box">
+  <h2>files</h2>
+  <ul id="file-list"></ul>
+  <p id="empty" style="color:#94a3b8">No files yet.</p>
+</section>
+
+<pre id="log"></pre>
