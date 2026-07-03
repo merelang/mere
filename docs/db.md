@@ -6,7 +6,7 @@ their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` and
 implemented in Mere itself; the host only exposes low-level TCP and
 crypto primitives. No `npm` packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 21
+The rest of this page walks the stack top-down, then catalogs the 22
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -245,20 +245,24 @@ command needed) and cleans up on process exit.
 | [db_mysql_pool](https://github.com/merelang/mere/blob/main/examples/db_mysql_pool.mere) | `mysql_pool` keep-alive + `mysql_parse_url` + percent decoding |
 | [db_mysql_tx](https://github.com/merelang/mere/blob/main/examples/db_mysql_tx.mere) | `mysql_tx_iso` (REPEATABLE READ) + `mysql_savepoint_scope` nested rollback |
 | [db_ssl](https://github.com/merelang/mere/blob/main/examples/db_ssl.mere) | Postgres over TLS 1.3 — `pg_connect_ssl` + `?sslmode=require` |
+| [db_mysql_ssl](https://github.com/merelang/mere/blob/main/examples/db_mysql_ssl.mere) | MySQL over TLS 1.3 — `mysql_connect_ssl` + `?ssl=true` |
 
 ## Limitations and future work
 
 - **Auth**: SCRAM-SHA-256 is the only strong method wired. Cleartext
   password and MD5 aren't; SCRAM-SHA-256-PLUS (channel binding) isn't
   either.
-- **TLS**: `pg_connect_ssl` implements PG's SSLRequest handshake and
-  hands the socket to Node's `tls` module for the actual TLS 1.2/1.3
-  negotiation. Certificate verification is currently disabled
-  (`rejectUnauthorized: false`) — good enough for local dev / self-
-  signed certs. Wiring a CA bundle / hostname verification is a
-  follow-up. MySQL's SSL upgrade (CLIENT_SSL bit + partial
-  HandshakeResponse41 → TLS handshake → full HandshakeResponse41) is
-  not wired yet.
+- **TLS**: both drivers negotiate TLS 1.2/1.3 through Node's `tls`
+  module. `pg_connect_ssl` sends PG's 8-byte SSLRequest and waits for
+  the single-byte 'S' reply before upgrading; `mysql_connect_ssl`
+  sends the 32-byte "SSL Request Packet" with the CLIENT_SSL bit at
+  MySQL seq=1, then hands the full HandshakeResponse41 over the
+  encrypted channel at seq=2. `pg_connect_url` / `mysql_connect_url`
+  both auto-select the SSL path when the URL query string contains
+  `sslmode=require` (or `ssl=true` for MySQL). Certificate
+  verification is currently disabled (`rejectUnauthorized: false`) —
+  good for local dev; wiring a CA bundle / hostname verification is a
+  follow-up.
 - **Binary column format**: everything is text. Encoding / decoding
   of PG binary format would let us skip a `pg_type_name`-based decode
   step for hot paths.
@@ -275,8 +279,9 @@ command needed) and cleans up on process exit.
   auth plugins are wired — `mysql_native_password` (SHA-1) and
   `caching_sha2_password` (SHA-256 fast-path + RSA-OAEP-SHA1
   public-key exchange when the server's auth cache is cold).
-  TLS and `LISTEN`-style pub/sub are not wired (MySQL has no
-  server-side pub/sub anyway — `NOTIFY` is a PG feature).
+  TLS is wired (`mysql_connect_ssl` / `?ssl=true`). `LISTEN`-style
+  pub/sub is not — MySQL has no server-side pub/sub (`NOTIFY` is a PG
+  feature).
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).

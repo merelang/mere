@@ -34,6 +34,7 @@ extern fn tcp_write: int -> int -> int -> int;
 extern fn tcp_read: int -> int -> int -> int;
 extern fn tcp_close: int -> unit;
 extern fn tcp_set_timeout: int -> int -> unit;
+extern fn tcp_starttls: int -> str -> int;
 extern fn str_ptr: str -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_set_u8: int -> int -> int -> unit;
@@ -81,6 +82,13 @@ let _my_set_u24le = fn (buf: int) -> fn (off: int) -> fn (v: int) ->
   let _ = mem_set_u8 buf (off + 1) (v / 256 % 256) in
   let _ = mem_set_u8 buf (off + 2) (v / 65536 % 256) in
   ()
+  ;
+
+// Zero out `n` bytes of `buf` starting at `off`. Extracted because
+// wasm codegen doesn't allow let-rec inside expression scope.
+let rec _my_zero_bytes = fn (buf: int) -> fn (off: int) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else let _ = mem_set_u8 buf (off + i) 0 in _my_zero_bytes buf off (i + 1) n
   ;
 
 // ---- Packet framing ---------------------------------------------------
@@ -237,31 +245,31 @@ let _my_native_auth = fn (password: str) -> fn (salt: str) ->
 // We don't request CLIENT_DEPRECATE_EOF, so the server still sends EOF
 // packets to demarcate the result-set phases we parse below.
 
-let _my_send_handshake_response = fn (fd: int)
+// Base capability set the driver advertises (bits we implement):
+//   CLIENT_LONG_PASSWORD (0x00000001)
+//   CLIENT_CONNECT_WITH_DB (0x00000008)
+//   CLIENT_PROTOCOL_41   (0x00000200)
+//   CLIENT_TRANSACTIONS  (0x00002000)
+//   CLIENT_SECURE_CONNECTION (0x00008000)
+//   CLIENT_PLUGIN_AUTH   (0x00080000)
+//   Sum → 0x0008A209
+// SSL adds CLIENT_SSL (0x00000800), producing 0x0008AA09.
+let _my_caps_plain = 565769;     // 0x0008A209
+let _my_caps_ssl   = 567817;     // 0x0008AA09 (plain + CLIENT_SSL)
+
+let _my_send_handshake_response = fn (fd: int) -> fn (seq: int)
+                                -> fn (caps: int)
                                 -> fn (user: str) -> fn (db: str)
                                 -> fn (auth_resp_hex: str)
                                 -> fn (plugin: str) ->
-  // Convert auth_resp_hex (40 hex chars for the 20-byte native response,
-  // 64 for the 32-byte caching_sha2 response, empty when password="") to
-  // a raw byte count.
   let auth_len = str_len auth_resp_hex / 2 in
   let user_len = str_len user in
   let db_len = str_len db in
   let plugin_len = str_len plugin in
-  // Payload size: 4 + 4 + 1 + 23 + user_len + 1 + 1 + auth_len
-  //   + db_len + 1 + plugin_len + 1
   let plen = 4 + 4 + 1 + 23 + user_len + 1 + 1 + auth_len
              + db_len + 1 + plugin_len + 1 in
   let buf = mem_alloc plen in
-  // capabilities (LE u32): bits we need:
-  //   CLIENT_LONG_PASSWORD (0x00000001)
-  //   CLIENT_PROTOCOL_41   (0x00000200)
-  //   CLIENT_TRANSACTIONS  (0x00002000)
-  //   CLIENT_SECURE_CONNECTION (0x00008000)
-  //   CLIENT_CONNECT_WITH_DB   (0x00000008)
-  //   CLIENT_PLUGIN_AUTH       (0x00080000)
-  //   → 0x0008A209
-  let _ = mem_set_u32le buf 0 565769 in    // 0x0008A209 decimal
+  let _ = mem_set_u32le buf 0 caps in
   let _ = mem_set_u32le buf 4 1048576 in   // 1 MB max packet
   let _ = mem_set_u8 buf 8 33 in           // 0x21 utf8_general_ci
   // 23 bytes of filler are already zero from mem_alloc — no explicit zero
@@ -295,7 +303,7 @@ let _my_send_handshake_response = fn (fd: int)
   let plugin_off = after_db + 1 in
   let after_plugin = mem_copy_str buf plugin_off plugin in
   let _ = mem_set_u8 buf after_plugin 0 in
-  _my_send_packet fd 1 buf plen
+  _my_send_packet fd seq buf plen
   ;
 
 // ---- caching_sha2_password -------------------------------------------
@@ -392,6 +400,59 @@ let _my_sha2_full_auth = fn (fd: int) -> fn (seq_after: int)
       let _ = print ("mysql: unexpected sha2 reply head=" ++ show oh) in false
   ;
 
+// Common post-Initial-Handshake auth flow. Takes the salt + plugin
+// parsed from the server's greeting plus the seq/caps to advertise in
+// HandshakeResponse41 — different when SSL is in use (seq=2 after the
+// SSL Request took seq=1; caps includes CLIENT_SSL). Returns fd on
+// success or -1 on failure (closing the socket).
+let _my_finish_auth = fn (fd: int) -> fn (hs_seq: int) -> fn (caps: int)
+                   -> fn (user: str) -> fn (password: str) -> fn (db: str)
+                   -> fn (salt: str) -> fn (plugin: str) ->
+  let (auth_resp, using_sha2) =
+    if str_eq plugin "mysql_native_password" then
+      (_my_native_auth password salt, false)
+    else if str_eq plugin "caching_sha2_password" then
+      (_my_sha2_fast password salt, true)
+    else
+      ("", false) in
+  if str_eq plugin "mysql_native_password" ||
+     str_eq plugin "caching_sha2_password" then
+    let _ = _my_send_handshake_response fd hs_seq caps user db auth_resp plugin in
+    let (seq_reply, reply, rlen) = _my_recv_packet fd in
+    let rh = mem_get_u8 reply 0 in
+    if rh == 0 then fd
+    else if rh == 255 then
+      let msg = mem_to_str (reply + 3) (rlen - 3) in
+      let _ = print ("mysql auth ERR: " ++ msg) in
+      let _ = tcp_close fd in
+      (0 - 1)
+    else if using_sha2 && rh == 1 then
+      let status = mem_get_u8 reply 1 in
+      if status == 3 then
+        let (_, ok, olen) = _my_recv_packet fd in
+        if mem_get_u8 ok 0 == 0 then fd
+        else
+          let _ = print ("mysql sha2 fast reply ERR: " ++
+            mem_to_str (ok + 3) (olen - 3)) in
+          let _ = tcp_close fd in
+          (0 - 1)
+      else if status == 4 then
+        if _my_sha2_full_auth fd seq_reply password salt then fd
+        else let _ = tcp_close fd in (0 - 1)
+      else
+        let _ = print ("mysql: unexpected sha2 status=" ++ show status) in
+        let _ = tcp_close fd in
+        (0 - 1)
+    else
+      let _ = print ("mysql: unexpected handshake reply head=" ++ show rh) in
+      let _ = tcp_close fd in
+      (0 - 1)
+  else
+    let _ = print ("mysql: unsupported auth plugin " ++ plugin) in
+    let _ = tcp_close fd in
+    (0 - 1)
+  ;
+
 // ---- Public entry: connect -------------------------------------------
 
 let mysql_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
@@ -415,53 +476,67 @@ let mysql_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
         (0 - 1)
       else
         let (salt, plugin) = _my_parse_handshake payload plen in
-        // Compute auth response per plugin.
-        let (auth_resp, using_sha2) =
-          if str_eq plugin "mysql_native_password" then
-            (_my_native_auth password salt, false)
-          else if str_eq plugin "caching_sha2_password" then
-            (_my_sha2_fast password salt, true)
-          else
-            ("", false) in
-        if str_eq plugin "mysql_native_password" ||
-           str_eq plugin "caching_sha2_password" then
-          let _ = _my_send_handshake_response fd user db auth_resp plugin in
-          let (seq_reply, reply, rlen) = _my_recv_packet fd in
-          let rh = mem_get_u8 reply 0 in
-          if rh == 0 then fd                                // OK — done
-          else if rh == 255 then
-            let msg = mem_to_str (reply + 3) (rlen - 3) in
-            let _ = print ("mysql auth ERR: " ++ msg) in
-            let _ = tcp_close fd in
-            (0 - 1)
-          else if using_sha2 && rh == 1 then
-            // AuthMoreData with fast/full status.
-            let status = mem_get_u8 reply 1 in
-            if status == 3 then
-              // fast_auth_success — next packet is OK.
-              let (_, ok, olen) = _my_recv_packet fd in
-              if mem_get_u8 ok 0 == 0 then fd
-              else
-                let _ = print ("mysql sha2 fast reply ERR: " ++
-                  mem_to_str (ok + 3) (olen - 3)) in
-                let _ = tcp_close fd in
-                (0 - 1)
-            else if status == 4 then
-              // perform_full_authentication — RSA public-key round trip.
-              if _my_sha2_full_auth fd seq_reply password salt then fd
-              else let _ = tcp_close fd in (0 - 1)
-            else
-              let _ = print ("mysql: unexpected sha2 status=" ++ show status) in
-              let _ = tcp_close fd in
-              (0 - 1)
-          else
-            let _ = print ("mysql: unexpected handshake reply head=" ++ show rh) in
-            let _ = tcp_close fd in
-            (0 - 1)
+        _my_finish_auth fd 1 _my_caps_plain user password db salt plugin
+  ;
+
+// ---- SSL negotiation -------------------------------------------------
+//
+// MySQL's SSL upgrade is more involved than PG's magic-byte handshake.
+// After receiving Initial Handshake, the client sends a partial
+// HandshakeResponse41 — just the 32-byte header (capabilities with
+// CLIENT_SSL set, max_packet_size, charset, 23-byte reserved). The
+// server then initiates a TLS handshake on the same fd. Once TLS is
+// established, the client sends the FULL HandshakeResponse41 (with
+// user / auth / db / plugin) over the encrypted channel, and the
+// server responds with OK / ERR / AuthMoreData as usual.
+//
+// Sequence numbers thread through:
+//   seq 0 : server → Initial Handshake
+//   seq 1 : client → SSL Request (partial response)
+//   [TLS handshake — no MySQL packets]
+//   seq 2 : client → full HandshakeResponse41  (over TLS)
+//   seq 3 : server → OK / ERR / AuthMoreData
+
+let _my_send_ssl_request = fn (fd: int) ->
+  let plen = 32 in
+  let buf = mem_alloc plen in
+  let _ = mem_set_u32le buf 0 _my_caps_ssl in
+  let _ = mem_set_u32le buf 4 1048576 in                     // 1 MB max packet
+  let _ = mem_set_u8 buf 8 33 in                             // utf8_general_ci
+  let _ = _my_zero_bytes buf 9 0 23 in                       // filler
+  _my_send_packet fd 1 buf plen
+  ;
+
+let mysql_connect_ssl = fn (host: str) -> fn (port: int) -> fn (user: str)
+                     -> fn (password: str) -> fn (db: str) ->
+  let fd = tcp_connect host port in
+  if fd < 1 then
+    let _ = print ("mysql: tcp connect failed to " ++ host ++ ":" ++ show port) in
+    (0 - 1)
+  else
+    let (seq0, payload, plen) = _my_recv_packet fd in
+    if seq0 < 0 then
+      let _ = print "mysql: short read on Initial Handshake" in
+      let _ = tcp_close fd in (0 - 1)
+    else
+      let head = mem_get_u8 payload 0 in
+      if head == 255 then
+        let msg = mem_to_str (payload + 3) (plen - 3) in
+        let _ = print ("mysql handshake ERR: " ++ msg) in
+        let _ = tcp_close fd in (0 - 1)
+      else
+        let (salt, plugin) = _my_parse_handshake payload plen in
+        // 1. Ask the server for TLS.
+        let _ = _my_send_ssl_request fd in
+        // 2. Upgrade the socket in place — Node's tls.connect wraps
+        //    the fd and swaps our worker's socket handle.
+        if tcp_starttls fd host != 0 then
+          let _ = print "mysql: SSL required but TLS handshake failed" in
+          let _ = tcp_close fd in (0 - 1)
         else
-          let _ = print ("mysql: unsupported auth plugin " ++ plugin) in
-          let _ = tcp_close fd in
-          (0 - 1)
+          // 3. Now speak the full HandshakeResponse41 over the
+          //    encrypted stream, at seq=2 (since SSL Request took 1).
+          _my_finish_auth fd 2 _my_caps_ssl user password db salt plugin
   ;
 
 // ---- COM_QUERY -------------------------------------------------------
@@ -793,13 +868,6 @@ let rec _my_null_placeholder = fn (params: str option list) ->
   | Cons (_, rest) -> Cons (0, _my_null_placeholder rest)
   ;
 
-// Zero out `n` bytes of `buf` starting at `off`. Extracted because
-// wasm codegen doesn't allow let-rec inside expression scope.
-let rec _my_zero_bytes = fn (buf: int) -> fn (off: int) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then ()
-  else let _ = mem_set_u8 buf (off + i) 0 in _my_zero_bytes buf off (i + 1) n
-  ;
-
 // COM_STMT_EXECUTE packet. `stmt_id` comes from mysql_prepare.
 let _my_send_execute = fn (fd: int) -> fn (stmt_id: int)
                     -> fn (params: str option list) ->
@@ -1051,7 +1119,10 @@ let mysql_parse_url = fn (url: str) ->
 
 let mysql_connect_url = fn (url: str) ->
   let (host, port, user, password, db) = mysql_parse_url url in
-  mysql_connect host port user password db
+  if str_contains url "ssl=true" || str_contains url "sslmode=require" then
+    mysql_connect_ssl host port user password db
+  else
+    mysql_connect host port user password db
   ;
 
 // ---- Transactions ---------------------------------------------------
