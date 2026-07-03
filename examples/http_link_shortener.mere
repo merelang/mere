@@ -49,6 +49,7 @@ import "../contrib/http/security.mere";
 import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
+import "../contrib/http/escape.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
@@ -90,20 +91,7 @@ in
 
 // ---- JSON emission helpers ----------------------------------------
 
-let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
-            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
-            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _esc_walk s buf (i + 1) n
-in
-let jstr = fn (s: str) ->
-  let buf = strbuf_new () in
-  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
-in
+// jstr comes from contrib/http/escape.mere.
 
 // ---- link CRUD ----------------------------------------------------
 

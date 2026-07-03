@@ -36,6 +36,7 @@ import "../contrib/http/security.mere";
 import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
+import "../contrib/http/escape.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
@@ -93,37 +94,7 @@ let valid_slug = fn (s: str) ->
     map_get st "ok" == 1
 in
 
-// ---- HTML / JSON emission -----------------------------------------
-
-let rec _json_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
-            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
-            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _json_walk s buf (i + 1) n
-in
-let jstr = fn (s: str) ->
-  let buf = strbuf_new () in
-  "\"" ++ _json_walk s buf 0 (str_len s) ++ "\""
-in
-
-let rec _html_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
-            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
-            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _html_walk s buf (i + 1) n
-in
-let html_esc = fn (s: str) ->
-  let buf = strbuf_new () in
-  _html_walk s buf 0 (str_len s)
-in
+// jstr / html_escape come from contrib/http/escape.mere.
 
 // Split body into lines for MarkdownHtml.render.
 let split_lines = fn (s: str) ->
@@ -248,15 +219,15 @@ let render_page = fn (slug: str) -> fn (version: int) ->
                    "\">Show latest</a>.</div>"
                  else "" in
     let _ = http_set_content_type "text/html; charset=utf-8" in
-    "<!doctype html><meta charset=utf-8><title>" ++ html_esc title ++
-    " — " ++ html_esc wiki_title ++ "</title>" ++
+    "<!doctype html><meta charset=utf-8><title>" ++ html_escape title ++
+    " — " ++ html_escape wiki_title ++ "</title>" ++
     "<link rel=\"stylesheet\" href=\"/static/style.css\">" ++
     banner ++
     "<nav><a href=\"/\">index</a> · <a href=\"/page/" ++ slug ++
     "/history\">history</a> · <a href=\"/edit/" ++ slug ++ "\">edit</a></nav>" ++
-    "<h1>" ++ html_esc title ++ "</h1>" ++
-    "<p class=\"meta\">v" ++ show version ++ " · " ++ html_esc ts ++
-    " · " ++ html_esc author ++ "</p>" ++
+    "<h1>" ++ html_escape title ++ "</h1>" ++
+    "<p class=\"meta\">v" ++ show version ++ " · " ++ html_escape ts ++
+    " · " ++ html_escape author ++ "</p>" ++
     "<article>" ++ rendered ++ "</article>"
 in
 
@@ -273,17 +244,17 @@ let render_history_page = fn (slug: str) ->
         else
           let row = "<li><a href=\"/page/" ++ slug ++ "/v/" ++ show n ++
                     "\">v" ++ show n ++ "</a> " ++
-                    "<span class=\"meta\">" ++ html_esc ts ++
-                    " by " ++ html_esc author ++
-                    "</span> — " ++ html_esc title ++ "</li>" in
+                    "<span class=\"meta\">" ++ html_escape ts ++
+                    " by " ++ html_escape author ++
+                    "</span> — " ++ html_escape title ++ "</li>" in
           collect (n - 1) (acc ++ row) in
     let items = collect latest "" in
     let _ = http_set_content_type "text/html; charset=utf-8" in
-    "<!doctype html><meta charset=utf-8><title>History — " ++ html_esc slug ++
+    "<!doctype html><meta charset=utf-8><title>History — " ++ html_escape slug ++
     "</title><link rel=\"stylesheet\" href=\"/static/style.css\">" ++
     "<nav><a href=\"/\">index</a> · <a href=\"/page/" ++ slug ++
     "\">latest</a></nav>" ++
-    "<h1>History of <code>" ++ html_esc slug ++ "</code></h1>" ++
+    "<h1>History of <code>" ++ html_escape slug ++ "</code></h1>" ++
     "<ul class=\"history\">" ++ items ++ "</ul>"
 in
 
@@ -304,9 +275,9 @@ let render_edit_form = fn (slug: str) ->
     else read_version slug latest in
   let _ = http_set_content_type "text/html; charset=utf-8" in
   let t = read_file "examples/wiki/edit.html" in
-  let t1 = sub_marker t "<!--SLUG-->" (html_esc slug) in
-  let t2 = sub_marker t1 "<!--TITLE-->" (html_esc title) in
-  sub_marker t2 "<!--BODY-->" (html_esc body)
+  let t1 = sub_marker t "<!--SLUG-->" (html_escape slug) in
+  let t2 = sub_marker t1 "<!--TITLE-->" (html_escape title) in
+  sub_marker t2 "<!--BODY-->" (html_escape body)
 in
 
 let home_h = fn (req: str) ->
@@ -326,7 +297,7 @@ let home_h = fn (req: str) ->
         let title = if kv_has pages ("page/" ++ slug ++ "/title")
                     then kv_get pages ("page/" ++ slug ++ "/title")
                     else slug in
-        let li = "<li><a href=\"/page/" ++ slug ++ "\">" ++ html_esc title ++
+        let li = "<li><a href=\"/page/" ++ slug ++ "\">" ++ html_escape title ++
                  "</a> <span class=\"meta\">v" ++ latest ++
                  " · <a href=\"/page/" ++ slug ++ "/history\">history</a>" ++
                  "</span></li>" in
