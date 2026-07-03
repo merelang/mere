@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere JWT API demo</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere JWT API</h1>
+<p class="subtitle">
+  Stateless HS256 bearer auth. Log in to receive a signed token,
+  then every subsequent call sends <code>Authorization: Bearer …</code>.
+  No cookie, no session store — restart the server, the token
+  keeps working. Try tampering with any character of the token to
+  see the signature check fire.
+</p>
+
+<section id="auth-box">
+  <h2>register / login</h2>
+  <input id="user" placeholder="user" value="alice">
+  <input id="pass" type="password" placeholder="pass" value="secret">
+  <button id="btn-register">register</button>
+  <button id="btn-login">login</button>
+</section>
+
+<section id="token-box" hidden>
+  <h2>current token</h2>
+  <details>
+    <summary id="token-summary">signed as <span id="who">(unknown)</span></summary>
+    <pre id="token-raw" class="token"></pre>
+    <p class="meta">
+      Try changing any character in the payload segment (middle
+      chunk between the two dots) and hitting reload — the API will
+      return 401.
+    </p>
+    <button id="btn-logout" class="secondary">forget token</button>
+  </details>
+</section>
+
+<section id="tasks-box" hidden>
+  <h2>tasks</h2>
+  <form id="task-form">
+    <input id="task-text" placeholder="task text" size="40" required autofocus>
+    <button type="submit">add</button>
+  </form>
+  <ul id="task-list"></ul>
+</section>
+
+<pre id="log"></pre>
