@@ -1,0 +1,153 @@
+// contrib/http/multipart.mere — `multipart/form-data` body parser.
+//
+// Handles the common browser upload shape: `<form enctype="multipart
+// /form-data">` with `<input type=file>` and/or plain `<input>`
+// fields. The body layout is:
+//
+//     --<boundary>\r\n
+//     Content-Disposition: form-data; name="<field>"; filename="<f>"\r\n
+//     Content-Type: <mime>\r\n            <-- optional
+//     \r\n
+//     <content bytes>\r\n
+//     --<boundary>\r\n
+//     Content-Disposition: form-data; name="<field2>"\r\n
+//     \r\n
+//     <content>\r\n
+//     --<boundary>--\r\n                  <-- terminator
+//
+// The boundary string comes from the request's `Content-Type` header
+// (`multipart/form-data; boundary=<X>`). Callers should read that
+// header, run `boundary_from_content_type` on it, then hand both the
+// boundary and the body to `parse_multipart`.
+//
+// Public API:
+//   boundary_from_content_type : str -> str
+//     Extract `boundary=<X>` — returns "" if the header isn't
+//     multipart/form-data.
+//
+//   parse_multipart : str -> str -> (str * str * str) list
+//     args: body, boundary
+//     result: for each part, `(name, filename, content)`. `filename`
+//     is "" for plain text fields.
+
+// Extract the boundary token from a Content-Type header like
+// `multipart/form-data; boundary=------abcd`. Missing → "".
+let boundary_from_content_type = fn (ct: str) ->
+  let key = "boundary=" in
+  let idx = str_index_of ct key in
+  if idx < 0 then ""
+  else
+    let start = idx + str_len key in
+    // Boundary token ends at `;` (next parameter) or end of string.
+    // Strip surrounding double quotes if present.
+    let rest = substring ct start (str_len ct) in
+    let semi = str_index_of rest ";" in
+    let raw = if semi < 0 then rest else substring rest 0 semi in
+    let n = str_len raw in
+    if n >= 2 && str_eq (char_at raw 0) "\""
+       && str_eq (char_at raw (n - 1)) "\""
+    then substring raw 1 (n - 1)
+    else raw;
+
+// Look up a `name="value"` pair inside a header line. Case-sensitive
+// on the key, tolerates optional whitespace after `;`. Returns "" if
+// the key isn't present or its value isn't double-quoted.
+let _header_param = fn (line: str) -> fn (key: str) ->
+  let needle = key ++ "=\"" in
+  let idx = str_index_of line needle in
+  if idx < 0 then ""
+  else
+    let start = idx + str_len needle in
+    let rest = substring line start (str_len line) in
+    let close = str_index_of rest "\"" in
+    if close < 0 then ""
+    else substring rest 0 close;
+
+// Split a part's `headers\r\n\r\nbody` blob into (headers, body).
+let _split_headers = fn (part: str) ->
+  let sep = "\r\n\r\n" in
+  let idx = str_index_of part sep in
+  if idx < 0 then ("", part)
+  else (substring part 0 idx,
+        substring part (idx + str_len sep) (str_len part));
+
+// Find the `Content-Disposition:` line inside a headers blob and
+// return it as-is (or "" if not present).
+let _find_disposition = fn (headers: str) ->
+  let lines = str_split headers "\r\n" in
+  let rec find = fn (xs: str list) ->
+    match xs with
+    | Nil -> ""
+    | Cons (line, rest) ->
+      if str_starts_with line "Content-Disposition:"
+         || str_starts_with line "content-disposition:"
+      then line
+      else find rest in
+  find lines;
+
+// Read one part: split into headers + body, extract name / filename
+// from Content-Disposition. Returns (name, filename, body).
+// Trailing `\r\n` at the end of body (belonging to the boundary
+// delimiter that split us) is trimmed if present.
+let _one_part = fn (part: str) ->
+  let (headers, body) = _split_headers part in
+  let disp = _find_disposition headers in
+  let name = _header_param disp "name" in
+  let filename = _header_param disp "filename" in
+  let n = str_len body in
+  let trimmed =
+    if n >= 2 && str_eq (substring body (n - 2) n) "\r\n"
+    then substring body 0 (n - 2)
+    else body in
+  (name, filename, trimmed);
+
+// Reverse a list in-place-style — same shape as elsewhere in
+// contrib, since Mere's stdlib doesn't ship a `List.rev`.
+let rec _rev_walk = fn (xs) -> fn (acc) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rev_walk t (Cons (h, acc));
+let _rev = fn (xs) -> _rev_walk xs Nil;
+
+// Main entry point. Split the body on `\r\n--<boundary>`, keep only
+// the middle segments (skip the empty prefix + the `--` terminator),
+// parse each into (name, filename, content). Order preserved.
+let parse_multipart = fn (body: str) -> fn (boundary: str) ->
+  if str_eq boundary "" then Nil
+  else
+    let sep = "\r\n--" ++ boundary in
+    // The body typically starts with `--<boundary>\r\n…` so the
+    // first split slot is empty. We conservatively look for the
+    // leading `--<boundary>\r\n` and only walk what follows.
+    let leader = "--" ++ boundary ++ "\r\n" in
+    let start =
+      if str_starts_with body leader then str_len leader
+      else 0 in
+    // From position `start`, the remaining body has repeated
+    // `<part-content>\r\n--<boundary>(\r\n|--)` chunks. We split on
+    // the `\r\n--<boundary>` sentinel and process each non-trailing
+    // chunk. The final chunk before `--` (terminator) contains the
+    // last part.
+    let remainder = substring body start (str_len body) in
+    let chunks = str_split remainder sep in
+    let rec collect = fn (xs: str list) -> fn (acc: (str * str * str) list) ->
+      match xs with
+      | Nil -> acc
+      | Cons (chunk, rest) ->
+        // The terminator chunk starts with `--` (followed by `\r\n`).
+        // Empty chunk means we consumed the split at the boundary
+        // right position — skip.
+        if str_len chunk == 0 then collect rest acc
+        else if str_starts_with chunk "--" then collect rest acc
+        else
+          // Strip the leading `\r\n` left over from `sep` matching
+          // (which was `\r\n--<boundary>` for internal boundaries;
+          // the FIRST chunk here started without the leading `\r\n`
+          // because we already skipped the initial `--<boundary>\r\n`).
+          let head =
+            if str_starts_with chunk "\r\n"
+            then substring chunk 2 (str_len chunk)
+            else chunk in
+          let part = _one_part head in
+          collect rest (Cons (part, acc)) in
+    _rev (collect chunks Nil);
