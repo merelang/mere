@@ -1,0 +1,25 @@
+// Smoke test for contrib/xml + contrib/feed.
+// Parses a small hand-crafted RSS 2.0 doc and an Atom doc, printing
+// title / link / date / summary for each entry.
+
+import "../contrib/feed/feed.mere";
+
+let rss_xml = "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>Sample Blog</title><link>http://ex.com/</link><item><title>First post</title><link>http://ex.com/1</link><pubDate>Sat, 01 Jan 2026 00:00:00 GMT</pubDate><description>Hello &amp; welcome.</description></item><item><title>Second &amp; Third</title><link>http://ex.com/2</link><pubDate>Sun, 02 Jan 2026 00:00:00 GMT</pubDate><description><![CDATA[<p>Raw HTML here.</p>]]></description></item></channel></rss>" in
+
+let atom_xml = "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom Blog</title><link href=\"http://atom.example/\"/><entry><title>Atom one</title><link href=\"http://atom.example/1\"/><updated>2026-01-01T00:00:00Z</updated><summary>Body one.</summary></entry></feed>" in
+
+let show_doc = fn (doc: Doc) ->
+  let _ = print ("== " ++ doc.title ++ " (" ++ doc.link ++ ") ==") in
+  let rec go = fn (xs: Entry list) ->
+    match xs with
+    | Nil -> 0
+    | Cons (e, rest) ->
+      let _ = print ("  - " ++ e.title ++ " | " ++ e.date) in
+      let _ = print ("      link: " ++ e.link) in
+      let _ = print ("      body: " ++ e.summary) in
+      go rest in
+  go doc.entries;
+
+let _ = show_doc (Feed.parse_feed rss_xml) in
+let _ = show_doc (Feed.parse_feed atom_xml) in
+0
