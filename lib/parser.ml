@@ -44,6 +44,16 @@ let imported_files : (string, unit) Hashtbl.t = Hashtbl.create 4
    `import "path";` is processed (so recursive imports resolve correctly). *)
 let current_base_dir : string ref = ref ""
 
+(* Phase 55.x (Level 1 package system): extra directories to try when
+   an import's importer-relative path doesn't exist. Populated by
+   `parse_program ~search_paths` from the CLI's `-I` flags and the
+   `MERE_PATH` env var. The importer's own directory is tried first
+   (existing behavior); each search path is tried in order after
+   that. This lets a Mere program in an unrelated repo `import
+   "contrib/http/router.mere"` as long as the compiler was invoked
+   with `-I /path/to/mere/checkout`. *)
+let import_search_paths : string list ref = ref []
+
 (* Region name stack — pushed when entering a `region NAME { ... }` body
    and popped on exit. Used to recognize `R.alloc(expr)` as sugar for
    `&R expr` only when R is a lexically-enclosing region (so existing
@@ -1682,22 +1692,37 @@ let rec parse_program_internal tokens =
     match toks with
     | (pos, T_import) :: (_, T_string path) :: (_, T_semi) :: rest ->
       (* `import "path";` — Phase 9.5: importer-relative path resolution.
-         Relative paths are resolved against `current_base_dir` (the
-         directory of the file currently being parsed). Absolute paths
-         used as-is. Canonicalisation via `Unix.realpath` collapses
-         symlinks and different relative forms of the same file, so the
-         cycle guard catches them. *)
-      let resolved =
+         Relative paths are resolved against `current_base_dir` first;
+         if the file isn't there we fall through to each dir in
+         `import_search_paths` (the CLI's `-I` list + $MERE_PATH). Absolute
+         paths are used as-is. Canonicalisation via `Unix.realpath`
+         collapses symlinks and different relative forms of the same file,
+         so the cycle guard catches them. *)
+      let try_canonical p =
+        try Some (Unix.realpath p)
+        with Unix.Unix_error _ -> None
+      in
+      let candidates =
         if Filename.is_relative path then
           Filename.concat !current_base_dir path
-        else path
+          :: List.map (fun d -> Filename.concat d path) !import_search_paths
+        else [path]
+      in
+      let rec first_match = function
+        | [] -> None
+        | p :: rest ->
+          (match try_canonical p with
+           | Some c -> Some c
+           | None -> first_match rest)
       in
       let canonical =
-        try Unix.realpath resolved
-        with Unix.Unix_error _ ->
+        match first_match candidates with
+        | Some c -> c
+        | None ->
           raise (Parse_error (pos,
-            Printf.sprintf "import: cannot resolve path `%s` (relative to `%s`)"
-              path !current_base_dir))
+            Printf.sprintf
+              "import: cannot resolve path `%s` (tried: %s)"
+              path (String.concat ", " candidates)))
       in
       if Hashtbl.mem imported_files canonical then
         parse_decls decls rest
@@ -1932,9 +1957,10 @@ let rec parse_program_internal tokens =
    delegate to the recursive worker. Inside the worker, `import` calls
    `parse_program_internal` directly so the cycle guard survives the
    recursion. *)
-let parse_program ?(base_dir = Sys.getcwd ()) tokens =
+let parse_program ?(base_dir = Sys.getcwd ()) ?(search_paths = []) tokens =
   Hashtbl.reset imported_files;
   current_base_dir := base_dir;
+  import_search_paths := search_paths;
   parse_program_internal tokens
 
 let parse tokens =
