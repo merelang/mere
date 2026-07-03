@@ -1,0 +1,98 @@
+// examples/db_mysql_tx.mere — MySQL transactions + savepoints.
+//
+// Companion to db_tx.mere + db_savepoint.mere on the PG side. Same
+// callback convention: body returns `Some _` to commit, `None` to
+// roll back. Unlike PG, MySQL splits isolation-level configuration
+// from the BEGIN — mysql_tx_iso hides both statements behind a single
+// helper.
+//
+// Demo cycle:
+//   1. mysql_tx_iso REPEATABLE READ, verifies @@tx_isolation reports
+//      the requested level; two INSERTs commit.
+//   2. mysql_tx with savepoint-scope: outer INSERTs land, inner scope
+//      inserts and returns None → those rows are rolled back but the
+//      outer transaction commits.
+//
+// Setup:
+//   docker run -d --name mere-mysql-tx -p 15505:3306 \
+//     -e MYSQL_ROOT_PASSWORD=rootpw \
+//     -e MYSQL_DATABASE=meredb \
+//     -e MYSQL_USER=meredev \
+//     -e MYSQL_PASSWORD=meredevpw \
+//     mysql:8.0
+//
+// Usage:
+//   ./mere -w examples/db_mysql_tx.mere > /tmp/dbmt.wat
+//   wat2wasm --enable-tail-call /tmp/dbmt.wat -o /tmp/dbmt.wasm
+//   node scripts/run_wasm.js /tmp/dbmt.wasm
+
+import "../contrib/db/mysql.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> mysql_val_or h "NULL"
+  | Cons (h, t) -> mysql_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let insert_row = fn (fd: int) -> fn (id: str) -> fn (name: str) ->
+  mysql_query_params fd
+    "INSERT INTO accounts VALUES (?, ?)"
+    (Cons (Some id, Cons (Some name, Nil)))
+  ;
+
+let fd = mysql_connect_url "mysql://meredev:meredevpw@127.0.0.1:15505/meredb" in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  let _ = mysql_query fd "DROP TABLE IF EXISTS accounts" in
+  let _ = mysql_query fd
+    "CREATE TABLE accounts (id INT PRIMARY KEY, name VARCHAR(80))" in
+
+  // ---- mysql_tx_iso: REPEATABLE READ ----------------------------------
+  let _ = print "== mysql_tx_iso REPEATABLE READ ==" in
+  let _ = mysql_tx_iso fd "REPEATABLE READ" (fn (tx) ->
+    let iso_rows = mysql_query tx
+      "SELECT @@session.transaction_isolation" in
+    let _ = print ("  server iso = " ++
+      mysql_val_or (mysql_first_col iso_rows 0) "?") in
+    let _ = insert_row tx "1" "alice" in
+    let _ = insert_row tx "2" "bob" in
+    Some ()) in
+
+  // ---- mysql_savepoint_scope: nested rollback -------------------------
+  //
+  // Called at the top of a mysql_tx wrapper. Same reachability wrinkle
+  // as db_savepoint.mere on the PG side: the codegen's dead-code walker
+  // occasionally drops helpers referenced only from inside another
+  // higher-order call's body, so we run the outer BEGIN/COMMIT by hand
+  // and let savepoint_scope stand at top level.
+  let _ = print "" in
+  let _ = print "== mysql_savepoint_scope: inner rollback, outer commit ==" in
+  let _ = mysql_query fd "BEGIN" in
+  let _ = insert_row fd "3" "gamma" in           // outer, survives
+
+  let _ = mysql_savepoint_scope fd "sp_inner" (fn (fd2) ->
+    let _ = insert_row fd2 "4" "delta_bad" in    // rolled back
+    let _ = insert_row fd2 "5" "epsilon_bad" in  // rolled back
+    (None : unit option)) in
+
+  let _ = insert_row fd "6" "zeta" in            // outer, survives
+  let _ = mysql_query fd "COMMIT" in
+
+  let _ = print "" in
+  let _ = print "-- final rows (delta_bad / epsilon_bad should be gone):" in
+  let rows = mysql_query fd
+    "SELECT id, name FROM accounts ORDER BY id" in
+  let _ = print_rows rows in
+
+  let _ = mysql_close fd in
+  ()

@@ -6,7 +6,7 @@ their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` and
 implemented in Mere itself; the host only exposes low-level TCP and
 crypto primitives. No `npm` packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 19
+The rest of this page walks the stack top-down, then catalogs the 20
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -241,6 +241,7 @@ command needed) and cleans up on process exit.
 | [db_mysql](https://github.com/merelang/mere/blob/main/examples/db_mysql.mere) | MySQL 8 — auto-selects `mysql_native_password` (SHA-1) or `caching_sha2_password` (SHA-256 fast + RSA-OAEP-SHA1 slow); NULL round-trip |
 | [db_mysql_prepared](https://github.com/merelang/mere/blob/main/examples/db_mysql_prepared.mere) | `COM_STMT_PREPARE` + `_EXECUTE`, binary-protocol row decode; SQL-injection defense |
 | [db_mysql_pool](https://github.com/merelang/mere/blob/main/examples/db_mysql_pool.mere) | `mysql_pool` keep-alive + `mysql_parse_url` + percent decoding |
+| [db_mysql_tx](https://github.com/merelang/mere/blob/main/examples/db_mysql_tx.mere) | `mysql_tx_iso` (REPEATABLE READ) + `mysql_savepoint_scope` nested rollback |
 
 ## Limitations and future work
 
@@ -260,12 +261,13 @@ command needed) and cleans up on process exit.
   event loop would need cooperation from the Node harness.
 - **MySQL client**: connect + auth + `COM_QUERY` + prepared statements
   (`COM_STMT_PREPARE` / `_EXECUTE` / `_CLOSE`) with binary-protocol
-  row decoding + `mysql://` URL parsing + single-fd `mysql_pool`. Both
+  row decoding + `mysql://` URL parsing + single-fd `mysql_pool` +
+  transactions (`mysql_tx` / `mysql_tx_iso`) with savepoints. Both
   auth plugins are wired — `mysql_native_password` (SHA-1) and
   `caching_sha2_password` (SHA-256 fast-path + RSA-OAEP-SHA1
   public-key exchange when the server's auth cache is cold).
-  Transactions beyond bare `BEGIN/COMMIT` strings and TLS are not
-  wired.
+  TLS and `LISTEN`-style pub/sub are not wired (MySQL has no
+  server-side pub/sub anyway — `NOTIFY` is a PG feature).
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).
