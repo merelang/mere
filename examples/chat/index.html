@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere chat</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere chat</h1>
+<p class="subtitle">
+  Server-Sent Events demo. Every open tab holds a long-lived
+  <code>GET /sse/chat</code> connection; when anyone POSTs a message,
+  the Mere handler pushes a <code>data: {...}</code> frame out to
+  every subscriber. Open this page in two tabs to see it live.
+</p>
+
+<div id="status">connecting…</div>
+
+<ul id="messages"></ul>
+
+<form id="compose">
+  <input id="author" placeholder="your name" size="12" value="anon">
+  <input id="text" placeholder="say something" size="40" required autofocus>
+  <button type="submit">send</button>
+</form>
+
+<pre id="log"></pre>
