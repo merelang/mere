@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere CSV export</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere CSV export</h1>
+<p class="subtitle">
+  Pair to the SSE chat demo. SSE pushes small events to many
+  long-lived subscribers; this pushes a large payload to one
+  client, one row at a time, via a chunked-transfer streaming
+  response. The Mere handler runs a <code>while</code> loop over
+  <code>1..N</code> and calls <code>http_stream_write</code> per
+  row — no full-body allocation in the Mere heap.
+</p>
+
+<section>
+  <h2>generate</h2>
+  <label>rows <input id="rows" type="number" value="10000" min="1" max="1000000"></label>
+  <button id="btn-download">download CSV</button>
+  <button id="btn-preview" class="secondary">preview first 20 rows</button>
+  <p class="meta">
+    Cap is 1,000,000 rows. Larger requests are still valid HTTP; try
+    <code>curl -s 'http://localhost:8080/api/logs.csv?rows=100000' | wc -l</code>
+    to see the raw stream.
+  </p>
+</section>
+
+<section>
+  <h2>preview</h2>
+  <pre id="preview" class="output">(no preview yet)</pre>
+</section>
+
+<pre id="log"></pre>

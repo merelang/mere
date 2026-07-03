@@ -1,0 +1,108 @@
+// http_csv_export: on-demand CSV export via streaming response.
+//
+// Twelfth contrib/http demo. Pair to http_chat's server-sent events:
+// SSE pushes SMALL events out to many long-lived subscribers, this
+// pushes LARGE data out to one client. Both hijack the response
+// stream instead of buffering; both mean the Mere handler can loop
+// and emit as it goes without allocating the whole payload in the
+// Mere heap first.
+//
+// Endpoints:
+//   GET  /                        HTML export UI
+//   GET  /api/logs.csv?rows=N     CSV stream of N synthetic log rows
+//
+// The synthetic data is `<i>,<timestamp>,<level>,message #<i>`
+// — enough shape to try in a spreadsheet, cheap enough to generate
+// millions of rows without touching disk.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/query.mere";
+import "../contrib/http/stream.mere";
+import "../contrib/log/log.mere";
+
+// ---- helpers ------------------------------------------------------
+
+// Pick the `rows` query param out of the raw request line. Defaults
+// to 1000 if missing / non-numeric. Capped at 1,000,000 to keep
+// runaway requests from tying up the process.
+let rows_from_req = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then 1000
+  else
+    let url = substring req (sp + 1) (str_len req) in
+    let (_path, query) = split_url url in
+    let params = parse_query query in
+    let raw = query_get params "rows" in
+    if str_eq raw "" then 1000
+    else
+      let n = int_of_str raw in
+      if n < 0 then 0
+      else if n > 1000000 then 1000000
+      else n
+in
+
+// One CSV row. Simple synthetic shape: a monotonic id, a fake ts,
+// a rotating level, and a message. No embedded commas so we don't
+// need CSV quoting.
+let csv_row = fn (i: int) ->
+  let level = if (i % 20) == 0 then "ERROR"
+              else if (i % 7) == 0 then "WARN"
+              else "INFO" in
+  let ts = 1783000000 + i * 60 in
+  show i ++ "," ++ show ts ++ "," ++ level ++ ",message number " ++ show i ++ "\n"
+in
+
+// ---- handlers -----------------------------------------------------
+
+// Emit an N-row CSV as a single streaming response. The handler
+// walks 1..N and writes each row via `http_stream_write` — the
+// Node glue flushes each chunk to the client immediately.
+let logs_csv_h = fn (req: str) ->
+  let n = rows_from_req req in
+  let _ = http_stream_start "text/csv; charset=utf-8" 200 in
+  let _ = http_stream_write "id,timestamp,level,message\n" in
+  let st = map_new () in
+  let _ = map_set st "i" 1 in
+  let _ = while map_get st "i" <= n do
+    let i = map_get st "i" in
+    let _ = http_stream_write (csv_row i) in
+    let _ = map_set st "i" (i + 1) in () in
+  let _ = log_with "info" "csv_export" (Cons (("rows", show n), Nil)) in
+  ""
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/csv_export/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET" "/"                home_h,
+  Cons (route "GET" "/api/logs.csv"    logs_csv_h,
+  Nil)) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/csv_export" handle_routed in
+
+let _ = print "starting CSV export on :8080" in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0
