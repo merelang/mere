@@ -27,7 +27,7 @@ const TCP_BUF_BYTES = 1 << 20;  // 1 MiB shared window; big enough for typical D
 const TCP_SAB = new SharedArrayBuffer(TCP_DATA_OFFSET + TCP_BUF_BYTES);
 const tcpCtrl = new Int32Array(TCP_SAB, 0, 8);
 const tcpData = new Uint8Array(TCP_SAB, TCP_DATA_OFFSET);
-const TCP_OP = { CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5 };
+const TCP_OP = { CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5, STARTTLS: 6 };
 let tcpWorker = null;
 
 function tcpEnsureWorker() {
@@ -91,6 +91,15 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     },
     tcp_close: (fd) => { tcpCall(TCP_OP.CLOSE, fd | 0, 0); return 0; },
     tcp_set_timeout: (fd, ms) => { tcpCall(TCP_OP.SET_TIMEOUT, fd | 0, ms | 0); return 0; },
+    // tcp_starttls(fd, sni_host: str) -> int (0 = success, -1 = handshake
+    //   failed). Upgrades an already-established plain TCP connection to
+    //   TLS in place. Used by pg / mysql SSL negotiation.
+    tcp_starttls: (fd, hostPtr) => {
+      const host = readCStr(hostPtr);
+      const bytes = Buffer.from(host, 'utf8');
+      tcpData.set(bytes, 0);
+      return tcpCall(TCP_OP.STARTTLS, fd | 0, bytes.length) | 0;
+    },
 
     // ---- Byte-buffer primitives -----------------------------------------
     str_ptr: (ptr) => ptr,
