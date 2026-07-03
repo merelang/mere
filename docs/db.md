@@ -234,7 +234,7 @@ command needed) and cleans up on process exit.
 | [db_notify](https://github.com/merelang/mere/blob/main/examples/db_notify.mere) | LISTEN / NOTIFY with two connections + timeout path |
 | [db_notify_async](https://github.com/merelang/mere/blob/main/examples/db_notify_async.mere) | notifications arriving inside another query's response stream |
 | [http_todo_pg](https://github.com/merelang/mere/blob/main/examples/http_todo_pg.mere) | `contrib/http` + `pg_pool` — signup / login / todos backed by PG |
-| [db_mysql](https://github.com/merelang/mere/blob/main/examples/db_mysql.mere) | MySQL 8 (`mysql_native_password`) — handshake + query + NULL round trip |
+| [db_mysql](https://github.com/merelang/mere/blob/main/examples/db_mysql.mere) | MySQL 8 — auto-selects `mysql_native_password` (SHA-1) or `caching_sha2_password` (SHA-256 fast + RSA-OAEP-SHA1 slow); NULL round-trip |
 
 ## Limitations and future work
 
@@ -253,12 +253,12 @@ command needed) and cleans up on process exit.
   — the pool has a `pump` primitive but no background loop. A real
   event loop would need cooperation from the Node harness.
 - **MySQL client is MVP**: connect + auth + simple `COM_QUERY` +
-  text-format rows work. Prepared statements (`COM_STMT_PREPARE`),
-  transactions beyond bare `BEGIN/COMMIT` strings, TLS, and the modern
-  `caching_sha2_password` auth path are not wired. Server must be
-  configured with `--default-authentication-plugin=mysql_native_password`
-  (MySQL 8.0-8.3), or use `ALTER USER ... IDENTIFIED WITH
-  mysql_native_password` — the flag was removed in MySQL 8.4.
+  text-format rows work. Both auth plugins are wired —
+  `mysql_native_password` (SHA-1) and `caching_sha2_password` (SHA-256
+  fast-path + RSA-OAEP-SHA1 public-key exchange when the server's
+  auth cache is cold). Prepared statements (`COM_STMT_PREPARE`),
+  transactions beyond bare `BEGIN/COMMIT` strings, and TLS are not
+  wired.
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).

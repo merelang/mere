@@ -209,6 +209,42 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i];
       return writeStr(r.toString('hex'));
     },
+
+    // bytes_to_hex(s: str) -> hex — hex-encode the UTF-8 bytes of s.
+    // Needed for values that were built as text but must reach an extern
+    // that only knows how to speak hex (RSA, hex_xor on non-digest data,
+    // …).
+    bytes_to_hex: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'utf8').toString('hex'));
+    },
+
+    // bytes_cycle_xor_hex(bytes_hex, key_hex) -> hex — XOR `bytes` with
+    // a copy of `key` that repeats to match its length. Used by MySQL's
+    // caching_sha2_password full-auth path to obfuscate the cleartext
+    // password before RSA encryption.
+    bytes_cycle_xor_hex: (bytesPtr, keyPtr) => {
+      const bytes = Buffer.from(readCStr(bytesPtr), 'hex');
+      const key = Buffer.from(readCStr(keyPtr), 'hex');
+      if (key.length === 0) return writeStr(bytes.toString('hex'));
+      const r = Buffer.alloc(bytes.length);
+      for (let i = 0; i < bytes.length; i++) r[i] = bytes[i] ^ key[i % key.length];
+      return writeStr(r.toString('hex'));
+    },
+
+    // rsa_encrypt_oaep_sha1(pem: str, data_hex: str) -> hex
+    //   Encrypts `data` with the RSA public key parsed from `pem`,
+    //   using OAEP padding with SHA-1 (MySQL's choice for the
+    //   caching_sha2_password full-auth ciphertext).
+    rsa_encrypt_oaep_sha1: (pemPtr, dataPtr) => {
+      const crypto = require('crypto');
+      const pem = readCStr(pemPtr);
+      const data = Buffer.from(readCStr(dataPtr), 'hex');
+      const encrypted = crypto.publicEncrypt(
+        { key: pem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha1' },
+        data,
+      );
+      return writeStr(encrypted.toString('hex'));
+    },
   };
 }
 
