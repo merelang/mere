@@ -959,6 +959,75 @@ let pg_tx = fn (fd: int) -> fn (body) ->
     Some v
   ;
 
+// Same as pg_tx but with an explicit isolation-level / access-mode
+// suffix appended to BEGIN. Common values:
+//   "ISOLATION LEVEL REPEATABLE READ"
+//   "ISOLATION LEVEL SERIALIZABLE"
+//   "ISOLATION LEVEL SERIALIZABLE READ ONLY"
+//   "READ ONLY DEFERRABLE"
+// The suffix is inlined verbatim, so it must come from a trusted
+// (Mere-visible) constant — never from user-supplied HTTP input.
+let pg_tx_iso = fn (fd: int) -> fn (opts: str) -> fn (body) ->
+  let _ = pg_query fd ("BEGIN " ++ opts) in
+  let result = body fd in
+  match result with
+  | None ->
+    let _ = pg_query fd "ROLLBACK" in
+    None
+  | Some v ->
+    let _ = pg_query fd "COMMIT" in
+    Some v
+  ;
+
+// ---- Savepoints ---------------------------------------------------------
+//
+// PG savepoints give you nested rollback boundaries inside a single
+// transaction. Roll back to a savepoint and everything after that
+// point is discarded, but the surrounding transaction stays open —
+// unlike ROLLBACK on the outer tx, which throws everything away.
+//
+//   pg_tx fd (fn (tx) ->
+//     let _ = pg_query_params tx "INSERT …" params_a in
+//     let _ = pg_savepoint_scope tx "sp1" (fn (tx) ->
+//       let _ = pg_query_params tx "INSERT …" params_b in
+//       // check some invariant …
+//       None                              // → ROLLBACK TO SAVEPOINT sp1
+//     ) in
+//     let _ = pg_query_params tx "INSERT …" params_c in
+//     Some "outer committed")
+//
+// After this: params_a and params_c are in, params_b is discarded.
+//
+// The `name` argument is inlined into the SQL — treat it as an
+// identifier from a trusted source (Mere constant, not HTTP input).
+
+let pg_savepoint = fn (fd: int) -> fn (name: str) ->
+  let _ = pg_query fd ("SAVEPOINT " ++ name) in ()
+  ;
+
+let pg_rollback_to = fn (fd: int) -> fn (name: str) ->
+  let _ = pg_query fd ("ROLLBACK TO SAVEPOINT " ++ name) in ()
+  ;
+
+let pg_release_savepoint = fn (fd: int) -> fn (name: str) ->
+  let _ = pg_query fd ("RELEASE SAVEPOINT " ++ name) in ()
+  ;
+
+// Scoped savepoint: SAVEPOINT → body → RELEASE (Some) or ROLLBACK TO
+// (None). Analogous to pg_tx but for the nested case. Body still
+// receives the outer fd — savepoints don't need a separate handle.
+let pg_savepoint_scope = fn (fd: int) -> fn (name: str) -> fn (body) ->
+  let _ = pg_savepoint fd name in
+  let result = body fd in
+  match result with
+  | None ->
+    let _ = pg_rollback_to fd name in
+    None
+  | Some v ->
+    let _ = pg_release_savepoint fd name in
+    Some v
+  ;
+
 // ---- Cleanup ------------------------------------------------------------
 
 let pg_close = fn (fd: int) ->

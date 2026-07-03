@@ -1,0 +1,98 @@
+// examples/db_savepoint.mere — nested rollback via savepoints, plus
+// an isolation-level opener.
+//
+// Verifies two things:
+//   1. pg_tx_iso lets the caller start a transaction with an explicit
+//      isolation level (visible via current_setting('transaction_isolation'))
+//   2. pg_savepoint_scope rolls back only the nested portion — the
+//      surrounding transaction stays alive and commits normally
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-sp -p 15445:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_savepoint.mere > /tmp/dbsp.wat
+//   wat2wasm --enable-tail-call /tmp/dbsp.wat -o /tmp/dbsp.wasm
+//   node scripts/run_wasm.js /tmp/dbsp.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let insert_row = fn (fd: int) -> fn (id: str) -> fn (name: str) ->
+  pg_query_params fd
+    "INSERT INTO items VALUES ($1::int, $2)"
+    (Cons (Some id, Cons (Some name, Nil)))
+  ;
+
+let fd = pg_connect_url "postgres://postgres@127.0.0.1:15445/postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+
+  let _ = pg_query fd "DROP TABLE IF EXISTS items" in
+  let _ = pg_query fd "CREATE TABLE items (id int, name text)" in
+
+  // ---- pg_tx_iso: REPEATABLE READ ----------------------------------
+  // Called at top level so the codegen dead-code walker keeps the
+  // definition. See the block comment below the next section for the
+  // reason we avoid pg_tx_iso-wrapped callbacks in this file.
+  let _ = print "== pg_tx_iso REPEATABLE READ ==" in
+  let _ = pg_tx_iso fd "ISOLATION LEVEL REPEATABLE READ" (fn (fd2) ->
+    let rows = pg_query fd2
+      "SELECT current_setting('transaction_isolation')" in
+    let _ = print ("  server iso = " ++
+      pg_val_or (pg_first_col rows 0) "?") in
+    let _ = insert_row fd2 "1" "alpha" in
+    let _ = insert_row fd2 "2" "beta" in
+    Some ()) in
+
+  // ---- pg_savepoint_scope: nested rollback -------------------------
+  //
+  // The classical "wrap a savepoint in pg_tx" nesting doesn't fit the
+  // self-host codegen's current reachability walker (dead-code stops at
+  // anonymous-fn bodies for imported symbols), so we exercise the same
+  // semantics with an explicit BEGIN + savepoint_scope + COMMIT at the
+  // top level. This proves the primitive works; the sugar layer is a
+  // separate follow-up.
+  let _ = print "" in
+  let _ = print "== pg_savepoint_scope: inner rollback, outer commit ==" in
+  let _ = pg_query fd "BEGIN" in
+  let _ = insert_row fd "3" "gamma" in             // outer, survives
+
+  let _ = pg_savepoint_scope fd "sp_inner" (fn (fd2) ->
+    let _ = insert_row fd2 "4" "delta_bad" in      // rolled back
+    let _ = insert_row fd2 "5" "epsilon_bad" in    // rolled back
+    // Annotate the option so the typer pins the payload type — bare
+    // `None` here defaults to a polymorphic 'a option and codegen ends
+    // up dropping pg_savepoint_scope as unresolvable.
+    (None : unit option)) in
+
+  let _ = insert_row fd "6" "zeta" in              // outer, survives
+  let _ = pg_query fd "COMMIT" in
+
+  // ---- verify final table state ------------------------------------
+  let _ = print "" in
+  let _ = print "-- final rows (delta_bad / epsilon_bad should be gone):" in
+  let rows = pg_query fd
+    "SELECT id::text, name FROM items ORDER BY id" in
+  let _ = print_rows rows in
+
+  let _ = pg_close fd in
+  ()
