@@ -1,0 +1,72 @@
+// examples/db_redis_ssl.mere — Redis over TLS.
+//
+// Redis 6+ exposes a dedicated TLS port (typically 6380). Unlike PG's
+// SSLRequest or MySQL's SSL Request Packet, there's no protocol-level
+// negotiation — the socket goes straight into TLS handshake, then RESP
+// flows on top of the encrypted stream. redis_connect_ssl wraps that
+// pattern; the demo also shows the fail-closed verified variant.
+//
+// Setup:
+//   mkdir -p /tmp/mere-redis-certs && cd /tmp/mere-redis-certs
+//   openssl req -new -x509 -days 365 -nodes -text \
+//     -out server.crt -keyout server.key -subj "/CN=localhost"
+//   chmod 644 server.crt server.key
+//   docker run -d --name mere-redis-ssl -p 15603:6380 \
+//     -v /tmp/mere-redis-certs:/certs:ro \
+//     redis:7 \
+//     --port 0 --tls-port 6380 \
+//     --tls-cert-file /certs/server.crt \
+//     --tls-key-file /certs/server.key \
+//     --tls-auth-clients no
+//
+// Usage:
+//   ./mere -w examples/db_redis_ssl.mere > /tmp/dbrs.wat
+//   wat2wasm --enable-tail-call /tmp/dbrs.wat -o /tmp/dbrs.wasm
+//   node scripts/run_wasm.js /tmp/dbrs.wasm
+
+extern fn read_file: str -> str;
+
+import "../contrib/db/redis.mere";
+
+let run_permissive = fn (u: unit) ->
+  let _ = print "== redis_connect_ssl (accept any cert) ==" in
+  let fd = redis_connect_ssl "127.0.0.1" 15603 in
+  if fd < 0 then let _ = print "  unexpected: connect failed" in ()
+  else
+    let _ = print ("  PING: " ++ redis_show (redis_command fd (Cons ("PING", Nil)))) in
+    let _ = redis_close fd in
+    ()
+  ;
+
+let run_verify_system = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== redis_connect_ssl_verify with system CAs (should fail) ==" in
+  let fd = redis_connect_ssl_verify "127.0.0.1" 15603 "" in
+  if fd < 0 then let _ = print "  ok: rejected (self-signed cert not in system trust)" in ()
+  else
+    let _ = print "  unexpected: connect succeeded" in
+    let _ = redis_close fd in
+    ()
+  ;
+
+let run_verify_custom_ca = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== redis_connect_ssl_verify with custom CA PEM (should succeed) ==" in
+  let ca = read_file "/tmp/mere-redis-certs/server.crt" in
+  let fd = redis_connect_ssl_verify "127.0.0.1" 15603 ca in
+  if fd < 0 then let _ = print "  unexpected: connect failed" in ()
+  else
+    let _ = print ("  PING: " ++ redis_show (redis_command fd (Cons ("PING", Nil)))) in
+    let _ = print ("  SET: " ++
+      redis_show (redis_command fd
+        (Cons ("SET", Cons ("k", Cons ("v-over-tls", Nil)))))) in
+    let _ = print ("  GET: " ++
+      redis_show (redis_command fd (Cons ("GET", Cons ("k", Nil))))) in
+    let _ = redis_close fd in
+    ()
+  ;
+
+let _ = run_permissive () in
+let _ = run_verify_system () in
+let _ = run_verify_custom_ca () in
+()
