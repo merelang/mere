@@ -400,6 +400,9 @@ let rec parse_program_internal tokens =
        | (_, T_in) :: rest ->
          let body, toks = expr rest in
          mk pos (Ast.Let_rec (bindings, body)), toks
+       | (_, T_semi) :: rest ->
+         let body, toks = expr rest in
+         mk pos (Ast.Let_rec (bindings, body)), toks
        | _ ->
          raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
     | (pos, T_let) :: (_, T_rec) :: _ ->
@@ -443,6 +446,14 @@ let rec parse_program_internal tokens =
             mk pos (Ast.Match (value,
               [(err_pat, None, err_body); (ok_pat, None, body)])), rest
           | (_, T_in) :: rest ->
+            let body, rest = expr rest in
+            mk pos (Ast.Let (pat, value, body)), rest
+          | (_, T_semi) :: rest ->
+            (* `;` accepted as sugar for `in` in expression position, so
+               a series of top-level-looking `let x = e;` bindings mixed
+               with the classic `let x = e in ...` chain both parse the
+               same. Matches the file-top decl grammar (`;` terminator)
+               and reduces the "wrong separator here" foot-gun. *)
             let body, rest = expr rest in
             mk pos (Ast.Let (pat, value, body)), rest
           | _ ->
