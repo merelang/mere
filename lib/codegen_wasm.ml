@@ -334,6 +334,23 @@ let set_inner_lifts_for_host_wasm (host : string) : unit =
    `--enable-tail-call` (or an equivalent V8 default). *)
 let wasm_tail_pos = ref false
 
+(* True only while emit_expr is walking the top-level `let a = … in
+   let b = … in … 0` spine of the main body. This is the ONE context
+   where a `let x = v in …` with x registered in top_globals_wasm
+   should compile to `global.set $x` (the Phase 36 initialization
+   trick). Any nested `let x = v in …` inside a fn body that happens
+   to share a name with a top-level global is a plain local
+   shadowing binding, and gets a fresh slot.
+
+   Bug this closes: a top-level `let entries = kv_load … in` at the
+   importing file's top makes `entries` a global; when a value-
+   position `let entries = _map_entries …` inside an imported
+   module's fn body was emitted, the name-only check misrouted it
+   to `global.set $entries`, silently overwriting the KV strbuf
+   pointer with an unrelated Entry list. Downstream kv_save then
+   wrote 0 bytes to disk. *)
+let wasm_in_top_level_body = ref false
+
 type lifted_fn_wasm = {
   l_name     : string;
   l_captures : string list;
@@ -1174,12 +1191,16 @@ let emit_float_alloc_from_f64_on_stack () : unit =
 
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
-  (* Snapshot inbound tail-position, then default all descendant
-     emit_expr calls back to non-tail; the specific tail-preserving
-     nodes below (If branches, Let body, Match arm bodies) reinstate
-     `saved_tail` right before recursing into their tail children. *)
+  (* Snapshot inbound tail-position + top-level-body flags. All
+     descendant emit_expr calls default back to non-tail / non-top;
+     tail-preserving nodes (If branches, Let body, Match arm bodies)
+     reinstate `saved_tail`, and Let / Let_rec bodies additionally
+     reinstate `saved_top` so a top-level let-spine stays top-level
+     as it walks down. *)
   let saved_tail = !wasm_tail_pos in
+  let saved_top = !wasm_in_top_level_body in
   wasm_tail_pos := false;
+  wasm_in_top_level_body := false;
   match e.Ast.node with
   | Ast.Int_lit n ->
     emit_instr (Printf.sprintf "i32.const %d" n)
@@ -1483,14 +1504,21 @@ let rec emit_expr (e : Ast.expr) : unit =
           value has been pushed up; just emit the body, which will dispatch
           via App-Var to the lifted name. *)
        wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
        emit_expr body
-     | Ast.P_var name when Hashtbl.mem top_globals_wasm name ->
+     | Ast.P_var name when saved_top && Hashtbl.mem top_globals_wasm name ->
        (* Phase 36 (DEFERRED §1.18 fix): file-scope global. Assign at
           source-order position so subsequent reads (via Var emit which
-          does `global.get $name`) see the updated value. *)
+          does `global.get $name`) see the updated value.
+
+          Gated on saved_top so a nested `let x = v in …` inside a fn
+          body that happens to share a name with a top-level global
+          does NOT overwrite the global — it becomes a plain local
+          shadowing instead. *)
        emit_expr value;
        emit_instr (Printf.sprintf "global.set $%s" name);
        wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
        emit_expr body
      | Ast.P_var name ->
        let slot = fresh_local () in
@@ -1499,6 +1527,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        let prev = !locals in
        locals := (name, slot) :: prev;
        wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
        emit_expr body;
        locals := prev
      | Ast.P_wild | Ast.P_unit ->
@@ -1506,6 +1535,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr value;
        emit_instr "drop";
        wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
        emit_expr body
      | Ast.P_tuple ps ->
        (* Phase 22.1: `let (a, b, ...) = E in B` — Wasm tuples are flat
@@ -1543,6 +1573,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        ) ps;
        locals := !new_bindings @ prev;
        wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
        emit_expr body;
        locals := prev
      | _ ->
@@ -1552,6 +1583,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        in inner_lifts_wasm (= lifted to top level), just emit body. *)
     if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_wasm n) bindings then
       (wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
        emit_expr body)
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
@@ -5124,9 +5156,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Reset counters for the main body. *)
   reset ();
   (* Phase 36 (DEFERRED §1.18 fix): globals are initialized inline in
-     body_expr via emit_expr Let emitting `global.set $name`. *)
+     body_expr via emit_expr Let emitting `global.set $name`. The
+     top-level flag gates that behavior — nested let bindings inside
+     fn bodies (imported modules etc.) that happen to share a name
+     with a top-level global are plain locals. *)
   ignore top_globals_list;
+  wasm_in_top_level_body := true;
   emit_expr body_expr;
+  wasm_in_top_level_body := false;
   (* Phase 27.2: print main's result to stdout via $puts so wasm runtime
      output matches interp's `Pipeline.process s |> print_endline`. The
      stack-top has body's i32 result; pipe through show_<tag> if needed,
