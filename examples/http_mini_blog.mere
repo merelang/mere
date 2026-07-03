@@ -40,6 +40,7 @@ import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/http/escape.mere";
+import "../contrib/http/cookie.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
@@ -63,27 +64,10 @@ let blog_desc = "Powered by Mere — contrib/http + contrib/markdown + contrib/k
 
 // ---- helpers ------------------------------------------------------
 
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
-let session_id = fn (u: unit) ->
-  let cookie = http_get_header "Cookie" ++ "" in
-  let target = "session=" in
-  let tlen = str_len target in
-  let pairs = str_split cookie "; " in
-  let rec find = fn (ps: str list) ->
-    match ps with
-    | Nil -> ""
-    | Cons (p, rest) ->
-      if str_starts_with p target then substring p tlen (str_len p)
-      else find rest in
-  find pairs
-in
 
 let is_admin = fn (u: unit) ->
-  let sid = session_id () in
+  let sid = session_id (http_get_header "Cookie") in
   if str_eq sid "" then false
   else map_has sessions sid
 in

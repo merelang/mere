@@ -147,3 +147,16 @@ let rec json_get = fn (kvs: (str * str) list) -> fn (name: str) ->
     let (k, v) = p in
     if str_eq k name then v
     else json_get rest name;
+
+// Convenience: `body_field name` parses `http_current_body ()` fresh
+// and returns the value of `name` (or ""). Every HTTP demo that
+// speaks JSON was hand-rolling this three-liner; consolidate it here.
+// The redeclared `extern fn` matches the one from contrib/http/http.mere
+// — Mere allows repeated extern declarations as long as the type
+// matches, and doing it here means callers can import just json_body
+// (not both).
+extern fn http_current_body: unit -> str;
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name;

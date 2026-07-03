@@ -39,10 +39,6 @@ import "../contrib/log/log.mere";
 let msgs_db_path = "/tmp/mere_chat_msgs.db" in
 let msgs = kv_load msgs_db_path in
 
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
 // pack3 / split3 come from contrib/kv/pack.mere.
 

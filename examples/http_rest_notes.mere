@@ -49,43 +49,17 @@ let notes = kv_load notes_db_path in
 
 // ---- helpers ------------------------------------------------------
 
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
 // jstr comes from contrib/http/escape.mere.
 
-let parse_int = fn (s: str) ->
-  let n = str_len s in
-  let st = map_new () in
-  let _ = map_set st "i" 0 in
-  let _ = map_set st "n" 0 in
-  let _ = while map_get st "i" < n do
-    let i = map_get st "i" in
-    let d = ord (char_at s i) - ord "0" in
-    if d >= 0 && d <= 9 then
-      let _ = map_set st "n" (map_get st "n" * 10 + d) in
-      let _ = map_set st "i" (i + 1) in ()
-    else let _ = map_set st "i" n in () in
-  map_get st "n"
-in
 
 // Extract path from the raw request line.
-let req_path = fn (req: str) ->
-  let sp = str_index_of req " " in
-  if sp < 0 then ""
-  else
-    let url = substring req (sp + 1) (str_len req) in
-    let q = str_index_of url "?" in
-    if q < 0 then url else substring url 0 q
-in
 
 // ---- note lookup / etag -------------------------------------------
 
 let current_version = fn (id: str) ->
   let k = "note/" ++ id ++ "/version" in
-  if kv_has notes k then parse_int (kv_get notes k) else 0
+  if kv_has notes k then parse_int_or_zero (kv_get notes k) else 0
 in
 
 // The ETag format follows RFC 7232 — quoted opaque string. We use
