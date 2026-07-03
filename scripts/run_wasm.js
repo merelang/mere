@@ -277,6 +277,89 @@ function tcpCall(op, arg1, arg2) {
       bytes[dst + n] = 0;
       return dst;
     },
+
+    // ---- Crypto helpers for binary protocols -----------------------------
+    // SCRAM-SHA-256 (PostgreSQL / MongoDB / IMAP AUTH) is a chain of
+    // HMAC / SHA-256 / PBKDF2 / XOR / base64 ops on 32-byte digest
+    // buffers. Mere's str is NUL-terminated so we can't pass raw digests
+    // around — everything is hex-encoded at the extern boundary and
+    // decoded back inside these helpers.
+
+    // sha256_hex(s: str) -> str   (64-char lowercase hex of SHA-256(s))
+    sha256_hex: (ptr) => {
+      const s = readCStr(ptr);
+      return writeStr(require('crypto').createHash('sha256').update(s).digest('hex'));
+    },
+    // sha256_of_hex(hex: str) -> str  (SHA-256 of hex-decoded bytes)
+    sha256_of_hex: (ptr) => {
+      const h = Buffer.from(readCStr(ptr), 'hex');
+      return writeStr(require('crypto').createHash('sha256').update(h).digest('hex'));
+    },
+    // hmac_sha256_hex(key: str, msg: str) -> str   (both args as text)
+    hmac_sha256_hex: (keyPtr, msgPtr) => {
+      const key = readCStr(keyPtr);
+      const msg = readCStr(msgPtr);
+      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
+    },
+    // hmac_sha256_hex_hex(key_hex, msg_hex) -> hex  (both hex-decoded first)
+    hmac_sha256_hex_hex: (keyPtr, msgPtr) => {
+      const key = Buffer.from(readCStr(keyPtr), 'hex');
+      const msg = Buffer.from(readCStr(msgPtr), 'hex');
+      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
+    },
+    // hmac_sha256_hex_str(key_hex, msg_str) -> hex   (key is hex, msg is text)
+    // Convenience for SCRAM's HMAC(digest, ascii-msg) step where the key
+    // is a fresh digest but the message ("Client Key", AuthMessage, …)
+    // is normal ASCII.
+    hmac_sha256_hex_str: (keyPtr, msgPtr) => {
+      const key = Buffer.from(readCStr(keyPtr), 'hex');
+      const msg = readCStr(msgPtr);
+      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
+    },
+    // pbkdf2_sha256_hex(password: str, salt_hex: str, iters: int, keylen: int)
+    //   -> str   (hex-encoded PBKDF2-HMAC-SHA256 derived key)
+    pbkdf2_sha256_hex: (pwPtr, saltPtr, iters, keylen) => {
+      const password = readCStr(pwPtr);
+      const salt = Buffer.from(readCStr(saltPtr), 'hex');
+      const out = require('crypto').pbkdf2Sync(password, salt, iters | 0, keylen | 0, 'sha256');
+      return writeStr(out.toString('hex'));
+    },
+    // base64_encode_hex(hex) -> base64
+    base64_encode_hex: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'hex').toString('base64'));
+    },
+    // base64_decode_to_hex(base64) -> hex
+    base64_decode_to_hex: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'base64').toString('hex'));
+    },
+    // random_hex(n_bytes) -> hex
+    random_hex: (n) => {
+      return writeStr(require('crypto').randomBytes(n | 0).toString('hex'));
+    },
+    // random_b64(n_bytes) -> base64  (used for SCRAM nonces — printable
+    // ASCII, safe to embed in the client-first message)
+    random_b64: (n) => {
+      return writeStr(require('crypto').randomBytes(n | 0).toString('base64'));
+    },
+    // hex_xor(a_hex, b_hex) -> hex   (equal-length XOR; empty on mismatch)
+    hex_xor: (aPtr, bPtr) => {
+      const a = Buffer.from(readCStr(aPtr), 'hex');
+      const b = Buffer.from(readCStr(bPtr), 'hex');
+      if (a.length !== b.length) return writeStr('');
+      const r = Buffer.alloc(a.length);
+      for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i];
+      return writeStr(r.toString('hex'));
+    },
+  };
+
+  // writeStr — allocate a NUL-terminated copy of a JS string in Wasm memory.
+  // Used by the crypto helpers above; hoisted here so they can reference it
+  // without duplicating the four-line bump-alloc dance each time.
+  const writeStr = (s) => {
+    const bytes = Buffer.from(s + '\0', 'utf8');
+    const ptr = bumpAlloc(bytes.length);
+    new Uint8Array(memory.buffer).set(bytes, ptr);
+    return ptr;
   };
 
   // Allocate on the shared Mere heap by advancing `$__lang_bump`

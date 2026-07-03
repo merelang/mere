@@ -1,0 +1,48 @@
+// examples/db_scram.mere — SCRAM-SHA-256 authenticated pure-Mere PG client.
+//
+// Companion to db_hello.mere (which speaks trust auth). This one drives
+// the full SASL exchange in contrib/db/pg.mere — client-first / server-
+// first / client-final / server-final — against a real Postgres
+// configured with `POSTGRES_HOST_AUTH_METHOD=scram-sha-256`.
+//
+// Setup:
+//   docker run -d --name mere-pg-scram -p 15433:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
+//     -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" \
+//     -e POSTGRES_USER=meredev -e POSTGRES_PASSWORD=meredevpw \
+//     -e POSTGRES_DB=meredb \
+//     postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_scram.mere > /tmp/dbs.wat
+//   wat2wasm --enable-tail-call /tmp/dbs.wat -o /tmp/dbs.wasm
+//   node scripts/run_wasm.js /tmp/dbs.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> h
+  | Cons (h, t) -> h ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let fd = pg_connect "127.0.0.1" 15433 "meredev" "meredevpw" "meredb" in
+if fd < 0 then
+  let _ = print "pg_connect (SCRAM) failed" in
+  ()
+else
+  let _ = print "connected via SCRAM-SHA-256" in
+  let rows = pg_query fd
+    "SELECT current_user, current_database(), version()" in
+  let _ = print_rows rows in
+  let _ = pg_close fd in
+  ()
