@@ -9,7 +9,7 @@
 // prove that pg_query_params treats it as data, not SQL.
 //
 // Setup (SCRAM mode — reuse from db_scram.mere):
-//   docker run -d --name mere-pg-params -p 15434:5432 \
+//   docker run -d --name mere-pg-params -p 15435:5432 \
 //     -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
 //     -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" \
 //     -e POSTGRES_USER=meredev -e POSTGRES_PASSWORD=meredevpw \
@@ -37,7 +37,7 @@ let rec print_rows = fn (rs: (str list) list) ->
     print_rows rest
   ;
 
-let fd = pg_connect "127.0.0.1" 15434 "meredev" "meredevpw" "meredb" in
+let fd = pg_connect "127.0.0.1" 15435 "meredev" "meredevpw" "meredb" in
 if fd < 0 then
   let _ = print "connect failed" in
   ()
@@ -52,12 +52,14 @@ else
 
   // Parameterized INSERTs. Each Bind sends the values out-of-band, so
   // punctuation / quotes in the payload can never terminate the SQL.
+  // `None` in the params list sends SQL NULL (length -1 on the wire),
+  // which is semantically different from Some "" (empty string).
   let _ = pg_query_params fd
     "INSERT INTO mere_users VALUES ($1::int, $2, $3)"
-    (Cons ("1", Cons ("alice", Cons ("first admin", Nil)))) in
+    (Cons (Some "1", Cons (Some "alice", Cons (Some "first admin", Nil)))) in
   let _ = pg_query_params fd
     "INSERT INTO mere_users VALUES ($1::int, $2, $3)"
-    (Cons ("2", Cons ("bob", Cons ("no notes", Nil)))) in
+    (Cons (Some "2", Cons (Some "bob", Cons (None, Nil)))) in
 
   // Deliberately hostile row: name contains the classic SQL-injection
   // payload. With `pg_query` (simple query) this would drop the table;
@@ -65,22 +67,30 @@ else
   let hostile = "'; DROP TABLE mere_users; --" in
   let _ = pg_query_params fd
     "INSERT INTO mere_users VALUES ($1::int, $2, $3)"
-    (Cons ("3", Cons (hostile, Cons ("attempt", Nil)))) in
-  let _ = print "-- three rows inserted (including a hostile payload)" in
+    (Cons (Some "3", Cons (Some hostile, Cons (Some "attempt", Nil)))) in
+  let _ = print "-- three rows inserted (bob has NULL note, row 3 is hostile)" in
 
   // Parameterized SELECT — $1 is the id we're filtering on.
   let _ = print "-- rows where id > $1  (arg=1):" in
   let rows1 = pg_query_params fd
     "SELECT id, name FROM mere_users WHERE id > $1 ORDER BY id"
-    (Cons ("1", Nil)) in
+    (Cons (Some "1", Nil)) in
   let _ = print_rows rows1 in
 
   // Verify the hostile name landed as-is, not as executed SQL.
   let _ = print "-- rows matching hostile name payload:" in
   let rows2 = pg_query_params fd
     "SELECT id, name FROM mere_users WHERE name = $1"
-    (Cons (hostile, Nil)) in
+    (Cons (Some hostile, Nil)) in
   let _ = print_rows rows2 in
+
+  // Verify NULL round-tripped for bob's note. Using IS NULL, not `= NULL`,
+  // because `NULL = NULL` in SQL is unknown (not true) — the whole reason
+  // NULL isn't just an empty string.
+  let _ = print "-- rows where note IS NULL:" in
+  let rows_null = pg_query fd
+    "SELECT id, name FROM mere_users WHERE note IS NULL ORDER BY id" in
+  let _ = print_rows rows_null in
 
   // Confirm the table still exists (hostile input didn't drop it).
   let _ = print "-- total row count:" in
