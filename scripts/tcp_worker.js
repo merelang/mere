@@ -55,7 +55,9 @@ function respond(status, resultLen) {
 function doConnect(hostLen, port) {
   const host = decodeUtf8(0, hostLen);
   const fd = nextFd++;
-  const socket = net.createConnection({ host, port });
+  // allowHalfOpen: peer FIN (nc, some HTTP proxies, ...) shouldn't auto-close
+  // our write side. DB clients terminate explicitly via tcp_close.
+  const socket = net.createConnection({ host, port, allowHalfOpen: true });
   const entry = { socket, rxBuf: [], rxLen: 0, closed: false, err: null, pendingRead: null };
   sockets.set(fd, entry);
 
