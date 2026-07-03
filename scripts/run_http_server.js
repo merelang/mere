@@ -28,22 +28,29 @@ const wasmPath = process.argv[2];
     return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
   };
 
-  // Runner-side scratch region: sits ABOVE the http glue's 56K..60K
-  // reserved slice so we don't step on the reqPtr / body pointers
-  // that the glue writes at request-dispatch time. Grows within
-  // 60K..64K per request; wraps if too many writeStr calls happen
-  // in a single handler (rare in practice — sha256_hex, now_ms
-  // constants, and small responses fit comfortably).
-  const RUNNER_SCRATCH_START = 60 * 1024;
-  const RUNNER_SCRATCH_LIMIT = 64 * 1024;
-  let scratchOffset = RUNNER_SCRATCH_START;
+  // Allocate on the shared Mere heap by advancing the `$__lang_bump`
+  // global (exported from the Wasm module). This replaces the older
+  // fixed 4KB scratch region (60K..64K), which was too small for
+  // realistic extern returns — a multi-MB http_fetch body would
+  // wrap the region and clobber the Mere heap sitting just above
+  // it. Sharing the same bump pointer means Mere allocations and
+  // extern-returned strings never collide.
+  //
+  // Memory is grown one 64KB page at a time when the current bump +
+  // requested size exceeds the total buffer length.
+  let langBump;  // set in bindMemory after instantiate
+  const PAGE = 64 * 1024;
   const bumpAlloc = (n) => {
-    if (scratchOffset + n > RUNNER_SCRATCH_LIMIT) {
-      scratchOffset = RUNNER_SCRATCH_START;
+    const aligned = (n + 7) & ~7;
+    const start = langBump.value;
+    const needed = start + aligned;
+    const capacity = memory.buffer.byteLength;
+    if (needed > capacity) {
+      const growPages = Math.ceil((needed - capacity) / PAGE);
+      memory.grow(growPages);
     }
-    const ptr = scratchOffset;
-    scratchOffset += (n + 7) & ~7;
-    return ptr;
+    langBump.value = start + aligned;
+    return start;
   };
 
   // Copy a JS string into a fresh scratch slot and return the ptr.
@@ -232,6 +239,14 @@ const wasmPath = process.argv[2];
 
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
   memory = instance.exports.memory;
+  langBump = instance.exports.__lang_bump;
+  if (!langBump) {
+    throw new Error(
+      "wasm module does not export __lang_bump — rebuild with a codegen " +
+      "that exports it (needed so extern-returned strings and Mere " +
+      "allocations share a bump pointer)."
+    );
+  }
   attachHttp(instance);
 
   try {

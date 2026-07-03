@@ -21,6 +21,7 @@
 function makeHttpGlue() {
   let memory = null;
   let table = null;
+  let langBump = null;  // exported __lang_bump global from the Wasm module
 
   const readCStr = (ptr) => {
     if (!memory) return "";
@@ -30,26 +31,30 @@ function makeHttpGlue() {
     return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
   };
 
-  // Scratch buffer for handing request strings back to Mere. Sits high
-  // in memory to avoid trampling the bump arena; each in-flight request
-  // gets its own slice, and the offset resets between requests. The
-  // Mere handler is called synchronously within the request callback,
-  // so a single-buffer design is safe.
-  let scratchOffset = 56 * 1024;
-  const SCRATCH_LIMIT = 60 * 1024;
-
+  // Allocate on the shared Mere bump heap so extern-returned strings
+  // and Mere allocations never collide. Grow memory one 64KB page at
+  // a time when needed. This replaces the older fixed 4KB scratch
+  // region (56K..60K) — for realistic HTTP request bodies (multi-MB)
+  // that region was too small and its wraparound corrupted Mere-side
+  // strings that were live for the whole handler.
+  const PAGE = 64 * 1024;
   const writeStr = (s) => {
-    if (!memory) return 0;
+    if (!memory || !langBump) return 0;
     const utf8 = Buffer.from(s, "utf8");
     const total = utf8.length + 1;
-    if (scratchOffset + total > SCRATCH_LIMIT) {
-      scratchOffset = 56 * 1024;
+    const aligned = (total + 7) & ~7;
+    const start = langBump.value;
+    const needed = start + aligned;
+    const capacity = memory.buffer.byteLength;
+    if (needed > capacity) {
+      const growPages = Math.ceil((needed - capacity) / PAGE);
+      memory.grow(growPages);
     }
-    const ptr = scratchOffset;
-    new Uint8Array(memory.buffer).set(utf8, ptr);
-    new Uint8Array(memory.buffer)[ptr + utf8.length] = 0;
-    scratchOffset += total;
-    return ptr;
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.set(utf8, start);
+    bytes[start + utf8.length] = 0;
+    langBump.value = start + aligned;
+    return start;
   };
 
   const callClosure = (closurePtr, argPtr) => {
@@ -88,8 +93,7 @@ function makeHttpGlue() {
     http_serve: (port, closurePtr) => {
       const http = require("http");
       const server = http.createServer((req, res) => {
-        // Reset scratch + response defaults per request so nothing bleeds.
-        scratchOffset = 56 * 1024;
+        // No scratch to reset — writeStr allocates on the Mere heap.
         currentStatus = 200;
         currentContentType = "text/plain; charset=utf-8";
         currentHeaders = {};
@@ -145,10 +149,18 @@ function makeHttpGlue() {
   const attach = (instance) => {
     memory = instance.exports.memory;
     table = instance.exports.__indirect_function_table;
+    langBump = instance.exports.__lang_bump;
     if (!table) {
       throw new Error(
         "contrib/http: instance does not export __indirect_function_table " +
         "— recompile with a current `mere -w` (Phase 48.2+)"
+      );
+    }
+    if (!langBump) {
+      throw new Error(
+        "contrib/http: instance does not export __lang_bump — recompile " +
+        "with a current `mere -w` (needed so extern writes share the " +
+        "Mere heap bump pointer)"
       );
     }
   };
