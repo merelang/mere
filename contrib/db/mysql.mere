@@ -1054,6 +1054,66 @@ let mysql_connect_url = fn (url: str) ->
   mysql_connect host port user password db
   ;
 
+// ---- Transactions ---------------------------------------------------
+//
+// MySQL doesn't accept the `BEGIN <options>` form PG uses. The
+// isolation level is set separately, then the transaction is started
+// (either with `START TRANSACTION [READ ONLY | ...]` or plain `BEGIN`).
+// mysql_tx_iso encodes the "set + begin" pair and takes an `iso` string
+// like `"REPEATABLE READ"` or `"SERIALIZABLE"`.
+//
+// Same callback convention as pg_tx:
+//   Some v  → COMMIT and pass v through
+//   None    → ROLLBACK and return None
+
+let mysql_tx = fn (fd: int) -> fn (body) ->
+  let _ = mysql_query fd "BEGIN" in
+  match body fd with
+  | None ->
+    let _ = mysql_query fd "ROLLBACK" in
+    None
+  | Some v ->
+    let _ = mysql_query fd "COMMIT" in
+    Some v
+  ;
+
+let mysql_tx_iso = fn (fd: int) -> fn (iso: str) -> fn (body) ->
+  let _ = mysql_query fd ("SET TRANSACTION ISOLATION LEVEL " ++ iso) in
+  let _ = mysql_query fd "BEGIN" in
+  match body fd with
+  | None ->
+    let _ = mysql_query fd "ROLLBACK" in
+    None
+  | Some v ->
+    let _ = mysql_query fd "COMMIT" in
+    Some v
+  ;
+
+// Savepoints — same shape as pg. `name` is spliced verbatim into the
+// SQL; keep it a trusted identifier.
+let mysql_savepoint = fn (fd: int) -> fn (name: str) ->
+  let _ = mysql_query fd ("SAVEPOINT " ++ name) in ()
+  ;
+
+let mysql_rollback_to = fn (fd: int) -> fn (name: str) ->
+  let _ = mysql_query fd ("ROLLBACK TO SAVEPOINT " ++ name) in ()
+  ;
+
+let mysql_release_savepoint = fn (fd: int) -> fn (name: str) ->
+  let _ = mysql_query fd ("RELEASE SAVEPOINT " ++ name) in ()
+  ;
+
+let mysql_savepoint_scope = fn (fd: int) -> fn (name: str) -> fn (body) ->
+  let _ = mysql_savepoint fd name in
+  match body fd with
+  | None ->
+    let _ = mysql_rollback_to fd name in
+    None
+  | Some v ->
+    let _ = mysql_release_savepoint fd name in
+    Some v
+  ;
+
 // ---- Cleanup ---------------------------------------------------------
 //
 // COM_QUIT (0x01) is a single-byte payload with sequence 0; the server
