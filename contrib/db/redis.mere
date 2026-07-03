@@ -47,6 +47,16 @@ extern fn mem_alloc: int -> int;
 extern fn mem_set_u8: int -> int -> int -> unit;
 extern fn mem_get_u8: int -> int -> int;
 extern fn mem_to_str: int -> int -> str;
+extern fn bytes_from_hex_alloc: str -> int;
+
+// Argument type for redis_command_b — RATxt for the common ASCII case,
+// RABin (ptr, len) when the arg is a raw byte buffer built via
+// mem_alloc / mem_set_u8 (or the bytes_from_hex_alloc convenience).
+// Binary bulk-strings are NUL-safe on the wire — RESP length-prefixes
+// them, so embedded 0x00 bytes go through unmodified.
+type redis_arg =
+  | RATxt of str
+  | RABin of (int * int);           // (raw_ptr, byte_len)
 
 type redis_reply =
   | RRStr    of str
@@ -279,6 +289,57 @@ let redis_pipeline = fn (fd: int) -> fn (cmds: (str list) list) ->
   let buf = _r_build_pipeline cmds "" in
   let _ = tcp_write fd (str_ptr buf) (str_len buf) in
   _r_rev_arr (_r_read_n_replies fd n Nil) Nil
+  ;
+
+// ---- Binary-safe command sender --------------------------------------
+//
+// Each `redis_arg` is one bulk. For RATxt we build the `$len\r\nbody\r\n`
+// segment as a Mere str. For RABin, str_concat can't help (the payload
+// may contain NULs), so we write the header string first, then hand the
+// raw bytes to tcp_write directly. The number of Wasm-level tcp_write
+// calls is O(number-of-binary-args + 1) — still one round trip since
+// the OS buffers everything until the caller reads for a reply.
+
+let rec _r_arg_list_len = fn (xs: redis_arg list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + _r_arg_list_len t
+  ;
+
+// Write the `*N\r\n` array header + all text-only args followed by the
+// bulk header for each binary arg + a tcp_write of the raw bytes. `n`
+// = argv length.
+let rec _r_send_args = fn (fd: int) -> fn (args: redis_arg list) ->
+  match args with
+  | Nil -> ()
+  | Cons (RATxt s, rest) ->
+    let hdr = "$" ++ show (str_len s) ++ "\r\n" ++ s ++ "\r\n" in
+    let _ = tcp_write fd (str_ptr hdr) (str_len hdr) in
+    _r_send_args fd rest
+  | Cons (RABin (ptr, len), rest) ->
+    let hdr = "$" ++ show len ++ "\r\n" in
+    let _ = tcp_write fd (str_ptr hdr) (str_len hdr) in
+    let _ = tcp_write fd ptr len in
+    let crlf = "\r\n" in
+    let _ = tcp_write fd (str_ptr crlf) (str_len crlf) in
+    _r_send_args fd rest
+  ;
+
+// Public: send a command whose args may contain arbitrary bytes.
+// Example — SET a key to five bytes with two embedded NULs:
+//
+//   let bin_ptr = bytes_from_hex_alloc "00ff41007a" in
+//   let bin_len = 5 in
+//   let r = redis_command_b fd
+//     (Cons (RATxt "SET",
+//      Cons (RATxt "bkey",
+//      Cons (RABin (bin_ptr, bin_len), Nil)))) in
+let redis_command_b = fn (fd: int) -> fn (args: redis_arg list) ->
+  let n = _r_arg_list_len args in
+  let header = "*" ++ show n ++ "\r\n" in
+  let _ = tcp_write fd (str_ptr header) (str_len header) in
+  let _ = _r_send_args fd args in
+  _r_read_reply fd
   ;
 
 // ---- Connect / auth / close -----------------------------------------
