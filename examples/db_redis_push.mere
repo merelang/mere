@@ -74,7 +74,7 @@ else
   // — RESP3 always uses bulk strings for the payload, even though the
   // wire hex might look like a simple string.
   let _ = match redis_as_push pushed with
-          | Some (Cons (RRBulk (Some tag), Cons (RRArr keys, _))) ->
+          | Some (Cons (RRBulk (Some (tag, _)), Cons (RRArr keys, _))) ->
             print ("  → parsed push: tag=" ++ tag ++
               ", keys=" ++ redis_show (RRArr keys))
           | Some _ -> print "  → push had unexpected structure"

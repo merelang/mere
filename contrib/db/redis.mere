@@ -26,7 +26,11 @@
 //     | RRStr  of str                — "+OK\r\n"    (simple string)
 //     | RRErr  of str                — "-msg\r\n"   (error)
 //     | RRInt  of int                — ":42\r\n"
-//     | RRBulk of str option         — "$5\r\nhello\r\n"  (None = nil)
+//     | RRBulk of ((str * int) option)
+//                                    — "$5\r\nhello\r\n"  (None = nil)
+//                                      Payload is (str_view, byte_len)
+//                                      so callers can peek past
+//                                      embedded NULs via redis_bulk_bytes.
 //     | RRArr  of redis_reply list   — "*2\r\n..."
 //
 // Text/binary safety on the RECV side: bulk strings are read with
@@ -48,6 +52,7 @@ extern fn mem_set_u8: int -> int -> int -> unit;
 extern fn mem_get_u8: int -> int -> int;
 extern fn mem_to_str: int -> int -> str;
 extern fn bytes_from_hex_alloc: str -> int;
+extern fn bytes_to_hex_len: int -> int -> str;
 
 // Argument type for redis_command_b — RATxt for the common ASCII case,
 // RABin (ptr, len) when the arg is a raw byte buffer built via
@@ -62,7 +67,7 @@ type redis_reply =
   | RRStr    of str
   | RRErr    of str
   | RRInt    of int
-  | RRBulk   of (str option)
+  | RRBulk   of ((str * int) option)      // (str_view, true_byte_length)
   | RRArr    of (redis_reply list)
   // ---- RESP3 additions -------------------------------------------------
   | RRNull                                     // `_\r\n`
@@ -144,8 +149,8 @@ let rec _r_read_reply = fn (fd: int) ->
     else if len == 0 then
       let _ = _r_read_byte fd in                            // '\r'
       let _ = _r_read_byte fd in                            // '\n'
-      RRBulk (Some "")
-    else RRBulk (Some (_r_read_bulk fd len))
+      RRBulk (Some ("", 0))
+    else RRBulk (Some (_r_read_bulk fd len, len))
   else if ty == 42 then                                    // '*' array
     let cnt = int_of_str (_r_read_line fd) in
     if cnt < 0 then RRArr Nil
@@ -476,9 +481,9 @@ let redis_publish = fn (fd: int) -> fn (channel: str) -> fn (payload: str) ->
 // callers can pattern-match on the raw reply for pmessage variants.
 let _r_match_message = fn (r) ->
   match r with
-  | RRArr (Cons (RRBulk (Some tag),
-             Cons (RRBulk (Some channel),
-               Cons (RRBulk (Some payload), Nil)))) ->
+  | RRArr (Cons (RRBulk (Some (tag, _)),
+             Cons (RRBulk (Some (channel, _)),
+               Cons (RRBulk (Some (payload, _)), Nil)))) ->
     if str_eq tag "message" then Some (channel, payload) else None
   | _ -> None
   ;
@@ -513,7 +518,7 @@ let redis_wait_reply = fn (fd: int) -> fn (timeout_ms: int) ->
 let redis_as_str = fn (r) ->
   match r with
   | RRStr s -> Some s
-  | RRBulk (Some s) -> Some s
+  | RRBulk (Some (s, _)) -> Some s
   | _ -> None
   ;
 
@@ -525,8 +530,28 @@ let redis_as_int = fn (r) ->
 
 let redis_as_bulk = fn (r) ->
   match r with
-  | RRBulk v -> Some v         // Some (Some s) or Some None
+  | RRBulk None -> Some None
+  | RRBulk (Some (s, _)) -> Some (Some s)
   | _ -> None
+  ;
+
+// Raw-byte access to a bulk reply — returns `(ptr, len)` regardless
+// of embedded NULs. Companion of `redis_command_b` on the read side;
+// hand off to bytes_to_hex_len / mem_get_u8 for binary decoding.
+let redis_bulk_bytes = fn (r) ->
+  match r with
+  | RRBulk None -> None
+  | RRBulk (Some (s, len)) -> Some (str_ptr s, len)
+  | _ -> None
+  ;
+
+// Hex-encode a bulk reply's payload, respecting the true byte length
+// rather than stopping at the first NUL. Returns "" on a non-bulk /
+// nil reply so callers can `str_len` the result to distinguish.
+let redis_bulk_hex = fn (r) ->
+  match r with
+  | RRBulk (Some (s, len)) -> bytes_to_hex_len (str_ptr s) len
+  | _ -> ""
   ;
 
 let redis_as_arr = fn (r) ->
@@ -598,7 +623,7 @@ let rec redis_show = fn (r) ->
   | RRErr e -> "-" ++ e
   | RRInt n -> show n
   | RRBulk None -> "(nil)"
-  | RRBulk (Some s) -> "\"" ++ s ++ "\""
+  | RRBulk (Some (s, _)) -> "\"" ++ s ++ "\""
   | RRArr xs -> "[" ++ redis_show_arr xs true ++ "]"
   | RRNull -> "(null)"
   | RRDouble s -> s

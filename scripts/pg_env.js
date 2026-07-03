@@ -246,6 +246,16 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       return writeStr(Buffer.from(readCStr(ptr), 'utf8').toString('hex'));
     },
 
+    // bytes_to_hex_len(ptr, len) -> str — length-aware companion to
+    //   bytes_to_hex. Reads exactly `len` bytes starting at `ptr` and
+    //   hex-encodes the result, regardless of any interior NUL bytes.
+    //   Used by Redis's binary-safe read path (redis_bulk_bytes hands
+    //   the ptr + len; this turns them into a NUL-free str).
+    bytes_to_hex_len: (ptr, len) => {
+      const src = new Uint8Array(getMemory(), ptr | 0, len | 0);
+      return writeStr(Buffer.from(src).toString('hex'));
+    },
+
     // bytes_from_hex_alloc(hex: str) -> int (raw pointer)
     //   Decode a hex string into raw bytes on the Mere heap. Returns
     //   the pointer; the caller already knows the byte count (=
