@@ -1,0 +1,90 @@
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 44em;
+  margin: 2em auto;
+  padding: 0 1em;
+  color: #1e293b;
+  background: #f4f4f6;
+  line-height: 1.5;
+}
+h1 { color: #9333ea; margin-bottom: 0.2em; }
+h2 { color: #7e22ce; margin-top: 1em; font-size: 1.1em; }
+.subtitle { color: #64748b; font-size: 0.9em; }
+code {
+  background: #ede9fe;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 0.88em;
+  color: #6b21a8;
+}
+.etag {
+  font-family: ui-monospace, monospace;
+  background: #fef3c7;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #78350f;
+  font-size: 0.85em;
+  margin-left: 0.6em;
+}
+.meta { color: #64748b; font-size: 0.85em; }
+input, textarea, button {
+  font: inherit;
+  padding: 0.4em 0.7em;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+}
+input, textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.4em 0;
+}
+button {
+  background: #9333ea;
+  color: white;
+  border-color: #9333ea;
+  cursor: pointer;
+  margin-right: 0.4em;
+}
+button:hover { background: #7e22ce; }
+button.secondary {
+  background: transparent;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+button.secondary:hover { background: #ede9fe; }
+button.danger {
+  background: transparent;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+button.danger:hover { background: #fee2e2; }
+section {
+  background: #fff;
+  padding: 0.8em 1em;
+  margin: 1em 0;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+}
+#note-list { list-style: none; padding: 0; }
+#note-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.5em 0.6em;
+  border-bottom: 1px solid #f1f5f9;
+}
+#note-list li:last-child { border-bottom: none; }
+#note-list .title { flex: 1; font-weight: 600; color: #7e22ce; cursor: pointer; }
+#note-list .version { color: #94a3b8; font-family: ui-monospace, monospace; font-size: 0.75em; }
+#log {
+  background: #1e1b4b;
+  color: #e0e7ff;
+  padding: 0.6em;
+  border-radius: 3px;
+  font-size: 0.75em;
+  max-height: 10em;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+}
+form div { display: flex; flex-wrap: wrap; gap: 0.4em; margin-top: 0.6em; }
