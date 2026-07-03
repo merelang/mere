@@ -19,6 +19,14 @@ let usage () =
   print_endline "  mere -v | --version   print version";
   print_endline "  mere -h | --help      show this help";
   print_endline "";
+  print_endline "Import search paths (Level 1 package system):";
+  print_endline "  -I <dir>              add <dir> to the import search list";
+  print_endline "                        (may be repeated). Used when a demo's";
+  print_endline "                        `import \"contrib/foo.mere\"` isn't found";
+  print_endline "                        relative to the source file.";
+  print_endline "  MERE_PATH             colon-separated env var, same effect";
+  print_endline "                        (evaluated after any -I flags).";
+  print_endline "";
   print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
   print_endline "Examples: examples/ (118 .mere files; see examples/README.md for category index)"
 
@@ -55,9 +63,17 @@ let run_action action label source =
     Printf.eprintf "io error: %s\n" msg;
     exit 1
 
+(* Import search paths accumulated from `-I <dir>` flags and the
+   `MERE_PATH` env var. Populated before the arg-parse match runs (see
+   `preprocess_argv` at `main`), read here for every parse_program
+   call. Level 1 package system: lets a Mere program in an unrelated
+   repo `import "contrib/http/router.mere"` as long as the compiler
+   was invoked with `-I /path/to/mere/checkout`. *)
+let search_paths : string list ref = ref []
+
 let infer_program ?base_dir source =
   let open Mere in
-  let prog = Pipeline.parse_program ?base_dir source in
+  let prog = Pipeline.parse_program ?base_dir ~search_paths:!search_paths source in
   let type_env = ref Typer.initial_env in
   List.iter (fun decl ->
     match decl with
@@ -127,7 +143,8 @@ let compile_to_wasm ?base_dir source =
 let format_source ~base_dir source =
   let prelude_decls = Mere.Pipeline.parse_prelude () in
   let n_prelude = List.length prelude_decls in
-  let prog = Mere.Pipeline.parse_program ~prelude:true ~base_dir source in
+  let prog = Mere.Pipeline.parse_program ~prelude:true ~base_dir
+               ~search_paths:!search_paths source in
   let user_decls =
     let rec drop n xs = if n <= 0 then xs else match xs with
       | [] -> []
@@ -200,8 +217,29 @@ let () =
   if not no_color && Unix.isatty Unix.stderr then
     Mere.Diagnostic.use_color := true
 
+(* Sift `-I <dir>` pairs out of argv (Level 1 package system: extra
+   import search paths). Also read `MERE_PATH` — colon-separated dir
+   list, same convention as `PATH`. `-I` flags come first in
+   `search_paths`, then env vars, so an explicit `-I` on the command
+   line wins over the ambient env. *)
+let preprocess_argv () : string array =
+  let argv = Array.to_list Sys.argv in
+  let path_from_env =
+    match Sys.getenv_opt "MERE_PATH" with
+    | None | Some "" -> []
+    | Some s -> String.split_on_char ':' s |> List.filter (fun x -> x <> "")
+  in
+  let rec walk kept dirs = function
+    | [] -> (List.rev kept, List.rev dirs)
+    | "-I" :: d :: rest -> walk kept (d :: dirs) rest
+    | tok :: rest -> walk (tok :: kept) dirs rest
+  in
+  let (kept, dashI_dirs) = walk [] [] argv in
+  search_paths := dashI_dirs @ path_from_env;
+  Array.of_list kept
+
 let () =
-  match Array.to_list Sys.argv with
+  match Array.to_list (preprocess_argv ()) with
   | [_] -> usage ()
   | [_; "-h"] | [_; "--help"] -> usage ()
   | [_; "-v"] | [_; "--version"] -> version ()

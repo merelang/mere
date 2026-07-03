@@ -9,7 +9,7 @@ let parse_prelude () : Ast.top_decl list =
   let prog = Parser.parse_program tokens in
   prog.Ast.decls
 
-let parse_program ?(prelude = true) ?base_dir s =
+let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
   (* Phase 19.4: parse the prelude FIRST so parser.constructors etc.
      have the prelude's types/ctors registered before the user's source
      is tokenized + parsed. Otherwise `Cons` in user code lookups arity
@@ -20,8 +20,8 @@ let parse_program ?(prelude = true) ?base_dir s =
   let tokens = Lexer.tokenize s in
   let user_prog =
     match base_dir with
-    | Some d -> Parser.parse_program ~base_dir:d tokens
-    | None -> Parser.parse_program tokens
+    | Some d -> Parser.parse_program ~base_dir:d ~search_paths tokens
+    | None -> Parser.parse_program ~search_paths tokens
   in
   { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }
 
