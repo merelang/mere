@@ -134,13 +134,25 @@ function tlsUpgrade(fd, sniHint, extraOpts) {
   rawSocket.removeAllListeners();
 
   // SNI is defined for DNS names only (RFC 6066). Drop it if the hint
-  // is an IPv4/IPv6 literal.
+  // is an IPv4/IPv6 literal — the tls layer would warn otherwise.
   const sni = net.isIP(sniHint) === 0 ? sniHint : undefined;
 
-  const tlsSocket = tls.connect(Object.assign({
+  // When verification is on, force `tls.checkServerIdentity` to run
+  // against the caller-supplied hostname (or IP). Without this
+  // override, tls.connect only performs a full hostname / SAN check
+  // when `servername` is set — so an IP connect would silently skip
+  // the SAN match. Node's built-in checker handles both DNS SANs
+  // and `IP:` SANs, so this call is enough.
+  const opts = Object.assign({
     socket: rawSocket,
     servername: sni,
-  }, extraOpts));
+  }, extraOpts);
+  if (opts.rejectUnauthorized && sniHint) {
+    opts.checkServerIdentity = (_ignoredSNI, cert) =>
+      tls.checkServerIdentity(sniHint, cert);
+  }
+
+  const tlsSocket = tls.connect(opts);
 
   let settled = false;
   tlsSocket.once('secureConnect', () => {
