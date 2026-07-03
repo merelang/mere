@@ -1467,6 +1467,31 @@ let pg_drain_notifications = fn (fd: int) ->
   _pg_rev_notifs_loop (_pg_drain_all Nil) Nil
   ;
 
+// pg_poll_once — one-shot wire probe. Reads at most one message,
+// applying `timeout_ms` to the read. If a message arrives:
+//   - 'A' NotificationResponse → enqueued via the standard hook
+//   - anything else            → dropped (still counts as "arrived")
+// Returns true if a message was consumed, false on timeout / EOF.
+let pg_poll_once = fn (fd: int) -> fn (timeout_ms: int) ->
+  let _ = tcp_set_timeout fd timeout_ms in
+  let (mtype, payload, plen) = _recv_msg fd in
+  let _ = tcp_set_timeout fd 0 in
+  if mtype < 0 then false
+  else
+    let _ = (if mtype == _MSG_NOTIFY then _pg_enqueue_notif payload plen
+             else ()) in
+    true
+  ;
+
+// pg_poll — drain-until-idle. Reads messages one by one until
+// `timeout_ms` passes without new traffic. Every 'A' encountered gets
+// pushed onto the shared queue; call pg_drain_notifications afterwards
+// to collect them.
+let rec pg_poll = fn (fd: int) -> fn (timeout_ms: int) ->
+  if pg_poll_once fd timeout_ms then pg_poll fd timeout_ms
+  else ()
+  ;
+
 // ---- Cleanup ------------------------------------------------------------
 
 let pg_close = fn (fd: int) ->
