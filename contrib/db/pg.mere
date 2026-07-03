@@ -747,6 +747,40 @@ let pg_query_params_meta = fn (fd: int) -> fn (sql: str)
   (cols, _rev_rows rev_rows Nil)
   ;
 
+// ---- Transactions -------------------------------------------------------
+//
+// Mere doesn't have exceptions, so we can't wrap a body in try/rollback
+// the way a driver in OCaml or Python would. Instead the caller signals
+// its own commit/rollback intent through the body's return value:
+//
+//   Some value  →  COMMIT and pass value through
+//   None        →  ROLLBACK and return None
+//
+// Typical usage — inserting two rows atomically:
+//
+//   let out = pg_tx fd (fn (tx) ->
+//     let _ = pg_query_params tx "INSERT …" (Cons (Some "42", Nil)) in
+//     let _ = pg_query_params tx "INSERT …" (Cons (Some "43", Nil)) in
+//     Some "both inserted") in
+//
+// If any of the interior queries can't run (e.g. constraint violation),
+// the body returns None and pg_tx rolls back. Errors are surfaced by
+// pg_query itself as printed messages — the caller can gate on the
+// server having accepted every step (currently by checking that the
+// row-count matches expected).
+
+let pg_tx = fn (fd: int) -> fn (body) ->
+  let _ = pg_query fd "BEGIN" in
+  let result = body fd in
+  match result with
+  | None ->
+    let _ = pg_query fd "ROLLBACK" in
+    None
+  | Some v ->
+    let _ = pg_query fd "COMMIT" in
+    Some v
+  ;
+
 // ---- Cleanup ------------------------------------------------------------
 
 let pg_close = fn (fd: int) ->
