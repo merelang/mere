@@ -347,8 +347,13 @@ let rec tokenize s =
           aux j ((with_width pos w, T_int n) :: acc)
         end
       | c when is_alpha c ->
+        (* Allow ML-style primed identifiers (`arg'`, `x''`) — `'` is a
+           continuation character only once the identifier has started
+           with an alpha, so bare `'x'` / `'name` still lex as char /
+           tyvar respectively. *)
         let rec read j =
-          if j < len && is_ident_cont s.[j] then read (j + 1) else j
+          if j < len && (is_ident_cont s.[j] || s.[j] = '\'') then read (j + 1)
+          else j
         in
         let j = read i in
         let word = String.sub s i (j - i) in

@@ -177,6 +177,26 @@ let () =
   check_raises "let pattern arity mismatch"
     (fun () -> Pipeline.type_of "let (a, b, c) = (1, 2) in a");
 
+  (* --- ML-style primed identifiers (Phase 55.x rough-edge sweep) --- *)
+  check "primed ident single tick"
+    (Pipeline.process "let x' = 41 in x' + 1") "42";
+  check "primed ident multi tick"
+    (Pipeline.process "let x = 1 in let x' = x + 1 in let x'' = x' + 1 in x''") "3";
+  check "primed ident survives fn param name"
+    (Pipeline.process "let inc' = fn (a: int) -> a + 1 in inc' 41") "42";
+  check "bare tyvar still lexes"
+    (Pipeline.type_of "fn x -> x") "('a -> 'a)";
+
+  (* --- `;` as sugar for `in` in expression-level let bindings --- *)
+  check "semi sugar for in — plain let"
+    (Pipeline.process "let x = 1; let y = 2; x + y") "3";
+  check "semi sugar for in — let rec"
+    (Pipeline.process
+      "let rec fact = fn (n: int) -> if n <= 1 then 1 else n * fact (n - 1); \
+       fact 5") "120";
+  check "semi and in mix freely"
+    (Pipeline.process "let a = 1 in let b = 2; let c = 3 in a + b + c") "6";
+
   (* --- new arithmetic operators (E2) --- *)
   check "div"             (Pipeline.process "10 / 3") "3";
   check "mod"             (Pipeline.process "10 % 3") "1";
