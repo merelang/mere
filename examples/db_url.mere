@@ -55,11 +55,13 @@ let _ = show_parse "with params"
   "postgres://alice:secret@127.0.0.1:5432/prod?sslmode=require&application_name=mere" in
 let _ = show_parse "postgresql:// scheme"
   "postgresql://bob@[::1]:5433/analytics" in
+let _ = show_parse "percent-encoded userinfo + db"
+  "postgres://al%40ce:p%3Assw%40rd@127.0.0.1:5432/my%20db" in
 
 let _ = print "" in
 let _ = print "== live connect ==" in
 
-let url = "postgres://postgres@127.0.0.1:15439/postgres" in
+let url = "postgres://postgres@127.0.0.1:15444/postgres" in
 let fd = pg_connect_url url in
 if fd < 0 then
   let _ = print ("pg_connect_url failed: " ++ url) in

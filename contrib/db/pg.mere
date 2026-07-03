@@ -353,13 +353,48 @@ let pg_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
 // isn't wired yet.
 //
 // Percent-decoding (`%20`, `%40`, …) is not applied — passwords with
-// URL-reserved chars must be passed to pg_connect directly.
+// URL-reserved chars in user/password/db are percent-decoded (%40 → @).
+// The host and port fields are not decoded — DNS names and IPv6
+// bracket-form addresses don't overlap with the percent alphabet in
+// practice, so it's less confusion than help.
 
 // Substring wrapper: `_slice s i` returns s[i..]. Written as a helper
 // because raw `substring s i (str_len s)` shows up ~5 times in the
 // parser body.
 let _slice = fn (s: str) -> fn (i: int) ->
   substring s i (str_len s)
+  ;
+
+// Hex nibble → int; returns -1 for non-hex characters. Uppercase and
+// lowercase letters both accepted, matching RFC 3986 §2.1.
+let _hex_of = fn (c: str) ->
+  let n = ord c in
+  if n >= 48 && n <= 57 then n - 48                        // '0'..'9'
+  else if n >= 97 && n <= 102 then n - 97 + 10             // 'a'..'f'
+  else if n >= 65 && n <= 70 then n - 65 + 10              // 'A'..'F'
+  else 0 - 1
+  ;
+
+// Loop body for _percent_decode. Appends one char at a time to acc,
+// consuming `%XX` triplets as they appear. Malformed triplets (non-hex
+// digit or truncated at end of string) pass through as literal `%`.
+let rec _pct_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else
+    let c = char_at s i in
+    if str_eq c "%" && i + 2 < n then
+      let h = _hex_of (char_at s (i + 1)) in
+      let l = _hex_of (char_at s (i + 2)) in
+      if h < 0 || l < 0 then
+        _pct_loop s (i + 1) n (acc ++ c)
+      else
+        _pct_loop s (i + 3) n (acc ++ chr (h * 16 + l))
+    else
+      _pct_loop s (i + 1) n (acc ++ c)
+  ;
+
+let _percent_decode = fn (s: str) ->
+  _pct_loop s 0 (str_len s) ""
   ;
 
 let pg_parse_url = fn (url: str) ->
@@ -378,11 +413,14 @@ let pg_parse_url = fn (url: str) ->
     if at_pos < 0 then ("", rest)
     else (substring rest 0 at_pos, _slice rest (at_pos + 1)) in
 
-  // user[:password]
+  // user[:password] — both sides percent-decoded so
+  // `postgres://al%40ce:p%3Assw@…` yields user="al@ce" password="p:ssw".
   let colon_ui = str_index_of userinfo ":" in
-  let (user, password) =
+  let (user_raw, password_raw) =
     if colon_ui < 0 then (userinfo, "")
     else (substring userinfo 0 colon_ui, _slice userinfo (colon_ui + 1)) in
+  let user = _percent_decode user_raw in
+  let password = _percent_decode password_raw in
 
   // hostpart = host[:port][/dbname][?query]
   let slash = str_index_of hostpart "/" in
@@ -411,9 +449,11 @@ let pg_parse_url = fn (url: str) ->
         (substring hp 0 colon_hp,
          int_of_str (_slice hp (colon_hp + 1))) in
 
-  // Strip ?query params from the dbname.
+  // Strip ?query params from the dbname, then percent-decode the
+  // remainder so `postgres://…/my%20db` yields db="my db".
   let qmark = str_index_of dbpart "?" in
-  let db = if qmark < 0 then dbpart else substring dbpart 0 qmark in
+  let db_raw = if qmark < 0 then dbpart else substring dbpart 0 qmark in
+  let db = _percent_decode db_raw in
 
   (host, port, user, password, db)
   ;
