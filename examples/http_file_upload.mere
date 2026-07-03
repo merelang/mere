@@ -48,10 +48,6 @@ let files = kv_load files_db_path in
 
 // ---- helpers ------------------------------------------------------
 
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
 // jstr / html_escape come from contrib/http/escape.mere.
 
@@ -166,14 +162,6 @@ in
 
 // ---- dynamic /files/<id> download --------------------------------
 
-let req_path = fn (req: str) ->
-  let sp = str_index_of req " " in
-  if sp < 0 then ""
-  else
-    let url = substring req (sp + 1) (str_len req) in
-    let q = str_index_of url "?" in
-    if q < 0 then url else substring url 0 q
-in
 
 let download_h = fn (id: str) ->
   let name_k = "file/" ++ id ++ "/name" in

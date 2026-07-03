@@ -1,0 +1,41 @@
+// contrib/http/cookie.mere — pull values out of the Cookie header.
+//
+// Every HTTP demo that uses cookie sessions was hand-rolling the
+// same three-liner: fetch the Cookie header, split on `; `, walk
+// the parts looking for `<name>=<value>`, return the value. This
+// module lifts that into `cookie_get`, plus a convenience
+// `session_id` shortcut for the ubiquitous `session=...` case.
+//
+// Public API:
+//
+//   cookie_get : str -> str -> str
+//     args: cookie_header, name → value or "".
+//     `cookie_header` is what `http_get_header "Cookie"` returns —
+//     "session=abc; theme=dark; opt=1" style. The caller reads that
+//     header itself (this module has no direct extern dependency),
+//     so it composes with any other cookie-reading helper.
+//
+//   session_id : str -> str
+//     Convenience for the near-universal "read session id from the
+//     Cookie header" pattern. Equivalent to
+//     `cookie_get cookie_header "session"`.
+
+// Extract the value of a named cookie from a raw `Cookie:` header
+// value. Empty header → "", missing name → "", present name →
+// the raw string right of `<name>=` up to `;` (or end of header).
+let cookie_get = fn (cookie_header: str) -> fn (name: str) ->
+  let target = name ++ "=" in
+  let tlen = str_len target in
+  let pairs = str_split cookie_header "; " in
+  let rec find = fn (ps: str list) ->
+    match ps with
+    | Nil -> ""
+    | Cons (p, rest) ->
+      if str_starts_with p target then substring p tlen (str_len p)
+      else find rest in
+  find pairs;
+
+// Shortcut for the near-universal `session=<id>` cookie. Same
+// contract as cookie_get but hard-codes "session" as the key name.
+let session_id = fn (cookie_header: str) ->
+  cookie_get cookie_header "session";

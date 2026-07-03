@@ -82,10 +82,6 @@ let get_forward_url = fn (u: unit) ->
   else ""
 in
 
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
 // JSON string escape (mirrors the helper in http_todo_app).
 // jstr comes from contrib/http/escape.mere.

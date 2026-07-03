@@ -65,10 +65,6 @@ let jwt_secret = kv_get store "secret/jwt" in
 
 // ---- helpers ------------------------------------------------------
 
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
 // Extract the token from `Authorization: Bearer <token>`. Returns ""
 // when missing or malformed. Copy immediately to Mere heap so the

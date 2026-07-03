@@ -66,6 +66,7 @@ import "../contrib/http/security.mere";
 import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
+import "../contrib/http/cookie.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/log/log.mere";
 
@@ -80,29 +81,12 @@ let login_max = 5 in
 
 // Read a JSON body field. Parses the current request body every call
 // (cheap for small bodies).
-let body_field = fn (name: str) ->
-  let parsed = parse_json_body (http_current_body ()) in
-  json_get parsed name
-in
 
 // Extract the session cookie value from the request's Cookie header.
-let session_id = fn (u: unit) ->
-  let cookie = http_get_header "Cookie" in
-  let target = "session=" in
-  let tlen = str_len target in
-  let pairs = str_split cookie "; " in
-  let rec find = fn (ps: str list) ->
-    match ps with
-    | Nil -> ""
-    | Cons (p, rest) ->
-      if str_starts_with p target then substring p tlen (str_len p)
-      else find rest in
-  find pairs
-in
 
 // Return the logged-in user's name, or "" if not authenticated.
 let current_user = fn (u: unit) ->
-  let sid = session_id () in
+  let sid = session_id (http_get_header "Cookie") in
   if str_eq sid "" then ""
   else if map_has sessions sid then map_get sessions sid
   else ""
