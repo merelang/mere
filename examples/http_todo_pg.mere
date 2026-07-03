@@ -1,0 +1,264 @@
+// http_todo_pg: the http_todo_app storage layer, ported to Postgres.
+//
+// Same endpoints as http_todo_app.mere — signup / login / logout /
+// me / todos {list, add, toggle, delete} — but persistence moves from
+// contrib/kv (log-structured on-disk file) to contrib/db/pg_pool
+// (real Postgres over the wire). Sessions still live in an in-memory
+// Map, so a server restart drops logins — swapping that for a
+// pg-backed sessions table is a one-file follow-up.
+//
+// The point of the demo is the pool integration:
+//   - A single pg_pool at module scope, opened lazily on first acquire.
+//   - Each handler acquires an fd, runs its queries, releases. Because
+//     the runtime is single-threaded, every acquire returns the same
+//     underlying connection — the server-side session (including
+//     prepared statements and transaction state) stays warm across
+//     requests.
+//
+// Setup (trust mode is enough for local dev — the pool respects
+// the URL so plug in real credentials for prod):
+//
+//   docker run -d --name mere-todo-pg -p 15451:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+//   ./mere -w examples/http_todo_pg.mere > /tmp/tp.wat
+//   wat2wasm --enable-tail-call /tmp/tp.wat -o /tmp/tp.wasm
+//   node scripts/run_http_server.js /tmp/tp.wasm
+//
+// Try:
+//   curl -c c -X POST -H 'Content-Type: application/json' \
+//     -d '{"user":"alice","pass":"secret"}' http://localhost:8080/api/signup
+//   curl -c c -X POST -H 'Content-Type: application/json' \
+//     -d '{"user":"alice","pass":"secret"}' http://localhost:8080/api/login
+//   curl -b c -X POST -H 'Content-Type: application/json' \
+//     -d '{"text":"buy milk"}' http://localhost:8080/api/todos
+//   curl -b c http://localhost:8080/api/todos
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/query.mere";
+import "../contrib/http/json_body.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/cookie.mere";
+import "../contrib/db/pg_pool.mere";
+
+// ---- pool + one-time schema ---------------------------------------
+//
+// Change the URL if you're pointing at something other than the
+// docker container in the header.
+let pool = pg_pool_open "postgres://postgres@127.0.0.1:15451/postgres" in
+
+let init_fd = pg_pool_acquire pool in
+let _ = pg_query init_fd
+  "CREATE TABLE IF NOT EXISTS mere_users (username text PRIMARY KEY, pw_hash text NOT NULL)" in
+let _ = pg_query init_fd
+  "CREATE TABLE IF NOT EXISTS mere_todos (id text PRIMARY KEY, username text NOT NULL, done bool NOT NULL DEFAULT false, body text NOT NULL, created timestamptz NOT NULL DEFAULT now())" in
+let _ = pg_pool_release pool init_fd in
+
+// Sessions still live in-memory. Restart drops them; a PG-backed
+// sessions table would be a symmetric follow-up.
+let sessions = map_new () in
+
+let current_user = fn (u: unit) ->
+  let sid = session_id (http_get_header "Cookie") in
+  if str_eq sid "" then ""
+  else if map_has sessions sid then map_get sessions sid
+  else ""
+  ;
+
+// Minimal JSON escape — only " and \ (payloads here are user-supplied
+// text; a real API would centralize this via contrib/http/escape).
+let json_esc_char = fn (c: str) ->
+  if str_eq c "\"" then "\\\""
+  else if str_eq c "\\" then "\\\\"
+  else c
+  ;
+
+let rec _je_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else _je_loop s (i + 1) n (acc ++ json_esc_char (char_at s i))
+  ;
+
+let json_esc = fn (s: str) -> _je_loop s 0 (str_len s) "";
+
+let render_todo = fn (id: str) -> fn (done: bool) -> fn (text: str) ->
+  "\{\"id\":\"" ++ id ++ "\",\"text\":\"" ++ json_esc text ++
+    "\",\"done\":" ++ (if done then "true" else "false") ++ "}"
+  ;
+
+// Fold a rows list into a JSON array literal. Written top-level (not
+// nested) so codegen's dead-code walker keeps it.
+let rec _rows_to_json = fn (rows: (str option list) list) -> fn (first: bool) -> fn (acc: str) ->
+  match rows with
+  | Nil -> acc ++ "]"
+  | Cons (row, rest) ->
+    let id = pg_val_or (pg_col_at row 0) "" in
+    let done = pg_col_bool_or (pg_col_at row 1) false in
+    let text = pg_val_or (pg_col_at row 2) "" in
+    let sep = if first then "" else "," in
+    _rows_to_json rest false (acc ++ sep ++ render_todo id done text)
+  ;
+
+// ---- handlers -----------------------------------------------------
+
+let signup_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  if str_eq u "" || str_eq p "" then
+    let _ = http_set_status 400 in
+    "missing user or pass\n"
+  else
+    let fd = pg_pool_acquire pool in
+    // Existence check via SELECT — parameterized so `u` can contain
+    // any characters without SQL injection risk.
+    let existing = pg_query_params fd
+      "SELECT 1::text FROM mere_users WHERE username = $1"
+      (Cons (Some u, Nil)) in
+    let taken = (match existing with | Cons (_, _) -> true | Nil -> false) in
+    if taken then
+      let _ = pg_pool_release pool fd in
+      let _ = http_set_status 409 in
+      "user exists: " ++ u ++ "\n"
+    else
+      let _ = pg_query_params fd
+        "INSERT INTO mere_users VALUES ($1, $2)"
+        (Cons (Some u, Cons (Some (sha256_hex p), Nil))) in
+      let _ = pg_pool_release pool fd in
+      let _ = http_set_status 201 in
+      "created: " ++ u ++ "\n"
+  ;
+
+let login_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  let fd = pg_pool_acquire pool in
+  let rows = pg_query_params fd
+    "SELECT pw_hash FROM mere_users WHERE username = $1"
+    (Cons (Some u, Nil)) in
+  let _ = pg_pool_release pool fd in
+  let stored = pg_val_or (pg_first_col rows 0) "" in
+  if str_eq stored "" then
+    let _ = http_set_status 401 in
+    "invalid credentials\n"
+  else if str_eq stored (sha256_hex p) then
+    let sid = "s-" ++ u in
+    let _ = map_set sessions sid u in
+    let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+    "logged in as " ++ u ++ "\n"
+  else
+    let _ = http_set_status 401 in
+    "invalid credentials\n"
+  ;
+
+let logout_h = fn (req: str) ->
+  let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+  "logged out\n"
+  ;
+
+let me_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else user ++ "\n"
+  ;
+
+let todos_list_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "[]\n"
+  else
+    let fd = pg_pool_acquire pool in
+    let rows = pg_query_params fd
+      "SELECT id, done, body FROM mere_todos WHERE username = $1 ORDER BY created"
+      (Cons (Some user, Nil)) in
+    let _ = pg_pool_release pool fd in
+    let _ = http_set_content_type "application/json" in
+    _rows_to_json rows true "[" ++ "\n"
+  ;
+
+let todos_add_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else
+    let text = body_field "text" in
+    if str_eq text "" then
+      let _ = http_set_status 400 in "missing text\n"
+    else
+      let id = gen_request_id () in
+      let fd = pg_pool_acquire pool in
+      let _ = pg_query_params fd
+        "INSERT INTO mere_todos (id, username, body) VALUES ($1, $2, $3)"
+        (Cons (Some id, Cons (Some user, Cons (Some text, Nil)))) in
+      let _ = pg_pool_release pool fd in
+      let _ = http_set_content_type "application/json" in
+      let _ = http_set_status 201 in
+      render_todo id false text ++ "\n"
+  ;
+
+let todos_toggle_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else
+    let id = body_field "id" in
+    let fd = pg_pool_acquire pool in
+    let rows = pg_query_params fd
+      "UPDATE mere_todos SET done = NOT done WHERE id = $1 AND username = $2 RETURNING done, body"
+      (Cons (Some id, Cons (Some user, Nil))) in
+    let _ = pg_pool_release pool fd in
+    match rows with
+    | Nil ->
+      let _ = http_set_status 404 in "no such todo\n"
+    | Cons (row, _) ->
+      let done = pg_col_bool_or (pg_col_at row 0) false in
+      let text = pg_val_or (pg_col_at row 1) "" in
+      let _ = http_set_content_type "application/json" in
+      render_todo id done text ++ "\n"
+  ;
+
+let todos_delete_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "not logged in\n"
+  else
+    let id = body_field "id" in
+    let fd = pg_pool_acquire pool in
+    let rows = pg_query_params fd
+      "DELETE FROM mere_todos WHERE id = $1 AND username = $2 RETURNING id"
+      (Cons (Some id, Cons (Some user, Nil))) in
+    let _ = pg_pool_release pool fd in
+    match rows with
+    | Nil ->
+      let _ = http_set_status 404 in "no such todo\n"
+    | Cons (_, _) -> "deleted\n"
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+  ;
+
+let routes =
+  Cons (route "POST" "/api/signup"        signup_h,
+  Cons (route "POST" "/api/login"         login_h,
+  Cons (route "POST" "/api/logout"        logout_h,
+  Cons (route "GET"  "/api/me"            me_h,
+  Cons (route "GET"  "/api/todos"         todos_list_h,
+  Cons (route "POST" "/api/todos"         todos_add_h,
+  Cons (route "POST" "/api/todos/toggle"  todos_toggle_h,
+  Cons (route "POST" "/api/todos/delete"  todos_delete_h,
+  Nil)))))))) in
+
+let handle = router routes not_found in
+let _ = print "starting http_todo_pg on :8080 (pg pool -> localhost:15451)" in
+let _ = http_serve 8080 handle in
+0

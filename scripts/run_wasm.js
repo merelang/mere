@@ -5,53 +5,13 @@
 // Usage: node run_wasm.js <path-to-wasm>
 
 const fs = require('fs');
-const path = require('path');
-const { Worker } = require('worker_threads');
+const { makePgEnv } = require('./pg_env.js');
 
 if (process.argv.length < 3) {
   console.error("usage: node run_wasm.js <path-to-wasm>");
   process.exit(2);
 }
 const wasmPath = process.argv[2];
-
-// ---- Synchronous TCP transport ------------------------------------------
-//
-// Wasm runs synchronously, but net.Socket is async. Bridge the two via a
-// worker_thread that owns the sockets and a SharedArrayBuffer for
-// request/response. The Wasm-side externs write into ctrl[]/data[], notify
-// the worker, and Atomics.wait for the response. Lazy — the worker only
-// spins up on first tcp_* call.
-
-const TCP_DATA_OFFSET = 32;
-const TCP_BUF_BYTES = 1 << 20;  // 1 MiB — large enough for typical DB row/frame
-const TCP_SAB = new SharedArrayBuffer(TCP_DATA_OFFSET + TCP_BUF_BYTES);
-const tcpCtrl = new Int32Array(TCP_SAB, 0, 8);
-const tcpData = new Uint8Array(TCP_SAB, TCP_DATA_OFFSET);
-const TCP_OP = { CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5 };
-let tcpWorker = null;
-
-function tcpEnsureWorker() {
-  if (tcpWorker) return;
-  const workerPath = path.join(__dirname, 'tcp_worker.js');
-  tcpWorker = new Worker(workerPath, {
-    workerData: { sab: TCP_SAB, dataOffset: TCP_DATA_OFFSET },
-  });
-  tcpWorker.unref();  // don't keep the process alive for the worker alone
-}
-
-// Fire off a request, block until worker responds. Result stored in ctrl[4];
-// data payload (for READ) already sits in tcpData[0..ctrl[3]].
-function tcpCall(op, arg1, arg2) {
-  tcpEnsureWorker();
-  Atomics.store(tcpCtrl, 1, op);
-  Atomics.store(tcpCtrl, 2, arg1 | 0);
-  Atomics.store(tcpCtrl, 3, arg2 | 0);
-  Atomics.store(tcpCtrl, 0, 1);
-  tcpWorker.postMessage(0);
-  Atomics.wait(tcpCtrl, 0, 1);
-  Atomics.store(tcpCtrl, 0, 0);
-  return Atomics.load(tcpCtrl, 4);
-}
 
 (async () => {
   const wasmBytes = fs.readFileSync(wasmPath);
@@ -182,185 +142,13 @@ function tcpCall(op, arg1, arg2) {
       new Uint8Array(memory.buffer).set(bytes, ptr);
       return ptr;
     },
-    // ---- Sync TCP (see scripts/tcp_worker.js) ----------------------------
-    // Wire-protocol clients (contrib/db/pg.mere etc.) build on these four
-    // primitives. All calls are strictly synchronous from Wasm's POV; the
-    // async plumbing happens in the worker thread.
-    //
-    // tcp_connect(host: str, port: int) -> int
-    //   Returns fd (>=1) on success, -1 on connect failure.
-    tcp_connect: (hostPtr, port) => {
-      const host = readCStr(hostPtr);
-      const bytes = Buffer.from(host, 'utf8');
-      tcpData.set(bytes, 0);
-      return tcpCall(TCP_OP.CONNECT, bytes.length, port | 0) | 0;
-    },
-    // tcp_write(fd, buf_ptr: int, len: int) -> int (bytes written, -1 on error).
-    // buf_ptr is a raw byte pointer into Wasm linear memory — obtain from
-    // mem_alloc or str_ptr. Binary-safe (NUL bytes pass through).
-    tcp_write: (fd, bufPtr, len) => {
-      const src = new Uint8Array(memory.buffer, bufPtr, len);
-      tcpData.set(src, 0);
-      return tcpCall(TCP_OP.WRITE, fd | 0, len | 0) | 0;
-    },
-    // tcp_read(fd, buf_ptr: int, cap: int) -> int (bytes read, 0=EOF, -1=error).
-    tcp_read: (fd, bufPtr, cap) => {
-      const capped = Math.min(cap | 0, TCP_BUF_BYTES);
-      const n = tcpCall(TCP_OP.READ, fd | 0, capped) | 0;
-      if (n > 0) {
-        const dst = new Uint8Array(memory.buffer, bufPtr, n);
-        dst.set(tcpData.subarray(0, n));
-      }
-      return n;
-    },
-    tcp_close: (fd) => { tcpCall(TCP_OP.CLOSE, fd | 0, 0); return 0; },
-    tcp_set_timeout: (fd, ms) => { tcpCall(TCP_OP.SET_TIMEOUT, fd | 0, ms | 0); return 0; },
-
-    // ---- Byte-buffer primitives for binary protocols ---------------------
-    // Mere `str` is C-string (NUL-terminated), so binary framing needs a
-    // raw-pointer path. These are thin wrappers over the bump allocator
-    // and DataView reads/writes.
-
-    // str_ptr(s: str) -> int  — coerce a str value to its raw pointer.
-    // At the Wasm level this is a no-op (`str` IS an i32 pointer); the
-    // extern boundary is what lets the type-checker accept it.
-    str_ptr: (ptr) => ptr,
-
-    // mem_alloc(n: int) -> int  — bump-allocate n bytes, returns pointer.
-    // Contents are undefined; caller writes via mem_set_* before use.
-    mem_alloc: (n) => bumpAlloc(n | 0),
-
-    // Byte / u32 accessors — offsets are byte offsets from the pointer.
-    mem_set_u8: (ptr, off, b) => {
-      new Uint8Array(memory.buffer)[(ptr | 0) + (off | 0)] = b & 0xff;
-      return 0;
-    },
-    mem_get_u8: (ptr, off) => {
-      return new Uint8Array(memory.buffer)[(ptr | 0) + (off | 0)] | 0;
-    },
-    mem_set_u32be: (ptr, off, val) => {
-      new DataView(memory.buffer).setUint32((ptr | 0) + (off | 0), val >>> 0, false);
-      return 0;
-    },
-    mem_get_u32be: (ptr, off) => {
-      // Coerce back to signed i32 — PG lengths fit comfortably in 31 bits.
-      return new DataView(memory.buffer).getInt32((ptr | 0) + (off | 0), false);
-    },
-    mem_set_u16be: (ptr, off, val) => {
-      new DataView(memory.buffer).setUint16((ptr | 0) + (off | 0), val & 0xffff, false);
-      return 0;
-    },
-    mem_get_u16be: (ptr, off) => {
-      return new DataView(memory.buffer).getUint16((ptr | 0) + (off | 0), false);
-    },
-
-    // mem_copy_str(dst: int, off: int, s: str) -> int
-    //   Copies s's bytes (up to but excluding its terminating NUL) into
-    //   dst starting at dst+off. Returns the new offset past the copy.
-    mem_copy_str: (dst, off, srcPtr) => {
-      const bytes = new Uint8Array(memory.buffer);
-      let src = srcPtr | 0;
-      let d = (dst | 0) + (off | 0);
-      while (bytes[src] !== 0) bytes[d++] = bytes[src++];
-      return d - (dst | 0);
-    },
-
-    // mem_to_str(ptr: int, len: int) -> str
-    //   Materialize a Mere str by copying len bytes and appending a NUL.
-    //   Callers must ensure the bytes are text (embedded NUL truncates
-    //   the resulting str when used with str_len / concat).
-    mem_to_str: (ptr, len) => {
-      const n = len | 0;
-      const dst = bumpAlloc(n + 1);
-      const bytes = new Uint8Array(memory.buffer);
-      bytes.copyWithin(dst, ptr | 0, (ptr | 0) + n);
-      bytes[dst + n] = 0;
-      return dst;
-    },
-
-    // ---- Crypto helpers for binary protocols -----------------------------
-    // SCRAM-SHA-256 (PostgreSQL / MongoDB / IMAP AUTH) is a chain of
-    // HMAC / SHA-256 / PBKDF2 / XOR / base64 ops on 32-byte digest
-    // buffers. Mere's str is NUL-terminated so we can't pass raw digests
-    // around — everything is hex-encoded at the extern boundary and
-    // decoded back inside these helpers.
-
-    // sha256_hex(s: str) -> str   (64-char lowercase hex of SHA-256(s))
-    sha256_hex: (ptr) => {
-      const s = readCStr(ptr);
-      return writeStr(require('crypto').createHash('sha256').update(s).digest('hex'));
-    },
-    // sha256_of_hex(hex: str) -> str  (SHA-256 of hex-decoded bytes)
-    sha256_of_hex: (ptr) => {
-      const h = Buffer.from(readCStr(ptr), 'hex');
-      return writeStr(require('crypto').createHash('sha256').update(h).digest('hex'));
-    },
-    // hmac_sha256_hex(key: str, msg: str) -> str   (both args as text)
-    hmac_sha256_hex: (keyPtr, msgPtr) => {
-      const key = readCStr(keyPtr);
-      const msg = readCStr(msgPtr);
-      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
-    },
-    // hmac_sha256_hex_hex(key_hex, msg_hex) -> hex  (both hex-decoded first)
-    hmac_sha256_hex_hex: (keyPtr, msgPtr) => {
-      const key = Buffer.from(readCStr(keyPtr), 'hex');
-      const msg = Buffer.from(readCStr(msgPtr), 'hex');
-      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
-    },
-    // hmac_sha256_hex_str(key_hex, msg_str) -> hex   (key is hex, msg is text)
-    // Convenience for SCRAM's HMAC(digest, ascii-msg) step where the key
-    // is a fresh digest but the message ("Client Key", AuthMessage, …)
-    // is normal ASCII.
-    hmac_sha256_hex_str: (keyPtr, msgPtr) => {
-      const key = Buffer.from(readCStr(keyPtr), 'hex');
-      const msg = readCStr(msgPtr);
-      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
-    },
-    // pbkdf2_sha256_hex(password: str, salt_hex: str, iters: int, keylen: int)
-    //   -> str   (hex-encoded PBKDF2-HMAC-SHA256 derived key)
-    pbkdf2_sha256_hex: (pwPtr, saltPtr, iters, keylen) => {
-      const password = readCStr(pwPtr);
-      const salt = Buffer.from(readCStr(saltPtr), 'hex');
-      const out = require('crypto').pbkdf2Sync(password, salt, iters | 0, keylen | 0, 'sha256');
-      return writeStr(out.toString('hex'));
-    },
-    // base64_encode_hex(hex) -> base64
-    base64_encode_hex: (ptr) => {
-      return writeStr(Buffer.from(readCStr(ptr), 'hex').toString('base64'));
-    },
-    // base64_decode_to_hex(base64) -> hex
-    base64_decode_to_hex: (ptr) => {
-      return writeStr(Buffer.from(readCStr(ptr), 'base64').toString('hex'));
-    },
-    // random_hex(n_bytes) -> hex
-    random_hex: (n) => {
-      return writeStr(require('crypto').randomBytes(n | 0).toString('hex'));
-    },
-    // random_b64(n_bytes) -> base64  (used for SCRAM nonces — printable
-    // ASCII, safe to embed in the client-first message)
-    random_b64: (n) => {
-      return writeStr(require('crypto').randomBytes(n | 0).toString('base64'));
-    },
-    // hex_xor(a_hex, b_hex) -> hex   (equal-length XOR; empty on mismatch)
-    hex_xor: (aPtr, bPtr) => {
-      const a = Buffer.from(readCStr(aPtr), 'hex');
-      const b = Buffer.from(readCStr(bPtr), 'hex');
-      if (a.length !== b.length) return writeStr('');
-      const r = Buffer.alloc(a.length);
-      for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i];
-      return writeStr(r.toString('hex'));
-    },
+    // TCP + byte-buffer + crypto externs come from the shared pg_env
+    // module; they're merged into `env` below with Object.assign.
   };
-
-  // writeStr — allocate a NUL-terminated copy of a JS string in Wasm memory.
-  // Used by the crypto helpers above; hoisted here so they can reference it
-  // without duplicating the four-line bump-alloc dance each time.
-  const writeStr = (s) => {
-    const bytes = Buffer.from(s + '\0', 'utf8');
-    const ptr = bumpAlloc(bytes.length);
-    new Uint8Array(memory.buffer).set(bytes, ptr);
-    return ptr;
-  };
+  Object.assign(env, makePgEnv({
+    getMemory: () => memory.buffer,
+    bumpAlloc: (n) => bumpAlloc(n),
+  }));
 
   // Allocate on the shared Mere heap by advancing `$__lang_bump`
   // (mirrors the newer run_http_server.js). Grows memory one 64KB

@@ -1,0 +1,188 @@
+// scripts/pg_env.js — extern imports shared between run_wasm.js and
+// run_http_server.js for programs that talk to Postgres from Mere.
+//
+// Groups three concerns that were previously duplicated between the two
+// Node harnesses:
+//   1. Synchronous TCP transport (worker_thread + SAB + Atomics.wait)
+//   2. Byte-buffer primitives — mem_alloc/set/get, str_ptr, mem_to_str
+//   3. Crypto helpers for SCRAM / URL parsing — pbkdf2, hmac, base64, XOR
+//
+// Usage:
+//   const { makePgEnv, PG_TCP_STATE } = require("./pg_env.js");
+//   ...
+//   const pgEnv = makePgEnv({ getMemory, bumpAlloc });
+//   const env = { ...pgEnv, ...customEnv };
+//
+// `getMemory` is a zero-arg function returning the current `WebAssembly.
+// Memory.buffer` (memory may grow during execution). `bumpAlloc(n)`
+// returns a fresh linear-memory offset with room for `n` bytes.
+
+'use strict';
+
+const path = require('path');
+const { Worker } = require('worker_threads');
+
+const TCP_DATA_OFFSET = 32;
+const TCP_BUF_BYTES = 1 << 20;  // 1 MiB shared window; big enough for typical DB frames
+const TCP_SAB = new SharedArrayBuffer(TCP_DATA_OFFSET + TCP_BUF_BYTES);
+const tcpCtrl = new Int32Array(TCP_SAB, 0, 8);
+const tcpData = new Uint8Array(TCP_SAB, TCP_DATA_OFFSET);
+const TCP_OP = { CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5 };
+let tcpWorker = null;
+
+function tcpEnsureWorker() {
+  if (tcpWorker) return;
+  const workerPath = path.join(__dirname, 'tcp_worker.js');
+  tcpWorker = new Worker(workerPath, {
+    workerData: { sab: TCP_SAB, dataOffset: TCP_DATA_OFFSET },
+  });
+  tcpWorker.unref();  // don't keep the parent process alive on this alone
+}
+
+function tcpCall(op, arg1, arg2) {
+  tcpEnsureWorker();
+  Atomics.store(tcpCtrl, 1, op);
+  Atomics.store(tcpCtrl, 2, arg1 | 0);
+  Atomics.store(tcpCtrl, 3, arg2 | 0);
+  Atomics.store(tcpCtrl, 0, 1);
+  tcpWorker.postMessage(0);
+  Atomics.wait(tcpCtrl, 0, 1);
+  Atomics.store(tcpCtrl, 0, 0);
+  return Atomics.load(tcpCtrl, 4);
+}
+
+function makePgEnv({ getMemory, bumpAlloc }) {
+  // readCStr is trivially built from getMemory, so both harnesses share
+  // the same NUL-scan without needing to pass it in.
+  const readCStr = (ptr) => {
+    const bytes = new Uint8Array(getMemory());
+    let end = ptr;
+    while (end < bytes.length && bytes[end] !== 0) end++;
+    return Buffer.from(bytes.subarray(ptr, end)).toString('utf8');
+  };
+  const writeStr = (s) => {
+    const bytes = Buffer.from(s + '\0', 'utf8');
+    const ptr = bumpAlloc(bytes.length);
+    new Uint8Array(getMemory()).set(bytes, ptr);
+    return ptr;
+  };
+
+  return {
+    // ---- Sync TCP -------------------------------------------------------
+    tcp_connect: (hostPtr, port) => {
+      const host = readCStr(hostPtr);
+      const bytes = Buffer.from(host, 'utf8');
+      tcpData.set(bytes, 0);
+      return tcpCall(TCP_OP.CONNECT, bytes.length, port | 0) | 0;
+    },
+    tcp_write: (fd, bufPtr, len) => {
+      const src = new Uint8Array(getMemory(), bufPtr, len);
+      tcpData.set(src, 0);
+      return tcpCall(TCP_OP.WRITE, fd | 0, len | 0) | 0;
+    },
+    tcp_read: (fd, bufPtr, cap) => {
+      const capped = Math.min(cap | 0, TCP_BUF_BYTES);
+      const n = tcpCall(TCP_OP.READ, fd | 0, capped) | 0;
+      if (n > 0) {
+        const dst = new Uint8Array(getMemory(), bufPtr, n);
+        dst.set(tcpData.subarray(0, n));
+      }
+      return n;
+    },
+    tcp_close: (fd) => { tcpCall(TCP_OP.CLOSE, fd | 0, 0); return 0; },
+    tcp_set_timeout: (fd, ms) => { tcpCall(TCP_OP.SET_TIMEOUT, fd | 0, ms | 0); return 0; },
+
+    // ---- Byte-buffer primitives -----------------------------------------
+    str_ptr: (ptr) => ptr,
+    mem_alloc: (n) => bumpAlloc(n | 0),
+    mem_set_u8: (ptr, off, b) => {
+      new Uint8Array(getMemory())[(ptr | 0) + (off | 0)] = b & 0xff;
+      return 0;
+    },
+    mem_get_u8: (ptr, off) => {
+      return new Uint8Array(getMemory())[(ptr | 0) + (off | 0)] | 0;
+    },
+    mem_set_u32be: (ptr, off, val) => {
+      new DataView(getMemory()).setUint32((ptr | 0) + (off | 0), val >>> 0, false);
+      return 0;
+    },
+    mem_get_u32be: (ptr, off) => {
+      return new DataView(getMemory()).getInt32((ptr | 0) + (off | 0), false);
+    },
+    mem_set_u16be: (ptr, off, val) => {
+      new DataView(getMemory()).setUint16((ptr | 0) + (off | 0), val & 0xffff, false);
+      return 0;
+    },
+    mem_get_u16be: (ptr, off) => {
+      return new DataView(getMemory()).getUint16((ptr | 0) + (off | 0), false);
+    },
+    mem_copy_str: (dst, off, srcPtr) => {
+      const bytes = new Uint8Array(getMemory());
+      let src = srcPtr | 0;
+      let d = (dst | 0) + (off | 0);
+      while (bytes[src] !== 0) bytes[d++] = bytes[src++];
+      return d - (dst | 0);
+    },
+    mem_to_str: (ptr, len) => {
+      const n = len | 0;
+      const dst = bumpAlloc(n + 1);
+      const bytes = new Uint8Array(getMemory());
+      bytes.copyWithin(dst, ptr | 0, (ptr | 0) + n);
+      bytes[dst + n] = 0;
+      return dst;
+    },
+
+    // ---- Crypto ---------------------------------------------------------
+    sha256_hex: (ptr) => {
+      const s = readCStr(ptr);
+      return writeStr(require('crypto').createHash('sha256').update(s).digest('hex'));
+    },
+    sha256_of_hex: (ptr) => {
+      const h = Buffer.from(readCStr(ptr), 'hex');
+      return writeStr(require('crypto').createHash('sha256').update(h).digest('hex'));
+    },
+    hmac_sha256_hex: (keyPtr, msgPtr) => {
+      const key = readCStr(keyPtr);
+      const msg = readCStr(msgPtr);
+      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
+    },
+    hmac_sha256_hex_hex: (keyPtr, msgPtr) => {
+      const key = Buffer.from(readCStr(keyPtr), 'hex');
+      const msg = Buffer.from(readCStr(msgPtr), 'hex');
+      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
+    },
+    hmac_sha256_hex_str: (keyPtr, msgPtr) => {
+      const key = Buffer.from(readCStr(keyPtr), 'hex');
+      const msg = readCStr(msgPtr);
+      return writeStr(require('crypto').createHmac('sha256', key).update(msg).digest('hex'));
+    },
+    pbkdf2_sha256_hex: (pwPtr, saltPtr, iters, keylen) => {
+      const password = readCStr(pwPtr);
+      const salt = Buffer.from(readCStr(saltPtr), 'hex');
+      const out = require('crypto').pbkdf2Sync(password, salt, iters | 0, keylen | 0, 'sha256');
+      return writeStr(out.toString('hex'));
+    },
+    base64_encode_hex: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'hex').toString('base64'));
+    },
+    base64_decode_to_hex: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'base64').toString('hex'));
+    },
+    random_hex: (n) => {
+      return writeStr(require('crypto').randomBytes(n | 0).toString('hex'));
+    },
+    random_b64: (n) => {
+      return writeStr(require('crypto').randomBytes(n | 0).toString('base64'));
+    },
+    hex_xor: (aPtr, bPtr) => {
+      const a = Buffer.from(readCStr(aPtr), 'hex');
+      const b = Buffer.from(readCStr(bPtr), 'hex');
+      if (a.length !== b.length) return writeStr('');
+      const r = Buffer.alloc(a.length);
+      for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i];
+      return writeStr(r.toString('hex'));
+    },
+  };
+}
+
+module.exports = { makePgEnv };
