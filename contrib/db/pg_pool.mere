@@ -1,0 +1,63 @@
+// contrib/db/pg_pool.mere — connection reuse across queries.
+//
+// Mere's Wasm runtime is single-threaded; every http_serve handler runs
+// to completion before the next request is dispatched. That means a
+// "connection pool" here really means "keep-alive" — one fd held open
+// across acquire/release cycles so we don't pay the 4- or 6-message
+// startup handshake per query.
+//
+// The design is deliberately tiny — no LIFO stack, no health checks,
+// no per-request checkout accounting. If the underlying fd dies (server
+// restart, network hiccup), the next query will fail; catch that at the
+// call site and call pg_pool_close + pg_pool_acquire to rebuild.
+//
+// Shape:
+//   type pg_pool = (url, state_map)
+//     where state_map : Map<str, int>
+//     keys used:  "fd" — current fd, -1 while closed
+//
+// The tuple-based value is deliberately opaque; callers should treat
+// it as such and only touch it through the pg_pool_* functions.
+//
+// Usage:
+//   let pool = pg_pool_open "postgres://alice:pw@127.0.0.1/db" in
+//   let fd = pg_pool_acquire pool in
+//   let rows = pg_query fd "SELECT 1" in
+//   let _ = pg_pool_release pool fd in    // no-op today; call for API symmetry
+//   ...
+//   let _ = pg_pool_close pool in         // at shutdown
+
+import "pg.mere";
+
+let pg_pool_open = fn (url: str) ->
+  let st = map_new () in
+  let _ = map_set st "fd" (0 - 1) in
+  (url, st)
+  ;
+
+let pg_pool_acquire = fn (pool) ->
+  let (url, st) = pool in
+  let fd = map_get st "fd" in
+  if fd > 0 then fd
+  else
+    let new_fd = pg_connect_url url in
+    let _ = map_set st "fd" new_fd in
+    new_fd
+  ;
+
+// Release: today this is a no-op — the fd stays checked out ==
+// "still available" since there is exactly one slot in the pool.
+// Kept in the API so upgrading to a multi-slot LIFO stack later
+// doesn't force every call site to change.
+let pg_pool_release = fn (pool) -> fn (fd: int) ->
+  ()
+  ;
+
+let pg_pool_close = fn (pool) ->
+  let (_, st) = pool in
+  let fd = map_get st "fd" in
+  if fd > 0 then
+    let _ = pg_close fd in
+    let _ = map_set st "fd" (0 - 1) in ()
+  else ()
+  ;
