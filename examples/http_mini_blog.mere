@@ -1,0 +1,463 @@
+// http_mini_blog: single-author blog with public read + admin write.
+//
+// The satisfying part of this demo is the mirror symmetry with
+// http_feed_reader: THAT one CONSUMES RSS/Atom feeds, THIS one
+// PRODUCES an RSS 2.0 feed at /feed.xml. Point a Mere feed reader
+// (or any RSS client) at this blog's /feed.xml and it round-trips
+// cleanly through contrib/xml + contrib/feed.
+//
+// Endpoints:
+//   GET  /                    HTML home — recent posts (public)
+//   GET  /post/<slug>         HTML rendered post (markdown → html)
+//   GET  /feed.xml            RSS 2.0 feed of all posts (public)
+//   GET  /api/posts           JSON list of posts (public)
+//   POST /api/login           {password} — sets admin session cookie
+//   POST /api/logout          clears cookie
+//   POST /api/posts           {slug, title, body} — admin only, 401 else
+//   POST /api/posts/delete    {slug} — admin only
+//
+// Data model (log-structured KV):
+//   posts_db:
+//     admin/password  →  sha256(admin_password)
+//     post/<slug>     →  `<created_at>|<title>|<body_markdown>`
+//
+// First-run defaults: if admin/password isn't set, seed it with
+// sha256("admin"). Change via kv_set on the shell or a proper reset
+// endpoint (not exposed here).
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+import "../contrib/markdown/to_html.mere";
+
+let posts_db_path = "/tmp/mere_blog_posts.db" in
+let posts = kv_load posts_db_path in
+let sessions = map_new () in
+
+// Seed admin password on first run.
+let _ =
+  if not (kv_has posts "admin/password") then
+    let _ = kv_set posts "admin/password" (sha256_hex "admin") in
+    let _ = kv_save posts posts_db_path in ()
+  else ()
+in
+
+let blog_title = "Mere mini blog" in
+let blog_url = "http://localhost:8080/" in
+let blog_desc = "Powered by Mere — contrib/http + contrib/markdown + contrib/kv." in
+
+// ---- helpers ------------------------------------------------------
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+let session_id = fn (u: unit) ->
+  let cookie = http_get_header "Cookie" ++ "" in
+  let target = "session=" in
+  let tlen = str_len target in
+  let pairs = str_split cookie "; " in
+  let rec find = fn (ps: str list) ->
+    match ps with
+    | Nil -> ""
+    | Cons (p, rest) ->
+      if str_starts_with p target then substring p tlen (str_len p)
+      else find rest in
+  find pairs
+in
+
+let is_admin = fn (u: unit) ->
+  let sid = session_id () in
+  if str_eq sid "" then false
+  else map_has sessions sid
+in
+
+// contrib/kv splits records on `\n`, so any value we store that
+// contains a newline needs to be escaped. Convention: `\` → `\\`,
+// `\n` → `\n` (backslash + literal 'n'), reversed on read. Same
+// trick as the C string escape and JSON's serialization.
+let rec _kv_esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _kv_esc_walk s buf (i + 1) n
+in
+let kv_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _kv_esc_walk s buf 0 (str_len s)
+in
+
+let rec _kv_unesc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    if str_eq c "\\" && i + 1 < n then
+      let nxt = char_at s (i + 1) in
+      let _ = if str_eq nxt "n" then let _ = strbuf_push buf "\n" in 0
+              else if str_eq nxt "\\" then let _ = strbuf_push buf "\\" in 0
+              else let _ = strbuf_push buf nxt in 0 in
+      _kv_unesc_walk s buf (i + 2) n
+    else
+      let _ = strbuf_push buf c in
+      _kv_unesc_walk s buf (i + 1) n
+in
+let kv_unesc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _kv_unesc_walk s buf 0 (str_len s)
+in
+
+let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
+  a ++ "|" ++ b ++ "|" ++ c
+in
+
+let split3 = fn (s: str) ->
+  let b1 = str_index_of s "|" in
+  if b1 < 0 then (s, "", "")
+  else
+    let after = substring s (b1 + 1) (str_len s) in
+    let b2 = str_index_of after "|" in
+    if b2 < 0 then (substring s 0 b1, after, "")
+    else (substring s 0 b1,
+          substring after 0 b2,
+          substring after (b2 + 1) (str_len after))
+in
+
+// ---- JSON + XML escaping ------------------------------------------
+
+let rec _json_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _json_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _json_walk s buf 0 (str_len s) ++ "\""
+in
+
+let rec _xml_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
+            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
+            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
+            else if str_eq c "\"" then let _ = strbuf_push buf "&quot;" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _xml_walk s buf (i + 1) n
+in
+let xml_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _xml_walk s buf 0 (str_len s)
+in
+
+let rec _html_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
+            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
+            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _html_walk s buf (i + 1) n
+in
+let html_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _html_walk s buf 0 (str_len s)
+in
+
+// ---- slug validation ---------------------------------------------
+
+let slug_char = fn (c: str) ->
+  (str_eq c "-") || (str_eq c "_")
+  || (ord c >= ord "0" && ord c <= ord "9")
+  || (ord c >= ord "a" && ord c <= ord "z")
+in
+
+let valid_slug = fn (s: str) ->
+  let n = str_len s in
+  if n == 0 || n > 60 then false
+  else
+    let st = map_new () in
+    let _ = map_set st "i" 0 in
+    let _ = map_set st "ok" 1 in
+    let _ = while (map_get st "ok" == 1) && (map_get st "i" < n) do
+      if slug_char (char_at s (map_get st "i")) then
+        let _ = map_set st "i" (map_get st "i" + 1) in ()
+      else let _ = map_set st "ok" 0 in () in
+    map_get st "ok" == 1
+in
+
+// ---- post iteration -----------------------------------------------
+
+// Returns list of (slug, created_at, title, body) tuples for each
+// post/ key, freshest-first is NOT guaranteed — log-structured KV
+// keys arrive in insertion order. Body is unescaped from the KV
+// storage form (see kv_esc above).
+let all_posts = fn (u: unit) ->
+  let prefix = "post/" in
+  let plen = str_len prefix in
+  let ks = kv_keys posts in
+  let rec collect = fn (xs: str list) -> fn (acc: (str * str * str * str) list) ->
+    match xs with
+    | Nil -> acc
+    | Cons (k, rest) ->
+      if str_starts_with k prefix then
+        let slug = substring k plen (str_len k) in
+        let v = kv_get posts k in
+        let (created, title, body_esc) = split3 v in
+        collect rest (Cons ((slug, created, title, kv_unesc body_esc), acc))
+      else collect rest acc in
+  collect ks Nil
+in
+
+// ---- handlers -----------------------------------------------------
+
+let login_h = fn (req: str) ->
+  let p = body_field "password" in
+  let stored = if kv_has posts "admin/password" then kv_get posts "admin/password" else "" in
+  if str_eq stored "" || not (str_eq stored (sha256_hex p)) then
+    let _ = http_set_status 401 in
+    "invalid admin password\n"
+  else
+    let sid = "admin-" ++ sha256_hex (p ++ "salt") in
+    let _ = map_set sessions sid "admin" in
+    let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+    let _ = log_with "info" "admin_login" Nil in
+    "logged in\n"
+in
+
+let logout_h = fn (req: str) ->
+  let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+  "logged out\n"
+in
+
+let post_create_h = fn (req: str) ->
+  if not (is_admin ()) then
+    let _ = http_set_status 401 in "admin only\n"
+  else
+    let slug = body_field "slug" in
+    let title = body_field "title" in
+    let body = body_field "body" in
+    if not (valid_slug slug) then
+      let _ = http_set_status 400 in
+      "slug must be [a-z0-9-_]\{1,60}\n"
+    else if str_eq title "" then
+      let _ = http_set_status 400 in "missing title\n"
+    else
+      let k = "post/" ++ slug in
+      // For a demo, allow updates — kv_set overwrites (last write wins
+      // via kv_get semantics).
+      let created = if kv_has posts k then
+                      let (c, _t, _b) = split3 (kv_get posts k) in c
+                    else "2026-07-03" in
+      let _ = kv_set posts k (pack3 created title (kv_esc body)) in
+      let _ = kv_save posts posts_db_path in
+      let _ = log_with "info" "post_saved"
+        (Cons (("slug", slug), Cons (("title", title), Nil))) in
+      let _ = http_set_content_type "application/json" in
+      let _ = http_set_status 201 in
+      "\{\"slug\":" ++ jstr slug ++ ",\"title\":" ++ jstr title ++ "}\n"
+in
+
+let post_delete_h = fn (req: str) ->
+  if not (is_admin ()) then
+    let _ = http_set_status 401 in "admin only\n"
+  else
+    let slug = body_field "slug" in
+    let k = "post/" ++ slug in
+    if not (kv_has posts k) then
+      let _ = http_set_status 404 in "no such post\n"
+    else
+      let _ = kv_delete posts k in
+      let _ = kv_save posts posts_db_path in
+      "deleted\n"
+in
+
+let posts_list_h = fn (req: str) ->
+  let rows = all_posts () in
+  let rec render = fn (xs: (str * str * str * str) list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons ((slug, created, title, _body), rest) ->
+      let sep = if first then "" else "," in
+      let row = "\{\"slug\":" ++ jstr slug ++
+                ",\"created\":" ++ jstr created ++
+                ",\"title\":" ++ jstr title ++ "}" in
+      render rest false (acc ++ sep ++ row) in
+  let _ = http_set_content_type "application/json" in
+  render rows true "[" ++ "\n"
+in
+
+// GET /post/<slug> — render markdown → HTML page
+let post_view_h = fn (req: str) ->
+  // Router only sends us here for `/` — we handle dynamic in not_found.
+  let _ = http_set_status 404 in "unreachable\n"
+in
+
+// Read a template file (index.html) and substitute a marker with
+// generated HTML for the post list.
+let home_h = fn (req: str) ->
+  let template = read_file "examples/mini_blog/index.html" in
+  let rows = all_posts () in
+  let rec render = fn (xs: (str * str * str * str) list) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc
+    | Cons ((slug, created, title, _body), rest) ->
+      let li = "<li><a href=\"/post/" ++ slug ++ "\">" ++
+               html_esc title ++ "</a> " ++
+               "<small>" ++ html_esc created ++ "</small></li>" in
+      render rest (acc ++ li) in
+  let list_html = render rows "" in
+  let marker = "<!--POSTS-->" in
+  let idx = str_index_of template marker in
+  let html = if idx < 0 then template
+             else substring template 0 idx ++ list_html ++
+                  substring template (idx + str_len marker) (str_len template) in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  html
+in
+
+// RSS 2.0 generation — the mirror of contrib/feed's parser.
+// Emits `<rss><channel>` with one `<item>` per post; body is wrapped
+// in CDATA so markdown special chars don't need entity escaping.
+let feed_h = fn (req: str) ->
+  let rows = all_posts () in
+  let rec render = fn (xs: (str * str * str * str) list) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc
+    | Cons ((slug, created, title, body), rest) ->
+      let item =
+        "<item>" ++
+          "<title>" ++ xml_esc title ++ "</title>" ++
+          "<link>" ++ blog_url ++ "post/" ++ slug ++ "</link>" ++
+          "<guid>" ++ blog_url ++ "post/" ++ slug ++ "</guid>" ++
+          "<pubDate>" ++ xml_esc created ++ "</pubDate>" ++
+          "<description><![CDATA[" ++ body ++ "]]></description>" ++
+        "</item>" in
+      render rest (acc ++ item) in
+  let items = render rows "" in
+  let _ = http_set_content_type "application/rss+xml; charset=utf-8" in
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" ++
+  "<rss version=\"2.0\">" ++
+  "<channel>" ++
+    "<title>" ++ xml_esc blog_title ++ "</title>" ++
+    "<link>" ++ blog_url ++ "</link>" ++
+    "<description>" ++ xml_esc blog_desc ++ "</description>" ++
+    items ++
+  "</channel>" ++
+  "</rss>"
+in
+
+// ---- dynamic /post/<slug> -----------------------------------------
+
+let extract_slug = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then ""
+  else
+    let url = substring req (sp + 1) (str_len req) in
+    let q = str_index_of url "?" in
+    let path = if q < 0 then url else substring url 0 q in
+    let prefix = "/post/" in
+    let plen = str_len prefix in
+    if str_starts_with path prefix then substring path plen (str_len path)
+    else ""
+in
+
+// Split markdown body into lines for MarkdownHtml.render.
+let split_lines = fn (s: str) ->
+  let n = str_len s in
+  let st = map_new () in
+  let _ = map_set st "i" 0 in
+  let _ = map_set st "start" 0 in
+  // We build a reversed line list then re-reverse. Store list head in
+  // a mutable ref by threading through a closure — since Mere doesn't
+  // give us direct mutable list cells, use a recursive helper that
+  // scans and emits per-newline.
+  let rec collect = fn (i: int) -> fn (start: int) -> fn (acc: str list) ->
+    if i >= n then
+      let last = substring s start n in
+      if str_len last == 0 then acc else Cons (last, acc)
+    else if str_eq (char_at s i) "\n" then
+      let line = substring s start i in
+      collect (i + 1) (i + 1) (Cons (line, acc))
+    else collect (i + 1) start acc in
+  let rec rev = fn (xs) -> fn (acc) ->
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) -> rev t (Cons (h, acc)) in
+  let _ = st in
+  rev (collect 0 0 Nil) Nil
+in
+
+let post_page_h = fn (slug: str) ->
+  let k = "post/" ++ slug in
+  if not (kv_has posts k) then
+    let _ = http_set_status 404 in
+    "post not found: " ++ slug ++ "\n"
+  else
+    let v = kv_get posts k in
+    let (created, title, body_esc) = split3 v in
+    let body = kv_unesc body_esc in
+    let rendered = MarkdownHtml.render (split_lines body) in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>" ++ html_esc title ++
+    " — " ++ html_esc blog_title ++ "</title>" ++
+    "<link rel=\"stylesheet\" href=\"/static/style.css\">" ++
+    "<h1>" ++ html_esc title ++ "</h1>" ++
+    "<p class=\"meta\">" ++ html_esc created ++
+    " · <a href=\"/\">back</a> · <a href=\"/feed.xml\">rss</a></p>" ++
+    "<article>" ++ rendered ++ "</article>"
+in
+
+let not_found = fn (req: str) ->
+  let slug = extract_slug req in
+  if not (str_eq slug "") && valid_slug slug then
+    post_page_h slug
+  else
+    let _ = http_set_status 404 in
+    "not found\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                  home_h,
+  Cons (route "GET"  "/feed.xml"          feed_h,
+  Cons (route "POST" "/api/login"         login_h,
+  Cons (route "POST" "/api/logout"        logout_h,
+  Cons (route "GET"  "/api/posts"         posts_list_h,
+  Cons (route "POST" "/api/posts"         post_create_h,
+  Cons (route "POST" "/api/posts/delete"  post_delete_h,
+  Nil))))))) in
+
+let _ = post_view_h in    // referenced to prevent "unused" pruning; see not_found for the real logic
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/mini_blog" handle_routed in
+
+let _ = print ("starting mini blog on :8080 (posts=" ++ posts_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0

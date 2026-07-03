@@ -1,0 +1,98 @@
+body {
+  font-family: Georgia, "Palatino Linotype", Palatino, "Book Antiqua", serif;
+  max-width: 42em;
+  margin: 2em auto;
+  padding: 0 1em;
+  color: #1a1a1a;
+  background: #fafaf7;
+  line-height: 1.55;
+}
+header h1 a {
+  color: #7c2d12;
+  text-decoration: none;
+}
+h1, h2 { font-family: system-ui, sans-serif; }
+h1 { color: #7c2d12; margin-bottom: 0.2em; }
+h2 { color: #57534e; margin-top: 1.5em; }
+.subtitle { color: #78716c; font-size: 0.9em; line-height: 1.5; }
+code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  background: #f5f5f4;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 0.88em;
+}
+article code { color: #7c2d12; }
+article pre {
+  background: #292524;
+  color: #f5f5f4;
+  padding: 0.8em 1em;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+article pre code { background: transparent; color: inherit; padding: 0; }
+.meta { color: #a8a29e; font-size: 0.85em; }
+.meta a { color: inherit; }
+input, textarea, button {
+  font: inherit;
+  padding: 0.4em 0.6em;
+  border: 1px solid #d6d3d1;
+  border-radius: 3px;
+}
+textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.5em 0;
+}
+label {
+  display: block;
+  margin: 0.5em 0;
+  color: #57534e;
+  font-size: 0.9em;
+}
+button {
+  background: #7c2d12;
+  color: white;
+  border-color: #7c2d12;
+  cursor: pointer;
+}
+button:hover { background: #5a1f0a; }
+button.secondary {
+  background: transparent;
+  color: #78716c;
+  border-color: #d6d3d1;
+}
+button.secondary:hover { background: #f5f5f4; }
+#post-list { list-style: none; padding: 0; }
+#post-list li {
+  padding: 0.6em 0;
+  border-bottom: 1px solid #e7e5e4;
+}
+#post-list li a {
+  color: #7c2d12;
+  text-decoration: none;
+  font-weight: 600;
+}
+#post-list li a:hover { text-decoration: underline; }
+#post-list small { color: #a8a29e; margin-left: 0.6em; font-size: 0.85em; }
+section#admin, section#login-box {
+  background: #fff;
+  padding: 1em;
+  border-radius: 4px;
+  margin: 1.5em 0;
+  border: 1px solid #e7e5e4;
+}
+#log {
+  background: #292524;
+  color: #d6d3d1;
+  padding: 0.6em;
+  border-radius: 3px;
+  font-size: 0.75em;
+  max-height: 8em;
+  overflow: auto;
+  margin-top: 2em;
+  font-family: ui-monospace, monospace;
+}
