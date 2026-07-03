@@ -565,6 +565,386 @@ let mysql_query = fn (fd: int) -> fn (sql: str) ->
     _my_rev_rows (_my_collect_rows fd Nil) Nil
   ;
 
+// ---- Prepared statements (COM_STMT_PREPARE / EXECUTE) ---------------
+//
+// MySQL's parameterized-query path. Compared to text-protocol COM_QUERY,
+// prepared statements give us:
+//   - Real SQL-injection defense (parameters out-of-band on the wire)
+//   - Binary result protocol (rows come back in native encoding, not
+//     as printable text)
+//
+// The wire choreography is:
+//
+//   1. Client → Server  COM_STMT_PREPARE  (0x16)
+//   2. Server → Client  Prepare-OK
+//        + N ColumnDefinition packets for params  (skipped)
+//        + EOF
+//        + M ColumnDefinition packets for result cols
+//        + EOF
+//   3. Client → Server  COM_STMT_EXECUTE  (0x17)
+//        header (stmt_id + flags + iter_count)
+//        + NULL bitmap
+//        + new_params_bound flag (1)
+//        + per-param  (u16 type + u8 unsigned) x N
+//        + per-non-null-param  binary value
+//   4. Server → Client  Result set (binary protocol)
+//        column count (lenc int) + col defs + EOF
+//        + K binary Row packets + EOF
+//      or OK  (statement produced no rows)
+//      or ERR
+//   5. Client → Server  COM_STMT_CLOSE  (0x19)  — fire and forget
+//
+// Binary result rows are laid out as:
+//   0x00 header + NULL bitmap( (num_cols + 9) / 8 ) + values
+// where column i's NULL bit is bit (i+2) — the first two bitmap bits
+// are reserved. Non-string types are LE-encoded; string/blob/decimal/
+// date types are length-encoded strings.
+
+// Skip a length-encoded string, returning the offset past it.
+let _my_skip_lestring = fn (payload: int) -> fn (off: int) ->
+  let b = mem_get_u8 payload off in
+  if b < 251 then off + 1 + b
+  else if b == 252 then off + 3 + mem_get_u16le payload (off + 1)
+  else if b == 253 then
+    off + 4 + (mem_get_u8 payload (off + 1)
+      + mem_get_u8 payload (off + 2) * 256
+      + mem_get_u8 payload (off + 3) * 65536)
+  else off + 9 + mem_get_u32le payload (off + 1)
+  ;
+
+// Column type is at a fixed offset after 6 length-encoded strings.
+let _my_column_type = fn (payload: int) ->
+  let off1 = _my_skip_lestring payload 0 in
+  let off2 = _my_skip_lestring payload off1 in
+  let off3 = _my_skip_lestring payload off2 in
+  let off4 = _my_skip_lestring payload off3 in
+  let off5 = _my_skip_lestring payload off4 in
+  let off6 = _my_skip_lestring payload off5 in
+  // After 6 lestrings: 1 byte (0x0C length_of_fixed_fields)
+  //                  + charset(2) + column_length(4) = 7 bytes → type
+  mem_get_u8 payload (off6 + 7)
+  ;
+
+// Collect column-definition packets into a `int list` of type OIDs.
+// Consumes the trailing EOF (0xFE, plen < 9) so the caller can go
+// straight to the next section.
+let rec _my_collect_col_types = fn (fd: int) -> fn (n: int)
+                             -> fn (acc: int list) ->
+  if n == 0 then
+    let (_, _, _) = _my_recv_packet fd in acc                // trailing EOF
+  else
+    let (_, payload, _) = _my_recv_packet fd in
+    _my_collect_col_types fd (n - 1) (Cons (_my_column_type payload, acc))
+  ;
+
+let rec _my_rev_int = fn (xs: int list) -> fn (acc: int list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _my_rev_int t (Cons (h, acc))
+  ;
+
+let rec _my_list_len_int = fn (xs: int list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + _my_list_len_int t
+  ;
+
+// MYSQL_TYPE constants used at decode / bind time.
+let _MY_TY_TINY = 1;
+let _MY_TY_SHORT = 2;
+let _MY_TY_LONG = 3;
+let _MY_TY_LONGLONG = 8;
+let _MY_TY_INT24 = 9;
+let _MY_TY_NULL = 6;
+let _MY_TY_VAR_STRING = 253;
+let _MY_TY_STRING = 254;
+let _MY_TY_VARCHAR = 15;
+
+// Prepare a statement. Returns (stmt_id, num_params, col_types).
+// col_types is a `int list` of MYSQL_TYPE codes in select-list order —
+// used later by mysql_execute to decode each binary row cell.
+let mysql_prepare = fn (fd: int) -> fn (sql: str) ->
+  let sql_len = str_len sql in
+  let plen = 1 + sql_len in
+  let buf = mem_alloc plen in
+  let _ = mem_set_u8 buf 0 22 in                             // COM_STMT_PREPARE (0x16)
+  let _ = mem_copy_str buf 1 sql in
+  let _ = _my_send_packet fd 0 buf plen in
+
+  let (_, ok, olen) = _my_recv_packet fd in
+  let head = mem_get_u8 ok 0 in
+  if head == 255 then
+    let msg = mem_to_str (ok + 3) (olen - 3) in
+    let _ = print ("mysql prepare ERR: " ++ msg) in
+    (0 - 1, 0, Nil)
+  else
+    let stmt_id = mem_get_u32le ok 1 in
+    let num_cols = mem_get_u16le ok 5 in
+    let num_params = mem_get_u16le ok 7 in
+    // Skip param definitions + trailing EOF (if any).
+    let _ =
+      if num_params > 0 then
+        let _ = _my_collect_col_types fd num_params Nil in ()
+      else () in
+    // Collect result-column definitions + trailing EOF.
+    let col_types =
+      if num_cols > 0 then
+        _my_rev_int (_my_collect_col_types fd num_cols Nil) Nil
+      else Nil in
+    (stmt_id, num_params, col_types)
+  ;
+
+// Table of 2^n for n in [0, 7] — replaces a shl builtin we don't have.
+let _my_shl_bit = fn (n: int) ->
+  if n == 0 then 1
+  else if n == 1 then 2
+  else if n == 2 then 4
+  else if n == 3 then 8
+  else if n == 4 then 16
+  else if n == 5 then 32
+  else if n == 6 then 64
+  else 128
+  ;
+
+// Build the NULL bitmap for the EXECUTE header. One bit per param;
+// the first param's bit lives at (byte 0, bit 0).
+let rec _my_null_bitmap_write = fn (buf: int) -> fn (off: int)
+                             -> fn (params: str option list) -> fn (i: int) ->
+  match params with
+  | Nil -> ()
+  | Cons (v, rest) ->
+    let is_null = (match v with | None -> 1 | Some _ -> 0) in
+    if is_null == 1 then
+      let byte_off = off + i / 8 in
+      let cur = mem_get_u8 buf byte_off in
+      let _ = mem_set_u8 buf byte_off (cur + (1 * _my_shl_bit (i % 8))) in
+      _my_null_bitmap_write buf off rest (i + 1)
+    else
+      _my_null_bitmap_write buf off rest (i + 1)
+  ;
+
+// Total byte size of the params-value section — sum of length-encoded
+// (length prefix bytes + value bytes) across all non-NULL params.
+// We send every param as VAR_STRING, so:
+//   1-byte lenc prefix for values < 251
+//   3-byte prefix for 251-65535
+//   4-byte prefix for larger — capped by TCP_BUF_BYTES anyway.
+let rec _my_param_bytes = fn (params: str option list) -> fn (acc: int) ->
+  match params with
+  | Nil -> acc
+  | Cons (None, rest) -> _my_param_bytes rest acc
+  | Cons (Some s, rest) ->
+    let n = str_len s in
+    let hdr =
+      if n < 251 then 1
+      else if n < 65536 then 3
+      else 4 in
+    _my_param_bytes rest (acc + hdr + n)
+  ;
+
+// Write a length-encoded string. Returns the next offset.
+let _my_write_lestring = fn (buf: int) -> fn (off: int) -> fn (s: str) ->
+  let n = str_len s in
+  if n < 251 then
+    let _ = mem_set_u8 buf off n in
+    let end_ = mem_copy_str buf (off + 1) s in
+    end_
+  else if n < 65536 then
+    let _ = mem_set_u8 buf off 252 in
+    let _ = mem_set_u16le buf (off + 1) n in
+    let end_ = mem_copy_str buf (off + 3) s in
+    end_
+  else
+    // 253: 3-byte length. Store low 24 bits.
+    let _ = mem_set_u8 buf off 253 in
+    let _ = mem_set_u8 buf (off + 1) (n % 256) in
+    let _ = mem_set_u8 buf (off + 2) (n / 256 % 256) in
+    let _ = mem_set_u8 buf (off + 3) (n / 65536 % 256) in
+    let end_ = mem_copy_str buf (off + 4) s in
+    end_
+  ;
+
+// Loop version, exposed to _my_send_execute.
+let rec _my_write_param_values = fn (buf: int) -> fn (off: int)
+                              -> fn (params: str option list) ->
+  match params with
+  | Nil -> off
+  | Cons (None, rest) -> _my_write_param_values buf off rest
+  | Cons (Some s, rest) ->
+    let new_off = _my_write_lestring buf off s in
+    _my_write_param_values buf new_off rest
+  ;
+
+let rec _my_write_param_types = fn (buf: int) -> fn (off: int)
+                             -> fn (params: str option list) ->
+  match params with
+  | Nil -> off
+  | Cons (_, rest) ->
+    let _ = mem_set_u8 buf off _MY_TY_VAR_STRING in
+    let _ = mem_set_u8 buf (off + 1) 0 in                    // unsigned flag = 0
+    _my_write_param_types buf (off + 2) rest
+  ;
+
+// Length of a str option list. Coerces elements to 0-ints and reuses
+// _my_list_len_int rather than duplicating a polymorphic walker.
+let rec _my_null_placeholder = fn (params: str option list) ->
+  match params with
+  | Nil -> Nil
+  | Cons (_, rest) -> Cons (0, _my_null_placeholder rest)
+  ;
+
+// Zero out `n` bytes of `buf` starting at `off`. Extracted because
+// wasm codegen doesn't allow let-rec inside expression scope.
+let rec _my_zero_bytes = fn (buf: int) -> fn (off: int) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else let _ = mem_set_u8 buf (off + i) 0 in _my_zero_bytes buf off (i + 1) n
+  ;
+
+// COM_STMT_EXECUTE packet. `stmt_id` comes from mysql_prepare.
+let _my_send_execute = fn (fd: int) -> fn (stmt_id: int)
+                    -> fn (params: str option list) ->
+  let n_params = _my_list_len_int (_my_null_placeholder params) in
+  let bitmap_len = (n_params + 7) / 8 in
+  let val_bytes = _my_param_bytes params 0 in
+  // Payload: 1(cmd) + 4(stmt_id) + 1(flags) + 4(iter=1)
+  //          + bitmap_len + 1(new_params_bound) + 2*n_params(types) + val_bytes
+  let plen = 1 + 4 + 1 + 4 + bitmap_len + 1 + 2 * n_params + val_bytes in
+  let buf = mem_alloc plen in
+  let _ = mem_set_u8 buf 0 23 in                             // COM_STMT_EXECUTE
+  let _ = mem_set_u32le buf 1 stmt_id in
+  let _ = mem_set_u8 buf 5 0 in                              // flags: CURSOR_TYPE_NO_CURSOR
+  let _ = mem_set_u32le buf 6 1 in                           // iteration_count = 1
+  let bitmap_off = 10 in
+  // mem_alloc doesn't zero — zero the bitmap explicitly.
+  let _ = _my_zero_bytes buf bitmap_off 0 bitmap_len in
+  let _ = _my_null_bitmap_write buf bitmap_off params 0 in
+  let types_off = bitmap_off + bitmap_len in
+  let _ = mem_set_u8 buf types_off 1 in                      // new_params_bound = 1
+  let after_types = _my_write_param_types buf (types_off + 1) params in
+  let _ = _my_write_param_values buf after_types params in
+  _my_send_packet fd 0 buf plen
+  ;
+
+// ---- Binary row decode ----------------------------------------------
+//
+// Given a raw payload starting with 0x00 (the binary-row marker), the
+// per-column NULL bitmap covers ((num_cols + 9) / 8) bytes. Column i's
+// NULL bit is at (bit index i + 2) — the first two bits are reserved
+// for MySQL server metadata.
+
+let _my_null_bit_set = fn (bitmap_off: int) -> fn (payload: int) -> fn (i: int) ->
+  let bit = i + 2 in
+  let byte = mem_get_u8 payload (bitmap_off + bit / 8) in
+  let mask = _my_shl_bit (bit % 8) in
+  byte / mask % 2 == 1
+  ;
+
+// Read a length-encoded string as an unescape-once str. Returns
+// (Some str, next_off) — never None (NULLs are handled via the bitmap
+// separately in binary rows).
+let _my_read_lestring = fn (payload: int) -> fn (off: int) ->
+  let (len, off1) = _my_lenc_int payload off in
+  let s = mem_to_str (payload + off1) len in
+  (Some s, off1 + len)
+  ;
+
+// Decode one non-null cell. Dispatches on the MYSQL_TYPE code.
+let _my_decode_cell = fn (payload: int) -> fn (off: int) -> fn (ty: int) ->
+  if ty == _MY_TY_TINY then
+    (Some (show (mem_get_u8 payload off)), off + 1)
+  else if ty == _MY_TY_SHORT then
+    (Some (show (mem_get_u16le payload off)), off + 2)
+  else if ty == _MY_TY_LONG || ty == _MY_TY_INT24 then
+    (Some (show (mem_get_u32le payload off)), off + 4)
+  else if ty == _MY_TY_LONGLONG then
+    // 8-byte LE. Trust that MySQL row counts fit in 31 bits — good
+    // enough for the numbers most demos surface.
+    (Some (show (mem_get_u32le payload off)), off + 8)
+  else
+    // Everything else — VAR_STRING, STRING, VARCHAR, TEXT, BLOB,
+    // DECIMAL, dates, JSON — is length-encoded text.
+    _my_read_lestring payload off
+  ;
+
+// Walk the row payload, produce a Cons-prepended str option list.
+let rec _my_decode_row_cells = fn (payload: int) -> fn (off: int)
+                            -> fn (bitmap_off: int)
+                            -> fn (col_types: int list) -> fn (i: int)
+                            -> fn (acc: str option list) ->
+  match col_types with
+  | Nil -> acc
+  | Cons (ty, rest) ->
+    if _my_null_bit_set bitmap_off payload i then
+      _my_decode_row_cells payload off bitmap_off rest (i + 1) (Cons (None, acc))
+    else
+      let (v, next_off) = _my_decode_cell payload off ty in
+      _my_decode_row_cells payload next_off bitmap_off rest (i + 1) (Cons (v, acc))
+  ;
+
+let _my_decode_binary_row = fn (payload: int) -> fn (col_types: int list) ->
+  let ncols = _my_list_len_int col_types in
+  let bitmap_len = (ncols + 9) / 8 in
+  let value_start = 1 + bitmap_len in
+  _my_rev_row (_my_decode_row_cells payload value_start 1 col_types 0 Nil) Nil
+  ;
+
+// Recv loop for binary result rows.
+let rec _my_collect_binary_rows = fn (fd: int) -> fn (col_types: int list)
+                               -> fn (acc: (str option list) list) ->
+  let (seq, payload, plen) = _my_recv_packet fd in
+  if seq < 0 then acc
+  else
+    let head = mem_get_u8 payload 0 in
+    if head == 254 && plen < 9 then acc                      // EOF
+    else if head == 255 then
+      let msg = mem_to_str (payload + 3) (plen - 3) in
+      let _ = print ("mysql execute ERR: " ++ msg) in acc
+    else
+      _my_collect_binary_rows fd col_types
+        (Cons (_my_decode_binary_row payload col_types, acc))
+  ;
+
+// Fire COM_STMT_CLOSE (0x19). No server reply.
+let mysql_deallocate_stmt = fn (fd: int) -> fn (stmt_id: int) ->
+  let buf = mem_alloc 5 in
+  let _ = mem_set_u8 buf 0 25 in                             // COM_STMT_CLOSE
+  let _ = mem_set_u32le buf 1 stmt_id in
+  _my_send_packet fd 0 buf 5
+  ;
+
+// Public: execute a prepared statement. Returns rows.
+let mysql_execute = fn (fd: int) -> fn (stmt) -> fn (params: str option list) ->
+  let (stmt_id, _num_params, col_types) = stmt in
+  let _ = _my_send_execute fd stmt_id params in
+  let (_, first, flen) = _my_recv_packet fd in
+  let head = mem_get_u8 first 0 in
+  if head == 0 then Nil                                      // OK — non-select
+  else if head == 255 then
+    let msg = mem_to_str (first + 3) (flen - 3) in
+    let _ = print ("mysql execute ERR: " ++ msg) in Nil
+  else
+    // First packet is length-encoded column count for the result set.
+    // We already have col_types from prepare, so we skip re-parsing the
+    // column definitions.
+    let (ncols_reply, _) = _my_lenc_int first 0 in
+    let _ = _my_drain_col_defs fd ncols_reply in
+    // Trailing EOF after col defs.
+    let (_, _, _) = _my_recv_packet fd in
+    _my_rev_rows (_my_collect_binary_rows fd col_types Nil) Nil
+  ;
+
+// One-shot convenience: prepare → execute → close.
+let mysql_query_params = fn (fd: int) -> fn (sql: str)
+                      -> fn (params: str option list) ->
+  let stmt = mysql_prepare fd sql in
+  let (stmt_id, _, _) = stmt in
+  if stmt_id < 0 then Nil
+  else
+    let rows = mysql_execute fd stmt params in
+    let _ = mysql_deallocate_stmt fd stmt_id in
+    rows
+  ;
+
 // ---- Public API: helpers mirroring pg's naming ------------------------
 
 // Column-value convenience — same shape as pg_val_or, so demos can

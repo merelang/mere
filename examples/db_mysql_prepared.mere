@@ -1,0 +1,95 @@
+// examples/db_mysql_prepared.mere — MySQL prepared statements via
+// COM_STMT_PREPARE + COM_STMT_EXECUTE.
+//
+// Same SQL-injection-defense story as db_params.mere on the PG side:
+// parameters are sent out-of-band, so untrusted input can't terminate
+// the statement text. The demo:
+//
+//   1. Prepares an INSERT and re-executes it four times with different
+//      params, including a hostile "'; DROP TABLE items; --" payload.
+//   2. Executes a parameterized SELECT to fetch specific rows back.
+//   3. Also exercises `mysql_query_params` — the one-shot convenience
+//      wrapper that hides prepare/execute/close.
+//   4. Verifies the table still exists (hostile input landed as data)
+//      and that NULL round-trips through the binary result protocol.
+//
+// Setup (either auth plugin works — the driver auto-selects):
+//   docker run -d --name mere-mysql-prep -p 15503:3306 \
+//     -e MYSQL_ROOT_PASSWORD=rootpw \
+//     -e MYSQL_DATABASE=meredb \
+//     -e MYSQL_USER=meredev \
+//     -e MYSQL_PASSWORD=meredevpw \
+//     mysql:8.0
+//
+// Usage:
+//   ./mere -w examples/db_mysql_prepared.mere > /tmp/dbmp.wat
+//   wat2wasm --enable-tail-call /tmp/dbmp.wat -o /tmp/dbmp.wasm
+//   node scripts/run_wasm.js /tmp/dbmp.wasm
+
+import "../contrib/db/mysql.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> mysql_val_or h "NULL"
+  | Cons (h, t) -> mysql_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let fd = mysql_connect "127.0.0.1" 15503 "meredev" "meredevpw" "meredb" in
+if fd < 0 then
+  let _ = print "mysql_connect failed" in
+  ()
+else
+  let _ = mysql_query fd "DROP TABLE IF EXISTS items" in
+  let _ = mysql_query fd
+    "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(120), note VARCHAR(200))" in
+
+  // ---- prepared INSERT — bind values out of band -------------------
+  let ins = mysql_prepare fd "INSERT INTO items VALUES (?, ?, ?)" in
+  let (ins_id, _, _) = ins in
+  let _ = print ("prepared INSERT (stmt_id=" ++ show ins_id ++ ")") in
+
+  let _ = mysql_execute fd ins
+    (Cons (Some "1", Cons (Some "alpha", Cons (Some "first",     Nil)))) in
+  let _ = mysql_execute fd ins
+    (Cons (Some "2", Cons (Some "beta",  Cons (None,             Nil)))) in
+
+  let hostile = "'; DROP TABLE items; --" in
+  let _ = mysql_execute fd ins
+    (Cons (Some "3", Cons (Some hostile, Cons (Some "attempt",   Nil)))) in
+  let _ = mysql_execute fd ins
+    (Cons (Some "4", Cons (Some "delta", Cons (Some "ships it",  Nil)))) in
+  let _ = mysql_deallocate_stmt fd ins_id in
+  let _ = print "-- 4 rows inserted (row 2 has NULL note, row 3 is hostile)" in
+
+  // ---- prepared SELECT via mysql_query_params (one-shot) -----------
+  let _ = print "" in
+  let _ = print "-- rows via mysql_query_params (id >= ?, id <= ?):" in
+  let rows = mysql_query_params fd
+    "SELECT id, name, note FROM items WHERE id >= ? AND id <= ? ORDER BY id"
+    (Cons (Some "2", Cons (Some "4", Nil))) in
+  let _ = print_rows rows in
+
+  // ---- verify hostile input landed as data -------------------------
+  let _ = print "" in
+  let _ = print "-- lookup hostile name via prepared SELECT:" in
+  let hostile_rows = mysql_query_params fd
+    "SELECT id, name FROM items WHERE name = ?"
+    (Cons (Some hostile, Nil)) in
+  let _ = print_rows hostile_rows in
+
+  let _ = print "" in
+  let _ = print "-- total row count (table survives injection attempt):" in
+  let count_row = mysql_query fd "SELECT COUNT(*) FROM items" in
+  let _ = print_rows count_row in
+
+  let _ = mysql_close fd in
+  ()
