@@ -1,0 +1,41 @@
+// examples/tcp_smoke.mere — end-to-end check for the sync TCP externs.
+//
+// Connects to a host / port passed on the command line, sends a fixed
+// payload ("hello\n"), reads back whatever the server returns, prints
+// the bytes as a decoded str.
+//
+// Usage (paired with a netcat listener that echoes lines):
+//   nc -l 12345 &                                       # in a shell
+//   ./mere -w examples/tcp_smoke.mere > /tmp/tcp.wat
+//   wat2wasm --enable-tail-call /tmp/tcp.wat -o /tmp/tcp.wasm
+//   node scripts/run_wasm.js /tmp/tcp.wasm 127.0.0.1 12345
+
+extern fn arg_count: unit -> int;
+extern fn arg_get: int -> str;
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_write: int -> str -> int -> int;
+extern fn tcp_read: int -> str -> int -> int;
+extern fn tcp_close: int -> unit;
+
+let host = if arg_count () < 2 then "127.0.0.1" else arg_get 0 in
+let port = if arg_count () < 2 then 12345 else int_of_str (arg_get 1) in
+
+let _ = print ("connecting to " ++ host ++ ":" ++ show port ++ " …") in
+let fd = tcp_connect host port in
+
+if fd < 1 then
+  let _ = print "connect failed" in
+  ()
+else
+  let _ = print ("fd=" ++ show fd) in
+  let payload = "hello\n" in
+  let n_w = tcp_write fd payload (str_len payload) in
+  let _ = print ("wrote " ++ show n_w ++ " bytes") in
+  // Pre-allocate an on-heap byte scratch by concatenating; we only need
+  // a writable region tcp_read can fill. 256-byte spare is plenty for
+  // a smoke test.
+  let scratch = str_repeat " " 256 in
+  let n_r = tcp_read fd scratch 256 in
+  let _ = print ("read " ++ show n_r ++ " bytes: " ++ scratch) in
+  let _ = tcp_close fd in
+  ()
