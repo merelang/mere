@@ -40,6 +40,7 @@ import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
 import "../contrib/markdown/to_html.mere";
 
@@ -86,21 +87,7 @@ let is_admin = fn (u: unit) ->
   else map_has sessions sid
 in
 
-let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
-  a ++ "|" ++ b ++ "|" ++ c
-in
-
-let split3 = fn (s: str) ->
-  let b1 = str_index_of s "|" in
-  if b1 < 0 then (s, "", "")
-  else
-    let after = substring s (b1 + 1) (str_len s) in
-    let b2 = str_index_of after "|" in
-    if b2 < 0 then (substring s 0 b1, after, "")
-    else (substring s 0 b1,
-          substring after 0 b2,
-          substring after (b2 + 1) (str_len after))
-in
+// pack3 / split3 come from contrib/kv/pack.mere.
 
 // ---- JSON + XML escaping ------------------------------------------
 

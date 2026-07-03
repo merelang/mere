@@ -1,0 +1,61 @@
+// contrib/kv/pack.mere — pipe-separated string tuple encoding.
+//
+// Every one of the http_* demos stores tuples-of-strings as KV
+// values with `|` as the separator (`created_at|title|body`,
+// `status|conclusion|actor|url`, …). Each demo used to redefine
+// its own `pack3` / `split3` / `split4` copies — this module
+// pulls them together so callers just:
+//
+//   import "../contrib/kv/pack.mere";
+//   let value = pack3 created title body in
+//   let (created, title, body) = split3 value in
+//
+// The `|` character is used as the delimiter. Field values must
+// not contain a literal `|` — for arbitrary bytes, wrap in
+// contrib/http/query.mere's `url_encode` first (or add an escape
+// pass here later).
+//
+// Public API:
+//   pack2..pack5   : join N fields with `|`
+//   split2..split5 : split at each `|` up to N pieces; missing tail
+//                    fields come back as "".
+
+// ---- packing ------------------------------------------------------
+
+let pack2 = fn (a: str) -> fn (b: str) ->
+  a ++ "|" ++ b;
+
+let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
+  a ++ "|" ++ b ++ "|" ++ c;
+
+let pack4 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) ->
+  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d;
+
+let pack5 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) -> fn (e: str) ->
+  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d ++ "|" ++ e;
+
+// ---- splitting ----------------------------------------------------
+
+// Split at the first `|`. If none, `(s, "")`.
+let split2 = fn (s: str) ->
+  let bar = str_index_of s "|" in
+  if bar < 0 then (s, "")
+  else (substring s 0 bar, substring s (bar + 1) (str_len s));
+
+let split3 = fn (s: str) ->
+  let (a, r1) = split2 s in
+  let (b, c) = split2 r1 in
+  (a, b, c);
+
+let split4 = fn (s: str) ->
+  let (a, r1) = split2 s in
+  let (b, r2) = split2 r1 in
+  let (c, d) = split2 r2 in
+  (a, b, c, d);
+
+let split5 = fn (s: str) ->
+  let (a, r1) = split2 s in
+  let (b, r2) = split2 r1 in
+  let (c, r3) = split2 r2 in
+  let (d, e) = split2 r3 in
+  (a, b, c, d, e);

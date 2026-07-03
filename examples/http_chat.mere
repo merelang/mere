@@ -32,6 +32,7 @@ import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/http/sse.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
 
 let msgs_db_path = "/tmp/mere_chat_msgs.db" in
@@ -42,21 +43,7 @@ let body_field = fn (name: str) ->
   json_get parsed name
 in
 
-let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
-  a ++ "|" ++ b ++ "|" ++ c
-in
-
-let split3 = fn (s: str) ->
-  let b1 = str_index_of s "|" in
-  if b1 < 0 then (s, "", "")
-  else
-    let r = substring s (b1 + 1) (str_len s) in
-    let b2 = str_index_of r "|" in
-    if b2 < 0 then (substring s 0 b1, r, "")
-    else (substring s 0 b1,
-          substring r 0 b2,
-          substring r (b2 + 1) (str_len r))
-in
+// pack3 / split3 come from contrib/kv/pack.mere.
 
 let rec _json_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
   if i >= n then strbuf_to_str buf

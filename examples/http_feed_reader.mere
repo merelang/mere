@@ -50,6 +50,7 @@ import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/http/client.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
 import "../contrib/feed/feed.mere";
 
@@ -100,28 +101,7 @@ let entry_key_prefix = fn (user: str) -> fn (url: str) ->
   "entries/" ++ user ++ "/" ++ sha256_hex url ++ "/"
 in
 
-// Serialize/parse pipe-separated triples/quads. We assume the fields
-// don't contain literal `|` — for a demo good enough, though a real
-// impl would escape.
-let pack2 = fn (a: str) -> fn (b: str) -> a ++ "|" ++ b in
-let pack4 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) ->
-  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d
-in
-
-// Split at the first `|`, returning (before, after).
-let split1 = fn (s: str) ->
-  let bar = str_index_of s "|" in
-  if bar < 0 then (s, "")
-  else (substring s 0 bar, substring s (bar + 1) (str_len s))
-in
-
-// Split at each `|` (up to 4 fields). Missing tail fields → "".
-let split4 = fn (s: str) ->
-  let (a, r1) = split1 s in
-  let (b, r2) = split1 r1 in
-  let (c, d) = split1 r2 in
-  (a, b, c, d)
-in
+// pack2 / pack4 / split2 / split4 live in contrib/kv/pack.mere.
 
 // ---- JSON emission helpers ----------------------------------------
 
@@ -202,7 +182,7 @@ let feeds_list_h = fn (req: str) ->
       | Cons (k, rest) ->
         if str_starts_with k prefix then
           let v = kv_get subs k in
-          let (url, title) = split1 v in
+          let (url, title) = split2 v in
           let sep = if first then "" else "," in
           let row = "\{\"url\":" ++ jstr url ++ ",\"title\":" ++ jstr title ++ "}" in
           build rest false (acc ++ sep ++ row)
@@ -313,7 +293,7 @@ let feeds_refresh_h = fn (req: str) ->
       | Cons (k, rest) ->
         if str_starts_with k prefix then
           let v = kv_get subs k in
-          let (url, _title) = split1 v in
+          let (url, _title) = split2 v in
           let added = refresh_one user url in
           walk_subs rest (n_feeds + 1) (n_entries + added)
         else walk_subs rest n_feeds n_entries in
