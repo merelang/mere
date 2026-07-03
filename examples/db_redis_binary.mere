@@ -15,9 +15,8 @@
 //      server-side; a NUL-truncated `redis_command` SET would have
 //      stored 0 bytes since str_len sees the leading \x00).
 //   4. Read back the raw bytes with GET and inspect them via
-//      mem_get_u8 (the returned RRBulk carries the raw memory —
-//      str_len sees only the pre-NUL prefix, but the byte buffer at
-//      that pointer is intact for len bytes given the RESP header).
+//      redis_bulk_hex (the reader tags every RRBulk with its true
+//      byte length, so the hex-encoded result is NUL-safe).
 //
 // Setup:
 //   docker run -d --name mere-redis-bin -p 15606:6379 redis:7
@@ -33,25 +32,6 @@ let show_reply = fn (label: str) -> fn (r) ->
   print (label ++ ": " ++ redis_show r)
   ;
 
-// Inspect the byte at offset `i` of a str value's underlying memory.
-// str_ptr coerces the Mere str to a raw pointer; mem_get_u8 dereferences.
-// Used below to peek past the leading NUL of the GET reply.
-let peek_byte = fn (s: str) -> fn (i: int) ->
-  mem_get_u8 (str_ptr s) i
-  ;
-
-let rec show_bytes = fn (s: str) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then ()
-  else
-    let _ = print ("  byte[" ++ show i ++ "] = 0x" ++
-      (let b = peek_byte s i in
-       let hi = b / 16 in
-       let lo = b - hi * 16 in
-       let hc = fn (v: int) ->
-         if v < 10 then chr (v + 48) else chr (v + 87) in
-       hc hi ++ hc lo)) in
-    show_bytes s (i + 1) n
-  ;
 
 let fd = redis_connect "127.0.0.1" 15606 in
 if fd < 0 then let _ = print "connect failed" in ()
@@ -85,16 +65,18 @@ else
   // (We skip the ill-formed call — the point is that redis_command_b
   // is required whenever binary values need to survive.)
 
-  // Read the value back via GET. redis_command returns RRBulk (Some s)
-  // where `s` is the raw memory pointer to `len` bytes on the Mere
-  // heap. str_len(s) sees the prefix ending at the first NUL, but the
-  // subsequent bytes are still there — walk them with peek_byte.
+  // Read the value back via GET. The reader tags every RRBulk with
+  // its true byte length, so `redis_bulk_hex` returns a NUL-safe hex
+  // string of the payload — no manual byte-by-byte peek needed.
   let r = redis_command fd (Cons ("GET", Cons ("bkey", Nil))) in
   let _ = print "" in
-  let _ = print "GET bkey (5 bytes accessed via mem_get_u8):" in
-  let _ = match r with
-          | RRBulk (Some s) -> show_bytes s 0 5
-          | _ -> print "  unexpected reply shape" in
+  let _ = print ("GET bkey (via redis_bulk_hex): " ++ redis_bulk_hex r) in
+
+  // Length-tagged access via redis_bulk_bytes returns (ptr, len).
+  let _ = match redis_bulk_bytes r with
+          | Some (ptr, len) ->
+            print ("  raw: ptr=<opaque> len=" ++ show len)
+          | None -> print "  (nil)" in
 
   let _ = redis_close fd in
   ()
