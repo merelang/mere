@@ -50,6 +50,7 @@ import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
 
 let links_db_path = "/tmp/mere_link_links.db" in
@@ -62,21 +63,7 @@ let body_field = fn (name: str) ->
   json_get parsed name
 in
 
-let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
-  a ++ "|" ++ b ++ "|" ++ c
-in
-
-let split1 = fn (s: str) ->
-  let bar = str_index_of s "|" in
-  if bar < 0 then (s, "")
-  else (substring s 0 bar, substring s (bar + 1) (str_len s))
-in
-
-let split3 = fn (s: str) ->
-  let (a, r1) = split1 s in
-  let (b, c) = split1 r1 in
-  (a, b, c)
-in
+// pack3 / split3 come from contrib/kv/pack.mere.
 
 // Codes are alphanumeric / dash / underscore. Anything else, we reject
 // to keep the /-prefix routing unambiguous.

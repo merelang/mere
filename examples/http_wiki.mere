@@ -37,6 +37,7 @@ import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
 import "../contrib/markdown/to_html.mere";
 
@@ -52,26 +53,7 @@ let body_field = fn (name: str) ->
   json_get parsed name
 in
 
-let pack4 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) ->
-  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d
-in
-
-let split4 = fn (s: str) ->
-  let b1 = str_index_of s "|" in
-  if b1 < 0 then (s, "", "", "")
-  else
-    let r1 = substring s (b1 + 1) (str_len s) in
-    let b2 = str_index_of r1 "|" in
-    if b2 < 0 then (substring s 0 b1, r1, "", "")
-    else
-      let r2 = substring r1 (b2 + 1) (str_len r1) in
-      let b3 = str_index_of r2 "|" in
-      if b3 < 0 then (substring s 0 b1, substring r1 0 b2, r2, "")
-      else (substring s 0 b1,
-            substring r1 0 b2,
-            substring r2 0 b3,
-            substring r2 (b3 + 1) (str_len r2))
-in
+// pack4 / split4 come from contrib/kv/pack.mere.
 
 // Parse a base-10 unsigned int; empty / non-digits → 0.
 let parse_int = fn (s: str) ->

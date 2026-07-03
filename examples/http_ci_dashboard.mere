@@ -52,6 +52,7 @@ import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/kv/kv.mere";
+import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
 import "../contrib/webhook/github.mere";
 
@@ -89,25 +90,7 @@ let jstr = fn (s: str) ->
   "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
 in
 
-// ---- pipe-separated value packing ---------------------------------
-
-let pack5 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) -> fn (e: str) ->
-  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d ++ "|" ++ e
-in
-
-let split1 = fn (s: str) ->
-  let bar = str_index_of s "|" in
-  if bar < 0 then (s, "")
-  else (substring s 0 bar, substring s (bar + 1) (str_len s))
-in
-
-let split5 = fn (s: str) ->
-  let (a, r1) = split1 s in
-  let (b, r2) = split1 r1 in
-  let (c, r3) = split1 r2 in
-  let (d, e) = split1 r3 in
-  (a, b, c, d, e)
-in
+// pack5 / split5 come from contrib/kv/pack.mere.
 
 // ---- webhook handler ----------------------------------------------
 
