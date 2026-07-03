@@ -880,7 +880,10 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : un
   inner_fn_counter_wasm := 0;
   lifted_fns_wasm := [];
   let builtin_names = List.map fst Typer.initial_env in
-  let known = ref (toplevel_names @ builtin_names) in
+  let extern_names =
+    Hashtbl.fold (fun k _ acc -> k :: acc) extern_fn_decls_wasm []
+  in
+  let known = ref (toplevel_names @ builtin_names @ extern_names) in
   let current_host = ref "" in
   let lift_one _host_param host_locals n p fn_body =
     let effective_known =
@@ -967,26 +970,44 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : un
   (* Phase 45 (DEFERRED §8): transitive capture closure for mutually-called
      inner-lifted fns. See the same-phase comment in codegen_c.ml for details *)
   let all_lifted = !lifted_fns_wasm in
-  let mere_to_lifted : (string, string) Hashtbl.t = Hashtbl.create 8 in
-  Hashtbl.iter (fun mname entry ->
-    Hashtbl.replace mere_to_lifted mname entry.lifted_name) inner_lifts_wasm;
+  (* Build a per-host mere→lifted map. Using a single global map keyed
+     only by raw name causes collisions when two different top-level
+     fns each define an inner-lifted helper with the same source name
+     (e.g. two separate `let rec walk = …` bodies) — the second
+     silently overwrote the first, and the transitive-capture pass
+     then attributed the wrong capture set to inter-sibling calls,
+     surfacing as `inner-lifted capture X not in scope` at emit. *)
+  let mere_to_lifted_by_host : (string, (string, string) Hashtbl.t) Hashtbl.t =
+    Hashtbl.create 8
+  in
+  Hashtbl.iter (fun host tbl ->
+    let m = Hashtbl.create 4 in
+    Hashtbl.iter (fun mname entry -> Hashtbl.replace m mname entry.lifted_name) tbl;
+    Hashtbl.replace mere_to_lifted_by_host host m
+  ) inner_lifts_by_host_wasm;
+  let mere_to_lifted_for host =
+    match Hashtbl.find_opt mere_to_lifted_by_host host with
+    | Some m -> m
+    | None -> Hashtbl.create 0
+  in
   (* Note that Wasm captures are a string list, so the type differs *)
   let captures_map : (string, string list) Hashtbl.t =
     Hashtbl.create 8
   in
   List.iter (fun lf ->
+    let host_map = mere_to_lifted_for lf.l_host in
     let filtered = List.filter (fun n ->
-      not (Hashtbl.mem mere_to_lifted n)) lf.l_captures in
+      not (Hashtbl.mem host_map n)) lf.l_captures in
     Hashtbl.replace captures_map lf.l_name filtered) all_lifted;
-  let rec scan_for_called called_acc (e : Ast.expr) cur_name =
+  let rec scan_for_called host_map called_acc (e : Ast.expr) cur_name =
     let acc = ref called_acc in
     (match e.Ast.node with
-     | Ast.Var n when Hashtbl.mem mere_to_lifted n
-                   && Hashtbl.find mere_to_lifted n <> cur_name ->
-       let cl_name = Hashtbl.find mere_to_lifted n in
+     | Ast.Var n when Hashtbl.mem host_map n
+                   && Hashtbl.find host_map n <> cur_name ->
+       let cl_name = Hashtbl.find host_map n in
        if not (List.mem cl_name !acc) then acc := cl_name :: !acc
      | _ -> ());
-    let recurse sub = acc := scan_for_called !acc sub cur_name in
+    let recurse sub = acc := scan_for_called host_map !acc sub cur_name in
     (match e.Ast.node with
      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
      | Ast.Unit_lit | Ast.Var _ -> ()
@@ -1017,14 +1038,15 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : un
   while !changed do
     changed := false;
     List.iter (fun lf ->
-      let called_inner = scan_for_called [] lf.l_body lf.l_name in
+      let host_map = mere_to_lifted_for lf.l_host in
+      let called_inner = scan_for_called host_map [] lf.l_body lf.l_name in
       let cur_caps = Hashtbl.find captures_map lf.l_name in
       let new_caps = ref cur_caps in
       List.iter (fun called_lifted_name ->
         let other_caps = Hashtbl.find captures_map called_lifted_name in
         List.iter (fun cap_n ->
           if cap_n = lf.l_param then ()
-          else if Hashtbl.mem mere_to_lifted cap_n then ()
+          else if Hashtbl.mem host_map cap_n then ()
           else if List.mem cap_n !new_caps then ()
           else begin
             new_caps := !new_caps @ [cap_n];
