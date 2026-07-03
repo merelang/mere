@@ -1,0 +1,244 @@
+// http_jwt_api: stateless task API with HS256 JWT bearer auth.
+//
+// Ninth contrib/http demo. Difference from every previous one:
+// no server-side session table. Auth is proved by every request
+// carrying `Authorization: Bearer <jwt>`; the server verifies the
+// HMAC signature and reads the user claim straight out of the
+// payload. No cookie, no session store — tokens survive a server
+// restart, and multiple server processes could share the same
+// secret without any shared state.
+//
+// Endpoints (all JSON in / JSON out — no HTML this time):
+//   POST /api/register    {user, pass}    — create account
+//   POST /api/login       {user, pass}    → { token }
+//   GET  /api/me                          → { user }        (bearer)
+//   GET  /api/tasks                       → [ …tasks ]      (bearer)
+//   POST /api/tasks       {text}          → { id, text }    (bearer)
+//   POST /api/tasks/delete {id}           → 204             (bearer)
+//
+// Data model:
+//   user/<u>       →  sha256(password)
+//   task/<u>/<id>  →  text  (per-user isolation via key namespace)
+//
+// JWT secret is seeded from `crypto.randomBytes(32).toString('hex')`
+// on first run and cached in `secret/jwt`. This means (a) restarts
+// preserve issued tokens, but (b) if operators want rotation they
+// can just delete the secret row and every outstanding token will
+// stop verifying.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+import "../contrib/auth/jwt.mere";
+
+let store_path = "/tmp/mere_jwt_store.db" in
+let store = kv_load store_path in
+
+// Seed a random JWT secret if not present. gen_request_id gives us
+// 16 hex chars — plenty of entropy for a demo, though production
+// would want a longer key.
+let _ =
+  if not (kv_has store "secret/jwt") then
+    let s1 = gen_request_id () in
+    let s2 = gen_request_id () in
+    let _ = kv_set store "secret/jwt" (s1 ++ s2) in
+    let _ = kv_save store store_path in ()
+  else ()
+in
+
+let jwt_secret = kv_get store "secret/jwt" in
+
+// ---- helpers ------------------------------------------------------
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+// Extract the token from `Authorization: Bearer <token>`. Returns ""
+// when missing or malformed. Copy immediately to Mere heap so the
+// value survives later writeStr calls in the same handler.
+let bearer_token = fn (u: unit) ->
+  let h = http_get_header "Authorization" ++ "" in
+  let p = "Bearer " in
+  if str_starts_with h p then substring h (str_len p) (str_len h)
+  else ""
+in
+
+// Verify the current request's bearer token and return the user
+// name. Empty string means "not authenticated".
+let auth_user = fn (u: unit) ->
+  let tok = bearer_token () in
+  if str_eq tok "" then ""
+  else match Jwt.verify jwt_secret tok with
+       | None -> ""
+       | Some payload -> json_get (parse_json_body payload) "sub"
+in
+
+// ---- JSON escape helper ------------------------------------------
+
+let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
+in
+
+// ---- handlers -----------------------------------------------------
+
+let register_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  if str_eq u "" || str_eq p "" then
+    let _ = http_set_status 400 in "missing user or pass\n"
+  else if str_index_of u "/" >= 0 then
+    let _ = http_set_status 400 in "user must not contain '/'\n"
+  else
+    let k = "user/" ++ u in
+    if kv_has store k then
+      let _ = http_set_status 409 in "user exists\n"
+    else
+      let _ = kv_set store k (sha256_hex p) in
+      let _ = kv_save store store_path in
+      let _ = log_with "info" "register" (Cons (("user", u), Nil)) in
+      let _ = http_set_status 201 in
+      "created\n"
+in
+
+let login_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  let k = "user/" ++ u in
+  if not (kv_has store k) || not (str_eq (kv_get store k) (sha256_hex p)) then
+    let _ = http_set_status 401 in "invalid credentials\n"
+  else
+    // Payload: {"sub":"<user>","iat":<now>}. `sub` is the standard
+    // registered claim for "subject". No expiry in this demo — a
+    // real API would add "exp" and check it in auth_user.
+    let now = unix_time () in
+    let payload = "\{\"sub\":" ++ jstr u ++ ",\"iat\":" ++ show now ++ "}" in
+    let token = Jwt.sign jwt_secret payload in
+    let _ = log_with "info" "login" (Cons (("user", u), Nil)) in
+    let _ = http_set_content_type "application/json" in
+    "\{\"token\":" ++ jstr token ++ "}\n"
+in
+
+let me_h = fn (req: str) ->
+  let user = auth_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "invalid or missing token\n"
+  else
+    let _ = http_set_content_type "application/json" in
+    "\{\"user\":" ++ jstr user ++ "}\n"
+in
+
+let tasks_list_h = fn (req: str) ->
+  let user = auth_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "[]\n"
+  else
+    let prefix = "task/" ++ user ++ "/" in
+    let plen = str_len prefix in
+    let ks = kv_keys store in
+    let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+      match xs with
+      | Nil -> acc ++ "]"
+      | Cons (k, rest) ->
+        if str_starts_with k prefix then
+          let id = substring k plen (str_len k) in
+          let text = kv_get store k in
+          let sep = if first then "" else "," in
+          let row = "\{\"id\":" ++ jstr id ++ ",\"text\":" ++ jstr text ++ "}" in
+          build rest false (acc ++ sep ++ row)
+        else build rest first acc in
+    let _ = http_set_content_type "application/json" in
+    build ks true "[" ++ "\n"
+in
+
+let task_create_h = fn (req: str) ->
+  let user = auth_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "missing bearer\n"
+  else
+    let text = body_field "text" in
+    if str_eq text "" then
+      let _ = http_set_status 400 in "missing text\n"
+    else
+      let id = gen_request_id () in
+      let _ = kv_set store ("task/" ++ user ++ "/" ++ id) text in
+      let _ = kv_save store store_path in
+      let _ = log_with "info" "task_add"
+        (Cons (("user", user), Cons (("id", id), Nil))) in
+      let _ = http_set_content_type "application/json" in
+      let _ = http_set_status 201 in
+      "\{\"id\":" ++ jstr id ++ ",\"text\":" ++ jstr text ++ "}\n"
+in
+
+let task_delete_h = fn (req: str) ->
+  let user = auth_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in "missing bearer\n"
+  else
+    let id = body_field "id" in
+    let k = "task/" ++ user ++ "/" ++ id in
+    if not (kv_has store k) then
+      let _ = http_set_status 404 in "no such task\n"
+    else
+      let _ = kv_delete store k in
+      let _ = kv_save store store_path in
+      let _ = http_set_status 204 in
+      ""
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/jwt_demo/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                   home_h,
+  Cons (route "POST" "/api/register"       register_h,
+  Cons (route "POST" "/api/login"          login_h,
+  Cons (route "GET"  "/api/me"             me_h,
+  Cons (route "GET"  "/api/tasks"          tasks_list_h,
+  Cons (route "POST" "/api/tasks"          task_create_h,
+  Cons (route "POST" "/api/tasks/delete"   task_delete_h,
+  Nil))))))) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/jwt_demo" handle_routed in
+
+let _ = print ("starting JWT task API on :8080 (store=" ++ store_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0
