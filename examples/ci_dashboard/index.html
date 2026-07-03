@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere CI dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere CI dashboard</h1>
+<p class="subtitle">
+  Live status board fed by GitHub <code>workflow_run</code> webhooks.
+  Each row is one <code>(repo, branch, workflow)</code> triple. Auto-refreshes
+  every 5 seconds. HMAC signature is verified server-side; only signed
+  events land here.
+</p>
+
+<div id="controls">
+  <span id="count"></span>
+  <button id="btn-refresh">refresh now</button>
+</div>
+
+<table id="jobs">
+  <thead>
+    <tr>
+      <th>repo</th>
+      <th>branch</th>
+      <th>workflow</th>
+      <th>status</th>
+      <th>conclusion</th>
+      <th>actor</th>
+      <th>updated</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<p id="empty" hidden>No jobs yet. Send a signed <code>workflow_run</code>
+event to <code>/webhooks/github</code>.</p>
+
+<pre id="log"></pre>
