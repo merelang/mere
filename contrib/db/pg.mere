@@ -467,6 +467,61 @@ let pg_val_or = fn (v: str option) -> fn (dflt: str) ->
   | Some s -> s
   ;
 
+// ---- Typed column extractors --------------------------------------------
+//
+// PG sends every value as text (format 0), so a column that's declared
+// int / bool / … arrives as its printed form: "42", "t", "3.14", ….
+// These helpers do the last-mile parse so callers don't have to sprinkle
+// `int_of_str` at every match site. On NULL (`None`), the `_or` variants
+// return the caller's supplied default; the plain variants return
+// `<type> option` so callers can distinguish "no row" from "row with 0".
+
+let pg_col_int = fn (v: str option) ->
+  match v with
+  | None -> None
+  | Some s -> Some (int_of_str s)
+  ;
+
+let pg_col_int_or = fn (v: str option) -> fn (dflt: int) ->
+  match v with
+  | None -> dflt
+  | Some s -> int_of_str s
+  ;
+
+// PG bool arrives as single-char "t" / "f". Accept the long forms too
+// (a hand-crafted SELECT can emit "true"/"false"), and treat anything
+// else as false — safer than throwing away the row.
+let pg_col_bool = fn (v: str option) ->
+  match v with
+  | None -> None
+  | Some s -> Some (str_eq s "t" || str_eq s "true")
+  ;
+
+let pg_col_bool_or = fn (v: str option) -> fn (dflt: bool) ->
+  match v with
+  | None -> dflt
+  | Some s -> str_eq s "t" || str_eq s "true"
+  ;
+
+// nth element of a row (0-indexed). Returns `None` for both out-of-range
+// indices and explicit NULLs — callers who need to distinguish them
+// should just pattern-match on the row directly.
+let rec pg_col_at = fn (row: str option list) -> fn (i: int) ->
+  match row with
+  | Nil -> None
+  | Cons (v, rest) ->
+    if i == 0 then v
+    else pg_col_at rest (i - 1)
+  ;
+
+// First row, nth column. Useful for one-shot queries that return a
+// single scalar (`SELECT count(*)` / `SELECT id FROM users WHERE …`).
+let pg_first_col = fn (rows: (str option list) list) -> fn (i: int) ->
+  match rows with
+  | Nil -> None
+  | Cons (row, _) -> pg_col_at row i
+  ;
+
 // ---- RowDescription parsing ---------------------------------------------
 //
 // Payload layout (per PG docs, message type 'T'):

@@ -1,0 +1,91 @@
+// examples/db_typed.mere — typed column extractors.
+//
+// pg_col_int / pg_col_bool convert a `str option` cell value to the
+// natural Mere type, returning None on NULL. `_or` variants take a
+// default. pg_col_at / pg_first_col index into rows without a manual
+// list walk — handy for single-value queries.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-typed -p 15443:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_typed.mere > /tmp/dbt.wat
+//   wat2wasm --enable-tail-call /tmp/dbt.wat -o /tmp/dbt.wasm
+//   node scripts/run_wasm.js /tmp/dbt.wasm
+
+import "../contrib/db/pg.mere";
+
+let show_opt_int = fn (o: int option) ->
+  match o with
+  | None -> "None"
+  | Some n -> "Some " ++ show n
+  ;
+
+let show_opt_bool = fn (o: bool option) ->
+  match o with
+  | None -> "None"
+  | Some b -> "Some " ++ (if b then "true" else "false")
+  ;
+
+let fd = pg_connect_url "postgres://postgres@127.0.0.1:15443/postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+
+  // Build a couple of rows so we have both a "populated" and a NULL case.
+  let _ = pg_query fd "DROP TABLE IF EXISTS meas" in
+  let _ = pg_query fd
+    "CREATE TABLE meas (id int, sample int, active bool, note text)" in
+  let _ = pg_query_params fd
+    "INSERT INTO meas VALUES ($1::int, $2::int, $3::bool, $4)"
+    (Cons (Some "1", Cons (Some "42",   Cons (Some "true",  Cons (Some "warm",  Nil))))) in
+  let _ = pg_query_params fd
+    "INSERT INTO meas VALUES ($1::int, $2::int, $3::bool, $4)"
+    (Cons (Some "2", Cons (None,        Cons (Some "false", Cons (None,         Nil))))) in
+
+  // ---- per-cell converters -----------------------------------------
+  let _ = print "== per-column extraction ==" in
+  let rows = pg_query fd "SELECT sample, active, note FROM meas ORDER BY id" in
+
+  // Row 1 (id=1): sample=42, active=true, note="warm"
+  let row1 = match rows with | Cons (r, _) -> r | Nil -> Nil in
+  let _ = print ("row1 sample: " ++
+    show_opt_int  (pg_col_int  (pg_col_at row1 0))) in
+  let _ = print ("row1 active: " ++
+    show_opt_bool (pg_col_bool (pg_col_at row1 1))) in
+  let _ = print ("row1 note:   " ++
+    pg_val_or (pg_col_at row1 2) "-") in
+
+  // Row 2 (id=2): sample=NULL, active=false, note=NULL
+  let row2 = match rows with
+             | Cons (_, Cons (r, _)) -> r
+             | _ -> Nil in
+  let _ = print ("row2 sample: " ++
+    show_opt_int  (pg_col_int  (pg_col_at row2 0))) in
+  let _ = print ("row2 active: " ++
+    show_opt_bool (pg_col_bool (pg_col_at row2 1))) in
+  let _ = print ("row2 note:   " ++
+    pg_val_or (pg_col_at row2 2) "-") in
+
+  // ---- _or defaults ------------------------------------------------
+  let _ = print "" in
+  let _ = print "== _or defaults ==" in
+  let _ = print ("row2 sample _or -1:  " ++ show (pg_col_int_or  (pg_col_at row2 0) (0-1))) in
+  let _ = print ("row2 active _or true:" ++ (if pg_col_bool_or (pg_col_at row2 1) true then "true" else "false")) in
+
+  // ---- pg_first_col: scalar queries --------------------------------
+  let _ = print "" in
+  let _ = print "== single-scalar queries ==" in
+  let n_rows_result = pg_query fd "SELECT count(*)::int FROM meas" in
+  let n_rows = pg_col_int_or (pg_first_col n_rows_result 0) 0 in
+  let _ = print ("row count = " ++ show n_rows) in
+
+  let max_id_result = pg_query fd "SELECT max(id)::int FROM meas" in
+  let max_id = pg_col_int_or (pg_first_col max_id_result 0) 0 in
+  let _ = print ("max id    = " ++ show max_id) in
+
+  let _ = pg_close fd in
+  ()
