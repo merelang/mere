@@ -1,0 +1,268 @@
+// http_link_shortener: a URL shortener with per-code click tracking.
+//
+// Different shape from the previous demos:
+//   - dynamic routing (`GET /<code>` isn't in the fixed route table
+//     — resolved by a custom fallback that looks the code up in KV)
+//   - 302 redirect responses (all prior demos only sent 200 / 201)
+//   - per-hit counter update (kv_set on every redirect)
+//
+// Endpoints:
+//   POST /api/shorten            {url, code?} — create; auto-generate
+//                                  a code if omitted; 409 on collision
+//   GET  /api/links              JSON list of every stored link + hits
+//   POST /api/links/delete       {code} — remove
+//   GET  /<code>                 302 redirect + increment hits
+//   GET  /                       HTML dashboard
+//
+// Data model (log-structured KV):
+//   link/<code>   →   `<url>|<created_at>|<hits>`
+//
+// Code generation: an 8-hex-char id from `gen_request_id()` when the
+// caller doesn't specify one; sha256 of user-provided codes is NOT
+// applied (they need to appear in URLs verbatim). Codes are
+// restricted to [a-z0-9-_] so URL routing stays unambiguous.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_link_shortener.mere > /tmp/ls.wat
+//   wat2wasm --enable-tail-call /tmp/ls.wat -o /tmp/ls.wasm
+//   node scripts/run_http_server.js /tmp/ls.wasm
+//
+//   # create a link
+//   curl -sX POST -H 'Content-Type: application/json' \
+//     -d '{"url":"https://merelang.github.io/mere/","code":"mere"}' \
+//     http://localhost:8080/api/shorten
+//   # follow it
+//   curl -sI http://localhost:8080/mere
+//   # audit
+//   curl -s http://localhost:8080/api/links
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+
+let links_db_path = "/tmp/mere_link_links.db" in
+let links = kv_load links_db_path in
+
+// ---- helpers ------------------------------------------------------
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+let pack3 = fn (a: str) -> fn (b: str) -> fn (c: str) ->
+  a ++ "|" ++ b ++ "|" ++ c
+in
+
+let split1 = fn (s: str) ->
+  let bar = str_index_of s "|" in
+  if bar < 0 then (s, "")
+  else (substring s 0 bar, substring s (bar + 1) (str_len s))
+in
+
+let split3 = fn (s: str) ->
+  let (a, r1) = split1 s in
+  let (b, c) = split1 r1 in
+  (a, b, c)
+in
+
+// Codes are alphanumeric / dash / underscore. Anything else, we reject
+// to keep the /-prefix routing unambiguous.
+let is_code_char = fn (c: str) ->
+  (str_eq c "-") || (str_eq c "_")
+  || (ord c >= ord "0" && ord c <= ord "9")
+  || (ord c >= ord "a" && ord c <= ord "z")
+  || (ord c >= ord "A" && ord c <= ord "Z")
+in
+
+let valid_code = fn (code: str) ->
+  if str_eq code "" then false
+  else
+    let n = str_len code in
+    let st = map_new () in
+    let _ = map_set st "i" 0 in
+    let _ = map_set st "ok" 1 in
+    let _ = while (map_get st "ok" == 1) && (map_get st "i" < n) do
+      if is_code_char (char_at code (map_get st "i")) then
+        let _ = map_set st "i" (map_get st "i" + 1) in ()
+      else let _ = map_set st "ok" 0 in () in
+    map_get st "ok" == 1
+in
+
+// ---- JSON emission helpers ----------------------------------------
+
+let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
+in
+
+// ---- link CRUD ----------------------------------------------------
+
+let shorten_h = fn (req: str) ->
+  let url = body_field "url" in
+  let user_code = body_field "code" in
+  if str_eq url "" then
+    let _ = http_set_status 400 in "missing url\n"
+  else if not (str_starts_with url "http://" || str_starts_with url "https://") then
+    let _ = http_set_status 400 in "url must be http(s)://\n"
+  else
+    let code =
+      if str_eq user_code "" then
+        // gen_request_id returns 16 hex chars — take the first 8 for
+        // shorter URLs.
+        let rid = gen_request_id () in substring rid 0 8
+      else user_code in
+    if not (valid_code code) then
+      let _ = http_set_status 400 in
+      "code must be [A-Za-z0-9-_]+\n"
+    else
+      let k = "link/" ++ code in
+      if kv_has links k then
+        let _ = http_set_status 409 in
+        "code taken: " ++ code ++ "\n"
+      else
+        let _ = kv_set links k (pack3 url "2026-07-03" "0") in
+        let _ = kv_save links links_db_path in
+        let _ = log_with "info" "link_created"
+          (Cons (("code", code), Cons (("url", url), Nil))) in
+        let _ = http_set_content_type "application/json" in
+        let _ = http_set_status 201 in
+        "\{\"code\":" ++ jstr code ++ ",\"url\":" ++ jstr url ++ "}\n"
+in
+
+let list_h = fn (req: str) ->
+  let ks = kv_keys links in
+  let prefix = "link/" in
+  let plen = str_len prefix in
+  let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (k, rest) ->
+      if str_starts_with k prefix then
+        let v = kv_get links k in
+        let code = substring k plen (str_len k) in
+        let (url, created, hits) = split3 v in
+        let sep = if first then "" else "," in
+        let row = "\{\"code\":" ++ jstr code ++
+                  ",\"url\":" ++ jstr url ++
+                  ",\"created\":" ++ jstr created ++
+                  ",\"hits\":" ++ hits ++ "}" in
+        build rest false (acc ++ sep ++ row)
+      else build rest first acc in
+  let _ = http_set_content_type "application/json" in
+  build ks true "[" ++ "\n"
+in
+
+let delete_h = fn (req: str) ->
+  let code = body_field "code" in
+  let k = "link/" ++ code in
+  if not (kv_has links k) then
+    let _ = http_set_status 404 in "no such code\n"
+  else
+    let _ = kv_delete links k in
+    let _ = kv_save links links_db_path in
+    let _ = log_with "info" "link_deleted" (Cons (("code", code), Nil)) in
+    "deleted: " ++ code ++ "\n"
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/link_shortener/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+// ---- dynamic redirect + hit counter -------------------------------
+
+// Parse `<method> /<path> HTTP/1.1` → return path (no leading `/`,
+// no query string). Empty means "root or malformed".
+let extract_code = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then ""
+  else
+    let url = substring req (sp + 1) (str_len req) in
+    let q = str_index_of url "?" in
+    let path = if q < 0 then url else substring url 0 q in
+    let n = str_len path in
+    if n < 2 then ""
+    else if str_eq (char_at path 0) "/" then substring path 1 n
+    else ""
+in
+
+// Convert digits-only string to int (best effort; empty / non-digits → 0).
+let parse_int = fn (s: str) ->
+  let n = str_len s in
+  let st = map_new () in
+  let _ = map_set st "i" 0 in
+  let _ = map_set st "n" 0 in
+  let _ = while map_get st "i" < n do
+    let i = map_get st "i" in
+    let c = char_at s i in
+    let d = ord c - ord "0" in
+    if d >= 0 && d <= 9 then
+      let _ = map_set st "n" (map_get st "n" * 10 + d) in
+      let _ = map_set st "i" (i + 1) in ()
+    else let _ = map_set st "i" n in () in
+  map_get st "n"
+in
+
+let not_found = fn (req: str) ->
+  let code = extract_code req in
+  if str_eq code "" || not (valid_code code) then
+    let _ = http_set_status 404 in
+    "not found\n"
+  else
+    let k = "link/" ++ code in
+    if not (kv_has links k) then
+      let _ = http_set_status 404 in
+      "no such short link: " ++ code ++ "\n"
+    else
+      let v = kv_get links k in
+      let (url, created, hits) = split3 v in
+      let new_hits = parse_int hits + 1 in
+      let _ = kv_set links k (pack3 url created (show new_hits)) in
+      let _ = kv_save links links_db_path in
+      let _ = log_with "info" "link_hit"
+        (Cons (("code", code), Cons (("hits", show new_hits), Nil))) in
+      let _ = http_set_header "Location" url in
+      let _ = http_set_status 302 in
+      "redirecting to " ++ url ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                    home_h,
+  Cons (route "POST" "/api/shorten"         shorten_h,
+  Cons (route "GET"  "/api/links"           list_h,
+  Cons (route "POST" "/api/links/delete"    delete_h,
+  Nil)))) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/link_shortener" handle_routed in
+
+let _ = print ("starting link shortener on :8080 (links=" ++ links_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0
