@@ -1,0 +1,77 @@
+// examples/db_mysql_ssl.mere — MySQL over TLS.
+//
+// Companion to db_ssl.mere on the PG side. MySQL's TLS upgrade is a
+// three-step dance:
+//
+//   1. Client reads Initial Handshake (plain).
+//   2. Client sends "SSL Request Packet" — a partial HandshakeResponse41
+//      (just the 32-byte header) with the CLIENT_SSL capability bit set.
+//   3. Both sides begin the TLS handshake on the same fd.
+//   4. Client sends the full HandshakeResponse41 (user / auth / db /
+//      plugin) over the encrypted channel; auth continues normally.
+//
+// The server is booted with `--require-secure-transport=ON` so the
+// non-SSL mysql_connect path fails first, then mysql_connect_ssl (and
+// the URL-driven variant) succeed and the SESSION_STATUS view shows
+// the negotiated cipher.
+//
+// Setup:
+//   docker run -d --name mere-mysql-ssl -p 15552:3306 \
+//     -e MYSQL_ROOT_PASSWORD=rootpw \
+//     -e MYSQL_DATABASE=meredb \
+//     -e MYSQL_USER=meredev \
+//     -e MYSQL_PASSWORD=meredevpw \
+//     mysql:8.0 --require-secure-transport=ON
+//
+// Usage:
+//   ./mere -w examples/db_mysql_ssl.mere > /tmp/dbms.wat
+//   wat2wasm --enable-tail-call /tmp/dbms.wat -o /tmp/dbms.wasm
+//   node scripts/run_wasm.js /tmp/dbms.wasm
+
+import "../contrib/db/mysql.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> mysql_val_or h "NULL"
+  | Cons (h, t) -> mysql_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let run_explicit = fn (u: unit) ->
+  let _ = print "== mysql_connect_ssl (explicit) ==" in
+  let fd = mysql_connect_ssl "127.0.0.1" 15552 "meredev" "meredevpw" "meredb" in
+  if fd < 0 then let _ = print "explicit-ssl connect failed" in ()
+  else
+    let stat = mysql_query fd
+      "SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version','Ssl_cipher')" in
+    let _ = print "-- SSL status:" in
+    let _ = print_rows stat in
+    let _ = mysql_close fd in
+    ()
+  ;
+
+let run_url = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== mysql_connect_url with ?ssl=true ==" in
+  let fd = mysql_connect_url
+    "mysql://meredev:meredevpw@127.0.0.1:15552/meredb?ssl=true" in
+  if fd < 0 then let _ = print "url-ssl connect failed" in ()
+  else
+    let rows = mysql_query fd
+      "SELECT 'over TLS' AS msg, CURRENT_USER() AS who" in
+    let _ = print_rows rows in
+    let _ = mysql_close fd in
+    ()
+  ;
+
+let _ = run_explicit () in
+let _ = run_url () in
+()
