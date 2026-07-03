@@ -1,0 +1,328 @@
+// http_todo_app: the whole contrib/http stack in one file.
+//
+// Signup / login / logout with hashed passwords, per-user
+// persistent todos, cookie sessions, JSON-body API, brute-force
+// throttled login, structured access logging with request IDs, CORS,
+// security headers, static assets served from disk, and a
+// fetch-based single-page-ish frontend. All in pure Mere; the only
+// deps are Node.js (for the extern fns) and curl (for outbound
+// HTTP, unused here but bundled with the runner).
+//
+// Middleware stack (outer → inner):
+//
+//   access_log             → JSON log per request + X-Request-Id
+//   security_headers       → OWASP hardening
+//   cors "*"               → OPTIONS preflight + Allow-Origin
+//   serve_static_fallback  → HTML/CSS/JS from ./examples/todo_app/
+//   router                 → GET / POST endpoint dispatch
+//
+// Endpoints:
+//   GET  /                    → static index.html
+//   GET  /static/*            → static assets
+//   POST /api/signup          → JSON {user, pass}
+//   POST /api/login           → JSON {user, pass}, sets session cookie
+//   POST /api/logout          → clears session cookie
+//   GET  /api/me              → whoami (401 if not logged in)
+//   GET  /api/todos           → JSON array of current user's todos
+//   POST /api/todos           → JSON {text}, add todo
+//   POST /api/todos/toggle    → JSON {id}, flip done flag
+//   POST /api/todos/delete    → JSON {id}, remove
+//
+// Data model (on-disk KV, log-structured):
+//   users_db  user → sha256(pw)
+//   todos_db  key `todos/<user>/<id>` → value `<done>|<text>`
+//               (id = random 16-hex from gen_request_id ())
+//               (done = "0" or "1")
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_todo_app.mere > /tmp/ta.wat
+//   wat2wasm /tmp/ta.wat -o /tmp/ta.wasm
+//   node scripts/run_http_server.js /tmp/ta.wasm
+//   # open http://localhost:8080/ in a browser
+//
+// Or via curl:
+//   curl -c c -X POST -H 'Content-Type: application/json' \
+//     -d '{"user":"alice","pass":"secret"}' http://localhost:8080/api/signup
+//   curl -c c -X POST -H 'Content-Type: application/json' \
+//     -d '{"user":"alice","pass":"secret"}' http://localhost:8080/api/login
+//   curl -b c -X POST -H 'Content-Type: application/json' \
+//     -d '{"text":"buy milk"}' http://localhost:8080/api/todos
+//   curl -b c http://localhost:8080/api/todos
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/query.mere";
+import "../contrib/http/json_body.mere";
+import "../contrib/http/ratelimit.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+
+let users_db_path = "/tmp/mere_todo_users.db" in
+let todos_db_path = "/tmp/mere_todo_todos.db" in
+let users = kv_load users_db_path in
+let todos = kv_load todos_db_path in
+let sessions = map_new () in
+let login_limiter = rate_new () in
+let login_window = 60 in
+let login_max = 5 in
+
+// Read a JSON body field. Parses the current request body every call
+// (cheap for small bodies).
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+// Extract the session cookie value from the request's Cookie header.
+let session_id = fn (u: unit) ->
+  let cookie = http_get_header "Cookie" in
+  let target = "session=" in
+  let tlen = str_len target in
+  let pairs = str_split cookie "; " in
+  let rec find = fn (ps: str list) ->
+    match ps with
+    | Nil -> ""
+    | Cons (p, rest) ->
+      if str_starts_with p target then substring p tlen (str_len p)
+      else find rest in
+  find pairs
+in
+
+// Return the logged-in user's name, or "" if not authenticated.
+let current_user = fn (u: unit) ->
+  let sid = session_id () in
+  if str_eq sid "" then ""
+  else if map_has sessions sid then map_get sessions sid
+  else ""
+in
+
+// Build the KV key for a user's todo. Uses "/" as separator; users
+// with "/" in their name would collide but we validate against that
+// at signup time (below).
+let todo_key = fn (user: str) -> fn (id: str) ->
+  "todos/" ++ user ++ "/" ++ id
+in
+
+// Serialize a todo value as `<done>|<text>` where done is "0" or "1".
+let serialize_todo = fn (done: bool) -> fn (text: str) ->
+  (if done then "1" else "0") ++ "|" ++ text
+in
+
+// Parse the value form. Returns (done, text). Missing "|" → empty.
+let parse_todo = fn (v: str) ->
+  let bar = str_index_of v "|" in
+  if bar < 0 then (false, "")
+  else
+    let d = substring v 0 bar in
+    let t = substring v (bar + 1) (str_len v) in
+    (str_eq d "1", t)
+in
+
+// JSON-escape a value (only " and \). Same shape as log module's helper.
+let rec _json_esc_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _json_esc_walk s buf (i + 1) n
+in
+let json_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _json_esc_walk s buf 0 (str_len s)
+in
+
+// Render a single todo as a JSON object.
+let render_todo = fn (id: str) -> fn (done: bool) -> fn (text: str) ->
+  "\{\"id\":\"" ++ id ++ "\",\"text\":\"" ++ json_esc text ++
+    "\",\"done\":" ++ (if done then "true" else "false") ++ "}"
+in
+
+// Iterate live KV keys, keeping only those that belong to `user`.
+// Returns a JSON array as a string.
+let list_todos_of = fn (user: str) ->
+  let prefix = "todos/" ++ user ++ "/" in
+  let plen = str_len prefix in
+  let ks = kv_keys todos in
+  let rec go = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (k, rest) ->
+      if str_starts_with k prefix then
+        let id = substring k plen (str_len k) in
+        let v = kv_get todos k in
+        let (done, text) = parse_todo v in
+        let sep = if first then "" else "," in
+        go rest false (acc ++ sep ++ render_todo id done text)
+      else go rest first acc in
+  go ks true "["
+in
+
+// ---- handlers ------------------------------------------------------
+
+let signup_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  if str_eq u "" || str_eq p "" then
+    let _ = http_set_status 400 in
+    "missing user or pass\n"
+  else if str_index_of u "/" >= 0 then
+    let _ = http_set_status 400 in
+    "user must not contain '/'\n"
+  else if kv_has users u then
+    let _ = http_set_status 409 in
+    "user exists: " ++ u ++ "\n"
+  else
+    let _ = kv_set users u (sha256_hex p) in
+    let _ = kv_save users users_db_path in
+    let _ = log_with "info" "signup" (Cons (("user", u), Nil)) in
+    let _ = http_set_status 201 in
+    "created: " ++ u ++ "\n"
+in
+
+let login_h = fn (req: str) ->
+  let u = body_field "user" in
+  let p = body_field "pass" in
+  if rate_over_limit login_limiter u login_window login_max then
+    let _ = log_with "warn" "login_blocked" (Cons (("user", u), Nil)) in
+    let _ = http_set_status 429 in
+    let _ = http_set_header "Retry-After" (show login_window) in
+    "too many failed login attempts; try again later\n"
+  else if kv_has users u && str_eq (kv_get users u) (sha256_hex p) then
+    let _ = rate_reset login_limiter u in
+    let sid = "s-" ++ u in
+    let _ = map_set sessions sid u in
+    let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+    let _ = log_with "info" "login_success" (Cons (("user", u), Nil)) in
+    "logged in as " ++ u ++ "\n"
+  else
+    let _ = rate_bump login_limiter u login_window in
+    let _ = log_with "warn" "login_failed" (Cons (("user", u), Nil)) in
+    let _ = http_set_status 401 in
+    "invalid credentials\n"
+in
+
+let logout_h = fn (req: str) ->
+  let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+  "logged out\n"
+in
+
+let me_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in
+    "not logged in\n"
+  else user
+in
+
+let todos_list_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in
+    "[]\n"
+  else
+    let _ = http_set_content_type "application/json" in
+    list_todos_of user ++ "\n"
+in
+
+let todos_add_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in
+    "not logged in\n"
+  else
+    let text = body_field "text" in
+    if str_eq text "" then
+      let _ = http_set_status 400 in
+      "missing text\n"
+    else
+      let id = gen_request_id () in
+      let _ = kv_set todos (todo_key user id) (serialize_todo false text) in
+      let _ = kv_save todos todos_db_path in
+      let _ = log_with "info" "todo_add" (Cons (("user", user), Cons (("id", id), Nil))) in
+      let _ = http_set_content_type "application/json" in
+      let _ = http_set_status 201 in
+      render_todo id false text ++ "\n"
+in
+
+let todos_toggle_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in
+    "not logged in\n"
+  else
+    let id = body_field "id" in
+    let k = todo_key user id in
+    if not (kv_has todos k) then
+      let _ = http_set_status 404 in
+      "no such todo\n"
+    else
+      let (done, text) = parse_todo (kv_get todos k) in
+      let _ = kv_set todos k (serialize_todo (not done) text) in
+      let _ = kv_save todos todos_db_path in
+      let _ = http_set_content_type "application/json" in
+      render_todo id (not done) text ++ "\n"
+in
+
+let todos_delete_h = fn (req: str) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_status 401 in
+    "not logged in\n"
+  else
+    let id = body_field "id" in
+    let k = todo_key user id in
+    if not (kv_has todos k) then
+      let _ = http_set_status 404 in
+      "no such todo\n"
+    else
+      let _ = kv_delete todos k in
+      let _ = kv_save todos todos_db_path in
+      "deleted\n"
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/todo_app/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                  home_h,
+  Cons (route "POST" "/api/signup"        signup_h,
+  Cons (route "POST" "/api/login"         login_h,
+  Cons (route "POST" "/api/logout"        logout_h,
+  Cons (route "GET"  "/api/me"            me_h,
+  Cons (route "GET"  "/api/todos"         todos_list_h,
+  Cons (route "POST" "/api/todos"         todos_add_h,
+  Cons (route "POST" "/api/todos/toggle"  todos_toggle_h,
+  Cons (route "POST" "/api/todos/delete"  todos_delete_h,
+  Nil))))))))) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/todo_app" handle_routed in
+
+let _ = print ("starting todo app on :8080 (users=" ++ users_db_path ++ ", todos=" ++ todos_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0
