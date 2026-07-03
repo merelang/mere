@@ -61,3 +61,33 @@ let pg_pool_close = fn (pool) ->
     let _ = map_set st "fd" (0 - 1) in ()
   else ()
   ;
+
+// ---- Notification integration ------------------------------------------
+//
+// The keep-alive pool is a natural place to poll the LISTEN'd connection
+// for any notifications that arrived while nobody was running a query.
+// Two entry points:
+//
+//   pg_pool_release_notifs pool fd
+//     — like pg_pool_release, but ALSO drains any notifications queued
+//       during the fd's most recent use. Handlers that both query and
+//       want to react to pushes get both signals in one call.
+//
+//   pg_pool_pump pool timeout_ms
+//     — acquire, poll the wire until idle (per-read timeout), release.
+//       Ideal in a "spare tick" loop that wants to react to notifications
+//       arriving while the pool is otherwise idle.
+
+let pg_pool_release_notifs = fn (pool) -> fn (fd: int) ->
+  let notifs = pg_drain_notifications fd in
+  let _ = pg_pool_release pool fd in
+  notifs
+  ;
+
+let pg_pool_pump = fn (pool) -> fn (timeout_ms: int) ->
+  let fd = pg_pool_acquire pool in
+  let _ = pg_poll fd timeout_ms in
+  let notifs = pg_drain_notifications fd in
+  let _ = pg_pool_release pool fd in
+  notifs
+  ;

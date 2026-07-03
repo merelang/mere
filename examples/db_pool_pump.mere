@@ -1,0 +1,91 @@
+// examples/db_pool_pump.mere — pool-driven notification pump.
+//
+// Combines pg_pool with the async NOTIFY plumbing. Two connections:
+//   - `pool` is our long-lived listener, wrapped in pg_pool for
+//     keep-alive across simulated "handler ticks"
+//   - `pub` publishes NOTIFYs (imagine another process / another Mere
+//     handler; here we just open a second fd to the same server)
+//
+// Demo cycle:
+//   1. Register `LISTEN events`.
+//   2. Handler tick A: pub NOTIFYs "click 42"; pool_pump picks it up
+//      via a brief tcp_set_timeout window.
+//   3. Handler tick B: run an unrelated pg_query, then
+//      pg_pool_release_notifs — proves notifications that arrived
+//      *inside* the query are drained without a separate wait.
+//   4. Handler tick C: no publications, pool_pump returns Nil.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-pump -p 15450:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_pool_pump.mere > /tmp/dbpp.wat
+//   wat2wasm --enable-tail-call /tmp/dbpp.wat -o /tmp/dbpp.wasm
+//   node scripts/run_wasm.js /tmp/dbpp.wasm
+
+import "../contrib/db/pg_pool.mere";
+
+let rec dispatch_notifs = fn (xs) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((pid, ch, pl), rest) ->
+    let _ = print ("  event: pid=" ++ show pid ++
+      " channel=" ++ ch ++ " payload=" ++ pl) in
+    dispatch_notifs rest
+  ;
+
+let url = "postgres://postgres@127.0.0.1:15450/postgres" in
+
+// Publisher — separate fd, not pooled.
+let pub = pg_connect_url url in
+if pub < 0 then let _ = print "pub connect failed" in ()
+else
+
+  // Listener — through the pool. First acquire opens it lazily and
+  // establishes the subscription.
+  let pool = pg_pool_open url in
+  let fd0 = pg_pool_acquire pool in
+  let _ = pg_listen fd0 "events" in
+  let _ = pg_pool_release pool fd0 in
+
+  // Tick A: pump-driven receive of notifications that arrived while the
+  // pool was idle.
+  let _ = print "== tick A: publisher fires, pool_pump receives ==" in
+  let _ = pg_notify pub "events" "click 42" in
+  let _ = pg_notify pub "events" "click 43" in
+  // Give the server a beat to flush; on localhost usually a no-op but
+  // safer with tiny sleep.
+  let _ = pg_query pub "SELECT pg_sleep(0.05)" in
+  let notifs_a = pg_pool_pump pool 100 in
+  let _ = dispatch_notifs notifs_a in
+
+  // Tick B: a normal query on the pool absorbs interleaved notifications
+  // through _collect_result's drain hook; release-with-notifs surfaces
+  // them without a second wait_notify call.
+  let _ = print "" in
+  let _ = print "== tick B: pg_query absorbs notifs, release surfaces them ==" in
+  let _ = pg_notify pub "events" "loaded page" in
+  let _ = pg_notify pub "events" "form_submit" in
+  let _ = pg_query pub "SELECT pg_sleep(0.05)" in
+  let fdb = pg_pool_acquire pool in
+  let rows = pg_query fdb "SELECT 'work'::text" in
+  let _ = print ("  query result: " ++
+    (match rows with
+     | Cons (Cons (h, _), _) -> pg_val_or h "?"
+     | _ -> "?")) in
+  let notifs_b = pg_pool_release_notifs pool fdb in
+  let _ = dispatch_notifs notifs_b in
+
+  // Tick C: quiet period.
+  let _ = print "" in
+  let _ = print "== tick C: nothing pending ==" in
+  let notifs_c = pg_pool_pump pool 100 in
+  let _ = match notifs_c with
+          | Nil -> print "  (no events — pump returned Nil, as expected)"
+          | _ -> dispatch_notifs notifs_c in
+
+  let _ = pg_pool_close pool in
+  let _ = pg_close pub in
+  ()
