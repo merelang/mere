@@ -1,0 +1,89 @@
+// examples/db_redis_resp3.mere — Redis RESP3 protocol.
+//
+// After sending `HELLO 3`, Redis 6+ switches to the RESP3 wire format,
+// which adds these types to the reply variant:
+//   RRNull   — the null sentinel (was RRBulk None in RESP2)
+//   RRDouble — floating-point numbers (kept as text at the Mere layer)
+//   RRBool   — boolean
+//   RRMap    — key/value pairs, sent as `%N\r\n` + 2N replies
+//   RRSet    — unordered array (`~N\r\n`)
+//
+// Demo:
+//   1. HELLO 3 upgrades the connection; the server's info comes back
+//      as an RRMap.
+//   2. HGETALL on a hash returns RRMap (RESP2 would have returned a
+//      flat array).
+//   3. SMEMBERS returns RRSet.
+//   4. CLIENT INFO exercises simple string type — same as RESP2.
+//   5. redis_is_null helper collapses RESP2 nil (RRBulk None) and RESP3
+//      RRNull into a single check.
+//
+// Setup:
+//   docker run -d --name mere-redis-r3 -p 15604:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_resp3.mere > /tmp/dbrr3.wat
+//   wat2wasm --enable-tail-call /tmp/dbrr3.wat -o /tmp/dbrr3.wasm
+//   node scripts/run_wasm.js /tmp/dbrr3.wasm
+
+import "../contrib/db/redis.mere";
+
+let show_reply = fn (label: str) -> fn (r) ->
+  print (label ++ ": " ++ redis_show r)
+  ;
+
+let rec walk_pairs = fn (xs) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((k, v), rest) ->
+    let _ = print ("  " ++ redis_show k ++ " → " ++ redis_show v) in
+    walk_pairs rest
+  ;
+
+let fd = redis_connect "127.0.0.1" 15604 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  // Upgrade to RESP3 first — the very first reply is the HELLO map.
+  let ok = redis_hello3 fd in
+  let _ = print ("HELLO 3 → " ++ (if ok then "acknowledged" else "refused")) in
+
+  let _ = redis_command fd (Cons ("FLUSHDB", Nil)) in
+
+  // ---- HGETALL returns RRMap in RESP3 --------------------------------
+  let _ = redis_command fd
+    (Cons ("HSET",
+     Cons ("user:1",
+     Cons ("name", Cons ("alice",
+     Cons ("email", Cons ("alice@example.com",
+     Cons ("age", Cons ("30", Nil))))))))) in
+  let _ = print "" in
+  let _ = show_reply "HGETALL user:1  "
+    (redis_command fd (Cons ("HGETALL", Cons ("user:1", Nil)))) in
+
+  // ---- SMEMBERS returns RRSet ---------------------------------------
+  let _ = redis_command fd
+    (Cons ("SADD", Cons ("tags",
+     Cons ("blue", Cons ("green", Cons ("red", Nil)))))) in
+  let _ = print "" in
+  let _ = show_reply "SMEMBERS tags   "
+    (redis_command fd (Cons ("SMEMBERS", Cons ("tags", Nil)))) in
+
+  // ---- RESP3 nil (proper null) --------------------------------------
+  let _ = print "" in
+  let missing = redis_command fd (Cons ("GET", Cons ("missing", Nil))) in
+  let _ = show_reply "GET missing     " missing in
+  let _ = print ("redis_is_null missing: " ++
+    (if redis_is_null missing then "true" else "false")) in
+
+  // ---- Extractor demo -----------------------------------------------
+  let _ = print "" in
+  let _ = print "-- iterate the HGETALL map via redis_as_map:" in
+  let kvs = redis_as_map (redis_command fd
+              (Cons ("HGETALL", Cons ("user:1", Nil)))) in
+  let _ = match kvs with
+          | Some pairs -> walk_pairs pairs
+          | None -> print "  (not a map)" in
+
+  let _ = redis_close fd in
+  ()
