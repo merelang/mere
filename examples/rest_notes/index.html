@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere REST notes</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere REST notes</h1>
+<p class="subtitle">
+  Proper REST verbs: <code>POST</code>, <code>GET</code>,
+  <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code>.
+  Every response carries an <code>ETag</code>; every mutation
+  requires the client to send <code>If-Match: &lt;etag&gt;</code>.
+  Two tabs editing the same note can't blindly clobber each other —
+  whoever writes second gets <code>412 Precondition Failed</code>.
+</p>
+
+<section id="new-box">
+  <h2>new note</h2>
+  <form id="new-form">
+    <input id="new-title" placeholder="title" required>
+    <textarea id="new-body" rows="3" placeholder="body"></textarea>
+    <button type="submit">POST /api/notes</button>
+  </form>
+</section>
+
+<section id="list-box">
+  <h2>notes</h2>
+  <ul id="note-list"></ul>
+</section>
+
+<section id="edit-box" hidden>
+  <h2>edit <code id="edit-id"></code> <span class="etag" id="edit-etag"></span></h2>
+  <form id="edit-form">
+    <input id="edit-title" placeholder="title" required>
+    <textarea id="edit-body" rows="6" placeholder="body"></textarea>
+    <div>
+      <button type="submit" id="btn-put">PUT (full replace)</button>
+      <button type="button" id="btn-patch">PATCH (partial)</button>
+      <button type="button" id="btn-delete" class="danger">DELETE</button>
+      <button type="button" id="btn-close" class="secondary">close</button>
+    </div>
+  </form>
+  <details style="margin-top:1em">
+    <summary>Try the 412 flow</summary>
+    <p class="meta">Open this same URL in a second tab, edit the
+    note there, save. Come back to this tab and hit "PUT" — the
+    stale If-Match will trigger 412.</p>
+  </details>
+</section>
+
+<pre id="log"></pre>

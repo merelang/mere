@@ -1,0 +1,314 @@
+// http_rest_notes: notes API with proper REST verbs + ETag concurrency.
+//
+// Eleventh contrib/http demo. First one to use PUT / PATCH / DELETE
+// (all prior demos used only POST for mutations) and to enforce
+// optimistic concurrency via ETag + If-Match: the client's If-Match
+// header must equal the server's current ETag or the write is
+// rejected with 412 Precondition Failed.
+//
+// This is the shape you see in production REST APIs (Stripe, GitHub
+// v3, Google Cloud) — the semantic difference from a plain POST /
+// PUT flow is that TWO clients editing the same note can't blindly
+// clobber each other's work; whoever writes second sees a 412 and
+// has to re-fetch, merge, and retry.
+//
+// Endpoints:
+//   POST   /api/notes            create — returns { id }, ETag header
+//   GET    /api/notes            list  → [ { id, title, version } ]
+//   GET    /api/notes/<id>       fetch → { title, body, version }
+//                                        + ETag: "v<n>"
+//   PUT    /api/notes/<id>       full replace   (If-Match required)
+//   PATCH  /api/notes/<id>       partial update (If-Match required)
+//   DELETE /api/notes/<id>       remove         (If-Match optional)
+//
+// Data model (KV):
+//   note/<id>/version  →  base-10 int (as str) — bumps on every write
+//   note/<id>/title    →  title
+//   note/<id>/body     →  body
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+
+let notes_db_path = "/tmp/mere_rest_notes.db" in
+let notes = kv_load notes_db_path in
+
+// ---- helpers ------------------------------------------------------
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
+in
+
+let parse_int = fn (s: str) ->
+  let n = str_len s in
+  let st = map_new () in
+  let _ = map_set st "i" 0 in
+  let _ = map_set st "n" 0 in
+  let _ = while map_get st "i" < n do
+    let i = map_get st "i" in
+    let d = ord (char_at s i) - ord "0" in
+    if d >= 0 && d <= 9 then
+      let _ = map_set st "n" (map_get st "n" * 10 + d) in
+      let _ = map_set st "i" (i + 1) in ()
+    else let _ = map_set st "i" n in () in
+  map_get st "n"
+in
+
+// Extract path from the raw request line.
+let req_path = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then ""
+  else
+    let url = substring req (sp + 1) (str_len req) in
+    let q = str_index_of url "?" in
+    if q < 0 then url else substring url 0 q
+in
+
+// ---- note lookup / etag -------------------------------------------
+
+let current_version = fn (id: str) ->
+  let k = "note/" ++ id ++ "/version" in
+  if kv_has notes k then parse_int (kv_get notes k) else 0
+in
+
+// The ETag format follows RFC 7232 — quoted opaque string. We use
+// `"v<n>"` for readability, but semantics only require that the
+// SAME value comes back on match. Strong ETag (no `W/` prefix) is
+// fine here because our resources are byte-identical on repeat.
+let etag_for = fn (version: int) ->
+  "\"v" ++ show version ++ "\""
+in
+
+// Return the current note's ETag, or "" if the note doesn't exist.
+let etag_of = fn (id: str) ->
+  let v = current_version id in
+  if v == 0 then "" else etag_for v
+in
+
+let note_json = fn (id: str) ->
+  let title = if kv_has notes ("note/" ++ id ++ "/title")
+              then kv_get notes ("note/" ++ id ++ "/title") else "" in
+  let body = if kv_has notes ("note/" ++ id ++ "/body")
+             then kv_get notes ("note/" ++ id ++ "/body") else "" in
+  let v = current_version id in
+  "\{\"id\":" ++ jstr id ++
+  ",\"title\":" ++ jstr title ++
+  ",\"body\":" ++ jstr body ++
+  ",\"version\":" ++ show v ++ "}"
+in
+
+// ---- handlers -----------------------------------------------------
+
+let create_h = fn (req: str) ->
+  let title = body_field "title" in
+  let body = body_field "body" in
+  if str_eq title "" then
+    let _ = http_set_status 400 in "missing title\n"
+  else
+    let id = gen_request_id () in
+    let _ = kv_set notes ("note/" ++ id ++ "/version") "1" in
+    let _ = kv_set notes ("note/" ++ id ++ "/title") title in
+    let _ = kv_set notes ("note/" ++ id ++ "/body") body in
+    let _ = kv_save notes notes_db_path in
+    let _ = log_with "info" "note_created" (Cons (("id", id), Nil)) in
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_header "ETag" (etag_for 1) in
+    let _ = http_set_header "Location" ("/api/notes/" ++ id) in
+    let _ = http_set_status 201 in
+    note_json id ++ "\n"
+in
+
+let list_h = fn (req: str) ->
+  let ks = kv_keys notes in
+  let prefix = "note/" in
+  let plen = str_len prefix in
+  let suffix = "/version" in
+  let slen = str_len suffix in
+  let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (k, rest) ->
+      let kn = str_len k in
+      if str_starts_with k prefix
+         && kn > slen
+         && str_eq (substring k (kn - slen) kn) suffix then
+        let id = substring k plen (kn - slen) in
+        let title = if kv_has notes ("note/" ++ id ++ "/title")
+                    then kv_get notes ("note/" ++ id ++ "/title") else "" in
+        let v = current_version id in
+        let sep = if first then "" else "," in
+        let row = "\{\"id\":" ++ jstr id ++
+                  ",\"title\":" ++ jstr title ++
+                  ",\"version\":" ++ show v ++ "}" in
+        build rest false (acc ++ sep ++ row)
+      else build rest first acc in
+  let _ = http_set_content_type "application/json" in
+  build ks true "[" ++ "\n"
+in
+
+let get_h = fn (id: str) ->
+  let et = etag_of id in
+  if str_eq et "" then
+    let _ = http_set_status 404 in "not found\n"
+  else
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_header "ETag" et in
+    note_json id ++ "\n"
+in
+
+// PUT / PATCH share the ETag-check preamble. Returns Some new_version
+// on success, or None if the caller should return early with a status
+// already set.
+let _check_if_match = fn (id: str) ->
+  let et = etag_of id in
+  if str_eq et "" then
+    let _ = http_set_status 404 in None
+  else
+    let if_match = http_get_header "If-Match" ++ "" in
+    if str_eq if_match "" then
+      let _ = http_set_status 428 in None
+    else if not (str_eq if_match et) then
+      let _ = http_set_status 412 in
+      let _ = http_set_header "ETag" et in None
+    else Some (current_version id + 1)
+in
+
+let put_h = fn (id: str) ->
+  match _check_if_match id with
+  | None -> "precondition failed\n"
+  | Some new_v ->
+    let title = body_field "title" in
+    let body = body_field "body" in
+    if str_eq title "" then
+      let _ = http_set_status 400 in "missing title\n"
+    else
+      let _ = kv_set notes ("note/" ++ id ++ "/title") title in
+      let _ = kv_set notes ("note/" ++ id ++ "/body") body in
+      let _ = kv_set notes ("note/" ++ id ++ "/version") (show new_v) in
+      let _ = kv_save notes notes_db_path in
+      let _ = log_with "info" "note_put"
+        (Cons (("id", id), Cons (("version", show new_v), Nil))) in
+      let _ = http_set_content_type "application/json" in
+      let _ = http_set_header "ETag" (etag_for new_v) in
+      note_json id ++ "\n"
+in
+
+let patch_h = fn (id: str) ->
+  match _check_if_match id with
+  | None -> "precondition failed\n"
+  | Some new_v ->
+    // Only overwrite fields that are non-empty in the request body.
+    // A real API would use a JSON Patch document; for this demo the
+    // convention is "empty means unchanged".
+    let title = body_field "title" in
+    let body = body_field "body" in
+    let _ = if not (str_eq title "") then
+              let _ = kv_set notes ("note/" ++ id ++ "/title") title in 0
+            else 0 in
+    let _ = if not (str_eq body "") then
+              let _ = kv_set notes ("note/" ++ id ++ "/body") body in 0
+            else 0 in
+    let _ = kv_set notes ("note/" ++ id ++ "/version") (show new_v) in
+    let _ = kv_save notes notes_db_path in
+    let _ = log_with "info" "note_patched"
+      (Cons (("id", id), Cons (("version", show new_v), Nil))) in
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_header "ETag" (etag_for new_v) in
+    note_json id ++ "\n"
+in
+
+let delete_h = fn (id: str) ->
+  let et = etag_of id in
+  if str_eq et "" then
+    let _ = http_set_status 404 in "not found\n"
+  else
+    let if_match = http_get_header "If-Match" ++ "" in
+    if not (str_eq if_match "") && not (str_eq if_match et) then
+      let _ = http_set_status 412 in
+      let _ = http_set_header "ETag" et in
+      "precondition failed\n"
+    else
+      let _ = kv_delete notes ("note/" ++ id ++ "/title") in
+      let _ = kv_delete notes ("note/" ++ id ++ "/body") in
+      let _ = kv_delete notes ("note/" ++ id ++ "/version") in
+      let _ = kv_save notes notes_db_path in
+      let _ = log_with "info" "note_deleted" (Cons (("id", id), Nil)) in
+      let _ = http_set_status 204 in
+      ""
+in
+
+let home_h = fn (req: str) ->
+  let content = read_file "examples/rest_notes/index.html" in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  content
+in
+
+// ---- dispatch /api/notes/<id> to GET/PUT/PATCH/DELETE -----------
+
+let not_found = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then let _ = http_set_status 404 in "malformed request\n"
+  else
+    let method = substring req 0 sp in
+    let path = req_path req in
+    let prefix = "/api/notes/" in
+    if not (str_starts_with path prefix) then
+      let _ = http_set_status 404 in "not found: " ++ path ++ "\n"
+    else
+      let id = substring path (str_len prefix) (str_len path) in
+      if str_eq id "" then
+        let _ = http_set_status 404 in "missing id\n"
+      else if str_eq method "GET" then get_h id
+      else if str_eq method "PUT" then put_h id
+      else if str_eq method "PATCH" then patch_h id
+      else if str_eq method "DELETE" then delete_h id
+      else
+        let _ = http_set_status 405 in
+        let _ = http_set_header "Allow" "GET, PUT, PATCH, DELETE" in
+        "method not allowed\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                home_h,
+  Cons (route "POST" "/api/notes"       create_h,
+  Cons (route "GET"  "/api/notes"       list_h,
+  Nil))) in
+
+let handle_routed = router routes not_found in
+let handle_with_static = serve_static_fallback "/static/" "examples/rest_notes" handle_routed in
+
+let _ = print ("starting REST notes on :8080 (notes=" ++ notes_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0
