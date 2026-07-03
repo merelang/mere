@@ -340,6 +340,93 @@ let pg_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
       -1
   ;
 
+// ---- URL parser ---------------------------------------------------------
+//
+// Accepts the libpq-compatible form
+//
+//     postgres[ql]://[user[:password]@][host[:port]][/database][?params]
+//
+// Returns a 5-tuple `(host, port, user, password, database)`. Any missing
+// component gets a conventional default (host="127.0.0.1", port=5432,
+// user="", password="", database=""). Query params (`?sslmode=…`) are
+// currently discarded — TLS / other options need runtime support that
+// isn't wired yet.
+//
+// Percent-decoding (`%20`, `%40`, …) is not applied — passwords with
+// URL-reserved chars must be passed to pg_connect directly.
+
+// Substring wrapper: `_slice s i` returns s[i..]. Written as a helper
+// because raw `substring s i (str_len s)` shows up ~5 times in the
+// parser body.
+let _slice = fn (s: str) -> fn (i: int) ->
+  substring s i (str_len s)
+  ;
+
+let pg_parse_url = fn (url: str) ->
+  // Strip whichever scheme prefix is present. If the caller passed a
+  // libpq-style key/value string ("host=… port=…") this bailout is fine
+  // too — it just means the parser sees a mangled bare hostname and
+  // most fields fall back to their defaults.
+  let rest =
+    if str_starts_with url "postgres://" then _slice url 11
+    else if str_starts_with url "postgresql://" then _slice url 13
+    else url in
+
+  // Split userinfo (before '@') from the rest.
+  let at_pos = str_index_of rest "@" in
+  let (userinfo, hostpart) =
+    if at_pos < 0 then ("", rest)
+    else (substring rest 0 at_pos, _slice rest (at_pos + 1)) in
+
+  // user[:password]
+  let colon_ui = str_index_of userinfo ":" in
+  let (user, password) =
+    if colon_ui < 0 then (userinfo, "")
+    else (substring userinfo 0 colon_ui, _slice userinfo (colon_ui + 1)) in
+
+  // hostpart = host[:port][/dbname][?query]
+  let slash = str_index_of hostpart "/" in
+  let (hp, dbpart) =
+    if slash < 0 then (hostpart, "")
+    else (substring hostpart 0 slash, _slice hostpart (slash + 1)) in
+
+  // Split host:port, handling the bracketed IPv6 form `[::1]:PORT` — the
+  // brackets stop the leftmost `:` in the address from being mistaken
+  // for the port separator. Non-bracket form is a plain host:port split.
+  let (host, port) =
+    if str_starts_with hp "[" then
+      let close = str_index_of hp "]" in
+      if close < 0 then (hp, 5432)   // malformed — treat literally
+      else
+        let addr = substring hp 1 close in
+        let after = _slice hp (close + 1) in
+        if str_starts_with after ":" then
+          (addr, int_of_str (_slice after 1))
+        else (addr, 5432)
+    else
+      let colon_hp = str_index_of hp ":" in
+      if colon_hp < 0 then
+        ((if str_eq hp "" then "127.0.0.1" else hp), 5432)
+      else
+        (substring hp 0 colon_hp,
+         int_of_str (_slice hp (colon_hp + 1))) in
+
+  // Strip ?query params from the dbname.
+  let qmark = str_index_of dbpart "?" in
+  let db = if qmark < 0 then dbpart else substring dbpart 0 qmark in
+
+  (host, port, user, password, db)
+  ;
+
+// Convenience: connect using a full URL. Same return contract as
+// pg_connect (fd on success, -1 on failure).
+//
+//   let fd = pg_connect_url "postgres://alice:pw@127.0.0.1:5432/mydb" in ...
+let pg_connect_url = fn (url: str) ->
+  let (host, port, user, password, db) = pg_parse_url url in
+  pg_connect host port user password db
+  ;
+
 // ---- Row parsing --------------------------------------------------------
 //
 // DataRow payload: 2-byte column count (BE), then per column:

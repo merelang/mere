@@ -1,0 +1,73 @@
+// examples/db_url.mere — connection-URL parsing + one-liner connect.
+//
+// The libpq form `postgres://[user[:password]@][host[:port]][/db][?…]`
+// is convenient enough that most Postgres clients accept it directly.
+// pg_parse_url unpacks it into (host, port, user, password, db); the
+// pg_connect_url wrapper hands the result straight to pg_connect.
+//
+// This demo:
+//   1. parses several representative URLs and prints the extracted
+//      components (unit-test style — no server required)
+//   2. connects via pg_connect_url against the trust-mode container:
+//        docker run -d --name mere-pg-url -p 15439:5432 \
+//          -e POSTGRES_HOST_AUTH_METHOD=trust \
+//          -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_url.mere > /tmp/dbu.wat
+//   wat2wasm --enable-tail-call /tmp/dbu.wat -o /tmp/dbu.wasm
+//   node scripts/run_wasm.js /tmp/dbu.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let show_parse = fn (label: str) -> fn (url: str) ->
+  let (host, port, user, pw, db) = pg_parse_url url in
+  let _ = print (label ++ ": " ++ url) in
+  let _ = print
+    ("  host=" ++ host ++ " port=" ++ show port ++ " user=" ++ user ++
+     " pw=" ++ (if str_eq pw "" then "(empty)" else pw) ++
+     " db=" ++ (if str_eq db "" then "(empty)" else db)) in
+  ()
+  ;
+
+let _ = print "== parse tests ==" in
+let _ = show_parse "full"    "postgres://alice:secret@db.example.com:5433/prod" in
+let _ = show_parse "no port" "postgres://alice:secret@127.0.0.1/prod" in
+let _ = show_parse "no pw"   "postgres://alice@127.0.0.1:5432/prod" in
+let _ = show_parse "no user" "postgres://127.0.0.1:5432/prod" in
+let _ = show_parse "no db"   "postgres://alice@127.0.0.1:5432" in
+let _ = show_parse "with params"
+  "postgres://alice:secret@127.0.0.1:5432/prod?sslmode=require&application_name=mere" in
+let _ = show_parse "postgresql:// scheme"
+  "postgresql://bob@[::1]:5433/analytics" in
+
+let _ = print "" in
+let _ = print "== live connect ==" in
+
+let url = "postgres://postgres@127.0.0.1:15439/postgres" in
+let fd = pg_connect_url url in
+if fd < 0 then
+  let _ = print ("pg_connect_url failed: " ++ url) in
+  ()
+else
+  let _ = print ("connected via URL: " ++ url) in
+  let rows = pg_query fd
+    "SELECT current_user, current_database(), inet_server_port()" in
+  let _ = print_rows rows in
+  let _ = pg_close fd in
+  ()
