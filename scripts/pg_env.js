@@ -246,6 +246,19 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       return writeStr(Buffer.from(readCStr(ptr), 'utf8').toString('hex'));
     },
 
+    // bytes_from_hex_alloc(hex: str) -> int (raw pointer)
+    //   Decode a hex string into raw bytes on the Mere heap. Returns
+    //   the pointer; the caller already knows the byte count (=
+    //   str_len(hex) / 2), so a single-int return keeps the extern
+    //   simple.
+    bytes_from_hex_alloc: (hexPtr) => {
+      const hex = readCStr(hexPtr);
+      const bytes = Buffer.from(hex, 'hex');
+      const dst = bumpAlloc(bytes.length);
+      new Uint8Array(getMemory()).set(bytes, dst);
+      return dst;
+    },
+
     // bytes_cycle_xor_hex(bytes_hex, key_hex) -> hex — XOR `bytes` with
     // a copy of `key` that repeats to match its length. Used by MySQL's
     // caching_sha2_password full-auth path to obfuscate the cleartext

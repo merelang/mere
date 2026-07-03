@@ -1,0 +1,100 @@
+// examples/db_redis_binary.mere — binary-safe arguments over Redis.
+//
+// Mere's `str` is C-string (NUL-terminated), so a value like
+// `\x00\xff\x41\x00\x7a` would silently truncate through str_concat /
+// str_len. `redis_command_b` accepts a `redis_arg list` where each
+// arg is either text (RATxt) or a raw byte buffer (RABin (ptr, len)),
+// letting arbitrary bytes ride the wire's length-prefixed bulk-string
+// encoding intact.
+//
+// Demo:
+//   1. Build a five-byte binary payload  \x00\xff\x41\x00\x7a  via
+//      bytes_from_hex_alloc.
+//   2. SET a key to that payload using redis_command_b + RABin.
+//   3. STRLEN the key — should be 5 (proving the whole payload lives
+//      server-side; a NUL-truncated `redis_command` SET would have
+//      stored 0 bytes since str_len sees the leading \x00).
+//   4. Read back the raw bytes with GET and inspect them via
+//      mem_get_u8 (the returned RRBulk carries the raw memory —
+//      str_len sees only the pre-NUL prefix, but the byte buffer at
+//      that pointer is intact for len bytes given the RESP header).
+//
+// Setup:
+//   docker run -d --name mere-redis-bin -p 15606:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_binary.mere > /tmp/dbrb.wat
+//   wat2wasm --enable-tail-call /tmp/dbrb.wat -o /tmp/dbrb.wasm
+//   node scripts/run_wasm.js /tmp/dbrb.wasm
+
+import "../contrib/db/redis.mere";
+
+let show_reply = fn (label: str) -> fn (r) ->
+  print (label ++ ": " ++ redis_show r)
+  ;
+
+// Inspect the byte at offset `i` of a str value's underlying memory.
+// str_ptr coerces the Mere str to a raw pointer; mem_get_u8 dereferences.
+// Used below to peek past the leading NUL of the GET reply.
+let peek_byte = fn (s: str) -> fn (i: int) ->
+  mem_get_u8 (str_ptr s) i
+  ;
+
+let rec show_bytes = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else
+    let _ = print ("  byte[" ++ show i ++ "] = 0x" ++
+      (let b = peek_byte s i in
+       let hi = b / 16 in
+       let lo = b - hi * 16 in
+       let hc = fn (v: int) ->
+         if v < 10 then chr (v + 48) else chr (v + 87) in
+       hc hi ++ hc lo)) in
+    show_bytes s (i + 1) n
+  ;
+
+let fd = redis_connect "127.0.0.1" 15606 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  let _ = redis_command fd (Cons ("FLUSHDB", Nil)) in
+
+  // Build the 5-byte binary payload \x00 \xff \x41 \x00 \x7a.
+  let hex = "00ff41007a" in
+  let ptr = bytes_from_hex_alloc hex in
+  let len = 5 in
+  let _ = print ("binary payload = " ++ hex ++ " (" ++ show len ++ " bytes)") in
+
+  // SET via redis_command_b — arg mix: RATxt for command / key, RABin
+  // for the byte payload.
+  let _ = show_reply "SET bkey <bin>"
+    (redis_command_b fd
+      (Cons (RATxt "SET",
+       Cons (RATxt "bkey",
+       Cons (RABin (ptr, len), Nil))))) in
+
+  // STRLEN proves the entire payload landed on the server (5 bytes).
+  let _ = show_reply "STRLEN bkey  "
+    (redis_command fd (Cons ("STRLEN", Cons ("bkey", Nil)))) in
+
+  // Comparison: what happens with the plain-str API? The payload's
+  // leading 0x00 truncates the arg at str_len, so nothing gets sent
+  // beyond the SET / key headers. Result depends on Redis version;
+  // typically a WRONGTYPE-ish error or an empty value.
+  //
+  // (We skip the ill-formed call — the point is that redis_command_b
+  // is required whenever binary values need to survive.)
+
+  // Read the value back via GET. redis_command returns RRBulk (Some s)
+  // where `s` is the raw memory pointer to `len` bytes on the Mere
+  // heap. str_len(s) sees the prefix ending at the first NUL, but the
+  // subsequent bytes are still there — walk them with peek_byte.
+  let r = redis_command fd (Cons ("GET", Cons ("bkey", Nil))) in
+  let _ = print "" in
+  let _ = print "GET bkey (5 bytes accessed via mem_get_u8):" in
+  let _ = match r with
+          | RRBulk (Some s) -> show_bytes s 0 5
+          | _ -> print "  unexpected reply shape" in
+
+  let _ = redis_close fd in
+  ()

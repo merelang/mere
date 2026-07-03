@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 29
+The rest of this page walks the stack top-down, then catalogs the 30
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -264,6 +264,7 @@ command needed) and cleans up on process exit.
 | [db_redis_ssl](https://github.com/merelang/mere/blob/main/examples/db_redis_ssl.mere) | Redis 7 over TLS — permissive / system-CA reject / custom-CA accept |
 | [db_redis_resp3](https://github.com/merelang/mere/blob/main/examples/db_redis_resp3.mere) | `HELLO 3` upgrade — HGETALL → `RRMap`, SMEMBERS → `RRSet`, `RRNull` |
 | [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
+| [db_redis_binary](https://github.com/merelang/mere/blob/main/examples/db_redis_binary.mere) | Binary-safe args via `redis_command_b` — 5-byte payload with embedded NULs |
 
 ## Limitations and future work
 
@@ -307,13 +308,17 @@ command needed) and cleans up on process exit.
   `RRVerbatim`, `RRPush`, and `RRAttr` are all recognized on the wire
   and surfaced through typed extractors (`redis_as_bool` /
   `redis_as_map` / `redis_as_bignum` / `redis_as_verbatim` /
-  `redis_as_push`) plus a `redis_unwrap_attr` metadata peeler. Also
-  wired: PUB/SUB (`redis_subscribe` / `redis_psubscribe` /
-  `redis_wait_message` / `redis_publish`), pipelining
-  (`redis_pipeline`), TLS (`redis_connect_ssl` /
-  `redis_connect_ssl_verify`). Not yet: binary-safe command args
-  (currently keys/values can't contain embedded NULs on the send
-  side).
+  `redis_as_push`) plus a `redis_unwrap_attr` metadata peeler.
+  Binary-safe command args ride through `redis_command_b` with a
+  `redis_arg` variant — `RATxt s` for ASCII, `RABin (ptr, len)` for
+  arbitrary byte buffers built via `mem_alloc` / `bytes_from_hex_alloc`.
+  Reads still surface as `RRBulk (Some str)` where `str` is
+  NUL-terminated at the Mere layer; the raw byte buffer is intact at
+  that pointer, so callers who need binary reads peek via
+  `mem_get_u8`. Also wired: PUB/SUB (`redis_subscribe` /
+  `redis_psubscribe` / `redis_wait_message` / `redis_publish`),
+  pipelining (`redis_pipeline`), TLS (`redis_connect_ssl` /
+  `redis_connect_ssl_verify`).
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).
