@@ -27,7 +27,10 @@ const TCP_BUF_BYTES = 1 << 20;  // 1 MiB shared window; big enough for typical D
 const TCP_SAB = new SharedArrayBuffer(TCP_DATA_OFFSET + TCP_BUF_BYTES);
 const tcpCtrl = new Int32Array(TCP_SAB, 0, 8);
 const tcpData = new Uint8Array(TCP_SAB, TCP_DATA_OFFSET);
-const TCP_OP = { CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5, STARTTLS: 6 };
+const TCP_OP = {
+  CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5,
+  STARTTLS: 6, STARTTLS_VERIFIED: 7,
+};
 let tcpWorker = null;
 
 function tcpEnsureWorker() {
@@ -99,6 +102,22 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       const bytes = Buffer.from(host, 'utf8');
       tcpData.set(bytes, 0);
       return tcpCall(TCP_OP.STARTTLS, fd | 0, bytes.length) | 0;
+    },
+
+    // tcp_starttls_verified(fd, sni_host: str, ca_pem: str) -> int
+    //   Same as tcp_starttls but with cert-chain verification enabled
+    //   (`rejectUnauthorized: true`). If `ca_pem` is empty, Node falls
+    //   back to its built-in root store; otherwise the passed PEM is
+    //   the sole accepted trust anchor.
+    tcp_starttls_verified: (fd, hostPtr, caPtr) => {
+      const host = readCStr(hostPtr);
+      const ca = readCStr(caPtr);
+      const hostBytes = Buffer.from(host, 'utf8');
+      const caBytes = Buffer.from(ca, 'utf8');
+      tcpData.set(hostBytes, 0);
+      tcpData.set(caBytes, hostBytes.length);
+      const packed = (hostBytes.length & 0xffff) | ((caBytes.length & 0xffff) << 16);
+      return tcpCall(TCP_OP.STARTTLS_VERIFIED, fd | 0, packed) | 0;
     },
 
     // ---- Byte-buffer primitives -----------------------------------------
