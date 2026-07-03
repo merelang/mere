@@ -1,18 +1,23 @@
-// examples/db_mysql.mere — first pure-Mere MySQL client demo.
+// examples/db_mysql.mere — pure-Mere MySQL client demo.
 //
-// Companion to db_hello.mere. Connects to a local MySQL 8 configured
-// with mysql_native_password (the caching_sha2_password default needs
-// an RSA key exchange path we haven't implemented yet), runs a small
-// CRUD scenario, and prints the result rows.
+// Companion to db_hello.mere. The driver auto-detects the auth plugin
+// from the server's Initial Handshake and takes the matching path:
 //
-// Setup:
-//   docker run -d --name mere-mysql -p 15501:3306 \
+//   mysql_native_password    — SHA-1 challenge/response
+//   caching_sha2_password    — SHA-256 fast-path if the cache is warm,
+//                              RSA-OAEP-SHA1 public-key exchange
+//                              otherwise
+//
+// Setup (MySQL 8 default is caching_sha2_password):
+//   docker run -d --name mere-mysql -p 15502:3306 \
 //     -e MYSQL_ROOT_PASSWORD=rootpw \
 //     -e MYSQL_DATABASE=meredb \
 //     -e MYSQL_USER=meredev \
 //     -e MYSQL_PASSWORD=meredevpw \
-//     mysql:8 \
-//     --default-authentication-plugin=mysql_native_password
+//     mysql:8.0
+//
+// Or for the legacy path:
+//   docker run … mysql:8.0 --default-authentication-plugin=mysql_native_password
 //
 // Usage:
 //   ./mere -w examples/db_mysql.mere > /tmp/dbm.wat
@@ -36,12 +41,12 @@ let rec print_rows = fn (rs: (str option list) list) ->
     print_rows rest
   ;
 
-let fd = mysql_connect "127.0.0.1" 15501 "meredev" "meredevpw" "meredb" in
+let fd = mysql_connect "127.0.0.1" 15502 "meredev" "meredevpw" "meredb" in
 if fd < 0 then
   let _ = print "mysql_connect failed" in
   ()
 else
-  let _ = print "connected via mysql_native_password" in
+  let _ = print "connected" in
 
   let _ = mysql_query fd "DROP TABLE IF EXISTS mere_users" in
   let _ = mysql_query fd
