@@ -38,6 +38,30 @@ extern fn mem_get_u16be: int -> int -> int;
 extern fn mem_copy_str: int -> int -> str -> int;
 extern fn mem_to_str: int -> int -> str;
 
+// SCRAM-SHA-256 support — the hex-in / hex-out crypto primitives live
+// in scripts/run_wasm.js. We stay in hex at the Mere level so nothing
+// contains embedded NULs (which would break str_concat / str_len).
+extern fn sha256_of_hex: str -> str;
+extern fn hmac_sha256_hex_str: str -> str -> str;
+extern fn pbkdf2_sha256_hex: str -> str -> int -> int -> str;
+extern fn base64_encode_hex: str -> str;
+extern fn base64_decode_to_hex: str -> str;
+extern fn random_b64: int -> str;
+extern fn hex_xor: str -> str -> str;
+
+// ---- Message-type constants ---------------------------------------------
+
+let _MSG_AUTH = 82;           // 'R'
+let _MSG_PARAM = 83;          // 'S'
+let _MSG_BACKEND_KEY = 75;    // 'K'
+let _MSG_READY = 90;          // 'Z'
+let _MSG_ROW_DESC = 84;       // 'T'
+let _MSG_DATA_ROW = 68;       // 'D'
+let _MSG_CMD_COMPLETE = 67;   // 'C'
+let _MSG_ERROR = 69;          // 'E'
+let _MSG_NOTICE = 78;         // 'N'
+let _MSG_EMPTY_QUERY = 73;    // 'I'
+
 // ---- Low-level socket helpers -------------------------------------------
 
 // Read exactly `want` bytes into buf. Loops until the OS delivers them.
@@ -123,18 +147,141 @@ let _recv_msg = fn (fd: int) ->
       else (mtype, payload, payload_len)
   ;
 
-// ---- Message-type constants ---------------------------------------------
+// ---- SASL frame construction --------------------------------------------
+//
+// Both SASLInitialResponse and SASLResponse use the type byte 'p'.
+// The initial response also embeds the mechanism name; the follow-up
+// response is just the client-final message. PG treats both as
+// PasswordMessage on the wire (type='p'), disambiguated by the
+// preceding AuthenticationSASL / AuthenticationSASLContinue state.
 
-let _MSG_AUTH = 82;           // 'R'
-let _MSG_PARAM = 83;          // 'S'
-let _MSG_BACKEND_KEY = 75;    // 'K'
-let _MSG_READY = 90;          // 'Z'
-let _MSG_ROW_DESC = 84;       // 'T'
-let _MSG_DATA_ROW = 68;       // 'D'
-let _MSG_CMD_COMPLETE = 67;   // 'C'
-let _MSG_ERROR = 69;          // 'E'
-let _MSG_NOTICE = 78;         // 'N'
-let _MSG_EMPTY_QUERY = 73;    // 'I'
+let _send_sasl_initial = fn (fd: int) -> fn (mechanism: str) -> fn (client_first: str) ->
+  let mech_len = str_len mechanism in
+  let cf_len = str_len client_first in
+  let msg_len = 4 + mech_len + 1 + 4 + cf_len in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 112 in            // 'p'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let off1 = mem_copy_str buf 5 mechanism in
+  let _ = mem_set_u8 buf off1 0 in
+  let _ = mem_set_u32be buf (off1 + 1) cf_len in
+  let _ = mem_copy_str buf (off1 + 5) client_first in
+  tcp_write fd buf total
+  ;
+
+let _send_sasl_response = fn (fd: int) -> fn (client_final: str) ->
+  let cf_len = str_len client_final in
+  let msg_len = 4 + cf_len in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 112 in            // 'p'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let _ = mem_copy_str buf 5 client_final in
+  tcp_write fd buf total
+  ;
+
+// ---- SCRAM-SHA-256 (RFC 5802 / 7677) ------------------------------------
+//
+// Three-message exchange:
+//   1. C→S  client-first:  "n,,n=<user>,r=<client-nonce>"
+//   2. S→C  server-first:  "r=<combined-nonce>,s=<salt-b64>,i=<iters>"
+//   3. C→S  client-final:  "c=biws,r=<combined-nonce>,p=<client-proof-b64>"
+//   4. S→C  server-final:  "v=<server-signature-b64>"
+// After (4) the server sends AuthenticationOk (subtype 0); the caller's
+// drain loop picks that up on the next _recv_msg.
+//
+// Crypto pipeline (all hex on the Mere side, decoded inside the extern):
+//   salted_pw       = PBKDF2-HMAC-SHA256(password, salt, iters, 32)
+//   client_key      = HMAC(salted_pw,      "Client Key")
+//   stored_key      = SHA-256(client_key)
+//   auth_message    = client-first-bare + "," + server-first + "," + cf-wo-proof
+//   client_sig      = HMAC(stored_key,     auth_message)
+//   client_proof    = client_key XOR client_sig
+//   server_key      = HMAC(salted_pw,      "Server Key")
+//   expected_srv_sig = HMAC(server_key,    auth_message)
+
+// Extract a `<prefix><value>` field from a comma-separated SCRAM message.
+// Returns the value up to the next comma or end-of-string; empty string
+// if the prefix isn't found.
+let _scram_field = fn (msg: str) -> fn (prefix: str) ->
+  let start = str_index_of msg prefix in
+  if start < 0 then ""
+  else
+    let after = start + str_len prefix in
+    let rest = substring msg after (str_len msg) in
+    let comma = str_index_of rest "," in
+    if comma < 0 then rest
+    else substring rest 0 comma
+  ;
+
+let _do_scram_sha256 = fn (fd: int) -> fn (user: str) -> fn (password: str) ->
+  // 18 raw bytes → 24 chars of base64. Comfortably above the ~10-byte
+  // entropy floor RFC 5802 recommends. Nonce must be ASCII printable
+  // and comma-free — base64 (which uses `+ /` in the standard alphabet)
+  // satisfies both.
+  let client_nonce = random_b64 18 in
+  let client_first_bare = "n=" ++ user ++ ",r=" ++ client_nonce in
+  let client_first = "n,," ++ client_first_bare in
+  let _ = _send_sasl_initial fd "SCRAM-SHA-256" client_first in
+
+  // Expect AuthenticationSASLContinue (R, subtype=11) with server-first.
+  let (mt1, p1, plen1) = _recv_msg fd in
+  if mt1 != _MSG_AUTH then
+    let _ = print "pg scram: expected AuthenticationSASLContinue" in
+    false
+  else
+    let sub1 = mem_get_u32be p1 0 in
+    if sub1 != 11 then
+      let _ = print ("pg scram: expected sub=11, got " ++ show sub1) in
+      false
+    else
+      let server_first = mem_to_str (p1 + 4) (plen1 - 4) in
+      let combined_nonce = _scram_field server_first "r=" in
+      let salt_b64 = _scram_field server_first "s=" in
+      let iters = int_of_str (_scram_field server_first "i=") in
+      let salt_hex = base64_decode_to_hex salt_b64 in
+
+      let salted_pw = pbkdf2_sha256_hex password salt_hex iters 32 in
+      let client_key = hmac_sha256_hex_str salted_pw "Client Key" in
+      let stored_key = sha256_of_hex client_key in
+
+      // "biws" is the base64 of "n,," (the gs2 header). Not parameterized.
+      let cf_wo_proof = "c=biws,r=" ++ combined_nonce in
+      let auth_msg =
+        client_first_bare ++ "," ++ server_first ++ "," ++ cf_wo_proof in
+
+      let client_sig = hmac_sha256_hex_str stored_key auth_msg in
+      let client_proof_hex = hex_xor client_key client_sig in
+      let client_proof_b64 = base64_encode_hex client_proof_hex in
+
+      let client_final = cf_wo_proof ++ ",p=" ++ client_proof_b64 in
+      let _ = _send_sasl_response fd client_final in
+
+      // Expect AuthenticationSASLFinal (R, subtype=12).
+      let (mt2, p2, plen2) = _recv_msg fd in
+      if mt2 != _MSG_AUTH then
+        let _ = print "pg scram: expected AuthenticationSASLFinal" in
+        false
+      else
+        let sub2 = mem_get_u32be p2 0 in
+        if sub2 != 12 then
+          let _ = print ("pg scram: expected sub=12, got " ++ show sub2) in
+          false
+        else
+          let server_final = mem_to_str (p2 + 4) (plen2 - 4) in
+          let server_sig_b64 = _scram_field server_final "v=" in
+          let server_key = hmac_sha256_hex_str salted_pw "Server Key" in
+          let expected_sig_hex = hmac_sha256_hex_str server_key auth_msg in
+          let expected_sig_b64 = base64_encode_hex expected_sig_hex in
+          if not (str_eq server_sig_b64 expected_sig_b64) then
+            let _ = print "pg scram: server signature mismatch (auth failed)" in
+            false
+          else
+            // Success. The next message from the server is AuthenticationOk
+            // (subtype 0), which the outer drain loop handles.
+            true
+  ;
 
 // ---- Handshake ----------------------------------------------------------
 //
@@ -147,38 +294,47 @@ let _MSG_EMPTY_QUERY = 73;    // 'I'
 // SCRAM / md5, which trust-mode MVP doesn't support — bail with an
 // error and empty rows.
 
-let rec _drain_until_ready = fn (fd: int) -> fn (ok: bool) ->
+let rec _drain_until_ready = fn (fd: int) -> fn (user: str)
+                           -> fn (password: str) -> fn (ok: bool) ->
   let (mtype, payload, plen) = _recv_msg fd in
   if mtype < 0 then false
   else if mtype == _MSG_READY then ok
   else if mtype == _MSG_ERROR then
     let _ = print ("pg error: " ++ mem_to_str payload plen) in
-    _drain_until_ready fd false
+    _drain_until_ready fd user password false
   else if mtype == _MSG_AUTH then
     let sub = mem_get_u32be payload 0 in
-    if sub == 0 then _drain_until_ready fd ok
+    if sub == 0 then _drain_until_ready fd user password ok
+    else if sub == 10 then
+      // AuthenticationSASL — payload lists available mechanisms as
+      // NUL-terminated strings after the 4-byte sub. We commit to
+      // SCRAM-SHA-256 without inspecting the list; if the server
+      // doesn't offer it the exchange will fail cleanly at step 2.
+      let ok2 = _do_scram_sha256 fd user password in
+      _drain_until_ready fd user password (ok && ok2)
     else
-      let _ = print ("pg: unsupported auth method " ++ show sub ++
-        " (this MVP only supports 'trust' — set pg_hba.conf accordingly)") in
-      _drain_until_ready fd false
+      let _ = print ("pg: unsupported auth method " ++ show sub) in
+      _drain_until_ready fd user password false
   else
     // Ignore ParameterStatus, BackendKeyData, NoticeResponse, etc.
-    _drain_until_ready fd ok
+    _drain_until_ready fd user password ok
   ;
 
 // ---- Public entry: connect ----------------------------------------------
 //
 // Returns fd (>= 1) on success, -1 on failure. Auth failures print
-// diagnostic messages to stdout and return -1.
+// diagnostic messages to stdout and return -1. Pass "" for `password`
+// when the server is configured for trust-mode auth.
 
-let pg_connect = fn (host: str) -> fn (port: int) -> fn (user: str) -> fn (db: str) ->
+let pg_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
+              -> fn (password: str) -> fn (db: str) ->
   let fd = tcp_connect host port in
   if fd < 1 then
     let _ = print ("pg: tcp connect failed to " ++ host ++ ":" ++ show port) in
     -1
   else
     let _ = _send_startup fd user db in
-    if _drain_until_ready fd true then fd
+    if _drain_until_ready fd user password true then fd
     else
       let _ = tcp_close fd in
       -1

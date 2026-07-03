@@ -37,7 +37,9 @@ let rec print_rows = fn (rs: (str list) list) ->
 // The port defaults match a trust-mode dev instance started via:
 //   docker run -d -p 15432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
 //     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
-let fd = pg_connect "127.0.0.1" 15432 "postgres" "postgres" in
+// pg_connect: host, port, user, password, database.
+// Trust auth ignores the password argument — pass "" to be explicit.
+let fd = pg_connect "127.0.0.1" 15432 "postgres" "" "postgres" in
 if fd < 0 then
   let _ = print "pg_connect failed" in
   ()
