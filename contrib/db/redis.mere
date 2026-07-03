@@ -39,6 +39,7 @@ extern fn tcp_connect: str -> int -> int;
 extern fn tcp_write: int -> int -> int -> int;
 extern fn tcp_read: int -> int -> int -> int;
 extern fn tcp_close: int -> unit;
+extern fn tcp_set_timeout: int -> int -> unit;
 extern fn str_ptr: str -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_set_u8: int -> int -> int -> unit;
@@ -195,6 +196,89 @@ let redis_auth = fn (fd: int) -> fn (username: str) -> fn (password: str) ->
 let redis_close = fn (fd: int) ->
   let _ = redis_command fd (Cons ("QUIT", Nil)) in
   tcp_close fd
+  ;
+
+// ---- PUB / SUB --------------------------------------------------------
+//
+// SUBSCRIBE puts the connection into a mode where the server pushes
+// unsolicited `["message", channel, payload]` arrays whenever another
+// client PUBLISHes on a matching channel. Only SUBSCRIBE / UNSUBSCRIBE
+// / PSUBSCRIBE / PUNSUBSCRIBE / PING / QUIT / RESET are legal on that
+// same fd — use a separate fd (or a pool acquire elsewhere) for the
+// PUBLISH side.
+//
+// Protocol subtlety: SUBSCRIBE to N channels triggers N array replies
+// in sequence, each `["subscribe", channel, subscription_count]`. We
+// drain them to keep the wire in sync before the caller starts
+// waiting for messages.
+
+let rec _r_drain_subscribe_replies = fn (fd: int) -> fn (n: int) ->
+  if n <= 0 then ()
+  else
+    let _ = _r_read_reply fd in
+    _r_drain_subscribe_replies fd (n - 1)
+  ;
+
+// Send SUBSCRIBE + drain the N confirmation replies. Returns unit —
+// callers consume incoming messages via redis_wait_message.
+let redis_subscribe = fn (fd: int) -> fn (channels: str list) ->
+  let n = _r_list_len channels in
+  let cmd = "*" ++ show (n + 1) ++ "\r\n$9\r\nSUBSCRIBE\r\n" ++
+            _r_build_args channels "" in
+  let _ = tcp_write fd (str_ptr cmd) (str_len cmd) in
+  _r_drain_subscribe_replies fd n
+  ;
+
+// PSUBSCRIBE variant — pattern-based subscription. Server emits
+// `["pmessage", pattern, channel, payload]` on match.
+let redis_psubscribe = fn (fd: int) -> fn (patterns: str list) ->
+  let n = _r_list_len patterns in
+  let cmd = "*" ++ show (n + 1) ++ "\r\n$10\r\nPSUBSCRIBE\r\n" ++
+            _r_build_args patterns "" in
+  let _ = tcp_write fd (str_ptr cmd) (str_len cmd) in
+  _r_drain_subscribe_replies fd n
+  ;
+
+// Convenience for PUBLISH from a non-subscribing fd. Returns the
+// number of subscribers that received the message (0 = none listening).
+let redis_publish = fn (fd: int) -> fn (channel: str) -> fn (payload: str) ->
+  match redis_command fd
+          (Cons ("PUBLISH", Cons (channel, Cons (payload, Nil)))) with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+// Match a `["message", channel, payload]` array. Returns Some
+// (channel, payload) on match; None if the shape doesn't fit —
+// callers can pattern-match on the raw reply for pmessage variants.
+let _r_match_message = fn (r) ->
+  match r with
+  | RRArr (Cons (RRBulk (Some tag),
+             Cons (RRBulk (Some channel),
+               Cons (RRBulk (Some payload), Nil)))) ->
+    if str_eq tag "message" then Some (channel, payload) else None
+  | _ -> None
+  ;
+
+// Wait up to `timeout_ms` for the next message on this subscribed
+// connection. Returns Some (channel, payload) on delivery or None on
+// timeout / non-message reply.
+let redis_wait_message = fn (fd: int) -> fn (timeout_ms: int) ->
+  let _ = tcp_set_timeout fd timeout_ms in
+  let r = _r_read_reply fd in
+  let _ = tcp_set_timeout fd 0 in
+  _r_match_message r
+  ;
+
+// Full-shape variant that returns the raw reply — useful when the
+// caller wants to distinguish `message` / `pmessage` / `subscribe` /
+// `unsubscribe` / `pong` responses that all arrive on the subscribed
+// connection.
+let redis_wait_reply = fn (fd: int) -> fn (timeout_ms: int) ->
+  let _ = tcp_set_timeout fd timeout_ms in
+  let r = _r_read_reply fd in
+  let _ = tcp_set_timeout fd 0 in
+  r
   ;
 
 // ---- Reply extractors -------------------------------------------------
