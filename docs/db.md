@@ -1,11 +1,12 @@
 # Database support
 
-Mere ships a pure-Mere PostgreSQL client. Everything from the wire
-protocol to SCRAM-SHA-256 auth is implemented in Mere itself; the host
+Mere ships pure-Mere PostgreSQL and MySQL clients. Both wire protocols,
+their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` for
+MySQL), and everything on top are implemented in Mere itself; the host
 only exposes low-level TCP and crypto primitives. No `npm` packages
 involved.
 
-The rest of this page walks the stack top-down, then catalogs the 16
+The rest of this page walks the stack top-down, then catalogs the 17
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -15,16 +16,17 @@ The rest of this page walks the stack top-down, then catalogs the 16
 │  Mere application code                                             │
 │  (e.g. examples/http_todo_pg.mere)                                 │
 ├────────────────────────────────────────────────────────────────────┤
-│  contrib/db/pg.mere            contrib/db/pg_pool.mere             │
-│  ─────────────────             ───────────────────────             │
-│  Wire protocol (v3)            Keep-alive pool over pg.mere        │
-│  Simple + extended query       Idle event pump                     │
-│  Prepared statements           pg_pool_pump / release_notifs       │
+│  contrib/db/pg.mere            contrib/db/mysql.mere               │
+│  ─────────────────             ─────────────────────               │
+│  Wire protocol (v3)            Wire protocol (v10)                 │
+│  SCRAM-SHA-256 auth            mysql_native_password auth          │
+│  Simple + extended query       Simple query (COM_QUERY)            │
+│  Prepared statements           Text row protocol                   │
 │  Transactions + savepoints                                         │
-│  COPY FROM/TO STDOUT                                               │
-│  LISTEN / NOTIFY + async queue                                     │
-│  URL parser (RFC 3986)                                             │
-│  SCRAM-SHA-256                                                     │
+│  COPY FROM/TO STDOUT           contrib/db/pg_pool.mere             │
+│  LISTEN / NOTIFY + async queue ───────────────────────             │
+│  URL parser (RFC 3986)         Keep-alive pool over pg.mere        │
+│                                Idle event pump                     │
 ├────────────────────────────────────────────────────────────────────┤
 │  Crypto helpers                                                    │
 │  sha256, hmac_sha256, pbkdf2_sha256, base64_encode/decode,         │
@@ -232,6 +234,7 @@ command needed) and cleans up on process exit.
 | [db_notify](https://github.com/merelang/mere/blob/main/examples/db_notify.mere) | LISTEN / NOTIFY with two connections + timeout path |
 | [db_notify_async](https://github.com/merelang/mere/blob/main/examples/db_notify_async.mere) | notifications arriving inside another query's response stream |
 | [http_todo_pg](https://github.com/merelang/mere/blob/main/examples/http_todo_pg.mere) | `contrib/http` + `pg_pool` — signup / login / todos backed by PG |
+| [db_mysql](https://github.com/merelang/mere/blob/main/examples/db_mysql.mere) | MySQL 8 (`mysql_native_password`) — handshake + query + NULL round trip |
 
 ## Limitations and future work
 
@@ -249,6 +252,13 @@ command needed) and cleans up on process exit.
 - **Async event loop**: `NotificationResponse` handling is queue-based
   — the pool has a `pump` primitive but no background loop. A real
   event loop would need cooperation from the Node harness.
-- **MySQL / SQLite**: not implemented. MySQL would fit on the same
-  TCP + crypto substrate; SQLite would need either a fresh Mere
-  implementation of the file format or a bundled Wasm build.
+- **MySQL client is MVP**: connect + auth + simple `COM_QUERY` +
+  text-format rows work. Prepared statements (`COM_STMT_PREPARE`),
+  transactions beyond bare `BEGIN/COMMIT` strings, TLS, and the modern
+  `caching_sha2_password` auth path are not wired. Server must be
+  configured with `--default-authentication-plugin=mysql_native_password`
+  (MySQL 8.0-8.3), or use `ALTER USER ... IDENTIFIED WITH
+  mysql_native_password` — the flag was removed in MySQL 8.4.
+- **SQLite**: not implemented. Would need either a fresh Mere
+  implementation of the file format or a bundled Wasm build (sql.js /
+  wa-sqlite).

@@ -1,0 +1,69 @@
+// examples/db_mysql.mere — first pure-Mere MySQL client demo.
+//
+// Companion to db_hello.mere. Connects to a local MySQL 8 configured
+// with mysql_native_password (the caching_sha2_password default needs
+// an RSA key exchange path we haven't implemented yet), runs a small
+// CRUD scenario, and prints the result rows.
+//
+// Setup:
+//   docker run -d --name mere-mysql -p 15501:3306 \
+//     -e MYSQL_ROOT_PASSWORD=rootpw \
+//     -e MYSQL_DATABASE=meredb \
+//     -e MYSQL_USER=meredev \
+//     -e MYSQL_PASSWORD=meredevpw \
+//     mysql:8 \
+//     --default-authentication-plugin=mysql_native_password
+//
+// Usage:
+//   ./mere -w examples/db_mysql.mere > /tmp/dbm.wat
+//   wat2wasm --enable-tail-call /tmp/dbm.wat -o /tmp/dbm.wasm
+//   node scripts/run_wasm.js /tmp/dbm.wasm
+
+import "../contrib/db/mysql.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> mysql_val_or h "NULL"
+  | Cons (h, t) -> mysql_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let fd = mysql_connect "127.0.0.1" 15501 "meredev" "meredevpw" "meredb" in
+if fd < 0 then
+  let _ = print "mysql_connect failed" in
+  ()
+else
+  let _ = print "connected via mysql_native_password" in
+
+  let _ = mysql_query fd "DROP TABLE IF EXISTS mere_users" in
+  let _ = mysql_query fd
+    "CREATE TABLE mere_users (id INT PRIMARY KEY, name VARCHAR(80), note VARCHAR(200))" in
+
+  let _ = mysql_query fd
+    "INSERT INTO mere_users VALUES (1, 'alice', 'first admin')" in
+  let _ = mysql_query fd
+    "INSERT INTO mere_users VALUES (2, 'bob', NULL)" in
+  let _ = mysql_query fd
+    "INSERT INTO mere_users VALUES (3, 'carol', 'ships it')" in
+  let _ = print "-- 3 rows inserted (bob has NULL note)" in
+
+  let rows = mysql_query fd
+    "SELECT id, name, note FROM mere_users ORDER BY id" in
+  let _ = print_rows rows in
+
+  let _ = print "" in
+  let _ = print "-- scalar via mysql_first_col:" in
+  let count = mysql_val_or (mysql_first_col
+    (mysql_query fd "SELECT COUNT(*) FROM mere_users") 0) "?" in
+  let _ = print ("count = " ++ count) in
+
+  let _ = mysql_close fd in
+  ()

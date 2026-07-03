@@ -116,6 +116,22 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     mem_get_u16be: (ptr, off) => {
       return new DataView(getMemory()).getUint16((ptr | 0) + (off | 0), false);
     },
+    // Little-endian variants — MySQL / SQLite / most native protocols
+    // outside the PG family use these.
+    mem_set_u16le: (ptr, off, val) => {
+      new DataView(getMemory()).setUint16((ptr | 0) + (off | 0), val & 0xffff, true);
+      return 0;
+    },
+    mem_get_u16le: (ptr, off) => {
+      return new DataView(getMemory()).getUint16((ptr | 0) + (off | 0), true);
+    },
+    mem_set_u32le: (ptr, off, val) => {
+      new DataView(getMemory()).setUint32((ptr | 0) + (off | 0), val >>> 0, true);
+      return 0;
+    },
+    mem_get_u32le: (ptr, off) => {
+      return new DataView(getMemory()).getInt32((ptr | 0) + (off | 0), true);
+    },
     mem_copy_str: (dst, off, srcPtr) => {
       const bytes = new Uint8Array(getMemory());
       let src = srcPtr | 0;
@@ -133,6 +149,17 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     },
 
     // ---- Crypto ---------------------------------------------------------
+    // SHA-1 — MySQL's `mysql_native_password` auth needs it. Modern
+    // stacks prefer SHA-256, but the deprecated hash still ships with
+    // every MySQL server we're likely to touch.
+    sha1_hex: (ptr) => {
+      const s = readCStr(ptr);
+      return writeStr(require('crypto').createHash('sha1').update(s).digest('hex'));
+    },
+    sha1_of_hex: (ptr) => {
+      const h = Buffer.from(readCStr(ptr), 'hex');
+      return writeStr(require('crypto').createHash('sha1').update(h).digest('hex'));
+    },
     sha256_hex: (ptr) => {
       const s = readCStr(ptr);
       return writeStr(require('crypto').createHash('sha256').update(s).digest('hex'));
