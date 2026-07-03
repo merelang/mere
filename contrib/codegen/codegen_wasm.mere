@@ -959,6 +959,15 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
             let s0 = note_helper_use "show_bool" s in
             let s1 = emit_expr x s0 in
             push_instr "call $show_bool" s1
+          | EAnnot (_, TyUnit) ->
+            // Unit-typed main: `show ()` renders as the string literal
+            // "()". Emit the unit arg then drop it (it always evaluates
+            // to i32.const 0 anyway), then push the pre-allocated "()"
+            // pointer so the outer print gets a proper C-string.
+            let (unit_off, s0) = alloc_str_literal "()" s in
+            let s1 = emit_expr x s0 in
+            let s2 = push_instr "drop" s1 in
+            push_instr ("i32.const " ++ show unit_off) s2
           | EAnnot (_, TyStr) ->
             // show_str wraps in quotes via str_concat + bump-allocated `"`
             let s0 = note_helper_use "strlen" s in
@@ -3063,6 +3072,14 @@ let parse_and_emit_file = fn (path: str) ->
   let base = dirname path in
   let (inlined, _) = inline_imports_in src base (Cons (path, Nil)) in
   parse_and_emit inlined;
+
+// Main auto-print (matching lib/codegen_wasm.ml's Phase 27.2 epilogue)
+// lives in the CLI driver — see examples/selfhost_wasm_cli.mere — not
+// here, because it needs a typer pass to attach `EAnnot` wrappers so
+// the `EVar "show"` dispatch in `emit_expr` picks the right
+// `$show_int` / `$show_str` / `$show_bool` / `$show_unit` variant.
+// Keeping codegen independent of contrib/typer preserves the
+// separation-of-concerns split between the two contrib modules.
 
 // === Demos ================================================================
 

@@ -1,44 +1,64 @@
 // examples/selfhost_wasm_cli.mere — CLI wrapper for the self-hosted
-// Mere→Wasm compiler. Takes a `.mere` file path as argv[0] (i.e. the
-// first arg after the .wasm path), pipes it through
-// `parse_and_emit_file` from contrib/codegen/codegen_wasm.mere, and
-// prints the resulting WAT text to stdout.
+// Mere→Wasm compiler with main-return auto-print.
 //
-// Full self-host round-trip:
+// Pipeline:
+//   1. Read + inline-imports the target `.mere` source.
+//   2. Tokenize + parse → AST.
+//   3. `annotate_decls` + `annotate_expr` from contrib/typer to
+//      attach resolved types at the sites codegen's polymorphic
+//      `show` dispatch cares about.
+//   4. Infer main's type and wrap it as
+//        `let _ = print (show (main : main_ty)) in ()`
+//      via an explicit `EAnnot (main, main_ty)`. Codegen's
+//      `EVar "show"` handler dispatches to `$show_int` /
+//      `$show_str` / `$show_bool` / etc.
+//   5. `emit_program` → WAT.
 //
-//   # 1. build the self-hosted compiler (OCaml `mere` bootstrap)
-//   ./_build/default/bin/mere.exe -w examples/selfhost_wasm_cli.mere > /tmp/selfmere.wat
+// Matches lib/codegen_wasm.ml's Phase 27.2 main-auto-print
+// epilogue on the OCaml side, so int/str/bool/unit-returning
+// programs (like `fibonacci.mere` whose main is just `fib 15`)
+// produce output through this driver.
+//
+// Usage:
+//   ./mere -w examples/selfhost_wasm_cli.mere > /tmp/selfmere.wat
 //   wat2wasm --enable-tail-call /tmp/selfmere.wat -o /tmp/selfmere.wasm
-//
-//   # 2. use it to compile a target source, stripping the trailing
-//   #    `()` from main's return-value auto-print
-//   node scripts/run_wasm.js /tmp/selfmere.wasm target.mere | sed '$d' > target.wat
-//
-//   # 3. assemble target.wat and run — same output as
-//   #    `./_build/default/bin/mere.exe target.mere` (via OCaml mere)
+//   node scripts/run_wasm.js /tmp/selfmere.wasm target.mere \
+//     | sed '$d' > target.wat        # strip final `()` auto-print line
 //   wat2wasm --enable-tail-call target.wat -o target.wasm
 //   node scripts/run_wasm.js target.wasm
-//
-// This is the CLI-shaped counterpart to
-// `contrib/site/playground/selfhost-compile.mere` (which drives the
-// same pipeline from a browser textarea). The self-hosted output is
-// larger than the reference (unconditional preamble, less pruning)
-// but the assembled Wasm produces identical results.
 
 extern fn arg_count: unit -> int;
 extern fn arg_get: int -> str;
 
+import "../contrib/typer/typer.mere";
 import "../contrib/codegen/codegen_wasm.mere";
 
-// The codegen's `main` epilogue auto-prints main's return value —
-// `0` for int, `()` for unit — so this program emits one extra
-// line after the WAT output. Callers strip it with `sed '$d'` or
-// `head -n -1`. See the Usage section above for the exact shell
-// pipeline that gives clean WAT.
+let compile_source_to_wat = fn (src: str) ->
+  let toks = tokenize src in
+  let (prog, _rest) = parse_decls Nil toks in
+  let (decls, main_expr) = flatten_and_resolve prog in
+  let (decls_r, env1, s1) =
+    annotate_decls decls initial_type_env initial_state in
+  let (main_r, s2) = annotate_expr env1 s1 main_expr in
+  let (main_ty, s3) = infer env1 s2 main_expr in
+  let resolved_main_ty = apply_subst (subst_of s3) main_ty in
+  let annotated_main = EAnnot (main_r, resolved_main_ty) in
+  let wrapped =
+    ELet (PWild,
+          EApp (EVar "print", EApp (EVar "show", annotated_main)),
+          EUnit) in
+  emit_program ((decls_r, wrapped) : program);
+
+let compile_file_to_wat = fn (path: str) ->
+  let src = read_file path in
+  let base = dirname path in
+  let (inlined, _) = inline_imports_in src base (Cons (path, Nil)) in
+  compile_source_to_wat inlined;
+
 let _ =
   if arg_count () < 1 then
     print "usage: node run_wasm.js <this.wasm> <input.mere>"
   else
-    print (parse_and_emit_file (arg_get 0))
+    print (compile_file_to_wat (arg_get 0))
 in
 ()
