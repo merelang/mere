@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere link shortener</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere link shortener</h1>
+<p class="subtitle">
+  Paste a long URL below. The server generates an 8-hex-char code
+  (or accepts a custom one), stores it in the log-structured KV, and
+  serves <code>GET /&lt;code&gt;</code> as a 302 redirect while
+  incrementing the per-code hit counter.
+</p>
+
+<section id="create">
+  <h2>create</h2>
+  <input id="new-url" placeholder="https://example.com/very/long/url" size="50">
+  <input id="new-code" placeholder="custom-code (optional)" size="20">
+  <button id="btn-shorten">shorten</button>
+</section>
+
+<section id="listing">
+  <h2>links</h2>
+  <table id="links">
+    <thead>
+      <tr>
+        <th>code</th>
+        <th>url</th>
+        <th>hits</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="empty" hidden>No links yet.</p>
+</section>
+
+<pre id="log"></pre>
