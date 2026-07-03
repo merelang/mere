@@ -394,14 +394,144 @@ let rec _collect_rows = fn (fd: int) -> fn (acc: (str list) list) ->
     _collect_rows fd acc
   ;
 
+// Reverse a (str list) list. Used to flip _collect_rows's Cons-prepended
+// accumulator into the natural forward order. Kept at module scope
+// because let-rec isn't allowed inside expressions (self-host limit).
+let rec _rev_rows = fn (xs: (str list) list) -> fn (acc: (str list) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rev_rows t (Cons (h, acc))
+  ;
+
 let pg_query = fn (fd: int) -> fn (sql: str) ->
   let _ = _send_query fd sql in
-  // Rows come in reverse; flip once at the end.
-  let rec rev_rows = fn (xs: (str list) list) -> fn (acc: (str list) list) ->
-    match xs with
-    | Nil -> acc
-    | Cons (h, t) -> rev_rows t (Cons (h, acc)) in
-  rev_rows (_collect_rows fd Nil) Nil
+  _rev_rows (_collect_rows fd Nil) Nil
+  ;
+
+// ---- Extended query (Parse / Bind / Execute / Sync) ---------------------
+//
+// The simple-Query path above (pg_query) does string interpolation at the
+// call site — dangerous with untrusted input. Extended query separates
+// the statement text from the parameter values on the wire:
+//
+//   1. Parse ('P')   — send SQL text with $1, $2 … placeholders
+//   2. Bind ('B')    — send parameter values in the same order
+//   3. Execute ('E') — run the bound portal, request up to N rows
+//   4. Sync ('S')    — flush + return control (else the server stays
+//                       in "extended query" state)
+//
+// This MVP:
+//   - Uses unnamed (anonymous) prepared statement and portal — no reuse
+//     across queries yet. Each call re-parses.
+//   - Sends all parameters as text (format code 0). PG casts based on
+//     column context in most cases; explicit casts (`$1::int`) work
+//     everywhere.
+//   - Requests all result columns as text.
+//   - Doesn't support NULL parameters — pass "" instead (this is
+//     semantically different! for a real NULL, the length prefix must
+//     be -1, which the (str list) API can't express).
+
+let rec _list_len = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + _list_len t
+  ;
+
+let rec _sum_lens = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> str_len h + _sum_lens t
+  ;
+
+// Serialize each param as (int32 length, bytes). Returns the offset
+// after the last param — caller uses it to place the trailing "num
+// result format codes" field.
+let rec _write_params = fn (buf: int) -> fn (off: int) -> fn (ps: str list) ->
+  match ps with
+  | Nil -> off
+  | Cons (p, rest) ->
+    let plen = str_len p in
+    let _ = mem_set_u32be buf off plen in
+    let new_off = mem_copy_str buf (off + 4) p in
+    _write_params buf new_off rest
+  ;
+
+// Parse ('P') — statement name (unnamed = ""), SQL with $N placeholders,
+// zero declared param OIDs (server infers).
+let _send_parse = fn (fd: int) -> fn (name: str) -> fn (sql: str) ->
+  let name_len = str_len name in
+  let sql_len = str_len sql in
+  let msg_len = 4 + name_len + 1 + sql_len + 1 + 2 in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 80 in                        // 'P'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let off1 = mem_copy_str buf 5 name in
+  let _ = mem_set_u8 buf off1 0 in
+  let off2 = mem_copy_str buf (off1 + 1) sql in
+  let _ = mem_set_u8 buf off2 0 in
+  let _ = mem_set_u16be buf (off2 + 1) 0 in             // 0 param OIDs
+  tcp_write fd buf total
+  ;
+
+// Bind ('B') — portal "", stmt "", all params as text, all results as text.
+let _send_bind = fn (fd: int) -> fn (params: str list) ->
+  let num_params = _list_len params in
+  let params_bytes = _sum_lens params in
+  // 4 (len) + 1 (portal "\0") + 1 (stmt "\0")
+  //   + 2 (num param fmt codes = 0)
+  //   + 2 (num params)
+  //   + num_params * 4 (length prefixes) + params_bytes
+  //   + 2 (num result fmt codes = 0)
+  let msg_len = 4 + 1 + 1 + 2 + 2 + 4 * num_params + params_bytes + 2 in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 66 in                        // 'B'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let _ = mem_set_u8 buf 5 0 in                         // portal = ""
+  let _ = mem_set_u8 buf 6 0 in                         // stmt = ""
+  let _ = mem_set_u16be buf 7 0 in                      // 0 param fmt codes
+  let _ = mem_set_u16be buf 9 num_params in
+  let end_off = _write_params buf 11 params in
+  let _ = mem_set_u16be buf end_off 0 in                // 0 result fmt codes
+  tcp_write fd buf total
+  ;
+
+// Execute ('E') — portal "", max_rows=0 (unlimited).
+let _send_execute = fn (fd: int) -> fn (max_rows: int) ->
+  let msg_len = 4 + 1 + 4 in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 69 in                        // 'E'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let _ = mem_set_u8 buf 5 0 in                         // portal = ""
+  let _ = mem_set_u32be buf 6 max_rows in
+  tcp_write fd buf total
+  ;
+
+// Sync ('S') — no payload beyond the length field itself.
+let _send_sync = fn (fd: int) ->
+  let buf = mem_alloc 5 in
+  let _ = mem_set_u8 buf 0 83 in                        // 'S'
+  let _ = mem_set_u32be buf 1 4 in
+  tcp_write fd buf 5
+  ;
+
+// Public API: parameterized query. Params are strings — pass them as-is
+// (no quoting, no escaping — the wire protocol keeps them out of band).
+//
+//   pg_query_params fd "SELECT * FROM u WHERE id = $1 AND name = $2"
+//                   (Cons ("42", Cons ("alice", Nil)))
+let pg_query_params = fn (fd: int) -> fn (sql: str) -> fn (params: str list) ->
+  let _ = _send_parse fd "" sql in
+  let _ = _send_bind fd params in
+  let _ = _send_execute fd 0 in
+  let _ = _send_sync fd in
+  // Server sends ParseComplete + BindComplete + [RowDescription] + DataRows
+  // + CommandComplete + ReadyForQuery. _collect_rows already skips
+  // everything except DataRow / Error / Ready, so it handles the leading
+  // '1' / '2' completion messages transparently.
+  _rev_rows (_collect_rows fd Nil) Nil
   ;
 
 // ---- Cleanup ------------------------------------------------------------

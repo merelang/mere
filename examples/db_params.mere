@@ -1,0 +1,91 @@
+// examples/db_params.mere — parameterized query via extended-protocol
+// (Parse / Bind / Execute / Sync). Same public API as db_hello.mere but
+// with $1, $2 … placeholders bound out-of-band, which is what makes
+// the client safe from SQL injection.
+//
+// The demo creates a small table, inserts three rows with parameterized
+// INSERTs, then selects with a parameterized WHERE — including a
+// deliberately malicious `name` value ("'; DROP TABLE users; --") to
+// prove that pg_query_params treats it as data, not SQL.
+//
+// Setup (SCRAM mode — reuse from db_scram.mere):
+//   docker run -d --name mere-pg-params -p 15434:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
+//     -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" \
+//     -e POSTGRES_USER=meredev -e POSTGRES_PASSWORD=meredevpw \
+//     -e POSTGRES_DB=meredb postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_params.mere > /tmp/dbp.wat
+//   wat2wasm --enable-tail-call /tmp/dbp.wat -o /tmp/dbp.wasm
+//   node scripts/run_wasm.js /tmp/dbp.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> h
+  | Cons (h, t) -> h ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let fd = pg_connect "127.0.0.1" 15434 "meredev" "meredevpw" "meredb" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+  let _ = print "connected" in
+
+  // Fresh schema — no-op if this is the first run.
+  let _ = pg_query fd "DROP TABLE IF EXISTS mere_users" in
+  let _ = pg_query fd
+    "CREATE TABLE mere_users (id int, name text, note text)" in
+  let _ = print "-- table created" in
+
+  // Parameterized INSERTs. Each Bind sends the values out-of-band, so
+  // punctuation / quotes in the payload can never terminate the SQL.
+  let _ = pg_query_params fd
+    "INSERT INTO mere_users VALUES ($1::int, $2, $3)"
+    (Cons ("1", Cons ("alice", Cons ("first admin", Nil)))) in
+  let _ = pg_query_params fd
+    "INSERT INTO mere_users VALUES ($1::int, $2, $3)"
+    (Cons ("2", Cons ("bob", Cons ("no notes", Nil)))) in
+
+  // Deliberately hostile row: name contains the classic SQL-injection
+  // payload. With `pg_query` (simple query) this would drop the table;
+  // with `pg_query_params` it's just three bytes in the varchar column.
+  let hostile = "'; DROP TABLE mere_users; --" in
+  let _ = pg_query_params fd
+    "INSERT INTO mere_users VALUES ($1::int, $2, $3)"
+    (Cons ("3", Cons (hostile, Cons ("attempt", Nil)))) in
+  let _ = print "-- three rows inserted (including a hostile payload)" in
+
+  // Parameterized SELECT — $1 is the id we're filtering on.
+  let _ = print "-- rows where id > $1  (arg=1):" in
+  let rows1 = pg_query_params fd
+    "SELECT id, name FROM mere_users WHERE id > $1 ORDER BY id"
+    (Cons ("1", Nil)) in
+  let _ = print_rows rows1 in
+
+  // Verify the hostile name landed as-is, not as executed SQL.
+  let _ = print "-- rows matching hostile name payload:" in
+  let rows2 = pg_query_params fd
+    "SELECT id, name FROM mere_users WHERE name = $1"
+    (Cons (hostile, Nil)) in
+  let _ = print_rows rows2 in
+
+  // Confirm the table still exists (hostile input didn't drop it).
+  let _ = print "-- total row count:" in
+  let rows3 = pg_query fd "SELECT count(*) FROM mere_users" in
+  let _ = print_rows rows3 in
+
+  let _ = pg_close fd in
+  ()
