@@ -969,6 +969,91 @@ let mysql_first_col = fn (rows: (str option list) list) -> fn (i: int) ->
   | Cons (row, _) -> mysql_col_at row i
   ;
 
+// ---- URL parser + one-shot connect via URL ---------------------------
+//
+// Accepts `mysql://[user[:password]@][host[:port]][/database][?params]`.
+// Same shape as pg_parse_url but with mysql:// as the required scheme
+// and 3306 as the default port. Percent decoding (`%40` → `@`) applies
+// to user / password / database.
+
+let _my_slice = fn (s: str) -> fn (i: int) ->
+  substring s i (str_len s)
+  ;
+
+let _my_pct_hex = fn (c: str) ->
+  let n = ord c in
+  if n >= 48 && n <= 57 then n - 48
+  else if n >= 97 && n <= 102 then n - 97 + 10
+  else if n >= 65 && n <= 70 then n - 65 + 10
+  else 0 - 1
+  ;
+
+let rec _my_pct_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else
+    let c = char_at s i in
+    if str_eq c "%" && i + 2 < n then
+      let h = _my_pct_hex (char_at s (i + 1)) in
+      let l = _my_pct_hex (char_at s (i + 2)) in
+      if h < 0 || l < 0 then _my_pct_loop s (i + 1) n (acc ++ c)
+      else _my_pct_loop s (i + 3) n (acc ++ chr (h * 16 + l))
+    else _my_pct_loop s (i + 1) n (acc ++ c)
+  ;
+
+let _my_pct_decode = fn (s: str) -> _my_pct_loop s 0 (str_len s) "";
+
+let mysql_parse_url = fn (url: str) ->
+  let rest =
+    if str_starts_with url "mysql://" then _my_slice url 8
+    else url in
+
+  let at_pos = str_index_of rest "@" in
+  let (userinfo, hostpart) =
+    if at_pos < 0 then ("", rest)
+    else (substring rest 0 at_pos, _my_slice rest (at_pos + 1)) in
+
+  let colon_ui = str_index_of userinfo ":" in
+  let (user_raw, password_raw) =
+    if colon_ui < 0 then (userinfo, "")
+    else (substring userinfo 0 colon_ui, _my_slice userinfo (colon_ui + 1)) in
+  let user = _my_pct_decode user_raw in
+  let password = _my_pct_decode password_raw in
+
+  let slash = str_index_of hostpart "/" in
+  let (hp, dbpart) =
+    if slash < 0 then (hostpart, "")
+    else (substring hostpart 0 slash, _my_slice hostpart (slash + 1)) in
+
+  // Bracketed IPv6 (`[::1]:PORT`) — same shape as pg.
+  let (host, port) =
+    if str_starts_with hp "[" then
+      let close_pos = str_index_of hp "]" in
+      if close_pos < 0 then (hp, 3306)
+      else
+        let addr = substring hp 1 close_pos in
+        let after = _my_slice hp (close_pos + 1) in
+        if str_starts_with after ":" then
+          (addr, int_of_str (_my_slice after 1))
+        else (addr, 3306)
+    else
+      let colon_hp = str_index_of hp ":" in
+      if colon_hp < 0 then
+        ((if str_eq hp "" then "127.0.0.1" else hp), 3306)
+      else
+        (substring hp 0 colon_hp, int_of_str (_my_slice hp (colon_hp + 1))) in
+
+  let qmark = str_index_of dbpart "?" in
+  let db_raw = if qmark < 0 then dbpart else substring dbpart 0 qmark in
+  let db = _my_pct_decode db_raw in
+
+  (host, port, user, password, db)
+  ;
+
+let mysql_connect_url = fn (url: str) ->
+  let (host, port, user, password, db) = mysql_parse_url url in
+  mysql_connect host port user password db
+  ;
+
 // ---- Cleanup ---------------------------------------------------------
 //
 // COM_QUIT (0x01) is a single-byte payload with sequence 0; the server
