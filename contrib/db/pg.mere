@@ -380,6 +380,82 @@ let pg_val_or = fn (v: str option) -> fn (dflt: str) ->
   | Some s -> s
   ;
 
+// ---- RowDescription parsing ---------------------------------------------
+//
+// Payload layout (per PG docs, message type 'T'):
+//   int16 num_columns
+//   repeat per column:
+//     cstring name          (NUL-terminated ASCII)
+//     int32   table_oid     (0 if not from a table)
+//     int16   attr_num      (0 if not from a table)
+//     int32   type_oid      ← what callers care about
+//     int16   type_size     (negative = variable length)
+//     int32   type_modifier
+//     int16   format_code   (0 = text, 1 = binary)
+//
+// We surface `(column_name, type_oid)` pairs; the rest is available in
+// the wire format if a later revision needs it but adds no value now.
+
+// Read a NUL-terminated cstring starting at buf+off. Returns the offset
+// AFTER the NUL — caller advances past both name bytes and terminator.
+let rec _find_nul = fn (buf: int) -> fn (off: int) ->
+  if mem_get_u8 buf off == 0 then off
+  else _find_nul buf (off + 1)
+  ;
+
+let rec _parse_row_desc_cols = fn (payload: int) -> fn (off: int)
+                            -> fn (remaining: int)
+                            -> fn (acc: (str * int) list) ->
+  if remaining == 0 then acc
+  else
+    let name_end = _find_nul payload off in
+    let name = mem_to_str (payload + off) (name_end - off) in
+    // After the NUL: table_oid(4) + attr_num(2) = 6 bytes, then type_oid.
+    let type_oid_off = name_end + 1 + 6 in
+    let type_oid = mem_get_u32be payload type_oid_off in
+    // type_oid(4) + type_size(2) + type_modifier(4) + format(2) = 12 bytes
+    let next = type_oid_off + 12 in
+    _parse_row_desc_cols payload next (remaining - 1)
+                         (Cons ((name, type_oid), acc))
+  ;
+
+let rec _rev_cols = fn (xs: (str * int) list) -> fn (acc: (str * int) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rev_cols t (Cons (h, acc))
+  ;
+
+let _parse_row_desc = fn (payload: int) ->
+  let n = mem_get_u16be payload 0 in
+  _rev_cols (_parse_row_desc_cols payload 2 n Nil) Nil
+  ;
+
+// OID → conventional PG type name, mirroring what `psql \dT+` would show.
+// Everything unknown becomes "oid=<n>" — a hex-ish leaf that lets callers
+// pattern-match without pretending we understand extension types.
+let pg_type_name = fn (oid: int) ->
+  if oid == 16 then "bool"
+  else if oid == 17 then "bytea"
+  else if oid == 20 then "int8"
+  else if oid == 21 then "int2"
+  else if oid == 23 then "int4"
+  else if oid == 25 then "text"
+  else if oid == 26 then "oid"
+  else if oid == 114 then "json"
+  else if oid == 700 then "float4"
+  else if oid == 701 then "float8"
+  else if oid == 1042 then "bpchar"
+  else if oid == 1043 then "varchar"
+  else if oid == 1082 then "date"
+  else if oid == 1083 then "time"
+  else if oid == 1114 then "timestamp"
+  else if oid == 1184 then "timestamptz"
+  else if oid == 1700 then "numeric"
+  else if oid == 2950 then "uuid"
+  else if oid == 3802 then "jsonb"
+  else "oid=" ++ show oid
+  ;
+
 // ---- Simple query -------------------------------------------------------
 //
 // After sending Query('Q'), the server streams:
@@ -390,18 +466,24 @@ let pg_val_or = fn (v: str option) -> fn (dflt: str) ->
 // On error, E arrives instead; we print it and return the rows we did
 // manage to collect.
 
-let rec _collect_rows = fn (fd: int) -> fn (acc: (str option list) list) ->
+// Read pending server messages until ReadyForQuery. Captures both
+// RowDescription (columns) and DataRow (rows). Rows come back reversed
+// (Cons-prepended); caller flips.
+let rec _collect_result = fn (fd: int) -> fn (cols: (str * int) list)
+                       -> fn (acc: (str option list) list) ->
   let (mtype, payload, plen) = _recv_msg fd in
-  if mtype < 0 then acc
-  else if mtype == _MSG_READY then acc
+  if mtype < 0 then (cols, acc)
+  else if mtype == _MSG_READY then (cols, acc)
   else if mtype == _MSG_DATA_ROW then
-    _collect_rows fd (Cons (_parse_data_row payload, acc))
+    _collect_result fd cols (Cons (_parse_data_row payload, acc))
+  else if mtype == _MSG_ROW_DESC then
+    _collect_result fd (_parse_row_desc payload) acc
   else if mtype == _MSG_ERROR then
     let _ = print ("pg query error: " ++ mem_to_str payload plen) in
-    _collect_rows fd acc
+    _collect_result fd cols acc
   else
-    // T (RowDescription) / C (CommandComplete) / N (Notice) — ignored.
-    _collect_rows fd acc
+    // C (CommandComplete) / N (Notice) / 1/2 (Parse/Bind complete) — skip.
+    _collect_result fd cols acc
   ;
 
 // Reverse a (str option list) list. Kept at module scope because let-rec
@@ -413,9 +495,21 @@ let rec _rev_rows = fn (xs: (str option list) list)
   | Cons (h, t) -> _rev_rows t (Cons (h, acc))
   ;
 
+// Rows-only entry points (unchanged public contract). Drop the columns.
 let pg_query = fn (fd: int) -> fn (sql: str) ->
   let _ = _send_query fd sql in
-  _rev_rows (_collect_rows fd Nil) Nil
+  let (_, rev_rows) = _collect_result fd Nil Nil in
+  _rev_rows rev_rows Nil
+  ;
+
+// Metadata-carrying variant: returns (columns, rows) where columns is
+// `(name, type_oid) list` in select-list order. Non-SELECT statements
+// (INSERT / UPDATE without RETURNING, DDL, …) surface as `(Nil, Nil)`
+// since the server sends CommandComplete without a prior RowDescription.
+let pg_query_meta = fn (fd: int) -> fn (sql: str) ->
+  let _ = _send_query fd sql in
+  let (cols, rev_rows) = _collect_result fd Nil Nil in
+  (cols, _rev_rows rev_rows Nil)
   ;
 
 // ---- Extended query (Parse / Bind / Execute / Sync) ---------------------
@@ -549,10 +643,21 @@ let pg_query_params = fn (fd: int) -> fn (sql: str) -> fn (params: str option li
   let _ = _send_execute fd 0 in
   let _ = _send_sync fd in
   // Server sends ParseComplete + BindComplete + [RowDescription] + DataRows
-  // + CommandComplete + ReadyForQuery. _collect_rows already skips
-  // everything except DataRow / Error / Ready, so it handles the leading
-  // '1' / '2' completion messages transparently.
-  _rev_rows (_collect_rows fd Nil) Nil
+  // + CommandComplete + ReadyForQuery. _collect_result skips the completion
+  // messages transparently.
+  let (_, rev_rows) = _collect_result fd Nil Nil in
+  _rev_rows rev_rows Nil
+  ;
+
+// Metadata variant of the parameterized query (see pg_query_meta).
+let pg_query_params_meta = fn (fd: int) -> fn (sql: str)
+                        -> fn (params: str option list) ->
+  let _ = _send_parse fd "" sql in
+  let _ = _send_bind fd params in
+  let _ = _send_execute fd 0 in
+  let _ = _send_sync fd in
+  let (cols, rev_rows) = _collect_result fd Nil Nil in
+  (cols, _rev_rows rev_rows Nil)
   ;
 
 // ---- Cleanup ------------------------------------------------------------

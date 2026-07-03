@@ -1,0 +1,77 @@
+// examples/db_types.mere — inspect PG column types via RowDescription.
+//
+// Runs a SELECT that exercises a variety of common Postgres types, then
+// prints the column name + inferred type name alongside each value. This
+// is the metadata surface that pg_query_meta / pg_query_params_meta
+// expose — callers can use it to route values into typed variants or
+// custom decoders without hard-coding column offsets.
+//
+// Setup (trust mode, no auth):
+//   docker run -d --name mere-pg-types -p 15438:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_types.mere > /tmp/dbt.wat
+//   wat2wasm --enable-tail-call /tmp/dbt.wat -o /tmp/dbt.wasm
+//   node scripts/run_wasm.js /tmp/dbt.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec zip_cols_vals = fn (cs: (str * int) list) -> fn (vs: str option list) ->
+  match cs with
+  | Nil -> ""
+  | Cons ((cname, coid), crest) ->
+    match vs with
+    | Nil -> ""
+    | Cons (v, vrest) ->
+      let vshow = pg_val_or v "NULL" in
+      cname ++ "(" ++ pg_type_name coid ++ ")=" ++ vshow ++
+        (match crest with
+         | Nil -> ""
+         | _ -> "  ") ++
+      zip_cols_vals crest vrest
+  ;
+
+let rec print_typed_rows = fn (cs: (str * int) list)
+                        -> fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (zip_cols_vals cs r) in
+    print_typed_rows cs rest
+  ;
+
+let rec print_cols = fn (cs: (str * int) list) ->
+  match cs with
+  | Nil -> ()
+  | Cons ((name, oid), rest) ->
+    let _ = print ("  " ++ name ++ " : " ++ pg_type_name oid ++
+      " (oid=" ++ show oid ++ ")") in
+    print_cols rest
+  ;
+
+let fd = pg_connect "127.0.0.1" 15438 "postgres" "" "postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+  let _ = print "connected" in
+
+  // Exercise a variety of types in one SELECT so the output shows the
+  // OID → name mapping working across the common cases.
+  let sql =
+    "SELECT 42::int AS n, 'hello'::text AS greeting, true::bool AS flag, "
+    ++ "3.14::float8 AS pi, '2026-07-03'::date AS today, "
+    ++ "'a1b2c3d4-e5f6-7890-abcd-ef1234567890'::uuid AS ident, "
+    ++ "'\{\"k\": 1}'::jsonb AS meta, NULL::int AS missing" in
+  let (cols, rows) = pg_query_meta fd sql in
+
+  let _ = print "-- columns:" in
+  let _ = print_cols cols in
+
+  let _ = print "-- row:" in
+  let _ = print_typed_rows cols rows in
+
+  let _ = pg_close fd in
+  ()
