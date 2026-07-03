@@ -1,0 +1,85 @@
+// examples/db_copy_out.mere — bulk read via COPY TO STDOUT.
+//
+// Companion to db_copy.mere. Where pg_copy_from streams rows *into*
+// PG in one round trip, pg_copy_to streams them *out* — useful for
+// dumping large tables, feeding ETL pipelines, or just faster than a
+// plain SELECT for known-good text data.
+//
+// Demo:
+//   1. Load a table via pg_copy_from (proven path from db_copy.mere).
+//   2. Read it back via pg_copy_to with a plain table target.
+//   3. Read a subset via `COPY (SELECT …) TO STDOUT` — the subquery
+//      form is the ergonomic escape hatch when you want a WHERE clause
+//      or a projection without CREATE TEMP TABLE.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-copyout -p 15447:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_copy_out.mere > /tmp/dbco.wat
+//   wat2wasm --enable-tail-call /tmp/dbco.wat -o /tmp/dbco.wasm
+//   node scripts/run_wasm.js /tmp/dbco.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let rec _list_len = fn (xs) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + _list_len t
+  ;
+
+let fd = pg_connect_url "postgres://postgres@127.0.0.1:15447/postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+
+  let _ = pg_query fd "DROP TABLE IF EXISTS people" in
+  let _ = pg_query fd "CREATE TABLE people (id int, name text, note text)" in
+
+  // Seed with pg_copy_from — includes edge chars and a NULL note so we
+  // can verify the escape round trip end-to-end.
+  let seed =
+    Cons (Cons (Some "1", Cons (Some "alice",       Cons (Some "first admin",  Nil))),
+    Cons (Cons (Some "2", Cons (Some "bob\ttabby",  Cons (None,                 Nil))),
+    Cons (Cons (Some "3", Cons (Some "carol",       Cons (Some "note\nsecond", Nil))),
+    Nil))) in
+  let n_in = pg_copy_from fd "people"
+    (Cons ("id", Cons ("name", Cons ("note", Nil))))
+    seed in
+  let _ = print ("seed rows: " ++ show n_in) in
+
+  // ---- full table -------------------------------------------------
+  let _ = print "" in
+  let _ = print "== pg_copy_to plain table ==" in
+  let all_rows = pg_copy_to fd "COPY people TO STDOUT" in
+  let _ = print ("row count: " ++ show (_list_len all_rows)) in
+  let _ = print_rows all_rows in
+
+  // ---- subquery ---------------------------------------------------
+  let _ = print "" in
+  let _ = print "== pg_copy_to subquery (id > 1) ==" in
+  let filtered = pg_copy_to fd
+    "COPY (SELECT id, name FROM people WHERE id > 1 ORDER BY id) TO STDOUT" in
+  let _ = print ("row count: " ++ show (_list_len filtered)) in
+  let _ = print_rows filtered in
+
+  let _ = pg_close fd in
+  ()
