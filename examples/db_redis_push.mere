@@ -1,0 +1,85 @@
+// examples/db_redis_push.mere — RESP3 server pushes via CLIENT TRACKING.
+//
+// The reader supports every RESP3 wire type — this demo exercises the
+// two most useful "rare" ones: `RRPush` (out-of-band messages) and
+// `RRAttr` (metadata prefix that wraps another reply). The easiest way
+// to trigger a real push from a stock Redis is CLIENT TRACKING:
+//
+//   HELLO 3
+//   CLIENT TRACKING ON
+//   GET some_key           ← the server now watches this key
+//   (another client) SET some_key new_value
+//   → server pushes `>2\r\n+invalidate\r\n*1\r\n$8\r\nsome_key\r\n`
+//     to us on the next drain of the socket
+//
+// Two connections:
+//   * tracker  — HELLO 3, CLIENT TRACKING ON, GETs a key, waits
+//   * mutator  — SETs the same key, causing tracker to receive the push
+//
+// Setup:
+//   docker run -d --name mere-redis-push -p 15605:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_push.mere > /tmp/dbrp.wat
+//   wat2wasm --enable-tail-call /tmp/dbrp.wat -o /tmp/dbrp.wasm
+//   node scripts/run_wasm.js /tmp/dbrp.wasm
+
+import "../contrib/db/redis.mere";
+
+let show_reply = fn (label: str) -> fn (r) ->
+  print (label ++ ": " ++ redis_show r)
+  ;
+
+let tracker = redis_connect "127.0.0.1" 15605 in
+let mutator = redis_connect "127.0.0.1" 15605 in
+if tracker < 0 then let _ = print "tracker connect failed" in ()
+else if mutator < 0 then let _ = print "mutator connect failed" in ()
+else
+
+  let _ = redis_hello3 tracker in
+  let _ = redis_hello3 mutator in
+  let _ = redis_command tracker (Cons ("FLUSHDB", Nil)) in
+
+  // Seed a value so the tracker's GET succeeds and registers watch.
+  let _ = redis_command tracker
+    (Cons ("SET", Cons ("watched", Cons ("orig", Nil)))) in
+
+  // Enable client-side tracking on the tracker connection. The reply
+  // is a simple string in RESP3.
+  let _ = show_reply "CLIENT TRACKING ON"
+    (redis_command tracker
+      (Cons ("CLIENT", Cons ("TRACKING", Cons ("ON", Nil))))) in
+
+  // First GET registers the key for tracking.
+  let _ = show_reply "GET watched (register)"
+    (redis_command tracker (Cons ("GET", Cons ("watched", Nil)))) in
+
+  // Mutator changes the key — this triggers Redis to send an
+  // invalidation push to the tracker's socket.
+  let _ = redis_command mutator
+    (Cons ("SET", Cons ("watched", Cons ("changed", Nil)))) in
+  let _ = print "" in
+  let _ = print "mutator: SET watched -> changed" in
+
+  // Drain a reply on the tracker connection — should be an RRPush of
+  // shape ["invalidate", ["watched"]].
+  let _ = print "" in
+  let _ = print "tracker: waiting for invalidation push (up to 500ms)…" in
+  let pushed = redis_wait_reply tracker 500 in
+  let _ = show_reply "recv" pushed in
+
+  // Extract the push list via the RESP3 typed extractor.
+  // The invalidation push arrives as
+  //     [RRBulk (Some "invalidate"), RRArr [RRBulk (Some "<key>"), …]]
+  // — RESP3 always uses bulk strings for the payload, even though the
+  // wire hex might look like a simple string.
+  let _ = match redis_as_push pushed with
+          | Some (Cons (RRBulk (Some tag), Cons (RRArr keys, _))) ->
+            print ("  → parsed push: tag=" ++ tag ++
+              ", keys=" ++ redis_show (RRArr keys))
+          | Some _ -> print "  → push had unexpected structure"
+          | None -> print "  → not a push reply" in
+
+  let _ = redis_close tracker in
+  let _ = redis_close mutator in
+  ()

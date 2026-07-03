@@ -62,7 +62,17 @@ type redis_reply =
   | RRBool   of bool                           // `#t\r\n` / `#f\r\n`
   | RRMap    of ((redis_reply * redis_reply) list)
                                                // `%N\r\n` + 2N replies
-  | RRSet    of (redis_reply list);            // `~N\r\n` + N replies
+  | RRSet    of (redis_reply list)             // `~N\r\n` + N replies
+  | RRBigNum of str                            // `(NNN\r\n` — arbitrary
+                                               //   precision int as text
+  | RRVerbatim of (str * str)                  // `=LEN\r\ntxt:body\r\n`
+                                               //   (format, body)
+  | RRPush   of (redis_reply list)             // `>N\r\n` + N replies
+                                               //   (out-of-band push)
+  | RRAttr   of (((redis_reply * redis_reply) list) * redis_reply);
+                                               // `|N\r\n` — metadata
+                                               //   map followed by an
+                                               //   inner reply
 
 // ---- Low-level byte reader --------------------------------------------
 
@@ -145,6 +155,26 @@ let rec _r_read_reply = fn (fd: int) ->
     let cnt = int_of_str (_r_read_line fd) in
     if cnt < 0 then RRSet Nil
     else RRSet (_r_rev_arr (_r_read_array_elts fd cnt Nil) Nil)
+  else if ty == 40 then                                    // '(' big num (RESP3)
+    RRBigNum (_r_read_line fd)
+  else if ty == 61 then                                    // '=' verbatim (RESP3)
+    let len = int_of_str (_r_read_line fd) in
+    if len < 4 then RRVerbatim ("", "")
+    else
+      // Layout: `<3-char format>:<body>` — total bytes = `len`.
+      let full = _r_read_bulk fd len in
+      let fmt = substring full 0 3 in
+      let body = substring full 4 len in
+      RRVerbatim (fmt, body)
+  else if ty == 62 then                                    // '>' push (RESP3)
+    let cnt = int_of_str (_r_read_line fd) in
+    if cnt < 0 then RRPush Nil
+    else RRPush (_r_rev_arr (_r_read_array_elts fd cnt Nil) Nil)
+  else if ty == 124 then                                   // '|' attribute (RESP3)
+    let cnt = int_of_str (_r_read_line fd) in
+    let attrs = if cnt < 0 then Nil
+                else _r_rev_pairs (_r_read_map_pairs fd cnt Nil) Nil in
+    RRAttr (attrs, _r_read_reply fd)
   else
     RRErr ("unknown RESP type byte " ++ show ty)
 
@@ -465,6 +495,34 @@ let redis_is_null = fn (r) ->
   | _ -> false
   ;
 
+let redis_as_bignum = fn (r) ->
+  match r with
+  | RRBigNum s -> Some s
+  | _ -> None
+  ;
+
+// (format, body) — verbatim strings carry a 3-char format hint like
+// "txt", "mkd" that tells the caller how to render the payload.
+let redis_as_verbatim = fn (r) ->
+  match r with
+  | RRVerbatim v -> Some v
+  | _ -> None
+  ;
+
+let redis_as_push = fn (r) ->
+  match r with
+  | RRPush xs -> Some xs
+  | _ -> None
+  ;
+
+// Peel every `RRAttr` layer off a reply. Metadata is discarded — use
+// pattern-matching on the raw variant if you need to inspect attrs.
+let rec redis_unwrap_attr = fn (r) ->
+  match r with
+  | RRAttr (_, inner) -> redis_unwrap_attr inner
+  | _ -> r
+  ;
+
 let redis_is_ok = fn (r) ->
   match r with
   | RRStr s -> str_eq s "OK"
@@ -486,6 +544,11 @@ let rec redis_show = fn (r) ->
   | RRBool b -> if b then "true" else "false"
   | RRMap kvs -> "\{" ++ redis_show_map kvs true ++ "}"
   | RRSet xs -> "#\{" ++ redis_show_arr xs true ++ "}"
+  | RRBigNum s -> s ++ "n"
+  | RRVerbatim (fmt, body) -> "<" ++ fmt ++ ":" ++ body ++ ">"
+  | RRPush xs -> "push[" ++ redis_show_arr xs true ++ "]"
+  | RRAttr (attrs, inner) ->
+    "@\{" ++ redis_show_map attrs true ++ "} " ++ redis_show inner
 
 and redis_show_arr = fn (xs) -> fn (first: bool) ->
   match xs with
