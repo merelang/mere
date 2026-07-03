@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere todo app</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<h1>Mere todo app</h1>
+<p class="subtitle">signup + login + persistent todos, all in pure Mere.
+Session cookies, hashed passwords, rate-limited login, JSON body,
+access log with request IDs — the full <code>contrib/http/*</code>
+stack.</p>
+
+<section id="auth">
+  <div id="who"></div>
+
+  <div id="login-box">
+    <h2>login / signup</h2>
+    <input id="user" placeholder="user" value="alice">
+    <input id="pass" type="password" placeholder="pass" value="secret">
+    <button id="btn-signup">signup</button>
+    <button id="btn-login">login</button>
+  </div>
+
+  <div id="logout-box" hidden>
+    <button id="btn-logout">logout</button>
+  </div>
+</section>
+
+<section id="todos" hidden>
+  <h2>your todos</h2>
+  <div>
+    <input id="new-text" placeholder="what needs doing?">
+    <button id="btn-add">add</button>
+  </div>
+  <ul id="todo-list"></ul>
+</section>
+
+<pre id="log"></pre>
