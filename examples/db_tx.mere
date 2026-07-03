@@ -1,0 +1,94 @@
+// examples/db_tx.mere — atomic multi-statement transactions via pg_tx.
+//
+// pg_tx runs `BEGIN`, calls the body with a transactional fd, and then
+// runs either `COMMIT` (body returned `Some _`) or `ROLLBACK` (body
+// returned `None`). Since Mere doesn't have exceptions, callers signal
+// commit / rollback intent through the return value.
+//
+// Demo:
+//   1. Commit path: inserts two rows atomically, verifies both landed.
+//   2. Rollback path: same shape but returns None mid-way, verifies
+//      neither row is present after the tx.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-tx -p 15441:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_tx.mere > /tmp/dbt.wat
+//   wat2wasm --enable-tail-call /tmp/dbt.wat -o /tmp/dbt.wasm
+//   node scripts/run_wasm.js /tmp/dbt.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let insert_row = fn (tx: int) -> fn (id: str) -> fn (name: str) ->
+  pg_query_params tx
+    "INSERT INTO accounts VALUES ($1::int, $2)"
+    (Cons (Some id, Cons (Some name, Nil)))
+  ;
+
+let count_rows = fn (fd: int) ->
+  let rows = pg_query fd "SELECT count(*)::text FROM accounts" in
+  match rows with
+  | Cons (Cons (h, _), _) -> pg_val_or h "?"
+  | _ -> "?"
+  ;
+
+let fd = pg_connect_url "postgres://postgres@127.0.0.1:15441/postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+  let _ = pg_query fd "DROP TABLE IF EXISTS accounts" in
+  let _ = pg_query fd "CREATE TABLE accounts (id int, name text)" in
+
+  // ---- COMMIT path -----------------------------------------------------
+  let _ = print "== commit path ==" in
+  let result_commit = pg_tx fd (fn (tx) ->
+    let _ = insert_row tx "1" "alice" in
+    let _ = insert_row tx "2" "bob" in
+    Some "both rows inserted") in
+  let _ = print ("pg_tx returned: " ++
+    (match result_commit with
+     | Some s -> "Some \"" ++ s ++ "\""
+     | None -> "None")) in
+  let _ = print ("after commit, count = " ++ count_rows fd) in
+
+  // ---- ROLLBACK path ---------------------------------------------------
+  let _ = print "" in
+  let _ = print "== rollback path ==" in
+  let result_rb = pg_tx fd (fn (tx) ->
+    let _ = insert_row tx "3" "carol" in
+    let _ = insert_row tx "4" "dave" in
+    // Something went wrong (app-level), abort.
+    None) in
+  let _ = print ("pg_tx returned: " ++
+    (match result_rb with
+     | Some s -> "Some \"" ++ s ++ "\""
+     | None -> "None")) in
+  let _ = print ("after rollback, count = " ++ count_rows fd ++
+    "  (should still be 2 — carol/dave discarded)") in
+
+  let _ = print "" in
+  let _ = print "-- final table contents:" in
+  let rows = pg_query fd "SELECT id::text, name FROM accounts ORDER BY id" in
+  let _ = print_rows rows in
+
+  let _ = pg_close fd in
+  ()
