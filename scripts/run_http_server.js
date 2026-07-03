@@ -10,6 +10,7 @@
 const fs = require("fs");
 const path = require("path");
 const { makeHttpGlue } = require("../contrib/http/http.glue.js");
+const { makePgEnv } = require("./pg_env.js");
 
 if (process.argv.length < 3) {
   console.error("usage: node run_http_server.js <path-to-wasm>");
@@ -266,6 +267,16 @@ const wasmPath = process.argv[2];
     http_fetch_status: () => lastFetchStatus,
     ...httpGlue,
   };
+
+  // Merge the shared pg env (TCP sync + byte-buffer primitives + crypto).
+  // Uses the same bumpAlloc so extern-returned strings live on the Mere
+  // heap. pg_env's crypto entries (sha256_hex / hmac_sha256_hex / …)
+  // OVERWRITE the http-server's existing versions, but the implementations
+  // are byte-for-byte identical so the behavior stays the same.
+  Object.assign(env, makePgEnv({
+    getMemory: () => memory.buffer,
+    bumpAlloc: (n) => bumpAlloc(n),
+  }));
 
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
   memory = instance.exports.memory;
