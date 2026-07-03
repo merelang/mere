@@ -427,29 +427,36 @@ let pg_query = fn (fd: int) -> fn (sql: str) ->
 //     column context in most cases; explicit casts (`$1::int`) work
 //     everywhere.
 //   - Requests all result columns as text.
-//   - Doesn't support NULL parameters — pass "" instead (this is
-//     semantically different! for a real NULL, the length prefix must
-//     be -1, which the (str list) API can't express).
+//   - Parameters use `str option`: `Some s` sends `s` verbatim as text,
+//     `None` sends the length -1 sentinel that PG interprets as SQL
+//     NULL. Result rows still surface NULLs as "" — the (str list)
+//     shape can't express the distinction on the way back; that's a
+//     future API break.
 
-let rec _list_len = fn (xs: str list) ->
+let rec _list_len = fn (xs) ->
   match xs with
   | Nil -> 0
   | Cons (_, t) -> 1 + _list_len t
   ;
 
-let rec _sum_lens = fn (xs: str list) ->
+let rec _sum_param_lens = fn (xs: str option list) ->
   match xs with
   | Nil -> 0
-  | Cons (h, t) -> str_len h + _sum_lens t
+  | Cons (None, t) -> _sum_param_lens t
+  | Cons (Some s, t) -> str_len s + _sum_param_lens t
   ;
 
 // Serialize each param as (int32 length, bytes). Returns the offset
 // after the last param — caller uses it to place the trailing "num
-// result format codes" field.
-let rec _write_params = fn (buf: int) -> fn (off: int) -> fn (ps: str list) ->
+// result format codes" field. Length -1 (0xFFFFFFFF as u32) marks
+// SQL NULL, per the PG protocol; the byte payload is elided.
+let rec _write_params = fn (buf: int) -> fn (off: int) -> fn (ps: str option list) ->
   match ps with
   | Nil -> off
-  | Cons (p, rest) ->
+  | Cons (None, rest) ->
+    let _ = mem_set_u32be buf off (0 - 1) in
+    _write_params buf (off + 4) rest
+  | Cons (Some p, rest) ->
     let plen = str_len p in
     let _ = mem_set_u32be buf off plen in
     let new_off = mem_copy_str buf (off + 4) p in
@@ -475,9 +482,9 @@ let _send_parse = fn (fd: int) -> fn (name: str) -> fn (sql: str) ->
   ;
 
 // Bind ('B') — portal "", stmt "", all params as text, all results as text.
-let _send_bind = fn (fd: int) -> fn (params: str list) ->
+let _send_bind = fn (fd: int) -> fn (params: str option list) ->
   let num_params = _list_len params in
-  let params_bytes = _sum_lens params in
+  let params_bytes = _sum_param_lens params in
   // 4 (len) + 1 (portal "\0") + 1 (stmt "\0")
   //   + 2 (num param fmt codes = 0)
   //   + 2 (num params)
@@ -517,12 +524,16 @@ let _send_sync = fn (fd: int) ->
   tcp_write fd buf 5
   ;
 
-// Public API: parameterized query. Params are strings — pass them as-is
-// (no quoting, no escaping — the wire protocol keeps them out of band).
+// Public API: parameterized query. Params are `str option`s — pass
+// `Some "value"` for a text value or `None` for SQL NULL. No quoting,
+// no escaping needed; the wire protocol keeps values out of band.
 //
 //   pg_query_params fd "SELECT * FROM u WHERE id = $1 AND name = $2"
-//                   (Cons ("42", Cons ("alice", Nil)))
-let pg_query_params = fn (fd: int) -> fn (sql: str) -> fn (params: str list) ->
+//                   (Cons (Some "42", Cons (Some "alice", Nil)))
+//
+//   pg_query_params fd "UPDATE u SET note = $1 WHERE id = $2"
+//                   (Cons (None, Cons (Some "42", Nil)))
+let pg_query_params = fn (fd: int) -> fn (sql: str) -> fn (params: str option list) ->
   let _ = _send_parse fd "" sql in
   let _ = _send_bind fd params in
   let _ = _send_execute fd 0 in
