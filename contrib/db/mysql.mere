@@ -35,6 +35,7 @@ extern fn tcp_read: int -> int -> int -> int;
 extern fn tcp_close: int -> unit;
 extern fn tcp_set_timeout: int -> int -> unit;
 extern fn tcp_starttls: int -> str -> int;
+extern fn tcp_starttls_verified: int -> str -> str -> int;
 extern fn str_ptr: str -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_set_u8: int -> int -> int -> unit;
@@ -507,8 +508,13 @@ let _my_send_ssl_request = fn (fd: int) ->
   _my_send_packet fd 1 buf plen
   ;
 
-let mysql_connect_ssl = fn (host: str) -> fn (port: int) -> fn (user: str)
-                     -> fn (password: str) -> fn (db: str) ->
+// Shared body between mysql_connect_ssl (accept-anything) and
+// mysql_connect_ssl_verify (verified). `do_upgrade` is a caller-
+// supplied function that takes fd + host and returns the tls_starttls
+// return code (0 on success, non-0 on failure).
+let _my_connect_ssl_with = fn (host: str) -> fn (port: int) -> fn (user: str)
+                        -> fn (password: str) -> fn (db: str)
+                        -> fn (do_upgrade) ->
   let fd = tcp_connect host port in
   if fd < 1 then
     let _ = print ("mysql: tcp connect failed to " ++ host ++ ":" ++ show port) in
@@ -526,17 +532,27 @@ let mysql_connect_ssl = fn (host: str) -> fn (port: int) -> fn (user: str)
         let _ = tcp_close fd in (0 - 1)
       else
         let (salt, plugin) = _my_parse_handshake payload plen in
-        // 1. Ask the server for TLS.
         let _ = _my_send_ssl_request fd in
-        // 2. Upgrade the socket in place — Node's tls.connect wraps
-        //    the fd and swaps our worker's socket handle.
-        if tcp_starttls fd host != 0 then
-          let _ = print "mysql: SSL required but TLS handshake failed" in
+        if do_upgrade fd host != 0 then
+          let _ = print "mysql: TLS handshake failed" in
           let _ = tcp_close fd in (0 - 1)
         else
-          // 3. Now speak the full HandshakeResponse41 over the
-          //    encrypted stream, at seq=2 (since SSL Request took 1).
           _my_finish_auth fd 2 _my_caps_ssl user password db salt plugin
+  ;
+
+let mysql_connect_ssl = fn (host: str) -> fn (port: int) -> fn (user: str)
+                     -> fn (password: str) -> fn (db: str) ->
+  _my_connect_ssl_with host port user password db
+    (fn (fd: int) -> fn (h: str) -> tcp_starttls fd h)
+  ;
+
+// Verified variant. `ca_pem` may be empty (fall back to Node's built-
+// in trust store) or a PEM-encoded custom CA.
+let mysql_connect_ssl_verify = fn (host: str) -> fn (port: int) -> fn (user: str)
+                            -> fn (password: str) -> fn (db: str)
+                            -> fn (ca_pem: str) ->
+  _my_connect_ssl_with host port user password db
+    (fn (fd: int) -> fn (h: str) -> tcp_starttls_verified fd h ca_pem)
   ;
 
 // ---- COM_QUERY -------------------------------------------------------
@@ -1119,7 +1135,10 @@ let mysql_parse_url = fn (url: str) ->
 
 let mysql_connect_url = fn (url: str) ->
   let (host, port, user, password, db) = mysql_parse_url url in
-  if str_contains url "ssl=true" || str_contains url "sslmode=require" then
+  if str_contains url "sslmode=verify-full" ||
+     str_contains url "sslmode=verify-ca" then
+    mysql_connect_ssl_verify host port user password db ""
+  else if str_contains url "ssl=true" || str_contains url "sslmode=require" then
     mysql_connect_ssl host port user password db
   else
     mysql_connect host port user password db

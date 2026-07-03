@@ -1,0 +1,91 @@
+// examples/db_ssl_verify.mere — TLS with certificate-chain verification.
+//
+// Extends db_ssl.mere. The accept-anything path (rejectUnauthorized:
+// false) is fine for local dev but leaks connections to any MITM
+// presenting a valid-looking cert. This demo shows three levels of
+// verification:
+//
+//   1. sslmode=require       — encrypted, but accept any cert (baseline)
+//   2. sslmode=verify-full   — reject self-signed cert (no matching CA)
+//   3. pg_connect_ssl_verify with a custom CA PEM → succeeds again
+//
+// Setup — reuse the self-signed cert generated for db_ssl.mere:
+//   mkdir -p /tmp/mere-pg-ssl-certs && cd /tmp/mere-pg-ssl-certs
+//   openssl req -new -x509 -days 365 -nodes -text \
+//     -out server.crt -keyout server.key -subj "/CN=localhost"
+//   chmod 600 server.key
+//   docker run -d --name mere-pg-ssl-v -p 15553:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
+//     -v /tmp/mere-pg-ssl-certs/server.crt:/etc/ssl/server.crt:ro \
+//     -v /tmp/mere-pg-ssl-certs/server.key:/etc/ssl/server.key:ro \
+//     postgres:16 -c ssl=on \
+//       -c ssl_cert_file=/etc/ssl/server.crt \
+//       -c ssl_key_file=/etc/ssl/server.key
+//
+// Usage:
+//   ./mere -w examples/db_ssl_verify.mere > /tmp/dbsv.wat
+//   wat2wasm --enable-tail-call /tmp/dbsv.wat -o /tmp/dbsv.wasm
+//   node scripts/run_wasm.js /tmp/dbsv.wasm
+
+extern fn read_file: str -> str;
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let run_accept = fn (u: unit) ->
+  let _ = print "== sslmode=require (accept any cert) ==" in
+  let fd = pg_connect_url
+    "postgres://postgres@127.0.0.1:15553/postgres?sslmode=require" in
+  if fd < 0 then let _ = print "  unexpected: connect failed" in ()
+  else
+    let _ = print "  connected — server cert accepted without verification" in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let run_verify_system = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== sslmode=verify-full (system CAs — should fail) ==" in
+  let fd = pg_connect_url
+    "postgres://postgres@127.0.0.1:15553/postgres?sslmode=verify-full" in
+  if fd < 0 then let _ = print "  ok: rejected (self-signed cert not in system trust)" in ()
+  else
+    let _ = print "  unexpected: connect succeeded" in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let run_verify_custom_ca = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== pg_connect_ssl_verify with custom CA PEM (should succeed) ==" in
+  let ca = read_file "/tmp/mere-pg-ssl-certs/server.crt" in
+  let fd = pg_connect_ssl_verify "127.0.0.1" 15553 "postgres" "" "postgres" ca in
+  if fd < 0 then let _ = print "  unexpected: connect failed" in ()
+  else
+    let rows = pg_query fd
+      "SELECT ssl::text, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()" in
+    let _ = print "  connected — pg_stat_ssl:" in
+    let _ = print_rows rows in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let _ = run_accept () in
+let _ = run_verify_system () in
+let _ = run_verify_custom_ca () in
+()

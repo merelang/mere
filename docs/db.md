@@ -6,7 +6,7 @@ their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` and
 implemented in Mere itself; the host only exposes low-level TCP and
 crypto primitives. No `npm` packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 22
+The rest of this page walks the stack top-down, then catalogs the 23
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -98,7 +98,8 @@ which live in `contrib/db/pg_pool.mere`.
 |---|---|---|
 | `pg_connect` | `host -> port -> user -> pw -> db -> fd` | trust / SCRAM auth |
 | `pg_connect_ssl` | same shape | SSLRequest + TLS upgrade before auth |
-| `pg_connect_url` | `str -> fd` | libpq URL; `?sslmode=require` → SSL |
+| `pg_connect_ssl_verify` | + `ca_pem` | verified TLS — reject bad chain |
+| `pg_connect_url` | `str -> fd` | libpq URL; `?sslmode=require\|verify-*` |
 | `pg_parse_url` | `str -> (host, port, user, pw, db)` | IPv6 brackets ok |
 | `pg_close` | `fd -> unit` | sends Terminate + closes tcp |
 
@@ -246,6 +247,7 @@ command needed) and cleans up on process exit.
 | [db_mysql_tx](https://github.com/merelang/mere/blob/main/examples/db_mysql_tx.mere) | `mysql_tx_iso` (REPEATABLE READ) + `mysql_savepoint_scope` nested rollback |
 | [db_ssl](https://github.com/merelang/mere/blob/main/examples/db_ssl.mere) | Postgres over TLS 1.3 — `pg_connect_ssl` + `?sslmode=require` |
 | [db_mysql_ssl](https://github.com/merelang/mere/blob/main/examples/db_mysql_ssl.mere) | MySQL over TLS 1.3 — `mysql_connect_ssl` + `?ssl=true` |
+| [db_ssl_verify](https://github.com/merelang/mere/blob/main/examples/db_ssl_verify.mere) | Cert-chain verification — accept-any / system CAs / custom CA |
 
 ## Limitations and future work
 
@@ -257,12 +259,13 @@ command needed) and cleans up on process exit.
   the single-byte 'S' reply before upgrading; `mysql_connect_ssl`
   sends the 32-byte "SSL Request Packet" with the CLIENT_SSL bit at
   MySQL seq=1, then hands the full HandshakeResponse41 over the
-  encrypted channel at seq=2. `pg_connect_url` / `mysql_connect_url`
-  both auto-select the SSL path when the URL query string contains
-  `sslmode=require` (or `ssl=true` for MySQL). Certificate
-  verification is currently disabled (`rejectUnauthorized: false`) —
-  good for local dev; wiring a CA bundle / hostname verification is a
-  follow-up.
+  encrypted channel at seq=2. The `_verify` variants
+  (`pg_connect_ssl_verify` / `mysql_connect_ssl_verify`) take an
+  optional CA PEM (empty = Node's built-in trust store) and require
+  a valid chain — hostname / expiry / signature failures short-circuit
+  the connect with `-1`. URL parsers auto-select:
+  `sslmode=verify-full` / `sslmode=verify-ca` → verified,
+  `sslmode=require` / `ssl=true` → accept-anything, otherwise plain.
 - **Binary column format**: everything is text. Encoding / decoding
   of PG binary format would let us skip a `pg_type_name`-based decode
   step for hot paths.

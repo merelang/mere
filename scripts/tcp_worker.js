@@ -33,6 +33,7 @@ const OP = {
   CLOSE: 4,
   SET_TIMEOUT: 5,
   STARTTLS: 6,
+  STARTTLS_VERIFIED: 7,
 };
 
 const { sab, dataOffset } = workerData;
@@ -120,35 +121,26 @@ function doConnect(hostLen, port) {
   });
 }
 
-// Upgrade `entry.socket` to a TLS socket in place. All buffered rx bytes
-// have already been drained by the caller before requesting STARTTLS
-// (both PG's SSLRequest / MySQL's SSLRequest expect the client to be
-// caught up), so we just need to hand the existing socket to
-// tls.connect and rewire our listeners onto the new TLSSocket.
-function doStartTls(fd, hostLen) {
+// Shared TLS-upgrade core. `opts` is passed straight to tls.connect
+// once we've added the current socket + a servername derived from
+// the SNI hint / connect-time host. rxBuf must already be drained
+// (both PG's SSLRequest and MySQL's SSL Request Packet expect the
+// client to be caught up on rx before the TLS handshake begins).
+function tlsUpgrade(fd, sniHint, extraOpts) {
   const entry = sockets.get(fd);
   if (!entry || entry.closed) { respond(-1, 0); return; }
 
   const rawSocket = entry.socket;
-  // Detach every listener so tls.connect can consume handshake bytes
-  // without competing with our data handler.
   rawSocket.removeAllListeners();
 
-  // Fresh servername has to come from somewhere — the caller can pass
-  // an SNI value via the STARTTLS request payload (host string in the
-  // shared buffer). If unspecified, fall back to the connect-time host.
-  const sniRaw = hostLen > 0 ? decodeUtf8(0, hostLen) : entry.host;
-  // SNI is defined for DNS names only; per RFC 6066, IP literals are
-  // rejected and Node warns about setting servername to one. Detect
-  // an IPv4/IPv6 literal and drop SNI in that case.
-  const sni = net.isIP(sniRaw) === 0 ? sniRaw : undefined;
+  // SNI is defined for DNS names only (RFC 6066). Drop it if the hint
+  // is an IPv4/IPv6 literal.
+  const sni = net.isIP(sniHint) === 0 ? sniHint : undefined;
 
-  const tlsSocket = tls.connect({
+  const tlsSocket = tls.connect(Object.assign({
     socket: rawSocket,
-    rejectUnauthorized: false,   // MVP: self-signed certs work; production
-                                 // hardening = wire a CA / servername opt.
     servername: sni,
-  });
+  }, extraOpts));
 
   let settled = false;
   tlsSocket.once('secureConnect', () => {
@@ -165,6 +157,36 @@ function doStartTls(fd, hostLen) {
     entry.closed = true;
     respond(-1, 0);
   });
+}
+
+// Original permissive path — accepts self-signed / expired certs.
+// Retained for local-dev / test setups where a full trust chain isn't
+// available.
+function doStartTls(fd, hostLen) {
+  const sni = hostLen > 0 ? decodeUtf8(0, hostLen) : sockets.get(fd)?.host;
+  tlsUpgrade(fd, sni, { rejectUnauthorized: false });
+}
+
+// Verifying variant. Layout of the shared data buffer for this op:
+//   bytes [0 .. hostLen)                       — SNI / hostname
+//   bytes [hostLen .. hostLen + caLen)         — CA bundle PEM (may
+//                                                be empty to fall back
+//                                                to Node's built-in
+//                                                trust store)
+// The 32-bit arg2 carries hostLen in the low 16 bits and caLen in the
+// high 16 bits — fits under 64 KiB each, plenty for typical PEM.
+// arg1 = fd; verify_flag is packed into the ctrl block via ctrl[5].
+function doStartTlsVerified(fd, packed) {
+  const hostLen = packed & 0xffff;
+  const caLen = (packed >>> 16) & 0xffff;
+  const sni = hostLen > 0 ? decodeUtf8(0, hostLen) : sockets.get(fd)?.host;
+  const ca = caLen > 0
+    ? Buffer.from(dataView.buffer, dataView.byteOffset + hostLen, caLen)
+        .toString('utf8')
+    : undefined;
+  const opts = { rejectUnauthorized: true };
+  if (ca) opts.ca = ca;
+  tlsUpgrade(fd, sni, opts);
 }
 
 function doWrite(fd, len) {
@@ -242,8 +264,9 @@ parentPort.on('message', () => {
       case OP.READ:        doRead(arg1, arg2); break;
       case OP.CLOSE:       doClose(arg1); break;
       case OP.SET_TIMEOUT: doSetTimeout(arg1, arg2); break;
-      case OP.STARTTLS:    doStartTls(arg1, arg2); break;
-      default:             respond(-1, 0);
+      case OP.STARTTLS:          doStartTls(arg1, arg2); break;
+      case OP.STARTTLS_VERIFIED: doStartTlsVerified(arg1, arg2); break;
+      default:                   respond(-1, 0);
     }
   } catch (e) {
     respond(-1, 0);
