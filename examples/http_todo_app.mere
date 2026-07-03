@@ -130,19 +130,18 @@ let parse_todo = fn (v: str) ->
     (str_eq d "1", t)
 in
 
-// JSON-escape a value (only " and \). Same shape as log module's helper.
-let rec _json_esc_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
-            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _json_esc_walk s buf (i + 1) n
-in
+// JSON-escape a value (only " and \). Nested rec captures `s` / `buf`.
 let json_esc = fn (s: str) ->
   let buf = strbuf_new () in
-  _json_esc_walk s buf 0 (str_len s)
+  let rec walk = fn (i: int) -> fn (n: int) ->
+    if i >= n then strbuf_to_str buf
+    else
+      let c = char_at s i in
+      let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+              else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+              else let _ = strbuf_push buf c in 0 in
+      walk (i + 1) n in
+  walk 0 (str_len s)
 in
 
 // Render a single todo as a JSON object.
