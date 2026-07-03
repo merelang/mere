@@ -22,14 +22,14 @@
 
 import "../contrib/db/pg.mere";
 
-let rec join_cols = fn (cols: str list) ->
+let rec join_cols = fn (cols: str option list) ->
   match cols with
   | Nil -> ""
-  | Cons (h, Nil) -> h
-  | Cons (h, t) -> h ++ " | " ++ join_cols t
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
   ;
 
-let rec print_rows = fn (rs: (str list) list) ->
+let rec print_rows = fn (rs: (str option list) list) ->
   match rs with
   | Nil -> ()
   | Cons (r, rest) ->
@@ -86,10 +86,12 @@ else
 
   // Verify NULL round-tripped for bob's note. Using IS NULL, not `= NULL`,
   // because `NULL = NULL` in SQL is unknown (not true) — the whole reason
-  // NULL isn't just an empty string.
-  let _ = print "-- rows where note IS NULL:" in
+  // NULL isn't just an empty string. Selecting `note` too so the None
+  // path in the result-side option surfaces (rendered as "NULL" by
+  // join_cols → pg_val_or).
+  let _ = print "-- rows where note IS NULL (selecting note column too):" in
   let rows_null = pg_query fd
-    "SELECT id, name FROM mere_users WHERE note IS NULL ORDER BY id" in
+    "SELECT id, name, note FROM mere_users WHERE note IS NULL ORDER BY id" in
   let _ = print_rows rows_null in
 
   // Confirm the table still exists (hostile input didn't drop it).

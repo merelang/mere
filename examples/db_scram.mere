@@ -20,14 +20,14 @@
 
 import "../contrib/db/pg.mere";
 
-let rec join_cols = fn (cols: str list) ->
+let rec join_cols = fn (cols: str option list) ->
   match cols with
   | Nil -> ""
-  | Cons (h, Nil) -> h
-  | Cons (h, t) -> h ++ " | " ++ join_cols t
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
   ;
 
-let rec print_rows = fn (rs: (str list) list) ->
+let rec print_rows = fn (rs: (str option list) list) ->
   match rs with
   | Nil -> ()
   | Cons (r, rest) ->

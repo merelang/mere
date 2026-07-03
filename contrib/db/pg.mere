@@ -344,30 +344,40 @@ let pg_connect = fn (host: str) -> fn (port: int) -> fn (user: str)
 //
 // DataRow payload: 2-byte column count (BE), then per column:
 //   4-byte length (BE, -1 = NULL) + `length` bytes of text.
-// NULL columns become the string "" (MVP simplification — a real API
-// would use option str).
+// Column values surface as `str option` — `None` for NULL, `Some s` for
+// a text value (even if empty). Callers that don't want NULLs use
+// `pg_val` below to collapse them into a fallback string.
+
+let rec _rev_str_opt = fn (xs: str option list) -> fn (acc: str option list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rev_str_opt t (Cons (h, acc))
+  ;
 
 let rec _parse_data_row_cols = fn (payload: int) -> fn (off: int)
-                            -> fn (remaining: int) -> fn (acc: str list) ->
+                            -> fn (remaining: int) -> fn (acc: str option list) ->
   if remaining == 0 then acc
   else
     let col_len = mem_get_u32be payload off in
     if col_len < 0 then
-      _parse_data_row_cols payload (off + 4) (remaining - 1) (Cons ("", acc))
+      _parse_data_row_cols payload (off + 4) (remaining - 1) (Cons (None, acc))
     else
       let s = mem_to_str (payload + off + 4) col_len in
-      _parse_data_row_cols payload (off + 4 + col_len) (remaining - 1) (Cons (s, acc))
+      _parse_data_row_cols payload (off + 4 + col_len) (remaining - 1) (Cons (Some s, acc))
   ;
 
 let _parse_data_row = fn (payload: int) ->
   let cols = mem_get_u16be payload 0 in
-  // Cons-prepends leave the accumulator reversed — but list_rev isn't
-  // universally available across bootstraps; write our own tiny reverse.
-  let rec rev_help = fn (xs: str list) -> fn (acc: str list) ->
-    match xs with
-    | Nil -> acc
-    | Cons (h, t) -> rev_help t (Cons (h, acc)) in
-  rev_help (_parse_data_row_cols payload 2 cols Nil) Nil
+  _rev_str_opt (_parse_data_row_cols payload 2 cols Nil) Nil
+  ;
+
+// Convenience: unwrap a column value with a default. `pg_val_or v ""`
+// gives the "old" text-only behavior; typical UI code renders NULL as
+// "NULL" or "" depending on context.
+let pg_val_or = fn (v: str option) -> fn (dflt: str) ->
+  match v with
+  | None -> dflt
+  | Some s -> s
   ;
 
 // ---- Simple query -------------------------------------------------------
@@ -380,7 +390,7 @@ let _parse_data_row = fn (payload: int) ->
 // On error, E arrives instead; we print it and return the rows we did
 // manage to collect.
 
-let rec _collect_rows = fn (fd: int) -> fn (acc: (str list) list) ->
+let rec _collect_rows = fn (fd: int) -> fn (acc: (str option list) list) ->
   let (mtype, payload, plen) = _recv_msg fd in
   if mtype < 0 then acc
   else if mtype == _MSG_READY then acc
@@ -394,10 +404,10 @@ let rec _collect_rows = fn (fd: int) -> fn (acc: (str list) list) ->
     _collect_rows fd acc
   ;
 
-// Reverse a (str list) list. Used to flip _collect_rows's Cons-prepended
-// accumulator into the natural forward order. Kept at module scope
-// because let-rec isn't allowed inside expressions (self-host limit).
-let rec _rev_rows = fn (xs: (str list) list) -> fn (acc: (str list) list) ->
+// Reverse a (str option list) list. Kept at module scope because let-rec
+// isn't allowed inside expressions (self-host codegen limit).
+let rec _rev_rows = fn (xs: (str option list) list)
+                 -> fn (acc: (str option list) list) ->
   match xs with
   | Nil -> acc
   | Cons (h, t) -> _rev_rows t (Cons (h, acc))
