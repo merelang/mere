@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 30
+The rest of this page walks the stack top-down, then catalogs the 31
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -258,6 +258,7 @@ command needed) and cleans up on process exit.
 | [db_ssl](https://github.com/merelang/mere/blob/main/examples/db_ssl.mere) | Postgres over TLS 1.3 — `pg_connect_ssl` + `?sslmode=require` |
 | [db_mysql_ssl](https://github.com/merelang/mere/blob/main/examples/db_mysql_ssl.mere) | MySQL over TLS 1.3 — `mysql_connect_ssl` + `?ssl=true` |
 | [db_ssl_verify](https://github.com/merelang/mere/blob/main/examples/db_ssl_verify.mere) | Cert-chain verification — accept-any / system CAs / custom CA |
+| [db_ssl_san](https://github.com/merelang/mere/blob/main/examples/db_ssl_san.mere) | Hostname / SAN matching under verify-full — DNS-only SAN cert rejects 127.0.0.1 |
 | [db_redis](https://github.com/merelang/mere/blob/main/examples/db_redis.mere) | Redis 7 — RESP2 replies (str / err / int / bulk / array), typed extractors |
 | [db_redis_pubsub](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub.mere) | Redis PUB/SUB — SUBSCRIBE + `redis_wait_message` on one connection, PUBLISH on another |
 | [db_redis_pipeline](https://github.com/merelang/mere/blob/main/examples/db_redis_pipeline.mere) | `redis_pipeline` — 100 INCRs in one round trip; mixed SET/GET batch replies in order |
@@ -277,12 +278,17 @@ command needed) and cleans up on process exit.
   sends the 32-byte "SSL Request Packet" with the CLIENT_SSL bit at
   MySQL seq=1, then hands the full HandshakeResponse41 over the
   encrypted channel at seq=2. The `_verify` variants
-  (`pg_connect_ssl_verify` / `mysql_connect_ssl_verify`) take an
-  optional CA PEM (empty = Node's built-in trust store) and require
-  a valid chain — hostname / expiry / signature failures short-circuit
-  the connect with `-1`. URL parsers auto-select:
-  `sslmode=verify-full` / `sslmode=verify-ca` → verified,
-  `sslmode=require` / `ssl=true` → accept-anything, otherwise plain.
+  (`pg_connect_ssl_verify` / `mysql_connect_ssl_verify` /
+  `redis_connect_ssl_verify`) take an optional CA PEM (empty = Node's
+  built-in trust store), require a valid chain, AND run
+  `tls.checkServerIdentity` against the caller-supplied hostname —
+  so a cert without a matching CN or Subject Alternative Name entry
+  short-circuits the connect with `-1` even if the chain itself is
+  valid. Hostname / SAN checks apply to both DNS and IP literal
+  targets (Node's default checker handles `IP:` SAN entries). URL
+  parsers auto-select: `sslmode=verify-full` / `sslmode=verify-ca` →
+  verified, `sslmode=require` / `ssl=true` → accept-anything,
+  otherwise plain.
 - **Binary column format**: everything is text. Encoding / decoding
   of PG binary format would let us skip a `pg_type_name`-based decode
   step for hot paths.

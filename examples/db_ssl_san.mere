@@ -1,0 +1,81 @@
+// examples/db_ssl_san.mere — hostname / SAN matching under verify-full.
+//
+// Now that tcp_starttls_verified runs `tls.checkServerIdentity`
+// against the caller-supplied hostname (or IP), a cert whose SANs
+// don't cover the client's connect target is fail-closed even when
+// the chain itself is valid. Earlier revisions of the driver skipped
+// the hostname step when the connect host was an IP literal, so this
+// case silently succeeded.
+//
+// Two scenarios against a Postgres whose cert has SANs
+// `DNS:pg.example.local, DNS:alt.example.local` (no IP SAN):
+//
+//   1. sslmode=require       — encrypted but chain / hostname unchecked
+//                              → succeeds
+//   2. pg_connect_ssl_verify — chain OK, but 127.0.0.1 is not in the
+//                              cert's SAN list → rejected
+//
+// Setup:
+//   mkdir -p /tmp/mere-san-certs && cd /tmp/mere-san-certs
+//   cat > openssl.cnf <<EOF
+//   [req]
+//   distinguished_name = req_dn
+//   x509_extensions = v3_ext
+//   prompt = no
+//   [req_dn]
+//   CN = pg.example.local
+//   [v3_ext]
+//   subjectAltName = @san
+//   [san]
+//   DNS.1 = pg.example.local
+//   DNS.2 = alt.example.local
+//   EOF
+//   openssl req -new -x509 -days 365 -nodes -text -out server.crt \
+//     -keyout server.key -config openssl.cnf
+//   chmod 600 server.key
+//   docker run -d --name mere-pg-san -p 15554:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
+//     -v /tmp/mere-san-certs/server.crt:/etc/ssl/server.crt:ro \
+//     -v /tmp/mere-san-certs/server.key:/etc/ssl/server.key:ro \
+//     postgres:16 -c ssl=on \
+//     -c ssl_cert_file=/etc/ssl/server.crt \
+//     -c ssl_key_file=/etc/ssl/server.key
+//
+// Usage:
+//   ./mere -w examples/db_ssl_san.mere > /tmp/dbsan.wat
+//   wat2wasm --enable-tail-call /tmp/dbsan.wat -o /tmp/dbsan.wasm
+//   node scripts/run_wasm.js /tmp/dbsan.wasm
+
+extern fn read_file: str -> str;
+
+import "../contrib/db/pg.mere";
+
+let ca = read_file "/tmp/mere-san-certs/server.crt";
+
+let run_permissive = fn (u: unit) ->
+  let _ = print "== sslmode=require (skip SAN check) ==" in
+  let fd = pg_connect_url
+    "postgres://postgres@127.0.0.1:15554/postgres?sslmode=require" in
+  if fd < 0 then let _ = print "  unexpected: connect failed" in ()
+  else
+    let _ = print "  connected — cert chain and hostname not verified" in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let run_verify_should_fail = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== pg_connect_ssl_verify to 127.0.0.1 (SAN has no IP entry) ==" in
+  let fd = pg_connect_ssl_verify "127.0.0.1" 15554 "postgres" "" "postgres" ca in
+  if fd < 0 then
+    let _ = print "  ok: rejected (127.0.0.1 not in cert's DNS-only SAN list)" in ()
+  else
+    let _ = print "  UNEXPECTED: connect succeeded — SAN mismatch was skipped" in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let _ = run_permissive () in
+let _ = run_verify_should_fail () in
+()
