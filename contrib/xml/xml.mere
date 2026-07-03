@@ -1,0 +1,400 @@
+// contrib/xml/xml.mere — minimal XML parser.
+//
+// Pure Mere. Handles what RSS 2.0 / Atom / most real-world XML data
+// documents throw at a parser:
+//
+//   - element tags with optional attributes: <a foo="bar">…</a>
+//   - self-closing tags:                     <br/>
+//   - text content with entity refs:         &amp; &lt; &gt; &quot; &apos; &#N;
+//   - CDATA sections:                        <![CDATA[ raw <>&' ]]>
+//   - comments:                              <!-- skipped -->
+//   - XML / PI directives:                   <?xml …?>  (skipped)
+//   - namespace prefixes in tag names:       treated as part of the name
+//
+// Does NOT handle: DTDs, entity declarations, mixed content quirks
+// beyond the above, or malformed input recovery. On parse failure
+// callers get a `None` back (via `parse_xml`) rather than a partial
+// tree — good enough for a feed reader; not good enough for a
+// browser.
+//
+// Public API (module Xml):
+//   parse_xml       : str -> xml option
+//   xml_name        : xml -> str
+//   xml_attr        : xml -> str -> str          // "" if missing
+//   xml_children    : xml -> xml list
+//   children_named  : xml -> str -> xml list     // direct children by name
+//   first_named     : xml -> str -> xml option
+//   text_content    : xml -> str                 // concatenated text of subtree
+
+module Xml {
+
+type xml =
+  | XElem of str * (str * str) list * xml list
+  | XText of str;
+
+// ---- character helpers --------------------------------------------
+
+let _is_ws = fn (c: str) ->
+  str_eq c " " || str_eq c "\t" || str_eq c "\n" || str_eq c "\r";
+
+let _is_name_start = fn (c: str) ->
+  is_alpha c || str_eq c "_" || str_eq c ":";
+
+let _is_name_cont = fn (c: str) ->
+  is_alpha c || is_digit c || str_eq c "_" || str_eq c ":" || str_eq c "-" || str_eq c ".";
+
+let rec _skip_ws = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then i
+  else if _is_ws (char_at s i) then _skip_ws s (i + 1) n
+  else i;
+
+// ---- entity decoding ----------------------------------------------
+
+// Decode a numeric entity `&#N;` or `&#xHH;` (starting at the char
+// AFTER the `#`). Returns (char, position past `;`).
+let _decode_numeric = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let is_hex = i < n && (str_eq (char_at s i) "x" || str_eq (char_at s i) "X") in
+  let start = if is_hex then i + 1 else i in
+  let rec find_end = fn (j: int) ->
+    if j >= n then j
+    else if str_eq (char_at s j) ";" then j
+    else find_end (j + 1) in
+  let end_pos = find_end start in
+  let digits = substring s start end_pos in
+  let code =
+    if is_hex then
+      // parse hex manually since we may not have int_of_hex
+      let rec hex_walk = fn (k: int) -> fn (acc: int) ->
+        if k >= str_len digits then acc
+        else
+          let d = char_at digits k in
+          let v = if str_eq d "0" then 0 else if str_eq d "1" then 1
+                  else if str_eq d "2" then 2 else if str_eq d "3" then 3
+                  else if str_eq d "4" then 4 else if str_eq d "5" then 5
+                  else if str_eq d "6" then 6 else if str_eq d "7" then 7
+                  else if str_eq d "8" then 8 else if str_eq d "9" then 9
+                  else if str_eq d "a" || str_eq d "A" then 10
+                  else if str_eq d "b" || str_eq d "B" then 11
+                  else if str_eq d "c" || str_eq d "C" then 12
+                  else if str_eq d "d" || str_eq d "D" then 13
+                  else if str_eq d "e" || str_eq d "E" then 14
+                  else if str_eq d "f" || str_eq d "F" then 15
+                  else 0 in
+          hex_walk (k + 1) (acc * 16 + v) in
+      hex_walk 0 0
+    else int_of_str digits in
+  // Only emit ASCII code points here (RSS text is usually ASCII/UTF-8;
+  // proper UTF-8 encoding of higher code points is not worth the LoC
+  // for a feed reader — high entities pass through as their literal
+  // decimal for the caller to notice).
+  let ch = if code >= 0 && code < 128 then chr code else "&#" ++ digits ++ ";" in
+  (ch, end_pos + 1);
+
+// Check that `s[k..k+len(needle)] == needle`. Top-level to sidestep
+// a Phase 6.1 codegen quirk where a nested closure capturing a
+// mutable strbuf plus enclosing indices fails to lift correctly.
+let _substr_matches = fn (s: str) -> fn (k: int) -> fn (j: int) -> fn (needle: str) ->
+  let m = str_len needle in
+  k + m <= j && str_eq (substring s k (k + m)) needle;
+
+// Decode text between tags. Iterative (via a mutable cursor map)
+// rather than recursive so long text runs — RSS <description> or
+// Atom <content> can be tens of KB — don't blow the Wasm stack.
+// Copies verbatim except for &amp; &lt; &gt; &quot; &apos; and
+// numeric entities.
+let _decode_text = fn (s: str) -> fn (i: int) -> fn (j: int) ->
+  let buf = strbuf_new () in
+  let st = map_new () in
+  let _ = map_set st "k" i in
+  let _ = while (map_get st "k") < j do
+    let k = map_get st "k" in
+    let c = char_at s k in
+    if str_eq c "&" then
+      if _substr_matches s k j "&amp;" then
+        let _ = strbuf_push buf "&" in let _ = map_set st "k" (k + 5) in ()
+      else if _substr_matches s k j "&lt;" then
+        let _ = strbuf_push buf "<" in let _ = map_set st "k" (k + 4) in ()
+      else if _substr_matches s k j "&gt;" then
+        let _ = strbuf_push buf ">" in let _ = map_set st "k" (k + 4) in ()
+      else if _substr_matches s k j "&quot;" then
+        let _ = strbuf_push buf "\"" in let _ = map_set st "k" (k + 6) in ()
+      else if _substr_matches s k j "&apos;" then
+        let _ = strbuf_push buf "'" in let _ = map_set st "k" (k + 6) in ()
+      else if k + 1 < j && str_eq (char_at s (k + 1)) "#" then
+        let (ch, next) = _decode_numeric s (k + 2) j in
+        let _ = strbuf_push buf ch in let _ = map_set st "k" next in ()
+      else
+        let _ = strbuf_push buf c in let _ = map_set st "k" (k + 1) in ()
+    else
+      let _ = strbuf_push buf c in let _ = map_set st "k" (k + 1) in () in
+  strbuf_to_str buf;
+
+// ---- name reading -------------------------------------------------
+
+let _read_name = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  if i >= n || not (_is_name_start (char_at s i)) then ("", i)
+  else
+    let rec walk = fn (j: int) ->
+      if j >= n || not (_is_name_cont (char_at s j)) then j
+      else walk (j + 1) in
+    let j = walk (i + 1) in
+    (substring s i j, j);
+
+// ---- attribute reading --------------------------------------------
+
+// Parse a single attribute at position `i`: name="value" or name='value'.
+// Returns ((name, value), position past value + closing quote).
+let _read_attr = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let (name, i) = _read_name s i n in
+  let i = _skip_ws s i n in
+  if i >= n || not (str_eq (char_at s i) "=") then ((name, ""), i)
+  else
+    let i = _skip_ws s (i + 1) n in
+    if i >= n then ((name, ""), i)
+    else
+      let q = char_at s i in
+      if not (str_eq q "\"" || str_eq q "'") then ((name, ""), i)
+      else
+        let start = i + 1 in
+        let rec find_close = fn (j: int) ->
+          if j >= n then j
+          else if str_eq (char_at s j) q then j
+          else find_close (j + 1) in
+        let end_pos = find_close start in
+        let raw = _decode_text s start end_pos in
+        ((name, raw), end_pos + 1);
+
+// Parse zero or more attributes after a tag name. Stops at `>` `/` or
+// end-of-input. Returns (attrs, position of the terminating char).
+let _read_attrs = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let rec loop = fn (i: int) -> fn (acc: (str * str) list) ->
+    let i = _skip_ws s i n in
+    if i >= n then (acc, i)
+    else
+      let c = char_at s i in
+      if str_eq c ">" || str_eq c "/" then (acc, i)
+      else if _is_name_start c then
+        let (av, next) = _read_attr s i n in
+        loop next (Cons (av, acc))
+      else (acc, i) in
+  loop i Nil;
+
+// ---- top-level parser ---------------------------------------------
+
+// Skip over `<!-- ... -->`. Assumes `s.[i..i+3] = "<!--"`.
+let _skip_comment = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let rec walk = fn (j: int) ->
+    if j + 2 >= n then n
+    else if str_eq (char_at s j) "-" && str_eq (char_at s (j + 1)) "-"
+         && str_eq (char_at s (j + 2)) ">" then j + 3
+    else walk (j + 1) in
+  walk (i + 4);
+
+// Skip over `<?xml ... ?>` or any `<?target ... ?>`. Assumes `s.[i..i+1] = "<?"`.
+let _skip_pi = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let rec walk = fn (j: int) ->
+    if j + 1 >= n then n
+    else if str_eq (char_at s j) "?" && str_eq (char_at s (j + 1)) ">" then j + 2
+    else walk (j + 1) in
+  walk (i + 2);
+
+// Skip over `<!DOCTYPE ...>` — naive: walks to the next `>`. Not
+// correct for internal subsets but neither RSS nor Atom uses them.
+let _skip_doctype = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  let rec walk = fn (j: int) ->
+    if j >= n then n
+    else if str_eq (char_at s j) ">" then j + 1
+    else walk (j + 1) in
+  walk (i + 9);
+
+// Parse a CDATA section `<![CDATA[…]]>` and append its content
+// verbatim to `buf`. Assumes we're positioned at the leading `<`.
+// Iterative to survive very long CDATA payloads (Atom <content>).
+let _read_cdata = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn buf ->
+  let start = i + 9 in
+  let st = map_new () in
+  let _ = map_set st "j" start in
+  let _ = map_set st "fin" 0 in
+  let _ = while map_get st "fin" == 0 do
+    let j = map_get st "j" in
+    if j + 2 >= n then
+      let _ = strbuf_push buf (substring s start n) in
+      let _ = map_set st "j" n in
+      let _ = map_set st "fin" 1 in ()
+    else if str_eq (char_at s j) "]" && str_eq (char_at s (j + 1)) "]"
+         && str_eq (char_at s (j + 2)) ">" then
+      let _ = strbuf_push buf (substring s start j) in
+      let _ = map_set st "j" (j + 3) in
+      let _ = map_set st "fin" 1 in ()
+    else
+      let _ = map_set st "j" (j + 1) in () in
+  map_get st "j";
+
+// Mutually recursive: `_parse_children` collects child nodes of the
+// currently-open element until it sees a matching `</name>`.
+// `_parse_element` starts at a `<` and returns a single element node.
+let rec _parse_children = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  fn (parent: str) -> fn (acc: xml list) ->
+  if i >= n then (acc, i)  // unterminated — return what we have
+  else
+    let c = char_at s i in
+    if str_eq c "<" then
+      // Look ahead to decide: end-tag / comment / PI / CDATA / DOCTYPE / element.
+      if i + 1 < n && str_eq (char_at s (i + 1)) "/" then
+        // </name> — close of parent. Consume to `>` and return.
+        let (name, j) = _read_name s (i + 2) n in
+        let j = _skip_ws s j n in
+        let j = if j < n && str_eq (char_at s j) ">" then j + 1 else j in
+        let _ = parent in
+        let _ = name in
+        (acc, j)
+      else if i + 3 < n && str_eq (substring s i (i + 4)) "<!--" then
+        let j = _skip_comment s i n in
+        _parse_children s j n parent acc
+      else if i + 1 < n && str_eq (char_at s (i + 1)) "?" then
+        let j = _skip_pi s i n in
+        _parse_children s j n parent acc
+      else if i + 8 < n && str_eq (substring s i (i + 9)) "<![CDATA[" then
+        let buf = strbuf_new () in
+        let j = _read_cdata s i n buf in
+        let cd = strbuf_to_str buf in
+        let acc = if str_eq cd "" then acc else Cons (XText cd, acc) in
+        _parse_children s j n parent acc
+      else if i + 1 < n && str_eq (char_at s (i + 1)) "!" then
+        let j = _skip_doctype s i n in
+        _parse_children s j n parent acc
+      else
+        let (elem, j) = _parse_element s i n in
+        _parse_children s j n parent (Cons (elem, acc))
+    else
+      // Text run: read until next `<` or EOF. Iterative to survive
+      // large text bodies (Atom <content> can be 10s of KB).
+      let stf = map_new () in
+      let _ = map_set stf "j" i in
+      let _ = map_set stf "fin" 0 in
+      let _ = while map_get stf "fin" == 0 do
+        let jj = map_get stf "j" in
+        if jj >= n then let _ = map_set stf "fin" 1 in ()
+        else if str_eq (char_at s jj) "<" then let _ = map_set stf "fin" 1 in ()
+        else let _ = map_set stf "j" (jj + 1) in () in
+      let j = map_get stf "j" in
+      let raw = _decode_text s i j in
+      // Drop pure-whitespace text at the "structural" level so
+      // consumers don't have to filter it themselves. Iterative for
+      // the same "very long text run" reason.
+      let stw = map_new () in
+      let _ = map_set stw "k" 0 in
+      let _ = map_set stw "ws" 1 in
+      let _ = while (map_get stw "ws" == 1) && (map_get stw "k" < str_len raw) do
+        if _is_ws (char_at raw (map_get stw "k")) then
+          let _ = map_set stw "k" (map_get stw "k" + 1) in ()
+        else let _ = map_set stw "ws" 0 in () in
+      let trimmed_all_ws = map_get stw "ws" == 1 in
+      let acc = if trimmed_all_ws then acc else Cons (XText raw, acc) in
+      _parse_children s j n parent acc
+and _parse_element = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  // Expects `<`. Read name + attrs. Then either `/>` (self-close)
+  // or `>` followed by children and matching `</name>`.
+  let (name, j) = _read_name s (i + 1) n in
+  let (attrs_rev, j) = _read_attrs s j n in
+  let attrs =
+    let rec rev = fn (xs: (str * str) list) -> fn (acc: (str * str) list) ->
+      match xs with
+      | Nil -> acc
+      | Cons (h, t) -> rev t (Cons (h, acc)) in
+    rev attrs_rev Nil in
+  if j < n && str_eq (char_at s j) "/" then
+    // Self-closing: `<name .../>`
+    let j = j + 1 in
+    let j = if j < n && str_eq (char_at s j) ">" then j + 1 else j in
+    (XElem (name, attrs, Nil), j)
+  else
+    let j = if j < n && str_eq (char_at s j) ">" then j + 1 else j in
+    let (children_rev, j) = _parse_children s j n name Nil in
+    let rec rev = fn (xs: xml list) -> fn (acc: xml list) ->
+      match xs with
+      | Nil -> acc
+      | Cons (h, t) -> rev t (Cons (h, acc)) in
+    let children = rev children_rev Nil in
+    (XElem (name, attrs, children), j);
+
+// Entry point: skip prologue (whitespace, XML decl, comments, DOCTYPE)
+// then read the root element.
+let parse_xml = fn (s: str) ->
+  let n = str_len s in
+  let rec skip_prologue = fn (i: int) ->
+    let i = _skip_ws s i n in
+    if i >= n then i
+    else if i + 1 < n && str_eq (char_at s i) "<" && str_eq (char_at s (i + 1)) "?" then
+      skip_prologue (_skip_pi s i n)
+    else if i + 3 < n && str_eq (substring s i (i + 4)) "<!--" then
+      skip_prologue (_skip_comment s i n)
+    else if i + 1 < n && str_eq (char_at s i) "<" && str_eq (char_at s (i + 1)) "!" then
+      skip_prologue (_skip_doctype s i n)
+    else i in
+  let i = skip_prologue 0 in
+  if i >= n || not (str_eq (char_at s i) "<") then None
+  else
+    let (root, _) = _parse_element s i n in
+    Some root;
+
+// ---- query helpers ------------------------------------------------
+
+let xml_name = fn (x: xml) ->
+  match x with
+  | XElem (n, _, _) -> n
+  | XText _ -> "";
+
+let xml_attr = fn (x: xml) -> fn (key: str) ->
+  match x with
+  | XElem (_, attrs, _) ->
+    let rec find = fn (xs: (str * str) list) ->
+      match xs with
+      | Nil -> ""
+      | Cons ((k, v), t) -> if str_eq k key then v else find t in
+    find attrs
+  | XText _ -> "";
+
+let xml_children = fn (x: xml) ->
+  match x with
+  | XElem (_, _, cs) -> cs
+  | XText _ -> Nil;
+
+let children_named = fn (x: xml) -> fn (name: str) ->
+  let rec filter = fn (xs: xml list) -> fn (acc: xml list) ->
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) ->
+      match h with
+      | XElem (n, _, _) ->
+        if str_eq n name then filter t (Cons (h, acc)) else filter t acc
+      | XText _ -> filter t acc in
+  let rec rev = fn (xs: xml list) -> fn (acc: xml list) ->
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) -> rev t (Cons (h, acc)) in
+  rev (filter (xml_children x) Nil) Nil;
+
+let first_named = fn (x: xml) -> fn (name: str) ->
+  let rec find = fn (xs: xml list) ->
+    match xs with
+    | Nil -> None
+    | Cons (h, t) ->
+      match h with
+      | XElem (n, _, _) -> if str_eq n name then Some h else find t
+      | XText _ -> find t in
+  find (xml_children x);
+
+// Concatenated text of a subtree — text nodes joined, elements
+// recursed into. Attributes are NOT included.
+let rec text_content = fn (x: xml) ->
+  match x with
+  | XText t -> t
+  | XElem (_, _, cs) ->
+    let rec go = fn (xs: xml list) -> fn (acc: str) ->
+      match xs with
+      | Nil -> acc
+      | Cons (h, t) -> go t (acc ++ text_content h) in
+    go cs "";
+
+}

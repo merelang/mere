@@ -1,0 +1,118 @@
+// contrib/feed/feed.mere — RSS 2.0 / Atom feed extractor.
+//
+// Given the raw XML of a feed document, produce a normalized list
+// of entries with (title, link, pub_date, summary). Handles the two
+// most common formats:
+//
+//   RSS 2.0:  <rss><channel><item>
+//               <title>…</title>
+//               <link>…</link>
+//               <pubDate>…</pubDate>
+//               <description>…</description>
+//             </item>
+//
+//   Atom:     <feed><entry>
+//               <title>…</title>
+//               <link href="…"/>
+//               <updated>…</updated>
+//               <summary>…</summary>
+//             </entry>
+//
+// The channel/feed-level `title` and `link` are also returned so the
+// caller can label the feed. If parsing fails or no known root shape
+// is found the returned entry list is empty and the title is "".
+//
+// Public API (module Feed):
+//   type entry = { title: str, link: str, date: str, summary: str };
+//   type feed  = { title: str, link: str, entries: entry list };
+//   parse_feed : str -> feed
+
+import "../xml/xml.mere";
+
+type Entry = { title: str, link: str, date: str, summary: str };
+type Doc   = { title: str, link: str, entries: Entry list };
+
+module Feed {
+
+// Return the text of the first direct child element with `name`, or
+// "" if not found. Trims surrounding whitespace.
+let _child_text = fn (x) -> fn (name: str) ->
+  match Xml.first_named x name with
+  | None -> ""
+  | Some n -> Xml.text_content n;
+
+// Atom's <link> is `<link href="…"/>` — the URL is an attribute, not
+// text. RSS 2.0's <link> holds the URL as text. Some feeds have
+// multiple <link> elements; we take the first with either an `href`
+// attribute or non-empty text content.
+let _link_of = fn (x) ->
+  match Xml.first_named x "link" with
+  | None -> ""
+  | Some ln ->
+    let href = Xml.xml_attr ln "href" in
+    if not (str_eq href "") then href
+    else Xml.text_content ln;
+
+let _entry_of_rss_item = fn (item) ->
+  Entry {
+    title = _child_text item "title",
+    link = _link_of item,
+    date = _child_text item "pubDate",
+    summary = _child_text item "description"
+  };
+
+let _entry_of_atom_entry = fn (e) ->
+  Entry {
+    title = _child_text e "title",
+    link = _link_of e,
+    date =
+      let p = _child_text e "published" in
+      if str_eq p "" then _child_text e "updated" else p,
+    summary =
+      let s = _child_text e "summary" in
+      if str_eq s "" then _child_text e "content" else s
+  };
+
+let rec _rev_walk = fn (xs) -> fn (acc) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rev_walk t (Cons (h, acc));
+
+let _rev = fn (xs) -> _rev_walk xs Nil;
+
+// Map (RSS/Atom item → Entry). Inlined to sidestep the "returning a
+// closure that captures a nested let-rec" codegen limitation.
+let _map_entries = fn (extract) -> fn (items) ->
+  let rec go = fn (xs) -> fn (acc) ->
+    match xs with
+    | Nil -> _rev acc
+    | Cons (h, t) -> go t (Cons (extract h, acc)) in
+  go items Nil;
+
+let parse_feed = fn (xml_src: str) ->
+  let empty = Doc { title = "", link = "", entries = Nil } in
+  match Xml.parse_xml xml_src with
+  | None -> empty
+  | Some root ->
+    let name = Xml.xml_name root in
+    if str_eq name "rss" then
+      match Xml.first_named root "channel" with
+      | None -> empty
+      | Some ch ->
+        let items = Xml.children_named ch "item" in
+        let entries = _map_entries _entry_of_rss_item items in
+        Doc {
+          title = _child_text ch "title",
+          link = _link_of ch,
+          entries = entries
+        }
+    else if str_eq name "feed" then
+      let entries = _map_entries _entry_of_atom_entry (Xml.children_named root "entry") in
+      Doc {
+        title = _child_text root "title",
+        link = _link_of root,
+        entries = entries
+      }
+    else empty;
+
+}
