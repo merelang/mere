@@ -1,0 +1,72 @@
+// examples/db_notify.mere — LISTEN / NOTIFY pub/sub.
+//
+// PG's built-in message bus. Every connection that calls
+// `LISTEN <channel>` receives a NotificationResponse ('A') from the
+// server the moment any OTHER connection issues `NOTIFY <channel>[, '<p>']`.
+// It's coarse — no ordering guarantees across channels, and payloads are
+// capped at 8000 bytes — but perfect for cache invalidation, "job
+// available" pokes, or lightweight fan-out.
+//
+// This demo:
+//   1. Opens two connections to the same trust-mode Postgres.
+//   2. Connection A subscribes via pg_listen "job_ready".
+//   3. Connection B publishes three NOTIFYs.
+//   4. Connection A drains them with pg_wait_notify; each notification
+//      arrives as `Some (pid, channel, payload)`.
+//   5. A final pg_wait_notify with a 100ms timeout returns `None` to
+//      show the timeout path.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-nfy -p 15448:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_notify.mere > /tmp/dbn.wat
+//   wat2wasm --enable-tail-call /tmp/dbn.wat -o /tmp/dbn.wasm
+//   node scripts/run_wasm.js /tmp/dbn.wasm
+
+import "../contrib/db/pg.mere";
+
+let show_notif = fn (n) ->
+  match n with
+  | None -> "None"
+  | Some (pid, ch, payload) ->
+    "Some (pid=" ++ show pid ++
+    ", channel=" ++ ch ++
+    ", payload=" ++ payload ++ ")"
+  ;
+
+let url = "postgres://postgres@127.0.0.1:15448/postgres" in
+let sub = pg_connect_url url in
+let pub = pg_connect_url url in
+if sub < 0 then let _ = print "sub connect failed" in ()
+else if pub < 0 then let _ = print "pub connect failed" in ()
+else
+
+  // Subscriber tunes in.
+  let _ = pg_listen sub "job_ready" in
+  let _ = print "sub: LISTEN job_ready" in
+
+  // Publisher fires three notifications.
+  let _ = pg_notify pub "job_ready" "job-42" in
+  let _ = pg_notify pub "job_ready" "job-43" in
+  let _ = pg_notify pub "job_ready" "job-with-'quote'" in
+  let _ = print "pub: 3 NOTIFY sent" in
+
+  // Drain them (5-second cap each so a lost message doesn't hang CI).
+  let n1 = pg_wait_notify sub 5000 in
+  let _ = print ("recv 1: " ++ show_notif n1) in
+  let n2 = pg_wait_notify sub 5000 in
+  let _ = print ("recv 2: " ++ show_notif n2) in
+  let n3 = pg_wait_notify sub 5000 in
+  let _ = print ("recv 3: " ++ show_notif n3) in
+
+  // Nothing more coming — timeout path.
+  let n4 = pg_wait_notify sub 100 in
+  let _ = print ("recv 4 (should be None): " ++ show_notif n4) in
+
+  let _ = pg_unlisten sub "job_ready" in
+  let _ = pg_close sub in
+  let _ = pg_close pub in
+  ()

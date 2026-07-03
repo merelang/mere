@@ -92,6 +92,17 @@ function doConnect(hostLen, port) {
       cb();
     }
   });
+  // socket.setTimeout fires this after N ms of idle read. Node's default
+  // is to leave the socket open — we resolve the pending read as "0
+  // bytes" so pg_wait_notify can distinguish a timeout from a real EOF
+  // (which would set entry.closed).
+  socket.on('timeout', () => {
+    if (entry.pendingRead) {
+      const cb = entry.pendingRead;
+      entry.pendingRead = null;
+      cb();
+    }
+  });
 
   entry.pendingConnect = () => {
     if (entry.err) respond(-1, 0);

@@ -27,6 +27,7 @@ extern fn tcp_connect: str -> int -> int;
 extern fn tcp_write: int -> int -> int -> int;
 extern fn tcp_read: int -> int -> int -> int;
 extern fn tcp_close: int -> unit;
+extern fn tcp_set_timeout: int -> int -> unit;
 extern fn str_ptr: str -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_set_u8: int -> int -> int -> unit;
@@ -1292,6 +1293,83 @@ let rec _copy_out_drain = fn (fd: int) -> fn (acc: (str option list) list) ->
 let pg_copy_to = fn (fd: int) -> fn (sql: str) ->
   let _ = _send_query fd sql in
   _rev_rows (_copy_out_drain fd Nil) Nil
+  ;
+
+// ---- LISTEN / NOTIFY (async pub/sub) ------------------------------------
+//
+// PG's built-in pub/sub. One connection issues `LISTEN <channel>`, and
+// any subsequent `NOTIFY <channel>[, '<payload>']` from any connection
+// causes the server to push a NotificationResponse ('A') message to
+// every listener.
+//
+// Payload layout on the wire (for the 'A' message):
+//   int32  backend PID of the notifier
+//   cstring channel name
+//   cstring payload (empty string when NOTIFY had no payload)
+//
+// Notifications arrive asynchronously — they can interleave with the
+// responses of any other query — but this MVP surfaces them only via
+// explicit pg_wait_notify calls on an otherwise-idle connection.
+// Interleaved 'A' messages inside a busy pg_query response are
+// silently dropped; a fully async loop is a future direction.
+
+let pg_listen = fn (fd: int) -> fn (channel: str) ->
+  let _ = pg_query fd ("LISTEN " ++ channel) in ()
+  ;
+
+let pg_unlisten = fn (fd: int) -> fn (channel: str) ->
+  let _ = pg_query fd ("UNLISTEN " ++ channel) in ()
+  ;
+
+// pg_notify fd channel payload
+//   Emits `NOTIFY <channel>, '<payload>'`. The payload is single-quoted
+//   and interior single-quotes are doubled — PG's identifier-quoting
+//   rule for string literals. `channel` is spliced verbatim; keep it
+//   a trusted identifier.
+let pg_notify = fn (fd: int) -> fn (channel: str) -> fn (payload: str) ->
+  let esc = str_replace payload "'" "''" in
+  let _ = pg_query fd ("NOTIFY " ++ channel ++ ", '" ++ esc ++ "'") in
+  ()
+  ;
+
+// Parse a NotificationResponse payload — the 4-byte PID followed by
+// two NUL-terminated strings (channel, payload).
+let _parse_notify = fn (payload: int) -> fn (plen: int) ->
+  let pid = mem_get_u32be payload 0 in
+  let ch_end = _find_nul payload 4 in
+  let channel = mem_to_str (payload + 4) (ch_end - 4) in
+  let pl_start = ch_end + 1 in
+  let pl_end = _find_nul payload pl_start in
+  let pl = mem_to_str (payload + pl_start) (pl_end - pl_start) in
+  (pid, channel, pl)
+  ;
+
+// Wait up to `timeout_ms` for a NotificationResponse. Returns
+//   Some (pid, channel, payload)  on delivery
+//   None                          on timeout (or spurious wakeup)
+//
+// Non-'A' messages arriving during the wait window (ParameterStatus,
+// keepalives, etc.) are ignored and the loop keeps waiting until either
+// an 'A' arrives or the socket times out.
+let rec _wait_notify_loop = fn (fd: int) -> fn (deadline_hint: int) ->
+  let (mtype, payload, plen) = _recv_msg fd in
+  if mtype < 0 then None
+  else if mtype == 65 then
+    // 'A' NotificationResponse
+    Some (_parse_notify payload plen)
+  else
+    // Non-notification (e.g., ParameterStatus 'S', NoticeResponse 'N').
+    // Keep waiting; the socket timeout is per-read, so this may block
+    // longer than the caller asked for if the server chattily sends
+    // other messages. Rare in practice on an idle LISTEN connection.
+    _wait_notify_loop fd deadline_hint
+  ;
+
+let pg_wait_notify = fn (fd: int) -> fn (timeout_ms: int) ->
+  let _ = tcp_set_timeout fd timeout_ms in
+  let r = _wait_notify_loop fd 0 in
+  let _ = tcp_set_timeout fd 0 in
+  r
   ;
 
 // ---- Cleanup ------------------------------------------------------------
