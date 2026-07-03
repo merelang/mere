@@ -1,0 +1,53 @@
+// contrib/db/mysql_pool.mere — connection reuse for the MySQL driver.
+//
+// Mirror of contrib/db/pg_pool.mere. The Wasm runtime is single-threaded,
+// so this "pool" is really a keep-alive slot — one fd held open across
+// acquire/release cycles so we don't pay the handshake + auth cost
+// (SHA-1 for mysql_native_password, or SHA-256 + optional RSA for
+// caching_sha2_password) on every query.
+//
+// Shape:
+//   type mysql_pool = (url, state_map)
+//     where state_map : Map<str, int>
+//     keys used:  "fd" — current fd, -1 while closed
+//
+// Usage:
+//   let pool = mysql_pool_open "mysql://user:pw@127.0.0.1/db" in
+//   let fd = mysql_pool_acquire pool in
+//   let rows = mysql_query fd "SELECT 1" in
+//   let _ = mysql_pool_release pool fd in    // no-op today
+//   ...
+//   let _ = mysql_pool_close pool in         // at shutdown
+
+import "mysql.mere";
+
+let mysql_pool_open = fn (url: str) ->
+  let st = map_new () in
+  let _ = map_set st "fd" (0 - 1) in
+  (url, st)
+  ;
+
+let mysql_pool_acquire = fn (pool) ->
+  let (url, st) = pool in
+  let fd = map_get st "fd" in
+  if fd > 0 then fd
+  else
+    let new_fd = mysql_connect_url url in
+    let _ = map_set st "fd" new_fd in
+    new_fd
+  ;
+
+// No-op today (single-slot pool). Present for API symmetry with a
+// future multi-slot LIFO stack.
+let mysql_pool_release = fn (pool) -> fn (fd: int) ->
+  ()
+  ;
+
+let mysql_pool_close = fn (pool) ->
+  let (_, st) = pool in
+  let fd = map_get st "fd" in
+  if fd > 0 then
+    let _ = mysql_close fd in
+    let _ = map_set st "fd" (0 - 1) in ()
+  else ()
+  ;

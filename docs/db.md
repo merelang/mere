@@ -6,7 +6,7 @@ their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` and
 implemented in Mere itself; the host only exposes low-level TCP and
 crypto primitives. No `npm` packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 18
+The rest of this page walks the stack top-down, then catalogs the 19
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -19,14 +19,18 @@ The rest of this page walks the stack top-down, then catalogs the 18
 │  contrib/db/pg.mere            contrib/db/mysql.mere               │
 │  ─────────────────             ─────────────────────               │
 │  Wire protocol (v3)            Wire protocol (v10)                 │
-│  SCRAM-SHA-256 auth            mysql_native_password auth          │
-│  Simple + extended query       Simple query (COM_QUERY)            │
-│  Prepared statements           Text row protocol                   │
-│  Transactions + savepoints                                         │
-│  COPY FROM/TO STDOUT           contrib/db/pg_pool.mere             │
-│  LISTEN / NOTIFY + async queue ───────────────────────             │
-│  URL parser (RFC 3986)         Keep-alive pool over pg.mere        │
-│                                Idle event pump                     │
+│  SCRAM-SHA-256                 mysql_native_password (SHA-1)       │
+│  Simple + extended query       caching_sha2_password (SHA-256 +    │
+│  Prepared statements            RSA-OAEP-SHA1)                     │
+│  Transactions + savepoints     Simple query (COM_QUERY)            │
+│  COPY FROM/TO STDOUT           Prepared statements (COM_STMT_*)    │
+│  LISTEN / NOTIFY + async queue Text + binary row decode            │
+│  URL parser (RFC 3986)         URL parser (mysql://)               │
+│                                                                    │
+│  contrib/db/pg_pool.mere       contrib/db/mysql_pool.mere          │
+│  ─────────────────────         ────────────────────────            │
+│  Keep-alive pool               Keep-alive pool                     │
+│  Idle event pump                                                   │
 ├────────────────────────────────────────────────────────────────────┤
 │  Crypto helpers                                                    │
 │  sha256, hmac_sha256, pbkdf2_sha256, base64_encode/decode,         │
@@ -236,6 +240,7 @@ command needed) and cleans up on process exit.
 | [http_todo_pg](https://github.com/merelang/mere/blob/main/examples/http_todo_pg.mere) | `contrib/http` + `pg_pool` — signup / login / todos backed by PG |
 | [db_mysql](https://github.com/merelang/mere/blob/main/examples/db_mysql.mere) | MySQL 8 — auto-selects `mysql_native_password` (SHA-1) or `caching_sha2_password` (SHA-256 fast + RSA-OAEP-SHA1 slow); NULL round-trip |
 | [db_mysql_prepared](https://github.com/merelang/mere/blob/main/examples/db_mysql_prepared.mere) | `COM_STMT_PREPARE` + `_EXECUTE`, binary-protocol row decode; SQL-injection defense |
+| [db_mysql_pool](https://github.com/merelang/mere/blob/main/examples/db_mysql_pool.mere) | `mysql_pool` keep-alive + `mysql_parse_url` + percent decoding |
 
 ## Limitations and future work
 
@@ -255,11 +260,12 @@ command needed) and cleans up on process exit.
   event loop would need cooperation from the Node harness.
 - **MySQL client**: connect + auth + `COM_QUERY` + prepared statements
   (`COM_STMT_PREPARE` / `_EXECUTE` / `_CLOSE`) with binary-protocol
-  row decoding. Both auth plugins are wired —
-  `mysql_native_password` (SHA-1) and `caching_sha2_password` (SHA-256
-  fast-path + RSA-OAEP-SHA1 public-key exchange when the server's
-  auth cache is cold). Transactions beyond bare `BEGIN/COMMIT`
-  strings, TLS, and a `mysql_pool` are not wired.
+  row decoding + `mysql://` URL parsing + single-fd `mysql_pool`. Both
+  auth plugins are wired — `mysql_native_password` (SHA-1) and
+  `caching_sha2_password` (SHA-256 fast-path + RSA-OAEP-SHA1
+  public-key exchange when the server's auth cache is cold).
+  Transactions beyond bare `BEGIN/COMMIT` strings and TLS are not
+  wired.
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).

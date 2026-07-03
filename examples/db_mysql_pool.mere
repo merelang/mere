@@ -1,0 +1,74 @@
+// examples/db_mysql_pool.mere — connection reuse via mysql_pool + URL.
+//
+// Companion to db_pool.mere on the PG side. Verifies that:
+//   1. mysql_pool_open + mysql_pool_acquire opens exactly one fd on
+//      the first call.
+//   2. Subsequent acquires return the same fd — server-side connection
+//      id (returned by SELECT CONNECTION_ID()) stays constant.
+//   3. mysql_pool_close cleanly terminates.
+//
+// Setup:
+//   docker run -d --name mere-mysql-pool -p 15504:3306 \
+//     -e MYSQL_ROOT_PASSWORD=rootpw \
+//     -e MYSQL_DATABASE=meredb \
+//     -e MYSQL_USER=meredev \
+//     -e MYSQL_PASSWORD=meredevpw \
+//     mysql:8.0
+//
+// Usage:
+//   ./mere -w examples/db_mysql_pool.mere > /tmp/dbmpl.wat
+//   wat2wasm --enable-tail-call /tmp/dbmpl.wat -o /tmp/dbmpl.wasm
+//   node scripts/run_wasm.js /tmp/dbmpl.wasm
+
+import "../contrib/db/mysql_pool.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> mysql_val_or h "NULL"
+  | Cons (h, t) -> mysql_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+// ---- URL parser demo -----------------------------------------------
+let (h1, p1, u1, pw1, db1) = mysql_parse_url
+  "mysql://meredev:me%40re@127.0.0.1:15504/meredb?charset=utf8mb4" in
+let _ = print
+  ("parsed: host=" ++ h1 ++ " port=" ++ show p1 ++
+   " user=" ++ u1 ++ " pw=" ++ pw1 ++ " db=" ++ db1) in
+
+// ---- live pool ------------------------------------------------------
+let pool = mysql_pool_open
+  "mysql://meredev:meredevpw@127.0.0.1:15504/meredb" in
+
+let fd1 = mysql_pool_acquire pool in
+let _ = print ("first  acquire fd=" ++ show fd1) in
+let row1 = mysql_query fd1 "SELECT 'hello'" in
+let _ = print_rows row1 in
+let _ = mysql_pool_release pool fd1 in
+
+let fd2 = mysql_pool_acquire pool in
+let _ = print ("second acquire fd=" ++ show fd2 ++
+  (if fd2 == fd1 then "  (reused)" else "  (NEW — pool didn't cache!)")) in
+let cid_row = mysql_query fd2 "SELECT CONNECTION_ID()" in
+let _ = print "connection id (should stay constant across acquires):" in
+let _ = print_rows cid_row in
+let _ = mysql_pool_release pool fd2 in
+
+let fd3 = mysql_pool_acquire pool in
+let _ = print ("third  acquire fd=" ++ show fd3 ++
+  (if fd3 == fd1 then "  (reused)" else "  (NEW)")) in
+let cid_row2 = mysql_query fd3 "SELECT CONNECTION_ID()" in
+let _ = print_rows cid_row2 in
+let _ = mysql_pool_release pool fd3 in
+
+let _ = mysql_pool_close pool in
+let _ = print "pool closed" in
+()
