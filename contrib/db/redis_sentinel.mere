@@ -1,0 +1,97 @@
+// contrib/db/redis_sentinel.mere — resolve the current master via
+// Redis Sentinel and connect to it.
+//
+// A Sentinel deployment runs one or more sentinel processes that
+// monitor a set of masters + replicas. Clients don't hard-code the
+// master's host/port; they ask a sentinel via
+//
+//     SENTINEL GET-MASTER-ADDR-BY-NAME <master_name>
+//
+// which returns an RRArr of two RRBulk elements — [host, port_str].
+// On master failure the sentinel quorum promotes a replica, and the
+// next `get-master-addr` call points at the new master.
+//
+// MVP scope:
+//   - Point-in-time resolution: one sentinel query per connect
+//   - No auto-reconnect on master failover — callers should re-run
+//     redis_via_sentinel and treat their old fd as invalid when a
+//     query returns a MASTERDOWN or connection error
+//   - No sentinel pool / quorum picking — caller supplies one
+//     sentinel address; the sentinel replies authoritatively
+
+import "redis.mere";
+
+// Ask a sentinel connection for the current master address of
+// `master_name`. Returns None if the sentinel doesn't recognize the
+// name (or lost track of the master).
+let redis_sentinel_master_addr = fn (sentinel_fd: int)
+                              -> fn (master_name: str) ->
+  match redis_command sentinel_fd
+          (Cons ("SENTINEL",
+           Cons ("GET-MASTER-ADDR-BY-NAME",
+           Cons (master_name, Nil)))) with
+  | RRArr (Cons (RRBulk (Some (host, _)),
+             Cons (RRBulk (Some (port_s, _)), Nil))) ->
+    Some (host, int_of_str port_s)
+  | RRArr Nil -> None                                      // no such master
+  | _ -> None
+  ;
+
+// Convenience: point at a sentinel, resolve the master, connect
+// straight there. Returns the master fd, or -1 on any failure.
+//
+//   let fd = redis_via_sentinel "127.0.0.1" 26379 "mymaster" in ...
+let redis_via_sentinel = fn (sentinel_host: str) -> fn (sentinel_port: int)
+                      -> fn (master_name: str) ->
+  let sfd = redis_connect sentinel_host sentinel_port in
+  if sfd < 0 then
+    let _ = print ("sentinel: connect failed") in 0 - 1
+  else
+    let addr = redis_sentinel_master_addr sfd master_name in
+    let _ = redis_close sfd in
+    match addr with
+    | None ->
+      let _ = print ("sentinel: no master named " ++ master_name) in
+      0 - 1
+    | Some (host, port) -> redis_connect host port
+  ;
+
+// List all masters the sentinel knows about — returns their names as
+// a str list. Useful for admin / debugging tooling.
+//
+// Reply shape is `RRArr (RRArr ("name" "…" "ip" "…" "port" "…" …))`
+// — a flat property-list per master. We just fish out the "name"
+// field of each.
+let rec _rs_pick_name = fn (row: redis_reply list) ->
+  match row with
+  | Nil -> None
+  | Cons (RRBulk (Some ("name", _)),
+    Cons (RRBulk (Some (val, _)), _)) -> Some val
+  | Cons (_, Cons (_, rest)) -> _rs_pick_name rest
+  | _ -> None
+  ;
+
+let rec _rs_names_of = fn (masters: redis_reply list)
+                    -> fn (acc: str list) ->
+  match masters with
+  | Nil -> acc
+  | Cons (RRArr row, rest) ->
+    let acc2 = (match _rs_pick_name row with
+                | Some n -> Cons (n, acc)
+                | None -> acc) in
+    _rs_names_of rest acc2
+  | Cons (_, rest) -> _rs_names_of rest acc
+  ;
+
+let rec _rs_rev_str = fn (xs: str list) -> fn (acc: str list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rs_rev_str t (Cons (h, acc))
+  ;
+
+let redis_sentinel_list_masters = fn (sentinel_fd: int) ->
+  match redis_command sentinel_fd
+          (Cons ("SENTINEL", Cons ("MASTERS", Nil))) with
+  | RRArr masters -> _rs_rev_str (_rs_names_of masters Nil) Nil
+  | _ -> Nil
+  ;

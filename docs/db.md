@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 31
+The rest of this page walks the stack top-down, then catalogs the 32
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -41,6 +41,15 @@ The rest of this page walks the stack top-down, then catalogs the 31
 │  PUB/SUB (SUBSCRIBE / PSUBSCRIBE / redis_wait_message)             │
 │  Pipelining (N commands / N replies in one round trip)             │
 │  TLS (redis_connect_ssl / _verify — direct handshake, no in-band)  │
+│                                                                    │
+│  contrib/db/redis_sentinel.mere                                    │
+│  ─────────────────────────                                         │
+│  Sentinel master resolution + list-masters                         │
+│                                                                    │
+│  contrib/db/redis_cluster.mere                                     │
+│  ────────────────────────                                          │
+│  CRC16-XMODEM slot hash + hash-tag extraction                      │
+│  CLUSTER SLOTS bootstrap, MOVED redirection, per-node fd cache     │
 ├────────────────────────────────────────────────────────────────────┤
 │  Crypto helpers                                                    │
 │  sha256, hmac_sha256, pbkdf2_sha256, base64_encode/decode,         │
@@ -266,6 +275,7 @@ command needed) and cleans up on process exit.
 | [db_redis_resp3](https://github.com/merelang/mere/blob/main/examples/db_redis_resp3.mere) | `HELLO 3` upgrade — HGETALL → `RRMap`, SMEMBERS → `RRSet`, `RRNull` |
 | [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
 | [db_redis_binary](https://github.com/merelang/mere/blob/main/examples/db_redis_binary.mere) | Binary-safe args via `redis_command_b` — 5-byte payload with embedded NULs |
+| [db_redis_cluster](https://github.com/merelang/mere/blob/main/examples/db_redis_cluster.mere) | Slot hashing + hash-tag; live routing / MOVED redirect wired |
 
 ## Limitations and future work
 

@@ -256,6 +256,24 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       return writeStr(Buffer.from(src).toString('hex'));
     },
 
+    // crc16_xmodem(s: str) -> int
+    //   XMODEM CRC16 over the UTF-8 bytes of `s`. Used by the Redis
+    //   Cluster slot calculation (slot = crc16(key) & 0x3FFF, or 16383).
+    //   Poly 0x1021, init 0, no reflection, no xor-out.
+    crc16_xmodem: (ptr) => {
+      const s = readCStr(ptr);
+      const bytes = Buffer.from(s, 'utf8');
+      let crc = 0;
+      for (let i = 0; i < bytes.length; i++) {
+        crc ^= bytes[i] << 8;
+        for (let j = 0; j < 8; j++) {
+          crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+          crc &= 0xffff;
+        }
+      }
+      return crc;
+    },
+
     // bytes_from_hex_alloc(hex: str) -> int (raw pointer)
     //   Decode a hex string into raw bytes on the Mere heap. Returns
     //   the pointer; the caller already knows the byte count (=
