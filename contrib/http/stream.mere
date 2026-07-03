@@ -1,0 +1,26 @@
+// contrib/http/stream.mere — streaming response externs.
+//
+// The default request/response cycle in contrib/http buffers the
+// handler's return value and sends it as one chunked body. That's
+// fine for JSON / small HTML pages but wasteful when the response
+// is large (CSV export, log tail). This module exposes two externs
+// that let a handler send headers early and push body chunks as
+// they're generated — the Node glue keeps the connection open and
+// `res.write()`s each chunk instead of buffering.
+//
+// Usage:
+//
+//   http_stream_start "text/csv; charset=utf-8" 200;
+//   http_stream_write "timestamp,level,message\n";
+//   for each row do http_stream_write (row_csv row) done;
+//   // handler returns "" — glue calls res.end()
+//
+// After `http_stream_start` fires, subsequent `http_set_status` /
+// `http_set_header` are no-ops (headers already flushed). The
+// handler's return string is treated as a final trailing chunk;
+// return "" if you already wrote everything.
+//
+// Requires contrib/http/http.glue.js from the same tree.
+
+extern fn http_stream_start: str -> int -> unit;
+extern fn http_stream_write: str -> unit;
