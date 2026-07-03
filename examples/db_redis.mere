@@ -1,0 +1,79 @@
+// examples/db_redis.mere — pure-Mere Redis (RESP2) client.
+//
+// Exercises the reply-variant surface end to end:
+//   - PING          → RRStr "PONG"
+//   - SET / GET     → RRStr / RRBulk
+//   - INCR          → RRInt
+//   - LPUSH / LRANGE → RRArr of RRBulk
+//   - GET on missing → RRBulk None
+//
+// Setup:
+//   docker run -d --name mere-redis -p 15600:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis.mere > /tmp/dbr.wat
+//   wat2wasm --enable-tail-call /tmp/dbr.wat -o /tmp/dbr.wasm
+//   node scripts/run_wasm.js /tmp/dbr.wasm
+
+import "../contrib/db/redis.mere";
+
+let show_reply = fn (label: str) -> fn (r) ->
+  print (label ++ ": " ++ redis_show r)
+  ;
+
+let fd = redis_connect "127.0.0.1" 15600 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  // Clear old state from previous demo runs.
+  let _ = redis_command fd (Cons ("FLUSHDB", Nil)) in
+
+  // ---- simple string reply ------------------------------------------
+  let _ = show_reply "PING            " (redis_command fd (Cons ("PING", Nil))) in
+
+  // ---- SET / GET (RRStr / RRBulk) -----------------------------------
+  let _ = show_reply "SET user:1 alice"
+    (redis_command fd (Cons ("SET", Cons ("user:1", Cons ("alice", Nil))))) in
+  let _ = show_reply "GET user:1      "
+    (redis_command fd (Cons ("GET", Cons ("user:1", Nil)))) in
+
+  // ---- GET on missing key = RRBulk None ------------------------------
+  let _ = show_reply "GET missing     "
+    (redis_command fd (Cons ("GET", Cons ("missing", Nil)))) in
+
+  // ---- INCR (RRInt) -------------------------------------------------
+  let _ = show_reply "INCR count      "
+    (redis_command fd (Cons ("INCR", Cons ("count", Nil)))) in
+  let _ = show_reply "INCR count      "
+    (redis_command fd (Cons ("INCR", Cons ("count", Nil)))) in
+  let _ = show_reply "INCR count      "
+    (redis_command fd (Cons ("INCR", Cons ("count", Nil)))) in
+
+  // ---- List commands (RRArr of RRBulk) ------------------------------
+  let _ = show_reply "LPUSH todos     "
+    (redis_command fd
+      (Cons ("LPUSH", Cons ("todos", Cons ("buy milk",
+       Cons ("walk dog", Cons ("write demo", Nil))))))) in
+  let _ = show_reply "LRANGE todos 0 -1"
+    (redis_command fd
+      (Cons ("LRANGE", Cons ("todos", Cons ("0", Cons ("-1", Nil)))))) in
+
+  // ---- Type-directed extractor demo ----------------------------------
+  let _ = print "" in
+  let _ = print "-- typed access via redis_as_int / redis_as_str:" in
+  let cnt = redis_as_int (redis_command fd
+              (Cons ("GET", Cons ("count", Nil)))) in
+  let _ = match cnt with
+          | Some n -> print ("  count as int = " ++ show n)
+          | None ->
+            // GET on int-stored keys actually returns RRBulk with the
+            // digits. Fall back through redis_as_str.
+            let s = redis_as_str (redis_command fd
+                      (Cons ("GET", Cons ("count", Nil)))) in
+            let msg = (match s with
+                       | Some v -> "  count as str = " ++ v
+                       | None -> "  count was nil") in
+            print msg in
+
+  let _ = redis_close fd in
+  ()
