@@ -1,0 +1,101 @@
+// examples/db_copy.mere — bulk load via COPY FROM STDIN.
+//
+// One round trip to the server for the entire batch; the client streams
+// tab-separated rows as CopyData messages and terminates with CopyDone.
+// Typical speedup vs a loop of pg_query_params calls is 10-100x for
+// large batches — worth switching to when loading > a few hundred rows.
+//
+// This demo:
+//   1. Inserts three rows containing edge-case characters — an embedded
+//      tab, a newline, a backslash, and a SQL NULL — to prove the
+//      escape routines survive the round trip.
+//   2. Streams a larger batch of 1000 rows and asks Postgres how many
+//      it just committed via the CommandComplete tag.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-copy -p 15446:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_copy.mere > /tmp/dbc.wat
+//   wat2wasm --enable-tail-call /tmp/dbc.wat -o /tmp/dbc.wasm
+//   node scripts/run_wasm.js /tmp/dbc.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+// Build `Cons (Some "1", Cons (Some "row-1", Nil))` … through n. Written
+// tail-recursive with an explicit reversal at the end because the
+// self-host codegen doesn't allow let-rec inside expressions.
+let rec _mkrows = fn (i: int) -> fn (n: int) -> fn (acc: (str option list) list) ->
+  if i > n then acc
+  else
+    let row =
+      Cons (Some (show i),
+      Cons (Some ("row-" ++ show i), Nil)) in
+    _mkrows (i + 1) n (Cons (row, acc))
+  ;
+
+let rec _rev_rows = fn (xs: (str option list) list)
+                 -> fn (acc: (str option list) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _rev_rows t (Cons (h, acc))
+  ;
+
+let mkrows = fn (n: int) -> _rev_rows (_mkrows 1 n Nil) Nil;
+
+let fd = pg_connect_url "postgres://postgres@127.0.0.1:15446/postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+
+  let _ = pg_query fd "DROP TABLE IF EXISTS bulk" in
+  let _ = pg_query fd "CREATE TABLE bulk (id int, note text)" in
+
+  // ---- edge-case escapes -------------------------------------------
+  let _ = print "== escape round trip ==" in
+  let edge_rows =
+    Cons (Cons (Some "1", Cons (Some "has\ttab",         Nil)),
+    Cons (Cons (Some "2", Cons (Some "has\nnewline",     Nil)),
+    Cons (Cons (Some "3", Cons (Some "has\\backslash",   Nil)),
+    Cons (Cons (Some "4", Cons (None,                    Nil)),
+    Nil)))) in
+  let n = pg_copy_from fd "bulk"
+    (Cons ("id", Cons ("note", Nil))) edge_rows in
+  let _ = print ("pg_copy_from returned: " ++ show n) in
+  let _ = print "-- rows read back:" in
+  let back = pg_query fd
+    "SELECT id::text, note FROM bulk ORDER BY id" in
+  let _ = print_rows back in
+
+  // ---- larger batch ------------------------------------------------
+  let _ = print "" in
+  let _ = print "== 1000-row bulk load ==" in
+  let _ = pg_query fd "TRUNCATE bulk" in
+  let big = mkrows 1000 in
+  let n2 = pg_copy_from fd "bulk"
+    (Cons ("id", Cons ("note", Nil))) big in
+  let _ = print ("pg_copy_from returned: " ++ show n2) in
+  let count_rows = pg_query fd "SELECT count(*)::text FROM bulk" in
+  let _ = print ("SELECT count(*) = " ++
+    pg_val_or (pg_first_col count_rows 0) "?") in
+
+  let _ = pg_close fd in
+  ()

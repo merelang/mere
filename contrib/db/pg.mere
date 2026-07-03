@@ -61,6 +61,8 @@ let _MSG_CMD_COMPLETE = 67;   // 'C'
 let _MSG_ERROR = 69;          // 'E'
 let _MSG_NOTICE = 78;         // 'N'
 let _MSG_EMPTY_QUERY = 73;    // 'I'
+let _MSG_COPY_IN = 71;        // 'G' — server: "start streaming rows via CopyData"
+let _MSG_COPY_OUT = 72;       // 'H' — server: "streaming rows to you"
 
 // ---- Low-level socket helpers -------------------------------------------
 
@@ -1026,6 +1028,150 @@ let pg_savepoint_scope = fn (fd: int) -> fn (name: str) -> fn (body) ->
   | Some v ->
     let _ = pg_release_savepoint fd name in
     Some v
+  ;
+
+// ---- Bulk load via COPY FROM STDIN --------------------------------------
+//
+// PG's fastest bulk-load path. The client kicks off a
+// `COPY <table> FROM STDIN` query and then, instead of getting the usual
+// DataRow / CommandComplete stream, receives a CopyInResponse ('G') and
+// hands raw row bytes back over CopyData ('d') messages until it sends
+// CopyDone ('c'). Typical speedup vs a loop of INSERTs is 10-100x for
+// large batches — one round trip instead of one per row.
+//
+// This module uses the text sub-format (COPY defaults). Each CopyData
+// carries one tab-separated line terminated by \n:
+//
+//     col1\tcol2\tcol3\n
+//
+// With PG's rules for escapes inside a field:
+//     backslash → \\    tab → \t    newline → \n    CR → \r
+//     `None`             →  \N        (SQL NULL, distinct from empty)
+//
+// Higher-level ergonomics: `pg_copy_from fd table cols rows` takes rows
+// as `str option list` (matching pg_query_params), returns the row
+// count reported by CommandComplete on success, `-1` on any error.
+
+let rec _needs_escape = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then false
+  else
+    let c = ord (char_at s i) in
+    // 92 = '\\'   9 = '\t'   10 = '\n'   13 = '\r'
+    if c == 92 || c == 9 || c == 10 || c == 13 then true
+    else _needs_escape s (i + 1) n
+  ;
+
+let rec _escape_copy_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else
+    let c = char_at s i in
+    let cn = ord c in
+    let escaped =
+      if cn == 92 then "\\\\"
+      else if cn == 9 then "\\t"
+      else if cn == 10 then "\\n"
+      else if cn == 13 then "\\r"
+      else c in
+    _escape_copy_loop s (i + 1) n (acc ++ escaped)
+  ;
+
+let _escape_copy = fn (s: str) ->
+  let n = str_len s in
+  if _needs_escape s 0 n then _escape_copy_loop s 0 n ""
+  else s
+  ;
+
+// Serialize one row into the text-format wire representation:
+// `col1\tcol2\tcol3\n`, with None → `\N`.
+let rec _row_to_line = fn (cols: str option list) -> fn (first: bool) -> fn (acc: str) ->
+  match cols with
+  | Nil -> acc ++ "\n"
+  | Cons (v, rest) ->
+    let sep = if first then "" else "\t" in
+    let cell = (match v with
+                | None -> "\\N"
+                | Some s -> _escape_copy s) in
+    _row_to_line rest false (acc ++ sep ++ cell)
+  ;
+
+// CopyData ('d') message carrying `line`. Server side reads until CopyDone.
+let _send_copy_data = fn (fd: int) -> fn (line: str) ->
+  let n = str_len line in
+  let msg_len = 4 + n in
+  let total = 1 + msg_len in
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 100 in                       // 'd'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let _ = mem_copy_str buf 5 line in
+  tcp_write fd buf total
+  ;
+
+// CopyDone ('c') — no payload beyond the length field itself.
+let _send_copy_done = fn (fd: int) ->
+  let buf = mem_alloc 5 in
+  let _ = mem_set_u8 buf 0 99 in                        // 'c'
+  let _ = mem_set_u32be buf 1 4 in
+  tcp_write fd buf 5
+  ;
+
+let rec _stream_copy_rows = fn (fd: int) -> fn (rows: (str option list) list) ->
+  match rows with
+  | Nil -> ()
+  | Cons (row, rest) ->
+    let line = _row_to_line row true "" in
+    let _ = _send_copy_data fd line in
+    _stream_copy_rows fd rest
+  ;
+
+// Wait for the ReadyForQuery that closes the COPY exchange. Along the
+// way we scan for the CommandComplete ('C') payload — its tag has the
+// row count — and treat any ErrorResponse as a signal to return -1.
+let rec _copy_drain = fn (fd: int) -> fn (ok: bool) -> fn (count: int) ->
+  let (mtype, payload, plen) = _recv_msg fd in
+  if mtype < 0 then (ok, count)
+  else if mtype == _MSG_READY then (ok, count)
+  else if mtype == _MSG_ERROR then
+    let _ = print ("pg copy error: " ++ mem_to_str payload plen) in
+    _copy_drain fd false count
+  else if mtype == _MSG_CMD_COMPLETE then
+    // CommandComplete tag looks like "COPY 5\0". Extract the trailing
+    // integer as the row count.
+    let tag = mem_to_str payload plen in
+    let space = str_index_of tag " " in
+    let n = if space < 0 then 0 else int_of_str (_slice tag (space + 1)) in
+    _copy_drain fd ok n
+  else
+    _copy_drain fd ok count
+  ;
+
+// pg_copy_from fd table cols rows -> int
+//   Returns the row count reported by CommandComplete on success,
+//   `-1` if the server rejected the COPY (missing table, permission,
+//   or type coercion failure during the streamed data).
+let pg_copy_from = fn (fd: int) -> fn (table: str)
+                -> fn (cols: str list)
+                -> fn (rows: (str option list) list) ->
+  let col_list = str_join ", " cols in
+  let copy_sql = "COPY " ++ table ++ " (" ++ col_list ++ ") FROM STDIN" in
+  let _ = _send_query fd copy_sql in
+
+  // Expect CopyInResponse. If the server sends anything else — usually
+  // ErrorResponse for a bad table name / permission issue — bail after
+  // draining to ReadyForQuery so the connection stays usable.
+  let (mtype, payload, plen) = _recv_msg fd in
+  if mtype == _MSG_ERROR then
+    let _ = print ("pg copy setup error: " ++ mem_to_str payload plen) in
+    let (_ok, _n) = _copy_drain fd false 0 in
+    (0 - 1)
+  else if mtype != _MSG_COPY_IN then
+    let _ = print ("pg copy: expected CopyInResponse (G), got " ++ show mtype) in
+    let (_ok, _n) = _copy_drain fd false 0 in
+    (0 - 1)
+  else
+    let _ = _stream_copy_rows fd rows in
+    let _ = _send_copy_done fd in
+    let (ok, count) = _copy_drain fd true 0 in
+    if ok then count else (0 - 1)
   ;
 
 // ---- Cleanup ------------------------------------------------------------
