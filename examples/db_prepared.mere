@@ -1,0 +1,83 @@
+// examples/db_prepared.mere — named prepared statements + repeated Execute.
+//
+// pg_query_params re-parses the SQL server-side on every call. For hot
+// paths this is wasteful — pg_prepare / pg_execute let us pay the Parse
+// cost once and Execute many times against the cached plan.
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-prep -p 15442:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_prepared.mere > /tmp/dbp.wat
+//   wat2wasm --enable-tail-call /tmp/dbp.wat -o /tmp/dbp.wasm
+//   node scripts/run_wasm.js /tmp/dbp.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let fd = pg_connect_url "postgres://postgres@127.0.0.1:15442/postgres" in
+if fd < 0 then
+  let _ = print "connect failed" in
+  ()
+else
+  let _ = pg_query fd "DROP TABLE IF EXISTS numbers" in
+  let _ = pg_query fd "CREATE TABLE numbers (n int, label text)" in
+
+  // Parse once — the server caches the plan under the given name.
+  let ins = pg_prepare fd "ins_num"
+    "INSERT INTO numbers VALUES ($1::int, $2)" in
+  let _ = print ("prepared: " ++ ins) in
+
+  // Execute five times with different params. No Parse on the wire —
+  // each call sends Bind + Execute + Sync only.
+  let _ = pg_execute fd ins (Cons (Some "1", Cons (Some "one", Nil))) in
+  let _ = pg_execute fd ins (Cons (Some "2", Cons (Some "two", Nil))) in
+  let _ = pg_execute fd ins (Cons (Some "3", Cons (Some "three", Nil))) in
+  let _ = pg_execute fd ins (Cons (Some "4", Cons (Some "four", Nil))) in
+  let _ = pg_execute fd ins (Cons (Some "5", Cons (Some "five", Nil))) in
+
+  // Verify pg_prepared_statements reflects the cache.
+  let _ = print "" in
+  let _ = print "-- pg_prepared_statements:" in
+  let stmts = pg_query fd
+    "SELECT name, statement FROM pg_prepared_statements WHERE name = 'ins_num'" in
+  let _ = print_rows stmts in
+
+  // Read the rows back — also via a named prepared statement, so this
+  // exercises the "returns rows" branch of Execute (RowDescription
+  // arrives before DataRows).
+  let sel = pg_prepare fd "sel_all"
+    "SELECT n, label FROM numbers ORDER BY n" in
+  let _ = print "" in
+  let _ = print "-- rows via pg_execute:" in
+  let rows = pg_execute fd sel Nil in
+  let _ = print_rows rows in
+
+  // Deallocate: server-side cache is released.
+  let _ = pg_deallocate fd ins in
+  let _ = pg_deallocate fd sel in
+  let _ = print "" in
+  let _ = print "-- pg_prepared_statements after deallocate:" in
+  let stmts2 = pg_query fd "SELECT name FROM pg_prepared_statements" in
+  let _ = match stmts2 with
+          | Nil -> print "  (empty — as expected)"
+          | _ -> print_rows stmts2 in
+
+  let _ = pg_close fd in
+  ()
