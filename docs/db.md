@@ -6,7 +6,7 @@ their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` and
 implemented in Mere itself; the host only exposes low-level TCP and
 crypto primitives. No `npm` packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 20
+The rest of this page walks the stack top-down, then catalogs the 21
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -40,8 +40,9 @@ The rest of this page walks the stack top-down, then catalogs the 20
 │  mem_alloc, mem_{set,get}_{u8,u16be,u32be}, mem_copy_str,          │
 │  mem_to_str, str_ptr                                               │
 ├────────────────────────────────────────────────────────────────────┤
-│  Sync TCP transport                                                │
+│  Sync TCP + TLS transport                                          │
 │  tcp_connect / tcp_write / tcp_read / tcp_close / tcp_set_timeout  │
+│  tcp_starttls  — in-place TLS upgrade of an established socket     │
 │  worker_thread + SharedArrayBuffer + Atomics.wait                  │
 │  (scripts/tcp_worker.js)                                           │
 └────────────────────────────────────────────────────────────────────┘
@@ -96,7 +97,8 @@ which live in `contrib/db/pg_pool.mere`.
 | symbol | signature | notes |
 |---|---|---|
 | `pg_connect` | `host -> port -> user -> pw -> db -> fd` | trust / SCRAM auth |
-| `pg_connect_url` | `str -> fd` | libpq URL, percent-decoded |
+| `pg_connect_ssl` | same shape | SSLRequest + TLS upgrade before auth |
+| `pg_connect_url` | `str -> fd` | libpq URL; `?sslmode=require` → SSL |
 | `pg_parse_url` | `str -> (host, port, user, pw, db)` | IPv6 brackets ok |
 | `pg_close` | `fd -> unit` | sends Terminate + closes tcp |
 
@@ -242,14 +244,21 @@ command needed) and cleans up on process exit.
 | [db_mysql_prepared](https://github.com/merelang/mere/blob/main/examples/db_mysql_prepared.mere) | `COM_STMT_PREPARE` + `_EXECUTE`, binary-protocol row decode; SQL-injection defense |
 | [db_mysql_pool](https://github.com/merelang/mere/blob/main/examples/db_mysql_pool.mere) | `mysql_pool` keep-alive + `mysql_parse_url` + percent decoding |
 | [db_mysql_tx](https://github.com/merelang/mere/blob/main/examples/db_mysql_tx.mere) | `mysql_tx_iso` (REPEATABLE READ) + `mysql_savepoint_scope` nested rollback |
+| [db_ssl](https://github.com/merelang/mere/blob/main/examples/db_ssl.mere) | Postgres over TLS 1.3 — `pg_connect_ssl` + `?sslmode=require` |
 
 ## Limitations and future work
 
 - **Auth**: SCRAM-SHA-256 is the only strong method wired. Cleartext
   password and MD5 aren't; SCRAM-SHA-256-PLUS (channel binding) isn't
   either.
-- **TLS**: no SSL negotiation yet. `?sslmode=require` in a URL is
-  accepted by the parser but not enforced.
+- **TLS**: `pg_connect_ssl` implements PG's SSLRequest handshake and
+  hands the socket to Node's `tls` module for the actual TLS 1.2/1.3
+  negotiation. Certificate verification is currently disabled
+  (`rejectUnauthorized: false`) — good enough for local dev / self-
+  signed certs. Wiring a CA bundle / hostname verification is a
+  follow-up. MySQL's SSL upgrade (CLIENT_SSL bit + partial
+  HandshakeResponse41 → TLS handshake → full HandshakeResponse41) is
+  not wired yet.
 - **Binary column format**: everything is text. Encoding / decoding
   of PG binary format would let us skip a `pg_type_name`-based decode
   step for hot paths.

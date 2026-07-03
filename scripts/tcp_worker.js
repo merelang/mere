@@ -23,6 +23,7 @@
 'use strict';
 
 const net = require('net');
+const tls = require('tls');
 const { parentPort, workerData } = require('worker_threads');
 
 const OP = {
@@ -31,6 +32,7 @@ const OP = {
   READ: 3,
   CLOSE: 4,
   SET_TIMEOUT: 5,
+  STARTTLS: 6,
 };
 
 const { sab, dataOffset } = workerData;
@@ -52,15 +54,11 @@ function respond(status, resultLen) {
   Atomics.notify(ctrl, 0);
 }
 
-function doConnect(hostLen, port) {
-  const host = decodeUtf8(0, hostLen);
-  const fd = nextFd++;
-  // allowHalfOpen: peer FIN (nc, some HTTP proxies, ...) shouldn't auto-close
-  // our write side. DB clients terminate explicitly via tcp_close.
-  const socket = net.createConnection({ host, port, allowHalfOpen: true });
-  const entry = { socket, rxBuf: [], rxLen: 0, closed: false, err: null, pendingRead: null };
-  sockets.set(fd, entry);
-
+// Wire the standard set of stream listeners into `socket`, forwarding
+// data / error / close / timeout events into `entry`'s shared state.
+// Extracted so doStartTls can re-attach the same handlers to the
+// upgraded TLS socket after the raw net.Socket is unwrapped.
+function attachStreamListeners(entry, socket) {
   socket.on('data', (chunk) => {
     entry.rxBuf.push(chunk);
     entry.rxLen += chunk.length;
@@ -92,10 +90,6 @@ function doConnect(hostLen, port) {
       cb();
     }
   });
-  // socket.setTimeout fires this after N ms of idle read. Node's default
-  // is to leave the socket open — we resolve the pending read as "0
-  // bytes" so pg_wait_notify can distinguish a timeout from a real EOF
-  // (which would set entry.closed).
   socket.on('timeout', () => {
     if (entry.pendingRead) {
       const cb = entry.pendingRead;
@@ -103,6 +97,18 @@ function doConnect(hostLen, port) {
       cb();
     }
   });
+}
+
+function doConnect(hostLen, port) {
+  const host = decodeUtf8(0, hostLen);
+  const fd = nextFd++;
+  // allowHalfOpen: peer FIN (nc, some HTTP proxies, ...) shouldn't auto-close
+  // our write side. DB clients terminate explicitly via tcp_close.
+  const socket = net.createConnection({ host, port, allowHalfOpen: true });
+  const entry = { socket, host, rxBuf: [], rxLen: 0, closed: false, err: null, pendingRead: null };
+  sockets.set(fd, entry);
+
+  attachStreamListeners(entry, socket);
 
   entry.pendingConnect = () => {
     if (entry.err) respond(-1, 0);
@@ -111,6 +117,53 @@ function doConnect(hostLen, port) {
   socket.once('connect', () => {
     const cb = entry.pendingConnect;
     if (cb) { entry.pendingConnect = null; cb(); }
+  });
+}
+
+// Upgrade `entry.socket` to a TLS socket in place. All buffered rx bytes
+// have already been drained by the caller before requesting STARTTLS
+// (both PG's SSLRequest / MySQL's SSLRequest expect the client to be
+// caught up), so we just need to hand the existing socket to
+// tls.connect and rewire our listeners onto the new TLSSocket.
+function doStartTls(fd, hostLen) {
+  const entry = sockets.get(fd);
+  if (!entry || entry.closed) { respond(-1, 0); return; }
+
+  const rawSocket = entry.socket;
+  // Detach every listener so tls.connect can consume handshake bytes
+  // without competing with our data handler.
+  rawSocket.removeAllListeners();
+
+  // Fresh servername has to come from somewhere — the caller can pass
+  // an SNI value via the STARTTLS request payload (host string in the
+  // shared buffer). If unspecified, fall back to the connect-time host.
+  const sniRaw = hostLen > 0 ? decodeUtf8(0, hostLen) : entry.host;
+  // SNI is defined for DNS names only; per RFC 6066, IP literals are
+  // rejected and Node warns about setting servername to one. Detect
+  // an IPv4/IPv6 literal and drop SNI in that case.
+  const sni = net.isIP(sniRaw) === 0 ? sniRaw : undefined;
+
+  const tlsSocket = tls.connect({
+    socket: rawSocket,
+    rejectUnauthorized: false,   // MVP: self-signed certs work; production
+                                 // hardening = wire a CA / servername opt.
+    servername: sni,
+  });
+
+  let settled = false;
+  tlsSocket.once('secureConnect', () => {
+    if (settled) return;
+    settled = true;
+    entry.socket = tlsSocket;
+    attachStreamListeners(entry, tlsSocket);
+    respond(0, 0);
+  });
+  tlsSocket.once('error', (e) => {
+    if (settled) return;
+    settled = true;
+    entry.err = e;
+    entry.closed = true;
+    respond(-1, 0);
   });
 }
 
@@ -189,6 +242,7 @@ parentPort.on('message', () => {
       case OP.READ:        doRead(arg1, arg2); break;
       case OP.CLOSE:       doClose(arg1); break;
       case OP.SET_TIMEOUT: doSetTimeout(arg1, arg2); break;
+      case OP.STARTTLS:    doStartTls(arg1, arg2); break;
       default:             respond(-1, 0);
     }
   } catch (e) {

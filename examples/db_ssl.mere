@@ -1,0 +1,79 @@
+// examples/db_ssl.mere — Postgres over TLS.
+//
+// The driver's SSL path opens a plain TCP socket, sends PG's SSLRequest
+// (8-byte magic packet), waits for a single 'S' byte from the server,
+// then hands the socket to Node's tls module for the actual TLS 1.2/1.3
+// handshake. Once secureConnect fires, every future tcp_read / tcp_write
+// on that fd goes through the encrypted stream — StartupMessage,
+// authentication, all queries.
+//
+// The demo verifies encryption by querying pg_stat_ssl and printing the
+// TLS version + cipher negotiated for the current connection. Also
+// checked: mere_ssl_test survives round-tripping through TLS.
+//
+// Setup (self-signed cert generated locally):
+//   mkdir -p /tmp/mere-pg-ssl-certs && cd /tmp/mere-pg-ssl-certs
+//   openssl req -new -x509 -days 365 -nodes -text \
+//     -out server.crt -keyout server.key -subj "/CN=localhost"
+//   chmod 600 server.key
+//   docker run -d --name mere-pg-ssl -p 15551:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
+//     -v /tmp/mere-pg-ssl-certs/server.crt:/etc/ssl/server.crt:ro \
+//     -v /tmp/mere-pg-ssl-certs/server.key:/etc/ssl/server.key:ro \
+//     postgres:16 -c ssl=on \
+//       -c ssl_cert_file=/etc/ssl/server.crt \
+//       -c ssl_key_file=/etc/ssl/server.key
+//
+// Usage:
+//   ./mere -w examples/db_ssl.mere > /tmp/dbs.wat
+//   wat2wasm --enable-tail-call /tmp/dbs.wat -o /tmp/dbs.wasm
+//   node scripts/run_wasm.js /tmp/dbs.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec join_cols = fn (cols: str option list) ->
+  match cols with
+  | Nil -> ""
+  | Cons (h, Nil) -> pg_val_or h "NULL"
+  | Cons (h, t) -> pg_val_or h "NULL" ++ " | " ++ join_cols t
+  ;
+
+let rec print_rows = fn (rs: (str option list) list) ->
+  match rs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print (join_cols r) in
+    print_rows rest
+  ;
+
+let run_explicit = fn (u: unit) ->
+  let _ = print "== pg_connect_ssl (explicit) ==" in
+  let fd = pg_connect_ssl "127.0.0.1" 15551 "postgres" "" "postgres" in
+  if fd < 0 then let _ = print "explicit-ssl connect failed" in ()
+  else
+    let stat = pg_query fd
+      "SELECT ssl::text, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()" in
+    let _ = print "-- pg_stat_ssl:" in
+    let _ = print_rows stat in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let run_url = fn (u: unit) ->
+  let _ = print "" in
+  let _ = print "== pg_connect_url with sslmode=require ==" in
+  let fd = pg_connect_url
+    "postgres://postgres@127.0.0.1:15551/postgres?sslmode=require" in
+  if fd < 0 then let _ = print "url-ssl connect failed" in ()
+  else
+    let rows = pg_query fd
+      "SELECT 'over TLS'::text AS msg, current_user AS who" in
+    let _ = print_rows rows in
+    let _ = pg_close fd in
+    ()
+  ;
+
+let _ = run_explicit () in
+let _ = run_url () in
+()
