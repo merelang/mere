@@ -246,6 +246,13 @@ function tcpCall(op, arg1, arg2) {
       // Coerce back to signed i32 — PG lengths fit comfortably in 31 bits.
       return new DataView(memory.buffer).getInt32((ptr | 0) + (off | 0), false);
     },
+    mem_set_u16be: (ptr, off, val) => {
+      new DataView(memory.buffer).setUint16((ptr | 0) + (off | 0), val & 0xffff, false);
+      return 0;
+    },
+    mem_get_u16be: (ptr, off) => {
+      return new DataView(memory.buffer).getUint16((ptr | 0) + (off | 0), false);
+    },
 
     // mem_copy_str(dst: int, off: int, s: str) -> int
     //   Copies s's bytes (up to but excluding its terminating NUL) into
