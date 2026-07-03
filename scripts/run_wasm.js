@@ -126,21 +126,56 @@ const wasmPath = process.argv[2];
         return e.status || 1;
       }
     },
+    // arg_count / arg_get — user-facing CLI args (everything after the
+    // .wasm path on the command line). Same as `argv[1:]` in a normal
+    // program: `node run_wasm.js foo.wasm --flag path/to/input` gives
+    // arg_count() = 2, arg_get(0) = "--flag", arg_get(1) = "path/…".
+    // Needed for self-hosted CLI tools (mere-in-Mere compiler driver
+    // that takes an input file path).
+    arg_count: () => process.argv.length - 3,
+    arg_get: (n) => {
+      const args = process.argv.slice(3);
+      const v = args[n | 0] || "";
+      const bytes = Buffer.from(v + "\0", "utf8");
+      const ptr = bumpAlloc(bytes.length);
+      new Uint8Array(memory.buffer).set(bytes, ptr);
+      return ptr;
+    },
   };
 
-  // Allocate bytes by bumping the `__lang_bump` mutable global.
-  // We can't easily mutate Wasm globals from JS, so we use a simple
-  // approach: append to a fixed scratch region near the end of memory.
-  // For Phase 27.2 MVP, just use a static offset that's known to be unused.
-  let scratchOffset = 0; // set after instantiation based on memory size
+  // Allocate on the shared Mere heap by advancing `$__lang_bump`
+  // (mirrors the newer run_http_server.js). Grows memory one 64KB
+  // page at a time when a write would exceed the current buffer.
+  // Small allocations (env / getenv strings, single args) don't
+  // trigger growth; the self-host CLI reading multi-KB source files
+  // does.
+  let langBump = null;  // set after instantiate
+  const PAGE = 64 * 1024;
   const bumpAlloc = (n) => {
-    const ptr = scratchOffset;
-    scratchOffset += (n + 7) & ~7; // 8-byte align
-    return ptr;
+    if (!langBump) {
+      // Legacy fallback for pre-Phase-55 wasm that didn't export
+      // __lang_bump. A fixed high-offset scratch worked for the
+      // tiny compute demos this runner was originally shipped for.
+      // Real programs should recompile with a current mere.
+      const p = scratchOffset;
+      scratchOffset += (n + 7) & ~7;
+      return p;
+    }
+    const aligned = (n + 7) & ~7;
+    const start = langBump.value;
+    const needed = start + aligned;
+    if (needed > memory.buffer.byteLength) {
+      const growPages = Math.ceil((needed - memory.buffer.byteLength) / PAGE);
+      memory.grow(growPages);
+    }
+    langBump.value = start + aligned;
+    return start;
   };
+  let scratchOffset = 56 * 1024;  // used only when langBump is absent
 
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
   memory = instance.exports.memory;
+  langBump = instance.exports.__lang_bump || null;
 
   // Phase 48.2 (C2 Stage 2): helper for invoking a Mere closure value
   // (an i32 pointer to a 2-word { env, fn_idx } record in linear memory)
@@ -166,11 +201,6 @@ const wasmPath = process.argv[2];
   };
   // Expose for hosts that bind extra env imports later (e.g. DOM glue).
   globalThis.__mere_call_closure = callMereClosure;
-
-  // Initialize scratch to start at the END of currently-allocated memory.
-  // Wasm memory starts at 1 page = 64KB and grows. Use offset 56KB as
-  // scratch (safe for most small examples).
-  scratchOffset = 56 * 1024;
 
   try {
     instance.exports.main();

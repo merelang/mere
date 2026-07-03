@@ -1,0 +1,44 @@
+// examples/selfhost_wasm_cli.mere — CLI wrapper for the self-hosted
+// Mere→Wasm compiler. Takes a `.mere` file path as argv[0] (i.e. the
+// first arg after the .wasm path), pipes it through
+// `parse_and_emit_file` from contrib/codegen/codegen_wasm.mere, and
+// prints the resulting WAT text to stdout.
+//
+// Full self-host round-trip:
+//
+//   # 1. build the self-hosted compiler (OCaml `mere` bootstrap)
+//   ./_build/default/bin/mere.exe -w examples/selfhost_wasm_cli.mere > /tmp/selfmere.wat
+//   wat2wasm --enable-tail-call /tmp/selfmere.wat -o /tmp/selfmere.wasm
+//
+//   # 2. use it to compile a target source, stripping the trailing
+//   #    `()` from main's return-value auto-print
+//   node scripts/run_wasm.js /tmp/selfmere.wasm target.mere | sed '$d' > target.wat
+//
+//   # 3. assemble target.wat and run — same output as
+//   #    `./_build/default/bin/mere.exe target.mere` (via OCaml mere)
+//   wat2wasm --enable-tail-call target.wat -o target.wasm
+//   node scripts/run_wasm.js target.wasm
+//
+// This is the CLI-shaped counterpart to
+// `contrib/site/playground/selfhost-compile.mere` (which drives the
+// same pipeline from a browser textarea). The self-hosted output is
+// larger than the reference (unconditional preamble, less pruning)
+// but the assembled Wasm produces identical results.
+
+extern fn arg_count: unit -> int;
+extern fn arg_get: int -> str;
+
+import "../contrib/codegen/codegen_wasm.mere";
+
+// The codegen's `main` epilogue auto-prints main's return value —
+// `0` for int, `()` for unit — so this program emits one extra
+// line after the WAT output. Callers strip it with `sed '$d'` or
+// `head -n -1`. See the Usage section above for the exact shell
+// pipeline that gives clean WAT.
+let _ =
+  if arg_count () < 1 then
+    print "usage: node run_wasm.js <this.wasm> <input.mere>"
+  else
+    print (parse_and_emit_file (arg_get 0))
+in
+()
