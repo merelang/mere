@@ -1,0 +1,256 @@
+// contrib/db/pg.mere — PostgreSQL wire protocol client, pure Mere.
+//
+// Speaks the v3 frontend/backend protocol on top of the Node host's
+// synchronous TCP externs (scripts/tcp_worker.js). No npm — the entire
+// message framing and parsing lives here.
+//
+// Scope (MVP):
+//   - StartupMessage → AuthenticationOk → ReadyForQuery
+//   - Trust-auth ONLY (SCRAM-SHA-256 not yet — matches pg_hba.conf
+//     `local  all  all  trust` / `host  all  all  127.0.0.1/32  trust`)
+//   - Simple Query ('Q') → rows as (str list) list
+//   - ErrorResponse ('E') → surfaced as a printed error, empty result
+//   - CommandComplete tag ignored
+//
+// Not yet:
+//   - password / md5 / SCRAM auth
+//   - Extended query (Parse / Bind / Execute) — no parameterized queries
+//   - COPY, LISTEN/NOTIFY, cursors, prepared statements
+//   - Binary column encoding — everything returned as text
+//   - SSL/TLS
+//
+// Byte-level primitives (str_ptr / mem_alloc / mem_set_u8 / …) come from
+// scripts/run_wasm.js. See examples/tcp_smoke.mere for the shape of the
+// underlying tcp_* wire.
+
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn str_ptr: str -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> unit;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_set_u32be: int -> int -> int -> unit;
+extern fn mem_get_u32be: int -> int -> int;
+extern fn mem_set_u16be: int -> int -> int -> unit;
+extern fn mem_get_u16be: int -> int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+
+// ---- Low-level socket helpers -------------------------------------------
+
+// Read exactly `want` bytes into buf. Loops until the OS delivers them.
+// Returns actual bytes read (< want on EOF / error).
+let rec _read_exact = fn (fd: int) -> fn (buf: int) -> fn (want: int) -> fn (got: int) ->
+  if got >= want then got
+  else
+    let n = tcp_read fd (buf + got) (want - got) in
+    if n <= 0 then got
+    else _read_exact fd buf want (got + n)
+  ;
+
+// ---- Frame construction -------------------------------------------------
+
+// StartupMessage: 4-byte total len + 4-byte proto (0x00030000)
+//   + "user\0<user>\0" + optional "database\0<db>\0" + "\0"
+// Sends the whole thing in one tcp_write. Buffer sizing is exact.
+let _send_startup = fn (fd: int) -> fn (user: str) -> fn (db: str) ->
+  let user_len = str_len user in
+  let db_len = str_len db in
+  let payload_len =
+    // "user\0" + user + "\0" + "database\0" + db + "\0" + trailing \0
+    5 + user_len + 1 + 9 + db_len + 1 + 1 in
+  let total_len = 8 + payload_len in    // 4 (len) + 4 (proto) + payload
+  let buf = mem_alloc total_len in
+  let _ = mem_set_u32be buf 0 total_len in
+  let _ = mem_set_u32be buf 4 196608 in  // 0x00030000
+  let off1 = mem_copy_str buf 8 "user" in
+  let _ = mem_set_u8 buf off1 0 in
+  let off2 = mem_copy_str buf (off1 + 1) user in
+  let _ = mem_set_u8 buf off2 0 in
+  let off3 = mem_copy_str buf (off2 + 1) "database" in
+  let _ = mem_set_u8 buf off3 0 in
+  let off4 = mem_copy_str buf (off3 + 1) db in
+  let _ = mem_set_u8 buf off4 0 in
+  let _ = mem_set_u8 buf (off4 + 1) 0 in   // final \0 terminator
+  tcp_write fd buf total_len
+  ;
+
+// Query message: 'Q' + 4-byte len + sql\0
+let _send_query = fn (fd: int) -> fn (sql: str) ->
+  let sql_len = str_len sql in
+  let msg_len = 4 + sql_len + 1 in   // len-field itself + SQL + NUL
+  let total = 1 + msg_len in         // + 1 for 'Q'
+  let buf = mem_alloc total in
+  let _ = mem_set_u8 buf 0 81 in     // 'Q'
+  let _ = mem_set_u32be buf 1 msg_len in
+  let off = mem_copy_str buf 5 sql in
+  let _ = mem_set_u8 buf off 0 in
+  tcp_write fd buf total
+  ;
+
+// Terminate message: 'X' + 4-byte len (= 4).
+let _send_terminate = fn (fd: int) ->
+  let buf = mem_alloc 5 in
+  let _ = mem_set_u8 buf 0 88 in     // 'X'
+  let _ = mem_set_u32be buf 1 4 in
+  tcp_write fd buf 5
+  ;
+
+// ---- Message reader -----------------------------------------------------
+//
+// Message layout on the wire: 1-byte type + 4-byte length (BE) that
+// includes the length field itself but not the type. Payload follows,
+// length-4 bytes.
+//
+// Returns a triple: (msg_type, payload_ptr, payload_len). Type is -1 on
+// short read / EOF.
+
+let _recv_msg = fn (fd: int) ->
+  let hdr = mem_alloc 5 in
+  let n = _read_exact fd hdr 5 0 in
+  if n < 5 then (-1, 0, 0)
+  else
+    let mtype = mem_get_u8 hdr 0 in
+    let mlen = mem_get_u32be hdr 1 in
+    let payload_len = mlen - 4 in
+    if payload_len <= 0 then (mtype, 0, 0)
+    else
+      let payload = mem_alloc payload_len in
+      let read_n = _read_exact fd payload payload_len 0 in
+      if read_n < payload_len then (-1, 0, 0)
+      else (mtype, payload, payload_len)
+  ;
+
+// ---- Message-type constants ---------------------------------------------
+
+let _MSG_AUTH = 82;           // 'R'
+let _MSG_PARAM = 83;          // 'S'
+let _MSG_BACKEND_KEY = 75;    // 'K'
+let _MSG_READY = 90;          // 'Z'
+let _MSG_ROW_DESC = 84;       // 'T'
+let _MSG_DATA_ROW = 68;       // 'D'
+let _MSG_CMD_COMPLETE = 67;   // 'C'
+let _MSG_ERROR = 69;          // 'E'
+let _MSG_NOTICE = 78;         // 'N'
+let _MSG_EMPTY_QUERY = 73;    // 'I'
+
+// ---- Handshake ----------------------------------------------------------
+//
+// After sending StartupMessage, expect (in some order):
+//   R (AuthenticationOk with sub-status = 0)
+//   0..* S (ParameterStatus)
+//   1 K   (BackendKeyData)
+//   1 Z   (ReadyForQuery)
+// Any 'R' sub-status other than 0 means the server wants password /
+// SCRAM / md5, which trust-mode MVP doesn't support — bail with an
+// error and empty rows.
+
+let rec _drain_until_ready = fn (fd: int) -> fn (ok: bool) ->
+  let (mtype, payload, plen) = _recv_msg fd in
+  if mtype < 0 then false
+  else if mtype == _MSG_READY then ok
+  else if mtype == _MSG_ERROR then
+    let _ = print ("pg error: " ++ mem_to_str payload plen) in
+    _drain_until_ready fd false
+  else if mtype == _MSG_AUTH then
+    let sub = mem_get_u32be payload 0 in
+    if sub == 0 then _drain_until_ready fd ok
+    else
+      let _ = print ("pg: unsupported auth method " ++ show sub ++
+        " (this MVP only supports 'trust' — set pg_hba.conf accordingly)") in
+      _drain_until_ready fd false
+  else
+    // Ignore ParameterStatus, BackendKeyData, NoticeResponse, etc.
+    _drain_until_ready fd ok
+  ;
+
+// ---- Public entry: connect ----------------------------------------------
+//
+// Returns fd (>= 1) on success, -1 on failure. Auth failures print
+// diagnostic messages to stdout and return -1.
+
+let pg_connect = fn (host: str) -> fn (port: int) -> fn (user: str) -> fn (db: str) ->
+  let fd = tcp_connect host port in
+  if fd < 1 then
+    let _ = print ("pg: tcp connect failed to " ++ host ++ ":" ++ show port) in
+    -1
+  else
+    let _ = _send_startup fd user db in
+    if _drain_until_ready fd true then fd
+    else
+      let _ = tcp_close fd in
+      -1
+  ;
+
+// ---- Row parsing --------------------------------------------------------
+//
+// DataRow payload: 2-byte column count (BE), then per column:
+//   4-byte length (BE, -1 = NULL) + `length` bytes of text.
+// NULL columns become the string "" (MVP simplification — a real API
+// would use option str).
+
+let rec _parse_data_row_cols = fn (payload: int) -> fn (off: int)
+                            -> fn (remaining: int) -> fn (acc: str list) ->
+  if remaining == 0 then acc
+  else
+    let col_len = mem_get_u32be payload off in
+    if col_len < 0 then
+      _parse_data_row_cols payload (off + 4) (remaining - 1) (Cons ("", acc))
+    else
+      let s = mem_to_str (payload + off + 4) col_len in
+      _parse_data_row_cols payload (off + 4 + col_len) (remaining - 1) (Cons (s, acc))
+  ;
+
+let _parse_data_row = fn (payload: int) ->
+  let cols = mem_get_u16be payload 0 in
+  // Cons-prepends leave the accumulator reversed — but list_rev isn't
+  // universally available across bootstraps; write our own tiny reverse.
+  let rec rev_help = fn (xs: str list) -> fn (acc: str list) ->
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) -> rev_help t (Cons (h, acc)) in
+  rev_help (_parse_data_row_cols payload 2 cols Nil) Nil
+  ;
+
+// ---- Simple query -------------------------------------------------------
+//
+// After sending Query('Q'), the server streams:
+//   T (RowDescription) — column metadata, skipped in MVP
+//   0..* D (DataRow)
+//   C (CommandComplete)
+//   Z (ReadyForQuery)  — end marker
+// On error, E arrives instead; we print it and return the rows we did
+// manage to collect.
+
+let rec _collect_rows = fn (fd: int) -> fn (acc: (str list) list) ->
+  let (mtype, payload, plen) = _recv_msg fd in
+  if mtype < 0 then acc
+  else if mtype == _MSG_READY then acc
+  else if mtype == _MSG_DATA_ROW then
+    _collect_rows fd (Cons (_parse_data_row payload, acc))
+  else if mtype == _MSG_ERROR then
+    let _ = print ("pg query error: " ++ mem_to_str payload plen) in
+    _collect_rows fd acc
+  else
+    // T (RowDescription) / C (CommandComplete) / N (Notice) — ignored.
+    _collect_rows fd acc
+  ;
+
+let pg_query = fn (fd: int) -> fn (sql: str) ->
+  let _ = _send_query fd sql in
+  // Rows come in reverse; flip once at the end.
+  let rec rev_rows = fn (xs: (str list) list) -> fn (acc: (str list) list) ->
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) -> rev_rows t (Cons (h, acc)) in
+  rev_rows (_collect_rows fd Nil) Nil
+  ;
+
+// ---- Cleanup ------------------------------------------------------------
+
+let pg_close = fn (fd: int) ->
+  let _ = _send_terminate fd in
+  tcp_close fd
+  ;
