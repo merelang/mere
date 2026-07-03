@@ -1,12 +1,13 @@
 # Database support
 
-Mere ships pure-Mere PostgreSQL and MySQL clients. Both wire protocols,
-their auth flows (SCRAM-SHA-256 for PG, `mysql_native_password` and
-`caching_sha2_password` for MySQL), and everything on top are
-implemented in Mere itself; the host only exposes low-level TCP and
-crypto primitives. No `npm` packages involved.
+Mere ships pure-Mere PostgreSQL, MySQL, and Redis clients. All three
+wire protocols, their auth flows (SCRAM-SHA-256 for PG,
+`mysql_native_password` and `caching_sha2_password` for MySQL, `AUTH`
+for Redis), and everything on top are implemented in Mere itself; the
+host only exposes low-level TCP and crypto primitives. No `npm`
+packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 23
+The rest of this page walks the stack top-down, then catalogs the 24
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -31,6 +32,11 @@ The rest of this page walks the stack top-down, then catalogs the 23
 │  ─────────────────────         ────────────────────────            │
 │  Keep-alive pool               Keep-alive pool                     │
 │  Idle event pump                                                   │
+│                                                                    │
+│  contrib/db/redis.mere                                             │
+│  ─────────────────────                                             │
+│  RESP2 protocol (Simple string / Error / Integer / Bulk / Array)   │
+│  redis_command + typed extractors + AUTH                           │
 ├────────────────────────────────────────────────────────────────────┤
 │  Crypto helpers                                                    │
 │  sha256, hmac_sha256, pbkdf2_sha256, base64_encode/decode,         │
@@ -248,6 +254,7 @@ command needed) and cleans up on process exit.
 | [db_ssl](https://github.com/merelang/mere/blob/main/examples/db_ssl.mere) | Postgres over TLS 1.3 — `pg_connect_ssl` + `?sslmode=require` |
 | [db_mysql_ssl](https://github.com/merelang/mere/blob/main/examples/db_mysql_ssl.mere) | MySQL over TLS 1.3 — `mysql_connect_ssl` + `?ssl=true` |
 | [db_ssl_verify](https://github.com/merelang/mere/blob/main/examples/db_ssl_verify.mere) | Cert-chain verification — accept-any / system CAs / custom CA |
+| [db_redis](https://github.com/merelang/mere/blob/main/examples/db_redis.mere) | Redis 7 — RESP2 replies (str / err / int / bulk / array), typed extractors |
 
 ## Limitations and future work
 
@@ -285,6 +292,14 @@ command needed) and cleans up on process exit.
   TLS is wired (`mysql_connect_ssl` / `?ssl=true`). `LISTEN`-style
   pub/sub is not — MySQL has no server-side pub/sub (`NOTIFY` is a PG
   feature).
+- **Redis client is MVP**: `redis_command` speaks RESP2 with all five
+  reply types (simple string / error / integer / bulk / array).
+  Not yet: RESP3 features (attributes / maps / sets / bignum /
+  verbatim / doubles / bools), pipelining, PUB/SUB long-poll loop,
+  TLS (Redis 6+ exposes `--tls-port` — needs its own
+  `redis_connect_ssl` wired against the shared `tcp_starttls`
+  primitive), and binary-safe command args (currently keys/values
+  can't contain embedded NULs on the send side).
 - **SQLite**: not implemented. Would need either a fresh Mere
   implementation of the file format or a bundled Wasm build (sql.js /
   wa-sqlite).

@@ -1,0 +1,253 @@
+// contrib/db/redis.mere — Redis RESP2 client, pure Mere.
+//
+// Speaks the RESP (REdis Serialization Protocol) v2 that every Redis
+// server 6.x/7.x/8.x understands. Same TCP + byte-buffer plumbing as
+// contrib/db/{pg,mysql}. No npm dependencies.
+//
+// Scope (MVP):
+//   - Command send: `*N\r\n$len\r\nARG\r\n…` array of bulk strings
+//   - Reply parse: simple string / error / integer / bulk / nested array
+//   - AUTH (implicit via redis_connect_auth or by sending AUTH manually)
+//   - redis_close
+// Not yet:
+//   - RESP3 attributes / maps / sets / bignum / verbatim / doubles / bools
+//   - Pipelining
+//   - TLS (Redis 6+ exposes a separate --tls-port; add later)
+//   - PUB/SUB (each SUBSCRIBE reply is a normal RESP array — trivial to
+//     add, but the "wait for pushes indefinitely" loop shape needs a
+//     poll primitive)
+//   - Binary-safe values on the SEND side. Command args go through
+//     Mere str (NUL-terminated) so keys/values with embedded NULs
+//     won't round-trip.
+//
+// Reply values arrive as a small variant type:
+//
+//   type redis_reply =
+//     | RRStr  of str                — "+OK\r\n"    (simple string)
+//     | RRErr  of str                — "-msg\r\n"   (error)
+//     | RRInt  of int                — ":42\r\n"
+//     | RRBulk of str option         — "$5\r\nhello\r\n"  (None = nil)
+//     | RRArr  of redis_reply list   — "*2\r\n..."
+//
+// Text/binary safety on the RECV side: bulk strings are read with
+// exact byte counts so short values with embedded NULs come back
+// intact — but the Mere `str` layer will still truncate them when
+// str_len walks past the first NUL. Callers who need binary-safe
+// values should switch to a dedicated bytes type once mere has one.
+
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn str_ptr: str -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> unit;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_to_str: int -> int -> str;
+
+type redis_reply =
+  | RRStr  of str
+  | RRErr  of str
+  | RRInt  of int
+  | RRBulk of (str option)
+  | RRArr  of (redis_reply list);
+
+// ---- Low-level byte reader --------------------------------------------
+
+let _r_read_byte = fn (fd: int) ->
+  let buf = mem_alloc 1 in
+  let n = tcp_read fd buf 1 in
+  if n < 1 then 0 - 1
+  else mem_get_u8 buf 0
+  ;
+
+let rec _r_read_exact = fn (fd: int) -> fn (buf: int) -> fn (want: int) -> fn (got: int) ->
+  if got >= want then got
+  else
+    let n = tcp_read fd (buf + got) (want - got) in
+    if n <= 0 then got
+    else _r_read_exact fd buf want (got + n)
+  ;
+
+// Read bytes up to (and consuming) the CRLF terminator. Returns the
+// content string. We accumulate character by character — RESP lines
+// (status, error, length prefixes) are always short so per-byte reads
+// are fine.
+let rec _r_read_line_bytes = fn (fd: int) -> fn (acc: str) ->
+  let b = _r_read_byte fd in
+  if b < 0 then acc
+  else if b == 13 then
+    let _n = _r_read_byte fd in       // consume '\n'
+    acc
+  else
+    _r_read_line_bytes fd (acc ++ chr b)
+  ;
+
+let _r_read_line = fn (fd: int) -> _r_read_line_bytes fd "";
+
+// Consume `n` bytes then the trailing CRLF (bulk strings are exact-
+// length payloads). Returns the payload as a Mere str.
+let _r_read_bulk = fn (fd: int) -> fn (n: int) ->
+  let buf = mem_alloc (n + 1) in
+  let _ = _r_read_exact fd buf n 0 in
+  let _ = _r_read_byte fd in           // consume '\r'
+  let _ = _r_read_byte fd in           // consume '\n'
+  mem_to_str buf n
+  ;
+
+// ---- RESP parser -----------------------------------------------------
+
+let rec _r_read_reply = fn (fd: int) ->
+  let ty = _r_read_byte fd in
+  if ty < 0 then RRErr "short read"
+  else if ty == 43 then                                    // '+'
+    RRStr (_r_read_line fd)
+  else if ty == 45 then                                    // '-'
+    RRErr (_r_read_line fd)
+  else if ty == 58 then                                    // ':'
+    RRInt (int_of_str (_r_read_line fd))
+  else if ty == 36 then                                    // '$' bulk
+    let len = int_of_str (_r_read_line fd) in
+    if len < 0 then RRBulk None
+    else if len == 0 then
+      let _ = _r_read_byte fd in                            // '\r'
+      let _ = _r_read_byte fd in                            // '\n'
+      RRBulk (Some "")
+    else RRBulk (Some (_r_read_bulk fd len))
+  else if ty == 42 then                                    // '*' array
+    let cnt = int_of_str (_r_read_line fd) in
+    if cnt < 0 then RRArr Nil
+    else RRArr (_r_rev_arr (_r_read_array_elts fd cnt Nil) Nil)
+  else
+    RRErr ("unknown RESP type byte " ++ show ty)
+
+and _r_read_array_elts = fn (fd: int) -> fn (n: int)
+                       -> fn (acc: redis_reply list) ->
+  if n <= 0 then acc
+  else _r_read_array_elts fd (n - 1) (Cons (_r_read_reply fd, acc))
+
+and _r_rev_arr = fn (xs: redis_reply list) -> fn (acc: redis_reply list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _r_rev_arr t (Cons (h, acc))
+  ;
+
+// ---- Command building ------------------------------------------------
+//
+// Redis expects each command as `*N\r\n$len\r\nARG\r\n…`. Everything
+// is ASCII on the wire (the length prefix + framing), and the arg
+// bytes are copied verbatim. Since we build the whole line as a Mere
+// str, arg strings can't contain embedded NULs — that's a known gap
+// on the send side.
+
+let rec _r_list_len = fn (xs) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, t) -> 1 + _r_list_len t
+  ;
+
+let rec _r_build_args = fn (args: str list) -> fn (acc: str) ->
+  match args with
+  | Nil -> acc
+  | Cons (a, rest) ->
+    _r_build_args rest
+      (acc ++ "$" ++ show (str_len a) ++ "\r\n" ++ a ++ "\r\n")
+  ;
+
+// Public: send a command and read its reply. `args` is the argv-style
+// list — command name first, then each arg.
+//
+//   let r = redis_command fd (Cons ("SET", Cons ("key", Cons ("val", Nil))))
+let redis_command = fn (fd: int) -> fn (args: str list) ->
+  let n = _r_list_len args in
+  let cmd = "*" ++ show n ++ "\r\n" ++ _r_build_args args "" in
+  let _ = tcp_write fd (str_ptr cmd) (str_len cmd) in
+  _r_read_reply fd
+  ;
+
+// ---- Connect / auth / close -----------------------------------------
+
+let redis_connect = fn (host: str) -> fn (port: int) ->
+  let fd = tcp_connect host port in
+  if fd < 1 then
+    let _ = print ("redis: tcp connect failed to " ++ host ++ ":" ++ show port) in
+    0 - 1
+  else fd
+  ;
+
+// Send AUTH. `username` may be empty for legacy password-only auth
+// (Redis < 6). Returns true on OK, false on any other reply.
+let redis_auth = fn (fd: int) -> fn (username: str) -> fn (password: str) ->
+  let args =
+    if str_eq username "" then
+      Cons ("AUTH", Cons (password, Nil))
+    else
+      Cons ("AUTH", Cons (username, Cons (password, Nil))) in
+  match redis_command fd args with
+  | RRStr s -> str_eq s "OK"
+  | RRErr msg ->
+    let _ = print ("redis AUTH error: " ++ msg) in false
+  | _ -> false
+  ;
+
+// Send QUIT + close. RESP Redis servers close the socket on receiving
+// QUIT; the reply is a simple +OK that we drop.
+let redis_close = fn (fd: int) ->
+  let _ = redis_command fd (Cons ("QUIT", Nil)) in
+  tcp_close fd
+  ;
+
+// ---- Reply extractors -------------------------------------------------
+//
+// Ergonomics on top of the reply variant. Callers who want to
+// pattern-match manually can, but these cover the "here's what I
+// want, give me None if the shape doesn't match" case:
+
+let redis_as_str = fn (r) ->
+  match r with
+  | RRStr s -> Some s
+  | RRBulk (Some s) -> Some s
+  | _ -> None
+  ;
+
+let redis_as_int = fn (r) ->
+  match r with
+  | RRInt n -> Some n
+  | _ -> None
+  ;
+
+let redis_as_bulk = fn (r) ->
+  match r with
+  | RRBulk v -> Some v         // Some (Some s) or Some None
+  | _ -> None
+  ;
+
+let redis_as_arr = fn (r) ->
+  match r with
+  | RRArr xs -> Some xs
+  | _ -> None
+  ;
+
+let redis_is_ok = fn (r) ->
+  match r with
+  | RRStr s -> str_eq s "OK"
+  | _ -> false
+  ;
+
+// Pretty-printer for demos. Recursive so it can flatten nested arrays.
+let rec redis_show = fn (r) ->
+  match r with
+  | RRStr s -> "+" ++ s
+  | RRErr e -> "-" ++ e
+  | RRInt n -> show n
+  | RRBulk None -> "(nil)"
+  | RRBulk (Some s) -> "\"" ++ s ++ "\""
+  | RRArr xs -> "[" ++ redis_show_arr xs true ++ "]"
+
+and redis_show_arr = fn (xs) -> fn (first: bool) ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, rest) ->
+    let sep = if first then "" else ", " in
+    sep ++ redis_show h ++ redis_show_arr rest false
+  ;
