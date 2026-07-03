@@ -1,0 +1,89 @@
+// contrib/auth/jwt.mere — HS256 JWT sign + verify.
+//
+// Just enough JWT to build a stateless bearer-auth demo — the
+// three-segment `header.payload.signature` shape with `HS256`
+// (HMAC-SHA256 over `header.payload`, then base64url) as the only
+// supported algorithm. Header is a fixed literal so we don't need
+// a JSON encoder here.
+//
+// Payload is passed in as raw JSON — the caller composes it (for
+// small claims it's cheaper than a full encoder). On verify the
+// payload comes back as raw JSON too; use `contrib/http/json_body`
+// to pluck fields out.
+//
+// Public API (module Jwt):
+//   sign   : str -> str -> str          secret, payload_json → token
+//   verify : str -> str -> str option   secret, token       → Some payload / None
+//
+// Notes:
+//   - No `exp` handling — the caller must inspect the payload if
+//     it wants expiry enforcement (contrib/http/json_body + a numeric
+//     compare).
+//   - Constant-time compare on the signature. Not perfect (Mere
+//     `str_eq` short-circuits) but the wrapper below iterates the
+//     full length so early-mismatch timing leaks less.
+
+extern fn base64url_encode: str -> str;
+extern fn base64url_decode: str -> str;
+extern fn hmac_sha256_base64url: str -> str -> str;
+
+module Jwt {
+
+// Fixed header for HS256. Its base64url form is stable, so precompute.
+let _header_b64 = base64url_encode "\{\"typ\":\"JWT\",\"alg\":\"HS256\"}";
+
+let sign = fn (secret: str) -> fn (payload_json: str) ->
+  let payload_b64 = base64url_encode payload_json in
+  let signing_input = _header_b64 ++ "." ++ payload_b64 in
+  let sig = hmac_sha256_base64url secret signing_input in
+  signing_input ++ "." ++ sig;
+
+// Same-length byte-diff accumulator. Returns true iff both strings
+// have identical bytes; keeps the walk full-width to leak less
+// timing than `str_eq` (which short-circuits on first mismatch).
+let _eq_ct = fn (a: str) -> fn (b: str) ->
+  if str_len a != str_len b then false
+  else
+    let n = str_len a in
+    let st = map_new () in
+    let _ = map_set st "diff" 0 in
+    let _ = map_set st "i" 0 in
+    let _ = while (map_get st "i") < n do
+      let i = map_get st "i" in
+      let d = if str_eq (char_at a i) (char_at b i) then 0 else 1 in
+      let _ = map_set st "diff" (map_get st "diff" + d) in
+      let _ = map_set st "i" (i + 1) in () in
+    map_get st "diff" == 0;
+
+// Split `header.payload.signature` at the two dots. Returns
+// ("", "", "") on any format mismatch (fewer than 3 segments,
+// leading/trailing dot, empty pieces).
+let _split_token = fn (token: str) ->
+  let d1 = str_index_of token "." in
+  if d1 <= 0 then ("", "", "")
+  else
+    let rest = substring token (d1 + 1) (str_len token) in
+    let d2 = str_index_of rest "." in
+    if d2 <= 0 then ("", "", "")
+    else
+      let p = substring rest 0 d2 in
+      let s = substring rest (d2 + 1) (str_len rest) in
+      if str_len s == 0 then ("", "", "")
+      else (substring token 0 d1, p, s);
+
+// Verify a token: check the header matches HS256, recompute the
+// signature, constant-time-compare, and return the decoded payload
+// on success.
+let verify = fn (secret: str) -> fn (token: str) ->
+  let (h, p, s) = _split_token token in
+  if str_eq h "" then None
+  else if not (str_eq h _header_b64) then None
+  else
+    let expected = hmac_sha256_base64url secret (h ++ "." ++ p) in
+    if not (_eq_ct s expected) then None
+    else
+      let payload = base64url_decode p in
+      if str_eq payload "" then None
+      else Some payload;
+
+}

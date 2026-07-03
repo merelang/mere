@@ -189,6 +189,36 @@ const wasmPath = process.argv[2];
         .update(msg).digest("hex");
       return writeStr(hex);
     },
+    // base64url_encode / base64url_decode. RFC 4648 §5 base64url —
+    // like base64 but replaces `+` / `/` with `-` / `_` and drops
+    // trailing `=` padding. Needed for JWT (header / payload chunks +
+    // HMAC signature). Bit-level ops in pure Mere are awkward without
+    // shift/and primitives, so we hand off to Node's Buffer here.
+    base64url_encode: (ptr) => {
+      const s = readCStr(ptr);
+      const b = Buffer.from(s, "utf8").toString("base64url");
+      return writeStr(b);
+    },
+    base64url_decode: (ptr) => {
+      const s = readCStr(ptr);
+      try {
+        const b = Buffer.from(s, "base64url").toString("utf8");
+        return writeStr(b);
+      } catch (e) {
+        return writeStr("");
+      }
+    },
+    // HMAC-SHA256 → base64url. Convenience wrapper so JWT signing
+    // doesn't have to do `hmac_sha256_hex` then hex→bytes→base64url
+    // (which requires the same bit-shift plumbing that keeps us
+    // externing base64 in the first place).
+    hmac_sha256_base64url: (keyPtr, msgPtr) => {
+      const key = readCStr(keyPtr);
+      const msg = readCStr(msgPtr);
+      const b = require("crypto").createHmac("sha256", key)
+        .update(msg).digest("base64url");
+      return writeStr(b);
+    },
     // gen_request_id : unit -> str. Returns a fresh 16-char lowercase
     // hex string (8 random bytes from Node's crypto.randomBytes),
     // suitable for a per-request correlation ID. Not a UUID — no
