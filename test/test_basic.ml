@@ -197,6 +197,16 @@ let () =
   check "semi and in mix freely"
     (Pipeline.process "let a = 1 in let b = 2; let c = 3 in a + b + c") "6";
 
+  (* Regression: a nested `let x = v in ...` inside a fn body must
+     not be misrouted through the top-level global-init path just
+     because `x` also names a top-level global. Before the fix, the
+     inner let overwrote the global with the local value. *)
+  check "nested let doesn't clobber top-level global of same name"
+    (Pipeline.process
+      "let entries = 42 in \
+       let f = fn (u: unit) -> let entries = 99 in entries in \
+       let _ = f () in entries") "42";
+
   (* --- new arithmetic operators (E2) --- *)
   check "div"             (Pipeline.process "10 / 3") "3";
   check "mod"             (Pipeline.process "10 % 3") "1";
