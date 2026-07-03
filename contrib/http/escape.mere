@@ -1,0 +1,62 @@
+// contrib/http/escape.mere — JSON / HTML / XML string escaping.
+//
+// Every HTTP handler that emits JSON, HTML, or an XML/RSS feed ends
+// up hand-rolling the same character-by-character escape walker.
+// This module consolidates them into a single set of helpers:
+//
+//   json_escape  : str -> str    escape `"` `\` `\n` `\r` `\t`
+//   jstr         : str -> str    json_escape + wrap in double quotes
+//   html_escape  : str -> str    escape `& < > " '` — safe for both
+//                                 element content and attribute values
+//   xml_escape   : str -> str    same as html_escape (XML and HTML
+//                                 share the same named entities for
+//                                 these five characters)
+//
+// The escape sets cover the demos in this tree; more exotic input
+// (control bytes < 0x20, non-BMP unicode escapes) would need
+// extension. For JSON specifically, servers usually only see the
+// short escape set because the source data is already utf-8 text.
+
+let rec _json_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else if str_eq c "\r" then let _ = strbuf_push buf "\\r" in 0
+            else if str_eq c "\t" then let _ = strbuf_push buf "\\t" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _json_walk s buf (i + 1) n;
+
+let json_escape = fn (s: str) ->
+  let buf = strbuf_new () in
+  _json_walk s buf 0 (str_len s);
+
+// Same but wraps the result in `"..."`. This is the shape you paste
+// straight into a JSON literal: `jstr "hi"` → `"hi"`.
+let jstr = fn (s: str) ->
+  "\"" ++ json_escape s ++ "\"";
+
+let rec _xml_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
+            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
+            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
+            else if str_eq c "\"" then let _ = strbuf_push buf "&quot;" in 0
+            else if str_eq c "'" then let _ = strbuf_push buf "&#39;" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _xml_walk s buf (i + 1) n;
+
+let xml_escape = fn (s: str) ->
+  let buf = strbuf_new () in
+  _xml_walk s buf 0 (str_len s);
+
+// `html_escape` is an alias — HTML5 requires the same five entities
+// (`&`, `<`, `>`, `"`, `'`) in attribute values, and using them in
+// element text content is always safe. Kept as a distinct name so
+// call sites read as "this is going into HTML" vs "this is going
+// into an RSS/Atom feed".
+let html_escape = fn (s: str) -> xml_escape s;

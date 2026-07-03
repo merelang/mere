@@ -39,6 +39,7 @@ import "../contrib/http/security.mere";
 import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
+import "../contrib/http/escape.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
@@ -89,53 +90,7 @@ in
 
 // pack3 / split3 come from contrib/kv/pack.mere.
 
-// ---- JSON + XML escaping ------------------------------------------
-
-let rec _json_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
-            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
-            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _json_walk s buf (i + 1) n
-in
-let jstr = fn (s: str) ->
-  let buf = strbuf_new () in
-  "\"" ++ _json_walk s buf 0 (str_len s) ++ "\""
-in
-
-let rec _xml_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
-            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
-            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
-            else if str_eq c "\"" then let _ = strbuf_push buf "&quot;" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _xml_walk s buf (i + 1) n
-in
-let xml_esc = fn (s: str) ->
-  let buf = strbuf_new () in
-  _xml_walk s buf 0 (str_len s)
-in
-
-let rec _html_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
-  if i >= n then strbuf_to_str buf
-  else
-    let c = char_at s i in
-    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
-            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
-            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
-            else let _ = strbuf_push buf c in 0 in
-    _html_walk s buf (i + 1) n
-in
-let html_esc = fn (s: str) ->
-  let buf = strbuf_new () in
-  _html_walk s buf 0 (str_len s)
-in
+// jstr / xml_escape / html_escape come from contrib/http/escape.mere.
 
 // ---- slug validation ---------------------------------------------
 
@@ -275,8 +230,8 @@ let home_h = fn (req: str) ->
     | Nil -> acc
     | Cons ((slug, created, title, _body), rest) ->
       let li = "<li><a href=\"/post/" ++ slug ++ "\">" ++
-               html_esc title ++ "</a> " ++
-               "<small>" ++ html_esc created ++ "</small></li>" in
+               html_escape title ++ "</a> " ++
+               "<small>" ++ html_escape created ++ "</small></li>" in
       render rest (acc ++ li) in
   let list_html = render rows "" in
   let marker = "<!--POSTS-->" in
@@ -299,10 +254,10 @@ let feed_h = fn (req: str) ->
     | Cons ((slug, created, title, body), rest) ->
       let item =
         "<item>" ++
-          "<title>" ++ xml_esc title ++ "</title>" ++
+          "<title>" ++ xml_escape title ++ "</title>" ++
           "<link>" ++ blog_url ++ "post/" ++ slug ++ "</link>" ++
           "<guid>" ++ blog_url ++ "post/" ++ slug ++ "</guid>" ++
-          "<pubDate>" ++ xml_esc created ++ "</pubDate>" ++
+          "<pubDate>" ++ xml_escape created ++ "</pubDate>" ++
           "<description><![CDATA[" ++ body ++ "]]></description>" ++
         "</item>" in
       render rest (acc ++ item) in
@@ -311,9 +266,9 @@ let feed_h = fn (req: str) ->
   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" ++
   "<rss version=\"2.0\">" ++
   "<channel>" ++
-    "<title>" ++ xml_esc blog_title ++ "</title>" ++
+    "<title>" ++ xml_escape blog_title ++ "</title>" ++
     "<link>" ++ blog_url ++ "</link>" ++
-    "<description>" ++ xml_esc blog_desc ++ "</description>" ++
+    "<description>" ++ xml_escape blog_desc ++ "</description>" ++
     items ++
   "</channel>" ++
   "</rss>"
@@ -370,11 +325,11 @@ let post_page_h = fn (slug: str) ->
     let (created, title, body) = split3 v in
     let rendered = MarkdownHtml.render (split_lines body) in
     let _ = http_set_content_type "text/html; charset=utf-8" in
-    "<!doctype html><meta charset=utf-8><title>" ++ html_esc title ++
-    " — " ++ html_esc blog_title ++ "</title>" ++
+    "<!doctype html><meta charset=utf-8><title>" ++ html_escape title ++
+    " — " ++ html_escape blog_title ++ "</title>" ++
     "<link rel=\"stylesheet\" href=\"/static/style.css\">" ++
-    "<h1>" ++ html_esc title ++ "</h1>" ++
-    "<p class=\"meta\">" ++ html_esc created ++
+    "<h1>" ++ html_escape title ++ "</h1>" ++
+    "<p class=\"meta\">" ++ html_escape created ++
     " · <a href=\"/\">back</a> · <a href=\"/feed.xml\">rss</a></p>" ++
     "<article>" ++ rendered ++ "</article>"
 in
