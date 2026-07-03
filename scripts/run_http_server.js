@@ -170,6 +170,18 @@ const wasmPath = process.argv[2];
       new Uint8Array(memory.buffer).set(bytes, outPtr);
       return outPtr;
     },
+    // hmac_sha256_hex : str -> str -> str  (key, message → 64-char hex).
+    // Wraps Node's `crypto.createHmac('sha256', key)` so Mere-side
+    // webhook receivers can verify GitHub-style `X-Hub-Signature-256`
+    // headers without reimplementing HMAC (which would need bytewise
+    // XOR that the language doesn't currently expose).
+    hmac_sha256_hex: (keyPtr, msgPtr) => {
+      const key = readCStr(keyPtr);
+      const msg = readCStr(msgPtr);
+      const hex = require("crypto").createHmac("sha256", key)
+        .update(msg).digest("hex");
+      return writeStr(hex);
+    },
     // gen_request_id : unit -> str. Returns a fresh 16-char lowercase
     // hex string (8 random bytes from Node's crypto.randomBytes),
     // suitable for a per-request correlation ID. Not a UUID — no

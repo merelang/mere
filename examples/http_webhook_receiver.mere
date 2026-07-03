@@ -1,0 +1,229 @@
+// http_webhook_receiver: GitHub-style webhook receiver + forwarder.
+//
+// Receives POST at /webhooks/github, verifies the
+// X-Hub-Signature-256 HMAC using a shared secret, formats a short
+// human-readable summary of the event, appends it to an audit log
+// (KV), and optionally forwards it to an outbound webhook URL
+// (Slack incoming or Discord — anything that takes a JSON POST).
+//
+// The intent is to demonstrate the three pieces that every real
+// webhook receiver needs, in one place:
+//
+//   1. HMAC signature verification (via the contrib/webhook helper)
+//   2. Body parsing (contrib/http/json_body)
+//   3. Outbound HTTP POST forwarding (contrib/http/client)
+//
+// Middleware stack: access_log → security_headers → cors → router.
+//
+// Endpoints:
+//   POST /webhooks/github           receive + verify + forward
+//   GET  /audit                     JSON of recent deliveries
+//   POST /config/forward            {url} — set outbound target URL
+//   GET  /config                    { forward_url }
+//   GET  /                          minimal status page
+//
+// Secret + initial forward URL are read from env-like KV values so
+// operators can set them without recompiling:
+//
+//   `secret/shared`      HMAC key (defaults to `dev-secret`)
+//   `forward/url`        outbound POST target (default: unset = skip)
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/http_webhook_receiver.mere > /tmp/wh.wat
+//   wat2wasm /tmp/wh.wat -o /tmp/wh.wasm
+//   node scripts/run_http_server.js /tmp/wh.wasm
+//
+//   # send a signed POST (bash):
+//   BODY='{"action":"opened","sender":"alice","repository":"foo/bar"}'
+//   SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac dev-secret -hex | awk '{print $2}')"
+//   curl -sS -X POST -H 'Content-Type: application/json' \
+//     -H "X-GitHub-Event: pull_request" -H "X-Hub-Signature-256: $SIG" \
+//     -d "$BODY" http://localhost:8080/webhooks/github
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/client.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+import "../contrib/webhook/github.mere";
+
+let config_db_path = "/tmp/mere_webhook_config.db" in
+let audit_db_path = "/tmp/mere_webhook_audit.db" in
+
+let config = kv_load config_db_path in
+let audit = kv_load audit_db_path in
+
+// Seed defaults on first boot.
+let _ = if not (kv_has config "secret/shared") then
+          let _ = kv_set config "secret/shared" "dev-secret" in
+          let _ = kv_save config config_db_path in
+          ()
+        else () in
+
+let get_secret = fn (u: unit) ->
+  if kv_has config "secret/shared" then kv_get config "secret/shared"
+  else "dev-secret"
+in
+
+let get_forward_url = fn (u: unit) ->
+  if kv_has config "forward/url" then kv_get config "forward/url"
+  else ""
+in
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+// JSON string escape (mirrors the helper in http_todo_app).
+let rec _esc_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else if str_eq c "\r" then let _ = strbuf_push buf "\\r" in 0
+            else if str_eq c "\t" then let _ = strbuf_push buf "\\t" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _esc_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _esc_walk s buf 0 (str_len s) ++ "\""
+in
+
+// ---- handlers -----------------------------------------------------
+
+let webhook_h = fn (req: str) ->
+  // Header + body strings live in the http glue's request-scoped
+  // scratch region (56K..60K). Any later extern call that goes
+  // through writeStr — hmac_sha256_hex, print via log_with, further
+  // header reads — can wrap the scratch pointer and stomp on the
+  // bytes these locals refer to. Copy each into Mere's own heap by
+  // concatenating with the empty string so the values are stable
+  // for the whole handler.
+  let body = http_current_body () ++ "" in
+  let event = http_get_header "X-GitHub-Event" ++ "" in
+  let sig = http_get_header "X-Hub-Signature-256" ++ "" in
+  let delivery = http_get_header "X-GitHub-Delivery" ++ "" in
+  let secret = get_secret () in
+  if str_eq sig "" then
+    let _ = log_with "warn" "webhook_no_sig"
+      (Cons (("event", event), Nil)) in
+    let _ = http_set_status 401 in
+    "missing X-Hub-Signature-256\n"
+  else if not (GhWebhook.verify_signature secret body sig) then
+    let _ = log_with "warn" "webhook_bad_sig"
+      (Cons (("event", event), Cons (("delivery", delivery), Nil))) in
+    let _ = http_set_status 401 in
+    "signature mismatch\n"
+  else
+    let summary = GhWebhook.summarize event body in
+    let _ = log_with "info" "webhook_ok"
+      (Cons (("event", event),
+        Cons (("delivery", delivery),
+          Cons (("summary", summary), Nil)))) in
+    // Append to audit log. Key = `audit/<request_id>` so ordering by
+    // key iteration is best-effort chronological (request IDs are
+    // random hex so this isn't strictly time-sorted, but for a demo
+    // it clusters well).
+    let rid = gen_request_id () in
+    let row = event ++ "|" ++ delivery ++ "|" ++ summary in
+    let _ = kv_set audit ("audit/" ++ rid) row in
+    let _ = kv_save audit audit_db_path in
+    // Forward if configured.
+    let fwd = get_forward_url () in
+    let _ = if str_eq fwd "" then 0
+            else
+              let outbound_body = "\{\"text\":" ++ jstr summary ++ "}" in
+              let _ = http_post_json fwd outbound_body in
+              let _ = log_with "info" "webhook_forwarded"
+                (Cons (("url", fwd), Cons (("status", show (http_fetch_status ())), Nil))) in 0 in
+    let _ = http_set_content_type "application/json" in
+    "\{\"ok\":true,\"summary\":" ++ jstr summary ++ "}\n"
+in
+
+let audit_h = fn (req: str) ->
+  let ks = kv_keys audit in
+  let prefix = "audit/" in
+  let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (k, rest) ->
+      if str_starts_with k prefix then
+        let v = kv_get audit k in
+        // v = event|delivery|summary
+        let bar1 = str_index_of v "|" in
+        let evt = if bar1 < 0 then v else substring v 0 bar1 in
+        let after1 = if bar1 < 0 then "" else substring v (bar1 + 1) (str_len v) in
+        let bar2 = str_index_of after1 "|" in
+        let deliv = if bar2 < 0 then after1 else substring after1 0 bar2 in
+        let summ = if bar2 < 0 then "" else substring after1 (bar2 + 1) (str_len after1) in
+        let sep = if first then "" else "," in
+        let row = "\{\"event\":" ++ jstr evt ++
+                  ",\"delivery\":" ++ jstr deliv ++
+                  ",\"summary\":" ++ jstr summ ++ "}" in
+        build rest false (acc ++ sep ++ row)
+      else build rest first acc in
+  let _ = http_set_content_type "application/json" in
+  build ks true "[" ++ "\n"
+in
+
+let config_get_h = fn (req: str) ->
+  let _ = http_set_content_type "application/json" in
+  "\{\"forward_url\":" ++ jstr (get_forward_url ()) ++
+  ",\"secret_set\":" ++ (if str_eq (get_secret ()) "" then "false" else "true") ++ "}\n"
+in
+
+let config_set_forward_h = fn (req: str) ->
+  let url = body_field "url" in
+  let _ = kv_set config "forward/url" url in
+  let _ = kv_save config config_db_path in
+  let _ = log_with "info" "forward_url_set" (Cons (("url", url), Nil)) in
+  "forward url set to: " ++ url ++ "\n"
+in
+
+let home_h = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><meta charset=utf-8><title>Mere webhook receiver</title>" ++
+  "<h1>Mere webhook receiver</h1>" ++
+  "<p>POST GitHub-style signed webhooks to <code>/webhooks/github</code>," ++
+  " audit at <code>/audit</code>," ++
+  " configure outbound at <code>POST /config/forward</code> with \{url}.</p>" ++
+  "<p>Secret is <code>" ++ get_secret () ++ "</code>, forward URL is <code>" ++
+  (let f = get_forward_url () in if str_eq f "" then "(unset)" else f) ++ "</code>.</p>\n"
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                   home_h,
+  Cons (route "POST" "/webhooks/github"    webhook_h,
+  Cons (route "GET"  "/audit"              audit_h,
+  Cons (route "GET"  "/config"             config_get_h,
+  Cons (route "POST" "/config/forward"     config_set_forward_h,
+  Nil))))) in
+
+let handle_routed = router routes not_found in
+
+let _ = print ("starting webhook receiver on :8080 (config=" ++ config_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_routed))) in
+0

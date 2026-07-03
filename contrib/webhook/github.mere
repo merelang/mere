@@ -1,0 +1,83 @@
+// contrib/webhook/github.mere — GitHub-style webhook helpers.
+//
+// GitHub delivers webhooks as POST with:
+//   Content-Type: application/json
+//   X-GitHub-Event: <event name>          — push / issues / pull_request / …
+//   X-GitHub-Delivery: <uuid>             — server-assigned delivery ID
+//   X-Hub-Signature-256: sha256=<hex>     — HMAC-SHA256 over the raw body,
+//                                            keyed by the shared secret
+//
+// This module packages the signature check and a small "extract a
+// human-readable summary from the JSON body" helper. Both of these
+// leak into every webhook receiver on the planet, so we keep them
+// together.
+//
+// Public API (module GhWebhook):
+//   verify_signature : str -> str -> str -> bool
+//     args: secret, raw_body, header_value  (e.g. "sha256=abc…")
+//     returns true iff the header carries a matching HMAC.
+//   summarize        : str -> str -> str
+//     args: event_name (e.g. "push"), raw_body (JSON)
+//     returns a short human sentence — used for outbound Slack posts.
+
+extern fn hmac_sha256_hex: str -> str -> str;
+
+import "../http/json_body.mere";
+
+module GhWebhook {
+
+// Constant-time-ish string comparison. Mere's `str_eq` short-circuits
+// on the first mismatched byte, which leaks timing info against a
+// determined attacker. For a webhook demo this is more theatre than
+// necessity, but the shape is right.
+let _eq_ct = fn (a: str) -> fn (b: str) ->
+  if str_len a != str_len b then false
+  else
+    let acc = map_new () in
+    let _ = map_set acc "diff" 0 in
+    let n = str_len a in
+    let i = map_new () in
+    let _ = map_set i "k" 0 in
+    let _ = while (map_get i "k") < n do
+      let k = map_get i "k" in
+      let d = if str_eq (char_at a k) (char_at b k) then 0 else 1 in
+      let cur = map_get acc "diff" in
+      let _ = map_set acc "diff" (cur + d) in
+      let _ = map_set i "k" (k + 1) in () in
+    map_get acc "diff" == 0;
+
+// Verify GitHub's `X-Hub-Signature-256: sha256=<hex>` header. Returns
+// false on any format mismatch (wrong prefix, wrong length, empty).
+let verify_signature = fn (secret: str) -> fn (body: str) -> fn (header: str) ->
+  let prefix = "sha256=" in
+  let plen = str_len prefix in
+  if str_len header <= plen then false
+  else if not (str_eq (substring header 0 plen) prefix) then false
+  else
+    let claimed = substring header plen (str_len header) in
+    let expected = hmac_sha256_hex secret body in
+    _eq_ct claimed expected;
+
+// Best-effort event summary. The flat json_body parser doesn't do
+// nested objects, so we look at a small set of top-level keys and
+// print whatever's there — good enough to demonstrate routing per
+// event type. Unknown event → return the event name plus body length
+// so operators know something arrived.
+let summarize = fn (event: str) -> fn (body: str) ->
+  let parsed = parse_json_body body in
+  let repo = json_get parsed "repository" in
+  let sender = json_get parsed "sender" in
+  let action = json_get parsed "action" in
+  if str_eq event "push" then
+    let branch = json_get parsed "ref" in
+    "[push] " ++ sender ++ " → " ++ repo ++ " (" ++ branch ++ ")"
+  else if str_eq event "issues" then
+    "[issues] " ++ action ++ " by " ++ sender ++ " on " ++ repo
+  else if str_eq event "pull_request" then
+    "[pull_request] " ++ action ++ " by " ++ sender ++ " on " ++ repo
+  else if str_eq event "ping" then
+    "[ping] webhook installed on " ++ repo
+  else
+    "[" ++ event ++ "] " ++ show (str_len body) ++ " bytes from " ++ sender;
+
+}
