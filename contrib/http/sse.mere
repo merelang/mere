@@ -1,0 +1,27 @@
+// contrib/http/sse.mere — server-sent events broadcaster.
+//
+// SSE is a one-way HTTP push channel: the client opens a persistent
+// GET connection to /sse/<channel>, the server writes `data: ...\n\n`
+// frames whenever it has something to say. The client-side JS reads
+// them via `new EventSource("/sse/<channel>")`.
+//
+// The Mere program never handles the GET side itself — contrib/http's
+// Node glue (http.glue.js) intercepts `/sse/<channel>` before dispatching
+// to the Mere closure, sends the SSE headers, and adds the response
+// stream to a per-channel subscriber pool. From Mere all you need is
+// this one extern to push a payload out to every subscriber:
+//
+//   sse_broadcast : str -> str -> unit
+//     args: channel_name, payload
+//     payloads with embedded newlines are automatically split into
+//     multiple `data:` lines per the SSE spec on the JS side.
+//
+// Typical use pattern (chat, activity feed, live status board):
+//
+//   POST /api/message   handler stores the message + calls
+//                       `sse_broadcast "chat" json_encoded_msg`
+//   GET  /sse/chat      Node glue handles — no Mere code needed
+//   client              new EventSource("/sse/chat")
+//                          .onmessage = (e) => JSON.parse(e.data)
+
+extern fn sse_broadcast: str -> str -> unit;

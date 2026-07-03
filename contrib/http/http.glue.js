@@ -89,11 +89,46 @@ function makeHttpGlue() {
   // (case-insensitive lookup — we lowercase the name before indexing).
   let currentReqHeaders = {};
 
+  // SSE channel pool. Each channel maps to a Set of live `res` streams;
+  // when the Mere side calls `sse_broadcast channel data` the glue
+  // writes `data: <line>\n\n` to every subscriber. Clients that
+  // disconnect are pruned by a per-res `close` listener. The Mere
+  // handler is NOT invoked for `GET /sse/<channel>` — the connection
+  // is hijacked at the http glue layer and held open until the client
+  // (or the server) closes it.
+  const sseChannels = new Map();  // channel → Set<res>
+
   const glue = {
     http_serve: (port, closurePtr) => {
       const http = require("http");
       const server = http.createServer((req, res) => {
-        // No scratch to reset — writeStr allocates on the Mere heap.
+        // /sse/<channel> — SSE upgrade path. Intercept before the
+        // normal request/response Mere-callout path.
+        if (req.method === "GET" && req.url && req.url.startsWith("/sse/")) {
+          const channel = req.url.slice("/sse/".length).split("?")[0];
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+          });
+          // Priming comment so clients see the connection open in dev
+          // tools even before the first event.
+          res.write(": connected\n\n");
+          let set = sseChannels.get(channel);
+          if (!set) { set = new Set(); sseChannels.set(channel, set); }
+          set.add(res);
+          const drop = () => {
+            const s = sseChannels.get(channel);
+            if (s) { s.delete(res); if (s.size === 0) sseChannels.delete(channel); }
+          };
+          req.on("close", drop);
+          req.on("error", drop);
+          return;
+        }
+
+        // Normal Mere-dispatched request. writeStr allocates on the
+        // Mere heap, so no per-request reset needed.
         currentStatus = 200;
         currentContentType = "text/plain; charset=utf-8";
         currentHeaders = {};
@@ -119,6 +154,21 @@ function makeHttpGlue() {
       server.listen(port, () => {
         console.log(`contrib/http: listening on :${port}`);
       });
+    },
+    // Push a `data: <payload>\n\n` line to every client currently
+    // subscribed to `channel`. Payload with embedded newlines is split
+    // into multiple `data:` lines per the SSE spec. Called from Mere
+    // via `extern fn sse_broadcast: str -> str -> unit`.
+    sse_broadcast: (channelPtr, payloadPtr) => {
+      const channel = readCStr(channelPtr);
+      const payload = readCStr(payloadPtr);
+      const set = sseChannels.get(channel);
+      if (!set) return;
+      const lines = payload.split("\n");
+      const frame = lines.map((l) => "data: " + l).join("\n") + "\n\n";
+      for (const res of set) {
+        try { res.write(frame); } catch (e) { /* client gone */ }
+      }
     },
     http_current_body: () => currentBodyPtr,
     http_set_status: (code) => { currentStatus = code | 0; },
