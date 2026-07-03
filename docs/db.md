@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 28
+The rest of this page walks the stack top-down, then catalogs the 29
 `examples/db_*.mere` demos.
 
 ## Layered architecture
@@ -35,7 +35,8 @@ The rest of this page walks the stack top-down, then catalogs the 28
 │                                                                    │
 │  contrib/db/redis.mere                                             │
 │  ─────────────────────                                             │
-│  RESP2 + RESP3 (Null / Double / Bool / Map / Set adds)             │
+│  Full RESP2 + RESP3 (Null / Double / Bool / Map / Set / BigNum /   │
+│                       Verbatim / Push / Attribute)                 │
 │  redis_command + typed extractors + AUTH + HELLO 3                 │
 │  PUB/SUB (SUBSCRIBE / PSUBSCRIBE / redis_wait_message)             │
 │  Pipelining (N commands / N replies in one round trip)             │
@@ -262,6 +263,7 @@ command needed) and cleans up on process exit.
 | [db_redis_pipeline](https://github.com/merelang/mere/blob/main/examples/db_redis_pipeline.mere) | `redis_pipeline` — 100 INCRs in one round trip; mixed SET/GET batch replies in order |
 | [db_redis_ssl](https://github.com/merelang/mere/blob/main/examples/db_redis_ssl.mere) | Redis 7 over TLS — permissive / system-CA reject / custom-CA accept |
 | [db_redis_resp3](https://github.com/merelang/mere/blob/main/examples/db_redis_resp3.mere) | `HELLO 3` upgrade — HGETALL → `RRMap`, SMEMBERS → `RRSet`, `RRNull` |
+| [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
 
 ## Limitations and future work
 
@@ -300,13 +302,16 @@ command needed) and cleans up on process exit.
   pub/sub is not — MySQL has no server-side pub/sub (`NOTIFY` is a PG
   feature).
 - **Redis client**: `redis_command` speaks RESP2 out of the box; call
-  `redis_hello3` to upgrade the connection and pick up the RESP3
-  reply types (`RRNull`, `RRDouble`, `RRBool`, `RRMap`, `RRSet`). Also
+  `redis_hello3` to upgrade to RESP3. The full RESP3 wire spec is
+  parsed — `RRNull`, `RRDouble`, `RRBool`, `RRMap`, `RRSet`, `RRBigNum`,
+  `RRVerbatim`, `RRPush`, and `RRAttr` are all recognized on the wire
+  and surfaced through typed extractors (`redis_as_bool` /
+  `redis_as_map` / `redis_as_bignum` / `redis_as_verbatim` /
+  `redis_as_push`) plus a `redis_unwrap_attr` metadata peeler. Also
   wired: PUB/SUB (`redis_subscribe` / `redis_psubscribe` /
   `redis_wait_message` / `redis_publish`), pipelining
   (`redis_pipeline`), TLS (`redis_connect_ssl` /
-  `redis_connect_ssl_verify`). Not yet: RESP3 attributes / big-numbers
-  / verbatim strings / server pushes, and binary-safe command args
+  `redis_connect_ssl_verify`). Not yet: binary-safe command args
   (currently keys/values can't contain embedded NULs on the send
   side).
 - **SQLite**: not implemented. Would need either a fresh Mere
