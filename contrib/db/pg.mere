@@ -1174,6 +1174,126 @@ let pg_copy_from = fn (fd: int) -> fn (table: str)
     if ok then count else (0 - 1)
   ;
 
+// ---- Bulk read via COPY TO STDOUT ---------------------------------------
+//
+// Mirror image of pg_copy_from. Client sends a `COPY <src> TO STDOUT`
+// query; server responds with CopyOutResponse ('H') and streams zero
+// or more CopyData ('d') messages containing tab-separated row lines,
+// then CopyDone ('c'), then CommandComplete / ReadyForQuery.
+//
+// Text format only (matching pg_copy_from). Each row line is
+// `col1\tcol2\tcol3\n` with the same escape rules — this module
+// undoes them per-cell before surfacing values.
+//
+// pg_copy_to takes the FULL SQL so the caller can freely use
+// `COPY <table> TO STDOUT` or `COPY (SELECT …) TO STDOUT` and pass
+// `WITH (…)` options (CSV, DELIMITER, HEADER, …) verbatim — the
+// text-mode parser here only handles the default settings, so
+// callers who switch on CSV etc. will need their own decoder.
+
+// Undo the escape rules from _escape_copy. Also handles the extended
+// set PG can emit in some contexts (b/f/v/octal/hex) — the octal and
+// hex forms decode via char-arith. Anything unknown falls back to the
+// literal following char, matching libpq's forgiving behavior.
+let rec _unesc_copy_loop = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else
+    let c = char_at s i in
+    if str_eq c "\\" && i + 1 < n then
+      let nxt = char_at s (i + 1) in
+      let byte =
+        if str_eq nxt "\\" then "\\"
+        else if str_eq nxt "t" then "\t"
+        else if str_eq nxt "n" then "\n"
+        else if str_eq nxt "r" then "\r"
+        else if str_eq nxt "b" then chr 8
+        else if str_eq nxt "f" then chr 12
+        else if str_eq nxt "v" then chr 11
+        else nxt in
+      _unesc_copy_loop s (i + 2) n (acc ++ byte)
+    else
+      _unesc_copy_loop s (i + 1) n (acc ++ c)
+  ;
+
+let _unesc_copy = fn (s: str) ->
+  _unesc_copy_loop s 0 (str_len s) ""
+  ;
+
+// Turn one \t-separated line into `str option list` — cells reading `\N`
+// map to `None`; every other cell is unescape → Some.
+let rec _cells_to_opts = fn (cells: str list) ->
+  match cells with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    let v = if str_eq h "\\N" then None else Some (_unesc_copy h) in
+    Cons (v, _cells_to_opts t)
+  ;
+
+let _parse_copy_line = fn (line: str) ->
+  _cells_to_opts (str_split line "\t")
+  ;
+
+// Trim a single trailing \n if present. CopyData payloads end with one
+// (part of PG's line-oriented framing); anything else is data.
+let _strip_trailing_nl = fn (s: str) ->
+  let n = str_len s in
+  if n > 0 && ord (char_at s (n - 1)) == 10 then substring s 0 (n - 1)
+  else s
+  ;
+
+// Split a CopyData payload on \n so multi-row messages parse correctly.
+// (PG usually sends one row per CopyData, but the spec allows batching.)
+// Empty trailing entry from the terminating \n is filtered out.
+let rec _split_lines_filter = fn (xs: str list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    if str_eq h "" then _split_lines_filter t
+    else Cons (h, _split_lines_filter t)
+  ;
+
+// Fold parsed lines into the row accumulator. Extracted from the recv
+// loop below because let-rec-inside-expressions isn't allowed at the
+// self-host codegen level.
+let rec _fold_copy_lines = fn (ls: str list)
+                       -> fn (acc: (str option list) list) ->
+  match ls with
+  | Nil -> acc
+  | Cons (line, rest) ->
+    _fold_copy_lines rest (Cons (_parse_copy_line line, acc))
+  ;
+
+// Recv loop for COPY OUT: collect DataRows from CopyData payloads until
+// CopyDone / CommandComplete / ReadyForQuery. Rows accumulate Cons-first
+// so caller flips at the end.
+let rec _copy_out_drain = fn (fd: int) -> fn (acc: (str option list) list) ->
+  let (mtype, payload, plen) = _recv_msg fd in
+  if mtype < 0 then acc
+  else if mtype == _MSG_READY then acc
+  else if mtype == _MSG_ERROR then
+    let _ = print ("pg copy out error: " ++ mem_to_str payload plen) in
+    _copy_out_drain fd acc
+  else if mtype == 100 then
+    // 'd' CopyData
+    let raw = mem_to_str payload plen in
+    let lines = _split_lines_filter (str_split raw "\n") in
+    _copy_out_drain fd (_fold_copy_lines lines acc)
+  else
+    // CopyOutResponse ('H'), CopyDone ('c'), CommandComplete ('C'),
+    // NoticeResponse ('N') — all no-ops on the accumulator.
+    _copy_out_drain fd acc
+  ;
+
+// pg_copy_to fd sql -> (str option list) list
+//   sql must be the full COPY TO STDOUT statement (with optional
+//   `WITH (…)` clause). The result is the streamed rows in wire order.
+//   Errors (bad table, permission, encoding trouble) surface as an
+//   empty list plus a printed diagnostic.
+let pg_copy_to = fn (fd: int) -> fn (sql: str) ->
+  let _ = _send_query fd sql in
+  _rev_rows (_copy_out_drain fd Nil) Nil
+  ;
+
 // ---- Cleanup ------------------------------------------------------------
 
 let pg_close = fn (fd: int) ->
