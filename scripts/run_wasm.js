@@ -5,12 +5,53 @@
 // Usage: node run_wasm.js <path-to-wasm>
 
 const fs = require('fs');
+const path = require('path');
+const { Worker } = require('worker_threads');
 
 if (process.argv.length < 3) {
   console.error("usage: node run_wasm.js <path-to-wasm>");
   process.exit(2);
 }
 const wasmPath = process.argv[2];
+
+// ---- Synchronous TCP transport ------------------------------------------
+//
+// Wasm runs synchronously, but net.Socket is async. Bridge the two via a
+// worker_thread that owns the sockets and a SharedArrayBuffer for
+// request/response. The Wasm-side externs write into ctrl[]/data[], notify
+// the worker, and Atomics.wait for the response. Lazy — the worker only
+// spins up on first tcp_* call.
+
+const TCP_DATA_OFFSET = 32;
+const TCP_BUF_BYTES = 1 << 20;  // 1 MiB — large enough for typical DB row/frame
+const TCP_SAB = new SharedArrayBuffer(TCP_DATA_OFFSET + TCP_BUF_BYTES);
+const tcpCtrl = new Int32Array(TCP_SAB, 0, 8);
+const tcpData = new Uint8Array(TCP_SAB, TCP_DATA_OFFSET);
+const TCP_OP = { CONNECT: 1, WRITE: 2, READ: 3, CLOSE: 4, SET_TIMEOUT: 5 };
+let tcpWorker = null;
+
+function tcpEnsureWorker() {
+  if (tcpWorker) return;
+  const workerPath = path.join(__dirname, 'tcp_worker.js');
+  tcpWorker = new Worker(workerPath, {
+    workerData: { sab: TCP_SAB, dataOffset: TCP_DATA_OFFSET },
+  });
+  tcpWorker.unref();  // don't keep the process alive for the worker alone
+}
+
+// Fire off a request, block until worker responds. Result stored in ctrl[4];
+// data payload (for READ) already sits in tcpData[0..ctrl[3]].
+function tcpCall(op, arg1, arg2) {
+  tcpEnsureWorker();
+  Atomics.store(tcpCtrl, 1, op);
+  Atomics.store(tcpCtrl, 2, arg1 | 0);
+  Atomics.store(tcpCtrl, 3, arg2 | 0);
+  Atomics.store(tcpCtrl, 0, 1);
+  tcpWorker.postMessage(0);
+  Atomics.wait(tcpCtrl, 0, 1);
+  Atomics.store(tcpCtrl, 0, 0);
+  return Atomics.load(tcpCtrl, 4);
+}
 
 (async () => {
   const wasmBytes = fs.readFileSync(wasmPath);
@@ -141,6 +182,39 @@ const wasmPath = process.argv[2];
       new Uint8Array(memory.buffer).set(bytes, ptr);
       return ptr;
     },
+    // ---- Sync TCP (see scripts/tcp_worker.js) ----------------------------
+    // Wire-protocol clients (contrib/db/pg.mere etc.) build on these four
+    // primitives. All calls are strictly synchronous from Wasm's POV; the
+    // async plumbing happens in the worker thread.
+    //
+    // tcp_connect(host: str, port: int) -> int
+    //   Returns fd (>=1) on success, -1 on connect failure.
+    tcp_connect: (hostPtr, port) => {
+      const host = readCStr(hostPtr);
+      const bytes = Buffer.from(host, 'utf8');
+      tcpData.set(bytes, 0);
+      return tcpCall(TCP_OP.CONNECT, bytes.length, port | 0) | 0;
+    },
+    // tcp_write(fd, bufPtr, len) -> int (bytes written, -1 on error).
+    // Assumes buf is a raw byte pointer (not necessarily NUL-terminated).
+    tcp_write: (fd, bufPtr, len) => {
+      const src = new Uint8Array(memory.buffer, bufPtr, len);
+      tcpData.set(src, 0);
+      return tcpCall(TCP_OP.WRITE, fd | 0, len | 0) | 0;
+    },
+    // tcp_read(fd, bufPtr, cap) -> int (bytes read, 0=EOF, -1=error).
+    // Copies at most cap bytes from the socket's rx queue into Wasm memory.
+    tcp_read: (fd, bufPtr, cap) => {
+      const capped = Math.min(cap | 0, TCP_BUF_BYTES);
+      const n = tcpCall(TCP_OP.READ, fd | 0, capped) | 0;
+      if (n > 0) {
+        const dst = new Uint8Array(memory.buffer, bufPtr, n);
+        dst.set(tcpData.subarray(0, n));
+      }
+      return n;
+    },
+    tcp_close: (fd) => { tcpCall(TCP_OP.CLOSE, fd | 0, 0); return 0; },
+    tcp_set_timeout: (fd, ms) => { tcpCall(TCP_OP.SET_TIMEOUT, fd | 0, ms | 0); return 0; },
   };
 
   // Allocate on the shared Mere heap by advancing `$__lang_bump`
