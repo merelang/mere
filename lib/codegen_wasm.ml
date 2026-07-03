@@ -325,6 +325,15 @@ let set_inner_lifts_for_host_wasm (host : string) : unit =
    | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts_wasm k v) tbl
    | None -> ())
 
+(* Wasm tail-call proposal — set to true only while emit_expr is
+   producing a value in tail position of the enclosing function
+   body. The App emissions look at the flag and switch `call` /
+   `call_indirect` to `return_call` / `return_call_indirect` when
+   set, so deeply tail-recursive Mere code (parser walkers, list
+   iterations) doesn't grow the JS stack. Requires wat2wasm's
+   `--enable-tail-call` (or an equivalent V8 default). *)
+let wasm_tail_pos = ref false
+
 type lifted_fn_wasm = {
   l_name     : string;
   l_captures : string list;
@@ -1165,6 +1174,12 @@ let emit_float_alloc_from_f64_on_stack () : unit =
 
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
+  (* Snapshot inbound tail-position, then default all descendant
+     emit_expr calls back to non-tail; the specific tail-preserving
+     nodes below (If branches, Let body, Match arm bodies) reinstate
+     `saved_tail` right before recursing into their tail children. *)
+  let saved_tail = !wasm_tail_pos in
+  wasm_tail_pos := false;
   match e.Ast.node with
   | Ast.Int_lit n ->
     emit_instr (Printf.sprintf "i32.const %d" n)
@@ -1455,8 +1470,10 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.If (cond, t, f) ->
     emit_expr cond;
     emit_instr "if (result i32)";
+    wasm_tail_pos := saved_tail;
     emit_expr t;
     emit_instr "else";
+    wasm_tail_pos := saved_tail;
     emit_expr f;
     emit_instr "end"
   | Ast.Let (pat, value, body) ->
@@ -1465,6 +1482,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        (* Phase 26.3: inner Let-bound Fun lifted to top-level. The Fun
           value has been pushed up; just emit the body, which will dispatch
           via App-Var to the lifted name. *)
+       wasm_tail_pos := saved_tail;
        emit_expr body
      | Ast.P_var name when Hashtbl.mem top_globals_wasm name ->
        (* Phase 36 (DEFERRED §1.18 fix): file-scope global. Assign at
@@ -1472,6 +1490,7 @@ let rec emit_expr (e : Ast.expr) : unit =
           does `global.get $name`) see the updated value. *)
        emit_expr value;
        emit_instr (Printf.sprintf "global.set $%s" name);
+       wasm_tail_pos := saved_tail;
        emit_expr body
      | Ast.P_var name ->
        let slot = fresh_local () in
@@ -1479,12 +1498,14 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.set %d" slot);
        let prev = !locals in
        locals := (name, slot) :: prev;
+       wasm_tail_pos := saved_tail;
        emit_expr body;
        locals := prev
      | Ast.P_wild | Ast.P_unit ->
        (* Phase 22.1: evaluate RHS for side effects, drop, then body. *)
        emit_expr value;
        emit_instr "drop";
+       wasm_tail_pos := saved_tail;
        emit_expr body
      | Ast.P_tuple ps ->
        (* Phase 22.1: `let (a, b, ...) = E in B` — Wasm tuples are flat
@@ -1521,6 +1542,7 @@ let rec emit_expr (e : Ast.expr) : unit =
              "nested let-tuple patterns not supported in Wasm codegen subset"))
        ) ps;
        locals := !new_bindings @ prev;
+       wasm_tail_pos := saved_tail;
        emit_expr body;
        locals := prev
      | _ ->
@@ -1529,7 +1551,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     (* Phase 26.3: inner let-rec lifting. If all bindings are registered
        in inner_lifts_wasm (= lifted to top level), just emit body. *)
     if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_wasm n) bindings then
-      emit_expr body
+      (wasm_tail_pos := saved_tail;
+       emit_expr body)
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
   | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
@@ -2133,18 +2156,16 @@ let rec emit_expr (e : Ast.expr) : unit =
       match List.assoc_opt cap !locals with
       | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
       | None when Hashtbl.mem top_globals_wasm cap ->
-        (* Phase 36 (DEFERRED §1.14 fix): if a captured free var is a
-           top-level global, fetch the value via global.get. *)
         emit_instr (Printf.sprintf "global.get $%s" cap)
       | None -> unsupported e.Ast.loc
           (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
     ) li.captures;
     emit_expr arg;
-    emit_instr (Printf.sprintf "call $%s" li.lifted_name)
+    let call_op = if saved_tail then "return_call" else "call" in
+    emit_instr (Printf.sprintf "%s $%s" call_op li.lifted_name)
   | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name ->
     emit_expr arg;
-    (* Phase 26.4: per-instantiation dispatch for multi-inst fns. *)
     let dispatch_name =
       if Hashtbl.mem multi_inst_fns_wasm name then
         match f_ty with
@@ -2155,7 +2176,8 @@ let rec emit_expr (e : Ast.expr) : unit =
         | None -> name
       else name
     in
-    emit_instr (Printf.sprintf "call $%s" dispatch_name)
+    let call_op = if saved_tail then "return_call" else "call" in
+    emit_instr (Printf.sprintf "%s $%s" call_op dispatch_name)
   | Ast.App (f, arg) ->
     (* Indirect call via call_indirect on the closure value's table
        index. closure layout: { env @ offset 0, fn_idx @ offset 4 }. *)
@@ -2167,7 +2189,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr "i32.load offset=4";
-    emit_instr "call_indirect (type $cl)"
+    let call_op = if saved_tail then "return_call_indirect" else "call_indirect" in
+    emit_instr (Printf.sprintf "%s (type $cl)" call_op)
   | Ast.Record_lit (name, fields) when Hashtbl.mem Typer.views name ->
     (* View literal: same memory layout as a record (i32 per field),
        allocated from the active region's bump pointer. In Wasm all
@@ -2550,9 +2573,11 @@ let rec emit_expr (e : Ast.expr) : unit =
         emit_instr "if (result i32)";
         let prev = !locals in
         locals := bindings @ prev;
+        wasm_tail_pos := saved_tail;
         emit_expr body;
         locals := prev;
         emit_instr "else";
+        wasm_tail_pos := saved_tail;
         emit_arms rest;
         emit_instr "end"
     in
@@ -2720,7 +2745,10 @@ let emit_fn_def (f : fn_decl) : string =
   (* Param sits at slot 0. let-bindings start from slot 1. *)
   local_counter := 1;
   locals := [(f.param, 0)];
+  let saved_tail = !wasm_tail_pos in
+  wasm_tail_pos := true;
   emit_expr f.body;
+  wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - 1 in
   instrs := saved_instrs;
@@ -2758,7 +2786,10 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   local_counter := n_caps + 1;
   let cap_locals = List.mapi (fun i n -> (n, i)) lf.l_captures in
   locals := (lf.l_param, n_caps) :: cap_locals;
+  let saved_tail = !wasm_tail_pos in
+  wasm_tail_pos := true;
   emit_expr lf.l_body;
+  wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - (n_caps + 1) in
   instrs := saved_instrs;
@@ -2841,7 +2872,10 @@ let emit_anon_adapter (ce : closure_emission) : string =
   in
   local_counter := 2 + n;
   locals := (ce.ce_param, param_slot) :: capture_locals;
+  let saved_tail = !wasm_tail_pos in
+  wasm_tail_pos := true;
   emit_expr ce.ce_body;
+  wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - 2 in
   instrs := saved_instrs;
@@ -5490,7 +5524,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      \  (memory (export \"memory\") 1024)\n\
      %s\
-     \  (global $__lang_bump (mut i32) (i32.const %d))\n\
+     \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\
