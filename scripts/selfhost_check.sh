@@ -56,29 +56,28 @@ check_one() {
   wat2wasm --enable-tail-call "$ref_wat" -o "$ref_wasm" 2>/dev/null
   $RUN "$ref_wasm" > "$ref_out" 2>&1
 
-  # Self-hosted pipeline (`sed '$d'` strips main's `()` auto-print)
+  # Self-hosted pipeline. `run_wasm.js` calling selfmere.wasm prints the
+  # generated WAT via Mere's `print`, and then — because the CLI wraps
+  # main as `let _ = print (show ...) in ()` — an extra `()` line from
+  # the outer unit's auto-print epilogue. Strip that trailing `()` to
+  # recover pure WAT before assembly.
   $RUN "$SELF" "$input" 2>/dev/null | sed '$d' > "$self_wat"
   wat2wasm --enable-tail-call "$self_wat" -o "$self_wasm" 2>/dev/null
   $RUN "$self_wasm" > "$self_out" 2>&1
 
-  # OCaml codegen always appends a `()` (or a stringified return value)
-  # line after main returns. Self-host's codegen doesn't. Strip the
-  # last line of the reference output — this is a known gap tracked
-  # in the comment block above. Inputs that only produce output via
-  # explicit `print` calls are unaffected by the stripping (their
-  # meaningful output is in the earlier lines).
-  ref_out_norm="${ref_out}.norm"
-  sed '$d' "$ref_out" > "$ref_out_norm"
-
-  if diff -q "$ref_out_norm" "$self_out" >/dev/null; then
+  # Both compilers now emit main-return auto-print (OCaml via
+  # `Phase 27.2` epilogue; self-host via the CLI wrapper that annotates
+  # main and rewrites the AST to `print (show (main : ty))`). No
+  # normalization needed — diff directly.
+  if diff -q "$ref_out" "$self_out" >/dev/null; then
     ref_lines=$(wc -l < "$ref_wat" | tr -d ' ')
     self_lines=$(wc -l < "$self_wat" | tr -d ' ')
     printf "  ok  %-40s ref=%s self=%s\n" "$name" "$ref_lines" "$self_lines"
     return 0
   else
     printf "  FAIL %-40s\n" "$name"
-    echo "    reference output (normalized, trailing auto-print stripped):"
-    sed 's/^/      /' "$ref_out_norm"
+    echo "    reference output:"
+    sed 's/^/      /' "$ref_out"
     echo "    self-host output:"
     sed 's/^/      /' "$self_out"
     return 1
@@ -88,32 +87,24 @@ check_one() {
 if [ $# -gt 0 ]; then
   inputs="$*"
 else
-  # Default set — small unit-typed programs under test/selfhost/ that
-  # produce their meaningful output via explicit `print` calls. That
-  # bypasses the known "self-host doesn't auto-print main's return"
-  # gap (see below).
+  # Default set. The t01–t05 files under test/selfhost/ are unit-typed
+  # programs that produce their meaningful output via explicit `print`
+  # calls; hello.mere and fibonacci.mere additionally exercise the
+  # main-return auto-print path (unit main → "()", int main → the
+  # returned integer) that both compilers now handle uniformly.
   #
-  # Known self-host gaps that this script surfaces:
-  #   1. Main return-value auto-print not emitted by self-host. OCaml
-  #      appends `puts(show_int(result))` for int-typed main and
-  #      `puts("()")` for unit-typed main. Self-host emits neither.
-  #      The check normalizes by stripping the last line of OCaml
-  #      output before comparing, which works for programs whose
-  #      meaningful output is in earlier print lines. Programs that
-  #      rely on main-return-as-output (e.g. `fib 15` at the end
-  #      with no explicit print) fail.
-  #      Fix: port lib/codegen_wasm.ml:5171 "match main_ty_walked" to
-  #      contrib/codegen/codegen_wasm.mere. Requires calling contrib/typer
-  #      first to know main's inferred type.
-  #   2. Preamble emission is unconditional in self-host — always emits
-  #      all runtime helpers regardless of usage. Doesn't affect
-  #      correctness, only file size (self-host output is ~2.7x bigger).
+  # Remaining known gap: preamble emission is unconditional in
+  # self-host — it always emits all runtime helpers regardless of
+  # usage. Doesn't affect correctness, only file size (self-host
+  # output is ~2.7x bigger).
   inputs="\
     test/selfhost/t01_hello.mere \
     test/selfhost/t02_arith.mere \
     test/selfhost/t03_fib.mere \
     test/selfhost/t04_string.mere \
     test/selfhost/t05_list.mere \
+    examples/hello.mere \
+    examples/fibonacci.mere \
   "
 fi
 
