@@ -59,7 +59,7 @@ let entries_db_path = "/tmp/mere_feed_entries.db" in
 
 let users = kv_load users_db_path in
 let subs = kv_load subs_db_path in
-let entries = kv_load entries_db_path in
+let entry_db = kv_load entries_db_path in
 let sessions = map_new () in
 
 // ---- helpers ------------------------------------------------------
@@ -247,13 +247,13 @@ let feeds_delete_h = fn (req: str) ->
         | Nil -> dropped
         | Cons (kk, rest) ->
           if str_starts_with kk prefix then
-            let _ = kv_delete entries kk in
+            let _ = kv_delete entry_db kk in
             drop_entries rest (dropped + 1)
           else drop_entries rest dropped in
-      let _ = drop_entries (kv_keys entries) 0 in
+      let _ = drop_entries (kv_keys entry_db) 0 in
       let _ = kv_delete subs k in
       let _ = kv_save subs subs_db_path in
-      let _ = kv_save entries entries_db_path in
+      let _ = kv_save entry_db entries_db_path in
       "unsubscribed\n"
 in
 
@@ -276,16 +276,20 @@ let refresh_one = fn (user: str) -> fn (url: str) ->
       match xs with
       | Nil -> 0
       | Cons (k, rest) ->
-        if str_starts_with k prefix then let _ = kv_delete entries k in drop_old rest
+        if str_starts_with k prefix then let _ = kv_delete entry_db k in drop_old rest
         else drop_old rest in
-    let _ = drop_old (kv_keys entries) in
+    let _ = drop_old (kv_keys entry_db) in
     let rec insert = fn (xs: Entry list) -> fn (count: int) ->
       match xs with
       | Nil -> count
       | Cons (e, rest) ->
         let eid = sha256_hex (e.link ++ "|" ++ e.title) in
         let k = prefix ++ eid in
-        let _ = kv_set entries k (pack4 e.title e.link e.date e.summary) in
+        let clipped =
+          if str_len e.summary > 400
+          then substring e.summary 0 400 ++ "..."
+          else e.summary in
+        let _ = kv_set entry_db k (pack4 e.title e.link e.date clipped) in
         insert rest (count + 1) in
     let stored = insert doc.entries 0 in
     let _ = log_with "info" "feed_refreshed"
@@ -315,7 +319,7 @@ let feeds_refresh_h = fn (req: str) ->
         else walk_subs rest n_feeds n_entries in
     let (nf, ne) = walk_subs ks 0 0 in
     let _ = kv_save subs subs_db_path in
-    let _ = kv_save entries entries_db_path in
+    let _ = kv_save entry_db entries_db_path in
     let _ = http_set_content_type "application/json" in
     "\{\"feeds\":" ++ show nf ++ ",\"entries\":" ++ show ne ++ "}\n"
 in
@@ -328,13 +332,13 @@ let entries_list_h = fn (req: str) ->
     let _ = http_set_status 401 in "[]\n"
   else
     let prefix = "entries/" ++ user ++ "/" in
-    let ks = kv_keys entries in
+    let ks = kv_keys entry_db in
     let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
       match xs with
       | Nil -> acc ++ "]"
       | Cons (k, rest) ->
         if str_starts_with k prefix then
-          let v = kv_get entries k in
+          let v = kv_get entry_db k in
           let (title, link, date, summary) = split4 v in
           let sep = if first then "" else "," in
           let row = "\{\"title\":" ++ jstr title ++
