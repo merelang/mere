@@ -1,0 +1,71 @@
+// examples/db_notify_async.mere — notifications arriving during other work.
+//
+// Extends db_notify.mere. The MVP LISTEN/NOTIFY path only surfaces
+// notifications through pg_wait_notify — but the server can push
+// NotificationResponse ('A') messages at ANY point in the wire stream,
+// including inside another query's response. This demo:
+//
+//   1. sub LISTENs on "async_ch"
+//   2. pub NOTIFYs three times (server queues them for sub's connection)
+//   3. sub runs an unrelated `SELECT 1` — the response stream carries
+//      the queued 'A' messages before ReadyForQuery
+//   4. sub calls pg_drain_notifications and gets all three at once,
+//      without any additional wire read
+//
+// Setup (trust mode):
+//   docker run -d --name mere-pg-anfy -p 15449:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//
+// Usage:
+//   ./mere -w examples/db_notify_async.mere > /tmp/dbna.wat
+//   wat2wasm --enable-tail-call /tmp/dbna.wat -o /tmp/dbna.wasm
+//   node scripts/run_wasm.js /tmp/dbna.wasm
+
+import "../contrib/db/pg.mere";
+
+let rec show_notif_list = fn (xs) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((pid, ch, pl), rest) ->
+    let _ = print ("  pid=" ++ show pid ++ " ch=" ++ ch ++ " payload=" ++ pl) in
+    show_notif_list rest
+  ;
+
+let url = "postgres://postgres@127.0.0.1:15449/postgres" in
+let sub = pg_connect_url url in
+let pub = pg_connect_url url in
+if sub < 0 then let _ = print "sub connect failed" in ()
+else if pub < 0 then let _ = print "pub connect failed" in ()
+else
+
+  let _ = pg_listen sub "async_ch" in
+
+  // Fire three NOTIFYs from the publisher. The subscriber's connection
+  // now has three 'A' messages queued server-side.
+  let _ = pg_notify pub "async_ch" "one" in
+  let _ = pg_notify pub "async_ch" "two" in
+  let _ = pg_notify pub "async_ch" "three" in
+
+  // Force a small delay so the notifications reach sub's kernel buffer
+  // before we hit the next read. Trivial in real code — event loops
+  // would keep reading — but pg_query's synchronous drain here needs the
+  // messages already parked at the OS layer.
+  let _ = pg_query pub "SELECT pg_sleep(0.1)" in
+  let _ = print "== phase 1: SELECT 1 while notifications pending ==" in
+  let rows = pg_query sub "SELECT 1::text" in
+  let _ = print ("SELECT result rows: " ++
+    (match rows with
+     | Nil -> "(none)"
+     | Cons (Cons (h, _), _) -> pg_val_or h "?"
+     | _ -> "?")) in
+
+  let _ = print "" in
+  let _ = print "== phase 2: pg_drain_notifications ==" in
+  let queued = pg_drain_notifications sub in
+  let _ = show_notif_list queued in
+
+  let _ = pg_unlisten sub "async_ch" in
+  let _ = pg_close sub in
+  let _ = pg_close pub in
+  ()

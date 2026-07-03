@@ -64,6 +64,62 @@ let _MSG_NOTICE = 78;         // 'N'
 let _MSG_EMPTY_QUERY = 73;    // 'I'
 let _MSG_COPY_IN = 71;        // 'G' — server: "start streaming rows via CopyData"
 let _MSG_COPY_OUT = 72;       // 'H' — server: "streaming rows to you"
+let _MSG_NOTIFY = 65;         // 'A' — async NotificationResponse
+
+// ---- Notification queue (async-aware drain infrastructure) -------------
+//
+// PG's NotificationResponse ('A') messages can arrive at ANY point in
+// the response stream — interleaved with DataRows, between CommandComplete
+// and ReadyForQuery, right before AuthenticationOk, etc. If a drain loop
+// silently drops them, callers relying on pg_wait_notify miss events
+// fired during unrelated queries.
+//
+// The fix is a per-process queue that every drain function pushes into
+// when it sees an 'A'. Consumers pull via pg_drain_notifications; the
+// blocking pg_wait_notify also drains queued entries first, so a
+// notification that arrived during an earlier pg_query is delivered
+// on the next wait_notify call without needing another wire read.
+
+// Read a NUL-terminated cstring starting at buf+off. Returns the offset
+// OF the NUL — caller advances past it manually.
+let rec _find_nul = fn (buf: int) -> fn (off: int) ->
+  if mem_get_u8 buf off == 0 then off
+  else _find_nul buf (off + 1)
+  ;
+
+// Parse a NotificationResponse payload — 4-byte PID + two NUL-terminated
+// strings (channel, payload).
+let _parse_notify = fn (payload: int) -> fn (plen: int) ->
+  let pid = mem_get_u32be payload 0 in
+  let ch_end = _find_nul payload 4 in
+  let channel = mem_to_str (payload + 4) (ch_end - 4) in
+  let pl_start = ch_end + 1 in
+  let pl_end = _find_nul payload pl_start in
+  let pl = mem_to_str (payload + pl_start) (pl_end - pl_start) in
+  (pid, channel, pl)
+  ;
+
+// Module-level Map<str, str> holding queued notifications. Keys used:
+//   "n"        — decimal count of stored entries
+//   "pid_<i>"  — decimal string of the notifier's backend PID
+//   "ch_<i>"   — channel name (any characters, incl. tabs/newlines)
+//   "pl_<i>"   — payload (any characters)
+// Split into three keys per entry so payload/channel don't need
+// escaping — mere maps are homogeneous over their value type but each
+// entry stands alone.
+let _pg_notif_q = map_new ();
+let _ = map_set _pg_notif_q "n" "0";
+
+let _pg_enqueue_notif = fn (payload: int) -> fn (plen: int) ->
+  let (pid, channel, pl) = _parse_notify payload plen in
+  let n = int_of_str (map_get _pg_notif_q "n") in
+  let idx = show n in
+  let _ = map_set _pg_notif_q ("pid_" ++ idx) (show pid) in
+  let _ = map_set _pg_notif_q ("ch_" ++ idx) channel in
+  let _ = map_set _pg_notif_q ("pl_" ++ idx) pl in
+  let _ = map_set _pg_notif_q "n" (show (n + 1)) in
+  ()
+  ;
 
 // ---- Low-level socket helpers -------------------------------------------
 
@@ -305,6 +361,9 @@ let rec _drain_until_ready = fn (fd: int) -> fn (user: str)
   else if mtype == _MSG_ERROR then
     let _ = print ("pg error: " ++ mem_to_str payload plen) in
     _drain_until_ready fd user password false
+  else if mtype == _MSG_NOTIFY then
+    let _ = _pg_enqueue_notif payload plen in
+    _drain_until_ready fd user password ok
   else if mtype == _MSG_AUTH then
     let sub = mem_get_u32be payload 0 in
     if sub == 0 then _drain_until_ready fd user password ok
@@ -581,13 +640,6 @@ let pg_first_col = fn (rows: (str option list) list) -> fn (i: int) ->
 // We surface `(column_name, type_oid)` pairs; the rest is available in
 // the wire format if a later revision needs it but adds no value now.
 
-// Read a NUL-terminated cstring starting at buf+off. Returns the offset
-// AFTER the NUL — caller advances past both name bytes and terminator.
-let rec _find_nul = fn (buf: int) -> fn (off: int) ->
-  if mem_get_u8 buf off == 0 then off
-  else _find_nul buf (off + 1)
-  ;
-
 let rec _parse_row_desc_cols = fn (payload: int) -> fn (off: int)
                             -> fn (remaining: int)
                             -> fn (acc: (str * int) list) ->
@@ -665,6 +717,9 @@ let rec _collect_result = fn (fd: int) -> fn (cols: (str * int) list)
     _collect_result fd (_parse_row_desc payload) acc
   else if mtype == _MSG_ERROR then
     let _ = print ("pg query error: " ++ mem_to_str payload plen) in
+    _collect_result fd cols acc
+  else if mtype == _MSG_NOTIFY then
+    let _ = _pg_enqueue_notif payload plen in
     _collect_result fd cols acc
   else
     // C (CommandComplete) / N (Notice) / 1/2 (Parse/Bind complete) — skip.
@@ -1141,6 +1196,9 @@ let rec _copy_drain = fn (fd: int) -> fn (ok: bool) -> fn (count: int) ->
     let space = str_index_of tag " " in
     let n = if space < 0 then 0 else int_of_str (_slice tag (space + 1)) in
     _copy_drain fd ok n
+  else if mtype == _MSG_NOTIFY then
+    let _ = _pg_enqueue_notif payload plen in
+    _copy_drain fd ok count
   else
     _copy_drain fd ok count
   ;
@@ -1279,6 +1337,9 @@ let rec _copy_out_drain = fn (fd: int) -> fn (acc: (str option list) list) ->
     let raw = mem_to_str payload plen in
     let lines = _split_lines_filter (str_split raw "\n") in
     _copy_out_drain fd (_fold_copy_lines lines acc)
+  else if mtype == _MSG_NOTIFY then
+    let _ = _pg_enqueue_notif payload plen in
+    _copy_out_drain fd acc
   else
     // CopyOutResponse ('H'), CopyDone ('c'), CommandComplete ('C'),
     // NoticeResponse ('N') — all no-ops on the accumulator.
@@ -1332,44 +1393,78 @@ let pg_notify = fn (fd: int) -> fn (channel: str) -> fn (payload: str) ->
   ()
   ;
 
-// Parse a NotificationResponse payload — the 4-byte PID followed by
-// two NUL-terminated strings (channel, payload).
-let _parse_notify = fn (payload: int) -> fn (plen: int) ->
-  let pid = mem_get_u32be payload 0 in
-  let ch_end = _find_nul payload 4 in
-  let channel = mem_to_str (payload + 4) (ch_end - 4) in
-  let pl_start = ch_end + 1 in
-  let pl_end = _find_nul payload pl_start in
-  let pl = mem_to_str (payload + pl_start) (pl_end - pl_start) in
-  (pid, channel, pl)
+// Shift queued entries [from..n-1] down to [from-1..n-2]. Called from
+// _pg_pop_first_notif after reading slot 0; each subsequent slot's
+// (pid, ch, pl) trio is re-keyed one index lower.
+let rec _pg_shift_notifs = fn (from_idx: int) -> fn (n: int) ->
+  if from_idx >= n then ()
+  else
+    let src = show from_idx in
+    let dst = show (from_idx - 1) in
+    let _ = map_set _pg_notif_q ("pid_" ++ dst) (map_get _pg_notif_q ("pid_" ++ src)) in
+    let _ = map_set _pg_notif_q ("ch_"  ++ dst) (map_get _pg_notif_q ("ch_"  ++ src)) in
+    let _ = map_set _pg_notif_q ("pl_"  ++ dst) (map_get _pg_notif_q ("pl_"  ++ src)) in
+    _pg_shift_notifs (from_idx + 1) n
   ;
 
-// Wait up to `timeout_ms` for a NotificationResponse. Returns
-//   Some (pid, channel, payload)  on delivery
-//   None                          on timeout (or spurious wakeup)
-//
-// Non-'A' messages arriving during the wait window (ParameterStatus,
-// keepalives, etc.) are ignored and the loop keeps waiting until either
-// an 'A' arrives or the socket times out.
+// Pop the oldest queued notification (index 0). Returns None on empty.
+let _pg_pop_first_notif = fn () ->
+  let n = int_of_str (map_get _pg_notif_q "n") in
+  if n <= 0 then None
+  else
+    let pid = int_of_str (map_get _pg_notif_q "pid_0") in
+    let ch = map_get _pg_notif_q "ch_0" in
+    let pl = map_get _pg_notif_q "pl_0" in
+    let _ = _pg_shift_notifs 1 n in
+    let _ = map_set _pg_notif_q "n" (show (n - 1)) in
+    Some (pid, ch, pl)
+  ;
+
+// Wait up to `timeout_ms` for a NotificationResponse on the wire. Non-'A'
+// interleaved messages are ignored (their own drain callers would have
+// pushed them into the queue; this loop just skips them).
 let rec _wait_notify_loop = fn (fd: int) -> fn (deadline_hint: int) ->
   let (mtype, payload, plen) = _recv_msg fd in
   if mtype < 0 then None
-  else if mtype == 65 then
-    // 'A' NotificationResponse
+  else if mtype == _MSG_NOTIFY then
     Some (_parse_notify payload plen)
   else
-    // Non-notification (e.g., ParameterStatus 'S', NoticeResponse 'N').
-    // Keep waiting; the socket timeout is per-read, so this may block
-    // longer than the caller asked for if the server chattily sends
-    // other messages. Rare in practice on an idle LISTEN connection.
     _wait_notify_loop fd deadline_hint
   ;
 
+// pg_wait_notify:
+//   1. Pop from the queue first — pg_query / pg_copy_* might have
+//      collected notifications during their response streams.
+//   2. If the queue is empty, apply `timeout_ms` to the socket and
+//      wait on the wire.
 let pg_wait_notify = fn (fd: int) -> fn (timeout_ms: int) ->
-  let _ = tcp_set_timeout fd timeout_ms in
-  let r = _wait_notify_loop fd 0 in
-  let _ = tcp_set_timeout fd 0 in
-  r
+  match _pg_pop_first_notif () with
+  | Some q -> Some q
+  | None ->
+    let _ = tcp_set_timeout fd timeout_ms in
+    let r = _wait_notify_loop fd 0 in
+    let _ = tcp_set_timeout fd 0 in
+    r
+  ;
+
+// pg_drain_notifications: pull every queued notification at once,
+// clearing the queue. Order matches the wire arrival order (FIFO)
+// since the pop-first + shift-down pattern preserves it.
+let rec _pg_drain_all = fn (acc: (int * str * str) list) ->
+  match _pg_pop_first_notif () with
+  | None -> acc
+  | Some x -> _pg_drain_all (Cons (x, acc))
+  ;
+
+let rec _pg_rev_notifs_loop = fn (xs: (int * str * str) list)
+                           -> fn (acc: (int * str * str) list) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _pg_rev_notifs_loop t (Cons (h, acc))
+  ;
+
+let pg_drain_notifications = fn (fd: int) ->
+  _pg_rev_notifs_loop (_pg_drain_all Nil) Nil
   ;
 
 // ---- Cleanup ------------------------------------------------------------
