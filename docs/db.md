@@ -10,6 +10,22 @@ packages involved.
 The rest of this page walks the stack top-down, then catalogs the 32
 `examples/db_*.mere` demos.
 
+**At a glance**
+
+| Engine | Wire | Auth | Features |
+|---|---|---|---|
+| **PostgreSQL** | v3 | trust, SCRAM-SHA-256 | prepared / tx+savepoints / COPY / LISTEN-NOTIFY (async queue) / pool / TLS+verify+SAN |
+| **MySQL** | v10 | `mysql_native_password`, `caching_sha2_password` (fast + RSA) | prepared / tx+savepoints / pool / TLS+verify+SAN |
+| **Redis** | RESP2 + RESP3 (9 types) | `AUTH`, `HELLO 3` | pipelining / PUB-SUB / binary-safe I/O / TLS+verify+SAN / **Sentinel** / **Cluster** (CRC16 + MOVED) |
+
+**Contents**
+
+- [Layered architecture](#layered-architecture) — 5-layer diagram
+- [Quick start](#quick-start) — docker + build + run
+- [Public API reference](#public-api-reference) — grouped tables per concern
+- [Demo catalog](#demo-catalog) — 32 demos grouped by engine + concern
+- [Limitations and future work](#limitations-and-future-work)
+
 ## Layered architecture
 
 ```
@@ -242,40 +258,96 @@ node scripts/run_wasm.js /tmp/db.wasm
 Every demo is self-contained (its file header lists the exact docker
 command needed) and cleans up on process exit.
 
+### PostgreSQL (16 demos)
+
+*Auth & connect*
+
 | demo | shows |
 |---|---|
 | [db_hello](https://github.com/merelang/mere/blob/main/examples/db_hello.mere) | trust auth + simple query, minimal starter |
 | [db_scram](https://github.com/merelang/mere/blob/main/examples/db_scram.mere) | SCRAM-SHA-256 handshake against a scram-only server |
+| [db_url](https://github.com/merelang/mere/blob/main/examples/db_url.mere) | libpq URL — IPv6 brackets, `?query`, `%40` percent decoding |
+| [db_pool](https://github.com/merelang/mere/blob/main/examples/db_pool.mere) | single-fd keep-alive: same `fd` + backend pid across acquires |
+
+*Query surface*
+
+| demo | shows |
+|---|---|
 | [db_params](https://github.com/merelang/mere/blob/main/examples/db_params.mere) | parameterized query — SQL injection payload lands as data, not SQL |
+| [db_prepared](https://github.com/merelang/mere/blob/main/examples/db_prepared.mere) | named prepared statement, 5× execute, deallocate |
 | [db_types](https://github.com/merelang/mere/blob/main/examples/db_types.mere) | RowDescription OIDs — `pg_type_name` on int4/text/bool/uuid/jsonb/… |
 | [db_typed](https://github.com/merelang/mere/blob/main/examples/db_typed.mere) | `pg_col_int` / `pg_col_bool` / defaults / `pg_first_col` |
-| [db_url](https://github.com/merelang/mere/blob/main/examples/db_url.mere) | libpq URL — IPv6 brackets, `?query`, `%40` percent decoding |
+
+*Transactions*
+
+| demo | shows |
+|---|---|
 | [db_tx](https://github.com/merelang/mere/blob/main/examples/db_tx.mere) | `pg_tx` commit / rollback via body return value |
 | [db_savepoint](https://github.com/merelang/mere/blob/main/examples/db_savepoint.mere) | isolation level + nested savepoint scope |
-| [db_prepared](https://github.com/merelang/mere/blob/main/examples/db_prepared.mere) | named prepared statement, 5× execute, deallocate |
-| [db_pool](https://github.com/merelang/mere/blob/main/examples/db_pool.mere) | single-fd keep-alive: same `fd` + backend pid across acquires |
-| [db_pool_pump](https://github.com/merelang/mere/blob/main/examples/db_pool_pump.mere) | pool + LISTEN — pump / release-with-notifs / quiet tick |
+
+*Bulk transfer (COPY)*
+
+| demo | shows |
+|---|---|
 | [db_copy](https://github.com/merelang/mere/blob/main/examples/db_copy.mere) | `pg_copy_from` — 1000 rows in one round trip, edge-case escapes |
 | [db_copy_out](https://github.com/merelang/mere/blob/main/examples/db_copy_out.mere) | `pg_copy_to` — subquery form, escapes round-trip |
+
+*Async pub/sub*
+
+| demo | shows |
+|---|---|
 | [db_notify](https://github.com/merelang/mere/blob/main/examples/db_notify.mere) | LISTEN / NOTIFY with two connections + timeout path |
 | [db_notify_async](https://github.com/merelang/mere/blob/main/examples/db_notify_async.mere) | notifications arriving inside another query's response stream |
+| [db_pool_pump](https://github.com/merelang/mere/blob/main/examples/db_pool_pump.mere) | pool + LISTEN — pump / release-with-notifs / quiet tick |
+
+*End-to-end integration*
+
+| demo | shows |
+|---|---|
 | [http_todo_pg](https://github.com/merelang/mere/blob/main/examples/http_todo_pg.mere) | `contrib/http` + `pg_pool` — signup / login / todos backed by PG |
+
+### MySQL (4 demos)
+
+| demo | shows |
+|---|---|
 | [db_mysql](https://github.com/merelang/mere/blob/main/examples/db_mysql.mere) | MySQL 8 — auto-selects `mysql_native_password` (SHA-1) or `caching_sha2_password` (SHA-256 fast + RSA-OAEP-SHA1 slow); NULL round-trip |
 | [db_mysql_prepared](https://github.com/merelang/mere/blob/main/examples/db_mysql_prepared.mere) | `COM_STMT_PREPARE` + `_EXECUTE`, binary-protocol row decode; SQL-injection defense |
 | [db_mysql_pool](https://github.com/merelang/mere/blob/main/examples/db_mysql_pool.mere) | `mysql_pool` keep-alive + `mysql_parse_url` + percent decoding |
 | [db_mysql_tx](https://github.com/merelang/mere/blob/main/examples/db_mysql_tx.mere) | `mysql_tx_iso` (REPEATABLE READ) + `mysql_savepoint_scope` nested rollback |
+
+### Redis (7 demos)
+
+*Core*
+
+| demo | shows |
+|---|---|
+| [db_redis](https://github.com/merelang/mere/blob/main/examples/db_redis.mere) | Redis 7 — RESP2 replies (str / err / int / bulk / array), typed extractors |
+| [db_redis_pipeline](https://github.com/merelang/mere/blob/main/examples/db_redis_pipeline.mere) | `redis_pipeline` — 100 INCRs in one round trip; mixed SET/GET batch replies in order |
+| [db_redis_binary](https://github.com/merelang/mere/blob/main/examples/db_redis_binary.mere) | Binary-safe args via `redis_command_b` — 5-byte payload with embedded NULs |
+
+*RESP3 & async*
+
+| demo | shows |
+|---|---|
+| [db_redis_resp3](https://github.com/merelang/mere/blob/main/examples/db_redis_resp3.mere) | `HELLO 3` upgrade — HGETALL → `RRMap`, SMEMBERS → `RRSet`, `RRNull` |
+| [db_redis_pubsub](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub.mere) | Redis PUB/SUB — SUBSCRIBE + `redis_wait_message` on one connection, PUBLISH on another |
+| [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
+
+*Cluster / high availability*
+
+| demo | shows |
+|---|---|
+| [db_redis_cluster](https://github.com/merelang/mere/blob/main/examples/db_redis_cluster.mere) | Slot hashing + hash-tag; live routing / MOVED redirect wired |
+
+### Transport / TLS (5 demos — one per engine plus verification variants)
+
+| demo | shows |
+|---|---|
 | [db_ssl](https://github.com/merelang/mere/blob/main/examples/db_ssl.mere) | Postgres over TLS 1.3 — `pg_connect_ssl` + `?sslmode=require` |
 | [db_mysql_ssl](https://github.com/merelang/mere/blob/main/examples/db_mysql_ssl.mere) | MySQL over TLS 1.3 — `mysql_connect_ssl` + `?ssl=true` |
+| [db_redis_ssl](https://github.com/merelang/mere/blob/main/examples/db_redis_ssl.mere) | Redis 7 over TLS — permissive / system-CA reject / custom-CA accept |
 | [db_ssl_verify](https://github.com/merelang/mere/blob/main/examples/db_ssl_verify.mere) | Cert-chain verification — accept-any / system CAs / custom CA |
 | [db_ssl_san](https://github.com/merelang/mere/blob/main/examples/db_ssl_san.mere) | Hostname / SAN matching under verify-full — DNS-only SAN cert rejects 127.0.0.1 |
-| [db_redis](https://github.com/merelang/mere/blob/main/examples/db_redis.mere) | Redis 7 — RESP2 replies (str / err / int / bulk / array), typed extractors |
-| [db_redis_pubsub](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub.mere) | Redis PUB/SUB — SUBSCRIBE + `redis_wait_message` on one connection, PUBLISH on another |
-| [db_redis_pipeline](https://github.com/merelang/mere/blob/main/examples/db_redis_pipeline.mere) | `redis_pipeline` — 100 INCRs in one round trip; mixed SET/GET batch replies in order |
-| [db_redis_ssl](https://github.com/merelang/mere/blob/main/examples/db_redis_ssl.mere) | Redis 7 over TLS — permissive / system-CA reject / custom-CA accept |
-| [db_redis_resp3](https://github.com/merelang/mere/blob/main/examples/db_redis_resp3.mere) | `HELLO 3` upgrade — HGETALL → `RRMap`, SMEMBERS → `RRSet`, `RRNull` |
-| [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
-| [db_redis_binary](https://github.com/merelang/mere/blob/main/examples/db_redis_binary.mere) | Binary-safe args via `redis_command_b` — 5-byte payload with embedded NULs |
-| [db_redis_cluster](https://github.com/merelang/mere/blob/main/examples/db_redis_cluster.mere) | Slot hashing + hash-tag; live routing / MOVED redirect wired |
 
 ## Limitations and future work
 
