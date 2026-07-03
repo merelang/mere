@@ -1,0 +1,460 @@
+// http_wiki: anonymous-edit wiki with first-class revision history.
+//
+// The chosen angle for this demo: dogfood contrib/kv's log-structured
+// storage as a FEATURE, not a limitation. Every edit is a fresh key
+// (`page/<slug>/v/<n>`) so nothing is ever overwritten — the past
+// state is always retrievable, and the "history" UI is just a
+// filtered key listing.
+//
+// Endpoints:
+//   GET  /                        HTML home — page index (public)
+//   GET  /page/<slug>             HTML render of latest markdown
+//   GET  /page/<slug>/history     HTML list of all revisions
+//   GET  /page/<slug>/v/<n>       HTML render of a specific version
+//   GET  /api/pages               JSON [{ slug, title, latest, updated }]
+//   POST /api/pages               {slug, title, body, author} — new version
+//   GET  /api/pages/<slug>/history JSON list of revisions
+//
+// Data model (log-structured KV — mere_wiki_pages.db):
+//   page/<slug>/latest      →  latest version number, as base-10 str
+//   page/<slug>/v/<n>       →  `<created_at>|<author>|<title>|<body>`
+//   page/<slug>/title       →  cached title of latest version (for /api/pages)
+//
+// No auth: anyone can edit. The `author` field is a self-declared
+// name, not verified. Classic wiki behavior.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+
+import "../contrib/http/json_body.mere";
+import "../contrib/http/access_log.mere";
+import "../contrib/http/security.mere";
+import "../contrib/http/cors.mere";
+import "../contrib/http/static.mere";
+import "../contrib/http/router.mere";
+import "../contrib/kv/kv.mere";
+import "../contrib/log/log.mere";
+import "../contrib/markdown/to_html.mere";
+
+let pages_db_path = "/tmp/mere_wiki_pages.db" in
+let pages = kv_load pages_db_path in
+
+let wiki_title = "Mere wiki" in
+
+// ---- helpers ------------------------------------------------------
+
+let body_field = fn (name: str) ->
+  let parsed = parse_json_body (http_current_body ()) in
+  json_get parsed name
+in
+
+let pack4 = fn (a: str) -> fn (b: str) -> fn (c: str) -> fn (d: str) ->
+  a ++ "|" ++ b ++ "|" ++ c ++ "|" ++ d
+in
+
+let split4 = fn (s: str) ->
+  let b1 = str_index_of s "|" in
+  if b1 < 0 then (s, "", "", "")
+  else
+    let r1 = substring s (b1 + 1) (str_len s) in
+    let b2 = str_index_of r1 "|" in
+    if b2 < 0 then (substring s 0 b1, r1, "", "")
+    else
+      let r2 = substring r1 (b2 + 1) (str_len r1) in
+      let b3 = str_index_of r2 "|" in
+      if b3 < 0 then (substring s 0 b1, substring r1 0 b2, r2, "")
+      else (substring s 0 b1,
+            substring r1 0 b2,
+            substring r2 0 b3,
+            substring r2 (b3 + 1) (str_len r2))
+in
+
+// Parse a base-10 unsigned int; empty / non-digits → 0.
+let parse_int = fn (s: str) ->
+  let n = str_len s in
+  let st = map_new () in
+  let _ = map_set st "i" 0 in
+  let _ = map_set st "n" 0 in
+  let _ = while map_get st "i" < n do
+    let i = map_get st "i" in
+    let d = ord (char_at s i) - ord "0" in
+    if d >= 0 && d <= 9 then
+      let _ = map_set st "n" (map_get st "n" * 10 + d) in
+      let _ = map_set st "i" (i + 1) in ()
+    else let _ = map_set st "i" n in () in
+  map_get st "n"
+in
+
+// Slug: [a-z0-9-_]{1,60}. Same rules as the link shortener so the
+// dynamic /page/<slug> path routing is unambiguous.
+let slug_char = fn (c: str) ->
+  (str_eq c "-") || (str_eq c "_")
+  || (ord c >= ord "0" && ord c <= ord "9")
+  || (ord c >= ord "a" && ord c <= ord "z")
+in
+
+let valid_slug = fn (s: str) ->
+  let n = str_len s in
+  if n == 0 || n > 60 then false
+  else
+    let st = map_new () in
+    let _ = map_set st "i" 0 in
+    let _ = map_set st "ok" 1 in
+    let _ = while (map_get st "ok" == 1) && (map_get st "i" < n) do
+      if slug_char (char_at s (map_get st "i")) then
+        let _ = map_set st "i" (map_get st "i" + 1) in ()
+      else let _ = map_set st "ok" 0 in () in
+    map_get st "ok" == 1
+in
+
+// ---- HTML / JSON emission -----------------------------------------
+
+let rec _json_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _json_walk s buf (i + 1) n
+in
+let jstr = fn (s: str) ->
+  let buf = strbuf_new () in
+  "\"" ++ _json_walk s buf 0 (str_len s) ++ "\""
+in
+
+let rec _html_walk = fn (s: str) -> fn (buf) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "&" then let _ = strbuf_push buf "&amp;" in 0
+            else if str_eq c "<" then let _ = strbuf_push buf "&lt;" in 0
+            else if str_eq c ">" then let _ = strbuf_push buf "&gt;" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _html_walk s buf (i + 1) n
+in
+let html_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _html_walk s buf 0 (str_len s)
+in
+
+// Split body into lines for MarkdownHtml.render.
+let split_lines = fn (s: str) ->
+  let n = str_len s in
+  let rec collect = fn (i: int) -> fn (start: int) -> fn (acc: str list) ->
+    if i >= n then
+      let last = substring s start n in
+      if str_len last == 0 then acc else Cons (last, acc)
+    else if str_eq (char_at s i) "\n" then
+      let line = substring s start i in
+      collect (i + 1) (i + 1) (Cons (line, acc))
+    else collect (i + 1) start acc in
+  let rec rev = fn (xs) -> fn (acc) ->
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) -> rev t (Cons (h, acc)) in
+  rev (collect 0 0 Nil) Nil
+in
+
+// ---- Wiki logic ---------------------------------------------------
+
+let latest_version = fn (slug: str) ->
+  let k = "page/" ++ slug ++ "/latest" in
+  if kv_has pages k then parse_int (kv_get pages k) else 0
+in
+
+let read_version = fn (slug: str) -> fn (n: int) ->
+  let k = "page/" ++ slug ++ "/v/" ++ show n in
+  if not (kv_has pages k) then ("", "", "", "")
+  else split4 (kv_get pages k)
+in
+
+// ---- handlers -----------------------------------------------------
+
+let page_save_h = fn (req: str) ->
+  let slug = body_field "slug" in
+  let title = body_field "title" in
+  let body = body_field "body" in
+  let author = body_field "author" in
+  if not (valid_slug slug) then
+    let _ = http_set_status 400 in "slug must be [a-z0-9-_]\{1,60}\n"
+  else if str_eq title "" then
+    let _ = http_set_status 400 in "missing title\n"
+  else
+    let cur = latest_version slug in
+    let next = cur + 1 in
+    let author_or_anon = if str_eq author "" then "anonymous" else author in
+    let ts = "2026-07-03" in
+    let _ = kv_set pages ("page/" ++ slug ++ "/v/" ++ show next)
+                        (pack4 ts author_or_anon title body) in
+    let _ = kv_set pages ("page/" ++ slug ++ "/latest") (show next) in
+    let _ = kv_set pages ("page/" ++ slug ++ "/title") title in
+    let _ = kv_save pages pages_db_path in
+    let _ = log_with "info" "page_saved"
+      (Cons (("slug", slug),
+        Cons (("version", show next),
+          Cons (("author", author_or_anon), Nil)))) in
+    let _ = http_set_content_type "application/json" in
+    let _ = http_set_status 201 in
+    "\{\"slug\":" ++ jstr slug ++ ",\"version\":" ++ show next ++ "}\n"
+in
+
+let pages_list_h = fn (req: str) ->
+  let ks = kv_keys pages in
+  let prefix = "page/" in
+  let suffix = "/latest" in
+  let slen = str_len suffix in
+  let rec build = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc ++ "]"
+    | Cons (k, rest) ->
+      let kn = str_len k in
+      if str_starts_with k prefix && kn > slen
+         && str_eq (substring k (kn - slen) kn) suffix then
+        let slug = substring k (str_len prefix) (kn - slen) in
+        let latest = kv_get pages k in
+        let title = if kv_has pages ("page/" ++ slug ++ "/title")
+                    then kv_get pages ("page/" ++ slug ++ "/title")
+                    else slug in
+        let sep = if first then "" else "," in
+        let row = "\{\"slug\":" ++ jstr slug ++
+                  ",\"title\":" ++ jstr title ++
+                  ",\"latest\":" ++ latest ++ "}" in
+        build rest false (acc ++ sep ++ row)
+      else build rest first acc in
+  let _ = http_set_content_type "application/json" in
+  build ks true "[" ++ "\n"
+in
+
+// GET /api/pages/<slug>/history — return every version's metadata.
+let page_history_json = fn (slug: str) ->
+  let latest = latest_version slug in
+  let rec build = fn (n: int) -> fn (first: bool) -> fn (acc: str) ->
+    if n > latest then acc ++ "]"
+    else
+      let (ts, author, title, _body) = read_version slug n in
+      if str_eq ts "" then build (n + 1) first acc
+      else
+        let sep = if first then "" else "," in
+        let row = "\{\"version\":" ++ show n ++
+                  ",\"created_at\":" ++ jstr ts ++
+                  ",\"author\":" ++ jstr author ++
+                  ",\"title\":" ++ jstr title ++ "}" in
+        build (n + 1) false (acc ++ sep ++ row) in
+  let _ = http_set_content_type "application/json" in
+  build 1 true "[" ++ "\n"
+in
+
+// ---- HTML pages ---------------------------------------------------
+
+let render_page = fn (slug: str) -> fn (version: int) ->
+  let (ts, author, title, body) = read_version slug version in
+  if str_eq ts "" then
+    let _ = http_set_status 404 in
+    "page not found: " ++ slug ++ " v" ++ show version ++ "\n"
+  else
+    let rendered = MarkdownHtml.render (split_lines body) in
+    let latest = latest_version slug in
+    let banner = if version < latest then
+                   "<div class=\"banner\">Viewing revision " ++ show version ++
+                   " of " ++ show latest ++ ". <a href=\"/page/" ++ slug ++
+                   "\">Show latest</a>.</div>"
+                 else "" in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>" ++ html_esc title ++
+    " — " ++ html_esc wiki_title ++ "</title>" ++
+    "<link rel=\"stylesheet\" href=\"/static/style.css\">" ++
+    banner ++
+    "<nav><a href=\"/\">index</a> · <a href=\"/page/" ++ slug ++
+    "/history\">history</a> · <a href=\"/edit/" ++ slug ++ "\">edit</a></nav>" ++
+    "<h1>" ++ html_esc title ++ "</h1>" ++
+    "<p class=\"meta\">v" ++ show version ++ " · " ++ html_esc ts ++
+    " · " ++ html_esc author ++ "</p>" ++
+    "<article>" ++ rendered ++ "</article>"
+in
+
+let render_history_page = fn (slug: str) ->
+  let latest = latest_version slug in
+  if latest == 0 then
+    let _ = http_set_status 404 in "no such page: " ++ slug ++ "\n"
+  else
+    let rec collect = fn (n: int) -> fn (acc: str) ->
+      if n < 1 then acc
+      else
+        let (ts, author, title, _body) = read_version slug n in
+        if str_eq ts "" then collect (n - 1) acc
+        else
+          let row = "<li><a href=\"/page/" ++ slug ++ "/v/" ++ show n ++
+                    "\">v" ++ show n ++ "</a> " ++
+                    "<span class=\"meta\">" ++ html_esc ts ++
+                    " by " ++ html_esc author ++
+                    "</span> — " ++ html_esc title ++ "</li>" in
+          collect (n - 1) (acc ++ row) in
+    let items = collect latest "" in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><meta charset=utf-8><title>History — " ++ html_esc slug ++
+    "</title><link rel=\"stylesheet\" href=\"/static/style.css\">" ++
+    "<nav><a href=\"/\">index</a> · <a href=\"/page/" ++ slug ++
+    "\">latest</a></nav>" ++
+    "<h1>History of <code>" ++ html_esc slug ++ "</code></h1>" ++
+    "<ul class=\"history\">" ++ items ++ "</ul>"
+in
+
+let sub_marker = fn (haystack: str) -> fn (needle: str) -> fn (replacement: str) ->
+  let idx = str_index_of haystack needle in
+  if idx < 0 then haystack
+  else substring haystack 0 idx ++ replacement ++
+       substring haystack (idx + str_len needle) (str_len haystack)
+in
+
+// Simple template: edit.html carries <!--SLUG--> <!--TITLE--> <!--BODY-->
+// placeholders that we replace before serving. Kept minimal to sidestep a
+// real templating engine.
+let render_edit_form = fn (slug: str) ->
+  let latest = latest_version slug in
+  let (_, _, title, body) =
+    if latest == 0 then ("", "", "", "")
+    else read_version slug latest in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  let t = read_file "examples/wiki/edit.html" in
+  let t1 = sub_marker t "<!--SLUG-->" (html_esc slug) in
+  let t2 = sub_marker t1 "<!--TITLE-->" (html_esc title) in
+  sub_marker t2 "<!--BODY-->" (html_esc body)
+in
+
+let home_h = fn (req: str) ->
+  let ks = kv_keys pages in
+  let prefix = "page/" in
+  let suffix = "/latest" in
+  let slen = str_len suffix in
+  let rec collect = fn (xs: str list) -> fn (acc: str) ->
+    match xs with
+    | Nil -> acc
+    | Cons (k, rest) ->
+      let kn = str_len k in
+      if str_starts_with k prefix && kn > slen
+         && str_eq (substring k (kn - slen) kn) suffix then
+        let slug = substring k (str_len prefix) (kn - slen) in
+        let latest = kv_get pages k in
+        let title = if kv_has pages ("page/" ++ slug ++ "/title")
+                    then kv_get pages ("page/" ++ slug ++ "/title")
+                    else slug in
+        let li = "<li><a href=\"/page/" ++ slug ++ "\">" ++ html_esc title ++
+                 "</a> <span class=\"meta\">v" ++ latest ++
+                 " · <a href=\"/page/" ++ slug ++ "/history\">history</a>" ++
+                 "</span></li>" in
+        collect rest (acc ++ li)
+      else collect rest acc in
+  let items = collect ks "" in
+  let template = read_file "examples/wiki/index.html" in
+  let marker = "<!--PAGES-->" in
+  let idx = str_index_of template marker in
+  let html = if idx < 0 then template
+             else substring template 0 idx ++ items ++
+                  substring template (idx + str_len marker) (str_len template) in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  html
+in
+
+// ---- dynamic route dispatch --------------------------------------
+
+// Extract path (no query) from raw req.
+let req_path = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then ""
+  else
+    let url = substring req (sp + 1) (str_len req) in
+    let q = str_index_of url "?" in
+    if q < 0 then url else substring url 0 q
+in
+
+// Handle /page/<slug>, /page/<slug>/history, /page/<slug>/v/<n>, /edit/<slug>.
+// Returns "" if not a match — the caller renders 404 in that case.
+let dispatch_path = fn (path: str) ->
+  let p_prefix = "/page/" in
+  let e_prefix = "/edit/" in
+  if str_starts_with path p_prefix then
+    let after = substring path (str_len p_prefix) (str_len path) in
+    // after = `<slug>` or `<slug>/history` or `<slug>/v/<n>`
+    let slash = str_index_of after "/" in
+    if slash < 0 then
+      if valid_slug after then render_page after (latest_version after)
+      else let _ = http_set_status 404 in "invalid slug\n"
+    else
+      let slug = substring after 0 slash in
+      let rest = substring after (slash + 1) (str_len after) in
+      if not (valid_slug slug) then
+        let _ = http_set_status 404 in "invalid slug\n"
+      else if str_eq rest "history" then render_history_page slug
+      else if str_starts_with rest "v/" then
+        let vs = substring rest 2 (str_len rest) in
+        render_page slug (parse_int vs)
+      else
+        let _ = http_set_status 404 in "unknown page sub-route\n"
+  else if str_starts_with path e_prefix then
+    let slug = substring path (str_len e_prefix) (str_len path) in
+    if valid_slug slug then render_edit_form slug
+    else let _ = http_set_status 404 in "invalid slug\n"
+  else ""
+in
+
+let not_found = fn (req: str) ->
+  let path = req_path req in
+  let attempted = dispatch_path path in
+  if str_eq attempted "" then
+    let _ = http_set_status 404 in "not found: " ++ path ++ "\n"
+  else attempted
+in
+
+// The router only owns fixed API paths and /. Dynamic routes are
+// handled by not_found → dispatch_path.
+let history_api_h = fn (req: str) ->
+  // /api/pages/<slug>/history — parse slug out of the request line.
+  let path = req_path req in
+  let prefix = "/api/pages/" in
+  let suffix = "/history" in
+  if not (str_starts_with path prefix) then
+    let _ = http_set_status 404 in "not a history url\n"
+  else
+    let after = substring path (str_len prefix) (str_len path) in
+    let sn = str_len after - str_len suffix in
+    if sn <= 0 || not (str_eq (substring after sn (str_len after)) suffix) then
+      let _ = http_set_status 404 in "not a history url\n"
+    else
+      let slug = substring after 0 sn in
+      if not (valid_slug slug) then
+        let _ = http_set_status 404 in "invalid slug\n"
+      else page_history_json slug
+in
+
+let routes =
+  Cons (route "GET"  "/"                home_h,
+  Cons (route "GET"  "/api/pages"       pages_list_h,
+  Cons (route "POST" "/api/pages"       page_save_h,
+  Nil))) in
+
+// The /api/pages/<slug>/history endpoint is dynamic too — put it in the
+// dispatch path as a special case above the "static match" fall-through.
+let dispatch_with_api = fn (req: str) ->
+  let path = req_path req in
+  if str_starts_with path "/api/pages/" && (
+       let n = str_len path in
+       n > 8 && str_eq (substring path (n - 8) n) "/history") then
+    history_api_h req
+  else not_found req
+in
+
+let handle_routed = router routes dispatch_with_api in
+let handle_with_static = serve_static_fallback "/static/" "examples/wiki" handle_routed in
+
+let _ = print ("starting wiki on :8080 (pages=" ++ pages_db_path ++ ")") in
+let _ = http_serve 8080
+  (with_access_log
+    (with_security_headers
+      (with_cors "*" handle_with_static))) in
+0

@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Edit <!--SLUG--> — Mere wiki</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<nav><a href="/">index</a> · <a href="/page/&#1;">back to page</a></nav>
+
+<h1>Edit <code id="slug-echo"><!--SLUG--></code></h1>
+
+<form id="edit-form">
+  <label>title <input id="edit-title" value="<!--TITLE-->" size="40" required></label>
+  <label>author <input id="edit-author" placeholder="anonymous"></label>
+  <textarea id="edit-body" rows="14" required><!--BODY--></textarea>
+  <button type="submit">save new revision</button>
+</form>
+
+<pre id="log"></pre>
+
+<script>
+const slug = document.getElementById('slug-echo').textContent.trim();
+// Fix up the "back to page" link (the &#1; sentinel above is just a
+// placeholder that won't appear in real HTML).
+Array.from(document.querySelectorAll('nav a')).forEach((a) => {
+  if (a.href.endsWith('%01') || a.href.endsWith('/')) {
+    a.href = '/page/' + slug;
+  }
+});
+document.getElementById('edit-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const title = document.getElementById('edit-title').value.trim();
+  const author = document.getElementById('edit-author').value.trim();
+  const body = document.getElementById('edit-body').value;
+  const resp = await fetch('/api/pages', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({slug, title, body, author}),
+  });
+  const t = await resp.text();
+  document.getElementById('log').textContent += `POST /api/pages → ${resp.status} ${t}\n`;
+  if (resp.status === 201) location.href = '/page/' + slug;
+});
+</script>
