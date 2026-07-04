@@ -1,11 +1,11 @@
-// contrib/http/router.mere — method + path router (exact + patterns).
+// contrib/http/router.mere — method + path router.
 //
 // Turns the if-else chain that dispatches request lines into a
 // declarative `route_entry list` — useful when the number of
 // endpoints grows past 3-4 and pattern coverage becomes harder to
 // eyeball.
 //
-// Two entry kinds:
+// Three entry kinds:
 //
 //   1. Exact:   `route "GET" "/health" h`
 //               Handler is `str -> str` (just the raw request).
@@ -14,6 +14,16 @@
 //               Handler is `str list -> str -> str` — the captures
 //               list (in the order the `:name` segments appear in
 //               the pattern) followed by the raw request.
+//
+//   3. Prefix:  `route_prefix "/admin" inner_routes`
+//               Nests a whole `route_entry list` at a common URL
+//               prefix. Useful for `/api/v1` versioning, `/admin`
+//               subtrees, etc. Inner routes see paths stripped of
+//               the prefix ("/admin/login" becomes "/login" inside),
+//               so their entry paths are declared relative to the
+//               mount point. If the inner list has no match, we
+//               fall through to the next outer entry (rather than
+//               claiming the prefix definitively).
 //
 // Patterns:
 //   - Segments are split on `/`. A leading `/` and a trailing `/`
@@ -33,23 +43,25 @@
 // Public API:
 //
 //   route          : str -> str -> (str -> str) -> route_entry
-//                     exact-path entry (backwards-compatible)
-//
 //   route_pattern  : str -> str -> (str list -> str -> str) -> route_entry
-//                     path-with-`:captures` entry
-//
+//   route_prefix   : str -> route_entry list -> route_entry
 //   router         : route_entry list -> (str -> str) -> (str -> str)
 //                     first arg  = route table (tried in order)
 //                     second arg = fallback handler (no match)
 //
 // Usage:
 //
+//   let admin =
+//     Cons (route         "GET"  "/"           dashboard,
+//     Cons (route         "GET"  "/login"      login_form,
+//     Cons (route_pattern "GET"  "/edit/:id"   edit_form,
+//     Nil))) in
+//
 //   let routes =
-//     Cons (route         "GET"    "/"            home,
-//     Cons (route         "POST"   "/signup"      signup,
-//     Cons (route_pattern "GET"    "/post/:slug"  show_post,
-//     Cons (route_pattern "DELETE" "/post/:id"    delete_post,
-//     Nil)))) in
+//     Cons (route         "GET"  "/"            home,
+//     Cons (route_pattern "GET"  "/post/:slug"  show_post,
+//     Cons (route_prefix  "/admin"              admin,
+//     Nil))) in
 //
 //   let handle = router routes not_found in
 //   http_serve 8080 (with_access_log handle);
@@ -57,12 +69,13 @@
 // Composes with the other middleware (access_log, cors, security,
 // etc.) — router is itself a `str -> str` fn.
 
-// Route entry: exact-match or capture-pattern. The pattern variant
-// stores pre-split segments (built once at construction time) so
-// dispatch on every request is just a list walk.
+// Route entry: exact-match, capture-pattern, or nested prefix. The
+// pattern variant stores pre-split segments (built once at
+// construction time) so dispatch on every request is just a list walk.
 type route_entry =
   | REExact   of str * str * (str -> str)
   | REPattern of str * str list * (str list -> str -> str)
+  | REPrefix  of str * route_entry list
   ;
 
 let route = fn (method: str) -> fn (path: str) -> fn (handler: str -> str) ->
@@ -87,6 +100,9 @@ let route_pattern = fn (method: str) -> fn (path: str) ->
                     fn (handler: str list -> str -> str) ->
   REPattern (method, _split_path path, handler);
 
+let route_prefix = fn (prefix: str) -> fn (inner: route_entry list) ->
+  REPrefix (prefix, inner);
+
 // Walk pattern segments and URL segments in parallel, collecting
 // captures where the pattern segment starts with `:`. Returns
 // Some captures on a full match, None otherwise. Captures come
@@ -103,23 +119,39 @@ let rec _match_segs = fn (pat: str list) -> fn (url: str list) -> fn (caps: str 
       _match_segs pt ut caps
     else None;
 
-// Try each entry in order, calling the first whose method matches
-// AND whose path (exact or pattern) matches. On no match, invoke
-// the fallback.
-let rec _try = fn (rs: route_entry list) -> fn (method: str) -> fn (path: str) -> fn (req: str) -> fn (fallback: str -> str) ->
+// Try each entry in order, returning Some body for the first whose
+// method AND path match. Returns None if no entry claims the
+// request — the outer `router` fn turns that into a fallback call.
+// Returning `str option` (rather than eagerly calling the fallback
+// on any Cons-terminator hit) lets REPrefix fall through to the
+// next outer entry when its inner list has no match.
+let rec _try = fn (rs: route_entry list) -> fn (method: str) -> fn (path: str) -> fn (req: str) ->
   match rs with
-  | Nil -> fallback req
+  | Nil -> (None : str option)
   | Cons (r, rest) ->
     (match r with
       | REExact (m, p, h) ->
-        if str_eq m method && str_eq p path then h req
-        else _try rest method path req fallback
+        if str_eq m method && str_eq p path then Some (h req)
+        else _try rest method path req
       | REPattern (m, segs, h) ->
         if str_eq m method then
           (match _match_segs segs (_split_path path) Nil with
-            | Some caps -> h caps req
-            | None -> _try rest method path req fallback)
-        else _try rest method path req fallback);
+            | Some caps -> Some (h caps req)
+            | None -> _try rest method path req)
+        else _try rest method path req
+      | REPrefix (prefix, inner) ->
+        // Match `prefix` at the start of the path. `/admin/login`
+        // under mount `/admin` yields inner_path `/login`. Bare
+        // `/admin` yields inner_path `/` so an inner `route ".." "/"`
+        // handler catches the mount root.
+        if str_starts_with path prefix then
+          let n = str_len prefix in
+          let rest_path = substring path n (str_len path) in
+          let inner_path = if str_len rest_path == 0 then "/" else rest_path in
+          (match _try inner method inner_path req with
+            | Some body -> Some body
+            | None -> _try rest method path req)
+        else _try rest method path req);
 
 let router = fn (routes: route_entry list) -> fn (fallback: str -> str) -> fn (req: str) ->
   let sp = str_index_of req " " in
@@ -130,7 +162,9 @@ let router = fn (routes: route_entry list) -> fn (fallback: str -> str) -> fn (r
     // Strip the query string so `/search` matches `/search?q=hi`.
     let path = let q = str_index_of url "?" in
                if q < 0 then url else substring url 0 q in
-    _try routes method path req fallback;
+    match _try routes method path req with
+    | Some body -> body
+    | None -> fallback req;
 
 // Extract just the path (no method, no query) from a raw request
 // line — the shape the fallback handler sees. Handy when a demo

@@ -22,9 +22,9 @@
 //     POST /admin/logout              — clears the cookie
 //     GET  /admin/new                 — HTML new-post editor
 //     POST /admin/new                 — create post (draft by default)
-//     GET  /admin/edit?id=<n>         — HTML edit form
-//     POST /admin/edit                — update title / body / published
-//     POST /admin/delete              — delete by id
+//     GET  /admin/edit/<id>           — HTML edit form
+//     POST /admin/edit/<id>           — update title / body / published
+//     POST /admin/delete/<id>         — delete by id
 //
 // Data model (PostgreSQL, tables auto-created on first boot):
 //   blog_users(username, pw_hash)
@@ -333,10 +333,9 @@ let rec _rows_to_admin_list = fn (rows: (str option list) list) -> fn (acc: str)
       "<td>" ++ (if pubed then "🟢" else "⚪") ++ "</td>" ++
       "<td><a href=\"/post/" ++ html_escape slug ++ "\">" ++ html_escape title ++ "</a></td>" ++
       "<td>" ++ html_escape (date_only created) ++ "</td>" ++
-      "<td><a href=\"/admin/edit?id=" ++ html_escape id ++ "\">edit</a></td>" ++
+      "<td><a href=\"/admin/edit/" ++ html_escape id ++ "\">edit</a></td>" ++
       "<td>" ++
-        "<form method=\"POST\" action=\"/admin/delete\" style=\"display:inline\">" ++
-        "<input type=\"hidden\" name=\"id\" value=\"" ++ html_escape id ++ "\">" ++
+        "<form method=\"POST\" action=\"/admin/delete/" ++ html_escape id ++ "\" style=\"display:inline\">" ++
         "<button>delete</button></form>" ++
       "</td>" ++
       "</tr>" in
@@ -406,20 +405,15 @@ let new_post_h = fn (req: str) ->
       "created\n"
   ;
 
-let edit_form_h = fn (req: str) ->
+// GET /admin/edit/:id — pattern handler pulls the id straight out
+// of the captures list, no manual query-string parse needed.
+let edit_form_h = fn (caps: str list) -> fn (req: str) ->
   let (_user, ok) = require_auth () in
   if not ok then "redirecting\n"
   else
-    // ?id=<n> from the query string. Router's exact-match strips the
-    // query before dispatch, so we re-parse it out of the raw request
-    // line here.
-    let q_pos = str_index_of req "?" in
-    let query_raw = if q_pos < 0 then "" else
-      let after = _slice req (q_pos + 1) in
-      // strip any trailing ` HTTP/1.1\r\n...`
-      let sp = str_index_of after " " in
-      if sp < 0 then after else substring after 0 sp in
-    let id_str = query_get (parse_query query_raw) "id" in
+    let id_str = match caps with
+                 | Cons (s, _) -> s
+                 | Nil -> "" in
     let fd = pg_pool_acquire pool in
     let rows = pg_query_params fd
       "SELECT slug, title, body_md, published FROM blog_posts WHERE id = $1::int"
@@ -436,8 +430,7 @@ let edit_form_h = fn (req: str) ->
       let _ = http_set_content_type "text/html; charset=utf-8" in
       page ("Edit " ++ title)
         ("<h1>Edit</h1>" ++
-         "<form method=\"POST\" action=\"/admin/edit\" class=\"editor\">" ++
-         "<input type=\"hidden\" name=\"id\" value=\"" ++ html_escape id_str ++ "\">" ++
+         "<form method=\"POST\" action=\"/admin/edit/" ++ html_escape id_str ++ "\" class=\"editor\">" ++
          "<label>Slug <input name=\"slug\" value=\"" ++ html_escape slug ++ "\" required></label>" ++
          "<label>Title <input name=\"title\" value=\"" ++ html_escape title ++ "\" required></label>" ++
          "<label>Body (Markdown)<br><textarea name=\"body\" rows=\"20\">" ++ html_escape body ++ "</textarea></label>" ++
@@ -447,11 +440,13 @@ let edit_form_h = fn (req: str) ->
          "</form>")
   ;
 
-let edit_post_h = fn (req: str) ->
+let edit_post_h = fn (caps: str list) -> fn (req: str) ->
   let (_user, ok) = require_auth () in
   if not ok then "redirecting\n"
   else
-    let id = form_field "id" in
+    let id = match caps with
+             | Cons (s, _) -> s
+             | Nil -> "" in
     let slug = form_field "slug" in
     let title = form_field "title" in
     let body = form_field "body" in
@@ -471,11 +466,13 @@ let edit_post_h = fn (req: str) ->
     "updated\n"
   ;
 
-let delete_h = fn (req: str) ->
+let delete_h = fn (caps: str list) -> fn (req: str) ->
   let (_user, ok) = require_auth () in
   if not ok then "redirecting\n"
   else
-    let id = form_field "id" in
+    let id = match caps with
+             | Cons (s, _) -> s
+             | Nil -> "" in
     let fd = pg_pool_acquire pool in
     let _ = pg_query_params fd
       "DELETE FROM blog_posts WHERE id = $1::int"
@@ -496,20 +493,28 @@ let not_found = fn (req: str) ->
 
 // ---- server ---------------------------------------------------------
 
+// Admin subtree — mounted at `/admin` via route_prefix below. Inner
+// paths are declared relative to the mount point ("/" is the bare
+// `/admin` dashboard, "/login" is `/admin/login`, etc.).
+let admin_routes =
+  Cons (route         "GET"  "/"           admin_h,
+  Cons (route         "GET"  "/login"      login_form_h,
+  Cons (route         "POST" "/login"      login_h,
+  Cons (route         "POST" "/logout"     logout_h,
+  Cons (route         "GET"  "/new"        new_form_h,
+  Cons (route         "POST" "/new"        new_post_h,
+  Cons (route_pattern "GET"  "/edit/:id"   edit_form_h,
+  Cons (route_pattern "POST" "/edit/:id"   edit_post_h,
+  Cons (route_pattern "POST" "/delete/:id" delete_h,
+  Nil)))))))))
+  in
+
 let routes =
   Cons (route         "GET"  "/"              home_h,
   Cons (route         "GET"  "/rss.xml"       rss_h,
   Cons (route_pattern "GET"  "/post/:slug"    post_h,
-  Cons (route         "GET"  "/admin"         admin_h,
-  Cons (route         "GET"  "/admin/login"   login_form_h,
-  Cons (route         "POST" "/admin/login"   login_h,
-  Cons (route         "POST" "/admin/logout"  logout_h,
-  Cons (route         "GET"  "/admin/new"     new_form_h,
-  Cons (route         "POST" "/admin/new"     new_post_h,
-  Cons (route         "GET"  "/admin/edit"    edit_form_h,
-  Cons (route         "POST" "/admin/edit"    edit_post_h,
-  Cons (route         "POST" "/admin/delete"  delete_h,
-  Nil)))))))))))) in
+  Cons (route_prefix  "/admin"                admin_routes,
+  Nil)))) in
 
 let handle_routed = router routes not_found in
 let handle = serve_static_fallback "/static/" "examples/blog" handle_routed in

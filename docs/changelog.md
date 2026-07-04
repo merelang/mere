@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-04 — `contrib/http/router`: `route_prefix` mount points
+
+Third arm of `route_entry`: `REPrefix of str * route_entry list`.
+Declared via `route_prefix "/mount" inner_routes`, it nests a whole
+route table at a common URL prefix. Inner entries are stated
+relative to the mount point (`"/"` is the mount root, `"/login"` is
+`"/mount/login"`, etc.), and if no inner entry matches the request
+falls through to the next outer entry (rather than the prefix
+"claiming" the URL).
+
+Made the fall-through work cleanly by refactoring internal `_try` to
+return `str option` — `Some body` on match, `None` on no-match —
+with the top-level `router` invoking the fallback only if `_try`
+returns `None`. No behavioural change for pure-exact / pure-pattern
+route tables.
+
+Dogfood in `examples/http_blog.mere`:
+- All 9 `/admin/*` routes now live under `route_prefix "/admin"` —
+  the admin subtree is declared as a self-contained table and
+  reused as one entry.
+- Edit / delete moved to `/admin/edit/:id` and `/admin/delete/:id`
+  pattern routes — the hand-rolled query-string parse in
+  `edit_form_h` (that reached into the raw request line because the
+  router had already stripped the query) is gone. Cleaner URLs and
+  one fewer papercut for the next demo author.
+
 ## 2026-07-04 — `contrib/http/router`: `:capture` path params
 
 Extended `route_entry` from a bare tuple to a two-arm variant so the
