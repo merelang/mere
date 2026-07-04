@@ -1,0 +1,523 @@
+// http_blog: a small blog engine written in pure Mere.
+//
+// Dogfoods the contrib stack end to end:
+//
+//   contrib/http/router          → GET / POST endpoint dispatch
+//   contrib/http/cookie          → session_id extraction
+//   contrib/http/escape          → html_escape for user-supplied text
+//   contrib/http/json_body       → form_field for POST form-encoded data
+//   contrib/http/static          → CSS from examples/blog/
+//   contrib/db/pg_pool           → persistent post + user storage
+//   contrib/markdown/to_html     → post body → HTML render
+//
+// Features:
+//   Public
+//     GET  /                          — homepage (published posts, newest first)
+//     GET  /post/<slug>               — single post view (markdown → HTML)
+//     GET  /rss.xml                   — RSS 2.0 feed of published posts
+//   Admin (single seeded user, HTTP-Basic-ish via cookie session)
+//     GET  /admin                     — dashboard (all posts incl. drafts)
+//     GET  /admin/login               — HTML login form
+//     POST /admin/login               — sets `session=` cookie
+//     POST /admin/logout              — clears the cookie
+//     GET  /admin/new                 — HTML new-post editor
+//     POST /admin/new                 — create post (draft by default)
+//     GET  /admin/edit?id=<n>         — HTML edit form
+//     POST /admin/edit                — update title / body / published
+//     POST /admin/delete              — delete by id
+//
+// Data model (PostgreSQL, tables auto-created on first boot):
+//   blog_users(username, pw_hash)
+//   blog_posts(id serial, slug unique, title, body_md, published,
+//              created timestamptz)
+//
+// The admin user is seeded on first startup as `admin` / `adminpw`.
+// Change via the SEED_* consts below before deploying anywhere real.
+//
+// Setup:
+//   docker run -d --name mere-blog-pg -p 15450:5432 \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust \
+//     -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres postgres:16
+//   ./mere -w examples/http_blog.mere > /tmp/blog.wat
+//   wat2wasm --enable-tail-call /tmp/blog.wat -o /tmp/blog.wasm
+//   node scripts/run_http_server.js /tmp/blog.wasm
+//   # open http://localhost:8080/ — login at /admin/login as admin/adminpw
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+
+import "../contrib/http/query.mere";
+import "../contrib/http/json_body.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/cookie.mere";
+import "../contrib/http/escape.mere";
+import "../contrib/http/static.mere";
+import "../contrib/markdown/to_html.mere";
+import "../contrib/db/pg_pool.mere";
+
+// ---- config -----------------------------------------------------------
+
+let db_url     = "postgres://postgres@127.0.0.1:15450/postgres";
+let seed_user  = "admin";
+let seed_pass  = "adminpw";
+let site_title = "mere blog";
+let site_url   = "http://localhost:8080";
+
+// ---- pool + schema + seed --------------------------------------------
+
+let pool = pg_pool_open db_url in
+
+let init_fd = pg_pool_acquire pool in
+let _ = pg_query init_fd
+  "CREATE TABLE IF NOT EXISTS blog_users (username text PRIMARY KEY, pw_hash text NOT NULL)" in
+let _ = pg_query init_fd
+  "CREATE TABLE IF NOT EXISTS blog_posts (id serial PRIMARY KEY, slug text UNIQUE NOT NULL, title text NOT NULL, body_md text NOT NULL, published bool NOT NULL DEFAULT false, created timestamptz NOT NULL DEFAULT now())" in
+
+// Seed the admin user if the users table is empty.
+let seed_rows = pg_query init_fd "SELECT count(*)::text FROM blog_users" in
+let seed_count = pg_col_int_or (pg_first_col seed_rows 0) 0 in
+let _ = if seed_count == 0 then
+  let _ = pg_query_params init_fd
+    "INSERT INTO blog_users VALUES ($1, $2)"
+    (Cons (Some seed_user, Cons (Some (sha256_hex seed_pass), Nil))) in
+  print ("seeded admin user: " ++ seed_user)
+else () in
+let _ = pg_pool_release pool init_fd in
+
+// In-memory session store — resets on restart. Suitable for a single-
+// process demo; a real deployment would move sessions into blog_users
+// or a dedicated table.
+let sessions = map_new () in
+
+// ---- helpers ---------------------------------------------------------
+
+// HTML form bodies come in as `application/x-www-form-urlencoded`, which
+// is line-noise-compatible with query strings — parse_query happens to
+// handle both. form_field is JSON-only so we go direct here.
+let form_field = fn (name: str) ->
+  query_get (parse_query (http_current_body ())) name
+  ;
+
+let current_user = fn (u: unit) ->
+  let sid = session_id (http_get_header "Cookie") in
+  if str_eq sid "" then ""
+  else if map_has sessions sid then map_get sessions sid
+  else ""
+  ;
+
+// A single row from the posts table maps to a tuple of (id, slug,
+// title, body_md, published, created). We use pg_col_at repeatedly at
+// call sites — keeping the tuple raw here rather than a proper record
+// avoids the accompanying wrapper boilerplate for one demo.
+
+// HTML5 shell around a page body. `title` is the tab / h1 label
+// (not escaped — caller passes literals). `body_html` is inserted raw
+// so callers can compose freely.
+let page = fn (title: str) -> fn (body_html: str) ->
+  "<!DOCTYPE html>\n" ++
+  "<html><head><meta charset=\"utf-8\">" ++
+  "<link rel=\"stylesheet\" href=\"/static/style.css\">" ++
+  "<title>" ++ html_escape title ++ " — " ++ site_title ++ "</title>" ++
+  "</head><body>" ++
+  "<header><a href=\"/\">" ++ site_title ++ "</a>" ++
+  "<nav><a href=\"/rss.xml\">RSS</a> " ++
+  "<a href=\"/admin\">admin</a></nav></header>" ++
+  "<main>" ++ body_html ++ "</main>" ++
+  "</body></html>"
+  ;
+
+// Turn a body_md string (with \n line separators) into HTML via the
+// contrib markdown renderer. Split on newline first — the renderer
+// wants a str list.
+let markdown_to_html = fn (md: str) ->
+  MarkdownHtml.render (str_split md "\n")
+  ;
+
+// A one-line summary of a post — first ~200 chars of the body, plain
+// text, appended with an ellipsis if truncated. Cheap and adequate for
+// the homepage list.
+let excerpt = fn (body_md: str) ->
+  let n = str_len body_md in
+  if n <= 200 then body_md
+  else substring body_md 0 200 ++ "…"
+  ;
+
+// Timestamp normalisation. PG hands us `2026-07-04 01:23:45.678+00`
+// as a text bulk; we clip everything after (and including) the space.
+let date_only = fn (ts: str) ->
+  let sp = str_index_of ts " " in
+  if sp < 0 then ts
+  else substring ts 0 sp
+  ;
+
+// Render a one-row-per-post block for the homepage list.
+let render_post_summary = fn (slug: str) -> fn (title: str)
+                       -> fn (body_md: str) -> fn (created: str) ->
+  "<article class=\"summary\">" ++
+  "<h2><a href=\"/post/" ++ html_escape slug ++ "\">" ++
+    html_escape title ++ "</a></h2>" ++
+  "<p class=\"meta\">" ++ html_escape (date_only created) ++ "</p>" ++
+  "<p>" ++ html_escape (excerpt body_md) ++ "</p>" ++
+  "</article>"
+  ;
+
+// Render a full post page — title / date / rendered markdown body.
+let render_post_full = fn (title: str) -> fn (body_md: str)
+                    -> fn (created: str) ->
+  "<article>" ++
+  "<h1>" ++ html_escape title ++ "</h1>" ++
+  "<p class=\"meta\">" ++ html_escape (date_only created) ++ "</p>" ++
+  markdown_to_html body_md ++
+  "</article>"
+  ;
+
+// ---- public handlers -------------------------------------------------
+
+let rec _rows_to_summaries = fn (rows: (str option list) list) -> fn (acc: str) ->
+  match rows with
+  | Nil -> acc
+  | Cons (row, rest) ->
+    let slug    = pg_val_or (pg_col_at row 0) "" in
+    let title   = pg_val_or (pg_col_at row 1) "" in
+    let body    = pg_val_or (pg_col_at row 2) "" in
+    let created = pg_val_or (pg_col_at row 3) "" in
+    _rows_to_summaries rest
+      (acc ++ render_post_summary slug title body created)
+  ;
+
+let home_h = fn (req: str) ->
+  let fd = pg_pool_acquire pool in
+  let rows = pg_query fd
+    ("SELECT slug, title, body_md, created::text FROM blog_posts"
+     ++ " WHERE published = true ORDER BY created DESC LIMIT 20") in
+  let _ = pg_pool_release pool fd in
+  let body = (match rows with
+              | Nil -> "<p>No posts yet. <a href=\"/admin/login\">Log in</a> to write one.</p>"
+              | _ -> _rows_to_summaries rows "") in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  page "Home" body
+  ;
+
+// GET /post/<slug> — dispatched from the fallback handler because the
+// router only does exact matches. See not_found below.
+let post_h = fn (req: str) -> fn (slug: str) ->
+  let fd = pg_pool_acquire pool in
+  let rows = pg_query_params fd
+    ("SELECT title, body_md, created::text FROM blog_posts"
+     ++ " WHERE slug = $1 AND published = true")
+    (Cons (Some slug, Nil)) in
+  let _ = pg_pool_release pool fd in
+  match rows with
+  | Nil ->
+    let _ = http_set_status 404 in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page "Not found" "<p>No such post.</p>"
+  | Cons (row, _) ->
+    let title   = pg_val_or (pg_col_at row 0) "" in
+    let body_md = pg_val_or (pg_col_at row 1) "" in
+    let created = pg_val_or (pg_col_at row 2) "" in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page title (render_post_full title body_md created)
+  ;
+
+// RSS 2.0 feed — one <item> per published post.
+let rec _rows_to_rss_items = fn (rows: (str option list) list) -> fn (acc: str) ->
+  match rows with
+  | Nil -> acc
+  | Cons (row, rest) ->
+    let slug    = pg_val_or (pg_col_at row 0) "" in
+    let title   = pg_val_or (pg_col_at row 1) "" in
+    let body    = pg_val_or (pg_col_at row 2) "" in
+    let created = pg_val_or (pg_col_at row 3) "" in
+    let item =
+      "<item>" ++
+      "<title>" ++ xml_escape title ++ "</title>" ++
+      "<link>" ++ site_url ++ "/post/" ++ xml_escape slug ++ "</link>" ++
+      "<guid>" ++ site_url ++ "/post/" ++ xml_escape slug ++ "</guid>" ++
+      "<pubDate>" ++ xml_escape created ++ "</pubDate>" ++
+      "<description>" ++ xml_escape (excerpt body) ++ "</description>" ++
+      "</item>" in
+    _rows_to_rss_items rest (acc ++ item)
+  ;
+
+let rss_h = fn (req: str) ->
+  let fd = pg_pool_acquire pool in
+  let rows = pg_query fd
+    ("SELECT slug, title, body_md, created::text FROM blog_posts"
+     ++ " WHERE published = true ORDER BY created DESC LIMIT 50") in
+  let _ = pg_pool_release pool fd in
+  let items = _rows_to_rss_items rows "" in
+  let feed =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" ++
+    "<rss version=\"2.0\"><channel>" ++
+    "<title>" ++ xml_escape site_title ++ "</title>" ++
+    "<link>" ++ site_url ++ "/</link>" ++
+    "<description>Blog posts from " ++ xml_escape site_title ++ "</description>" ++
+    items ++
+    "</channel></rss>" in
+  let _ = http_set_content_type "application/rss+xml; charset=utf-8" in
+  feed
+  ;
+
+// ---- admin: auth -----------------------------------------------------
+
+let login_form_h = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  page "Login"
+    ("<form method=\"POST\" action=\"/admin/login\">" ++
+     "<label>User <input name=\"user\"></label>" ++
+     "<label>Password <input name=\"pass\" type=\"password\"></label>" ++
+     "<button>Log in</button>" ++
+     "</form>")
+  ;
+
+let login_h = fn (req: str) ->
+  let u = form_field "user" in
+  let p = form_field "pass" in
+  let fd = pg_pool_acquire pool in
+  let rows = pg_query_params fd
+    "SELECT pw_hash FROM blog_users WHERE username = $1"
+    (Cons (Some u, Nil)) in
+  let _ = pg_pool_release pool fd in
+  let stored = pg_val_or (pg_first_col rows 0) "" in
+  if str_eq stored "" || not (str_eq stored (sha256_hex p)) then
+    let _ = http_set_status 401 in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page "Login failed" "<p>Wrong username or password. <a href=\"/admin/login\">Try again</a>.</p>"
+  else
+    let sid = "s-" ++ u in
+    let _ = map_set sessions sid u in
+    let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+    let _ = http_set_header "Location" "/admin" in
+    let _ = http_set_status 303 in
+    "redirecting\n"
+  ;
+
+let logout_h = fn (req: str) ->
+  let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+  let _ = http_set_header "Location" "/" in
+  let _ = http_set_status 303 in
+  "bye\n"
+  ;
+
+// ---- admin: CRUD -----------------------------------------------------
+
+let require_auth = fn (u: unit) ->
+  let user = current_user () in
+  if str_eq user "" then
+    let _ = http_set_header "Location" "/admin/login" in
+    let _ = http_set_status 303 in
+    ("", false)
+  else (user, true)
+  ;
+
+let rec _rows_to_admin_list = fn (rows: (str option list) list) -> fn (acc: str) ->
+  match rows with
+  | Nil -> acc
+  | Cons (row, rest) ->
+    let id      = pg_val_or (pg_col_at row 0) "" in
+    let slug    = pg_val_or (pg_col_at row 1) "" in
+    let title   = pg_val_or (pg_col_at row 2) "" in
+    let pubed   = pg_col_bool_or (pg_col_at row 3) false in
+    let created = pg_val_or (pg_col_at row 4) "" in
+    let row_html =
+      "<tr>" ++
+      "<td>" ++ (if pubed then "🟢" else "⚪") ++ "</td>" ++
+      "<td><a href=\"/post/" ++ html_escape slug ++ "\">" ++ html_escape title ++ "</a></td>" ++
+      "<td>" ++ html_escape (date_only created) ++ "</td>" ++
+      "<td><a href=\"/admin/edit?id=" ++ html_escape id ++ "\">edit</a></td>" ++
+      "<td>" ++
+        "<form method=\"POST\" action=\"/admin/delete\" style=\"display:inline\">" ++
+        "<input type=\"hidden\" name=\"id\" value=\"" ++ html_escape id ++ "\">" ++
+        "<button>delete</button></form>" ++
+      "</td>" ++
+      "</tr>" in
+    _rows_to_admin_list rest (acc ++ row_html)
+  ;
+
+let admin_h = fn (req: str) ->
+  let (user, ok) = require_auth () in
+  if not ok then "redirecting\n"
+  else
+    let fd = pg_pool_acquire pool in
+    let rows = pg_query fd
+      ("SELECT id::text, slug, title, published, created::text FROM blog_posts"
+       ++ " ORDER BY created DESC") in
+    let _ = pg_pool_release pool fd in
+    let table =
+      "<h1>Dashboard</h1>" ++
+      "<p>Logged in as <code>" ++ html_escape user ++ "</code>. " ++
+      "<a href=\"/admin/new\">new post</a> · " ++
+      "<form method=\"POST\" action=\"/admin/logout\" style=\"display:inline\">" ++
+      "<button class=\"link\">log out</button></form></p>" ++
+      "<table><thead><tr><th></th><th>Title</th><th>Created</th><th></th><th></th></tr></thead>" ++
+      "<tbody>" ++ _rows_to_admin_list rows "" ++ "</tbody></table>" in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page "Dashboard" table
+  ;
+
+let new_form_h = fn (req: str) ->
+  let (_user, ok) = require_auth () in
+  if not ok then "redirecting\n"
+  else
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page "New post"
+      ("<h1>New post</h1>" ++
+       "<form method=\"POST\" action=\"/admin/new\" class=\"editor\">" ++
+       "<label>Slug <input name=\"slug\" required></label>" ++
+       "<label>Title <input name=\"title\" required></label>" ++
+       "<label>Body (Markdown)<br><textarea name=\"body\" rows=\"20\"></textarea></label>" ++
+       "<label><input type=\"checkbox\" name=\"published\" value=\"1\"> Publish now</label>" ++
+       "<button>Save</button>" ++
+       "</form>")
+  ;
+
+let new_post_h = fn (req: str) ->
+  let (_user, ok) = require_auth () in
+  if not ok then "redirecting\n"
+  else
+    let slug = form_field "slug" in
+    let title = form_field "title" in
+    let body = form_field "body" in
+    let pubed = str_eq (form_field "published") "1" in
+    if str_eq slug "" || str_eq title "" then
+      let _ = http_set_status 400 in
+      "missing slug or title\n"
+    else
+      let fd = pg_pool_acquire pool in
+      let _ = pg_query_params fd
+        ("INSERT INTO blog_posts (slug, title, body_md, published)"
+         ++ " VALUES ($1, $2, $3, $4::bool)")
+        (Cons (Some slug,
+         Cons (Some title,
+         Cons (Some body,
+         Cons (Some (if pubed then "true" else "false"), Nil))))) in
+      let _ = pg_pool_release pool fd in
+      let _ = http_set_header "Location" "/admin" in
+      let _ = http_set_status 303 in
+      "created\n"
+  ;
+
+let edit_form_h = fn (req: str) ->
+  let (_user, ok) = require_auth () in
+  if not ok then "redirecting\n"
+  else
+    // ?id=<n> from the query string. Router's exact-match strips the
+    // query before dispatch, so we re-parse it out of the raw request
+    // line here.
+    let q_pos = str_index_of req "?" in
+    let query_raw = if q_pos < 0 then "" else
+      let after = _slice req (q_pos + 1) in
+      // strip any trailing ` HTTP/1.1\r\n...`
+      let sp = str_index_of after " " in
+      if sp < 0 then after else substring after 0 sp in
+    let id_str = query_get (parse_query query_raw) "id" in
+    let fd = pg_pool_acquire pool in
+    let rows = pg_query_params fd
+      "SELECT slug, title, body_md, published FROM blog_posts WHERE id = $1::int"
+      (Cons (Some id_str, Nil)) in
+    let _ = pg_pool_release pool fd in
+    match rows with
+    | Nil ->
+      let _ = http_set_status 404 in "no such post\n"
+    | Cons (row, _) ->
+      let slug   = pg_val_or (pg_col_at row 0) "" in
+      let title  = pg_val_or (pg_col_at row 1) "" in
+      let body   = pg_val_or (pg_col_at row 2) "" in
+      let pubed  = pg_col_bool_or (pg_col_at row 3) false in
+      let _ = http_set_content_type "text/html; charset=utf-8" in
+      page ("Edit " ++ title)
+        ("<h1>Edit</h1>" ++
+         "<form method=\"POST\" action=\"/admin/edit\" class=\"editor\">" ++
+         "<input type=\"hidden\" name=\"id\" value=\"" ++ html_escape id_str ++ "\">" ++
+         "<label>Slug <input name=\"slug\" value=\"" ++ html_escape slug ++ "\" required></label>" ++
+         "<label>Title <input name=\"title\" value=\"" ++ html_escape title ++ "\" required></label>" ++
+         "<label>Body (Markdown)<br><textarea name=\"body\" rows=\"20\">" ++ html_escape body ++ "</textarea></label>" ++
+         "<label><input type=\"checkbox\" name=\"published\" value=\"1\"" ++
+           (if pubed then " checked" else "") ++ "> Published</label>" ++
+         "<button>Save</button>" ++
+         "</form>")
+  ;
+
+let edit_post_h = fn (req: str) ->
+  let (_user, ok) = require_auth () in
+  if not ok then "redirecting\n"
+  else
+    let id = form_field "id" in
+    let slug = form_field "slug" in
+    let title = form_field "title" in
+    let body = form_field "body" in
+    let pubed = str_eq (form_field "published") "1" in
+    let fd = pg_pool_acquire pool in
+    let _ = pg_query_params fd
+      ("UPDATE blog_posts SET slug = $1, title = $2, body_md = $3, published = $4::bool"
+       ++ " WHERE id = $5::int")
+      (Cons (Some slug,
+       Cons (Some title,
+       Cons (Some body,
+       Cons (Some (if pubed then "true" else "false"),
+       Cons (Some id, Nil)))))) in
+    let _ = pg_pool_release pool fd in
+    let _ = http_set_header "Location" "/admin" in
+    let _ = http_set_status 303 in
+    "updated\n"
+  ;
+
+let delete_h = fn (req: str) ->
+  let (_user, ok) = require_auth () in
+  if not ok then "redirecting\n"
+  else
+    let id = form_field "id" in
+    let fd = pg_pool_acquire pool in
+    let _ = pg_query_params fd
+      "DELETE FROM blog_posts WHERE id = $1::int"
+      (Cons (Some id, Nil)) in
+    let _ = pg_pool_release pool fd in
+    let _ = http_set_header "Location" "/admin" in
+    let _ = http_set_status 303 in
+    "deleted\n"
+  ;
+
+// ---- dynamic path dispatch ------------------------------------------
+//
+// `router` matches exact paths only. `/post/<slug>` needs prefix
+// matching, so the fallback handler picks it up before returning 404.
+
+let not_found = fn (req: str) ->
+  let path = req_path req in
+  if str_starts_with path "/post/" then
+    let slug = _slice path 6 in
+    post_h req slug
+  else
+    let _ = http_set_status 404 in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page "Not found" ("<p>No such page: " ++ html_escape path ++ "</p>")
+  ;
+
+// ---- server ---------------------------------------------------------
+
+let routes =
+  Cons (route "GET"  "/"              home_h,
+  Cons (route "GET"  "/rss.xml"       rss_h,
+  Cons (route "GET"  "/admin"         admin_h,
+  Cons (route "GET"  "/admin/login"   login_form_h,
+  Cons (route "POST" "/admin/login"   login_h,
+  Cons (route "POST" "/admin/logout"  logout_h,
+  Cons (route "GET"  "/admin/new"     new_form_h,
+  Cons (route "POST" "/admin/new"     new_post_h,
+  Cons (route "GET"  "/admin/edit"    edit_form_h,
+  Cons (route "POST" "/admin/edit"    edit_post_h,
+  Cons (route "POST" "/admin/delete"  delete_h,
+  Nil))))))))))) in
+
+let handle_routed = router routes not_found in
+let handle = serve_static_fallback "/static/" "examples/blog" handle_routed in
+
+let _ = print ("starting http_blog on :8080 (pg=" ++ db_url ++ ")") in
+let _ = http_serve 8080 handle in
+0
