@@ -1,63 +1,125 @@
-// contrib/http/router.mere — minimal method + exact-path router.
+// contrib/http/router.mere — method + path router (exact + patterns).
 //
 // Turns the if-else chain that dispatches request lines into a
-// declarative `(method, path, handler) list` — useful when the
-// number of endpoints grows past 3-4 and pattern coverage becomes
-// harder to eyeball.
+// declarative `route_entry list` — useful when the number of
+// endpoints grows past 3-4 and pattern coverage becomes harder to
+// eyeball.
 //
-// Scope: exact-path matches only. No path parameters (`/users/:id`),
-// no globs, no prefix routes. Real code that needs those can
-// preprocess the URL inside a fallback handler or write its own
-// matcher on top of this — the routing DSL is deliberately kept
-// tiny so anyone reading it can guess how it behaves.
+// Two entry kinds:
 //
-// Query strings are stripped before matching, so a route entry for
-// `/search` catches `GET /search?q=hi`. Handlers still receive the
-// full request line and can call `split_url` themselves to pull
-// the query out.
+//   1. Exact:   `route "GET" "/health" h`
+//               Handler is `str -> str` (just the raw request).
+//
+//   2. Pattern: `route_pattern "GET" "/post/:slug" h`
+//               Handler is `str list -> str -> str` — the captures
+//               list (in the order the `:name` segments appear in
+//               the pattern) followed by the raw request.
+//
+// Patterns:
+//   - Segments are split on `/`. A leading `/` and a trailing `/`
+//     are both ignored, so `/foo/bar/` and `/foo/bar` match the
+//     same. A pattern of `/` matches the empty-segment URL.
+//   - A segment starting with `:` (e.g. `:id`, `:slug`) captures
+//     one URL segment. Everything else must match literally.
+//   - No `*` glob, no regex, no optional segments. If a real
+//     application outgrows this, escape hatch: fall back to hand
+//     dispatch inside the `not_found` handler and use `req_path`.
+//
+// Query strings are stripped before matching, so `/search`
+// (exact or pattern) catches `GET /search?q=hi`. Handlers still
+// receive the full request line and can call `split_url` themselves
+// to pull the query out.
 //
 // Public API:
 //
-//   route         : str -> str -> (str -> str) -> route_entry
-//                    (helper to build a route entry — just a
-//                     triple, but the named constructor reads
-//                     better in tables)
+//   route          : str -> str -> (str -> str) -> route_entry
+//                     exact-path entry (backwards-compatible)
 //
-//   router        : route_entry list -> (str -> str) -> (str -> str)
-//                    first arg  = route table
-//                    second arg = fallback handler (called on no
-//                                                   match, typically
-//                                                   returns 404)
+//   route_pattern  : str -> str -> (str list -> str -> str) -> route_entry
+//                     path-with-`:captures` entry
 //
-// Usage (in your main file):
+//   router         : route_entry list -> (str -> str) -> (str -> str)
+//                     first arg  = route table (tried in order)
+//                     second arg = fallback handler (no match)
 //
-//   let routes = Cons (route "GET"  "/"       home_handler,
-//                Cons (route "POST" "/signup" signup_handler,
-//                Cons (route "POST" "/login"  login_handler,
-//                Nil))) in
+// Usage:
+//
+//   let routes =
+//     Cons (route         "GET"    "/"            home,
+//     Cons (route         "POST"   "/signup"      signup,
+//     Cons (route_pattern "GET"    "/post/:slug"  show_post,
+//     Cons (route_pattern "DELETE" "/post/:id"    delete_post,
+//     Nil)))) in
 //
 //   let handle = router routes not_found in
 //   http_serve 8080 (with_access_log handle);
 //
 // Composes with the other middleware (access_log, cors, security,
-// etc.) — router is itself a `str -> str` fn, so all the
-// `with_*` wrappers layer on top exactly the same way.
+// etc.) — router is itself a `str -> str` fn.
 
-// Route entry = (method, path, handler). Alias for readability.
-type route_entry = str * str * (str -> str);
+// Route entry: exact-match or capture-pattern. The pattern variant
+// stores pre-split segments (built once at construction time) so
+// dispatch on every request is just a list walk.
+type route_entry =
+  | REExact   of str * str * (str -> str)
+  | REPattern of str * str list * (str list -> str -> str)
+  ;
 
 let route = fn (method: str) -> fn (path: str) -> fn (handler: str -> str) ->
-  ((method, path, handler) : route_entry);
+  REExact (method, path, handler);
 
-// Try each entry in order, calling the first whose method AND path
-// exactly match. On no match, invoke the fallback.
+// Split a URL path on `/`, dropping leading and trailing empty
+// segments so `/foo/bar/` and `/foo/bar` and `foo/bar` all yield
+// `["foo", "bar"]`. A path of `""` or `"/"` yields Nil (matches a
+// pattern that also splits to Nil).
+let _split_path = fn (p: str) ->
+  let n0 = str_len p in
+  let lead = if n0 > 0 && str_eq (char_at p 0) "/" then 1 else 0 in
+  let s1 = if lead > 0 then substring p 1 n0 else p in
+  let n1 = str_len s1 in
+  let s2 = if n1 > 0 && str_eq (char_at s1 (n1 - 1)) "/" then
+             substring s1 0 (n1 - 1)
+           else s1 in
+  if str_len s2 == 0 then Nil
+  else str_split s2 "/";
+
+let route_pattern = fn (method: str) -> fn (path: str) ->
+                    fn (handler: str list -> str -> str) ->
+  REPattern (method, _split_path path, handler);
+
+// Walk pattern segments and URL segments in parallel, collecting
+// captures where the pattern segment starts with `:`. Returns
+// Some captures on a full match, None otherwise. Captures come
+// back in source-declaration order (list_append at each step).
+let rec _match_segs = fn (pat: str list) -> fn (url: str list) -> fn (caps: str list) ->
+  match (pat, url) with
+  | (Nil, Nil) -> Some caps
+  | (Nil, _) -> None
+  | (_, Nil) -> None
+  | (Cons (ph, pt), Cons (uh, ut)) ->
+    if str_len ph > 0 && str_eq (char_at ph 0) ":" then
+      _match_segs pt ut (list_append caps (Cons (uh, Nil)))
+    else if str_eq ph uh then
+      _match_segs pt ut caps
+    else None;
+
+// Try each entry in order, calling the first whose method matches
+// AND whose path (exact or pattern) matches. On no match, invoke
+// the fallback.
 let rec _try = fn (rs: route_entry list) -> fn (method: str) -> fn (path: str) -> fn (req: str) -> fn (fallback: str -> str) ->
   match rs with
   | Nil -> fallback req
   | Cons (r, rest) ->
-    let (m, p, h) = r in
-    if str_eq m method && str_eq p path then h req
-    else _try rest method path req fallback;
+    (match r with
+      | REExact (m, p, h) ->
+        if str_eq m method && str_eq p path then h req
+        else _try rest method path req fallback
+      | REPattern (m, segs, h) ->
+        if str_eq m method then
+          (match _match_segs segs (_split_path path) Nil with
+            | Some caps -> h caps req
+            | None -> _try rest method path req fallback)
+        else _try rest method path req fallback);
 
 let router = fn (routes: route_entry list) -> fn (fallback: str -> str) -> fn (req: str) ->
   let sp = str_index_of req " " in

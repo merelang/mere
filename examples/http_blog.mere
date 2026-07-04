@@ -203,9 +203,12 @@ let home_h = fn (req: str) ->
   page "Home" body
   ;
 
-// GET /post/<slug> — dispatched from the fallback handler because the
-// router only does exact matches. See not_found below.
-let post_h = fn (req: str) -> fn (slug: str) ->
+// GET /post/:slug — pattern handler. The router hands us the
+// captured slug as the head of the captures list.
+let post_h = fn (caps: str list) -> fn (req: str) ->
+  let slug = match caps with
+             | Cons (s, _) -> s
+             | Nil -> "" in
   let fd = pg_pool_acquire pool in
   let rows = pg_query_params fd
     ("SELECT title, body_md, created::text FROM blog_posts"
@@ -483,37 +486,30 @@ let delete_h = fn (req: str) ->
     "deleted\n"
   ;
 
-// ---- dynamic path dispatch ------------------------------------------
-//
-// `router` matches exact paths only. `/post/<slug>` needs prefix
-// matching, so the fallback handler picks it up before returning 404.
+// ---- fallback -------------------------------------------------------
 
 let not_found = fn (req: str) ->
-  let path = req_path req in
-  if str_starts_with path "/post/" then
-    let slug = _slice path 6 in
-    post_h req slug
-  else
-    let _ = http_set_status 404 in
-    let _ = http_set_content_type "text/html; charset=utf-8" in
-    page "Not found" ("<p>No such page: " ++ html_escape path ++ "</p>")
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  page "Not found" ("<p>No such page: " ++ html_escape (req_path req) ++ "</p>")
   ;
 
 // ---- server ---------------------------------------------------------
 
 let routes =
-  Cons (route "GET"  "/"              home_h,
-  Cons (route "GET"  "/rss.xml"       rss_h,
-  Cons (route "GET"  "/admin"         admin_h,
-  Cons (route "GET"  "/admin/login"   login_form_h,
-  Cons (route "POST" "/admin/login"   login_h,
-  Cons (route "POST" "/admin/logout"  logout_h,
-  Cons (route "GET"  "/admin/new"     new_form_h,
-  Cons (route "POST" "/admin/new"     new_post_h,
-  Cons (route "GET"  "/admin/edit"    edit_form_h,
-  Cons (route "POST" "/admin/edit"    edit_post_h,
-  Cons (route "POST" "/admin/delete"  delete_h,
-  Nil))))))))))) in
+  Cons (route         "GET"  "/"              home_h,
+  Cons (route         "GET"  "/rss.xml"       rss_h,
+  Cons (route_pattern "GET"  "/post/:slug"    post_h,
+  Cons (route         "GET"  "/admin"         admin_h,
+  Cons (route         "GET"  "/admin/login"   login_form_h,
+  Cons (route         "POST" "/admin/login"   login_h,
+  Cons (route         "POST" "/admin/logout"  logout_h,
+  Cons (route         "GET"  "/admin/new"     new_form_h,
+  Cons (route         "POST" "/admin/new"     new_post_h,
+  Cons (route         "GET"  "/admin/edit"    edit_form_h,
+  Cons (route         "POST" "/admin/edit"    edit_post_h,
+  Cons (route         "POST" "/admin/delete"  delete_h,
+  Nil)))))))))))) in
 
 let handle_routed = router routes not_found in
 let handle = serve_static_fallback "/static/" "examples/blog" handle_routed in
