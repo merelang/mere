@@ -3555,8 +3555,12 @@ let () =
      are defined inline in WAT, and print uses a host import (env.puts). *)
   assert_contains "wasm: memory declared + exported"
     (wasm "\"hi\"") "(memory (export \"memory\") 1024)";
+  (* Bump-pointer global is now exported ("__lang_bump") so the JS
+     host can advance it from extern-fn implementations (Phase 55.x
+     onwards). Match the prefix — the (export "…") attribute lands
+     between the name and the (mut i32) type. *)
   assert_contains "wasm: bump pointer global declared"
-    (wasm "\"hi\"") "(global $__lang_bump (mut i32)";
+    (wasm "\"hi\"") "(global $__lang_bump";
   assert_contains "wasm: puts imported"
     (wasm "\"hi\"") "(import \"env\" \"puts\" (func $puts (param i32)))";
   assert_contains "wasm: str literal becomes data segment"
@@ -8081,7 +8085,7 @@ let () =
     output_string oc wat;
     close_out oc;
     let wat2wasm_cmd = Printf.sprintf
-      "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      "wat2wasm --enable-tail-call %s -o %s 2>/dev/null" wat_path wasm_path in
     if Sys.command wat2wasm_cmd <> 0 then
       (Sys.remove wat_path; "<wat2wasm-failed>")
     else
@@ -8167,7 +8171,7 @@ let () =
     output_string oc wat;
     close_out oc;
     let wat2wasm_cmd = Printf.sprintf
-      "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      "wat2wasm --enable-tail-call %s -o %s 2>/dev/null" wat_path wasm_path in
     if Sys.command wat2wasm_cmd <> 0 then
       (Sys.remove wat_path; "<wat2wasm-failed>")
     else
@@ -8273,7 +8277,7 @@ let () =
       Printf.printf "FAIL  codegen runtime bootstrap: %s (mere -w failed)\n" name
     end else begin
       let wat2wasm_cmd = Printf.sprintf
-        "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+        "wat2wasm --enable-tail-call %s -o %s 2>/dev/null" wat_path wasm_path in
       if Sys.command wat2wasm_cmd <> 0 then begin
         Sys.remove wat_path;
         incr fail;
@@ -8364,7 +8368,7 @@ let () =
       let oc = open_out wat_path in
       output_string oc wat;
       close_out oc;
-      let cmd = Printf.sprintf "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      let cmd = Printf.sprintf "wat2wasm --enable-tail-call %s -o %s 2>/dev/null" wat_path wasm_path in
       let ok = Sys.command cmd = 0 in
       Sys.remove wat_path;
       (try Sys.remove wasm_path with _ -> ());
@@ -8395,7 +8399,7 @@ let () =
       let oc = open_out wat_path in
       output_string oc wat;
       close_out oc;
-      let cmd = Printf.sprintf "wat2wasm %s -o %s 2>/dev/null" wat_path wasm_path in
+      let cmd = Printf.sprintf "wat2wasm --enable-tail-call %s -o %s 2>/dev/null" wat_path wasm_path in
       let ok = Sys.command cmd = 0 in
       Sys.remove wat_path;
       (try Sys.remove wasm_path with _ -> ());
