@@ -1,4 +1,5 @@
-// examples/db_redis_pubsub.mere — Redis PUB/SUB with two connections.
+// examples/db_redis_pubsub.mere — Redis PUB/SUB with the pubsub
+// dispatch layer.
 //
 // Companion to db_notify.mere on the PG side. Redis PUB/SUB is even
 // lighter-weight than PG's LISTEN/NOTIFY: no channel registration on
@@ -6,12 +7,14 @@
 // message published while it's connected, and pushes stop the moment
 // UNSUBSCRIBE or QUIT lands.
 //
-// Demo:
-//   1. `sub` connection SUBSCRIBEs on channel "events".
-//   2. `pub` connection PUBLISHes three messages.
-//   3. `sub` calls redis_wait_message three times, prints each.
-//   4. A fourth wait with a 200 ms timeout returns None to show the
-//      quiet-period path.
+// This demo:
+//   1. Opens a pubsub_client (two fds: one publish, one subscribe).
+//   2. SUBSCRIBEs to channel "events" and PSUBSCRIBEs to "news.*".
+//   3. PUBLISHes to "events", "news.tech", and an unmatched channel.
+//   4. Drains and classifies the confirmation + message replies via
+//      redis_pubsub_next, printing each with redis_pubsub_show.
+//   5. Verifies the timeout path with a short-timeout wait.
+//   6. Cleans up.
 //
 // Setup:
 //   docker run -d --name mere-redis-ps -p 15601:6379 redis:7
@@ -22,38 +25,48 @@
 //   node scripts/run_wasm.js /tmp/dbrps.wasm
 
 import "../contrib/db/redis.mere";
+import "../contrib/db/redis_pubsub.mere";
 
-let show_msg = fn (r) ->
-  match r with
-  | None -> "None"
-  | Some (ch, pl) -> "Some (channel=" ++ ch ++ ", payload=" ++ pl ++ ")"
-  ;
+let host = "127.0.0.1" in
+let port = 15601 in
 
-let sub = redis_connect "127.0.0.1" 15601 in
-let pub = redis_connect "127.0.0.1" 15601 in
-if sub < 0 then let _ = print "sub connect failed" in ()
-else if pub < 0 then let _ = print "pub connect failed" in ()
+let c = redis_pubsub_open host port in
+if c.sub_fd < 0 || c.pub_fd < 0 then
+  let _ = print "connect failed" in ()
 else
 
-  let _ = redis_subscribe sub (Cons ("events", Nil)) in
-  let _ = print "sub: SUBSCRIBE events" in
+  // 1. Subscribe on the sub fd. The `_pubsub_` variants of subscribe
+  //    /psubscribe leave the "subscribe" confirmation reply on the
+  //    wire so the dispatch loop sees each as a PSSubscribed event.
+  //    (The raw `redis_subscribe` / `redis_psubscribe` drain them
+  //    instead, for callers that just want the poll shape.)
+  let _ = redis_pubsub_subscribe  c.sub_fd (Cons ("events",  Nil)) in
+  let _ = redis_pubsub_psubscribe c.sub_fd (Cons ("news.*",  Nil)) in
+  let m1 = redis_pubsub_next c.sub_fd 5000 in
+  let m2 = redis_pubsub_next c.sub_fd 5000 in
+  let _ = print ("recv 1: " ++ redis_pubsub_show m1) in
+  let _ = print ("recv 2: " ++ redis_pubsub_show m2) in
 
-  let n1 = redis_publish pub "events" "one" in
-  let n2 = redis_publish pub "events" "two" in
-  let n3 = redis_publish pub "events" "three" in
-  let _ = print ("pub: 3 PUBLISHes done (last saw " ++ show n3 ++
-    " subscriber" ++ (if n3 == 1 then "" else "s") ++ ")") in
+  // 2. Publish. The third channel matches neither the direct
+  //    subscription nor the pattern, so it should be silently
+  //    dropped by the server.
+  let n1 = redis_publish c.pub_fd "events"    "hello" in
+  let n2 = redis_publish c.pub_fd "news.tech" "wasm won" in
+  let n3 = redis_publish c.pub_fd "nomatch"   "ignored" in
+  let _ = print ("publish counts: events=" ++ show n1
+              ++ ", news.tech=" ++ show n2
+              ++ ", nomatch=" ++ show n3) in
 
-  let m1 = redis_wait_message sub 5000 in
-  let _ = print ("recv 1: " ++ show_msg m1) in
-  let m2 = redis_wait_message sub 5000 in
-  let _ = print ("recv 2: " ++ show_msg m2) in
-  let m3 = redis_wait_message sub 5000 in
-  let _ = print ("recv 3: " ++ show_msg m3) in
+  // 3. Drain the two deliveries. `news.tech` should arrive as a
+  //    PSPMessage carrying the matched pattern.
+  let m3 = redis_pubsub_next c.sub_fd 5000 in
+  let m4 = redis_pubsub_next c.sub_fd 5000 in
+  let _ = print ("recv 3: " ++ redis_pubsub_show m3) in
+  let _ = print ("recv 4: " ++ redis_pubsub_show m4) in
 
-  let m4 = redis_wait_message sub 200 in
-  let _ = print ("recv 4 (should be None): " ++ show_msg m4) in
+  // 4. Timeout path — nothing else should be coming.
+  let m5 = redis_pubsub_next c.sub_fd 200 in
+  let _ = print ("recv 5 (should be timeout): " ++ redis_pubsub_show m5) in
 
-  let _ = redis_close pub in
-  let _ = redis_close sub in
+  let _ = redis_pubsub_close c in
   ()

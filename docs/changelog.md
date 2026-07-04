@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-04 — `contrib/db/redis_pubsub`: dispatch layer
+
+`redis.mere` already carried the raw `SUBSCRIBE` / `PSUBSCRIBE` /
+`PUBLISH` primitives, but callers had to destructure the resulting
+RRArr replies by hand to tell a `message` from a `pmessage` from a
+`subscribe` confirmation. A separate module now does the
+classification once and returns a small variant:
+
+```
+type pubsub_msg =
+  | PSMessage      of str * str          — (channel, payload)
+  | PSPMessage     of str * str * str    — (pattern, channel, payload)
+  | PSSubscribed   of str * int
+  | PSUnsubscribed of str * int
+  | PSPong         of str
+  | PSTimeout
+  | PSClosed
+  | PSOther        of redis_reply
+```
+
+- `redis_pubsub_next fd timeout_ms` — read + classify one reply.
+  Uses the caller's `timeout_ms` to disambiguate the "short read"
+  case: > 0 → `PSTimeout`, else `PSClosed`.
+- `redis_pubsub_run fd timeout_ms handler` — event-loop helper;
+  handler returns `false` to break out, loop also exits on
+  `PSClosed`.
+- `redis_pubsub_subscribe` / `redis_pubsub_psubscribe` — non-draining
+  variants that leave the confirmation reply on the wire, so the
+  dispatch loop sees each as a `PSSubscribed` event.
+- `redis_pubsub_open host port` — two-fd `PubsubClient` record
+  (publisher + subscriber connections) encapsulating Redis's
+  "PUBLISH needs its own fd" rule.
+- `redis_pubsub_show msg` — one-line pretty-printer for access logs.
+
+`examples/db_redis_pubsub.mere` rewritten to demonstrate the whole
+API, including PSUBSCRIBE with a matched-pattern delivery and a
+`PSTimeout` tick. Full RESP3 push (`RRPush`) is also routed through
+the classifier by recursing into the inner list.
+
 ## 2026-07-04 — `contrib/http/router`: `route_prefix` mount points
 
 Third arm of `route_entry`: `REPrefix of str * route_entry list`.
