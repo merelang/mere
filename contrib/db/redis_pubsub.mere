@@ -1,0 +1,201 @@
+// contrib/db/redis_pubsub.mere — dispatch layer on top of the raw
+// SUBSCRIBE / PSUBSCRIBE / PUBLISH primitives that already live in
+// `contrib/db/redis.mere`.
+//
+// Why a separate module: the raw `redis_wait_reply` hands the caller
+// an RRArr they then have to destructure to distinguish between:
+//
+//   ["message",     channel,          payload]
+//   ["pmessage",    pattern, channel, payload]
+//   ["subscribe",   channel,          count]
+//   ["unsubscribe", channel,          count]
+//   ["psubscribe",  pattern,          count]
+//   ["punsubscribe",pattern,          count]
+//   ["pong",        <optional payload>]
+//
+// Doing that inline every time is ~20 lines of match ceremony. This
+// module classifies once and returns a small variant, so a subscriber
+// event loop shrinks to a single `match msg with | PSMessage ... -> ..`.
+//
+// Public API:
+//
+//   type pubsub_msg =
+//     | PSMessage      of (str * str)          — (channel, payload)
+//     | PSPMessage     of (str * str * str)    — (pattern, channel, payload)
+//     | PSSubscribed   of (str * int)          — (channel-or-pattern, count)
+//     | PSUnsubscribed of (str * int)
+//     | PSPong         of str                  — payload or ""
+//     | PSTimeout                              — timeout_ms elapsed
+//     | PSClosed                               — server closed the socket
+//     | PSOther        of redis_reply          — anything unrecognised
+//
+//   redis_pubsub_next : int -> int -> pubsub_msg
+//                        fd    timeout_ms (0 = block forever)
+//
+//   redis_pubsub_run  : int -> int -> (pubsub_msg -> bool) -> unit
+//                        Loops calling `handler`. Handler returns
+//                        `false` to break out (e.g. after a shutdown
+//                        message). Loop also exits on PSClosed.
+//
+//   redis_pubsub_show : pubsub_msg -> str
+//                        pretty-printer for demos / access logs.
+
+import "redis.mere";
+
+type pubsub_msg =
+  | PSMessage      of str * str
+  | PSPMessage     of str * str * str
+  | PSSubscribed   of str * int
+  | PSUnsubscribed of str * int
+  | PSPong         of str
+  | PSTimeout
+  | PSClosed
+  | PSOther        of redis_reply
+  ;
+
+// Classify a single RRArr reply into a pubsub_msg. Non-array shapes
+// fall through to PSOther so the caller can still see them.
+let rec _rps_classify = fn (r: redis_reply) ->
+  match r with
+  | RRArr (Cons (RRBulk (Some (tag, _)),
+             Cons (RRBulk (Some (ch, _)),
+               Cons (RRBulk (Some (pl, _)), Nil)))) ->
+    if str_eq tag "message" then PSMessage (ch, pl)
+    else PSOther r
+  | RRArr (Cons (RRBulk (Some (tag, _)),
+             Cons (RRBulk (Some (pat, _)),
+               Cons (RRBulk (Some (ch, _)),
+                 Cons (RRBulk (Some (pl, _)), Nil))))) ->
+    if str_eq tag "pmessage" then PSPMessage (pat, ch, pl)
+    else PSOther r
+  | RRArr (Cons (RRBulk (Some (tag, _)),
+             Cons (RRBulk (Some (name, _)),
+               Cons (RRInt count, Nil)))) ->
+    if str_eq tag "subscribe" || str_eq tag "psubscribe" then
+      PSSubscribed (name, count)
+    else if str_eq tag "unsubscribe" || str_eq tag "punsubscribe" then
+      PSUnsubscribed (name, count)
+    else PSOther r
+  | RRArr (Cons (RRBulk (Some ("pong", _)),
+             Cons (RRBulk (Some (pl, _)), Nil))) ->
+    PSPong pl
+  | RRArr (Cons (RRBulk (Some ("pong", _)), Nil)) ->
+    PSPong ""
+  | RRStr "PONG" -> PSPong ""
+  // RESP3 wraps unsolicited pushes in RRPush rather than RRArr. Same
+  // payload layout inside, so we just re-run the classifier one level
+  // down. Server info wrapped in RRAttr comes through similarly.
+  | RRPush inner -> _rps_classify (RRArr inner)
+  | RRAttr (_, inner) -> _rps_classify inner
+  | RRErr msg ->
+    // `-msg\r\n` on a subscribed connection typically means the
+    // server closed on QUIT or a legal-only-when-subscribed rule
+    // violation. Callers that care can pattern-match PSOther.
+    let _ = msg in PSOther r
+  | _ -> PSOther r
+  ;
+
+// Read + classify one message. `timeout_ms == 0` means block until a
+// reply arrives (matches tcp_set_timeout's "no timeout" semantics).
+//
+// The underlying tcp_read can't distinguish "timeout elapsed" from
+// "peer closed the socket" — both surface as a short read — so we
+// use the caller-supplied `timeout_ms` as a proxy: if it was > 0, a
+// short read is PSTimeout; otherwise (blocking wait), it must have
+// been a genuine close. Callers that need harder guarantees should
+// ping the connection separately.
+let redis_pubsub_next = fn (fd: int) -> fn (timeout_ms: int) ->
+  let r = redis_wait_reply fd timeout_ms in
+  match r with
+  | RRErr "short read" ->
+    if timeout_ms > 0 then PSTimeout else PSClosed
+  | _ -> _rps_classify r
+  ;
+
+// Send SUBSCRIBE / PSUBSCRIBE without draining the confirmation
+// replies — leaves them on the wire so a `redis_pubsub_run` loop
+// sees the subscribe/psubscribe confirmations as PSSubscribed events
+// alongside real messages. Use this instead of `redis_subscribe`
+// when you're driving the wire through the dispatch layer end-to-end.
+//
+// (The base `redis_subscribe` drains confirmations because the
+// classic "subscribe, then poll" flow doesn't want to trip over the
+// confirmations before the first real message arrives. Both are
+// useful — pick the one that matches your reader shape.)
+let _rps_subscribe_cmd = fn (fd: int) -> fn (verb: str)
+                       -> fn (names: str list) ->
+  let n = _r_list_len names in
+  let cmd = "*" ++ show (n + 1) ++ "\r\n"
+         ++ "$" ++ show (str_len verb) ++ "\r\n" ++ verb ++ "\r\n"
+         ++ _r_build_args names "" in
+  tcp_write fd (str_ptr cmd) (str_len cmd)
+  ;
+
+let redis_pubsub_subscribe = fn (fd: int) -> fn (channels: str list) ->
+  let _ = _rps_subscribe_cmd fd "SUBSCRIBE" channels in ()
+  ;
+
+let redis_pubsub_psubscribe = fn (fd: int) -> fn (patterns: str list) ->
+  let _ = _rps_subscribe_cmd fd "PSUBSCRIBE" patterns in ()
+  ;
+
+// Loop calling `handler` for each classified message until either
+// (a) handler returns false or (b) PSClosed arrives (server closed
+// the socket). `timeout_ms` applies to each individual wait — if the
+// wait times out, handler still sees the PSTimeout tick, so a "poll
+// external state every N ms while also listening" pattern is easy.
+let rec redis_pubsub_run = fn (fd: int) -> fn (timeout_ms: int)
+                        -> fn (handler: pubsub_msg -> bool) ->
+  let msg = redis_pubsub_next fd timeout_ms in
+  match msg with
+  | PSClosed -> let _ = handler PSClosed in ()
+  | _ ->
+    if handler msg then redis_pubsub_run fd timeout_ms handler
+    else ()
+  ;
+
+let redis_pubsub_show = fn (m: pubsub_msg) ->
+  match m with
+  | PSMessage (ch, pl) ->
+    "message[" ++ ch ++ "] " ++ pl
+  | PSPMessage (pat, ch, pl) ->
+    "pmessage[" ++ pat ++ " -> " ++ ch ++ "] " ++ pl
+  | PSSubscribed (name, count) ->
+    "subscribed " ++ name ++ " (" ++ show count ++ " total)"
+  | PSUnsubscribed (name, count) ->
+    "unsubscribed " ++ name ++ " (" ++ show count ++ " remaining)"
+  | PSPong pl ->
+    if str_eq pl "" then "pong" else "pong " ++ pl
+  | PSTimeout -> "(timeout)"
+  | PSClosed -> "(closed)"
+  | PSOther r -> "other: " ++ redis_show r
+  ;
+
+// Convenience combined type: two fds, one for publishing and one
+// blocked in SUBSCRIBE. Redis's rule — "only SUBSCRIBE / UNSUBSCRIBE /
+// PING / QUIT / RESET are legal on a subscribed fd" — means most apps
+// need both; hoisting the pair into a record keeps the caller from
+// juggling loose ints.
+type PubsubClient = {
+  pub_fd : int,
+  sub_fd : int,
+};
+
+// Open both connections. Returns pub_fd = sub_fd = -1 on any failure
+// (leaves both closed). Callers should test the fields before use.
+let redis_pubsub_open = fn (host: str) -> fn (port: int) ->
+  let sfd = redis_connect host port in
+  if sfd < 0 then PubsubClient { pub_fd = 0 - 1, sub_fd = 0 - 1 }
+  else
+    let pfd = redis_connect host port in
+    if pfd < 0 then
+      let _ = redis_close sfd in
+      PubsubClient { pub_fd = 0 - 1, sub_fd = 0 - 1 }
+    else PubsubClient { pub_fd = pfd, sub_fd = sfd }
+  ;
+
+let redis_pubsub_close = fn (c: PubsubClient) ->
+  let _ = if c.sub_fd >= 0 then redis_close c.sub_fd else () in
+  let _ = if c.pub_fd >= 0 then redis_close c.pub_fd else () in
+  ()
+  ;
