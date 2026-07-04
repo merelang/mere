@@ -9,6 +9,8 @@
 //   GET  /               → landing page (HTML)
 //   GET  /hello          → plain-text hello
 //   GET  /hello?name=…   → hello, <name>
+//   GET  /user/:name     → pattern route — captures :name
+//   GET  /user/:name/pet/:pet → two captures in one path
 //   POST /echo           → echo the request body
 //   GET  /healthz        → 200 "ok" (K8s / load-balancer liveness)
 //   *    anything else   → 404 fallback
@@ -23,6 +25,8 @@
 //   curl http://localhost:8080/hello?name=Mere
 //   curl -X POST -d 'ping' http://localhost:8080/echo
 //   curl http://localhost:8080/healthz
+//   curl http://localhost:8080/user/alice          # → user: alice
+//   curl http://localhost:8080/user/alice/pet/cat  # → alice has a cat
 //
 // Execution mode: Wasm only, run under Node with contrib/http glue.
 
@@ -69,18 +73,38 @@ let healthz = fn (req: str) ->
   let _ = http_set_content_type "text/plain" in
   "ok\n";
 
+// Pattern handlers receive the captured segments (in source order)
+// followed by the raw request line. This one has a single capture.
+let user_h = fn (caps: str list) -> fn (req: str) ->
+  let name = match caps with
+             | Cons (n, _) -> n
+             | Nil -> "?" in
+  let _ = http_set_content_type "text/plain" in
+  "user: " ++ name ++ "\n";
+
+// Two captures — walked left-to-right, so caps is [name; pet].
+let user_pet_h = fn (caps: str list) -> fn (req: str) ->
+  let (name, pet) = match caps with
+                    | Cons (n, Cons (p, _)) -> (n, p)
+                    | _ -> ("?", "?") in
+  let _ = http_set_content_type "text/plain" in
+  name ++ " has a " ++ pet ++ "\n";
+
 let not_found = fn (req: str) ->
   let _ = http_set_status 404 in
   let _ = http_set_content_type "text/plain" in
   "not found: " ++ req ++ "\n";
 
-// The route table — declarative, easy to eyeball.
+// The route table — declarative, easy to eyeball. `route` is exact
+// match; `route_pattern` supports `:capture` segments.
 let routes =
-  Cons (route "GET"  "/"        home,
-  Cons (route "GET"  "/hello"   hello,
-  Cons (route "POST" "/echo"    echo,
-  Cons (route "GET"  "/healthz" healthz,
-  Nil)))) in
+  Cons (route         "GET"  "/"                     home,
+  Cons (route         "GET"  "/hello"                hello,
+  Cons (route         "POST" "/echo"                 echo,
+  Cons (route         "GET"  "/healthz"              healthz,
+  Cons (route_pattern "GET"  "/user/:name"           user_h,
+  Cons (route_pattern "GET"  "/user/:name/pet/:pet"  user_pet_h,
+  Nil)))))) in
 
 let handle = router routes not_found in
 

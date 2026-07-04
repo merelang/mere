@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-04 — `contrib/http/router`: `:capture` path params
+
+Extended `route_entry` from a bare tuple to a two-arm variant so the
+router can dispatch on patterns without breaking the existing
+exact-match API.
+
+- `route` (backwards-compatible) — exact-path entry, unchanged
+  signature. Existing 15 demos recompile with zero source changes.
+- `route_pattern method path handler` — new. Path segments starting
+  with `:` capture one URL segment each. Handler is
+  `str list -> str -> str` (captures in source order, then req).
+- Segment matching splits on `/`, ignores leading and trailing
+  slashes, and requires arity to match exactly (no `*` glob).
+
+Wired into `examples/http_blog.mere` — the previous
+`not_found` + `str_starts_with "/post/"` workaround is gone; blog
+now routes `/post/:slug` declaratively. `examples/http_router_demo`
+gained two-capture `/user/:name/pet/:pet` for reference.
+
+---
+
 ## 2026-07-02 — Phase 54.36 runtime codegen bootstrap unblocked
 
 Root-caused the "runtime OOB" that had been the last unresolved self-host
