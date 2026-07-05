@@ -1,21 +1,19 @@
-# wrangler.toml — Cloudflare Worker config for the Mere sample.
+# wrangler.toml — Cloudflare Worker config for the Mere snippet-share.
 #
-# Deploy: `wrangler deploy` (needs `wrangler` installed + `wrangler login`
-# done at least once). Local dev: `wrangler dev` starts a local V8
-# isolate on http://localhost:8787.
+# Deploy: `wrangler deploy` (needs wrangler CLI + `wrangler login`).
+# Local dev: `wrangler dev` starts a local V8 isolate + emulated KV.
 
-name = "mere-hello"
+name = "mere-share"
 main = "worker.js"
 compatibility_date = "2026-07-05"
 
-# `main.wasm` is imported as a module binding via `import` in worker.js.
-# Wrangler picks up any file matching a `[[wasm_modules]]` binding OR
-# any file referenced with the `import x from "./file.wasm"` shape.
-[assets]
+# KV namespace binding. Create with:
+#   wrangler kv namespace create MERE_SNIPPETS
+# then copy the returned `id` into the block below.
+[[kv_namespaces]]
+binding = "MERE_SNIPPETS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
-# Optional: rules for wasm module bundling (esbuild finds it via the
-# `import ... from "./main.wasm"` in worker.js, so this is redundant
-# but explicit for readers).
 [[rules]]
 type = "CompiledWasm"
 globs = ["**/*.wasm"]
