@@ -1,0 +1,80 @@
+// examples/http_client_auth.mere — outbound HTTP with custom headers.
+//
+// Demonstrates the request-header / response-header extensions to
+// `contrib/http/client`. Hits httpbin.org, which echoes back
+// whatever we sent (headers, body, method) as a JSON document —
+// good enough to verify the extensions round-trip.
+//
+// Requires internet access. Not part of the regular test suite.
+//
+// Endpoints exercised:
+//   GET  https://httpbin.org/headers    — echoes request headers
+//   POST https://httpbin.org/anything   — echoes method / headers / body
+//
+// Usage:
+//   ./mere -w examples/http_client_auth.mere > /tmp/hca.wat
+//   wat2wasm --enable-tail-call /tmp/hca.wat -o /tmp/hca.wasm
+//   node scripts/run_http_server.js /tmp/hca.wasm
+//
+// The wasm doesn't actually start a server here — it just exercises
+// the outbound client and exits. `run_http_server.js` is still the
+// right runner because it's the one that provides the http_fetch
+// externs; `run_wasm.js` doesn't.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+
+import "../contrib/http/client.mere";
+
+// ---- 1. Custom User-Agent + Accept via http_fetch_h ------------------
+
+let _ = print "1. GET /headers with custom User-Agent + Accept" in
+let body1 = http_fetch_h "GET" "https://httpbin.org/headers" ""
+  (Cons (("User-Agent", "mere-client-demo/1.0"),
+   Cons (("Accept", "application/json"),
+   Cons (("X-Trace-Id", "abc-123"), Nil)))) in
+let code1 = http_fetch_status () in
+let _ = print ("   status=" ++ show code1) in
+let _ = print ("   body length=" ++ show (str_len body1)) in
+// httpbin echoes the headers we sent — searching for our trace-id
+// in the response verifies the header actually landed on the wire.
+let _ = if str_index_of body1 "abc-123" >= 0 then
+  print "   ✓ X-Trace-Id round-tripped"
+else
+  print "   ✗ X-Trace-Id missing from response" in
+
+// ---- 2. Response-header inspection ----------------------------------
+
+let _ = print "" in
+let _ = print "2. inspect response headers from last fetch" in
+let ctype = http_fetch_response_header "Content-Type" in
+let server = http_fetch_response_header "server" in
+let missing = http_fetch_response_header "X-Does-Not-Exist" in
+let _ = print ("   Content-Type = " ++ ctype) in
+let _ = print ("   server (lowercased lookup) = " ++ server) in
+let _ = print ("   X-Does-Not-Exist = '" ++ missing ++ "' (empty as expected)") in
+
+// ---- 3. Bearer-token convenience -----------------------------------
+
+let _ = print "" in
+let _ = print "3. GET with http_get_bearer" in
+let body3 = http_get_bearer "https://httpbin.org/bearer" "shhh-my-secret" in
+let code3 = http_fetch_status () in
+let _ = print ("   status=" ++ show code3) in
+let _ = if str_index_of body3 "shhh-my-secret" >= 0 then
+  print "   ✓ bearer token echoed"
+else
+  print "   ✗ bearer token missing" in
+
+// ---- 4. Per-call timeout override ------------------------------------
+
+let _ = print "" in
+let _ = print "4. per-call timeout — 500 ms on a 3-second endpoint" in
+let _ = http_fetch_set_timeout 500 in
+let body4 = http_get "https://httpbin.org/delay/3" in
+let code4 = http_fetch_status () in
+let _ = print ("   status=" ++ show code4 ++ " (expect 0 — curl timed out)") in
+let _ = print ("   body length=" ++ show (str_len body4) ++ " (expect 0)") in
+
+let _ = print "" in
+let _ = print "done." in
+0
