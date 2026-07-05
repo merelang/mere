@@ -1,0 +1,68 @@
+// examples/db_redis_lock.mere — distributed lock via Redis SET NX PX.
+//
+// Two "workers" (both in this single process, for demo simplicity)
+// race for the same lock key. Only one gets the token; the other
+// gets None. The winner then releases, and a third attempt
+// succeeds. Finally we exercise the safe-release semantics: a
+// stale token from an expired lock DOES NOT release the current
+// holder's grip.
+//
+// Setup:
+//   docker run -d --name mere-redis-lock -p 15608:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_lock.mere > /tmp/dbrl.wat
+//   wat2wasm --enable-tail-call /tmp/dbrl.wat -o /tmp/dbrl.wasm
+//   node scripts/run_wasm.js /tmp/dbrl.wasm
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_lock.mere";
+
+let show_acq = fn (r) ->
+  match r with
+  | Some t -> "Some " ++ t
+  | None -> "None (contention)"
+  ;
+
+let show_bool = fn (b: bool) -> if b then "true" else "false" ;
+
+let fd = redis_connect "127.0.0.1" 15608 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  // Clean slate.
+  let _ = redis_command fd (Cons ("DEL", Cons ("job-lock", Nil))) in
+
+  // Worker A grabs first.
+  let a = redis_lock_acquire fd "job-lock" 60000 in
+  let _ = print ("A acquire: " ++ show_acq a) in
+
+  // Worker B tries immediately — should lose.
+  let b = redis_lock_acquire fd "job-lock" 60000 in
+  let _ = print ("B acquire while A holds: " ++ show_acq b) in
+
+  // Worker A releases with its real token — should succeed.
+  let a_tok = match a with | Some t -> t | None -> "" in
+  let a_rel = redis_lock_release fd "job-lock" a_tok in
+  let _ = print ("A release with real token: " ++ show_bool a_rel) in
+
+  // Now C can acquire.
+  let c = redis_lock_acquire fd "job-lock" 60000 in
+  let _ = print ("C acquire after A released: " ++ show_acq c) in
+
+  // Safe-release check: D (an impostor) tries to release with the
+  // wrong token — must fail, and C's lock must survive.
+  let d_rel = redis_lock_release fd "job-lock" "totally-not-the-token" in
+  let _ = print ("impostor release with wrong token: " ++ show_bool d_rel) in
+
+  // Confirm C still holds — a fresh acquire should still lose.
+  let e = redis_lock_acquire fd "job-lock" 60000 in
+  let _ = print ("E acquire after impostor release: " ++ show_acq e) in
+
+  // Clean up: C releases properly.
+  let c_tok = match c with | Some t -> t | None -> "" in
+  let c_rel = redis_lock_release fd "job-lock" c_tok in
+  let _ = print ("C release: " ++ show_bool c_rel) in
+
+  let _ = redis_close fd in
+  ()

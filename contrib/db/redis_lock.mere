@@ -1,0 +1,69 @@
+// contrib/db/redis_lock.mere — distributed mutex via Redis.
+//
+// Standard Redis "SET NX PX" lock — good enough for the common case
+// of "at most one worker across N processes should be running this
+// job right now". NOT good enough for critical-section-with-
+// consequences workloads (RedLock, CP-ish consensus, etc.); for
+// those a proper consensus store is warranted. See Martin
+// Kleppmann's "How to do distributed locking" for the tradeoff
+// discussion.
+//
+// Semantics:
+//
+//   Acquire — SET key <fencing_token> NX PX <ttl_ms>
+//     Atomically claims the key ONLY if it doesn't exist, expiring
+//     after ttl_ms. Returns the fencing token on success (needed
+//     for a safe release), or "" on contention (someone else holds it).
+//
+//   Release — EVAL "compare-and-del"
+//     Deletes the key ONLY if its value matches the caller's fencing
+//     token. This prevents "release someone else's lock" bugs where
+//     process A's TTL expires, process B acquires, then A's stale
+//     Release would blow away B's lock. Doing this compare-and-delete
+//     needs atomicity — Redis's EVAL runs the two-step Lua script
+//     in one server-side transaction.
+//
+// The fencing token is a fresh 16-hex random (`gen_request_id`).
+// Real fencing (monotonically increasing across acquires) would need
+// INCR alongside SET; the token here is only used for the safe-
+// release check, not for downstream ordering.
+//
+// Public API:
+//
+//   redis_lock_acquire fd key ttl_ms  -> str option
+//   redis_lock_release fd key token   -> bool
+
+import "redis.mere";
+
+extern fn gen_request_id: unit -> str;
+
+// SET key <token> NX PX <ttl_ms>  — atomic acquire.
+// Reply: RRStr "OK" on success, RRBulk None (RESP2) / RRNull (RESP3)
+// on contention.
+let redis_lock_acquire = fn (fd: int) -> fn (key: str)
+                     -> fn (ttl_ms: int) ->
+  let token = gen_request_id () in
+  let args = Cons ("SET",
+             Cons (key, Cons (token,
+             Cons ("NX", Cons ("PX", Cons (show ttl_ms, Nil)))))) in
+  match redis_command fd args with
+  | RRStr s -> if str_eq s "OK" then Some token else (None : str option)
+  | _ -> None
+  ;
+
+// Compare-and-delete via Lua EVAL. The script is intentionally
+// tiny — Redis parses each eval fresh; SCRIPT LOAD + EVALSHA would
+// save a few bytes per call but complicates error handling for
+// negligible gain in this MVP.
+let _lock_release_script =
+  "if redis.call('GET', KEYS[1]) == ARGV[1] then " ++
+  "return redis.call('DEL', KEYS[1]) else return 0 end" ;
+
+let redis_lock_release = fn (fd: int) -> fn (key: str) -> fn (token: str) ->
+  let args = Cons ("EVAL",
+             Cons (_lock_release_script,
+             Cons ("1", Cons (key, Cons (token, Nil))))) in
+  match redis_command fd args with
+  | RRInt 1 -> true
+  | _ -> false
+  ;

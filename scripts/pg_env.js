@@ -237,6 +237,14 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     random_hex: (n) => {
       return writeStr(require('crypto').randomBytes(n | 0).toString('hex'));
     },
+    // gen_request_id — 16-hex random request/session id. Same shape
+    // as the http-server-specific version previously defined only
+    // in run_http_server.js; hoisted here so CLI Mere programs
+    // (running under run_wasm.js) that use it — e.g. redis_lock's
+    // fencing tokens, session ids in test harnesses — link cleanly.
+    gen_request_id: () => {
+      return writeStr(require('crypto').randomBytes(8).toString('hex'));
+    },
     random_b64: (n) => {
       return writeStr(require('crypto').randomBytes(n | 0).toString('base64'));
     },

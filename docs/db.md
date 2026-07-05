@@ -337,6 +337,7 @@ command needed) and cleans up on process exit.
 | [db_redis_hll](https://github.com/merelang/mere/blob/main/examples/db_redis_hll.mere) | HyperLogLog cardinality — `hll_add` / `hll_count` / `hll_merge` for 12 KiB approximate distinct-count. Two-shard union demo (5 true distinct across shard-a + shard-b) via `contrib/db/redis_hll` |
 | [db_redis_stream](https://github.com/merelang/mere/blob/main/examples/db_redis_stream.mere) | Redis Streams — `stream_add` / `stream_read` / `stream_len` durable append-only log. 3 XADDs, XLEN=3, full replay via id `0`, tail-only replay via previous id, past-the-tail empty. Via `contrib/db/redis_stream` |
 | [db_redis_stream_groups](https://github.com/merelang/mere/blob/main/examples/db_redis_stream_groups.mere) | Redis Streams consumer groups — `stream_group_create` / `stream_group_read` / `stream_ack` / `stream_pending_len`. Two workers in one group, XREADGROUP `>` load-balances (A: 1-2, B: 3-4), PEL 4→2→0 as each ACKs. Same module as above |
+| [db_redis_lock](https://github.com/merelang/mere/blob/main/examples/db_redis_lock.mere) | Distributed mutex via `SET NX PX` + compare-and-delete `EVAL` — `redis_lock_acquire` / `redis_lock_release`. Contention returns None; impostor release with wrong token silently fails. Via `contrib/db/redis_lock` |
 
 *Cluster / high availability*
 
