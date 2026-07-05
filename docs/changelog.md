@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/client`: request + response headers, per-call timeout
+
+The outbound `http_fetch` was fixed to a bare `(method, url, body)`
+shape — no way to attach an `Authorization: Bearer …` header, no
+way to read a `Retry-After` back off a 429, no way to shorten the
+10 s default timeout for a cheap probe. Three new externs close
+that gap without breaking the existing 3-arg call:
+
+- `http_fetch_add_header name value` — attaches a header to the
+  NEXT fetch (host-side accumulator is cleared once the fetch
+  fires, so a set-and-fetch pair is self-contained).
+- `http_fetch_response_header name` — case-insensitive lookup on
+  the LAST response. Only the final response block is exposed —
+  redirect chains and 100-continue trailers are discarded.
+- `http_fetch_set_timeout ms` — one-shot override; 0 restores the
+  10 s default.
+
+Ergonomic wrappers in `contrib/http/client.mere`:
+
+- `http_fetch_h method url body headers` — headers as `(str * str) list`.
+- `http_get_bearer url token` — sugar over the common auth-header case.
+
+`scripts/run_http_server.js` runs curl with `-i` and parses the
+final response header block (handling redirect / 100-continue
+prefaces by taking the LAST `HTTP/…` block) so the host doesn't
+need a temp file for header capture.
+
+Demo `examples/http_client_auth.mere` verifies all four features
+end-to-end against httpbin.org: custom header round-trip, response
+header read, Bearer token, per-call timeout enforcement.
+
 ## 2026-07-04 — `contrib/db/redis_pubsub`: dispatch layer
 
 `redis.mere` already carried the raw `SUBSCRIBE` / `PSUBSCRIBE` /

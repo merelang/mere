@@ -9,22 +9,47 @@
 // a wasm frame.
 //
 // Depends on `curl` being on PATH. Body is sent as `--data-binary`
-// when non-empty; empty body is skipped. Timeout is 10 seconds.
-// Empty return + status = 0 signals a network error / non-zero curl
-// exit.
+// when non-empty; empty body is skipped. Timeout is 10 seconds
+// unless overridden per-call via `http_fetch_set_timeout`. Empty
+// return + status = 0 signals a network error / non-zero curl exit.
+//
+// Public API (five externs + three convenience wrappers):
 //
 //   http_fetch method url body -> response_body
-//   http_fetch_status () -> status_code
+//   http_fetch_status  () -> status_code
+//   http_fetch_add_header  name value -> unit
+//                          Attaches a header to the NEXT fetch call
+//                          (cleared after the fetch fires so a
+//                          set-and-fetch pair is self-contained).
+//   http_fetch_response_header name -> str
+//                          Reads a header from the LAST response.
+//                          Case-insensitive; "" if absent. Only the
+//                          final response's headers are exposed —
+//                          redirect chains and 100-continue blocks
+//                          are discarded.
+//   http_fetch_set_timeout ms -> unit
+//                          One-shot override for the next call's
+//                          overall timeout (0 = 10 s default).
 //
-// Typical usage (with the `contrib/http/query.mere` / `json_body`
-// helpers to build / parse payloads):
+//   http_get         url                     -> body    (plain GET)
+//   http_post_json   url body                -> body    (POST, no extra headers)
+//   http_fetch_h     method url body headers -> body    (headers = list)
+//   http_get_bearer  url token               -> body    (Authorization: Bearer …)
 //
-//   let body = http_fetch "GET" "https://api.github.com/repos/merelang/mere" "" in
+// Typical usage:
+//
+//   let body = http_fetch_h "GET"
+//                 "https://api.github.com/repos/merelang/mere" ""
+//                 (Cons (("User-Agent", "mere-demo"),
+//                  Cons (("Accept", "application/vnd.github+json"), Nil))) in
 //   let code = http_fetch_status () in
-//   if code == 200 then ...
+//   let remaining = http_fetch_response_header "X-RateLimit-Remaining" in
 
 extern fn http_fetch: str -> str -> str -> str;
 extern fn http_fetch_status: unit -> int;
+extern fn http_fetch_add_header: str -> str -> int;
+extern fn http_fetch_response_header: str -> str;
+extern fn http_fetch_set_timeout: int -> int;
 
 // Convenience wrappers matching common shapes. Not strictly needed
 // — callers can invoke `http_fetch` directly — but the named forms
@@ -34,3 +59,26 @@ let http_get = fn (url: str) -> http_fetch "GET" url "";
 
 let http_post_json = fn (url: str) -> fn (body: str) ->
   http_fetch "POST" url body;
+
+// Attach every entry in the header list, then run the fetch. The
+// extern accumulator on the host side is cleared by http_fetch so
+// subsequent calls don't inherit stale headers.
+let rec _push_headers = fn (headers: (str * str) list) ->
+  match headers with
+  | Nil -> ()
+  | Cons (kv, rest) ->
+    let (k, v) = kv in
+    let _ = http_fetch_add_header k v in
+    _push_headers rest
+  ;
+
+let http_fetch_h = fn (method: str) -> fn (url: str) -> fn (body: str)
+                -> fn (headers: (str * str) list) ->
+  let _ = _push_headers headers in
+  http_fetch method url body
+  ;
+
+let http_get_bearer = fn (url: str) -> fn (token: str) ->
+  http_fetch_h "GET" url ""
+    (Cons (("Authorization", "Bearer " ++ token), Nil))
+  ;

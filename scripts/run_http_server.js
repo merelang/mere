@@ -68,6 +68,20 @@ const wasmPath = process.argv[2];
   // extern fn on entry.
   let lastFetchStatus = 0;
 
+  // Accumulator for request headers to attach to the NEXT http_fetch
+  // call. Cleared by http_fetch on entry so a set-and-fetch pair is
+  // self-contained. Case is preserved as passed (curl is case-
+  // insensitive on the wire either way).
+  let nextFetchHeaders = [];
+
+  // Map<lower-cased-name, value> populated after each http_fetch
+  // call from the response header block. Read via
+  // http_fetch_response_header(name).
+  let lastFetchHeaders = new Map();
+
+  // Per-call timeout override. 0 = use the 10 s default.
+  let nextFetchTimeoutMs = 0;
+
   const { glue: httpGlue, attach: attachHttp } = makeHttpGlue();
 
   // Reuse the same set of env imports as scripts/run_wasm.js so any
@@ -244,27 +258,93 @@ const wasmPath = process.argv[2];
       const url = readCStr(urlPtr);
       const body = readCStr(bodyPtr);
       const { spawnSync } = require("child_process");
-      const args = ["-sS", "-w", "\n__STATUS__%{http_code}", "-X", method];
+      // `-i` includes response headers before the body separated by
+      // a blank line. That lets us capture them without a temp file.
+      const args = ["-sS", "-i", "-w", "\n__STATUS__%{http_code}", "-X", method];
+      for (const [k, v] of nextFetchHeaders) args.push("-H", `${k}: ${v}`);
+      nextFetchHeaders = [];
       if (body && body.length > 0) args.push("--data-binary", body);
       args.push(url);
+      const timeoutMs = nextFetchTimeoutMs > 0 ? nextFetchTimeoutMs : 10000;
+      nextFetchTimeoutMs = 0;
       const result = spawnSync("curl", args, {
         encoding: "utf8",
-        timeout: 10000,
+        timeout: timeoutMs,
         maxBuffer: 16 * 1024 * 1024,
       });
+      lastFetchHeaders = new Map();
       if (result.status !== 0 || !result.stdout) {
         lastFetchStatus = 0;
         return writeStr("");
       }
       const marker = result.stdout.lastIndexOf("\n__STATUS__");
-      if (marker < 0) {
-        lastFetchStatus = 0;
-        return writeStr(result.stdout);
+      const withHeaders = marker < 0 ? result.stdout : result.stdout.substring(0, marker);
+      lastFetchStatus = marker < 0
+        ? 0
+        : (parseInt(result.stdout.substring(marker + 11), 10) || 0);
+      // With `-i`, curl may emit multiple header blocks (redirects,
+      // 100-continue). Take the LAST one — that's the final response
+      // whose status matches `%{http_code}`.
+      const sepRe = /\r?\n\r?\n/g;
+      let lastSep = -1;
+      let lastHeaderStart = 0;
+      let m;
+      while ((m = sepRe.exec(withHeaders)) !== null) {
+        // A header block always starts with "HTTP/". Anything else is
+        // just paragraph content in the body and shouldn't split.
+        if (withHeaders.substring(lastHeaderStart, m.index).match(/^HTTP\//)) {
+          lastSep = m.index + m[0].length;
+          lastHeaderStart = lastSep;
+        } else {
+          break;
+        }
       }
-      lastFetchStatus = parseInt(result.stdout.substring(marker + 11), 10) || 0;
-      return writeStr(result.stdout.substring(0, marker));
+      let bodyOut = withHeaders;
+      let headerBlock = "";
+      if (lastSep > 0) {
+        // Find where THIS header block started.
+        const prevBlockEnd = withHeaders.lastIndexOf("\r\n\r\n", lastSep - 5);
+        const blockStart = prevBlockEnd < 0 ? 0 : prevBlockEnd + 4;
+        headerBlock = withHeaders.substring(blockStart, lastSep).replace(/\r?\n\r?\n$/, "");
+        bodyOut = withHeaders.substring(lastSep);
+      }
+      // Parse header block, skipping the first line ("HTTP/1.1 200 OK").
+      const lines = headerBlock.split(/\r?\n/);
+      for (let i = 1; i < lines.length; i++) {
+        const colon = lines[i].indexOf(":");
+        if (colon > 0) {
+          const name = lines[i].substring(0, colon).trim().toLowerCase();
+          const value = lines[i].substring(colon + 1).trim();
+          lastFetchHeaders.set(name, value);
+        }
+      }
+      return writeStr(bodyOut);
     },
     http_fetch_status: () => lastFetchStatus,
+    // http_fetch_add_header(name, value) — attach a request header to
+    // the NEXT http_fetch call. Cleared automatically once the fetch
+    // fires, so per-call headers don't leak into subsequent calls.
+    // Callers typically wrap this in an ergonomic helper — see
+    // contrib/http/client.mere's http_fetch_h.
+    http_fetch_add_header: (namePtr, valuePtr) => {
+      nextFetchHeaders.push([readCStr(namePtr), readCStr(valuePtr)]);
+      return 0;
+    },
+    // http_fetch_response_header(name) — read a header from the last
+    // http_fetch response. Case-insensitive lookup. Returns "" if
+    // absent. Values are the final response's headers only (any
+    // intermediate redirect blocks are discarded).
+    http_fetch_response_header: (namePtr) => {
+      const name = readCStr(namePtr).toLowerCase();
+      return writeStr(lastFetchHeaders.get(name) || "");
+    },
+    // http_fetch_set_timeout(ms) — one-shot override for the next
+    // http_fetch call. 0 restores the 10 s default. Applies to the
+    // whole request (connect + read).
+    http_fetch_set_timeout: (ms) => {
+      nextFetchTimeoutMs = ms | 0;
+      return 0;
+    },
     ...httpGlue,
   };
 
