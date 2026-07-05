@@ -1,0 +1,73 @@
+// examples/db_redis_stream.mere — Redis Streams end-to-end.
+//
+// Producer appends 3 orders to a stream; consumer replays them from
+// the beginning, then a second consumer starts from the third's id
+// to see only the tail.
+//
+// Setup:
+//   docker run -d --name mere-redis-stream -p 15606:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_stream.mere > /tmp/dbrs.wat
+//   wat2wasm --enable-tail-call /tmp/dbrs.wat -o /tmp/dbrs.wasm
+//   node scripts/run_wasm.js /tmp/dbrs.wasm
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_stream.mere";
+
+let show_pairs = fn (ps: (str * str) list) ->
+  let rec walk = fn (xs) -> fn (first: bool) ->
+    match xs with
+    | Nil -> ""
+    | Cons ((k, v), rest) ->
+      (if first then "" else ", ") ++ k ++ "=" ++ v ++ walk rest false in
+  "\{" ++ walk ps true ++ "}"
+  ;
+
+let rec show_entries = fn (es: (str * (str * str) list) list) ->
+  match es with
+  | Nil -> ()
+  | Cons ((id, pairs), rest) ->
+    let _ = print ("  " ++ id ++ " " ++ show_pairs pairs) in
+    show_entries rest
+  ;
+
+let fd = redis_connect "127.0.0.1" 15606 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+  // Clean slate.
+  let _ = redis_command fd (Cons ("DEL", Cons ("orders", Nil))) in
+
+  // Append three entries.
+  let id1 = stream_add fd "orders"
+    (Cons (("cust", "alice"), Cons (("amt", "42"), Nil))) in
+  let id2 = stream_add fd "orders"
+    (Cons (("cust", "bob"),   Cons (("amt", "100"), Nil))) in
+  let id3 = stream_add fd "orders"
+    (Cons (("cust", "carol"), Cons (("amt", "17"), Nil))) in
+
+  let id1_s = match id1 with | Some s -> s | None -> "?" in
+  let id2_s = match id2 with | Some s -> s | None -> "?" in
+  let id3_s = match id3 with | Some s -> s | None -> "?" in
+  let _ = print ("appended: " ++ id1_s ++ ", " ++ id2_s ++ ", " ++ id3_s) in
+
+  // Depth.
+  let _ = print ("stream length: " ++ show (stream_len fd "orders")) in
+
+  // Full replay from the start.
+  let _ = print "read from id 0 (full history):" in
+  let _ = show_entries (stream_read fd "orders" "0" 100) in
+
+  // Resume from id2 — should only see id3.
+  let _ = print ("read after " ++ id2_s ++ " (tail only):") in
+  let _ = show_entries (stream_read fd "orders" id2_s 100) in
+
+  // Read past the tail — empty.
+  let _ = print ("read after " ++ id3_s ++ " (should be empty):") in
+  let after = stream_read fd "orders" id3_s 100 in
+  let _ = match after with
+          | Nil -> print "  (no entries)"
+          | _ -> show_entries after in
+
+  let _ = redis_close fd in
+  ()

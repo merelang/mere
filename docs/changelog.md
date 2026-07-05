@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/db/redis_stream`: XADD / XREAD / XLEN
+
+Third leg of the Redis event story:
+
+    redis_pubsub    broadcast-and-forget, no history
+    redis_queue     exactly-one-worker-claims (BRPOP)
+    redis_stream    durable append-only log, replayable
+
+Streams are Redis' Kafka-lite — entries live in an append-only radix
+tree with server-generated `<ms>-<seq>` ids. Consumers either
+resume from a chosen id or use consumer groups (deferred here).
+
+Public API:
+
+- `stream_add fd key fields         -> str option`
+  XADD with `*` id, returns the new entry id.
+- `stream_read fd key after_id N    -> (id, fields) list`
+  XREAD COUNT N STREAMS key after_id. `after_id` is exclusive;
+  use `"0"` for a full replay.
+- `stream_len fd key                -> int`
+  XLEN, `-1` on error.
+
+Out of MVP scope: XREADGROUP / XACK / XPENDING consumer groups,
+MAXLEN caps, blocking reads (XREAD BLOCK N). Documented in the
+module header.
+
+Demo `examples/db_redis_stream.mere` verifies the full flow: 3
+XADDs → XLEN=3 → full replay from `0` recovers all fields → resume
+from mid-stream id yields only the tail → past-the-tail returns
+empty.
+
 ## 2026-07-05 — `contrib/http/csrf`: synchronizer-token CSRF middleware
 
 Sits on top of `contrib/http/session`: the cookie session id is
