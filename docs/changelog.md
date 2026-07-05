@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/session`: consolidate cookie-session pattern
+
+Seven demos (http_blog, http_todo_app, http_users_db, http_todo_pg,
+http_mini_blog, http_feed_reader, http_cookie_session) all
+hand-rolled the same five-line dance: `map_new ()`, read `session=`
+cookie, look up user, mint id on login, `Set-Cookie`. Consolidate:
+
+- `session_new_store ()` — opaque store handle (a `map` under the
+  hood; pre-migration demos still compile against `map_has` etc.).
+- `session_current store` — current user id or `""`.
+- `session_login store user` — mints a random 16-hex id via
+  `gen_request_id ()`, sets `Set-Cookie: session=…; Path=/;
+  HttpOnly; SameSite=Lax`.
+- `session_logout store` — removes the entry + emits `Max-Age=0`.
+- `session_require store login_url` — returns `str option`; `None`
+  side-effects a 303 to `login_url`.
+
+Behavioural upgrade: sessions now use `gen_request_id ()` (crypto
+random) instead of the demos' old `"s-" ++ username` — non-guessable
+ids, plus `HttpOnly; SameSite=Lax` cookie attributes by default.
+
+`examples/http_blog.mere` migrated as the first consumer. All six
+CRUD flows still work end-to-end (login → post → view → edit →
+delete). The other six demos continue to work unchanged and can
+migrate incrementally.
+
 ## 2026-07-05 — `contrib/http/metrics`: Prometheus-style metrics + middleware
 
 A small registry of counters and gauges plus a text-format exporter

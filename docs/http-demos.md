@@ -238,7 +238,7 @@ Source: [examples/http_csv_export.mere](https://github.com/merelang/mere/blob/ma
 
 Everything the demos import is under [`contrib/`](https://github.com/merelang/mere/tree/main/contrib):
 
-- `contrib/http/` — 17 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
+- `contrib/http/` — 18 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `session` (in-memory cookie session store — random 16-hex ids, `HttpOnly; SameSite=Lax` defaults), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
 - `contrib/kv/` — log-structured KV + pipe-separated pack/unpack
 - `contrib/xml/`, `contrib/feed/`, `contrib/markdown/`, `contrib/json/` — parsers / renderers
 - `contrib/auth/jwt.mere` — HS256 sign / verify

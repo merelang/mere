@@ -55,6 +55,7 @@ import "../contrib/http/query.mere";
 import "../contrib/http/json_body.mere";
 import "../contrib/http/router.mere";
 import "../contrib/http/cookie.mere";
+import "../contrib/http/session.mere";
 import "../contrib/http/escape.mere";
 import "../contrib/http/static.mere";
 import "../contrib/markdown/to_html.mere";
@@ -92,7 +93,7 @@ let _ = pg_pool_release pool init_fd in
 // In-memory session store — resets on restart. Suitable for a single-
 // process demo; a real deployment would move sessions into blog_users
 // or a dedicated table.
-let sessions = map_new () in
+let sessions = session_new_store () in
 
 // ---- helpers ---------------------------------------------------------
 
@@ -101,13 +102,6 @@ let sessions = map_new () in
 // handle both. form_field is JSON-only so we go direct here.
 let form_field = fn (name: str) ->
   query_get (parse_query (http_current_body ())) name
-  ;
-
-let current_user = fn (u: unit) ->
-  let sid = session_id (http_get_header "Cookie") in
-  if str_eq sid "" then ""
-  else if map_has sessions sid then map_get sessions sid
-  else ""
   ;
 
 // A single row from the posts table maps to a tuple of (id, slug,
@@ -293,16 +287,14 @@ let login_h = fn (req: str) ->
     let _ = http_set_content_type "text/html; charset=utf-8" in
     page "Login failed" "<p>Wrong username or password. <a href=\"/admin/login\">Try again</a>.</p>"
   else
-    let sid = "s-" ++ u in
-    let _ = map_set sessions sid u in
-    let _ = http_set_header "Set-Cookie" ("session=" ++ sid ++ "; Path=/; HttpOnly") in
+    let _ = session_login sessions u in
     let _ = http_set_header "Location" "/admin" in
     let _ = http_set_status 303 in
     "redirecting\n"
   ;
 
 let logout_h = fn (req: str) ->
-  let _ = http_set_header "Set-Cookie" "session=; Path=/; Max-Age=0" in
+  let _ = session_logout sessions in
   let _ = http_set_header "Location" "/" in
   let _ = http_set_status 303 in
   "bye\n"
@@ -311,12 +303,9 @@ let logout_h = fn (req: str) ->
 // ---- admin: CRUD -----------------------------------------------------
 
 let require_auth = fn (u: unit) ->
-  let user = current_user () in
-  if str_eq user "" then
-    let _ = http_set_header "Location" "/admin/login" in
-    let _ = http_set_status 303 in
-    ("", false)
-  else (user, true)
+  match session_require sessions "/admin/login" with
+  | Some user -> (user, true)
+  | None -> ("", false)
   ;
 
 let rec _rows_to_admin_list = fn (rows: (str option list) list) -> fn (acc: str) ->
