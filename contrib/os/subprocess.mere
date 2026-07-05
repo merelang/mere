@@ -1,0 +1,51 @@
+// contrib/os/subprocess.mere — synchronous shell-out helper.
+//
+// First step toward Mere's concurrency story — the "no language
+// change, immediate utility" primitive that comes before a proper
+// `spawn` / `channel` (with a Send / Sync type discipline) lands.
+// Blocking by design; parallelism today is via shell backgrounding
+// (see the tail comment).
+//
+// Public API:
+//
+//   subprocess_run    cmd stdin  -> str
+//     Run `cmd` through the user's shell (bash / sh — spawnSync
+//     `shell: true` on the Node side). Write `stdin` to the child's
+//     stdin, wait for exit, return stdout. Timeout 30 s. Buffer cap
+//     16 MiB per stream. On timeout / signal, status is -1.
+//
+//   subprocess_status ()          -> int
+//     Exit code of the last subprocess_run. 0 = success, nonzero =
+//     child exited with that code, -1 = signal / timeout.
+//
+//   subprocess_stderr ()          -> str
+//     Stderr of the last subprocess_run. Empty string if the child
+//     wrote nothing to stderr.
+//
+// Semantics + limitations:
+//
+//   BLOCKING. subprocess_run holds the whole Wasm frame until the
+//   child exits. That means a Mere HTTP server should NOT call this
+//   inside a request handler (the listener stalls).
+//
+//   SHELL ESCAPING is the caller's job — `cmd` runs through
+//   `sh -c "..."`, so any user-controlled substring must be quoted
+//   (or built via a safer approach like writing input to stdin).
+//
+//   ONE AT A TIME. There's no async / parallel-collect API here.
+//   For parallelism today: use shell backgrounding + tmpfiles inside
+//   a single call —
+//
+//     subprocess_run
+//       "sh -c '(child1 > /tmp/r1) & (child2 > /tmp/r2) & wait; " ++
+//       "cat /tmp/r1; echo ---; cat /tmp/r2'"
+//       ""
+//
+//   The two children run concurrently under the OS scheduler; only
+//   the collection step is serial. A proper `worker_spawn` /
+//   `worker_await` pair is scheduled for Q-012 step 3 (post
+//   worker_threads restructure).
+
+extern fn subprocess_run: str -> str -> str;
+extern fn subprocess_status: unit -> int;
+extern fn subprocess_stderr: unit -> str;
