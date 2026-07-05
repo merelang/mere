@@ -72,6 +72,7 @@ example exercises all three variants (including two-capture
 | [gh_stars](https://github.com/merelang/mere/blob/main/examples/gh_stars.mere) | CLI — GitHub repo star count via `http_fetch_h` (optional `GITHUB_TOKEN` Bearer) + rate-limit header echo | 110 |
 | [metrics_demo](https://github.com/merelang/mere/blob/main/examples/http_metrics_demo.mere) | Prometheus-style `/metrics` endpoint — counters + gauges + `with_metrics` middleware. `/metrics` gated by `with_basic_auth "metrics" "scraper" "s3cret"` (Prometheus / Grafana Agent speak Basic Auth natively). Via `contrib/http/metrics` + `contrib/http/basic_auth` | 75 |
 | [pubsub_chat](https://github.com/merelang/mere/blob/main/examples/http_pubsub_chat.mere) | multi-instance SSE chat — POST publishes to Redis, JS-side subscriber bridges into `sse_broadcast` so listeners on *any* instance see every message (verified: 2 instances on :8080 + :8081, POST → both SSE streams) | 100 |
+| [csrf_demo](https://github.com/merelang/mere/blob/main/examples/http_csrf_demo.mere) | Synchronizer-token CSRF on a form POST — session-bound token, `csrf_hidden_input` in the form, `csrf_validate` guard on `/update`. Missing/wrong token → 403, correct → 303 | 90 |
 
 ## todo_app
 
@@ -239,7 +240,7 @@ Source: [examples/http_csv_export.mere](https://github.com/merelang/mere/blob/ma
 
 Everything the demos import is under [`contrib/`](https://github.com/merelang/mere/tree/main/contrib):
 
-- `contrib/http/` — 19 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `session` (in-memory cookie session store — random 16-hex ids, `HttpOnly; SameSite=Lax` defaults), `basic_auth` (RFC 7617 middleware — single-cred or predicate variant, standard `WWW-Authenticate` challenge), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
+- `contrib/http/` — 20 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `session` (in-memory cookie session store — random 16-hex ids, `HttpOnly; SameSite=Lax` defaults), `basic_auth` (RFC 7617 middleware), `csrf` (synchronizer-token guard on top of session), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
 - `contrib/kv/` — log-structured KV + pipe-separated pack/unpack
 - `contrib/xml/`, `contrib/feed/`, `contrib/markdown/`, `contrib/json/` — parsers / renderers
 - `contrib/auth/jwt.mere` — HS256 sign / verify

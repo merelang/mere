@@ -1,0 +1,108 @@
+// http_csrf_demo: end-to-end CSRF protection on a form POST.
+//
+// Minimal setup: one form that displays a mutable message, one
+// POST endpoint that overwrites it. Without the CSRF token, the
+// POST is rejected 403. With the correct token, it succeeds.
+//
+// Uses contrib/http/session for cookie sessions + contrib/http/csrf
+// for the synchronizer-token gate. Both stores are per-process
+// in-memory maps.
+//
+// Endpoints:
+//   GET  /            HTML page with the current message + form
+//   POST /update      { message, _csrf } — overwrites the message
+//   POST /login       one-shot cookie mint (no auth in the demo)
+//
+// Try:
+//   ./mere -w examples/http_csrf_demo.mere > /tmp/csd.wat
+//   wat2wasm --enable-tail-call /tmp/csd.wat -o /tmp/csd.wasm
+//   node scripts/run_http_server.js /tmp/csd.wasm
+//   curl -s -c cookies -b cookies -X POST http://localhost:8080/login
+//   TOK=$(curl -s -b cookies http://localhost:8080/ | grep -oE 'value="[^"]+"' | head -1 | cut -d\" -f2)
+//   curl -s -b cookies -X POST \
+//     --data-urlencode "message=hello csrf" \
+//     --data-urlencode "_csrf=$TOK" \
+//     http://localhost:8080/update
+//   # Wrong token → 403; correct token → 303 → refreshed message.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+
+import "../contrib/http/query.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/cookie.mere";
+import "../contrib/http/session.mere";
+import "../contrib/http/csrf.mere";
+import "../contrib/http/escape.mere";
+
+let sessions = session_new_store () in
+let csrf     = csrf_new_store () in
+
+// Current message lives in a single-slot vec so handlers can mutate
+// it. Starts with a placeholder.
+let msg_cell = vec_new () in
+let _ = vec_push msg_cell "hello, world" in
+
+let form_field = fn (name: str) ->
+  query_get (parse_query (http_current_body ())) name
+  ;
+
+// Mint an anonymous session on demand. Real apps do this in a login
+// handler; here it's a no-auth stub so the demo curl script is short.
+let login_h = fn (req: str) ->
+  let _ = session_login sessions "anon" in
+  let _ = http_set_status 200 in
+  let _ = http_set_content_type "text/plain" in
+  "ok — session cookie set\n" ;
+
+let home_h = fn (req: str) ->
+  let sid = session_id (http_get_header "Cookie") in
+  let tok = csrf_token_for csrf sid in
+  let cur = vec_get msg_cell 0 in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html>\n<meta charset=utf-8><title>csrf demo</title>" ++
+  "<h1>csrf demo</h1>" ++
+  "<p>Current message: <b>" ++ html_escape cur ++ "</b></p>" ++
+  (if str_eq sid "" then
+     "<p>No session yet. <code>curl -X POST /login -c cookies</code> then reload.</p>"
+   else
+     "<form method=POST action=/update>" ++
+     csrf_hidden_input tok ++
+     "<input name=message required>" ++
+     "<button>update</button></form>") ++
+  "\n" ;
+
+let update_h = fn (req: str) ->
+  let sid = session_id (http_get_header "Cookie") in
+  let submitted = form_field "_csrf" in
+  if not (csrf_validate csrf sid submitted) then
+    let _ = http_set_status 403 in
+    let _ = http_set_content_type "text/plain" in
+    "CSRF token missing or invalid\n"
+  else
+    let m = form_field "message" in
+    let _ = vec_set msg_cell 0 m in
+    let _ = http_set_header "Location" "/" in
+    let _ = http_set_status 303 in
+    "updated\n"
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found\n" ;
+
+let routes =
+  Cons (route "GET"  "/"       home_h,
+  Cons (route "POST" "/login"  login_h,
+  Cons (route "POST" "/update" update_h,
+  Nil))) in
+
+let handle = router routes not_found in
+let _ = print "csrf demo on :8080" in
+let _ = http_serve 8080 handle in
+0

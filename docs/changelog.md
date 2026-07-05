@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/csrf`: synchronizer-token CSRF middleware
+
+Sits on top of `contrib/http/session`: the cookie session id is
+the store key, the token is a fresh 16-hex random via
+`gen_request_id ()` minted on first `csrf_token_for` per session
+and re-used for the lifetime of the session.
+
+Public API:
+
+- `csrf_new_store ()`
+- `csrf_token_for store session_id`      — idempotent per session
+- `csrf_validate  store session_id tok`  — bool
+- `csrf_hidden_input token`              — `<input type="hidden" name="_csrf" value="…">` snippet
+
+Design choice: kept as primitives rather than a `with_csrf`
+middleware because content-type detection (form vs JSON) and body
+re-parsing are handler-specific concerns; handlers already read
+the body via `form_field` / `body_field`, so passing the value
+into `csrf_validate` is a one-liner where the caller already is.
+
+Demo `examples/http_csrf_demo.mere` — a mutable-message form.
+Verified: missing `_csrf` → 403, wrong token → 403, correct token →
+303 redirect with the message actually persisting.
+
 ## 2026-07-05 — playground: `wordcount` demo + build tail-call flag
 
 New live-docs demo — a client-side text stats tool: char / word /
