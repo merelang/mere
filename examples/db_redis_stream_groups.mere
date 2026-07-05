@@ -1,0 +1,99 @@
+// examples/db_redis_stream_groups.mere — Redis Streams consumer groups.
+//
+// XGROUP + XREADGROUP + XACK + XPENDING end-to-end. Producer appends
+// 4 jobs to a stream; two "workers" in the same consumer group each
+// grab a subset via XREADGROUP `>` (un-delivered), ack their halves,
+// and the pending count drops to 0.
+//
+// This is the standard "Kafka consumer group" pattern:
+//
+//   - N workers form one group.
+//   - Each XREADGROUP returns entries the group hasn't handed out
+//     yet, load-balanced across workers.
+//   - Server tracks in-flight entries per consumer in the PEL
+//     (Pending Entries List). XACK removes them.
+//   - If a worker crashes, its PEL entries can be reclaimed by
+//     another worker via XCLAIM (deferred here).
+//
+// Setup:
+//   docker run -d --name mere-redis-sg -p 15607:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_stream_groups.mere > /tmp/dbsg.wat
+//   wat2wasm --enable-tail-call /tmp/dbsg.wat -o /tmp/dbsg.wasm
+//   node scripts/run_wasm.js /tmp/dbsg.wasm
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_stream.mere";
+
+let show_pairs = fn (ps: (str * str) list) ->
+  let rec walk = fn (xs) -> fn (first: bool) ->
+    match xs with
+    | Nil -> ""
+    | Cons ((k, v), rest) ->
+      (if first then "" else ", ") ++ k ++ "=" ++ v ++ walk rest false in
+  "\{" ++ walk ps true ++ "}"
+  ;
+
+// Extract just the ids from a fetched batch (needed for XACK).
+let rec ids_of = fn (es: (str * (str * str) list) list) ->
+  match es with
+  | Nil -> Nil
+  | Cons ((id, _), rest) -> Cons (id, ids_of rest)
+  ;
+
+let rec show_entries = fn (label: str) -> fn (es: (str * (str * str) list) list) ->
+  match es with
+  | Nil -> ()
+  | Cons ((id, pairs), rest) ->
+    let _ = print ("  " ++ label ++ " got " ++ id ++ " " ++ show_pairs pairs) in
+    show_entries label rest
+  ;
+
+let fd = redis_connect "127.0.0.1" 15607 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  // Clean slate — DEL removes both the stream and its group state.
+  let _ = redis_command fd (Cons ("DEL", Cons ("jobs", Nil))) in
+
+  // Group creation with MKSTREAM: works even before the first XADD.
+  let ok = stream_group_create fd "jobs" "workers" "0" in
+  let _ = print ("XGROUP CREATE jobs workers 0 MKSTREAM: "
+              ++ (if ok then "OK" else "already exists")) in
+
+  // Producer: 4 jobs.
+  let _ = stream_add fd "jobs" (Cons (("op", "resize"), Cons (("id", "1"), Nil))) in
+  let _ = stream_add fd "jobs" (Cons (("op", "resize"), Cons (("id", "2"), Nil))) in
+  let _ = stream_add fd "jobs" (Cons (("op", "email"),  Cons (("id", "3"), Nil))) in
+  let _ = stream_add fd "jobs" (Cons (("op", "email"),  Cons (("id", "4"), Nil))) in
+  let _ = print ("XLEN jobs = " ++ show (stream_len fd "jobs")) in
+
+  // Worker A takes 2, worker B takes 2 — since both share the group,
+  // each XREADGROUP sees only entries the OTHER worker hasn't grabbed.
+  let batch_a = stream_group_read fd "jobs" "workers" "worker-A" 2 in
+  let _ = show_entries "A" batch_a in
+  let batch_b = stream_group_read fd "jobs" "workers" "worker-B" 2 in
+  let _ = show_entries "B" batch_b in
+
+  // Before ACK: PEL holds 4 in-flight.
+  let _ = print ("XPENDING before ACK: " ++ show (stream_pending_len fd "jobs" "workers")) in
+
+  // Worker A acks its half.
+  let acked_a = stream_ack fd "jobs" "workers" (ids_of batch_a) in
+  let _ = print ("A acked: " ++ show acked_a
+              ++ ", XPENDING: " ++ show (stream_pending_len fd "jobs" "workers")) in
+
+  // Worker B acks its half.
+  let acked_b = stream_ack fd "jobs" "workers" (ids_of batch_b) in
+  let _ = print ("B acked: " ++ show acked_b
+              ++ ", XPENDING: " ++ show (stream_pending_len fd "jobs" "workers")) in
+
+  // No un-delivered entries left → XREADGROUP `>` returns nothing.
+  let batch_c = stream_group_read fd "jobs" "workers" "worker-A" 10 in
+  let _ = match batch_c with
+          | Nil -> print "next XREADGROUP: (empty — group drained)"
+          | _   -> show_entries "A" batch_c in
+
+  let _ = redis_close fd in
+  ()
