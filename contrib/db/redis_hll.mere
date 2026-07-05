@@ -1,0 +1,56 @@
+// contrib/db/redis_hll.mere — HyperLogLog cardinality estimators.
+//
+// Redis' `PF*` family gives you an approximate distinct-counter with
+// fixed 12 KiB per key regardless of true cardinality, at the cost
+// of ~0.81 % standard error. Great for things like "unique visitors
+// per day", "distinct URLs shortened", "unique IPs seen this hour"
+// — anything where the exact count doesn't matter but the memory
+// budget for a real Set would balloon.
+//
+// Wire ergonomics only — Redis does all the heavy lifting. Thin
+// wrappers on top of `contrib/db/redis.mere`'s command primitives.
+//
+// Public API:
+//
+//   hll_add   fd key values      -> int    (1 if estimate grew, else 0; -1 on error)
+//   hll_count fd keys            -> int    (approx cardinality, union across keys)
+//   hll_merge fd dest srcs       -> bool   (server returned +OK)
+//
+// `values` and `srcs` are `str list` — the caller passes 1..N
+// elements per call. For the single-value case just wrap:
+//
+//   let _ = hll_add fd "visitors" (Cons ("alice", Nil)) in ...
+
+import "redis.mere";
+
+// PFADD accepts N arguments; the reply is 1 if the internal
+// registers changed (i.e. at least one element was previously
+// unseen) or 0 if all were already there. On any parse issue we
+// return -1 so callers can distinguish it from the 0/1 signal.
+let hll_add = fn (fd: int) -> fn (key: str) -> fn (values: str list) ->
+  let args = Cons ("PFADD", Cons (key, values)) in
+  match redis_command fd args with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+// PFCOUNT takes 1..N keys. With a single key it's the approximate
+// cardinality of that key; with multiple keys, the approximate
+// cardinality of the UNION (Redis does the merge server-side into
+// a temporary HLL). -1 on error.
+let hll_count = fn (fd: int) -> fn (keys: str list) ->
+  let args = Cons ("PFCOUNT", keys) in
+  match redis_command fd args with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+// PFMERGE dest src1 src2 ... — merges the src HLLs into `dest`
+// (creating dest if it doesn't exist). Idempotent. Returns true on
+// the standard `+OK` reply.
+let hll_merge = fn (fd: int) -> fn (dest: str) -> fn (srcs: str list) ->
+  let args = Cons ("PFMERGE", Cons (dest, srcs)) in
+  match redis_command fd args with
+  | RRStr s -> str_eq s "OK"
+  | _ -> false
+  ;

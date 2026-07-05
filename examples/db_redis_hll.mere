@@ -1,0 +1,62 @@
+// examples/db_redis_hll.mere — approximate distinct-counting via
+// Redis HyperLogLog (PFADD / PFCOUNT / PFMERGE).
+//
+// Simulates two "shards" (e.g. two app instances) each with their
+// own visitor stream. Adds overlapping-but-not-identical users to
+// each shard, then merges into a global HLL and checks the union
+// cardinality is close to the true distinct-user count.
+//
+// Setup:
+//   docker run -d --name mere-redis-hll -p 15605:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_hll.mere > /tmp/dbhll.wat
+//   wat2wasm --enable-tail-call /tmp/dbhll.wat -o /tmp/dbhll.wasm
+//   node scripts/run_wasm.js /tmp/dbhll.wasm
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_hll.mere";
+
+let fd = redis_connect "127.0.0.1" 15605 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  // Start clean.
+  let _ = redis_command fd
+    (Cons ("DEL",
+     Cons ("visitors:shard-a",
+     Cons ("visitors:shard-b",
+     Cons ("visitors:total", Nil))))) in
+
+  // Shard A: 3 distinct users, one repeated. First PFADD returns 1
+  // (register changed), second returns 0 (already seen).
+  let r1 = hll_add fd "visitors:shard-a" (Cons ("alice", Cons ("bob", Cons ("carol", Nil)))) in
+  let r2 = hll_add fd "visitors:shard-a" (Cons ("alice", Nil)) in
+  let _ = print ("shard-a PFADD returns: " ++ show r1 ++ ", " ++ show r2) in
+  let ca = hll_count fd (Cons ("visitors:shard-a", Nil)) in
+  let _ = print ("shard-a distinct count: " ++ show ca) in
+
+  // Shard B: 3 distinct users, 1 overlaps with shard-a (bob).
+  let _ = hll_add fd "visitors:shard-b"
+            (Cons ("bob", Cons ("dave", Cons ("erin", Nil)))) in
+  let cb = hll_count fd (Cons ("visitors:shard-b", Nil)) in
+  let _ = print ("shard-b distinct count: " ++ show cb) in
+
+  // Union via PFCOUNT with two keys (no server-side merge into a
+  // named key — just returns the union cardinality).
+  let cu = hll_count fd (Cons ("visitors:shard-a",
+                        Cons ("visitors:shard-b", Nil))) in
+  let _ = print ("union count (PFCOUNT a b): " ++ show cu
+              ++ " (true distinct = 5)") in
+
+  // Same union but materialised into a third key via PFMERGE.
+  // Handy when the same "total" HLL is queried repeatedly.
+  let ok = hll_merge fd "visitors:total"
+             (Cons ("visitors:shard-a",
+              Cons ("visitors:shard-b", Nil))) in
+  let _ = print ("PFMERGE ok: " ++ (if ok then "yes" else "no")) in
+  let ct = hll_count fd (Cons ("visitors:total", Nil)) in
+  let _ = print ("visitors:total count: " ++ show ct) in
+
+  let _ = redis_close fd in
+  ()
