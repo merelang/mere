@@ -1,0 +1,13 @@
+# wrangler.toml — CF Worker config for the Mere package registry v0.1.
+#
+# v0.1 has no KV, no bindings other than the bundled wasm + packages.json.
+# v0.2 will add a KV namespace for the GitHub tag cache.
+
+name = "mere-registry"
+main = "worker.js"
+compatibility_date = "2026-07-05"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true

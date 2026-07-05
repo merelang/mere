@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — Cloudflare Worker: package registry v0.1 (JSON API)
+
+Second CF Worker sample from the direction paper. Read-only JSON API
+over a static-ish bundled package list — the foundation for
+`mere install` speaking a normalized endpoint instead of hitting
+GitHub directly.
+
+`examples/cloudflare-worker-registry/`:
+
+- `main.mere` — routes + response builders + naive JSON scan/escape
+- `worker.js` — CF entry, exposes bundled `packages.json` to Mere via
+  a `cf_registry_data ()` extern
+- `packages.json` — v0.1's source of truth (3 sample entries:
+  mere-http / mere-db / mere-json). To add a package: edit + rebuild
+- `wrangler.toml`, `build.sh`, `local_test.js`, `README.md`
+
+Endpoints:
+
+- `GET /` landing HTML
+- `GET /pkg` whole registry
+- `GET /pkg/:name` one package's metadata
+- `GET /pkg/:name/latest` latest version
+- `GET /pkg/:name/:version` specific version
+
+Verified via `node local_test.js` — **21 assertions across 8 request
+scenarios**, all pass:
+- Landing 200 + HTML
+- `/pkg` lists all 3 packages
+- Package metadata has owner / latest / versions
+- `/pkg/mere-http/latest` returns injected `{name, version, tarball, ...}`
+- Specific version endpoint works
+- Unknown package → 404
+- Unknown version → 404
+- POST → 404 (only GET supported)
+
+Two landmines fixed during shipping:
+- **Balanced-brace parser bug**: earlier `while` loop set `i = n` to
+  break out but then the "start >= n → empty" check false-negatived
+  every extraction. Restructured with an explicit `done` flag.
+- **Unescaped `\n` in 404 body**: `resp_not_found` splices `msg` into
+  response body JSON without escaping. Added a `json_esc` pass.
+
+Wasm size: 11 KB. v0.2 roadmap in the README (GitHub tag fetching,
+KV cache, publish endpoint, `mere install` CLI).
+
 ## 2026-07-05 — Cloudflare Worker: playground snippet share (KV-backed)
 
 Turned the CF Worker template from "hello, method+path echoed" into

@@ -1,0 +1,38 @@
+{
+  "mere-http": {
+    "owner": "merelang",
+    "description": "HTTP server + client + middleware (router, session, csrf, basic_auth, cache, metrics, sse, websocket).",
+    "repo": "https://github.com/merelang/mere-http",
+    "versions": {
+      "0.1.0": {
+        "tarball": "https://github.com/merelang/mere-http/archive/refs/tags/v0.1.0.tar.gz",
+        "published_at": "2026-07-05T12:00:00Z"
+      }
+    },
+    "latest": "0.1.0"
+  },
+  "mere-db": {
+    "owner": "merelang",
+    "description": "Database drivers — Postgres, MySQL, Redis (pubsub, queue, stream, hll, lock, ratelimit).",
+    "repo": "https://github.com/merelang/mere-db",
+    "versions": {
+      "0.1.0": {
+        "tarball": "https://github.com/merelang/mere-db/archive/refs/tags/v0.1.0.tar.gz",
+        "published_at": "2026-07-05T12:00:00Z"
+      }
+    },
+    "latest": "0.1.0"
+  },
+  "mere-json": {
+    "owner": "merelang",
+    "description": "JSON parser + writer for Mere.",
+    "repo": "https://github.com/merelang/mere-json",
+    "versions": {
+      "0.1.0": {
+        "tarball": "https://github.com/merelang/mere-json/archive/refs/tags/v0.1.0.tar.gz",
+        "published_at": "2026-07-05T12:00:00Z"
+      }
+    },
+    "latest": "0.1.0"
+  }
+}

@@ -1,0 +1,197 @@
+// examples/cloudflare-worker-registry/main.mere — Mere package
+// registry v0.1. Read-only JSON API over a static-ish package list
+// bundled with the Worker.
+//
+// Routes:
+//
+//   GET  /                       landing HTML
+//   GET  /pkg                    list all packages (JSON)
+//   GET  /pkg/:name              one package's metadata
+//   GET  /pkg/:name/latest       shortcut for the latest version
+//   GET  /pkg/:name/:version     specific version's metadata
+//
+// The package data is passed in as JSON via `cf_registry_data ()`
+// (the JS glue loads packages.json at build time and exposes it).
+// v0.1 has no dynamic GitHub fetching, no caching, no publish flow —
+// intentionally: the API SHAPE is the deliverable, dynamic behaviour
+// lands in v0.2 with the KV cache + GitHub tags integration.
+
+extern fn cf_on_fetch: (str -> str) -> unit;
+extern fn cf_registry_data: unit -> str;
+
+// Naive JSON string-field extractor (same as snippet-share).
+let json_str_field = fn (blob: str) -> fn (field: str) ->
+  let needle = "\"" ++ field ++ "\":\"" in
+  let idx = str_index_of blob needle in
+  if idx < 0 then ""
+  else
+    let after = substring blob (idx + str_len needle) (str_len blob) in
+    let close = str_index_of after "\"" in
+    if close < 0 then "" else substring after 0 close
+  ;
+
+// JSON-string escape for user-supplied text (mostly for error messages
+// that we splice into the response body JSON).
+let rec _json_esc_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else if str_eq c "\r" then let _ = strbuf_push buf "\\r" in 0
+            else if str_eq c "\t" then let _ = strbuf_push buf "\\t" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _json_esc_walk s buf (i + 1) n
+  ;
+let json_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _json_esc_walk s buf 0 (str_len s)
+  ;
+
+// Extract the JSON blob for the object under a given top-level key.
+// Given `{"mere-http":{...},"mere-db":{...}}` and key `"mere-http"`,
+// returns `{...}` — the raw JSON of that object. Naive balanced-brace
+// scan; assumes JSON.stringify default (no whitespace) input, which
+// is the shape the Worker glue emits.
+let extract_object_at = fn (blob: str) -> fn (key: str) ->
+  let needle = "\"" ++ key ++ "\":" in
+  let idx = str_index_of blob needle in
+  if idx < 0 then ""
+  else
+    let start = idx + str_len needle in
+    let n = str_len blob in
+    if start >= n then ""
+    else if not (str_eq (char_at blob start) "\{") then ""
+    else
+      let st = map_new () in
+      let _ = map_set st "i" start in
+      let _ = map_set st "depth" 0 in
+      let _ = map_set st "end" 0 in
+      let _ = while map_get st "i" < n && map_get st "end" == 0 do
+        let i = map_get st "i" in
+        let c = char_at blob i in
+        let _ = if str_eq c "\{" then
+                  map_set st "depth" (map_get st "depth" + 1)
+                else if str_eq c "}" then
+                  let _ = map_set st "depth" (map_get st "depth" - 1) in
+                  if map_get st "depth" == 0 then
+                    map_set st "end" (i + 1)
+                  else ()
+                else () in
+        map_set st "i" (i + 1) in
+      let e = map_get st "end" in
+      if e == 0 then "" else substring blob start e
+  ;
+
+// Response builders.
+
+let resp_landing = fn (u: unit) ->
+  "\{\"status\":200," ++
+  "\"headers\":\{\"content-type\":\"text/html; charset=utf-8\"}," ++
+  "\"body\":\"" ++
+    "<!doctype html><title>mere package registry</title>" ++
+    "<h1>mere package registry (v0.1)</h1>" ++
+    "<p>Read-only JSON API. Endpoints:</p>" ++
+    "<ul>" ++
+    "<li><a href=/pkg>/pkg</a> &mdash; list all packages</li>" ++
+    "<li>/pkg/&lt;name&gt; &mdash; one package&#39;s metadata</li>" ++
+    "<li>/pkg/&lt;name&gt;/latest &mdash; latest version metadata</li>" ++
+    "<li>/pkg/&lt;name&gt;/&lt;version&gt; &mdash; specific version</li>" ++
+    "</ul>" ++
+  "\"}"
+  ;
+
+let resp_all_packages = fn (data: str) ->
+  "\{\"status\":200," ++
+  "\"headers\":\{\"content-type\":\"application/json\"}," ++
+  "\"body_raw\":true," ++
+  "\"body\":" ++ data ++ "}"
+  ;
+
+let resp_package = fn (obj: str) ->
+  "\{\"status\":200," ++
+  "\"headers\":\{\"content-type\":\"application/json\"}," ++
+  "\"body_raw\":true," ++
+  "\"body\":" ++ obj ++ "}"
+  ;
+
+let resp_not_found = fn (msg: str) ->
+  "\{\"status\":404," ++
+  "\"headers\":\{\"content-type\":\"text/plain\"}," ++
+  "\"body\":\"" ++ json_esc msg ++ "\"}"
+  ;
+
+// Path parsing — split `/pkg/foo/latest` into segments.
+let rec _split_seg = fn (s: str) -> fn (i: int) -> fn (n: int)
+                  -> fn (start: int) -> fn (acc: str list) ->
+  if i >= n then
+    if i > start then list_append acc (Cons (substring s start i, Nil)) else acc
+  else if str_eq (char_at s i) "/" then
+    let piece = if i > start then Cons (substring s start i, Nil) else Nil in
+    _split_seg s (i + 1) n (i + 1) (list_append acc piece)
+  else
+    _split_seg s (i + 1) n start acc
+  ;
+
+let path_segments = fn (p: str) ->
+  let start = if str_len p > 0 && str_eq (char_at p 0) "/" then 1 else 0 in
+  _split_seg p start (str_len p) start Nil
+  ;
+
+let handler = fn (req_json: str) ->
+  let method = json_str_field req_json "method" in
+  let path = json_str_field req_json "path" in
+  let data = cf_registry_data () in
+
+  if not (str_eq method "GET") then
+    resp_not_found "only GET supported\n"
+  else if str_eq path "/" then
+    resp_landing ()
+  else
+    let segs = path_segments path in
+    match segs with
+    | Cons ("pkg", Nil) ->
+      // /pkg → whole registry
+      resp_all_packages data
+    | Cons ("pkg", Cons (name, Nil)) ->
+      let obj = extract_object_at data name in
+      if str_eq obj "" then resp_not_found ("no such package: " ++ name ++ "\n")
+      else resp_package obj
+    | Cons ("pkg", Cons (name, Cons ("latest", Nil))) ->
+      let obj = extract_object_at data name in
+      if str_eq obj "" then resp_not_found ("no such package: " ++ name ++ "\n")
+      else
+        let latest = json_str_field obj "latest" in
+        if str_eq latest "" then resp_not_found "no latest version\n"
+        else
+          // Look up the version's inline object inside `obj.versions.<latest>`.
+          let versions = extract_object_at obj "versions" in
+          let ver_obj = extract_object_at versions latest in
+          if str_eq ver_obj "" then resp_not_found "version metadata missing\n"
+          else
+            // Splice `{"name":..., "version":..., ...ver_obj_body}` — but
+            // ver_obj already starts with `{` and ends with `}`, so we
+            // just inject name + version fields at the front.
+            let injected =
+              "\{\"name\":\"" ++ name ++ "\",\"version\":\"" ++ latest
+              ++ "\"," ++ substring ver_obj 1 (str_len ver_obj) in
+            resp_package injected
+    | Cons ("pkg", Cons (name, Cons (version, Nil))) ->
+      let obj = extract_object_at data name in
+      if str_eq obj "" then resp_not_found ("no such package: " ++ name ++ "\n")
+      else
+        let versions = extract_object_at obj "versions" in
+        let ver_obj = extract_object_at versions version in
+        if str_eq ver_obj "" then
+          resp_not_found ("no such version: " ++ name ++ "@" ++ version ++ "\n")
+        else
+          let injected =
+            "\{\"name\":\"" ++ name ++ "\",\"version\":\"" ++ version
+            ++ "\"," ++ substring ver_obj 1 (str_len ver_obj) in
+          resp_package injected
+    | _ -> resp_not_found ("unknown path: " ++ path ++ "\n")
+  ;
+
+let _ = cf_on_fetch handler in
+0
