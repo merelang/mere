@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `examples/http_admin_dash`: integration dogfood
+
+One small admin console exercises six of the modules shipped over
+the last day in a single mere file (~200 lines):
+
+- `contrib/http/router`     — `route_prefix "/admin"` + exact routes
+- `contrib/http/session`    — cookie sessions (random 16-hex ids)
+- `contrib/http/csrf`       — synchronizer-token on the "run job" POST
+- `contrib/http/basic_auth` — Prometheus scrape gate on `/metrics`
+- `contrib/http/metrics`    — `/metrics` + `with_metrics` middleware
+- `contrib/http/cache`      — `cache_no_store` on admin pages
+- `contrib/db/redis_lock`   — "only one instance runs the job" mutex
+
+Feature: press the dashboard's "run job" button. The server acquires
+a Redis lock, sleeps 500 ms (simulated work), releases. A second
+instance clicking during the sleep window hits `redis_lock_acquire`
+→ `None` and returns 409 `"contended"`.
+
+Verified multi-instance end-to-end (two processes on `:8080` +
+`:8081` sharing one Redis at :15650):
+
+- Login flow: admin/adminpw → session cookie → dashboard 200 with
+  a CSRF token in the form's hidden input.
+- Concurrent kick: instance A returns 200 `"job ran successfully
+  (held lock for 500 ms)"`, instance B returns 409 `"contended:
+  another instance is running the job"`.
+- CSRF check: POST without the token → 403.
+- `/metrics`: without Basic Auth → 401, `-u scraper:s3cret` → 200
+  with `jobs_run_total 1` in the scrape body.
+
+The demo also documents the multi-instance run recipe in the
+header comments so users can reproduce the race locally with two
+`PORT=…` invocations against the same Redis.
+
 ## 2026-07-05 — `contrib/db/redis_lock`: distributed mutex + `gen_request_id` shared
 
 Standard `SET key <token> NX PX <ttl_ms>` acquire with compare-and-
