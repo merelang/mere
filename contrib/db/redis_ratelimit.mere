@@ -1,0 +1,74 @@
+// contrib/db/redis_ratelimit.mere — distributed fixed-window rate limiter.
+//
+// Companion of `contrib/http/ratelimit` (which is in-process only —
+// two Mere HTTP instances would each have their own counter, so a
+// caller can circumvent the limit by rotating through instances).
+// This version puts the counter in Redis, so N instances share one
+// budget per key.
+//
+// Standard `INCR` + `EXPIRE` pattern. Cheap (2 commands per bump on
+// window boundary, 1 elsewhere). Not sliding-window — a burst right
+// at the window edge can spike to 2 x max. For a bursty-tolerant
+// leaky-bucket, layer on top or use a token-bucket module (deferred).
+//
+// Public API:
+//
+//   redis_rate_over_limit fd key window_sec max -> bool
+//     Increments the counter for `key` in the current fixed window
+//     (window aligns to unix-time / window_sec buckets). Returns
+//     `true` if the incremented count now exceeds `max` (caller
+//     should reject the request), `false` if it's within budget.
+//
+//   redis_rate_count fd key window_sec -> int
+//     Peek — returns the current count without incrementing. Useful
+//     for exposing `X-RateLimit-Remaining` headers or metrics.
+//
+// Wire semantics:
+//   - `unix_time` and `redis.mere`'s `redis_command` must be in scope.
+//   - Bucket key is `<key>:<epoch/window>`, TTL = window_sec at first
+//     INCR of the bucket. Rolled buckets self-expire on the server.
+//   - -1 on any error (network / non-int reply); caller should treat
+//     as "block" or "allow" depending on the fail-open / fail-closed
+//     policy (documented per caller).
+
+import "redis.mere";
+
+extern fn unix_time: unit -> int;
+
+// Format the per-window bucket key deterministically. epoch / window
+// gives an integer bucket id; all instances at the same wall-clock
+// second (within the same window_sec bucket) share the counter.
+let _rl_bucket_key = fn (key: str) -> fn (window_sec: int) ->
+  key ++ ":" ++ show (unix_time () / window_sec)
+  ;
+
+// Increment the current window's counter. If this call was the FIRST
+// hit of the bucket (INCR returned 1), attach a TTL so the bucket
+// self-cleans on window roll. Returns the post-increment count.
+let _rl_bump = fn (fd: int) -> fn (key: str) -> fn (window_sec: int) ->
+  let win_key = _rl_bucket_key key window_sec in
+  match redis_command fd (Cons ("INCR", Cons (win_key, Nil))) with
+  | RRInt 1 ->
+    // First hit of this bucket — attach TTL. Ignore EXPIRE's OK reply.
+    let _ = redis_command fd
+              (Cons ("EXPIRE", Cons (win_key, Cons (show window_sec, Nil)))) in
+    1
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+let redis_rate_over_limit = fn (fd: int) -> fn (key: str)
+                          -> fn (window_sec: int) -> fn (max: int) ->
+  let n = _rl_bump fd key window_sec in
+  if n < 0 then false        // fail-open on network error
+  else n > max
+  ;
+
+let redis_rate_count = fn (fd: int) -> fn (key: str) -> fn (window_sec: int) ->
+  let win_key = _rl_bucket_key key window_sec in
+  match redis_command fd (Cons ("GET", Cons (win_key, Nil))) with
+  | RRBulk None -> 0
+  | RRBulk (Some (s, _)) -> int_of_str s
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
