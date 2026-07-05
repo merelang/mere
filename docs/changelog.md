@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/db/redis_lock`: distributed mutex + `gen_request_id` shared
+
+Standard `SET key <token> NX PX <ttl_ms>` acquire with compare-and-
+delete release via Lua EVAL. Enough for "at most one worker across N
+processes should be running this job right now"; not enough for
+critical-section-with-consequences workloads (RedLock, CP consensus).
+
+- `redis_lock_acquire fd key ttl_ms  -> str option`
+  Some fencing token on success, None on contention.
+- `redis_lock_release fd key token   -> bool`
+  Compare-and-delete Lua: only deletes if the key's current value
+  matches the caller's token. Prevents "A's TTL expires, B
+  acquires, A's stale Release blows away B's lock" bugs.
+
+Also hoisted `gen_request_id` (16-hex random) from
+`run_http_server.js` into `scripts/pg_env.js` so CLI Mere programs
+under `run_wasm.js` can use it too — the lock's fencing tokens
+were the immediate trigger, but any test harness minting session
+ids or correlation ids benefits. All 7 existing consumers
+recompile unchanged.
+
+Demo `examples/db_redis_lock.mere` walks the six-step race:
+- A acquires (fresh token)
+- B tries → None (contention)
+- A releases → true (CAS matches)
+- C acquires (fresh token)
+- Impostor tries release with wrong token → false, lock intact
+- E tries → None (C still holds), C releases → true
+
 ## 2026-07-05 — `contrib/http/cache`: Cache-Control postures + ETag / 304
 
 Rounds out the middleware family (session / basic_auth / csrf /

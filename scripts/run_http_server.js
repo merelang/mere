@@ -229,14 +229,9 @@ const wasmPath = process.argv[2];
         .update(msg).digest("base64url");
       return writeStr(b);
     },
-    // gen_request_id : unit -> str. Returns a fresh 16-char lowercase
-    // hex string (8 random bytes from Node's crypto.randomBytes),
-    // suitable for a per-request correlation ID. Not a UUID — no
-    // format markers — but sufficient entropy for log stitching.
-    gen_request_id: () => {
-      const hex = require("crypto").randomBytes(8).toString("hex");
-      return writeStr(hex);
-    },
+    // gen_request_id — now provided by pg_env (shared with run_wasm.js
+    // so CLI Mere programs that use it, e.g. contrib/db/redis_lock's
+    // fencing tokens, link cleanly under either runner).
     // Outbound HTTP externs (http_fetch, http_fetch_status, and the
     // header / timeout controls) are provided by http_fetch_env so
     // run_wasm.js can offer the same capability. See its module
