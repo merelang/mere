@@ -14,14 +14,13 @@
 // Usage:
 //   ./mere -w examples/http_client_auth.mere > /tmp/hca.wat
 //   wat2wasm --enable-tail-call /tmp/hca.wat -o /tmp/hca.wasm
-//   node scripts/run_http_server.js /tmp/hca.wasm
+//   node scripts/run_wasm.js       /tmp/hca.wasm    # CLI runner
+//   # or
+//   node scripts/run_http_server.js /tmp/hca.wasm    # HTTP server runner
 //
-// The wasm doesn't actually start a server here — it just exercises
-// the outbound client and exits. `run_http_server.js` is still the
-// right runner because it's the one that provides the http_fetch
-// externs; `run_wasm.js` doesn't.
-
-extern fn http_serve: int -> (str -> str) -> unit;
+// This demo is a pure outbound-client exercise: no `http_serve`, no
+// long-lived process. Both runners provide the same http_fetch env
+// (via scripts/http_fetch_env.js) so either works.
 
 import "../contrib/http/client.mere";
 

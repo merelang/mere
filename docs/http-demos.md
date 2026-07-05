@@ -1,10 +1,11 @@
 # HTTP demos
 
-Twelve `examples/http_*.mere` servers — a tour of the web-app
-patterns you can build with the [`contrib/http`](https://github.com/merelang/mere/tree/main/contrib/http)
-stack. Each one is a single Mere file plus a small static HTML frontend.
+A tour of the web-app patterns you can build with the
+[`contrib/http`](https://github.com/merelang/mere/tree/main/contrib/http)
+stack. Each demo is one `examples/http_*.mere` file plus a small
+static HTML frontend.
 
-All twelve share the same build recipe:
+All demos share the same build recipe:
 
 ```sh
 ./_build/default/bin/mere.exe -w examples/<name>.mere > /tmp/<name>.wat
@@ -15,7 +16,40 @@ node scripts/run_http_server.js /tmp/<name>.wasm
 
 The Node runner (`scripts/run_http_server.js`) provides the extern
 imports (fs, crypto, http, curl). Every demo listens on port 8080,
-so run one at a time.
+so run one at a time. The outbound-only `http_client_auth` demo has
+no server component; it also runs cleanly under the plain
+`scripts/run_wasm.js` runner (they share the same `http_fetch` env).
+
+## The router API
+
+The routing table is a declarative `route_entry list` fed to
+`router routes not_found`. Three entry constructors:
+
+```mere
+route         "GET"  "/"            home_h                 // exact
+route_pattern "GET"  "/post/:slug"  post_h                 // :captures
+route_prefix  "/admin"              admin_subtable         // mount subtree
+```
+
+- **`route`** — exact-path entry. Handler is `str -> str` (raw req → body).
+- **`route_pattern`** — segments starting with `:` capture one URL
+  segment each. Handler is `str list -> str -> str` (captures in
+  source order, then req). Arity must match: `/post/:slug` matches
+  `/post/hello` but not `/post/hello/extra`.
+- **`route_prefix`** — nests a whole `route_entry list` under a URL
+  prefix. Inner entries are declared relative to the mount point
+  (`"/"` = mount root, `"/login"` = `<prefix>/login`). If the inner
+  table has no match, dispatch falls through to the next outer entry.
+
+Query strings are stripped before matching (`/search?q=hi` matches
+`/search`), and the raw request line is still passed to handlers
+that need to peek at headers or the query.
+
+Full API + rationale in
+[`contrib/http/router.mere`](https://github.com/merelang/mere/blob/main/contrib/http/router.mere).
+The [`http_router_demo`](https://github.com/merelang/mere/blob/main/examples/http_router_demo.mere)
+example exercises all three variants (including two-capture
+`/user/:name/pet/:pet`).
 
 ## The catalog
 
@@ -25,7 +59,7 @@ so run one at a time.
 | [feed_reader](#feed-reader) | outbound HTTP + RSS/Atom parsing + per-user cache | 350 |
 | [webhook_receiver](#webhook-receiver) | HMAC-SHA256 signature verify + Slack forward | 250 |
 | [ci_dashboard](#ci-dashboard) | workflow_run event ingest + status aggregation | 240 |
-| [link_shortener](#link-shortener) | dynamic route + 302 redirect + hit counter | 260 |
+| [link_shortener](#link-shortener) | dynamic route via `not_found` (regex-validated code) | 260 |
 | [mini_blog](#mini-blog) | markdown render + RSS 2.0 producer (round-trip with feed_reader) | 320 |
 | [wiki](#wiki) | anonymous-edit wiki + append-only revision history | 380 |
 | [chat](#chat) | Server-Sent Events broadcast + long-lived HTTP | 140 |
@@ -33,6 +67,8 @@ so run one at a time.
 | [file_upload](#file-upload) | multipart/form-data parser + byte-identical download | 260 |
 | [rest_notes](#rest-notes) | REST verbs (PUT/PATCH/DELETE) + ETag / If-Match concurrency | 300 |
 | [csv_export](#csv-export) | chunked Transfer-Encoding streaming | 110 |
+| [blog](https://github.com/merelang/mere/blob/main/examples/http_blog.mere) | markdown blog on Postgres — `route_prefix "/admin"` + `route_pattern "/post/:slug"` end-to-end | 560 |
+| [client_auth](https://github.com/merelang/mere/blob/main/examples/http_client_auth.mere) | outbound HTTP — `http_fetch_h`, Bearer auth, per-call timeout, response header read | 80 |
 
 ## todo_app
 
@@ -200,7 +236,7 @@ Source: [examples/http_csv_export.mere](https://github.com/merelang/mere/blob/ma
 
 Everything the demos import is under [`contrib/`](https://github.com/merelang/mere/tree/main/contrib):
 
-- `contrib/http/` — 16 modules including `router`, `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
+- `contrib/http/` — 16 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
 - `contrib/kv/` — log-structured KV + pipe-separated pack/unpack
 - `contrib/xml/`, `contrib/feed/`, `contrib/markdown/`, `contrib/json/` — parsers / renderers
 - `contrib/auth/jwt.mere` — HS256 sign / verify
