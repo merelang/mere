@@ -91,6 +91,18 @@ function attachStreamListeners(entry, socket) {
       cb();
     }
   });
+  // With allowHalfOpen: true, a peer FIN emits `end` but not `close`
+  // (we could still write). Reads waiting for more data would hang
+  // otherwise — mark the socket "read-closed" so pendingRead returns
+  // EOF now, and future reads short-circuit via entry.closed.
+  socket.on('end', () => {
+    entry.closed = true;
+    if (entry.pendingRead) {
+      const cb = entry.pendingRead;
+      entry.pendingRead = null;
+      cb();
+    }
+  });
   socket.on('timeout', () => {
     if (entry.pendingRead) {
       const cb = entry.pendingRead;

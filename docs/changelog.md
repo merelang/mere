@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `redis_pubsub_run_forever` + `sleep_ms` extern + tcp_worker `end`-event fix
+
+Three related changes to make a real-world reconnecting subscribe
+loop possible in pure Mere.
+
+**`redis_pubsub_run_forever host port sub timeout_ms retry_ms handler`**
+Opens its own sub fd, sends the `SUBSCRIBE` / `PSUBSCRIBE` commands
+from `sub`, dispatches messages via `handler`, and on `PSClosed`
+(or `redis_connect` failure) sleeps `retry_ms` then starts over.
+The handler receives `PSClosed` events too, so it can log / reset
+metrics / decide to bail (returning `false` from any invocation
+ends the loop cleanly). Non-draining `redis_pubsub_subscribe`
+variants are used so `PSSubscribed` events flow through the
+handler on every reconnect.
+
+Subscription state is captured in a new `PubsubSub` record —
+`{ channels; patterns }`.
+
+**`sleep_ms` extern** — synchronous millisecond sleep via
+`Atomics.wait` on a private `SharedArrayBuffer`. Blocks the whole
+Wasm frame, so an HTTP server MUST NOT call this inside a request
+handler. Added to both `run_wasm.js` and `run_http_server.js` (both
+had a no-op `sleep`).
+
+**tcp_worker.js `end`-event handler** — with `allowHalfOpen: true`,
+a peer FIN emitted `end` but not `close`, so a pending
+`tcp_read` hung indefinitely. Reproducible via `CLIENT KILL TYPE
+PUBSUB` on a subscribed connection. Added an `on('end', ...)`
+handler that marks the socket read-closed and wakes any pending
+read with EOF (`respond(0, 0)`), matching what the `close` branch
+already did.
+
+Demo `examples/db_redis_pubsub_reconnect.mere` stages the failure
+in one process: subscribe → publish 2 → 2 deliveries → send
+`CLIENT KILL TYPE PUBSUB` → sub fd closes → loop sleeps 500 ms →
+reconnects + resubscribes → publish 2 more → 2 deliveries → exit.
+
+Verified end-to-end against redis:7, plus the existing base pubsub
++ queue demos still work unchanged (regression check). 1838-test
+OCaml suite passes.
+
 ## 2026-07-05 — `contrib/db/redis_queue`: list-backed work queue
 
 Complements `redis_pubsub`. Pub/sub is broadcast-and-forget; work

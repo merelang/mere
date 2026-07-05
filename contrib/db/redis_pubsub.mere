@@ -199,3 +199,80 @@ let redis_pubsub_close = fn (c: PubsubClient) ->
   let _ = if c.pub_fd >= 0 then redis_close c.pub_fd else () in
   ()
   ;
+
+// ---- Auto-reconnect / auto-resubscribe --------------------------------
+//
+// `redis_pubsub_run` above exits on PSClosed. A production listener
+// wants to reconnect + resubscribe automatically instead. `PubsubSub`
+// captures the intended subscription state (which channels + patterns
+// to speak on the new fd), and `redis_pubsub_run_forever` drives the
+// loop.
+
+type PubsubSub = {
+  channels : str list,
+  patterns : str list,
+};
+
+// Send all subscribe / psubscribe commands from a fresh sub. Uses
+// the non-draining variants so the handler still sees each
+// PSSubscribed event on reconnect (useful for reset logic).
+let _rps_send_subscriptions = fn (fd: int) -> fn (sub: PubsubSub) ->
+  let _ = match sub.channels with
+          | Nil -> ()
+          | _ -> redis_pubsub_subscribe fd sub.channels in
+  let _ = match sub.patterns with
+          | Nil -> ()
+          | _ -> redis_pubsub_psubscribe fd sub.patterns in
+  ()
+  ;
+
+// Blocking read loop on one fd. Returns true if the handler wants
+// the outer reconnect loop to continue (dispatch after PSClosed
+// keeps polling), false to shut down cleanly.
+let rec _rps_run_until_close = fn (fd: int) -> fn (timeout_ms: int)
+                            -> fn (handler: pubsub_msg -> bool) ->
+  let m = redis_pubsub_next fd timeout_ms in
+  match m with
+  | PSClosed -> handler PSClosed
+  | _ ->
+    if handler m then _rps_run_until_close fd timeout_ms handler
+    else false
+  ;
+
+// Blocking, auto-reconnecting subscribe loop. Opens its own sub fd,
+// sends the SUBSCRIBE / PSUBSCRIBE commands, dispatches messages
+// via `handler`, and on PSClosed (or connect failure) sleeps
+// `retry_ms` and starts over. The handler receives PSClosed too so
+// the caller can log / decrement metrics / bail; returning `false`
+// from any handler invocation ends the loop cleanly.
+//
+// `timeout_ms` is the per-read timeout — 0 blocks forever (recommended
+// unless the caller has some external tick to run alongside the
+// listener). `retry_ms` is the backoff between reconnect attempts;
+// keep it > 100 ms so a persistent server outage doesn't hammer the
+// port.
+extern fn sleep_ms: int -> int;
+
+let rec redis_pubsub_run_forever = fn (host: str) -> fn (port: int)
+                                -> fn (sub: PubsubSub)
+                                -> fn (timeout_ms: int)
+                                -> fn (retry_ms: int)
+                                -> fn (handler: pubsub_msg -> bool) ->
+  let fd = redis_connect host port in
+  if fd < 0 then
+    // Connect failed. Surface it as PSClosed so the caller's handler
+    // gets a chance to log / bail; then sleep and retry unless the
+    // handler asked us to stop.
+    if handler PSClosed then
+      let _ = sleep_ms retry_ms in
+      redis_pubsub_run_forever host port sub timeout_ms retry_ms handler
+    else ()
+  else
+    let _ = _rps_send_subscriptions fd sub in
+    let keep_going = _rps_run_until_close fd timeout_ms handler in
+    let _ = tcp_close fd in
+    if keep_going then
+      let _ = sleep_ms retry_ms in
+      redis_pubsub_run_forever host port sub timeout_ms retry_ms handler
+    else ()
+  ;
