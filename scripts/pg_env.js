@@ -223,6 +223,17 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     base64_decode_to_hex: (ptr) => {
       return writeStr(Buffer.from(readCStr(ptr), 'base64').toString('hex'));
     },
+    // Standard-alphabet base64 (+/, padded) directly from/to utf8 strs.
+    // The `_hex` variants above accept raw-byte input via a hex-string
+    // detour so they can round-trip binary. This pair skips the hex
+    // step for the common case where input/output are utf8 text —
+    // e.g. HTTP Basic Auth's `dXNlcjpwYXNz` <-> `user:pass`.
+    base64_encode: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'utf8').toString('base64'));
+    },
+    base64_decode: (ptr) => {
+      return writeStr(Buffer.from(readCStr(ptr), 'base64').toString('utf8'));
+    },
     random_hex: (n) => {
       return writeStr(require('crypto').randomBytes(n | 0).toString('hex'));
     },

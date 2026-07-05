@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/basic_auth`: RFC 7617 Basic Auth middleware
+
+Small addition to gate internal endpoints — `/metrics` scraping,
+`/admin` dashboards, cron-triggered endpoints. Two entry points:
+
+- `with_basic_auth realm user pass handler` — single credential pair
+  (compile-time constant).
+- `with_basic_auth_pred realm predicate handler` — delegate the
+  credential check to a `(user, pass) -> bool` predicate. Useful
+  when the accepted set comes from an env var or in-process map.
+
+Missing / wrong credentials → 401 with `WWW-Authenticate: Basic
+realm="…", charset="UTF-8"`. Handler is NOT called on failure.
+Simple `str_eq` compare (not timing-safe) — documented as a gate,
+not a production auth layer.
+
+Added `base64_encode` / `base64_decode` externs to `scripts/pg_env.js`
+for utf8 <-> standard-alphabet base64 round-trip (the existing
+`_hex` variants take a hex detour that's overkill for Basic Auth's
+plain `user:pass` payload).
+
+`examples/http_metrics_demo.mere` gained a Basic-Auth-gated
+`/metrics` route as the first consumer. Verified: no-auth → 401,
+wrong creds → 401, `-u scraper:s3cret` → 200 with metrics body.
+Ungated routes (`/`, `/work`) still return 200.
+
 ## 2026-07-05 — Blog-engine papercuts: lexer + typer polish
 
 Two friction points surfaced during the http_blog dogfood get proper

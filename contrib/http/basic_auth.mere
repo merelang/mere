@@ -1,0 +1,83 @@
+// contrib/http/basic_auth.mere — RFC 7617 Basic Auth middleware.
+//
+// Wraps a handler so unauthenticated requests get a 401 challenge
+// (`WWW-Authenticate: Basic realm="…"`) and authenticated ones pass
+// through. Meant for internal endpoints where you just want a
+// password gate — `/metrics` scraping, `/admin` dashboards behind a
+// simple credential, cron-triggered endpoints.
+//
+// This is Basic Auth, not a session mechanism. Every request re-sends
+// the credentials, so use TLS for anything real. For end-user login
+// flows use `contrib/http/session` instead.
+//
+// Public API:
+//
+//   with_basic_auth realm user pass handler -> handler
+//     Single credential pair. Wraps `handler`; requests missing the
+//     Authorization header or presenting bad creds get a 401 + the
+//     challenge header and the inner handler is not called.
+//
+//   with_basic_auth_pred realm predicate handler -> handler
+//     Predicate variant: pass a fn `(user, pass) -> bool` that
+//     handles the credential check. Useful when the accepted user/pass
+//     set is not a compile-time constant (e.g. read from an env var
+//     or a small in-process map).
+//
+// Timing-safe compare is NOT applied — this is a simple gate, not a
+// production auth layer. If you're guarding real secrets, either add
+// a proper hash + timing-safe compare or use JWT / session flows.
+
+extern fn http_get_header: str -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn base64_decode: str -> str;
+
+let _ba_challenge = fn (realm: str) ->
+  let _ = http_set_status 401 in
+  let _ = http_set_header "WWW-Authenticate"
+            ("Basic realm=\"" ++ realm ++ "\", charset=\"UTF-8\"") in
+  let _ = http_set_header "Content-Type" "text/plain" in
+  "unauthorized\n"
+  ;
+
+// Decode the Authorization header value into an `(user, pass) option`.
+// Returns None on missing header, wrong scheme, invalid base64, or
+// missing `:` separator.
+let _ba_decode = fn (auth: str) ->
+  let prefix = "Basic " in
+  let plen = str_len prefix in
+  if str_len auth < plen then (None : (str * str) option)
+  else if not (str_starts_with auth prefix) then None
+  else
+    let encoded = substring auth plen (str_len auth) in
+    let decoded = base64_decode encoded in
+    if str_len decoded == 0 then None
+    else
+      let colon = str_index_of decoded ":" in
+      if colon < 0 then None
+      else Some (substring decoded 0 colon,
+                 substring decoded (colon + 1) (str_len decoded))
+  ;
+
+let with_basic_auth = fn (realm: str) -> fn (user: str) -> fn (pass: str)
+                   -> fn (handler: str -> str) -> fn (req: str) ->
+  match _ba_decode (http_get_header "Authorization") with
+  | None -> _ba_challenge realm
+  | Some (u, p) ->
+    if str_eq u user && str_eq p pass then handler req
+    else _ba_challenge realm
+  ;
+
+// Predicate variant — same challenge behaviour, but the user/pass
+// check is delegated to a caller-supplied fn. Handy for env-driven
+// creds without leaking them into the compiled binary at every
+// call site.
+let with_basic_auth_pred = fn (realm: str)
+                        -> fn (predicate: str -> str -> bool)
+                        -> fn (handler: str -> str) -> fn (req: str) ->
+  match _ba_decode (http_get_header "Authorization") with
+  | None -> _ba_challenge realm
+  | Some (u, p) ->
+    if predicate u p then handler req
+    else _ba_challenge realm
+  ;

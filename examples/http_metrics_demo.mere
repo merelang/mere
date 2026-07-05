@@ -28,6 +28,7 @@ extern fn sleep_ms: int -> int;
 
 import "../contrib/http/router.mere";
 import "../contrib/http/metrics.mere";
+import "../contrib/http/basic_auth.mere";
 
 // Declare metric metadata (kind + HELP). Optional but recommended
 // so scrapers know how to interpret each series.
@@ -66,11 +67,17 @@ let not_found = fn (req: str) ->
   let _ = http_set_content_type "text/plain" in
   "not found\n" ;
 
+// Gate /metrics behind Basic Auth so a public scraper can't just
+// slurp counters. Prometheus / Grafana Agent both send Basic Auth
+// natively when a `basic_auth` block is configured on the target.
+let metrics_guarded =
+  with_basic_auth "metrics" "scraper" "s3cret" metrics_handler in
+
 let routes =
   Cons (route "GET"  "/"        home,
   Cons (route "GET"  "/work"    work,
   Cons (route "POST" "/error"   error_h,
-  Cons (route "GET"  "/metrics" metrics_handler,
+  Cons (route "GET"  "/metrics" metrics_guarded,
   Nil)))) in
 
 let handle = with_metrics (router routes not_found) in
