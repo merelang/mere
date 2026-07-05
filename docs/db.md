@@ -334,6 +334,7 @@ command needed) and cleans up on process exit.
 | [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
 | [db_redis_queue](https://github.com/merelang/mere/blob/main/examples/db_redis_queue.mere) | List-backed work queue — LPUSH producer + BRPOP consumer with priority multi-queue fallback + timeout path via `contrib/db/redis_queue` |
 | [db_redis_pubsub_reconnect](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub_reconnect.mere) | `redis_pubsub_run_forever` — auto-reconnects + resubscribes after `CLIENT KILL TYPE PUBSUB` mid-run; handler counts 4 deliveries across the fd swap |
+| [db_redis_hll](https://github.com/merelang/mere/blob/main/examples/db_redis_hll.mere) | HyperLogLog cardinality — `hll_add` / `hll_count` / `hll_merge` for 12 KiB approximate distinct-count. Two-shard union demo (5 true distinct across shard-a + shard-b) via `contrib/db/redis_hll` |
 
 *Cluster / high availability*
 

@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/db/redis_hll`: HyperLogLog cardinality estimators
+
+Thin wrappers on Redis's `PF*` family. Approximate distinct-count
+with fixed 12 KiB per key regardless of true cardinality (~0.81 %
+standard error). Complements the exact-set path (`SADD` / `SCARD`)
+for cases where the memory budget matters more than the exact
+number — unique visitors, distinct URLs, unique IPs per hour.
+
+- `hll_add fd key values` — PFADD; returns `1` if the estimate
+  moved, `0` if all values were already there, `-1` on error.
+- `hll_count fd keys` — PFCOUNT; approximate cardinality. Single
+  key = that key's count; multiple keys = the union cardinality
+  (server-side merge into a temp HLL).
+- `hll_merge fd dest srcs` — PFMERGE; materializes the union of
+  `srcs` into `dest`. Idempotent.
+
+Demo `examples/db_redis_hll.mere` verifies both the union-via-
+count and union-via-merge paths: 3 users on `shard-a`, 3 users on
+`shard-b` (one overlap), true distinct = 5 across both, and both
+merge paths report 5.
+
 ## 2026-07-05 — `contrib/log`: level filtering + field-taking variants + `LOG_LEVEL` env
 
 The base `log_debug` / `log_info` / `log_warn` / `log_error`
