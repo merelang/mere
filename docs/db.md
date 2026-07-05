@@ -338,6 +338,7 @@ command needed) and cleans up on process exit.
 | [db_redis_stream](https://github.com/merelang/mere/blob/main/examples/db_redis_stream.mere) | Redis Streams — `stream_add` / `stream_read` / `stream_len` durable append-only log. 3 XADDs, XLEN=3, full replay via id `0`, tail-only replay via previous id, past-the-tail empty. Via `contrib/db/redis_stream` |
 | [db_redis_stream_groups](https://github.com/merelang/mere/blob/main/examples/db_redis_stream_groups.mere) | Redis Streams consumer groups — `stream_group_create` / `stream_group_read` / `stream_ack` / `stream_pending_len`. Two workers in one group, XREADGROUP `>` load-balances (A: 1-2, B: 3-4), PEL 4→2→0 as each ACKs. Same module as above |
 | [db_redis_lock](https://github.com/merelang/mere/blob/main/examples/db_redis_lock.mere) | Distributed mutex via `SET NX PX` + compare-and-delete `EVAL` — `redis_lock_acquire` / `redis_lock_release`. Contention returns None; impostor release with wrong token silently fails. Via `contrib/db/redis_lock` |
+| [db_redis_ratelimit](https://github.com/merelang/mere/blob/main/examples/db_redis_ratelimit.mere) | Distributed fixed-window rate limiter — `INCR` + `EXPIRE` per bucket. 3-per-2s policy: attempts 1-3 pass, 4-5 blocked, window roll resets. Via `contrib/db/redis_ratelimit` (multi-instance version of `contrib/http/ratelimit`) |
 
 *Cluster / high availability*
 

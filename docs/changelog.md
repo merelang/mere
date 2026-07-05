@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/db/redis_ratelimit`: distributed fixed-window limiter
+
+Multi-instance version of `contrib/http/ratelimit` (which is
+in-process only — two Mere HTTP servers would each keep their own
+counter, so a caller can rotate through instances to bypass). This
+version puts the bucket counter in Redis so N instances share one
+budget per key.
+
+Standard `INCR` + `EXPIRE` pattern:
+
+- `redis_rate_over_limit fd key window_sec max` → bool
+  Increments the counter for the current window and returns
+  `true` if `count > max`. Attaches TTL on the first hit of a
+  bucket via `EXPIRE`; subsequent hits are single-`INCR` calls.
+  Fail-open on network error (returns `false`).
+- `redis_rate_count fd key window_sec` → int
+  Peek without incrementing. Useful for
+  `X-RateLimit-Remaining` headers.
+
+Bucket key layout: `<key>:<epoch/window>` — all instances at the
+same wall-clock second share the counter. Not sliding-window (a
+burst right at the boundary can spike to 2 x max); document for
+callers who need bursty tolerance.
+
+Demo `examples/db_redis_ratelimit.mere` — 3-per-2-sec policy:
+attempts 1-3 return `ok`, 4-5 return `BLOCKED`, then a `sleep_ms
+2200` triggers a window roll and the next attempt returns `ok`.
+
 ## 2026-07-05 — `contrib/os/parallel_map`: N shell commands in parallel
 
 Sits on top of `contrib/os/subprocess`. No new externs. Uses shell

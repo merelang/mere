@@ -1,0 +1,68 @@
+// examples/db_redis_ratelimit.mere — distributed rate limiting via
+// contrib/db/redis_ratelimit. Simulates a login endpoint that
+// tolerates 3 attempts per 2-second window per IP.
+//
+// Setup:
+//   docker run -d --name mere-redis-rl -p 15609:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_ratelimit.mere > /tmp/dbrl.wat
+//   wat2wasm --enable-tail-call /tmp/dbrl.wat -o /tmp/dbrl.wasm
+//   node scripts/run_wasm.js /tmp/dbrl.wasm
+
+extern fn sleep_ms: int -> int;
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_ratelimit.mere";
+
+let show_bool = fn (b: bool) -> if b then "BLOCKED" else "ok" ;
+
+// Top-level rec — wasm codegen doesn't allow `let rec` inside an
+// expression. Takes the fd + params as args instead of closing over.
+let rec burst = fn (fd: int) -> fn (key: str) -> fn (window: int)
+             -> fn (max: int) -> fn (i: int) -> fn (last: int) ->
+  if i > last then ()
+  else
+    let blocked = redis_rate_over_limit fd key window max in
+    let n = redis_rate_count fd key window in
+    let _ = print ("  attempt " ++ show i ++ ": count=" ++ show n
+                ++ "  " ++ show_bool blocked) in
+    burst fd key window max (i + 1) last
+  ;
+
+let fd = redis_connect "127.0.0.1" 15609 in
+if fd < 0 then let _ = print "connect failed" in ()
+else
+
+  // Clean slate — DEL all `login:1.2.3.4:*` bucket keys.
+  let _ = redis_command fd
+            (Cons ("EVAL",
+             Cons ("for _,k in ipairs(redis.call('KEYS','login:1.2.3.4:*')) do redis.call('DEL',k) end",
+             Cons ("0", Nil)))) in
+
+  let key    = "login:1.2.3.4" in
+  let window = 2 in
+  let max    = 3 in
+
+  let _ = print ("policy: " ++ show max
+              ++ " requests / " ++ show window ++ " s window") in
+
+  // First 3 attempts should pass, 4th and 5th blocked.
+  let _ = print "" in
+  let _ = print "burst 1..5 within window:" in
+  let _ = burst fd key window max 1 5 in
+
+  // Wait for the window to roll. sleep_ms so the demo doesn't
+  // depend on the wall clock alignment (adds an extra 200 ms slack).
+  let _ = print "" in
+  let _ = print ("sleep " ++ show (window * 1000 + 200) ++ " ms for window roll...") in
+  let _ = sleep_ms (window * 1000 + 200) in
+
+  // After roll, budget resets — first request should pass again.
+  let _ = print "after window roll:" in
+  let blocked = redis_rate_over_limit fd key window max in
+  let n = redis_rate_count fd key window in
+  let _ = print ("  attempt: count=" ++ show n ++ "  " ++ show_bool blocked) in
+
+  let _ = redis_close fd in
+  ()
