@@ -1,0 +1,104 @@
+// contrib/db/redis_stream.mere — Redis Streams (XADD / XREAD / XLEN).
+//
+// The third leg of the Redis event story:
+//
+//   redis_pubsub   broadcast-and-forget, no history
+//   redis_queue    exactly-one-worker-claims, LPUSH+BRPOP
+//   redis_stream   durable append-only log (XADD), replayable
+//                  via consumer group or explicit id cursor
+//
+// Streams are Redis' equivalent of a Kafka topic: entries are
+// name/value maps identified by an auto-generated `<ms>-<seq>` id,
+// stored on the server in an append-only radix tree. Consumers
+// either poll from a chosen start id or use a consumer group (XREADGROUP)
+// for load-balanced work distribution with per-group acknowledgements.
+//
+// MVP scope of this module:
+//   - XADD  — append one entry, server-generated id (`*`).
+//   - XREAD — read >N entries after a caller-supplied id. Non-blocking.
+//   - XLEN  — current entry count.
+//
+// Not in this cut (deferred):
+//   - XREADGROUP / XACK / XPENDING — consumer-group primitives.
+//   - MAXLEN cap for XADD.
+//   - Blocking reads (XREAD BLOCK N) — requires tcp_set_timeout tuning
+//     similar to the queue module.
+//
+// Public API:
+//
+//   stream_add   fd key fields          -> str option  (Some new_id | None)
+//   stream_read  fd key after_id count  -> (str * (str * str) list) list
+//                (entry id, fields) pairs in stream order; empty on miss.
+//   stream_len   fd key                 -> int         (-1 on error)
+//
+// `fields` is `(str * str) list` — key/value pairs, XADD encodes them
+// as alternating bulk arguments.
+
+import "redis.mere";
+
+// XADD key * f1 v1 f2 v2 ...  → returns the new entry id like
+// "1699999999999-0". On any parse failure we return None; on empty
+// stream this is the FIRST entry and gets a fresh millisecond id.
+let rec _stream_flatten_fields = fn (fs: (str * str) list) -> fn (acc: str list) ->
+  match fs with
+  | Nil -> acc
+  | Cons (kv, rest) ->
+    let (k, v) = kv in
+    _stream_flatten_fields rest (list_append acc (Cons (k, Cons (v, Nil))))
+  ;
+
+let stream_add = fn (fd: int) -> fn (key: str) -> fn (fields: (str * str) list) ->
+  let flat = _stream_flatten_fields fields Nil in
+  let args = list_append (Cons ("XADD", Cons (key, Cons ("*", Nil)))) flat in
+  match redis_command fd args with
+  | RRBulk (Some (id, _)) -> Some id
+  | RRStr id -> Some id
+  | _ -> (None : str option)
+  ;
+
+// XLEN key → int.
+let stream_len = fn (fd: int) -> fn (key: str) ->
+  match redis_command fd (Cons ("XLEN", Cons (key, Nil))) with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+// Convert a nested RESP reply into `(entry_id, (field, value) list)`.
+// XREAD delivers:  [ [key, [ [id, [f1, v1, f2, v2, ...]], [id2, [...]] ]] ]
+// XREAD's outer wrapper is stripped here; we handle a single-stream
+// call so the caller gets just the entry list.
+let rec _stream_pairs_of = fn (fs: redis_reply list) -> fn (acc: (str * str) list) ->
+  match fs with
+  | Cons (RRBulk (Some (k, _)),
+    Cons (RRBulk (Some (v, _)), rest)) ->
+    _stream_pairs_of rest (list_append acc (Cons ((k, v), Nil)))
+  | _ -> acc
+  ;
+
+let rec _stream_entries_of = fn (es: redis_reply list) -> fn (acc: (str * (str * str) list) list) ->
+  match es with
+  | Nil -> acc
+  | Cons (RRArr (Cons (RRBulk (Some (id, _)),
+                Cons (RRArr fs, Nil))), rest) ->
+    let pairs = _stream_pairs_of fs Nil in
+    _stream_entries_of rest (list_append acc (Cons ((id, pairs), Nil)))
+  | Cons (_, rest) -> _stream_entries_of rest acc
+  ;
+
+// XREAD COUNT <count> STREAMS <key> <after_id>.
+// The `after_id` is exclusive — pass "0" for "everything from the
+// start", or the id returned by the previous XREAD for a resume.
+let stream_read = fn (fd: int) -> fn (key: str) -> fn (after_id: str)
+               -> fn (count: int) ->
+  let args = Cons ("XREAD",
+             Cons ("COUNT", Cons (show count,
+             Cons ("STREAMS", Cons (key, Cons (after_id, Nil)))))) in
+  match redis_command fd args with
+  // Nil reply on "no entries" — RRArr Nil in RESP2, RRNull in RESP3.
+  | RRArr Nil -> (Nil : (str * (str * str) list) list)
+  | RRNull    -> Nil
+  | RRArr (Cons (RRArr (Cons (RRBulk (Some (_key, _)),
+                        Cons (RRArr entries, Nil))), _)) ->
+    _stream_entries_of entries Nil
+  | _ -> Nil
+  ;
