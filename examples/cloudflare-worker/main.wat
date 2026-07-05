@@ -8,31 +8,77 @@
   (import "env" "__lang_tan" (func $__lang_tan (param f64) (result f64)))
   (import "env" "__lang_f_pow" (func $__lang_f_pow (param f64) (param f64) (result f64)))
   (import "env" "__lang_atan2" (func $__lang_atan2 (param f64) (param f64) (result f64)))
+  (import "env" "gen_request_id" (func $gen_request_id (result i32)))
+  (import "env" "cf_body" (func $cf_body (result i32)))
   (import "env" "cf_on_fetch" (func $cf_on_fetch (param i32)))
+  (import "env" "cf_kv_lookup" (func $cf_kv_lookup (result i32)))
   (memory (export "memory") 1024)
-  (table 22 funcref)
+  (table 35 funcref)
   (export "__indirect_function_table" (table 0))
-  (elem (i32.const 0) $handler_closure $list_sort_closure $list_sort_by_closure $list_sort_insert_closure $list_min_closure $list_max_closure $list_product_closure $list_sum_closure $range_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn)
-  (global $__lang_bump (export "__lang_bump") (mut i32) (i32.const 706))
-  (global $__lang_char_table i32 (i32.const 194))
+  (elem (i32.const 0) $handler_closure $resp_bad_request_closure $resp_not_found_closure $resp_snippet_found_closure $resp_share_created_closure $resp_landing_closure $json_esc_closure $_json_esc_walk_closure $json_str_field_closure $list_sort_closure $list_sort_by_closure $list_sort_insert_closure $list_min_closure $list_max_closure $list_product_closure $list_sum_closure $range_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn $anon_12_fn $anon_13_fn $anon_14_fn $anon_15_fn $anon_16_fn)
+  (global $__lang_bump (export "__lang_bump") (mut i32) (i32.const 1357))
+  (global $__lang_char_table i32 (i32.const 845))
   (global $__lang_char_table_initialized (mut i32) (i32.const 0))
   (global $__lang_fail_flag (mut i32) (i32.const 0))
   (global $__lang_fail_active (mut i32) (i32.const 0))
-  (data (i32.const 16) "\22path\22:\22\00")
-  (data (i32.const 25) "?\00")
-  (data (i32.const 27) "\22\00")
-  (data (i32.const 29) "?\00")
-  (data (i32.const 31) "\22method\22:\22\00")
-  (data (i32.const 42) "?\00")
-  (data (i32.const 44) "\22\00")
-  (data (i32.const 46) "?\00")
-  (data (i32.const 48) "{\22status\22:200,\00")
-  (data (i32.const 63) "\22headers\22:{\22content-type\22:\22text/plain\22},\00")
-  (data (i32.const 104) "\22body\22:\22hello from Mere on Cloudflare \e2\80\94 \00")
-  (data (i32.const 147) " \00")
-  (data (i32.const 149) "\22}\00")
-  (data (i32.const 152) "list_min: empty list\00")
-  (data (i32.const 173) "list_max: empty list\00")
+  (data (i32.const 16) "method\00")
+  (data (i32.const 23) "path\00")
+  (data (i32.const 28) "GET\00")
+  (data (i32.const 32) "/\00")
+  (data (i32.const 34) "POST\00")
+  (data (i32.const 39) "/share\00")
+  (data (i32.const 46) "empty body\0a\00")
+  (data (i32.const 58) "/s/\00")
+  (data (i32.const 62) "no such snippet\0a\00")
+  (data (i32.const 79) "unknown path: \00")
+  (data (i32.const 94) "\0a\00")
+  (data (i32.const 96) "{\22status\22:400,\00")
+  (data (i32.const 111) "\22headers\22:{\22content-type\22:\22text/plain\22},\00")
+  (data (i32.const 152) "\22body\22:\22\00")
+  (data (i32.const 161) "\22}\00")
+  (data (i32.const 164) "{\22status\22:404,\00")
+  (data (i32.const 179) "\22headers\22:{\22content-type\22:\22text/plain\22},\00")
+  (data (i32.const 220) "\22body\22:\22\00")
+  (data (i32.const 229) "\22}\00")
+  (data (i32.const 232) "{\22status\22:200,\00")
+  (data (i32.const 247) "\22headers\22:{\22content-type\22:\22text/plain; charset=utf-8\22},\00")
+  (data (i32.const 303) "\22body\22:\22\00")
+  (data (i32.const 312) "\22}\00")
+  (data (i32.const 315) "{\22status\22:200,\00")
+  (data (i32.const 330) "\22headers\22:{\22content-type\22:\22text/html; charset=utf-8\22},\00")
+  (data (i32.const 385) "\22body\22:\22\00")
+  (data (i32.const 394) "<!doctype html><title>mere snippet share</title>\00")
+  (data (i32.const 443) "<h1>mere snippet share</h1>\00")
+  (data (i32.const 471) "<p>POST raw text to <code>/share</code>, get a <code>/s/:id</code> URL back.</p>\00")
+  (data (i32.const 552) "<pre>curl -X POST --data-binary 'let x = 1 in x' https://this-worker/share</pre>\00")
+  (data (i32.const 633) "\22}\00")
+  (data (i32.const 636) "list_min: empty list\00")
+  (data (i32.const 657) "list_max: empty list\00")
+  (data (i32.const 678) "\22\00")
+  (data (i32.const 680) "\22:\22\00")
+  (data (i32.const 684) "\00")
+  (data (i32.const 685) "\22\00")
+  (data (i32.const 687) "\00")
+  (data (i32.const 688) "\5c\00")
+  (data (i32.const 690) "\5c\5c\00")
+  (data (i32.const 693) "\22\00")
+  (data (i32.const 695) "\5c\22\00")
+  (data (i32.const 698) "\0a\00")
+  (data (i32.const 700) "\5cn\00")
+  (data (i32.const 703) "\0d\00")
+  (data (i32.const 705) "\5cr\00")
+  (data (i32.const 708) "\09\00")
+  (data (i32.const 710) "\5ct\00")
+  (data (i32.const 713) "{\22status\22:201,\00")
+  (data (i32.const 728) "\22headers\22:{\22content-type\22:\22application/json\22},\00")
+  (data (i32.const 775) "\22body\22:\22\00")
+  (data (i32.const 784) "{\22id\22:\22\00")
+  (data (i32.const 792) "\22,\22url\22:\22/s/\00")
+  (data (i32.const 805) "\22}\00")
+  (data (i32.const 808) "\22,\00")
+  (data (i32.const 811) "\22kv_put\22:{\22key\22:\22\00")
+  (data (i32.const 829) "\22,\22value\22:\22\00")
+  (data (i32.const 841) "\22}}\00")
 
   (func $__lang_strlen (param $s i32) (result i32)
     (local $i i32)
@@ -573,91 +619,342 @@
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
-    (local.get $r))  (func $handler (param i32) (result i32)
+    (local.get $r))
+  (func $mere_strbuf_new (result i32)
+    (local $sb i32) (local $buf i32)
+    (local.set $sb (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $sb) (i32.const 16)))
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 16)))
+    (i32.store offset=0 (local.get $sb) (local.get $buf))
+    (i32.store offset=4 (local.get $sb) (i32.const 0))
+    (i32.store offset=8 (local.get $sb) (i32.const 16))
+    (local.get $sb))
+  (func $mere_strbuf_push (param $sb i32) (param $s i32) (result i32)
+    (local $slen i32) (local $len i32) (local $cap i32) (local $buf i32)
+    (local $new_buf i32) (local $i i32)
+    (local.set $slen (call $__lang_strlen (local.get $s)))
+    (block $resize_end
+      (loop $resize_lp
+        (local.set $len (i32.load offset=4 (local.get $sb)))
+        (local.set $cap (i32.load offset=8 (local.get $sb)))
+        (br_if $resize_end
+          (i32.le_s (i32.add (local.get $len) (local.get $slen))
+                    (local.get $cap)))
+        ;; grow
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $new_buf (global.get $__lang_bump))
+        (global.set $__lang_bump
+          (i32.add (local.get $new_buf) (local.get $cap)))
+        (local.set $buf (i32.load offset=0 (local.get $sb)))
+        (local.set $i (i32.const 0))
+        (block $cp_end
+          (loop $cp_lp
+            (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+            (i32.store8
+              (i32.add (local.get $new_buf) (local.get $i))
+              (i32.load8_u (i32.add (local.get $buf) (local.get $i))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cp_lp)))
+        (i32.store offset=0 (local.get $sb) (local.get $new_buf))
+        (i32.store offset=8 (local.get $sb) (local.get $cap))
+        (br $resize_lp)))
+    ;; copy s into the buffer at offset len
+    (local.set $buf (i32.load offset=0 (local.get $sb)))
+    (local.set $len (i32.load offset=4 (local.get $sb)))
+    (local.set $i (i32.const 0))
+    (block $cp2_end
+      (loop $cp2_lp
+        (br_if $cp2_end (i32.eq (local.get $i) (local.get $slen)))
+        (i32.store8
+          (i32.add (i32.add (local.get $buf) (local.get $len)) (local.get $i))
+          (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cp2_lp)))
+    (i32.store offset=4 (local.get $sb)
+      (i32.add (local.get $len) (local.get $slen)))
+    (i32.const 0))
+  (func $mere_strbuf_to_str (param $sb i32) (result i32)
+    (local $len i32) (local $out i32) (local $buf i32) (local $i i32)
+    (local.set $len (i32.load offset=4 (local.get $sb)))
+    (local.set $buf (i32.load offset=0 (local.get $sb)))
+    (local.set $out (global.get $__lang_bump))
+    (global.set $__lang_bump
+      (i32.add (local.get $out) (i32.add (local.get $len) (i32.const 1))))
+    (local.set $i (i32.const 0))
+    (block $cp_end
+      (loop $cp_lp
+        (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
+        (i32.store8
+          (i32.add (local.get $out) (local.get $i))
+          (i32.load8_u (i32.add (local.get $buf) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cp_lp)))
+    (i32.store8 (i32.add (local.get $out) (local.get $len)) (i32.const 0))
+    (local.get $out))
+  (func $mere_strbuf_len (param $sb i32) (result i32)
+    (i32.load offset=4 (local.get $sb)))  (func $handler (param i32) (result i32)
     (local i32 i32 i32 i32 i32 i32 i32 i32)
     local.get 0
+    call $json_str_field
+    local.set 2
+    local.get 2
+    i32.load offset=0
     i32.const 16
-    call $__lang_str_index_of
+    local.get 2
+    i32.load offset=4
+    call_indirect (type $cl)
     local.set 1
-    local.get 1
-    i32.const 0
-    i32.lt_s
-    if (result i32)
-    i32.const 25
-    else
     local.get 0
-    local.get 1
-    i32.const 8
-    i32.add
-    local.get 0
-    call $__lang_strlen
-    call $__lang_substring
-    local.set 3
-    local.get 3
-    i32.const 27
-    call $__lang_str_index_of
+    call $json_str_field
     local.set 4
     local.get 4
-    i32.const 0
-    i32.lt_s
-    if (result i32)
-    i32.const 29
-    else
-    local.get 3
-    i32.const 0
+    i32.load offset=0
+    i32.const 23
     local.get 4
-    call $__lang_substring
-    end
-    end
-    local.set 2
-    local.get 0
-    i32.const 31
-    call $__lang_str_index_of
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 3
+    local.get 1
+    i32.const 28
+    call $__lang_streq
+    local.get 3
+    i32.const 32
+    call $__lang_streq
+    i32.and
+    if (result i32)
+    i32.const 0
+    return_call $resp_landing
+    else
+    local.get 1
+    i32.const 34
+    call $__lang_streq
+    local.get 3
+    i32.const 39
+    call $__lang_streq
+    i32.and
+    if (result i32)
+    call $cf_body
     local.set 5
     local.get 5
-    i32.const 0
-    i32.lt_s
-    if (result i32)
-    i32.const 42
-    else
-    local.get 0
-    local.get 5
-    i32.const 10
-    i32.add
-    local.get 0
     call $__lang_strlen
-    call $__lang_substring
-    local.set 7
-    local.get 7
-    i32.const 44
-    call $__lang_str_index_of
-    local.set 8
-    local.get 8
     i32.const 0
-    i32.lt_s
+    i32.eq
     if (result i32)
     i32.const 46
+    return_call $resp_bad_request
     else
-    local.get 7
+    call $gen_request_id
     i32.const 0
-    local.get 8
+    i32.const 8
     call $__lang_substring
-    end
-    end
     local.set 6
-    i32.const 48
-    i32.const 63
-    call $__lang_str_concat
-    i32.const 104
-    call $__lang_str_concat
     local.get 6
+    call $resp_share_created
+    local.set 7
+    local.get 7
+    i32.load offset=0
+    local.get 5
+    local.get 7
+    i32.load offset=4
+    return_call_indirect (type $cl)
+    end
+    else
+    local.get 3
+    i32.const 58
+    call $__lang_str_starts_with
+    if (result i32)
+    call $cf_kv_lookup
+    local.set 8
+    local.get 8
+    call $__lang_strlen
+    i32.const 0
+    i32.eq
+    if (result i32)
+    i32.const 62
+    return_call $resp_not_found
+    else
+    local.get 8
+    return_call $resp_snippet_found
+    end
+    else
+    i32.const 79
+    local.get 3
     call $__lang_str_concat
-    i32.const 147
+    i32.const 94
     call $__lang_str_concat
-    local.get 2
+    return_call $resp_not_found
+    end
+    end
+    end)
+  (func $resp_bad_request (param i32) (result i32)
+    i32.const 96
+    i32.const 111
     call $__lang_str_concat
-    i32.const 149
+    i32.const 152
+    call $__lang_str_concat
+    local.get 0
+    call $json_esc
+    call $__lang_str_concat
+    i32.const 161
     call $__lang_str_concat)
+  (func $resp_not_found (param i32) (result i32)
+    i32.const 164
+    i32.const 179
+    call $__lang_str_concat
+    i32.const 220
+    call $__lang_str_concat
+    local.get 0
+    call $json_esc
+    call $__lang_str_concat
+    i32.const 229
+    call $__lang_str_concat)
+  (func $resp_snippet_found (param i32) (result i32)
+    i32.const 232
+    i32.const 247
+    call $__lang_str_concat
+    i32.const 303
+    call $__lang_str_concat
+    local.get 0
+    call $json_esc
+    call $__lang_str_concat
+    i32.const 312
+    call $__lang_str_concat)
+  (func $resp_share_created (param i32) (result i32)
+    (local i32 i32)
+    global.get $__lang_bump
+    local.set 1
+    local.get 1
+    i32.const 4
+    i32.add
+    global.set $__lang_bump
+    local.get 1
+    local.get 0
+    i32.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 2
+    local.get 2
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 2
+    local.get 1
+    i32.store offset=0
+    local.get 2
+    i32.const 18
+    i32.store offset=4
+    local.get 2)
+  (func $resp_landing (param i32) (result i32)
+    i32.const 315
+    i32.const 330
+    call $__lang_str_concat
+    i32.const 385
+    call $__lang_str_concat
+    i32.const 394
+    i32.const 443
+    call $__lang_str_concat
+    i32.const 471
+    call $__lang_str_concat
+    i32.const 552
+    call $__lang_str_concat
+    call $json_esc
+    call $__lang_str_concat
+    i32.const 633
+    call $__lang_str_concat)
+  (func $json_esc (param i32) (result i32)
+    (local i32 i32 i32 i32)
+    call $mere_strbuf_new
+    local.set 1
+    local.get 0
+    call $_json_esc_walk
+    local.set 4
+    local.get 4
+    i32.load offset=0
+    local.get 1
+    local.get 4
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 3
+    local.get 3
+    i32.load offset=0
+    i32.const 0
+    local.get 3
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 2
+    local.get 2
+    i32.load offset=0
+    local.get 0
+    call $__lang_strlen
+    local.get 2
+    i32.load offset=4
+    return_call_indirect (type $cl))
+  (func $_json_esc_walk (param i32) (result i32)
+    (local i32 i32)
+    global.get $__lang_bump
+    local.set 1
+    local.get 1
+    i32.const 4
+    i32.add
+    global.set $__lang_bump
+    local.get 1
+    local.get 0
+    i32.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 2
+    local.get 2
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 2
+    local.get 1
+    i32.store offset=0
+    local.get 2
+    i32.const 19
+    i32.store offset=4
+    local.get 2)
+  (func $json_str_field (param i32) (result i32)
+    (local i32 i32)
+    global.get $__lang_bump
+    local.set 1
+    local.get 1
+    i32.const 4
+    i32.add
+    global.set $__lang_bump
+    local.get 1
+    local.get 0
+    i32.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 2
+    local.get 2
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 2
+    local.get 1
+    i32.store offset=0
+    local.get 2
+    i32.const 20
+    i32.store offset=4
+    local.get 2)
   (func $list_sort (param i32) (result i32)
     (local i32 i32 i32)
     i32.const 0
@@ -678,7 +975,7 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 10
+    i32.const 21
     i32.store offset=4
     local.get 3
     call $list_sort_by
@@ -716,7 +1013,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 11
+    i32.const 22
     i32.store offset=4
     local.get 2)
   (func $list_sort_insert (param i32) (result i32)
@@ -746,7 +1043,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 12
+    i32.const 23
     i32.store offset=4
     local.get 2)
   (func $list_min (param i32) (result i32)
@@ -760,7 +1057,7 @@
     local.set 2
     local.get 2
     if (result i32)
-    i32.const 152
+    i32.const 636
     call $__lang_fail
     else
     local.get 1
@@ -860,7 +1157,7 @@
     local.set 2
     local.get 2
     if (result i32)
-    i32.const 173
+    i32.const 657
     call $__lang_fail
     else
     local.get 1
@@ -981,7 +1278,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 13
+    i32.const 24
     i32.store offset=4
     local.get 4
     local.get 1
@@ -1019,7 +1316,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 14
+    i32.const 25
     i32.store offset=4
     local.get 4
     local.get 1
@@ -1052,7 +1349,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 15
+    i32.const 26
     i32.store offset=4
     local.get 2)
   (func $list_fold (param i32) (result i32)
@@ -1082,12 +1379,36 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 16
+    i32.const 27
     i32.store offset=4
     local.get 2)
   (func $handler_closure (param i32) (param i32) (result i32)
     local.get 1
     call $handler)
+  (func $resp_bad_request_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $resp_bad_request)
+  (func $resp_not_found_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $resp_not_found)
+  (func $resp_snippet_found_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $resp_snippet_found)
+  (func $resp_share_created_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $resp_share_created)
+  (func $resp_landing_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $resp_landing)
+  (func $json_esc_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $json_esc)
+  (func $_json_esc_walk_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $_json_esc_walk)
+  (func $json_str_field_closure (param i32) (param i32) (result i32)
+    local.get 1
+    call $json_str_field)
   (func $list_sort_closure (param i32) (param i32) (result i32)
     local.get 1
     call $list_sort)
@@ -1115,7 +1436,7 @@
   (func $list_fold_closure (param i32) (param i32) (result i32)
     local.get 1
     call $list_fold)
-  (func $anon_6_fn (param i32) (param i32) (result i32)
+  (func $anon_9_fn (param i32) (param i32) (result i32)
     (local i32 i32 i32)
     local.get 0
     i32.load offset=0
@@ -1148,10 +1469,10 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 17
+    i32.const 28
     i32.store offset=4
     local.get 4)
-  (func $anon_7_fn (param i32) (param i32) (result i32)
+  (func $anon_10_fn (param i32) (param i32) (result i32)
     (local i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)
     local.get 0
     i32.load offset=0
@@ -1241,7 +1562,7 @@
     unreachable
     end
     end)
-  (func $anon_5_fn (param i32) (param i32) (result i32)
+  (func $anon_8_fn (param i32) (param i32) (result i32)
     (local i32 i32 i32 i32 i32)
     local.get 0
     i32.load offset=0
@@ -1297,7 +1618,7 @@
     i32.store offset=4
     local.get 4
     end)
-  (func $anon_4_fn (param i32) (param i32) (result i32)
+  (func $anon_7_fn (param i32) (param i32) (result i32)
     (local i32 i32)
     global.get $__lang_bump
     local.set 2
@@ -1324,10 +1645,10 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 18
+    i32.const 29
     i32.store offset=4
     local.get 3)
-  (func $anon_8_fn (param i32) (param i32) (result i32)
+  (func $anon_11_fn (param i32) (param i32) (result i32)
     (local i32)
     local.get 0
     i32.load offset=0
@@ -1335,7 +1656,7 @@
     local.get 2
     local.get 1
     i32.add)
-  (func $anon_3_fn (param i32) (param i32) (result i32)
+  (func $anon_6_fn (param i32) (param i32) (result i32)
     (local i32 i32)
     global.get $__lang_bump
     local.set 2
@@ -1362,10 +1683,10 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 19
+    i32.const 30
     i32.store offset=4
     local.get 3)
-  (func $anon_9_fn (param i32) (param i32) (result i32)
+  (func $anon_12_fn (param i32) (param i32) (result i32)
     (local i32)
     local.get 0
     i32.load offset=0
@@ -1373,7 +1694,7 @@
     local.get 2
     local.get 1
     i32.mul)
-  (func $anon_2_fn (param i32) (param i32) (result i32)
+  (func $anon_5_fn (param i32) (param i32) (result i32)
     (local i32 i32 i32)
     local.get 0
     i32.load offset=0
@@ -1406,10 +1727,10 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 20
+    i32.const 31
     i32.store offset=4
     local.get 4)
-  (func $anon_10_fn (param i32) (param i32) (result i32)
+  (func $anon_13_fn (param i32) (param i32) (result i32)
     (local i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)
     local.get 0
     i32.load offset=0
@@ -1585,7 +1906,7 @@
     unreachable
     end
     end)
-  (func $anon_1_fn (param i32) (param i32) (result i32)
+  (func $anon_4_fn (param i32) (param i32) (result i32)
     (local i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)
     local.get 0
     i32.load offset=0
@@ -1675,7 +1996,7 @@
     unreachable
     end
     end)
-  (func $anon_0_fn (param i32) (param i32) (result i32)
+  (func $anon_3_fn (param i32) (param i32) (result i32)
     (local i32 i32)
     global.get $__lang_bump
     local.set 2
@@ -1702,10 +2023,10 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 21
+    i32.const 32
     i32.store offset=4
     local.get 3)
-  (func $anon_11_fn (param i32) (param i32) (result i32)
+  (func $anon_14_fn (param i32) (param i32) (result i32)
     (local i32)
     local.get 0
     i32.load offset=0
@@ -1713,6 +2034,273 @@
     local.get 2
     local.get 1
     i32.lt_s)
+  (func $anon_2_fn (param i32) (param i32) (result i32)
+    (local i32 i32 i32 i32 i32)
+    local.get 0
+    i32.load offset=0
+    local.set 2
+    i32.const 678
+    local.get 1
+    call $__lang_str_concat
+    i32.const 680
+    call $__lang_str_concat
+    local.set 3
+    local.get 2
+    local.get 3
+    call $__lang_str_index_of
+    local.set 4
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    if (result i32)
+    i32.const 684
+    else
+    local.get 2
+    local.get 4
+    local.get 3
+    call $__lang_strlen
+    i32.add
+    local.get 2
+    call $__lang_strlen
+    call $__lang_substring
+    local.set 5
+    local.get 5
+    i32.const 685
+    call $__lang_str_index_of
+    local.set 6
+    local.get 6
+    i32.const 0
+    i32.lt_s
+    if (result i32)
+    i32.const 687
+    else
+    local.get 5
+    i32.const 0
+    local.get 6
+    call $__lang_substring
+    end
+    end)
+  (func $anon_1_fn (param i32) (param i32) (result i32)
+    (local i32 i32 i32)
+    local.get 0
+    i32.load offset=0
+    local.set 2
+    global.get $__lang_bump
+    local.set 3
+    local.get 3
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 3
+    local.get 1
+    i32.store offset=0
+    local.get 3
+    local.get 2
+    i32.store offset=4
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 4
+    local.get 4
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 4
+    local.get 3
+    i32.store offset=0
+    local.get 4
+    i32.const 33
+    i32.store offset=4
+    local.get 4)
+  (func $anon_15_fn (param i32) (param i32) (result i32)
+    (local i32 i32 i32 i32)
+    local.get 0
+    i32.load offset=0
+    local.set 2
+    local.get 0
+    i32.load offset=4
+    local.set 3
+    global.get $__lang_bump
+    local.set 4
+    local.get 4
+    i32.const 12
+    i32.add
+    global.set $__lang_bump
+    local.get 4
+    local.get 1
+    i32.store offset=0
+    local.get 4
+    local.get 2
+    i32.store offset=4
+    local.get 4
+    local.get 3
+    i32.store offset=8
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 5
+    local.get 5
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 5
+    local.get 4
+    i32.store offset=0
+    local.get 5
+    i32.const 34
+    i32.store offset=4
+    local.get 5)
+  (func $anon_16_fn (param i32) (param i32) (result i32)
+    (local i32 i32 i32 i32 i32 i32 i32)
+    local.get 0
+    i32.load offset=0
+    local.set 2
+    local.get 0
+    i32.load offset=4
+    local.set 3
+    local.get 0
+    i32.load offset=8
+    local.set 4
+    local.get 2
+    local.get 1
+    i32.ge_s
+    if (result i32)
+    local.get 3
+    call $mere_strbuf_to_str
+    else
+    local.get 4
+    local.get 2
+    call $__lang_char_at
+    local.set 5
+    local.get 5
+    i32.const 688
+    call $__lang_streq
+    if (result i32)
+    local.get 3
+    i32.const 690
+    call $mere_strbuf_push
+    drop
+    i32.const 0
+    else
+    local.get 5
+    i32.const 693
+    call $__lang_streq
+    if (result i32)
+    local.get 3
+    i32.const 695
+    call $mere_strbuf_push
+    drop
+    i32.const 0
+    else
+    local.get 5
+    i32.const 698
+    call $__lang_streq
+    if (result i32)
+    local.get 3
+    i32.const 700
+    call $mere_strbuf_push
+    drop
+    i32.const 0
+    else
+    local.get 5
+    i32.const 703
+    call $__lang_streq
+    if (result i32)
+    local.get 3
+    i32.const 705
+    call $mere_strbuf_push
+    drop
+    i32.const 0
+    else
+    local.get 5
+    i32.const 708
+    call $__lang_streq
+    if (result i32)
+    local.get 3
+    i32.const 710
+    call $mere_strbuf_push
+    drop
+    i32.const 0
+    else
+    local.get 3
+    local.get 5
+    call $mere_strbuf_push
+    drop
+    i32.const 0
+    end
+    end
+    end
+    end
+    end
+    drop
+    local.get 4
+    call $_json_esc_walk
+    local.set 8
+    local.get 8
+    i32.load offset=0
+    local.get 3
+    local.get 8
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 7
+    local.get 7
+    i32.load offset=0
+    local.get 2
+    i32.const 1
+    i32.add
+    local.get 7
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 6
+    local.get 6
+    i32.load offset=0
+    local.get 1
+    local.get 6
+    i32.load offset=4
+    return_call_indirect (type $cl)
+    end)
+  (func $anon_0_fn (param i32) (param i32) (result i32)
+    (local i32)
+    local.get 0
+    i32.load offset=0
+    local.set 2
+    i32.const 713
+    i32.const 728
+    call $__lang_str_concat
+    i32.const 775
+    call $__lang_str_concat
+    i32.const 784
+    local.get 2
+    call $__lang_str_concat
+    i32.const 792
+    call $__lang_str_concat
+    local.get 2
+    call $__lang_str_concat
+    i32.const 805
+    call $__lang_str_concat
+    call $json_esc
+    call $__lang_str_concat
+    i32.const 808
+    call $__lang_str_concat
+    i32.const 811
+    call $__lang_str_concat
+    local.get 2
+    call $__lang_str_concat
+    i32.const 829
+    call $__lang_str_concat
+    local.get 1
+    call $json_esc
+    call $__lang_str_concat
+    i32.const 841
+    call $__lang_str_concat)
   (func $show_int (param $n i32) (result i32)
     (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)
     (local.set $buf (global.get $__lang_bump))

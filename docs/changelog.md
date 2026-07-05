@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — Cloudflare Worker: playground snippet share (KV-backed)
+
+Turned the CF Worker template from "hello, method+path echoed" into
+a real sample that motivates Workers over static hosting: a
+playground-snippet share service backed by Cloudflare KV.
+
+Endpoints:
+
+- `GET /` landing HTML
+- `POST /share` raw code → 8-hex id + `KV.put`, returns `{id, url}`
+- `GET /s/:id` returns stored snippet, 404 if unknown
+
+The async KV binding on CF is bridged to sync Mere externs via two
+conventions:
+
+- **Pre-fetch** (read path): worker awaits `KV.get(id)` BEFORE
+  calling Mere; the value lives in a module-scoped
+  `currentKvLookup` and Mere reads it via `cf_kv_lookup ()`.
+- **Outbox** (write path): Mere emits `kv_put:{key,value}` in the
+  response JSON; worker honours it AFTER the handler returns via
+  `KV.put(key, value)`.
+
+Body handling uses the same "extern-not-JSON" convention: JS stashes
+the raw request body in a module scratch, Mere reads it via
+`cf_body ()`. This sidesteps a JSON-in-JSON double-escape bug where
+`\n` inside stored snippets turned into `\\n` after round-trip.
+
+Local smoke test (`local_test.js`) verifies six assertions with an
+in-memory KV mock:
+
+- Landing page 200 + text/html
+- `POST /share` returns 201 + JSON id/url, KV was written
+- `GET /s/:id` returns 200 with the ORIGINAL code (newlines
+  preserved byte-for-byte — regression for the double-escape bug)
+- Unknown id → 404
+- Empty body → 400
+- Unknown route → 404
+
+Wasm size: 5.7 KB → **8.1 KB** (added routing + JSON escaper + KV
+outbox construction).
+
 ## 2026-07-05 — Cloudflare Worker template (roadmap step 2)
 
 Step 2 of the direction-paper roadmap. A minimal, self-contained

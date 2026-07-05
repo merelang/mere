@@ -1,20 +1,25 @@
 // worker.js — Cloudflare Worker entry.
 //
-// Loads main.wasm (pre-compiled from main.mere via wat2wasm), wires the
-// `cf_on_fetch` extern so the Mere program can register a request
-// handler, then exports a default `fetch` handler that serializes each
-// incoming Request to JSON, invokes the Mere closure, and deserializes
-// the response.
+// Playground snippet share: three routes handled by the Mere wasm
+// module, with KV storage async-glued in JS around the sync Mere
+// call:
 //
-// The Wasm module is imported as a static asset via wrangler's
-// `[wasm_modules]` binding. See wrangler.toml.
+//   GET  /            landing page
+//   POST /share       raw code in body → returns {id, url}, stores in KV
+//   GET  /s/:id       returns stored code, 404 if unknown
+//
+// The KV plumbing is intentionally OUTSIDE Mere. Cloudflare's KV
+// bindings are async (Promise-based); Mere externs are sync. So:
+//
+//   Pre-fetch:  For GET /s/:id, we KV.get(id) BEFORE invoking the
+//               Mere handler and pass the result as `kv_lookup` in
+//               the request JSON.
+//   Post-write: If the Mere response JSON carries a `kv_put` field,
+//               we KV.put() AFTER the handler returns. That's the
+//               "outbox pattern" — Mere emits intent, JS executes.
 
-// wrangler injects the compiled Wasm module here at build time.
-// Locally (node-based test runner), the same shape works via
-// `WebAssembly.compile(fs.readFileSync(...))`.
 import wasmModule from "./main.wasm";
 
-// State that survives across fetch events (V8 isolate warm-start).
 let memory = null;
 let table = null;
 let langBump = null;
@@ -56,17 +61,28 @@ const callHandler = (reqJson) => {
   return readCStr(resultPtr);
 };
 
-// Minimal env — no TCP, no fs, no subprocess. CF Workers only get
-// what V8 exposes; our Mere code sticks to compute + string ops.
+// Per-request scratch — the JS glue writes these before invoking the
+// Mere handler; the handler pulls them via cf_body / cf_kv_lookup.
+// Passing arbitrary body text out-of-band (rather than embedded in
+// the request JSON) sidesteps JSON escape round-trips that would
+// otherwise mangle snippets containing newlines / quotes / backslashes.
+let currentBody = "";
+let currentKvLookup = "";
+
 const stub = () => 0;
 const env = {
   cf_on_fetch: (closurePtr) => { handlerClosurePtr = closurePtr; },
-  puts: (ptr) => {
-    // console.log for `print` calls. Fine in CF Worker.
-    console.log(readCStr(ptr));
+  cf_body: () => writeStr(currentBody),
+  cf_kv_lookup: () => writeStr(currentKvLookup),
+  gen_request_id: () => {
+    // 16 hex chars from crypto.getRandomValues (available on CF Workers).
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    return writeStr(
+      Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
+    );
   },
-  // Stubs for prelude imports Mere programs always reference even
-  // when unused. Standard set from run_wasm.js.
+  puts: (ptr) => { console.log(readCStr(ptr)); },
   read_file: stub,
   write_file: stub,
   __lang_str_of_float: stub,
@@ -78,7 +94,6 @@ const env = {
   __lang_atan2: Math.atan2,
 };
 
-// One-time init: compile + run main() so the handler gets registered.
 let instantiated = null;
 const ensureReady = async () => {
   if (instantiated) return instantiated;
@@ -91,19 +106,19 @@ const ensureReady = async () => {
   return instance;
 };
 
-// Extract the fields the Mere handler cares about into a JSON envelope.
-const requestToJson = async (request) => {
+// Envelope handed to Mere is method + path + headers only. Body and
+// pre-fetched KV value are stashed in module-level scratch (see the
+// currentBody / currentKvLookup vars above); the handler pulls them
+// via the cf_body / cf_kv_lookup externs. That avoids the JSON escape
+// round-trip pitfall for arbitrary-content strings.
+const requestToJson = (request) => {
   const url = new URL(request.url);
   const headers = {};
   request.headers.forEach((v, k) => { headers[k] = v; });
-  const body = ["GET", "HEAD"].includes(request.method)
-    ? ""
-    : await request.text();
   return JSON.stringify({
     method: request.method,
     path: url.pathname + url.search,
     headers,
-    body,
   });
 };
 
@@ -112,24 +127,45 @@ const jsonToResponse = (jsonStr) => {
   try {
     parsed = JSON.parse(jsonStr);
   } catch (e) {
-    return new Response(
+    return { response: new Response(
       "worker: Mere handler returned non-JSON: " + jsonStr,
       { status: 500 }
-    );
+    ) };
   }
-  return new Response(parsed.body ?? "", {
+  const response = new Response(parsed.body ?? "", {
     status: parsed.status ?? 200,
     headers: parsed.headers ?? {},
   });
+  return { response, kv_put: parsed.kv_put || null };
 };
 
 export default {
-  async fetch(request) {
+  async fetch(request, env_) {
     try {
       await ensureReady();
-      const reqJson = await requestToJson(request);
+
+      // Stash body + pre-fetched KV value in module scratch so Mere
+      // can pull them via cf_body / cf_kv_lookup externs.
+      currentBody = ["GET", "HEAD"].includes(request.method)
+        ? ""
+        : await request.text();
+
+      const url = new URL(request.url);
+      currentKvLookup = "";
+      if (url.pathname.startsWith("/s/") && env_ && env_.MERE_SNIPPETS) {
+        const id = url.pathname.slice(3);
+        currentKvLookup = (await env_.MERE_SNIPPETS.get(id)) || "";
+      }
+
+      const reqJson = requestToJson(request);
       const respJson = callHandler(reqJson);
-      return jsonToResponse(respJson);
+      const { response, kv_put } = jsonToResponse(respJson);
+
+      // KV binding write for POST /share — post-process after Mere.
+      if (kv_put && env_ && env_.MERE_SNIPPETS) {
+        await env_.MERE_SNIPPETS.put(kv_put.key, kv_put.value);
+      }
+      return response;
     } catch (e) {
       return new Response("worker error: " + e.message, { status: 500 });
     }

@@ -1,40 +1,128 @@
 // examples/cloudflare-worker/main.mere — Cloudflare Worker entry.
 //
-// Registers a fetch handler that receives one JSON-encoded HTTP
-// request per invocation and returns a JSON-encoded response.
-// The registration happens once at Wasm instantiate time; every
-// subsequent CF Worker `fetch` event calls the stored closure.
+// Playground-snippet share service. Three routes:
 //
-// Request  JSON: {"method":"GET","path":"/","headers":{"k":"v"},"body":""}
-// Response JSON: {"status":200,"headers":{"k":"v"},"body":"hello"}
+//   GET  /            landing HTML with usage
+//   POST /share       body = raw code text; returns {"id","url"} and
+//                     asks the worker to KV.put(id, code)
+//   GET  /s/:id       returns the stored snippet as plain text; 404
+//                     if not found. The worker pre-fetches KV.get(id)
+//                     before calling this handler.
 //
-// This file is Wasm-portable: no TCP, no subprocess, no file I/O.
-// All CF Worker constraints (V8 isolate, no Node stdlib) are honoured
-// because the Mere code doesn't touch any of that.
+// Design:
+//
+//   The request envelope passed to Mere is a small JSON with just
+//   `method`, `path`, and `headers`. The raw request body and the
+//   pre-fetched KV value are exposed via SEPARATE externs
+//   (`cf_body ()` / `cf_kv_lookup ()`), NOT embedded in the JSON.
+//   That's deliberate: JSON string escaping of arbitrary code text
+//   (embedded newlines / quotes / backslashes) is error-prone, and
+//   we already need a `str` extern surface anyway.
+//
+//   Response is a JSON envelope containing `{status, headers, body,
+//   kv_put?}` — `kv_put:{key,value}` is the "outbox" the JS glue
+//   consumes to do the async KV.put after Mere returns.
 
 extern fn cf_on_fetch: (str -> str) -> unit;
+extern fn cf_body: unit -> str;
+extern fn cf_kv_lookup: unit -> str;
+extern fn gen_request_id: unit -> str;
 
-// A trivial handler: echo the method + path in the response body.
-// Real code would parse the JSON with contrib/json/json.mere and
-// build the response with contrib/json/writer.mere.
-let handler = fn (req_json: str) ->
-  // Naive string scan for `"path":"..."` — no full JSON parse. Good
-  // enough for the demo. Replace with contrib/json for production.
-  let path_idx = str_index_of req_json "\"path\":\"" in
-  let path = if path_idx < 0 then "?"
-             else
-               let after = substring req_json (path_idx + 8) (str_len req_json) in
-               let end_idx = str_index_of after "\"" in
-               if end_idx < 0 then "?" else substring after 0 end_idx in
-  let method_idx = str_index_of req_json "\"method\":\"" in
-  let method = if method_idx < 0 then "?"
-               else
-                 let after = substring req_json (method_idx + 10) (str_len req_json) in
-                 let end_idx = str_index_of after "\"" in
-                 if end_idx < 0 then "?" else substring after 0 end_idx in
+// Naive JSON string-field extractor — enough for the small
+// `{method, path, headers}` envelope this handler receives. Assumes
+// the field's value contains no un-escaped `"`, which is true for
+// HTTP methods (`GET`/`POST`/…) and URL paths.
+let json_str_field = fn (blob: str) -> fn (field: str) ->
+  let needle = "\"" ++ field ++ "\":\"" in
+  let idx = str_index_of blob needle in
+  if idx < 0 then ""
+  else
+    let after = substring blob (idx + str_len needle) (str_len blob) in
+    let close = str_index_of after "\"" in
+    if close < 0 then "" else substring after 0 close
+  ;
+
+// JSON-string escape: `\`, `"`, and control chars needed for
+// round-tripping snippets with newlines / quotes. Used when Mere
+// puts arbitrary user code into the response JSON (body / kv_put).
+let rec _json_esc_walk = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+  if i >= n then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let _ = if str_eq c "\\" then let _ = strbuf_push buf "\\\\" in 0
+            else if str_eq c "\"" then let _ = strbuf_push buf "\\\"" in 0
+            else if str_eq c "\n" then let _ = strbuf_push buf "\\n" in 0
+            else if str_eq c "\r" then let _ = strbuf_push buf "\\r" in 0
+            else if str_eq c "\t" then let _ = strbuf_push buf "\\t" in 0
+            else let _ = strbuf_push buf c in 0 in
+    _json_esc_walk s buf (i + 1) n
+  ;
+let json_esc = fn (s: str) ->
+  let buf = strbuf_new () in
+  _json_esc_walk s buf 0 (str_len s)
+  ;
+
+// Response builders.
+
+let resp_landing = fn (u: unit) ->
   "\{\"status\":200," ++
+  "\"headers\":\{\"content-type\":\"text/html; charset=utf-8\"}," ++
+  "\"body\":\"" ++ json_esc (
+    "<!doctype html><title>mere snippet share</title>" ++
+    "<h1>mere snippet share</h1>" ++
+    "<p>POST raw text to <code>/share</code>, get a <code>/s/:id</code> URL back.</p>" ++
+    "<pre>curl -X POST --data-binary 'let x = 1 in x' https://this-worker/share</pre>"
+  ) ++ "\"}"
+  ;
+
+let resp_share_created = fn (id: str) -> fn (code: str) ->
+  "\{\"status\":201," ++
+  "\"headers\":\{\"content-type\":\"application/json\"}," ++
+  "\"body\":\"" ++ json_esc (
+    "\{\"id\":\"" ++ id ++ "\",\"url\":\"/s/" ++ id ++ "\"}"
+  ) ++ "\"," ++
+  "\"kv_put\":\{\"key\":\"" ++ id ++ "\",\"value\":\"" ++ json_esc code ++ "\"}}"
+  ;
+
+let resp_snippet_found = fn (code: str) ->
+  "\{\"status\":200," ++
+  "\"headers\":\{\"content-type\":\"text/plain; charset=utf-8\"}," ++
+  "\"body\":\"" ++ json_esc code ++ "\"}"
+  ;
+
+let resp_not_found = fn (msg: str) ->
+  "\{\"status\":404," ++
   "\"headers\":\{\"content-type\":\"text/plain\"}," ++
-  "\"body\":\"hello from Mere on Cloudflare — " ++ method ++ " " ++ path ++ "\"}" ;
+  "\"body\":\"" ++ json_esc msg ++ "\"}"
+  ;
+
+let resp_bad_request = fn (msg: str) ->
+  "\{\"status\":400," ++
+  "\"headers\":\{\"content-type\":\"text/plain\"}," ++
+  "\"body\":\"" ++ json_esc msg ++ "\"}"
+  ;
+
+// The handler. Dispatches on method + path prefix.
+let handler = fn (req_json: str) ->
+  let method = json_str_field req_json "method" in
+  let path = json_str_field req_json "path" in
+
+  if str_eq method "GET" && str_eq path "/" then
+    resp_landing ()
+  else if str_eq method "POST" && str_eq path "/share" then
+    let body = cf_body () in
+    if str_len body == 0 then resp_bad_request "empty body\n"
+    else
+      // Compact 8-hex id (first half of gen_request_id's 16-hex).
+      let id = substring (gen_request_id ()) 0 8 in
+      resp_share_created id body
+  else if str_starts_with path "/s/" then
+    let stored = cf_kv_lookup () in
+    if str_len stored == 0 then resp_not_found "no such snippet\n"
+    else resp_snippet_found stored
+  else
+    resp_not_found ("unknown path: " ++ path ++ "\n")
+  ;
 
 let _ = cf_on_fetch handler in
 0
