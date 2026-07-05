@@ -1,0 +1,66 @@
+// wordcount — small dogfood of contrib/dom + a real string-scan
+// algorithm (word-boundary detection). Reads a textarea on button
+// click, computes three stats, updates three display slots.
+
+import "contrib/dom/dom.mere";
+
+// Character count = str_len. Lines = newlines + 1 for any content.
+// Words = number of whitespace-separated tokens (folds runs of
+// whitespace into one boundary — a "  hello  world  " string has
+// two words, not four).
+let count_lines = fn (s: str) ->
+  let n = str_len s in
+  if n == 0 then 0
+  else
+    let st = map_new () in
+    let _ = map_set st "i" 0 in
+    let _ = map_set st "n" 1 in
+    let _ = while map_get st "i" < n do
+      let i = map_get st "i" in
+      let _ = if str_eq (char_at s i) "\n" then
+                map_set st "n" (map_get st "n" + 1)
+              else () in
+      let _ = map_set st "i" (i + 1) in () in
+    map_get st "n"
+  ;
+
+let count_words = fn (s: str) ->
+  let n = str_len s in
+  let st = map_new () in
+  let _ = map_set st "i" 0 in
+  let _ = map_set st "count" 0 in
+  let _ = map_set st "in_word" 0 in
+  let _ = while map_get st "i" < n do
+    let i = map_get st "i" in
+    let c = char_at s i in
+    let is_ws = str_eq c " " || str_eq c "\t"
+             || str_eq c "\n" || str_eq c "\r" in
+    let _ = if is_ws then
+              map_set st "in_word" 0
+            else if map_get st "in_word" == 0 then
+              let _ = map_set st "count" (map_get st "count" + 1) in
+              map_set st "in_word" 1
+            else () in
+    let _ = map_set st "i" (i + 1) in () in
+  map_get st "count"
+  ;
+
+let input = dom_get_by_id "input" in
+let btn = dom_get_by_id "count-btn" in
+let out_chars = dom_get_by_id "out-chars" in
+let out_words = dom_get_by_id "out-words" in
+let out_lines = dom_get_by_id "out-lines" in
+
+// Initial render so the "…" placeholders don't stare back.
+let _ = dom_set_text out_chars "0" in
+let _ = dom_set_text out_words "0" in
+let _ = dom_set_text out_lines "0" in
+
+let _ = dom_on_click btn (fn (u: unit) ->
+  let s = dom_input_value input in
+  let _ = dom_set_text out_chars (show (str_len s)) in
+  let _ = dom_set_text out_words (show (count_words s)) in
+  let _ = dom_set_text out_lines (show (count_lines s)) in
+  ()
+) in
+0

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mere Word Count — DOM bindings demo</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .wc-app {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      padding: 2rem;
+      margin: 2rem 0;
+      background: #f7fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+    #input {
+      width: 100%;
+      min-height: 12em;
+      padding: 0.6em 0.8em;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.95em;
+      border: 1px solid #cbd5e0;
+      border-radius: 6px;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    #count-btn {
+      align-self: flex-start;
+      padding: 0.6em 1.4em;
+      font-size: 1em;
+      background: #2b6cb0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #count-btn:hover { background: #2c5282; }
+    #count-btn:active { transform: translateY(1px); }
+    .wc-stats {
+      display: flex;
+      gap: 2rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .wc-stat {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+    .wc-stat-label {
+      font-size: 0.85em;
+      color: #718096;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .wc-stat-value {
+      font-size: 2.2rem;
+      font-weight: 600;
+      color: #2b6cb0;
+    }
+    .source-block {
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 1em;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="echo.html">echo</a>
+      <a href="wordcount.html" class="active">wordcount</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+    </div>
+  </nav>
+  <main>
+    <h1>Word Count — Mere &rarr; DOM</h1>
+
+    <p>
+      Client-side text stats, computed in a Mere function compiled to
+      Wasm. Click <em>Count</em> to run <code>count_words</code> /
+      <code>count_lines</code> / <code>str_len</code> over the textarea
+      contents and update the three displays through
+      <code>contrib/dom/dom.mere</code>.
+    </p>
+
+    <div class="wc-app">
+      <textarea id="input" placeholder="Paste or type some text, then click Count."></textarea>
+      <button id="count-btn">Count</button>
+      <div class="wc-stats">
+        <div class="wc-stat">
+          <span class="wc-stat-label">chars</span>
+          <span id="out-chars" class="wc-stat-value">0</span>
+        </div>
+        <div class="wc-stat">
+          <span class="wc-stat-label">words</span>
+          <span id="out-words" class="wc-stat-value">0</span>
+        </div>
+        <div class="wc-stat">
+          <span class="wc-stat-label">lines</span>
+          <span id="out-lines" class="wc-stat-value">0</span>
+        </div>
+      </div>
+    </div>
+
+    <h2>What's happening</h2>
+    <p>
+      The word counter isn't a hand-written JS function — it's a
+      Mere program compiled to Wasm. <code>count_words</code> walks
+      the string character by character, tracking whether it's
+      inside a word to fold runs of whitespace into one boundary.
+      The three <code>dom_set_text</code> calls update the displays
+      through the same closure-dispatch machinery the counter demo
+      uses.
+    </p>
+
+    <h2>Source (<code>wordcount.mere</code>)</h2>
+    <pre class="source-block">import "contrib/dom/dom.mere";
+
+let count_words = fn (s: str) -&gt;
+  let n = str_len s in
+  let st = map_new () in
+  let _ = map_set st "i" 0 in
+  let _ = map_set st "count" 0 in
+  let _ = map_set st "in_word" 0 in
+  let _ = while map_get st "i" &lt; n do
+    let i = map_get st "i" in
+    let c = char_at s i in
+    let is_ws = str_eq c " " || str_eq c "\t"
+             || str_eq c "\n" || str_eq c "\r" in
+    let _ = if is_ws then
+              map_set st "in_word" 0
+            else if map_get st "in_word" == 0 then
+              let _ = map_set st "count" (map_get st "count" + 1) in
+              map_set st "in_word" 1
+            else () in
+    let _ = map_set st "i" (i + 1) in () in
+  map_get st "count"
+  ;
+
+// … + count_lines + wiring three displays via dom_set_text.</pre>
+  </main>
+  <footer>Phase 48 C2 frontend FFI — string-scan dogfood</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./wordcount.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();
+  </script>
+</body>
+</html>

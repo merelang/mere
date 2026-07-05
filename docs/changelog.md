@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — playground: `wordcount` demo + build tail-call flag
+
+New live-docs demo — a client-side text stats tool: char / word /
+line counters computed by a Mere function compiled to Wasm, wired
+into a textarea + three display slots via `contrib/dom`. Reuses the
+Phase 48 C2 frontend FFI (closure dispatch through the exported
+function table); no new externs.
+
+Files:
+
+- `contrib/site/playground/wordcount.mere` — `count_words` /
+  `count_lines` implemented as manual character scans (folds runs
+  of whitespace into one word boundary; treats `\n` as line
+  separator so an N-line file reports N).
+- `contrib/site/playground/wordcount.html` — form + wire wasm,
+  matches the styling of the counter / echo demos.
+- Nav entry added to all sibling playground pages + the SSG's
+  playground index.
+
+Build fix: `contrib/site/build_full.sh` now invokes `wat2wasm
+--enable-tail-call`. The wordcount demo emits `return_call` /
+`return_call_indirect` (Wasm tail-call proposal) via its `while`
+loop + inner-lifted closures, and the pre-flag site build rejected
+those opcodes. Enabled by default in Chrome / Safari / Firefox 129+ /
+Node 22+, so no runtime compatibility loss.
+
+Live path: `https://merelang.github.io/mere/playground/wordcount.html`
+after the next Pages deploy.
+
 ## 2026-07-05 — `contrib/db/redis_hll`: HyperLogLog cardinality estimators
 
 Thin wrappers on Redis's `PF*` family. Approximate distinct-count
