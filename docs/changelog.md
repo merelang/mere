@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/websocket`: RFC 6455 hub
+
+WebSocket support in the standard shape:
+
+- Handshake — `GET /ws/<channel>` with `Upgrade: websocket` and
+  `Sec-WebSocket-Key` → 101 Switching Protocols with the standard
+  `Sec-WebSocket-Accept: base64(sha1(key + magic))` computation.
+- Text frame codec — encode server → client (unmasked), decode
+  client → server (masked with per-frame XOR key). Both length
+  forms (7-bit / 16-bit / 64-bit) supported.
+- Channel pool — `/ws/<channel>` sockets go into a per-channel Set;
+  `ws_broadcast` writes to every socket, auto-relay writes to every
+  socket EXCEPT the sender.
+- Close + ping — client close → echo close + destroy socket. Ping
+  → reply pong with same payload.
+
+Public API (`contrib/http/websocket.mere`):
+
+- `ws_broadcast channel payload -> unit` — server → all clients.
+- `ws_client_count channel -> int` — for a "0 listeners → skip
+  work" fast-path.
+
+**Deliberate design choice**: individual client frames are NOT
+delivered to Mere. The glue auto-relays them to peers on the same
+channel (hub pattern), covering chat / cursor-share / collaborative-
+edit demos without needing an in-Wasm callback per frame. Per-frame
+Mere handlers would require a callback-into-Wasm design and stay
+deferred.
+
+Not supported (documented):
+- Binary opcodes (0x2) — silently dropped
+- Fragmentation (FIN=0 continuation) — every frame treated as full
+- Payloads > 2^32 bytes (unrealistic for browser peers)
+
+Demo `examples/http_ws_chat.mere` — auto-relay chat + admin
+`POST /announce` → `ws_broadcast`. Verified with a native
+`WebSocket` probe on Node 22:
+- A sends "hello from A" → B receives it, A does NOT (hub excludes
+  sender)
+- `POST /announce {"msg":"hello everyone"}` → `{"delivered_to":2}`,
+  both A and B receive `[admin] hello everyone`
+
+All 5 spot-checked existing HTTP demos (router / blog / chat /
+pubsub_chat / admin_dash) recompile and serve as before — the
+`Upgrade` hook is a new event handler on the same server, so
+non-upgrade requests are unaffected.
+
+1846-test OCaml suite passes.
+
 ## 2026-07-05 — `examples/http_admin_dash`: integration dogfood
 
 One small admin console exercises six of the modules shipped over

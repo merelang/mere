@@ -1,0 +1,43 @@
+// contrib/http/websocket.mere — WebSocket hub (RFC 6455).
+//
+// The Node glue (`scripts/ws_env.js`, wired into `contrib/http/http.glue.js`)
+// terminates the WebSocket protocol so Mere sees only the message-level
+// semantics: broadcast to a channel and read the current subscriber
+// count. Individual client → server frames are NOT delivered to Mere;
+// the glue auto-relays them to peers on the same channel (hub / chat
+// pattern). Enough for:
+//
+//   - real-time notification streams (server pushes updates)
+//   - chat / cursor-share / collaborative-edit demos where every
+//     message from any client should reach every other client
+//   - live dashboards where the server periodically pushes deltas
+//
+// Not yet supported:
+//   - Mere-side per-frame handlers (would need a Wasm callback into
+//     the Mere program on each incoming frame — deferred).
+//   - Binary opcodes (0x2). Received binary is silently dropped.
+//   - Fragmentation (FIN=0 continuation). Every frame is treated as
+//     a complete message.
+//   - Per-connection state (auth cookies land in the upgrade req's
+//     headers, but the glue doesn't currently forward them into Mere).
+//
+// Public API:
+//
+//   ws_broadcast    channel payload -> unit
+//     Send one text frame to every socket currently connected to
+//     `/ws/<channel>`. Payload is UTF-8; call `ws_client_count`
+//     first to skip the round trip when nobody's listening.
+//
+//   ws_client_count channel         -> int
+//     Number of connected sockets for `/ws/<channel>`. Returns 0
+//     when the channel has never had a connection (or after the
+//     last one dropped).
+//
+// Wire path (browser POV):
+//
+//   const ws = new WebSocket("ws://localhost:8080/ws/chat");
+//   ws.onmessage = (e) => console.log(e.data);
+//   ws.send("hello");    // → relayed to every OTHER peer on `chat`
+
+extern fn ws_broadcast: str -> str -> unit;
+extern fn ws_client_count: str -> int;
