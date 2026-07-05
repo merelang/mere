@@ -69,6 +69,7 @@ example exercises all three variants (including two-capture
 | [csv_export](#csv-export) | chunked Transfer-Encoding streaming | 110 |
 | [blog](https://github.com/merelang/mere/blob/main/examples/http_blog.mere) | markdown blog on Postgres — `route_prefix "/admin"` + `route_pattern "/post/:slug"` end-to-end | 560 |
 | [client_auth](https://github.com/merelang/mere/blob/main/examples/http_client_auth.mere) | outbound HTTP — `http_fetch_h`, Bearer auth, per-call timeout, response header read | 80 |
+| [gh_stars](https://github.com/merelang/mere/blob/main/examples/gh_stars.mere) | CLI — GitHub repo star count via `http_fetch_h` (optional `GITHUB_TOKEN` Bearer) + rate-limit header echo | 110 |
 
 ## todo_app
 
