@@ -1,0 +1,49 @@
+// examples/subprocess_demo.mere — spawn shell children from Mere.
+//
+// Four scenarios exercise the subprocess module (Path A of Q-012):
+//
+//   1. Basic exec: run `date` and capture the timestamp
+//   2. Stdin piping: pipe text into `wc -w`
+//   3. Nonzero exit: run `false`, inspect subprocess_status
+//   4. Parallel via shell backgrounding + tmpfiles: kick off two
+//      sleeps that run concurrently; total wallclock ~1 s, not ~2
+//
+// Usage:
+//   ./mere -w examples/subprocess_demo.mere > /tmp/sp.wat
+//   wat2wasm --enable-tail-call /tmp/sp.wat -o /tmp/sp.wasm
+//   node scripts/run_wasm.js /tmp/sp.wasm
+
+extern fn now_ms: unit -> int;
+
+import "../contrib/os/subprocess.mere";
+
+// 1. Basic exec — read `date -u +%Y-%m-%dT%H:%M:%SZ`
+let _ = print "1. exec `date -u ...`" in
+let d = subprocess_run "date -u +%Y-%m-%dT%H:%M:%SZ" "" in
+let _ = print ("   status = " ++ show (subprocess_status ())) in
+let _ = print ("   stdout = " ++ d) in
+
+// 2. Stdin piping — pipe text into `wc -w`
+let _ = print "2. pipe text -> wc -w" in
+let w = subprocess_run "wc -w" "one two three four five" in
+let _ = print ("   status = " ++ show (subprocess_status ())) in
+let _ = print ("   stdout = " ++ w) in
+
+// 3. Nonzero exit — `false` returns 1, stderr silent
+let _ = print "3. nonzero exit path" in
+let _ = subprocess_run "sh -c 'echo ok on stderr >&2; false'" "" in
+let _ = print ("   status = " ++ show (subprocess_status ())) in
+let _ = print ("   stderr = " ++ subprocess_stderr ()) in
+
+// 4. Parallel via shell backgrounding. Two `sleep 1` in parallel
+//    should finish in ~1 s wallclock, not ~2 s. Timed via now_ms.
+let _ = print "4. parallel via shell &  ( 2x sleep 1 )" in
+let t0 = now_ms () in
+let out = subprocess_run
+  "sh -c '(sleep 1 && echo A > /tmp/mere-sp-a) & (sleep 1 && echo B > /tmp/mere-sp-b) & wait; cat /tmp/mere-sp-a /tmp/mere-sp-b'"
+  "" in
+let dt = now_ms () - t0 in
+let _ = print ("   wallclock = " ++ show dt ++ " ms (expect ~1000, not ~2000)") in
+let _ = print ("   combined stdout:") in
+let _ = print out in
+0

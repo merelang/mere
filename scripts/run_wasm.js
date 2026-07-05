@@ -7,6 +7,7 @@
 const fs = require('fs');
 const { makePgEnv } = require('./pg_env.js');
 const { makeHttpFetchEnv } = require('./http_fetch_env.js');
+const { makeSubprocessEnv } = require('./subprocess_env.js');
 
 if (process.argv.length < 3) {
   console.error("usage: node run_wasm.js <path-to-wasm>");
@@ -176,6 +177,7 @@ const wasmPath = process.argv[2];
     return ptr;
   };
   Object.assign(env, makeHttpFetchEnv({ readCStr, writeStr }));
+  Object.assign(env, makeSubprocessEnv({ readCStr, writeStr }));
 
   // Allocate on the shared Mere heap by advancing `$__lang_bump`
   // (mirrors the newer run_http_server.js). Grows memory one 64KB

@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/os/subprocess`: sync shell-out (Q-012 Path A)
+
+First shipping toward the concurrency-primitive design (see design
+notes in the project's internal notes). Path A of the plan — the
+"no language change, immediate utility" step before a proper
+`spawn` / `channel` primitive.
+
+Three externs backed by Node's `child_process.spawnSync`:
+
+- `subprocess_run cmd stdin -> str` — shell-execute, feed stdin,
+  return stdout. Timeout 30 s, buffer cap 16 MiB per stream.
+- `subprocess_status ()` -> int — exit code of the last run
+  (0 = ok, nonzero = child, -1 = signal / timeout).
+- `subprocess_stderr ()` -> str — stderr of the last run.
+
+Blocking by design. `subprocess_run` holds the whole Wasm frame
+until the child exits — a Mere HTTP server MUST NOT call it inside
+a request handler.
+
+Deliberate scope: no async / parallel-collect primitive. For
+parallelism today, users can shell-background inside one call:
+
+    subprocess_run
+      "sh -c '(child1 > /tmp/r1) & (child2 > /tmp/r2) & wait; " ++
+      "cat /tmp/r1; echo ---; cat /tmp/r2'"
+      ""
+
+The two children run concurrently under the OS scheduler; only
+collection is serial. A proper `worker_spawn` / `worker_await` pair
+is scheduled for Q-012 step 3 (post `worker_threads` restructure).
+
+Demo `examples/subprocess_demo.mere` verifies all four flows:
+
+- `date -u` → status 0, timestamp captured
+- text piped into `wc -w` → 5
+- `false` → status 1, stderr captured
+- two `sleep 1` in parallel via shell `&` → **1055 ms wallclock**
+  (not 2000+ ms — real OS-level parallelism)
+
+Wired into both `run_wasm.js` and `run_http_server.js` via the
+same factory pattern as `http_fetch_env`. 1846 tests pass.
+
 ## 2026-07-05 — `contrib/http/websocket`: RFC 6455 hub
 
 WebSocket support in the standard shape:
