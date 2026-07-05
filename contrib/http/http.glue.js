@@ -98,6 +98,21 @@ function makeHttpGlue() {
   // (or the server) closes it.
   const sseChannels = new Map();  // channel → Set<res>
 
+  // JS-callable version of sse_broadcast — exposed alongside `glue`
+  // so a Node-side bridge (e.g. scripts/sse_redis_bridge.js) can fan
+  // in messages from other transports without going through the
+  // Mere-heap pointer boundary. The Mere-facing extern
+  // `sse_broadcast` calls this same helper after decoding its args.
+  const broadcast = (channel, payload) => {
+    const set = sseChannels.get(channel);
+    if (!set) return;
+    const lines = String(payload).split("\n");
+    const frame = lines.map((l) => "data: " + l).join("\n") + "\n\n";
+    for (const res of set) {
+      try { res.write(frame); } catch (e) { /* client gone */ }
+    }
+  };
+
   // Streaming-response state. When the Mere handler decides its
   // output is too big to buffer (large CSV export, tail -f style
   // log stream, etc.) it can call `http_stream_start ct status` to
@@ -209,15 +224,7 @@ function makeHttpGlue() {
       try { activeRes.write(readCStr(ptr)); } catch (e) { /* client gone */ }
     },
     sse_broadcast: (channelPtr, payloadPtr) => {
-      const channel = readCStr(channelPtr);
-      const payload = readCStr(payloadPtr);
-      const set = sseChannels.get(channel);
-      if (!set) return;
-      const lines = payload.split("\n");
-      const frame = lines.map((l) => "data: " + l).join("\n") + "\n\n";
-      for (const res of set) {
-        try { res.write(frame); } catch (e) { /* client gone */ }
-      }
+      broadcast(readCStr(channelPtr), readCStr(payloadPtr));
     },
     http_current_body: () => currentBodyPtr,
     http_set_status: (code) => { currentStatus = code | 0; },
@@ -264,7 +271,7 @@ function makeHttpGlue() {
     }
   };
 
-  return { glue, attach };
+  return { glue, attach, broadcast };
 }
 
 module.exports = { makeHttpGlue };

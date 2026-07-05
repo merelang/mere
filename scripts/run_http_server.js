@@ -12,6 +12,7 @@ const path = require("path");
 const { makeHttpGlue } = require("../contrib/http/http.glue.js");
 const { makePgEnv } = require("./pg_env.js");
 const { makeHttpFetchEnv } = require("./http_fetch_env.js");
+const { makeSseRedisBridge } = require("./sse_redis_bridge.js");
 
 if (process.argv.length < 3) {
   console.error("usage: node run_http_server.js <path-to-wasm>");
@@ -64,8 +65,9 @@ const wasmPath = process.argv[2];
     return ptr;
   };
 
-  const { glue: httpGlue, attach: attachHttp } = makeHttpGlue();
+  const { glue: httpGlue, attach: attachHttp, broadcast } = makeHttpGlue();
   const fetchEnv = makeHttpFetchEnv({ readCStr, writeStr });
+  const sseRedisBridge = makeSseRedisBridge({ broadcast, readCStr });
 
   // Reuse the same set of env imports as scripts/run_wasm.js so any
   // extern fn a Mere program declares (getpid, sleep, str_of_float, …)
@@ -240,6 +242,7 @@ const wasmPath = process.argv[2];
     // run_wasm.js can offer the same capability. See its module
     // header for the extern signatures.
     ...fetchEnv,
+    ...sseRedisBridge,
     ...httpGlue,
   };
 

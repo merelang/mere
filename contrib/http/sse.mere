@@ -25,3 +25,27 @@
 //                          .onmessage = (e) => JSON.parse(e.data)
 
 extern fn sse_broadcast: str -> str -> unit;
+
+// Bridge a Redis pubsub channel into the SSE broadcast for the same
+// channel name. On first call, spins up a persistent RESP2 subscriber
+// on host:port (via `scripts/sse_redis_bridge.js`) and forwards every
+// incoming `message` to the JS-side broadcast path — reaching every
+// local SSE client. Idempotent per channel; safe to call at startup.
+//
+// Pattern for multi-process SSE deployments:
+//
+//   POST /api/msg   handler stores + calls `redis_publish "chat" json`
+//                   (from contrib/db/redis)
+//   startup         `sse_bridge_from_redis "chat" "127.0.0.1" 6379`
+//   GET /sse/chat   handled by contrib/http glue as usual
+//
+//   Result: publishes on instance A reach SSE clients on instance A
+//   *and* B, because both instances have subscribed to the same
+//   Redis channel.
+//
+// The bridge auto-reconnects with a 1 s backoff on socket error /
+// close, and does NOT survive a Redis server restart cleanly for
+// in-flight messages (they land nowhere). Use redis_publish +
+// sse_broadcast side-by-side if in-flight loss during Redis restart
+// matters.
+extern fn sse_bridge_from_redis: str -> str -> int -> unit;

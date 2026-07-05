@@ -71,6 +71,7 @@ example exercises all three variants (including two-capture
 | [client_auth](https://github.com/merelang/mere/blob/main/examples/http_client_auth.mere) | outbound HTTP — `http_fetch_h`, Bearer auth, per-call timeout, response header read | 80 |
 | [gh_stars](https://github.com/merelang/mere/blob/main/examples/gh_stars.mere) | CLI — GitHub repo star count via `http_fetch_h` (optional `GITHUB_TOKEN` Bearer) + rate-limit header echo | 110 |
 | [metrics_demo](https://github.com/merelang/mere/blob/main/examples/http_metrics_demo.mere) | Prometheus-style `/metrics` endpoint — counters + gauges + `with_metrics` middleware (auto-counts `http_requests_total{method,path}` + duration) via `contrib/http/metrics` | 70 |
+| [pubsub_chat](https://github.com/merelang/mere/blob/main/examples/http_pubsub_chat.mere) | multi-instance SSE chat — POST publishes to Redis, JS-side subscriber bridges into `sse_broadcast` so listeners on *any* instance see every message (verified: 2 instances on :8080 + :8081, POST → both SSE streams) | 100 |
 
 ## todo_app
 
