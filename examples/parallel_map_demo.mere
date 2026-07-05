@@ -1,0 +1,47 @@
+// examples/parallel_map_demo.mere — 4 shell commands in parallel via
+// `contrib/os/parallel_map`. Verifies "wallclock ≈ max(child times)",
+// not sum.
+
+extern fn now_ms: unit -> int;
+
+import "../contrib/os/parallel_map.mere";
+
+// Four sleep-then-echo commands. Each sleeps 1 second then prints
+// its label. Total wallclock should be ~1 s (parallel), not ~4 s.
+let cmds =
+  Cons ("sleep 1 && echo A",
+  Cons ("sleep 1 && echo B",
+  Cons ("sleep 1 && echo C",
+  Cons ("sleep 1 && echo D",
+  Nil)))) in
+
+let t0 = now_ms () in
+let results = parallel_map cmds in
+let dt = now_ms () - t0 in
+
+let _ = print ("wallclock: " ++ show dt ++ " ms  (expect ~1000, not ~4000)") in
+let _ = print "results (order preserved despite parallel exec):" in
+let rec show_each = fn (xs: str list) -> fn (i: int) ->
+  match xs with
+  | Nil -> ()
+  | Cons (r, rest) ->
+    let _ = print ("  [" ++ show i ++ "] " ++ r) in
+    show_each rest (i + 1) in
+let _ = show_each results 0 in
+
+// Second demo: mixed timings — some children fast, some slow.
+// Total wallclock should be ~max(individual), the slowest is 2 s.
+let _ = print "" in
+let _ = print "mixed timings (max = 2 s):" in
+let cmds2 =
+  Cons ("sleep 0 && echo instant",
+  Cons ("sleep 2 && echo two-sec",
+  Cons ("sleep 1 && echo one-sec",
+  Nil))) in
+let t1 = now_ms () in
+let r2 = parallel_map cmds2 in
+let dt2 = now_ms () - t1 in
+let _ = print ("wallclock: " ++ show dt2 ++ " ms  (expect ~2000, not ~3000)") in
+let _ = show_each r2 0 in
+
+0
