@@ -1,0 +1,76 @@
+// examples/db_redis_queue.mere — Redis list-backed work queue.
+//
+// Reliable-queue pattern used by every language's background-job
+// library (Sidekiq, RQ, Bull, Celery): producers LPUSH jobs onto a
+// list, consumers BRPOP with a timeout. Redis blocks on the server
+// side so consumers don't busy-poll.
+//
+// Demo flow (single process for the demo):
+//   1. Push 4 jobs onto queue "jobs" (LPUSH → new length echoed).
+//   2. Peek queue depth via redis_queue_len.
+//   3. Consume 3 jobs one-at-a-time with redis_queue_pop.
+//   4. Consume the last one via redis_queue_pop_many (with a lower-
+//      priority "jobs.slow" queue that's empty, so it falls back
+//      to "jobs").
+//   5. Show the empty-queue timeout path (1-second BRPOP → None).
+//
+// Setup:
+//   docker run -d --name mere-redis-q -p 15602:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_queue.mere > /tmp/dbrq.wat
+//   wat2wasm --enable-tail-call /tmp/dbrq.wat -o /tmp/dbrq.wasm
+//   node scripts/run_wasm.js /tmp/dbrq.wasm
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_queue.mere";
+
+let show_job = fn (m) ->
+  match m with
+  | None -> "None (timeout)"
+  | Some (q, p) -> "Some (queue=" ++ q ++ ", payload=" ++ p ++ ")"
+  ;
+
+let host = "127.0.0.1" in
+let port = 15602 in
+let fd = redis_connect host port in
+if fd < 0 then
+  let _ = print "redis connect failed" in ()
+else
+
+  // Start clean — DEL the queue in case a prior run left jobs behind.
+  let _ = redis_command fd (Cons ("DEL", Cons ("jobs", Cons ("jobs.slow", Nil)))) in
+
+  // 1. Enqueue.
+  let n1 = redis_queue_push fd "jobs" "email-alice"    in
+  let n2 = redis_queue_push fd "jobs" "email-bob"      in
+  let n3 = redis_queue_push fd "jobs" "resize-thumb-1" in
+  let n4 = redis_queue_push fd "jobs" "resize-thumb-2" in
+  let _ = print ("pushed: lengths after each = " ++ show n1
+              ++ ", " ++ show n2 ++ ", " ++ show n3 ++ ", " ++ show n4) in
+
+  // 2. Depth.
+  let depth = redis_queue_len fd "jobs" in
+  let _ = print ("queue depth: " ++ show depth) in
+
+  // 3. Dequeue three (server should return them in FIFO order —
+  //    LPUSH pushes to head, BRPOP pops from tail).
+  let j1 = redis_queue_pop fd "jobs" 5 in
+  let _ = print ("pop 1: " ++ show_job j1) in
+  let j2 = redis_queue_pop fd "jobs" 5 in
+  let _ = print ("pop 2: " ++ show_job j2) in
+  let j3 = redis_queue_pop fd "jobs" 5 in
+  let _ = print ("pop 3: " ++ show_job j3) in
+
+  // 4. Multi-queue pop. Priority order: jobs.slow → jobs. slow is
+  //    empty so this falls through to jobs and returns the 4th one.
+  let j4 = redis_queue_pop_many fd
+             (Cons ("jobs.slow", Cons ("jobs", Nil))) 5 in
+  let _ = print ("pop 4 (multi): " ++ show_job j4) in
+
+  // 5. Empty queue + 1s timeout → None.
+  let j5 = redis_queue_pop fd "jobs" 1 in
+  let _ = print ("pop 5 (empty, 1s timeout): " ++ show_job j5) in
+
+  let _ = redis_close fd in
+  ()

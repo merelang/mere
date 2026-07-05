@@ -1,0 +1,113 @@
+// contrib/db/redis_queue.mere — Redis list-backed work queue.
+//
+// Companion to `contrib/db/redis_pubsub`. Pub/sub is broadcast-and-
+// forget: every subscriber sees every message, and offline
+// subscribers miss deliveries entirely. Work queues are the opposite
+// discipline — exactly one worker claims each job, and jobs pile up
+// on the server until someone dequeues them.
+//
+// Standard Redis reliable-queue pattern:
+//
+//   Producer: LPUSH queue "payload"        — O(1), returns new length
+//   Consumer: BRPOP  queue timeout_s       — blocks up to timeout_s,
+//                                            returns [queue, payload]
+//                                            or nil on timeout
+//
+// BRPOP naturally supports priority-ordered multi-queue reads: pass
+// N queue names, Redis returns from the first non-empty one, so a
+// worker can drain a "critical" queue before "normal".
+//
+// This module wraps LPUSH / BRPOP / LLEN plus an event-loop helper.
+// It does NOT implement:
+//
+//   - Ack / retry: a worker that crashes mid-job drops that job.
+//     For at-least-once semantics, use a "processing" list per
+//     worker (RPOPLPUSH) and reconciliation on restart. Out of
+//     scope for the MVP.
+//   - Priorities beyond the multi-queue BRPOP trick.
+//   - Delayed jobs (ZADD with score = eta) — a separate module.
+//
+// Public API:
+//
+//   redis_queue_push     : int -> str -> str        -> int
+//                          (fd, queue, payload -> new_length; -1 on error)
+//
+//   redis_queue_pop      : int -> str -> int        -> (str * str) option
+//                          (fd, queue, timeout_s
+//                           -> Some (queue, payload) on delivery,
+//                              None on timeout)
+//
+//   redis_queue_pop_many : int -> str list -> int   -> (str * str) option
+//                          Same as pop, but reads the FIRST non-
+//                          empty queue among `queues`. Priority
+//                          order: earlier queues in the list win.
+//
+//   redis_queue_len      : int -> str               -> int
+//                          Current queue depth. -1 on error.
+//
+//   redis_queue_run      : int -> str list -> int
+//                              -> ((str * str) -> bool)
+//                              -> unit
+//                          Event-loop helper. Calls `handler (queue,
+//                          payload)` for each dequeued job. Handler
+//                          returns `false` to break out (e.g. after
+//                          an admin "quit" job). On timeout the
+//                          handler is NOT called; the loop retries.
+
+import "redis.mere";
+
+let redis_queue_push = fn (fd: int) -> fn (queue: str) -> fn (payload: str) ->
+  match redis_command fd
+          (Cons ("LPUSH", Cons (queue, Cons (payload, Nil)))) with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+let redis_queue_len = fn (fd: int) -> fn (queue: str) ->
+  match redis_command fd (Cons ("LLEN", Cons (queue, Nil))) with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+// Send BRPOP with N queue names + a final timeout arg. Same wire
+// format as any other RESP command, but we tweak the tcp read
+// timeout to (timeout_s + slack) so the socket outlives the server-
+// side blocking wait. `timeout_s == 0` means block forever on both
+// sides.
+let _rq_brpop = fn (fd: int) -> fn (queues: str list) -> fn (timeout_s: int) ->
+  let cmd_args = list_append (Cons ("BRPOP", Nil))
+                    (list_append queues
+                      (Cons (show timeout_s, Nil))) in
+  let socket_timeout_ms = if timeout_s <= 0 then 0
+                         else (timeout_s + 5) * 1000 in
+  let _ = tcp_set_timeout fd socket_timeout_ms in
+  let r = redis_command fd cmd_args in
+  let _ = tcp_set_timeout fd 0 in
+  match r with
+  | RRArr (Cons (RRBulk (Some (q, _)),
+             Cons (RRBulk (Some (p, _)), Nil))) -> Some (q, p)
+  // Timeout: RESP2 nil-array, RESP3 null. Both surface here.
+  | _ -> None
+  ;
+
+let redis_queue_pop = fn (fd: int) -> fn (queue: str) -> fn (timeout_s: int) ->
+  _rq_brpop fd (Cons (queue, Nil)) timeout_s
+  ;
+
+let redis_queue_pop_many = fn (fd: int) -> fn (queues: str list)
+                        -> fn (timeout_s: int) ->
+  _rq_brpop fd queues timeout_s
+  ;
+
+let rec redis_queue_run = fn (fd: int) -> fn (queues: str list)
+                       -> fn (timeout_s: int)
+                       -> fn (handler: (str * str) -> bool) ->
+  match _rq_brpop fd queues timeout_s with
+  | None ->
+    // Timeout — retry. If the caller wants to bound total wait time
+    // they should structure the timeout parameter itself.
+    redis_queue_run fd queues timeout_s handler
+  | Some job ->
+    if handler job then redis_queue_run fd queues timeout_s handler
+    else ()
+  ;
