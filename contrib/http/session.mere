@@ -1,0 +1,109 @@
+// contrib/http/session.mere — in-memory cookie session store.
+//
+// Every HTTP demo with login was hand-rolling the same five-line
+// pattern: allocate a `map_new ()`, extract session id via
+// `session_id (http_get_header "Cookie")`, look up the user,
+// mint a new id in the login handler + set a `Set-Cookie` header.
+// This module consolidates that into a small helper set.
+//
+// The session store is a plain `map str str` — session_id -> user
+// identifier. Storage is in-process only; sessions do NOT survive a
+// server restart. That matches every existing demo's semantics; a
+// production deployment would swap the store for a KV / PG-backed
+// implementation with the same fn shape.
+//
+// Session IDs are minted via `gen_request_id ()` (16 hex chars from
+// crypto.randomBytes on the Node host). Random IDs make cookies
+// non-guessable in a way the older `"s-" ++ user` demos weren't.
+//
+// Public API:
+//
+//   session_new_store ()             -> store
+//                                        (opaque — pass around by value)
+//
+//   session_current store            -> str
+//                                        Current user id, or "" if not
+//                                        logged in. Reads the Cookie
+//                                        header via http_get_header.
+//
+//   session_login store user         -> str
+//                                        Mints a new session id,
+//                                        remembers user, sets the
+//                                        Set-Cookie header. Returns
+//                                        the id in case the caller
+//                                        wants to log it.
+//
+//   session_logout store             -> unit
+//                                        Removes the current session
+//                                        from the store + emits a
+//                                        `Max-Age=0` Set-Cookie so
+//                                        the browser drops it.
+//
+//   session_require store login_url  -> str option
+//                                        `Some user` if logged in;
+//                                        `None` after issuing a
+//                                        303 redirect to `login_url`.
+//                                        Handlers pattern-match on
+//                                        the result: `Some u -> …`
+//                                        for authed flows, `None ->
+//                                        "redirecting\n"` for the
+//                                        bounce.
+
+extern fn http_get_header: str -> str;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_set_status: int -> unit;
+extern fn gen_request_id: unit -> str;
+
+import "cookie.mere";
+
+// Store constructor. Opaque to callers — treat the return value as
+// a session_store handle and pass it back to the other fns. Under
+// the hood it's a plain `map`, so pre-migration demos that read
+// `map_has` directly still compile.
+let session_new_store = fn (u: unit) -> map_new ();
+
+// Read the session id from the Cookie header and look up the user.
+// `""` if either the cookie is absent or the id isn't in the store.
+let session_current = fn (store) ->
+  let sid = session_id (http_get_header "Cookie") in
+  if str_eq sid "" then ""
+  else if map_has store sid then map_get store sid
+  else ""
+  ;
+
+let _session_cookie_header = fn (sid: str) ->
+  "session=" ++ sid ++ "; Path=/; HttpOnly; SameSite=Lax"
+  ;
+
+// Mint a fresh session id, remember the mapping, emit Set-Cookie.
+// Returns the id — usually ignored, occasionally logged.
+let session_login = fn (store) -> fn (user: str) ->
+  let sid = gen_request_id () in
+  let _ = map_set store sid user in
+  let _ = http_set_header "Set-Cookie" (_session_cookie_header sid) in
+  sid
+  ;
+
+// Drop the current session on both sides — the map entry and the
+// browser's cookie (via Max-Age=0). Idempotent: safe to call when
+// no session is active.
+let session_logout = fn (store) ->
+  let sid = session_id (http_get_header "Cookie") in
+  let _ = if map_has store sid then map_delete store sid else () in
+  let _ = http_set_header "Set-Cookie"
+            "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax" in
+  ()
+  ;
+
+// Guard for protected handlers. Returns `Some user` when the caller
+// is logged in; on `None`, has already emitted a 303 to `login_url`,
+// so handlers should return a short "redirecting" body without any
+// further work.
+let session_require = fn (store) -> fn (login_url: str) ->
+  let u = session_current store in
+  if str_eq u "" then
+    let _ = http_set_header "Location" login_url in
+    let _ = http_set_status 303 in
+    (None : str option)
+  else Some u
+  ;
