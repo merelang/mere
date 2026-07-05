@@ -21,6 +21,32 @@ let check_raises name f =
     incr pass;
     Printf.printf "PASS  %s\n" name
 
+(* Like check_raises but asserts the exception's Printexc string
+   contains a given substring — useful for regressing an improved
+   error-message hint against future refactors. *)
+let check_raises_containing name substr f =
+  match f () with
+  | _ ->
+    incr fail;
+    Printf.printf "FAIL  %s (expected exception)\n" name
+  | exception e ->
+    let msg = Printexc.to_string e in
+    let has_substr =
+      let n = String.length substr in
+      let m = String.length msg in
+      let rec scan i = i + n <= m
+                       && (String.sub msg i n = substr || scan (i + 1)) in
+      n = 0 || scan 0
+    in
+    if has_substr then begin
+      incr pass;
+      Printf.printf "PASS  %s\n" name
+    end else begin
+      incr fail;
+      Printf.printf "FAIL  %s (expected exception msg containing %S, got %S)\n"
+        name substr msg
+    end
+
 let () =
   check "version is 0.1.0" Version.v "0.1.0";
 
@@ -1663,6 +1689,36 @@ let () =
     (Pipeline.type_of "str_unescape") "(str -> str)";
   check_raises "str_unescape unknown escape"
     (fun () -> Pipeline.process "str_unescape \"\\\\x\"");
+
+  (* --- string literal `\<newline>` line continuation --- *)
+  check "line continuation joins two lines"
+    (Pipeline.process "\"long value with \\\n   next\"")
+    "\"long value with next\"";
+  check "line continuation with no indent"
+    (Pipeline.process "\"foo\\\nbar\"") "\"foobar\"";
+  check "line continuation eats tabs too"
+    (Pipeline.process "\"a\\\n\t\tb\"") "\"ab\"";
+  check "line continuation preserves trailing whitespace before backslash"
+    (Pipeline.process "\"a \\\n b\"") "\"a b\"";
+
+  (* --- friendlier error for `let SCREAMING_SNAKE = …` bindings ---
+     The name looks like a wanted UPPER_SNAKE constant but Mere reserves
+     uppercase-first identifiers for constructors. The typer's hint
+     should recommend lowercasing. *)
+  check_raises_containing "SCREAMING_SNAKE hint suggests lower"
+    "rename to `db_url`"
+    (fun () -> Pipeline.process "let DB_URL = \"x\" in DB_URL");
+  check_raises_containing "SCREAMING_SNAKE hint for MAX"
+    "rename to `max`"
+    (fun () -> Pipeline.process "let MAX = 100 in MAX");
+  (* But the heuristic must NOT trigger on real constructor-look-alikes
+     (single letters like `X`, or `Cnos` which is a Cons typo). *)
+  check_raises_containing "single-letter capital: no snake hint"
+    "unknown constructor"
+    (fun () -> Pipeline.process "let X = 1 in X");
+  check_raises_containing "Cnos typo: did-you-mean Cons"
+    "did you mean `Cons`"
+    (fun () -> Pipeline.process "let x = Cnos (1, Nil) in 0");
 
   (* --- file I/O: read_file / write_file (round-trip via /tmp) --- *)
   check "read_file type"
