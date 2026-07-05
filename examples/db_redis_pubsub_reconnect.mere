@@ -1,0 +1,87 @@
+// examples/db_redis_pubsub_reconnect.mere — auto-reconnect subscribe loop.
+//
+// Demonstrates `redis_pubsub_run_forever` — the reconnecting event
+// loop on top of `redis_pubsub`. The demo uses a single process to
+// stage the failure end-to-end:
+//
+//   1. Subscribe on channel "events" via redis_pubsub_run_forever.
+//   2. On the first PSSubscribed (initial connect), publish 2
+//      messages from a separate connection.
+//   3. Handler counts each PSMessage. After 2 deliveries, send
+//      `CLIENT KILL TYPE PUBSUB` from the pub fd — Redis forcibly
+//      closes the subscribe fd. The next read on it hits EOF and
+//      the loop sees PSClosed.
+//   4. On PSClosed, the handler returns `true` so the loop sleeps
+//      500 ms then reconnects + resubscribes.
+//   5. On the SECOND PSSubscribed (after reconnect), publish 2 more
+//      messages.
+//   6. After 4 total deliveries the handler returns `false` and the
+//      loop exits cleanly.
+//
+// Setup:
+//   docker run -d --name mere-redis-rc -p 15603:6379 redis:7
+//
+// Usage:
+//   ./mere -w examples/db_redis_pubsub_reconnect.mere > /tmp/dbrc.wat
+//   wat2wasm --enable-tail-call /tmp/dbrc.wat -o /tmp/dbrc.wasm
+//   node scripts/run_wasm.js /tmp/dbrc.wasm
+
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_pubsub.mere";
+
+let host = "127.0.0.1" in
+let port = 15603 in
+
+// A separate publish connection — reused across the reconnect.
+let pub_fd = redis_connect host port in
+if pub_fd < 0 then
+  let _ = print "pub connect failed" in ()
+else
+
+  // Counters live in a small map so the handler closure can mutate
+  // them. Keys: "msgs" (message count), "kills" (already killed?).
+  let st = map_new () in
+  let _ = map_set st "msgs" 0 in
+  let _ = map_set st "kills" 0 in
+
+  let handler = fn (m: pubsub_msg) ->
+    let _ = print ("event: " ++ redis_pubsub_show m) in
+    match m with
+    | PSSubscribed (_, _) ->
+      // Publish 2 messages on this fresh subscription. Runs on both
+      // the initial connect AND the reconnect after CLIENT KILL.
+      let n1 = redis_publish pub_fd "events" "msg-A" in
+      let n2 = redis_publish pub_fd "events" "msg-B" in
+      let _ = print ("  publish counts: " ++ show n1 ++ ", " ++ show n2) in
+      true
+    | PSMessage (_, _) ->
+      let n = map_get st "msgs" + 1 in
+      let _ = map_set st "msgs" n in
+      let _ = print ("  message #" ++ show n) in
+      if n == 2 && map_get st "kills" == 0 then
+        // Force-close the subscribe connection. TYPE PUBSUB matches
+        // ONLY subscribed clients, so pub_fd itself survives.
+        let _ = print "  -> CLIENT KILL TYPE PUBSUB" in
+        let _ = map_set st "kills" 1 in
+        let r = redis_command pub_fd
+                  (Cons ("CLIENT",
+                   Cons ("KILL",
+                   Cons ("TYPE",
+                   Cons ("PUBSUB", Nil))))) in
+        let _ = print ("  kill reply: " ++ redis_show r) in
+        true
+      else if n >= 4 then
+        let _ = print "  reached 4 messages — exiting loop" in
+        false
+      else true
+    | PSClosed ->
+      let _ = print "  (connection closed — will reconnect)" in
+      true
+    | _ -> true in
+
+  let sub = PubsubSub { channels = Cons ("events", Nil),
+                        patterns = Nil } in
+
+  let _ = redis_pubsub_run_forever host port sub 0 500 handler in
+  let _ = redis_close pub_fd in
+  ()

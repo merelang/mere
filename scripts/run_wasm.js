@@ -103,6 +103,17 @@ const wasmPath = process.argv[2];
     rand: () => Math.floor(Math.random() * 0x7fffffff),
     srand: (_seed) => {},  // JS Math.random can't be seeded; no-op
     sleep: (_n) => 0,       // skip blocking sleep in JS context
+    // sleep_ms(ms) — synchronous millisecond sleep via Atomics.wait
+    // on a private SharedArrayBuffer. Blocks the whole Wasm frame
+    // (which is what Mere programs want when they call it), so this
+    // is only useful for CLIs / worker loops that WANT to pause; a
+    // web server should not call it or all requests will stall.
+    sleep_ms: (ms) => {
+      if (!ms || ms <= 0) return 0;
+      const sab = new SharedArrayBuffer(4);
+      Atomics.wait(new Int32Array(sab), 0, 0, ms);
+      return 0;
+    },
     abs_int: (n) => Math.abs(n | 0),
     getenv: (namePtr) => {
       const name = readCStr(namePtr);

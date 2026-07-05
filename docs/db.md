@@ -333,6 +333,7 @@ command needed) and cleans up on process exit.
 | [db_redis_pubsub](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub.mere) | Redis PUB/SUB — two-fd `pubsub_client`; SUBSCRIBE + PSUBSCRIBE classified into a `pubsub_msg` variant (message / pmessage / subscribed / unsubscribed / pong / timeout / closed) via `contrib/db/redis_pubsub` |
 | [db_redis_push](https://github.com/merelang/mere/blob/main/examples/db_redis_push.mere) | CLIENT TRACKING → real `RRPush` invalidation on key mutation |
 | [db_redis_queue](https://github.com/merelang/mere/blob/main/examples/db_redis_queue.mere) | List-backed work queue — LPUSH producer + BRPOP consumer with priority multi-queue fallback + timeout path via `contrib/db/redis_queue` |
+| [db_redis_pubsub_reconnect](https://github.com/merelang/mere/blob/main/examples/db_redis_pubsub_reconnect.mere) | `redis_pubsub_run_forever` — auto-reconnects + resubscribes after `CLIENT KILL TYPE PUBSUB` mid-run; handler counts 4 deliveries across the fd swap |
 
 *Cluster / high availability*
 
