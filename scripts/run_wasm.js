@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const { makePgEnv } = require('./pg_env.js');
+const { makeHttpFetchEnv } = require('./http_fetch_env.js');
 
 if (process.argv.length < 3) {
   console.error("usage: node run_wasm.js <path-to-wasm>");
@@ -149,6 +150,16 @@ const wasmPath = process.argv[2];
     getMemory: () => memory.buffer,
     bumpAlloc: (n) => bumpAlloc(n),
   }));
+  // Outbound HTTP (http_fetch and friends) — same curl-based
+  // implementation as run_http_server.js. Any Mere CLI that declares
+  // `extern fn http_fetch: ...` can now make outbound calls too.
+  const writeStr = (s) => {
+    const utf8 = Buffer.from((s || "") + "\0", "utf8");
+    const ptr = bumpAlloc(utf8.length);
+    new Uint8Array(memory.buffer).set(utf8, ptr);
+    return ptr;
+  };
+  Object.assign(env, makeHttpFetchEnv({ readCStr, writeStr }));
 
   // Allocate on the shared Mere heap by advancing `$__lang_bump`
   // (mirrors the newer run_http_server.js). Grows memory one 64KB

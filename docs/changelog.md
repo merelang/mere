@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `http_fetch` shared across both runners
+
+`http_fetch` and friends now live in `scripts/http_fetch_env.js` and
+plug into both `run_http_server.js` (as before) and `run_wasm.js`
+(new). Any Mere CLI that declares `extern fn http_fetch: ...` can
+now make outbound calls under the plain runner — previously they
+had to boot the HTTP server runner just to get the extern env.
+
+`examples/http_client_auth.mere` dropped its unused
+`extern fn http_serve` declaration and runs identically under both
+runners (verified against httpbin.org).
+
+Also refreshed `docs/http-demos.md`: added a "Router API" primer
+covering `route` / `route_pattern` / `route_prefix`, and catalog
+entries for the recent `blog` and `client_auth` demos.
+
 ## 2026-07-05 — `contrib/http/client`: request + response headers, per-call timeout
 
 The outbound `http_fetch` was fixed to a bare `(method, url, body)`
