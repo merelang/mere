@@ -1,0 +1,79 @@
+// http_metrics_demo: Prometheus-style /metrics endpoint.
+//
+// Dogfoods `contrib/http/metrics`. Three handlers:
+//   GET  /             — landing page, bumps `home_visits_total`
+//   GET  /work         — deliberately slow (sleep_ms 50) so the
+//                        duration counter has a visible spike
+//   POST /error        — bumps `errors_total` (business counter)
+//   GET  /metrics      — Prometheus text-format dump
+//
+// The `with_metrics` middleware auto-increments
+// `http_requests_total{method, path}` +
+// `http_request_duration_ms_sum` / `_count` for every request
+// (including /metrics itself — Prometheus scrapes get counted).
+//
+// Try:
+//   ./mere -w examples/http_metrics_demo.mere > /tmp/hmd.wat
+//   wat2wasm --enable-tail-call /tmp/hmd.wat -o /tmp/hmd.wasm
+//   node scripts/run_http_server.js /tmp/hmd.wasm
+//   for i in 1 2 3; do curl -s http://localhost:8080/; done
+//   curl -s http://localhost:8080/work
+//   curl -s -X POST http://localhost:8080/error
+//   curl -s http://localhost:8080/metrics
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn sleep_ms: int -> int;
+
+import "../contrib/http/router.mere";
+import "../contrib/http/metrics.mere";
+
+// Declare metric metadata (kind + HELP). Optional but recommended
+// so scrapers know how to interpret each series.
+let _ = metric_declare_counter "home_visits_total"          "Total visits to /" in
+let _ = metric_declare_counter "errors_total"               "Business-error counter" in
+let _ = metric_declare_counter "http_requests_total"        "Total HTTP requests" in
+let _ = metric_declare_counter "http_request_duration_ms_sum"
+                                "Cumulative request duration in ms (partition of `_count`)" in
+let _ = metric_declare_counter "http_request_duration_ms_count"
+                                "Total requests seen by the duration counter" in
+
+let home = fn (req: str) ->
+  let _ = metric_inc "home_visits_total" Nil in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><title>metrics demo</title>" ++
+  "<h1>metrics demo</h1>" ++
+  "<ul>" ++
+  "<li>GET <a href=/work>/work</a> (slow endpoint)</li>" ++
+  "<li>POST /error (curl -X POST /error)</li>" ++
+  "<li>GET <a href=/metrics>/metrics</a></li>" ++
+  "</ul>\n" ;
+
+let work = fn (req: str) ->
+  let _ = sleep_ms 50 in
+  let _ = http_set_content_type "text/plain" in
+  "did some work\n" ;
+
+let error_h = fn (req: str) ->
+  let _ = metric_inc "errors_total" Nil in
+  let _ = http_set_status 500 in
+  let _ = http_set_content_type "text/plain" in
+  "boom\n" ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found\n" ;
+
+let routes =
+  Cons (route "GET"  "/"        home,
+  Cons (route "GET"  "/work"    work,
+  Cons (route "POST" "/error"   error_h,
+  Cons (route "GET"  "/metrics" metrics_handler,
+  Nil)))) in
+
+let handle = with_metrics (router routes not_found) in
+let _ = print "metrics demo on :8080" in
+let _ = http_serve 8080 handle in
+0

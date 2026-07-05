@@ -1,0 +1,176 @@
+// contrib/http/metrics.mere — Prometheus-style in-process metrics.
+//
+// Provides a small registry of counters and gauges plus a text-
+// format exporter and a `GET /metrics` handler suitable for direct
+// use in a route table. Also ships a middleware wrapper that
+// auto-increments per-request counters (method + path + duration).
+//
+// Scope of the MVP:
+//   - Counters (`metric_inc` / `metric_add`) — monotonically
+//     increasing, one int per (name, labels) key.
+//   - Gauges (`metric_set`) — set to arbitrary int.
+//   - Optional labels — `(str * str) list`, empty means no labels.
+//   - HELP / TYPE lines rendered when the metric is declared via
+//     `metric_declare_counter` / `metric_declare_gauge`.
+//   - Middleware `with_metrics` — wraps a handler; increments
+//     `http_requests_total{method, path}` and adds request duration
+//     into `http_request_duration_ms_sum` + `_count` (Prom's
+//     "summary" idiom, no percentiles).
+//
+// Deferred (out of scope for MVP):
+//   - Histograms with configurable buckets.
+//   - Float values — everything is int (millisecond timings, counts).
+//   - Per-instance uid / process_start_time_seconds — trivial to add
+//     via metric_set, left to the caller.
+//   - Concurrent write safety — Mere is single-threaded per Wasm
+//     instance so there's no race, but the current storage would
+//     race under a hypothetical multi-worker refactor.
+//
+// Public API:
+//
+//   metric_declare_counter name help    — register + attach HELP/TYPE
+//   metric_declare_gauge   name help
+//   metric_inc  name labels             — counter += 1
+//   metric_add  name labels n           — counter += n
+//   metric_set  name labels v           — gauge = v
+//   metrics_render ()                   — Prometheus text-format
+//   metrics_handler req                 — mount as GET /metrics
+//   with_metrics handle                 — middleware wrapper
+
+extern fn http_set_content_type: str -> unit;
+extern fn now_ms: unit -> int;
+
+// Storage. Three maps: values keyed by "name" or "name{labels}",
+// kinds and helps keyed by bare name.
+let _metrics_values = map_new () ;
+let _metrics_kinds  = map_new () ;
+let _metrics_helps  = map_new () ;
+
+let metric_declare_counter = fn (name: str) -> fn (help: str) ->
+  let _ = map_set _metrics_kinds name "counter" in
+  let _ = if str_eq help "" then () else map_set _metrics_helps name help in
+  ()
+  ;
+
+let metric_declare_gauge = fn (name: str) -> fn (help: str) ->
+  let _ = map_set _metrics_kinds name "gauge" in
+  let _ = if str_eq help "" then () else map_set _metrics_helps name help in
+  ()
+  ;
+
+// Encode a label list into `{k1="v1",k2="v2"}` (or "" if empty).
+// Values are NOT escaped — Prometheus text spec allows `\"`, `\n`,
+// `\\` escapes inside quoted values, but the demo callers don't use
+// characters that need it. Escape here if you feed user input.
+let rec _mm_encode_labels_walk = fn (xs: (str * str) list) -> fn (first: bool) ->
+  match xs with
+  | Nil -> ""
+  | Cons (kv, rest) ->
+    let (k, v) = kv in
+    let sep = if first then "" else "," in
+    sep ++ k ++ "=\"" ++ v ++ "\"" ++ _mm_encode_labels_walk rest false
+  ;
+
+let _mm_encode_labels = fn (labels: (str * str) list) ->
+  match labels with
+  | Nil -> ""
+  | _ -> "\{" ++ _mm_encode_labels_walk labels true ++ "}"
+  ;
+
+let _mm_encode_key = fn (name: str) -> fn (labels: (str * str) list) ->
+  name ++ _mm_encode_labels labels
+  ;
+
+let metric_inc = fn (name: str) -> fn (labels: (str * str) list) ->
+  let key = _mm_encode_key name labels in
+  let cur = if map_has _metrics_values key
+            then map_get _metrics_values key else 0 in
+  let _ = map_set _metrics_values key (cur + 1) in
+  ()
+  ;
+
+let metric_add = fn (name: str) -> fn (labels: (str * str) list)
+              -> fn (n: int) ->
+  let key = _mm_encode_key name labels in
+  let cur = if map_has _metrics_values key
+            then map_get _metrics_values key else 0 in
+  let _ = map_set _metrics_values key (cur + n) in
+  ()
+  ;
+
+let metric_set = fn (name: str) -> fn (labels: (str * str) list)
+              -> fn (v: int) ->
+  let _ = map_set _metrics_values (_mm_encode_key name labels) v in
+  ()
+  ;
+
+// Split "name" or "name{...}" back into the bare metric name for
+// HELP/TYPE lookup.
+let _mm_key_name = fn (key: str) ->
+  let idx = str_index_of key "\{" in
+  if idx < 0 then key else substring key 0 idx
+  ;
+
+// Render the whole registry into Prometheus text-format. HELP and
+// TYPE lines are emitted once per name, on first appearance in the
+// iteration order. That's fine for demo consumption; a stricter
+// producer would group all lines of one metric together.
+let metrics_render = fn (u: unit) ->
+  let buf = strbuf_new () in
+  let emitted = map_new () in
+  let _ = map_iter _metrics_values (fn (k: str) -> fn (v: int) ->
+    let name = _mm_key_name k in
+    let _ = if map_has emitted name then ()
+            else
+              let _ = map_set emitted name 1 in
+              let help = if map_has _metrics_helps name
+                         then map_get _metrics_helps name else "" in
+              let kind = if map_has _metrics_kinds name
+                         then map_get _metrics_kinds name else "gauge" in
+              let _ = if str_eq help "" then ()
+                      else let _ = strbuf_push buf
+                             ("# HELP " ++ name ++ " " ++ help ++ "\n") in () in
+              let _ = strbuf_push buf
+                       ("# TYPE " ++ name ++ " " ++ kind ++ "\n") in
+              () in
+    strbuf_push buf (k ++ " " ++ show v ++ "\n")) in
+  strbuf_to_str buf
+  ;
+
+// Ready-to-mount handler. Sets the standard Prometheus content
+// type and returns the render.
+let metrics_handler = fn (req: str) ->
+  let _ = http_set_content_type "text/plain; version=0.0.4" in
+  metrics_render ()
+  ;
+
+// Middleware: wrap a handler to auto-increment per-request counters.
+// Extracts method + path (query stripped) from the raw request
+// line and labels the metrics with them. Duration in milliseconds
+// via now_ms.
+let _mm_method_of = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then "?" else substring req 0 sp
+  ;
+
+let _mm_path_of = fn (req: str) ->
+  let sp = str_index_of req " " in
+  if sp < 0 then "/"
+  else
+    let url = substring req (sp + 1) (str_len req) in
+    let q = str_index_of url "?" in
+    if q < 0 then url else substring url 0 q
+  ;
+
+let with_metrics = fn (handler: str -> str) -> fn (req: str) ->
+  let start = now_ms () in
+  let body = handler req in
+  let dur = now_ms () - start in
+  let method = _mm_method_of req in
+  let path = _mm_path_of req in
+  let labels = Cons (("method", method), Cons (("path", path), Nil)) in
+  let _ = metric_inc "http_requests_total" labels in
+  let _ = metric_add "http_request_duration_ms_sum" labels dur in
+  let _ = metric_inc "http_request_duration_ms_count" labels in
+  body
+  ;

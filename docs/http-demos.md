@@ -70,6 +70,7 @@ example exercises all three variants (including two-capture
 | [blog](https://github.com/merelang/mere/blob/main/examples/http_blog.mere) | markdown blog on Postgres — `route_prefix "/admin"` + `route_pattern "/post/:slug"` end-to-end | 560 |
 | [client_auth](https://github.com/merelang/mere/blob/main/examples/http_client_auth.mere) | outbound HTTP — `http_fetch_h`, Bearer auth, per-call timeout, response header read | 80 |
 | [gh_stars](https://github.com/merelang/mere/blob/main/examples/gh_stars.mere) | CLI — GitHub repo star count via `http_fetch_h` (optional `GITHUB_TOKEN` Bearer) + rate-limit header echo | 110 |
+| [metrics_demo](https://github.com/merelang/mere/blob/main/examples/http_metrics_demo.mere) | Prometheus-style `/metrics` endpoint — counters + gauges + `with_metrics` middleware (auto-counts `http_requests_total{method,path}` + duration) via `contrib/http/metrics` | 70 |
 
 ## todo_app
 
@@ -237,7 +238,7 @@ Source: [examples/http_csv_export.mere](https://github.com/merelang/mere/blob/ma
 
 Everything the demos import is under [`contrib/`](https://github.com/merelang/mere/tree/main/contrib):
 
-- `contrib/http/` — 16 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
+- `contrib/http/` — 17 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
 - `contrib/kv/` — log-structured KV + pipe-separated pack/unpack
 - `contrib/xml/`, `contrib/feed/`, `contrib/markdown/`, `contrib/json/` — parsers / renderers
 - `contrib/auth/jwt.mere` — HS256 sign / verify
