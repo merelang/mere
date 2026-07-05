@@ -4261,6 +4261,43 @@ let () =
       Pipeline.process
         "import \"/nonexistent/path/foo.lang\";\n42");
 
+  (* --- Package system v0.1: `.mere_modules/` walk-up resolution ---
+     Node's `node_modules` semantics — the resolver walks up from
+     the importing file's directory looking for a `.mere_modules/`
+     subdir, then resolves `<path>` inside it. *)
+  let pkg_root = Filename.temp_dir "lang_pkg_v01_" "" in
+  let modules_dir = Filename.concat pkg_root ".mere_modules" in
+  let pkg_dir = Filename.concat modules_dir "hello" in
+  Unix.mkdir modules_dir 0o755;
+  Unix.mkdir pkg_dir 0o755;
+  write_file (Filename.concat pkg_dir "greet.mere")
+    "let greet = fn (name: str) -> \"hello, \" ++ name;\n";
+  let entry_path = Filename.concat pkg_root "main.mere" in
+  write_file entry_path
+    "import \"hello/greet.mere\";\ngreet \"world\"";
+  check "package: import resolves via .mere_modules walk-up"
+    (Pipeline.process ~base_dir:pkg_root
+       "import \"hello/greet.mere\";\ngreet \"world\"") "\"hello, world\"";
+
+  (* Deeper walk-up: entry is in a subdir; .mere_modules/ sits above. *)
+  let deeper = Filename.concat pkg_root "app/handlers" in
+  Unix.mkdir (Filename.concat pkg_root "app") 0o755;
+  Unix.mkdir deeper 0o755;
+  check "package: walks up multiple directory levels"
+    (Pipeline.process ~base_dir:deeper
+       "import \"hello/greet.mere\";\ngreet \"deep\"") "\"hello, deep\"";
+
+  (* Nested imports: a vendored package importing ANOTHER vendored
+     package — the resolver's walk-up finds the SAME .mere_modules/
+     root regardless of which subtree it starts from. *)
+  let other_pkg = Filename.concat modules_dir "excite" in
+  Unix.mkdir other_pkg 0o755;
+  write_file (Filename.concat other_pkg "bang.mere")
+    "import \"hello/greet.mere\";\nlet excited = fn (n: str) -> greet n ++ \"!\";\n";
+  check "package: cross-package imports find the same .mere_modules/"
+    (Pipeline.process ~base_dir:pkg_root
+       "import \"excite/bang.mere\";\nexcited \"world\"") "\"hello, world!\"";
+
   (* --- Phase 41: qualified ctor pattern in 4-backend codegen. We apply
      Ast.canonical_ctor to Constr / P_constr lookup so `match v with | M.A -> ...`
      works in C / LLVM / Wasm. This is the qualified-pattern gap fix from

@@ -1702,10 +1702,29 @@ let rec parse_program_internal tokens =
         try Some (Unix.realpath p)
         with Unix.Unix_error _ -> None
       in
+      (* Walk up from `base_dir` looking for a `.mere_modules/` directory —
+         the same "nearest package root" search Node.js does for
+         node_modules. Returns the FIRST such dir found (project root),
+         or None if none exists between base_dir and filesystem root. *)
+      let rec find_mere_modules dir =
+        let candidate = Filename.concat dir ".mere_modules" in
+        if Sys.file_exists candidate && Sys.is_directory candidate
+        then Some candidate
+        else
+          let parent = Filename.dirname dir in
+          if String.equal parent dir then None    (* hit "/" *)
+          else find_mere_modules parent
+      in
       let candidates =
         if Filename.is_relative path then
-          Filename.concat !current_base_dir path
-          :: List.map (fun d -> Filename.concat d path) !import_search_paths
+          let base_here = Filename.concat !current_base_dir path in
+          let modules_here =
+            match find_mere_modules !current_base_dir with
+            | Some d -> [Filename.concat d path]
+            | None -> []
+          in
+          (base_here :: modules_here)
+          @ List.map (fun d -> Filename.concat d path) !import_search_paths
         else [path]
       in
       let rec first_match = function
