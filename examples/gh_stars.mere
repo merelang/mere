@@ -1,0 +1,113 @@
+// examples/gh_stars.mere — CLI: print the star count of a GitHub repo.
+//
+// First CLI Mere program that dogfoods the outbound HTTP client
+// (contrib/http/client) + the shared http_fetch env now available
+// under run_wasm.js (not just run_http_server.js). A concrete
+// end-to-end test that the recent client polish carries its weight
+// outside of a server context.
+//
+// Usage:
+//   ./mere -w examples/gh_stars.mere > /tmp/ghs.wat
+//   wat2wasm --enable-tail-call /tmp/ghs.wat -o /tmp/ghs.wasm
+//   node --stack-size=65500 scripts/run_wasm.js /tmp/ghs.wasm merelang/mere
+//
+// Auth:
+//   Set GITHUB_TOKEN to raise the unauth 60-req/hour limit to 5000/hour:
+//     GITHUB_TOKEN=ghp_… node scripts/run_wasm.js /tmp/ghs.wasm owner/repo
+//
+// Output:
+//   merelang/mere: 42 stars
+//   merelang/mere: rate-limit 4991/5000 remaining
+//
+// The rate-limit line uses http_fetch_response_header to read the
+// GitHub-provided `X-RateLimit-Remaining` header. Skipped if the
+// header is absent (e.g. behind a proxy that strips it).
+
+extern fn arg_count: unit -> int;
+extern fn arg_get: int -> str;
+extern fn getenv: str -> str;
+
+import "../contrib/http/client.mere";
+
+// Skip whitespace forward from position i.
+let rec _ghs_skip_ws = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then i
+  else
+    let c = char_at s i in
+    if str_eq c " " || str_eq c "\t" || str_eq c "\n" || str_eq c "\r" then
+      _ghs_skip_ws s (i + 1) n
+    else i
+  ;
+
+// Read decimal digits starting at position i, returning the parsed
+// int (0 if the first char isn't a digit) and the end position.
+let _ghs_read_int = fn (s: str) -> fn (i0: int) -> fn (n: int) ->
+  let st = map_new () in
+  let _ = map_set st "i" i0 in
+  let _ = map_set st "n" 0 in
+  let _ = while map_get st "i" < n do
+    let i = map_get st "i" in
+    let d = ord (char_at s i) - ord "0" in
+    if d >= 0 && d <= 9 then
+      let _ = map_set st "n" (map_get st "n" * 10 + d) in
+      let _ = map_set st "i" (i + 1) in ()
+    else let _ = map_set st "i" n in () in
+  (map_get st "n", map_get st "i")
+  ;
+
+// Locate `"field":` inside a JSON blob and return the int that
+// follows. -1 if the field is absent or the value isn't a bare int.
+// Naive scanner — good enough for the two fields this CLI cares
+// about; use contrib/json/json.mere for anything richer.
+let _ghs_json_int = fn (body: str) -> fn (field: str) ->
+  let needle = "\"" ++ field ++ "\":" in
+  let idx = str_index_of body needle in
+  if idx < 0 then 0 - 1
+  else
+    let start = idx + str_len needle in
+    let n = str_len body in
+    let after = _ghs_skip_ws body start n in
+    let (v, _) = _ghs_read_int body after n in
+    v
+  ;
+
+let argc = arg_count () in
+if argc < 1 then
+  let _ = print "usage: gh_stars owner/repo" in ()
+else
+
+  let repo  = arg_get 0 in
+  let url   = "https://api.github.com/repos/" ++ repo in
+  let token = getenv "GITHUB_TOKEN" in
+
+  // Base headers — User-Agent required by GitHub, Accept pins the
+  // v3 JSON media type. Bearer prepended only when a token is set.
+  let base_headers = Cons (("User-Agent", "mere-gh-stars"),
+                     Cons (("Accept",     "application/vnd.github+json"), Nil)) in
+  let headers =
+    if str_eq token "" then base_headers
+    else Cons (("Authorization", "Bearer " ++ token), base_headers) in
+
+  let body = http_fetch_h "GET" url "" headers in
+  let code = http_fetch_status () in
+
+  if code == 0 then
+    let _ = print "network error (curl exit != 0)" in ()
+  else if code != 200 then
+    let _ = print (repo ++ ": HTTP " ++ show code) in
+    let _ = print body in ()
+  else
+    let stars = _ghs_json_int body "stargazers_count" in
+    let _ = if stars < 0 then
+              print (repo ++ ": stargazers_count not found in response")
+            else
+              print (repo ++ ": " ++ show stars ++ " stars") in
+
+    // Rate-limit info is metadata, not the primary output. Only
+    // print if the header actually came through.
+    let remaining = http_fetch_response_header "X-RateLimit-Remaining" in
+    let limit     = http_fetch_response_header "X-RateLimit-Limit" in
+    let _ = if str_eq remaining "" then ()
+            else print (repo ++ ": rate-limit "
+                              ++ remaining ++ "/" ++ limit ++ " remaining") in
+    ()

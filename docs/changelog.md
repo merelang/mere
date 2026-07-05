@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `examples/gh_stars`: first CLI demo
+
+First Mere program that runs under `run_wasm.js` (not
+`run_http_server.js`) and makes outbound HTTP calls. Fetches
+`https://api.github.com/repos/<owner>/<repo>` and prints the star
+count, using:
+
+- `arg_get 0` for `owner/repo` argv.
+- `getenv "GITHUB_TOKEN"` for optional Bearer auth (60 → 5000
+  req/hour when set).
+- `http_fetch_h` for the `Accept: application/vnd.github+json` +
+  `User-Agent` headers.
+- `http_fetch_response_header "X-RateLimit-Remaining"` for the
+  rate-limit metadata line.
+- Naive `"stargazers_count":<n>` scanner (avoids pulling in
+  `contrib/json` which has a top-level self-test block that would
+  execute on import).
+
+Verified against `merelang/mere` (0 stars, fresh repo),
+`rust-lang/rust` (114325), `sindresorhus/awesome` (481588), and a
+404 path (`no-such-owner/no-such-repo-12345` → HTTP 404 with the
+response body printed).
+
 ## 2026-07-05 — `redis_pubsub_run_forever` + `sleep_ms` extern + tcp_worker `end`-event fix
 
 Three related changes to make a real-world reconnecting subscribe
