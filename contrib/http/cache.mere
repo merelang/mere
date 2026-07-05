@@ -1,0 +1,70 @@
+// contrib/http/cache.mere — HTTP cache-control + ETag helpers.
+//
+// Small set of helpers to emit the standard cache directives and to
+// short-circuit conditional GETs (`If-None-Match` → 304). Covers the
+// three common cache postures:
+//
+//   1. Public, long-lived, content-addressed
+//       cache_immutable 31536000    // 1 year, `immutable` hint
+//      For asset URLs with a hash in the path — the URL changes
+//      whenever the content does.
+//
+//   2. Per-user, short-lived
+//       cache_private 60
+//      For pages that vary by session but can be re-used briefly.
+//
+//   3. Auth / secrets / mutating flows
+//       cache_no_store ()
+//      For login pages, error responses, POST redirects.
+//
+// ETag (SHA-256 of the body, wrapped in quotes):
+//
+//   let body_html = render_page () in
+//   let tag = etag body_html in
+//   if if_none_match tag then
+//     let _ = http_set_status 304 in ""
+//   else
+//     let _ = http_set_header "ETag" tag in
+//     body_html
+//
+// The 304 body is empty — HTTP says so, and Node's Content-Length
+// bookkeeping handles it.
+
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn sha256_hex: str -> str;
+
+let cache_immutable = fn (seconds: int) ->
+  let _ = http_set_header "Cache-Control"
+            ("public, max-age=" ++ show seconds ++ ", immutable") in
+  ()
+  ;
+
+let cache_private = fn (seconds: int) ->
+  let _ = http_set_header "Cache-Control"
+            ("private, max-age=" ++ show seconds) in
+  ()
+  ;
+
+let cache_no_store = fn (u: unit) ->
+  let _ = http_set_header "Cache-Control"
+            "no-store, no-cache, must-revalidate" in
+  let _ = http_set_header "Pragma" "no-cache" in
+  ()
+  ;
+
+// Content-addressed ETag: SHA-256 of the body, hex-encoded, quoted
+// per RFC 7232. Strong ETag (no `W/` prefix) — matches byte-for-byte,
+// including whitespace / ordering changes.
+let etag = fn (body: str) ->
+  "\"" ++ sha256_hex body ++ "\""
+  ;
+
+// Compare against `If-None-Match`. Handles the exact match case;
+// does NOT parse `*` wildcard or comma-separated lists. Good enough
+// for the 90 % browser flow where the client echoes back the last
+// ETag it saw verbatim.
+let if_none_match = fn (tag: str) ->
+  let hdr = http_get_header "If-None-Match" in
+  str_eq hdr tag
+  ;

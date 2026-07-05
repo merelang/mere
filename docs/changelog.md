@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/cache`: Cache-Control postures + ETag / 304
+
+Rounds out the middleware family (session / basic_auth / csrf /
+metrics / cache). Three helpers for the three canonical cache
+postures plus an ETag + `If-None-Match` short-circuit:
+
+- `cache_immutable seconds`
+  Sets `Cache-Control: public, max-age=N, immutable`. For asset
+  URLs with a content hash in the path.
+- `cache_private seconds`
+  Sets `Cache-Control: private, max-age=N`. For per-session pages
+  that can be briefly re-used.
+- `cache_no_store ()`
+  Sets `Cache-Control: no-store, no-cache, must-revalidate` +
+  `Pragma: no-cache`. For login / secrets / POST redirects.
+- `etag body` — quoted SHA-256 hex, strong.
+- `if_none_match tag` — reads `If-None-Match`, `str_eq` compare.
+  Doesn't parse `*` wildcards or comma lists (documented).
+
+Demo `examples/http_cache_demo.mere` verifies all three postures +
+the 304 round-trip: matching `If-None-Match` → 304 with empty body,
+mismatching → 200 with fresh ETag.
+
 ## 2026-07-05 — `contrib/db/redis_stream`: consumer groups (XGROUP / XREADGROUP / XACK / XPENDING)
 
 Extends the stream module with the load-balanced worker pattern —

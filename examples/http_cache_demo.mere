@@ -1,0 +1,73 @@
+// http_cache_demo: HTTP cache-control + ETag round-trip.
+//
+// Three routes exercise the three cache postures:
+//
+//   GET /asset       cache_immutable — 1-year Cache-Control
+//   GET /page        ETag / If-None-Match → 304 on match
+//   GET /login       cache_no_store — sensitive page marker
+//
+// Try:
+//   ./mere -w examples/http_cache_demo.mere > /tmp/hcd.wat
+//   wat2wasm --enable-tail-call /tmp/hcd.wat -o /tmp/hcd.wasm
+//   node scripts/run_http_server.js /tmp/hcd.wasm
+//
+//   curl -sI http://localhost:8080/asset | grep -i cache-control
+//   curl -sI http://localhost:8080/login | grep -i cache-control
+//
+//   # First hit: 200 + ETag header
+//   ETAG=$(curl -sI http://localhost:8080/page | grep -i '^etag:' | \
+//     awk '{print $2}' | tr -d '\r')
+//   # Conditional GET: 304 with empty body
+//   curl -sI -H "If-None-Match: $ETAG" http://localhost:8080/page | head -1
+//   # Different content → different ETag → 200
+//   curl -sI -H "If-None-Match: \"nope\"" http://localhost:8080/page | head -1
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../contrib/http/router.mere";
+import "../contrib/http/cache.mere";
+
+// A stable content body — the ETag will be stable across restarts
+// (same body → same SHA-256).
+let page_body = "<!doctype html><title>cache demo</title>" ++
+                "<h1>Hello from Mere</h1>\n" ;
+
+let asset_h = fn (req: str) ->
+  let _ = cache_immutable 31536000 in
+  let _ = http_set_content_type "text/css" in
+  "body \{ font-family: system-ui; }\n" ;
+
+let page_h = fn (req: str) ->
+  let tag = etag page_body in
+  if if_none_match tag then
+    let _ = http_set_status 304 in
+    ""
+  else
+    let _ = http_set_header "ETag" tag in
+    let _ = cache_private 60 in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    page_body
+  ;
+
+let login_h = fn (req: str) ->
+  let _ = cache_no_store () in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><title>login</title><form>...</form>\n" ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found\n" ;
+
+let routes =
+  Cons (route "GET" "/asset" asset_h,
+  Cons (route "GET" "/page"  page_h,
+  Cons (route "GET" "/login" login_h,
+  Nil))) in
+
+let handle = router routes not_found in
+let _ = print "cache demo on :8080" in
+let _ = http_serve 8080 handle in
+0
