@@ -13,23 +13,43 @@
 // either poll from a chosen start id or use a consumer group (XREADGROUP)
 // for load-balanced work distribution with per-group acknowledgements.
 //
-// MVP scope of this module:
-//   - XADD  — append one entry, server-generated id (`*`).
-//   - XREAD — read >N entries after a caller-supplied id. Non-blocking.
-//   - XLEN  — current entry count.
+// Scope of this module:
+//   - XADD         — append one entry, server-generated id (`*`).
+//   - XREAD        — read >N entries after a caller-supplied id.
+//   - XLEN         — current entry count.
+//   - XGROUP CREATE — declare a consumer group.
+//   - XREADGROUP   — read from the group's un-delivered tail.
+//   - XACK         — mark entries as processed.
+//   - XPENDING     — count of un-acked entries.
 //
 // Not in this cut (deferred):
-//   - XREADGROUP / XACK / XPENDING — consumer-group primitives.
 //   - MAXLEN cap for XADD.
 //   - Blocking reads (XREAD BLOCK N) — requires tcp_set_timeout tuning
 //     similar to the queue module.
+//   - XCLAIM / XAUTOCLAIM for reassigning stuck entries.
 //
 // Public API:
 //
-//   stream_add   fd key fields          -> str option  (Some new_id | None)
-//   stream_read  fd key after_id count  -> (str * (str * str) list) list
-//                (entry id, fields) pairs in stream order; empty on miss.
-//   stream_len   fd key                 -> int         (-1 on error)
+//   stream_add          fd key fields          -> str option
+//   stream_read         fd key after_id count  -> (id, fields) list
+//   stream_len          fd key                 -> int
+//   stream_group_create fd key group start_id  -> bool
+//                          start_id = "0" (from beginning), "$" (new only)
+//   stream_group_read   fd key group consumer count
+//                                              -> (id, fields) list
+//   stream_ack          fd key group ids       -> int   (n acked)
+//   stream_pending_len  fd key group           -> int
+//
+// Consumer-group semantics recap:
+//
+//   XGROUP CREATE key group start_id [MKSTREAM]  — one-time setup
+//   XREADGROUP GROUP g consumer COUNT N STREAMS key >
+//       → hand N un-delivered entries to `consumer`; server remembers
+//         they're in-flight in the group's Pending Entries List (PEL)
+//   XACK key group id1 id2 ...
+//       → remove those ids from PEL; server considers them done
+//   XPENDING key group
+//       → summary: total un-acked count + oldest/newest un-acked ids
 //
 // `fields` is `(str * str) list` — key/value pairs, XADD encodes them
 // as alternating bulk arguments.
@@ -101,4 +121,59 @@ let stream_read = fn (fd: int) -> fn (key: str) -> fn (after_id: str)
                         Cons (RRArr entries, Nil))), _)) ->
     _stream_entries_of entries Nil
   | _ -> Nil
+  ;
+
+// XGROUP CREATE key group start_id MKSTREAM  — MKSTREAM auto-creates
+// the stream if the key doesn't exist yet, so producer + consumer
+// bootstrap order doesn't matter. Returns true on OK, false on
+// BUSYGROUP (group already exists) or any other error.
+let stream_group_create = fn (fd: int) -> fn (key: str)
+                       -> fn (group: str) -> fn (start_id: str) ->
+  let args = Cons ("XGROUP",
+             Cons ("CREATE", Cons (key,
+             Cons (group, Cons (start_id, Cons ("MKSTREAM", Nil)))))) in
+  match redis_command fd args with
+  | RRStr s -> str_eq s "OK"
+  | _ -> false
+  ;
+
+// XREADGROUP GROUP <group> <consumer> COUNT <count> STREAMS <key> >
+//   `>` = "give me only un-delivered entries" (skip PEL).
+// The `consumer` string identifies THIS worker within the group;
+// pending entries are tracked per-consumer so a crashed worker's
+// backlog can be reclaimed via XPENDING / XCLAIM (deferred).
+let stream_group_read = fn (fd: int) -> fn (key: str) -> fn (group: str)
+                     -> fn (consumer: str) -> fn (count: int) ->
+  let args = Cons ("XREADGROUP",
+             Cons ("GROUP", Cons (group, Cons (consumer,
+             Cons ("COUNT", Cons (show count,
+             Cons ("STREAMS", Cons (key, Cons (">", Nil))))))))) in
+  match redis_command fd args with
+  | RRArr Nil -> (Nil : (str * (str * str) list) list)
+  | RRNull    -> Nil
+  | RRArr (Cons (RRArr (Cons (RRBulk (Some (_key, _)),
+                        Cons (RRArr entries, Nil))), _)) ->
+    _stream_entries_of entries Nil
+  | _ -> Nil
+  ;
+
+// XACK key group id1 id2 ...  — removes ids from the group's PEL.
+// Returns the number the server actually acked (some ids may have
+// been auto-claimed by another consumer already; that's fine).
+let stream_ack = fn (fd: int) -> fn (key: str) -> fn (group: str)
+              -> fn (ids: str list) ->
+  let args = list_append (Cons ("XACK", Cons (key, Cons (group, Nil)))) ids in
+  match redis_command fd args with
+  | RRInt n -> n
+  | _ -> 0 - 1
+  ;
+
+// XPENDING key group — the short-form summary returns
+//   [count, first_id, last_id, [[consumer, count], ...]]
+// We surface just the total un-acked count; callers who need the
+// per-consumer breakdown can call redis_command manually.
+let stream_pending_len = fn (fd: int) -> fn (key: str) -> fn (group: str) ->
+  match redis_command fd (Cons ("XPENDING", Cons (key, Cons (group, Nil)))) with
+  | RRArr (Cons (RRInt n, _)) -> n
+  | _ -> 0 - 1
   ;

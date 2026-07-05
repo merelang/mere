@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/db/redis_stream`: consumer groups (XGROUP / XREADGROUP / XACK / XPENDING)
+
+Extends the stream module with the load-balanced worker pattern —
+Redis' Kafka-consumer-group equivalent.
+
+Added:
+
+- `stream_group_create fd key group start_id` — XGROUP CREATE with
+  MKSTREAM so producer/consumer bootstrap order is irrelevant.
+  `"0"` = read from beginning, `"$"` = only new arrivals.
+- `stream_group_read  fd key group consumer count` — XREADGROUP
+  GROUP … `>` (un-delivered only). Server remembers per-consumer
+  in-flight entries in the PEL.
+- `stream_ack  fd key group ids` — XACK; returns n acked.
+- `stream_pending_len fd key group` — XPENDING summary → total
+  un-acked count.
+
+XCLAIM / XAUTOCLAIM for reassigning stuck entries stays deferred.
+
+Demo `examples/db_redis_stream_groups.mere` walks the full cycle:
+one group `workers` with two consumers A + B share 4 XADD'd jobs.
+XREADGROUP delivers 1-2 to A and 3-4 to B (no overlap — Redis
+tracks what's been handed out). PEL sits at 4, then 2 after A
+ACKs its half, then 0 after B ACKs. A follow-up XREADGROUP `>`
+returns empty since the group is drained.
+
 ## 2026-07-05 — `contrib/db/redis_stream`: XADD / XREAD / XLEN
 
 Third leg of the Redis event story:
