@@ -74,6 +74,7 @@ example exercises all three variants (including two-capture
 | [pubsub_chat](https://github.com/merelang/mere/blob/main/examples/http_pubsub_chat.mere) | multi-instance SSE chat — POST publishes to Redis, JS-side subscriber bridges into `sse_broadcast` so listeners on *any* instance see every message (verified: 2 instances on :8080 + :8081, POST → both SSE streams) | 100 |
 | [csrf_demo](https://github.com/merelang/mere/blob/main/examples/http_csrf_demo.mere) | Synchronizer-token CSRF on a form POST — session-bound token, `csrf_hidden_input` in the form, `csrf_validate` guard on `/update`. Missing/wrong token → 403, correct → 303 | 90 |
 | [cache_demo](https://github.com/merelang/mere/blob/main/examples/http_cache_demo.mere) | Cache-Control postures — `/asset` immutable / `/login` no-store / `/page` ETag + If-None-Match 304 round-trip. Via `contrib/http/cache` | 65 |
+| [admin_dash](https://github.com/merelang/mere/blob/main/examples/http_admin_dash.mere) | Integration dogfood — one admin console exercises router `route_prefix` + session + csrf + basic_auth + metrics (`with_metrics` middleware) + cache + `redis_lock`. Multi-instance race verified: instance A wins the 500 ms job, B gets 409 "contended" | 200 |
 
 ## todo_app
 

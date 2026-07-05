@@ -1,0 +1,228 @@
+// http_admin_dash: integration dogfood for the recent contrib
+// shipment. One small admin console exercises six of the modules
+// added over the last day:
+//
+//   contrib/http/router        — exact + `:capture` routes
+//   contrib/http/session       — cookie-session store
+//   contrib/http/csrf          — synchronizer-token guard
+//   contrib/http/basic_auth    — Prometheus scrape gate
+//   contrib/http/metrics       — `/metrics` + `with_metrics` middleware
+//   contrib/http/cache         — `cache_no_store` on admin pages
+//   contrib/db/redis_lock      — "only one instance runs the job" mutex
+//
+// Feature: press a button, the server tries to acquire a Redis lock,
+// runs a simulated 500 ms job, releases. If a second instance
+// concurrently presses the same button, one wins and one gets a
+// "contended" message. Job counter + contended counter are exposed
+// on `/metrics`.
+//
+// Endpoints:
+//   GET  /                    landing (no auth)
+//   GET  /admin/login         HTML login form
+//   POST /admin/login         mints session cookie (admin/adminpw)
+//   POST /admin/logout        drops session
+//   GET  /admin               dashboard (session required)
+//   POST /admin/jobs/kick     session + CSRF; try lock + fake job
+//   GET  /metrics             Basic-Auth-gated Prometheus scrape
+//
+// Setup:
+//   docker run -d --name mere-admin-redis -p 15650:6379 redis:7
+//
+// Single-instance:
+//   ./mere -w examples/http_admin_dash.mere > /tmp/dash.wat
+//   wat2wasm --enable-tail-call /tmp/dash.wat -o /tmp/dash.wasm
+//   node scripts/run_http_server.js /tmp/dash.wasm
+//   open http://localhost:8080/admin/login  (admin / adminpw)
+//
+// Multi-instance (proves the lock earns its keep):
+//   PORT=8080 node scripts/run_http_server.js /tmp/dash.wasm &
+//   PORT=8081 node scripts/run_http_server.js /tmp/dash.wasm &
+//   # log in to both, mash the "run job" button on both simultaneously
+//   # -> one wins the lock, the other's response says "contended"
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+extern fn http_get_header: str -> str;
+extern fn getenv: str -> str;
+extern fn sleep_ms: int -> int;
+
+import "../contrib/http/query.mere";
+import "../contrib/http/router.mere";
+import "../contrib/http/cookie.mere";
+import "../contrib/http/session.mere";
+import "../contrib/http/csrf.mere";
+import "../contrib/http/basic_auth.mere";
+import "../contrib/http/metrics.mere";
+import "../contrib/http/cache.mere";
+import "../contrib/http/escape.mere";
+import "../contrib/db/redis.mere";
+import "../contrib/db/redis_lock.mere";
+
+// ---- config -----------------------------------------------------------
+
+let admin_user   = "admin" in
+let admin_pass   = "adminpw" in
+let scrape_user  = "scraper" in
+let scrape_pass  = "s3cret" in
+let redis_host   = "127.0.0.1" in
+let redis_port   = 15650 in
+let lock_key     = "job-lock" in
+let lock_ttl_ms  = 5000 in
+let job_ms       = 500 in
+
+// ---- state ----------------------------------------------------------
+
+let sessions   = session_new_store () in
+let csrf_store = csrf_new_store () in
+let redis_fd   = redis_connect redis_host redis_port in
+let _ = if redis_fd < 0 then
+          let _ = print ("redis connect failed at "
+                      ++ redis_host ++ ":" ++ show redis_port) in
+          fail "cannot start without Redis"
+        else () in
+
+let _ = metric_declare_counter "jobs_run_total"        "Jobs that won the lock" in
+let _ = metric_declare_counter "jobs_contended_total"  "Jobs that lost the lock" in
+let _ = metric_declare_counter "http_requests_total"   "Total HTTP requests" in
+let _ = metric_declare_counter "http_request_duration_ms_sum"
+                                "Cumulative request duration in ms" in
+let _ = metric_declare_counter "http_request_duration_ms_count"
+                                "Total requests seen by the duration counter" in
+
+let form_field = fn (name: str) ->
+  query_get (parse_query (http_current_body ())) name
+  ;
+
+// ---- handlers -------------------------------------------------------
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><title>admin dash</title>" ++
+  "<h1>mere admin dash</h1>" ++
+  "<p><a href=/admin/login>log in</a> to see the dashboard.</p>" ++
+  "<p><a href=/metrics>/metrics</a> (scraper / s3cret via Basic Auth).</p>\n"
+  ;
+
+let login_form = fn (req: str) ->
+  let _ = cache_no_store () in
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html><title>login</title>" ++
+  "<h1>log in</h1>" ++
+  "<form method=POST action=/admin/login>" ++
+  "<label>user <input name=user></label>" ++
+  "<label>pass <input name=pass type=password></label>" ++
+  "<button>log in</button>" ++
+  "</form>\n"
+  ;
+
+let login = fn (req: str) ->
+  let u = form_field "user" in
+  let p = form_field "pass" in
+  if str_eq u admin_user && str_eq p admin_pass then
+    let _ = session_login sessions u in
+    let _ = http_set_header "Location" "/admin" in
+    let _ = http_set_status 303 in
+    "redirecting\n"
+  else
+    let _ = http_set_status 401 in
+    let _ = http_set_content_type "text/plain" in
+    "wrong user / pass\n"
+  ;
+
+let logout = fn (req: str) ->
+  let _ = session_logout sessions in
+  let _ = http_set_header "Location" "/" in
+  let _ = http_set_status 303 in
+  "bye\n"
+  ;
+
+let dashboard = fn (req: str) ->
+  match session_require sessions "/admin/login" with
+  | None -> "redirecting\n"
+  | Some user ->
+    let sid = session_id (http_get_header "Cookie") in
+    let tok = csrf_token_for csrf_store sid in
+    let _ = cache_no_store () in
+    let _ = http_set_content_type "text/html; charset=utf-8" in
+    "<!doctype html><title>dashboard</title>" ++
+    "<h1>dashboard</h1>" ++
+    "<p>Logged in as <code>" ++ html_escape user ++ "</code>. " ++
+    "<form method=POST action=/admin/logout style=\"display:inline\">" ++
+    "<button>log out</button></form></p>" ++
+    "<p>Press <em>run job</em> to acquire the Redis lock, sleep " ++
+      show job_ms ++ " ms, release. Second-instance clicks during the " ++
+      "sleep window see <em>contended</em>.</p>" ++
+    "<form method=POST action=/admin/jobs/kick>" ++
+    csrf_hidden_input tok ++
+    "<button>run job</button></form>\n"
+  ;
+
+let jobs_kick = fn (req: str) ->
+  match session_require sessions "/admin/login" with
+  | None -> "redirecting\n"
+  | Some _user ->
+    let sid = session_id (http_get_header "Cookie") in
+    let submitted = form_field "_csrf" in
+    if not (csrf_validate csrf_store sid submitted) then
+      let _ = http_set_status 403 in
+      let _ = http_set_content_type "text/plain" in
+      "CSRF token missing or invalid\n"
+    else
+      match redis_lock_acquire redis_fd lock_key lock_ttl_ms with
+      | None ->
+        let _ = metric_inc "jobs_contended_total" Nil in
+        let _ = http_set_status 409 in
+        let _ = http_set_content_type "text/plain" in
+        "contended: another instance is running the job\n"
+      | Some token ->
+        // Simulate work while holding the lock. Any concurrent
+        // /admin/jobs/kick (this or another instance) hits the None
+        // branch above and increments the contended counter.
+        let _ = sleep_ms job_ms in
+        let _ = redis_lock_release redis_fd lock_key token in
+        let _ = metric_inc "jobs_run_total" Nil in
+        let _ = http_set_content_type "text/plain" in
+        "job ran successfully (held lock for " ++ show job_ms ++ " ms)\n"
+  ;
+
+// /metrics gated by Basic Auth so a public scraper doesn't leak
+// counters. Prometheus / Grafana Agent both speak Basic Auth
+// natively.
+let metrics_guarded =
+  with_basic_auth "metrics" scrape_user scrape_pass metrics_handler in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found\n"
+  ;
+
+// ---- routes ---------------------------------------------------------
+
+let admin_routes =
+  Cons (route "GET"  "/"                dashboard,
+  Cons (route "GET"  "/login"           login_form,
+  Cons (route "POST" "/login"           login,
+  Cons (route "POST" "/logout"          logout,
+  Cons (route "POST" "/jobs/kick"       jobs_kick,
+  Nil)))))
+  in
+
+let routes =
+  Cons (route         "GET"  "/"          home,
+  Cons (route_prefix  "/admin"            admin_routes,
+  Cons (route         "GET"  "/metrics"   metrics_guarded,
+  Nil)))
+  in
+
+let handle = with_metrics (router routes not_found) in
+
+let port_str = getenv "PORT" in
+let port = if str_eq port_str "" then 8080 else int_of_str port_str in
+let _ = print ("admin dash on :" ++ show port
+            ++ " (redis " ++ redis_host ++ ":" ++ show redis_port ++ ")") in
+let _ = http_serve port handle in
+0
