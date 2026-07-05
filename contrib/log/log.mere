@@ -9,20 +9,72 @@
 //
 //   {"ts":1699999999,"level":"info","msg":"logged in","user":"alice"}
 //
+// Level filtering:
+//
+//   Priority order: debug < info < warn < error < off
+//   Default threshold is `info`, i.e. debug lines are suppressed.
+//
+//   set_log_level "debug"       — enable everything
+//   set_log_level "warn"        — only warn + error
+//   set_log_level "off"         — silence entirely
+//   log_from_env ()             — read LOG_LEVEL from the process
+//                                  env; unset / empty means keep
+//                                  the current default.
+//
 // Public API:
 //
-//   log_debug msg
-//   log_info  msg
-//   log_warn  msg
-//   log_error msg
-//   log_with  level msg [(k,v); ...]      // arbitrary fields
+//   log_debug msg / log_info msg / log_warn msg / log_error msg
+//   log_debug_f msg fields / log_info_f msg fields
+//   log_warn_f  msg fields / log_error_f msg fields
+//   log_with    level msg fields             // arbitrary level
+//   set_log_level level                       // "debug".."off"
+//   log_from_env ()                           // LOG_LEVEL env
 //
 // Message and field values are minimally JSON-escaped: `"` → `\"`,
-// `\` → `\\`, newlines / control chars pass through (this is a
-// demo-grade logger — real production should use a full JSON
-// encoder, e.g. contrib/json's forthcoming render side).
+// `\` → `\\`. Newlines / control chars pass through — good enough
+// for a demo-grade logger; production should switch to
+// contrib/json's writer for full-fidelity escaping.
 
 extern fn unix_time: unit -> int;
+extern fn getenv: str -> str;
+
+// Level as an int for easy comparison. Public callers should stay
+// in str-land via set_log_level / log_from_env.
+let _log_level_num = fn (level: str) ->
+  if str_eq level "debug" then 0
+  else if str_eq level "info"  then 1
+  else if str_eq level "warn"  then 2
+  else if str_eq level "error" then 3
+  else if str_eq level "off"   then 4
+  else 1
+  ;
+
+// Global mutable slot for the current threshold. `vec_new ()` gives
+// us a single-cell store because Mere has no first-class ref. The
+// vec is allocated once at module-load time (i.e. once per program
+// after import-flatten) and mutated via vec_set from set_log_level.
+// Default: 1 = "info". Both bindings use `;` (top-level decl) so
+// importers pick them up — using `in` here would fold the rest of
+// the file into one expression that import discards.
+let _log_level_slot = vec_new () ;
+let _ = vec_push _log_level_slot 1 ;
+
+let set_log_level = fn (level: str) ->
+  let _ = vec_set _log_level_slot 0 (_log_level_num level) in
+  ()
+  ;
+
+// Read LOG_LEVEL from the environment. Unset / empty leaves the
+// default in place, so a demo without any explicit configuration
+// still gets info-and-above.
+let log_from_env = fn (u: unit) ->
+  let v = getenv "LOG_LEVEL" in
+  if str_eq v "" then () else set_log_level v
+  ;
+
+let _log_enabled = fn (level: str) ->
+  _log_level_num level >= vec_get _log_level_slot 0
+  ;
 
 // Escape a JSON string body — swaps `"` and `\` for their escape
 // sequences. Everything else is passed through as-is.
@@ -53,12 +105,19 @@ let rec _append_fields = fn (fields: (str * str) list) -> fn (acc: str) ->
     _append_fields rest (acc ++ seg);
 
 let log_with = fn (level: str) -> fn (msg: str) -> fn (fields: (str * str) list) ->
-  let ts = show (unix_time ()) in
-  let base = "\{\"ts\":" ++ ts ++ ",\"level\":\"" ++ level ++
-    "\",\"msg\":\"" ++ _esc msg ++ "\"" in
-  print (_append_fields fields base ++ "}");
+  if not (_log_enabled level) then ()
+  else
+    let ts = show (unix_time ()) in
+    let base = "\{\"ts\":" ++ ts ++ ",\"level\":\"" ++ level ++
+      "\",\"msg\":\"" ++ _esc msg ++ "\"" in
+    print (_append_fields fields base ++ "}");
 
 let log_debug = fn (msg: str) -> log_with "debug" msg Nil;
 let log_info  = fn (msg: str) -> log_with "info"  msg Nil;
 let log_warn  = fn (msg: str) -> log_with "warn"  msg Nil;
 let log_error = fn (msg: str) -> log_with "error" msg Nil;
+
+let log_debug_f = fn (msg: str) -> fn (fields: (str * str) list) -> log_with "debug" msg fields;
+let log_info_f  = fn (msg: str) -> fn (fields: (str * str) list) -> log_with "info"  msg fields;
+let log_warn_f  = fn (msg: str) -> fn (fields: (str * str) list) -> log_with "warn"  msg fields;
+let log_error_f = fn (msg: str) -> fn (fields: (str * str) list) -> log_with "error" msg fields;
