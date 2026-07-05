@@ -1,0 +1,93 @@
+// contrib/os/parallel_map.mere — dispatch N shell commands in parallel.
+//
+// Built on top of `contrib/os/subprocess`. No new externs. Uses shell
+// backgrounding (`&`) + `wait` + tmpfiles to run children concurrently
+// under the OS scheduler, then reads their stdouts back in **index
+// order** (not completion order — collection is a serial cat).
+//
+// The "cheap dogfood" step between the sync `subprocess_run` primitive
+// and a native `worker_spawn` / `worker_await` pair that a future
+// worker_threads shipping will bring.
+//
+// Public API:
+//
+//   parallel_map : str list -> str list
+//     Input: N shell commands. Output: N stdout strings, one per
+//     input command, in the same order. Each stdout retains its own
+//     trailing newline (if any).
+//
+// Semantics:
+//   - All N children run concurrently under `sh &`. Wallclock ~ max
+//     of individual child times, not sum.
+//   - `parallel_map` blocks the whole Wasm frame until the slowest
+//     child finishes (via a single `subprocess_run` on the wait+cat
+//     script).
+//   - Each child's stdout lands in `/tmp/mere-pmap-<ts>-<i>.out`,
+//     `rm`'d after collection.
+//   - Stderr of children is DROPPED (`2>/dev/null`) to keep stdout
+//     parsing unambiguous. Wrap the child command with `2>&1` if
+//     you want to capture it.
+//   - Nonzero exit of a child is silent (the child's stdout — up to
+//     whatever it wrote before dying — is still returned).
+//
+// Not suitable for:
+//   - Streaming (all children must exit before parallel_map returns)
+//   - Very short-lived children (fork + shell overhead ~30-50 ms /
+//     process — the batching benefit disappears below that)
+//   - Children whose stdout contains the sentinel string
+//     `__MERE_PMAP_SEP_9c3d4f7a__`. That's a fixed random-looking
+//     marker; extremely unlikely, not escaped.
+
+extern fn now_ms: unit -> int;
+
+import "subprocess.mere";
+
+let _pmap_sep = "__MERE_PMAP_SEP_9c3d4f7a__" ;
+
+// Walk cmds building (background_shell, outfiles_in_order).
+let rec _pmap_bg = fn (cmds: str list) -> fn (ts: int) -> fn (i: int)
+                -> fn (outs_acc: str list) -> fn (sh_acc: str) ->
+  match cmds with
+  | Nil -> (sh_acc ++ "wait; ", outs_acc)
+  | Cons (cmd, rest) ->
+    let outfile = "/tmp/mere-pmap-" ++ show ts ++ "-" ++ show i ++ ".out" in
+    let piece = "(" ++ cmd ++ ") > " ++ outfile ++ " 2>/dev/null & " in
+    _pmap_bg rest ts (i + 1)
+      (list_append outs_acc (Cons (outfile, Nil)))
+      (sh_acc ++ piece)
+  ;
+
+// Emit `cat <out>; echo <sep>;` for each outfile so the collected
+// stdout is split-able on the sep. Also `rm` after cat so tmpfiles
+// don't accumulate across many invocations.
+let rec _pmap_cat = fn (outs: str list) -> fn (acc: str) ->
+  match outs with
+  | Nil -> acc
+  | Cons (path, rest) ->
+    let piece = "cat " ++ path ++ "; rm -f " ++ path ++ "; printf '%s\n' "
+             ++ _pmap_sep ++ "; " in
+    _pmap_cat rest (acc ++ piece)
+  ;
+
+// Drop the trailing empty element after str_split by the separator
+// (the shell prints separator AFTER each cat, so the final split
+// yields ["stdout1"; "stdout2"; ...; ""]).
+let rec _pmap_drop_last_empty = fn (xs: str list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (last, Nil) -> if str_eq last "" then Nil else Cons (last, Nil)
+  | Cons (x, rest) -> Cons (x, _pmap_drop_last_empty rest)
+  ;
+
+// Trailing "\n" after each cat is part of the separator line, but
+// the shell's `printf '%s\n' <sep>` puts a newline BEFORE it too if
+// the child's stdout didn't end in \n. Split on `<sep>\n` so the
+// separator's own trailing newline is consumed.
+let parallel_map = fn (cmds: str list) ->
+  let ts = now_ms () in
+  let (bg_sh, outs) = _pmap_bg cmds ts 0 Nil "" in
+  let cat_sh = _pmap_cat outs "" in
+  let out = subprocess_run (bg_sh ++ cat_sh) "" in
+  let parts = str_split out (_pmap_sep ++ "\n") in
+  _pmap_drop_last_empty parts
+  ;

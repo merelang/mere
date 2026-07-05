@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/os/parallel_map`: N shell commands in parallel
+
+Sits on top of `contrib/os/subprocess`. No new externs. Uses shell
+backgrounding (`&`) + `wait` + tmpfiles to run N children
+concurrently under the OS scheduler, then reads their stdouts back
+in **index order** (not completion order).
+
+The "cheap dogfood" step between the sync `subprocess_run` primitive
+and a native `worker_spawn` / `worker_await` pair that a future
+worker_threads shipping will bring.
+
+    parallel_map : str list -> str list
+
+Verified end-to-end:
+- 4 x `sleep 1 && echo <label>` → **1135 ms wallclock** (~max of
+  individual times, not sum of 4000), results `[A; B; C; D]` in
+  submitted order
+- Mixed timings (0 / 2 / 1 sec) → **2099 ms wallclock**, results
+  `[instant; two-sec; one-sec]` — the slowest child at index 1
+  dictates wallclock; ordering follows input order, not completion
+
+Not suitable for streaming (all children must exit before return),
+very short-lived children (fork overhead dominates), or output
+containing the fixed sentinel `__MERE_PMAP_SEP_9c3d4f7a__`.
+Documented in the module.
+
 ## 2026-07-05 — `contrib/os/subprocess`: sync shell-out (Q-012 Path A)
 
 First shipping toward the concurrency-primitive design (see design
