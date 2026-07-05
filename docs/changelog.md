@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/db/redis_queue`: list-backed work queue
+
+Complements `redis_pubsub`. Pub/sub is broadcast-and-forget; work
+queues are exactly-one-worker-claims-each-job. Standard Redis
+reliable-queue pattern wrapped:
+
+- `redis_queue_push fd queue payload` — LPUSH, returns new length.
+- `redis_queue_pop fd queue timeout_s` — BRPOP with server-side
+  block. `Some (queue, payload)` on delivery, `None` on timeout.
+  Client-side socket timeout is set to `(timeout_s + 5) s` as a
+  safety net; `timeout_s == 0` blocks forever on both sides.
+- `redis_queue_pop_many fd queues timeout_s` — priority multi-queue
+  BRPOP. Earlier queues in the list win.
+- `redis_queue_len fd queue` — LLEN.
+- `redis_queue_run fd queues timeout_s handler` — event-loop helper
+  that retries on timeout; handler returns `false` to break out.
+
+Explicitly out of scope for the MVP: ack / retry semantics
+(processing-list + RPOPLPUSH reconciliation), delayed jobs, and
+priorities beyond the multi-queue trick.
+
+Demo `examples/db_redis_queue.mere` verifies push (returns
+1,2,3,4), LLEN=4, FIFO order across three BRPOPs, priority fall-
+through via `pop_many ["jobs.slow"; "jobs"]`, and the empty-queue
+timeout returning `None`.
+
 ## 2026-07-05 — `http_fetch` shared across both runners
 
 `http_fetch` and friends now live in `scripts/http_fetch_env.js` and
