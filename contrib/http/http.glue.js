@@ -18,6 +18,8 @@
 // exists; `attach(instance)` then hands the instance's memory + table
 // to the closure so the http import can start firing.
 
+const { makeWsEnv } = require("../../scripts/ws_env.js");
+
 function makeHttpGlue() {
   let memory = null;
   let table = null;
@@ -30,6 +32,11 @@ function makeHttpGlue() {
     while (end < bytes.length && bytes[end] !== 0) end++;
     return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
   };
+
+  // WebSocket hub — /ws/<channel> upgrade path. Hooked on the server's
+  // `upgrade` event down in http_serve below. Extras (ws_broadcast /
+  // ws_client_count) are merged into the returned glue object.
+  const ws = makeWsEnv({ readCStr });
 
   // Allocate on the shared Mere bump heap so extern-returned strings
   // and Mere allocations never collide. Grow memory one 64KB page at
@@ -186,6 +193,17 @@ function makeHttpGlue() {
           streamStarted = false;
         });
       });
+      server.on("upgrade", (req, socket, head) => {
+        if (ws.tryUpgrade(req, socket, head)) return;
+        // Any other Upgrade request (e.g. HTTP/2 h2c) is not
+        // supported — respond with 400 and close.
+        socket.write(
+          "HTTP/1.1 400 Bad Request\r\n" +
+          "Connection: close\r\n" +
+          "Content-Length: 0\r\n\r\n"
+        );
+        socket.destroy();
+      });
       server.on("error", (e) => {
         console.error("contrib/http: server error:", e.message);
       });
@@ -250,6 +268,9 @@ function makeHttpGlue() {
     // default). Useful for access-log middleware that wants to
     // record the outcome after the inner handler runs.
     http_current_status: () => currentStatus,
+    // WebSocket hub externs — see scripts/ws_env.js for the wire
+    // protocol; contrib/http/websocket.mere for the extern decls.
+    ...ws.extras,
   };
 
   const attach = (instance) => {

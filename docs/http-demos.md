@@ -75,6 +75,7 @@ example exercises all three variants (including two-capture
 | [csrf_demo](https://github.com/merelang/mere/blob/main/examples/http_csrf_demo.mere) | Synchronizer-token CSRF on a form POST — session-bound token, `csrf_hidden_input` in the form, `csrf_validate` guard on `/update`. Missing/wrong token → 403, correct → 303 | 90 |
 | [cache_demo](https://github.com/merelang/mere/blob/main/examples/http_cache_demo.mere) | Cache-Control postures — `/asset` immutable / `/login` no-store / `/page` ETag + If-None-Match 304 round-trip. Via `contrib/http/cache` | 65 |
 | [admin_dash](https://github.com/merelang/mere/blob/main/examples/http_admin_dash.mere) | Integration dogfood — one admin console exercises router `route_prefix` + session + csrf + basic_auth + metrics (`with_metrics` middleware) + cache + `redis_lock`. Multi-instance race verified: instance A wins the 500 ms job, B gets 409 "contended" | 200 |
+| [ws_chat](https://github.com/merelang/mere/blob/main/examples/http_ws_chat.mere) | RFC 6455 WebSocket hub — clients connect to `/ws/chat`, glue auto-relays messages between peers. `POST /announce` calls `ws_broadcast` for server-side pushes. Verified: A→B via native `WebSocket`, `/announce` reaches both | 90 |
 
 ## todo_app
 
@@ -242,7 +243,7 @@ Source: [examples/http_csv_export.mere](https://github.com/merelang/mere/blob/ma
 
 Everything the demos import is under [`contrib/`](https://github.com/merelang/mere/tree/main/contrib):
 
-- `contrib/http/` — 21 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `session` (in-memory cookie session store — random 16-hex ids, `HttpOnly; SameSite=Lax` defaults), `basic_auth` (RFC 7617 middleware), `csrf` (synchronizer-token guard on top of session), `cache` (Cache-Control postures + ETag/If-None-Match 304), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
+- `contrib/http/` — 22 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `session` (in-memory cookie session store — random 16-hex ids, `HttpOnly; SameSite=Lax` defaults), `basic_auth` (RFC 7617 middleware), `csrf` (synchronizer-token guard on top of session), `cache` (Cache-Control postures + ETag/If-None-Match 304), `websocket` (RFC 6455 hub — server-side broadcast + client auto-relay), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
 - `contrib/kv/` — log-structured KV + pipe-separated pack/unpack
 - `contrib/xml/`, `contrib/feed/`, `contrib/markdown/`, `contrib/json/` — parsers / renderers
 - `contrib/auth/jwt.mere` — HS256 sign / verify

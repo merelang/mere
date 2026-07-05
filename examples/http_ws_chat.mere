@@ -1,0 +1,96 @@
+// http_ws_chat: WebSocket chat + auto-relay hub.
+//
+// Two message paths converge on the same channel:
+//
+//   1. Client → other clients (auto-relay)
+//      Anyone connected to `ws://…/ws/chat` types → the glue
+//      broadcasts to every other peer on the channel. Mere never
+//      sees these messages; they're pure JS-side fanout.
+//
+//   2. Server → all clients (announcements)
+//      A background POST `/announce` from an admin causes Mere to
+//      call `ws_broadcast "chat" msg`, which reaches every peer
+//      including the poster. Useful for things like "server about
+//      to restart in 30 s" pushed from a cron.
+//
+// Endpoints:
+//   GET  /             HTML chat page
+//   POST /announce     JSON `{msg}` → ws_broadcast to chat channel
+//   GET  /ws/chat      handled by contrib/http glue (upgrade)
+//
+// Try:
+//   ./mere -w examples/http_ws_chat.mere > /tmp/wsc.wat
+//   wat2wasm --enable-tail-call /tmp/wsc.wat -o /tmp/wsc.wasm
+//   node scripts/run_http_server.js /tmp/wsc.wasm
+//   # open http://localhost:8080/ in two tabs, chat between them
+//   # curl -X POST -d '{"msg":"hello"}' -H 'Content-Type: application/json' \
+//   #   http://localhost:8080/announce
+//   # → both tabs see "[admin] hello"
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../contrib/http/router.mere";
+import "../contrib/http/websocket.mere";
+import "../contrib/http/json_body.mere";
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html>\n" ++
+  "<meta charset=utf-8><title>mere ws chat</title>" ++
+  "<style>body\{font:14px/1.4 system-ui;max-width:40em;margin:1em auto}" ++
+  "form\{display:flex;gap:.5em}#log\{height:20em;overflow:auto;" ++
+  "border:1px solid #ccc;padding:.5em;margin:.5em 0}</style>" ++
+  "<h1>ws chat</h1>" ++
+  "<p><small>Two tabs = two peers. Server-side announcements go " ++
+  "through <code>POST /announce</code>.</small></p>" ++
+  "<div id=log></div>" ++
+  "<form id=f><input id=n placeholder=name size=8>" ++
+  "<input id=t placeholder=message required style=flex:1>" ++
+  "<button>send</button></form>" ++
+  "<script>\n" ++
+  "const log=document.getElementById('log');\n" ++
+  "const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')" ++
+  "  +location.host+'/ws/chat');\n" ++
+  "ws.onmessage=(e)=>\{log.insertAdjacentHTML('beforeend'," ++
+    "'<div>'+e.data+'</div>');log.scrollTop=log.scrollHeight};\n" ++
+  "document.getElementById('f').onsubmit=e=>\{e.preventDefault();" ++
+    "const n=document.getElementById('n').value||'anon';" ++
+    "const t=document.getElementById('t').value;" ++
+    "ws.send('<b>'+n+':</b> '+t);" ++
+    "log.insertAdjacentHTML('beforeend','<div><b>'+n+':</b> '+t+' <em>(you)</em></div>');" ++
+    "log.scrollTop=log.scrollHeight;" ++
+    "document.getElementById('t').value=''};\n" ++
+  "</script>\n"
+  ;
+
+let announce_h = fn (req: str) ->
+  let msg = body_field "msg" in
+  if str_eq msg "" then
+    let _ = http_set_status 400 in
+    let _ = http_set_content_type "text/plain" in
+    "missing msg\n"
+  else
+    let _ = ws_broadcast "chat" ("[admin] " ++ msg) in
+    let n = ws_client_count "chat" in
+    let _ = http_set_content_type "application/json" in
+    "\{\"delivered_to\":" ++ show n ++ "}\n"
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found\n"
+  ;
+
+let routes =
+  Cons (route "GET"  "/"          home,
+  Cons (route "POST" "/announce"  announce_h,
+  Nil)) in
+
+let handle = router routes not_found in
+let _ = print "ws chat on :8080" in
+let _ = http_serve 8080 handle in
+0
