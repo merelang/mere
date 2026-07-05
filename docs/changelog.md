@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `sse_bridge_from_redis`: multi-instance SSE fanout
+
+New extern in `contrib/http/sse.mere`:
+
+    sse_bridge_from_redis channel host port -> unit
+
+Spins up (or reuses — idempotent per channel) a persistent RESP2
+subscriber in the Node runner. Every incoming `message`-shaped
+reply on `channel` is forwarded to the JS-side SSE broadcast for
+the same channel name. Result: N Mere HTTP instances behind a
+load balancer, all subscribed to the same Redis channel, deliver
+posted messages to every SSE client regardless of which instance
+holds the subscription.
+
+Two moving parts:
+
+- `scripts/sse_redis_bridge.js` — new. Async RESP2 subscriber
+  (Node's `net.Socket`), auto-reconnect on error / close with a
+  1 s backoff. Parser handles arrays / bulks / simple strings /
+  integers — enough for the SUBSCRIBE reply shape.
+- `contrib/http/http.glue.js` — factored the inner fanout code out
+  of the Mere-facing `sse_broadcast` extern into a JS-callable
+  `broadcast(channel, payload)` helper. `makeHttpGlue()` now
+  returns `{ glue, attach, broadcast }`; the bridge factory
+  receives `broadcast` and calls it directly (no Mere-heap ptr
+  boundary crossing).
+
+Demo `examples/http_pubsub_chat.mere` verifies end-to-end:
+
+- Two instances started on `:8080` + `:8081` against a shared
+  Redis; both subscribe to `chat`.
+- POST to `:8080` returns `{"delivered_to":2}` (Redis sees two
+  subscribers) and the message appears on BOTH SSE streams.
+- POST to `:8081` — same behaviour in reverse.
+
+`http_serve` and the pubsub subscriber coexist because the
+subscribe socket lives entirely in JS (Node's event loop),
+avoiding Mere's single-threaded per-frame constraint.
+
 ## 2026-07-05 — `contrib/http/session`: consolidate cookie-session pattern
 
 Seven demos (http_blog, http_todo_app, http_users_db, http_todo_pg,

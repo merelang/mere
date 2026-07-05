@@ -1,0 +1,137 @@
+// http_pubsub_chat: multi-instance SSE chat, fanned out via Redis pubsub.
+//
+// Like examples/http_chat.mere but the message-broadcast step goes
+// through Redis pubsub instead of the local in-process SSE fanout.
+// Deploying two instances behind a load balancer works: a POST that
+// lands on instance A reaches SSE clients connected to instance B,
+// because both instances are subscribers to the same Redis channel.
+//
+// Message flow:
+//
+//   POST /api/message                       (any instance)
+//     └─ redis_publish "chat" "<json msg>"
+//         │
+//         ▼
+//     Redis "chat" channel
+//         │
+//    ┌────┴────┐
+//    ▼         ▼
+//   subscriber-A  subscriber-B
+//    │             │
+//   sse_broadcast  sse_broadcast   (fan out to local SSE clients)
+//
+// The subscribe loop lives in JS (scripts/sse_redis_bridge.js),
+// spun up by the one-shot `sse_bridge_from_redis` extern below.
+//
+// Endpoints:
+//   GET  /                    HTML chat UI
+//   POST /api/message         {author, text} — publishes to Redis
+//   GET  /sse/chat            handled by contrib/http glue
+//
+// Setup:
+//   docker run -d --name mere-pubsub-chat-redis -p 15604:6379 redis:7
+//
+// Usage (one instance):
+//   ./mere -w examples/http_pubsub_chat.mere > /tmp/pcc.wat
+//   wat2wasm --enable-tail-call /tmp/pcc.wat -o /tmp/pcc.wasm
+//   node scripts/run_http_server.js /tmp/pcc.wasm
+//   open http://localhost:8080/
+//
+// Usage (multi-instance — run 2 shells):
+//   PORT=8080 node scripts/run_http_server.js /tmp/pcc.wasm
+//   PORT=8081 node scripts/run_http_server.js /tmp/pcc.wasm
+//   # Post to :8080, SSE listener on :8081 sees the message.
+//   # (No load balancer needed for the demo — just point curl and
+//   #  EventSource at different ports.)
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn getenv: str -> str;
+
+import "../contrib/http/router.mere";
+import "../contrib/http/json_body.mere";
+import "../contrib/http/escape.mere";
+import "../contrib/http/sse.mere";
+import "../contrib/db/redis.mere";
+
+let redis_host = "127.0.0.1" in
+let redis_port = 15604 in
+let channel    = "chat" in
+
+// One publish connection shared across the process. The bridge's
+// SUBSCRIBE lives in the JS side (via sse_bridge_from_redis), so
+// this fd only publishes.
+let pub_fd = redis_connect redis_host redis_port in
+let _ = if pub_fd < 0 then
+          let _ = print ("redis publish connect failed at "
+                      ++ redis_host ++ ":" ++ show redis_port) in
+          fail "cannot start without Redis"
+        else () in
+
+// Kick off the JS-side subscribe → sse_broadcast bridge. Idempotent;
+// calling twice is safe.
+let _ = sse_bridge_from_redis channel redis_host redis_port in
+
+// ---- handlers ---------------------------------------------------------
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  "<!doctype html>\n" ++
+  "<meta charset=utf-8><title>mere pubsub chat</title>" ++
+  "<style>body\{font:14px/1.4 system-ui;max-width:40em;margin:1em auto}" ++
+  "form\{display:flex;gap:.5em}#log\{height:20em;overflow:auto;" ++
+  "border:1px solid #ccc;padding:.5em;margin:.5em 0}</style>" ++
+  "<h1>mere pubsub chat</h1>" ++
+  "<div id=log></div>" ++
+  "<form id=f><input id=n placeholder=name size=8>" ++
+  "<input id=t placeholder=message required style=flex:1>" ++
+  "<button>send</button></form>" ++
+  "<script>\n" ++
+  "const log=document.getElementById('log');\n" ++
+  "const es=new EventSource('/sse/chat');\n" ++
+  "es.onmessage=(e)=>\{const m=JSON.parse(e.data);" ++
+    "log.insertAdjacentHTML('beforeend', " ++
+      "'<div><b>'+m.author+':</b> '+m.text+'</div>');" ++
+    "log.scrollTop=log.scrollHeight};\n" ++
+  "document.getElementById('f').onsubmit=async e=>\{" ++
+    "e.preventDefault();" ++
+    "await fetch('/api/message',\{method:'POST'," ++
+      "body:JSON.stringify(\{author:document.getElementById('n').value||'anon'," ++
+      "text:document.getElementById('t').value})});" ++
+    "document.getElementById('t').value=''};\n" ++
+  "</script>\n" ;
+
+let post_msg = fn (req: str) ->
+  let author = body_field "author" in
+  let text   = body_field "text" in
+  let author_safe = if str_eq author "" then "anon" else html_escape author in
+  let text_safe   = html_escape text in
+  let json = "\{\"author\":\"" ++ author_safe
+         ++ "\",\"text\":\"" ++ text_safe ++ "\"}" in
+  let n = redis_publish pub_fd channel json in
+  let _ = http_set_content_type "application/json" in
+  "\{\"delivered_to\":" ++ show n ++ "}\n" ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "text/plain" in
+  "not found\n" ;
+
+let routes =
+  Cons (route "GET"  "/"            home,
+  Cons (route "POST" "/api/message" post_msg,
+  Nil)) in
+
+let handle = router routes not_found in
+
+// Port override via env — makes it painless to run two instances
+// during the demo (`PORT=8081 node ...`).
+let port_str = getenv "PORT" in
+let port = if str_eq port_str "" then 8080 else int_of_str port_str in
+
+let _ = print ("pubsub-chat on :" ++ show port
+            ++ " (redis " ++ redis_host ++ ":" ++ show redis_port ++ ")") in
+let _ = http_serve port handle in
+0
