@@ -1,0 +1,40 @@
+// examples/cloudflare-worker/main.mere — Cloudflare Worker entry.
+//
+// Registers a fetch handler that receives one JSON-encoded HTTP
+// request per invocation and returns a JSON-encoded response.
+// The registration happens once at Wasm instantiate time; every
+// subsequent CF Worker `fetch` event calls the stored closure.
+//
+// Request  JSON: {"method":"GET","path":"/","headers":{"k":"v"},"body":""}
+// Response JSON: {"status":200,"headers":{"k":"v"},"body":"hello"}
+//
+// This file is Wasm-portable: no TCP, no subprocess, no file I/O.
+// All CF Worker constraints (V8 isolate, no Node stdlib) are honoured
+// because the Mere code doesn't touch any of that.
+
+extern fn cf_on_fetch: (str -> str) -> unit;
+
+// A trivial handler: echo the method + path in the response body.
+// Real code would parse the JSON with contrib/json/json.mere and
+// build the response with contrib/json/writer.mere.
+let handler = fn (req_json: str) ->
+  // Naive string scan for `"path":"..."` — no full JSON parse. Good
+  // enough for the demo. Replace with contrib/json for production.
+  let path_idx = str_index_of req_json "\"path\":\"" in
+  let path = if path_idx < 0 then "?"
+             else
+               let after = substring req_json (path_idx + 8) (str_len req_json) in
+               let end_idx = str_index_of after "\"" in
+               if end_idx < 0 then "?" else substring after 0 end_idx in
+  let method_idx = str_index_of req_json "\"method\":\"" in
+  let method = if method_idx < 0 then "?"
+               else
+                 let after = substring req_json (method_idx + 10) (str_len req_json) in
+                 let end_idx = str_index_of after "\"" in
+                 if end_idx < 0 then "?" else substring after 0 end_idx in
+  "\{\"status\":200," ++
+  "\"headers\":\{\"content-type\":\"text/plain\"}," ++
+  "\"body\":\"hello from Mere on Cloudflare — " ++ method ++ " " ++ path ++ "\"}" ;
+
+let _ = cf_on_fetch handler in
+0

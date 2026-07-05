@@ -1,0 +1,22 @@
+# wrangler.toml — Cloudflare Worker config for the Mere sample.
+#
+# Deploy: `wrangler deploy` (needs `wrangler` installed + `wrangler login`
+# done at least once). Local dev: `wrangler dev` starts a local V8
+# isolate on http://localhost:8787.
+
+name = "mere-hello"
+main = "worker.js"
+compatibility_date = "2026-07-05"
+
+# `main.wasm` is imported as a module binding via `import` in worker.js.
+# Wrangler picks up any file matching a `[[wasm_modules]]` binding OR
+# any file referenced with the `import x from "./file.wasm"` shape.
+[assets]
+
+# Optional: rules for wasm module bundling (esbuild finds it via the
+# `import ... from "./main.wasm"` in worker.js, so this is redundant
+# but explicit for readers).
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true

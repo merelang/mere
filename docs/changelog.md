@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — Cloudflare Worker template (roadmap step 2)
+
+Step 2 of the direction-paper roadmap. A minimal, self-contained
+template that runs a Mere program as a Cloudflare Worker — 5.7 KB
+compiled wasm, no npm runtime deps, V8-isolate compatible.
+
+`examples/cloudflare-worker/`:
+
+- `main.mere` — 30-line handler. Registers a request handler via a
+  new `cf_on_fetch: (str -> str) -> unit` extern. Handler receives
+  JSON-encoded request, returns JSON-encoded response.
+- `worker.js` — CF Worker entry (ES module). Provides `cf_on_fetch`
+  + the standard prelude stubs, marshals `Request` ↔ JSON ↔ Mere
+  closure via the existing `__lang_bump` + `__indirect_function_table`
+  machinery.
+- `wrangler.toml` — CF Worker deploy config.
+- `build.sh` — `mere -w main.mere → main.wat → main.wasm`.
+- `local_test.js` — Node 22-based smoke test using native
+  `Request`/`Response` (no wrangler/miniflare required for
+  verification).
+- `README.md` — layout, build/deploy commands, request/response
+  protocol, and an explicit "what doesn't work on CF" section (no
+  TCP / subprocess / fs — those are Node-runtime-specific externs).
+
+Verified locally via `node local_test.js` — three requests round-trip:
+- `GET /` → `hello from Mere on Cloudflare — GET /`
+- `GET /hello?name=world` → same shape, path echoed
+- `POST /submit` → method + path echoed
+
+Actual `wrangler deploy` requires a Cloudflare account and is left
+to the operator (`README.md` documents the commands).
+
+Deliberate non-goals for this template: KV / R2 / D1 bindings,
+Durable Objects, auto-rebuild watcher. All addable incrementally.
+
 ## 2026-07-05 — package system v0.1: `.mere_modules/` walk-up resolution
 
 First step of the direction-paper roadmap. Extends the import
