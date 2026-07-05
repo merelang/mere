@@ -1,0 +1,43 @@
+// examples/log_levels_demo.mere — dogfood contrib/log's new level
+// filter + LOG_LEVEL env var.
+//
+// Emits all five levels with a mix of plain messages and field
+// variants. Whether each line prints depends on the currently-set
+// threshold (default: info).
+//
+// Usage:
+//   ./mere -w examples/log_levels_demo.mere > /tmp/lld.wat
+//   wat2wasm --enable-tail-call /tmp/lld.wat -o /tmp/lld.wasm
+//
+//   node scripts/run_wasm.js /tmp/lld.wasm             # default = info
+//   LOG_LEVEL=debug node scripts/run_wasm.js /tmp/lld.wasm  # all 4
+//   LOG_LEVEL=warn  node scripts/run_wasm.js /tmp/lld.wasm  # warn+error
+//   LOG_LEVEL=off   node scripts/run_wasm.js /tmp/lld.wasm  # silence
+
+import "../contrib/log/log.mere";
+
+// Read LOG_LEVEL from the environment; leaves the default in place
+// if unset. Any real service would call this once at startup.
+let _ = log_from_env () in
+
+let _ = log_debug "debug line — should hide at info+" in
+let _ = log_info  "info line" in
+let _ = log_warn  "warn line" in
+let _ = log_error "error line" in
+
+// Field variants — same filter applies, but structured k/v arrives
+// as JSON keys next to msg.
+let _ = log_info_f "with fields"
+          (Cons (("user", "alice"),
+           Cons (("dur_ms", "42"), Nil))) in
+
+let _ = log_error_f "escape check"
+          (Cons (("payload", "contains \"quotes\" and \\ slashes"), Nil)) in
+
+// Runtime level switching. From this point on, only warn + error
+// print — even if LOG_LEVEL said debug earlier.
+let _ = set_log_level "warn" in
+let _ = log_info  "info-after-switch (suppressed)" in
+let _ = log_warn  "warn-after-switch (visible)" in
+
+0

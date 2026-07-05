@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/log`: level filtering + field-taking variants + `LOG_LEVEL` env
+
+The base `log_debug` / `log_info` / `log_warn` / `log_error`
+functions were already there but always printed. Now:
+
+- `set_log_level "debug" | "info" | "warn" | "error" | "off"` sets
+  the threshold at runtime. Default remains `info`.
+- `log_from_env ()` reads `LOG_LEVEL` from the process env. Unset
+  or empty leaves the default in place — a demo without any
+  explicit configuration still gets `info`-and-above.
+- `log_debug_f` / `log_info_f` / `log_warn_f` / `log_error_f` —
+  field-taking variants. Same filter applies; structured
+  `(str, str) list` fields become JSON keys next to `msg`.
+
+The threshold lives in a single-cell `vec_new ()` allocated once at
+module-load time (post import-flatten). Note for future contrib
+authors: module-level mutable state must use `;` (top-level decl)
+rather than `let ... in` — the latter turns the rest of the file
+into one expression that import discards. Learned the hard way
+here; documented in the module.
+
+Demo `examples/log_levels_demo.mere` exercises all levels + runtime
+switching. Verified:
+- default: info + warn + error + info_f + error_f visible.
+- `LOG_LEVEL=debug`: debug included.
+- `LOG_LEVEL=warn`: only warn + error.
+- `LOG_LEVEL=off`: silent (until runtime `set_log_level` re-enables).
+
+All 8 existing log consumers (`http_users_db`, `http_jwt_api`,
+`http_ci_dashboard`, `http_feed_reader`, `http_csv_export`,
+`http_wiki`, `http_file_upload`, `http_webhook_receiver`) recompile
+unchanged. Test suite: 1846.
+
 ## 2026-07-05 — `contrib/http/basic_auth`: RFC 7617 Basic Auth middleware
 
 Small addition to gate internal endpoints — `/metrics` scraping,
