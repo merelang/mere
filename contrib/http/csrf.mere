@@ -1,0 +1,86 @@
+// contrib/http/csrf.mere — synchronizer-token CSRF protection.
+//
+// Sits on top of `contrib/http/session`: the session id (from the
+// Cookie header) is the store key, the token is a fresh random
+// 16-hex string generated on first `csrf_token_for` per session and
+// re-used until the session expires (i.e. until the process
+// restarts, in the current in-memory model).
+//
+// Usage pattern:
+//
+//   // At startup.
+//   let sessions = session_new_store () in
+//   let csrf     = csrf_new_store () in
+//
+//   // In a GET handler that renders a form: mint / re-fetch the
+//   // token and embed it via `csrf_hidden_input`.
+//   let sid = session_id (http_get_header "Cookie") in
+//   let tok = csrf_token_for csrf sid in
+//   "<form method=POST>" ++ csrf_hidden_input tok ++ ... ++ "</form>"
+//
+//   // In a POST handler that accepts a form: verify before mutating.
+//   let sid = session_id (http_get_header "Cookie") in
+//   if not (csrf_validate csrf sid (form_field "_csrf")) then
+//     let _ = http_set_status 403 in "CSRF mismatch\n"
+//   else ...
+//
+// Design choice: kept as primitives instead of a `with_csrf`
+// middleware because content-type detection (form vs JSON) and body
+// re-parsing on the wire boundary are handler-specific concerns.
+// Handlers already read the body via `form_field` / `body_field`,
+// so passing the field value into `csrf_validate` is a one-liner
+// where the caller already is.
+//
+// Public API:
+//
+//   csrf_new_store ()                     -> store  (opaque map)
+//   csrf_token_for store session_id       -> str    (mints on first call)
+//   csrf_validate store session_id token  -> bool
+//   csrf_hidden_input token               -> str    (HTML snippet)
+//
+// Threat model:
+//   - Prevents cross-origin form POSTs from executing state changes
+//     with the victim's session cookie.
+//   - Assumes tokens are treated as secret (i.e. TLS + no logging of
+//     rendered pages that contain the token).
+//   - Does NOT protect against XSS on the app itself — an attacker
+//     with script access reads the token.
+//   - Does NOT rotate tokens per submission (would require single-
+//     use tokens with a replay window; deferred).
+
+extern fn gen_request_id: unit -> str;
+
+let csrf_new_store = fn (u: unit) -> map_new ();
+
+// Idempotent per session. First call per session_id mints a random
+// 16-hex token via `gen_request_id`; subsequent calls return the
+// same value so multiple forms on a page share it.
+let csrf_token_for = fn (store) -> fn (session_id: str) ->
+  if str_eq session_id "" then ""
+  else if map_has store session_id then map_get store session_id
+  else
+    let tok = gen_request_id () in
+    let _ = map_set store session_id tok in
+    tok
+  ;
+
+// A `""` on either side of the compare is a hard no — protects
+// against unauthenticated posters (empty session) and missing
+// `_csrf` form fields (empty submitted token). Simple str_eq (not
+// timing-safe) — tokens are per-session random and not derived from
+// secrets, so the small leak from a timing side-channel doesn't
+// give an attacker anything actionable.
+let csrf_validate = fn (store) -> fn (session_id: str)
+                 -> fn (submitted: str) ->
+  if str_eq session_id "" then false
+  else if str_eq submitted "" then false
+  else if not (map_has store session_id) then false
+  else str_eq (map_get store session_id) submitted
+  ;
+
+// Emit the hidden form input in one line. Token is embedded raw —
+// callers must ensure the token isn't ever a value from user input
+// (which csrf_token_for guarantees via gen_request_id).
+let csrf_hidden_input = fn (token: str) ->
+  "<input type=\"hidden\" name=\"_csrf\" value=\"" ++ token ++ "\">"
+  ;
