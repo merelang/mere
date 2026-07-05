@@ -69,7 +69,10 @@ if [ -d "$PLAYGROUND_OUT" ]; then
     [ -f "$wat" ] || continue
     wasm="${wat%.wat}.wasm"
     if command -v wat2wasm > /dev/null 2>&1; then
-      wat2wasm "$wat" -o "$wasm" 2>&1 \
+      # --enable-tail-call: contrib demos with while / inner-lifted
+      # closures emit `return_call[_indirect]` (Wasm tail-call proposal).
+      # Enabled by default in Chrome / Safari / Firefox 129+ / Node 22+.
+      wat2wasm --enable-tail-call "$wat" -o "$wasm" 2>&1 \
         && echo "  wat2wasm $(basename "$wat") -> $(basename "$wasm")"
     else
       echo "  warning: wat2wasm not in PATH, skipping $wat" >&2
