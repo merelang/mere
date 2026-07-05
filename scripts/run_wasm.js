@@ -100,6 +100,11 @@ const wasmPath = process.argv[2];
     getpid: () => process.pid,
     getppid: () => process.ppid,
     unix_time: () => Math.floor(Date.now() / 1000),
+    // Monotonic milliseconds since process start, truncated to i32.
+    // Same shape as run_http_server.js so contrib modules that pull
+    // `now_ms` (e.g. metrics duration counters) work under either
+    // runner.
+    now_ms: () => Math.floor(require("perf_hooks").performance.now()) | 0,
     rand: () => Math.floor(Math.random() * 0x7fffffff),
     srand: (_seed) => {},  // JS Math.random can't be seeded; no-op
     sleep: (_n) => 0,       // skip blocking sleep in JS context

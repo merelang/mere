@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — `contrib/http/metrics`: Prometheus-style metrics + middleware
+
+A small registry of counters and gauges plus a text-format exporter
+and a `GET /metrics` handler suitable for direct mount in a route
+table. Ships an auto-counting middleware `with_metrics` that
+increments `http_requests_total{method, path}` and adds request
+duration into `http_request_duration_ms_sum` + `_count` for every
+request (Prom's "summary" idiom, no percentiles).
+
+Public API:
+
+- `metric_declare_counter name help` / `metric_declare_gauge name help`
+  — register + attach HELP/TYPE metadata (rendered once per name).
+- `metric_inc name labels` — counter += 1.
+- `metric_add name labels n` — counter += n.
+- `metric_set name labels v` — gauge = v.
+- `metrics_render ()` — Prometheus text-format string.
+- `metrics_handler req` — mount as `GET /metrics`.
+- `with_metrics handle` — middleware wrapper.
+
+Storage is a plain `map_new ()` keyed by `name` or `name{labels}`;
+values are `int` (millisecond durations, counts). Float values,
+configurable histogram buckets, and label-value escaping are out
+of MVP scope.
+
+Also added `now_ms` extern to `run_wasm.js` (previously only in
+`run_http_server.js`) so contrib modules that pull it work under
+either runner.
+
+Demo `examples/http_metrics_demo.mere` — four routes (`/`, `/work`
+with a 50 ms sleep, `POST /error`, `/metrics`) verify the auto-
+counters, business counters, and duration accumulation. `/work`'s
+`http_request_duration_ms_sum` sits at ~55 ms after one hit;
+`errors_total` increments only on `POST /error`.
+
 ## 2026-07-05 — `examples/gh_stars`: first CLI demo
 
 First Mere program that runs under `run_wasm.js` (not
