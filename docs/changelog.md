@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — Blog-engine papercuts: lexer + typer polish
+
+Two friction points surfaced during the http_blog dogfood get proper
+first-class fixes now (previously the demo worked around them).
+
+**String line-continuation.** `"foo \<newline>   bar"` now lexes as
+`"foo bar"` — the backslash-newline sequence eats the newline itself
+plus any leading spaces / tabs on the next line (Python / Rust
+convention). Long HTML snippets, SQL statements, and log messages
+can be broken across source lines without smuggling in a `\n` or
+indent characters, and without piecing them back with `++` string
+concatenation. All existing escapes (`\n`, `\t`, `\r`, `\"`, `\\`,
+`\{`) still work identically.
+
+**SCREAMING_SNAKE_CASE hint on `let`.** `let DB_URL = "..."` used to
+fail with a bare `type error: unknown constructor in pattern: DB_URL`
+because Mere reserves uppercase-first identifiers for constructors.
+The typer now recognises the shape (starts uppercase, has no
+lowercase letters, either ≥ 3 chars OR contains `_`) and adds:
+
+    help: Mere reserves uppercase-first identifiers for constructors.
+    If you meant a value binding, rename to `db_url`.
+
+The heuristic explicitly excludes single-letter names like `let X = …`
+(too plausibly a one-shot constructor placeholder) and still yields
+to the standard did-you-mean suggestion when one exists (`let x = Cnos (…)`
+→ `did you mean 'Cons'?`).
+
+Both changes come with regression tests. Full suite: 1838 → 1846.
+
 ## 2026-07-05 — `sse_bridge_from_redis`: multi-instance SSE fanout
 
 New extern in `contrib/http/sse.mere`:

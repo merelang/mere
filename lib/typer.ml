@@ -101,14 +101,48 @@ let format_did_you_mean (cands : string list) : string option =
 let with_hint (msg : string) (hint : string) : string =
   msg ^ "\nhelp: " ^ hint
 
+(* Detect names that look like an attempted UPPER_SNAKE_CASE constant
+   binding (e.g. `let DB_URL = ...`). In Mere identifiers starting
+   with an uppercase letter are constructors, so such a `let` parses
+   as a constructor pattern that then fails to resolve. The heuristic:
+   name starts uppercase AND has no lowercase letters AND is either
+   ≥ 2 chars or contains an underscore — that catches SCREAMING_SNAKE
+   and shorter ALL_CAPS names while leaving single-letter `X` / `Y`
+   alone (they're plausibly one-shot constructor placeholders). *)
+let looks_like_upper_snake_constant name =
+  String.length name >= 2
+  && (name.[0] >= 'A' && name.[0] <= 'Z')
+  && String.for_all
+       (fun c -> not (c >= 'a' && c <= 'z')) name
+  && (String.length name >= 3 || String.contains name '_')
+
+let to_lower_snake name =
+  let buf = Buffer.create (String.length name) in
+  String.iter (fun c ->
+    if c >= 'A' && c <= 'Z' then
+      Buffer.add_char buf (Char.chr (Char.code c + 32))
+    else Buffer.add_char buf c) name;
+  Buffer.contents buf
+
 let raise_with_suggestion loc kind target candidates =
   (* Phase 33.0: try top 3 candidates first; falls back to single suggestion
      if format_did_you_mean returns None (= no candidates within distance). *)
   let msg =
+    let base = kind ^ ": " ^ target in
     let cands3 = suggest_names_n target candidates 3 in
+    (* If the target looks like an attempted SCREAMING_SNAKE constant
+       binding and the fuzzy search found nothing that resembles it,
+       swap in a targeted hint about the constructor-vs-value naming
+       rule — much more actionable than a bare "unknown constructor". *)
     match format_did_you_mean cands3 with
-    | Some hint -> with_hint (kind ^ ": " ^ target) hint
-    | None -> kind ^ ": " ^ target
+    | Some hint -> with_hint base hint
+    | None ->
+      if looks_like_upper_snake_constant target then
+        with_hint base
+          ("Mere reserves uppercase-first identifiers for constructors. \
+            If you meant a value binding, rename to `"
+           ^ to_lower_snake target ^ "`.")
+      else base
   in
   raise (Type_error (loc, msg))
 

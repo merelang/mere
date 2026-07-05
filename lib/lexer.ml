@@ -232,20 +232,35 @@ let rec tokenize s =
             | '"' -> j + 1
             | '\\' when j + 1 < len ->
               let esc = s.[j + 1] in
-              let actual = match esc with
-                | 'n' -> '\n'
-                | 't' -> '\t'
-                | 'r' -> '\r'
-                | '0' -> '\000'
-                | '\\' -> '\\'
-                | '"' -> '"'
-                | '{' -> '{'        (* escape interpolation *)
+              (match esc with
+                | '\n' ->
+                  (* Line continuation: `\<newline>` eats the newline
+                     itself plus any leading whitespace on the next
+                     line, so a long string literal can break across
+                     source lines without smuggling in newline / indent
+                     characters. Matches the Python / Rust convention. *)
+                  let rec skip_ws k =
+                    if k >= len then k
+                    else match s.[k] with
+                      | ' ' | '\t' -> skip_ws (k + 1)
+                      | _ -> k
+                  in
+                  read (skip_ws (j + 2))
                 | _ ->
-                  raise (Lex_error (pos,
-                    Printf.sprintf "unknown escape: \\%c" esc))
-              in
-              Buffer.add_char buf actual;
-              read (j + 2)
+                  let actual = match esc with
+                    | 'n' -> '\n'
+                    | 't' -> '\t'
+                    | 'r' -> '\r'
+                    | '0' -> '\000'
+                    | '\\' -> '\\'
+                    | '"' -> '"'
+                    | '{' -> '{'        (* escape interpolation *)
+                    | _ ->
+                      raise (Lex_error (pos,
+                        Printf.sprintf "unknown escape: \\%c" esc))
+                  in
+                  Buffer.add_char buf actual;
+                  read (j + 2))
             | '{' ->
               (* start interpolation: flush prefix, then find matching `}`
                  (skipping `{...}` nested groups). *)
