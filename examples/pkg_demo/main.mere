@@ -1,0 +1,18 @@
+// examples/pkg_demo/main.mere — dogfood the v0.1 package system.
+//
+// Imports `hello/greet.mere` as if it were a distributed package.
+// The resolver walks up from this file's directory, finds
+// `.mere_modules/`, and picks up `.mere_modules/hello/greet.mere`
+// — no relative `../` navigation, no `-I` flag.
+//
+// Try:
+//   dune exec ./bin/mere.exe -- -w examples/pkg_demo/main.mere \
+//       > /tmp/pkg.wat
+//   wat2wasm --enable-tail-call /tmp/pkg.wat -o /tmp/pkg.wasm
+//   node scripts/run_wasm.js /tmp/pkg.wasm
+//     → hello, world!
+
+import "hello/greet.mere";
+
+let _ = print (greet "world") in
+0

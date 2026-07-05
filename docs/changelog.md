@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-05 — package system v0.1: `.mere_modules/` walk-up resolution
+
+First step of the direction-paper roadmap. Extends the import
+resolver in `lib/parser.ml` with Node.js-style `node_modules` walk-
+up semantics — a project puts vendored packages under
+`.mere_modules/`, and any file in the tree can `import "pkg/module.mere"`
+without relative `../` navigation or `-I` flags.
+
+Resolution order (relative paths only; absolute paths still resolve
+literally):
+
+1. `<importer_dir>/<path>` — historical behaviour
+2. `<nearest .mere_modules up>/<path>` — new (Node-style walk-up)
+3. `-I` dirs + `MERE_PATH` env — historical, order preserved
+
+Deliberate v0.1 non-goals (documented in `docs/packages.md`):
+
+- No `mere.toml` manifest yet (track deps by git URL / commit)
+- No `mere install` command (git clone / submodule / tarball drop)
+- No central registry (planned for v0.3+, design in internal notes)
+- No version resolution (walk-up first-match-wins)
+
+Vendoring workflow — three equivalent options, all documented:
+
+    git clone https://github.com/<owner>/<pkg> .mere_modules/<pkg>
+    # or
+    git submodule add https://github.com/<owner>/<pkg> .mere_modules/<pkg>
+    # or
+    curl -L https://example.com/<pkg>.tar.gz | tar xz -C .mere_modules/
+
+New docs page `docs/packages.md` with layout, semantics, precedence,
+and a self-contained demo pointer. Demo `examples/pkg_demo/`:
+- `main.mere` — 3 lines, `import "hello/greet.mere"; print (greet "world")`
+- `.mere_modules/hello/greet.mere` — one-liner greeter package
+- End-to-end verified: `mere -w examples/pkg_demo/main.mere` →
+  `hello, world!`
+
+Three new regression tests in `test/test_basic.ml`:
+- Single-level walk-up (`.mere_modules/` alongside entry file)
+- Deep walk-up (entry file in `app/handlers/`, modules dir above)
+- Cross-package imports find the same `.mere_modules/` root
+
+All 7 spot-checked existing demos (`http_blog`, `http_admin_dash`,
+`http_router_demo`, `http_ws_chat`, `db_redis_pubsub`,
+`subprocess_demo`, `gh_stars`) recompile unchanged. Test suite:
+1846 → 1849.
+
 ## 2026-07-05 — `contrib/db/redis_ratelimit`: distributed fixed-window limiter
 
 Multi-instance version of `contrib/http/ratelimit` (which is

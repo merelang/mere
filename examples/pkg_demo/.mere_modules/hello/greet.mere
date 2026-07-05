@@ -1,0 +1,2 @@
+// Vendored module — one function, greets by name.
+let greet = fn (name: str) -> "hello, " ++ name ++ "!" ;
