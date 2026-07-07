@@ -4,6 +4,15 @@ Read-only JSON API for Mere packages. Runs as a Cloudflare Worker;
 package data is bundled as static JSON. Future v0.2 will add
 dynamic GitHub tag fetching + KV caching.
 
+> **Note — the package repos are aspirational.** The entries in
+> `packages.json` (`merelang/mere-http`, `mere-db`, `mere-json`) and
+> their tarball URLs point at repos that **do not exist yet**. Today
+> all contrib modules live in the `mere` monorepo under `contrib/`;
+> the polyrepo split happens only when there's real demand (see the
+> project's packaging notes). Don't `git clone` those URLs expecting
+> a hit — this sample demonstrates the registry's API *shape*, which
+> v0.2 will back with live data.
+
 ## Endpoints
 
 | Route                     | Behaviour |
