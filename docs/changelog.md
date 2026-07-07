@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-06 — Tutorial: build a Redis client in Mere (roadmap step 4, second of three)
+
+Second educational tutorial. Builds a minimal Redis client from the
+raw TCP + memory externs to teach the RESP wire protocol — the layer
+`contrib/db/redis` sits on top of.
+
+- `docs/tutorial-redis-client.md` — auto-published (nav + sitemap +
+  search). Covers RESP in a table (`+` simple / `-` error / `:` int
+  / `$` bulk / `*` array), then builds bottom-up: the `tcp_*` +
+  `mem_*` externs, the reply variant, byte / line / exact-count
+  readers, the first-byte dispatch parser, and command encoding
+  (`*N\r\n$len\r\narg\r\n`). Ends pointing at the full
+  `contrib/db/redis` (RESP3, pipelining, TLS, pub/sub) + queue /
+  stream / lock modules + the pg driver (same `mem_*` pattern).
+- `examples/tutorial_redis_client.mere` — the worked example.
+  Verified end-to-end against `redis:7`: PING → `+PONG`, SET →
+  `+OK`, GET → bulk `"hello mere"`, GET missing → nil, DEL → `:1`
+  — one reply type exercised per command.
+
+Teaching point emphasized: bulk strings use a length prefix (not
+line scanning) because payloads can contain `\r\n` / NUL — so
+`read_bulk` reads an exact byte count via `read_exact`, unlike the
+CRLF `read_line` used for status / length lines.
+
+Note: `tcp_*` externs need the Node runner's sync TCP worker; they
+are NOT available on Cloudflare Workers (no raw sockets) — called
+out in the tutorial.
+
 ## 2026-07-06 — Tutorial: build a REST API in Mere (roadmap step 4, first of three)
 
 First educational tutorial (direction paper's step 4). A guided
