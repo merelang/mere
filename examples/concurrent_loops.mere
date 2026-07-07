@@ -1,0 +1,35 @@
+// concurrent_loops: two loops running in one process (the Q-012 motivation)
+//
+// The concurrency work started from a concrete pain point: a program that
+// needs two long-running loops in a single process (e.g. an HTTP serve loop
+// plus a background worker loop) could not be written in Mere — there was no
+// way to run more than one loop at a time. spawn + channel fixes that.
+//
+// Here a worker loop runs on a spawned thread, consuming jobs from a channel
+// and accumulating a total, while the main loop produces jobs concurrently.
+// When the producer is done it sends a sentinel (0); the worker returns its
+// total through a second channel, which the main thread waits on.
+
+// Producer loop: send n, n-1, ..., 1, then 0 (the "done" sentinel).
+let rec produce = fn ch -> fn n ->
+  if n < 1 then channel_send ch 0
+  else let _ = channel_send ch n in produce ch (n - 1);
+
+// Worker loop: fold jobs until the sentinel, then return the running total.
+let rec consume = fn jobs -> fn acc ->
+  let j = channel_recv jobs in
+  if j < 1 then acc else consume jobs (acc + j);
+
+let total =
+  let jobs = channel_new () in
+  let results = channel_new () in
+  // Worker loop on its own thread. It captures `jobs`, `results`, `consume`
+  // — all shared (Sync), so the main thread keeps using them too.
+  let _ = spawn (fn u -> channel_send results (consume jobs 0)) in
+  // Main loop produces 100 jobs concurrently with the worker.
+  let _ = produce jobs 100 in
+  // Block until the worker reports its total.
+  channel_recv results;
+
+// 1 + 2 + ... + 100 = 5050
+print_int total
