@@ -187,6 +187,10 @@ let process ?base_dir s =
      program (decls folded into nested Let chains) so cross-decl
      borrows are tracked too. *)
   Typer.check_borrows [] (Ast.desugar_program prog);
+  (* Q-012 (OPEN i): move / use-after-move analysis for spawn captures.
+     Runs on the desugared program (same shape as check_borrows) so it
+     sees resolved node types and full lexical scope. *)
+  Move_check.check (Ast.desugar_program prog);
   List.iter prerr_endline (Exhaustive.take ());
   let v = Eval.eval_in !eval_env prog.main in
   Eval.to_string v
