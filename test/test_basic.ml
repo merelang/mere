@@ -2585,6 +2585,21 @@ let () =
       "type CgRectC = { w: int };\n\
        let r = CgRectC { w = 5 } in r.w")
     "(r).w";
+  (* Q-012 step 3b-4a: C backend spawn / join over pthreads (env-less closures).
+     The emitted program compiles with clang and runs the closure on a real
+     OS thread (validated manually; there is no C compile-run harness). *)
+  assert_contains "codegen C: spawn emits a pthread_create"
+    (codegen_with_decls
+      "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "pthread_create";
+  assert_contains "codegen C: join emits a pthread_join"
+    (codegen_with_decls
+      "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "pthread_join";
+  assert_contains "codegen C: emits the spawn trampoline + ThreadHandle"
+    (codegen_with_decls
+      "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "__mere_spawn_trampoline";
   assert_contains "codegen: record update via tmp + statement expr"
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\
