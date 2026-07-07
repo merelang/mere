@@ -9181,6 +9181,52 @@ let () =
        "sync type SharedLog = MkLog of int; \
         let ch = channel_new () in \
         channel_send ch (MkLog 0)") "()";
+  (* Q-012 (OPEN i): move / use-after-move analysis for spawn captures. *)
+  check_raises_containing "move: use-after-move of an owned cap is rejected"
+    "use after move"
+    (fun () -> Pipeline.process
+       "drop type Logger = MkLogger of int; \
+        let lg = MkLogger 0 in \
+        let _ = spawn (fn () -> let _ = lg in ()) in \
+        lg");
+  check "move: an owned cap moved and not reused is accepted"
+    (Pipeline.process
+       "drop type Logger = MkLogger of int; \
+        let lg = MkLogger 0 in \
+        let _ = spawn (fn () -> let _ = lg in ()) in \
+        ()") "()";
+  check_raises_containing "move: capturing a !Send (local) cap is rejected"
+    "neither"
+    (fun () -> Pipeline.process
+       "local type Conn = MkConn of int; \
+        let c = MkConn 0 in \
+        let _ = spawn (fn () -> let _ = c in ()) in \
+        ()");
+  check_raises_containing "move: moving inside a >1-run closure is rejected"
+    "more than once"
+    (fun () -> Pipeline.process
+       "drop type Logger = MkLogger of int; \
+        let lg = MkLogger 0 in \
+        let f = fn u -> spawn (fn () -> let _ = lg in ()) in \
+        let _ = f () in f ()");
+  check_raises_containing "move: asymmetric one-branch move is rejected"
+    "some branches"
+    (fun () -> Pipeline.process
+       "drop type Logger = MkLogger of int; \
+        let lg = MkLogger 0 in \
+        let _ = if true then (let _ = spawn (fn () -> let _ = lg in ()) in ()) \
+                else () in \
+        ()");
+  check_raises_containing "move: capturing a polymorphic-typed var is rejected"
+    "polymorphic"
+    (fun () -> Pipeline.process
+       "let g = fn c -> spawn (fn () -> let _ = c in ()) in ()");
+  check "move: a Sync (shared) cap stays usable in the parent"
+    (Pipeline.process
+       "sync type SLog = MkLog of int; \
+        let s = MkLog 0 in \
+        let _ = spawn (fn () -> let _ = s in ()) in \
+        let _ = s in ()") "()";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
