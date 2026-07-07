@@ -196,6 +196,14 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    placed inside a region. *)
 let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* Q-012: concrete element types of `Channel[T]` seen in the program. Key is
+   the element ty_tag; value is the walked element type. Each entry emits a
+   `mere_channel_<tag>` struct + new/send/recv (a heap-allocated blocking
+   FIFO guarded by a pthread mutex + condition variable). Heap-allocated (not
+   region-bound) since a channel is shared across threads and outlives any
+   region block. *)
+let channel_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
+
 (* Phase 15.9: StrBuf[R] usage flag — StrBuf is a single (non-polymorphic)
    region-bound mutable string buffer, so no per-T monomorphization.
    The runtime is emitted iff this flag is set. *)
@@ -980,6 +988,20 @@ let vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
    )
   | None -> raise (Codegen_error (loc, "vec_*: missing type info"))
 
+(* Q-012: given the type of a channel expression (`Channel[T]`), return the
+   element ty_tag and register the instance so its runtime is emitted. *)
+let channel_elem_tag (t : Ast.ty option) : string =
+  match Option.map Ast.walk t with
+  | Some (Ast.TyCon ("Channel", [el])) ->
+    let el = Ast.walk el in
+    let tag = ty_tag el in
+    if not (Hashtbl.mem channel_instances tag) then
+      Hashtbl.add channel_instances tag el;
+    tag
+  | _ ->
+    raise (Codegen_error (Loc.dummy,
+      "channel operation: element type is not a resolved Channel[T]"))
+
 (* Translate one Lang expression to a C expression string. *)
 let rec emit_expr (e : Ast.expr) : string =
   match e.node with
@@ -1565,6 +1587,16 @@ let rec emit_expr (e : Ast.expr) : string =
            __t; })"
      | Ast.Var "join" ->
        "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_join(__h.tid, NULL); 0; })"
+     (* Q-012: channel primitives, dispatched to the monomorphized runtime.
+        The element tag comes from the channel's resolved type. *)
+     | Ast.Var "channel_new" ->
+       Printf.sprintf "mere_channel_%s_new()" (channel_elem_tag e.ty)
+     | Ast.Var "channel_recv" ->
+       Printf.sprintf "mere_channel_%s_recv(%s)"
+         (channel_elem_tag arg.Ast.ty) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e) ->
+       Printf.sprintf "mere_channel_%s_send(%s, %s)"
+         (channel_elem_tag ch_e.Ast.ty) (emit_expr ch_e) (emit_expr arg)
      | Ast.Var "str_len" ->
        "((int) strlen(" ^ emit_expr arg ^ "))"
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
@@ -2607,6 +2639,19 @@ let rec c_type_of (t : Ast.ty) : string =
        region ptr inside the struct. *)
     strbuf_used := true;
     "mere_strbuf*"
+  | Ast.TyCon ("Channel", args) ->
+    (* Q-012: Channel[T] — heap-allocated blocking FIFO, monomorphized per
+       element type to `mere_channel_<tag>*` (registered in channel_instances,
+       runtime batched in emit_program). *)
+    (match List.map Ast.walk args with
+     | [elem_ty] when ty_is_concrete elem_ty ->
+       let tag = ty_tag elem_ty in
+       if not (Hashtbl.mem channel_instances tag) then
+         Hashtbl.add channel_instances tag elem_ty;
+       "mere_channel_" ^ tag ^ "*"
+     | _ ->
+       raise (Codegen_error (Loc.dummy,
+         "unsupported in C codegen subset: Channel[<unresolved>] (element type must be concrete)")))
   | Ast.TyCon ("Map", args) ->
     (* Phase 15.10/15.14/15.15: Map[R, K, V] — per-(K, V) monomorphize.
        K = int / bool / str / tuple / record / nullary variant. *)
@@ -5094,6 +5139,55 @@ let emit_variant_struct_body (name : string)
     in
     Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
 
+(* Q-012: per-element-type channel runtime. A heap-allocated ring buffer
+   guarded by a mutex + condition variable; recv blocks until an element is
+   available. Element tag `tag`, C element type `cty`. *)
+let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
+  let tag = ty_tag elem_ty in
+  let cty = c_type_of elem_ty in
+  let s = "mere_channel_" ^ tag in
+  String.concat "\n"
+    [ Printf.sprintf "typedef struct %s {" s;
+      Printf.sprintf "  %s* buf;" cty;
+      "  int len; int cap; int head;";
+      "  pthread_mutex_t m;";
+      "  pthread_cond_t c;";
+      Printf.sprintf "} %s;" s;
+      "";
+      Printf.sprintf "static %s* %s_new(void) {" s s;
+      Printf.sprintf "  %s* ch = (%s*)malloc(sizeof(%s));" s s s;
+      "  ch->cap = 8; ch->len = 0; ch->head = 0;";
+      Printf.sprintf "  ch->buf = (%s*)malloc(sizeof(%s) * (size_t)ch->cap);" cty cty;
+      "  pthread_mutex_init(&ch->m, NULL);";
+      "  pthread_cond_init(&ch->c, NULL);";
+      "  return ch;";
+      "}";
+      "";
+      Printf.sprintf "static int %s_send(%s* ch, %s v) {" s s cty;
+      "  pthread_mutex_lock(&ch->m);";
+      "  if (ch->len == ch->cap) {";
+      "    int nc = ch->cap * 2;";
+      Printf.sprintf "    %s* nb = (%s*)malloc(sizeof(%s) * (size_t)nc);" cty cty cty;
+      "    for (int i = 0; i < ch->len; i++) nb[i] = ch->buf[(ch->head + i) % ch->cap];";
+      "    free(ch->buf); ch->buf = nb; ch->head = 0; ch->cap = nc;";
+      "  }";
+      "  ch->buf[(ch->head + ch->len) % ch->cap] = v;";
+      "  ch->len++;";
+      "  pthread_cond_signal(&ch->c);";
+      "  pthread_mutex_unlock(&ch->m);";
+      "  return 0;";
+      "}";
+      "";
+      Printf.sprintf "static %s %s_recv(%s* ch) {" cty s s;
+      "  pthread_mutex_lock(&ch->m);";
+      "  while (ch->len == 0) pthread_cond_wait(&ch->c, &ch->m);";
+      Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
+      "  ch->head = (ch->head + 1) % ch->cap;";
+      "  ch->len--;";
+      "  pthread_mutex_unlock(&ch->m);";
+      "  return v;";
+      "}" ]
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Variant typedefs come from Top_type decls. Walk prog.decls (NOT the
      desugared main, which drops type decls) and emit a tagged-union
@@ -5109,6 +5203,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   Hashtbl.reset owned_vec_instances;
+  Hashtbl.reset channel_instances;
   Hashtbl.reset map_instances;
   Hashtbl.reset extern_fn_decls;
   (* Phase 32.2 (C1 FFI): walk prog.decls to register extern fn names + types. *)
@@ -5726,6 +5821,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _tag elem_ty acc ->
       emit_owned_vec_runtime_for elem_ty :: acc) owned_vec_instances []
   in
+  let channel_runtimes =
+    Hashtbl.fold (fun _tag elem_ty acc ->
+      emit_channel_runtime_for elem_ty :: acc) channel_instances []
+  in
+  let channel_forward_typedefs =
+    Hashtbl.fold (fun tag _ acc ->
+      Printf.sprintf "typedef struct mere_channel_%s mere_channel_%s;" tag tag :: acc)
+      channel_instances []
+  in
   let map_runtimes =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       emit_map_runtime_for k_ty v_ty :: acc) map_instances []
@@ -5805,6 +5909,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_forward_typedefs = [] then [] else vec_forward_typedefs @ [""])
     @ (if owned_vec_forward_typedefs = [] then []
        else owned_vec_forward_typedefs @ [""])
+    @ (if channel_forward_typedefs = [] then []
+       else channel_forward_typedefs @ [""])
     @ (if !strbuf_used then
          ["typedef struct mere_strbuf mere_strbuf;"; ""]
        else [])
@@ -5839,6 +5945,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
+    @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /

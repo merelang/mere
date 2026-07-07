@@ -2610,6 +2610,33 @@ let () =
       "let mk = fn m -> spawn (fn u -> print m); \
        let h = mk \"captured\" in join h")
     "pthread_create";
+  (* Q-012 step 3b-4c: channels monomorphized to a per-element mutex/cond
+     FIFO. A parallel producer/consumer program compiles with clang and runs
+     (validated manually; TSan reports no data race on the channel). *)
+  assert_contains "codegen C: channel_new emits the monomorphized constructor"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "mere_channel_int_new()";
+  assert_contains "codegen C: channel_send emits the monomorphized send"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "mere_channel_int_send";
+  assert_contains "codegen C: channel_recv emits the monomorphized recv"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "mere_channel_int_recv";
+  assert_contains "codegen C: channel runtime uses a condition variable"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "pthread_cond_wait";
   assert_contains "codegen: record update via tmp + statement expr"
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\
