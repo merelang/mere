@@ -177,11 +177,15 @@ let process_decls eval_env type_env decls =
 
 let process ?base_dir s =
   Exhaustive.reset ();
+  Typer.reset_send_constraints ();
   let prog = parse_program ?base_dir s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
   let _ = Typer.infer !type_env prog.main in
+  (* Q-012 (OPEN ii): discharge deferred channel-element Send obligations
+     now that the whole program is typed and element tyvars are resolved. *)
+  Typer.discharge_send_constraints ();
   (* Phase 11.4: borrow checker — reject conflicting borrows on the
      same (region, var) within a single program. Runs on the desugared
      program (decls folded into nested Let chains) so cross-decl
@@ -199,6 +203,7 @@ let process ?base_dir s =
    (no side-effects), for unit tests to assert against. *)
 let exhaustiveness_warnings s =
   Exhaustive.reset ();
+  Typer.reset_send_constraints ();
   let prog = parse_program s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -208,6 +213,7 @@ let exhaustiveness_warnings s =
 
 let type_of s =
   Exhaustive.reset ();
+  Typer.reset_send_constraints ();
   let prog = parse_program s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -266,9 +272,11 @@ let type_of s =
 
 let process_typed s =
   Exhaustive.reset ();
+  Typer.reset_send_constraints ();
   let prog = parse_program s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
   let _ = Typer.infer !type_env prog.main in
+  Typer.discharge_send_constraints ();
   Eval.to_string (Eval.eval_in !eval_env prog.main)

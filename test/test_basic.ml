@@ -9227,6 +9227,30 @@ let () =
         let s = MkLog 0 in \
         let _ = spawn (fn () -> let _ = s in ()) in \
         let _ = s in ()") "()";
+  (* Q-012 (OPEN ii): polymorphic channels — deferred Send bound + the
+     "don't generalize a Send-constrained tyvar" monomorphization. *)
+  check_raises_containing
+    "poly channel: smuggling a !Send value through a polymorphic fn is rejected"
+    "is not Send"
+    (fun () -> Pipeline.process
+       "local type Conn = MkConn of int; \
+        let f = fn ch -> fn v -> channel_send ch v; \
+        let c = MkConn 0 in \
+        let ch = channel_new () in \
+        f ch c");
+  check "poly channel: a polymorphic channel fn used at a Send type is accepted"
+    (Pipeline.process
+       "let f = fn ch -> fn v -> channel_send ch v; \
+        let ch = channel_new () in \
+        f ch 42") "()";
+  check_raises
+    "poly channel: a Send-constrained channel fn is monomorphic (no reuse at 2 types)"
+    (fun () -> Pipeline.process
+       "let f = fn ch -> fn v -> channel_send ch v; \
+        let c1 = channel_new () in \
+        let c2 = channel_new () in \
+        let _ = f c1 42 in \
+        f c2 \"x\"");
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -256,10 +256,27 @@ let env_free_vars env =
     ) acc body_free
   ) [] env
 
+(* === Q-012 (OPEN ii): Send bound on channel elements, HM-integrated ===
+   When `channel_send` (etc.) is applied to an element whose type is not yet
+   resolved, the Send obligation cannot be discharged on the spot. We record
+   the element type here and (a) refuse to generalize any type variable it
+   mentions — so a "polymorphic channel" function stays monomorphic and all
+   its uses share one element type — and (b) re-check every recorded element
+   at the end of the program (discharge), erroring if it resolved to a !Send
+   type. Together this is sound without a general qualified-types solver:
+   a !Send value cannot be smuggled through a polymorphic wrapper (it would
+   either fail the discharge check or fail to unify across two uses). *)
+let pending_send : (Ast.ty * Loc.t) list ref = ref []
+let reset_send_constraints () = pending_send := []
+let pending_send_ids () =
+  List.fold_left (fun acc (ty, _) -> collect_free_vars ty acc) [] !pending_send
+
 let generalize env t =
   let t_free = collect_free_vars t [] in
   let env_free = env_free_vars env in
-  let qs = List.filter (fun id -> not (List.mem id env_free)) t_free in
+  let send_ids = pending_send_ids () in
+  let qs = List.filter (fun id ->
+    not (List.mem id env_free) && not (List.mem id send_ids)) t_free in
   { quantified = qs; body = t }
 
 (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
@@ -534,6 +551,33 @@ let rec is_sync (t : Ast.ty) : bool =
   | Ast.TyCon (_, args) -> List.for_all is_sync args
   | Ast.TyParam _ -> true
   | Ast.TyVar _ -> true
+
+(* Q-012 (OPEN ii): register a channel element's Send obligation. If the
+   element type is fully resolved, check it now; if it still mentions type
+   variables, defer it to discharge (and generalize will keep those vars
+   monomorphic). *)
+let record_send_bound loc (t : Ast.ty) =
+  if collect_free_vars t [] = [] then begin
+    if not (is_send t) then
+      raise (Type_error (loc,
+        Printf.sprintf
+          "channel element type `%s` is not Send — a value of this type \
+           cannot cross a thread boundary" (Ast.pp_ty t)))
+  end else
+    pending_send := (t, loc) :: !pending_send
+
+(* Run at the end of a program: any deferred channel element that has since
+   resolved to a concrete type must be Send. Elements still mentioning type
+   variables are left alone (they were kept monomorphic, so a later concrete
+   use would either satisfy this or fail to unify). *)
+let discharge_send_constraints () =
+  List.iter (fun (t, loc) ->
+    if collect_free_vars t [] = [] && not (is_send t) then
+      raise (Type_error (loc,
+        Printf.sprintf
+          "channel element type `%s` is not Send — a value of this type \
+           cannot cross a thread boundary" (Ast.pp_ty t)))
+  ) !pending_send
 
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
    substitute them into the arg type and result type. *)
@@ -1483,15 +1527,10 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
      | Ast.App ({ Ast.node = Ast.Var "channel_send"; _ }, _ch_e) ->
        let r = fresh_var () in
        unify e.loc tf (Ast.TyArrow (ta, r));
-       (match Ast.walk ta with
-        | Ast.TyVar _ -> ()
-        | elem ->
-          if not (is_send elem) then
-            raise (Type_error (e.loc,
-              Printf.sprintf
-                "channel element type `%s` is not Send — a value of this type \
-                 cannot cross a thread boundary"
-                (Ast.pp_ty elem))));
+       (* §C + OPEN ii: element must be Send. Concrete types are checked
+          now; element types that still mention tyvars are deferred (and
+          kept monomorphic by generalize) and re-checked at discharge. *)
+       record_send_bound e.loc (Ast.walk ta);
        r
      | Ast.Var "vec_new" ->
        let active_region =
