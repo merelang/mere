@@ -1553,6 +1553,18 @@ let rec emit_expr (e : Ast.expr) : string =
     (match f.node with
      | Ast.Var "print" ->
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
+     (* Q-012: spawn a `unit -> unit` closure on a fresh OS thread. Copy the
+        closure value onto the heap so the child owns it, then pthread_create
+        the trampoline. Returns a ThreadHandle. *)
+     | Ast.Var "spawn" ->
+       "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
+           __mere_unit_closure* __c = (__mere_unit_closure*)malloc(sizeof(__mere_unit_closure)); \
+           __c->env = __cl.env; __c->fn = __cl.fn; \
+           ThreadHandle __t; \
+           pthread_create(&__t.tid, NULL, __mere_spawn_trampoline, __c); \
+           __t; })"
+     | Ast.Var "join" ->
+       "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_join(__h.tid, NULL); 0; })"
      | Ast.Var "str_len" ->
        "((int) strlen(" ^ emit_expr arg ^ "))"
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
@@ -5749,8 +5761,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <string.h>";
       "#include <setjmp.h>";
       "#include <math.h>";  (* Phase 34.4: sqrt / sin / cos / tan / pow / atan2 *)
+      "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "";
       region_runtime_helpers;
+      "";
+      (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
+         fresh OS thread; the trampoline invokes the closure the same way the
+         rest of the codegen does (c.fn(c.env, 0), unit == int 0). A
+         ThreadHandle wraps the pthread_t so `join` can wait on it. NOTE: this
+         MVP supports closures that capture nothing (env == NULL); captured
+         env lives in the shared region allocator, whose thread-safety is a
+         separate design item (see internal notes, Q-012-C-mem). *)
+      "typedef struct { pthread_t tid; } ThreadHandle;";
+      "typedef struct { void* env; int (*fn)(void*, int); } __mere_unit_closure;";
+      "static void* __mere_spawn_trampoline(void* __p) {";
+      "  __mere_unit_closure* __c = (__mere_unit_closure*)__p;";
+      "  __c->fn(__c->env, 0);";
+      "  free(__c);";
+      "  return NULL;";
+      "}";
       "";
       str_concat_helper;
       "" ]
