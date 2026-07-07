@@ -118,6 +118,15 @@ type top_decl =
        Emitted by the parser when it sees `drop type ...` or `drop type =
        { ... }` form. The typer uses this to enforce the Trivial[R]
        constraint on region-tagged values. *)
+  | Top_sync of string
+    (* Q-012: marks a type as Sync (shareable across threads — it carries
+       an internal lock, e.g. `sync type SharedLogger = ...`). Send + Sync.
+       Emitted by the parser for the `sync type Name = ...` form, same
+       look-ahead trick as `drop type`. *)
+  | Top_local of string
+    (* Q-012: marks a type as thread-local / !Send (a single-owner handle
+       over a raw resource such as a fd, e.g. `local type TcpConn = ...`).
+       Cannot cross a thread boundary by move or share. *)
   | Top_ctor_alias of string * string
     (* Phase 18.1 / DEFERRED §4.1 remaining: typer-side aliasing of constructor
        names. Emitted by parser's `prefix_module_decls` for each ctor in
@@ -456,6 +465,8 @@ let desugar_program (prog : program) : expr =
     | Top_type_alias _ -> body
     | Top_view _ -> body
     | Top_drop _ -> body
+    | Top_sync _ -> body
+    | Top_local _ -> body
     | Top_extern _ -> body
     | Top_extern_type _ -> body
     | Top_ctor_alias _ -> body

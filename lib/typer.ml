@@ -481,6 +481,60 @@ let rec contains_drop_type (t : Ast.ty) : bool =
   | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
+(* === Q-012: Send / Sync trait predicates (concurrency narrowing §D) ===
+   Send = "can cross a thread boundary by move"; Sync = "can cross by share
+   (has an internal lock)". These are structural, auto-derived predicates in
+   the same ad-hoc style as contains_drop_type (Trivial), NOT a general trait
+   solver — Send/Sync are the 4th/5th structural predicate alongside
+   Trivial/Drop. Two registries let a cap author override the default:
+
+     sync type Foo   -> Send + Sync   (shareable; carries an internal lock)
+     local type Foo  -> !Send && !Sync (thread-local, e.g. a raw fd handle)
+
+   Derivation defaults:
+     primitives (int/float/bool/str/unit)  -> Send + Sync
+     &R T (region borrow)                  -> !Send  (region is thread-local;
+                                              this is what makes "child = fresh
+                                              region" fall out of Send, §E)
+     fn / arrow                            -> Send + Sync (closures are shareable)
+     tuple / TyCon args                    -> Send/Sync iff every component is
+     drop type (owned cap)                 -> Send, !Sync (single-owner, movable)
+
+   Unresolved TyVar is treated optimistically here (matches the bound-check
+   site policy); spawn-capture analysis in the move-check pass will instead
+   REJECT unresolved captures, closing the soundness hole flagged in review. *)
+let sync_types : (string, unit) Hashtbl.t = Hashtbl.create 8
+let local_types : (string, unit) Hashtbl.t = Hashtbl.create 8
+let register_sync_type name = Hashtbl.replace sync_types name ()
+let register_local_type name = Hashtbl.replace local_types name ()
+
+let rec is_send (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyArrow _ -> true
+  | Ast.TyRef _ -> false                       (* region borrow: thread-local *)
+  | Ast.TyTuple ts -> List.for_all is_send ts
+  | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
+  | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
+  | Ast.TyCon (name, args) when Hashtbl.mem drop_types name ->
+    List.for_all is_send args                  (* owned cap: Send, !Sync *)
+  | Ast.TyCon (_, args) -> List.for_all is_send args
+  | Ast.TyParam _ -> true
+  | Ast.TyVar _ -> true                         (* optimistic; see note above *)
+
+let rec is_sync (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyArrow _ -> true
+  | Ast.TyRef _ -> false
+  | Ast.TyTuple ts -> List.for_all is_sync ts
+  | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
+  | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
+  | Ast.TyCon (name, _) when Hashtbl.mem drop_types name -> false
+  | Ast.TyCon (_, args) -> List.for_all is_sync args
+  | Ast.TyParam _ -> true
+  | Ast.TyVar _ -> true
+
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
    substitute them into the arg type and result type. *)
 let instantiate_constr (info : constr_info) =
@@ -1423,6 +1477,22 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        `vec_new` as a first-class value still has its polymorphic
        scheme; only direct application triggers the binding. *)
     (match f.Ast.node with
+     (* Q-012 §C: `channel_send ch v` requires the element type to be Send.
+        Checked at the saturated application; an unresolved element type is
+        skipped optimistically (polymorphic channels are OPEN (ii)). *)
+     | Ast.App ({ Ast.node = Ast.Var "channel_send"; _ }, _ch_e) ->
+       let r = fresh_var () in
+       unify e.loc tf (Ast.TyArrow (ta, r));
+       (match Ast.walk ta with
+        | Ast.TyVar _ -> ()
+        | elem ->
+          if not (is_send elem) then
+            raise (Type_error (e.loc,
+              Printf.sprintf
+                "channel element type `%s` is not Send — a value of this type \
+                 cannot cross a thread boundary"
+                (Ast.pp_ty elem))));
+       r
      | Ast.Var "vec_new" ->
        let active_region =
          match !active_regions with

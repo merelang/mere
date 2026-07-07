@@ -524,6 +524,14 @@ let fmt_top_extern_type type_name =
 
 let fmt_top_drop name = "drop type " ^ name ^ ";"
 
+(* Q-012: `sync`/`local` type markers format exactly like `drop` (same
+   look-ahead split by the parser). See fuse_marker_decls below. *)
+let marker_kw : top_decl -> string option = function
+  | Top_drop _ -> Some "drop"
+  | Top_sync _ -> Some "sync"
+  | Top_local _ -> Some "local"
+  | _ -> None
+
 let fmt_top_decl d =
   match d with
   | Top_let (pat, value) -> Some (fmt_top_let pat value)
@@ -540,6 +548,8 @@ let fmt_top_decl d =
   | Top_extern (name, t) -> Some (fmt_top_extern name t)
   | Top_extern_type type_name -> Some (fmt_top_extern_type type_name)
   | Top_drop name -> Some (fmt_top_drop name)
+  | Top_sync name -> Some ("sync type " ^ name ^ ";")
+  | Top_local name -> Some ("local type " ^ name ^ ";")
   (* These aliases are injected by the parser for `module M { ... }`
      blocks. They have no surface syntax of their own — skip them so the
      formatter doesn't emit invisible-to-the-user declarations. *)
@@ -550,9 +560,9 @@ let fmt_top_decl d =
    We rebuild the combined `drop type Foo = ...;` here, so the emitted
    source is parseable (`drop type Foo;` alone is rejected by the
    parser, which requires `... = ...` after `type`). *)
-let drop_combined drop_name nxt =
+let marker_combined kw marker_name nxt =
   match nxt with
-  | Top_type (name, params, variants) when name = drop_name ->
+  | Top_type (name, params, variants) when name = marker_name ->
     let var_s =
       variants
       |> List.map (fun (c, payload) ->
@@ -561,25 +571,35 @@ let drop_combined drop_name nxt =
         | Some t -> c ^ " of " ^ fmt_ty t)
       |> String.concat " | "
     in
-    Some ("drop type " ^ fmt_type_params params ^ name ^ " = " ^ var_s ^ ";")
-  | Top_record (name, params, fields) when name = drop_name ->
+    Some (kw ^ " type " ^ fmt_type_params params ^ name ^ " = " ^ var_s ^ ";")
+  | Top_record (name, params, fields) when name = marker_name ->
     let field_s =
       fields
       |> List.map (fun (f, t) -> f ^ ": " ^ fmt_ty t)
       |> String.concat ", "
     in
-    Some ("drop type " ^ fmt_type_params params ^ name ^ " = { " ^ field_s ^ " };")
-  | Top_type_alias (name, params, aliased) when name = drop_name ->
-    Some ("drop type " ^ fmt_type_params params ^ name ^ " = " ^ fmt_ty aliased ^ ";")
+    Some (kw ^ " type " ^ fmt_type_params params ^ name ^ " = { " ^ field_s ^ " };")
+  | Top_type_alias (name, params, aliased) when name = marker_name ->
+    Some (kw ^ " type " ^ fmt_type_params params ^ name ^ " = " ^ fmt_ty aliased ^ ";")
   | _ -> None
 
-(* Walk decls and fuse `Top_drop name :: Top_type/Top_record name :: ...`
-   pairs into a single `drop type ...` line. Non-pairs pass through. *)
-let rec fuse_drop_decls = function
-  | Top_drop name :: nxt :: rest ->
-    (match drop_combined name nxt with
+(* Walk decls and fuse `<marker> name :: Top_type/Top_record name :: ...`
+   pairs into a single `<marker> type ...` line, for each of the drop / sync
+   / local markers. Non-pairs pass through. *)
+let marker_of_decl = function
+  | Top_drop n | Top_sync n | Top_local n -> Some n
+  | _ -> None
+
+let rec fuse_drop_decls decls =
+  match decls with
+  | d :: nxt :: rest
+    when (match marker_kw d, marker_of_decl d with
+          | Some _, Some _ -> true | _ -> false) ->
+    let kw = Option.get (marker_kw d) in
+    let name = Option.get (marker_of_decl d) in
+    (match marker_combined kw name nxt with
      | Some combined -> `Combined combined :: fuse_drop_decls rest
-     | None -> `Decl (Top_drop name) :: fuse_drop_decls (nxt :: rest))
+     | None -> `Decl d :: fuse_drop_decls (nxt :: rest))
   | d :: rest -> `Decl d :: fuse_drop_decls rest
   | [] -> []
 

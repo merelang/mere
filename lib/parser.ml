@@ -1606,7 +1606,8 @@ let rec parse_program_internal tokens =
        which may reference qualified names in their bodies. *)
     let is_type_decl = function
       | Ast.Top_type _ | Ast.Top_record _ | Ast.Top_type_alias _
-      | Ast.Top_view _ | Ast.Top_drop _ | Ast.Top_signature _ -> true
+      | Ast.Top_view _ | Ast.Top_drop _ | Ast.Top_sync _ | Ast.Top_local _
+      | Ast.Top_signature _ -> true
       | _ -> false
     in
     let type_decls, value_decls = List.partition is_type_decl prefixed_decls in
@@ -1843,6 +1844,23 @@ let rec parse_program_internal tokens =
     | (pos, T_drop) :: _ ->
       raise (Parse_error (pos,
         "expected `type` after `drop`"))
+    (* Q-012: `sync type Name = ...` / `local type Name = ...` — Send/Sync
+       markers. Contextual keywords (matched only directly before `type`,
+       so `sync` / `local` stay usable as ordinary identifiers). Same
+       look-ahead-and-prepend trick as `drop type` above. *)
+    | (pos, T_ident (("sync" | "local") as marker))
+      :: ((_, T_type) :: rest_after_type as after_marker) ->
+      let _, after_params = parse_type_params rest_after_type in
+      let name =
+        match after_params with
+        | (_, T_ident n) :: _ -> n
+        | _ ->
+          raise (Parse_error (pos,
+            Printf.sprintf "expected type name after `%s type`" marker))
+      in
+      let decl =
+        if marker = "sync" then Ast.Top_sync name else Ast.Top_local name in
+      parse_decls (decl :: decls) after_marker
     | (_, T_extern) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
       (* Phase 32.1 (C1 FFI): `extern fn <name>: <ty>;` parse. *)
       let t, after_ty = ty rest in

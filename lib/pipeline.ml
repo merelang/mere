@@ -153,6 +153,10 @@ let process_decls eval_env type_env decls =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_sync name ->
+      Typer.register_sync_type name
+    | Ast.Top_local name ->
+      Typer.register_local_type name
     | Ast.Top_extern (name, ty) ->
       (* Phase 32.1 (FFI): register extern fn in both the type env and the eval env.
          The typer side just adds the type. The eval side references the
@@ -241,6 +245,10 @@ let type_of s =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_sync name ->
+      Typer.register_sync_type name
+    | Ast.Top_local name ->
+      Typer.register_local_type name
     | Ast.Top_extern (name, ty) ->
       type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern_type type_name ->

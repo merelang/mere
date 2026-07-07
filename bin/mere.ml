@@ -105,6 +105,10 @@ let infer_program ?base_dir source =
       Typer.register_view name region fields
     | Ast.Top_drop name ->
       Typer.register_drop_type name
+    | Ast.Top_sync name ->
+      Typer.register_sync_type name
+    | Ast.Top_local name ->
+      Typer.register_local_type name
     | Ast.Top_extern (name, ty) ->
       type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern_type type_name ->
