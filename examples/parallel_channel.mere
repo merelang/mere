@@ -1,0 +1,32 @@
+// parallel_channel: spawn + channel across OS threads (Q-012 step 3a)
+//
+// Purpose: demonstrate the first concurrency primitives — `spawn` runs a
+//   `unit -> unit` closure on a fresh worker (an OCaml 5 domain in the
+//   interpreter), and a `Channel[T]` is a blocking FIFO used to hand
+//   results back to the parent. This is the "thin runnable slice": it
+//   lets a Mere program actually use more than one core / run more than
+//   one loop in a single process.
+//
+// Model (from the concurrency narrowing):
+//   spawn        : (unit -> unit) -> ThreadHandle   -- 1 spawn = 1 worker
+//   join         : ThreadHandle -> unit             -- wait for a worker
+//   channel_new  : unit -> Channel['a]
+//   channel_send : Channel['a] -> 'a -> unit        -- element must be Send
+//   channel_recv : Channel['a] -> 'a                -- blocks until available
+//
+// Here two workers each compute fib 30 in parallel and post the result to
+// a shared channel; the parent sums the two results.
+
+let rec fib = fn n ->
+  if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+let main_ =
+  let ch = channel_new () in
+  let _ = spawn (fn () -> channel_send ch (fib 30)) in
+  let _ = spawn (fn () -> channel_send ch (fib 30)) in
+  let r1 = channel_recv ch in
+  let r2 = channel_recv ch in
+  r1 + r2;
+
+// 832040 * 2 = 1664080
+print_int main_

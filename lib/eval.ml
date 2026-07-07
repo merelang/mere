@@ -34,6 +34,18 @@ type value =
        Phase 27.1: the 2nd component is the insertion-order key list
        (so that map_iter iterates in deterministic order). The Hashtbl
        itself preserves O(1) lookup. *)
+  | V_channel of value Queue.t * Mutex.t * Condition.t
+    (* `Channel[T]` — blocking FIFO queue for cross-thread communication
+       (Q-012 step 3a, concurrency narrowing Sub-Q C). Guarded by a
+       Mutex; channel_recv blocks on the Condition until an element is
+       available. Send/Sync type checking is minimal at this stage
+       (the interp shares the OCaml heap and leaves races to the GC);
+       the full trait check lands with the C backend, where shared
+       memory makes data races real. *)
+  | V_thread of value Domain.t
+    (* `ThreadHandle` — a worker spawned on a fresh OCaml 5 domain
+       (Sub-Q A: OS-thread / Domain-like). `join` blocks on Domain.join.
+       The domain runs the `unit -> unit` closure passed to `spawn`. *)
 
 and env = (string * value ref) list
 
@@ -84,6 +96,8 @@ and to_string = function
       let v = Hashtbl.find tbl k in
       to_string k ^ " => " ^ to_string v) !keys in
     "Map[" ^ String.concat ", " parts ^ "]"
+  | V_channel _ -> "<channel>"
+  | V_thread _ -> "<thread>"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
 
@@ -1598,8 +1612,57 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
         "extern fn %S: no interp mock implementation. Add a case to \
          Eval.lookup_extern, or run via codegen (-c / -ll / -w)." name))
 
+(* === Q-012 step 3a: concurrency primitives (interp) ===
+   spawn runs a `unit -> unit` closure on a fresh OCaml 5 domain (real
+   multicore parallelism). A channel is a blocking FIFO guarded by a
+   Mutex + Condition. This is the "thin runnable slice" (Plan Y): it lets
+   test programs actually run two loops in one process; the full Send/Sync
+   trait check + move tracking arrive with the shared-memory C backend. *)
+let builtin_spawn =
+  V_builtin ("spawn", fun clos ->
+    V_thread (Domain.spawn (fun () -> !apply_value_ref clos V_unit)))
+
+let builtin_join =
+  V_builtin ("join", fun h ->
+    match h with
+    | V_thread d -> ignore (Domain.join d); V_unit
+    | _ -> failwith "join: expected a ThreadHandle")
+
+let builtin_channel_new =
+  V_builtin ("channel_new", fun _ ->
+    V_channel (Queue.create (), Mutex.create (), Condition.create ()))
+
+let builtin_channel_send =
+  V_builtin ("channel_send", fun ch ->
+    match ch with
+    | V_channel (q, m, c) ->
+      V_builtin ("channel_send_p", fun v ->
+        Mutex.lock m;
+        Queue.push v q;
+        Condition.signal c;
+        Mutex.unlock m;
+        V_unit)
+    | _ -> failwith "channel_send: expected a Channel")
+
+let builtin_channel_recv =
+  V_builtin ("channel_recv", fun ch ->
+    match ch with
+    | V_channel (q, m, c) ->
+      Mutex.lock m;
+      while Queue.is_empty q do Condition.wait c m done;
+      let v = Queue.pop q in
+      Mutex.unlock m;
+      v
+    | _ -> failwith "channel_recv: expected a Channel")
+
 let initial_env : env =
   [ ("print", ref builtin_print);
+    (* Q-012 step 3a: concurrency primitives *)
+    ("spawn", ref builtin_spawn);
+    ("join", ref builtin_join);
+    ("channel_new", ref builtin_channel_new);
+    ("channel_send", ref builtin_channel_send);
+    ("channel_recv", ref builtin_channel_recv);
     ("read_line", ref builtin_read_line);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);

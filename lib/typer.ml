@@ -293,7 +293,7 @@ let rec is_value (e : Ast.expr) : bool =
 
 let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf"), _) -> true
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"), _) -> true
   | Ast.TyCon (_, args) -> List.exists ty_mentions_mutable_container args
   | Ast.TyArrow (p, r) ->
     ty_mentions_mutable_container p || ty_mentions_mutable_container r
@@ -696,6 +696,11 @@ let vec_len_scheme =
    synthetic `__heap`). *)
 let () = Hashtbl.replace types "Vec" 2
 
+(* Q-012 step 3a: concurrency type constructors. `Channel[T]` (arity 1)
+   and `ThreadHandle` (arity 0, e.g. `let h : ThreadHandle = spawn (...)`). *)
+let () = Hashtbl.replace types "Channel" 1
+let () = Hashtbl.replace types "ThreadHandle" 0
+
 (* --- Higher-order Vec API (Phase 12.9) ---
    Schemes that are region-polymorphic and element-type-polymorphic.
      vec_iter : forall R T. Vec[R, T] -> (T -> unit) -> unit
@@ -945,6 +950,42 @@ let map_new_scheme =
     body = Ast.TyArrow (Ast.TyUnit,
       Ast.TyCon ("Map", [_map_new_region; _map_new_k; _map_new_v])) }
 
+(* === Q-012 step 3a: concurrency primitive schemes ===
+   spawn : (unit -> unit) -> ThreadHandle      (Sub-Q A / E)
+   join  : ThreadHandle -> unit
+   channel_new  : unit -> Channel['a]          (Sub-Q C)
+   channel_send : Channel['a] -> 'a -> unit
+   channel_recv : Channel['a] -> 'a
+   Element Send checking is deferred to step 3b (C backend, shared memory);
+   here the schemes just let programs type-check and run on the interp.
+   `channel_new` is kept monomorphic at let-bindings (see
+   ty_mentions_mutable_container) so the element type propagates from
+   channel_send to channel_recv. *)
+let spawn_scheme =
+  mono (Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit),
+                     Ast.TyCon ("ThreadHandle", [])))
+let join_scheme =
+  mono (Ast.TyArrow (Ast.TyCon ("ThreadHandle", []), Ast.TyUnit))
+
+let _chan_new_elem = fresh_var ()
+let channel_new_scheme =
+  let aid = match _chan_new_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Channel", [_chan_new_elem])) }
+
+let _chan_send_elem = fresh_var ()
+let channel_send_scheme =
+  let aid = match _chan_send_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_send_elem]),
+             Ast.TyArrow (_chan_send_elem, Ast.TyUnit)) }
+
+let _chan_recv_elem = fresh_var ()
+let channel_recv_scheme =
+  let aid = match _chan_recv_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_elem]), _chan_recv_elem) }
+
 let _map_set_region = fresh_var ()
 let _map_set_k = fresh_var ()
 let _map_set_v = fresh_var ()
@@ -1029,6 +1070,12 @@ let () = Hashtbl.replace types "Map" 3
 
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
+    (* Q-012 step 3a: concurrency primitives *)
+    ("spawn",        spawn_scheme);
+    ("join",         join_scheme);
+    ("channel_new",  channel_new_scheme);
+    ("channel_send", channel_send_scheme);
+    ("channel_recv", channel_recv_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
