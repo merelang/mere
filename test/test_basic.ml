@@ -3080,6 +3080,18 @@ let () =
     (llvm "42") "declare i32 @printf(ptr, ...)";
   assert_contains "llvm: defines main"
     (llvm "42") "define i32 @main()";
+  (* Q-012 step 3b-4d: LLVM backend spawn / join over pthreads. The emitted
+     IR compiles with clang and runs the closure on a real OS thread
+     (validated manually). *)
+  assert_contains "llvm: spawn emits pthread_create"
+    (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "call i32 @pthread_create";
+  assert_contains "llvm: join emits pthread_join"
+    (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "call i32 @pthread_join";
+  assert_contains "llvm: emits the spawn trampoline"
+    (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "@__mere_spawn_trampoline";
   assert_contains "llvm: format constant present"
     (llvm "42") "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"";
   assert_contains "llvm: int literal call site"

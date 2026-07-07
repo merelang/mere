@@ -326,6 +326,10 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
+  (* Q-012: ThreadHandle wraps a pthread_t (pointer-sized); Channel[T] is a
+     heap pointer to the monomorphized channel struct. *)
+  | Ast.TyCon ("ThreadHandle", _) -> "i64"
+  | Ast.TyCon ("Channel", _) -> "ptr"
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.views name -> "ptr"
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_records name ->
     "%" ^ mono_record_name name (List.map Ast.walk args)
@@ -1518,7 +1522,11 @@ let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
     if Hashtbl.mem Typer.types name &&
        not (Hashtbl.mem Typer.records name) &&
        not (Hashtbl.mem seen name) &&
-       Hashtbl.find Typer.types name = 0 (* arity 0 — monomorphic *)
+       Hashtbl.find Typer.types name = 0 (* arity 0 — monomorphic *) &&
+       (* Only real variants have a shape; skip builtin runtime types such as
+          Q-012's ThreadHandle that live in the arity registry but are not
+          user-declared variants. *)
+       Hashtbl.mem Exhaustive.type_variants name
     then Hashtbl.add seen name ()
   in
   let rec walk_ty (t : Ast.ty) =
@@ -2853,6 +2861,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
     "0"  (* unit / int 0 *)
+  (* Q-012: spawn a unit -> unit closure on a fresh pthread. Copy the
+     closure's {env, fn} onto the heap so the child owns it, then
+     pthread_create the trampoline. Result is the pthread_t as i64. *)
+  | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
+    let cl = emit_expr env clos in
+    let cs =
+      match Option.map Ast.walk clos.Ast.ty with
+      | Some (Ast.TyArrow (p, r)) -> closure_struct_name (Ast.walk p) (Ast.walk r)
+      | _ -> "closure_unit_unit"
+    in
+    let envr = fresh_reg () and fnr = fresh_reg () and c = fresh_reg () in
+    let fnslot = fresh_reg () and tidp = fresh_reg () and tid = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" envr cs cl);
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnr cs cl);
+    emit_instr (Printf.sprintf "  %s = call ptr @malloc(i64 16)" c);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" envr c);
+    emit_instr (Printf.sprintf "  %s = getelementptr i8, ptr %s, i64 8" fnslot c);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" fnr fnslot);
+    emit_instr (Printf.sprintf "  %s = alloca i64" tidp);
+    emit_instr (Printf.sprintf
+      "  call i32 @pthread_create(ptr %s, ptr null, ptr @__mere_spawn_trampoline, ptr %s)"
+      tidp c);
+    emit_instr (Printf.sprintf "  %s = load i64, ptr %s" tid tidp);
+    tid
+  | Ast.App ({ node = Ast.Var "join"; _ }, h) ->
+    let hv = emit_expr env h in
+    emit_instr (Printf.sprintf "  call i32 @pthread_join(i64 %s, ptr null)" hv);
+    "0"  (* unit *)
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: call @__mere_mk_logger to build a
        Logger value (= 3 closure_str_unit fields). *)
@@ -4995,6 +5031,17 @@ let runtime_decls =
       "declare i32 @memcmp(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
       "declare i32 @printf(ptr, ...)";
+      (* Q-012: POSIX threads. pthread_t is pointer-sized on LP64, carried as
+         i64. The spawn trampoline unpacks a heap {env, fn} pair and invokes
+         the closure the same way the rest of codegen does: fn(env, unit=0). *)
+      "declare i32 @pthread_create(ptr, ptr, ptr, ptr)";
+      "declare i32 @pthread_join(i64, ptr)";
+      "declare i32 @pthread_mutex_init(ptr, ptr)";
+      "declare i32 @pthread_mutex_lock(ptr)";
+      "declare i32 @pthread_mutex_unlock(ptr)";
+      "declare i32 @pthread_cond_init(ptr, ptr)";
+      "declare i32 @pthread_cond_signal(ptr)";
+      "declare i32 @pthread_cond_wait(ptr, ptr)";
       "declare i32 @fprintf(ptr, ptr, ...)";
       "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()";
@@ -7287,6 +7334,21 @@ let file_io_runtime_llvm =
       "  ret i32 0";
       "}" ]
 
+(* Q-012: the spawn trampoline. pthread_create runs it with a heap-allocated
+   {env, fn} pair; it invokes the closure as fn(env, unit=0) and frees the
+   pair. Closure fns lower to `i32 (ptr, i32)` for a unit -> unit closure. *)
+let thread_runtime_llvm =
+  String.concat "\n"
+    [ "define ptr @__mere_spawn_trampoline(ptr %p) {";
+      "entry:";
+      "  %env = load ptr, ptr %p";
+      "  %fnslot = getelementptr i8, ptr %p, i64 8";
+      "  %fn = load ptr, ptr %fnslot";
+      "  %r = call i32 %fn(ptr %env, i32 0)";
+      "  call void @free(ptr %p)";
+      "  ret ptr null";
+      "}" ]
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reg_counter := 0;
   label_counter := 0;
@@ -7821,6 +7883,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ format_globals
     @ [ "";
         runtime_decls;
+        "";
+        thread_runtime_llvm;
         "";
         region_runtime_helpers;
         "";
