@@ -89,4 +89,13 @@ if [ -d "$PLAYGROUND_OUT" ]; then
   fi
 fi
 
+# 5. Custom domain. The GitHub Actions Pages deploy serves whatever is
+#    in the uploaded artifact, so the CNAME file must live in the
+#    output dir (not just the repo). Emitting it here means the apex
+#    domain is claimed on every deploy. All generated links are
+#    relative, so serving at merelang.org/ (root) works identically to
+#    the old merelang.github.io/mere/ (project subpath).
+echo "merelang.org" > "$OUTPUT_DIR/CNAME"
+echo "  wrote $OUTPUT_DIR/CNAME (merelang.org)"
+
 echo "Full build complete."
