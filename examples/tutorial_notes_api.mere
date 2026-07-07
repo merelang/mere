@@ -1,0 +1,135 @@
+// tutorial_notes_api: the worked example for docs/tutorial-rest-api.md.
+//
+// A minimal in-memory notes REST API — the teaching version, kept
+// deliberately smaller than http_rest_notes.mere (which adds
+// PUT/PATCH + ETag optimistic concurrency). Here we cover the core
+// four:
+//
+//   POST   /notes          create  → {"id":"..."}
+//   GET    /notes          list    → [{"id","title"}, ...]
+//   GET    /notes/:id      fetch   → {"id","title","body"}  (404 if gone)
+//   DELETE /notes/:id      remove  → 204-ish {"deleted":true}
+//
+// Storage is two in-memory maps + an insertion-order id vector, so
+// there's no database to set up — `node scripts/run_http_server.js`
+// and it just runs. Restarting the server clears everything.
+//
+// Run:
+//   ./mere -w examples/tutorial_notes_api.mere > /tmp/notes.wat
+//   wat2wasm --enable-tail-call /tmp/notes.wat -o /tmp/notes.wasm
+//   node scripts/run_http_server.js /tmp/notes.wasm
+//
+//   curl -X POST -d '{"title":"first","body":"hello"}' localhost:8080/notes
+//   curl localhost:8080/notes
+//   curl localhost:8080/notes/<id>
+//   curl -X DELETE localhost:8080/notes/<id>
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn gen_request_id: unit -> str;
+
+import "../contrib/http/router.mere";
+import "../contrib/http/json_body.mere";
+import "../contrib/http/escape.mere";
+
+// ---- storage ----------------------------------------------------------
+// Two maps keyed by note id, plus a vec preserving creation order for
+// the list endpoint. In-memory only — resets on restart.
+let titles = map_new () in
+let bodies = map_new () in
+let order  = vec_new () in
+
+// ---- helpers ----------------------------------------------------------
+// Pull the `:id` capture out of the pattern-route captures list.
+let cap_id = fn (caps: str list) ->
+  match caps with
+  | Cons (id, _) -> id
+  | Nil -> ""
+  ;
+
+// Build the JSON array body for GET /notes by walking `order`. A
+// top-level `let rec` (the wasm backend disallows `let rec` nested in
+// a fn body). Deleted notes leave their id in `order` but drop out of
+// the maps, so we skip any id no longer present. The comma is added
+// whenever `acc` already holds an item (acc != "").
+let rec _list_walk = fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc
+  else
+    let id = vec_get order i in
+    if not (map_has titles id) then _list_walk (i + 1) n acc
+    else
+      let sep = if str_eq acc "" then "" else "," in
+      let item = sep ++ "\{\"id\":" ++ jstr id
+              ++ ",\"title\":" ++ jstr (map_get titles id) ++ "}" in
+      _list_walk (i + 1) n (acc ++ item)
+  ;
+
+// ---- handlers ---------------------------------------------------------
+
+let create = fn (req: str) ->
+  let title = body_field "title" in
+  let body  = body_field "body" in
+  let id = substring (gen_request_id ()) 0 8 in
+  let _ = map_set titles id title in
+  let _ = map_set bodies id body in
+  let _ = vec_push order id in
+  let _ = http_set_status 201 in
+  let _ = http_set_content_type "application/json" in
+  "\{\"id\":" ++ jstr id ++ "}\n"
+  ;
+
+let list = fn (req: str) ->
+  let _ = http_set_content_type "application/json" in
+  "[" ++ _list_walk 0 (vec_len order) "" ++ "]\n"
+  ;
+
+let fetch = fn (caps: str list) -> fn (req: str) ->
+  let id = cap_id caps in
+  if not (map_has titles id) then
+    let _ = http_set_status 404 in
+    let _ = http_set_content_type "application/json" in
+    "\{\"error\":\"not found\"}\n"
+  else
+    let _ = http_set_content_type "application/json" in
+    "\{\"id\":" ++ jstr id ++
+    ",\"title\":" ++ jstr (map_get titles id) ++
+    ",\"body\":" ++ jstr (map_get bodies id) ++ "}\n"
+  ;
+
+let remove = fn (caps: str list) -> fn (req: str) ->
+  let id = cap_id caps in
+  if not (map_has titles id) then
+    let _ = http_set_status 404 in
+    let _ = http_set_content_type "application/json" in
+    "\{\"error\":\"not found\"}\n"
+  else
+    // Delete from both maps. The id stays in `order`, but `list` and
+    // `fetch` both gate on `map_has titles`, so the note is invisible
+    // afterward — no need to rebuild the order vec for the tutorial.
+    let _ = map_delete titles id in
+    let _ = map_delete bodies id in
+    let _ = http_set_content_type "application/json" in
+    "\{\"deleted\":true}\n"
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  let _ = http_set_content_type "application/json" in
+  "\{\"error\":\"unknown route\"}\n"
+  ;
+
+// ---- routes -----------------------------------------------------------
+
+let routes =
+  Cons (route         "POST"   "/notes"       create,
+  Cons (route         "GET"    "/notes"       list,
+  Cons (route_pattern "GET"    "/notes/:id"   fetch,
+  Cons (route_pattern "DELETE" "/notes/:id"   remove,
+  Nil)))) in
+
+let handle = router routes not_found in
+let _ = print "notes API on :8080" in
+let _ = http_serve 8080 handle in
+0

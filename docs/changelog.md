@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-06 — Tutorial: build a REST API in Mere (roadmap step 4, first of three)
+
+First educational tutorial (direction paper's step 4). A guided
+walkthrough that builds a minimal notes REST API on the
+`contrib/http` stack — create / list / fetch / delete over JSON,
+storage in-memory (no DB to set up).
+
+- `docs/tutorial-rest-api.md` — the tutorial, auto-published to the
+  docs site (nav + sitemap + search picked it up automatically).
+  Builds the program up in 5 steps (route → store+create → list →
+  path-param fetch → delete), each snippet grounded in real code,
+  then points to next steps (Postgres persistence, ETag concurrency
+  via `http_rest_notes`, auth, middleware).
+- `examples/tutorial_notes_api.mere` — the complete worked example
+  the tutorial references. Verified end-to-end: create → 201,
+  list → JSON array, fetch → full note, missing → 404, delete →
+  `{"deleted":true}`, list-after-delete correctly skips the removed
+  note (the list walk gates on `map_has`, so a deleted id left in
+  the order vector drops out silently).
+
+Teaching points surfaced in the tutorial: the `\{` escape for JSON
+object literals (bare `{` starts string interpolation), top-level
+`let rec` for recursive helpers (Wasm backend disallows `let rec`
+nested in a fn body), and `route_pattern` `:id` captures working
+across GET and DELETE.
+
+README gains a pointer under Documentation.
+
 ## 2026-07-05 — Cloudflare Worker: package registry v0.1 (JSON API)
 
 Second CF Worker sample from the direction paper. Read-only JSON API

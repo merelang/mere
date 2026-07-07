@@ -121,6 +121,7 @@ $ dune exec ./bin/mere.exe -e '
 ## Documentation
 
 - **[Tutorial](docs/tutorial.md)** — start here (includes `module` / `import` / REPL)
+- **[Tutorial: REST API](docs/tutorial-rest-api.md)** — build a notes JSON API with `contrib/http` (routing, path params, CRUD)
 - **[Language reference](docs/language-reference.md)** — syntax and semantics
 - **[Stdlib reference](docs/stdlib-reference.md)** — builtin tables
 - **[Patterns / cookbook](docs/patterns.md)** — common idioms
