@@ -1,0 +1,178 @@
+// tutorial_type_infer: the worked example for
+// docs/tutorial-type-inference.md.
+//
+// A minimal unification-based type inferencer — the engine at the
+// heart of Hindley-Milner. Handles int/bool literals, variables,
+// lambda, application, and let over a tiny AST. Infers principal
+// types with type variables, unification, and the occurs check.
+//
+// Deliberately smaller than contrib/typer/typer.mere (the full
+// self-host HM typer with let-generalization, records, ADTs,
+// pattern matching, and "did you mean" diagnostics). This teaches
+// the core algorithm; the tutorial points to the real typer for the
+// let-polymorphism leap.
+//
+// Run:
+//   ./mere -w examples/tutorial_type_infer.mere > /tmp/ti.wat
+//   wat2wasm --enable-tail-call /tmp/ti.wat -o /tmp/ti.wasm
+//   node scripts/run_wasm.js /tmp/ti.wasm
+
+// --- the tiny language we type-check ---------------------------------
+type expr =
+  | EInt  of int
+  | EBool of bool
+  | EVar  of str
+  | ELam  of str * expr        // fn x -> body
+  | EApp  of expr * expr       // f arg
+  | ELet  of str * expr * expr // let x = e1 in e2
+  ;
+
+// --- types. TVar is a unification variable (an int id) ---------------
+type ty =
+  | TInt
+  | TBool
+  | TVar   of int
+  | TArrow of ty * ty          // a -> b
+  ;
+
+// --- fresh type-variable supply --------------------------------------
+// Single-cell vec as a mutable counter (Mere has no first-class ref).
+let counter = vec_new () in
+let _ = vec_push counter 0 in
+let fresh = fn (u: unit) ->
+  let n = vec_get counter 0 in
+  let _ = vec_set counter 0 (n + 1) in
+  TVar n
+  ;
+
+// --- substitution: (tvar-id, ty) association list --------------------
+let rec subst_lookup = fn (s: (int * ty) list) -> fn (n: int) ->
+  match s with
+  | Nil -> (None : ty option)
+  | Cons (b, rest) ->
+    let (k, v) = b in
+    if k == n then Some v else subst_lookup rest n
+  ;
+
+// Resolve a type under the substitution: follow TVar bindings all the
+// way down, recursing into arrows.
+let rec apply = fn (s: (int * ty) list) -> fn (t: ty) ->
+  match t with
+  | TVar n ->
+    (match subst_lookup s n with
+      | Some t2 -> apply s t2
+      | None -> TVar n)
+  | TArrow (a, b) -> TArrow (apply s a, apply s b)
+  | _ -> t
+  ;
+
+// Occurs check: does tvar `n` appear in `t`? Prevents building an
+// infinite type like t = t -> t.
+let rec occurs = fn (n: int) -> fn (t: ty) ->
+  match t with
+  | TVar m -> n == m
+  | TArrow (a, b) -> occurs n a || occurs n b
+  | _ -> false
+  ;
+
+// --- unification: make two types equal, extending the substitution --
+// Returns Some extended-subst, or None on a type clash / occurs fail.
+let rec unify = fn (a0: ty) -> fn (b0: ty) -> fn (s: (int * ty) list) ->
+  let a = apply s a0 in
+  let b = apply s b0 in
+  match (a, b) with
+  | (TInt, TInt)   -> Some s
+  | (TBool, TBool) -> Some s
+  | (TVar n, TVar m) ->
+    if n == m then Some s else Some (Cons ((n, b), s))
+  | (TVar n, _) -> if occurs n b then (None : (int * ty) list option)
+                   else Some (Cons ((n, b), s))
+  | (_, TVar m) -> if occurs m a then None else Some (Cons ((m, a), s))
+  | (TArrow (a1, a2), TArrow (b1, b2)) ->
+    (match unify a1 b1 s with
+      | None -> None
+      | Some s1 -> unify a2 b2 s1)
+  | _ -> None
+  ;
+
+// --- typing environment: (name, ty) association list -----------------
+let rec env_lookup = fn (env: (str * ty) list) -> fn (x: str) ->
+  match env with
+  | Nil -> (None : ty option)
+  | Cons (b, rest) ->
+    let (k, v) = b in
+    if str_eq k x then Some v else env_lookup rest x
+  ;
+
+// --- inference: env, expr, subst -> (ty, subst) option ---------------
+// Threads the substitution through; returns None on any type error.
+let rec infer = fn (env: (str * ty) list) -> fn (e: expr) -> fn (s: (int * ty) list) ->
+  match e with
+  | EInt _  -> Some (TInt, s)
+  | EBool _ -> Some (TBool, s)
+  | EVar x ->
+    (match env_lookup env x with
+      | Some t -> Some (t, s)
+      | None -> (None : (ty * (int * ty) list) option))
+  | ELam (x, body) ->
+    let tv = fresh () in
+    (match infer (Cons ((x, tv), env)) body s with
+      | None -> None
+      | Some (tbody, s1) -> Some (TArrow (apply s1 tv, tbody), s1))
+  | EApp (f, arg) ->
+    (match infer env f s with
+      | None -> None
+      | Some (tf, s1) ->
+        (match infer env arg s1 with
+          | None -> None
+          | Some (targ, s2) ->
+            let tres = fresh () in
+            (match unify tf (TArrow (targ, tres)) s2 with
+              | None -> None
+              | Some s3 -> Some (apply s3 tres, s3))))
+  | ELet (x, e1, e2) ->
+    (match infer env e1 s with
+      | None -> None
+      | Some (t1, s1) -> infer (Cons ((x, apply s1 t1), env)) e2 s1)
+  ;
+
+// --- render a type, resolving vars, parenthesizing arrow domains -----
+let rec show_ty = fn (s: (int * ty) list) -> fn (t: ty) ->
+  let t2 = apply s t in
+  match t2 with
+  | TInt  -> "int"
+  | TBool -> "bool"
+  | TVar n -> "t" ++ show n
+  | TArrow (a, b) ->
+    let dom = (match apply s a with
+               | TArrow (_, _) -> "(" ++ show_ty s a ++ ")"
+               | _ -> show_ty s a) in
+    dom ++ " -> " ++ show_ty s b
+  ;
+
+// --- run one expression through the inferencer -----------------------
+let run = fn (name: str) -> fn (e: expr) ->
+  match infer Nil e Nil with
+  | None -> print (name ++ "  :  TYPE ERROR")
+  | Some (t, s) -> print (name ++ "  :  " ++ show_ty s t)
+  ;
+
+// --- demo ------------------------------------------------------------
+// identity: fn x -> x
+let _ = run "fn x -> x                    " (ELam ("x", EVar "x")) in
+// const: fn x -> fn y -> x
+let _ = run "fn x -> fn y -> x            " (ELam ("x", ELam ("y", EVar "x"))) in
+// apply identity to an int
+let _ = run "(fn x -> x) 5                " (EApp (ELam ("x", EVar "x"), EInt 5)) in
+// higher-order: fn f -> fn x -> f x
+let _ = run "fn f -> fn x -> f x          "
+  (ELam ("f", ELam ("x", EApp (EVar "f", EVar "x")))) in
+// let-bound identity applied to a bool
+let _ = run "let id = fn x -> x in id true"
+  (ELet ("id", ELam ("x", EVar "x"), EApp (EVar "id", EBool true))) in
+// TYPE ERROR: applying a non-function (1 2)
+let _ = run "1 2  (apply an int)          " (EApp (EInt 1, EInt 2)) in
+// TYPE ERROR: occurs check — id id with a monomorphic let
+let _ = run "let id = fn x -> x in id id  "
+  (ELet ("id", ELam ("x", EVar "x"), EApp (EVar "id", EVar "id"))) in
+0

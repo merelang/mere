@@ -123,6 +123,7 @@ $ dune exec ./bin/mere.exe -e '
 - **[Tutorial](docs/tutorial.md)** — start here (includes `module` / `import` / REPL)
 - **[Tutorial: REST API](docs/tutorial-rest-api.md)** — build a notes JSON API with `contrib/http` (routing, path params, CRUD)
 - **[Tutorial: Redis client](docs/tutorial-redis-client.md)** — build a Redis client from the raw TCP externs (RESP wire protocol)
+- **[Tutorial: type inference](docs/tutorial-type-inference.md)** — implement the HM unification engine (type vars, unify, occurs check, infer)
 - **[Language reference](docs/language-reference.md)** — syntax and semantics
 - **[Stdlib reference](docs/stdlib-reference.md)** — builtin tables
 - **[Patterns / cookbook](docs/patterns.md)** — common idioms

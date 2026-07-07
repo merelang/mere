@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-07-06 — Tutorial: implement type inference in Mere (roadmap step 4, third of three — series complete)
+
+Third and final tutorial in the initial series (direction paper's
+educational thread). Builds the unification engine at the heart of
+Hindley-Milner over a tiny lambda calculus + `let`.
+
+- `docs/tutorial-type-inference.md` — auto-published. Builds
+  bottom-up: the `expr` / `ty` ASTs (with `TVar` unification
+  variables), fresh-var supply (single-slot vec), the substitution +
+  `apply`, the occurs check, `unify` (tuple-match core), and `infer`
+  (6 cases). Then the honest **HM leap** section: explains why the
+  monomorphic `let` here rejects `let id = fn x -> x in id id`, and
+  what let-generalization / instantiation add — pointing to the real
+  `contrib/typer` (which runs in the browser playground).
+- `examples/tutorial_type_infer.mere` — the worked example. Verified
+  end-to-end: `fn x -> x : t0 -> t0`, `fn f -> fn x -> f x :
+  (t6 -> t7) -> t6 -> t7` (arrow domain parenthesized), `(fn x -> x) 5
+  : int`, `let id = fn x -> x in id true : bool`, `1 2 : TYPE ERROR`
+  (int isn't a function), `id id : TYPE ERROR` (occurs check).
+
+The tutorial series now covers all three planned tracks:
+1. REST API (`contrib/http` — routing / path params / CRUD)
+2. Redis client (raw TCP externs — the RESP protocol)
+3. Type inference (the HM unification engine — self-host compiler
+   internals)
+
+Together they span the three positioning directions: Wasm-first
+backend (1), the network/systems layer (2), and the educational
+PL-implementation angle (3).
+
 ## 2026-07-06 — Tutorial: build a Redis client in Mere (roadmap step 4, second of three)
 
 Second educational tutorial. Builds a minimal Redis client from the
