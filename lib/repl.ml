@@ -270,6 +270,7 @@ let rec is_serializable = function
   | Eval.V_str _ | Eval.V_unit -> true
   | Eval.V_closure _ | Eval.V_builtin _ -> false
   | Eval.V_vec _ | Eval.V_strbuf _ | Eval.V_map _ -> false
+  | Eval.V_channel _ | Eval.V_thread _ -> false
   | Eval.V_constr (_, None) -> true
   | Eval.V_constr (_, Some inner) -> is_serializable inner
   | Eval.V_tuple vs -> List.for_all is_serializable vs

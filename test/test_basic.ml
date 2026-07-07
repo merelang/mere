@@ -9130,5 +9130,38 @@ let () =
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
 
+  (* Q-012 step 3a: concurrency primitives (interp — spawn/channel/join
+     on OCaml 5 domains). Concurrency narrowing: spawn = OS-thread/Domain,
+     Channel[T:Send], child = fresh region. Send/Sync type checking is
+     minimal at this stage; the full trait check lands with the C backend. *)
+  check "concurrency: channel roundtrip (single spawn)"
+    (Pipeline.process
+       "let ch = channel_new () in \
+        let _ = spawn (fn () -> channel_send ch 42) in \
+        channel_recv ch") "42";
+  check "concurrency: parallel fib sum across 2 workers"
+    (Pipeline.process
+       "let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2) in \
+        let ch = channel_new () in \
+        let _ = spawn (fn () -> channel_send ch (fib 20)) in \
+        let _ = spawn (fn () -> channel_send ch (fib 20)) in \
+        let r1 = channel_recv ch in \
+        let r2 = channel_recv ch in \
+        r1 + r2") "13530";
+  check "concurrency: join returns unit"
+    (Pipeline.process "let h = spawn (fn () -> ()) in join h") "()";
+  check "concurrency: channel carries a str element (polymorphic)"
+    (Pipeline.process
+       "let ch = channel_new () in \
+        let _ = spawn (fn () -> channel_send ch \"hi\") in \
+        channel_recv ch") "\"hi\"";
+  check "concurrency: spawn has type ThreadHandle"
+    (Pipeline.type_of "spawn (fn () -> ())") "ThreadHandle";
+  check "concurrency: channel element type propagates send->recv"
+    (Pipeline.type_of
+       "let ch = channel_new () in \
+        let _ = spawn (fn () -> channel_send ch 42) in \
+        channel_recv ch") "int";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
