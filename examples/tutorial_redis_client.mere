@@ -1,0 +1,143 @@
+// tutorial_redis_client: the worked example for
+// docs/tutorial-redis-client.md.
+//
+// A minimal Redis client, built from the raw TCP externs, to teach
+// the RESP wire protocol. Deliberately smaller than
+// contrib/db/redis.mere (which does RESP2 + RESP3, pipelining,
+// binary-safe args, TLS, pub/sub, cluster). Here: connect, send a
+// command, parse the four reply kinds we need, and run PING / SET /
+// GET / DEL.
+//
+// Run (needs a Redis on :15610):
+//   docker run -d --name mere-tut-redis -p 15610:6379 redis:7
+//   ./mere -w examples/tutorial_redis_client.mere > /tmp/rc.wat
+//   wat2wasm --enable-tail-call /tmp/rc.wat -o /tmp/rc.wasm
+//   node scripts/run_wasm.js /tmp/rc.wasm
+
+// --- the TCP + memory externs the Node runner provides ---------------
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_write:   int -> int -> int -> int;   // fd, ptr, len -> n
+extern fn tcp_read:    int -> int -> int -> int;   // fd, buf, want -> n
+extern fn tcp_close:   int -> unit;
+extern fn str_ptr:     str -> int;                 // address of a str's bytes
+extern fn mem_alloc:   int -> int;                 // scratch buffer -> ptr
+extern fn mem_get_u8:  int -> int -> int;          // buf, offset -> byte
+extern fn mem_to_str:  int -> int -> str;          // buf, len -> str
+
+// --- reply variant: RESP has 5 core types; we model 4 ----------------
+// (arrays exist too — GET/SET/PING don't return them, so we omit them
+// here; contrib/db/redis.mere covers the full set incl. RESP3.)
+type reply =
+  | RSimple of str      // "+OK\r\n"
+  | RError  of str      // "-ERR ...\r\n"
+  | RInt    of int      // ":42\r\n"
+  | RBulk   of str      // "$5\r\nhello\r\n"  ("" for nil, simplified)
+  ;
+
+// --- low-level byte reading ------------------------------------------
+// Read one byte; -1 on EOF. Allocates a 1-byte scratch buffer and
+// reads into it.
+let read_byte = fn (fd: int) ->
+  let buf = mem_alloc 1 in
+  let n = tcp_read fd buf 1 in
+  if n < 1 then 0 - 1 else mem_get_u8 buf 0
+  ;
+
+// Read a CRLF-terminated line, returning the content without the
+// trailing \r\n. RESP status / error / length lines are all short,
+// so per-byte reads are fine.
+let rec read_line = fn (fd: int) -> fn (acc: str) ->
+  let b = read_byte fd in
+  if b < 0 then acc
+  else if b == 13 then          // '\r'
+    let _ = read_byte fd in     // consume the '\n'
+    acc
+  else read_line fd (acc ++ chr b)
+  ;
+
+// Read exactly `want` bytes into `buf` starting at offset `got`.
+let rec read_exact = fn (fd: int) -> fn (buf: int) -> fn (want: int) -> fn (got: int) ->
+  if got >= want then got
+  else
+    let n = tcp_read fd (buf + got) (want - got) in
+    if n <= 0 then got
+    else read_exact fd buf want (got + n)
+  ;
+
+// Read a bulk string: `want` payload bytes, then the trailing \r\n.
+let read_bulk = fn (fd: int) -> fn (want: int) ->
+  let buf = mem_alloc (want + 1) in
+  let _ = read_exact fd buf want 0 in
+  let _ = read_byte fd in       // '\r'
+  let _ = read_byte fd in       // '\n'
+  mem_to_str buf want
+  ;
+
+// --- the RESP reply parser -------------------------------------------
+// The first byte selects the type: + simple, - error, : int, $ bulk.
+let read_reply = fn (fd: int) ->
+  let ty = read_byte fd in
+  if ty == 43 then RSimple (read_line fd "")               // '+'
+  else if ty == 45 then RError (read_line fd "")           // '-'
+  else if ty == 58 then RInt (int_of_str (read_line fd "")) // ':'
+  else if ty == 36 then                                     // '$'
+    let len = int_of_str (read_line fd "") in
+    if len < 0 then RBulk ""                                // nil
+    else read_bulk fd len |> (fn (s) -> RBulk s)
+  else RError ("unexpected reply byte " ++ show ty)
+  ;
+
+// --- command sending -------------------------------------------------
+// A command is an array of bulk strings on the wire:
+//   *<N>\r\n $<len>\r\n<arg>\r\n ... (once per arg)
+let rec build_args = fn (args: str list) -> fn (acc: str) ->
+  match args with
+  | Nil -> acc
+  | Cons (a, rest) ->
+    build_args rest (acc ++ "$" ++ show (str_len a) ++ "\r\n" ++ a ++ "\r\n")
+  ;
+
+let rec arg_count = fn (args: str list) ->
+  match args with
+  | Nil -> 0
+  | Cons (_, rest) -> 1 + arg_count rest
+  ;
+
+let command = fn (fd: int) -> fn (args: str list) ->
+  let n = arg_count args in
+  let wire = "*" ++ show n ++ "\r\n" ++ build_args args "" in
+  let _ = tcp_write fd (str_ptr wire) (str_len wire) in
+  read_reply fd
+  ;
+
+// --- pretty-print a reply for the demo -------------------------------
+let show_reply = fn (r: reply) ->
+  match r with
+  | RSimple s -> "+" ++ s
+  | RError e  -> "-" ++ e
+  | RInt n    -> ":" ++ show n
+  | RBulk s   -> "\"" ++ s ++ "\""
+  ;
+
+// --- demo ------------------------------------------------------------
+let fd = tcp_connect "127.0.0.1" 15610 in
+if fd < 1 then
+  let _ = print "connect failed (is redis on :15610?)" in ()
+else
+  let r1 = command fd (Cons ("PING", Nil)) in
+  let _ = print ("PING            -> " ++ show_reply r1) in
+
+  let r2 = command fd (Cons ("SET", Cons ("greeting", Cons ("hello mere", Nil)))) in
+  let _ = print ("SET greeting    -> " ++ show_reply r2) in
+
+  let r3 = command fd (Cons ("GET", Cons ("greeting", Nil))) in
+  let _ = print ("GET greeting    -> " ++ show_reply r3) in
+
+  let r4 = command fd (Cons ("GET", Cons ("missing-key", Nil))) in
+  let _ = print ("GET missing-key -> " ++ show_reply r4 ++ " (nil = empty)") in
+
+  let r5 = command fd (Cons ("DEL", Cons ("greeting", Nil))) in
+  let _ = print ("DEL greeting    -> " ++ show_reply r5) in
+
+  let _ = tcp_close fd in
+  ()
