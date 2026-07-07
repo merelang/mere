@@ -7682,6 +7682,8 @@ let () =
       | Ast.Top_view (name, region, fields) ->
         Typer.register_view name region fields
       | Ast.Top_drop name -> Typer.register_drop_type name
+      | Ast.Top_sync name -> Typer.register_sync_type name
+      | Ast.Top_local name -> Typer.register_local_type name
       | Ast.Top_extern (name, ty) ->
         type_env := (name, Typer.mono ty) :: !type_env
       | Ast.Top_extern_type tn -> Typer.register_type tn [] []
@@ -9162,6 +9164,23 @@ let () =
        "let ch = channel_new () in \
         let _ = spawn (fn () -> channel_send ch 42) in \
         channel_recv ch") "int";
+  (* Q-012 §C/§D: Send bound on channel elements + sync/local markers. *)
+  check_raises_containing "concurrency: sending a !Send (local type) element is rejected"
+    "is not Send"
+    (fun () -> Pipeline.process
+       "local type Conn = MkConn of int; \
+        let ch = channel_new () in \
+        channel_send ch (MkConn 0)");
+  check "concurrency: plain nominal element is Send (accepted)"
+    (Pipeline.process
+       "type Payload = MkPayload of int; \
+        let ch = channel_new () in \
+        channel_send ch (MkPayload 0)") "()";
+  check "concurrency: sync-marked element is Send (accepted)"
+    (Pipeline.process
+       "sync type SharedLog = MkLog of int; \
+        let ch = channel_new () in \
+        channel_send ch (MkLog 0)") "()";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
