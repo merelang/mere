@@ -2600,6 +2600,16 @@ let () =
     (codegen_with_decls
       "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "__mere_spawn_trampoline";
+  (* Q-012-C-mem: the shared program-lifetime arena is lock-guarded so
+     spawned threads can allocate from it without racing (validated under
+     ThreadSanitizer with concurrent allocs). *)
+  assert_contains "codegen C: shared arena allocation is lock-guarded"
+    (codegen "42") "__lang_default_region_lock";
+  assert_contains "codegen C: captured-env spawn lowers to a thread"
+    (codegen_with_decls
+      "let mk = fn m -> spawn (fn u -> print m); \
+       let h = mk \"captured\" in join h")
+    "pthread_create";
   assert_contains "codegen: record update via tmp + statement expr"
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\

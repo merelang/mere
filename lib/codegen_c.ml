@@ -3671,23 +3671,31 @@ let region_runtime_helpers =
       "  r->cap = cap;";
       "}";
       "";
+      "/* Program-lifetime arena for closure envs and other long-lived";
+      "   allocations that outlive any user `region R { ... }` block. It is";
+      "   never freed, so pointers into it stay valid for the whole run —";
+      "   including in spawned threads (Q-012). Only its bump pointer needs";
+      "   guarding: allocations from THIS region take a lock, while per-block";
+      "   regions (thread-local stack locals) stay lock-free. */";
+      "static __lang_region __lang_default_region;";
+      "static pthread_mutex_t __lang_default_region_lock = PTHREAD_MUTEX_INITIALIZER;";
+      "";
       "static void* __lang_region_alloc(__lang_region* r, size_t n) {";
+      "  int shared = (r == &__lang_default_region);";
+      "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "  size_t aligned = (n + 7) & ~((size_t)7);";
       "  if (r->top + aligned > r->base + r->cap) {";
       "    fprintf(stderr, \"region OOM\\n\"); abort();";
       "  }";
       "  void* p = r->top;";
       "  r->top += aligned;";
+      "  if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "  return p;";
       "}";
       "";
       "static void __lang_region_free(__lang_region* r) {";
       "  free(r->base);";
-      "}";
-      "";
-      "/* Program-lifetime arena for closure envs and other long-lived";
-      "   allocations that outlive any user `region R { ... }` block. */";
-      "static __lang_region __lang_default_region;" ]
+      "}" ]
 
 (* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan
    associative array. K supports only int / str; V is any concrete type.
