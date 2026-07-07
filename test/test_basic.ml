@@ -9303,6 +9303,22 @@ let () =
         let c2 = channel_new () in \
         let _ = f c1 42 in \
         f c2 \"x\"");
+  (* Q-012 motivating scenario end-to-end: two loops in one process — a
+     worker loop on a spawned thread consuming jobs from a channel while the
+     main loop produces them, reporting the total through a second channel. *)
+  check "concurrency: two concurrent loops communicate over channels"
+    (Pipeline.process
+       "let rec produce = fn ch -> fn n -> \
+          if n < 1 then channel_send ch 0 \
+          else let _ = channel_send ch n in produce ch (n - 1); \
+        let rec consume = fn jobs -> fn acc -> \
+          let j = channel_recv jobs in \
+          if j < 1 then acc else consume jobs (acc + j); \
+        let jobs = channel_new () in \
+        let results = channel_new () in \
+        let _ = spawn (fn u -> channel_send results (consume jobs 0)) in \
+        let _ = produce jobs 100 in \
+        channel_recv results") "5050";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
