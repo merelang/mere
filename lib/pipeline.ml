@@ -23,7 +23,10 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
     | Some d -> Parser.parse_program ~base_dir:d ~search_paths tokens
     | None -> Parser.parse_program ~search_paths tokens
   in
-  { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }
+  (* Q-012 Phase 32: lower saturated `par_map f xs` to spawn + channel +
+     list_map so it works on every backend, not just the interpreter. *)
+  Ast.lower_par_map_program
+    { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }
 
 let parse_only s =
   (* Phase 21.2: parse_only is used by pretty-print / AST-shape tests
