@@ -2362,13 +2362,28 @@ let vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
 
 (* Q-012: cast a Mere LLVM value to / from the i64 slot used by the generic
    channel runtime. Every Mere value (i32 / i1 / double / ptr) fits in 8 bytes. *)
+let is_aggregate_llty (s : string) : bool =
+  String.length s > 0 && s.[0] = '%'
+
 let cast_to_i64 (v : string) (llty : string) : string =
   match llty with
   | "i64" -> v
   | "double" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = bitcast double %s to i64" r v); r
   | "ptr" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" r v); r
   | "i1" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = zext i1 %s to i64" r v); r
-  | _ (* i32 (int / bool-as-i32 / unit) *) ->
+  | s when is_aggregate_llty s ->
+    (* By-value aggregate (tuple / record) — may exceed 8 bytes, so it can't
+       ride in the slot directly. Box it on the heap and carry the pointer.
+       This keeps the generic i64-slot channel correct for every Send type,
+       not just scalars. *)
+    let szp = fresh_reg () and sz = fresh_reg () and p = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1" szp s);
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" sz szp);
+    emit_instr (Printf.sprintf "  %s = call ptr @malloc(i64 %s)" p sz);
+    emit_instr (Printf.sprintf "  store %s %s, ptr %s" s v p);
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" r p);
+    r
+  | _ (* i32 (int / unit) *) ->
     let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r v); r
 
 let cast_from_i64 (v : string) (llty : string) : string =
@@ -2377,6 +2392,12 @@ let cast_from_i64 (v : string) (llty : string) : string =
   | "double" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = bitcast i64 %s to double" r v); r
   | "ptr" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = inttoptr i64 %s to ptr" r v); r
   | "i1" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = trunc i64 %s to i1" r v); r
+  | s when is_aggregate_llty s ->
+    (* Unbox: the slot holds a pointer to the heap-stored aggregate. *)
+    let p = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = inttoptr i64 %s to ptr" p v);
+    emit_instr (Printf.sprintf "  %s = load %s, ptr %s" r s p);
+    r
   | _ (* i32 *) -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r v); r
 
 (* Emit `expr` as a sequence of SSA instructions; return the register (or

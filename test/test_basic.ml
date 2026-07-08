@@ -3112,6 +3112,15 @@ let () =
        let _ = spawn (fn u -> channel_send ch 7) in \
        channel_recv ch")
     "call i64 @mere_channel_recv(ptr";
+  (* A by-value aggregate element (tuple/record) can exceed 8 bytes, so it is
+     boxed onto the heap and the slot carries the pointer — otherwise the i64
+     cast would emit invalid IR. *)
+  assert_contains "llvm: channel of a tuple element boxes the aggregate"
+    (llvm_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch (1, 2)) in \
+       channel_recv ch")
+    "store %tuple_int_int";
   assert_contains "llvm: format constant present"
     (llvm "42") "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"";
   assert_contains "llvm: int literal call site"
