@@ -451,6 +451,87 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
   in
   go [] e
 
+(* Q-012 Phase 32: lower a saturated `par_map f xs` into spawn + channel +
+   list_map, so it works on every backend (spawn / channel / list_map all
+   codegen already) without a par_map-specific runtime. Expansion:
+
+     let __f = f in let __xs = xs in
+     list_map
+       (list_map __xs
+          (fn x -> let ch = channel_new () in
+                   let _ = spawn (fn u -> channel_send ch (__f x)) in ch))
+       (fn c -> channel_recv c)
+
+   The two list_maps run in sequence: the first fans out (one worker + one
+   channel per element, order preserved in the channel list), the second
+   fans in (recv in the same order). Because each call site is lowered with
+   its own concrete element types, this avoids the polymorphic-channel
+   monomorphization that a shared prelude par_map would hit. The Send bounds
+   still hold: the output element is checked by channel_send, the input by
+   the spawn-capture analysis. An unsaturated `par_map` (used as a value) is
+   left alone and falls back to the interpreter builtin. *)
+let pm_counter = ref 0
+let lower_par_map_expr (e : expr) : expr =
+  let mk node = { loc = Loc.dummy; ty = None; node } in
+  let pvar n = { ploc = Loc.dummy; pnode = P_var n } in
+  let pwild = { ploc = Loc.dummy; pnode = P_wild } in
+  let var n = mk (Var n) in
+  let app a b = mk (App (a, b)) in
+  let fresh p = incr pm_counter; p ^ string_of_int !pm_counter in
+  let rec lo (e : expr) : expr =
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Bin (op, a, b) -> { e with node = Bin (op, lo a, lo b) }
+    | Cmp (op, a, b) -> { e with node = Cmp (op, lo a, lo b) }
+    | Logic (op, a, b) -> { e with node = Logic (op, lo a, lo b) }
+    | Neg a -> { e with node = Neg (lo a) }
+    | Let (p, v, b) -> { e with node = Let (p, lo v, lo b) }
+    | Let_rec (bs, b) ->
+      { e with node = Let_rec (List.map (fun (n, v) -> (n, lo v)) bs, lo b) }
+    | With (n, v, b) -> { e with node = With (n, lo v, lo b) }
+    | If (c, t, el) -> { e with node = If (lo c, lo t, lo el) }
+    | Fun (p, t, b) -> { e with node = Fun (p, t, lo b) }
+    | Annot (a, t) -> { e with node = Annot (lo a, t) }
+    | Constr (n, Some a) -> { e with node = Constr (n, Some (lo a)) }
+    | Constr (_, None) -> e
+    | Match (s, arms) ->
+      { e with node = Match (lo s,
+        List.map (fun (p, g, b) -> (p, Option.map lo g, lo b)) arms) }
+    | Tuple es -> { e with node = Tuple (List.map lo es) }
+    | Region_block (n, b) -> { e with node = Region_block (n, lo b) }
+    | Ref (m, r, a) -> { e with node = Ref (m, r, lo a) }
+    | Record_lit (n, fs) ->
+      { e with node = Record_lit (n, List.map (fun (f, x) -> (f, lo x)) fs) }
+    | Field_get (a, f) -> { e with node = Field_get (lo a, f) }
+    | Record_update (a, fs) ->
+      { e with node = Record_update (lo a, List.map (fun (f, x) -> (f, lo x)) fs) }
+    | App ({ node = App ({ node = Var "par_map"; _ }, pf); _ }, pxs) ->
+      let pf = lo pf and pxs = lo pxs in
+      let fn = fresh "__pm_f" and xsn = fresh "__pm_xs" and xn = fresh "__pm_x"
+      and chn = fresh "__pm_ch" and cn = fresh "__pm_c" and un = fresh "__pm_u" in
+      let spawn_lambda =
+        mk (Fun (un, None,
+          app (app (var "channel_send") (var chn)) (app (var fn) (var xn)))) in
+      let inner_lambda =
+        mk (Fun (xn, None,
+          mk (Let (pvar chn, app (var "channel_new") (mk Unit_lit),
+            mk (Let (pwild, app (var "spawn") spawn_lambda, var chn)))))) in
+      let recv_lambda = mk (Fun (cn, None, app (var "channel_recv") (var cn))) in
+      let inner_map = app (app (var "list_map") (var xsn)) inner_lambda in
+      let outer_map = app (app (var "list_map") inner_map) recv_lambda in
+      mk (Let (pvar fn, pf, mk (Let (pvar xsn, pxs, outer_map))))
+    | App (f, arg) -> { e with node = App (lo f, lo arg) }
+  in
+  lo e
+
+let lower_par_map_program (prog : program) : program =
+  let lower_decl = function
+    | Top_let (p, e) -> Top_let (p, lower_par_map_expr e)
+    | Top_let_rec bs -> Top_let_rec (List.map (fun (n, e) -> (n, lower_par_map_expr e)) bs)
+    | d -> d
+  in
+  { decls = List.map lower_decl prog.decls; main = lower_par_map_expr prog.main }
+
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
     let loc = body.loc in
