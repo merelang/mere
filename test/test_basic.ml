@@ -9420,6 +9420,21 @@ let () =
         let r3 = channel_recv results in \
         let r4 = channel_recv results in \
         r1 + r2 + r3 + r4") "135300";
+  (* Phase 32: par_map — ergonomic data parallelism (interp; backend codegen
+     is a follow-up). Polymorphic (checked per call site) with Send bounds on
+     the input and output element types. *)
+  check "par_map: applies f to every element in parallel, in order"
+    (Pipeline.process
+       "let sq = fn x -> x * x in \
+        par_map sq (Cons (1, Cons (2, Cons (3, Cons (4, Nil)))))") "[1, 4, 9, 16]";
+  check "par_map: type is (a -> b) -> a list -> b list"
+    (Pipeline.type_of "let sq = fn x -> x * x in par_map sq") "(int list -> int list)";
+  check_raises_containing "par_map: a !Send output element is rejected"
+    "is not Send"
+    (fun () -> Pipeline.process
+       "local type Conn = MkConn of int; \
+        let f = fn x -> MkConn x in \
+        par_map f (Cons (1, Nil))");
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

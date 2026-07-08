@@ -1655,6 +1655,26 @@ let builtin_channel_recv =
       v
     | _ -> failwith "channel_recv: expected a Channel")
 
+(* Q-012 Phase 32: par_map f xs — apply f to each element in parallel (one
+   OCaml domain per element) and collect the results in the original order.
+   MVP: one domain per element (fine for small lists; a worker pool is a
+   follow-up). Element types are Send-checked by the typer. *)
+let builtin_par_map =
+  V_builtin ("par_map", fun f ->
+    V_builtin ("par_map_p", fun xs ->
+      let elems =
+        match try_as_list xs with
+        | Some l -> l
+        | None -> failwith "par_map: expected a list"
+      in
+      let domains =
+        List.map (fun x -> Domain.spawn (fun () -> !apply_value_ref f x)) elems
+      in
+      let results = List.map Domain.join domains in
+      List.fold_right
+        (fun h tail -> V_constr ("Cons", Some (V_tuple [h; tail])))
+        results (V_constr ("Nil", None))))
+
 let initial_env : env =
   [ ("print", ref builtin_print);
     (* Q-012 step 3a: concurrency primitives *)
@@ -1663,6 +1683,7 @@ let initial_env : env =
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);
     ("channel_recv", ref builtin_channel_recv);
+    ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);
