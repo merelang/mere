@@ -3092,6 +3092,26 @@ let () =
   assert_contains "llvm: emits the spawn trampoline"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "@__mere_spawn_trampoline";
+  (* Q-012 step 3b-4e: LLVM channels via the generic i64-slot runtime.
+     A parallel producer/consumer compiles with clang and runs. *)
+  assert_contains "llvm: channel_new calls the generic runtime"
+    (llvm_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "call ptr @mere_channel_new()";
+  assert_contains "llvm: channel_send casts the element to an i64 slot"
+    (llvm_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "call i32 @mere_channel_send(ptr";
+  assert_contains "llvm: channel_recv reads an i64 slot"
+    (llvm_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "call i64 @mere_channel_recv(ptr";
   assert_contains "llvm: format constant present"
     (llvm "42") "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"";
   assert_contains "llvm: int literal call site"
