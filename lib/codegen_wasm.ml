@@ -131,6 +131,10 @@ let strbuf_used = ref false
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
 let logger_used = ref false
 let metrics_used = ref false
+(* Q-012: set when the program uses spawn / join / channel. Switches the
+   module to host-imported shared memory + pulls the pthread-like host
+   imports (mere_spawn / mere_join). *)
+let uses_threads = ref false
 (* Phase 26.1: stdlib builtin usage flags for Wasm. *)
 let char_table_used = ref false
 let fail_used = ref false
@@ -1633,6 +1637,19 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "call $puts";
     emit_instr "i32.const 0"  (* unit / int 0 *)
+  (* Q-012: spawn a `unit -> unit` closure on a Wasm worker. The closure
+     value is an i32 pointer to its { env_offset, fn_idx } record in the
+     (shared) linear memory; the host reads it and runs the closure on a
+     worker instance that shares the same module + memory. Returns the
+     thread id (i32). *)
+  | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
+    uses_threads := true;
+    emit_expr clos;
+    emit_instr "call $mere_spawn"
+  | Ast.App ({ node = Ast.Var "join"; _ }, h) ->
+    uses_threads := true;
+    emit_expr h;
+    emit_instr "call $mere_join"  (* returns i32 0 = unit *)
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: build a Logger record in linear
        memory (3 closure ptrs, each pointing to an 8-byte { env=prefix,
@@ -4953,6 +4970,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   strbuf_used := false;
   logger_used := false;
   metrics_used := false;
+  uses_threads := false;
   char_table_used := false;
   fail_used := false;
   substring_used := false;
@@ -5476,6 +5494,23 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let extern_imports = String.concat "" extern_imports in
   let file_io_imports = file_io_imports ^ extern_imports in
+  (* Q-012: threading imports + memory mode. When the program spawns, the
+     module imports one host-created shared memory (so every worker instance
+     shares it) and pulls the spawn/join host functions; otherwise it keeps
+     its own exported unshared memory. *)
+  let file_io_imports =
+    if !uses_threads then
+      file_io_imports
+      ^ "  (import \"env\" \"mere_spawn\" (func $mere_spawn (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_join\" (func $mere_join (param i32) (result i32)))\n"
+    else file_io_imports
+  in
+  let memory_section =
+    if !uses_threads then
+      "  (import \"env\" \"memory\" (memory 1024 65536 shared))\n\
+      \  (export \"memory\" (memory 0))\n"
+    else "  (memory (export \"memory\") 1024)\n"
+  in
   let vec_runtime_section = if !vec_used then vec_runtime else "" in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
@@ -5559,7 +5594,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      \  (type $cl (func (param i32) (param i32) (result i32)))\n\
      \  (import \"env\" \"puts\" (func $puts (param i32)))\n\
      %s\
-     \  (memory (export \"memory\") 1024)\n\
+     %s\
      %s\
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
@@ -5581,6 +5616,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
     file_io_imports
+    memory_section
     table_section bump_init char_table_offset
     top_globals_section
     data_section runtime_helpers

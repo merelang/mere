@@ -3651,6 +3651,19 @@ let () =
     (wasm "42") "(module";
   assert_contains "wasm: exports main with i32 result"
     (wasm "42") "(func $main (export \"main\") (result i32)";
+  (* Q-012 step 3b-4f: a non-threaded program keeps its own unshared memory;
+     a program that spawns switches to a host-imported shared memory and
+     pulls the spawn/join host imports. Verified end-to-end on node
+     worker_threads (a worker instantiates the same module over the shared
+     memory and runs the closure via the indirect function table). *)
+  assert_contains "wasm: non-threaded program declares its own memory"
+    (wasm "42") "(memory (export \"memory\") 1024)";
+  assert_contains "wasm: spawn switches to imported shared memory"
+    (wasm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "(import \"env\" \"memory\" (memory 1024 65536 shared))";
+  assert_contains "wasm: spawn emits the mere_spawn host import + call"
+    (wasm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
+    "call $mere_spawn";
   assert_contains "wasm: int literal becomes i32.const"
     (wasm "42") "i32.const 42";
   assert_contains "wasm: add maps to i32.add"
