@@ -1650,6 +1650,22 @@ let rec emit_expr (e : Ast.expr) : unit =
     uses_threads := true;
     emit_expr h;
     emit_instr "call $mere_join"  (* returns i32 0 = unit *)
+  (* Q-012: channels as host imports over the shared memory (the host does
+     the atomic mutex/cond via JS Atomics on the shared buffer). Elements are
+     i32 (Mere's Wasm value width). *)
+  | Ast.App ({ node = Ast.Var "channel_new"; _ }, arg) ->
+    uses_threads := true;
+    emit_expr arg;                (* unit; consumed by the import *)
+    emit_instr "call $mere_channel_new"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e); _ }, v_e) ->
+    uses_threads := true;
+    emit_expr ch_e;
+    emit_expr v_e;
+    emit_instr "call $mere_channel_send"  (* returns i32 0 = unit *)
+  | Ast.App ({ node = Ast.Var "channel_recv"; _ }, ch_e) ->
+    uses_threads := true;
+    emit_expr ch_e;
+    emit_instr "call $mere_channel_recv"
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: build a Logger record in linear
        memory (3 closure ptrs, each pointing to an 8-byte { env=prefix,
@@ -5502,7 +5518,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if !uses_threads then
       file_io_imports
       ^ "  (import \"env\" \"mere_spawn\" (func $mere_spawn (param i32) (result i32)))\n\
-        \  (import \"env\" \"mere_join\" (func $mere_join (param i32) (result i32)))\n"
+        \  (import \"env\" \"mere_join\" (func $mere_join (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_new\" (func $mere_channel_new (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_send\" (func $mere_channel_send (param i32) (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_recv\" (func $mere_channel_recv (param i32) (result i32)))\n"
     else file_io_imports
   in
   let memory_section =

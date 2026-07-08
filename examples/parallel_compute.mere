@@ -15,8 +15,12 @@
 let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
 
 // One worker's share: sum fib(28) over `count` iterations (a CPU-work proxy).
-let rec partial = fn count -> fn acc ->
-  if count < 1 then acc else partial (count - 1) (acc + fib 28);
+// Single-argument (not curried) on purpose: a curried call would allocate an
+// intermediate closure, and a spawned Wasm worker can't allocate yet (the
+// bump allocator is per-instance) — this way the same program runs on every
+// backend, interpreter / C / LLVM / Wasm.
+let rec partial = fn count ->
+  if count < 1 then 0 else fib 28 + partial (count - 1);
 
 // The program's result is the combined total. Ending in a bare int (rather
 // than print_int) keeps this compilable on the C and LLVM backends too, so
@@ -25,10 +29,10 @@ let rec partial = fn count -> fn acc ->
 let results = channel_new () in
 // Fan out: four workers, each on its own thread. They share `results` and
 // `partial` (both Sync), so nothing is moved.
-let _ = spawn (fn u -> channel_send results (partial 10 0)) in
-let _ = spawn (fn u -> channel_send results (partial 10 0)) in
-let _ = spawn (fn u -> channel_send results (partial 10 0)) in
-let _ = spawn (fn u -> channel_send results (partial 10 0)) in
+let _ = spawn (fn u -> channel_send results (partial 10)) in
+let _ = spawn (fn u -> channel_send results (partial 10)) in
+let _ = spawn (fn u -> channel_send results (partial 10)) in
+let _ = spawn (fn u -> channel_send results (partial 10)) in
 // Fan in: collect the four partials and combine.
 let r1 = channel_recv results in
 let r2 = channel_recv results in

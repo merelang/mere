@@ -10,13 +10,67 @@ const { makePgEnv } = require('./pg_env.js');
 const { makeHttpFetchEnv } = require('./http_fetch_env.js');
 const { makeSubprocessEnv } = require('./subprocess_env.js');
 
+// Q-012: channel host ops over the SHARED wasm memory. A channel is a small
+// region of shared linear memory (allocated by the creating instance's bump
+// allocator); every instance's host import reads/writes it with JS Atomics,
+// so the queue is coherent across worker threads. Layout in i32 words at
+// `ptr`: [0]=mutex, [1]=count, [2]=head, [3]=cap, [4..]=ring buffer.
+// Defined as a named function so its source can be injected into the worker
+// bootstrap verbatim (workers need the same channel ops).
+function makeChannelEnv(getBuffer, bumpAlloc) {
+  const CAP = 4096;
+  const lock = (i32, p) => {
+    while (Atomics.compareExchange(i32, p, 0, 1) !== 0) Atomics.wait(i32, p, 1);
+  };
+  const unlock = (i32, p) => { Atomics.store(i32, p, 0); Atomics.notify(i32, p, 1); };
+  return {
+    mere_channel_new: (_unit) => {
+      const ptr = bumpAlloc((4 + CAP) * 4);
+      const i32 = new Int32Array(getBuffer());
+      const p = ptr >> 2;
+      i32[p] = 0; i32[p + 1] = 0; i32[p + 2] = 0; i32[p + 3] = CAP;
+      return ptr;
+    },
+    mere_channel_send: (ptr, v) => {
+      const i32 = new Int32Array(getBuffer());
+      const p = ptr >> 2;
+      lock(i32, p);
+      const count = i32[p + 1], cap = i32[p + 3], head = i32[p + 2];
+      i32[p + 4 + ((head + count) % cap)] = v;
+      Atomics.store(i32, p + 1, count + 1);
+      unlock(i32, p);
+      Atomics.notify(i32, p + 1);  // wake recv waiters blocked on count
+      return 0;
+    },
+    mere_channel_recv: (ptr) => {
+      const i32 = new Int32Array(getBuffer());
+      const p = ptr >> 2;
+      for (;;) {
+        lock(i32, p);
+        const count = i32[p + 1];
+        if (count > 0) {
+          const head = i32[p + 2], cap = i32[p + 3];
+          const v = i32[p + 4 + head];
+          Atomics.store(i32, p + 2, (head + 1) % cap);
+          Atomics.store(i32, p + 1, count - 1);
+          unlock(i32, p);
+          return v;
+        }
+        unlock(i32, p);
+        Atomics.wait(i32, p + 1, 0);  // block while empty
+      }
+    },
+  };
+}
+
 // Q-012: worker bootstrap for spawn. A spawned worker instantiates the SAME
 // wasm module over the SAME shared memory (so the closure's env offset and
 // the function-table index are both valid), then invokes the closure via the
 // indirect function table: table.get(fnIdx)(envOffset, 0). It signals
-// completion by setting a shared flag that mere_join waits on. This MVP
-// supports closures that don't allocate (the bump allocator is per-instance);
-// a shared allocator is a follow-up.
+// completion by setting a shared flag that mere_join waits on. Channel ops
+// operate on the shared memory (makeChannelEnv, injected below). This MVP
+// supports non-allocating worker closures (the bump allocator is per-instance;
+// a shared allocator is a follow-up), which covers int-channel compute.
 const WORKER_CODE = `
 const { workerData } = require('worker_threads');
 const { wasmBytes, memory, fnIdx, envOff, doneSab } = workerData;
@@ -25,15 +79,16 @@ const readCStr = (ptr) => {
   let end = ptr; while (end < bytes.length && bytes[end] !== 0) end++;
   return Buffer.from(bytes.subarray(ptr, end)).toString('utf8');
 };
+${makeChannelEnv.toString()}
 const stub = () => 0;
-const env = {
+const env = Object.assign({
   memory,
   puts: (ptr) => process.stdout.write(readCStr(ptr) + '\\n'),
   mere_spawn: stub, mere_join: stub,
   __lang_str_of_float: stub, __lang_float_of_str: stub,
   __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
   __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
-};
+}, makeChannelEnv(() => memory.buffer, () => { throw new Error('no alloc in spawned worker'); }));
 (async () => {
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
   const table = instance.exports.__indirect_function_table;
@@ -275,6 +330,9 @@ const wasmPath = process.argv[2];
       if (t) { Atomics.wait(t.done, 0, 0); t.worker.terminate(); }
       return 0;
     };
+    // Channels live in the shared memory; the creating (main) instance
+    // allocates via its bump allocator, workers just read/write.
+    Object.assign(env, makeChannelEnv(() => sharedMemory.buffer, bumpAlloc));
   }
 
   // instantiate(Module, imports) resolves to the Instance directly (unlike
