@@ -73,7 +73,7 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
 // a shared allocator is a follow-up), which covers int-channel compute.
 const WORKER_CODE = `
 const { workerData } = require('worker_threads');
-const { wasmBytes, memory, fnIdx, envOff, doneSab } = workerData;
+const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase } = workerData;
 const readCStr = (ptr) => {
   const bytes = new Uint8Array(memory.buffer);
   let end = ptr; while (end < bytes.length && bytes[end] !== 0) end++;
@@ -91,6 +91,9 @@ const env = Object.assign({
 }, makeChannelEnv(() => memory.buffer, () => { throw new Error('no alloc in spawned worker'); }));
 (async () => {
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+  // Point this worker's bump allocator at its private region so allocations
+  // in the spawned closure don't collide with other workers or the parent.
+  if (instance.exports.__lang_bump) instance.exports.__lang_bump.value = bumpBase;
   const table = instance.exports.__indirect_function_table;
   try { table.get(fnIdx)(envOff, 0); } catch (e) { /* wasm trap in child */ }
   Atomics.store(new Int32Array(doneSab), 0, 1);
@@ -317,9 +320,14 @@ const wasmPath = process.argv[2];
       const fnIdx = view.getInt32(closurePtr + 4, true);
       const tid = nextTid++;
       const doneSab = new SharedArrayBuffer(4);
+      // Each worker allocates from a disjoint bump region so concurrent
+      // allocations can't collide (the bump pointer is a per-instance global).
+      // This is the pragmatic alternative to a single shared atomic bump:
+      // the main instance uses the low region, worker i uses [16MB + i*8MB, …).
+      const bumpBase = 16 * 1024 * 1024 + (tid - 1) * 8 * 1024 * 1024;
       const worker = new Worker(WORKER_CODE, {
         eval: true,
-        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab },
+        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase },
       });
       worker.on('error', (e) => console.error('worker error:', e));
       threads.set(tid, { worker, done: new Int32Array(doneSab) });
