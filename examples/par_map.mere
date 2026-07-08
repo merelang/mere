@@ -1,0 +1,25 @@
+// par_map: ergonomic data parallelism.
+//
+// `par_map f xs` applies f to every element of xs in parallel and returns the
+// results in the original order. It is the manual spawn + channel fan-out /
+// fan-in (see parallel_compute.mere) collapsed into a single call — the point
+// of the concurrency primitives is that this is all a user needs to write.
+//
+// The element types cross a thread boundary, so both the input and the output
+// element type must be Send (the type checker enforces this at the call site).
+//
+// (Runs on the interpreter; native/Wasm codegen for par_map is a follow-up —
+// spawn / channel already run on all four backends.)
+
+let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+let rec range = fn lo -> fn hi ->
+  if lo >= hi then Nil else Cons (lo, range (lo + 1) hi);
+
+let rec sum = fn xs ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> h + sum t;
+
+// Compute fib for 20..27 in parallel across eight workers, then total them.
+sum (par_map fib (range 20 28))

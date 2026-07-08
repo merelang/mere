@@ -617,8 +617,8 @@ let record_send_bound loc (t : Ast.ty) =
     if not (is_send t) then
       raise (Type_error (loc,
         Printf.sprintf
-          "channel element type `%s` is not Send — a value of this type \
-           cannot cross a thread boundary" (Ast.pp_ty t)))
+          "`%s` is not Send — a value of this type cannot cross a thread \
+           boundary" (Ast.pp_ty t)))
   end else
     pending_send := (t, loc) :: !pending_send
 
@@ -631,8 +631,8 @@ let discharge_send_constraints () =
     if collect_free_vars t [] = [] && not (is_send t) then
       raise (Type_error (loc,
         Printf.sprintf
-          "channel element type `%s` is not Send — a value of this type \
-           cannot cross a thread boundary" (Ast.pp_ty t)))
+          "`%s` is not Send — a value of this type cannot cross a thread \
+           boundary" (Ast.pp_ty t)))
   ) !pending_send
 
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
@@ -1140,6 +1140,21 @@ let channel_recv_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_elem]), _chan_recv_elem) }
 
+(* Q-012 Phase 32: par_map : ('a -> 'b) -> 'a list -> 'b list. Applies the
+   function to each element in parallel and collects the results in order.
+   'a and 'b cross thread boundaries, so both must be Send — checked (like
+   channel_send) at the saturated application. *)
+let _pmap_a = fresh_var ()
+let _pmap_b = fresh_var ()
+let par_map_scheme =
+  let aid = match _pmap_a with Ast.TyVar v -> v.id | _ -> assert false in
+  let bid = match _pmap_b with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid; bid];
+    body = Ast.TyArrow (
+      Ast.TyArrow (_pmap_a, _pmap_b),
+      Ast.TyArrow (Ast.TyCon ("list", [_pmap_a]),
+                   Ast.TyCon ("list", [_pmap_b]))) }
+
 let _map_set_region = fresh_var ()
 let _map_set_k = fresh_var ()
 let _map_set_v = fresh_var ()
@@ -1230,6 +1245,7 @@ let initial_env : env =
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);
     ("channel_recv", channel_recv_scheme);
+    ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
@@ -1588,6 +1604,18 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           kept monomorphic by generalize) and re-checked at discharge. *)
        record_send_bound e.loc (Ast.walk ta);
        r
+     (* Phase 32: par_map f xs — both the input and output element types
+        cross a thread boundary, so both must be Send (same discipline as
+        channel_send: concrete now, tyvar-bearing deferred to discharge).
+        tf is the type of the partial application `par_map f`, i.e.
+        list['a] -> list['b]. *)
+     | Ast.App ({ Ast.node = Ast.Var "par_map"; _ }, _f_e) ->
+       let a = fresh_var () and b = fresh_var () in
+       unify e.loc tf (Ast.TyArrow (Ast.TyCon ("list", [a]), Ast.TyCon ("list", [b])));
+       unify e.loc ta (Ast.TyCon ("list", [a]));
+       record_send_bound e.loc (Ast.walk a);
+       record_send_bound e.loc (Ast.walk b);
+       Ast.TyCon ("list", [b])
      | Ast.Var "vec_new" ->
        let active_region =
          match !active_regions with
