@@ -9445,6 +9445,30 @@ let () =
         let rec sum = fn xs -> match xs with Nil -> 0 | Cons (h, t) -> h + sum t; \
         let over = fn n -> if n > 4 then 1 else 0; \
         sum (par_map over (range 0 10))") "5";
+  (* Branch-and-bound pruning: sequential shares one best (1 eval); parallel
+     workers with local bests do more evals (4) for the same answer. The gap
+     is the concrete motivation for a shared atomic best (Phase 31). *)
+  check "concurrency: parallel pruning does more work without a shared best"
+    (Pipeline.process
+       "let hi = 40; \
+        let ub = fn x -> hi - x; \
+        let score = fn x -> ub x; \
+        let rec search = fn lo -> fn hiend -> fn best -> fn evals -> \
+          if lo >= hiend then (best, evals) \
+          else if ub lo <= best then search (lo + 1) hiend best evals \
+          else let s = score lo in \
+               let nb = if s > best then s else best in \
+               search (lo + 1) hiend nb (evals + 1); \
+        let worker = fn c -> match c with (lo, h) -> search lo h 0 0; \
+        let chunks = Cons ((0,10), Cons ((10,20), Cons ((20,30), Cons ((30,40), Nil)))); \
+        let rec combine = fn rs -> fn best -> fn evals -> \
+          match rs with \
+          | Nil -> (best, evals) \
+          | Cons (r, rest) -> match r with (b, e) -> \
+              combine rest (if b > best then b else best) (evals + e); \
+        let (sb, se) = search 0 hi 0 0 in \
+        let (pb, pe) = combine (par_map worker chunks) 0 0 in \
+        (sb, se, pb, pe)") "(40, 1, 40, 4)";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
