@@ -9360,6 +9360,23 @@ let () =
         let _ = spawn (fn u -> channel_send results (consume jobs 0)) in \
         let _ = produce jobs 100 in \
         channel_recv results") "5050";
+  (* Data-parallel fan-out / fan-in: four workers each compute a partial and
+     post it to a shared channel; the main thread sums the partials. *)
+  check "concurrency: data-parallel fan-out/fan-in over 4 workers"
+    (Pipeline.process
+       "let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2); \
+        let rec partial = fn count -> fn acc -> \
+          if count < 1 then acc else partial (count - 1) (acc + fib 20); \
+        let results = channel_new () in \
+        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
+        let r1 = channel_recv results in \
+        let r2 = channel_recv results in \
+        let r3 = channel_recv results in \
+        let r4 = channel_recv results in \
+        r1 + r2 + r3 + r4") "135300";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
