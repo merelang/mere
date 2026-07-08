@@ -1,0 +1,50 @@
+// parallel_search: where message passing is NOT enough — the case for Phase 31.
+//
+// Branch-and-bound: search for the maximum score, pruning any candidate whose
+// cheap upper bound can't beat the best found so far. Pruning quality depends
+// on the best being SHARED: a worker that knows another worker already found
+// a great solution can skip its whole chunk.
+//
+// With only spawn/channel there is no cheap shared mutable "best": each worker
+// prunes against its OWN local best. The answer is still correct, but workers
+// redo work that a shared best would have pruned. This program measures that:
+// it runs the search sequentially (one best throughout) and in parallel (four
+// workers, local best each) and reports how many expensive evaluations each
+// did. Same answer, but parallel does strictly more work — that gap is the
+// motivation for Phase 31 (an atomic / RwLock shared best).
+
+let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+let hi = 40;
+let ub = fn x -> hi - x;                 // cheap upper bound (decreasing in x)
+let score = fn x -> let _cost = fib 25 in ub x;   // the EXPENSIVE evaluation
+
+// Scan [lo, hiend): evaluate score only when the upper bound could still beat
+// `best`; otherwise prune (no evaluation). Returns (best, #evaluations).
+let rec search = fn lo -> fn hiend -> fn best -> fn evals ->
+  if lo >= hiend then (best, evals)
+  else if ub lo <= best then search (lo + 1) hiend best evals   // prune, no eval
+  else let s = score lo in
+       let nb = if s > best then s else best in
+       search (lo + 1) hiend nb (evals + 1);
+
+// Sequential: a single best carried across the whole range — optimal pruning.
+let seq = search 0 hi 0 0;
+
+// Parallel: four workers, each starting from best = 0 (no sharing).
+let worker = fn c -> match c with (lo, h) -> search lo h 0 0;
+let chunks =
+  Cons ((0, 10), Cons ((10, 20), Cons ((20, 30), Cons ((30, 40), Nil))));
+let rec combine = fn rs -> fn best -> fn evals ->
+  match rs with
+  | Nil -> (best, evals)
+  | Cons (r, rest) ->
+    match r with (b, e) ->
+      combine rest (if b > best then b else best) (evals + e);
+let par = combine (par_map worker chunks) 0 0;
+
+// (seq_best, seq_evals, par_best, par_evals): same best, but par_evals >
+// seq_evals — the extra evaluations are work a shared best would have pruned.
+let (sb, se) = seq in
+let (pb, pe) = par in
+(sb, se, pb, pe)
