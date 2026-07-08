@@ -3664,6 +3664,15 @@ let () =
   assert_contains "wasm: spawn emits the mere_spawn host import + call"
     (wasm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "call $mere_spawn";
+  (* Channels are host imports over the shared memory (the host does the
+     atomic queue via JS Atomics). Verified end-to-end: a 4-way parallel
+     fan-out/fan-in runs under node on all four backends including Wasm. *)
+  assert_contains "wasm: channel_new / send / recv are host imports"
+    (wasm_with_decls
+      "let ch = channel_new () in \
+       let _ = spawn (fn u -> channel_send ch 7) in \
+       channel_recv ch")
+    "call $mere_channel_recv";
   assert_contains "wasm: int literal becomes i32.const"
     (wasm "42") "i32.const 42";
   assert_contains "wasm: add maps to i32.add"
@@ -9399,13 +9408,13 @@ let () =
   check "concurrency: data-parallel fan-out/fan-in over 4 workers"
     (Pipeline.process
        "let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2); \
-        let rec partial = fn count -> fn acc -> \
-          if count < 1 then acc else partial (count - 1) (acc + fib 20); \
+        let rec partial = fn count -> \
+          if count < 1 then 0 else fib 20 + partial (count - 1); \
         let results = channel_new () in \
-        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
-        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
-        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
-        let _ = spawn (fn u -> channel_send results (partial 5 0)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5)) in \
+        let _ = spawn (fn u -> channel_send results (partial 5)) in \
         let r1 = channel_recv results in \
         let r2 = channel_recv results in \
         let r3 = channel_recv results in \
