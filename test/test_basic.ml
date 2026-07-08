@@ -9435,6 +9435,16 @@ let () =
        "local type Conn = MkConn of int; \
         let f = fn x -> MkConn x in \
         par_map f (Cons (1, Nil))");
+  (* A parallel count ("how many satisfy p?") is map-reduce, not shared
+     mutable state: each worker returns 0/1 and the results are summed —
+     no Mutex / atomic needed. *)
+  check "par_map: parallel count is map-then-reduce (no shared state)"
+    (Pipeline.process
+       "let rec range = fn lo -> fn hi -> \
+          if lo >= hi then Nil else Cons (lo, range (lo + 1) hi); \
+        let rec sum = fn xs -> match xs with Nil -> 0 | Cons (h, t) -> h + sum t; \
+        let over = fn n -> if n > 4 then 1 else 0; \
+        sum (par_map over (range 0 10))") "5";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
