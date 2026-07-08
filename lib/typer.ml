@@ -525,32 +525,88 @@ let local_types : (string, unit) Hashtbl.t = Hashtbl.create 8
 let register_sync_type name = Hashtbl.replace sync_types name ()
 let register_local_type name = Hashtbl.replace local_types name ()
 
-let rec is_send (t : Ast.ty) : bool =
+(* Substitute a type-parameter -> argument mapping through a type. *)
+let rec subst_type_params (m : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyParam p -> (try List.assoc p m with Not_found -> t)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (subst_type_params m a, subst_type_params m b)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_type_params m) ts)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_type_params m) args)
+  | Ast.TyRef (mode, r, inner) -> Ast.TyRef (mode, r, subst_type_params m inner)
+  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t0 -> t0
+
+(* The concrete types contained in a user-declared record's fields or a
+   variant's constructor payloads, with the type's parameters substituted by
+   `args`. None means `name` is not a user record/variant (a builtin/opaque
+   constructor such as Vec / OwnedVec / Channel). Used so Send/Sync derive
+   from what a nominal type actually holds — a plain record/variant wrapping
+   a !Send value must itself be !Send. *)
+let nominal_contents (name : string) (args : Ast.ty list) : Ast.ty list option =
+  if Hashtbl.mem records name then begin
+    let info = Hashtbl.find records name in
+    let m = try List.combine info.r_params args with Invalid_argument _ -> [] in
+    Some (List.map (fun (_, ft) -> subst_type_params m ft) info.r_fields)
+  end else begin
+    let ctors =
+      Hashtbl.fold (fun _ (i : constr_info) acc ->
+        if i.type_name = name then (i.params, i.arg) :: acc else acc) constructors []
+    in
+    match ctors with
+    | [] -> None
+    | _ ->
+      Some (List.filter_map (fun (params, payload) ->
+        match payload with
+        | None -> None
+        | Some pt ->
+          let m = try List.combine params args with Invalid_argument _ -> [] in
+          Some (subst_type_params m pt)) ctors)
+  end
+
+(* Send / Sync. Explicit markers (drop / local / sync) are authoritative; a
+   Channel is a thread-safe queue; unmarked user records/variants derive
+   structurally from their contents (recursion guarded against recursive
+   types by `visiting`); builtins fall back to checking their type args (so
+   e.g. Vec is !Send via its region-marker arg). Unresolved TyVar is
+   optimistic here — spawn-capture analysis rejects unresolved captures. *)
+let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
   | Ast.TyArrow _ -> true
   | Ast.TyRef _ -> false                       (* region borrow: thread-local *)
-  | Ast.TyTuple ts -> List.for_all is_send ts
+  | Ast.TyTuple ts -> List.for_all (is_send_v visiting) ts
+  | Ast.TyParam _ | Ast.TyVar _ -> true
+  | Ast.TyCon ("Channel", _) -> true
+  | Ast.TyCon ("ThreadHandle", _) -> true
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, args) when Hashtbl.mem drop_types name ->
-    List.for_all is_send args                  (* owned cap: Send, !Sync *)
-  | Ast.TyCon (_, args) -> List.for_all is_send args
-  | Ast.TyParam _ -> true
-  | Ast.TyVar _ -> true                         (* optimistic; see note above *)
+    List.for_all (is_send_v visiting) args     (* marker authoritative: Send, !Sync *)
+  | Ast.TyCon (name, _) when List.mem name visiting -> true
+  | Ast.TyCon (name, args) ->
+    (match nominal_contents name args with
+     | Some tys -> List.for_all (is_send_v (name :: visiting)) tys
+     | None -> List.for_all (is_send_v visiting) args)
 
-let rec is_sync (t : Ast.ty) : bool =
+let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
   | Ast.TyArrow _ -> true
   | Ast.TyRef _ -> false
-  | Ast.TyTuple ts -> List.for_all is_sync ts
+  | Ast.TyTuple ts -> List.for_all (is_sync_v visiting) ts
+  | Ast.TyParam _ | Ast.TyVar _ -> true
+  | Ast.TyCon ("Channel", _) -> true
+  | Ast.TyCon ("ThreadHandle", _) -> false     (* single-owner handle *)
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, _) when Hashtbl.mem drop_types name -> false
-  | Ast.TyCon (_, args) -> List.for_all is_sync args
-  | Ast.TyParam _ -> true
-  | Ast.TyVar _ -> true
+  | Ast.TyCon (name, _) when List.mem name visiting -> true
+  | Ast.TyCon (name, args) ->
+    (match nominal_contents name args with
+     | Some tys -> List.for_all (is_sync_v (name :: visiting)) tys
+     | None -> List.for_all (is_sync_v visiting) args)
+
+let is_send t = is_send_v [] t
+let is_sync t = is_sync_v [] t
 
 (* Q-012 (OPEN ii): register a channel element's Send obligation. If the
    element type is fully resolved, check it now; if it still mentions type
