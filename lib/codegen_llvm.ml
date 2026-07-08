@@ -2360,6 +2360,25 @@ let vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
      | _ -> raise (Codegen_error (loc, "vec_* expected a Vec value")))
   | None -> raise (Codegen_error (loc, "vec_*: missing type info"))
 
+(* Q-012: cast a Mere LLVM value to / from the i64 slot used by the generic
+   channel runtime. Every Mere value (i32 / i1 / double / ptr) fits in 8 bytes. *)
+let cast_to_i64 (v : string) (llty : string) : string =
+  match llty with
+  | "i64" -> v
+  | "double" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = bitcast double %s to i64" r v); r
+  | "ptr" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" r v); r
+  | "i1" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = zext i1 %s to i64" r v); r
+  | _ (* i32 (int / bool-as-i32 / unit) *) ->
+    let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r v); r
+
+let cast_from_i64 (v : string) (llty : string) : string =
+  match llty with
+  | "i64" -> v
+  | "double" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = bitcast i64 %s to double" r v); r
+  | "ptr" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = inttoptr i64 %s to ptr" r v); r
+  | "i1" -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = trunc i64 %s to i1" r v); r
+  | _ (* i32 *) -> let r = fresh_reg () in emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r v); r
+
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
@@ -2889,6 +2908,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let hv = emit_expr env h in
     emit_instr (Printf.sprintf "  call i32 @pthread_join(i64 %s, ptr null)" hv);
     "0"  (* unit *)
+  (* Q-012: channels via the generic i64-slot runtime. Elements cast to/from
+     i64 at the call site based on their LLVM type. *)
+  | Ast.App ({ node = Ast.Var "channel_new"; _ }, _arg) ->
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @mere_channel_new()" r);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e); _ }, v_e) ->
+    let chv = emit_expr env ch_e in
+    let vv = emit_expr env v_e in
+    let vty = match v_e.Ast.ty with Some t -> llvm_ty_of t | None -> "i32" in
+    let slot = cast_to_i64 vv vty in
+    emit_instr (Printf.sprintf "  call i32 @mere_channel_send(ptr %s, i64 %s)" chv slot);
+    "0"  (* unit *)
+  | Ast.App ({ node = Ast.Var "channel_recv"; _ }, ch_e) ->
+    let chv = emit_expr env ch_e in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @mere_channel_recv(ptr %s)" raw chv);
+    let ety = match e.Ast.ty with Some t -> llvm_ty_of t | None -> "i32" in
+    cast_from_i64 raw ety
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: call @__mere_mk_logger to build a
        Logger value (= 3 closure_str_unit fields). *)
@@ -7349,6 +7387,109 @@ let thread_runtime_llvm =
       "  ret ptr null";
       "}" ]
 
+(* Q-012: a single generic channel runtime. Every Mere LLVM value (i32 / i1 /
+   double / ptr) fits in 8 bytes, so channel elements are carried as i64
+   slots — the send/recv sites cast to/from i64. A heap-allocated fixed-cap
+   ring buffer guarded by a mutex + condition variable; recv blocks on the
+   condition until non-empty. mutex/cond are heap blocks (64 bytes covers the
+   platform's pthread structs) so the struct layout stays platform-agnostic. *)
+let channel_runtime_llvm =
+  String.concat "\n"
+    [ "%mere_channel = type { ptr, i32, i32, i32, ptr, ptr }";
+      "";
+      "define ptr @mere_channel_new() {";
+      "entry:";
+      "  %szp = getelementptr %mere_channel, ptr null, i32 1";
+      "  %sz = ptrtoint ptr %szp to i64";
+      "  %ch = call ptr @malloc(i64 %sz)";
+      "  %buf = call ptr @malloc(i64 524288)";  (* 65536 slots * 8 bytes *)
+      "  store ptr %buf, ptr %ch";
+      "  %lenp = getelementptr %mere_channel, ptr %ch, i32 0, i32 1";
+      "  store i32 0, ptr %lenp";
+      "  %capp = getelementptr %mere_channel, ptr %ch, i32 0, i32 2";
+      "  store i32 65536, ptr %capp";
+      "  %headp = getelementptr %mere_channel, ptr %ch, i32 0, i32 3";
+      "  store i32 0, ptr %headp";
+      "  %m = call ptr @malloc(i64 64)";
+      "  %r0 = call i32 @pthread_mutex_init(ptr %m, ptr null)";
+      "  %mp = getelementptr %mere_channel, ptr %ch, i32 0, i32 4";
+      "  store ptr %m, ptr %mp";
+      "  %c = call ptr @malloc(i64 64)";
+      "  %r1 = call i32 @pthread_cond_init(ptr %c, ptr null)";
+      "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
+      "  store ptr %c, ptr %cp";
+      "  ret ptr %ch";
+      "}";
+      "";
+      "define i32 @mere_channel_send(ptr %ch, i64 %v) {";
+      "entry:";
+      "  %mp = getelementptr %mere_channel, ptr %ch, i32 0, i32 4";
+      "  %m = load ptr, ptr %mp";
+      "  %r0 = call i32 @pthread_mutex_lock(ptr %m)";
+      "  %lenp = getelementptr %mere_channel, ptr %ch, i32 0, i32 1";
+      "  %len = load i32, ptr %lenp";
+      "  %capp = getelementptr %mere_channel, ptr %ch, i32 0, i32 2";
+      "  %cap = load i32, ptr %capp";
+      "  %full = icmp sge i32 %len, %cap";
+      "  br i1 %full, label %oom, label %ok";
+      "oom:";
+      "  call void @abort()";
+      "  unreachable";
+      "ok:";
+      "  %headp = getelementptr %mere_channel, ptr %ch, i32 0, i32 3";
+      "  %head = load i32, ptr %headp";
+      "  %pos0 = add i32 %head, %len";
+      "  %pos = srem i32 %pos0, %cap";
+      "  %pos64 = sext i32 %pos to i64";
+      "  %bufp = getelementptr %mere_channel, ptr %ch, i32 0, i32 0";
+      "  %buf = load ptr, ptr %bufp";
+      "  %slot = getelementptr i64, ptr %buf, i64 %pos64";
+      "  store i64 %v, ptr %slot";
+      "  %len1 = add i32 %len, 1";
+      "  store i32 %len1, ptr %lenp";
+      "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
+      "  %c = load ptr, ptr %cp";
+      "  %r1 = call i32 @pthread_cond_signal(ptr %c)";
+      "  %r2 = call i32 @pthread_mutex_unlock(ptr %m)";
+      "  ret i32 0";
+      "}";
+      "";
+      "define i64 @mere_channel_recv(ptr %ch) {";
+      "entry:";
+      "  %mp = getelementptr %mere_channel, ptr %ch, i32 0, i32 4";
+      "  %m = load ptr, ptr %mp";
+      "  %r0 = call i32 @pthread_mutex_lock(ptr %m)";
+      "  %lenp = getelementptr %mere_channel, ptr %ch, i32 0, i32 1";
+      "  br label %wait";
+      "wait:";
+      "  %len = load i32, ptr %lenp";
+      "  %empty = icmp eq i32 %len, 0";
+      "  br i1 %empty, label %block, label %ready";
+      "block:";
+      "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
+      "  %c = load ptr, ptr %cp";
+      "  %rw = call i32 @pthread_cond_wait(ptr %c, ptr %m)";
+      "  br label %wait";
+      "ready:";
+      "  %headp = getelementptr %mere_channel, ptr %ch, i32 0, i32 3";
+      "  %head = load i32, ptr %headp";
+      "  %capp = getelementptr %mere_channel, ptr %ch, i32 0, i32 2";
+      "  %cap = load i32, ptr %capp";
+      "  %bufp = getelementptr %mere_channel, ptr %ch, i32 0, i32 0";
+      "  %buf = load ptr, ptr %bufp";
+      "  %head64 = sext i32 %head to i64";
+      "  %slot = getelementptr i64, ptr %buf, i64 %head64";
+      "  %v = load i64, ptr %slot";
+      "  %head1 = add i32 %head, 1";
+      "  %headm = srem i32 %head1, %cap";
+      "  store i32 %headm, ptr %headp";
+      "  %len2 = load i32, ptr %lenp";
+      "  %len2d = sub i32 %len2, 1";
+      "  store i32 %len2d, ptr %lenp";
+      "  %r2 = call i32 @pthread_mutex_unlock(ptr %m)";
+      "  ret i64 %v";
+      "}" ]
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reg_counter := 0;
   label_counter := 0;
@@ -7885,6 +8026,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         runtime_decls;
         "";
         thread_runtime_llvm;
+        "";
+        channel_runtime_llvm;
         "";
         region_runtime_helpers;
         "";
