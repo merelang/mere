@@ -1,0 +1,30 @@
+// parallel_count: a "shared counter" that needs no shared state.
+//
+// Counting how many items satisfy a predicate looks like it wants a shared
+// mutable counter that every worker increments (the classic reach for a
+// Mutex / atomic). But with message passing you don't share anything: each
+// worker returns 0 or 1 for its item, and the results are summed. par_map
+// does the parallel part, a fold does the aggregation — no lock, no atomic,
+// no shared mutable state.
+//
+// This is the point of Phase 30/32 (spawn / channel / par_map): a large
+// class of "shared state" problems are really map-then-reduce, and those are
+// covered already. (Runs on the interpreter; par_map lowers to spawn +
+// channel + list_map on the native/Wasm backends too.)
+
+let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+let rec range = fn lo -> fn hi ->
+  if lo >= hi then Nil else Cons (lo, range (lo + 1) hi);
+
+let rec sum = fn xs ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> h + sum t;
+
+// How many of fib(2), fib(3), ..., fib(29) exceed 1000?  Each check runs on
+// its own worker; the per-item 0/1 answers are summed. (fib(n) > 1000 for
+// n >= 17, so 17..29 = 13 of them.)
+let over = fn n -> if fib n > 1000 then 1 else 0;
+
+sum (par_map over (range 2 30))
