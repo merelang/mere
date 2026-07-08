@@ -9274,6 +9274,27 @@ let () =
        "sync type SharedLog = MkLog of int; \
         let ch = channel_new () in \
         channel_send ch (MkLog 0)") "()";
+  (* Send/Sync derive structurally through unmarked records/variants: a plain
+     type wrapping a !Send value is itself !Send (no smuggling by wrapping). *)
+  check_raises_containing "send: a record wrapping a !Send field is rejected"
+    "is not Send"
+    (fun () -> Pipeline.process
+       "local type Conn = MkConn of int; \
+        type BoxR = { c: Conn }; \
+        let ch = channel_new () in \
+        channel_send ch (BoxR { c = MkConn 0 })");
+  check_raises_containing "send: a variant wrapping a !Send payload is rejected"
+    "is not Send"
+    (fun () -> Pipeline.process
+       "local type Conn = MkConn of int; \
+        type Boxed = Wrap of Conn; \
+        let ch = channel_new () in \
+        channel_send ch (Wrap (MkConn 0))");
+  check "send: a record of Send fields is Send (accepted)"
+    (Pipeline.process
+       "type Pt = { x: int, y: int }; \
+        let ch = channel_new () in \
+        channel_send ch (Pt { x = 1, y = 2 })") "()";
   (* Q-012 (OPEN i): move / use-after-move analysis for spawn captures. *)
   check_raises_containing "move: use-after-move of an owned cap is rejected"
     "use after move"
