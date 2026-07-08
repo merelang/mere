@@ -1,0 +1,37 @@
+// parallel_compute: data-parallel fan-out / fan-in (the CPU-parallel workload)
+//
+// spawn + channel already give real multicore on the interpreter and the
+// native (C / LLVM) backends. The workload that most wants this — and the one
+// that would justify porting concurrency to Wasm shared-memory threads for
+// the browser — is CPU-heavy data parallelism: split the work into chunks,
+// run the chunks on separate threads, and combine the partial results.
+//
+// Here four workers each fold a CPU-heavy function over their share of the
+// work and post a partial sum to a channel; the main thread sums the four
+// partials. On a multicore machine this runs close to 4x faster than the
+// sequential version, which is exactly the motivation for wanting the same
+// parallelism inside a Wasm module.
+
+let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+// One worker's share: sum fib(28) over `count` iterations (a CPU-work proxy).
+let rec partial = fn count -> fn acc ->
+  if count < 1 then acc else partial (count - 1) (acc + fib 28);
+
+// The program's result is the combined total. Ending in a bare int (rather
+// than print_int) keeps this compilable on the C and LLVM backends too, so
+// the same parallel program runs on every native target — 4 workers *
+// 10 * fib(28) = 40 * 317811 = 12712440.
+let results = channel_new () in
+// Fan out: four workers, each on its own thread. They share `results` and
+// `partial` (both Sync), so nothing is moved.
+let _ = spawn (fn u -> channel_send results (partial 10 0)) in
+let _ = spawn (fn u -> channel_send results (partial 10 0)) in
+let _ = spawn (fn u -> channel_send results (partial 10 0)) in
+let _ = spawn (fn u -> channel_send results (partial 10 0)) in
+// Fan in: collect the four partials and combine.
+let r1 = channel_recv results in
+let r2 = channel_recv results in
+let r3 = channel_recv results in
+let r4 = channel_recv results in
+r1 + r2 + r3 + r4
