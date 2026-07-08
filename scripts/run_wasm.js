@@ -5,9 +5,43 @@
 // Usage: node run_wasm.js <path-to-wasm>
 
 const fs = require('fs');
+const { Worker } = require('worker_threads');
 const { makePgEnv } = require('./pg_env.js');
 const { makeHttpFetchEnv } = require('./http_fetch_env.js');
 const { makeSubprocessEnv } = require('./subprocess_env.js');
+
+// Q-012: worker bootstrap for spawn. A spawned worker instantiates the SAME
+// wasm module over the SAME shared memory (so the closure's env offset and
+// the function-table index are both valid), then invokes the closure via the
+// indirect function table: table.get(fnIdx)(envOffset, 0). It signals
+// completion by setting a shared flag that mere_join waits on. This MVP
+// supports closures that don't allocate (the bump allocator is per-instance);
+// a shared allocator is a follow-up.
+const WORKER_CODE = `
+const { workerData } = require('worker_threads');
+const { wasmBytes, memory, fnIdx, envOff, doneSab } = workerData;
+const readCStr = (ptr) => {
+  const bytes = new Uint8Array(memory.buffer);
+  let end = ptr; while (end < bytes.length && bytes[end] !== 0) end++;
+  return Buffer.from(bytes.subarray(ptr, end)).toString('utf8');
+};
+const stub = () => 0;
+const env = {
+  memory,
+  puts: (ptr) => process.stdout.write(readCStr(ptr) + '\\n'),
+  mere_spawn: stub, mere_join: stub,
+  __lang_str_of_float: stub, __lang_float_of_str: stub,
+  __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+  __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+};
+(async () => {
+  const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+  const table = instance.exports.__indirect_function_table;
+  try { table.get(fnIdx)(envOff, 0); } catch (e) { /* wasm trap in child */ }
+  Atomics.store(new Int32Array(doneSab), 0, 1);
+  Atomics.notify(new Int32Array(doneSab), 0);
+})();
+`;
 
 if (process.argv.length < 3) {
   console.error("usage: node run_wasm.js <path-to-wasm>");
@@ -209,8 +243,44 @@ const wasmPath = process.argv[2];
   };
   let scratchOffset = 56 * 1024;  // used only when langBump is absent
 
-  const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
-  memory = instance.exports.memory;
+  // Q-012: if the module imports a shared memory (a threaded program), the
+  // host must create it so every worker instance shares one memory. Detect
+  // that from the module's import list and wire spawn/join.
+  const wasmModule = new WebAssembly.Module(wasmBytes);
+  const moduleImports = WebAssembly.Module.imports(wasmModule);
+  const needsSharedMem = moduleImports.some(
+    (i) => i.module === 'env' && i.name === 'memory' && i.kind === 'memory');
+  let sharedMemory = null;
+  if (needsSharedMem) {
+    sharedMemory = new WebAssembly.Memory({ initial: 1024, maximum: 65536, shared: true });
+    env.memory = sharedMemory;
+    let nextTid = 1;
+    const threads = new Map();
+    env.mere_spawn = (closurePtr) => {
+      const view = new DataView(sharedMemory.buffer);
+      const envOff = view.getInt32(closurePtr, true);
+      const fnIdx = view.getInt32(closurePtr + 4, true);
+      const tid = nextTid++;
+      const doneSab = new SharedArrayBuffer(4);
+      const worker = new Worker(WORKER_CODE, {
+        eval: true,
+        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab },
+      });
+      worker.on('error', (e) => console.error('worker error:', e));
+      threads.set(tid, { worker, done: new Int32Array(doneSab) });
+      return tid;
+    };
+    env.mere_join = (tid) => {
+      const t = threads.get(tid);
+      if (t) { Atomics.wait(t.done, 0, 0); t.worker.terminate(); }
+      return 0;
+    };
+  }
+
+  // instantiate(Module, imports) resolves to the Instance directly (unlike
+  // instantiate(bytes, imports) which resolves to { instance, module }).
+  const instance = await WebAssembly.instantiate(wasmModule, { env });
+  memory = needsSharedMem ? sharedMemory : instance.exports.memory;
   langBump = instance.exports.__lang_bump || null;
 
   // Phase 48.2 (C2 Stage 2): helper for invoking a Mere closure value
