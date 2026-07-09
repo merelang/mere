@@ -277,7 +277,8 @@ let is_builtin = fn (n: str) ->
   n == "str_unescape" || n == "try_or" ||
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
-  n == "not" || n == "str_eq" || n == "read_file" || n == "str_of_float" ||
+  n == "not" || n == "str_eq" || n == "read_file" || n == "write_file" ||
+  n == "str_of_float" ||
   n == "chr" ||
   n == "map_new" || n == "map_set" || n == "map_get" || n == "map_has" ||
   // Phase 54.33: float ops
@@ -1294,6 +1295,15 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s0 = note_extern_use "read_file" s in
         let s1 = emit_expr x s0 in
         push_instr "call $read_file" s1
+      | EApp (EVar "write_file", path_expr) ->
+        // beta: `write_file path content` — 2-arg host extern, mirrors
+        // read_file. Host (run_wasm.js) provides
+        // (path: i32) -> (content: i32) -> i32. The i32 result stands
+        // in for Mere's unit (write_file : str -> str -> unit).
+        let s0 = note_extern_use "write_file" s in
+        let s1 = emit_expr path_expr s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $write_file" s2
       | EVar "not" ->
         // Phase 54.11: `not b` — boolean negation. b is i32 (0 or 1).
         // `i32.eqz` produces 1 if zero, 0 otherwise — exactly NOT.
@@ -1939,6 +1949,10 @@ let extern_import_line = fn (name: str) ->
     // Phase 54.19: (path: i32 str_ptr) -> (i32 str_ptr). Host provides
     // the actual implementation (or returns 0 for a null-string stub).
     "  (import \"env\" \"read_file\" (func $read_file (param i32) (result i32)))\n"
+  else if name == "write_file" then
+    // beta: (path: i32) -> (content: i32) -> i32. Host writes and
+    // returns a status i32 (used as unit).
+    "  (import \"env\" \"write_file\" (func $write_file (param i32) (param i32) (result i32)))\n"
   else
     fail ("codegen_wasm: unknown extern fn " ++ name);
 
@@ -2886,7 +2900,16 @@ let selfhost_prelude_fns =
   "          let part = substring s start (start + idx) in\n" ++
   "          loop (start + idx + dl) (Cons (part, acc))\n" ++
   "    in\n" ++
-  "    loop 0 Nil;\n";
+  "    loop 0 Nil;\n" ++
+  // beta: str_contains — true if needle occurs in haystack. Built on
+  // str_index_of (a builtin). Unblocks http/security, http/csrf,
+  // feed, and other contrib files.
+  "let str_contains = fn (h: str) -> fn (n: str) -> str_index_of h n >= 0;\n" ++
+  // beta: list_find — first element satisfying p, as an option.
+  "let rec list_find = fn xs -> fn p ->\n" ++
+  "  match xs with\n" ++
+  "  | Nil -> None\n" ++
+  "  | Cons (h, t) -> if p h then Some h else list_find t p;\n";
 
 // Phase 55f part 8: full prelude (types + fns) — used by parse_and_emit
 // which needs the type decls for codegen's arity map. The typed
