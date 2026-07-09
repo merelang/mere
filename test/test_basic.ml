@@ -9013,6 +9013,14 @@ let () =
       "let m = map_new () in map_get m \"missing\"" "0";
     cross_emit "map multiple keys"
       "let m = map_new () in let _ = map_set m \"a\" 10 in let _ = map_set m \"b\" 20 in let _ = map_set m \"c\" 30 in map_get m \"a\" + map_get m \"b\" + map_get m \"c\"" "60";
+    (* beta: map_delete unlinks all pairs with the key (matches OCaml's
+       Hashtbl.remove). Unblocks http/session. *)
+    cross_emit "map_delete removes key"
+      "let m = map_new () in let _ = map_set m \"a\" 1 in let _ = map_set m \"b\" 2 in let _ = map_delete m \"b\" in (if map_has m \"b\" then 100 else 0) + map_get m \"a\"" "1";
+    cross_emit "map_delete absent is no-op"
+      "let m = map_new () in let _ = map_set m \"a\" 5 in let _ = map_delete m \"zzz\" in map_get m \"a\"" "5";
+    cross_emit "map_delete then re-set"
+      "let m = map_new () in let _ = map_set m \"k\" 1 in let _ = map_delete m \"k\" in let _ = map_set m \"k\" 9 in map_get m \"k\"" "9";
     (* A1/alpha: self-host parser gained `while cond do body` (Phase 36
        sugar). Desugars to a recursive unit->unit loop; these verify the
        self-host pipeline parses, lowers, and runs it. *)
