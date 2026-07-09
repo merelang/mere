@@ -9027,6 +9027,12 @@ let () =
       "let m = map_new () in let _ = map_set m \"a\" 1 in let _ = map_set m \"b\" 2 in let _ = map_set m \"c\" 3 in let acc = map_new () in let _ = map_set acc \"s\" 0 in let _ = map_iter m (fn k -> fn v -> map_set acc \"s\" (map_get acc \"s\" + v)) in map_get acc \"s\"" "6";
     cross_emit "map_iter dedups overwrites"
       "let m = map_new () in let _ = map_set m \"a\" 1 in let _ = map_set m \"b\" 2 in let _ = map_set m \"b\" 20 in let acc = map_new () in let _ = map_set acc \"s\" 0 in let _ = map_iter m (fn k -> fn v -> map_set acc \"s\" (map_get acc \"s\" + v)) in map_get acc \"s\"" "21";
+    (* beta: Vec runtime (new/push/get/set/len) ported from the OCaml
+       codegen. Unblocks http/access_log, log/log. *)
+    cross_emit "vec push/get/set/len"
+      "let v = vec_new () in let _ = vec_push v 10 in let _ = vec_push v 20 in let _ = vec_push v 30 in let a = vec_get v 1 in let _ = vec_set v 1 99 in a + vec_get v 1 + vec_len v" "122";
+    cross_emit "vec grows past initial cap"
+      "let v = vec_new () in let rec go = fn i -> if i > 10 then () else let _ = vec_push v i in go (i + 1) in let _ = go 1 in vec_len v + vec_get v 0 + vec_get v 9" "21";
     (* A1/alpha: self-host parser gained `while cond do body` (Phase 36
        sugar). Desugars to a recursive unit->unit loop; these verify the
        self-host pipeline parses, lowers, and runs it. *)

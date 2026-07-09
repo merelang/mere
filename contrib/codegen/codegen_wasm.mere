@@ -282,6 +282,8 @@ let is_builtin = fn (n: str) ->
   n == "chr" ||
   n == "map_new" || n == "map_set" || n == "map_get" || n == "map_has" ||
   n == "map_delete" || n == "map_head" ||
+  n == "vec_new" || n == "vec_push" || n == "vec_get" || n == "vec_set" ||
+  n == "vec_len" ||
   // Phase 54.33: float ops
   n == "float_of_int" || n == "int_of_float" ||
   n == "f_add" || n == "f_sub" || n == "f_mul" || n == "f_div" ||
@@ -1277,6 +1279,34 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s1 = note_helper_use "map_head" s0 in
         let s2 = emit_expr x s1 in
         push_instr "call $map_head" s2
+      | EVar "vec_new" ->
+        // beta: `vec_new ()` — arg is unit, ignore it. All elements are
+        // 4-byte i32 so one runtime covers every element type.
+        let s0 = note_helper_use "vec" s in
+        push_instr "call $mere_vec_new" s0
+      | EVar "vec_len" ->
+        let s0 = note_helper_use "vec" s in
+        let s1 = emit_expr x s0 in
+        push_instr "call $mere_vec_len" s1
+      | EApp (EVar "vec_push", vec_e) ->
+        // `vec_push v x` — append (grows the buffer if full). Returns unit.
+        let s0 = note_helper_use "vec" s in
+        let s1 = emit_expr vec_e s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $mere_vec_push" s2
+      | EApp (EVar "vec_get", vec_e) ->
+        // `vec_get v i` — bounds-checked load.
+        let s0 = note_helper_use "vec" s in
+        let s1 = emit_expr vec_e s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $mere_vec_get" s2
+      | EApp (EApp (EVar "vec_set", vec_e), idx_e) ->
+        // `vec_set v i x` — bounds-checked store. Returns unit.
+        let s0 = note_helper_use "vec" s in
+        let s1 = emit_expr vec_e s0 in
+        let s2 = emit_expr idx_e s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $mere_vec_set" s3
       | EVar "is_digit" ->
         // Phase 54.5: `is_digit s` — true iff first byte is '0'..'9'.
         // Idiomatic in-bounds check via unsigned subtract + compare.
@@ -2150,6 +2180,75 @@ let helper_decl_map_head =
   "        (br $lp)))\n" ++
   "    (local.get $result))\n";
 
+// beta: Vec runtime — ported from lib/codegen_wasm.ml. A vec is a
+// 16-byte header {buf@0, len@4, cap@8} plus a separately bump-alloc'd
+// element buffer (cap*4 bytes, all elements 4-byte i32). push doubles
+// the buffer when full (copy into a fresh region — the old one leaks,
+// which the bump arena tolerates). get/set are bounds-checked (trap on
+// out-of-range, matching the OCaml runtime). Emitted as one group when
+// any vec op is used (note_helper_use "vec").
+let helper_decl_vec =
+  "  (func $mere_vec_new (result i32)\n" ++
+  "    (local $v i32) (local $buf i32)\n" ++
+  "    (local.set $v (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $v) (i32.const 16)))\n" ++
+  "    (local.set $buf (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 16)))\n" ++
+  "    (i32.store offset=0 (local.get $v) (local.get $buf))\n" ++
+  "    (i32.store offset=4 (local.get $v) (i32.const 0))\n" ++
+  "    (i32.store offset=8 (local.get $v) (i32.const 4))\n" ++
+  "    (local.get $v))\n" ++
+  "  (func $mere_vec_len (param $v i32) (result i32)\n" ++
+  "    (i32.load offset=4 (local.get $v)))\n" ++
+  "  (func $mere_vec_push (param $v i32) (param $x i32) (result i32)\n" ++
+  "    (local $len i32) (local $cap i32) (local $buf i32)\n" ++
+  "    (local $new_buf i32) (local $i i32)\n" ++
+  "    (local.set $len (i32.load offset=4 (local.get $v)))\n" ++
+  "    (local.set $cap (i32.load offset=8 (local.get $v)))\n" ++
+  "    (if (i32.eq (local.get $len) (local.get $cap))\n" ++
+  "      (then\n" ++
+  "        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))\n" ++
+  "        (local.set $new_buf (global.get $__lang_bump))\n" ++
+  "        (global.set $__lang_bump\n" ++
+  "          (i32.add (local.get $new_buf) (i32.mul (local.get $cap) (i32.const 4))))\n" ++
+  "        (local.set $buf (i32.load offset=0 (local.get $v)))\n" ++
+  "        (local.set $i (i32.const 0))\n" ++
+  "        (block $ce (loop $cl\n" ++
+  "          (br_if $ce (i32.eq (local.get $i) (local.get $len)))\n" ++
+  "          (i32.store\n" ++
+  "            (i32.add (local.get $new_buf) (i32.mul (local.get $i) (i32.const 4)))\n" ++
+  "            (i32.load\n" ++
+  "              (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))))\n" ++
+  "          (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "          (br $cl)))\n" ++
+  "        (i32.store offset=0 (local.get $v) (local.get $new_buf))\n" ++
+  "        (i32.store offset=8 (local.get $v) (local.get $cap))))\n" ++
+  "    (local.set $buf (i32.load offset=0 (local.get $v)))\n" ++
+  "    (i32.store\n" ++
+  "      (i32.add (local.get $buf) (i32.mul (local.get $len) (i32.const 4)))\n" ++
+  "      (local.get $x))\n" ++
+  "    (i32.store offset=4 (local.get $v) (i32.add (local.get $len) (i32.const 1)))\n" ++
+  "    (i32.const 0))\n" ++
+  "  (func $mere_vec_get (param $v i32) (param $i i32) (result i32)\n" ++
+  "    (local $len i32) (local $buf i32)\n" ++
+  "    (local.set $len (i32.load offset=4 (local.get $v)))\n" ++
+  "    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))\n" ++
+  "                (i32.ge_s (local.get $i) (local.get $len)))\n" ++
+  "      (then (unreachable)))\n" ++
+  "    (local.set $buf (i32.load offset=0 (local.get $v)))\n" ++
+  "    (i32.load (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))))\n" ++
+  "  (func $mere_vec_set (param $v i32) (param $i i32) (param $x i32) (result i32)\n" ++
+  "    (local $len i32) (local $buf i32)\n" ++
+  "    (local.set $len (i32.load offset=4 (local.get $v)))\n" ++
+  "    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))\n" ++
+  "                (i32.ge_s (local.get $i) (local.get $len)))\n" ++
+  "      (then (unreachable)))\n" ++
+  "    (local.set $buf (i32.load offset=0 (local.get $v)))\n" ++
+  "    (i32.store\n" ++
+  "      (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))\n" ++
+  "      (local.get $x))\n" ++
+  "    (i32.const 0))\n";
+
 // Phase 54.33: `$__lang_float_box` — takes an f64 on the stack, bump-
 // allocs 8 bytes aligned to 8, stores the value, returns the i32 ptr.
 // Mirrors OCaml codegen_wasm.ml's `emit_float_alloc_from_f64_on_stack`.
@@ -2675,6 +2774,7 @@ let helper_body = fn (name: str) ->
   else if name == "map_has" then helper_decl_map_has
   else if name == "map_delete" then helper_decl_map_delete
   else if name == "map_head" then helper_decl_map_head
+  else if name == "vec" then helper_decl_vec
   else if name == "streq" then helper_decl_streq
   else if name == "is_space" then helper_decl_is_space
   else if name == "str_starts_with" then helper_decl_str_starts_with
