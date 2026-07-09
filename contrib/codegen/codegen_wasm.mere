@@ -281,7 +281,7 @@ let is_builtin = fn (n: str) ->
   n == "str_of_float" ||
   n == "chr" ||
   n == "map_new" || n == "map_set" || n == "map_get" || n == "map_has" ||
-  n == "map_delete" ||
+  n == "map_delete" || n == "map_head" ||
   // Phase 54.33: float ops
   n == "float_of_int" || n == "int_of_float" ||
   n == "f_add" || n == "f_sub" || n == "f_mul" || n == "f_div" ||
@@ -1266,6 +1266,17 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr m_expr s1 in
         let s3 = emit_expr x s2 in
         push_instr "call $map_delete" s3
+      | EVar "map_head" ->
+        // beta (internal, for the prelude's map_iter): `map_head m`
+        // returns a de-duplicated `(str * V) list` of the map's entries
+        // — each key once, with its current (newest) value. Dedup runs
+        // in the helper so map_iter can be a plain 2-arg list walk (the
+        // Wasm codegen can't lift a 3-arg recursive walker that threads
+        // a `seen` accumulator).
+        let s0 = note_helper_use "streq" s in
+        let s1 = note_helper_use "map_head" s0 in
+        let s2 = emit_expr x s1 in
+        push_instr "call $map_head" s2
       | EVar "is_digit" ->
         // Phase 54.5: `is_digit s` — true iff first byte is '0'..'9'.
         // Idiomatic in-bounds check via unsigned subtract + compare.
@@ -2090,6 +2101,55 @@ let helper_decl_map_delete =
   "        (br $lp)))\n" ++
   "    (i32.const 0))\n";
 
+// beta: `$map_head m` — build a de-duplicated `(str * V) list` from the
+// map's assoc list (newest-first, possible stale dups). For each node,
+// scan the newer nodes (head .. current-exclusive) for the same key; if
+// none, this is the current value, so cons its pair onto the result.
+// Pairs are shared (not copied); only fresh list spine is allocated.
+// O(n^2) but maps here are small. Lets the prelude's map_iter be a
+// plain 2-arg list walk.
+let helper_decl_map_head =
+  "  (func $map_head (param $m i32) (result i32)\n" ++
+  "    (local $result i32) (local $node i32) (local $pl i32) (local $pair i32)\n" ++
+  "    (local $key i32) (local $dup i32) (local $scan i32) (local $spl i32)\n" ++
+  "    (local $cons_pl i32) (local $cons i32)\n" ++
+  "    (local.set $result (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $result) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $result) (i32.const 0))\n" ++
+  "    (i32.store offset=4 (local.get $result) (i32.const 0))\n" ++
+  "    (local.set $node (i32.load offset=0 (local.get $m)))\n" ++
+  "    (block $done\n" ++
+  "      (loop $lp\n" ++
+  "        (br_if $done (i32.eqz (i32.load offset=0 (local.get $node))))\n" ++
+  "        (local.set $pl (i32.load offset=4 (local.get $node)))\n" ++
+  "        (local.set $pair (i32.load offset=0 (local.get $pl)))\n" ++
+  "        (local.set $key (i32.load offset=0 (local.get $pair)))\n" ++
+  "        (local.set $dup (i32.const 0))\n" ++
+  "        (local.set $scan (i32.load offset=0 (local.get $m)))\n" ++
+  "        (block $sdone\n" ++
+  "          (loop $slp\n" ++
+  "            (br_if $sdone (i32.eq (local.get $scan) (local.get $node)))\n" ++
+  "            (local.set $spl (i32.load offset=4 (local.get $scan)))\n" ++
+  "            (if (call $__lang_streq (local.get $key)\n" ++
+  "                   (i32.load offset=0 (i32.load offset=0 (local.get $spl))))\n" ++
+  "              (then (local.set $dup (i32.const 1)) (br $sdone)))\n" ++
+  "            (local.set $scan (i32.load offset=4 (local.get $spl)))\n" ++
+  "            (br $slp)))\n" ++
+  "        (if (i32.eqz (local.get $dup))\n" ++
+  "          (then\n" ++
+  "            (local.set $cons_pl (global.get $__lang_bump))\n" ++
+  "            (global.set $__lang_bump (i32.add (local.get $cons_pl) (i32.const 8)))\n" ++
+  "            (i32.store offset=0 (local.get $cons_pl) (local.get $pair))\n" ++
+  "            (i32.store offset=4 (local.get $cons_pl) (local.get $result))\n" ++
+  "            (local.set $cons (global.get $__lang_bump))\n" ++
+  "            (global.set $__lang_bump (i32.add (local.get $cons) (i32.const 8)))\n" ++
+  "            (i32.store offset=0 (local.get $cons) (i32.const 1))\n" ++
+  "            (i32.store offset=4 (local.get $cons) (local.get $cons_pl))\n" ++
+  "            (local.set $result (local.get $cons))))\n" ++
+  "        (local.set $node (i32.load offset=4 (local.get $pl)))\n" ++
+  "        (br $lp)))\n" ++
+  "    (local.get $result))\n";
+
 // Phase 54.33: `$__lang_float_box` — takes an f64 on the stack, bump-
 // allocs 8 bytes aligned to 8, stores the value, returns the i32 ptr.
 // Mirrors OCaml codegen_wasm.ml's `emit_float_alloc_from_f64_on_stack`.
@@ -2614,6 +2674,7 @@ let helper_body = fn (name: str) ->
   else if name == "map_get" then helper_decl_map_get
   else if name == "map_has" then helper_decl_map_has
   else if name == "map_delete" then helper_decl_map_delete
+  else if name == "map_head" then helper_decl_map_head
   else if name == "streq" then helper_decl_streq
   else if name == "is_space" then helper_decl_is_space
   else if name == "str_starts_with" then helper_decl_str_starts_with
@@ -2957,7 +3018,13 @@ let selfhost_prelude_fns =
   "      let c = if o >= 65 && o <= 90 then chr (o + 32) else char_at s i in\n" ++
   "      let __ = strbuf_push buf c in\n" ++
   "      loop (i + 1)\n" ++
-  "  in loop 0;\n";
+  "  in loop 0;\n" ++
+  // beta: map_iter m f — call f k v once per key, current value. Dedup
+  // is done by map_head (helper), so this is a plain 2-arg list_iter
+  // over the (key, value) pairs — no 3-arg `seen`-threading walker,
+  // which the Wasm codegen can't lift.
+  "let map_iter = fn m -> fn f ->\n" ++
+  "  list_iter (map_head m) (fn p -> f (fst p) (snd p));\n";
 
 // Phase 55f part 8: full prelude (types + fns) — used by parse_and_emit
 // which needs the type decls for codegen's arity map. The typed

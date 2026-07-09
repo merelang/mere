@@ -9021,6 +9021,12 @@ let () =
       "let m = map_new () in let _ = map_set m \"a\" 5 in let _ = map_delete m \"zzz\" in map_get m \"a\"" "5";
     cross_emit "map_delete then re-set"
       "let m = map_new () in let _ = map_set m \"k\" 1 in let _ = map_delete m \"k\" in let _ = map_set m \"k\" 9 in map_get m \"k\"" "9";
+    (* beta: map_iter calls f k v once per key (current value). map_head
+       dedups so overwrites are visited once. Unblocks http/metrics. *)
+    cross_emit "map_iter sums values"
+      "let m = map_new () in let _ = map_set m \"a\" 1 in let _ = map_set m \"b\" 2 in let _ = map_set m \"c\" 3 in let acc = map_new () in let _ = map_set acc \"s\" 0 in let _ = map_iter m (fn k -> fn v -> map_set acc \"s\" (map_get acc \"s\" + v)) in map_get acc \"s\"" "6";
+    cross_emit "map_iter dedups overwrites"
+      "let m = map_new () in let _ = map_set m \"a\" 1 in let _ = map_set m \"b\" 2 in let _ = map_set m \"b\" 20 in let acc = map_new () in let _ = map_set acc \"s\" 0 in let _ = map_iter m (fn k -> fn v -> map_set acc \"s\" (map_get acc \"s\" + v)) in map_get acc \"s\"" "21";
     (* A1/alpha: self-host parser gained `while cond do body` (Phase 36
        sugar). Desugars to a recursive unit->unit loop; these verify the
        self-host pipeline parses, lowers, and runs it. *)
@@ -9282,7 +9288,7 @@ let () =
        valid program at runtime — closes the last unresolved gap
        from Phase 54.20. *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "90486"
+      "examples/oneshot_codegen.mere" "96522"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
