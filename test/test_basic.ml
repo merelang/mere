@@ -9013,6 +9013,13 @@ let () =
       "let m = map_new () in map_get m \"missing\"" "0";
     cross_emit "map multiple keys"
       "let m = map_new () in let _ = map_set m \"a\" 10 in let _ = map_set m \"b\" 20 in let _ = map_set m \"c\" 30 in map_get m \"a\" + map_get m \"b\" + map_get m \"c\"" "60";
+    (* A1/alpha: self-host parser gained `while cond do body` (Phase 36
+       sugar). Desugars to a recursive unit->unit loop; these verify the
+       self-host pipeline parses, lowers, and runs it. *)
+    cross_emit "while loop iterates"
+      "let m = map_new () in let _ = map_set m \"i\" 0 in let _ = while map_get m \"i\" < 3 do map_set m \"i\" (map_get m \"i\" + 1) in map_get m \"i\"" "3";
+    cross_emit "while false zero iterations"
+      "let _ = while 1 > 2 do 0 in 42" "42";
     (* Phase 54.29: module-qualified constructor pattern
        (`| M.C p -> ...`) parses as a single qualified name — matches
        toml.mere's `| Toml.TInt n -> ...` shape. Requires paren'd
