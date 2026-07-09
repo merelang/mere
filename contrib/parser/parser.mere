@@ -597,11 +597,12 @@ and parse_atom_raw = fn (toks: pos_token list) ->
             (EVar name, rest))
         | TLParen -> parse_paren_body rest
         | TLBracket -> parse_list_literal rest
-        // `{ base | f = e, ... }` record update — OCaml-side syntax.
-        // `{}` (unit literal) and `{ e1; e2; ... }` (block expressions)
-        // are deferred until a future slice; for now, anything starting
-        // with `{` that isn't `Name {` must be a record update.
-        | TLBrace -> parse_record_update_form rest
+        // Bare `{` has three forms, disambiguated after the first token
+        // / expr (matches lib/parser.ml):
+        //   `{}`                     -> unit literal
+        //   `{ base | f = e, ... }`  -> record update
+        //   `{ e1; e2; ...; eN }`    -> block, a Let(PWild) chain
+        | TLBrace -> parse_brace_form rest
         | _ -> fail ("line " ++ show line ++ ": unexpected token in atom")))
 
 // Read the contents of `( ... )` after the opening paren has been
@@ -672,12 +673,36 @@ and parse_record_lit_body = fn (name: str)
 // Matches OCaml-side `lib/parser.ml` syntax: the type name is omitted
 // (inferred from BASE), fields are separated by `,` after a leading
 // `|` that follows the base expression.
-and parse_record_update_form = fn (toks: pos_token list) ->
-  let (base, toks1) = parse_expr toks in
-  let toks2 = expect_pipe toks1 in
-  let (fields, toks3) = parse_record_field_inits toks2 in
-  let toks4 = expect_rbrace toks3 in
-  (ERecordUpdate (base, fields), toks4)
+// `toks` is AFTER the opening `{`. Dispatches the three brace forms.
+and parse_brace_form = fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBrace -> (EUnit, advance toks)
+    | _ ->
+      let (first, toks1) = parse_expr toks in
+      (match peek_tok toks1 with
+        | TPipe ->
+          // `{ base | f = e, ... }` record update.
+          let (fields, toks2) = parse_record_field_inits (advance toks1) in
+          let toks3 = expect_rbrace toks2 in
+          (ERecordUpdate (first, fields), toks3)
+        | _ ->
+          // `{ e1; e2; ...; eN }` block -> Let(PWild, e1, Let(..., eN)).
+          parse_block_rest first toks1))
+
+// Fold a `;`-separated block into a right-nested Let(PWild) chain,
+// where the final expr is the block's value. `first` is already parsed;
+// `toks` sits just after it. `{ e }` (no `;`) yields `e` unchanged.
+and parse_block_rest = fn (first: expr) -> fn (toks: pos_token list) ->
+  (match peek_tok toks with
+    | TRBrace -> (first, advance toks)
+    | TSemi ->
+      (match peek_tok (advance toks) with
+        | TRBrace -> (first, advance (advance toks))
+        | _ ->
+          let (next, toks1) = parse_expr (advance toks) in
+          let (rest_e, toks2) = parse_block_rest next toks1 in
+          (ELet (PWild, first, rest_e), toks2))
+    | _ -> fail "expected `;` or `}` in block")
 
 // `f1 = e1, f2 = e2, ...` — caller handles the closing `}`. Used by
 // both record literals (`Name { f = e, ... }`) and record updates

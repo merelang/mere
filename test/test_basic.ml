@@ -9035,6 +9035,16 @@ let () =
       "let _ = write_file \"/tmp/mere_cross_wf\" \"hi\" in 42" "42";
     cross_emit "to_lower whole string"
       "if str_eq (to_lower \"AbC9\") \"abc9\" then 1 else 0" "1";
+    (* gamma: self-host parser gained bare-brace `{}` (unit) and
+       `{ e1; e2; ...; eN }` block (Let(PWild) chain); the record-update
+       form `{ base | f = e }` still works. Unblocks csv/parser and
+       json/writer. self_host_emit escapes `{` so these round-trip. *)
+    cross_emit "brace block sequences"
+      "let m = map_new () in let _ = { map_set m \"a\" 1; map_set m \"b\" 2 } in map_get m \"a\" + map_get m \"b\"" "3";
+    cross_emit "empty brace is unit"
+      "let _ = {} in 42" "42";
+    cross_emit "single-expr brace"
+      "{ 7 }" "7";
     (* Phase 54.29: module-qualified constructor pattern
        (`| M.C p -> ...`) parses as a single qualified name — matches
        toml.mere's `| Toml.TInt n -> ...` shape. Requires paren'd
