@@ -63,7 +63,8 @@ let rec walk_rel dir prefix =
 (* ---- manifest parsing (minimal, mere.toml subset) --------------------- *)
 
 type dep = { name : string; git : string; subdir : string option; rev : string }
-type manifest = { pkg_name : string; pkg_version : string; deps : dep list }
+type manifest = { pkg_name : string; pkg_version : string; deps : dep list;
+                  host : (string * string) option (* (git, rev) *) }
 
 (* Pull `key = "value"` pairs out of an inline table body like
    `git = "...", subdir = "contrib/http", rev = "abc"`. *)
@@ -87,6 +88,7 @@ let parse_manifest (content : string) : manifest =
   let lines = String.split_on_char '\n' content in
   let section = ref "" in
   let pkg_name = ref "" and pkg_version = ref "0.0.0" in
+  let host_git = ref "" and host_rev = ref "" in
   let deps = ref [] in
   let simple_kv = Str.regexp "^[ \t]*\\([a-z_]+\\)[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
   let dep_line = Str.regexp "^[ \t]*\\([A-Za-z0-9_-]+\\)[ \t]*=[ \t]*{\\(.*\\)}" in
@@ -111,9 +113,19 @@ let parse_manifest (content : string) : manifest =
         let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
         if k = "name" then pkg_name := v
         else if k = "version" then pkg_version := v
+      end
+      else if !section = "host" && Str.string_match simple_kv line 0 then begin
+        let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
+        if k = "git" then host_git := v
+        else if k = "rev" then host_rev := v
       end)
     lines;
-  { pkg_name = !pkg_name; pkg_version = !pkg_version; deps = List.rev !deps }
+  let host =
+    if !host_git <> "" && !host_rev <> "" then Some (!host_git, !host_rev)
+    else None
+  in
+  { pkg_name = !pkg_name; pkg_version = !pkg_version;
+    deps = List.rev !deps; host }
 
 (* ---- fetch + copy ------------------------------------------------------ *)
 
@@ -187,6 +199,49 @@ let scan_cross_deps ~pkg_dir ~pkg_subdir : (string * string) list =
     files;
   Hashtbl.fold (fun k v a -> (k, v) :: a) acc []
 
+(* ---- host runtime vendoring ------------------------------------------- *)
+(* The Node host (scripts/*.js + contrib/**/*.glue.js) lets a compiled
+   .wasm actually run — it provides the extern imports (puts, read_file,
+   http_serve, redis_*, sse_*, …). Those files live in the compiler repo
+   with requires wired to its layout, so an app can't run without a
+   checkout (PAIN P7). Vendoring flattens them into .mere_host/ and
+   rewrites every `require("…/x.js")` to `require("./x.js")` so the bundle
+   is self-contained. *)
+
+let rewrite_requires content =
+  Str.global_substitute (Str.regexp "require(\"\\([^\"]*\\)\\.js\")")
+    (fun s ->
+       let base = Filename.basename (Str.matched_group 1 s) in
+       "require(\"./" ^ base ^ ".js\")")
+    content
+
+let vendor_host ~clone ~root =
+  let host_dir = Filename.concat root ".mere_host" in
+  sh (Printf.sprintf "rm -rf %s" (q host_dir));
+  sh (Printf.sprintf "mkdir -p %s" (q host_dir));
+  let files = ref [] in
+  let scripts = Filename.concat clone "scripts" in
+  if Sys.file_exists scripts then
+    Array.iter
+      (fun n -> if Filename.check_suffix n ".js" then
+                  files := Filename.concat scripts n :: !files)
+      (Sys.readdir scripts);
+  let contrib = Filename.concat clone "contrib" in
+  if Sys.file_exists contrib then
+    List.iter
+      (fun rel -> if Filename.check_suffix rel ".glue.js" then
+                    files := Filename.concat contrib rel :: !files)
+      (walk_rel contrib "");
+  List.iter
+    (fun src ->
+      let base = Filename.basename src in
+      let out = rewrite_requires (read_file src) in
+      Out_channel.with_open_text (Filename.concat host_dir base)
+        (fun oc -> Out_channel.output_string oc out))
+    !files;
+  Printf.printf "  vendored host runtime -> %s (%d files)\n"
+    host_dir (List.length !files)
+
 (* ---- lockfile ---------------------------------------------------------- *)
 
 type lock_entry = { l_name : string; l_git : string; l_subdir : string option;
@@ -254,6 +309,11 @@ let install ~root =
        | None -> ())
     end
   done;
+  (match m.host with
+   | Some (hgit, hrev) ->
+     let (hclone, _) = fetch hgit hrev in
+     vendor_host ~clone:hclone ~root
+   | None -> ());
   write_lock ~root !entries;
   Printf.printf "wrote %s (%d packages)\n"
     (Filename.concat root "mere.lock") (List.length !entries)
