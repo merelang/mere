@@ -2909,7 +2909,20 @@ let selfhost_prelude_fns =
   "let rec list_find = fn xs -> fn p ->\n" ++
   "  match xs with\n" ++
   "  | Nil -> None\n" ++
-  "  | Cons (h, t) -> if p h then Some h else list_find t p;\n";
+  "  | Cons (h, t) -> if p h then Some h else list_find t p;\n" ++
+  // beta: to_lower — ASCII-lowercase every char, matching OCaml's
+  // String.lowercase_ascii. Built on strbuf + ord + chr + char_at.
+  "let to_lower = fn (s: str) ->\n" ++
+  "  let n = str_len s in\n" ++
+  "  let buf = strbuf_new () in\n" ++
+  "  let rec loop = fn (i: int) ->\n" ++
+  "    if i >= n then strbuf_to_str buf\n" ++
+  "    else\n" ++
+  "      let o = ord (char_at s i) in\n" ++
+  "      let c = if o >= 65 && o <= 90 then chr (o + 32) else char_at s i in\n" ++
+  "      let __ = strbuf_push buf c in\n" ++
+  "      loop (i + 1)\n" ++
+  "  in loop 0;\n";
 
 // Phase 55f part 8: full prelude (types + fns) — used by parse_and_emit
 // which needs the type decls for codegen's arity map. The typed
