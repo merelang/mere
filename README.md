@@ -12,6 +12,30 @@ OCaml implementation of **Mere**, a new programming language (Old English for "l
 
 Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 
+## Install
+
+Prebuilt binary (no OCaml toolchain needed), once a release is published:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/merelang/mere/main/scripts/install.sh | sh
+# installs to ~/.local/bin/mere (override with MERE_BINDIR)
+```
+
+Or build from source:
+
+```sh
+git clone https://github.com/merelang/mere && cd mere
+opam install . --deps-only
+dune build            # binary at _build/default/bin/mere.exe
+# or install onto PATH:  dune install   (/ opam install .)
+```
+
+Prebuilt binaries are produced by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+for macOS (arm64 / x86_64) and Linux (x86_64) on every `v*` tag. With an
+installed `mere`, `mere install` (see [docs/packages.md](docs/packages.md))
+fetches an app's dependencies *and* its Node runtime host, so no compiler
+source tree is needed to build or run an app.
+
 ## Status (as of 2026-07-02)
 
 - **1778 tests passing**

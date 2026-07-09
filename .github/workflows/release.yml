@@ -1,0 +1,68 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build prebuilt `mere` binaries for macOS and
+# Linux and attach them to a GitHub Release. Consumers can then install
+# without an OCaml toolchain (see scripts/install.sh) — closing the
+# "no installed mere" distribution gap.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create (or reuse) the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes || true
+
+  binaries:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: mere-linux-x86_64
+          - os: macos-latest
+            asset: mere-macos-arm64
+          - os: macos-13
+            asset: mere-macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.1"
+
+      - name: Install dependencies
+        run: opam install . --deps-only
+
+      - name: Build release binary
+        run: opam exec -- dune build --release bin/mere.exe
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp _build/default/bin/mere.exe "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            "dist/${{ matrix.asset }}" --clobber
