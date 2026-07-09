@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.0 — 2026-07-09 (first tagged release)
+
+First public tagged release of the Mere compiler. What it contains:
+
+- **The language**: HM inference + let-polymorphism, region / view /
+  `Trivial[R]` memory model with refined borrow modes, capability-passing
+  effects, and feature-parity codegen to **C / LLVM IR / Wasm** alongside
+  the tree-walking interpreter. 1936 tests.
+- **Self-host**: lexer / parser / typer / eval / fmt / codegen are written
+  in Mere and compile themselves through the Wasm pipeline.
+- **Concurrency**: `spawn` / `channel` / `join` + `par_map` on all four
+  backends, with a `Send` / `Sync` type discipline.
+- **Package system v0.2**: `mere install` (manifest + git deps with
+  monorepo `subdir`, transitive resolution, `mere.lock`) and a `[host]`
+  entry + `mere serve` that vendor and run the Node runtime host — so an
+  app builds and runs from just an installed `mere`, no source tree.
+- **Distribution**: `release.yml` builds prebuilt binaries for macOS
+  (arm64 / x86_64) + Linux (x86_64) on each `v*` tag; `scripts/install.sh`
+  installs one without an OCaml toolchain.
+
+Work since the entries below (2026-07-07…09): self-host frontier
+completion (module-import inlining fix; while / brace-block / vec / map
+builtins), the concurrency stack, and the package-system + distribution
+tooling above.
+
+---
+
 ## 2026-07-06 — Tutorial: implement type inference in Mere (roadmap step 4, third of three — series complete)
 
 Third and final tutorial in the initial series (direction paper's
