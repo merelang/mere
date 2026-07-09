@@ -21,10 +21,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Tags with a pre-release suffix (e.g. v0.1.0-rc1) publish as a
+          # GitHub pre-release, so they're excluded from /releases/latest.
+          PRE=""
+          case "${GITHUB_REF_NAME}" in *-*) PRE="--prerelease" ;; esac
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes || true
+            --generate-notes $PRE || true
 
   binaries:
     needs: create-release
