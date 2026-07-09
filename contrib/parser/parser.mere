@@ -108,6 +108,15 @@ let expect_in = fn (toks: pos_token list) ->
       | _ -> fail ("line " ++ show line ++ ": expected `in`"))
   | Nil -> fail "expected `in` but got EOF";
 
+let expect_do = fn (toks: pos_token list) ->
+  match toks with
+  | Cons (pt, rest) ->
+    let (line, t) = pt in
+    (match t with
+      | TDo -> rest
+      | _ -> fail ("line " ++ show line ++ ": expected `do`"))
+  | Nil -> fail "expected `do` but got EOF";
+
 let expect_eq = fn (toks: pos_token list) ->
   match toks with
   | Cons (pt, rest) ->
@@ -222,7 +231,26 @@ and parse_expr_top = fn (toks: pos_token list) ->
     | TLet -> parse_let (advance toks)
     | TFn -> parse_fn (advance toks)
     | TMatch -> parse_match (advance toks)
+    | TWhile -> parse_while (advance toks)
     | _ -> parse_or toks)
+
+// `while cond do body` (Phase 36 sugar). Desugars to a recursive
+// unit->unit loop, matching lib/parser.ml:
+//   let rec __while_loop = fn __u ->
+//     if cond then (let _ = body in __while_loop ()) else ()
+//   in __while_loop ()
+// A fixed loop name is safe: the recursive call sits in the `in`
+// branch (a sibling of body), never inside a nested while's scope, so
+// nesting a while in `body` cannot capture the outer recursive call.
+and parse_while = fn (toks: pos_token list) ->
+  let (cond, toks1) = parse_expr toks in
+  let toks2 = expect_do toks1 in
+  let (body, toks3) = parse_expr toks2 in
+  let loop = EVar "__while_loop" in
+  let recur = EApp (loop, EUnit) in
+  let then_b = ELet (PWild, body, recur) in
+  let fn_v = EFun ("__u", Some TyUnit, EIf (cond, then_b, EUnit)) in
+  (ELetRec (Cons (("__while_loop", fn_v), Nil), EApp (loop, EUnit)), toks3)
 
 // `if cond then t else e` — both `then` and `else` are required (no
 // statement-form `if` without else in slice 2).
