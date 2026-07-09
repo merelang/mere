@@ -16,6 +16,7 @@ let usage () =
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
   print_endline "  mere fmt --check <files...>   exit 1 if any file needs formatting";
+  print_endline "  mere install [dir]            fetch mere.toml deps into .mere_modules/";
   print_endline "  mere -v | --version   print version";
   print_endline "  mere -h | --help      show this help";
   print_endline "";
@@ -248,6 +249,15 @@ let () =
   | [_; "-h"] | [_; "--help"] -> usage ()
   | [_; "-v"] | [_; "--version"] -> version ()
   | [_; "-r"] -> Mere.Repl.run ()
+  | [_; "install"] | [_; "install"; _] ->
+    let root =
+      match Array.to_list (preprocess_argv ()) with
+      | [_; "install"; dir] -> dir
+      | _ -> "."
+    in
+    (try Mere.Pkg_install.install ~root
+     with Mere.Pkg_install.Install_error msg ->
+       Printf.eprintf "install error: %s\n" msg; exit 1)
   | _ :: "fmt" :: "-i" :: (_ :: _ as paths) ->
     fmt_inplace_files paths
   | _ :: "fmt" :: "--check" :: (_ :: _ as paths) ->

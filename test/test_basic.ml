@@ -9535,5 +9535,38 @@ let () =
         let (pb, pe) = combine (par_map worker chunks) 0 0 in \
         (sb, se, pb, pe)") "(40, 1, 40, 4)";
 
+  (* Phase 57: package installer (mere.toml parse + path normalise). The
+     fetch/copy path shells out to git and is exercised end-to-end by hand
+     (see project notes 61); here we regress the pure parsing logic. *)
+  (let open Mere.Pkg_install in
+   check "pkg_install: normalize .." (normalize "contrib/http/../log") "contrib/log";
+   check "pkg_install: normalize ../.."
+     (normalize "contrib/site/playground/../../dom") "contrib/dom";
+   check "pkg_install: normalize ./" (normalize "contrib/./http") "contrib/http";
+   let sample =
+     "[package]\n\
+      name = \"mere-notes\"\n\
+      version = \"0.1.0\"\n\
+      \n\
+      [dependencies]\n\
+      http = { git = \"https://x/mere\", subdir = \"contrib/http\", rev = \"abc123\" }\n\
+      db = { git = \"https://x/mere\", rev = \"def456\" }  # no subdir\n"
+   in
+   let m = parse_manifest sample in
+   check "pkg_install: manifest name" m.pkg_name "mere-notes";
+   check "pkg_install: manifest version" m.pkg_version "0.1.0";
+   check "pkg_install: dep count" (string_of_int (List.length m.deps)) "2";
+   (match m.deps with
+    | [ d1; d2 ] ->
+      check "pkg_install: dep1 name" d1.name "http";
+      check "pkg_install: dep1 git" d1.git "https://x/mere";
+      check "pkg_install: dep1 subdir" (Option.value ~default:"-" d1.subdir) "contrib/http";
+      check "pkg_install: dep1 rev" d1.rev "abc123";
+      check "pkg_install: dep2 name" d2.name "db";
+      check "pkg_install: dep2 subdir-none"
+        (match d2.subdir with None -> "none" | Some _ -> "some") "none";
+      check "pkg_install: dep2 rev" d2.rev "def456"
+    | _ -> check "pkg_install: dep shape" "wrong" "two deps"));
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
