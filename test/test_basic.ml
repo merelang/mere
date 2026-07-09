@@ -9020,6 +9020,19 @@ let () =
       "let m = map_new () in let _ = map_set m \"i\" 0 in let _ = while map_get m \"i\" < 3 do map_set m \"i\" (map_get m \"i\" + 1) in map_get m \"i\"" "3";
     cross_emit "while false zero iterations"
       "let _ = while 1 > 2 do 0 in 42" "42";
+    (* beta: self-host prelude/import additions (str_contains, list_find,
+       write_file) so contrib web/db code compiles under the self-host
+       pipeline. *)
+    cross_emit "str_contains hit"
+      "if str_contains \"hello\" \"ell\" then 1 else 0" "1";
+    cross_emit "str_contains miss"
+      "if str_contains \"hello\" \"xyz\" then 1 else 0" "0";
+    cross_emit "list_find match"
+      "match list_find (Cons (1, Cons (2, Cons (3, Nil)))) (fn x -> x > 1) with | Some v -> v | None -> 0" "2";
+    cross_emit "list_find none"
+      "match list_find (Cons (1, Nil)) (fn x -> x > 9) with | Some v -> v | None -> 0" "0";
+    cross_emit "write_file compiles + runs (host stub)"
+      "let _ = write_file \"/tmp/mere_cross_wf\" \"hi\" in 42" "42";
     (* Phase 54.29: module-qualified constructor pattern
        (`| M.C p -> ...`) parses as a single qualified name — matches
        toml.mere's `| Toml.TInt n -> ...` shape. Requires paren'd
@@ -9249,7 +9262,7 @@ let () =
        valid program at runtime — closes the last unresolved gap
        from Phase 54.20. *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "80946"
+      "examples/oneshot_codegen.mere" "87157"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
