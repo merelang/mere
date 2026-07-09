@@ -40,8 +40,9 @@ jobs:
             asset: mere-linux-x86_64
           - os: macos-latest
             asset: mere-macos-arm64
-          - os: macos-13
-            asset: mere-macos-x86_64
+          # macOS x86_64 (Intel) is omitted: the macos-13 runner sat
+          # queued for over a day here. Add it back when Intel runners are
+          # reliably available, or via cross-compilation.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
