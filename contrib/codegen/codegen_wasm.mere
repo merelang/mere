@@ -281,6 +281,7 @@ let is_builtin = fn (n: str) ->
   n == "str_of_float" ||
   n == "chr" ||
   n == "map_new" || n == "map_set" || n == "map_get" || n == "map_has" ||
+  n == "map_delete" ||
   // Phase 54.33: float ops
   n == "float_of_int" || n == "int_of_float" ||
   n == "f_add" || n == "f_sub" || n == "f_mul" || n == "f_div" ||
@@ -1258,6 +1259,13 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s2 = emit_expr m_expr s1 in
         let s3 = emit_expr x s2 in
         push_instr "call $map_has" s3
+      | EApp (EVar "map_delete", m_expr) ->
+        // beta: `map_delete m k` — remove all pairs with key k. Returns unit.
+        let s0 = note_helper_use "streq" s in
+        let s1 = note_helper_use "map_delete" s0 in
+        let s2 = emit_expr m_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $map_delete" s3
       | EVar "is_digit" ->
         // Phase 54.5: `is_digit s` — true iff first byte is '0'..'9'.
         // Idiomatic in-bounds check via unsigned subtract + compare.
@@ -2056,6 +2064,32 @@ let helper_decl_map_has =
   "        (br $lp)))\n" ++
   "    (i32.const 0))\n";
 
+// beta: `$map_delete m k` — unlink every pair whose key streq's k from
+// the assoc list, matching OCaml's Hashtbl.remove (idempotent, no-op if
+// absent). `$slot` is the address holding the current node pointer
+// (starts at m offset 0); on a match we relink [slot] to skip the node
+// and re-check without advancing (handles consecutive duplicates left
+// by prior overwrites). Returns unit (0).
+let helper_decl_map_delete =
+  "  (func $map_delete (param $m i32) (param $k i32) (result i32)\n" ++
+  "    (local $slot i32) (local $node i32) (local $pl i32) (local $pair i32)\n" ++
+  "    (local.set $slot (local.get $m))\n" ++
+  "    (block $done\n" ++
+  "      (loop $lp\n" ++
+  "        (local.set $node (i32.load offset=0 (local.get $slot)))\n" ++
+  "        (br_if $done (i32.eqz (i32.load offset=0 (local.get $node))))\n" ++
+  "        (local.set $pl (i32.load offset=4 (local.get $node)))\n" ++
+  "        (local.set $pair (i32.load offset=0 (local.get $pl)))\n" ++
+  "        (if (call $__lang_streq\n" ++
+  "               (local.get $k) (i32.load offset=0 (local.get $pair)))\n" ++
+  "          (then\n" ++
+  "            (i32.store offset=0 (local.get $slot)\n" ++
+  "              (i32.load offset=4 (local.get $pl))))\n" ++
+  "          (else\n" ++
+  "            (local.set $slot (i32.add (local.get $pl) (i32.const 4)))))\n" ++
+  "        (br $lp)))\n" ++
+  "    (i32.const 0))\n";
+
 // Phase 54.33: `$__lang_float_box` — takes an f64 on the stack, bump-
 // allocs 8 bytes aligned to 8, stores the value, returns the i32 ptr.
 // Mirrors OCaml codegen_wasm.ml's `emit_float_alloc_from_f64_on_stack`.
@@ -2579,6 +2613,7 @@ let helper_body = fn (name: str) ->
   else if name == "map_set" then helper_decl_map_set
   else if name == "map_get" then helper_decl_map_get
   else if name == "map_has" then helper_decl_map_has
+  else if name == "map_delete" then helper_decl_map_delete
   else if name == "streq" then helper_decl_streq
   else if name == "is_space" then helper_decl_is_space
   else if name == "str_starts_with" then helper_decl_str_starts_with
