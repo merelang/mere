@@ -95,17 +95,46 @@ Then `import "hello/greet.mere";` in *any* project also picks up
 `~/mere-modules/hello/greet.mere` as a fallback after the project-
 local `.mere_modules/` is exhausted.
 
+## v0.2 (experimental): `mere.toml` + `mere install`
+
+Manual vendoring works, but `mere install` automates it from a manifest.
+Write a `mere.toml` next to your entry file:
+
+    [package]
+    name = "my_app"
+    version = "0.1.0"
+
+    [dependencies]
+    http = { git = "https://github.com/merelang/mere", subdir = "contrib/http", rev = "<commit>" }
+    db   = { git = "https://github.com/merelang/mere", subdir = "contrib/db",   rev = "<commit>" }
+
+then:
+
+    mere install            # or: mere install <dir>
+
+This fetches each dependency at its pinned `rev` (a monorepo `subdir` is
+supported, so you can depend on one package inside a larger repo) and
+writes it to `.mere_modules/<name>/`. Packages install under their **bare
+source-directory name** — `http`, `db`, `log` — so `.mere_modules/`
+mirrors the source tree and cross-package relative imports keep resolving.
+Cross-package imports (`import "../log/log.mere"`) are followed
+automatically, so transitive dependency packages are pulled in too.
+
+A `mere.lock` is written recording each resolved full commit sha and a
+content hash (including transitive deps) for reproducible installs. The
+compiler resolver is unchanged — `install` just populates `.mere_modules/`.
+
+Still minimal: `rev` is an exact git commit (no version ranges), there's
+no central registry, and installs are whole-package.
+
 ## Deliberate non-goals (for now)
-
-**No `mere.toml`**. Manifest / version pinning / lockfiles are the
-obvious next step but out of v0.1 scope. Track a dependency by its
-git URL / commit until v0.2.
-
-**No `mere install`**. `git clone` is what you'd type anyway; adding
-a wrapper doesn't save much until we have a real registry.
 
 **No central registry**. `merelang.org`-hosted registry is planned
 for v0.3+; the design work is in the project's internal notes.
+
+**No version resolution**. `rev` pins an exact commit. If two packages
+pin different revs of a shared dependency, whichever wins the walk-up
+wins the import. Semver ranges are a v0.3+ concern.
 
 **No version resolution**. If two vendored packages both bundle a
 different version of `mere-http`, whichever wins the walk-up wins the
