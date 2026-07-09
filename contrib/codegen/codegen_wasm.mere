@@ -3196,26 +3196,53 @@ let rec strip_marker_scan = fn (src: str) -> fn (start: int) ->
   else if hit == 0 || str_eq (char_at src (hit - 1)) "\n" then hit
   else strip_marker_scan src (hit + 1);
 
-let rec strip_top_semi_scan = fn (src: str) -> fn (n: int) -> fn (i: int)
-                           -> fn (in_str: bool) -> fn (best: int) ->
+// Scanning skips for the top-level cut finder below. Each returns the
+// index just past the construct so the main scanner resumes cleanly.
+let rec strip_skip_string = fn (src: str) -> fn (n: int) -> fn (i: int) ->
+  if i >= n then n
+  else if str_eq (char_at src i) "\\" && i + 1 < n then strip_skip_string src n (i + 2)
+  else if str_eq (char_at src i) "\"" then i + 1
+  else strip_skip_string src n (i + 1);
+let rec strip_skip_line = fn (src: str) -> fn (n: int) -> fn (i: int) ->
+  if i >= n then n
+  else if str_eq (char_at src i) "\n" then i + 1
+  else strip_skip_line src n (i + 1);
+let rec strip_skip_block = fn (src: str) -> fn (n: int) -> fn (i: int) ->
+  if i + 1 >= n then n
+  else if str_eq (char_at src i) "*" && str_eq (char_at src (i + 1)) "/" then i + 2
+  else strip_skip_block src n (i + 1);
+
+// Find the cut point that keeps an imported file's declarations and
+// drops any trailing main expression. `best` advances to just past each
+// top-level (brace-depth 0) `;` and each top-level `}` (module / record
+// close), so a file ending in `module M { ... }` keeps its closing brace
+// (the earlier bug cut at the last `;` inside the module, dropping `}`).
+// Strings and `//` / `/* */` comments are skipped so their `{`, `}`, `;`
+// don't perturb the depth or the cut.
+let rec strip_top_scan = fn (src: str) -> fn (n: int) -> fn (i: int)
+                       -> fn (depth: int) -> fn (best: int) ->
   if i >= n then best
   else
     let c = char_at src i in
-    if in_str then
-      if str_eq c "\\" && i + 1 < n then strip_top_semi_scan src n (i + 2) true best
-      else if str_eq c "\"" then strip_top_semi_scan src n (i + 1) false best
-      else strip_top_semi_scan src n (i + 1) true best
-    else
-      if str_eq c "\"" then strip_top_semi_scan src n (i + 1) true best
-      else if str_eq c ";" then strip_top_semi_scan src n (i + 1) false (i + 1)
-      else strip_top_semi_scan src n (i + 1) false best;
+    if str_eq c "\"" then strip_top_scan src n (strip_skip_string src n (i + 1)) depth best
+    else if str_eq c "/" && i + 1 < n && str_eq (char_at src (i + 1)) "/" then
+      strip_top_scan src n (strip_skip_line src n (i + 2)) depth best
+    else if str_eq c "/" && i + 1 < n && str_eq (char_at src (i + 1)) "*" then
+      strip_top_scan src n (strip_skip_block src n (i + 2)) depth best
+    else if str_eq c "\{" then strip_top_scan src n (i + 1) (depth + 1) best
+    else if str_eq c "}" then
+      let d = depth - 1 in
+      if d == 0 then strip_top_scan src n (i + 1) d (i + 1)
+      else strip_top_scan src n (i + 1) d best
+    else if str_eq c ";" && depth == 0 then strip_top_scan src n (i + 1) depth (i + 1)
+    else strip_top_scan src n (i + 1) depth best;
 
 let strip_import_main = fn (src: str) ->
   let marker_pos = strip_marker_scan src 0 in
   if marker_pos >= 0 then substring src 0 marker_pos
   else
     let n = str_len src in
-    let cut = strip_top_semi_scan src n 0 false 0 in
+    let cut = strip_top_scan src n 0 0 0 in
     if cut <= 0 then src
     else substring src 0 cut;
 

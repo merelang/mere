@@ -9257,6 +9257,19 @@ let () =
       (project_root ^ "/contrib/regex/engine.mere") 60_000;
     bootstrap_wat_ok "compile: test"
       (project_root ^ "/contrib/test/test.mere") 50_000;
+    (* Phase 54.37: xml.mere is a module-only file (`module Xml { ... }`
+       with no trailing main expr). Compiling it standalone proves the
+       self-host codegen handles a module as the whole program. *)
+    bootstrap_wat_ok "compile: xml"
+      (project_root ^ "/contrib/xml/xml.mere") 200_000;
+    (* Phase 54.37: feed.mere `import "xml.mere"` then defines its own
+       `module Feed { ... }`. This is the regression guard for the
+       import-inlining bug where `strip_import_main` cut at the last
+       `;` *inside* the imported module, dropping its closing `}` and
+       breaking module-body parsing. `strip_top_scan` now tracks brace
+       depth (and skips strings/comments) so the module survives inlining. *)
+    bootstrap_wat_ok "compile: feed"
+      (project_root ^ "/contrib/feed/feed.mere") 250_000;
     (* Phase 54.22: fmt bootstrap. format_program compiled to wasm;
        we return the length of the formatted output. *)
     bootstrap_emit "fmt bootstrap int"
