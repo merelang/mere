@@ -17,6 +17,7 @@ let usage () =
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
   print_endline "  mere fmt --check <files...>   exit 1 if any file needs formatting";
   print_endline "  mere install [dir]            fetch mere.toml deps into .mere_modules/";
+  print_endline "  mere serve <file.wasm>        run a .wasm on the vendored Node host (.mere_host/)";
   print_endline "  mere -v | --version   print version";
   print_endline "  mere -h | --help      show this help";
   print_endline "";
@@ -258,6 +259,18 @@ let () =
     (try Mere.Pkg_install.install ~root
      with Mere.Pkg_install.Install_error msg ->
        Printf.eprintf "install error: %s\n" msg; exit 1)
+  | [_; "serve"; wasm] ->
+    (* Run a compiled .wasm on the vendored Node host (.mere_host/,
+       populated by `mere install` from a [host] entry). *)
+    let host = Filename.concat ".mere_host" "run_http_server.js" in
+    if not (Sys.file_exists host) then begin
+      Printf.eprintf
+        "error: %s not found — run `mere install` first \
+         (needs a [host] section in mere.toml)\n" host;
+      exit 1
+    end;
+    exit (Sys.command
+            (Printf.sprintf "node %s %s" (Filename.quote host) (Filename.quote wasm)))
   | _ :: "fmt" :: "-i" :: (_ :: _ as paths) ->
     fmt_inplace_files paths
   | _ :: "fmt" :: "--check" :: (_ :: _ as paths) ->

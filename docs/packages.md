@@ -127,6 +127,26 @@ compiler resolver is unchanged — `install` just populates `.mere_modules/`.
 Still minimal: `rev` is an exact git commit (no version ranges), there's
 no central registry, and installs are whole-package.
 
+### Running without a compiler checkout: `[host]` + `mere serve`
+
+A compiled `.wasm` needs a Node host to supply its extern imports
+(`puts`, `read_file`, `http_serve`, `redis_*`, `sse_*`, …). Those live in
+the compiler repo, so an app couldn't run without a checkout. Add a
+`[host]` section to fetch them into a self-contained `.mere_host/`:
+
+    [host]
+    git = "https://github.com/merelang/mere"
+    rev = "<commit>"
+
+`mere install` then vendors `scripts/*.js` + `contrib/**/*.glue.js` into
+`.mere_host/`, flattening every `require("…/x.js")` to `require("./x.js")`
+so the bundle stands alone. Run a compiled server with:
+
+    mere serve app.wasm      # = node .mere_host/run_http_server.js app.wasm
+
+So a released `mere` binary + `mere install` is enough to build *and* run
+an app — no compiler source tree required at runtime.
+
 ## Deliberate non-goals (for now)
 
 **No central registry**. `merelang.org`-hosted registry is planned

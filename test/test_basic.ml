@@ -9566,7 +9566,28 @@ let () =
       check "pkg_install: dep2 subdir-none"
         (match d2.subdir with None -> "none" | Some _ -> "some") "none";
       check "pkg_install: dep2 rev" d2.rev "def456"
-    | _ -> check "pkg_install: dep shape" "wrong" "two deps"));
+    | _ -> check "pkg_install: dep shape" "wrong" "two deps");
+   (* require-flattening for the vendored Node host (.mere_host/). *)
+   check "pkg_install: rewrite ../contrib require"
+     (rewrite_requires "const g = require(\"../contrib/http/http.glue.js\");")
+     "const g = require(\"./http.glue.js\");";
+   check "pkg_install: rewrite ../../scripts require"
+     (rewrite_requires "require(\"../../scripts/ws_env.js\")")
+     "require(\"./ws_env.js\")";
+   check "pkg_install: rewrite same-dir require unchanged"
+     (rewrite_requires "require(\"./pg_env.js\")") "require(\"./pg_env.js\")";
+   check "pkg_install: rewrite builtin require unchanged"
+     (rewrite_requires "require(\"crypto\")") "require(\"crypto\")";
+   (* [host] section parsing. *)
+   let host_sample =
+     "[package]\nname = \"a\"\n[host]\n\
+      git = \"https://x/mere\"\nrev = \"deadbeef\"\n"
+   in
+   check "pkg_install: manifest host"
+     (match (parse_manifest host_sample).host with
+      | Some (g, r) -> g ^ "@" ^ r
+      | None -> "none")
+     "https://x/mere@deadbeef");
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
