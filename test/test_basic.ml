@@ -9033,6 +9033,8 @@ let () =
       "match list_find (Cons (1, Nil)) (fn x -> x > 9) with | Some v -> v | None -> 0" "0";
     cross_emit "write_file compiles + runs (host stub)"
       "let _ = write_file \"/tmp/mere_cross_wf\" \"hi\" in 42" "42";
+    cross_emit "to_lower whole string"
+      "if str_eq (to_lower \"AbC9\") \"abc9\" then 1 else 0" "1";
     (* Phase 54.29: module-qualified constructor pattern
        (`| M.C p -> ...`) parses as a single qualified name — matches
        toml.mere's `| Toml.TInt n -> ...` shape. Requires paren'd
@@ -9262,7 +9264,7 @@ let () =
        valid program at runtime — closes the last unresolved gap
        from Phase 54.20. *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "87157"
+      "examples/oneshot_codegen.mere" "90486"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
