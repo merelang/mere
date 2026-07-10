@@ -72,6 +72,7 @@ naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 | **parser** | `contrib/parser/` | Mere self-host of `Mere.Lexer` + `Mere.Parser` — `tokenize` + `parse_decls` (Phase 50). Plus shared `ast.mere` consumed by fmt + eval. | top-level |
 | **eval** | `contrib/eval/` | (in progress) Mere self-host of `Mere.Eval` — tree-walking interpreter over `ast.mere`'s `expr`. Stage 51a: literals / var / binop / cmpop / logicop / neg / if (Phase 51 in progress). | top-level |
 | **http** | `contrib/http/` | minimal HTTP server bindings for Node-hosted Mere (`http_serve` + `http_current_body` + `http_set_status` + `http_set_content_type` + `http_set_header`). Wasm + `http.glue.js` host. Server-side sibling of `contrib/dom`. | extern fn (Phase 54 Stage A) |
+| **orm** | `contrib/orm/` | typed row decoding + JSON encoding combinators over `str option list` rows (`Orm.dec_int` / `dec_str` / `dec_bool` / `dec_str_opt` + `decode_rows`; `Orm.enc_int` / `enc_str` / `enc_bool` / `enc_str_opt` / `enc_obj` / `enc_arr`). DB-agnostic; the ML answer to reflection-based ORMs. From the mere-blog dogfood. | ✓ module |
 
 Future candidates: see internal design notes §3.
 

@@ -8039,6 +8039,45 @@ let () =
        "Json.to_json_str (Json.JArr (Cons (Json.JBool true, Cons (Json.JNull, Cons (Json.JNum 7, Nil)))))")
     "[true,null,7]";
 
+  (* contrib/orm: the typed row-decode + JSON-encode combinators promoted
+     from the mere-blog dogfood. Decode a raw `str option list` row into
+     values, then encode them back to JSON. *)
+  let orm_eval expr =
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/orm/orm.mere\";\n%s\n" project_root expr in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+  check "orm: decode a row then encode to JSON"
+    (orm_eval
+       "let row = Cons (Some \"7\", Cons (Some \"hi\", Cons (Some \"t\", Nil))) in \
+        let (id, r1) = Orm.dec_int row in \
+        let (name, r2) = Orm.dec_str r1 in \
+        let (active, _) = Orm.dec_bool r2 in \
+        Orm.enc_obj (Cons ((\"id\", Orm.enc_int id), \
+          Cons ((\"name\", Orm.enc_str name), \
+          Cons ((\"active\", Orm.enc_bool active), Nil))))")
+    "{\"id\":7,\"name\":\"hi\",\"active\":true}";
+  check "orm: enc_str escapes quotes"
+    (orm_eval "Orm.enc_str \"a\\\"b\"")
+    "\"a\\\"b\"";
+  check "orm: dec_str_opt keeps NULL as null"
+    (orm_eval "let (v, _) = Orm.dec_str_opt (Cons (None, Nil)) in Orm.enc_str_opt v")
+    "null";
+  check "orm: decode_rows maps a builder over rows"
+    (orm_eval
+       "let rows = Cons (Cons (Some \"1\", Nil), Cons (Cons (Some \"2\", Nil), Nil)) in \
+        let ids = Orm.decode_rows (fn (r) -> let (n, _) = Orm.dec_int r in n) rows in \
+        Orm.enc_arr (Cons (Orm.enc_int (match ids with Cons (h, _) -> h | Nil -> 0), Nil))")
+    "[1]";
+
   let ocaml_format input =
     Exhaustive.reset ();
     let prelude_decls = Pipeline.parse_prelude () in
@@ -9349,6 +9388,8 @@ let () =
        headroom but structural breakage catches. *)
     bootstrap_wat_ok "compile: json"
       (project_root ^ "/contrib/json/json.mere") 80_000;
+    bootstrap_wat_ok "compile: orm"
+      (project_root ^ "/contrib/orm/orm.mere") 35_000;
     bootstrap_wat_ok "compile: path"
       (project_root ^ "/contrib/path/path.mere") 50_000;
     (* Phase 55f dogfood: exercise the typed pipeline against real

@@ -1,0 +1,131 @@
+// contrib/orm/orm.mere — typed row decoding + JSON encoding combinators.
+//
+// A thin, DB-agnostic typed layer: turn the raw `str option list` rows that
+// SQL drivers (contrib/db/pg, mysql, …) hand back into typed records, and
+// encode records to JSON. This is the ML answer to reflection-based ORMs,
+// which Mere (no metaprogramming) can't do — you write small `*_of_row`
+// builders with the `dec_*` combinators and `*_json` writers with the
+// `enc_*` ones.
+//
+// Rows are `str option list` (one cell per column, `None` = SQL NULL), the
+// shape every contrib/db driver returns — so this layer is driver-agnostic.
+//
+// Proven in the mere-blog dogfood (a Rails-ish blog on contrib/db/pg).
+//
+// Usage:
+//   import "contrib/orm/orm.mere";
+//
+//   // decode: consume columns left to right, build a record.
+//   let post_of_row = fn (row) ->
+//     let (id, r1) = Orm.dec_int row in
+//     let (title, _) = Orm.dec_str r1 in
+//     Post { id = id, title = title };
+//   let posts = Orm.decode_rows post_of_row
+//                 (pg_query fd "SELECT id, title FROM posts");
+//
+//   // encode: build JSON from a record.
+//   Orm.enc_obj (Cons (("id", Orm.enc_int p.id),
+//                Cons (("title", Orm.enc_str p.title), Nil)))
+//
+// API:
+//   dec_int / dec_str / dec_bool  : str option list -> ('a * str option list)
+//   dec_str_opt                   : nullable, keeps None
+//   decode_rows build rows        : ('row -> 'a) -> 'row list -> 'a list
+//   head_opt xs                   : first element as an option
+//   enc_int / enc_str / enc_bool / enc_str_opt : 'a -> str (a JSON fragment)
+//   enc_obj  (key, fragment) list -> str        : a JSON object
+//   enc_arr  fragment list -> str               : a JSON array
+
+module Orm {
+
+// ---- row decoding -------------------------------------------------------
+// A primitive decoder consumes columns left to right, returning
+// `(value, remaining-columns)`. Tuples (not a named `Decoded of …`
+// wrapper) so `let (v, r) = dec_int row` destructures on every backend.
+
+let _dec_int_cell = fn (s: str) -> if str_eq s "" then 0 else int_of_str s;
+
+let dec_int = fn (cols: str option list) ->
+  match cols with
+  | Cons (Some s, rest) -> (_dec_int_cell s, rest)
+  | Cons (None, rest) -> (0, rest)
+  | Nil -> (0, Nil)
+  ;
+
+let dec_str = fn (cols: str option list) ->
+  match cols with
+  | Cons (Some s, rest) -> (s, rest)
+  | Cons (None, rest) -> ("", rest)
+  | Nil -> ("", Nil)
+  ;
+
+// Postgres renders booleans as "t"/"f"; also accept "true".
+let dec_bool = fn (cols: str option list) ->
+  match cols with
+  | Cons (Some s, rest) -> (str_eq s "t" || str_eq s "true", rest)
+  | Cons (None, rest) -> (false, rest)
+  | Nil -> (false, Nil)
+  ;
+
+// Nullable: keep NULL as None (the cell is already a `str option`).
+let dec_str_opt = fn (cols: str option list) ->
+  match cols with
+  | Cons (v, rest) -> (v, rest)
+  | Nil -> (None, Nil)
+  ;
+
+// Apply a whole-row builder to each row of a result set.
+let rec decode_rows = fn (build) -> fn (rows: (str option list) list) ->
+  match rows with
+  | Nil -> Nil
+  | Cons (row, rest) -> Cons (build row, decode_rows build rest)
+  ;
+
+// First row of a result as an option — for single-row lookups.
+let head_opt = fn (xs) ->
+  match xs with
+  | Nil -> None
+  | Cons (h, _) -> Some h
+  ;
+
+// ---- JSON encoding (the mirror of the decoders) -------------------------
+
+let _esc_char = fn (c: str) ->
+  if str_eq c "\"" then "\\\""
+  else if str_eq c "\\" then "\\\\"
+  else c
+  ;
+
+let rec _esc = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if i >= n then acc else _esc s (i + 1) n (acc ++ _esc_char (char_at s i))
+  ;
+
+// value encoders → a JSON fragment string.
+let enc_str = fn (s: str) -> "\"" ++ _esc s 0 (str_len s) "" ++ "\"";
+let enc_int = fn (n: int) -> show n;
+let enc_bool = fn (b: bool) -> if b then "true" else "false";
+let enc_str_opt = fn (o: str option) ->
+  match o with
+  | None -> "null"
+  | Some s -> enc_str s
+  ;
+
+// enc_obj: build a JSON object from (key, encoded-value) pairs.
+let rec _obj = fn (fs: (str * str) list) -> fn (first: bool) -> fn (acc: str) ->
+  match fs with
+  | Nil -> acc ++ "}"
+  | Cons (kv, rest) ->
+    let (k, v) = kv in
+    _obj rest false (acc ++ (if first then "" else ",") ++ enc_str k ++ ":" ++ v)
+  ;
+let enc_obj = fn (fs: (str * str) list) -> _obj fs true "\{";
+
+// enc_arr: build a JSON array from already-encoded fragments.
+let rec _arr = fn (xs: str list) -> fn (first: bool) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc ++ "]"
+  | Cons (x, rest) -> _arr rest false (acc ++ (if first then "" else ",") ++ x)
+  ;
+let enc_arr = fn (xs: str list) -> _arr xs true "[";
+
+}
