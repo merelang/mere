@@ -174,6 +174,9 @@ let mono_variant_instances : (string, string * Ast.ty list) Hashtbl.t =
    the type (used as the function name suffix); value is the type. *)
 let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Same, for `to_json` (the derive-y JSON sibling of show). Keyed by ty_tag. *)
+let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Polymorphic record declarations: deferred to instantiation time. *)
 let polymorphic_records
     : (string, string list * (string * Ast.ty) list) Hashtbl.t =
@@ -1870,6 +1873,15 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        let tag = ty_tag arg_ty in
        Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
+     | Ast.Var "to_json" ->
+       (* Polymorphic builtin — dispatch to the type-specialized
+          to_json_<tag> function based on arg's inferred type. *)
+       let arg_ty =
+         match arg.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported e.loc "to_json: missing arg type info"
+       in
+       Printf.sprintf "to_json_%s(%s)" (ty_tag arg_ty) (emit_expr arg)
      | Ast.Var "mk_logger" ->
        (* Phase 16.3 / DEFERRED §1.5: emit a runtime helper call that
           returns a Logger record (3 closure_str_unit fields capturing
@@ -3352,6 +3364,107 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
 
 let emit_show_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static const char* show_%s(%s);" tag (c_type_of t)
+
+(* JSON sibling of emit_show_fn: emits `to_json_<tag>` producing JSON.
+   Records drop their type name and become objects, lists/tuples become
+   arrays, nullary ctors become "Name", ctors with a payload become
+   {"Name": payload}. Mirrors emit_show_fn structurally; recursive calls go
+   to to_json_<tag>. Kept in sync with eval.ml's to_json_string. *)
+let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header = Printf.sprintf "static const char* to_json_%s(%s v)" tag cty in
+  match Ast.walk t with
+  | Ast.TyInt ->
+    header ^ " {\n  char* buf; asprintf(&buf, \"%d\", v); return buf;\n}"
+  | Ast.TyBool ->
+    header ^ " { return v ? \"true\" : \"false\"; }"
+  | Ast.TyStr ->
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return buf; }"
+  | Ast.TyUnit ->
+    header ^ " { (void)v; return \"null\"; }"
+  | Ast.TyArrow _ ->
+    header ^ " { (void)v; return \"null\"; }"
+  | Ast.TyTuple ts ->
+    let parts =
+      List.mapi (fun i et ->
+        Printf.sprintf "to_json_%s(v.f%d)" (ty_tag et) i) ts
+    in
+    let fmt = "[" ^ String.concat "," (List.map (fun _ -> "%s") ts) ^ "]" in
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+      header fmt (String.concat ", " parts)
+  | Ast.TyCon ("list", [elem_ty]) when Hashtbl.mem polymorphic_variants "list" ->
+    let elem = "to_json_" ^ ty_tag (Ast.walk elem_ty) in
+    Printf.sprintf
+      "%s {\n  \
+         if (v->tag == 0) return \"[]\";\n  \
+         const char* __acc = \"[\";\n  \
+         %s __cur = v;\n  \
+         int __first = 1;\n  \
+         while (__cur->tag == 1) {\n  \
+           char* __buf;\n  \
+           if (__first) {\n  \
+             asprintf(&__buf, \"%%s%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+           } else {\n  \
+             asprintf(&__buf, \"%%s,%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+           }\n  \
+           __acc = __buf;\n  \
+           __cur = __cur->payload.Cons.f1;\n  \
+           __first = 0;\n  \
+         }\n  \
+         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __buf;\n\
+       }"
+      header cty elem elem
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+    let info = Hashtbl.find Typer.records name in
+    let fields_parts =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "to_json_%s(v.%s)" (ty_tag ft) fname)
+        info.Typer.r_fields
+    in
+    let fmt =
+      "{" ^
+      String.concat ","
+        (List.map (fun (fname, _) -> "\\\"" ^ fname ^ "\\\":%s") info.Typer.r_fields) ^
+      "}"
+    in
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+      header fmt (String.concat ", " fields_parts)
+  | Ast.TyCon (name, args) ->
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc
+          else acc)
+          Typer.constructors []
+    in
+    let is_ptr = is_recursive_variant cty in
+    let dot = if is_ptr then "->" else "." in
+    let cases =
+      List.map (fun (cname, arg_opt) ->
+        let tag_n =
+          try Hashtbl.find variant_tags cname with Not_found -> 0
+        in
+        match arg_opt with
+        | None ->
+          Printf.sprintf "  if (v%stag == %d) return \"\\\"%s\\\"\";"
+            dot tag_n cname
+        | Some ty ->
+          Printf.sprintf
+            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(v%spayload.%s)); return buf; }"
+            dot tag_n cname (ty_tag ty) dot cname)
+        variants
+    in
+    Printf.sprintf "%s {\n%s\n  return \"null\";\n}"
+      header (String.concat "\n" cases)
+  | _ ->
+    Printf.sprintf "%s { (void)v; return \"null\"; }" header
+
+let emit_to_json_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static const char* to_json_%s(%s);" tag (c_type_of t)
 
 let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
   Printf.sprintf "static %s %s(void*, %s);"
@@ -4962,29 +5075,29 @@ let lift_inner_fns
    specialized show functions. Recurses into types so e.g. `show (1, 2)`
    also triggers show_int (for the elements). *)
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
-  let rec add_with_deps t =
+  let rec add_into tbl t =
     let t = Ast.walk t in
     if not (ty_is_concrete t) then ()
     else
       let tag = ty_tag t in
       (* Guard before recursion so recursive variants (e.g. list) don't
          infinite-loop through their self-referential payloads. *)
-      if Hashtbl.mem show_types tag then ()
+      if Hashtbl.mem tbl tag then ()
       else begin
-        Hashtbl.add show_types tag t;
+        Hashtbl.add tbl tag t;
         match t with
-        | Ast.TyTuple ts -> List.iter add_with_deps ts
+        | Ast.TyTuple ts -> List.iter (add_into tbl) ts
         | Ast.TyArrow _ -> ()
         | Ast.TyCon (name, args) ->
-          List.iter add_with_deps args;
+          List.iter (add_into tbl) args;
           if Hashtbl.mem Typer.records name then
             let info = Hashtbl.find Typer.records name in
-            List.iter (fun (_, ft) -> add_with_deps ft) info.Typer.r_fields
+            List.iter (fun (_, ft) -> add_into tbl ft) info.Typer.r_fields
           else if Hashtbl.mem polymorphic_variants name then begin
             let (params, variants) = Hashtbl.find polymorphic_variants name in
             let svariants = subst_variants params args variants in
             List.iter (fun (_, arg_opt) ->
-              match arg_opt with Some t -> add_with_deps t | None -> ()) svariants
+              match arg_opt with Some t -> add_into tbl t | None -> ()) svariants
           end
           else if Hashtbl.mem Typer.types name then begin
             let variants =
@@ -4993,16 +5106,21 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
                 Typer.constructors []
             in
             List.iter (fun (_, arg_opt) ->
-              match arg_opt with Some t -> add_with_deps t | None -> ()) variants
+              match arg_opt with Some t -> add_into tbl t | None -> ()) variants
           end
         | _ -> ()
       end
   in
+  let add_with_deps t = add_into show_types t in
   let rec walk_expr (e : Ast.expr) =
     (match e.Ast.node with
      | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
        (match arg.Ast.ty with
         | Some t -> add_with_deps t
+        | None -> ())
+     | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
+       (match arg.Ast.ty with
+        | Some t -> add_into to_json_types t
         | None -> ())
      (* str_of_int lowers to show_int(), so ensure show_int is emitted even
         when the program never uses `show` directly (mq dogfood P9). *)
@@ -5857,6 +5975,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      typedefs (forward+ptr for recursive instances, full struct for
      non-recursive). Bodies come after tuple/record typedefs. *)
   Hashtbl.reset show_types;
+  Hashtbl.reset to_json_types;
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
      for nested types) happens later via mono_record_typedefs. *)
@@ -6176,6 +6295,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun tag t acc ->
       emit_show_fn tag t :: acc) show_types []
   in
+  let to_json_fn_forward_decls =
+    Hashtbl.fold (fun tag t acc ->
+      emit_to_json_fn_forward_decl tag t :: acc) to_json_types []
+  in
+  let to_json_fn_defs =
+    Hashtbl.fold (fun tag t acc ->
+      emit_to_json_fn tag t :: acc) to_json_types []
+  in
   (* Phase 36 (DEFERRED §1.19 fix, C side): forward declare each fn's
      `<name>_as_value` closure constant so fn bodies that reference a
      top-level fn as a first-class value (e.g. `list_filter xs is_prime`)
@@ -6216,6 +6343,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_adapter_forward_decls
     @ closure_wrapper_forward_decls
     @ show_fn_forward_decls
+    @ to_json_fn_forward_decls
     @ inner_lift_closure_adapter_forward_decls
   in
   let inner_lift_closure_adapters =
@@ -6246,6 +6374,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_adapters
     @ closure_wrappers
     @ show_fn_defs
+    @ to_json_fn_defs
     @ inner_lift_closure_adapters
   in
   (* Phase 15.2: vec_instances is populated during fn / main emission
