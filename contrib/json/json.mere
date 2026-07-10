@@ -161,4 +161,86 @@ let parse_json = fn (s: str) ->
     then fail ("trailing input at pos " ++ str_of_int i)
   else v;
 
+// === Serialisation (was contrib/json/writer.mere) ==================
+// Kept in the same module so it shares the `json` type with the parser:
+// `to_json_str (parse_json s)` type-checks (previously the writer
+// declared its own top-level `json`, so parser + writer didn't compose).
+
+let rec write_join = fn (sb) -> fn (items) -> fn (sep) -> fn (write_item) ->
+  match items with
+  | Nil -> ()
+  | Cons (h, Nil) -> write_item sb h
+  | Cons (h, t) -> let __ = write_item sb h in
+                   let __ = strbuf_push sb sep in
+                   write_join sb t sep write_item;
+
+let escape_str = fn (s: str) ->
+  let buf = strbuf_new () in
+  let n = str_len s in
+  let rec loop = fn (i) ->
+    if i >= n then ()
+    else
+      let ch = char_at s i in
+      let __ = if ch == "\"" then
+                 let __ = strbuf_push buf "\\" in strbuf_push buf "\""
+               else if ch == "\\" then
+                 let __ = strbuf_push buf "\\" in strbuf_push buf "\\"
+               else
+                 strbuf_push buf ch
+      in
+      loop (i + 1)
+  in
+  let __ = loop 0 in
+  strbuf_to_str buf;
+
+let rec write_json = fn (sb) -> fn (v) ->
+  match v with
+  | JNull -> strbuf_push sb "null"
+  | JBool b -> strbuf_push sb (if b then "true" else "false")
+  | JNum n -> strbuf_push sb (show n)
+  | JStr s ->
+      let __ = strbuf_push sb "\"" in
+      let __ = strbuf_push sb (escape_str s) in
+      strbuf_push sb "\""
+  | JArr items ->
+      let __ = strbuf_push sb "[" in
+      let __ = write_join sb items "," (fn sb2 -> fn item -> write_json sb2 item) in
+      strbuf_push sb "]"
+  | JObj pairs ->
+      let __ = strbuf_push sb "\{" in
+      let __ = write_join sb pairs "," (fn sb2 -> fn p ->
+        let __ = strbuf_push sb2 "\"" in
+        let __ = strbuf_push sb2 (escape_str (fst p)) in
+        let __ = strbuf_push sb2 "\":" in
+        write_json sb2 (snd p))
+      in
+      strbuf_push sb "}";
+
+let to_json_str = fn (v) ->
+  let buf = strbuf_new () in
+  let __ = write_json buf v in
+  strbuf_to_str buf;
+
+let rec write_pretty = fn (sb) -> fn (v) ->
+  match v with
+  | JArr items ->
+      let __ = strbuf_push sb "[" in
+      let __ = write_join sb items ", " (fn sb2 -> fn item -> write_pretty sb2 item) in
+      strbuf_push sb "]"
+  | JObj pairs ->
+      let __ = strbuf_push sb "\{\n" in
+      let __ = write_join sb pairs ",\n" (fn sb2 -> fn p ->
+        let __ = strbuf_push sb2 "  \"" in
+        let __ = strbuf_push sb2 (escape_str (fst p)) in
+        let __ = strbuf_push sb2 "\": " in
+        write_pretty sb2 (snd p))
+      in
+      strbuf_push sb "\n}"
+  | other -> write_json sb other;
+
+let to_pretty_str = fn (v) ->
+  let buf = strbuf_new () in
+  let __ = write_pretty buf v in
+  strbuf_to_str buf;
+
 };   // end of `module Json`
