@@ -4511,13 +4511,29 @@ let lift_inner_fns
     List.iter (fun lf ->
       (* Collect names of other inner-lifted fns referenced in lf's body *)
       let called_inner = ref [] in
+      (* Resolve an inner-fn name to the lifted fn IN lf's OWN host. The
+         global `inner_lifts` / `mere_to_lifted` is last-write-wins, so two
+         hosts that each have a same-named inner fn (e.g. both a `loop`, as
+         in contrib/json and contrib/csv) would otherwise collide: lf's
+         recursive self-call would resolve to the *other* host's lifted fn,
+         and lf would inherit its captures (a spurious variable → undeclared
+         identifier at C compile time). Resolving per host fixes it. *)
+      let lifted_in_host n =
+        match Hashtbl.find_opt inner_lifts_by_host lf.l_host with
+        | Some tbl ->
+          (match Hashtbl.find_opt tbl n with
+           | Some e -> Some e.lifted_name
+           | None -> None)
+        | None -> None
+      in
       let rec scan (e : Ast.expr) =
         (match e.Ast.node with
-         | Ast.Var n when Hashtbl.mem mere_to_lifted n
-                       && Hashtbl.find mere_to_lifted n <> lf.l_name ->
-           let cl_name = Hashtbl.find mere_to_lifted n in
-           if not (List.mem cl_name !called_inner) then
-             called_inner := cl_name :: !called_inner
+         | Ast.Var n ->
+           (match lifted_in_host n with
+            | Some cl_name when cl_name <> lf.l_name ->
+              if not (List.mem cl_name !called_inner) then
+                called_inner := cl_name :: !called_inner
+            | _ -> ())
          | _ -> ());
         walk_children (fun _ _ e -> scan e) "" [] e
       in
