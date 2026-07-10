@@ -4914,6 +4914,18 @@ let () =
   check "read_stdin type" (Pipeline.type_of "read_stdin") "(unit -> str)";
   assert_contains "read_stdin: C backend emits helper"
     (vec_codegen_c "let s = read_stdin () in str_len s") "__lang_read_stdin()";
+  (* to_json on the C backend: a type-specialized to_json_<tag> is emitted
+     and dispatched, mirroring show. (interp semantics are covered above;
+     here we confirm the C codegen path exists. Wasm/LLVM are a follow-up,
+     as with args/read_stdin.) *)
+  assert_contains "to_json: C backend emits a record specialization"
+    (vec_codegen_c
+       "type R = { a: int, b: bool }; str_len (to_json (R { a = 1, b = true }))")
+    "to_json_R";
+  assert_contains "to_json: C record specialization drops name, quotes fields"
+    (vec_codegen_c
+       "type R = { a: int, b: bool }; str_len (to_json (R { a = 1, b = true }))")
+    "\\\"a\\\":%s";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
