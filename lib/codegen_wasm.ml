@@ -1473,8 +1473,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr b;
     emit_instr (wasm_binop op)
   | Ast.Cmp (op, a, b) ->
-    (* Phase 26.1: TyStr comparison via $__lang_streq (eq/ne only — the
-       other ops would need a 3-way compare runtime helper). *)
+    (* Phase 26.1: TyStr eq/ne via $__lang_streq; ordering (< <= > >=) via
+       $__lang_str_compare (3-way, -1/0/1) compared to 0. *)
     let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
     (match a_ty, op with
      | Ast.TyStr, Ast.Eq ->
@@ -1484,6 +1484,11 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr a; emit_expr b;
        emit_instr "call $__lang_streq";
        emit_instr "i32.eqz"
+     | Ast.TyStr, (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge) ->
+       emit_expr a; emit_expr b;
+       emit_instr "call $__lang_str_compare";
+       emit_instr "i32.const 0";
+       emit_instr (wasm_cmp op)
      | _ ->
        emit_expr a;
        emit_expr b;
