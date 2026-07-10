@@ -162,32 +162,3 @@ let parse_json = fn (s: str) ->
   else v;
 
 };   // end of `module Json`
-
-// === Self-tests (outside the module; kept as a demo. Remove in actual use) ===
-
-let run_case = fn (name: str, s: str) ->
-  let result = try_or (fn () -> show (Json.parse_json s)) "<error>" in
-  print (name ++ " | " ++ s ++ " => " ++ result);
-
-let _ = run_case "null"     "null";
-let _ = run_case "true"     "true";
-let _ = run_case "int"      "42";
-let _ = run_case "neg"      "-17";
-let _ = run_case "str"      "\"hello\"";
-let _ = run_case "arr-empty" "[]";
-let _ = run_case "arr-flat"  "[1, 2, 3]";
-let _ = run_case "arr-mix"   "[true, \"x\", -5, null]";
-// Phase 36 lex constraint workaround: `"{...}"` is interpreted as interpolation, so escape with `\{`
-let _ = run_case "obj-empty" "\{}";
-let _ = run_case "obj-flat"  "\{\"a\": 1, \"b\": 2}";
-let _ = run_case "nested"    "\{\"name\": \"alice\", \"tags\": [\"a\", \"b\"]}";
-let _ = run_case "ws"        "  [  1 ,  2  ]  ";
-let _ = run_case "deep"      "[[1, 2], [3, [4, 5]], []]";
-let _ = run_case "escape-quote" "\"a\\\"b\"";
-let _ = run_case "escape-newline" "\"line1\\nline2\"";
-let _ = run_case "escape-mixed"   "\{\"msg\": \"hello\\nworld\"}";
-let _ = run_case "bad-trailing" "1 2";
-let _ = run_case "bad-token"   "xxx";
-let _ = run_case "bad-arr"     "[1, 2,";
-
-0
