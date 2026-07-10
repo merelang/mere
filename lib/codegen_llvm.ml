@@ -6703,11 +6703,15 @@ let str_concat_helper =
       "  ret ptr %buf";
       "}";
       "";
-      (* Phase 36: chr — return ptr to char_table entry for byte n. *)
+      (* Phase 36: chr — return ptr to char_table entry for byte n.
+         Mask to a single byte (n & 0xFF) so out-of-range input can't
+         index past the 256-entry table into adjacent memory. Matches the
+         C backend ((unsigned char)n) and the wasm backend. *)
       "define ptr @__lang_char_at_chr(i32 %n) {";
       "entry:";
       "  call void @__lang_char_table_setup()";
-      "  %n64 = sext i32 %n to i64";
+      "  %m = and i32 %n, 255";
+      "  %n64 = zext i32 %m to i64";
       "  %p = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %n64";
       "  ret ptr %p";
       "}";
