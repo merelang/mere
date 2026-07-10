@@ -3416,16 +3416,11 @@ let native_ffi_names =
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
     "mem_copy_str"; "mem_to_str" ]
 
-(* SSL / SCRAM-crypto externs. Not implemented natively yet (Stage 2b: real
-   SHA-256 / HMAC / PBKDF2 / base64 / TLS). Stubbed so a native build LINKS
-   and trust-auth / plaintext connections work — these are referenced by
-   the SCRAM / STARTTLS code paths but not *called* on the trust path. If a
-   program does hit them (password auth / SSL), the stub warns and degrades
-   (returns "" / -1) rather than silently misbehaving. *)
+(* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
+   a native build LINKS and plaintext connections work; referenced by the
+   STARTTLS path but not called unless a program requests SSL. *)
 let native_ffi_stub_names =
-  [ "sha256_of_hex"; "hmac_sha256_hex_str"; "pbkdf2_sha256_hex";
-    "base64_encode_hex"; "base64_decode_to_hex"; "random_b64"; "hex_xor";
-    "tcp_starttls"; "tcp_starttls_verified" ]
+  [ "tcp_starttls"; "tcp_starttls_verified" ]
 
 (* Native HTTP server externs (Stage 3). Implemented in native_http_runtime,
    emitted after the closure typedefs (http_serve takes a `str -> str`
@@ -3435,11 +3430,17 @@ let native_http_names =
   [ "http_serve"; "http_current_body"; "http_set_status";
     "http_set_content_type"; "http_set_header"; "http_get_header" ]
 
-(* Native utility externs with real implementations: SHA-256 (password
-   hashing) and a random request/session id. Referenced by app code
-   (contrib/http/session, user password hashing) and the Node host provides
-   them via crypto glue; here they get real native impls. *)
-let native_util_names = [ "sha256_hex"; "gen_request_id" ]
+(* Native utility + crypto externs with real implementations: SHA-256 and
+   friends (password hashing, and the SCRAM-SHA-256 handshake contrib/db/pg
+   needs for password auth) plus a random request/session id. The Node host
+   provides these via crypto glue; here they get real native impls, so
+   native pg can authenticate to a password Postgres over plaintext (TLS is
+   still stubbed). Binary crosses the FFI boundary as hex strings (Mere str
+   is NUL-terminated), matching the Node contract. *)
+let native_util_names =
+  [ "sha256_hex"; "gen_request_id";
+    "sha256_of_hex"; "hmac_sha256_hex_str"; "pbkdf2_sha256_hex";
+    "base64_encode_hex"; "base64_decode_to_hex"; "random_b64"; "hex_xor" ]
 
 let is_native_ffi name =
   List.mem name native_ffi_names
@@ -3628,26 +3629,11 @@ let native_ffi_runtime =
       "  return 0;";
       "}";
       "";
-      "/* SSL / SCRAM crypto: not implemented on the native backend yet.";
-      "   Stubs let a native build link and trust-auth / plaintext work; the";
-      "   SCRAM / STARTTLS paths reference these but don't call them on trust. */";
-      "static char* __ffi_crypto_stub(const char* who) {";
-      "  fprintf(stderr, \"native: %s unsupported — SSL/SCRAM not implemented on \"";
-      "                  \"the native backend yet; use trust auth / plaintext.\\n\", who);";
-      "  return (char*)\"\";";
-      "}";
-      "static char* sha256_of_hex(const char* a) { (void)a; return __ffi_crypto_stub(\"sha256_of_hex\"); }";
-      "static char* hmac_sha256_hex_str(const char* a, const char* b) { (void)a; (void)b; return __ffi_crypto_stub(\"hmac_sha256_hex_str\"); }";
-      "static char* pbkdf2_sha256_hex(const char* a, const char* b, int c, int d) { (void)a; (void)b; (void)c; (void)d; return __ffi_crypto_stub(\"pbkdf2_sha256_hex\"); }";
-      "static char* base64_encode_hex(const char* a) { (void)a; return __ffi_crypto_stub(\"base64_encode_hex\"); }";
-      "static char* base64_decode_to_hex(const char* a) { (void)a; return __ffi_crypto_stub(\"base64_decode_to_hex\"); }";
-      "static char* random_b64(int n) { (void)n; return __ffi_crypto_stub(\"random_b64\"); }";
-      "static char* hex_xor(const char* a, const char* b) { (void)a; (void)b; return __ffi_crypto_stub(\"hex_xor\"); }";
-      "static int tcp_starttls(int fd, const char* host) { (void)fd; (void)host; (void)__ffi_crypto_stub(\"tcp_starttls\"); return -1; }";
-      "static int tcp_starttls_verified(int fd, const char* host, const char* ca) { (void)fd; (void)host; (void)ca; (void)__ffi_crypto_stub(\"tcp_starttls_verified\"); return -1; }";
-      "";
-      "/* SHA-256 (FIPS 180-4) — password hashing (sha256_hex). */";
-      "static char* sha256_hex(const char* msg) {";
+      "/* --- crypto: real SHA-256 core + HMAC-SHA256 + PBKDF2 + base64,";
+      "   backing the SCRAM-SHA-256 handshake contrib/db/pg uses for password";
+      "   auth. Binary crosses the FFI as hex strings. TLS (tcp_starttls) is";
+      "   still stubbed (needs libssl); SCRAM works over a plaintext socket. */";
+      "static void __sha256(const unsigned char* data, size_t len, unsigned char out[32]) {";
       "  static const uint32_t K[64] = {";
       "    0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,";
       "    0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,";
@@ -3658,10 +3644,9 @@ let native_ffi_runtime =
       "    0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,";
       "    0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u };";
       "  uint32_t h[8] = {0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u};";
-      "  size_t len = strlen(msg);";
       "  size_t total = ((len + 8) / 64 + 1) * 64;";
       "  unsigned char* m = (unsigned char*)calloc(total, 1);";
-      "  memcpy(m, msg, len); m[len] = 0x80;";
+      "  memcpy(m, data, len); m[len] = 0x80;";
       "  uint64_t bits = (uint64_t)len * 8;";
       "  for (int i = 0; i < 8; i++) m[total - 1 - i] = (unsigned char)(bits >> (8 * i));";
       "  for (size_t off = 0; off < total; off += 64) {";
@@ -3686,14 +3671,68 @@ let native_ffi_runtime =
       "    h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;";
       "  }";
       "  free(m);";
-      "  char* out = (char*)malloc(65);";
-      "  static const char* hx = \"0123456789abcdef\";";
-      "  for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) {";
-      "    unsigned char byte = (h[i] >> (24 - j*8)) & 0xff;";
-      "    out[(i*4+j)*2] = hx[byte>>4]; out[(i*4+j)*2+1] = hx[byte&15];";
+      "  for (int i = 0; i < 8; i++) {";
+      "    out[i*4]=(h[i]>>24)&0xff; out[i*4+1]=(h[i]>>16)&0xff;";
+      "    out[i*4+2]=(h[i]>>8)&0xff; out[i*4+3]=h[i]&0xff;";
       "  }";
-      "  out[64] = 0; return out;";
       "}";
+      "static const char __hexd[] = \"0123456789abcdef\";";
+      "static char* __to_hex(const unsigned char* b, int n) {";
+      "  char* s = (char*)malloc(n*2+1);";
+      "  for (int i=0;i<n;i++){ s[i*2]=__hexd[b[i]>>4]; s[i*2+1]=__hexd[b[i]&15]; }";
+      "  s[n*2]=0; return s;";
+      "}";
+      "static int __hexval(char c){ if(c>='0'&&c<='9')return c-'0'; if(c>='a'&&c<='f')return c-'a'+10; if(c>='A'&&c<='F')return c-'A'+10; return 0; }";
+      "static int __from_hex(const char* s, unsigned char* out) {";
+      "  int n=(int)strlen(s)/2; for(int i=0;i<n;i++) out[i]=(__hexval(s[i*2])<<4)|__hexval(s[i*2+1]); return n;";
+      "}";
+      "static const char __b64e[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
+      "static char* __to_b64(const unsigned char* d, int n) {";
+      "  int ol=((n+2)/3)*4; char* o=(char*)malloc(ol+1); int j=0;";
+      "  for(int i=0;i<n;i+=3){ int v=d[i]<<16; if(i+1<n)v|=d[i+1]<<8; if(i+2<n)v|=d[i+2];";
+      "    o[j++]=__b64e[(v>>18)&63]; o[j++]=__b64e[(v>>12)&63];";
+      "    o[j++]=(i+1<n)?__b64e[(v>>6)&63]:'='; o[j++]=(i+2<n)?__b64e[v&63]:'='; }";
+      "  o[ol]=0; return o;";
+      "}";
+      "static int __b64val(char c){ if(c>='A'&&c<='Z')return c-'A'; if(c>='a'&&c<='z')return c-'a'+26; if(c>='0'&&c<='9')return c-'0'+52; if(c=='+')return 62; if(c=='/')return 63; return -1; }";
+      "static int __from_b64(const char* s, unsigned char* out) {";
+      "  int n=0; unsigned int v=0; int bits=0;";
+      "  for(int i=0;s[i];i++){ if(s[i]=='=')break; int c=__b64val(s[i]); if(c<0)continue;";
+      "    v=(v<<6)|c; bits+=6; if(bits>=8){ bits-=8; out[n++]=(v>>bits)&0xff; } }";
+      "  return n;";
+      "}";
+      "static void __hmac_sha256(const unsigned char* key, int klen, const unsigned char* msg, int mlen, unsigned char out[32]) {";
+      "  unsigned char k[64]; memset(k,0,64);";
+      "  if (klen>64) __sha256(key,klen,k); else memcpy(k,key,klen);";
+      "  unsigned char ipad[64], opad[64];";
+      "  for(int i=0;i<64;i++){ ipad[i]=k[i]^0x36; opad[i]=k[i]^0x5c; }";
+      "  unsigned char inner[32]; unsigned char* buf=(unsigned char*)malloc(64+mlen);";
+      "  memcpy(buf,ipad,64); memcpy(buf+64,msg,mlen); __sha256(buf,64+mlen,inner); free(buf);";
+      "  unsigned char buf2[96]; memcpy(buf2,opad,64); memcpy(buf2+64,inner,32); __sha256(buf2,96,out);";
+      "}";
+      "/* --- the hex-boundary crypto externs contrib/db/pg's SCRAM path calls --- */";
+      "static char* sha256_hex(const char* msg){ unsigned char d[32]; __sha256((const unsigned char*)msg, strlen(msg), d); return __to_hex(d,32); }";
+      "static char* sha256_of_hex(const char* hex){ unsigned char* b=(unsigned char*)malloc(strlen(hex)/2+1); int n=__from_hex(hex,b); unsigned char d[32]; __sha256(b,n,d); free(b); return __to_hex(d,32); }";
+      "static char* hmac_sha256_hex_str(const char* key_hex, const char* msg){ unsigned char* k=(unsigned char*)malloc(strlen(key_hex)/2+1); int kn=__from_hex(key_hex,k); unsigned char d[32]; __hmac_sha256(k,kn,(const unsigned char*)msg,(int)strlen(msg),d); free(k); return __to_hex(d,32); }";
+      "static char* pbkdf2_sha256_hex(const char* pw, const char* salt_hex, int iters, int keylen){";
+      "  unsigned char salt[512]; int slen=__from_hex(salt_hex,salt);";
+      "  int pwlen=(int)strlen(pw); unsigned char* dk=(unsigned char*)malloc(keylen>0?keylen:1);";
+      "  int done=0; unsigned int blk=1;";
+      "  while(done<keylen){";
+      "    unsigned char* sb=(unsigned char*)malloc(slen+4); memcpy(sb,salt,slen);";
+      "    sb[slen]=(blk>>24)&0xff; sb[slen+1]=(blk>>16)&0xff; sb[slen+2]=(blk>>8)&0xff; sb[slen+3]=blk&0xff;";
+      "    unsigned char u[32], t[32]; __hmac_sha256((const unsigned char*)pw,pwlen,sb,slen+4,u); free(sb); memcpy(t,u,32);";
+      "    for(int i=1;i<iters;i++){ __hmac_sha256((const unsigned char*)pw,pwlen,u,32,u); for(int j=0;j<32;j++) t[j]^=u[j]; }";
+      "    int take=(keylen-done<32)?(keylen-done):32; memcpy(dk+done,t,take); done+=take; blk++;";
+      "  }";
+      "  char* r=__to_hex(dk,keylen); free(dk); return r;";
+      "}";
+      "static char* base64_encode_hex(const char* hex){ unsigned char* b=(unsigned char*)malloc(strlen(hex)/2+1); int n=__from_hex(hex,b); char* r=__to_b64(b,n); free(b); return r; }";
+      "static char* base64_decode_to_hex(const char* b64){ unsigned char* b=(unsigned char*)malloc(strlen(b64)+1); int n=__from_b64(b64,b); char* r=__to_hex(b,n); free(b); return r; }";
+      "static char* random_b64(int n){ if(n<1)n=1; unsigned char* b=(unsigned char*)malloc(n); FILE* f=fopen(\"/dev/urandom\",\"rb\"); if(f){ size_t g=fread(b,1,n,f); (void)g; fclose(f);} else for(int i=0;i<n;i++) b[i]=rand()&0xff; char* r=__to_b64(b,n); free(b); return r; }";
+      "static char* hex_xor(const char* a, const char* b){ int la=(int)strlen(a)/2, lb=(int)strlen(b)/2; if(la!=lb) return strdup(\"\"); unsigned char* ba=(unsigned char*)malloc(la?la:1); unsigned char* bb=(unsigned char*)malloc(lb?lb:1); __from_hex(a,ba); __from_hex(b,bb); for(int i=0;i<la;i++) ba[i]^=bb[i]; char* r=__to_hex(ba,la); free(ba); free(bb); return r; }";
+      "static int tcp_starttls(int fd, const char* host){ (void)fd;(void)host; fprintf(stderr,\"native: tcp_starttls unsupported (TLS not implemented; use a plaintext connection)\\n\"); return -1; }";
+      "static int tcp_starttls_verified(int fd, const char* h, const char* ca){ (void)fd;(void)h;(void)ca; fprintf(stderr,\"native: tcp_starttls_verified unsupported (TLS not implemented)\\n\"); return -1; }";
       "/* gen_request_id: 16 random bytes (from /dev/urandom) as a 32-char hex id. */";
       "static char* gen_request_id(void) {";
       "  unsigned char b[16]; FILE* f = fopen(\"/dev/urandom\", \"rb\");";

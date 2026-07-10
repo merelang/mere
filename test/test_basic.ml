@@ -4920,6 +4920,19 @@ let () =
     (vec_codegen_c
        "extern fn sha256_hex: str -> str; str_len (sha256_hex \"x\")")
     "static char* sha256_hex(const char* msg)";
+  (* Native SCRAM-SHA-256 (Stage 2b): the crypto externs pg's password-auth
+     path calls get real native impls (HMAC / PBKDF2 / base64) built on the
+     SHA-256 core, not stubs — so native pg authenticates over plaintext. *)
+  assert_contains "native crypto: HMAC-SHA256 impl for SCRAM"
+    (vec_codegen_c
+       "extern fn hmac_sha256_hex_str: str -> str -> str; \
+        str_len (hmac_sha256_hex_str \"6b\" \"hi\")")
+    "static void __hmac_sha256";
+  assert_contains "native crypto: PBKDF2-SHA256 impl for SCRAM"
+    (vec_codegen_c
+       "extern fn pbkdf2_sha256_hex: str -> str -> int -> int -> str; \
+        str_len (pbkdf2_sha256_hex \"pw\" \"ab\" 1 32)")
+    "static char* pbkdf2_sha256_hex(const char* pw, const char* salt_hex, int iters, int keylen)";
   (* P7: str ordering lowers per backend — C/LLVM reuse libc strcmp, Wasm
      reuses the $__lang_str_compare helper (sign-normalized -1/0/1). The
      condition keeps main int so main_ty:TyInt stays consistent. *)
