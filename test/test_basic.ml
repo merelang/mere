@@ -4901,6 +4901,15 @@ let () =
     c_src_tcp "static int tcp_connect(const char* host, int port)";
   assert_contains "native FFI: emits the byte arena"
     c_src_tcp "static unsigned char __mem[";
+  (* contrib/db/redis uses the same native runtime plus two arena<->hex
+     helpers — so redis (and mysql) run as native binaries too, not just
+     pg. Verified end-to-end against a real redis (SET/GET/INCR). *)
+  assert_contains "native FFI: bytes_from_hex_alloc / bytes_to_hex_len (redis)"
+    (vec_codegen_c
+       "extern fn bytes_from_hex_alloc: str -> int; \
+        extern fn bytes_to_hex_len: int -> int -> str; \
+        let p = bytes_from_hex_alloc \"ab\" in str_len (bytes_to_hex_len p 1)")
+    "static int bytes_from_hex_alloc(const char* hex)";
   assert_no_contains "native FFI: no leftover extern prototype for tcp_connect"
     c_src_tcp "extern int tcp_connect";
   (* C-backend string-escape bug found while compiling pg.mere: a carriage

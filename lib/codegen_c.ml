@@ -3414,7 +3414,7 @@ let native_ffi_names =
   [ "tcp_connect"; "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
-    "mem_copy_str"; "mem_to_str" ]
+    "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -3741,7 +3741,10 @@ let native_ffi_runtime =
       "  char* id = (char*)malloc(33); static const char* hx = \"0123456789abcdef\";";
       "  for (int i = 0; i < 16; i++) { id[i*2] = hx[b[i]>>4]; id[i*2+1] = hx[b[i]&15]; }";
       "  id[32] = 0; return id;";
-      "}" ]
+      "}";
+      "/* arena <-> hex helpers (contrib/db/redis binary values). */";
+      "static int bytes_from_hex_alloc(const char* hex){ int n=(int)strlen(hex)/2; int p=mem_alloc(n); __from_hex(hex, __mem + p); return p; }";
+      "static char* bytes_to_hex_len(int p, int len){ return __to_hex(__mem + p, len); }" ]
 
 let str_concat_helper =
   String.concat "\n"
