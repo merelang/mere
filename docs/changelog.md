@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.2 — 2026-07-10
+
+More dogfood-driven fixes (from the mq CLI).
+
+- **`read_stdin`**: reads all of stdin as a `str` (interp + C backend), so
+  CLIs can filter piped input (`echo … | mq '.query'`).
+- **contrib/json**: the serialiser (`to_json_str` / `to_pretty_str`) moved
+  into `module Json` and `writer.mere` was removed, so parser and writer
+  share one `json` type — `to_pretty_str (parse_json s)` now composes.
+
+1947 tests.
+
+---
+
 ## v0.1.1 — 2026-07-10
 
 Fixes surfaced by dogfooding two real apps on top of Mere: a realtime
