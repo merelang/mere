@@ -4865,6 +4865,20 @@ let () =
     (vec_codegen_c
        "let rec join = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + join t in join (Cons (1, Cons (2, Nil)))")
     "pthread_join";
+  (* Two top-level fns each with a same-named inner `loop` but different
+     captures must not merge capture sets. `fa`'s loop captures only x;
+     `fb`'s also captures y. The transitive-capture fixpoint used to
+     resolve `loop` via a global last-write map, so `fa`'s loop inherited
+     `fb`'s `y` → an undeclared identifier in C (mq dogfood P8). `fa`'s
+     lifted loop (processed first → _0) must stay `(x, acc)`, not gain y. *)
+  let c_two_loops =
+    vec_codegen_c
+      "let fa = fn x -> let rec loop = fn acc -> fn k -> if k <= 0 then acc else loop (acc + x) (k - 1) in loop 0 x in \
+       let fb = fn x -> let y = x + 100 in let rec loop = fn acc -> fn k -> if k <= 0 then acc else loop (acc + x + y) (k - 1) in loop 0 x in \
+       fa 3 + fb 3"
+  in
+  assert_no_contains "inner-lift: same-named inner fns across hosts don't merge captures"
+    c_two_loops "__lifted_loop_0(int x, int y";
   assert_contains "vec: C codegen wires vec_new outside region to default arena"
     c_src_default_region "mere_vec_int_new(&__lang_default_region)";
   assert_contains "vec: C codegen routes vec_push to runtime helper"
