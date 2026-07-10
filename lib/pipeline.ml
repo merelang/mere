@@ -77,7 +77,20 @@ let reserved_c_names =
   ]
 
 let warn_reserved_name loc name =
-  if List.mem name reserved_c_names then
+  if name = "main" then
+    (* `main` is the synthesized program entry point (the module's trailing
+       expression compiles to `$main` / C `main`). A user binding named
+       `main` collides with it — and the raw collision otherwise only
+       surfaces from a downstream tool (e.g. wat2wasm "redefinition of
+       function $main"), far from the source. Mere has no `main`-function
+       convention: the entry point IS the file's trailing expression. *)
+    Printf.eprintf
+      "%s: warning: top-level name `main` is reserved for the program entry \
+       point (the file's trailing expression compiles to it). Rename this \
+       binding (e.g. `run`) — otherwise codegen emits two `main`s and the \
+       build fails downstream.\n%!"
+      (Loc.to_string loc)
+  else if List.mem name reserved_c_names then
     Printf.eprintf
       "%s: warning: top-level name `%s` collides with a C keyword or libc/libm \
        symbol — this will be a compile error at codegen. Renaming is \

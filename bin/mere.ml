@@ -80,6 +80,11 @@ let infer_program ?base_dir source =
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
+      (* Warn on reserved top-level names (incl. `main`, the entry point)
+         on the compile paths too — not just the interp path — so the
+         collision is caught here instead of surfacing as a cryptic
+         downstream error (e.g. wat2wasm "redefinition of $main"). *)
+      Pipeline.warn_reserved_in_pattern pat;
       let outer_env = !type_env in
       let t = Typer.infer outer_env value in
       let bindings = Typer.check_pattern pat t in
@@ -87,6 +92,8 @@ let infer_program ?base_dir source =
         let sch = Typer.generalize outer_env ty in
         (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
+      List.iter (fun (n, value) ->
+        Pipeline.warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
       let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
       let env_rec = List.fold_left2 (fun acc (n, _) a ->
