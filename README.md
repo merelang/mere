@@ -38,7 +38,7 @@ source tree is needed to build or run an app.
 
 ## Status (as of 2026-07-10)
 
-- **1945 tests passing**
+- **1947 tests passing**
 - **📦 Package system v0.2**: `mere install` reads a `mere.toml`, fetches git dependencies (monorepo `subdir` supported) into `.mere_modules/`, resolves transitive cross-package imports, and writes a `mere.lock`. An optional `[host]` entry also vendors the Node runtime host into `.mere_host/`, so `mere serve app.wasm` runs a compiled server with no compiler source tree. See [docs/packages.md](docs/packages.md).
 - **🧵 Concurrency**: `spawn` / `channel` / `join` + `par_map` on all four backends (interp / C / LLVM / Wasm), with a `Send` / `Sync` type discipline (move / use-after-move analysis, HM-integrated Send bound for polymorphic channels). See `examples/parallel_compute.mere`, `examples/par_map.mere`.
 - **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **All 18 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc` / `time`. 13 of the 18 have CI compile-time verification via `bootstrap_wat_ok` (wat2wasm-checks the emitted module).
@@ -171,7 +171,7 @@ dune exec ./bin/mere.exe -- examples/factorial.mere
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'
 dune exec ./bin/mere.exe -- -te 'fn x -> x + 1'      # print the type
 dune exec ./bin/mere.exe -- -r                       # REPL
-dune runtest                                         # 1945 tests
+dune runtest                                         # 1947 tests
 
 # C codegen
 dune exec ./bin/mere.exe -- -ce 'let x = 5 in x * 2' > out.c
@@ -227,7 +227,7 @@ mere/
 │   ├── formatter.ml    # `mere fmt` pretty-printer
 │   ├── diagnostic.ml   # Rust-style code frame + ANSI colors
 │   └── version.ml
-├── test/test_basic.ml  # 1945 tests
+├── test/test_basic.ml  # 1947 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
 ├── examples/           # *.mere sample programs
 └── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
