@@ -1756,6 +1756,9 @@ let rec emit_expr (e : Ast.expr) : string =
           evaluate it for side-effect-freedom, then build the list. *)
        args_used := true;
        Printf.sprintf "((void)(%s), __lang_args())" (emit_expr arg)
+     | Ast.Var "read_stdin" ->
+       (* Native CLI: read all of stdin as a str. Unit arg has no effect. *)
+       Printf.sprintf "((void)(%s), __lang_read_stdin())" (emit_expr arg)
      | Ast.Var "list_dir" ->
        (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
           with interp. Returns list_str, so set the gating flag *)
@@ -3624,6 +3627,19 @@ let str_concat_helper =
       "  if (len > 0) { size_t r = fread(buf, 1, (size_t)len, f); (void)r; }";
       "  buf[len] = '\\0';";
       "  fclose(f);";
+      "  return buf;";
+      "}";
+      "static const char* __lang_read_stdin(void) {";
+      "  size_t cap = 4096, n = 0;";
+      "  char* tmp = (char*)malloc(cap);";
+      "  size_t r;";
+      "  while ((r = fread(tmp + n, 1, cap - n, stdin)) > 0) {";
+      "    n += r;";
+      "    if (n == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
+      "  }";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, n + 1);";
+      "  memcpy(buf, tmp, n); buf[n] = '\\0';";
+      "  free(tmp);";
       "  return buf;";
       "}";
       "static int __lang_write_file(const char* path, const char* content) {";

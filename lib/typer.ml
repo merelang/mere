@@ -1247,6 +1247,7 @@ let initial_env : env =
     ("channel_recv", channel_recv_scheme);
     ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
     ("int_max",     mono Ast.TyInt);

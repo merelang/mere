@@ -176,6 +176,12 @@ let builtin_read_line =
        with End_of_file -> V_str "")
     | _ -> failwith "read_line: expected unit")
 
+let builtin_read_stdin =
+  V_builtin ("read_stdin", fun v ->
+    match v with
+    | V_unit -> V_str (In_channel.input_all stdin)
+    | _ -> failwith "read_stdin: expected unit")
+
 let builtin_print_no_nl =
   V_builtin ("print_no_nl", fun v ->
     (match v with
@@ -1685,6 +1691,7 @@ let initial_env : env =
     ("channel_recv", ref builtin_channel_recv);
     ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);
+    ("read_stdin", ref builtin_read_stdin);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);
     ("int_max", ref (V_int max_int));

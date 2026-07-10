@@ -4857,6 +4857,10 @@ let () =
   assert_contains "args: C codegen emits __lang_args" c_src_args "__lang_args()";
   assert_contains "args: C main captures argv"
     c_src_args "int main(int argc, char** argv)";
+  (* read_stdin: reads all of stdin as a str (for CLIs like mq). *)
+  check "read_stdin type" (Pipeline.type_of "read_stdin") "(unit -> str)";
+  assert_contains "read_stdin: C backend emits helper"
+    (vec_codegen_c "let s = read_stdin () in str_len s") "__lang_read_stdin()";
   (* A locally-bound `join` (e.g. a string-join helper) must NOT compile
      to the Q-012 thread `pthread_join` builtin — the C backend now checks
      shadowing before that dispatch. (Surfaced by the mq dogfood's CSV
