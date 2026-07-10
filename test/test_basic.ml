@@ -4857,6 +4857,14 @@ let () =
   assert_contains "args: C codegen emits __lang_args" c_src_args "__lang_args()";
   assert_contains "args: C main captures argv"
     c_src_args "int main(int argc, char** argv)";
+  (* A locally-bound `join` (e.g. a string-join helper) must NOT compile
+     to the Q-012 thread `pthread_join` builtin — the C backend now checks
+     shadowing before that dispatch. (Surfaced by the mq dogfood's CSV
+     parser.) *)
+  assert_no_contains "join: local shadow isn't compiled as pthread_join"
+    (vec_codegen_c
+       "let rec join = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + join t in join (Cons (1, Cons (2, Nil)))")
+    "pthread_join";
   assert_contains "vec: C codegen wires vec_new outside region to default arena"
     c_src_default_region "mere_vec_int_new(&__lang_default_region)";
   assert_contains "vec: C codegen routes vec_push to runtime helper"

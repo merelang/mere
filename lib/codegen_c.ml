@@ -1586,7 +1586,15 @@ let rec emit_expr (e : Ast.expr) : string =
            ThreadHandle __t; \
            pthread_create(&__t.tid, NULL, __mere_spawn_trampoline, __c); \
            __t; })"
-     | Ast.Var "join" ->
+     (* Only the Q-012 thread `join` builtin when not shadowed. `join` is a
+        very common user name (e.g. a string-join helper); if it's bound
+        locally / lifted / at top level, fall through to the ordinary-call
+        cases below instead of emitting pthread_join. *)
+     | Ast.Var "join" when
+         not (List.mem_assoc "join" !current_var_types
+              || List.mem_assoc "join" !current_env_subst
+              || Hashtbl.mem inner_lifts "join"
+              || Hashtbl.mem toplevel_fn_names "join") ->
        "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_join(__h.tid, NULL); 0; })"
      (* Q-012: channel primitives, dispatched to the monomorphized runtime.
         The element tag comes from the channel's resolved type. *)
