@@ -248,6 +248,7 @@ let escape_string s =
     | '"' -> Buffer.add_string buf "\\\""
     | '\\' -> Buffer.add_string buf "\\\\"
     | '\n' -> Buffer.add_string buf "\\n"
+    | '\r' -> Buffer.add_string buf "\\r"
     | '\t' -> Buffer.add_string buf "\\t"
     | c -> Buffer.add_char buf c
   ) s;

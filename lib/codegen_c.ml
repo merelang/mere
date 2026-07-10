@@ -3395,6 +3395,133 @@ let emit_closure_adapter (ce : closure_emission) : string =
 
 (* String-concat runtime helper: allocates |a| + |b| + 1 bytes from the
    default region and concatenates. Reclaimed in bulk when main exits. *)
+(* Native FFI runtime (Stage 1 of the native full-stack arc).
+
+   contrib/db (pg / mysql / redis) and other wire-protocol code are written
+   against a Wasm-style flat byte memory: addresses are 32-bit `int`
+   offsets, and the `mem_*` / `str_ptr` / `tcp_*` externs are provided by
+   the Node host over the Wasm linear memory. On the native (C) backend
+   there is no such shared linear memory, and a Mere `int` is 32-bit — too
+   narrow for a real 64-bit pointer. So we give the native runtime its own
+   flat arena (`__mem`, addressed by 32-bit offsets, exactly like Wasm's
+   memory) and implement the same extern set against it with POSIX sockets.
+   Same Mere source then runs on both "Wasm + Node host" and native.
+
+   These names, when declared `extern fn` and used, get a `static`
+   definition emitted here instead of an `extern` prototype — so
+   `mere -c app.mere | clang` yields a self-contained native binary. *)
+let native_ffi_names =
+  [ "tcp_connect"; "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
+    "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
+    "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
+    "mem_copy_str"; "mem_to_str" ]
+
+(* SSL / SCRAM-crypto externs. Not implemented natively yet (Stage 2b: real
+   SHA-256 / HMAC / PBKDF2 / base64 / TLS). Stubbed so a native build LINKS
+   and trust-auth / plaintext connections work — these are referenced by
+   the SCRAM / STARTTLS code paths but not *called* on the trust path. If a
+   program does hit them (password auth / SSL), the stub warns and degrades
+   (returns "" / -1) rather than silently misbehaving. *)
+let native_ffi_stub_names =
+  [ "sha256_of_hex"; "hmac_sha256_hex_str"; "pbkdf2_sha256_hex";
+    "base64_encode_hex"; "base64_decode_to_hex"; "random_b64"; "hex_xor";
+    "tcp_starttls"; "tcp_starttls_verified" ]
+
+let is_native_ffi name =
+  List.mem name native_ffi_names || List.mem name native_ffi_stub_names
+
+let native_ffi_runtime =
+  String.concat "\n"
+    [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
+      "#include <sys/socket.h>";
+      "#include <netinet/in.h>";
+      "#include <netdb.h>";
+      "#include <sys/time.h>";
+      "#include <stdint.h>";
+      "";
+      "#define __MEM_CAP (16 * 1024 * 1024)";
+      "static unsigned char __mem[__MEM_CAP];";
+      "static int __mem_top = 8;  /* leave low offsets as a null-ish guard */";
+      "";
+      "static int mem_alloc(int n) {";
+      "  int p = __mem_top; __mem_top += (n <= 0 ? 1 : n); return p;";
+      "}";
+      "static int mem_set_u8(int p, int off, int b) { __mem[p + off] = (unsigned char)b; return 0; }";
+      "static int mem_get_u8(int p, int off) { return __mem[p + off]; }";
+      "static int mem_set_u32be(int p, int off, int v) {";
+      "  unsigned char* q = __mem + p + off;";
+      "  q[0] = (v >> 24) & 0xff; q[1] = (v >> 16) & 0xff;";
+      "  q[2] = (v >> 8) & 0xff;  q[3] = v & 0xff; return 0;";
+      "}";
+      "static int mem_get_u32be(int p, int off) {";
+      "  unsigned char* q = __mem + p + off;";
+      "  return (q[0] << 24) | (q[1] << 16) | (q[2] << 8) | q[3];";
+      "}";
+      "static int mem_set_u16be(int p, int off, int v) {";
+      "  unsigned char* q = __mem + p + off;";
+      "  q[0] = (v >> 8) & 0xff; q[1] = v & 0xff; return 0;";
+      "}";
+      "static int mem_get_u16be(int p, int off) {";
+      "  unsigned char* q = __mem + p + off;";
+      "  return (q[0] << 8) | q[1];";
+      "}";
+      "/* str_ptr: place a Mere str's bytes in the arena, return the offset";
+      "   (Wasm gets this for free since a str is already an offset there). */";
+      "static int str_ptr(const char* s) {";
+      "  int n = (int)strlen(s); int p = __mem_top;";
+      "  memcpy(__mem + p, s, n); __mem[p + n] = 0; __mem_top += n + 1; return p;";
+      "}";
+      "/* mem_copy_str: copy a NUL-terminated str into __mem[dst+off], return len. */";
+      "static int mem_copy_str(int dst, int off, const char* s) {";
+      "  int d = dst + off; int i = 0;";
+      "  while (s[i]) { __mem[d++] = (unsigned char)s[i++]; }";
+      "  return d - dst;";
+      "}";
+      "/* mem_to_str: materialize len arena bytes as a fresh Mere str. */";
+      "static char* mem_to_str(int p, int len) {";
+      "  char* s = (char*)malloc(len + 1);";
+      "  memcpy(s, __mem + p, len); s[len] = 0; return s;";
+      "}";
+      "";
+      "static int tcp_connect(const char* host, int port) {";
+      "  struct addrinfo hints, *res; char portstr[16];";
+      "  memset(&hints, 0, sizeof hints);";
+      "  hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;";
+      "  snprintf(portstr, sizeof portstr, \"%d\", port);";
+      "  if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;";
+      "  int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);";
+      "  if (fd < 0) { freeaddrinfo(res); return -1; }";
+      "  if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) { close(fd); freeaddrinfo(res); return -1; }";
+      "  freeaddrinfo(res); return fd;";
+      "}";
+      "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }";
+      "static int tcp_read(int fd, int p, int cap) { return (int)read(fd, __mem + p, (size_t)cap); }";
+      "static int tcp_close(int fd) { close(fd); return 0; }";
+      "static int tcp_set_timeout(int fd, int ms) {";
+      "  struct timeval tv; tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;";
+      "  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);";
+      "  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);";
+      "  return 0;";
+      "}";
+      "";
+      "/* SSL / SCRAM crypto: not implemented on the native backend yet.";
+      "   Stubs let a native build link and trust-auth / plaintext work; the";
+      "   SCRAM / STARTTLS paths reference these but don't call them on trust. */";
+      "static char* __ffi_crypto_stub(const char* who) {";
+      "  fprintf(stderr, \"native: %s unsupported — SSL/SCRAM not implemented on \"";
+      "                  \"the native backend yet; use trust auth / plaintext.\\n\", who);";
+      "  return (char*)\"\";";
+      "}";
+      "static char* sha256_of_hex(const char* a) { (void)a; return __ffi_crypto_stub(\"sha256_of_hex\"); }";
+      "static char* hmac_sha256_hex_str(const char* a, const char* b) { (void)a; (void)b; return __ffi_crypto_stub(\"hmac_sha256_hex_str\"); }";
+      "static char* pbkdf2_sha256_hex(const char* a, const char* b, int c, int d) { (void)a; (void)b; (void)c; (void)d; return __ffi_crypto_stub(\"pbkdf2_sha256_hex\"); }";
+      "static char* base64_encode_hex(const char* a) { (void)a; return __ffi_crypto_stub(\"base64_encode_hex\"); }";
+      "static char* base64_decode_to_hex(const char* a) { (void)a; return __ffi_crypto_stub(\"base64_decode_to_hex\"); }";
+      "static char* random_b64(int n) { (void)n; return __ffi_crypto_stub(\"random_b64\"); }";
+      "static char* hex_xor(const char* a, const char* b) { (void)a; (void)b; return __ffi_crypto_stub(\"hex_xor\"); }";
+      "static int tcp_starttls(int fd, const char* host) { (void)fd; (void)host; (void)__ffi_crypto_stub(\"tcp_starttls\"); return -1; }";
+      "static int tcp_starttls_verified(int fd, const char* host, const char* ca) { (void)fd; (void)host; (void)ca; (void)__ffi_crypto_stub(\"tcp_starttls_verified\"); return -1; }" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "static const char* __lang_str_concat(const char* a, const char* b) {";
@@ -5961,7 +6088,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <setjmp.h>";
       "#include <math.h>";  (* Phase 34.4: sqrt / sin / cos / tan / pow / atan2 *)
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
+      "#include <unistd.h>";   (* native FFI: read / write / close *)
       "";
+      (* Stage 1 native full-stack: if any Wasm-memory-model FFI extern
+         (tcp_* / mem_* / str_ptr) is used, emit the native runtime that
+         backs them (a flat byte arena + POSIX sockets) instead of leaving
+         them as unresolved `extern` prototypes. *)
+      (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
+            extern_fn_decls false
+       then native_ffi_runtime ^ "\n"
+       else "");
       region_runtime_helpers;
       "";
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
@@ -6046,6 +6182,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (let extern_decls =
          Hashtbl.fold (fun name ty acc ->
+           (* Native FFI externs (tcp_* / mem_* / str_ptr) get a `static`
+              definition from native_ffi_runtime above — skip the `extern`
+              prototype here so the two don't collide. *)
+           if is_native_ffi name then acc else
            (* Map a Mere arrow type to a C extern declaration.
               int -> int      becomes  int <name>(int);
               unit -> int     becomes  int <name>(void);
