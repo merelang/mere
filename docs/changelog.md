@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.4 — 2026-07-10
+
+Driven by the mere-blog dogfood (a Rails-ish blog on `contrib/http` +
+`contrib/db/pg`).
+
+- **`let` constructor/record patterns on all backends**: `let Ctor (a, b)
+  = e` and `let Rec { f = x } = e` now compile on the C, Wasm, and LLVM
+  backends (previously only the interpreter accepted them; the compiled
+  backends handled just `P_var` / tuple / wildcard). Each backend desugars
+  the general case to a single-arm match.
+- **`contrib/orm`**: a small, DB-agnostic typed layer — row decoders
+  (`Orm.dec_int` / `dec_str` / `dec_bool` / `dec_str_opt` + `decode_rows`)
+  over the `str option list` rows the `contrib/db` drivers return, plus
+  matching JSON encoders (`Orm.enc_int` / `enc_str` / `enc_bool` /
+  `enc_str_opt` / `enc_obj` / `enc_arr`). The ML answer to
+  reflection-based ORMs.
+
+1972 tests.
+
+---
+
 ## v0.1.3 — 2026-07-10
 
 Closes the last dogfood finding from the mq CLI.
