@@ -2811,7 +2811,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        current_var_types := saved;
        r
      | _ ->
-       unsupported pat.Ast.ploc "non-P_var let pattern — Phase 5 later slice")
+       (* General irrefutable pattern (constructor / record / as / …):
+          desugar `let pat = value in body` to a single-arm
+          `match value with | pat -> body`, reusing the full pattern
+          compiler. Previously only P_var / P_tuple / P_wild were handled
+          (the interp accepted every pattern) — a backend parity gap
+          surfaced by the mere-blog dogfood. *)
+       emit_expr env { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     let av = emit_expr env arg in
     let tname =

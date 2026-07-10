@@ -1422,7 +1422,14 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        Printf.sprintf "({ __auto_type __let_tup = %s; %s %s; })"
          value_c bind_stmts body_c
-     | _ -> unsupported pat.ploc "non-variable let pattern")
+     | _ ->
+       (* General irrefutable pattern (constructor / record / as / …):
+          desugar `let pat = value in body` to a single-arm
+          `match value with | pat -> body`, reusing the full pattern
+          compiler. Previously only P_var / P_tuple / P_wild were handled
+          (the interp accepted every pattern) — a backend parity gap
+          surfaced by the mere-blog dogfood. *)
+       emit_expr { e with node = Ast.Match (value, [(pat, None, body)]) })
   (* Unsupported nodes *)
   (* Phase 34.1: Float_lit handled at top of emit_expr now *)
   | Ast.Unit_lit      -> "0"  (* unit becomes int 0 in C *)
