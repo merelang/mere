@@ -3427,8 +3427,132 @@ let native_ffi_stub_names =
     "base64_encode_hex"; "base64_decode_to_hex"; "random_b64"; "hex_xor";
     "tcp_starttls"; "tcp_starttls_verified" ]
 
+(* Native HTTP server externs (Stage 3). Implemented in native_http_runtime,
+   emitted after the closure typedefs (http_serve takes a `str -> str`
+   closure = the `closure_str_str` struct). Single-threaded accept loop;
+   response metadata is per-request global state. *)
+let native_http_names =
+  [ "http_serve"; "http_current_body"; "http_set_status";
+    "http_set_content_type"; "http_set_header"; "http_get_header" ]
+
+(* Native utility externs with real implementations: SHA-256 (password
+   hashing) and a random request/session id. Referenced by app code
+   (contrib/http/session, user password hashing) and the Node host provides
+   them via crypto glue; here they get real native impls. *)
+let native_util_names = [ "sha256_hex"; "gen_request_id" ]
+
 let is_native_ffi name =
-  List.mem name native_ffi_names || List.mem name native_ffi_stub_names
+  List.mem name native_ffi_names
+  || List.mem name native_ffi_stub_names
+  || List.mem name native_http_names
+  || List.mem name native_util_names
+
+let native_http_runtime =
+  String.concat "\n"
+    [ "/* --- native HTTP server (Stage 3): single-threaded accept loop, ";
+      "   per-request response state. Same extern contract as the Node host: ";
+      "   the handler gets \"METHOD URL\", sets status/content-type/headers via ";
+      "   the http_set_* externs, and returns the response body. --- */";
+      "#include <arpa/inet.h>";
+      "static int  __http_status = 200;";
+      "static char __http_ctype[256] = \"text/plain\";";
+      "static char __http_extra_hdrs[8192]; static int __http_extra_len = 0;";
+      "static char __http_req_body[1 << 20]; static int __http_req_body_len = 0;";
+      "static char __http_req_head[16384]; static int __http_req_head_len = 0;";
+      "";
+      "static char* http_current_body(void) { return __http_req_body; }";
+      "static int http_set_status(int c) { __http_status = c; return 0; }";
+      "static int http_set_content_type(const char* ct) {";
+      "  strncpy(__http_ctype, ct, sizeof __http_ctype - 1);";
+      "  __http_ctype[sizeof __http_ctype - 1] = 0; return 0;";
+      "}";
+      "static int http_set_header(const char* k, const char* v) {";
+      "  int r = snprintf(__http_extra_hdrs + __http_extra_len,";
+      "                   sizeof __http_extra_hdrs - __http_extra_len,";
+      "                   \"%s: %s\\r\\n\", k, v);";
+      "  if (r > 0) __http_extra_len += r; return 0;";
+      "}";
+      "/* case-insensitive lookup of a request header value (\"\" if absent). */";
+      "static char* http_get_header(const char* name) {";
+      "  static char val[4096];";
+      "  int nl = (int)strlen(name);";
+      "  const char* p = __http_req_head;";
+      "  while (*p) {";
+      "    const char* line = p;";
+      "    const char* eol = strstr(line, \"\\r\\n\");";
+      "    int linelen = eol ? (int)(eol - line) : (int)strlen(line);";
+      "    const char* colon = memchr(line, ':', linelen);";
+      "    if (colon) {";
+      "      int keylen = (int)(colon - line);";
+      "      if (keylen == nl && strncasecmp(line, name, nl) == 0) {";
+      "        const char* v = colon + 1;";
+      "        while (*v == ' ' || *v == '\\t') v++;";
+      "        int vlen = eol ? (int)(eol - v) : (int)strlen(v);";
+      "        if (vlen > (int)sizeof val - 1) vlen = sizeof val - 1;";
+      "        memcpy(val, v, vlen); val[vlen] = 0; return val;";
+      "      }";
+      "    }";
+      "    if (!eol) break; p = eol + 2;";
+      "  }";
+      "  val[0] = 0; return val;";
+      "}";
+      "";
+      "static int http_serve(int port, closure_str_str handler) {";
+      "  int srv = socket(AF_INET, SOCK_STREAM, 0);";
+      "  int one = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);";
+      "  struct sockaddr_in addr; memset(&addr, 0, sizeof addr);";
+      "  addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY;";
+      "  addr.sin_port = htons((unsigned short)port);";
+      "  if (bind(srv, (struct sockaddr*)&addr, sizeof addr) != 0) { perror(\"bind\"); return -1; }";
+      "  listen(srv, 64);";
+      "  fprintf(stderr, \"native http: listening on :%d\\n\", port);";
+      "  static char buf[1 << 20];";
+      "  for (;;) {";
+      "    int c = accept(srv, 0, 0);";
+      "    if (c < 0) continue;";
+      "    int n = 0, hdr_end = -1;";
+      "    while (n < (int)sizeof buf - 1) {";
+      "      int r = (int)read(c, buf + n, sizeof buf - 1 - n);";
+      "      if (r <= 0) break; n += r; buf[n] = 0;";
+      "      char* e = strstr(buf, \"\\r\\n\\r\\n\");";
+      "      if (e) { hdr_end = (int)(e - buf) + 4; break; }";
+      "    }";
+      "    if (hdr_end < 0) { close(c); continue; }";
+      "    /* request head (request line + headers) for http_get_header */";
+      "    __http_req_head_len = hdr_end < (int)sizeof __http_req_head - 1 ? hdr_end : (int)sizeof __http_req_head - 1;";
+      "    memcpy(__http_req_head, buf, __http_req_head_len); __http_req_head[__http_req_head_len] = 0;";
+      "    /* Content-Length → read the rest of the body */";
+      "    int clen = 0;";
+      "    { char* cl = __http_req_head;";
+      "      while (*cl) { if (strncasecmp(cl, \"content-length:\", 15) == 0) { clen = atoi(cl + 15); break; }";
+      "                    char* e2 = strstr(cl, \"\\r\\n\"); if (!e2) break; cl = e2 + 2; } }";
+      "    while (n - hdr_end < clen && n < (int)sizeof buf - 1) {";
+      "      int r = (int)read(c, buf + n, sizeof buf - 1 - n); if (r <= 0) break; n += r;";
+      "    }";
+      "    __http_req_body_len = n - hdr_end;";
+      "    if (__http_req_body_len > (int)sizeof __http_req_body - 1) __http_req_body_len = sizeof __http_req_body - 1;";
+      "    memcpy(__http_req_body, buf + hdr_end, __http_req_body_len); __http_req_body[__http_req_body_len] = 0;";
+      "    /* build \"METHOD URL\" from the request line */";
+      "    static char reqline[8192]; int sp1 = -1, sp2 = -1;";
+      "    for (int i = 0; i < hdr_end && buf[i] != '\\r'; i++) {";
+      "      if (buf[i] == ' ') { if (sp1 < 0) sp1 = i; else if (sp2 < 0) { sp2 = i; break; } }";
+      "    }";
+      "    int ml = sp2 > 0 ? sp2 : (sp1 > 0 ? sp1 : 0);";
+      "    if (ml > (int)sizeof reqline - 1) ml = sizeof reqline - 1;";
+      "    memcpy(reqline, buf, ml); reqline[ml] = 0;";
+      "    /* reset per-request response state */";
+      "    __http_status = 200; strcpy(__http_ctype, \"text/plain\");";
+      "    __http_extra_len = 0; __http_extra_hdrs[0] = 0;";
+      "    const char* body = handler.fn(handler.env, reqline);";
+      "    if (!body) body = \"\";";
+      "    char head[9216]; size_t blen = strlen(body);";
+      "    int hn = snprintf(head, sizeof head,";
+      "      \"HTTP/1.1 %d\\r\\nContent-Type: %s\\r\\nContent-Length: %zu\\r\\n%sConnection: close\\r\\n\\r\\n\",";
+      "      __http_status, __http_ctype, blen, __http_extra_hdrs);";
+      "    write(c, head, hn); write(c, body, blen); close(c);";
+      "  }";
+      "  return 0;";
+      "}" ]
 
 let native_ffi_runtime =
   String.concat "\n"
@@ -3520,7 +3644,65 @@ let native_ffi_runtime =
       "static char* random_b64(int n) { (void)n; return __ffi_crypto_stub(\"random_b64\"); }";
       "static char* hex_xor(const char* a, const char* b) { (void)a; (void)b; return __ffi_crypto_stub(\"hex_xor\"); }";
       "static int tcp_starttls(int fd, const char* host) { (void)fd; (void)host; (void)__ffi_crypto_stub(\"tcp_starttls\"); return -1; }";
-      "static int tcp_starttls_verified(int fd, const char* host, const char* ca) { (void)fd; (void)host; (void)ca; (void)__ffi_crypto_stub(\"tcp_starttls_verified\"); return -1; }" ]
+      "static int tcp_starttls_verified(int fd, const char* host, const char* ca) { (void)fd; (void)host; (void)ca; (void)__ffi_crypto_stub(\"tcp_starttls_verified\"); return -1; }";
+      "";
+      "/* SHA-256 (FIPS 180-4) — password hashing (sha256_hex). */";
+      "static char* sha256_hex(const char* msg) {";
+      "  static const uint32_t K[64] = {";
+      "    0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,";
+      "    0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,";
+      "    0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,";
+      "    0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,";
+      "    0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,";
+      "    0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,";
+      "    0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,";
+      "    0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u };";
+      "  uint32_t h[8] = {0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u};";
+      "  size_t len = strlen(msg);";
+      "  size_t total = ((len + 8) / 64 + 1) * 64;";
+      "  unsigned char* m = (unsigned char*)calloc(total, 1);";
+      "  memcpy(m, msg, len); m[len] = 0x80;";
+      "  uint64_t bits = (uint64_t)len * 8;";
+      "  for (int i = 0; i < 8; i++) m[total - 1 - i] = (unsigned char)(bits >> (8 * i));";
+      "  for (size_t off = 0; off < total; off += 64) {";
+      "    uint32_t w[64];";
+      "    for (int i = 0; i < 16; i++)";
+      "      w[i] = (m[off+i*4]<<24)|(m[off+i*4+1]<<16)|(m[off+i*4+2]<<8)|m[off+i*4+3];";
+      "    for (int i = 16; i < 64; i++) {";
+      "      uint32_t s0 = (w[i-15]>>7|w[i-15]<<25)^(w[i-15]>>18|w[i-15]<<14)^(w[i-15]>>3);";
+      "      uint32_t s1 = (w[i-2]>>17|w[i-2]<<15)^(w[i-2]>>19|w[i-2]<<13)^(w[i-2]>>10);";
+      "      w[i] = w[i-16] + s0 + w[i-7] + s1;";
+      "    }";
+      "    uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];";
+      "    for (int i = 0; i < 64; i++) {";
+      "      uint32_t S1=(e>>6|e<<26)^(e>>11|e<<21)^(e>>25|e<<7);";
+      "      uint32_t ch=(e&f)^(~e&g);";
+      "      uint32_t t1=hh+S1+ch+K[i]+w[i];";
+      "      uint32_t S0=(a>>2|a<<30)^(a>>13|a<<19)^(a>>22|a<<10);";
+      "      uint32_t maj=(a&b)^(a&c)^(b&c);";
+      "      uint32_t t2=S0+maj;";
+      "      hh=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;";
+      "    }";
+      "    h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;";
+      "  }";
+      "  free(m);";
+      "  char* out = (char*)malloc(65);";
+      "  static const char* hx = \"0123456789abcdef\";";
+      "  for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) {";
+      "    unsigned char byte = (h[i] >> (24 - j*8)) & 0xff;";
+      "    out[(i*4+j)*2] = hx[byte>>4]; out[(i*4+j)*2+1] = hx[byte&15];";
+      "  }";
+      "  out[64] = 0; return out;";
+      "}";
+      "/* gen_request_id: 16 random bytes (from /dev/urandom) as a 32-char hex id. */";
+      "static char* gen_request_id(void) {";
+      "  unsigned char b[16]; FILE* f = fopen(\"/dev/urandom\", \"rb\");";
+      "  if (f) { size_t got = fread(b, 1, 16, f); (void)got; fclose(f); }";
+      "  else { for (int i = 0; i < 16; i++) b[i] = (unsigned char)(rand() & 0xff); }";
+      "  char* id = (char*)malloc(33); static const char* hx = \"0123456789abcdef\";";
+      "  for (int i = 0; i < 16; i++) { id[i*2] = hx[b[i]>>4]; id[i*2+1] = hx[b[i]&15]; }";
+      "  id[32] = 0; return id;";
+      "}" ]
 
 let str_concat_helper =
   String.concat "\n"
@@ -6143,6 +6325,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        `closure_int_Conn`) but only via function pointer types, which C
        accepts with forward-declared structs. *)
     @ (if closure_typedefs = [] then [] else closure_typedefs @ [""])
+    (* Stage 3 native full-stack: emit the native HTTP server after the
+       closure typedefs (http_serve takes a `closure_str_str` handler). *)
+    @ (if Hashtbl.fold (fun n _ acc -> acc || List.mem n native_http_names)
+            extern_fn_decls false
+       then [native_http_runtime; ""]
+       else [])
     (* Now the struct bodies themselves — fields may reference closure
        types (e.g., `closure_unit_unit close;` inside a Drop record), so
        these need to come AFTER closure typedefs.
