@@ -222,6 +222,7 @@ let metrics_used = ref false
 let str_split_used = ref false
 let str_join_used = ref false
 let list_dir_used = ref false   (* Phase 44 *)
+let args_used = ref false       (* native CLI: argv → str list *)
 
 (* Phase 15.10: Map[R, K, V] per-(K, V) monomorphize. Key supports only
    int / str; value can be any concrete type in codegen. Linear scan.
@@ -1736,6 +1737,11 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr path_e) (emit_expr arg)
      | Ast.Var "read_file" ->
        Printf.sprintf "__lang_read_file(%s)" (emit_expr arg)
+     | Ast.Var "args" ->
+       (* Native CLI: argv[1..] as a str list. The unit arg has no effect;
+          evaluate it for side-effect-freedom, then build the list. *)
+       args_used := true;
+       Printf.sprintf "((void)(%s), __lang_args())" (emit_expr arg)
      | Ast.Var "list_dir" ->
        (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
           with interp. Returns list_str, so set the gating flag *)
@@ -4125,6 +4131,29 @@ let str_list_helpers =
       "  }";
       "  free(arr);";
       "  return head;";
+      "}";
+      "";
+      (* Native CLI: argv[1..] as a str list, preserving order. argc/argv are
+         captured into these globals by main(). Mirrors interp's `args`
+         (argv[0], the program name, is dropped). *)
+      "int __lang_argc = 0;";
+      "char** __lang_argv = 0;";
+      "static list_str __lang_args(void) {";
+      "  list_str head = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "  head->tag = 0;";
+      "  for (int k = 1; k < __lang_argc; k++) {";
+      "    int i = __lang_argc - k;  /* reverse so argv[1] ends up first */";
+      "    const char* a = __lang_argv[i];";
+      "    size_t nlen = strlen(a);";
+      "    char* copy = (char*)__lang_region_alloc(&__lang_default_region, nlen + 1);";
+      "    memcpy(copy, a, nlen + 1);";
+      "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    cons->tag = 1;";
+      "    cons->payload.Cons.f0 = copy;";
+      "    cons->payload.Cons.f1 = head;";
+      "    head = cons;";
+      "  }";
+      "  return head;";
       "}" ]
 
 (* Phase 15.8: registry that tracks all OwnedVecs. Every struct allocated by
@@ -5219,6 +5248,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_split_used := false;
   str_join_used := false;
   list_dir_used := false;
+  args_used := false;
   let variant_decls =
     (* Phase 36 (DEFERRED §1.17 fix): dedupe by name keeping LAST occurrence
        so user-side `type result = ...` shadows the builtin entry. *)
@@ -5955,7 +5985,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !metrics_used then [metrics_runtime; ""] else [])
     (* Phase 24.3: str_split / str_join — references list_str_node so
        emit after mono variant bodies (= list_str). *)
-    @ (if !str_split_used || !str_join_used || !list_dir_used then [str_list_helpers; ""] else [])
+    @ (if !str_split_used || !str_join_used || !list_dir_used || !args_used then [str_list_helpers; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (let extern_decls =
          Hashtbl.fold (fun name ty acc ->
@@ -6044,7 +6074,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        if eta_lines = [] then []
        else "/* Phase 35.1: nullary factory builtins as first-class values */"
             :: eta_lines @ [""])
-    @ [ "int main(void) {";
+    @ [ "int main(int argc, char** argv) {";
+        (if !args_used then "  __lang_argc = argc; __lang_argv = argv;"
+         else "  (void)argc; (void)argv;");
         "  __lang_region_init(&__lang_default_region, 1 << 22);";
         (if top_global_inits = [] then ""
          else String.concat "\n" top_global_inits);
