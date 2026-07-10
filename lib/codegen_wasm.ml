@@ -383,6 +383,9 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
 (* Types whose `show_<ty_tag>` function we need to emit. *)
 let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Same, for `to_json_<ty_tag>` (derive JSON sibling of show). *)
+let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Cache: literal string → data segment offset, so repeated literals
    (e.g. `, ` between tuple elements) share one segment. *)
 let show_str_offsets : (string, int) Hashtbl.t = Hashtbl.create 16
@@ -499,17 +502,17 @@ let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
    (tuple elems / record fields / variant payloads) recursively. The
    already-seen guard prevents infinite recursion on self-referential
    variants. *)
-let rec add_show_type (t : Ast.ty) : unit =
+let rec add_type_into (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
   let t = Ast.walk t in
   if not (ty_is_concrete t) then ()
   else
     let tag = ty_tag t in
-    if Hashtbl.mem show_types tag then ()
+    if Hashtbl.mem tbl tag then ()
     else begin
-      Hashtbl.add show_types tag t;
+      Hashtbl.add tbl tag t;
       match t with
       | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
-      | Ast.TyTuple ts -> List.iter add_show_type ts
+      | Ast.TyTuple ts -> List.iter (add_type_into tbl) ts
       | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
         let info = Hashtbl.find Typer.records n in
         let mapping =
@@ -517,7 +520,7 @@ let rec add_show_type (t : Ast.ty) : unit =
           else List.combine info.Typer.r_params args
         in
         List.iter (fun (_, ft) ->
-          add_show_type (subst_params mapping ft)) info.Typer.r_fields
+          add_type_into tbl (subst_params mapping ft)) info.Typer.r_fields
       | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
         (match Hashtbl.find_opt Exhaustive.type_variants n with
          | None -> ()
@@ -533,10 +536,12 @@ let rec add_show_type (t : Ast.ty) : unit =
            in
            List.iter (fun (_, arg_opt) ->
              match arg_opt with
-             | Some t -> add_show_type (subst_params mapping t)
+             | Some t -> add_type_into tbl (subst_params mapping t)
              | None -> ()) vs)
       | _ -> ()
     end
+
+let add_show_type (t : Ast.ty) : unit = add_type_into show_types t
 
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
   let rec walk_expr (e : Ast.expr) =
@@ -544,6 +549,10 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
      | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
        (match arg.Ast.ty with
         | Some t -> add_show_type t
+        | None -> ())
+     | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
+       (match arg.Ast.ty with
+        | Some t -> add_type_into to_json_types t
         | None -> ())
      | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, _) ->
        (* Phase 16.3: metrics.record uses show_int internally to format
@@ -1614,6 +1623,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     let tag = ty_tag arg_ty in
     emit_expr arg;
     emit_instr (Printf.sprintf "call $show_%s" tag)
+  | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "to_json: missing arg type"
+    in
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $to_json_%s" (ty_tag arg_ty))
   | Ast.App _ as outer_app when
     (let rec head_is_extern e =
        match e.Ast.node with
@@ -3186,6 +3203,212 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       "  (func $show_%s (param $x i32) (result i32)\n\
       \    (i32.const %d))"
       tag off
+
+(* JSON sibling of emit_show_fn (derive slice, Wasm). Emits `to_json_<tag>`
+   producing JSON: records -> objects (quoted field names, no type tag),
+   lists/tuples -> arrays, nullary ctor -> "Name", payload ctor ->
+   {"Name": payload}. int/bool/str are byte-identical to show so their
+   bodies are copied; the rest use JSON delimiters. Recursive calls go to
+   to_json_<tag>. Kept in sync with eval.ml / codegen_c.ml. *)
+let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyInt ->
+    {|  (func $to_json_int (param $n i32) (result i32)
+    (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 16)))
+    (local.set $i (i32.const 15))
+    (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 0))
+    (if (i32.lt_s (local.get $n) (i32.const 0))
+      (then
+        (local.set $neg (i32.const 1))
+        (local.set $abs (i32.sub (i32.const 0) (local.get $n))))
+      (else
+        (local.set $neg (i32.const 0))
+        (local.set $abs (local.get $n))))
+    (if (i32.eqz (local.get $abs))
+      (then
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))
+        (return (i32.add (local.get $buf) (local.get $i)))))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eqz (local.get $abs)))
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (i32.store8 (i32.add (local.get $buf) (local.get $i))
+          (i32.add (i32.const 48) (i32.rem_u (local.get $abs) (i32.const 10))))
+        (local.set $abs (i32.div_u (local.get $abs) (i32.const 10)))
+        (br $lp)))
+    (if (local.get $neg)
+      (then
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
+    (i32.add (local.get $buf) (local.get $i)))|}
+  | Ast.TyBool ->
+    let t_off = intern_show_str "true" in
+    let f_off = intern_show_str "false" in
+    Printf.sprintf
+      "  (func $to_json_bool (param $b i32) (result i32)\n\
+      \    (if (result i32) (local.get $b)\n\
+      \      (then (i32.const %d))\n\
+      \      (else (i32.const %d))))"
+      t_off f_off
+  | Ast.TyStr ->
+    let q_off = intern_show_str "\"" in
+    Printf.sprintf
+      "  (func $to_json_str (param $s i32) (result i32)\n\
+      \    (call $__lang_str_concat\n\
+      \      (call $__lang_str_concat (i32.const %d) (call $__lang_str_escape (local.get $s)))\n\
+      \      (i32.const %d)))"
+      q_off q_off
+  | Ast.TyUnit ->
+    let off = intern_show_str "null" in
+    Printf.sprintf
+      "  (func $to_json_unit (param $u i32) (result i32) (i32.const %d))" off
+  | Ast.TyArrow _ ->
+    let off = intern_show_str "null" in
+    Printf.sprintf
+      "  (func $to_json_%s (param $u i32) (result i32) (i32.const %d))" tag off
+  | Ast.TyTuple ts ->
+    let comma = intern_show_str "," in
+    let lb = intern_show_str "[" in
+    let rb = intern_show_str "]" in
+    let lines = Buffer.create 256 in
+    Buffer.add_string lines
+      (Printf.sprintf "  (func $to_json_%s (param $x i32) (result i32)\n" tag);
+    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines
+      (Printf.sprintf "    (local.set $r (i32.const %d))\n" lb);
+    List.iteri (fun i ety ->
+      if i > 0 then
+        Buffer.add_string lines
+          (Printf.sprintf
+             "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+             comma);
+      Buffer.add_string lines
+        (Printf.sprintf
+           "    (local.set $r (call $__lang_str_concat (local.get $r) \
+            (call $to_json_%s (i32.load offset=%d (local.get $x)))))\n"
+           (ty_tag ety) (i * 4))
+    ) ts;
+    Buffer.add_string lines
+      (Printf.sprintf
+         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))" rb);
+    Buffer.contents lines
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+    let info = Hashtbl.find Typer.records n in
+    let mapping =
+      if info.Typer.r_params = [] then []
+      else List.combine info.Typer.r_params args
+    in
+    let hdr = intern_show_str "{" in
+    let suffix = intern_show_str "}" in
+    let lines = Buffer.create 256 in
+    Buffer.add_string lines
+      (Printf.sprintf "  (func $to_json_%s (param $x i32) (result i32)\n" tag);
+    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines
+      (Printf.sprintf "    (local.set $r (i32.const %d))\n" hdr);
+    List.iteri (fun i (fname, ft) ->
+      let ft = subst_params mapping ft in
+      let sep =
+        if i = 0 then intern_show_str ("\"" ^ fname ^ "\":")
+        else intern_show_str (",\"" ^ fname ^ "\":")
+      in
+      Buffer.add_string lines
+        (Printf.sprintf
+           "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+           sep);
+      Buffer.add_string lines
+        (Printf.sprintf
+           "    (local.set $r (call $__lang_str_concat (local.get $r) \
+            (call $to_json_%s (i32.load offset=%d (local.get $x)))))\n"
+           (ty_tag ft) (i * 4))
+    ) info.Typer.r_fields;
+    Buffer.add_string lines
+      (Printf.sprintf
+         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))" suffix);
+    Buffer.contents lines
+  | Ast.TyCon ("list", [elem_ty]) ->
+    let lb = intern_show_str "[" in
+    let rb = intern_show_str "]" in
+    let comma = intern_show_str "," in
+    Printf.sprintf
+      "  (func $to_json_%s (param $x i32) (result i32)\n\
+      \    (local $cur i32) (local $acc i32) (local $first i32)\n\
+      \    (local $tag i32) (local $pl i32) (local $h i32)\n\
+      \    (local.set $acc (i32.const %d))\n\
+      \    (local.set $cur (local.get $x))\n\
+      \    (local.set $first (i32.const 1))\n\
+      \    (block $end\n\
+      \      (loop $lp\n\
+      \        (local.set $tag (i32.load offset=0 (local.get $cur)))\n\
+      \        (br_if $end (i32.eqz (local.get $tag)))\n\
+      \        (local.set $pl (i32.load offset=4 (local.get $cur)))\n\
+      \        (local.set $h (i32.load offset=0 (local.get $pl)))\n\
+      \        (if (i32.eqz (local.get $first))\n\
+      \          (then\n\
+      \            (local.set $acc (call $__lang_str_concat (local.get $acc) (i32.const %d)))))\n\
+      \        (local.set $acc (call $__lang_str_concat (local.get $acc) (call $to_json_%s (local.get $h))))\n\
+      \        (local.set $first (i32.const 0))\n\
+      \        (local.set $cur (i32.load offset=4 (local.get $pl)))\n\
+      \        (br $lp)))\n\
+      \    (call $__lang_str_concat (local.get $acc) (i32.const %d)))"
+      tag lb comma (ty_tag elem_ty) rb
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
+    let vs =
+      match Hashtbl.find_opt Exhaustive.type_variants n with
+      | Some vs -> vs | None -> []
+    in
+    let mapping =
+      match vs with
+      | (cname, _) :: _ ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some info when info.Typer.params <> [] ->
+           List.combine info.Typer.params args
+         | _ -> [])
+      | [] -> []
+    in
+    let lines = Buffer.create 256 in
+    Buffer.add_string lines
+      (Printf.sprintf "  (func $to_json_%s (param $x i32) (result i32)\n" tag);
+    Buffer.add_string lines "    (local $tag i32)\n";
+    Buffer.add_string lines
+      "    (local.set $tag (i32.load offset=0 (local.get $x)))\n";
+    let rec emit_branches = function
+      | [] -> "(unreachable)"
+      | (cname, arg_opt) :: rest ->
+        let ctor_tag =
+          match Hashtbl.find_opt variant_tags cname with
+          | Some t -> t
+          | None -> raise (Codegen_error (Loc.dummy,
+            "ctor without tag in to_json_fn: " ^ cname))
+        in
+        let arm_body =
+          match arg_opt with
+          | None ->
+            Printf.sprintf "(i32.const %d)" (intern_show_str ("\"" ^ cname ^ "\""))
+          | Some pty ->
+            let pty = subst_params mapping pty in
+            let prefix = intern_show_str ("{\"" ^ cname ^ "\":") in
+            let suffix = intern_show_str "}" in
+            Printf.sprintf
+              "(call $__lang_str_concat (call $__lang_str_concat (i32.const %d) \
+               (call $to_json_%s (i32.load offset=4 (local.get $x)))) (i32.const %d))"
+              prefix (ty_tag pty) suffix
+        in
+        Printf.sprintf
+          "(if (result i32) (i32.eq (local.get $tag) (i32.const %d))\n\
+          \      (then %s)\n\
+          \      (else %s))"
+          ctor_tag arm_body (emit_branches rest)
+    in
+    Buffer.add_string lines (Printf.sprintf "    %s)" (emit_branches vs));
+    Buffer.contents lines
+  | _ ->
+    let off = intern_show_str "null" in
+    Printf.sprintf
+      "  (func $to_json_%s (param $x i32) (result i32) (i32.const %d))" tag off
 
 (* Static runtime helpers emitted into the Wasm module: strlen and
    str_concat both work on the linear memory. The bump pointer is a
@@ -4985,6 +5208,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset fn_closure_table_idx;
   Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
+  Hashtbl.reset to_json_types;
   Hashtbl.reset show_str_offsets;
   table_entries := [];
   pending_closures := [];
@@ -5204,6 +5428,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Emit one specialized `show_<tag>` function per registered type. *)
   let show_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
+  in
+  let to_json_fn_defs =
+    Hashtbl.fold (fun tag t acc -> emit_to_json_fn tag t :: acc) to_json_types []
   in
   (* Reset counters for the main body. *)
   reset ();
@@ -5425,7 +5652,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       eta_adapters_wasm []
   in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ inner_lift_adapter_strs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all
