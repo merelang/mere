@@ -4888,6 +4888,26 @@ let () =
   check "read_stdin type" (Pipeline.type_of "read_stdin") "(unit -> str)";
   assert_contains "read_stdin: C backend emits helper"
     (vec_codegen_c "let s = read_stdin () in str_len s") "__lang_read_stdin()";
+  (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
+     mem_* / str_ptr) get a native `static` implementation (a flat byte
+     arena + POSIX sockets) instead of an unresolved `extern` prototype, so
+     contrib/db can compile to a self-contained native binary. Surfaced by
+     compiling contrib/db/pg.mere to C for the first time. *)
+  let c_src_tcp =
+    vec_codegen_c
+      "extern fn tcp_connect: str -> int -> int; \
+       let fd = tcp_connect \"127.0.0.1\" 5432 in fd" in
+  assert_contains "native FFI: tcp_connect gets a static impl"
+    c_src_tcp "static int tcp_connect(const char* host, int port)";
+  assert_contains "native FFI: emits the byte arena"
+    c_src_tcp "static unsigned char __mem[";
+  assert_no_contains "native FFI: no leftover extern prototype for tcp_connect"
+    c_src_tcp "extern int tcp_connect";
+  (* C-backend string-escape bug found while compiling pg.mere: a carriage
+     return in a string literal was emitted raw into the C source (breaking
+     the string), because escape_string handled \\n / \\t but not \\r. *)
+  assert_contains "C backend escapes CR in string literals"
+    (vec_codegen_c "let s = \"a\\rb\" in str_len s") "a\\rb";
   (* P7: str ordering lowers per backend — C/LLVM reuse libc strcmp, Wasm
      reuses the $__lang_str_compare helper (sign-normalized -1/0/1). The
      condition keeps main int so main_ty:TyInt stays consistent. *)
