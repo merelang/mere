@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.3 — 2026-07-10
+
+Closes the last dogfood finding from the mq CLI.
+
+- **String ordering**: `<`, `<=`, `>`, `>=` now work directly on `str`,
+  comparing lexicographically (in addition to `int`). Previously the
+  typer forced both operands to `int`, so `"a" < "b"` failed to
+  typecheck and callers had to route through `str_compare`/`ord`.
+  Works across all four backends (interp / C / Wasm / LLVM); the `int`
+  default for unresolved operands is preserved, so existing code is
+  unaffected.
+- **contrib/json fix**: v0.1.2 claimed the serialiser had moved into
+  `module Json`, but the functions were dropped rather than re-added, so
+  the release actually shipped a parser-only `json.mere`. They are now
+  restored inside the module — `Json.to_json_str (Json.parse_json s)`
+  type-checks and round-trips as intended.
+
+1961 tests.
+
+---
+
 ## v0.1.2 — 2026-07-10
 
 More dogfood-driven fixes (from the mq CLI).
