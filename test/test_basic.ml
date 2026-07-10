@@ -195,6 +195,16 @@ let () =
     (Pipeline.type_of "let (f, g) = (fn x -> x, fn x -> x + 1) in g") "(int -> int)";
   check "nested let patterns"
     (Pipeline.process "let (a, (b, c)) = (1, (2, 3)) in a + b + c") "6";
+  (* B2 (mere-blog dogfood): irrefutable constructor / record patterns in
+     `let`. The interp always accepted these; the C and Wasm backends only
+     handled P_var / P_tuple / P_wild and now desugar the rest to a
+     single-arm match (see the codegen compile-checks below). *)
+  check "let constructor pattern"
+    (Pipeline.process "type ab = AB of int * int; let AB (a, b) = AB (3, 4) in a + b")
+    "7";
+  check "let record pattern"
+    (Pipeline.process "type P = { x: int, y: int }; let P { x = a, y = b } = P { x = 3, y = 4 } in a + b")
+    "7";
   check "let pattern with print side effect"
     (Pipeline.process "let _ = print \"hello\" in 42") "42";
   check "pp let tuple pattern"
@@ -4885,6 +4895,22 @@ let () =
     (vec_codegen_c "if \"a\" < \"b\" then 1 else 0") "strcmp";
   assert_contains "P7: Wasm backend lowers str `<` via str_compare helper"
     (wasm "if \"a\" < \"b\" then 1 else 0") "call $__lang_str_compare";
+  (* B2 (mere-blog dogfood): constructor `let` patterns compile on the C
+     and Wasm backends (desugared to a single-arm match). Previously both
+     raised a codegen error for any non-P_var/P_tuple let pattern. A
+     non-empty emit == no codegen_error raised. *)
+  check "B2: C backend compiles constructor let"
+    (let c = vec_codegen_c
+       "type ab = AB of int * int; let AB (a, b) = AB (3, 4) in a + b" in
+     if String.length c > 0 then "ok" else "empty") "ok";
+  check "B2: Wasm backend compiles constructor let"
+    (let w = wasm
+       "type ab = AB of int * int; let AB (a, b) = AB (3, 4) in a + b" in
+     if String.length w > 0 then "ok" else "empty") "ok";
+  check "B2: C backend compiles record let"
+    (let c = vec_codegen_c
+       "type P = { x: int, y: int }; let P { x = a, y = b } = P { x = 3, y = 4 } in a + b" in
+     if String.length c > 0 then "ok" else "empty") "ok";
   (* A locally-bound `join` (e.g. a string-join helper) must NOT compile
      to the Q-012 thread `pthread_join` builtin — the C backend now checks
      shadowing before that dispatch. (Surfaced by the mq dogfood's CSV
@@ -4953,6 +4979,12 @@ let () =
      companion assertion near read_stdin). *)
   assert_contains "P7: LLVM backend lowers str `<` via strcmp"
     (vec_codegen_llvm "if \"a\" < \"b\" then 1 else 0") "@strcmp";
+  (* B2 (mere-blog dogfood): constructor `let` patterns compile on LLVM too
+     (desugared to a single-arm match). *)
+  check "B2: LLVM backend compiles constructor let"
+    (let l = vec_codegen_llvm
+       "type ab = AB of int * int; let AB (a, b) = AB (3, 4) in a + b" in
+     if String.length l > 0 then "ok" else "empty") "ok";
   assert_contains "vec: LLVM codegen emits mere_vec_int runtime"
     (vec_codegen_llvm
        "let v = vec_new () in let r = vec_push v 7 in vec_len v")

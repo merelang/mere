@@ -1586,7 +1586,16 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr body;
        locals := prev
      | _ ->
-       unsupported pat.Ast.ploc "non-P_var let pattern — Phase 6 later slice")
+       (* General irrefutable pattern (constructor / record / as / …):
+          desugar `let pat = value in body` to a single-arm
+          `match value with | pat -> body`, reusing the full pattern
+          compiler. Previously only P_var / P_tuple / P_wild were handled
+          here (the interp accepted every pattern) — a backend parity gap
+          surfaced by the mere-blog dogfood. Reinstate the Let-body tail /
+          top-level flags so the synthesized match arm keeps tail position. *)
+       wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
+       emit_expr { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
   | Ast.Let_rec (bindings, body) ->
     (* Phase 26.3: inner let-rec lifting. If all bindings are registered
        in inner_lifts_wasm (= lifted to top level), just emit body. *)
