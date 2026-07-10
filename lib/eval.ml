@@ -99,6 +99,51 @@ and to_string = function
   | V_channel _ -> "<channel>"
   | V_thread _ -> "<thread>"
 
+(* `to_json x` — structural JSON serialization of any value, the derive-y
+   sibling of `show` (compile-time-specialized ad-hoc polymorphism, no trait
+   machinery). Records drop their type name and become JSON objects
+   (`Post { id = 1; title = "hi" }` -> `{"id":1,"title":"hi"}`), lists/tuples
+   become arrays, and a variant becomes `"Name"` (nullary) or
+   `{"Name": payload}`. Motivated by the mere-blog dogfood (PAIN B3): hand-
+   written record->JSON writers collapse to `to_json x`. *)
+and to_json_string = function
+  | V_int n -> string_of_int n
+  | V_float f -> string_of_float f
+  | V_bool b -> if b then "true" else "false"
+  | V_str s -> Ast.escape_string s
+  | V_unit -> "null"
+  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ -> "null"
+  | V_constr ("Nil", None) -> "[]"
+  | V_constr ("Cons", Some (V_tuple [_; _])) as v ->
+    (match try_as_list v with
+     | Some elems ->
+       "[" ^ String.concat "," (List.map to_json_string elems) ^ "]"
+     | None ->
+       (match v with
+        | V_constr (name, Some inner) ->
+          "{" ^ Ast.escape_string name ^ ":" ^ to_json_string inner ^ "}"
+        | _ -> assert false))
+  | V_constr (name, None) -> Ast.escape_string name
+  | V_constr (name, Some v) ->
+    "{" ^ Ast.escape_string name ^ ":" ^ to_json_string v ^ "}"
+  | V_tuple vs ->
+    "[" ^ String.concat "," (List.map to_json_string vs) ^ "]"
+  | V_record (_, fields) ->
+    let parts =
+      List.map (fun (f, v) ->
+        Ast.escape_string f ^ ":" ^ to_json_string v) fields in
+    "{" ^ String.concat "," parts ^ "}"
+  | V_vec arr ->
+    "[" ^ String.concat "," (List.map to_json_string (Array.to_list !arr)) ^ "]"
+  | V_strbuf buf -> Ast.escape_string (Buffer.contents buf)
+  | V_map (tbl, keys) ->
+    let parts = List.map (fun k ->
+      let v = Hashtbl.find tbl k in
+      (* JSON object keys must be strings: use the key's string form. *)
+      let ks = match k with V_str s -> s | _ -> to_string k in
+      Ast.escape_string ks ^ ":" ^ to_json_string v) !keys in
+    "{" ^ String.concat "," parts ^ "}"
+
 let type_error loc msg = raise (Eval_error (loc, msg))
 
 let builtin_print =
@@ -866,6 +911,9 @@ let builtin_fail =
 
 let builtin_show =
   V_builtin ("show", fun v -> V_str (to_string v))
+
+let builtin_to_json =
+  V_builtin ("to_json", fun v -> V_str (to_json_string v))
 
 (* Phase 12.6 — Q-010 narrowed: the first step toward trait-style API
    unification. Adds `len` as a polymorphic `'a -> int` builtin that
@@ -1788,6 +1836,7 @@ let initial_env : env =
     ("lcm", ref builtin_lcm);
     ("assert", ref builtin_assert);
     ("show", ref builtin_show);
+    ("to_json", ref builtin_to_json);
     ("fst", ref builtin_fst);
     ("snd", ref builtin_snd);
     ("id", ref builtin_id);
