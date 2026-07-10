@@ -1387,6 +1387,7 @@ let initial_env : env =
     ("assert",
        mono (Ast.TyArrow (Ast.TyBool, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
     ("show",        show_scheme);
+    ("to_json",     show_scheme);
     ("len",         len_scheme);
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);

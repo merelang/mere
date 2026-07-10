@@ -1000,6 +1000,32 @@ let () =
     (Pipeline.process
       "show 1 ++ \" / \" ++ show true ++ \" / \" ++ show \"x\"")
     "\"1 / true / \\\"x\\\"\"";
+  (* to_json — the derive-y sibling of show (structural JSON, compile-time
+     ad-hoc polymorphism, no trait machinery). Records drop their name and
+     become JSON objects; motivated by the mere-blog dogfood (PAIN B3), it
+     collapses hand-written record->JSON writers to `to_json x`.
+     (interp; codegen backends are a follow-up slice.) *)
+  check "to_json type" (Pipeline.type_of "to_json") "('a -> str)";
+  check "to_json int" (Pipeline.process "to_json 42") "\"42\"";
+  check "to_json bool" (Pipeline.process "to_json true") "\"true\"";
+  check "to_json str escapes"
+    (Pipeline.process "to_json \"a\\\"b\"") "\"\\\"a\\\\\\\"b\\\"\"";
+  check "to_json record drops name -> JSON object"
+    (Pipeline.process
+      "type P = { id: int, ok: bool };
+       to_json (P { id = 5, ok = true })") "\"{\\\"id\\\":5,\\\"ok\\\":true}\"";
+  check "to_json list -> JSON array"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       to_json [1, 2, 3]") "\"[1,2,3]\"";
+  check "to_json nullary constructor -> string"
+    (Pipeline.process
+      "type color = Red | Green;
+       to_json Red") "\"\\\"Red\\\"\"";
+  check "to_json constructor with payload -> tagged object"
+    (Pipeline.process
+      "type 'a wrap = Wrap of 'a;
+       to_json (Wrap 7)") "\"{\\\"Wrap\\\":7}\"";
   check "show with compose"
     (Pipeline.process
       "let print_int_v2 = print << show in
