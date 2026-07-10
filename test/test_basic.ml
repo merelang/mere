@@ -7981,6 +7981,32 @@ let () =
     walk (Sys.getcwd ())
   in
 
+  (* P3 (mq dogfood): contrib/json's serializer lives in the same
+     `module Json` as the parser, so they share the `json` type and
+     compose — `Json.to_json_str (Json.parse_json s)` type-checks and
+     round-trips. (Previously the writer declared its own top-level
+     `json`, so parser output couldn't be fed to the writer.) *)
+  let json_eval expr =
+    let bridge = Printf.sprintf
+      "import \"%s/contrib/json/json.mere\";\n%s\n" project_root expr in
+    Exhaustive.reset ();
+    let prog = Pipeline.parse_program ~base_dir:project_root bridge in
+    let eval_env = ref Eval.initial_env in
+    let type_env = ref Typer.initial_env in
+    Pipeline.process_decls eval_env type_env prog.decls;
+    let _ = Typer.infer !type_env prog.main in
+    match Eval.eval_in !eval_env prog.main with
+    | Eval.V_str s -> s
+    | _ -> "<not-a-string>"
+  in
+  check "P3: json parser+writer compose (array round-trip)"
+    (json_eval "Json.to_json_str (Json.parse_json \"[1, 2, 3]\")")
+    "[1,2,3]";
+  check "P3: json serializer handles all constructors"
+    (json_eval
+       "Json.to_json_str (Json.JArr (Cons (Json.JBool true, Cons (Json.JNull, Cons (Json.JNum 7, Nil)))))")
+    "[true,null,7]";
+
   let ocaml_format input =
     Exhaustive.reset ();
     let prelude_decls = Pipeline.parse_prelude () in
