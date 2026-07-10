@@ -4922,6 +4922,13 @@ let () =
     (vec_codegen_wasm
        "let v = vec_new () in let r = vec_push v (1, 2) in vec_len v")
     "$mere_vec_push";
+  (* Q-014: `chr` masks its argument to a byte before indexing the
+     256-entry char_table, so out-of-range input can't read past it into
+     adjacent memory (was a corruption in wasm/llvm; C already masked). *)
+  assert_contains "chr masks out-of-range index (wasm)"
+    (vec_codegen_wasm "chr 65") "(i32.and (local.get $n) (i32.const 255))";
+  assert_contains "chr masks out-of-range index (llvm)"
+    (vec_codegen_llvm "chr 65") "and i32 %n, 255";
   (* --- Phase 15.5: codegen of higher-order API (vec_set / vec_iter / vec_fold) --- *)
   let src_set =
     "let v = vec_new () in let __ = vec_push v 10 in \

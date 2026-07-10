@@ -3402,10 +3402,14 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
     (local.get $r))
-  ;; Phase 36: chr n — return char_table entry pointer for byte n
+  ;; Phase 36: chr n — return char_table entry pointer for byte n.
+  ;; Mask to a single byte (n & 0xFF) so out-of-range input can't index
+  ;; past the 256-entry table into adjacent memory. Matches the C backend
+  ;; ((unsigned char)n) and the self-host $chr (i32.store8 truncation).
   (func $__lang_char_at_chr (param $n i32) (result i32)
     (call $__lang_char_at_setup)
-    (i32.add (global.get $__lang_char_table) (i32.mul (local.get $n) (i32.const 2))))
+    (i32.add (global.get $__lang_char_table)
+      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 2))))
   ;; Phase 36: abs / min / max / clamp
   (func $__lang_abs (param $n i32) (result i32)
     (if (i32.lt_s (local.get $n) (i32.const 0))
