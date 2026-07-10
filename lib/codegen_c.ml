@@ -1689,6 +1689,12 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Phase 36: str_starts_with s p — curried 2-arg *)
        Printf.sprintf "__lang_str_starts_with(%s, %s)"
          (emit_expr s_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_eq"; _ }, a_e) ->
+       (* str_eq a b — curried 2-arg; same as the `==`-on-str path
+          (strcmp). Interp / Wasm have str_eq as a function; the C backend
+          previously only had the `==` operator (mq dogfood P6). *)
+       Printf.sprintf "(strcmp(%s, %s) == 0)"
+         (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_replace"; _ }, s_e); _ }, old_e) ->
        (* Phase 36: str_replace s old new — curried 3-arg *)
        Printf.sprintf "__lang_str_replace(%s, %s, %s)"
@@ -4624,6 +4630,10 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_with_deps t
         | None -> ())
+     (* str_of_int lowers to show_int(), so ensure show_int is emitted even
+        when the program never uses `show` directly (mq dogfood P9). *)
+     | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
+       add_with_deps Ast.TyInt
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
