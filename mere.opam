@@ -3,7 +3,7 @@ opam-version: "2.0"
 synopsis:
   "Make Explicit Region-bound Effects — an ML-family language with region memory, capability effects, and 3 codegen backends"
 description:
-  "Mere is a small ML-family programming language implemented in OCaml. It features Hindley-Milner type inference with let-polymorphism, a region/view-based memory model with refined borrow modes, capability-passing effects, and feature-parity codegen to C / LLVM IR / Wasm in addition to the tree-walking interpreter. 1936 tests, 130+ example programs."
+  "Mere is a small ML-family programming language implemented in OCaml. It features Hindley-Milner type inference with let-polymorphism, a region/view-based memory model with refined borrow modes, capability-passing effects, and feature-parity codegen to C / LLVM IR / Wasm in addition to the tree-walking interpreter. 1945 tests, 130+ example programs."
 maintainer: ["Kazuma Furuhashi <k.furuhashi10@gmail.com>"]
 authors: ["Kazuma Furuhashi <k.furuhashi10@gmail.com>"]
 license: "MIT"

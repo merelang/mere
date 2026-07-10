@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.1 — 2026-07-10
+
+Fixes surfaced by dogfooding two real apps on top of Mere: a realtime
+collaborative editor (mere-notes, Wasm) and a native `jq`-like CLI (mq,
+C backend). Mostly C-backend and contrib hardening.
+
+- **Native CLI I/O**: the C backend implements `args()` (argv → str list),
+  so a compiled Mere program can read its arguments.
+- **C backend correctness**: respect shadowing of the `join` builtin (a
+  local `join` no longer compiles to `pthread_join`); fix cross-host
+  capture merging in inner-fn lifting (composing two modules that each
+  have a same-named inner fn no longer corrupts captures); mask `chr`'s
+  byte index so out-of-range input can't read past the char table.
+- **C backend parity / ergonomics**: `str_eq` works as a function (not
+  just the `==` operator); `str_of_int` pulls in the `show_int` helper;
+  type annotations accept qualified module types (`Module.t`).
+- **contrib hygiene**: `contrib/json` and `contrib/csv` no longer run
+  self-test demos on import (library-clean, module-only).
+- **Package system v0.2** (from the mere-notes dogfood): `mere install`
+  (manifest + git/subdir deps + lockfile), a `[host]` entry + `mere serve`
+  that vendor and run the Node host, and distribution via `release.yml` +
+  `scripts/install.sh`.
+
+1945 tests.
+
+---
+
 ## v0.1.0 — 2026-07-09 (first tagged release)
 
 First public tagged release of the Mere compiler. What it contains:
