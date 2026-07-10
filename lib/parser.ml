@@ -216,6 +216,14 @@ let rec parse_program_internal tokens =
       in
       let args, rest = parse_bracket_args [] rest in
       expand_alias_or_tycon name args, rest
+    | (_, T_ident m) :: (_, T_dot) :: (_, T_ident tyname) :: rest
+      when starts_with_upper m ->
+      (* Qualified module type, e.g. `Json.json` in an annotation. Module-
+         internal types are registered globally *unqualified* (see the
+         module body parser), so drop the `Module.` prefix and resolve the
+         bare type name. Mirrors qualified value / constructor access,
+         which already parse. (mq dogfood P4.) *)
+      expand_alias_or_tycon tyname [], rest
     | (_, T_ident name) :: rest -> expand_alias_or_tycon name [], rest
     | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
     | (_, T_lparen) :: rest ->

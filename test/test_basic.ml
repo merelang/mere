@@ -4865,6 +4865,14 @@ let () =
     (vec_codegen_c
        "let rec join = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + join t in join (Cons (1, Cons (2, Nil)))")
     "pthread_join";
+  (* P6: str_eq works as a function on the C backend (was only the `==`
+     operator on str). *)
+  assert_contains "str_eq: C backend emits strcmp"
+    (vec_codegen_c "if str_eq \"a\" \"b\" then 1 else 0") "strcmp";
+  (* P9: str_of_int lowers to show_int(), so the show_int definition must
+     be emitted even without a direct `show` (was an undeclared call). *)
+  assert_contains "str_of_int: C backend emits show_int definition"
+    (vec_codegen_c "let _ = str_of_int 42 in 0") "show_int(int v)";
   (* Two top-level fns each with a same-named inner `loop` but different
      captures must not merge capture sets. `fa`'s loop captures only x;
      `fb`'s also captures y. The transitive-capture fixpoint used to
@@ -9570,6 +9578,14 @@ let () =
         let (sb, se) = search 0 hi 0 0 in \
         let (pb, pe) = combine (par_map worker chunks) 0 0 in \
         (sb, se, pb, pe)") "(40, 1, 40, 4)";
+
+  (* P4: a qualified module type (`M.t`) is accepted in a type annotation
+     (module-internal types are registered unqualified, so it resolves to
+     `t`). Used to fail with "expected ',' or ')' in param list" at the dot. *)
+  check "qualified module type in annotation"
+    (Pipeline.process
+       "module M { type t = | A | B; } let f = fn (x: M.t) -> match x with | A -> 1 | B -> 2 in f B")
+    "2";
 
   (* Phase 57: package installer (mere.toml parse + path normalise). The
      fetch/copy path shells out to git and is exercised end-to-end by hand
