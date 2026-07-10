@@ -4908,6 +4908,18 @@ let () =
      the string), because escape_string handled \\n / \\t but not \\r. *)
   assert_contains "C backend escapes CR in string literals"
     (vec_codegen_c "let s = \"a\\rb\" in str_len s") "a\\rb";
+  (* Native full-stack Stage 3-4: http_serve gets a native accept-loop impl
+     (taking the closure_str_str handler), and sha256_hex a real SHA-256, so
+     a web+DB app compiles to a single native binary. *)
+  assert_contains "native HTTP: http_serve gets a native impl"
+    (vec_codegen_c
+       "extern fn http_serve: int -> (str -> str) -> unit; \
+        let h = fn (r: str) -> r in let _ = http_serve 8080 h in 0")
+    "static int http_serve(int port, closure_str_str handler)";
+  assert_contains "native util: sha256_hex gets a real SHA-256 impl"
+    (vec_codegen_c
+       "extern fn sha256_hex: str -> str; str_len (sha256_hex \"x\")")
+    "static char* sha256_hex(const char* msg)";
   (* P7: str ordering lowers per backend — C/LLVM reuse libc strcmp, Wasm
      reuses the $__lang_str_compare helper (sign-normalized -1/0/1). The
      condition keeps main int so main_ty:TyInt stays consistent. *)
