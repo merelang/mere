@@ -1137,6 +1137,23 @@ let () =
     (Pipeline.process
       "if str_compare \"a\" \"b\" < 0 then \"a-first\" else \"b-first\"") "\"a-first\"";
 
+  (* --- P7 (mq dogfood): the ordering operators </<=/>/>= work directly on
+     str, comparing lexicographically. Previously the typer defaulted both
+     operands to int, so `"a" < "b"` failed to typecheck and mq had to route
+     through `ord`/`str_compare`. Now str is a first-class ordered type; the
+     comparison stays backward-compatible (unknown-meta operands still
+     default to int). Must hold across interp + C + Wasm + LLVM. *)
+  check "str lt true"  (Pipeline.process "\"apple\" < \"banana\"") "true";
+  check "str lt false" (Pipeline.process "\"banana\" < \"apple\"") "false";
+  check "str le equal" (Pipeline.process "\"abc\" <= \"abc\"") "true";
+  check "str gt true"  (Pipeline.process "\"b\" > \"a\"") "true";
+  check "str ge false" (Pipeline.process "\"a\" >= \"b\"") "false";
+  check "str lt prefix" (Pipeline.process "\"abc\" < \"abcd\"") "true";
+  check "str ordering types as bool" (Pipeline.type_of "\"a\" < \"b\"") "bool";
+  (* int ordering must stay intact (no regression from the str relaxation) *)
+  check "int lt still works" (Pipeline.process "3 < 5") "true";
+  check "int ge still works" (Pipeline.process "5 >= 5") "true";
+
   (* --- as-pattern `| pat as name -> body` --- *)
   check "as-pattern tuple"
     (Pipeline.process
@@ -4861,6 +4878,13 @@ let () =
   check "read_stdin type" (Pipeline.type_of "read_stdin") "(unit -> str)";
   assert_contains "read_stdin: C backend emits helper"
     (vec_codegen_c "let s = read_stdin () in str_len s") "__lang_read_stdin()";
+  (* P7: str ordering lowers per backend — C/LLVM reuse libc strcmp, Wasm
+     reuses the $__lang_str_compare helper (sign-normalized -1/0/1). The
+     condition keeps main int so main_ty:TyInt stays consistent. *)
+  assert_contains "P7: C backend lowers str `<` via strcmp"
+    (vec_codegen_c "if \"a\" < \"b\" then 1 else 0") "strcmp";
+  assert_contains "P7: Wasm backend lowers str `<` via str_compare helper"
+    (wasm "if \"a\" < \"b\" then 1 else 0") "call $__lang_str_compare";
   (* A locally-bound `join` (e.g. a string-join helper) must NOT compile
      to the Q-012 thread `pthread_join` builtin — the C backend now checks
      shadowing before that dispatch. (Surfaced by the mq dogfood's CSV
@@ -4925,6 +4949,10 @@ let () =
     (let ll = vec_codegen_llvm
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length ll > 0 then "ok" else "empty") "ok";
+  (* P7: str ordering on the LLVM backend reuses libc strcmp (see the C-backend
+     companion assertion near read_stdin). *)
+  assert_contains "P7: LLVM backend lowers str `<` via strcmp"
+    (vec_codegen_llvm "if \"a\" < \"b\" then 1 else 0") "@strcmp";
   assert_contains "vec: LLVM codegen emits mere_vec_int runtime"
     (vec_codegen_llvm
        "let v = vec_new () in let r = vec_push v 7 in vec_len v")

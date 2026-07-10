@@ -1474,8 +1474,14 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let tb = infer env b in
     (match op with
      | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
-       unify a.loc Ast.TyInt ta;
-       unify b.loc Ast.TyInt tb
+       (* Ordering works on int or str (lexicographic). Unify the two
+          sides, then: str → allow; otherwise default to int (keeps the
+          historical int default for unknowns and rejects e.g. float,
+          which uses the f_* builtins). *)
+       unify a.loc ta tb;
+       (match Ast.walk ta with
+        | Ast.TyStr -> ()
+        | _ -> unify a.loc Ast.TyInt ta; unify b.loc Ast.TyInt tb)
      | Ast.Eq | Ast.Ne ->
        (* Symmetric: lhs is the "first observed" type. *)
        unify e.loc ta tb);

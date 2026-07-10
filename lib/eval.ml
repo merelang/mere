@@ -1947,8 +1947,13 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | Ast.Le, V_int x, V_int y -> V_bool (x <= y)
      | Ast.Gt, V_int x, V_int y -> V_bool (x > y)
      | Ast.Ge, V_int x, V_int y -> V_bool (x >= y)
+     (* Lexicographic ordering on strings. *)
+     | Ast.Lt, V_str x, V_str y -> V_bool (String.compare x y < 0)
+     | Ast.Le, V_str x, V_str y -> V_bool (String.compare x y <= 0)
+     | Ast.Gt, V_str x, V_str y -> V_bool (String.compare x y > 0)
+     | Ast.Ge, V_str x, V_str y -> V_bool (String.compare x y >= 0)
      | (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), _, _ ->
-       type_error e.Ast.loc "ordering requires int operands"
+       type_error e.Ast.loc "ordering requires int or str operands"
      | Ast.Eq, _, _ -> V_bool (value_eq va vb)
      | Ast.Ne, _, _ -> V_bool (not (value_eq va vb)))
   | Ast.Logic (op, a, b) ->
