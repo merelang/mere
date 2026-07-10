@@ -4999,6 +4999,13 @@ let () =
     (let w = wasm
        "type ab = AB of int * int; let AB (a, b) = AB (3, 4) in a + b" in
      if String.length w > 0 then "ok" else "empty") "ok";
+  (* to_json on the Wasm backend: a type-specialized $to_json_<tag> func is
+     emitted, mirroring $show_<tag>. Verified byte-identical to interp
+     end-to-end via wat2wasm+node (record/list/tuple/variant). *)
+  assert_contains "to_json: Wasm backend emits a record specialization"
+    (wasm_with_decls
+       "type R = { a: int, b: bool }; to_json (R { a = 1, b = true })")
+    "(func $to_json_R";
   check "B2: C backend compiles record let"
     (let c = vec_codegen_c
        "type P = { x: int, y: int }; let P { x = a, y = b } = P { x = 3, y = 4 } in a + b" in
