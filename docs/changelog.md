@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.5 — 2026-07-10
+
+**Native full-stack**: a web + Postgres app now compiles to a single
+native binary. Driven by the mere-blog dogfood.
+
+- **Native FFI runtime (C backend)**: the `tcp_*` / `mem_*` / `str_ptr`
+  externs that `contrib/db` (pg / mysql / redis) speak — previously
+  host-provided over the Wasm linear memory — get native implementations:
+  a Wasm-style flat byte arena (32-bit offsets) plus POSIX sockets. So the
+  pure-Mere wire-protocol drivers run in a native binary.
+- **Native HTTP server**: `http_serve` runs a POSIX accept loop with the
+  same handler contract as the Node host (`"METHOD URL"` + `http_set_*` /
+  `http_get_header` / `http_current_body`).
+- **Native crypto/util**: a real FIPS 180-4 `sha256_hex` and a
+  `/dev/urandom`-backed `gen_request_id` (password hashing + session ids).
+- Result: `mere -c app.mere | clang` yields a self-contained native web+DB
+  server — no Node, no Wasm. (Postgres SSL / SCRAM auth on native are
+  stubbed for now; use trust / plaintext.)
+- **`let` main diagnostic**: a top-level `let main = …` now warns on the
+  compile paths (not just the interpreter) with a message pointing at the
+  entry-point convention, instead of surfacing a cryptic downstream
+  `wat2wasm` clash.
+- **Fix**: the C backend escaped `\n` / `\t` in string literals but not
+  `\r`, so a carriage return broke the emitted C string (hit compiling
+  pg's COPY unescape).
+
+1978 tests.
+
+---
+
 ## v0.1.4 — 2026-07-10
 
 Driven by the mere-blog dogfood (a Rails-ish blog on `contrib/http` +
