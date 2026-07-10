@@ -4850,6 +4850,13 @@ let () =
   in
   assert_contains "vec: C codegen emits mere_vec_int runtime"
     c_src_default_region "mere_vec_int";
+  (* Native CLI: `args ()` compiles to a real argv→str list on the C
+     backend (was an undeclared-identifier clang error). main() captures
+     argc/argv; __lang_args builds the list. *)
+  let c_src_args = vec_codegen_c "let a = args () in 0" in
+  assert_contains "args: C codegen emits __lang_args" c_src_args "__lang_args()";
+  assert_contains "args: C main captures argv"
+    c_src_args "int main(int argc, char** argv)";
   assert_contains "vec: C codegen wires vec_new outside region to default arena"
     c_src_default_region "mere_vec_int_new(&__lang_default_region)";
   assert_contains "vec: C codegen routes vec_push to runtime helper"
