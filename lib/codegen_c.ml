@@ -1186,7 +1186,12 @@ let rec emit_expr (e : Ast.expr) : string =
     (match List.assoc_opt name !current_env_subst with
      | Some s -> s
      | None ->
-       if Hashtbl.mem toplevel_fn_names name then c_safe_name name ^ "_as_value"
+       (* A local binding / parameter shadows a same-named top-level fn:
+          emit the local (the C parameter / local), NOT the global's
+          `<name>_as_value`. Without this, e.g. the prelude `list_fold`'s
+          parameter `f` resolved to a user top-level `let f`. *)
+       if List.mem_assoc name !current_var_types then c_safe_name name
+       else if Hashtbl.mem toplevel_fn_names name then c_safe_name name ^ "_as_value"
        else if Hashtbl.mem inner_lifts name then
          (* Phase 39.A2 (DEFERRED patterns.md §8): materialize the inner-lifted
             fn so it can be used in value position. Pack the captures into an
@@ -2312,8 +2317,13 @@ let rec emit_expr (e : Ast.expr) : string =
        ) li.captures in
        li.lifted_name ^ "(" ^
        String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
-     | Ast.Var name when Hashtbl.mem toplevel_fn_names name ->
-       (* Direct call to a known top-level fn — fast path, no closure. *)
+     | Ast.Var name when Hashtbl.mem toplevel_fn_names name
+                         && not (List.mem_assoc name !current_var_types)
+                         && not (List.mem_assoc name !current_env_subst) ->
+       (* Direct call to a known top-level fn — fast path, no closure.
+          Guarded so a same-named local binding / captured parameter (e.g.
+          the prelude `list_fold`'s parameter `f` vs a user top-level `let
+          f`) falls through to the closure-value call path instead. *)
        (* Phase 23.3: per-instantiation dispatch. If name is multi-inst,
           use the call site's Var.ty (walked, which is the specific
           arrow type for this use) to pick the mangled name. *)
