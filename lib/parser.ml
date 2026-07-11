@@ -1219,6 +1219,8 @@ let rec parse_program_internal tokens =
          (* Regular list literal: continue parsing `, e2, e3, ...]`. *)
          let rec parse_elems acc toks =
            match toks with
+           (* trailing comma before `]` is allowed: `[1, 2, 3,]` *)
+           | (_, T_comma) :: (_, T_rbracket) :: rest -> List.rev acc, rest
            | (_, T_comma) :: rest ->
              let e, toks = expr rest in
              parse_elems (e :: acc) toks
@@ -1348,6 +1350,8 @@ let rec parse_program_internal tokens =
        | (_, T_comma) :: _ ->
          let rec collect acc toks =
            match toks with
+           (* trailing comma before `)` is allowed: `(a, b,)` *)
+           | (_, T_comma) :: ((_, T_rparen) :: _ as rest) -> List.rev acc, rest
            | (_, T_comma) :: rest ->
              let next, toks = expr rest in
              collect (next :: acc) toks

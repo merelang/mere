@@ -334,6 +334,7 @@ let p2 = { p | x = 100 } in p2.x                       // record update
 
 type 'a list = Nil | Cons of 'a * 'a list;
 [1, 2, 3]                           // list literal sugar = Cons (1, Cons (2, Cons (3, Nil)))
+[1, 2, 3,]                          // trailing comma allowed (also in tuple / record literals)
 []                                  // = Nil
 ```
 
