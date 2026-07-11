@@ -471,6 +471,13 @@ let () =
     (Pipeline.type_of
       "type 'a list = Nil | Cons of 'a * 'a list;
        [\"x\"]") "str list";
+  (* trailing comma allowed in list and tuple literals *)
+  check "list literal trailing comma"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       [1, 2, 3,]") "[1, 2, 3]";
+  check "tuple literal trailing comma"
+    (Pipeline.process "(1, 2, 3,)") "(1, 2, 3)";
   check "nested list literal"
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
