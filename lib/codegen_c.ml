@@ -177,6 +177,10 @@ let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 (* Same, for `to_json` (the derive-y JSON sibling of show). Keyed by ty_tag. *)
 let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Same, for `of_json` — the deserialization mirror. Keyed by the target
+   (result) type's ty_tag. When non-empty, the JSON-parser runtime is emitted. *)
+let of_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Compound types (tuple / record / variant) compared with == / != — they
    need a structural `eq_<tag>` since C can't `==` a struct. Keyed by ty_tag. *)
 let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
@@ -1908,6 +1912,17 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> unsupported e.loc "to_json: missing arg type info"
        in
        Printf.sprintf "to_json_%s(%s)" (ty_tag arg_ty) (emit_expr arg)
+     | Ast.Var "of_json" ->
+       (* Deserialization mirror: dispatch on the call node's RESULT type
+          (the `'a` in `str -> 'a`), read from this App node's inferred ty. *)
+       let target_ty =
+         match e.Ast.ty with
+         | Some t -> Ast.walk t
+         | None ->
+           unsupported e.loc
+             "of_json: cannot infer target type (add an annotation, e.g. `(of_json s : T)`)"
+       in
+       Printf.sprintf "of_json_%s(%s)" (ty_tag target_ty) (emit_expr arg)
      | Ast.Var "mk_logger" ->
        (* Phase 16.3 / DEFERRED §1.5: emit a runtime helper call that
           returns a Logger record (3 closure_str_unit fields capturing
@@ -3445,6 +3460,15 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
          char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __buf;\n\
        }"
       header cty elem elem
+  | Ast.TyCon ("option", [inner]) ->
+    (* option is a transparent JSON nullable: None -> null, Some x -> x.
+       Matches the interpreter and keeps of_json round-trip. *)
+    let is_ptr = is_recursive_variant cty in
+    let dot = if is_ptr then "->" else "." in
+    let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
+    Printf.sprintf
+      "%s {\n  if (v%stag == %d) return \"null\";\n  return to_json_%s(v%spayload.Some);\n}"
+      header dot none_tag (ty_tag (Ast.walk inner)) dot
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     let info = Hashtbl.find Typer.records name in
     let fields_parts =
@@ -3496,6 +3520,242 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
 
 let emit_to_json_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static const char* to_json_%s(%s);" tag (c_type_of t)
+
+(* ===== of_json: the deserialization mirror =====
+   A tiny JSON parser builds a generic mj_node tree; per-type __ojnode_<tag>
+   decoders walk it into the target C value, and the public of_json_<tag>
+   entry parses then decodes. Emitted only when the program uses of_json
+   (of_json_types non-empty). *)
+let of_json_runtime : string = {ojson|
+typedef enum { MJ_NULL, MJ_BOOL, MJ_NUM, MJ_STR, MJ_ARR, MJ_OBJ } mj_kind;
+typedef struct mj_node {
+  mj_kind kind;
+  int b;                    /* MJ_BOOL */
+  const char* text;         /* MJ_STR (unescaped) or MJ_NUM (raw lexeme) */
+  struct mj_node** items;   /* MJ_ARR elements / MJ_OBJ values */
+  const char** keys;        /* MJ_OBJ keys */
+  int len;
+} mj_node;
+static void __mj_die(const char* msg) { fprintf(stderr, "of_json: %s\n", msg); exit(1); }
+static mj_node* __mj_alloc(mj_kind k) {
+  mj_node* n = (mj_node*)calloc(1, sizeof(mj_node)); n->kind = k; return n; }
+typedef struct { const char* s; int pos; int n; } __mj_ps;
+static void __mj_ws(__mj_ps* p) {
+  while (p->pos < p->n) { char c = p->s[p->pos];
+    if (c==' '||c=='\t'||c=='\n'||c=='\r') p->pos++; else break; } }
+static char* __mj_pstr(__mj_ps* p) {
+  p->pos++; /* opening quote */
+  size_t cap = 16, len = 0; char* buf = (char*)malloc(cap);
+  while (p->pos < p->n) {
+    char c = p->s[p->pos];
+    if (c == '"') { p->pos++; buf[len] = 0; return buf; }
+    if (c == '\\' && p->pos + 1 < p->n) {
+      p->pos++; char e = p->s[p->pos]; char out = e;
+      if (e=='n') out='\n'; else if (e=='t') out='\t'; else if (e=='r') out='\r';
+      else if (e=='b') out='\b'; else if (e=='f') out='\f';
+      if (len+1 >= cap) { cap*=2; buf=(char*)realloc(buf,cap); }
+      buf[len++] = out; p->pos++;
+    } else {
+      if (len+1 >= cap) { cap*=2; buf=(char*)realloc(buf,cap); }
+      buf[len++] = c; p->pos++;
+    }
+  }
+  __mj_die("unterminated string"); return 0;
+}
+static mj_node* __mj_val(__mj_ps* p);
+static mj_node* __mj_arr(__mj_ps* p) {
+  p->pos++; __mj_ws(p);
+  mj_node* node = __mj_alloc(MJ_ARR);
+  size_t cap = 8; node->items = (mj_node**)malloc(cap*sizeof(mj_node*));
+  if (p->pos < p->n && p->s[p->pos]==']') { p->pos++; return node; }
+  for (;;) {
+    mj_node* v = __mj_val(p);
+    if ((size_t)node->len >= cap) { cap*=2; node->items=(mj_node**)realloc(node->items,cap*sizeof(mj_node*)); }
+    node->items[node->len++] = v; __mj_ws(p);
+    if (p->pos<p->n && p->s[p->pos]==',') { p->pos++; __mj_ws(p); continue; }
+    if (p->pos<p->n && p->s[p->pos]==']') { p->pos++; break; }
+    __mj_die("expected ',' or ']' in array");
+  }
+  return node;
+}
+static mj_node* __mj_obj(__mj_ps* p) {
+  p->pos++; __mj_ws(p);
+  mj_node* node = __mj_alloc(MJ_OBJ);
+  size_t cap = 8;
+  node->items = (mj_node**)malloc(cap*sizeof(mj_node*));
+  node->keys = (const char**)malloc(cap*sizeof(char*));
+  if (p->pos<p->n && p->s[p->pos]=='}') { p->pos++; return node; }
+  for (;;) {
+    __mj_ws(p);
+    if (!(p->pos<p->n && p->s[p->pos]=='"')) __mj_die("expected object key");
+    char* k = __mj_pstr(p); __mj_ws(p);
+    if (!(p->pos<p->n && p->s[p->pos]==':')) __mj_die("expected ':'");
+    p->pos++;
+    mj_node* v = __mj_val(p);
+    if ((size_t)node->len >= cap) { cap*=2;
+      node->items=(mj_node**)realloc(node->items,cap*sizeof(mj_node*));
+      node->keys=(const char**)realloc(node->keys,cap*sizeof(char*)); }
+    node->keys[node->len] = k; node->items[node->len] = v; node->len++; __mj_ws(p);
+    if (p->pos<p->n && p->s[p->pos]==',') { p->pos++; continue; }
+    if (p->pos<p->n && p->s[p->pos]=='}') { p->pos++; break; }
+    __mj_die("expected ',' or '}' in object");
+  }
+  return node;
+}
+static mj_node* __mj_val(__mj_ps* p) {
+  __mj_ws(p);
+  if (p->pos >= p->n) __mj_die("unexpected end of input");
+  char c = p->s[p->pos];
+  if (c=='{') return __mj_obj(p);
+  if (c=='[') return __mj_arr(p);
+  if (c=='"') { mj_node* n = __mj_alloc(MJ_STR); n->text = __mj_pstr(p); return n; }
+  if (c=='t') { if (p->pos+4<=p->n && strncmp(p->s+p->pos,"true",4)==0) { p->pos+=4; mj_node* n=__mj_alloc(MJ_BOOL); n->b=1; return n; } __mj_die("expected true"); }
+  if (c=='f') { if (p->pos+5<=p->n && strncmp(p->s+p->pos,"false",5)==0) { p->pos+=5; mj_node* n=__mj_alloc(MJ_BOOL); n->b=0; return n; } __mj_die("expected false"); }
+  if (c=='n') { if (p->pos+4<=p->n && strncmp(p->s+p->pos,"null",4)==0) { p->pos+=4; return __mj_alloc(MJ_NULL); } __mj_die("expected null"); }
+  if (c=='-' || (c>='0'&&c<='9')) {
+    int start = p->pos; if (c=='-') p->pos++;
+    while (p->pos<p->n) { char d=p->s[p->pos];
+      if ((d>='0'&&d<='9')||d=='.'||d=='e'||d=='E'||d=='+'||d=='-') p->pos++; else break; }
+    int len = p->pos-start; char* t=(char*)malloc(len+1); memcpy(t,p->s+start,len); t[len]=0;
+    mj_node* n=__mj_alloc(MJ_NUM); n->text=t; return n;
+  }
+  __mj_die("unexpected character"); return 0;
+}
+static mj_node* __mj_parse(const char* s) {
+  __mj_ps p; p.s=s; p.pos=0; p.n=(int)strlen(s);
+  mj_node* v=__mj_val(&p); __mj_ws(&p); return v;
+}
+static mj_node* __mj_field(mj_node* o, const char* key) {
+  if (o->kind != MJ_OBJ) __mj_die("expected a JSON object");
+  for (int i=0;i<o->len;i++) if (strcmp(o->keys[i],key)==0) return o->items[i];
+  __mj_die("missing object field"); return 0;
+}
+|ojson}
+
+(* Emit both the node decoder `__ojnode_<tag>` and the string entry
+   `of_json_<tag>` for one target type. *)
+let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  (* Recursive variants (e.g. list) are a typedef aliasing a node pointer, so
+     the pointer-ness is hidden — detect via recursive_variants (keyed by the
+     mono type name, which equals cty here), not a trailing '*'. *)
+  let is_ptr = is_recursive_variant cty in
+  let node_hdr = Printf.sprintf "static %s __ojnode_%s(mj_node* j)" cty tag in
+  (* construct a constructor value (recursive -> heap node; else compound). *)
+  let construct cname tag_n arg_c_opt =
+    if is_ptr then
+      let node = cty ^ "_node" in
+      Printf.sprintf
+        "({ %s* __p = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __p->tag = %d%s; __p; })"
+        node node node tag_n
+        (match arg_c_opt with None -> "" | Some a -> "; __p->payload." ^ cname ^ " = " ^ a)
+    else
+      Printf.sprintf "((%s){.tag = %d%s})" cty tag_n
+        (match arg_c_opt with None -> "" | Some a -> ", .payload." ^ cname ^ " = " ^ a)
+  in
+  let body =
+    match Ast.walk t with
+    | Ast.TyInt -> "  return (int)strtol(j->text, 0, 10);"
+    | Ast.TyBool -> "  return j->b;"
+    | Ast.TyStr -> "  return j->text;"
+    | Ast.TyFloat -> "  return strtod(j->text, 0);"
+    | Ast.TyUnit -> "  (void)j; return 0;"
+    | Ast.TyArrow _ -> "  (void)j; __mj_die(\"cannot decode a function\"); return 0;"
+    | Ast.TyTuple ts ->
+      let inits =
+        List.mapi (fun i et ->
+          Printf.sprintf ".f%d = __ojnode_%s(j->items[%d])" i (ty_tag (Ast.walk et)) i) ts
+      in
+      Printf.sprintf
+        "  if (j->kind != MJ_ARR || j->len != %d) __mj_die(\"expected a %d-element array\");\n  return ((%s){%s});"
+        (List.length ts) (List.length ts) cty (String.concat ", " inits)
+    | Ast.TyCon ("list", [elem]) ->
+      let elem_tag = ty_tag (Ast.walk elem) in
+      let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
+      let cons_tag = try Hashtbl.find variant_tags "Cons" with Not_found -> 1 in
+      let node = cty ^ "_node" in
+      Printf.sprintf
+        "  if (j->kind != MJ_ARR) __mj_die(\"expected a JSON array\");\n  \
+         %s __acc = ({ %s* __nil = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __nil->tag = %d; __nil; });\n  \
+         for (int __i = j->len - 1; __i >= 0; __i--) {\n    \
+           %s* __n = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s));\n    \
+           __n->tag = %d;\n    \
+           __n->payload.Cons.f0 = __ojnode_%s(j->items[__i]);\n    \
+           __n->payload.Cons.f1 = __acc;\n    \
+           __acc = __n;\n  }\n  return __acc;"
+        cty node node node nil_tag node node node cons_tag elem_tag
+    | Ast.TyCon ("option", [inner]) ->
+      let inner_tag = ty_tag (Ast.walk inner) in
+      let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
+      let some_tag = try Hashtbl.find variant_tags "Some" with Not_found -> 1 in
+      Printf.sprintf
+        "  if (j->kind == MJ_NULL) return %s;\n  return %s;"
+        (construct "None" none_tag None)
+        (construct "Some" some_tag (Some (Printf.sprintf "__ojnode_%s(j)" inner_tag)))
+    | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+      let info = Hashtbl.find Typer.records name in
+      let inits =
+        List.map (fun (fname, ft) ->
+          Printf.sprintf ".%s = __ojnode_%s(__mj_field(j, \"%s\"))"
+            fname (ty_tag (Ast.walk ft)) fname)
+          info.Typer.r_fields
+      in
+      Printf.sprintf "  return ((%s){%s});" cty (String.concat ", " inits)
+    | Ast.TyCon (name, args) ->
+      (* general variant: JSON string -> nullary ctor; {"Ctor":payload} -> Ctor payload *)
+      let variants =
+        if Hashtbl.mem polymorphic_variants name then
+          let (params, vs) = Hashtbl.find polymorphic_variants name in
+          subst_variants params args vs
+        else
+          Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+            if info.type_name = name && Ast.canonical_ctor cname = cname
+            then (cname, info.arg) :: acc else acc)
+            Typer.constructors []
+      in
+      let nullary_cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+          match arg_opt with
+          | None ->
+            Some (Printf.sprintf
+              "    if (strcmp(j->text, \"%s\") == 0) return %s;"
+              cname (construct cname tag_n None))
+          | Some _ -> None) variants
+      in
+      let payload_cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+          match arg_opt with
+          | Some ty ->
+            Some (Printf.sprintf
+              "    if (strcmp(__k, \"%s\") == 0) return %s;"
+              cname
+              (construct cname tag_n
+                 (Some (Printf.sprintf "__ojnode_%s(__v)" (ty_tag (Ast.walk ty))))))
+          | None -> None) variants
+      in
+      Printf.sprintf
+        "  if (j->kind == MJ_STR) {\n%s\n  }\n  \
+         if (j->kind == MJ_OBJ && j->len == 1) {\n    \
+           const char* __k = j->keys[0]; mj_node* __v = j->items[0];\n%s\n  }\n  \
+         __mj_die(\"cannot decode variant %s\"); return %s;"
+        (String.concat "\n" nullary_cases)
+        (String.concat "\n" payload_cases)
+        name
+        (if is_ptr then "0" else Printf.sprintf "((%s){0})" cty)
+    | _ ->
+      Printf.sprintf "  (void)j; __mj_die(\"unsupported of_json target\"); return %s;"
+        (if is_ptr then "0" else Printf.sprintf "((%s){0})" cty)
+  in
+  Printf.sprintf
+    "%s {\n%s\n}\nstatic %s of_json_%s(const char* __s) { return __ojnode_%s(__mj_parse(__s)); }"
+    node_hdr body cty tag tag
+
+let emit_of_json_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  Printf.sprintf "static %s __ojnode_%s(mj_node*); static %s of_json_%s(const char*);"
+    cty tag cty tag
 
 (* Structural equality for compound types (tuple / record / variant). C
    can't `==` a struct, so `a == b` on such a value lowers to eq_<tag>(a, b)
@@ -5210,6 +5470,11 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_into to_json_types t
         | None -> ())
+     | Ast.App ({ node = Ast.Var "of_json"; _ }, _) ->
+       (* of_json specializes on the RESULT type (this App node's ty). *)
+       (match e.Ast.ty with
+        | Some t -> add_into of_json_types t
+        | None -> ())
      (* Structural == / != on a compound type needs eq_<tag> (and its deps). *)
      | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
        (match a.Ast.ty with
@@ -6069,6 +6334,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      non-recursive). Bodies come after tuple/record typedefs. *)
   Hashtbl.reset show_types;
   Hashtbl.reset to_json_types;
+  Hashtbl.reset of_json_types;
   Hashtbl.reset eq_types;
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
@@ -6397,6 +6663,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun tag t acc ->
       emit_to_json_fn tag t :: acc) to_json_types []
   in
+  let of_json_fn_forward_decls =
+    Hashtbl.fold (fun tag t acc ->
+      emit_of_json_fn_forward_decl tag t :: acc) of_json_types []
+  in
+  let of_json_fn_defs =
+    Hashtbl.fold (fun tag t acc ->
+      emit_of_json_fn tag t :: acc) of_json_types []
+  in
   let eq_fn_forward_decls =
     Hashtbl.fold (fun tag t acc ->
       emit_eq_fn_forward_decl tag t :: acc) eq_types []
@@ -6446,6 +6720,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_wrapper_forward_decls
     @ show_fn_forward_decls
     @ to_json_fn_forward_decls
+    (* of_json: the JSON-parser runtime (defines mj_node) must precede the
+       __ojnode_<tag> forward decls that reference it. Emitted only when used. *)
+    @ (if Hashtbl.length of_json_types = 0 then []
+       else of_json_runtime :: of_json_fn_forward_decls)
     @ eq_fn_forward_decls
     @ inner_lift_closure_adapter_forward_decls
   in
@@ -6478,6 +6756,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_wrappers
     @ show_fn_defs
     @ to_json_fn_defs
+    @ of_json_fn_defs
     @ eq_fn_defs
     @ inner_lift_closure_adapters
   in
