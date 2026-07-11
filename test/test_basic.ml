@@ -9543,7 +9543,8 @@ let () =
        contribs still trip our stricter typer (deferred — need
        polymorphic gap fix + a couple more builtins). *)
     typed_wat_ok "typed compile: option"
-      "contrib/option/option.mere" 30000;
+      (* threshold lowered: option.mere shed its on-import self-tests. *)
+      "contrib/option/option.mere" 9000;
     typed_wat_ok "typed compile: path"
       (* threshold lowered: path.mere shed its on-import self-tests
          (library-clean, SSG-dogfood fix), so its typed WAT shrank. *)
