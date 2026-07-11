@@ -682,6 +682,19 @@ let fail_scheme =
   { quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, _fail_alpha_init) }
 
+(* `of_json : str -> 'a` — parse a JSON string into a typed value. The
+   concrete `'a` comes from the use/return context (annotation), not the
+   argument; codegen / the interpreter read the call node's inferred type to
+   drive type-directed decoding. The structural inverse of `to_json`. *)
+let _of_json_alpha_init = fresh_var ()
+let of_json_scheme =
+  let id = match _of_json_alpha_init with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { quantified = [id];
+    body = Ast.TyArrow (Ast.TyStr, _of_json_alpha_init) }
+
 (* `show : 'a -> str` — convert any value to a string. *)
 let _show_alpha_init = fresh_var ()
 let show_scheme =
@@ -1388,6 +1401,7 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyBool, Ast.TyArrow (Ast.TyStr, Ast.TyUnit))));
     ("show",        show_scheme);
     ("to_json",     show_scheme);
+    ("of_json",     of_json_scheme);
     ("len",         len_scheme);
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);
