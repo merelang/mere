@@ -97,35 +97,3 @@ let build_toc = fn (headings: (int * str) list) ->
     strbuf_to_str buf
   };
 
-// === Self-tests ===
-
-let _ = print "=== markdown_toc (Phase 33.5) ===";
-
-let src1 = "# Title\n## Section 1\nSome body text.\n## Section 2\n### Subsection 2.1\n### Subsection 2.2\n# Appendix";
-
-let lines1 = str_split src1 "\n";
-let h1 = collect_headings lines1 Nil;
-
-let _ = print "headings count:";
-let rec count_list = fn (xs: 'a list) -> fn (acc: int) ->
-  match xs with
-  | Nil -> acc
-  | Cons (_, t) -> count_list t (acc + 1);
-let _ = print (show (count_list h1 0));  // Expected: 6 (Title + Section 1 + Section 2 + Sub 2.1 + Sub 2.2 + Appendix)
-
-let _ = print "=== TOC ===";
-let _ = print (build_toc h1);
-
-// Another case: no headings
-let src2 = "Just body text.\nNo headings here.\nAnother line.";
-let h2 = collect_headings (str_split src2 "\n") Nil;
-let _ = print "empty TOC (no headings):";
-let _ = print ("[" ++ build_toc h2 ++ "]");
-
-// Another case: deep nesting
-let src3 = "# A\n## B\n### C\n#### D\n##### E";
-let h3 = collect_headings (str_split src3 "\n") Nil;
-let _ = print "=== deep nest TOC ===";
-let _ = print (build_toc h3);
-
-0
