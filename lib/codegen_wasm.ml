@@ -3380,6 +3380,17 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
       \        (br $lp)))\n\
       \    (call $__lang_str_concat (local.get $acc) (i32.const %d)))"
       tag lb comma (ty_tag elem_ty) rb
+  | Ast.TyCon ("option", [inner]) ->
+    (* option is a transparent JSON nullable: None -> null, Some x -> x.
+       Kept in sync with codegen_c / eval so to_json round-trips. *)
+    let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
+    let null_off = intern_show_str "null" in
+    Printf.sprintf
+      "  (func $to_json_%s (param $x i32) (result i32)\n\
+      \    (if (result i32) (i32.eq (i32.load offset=0 (local.get $x)) (i32.const %d))\n\
+      \      (then (i32.const %d))\n\
+      \      (else (call $to_json_%s (i32.load offset=4 (local.get $x))))))"
+      tag none_tag null_off (ty_tag (Ast.walk inner))
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
     let vs =
       match Hashtbl.find_opt Exhaustive.type_variants n with
