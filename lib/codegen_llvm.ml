@@ -1831,6 +1831,18 @@ let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
    (tuple elems, record fields, variant payloads) recursively. The
    Hashtbl guard prevents infinite recursion on self-referential
    variants (e.g. `'a list`). *)
+(* Does an Eq/Ne on this type need structural comparison (vs a scalar icmp)? *)
+let llvm_needs_struct_eq (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyTuple _ -> true
+  | Ast.TyCon (name, _) ->
+    Hashtbl.mem Typer.records name
+    || Hashtbl.mem polymorphic_records name
+    || Hashtbl.mem Typer.types name
+    || Hashtbl.mem polymorphic_variants name
+    || name = "list"
+  | _ -> false
+
 let rec add_show_type (t : Ast.ty) : unit =
   let t = Ast.walk t in
   if not (ty_is_concrete t) then ()
@@ -2672,6 +2684,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = icmp %s i32 %s, 0" r (llvm_cmp_int op) cmp);
        r
+     | (Ast.TyTuple _ | Ast.TyCon _) when
+         (op = Ast.Eq || op = Ast.Ne) && llvm_needs_struct_eq a_ty ->
+       (* A compound value is an aggregate / pointer; `icmp eq i32` on it is
+          invalid IR. Structural == is implemented on interp / C / Wasm; the
+          LLVM backend (no deployment path) doesn't specialize it yet, so
+          fail clearly here instead of emitting broken IR. *)
+       let _ = ra and _ = rb in
+       unsupported e.Ast.loc
+         "structural == / != on a record / variant / tuple \
+          (use the interp, C, or Wasm backend; LLVM specialization pending)"
      | _ ->
        let r = fresh_reg () in
        let opnd_ty = if a_ty = Ast.TyBool then "i1" else "i32" in
