@@ -386,6 +386,13 @@ let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 (* Same, for `to_json_<ty_tag>` (derive JSON sibling of show). *)
 let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* `of_json` — keyed by target (result) type tag. When non-empty, the WAT
+   JSON-parser runtime is emitted. *)
+let of_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* `of_json_opt` — keyed by the INNER type tag (result is `T option`). *)
+let of_json_opt_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Compound types compared with == / != — need a structural `eq_<tag>`
    (Wasm `i32.eq` on a compound value compares linear-memory offsets, not
    contents). Keyed by ty_tag. *)
@@ -567,6 +574,20 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
      | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
        (match arg.Ast.ty with
         | Some t -> add_type_into to_json_types t
+        | None -> ())
+     | Ast.App ({ node = Ast.Var "of_json"; _ }, _) ->
+       (match e.Ast.ty with
+        | Some t -> add_type_into of_json_types t
+        | None -> ())
+     | Ast.App ({ node = Ast.Var "of_json_opt"; _ }, _) ->
+       (match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyCon ("option", [inner]) ->
+             add_type_into of_json_types inner;
+             let it = Ast.walk inner in
+             Hashtbl.replace of_json_opt_types (ty_tag it) it
+           | _ -> ())
         | None -> ())
      | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
        (match a.Ast.ty with
@@ -1656,6 +1677,25 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     emit_expr arg;
     emit_instr (Printf.sprintf "call $to_json_%s" (ty_tag arg_ty))
+  | Ast.App ({ node = Ast.Var "of_json"; _ }, arg) ->
+    let target_ty =
+      match e.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "of_json: cannot infer target type"
+    in
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $of_json_%s" (ty_tag target_ty))
+  | Ast.App ({ node = Ast.Var "of_json_opt"; _ }, arg) ->
+    let inner =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("option", [inner]) -> Ast.walk inner
+         | _ -> unsupported e.Ast.loc "of_json_opt: result type is not an option")
+      | None -> unsupported e.Ast.loc "of_json_opt: cannot infer target type"
+    in
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $of_json_opt_%s" (ty_tag inner))
   | Ast.App _ as outer_app when
     (let rec head_is_extern e =
        match e.Ast.node with
@@ -5329,6 +5369,412 @@ let map_str_runtime_wasm = {|
         (br $find_lp)))
     (i32.const 0))|}
 
+(* ===== of_json (Wasm): JSON parser runtime + type-directed decoders =====
+   A generic JSON tree is built in linear memory as 16-byte cells
+   [kind@0, a@4, b@8, c@12]: NULL=0, BOOL=1(a=val), NUM=2(a=lexeme str),
+   STR=3(a=str), ARR=4(a=count, b=head of {item@0,next@4} list),
+   OBJ=5(a=count, b=head of {key@0,val@4,next@8} list). Parse errors set the
+   global $__mj_err; strict of_json traps (unreachable), of_json_opt returns
+   None. Mirrors the C backend (codegen_c). *)
+let of_json_runtime_wasm : string = {ojw|
+  (global $__mj_p (mut i32) (i32.const 0))
+  (global $__mj_err (mut i32) (i32.const 0))
+  (func $__oj_alloc (param $n i32) (result i32)
+    (local $r i32)
+    (local.set $r (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $r) (local.get $n)))
+    (local.get $r))
+  (func $__mj_ws
+    (local $c i32)
+    (block $end (loop $lp
+      (local.set $c (i32.load8_u (global.get $__mj_p)))
+      (br_if $end (i32.eqz (i32.or
+        (i32.or (i32.eq (local.get $c) (i32.const 32)) (i32.eq (local.get $c) (i32.const 9)))
+        (i32.or (i32.eq (local.get $c) (i32.const 10)) (i32.eq (local.get $c) (i32.const 13))))))
+      (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+      (br $lp))))
+  (func $__mj_cell (param $kind i32) (result i32)
+    (local $r i32)
+    (local.set $r (call $__oj_alloc (i32.const 16)))
+    (i32.store offset=0 (local.get $r) (local.get $kind))
+    (i32.store offset=4 (local.get $r) (i32.const 0))
+    (i32.store offset=8 (local.get $r) (i32.const 0))
+    (i32.store offset=12 (local.get $r) (i32.const 0))
+    (local.get $r))
+  (func $__mj_atoi (param $s i32) (result i32)
+    (local $r i32) (local $neg i32) (local $c i32)
+    (local.set $r (i32.const 0)) (local.set $neg (i32.const 0))
+    (if (i32.eq (i32.load8_u (local.get $s)) (i32.const 45))
+      (then (local.set $neg (i32.const 1)) (local.set $s (i32.add (local.get $s) (i32.const 1)))))
+    (block $end (loop $lp
+      (local.set $c (i32.load8_u (local.get $s)))
+      (br_if $end (i32.lt_u (local.get $c) (i32.const 48)))
+      (br_if $end (i32.gt_u (local.get $c) (i32.const 57)))
+      (local.set $r (i32.add (i32.mul (local.get $r) (i32.const 10)) (i32.sub (local.get $c) (i32.const 48))))
+      (local.set $s (i32.add (local.get $s) (i32.const 1)))
+      (br $lp)))
+    (if (result i32) (local.get $neg) (then (i32.sub (i32.const 0) (local.get $r))) (else (local.get $r))))
+  (func $__mj_pstr (result i32)
+    (local $r i32) (local $len i32) (local $c i32) (local $e i32)
+    (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $len (i32.const 0))
+    (block $end (loop $lp
+      (local.set $c (i32.load8_u (global.get $__mj_p)))
+      (if (i32.eqz (local.get $c)) (then (global.set $__mj_err (i32.const 1)) (br $end)))
+      (if (i32.eq (local.get $c) (i32.const 34))
+        (then (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1))) (br $end)))
+      (if (i32.eq (local.get $c) (i32.const 92))
+        (then
+          (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+          (local.set $e (i32.load8_u (global.get $__mj_p)))
+          (local.set $c
+            (if (result i32) (i32.eq (local.get $e) (i32.const 110)) (then (i32.const 10))
+            (else (if (result i32) (i32.eq (local.get $e) (i32.const 116)) (then (i32.const 9))
+            (else (if (result i32) (i32.eq (local.get $e) (i32.const 114)) (then (i32.const 13))
+            (else (local.get $e))))))))))
+      (i32.store8 (i32.add (local.get $r) (local.get $len)) (local.get $c))
+      (local.set $len (i32.add (local.get $len) (i32.const 1)))
+      (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+      (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
+    (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (local.get $r))
+  (func $__mj_num (result i32)
+    (local $r i32) (local $len i32) (local $c i32)
+    (local.set $r (global.get $__lang_bump))
+    (local.set $len (i32.const 0))
+    (block $end (loop $lp
+      (local.set $c (i32.load8_u (global.get $__mj_p)))
+      (br_if $end (i32.eqz (i32.or
+        (i32.and (i32.ge_u (local.get $c) (i32.const 48)) (i32.le_u (local.get $c) (i32.const 57)))
+        (i32.or (i32.eq (local.get $c) (i32.const 46))
+        (i32.or (i32.eq (local.get $c) (i32.const 101))
+        (i32.or (i32.eq (local.get $c) (i32.const 69))
+        (i32.or (i32.eq (local.get $c) (i32.const 43))
+                (i32.eq (local.get $c) (i32.const 45)))))))))
+      (i32.store8 (i32.add (local.get $r) (local.get $len)) (local.get $c))
+      (local.set $len (i32.add (local.get $len) (i32.const 1)))
+      (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+      (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
+    (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (local.get $r))
+  (func $__mj_value (result i32)
+    (local $c i32) (local $cell i32)
+    (call $__mj_ws)
+    (local.set $c (i32.load8_u (global.get $__mj_p)))
+    (if (i32.eq (local.get $c) (i32.const 123)) (then (return (call $__mj_object))))
+    (if (i32.eq (local.get $c) (i32.const 91)) (then (return (call $__mj_array))))
+    (if (i32.eq (local.get $c) (i32.const 34))
+      (then
+        (local.set $cell (call $__mj_cell (i32.const 3)))
+        (i32.store offset=4 (local.get $cell) (call $__mj_pstr))
+        (return (local.get $cell))))
+    (if (i32.eq (local.get $c) (i32.const 116))
+      (then
+        (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 4)))
+        (local.set $cell (call $__mj_cell (i32.const 1)))
+        (i32.store offset=4 (local.get $cell) (i32.const 1))
+        (return (local.get $cell))))
+    (if (i32.eq (local.get $c) (i32.const 102))
+      (then
+        (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 5)))
+        (local.set $cell (call $__mj_cell (i32.const 1)))
+        (i32.store offset=4 (local.get $cell) (i32.const 0))
+        (return (local.get $cell))))
+    (if (i32.eq (local.get $c) (i32.const 110))
+      (then
+        (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 4)))
+        (return (call $__mj_cell (i32.const 0)))))
+    (if (i32.or (i32.eq (local.get $c) (i32.const 45))
+                (i32.and (i32.ge_u (local.get $c) (i32.const 48)) (i32.le_u (local.get $c) (i32.const 57))))
+      (then
+        (local.set $cell (call $__mj_cell (i32.const 2)))
+        (i32.store offset=4 (local.get $cell) (call $__mj_num))
+        (return (local.get $cell))))
+    (global.set $__mj_err (i32.const 1))
+    (call $__mj_cell (i32.const 0)))
+  (func $__mj_array (result i32)
+    (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
+    (local $node i32) (local $item i32) (local $c i32)
+    (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+    (local.set $head (i32.const 0)) (local.set $tail (i32.const 0)) (local.set $count (i32.const 0))
+    (call $__mj_ws)
+    (if (i32.eq (i32.load8_u (global.get $__mj_p)) (i32.const 93))
+      (then
+        (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+        (return (call $__mj_cell (i32.const 4)))))
+    (block $done (loop $lp
+      (local.set $item (call $__mj_value))
+      (br_if $done (global.get $__mj_err))
+      (local.set $node (call $__oj_alloc (i32.const 8)))
+      (i32.store offset=0 (local.get $node) (local.get $item))
+      (i32.store offset=4 (local.get $node) (i32.const 0))
+      (if (i32.eqz (local.get $head))
+        (then (local.set $head (local.get $node)) (local.set $tail (local.get $node)))
+        (else (i32.store offset=4 (local.get $tail) (local.get $node)) (local.set $tail (local.get $node))))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (call $__mj_ws)
+      (local.set $c (i32.load8_u (global.get $__mj_p)))
+      (if (i32.eq (local.get $c) (i32.const 44))
+        (then (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1))) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 93))
+        (then (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1))) (br $done)))
+      (global.set $__mj_err (i32.const 1)) (br $done)))
+    (local.set $cell (call $__mj_cell (i32.const 4)))
+    (i32.store offset=4 (local.get $cell) (local.get $count))
+    (i32.store offset=8 (local.get $cell) (local.get $head))
+    (local.get $cell))
+  (func $__mj_object (result i32)
+    (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
+    (local $node i32) (local $key i32) (local $val i32) (local $c i32)
+    (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+    (local.set $head (i32.const 0)) (local.set $tail (i32.const 0)) (local.set $count (i32.const 0))
+    (call $__mj_ws)
+    (if (i32.eq (i32.load8_u (global.get $__mj_p)) (i32.const 125))
+      (then
+        (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+        (return (call $__mj_cell (i32.const 5)))))
+    (block $done (loop $lp
+      (call $__mj_ws)
+      (if (i32.ne (i32.load8_u (global.get $__mj_p)) (i32.const 34))
+        (then (global.set $__mj_err (i32.const 1)) (br $done)))
+      (local.set $key (call $__mj_pstr))
+      (call $__mj_ws)
+      (if (i32.ne (i32.load8_u (global.get $__mj_p)) (i32.const 58))
+        (then (global.set $__mj_err (i32.const 1)) (br $done)))
+      (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
+      (local.set $val (call $__mj_value))
+      (br_if $done (global.get $__mj_err))
+      (local.set $node (call $__oj_alloc (i32.const 12)))
+      (i32.store offset=0 (local.get $node) (local.get $key))
+      (i32.store offset=4 (local.get $node) (local.get $val))
+      (i32.store offset=8 (local.get $node) (i32.const 0))
+      (if (i32.eqz (local.get $head))
+        (then (local.set $head (local.get $node)) (local.set $tail (local.get $node)))
+        (else (i32.store offset=8 (local.get $tail) (local.get $node)) (local.set $tail (local.get $node))))
+      (local.set $count (i32.add (local.get $count) (i32.const 1)))
+      (call $__mj_ws)
+      (local.set $c (i32.load8_u (global.get $__mj_p)))
+      (if (i32.eq (local.get $c) (i32.const 44))
+        (then (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1))) (br $lp)))
+      (if (i32.eq (local.get $c) (i32.const 125))
+        (then (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1))) (br $done)))
+      (global.set $__mj_err (i32.const 1)) (br $done)))
+    (local.set $cell (call $__mj_cell (i32.const 5)))
+    (i32.store offset=4 (local.get $cell) (local.get $count))
+    (i32.store offset=8 (local.get $cell) (local.get $head))
+    (local.get $cell))
+  (func $__mj_parse (param $s i32) (result i32)
+    (global.set $__mj_p (local.get $s))
+    (global.set $__mj_err (i32.const 0))
+    (call $__mj_value))
+  (func $__mj_field (param $obj i32) (param $key i32) (result i32)
+    (local $node i32)
+    (if (i32.ne (i32.load offset=0 (local.get $obj)) (i32.const 5))
+      (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))
+    (local.set $node (i32.load offset=8 (local.get $obj)))
+    (block $done (loop $lp
+      (br_if $done (i32.eqz (local.get $node)))
+      (if (call $__lang_streq (i32.load offset=0 (local.get $node)) (local.get $key))
+        (then (return (i32.load offset=4 (local.get $node)))))
+      (local.set $node (i32.load offset=8 (local.get $node)))
+      (br $lp)))
+    (global.set $__mj_err (i32.const 1))
+    (i32.const 0))
+  (func $__mj_index (param $arr i32) (param $i i32) (result i32)
+    (local $node i32)
+    (local.set $node (i32.load offset=8 (local.get $arr)))
+    (block $done (loop $lp
+      (br_if $done (i32.eqz (local.get $i)))
+      (br_if $done (i32.eqz (local.get $node)))
+      (local.set $node (i32.load offset=4 (local.get $node)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (if (result i32) (i32.eqz (local.get $node)) (then (i32.const 0)) (else (i32.load offset=0 (local.get $node)))))
+|ojw}
+
+(* Emit `$__ojnode_<tag>` (mj_node -> value) + `$of_json_<tag>` (str ->
+   value; strict: traps on error). *)
+let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
+  let b = Buffer.create 512 in
+  let node = Printf.sprintf "$__ojnode_%s" tag in
+  Buffer.add_string b (Printf.sprintf "  (func %s (param $j i32) (result i32)\n" node);
+  (match Ast.walk t with
+   | Ast.TyInt ->
+     Buffer.add_string b
+       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 2)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n\
+       \    (call $__mj_atoi (i32.load offset=4 (local.get $j))))\n"
+   | Ast.TyBool ->
+     Buffer.add_string b
+       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 1)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n\
+       \    (i32.load offset=4 (local.get $j)))\n"
+   | Ast.TyStr ->
+     Buffer.add_string b
+       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 3)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n\
+       \    (i32.load offset=4 (local.get $j)))\n"
+   | Ast.TyUnit ->
+     Buffer.add_string b "    (drop (local.get $j)) (i32.const 0))\n"
+   | Ast.TyTuple ts ->
+     let n = List.length ts in
+     Buffer.add_string b "    (local $r i32)\n";
+     Buffer.add_string b
+       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 4)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n";
+     Buffer.add_string b (Printf.sprintf "    (local.set $r (call $__oj_alloc (i32.const %d)))\n" (4 * n));
+     List.iteri (fun i et ->
+       Buffer.add_string b
+         (Printf.sprintf
+            "    (i32.store offset=%d (local.get $r) (call $__ojnode_%s (call $__mj_index (local.get $j) (i32.const %d))))\n"
+            (4 * i) (ty_tag (Ast.walk et)) i)) ts;
+     Buffer.add_string b "    (local.get $r))\n"
+   | Ast.TyCon ("list", [elem]) ->
+     let elem_tag = ty_tag (Ast.walk elem) in
+     let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
+     let cons_tag = try Hashtbl.find variant_tags "Cons" with Not_found -> 1 in
+     Buffer.add_string b "    (local $it i32) (local $rev i32) (local $rn i32) (local $acc i32) (local $pl i32) (local $node i32)\n";
+     Buffer.add_string b
+       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 4)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n";
+     (* reverse the item list into $rev *)
+     Buffer.add_string b "    (local.set $rev (i32.const 0))\n";
+     Buffer.add_string b "    (local.set $it (i32.load offset=8 (local.get $j)))\n";
+     Buffer.add_string b
+       "    (block $r1 (loop $l1\n\
+       \      (br_if $r1 (i32.eqz (local.get $it)))\n\
+       \      (local.set $rn (call $__oj_alloc (i32.const 8)))\n\
+       \      (i32.store offset=0 (local.get $rn) (i32.load offset=0 (local.get $it)))\n\
+       \      (i32.store offset=4 (local.get $rn) (local.get $rev))\n\
+       \      (local.set $rev (local.get $rn))\n\
+       \      (local.set $it (i32.load offset=4 (local.get $it)))\n\
+       \      (br $l1)))\n";
+     (* acc = Nil *)
+     Buffer.add_string b (Printf.sprintf "    (local.set $acc (call $__oj_alloc (i32.const 8)))\n    (i32.store offset=0 (local.get $acc) (i32.const %d))\n" nil_tag);
+     (* fold rev: acc = Cons(decode item, acc) *)
+     Buffer.add_string b
+       (Printf.sprintf
+       "    (block $r2 (loop $l2\n\
+       \      (br_if $r2 (i32.eqz (local.get $rev)))\n\
+       \      (local.set $pl (call $__oj_alloc (i32.const 8)))\n\
+       \      (i32.store offset=0 (local.get $pl) (call $__ojnode_%s (i32.load offset=0 (local.get $rev))))\n\
+       \      (i32.store offset=4 (local.get $pl) (local.get $acc))\n\
+       \      (local.set $node (call $__oj_alloc (i32.const 8)))\n\
+       \      (i32.store offset=0 (local.get $node) (i32.const %d))\n\
+       \      (i32.store offset=4 (local.get $node) (local.get $pl))\n\
+       \      (local.set $acc (local.get $node))\n\
+       \      (local.set $rev (i32.load offset=4 (local.get $rev)))\n\
+       \      (br $l2)))\n"
+       elem_tag cons_tag);
+     Buffer.add_string b "    (local.get $acc))\n"
+   | Ast.TyCon ("option", [inner]) ->
+     let inner_tag = ty_tag (Ast.walk inner) in
+     let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
+     let some_tag = try Hashtbl.find variant_tags "Some" with Not_found -> 1 in
+     Buffer.add_string b "    (local $r i32)\n";
+     Buffer.add_string b
+       (Printf.sprintf
+       "    (if (result i32) (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 0))\n\
+       \      (then\n\
+       \        (local.set $r (call $__oj_alloc (i32.const 8)))\n\
+       \        (i32.store offset=0 (local.get $r) (i32.const %d))\n\
+       \        (local.get $r))\n\
+       \      (else\n\
+       \        (local.set $r (call $__oj_alloc (i32.const 8)))\n\
+       \        (i32.store offset=0 (local.get $r) (i32.const %d))\n\
+       \        (i32.store offset=4 (local.get $r) (call $__ojnode_%s (local.get $j)))\n\
+       \        (local.get $r))))\n"
+       none_tag some_tag inner_tag)
+   | Ast.TyCon (name, args) when Hashtbl.mem Typer.records name ->
+     let info = Hashtbl.find Typer.records name in
+     let mapping = if info.Typer.r_params = [] then [] else List.combine info.Typer.r_params args in
+     let n = List.length info.Typer.r_fields in
+     Buffer.add_string b "    (local $r i32)\n";
+     Buffer.add_string b (Printf.sprintf "    (local.set $r (call $__oj_alloc (i32.const %d)))\n" (4 * n));
+     List.iteri (fun i (fname, ft) ->
+       let ft = subst_params mapping ft in
+       let key = intern_show_str fname in
+       Buffer.add_string b
+         (Printf.sprintf
+            "    (i32.store offset=%d (local.get $r) (call $__ojnode_%s (call $__mj_field (local.get $j) (i32.const %d))))\n"
+            (4 * i) (ty_tag (Ast.walk ft)) key)) info.Typer.r_fields;
+     Buffer.add_string b "    (local.get $r))\n"
+   | Ast.TyCon (name, args) ->
+     (* general variant: STR -> nullary; OBJ{1} -> payload ctor *)
+     let vs =
+       match Hashtbl.find_opt Exhaustive.type_variants name with
+       | Some vs -> vs | None -> []
+     in
+     let mapping =
+       match vs with
+       | (cname, _) :: _ ->
+         (match Hashtbl.find_opt Typer.constructors cname with
+          | Some info when info.Typer.params <> [] -> List.combine info.Typer.params args
+          | _ -> [])
+       | [] -> []
+     in
+     let variants =
+       List.map (fun (cname, arg_opt) ->
+         (cname, match arg_opt with Some t -> Some (subst_params mapping t) | None -> None)) vs
+     in
+     Buffer.add_string b "    (local $r i32) (local $k i32) (local $v i32)\n";
+     (* nullary from STR *)
+     Buffer.add_string b "    (if (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 3)) (then\n";
+     List.iter (fun (cname, arg_opt) ->
+       match arg_opt with
+       | None ->
+         let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+         let nm = intern_show_str cname in
+         Buffer.add_string b
+           (Printf.sprintf
+              "      (if (call $__lang_streq (i32.load offset=4 (local.get $j)) (i32.const %d)) (then\n\
+              \        (local.set $r (call $__oj_alloc (i32.const 8))) (i32.store offset=0 (local.get $r) (i32.const %d)) (return (local.get $r))))\n"
+              nm tag_n)
+       | Some _ -> ()) variants;
+     Buffer.add_string b "      ))\n";
+     (* payload from OBJ single-key *)
+     Buffer.add_string b "    (if (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 5)) (then\n";
+     Buffer.add_string b "      (local.set $k (i32.load offset=0 (i32.load offset=8 (local.get $j))))\n";
+     Buffer.add_string b "      (local.set $v (i32.load offset=4 (i32.load offset=8 (local.get $j))))\n";
+     List.iter (fun (cname, arg_opt) ->
+       match arg_opt with
+       | Some ty ->
+         let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+         let nm = intern_show_str cname in
+         Buffer.add_string b
+           (Printf.sprintf
+              "      (if (call $__lang_streq (local.get $k) (i32.const %d)) (then\n\
+              \        (local.set $r (call $__oj_alloc (i32.const 8))) (i32.store offset=0 (local.get $r) (i32.const %d))\n\
+              \        (i32.store offset=4 (local.get $r) (call $__ojnode_%s (local.get $v))) (return (local.get $r))))\n"
+              nm tag_n (ty_tag (Ast.walk ty)))
+       | None -> ()) variants;
+     Buffer.add_string b "      ))\n";
+     Buffer.add_string b "    (global.set $__mj_err (i32.const 1)) (i32.const 0))\n"
+   | _ ->
+     Buffer.add_string b "    (drop (local.get $j)) (global.set $__mj_err (i32.const 1)) (i32.const 0))\n");
+  (* strict string entry: trap on error *)
+  Buffer.add_string b
+    (Printf.sprintf
+       "  (func $of_json_%s (param $s i32) (result i32)\n\
+       \    (local $v i32)\n\
+       \    (local.set $v (call $__ojnode_%s (call $__mj_parse (local.get $s))))\n\
+       \    (if (global.get $__mj_err) (then unreachable))\n\
+       \    (local.get $v))\n"
+       tag tag);
+  Buffer.contents b
+
+(* of_json_opt_<inner>: parse + decode; None on error, else Some. *)
+let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
+  let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
+  let some_tag = try Hashtbl.find variant_tags "Some" with Not_found -> 1 in
+  Printf.sprintf
+    "  (func $of_json_opt_%s (param $s i32) (result i32)\n\
+    \    (local $v i32) (local $r i32)\n\
+    \    (local.set $v (call $__ojnode_%s (call $__mj_parse (local.get $s))))\n\
+    \    (local.set $r (call $__oj_alloc (i32.const 8)))\n\
+    \    (if (result i32) (global.get $__mj_err)\n\
+    \      (then (i32.store offset=0 (local.get $r) (i32.const %d)) (local.get $r))\n\
+    \      (else (i32.store offset=0 (local.get $r) (i32.const %d)) (i32.store offset=4 (local.get $r) (local.get $v)) (local.get $r))))\n"
+    inner_tag inner_tag none_tag some_tag
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
@@ -5338,6 +5784,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
   Hashtbl.reset to_json_types;
+  Hashtbl.reset of_json_types;
+  Hashtbl.reset of_json_opt_types;
   Hashtbl.reset eq_types;
   Hashtbl.reset show_str_offsets;
   table_entries := [];
@@ -5562,6 +6010,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let to_json_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_to_json_fn tag t :: acc) to_json_types []
   in
+  let of_json_used =
+    Hashtbl.length of_json_types > 0 || Hashtbl.length of_json_opt_types > 0
+  in
+  let of_json_fn_defs =
+    (if of_json_used then [of_json_runtime_wasm] else [])
+    @ Hashtbl.fold (fun tag t acc -> emit_of_json_fn tag t :: acc) of_json_types []
+    @ Hashtbl.fold (fun tag t acc -> emit_of_json_opt_fn tag t :: acc) of_json_opt_types []
+  in
   let eq_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_eq_fn tag t :: acc) eq_types []
   in
@@ -5785,7 +6241,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       eta_adapters_wasm []
   in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ eq_fn_defs @ inner_lift_adapter_strs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all
