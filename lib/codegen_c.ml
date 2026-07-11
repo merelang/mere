@@ -1892,6 +1892,24 @@ let rec emit_expr (e : Ast.expr) : string =
         | other ->
           let c_ty = inline_c_type_of other in
           Printf.sprintf "({ __lang_fail_impl(%s); (%s){0}; })" arg_c c_ty)
+     | Ast.Var "exit" ->
+       (* `exit n` — call libc exit(n) (noreturn), then a default value of the
+          expected type so the statement-expression type-checks (unreachable).
+          Closes mq PAIN P1's last item (native process exit code). Mirrors
+          `fail`, which also has an 'a (bottom) result. *)
+       let arg_c = emit_expr arg in
+       let default =
+         match (match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt) with
+         | Ast.TyStr -> "\"\""
+         | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "0"
+         | Ast.TyTuple ts -> Printf.sprintf "(%s){0}" (tuple_struct_name ts)
+         | Ast.TyCon (n, args) ->
+           let cty = if args = [] then n
+                     else mono_variant_name n (List.map Ast.walk args) in
+           Printf.sprintf "(%s){0}" cty
+         | _ -> "0"
+       in
+       Printf.sprintf "({ exit(%s); %s; })" arg_c default
      | Ast.Var "fst" ->
        "(" ^ emit_expr arg ^ ").f0"
      | Ast.Var "snd" ->
