@@ -424,6 +424,45 @@ let html_template = fn (dev_mode: bool) -> fn (title: str) ->
 
 // Render the page list as navigation HTML. A page whose name matches
 // current_name gets `class="active"` (rendered bold + underlined in CSS).
+// Curated documentation order. Each section is (heading, [page basenames]).
+// This drives both the nav (left column) and the index landing sections, so
+// readers meet the docs in a deliberate order (tour first, then tutorials,
+// then reference) instead of raw alphabetical file order. Pages not listed
+// here are appended under "More" in file order, so a newly-added doc is never
+// dropped from the site just because nobody curated it yet.
+let section_order = [
+  ("Start here", ["tour", "tutorial"]),
+  ("Build something real",
+    ["tutorial-rest-api", "tutorial-redis-client", "tutorial-type-inference"]),
+  ("Reference", ["language-reference", "stdlib-reference", "patterns", "reserved-names"]),
+  ("Guides", ["memory-model", "packages", "db", "http-demos", "codegen"]),
+  ("Project", ["changelog"])
+];
+
+// All basenames named in the curation, flattened across sections.
+let curated_basenames =
+  list_concat (list_map section_order (fn sec ->
+    let (_, names) = sec in names));
+
+// A page's display title: front matter `title:` > first `# ...` line > basename.
+let page_title = fn (input_dir: str) -> fn (base: str) ->
+  let all_lines = str_split (read_file (Path.join input_dir (base ++ ".md"))) "\n" in
+  let (meta, lines) = parse_front_matter all_lines in
+  if map_has meta "title" then map_get meta "title"
+  else extract_title lines base;
+
+// Reorder the raw .md filename list into curated order, then append any
+// leftover pages (those the curation never mentioned) in their original order.
+let order_pages = fn (pages: str list) ->
+  let curated_files =
+    list_map
+      (list_filter curated_basenames (fn b -> list_member pages (b ++ ".md")))
+      (fn b -> b ++ ".md") in
+  let leftover =
+    list_filter pages (fn name ->
+      not (list_member curated_basenames (Path.drop_ext name))) in
+  list_append curated_files leftover;
+
 let render_nav = fn (pages: str list) -> fn (current_name: str) ->
   let buf = strbuf_new () in
   // put the link to index first
@@ -464,18 +503,38 @@ let process_page = fn (dev_mode: bool) -> fn (input_dir: str) ->
   let _ = write_file out_path html in
   print ("  " ++ name ++ " -> " ++ out_path);
 
-// Generate index.html (page list as a bulleted list; the nav's index is active)
-let render_index = fn (dev_mode: bool) -> fn (output_dir: str) ->
-                   fn (pages: str list) ->
+// Generate index.html: a curated landing page (sections from `section_order`,
+// each linking pages by their real titles), then the browser playground and
+// web-backend showcases. The nav's index entry is marked active.
+let render_index = fn (dev_mode: bool) -> fn (input_dir: str) ->
+                   fn (output_dir: str) -> fn (pages: str list) ->
   let nav_html = render_nav pages "index" in
   let buf = strbuf_new () in
-  let _ = strbuf_push buf "<h1>Mere Documentation</h1>\n<p>Generated index of all pages.</p>\n<ul>\n" in
-  let _ = list_iter pages (fn name ->
-    let label = Path.drop_ext name in
-    let href = label ++ ".html" in
-    let _ = strbuf_push buf ("  <li><a href=\"" ++ href ++ "\">" ++ label ++ "</a></li>\n") in
-    ()) in
-  let _ = strbuf_push buf "</ul>\n" in
+  let _ = strbuf_push buf "<h1>Mere Documentation</h1>\n" in
+  let _ = strbuf_push buf ("<p>New here? Start with the <a href=\"tour.html\">Tour of Mere</a> "
+    ++ "for a one-page overview of every core feature, then follow a tutorial to "
+    ++ "build something real.</p>\n") in
+  // curated sections (skip a section whose pages are all absent)
+  let _ = list_iter section_order (fn sec ->
+    let (heading, names) = sec in
+    let present = list_filter names (fn b -> list_member pages (b ++ ".md")) in
+    if list_len present == 0 then ()
+    else
+      let _ = strbuf_push buf ("<h2>" ++ heading ++ "</h2>\n<ul>\n") in
+      let _ = list_iter present (fn base ->
+        strbuf_push buf ("  <li><a href=\"" ++ base ++ ".html\">"
+          ++ page_title input_dir base ++ "</a></li>\n")) in
+      strbuf_push buf "</ul>\n") in
+  // any pages the curation didn't mention, so nothing is ever hidden
+  let leftover =
+    list_filter pages (fn name -> not (list_member curated_basenames (Path.drop_ext name))) in
+  let _ = if list_len leftover == 0 then () else
+    let _ = strbuf_push buf "<h2>More</h2>\n<ul>\n" in
+    let _ = list_iter leftover (fn name ->
+      let base = Path.drop_ext name in
+      strbuf_push buf ("  <li><a href=\"" ++ base ++ ".html\">"
+        ++ page_title input_dir base ++ "</a></li>\n")) in
+    strbuf_push buf "</ul>\n" in
   let _ = strbuf_push buf "<h2>Try Mere in your browser</h2>\n" in
   let _ = strbuf_push buf "<p>Pre-compiled Mere programs running directly in your browser via Wasm:</p>\n" in
   let _ = strbuf_push buf "<ul>\n" in
@@ -561,10 +620,11 @@ let build_sitemap_xml = fn (pages: str list) ->
 let do_build = fn (dev_mode: bool) -> fn (input_dir: str) -> fn (output_dir: str) ->
   let _ = mkdir_p output_dir in
   let all_entries = list_dir input_dir in
-  let pages = list_filter all_entries is_md_file in
+  // curated order drives nav, index, search and sitemap alike
+  let pages = order_pages (list_filter all_entries is_md_file) in
   let _ = write_file (Path.join output_dir "style.css") style_css in
   let _ = list_iter pages (process_page dev_mode input_dir output_dir pages) in
-  let _ = render_index dev_mode output_dir pages in
+  let _ = render_index dev_mode input_dir output_dir pages in
   let _ = write_file (Path.join output_dir "search.json")
                      (build_search_index_json input_dir pages) in
   // sitemap.xml — for SEO / crawlers
