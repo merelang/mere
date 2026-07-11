@@ -1014,6 +1014,21 @@ let () =
     (Pipeline.process
       "type P = { id: int, ok: bool };
        to_json (P { id = 5, ok = true })") "\"{\\\"id\\\":5,\\\"ok\\\":true}\"";
+  (* structural == on compound types (record / ADT / tuple). The interp does
+     value equality; the codegen backends must too — C used to emit an
+     invalid `struct == struct`, Wasm silently compared pointers. *)
+  check "eq: record structural =="
+    (Pipeline.process
+      "type P = { x: int, y: int };
+       if P { x = 1, y = 2 } == P { x = 1, y = 2 } then 1 else 0") "1";
+  check "eq: record structural != (differ)"
+    (Pipeline.process
+      "type P = { x: int, y: int };
+       if P { x = 1, y = 2 } == P { x = 1, y = 9 } then 1 else 0") "0";
+  check "eq: ADT structural =="
+    (Pipeline.process
+      "type 'a opt = None | Some of 'a;
+       if Some 3 == Some 3 then 1 else 0") "1";
   check "to_json list -> JSON array"
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
@@ -4926,6 +4941,13 @@ let () =
     (vec_codegen_c
        "type R = { a: int, b: bool }; str_len (to_json (R { a = 1, b = true }))")
     "\\\"a\\\":%s";
+  (* structural == on a record emits a C eq_<tag> call, not `struct == struct`
+     (which is invalid C). *)
+  assert_contains "eq: C backend emits a structural eq_<tag>"
+    (vec_codegen_c
+       "type R = { a: int, b: bool }; \
+        if R { a = 1, b = true } == R { a = 1, b = true } then 1 else 0")
+    "eq_R(";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
