@@ -5032,6 +5032,11 @@ let () =
        "type 'a option = None | Some of 'a; type R = { a: int }; \
         match (of_json_opt \"x\" : R option) with | Some r -> r.a | None -> 0")
     "setjmp(__mj_jb)";
+  (* exit n on the C backend: emits libc exit() (was undeclared before; mq
+     PAIN P1's last item). *)
+  assert_contains "exit: C backend emits libc exit()"
+    (vec_codegen_c "let _ = print \"x\" in exit 2")
+    "exit(2)";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
