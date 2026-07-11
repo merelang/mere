@@ -5028,6 +5028,13 @@ let () =
     (wasm_with_decls
        "type R = { a: int, b: bool }; to_json (R { a = 1, b = true })")
     "(func $to_json_R";
+  (* structural == on Wasm: emits $eq_<tag> (i32.eq would compare linear-mem
+     offsets, giving wrong answers). *)
+  assert_contains "eq: Wasm backend emits a structural eq_<tag>"
+    (wasm_with_decls
+       "type R = { a: int, b: bool }; \
+        if R { a = 1, b = true } == R { a = 1, b = true } then 1 else 0")
+    "(func $eq_R";
   check "B2: C backend compiles record let"
     (let c = vec_codegen_c
        "type P = { x: int, y: int }; let P { x = a, y = b } = P { x = 3, y = 4 } in a + b" in

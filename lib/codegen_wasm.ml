@@ -386,6 +386,20 @@ let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 (* Same, for `to_json_<ty_tag>` (derive JSON sibling of show). *)
 let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Compound types compared with == / != — need a structural `eq_<tag>`
+   (Wasm `i32.eq` on a compound value compares linear-memory offsets, not
+   contents). Keyed by ty_tag. *)
+let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+let needs_struct_eq (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyTuple _ -> true
+  | Ast.TyCon (name, _) ->
+    Hashtbl.mem Typer.records name
+    || Hashtbl.mem Typer.types name
+    || name = "list"
+  | _ -> false
+
 (* Cache: literal string → data segment offset, so repeated literals
    (e.g. `, ` between tuple elements) share one segment. *)
 let show_str_offsets : (string, int) Hashtbl.t = Hashtbl.create 16
@@ -554,6 +568,10 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_type_into to_json_types t
         | None -> ())
+     | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
+       (match a.Ast.ty with
+        | Some t when needs_struct_eq t -> add_type_into eq_types t
+        | _ -> ())
      | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, _) ->
        (* Phase 16.3: metrics.record uses show_int internally to format
           the integer payload, so register `int` ahead of show_fn_defs. *)
@@ -1498,6 +1516,13 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr "call $__lang_str_compare";
        emit_instr "i32.const 0";
        emit_instr (wasm_cmp op)
+     | ty, Ast.Eq when needs_struct_eq ty ->
+       emit_expr a; emit_expr b;
+       emit_instr (Printf.sprintf "call $eq_%s" (ty_tag ty))
+     | ty, Ast.Ne when needs_struct_eq ty ->
+       emit_expr a; emit_expr b;
+       emit_instr (Printf.sprintf "call $eq_%s" (ty_tag ty));
+       emit_instr "i32.eqz"
      | _ ->
        emit_expr a;
        emit_expr b;
@@ -3410,6 +3435,99 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     Printf.sprintf
       "  (func $to_json_%s (param $x i32) (result i32) (i32.const %d))" tag off
 
+(* Structural equality for compound types on Wasm. A compound value is a
+   linear-memory offset, so `i32.eq` would compare offsets, not contents —
+   `eq_<tag>` compares field/element/payload-wise instead. Mirrors show /
+   to_json; kept in sync with codegen_c / eval. *)
+let emit_eq_fn (tag : string) (t : Ast.ty) : string =
+  let and_chain items =
+    List.fold_right (fun e acc -> Printf.sprintf "(i32.and %s %s)" e acc)
+      items "(i32.const 1)"
+  in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool ->
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (i32.eq (local.get $a) (local.get $b)))" tag
+  | Ast.TyStr ->
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (call $__lang_streq (local.get $a) (local.get $b)))" tag
+  | Ast.TyUnit ->
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 1))" tag
+  | Ast.TyArrow _ ->
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+  | Ast.TyTuple ts ->
+    let elems =
+      List.mapi (fun i et ->
+        Printf.sprintf
+          "(call $eq_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
+          (ty_tag et) (i * 4) (i * 4)) ts
+    in
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n    %s)"
+      tag (and_chain elems)
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+    let info = Hashtbl.find Typer.records n in
+    let mapping =
+      if info.Typer.r_params = [] then []
+      else List.combine info.Typer.r_params args
+    in
+    let elems =
+      List.mapi (fun i (_, ft) ->
+        let _ = subst_params mapping ft in
+        Printf.sprintf
+          "(call $eq_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
+          (ty_tag (subst_params mapping ft)) (i * 4) (i * 4)) info.Typer.r_fields
+    in
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n    %s)"
+      tag (and_chain elems)
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n || n = "list" ->
+    let vs =
+      match Hashtbl.find_opt Exhaustive.type_variants n with
+      | Some vs -> vs | None -> []
+    in
+    let mapping =
+      match vs with
+      | (cname, _) :: _ ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some info when info.Typer.params <> [] ->
+           List.combine info.Typer.params args
+         | _ -> [])
+      | [] -> []
+    in
+    let rec payload_dispatch = function
+      | [] -> "(i32.const 1)"
+      | (cname, arg_opt) :: rest ->
+        (match arg_opt with
+         | None -> payload_dispatch rest
+         | Some pty ->
+           let pty = subst_params mapping pty in
+           let ctag =
+             match Hashtbl.find_opt variant_tags cname with
+             | Some t -> t | None -> 0
+           in
+           Printf.sprintf
+             "(if (result i32) (i32.eq (local.get $ta) (i32.const %d))\n\
+             \      (then (call $eq_%s (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $b))))\n\
+             \      (else %s))"
+             ctag (ty_tag pty) (payload_dispatch rest))
+    in
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (local $ta i32)\n\
+      \    (local.set $ta (i32.load offset=0 (local.get $a)))\n\
+      \    (if (result i32) (i32.ne (local.get $ta) (i32.load offset=0 (local.get $b)))\n\
+      \      (then (i32.const 0))\n\
+      \      (else %s)))"
+      tag (payload_dispatch vs)
+  | _ ->
+    Printf.sprintf
+      "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+
 (* Static runtime helpers emitted into the Wasm module: strlen and
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
@@ -5209,6 +5327,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
   Hashtbl.reset to_json_types;
+  Hashtbl.reset eq_types;
   Hashtbl.reset show_str_offsets;
   table_entries := [];
   pending_closures := [];
@@ -5432,6 +5551,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let to_json_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_to_json_fn tag t :: acc) to_json_types []
   in
+  let eq_fn_defs =
+    Hashtbl.fold (fun tag t acc -> emit_eq_fn tag t :: acc) eq_types []
+  in
   (* Reset counters for the main body. *)
   reset ();
   (* Phase 36 (DEFERRED §1.18 fix): globals are initialized inline in
@@ -5652,7 +5774,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       eta_adapters_wasm []
   in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ inner_lift_adapter_strs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ eq_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all
