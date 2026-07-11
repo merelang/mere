@@ -695,6 +695,18 @@ let of_json_scheme =
   { quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, _of_json_alpha_init) }
 
+(* `of_json_opt : str -> 'a option` — the non-crashing sibling of of_json.
+   Returns None on any parse / shape error instead of failing, so it is safe
+   for untrusted input (HTTP request bodies etc.). *)
+let _of_json_opt_alpha_init = fresh_var ()
+let of_json_opt_scheme =
+  let id = match _of_json_opt_alpha_init with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { quantified = [id];
+    body = Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [_of_json_opt_alpha_init])) }
+
 (* `show : 'a -> str` — convert any value to a string. *)
 let _show_alpha_init = fresh_var ()
 let show_scheme =
@@ -1402,6 +1414,7 @@ let initial_env : env =
     ("show",        show_scheme);
     ("to_json",     show_scheme);
     ("of_json",     of_json_scheme);
+    ("of_json_opt", of_json_opt_scheme);
     ("len",         len_scheme);
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);

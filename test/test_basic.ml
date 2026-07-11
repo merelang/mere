@@ -1080,6 +1080,23 @@ let () =
        type OjOpt = { v: int option };
        let r = OjOpt { v = Some 42 } in
        (of_json (to_json r) : OjOpt) == r") "true";
+  (* of_json_opt: the non-crashing sibling — None on any parse / shape error *)
+  check "of_json_opt ok -> Some"
+    (Pipeline.process
+      "type 'a option = None | Some of 'a;
+       match (of_json_opt \"42\" : int option) with
+       | Some n -> n | None -> (- 1)") "42";
+  check "of_json_opt malformed -> None"
+    (Pipeline.process
+      "type 'a option = None | Some of 'a;
+       match (of_json_opt \"not json\" : int option) with
+       | Some n -> n | None -> (- 1)") "-1";
+  check "of_json_opt missing field -> None"
+    (Pipeline.process
+      "type 'a option = None | Some of 'a;
+       type Rq = { a: int, b: int };
+       match (of_json_opt \"[]\" : Rq option) with
+       | Some _ -> 1 | None -> 0") "0";
   check "show with compose"
     (Pipeline.process
       "let print_int_v2 = print << show in
@@ -5003,6 +5020,18 @@ let () =
     (vec_codegen_c
        "type R = { a: int, b: bool }; let r = (of_json \"x\" : R); r.a")
     "__mj_field(j, \"a\")";
+  (* of_json_opt: the safe sibling emits a setjmp wrapper returning None on
+     error — usable for untrusted input (HTTP bodies) without crashing. *)
+  assert_contains "of_json_opt: C backend emits a setjmp-guarded wrapper"
+    (vec_codegen_c
+       "type 'a option = None | Some of 'a; type R = { a: int }; \
+        match (of_json_opt \"x\" : R option) with | Some r -> r.a | None -> 0")
+    "of_json_opt_R";
+  assert_contains "of_json_opt: C wrapper uses setjmp to recover"
+    (vec_codegen_c
+       "type 'a option = None | Some of 'a; type R = { a: int }; \
+        match (of_json_opt \"x\" : R option) with | Some r -> r.a | None -> 0")
+    "setjmp(__mj_jb)";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
