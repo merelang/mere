@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.7 — 2026-07-11
+
+`of_json` (derive-style JSON parsing) + docs push + ergonomics.
+
+- **`of_json` / `of_json_opt`**: the deserialization mirror of `to_json`.
+  `of_json : str -> 'a` parses JSON into a typed value, driven by the
+  result type at the call site (an annotation `(of_json s : T)`) — JSON
+  object → record fields by name, array → list / tuple, `null`/value →
+  option, string / `{"Ctor":…}` → variant. Same compile-time
+  specialization as `show` / `to_json`; interp + C (native) backends.
+  `of_json_opt : str -> 'a option` is the non-crashing sibling (returns
+  `None` on any parse / shape error) — safe for untrusted input like HTTP
+  request bodies. Closed the mere-blog dogfood's request-parsing gap
+  (PAIN B5): its handlers now decode into typed request records instead of
+  plucking string fields, verified end-to-end on the native binary.
+- **`option` is a transparent JSON nullable**: `to_json` now encodes
+  `None` as `null` and `Some x` as `x` (was the tagged `{"Some":x}`) on all
+  three backends, the idiomatic API encoding and symmetric with `of_json`.
+- **Native `exit n`**: the C backend emits libc `exit()`, so a native CLI
+  can set its process exit code (closed mq PAIN P1's last item).
+- **Trailing commas**: allowed in list and tuple literals (`[1, 2, 3,]`,
+  `(a, b,)`); records already allowed them.
+- **Docs**: a one-page [Tour of Mere](tour.html) feature showcase, and the
+  SSG's nav / index are now curated (Start here → tutorials → reference)
+  with real page titles. Site live at merelang.org.
+
+2019 tests.
+
+---
+
 ## v0.1.6 — 2026-07-11
 
 `to_json` (derive-style JSON) + native password-auth Postgres.
