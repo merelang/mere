@@ -256,6 +256,36 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 
 ---
 
+## JSON, derive-style (3 ★)
+
+Structural JSON, compile-time-specialized per type (no trait machinery),
+like `show`. `to_json` works on interp / C / Wasm; `of_json` /
+`of_json_opt` on interp / C (native).
+
+| Name | Type | Description |
+|---|---|---|
+| `to_json` ★ | `'a -> str` | Serialize any value to JSON structurally |
+| `of_json` ★ | `str -> 'a` | Parse JSON into a typed value; **fails fast** on error (trusted input) |
+| `of_json_opt` ★ | `str -> 'a option` | Same, but returns `None` on any error (safe for untrusted input) |
+
+The `of_json` result type comes from the use site — annotate the
+expression: `(of_json s : T)`. A JSON object maps to a record's fields (by
+name), an array to a list or tuple, `null`/value to `option` (`None` /
+`Some`), and a string / `{"Ctor": payload}` to a variant. `to_json` uses
+the same mapping in reverse, so `(of_json (to_json x) : T) == x`.
+
+```
+type User = { id: int, name: str, bio: str option };
+to_json (User { id = 1, name = "ada", bio = None })
+                                 // {"id":1,"name":"ada","bio":null}
+let u = (of_json body : User);   // fails fast if body is malformed
+match (of_json_opt body : User option) with
+| Some u -> u.name               // decoded
+| None   -> "bad request"        // malformed / missing field — no crash
+```
+
+---
+
 ## Loop helper (1 ★)
 
 | Name | Type | Description |
