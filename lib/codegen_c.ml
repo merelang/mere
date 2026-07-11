@@ -177,6 +177,21 @@ let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 (* Same, for `to_json` (the derive-y JSON sibling of show). Keyed by ty_tag. *)
 let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Compound types (tuple / record / variant) compared with == / != — they
+   need a structural `eq_<tag>` since C can't `==` a struct. Keyed by ty_tag. *)
+let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* Does an Eq/Ne on this type need a structural eq_<tag> (vs a C scalar ==)? *)
+let needs_struct_eq (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyTuple _ -> true
+  | Ast.TyCon (name, _) ->
+    Hashtbl.mem Typer.records name
+    || Hashtbl.mem Typer.types name
+    || Hashtbl.mem polymorphic_variants name
+    || name = "list"
+  | _ -> false
+
 (* Polymorphic record declarations: deferred to instantiation time. *)
 let polymorphic_records
     : (string, string list * (string * Ast.ty) list) Hashtbl.t =
@@ -1244,6 +1259,12 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "(strcmp(%s, %s) > 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Ge ->
        Printf.sprintf "(strcmp(%s, %s) >= 0)" (emit_expr a) (emit_expr b)
+     | ty, Ast.Eq when needs_struct_eq ty ->
+       (* Compound value (tuple / record / variant): C can't `==` a struct,
+          so compare structurally via eq_<tag>. *)
+       Printf.sprintf "eq_%s(%s, %s)" (ty_tag ty) (emit_expr a) (emit_expr b)
+     | ty, Ast.Ne when needs_struct_eq ty ->
+       Printf.sprintf "(!eq_%s(%s, %s))" (ty_tag ty) (emit_expr a) (emit_expr b)
      | _ ->
        "(" ^ emit_expr a ^ " " ^ cmpop_to_c op ^ " " ^ emit_expr b ^ ")")
   | Ast.Logic (op, a, b) ->
@@ -3466,6 +3487,63 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
 let emit_to_json_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static const char* to_json_%s(%s);" tag (c_type_of t)
 
+(* Structural equality for compound types (tuple / record / variant). C
+   can't `==` a struct, so `a == b` on such a value lowers to eq_<tag>(a, b)
+   (see the Cmp handler). Recurses field/element/payload-wise, matching the
+   interpreter's value_eq. The derive-style sibling of show / to_json. *)
+let emit_eq_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header = Printf.sprintf "static int eq_%s(%s a, %s b)" tag cty cty in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool -> header ^ " { return a == b; }"
+  | Ast.TyStr -> header ^ " { return strcmp(a, b) == 0; }"
+  | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 1; }"
+  | Ast.TyArrow _ -> header ^ " { (void)a; (void)b; return 0; }"
+  | Ast.TyTuple ts ->
+    let conds =
+      List.mapi (fun i et ->
+        Printf.sprintf "eq_%s(a.f%d, b.f%d)" (ty_tag et) i i) ts in
+    Printf.sprintf "%s { return %s; }"
+      header (if conds = [] then "1" else String.concat " && " conds)
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+    let info = Hashtbl.find Typer.records name in
+    let conds =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "eq_%s(a.%s, b.%s)" (ty_tag ft) fname fname)
+        info.Typer.r_fields in
+    Printf.sprintf "%s { return %s; }"
+      header (if conds = [] then "1" else String.concat " && " conds)
+  | Ast.TyCon (name, args) ->
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc else acc)
+          Typer.constructors []
+    in
+    let is_ptr = is_recursive_variant cty in
+    let dot = if is_ptr then "->" else "." in
+    let cases =
+      List.filter_map (fun (cname, arg_opt) ->
+        match arg_opt with
+        | None -> None
+        | Some ty ->
+          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+          Some (Printf.sprintf
+            "  if (a%stag == %d) return eq_%s(a%spayload.%s, b%spayload.%s);"
+            dot tag_n (ty_tag ty) dot cname dot cname))
+        variants
+    in
+    Printf.sprintf "%s {\n  if (a%stag != b%stag) return 0;\n%s\n  return 1;\n}"
+      header dot dot (String.concat "\n" cases)
+  | _ -> header ^ " { (void)a; (void)b; return 0; }"
+
+let emit_eq_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static int eq_%s(%s, %s);" tag (c_type_of t) (c_type_of t)
+
 let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
   Printf.sprintf "static %s %s(void*, %s);"
     (c_type_of ce.ce_return_ty) ce.ce_adapter_name
@@ -5122,6 +5200,11 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_into to_json_types t
         | None -> ())
+     (* Structural == / != on a compound type needs eq_<tag> (and its deps). *)
+     | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
+       (match a.Ast.ty with
+        | Some t when needs_struct_eq t -> add_into eq_types t
+        | _ -> ())
      (* str_of_int lowers to show_int(), so ensure show_int is emitted even
         when the program never uses `show` directly (mq dogfood P9). *)
      | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
@@ -5976,6 +6059,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      non-recursive). Bodies come after tuple/record typedefs. *)
   Hashtbl.reset show_types;
   Hashtbl.reset to_json_types;
+  Hashtbl.reset eq_types;
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
      for nested types) happens later via mono_record_typedefs. *)
@@ -6303,6 +6387,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun tag t acc ->
       emit_to_json_fn tag t :: acc) to_json_types []
   in
+  let eq_fn_forward_decls =
+    Hashtbl.fold (fun tag t acc ->
+      emit_eq_fn_forward_decl tag t :: acc) eq_types []
+  in
+  let eq_fn_defs =
+    Hashtbl.fold (fun tag t acc ->
+      emit_eq_fn tag t :: acc) eq_types []
+  in
   (* Phase 36 (DEFERRED §1.19 fix, C side): forward declare each fn's
      `<name>_as_value` closure constant so fn bodies that reference a
      top-level fn as a first-class value (e.g. `list_filter xs is_prime`)
@@ -6344,6 +6436,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_wrapper_forward_decls
     @ show_fn_forward_decls
     @ to_json_fn_forward_decls
+    @ eq_fn_forward_decls
     @ inner_lift_closure_adapter_forward_decls
   in
   let inner_lift_closure_adapters =
@@ -6375,6 +6468,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ closure_wrappers
     @ show_fn_defs
     @ to_json_fn_defs
+    @ eq_fn_defs
     @ inner_lift_closure_adapters
   in
   (* Phase 15.2: vec_instances is populated during fn / main emission
