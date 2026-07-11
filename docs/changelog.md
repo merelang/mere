@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.6 — 2026-07-11
+
+`to_json` (derive-style JSON) + native password-auth Postgres.
+
+- **`to_json`**: a polymorphic builtin (`forall 'a. 'a -> str`, the JSON
+  sibling of `show`) that serializes any value structurally — records
+  become JSON objects (dropping the type name), lists/tuples arrays,
+  nullary constructors `"Name"`, and payload constructors
+  `{"Name": payload}`. Same compile-time-specialization approach as `show`
+  (no trait machinery); works on interp / C / Wasm. Removes hand-written
+  record→JSON writers (the mere-blog dogfood's PAIN B3).
+- **Native SCRAM-SHA-256**: real SHA-256 / HMAC / PBKDF2 / base64 in the C
+  runtime, so a native binary authenticates to a password Postgres over
+  plaintext (TLS still pending). Verified against a scram-sha-256 server.
+- **Native redis/mysql**: two arena↔hex helpers complete the byte-buffer
+  FFI, so the whole `contrib/db` family — not just pg — compiles to native
+  binaries. Verified driving a real redis.
+
+1992 tests.
+
+---
+
 ## v0.1.5 — 2026-07-10
 
 **Native full-stack**: a web + Postgres app now compiles to a single
