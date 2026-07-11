@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.8 — 2026-07-12
+
+`of_json` / `of_json_opt` on the Wasm backend — backend parity.
+
+- **Wasm `of_json` / `of_json_opt`**: ported the JSON deserializers to the
+  Wasm backend, so all three shipping backends (interp / C / Wasm) have
+  them — matching `to_json`'s coverage (LLVM excluded, it lacks `to_json`
+  too). A WAT JSON-parser runtime builds a generic tree in linear memory;
+  per-type `$__ojnode_<tag>` decoders build the typed value; strict
+  `of_json` traps on error, `of_json_opt` returns `None`. This un-blocks
+  the mere-blog dogfood's **wasm deploy path** (native-only since it
+  adopted `of_json_opt` in v0.1.7).
+
+2022 tests.
+
+---
+
 ## v0.1.7 — 2026-07-11
 
 `of_json` (derive-style JSON parsing) + docs push + ergonomics.
