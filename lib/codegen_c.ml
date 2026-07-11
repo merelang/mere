@@ -181,6 +181,10 @@ let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    (result) type's ty_tag. When non-empty, the JSON-parser runtime is emitted. *)
 let of_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* For `of_json_opt : str -> 'a option` — keyed by the INNER type's ty_tag,
+   stores the inner type. Emits a setjmp wrapper that returns None on error. *)
+let of_json_opt_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 (* Compound types (tuple / record / variant) compared with == / != — they
    need a structural `eq_<tag>` since C can't `==` a struct. Keyed by ty_tag. *)
 let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
@@ -1923,6 +1927,17 @@ let rec emit_expr (e : Ast.expr) : string =
              "of_json: cannot infer target type (add an annotation, e.g. `(of_json s : T)`)"
        in
        Printf.sprintf "of_json_%s(%s)" (ty_tag target_ty) (emit_expr arg)
+     | Ast.Var "of_json_opt" ->
+       (* result is `T option`; dispatch on the inner T's tag. *)
+       let inner =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("option", [inner]) -> Ast.walk inner
+            | _ -> unsupported e.loc "of_json_opt: result type is not an option")
+         | None -> unsupported e.loc "of_json_opt: cannot infer target type"
+       in
+       Printf.sprintf "of_json_opt_%s(%s)" (ty_tag inner) (emit_expr arg)
      | Ast.Var "mk_logger" ->
        (* Phase 16.3 / DEFERRED §1.5: emit a runtime helper call that
           returns a Logger record (3 closure_str_unit fields capturing
@@ -3536,7 +3551,14 @@ typedef struct mj_node {
   const char** keys;        /* MJ_OBJ keys */
   int len;
 } mj_node;
-static void __mj_die(const char* msg) { fprintf(stderr, "of_json: %s\n", msg); exit(1); }
+/* of_json fails fast (exit); of_json_opt installs a longjmp handler so a
+   parse/shape error unwinds to a `return None` instead of crashing. */
+static jmp_buf __mj_jb;
+static int __mj_active = 0;
+static void __mj_die(const char* msg) {
+  if (__mj_active) longjmp(__mj_jb, 1);
+  fprintf(stderr, "of_json: %s\n", msg); exit(1);
+}
 static mj_node* __mj_alloc(mj_kind k) {
   mj_node* n = (mj_node*)calloc(1, sizeof(mj_node)); n->kind = k; return n; }
 typedef struct { const char* s; int pos; int n; } __mj_ps;
@@ -3756,6 +3778,27 @@ let emit_of_json_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   let cty = c_type_of t in
   Printf.sprintf "static %s __ojnode_%s(mj_node*); static %s of_json_%s(const char*);"
     cty tag cty tag
+
+(* of_json_opt_<inner_tag>: decode `inner` and wrap in Some, returning None on
+   any error (via the runtime longjmp handler). `inner_t` is the inner type T;
+   the function returns `T option`. *)
+let emit_of_json_opt_fn (inner_tag : string) (inner_t : Ast.ty) : string =
+  let opt_ty = Ast.TyCon ("option", [inner_t]) in
+  let opt_cty = c_type_of opt_ty in
+  let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
+  let some_tag = try Hashtbl.find variant_tags "Some" with Not_found -> 1 in
+  let none_v = Printf.sprintf "((%s){.tag = %d})" opt_cty none_tag in
+  Printf.sprintf
+    "static %s of_json_opt_%s(const char* __s) {\n  \
+       volatile int __saved = __mj_active; __mj_active = 1;\n  \
+       if (setjmp(__mj_jb)) { __mj_active = __saved; return %s; }\n  \
+       %s __v = ((%s){.tag = %d, .payload.Some = __ojnode_%s(__mj_parse(__s))});\n  \
+       __mj_active = __saved; return __v;\n}"
+    opt_cty inner_tag none_v opt_cty opt_cty some_tag inner_tag
+
+let emit_of_json_opt_fn_forward_decl (inner_tag : string) (inner_t : Ast.ty) : string =
+  let opt_cty = c_type_of (Ast.TyCon ("option", [inner_t])) in
+  Printf.sprintf "static %s of_json_opt_%s(const char*);" opt_cty inner_tag
 
 (* Structural equality for compound types (tuple / record / variant). C
    can't `==` a struct, so `a == b` on such a value lowers to eq_<tag>(a, b)
@@ -5475,6 +5518,18 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match e.Ast.ty with
         | Some t -> add_into of_json_types t
         | None -> ())
+     | Ast.App ({ node = Ast.Var "of_json_opt"; _ }, _) ->
+       (* result is `T option`; the node decoder is for T, the option wrapper
+          for `T option`. Register both. *)
+       (match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyCon ("option", [inner]) ->
+             add_into of_json_types inner;
+             let it = Ast.walk inner in
+             Hashtbl.replace of_json_opt_types (ty_tag it) it
+           | _ -> ())
+        | None -> ())
      (* Structural == / != on a compound type needs eq_<tag> (and its deps). *)
      | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
        (match a.Ast.ty with
@@ -6335,6 +6390,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset show_types;
   Hashtbl.reset to_json_types;
   Hashtbl.reset of_json_types;
+  Hashtbl.reset of_json_opt_types;
   Hashtbl.reset eq_types;
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
@@ -6671,6 +6727,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun tag t acc ->
       emit_of_json_fn tag t :: acc) of_json_types []
   in
+  let of_json_opt_fn_forward_decls =
+    Hashtbl.fold (fun tag t acc ->
+      emit_of_json_opt_fn_forward_decl tag t :: acc) of_json_opt_types []
+  in
+  let of_json_opt_fn_defs =
+    Hashtbl.fold (fun tag t acc ->
+      emit_of_json_opt_fn tag t :: acc) of_json_opt_types []
+  in
   let eq_fn_forward_decls =
     Hashtbl.fold (fun tag t acc ->
       emit_eq_fn_forward_decl tag t :: acc) eq_types []
@@ -6721,9 +6785,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ show_fn_forward_decls
     @ to_json_fn_forward_decls
     (* of_json: the JSON-parser runtime (defines mj_node) must precede the
-       __ojnode_<tag> forward decls that reference it. Emitted only when used. *)
-    @ (if Hashtbl.length of_json_types = 0 then []
-       else of_json_runtime :: of_json_fn_forward_decls)
+       __ojnode_<tag> forward decls that reference it. Emitted when either
+       of_json or of_json_opt is used. *)
+    @ (if Hashtbl.length of_json_types = 0 && Hashtbl.length of_json_opt_types = 0
+       then []
+       else of_json_runtime :: (of_json_fn_forward_decls @ of_json_opt_fn_forward_decls))
     @ eq_fn_forward_decls
     @ inner_lift_closure_adapter_forward_decls
   in
@@ -6757,6 +6823,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ show_fn_defs
     @ to_json_fn_defs
     @ of_json_fn_defs
+    @ of_json_opt_fn_defs
     @ eq_fn_defs
     @ inner_lift_closure_adapters
   in

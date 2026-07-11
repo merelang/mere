@@ -1852,6 +1852,7 @@ let initial_env : env =
     ("show", ref builtin_show);
     ("to_json", ref builtin_to_json);
     ("of_json", ref builtin_of_json);
+    ("of_json_opt", ref builtin_of_json);
     ("fst", ref builtin_fst);
     ("snd", ref builtin_snd);
     ("id", ref builtin_id);
@@ -2191,6 +2192,26 @@ let rec eval_in (env : env) (e : Ast.expr) =
     in
     (try of_json_value target (parse_json_tree s)
      with Json_parse_error msg -> type_error e.Ast.loc msg)
+  (* of_json_opt: the non-crashing sibling. Returns None on any error. *)
+  | Ast.App ({ Ast.node = Ast.Var "of_json_opt"; _ }, arg) ->
+    let s =
+      match eval_in env arg with
+      | V_str s -> s
+      | _ -> type_error e.Ast.loc "of_json_opt: expected a str argument"
+    in
+    (* result type is `T option`; decode T, wrap in Some, None on failure. *)
+    let inner =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("option", [inner]) -> inner
+         | _ -> type_error e.Ast.loc "of_json_opt: result type is not an option")
+      | None ->
+        type_error e.Ast.loc
+          "of_json_opt: cannot infer target type (add a type annotation)"
+    in
+    (try V_constr ("Some", Some (of_json_value inner (parse_json_tree s)))
+     with Json_parse_error _ -> V_constr ("None", None))
   | Ast.Int_lit n -> V_int n
   | Ast.Float_lit f -> V_float f
   | Ast.Bool_lit b -> V_bool b
