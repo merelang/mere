@@ -4987,6 +4987,22 @@ let () =
        "type R = { a: int, b: bool }; \
         if R { a = 1, b = true } == R { a = 1, b = true } then 1 else 0")
     "eq_R(";
+  (* of_json on the C backend: the JSON-parser runtime + a type-specialized
+     decoder (__ojnode_<tag> / of_json_<tag>) are emitted and dispatched on
+     the target type. (interp semantics covered above; here we confirm the
+     native codegen path exists. Wasm/LLVM are a follow-up, as with to_json.) *)
+  assert_contains "of_json: C backend emits a record decoder"
+    (vec_codegen_c
+       "type R = { a: int, b: bool }; let r = (of_json \"x\" : R); r.a")
+    "of_json_R";
+  assert_contains "of_json: C backend emits the JSON parser runtime"
+    (vec_codegen_c
+       "type R = { a: int, b: bool }; let r = (of_json \"x\" : R); r.a")
+    "__mj_parse";
+  assert_contains "of_json: C record decoder reads fields by name"
+    (vec_codegen_c
+       "type R = { a: int, b: bool }; let r = (of_json \"x\" : R); r.a")
+    "__mj_field(j, \"a\")";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
