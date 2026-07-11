@@ -1048,6 +1048,38 @@ let () =
     (Pipeline.process
       "type 'a wrap = Wrap of 'a;
        to_json (Wrap 7)") "\"{\\\"Wrap\\\":7}\"";
+
+  (* of_json — structural inverse of to_json (str -> 'a). The target type
+     comes from an expression annotation `(of_json s : T)`. *)
+  check "of_json type" (Pipeline.type_of "of_json") "(str -> 'a)";
+  check "of_json int" (Pipeline.process "(of_json \"42\" : int)") "42";
+  check "of_json bool" (Pipeline.process "(of_json \"true\" : bool)") "true";
+  check "of_json str"
+    (Pipeline.process "(of_json \"\\\"hi\\\"\" : str)") "\"hi\"";
+  check "of_json list"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       (of_json \"[1, 2, 3]\" : int list)") "[1, 2, 3]";
+  check "of_json tuple"
+    (Pipeline.process "(of_json \"[7, 9]\" : (int * int))") "(7, 9)";
+  (* round-trips avoid hand-escaping JSON braces in the test source *)
+  check "of_json record round-trip"
+    (Pipeline.process
+      "type P = { id: int, title: str };
+       let p = P { id = 5, title = \"x\" } in
+       (of_json (to_json p) : P) == p") "true";
+  check "of_json nested list round-trip"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       type OjRec = { xs: int list, name: str };
+       let q = OjRec { xs = [1, 2, 3], name = \"n\" } in
+       (of_json (to_json q) : OjRec) == q") "true";
+  check "of_json option Some round-trip"
+    (Pipeline.process
+      "type 'a option = None | Some of 'a;
+       type OjOpt = { v: int option };
+       let r = OjOpt { v = Some 42 } in
+       (of_json (to_json r) : OjOpt) == r") "true";
   check "show with compose"
     (Pipeline.process
       "let print_int_v2 = print << show in

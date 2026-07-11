@@ -123,6 +123,11 @@ and to_json_string = function
         | V_constr (name, Some inner) ->
           "{" ^ Ast.escape_string name ^ ":" ^ to_json_string inner ^ "}"
         | _ -> assert false))
+  (* option is a transparent JSON nullable: None -> null, Some x -> x. This is
+     the idiomatic API encoding and keeps `of_json` symmetric (a nullable /
+     omittable field round-trips). Other variants stay tagged. *)
+  | V_constr ("None", None) -> "null"
+  | V_constr ("Some", Some v) -> to_json_string v
   | V_constr (name, None) -> Ast.escape_string name
   | V_constr (name, Some v) ->
     "{" ^ Ast.escape_string name ^ ":" ^ to_json_string v ^ "}"
@@ -914,6 +919,15 @@ let builtin_show =
 
 let builtin_to_json =
   V_builtin ("to_json", fun v -> V_str (to_json_string v))
+
+(* Fallback for a bare/indirect `of_json` reference. The normal path is the
+   `App (Var "of_json", arg)` special case in eval_in, which has the target
+   type; used as a plain value it has no type context and cannot decode. *)
+let builtin_of_json =
+  V_builtin ("of_json", fun _ ->
+    raise (Eval_error (Loc.dummy,
+      "of_json must be applied directly where its result type is known \
+       (e.g. `let r: T = of_json s`); it can't be used as a first-class value")))
 
 (* Phase 12.6 — Q-010 narrowed: the first step toward trait-style API
    unification. Adds `len` as a polymorphic `'a -> int` builtin that
@@ -1837,6 +1851,7 @@ let initial_env : env =
     ("assert", ref builtin_assert);
     ("show", ref builtin_show);
     ("to_json", ref builtin_to_json);
+    ("of_json", ref builtin_of_json);
     ("fst", ref builtin_fst);
     ("snd", ref builtin_snd);
     ("id", ref builtin_id);
@@ -1955,8 +1970,227 @@ let rec value_eq a b =
     raise (Eval_error (Loc.dummy, "functions are not comparable with == / !="))
   | _ -> false
 
+(* ===== of_json: type-directed JSON deserialization (mirror of to_json) =====
+   `to_json` walks a runtime value (which already carries its structure), so it
+   needs no type info. `of_json` goes the other way — a JSON string alone can't
+   tell a record from a map, or a nullary constructor from a plain string — so
+   it is driven by the target type read from the call node's inferred `ty`.
+   We parse the input into a generic `jtree`, then convert it into the target
+   `value` structurally: JSON object -> record fields (matched by name), array
+   -> list / tuple, `null` -> None for `option`, string/object -> variant. *)
+
+type jtree =
+  | JNull
+  | JBool of bool
+  | JNum of string          (* raw numeric lexeme; int/float chosen by target *)
+  | JStr of string
+  | JArr of jtree list
+  | JObj of (string * jtree) list
+
+exception Json_parse_error of string
+
+let parse_json_tree (s : string) : jtree =
+  let n = String.length s in
+  let pos = ref 0 in
+  let error msg =
+    raise (Json_parse_error
+             (Printf.sprintf "of_json: %s (at offset %d)" msg !pos)) in
+  let peek () = if !pos < n then Some s.[!pos] else None in
+  let skip_ws () =
+    while !pos < n &&
+          (match s.[!pos] with ' ' | '\t' | '\n' | '\r' -> true | _ -> false)
+    do incr pos done in
+  let expect c =
+    if !pos < n && s.[!pos] = c then incr pos
+    else error (Printf.sprintf "expected '%c'" c) in
+  let parse_string_lit () =
+    expect '"';
+    let buf = Buffer.create 16 in
+    let rec loop () =
+      if !pos >= n then error "unterminated string";
+      match s.[!pos] with
+      | '"' -> incr pos
+      | '\\' ->
+        incr pos;
+        if !pos >= n then error "bad escape";
+        (match s.[!pos] with
+         | 'n' -> Buffer.add_char buf '\n'
+         | 't' -> Buffer.add_char buf '\t'
+         | 'r' -> Buffer.add_char buf '\r'
+         | 'b' -> Buffer.add_char buf '\b'
+         | 'f' -> Buffer.add_char buf '\012'
+         | '"' -> Buffer.add_char buf '"'
+         | '\\' -> Buffer.add_char buf '\\'
+         | '/' -> Buffer.add_char buf '/'
+         | c -> Buffer.add_char buf c);
+        incr pos; loop ()
+      | c -> Buffer.add_char buf c; incr pos; loop ()
+    in
+    loop ();
+    Buffer.contents buf in
+  let rec parse_value () =
+    skip_ws ();
+    match peek () with
+    | None -> error "unexpected end of input"
+    | Some '{' -> parse_object ()
+    | Some '[' -> parse_array ()
+    | Some '"' -> JStr (parse_string_lit ())
+    | Some 't' -> parse_lit "true" (JBool true)
+    | Some 'f' -> parse_lit "false" (JBool false)
+    | Some 'n' -> parse_lit "null" JNull
+    | Some c when c = '-' || (c >= '0' && c <= '9') -> parse_number ()
+    | Some c -> error (Printf.sprintf "unexpected char '%c'" c)
+  and parse_lit lit v =
+    let len = String.length lit in
+    if !pos + len <= n && String.sub s !pos len = lit then
+      (pos := !pos + len; v)
+    else error ("expected " ^ lit)
+  and parse_number () =
+    let start = !pos in
+    if !pos < n && s.[!pos] = '-' then incr pos;
+    while !pos < n &&
+          (match s.[!pos] with
+           | '0'..'9' | '.' | 'e' | 'E' | '+' | '-' -> true | _ -> false)
+    do incr pos done;
+    JNum (String.sub s start (!pos - start))
+  and parse_array () =
+    expect '[';
+    skip_ws ();
+    if peek () = Some ']' then (incr pos; JArr [])
+    else begin
+      let acc = ref [] in
+      let rec loop () =
+        let v = parse_value () in
+        acc := v :: !acc;
+        skip_ws ();
+        match peek () with
+        | Some ',' -> incr pos; loop ()
+        | Some ']' -> incr pos
+        | _ -> error "expected ',' or ']' in array"
+      in
+      loop ();
+      JArr (List.rev !acc)
+    end
+  and parse_object () =
+    expect '{';
+    skip_ws ();
+    if peek () = Some '}' then (incr pos; JObj [])
+    else begin
+      let acc = ref [] in
+      let rec loop () =
+        skip_ws ();
+        let k = parse_string_lit () in
+        skip_ws (); expect ':';
+        let v = parse_value () in
+        acc := (k, v) :: !acc;
+        skip_ws ();
+        match peek () with
+        | Some ',' -> incr pos; loop ()
+        | Some '}' -> incr pos
+        | _ -> error "expected ',' or '}' in object"
+      in
+      loop ();
+      JObj (List.rev !acc)
+    end
+  in
+  let v = parse_value () in
+  skip_ws ();
+  if !pos <> n then error "trailing content after JSON value";
+  v
+
+(* Substitute type params -> concrete args in a field/ctor type. *)
+let of_json_build_subst params args =
+  try List.combine params args with Invalid_argument _ -> []
+let rec of_json_apply_subst subst t =
+  match Ast.walk t with
+  | Ast.TyParam p ->
+    (match List.assoc_opt p subst with Some a -> a | None -> Ast.TyParam p)
+  | Ast.TyArrow (a, b) ->
+    Ast.TyArrow (of_json_apply_subst subst a, of_json_apply_subst subst b)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (of_json_apply_subst subst) ts)
+  | Ast.TyCon (n, xs) -> Ast.TyCon (n, List.map (of_json_apply_subst subst) xs)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, of_json_apply_subst subst inner)
+  | other -> other
+
+(* Convert a parsed jtree into a runtime value, directed by target type `t`. *)
+let rec of_json_value (t : Ast.ty) (j : jtree) : value =
+  let mismatch what =
+    raise (Json_parse_error ("of_json: expected " ^ what)) in
+  match Ast.walk t, j with
+  | Ast.TyInt, JNum s ->
+    (try V_int (int_of_string (String.trim s))
+     with _ ->
+       (try V_int (int_of_float (float_of_string s))
+        with _ -> mismatch "an integer"))
+  | Ast.TyFloat, JNum s ->
+    (try V_float (float_of_string s) with _ -> mismatch "a number")
+  | Ast.TyBool, JBool b -> V_bool b
+  | Ast.TyStr, JStr s -> V_str s
+  | Ast.TyUnit, JNull -> V_unit
+  | Ast.TyTuple ts, JArr js when List.length ts = List.length js ->
+    V_tuple (List.map2 of_json_value ts js)
+  | Ast.TyCon ("list", [elem]), JArr js ->
+    List.fold_right
+      (fun jv acc -> V_constr ("Cons", Some (V_tuple [of_json_value elem jv; acc])))
+      js (V_constr ("Nil", None))
+  | Ast.TyCon ("option", [inner]), _ ->
+    (match j with
+     | JNull -> V_constr ("None", None)
+     | _ -> V_constr ("Some", Some (of_json_value inner j)))
+  | Ast.TyCon (name, args), _ when Hashtbl.mem Typer.records name ->
+    (match j with
+     | JObj fields ->
+       let info = Hashtbl.find Typer.records name in
+       let subst = of_json_build_subst info.Typer.r_params args in
+       let vfields =
+         List.map (fun (fname, fty) ->
+           match List.assoc_opt fname fields with
+           | Some jv -> (fname, of_json_value (of_json_apply_subst subst fty) jv)
+           | None ->
+             raise (Json_parse_error
+                      (Printf.sprintf "of_json: missing field %S for record %s"
+                         fname name)))
+           info.Typer.r_fields
+       in
+       V_record (name, vfields)
+     | _ -> mismatch ("a JSON object for record " ^ name))
+  | Ast.TyCon (name, args), _ ->
+    (* general variant: JSON string -> nullary ctor; {"Ctor": payload} -> Ctor payload *)
+    (match j with
+     | JStr cname -> V_constr (cname, None)
+     | JObj [(cname, payload)] ->
+       (match Hashtbl.find_opt Typer.constructors cname with
+        | Some info ->
+          (match info.Typer.arg with
+           | Some argty ->
+             let subst = of_json_build_subst info.Typer.params args in
+             V_constr (cname, Some (of_json_value (of_json_apply_subst subst argty) payload))
+           | None -> V_constr (cname, None))
+        | None ->
+          raise (Json_parse_error
+                   (Printf.sprintf "of_json: unknown constructor %s" cname)))
+     | _ -> mismatch ("a variant value for " ^ name))
+  | _ ->
+    mismatch "a matching JSON shape for the target type"
+
 let rec eval_in (env : env) (e : Ast.expr) =
   match e.Ast.node with
+  (* of_json applied directly: decode the string using the call node's type. *)
+  | Ast.App ({ Ast.node = Ast.Var "of_json"; _ }, arg) ->
+    let s =
+      match eval_in env arg with
+      | V_str s -> s
+      | _ -> type_error e.Ast.loc "of_json: expected a str argument"
+    in
+    let target =
+      match e.Ast.ty with
+      | Some t -> t
+      | None ->
+        type_error e.Ast.loc
+          "of_json: cannot infer target type (add a type annotation)"
+    in
+    (try of_json_value target (parse_json_tree s)
+     with Json_parse_error msg -> type_error e.Ast.loc msg)
   | Ast.Int_lit n -> V_int n
   | Ast.Float_lit f -> V_float f
   | Ast.Bool_lit b -> V_bool b
