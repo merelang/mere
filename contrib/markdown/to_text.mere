@@ -54,20 +54,3 @@ let render = fn (lines: str list) ->
     strbuf_to_str b
   };
 
-let _ = print "=== markdown_to_text (Phase 36) ===";
-
-let md =
-  ["# Daily Notes",
-   "",
-   "## Tasks",
-   "- Buy *milk* and **bread**",
-   "- Call `Alice` about the meeting",
-   "",
-   "> Remember: keep the code _simple_.",
-   "",
-   "### Misc",
-   "  Plain paragraph with *no* heading."];
-
-let _ = print (render md);
-
-0

@@ -9545,7 +9545,9 @@ let () =
     typed_wat_ok "typed compile: option"
       "contrib/option/option.mere" 30000;
     typed_wat_ok "typed compile: path"
-      "contrib/path/path.mere" 20000;
+      (* threshold lowered: path.mere shed its on-import self-tests
+         (library-clean, SSG-dogfood fix), so its typed WAT shrank. *)
+      "contrib/path/path.mere" 12000;
     (* Phase 55f part 7: time.mere unlocked via float builtin additions
        (f_add / f_sub / f_lt etc. registered polymorphically). *)
     typed_wat_ok "typed compile: time"

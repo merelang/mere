@@ -84,32 +84,3 @@ let has_ext = fn (s: str) -> fn (e: str) ->
 
 };   // end of `module Path`
 
-// === Self-tests ===
-
-let _ = print "=== Path helpers demo ===";
-
-let _ = print ("join 'docs' 'tutorial.md' -> " ++ Path.join "docs" "tutorial.md");
-let _ = print ("join 'docs/' 'tutorial.md' -> " ++ Path.join "docs/" "tutorial.md");
-let _ = print ("join '' 'foo' -> " ++ Path.join "" "foo");
-let _ = print ("join 'a' '/abs' -> " ++ Path.join "a" "/abs");
-
-let _ = print ("basename 'docs/foo.md' -> " ++ Path.basename "docs/foo.md");
-let _ = print ("basename 'foo.md'      -> " ++ Path.basename "foo.md");
-let _ = print ("basename '/etc/hosts'  -> " ++ Path.basename "/etc/hosts");
-let _ = print ("basename '/'           -> " ++ Path.basename "/");
-
-let _ = print ("dirname 'docs/foo.md'  -> " ++ Path.dirname "docs/foo.md");
-let _ = print ("dirname 'foo.md'       -> '" ++ Path.dirname "foo.md" ++ "'");
-let _ = print ("dirname '/etc/hosts'   -> " ++ Path.dirname "/etc/hosts");
-let _ = print ("dirname '/foo'         -> " ++ Path.dirname "/foo");
-
-let _ = print ("ext 'foo.md'           -> '" ++ Path.ext "foo.md" ++ "'");
-let _ = print ("ext 'archive.tar.gz'   -> '" ++ Path.ext "archive.tar.gz" ++ "'");
-let _ = print ("ext 'noext'            -> '" ++ Path.ext "noext" ++ "'");
-let _ = print ("ext '.hidden'          -> '" ++ Path.ext ".hidden" ++ "'");
-
-let _ = print ("drop_ext 'foo.md'      -> " ++ Path.drop_ext "foo.md");
-let _ = print ("has_ext 'foo.md' '.md' -> " ++ show (Path.has_ext "foo.md" ".md"));
-let _ = print ("has_ext 'foo.md' '.py' -> " ++ show (Path.has_ext "foo.md" ".py"));
-
-0
