@@ -5124,6 +5124,22 @@ let () =
        "type R = { a: int, b: bool }; \
         if R { a = 1, b = true } == R { a = 1, b = true } then 1 else 0")
     "(func $eq_R";
+  (* of_json on the Wasm backend: emits the JSON-parser runtime + a
+     type-specialized decoder. Parity with interp + C (LLVM excluded, as it
+     also lacks to_json). *)
+  assert_contains "of_json: Wasm backend emits a record decoder"
+    (wasm_with_decls
+       "type R = { a: int, b: bool }; let r = (of_json \"x\" : R) in r.a")
+    "$of_json_R";
+  assert_contains "of_json: Wasm backend emits the JSON parser runtime"
+    (wasm_with_decls
+       "type R = { a: int, b: bool }; let r = (of_json \"x\" : R) in r.a")
+    "$__mj_parse";
+  assert_contains "of_json_opt: Wasm backend emits a safe wrapper"
+    (wasm_with_decls
+       "type 'a option = None | Some of 'a; type R = { a: int }; \
+        match (of_json_opt \"x\" : R option) with | Some r -> r.a | None -> 0")
+    "$of_json_opt_R";
   check "B2: C backend compiles record let"
     (let c = vec_codegen_c
        "type P = { x: int, y: int }; let P { x = a, y = b } = P { x = 3, y = 4 } in a + b" in
