@@ -5043,6 +5043,22 @@ let () =
      to the Q-012 thread `pthread_join` builtin — the C backend now checks
      shadowing before that dispatch. (Surfaced by the mq dogfood's CSV
      parser.) *)
+  (* A top-level `let f` must not corrupt a prelude fn (list_fold) whose
+     parameter is also named `f`: inside list_fold, `f` is its parameter /
+     captured value, not the user's global. Regression for the C-backend
+     resolution bug found via the mere-calc dogfood. *)
+  check "shadow: top-level name matching a prelude param evaluates"
+    (Pipeline.process
+       "let f = fn (x) -> x + 1; f (list_sum (Cons (10, Cons (20, Nil))))")
+    "31";
+  (* The C backend used to emit list_fold's parameter `f` as the user's
+     global (`f((...))` direct call + `f_as_value`), producing invalid C.
+     The fix routes list_fold's own `f` through its parameter — assert the
+     emit succeeds (the bug was a clang-level break on valid-looking C). *)
+  check "shadow: top-level name matching a prelude param compiles (C)"
+    (let c = vec_codegen_c
+       "let f = fn (x) -> x + 1; f (list_sum (Cons (10, Cons (20, Nil))))" in
+     if String.length c > 0 then "ok" else "empty") "ok";
   assert_no_contains "join: local shadow isn't compiled as pthread_join"
     (vec_codegen_c
        "let rec join = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + join t in join (Cons (1, Cons (2, Nil)))")
