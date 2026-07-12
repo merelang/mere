@@ -129,7 +129,14 @@ let c_reserved_keywords =
    (* C99/C11/C23 + stdlib pitfalls *)
    "_Bool"; "_Complex"; "_Imaginary"; "_Atomic"; "_Static_assert";
    "_Thread_local"; "_Alignas"; "_Alignof"; "_Generic"; "_Noreturn";
-   "main"]
+   "main";
+   (* libm <math.h> / POSIX names a user fn can collide with (the C backend
+      includes math.h). E.g. a `let rec fmin` clashes with libm's fmin.
+      Mere's own math builtins (sqrt/sin/cos/tan/pow) are emitted as libm
+      calls and are handled separately, so they're not listed here. *)
+   "fmin"; "fmax"; "fabs"; "floor"; "ceil"; "round"; "trunc"; "fmod";
+   "hypot"; "exp"; "log"; "log2"; "log10"; "cbrt"; "remainder"; "drem";
+   "gamma"; "y0"; "y1"; "j0"; "j1"; "index"; "remove"]
 let c_safe_name (n : string) : string =
   (* Phase 41: convert module-qualified name (`M.foo`) to a C identifier.
      Since `.` is not allowed in C identifiers, replace it with `__`
