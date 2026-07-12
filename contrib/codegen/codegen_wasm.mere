@@ -80,6 +80,13 @@ type EmitState = {
   // decls; ctors introduced lazily via EConstr use (not seen in any
   // TopType) are absent and get rendered as name-only.
   ctor_payload_tys: (str * ty option) list,
+  // Stage 55f: is the expression currently being emitted in TAIL position?
+  // Set true at a function body's entry, preserved through if / let / match
+  // tail sub-expressions, false elsewhere. At a closure call this selects
+  // `return_call_indirect` (wasm guaranteed TCO) over `call_indirect`, so
+  // deep tail recursion (list traversals when the compiler runs itself)
+  // stays stack-flat instead of overflowing.
+  tail: bool,
 };
 
 // Initial offset for string-literal data segments. Matches the OCaml
@@ -104,7 +111,8 @@ let initial_emit_state = EmitState {
   extern_uses = Nil,
   helpers_used = Nil,
   extern_decls = Nil,
-  ctor_payload_tys = Nil
+  ctor_payload_tys = Nil,
+  tail = false
 };
 
 // === Instruction emission ==================================================
@@ -728,7 +736,21 @@ let build_tuple_show_expr = fn (elems: ty list) -> fn (tup_slot: int)
 // lambdas work via the standard curried desugaring (each EFun lifts
 // one arg); captures land in Stage 53c-3.
 
-let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
+// Stage 55f: set the tail-position flag. A standalone helper (outside the
+// emit_* mutual-recursion group) so its `EmitState` param type is concrete —
+// a `{ x | tail = t }` update written directly on a value returned by a
+// mutually-recursive emit_* fn fails inference ("base must be a record").
+let set_tail = fn (t: bool) -> fn (s: EmitState) -> ({ s | tail = t } : EmitState);
+
+let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
+  // Stage 55f (TCO): capture whether THIS expression is in tail position,
+  // then default the working state to non-tail so ordinary sub-expressions
+  // (operands, call args, function positions) are not treated as tail.
+  // Tail-preserving forms (if / let / match / letrec bodies) re-set
+  // `tail = is_tail` on the state they hand to their tail sub-expression;
+  // the closure-call site reads `is_tail` to pick return_call_indirect.
+  let is_tail = s0.tail in
+  let s = set_tail false s0 in
   match e with
   | EInt n -> push_instr ("i32.const " ++ show n) s
   // Phase 54.33: EFloat holds the source text ("42.5") — emit
@@ -837,13 +859,13 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         // index is `s2.local_counter - 1`.
         let idx = s2.local_counter - 1 in
         let s3 = push_instr ("local.set " ++ show idx) s2 in
-        emit_expr body s3
+        emit_expr body (set_tail is_tail s3)
       | PWild ->
         // `let _ = e in body` — emit e, drop it, then emit body. wasm's
         // `drop` consumes one stack value.
         let s1 = emit_expr value_expr s in
         let s2 = push_instr "drop" s1 in
-        emit_expr body s2
+        emit_expr body (set_tail is_tail s2)
       | _ ->
         // Stage 53d enables destructuring lets via the pattern-bind
         // helpers. The let-binding is unconditional (the typer has
@@ -854,15 +876,16 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let (val_slot, s2) = alloc_tmp_local s1 in
         let s3 = push_instr ("local.set " ++ show val_slot) s2 in
         let s4 = emit_bind_pattern pat val_slot s3 in
-        emit_expr body s4)
+        emit_expr body (set_tail is_tail s4))
   | EIf (cond, then_e, else_e) ->
     // (cond) if (result i32) (then_e) else (else_e) end. The condition
     // i32 is consumed; both branches must push exactly one i32 result.
+    // then/else are in tail position when the `if` is.
     let s1 = emit_expr cond s in
     let s2 = push_instr "if (result i32)" s1 in
-    let s3 = emit_expr then_e s2 in
+    let s3 = emit_expr then_e (set_tail is_tail s2) in
     let s4 = push_instr "else" s3 in
-    let s5 = emit_expr else_e s4 in
+    let s5 = emit_expr else_e (set_tail is_tail s4) in
     push_instr "end" s5
   | EFun (arg, _ty_opt, body) ->
     // 1. Scan the body for free vars (excluding `arg`) and lay them
@@ -898,7 +921,8 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
       local_tys = Nil,
       local_counter = 2,
       captures = env_offsets,
-      fn_counter = fn_idx + 1 } : EmitState) in
+      fn_counter = fn_idx + 1,
+      tail = true } : EmitState) in
     let inner_done = emit_expr body inner in
     let fn_name = "$anon_" ++ show fn_idx ++ "_fn" in
     let inner_local_decls = join_local_decls (list_reverse inner_done.local_tys) in
@@ -1396,7 +1420,13 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
         let s6 = emit_expr x s5 in
         let s7 = push_instr ("local.get " ++ show tmp) s6 in
         let s8 = push_instr "i32.load offset=4" s7 in
-        push_instr "call_indirect (type $cl)" s8))
+        // Stage 55f: the final call of a tail-position application becomes a
+        // guaranteed tail call so deep (self-)recursion stays stack-flat.
+        // Only the OUTERMOST curried call is tail: inner EApps sit in the
+        // function position, emitted with tail=false above.
+        (if is_tail
+          then push_instr "return_call_indirect (type $cl)" s8
+          else push_instr "call_indirect (type $cl)" s8)))
   | ETuple es ->
     // Bump-alloc N*4 bytes, store each element at offset i*4, leave
     // the tuple pointer on top. Sub-expr emit order = source order so
@@ -1433,14 +1463,15 @@ let rec emit_expr = fn (e: expr) -> fn (s: EmitState) ->
     let s1 = emit_expr scrutinee s in
     let (s_tmp, s2) = alloc_tmp_local s1 in
     let s3 = push_instr ("local.set " ++ show s_tmp) s2 in
-    emit_match_arms arms s_tmp s3
+    // arm bodies are in tail position when the match is (thread is_tail).
+    emit_match_arms is_tail arms s_tmp s3
   | ELetRec (bindings, body) ->
     // Closure-env backpatching: pre-alloc each rec binding's 8-byte
     // closure record and bind the name to its slot so the body and
     // sibling values can reference it. Then lift each function and
     // patch its env_ptr + fn_idx into the pre-allocated record.
     let s1 = emit_letrec_bindings bindings s in
-    emit_expr body s1
+    emit_expr body (set_tail is_tail s1)
   | ERecordLit (_name, fields) ->
     // Stage 53h-fix: records via global lazy field-offset allocation.
     // Each (field_name, value) pair stores `value` at the offset that
@@ -1692,7 +1723,8 @@ and emit_tuple_binds = fn (ps: pattern list) -> fn (i: int)
 // `unreachable`. Pattern bindings live only inside their arm's
 // then-branch — outer `locals` is restored before recursing into the
 // next arm so the binding names don't leak.
-and emit_match_arms = fn (arms: (pattern * expr option * expr) list)
+and emit_match_arms = fn (is_tail: bool)
+                   -> fn (arms: (pattern * expr option * expr) list)
                    -> fn (slot: int) -> fn (s: EmitState) ->
   match arms with
   | Nil -> push_instr "unreachable" s
@@ -1702,25 +1734,21 @@ and emit_match_arms = fn (arms: (pattern * expr option * expr) list)
     let s2 = push_instr "if (result i32)" s1 in
     let outer_locals = s2.locals in
     let s3 = emit_bind_pattern pat slot s2 in
-    // Stage 53h-fix: `when`-guards. Evaluate the guard in the
-    // pattern-bound scope; if false, recurse into the remaining arms
-    // (duplicated below the guard-failed `else` for fall-through —
-    // cheap enough for typical match sizes, and avoids the wasm
-    // block/br_if dance that fall-through across nested `if`s would
-    // normally need).
+    // Stage 55f: an arm body is in tail position when the match is; the
+    // guard and pattern checks are not (they stay tail=false via `s`).
     let s4 = (match guard_opt with
-      | None -> emit_expr body s3
+      | None -> emit_expr body (set_tail is_tail s3)
       | Some g ->
         let sg = emit_expr g s3 in
         let sg2 = push_instr "if (result i32)" sg in
-        let sg3 = emit_expr body sg2 in
+        let sg3 = emit_expr body (set_tail is_tail sg2) in
         let sg4 = push_instr "else" sg3 in
         let sg5 = ({ sg4 | locals = outer_locals } : EmitState) in
-        let sg6 = emit_match_arms rest slot sg5 in
+        let sg6 = emit_match_arms is_tail rest slot sg5 in
         push_instr "end" sg6) in
     let s5 = push_instr "else" s4 in
     let s6 = ({ s5 | locals = outer_locals } : EmitState) in
-    let s7 = emit_match_arms rest slot s6 in
+    let s7 = emit_match_arms is_tail rest slot s6 in
     push_instr "end" s7
 
 // === let-rec (Stage 53e-2) =================================================
@@ -1790,7 +1818,8 @@ and lift_and_patch_closure = fn (fn_expr: expr) -> fn (slot: int)
       local_tys = Nil,
       local_counter = 2,
       captures = env_offsets,
-      fn_counter = fn_idx + 1 } : EmitState) in
+      fn_counter = fn_idx + 1,
+      tail = true } : EmitState) in
     let inner_done = emit_expr body inner in
     let fn_name = "$anon_" ++ show fn_idx ++ "_fn" in
     let inner_local_decls = join_local_decls (list_reverse inner_done.local_tys) in
