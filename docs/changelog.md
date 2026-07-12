@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.9 — 2026-07-12
+
+Float operator overloading + libm name collisions — driven by the `mstat`
+numeric-CLI dogfood.
+
+- **Infix operators on float**: `+ - * /` and `< <= > >=` now work on
+  `float`, not just `int` / `str`. Dispatched on the operand type at
+  codegen (the same compile-time specialization as `show` / `to_json` /
+  `eq`; no trait machinery). `Mod` stays int-only. All four backends'
+  arithmetic/ordering covered. Also fixes a latent C bug where a
+  whole-valued float literal emitted as `7` (via `%.17g`), making
+  `7.0 / 2.0` integer division. *Caveat:* operands must be concretely
+  float-typed — an unannotated `fn a -> fn b -> a < b` still defaults to
+  int, so the default `list_sort` stays int (sort floats with an annotated
+  comparator).
+- **libm / POSIX name collisions**: a user fn named `fmin` / `fmax` / … now
+  gets rehomed (`fmin_`) instead of clashing with `<math.h>` in the C
+  backend (`conflicting types for 'fmin'`). Same treatment as `main`.
+
+2033 tests.
+
+---
+
 ## v0.1.8 — 2026-07-12
 
 `of_json` / `of_json_opt` on the Wasm backend — backend parity.
