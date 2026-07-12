@@ -5037,6 +5037,12 @@ let () =
   assert_contains "exit: C backend emits libc exit()"
     (vec_codegen_c "let _ = print \"x\" in exit 2")
     "exit(2)";
+  (* a user fn named after a libm function (fmin/fmax/...) must be renamed
+     so it doesn't clash with <math.h> (mstat dogfood N2). *)
+  assert_contains "C backend renames a user fn colliding with libm fmin"
+    (vec_codegen_c
+       "let rec fmin = fn (a: int) -> fn (b: int) -> if a < b then a else b in fmin 3 5")
+    "fmin_";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
