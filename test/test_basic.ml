@@ -5061,6 +5061,12 @@ let () =
     (vec_codegen_c
        "let rec fmin = fn (a: int) -> fn (b: int) -> if a < b then a else b in fmin 3 5")
     "fmin_";
+  (* a `let rec` written directly in the top-level program expression (not
+     inside a fn) now lifts on C instead of erroring (mstat dogfood N6). *)
+  check "C backend: let rec in the main expression compiles"
+    (let c = vec_codegen_c
+       "let a = 3 in (let rec go = fn (k: int) -> if k <= 0 then 0 else k + go (k - 1) in go a)" in
+     if String.length c > 0 then "ok" else "empty") "ok";
   (* Native full-stack Stage 1: the Wasm-memory-model FFI externs (tcp_* /
      mem_* / str_ptr) get a native `static` implementation (a flat byte
      arena + POSIX sockets) instead of an unresolved `extern` prototype, so
