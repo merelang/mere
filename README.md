@@ -36,9 +36,10 @@ installed `mere`, `mere install` (see [docs/packages.md](docs/packages.md))
 fetches an app's dependencies *and* its Node runtime host, so no compiler
 source tree is needed to build or run an app.
 
-## Status (as of 2026-07-10)
+## Status (as of 2026-07-12)
 
-- **1947 tests passing**
+- **2035 tests passing**
+- **🏆 Bootstrap fixpoint — truly self-hosting** (v0.1.10, 2026-07-12): the Mere-in-Mere compiler, **compiled by itself and run as wasm, produces byte-identical output to the reference** — and that output runs correctly. Compiling a program with (A) the compiler under the interpreter and (B) the compiler compiled by itself yields the same WAT, byte for byte (CI-verified by a permanent fixpoint regression test). Getting there required guaranteed tail calls in the self-host codegen (`return_call_indirect`, Stage 55f) and fixing three latent self-compilation bugs (an eager pattern-check payload dereference, pointer-equality string compares in the untyped self-host codegen, and a missing `\r` lexer escape — Stage 55g). See [docs/changelog.md](docs/changelog.md).
 - **📦 Package system v0.2**: `mere install` reads a `mere.toml`, fetches git dependencies (monorepo `subdir` supported) into `.mere_modules/`, resolves transitive cross-package imports, and writes a `mere.lock`. An optional `[host]` entry also vendors the Node runtime host into `.mere_host/`, so `mere serve app.wasm` runs a compiled server with no compiler source tree. See [docs/packages.md](docs/packages.md).
 - **🧵 Concurrency**: `spawn` / `channel` / `join` + `par_map` on all four backends (interp / C / LLVM / Wasm), with a `Send` / `Sync` type discipline (move / use-after-move analysis, HM-integrated Send bound for polymorphic channels). See `examples/parallel_compute.mere`, `examples/par_map.mere`.
 - **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **All 18 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc` / `time`. 13 of the 18 have CI compile-time verification via `bootstrap_wat_ok` (wat2wasm-checks the emitted module).
@@ -121,9 +122,16 @@ $ dune exec ./bin/mere.exe -- examples/maze_solver.mere
 # Phase 36: BFS pathfinding through an ASCII 8x12 maze + path visualization
 ```
 
-### Self-host bootstrap (Phase 54)
+### Self-host bootstrap (Phase 54 → fixpoint at v0.1.10)
 
-The compiler compiles itself — Mere source is tokenized, parsed, and lowered to WAT by Mere code that itself runs under wasm.
+The compiler compiles itself — Mere source is tokenized, parsed, and lowered to WAT by Mere code that itself runs under wasm. As of v0.1.10 this closes into a **bootstrap fixpoint**: the compiler compiled by itself, running as a wasm binary, compiles programs to **byte-identical** output vs the reference.
+
+```sh
+# The fixpoint, by hand (the suite runs this automatically):
+#   WAT_A: the compiler (under the interpreter) compiles T
+#   WAT_B: the compiler COMPILED BY ITSELF (as wasm) compiles T
+#   diff WAT_A WAT_B  ->  identical; running either prints 7
+```
 
 ```sh
 # Self-emit: codegen_wasm.mere compiling itself
