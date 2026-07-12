@@ -9768,7 +9768,77 @@ let () =
        an if/else instead of an eager i32.and — the fix that closed the
        bootstrap fixpoint). *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "97209"
+      "examples/oneshot_codegen.mere" "97209";
+
+    (* Stage 55g: THE bootstrap fixpoint. Compile a test program T with
+       (A) the self-host compiler running under the interpreter, and
+       (B) the self-host compiler COMPILED BY ITSELF, run as wasm.
+       The two WAT outputs must be byte-identical — the strongest
+       self-hosting guarantee we have. Guards the three 55g fixes
+       (short-circuit pattern checks, str_eq in member_str and friends,
+       the lexer's \r escape) plus 55f TCO against regression. *)
+    begin
+      let mere_exe =
+        Filename.concat project_root "_build/default/bin/mere.exe" in
+      let run_capture cmd =
+        let ic = Unix.open_process_in cmd in
+        let buf = Buffer.create 65536 in
+        (try
+           while true do
+             let line = input_line ic in
+             (* drop the interp/run_wasm unit-result echo lines *)
+             if line <> "()" then begin
+               Buffer.add_string buf line; Buffer.add_char buf '\n'
+             end
+           done
+         with End_of_file -> ());
+        let _ = Unix.close_process_in ic in
+        Buffer.contents buf
+      in
+      let t_src = "print (show (1 + 2 * 3))" in
+      let refa_path = Filename.temp_file "mere_fixpoint_refA_" ".mere" in
+      let oc = open_out refa_path in
+      Printf.fprintf oc
+        "import \"%s/contrib/codegen/codegen_wasm.mere\";\nprint (parse_and_emit \"%s\")\n"
+        project_root t_src;
+      close_out oc;
+      (* (A) reference: the compiler under the interp *)
+      let wat_a = run_capture (Printf.sprintf "%s %s 2>/dev/null"
+        (Filename.quote mere_exe) (Filename.quote refa_path)) in
+      (* (B) self-compiled: compile the driver with itself, run as wasm *)
+      let bd_path = Filename.temp_file "mere_fixpoint_bd_" ".mere" in
+      let oc = open_out bd_path in
+      Printf.fprintf oc
+        "import \"%s/contrib/codegen/codegen_wasm.mere\";\nprint (parse_and_emit_file \"%s\")\n"
+        project_root refa_path;
+      close_out oc;
+      let driver_wat = Filename.temp_file "mere_fixpoint_driver_" ".wat" in
+      let driver_wasm = driver_wat ^ ".wasm" in
+      let dw = run_capture (Printf.sprintf "%s %s 2>/dev/null"
+        (Filename.quote mere_exe) (Filename.quote bd_path)) in
+      let oc = open_out driver_wat in
+      output_string oc dw; close_out oc;
+      let w2w = Sys.command (Printf.sprintf
+        "wat2wasm --enable-tail-call %s -o %s 2>/dev/null"
+        (Filename.quote driver_wat) (Filename.quote driver_wasm)) in
+      if w2w <> 0 then begin
+        incr fail;
+        Printf.printf "FAIL  bootstrap fixpoint: wat2wasm rejected the self-compiled driver\n"
+      end else begin
+        let wat_b = run_capture (Printf.sprintf
+          "node %s %s 2>/dev/null"
+          (Filename.quote (Filename.concat project_root "scripts/run_wasm.js"))
+          (Filename.quote driver_wasm)) in
+        let verdict =
+          if wat_a = wat_b && String.length wat_a > 1000 then "identical"
+          else Printf.sprintf "DIFFERENT (lenA=%d lenB=%d)"
+                 (String.length wat_a) (String.length wat_b)
+        in
+        check "bootstrap fixpoint: self-compiled compiler output" verdict "identical"
+      end;
+      List.iter (fun p -> try Sys.remove p with _ -> ())
+        [refa_path; bd_path; driver_wat; driver_wasm]
+    end
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
