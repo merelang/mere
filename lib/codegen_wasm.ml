@@ -952,7 +952,8 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
 (* Phase 26.3: lift inner Let-Fun / Let_rec to top-level Wasm fns.
    Mirrors codegen_llvm.lift_inner_fns_llvm. Populates inner_lifts_wasm /
    inner_lifts_by_host_wasm + lifted_fns_wasm. *)
-let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : unit =
+let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
+    (main_body : Ast.expr) : unit =
   Hashtbl.reset inner_lifts_wasm;
   Hashtbl.reset inner_lifts_by_host_wasm;
   inner_fn_counter_wasm := 0;
@@ -1045,6 +1046,11 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list) : un
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
     walk f.param [f.param] f.body) fns;
+  (* Also lift inner `let rec` in the top-level program expression, under the
+     synthetic host "$main" (mirrors codegen_c) — so a recursive helper in
+     main is lifted rather than rejected. *)
+  current_host := "$main";
+  walk "" [] main_body;
   (* Phase 45 (DEFERRED §8): transitive capture closure for mutually-called
      inner-lifted fns. See the same-phase comment in codegen_c.ml for details *)
   let all_lifted = !lifted_fns_wasm in
@@ -6014,7 +6020,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun k _ acc -> k :: acc) multi_inst_fns_wasm []
   in
   let toplevel_names = mangled_names @ multi_base_names in
-  lift_inner_fns_wasm toplevel_names fns;
+  lift_inner_fns_wasm toplevel_names fns body_expr;
   (* Phase 36 (DEFERRED §1.19 fix): register top-level closure adapter
      table indices BEFORE emit_fn_def so that fn bodies (and nested
      lambdas) can resolve `Var <top_fn>` as a closure value via
@@ -6056,6 +6062,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      fn bodies (imported modules etc.) that happen to share a name
      with a top-level global are plain locals. *)
   ignore top_globals_list;
+  (* main's own inner-lifted fns live under host "$main" (see lift_inner_fns_wasm). *)
+  set_inner_lifts_for_host_wasm "$main";
   wasm_in_top_level_body := true;
   emit_expr body_expr;
   wasm_in_top_level_body := false;

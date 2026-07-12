@@ -5250,7 +5250,8 @@ let fresh_inner_name base =
    `inner_lifts` so emit_expr can rewrite call sites and drop bindings. *)
 let lift_inner_fns
     (toplevel_names : string list)
-    (fns : fn_decl list) : lifted_fn list =
+    (fns : fn_decl list)
+    (main_body : Ast.expr) : lifted_fn list =
   Hashtbl.reset inner_lifts;
   Hashtbl.reset inner_lifts_by_host;
   inner_fn_counter := 0;
@@ -5390,6 +5391,11 @@ let lift_inner_fns
   List.iter (fun (f : fn_decl) ->
     current_host := f.name;
     walk_in_fn f.param [f.param] f.body) fns;
+  (* Also lift inner `let rec` in the top-level program expression, under the
+     synthetic host "$main" — so a recursive helper written directly in main
+     (not inside a fn) is lifted like a fn-body one instead of being rejected. *)
+  current_host := "$main";
+  walk_in_fn "" [] main_body;
   (* Phase 45 (DEFERRED §8): compute transitive capture closure to resolve
      mutual references between inner-lifted fns.
 
@@ -6678,7 +6684,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      see these as "globals" to NOT include them in captures. *)
   let toplevel_names =
     List.map (fun f -> f.name) fns @ List.map (fun s -> s.sname) skels in
-  let inner_fns = lift_inner_fns toplevel_names fns in
+  let inner_fns = lift_inner_fns toplevel_names fns body_expr in
   (* Closure (first-class fn) machinery: emit a `closure_T1_T2` typedef
      per arrow type used + a wrapper / value const for each top-level fn. *)
   let arrow_pairs = collect_arrow_types main_expr fns in
@@ -6723,6 +6729,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       Printf.sprintf "static %s %s;" (c_type_of ty) (c_safe_name name))
       top_globals_list
   in
+  (* main's own inner-lifted fns live under host "$main" (see lift_inner_fns). *)
+  set_inner_lifts_for_host "$main";
   let main_body = emit_expr body_expr in
   (* Phase 15.5: main_body may contain anonymous `Fun` nodes that push
      additional closure adapters onto pending_closures (e.g.,
