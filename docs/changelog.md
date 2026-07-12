@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.10 — 2026-07-12
+
+**Bootstrap fixpoint: Mere is truly self-hosting.** The Mere-in-Mere
+compiler, compiled by itself and run as wasm, produces byte-identical
+output to the reference — and that output runs correctly.
+
+- **Self-host TCO (Stage 55f)**: the self-host codegen now emits
+  `return_call_indirect` (guaranteed tail calls) for tail-position closure
+  calls, tracked via a `tail` flag threaded through if / let / letrec /
+  match. Deep tail recursion in self-compiled code stays stack-flat (a
+  200000-deep counter completes; it overflowed before).
+- **Three latent self-compilation bugs fixed (Stage 55g)** — found by
+  trace-bisecting the self-compiled compiler until the bootstrap fixpoint
+  held:
+  1. Pattern checks: a `PConstr` payload sub-check ran eagerly even when
+     the tag didn't match, dereferencing garbage (out-of-bounds traps).
+     Payload checks now short-circuit.
+  2. Var-vs-var string `==` lowers to pointer equality in the un-typed
+     self-host codegen; `member_str` (and parser friends) switched to
+     explicit `str_eq` — ghost closure captures are gone.
+  3. The self-host lexer was missing the `\r` escape, corrupting the
+     data-segment escaper's CR needle ("Err" emitted as "E\0d\0d").
+- **Fixpoint regression test**: the suite now compiles a program with the
+  interpreter-run compiler AND the self-compiled compiler and asserts the
+  WAT outputs are byte-identical.
+- Also: `let rec` written directly in the main expression now lifts on
+  C + Wasm (mstat N6) instead of erroring.
+
+2035 tests.
+
+---
+
 ## v0.1.9 — 2026-07-12
 
 Float operator overloading + libm name collisions — driven by the `mstat`
