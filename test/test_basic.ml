@@ -1949,6 +1949,24 @@ let () =
     (Pipeline.process "f_mul 3.0 4.0") "12.";
   check "f_div"
     (Pipeline.process "f_div 10.0 4.0") "2.5";
+  (* infix operators overloaded on float (+ - * / and < <= > >=) *)
+  check "float + infix" (Pipeline.process "1.5 + 2.25") "3.75";
+  check "float - infix" (Pipeline.process "5.0 - 1.5") "3.5";
+  check "float * infix" (Pipeline.process "2.5 * 4.0") "10.";
+  check "float / infix (not int div)" (Pipeline.process "7.0 / 2.0") "3.5";
+  check "float type of + is float" (Pipeline.type_of "fn (x: float) -> x + 1.0") "(float -> float)";
+  check "float < infix" (Pipeline.process "2.5 < 3.5") "true";
+  check "float > infix" (Pipeline.process "2.5 > 3.5") "false";
+  check "float >= infix" (Pipeline.process "3.0 >= 3.0") "true";
+  check "int arithmetic still int div"
+    (Pipeline.process "7 / 2") "3";
+  (* float ordering with `<` needs the operands concretely typed as float
+     (an unannotated `fn a -> fn b -> a < b` defaults its tyvars to int) *)
+  check "sort a float list via list_sort_by with annotated (<)"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       list_sort_by (fn (a: float) -> fn (b: float) -> a < b) [3.5, 1.0, 2.25]")
+    "[1., 2.25, 3.5]";
   check "float_of_int"
     (Pipeline.process "float_of_int 7") "7.";
   check "int_of_float truncates"

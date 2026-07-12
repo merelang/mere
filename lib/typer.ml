@@ -1489,7 +1489,19 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let ta = infer env a in
     let tb = infer env b in
     (match op with
-     | Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod ->
+     | Ast.Add | Ast.Sub | Ast.Mul | Ast.Div ->
+       (* Overloaded on int or float. If either side is concretely float,
+          both are float; otherwise keep the historical int default (and its
+          exact unify order, so the int type-error hints are unchanged).
+          Codegen reads the operand type to pick int vs float ops — the same
+          compile-time specialization as show / to_json. *)
+       (match Ast.walk ta, Ast.walk tb with
+        | Ast.TyFloat, _ | _, Ast.TyFloat ->
+          unify a.loc Ast.TyFloat ta; unify b.loc Ast.TyFloat tb; Ast.TyFloat
+        | _ ->
+          unify a.loc Ast.TyInt ta; unify b.loc Ast.TyInt tb; Ast.TyInt)
+     | Ast.Mod ->
+       (* Modulo stays int-only (no float remainder operator). *)
        unify a.loc Ast.TyInt ta;
        unify b.loc Ast.TyInt tb;
        Ast.TyInt
@@ -1509,6 +1521,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        unify a.loc ta tb;
        (match Ast.walk ta with
         | Ast.TyStr -> ()
+        | Ast.TyFloat -> ()   (* float ordering (codegen emits float compares) *)
         | _ -> unify a.loc Ast.TyInt ta; unify b.loc Ast.TyInt tb)
      | Ast.Eq | Ast.Ne ->
        (* Symmetric: lhs is the "first observed" type. *)

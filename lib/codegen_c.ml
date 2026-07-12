@@ -1046,7 +1046,13 @@ let rec emit_expr (e : Ast.expr) : string =
     if f <> f then "(0.0/0.0)"  (* NaN *)
     else if f = infinity then "(1.0/0.0)"
     else if f = neg_infinity then "(-1.0/0.0)"
-    else Printf.sprintf "%.17g" f
+    else
+      (* %.17g drops the decimal point for whole values (`7.0` -> "7"), which
+         C would then treat as an int in arithmetic (`7 / 2` = 3, not 3.5).
+         Ensure the literal always reads as a double. *)
+      let s = Printf.sprintf "%.17g" f in
+      if String.contains s '.' || String.contains s 'e' || String.contains s 'E'
+      then s else s ^ ".0"
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s -> Ast.escape_string s
   | Ast.Var name ->
