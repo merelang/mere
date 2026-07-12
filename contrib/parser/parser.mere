@@ -1470,7 +1470,10 @@ let rec collect_module_names = fn (decls: top_decl list) -> fn (acc: str list) -
 let rec is_module_name = fn (n: str) -> fn (names: str list) ->
   match names with
   | Nil -> false
-  | Cons (h, t) -> if h == n then true else is_module_name n t;
+  // Stage 55g: str_eq, not `==` — var-vs-var str == lowers to pointer
+  // equality when this file is self-compiled (no typer). See member_str
+  // in contrib/codegen/codegen_wasm.mere.
+  | Cons (h, t) -> if str_eq h n then true else is_module_name n t;
 
 // Rewrite a name in the context of a known module set. If `name`
 // looks like a qualified `M.f`, ... actually we handle the rewrite
@@ -1590,7 +1593,8 @@ let rec lookup_str_str = fn (k: str) -> fn (xs: (str * str) list) ->
   | Nil -> None
   | Cons (b, rest) ->
     let (a, b2) = b in
-    if a == k then Some b2 else lookup_str_str k rest;
+    // Stage 55g: str_eq, not `==` (self-compile pointer-eq hazard).
+    if str_eq a k then Some b2 else lookup_str_str k rest;
 
 let decl_binding_name = fn (d: top_decl) ->
   match d with

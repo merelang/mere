@@ -171,6 +171,12 @@ let read_string_lit = fn (s: str) -> fn (n: int) -> fn (i: int) ->
         let _ =
           if esc == "n" then strbuf_push buf "\n"
           else if esc == "t" then strbuf_push buf "\t"
+          // Stage 55g: `\r` was missing — it fell through to the
+          // pass-through arm and became a literal 'r'. That corrupted
+          // wat_escape_str's CR needle when the compiler was compiled
+          // by itself, turning every 'r' in emitted data segments into
+          // \0d (found as the LAST diff blocking the bootstrap fixpoint).
+          else if esc == "r" then strbuf_push buf "\r"
           else if esc == "\"" then strbuf_push buf "\""
           else if esc == "\\" then strbuf_push buf "\\"
           else if esc == "\{" then strbuf_push buf "\{"

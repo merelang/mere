@@ -257,7 +257,12 @@ let rec lookup_payload_ty = fn (name: str)
 let rec member_str = fn (n: str) -> fn (xs: str list) ->
   match xs with
   | Nil -> false
-  | Cons (h, t) -> if h == n then true else member_str n t
+  // Stage 55g: str_eq, NOT `==`. When this file is compiled by ITSELF the
+  // codegen has no typer, so a var-vs-var `==` lowers to pointer equality —
+  // two equal-content strings from different allocations compare false, and
+  // free_vars then invents ghost captures (→ "unbound var" fail at emit).
+  // `str_eq` dispatches to $__lang_streq by name, no type info needed.
+  | Cons (h, t) -> if str_eq h n then true else member_str n t
   ;
 
 let cons_unique = fn (n: str) -> fn (xs: str list) ->
@@ -1612,12 +1617,26 @@ and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
     (match payload_opt with
       | None -> s5
       | Some sub_p ->
-        let (sub_slot, s6) = alloc_tmp_local s5 in
-        let s7 = push_instr ("local.get " ++ show slot) s6 in
-        let s8 = push_instr "i32.load offset=4" s7 in
-        let s9 = push_instr ("local.set " ++ show sub_slot) s8 in
-        let s10 = emit_check_pattern sub_p sub_slot s9 in
-        push_instr "i32.and" s10)
+        // Stage 55g: SHORT-CIRCUIT the payload sub-check. The old eager
+        // `tag_eq AND payload_check` (plain i32.and) dereferenced the
+        // payload even when the tag DIDN'T match — for a differently-
+        // shaped scrutinee (e.g. checking `EConstr (_, None)` against an
+        // EVar whose payload is a string pointer) the sub-checks read
+        // garbage as pointers, and a wild value traps with "memory
+        // access out of bounds". Found by the bootstrap-fixpoint hunt:
+        // the self-compiled compiler trapped inside
+        // rewrite_constrs_expr's nested match. Only run the payload
+        // check when the tag matched:
+        //   tag_eq  if (result i32)  <payload check>  else  0  end
+        let s6 = push_instr "if (result i32)" s5 in
+        let (sub_slot, s7) = alloc_tmp_local s6 in
+        let s8 = push_instr ("local.get " ++ show slot) s7 in
+        let s9 = push_instr "i32.load offset=4" s8 in
+        let s10 = push_instr ("local.set " ++ show sub_slot) s9 in
+        let s11 = emit_check_pattern sub_p sub_slot s10 in
+        let s12 = push_instr "else" s11 in
+        let s13 = push_instr "i32.const 0" s12 in
+        push_instr "end" s13)
   | PAs (sub, _name) ->
     // PAs check is just the sub-pattern's check; the name binds in
     // emit_bind_pattern only.

@@ -9763,11 +9763,12 @@ let () =
        proves the compiled self-host codegen can actually emit a
        valid program at runtime — closes the last unresolved gap
        from Phase 54.20. *)
-    (* Length grew 96522 -> 96676 with Stage 55f: the self-host codegen now
-       emits `return_call_indirect` (guaranteed TCO) for tail-position
-       closure calls, which is a few bytes longer than `call_indirect`. *)
+    (* Length history: 96522 -> 96676 (Stage 55f: return_call_indirect TCO)
+       -> 97209 (Stage 55g: PConstr payload checks now short-circuit behind
+       an if/else instead of an eager i32.and — the fix that closed the
+       bootstrap fixpoint). *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "96676"
+      "examples/oneshot_codegen.mere" "97209"
   end else
     Printf.printf
       "skipping self-host codegen cross-validation (need wat2wasm + node)\n";
