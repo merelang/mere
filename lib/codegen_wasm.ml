@@ -1166,6 +1166,22 @@ let wasm_cmp = function
   | Ast.Gt -> "i32.gt_s"
   | Ast.Ge -> "i32.ge_s"
 
+(* float (f64) variants — operators overloaded on float (see typer). *)
+let wasm_binop_float = function
+  | Ast.Add -> "f64.add"
+  | Ast.Sub -> "f64.sub"
+  | Ast.Mul -> "f64.mul"
+  | Ast.Div -> "f64.div"
+  | Ast.Mod | Ast.Concat -> raise Exit
+
+let wasm_cmp_float = function
+  | Ast.Eq -> "f64.eq"
+  | Ast.Ne -> "f64.ne"
+  | Ast.Lt -> "f64.lt"
+  | Ast.Le -> "f64.le"
+  | Ast.Gt -> "f64.gt"
+  | Ast.Ge -> "f64.ge"
+
 (* Phase 15.10: In Wasm all values are i32 so per-V is unnecessary; only
    branch helpers on K (int / str). *)
 let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
@@ -1517,9 +1533,15 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr b;
     emit_instr "call $__lang_str_concat"
   | Ast.Bin (op, a, b) ->
-    emit_expr a;
-    emit_expr b;
-    emit_instr (wasm_binop op)
+    (match a.Ast.ty with
+     | Some t when Ast.walk t = Ast.TyFloat ->
+       (* floats are boxed (i32 ptr -> heap f64): load, op, re-box. *)
+       emit_expr a; emit_instr "f64.load offset=0 align=8";
+       emit_expr b; emit_instr "f64.load offset=0 align=8";
+       emit_instr (wasm_binop_float op);
+       emit_float_alloc_from_f64_on_stack ()
+     | _ ->
+       emit_expr a; emit_expr b; emit_instr (wasm_binop op))
   | Ast.Cmp (op, a, b) ->
     (* Phase 26.1: TyStr eq/ne via $__lang_streq; ordering (< <= > >=) via
        $__lang_str_compare (3-way, -1/0/1) compared to 0. *)
@@ -1544,6 +1566,11 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr a; emit_expr b;
        emit_instr (Printf.sprintf "call $eq_%s" (ty_tag ty));
        emit_instr "i32.eqz"
+     | Ast.TyFloat, _ ->
+       (* floats are boxed (i32 ptr): load both f64, compare (result is i32) *)
+       emit_expr a; emit_instr "f64.load offset=0 align=8";
+       emit_expr b; emit_instr "f64.load offset=0 align=8";
+       emit_instr (wasm_cmp_float op)
      | _ ->
        emit_expr a;
        emit_expr b;

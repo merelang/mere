@@ -2238,9 +2238,14 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | Ast.Mod, V_int _, V_int 0 ->
        type_error e.Ast.loc "modulo by zero"
      | Ast.Mod, V_int x, V_int y -> V_int (x mod y)
+     (* float arithmetic (operators overloaded on float; Mod stays int-only) *)
+     | Ast.Add, V_float x, V_float y -> V_float (x +. y)
+     | Ast.Sub, V_float x, V_float y -> V_float (x -. y)
+     | Ast.Mul, V_float x, V_float y -> V_float (x *. y)
+     | Ast.Div, V_float x, V_float y -> V_float (x /. y)
      | Ast.Concat, V_str x, V_str y -> V_str (x ^ y)
      | (Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod), _, _ ->
-       type_error e.Ast.loc "arithmetic requires int operands"
+       type_error e.Ast.loc "arithmetic requires int (or float, except mod) operands"
      | Ast.Concat, _, _ ->
        type_error e.Ast.loc "++ requires str operands")
   | Ast.Cmp (op, a, b) ->
@@ -2256,8 +2261,13 @@ let rec eval_in (env : env) (e : Ast.expr) =
      | Ast.Le, V_str x, V_str y -> V_bool (String.compare x y <= 0)
      | Ast.Gt, V_str x, V_str y -> V_bool (String.compare x y > 0)
      | Ast.Ge, V_str x, V_str y -> V_bool (String.compare x y >= 0)
+     (* float ordering *)
+     | Ast.Lt, V_float x, V_float y -> V_bool (x < y)
+     | Ast.Le, V_float x, V_float y -> V_bool (x <= y)
+     | Ast.Gt, V_float x, V_float y -> V_bool (x > y)
+     | Ast.Ge, V_float x, V_float y -> V_bool (x >= y)
      | (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), _, _ ->
-       type_error e.Ast.loc "ordering requires int or str operands"
+       type_error e.Ast.loc "ordering requires int, float, or str operands"
      | Ast.Eq, _, _ -> V_bool (value_eq va vb)
      | Ast.Ne, _, _ -> V_bool (not (value_eq va vb)))
   | Ast.Logic (op, a, b) ->
