@@ -241,6 +241,15 @@ let builtin_read_stdin =
     | V_unit -> V_str (In_channel.input_all stdin)
     | _ -> failwith "read_stdin: expected unit")
 
+(* v0.1.13 (mk dogfood): run a command line via /bin/sh, inheriting stdio,
+   and return its exit code. Sys.command already shells out and returns the
+   process's exit status. *)
+let builtin_run =
+  V_builtin ("run", fun v ->
+    match v with
+    | V_str cmd -> V_int (Sys.command cmd)
+    | _ -> failwith "run: expected str")
+
 let builtin_print_no_nl =
   V_builtin ("print_no_nl", fun v ->
     (match v with
@@ -1762,6 +1771,7 @@ let initial_env : env =
     ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);
     ("read_stdin", ref builtin_read_stdin);
+    ("run", ref builtin_run);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);
     ("int_max", ref (V_int max_int));

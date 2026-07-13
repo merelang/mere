@@ -1273,6 +1273,9 @@ let initial_env : env =
     ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
+       stdio, return its exit code. *)
+    ("run",         mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
     ("int_max",     mono Ast.TyInt);

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.12" Version.v "0.1.12";
+  check "version is 0.1.13" Version.v "0.1.13";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2010,6 +2010,9 @@ let () =
     (Pipeline.process "str_of_float 1.5") "\"1.5\"";
   check "float_of_str"
     (Pipeline.process "float_of_str \"3.14\"") "3.14";
+  (* v0.1.13 (mk dogfood): run — subprocess exit code via the shell. *)
+  check "run: exit code 0" (Pipeline.process "run \"true\"") "0";
+  check "run: exit code nonzero" (Pipeline.process "run \"exit 3\"") "3";
   check "float_of_str trimmed"
     (Pipeline.process "float_of_str \"  2.5  \"") "2.5";
   check_raises "float_of_str invalid"
