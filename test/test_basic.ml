@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.10" Version.v "0.1.10";
+  check "version is 0.1.11" Version.v "0.1.11";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -1256,6 +1256,41 @@ let () =
   check "str gt true"  (Pipeline.process "\"b\" > \"a\"") "true";
   check "str ge false" (Pipeline.process "\"a\" >= \"b\"") "false";
   check "str lt prefix" (Pipeline.process "\"abc\" < \"abcd\"") "true";
+
+  (* --- v0.1.11 derive-ord: structural ordering (sibling of structural ==) --- *)
+  check "ord: float lt" (Pipeline.process "2.5 < 3.5") "true";
+  check "ord: bool lt" (Pipeline.process "false < true") "true";
+  check "ord: tuple lt true" (Pipeline.process "(1, 2) < (1, 3)") "true";
+  check "ord: tuple lt false" (Pipeline.process "(2, 1) < (1, 9)") "false";
+  check "ord: tuple ge" (Pipeline.process "(1, 3) >= (1, 3)") "true";
+  check "ord: record lt"
+    (Pipeline.process
+       "type Pt = { x: int, y: int }; Pt { x=1, y=2 } < Pt { x=1, y=5 }") "true";
+  check "ord: record gt"
+    (Pipeline.process
+       "type Pt = { x: int, y: int }; Pt { x=2, y=0 } > Pt { x=1, y=9 }") "true";
+  check "ord: list lt" (Pipeline.process "[1,2,3] < [1,2,4]") "true";
+  check "ord: list prefix lt" (Pipeline.process "[1,2] < [1,2,3]") "true";
+  check "ord: list empty lt" (Pipeline.process "([] : int list) < [1]") "true";
+  (* variants order by DECLARATION ORDER (same tag order codegen assigns). *)
+  check "ord: variant decl order lt"
+    (Pipeline.process "type C = Red | Green | Blue; Red < Blue") "true";
+  check "ord: variant decl order gt"
+    (Pipeline.process "type C = Red | Green | Blue; Blue < Red") "false";
+  check "ord: variant payload tiebreak"
+    (Pipeline.process "type T = A of int | B of int; A 5 < A 9") "true";
+  (* list_sort_by with an annotated comparator now sorts any structural type. *)
+  check "ord: list_sort_by float"
+    (Pipeline.process
+       "list_sort_by (fn (a: float) -> fn (b: float) -> a < b) [3.1, 1.2, 2.5]")
+    "[1.2, 2.5, 3.1]";
+  check "ord: list_sort_by tuple"
+    (Pipeline.process
+       "list_sort_by (fn (a: (int * str)) -> fn (b: (int * str)) -> a < b) [(3, \"c\"), (1, \"a\"), (1, \"b\")]")
+    "[(1, \"a\"), (1, \"b\"), (3, \"c\")]";
+  (* backward compat: bare comparator tyvars still default to int. *)
+  check "ord: int still works" (Pipeline.process "3 < 5") "true";
+  check "ord: default list_sort int" (Pipeline.process "list_sort [3,1,2]") "[1, 2, 3]";
   check "str ordering types as bool" (Pipeline.type_of "\"a\" < \"b\"") "bool";
   (* int ordering must stay intact (no regression from the str relaxation) *)
   check "int lt still works" (Pipeline.process "3 < 5") "true";

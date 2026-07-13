@@ -407,6 +407,11 @@ let needs_struct_eq (t : Ast.ty) : bool =
     || name = "list"
   | _ -> false
 
+(* v0.1.11 derive-ord: compound types ordered with < <= > >= need a
+   structural `cmp_<tag>` (-1/0/1). Same compound set as needs_struct_eq. *)
+let cmp_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+let needs_struct_cmp = needs_struct_eq
+
 (* Cache: literal string → data segment offset, so repeated literals
    (e.g. `, ` between tuple elements) share one segment. *)
 let show_str_offsets : (string, int) Hashtbl.t = Hashtbl.create 16
@@ -592,6 +597,10 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
      | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
        (match a.Ast.ty with
         | Some t when needs_struct_eq t -> add_type_into eq_types t
+        | _ -> ())
+     | Ast.Cmp ((Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), a, _) ->
+       (match a.Ast.ty with
+        | Some t when needs_struct_cmp t -> add_type_into cmp_types t
         | _ -> ())
      | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, _) ->
        (* Phase 16.3: metrics.record uses show_int internally to format
@@ -1572,6 +1581,12 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr a; emit_expr b;
        emit_instr (Printf.sprintf "call $eq_%s" (ty_tag ty));
        emit_instr "i32.eqz"
+     | ty, (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge) when needs_struct_cmp ty ->
+       (* v0.1.11 derive-ord: compound ordering via cmp_<tag> (-1/0/1) vs 0. *)
+       emit_expr a; emit_expr b;
+       emit_instr (Printf.sprintf "call $cmp_%s" (ty_tag ty));
+       emit_instr "i32.const 0";
+       emit_instr (wasm_cmp op)
      | Ast.TyFloat, _ ->
        (* floats are boxed (i32 ptr): load both f64, compare (result is i32) *)
        emit_expr a; emit_instr "f64.load offset=0 align=8";
@@ -3611,6 +3626,102 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   | _ ->
     Printf.sprintf
       "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+
+(* v0.1.11 derive-ord: structural compare returning -1/0/1, the ordering
+   sibling of emit_eq_fn. Lexicographic first-non-zero via `local.tee $c`
+   chains. Variants order by tag (declaration order) then payload — matching
+   the interpreter's value_compare and the C backend's cmp_<tag>. *)
+let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
+  (* Right-fold a list of i32-producing compare exprs into "first non-zero,
+     else next; last is the tiebreak". Needs a `(local $c i32)`. *)
+  let rec chain = function
+    | [] -> "(i32.const 0)"
+    | [last] -> last
+    | ci :: rest ->
+      Printf.sprintf
+        "(if (result i32) (i32.eqz (local.tee $c %s))\n      (then %s)\n      (else (local.get $c)))"
+        ci (chain rest)
+  in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool ->
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (i32.sub (i32.gt_s (local.get $a) (local.get $b)) (i32.lt_s (local.get $a) (local.get $b))))" tag
+  | Ast.TyFloat ->
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (i32.sub\n\
+      \      (f64.gt (f64.load offset=0 align=8 (local.get $a)) (f64.load offset=0 align=8 (local.get $b)))\n\
+      \      (f64.lt (f64.load offset=0 align=8 (local.get $a)) (f64.load offset=0 align=8 (local.get $b)))))" tag
+  | Ast.TyStr ->
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (call $__lang_str_compare (local.get $a) (local.get $b)))" tag
+  | Ast.TyUnit | Ast.TyArrow _ ->
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+  | Ast.TyTuple ts ->
+    let elems =
+      List.mapi (fun i et ->
+        Printf.sprintf
+          "(call $cmp_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
+          (ty_tag et) (i * 4) (i * 4)) ts
+    in
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n    (local $c i32)\n    %s)"
+      tag (chain elems)
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+    let info = Hashtbl.find Typer.records n in
+    let mapping =
+      if info.Typer.r_params = [] then [] else List.combine info.Typer.r_params args
+    in
+    let elems =
+      List.mapi (fun i (_, ft) ->
+        Printf.sprintf
+          "(call $cmp_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
+          (ty_tag (subst_params mapping ft)) (i * 4) (i * 4)) info.Typer.r_fields
+    in
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n    (local $c i32)\n    %s)"
+      tag (chain elems)
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n || n = "list" ->
+    let vs =
+      match Hashtbl.find_opt Exhaustive.type_variants n with Some vs -> vs | None -> []
+    in
+    let mapping =
+      match vs with
+      | (cname, _) :: _ ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some info when info.Typer.params <> [] -> List.combine info.Typer.params args
+         | _ -> [])
+      | [] -> []
+    in
+    let rec payload_dispatch = function
+      | [] -> "(i32.const 0)"
+      | (cname, arg_opt) :: rest ->
+        (match arg_opt with
+         | None -> payload_dispatch rest
+         | Some pty ->
+           let pty = subst_params mapping pty in
+           let ctag = match Hashtbl.find_opt variant_tags cname with Some t -> t | None -> 0 in
+           Printf.sprintf
+             "(if (result i32) (i32.eq (local.get $ta) (i32.const %d))\n\
+             \      (then (call $cmp_%s (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $b))))\n\
+             \      (else %s))"
+             ctag (ty_tag pty) (payload_dispatch rest))
+    in
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
+      \    (local $ta i32) (local $tb i32)\n\
+      \    (local.set $ta (i32.load offset=0 (local.get $a)))\n\
+      \    (local.set $tb (i32.load offset=0 (local.get $b)))\n\
+      \    (if (result i32) (i32.ne (local.get $ta) (local.get $tb))\n\
+      \      (then (i32.sub (i32.gt_s (local.get $ta) (local.get $tb)) (i32.lt_s (local.get $ta) (local.get $tb))))\n\
+      \      (else %s)))"
+      tag (payload_dispatch vs)
+  | _ ->
+    Printf.sprintf
+      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
 
 (* Static runtime helpers emitted into the Wasm module: strlen and
    str_concat both work on the linear memory. The bump pointer is a
@@ -5820,6 +5931,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset of_json_types;
   Hashtbl.reset of_json_opt_types;
   Hashtbl.reset eq_types;
+  Hashtbl.reset cmp_types;
   Hashtbl.reset show_str_offsets;
   table_entries := [];
   pending_closures := [];
@@ -6054,6 +6166,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let eq_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_eq_fn tag t :: acc) eq_types []
   in
+  let cmp_fn_defs =
+    Hashtbl.fold (fun tag t acc -> emit_cmp_fn tag t :: acc) cmp_types []
+  in
   (* Reset counters for the main body. *)
   reset ();
   (* Phase 36 (DEFERRED §1.18 fix): globals are initialized inline in
@@ -6276,7 +6391,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       eta_adapters_wasm []
   in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ inner_lift_adapter_strs in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ cmp_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all

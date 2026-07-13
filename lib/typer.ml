@@ -1514,15 +1514,19 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let tb = infer env b in
     (match op with
      | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
-       (* Ordering works on int or str (lexicographic). Unify the two
-          sides, then: str → allow; otherwise default to int (keeps the
-          historical int default for unknowns and rejects e.g. float,
-          which uses the f_* builtins). *)
+       (* v0.1.11 derive-ord: ordering is structural, mirroring Eq. Any
+          concrete type is comparable — int / float / str / bool scalars
+          directly, and tuple / record / variant / list lexicographically
+          via a derived compare (interp: value_compare; codegen: cmp_<tag>,
+          the ordering sibling of eq_<tag>). An UNRESOLVED tyvar still
+          defaults to int, preserving the historical default and the
+          int-vs-str error hints — so a bare `fn a -> fn b -> a < b` is
+          still int (the fully-polymorphic-comparator story needs ad-hoc
+          poly resolution and stays deferred). *)
        unify a.loc ta tb;
        (match Ast.walk ta with
-        | Ast.TyStr -> ()
-        | Ast.TyFloat -> ()   (* float ordering (codegen emits float compares) *)
-        | _ -> unify a.loc Ast.TyInt ta; unify b.loc Ast.TyInt tb)
+        | Ast.TyVar _ -> unify a.loc Ast.TyInt ta; unify b.loc Ast.TyInt tb
+        | _ -> ())
      | Ast.Eq | Ast.Ne ->
        (* Symmetric: lhs is the "first observed" type. *)
        unify e.loc ta tb);
