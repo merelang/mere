@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.15 — 2026-07-13
+
+**`file_exists` now works on the C backend** (mk dogfood P3). Incremental
+builds skip a task when its output exists and is newer than its inputs;
+the "exists" check guards `file_mtime` (which raises on a missing path).
+`file_mtime` was already on C, but `file_exists` was interpreter-only, so
+the native build failed with `use of undeclared identifier 'file_exists'`.
+Added the case (`stat(path, &st) == 0`, next to `__lang_file_mtime`). With
+this, the `mk` task runner's incremental mode (`name (out: in1 in2): cmd`)
+builds and runs natively — and its float mtime comparison rides the
+v0.1.11 structural `>`.
+
+2057 tests.
+
+---
+
 ## v0.1.14 — 2026-07-13
 
 **`print_err` now works on the C backend** (mk dogfood P2). The native
