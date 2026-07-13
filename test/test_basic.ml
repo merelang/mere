@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.18" Version.v "0.1.18";
+  check "version is 0.1.19" Version.v "0.1.19";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2796,6 +2796,8 @@ let () =
     (codegen "read_key ()") "__lang_read_key";
   assert_contains "codegen C: tty_raw emits termios helper"
     (codegen "tty_raw ()") "__lang_tty_raw";
+  assert_contains "codegen C: print_no_nl emits flushed fputs"
+    (codegen "print_no_nl \"x\"") "fputs";
   (* v0.1.17 (mk dogfood P5): an inline lambda passed to par_map capturing a
      host-fn param gets inner-lifted; the spawn closure that calls it must
      carry the lifted fn's captures in ITS env (else the injected arg is an
