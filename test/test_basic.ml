@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.13" Version.v "0.1.13";
+  check "version is 0.1.14" Version.v "0.1.14";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2780,6 +2780,13 @@ let () =
     (codegen_with_decls
       "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "__mere_spawn_trampoline";
+  (* v0.1.13 (mk dogfood): run → system + WEXITSTATUS; print_err (P2) →
+     fprintf(stderr). Guarded at the emitted-C level (no compile-run
+     harness), the same way spawn/join are. *)
+  assert_contains "codegen C: run emits __lang_run"
+    (codegen "run \"true\"") "__lang_run";
+  assert_contains "codegen C: print_err emits fprintf(stderr"
+    (codegen "print_err \"x\"") "fprintf(stderr";
   (* Q-012-C-mem: the shared program-lifetime arena is lock-guarded so
      spawned threads can allocate from it without racing (validated under
      ThreadSanitizer with concurrent allocs). *)

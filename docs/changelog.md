@@ -4,6 +4,19 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.14 — 2026-07-13
+
+**`print_err` now works on the C backend** (mk dogfood P2). The native
+backend lowered `print` to `puts` but had no `print_err`, so a compiled CLI
+couldn't write diagnostics to stderr — a native build using it failed with
+`use of undeclared identifier 'print_err'`. Added the case
+(`fprintf(stderr, "%s\n", …)`, mirroring `print` → `puts`); the docs'
+3-backend claim for `print_err` is now actually true.
+
+2056 tests.
+
+---
+
 ## v0.1.13 — 2026-07-13
 
 **`run` — Mere can start external programs.** A new `run : str -> int`
