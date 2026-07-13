@@ -4629,12 +4629,23 @@ let str_concat_helper =
       "}";
       "";
       (* v0.1.13 (mk dogfood): run a command via the shell, inherit stdio,
-         return its exit code (matches the interp's Sys.command). *)
+         return its exit code.
+         v0.1.16 (mk dogfood P4): posix_spawn, NOT system() — macOS libc
+         serializes concurrent system() calls behind a global lock, so
+         parallel `run`s (spawn / par_map) ran one at a time. *)
       "#include <sys/wait.h>";
+      "#include <spawn.h>";
+      "extern char **environ;";
       "static int __lang_run(const char* cmd) {";
-      "  int st = system(cmd);";
-      "  if (st == -1) return -1;";
-      "  return WEXITSTATUS(st);";
+      "  pid_t pid;";
+      "  char* argv[] = { \"sh\", \"-c\", (char*)cmd, NULL };";
+      "  if (posix_spawn(&pid, \"/bin/sh\", NULL, NULL, argv, environ) != 0)";
+      "    return -1;";
+      "  int st;";
+      "  if (waitpid(pid, &st, 0) < 0) return -1;";
+      "  if (WIFEXITED(st)) return WEXITSTATUS(st);";
+      "  if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);";
+      "  return -1;";
       "}";
       "";
       (* Phase 44: mkdir_p doesn't depend on list_str, so it can live in the header *)
