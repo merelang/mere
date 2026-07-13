@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.12 — 2026-07-13
+
+Papercut batch — small dogfood findings paid back.
+
+- **`args()` is now consistent between the interpreter and native binaries**
+  (mstat N3). Both return only the program's own arguments, dropping the
+  interpreter's script path / the binary name; the CLI entry point hands
+  the post-script args to the `args()` builtin instead of it reading
+  `Sys.argv[1..]`. An argument-driven CLI now behaves the same under
+  `mere app.mere a b c` and the compiled `./app a b c`.
+- **`str_of_float` renders whole-valued floats as `550.0`, not `550.`**
+  (mstat N4). Fixed identically across interp / C / Wasm (and the `show`
+  path), so all backends still agree and the output round-trips through
+  `float_of_str`.
+
+Deferred: bare `None` needing a type annotation is an inference matter,
+not a papercut, and stays open.
+
+2052 tests.
+
+---
+
 ## v0.1.11 — 2026-07-13
 
 **derive-ord: structural ordering, the sibling of structural equality.**

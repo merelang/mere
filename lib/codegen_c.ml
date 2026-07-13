@@ -4680,8 +4680,9 @@ let str_concat_helper =
       "  return r;";
       "}";
       "";
-      (* Phase 34.1: str_of_float — match OCaml's string_of_float format
-         (%.12g + append trailing `.` for integer-valued floats). *)
+      (* Phase 34.1 / v0.1.12: str_of_float — %.12g, then append ".0" for
+         integer-valued floats (kept identical to the interp's format_float
+         and the Wasm JS host). *)
       "static const char* __lang_str_of_float(double f) {";
       "  char* buf;";
       "  asprintf(&buf, \"%.12g\", f);";
@@ -4693,7 +4694,7 @@ let str_concat_helper =
       "  }";
       "  if (!has_dot) {";
       "    char* buf2;";
-      "    asprintf(&buf2, \"%s.\", buf);";
+      "    asprintf(&buf2, \"%s.0\", buf);";
       "    free(buf);";
       "    return (const char*) buf2;";
       "  }";

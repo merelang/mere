@@ -115,7 +115,7 @@ const wasmPath = process.argv[2];
           s = s.replace(/\.?0+$/, "");
           if (s === "" || s === "-") s = "0";
         }
-        if (!/[.eEni]/.test(s)) s += ".";
+        if (!/[.eEni]/.test(s)) s += ".0";
       }
       const bytes = Buffer.from(s + "\0", "utf8");
       const ptr = bumpAlloc(bytes.length);

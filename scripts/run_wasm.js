@@ -171,7 +171,7 @@ const wasmPath = process.argv[2];
           if (s === '' || s === '-') s = '0';
         }
         // OCaml: append "." for plain integer-valued floats
-        if (!/[.eEni]/.test(s)) s += '.';
+        if (!/[.eEni]/.test(s)) s += '.0';
       }
       const bytes = Buffer.from(s + '\0', 'utf8');
       const ptr = bumpAlloc(bytes.length);
