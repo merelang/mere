@@ -1852,6 +1852,13 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "run" ->
        (* v0.1.13 (mk dogfood): run a command line, return its exit code. *)
        Printf.sprintf "__lang_run(%s)" (emit_expr arg)
+     | Ast.Var "tty_raw" ->
+       (* v0.1.18 (mrog dogfood): raw terminal mode on stdin. *)
+       Printf.sprintf "((void)(%s), __lang_tty_raw())" (emit_expr arg)
+     | Ast.Var "tty_restore" ->
+       Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
+     | Ast.Var "read_key" ->
+       Printf.sprintf "((void)(%s), __lang_read_key())" (emit_expr arg)
      | Ast.Var "list_dir" ->
        (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
           with interp. Returns list_str, so set the gating flag *)
@@ -4665,6 +4672,36 @@ let str_concat_helper =
       "  if (WIFEXITED(st)) return WEXITSTATUS(st);";
       "  if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);";
       "  return -1;";
+      "}";
+      "";
+      (* v0.1.18 (mrog dogfood): raw terminal mode + single-key input.
+         Raw = no echo, no canonical buffering; ISIG stays on (Ctrl-C
+         works). tty_restore puts back the termios saved by the first
+         tty_raw. read_key blocks for one byte; "" on EOF. *)
+      "#include <termios.h>";
+      "static struct termios __lang_saved_tio;";
+      "static int __lang_tio_saved = 0;";
+      "static int __lang_tty_raw(void) {";
+      "  if (!isatty(0)) return 0;";
+      "  struct termios tio;";
+      "  if (tcgetattr(0, &tio) != 0) return 0;";
+      "  if (!__lang_tio_saved) { __lang_saved_tio = tio; __lang_tio_saved = 1; }";
+      "  tio.c_lflag &= ~(ICANON | ECHO);";
+      "  tio.c_cc[VMIN] = 1; tio.c_cc[VTIME] = 0;";
+      "  tcsetattr(0, TCSANOW, &tio);";
+      "  return 0;";
+      "}";
+      "static int __lang_tty_restore(void) {";
+      "  if (__lang_tio_saved && isatty(0)) tcsetattr(0, TCSANOW, &__lang_saved_tio);";
+      "  return 0;";
+      "}";
+      "static const char* __lang_read_key(void) {";
+      "  char c;";
+      "  ssize_t n = read(0, &c, 1);";
+      "  char* s = (char*)__lang_region_alloc(&__lang_default_region, 2);";
+      "  if (n <= 0) { s[0] = 0; return s; }";
+      "  s[0] = c; s[1] = 0;";
+      "  return s;";
       "}";
       "";
       (* Phase 44: mkdir_p doesn't depend on list_str, so it can live in the header *)

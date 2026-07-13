@@ -264,6 +264,45 @@ let builtin_run =
       V_int code
     | _ -> failwith "run: expected str")
 
+(* v0.1.18 (mrog dogfood): raw terminal mode + single-key input. Saved
+   termios so tty_restore puts the terminal back exactly. Raw = no echo,
+   no canonical (line) buffering; ISIG left on so Ctrl-C still works. *)
+let saved_termios : Unix.terminal_io option ref = ref None
+
+let builtin_tty_raw =
+  V_builtin ("tty_raw", fun v ->
+    match v with
+    | V_unit ->
+      (if Unix.isatty Unix.stdin then begin
+         let tio = Unix.tcgetattr Unix.stdin in
+         if !saved_termios = None then saved_termios := Some tio;
+         Unix.tcsetattr Unix.stdin Unix.TCSANOW
+           { tio with Unix.c_icanon = false; Unix.c_echo = false;
+                      Unix.c_vmin = 1; Unix.c_vtime = 0 }
+       end);
+      V_unit
+    | _ -> failwith "tty_raw: expected unit")
+
+let builtin_tty_restore =
+  V_builtin ("tty_restore", fun v ->
+    match v with
+    | V_unit ->
+      (match !saved_termios with
+       | Some tio when Unix.isatty Unix.stdin ->
+         Unix.tcsetattr Unix.stdin Unix.TCSANOW tio
+       | _ -> ());
+      V_unit
+    | _ -> failwith "tty_restore: expected unit")
+
+let builtin_read_key =
+  V_builtin ("read_key", fun v ->
+    match v with
+    | V_unit ->
+      let buf = Bytes.create 1 in
+      let n = Unix.read Unix.stdin buf 0 1 in
+      V_str (if n = 0 then "" else Bytes.sub_string buf 0 1)
+    | _ -> failwith "read_key: expected unit")
+
 let builtin_print_no_nl =
   V_builtin ("print_no_nl", fun v ->
     (match v with
@@ -1786,6 +1825,9 @@ let initial_env : env =
     ("read_line", ref builtin_read_line);
     ("read_stdin", ref builtin_read_stdin);
     ("run", ref builtin_run);
+    ("tty_raw", ref builtin_tty_raw);
+    ("tty_restore", ref builtin_tty_restore);
+    ("read_key", ref builtin_read_key);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);
     ("int_max", ref (V_int max_int));
