@@ -242,12 +242,26 @@ let builtin_read_stdin =
     | _ -> failwith "read_stdin: expected unit")
 
 (* v0.1.13 (mk dogfood): run a command line via /bin/sh, inheriting stdio,
-   and return its exit code. Sys.command already shells out and returns the
-   process's exit status. *)
+   and return its exit code.
+   v0.1.16 (mk dogfood P4): NOT Sys.command — that lowers to libc system(),
+   which serializes across threads on macOS (a global lock), so `par_map
+   (fn c -> run c) cmds` ran commands one at a time. fork/exec via
+   Unix.create_process is thread-safe, letting `run` calls in different
+   domains truly overlap. *)
 let builtin_run =
   V_builtin ("run", fun v ->
     match v with
-    | V_str cmd -> V_int (Sys.command cmd)
+    | V_str cmd ->
+      let pid =
+        Unix.create_process "/bin/sh" [| "sh"; "-c"; cmd |]
+          Unix.stdin Unix.stdout Unix.stderr
+      in
+      let (_, status) = Unix.waitpid [] pid in
+      let code = match status with
+        | Unix.WEXITED n -> n
+        | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + n
+      in
+      V_int code
     | _ -> failwith "run: expected str")
 
 let builtin_print_no_nl =

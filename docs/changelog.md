@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.16 — 2026-07-13
+
+**`run` is now truly parallel under `spawn` / `par_map`** (mk dogfood P4).
+`run` was lowered to libc `system()` (and OCaml's `Sys.command`, which
+wraps it) — and on macOS, concurrent `system()` calls serialize behind a
+global lock, so `par_map (fn c -> run c) cmds` executed commands one at a
+time: three parallel 0.3s sleeps took ~1.0s (interp) / ~1.6s (native).
+Confirmed with a C probe (3 threads × `system("sleep 0.3")` = 1.01s;
+`posix_spawn` = 0.32s). Reimplemented without `system()`:
+
+- interp: `Unix.create_process "/bin/sh" ["sh";"-c";cmd]` + `waitpid`
+- C native: `posix_spawn` + `waitpid` (`128 + signal` on signaled exit)
+
+Three parallel 0.3s commands now take ~0.36s on both backends. Exit-code
+propagation is unchanged. This is what a parallel task runner needs — the
+`mk` dogfood's M5.
+
+2057 tests.
+
+---
+
 ## v0.1.15 — 2026-07-13
 
 **`file_exists` now works on the C backend** (mk dogfood P3). Incremental
