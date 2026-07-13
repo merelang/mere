@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.20 — 2026-07-14
+
+**`random_int` now works on the C backend** (mrog dogfood P3). The game's
+wandering ghost picks a random direction each turn; `random_int` existed
+only in the interpreter — the third interpreter-only builtin this dogfood
+family has flushed out (after `print_err`, `file_exists`, `print_no_nl`).
+Added `__lang_random_int` (seeded once from time^pid, uniform `[0, n)`,
+fails on `n <= 0` like the interpreter). mrog M3 — ghost + game over —
+now runs natively.
+
+2064 tests.
+
+---
+
 ## v0.1.19 — 2026-07-13
 
 **`print_no_nl` now works on the C backend** (mrog dogfood P2). A TUI's

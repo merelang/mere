@@ -1863,6 +1863,9 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
      | Ast.Var "read_key" ->
        Printf.sprintf "((void)(%s), __lang_read_key())" (emit_expr arg)
+     | Ast.Var "random_int" ->
+       (* v0.1.20 (mrog dogfood P3): uniform int in [0, n). *)
+       Printf.sprintf "__lang_random_int(%s)" (emit_expr arg)
      | Ast.Var "list_dir" ->
        (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
           with interp. Returns list_str, so set the gating flag *)
@@ -4706,6 +4709,16 @@ let str_concat_helper =
       "  if (n <= 0) { s[0] = 0; return s; }";
       "  s[0] = c; s[1] = 0;";
       "  return s;";
+      "}";
+      "";
+      (* v0.1.20 (mrog dogfood P3): random_int n — uniform in [0, n).
+         Seeded once from time^pid; n <= 0 fails like the interpreter. *)
+      "#include <time.h>";
+      "static int __lang_random_int(int n) {";
+      "  static int __seeded = 0;";
+      "  if (!__seeded) { srand((unsigned)(time(NULL) ^ getpid())); __seeded = 1; }";
+      "  if (n <= 0) __lang_fail_impl(\"random_int: bound must be positive\");";
+      "  return rand() % n;";
       "}";
       "";
       (* Phase 44: mkdir_p doesn't depend on list_str, so it can live in the header *)
