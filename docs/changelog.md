@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.13 — 2026-07-13
+
+**`run` — Mere can start external programs.** A new `run : str -> int`
+builtin executes a command line through the shell, inherits stdio, and
+returns the exit code (interpreter via `Sys.command`; C native via
+`system` + `WEXITSTATUS`). This is the capability the new `mk` task-runner
+dogfood needed on day one — a whole class of tools (build systems, task
+runners, anything that shells out) was previously inexpressible. Exit
+codes propagate identically under interp and native.
+
+2054 tests.
+
+---
+
 ## v0.1.12 — 2026-07-13
 
 Papercut batch — small dogfood findings paid back.

@@ -1826,6 +1826,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "read_stdin" ->
        (* Native CLI: read all of stdin as a str. Unit arg has no effect. *)
        Printf.sprintf "((void)(%s), __lang_read_stdin())" (emit_expr arg)
+     | Ast.Var "run" ->
+       (* v0.1.13 (mk dogfood): run a command line, return its exit code. *)
+       Printf.sprintf "__lang_run(%s)" (emit_expr arg)
      | Ast.Var "list_dir" ->
        (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
           with interp. Returns list_str, so set the gating flag *)
@@ -4615,6 +4618,15 @@ let str_concat_helper =
       "  if (len > 0) { size_t w = fwrite(content, 1, len, f); (void)w; }";
       "  fclose(f);";
       "  return 0;";
+      "}";
+      "";
+      (* v0.1.13 (mk dogfood): run a command via the shell, inherit stdio,
+         return its exit code (matches the interp's Sys.command). *)
+      "#include <sys/wait.h>";
+      "static int __lang_run(const char* cmd) {";
+      "  int st = system(cmd);";
+      "  if (st == -1) return -1;";
+      "  return WEXITSTATUS(st);";
       "}";
       "";
       (* Phase 44: mkdir_p doesn't depend on list_str, so it can live in the header *)
