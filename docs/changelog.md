@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.17 — 2026-07-13
+
+**C backend: closures that call an inner-lifted fn now carry its captures**
+(mk dogfood P5). An inline lambda passed to `par_map` that captures an
+enclosing function's parameter gets inner-lifted, and its call sites inject
+the captured variable as a leading argument. But when that call site sat
+inside *another* closure — the `par_map` lowering's spawn lambda — the
+spawn closure's env didn't include the injected variable, and the emitted C
+referenced an undeclared identifier. The anonymous-closure capture
+computation now unions in the captures of any inner-lifted fn the body
+calls (one level suffices — lifted captures are already transitively closed
+by the Phase 45 fixpoint). Found by `mk`'s parallel dependency groups
+(`name [a b c]&: cmd`), which now build and run natively: three parallel
+0.3s deps complete in ~0.38s, and a failing parallel dep propagates its
+exit code.
+
+2058 tests.
+
+---
+
 ## v0.1.16 — 2026-07-13
 
 **`run` is now truly parallel under `spawn` / `par_map`** (mk dogfood P4).

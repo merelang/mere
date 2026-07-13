@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.16" Version.v "0.1.16";
+  check "version is 0.1.17" Version.v "0.1.17";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2789,6 +2789,17 @@ let () =
     (codegen "print_err \"x\"") "fprintf(stderr";
   assert_contains "codegen C: file_exists emits __lang_file_exists"
     (codegen "file_exists \"/tmp/x\"") "__lang_file_exists";
+  (* v0.1.17 (mk dogfood P5): an inline lambda passed to par_map capturing a
+     host-fn param gets inner-lifted; the spawn closure that calls it must
+     carry the lifted fn's captures in ITS env (else the injected arg is an
+     undeclared identifier in the emitted C). The emitted env store for the
+     spawn closure must include the captured `k`. *)
+  assert_contains "codegen C: par_map spawn closure carries lifted-callee caps"
+    (codegen_with_decls
+      "let rec worker = fn (x: int) -> fn (k: int) -> x + k \
+       and outer = fn (k: int) -> par_map (fn (x: int) -> worker x k) [1, 2, 3] \
+       in 0")
+    "->k = ";
   (* Q-012-C-mem: the shared program-lifetime arena is lock-guarded so
      spawned threads can allocate from it without racing (validated under
      ThreadSanitizer with concurrent allocs). *)
