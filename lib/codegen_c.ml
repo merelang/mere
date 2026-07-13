@@ -1572,8 +1572,27 @@ let rec emit_expr (e : Ast.expr) : string =
        current_var_types respects shadowing (e.g., a user's `id`
        parameter is captured even though `id` is also a builtin). *)
     let raw_fvs = free_vars fn_body [param] in
+    (* v0.1.16 (mk dogfood P5): when the body calls an inner-LIFTED fn, the
+       call site injects that fn's captured vars as leading args (see the
+       App-on-inner_lifts case). Those vars must ride in THIS closure's env
+       too, or the injected args are undeclared inside the adapter — e.g.
+       the par_map lowering's spawn lambda calling __pm_f, where __pm_f was
+       an inline lambda capturing a host-fn param. inner_lifts captures are
+       already transitively closed (Phase 45 fixpoint), so one level is
+       enough. *)
+    let lifted_callee_caps =
+      List.concat_map (fun n ->
+        match Hashtbl.find_opt inner_lifts n with
+        | Some li -> List.map fst li.captures
+        | None -> []) raw_fvs
+    in
+    let seen = Hashtbl.create 8 in
     let fvs =
-      List.filter (fun n -> List.mem_assoc n !current_var_types) raw_fvs
+      List.filter (fun n ->
+        List.mem_assoc n !current_var_types
+        && not (Hashtbl.mem seen n)
+        && (Hashtbl.add seen n (); true))
+        (raw_fvs @ lifted_callee_caps)
     in
     (* Capture type lookup: prefer the in-scope binding's resolved type;
        fall back to scanning Var nodes in the body (which may be
