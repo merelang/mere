@@ -44,7 +44,8 @@ Legend:
 | `read_file` ⚡ | `str -> str` | Read the whole file; raises on failure |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
-| `file_exists` ★ | `str -> bool` | Whether path exists (Phase 19.6) |
+| `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
+| `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
 | `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12 |
 | `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code (interp + C native; v0.1.13) |
@@ -58,7 +59,7 @@ args ()                             // → ["foo", "bar"] (mere prog foo bar)
 run "clang -O2 main.c -o app"       // → 0 on success, nonzero exit code otherwise
 ```
 
-**★ Codegen status**: `print` / `print_no_nl` / `print_int` / `print_bool` / `print_err` / `read_file` / `write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `read_lines` / `args` / `env_var` / `file_exists` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31).
+**★ Codegen status**: `print` / `print_no_nl` / `print_int` / `print_bool` / `print_err` / `read_file` / `write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `read_lines` / `args` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). `file_exists` / `file_mtime` / `run` / `print_err` also work on the **C native** backend (added for the `mk` task-runner dogfood, v0.1.13-v0.1.15).
 
 ```
 let _ = print "Hello";

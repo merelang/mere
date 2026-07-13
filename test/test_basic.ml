@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.14" Version.v "0.1.14";
+  check "version is 0.1.15" Version.v "0.1.15";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2787,6 +2787,8 @@ let () =
     (codegen "run \"true\"") "__lang_run";
   assert_contains "codegen C: print_err emits fprintf(stderr"
     (codegen "print_err \"x\"") "fprintf(stderr";
+  assert_contains "codegen C: file_exists emits __lang_file_exists"
+    (codegen "file_exists \"/tmp/x\"") "__lang_file_exists";
   (* Q-012-C-mem: the shared program-lifetime arena is lock-guarded so
      spawned threads can allocate from it without racing (validated under
      ThreadSanitizer with concurrent allocs). *)
