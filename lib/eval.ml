@@ -49,6 +49,15 @@ type value =
 
 and env = (string * value ref) list
 
+(* v0.1.12 (N4): float → string. OCaml's `string_of_float` renders a
+   whole-valued float with a bare trailing dot ("550."), which is ugly and
+   reads oddly. Normalize to a trailing ".0" ("550.0"). Kept identical to
+   the C runtime (__lang_str_of_float) and the Wasm JS host so all backends
+   agree. Round-trips through float_of_str. *)
+let format_float f =
+  let s = string_of_float f in
+  if String.length s > 0 && s.[String.length s - 1] = '.' then s ^ "0" else s
+
 (* Try to interpret a value as a Nil-terminated Cons chain.
    Returns Some [v1; v2; ...] when the value walks all the way to Nil,
    None otherwise (mid-chain shape mismatch or non-Cons head). *)
@@ -62,7 +71,7 @@ let rec try_as_list = function
 
 and to_string = function
   | V_int n -> string_of_int n
-  | V_float f -> string_of_float f
+  | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "()"
@@ -108,7 +117,7 @@ and to_string = function
    written record->JSON writers collapse to `to_json x`. *)
 and to_json_string = function
   | V_int n -> string_of_int n
-  | V_float f -> string_of_float f
+  | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "null"
@@ -361,19 +370,18 @@ let builtin_env_var =
        | Some s -> V_constr ("Some", Some (V_str s)))
     | _ -> failwith "env_var: expected str")
 
+(* v0.1.12 (N3): the program's own arguments, i.e. everything AFTER the
+   script path — matching the native backend's `args()` (argv[1..] with the
+   binary name dropped). The CLI entry point sets this to the args following
+   the .mere file; reading Sys.argv[1..] here instead would wrongly include
+   the script path, so interp and native disagreed. Defaults to [] (REPL,
+   tests, embedded use). *)
+let program_argv : string list ref = ref []
+
 let builtin_args =
   V_builtin ("args", fun v ->
     match v with
-    | V_unit ->
-      (* OCaml's Sys.argv[0] is the executable name — from the Mere
-         program's perspective, returning "the program's own args"
-         (argv[1..]) is the natural choice. *)
-      let argv = Sys.argv in
-      let n = Array.length argv in
-      let args = if n <= 1 then [] else
-        Array.to_list (Array.sub argv 1 (n - 1))
-      in
-      str_list_to_v_local args
+    | V_unit -> str_list_to_v_local !program_argv
     | _ -> failwith "args: expected unit")
 
 let builtin_write_file =
@@ -421,7 +429,7 @@ let builtin_int_of_float =
 let builtin_str_of_float =
   V_builtin ("str_of_float", fun v ->
     match v with
-    | V_float f -> V_str (string_of_float f)
+    | V_float f -> V_str (format_float f)
     | _ -> failwith "str_of_float: expected float")
 
 let builtin_float_of_str =

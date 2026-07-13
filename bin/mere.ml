@@ -329,13 +329,16 @@ let () =
        base_dir to this file's dir so `import "./foo.lang"` inside
        resolves relative to the running file. *)
     let base = Filename.dirname path in
+    Mere.Eval.program_argv := [];
     run_action (Mere.Pipeline.process ~base_dir:base) path source
-  | _ :: path :: _rest_args when String.length path > 0 && path.[0] <> '-' ->
+  | _ :: path :: rest_args when String.length path > 0 && path.[0] <> '-' ->
     (* Phase 44: `mere <path> arg1 arg2 ...` — pass extra args to the program.
-       Since Sys.argv is retained by the OCaml runtime, eval's `args ()`
-       builtin can see rest_args. Only file execution is handled here. *)
+       v0.1.12 (N3): hand the args AFTER the script path to eval's `args ()`
+       builtin, so interp matches native (which sees only the user args, not
+       its own binary/script name). *)
     let source = read_file path in
     let base = Filename.dirname path in
+    Mere.Eval.program_argv := rest_args;
     run_action (Mere.Pipeline.process ~base_dir:base) path source
   | _ ->
     usage ();

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.11" Version.v "0.1.11";
+  check "version is 0.1.12" Version.v "0.1.12";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -1977,17 +1977,17 @@ let () =
   check "float show"
     (Pipeline.process "show 2.5") "\"2.5\"";
   check "f_add"
-    (Pipeline.process "f_add 1.5 2.5") "4.";
+    (Pipeline.process "f_add 1.5 2.5") "4.0";
   check "f_sub"
-    (Pipeline.process "f_sub 10.0 3.0") "7.";
+    (Pipeline.process "f_sub 10.0 3.0") "7.0";
   check "f_mul"
-    (Pipeline.process "f_mul 3.0 4.0") "12.";
+    (Pipeline.process "f_mul 3.0 4.0") "12.0";
   check "f_div"
     (Pipeline.process "f_div 10.0 4.0") "2.5";
   (* infix operators overloaded on float (+ - * / and < <= > >=) *)
   check "float + infix" (Pipeline.process "1.5 + 2.25") "3.75";
   check "float - infix" (Pipeline.process "5.0 - 1.5") "3.5";
-  check "float * infix" (Pipeline.process "2.5 * 4.0") "10.";
+  check "float * infix" (Pipeline.process "2.5 * 4.0") "10.0";
   check "float / infix (not int div)" (Pipeline.process "7.0 / 2.0") "3.5";
   check "float type of + is float" (Pipeline.type_of "fn (x: float) -> x + 1.0") "(float -> float)";
   check "float < infix" (Pipeline.process "2.5 < 3.5") "true";
@@ -2001,9 +2001,9 @@ let () =
     (Pipeline.process
       "type 'a list = Nil | Cons of 'a * 'a list;
        list_sort_by (fn (a: float) -> fn (b: float) -> a < b) [3.5, 1.0, 2.25]")
-    "[1., 2.25, 3.5]";
+    "[1.0, 2.25, 3.5]";
   check "float_of_int"
-    (Pipeline.process "float_of_int 7") "7.";
+    (Pipeline.process "float_of_int 7") "7.0";
   check "int_of_float truncates"
     (Pipeline.process "int_of_float 3.7") "3";
   check "str_of_float"
@@ -2015,7 +2015,7 @@ let () =
   check_raises "float_of_str invalid"
     (fun () -> Pipeline.process "float_of_str \"abc\"");
   check "float pipe chain"
-    (Pipeline.process "1.5 |> f_add 2.5 |> f_mul 2.0") "8.";
+    (Pipeline.process "1.5 |> f_add 2.5 |> f_mul 2.0") "8.0";
   check "int + float = type error"
     (* Lang requires explicit conversion *)
     (Pipeline.type_of "(float_of_int 3) |> f_add 0.5") "float";
@@ -2067,18 +2067,18 @@ let () =
   check "e type"       (Pipeline.type_of "e") "float";
   check "e ~ 2.718"    (Pipeline.process "f_gt e 2.7") "true";
 
-  check "sqrt 16"      (Pipeline.process "sqrt 16.0") "4.";
+  check "sqrt 16"      (Pipeline.process "sqrt 16.0") "4.0";
   check "sqrt 2 approx"
     (Pipeline.process "f_lt (sqrt 2.0) 1.5") "true";
   check "f_abs neg"    (Pipeline.process "f_abs (f_neg 3.5)") "3.5";
   check "f_abs pos"    (Pipeline.process "f_abs 4.2") "4.2";
-  check "f_neg"        (Pipeline.process "f_neg 1.0") "-1.";
+  check "f_neg"        (Pipeline.process "f_neg 1.0") "-1.0";
 
-  check "floor down"   (Pipeline.process "floor 3.7") "3.";
-  check "floor neg"    (Pipeline.process "floor (f_neg 1.2)") "-2.";
-  check "ceil up"      (Pipeline.process "ceil 3.2") "4.";
-  check "round half"   (Pipeline.process "round 3.5") "4.";
-  check "round down"   (Pipeline.process "round 3.4") "3.";
+  check "floor down"   (Pipeline.process "floor 3.7") "3.0";
+  check "floor neg"    (Pipeline.process "floor (f_neg 1.2)") "-2.0";
+  check "ceil up"      (Pipeline.process "ceil 3.2") "4.0";
+  check "round half"   (Pipeline.process "round 3.5") "4.0";
+  check "round down"   (Pipeline.process "round 3.4") "3.0";
 
   check "sqrt type"    (Pipeline.type_of "sqrt") "(float -> float)";
   check "pi >> sqrt"
@@ -2086,24 +2086,24 @@ let () =
     (Pipeline.process "sqrt pi |> f_lt 1.7") "true";
 
   (* --- Phase 19.7: math extensions (log / exp / trig / f_min_max / f_pow / random) --- *)
-  check "log e == 1"    (Pipeline.process "log e") "1.";
-  check "exp 0 == 1"    (Pipeline.process "exp 0.0") "1.";
+  check "log e == 1"    (Pipeline.process "log e") "1.0";
+  check "exp 0 == 1"    (Pipeline.process "exp 0.0") "1.0";
   check "log type"      (Pipeline.type_of "log") "(float -> float)";
   check "exp type"      (Pipeline.type_of "exp") "(float -> float)";
-  check "sin 0 == 0"    (Pipeline.process "sin 0.0") "0.";
-  check "cos 0 == 1"    (Pipeline.process "cos 0.0") "1.";
-  check "tan 0 == 0"    (Pipeline.process "tan 0.0") "0.";
+  check "sin 0 == 0"    (Pipeline.process "sin 0.0") "0.0";
+  check "cos 0 == 1"    (Pipeline.process "cos 0.0") "1.0";
+  check "tan 0 == 0"    (Pipeline.process "tan 0.0") "0.0";
   check "sin type"      (Pipeline.type_of "sin") "(float -> float)";
   check "atan2 type"
     (Pipeline.type_of "atan2") "(float -> (float -> float))";
   check "f_min picks smaller"
-    (Pipeline.process "f_min 3.5 2.0") "2.";
+    (Pipeline.process "f_min 3.5 2.0") "2.0";
   check "f_max picks larger"
     (Pipeline.process "f_max 3.5 2.0") "3.5";
   check "f_min type"
     (Pipeline.type_of "f_min") "(float -> (float -> float))";
   check "f_pow basic"
-    (Pipeline.process "f_pow 2.0 10.0") "1024.";
+    (Pipeline.process "f_pow 2.0 10.0") "1024.0";
   check "f_pow type"
     (Pipeline.type_of "f_pow") "(float -> (float -> float))";
   check "random_int in [0, n)"
