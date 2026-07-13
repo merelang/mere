@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.17" Version.v "0.1.17";
+  check "version is 0.1.18" Version.v "0.1.18";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2013,6 +2013,9 @@ let () =
   (* v0.1.13 (mk dogfood): run — subprocess exit code via the shell. *)
   check "run: exit code 0" (Pipeline.process "run \"true\"") "0";
   check "run: exit code nonzero" (Pipeline.process "run \"exit 3\"") "3";
+  (* v0.1.18 (mrog dogfood): raw terminal + single-key input. *)
+  check "tty_raw type" (Pipeline.type_of "tty_raw") "(unit -> unit)";
+  check "read_key type" (Pipeline.type_of "read_key") "(unit -> str)";
   check "float_of_str trimmed"
     (Pipeline.process "float_of_str \"  2.5  \"") "2.5";
   check_raises "float_of_str invalid"
@@ -2789,6 +2792,10 @@ let () =
     (codegen "print_err \"x\"") "fprintf(stderr";
   assert_contains "codegen C: file_exists emits __lang_file_exists"
     (codegen "file_exists \"/tmp/x\"") "__lang_file_exists";
+  assert_contains "codegen C: read_key emits __lang_read_key"
+    (codegen "read_key ()") "__lang_read_key";
+  assert_contains "codegen C: tty_raw emits termios helper"
+    (codegen "tty_raw ()") "__lang_tty_raw";
   (* v0.1.17 (mk dogfood P5): an inline lambda passed to par_map capturing a
      host-fn param gets inner-lifted; the spawn closure that calls it must
      carry the lifted fn's captures in ITS env (else the injected arg is an

@@ -1276,6 +1276,12 @@ let initial_env : env =
     (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
        stdio, return its exit code. *)
     ("run",         mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    (* v0.1.18 (mrog dogfood): interactive terminal — raw mode on stdin
+       (no echo, no line buffering), restore, and a blocking single-key
+       read. read_key returns a 1-char str ("" on EOF). *)
+    ("tty_raw",     mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    ("tty_restore", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    ("read_key",    mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
     ("int_max",     mono Ast.TyInt);

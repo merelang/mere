@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.18 — 2026-07-13
+
+**Interactive terminal: `tty_raw` / `tty_restore` / `read_key`** (mrog
+dogfood P1). Mere had only line-buffered input (`read_line` waits for
+Enter, with echo), so an interactive TUI couldn't be expressed at all.
+Three new builtins — interpreter (Unix termios) and C native
+(`tcgetattr`/`tcsetattr`):
+
+- `tty_raw : unit -> unit` — raw mode on stdin (no echo, no canonical
+  buffering; ISIG stays on so Ctrl-C works). No-op when stdin isn't a tty,
+  so piped tests behave.
+- `tty_restore : unit -> unit` — put back the termios saved by the first
+  `tty_raw`.
+- `read_key : unit -> str` — blocking single-byte read; `""` on EOF.
+
+ANSI *output* already worked (`chr 27 ++ "[2J"`), so with key input the
+interactive read → update → redraw loop is now expressible. Driving app:
+`mrog`, a tiny terminal roguelike.
+
+2062 tests.
+
+---
+
 ## v0.1.17 — 2026-07-13
 
 **C backend: closures that call an inner-lifted fn now carry its captures**
