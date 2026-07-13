@@ -207,6 +207,12 @@ let needs_struct_eq (t : Ast.ty) : bool =
     || name = "list"
   | _ -> false
 
+(* v0.1.11 derive-ord: compound types ordered with < <= > >= need a
+   structural `cmp_<tag>` (returns <0/0/>0), the ordering sibling of
+   eq_<tag>. Same compound set as needs_struct_eq. Keyed by ty_tag. *)
+let cmp_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+let needs_struct_cmp = needs_struct_eq
+
 (* Polymorphic record declarations: deferred to instantiation time. *)
 let polymorphic_records
     : (string, string list * (string * Ast.ty) list) Hashtbl.t =
@@ -1291,6 +1297,10 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "eq_%s(%s, %s)" (ty_tag ty) (emit_expr a) (emit_expr b)
      | ty, Ast.Ne when needs_struct_eq ty ->
        Printf.sprintf "(!eq_%s(%s, %s))" (ty_tag ty) (emit_expr a) (emit_expr b)
+     | ty, (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge) when needs_struct_cmp ty ->
+       (* v0.1.11 derive-ord: compound ordering via cmp_<tag> (<0/0/>0). *)
+       Printf.sprintf "(cmp_%s(%s, %s) %s 0)"
+         (ty_tag ty) (emit_expr a) (emit_expr b) (cmpop_to_c op)
      | _ ->
        "(" ^ emit_expr a ^ " " ^ cmpop_to_c op ^ " " ^ emit_expr b ^ ")")
   | Ast.Logic (op, a, b) ->
@@ -3888,6 +3898,69 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
 let emit_eq_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static int eq_%s(%s, %s);" tag (c_type_of t) (c_type_of t)
 
+(* v0.1.11 derive-ord: structural compare returning <0/0/>0, the ordering
+   sibling of emit_eq_fn. Lexicographic: tuple by component order, record by
+   declared field order, variant by tag (declaration order) then payload —
+   matching the interpreter's value_compare so all backends agree. *)
+let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header = Printf.sprintf "static int cmp_%s(%s a, %s b)" tag cty cty in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool ->
+    header ^ " { return (a > b) - (a < b); }"
+  | Ast.TyFloat ->
+    header ^ " { return (a > b) - (a < b); }"
+  | Ast.TyStr -> header ^ " { return strcmp(a, b); }"
+  | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 0; }"
+  | Ast.TyArrow _ -> header ^ " { (void)a; (void)b; return 0; }"
+  | Ast.TyTuple ts ->
+    let steps =
+      List.mapi (fun i et ->
+        Printf.sprintf "  c = cmp_%s(a.f%d, b.f%d); if (c) return c;"
+          (ty_tag et) i i) ts in
+    Printf.sprintf "%s {\n  int c;\n%s\n  return 0;\n}"
+      header (String.concat "\n" steps)
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+    let info = Hashtbl.find Typer.records name in
+    let steps =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "  c = cmp_%s(a.%s, b.%s); if (c) return c;"
+          (ty_tag ft) fname fname)
+        info.Typer.r_fields in
+    Printf.sprintf "%s {\n  int c;\n%s\n  return 0;\n}"
+      header (String.concat "\n" steps)
+  | Ast.TyCon (name, args) ->
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc else acc)
+          Typer.constructors []
+    in
+    let is_ptr = is_recursive_variant cty in
+    let dot = if is_ptr then "->" else "." in
+    let cases =
+      List.filter_map (fun (cname, arg_opt) ->
+        match arg_opt with
+        | None -> None
+        | Some ty ->
+          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+          Some (Printf.sprintf
+            "  if (a%stag == %d) return cmp_%s(a%spayload.%s, b%spayload.%s);"
+            dot tag_n (ty_tag ty) dot cname dot cname))
+        variants
+    in
+    Printf.sprintf
+      "%s {\n  if (a%stag != b%stag) return (a%stag > b%stag) - (a%stag < b%stag);\n%s\n  return 0;\n}"
+      header dot dot dot dot dot dot (String.concat "\n" cases)
+  | _ -> header ^ " { (void)a; (void)b; return 0; }"
+
+let emit_cmp_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static int cmp_%s(%s, %s);" tag (c_type_of t) (c_type_of t)
+
 let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
   Printf.sprintf "static %s %s(void*, %s);"
     (c_type_of ce.ce_return_ty) ce.ce_adapter_name
@@ -5572,6 +5645,12 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match a.Ast.ty with
         | Some t when needs_struct_eq t -> add_into eq_types t
         | _ -> ())
+     (* v0.1.11 derive-ord: < <= > >= on a compound type needs cmp_<tag>
+        (and its deps: field/element/payload compares down to scalars). *)
+     | Ast.Cmp ((Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), a, _) ->
+       (match a.Ast.ty with
+        | Some t when needs_struct_cmp t -> add_into cmp_types t
+        | _ -> ())
      (* str_of_int lowers to show_int(), so ensure show_int is emitted even
         when the program never uses `show` directly (mq dogfood P9). *)
      | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
@@ -6429,6 +6508,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset of_json_types;
   Hashtbl.reset of_json_opt_types;
   Hashtbl.reset eq_types;
+  Hashtbl.reset cmp_types;
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
      for nested types) happens later via mono_record_typedefs. *)
@@ -6782,6 +6862,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun tag t acc ->
       emit_eq_fn tag t :: acc) eq_types []
   in
+  let cmp_fn_forward_decls =
+    Hashtbl.fold (fun tag t acc ->
+      emit_cmp_fn_forward_decl tag t :: acc) cmp_types []
+  in
+  let cmp_fn_defs =
+    Hashtbl.fold (fun tag t acc ->
+      emit_cmp_fn tag t :: acc) cmp_types []
+  in
   (* Phase 36 (DEFERRED §1.19 fix, C side): forward declare each fn's
      `<name>_as_value` closure constant so fn bodies that reference a
      top-level fn as a first-class value (e.g. `list_filter xs is_prime`)
@@ -6830,6 +6918,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        then []
        else of_json_runtime :: (of_json_fn_forward_decls @ of_json_opt_fn_forward_decls))
     @ eq_fn_forward_decls
+    @ cmp_fn_forward_decls
     @ inner_lift_closure_adapter_forward_decls
   in
   let inner_lift_closure_adapters =
@@ -6864,6 +6953,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ of_json_fn_defs
     @ of_json_opt_fn_defs
     @ eq_fn_defs
+    @ cmp_fn_defs
     @ inner_lift_closure_adapters
   in
   (* Phase 15.2: vec_instances is populated during fn / main emission

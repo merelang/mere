@@ -286,6 +286,38 @@ match (of_json_opt body : User option) with
 
 ---
 
+## Comparison, derive-style (v0.1.11)
+
+`== / !=` (structural equality) and `< <= > >=` (structural **ordering**)
+are compile-time-specialized per operand type — the same no-trait
+mechanism as `show` / `to_json`. Both work on interp / C / Wasm.
+
+- **Scalars**: `int` / `float` / `bool` / `str` compare directly (`str`
+  lexicographically).
+- **Compound**: tuples and records compare **field-by-field in declared
+  order**; lists compare **element-wise** (a shorter prefix is smaller);
+  variants order by **declaration order** (the constructor listed first is
+  smallest), then by payload. All backends agree byte-for-byte, so a
+  value sorts the same under the interpreter, a native binary, and Wasm.
+
+```
+(1, 2) < (1, 3)                        // true  (tuple, lexicographic)
+[1,2] < [1,2,3]                        // true  (prefix is smaller)
+type C = Red | Green | Blue; Red < Blue // true  (declaration order)
+list_sort_by (fn (a: float) -> fn (b: float) -> a < b) [3.1, 1.2]  // [1.2, 3.1]
+```
+
+**Honest edges.** `float` uses a total order where `NaN` sorts as least.
+Comparing two functions is defined but meaningless (they order as equal).
+The bare default `list_sort` still bakes in an `int` comparison — its
+comparator's type variables default to `int`, the same rule that keeps
+`fn a -> fn b -> a < b` monomorphic — so sorting a non-`int` list needs
+`list_sort_by` with an **annotated** comparator (as above). A
+fully-polymorphic `list_sort` over any orderable element would need
+ad-hoc-polymorphism resolution (deferred).
+
+---
+
 ## Loop helper (1 ★)
 
 | Name | Type | Description |

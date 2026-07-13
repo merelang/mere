@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.11 — 2026-07-13
+
+**derive-ord: structural ordering, the sibling of structural equality.**
+`< <= > >=` now work on any concrete type, not just `int` / `float` /
+`str` — completing the compile-time-specialized "derive family"
+(`show` / `to_json` / `of_json` / `==` / **`<`**).
+
+- **Structural comparison** on tuples, records, lists, and variants, on
+  **interp / C / Wasm**, all agreeing byte-for-byte. Lexicographic: tuples
+  and records by declared field order, lists element-wise (shorter prefix
+  is smaller), variants by **declaration order** then payload. Emitted as
+  a `cmp_<tag>` function per type (the ordering sibling of `eq_<tag>`),
+  and as `value_compare` in the interpreter, ordering variants by the same
+  tag order the codegen assigns.
+- `list_sort_by` with an annotated comparator now sorts a list of any
+  structural type (`float` / record / tuple / …), closing the mstat N5
+  finding's practical half.
+- Backward compatible: an unresolved comparator type variable still
+  defaults to `int`, so `fn a -> fn b -> a < b` and the bare `list_sort`
+  stay `int`. A fully-polymorphic `list_sort` needs ad-hoc-polymorphism
+  resolution and remains deferred (documented in the stdlib reference).
+
+2052 tests.
+
+---
+
 ## v0.1.10 — 2026-07-12
 
 **Bootstrap fixpoint: Mere is truly self-hosting.** The Mere-in-Mere

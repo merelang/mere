@@ -1971,6 +1971,68 @@ let rec value_eq a b =
     raise (Eval_error (Loc.dummy, "functions are not comparable with == / !="))
   | _ -> false
 
+(* v0.1.11 derive-ord: structural, lexicographic comparison mirroring
+   value_eq. Returns <0 / 0 / >0. Scalars compare directly; tuple / record
+   compare component/field-wise; variants (including list = Nil/Cons) order
+   by DECLARATION ORDER — the same tag order codegen assigns via List.iteri —
+   so the interpreter agrees byte-for-byte with the native / wasm backends.
+   Honest edges: float uses OCaml's total `compare` (NaN sorts as least);
+   closures are ordered arbitrarily-but-totally (0), as value_eq treats them. *)
+and constr_decl_index name =
+  match Hashtbl.find_opt Typer.constructors name with
+  | Some info ->
+    (match Hashtbl.find_opt Exhaustive.type_variants info.Typer.type_name with
+     | Some vs ->
+       let rec idx i = function
+         | [] -> 0
+         | (c, _) :: _ when c = name -> i
+         | _ :: t -> idx (i + 1) t
+       in idx 0 vs
+     | None -> 0)
+  | None -> 0
+
+and value_compare a b =
+  match a, b with
+  | V_int x, V_int y -> compare (x : int) y
+  | V_float x, V_float y -> compare (x : float) y
+  | V_bool x, V_bool y -> compare (x : bool) y
+  | V_str x, V_str y -> String.compare x y
+  | V_unit, V_unit -> 0
+  | V_tuple xs, V_tuple ys -> compare_value_lists xs ys
+  | V_constr (n1, p1), V_constr (n2, p2) ->
+    let c = compare (constr_decl_index n1) (constr_decl_index n2) in
+    if c <> 0 then c
+    else (match p1, p2 with
+      | None, None -> 0
+      | Some v1, Some v2 -> value_compare v1 v2
+      | None, Some _ -> -1
+      | Some _, None -> 1)
+  | V_record (n1, fs1), V_record (_, fs2) ->
+    (* Compare fields in the type's DECLARED order (matches codegen), so
+       two records of the same type compare deterministically regardless of
+       how their field alists happen to be ordered. *)
+    (match Hashtbl.find_opt Typer.records n1 with
+     | Some info ->
+       let rec go = function
+         | [] -> 0
+         | (f, _) :: rest ->
+           (match List.assoc_opt f fs1, List.assoc_opt f fs2 with
+            | Some v1, Some v2 ->
+              let c = value_compare v1 v2 in if c <> 0 then c else go rest
+            | _ -> go rest)
+       in go info.Typer.r_fields
+     | None -> 0)
+  | _ -> 0
+
+and compare_value_lists xs ys =
+  match xs, ys with
+  | [], [] -> 0
+  | [], _ -> -1
+  | _, [] -> 1
+  | x :: xs', y :: ys' ->
+    let c = value_compare x y in
+    if c <> 0 then c else compare_value_lists xs' ys'
+
 (* ===== of_json: type-directed JSON deserialization (mirror of to_json) =====
    `to_json` walks a runtime value (which already carries its structure), so it
    needs no type info. `of_json` goes the other way — a JSON string alone can't
@@ -2251,25 +2313,17 @@ let rec eval_in (env : env) (e : Ast.expr) =
   | Ast.Cmp (op, a, b) ->
     let va = eval_in env a in
     let vb = eval_in env b in
-    (match op, va, vb with
-     | Ast.Lt, V_int x, V_int y -> V_bool (x < y)
-     | Ast.Le, V_int x, V_int y -> V_bool (x <= y)
-     | Ast.Gt, V_int x, V_int y -> V_bool (x > y)
-     | Ast.Ge, V_int x, V_int y -> V_bool (x >= y)
-     (* Lexicographic ordering on strings. *)
-     | Ast.Lt, V_str x, V_str y -> V_bool (String.compare x y < 0)
-     | Ast.Le, V_str x, V_str y -> V_bool (String.compare x y <= 0)
-     | Ast.Gt, V_str x, V_str y -> V_bool (String.compare x y > 0)
-     | Ast.Ge, V_str x, V_str y -> V_bool (String.compare x y >= 0)
-     (* float ordering *)
-     | Ast.Lt, V_float x, V_float y -> V_bool (x < y)
-     | Ast.Le, V_float x, V_float y -> V_bool (x <= y)
-     | Ast.Gt, V_float x, V_float y -> V_bool (x > y)
-     | Ast.Ge, V_float x, V_float y -> V_bool (x >= y)
-     | (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), _, _ ->
-       type_error e.Ast.loc "ordering requires int, float, or str operands"
-     | Ast.Eq, _, _ -> V_bool (value_eq va vb)
-     | Ast.Ne, _, _ -> V_bool (not (value_eq va vb)))
+    (match op with
+     | Ast.Eq -> V_bool (value_eq va vb)
+     | Ast.Ne -> V_bool (not (value_eq va vb))
+     (* v0.1.11 derive-ord: all ordering routes through the structural
+        value_compare (scalars, tuple, record, variant/list). *)
+     | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
+       let c = value_compare va vb in
+       V_bool (match op with
+         | Ast.Lt -> c < 0 | Ast.Le -> c <= 0
+         | Ast.Gt -> c > 0 | Ast.Ge -> c >= 0
+         | _ -> false))
   | Ast.Logic (op, a, b) ->
     (* short-circuit evaluation: don't evaluate b unless needed *)
     (match op, eval_in env a with
