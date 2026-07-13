@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.19 — 2026-07-13
+
+**`print_no_nl` now works on the C backend** (mrog dogfood P2). A TUI's
+cursor-control sequences must be written without a newline and without
+line buffering; `print_no_nl` existed only in the interpreter (the same
+family as `print_err` / `file_exists` before it). Added the case
+(`fputs(s, stdout); fflush(stdout)`). With it, mrog's full redraw loop —
+ANSI clear+home, map with `@` overlay, hjkl movement, wall collision,
+gold pickup — runs natively, byte-identical to the interpreter.
+
+2063 tests.
+
+---
+
 ## v0.1.18 — 2026-07-13
 
 **Interactive terminal: `tty_raw` / `tty_restore` / `read_key`** (mrog

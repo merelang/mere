@@ -1181,7 +1181,7 @@ let rec emit_expr (e : Ast.expr) : string =
       || name = "str_of_float" || name = "float_of_str"
       || name = "f_neg" || name = "f_abs"
       || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
-      || name = "print" || name = "print_err" || name = "fail"
+      || name = "print" || name = "print_err" || name = "print_no_nl" || name = "fail"
       || name = "fst" || name = "snd"
     in
     if not is_shadowed && is_curried_collection_builtin && is_phase38c_target then
@@ -1666,6 +1666,10 @@ let rec emit_expr (e : Ast.expr) : string =
        (* v0.1.13 (mk dogfood P2): write to stderr with a newline, mirroring
           print → puts. A native CLI needs diagnostics separate from stdout. *)
        "({ fprintf(stderr, \"%s\\n\", " ^ emit_expr arg ^ "); 0; })"
+     | Ast.Var "print_no_nl" ->
+       (* v0.1.19 (mrog dogfood P2): newline-free flushed write — a TUI's
+          cursor-control sequences must not be line-buffered. *)
+       "({ fputs(" ^ emit_expr arg ^ ", stdout); fflush(stdout); 0; })"
      (* Q-012: spawn a `unit -> unit` closure on a fresh OS thread. Copy the
         closure value onto the heap so the child owns it, then pthread_create
         the trampoline. Returns a ThreadHandle. *)
