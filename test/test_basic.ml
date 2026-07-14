@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.22" Version.v "0.1.22";
+  check "version is 0.1.23" Version.v "0.1.23";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3869,6 +3869,20 @@ let () =
   assert_contains "wasm: genuine spawn still lowers to $mere_spawn"
     (wasm_with_decls "let cw = fn (u: unit) -> print \"x\" in let h = spawn cw in join h")
     "mere_spawn";
+  (* 2048 dogfood P3: two same-named inner fns in one host (a `let rec go`
+     per if-branch) must be α-renamed uniquely, or the backends' name-keyed
+     inner-fn lift map collides and both call sites resolve to the wrong fn
+     (cross-backend: C and Wasm both mis-executed; interp was correct). The
+     uniquify pass keeps the first `go` and renames the second to `go_uq<N>`. *)
+  assert_contains "P3: second same-named inner fn is α-renamed (C)"
+    (codegen "let f = fn (w: bool) -> \
+       if w then (let rec go = fn (i: int) -> if i == 0 then 0 else go (i - 1) in go 2) \
+       else (let rec go = fn (j: int) -> if j == 0 then 9 else go (j - 1) in go 2) \
+     in f true")
+    "go_uq";
+  check "P3: collision-free inner fn keeps its name (interp unaffected)"
+    (Pipeline.process "let f = fn (n: int) -> (let rec go = fn (k: int) -> if k == 0 then n else go (k - 1) in go 3) in f 7")
+    "7";
   assert_contains "wasm: emits (module"
     (wasm "42") "(module";
   assert_contains "wasm: exports main with i32 result"

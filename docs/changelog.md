@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.23 — 2026-07-14
+
+**Fix: same-named inner functions no longer collide when lifted**
+(2048 dogfood P3). Two inner fns sharing a source name within one
+top-level function — e.g. a `let rec go` in each branch of an `if` —
+both lifted to the top level, but each backend's inner-fn resolution map
+is keyed by the source name, so the second `go` overwrote the first and
+both call sites dispatched to the wrong one. **Cross-backend**: the C and
+Wasm backends both mis-executed (silent wrong results); the interpreter
+was correct. A new shared pre-pass (`Ast.uniquify_inner_fns_program`, run
+next to the par_map lowering) α-renames on collision — the first use of a
+name keeps it, a later reuse becomes `<name>_uq<N>` with its references
+rewritten — fixing every backend in one place. Collision-free inner names
+(the common case) are untouched, so nothing changes in ordinary code or
+its pretty-printing.
+
+2069 tests.
+
+---
+
 ## v0.1.22 — 2026-07-14
 
 **Wasm backend: `spawn` / `join` / `channel_*` now respect shadowing**
