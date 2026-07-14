@@ -6,6 +6,16 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.23 — 2026-07-14
 
+_Fix (docs site): the Mere SSG (`contrib/site/build.mere`) parsed its
+CLI args assuming `args()` still prepended the script path — the v0.1.12
+`args()` consistency fix shifted that by one, so `input_dir` resolved to
+the output dir and the site built **0 markdown pages** (tour.html /
+tutorial.html etc. 404'd). Updated build.mere to the current `args()`
+contract (first positional = input dir). A dogfood consumer that relied
+on the old behaviour — exactly the interp/native `args()` mismatch N3 was
+about, biting a Mere program this time._
+
+
 **Fix: same-named inner functions no longer collide when lifted**
 (2048 dogfood P3). Two inner fns sharing a source name within one
 top-level function — e.g. a `let rec go` in each branch of an `if` —
