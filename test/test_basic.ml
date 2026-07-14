@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.26" Version.v "0.1.26";
+  check "version is 0.1.27" Version.v "0.1.27";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5214,6 +5214,22 @@ let () =
      be written at all: read_stdin slurps everything by design. *)
   assert_contains "codegen C: read_line emits __lang_read_line"
     (vec_codegen_c "str_len (read_line ())") "__lang_read_line";
+  (* v0.1.27 (mlog dogfood P4): exactly-saturated calls to curried top-level
+     fns compile to a direct N-ary call. The curried chain allocated a
+     closure env in the default region PER CALL (through the region lock) —
+     measured as O(iterations) permanent memory in every multi-arg hot loop
+     (a byte-at-a-time line counter: 2.1 GB RSS over 8M lines before, 1.5 MB
+     constant after). Self-recursion through the twin also gets C-level
+     tail calls. *)
+  let c_src_direct =
+    vec_codegen_c
+      "let rec add_to = fn (a: int) -> fn (b: int) -> \
+         if b == 0 then a else add_to (a + 1) (b - 1); \
+       add_to 0 5" in
+  assert_contains "uncurry: direct N-ary twin is emitted"
+    c_src_direct "static int add_to__direct(int a, int b)";
+  assert_contains "uncurry: saturated self-recursion calls the direct twin"
+    c_src_direct "add_to__direct(__da0, __da1)";
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")

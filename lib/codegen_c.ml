@@ -45,6 +45,30 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* v0.1.27 (mlog dogfood P4): curried top-level fns whose exactly-saturated
+   call sites compile to a direct N-ary C call. Level-by-level application
+   allocates a closure env in the default region PER CALL (through the
+   region lock) — measured as O(iterations) permanent memory in every
+   multi-arg hot loop. For each eligible `f = fn p1 -> .. -> fn pN -> body`
+   (N >= 2, fully concrete types) we also emit `f__direct(p1, .., pN)`
+   holding the body, and saturated calls — including self-recursion, which
+   then benefits from C-level tail calls — dispatch straight to it.
+   Partial applications and first-class uses keep the curried chain. *)
+type direct_fn_info = {
+  d_params : (string * Ast.ty) list;
+  d_body   : Ast.expr;
+  d_ret    : Ast.ty;
+}
+let direct_fns : (string, direct_fn_info) Hashtbl.t = Hashtbl.create 16
+
+let rec ty_concrete (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> false
+  | Ast.TyArrow (a, b) -> ty_concrete a && ty_concrete b
+  | Ast.TyTuple ts -> List.for_all ty_concrete ts
+  | Ast.TyCon (_, args) -> List.for_all ty_concrete args
+  | _ -> true
+
 (* Phase 30.2 (DEFERRED §1.10 fix): declare top-level non-fn let value names as
    file-scope C globals, initialized at the start of main. emit_expr Var "name"
    falls through to the usual c_safe_name path and references the file-scope
@@ -1659,6 +1683,43 @@ let rec emit_expr (e : Ast.expr) : string =
         | Ast.TyUnit -> Printf.sprintf "(%s, 0)" call_str
         | _ -> call_str)
      | None ->
+    (* v0.1.27 (mlog dogfood P4): exactly-saturated call to a curried
+       top-level fn — same spine collection as collect_extern above, but
+       against direct_fns. Guarded like the 1-arg direct-call path below
+       (local/captured shadowing, inner-lifted fns, multi-instantiation
+       fns fall through to the closure paths). *)
+    let collect_direct e0 =
+      let rec spine e' acc =
+        match e'.Ast.node with
+        | Ast.App (f', a) -> spine f' (a :: acc)
+        | Ast.Var n -> Some (n, acc)
+        | _ -> None
+      in
+      match spine e0 [] with
+      | Some (n, args)
+        when (match Hashtbl.find_opt direct_fns n with
+              | Some info -> List.length args = List.length info.d_params
+              | None -> false)
+             && not (Hashtbl.mem multi_inst_fns n)
+             && not (Hashtbl.mem inner_lifts n)
+             && not (List.mem_assoc n !current_var_types)
+             && not (List.mem_assoc n !current_env_subst) ->
+        Some (n, args)
+      | _ -> None
+    in
+    (match collect_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
+     | Some (n, args) ->
+       (* Statement-expr temporaries pin the interpreter's left-to-right
+          argument evaluation order (C argument order is unspecified). *)
+       let tmps =
+         List.mapi (fun i a ->
+           Printf.sprintf "__auto_type __da%d = %s;" i (emit_expr a)) args
+       in
+       Printf.sprintf "({ %s %s__direct(%s); })"
+         (String.concat " " tmps) (c_safe_name n)
+         (String.concat ", "
+            (List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args))
+     | None ->
     (match f.node with
      | Ast.Var "print" ->
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
@@ -2465,7 +2526,7 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Closure dispatch via the closure value's fn pointer + env. *)
        Printf.sprintf
          "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
-         (emit_expr f) (emit_expr arg)))
+         (emit_expr f) (emit_expr arg))))
   | Ast.Constr (raw_name, arg_opt) ->
     (* Phase 41 + 42: since alias_ctor also registers `Traffic.Red` in
        Typer.constructors, look up the qualified raw_name **first** (to
@@ -3354,6 +3415,27 @@ let emit_lifted_fn (f : lifted_fn) : string =
   in
   Printf.sprintf "%s %s(%s) {\n  return %s;\n}"
     (c_type_of f.l_return_ty) f.l_name params body_c
+
+(* v0.1.27: the direct N-ary twin of a curried top-level fn. The innermost
+   body is emitted a second time with every level's param as a plain C
+   parameter — no closure envs, no region-lock traffic. Anonymous lambdas
+   inside the body are queued again under fresh names (mild code-size cost);
+   inner-lifted fns are only *dispatched* here, never re-lifted. *)
+let emit_direct_fn (name : string) (info : direct_fn_info) : string =
+  set_inner_lifts_for_host name;
+  let params_c = String.concat ", " (List.map format_param info.d_params) in
+  let body_c =
+    with_var_types info.d_params (fun () ->
+      with_expected_ty info.d_ret (fun () -> emit_expr info.d_body))
+  in
+  Printf.sprintf "static %s %s__direct(%s) {\n  return %s;\n}"
+    (c_type_of info.d_ret) (c_safe_name name) params_c body_c
+
+let emit_direct_fn_forward_decl (name : string) (info : direct_fn_info) : string =
+  Printf.sprintf "static %s %s__direct(%s);"
+    (c_type_of info.d_ret) (c_safe_name name)
+    (String.concat ", "
+       (List.map (fun (_, t) -> c_type_of t) info.d_params))
 
 let emit_fn_forward_decl (f : fn_decl) : string =
   Printf.sprintf "%s %s(%s);"
@@ -6706,6 +6788,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      toplevel_fn_names branch and get dispatched (then mangled by
      multi_inst_fns lookup). *)
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  (* v0.1.27 (mlog dogfood P4): find curried top-level fns eligible for the
+     direct N-ary calling convention. The Fun chain is peeled by the
+     RESOLVED type (so a poly fn resolved to a single concrete instance
+     qualifies too); anything with an unresolved type is skipped. Must run
+     before any emit_expr call so every call site sees the table. *)
+  Hashtbl.reset direct_fns;
+  List.iter (fun f ->
+    let rec peel params body ty =
+      match body.Ast.node, Ast.walk ty with
+      | Ast.Fun (p, _, inner), Ast.TyArrow (pt, rt) ->
+        peel ((p, Ast.walk pt) :: params) inner rt
+      | _ -> (List.rev params, body, Ast.walk ty)
+    in
+    let params, body, ret = peel [(f.param, f.param_ty)] f.body f.return_ty in
+    if List.length params >= 2
+       && List.for_all (fun (_, t) -> ty_concrete t) params
+       && ty_concrete ret
+    then Hashtbl.replace direct_fns f.name
+           { d_params = params; d_body = body; d_ret = ret }
+  ) fns;
   (* Polymorphic variant monomorphization: collect concrete
      instantiations from the AST + fn signatures, then emit specialized
      typedefs (forward+ptr for recursive instances, full struct for
@@ -6986,6 +7088,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let fn_defs_main =
     List.map emit_lifted_fn inner_fns
     @ List.map emit_fn fns
+    (* v0.1.27: direct N-ary twins, in fns order (deterministic output —
+       the self-host fixpoint depends on byte-stable emission). *)
+    @ List.filter_map (fun f ->
+        match Hashtbl.find_opt direct_fns f.name with
+        | Some info -> Some (emit_direct_fn f.name info)
+        | None -> None) fns
   in
   (* Now emit the closure adapters that were registered during the
      above emissions. They might themselves emit more pending closures
@@ -7113,6 +7221,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let forward_decls =
     List.map emit_fn_forward_decl fns
+    @ List.filter_map (fun f ->
+        match Hashtbl.find_opt direct_fns f.name with
+        | Some info -> Some (emit_direct_fn_forward_decl f.name info)
+        | None -> None) fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
     @ closure_adapter_forward_decls
     @ closure_wrapper_forward_decls
