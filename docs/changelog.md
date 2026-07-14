@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.24 — 2026-07-14
+
+_Capability (mkv dogfood, T4 wire-protocol server): native TCP **server**
+primitives. `tcp_listen : int -> int` (socket + `SO_REUSEADDR` + bind +
+listen, returns the listening fd) and `tcp_accept : int -> int` (blocking
+accept, returns the client fd) join the existing `native_ffi_names`,
+emitted as `static` impls against the same flat arena + POSIX sockets that
+back `tcp_connect`/`tcp_read`/`tcp_write`. A Mere program can now be a TCP
+server, not just a client — the server-side mirror of the pg/redis client
+FFI. `SIGPIPE` is ignored so a client disconnecting mid-write drops the
+connection rather than the whole process. This is the missing capability
+behind a Redis-wire (RESP) key-value server; the earlier `http_serve` was
+HTTP-specific and single-connection._
+
+---
+
 ## v0.1.23 — 2026-07-14
 
 _Fix (docs site): the Mere SSG (`contrib/site/build.mere`) parsed its

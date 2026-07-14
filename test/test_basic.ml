@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.23" Version.v "0.1.23";
+  check "version is 0.1.24" Version.v "0.1.24";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5185,6 +5185,21 @@ let () =
     "static int bytes_from_hex_alloc(const char* hex)";
   assert_no_contains "native FFI: no leftover extern prototype for tcp_connect"
     c_src_tcp "extern int tcp_connect";
+  (* v0.1.24 (mkv dogfood, T4 wire-protocol server): the server-side mirror of
+     tcp_connect. tcp_listen (socket+bind+listen) and tcp_accept (blocking
+     accept) get native static impls so a Mere program can be a TCP server,
+     not just a client — reusing the same fd + arena tcp_read/tcp_write. *)
+  let c_src_srv =
+    vec_codegen_c
+      "extern fn tcp_listen: int -> int; \
+       extern fn tcp_accept: int -> int; \
+       let s = tcp_listen 7000 in tcp_accept s" in
+  assert_contains "native FFI: tcp_listen gets a static impl"
+    c_src_srv "static int tcp_listen(int port)";
+  assert_contains "native FFI: tcp_accept gets a static impl"
+    c_src_srv "static int tcp_accept(int srv)";
+  assert_no_contains "native FFI: no leftover extern prototype for tcp_listen"
+    c_src_srv "extern int tcp_listen";
   (* C-backend string-escape bug found while compiling pg.mere: a carriage
      return in a string literal was emitted raw into the C source (breaking
      the string), because escape_string handled \\n / \\t but not \\r. *)

@@ -4066,7 +4066,8 @@ let emit_closure_adapter (ce : closure_emission) : string =
    definition emitted here instead of an `extern` prototype — so
    `mere -c app.mere | clang` yields a self-contained native binary. *)
 let native_ffi_names =
-  [ "tcp_connect"; "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
+  [ "tcp_connect"; "tcp_listen"; "tcp_accept";
+    "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
     "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
@@ -4218,6 +4219,7 @@ let native_ffi_runtime =
       "#include <netdb.h>";
       "#include <sys/time.h>";
       "#include <stdint.h>";
+      "#include <signal.h>";
       "";
       "#define __MEM_CAP (16 * 1024 * 1024)";
       "static unsigned char __mem[__MEM_CAP];";
@@ -4274,6 +4276,25 @@ let native_ffi_runtime =
       "  if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) { close(fd); freeaddrinfo(res); return -1; }";
       "  freeaddrinfo(res); return fd;";
       "}";
+      "/* tcp_listen: bind a TCP listener on `port` (all interfaces) and return";
+      "   the listening fd, or -1 on failure. SO_REUSEADDR so a restart after";
+      "   a crash does not hit TIME_WAIT. SIGPIPE ignored so a client that";
+      "   disconnects mid-write kills the connection, not the whole server. */";
+      "static int tcp_listen(int port) {";
+      "  signal(SIGPIPE, SIG_IGN);";
+      "  int srv = socket(AF_INET, SOCK_STREAM, 0);";
+      "  if (srv < 0) return -1;";
+      "  int one = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);";
+      "  struct sockaddr_in addr; memset(&addr, 0, sizeof addr);";
+      "  addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY;";
+      "  addr.sin_port = htons((unsigned short)port);";
+      "  if (bind(srv, (struct sockaddr*)&addr, sizeof addr) != 0) { close(srv); return -1; }";
+      "  if (listen(srv, 128) != 0) { close(srv); return -1; }";
+      "  return srv;";
+      "}";
+      "/* tcp_accept: block until a client connects to the listening fd, and";
+      "   return the connected client fd, or -1 on failure. */";
+      "static int tcp_accept(int srv) { return (int)accept(srv, 0, 0); }";
       "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }";
       "static int tcp_read(int fd, int p, int cap) { return (int)read(fd, __mem + p, (size_t)cap); }";
       "static int tcp_close(int fd) { close(fd); return 0; }";
