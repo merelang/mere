@@ -708,14 +708,19 @@ let rec strip_flags = fn xs ->
 
 let positional = strip_flags argv;
 
+// v0.1.12+ (`args()` no longer prepends the script path): the first
+// positional arg is the input dir, the second is the output dir.
+// (Before the args() consistency fix, argv[0] was the script path, so
+// this used to skip one extra element — which silently made input_dir
+// resolve to "_site" and the SSG convert 0 markdown pages.)
 let input_dir =
   match positional with
-  | Cons (_, Cons (d, _)) -> d
+  | Cons (d, _) -> d
   | _ -> "docs";
 
 let output_dir =
   match positional with
-  | Cons (_, Cons (_, Cons (d, _))) -> d
+  | Cons (_, Cons (d, _)) -> d
   | _ -> "_site";
 
 let mode_tag = if watch_mode then " [watch]"
