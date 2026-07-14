@@ -32,3 +32,11 @@ extern fn dom_on_click: JsRef -> (unit -> unit) -> unit;
 // and is only valid until the next `dom_input_value` call — copy via
 // `str_*` builtins if you need to retain it past that point.
 extern fn dom_input_value: JsRef -> str;
+
+// v0.1.22 (2048 dogfood): a global keydown handler. The closure receives
+// the pressed key's name (e.g. "ArrowLeft", "a", "Enter") as a str, read
+// from a host scratch buffer valid only for that call — copy it if you
+// need to keep it. Wires `document.addEventListener("keydown", ...)`, so
+// no element handle is needed. The browser-side counterpart to native
+// `read_key` (mrog): input for the frontend FFI.
+extern fn dom_on_key: (str -> unit) -> unit;
