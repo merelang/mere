@@ -4,6 +4,19 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.26 — 2026-07-14
+
+_Capability (mlog dogfood P1): **`read_line` on the C backend**. It was
+interpreter-only — the sixth member of that family (print_err /
+file_exists / print_no_nl / random_int / file_size) — so a native
+streaming line processor could not be written at all (`read_stdin`
+slurps the whole input by design). `__lang_read_line` reads one stdin
+line without the trailing newline, `""` on EOF, matching the
+interpreter. Found by measuring memory behaviour of line-at-a-time
+processing for the constant-memory streaming question._
+
+---
+
 ## v0.1.25 — 2026-07-14
 
 _Fix (mkv dogfood, long-running processes): **regions grow instead of
