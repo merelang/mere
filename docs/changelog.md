@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.30 — 2026-07-15
+
+_Memory model (stage 1 of the per-request-reclamation plan):
+**copy-on-store — containers own their contents**. `map_set` deep-copies
+the key and value into the map's own region, and `vec_push` / `vec_set`
+copy the element, via per-type `__mcopy_<tag>` functions specialized the
+same way the derive family (show / json / == / cmp) is: strings copy
+their bytes, tuples / records / variants copy structurally (cons cells
+and variant nodes re-allocate in the container's region), scalars and
+closures pass through, and nested containers copy as pointers (mutable
+identity and aliasing preserved — they own their own storage). Strings
+are immutable, so the copies are semantically unobservable; the point is
+lifetime: a stored value must not dangle when the storer's allocation
+scope is later reclaimed. This is the prerequisite for scoped string
+allocation (`region R { }` capturing str/cons allocations — the next
+stage), which is what finally makes long-running servers' per-request
+memory reclaimable. OwnedVec / StrBuf / Channel are deferred to that
+stage. Today's cost: one copy per store; today's benefit: none visible —
+by design._
+
+---
+
 ## v0.1.29 — 2026-07-15
 
 _Soundness (mkv dogfood P2): **sharing a mutable container across threads
