@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2048 in Mere — a browser game</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .game-app {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 2rem;
+      margin: 2rem 0;
+      background: #f7fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+    #board {
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 1.6rem;
+      line-height: 1.4;
+      font-variant-numeric: tabular-nums;
+      color: #2d3748;
+      background: #edf2f7;
+      padding: 1.2rem 1.6rem;
+      border-radius: 6px;
+      margin: 0;
+      white-space: pre;
+    }
+    .hint { color: #718096; font-size: 0.9em; }
+    .source-block {
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 1em;
+      border-radius: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 0.85em;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="g2048.html" class="active">2048</a>
+      <a href="echo.html">echo</a>
+      <a href="wordcount.html">wordcount</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+    </div>
+  </nav>
+
+  <main>
+    <h1>2048 — written in Mere</h1>
+
+    <p>
+      A tiny <a href="https://en.wikipedia.org/wiki/2048_(video_game)">2048</a>
+      compiled from <a href="https://github.com/merelang/mere">Mere</a> to
+      WebAssembly. The board is drawn as text into a <code>&lt;pre&gt;</code>
+      via <code>dom_set_text</code>, and the arrow keys drive it through
+      <code>dom_on_key</code> — a keyboard binding added to
+      <code>contrib/dom</code> for this game. Turn-based, so no game loop or
+      timer is needed; each keypress runs one move in Mere.
+    </p>
+
+    <p class="hint">
+      Use the <strong>arrow keys</strong> to slide tiles. Merge equal tiles
+      to reach <strong>2048</strong>. (Click the board first if the keys
+      don't respond.)
+    </p>
+
+    <div class="game-app">
+      <pre id="board" tabindex="0">loading…</pre>
+    </div>
+
+    <h2>What's happening</h2>
+    <ol>
+      <li>
+        <code>mere -w g2048.mere</code> lowers the game — a 16-slot
+        <code>vec</code> board, the slide/merge row logic, a tiny LCG for
+        tile spawns — to WebAssembly.
+      </li>
+      <li>
+        <code>dom_on_key</code> registers a global <code>keydown</code>
+        listener; the pressed key name (<code>"ArrowLeft"</code>, …) is
+        passed to a Mere closure that applies one move, spawns a tile if the
+        board changed, and redraws the <code>&lt;pre&gt;</code>.
+      </li>
+      <li>
+        No randomness FFI is used: tile spawns come from a pure-Mere
+        linear-congruential generator seeded from a mutable <code>vec</code>
+        slot, so the game is fully self-contained in the Wasm module.
+      </li>
+    </ol>
+  </main>
+  <footer>frontend FFI dogfood — arrow-key input via <code>dom_on_key</code></footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./g2048.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();
+
+    // Keep the arrow keys with the game: focus the board so scrolling
+    // doesn't steal them (dom_on_key also calls preventDefault on Arrow*).
+    const board = document.getElementById("board");
+    board.focus();
+    board.addEventListener("click", () => board.focus());
+  </script>
+</body>
+</html>
