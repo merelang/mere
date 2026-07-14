@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.24" Version.v "0.1.24";
+  check "version is 0.1.25" Version.v "0.1.25";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5200,6 +5200,18 @@ let () =
     c_src_srv "static int tcp_accept(int srv)";
   assert_no_contains "native FFI: no leftover extern prototype for tcp_listen"
     c_src_srv "extern int tcp_listen";
+  (* v0.1.25 (mkv dogfood, P3): a long-running server exhausted the old
+     fixed-cap region (4MB, abort on overflow) after a few thousand
+     requests. Regions now grow by chaining geometrically larger blocks
+     (pointers stay valid — blocks never move), and the byte arena's bump
+     pointer is mutex-guarded + bounds-checked (it is shared across
+     spawned threads and previously raced / silently overflowed). *)
+  assert_contains "region runtime: grows by chaining blocks (no OOM abort)"
+    (vec_codegen_c "1") "__lang_region_add_block";
+  assert_contains "native FFI: mem_alloc goes through the locked bump"
+    (vec_codegen_c
+       "extern fn mem_alloc: int -> int; mem_alloc 8")
+    "static int mem_alloc(int n) { return __mem_bump(";
   (* C-backend string-escape bug found while compiling pg.mere: a carriage
      return in a string literal was emitted raw into the C source (breaking
      the string), because escape_string handled \\n / \\t but not \\r. *)

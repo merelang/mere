@@ -4224,10 +4224,26 @@ let native_ffi_runtime =
       "#define __MEM_CAP (16 * 1024 * 1024)";
       "static unsigned char __mem[__MEM_CAP];";
       "static int __mem_top = 8;  /* leave low offsets as a null-ish guard */";
+      "/* The bump pointer is shared across spawned threads (v0.1.25):";
+      "   guard it, and fail loudly on exhaustion instead of silently";
+      "   corrupting whatever lives past the end of the arena. */";
+      "static pthread_mutex_t __mem_lock = PTHREAD_MUTEX_INITIALIZER;";
       "";
-      "static int mem_alloc(int n) {";
-      "  int p = __mem_top; __mem_top += (n <= 0 ? 1 : n); return p;";
+      "static int __mem_bump(int n) {";
+      "  pthread_mutex_lock(&__mem_lock);";
+      "  int p = __mem_top;";
+      "  if (p + n > __MEM_CAP) {";
+      "    fprintf(stderr, \"mem_alloc: byte arena exhausted (%d bytes requested; \"";
+      "                    \"the arena is a bump allocator with no free — reuse \"";
+      "                    \"buffers instead of allocating per request)\\n\", n);";
+      "    abort();";
+      "  }";
+      "  __mem_top += n;";
+      "  pthread_mutex_unlock(&__mem_lock);";
+      "  return p;";
       "}";
+      "";
+      "static int mem_alloc(int n) { return __mem_bump(n <= 0 ? 1 : n); }";
       "static int mem_set_u8(int p, int off, int b) { __mem[p + off] = (unsigned char)b; return 0; }";
       "static int mem_get_u8(int p, int off) { return __mem[p + off]; }";
       "static int mem_set_u32be(int p, int off, int v) {";
@@ -4250,8 +4266,8 @@ let native_ffi_runtime =
       "/* str_ptr: place a Mere str's bytes in the arena, return the offset";
       "   (Wasm gets this for free since a str is already an offset there). */";
       "static int str_ptr(const char* s) {";
-      "  int n = (int)strlen(s); int p = __mem_top;";
-      "  memcpy(__mem + p, s, n); __mem[p + n] = 0; __mem_top += n + 1; return p;";
+      "  int n = (int)strlen(s); int p = __mem_bump(n + 1);";
+      "  memcpy(__mem + p, s, n); __mem[p + n] = 0; return p;";
       "}";
       "/* mem_copy_str: copy a NUL-terminated str into __mem[dst+off], return len. */";
       "static int mem_copy_str(int dst, int off, const char* s) {";
@@ -4846,16 +4862,37 @@ let str_concat_helper =
    typer ensures no `&R T` value leaves the region's scope. *)
 let region_runtime_helpers =
   String.concat "\n"
-    [ "typedef struct {";
-      "  char* base;";
+    [ "/* A region is a chain of bump-allocated blocks. When the current";
+      "   block fills, a new (geometrically larger) block is chained on";
+      "   instead of aborting — v0.1.25, found by a long-running server";
+      "   (mkv) whose per-command allocations exhausted the old fixed-cap";
+      "   region after a few thousand requests. Blocks never move, so";
+      "   pointers into earlier blocks stay valid across growth. */";
+      "typedef struct __lang_region_block {";
+      "  struct __lang_region_block* prev;";
+      "  size_t pad;  /* keep the data that follows 16-aligned */";
+      "} __lang_region_block;";
+      "";
+      "typedef struct {";
+      "  char* base;               /* current block: data start */";
       "  char* top;";
-      "  size_t cap;";
+      "  size_t cap;               /* current block capacity */";
+      "  __lang_region_block* blocks;  /* chain of every block, for free */";
       "} __lang_region;";
       "";
-      "static void __lang_region_init(__lang_region* r, size_t cap) {";
-      "  r->base = (char*) malloc(cap);";
+      "static void __lang_region_add_block(__lang_region* r, size_t cap) {";
+      "  __lang_region_block* b =";
+      "    (__lang_region_block*) malloc(sizeof(__lang_region_block) + cap);";
+      "  b->prev = r->blocks;";
+      "  r->blocks = b;";
+      "  r->base = (char*)(b + 1);";
       "  r->top = r->base;";
       "  r->cap = cap;";
+      "}";
+      "";
+      "static void __lang_region_init(__lang_region* r, size_t cap) {";
+      "  r->blocks = NULL;";
+      "  __lang_region_add_block(r, cap);";
       "}";
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
@@ -4872,7 +4909,9 @@ let region_runtime_helpers =
       "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "  size_t aligned = (n + 7) & ~((size_t)7);";
       "  if (r->top + aligned > r->base + r->cap) {";
-      "    fprintf(stderr, \"region OOM\\n\"); abort();";
+      "    size_t ncap = r->cap * 2;";
+      "    while (ncap < aligned) ncap *= 2;";
+      "    __lang_region_add_block(r, ncap);";
       "  }";
       "  void* p = r->top;";
       "  r->top += aligned;";
@@ -4881,7 +4920,13 @@ let region_runtime_helpers =
       "}";
       "";
       "static void __lang_region_free(__lang_region* r) {";
-      "  free(r->base);";
+      "  __lang_region_block* b = r->blocks;";
+      "  while (b) {";
+      "    __lang_region_block* prev = b->prev;";
+      "    free(b);";
+      "    b = prev;";
+      "  }";
+      "  r->blocks = NULL;";
       "}" ]
 
 (* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan
