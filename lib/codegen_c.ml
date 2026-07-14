@@ -1853,6 +1853,11 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "read_stdin" ->
        (* Native CLI: read all of stdin as a str. Unit arg has no effect. *)
        Printf.sprintf "((void)(%s), __lang_read_stdin())" (emit_expr arg)
+     | Ast.Var "read_line" ->
+       (* v0.1.26 (mlog dogfood): one stdin line at a time — the streaming
+          counterpart of read_stdin. Was interpreter-only until a
+          constant-memory line processor needed it natively. *)
+       Printf.sprintf "((void)(%s), __lang_read_line())" (emit_expr arg)
      | Ast.Var "run" ->
        (* v0.1.13 (mk dogfood): run a command line, return its exit code. *)
        Printf.sprintf "__lang_run(%s)" (emit_expr arg)
@@ -4686,6 +4691,23 @@ let str_concat_helper =
       "  while ((r = fread(tmp + n, 1, cap - n, stdin)) > 0) {";
       "    n += r;";
       "    if (n == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
+      "  }";
+      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, n + 1);";
+      "  memcpy(buf, tmp, n); buf[n] = '\\0';";
+      "  free(tmp);";
+      "  return buf;";
+      "}";
+      "static const char* __lang_read_line(void) {";
+      "  /* One stdin line, without the trailing newline; \"\" on EOF (matching";
+      "     the interpreter's input_line + End_of_file catch). A final line";
+      "     with no trailing newline is returned as-is. The result lands in";
+      "     the default region like every other native string. */";
+      "  size_t cap = 256, n = 0;";
+      "  char* tmp = (char*)malloc(cap);";
+      "  int c;";
+      "  while ((c = fgetc(stdin)) != EOF && c != '\\n') {";
+      "    if (n + 1 == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
+      "    tmp[n++] = (char)c;";
       "  }";
       "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, n + 1);";
       "  memcpy(buf, tmp, n); buf[n] = '\\0';";

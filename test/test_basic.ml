@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.25" Version.v "0.1.25";
+  check "version is 0.1.26" Version.v "0.1.26";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5208,6 +5208,12 @@ let () =
      spawned threads and previously raced / silently overflowed). *)
   assert_contains "region runtime: grows by chaining blocks (no OOM abort)"
     (vec_codegen_c "1") "__lang_region_add_block";
+  (* v0.1.26 (mlog dogfood P1): read_line was interpreter-only — the sixth
+     member of that family (print_err / file_exists / print_no_nl /
+     random_int / file_size). A native streaming line processor could not
+     be written at all: read_stdin slurps everything by design. *)
+  assert_contains "codegen C: read_line emits __lang_read_line"
+    (vec_codegen_c "str_len (read_line ())") "__lang_read_line";
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")
