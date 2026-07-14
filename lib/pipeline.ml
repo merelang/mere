@@ -24,9 +24,13 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
     | None -> Parser.parse_program ~search_paths tokens
   in
   (* Q-012 Phase 32: lower saturated `par_map f xs` to spawn + channel +
-     list_map so it works on every backend, not just the interpreter. *)
-  Ast.lower_par_map_program
-    { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }
+     list_map so it works on every backend, not just the interpreter.
+     2048-dogfood P3: then α-rename nested fn bindings to unique names so
+     same-named inner fns (e.g. a `let rec go` per if-branch) don't collide
+     in the backends' name-keyed inner-fn lift resolution. *)
+  Ast.uniquify_inner_fns_program
+    (Ast.lower_par_map_program
+      { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })
 
 let parse_only s =
   (* Phase 21.2: parse_only is used by pretty-print / AST-shape tests

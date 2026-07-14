@@ -452,6 +452,97 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
   in
   go [] e
 
+(* 2048-dogfood P3: α-rename nested (inner) fn bindings to globally-unique
+   names, so no two inner fns ever share a source name. Inner-fn lifting
+   (in each backend's codegen) keys its name -> lifted-fn resolution map by
+   the source name, so two same-named inner fns within one host function —
+   e.g. a `let rec go` in each branch of an `if` — collided: the second
+   overwrote the first, and both call sites resolved to the wrong one
+   (interp was correct; C and Wasm both mis-executed). Uniquifying here, in
+   one shared pre-pass, fixes every backend at once.
+
+   Only NESTED bindings are renamed — top-level decl names live in
+   `Top_let` / `Top_let_rec` and are never walked here, so cross-decl
+   references and `main` are untouched. Uses `rename_free_vars` (which is
+   shadowing-aware) to rewrite references within each binding's scope. *)
+let uq_counter = ref 0
+(* Rename ONLY on collision: within one host (top-level decl value), the
+   FIRST inner fn to use a name keeps it; a later inner fn reusing that name
+   is α-renamed to a fresh one. This is the minimum that disambiguates the
+   lift map — single-use inner names (the common case, and what most tests
+   assert on) are left untouched, and nothing leaks into pretty-printing of
+   collision-free code. `seen` is a per-host set of already-taken names. *)
+let uniquify_inner_fns_expr (e0 : expr) : expr =
+  let seen : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let is_fun ex = match ex.node with Fun _ -> true | _ -> false in
+  (* claim a name for an inner fn: keep it if free, else return a fresh one *)
+  let claim n =
+    if Hashtbl.mem seen n then begin
+      incr uq_counter; Some (n ^ "_uq" ^ string_of_int !uq_counter)
+    end else begin Hashtbl.add seen n (); None end
+  in
+  let rec uq (e : expr) : expr =
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Neg a -> { e with node = Neg (uq a) }
+    | Bin (op, a, b) -> { e with node = Bin (op, uq a, uq b) }
+    | Cmp (op, a, b) -> { e with node = Cmp (op, uq a, uq b) }
+    | Logic (op, a, b) -> { e with node = Logic (op, uq a, uq b) }
+    | If (c, t, el) -> { e with node = If (uq c, uq t, uq el) }
+    | App (f, a) -> { e with node = App (uq f, uq a) }
+    | Annot (i, t) -> { e with node = Annot (uq i, t) }
+    | Tuple es -> { e with node = Tuple (List.map uq es) }
+    | Fun (p, t, body) -> { e with node = Fun (p, t, uq body) }
+    | Match (s, arms) ->
+      let arms' = List.map (fun (p, g, b) -> (p, Option.map uq g, uq b)) arms in
+      { e with node = Match (uq s, arms') }
+    | With (n, v, b) -> { e with node = With (n, uq v, uq b) }
+    | Region_block (r, b) -> { e with node = Region_block (r, uq b) }
+    | Ref (m, r, a) -> { e with node = Ref (m, r, uq a) }
+    | Constr (c, ao) -> { e with node = Constr (c, Option.map uq ao) }
+    | Record_lit (n, fs) ->
+      { e with node = Record_lit (n, List.map (fun (f, x) -> (f, uq x)) fs) }
+    | Field_get (i, f) -> { e with node = Field_get (uq i, f) }
+    | Record_update (b, us) ->
+      { e with node = Record_update (uq b, List.map (fun (f, x) -> (f, uq x)) us) }
+    (* nested fn-valued let (non-recursive: name not in scope in value) *)
+    | Let ({ pnode = P_var name; _ } as pat, v, body) when is_fun v ->
+      let v' = uq v in
+      (match claim name with
+       | None -> { e with node = Let (pat, v', uq body) }
+       | Some name' ->
+         let body' =
+           uq (rename_free_vars (fun n -> if n = name then Some name' else None) body) in
+         { e with node = Let ({ pat with pnode = P_var name' }, v', body') })
+    | Let (pat, v, body) -> { e with node = Let (pat, uq v, uq body) }
+    (* nested recursive fn group: names are in scope in the values + body *)
+    | Let_rec (bindings, body) ->
+      let renames =
+        List.filter_map (fun (n, _) ->
+          match claim n with Some n' -> Some (n, n') | None -> None) bindings in
+      if renames = [] then
+        { e with node = Let_rec (List.map (fun (n, v) -> (n, uq v)) bindings, uq body) }
+      else
+        let lookup n = List.assoc_opt n renames in
+        let bindings' =
+          List.map (fun (n, v) ->
+            let n' = match List.assoc_opt n renames with Some x -> x | None -> n in
+            (n', uq (rename_free_vars lookup v))) bindings in
+        let body' = uq (rename_free_vars lookup body) in
+        { e with node = Let_rec (bindings', body') }
+  in
+  uq e0
+
+let uniquify_inner_fns_program (prog : program) : program =
+  let decls =
+    List.map (function
+      | Top_let (p, e) -> Top_let (p, uniquify_inner_fns_expr e)
+      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, e) -> (n, uniquify_inner_fns_expr e)) bs)
+      | d -> d)
+      prog.decls
+  in
+  { decls; main = uniquify_inner_fns_expr prog.main }
+
 (* Q-012 Phase 32: lower a saturated `par_map f xs` into spawn + channel +
    list_map, so it works on every backend (spawn / channel / list_map all
    codegen already) without a par_map-specific runtime. Expansion:
