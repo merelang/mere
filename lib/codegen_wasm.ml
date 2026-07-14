@@ -1785,28 +1785,49 @@ let rec emit_expr (e : Ast.expr) : unit =
      value is an i32 pointer to its { env_offset, fn_idx } record in the
      (shared) linear memory; the host reads it and runs the closure on a
      worker instance that shares the same module + memory. Returns the
-     thread id (i32). *)
-  | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
+     thread id (i32).
+
+     2048-dogfood P2 (port of codegen_c's mk-P2 `join` fix, dd17b8a): only
+     treat these names as the concurrency builtins when the program hasn't
+     rebound them — a user `let spawn = ...` (e.g. a game's tile spawner)
+     must fall through to ordinary application, or the module silently
+     turns into a threaded one (shared-memory import + $mere_spawn). *)
+  | Ast.App ({ node = Ast.Var "spawn"; _ }, clos)
+    when not (List.mem_assoc "spawn" !locals
+              || Hashtbl.mem toplevel_fn_names "spawn"
+              || Hashtbl.mem inner_lifts_wasm "spawn") ->
     uses_threads := true;
     emit_expr clos;
     emit_instr "call $mere_spawn"
-  | Ast.App ({ node = Ast.Var "join"; _ }, h) ->
+  | Ast.App ({ node = Ast.Var "join"; _ }, h)
+    when not (List.mem_assoc "join" !locals
+              || Hashtbl.mem toplevel_fn_names "join"
+              || Hashtbl.mem inner_lifts_wasm "join") ->
     uses_threads := true;
     emit_expr h;
     emit_instr "call $mere_join"  (* returns i32 0 = unit *)
   (* Q-012: channels as host imports over the shared memory (the host does
      the atomic mutex/cond via JS Atomics on the shared buffer). Elements are
      i32 (Mere's Wasm value width). *)
-  | Ast.App ({ node = Ast.Var "channel_new"; _ }, arg) ->
+  | Ast.App ({ node = Ast.Var "channel_new"; _ }, arg)
+    when not (List.mem_assoc "channel_new" !locals
+              || Hashtbl.mem toplevel_fn_names "channel_new"
+              || Hashtbl.mem inner_lifts_wasm "channel_new") ->
     uses_threads := true;
     emit_expr arg;                (* unit; consumed by the import *)
     emit_instr "call $mere_channel_new"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e); _ }, v_e) ->
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e); _ }, v_e)
+    when not (List.mem_assoc "channel_send" !locals
+              || Hashtbl.mem toplevel_fn_names "channel_send"
+              || Hashtbl.mem inner_lifts_wasm "channel_send") ->
     uses_threads := true;
     emit_expr ch_e;
     emit_expr v_e;
     emit_instr "call $mere_channel_send"  (* returns i32 0 = unit *)
-  | Ast.App ({ node = Ast.Var "channel_recv"; _ }, ch_e) ->
+  | Ast.App ({ node = Ast.Var "channel_recv"; _ }, ch_e)
+    when not (List.mem_assoc "channel_recv" !locals
+              || Hashtbl.mem toplevel_fn_names "channel_recv"
+              || Hashtbl.mem inner_lifts_wasm "channel_recv") ->
     uses_threads := true;
     emit_expr ch_e;
     emit_instr "call $mere_channel_recv"
