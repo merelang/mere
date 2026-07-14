@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.22 — 2026-07-14
+
+**Wasm backend: `spawn` / `join` / `channel_*` now respect shadowing**
+(2048 dogfood P2). A user binding named `spawn` — a game's tile spawner —
+was dispatched to the *concurrency* builtin, silently turning the module
+into a threaded one (shared-memory import + `$mere_spawn`), which the
+plain browser host rejects. The same bug family the C backend fixed for
+`join` in the mk dogfood (dd17b8a): the dispatch matched the name without
+asking whether it was rebound. All five concurrency dispatches now check
+the local scope / top-level fns / inner-lifted fns first, so a shadowed
+name falls through to ordinary application while genuine `spawn` still
+lowers to `$mere_spawn`.
+
+Also in the frontend FFI (no compiler change): `contrib/dom` gained
+`dom_on_key : (str -> unit) -> unit` — a global keydown listener passing
+the key name to a Mere closure; the browser counterpart to native
+`read_key`.
+
+2067 tests.
+
+---
+
 ## v0.1.21 — 2026-07-14
 
 **`file_size` — a binary file's true byte length** (mwasm dogfood P1).

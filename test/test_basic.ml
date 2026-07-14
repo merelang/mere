@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.21" Version.v "0.1.21";
+  check "version is 0.1.22" Version.v "0.1.22";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3860,6 +3860,15 @@ let () =
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
     Codegen_wasm.emit_program ~main_ty prog
   in
+  (* 2048 dogfood P2: a user-bound `spawn` must NOT dispatch to the
+     concurrency builtin (which would drag in shared memory + $mere_spawn).
+     Port of the C backend's mk-P2 `join` shadowing fix. *)
+  assert_no_contains "wasm: shadowed spawn stays an ordinary call"
+    (wasm_with_decls "let spawn = fn (n: int) -> n * 2; spawn 21")
+    "mere_spawn";
+  assert_contains "wasm: genuine spawn still lowers to $mere_spawn"
+    (wasm_with_decls "let cw = fn (u: unit) -> print \"x\" in let h = spawn cw in join h")
+    "mere_spawn";
   assert_contains "wasm: emits (module"
     (wasm "42") "(module";
   assert_contains "wasm: exports main with i32 result"
