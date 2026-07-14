@@ -1878,6 +1878,9 @@ let rec emit_expr (e : Ast.expr) : string =
        (* v0.1.15 (mk dogfood P3): whether a path exists (guards file_mtime,
           which raises on a missing path). *)
        Printf.sprintf "__lang_file_exists(%s)" (emit_expr arg)
+     | Ast.Var "file_size" ->
+       (* v0.1.21 (mwasm dogfood P1): true byte length via stat. *)
+       Printf.sprintf "__lang_file_size(%s)" (emit_expr arg)
      | Ast.Var "file_mtime" ->
        (* Phase 44.6: return stat(path).st_mtime as float (seconds) *)
        Printf.sprintf "__lang_file_mtime(%s)" (emit_expr arg)
@@ -4729,6 +4732,12 @@ let str_concat_helper =
       "  struct stat st;";
       "  if (stat(path, &st) != 0) __lang_fail_impl(path);";
       "  return (double)st.st_mtime;";
+      "}";
+      (* v0.1.21 (mwasm dogfood P1): true byte length via stat. *)
+      "static int __lang_file_size(const char* path) {";
+      "  struct stat st;";
+      "  if (stat(path, &st) != 0) __lang_fail_impl(path);";
+      "  return (int)st.st_size;";
       "}";
       (* v0.1.15 (mk dogfood P3): file_exists — stat succeeds. *)
       "static int __lang_file_exists(const char* path) {";

@@ -1282,6 +1282,9 @@ let initial_env : env =
     ("tty_raw",     mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("tty_restore", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("read_key",    mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    (* v0.1.21 (mwasm dogfood): a binary file's true byte length (stat).
+       Native str_len is strlen and lies about NUL-ful buffers. *)
+    ("file_size",   mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("time",        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyFloat)));
     ("exit",        exit_scheme);
     ("int_max",     mono Ast.TyInt);

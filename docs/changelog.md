@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.21 — 2026-07-14
+
+**`file_size` — a binary file's true byte length** (mwasm dogfood P1).
+`read_file` is binary-safe (the buffer holds every byte and `char_at` /
+`ord` index past NULs correctly, on interp *and* C native), but `str_len`
+is `strlen` on the C backend and stops at the leading NUL — so a `.wasm`
+(magic `\0asm`) reported length 0, and a binary walk couldn't bound its
+loop. Added `file_size : str -> int` (stat's `st_size`, next to
+`file_mtime`), on interp and C. With `(buffer, size)` carried explicitly,
+the NUL-safe `char_at` / `ord` / `substring` make binary parsing
+expressible — no dedicated bytes type needed yet. Driving app: `mwasm`, a
+WASM binary inspector that reads the compiler's own output.
+
+2065 tests.
+
+---
+
 ## v0.1.20 — 2026-07-14
 
 **`random_int` now works on the C backend** (mrog dogfood P3). The game's
