@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.28" Version.v "0.1.28";
+  check "version is 0.1.29" Version.v "0.1.29";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -10105,6 +10105,30 @@ let () =
         let lg = MkLogger 0 in \
         let _ = spawn (fn () -> let _ = lg in ()) in \
         ()") "()";
+  (* v0.1.29 (mkv dogfood P2): region-bound mutable containers are neither
+     Send nor Sync — their runtimes are lock-free, so a shared Map/Vec
+     across spawn is a data race. It previously compiled (the region
+     marker is a bare TyVar, judged optimistically) and lost concurrent
+     writes in a real RESP server. Share by communicating instead. *)
+  check_raises_containing "spawn: capturing a shared Map is rejected"
+    "cannot capture"
+    (fun () -> Pipeline.process
+       "let m = map_new () in \
+        let _ = map_set m \"a\" 1 in \
+        let _ = spawn (fn () -> let _ = map_set m \"b\" 2 in ()) in \
+        0");
+  check_raises_containing "spawn: capturing a shared Vec is rejected"
+    "cannot capture"
+    (fun () -> Pipeline.process
+       "let v = vec_new () in \
+        let _ = vec_push v 1 in \
+        let _ = spawn (fn () -> let _ = vec_push v 2 in ()) in \
+        0");
+  check "spawn: sharing a Channel (Send+Sync) is still accepted"
+    (Pipeline.process
+       "let ch = channel_new () in \
+        let _ = spawn (fn () -> channel_send ch 42) in \
+        channel_recv ch") "42";
   check_raises_containing "move: capturing a !Send (local) cap is rejected"
     "neither"
     (fun () -> Pipeline.process
