@@ -269,6 +269,17 @@ let builtin_run =
    no canonical (line) buffering; ISIG left on so Ctrl-C still works. *)
 let saved_termios : Unix.terminal_io option ref = ref None
 
+(* v0.1.21 (mwasm dogfood): true byte length of a file via stat. *)
+let builtin_file_size =
+  V_builtin ("file_size", fun v ->
+    match v with
+    | V_str path ->
+      (try V_int (Unix.stat path).Unix.st_size
+       with Unix.Unix_error (e, _, _) ->
+         raise (Eval_error (Loc.dummy,
+           "file_size: " ^ path ^ ": " ^ Unix.error_message e)))
+    | _ -> failwith "file_size: expected str")
+
 let builtin_tty_raw =
   V_builtin ("tty_raw", fun v ->
     match v with
@@ -1828,6 +1839,7 @@ let initial_env : env =
     ("tty_raw", ref builtin_tty_raw);
     ("tty_restore", ref builtin_tty_restore);
     ("read_key", ref builtin_read_key);
+    ("file_size", ref builtin_file_size);
     ("time", ref builtin_time);
     ("exit", ref builtin_exit);
     ("int_max", ref (V_int max_int));

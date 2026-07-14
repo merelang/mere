@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.20" Version.v "0.1.20";
+  check "version is 0.1.21" Version.v "0.1.21";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2800,6 +2800,8 @@ let () =
     (codegen "print_no_nl \"x\"") "fputs";
   assert_contains "codegen C: random_int emits __lang_random_int"
     (codegen "random_int 4") "__lang_random_int";
+  assert_contains "codegen C: file_size emits __lang_file_size"
+    (codegen "file_size \"/tmp/x\"") "__lang_file_size";
   (* v0.1.17 (mk dogfood P5): an inline lambda passed to par_map capturing a
      host-fn param gets inner-lifted; the spawn closure that calls it must
      carry the lifted fn's captures in ITS env (else the injected arg is an
