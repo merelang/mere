@@ -63,6 +63,13 @@ if [ -f "$SELFHOST_COMPILE_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w $SELFHOST_COMPILE_SRC -> playground/selfhost-compile.wat"
 fi
 
+# 2048 game — imports contrib/dom/dom.mere, so `-I .` for the import walk.
+G2048_SRC="contrib/site/playground/g2048.mere"
+if [ -f "$G2048_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w -I . "$G2048_SRC" > "$PLAYGROUND_OUT/g2048.wat"
+  echo "  mere -w -I . $G2048_SRC -> playground/g2048.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do

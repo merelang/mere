@@ -1,0 +1,142 @@
+// 2048 — a browser game written in Mere, compiled to Wasm.
+//
+// A dogfood of the C2 frontend FFI (contrib/dom): the board is drawn as
+// text into a <pre> via dom_set_text, and arrow keys drive it through
+// dom_on_key (added for this game). Turn-based, so no timer/rAF is
+// needed. Tile spawns use a tiny pure-Mere LCG (Wasm has no random_int),
+// seeded from a mutable slot — no extra FFI.
+
+import "contrib/dom/dom.mere";
+
+// --- row slide + merge (toward the front) ---
+let rec compress = fn (xs: int list) ->
+  match xs with | Nil -> Nil
+  | Cons (h, t) -> if h == 0 then compress t else Cons (h, compress t);
+let rec merge = fn (xs: int list) ->
+  match xs with
+  | Cons (a, Cons (b, rest)) ->
+    if a == b then Cons (a + b, merge rest) else Cons (a, merge (Cons (b, rest)))
+  | other -> other;
+let rec pad = fn (xs: int list) -> fn (n: int) ->
+  if n == 0 then Nil
+  else match xs with
+    | Nil -> Cons (0, pad Nil (n - 1))
+    | Cons (h, t) -> Cons (h, pad t (n - 1));
+let slide = fn (row: int list) -> pad (merge (compress row)) 4;
+let rec rev_go = fn (xs: int list) -> fn (acc: int list) ->
+  match xs with | Nil -> acc | Cons (h, t) -> rev_go t (Cons (h, acc));
+let reverse = fn (xs: int list) -> rev_go xs Nil;
+
+// --- board = a 16-slot vec, row-major. Lines are addressed by a start
+//     index i0 and a stride st (1 = row, 4 = column). ---
+let bget = fn b -> fn (i: int) -> vec_get b i;
+let bset = fn b -> fn (i: int) -> fn (v: int) -> vec_set b i v;
+let get_line = fn b -> fn (i0: int) -> fn (st: int) ->
+  Cons (bget b i0, Cons (bget b (i0 + st),
+    Cons (bget b (i0 + st * 2), Cons (bget b (i0 + st * 3), Nil))));
+let rec put_line = fn b -> fn (i0: int) -> fn (st: int) -> fn (xs: int list) ->
+  match xs with | Nil -> ()
+  | Cons (h, t) -> let _ = bset b i0 h in put_line b (i0 + st) st t;
+let do_line = fn b -> fn (i0: int) -> fn (st: int) -> fn (rv: bool) ->
+  let line = get_line b i0 st in
+  let out = if rv then reverse (slide (reverse line)) else slide line in
+  put_line b i0 st out;
+let move = fn b -> fn (k: str) ->
+  if str_eq k "L" then
+    (let rec go = fn (r: int) -> if r == 4 then () else let _ = do_line b (r * 4) 1 false in go (r + 1) in go 0)
+  else if str_eq k "R" then
+    (let rec go = fn (r: int) -> if r == 4 then () else let _ = do_line b (r * 4) 1 true in go (r + 1) in go 0)
+  else if str_eq k "U" then
+    (let rec go = fn (c: int) -> if c == 4 then () else let _ = do_line b c 4 false in go (c + 1) in go 0)
+  else if str_eq k "D" then
+    (let rec go = fn (c: int) -> if c == 4 then () else let _ = do_line b c 4 true in go (c + 1) in go 0)
+  else ();
+
+// --- snapshot / equality, to tell whether a move changed anything ---
+let rec snap = fn b -> fn (i: int) ->
+  if i == 16 then Nil else Cons (bget b i, snap b (i + 1));
+let rec eq_list = fn (a: int list) -> fn (c: int list) ->
+  match a with
+  | Nil -> (match c with | Nil -> true | _ -> false)
+  | Cons (h, t) -> (match c with | Nil -> false
+                    | Cons (h2, t2) -> h == h2 && eq_list t t2);
+
+// --- tile spawn via a tiny LCG kept in a 1-slot state vec (st) ---
+let next_rand = fn st ->
+  let s = vec_get st 0 in
+  let s2 = (s * 137 + 187) % 30011 in
+  let _ = vec_set st 0 s2 in s2;
+let rec count_empty = fn b -> fn (i: int) ->
+  if i == 16 then 0 else (if bget b i == 0 then 1 else 0) + count_empty b (i + 1);
+// place value at the k-th empty cell (0-based).
+let rec place_kth = fn b -> fn (i: int) -> fn (k: int) -> fn (v: int) ->
+  if i == 16 then ()
+  else if bget b i == 0 then
+    (if k == 0 then bset b i v else place_kth b (i + 1) (k - 1) v)
+  else place_kth b (i + 1) k v;
+let spawn_tile = fn b -> fn st ->
+  let e = count_empty b 0 in
+  if e == 0 then ()
+  else
+    let k = next_rand st % e in
+    let v = if next_rand st % 10 == 0 then 4 else 2 in
+    place_kth b 0 k v;
+
+// --- win / stuck detection ---
+let rec has_val = fn b -> fn (i: int) -> fn (v: int) ->
+  if i == 16 then false else if bget b i == v then true else has_val b (i + 1) v;
+// stuck = no empty cell AND no equal orthogonal neighbours.
+let rec any_adj = fn b -> fn (i: int) ->
+  if i == 16 then false
+  else
+    let r = i / 4 in let c = i % 4 in let v = bget b i in
+    let right = c < 3 && bget b (i + 1) == v in
+    let down = r < 3 && bget b (i + 4) == v in
+    if right || down then true else any_adj b (i + 1);
+let stuck = fn b -> count_empty b 0 == 0 && not (any_adj b 0);
+
+// --- render the board + status into a single string ---
+let cell = fn (v: int) ->
+  let s = if v == 0 then "." else show v in
+  let rec padl = fn (x: str) -> if str_len x >= 5 then x else padl (" " ++ x) in
+  padl s;
+let render = fn b ->
+  let rrow = fn (r: int) ->
+    cell (bget b (r * 4)) ++ cell (bget b (r * 4 + 1))
+    ++ cell (bget b (r * 4 + 2)) ++ cell (bget b (r * 4 + 3)) in
+  let status =
+    if has_val b 0 2048 then "  *** you win! ***"
+    else if stuck b then "  --- game over ---"
+    else "  (arrow keys)" in
+  rrow 0 ++ "\n" ++ rrow 1 ++ "\n" ++ rrow 2 ++ "\n" ++ rrow 3 ++ "\n" ++ status;
+
+// --- wiring ---
+// board / st / screen are TOP-LEVEL bindings so the keydown closure refers
+// to them as globals rather than capturing them (a captured vec driven
+// through inner-recursive helpers hit a Wasm transitive-capture bug — see
+// the dogfood note). init/spawn/redraw run once in the entry expression.
+let board = vec_new ();
+let st = vec_new ();
+let screen = dom_get_by_id "board";
+let redraw = fn (u: unit) -> dom_set_text screen (render board);
+let handle = fn (key: str) ->
+  let dir =
+    if str_eq key "ArrowLeft" then "L"
+    else if str_eq key "ArrowRight" then "R"
+    else if str_eq key "ArrowUp" then "U"
+    else if str_eq key "ArrowDown" then "D"
+    else "" in
+  if str_eq dir "" then ()
+  else
+    let before = snap board 0 in
+    let _ = move board dir in
+    let after = snap board 0 in
+    let _ = if not (eq_list before after) then spawn_tile board st else () in
+    redraw ();
+let rec init = fn (i: int) -> if i == 16 then () else let _ = vec_push board 0 in init (i + 1) in
+let _ = init 0 in
+let _ = vec_push st 12345 in
+let _ = spawn_tile board st in
+let _ = spawn_tile board st in
+let _ = redraw () in
+dom_on_key handle
