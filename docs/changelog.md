@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.25 — 2026-07-14
+
+_Fix (mkv dogfood, long-running processes): **regions grow instead of
+aborting**. The region allocator was a single fixed-cap bump block
+(default region: 4 MB) that aborted with `region OOM` on overflow — a
+long-running server's per-command allocations (reply strings, cons
+cells, tuples) exhausted it after a few thousand requests. A region is
+now a chain of bump blocks: on overflow a geometrically larger block is
+chained on. Blocks never move, so existing pointers stay valid, and
+`region R { }` frees the whole chain at scope exit. Also hardened the
+native byte arena: `mem_alloc` / `str_ptr` share one bump pointer across
+spawned threads — it is now mutex-guarded and bounds-checked (it
+previously raced and silently overflowed past the arena). Under a
+sustained 80k-command concurrent load the RESP server now runs clean
+where it previously aborted at ~8k. The honest remaining edge: growth is
+not reclamation — per-request memory still accumulates for the process
+lifetime (region-scoped strings need type-level lifetime tracking; see
+the memory-model open questions)._
+
+---
+
 ## v0.1.24 — 2026-07-14
 
 _Capability (mkv dogfood, T4 wire-protocol server): native TCP **server**
