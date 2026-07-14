@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.27 — 2026-07-14
+
+_Optimization (mlog dogfood P4, the big one): **saturated calls to curried
+top-level fns compile to a direct N-ary C call**. Level-by-level
+application allocated a closure env in the default region **per call**,
+through the region lock — measured as O(iterations) permanent memory in
+every multi-argument hot loop: a byte-at-a-time line counter held 2.1 GB
+RSS over 8M lines. For each top-level `f = fn p1 -> .. -> fn pN -> body`
+(N ≥ 2, concrete types) the backend now also emits `f__direct(p1, .., pN)`
+and compiles exactly-saturated call sites straight to it — argument
+temporaries pin the interpreter's left-to-right evaluation order, and
+self-recursion becomes a C self tail call. Partial applications and
+first-class uses keep the curried chain. The same line counter is now
+**1.5 MB RSS, constant across input size** (below `wc -l`), and 300 MB of
+input streams in 0.13 s. Constant-memory streaming is genuinely
+expressible now; what still accumulates is the string dialect's per-line
+`str` values (the open type-level lifetime question)._
+
+---
+
 ## v0.1.26 — 2026-07-14
 
 _Capability (mlog dogfood P1): **`read_line` on the C backend**. It was
