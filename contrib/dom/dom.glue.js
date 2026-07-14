@@ -84,6 +84,29 @@ export function makeDomGlue() {
     }
   };
 
+  // Like callClosure, but passes a string argument (written into the
+  // scratch buffer) as the closure's parameter — used by dom_on_key to
+  // hand the pressed key name to a `(str -> unit)` Mere closure.
+  const callClosureStr = (closurePtr, arg) => {
+    if (!memory || !table) {
+      console.error("contrib/dom: callClosureStr invoked before attach()");
+      return;
+    }
+    const view = new DataView(memory.buffer);
+    const env = view.getInt32(closurePtr, true);
+    const fnIdx = view.getInt32(closurePtr + 4, true);
+    const fn = table.get(fnIdx);
+    if (typeof fn !== "function") {
+      console.error("contrib/dom: closure fn_idx not in table", { closurePtr, fnIdx });
+      return;
+    }
+    try {
+      fn(env, writeStr(arg));
+    } catch (e) {
+      console.error("contrib/dom: Mere key closure threw", { closurePtr, error: e });
+    }
+  };
+
   const glue = {
     dom_get_by_id: (strPtr) => {
       const id = readStr(strPtr);
@@ -108,6 +131,14 @@ export function makeDomGlue() {
       const el = handles[handleIdx];
       if (!el) return writeStr("");
       return writeStr(el.value !== undefined ? el.value : "");
+    },
+    dom_on_key: (closurePtr) => {
+      if (typeof document === "undefined") return;
+      document.addEventListener("keydown", (e) => {
+        // Let the game own the arrow keys (don't scroll the page).
+        if (e.key.startsWith("Arrow")) e.preventDefault();
+        callClosureStr(closurePtr, e.key);
+      });
     },
   };
 

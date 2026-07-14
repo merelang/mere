@@ -1,6 +1,6 @@
 # contrib/dom — minimal DOM bindings for browser-side Mere
 
-Four `extern fn` declarations + a JS host glue that lets Mere code
+Five `extern fn` declarations + a JS host glue that lets Mere code
 manipulate DOM elements when compiled to Wasm and loaded in a browser.
 
 This is the user-facing layer of the Phase 48 C2 frontend-FFI MVP.
@@ -9,7 +9,7 @@ This is the user-facing layer of the Phase 48 C2 frontend-FFI MVP.
 
 | file | content | lines |
 |---|---|---|
-| `dom.mere` | `extern type JsRef;` + 4 `extern fn` declarations | ~30 |
+| `dom.mere` | `extern type JsRef;` + 5 `extern fn` declarations | ~30 |
 | `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | ~100 |
 
 ## API
@@ -20,6 +20,7 @@ This is the user-facing layer of the Phase 48 C2 frontend-FFI MVP.
 | `dom_set_text` | `JsRef -> str -> unit` | `element.textContent = ...` |
 | `dom_on_click` | `JsRef -> (unit -> unit) -> unit` | `element.addEventListener("click", ...)` |
 | `dom_input_value` | `JsRef -> str` | `element.value` (copied into a host scratch buffer) |
+| `dom_on_key` | `(str -> unit) -> unit` | `document.addEventListener("keydown", ...)`; passes the key name (e.g. `"ArrowLeft"`) to the closure |
 
 ## Usage
 
