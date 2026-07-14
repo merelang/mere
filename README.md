@@ -4,7 +4,7 @@
 [![Pages](https://github.com/merelang/mere/actions/workflows/pages.yml/badge.svg)](https://github.com/merelang/mere/actions/workflows/pages.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Docs / playground:** [merelang.github.io/mere](https://merelang.github.io/mere/) — tutorial, language reference, and a Wasm playground with an interactive [counter demo](https://merelang.github.io/mere/playground/counter.html) wired through the Phase 48 frontend FFI.
+**Docs / playground:** [merelang.org](https://merelang.org/) — tutorial, language reference, and a Wasm playground with interactive demos wired through the frontend FFI: a [counter](https://merelang.org/playground/counter.html) and a full [2048 game](https://merelang.org/playground/g2048.html) you can play with the arrow keys.
 
 > *Make Explicit Region-bound Effects.*
 

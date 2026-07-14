@@ -540,6 +540,7 @@ let render_index = fn (dev_mode: bool) -> fn (input_dir: str) ->
   let _ = strbuf_push buf "<ul>\n" in
   let _ = strbuf_push buf "  <li><a href=\"playground/playground.html\">playground</a> &mdash; hello / fizzbuzz / fibonacci, captured stdout</li>\n" in
   let _ = strbuf_push buf "  <li><a href=\"playground/counter.html\">counter</a> &mdash; button-driven counter; Mere closure dispatched back from JS (Phase 48 frontend FFI)</li>\n" in
+  let _ = strbuf_push buf "  <li><a href=\"playground/g2048.html\">2048</a> &mdash; the full sliding-tile game, playable with the arrow keys; keyboard events delivered to a Mere closure via <code>dom_on_key</code></li>\n" in
   let _ = strbuf_push buf "  <li><a href=\"playground/echo.html\">echo</a> &mdash; mirrors textarea input; exercises the JS &rarr; Mere string boundary</li>\n" in
   let _ = strbuf_push buf "  <li><a href=\"playground/wordcount.html\">wordcount</a> &mdash; chars / words / lines stats via a Mere string-scan; word boundaries fold runs of whitespace</li>\n" in
   let _ = strbuf_push buf "  <li><a href=\"playground/selfhost-fmt.html\">self-host fmt</a> &mdash; Mere pretty-printer written in Mere, running in browser (Phase 49 §S1)</li>\n" in
