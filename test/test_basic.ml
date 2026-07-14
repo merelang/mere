@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.27" Version.v "0.1.27";
+  check "version is 0.1.28" Version.v "0.1.28";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5230,6 +5230,41 @@ let () =
     c_src_direct "static int add_to__direct(int a, int b)";
   assert_contains "uncurry: saturated self-recursion calls the direct twin"
     c_src_direct "add_to__direct(__da0, __da1)";
+  (* v0.1.28 (generic-PQ dogfood B-P2): a tuple shape that exists only as a
+     body expression annotation — e.g. the scrutinee `(a, b)` of a poly
+     fn's match, concrete only in a monomorphized instance's cloned body —
+     was never collected, so the emitted C referenced an undeclared tuple
+     typedef. Found by a generic pairing heap that ran on the interpreter
+     but failed to compile natively. *)
+  let c_src_polytup =
+    vec_codegen_c
+      "type 'a bx = BE | BN of 'a; \
+       let pick = fn a -> fn b -> \
+         match (a, b) with \
+         | (BE, _) -> b \
+         | (_, BE) -> a \
+         | (BN _, BN _) -> a; \
+       let r1 = pick BE (BN 1) in \
+       let r2 = pick (BN \"x\") BE in 0" in
+  assert_contains "poly tuple scrutinee: int-instance tuple typedef emitted"
+    c_src_polytup "typedef struct tuple_bx_int_bx_int";
+  assert_contains "poly tuple scrutinee: str-instance tuple typedef emitted"
+    c_src_polytup "typedef struct tuple_bx_str_bx_str";
+  (* v0.1.28 (B-P2b): a poly fn resolved to a single instance is promoted
+     to multi-inst when a later pass discovers a second type — its other
+     usage sites live inside poly-fn bodies that only become scannable
+     once THOSE resolve. Before: `dup` resolved at str (from main) and the
+     int call inside use_int's body was emitted against str-typed structs. *)
+  let c_src_promote =
+    vec_codegen_c
+      "let dup = fn x -> (x, x); \
+       let use_int = fn (n: int) -> dup (n + 1); \
+       let p = dup \"s\" in \
+       let q = use_int 3 in 0" in
+  assert_contains "late second instantiation: int instance emitted"
+    c_src_promote "tuple_int_int dup__int__tuple_int_int(";
+  assert_contains "late second instantiation: str instance emitted"
+    c_src_promote "tuple_str_str dup__str__tuple_str_str(";
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")
