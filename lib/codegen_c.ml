@@ -235,6 +235,14 @@ let needs_struct_eq (t : Ast.ty) : bool =
    structural `cmp_<tag>` (returns <0/0/>0), the ordering sibling of
    eq_<tag>. Same compound set as needs_struct_eq. Keyed by ty_tag. *)
 let cmp_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* v0.1.30 (str-lifetime stage E, note: copy-on-store): types stored into
+   mutable containers (Map keys/values, Vec elements) get a specialized
+   deep-copy fn `__mcopy_<tag>(region, v)` so the container owns its
+   contents — the prerequisite for scoped (reclaimable) allocation of the
+   values being stored. Seeded from map_instances / vec_instances after
+   fn emission; transitive over components via add_type_and_deps. *)
+let copy_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 let needs_struct_cmp = needs_struct_eq
 
 (* Polymorphic record declarations: deferred to instantiation time. *)
@@ -4142,6 +4150,89 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
 let emit_cmp_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static int cmp_%s(%s, %s);" tag (c_type_of t) (c_type_of t)
 
+(* v0.1.30 (copy-on-store): deep-copy a value into region `r`. Strings
+   copy their bytes; tuples / records / variants copy structurally (cons
+   cells and variant nodes are re-allocated in `r`); scalars and closures
+   pass through; containers (Map / Vec / ...) copy as POINTERS — they are
+   mutable identities whose aliasing must be preserved, and they own
+   their own storage. Mirrors emit_cmp_fn's per-type specialization. *)
+let emit_copy_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header =
+    Printf.sprintf "static %s __mcopy_%s(__lang_region* r, %s v)" cty tag cty
+  in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit ->
+    header ^ " { (void)r; return v; }"
+  | Ast.TyArrow _ ->
+    (* Closures copy shallowly: their envs live in the default region. *)
+    header ^ " { (void)r; return v; }"
+  | Ast.TyStr ->
+    header ^ " {\n  size_t n = strlen(v);\n  \
+              char* s = (char*)__lang_region_alloc(r, n + 1);\n  \
+              memcpy(s, v, n + 1);\n  return s;\n}"
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"
+                | "ThreadHandle"), _) ->
+    header ^ " { (void)r; return v; }"
+  | Ast.TyTuple ts ->
+    let steps =
+      List.mapi (fun i et ->
+        Printf.sprintf "  v.f%d = __mcopy_%s(r, v.f%d);" i (ty_tag et) i) ts in
+    Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
+  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
+    let info = Hashtbl.find Typer.records name in
+    let steps =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "  v.%s = __mcopy_%s(r, v.%s);" fname (ty_tag ft) fname)
+        info.Typer.r_fields in
+    Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
+  | Ast.TyCon (name, args) ->
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc else acc)
+          Typer.constructors []
+    in
+    if is_recursive_variant cty then
+      (* Heap node: re-allocate the node in r, then copy the payload. *)
+      let cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          match arg_opt with
+          | None -> None
+          | Some ty ->
+            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+            Some (Printf.sprintf
+              "  if (p->tag == %d) p->payload.%s = __mcopy_%s(r, p->payload.%s);"
+              tag_n cname (ty_tag ty) cname))
+          variants
+      in
+      Printf.sprintf
+        "%s {\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
+         *p = *v;\n%s\n  return p;\n}"
+        header cty cty cty (String.concat "\n" cases)
+    else
+      let cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          match arg_opt with
+          | None -> None
+          | Some ty ->
+            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+            Some (Printf.sprintf
+              "  if (v.tag == %d) v.payload.%s = __mcopy_%s(r, v.payload.%s);"
+              tag_n cname (ty_tag ty) cname))
+          variants
+      in
+      Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" cases)
+  | _ -> header ^ " { (void)r; return v; }"
+
+let emit_copy_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static %s __mcopy_%s(__lang_region*, %s);"
+    (c_type_of t) tag (c_type_of t)
+
 let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
   Printf.sprintf "static %s %s(void*, %s);"
     (c_type_of ce.ce_return_ty) ce.ce_adapter_name
@@ -5161,6 +5252,11 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* set: replace if key exists, otherwise append (grow the array on cap hit) *)
       Printf.sprintf "static int %s_set(%s* m, %s k, %s v) {"
         struct_name struct_name c_k c_v;
+      (* v0.1.30 (copy-on-store): the map owns its contents — deep-copy
+         the key and value into the map's own region so a stored value
+         never dangles when the storer's allocation scope is reclaimed. *)
+      Printf.sprintf "  k = __mcopy_%s(m->region, k);" k_tag;
+      Printf.sprintf "  v = __mcopy_%s(m->region, v);" v_tag;
       "  for (int i = 0; i < m->len; i++) {";
       Printf.sprintf "    if (%s) { m->values[i] = v; return 0; }"
         (key_eq_expr "m->keys[i]" "k");
@@ -5601,6 +5697,9 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "}";
       "";
       Printf.sprintf "static int %s_push(%s* v, %s x) {" struct_name struct_name c_elem;
+      (* v0.1.30 (copy-on-store): the vec owns its elements — see the map
+         runtime's set for the rationale. *)
+      Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
       "  if (v->len == v->cap) {";
       "    int new_cap = v->cap * 2;";
       Printf.sprintf "    %s* new_data = (%s*)__lang_region_alloc(v->region, sizeof(%s) * new_cap);"
@@ -5629,6 +5728,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "    fprintf(stderr, \"vec_set: index %d out of bounds (len = %d)\\n\", i, v->len);";
       "    abort();";
       "  }";
+      Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
       "  v->data[i] = x;";
       "  return 0; /* unit */";
       "}" ]
@@ -5907,47 +6007,52 @@ let lift_inner_fns
   updated_lifted
 
 
+(* Transitively register a concrete type and every component type it can
+   contain (tuple fields, record fields, variant payloads, TyCon args)
+   into `tbl`, keyed by ty_tag. Extracted from collect_show_types
+   (v0.1.30) so the copy-on-store collection can reuse it. *)
+let rec add_type_and_deps (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
+  let t = Ast.walk t in
+  if not (ty_is_concrete t) then ()
+  else
+    let tag = ty_tag t in
+    (* Guard before recursion so recursive variants (e.g. list) don't
+       infinite-loop through their self-referential payloads. *)
+    if Hashtbl.mem tbl tag then ()
+    else begin
+      Hashtbl.add tbl tag t;
+      match t with
+      | Ast.TyTuple ts -> List.iter (add_type_and_deps tbl) ts
+      | Ast.TyArrow _ -> ()
+      | Ast.TyCon (name, args) ->
+        List.iter (add_type_and_deps tbl) args;
+        if Hashtbl.mem Typer.records name then
+          let info = Hashtbl.find Typer.records name in
+          List.iter (fun (_, ft) -> add_type_and_deps tbl ft) info.Typer.r_fields
+        else if Hashtbl.mem polymorphic_variants name then begin
+          let (params, variants) = Hashtbl.find polymorphic_variants name in
+          let svariants = subst_variants params args variants in
+          List.iter (fun (_, arg_opt) ->
+            match arg_opt with Some t -> add_type_and_deps tbl t | None -> ()) svariants
+        end
+        else if Hashtbl.mem Typer.types name then begin
+          let variants =
+            Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+              if info.type_name = name then (cname, info.arg) :: acc else acc)
+              Typer.constructors []
+          in
+          List.iter (fun (_, arg_opt) ->
+            match arg_opt with Some t -> add_type_and_deps tbl t | None -> ()) variants
+        end
+      | _ -> ()
+    end
+
 (* Walk the AST for `App (Var "show", arg)` calls and add each arg's
    type to `show_types` so emit_program can synthesize the right
    specialized show functions. Recurses into types so e.g. `show (1, 2)`
    also triggers show_int (for the elements). *)
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
-  let rec add_into tbl t =
-    let t = Ast.walk t in
-    if not (ty_is_concrete t) then ()
-    else
-      let tag = ty_tag t in
-      (* Guard before recursion so recursive variants (e.g. list) don't
-         infinite-loop through their self-referential payloads. *)
-      if Hashtbl.mem tbl tag then ()
-      else begin
-        Hashtbl.add tbl tag t;
-        match t with
-        | Ast.TyTuple ts -> List.iter (add_into tbl) ts
-        | Ast.TyArrow _ -> ()
-        | Ast.TyCon (name, args) ->
-          List.iter (add_into tbl) args;
-          if Hashtbl.mem Typer.records name then
-            let info = Hashtbl.find Typer.records name in
-            List.iter (fun (_, ft) -> add_into tbl ft) info.Typer.r_fields
-          else if Hashtbl.mem polymorphic_variants name then begin
-            let (params, variants) = Hashtbl.find polymorphic_variants name in
-            let svariants = subst_variants params args variants in
-            List.iter (fun (_, arg_opt) ->
-              match arg_opt with Some t -> add_into tbl t | None -> ()) svariants
-          end
-          else if Hashtbl.mem Typer.types name then begin
-            let variants =
-              Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
-                if info.type_name = name then (cname, info.arg) :: acc else acc)
-                Typer.constructors []
-            in
-            List.iter (fun (_, arg_opt) ->
-              match arg_opt with Some t -> add_into tbl t | None -> ()) variants
-          end
-        | _ -> ()
-      end
-  in
+  let add_into = add_type_and_deps in
   let add_with_deps t = add_into show_types t in
   let rec walk_expr (e : Ast.expr) =
     (match e.Ast.node with
@@ -7356,6 +7461,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       emit_map_runtime_for k_ty v_ty :: acc) map_instances []
   in
+  (* v0.1.30 (copy-on-store): specialized deep-copy fns for every type
+     stored into a Map or Vec (keys, values, elements — transitively over
+     their components). The map/vec runtimes call __mcopy_<tag> in set /
+     push, so every instance's tags must be covered. Sorted for
+     deterministic (byte-stable) output. *)
+  let copy_fn_decls, copy_fn_defs =
+    Hashtbl.reset copy_types;
+    Hashtbl.iter (fun _ (k_ty, v_ty) ->
+      add_type_and_deps copy_types k_ty;
+      add_type_and_deps copy_types v_ty) map_instances;
+    Hashtbl.iter (fun _ elem_ty ->
+      add_type_and_deps copy_types elem_ty) vec_instances;
+    let tags =
+      List.sort compare
+        (Hashtbl.fold (fun tag t acc -> (tag, t) :: acc) copy_types [])
+    in
+    (List.map (fun (tag, t) -> emit_copy_fn_forward_decl tag t) tags,
+     List.map (fun (tag, t) -> emit_copy_fn tag t) tags)
+  in
   let map_forward_typedefs =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       let k_tag = ty_tag k_ty and v_tag = ty_tag v_ty in
@@ -7479,12 +7603,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /
        record / variant bodies. OwnedVec registry first (each _new references it). *)
+    (* v0.1.30: copy-on-store fns — forward decls before the vec/map
+       runtimes that call them; definitions after (they only need the
+       value typedefs, which are all complete by here). *)
+    @ (if copy_fn_decls = [] then [] else copy_fn_decls @ [""])
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
+    @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
        Metrics struct bodies (= records) and closure_str_unit /
        closure_int_unit typedefs, so emit after struct bodies. *)

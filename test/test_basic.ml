@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.29" Version.v "0.1.29";
+  check "version is 0.1.30" Version.v "0.1.30";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5265,6 +5265,25 @@ let () =
     c_src_promote "tuple_int_int dup__int__tuple_int_int(";
   assert_contains "late second instantiation: str instance emitted"
     c_src_promote "tuple_str_str dup__str__tuple_str_str(";
+  (* v0.1.30 (str-lifetime stage E): copy-on-store — containers own their
+     contents. map_set deep-copies key and value into the map's region,
+     vec_push/vec_set copy the element, via per-type __mcopy_<tag> fns
+     (derive-style specialization). Prerequisite for scoped (reclaimable)
+     allocation: a stored value must not dangle when the storer's
+     allocation scope is reclaimed. *)
+  let c_src_cos =
+    vec_codegen_c
+      "let m = map_new () in \
+       let _ = map_set m \"k\" \"v\" in \
+       let v = vec_new () in \
+       let _ = vec_push v \"e\" in \
+       str_len (map_get m \"k\")" in
+  assert_contains "copy-on-store: str copy fn emitted"
+    c_src_cos "static const char* __mcopy_str(__lang_region* r, const char* v)";
+  assert_contains "copy-on-store: map_set copies the key into the map's region"
+    c_src_cos "k = __mcopy_str(m->region, k);";
+  assert_contains "copy-on-store: vec_push copies the element"
+    c_src_cos "x = __mcopy_str(v->region, x);";
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")
