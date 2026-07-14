@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.29 — 2026-07-15
+
+_Soundness (mkv dogfood P2): **sharing a mutable container across threads
+is now a compile error**, and **the compile path runs the same safety
+analyses as the run path**. Two fixes:_
+
+_**Send/Sync classification.** Region-bound mutable containers (`Map` /
+`Vec` / `StrBuf`) are now explicitly `!Send && !Sync` — their runtimes
+are lock-free (linear-scan arrays / bump buffers), so a shared container
+across `spawn` is a data race. Previously the classifier fell through to
+"are all type args Send?", and the region-marker arg is a bare TyVar,
+judged optimistically — so a shared `Map` compiled fine and lost ~2% of
+concurrent writes in a real RESP-server stress test. `OwnedVec` stays
+Send/!Sync (drop type: single owner, movable). The blessed pattern is
+share-by-communicating: `Channel` remains Send+Sync, and the mkv actor
+model compiles unchanged._
+
+_**The `-c` / `-l` / `-w` paths now run the safety analyses.** The
+compile entry ran type inference only — channel-element Send
+obligations, borrow-conflict checking, and spawn-capture move analysis
+were silently skipped, so `mere file.mere` rejected programs that
+`mere -c file.mere` happily compiled (including capturing a region
+borrow in a spawned thread). All three checks now run before codegen on
+every backend._
+
+---
+
 ## v0.1.28 — 2026-07-15
 
 _Fix (generic-PQ dogfood, two monomorphization bugs): a **generic pairing

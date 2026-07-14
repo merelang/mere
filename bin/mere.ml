@@ -75,6 +75,7 @@ let search_paths : string list ref = ref []
 
 let infer_program ?base_dir source =
   let open Mere in
+  Typer.reset_send_constraints ();
   let prog = Pipeline.parse_program ?base_dir ~search_paths:!search_paths source in
   let type_env = ref Typer.initial_env in
   List.iter (fun decl ->
@@ -127,9 +128,18 @@ let infer_program ?base_dir source =
     | Ast.Top_record_alias (alias, target) ->
       Typer.alias_record alias target
   ) prog.decls;
-  let main_ty =
-    Typer.infer !type_env (Ast.desugar_program prog)
-  in
+  let desugared = Ast.desugar_program prog in
+  let main_ty = Typer.infer !type_env desugared in
+  (* v0.1.29 (mkv dogfood P2): the compile path ran type inference only —
+     the interp path's safety analyses (channel-element Send obligations,
+     borrow conflicts, spawn-capture move/Send/Sync classification) were
+     silently skipped under -c / -l / -w. A shared mutable Map captured by
+     spawned threads was rejected by `mere file.mere` but compiled fine by
+     `mere -c file.mere` — and raced at runtime. Run the same checks the
+     run path runs (Pipeline.run_program lines up with this order). *)
+  Typer.discharge_send_constraints ();
+  Typer.check_borrows [] desugared;
+  Move_check.check desugared;
   (prog, main_ty)
 
 let compile_to_c ?base_dir source =

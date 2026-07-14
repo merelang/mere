@@ -577,6 +577,16 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyParam _ | Ast.TyVar _ -> true
   | Ast.TyCon ("Channel", _) -> true
   | Ast.TyCon ("ThreadHandle", _) -> true
+  (* v0.1.29 (mkv dogfood P2): region-bound mutable containers are
+     thread-local — the runtimes are lock-free (linear-scan arrays /
+     bump buffers), so sharing one across `spawn` is a data race. Their
+     region-marker arg is a bare TyVar, which the generic TyCon
+     fallthrough below treats optimistically — so without this case a
+     shared Map compiled fine and lost concurrent writes (measured:
+     39/1600 SET-then-GET failures in a naive RESP server). OwnedVec is
+     NOT here: it is a drop type (single owner, movable), handled below.
+     Share by communicating instead: Channel is Send+Sync. *)
+  | Ast.TyCon (("Map" | "Vec" | "StrBuf"), _) -> false
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, args) when Hashtbl.mem drop_types name ->
@@ -596,6 +606,9 @@ let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyParam _ | Ast.TyVar _ -> true
   | Ast.TyCon ("Channel", _) -> true
   | Ast.TyCon ("ThreadHandle", _) -> false     (* single-owner handle *)
+  (* v0.1.29 (mkv dogfood P2): see is_send_v — lock-free region-bound
+     containers must not be shared across threads. *)
+  | Ast.TyCon (("Map" | "Vec" | "StrBuf"), _) -> false
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, _) when Hashtbl.mem drop_types name -> false
