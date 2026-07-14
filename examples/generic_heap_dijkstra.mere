@@ -1,0 +1,62 @@
+// Dijkstra over a generic pairing heap — the payoff of dogfood B:
+// a polymorphic ADT container, comparator-parameterized, running natively.
+
+type 'a heap = HEmpty | HNode of ('a * 'a heap list);
+
+let hp_meld = fn cmp -> fn h1 -> fn h2 ->
+  match (h1, h2) with
+  | (HEmpty, _) -> h2
+  | (_, HEmpty) -> h1
+  | (HNode (x, xs), HNode (y, ys)) ->
+    if cmp x y then HNode (x, Cons (h2, xs))
+    else HNode (y, Cons (h1, ys));
+
+let hp_push = fn cmp -> fn h -> fn v -> hp_meld cmp h (HNode (v, Nil));
+
+let rec hp_meld_pairs = fn cmp -> fn hs ->
+  match hs with
+  | Nil -> HEmpty
+  | Cons (h, Nil) -> h
+  | Cons (a, Cons (b, rest)) -> hp_meld cmp (hp_meld cmp a b) (hp_meld_pairs cmp rest);
+
+let hp_pop = fn cmp -> fn h ->
+  match h with
+  | HEmpty -> None
+  | HNode (x, kids) -> Some (x, hp_meld_pairs cmp kids);
+
+// (dist, node) min-heap ordering
+let pair_lt = fn (a: (int * int)) -> fn (b: (int * int)) ->
+  match (a, b) with
+  | ((d1, n1), (d2, n2)) -> if d1 == d2 then n1 < n2 else d1 < d2;
+
+// classic 6-node graph (Wikipedia's Dijkstra example)
+let edges = fn (n: int) ->
+  if n == 0 then Cons ((1, 7), Cons ((2, 9), Cons ((5, 14), Nil)))
+  else if n == 1 then Cons ((2, 10), Cons ((3, 15), Nil))
+  else if n == 2 then Cons ((3, 11), Cons ((5, 2), Nil))
+  else if n == 3 then Cons ((4, 6), Nil)
+  else if n == 5 then Cons ((4, 9), Nil)
+  else Nil;
+
+let rec push_neighbors = fn h -> fn d -> fn ns ->
+  match ns with
+  | Nil -> h
+  | Cons ((m, w), rest) -> push_neighbors (hp_push pair_lt h (d + w, m)) d rest;
+
+let rec dij = fn h -> fn (done_map) -> fn (target: int) ->
+  match hp_pop pair_lt h with
+  | None -> 0 - 1
+  | Some ((d, n), rest) ->
+    if n == target then d
+    else if map_has done_map n then dij rest done_map target
+    else
+      let _ = map_set done_map n true in
+      dij (push_neighbors rest d (edges n)) done_map target;
+
+let h0 = hp_push pair_lt HEmpty (0, 0) in
+let dm = map_new () in
+let _ = print ("dist 0->4 = " ++ str_of_int (dij h0 dm 4)) in
+let dm2 = map_new () in
+let h1 = hp_push pair_lt HEmpty (0, 0) in
+let _ = print ("dist 0->3 = " ++ str_of_int (dij h1 dm2 3)) in
+0

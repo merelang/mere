@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.28 — 2026-07-15
+
+_Fix (generic-PQ dogfood, two monomorphization bugs): a **generic pairing
+heap** (`type 'a heap = HEmpty | HNode of ('a * 'a heap list)` +
+comparator closures) ran correctly on the interpreter but failed to
+compile natively. Two independent root causes, both in the C backend's
+monomorphization:_
+
+_**B-P2 — body-only tuple shapes were never collected.** Tuple typedef
+collection walked main's AST and fn signatures, but not fn bodies — so a
+tuple that exists only as a body annotation (the `(h1, h2)` scrutinee of
+a poly fn's match, concrete only inside a monomorphized instance's cloned
+body) was referenced in the emitted C without ever being declared.
+Bodies are now walked too; the concreteness guard still skips unresolved
+polymorphic shapes._
+
+_**B-P2b — no promotion to multi-instance.** A poly fn's usage sites
+inside another poly fn's body only become scannable once that fn
+resolves. `hp_pop` was seen at one type (from main), single-resolved by
+unifying the original skeleton in place — destroying its polymorphism —
+and the later-discovered second usage (at int, inside `drain`) was
+emitted against the wrong instance's struct types. Every skeleton now
+keeps a pristine clone taken before any unification; single-resolved fns'
+bodies join the arrow-discovery scan; and a fn already resolved at one
+type is promoted to multi-instance when a second type shows up._
+
+_With both fixed, the generic heap and a Dijkstra built on it (new
+`examples/generic_heap_dijkstra.mere`) run natively, byte-identical to
+the interpreter. Suite: 2081._
+
+---
+
 ## v0.1.27 — 2026-07-14
 
 _Optimization (mlog dogfood P4, the big one): **saturated calls to curried

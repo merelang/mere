@@ -3243,11 +3243,21 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
     Hashtbl.create 4
   in
+  (* v0.1.28 (generic-PQ dogfood B-P2b): keep a PRISTINE clone of every
+     skel before any unification. Single-resolution unifies the original
+     fn's tyvars in place, which destroys the polymorphic skeleton — so a
+     fn first seen at one type could never be promoted to multi-inst when
+     a second type shows up later (see the promotion branch below).
+     Cloning specs from the pristine copy keeps every instantiation
+     possible at any point in the fixpoint loop. *)
+  let pristine : (string, Ast.expr) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun s ->
+    Hashtbl.replace pristine s.sname (clone_with_fresh_tyvars s.sfun)) skels;
   (* Phase 43 (DEFERRED §1.7 fix): the clone helper for multi-inst, reused
      in 2 paths (initial scan + re-scan of existing multi_specs entries
      when new instantiations are discovered). *)
   let make_spec arrow s =
-    let cloned_fun = clone_with_fresh_tyvars s.sfun in
+    let cloned_fun = clone_with_fresh_tyvars (Hashtbl.find pristine s.sname) in
     let clone_fun_ty =
       match cloned_fun.Ast.ty with
       | Some t -> Ast.walk t
@@ -3270,8 +3280,45 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
         Hashtbl.fold (fun _ specs acc ->
           List.fold_left (fun acc (_, body) -> body :: acc) acc specs
         ) multi_specs []
+        (* v0.1.28 (B-P2b): also scan the bodies of single-resolved poly
+           fns. A usage of poly fn B inside poly fn A's body only becomes
+           concrete once A resolves — before this, B's arrow-discovery
+           scan never saw it, so B stayed single-instantiated at some
+           OTHER type and the emitted C called B's body with mismatched
+           struct types (found: a generic heap's `drain` calling `hp_pop`
+           at int while hp_pop resolved at tuple). *)
+        @ List.filter_map (fun s2 ->
+            if Hashtbl.mem resolved s2.sname then Some s2.sbody else None)
+            skels
       in
-      if Hashtbl.mem resolved s.sname then ()
+      if Hashtbl.mem resolved s.sname then begin
+        (* v0.1.28 (B-P2b): a fn resolved to a single instance may be
+           discovered at a second type later (its other usage sites live
+           in poly-fn bodies that resolve in later passes). Promote it to
+           multi-inst: drop the single resolution and clone one spec per
+           arrow from the pristine skeleton. *)
+        let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()) in
+        let cur = Hashtbl.find resolved s.sname in
+        let cur_str = Ast.pp_ty (Ast.walk cur) in
+        let extra = List.filter (fun a ->
+          Ast.pp_ty (Ast.walk a) <> cur_str) all in
+        (* Dedup the extras among themselves. *)
+        let extra =
+          let seen = Hashtbl.create 4 in
+          List.filter (fun a ->
+            let k = Ast.pp_ty (Ast.walk a) in
+            if Hashtbl.mem seen k then false
+            else (Hashtbl.add seen k (); true)) extra
+        in
+        if extra <> [] then begin
+          Hashtbl.remove resolved s.sname;
+          let arrows = cur :: extra in
+          Hashtbl.replace multi_inst_fns s.sname arrows;
+          Hashtbl.replace multi_specs s.sname
+            (List.map (fun a -> make_spec a s) arrows);
+          progress := true
+        end
+      end
       else if Hashtbl.mem multi_specs s.sname then begin
         (* Phase 43 fix (DEFERRED §1.7): re-scan multi-inst fns each pass.
            When a chained poly call site becomes concrete in a later pass
@@ -6853,6 +6900,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       @ (match Ast.walk f.return_ty with
          | Ast.TyTuple ts -> [ts] | _ -> [])
     ) fns in
+    (* v0.1.28 (generic-PQ dogfood B-P2): also walk every fn BODY. A tuple
+       shape that exists only as a body expression annotation — e.g. the
+       scrutinee `(h1, h2)` of a polymorphic fn's match, whose concrete
+       shape appears only in a monomorphized instance's cloned body — was
+       never collected, so the emitted C referenced an undeclared tuple
+       typedef (found: a generic pairing heap ran on the interpreter but
+       failed to compile natively). Instance bodies are cloned + unified,
+       so walking them here yields the concrete per-instance shapes; the
+       ty_is_concrete guard still skips unresolved polymorphic ones. *)
+    let from_bodies = List.concat_map (fun f -> collect_tuple_shapes f.body) fns in
     (* Also collect tuples inside specialized variant payloads (e.g.,
        `tuple_int_list_int` inside `list_int`'s Cons). *)
     let from_variants =
@@ -6890,7 +6947,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           ) variants
       ) variant_decls
     in
-    let all = from_expr @ from_fns @ from_variants @ from_variant_decls in
+    let all = from_expr @ from_fns @ from_bodies @ from_variants @ from_variant_decls in
     (* Dedup by struct name. *)
     let seen = Hashtbl.create 8 in
     let deduped =
