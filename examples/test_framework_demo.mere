@@ -1,0 +1,24 @@
+// examples/test_framework_demo.mere — demo of contrib/test (`module Test`).
+//
+// Moved out of contrib/test/test.mere (v0.1.35): the demo used to live at
+// the bottom of the library file, so every importer RAN it — a library
+// file must stay main-free (same hygiene as contrib/xml).
+//
+//   $ mere examples/test_framework_demo.mere      (exit 1: one intentional fail)
+
+import "../contrib/test/test.mere";
+
+let _ = print "=== test framework demo ===";
+let s = Test.new_suite ();
+
+let _ = Test.assert_eq s "1 + 1 = 2" 2 (1 + 1);
+let _ = Test.assert_eq s "string concat" "hi" ("h" ++ "i");
+let _ = Test.assert_eq s "list length" 3 (list_len (Cons (1, Cons (2, Cons (3, Nil)))));
+let _ = Test.assert_true s "5 > 3" (5 > 3);
+let _ = Test.assert_false s "5 < 3" (5 < 3);
+
+// Intentionally fail one case (to demonstrate assert_eq behavior)
+let _ = Test.assert_eq s "(intentional fail) 2 = 3" 2 3;
+
+let _ = Test.summary s;
+Test.exit_status s
