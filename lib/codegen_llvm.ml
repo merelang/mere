@@ -2700,14 +2700,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_instr (Printf.sprintf "  %s = icmp %s %s %s, %s" r (llvm_cmp_int op) opnd_ty ra rb);
        r)
   | Ast.Logic (op, a, b) ->
-    (* Short-circuit semantics matter for effects, but the MVP subset has
-       no effects, so eager `and`/`or` on i1 is observationally equivalent. *)
-    let ra = emit_expr env a in
-    let rb = emit_expr env b in
-    let r = fresh_reg () in
-    let opc = match op with Ast.And -> "and" | Ast.Or -> "or" in
-    emit_instr (Printf.sprintf "  %s = %s i1 %s, %s" r opc ra rb);
-    r
+    (* v0.1.34: SHORT-CIRCUIT, matching the interpreter and the C
+       backend. The old comment claimed eager evaluation was
+       observationally equivalent because "the MVP subset has no
+       effects" — long obsolete: a trapping RHS (vec_get bounds check,
+       fail) IS an effect, and the bounds-guard idiom
+       `i < len && vec_get v i == x` must not evaluate the get when the
+       guard is false. Lower to the If emission. *)
+    let const_bool v =
+      Ast.{ node = Ast.Bool_lit v; ty = Some Ast.TyBool; loc = e.Ast.loc } in
+    (match op with
+     | Ast.And -> emit_expr env Ast.{ e with node = Ast.If (a, b, const_bool false) }
+     | Ast.Or -> emit_expr env Ast.{ e with node = Ast.If (a, const_bool true, b) })
   | Ast.If (cond, t, f) ->
     let result_ty =
       match e.Ast.ty with

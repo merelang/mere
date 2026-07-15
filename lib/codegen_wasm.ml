@@ -1597,9 +1597,17 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr b;
        emit_instr (wasm_cmp op))
   | Ast.Logic (op, a, b) ->
-    emit_expr a;
-    emit_expr b;
-    emit_instr (match op with Ast.And -> "i32.and" | Ast.Or -> "i32.or")
+    (* v0.1.34: SHORT-CIRCUIT, matching the interpreter and the C
+       backend. The old strict `i32.and` / `i32.or` evaluated both
+       operands, so the bounds-guard idiom `i < len && vec_get v i == x`
+       trapped on Wasm only — found by the 2048 dogfood's stuck
+       detection, where 97% of live keypresses died silently. Lower to
+       the If emission (which handles the tail flag correctly). *)
+    let const_bool v =
+      Ast.{ node = Ast.Bool_lit v; ty = Some Ast.TyBool; loc = e.Ast.loc } in
+    (match op with
+     | Ast.And -> emit_expr Ast.{ e with node = Ast.If (a, b, const_bool false) }
+     | Ast.Or -> emit_expr Ast.{ e with node = Ast.If (a, const_bool true, b) })
   | Ast.If (cond, t, f) ->
     emit_expr cond;
     emit_instr "if (result i32)";
