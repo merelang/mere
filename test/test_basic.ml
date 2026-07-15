@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.32" Version.v "0.1.32";
+  check "version is 0.1.33" Version.v "0.1.33";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -1288,6 +1288,25 @@ let () =
     (Pipeline.process
        "list_sort_by (fn (a: (int * str)) -> fn (b: (int * str)) -> a < b) [(3, \"c\"), (1, \"a\"), (1, \"b\")]")
     "[(1, \"a\"), (1, \"b\"), (3, \"c\")]";
+  (* --- v0.1.33: ordering through TYPE VARIABLES (Eq's treatment, extended).
+     No annotation needed: a polymorphic comparator instantiates per use,
+     monomorphization plays the dictionary's role on the compiled backends,
+     and the interpreter compares structurally at runtime. The prelude's
+     list_sort / list_max / list_min become generic for free. *)
+  check "ord: polymorphic comparator at two types"
+    (Pipeline.process
+       "let lt = fn a -> fn b -> a < b in \
+        (lt 1 2, lt (2, \"b\") (2, \"a\"))")
+    "(true, false)";
+  check "ord: generic list_sort on tuples (no annotation)"
+    (Pipeline.process
+       "list_sort [(3, \"c\"), (1, \"a\"), (2, \"b\")]")
+    "[(1, \"a\"), (2, \"b\"), (3, \"c\")]";
+  check "ord: generic list_max on strings"
+    (Pipeline.process "list_max [\"apple\", \"pear\", \"fig\"]") "\"pear\"";
+  check "ord: generic list_sort still works at int"
+    (Pipeline.process "list_sort [3, 1, 2]") "[1, 2, 3]";
+
   (* backward compat: bare comparator tyvars still default to int. *)
   check "ord: int still works" (Pipeline.process "3 < 5") "true";
   check "ord: default list_sort int" (Pipeline.process "list_sort [3,1,2]") "[1, 2, 3]";
@@ -3172,14 +3191,14 @@ let () =
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "  closure_int_int f;\n} __anon_7_env;";   (* Under Phase 39.A', the lambdas of
-                             list_sort_by / list_sort_insert / list_sort consume 6 slots, so the user's
-                             `fn x -> f x` (captures f) is slot 7 (uniquely identifiable by the
-                             env field `closure_int_int f`) *)
+    "  closure_int_int f;\n} __anon_4_env;";   (* Slot number tracks how many
+                             prelude lambdas precede the user's `fn x -> f x` (captures f);
+                             v0.1.33's generic list_sort shifted it to 4. Uniquely identifiable
+                             by the env field `closure_int_int f`. *)
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "static int __anon_7_fn(void* __env_self_void, int x)";
+    "static int __anon_4_fn(void* __env_self_void, int x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -3411,11 +3430,11 @@ let () =
 
   (* --- LLVM IR codegen: strings / print / ++ / str_len (Phase 5.3) --- *)
   assert_contains "llvm: str literal global"
-    (llvm "\"hi\"") "@.str_2 = private constant [3 x i8] c\"hi\\00\"";   (* Phase 36: prelude list_min/list_max consume str_0, str_1 *)
+    (llvm "\"hi\"") "@.str_0 = private constant [3 x i8] c\"hi\\00\"";   (* v0.1.33: generic list_min/list_max are poly (skipped when unused), so user literals start at str_0 *)
   assert_contains "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
   assert_contains "llvm: str passed as ptr to printf"
-    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_2)";   (* Phase 36: prelude list_min/list_max claim str_0, str_1 first *)
+    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_0)";   (* v0.1.33: see above — slot 0 now *)
   assert_contains "llvm: print emits puts call"
     (llvm "print \"hi\"") "call i32 @puts(ptr ";
   assert_contains "llvm: ++ lowers to __lang_str_concat"
@@ -5357,6 +5376,14 @@ let () =
         let mx = list_max (Cons (3, Cons (7, Nil))) in \
         if use \"a\" then mx else 0")
     "__auto_type m = ";
+  (* v0.1.33: ordering through a type variable — the poly comparator's
+     monomorphized instance compares at a concrete type, landing on the
+     derived cmp_<tag> (monomorphization plays the dictionary's role). *)
+  assert_contains "ord poly: C instance uses derived tuple compare"
+    (vec_codegen_c
+       "let lt = fn a -> fn b -> a < b in \
+        if lt (1, 2) (1, 3) then 1 else 0")
+    "cmp_tuple_int_int";
   (* v0.1.32 (S-3): mem_to_str allocates in the current region (it used
      to malloc and leak). *)
   assert_contains "mem_to_str allocates in the current region"

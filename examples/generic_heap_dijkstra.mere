@@ -24,10 +24,10 @@ let hp_pop = fn cmp -> fn h ->
   | HEmpty -> None
   | HNode (x, kids) -> Some (x, hp_meld_pairs cmp kids);
 
-// (dist, node) min-heap ordering
-let pair_lt = fn (a: (int * int)) -> fn (b: (int * int)) ->
-  match (a, b) with
-  | ((d1, n1), (d2, n2)) -> if d1 == d2 then n1 < n2 else d1 < d2;
+// (dist, node) min-heap ordering: structural `<` compares tuples
+// lexicographically, and since v0.1.33 a polymorphic comparator needs no
+// annotations — its instances specialize to the derived compare.
+let pair_lt = fn a -> fn b -> a < b;
 
 // classic 6-node graph (Wikipedia's Dijkstra example)
 let edges = fn (n: int) ->

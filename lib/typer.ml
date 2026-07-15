@@ -1543,15 +1543,18 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           concrete type is comparable — int / float / str / bool scalars
           directly, and tuple / record / variant / list lexicographically
           via a derived compare (interp: value_compare; codegen: cmp_<tag>,
-          the ordering sibling of eq_<tag>). An UNRESOLVED tyvar still
-          defaults to int, preserving the historical default and the
-          int-vs-str error hints — so a bare `fn a -> fn b -> a < b` is
-          still int (the fully-polymorphic-comparator story needs ad-hoc
-          poly resolution and stays deferred). *)
-       unify a.loc ta tb;
-       (match Ast.walk ta with
-        | Ast.TyVar _ -> unify a.loc Ast.TyInt ta; unify b.loc Ast.TyInt tb
-        | _ -> ())
+          the ordering sibling of eq_<tag>).
+
+          v0.1.33: ordering through a TYPE VARIABLE is polymorphic, the
+          same as Eq (the historical int-defaulting is gone). The scheme
+          carries no explicit constraint; instead monomorphization plays
+          the dictionary's role — every instance body compares at a
+          concrete type, where the derive machinery specializes — and the
+          interpreter compares structurally at runtime. This is what made
+          `==` work through tyvars all along; `<` now joins it, which in
+          turn makes the prelude's list_sort / list_max / list_min
+          generic for free. *)
+       unify a.loc ta tb
      | Ast.Eq | Ast.Ne ->
        (* Symmetric: lhs is the "first observed" type. *)
        unify e.loc ta tb);
