@@ -102,6 +102,43 @@ with db = Database.connect(...) in
 
 ---
 
+## 3.5 Region blocks reclaim values (v0.1.30–31, implemented)
+
+The "one request = one region" use case above is no longer aspirational —
+as of v0.1.31 it is the implemented semantics on the C backend:
+
+- **Value allocations follow the current region.** Strings, cons cells,
+  and variant nodes allocate in a thread-local *current region*. A
+  `region R { ... }` block makes itself current for its body, so
+  everything the body allocates is reclaimed when the block exits.
+  Closure environments and container structs (Vec / Map / StrBuf) stay in
+  their own binding region — they carry identity and must not die with a
+  scratch block.
+- **The block's result is copied out** into the enclosing region
+  (per-type deep copy, specialized like the `show`/`==` derive family),
+  so returning a value from a block is always safe. A container cannot be
+  a block result — the typer's region-escape check rejects it.
+- **Containers own their contents** (v0.1.30 copy-on-store): `map_set`
+  deep-copies the key and value into the map's own region; `vec_push` /
+  `vec_set` copy the element. A stored value therefore outlives whoever
+  stored it, no matter where it was allocated. Strings are immutable, so
+  the copies are unobservable.
+- **Channel payloads copy through a per-message region**: `channel_send`
+  deep-copies into a malloc-backed message region; `channel_recv` copies
+  out into the *receiver's* current region and frees the message. A
+  sender's scratch region can die while the message is in flight.
+- Measured effect: an idiomatic line-at-a-time counter with a per-line
+  region runs at constant ~1.5 MB RSS over 8M lines (previously 246 MB);
+  a Redis-wire KV server with per-command regions holds flat RSS under
+  sustained load.
+
+Backend note: the interpreter is GC-backed (same value semantics, memory
+behaviour trivially fine); the Wasm backend still uses page-lifetime bump
+allocation — browser-scale programs are unaffected, and a long-lived Wasm
+server would need the v0.1.31 treatment ported.
+
+---
+
 ## 4. Current state in mere (as of 2026-06-24, Phase 46)
 
 The "Phase 2" section below is a record of the first implementation slices (the region/view syntax layer). **Phase 11 → 31 implemented the 4 borrow modes (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) + borrow checker + `with` Drop integration + the 4 Q-010 collections (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + 4-backend codegen (interp + C / LLVM / Wasm) parity.** Details: [language-reference.md §3 region/view/with](language-reference.md) / [codegen.md §4](codegen.md).

@@ -52,6 +52,59 @@ let rec top_level_bools (p : Ast.pattern) : bool list =
   | Ast.P_or (p1, p2) -> top_level_bools p1 @ top_level_bools p2
   | _ -> []
 
+(* --- v0.1.32 (Phase 3): product-space check for tuple scrutinees ---
+
+   `match (h1, h2) with (HEmpty, _) | (_, HEmpty) | (HNode _, HNode _)` is
+   exhaustive, but no single arm is total, so the old checker warned
+   "no wildcard arm for tuple" (found by the generic pairing heap's merge).
+   When every tuple component ranges over a FINITE space (bool / unit /
+   registered variant type) and the product is small, enumerate the
+   constructor combinations and check each is covered by some arm. *)
+
+let rec flatten_or (p : Ast.pattern) : Ast.pattern list =
+  match p.pnode with
+  | Ast.P_or (a, b) -> flatten_or a @ flatten_or b
+  | Ast.P_as (inner, _) -> flatten_or inner
+  | _ -> [p]
+
+(* One point of a component's finite space. `bool` on CCtor = has payload
+   (for printing the missing example as `HNode _`). *)
+type comp_case = CBool of bool | CCtor of string * bool | CUnit
+
+let comp_space (t : Ast.ty) : comp_case list option =
+  match Ast.walk t with
+  | Ast.TyBool -> Some [CBool true; CBool false]
+  | Ast.TyUnit -> Some [CUnit]
+  | Ast.TyCon (n, _) when Hashtbl.mem type_variants n ->
+    Some (List.map (fun (c, payload) -> CCtor (c, payload <> None))
+            (Hashtbl.find type_variants n))
+  | _ -> None
+
+(* Does sub-pattern `p` cover every value belonging to case `c`?
+   A constructor pattern covers its case only when the payload pattern is
+   irrefutable — a nested refutable payload is judged conservatively. *)
+let rec comp_covers (p : Ast.pattern) (c : comp_case) : bool =
+  match p.pnode with
+  | Ast.P_as (inner, _) -> comp_covers inner c
+  | Ast.P_or (a, b) -> comp_covers a c || comp_covers b c
+  | _ when is_total_pattern p -> true
+  | Ast.P_bool b -> (match c with CBool v -> b = v | _ -> false)
+  | Ast.P_constr (name, sub) ->
+    (match c with
+     | CCtor (cname, _) ->
+       name = cname
+       && (match sub with None -> true | Some sp -> is_total_pattern sp)
+     | _ -> false)
+  | _ -> false
+
+let show_comp_case = function
+  | CBool b -> string_of_bool b
+  | CCtor (c, true) -> c ^ " _"
+  | CCtor (c, false) -> c
+  | CUnit -> "()"
+
+let max_product_combos = 1024
+
 (* Check a Match expression.  Returns a list of warning strings (empty if
    the match is judged exhaustive).  `loc` is the location of the match
    expression for error reporting. *)
@@ -96,6 +149,47 @@ let check_match (loc : Loc.t)
           "%s: warning: non-exhaustive match (missing %s%s)"
           (Loc.to_string loc) vname p_str
       ) missing
+    | Ast.TyTuple ts
+      when (let spaces = List.map comp_space ts in
+            List.for_all (fun s -> s <> None) spaces
+            && List.fold_left
+                 (fun acc s -> acc * List.length (Option.get s)) 1 spaces
+               <= max_product_combos
+            && List.exists (fun p ->
+                 List.exists (fun p' ->
+                   match p'.Ast.pnode with
+                   | Ast.P_tuple ps -> List.length ps = List.length ts
+                   | _ -> false) (flatten_or p))
+                 unguarded_arms) ->
+      (* Every component ranges over a small finite space: enumerate the
+         product and check each combination against the tuple arms. *)
+      let spaces = List.map (fun t -> Option.get (comp_space t)) ts in
+      let tuple_arms =
+        List.concat_map flatten_or unguarded_arms
+        |> List.filter_map (fun p ->
+             match p.Ast.pnode with
+             | Ast.P_tuple ps when List.length ps = List.length ts -> Some ps
+             | _ -> None)
+      in
+      let rec combos = function
+        | [] -> [[]]
+        | s :: rest ->
+          List.concat_map (fun c ->
+            List.map (fun r -> c :: r) (combos rest)) s
+      in
+      let missing =
+        List.filter (fun combo ->
+          not (List.exists (fun ps -> List.for_all2 comp_covers ps combo)
+                 tuple_arms))
+          (combos spaces)
+      in
+      (match missing with
+       | [] -> []
+       | combo :: _ ->
+         [Printf.sprintf
+            "%s: warning: non-exhaustive match (missing (%s))"
+            (Loc.to_string loc)
+            (String.concat ", " (List.map show_comp_case combo))])
     | other_ty ->
       (* Phase 2: for other types (int, str, float, tuple, record, etc.),
          patterns are typically exhaustive only with a wildcard arm.  When

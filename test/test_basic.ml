@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.31" Version.v "0.1.31";
+  check "version is 0.1.32" Version.v "0.1.32";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2142,6 +2142,30 @@ let () =
   check "non-exhaustive: bool missing false"
     (warnings_of "match true with | true -> 1")
     "line 1, col 1: warning: non-exhaustive match (missing false)";
+  (* v0.1.32 (S-2): product-space check for tuple scrutinees. A tuple of
+     variants covered arm-by-arm is exhaustive even though no single arm
+     is total (the generic pairing heap's merge shape); a genuinely
+     missing combination is reported by example. *)
+  check "exhaustive: tuple-of-variants covered by combination arms"
+    (warnings_of
+      "type hp = HE | HN of int; \
+       match (HE, HN 1) with \
+       | (HE, _) -> 0 \
+       | (_, HE) -> 1 \
+       | (HN _, HN _) -> 2") "";
+  check "non-exhaustive: tuple combination reported by example"
+    (warnings_of
+      "type tl = Redq | Greenq; \
+       match (Greenq, Greenq) with \
+       | (Redq, _) -> 1 \
+       | (Greenq, Redq) -> 2")
+    "line 1, col 26: warning: non-exhaustive match (missing (Greenq, Greenq))";
+  check "exhaustive: tuple of bools covered pairwise"
+    (warnings_of
+      "match (true, false) with \
+       | (true, _) -> 1 \
+       | (false, true) -> 2 \
+       | (false, false) -> 3") "";
   check "non-exhaustive: opt missing None"
     (warnings_of
       "type 'a opt = None | Some of 'a;
@@ -5321,6 +5345,26 @@ let () =
       vec_codegen_c
         "let v = region R { let x = vec_new () in let _ = vec_push x 1 in x } in \
          vec_len v");
+  (* v0.1.32 (S-1): a LOCAL let sharing its name with a globalized
+     top-level let must declare a shadowing C local, not assign to the
+     global (which emitted invalid C — found via the prelude's list_max
+     using a local `m` while the program had a top-level `let m`). *)
+  assert_contains "top-global name reuse: local let shadows, not assigns"
+    (vec_codegen_c
+       "let m = map_new () in \
+        let use = fn (k: str) -> map_has m k in \
+        let _ = map_set m \"a\" 1 in \
+        let mx = list_max (Cons (3, Cons (7, Nil))) in \
+        if use \"a\" then mx else 0")
+    "__auto_type m = ";
+  (* v0.1.32 (S-3): mem_to_str allocates in the current region (it used
+     to malloc and leak). *)
+  assert_contains "mem_to_str allocates in the current region"
+    (vec_codegen_c
+       "extern fn mem_alloc: int -> int; \
+        extern fn mem_to_str: int -> int -> str; \
+        str_len (mem_to_str (mem_alloc 4) 4)")
+    "static char* mem_to_str(int p, int len) {\n  char* s = (char*)__lang_region_alloc(__lang_current_region";
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")
