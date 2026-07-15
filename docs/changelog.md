@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.33 — 2026-07-15
+
+_Polymorphic ordering: **`<` / `<=` / `>` / `>=` now work through type
+variables**, closing the gap derive-ord (v0.1.11) left open. The design
+is deliberately not a trait system: the scheme carries no constraint —
+instead **monomorphization plays the dictionary's role**. Every compiled
+instance of a polymorphic comparator compares at a concrete type, where
+the existing derive machinery (`cmp_<tag>`) specializes; the interpreter
+compares structurally at runtime. This is exactly how `==` has worked
+through type variables all along — ordering simply joins it (the
+historical "unresolved comparand defaults to int" rule is gone; programs
+that used the default still typecheck, since instantiation covers them)._
+
+_Consequences for free: the prelude's `list_sort`, `list_max`, and
+`list_min` are now generic — `list_sort [(3, "c"), (1, "a")]` sorts
+tuples with no annotations and no comparator; a hand-written
+`fn a -> fn b -> a < b` instantiates at every use type (the generic
+pairing-heap example drops its annotated comparator). Instances are
+structural only — there is no way to override a type's ordering (the
+derive family's philosophy), `_by` variants remain for explicit control,
+and the parity scope is interp / C / Wasm, as with derive-ord._
+
+---
+
 ## v0.1.32 — 2026-07-15
 
 _Cleanup release (three small fixes plus doc sync):_
