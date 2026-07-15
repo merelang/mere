@@ -50,17 +50,3 @@ let render = fn (rows: Person list) ->
   };
 
 };   // end of `module CsvWriter`
-
-// === Self-tests (outside the module; remove in actual use) ===
-
-let _ = print "=== csv_writer (module CsvWriter) ===";
-
-let people =
-  [Person { name = "Alice", age = 30, city = "Tokyo" },
-   Person { name = "Bob, Jr.", age = 25, city = "Osaka" },
-   Person { name = "Carol", age = 40, city = "He said \"hi\"" }];
-
-let csv = CsvWriter.render people;
-let _ = print csv;
-
-0

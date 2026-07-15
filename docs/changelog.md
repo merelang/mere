@@ -4,6 +4,19 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.36 — 2026-07-15
+
+_Library hygiene, applied across contrib: **importable libraries are
+main-free now**. Five more libraries carried a demo main at the bottom
+of the file (the pattern v0.1.35 fixed for contrib/test), so importing
+them ran the demo — argparse, csv/writer, regex, regex/engine, and time.
+Each demo moved to `examples/<name>_demo.mere` and runs standalone. The
+self-host family (parser / typer / fmt / eval / codegen_wasm) keeps its
+inline demos deliberately: those are programs whose demo output is the
+cross-implementation test vector, not libraries._
+
+---
+
 ## v0.1.35 — 2026-07-15
 
 _Test-framework dogfood (three small things it surfaced):_

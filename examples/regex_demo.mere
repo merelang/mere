@@ -1,0 +1,38 @@
+// examples/regex_demo.mere — demo of contrib/regex/regex.mere (module Regex).
+//
+// Moved out of the library file (v0.1.36 library hygiene): a library
+// must stay main-free so importing it never runs a demo.
+
+import "../contrib/regex/regex.mere";
+
+// === Self-tests (outside the module; remove when actually using) ===
+
+let run_case = fn (label: str) -> fn (pat_src: str) -> fn (subject: str) -> fn (expected: bool) ->
+  let pat = Regex.parse_re pat_src in
+  let actual = Regex.match_re pat subject in
+  let mark = if actual == expected then "ok " else "FAIL" in
+  print (mark ++ " | " ++ label ++ " | /" ++ pat_src ++ "/ " ++ subject ++ " => " ++ show actual);
+
+let _ = run_case"literal-hit"   "abc"    "abc"      true;
+let _ = run_case"literal-prefix" "abc"   "abcde"    true;
+let _ = run_case"literal-mid"   "bc"     "abcde"    true;
+let _ = run_case"literal-no"    "xyz"    "abc"      false;
+let _ = run_case"dot-mid"       "a.c"    "abc"      true;
+let _ = run_case"dot-no-empty"  "a.c"    "ac"       false;
+let _ = run_case"star-zero"     "ab*c"   "ac"       true;
+let _ = run_case"star-many"     "ab*c"   "abbbc"    true;
+let _ = run_case"star-mid"      "a.*z"   "anything-then-z"  true;
+let _ = run_case"plus-one"      "ab+c"   "abc"      true;
+let _ = run_case"plus-many"     "ab+c"   "abbbc"    true;
+let _ = run_case"plus-zero-no"  "ab+c"   "ac"       false;
+let _ = run_case"opt-zero"      "ab?c"   "ac"       true;
+let _ = run_case"opt-one"       "ab?c"   "abc"      true;
+let _ = run_case"opt-two-no"    "ab?c"   "abbc"     false;
+let _ = run_case"start-yes"     "^abc"   "abcdef"   true;
+let _ = run_case"start-no"      "^abc"   "xabc"     false;
+let _ = run_case"end-yes"       "abc$"   "xabc"     true;
+let _ = run_case"end-no"        "abc$"   "abcx"     false;
+let _ = run_case"full-yes"      "^a.+z$" "anything-then-z" true;
+let _ = run_case"full-no"       "^a.+z$" "a-then-y"  false;
+
+0

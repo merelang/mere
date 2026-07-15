@@ -1,0 +1,20 @@
+// examples/csv_writer_demo.mere — demo of contrib/csv/writer.mere (module CsvWriter).
+//
+// Moved out of the library file (v0.1.36 library hygiene): a library
+// must stay main-free so importing it never runs a demo.
+
+import "../contrib/csv/writer.mere";
+
+// === Self-tests (outside the module; remove in actual use) ===
+
+let _ = print "=== csv_writer (module CsvWriter) ===";
+
+let people =
+  [Person { name = "Alice", age = 30, city = "Tokyo" },
+   Person { name = "Bob, Jr.", age = 25, city = "Osaka" },
+   Person { name = "Carol", age = 40, city = "He said \"hi\"" }];
+
+let csv = CsvWriter.render people;
+let _ = print csv;
+
+0

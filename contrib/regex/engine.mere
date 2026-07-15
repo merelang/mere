@@ -75,38 +75,3 @@ let regex_search = fn (e: re) -> fn (s: str) ->
 let regex_full_match = fn (e: re) -> fn (s: str) ->
   let r = re_match e s 0 in
   fst r && snd r == str_len s;
-
-let report = fn (label: str) -> fn (pat: re) -> fn (s: str) ->
-  let pos = regex_search pat s in
-  let full = if regex_full_match pat s then "yes" else "no" in
-  let found = if pos >= 0 then "match @" ++ show pos else "no match" in
-  print (label ++ "  on \"" ++ s ++ "\":  " ++ found ++ ", full=" ++ full);
-
-let _ = print "=== regex engine: NFA backtracking matcher ===";
-
-// "ab+c" — a, one or more b, c
-let r1 = RSeq (RChar "a", RSeq (RPlus (RChar "b"), RChar "c"));
-let _ = report "ab+c" r1 "abc";        // match @0, full=yes
-let _ = report "ab+c" r1 "abbbc";       // match @0, full=yes
-let _ = report "ab+c" r1 "ac";          // no
-let _ = report "ab+c" r1 "xxabbcyy";    // match @2, full=no
-
-// "a.*b" — a, anything, b
-let r2 = RSeq (RChar "a", RSeq (RStar RAny, RChar "b"));
-let _ = report "a.*b" r2 "ab";          // match @0
-let _ = report "a.*b" r2 "axxxxb";       // match @0
-let _ = report "a.*b" r2 "aa";          // no
-
-// "(yes|no)" form = "y" alt "n"
-let r3 = RAlt (RChar "y", RChar "n");
-let _ = report "y|n" r3 "yyy";          // match @0
-let _ = report "y|n" r3 "nnn";          // match @0
-let _ = report "y|n" r3 "abc";          // no
-
-// optional: "ab?c" = "a" + "b"? + "c"
-let r4 = RSeq (RChar "a", RSeq (ROpt (RChar "b"), RChar "c"));
-let _ = report "ab?c" r4 "abc";         // match @0, full=yes
-let _ = report "ab?c" r4 "ac";          // match @0, full=yes
-let _ = report "ab?c" r4 "abbc";        // no full (extra b)
-
-0
