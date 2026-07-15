@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.31 — 2026-07-15
+
+_Memory model (stage 2 — the payoff): **`region R { }` now reclaims the
+values its body allocates**. Value allocations (strings, cons cells,
+variant nodes) target a thread-local **current region** instead of
+hardcoding the never-freed default region; a region block makes itself
+current for its body, deep-copies its result out into the enclosing
+region (stage 1's `__mcopy` machinery), and releases. Closure envs and
+container structs deliberately stay in the default region (they carry
+identity), stores into containers are safe by stage 1's copy-on-store,
+`channel_send` deep-copies the payload into a per-message region (freed
+on `recv` after copying out into the receiver's current region — a
+sender's scratch can die while the message is in flight), a container
+cannot escape as a block result (the typer's region-escape check fires;
+a codegen guard backs it up), and `try_or` restores the current region
+when a `fail` longjmps past a block. Block regions are heap-acquired
+with a one-deep per-thread cache, so a per-iteration block costs a
+pointer swap and a bump reset — and, critically, no stack struct's
+address escapes, which is what lets clang keep tail-calling
+(`show`/`to_json`/float-formatting helpers are `noinline` for the same
+reason: their inlined `asprintf(&local)` silently broke sibling-call
+optimization and deep loops overflowed the stack)._
+
+_Measured: the idiomatic line-at-a-time counter — plain `read_line` +
+`str_len` in a per-line region — now runs at **1.5 MB constant RSS over
+8M lines** (246 MB before; `wc -l` needs 2.5 MB). A 100k-iteration loop
+storing every 10,000th string into an outer map keeps exactly the stored
+data. Long-running servers can finally reclaim per-request memory in the
+string dialect, not just the byte dialect. Suite: 2093._
+
+---
+
 ## v0.1.30 — 2026-07-15
 
 _Memory model (stage 1 of the per-request-reclamation plan):

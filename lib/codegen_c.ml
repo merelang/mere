@@ -243,6 +243,11 @@ let cmp_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    values being stored. Seeded from map_instances / vec_instances after
    fn emission; transitive over components via add_type_and_deps. *)
 let copy_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* Region-block result types, registered during emission (Region_block
+   copies its result out via __mcopy_<tag>) and folded into copy_types at
+   collection time — emission runs before the collector is in scope. *)
+let region_result_types : Ast.ty list ref = ref []
 let needs_struct_cmp = needs_struct_eq
 
 (* Polymorphic record declarations: deferred to instantiation time. *)
@@ -1978,13 +1983,20 @@ let rec emit_expr (e : Ast.expr) : string =
          Printf.sprintf "({ __auto_type __c = %s; __c.fn(__c.env, 0); })"
            (emit_expr fn_e)
        in
+       (* v0.1.31: also save/restore the thread's current region — a fail
+          inside a `region R { }` longjmps past the block's normal exit,
+          which would leave __lang_current_region pointing at a dead stack
+          struct (the abandoned block's chain leaks, which is acceptable;
+          corrupting later allocations is not). *)
        Printf.sprintf
          "({ jmp_buf __saved_jmp; int __saved_set = __lang_fail_jmpbuf_set; \
+             __lang_region* __saved_cur = __lang_current_region; \
              memcpy(__saved_jmp, __lang_fail_jmpbuf, sizeof(jmp_buf)); \
              __lang_fail_jmpbuf_set = 1; \
              __auto_type __default = (%s); \
              __auto_type __res = __default; \
              if (setjmp(__lang_fail_jmpbuf) == 0) { __res = (%s); } \
+             else { __lang_current_region = __saved_cur; } \
              __lang_fail_jmpbuf_set = __saved_set; \
              memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
              __res; })"
@@ -2134,10 +2146,15 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> unsupported e.loc "vec_new: missing type info"
        in
        let region_var =
-         if region_name = "__heap" then "__lang_default_region"
+         (* v0.1.31: region locals are pointers now (heap-allocated block
+            regions — a stack struct whose address escapes into the
+            thread-local current region defeats sibling-call optimization,
+            and deep tail loops with per-iteration regions overflowed the
+            stack). The default region stays a static struct. *)
+         if region_name = "__heap" then "(&__lang_default_region)"
          else "__region_" ^ region_name
        in
-       Printf.sprintf "mere_vec_%s_new(&%s)" elem_tag region_var
+       Printf.sprintf "mere_vec_%s_new(%s)" elem_tag region_var
      | Ast.Var "vec_len" ->
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_vec_%s_len(%s)" elem_tag (emit_expr arg)
@@ -2298,10 +2315,10 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        Printf.sprintf
          "({ __auto_type __v = %s; \
-          %s __acc = (%s)__lang_region_alloc(&__lang_default_region, sizeof(%s_node)); \
+          %s __acc = (%s)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
           __acc->tag = %d; \
           for (int __i = __v->len - 1; __i >= 0; __i--) { \
-            %s __new_node = (%s)__lang_region_alloc(&__lang_default_region, sizeof(%s_node)); \
+            %s __new_node = (%s)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
             __new_node->tag = %d; \
             __new_node->payload.Cons.f0 = mere_vec_%s_get(__v, __i); \
             __new_node->payload.Cons.f1 = __acc; \
@@ -2386,10 +2403,15 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> "__heap"
        in
        let region_var =
-         if region_name = "__heap" then "__lang_default_region"
+         (* v0.1.31: region locals are pointers now (heap-allocated block
+            regions — a stack struct whose address escapes into the
+            thread-local current region defeats sibling-call optimization,
+            and deep tail loops with per-iteration regions overflowed the
+            stack). The default region stays a static struct. *)
+         if region_name = "__heap" then "(&__lang_default_region)"
          else "__region_" ^ region_name
        in
-       Printf.sprintf "mere_map_%s_%s_new(&%s)" k_tag v_tag region_var
+       Printf.sprintf "mere_map_%s_%s_new(%s)" k_tag v_tag region_var
      | Ast.Var "map_len" ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_len(%s)" k_tag v_tag (emit_expr arg)
@@ -2437,10 +2459,15 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> "__heap"
        in
        let region_var =
-         if region_name = "__heap" then "__lang_default_region"
+         (* v0.1.31: region locals are pointers now (heap-allocated block
+            regions — a stack struct whose address escapes into the
+            thread-local current region defeats sibling-call optimization,
+            and deep tail loops with per-iteration regions overflowed the
+            stack). The default region stays a static struct. *)
+         if region_name = "__heap" then "(&__lang_default_region)"
          else "__region_" ^ region_name
        in
-       Printf.sprintf "mere_strbuf_new(&%s)" region_var
+       Printf.sprintf "mere_strbuf_new(%s)" region_var
      | Ast.Var "strbuf_len" ->
        strbuf_used := true;
        Printf.sprintf "mere_strbuf_len(%s)" (emit_expr arg)
@@ -2464,7 +2491,12 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> "__heap"
        in
        let region_var =
-         if region_name = "__heap" then "__lang_default_region"
+         (* v0.1.31: region locals are pointers now (heap-allocated block
+            regions — a stack struct whose address escapes into the
+            thread-local current region defeats sibling-call optimization,
+            and deep tail loops with per-iteration regions overflowed the
+            stack). The default region stays a static struct. *)
+         if region_name = "__heap" then "(&__lang_default_region)"
          else "__region_" ^ region_name
        in
        (* Result is Vec[R, T] — register element type for runtime emission. *)
@@ -2474,7 +2506,7 @@ let rec emit_expr (e : Ast.expr) : string =
             Hashtbl.add vec_instances t_tag elem_ty
         with Not_found -> ());
        Printf.sprintf
-         "({ __auto_type __ov = %s; __auto_type __new = mere_vec_%s_new(&%s); \
+         "({ __auto_type __ov = %s; __auto_type __new = mere_vec_%s_new(%s); \
           for (int __i = 0; __i < __ov->len; __i++) { \
             mere_vec_%s_push(__new, mere_owned_vec_%s_get(__ov, __i)); \
           } __new; })"
@@ -2583,7 +2615,7 @@ let rec emit_expr (e : Ast.expr) : string =
          C). Reclaimed in bulk when main exits. *)
       let node = actual_type_name ^ "_node" in
       Printf.sprintf
-        "({ %s* __p = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); \
+        "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); \
          __p->tag = %d%s; __p; })"
         node node node tag
         (match arg_c_opt with
@@ -2685,14 +2717,49 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Region_block (name, body) ->
     (* Allocate a region buffer, evaluate body, free. The region's C
        local name is `__region_<name>` — accessed by Ref/`&R v` when
-       emitting `R.alloc(...)` calls inside body. Default cap 1 MB. *)
+       emitting `R.alloc(...)` calls inside body. Default cap 1 MB.
+
+       v0.1.31 (str-lifetime stage B): the block also makes itself the
+       thread's CURRENT region, so every value allocation in the body
+       (strings, cons cells, variant nodes) lands here and is reclaimed
+       at exit. The result is deep-copied out into the enclosing current
+       region (per-type __mcopy — stage E's machinery), so it survives
+       the free. Containers cannot be the result: their storage would
+       die with the block (their contents are safe via copy-on-store,
+       but the struct + arrays live where the container was created). *)
     let region_var = "__region_" ^ name in
+    let result_ty =
+      match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    let rec contains_container t =
+      match Ast.walk t with
+      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf"), _) -> true
+      | Ast.TyTuple ts -> List.exists contains_container ts
+      | Ast.TyCon (_, args) -> List.exists contains_container args
+      | _ -> false
+    in
+    if contains_container result_ty then
+      unsupported e.Ast.loc
+        ("a region block cannot return a Map / Vec / StrBuf — the \
+          container's storage is reclaimed with the block. Return a \
+          plain value, or create the container outside the block and \
+          store into it (stores copy their contents).");
+    region_result_types := result_ty :: !region_result_types;
+    let rtag = ty_tag result_ty in
+    (* The region struct is heap-acquired (thread-locally cached), not a
+       stack local: taking a stack struct's address into the thread-local
+       current region defeats clang's sibling-call optimization, and a
+       deep tail loop with a per-iteration region overflowed the stack. *)
     Printf.sprintf
-      "({ __lang_region %s; __lang_region_init(&%s, 1 << 20); \
+      "({ __lang_region* %s = __lang_region_block_acquire(); \
+       __lang_region* __saved_cur_%s = __lang_current_region; \
+       __lang_current_region = %s; \
        __auto_type __r_result = (%s); \
-       __lang_region_free(&%s); \
-       __r_result; })"
-      region_var region_var (emit_expr body) region_var
+       __lang_current_region = __saved_cur_%s; \
+       __auto_type __r_out = __mcopy_%s(__lang_current_region, __r_result); \
+       __lang_region_block_release(%s); \
+       __r_out; })"
+      region_var name region_var (emit_expr body) name rtag
+      region_var
   | Ast.Ref (_mode, region, inner) ->
     (* `&R v` — allocate v in region R's bump buffer and return a
        pointer of type `T*`. Uses typeof / __auto_type so we don't need
@@ -2701,7 +2768,7 @@ let rec emit_expr (e : Ast.expr) : string =
     Printf.sprintf
       "({ __auto_type __ref_v = (%s); \
        typeof(__ref_v)* __ref_p = (typeof(__ref_v)*) \
-         __lang_region_alloc(&%s, sizeof(__ref_v)); \
+         __lang_region_alloc(%s, sizeof(__ref_v)); \
        *__ref_p = __ref_v; __ref_p; })"
       (emit_expr inner) region_var
   | Ast.Record_lit (name, fields) ->
@@ -2723,7 +2790,7 @@ let rec emit_expr (e : Ast.expr) : string =
         | None -> unsupported e.loc "view literal missing type info"
       in
       Printf.sprintf
-        "({ %s* __view_p = (%s*) __lang_region_alloc(&__region_%s, sizeof(%s)); \
+        "({ %s* __view_p = (%s*) __lang_region_alloc(__region_%s, sizeof(%s)); \
          *__view_p = (%s){%s}; __view_p; })"
         name name region name name (String.concat ", " parts)
     end
@@ -3550,7 +3617,11 @@ let emit_closure_env_typedef (ce : closure_emission) : string =
 let emit_show_fn (tag : string) (t : Ast.ty) : string =
   let cty = c_type_of t in
   let header =
-    Printf.sprintf "static const char* show_%s(%s v)" tag cty
+    (* noinline: these helpers pass a LOCAL's address to asprintf. If one
+       inlines into a tail-recursive caller, the escaped local defeats
+       clang's sibling-call optimization and deep loops overflow the
+       stack (v0.1.31, found by per-iteration region blocks). *)
+    Printf.sprintf "__attribute__((noinline)) static const char* show_%s(%s v)" tag cty
   in
   match Ast.walk t with
   | Ast.TyInt ->
@@ -3663,7 +3734,7 @@ let emit_show_fn_forward_decl (tag : string) (t : Ast.ty) : string =
    to to_json_<tag>. Kept in sync with eval.ml's to_json_string. *)
 let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   let cty = c_type_of t in
-  let header = Printf.sprintf "static const char* to_json_%s(%s v)" tag cty in
+  let header = Printf.sprintf "__attribute__((noinline)) static const char* to_json_%s(%s v)" tag cty in
   match Ast.walk t with
   | Ast.TyInt ->
     header ^ " {\n  char* buf; asprintf(&buf, \"%d\", v); return buf;\n}"
@@ -3898,7 +3969,7 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
     if is_ptr then
       let node = cty ^ "_node" in
       Printf.sprintf
-        "({ %s* __p = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __p->tag = %d%s; __p; })"
+        "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __p->tag = %d%s; __p; })"
         node node node tag_n
         (match arg_c_opt with None -> "" | Some a -> "; __p->payload." ^ cname ^ " = " ^ a)
     else
@@ -3928,9 +3999,9 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
       let node = cty ^ "_node" in
       Printf.sprintf
         "  if (j->kind != MJ_ARR) __mj_die(\"expected a JSON array\");\n  \
-         %s __acc = ({ %s* __nil = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __nil->tag = %d; __nil; });\n  \
+         %s __acc = ({ %s* __nil = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __nil->tag = %d; __nil; });\n  \
          for (int __i = j->len - 1; __i >= 0; __i--) {\n    \
-           %s* __n = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s));\n    \
+           %s* __n = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s));\n    \
            __n->tag = %d;\n    \
            __n->payload.Cons.f0 = __ojnode_%s(j->items[__i]);\n    \
            __n->payload.Cons.f1 = __acc;\n    \
@@ -4667,7 +4738,7 @@ let str_concat_helper =
   String.concat "\n"
     [ "static const char* __lang_str_concat(const char* a, const char* b) {";
       "  size_t la = strlen(a), lb = strlen(b);";
-      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, la + lb + 1);";
+      "  char* r = (char*) __lang_region_alloc(__lang_current_region, la + lb + 1);";
       "  memcpy(r, a, la);";
       "  memcpy(r + la, b, lb);";
       "  r[la + lb] = '\\0';";
@@ -4739,7 +4810,7 @@ let str_concat_helper =
       "static const char* __lang_substring(const char* s, int start, int end_) {";
       "  int len = end_ - start;";
       "  if (len < 0) len = 0;";
-      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, len + 1);";
+      "  char* r = (char*) __lang_region_alloc(__lang_current_region, len + 1);";
       "  memcpy(r, s + start, (size_t)len);";
       "  r[len] = '\\0';";
       "  return r;";
@@ -4750,7 +4821,7 @@ let str_concat_helper =
          escape form. Stays consistent with interp's show_str. *)
       "static const char* __lang_str_escape(const char* s) {";
       "  size_t n = strlen(s);";
-      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, n * 2 + 1);";
+      "  char* r = (char*) __lang_region_alloc(__lang_current_region, n * 2 + 1);";
       "  size_t j = 0;";
       "  for (size_t i = 0; i < n; i++) {";
       "    char c = s[i];";
@@ -4790,7 +4861,7 @@ let str_concat_helper =
       "    if (c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\x0c') len--;";
       "    else break;";
       "  }";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, len + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, len + 1);";
       "  if (len > 0) memcpy(buf, s, len);";
       "  buf[len] = '\\0';";
       "  return buf;";
@@ -4815,7 +4886,7 @@ let str_concat_helper =
       "  if (n <= 0) return \"\";";
       "  size_t sl = strlen(s);";
       "  size_t total = sl * (size_t)n;";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, total + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, total + 1);";
       "  for (int i = 0; i < n; i++) memcpy(buf + i * sl, s, sl);";
       "  buf[total] = '\\0';";
       "  return buf;";
@@ -4824,7 +4895,7 @@ let str_concat_helper =
       (* Phase 36: str_rev — byte-level reverse. *)
       "static const char* __lang_str_rev(const char* s) {";
       "  size_t sl = strlen(s);";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, sl + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, sl + 1);";
       "  for (size_t i = 0; i < sl; i++) buf[i] = s[sl - 1 - i];";
       "  buf[sl] = '\\0';";
       "  return buf;";
@@ -4839,7 +4910,7 @@ let str_concat_helper =
       (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
       "static const char* __lang_to_upper(const char* s) {";
       "  size_t sl = strlen(s);";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, sl + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, sl + 1);";
       "  for (size_t i = 0; i < sl; i++) {";
       "    char c = s[i];";
       "    buf[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;";
@@ -4849,7 +4920,7 @@ let str_concat_helper =
       "}";
       "static const char* __lang_to_lower(const char* s) {";
       "  size_t sl = strlen(s);";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, sl + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, sl + 1);";
       "  for (size_t i = 0; i < sl; i++) {";
       "    char c = s[i];";
       "    buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;";
@@ -4876,7 +4947,7 @@ let str_concat_helper =
       "  /* Worst-case size: every char becomes new_str-length. */";
       "  size_t cap = slen + 1;";
       "  if (nlen > olen) cap += (slen / (olen > 0 ? olen : 1)) * (nlen - olen) + nlen;";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, cap);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, cap);";
       "  size_t bi = 0;";
       "  for (size_t i = 0; i < slen; ) {";
       "    if (i + olen <= slen && memcmp(s + i, old, olen) == 0) {";
@@ -4898,7 +4969,7 @@ let str_concat_helper =
       "  fseek(f, 0, SEEK_END);";
       "  long len = ftell(f);";
       "  fseek(f, 0, SEEK_SET);";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, (size_t)len + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, (size_t)len + 1);";
       "  if (len > 0) { size_t r = fread(buf, 1, (size_t)len, f); (void)r; }";
       "  buf[len] = '\\0';";
       "  fclose(f);";
@@ -4912,7 +4983,7 @@ let str_concat_helper =
       "    n += r;";
       "    if (n == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
       "  }";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, n + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, n + 1);";
       "  memcpy(buf, tmp, n); buf[n] = '\\0';";
       "  free(tmp);";
       "  return buf;";
@@ -4929,7 +5000,7 @@ let str_concat_helper =
       "    if (n + 1 == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
       "    tmp[n++] = (char)c;";
       "  }";
-      "  char* buf = (char*)__lang_region_alloc(&__lang_default_region, n + 1);";
+      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, n + 1);";
       "  memcpy(buf, tmp, n); buf[n] = '\\0';";
       "  free(tmp);";
       "  return buf;";
@@ -4987,7 +5058,7 @@ let str_concat_helper =
       "static const char* __lang_read_key(void) {";
       "  char c;";
       "  ssize_t n = read(0, &c, 1);";
-      "  char* s = (char*)__lang_region_alloc(&__lang_default_region, 2);";
+      "  char* s = (char*)__lang_region_alloc(__lang_current_region, 2);";
       "  if (n <= 0) { s[0] = 0; return s; }";
       "  s[0] = c; s[1] = 0;";
       "  return s;";
@@ -5054,7 +5125,7 @@ let str_concat_helper =
          escapes inside string literals for json_parser and the like. *)
       "static const char* __lang_str_unescape(const char* s) {";
       "  size_t n = strlen(s);";
-      "  char* r = (char*) __lang_region_alloc(&__lang_default_region, n + 1);";
+      "  char* r = (char*) __lang_region_alloc(__lang_current_region, n + 1);";
       "  size_t i = 0, j = 0;";
       "  while (i < n) {";
       "    if (s[i] == '\\\\' && i + 1 < n) {";
@@ -5080,7 +5151,7 @@ let str_concat_helper =
       (* Phase 34.1 / v0.1.12: str_of_float — %.12g, then append ".0" for
          integer-valued floats (kept identical to the interp's format_float
          and the Wasm JS host). *)
-      "static const char* __lang_str_of_float(double f) {";
+      "__attribute__((noinline)) static const char* __lang_str_of_float(double f) {";
       "  char* buf;";
       "  asprintf(&buf, \"%.12g\", f);";
       "  int has_dot = 0;";
@@ -5146,6 +5217,16 @@ let region_runtime_helpers =
       "static __lang_region __lang_default_region;";
       "static pthread_mutex_t __lang_default_region_lock = PTHREAD_MUTEX_INITIALIZER;";
       "";
+      "/* v0.1.31 (str-lifetime stage B): the thread-local CURRENT region.";
+      "   Value allocations (strings, cons cells, variant nodes) target this";
+      "   instead of hardcoding the default region, so a `region R { ... }`";
+      "   block can make itself current and reclaim everything its body";
+      "   allocated at exit. Closure envs and container structs stay in the";
+      "   default region (or their binding region) — they carry identity and";
+      "   must not die with a scratch block. Each thread starts at the";
+      "   default region. */";
+      "static _Thread_local __lang_region* __lang_current_region = &__lang_default_region;";
+      "";
       "static void* __lang_region_alloc(__lang_region* r, size_t n) {";
       "  int shared = (r == &__lang_default_region);";
       "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
@@ -5169,6 +5250,35 @@ let region_runtime_helpers =
       "    b = prev;";
       "  }";
       "  r->blocks = NULL;";
+      "}";
+      "";
+      "/* Block regions are heap structs, cached one-deep per thread so a";
+      "   per-iteration `region R { }` in a hot loop costs a pointer swap";
+      "   and a bump reset instead of malloc + free. (Also: a STACK region";
+      "   struct whose address escapes into the thread-local current region";
+      "   defeats clang's sibling-call optimization — deep tail loops with";
+      "   per-iteration regions overflowed the stack.) Release keeps the";
+      "   region only if it never grew past its first block (the common";
+      "   case); a grown chain is freed and re-seeded. */";
+      "static _Thread_local __lang_region* __lang_region_cache = NULL;";
+      "";
+      "static __lang_region* __lang_region_block_acquire(void) {";
+      "  __lang_region* r = __lang_region_cache;";
+      "  if (r) { __lang_region_cache = NULL; r->top = r->base; return r; }";
+      "  r = (__lang_region*)malloc(sizeof(__lang_region));";
+      "  __lang_region_init(r, 1 << 20);";
+      "  return r;";
+      "}";
+      "";
+      "static void __lang_region_block_release(__lang_region* r) {";
+      "  if (r->blocks->prev) {";
+      "    /* grew past the first block: free the chain, re-seed fresh */";
+      "    __lang_region_free(r);";
+      "    __lang_region_init(r, 1 << 20);";
+      "  }";
+      "  r->top = r->base;";
+      "  if (__lang_region_cache) { __lang_region_free(r); free(r); }";
+      "  else __lang_region_cache = r;";
       "}" ]
 
 (* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan
@@ -5361,7 +5471,7 @@ let strbuf_runtime =
       "     wide default region so the returned str outlives the StrBuf's";
       "     scoped region. Avoids dangling pointers when";
       "     `region R { ...; strbuf_to_str b }` returns a value out of R. */";
-      "  char* r = (char*)__lang_region_alloc(&__lang_default_region, sb->len + 1);";
+      "  char* r = (char*)__lang_region_alloc(__lang_current_region, sb->len + 1);";
       "  for (int i = 0; i < sb->len; i++) r[i] = sb->data[i];";
       "  r[sb->len] = '\\0';";
       "  return r;";
@@ -5444,11 +5554,11 @@ let str_list_helpers =
       "static list_str __lang_str_split(const char* s, const char* delim) {";
       "  size_t slen = strlen(s);";
       "  size_t dlen = strlen(delim);";
-      "  list_str nil_node = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "  list_str nil_node = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  nil_node->tag = 0;";
       "  if (dlen == 0) {";
       "    /* empty delim: return the whole string as a single element (matches interp) */";
-      "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->tag = 1;";
       "    cons->payload.Cons.f0 = s;";
       "    cons->payload.Cons.f1 = nil_node;";
@@ -5461,9 +5571,9 @@ let str_list_helpers =
       "    else i++;";
       "  }";
       "  /* allocate cons cells */";
-      "  list_str* cells = (list_str*)__lang_region_alloc(&__lang_default_region, n * sizeof(list_str));";
+      "  list_str* cells = (list_str*)__lang_region_alloc(__lang_current_region, n * sizeof(list_str));";
       "  for (size_t k = 0; k < n; k++) {";
-      "    cells[k] = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    cells[k] = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cells[k]->tag = 1;";
       "  }";
       "  /* fill tokens + link */";
@@ -5471,7 +5581,7 @@ let str_list_helpers =
       "  for (size_t i = 0; i + dlen <= slen; ) {";
       "    if (memcmp(s + i, delim, dlen) == 0) {";
       "      size_t tlen = i - start;";
-      "      char* tok = (char*)__lang_region_alloc(&__lang_default_region, tlen + 1);";
+      "      char* tok = (char*)__lang_region_alloc(__lang_current_region, tlen + 1);";
       "      memcpy(tok, s + start, tlen);";
       "      tok[tlen] = '\\0';";
       "      cells[idx]->payload.Cons.f0 = tok;";
@@ -5483,7 +5593,7 @@ let str_list_helpers =
       "  }";
       "  /* last token */";
       "  size_t tlen = slen - start;";
-      "  char* tok = (char*)__lang_region_alloc(&__lang_default_region, tlen + 1);";
+      "  char* tok = (char*)__lang_region_alloc(__lang_current_region, tlen + 1);";
       "  memcpy(tok, s + start, tlen);";
       "  tok[tlen] = '\\0';";
       "  cells[idx]->payload.Cons.f0 = tok;";
@@ -5504,7 +5614,7 @@ let str_list_helpers =
       "    first = 0;";
       "    cur = cur->payload.Cons.f1;";
       "  }";
-      "  char* r = (char*)__lang_region_alloc(&__lang_default_region, total + 1);";
+      "  char* r = (char*)__lang_region_alloc(__lang_current_region, total + 1);";
       "  size_t pos = 0;";
       "  first = 1;";
       "  cur = xs;";
@@ -5540,18 +5650,18 @@ let str_list_helpers =
       "    if (strcmp(ent->d_name, \".\") == 0 || strcmp(ent->d_name, \"..\") == 0) continue;";
       "    if (n == cap) { cap *= 2; arr = (const char**)realloc(arr, cap * sizeof(char*)); }";
       "    size_t nlen = strlen(ent->d_name);";
-      "    char* copy = (char*)__lang_region_alloc(&__lang_default_region, nlen + 1);";
+      "    char* copy = (char*)__lang_region_alloc(__lang_current_region, nlen + 1);";
       "    memcpy(copy, ent->d_name, nlen + 1);";
       "    arr[n++] = copy;";
       "  }";
       "  closedir(d);";
       "  qsort(arr, n, sizeof(char*), __lang_list_dir_qsort);";
-      "  list_str nil_node = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "  list_str nil_node = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  nil_node->tag = 0;";
       "  list_str head = nil_node;";
       "  for (size_t k = 0; k < n; k++) {";
       "    size_t i = n - 1 - k;";
-      "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->tag = 1;";
       "    cons->payload.Cons.f0 = arr[i];";
       "    cons->payload.Cons.f1 = head;";
@@ -5567,15 +5677,15 @@ let str_list_helpers =
       "int __lang_argc = 0;";
       "char** __lang_argv = 0;";
       "static list_str __lang_args(void) {";
-      "  list_str head = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "  list_str head = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  head->tag = 0;";
       "  for (int k = 1; k < __lang_argc; k++) {";
       "    int i = __lang_argc - k;  /* reverse so argv[1] ends up first */";
       "    const char* a = __lang_argv[i];";
       "    size_t nlen = strlen(a);";
-      "    char* copy = (char*)__lang_region_alloc(&__lang_default_region, nlen + 1);";
+      "    char* copy = (char*)__lang_region_alloc(__lang_current_region, nlen + 1);";
       "    memcpy(copy, a, nlen + 1);";
-      "    list_str cons = (list_str)__lang_region_alloc(&__lang_default_region, sizeof(struct list_str_node));";
+      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->tag = 1;";
       "    cons->payload.Cons.f0 = copy;";
       "    cons->payload.Cons.f1 = head;";
@@ -6674,6 +6784,12 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
   String.concat "\n"
     [ Printf.sprintf "typedef struct %s {" s;
       Printf.sprintf "  %s* buf;" cty;
+      (* v0.1.31 (stage B): each queued message owns a malloc-backed
+         mini-region holding a deep copy of the payload, so a sender's
+         scratch region can be reclaimed while the message is in flight.
+         recv copies the payload out into the receiving thread's current
+         region and frees the message region. *)
+      "  __lang_region** regs;";
       "  int len; int cap; int head;";
       "  pthread_mutex_t m;";
       "  pthread_cond_t c;";
@@ -6683,20 +6799,30 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %s* ch = (%s*)malloc(sizeof(%s));" s s s;
       "  ch->cap = 8; ch->len = 0; ch->head = 0;";
       Printf.sprintf "  ch->buf = (%s*)malloc(sizeof(%s) * (size_t)ch->cap);" cty cty;
+      "  ch->regs = (__lang_region**)malloc(sizeof(__lang_region*) * (size_t)ch->cap);";
       "  pthread_mutex_init(&ch->m, NULL);";
       "  pthread_cond_init(&ch->c, NULL);";
       "  return ch;";
       "}";
       "";
       Printf.sprintf "static int %s_send(%s* ch, %s v) {" s s cty;
+      "  __lang_region* mr = (__lang_region*)malloc(sizeof(__lang_region));";
+      "  __lang_region_init(mr, 256);";
+      Printf.sprintf "  v = __mcopy_%s(mr, v);" tag;
       "  pthread_mutex_lock(&ch->m);";
       "  if (ch->len == ch->cap) {";
       "    int nc = ch->cap * 2;";
       Printf.sprintf "    %s* nb = (%s*)malloc(sizeof(%s) * (size_t)nc);" cty cty cty;
-      "    for (int i = 0; i < ch->len; i++) nb[i] = ch->buf[(ch->head + i) % ch->cap];";
-      "    free(ch->buf); ch->buf = nb; ch->head = 0; ch->cap = nc;";
+      "    __lang_region** nr = (__lang_region**)malloc(sizeof(__lang_region*) * (size_t)nc);";
+      "    for (int i = 0; i < ch->len; i++) {";
+      "      nb[i] = ch->buf[(ch->head + i) % ch->cap];";
+      "      nr[i] = ch->regs[(ch->head + i) % ch->cap];";
+      "    }";
+      "    free(ch->buf); free(ch->regs);";
+      "    ch->buf = nb; ch->regs = nr; ch->head = 0; ch->cap = nc;";
       "  }";
       "  ch->buf[(ch->head + ch->len) % ch->cap] = v;";
+      "  ch->regs[(ch->head + ch->len) % ch->cap] = mr;";
       "  ch->len++;";
       "  pthread_cond_signal(&ch->c);";
       "  pthread_mutex_unlock(&ch->m);";
@@ -6707,10 +6833,14 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  pthread_mutex_lock(&ch->m);";
       "  while (ch->len == 0) pthread_cond_wait(&ch->c, &ch->m);";
       Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
+      "  __lang_region* mr = ch->regs[ch->head];";
       "  ch->head = (ch->head + 1) % ch->cap;";
       "  ch->len--;";
       "  pthread_mutex_unlock(&ch->m);";
-      "  return v;";
+      Printf.sprintf "  %s out = __mcopy_%s(__lang_current_region, v);" cty tag;
+      "  __lang_region_free(mr);";
+      "  free(mr);";
+      "  return out;";
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
@@ -6970,6 +7100,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset of_json_opt_types;
   Hashtbl.reset eq_types;
   Hashtbl.reset cmp_types;
+  region_result_types := [];
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
      for nested types) happens later via mono_record_typedefs. *)
@@ -7473,6 +7604,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       add_type_and_deps copy_types v_ty) map_instances;
     Hashtbl.iter (fun _ elem_ty ->
       add_type_and_deps copy_types elem_ty) vec_instances;
+    (* v0.1.31 (stage B): region-block results and channel elements are
+       copied too — out of the dying block, and across threads into a
+       per-message region. *)
+    List.iter (add_type_and_deps copy_types) !region_result_types;
+    Hashtbl.iter (fun _ elem_ty ->
+      add_type_and_deps copy_types elem_ty) channel_instances;
     let tags =
       List.sort compare
         (Hashtbl.fold (fun tag t acc -> (tag, t) :: acc) copy_types [])
