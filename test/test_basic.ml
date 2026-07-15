@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.34" Version.v "0.1.34";
+  check "version is 0.1.35" Version.v "0.1.35";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8623,6 +8623,22 @@ let () =
   check "P3: json parser+writer compose (array round-trip)"
     (json_eval "Json.to_json_str (Json.parse_json \"[1, 2, 3]\")")
     "[1,2,3]";
+  (* v0.1.35 (mtest dogfood): contrib/test is a pure module now — its demo
+     main used to live at the bottom of the library file, so every importer
+     RAN it. And its generic assert_eq works THROUGH a type variable (the
+     trait-v2 shape: `show`/`==` on a tyvar-typed helper param — mono plays
+     the dictionary, same as v0.1.33's ordering). *)
+  check "mtest: generic assert_eq through a tyvar helper, all pass"
+    (Pipeline.process ~base_dir:project_root
+       (Printf.sprintf
+          "import \"%s/contrib/test/test.mere\";\n\
+           let roundtrip = fn s -> fn (name: str) -> fn x -> \
+             Test.assert_eq s name x x in \
+           let s = Test.new_suite () in \
+           let _ = roundtrip s \"int\" 42 in \
+           let _ = roundtrip s \"pair\" (2, (true, \"hi\")) in \
+           Test.exit_status s" project_root))
+    "0";
   check "P3: json serializer handles all constructors"
     (json_eval
        "Json.to_json_str (Json.JArr (Cons (Json.JBool true, Cons (Json.JNull, Cons (Json.JNum 7, Nil)))))")

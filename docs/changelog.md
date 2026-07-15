@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.35 — 2026-07-15
+
+_Test-framework dogfood (three small things it surfaced):_
+
+_**Generic assertions confirmed working.** `show` (like `==`, and like
+`<` since v0.1.33) works through type variables — monomorphization plays
+the dictionary — so contrib/test's `assert_eq` is genuinely generic: a
+helper `fn s -> fn name -> fn x -> Test.assert_eq s name x x` asserts on
+ints, tuples, nested pairs, and prints failing values with no
+annotations. No language change was needed; the regression test pins it._
+
+_**Library files must not carry a demo main.** contrib/test's demo lived
+at the bottom of the library file, so every importer *ran* it (noise, an
+intentional FAIL, and the demo's exit status). The demo moved to
+`examples/test_framework_demo.mere`; the library is module-only now,
+like contrib/xml._
+
+_**`-I` now works when running a file.** The import search path flag was
+honored by `-c` / `-l` / `-w` but silently dropped by the interpreter
+path (`mere -I <dir> file.mere` failed to resolve imports that
+`mere -c -I <dir>` accepted) — the run entry points now pass the search
+paths through, closing another CLI asymmetry (cousin of v0.1.29's)._
+
+---
+
 ## v0.1.34 — 2026-07-15
 
 _Soundness (found by playing the live 2048 for ten thousand headless

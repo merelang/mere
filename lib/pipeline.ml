@@ -195,10 +195,10 @@ let process_decls eval_env type_env decls =
       Typer.alias_record alias target
   ) decls
 
-let process ?base_dir s =
+let process ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
-  let prog = parse_program ?base_dir s in
+  let prog = parse_program ?base_dir ~search_paths s in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;

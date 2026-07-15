@@ -84,20 +84,3 @@ let exit_status = fn suite ->
   if map_get counters "fail" == 0 then 0 else 1;
 
 };   // end of `module Test`
-
-// === Self-tests (outside the module, kept as a demo) ===
-
-let _ = print "=== test framework demo ===";
-let s = Test.new_suite ();
-
-let _ = Test.assert_eq s "1 + 1 = 2" 2 (1 + 1);
-let _ = Test.assert_eq s "string concat" "hi" ("h" ++ "i");
-let _ = Test.assert_eq s "list length" 3 (list_len (Cons (1, Cons (2, Cons (3, Nil)))));
-let _ = Test.assert_true s "5 > 3" (5 > 3);
-let _ = Test.assert_false s "5 < 3" (5 < 3);
-
-// Intentionally fail one case (to demonstrate assert_eq behavior)
-let _ = Test.assert_eq s "(intentional fail) 2 = 3" 2 3;
-
-let _ = Test.summary s;
-Test.exit_status s

@@ -340,7 +340,9 @@ let () =
        resolves relative to the running file. *)
     let base = Filename.dirname path in
     Mere.Eval.program_argv := [];
-    run_action (Mere.Pipeline.process ~base_dir:base) path source
+    run_action
+      (Mere.Pipeline.process ~base_dir:base ~search_paths:!search_paths)
+      path source
   | _ :: path :: rest_args when String.length path > 0 && path.[0] <> '-' ->
     (* Phase 44: `mere <path> arg1 arg2 ...` — pass extra args to the program.
        v0.1.12 (N3): hand the args AFTER the script path to eval's `args ()`
@@ -349,7 +351,9 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     Mere.Eval.program_argv := rest_args;
-    run_action (Mere.Pipeline.process ~base_dir:base) path source
+    run_action
+      (Mere.Pipeline.process ~base_dir:base ~search_paths:!search_paths)
+      path source
   | _ ->
     usage ();
     exit 1
