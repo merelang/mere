@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.30" Version.v "0.1.30";
+  check "version is 0.1.31" Version.v "0.1.31";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2949,13 +2949,13 @@ let () =
     "__lang_region_alloc";
   assert_contains "codegen: region block initializes + frees buffer"
     (codegen "region R { 42 }")
-    "__lang_region_init(&__region_R";
+    "__lang_region* __region_R = __lang_region_block_acquire()";
   assert_contains "codegen: region block frees at end"
     (codegen "region R { 42 }")
-    "__lang_region_free(&__region_R)";
+    "__lang_region_block_release(__region_R)";
   assert_contains "codegen: Ref allocates in region and copies"
     (codegen "region R { let x = &R 5 in 42 }")
-    "__lang_region_alloc(&__region_R";
+    "__lang_region_alloc(__region_R";
   assert_contains "codegen: Ref uses typeof for inner type"
     (codegen "region R { let x = &R 5 in 42 }")
     "typeof(__ref_v)*";
@@ -2991,7 +2991,7 @@ let () =
     (codegen_with_decls
       "view CgCell2[R] of int { v: int };\n\
        region R { let c = CgCell2 { v = 7 } in c.v }")
-    "__lang_region_alloc(&__region_R, sizeof(CgCell2))";
+    "__lang_region_alloc(__region_R, sizeof(CgCell2))";
   assert_contains "codegen: view field access uses -> "
     (codegen_with_decls
       "view CgCell3[R] of int { v: int };\n\
@@ -3019,9 +3019,9 @@ let () =
   assert_contains "codegen: main frees default region"
     (codegen_with_decls "1 + 2")
     "__lang_region_free(&__lang_default_region)";
-  assert_contains "codegen: str_concat allocates in default region"
+  assert_contains "codegen: str_concat allocates in the current region (v0.1.31)"
     (codegen_with_decls "\"hi\" ++ \"!\"")
-    "__lang_region_alloc(&__lang_default_region, la + lb + 1)";
+    "__lang_region_alloc(__lang_current_region, la + lb + 1)";
   assert_no_contains "codegen: str_concat no longer mallocs"
     (codegen_with_decls "\"hi\" ++ \"!\"")
     "malloc(la + lb + 1)";
@@ -3189,7 +3189,7 @@ let () =
          | CgNil3 -> 0\n\
          | CgCons3 (h, t) -> h + sum t\n\
        in sum (CgCons3 (1, CgNil3))")
-    "__lang_region_alloc(&__lang_default_region, sizeof(CgList3_node))";
+    "__lang_region_alloc(__lang_current_region, sizeof(CgList3_node))";
   assert_contains "codegen: match on recursive variant uses -> access"
     (codegen_with_decls
       "type CgList4 = CgNil4 | CgCons4 of int * CgList4;\n\
@@ -5284,6 +5284,43 @@ let () =
     c_src_cos "k = __mcopy_str(m->region, k);";
   assert_contains "copy-on-store: vec_push copies the element"
     c_src_cos "x = __mcopy_str(v->region, x);";
+  (* v0.1.31 (str-lifetime stage B): region blocks capture value
+     allocations. The block makes itself the thread's current region
+     (strings / cons cells / variant nodes land in it), deep-copies its
+     result out into the enclosing region, and releases. Channel payloads
+     are copied into a per-message region on send and out into the
+     receiver's current region on recv, so a sender's scratch region can
+     die while the message is in flight. Measured: an idiomatic
+     line-at-a-time counter with a per-line region runs at constant
+     1.5 MB RSS over 8M lines (was 246 MB). *)
+  let c_src_scratch =
+    vec_codegen_c
+      "let n = region R { str_len (\"a\" ++ \"b\") } in n" in
+  assert_contains "region block: makes itself the current region"
+    c_src_scratch "__lang_current_region = __region_R;";
+  assert_contains "region block: copies its result out"
+    c_src_scratch "__mcopy_int(__lang_current_region, __r_result)";
+  assert_contains "region block: heap-acquired (tail-call friendly)"
+    c_src_scratch "__lang_region_block_acquire()";
+  let c_src_chan =
+    vec_codegen_c
+      "let ch = channel_new () in \
+       let _ = channel_send ch \"x\" in \
+       str_len (channel_recv ch)" in
+  assert_contains "channel: send deep-copies into a per-message region"
+    c_src_chan "v = __mcopy_str(mr, v);";
+  assert_contains "channel: recv copies out into the receiver's region"
+    c_src_chan "__mcopy_str(__lang_current_region, v);";
+  (* A container cannot be a region block's result — its storage dies
+     with the block. The TYPER's region-escape check catches this first
+     (containers created inside the block bind to the block's region);
+     the codegen-level guard stays as a second line of defense. *)
+  check_raises_containing "region block: returning a Vec is rejected"
+    "region escape"
+    (fun () ->
+      vec_codegen_c
+        "let v = region R { let x = vec_new () in let _ = vec_push x 1 in x } in \
+         vec_len v");
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")
@@ -5418,7 +5455,7 @@ let () =
   assert_no_contains "inner-lift: same-named inner fns across hosts don't merge captures"
     c_two_loops "__lifted_loop_0(int x, int y";
   assert_contains "vec: C codegen wires vec_new outside region to default arena"
-    c_src_default_region "mere_vec_int_new(&__lang_default_region)";
+    c_src_default_region "mere_vec_int_new((&__lang_default_region))";
   assert_contains "vec: C codegen routes vec_push to runtime helper"
     c_src_default_region "mere_vec_int_push";
   assert_contains "vec: C codegen routes vec_len to runtime helper"
@@ -5428,7 +5465,7 @@ let () =
       "region R { let v = vec_new () in let r = vec_push v 7 in vec_len v }"
   in
   assert_contains "vec: C codegen binds vec_new inside region R to that region"
-    c_src_region_R "mere_vec_int_new(&__region_R)";
+    c_src_region_R "mere_vec_int_new(__region_R)";
   (* Phase 15.2: Vec[R, T] supports any T that is a codegen-supported concrete
      type — int / bool / str / tuple / record / variant. Below we confirm
      acceptance for str / tuple / polymorphic record as examples. *)
