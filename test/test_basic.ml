@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.36" Version.v "0.1.36";
+  check "version is 0.1.37" Version.v "0.1.37";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -4312,22 +4312,21 @@ let () =
   assert_contains "wasm: Region_block emits body directly (no save/restore)"
     (wasm "region R { 42 }")
     "(func $main";
-  assert_no_contains "wasm: Region_block does not save bump in main body"
-    (* The (local.set N (global.get $__lang_bump)) save form was emitted in main
-       before the fix; after the fix it no longer appears inside main. *)
-    (let w = wasm "region R { 42 }" in
-     (* Extract only the main function: everything from "(func $main" onward. *)
-     let needle = "(func $main" in
-     let nl = String.length needle and wl = String.length w in
-     let rec find i =
-       if i + nl > wl then None
-       else if String.sub w i nl = needle then Some i
-       else find (i + 1)
-     in
-     match find 0 with
-     | Some i -> String.sub w i (wl - i)
-     | None -> w)
-    "global.get $__lang_bump";
+  (* v0.1.37: regions RECLAIM on Wasm again — the sound replacement for
+     the Phase 16.4 leak semantics (which this test used to pin). The
+     block saves the bump, evaluates the body, copies its result out
+     (boxed results, via $__mcopy_<tag>), and restores. *)
+  assert_contains "wasm: region block releases the bump on exit"
+    (wasm "region R { 42 }") "global.set $__rgn_tmp";
+  assert_contains "wasm: region block copies a boxed result out"
+    (wasm "str_len (region R { \"a\" ++ \"b\" })") "call $__mcopy_str";
+  (* Escaping stores are compile errors, not dangling pointers. *)
+  check_raises_containing "wasm: storing a heap value from inside a region is rejected"
+    "not supported yet"
+    (fun () ->
+      wasm "let v = vec_new () in \
+            let _ = region R { vec_push v (\"a\" ++ \"b\") } in \
+            vec_len v");
 
   (* --- Diagnostic format (Phase 7.1) ---
      Multi-line code frame with line numbers + caret with inline message. *)

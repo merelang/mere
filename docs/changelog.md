@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.37 — 2026-07-15
+
+_Memory model, ported to Wasm: **`region R { }` reclaims on the Wasm
+backend** — the sound version of the save/restore that Phase 16.4
+removed as broken. Three parts make it sound where the old attempt was
+not: the block's result is **deep-copied out** (per-type `$__mcopy_<tag>`
+fns, twice — once above the block's garbage, then down into the enclosing
+range after the bump restores; the ranges cannot overlap); **escaping
+stores are compile errors** (pushing a heap value into a container
+created outside the block, `map_set`, `strbuf_push` on an outer buffer,
+`channel_send`, `spawn`, and externs that register callbacks — a
+container created *inside* the block is free to mutate, it dies with the
+block); and **escaping closures/containers/borrows are rejected via the
+result type**. Wasm needs no thread-locals or heap blocks: a mark saved
+on the value stack and one scratch global do it._
+
+_Measured on the live 2048 with a per-move region around the key
+handler: the bump pointer stays at exactly 4,544 bytes across 30,000
+moves — zero net allocation per move, zero traps. The same game
+previously burned ~8.4 KB per move and died at ~7,700. The remaining
+honest gap vs the C backend: no per-container storage (hence the
+escaping-store errors instead of C's copy-on-store), recorded in
+memory-model.md §3.5._
+
+---
+
 ## v0.1.36 — 2026-07-15
 
 _Library hygiene, applied across contrib: **importable libraries are
