@@ -133,9 +133,16 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   sustained load.
 
 Backend note: the interpreter is GC-backed (same value semantics, memory
-behaviour trivially fine); the Wasm backend still uses page-lifetime bump
-allocation — browser-scale programs are unaffected, and a long-lived Wasm
-server would need the v0.1.31 treatment ported.
+behaviour trivially fine). The Wasm backend reclaims region blocks as of
+v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`),
+with one honest difference from C: there is no per-container storage, so
+instead of copy-on-store, **escaping stores are compile errors** —
+pushing a heap value into a container created outside the block,
+`map_set` / `strbuf_push` on outer containers, `channel_send`, `spawn`,
+and closure-registering externs are rejected inside a region block
+(containers created inside the block mutate freely and die with it).
+Measured: the playground 2048 with a per-move region holds its bump
+pointer constant across 30,000 moves.
 
 ---
 

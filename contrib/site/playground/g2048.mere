@@ -119,20 +119,26 @@ let board = vec_new ();
 let st = vec_new ();
 let screen = dom_get_by_id "board";
 let redraw = fn (u: unit) -> dom_set_text screen (render board);
+// Each keypress runs inside a region block (v0.1.37): the snapshots,
+// the render string, and every intermediate die with the move, so the
+// game plays indefinitely (it used to exhaust the 64 MB linear memory
+// at ~7,700 moves — ~8.4 KB of garbage per move).
 let handle = fn (key: str) ->
-  let dir =
-    if str_eq key "ArrowLeft" then "L"
-    else if str_eq key "ArrowRight" then "R"
-    else if str_eq key "ArrowUp" then "U"
-    else if str_eq key "ArrowDown" then "D"
-    else "" in
-  if str_eq dir "" then ()
-  else
-    let before = snap board 0 in
-    let _ = move board dir in
-    let after = snap board 0 in
-    let _ = if not (eq_list before after) then spawn_tile board st else () in
-    redraw ();
+  region R {
+    let dir =
+      if str_eq key "ArrowLeft" then "L"
+      else if str_eq key "ArrowRight" then "R"
+      else if str_eq key "ArrowUp" then "U"
+      else if str_eq key "ArrowDown" then "D"
+      else "" in
+    if str_eq dir "" then ()
+    else
+      let before = snap board 0 in
+      let _ = move board dir in
+      let after = snap board 0 in
+      let _ = if not (eq_list before after) then spawn_tile board st else () in
+      redraw ()
+  };
 let rec init = fn (i: int) -> if i == 16 then () else let _ = vec_push board 0 in init (i + 1) in
 let _ = init 0 in
 let _ = vec_push st 12345 in

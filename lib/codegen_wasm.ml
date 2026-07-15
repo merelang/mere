@@ -567,6 +567,54 @@ let rec add_type_into (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
       | _ -> ()
     end
 
+(* ── v0.1.37: per-type deep-copy fns for region-block copy-out ──
+   `$__mcopy_<tag> (param $v i32) (result i32)` copies a value into fresh
+   bump allocations. Scalars pass through (they are raw i32s, not
+   pointers); str copies bytes; float re-boxes; tuples / records /
+   variant nodes copy structurally; containers / closures / channels
+   pass through as pointers (region-block guards reject the cases where
+   that would dangle). Mirrors emit_cmp_fn's specialization. *)
+let wasm_copy_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+let rec add_wasm_copy_deps (t : Ast.ty) : unit =
+  let t = Ast.walk t in
+  let tag = ty_tag t in
+  if Hashtbl.mem wasm_copy_types tag then ()
+  else begin
+    Hashtbl.add wasm_copy_types tag t;
+    match t with
+    | Ast.TyTuple ts -> List.iter add_wasm_copy_deps ts
+    | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+      let info = Hashtbl.find Typer.records n in
+      let mapping =
+        if info.Typer.r_params = [] then []
+        else List.combine info.Typer.r_params args in
+      List.iter (fun (_, ft) -> add_wasm_copy_deps (subst_params mapping ft))
+        info.Typer.r_fields
+    | Ast.TyCon (n, args) when Hashtbl.mem Exhaustive.type_variants n ->
+      let vs = Hashtbl.find Exhaustive.type_variants n in
+      let mapping =
+        match vs with
+        | (cname, _) :: _ ->
+          (match Hashtbl.find_opt Typer.constructors cname with
+           | Some info when info.Typer.params <> [] ->
+             List.combine info.Typer.params args
+           | _ -> [])
+        | [] -> []
+      in
+      List.iter (fun (_, arg_opt) ->
+        match arg_opt with
+        | Some pt -> add_wasm_copy_deps (subst_params mapping pt)
+        | None -> ()) vs
+    | _ -> ()
+  end
+
+(* Is a value of this type a raw i32 (no pointer to copy)? *)
+let wasm_unboxed (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> true
+  | _ -> false
+
 let add_show_type (t : Ast.ty) : unit = add_type_into show_types t
 
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
@@ -2896,19 +2944,171 @@ let rec emit_expr (e : Ast.expr) : unit =
     ) elems;
     emit_instr (Printf.sprintf "local.get %d" base_slot)
   | Ast.Region_block (_, body) ->
-    (* All Lang regions share the single Wasm linear-memory bump
-       pointer. Earlier we used a save / restore pattern so any
-       allocations inside the body were reclaimed on exit (LIFO).
-       Phase 16.4 / DEFERRED §1.6: that approach is unsound when a
-       value allocated inside the region escapes — e.g.,
-         let v = region R { vec_to_owned (...) } in ...
-       returns an OwnedVec whose data lives inside R's bump range.
-       After restore, subsequent allocations overwrite that data,
-       corrupting fields like a record's str pointer. We now do NOT
-       restore bump on region exit — Wasm semantics become a plain
-       arena-leak (matches what the other backends effectively do for
-       OwnedVec via main-end sweep). *)
-    emit_expr body
+    (* v0.1.37: regions RECLAIM again — the safe version of the
+       save / restore that Phase 16.4 removed as unsound. Three parts
+       make it sound where the old version was not:
+       1. the block's RESULT is deep-copied out (twice: once above the
+          block's garbage, then — after the bump is restored — down
+          into the enclosing allocation range; the two ranges cannot
+          overlap because the first copy sits above everything the
+          body allocated);
+       2. escaping STORES are rejected up front (see the guard below):
+          the Wasm backend has no per-container storage yet, so
+          pushing a heap value into an outer container from inside a
+          block would dangle — that is a compile error, not a leak;
+       3. escaping CLOSURES are rejected via the result type and
+          extern-callback checks (closure envs allocate in the block).
+       Found by the 2048 dogfood: ~8.4 KB of per-move garbage hit the
+       64 MB memory at move ~7,700. With a per-move region the game
+       runs indefinitely. *)
+    let result_ty =
+      match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    let rec ty_has_arrow t =
+      match Ast.walk t with
+      | Ast.TyArrow _ -> true
+      | Ast.TyTuple ts -> List.exists ty_has_arrow ts
+      | Ast.TyCon (_, args) -> List.exists ty_has_arrow args
+      | _ -> false
+    in
+    let rec ty_has_container t =
+      match Ast.walk t with
+      | Ast.TyCon (("Vec" | "OwnedVec" | "Map" | "StrBuf" | "Channel"
+                    | "ThreadHandle"), _) -> true
+      | Ast.TyRef _ -> true
+      | Ast.TyTuple ts -> List.exists ty_has_container ts
+      | Ast.TyCon (_, args) -> List.exists ty_has_container args
+      | _ -> false
+    in
+    if ty_has_arrow result_ty || ty_has_container result_ty then
+      raise (Codegen_error (e.Ast.loc,
+        "wasm: a region block cannot return a closure, container, or \
+         borrow — its storage is reclaimed with the block (the Wasm \
+         backend copies out plain values only; see memory-model.md section 3.5)"));
+    (* Guard: no ESCAPING stores / callback registrations inside. A
+       container CREATED inside the block is fine to mutate — its storage
+       dies with the block (and the result-type check above stops it from
+       escaping). What must be rejected is pushing block-allocated heap
+       values into containers from OUTSIDE the block. *)
+    let reject loc what =
+      raise (Codegen_error (loc,
+        Printf.sprintf
+          "wasm: %s inside a region block is not supported yet (for a \
+           container created outside the block) — the Wasm backend \
+           reclaims the whole block on exit and has no per-container \
+           storage to copy into (see memory-model.md section 3.5)"
+          what))
+    in
+    let local_containers : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let rec app_spine (ex : Ast.expr) (acc : Ast.expr list) =
+      match ex.Ast.node with
+      | Ast.App (f, a) -> app_spine f (a :: acc)
+      | Ast.Var n -> Some (n, acc)
+      | _ -> None
+    in
+    let is_local_container (ex : Ast.expr) =
+      match ex.Ast.node with
+      | Ast.Var n -> Hashtbl.mem local_containers n
+      | _ -> false
+    in
+    let elem_boxed (ve : Ast.expr) =
+      match ve.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon (("Vec" | "OwnedVec"), [_; et])
+         | Ast.TyCon (("Vec" | "OwnedVec"), [et]) ->
+           (match Ast.walk et with
+            | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> false
+            | _ -> true)
+         | _ -> true)
+      | None -> true
+    in
+    let rec guard (ex : Ast.expr) : unit =
+      (match app_spine ex [] with
+       | Some (("vec_push" | "owned_vec_push"), (ve :: _ as args))
+         when List.length args >= 2 ->
+         if not (is_local_container ve) && elem_boxed ve then
+           reject ex.Ast.loc "vec_push of a heap value"
+       | Some ("vec_set", (ve :: _ as args)) when List.length args >= 3 ->
+         if not (is_local_container ve) && elem_boxed ve then
+           reject ex.Ast.loc "vec_set of a heap value"
+       | Some ("map_set", (me :: _ as args)) when List.length args >= 3 ->
+         if not (is_local_container me) then reject ex.Ast.loc "map_set"
+       | Some ("strbuf_push", (be :: _ as args)) when List.length args >= 2 ->
+         if not (is_local_container be) then reject ex.Ast.loc "strbuf_push"
+       | Some (("channel_send"), args) when List.length args >= 2 ->
+         reject ex.Ast.loc "channel_send"
+       | Some ("spawn", args) when List.length args >= 1 ->
+         reject ex.Ast.loc "spawn"
+       | Some (nm, args)
+         when args <> []
+              && Hashtbl.mem extern_fn_decls_wasm nm
+              && (let rec has_arrow t =
+                    match Ast.walk t with
+                    | Ast.TyArrow _ -> true
+                    | Ast.TyTuple ts -> List.exists has_arrow ts
+                    | Ast.TyCon (_, ags) -> List.exists has_arrow ags
+                    | _ -> false
+                  in
+                  let rec params t =
+                    match Ast.walk t with
+                    | Ast.TyArrow (a, b) -> a :: params b
+                    | _ -> []
+                  in
+                  List.exists has_arrow
+                    (params (Hashtbl.find extern_fn_decls_wasm nm))) ->
+         reject ex.Ast.loc ("extern `" ^ nm ^ "` (registers a callback)")
+       | _ -> ());
+      (match ex.Ast.node with
+       | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+       | Ast.Unit_lit | Ast.Var _ -> ()
+       | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+       | Ast.App (a, b) -> guard a; guard b
+       | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
+       | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> guard a
+       | Ast.Let (pat, v, b) ->
+         guard v;
+         (match pat.Ast.pnode, app_spine v [] with
+          | Ast.P_var n, Some (("vec_new" | "map_new" | "strbuf_new"
+                                | "owned_vec_new"), _) ->
+            Hashtbl.replace local_containers n ()
+          | _ -> ());
+         guard b
+       | Ast.With (_, v, b) -> guard v; guard b
+       | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> guard v) bs; guard b
+       | Ast.If (c, t, f) -> guard c; guard t; guard f
+       | Ast.Fun (_, _, b) -> guard b
+       | Ast.Constr (_, Some a) -> guard a
+       | Ast.Constr (_, None) -> ()
+       | Ast.Match (sc, arms) ->
+         guard sc;
+         List.iter (fun (_, g, b) ->
+           (match g with Some ge -> guard ge | None -> ());
+           guard b) arms
+       | Ast.Tuple es -> List.iter guard es
+       | Ast.Record_lit (_, fs) -> List.iter (fun (_, x) -> guard x) fs
+       | Ast.Record_update (a, fs) ->
+         guard a; List.iter (fun (_, x) -> guard x) fs)
+    in
+    guard body;
+    add_wasm_copy_deps result_ty;
+    let rtag = ty_tag result_ty in
+    let unboxed =
+      match result_ty with
+      | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> true
+      | _ -> false
+    in
+    let saved = !wasm_tail_pos in
+    wasm_tail_pos := false;
+    emit_instr "global.get $__lang_bump";      (* mark *)
+    emit_expr body;                             (* [mark, result] *)
+    if not unboxed then
+      emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 1 (above garbage) *)
+    emit_instr "global.set $__rgn_tmp";         (* [mark] *)
+    emit_instr "global.set $__lang_bump";       (* release *)
+    emit_instr "global.get $__rgn_tmp";
+    if not unboxed then
+      emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 2 (into enclosing) *)
+    wasm_tail_pos := saved
   | Ast.Ref (_, _, inner) ->
     (* `&R v` — region-alloc 4 bytes, store value, return ptr. *)
     let base_slot = fresh_local () in
@@ -3752,6 +3952,95 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
     Printf.sprintf
       "  (func $cmp_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
 
+let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
+  let header = Printf.sprintf "  (func $__mcopy_%s (param $v i32) (result i32)" tag in
+  let field_copy src_expr ft =
+    if wasm_unboxed ft then src_expr
+    else Printf.sprintf "(call $__mcopy_%s %s)" (ty_tag ft) src_expr
+  in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit ->
+    header ^ " (local.get $v))"
+  | Ast.TyStr ->
+    header ^ " (call $__mcopy_str (local.get $v)))"
+  | Ast.TyFloat ->
+    (* floats are 8-byte boxes; keep the 8-alignment convention *)
+    header ^ "\n" ^
+    "    (local $p i32)\n\
+    \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
+    \    (local.set $p (global.get $__lang_bump))\n\
+    \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n\
+    \    (f64.store offset=0 align=8 (local.get $p) (f64.load offset=0 align=8 (local.get $v)))\n\
+    \    (local.get $p))"
+  | Ast.TyTuple ts ->
+    let n = List.length ts in
+    let stores =
+      List.mapi (fun i ft ->
+        Printf.sprintf
+          "    (i32.store offset=%d (local.get $p) %s)"
+          (i * 4)
+          (field_copy (Printf.sprintf "(i32.load offset=%d (local.get $v))" (i * 4)) ft))
+        ts
+    in
+    Printf.sprintf
+      "%s\n    (local $p i32)\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const %d)))\n%s\n    (local.get $p))"
+      header (n * 4) (String.concat "\n" stores)
+  | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+    let info = Hashtbl.find Typer.records n in
+    let mapping =
+      if info.Typer.r_params = [] then []
+      else List.combine info.Typer.r_params args in
+    let fields = List.map (fun (_, ft) -> subst_params mapping ft) info.Typer.r_fields in
+    let nf = List.length fields in
+    let stores =
+      List.mapi (fun i ft ->
+        Printf.sprintf
+          "    (i32.store offset=%d (local.get $p) %s)"
+          (i * 4)
+          (field_copy (Printf.sprintf "(i32.load offset=%d (local.get $v))" (i * 4)) ft))
+        fields
+    in
+    Printf.sprintf
+      "%s\n    (local $p i32)\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const %d)))\n%s\n    (local.get $p))"
+      header (nf * 4) (String.concat "\n" stores)
+  | Ast.TyCon (n, args) when Hashtbl.mem Exhaustive.type_variants n ->
+    let vs = Hashtbl.find Exhaustive.type_variants n in
+    let mapping =
+      match vs with
+      | (cname, _) :: _ ->
+        (match Hashtbl.find_opt Typer.constructors cname with
+         | Some info when info.Typer.params <> [] ->
+           List.combine info.Typer.params args
+         | _ -> [])
+      | [] -> []
+    in
+    (* node = [tag][payload]; copy payload per-ctor when boxed *)
+    let rec payload_dispatch = function
+      | [] -> "(i32.load offset=4 (local.get $v))"
+      | (cname, arg_opt) :: rest ->
+        (match arg_opt with
+         | None -> payload_dispatch rest
+         | Some pty ->
+           let pty = subst_params mapping pty in
+           if wasm_unboxed pty then payload_dispatch rest
+           else
+             let ctag =
+               match Hashtbl.find_opt variant_tags cname with
+               | Some t -> t | None -> 0 in
+             Printf.sprintf
+               "(if (result i32) (i32.eq (local.get $t) (i32.const %d))\n\
+               \      (then (call $__mcopy_%s (i32.load offset=4 (local.get $v))))\n\
+               \      (else %s))"
+               ctag (ty_tag pty) (payload_dispatch rest))
+    in
+    Printf.sprintf
+      "%s\n    (local $p i32) (local $t i32)\n    (local.set $t (i32.load offset=0 (local.get $v)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n    (i32.store offset=0 (local.get $p) (local.get $t))\n    (i32.store offset=4 (local.get $p) %s)\n    (local.get $p))"
+      header (payload_dispatch vs)
+  | _ ->
+    (* containers / closures / channels: pointer passthrough (guards
+       reject the escaping-store cases) *)
+    header ^ " (local.get $v))"
+
 (* Static runtime helpers emitted into the Wasm module: strlen and
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
@@ -3791,6 +4080,25 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
                (i32.const 1)))
+    (local.get $r))
+  ;; v0.1.37: deep-copy a NUL-terminated str into fresh bump space.
+  ;; Region blocks copy their result out before releasing the block's
+  ;; allocations (the safe version of the save/restore that Phase 16.4
+  ;; removed as unsound).
+  (func $__mcopy_str (param $s i32) (result i32)
+    (local $l i32) (local $r i32) (local $i i32)
+    (local.set $l (call $__lang_strlen (local.get $s)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.gt_s (local.get $i) (local.get $l)))
+        (i32.store8 (i32.add (local.get $r) (local.get $i))
+                    (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (global.set $__lang_bump
+      (i32.add (i32.add (local.get $r) (local.get $l)) (i32.const 1)))
     (local.get $r))
   (func $__lang_streq (param $a i32) (param $b i32) (result i32)
     (local $ba i32) (local $bb i32)
@@ -5953,6 +6261,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
+  Hashtbl.reset wasm_copy_types;
   Hashtbl.reset fn_closure_table_idx;
   Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
@@ -6420,7 +6729,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       eta_adapters_wasm []
   in
   let fn_section =
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ cmp_fn_defs @ inner_lift_adapter_strs in
+    (* v0.1.37: __mcopy fns are collected during emission (region blocks
+       register their result types), so compute the defs here — after
+       both the fn bodies and main have been emitted. Sorted for
+       byte-stable output. *)
+    let copy_fn_defs =
+      List.sort compare
+        (Hashtbl.fold (fun tag t acc ->
+           (* "str" is provided by the static runtime ($__mcopy_str) *)
+           if tag = "str" then acc
+           else emit_copy_fn_wasm tag t :: acc)
+           wasm_copy_types [])
+    in
+    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ cmp_fn_defs @ copy_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all
@@ -6629,6 +6950,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
+  (global $__rgn_tmp (mut i32) (i32.const 0))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\
