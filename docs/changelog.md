@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.32 — 2026-07-15
+
+_Cleanup release (three small fixes plus doc sync):_
+
+_**Top-level / local name collision (invalid C).** A local `let m = ...`
+inside any function that shared its name with a globalized top-level
+`let m` was emitted as an assignment to the file-scope global instead of
+declaring a shadowing local — the prelude's `list_max` (local `m`) plus
+a program-level `let m = map_new ()` produced C that didn't compile. The
+global-assignment form now fires only for the exact top-level spine
+bindings (matched by physical node identity), so same-named locals
+declare and shadow correctly._
+
+_**Tuple exhaustiveness false positive.** `match (h1, h2) with
+(HE, _) | (_, HE) | (HN _, HN _)` is exhaustive, but no single arm is
+total, so the checker warned "no wildcard arm for tuple" (found by the
+generic pairing heap's merge). Tuple scrutinees whose components all
+range over small finite spaces (bools / unit / registered variants) are
+now checked by enumerating the product; a genuinely missing combination
+is reported by example — `missing (Greenq, Greenq)` — instead of a
+generic complaint._
+
+_**mem_to_str leak.** It malloc'd and never freed; it now allocates in
+the thread's current region, so per-request region blocks reclaim
+byte-dialect strings too._
+
+_Also: [memory-model.md](memory-model.md) gains §3.5 documenting the
+implemented v0.1.30-31 reclamation semantics (current region, copy-out,
+copy-on-store, per-message channel copies, backend notes)._
+
+---
+
 ## v0.1.31 — 2026-07-15
 
 _Memory model (stage 2 — the payoff): **`region R { }` now reclaims the

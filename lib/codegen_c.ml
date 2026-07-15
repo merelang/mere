@@ -75,6 +75,15 @@ let rec ty_concrete (t : Ast.ty) : bool =
    global. *)
 let top_globals : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* v0.1.32 (S-1): the PHYSICAL value nodes of the top-level lets that were
+   globalized. The assignment form of Let emission must fire only for
+   these exact spine bindings — a LOCAL `let m = ...` inside some function
+   that happens to share a name with a global (e.g. the prelude's
+   list_max using `m` while the program has a top-level `let m`) must
+   declare a shadowing C local instead. Matching by name alone emitted an
+   undeclared assignment with the global's type — invalid C. *)
+let top_global_init_values : Ast.expr list ref = ref []
+
 (* Phase 32.2 (C1 FFI): extern fn declarations. The App handler in emit_expr
    dispatches App (Var name, arg) directly to a C function call. *)
 let extern_fn_decls : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
@@ -1426,7 +1435,8 @@ let rec emit_expr (e : Ast.expr) : string =
           for readability; they're scoped to this expression and don't
           collide with anything. *)
        let safe = c_safe_name name in
-       if Hashtbl.mem top_globals name then
+       if Hashtbl.mem top_globals name
+          && List.memq value !top_global_init_values then
          Printf.sprintf
            "({ %s = %s; %s; })" safe value_c body_c
        else if do_auto_drop then
@@ -4571,9 +4581,11 @@ let native_ffi_runtime =
       "  while (s[i]) { __mem[d++] = (unsigned char)s[i++]; }";
       "  return d - dst;";
       "}";
-      "/* mem_to_str: materialize len arena bytes as a fresh Mere str. */";
+      "/* mem_to_str: materialize len arena bytes as a fresh Mere str.";
+      "   Allocates in the current region (v0.1.32 — it used to malloc and";
+      "   leak; now a per-request region block reclaims these too). */";
       "static char* mem_to_str(int p, int len) {";
-      "  char* s = (char*)malloc(len + 1);";
+      "  char* s = (char*)__lang_region_alloc(__lang_current_region, (size_t)len + 1);";
       "  memcpy(s, __mem + p, len); s[len] = 0; return s;";
       "}";
       "";
@@ -7045,6 +7057,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   Hashtbl.reset top_globals;
   List.iter (fun (n, _, _) -> Hashtbl.add top_globals n ()) top_globals_list;
+  top_global_init_values := List.map (fun (_, v, _) -> v) top_globals_list;
   (* Phase 24.2: dedup skels by name keeping the LAST occurrence — this
      handles shadowing (e.g., user defines `let rec list_iter = ...` that
      shadows the prelude's `list_iter`). Without dedup, both end up in
@@ -7659,6 +7672,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
       "";
+      (* Region runtime FIRST (v0.1.32): native_ffi_runtime's mem_to_str
+         allocates in the thread's current region (it used to malloc and
+         leak), so the region helpers must precede it. They themselves
+         depend only on malloc/pthread. *)
+      region_runtime_helpers;
+      "";
       (* Stage 1 native full-stack: if any Wasm-memory-model FFI extern
          (tcp_* / mem_* / str_ptr) is used, emit the native runtime that
          backs them (a flat byte arena + POSIX sockets) instead of leaving
@@ -7667,8 +7686,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
             extern_fn_decls false
        then native_ffi_runtime ^ "\n"
        else "");
-      region_runtime_helpers;
-      "";
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
          rest of the codegen does (c.fn(c.env, 0), unit == int 0). A
