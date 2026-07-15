@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.34 — 2026-07-15
+
+_Soundness (found by playing the live 2048 for ten thousand headless
+moves): **`&&` and `||` now short-circuit on every backend**. The
+interpreter and the C backend always short-circuited, but the Wasm
+backend emitted strict `i32.and` / `i32.or` and LLVM emitted eager
+`and i1` (behind a comment claiming the "MVP subset has no effects" —
+long obsolete: a trapping right-hand side IS an effect). The
+bounds-guard idiom `i < len && vec_get v i == x` therefore trapped on
+Wasm only — in production, **97% of the live 2048's keypresses died
+silently** in its stuck-detection (`r < 3 && bget b (i + 4) == v`),
+invisible because the DOM glue catches and logs closure exceptions.
+Both backends now lower `&&`/`||` to their If emission._
+
+_The same probe measured the Wasm page-lifetime allocation model
+(the memory-model work of v0.1.30–31 is C-only so far): the game burns
+~8.4 KB of never-reclaimed bump per move and hits its 64 MB memory at
+move ~7,700 — a determined player kills the tab in under an hour. That
+number is now the forcing measurement for porting value reclamation to
+the Wasm backend._
+
+---
+
 ## v0.1.33 — 2026-07-15
 
 _Polymorphic ordering: **`<` / `<=` / `>` / `>=` now work through type

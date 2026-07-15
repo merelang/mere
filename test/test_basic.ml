@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.33" Version.v "0.1.33";
+  check "version is 0.1.34" Version.v "0.1.34";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3397,8 +3397,11 @@ let () =
     (llvm "if 1 < 2 then 10 else 20") "= phi i32";
   assert_contains "llvm: let body sees binding"
     (llvm "let x = 5 in x * x") "mul i32 5, 5";
-  assert_contains "llvm: bool literal as i1 in logic"
-    (llvm "true && false") "and i1 1, 0";
+  (* v0.1.34: && / || short-circuit on every backend — Logic lowers to
+     the If emission (a trapping RHS is an effect; the old eager `and i1`
+     evaluated it unconditionally). *)
+  assert_contains "llvm: && lowers to a short-circuit branch"
+    (llvm "true && false") "br i1 1";
   assert_contains "llvm: bool result is zero-extended for printf"
     (llvm "true") "zext i1";
   assert_contains "llvm: ret 0 at main end"
@@ -3974,8 +3977,10 @@ let () =
     (wasm "let x = 5 in x") "(local i32)";
   assert_contains "wasm: bool literal as i32"
     (wasm "true") "i32.const 1";
-  assert_contains "wasm: and lowers to i32.and"
-    (wasm "true && false") "i32.and";
+  (* v0.1.34: && short-circuits (Logic lowers to If) — the strict
+     i32.and evaluated both operands and trapped on guarded vec_get. *)
+  assert_contains "wasm: && lowers to a short-circuit if"
+    (wasm "true && false") "if (result i32)";
 
   (* --- Wasm codegen: function lifting + recursion (Phase 6.2) ---
      Top-level fns lift to `(func $name (param i32) (result i32))`, direct calls
