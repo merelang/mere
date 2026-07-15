@@ -116,30 +116,3 @@ let get_pos = fn parsed ->
   pos;
 
 };   // end of `module Argparse`
-
-// === Self-tests (outside the module; remove in actual use) ===
-
-let _ = print "=== argparse demo ===";
-
-// Sample argv: ["build", "--verbose", "--name=alice", "input.txt", "--output", "out.bin", "extra"]
-let argv =
-  Cons ("build",
-   Cons ("--verbose",
-    Cons ("--name=alice",
-     Cons ("input.txt",
-      Cons ("--output",
-       Cons ("out.bin",
-        Cons ("extra", Nil)))))));
-
-let flag_specs = Cons ("verbose", Cons ("dry-run", Nil));
-let opt_specs = Cons ("name", Cons ("output", Nil));
-let r = Argparse.parse flag_specs opt_specs argv;
-
-let _ = print ("verbose flag: " ++ show (Argparse.has_flag r "verbose"));
-let _ = print ("dry-run flag: " ++ show (Argparse.has_flag r "dry-run"));
-let _ = print ("name opt: " ++ Argparse.get_opt r "name" "<none>");
-let _ = print ("output opt: " ++ Argparse.get_opt r "output" "<none>");
-let _ = print ("missing opt: " ++ Argparse.get_opt r "missing" "<none>");
-let _ = print ("positional: " ++ show (Argparse.get_pos r));
-
-0

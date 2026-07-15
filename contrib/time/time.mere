@@ -50,20 +50,3 @@ let to_us = fn (sec: float) ->
   int_of_float (f_mul sec 1000000.0);
 
 };   // end of `module Time`
-
-// === Self-tests (outside the module; remove in actual use) ===
-
-let _ = print "=== Time helpers demo ===";
-
-// Format check for elapsed seconds (using fixed values so we do not depend on wall time)
-let _ = print ("0.5s     -> " ++ Time.format_elapsed 0.5);
-let _ = print ("1.25s    -> " ++ Time.format_elapsed 1.25);
-let _ = print ("12.34s   -> " ++ Time.format_elapsed 12.34);
-let _ = print ("0.003s   -> " ++ Time.format_elapsed 0.003);
-let _ = print ("0.0001s  -> " ++ Time.format_elapsed 0.0001);
-
-// Integer conversion
-let _ = print ("1.5s in ms = " ++ show (Time.to_ms 1.5));
-let _ = print ("0.001234s in us = " ++ show (Time.to_us 0.001234));
-
-0

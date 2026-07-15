@@ -1,0 +1,23 @@
+// examples/time_demo.mere — demo of contrib/time/time.mere (module Time).
+//
+// Moved out of the library file (v0.1.36 library hygiene): a library
+// must stay main-free so importing it never runs a demo.
+
+import "../contrib/time/time.mere";
+
+// === Self-tests (outside the module; remove in actual use) ===
+
+let _ = print "=== Time helpers demo ===";
+
+// Format check for elapsed seconds (using fixed values so we do not depend on wall time)
+let _ = print ("0.5s     -> " ++ Time.format_elapsed 0.5);
+let _ = print ("1.25s    -> " ++ Time.format_elapsed 1.25);
+let _ = print ("12.34s   -> " ++ Time.format_elapsed 12.34);
+let _ = print ("0.003s   -> " ++ Time.format_elapsed 0.003);
+let _ = print ("0.0001s  -> " ++ Time.format_elapsed 0.0001);
+
+// Integer conversion
+let _ = print ("1.5s in ms = " ++ show (Time.to_ms 1.5));
+let _ = print ("0.001234s in us = " ++ show (Time.to_us 0.001234));
+
+0
