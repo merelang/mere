@@ -7682,6 +7682,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "  __mere_unit_closure* __c = (__mere_unit_closure*)__p;";
       "  __c->fn(__c->env, 0);";
       "  free(__c);";
+      "  /* v0.1.31: drop this thread's cached block region — _Thread_local";
+      "     has no destructor, so a spawn-per-connection server would leak";
+      "     ~1 MB per finished thread without this. */";
+      "  if (__lang_region_cache) {";
+      "    __lang_region_free(__lang_region_cache);";
+      "    free(__lang_region_cache);";
+      "    __lang_region_cache = NULL;";
+      "  }";
       "  return NULL;";
       "}";
       "";

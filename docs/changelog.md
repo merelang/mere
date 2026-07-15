@@ -22,7 +22,10 @@ a codegen guard backs it up), and `try_or` restores the current region
 when a `fail` longjmps past a block. Block regions are heap-acquired
 with a one-deep per-thread cache, so a per-iteration block costs a
 pointer swap and a bump reset — and, critically, no stack struct's
-address escapes, which is what lets clang keep tail-calling
+address escapes, which is what lets clang keep tail-calling. The spawn
+trampoline frees a finished thread's cached region (`_Thread_local` has
+no destructor — a spawn-per-connection server leaked ~1 MB per closed
+connection without this)
 (`show`/`to_json`/float-formatting helpers are `noinline` for the same
 reason: their inlined `asprintf(&local)` silently broke sibling-call
 optimization and deep loops overflowed the stack)._
