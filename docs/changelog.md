@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.39 — 2026-07-16
+
+_Scale safety (found by sorting a million elements): **`list_sort_by` is
+a stable merge sort now**, and **the prelude's list functions survive
+million-element lists**. The insertion sort took ~2 s at 20k elements
+natively and O(n²) beyond — a million-element `list_sort` now runs in
+well under a second, still stable (ties keep input order; the merge is
+tail-recursive via a reversed accumulator, and the split avoids
+returning a tuple: a struct return compiles to an sret out-parameter in
+C, which quietly defeats clang's sibling-call optimization — that one
+cost an AddressSanitizer session to find). Ten more prelude functions
+were rewritten with accumulators after the probe showed the naive
+`Cons (f h, recurse)` shape overflowing the stack near a million
+elements: `list_len`, `list_map`, `list_filter`-adjacent take/zip,
+`list_append`, `list_concat`, `list_flat_map`, `range`, `list_max`,
+`list_min`. The derive family (`==` on a million-element list) was
+already safe. `list_sort_insert` remains for direct users._
+
+---
+
 ## v0.1.38 — 2026-07-16
 
 _Unicode (found by ten minutes of typing Japanese at the language):
