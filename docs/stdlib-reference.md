@@ -112,6 +112,9 @@ bool_of_str "true"   // true
 | `utf8_at` | `str -> int -> str` | i-th codepoint (prelude, on `utf8_chars`) |
 | `utf8_sub` | `str -> int -> int -> str` | Codepoint-indexed substring (prelude) |
 | `utf8_rev` | `str -> str` | Codepoint-wise reverse — `str_rev` is byte-wise and scrambles multibyte text (prelude) |
+| `utf8_width` | `str -> int` | **Display** width (East Asian Width, wcwidth-lite): CJK / fullwidth / emoji = 2 columns, combining marks = 0, halfwidth katakana = 1. `utf8_len` counts codepoints; terminals draw columns — use this for alignment (prelude, v0.1.45) |
+| `pad_right` | `str -> int -> str` | Pad with spaces to a display width (table columns, left-aligned); no-op if already wide enough (prelude, v0.1.45) |
+| `pad_left` | `str -> int -> str` | Right-align to a display width — numbers in table columns (prelude, v0.1.45) |
 | `str_join` ★ | `str -> str list -> str` | Join with separator. Empty list → empty string (Phase 19.1) |
 | `str_compare` 🌐 | `str -> str -> int` | Lexicographic -1 / 0 / 1 (Phase 31.0 ported to 3 backends; sign-normalized) |
 | `str_repeat` ⚡ | `str -> int -> str` | Repeat N times; raises on N<0 |

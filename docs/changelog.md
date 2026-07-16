@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.45 — 2026-07-16
+
+_Columns, not codepoints (found by printing a table with Japanese
+cells): v0.1.38's codepoint view was the right first step and the
+wrong tool for alignment — `utf8_len` says 5 for こんにちは, a
+terminal draws it in 10 columns, and a product table with CJK rows
+comes out visibly ragged. **`utf8_width`** is the display width (East
+Asian Width, wcwidth-lite: CJK / fullwidth / emoji = 2 columns,
+combining marks = 0, halfwidth katakana = 1), and **`pad_right` /
+`pad_left`** pad on it. All three are prelude functions in pure Mere —
+UTF-8 decoded with plain div/mod arithmetic, the width table a dozen
+range checks in decimal (the lexer has no hex literals, which is now a
+recorded papercut) — so they landed on all four backends at once by
+construction. `examples/aligned_table.mere` renders a mixed
+ASCII / Japanese / emoji / halfwidth-katakana table with straight
+borders on interp and C alike._
+
+---
+
 ## v0.1.44 — 2026-07-16
 
 _The picture that fixed the docs (found by a Mandelbrot renderer): the
