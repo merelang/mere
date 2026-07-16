@@ -8198,6 +8198,55 @@ let () =
             let _ = vec_push v 1 in\n\
             write_file_bytes \"x.bin\" v") in ());
 
+  (* v0.1.46 (base64 composition probe): the day's separately-shipped
+     capabilities — bitwise builtins, read_file_bytes, write_file_bytes —
+     compose in one program. RFC 4648 known-answer vectors, computed with
+     bit_shl / bit_shr / bit_and / bit_or over a byte string. *)
+  check "base64: encode 'foobar' (RFC 4648)"
+    (Pipeline.process
+       "let abc = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\" in\n\
+        let enc = fn s ->\n\
+        \  let n = str_len s in\n\
+        \  let buf = strbuf_new () in\n\
+        \  let rec go = fn i ->\n\
+        \    if i >= n then ()\n\
+        \    else\n\
+        \      let b0 = ord (char_at s i) in\n\
+        \      let h1 = i + 1 < n in let h2 = i + 2 < n in\n\
+        \      let b1 = if h1 then ord (char_at s (i + 1)) else 0 in\n\
+        \      let b2 = if h2 then ord (char_at s (i + 2)) else 0 in\n\
+        \      let t = bit_or (bit_or (bit_shl b0 16) (bit_shl b1 8)) b2 in\n\
+        \      let _ = strbuf_push buf (char_at abc (bit_and (bit_shr t 18) 0x3F)) in\n\
+        \      let _ = strbuf_push buf (char_at abc (bit_and (bit_shr t 12) 0x3F)) in\n\
+        \      let _ = strbuf_push buf (if h1 then char_at abc (bit_and (bit_shr t 6) 0x3F) else \"=\") in\n\
+        \      let _ = strbuf_push buf (if h2 then char_at abc (bit_and t 0x3F) else \"=\") in\n\
+        \      go (i + 3) in\n\
+        \  let _ = go 0 in strbuf_to_str buf in\n\
+        enc \"foobar\"")
+    "\"Zm9vYmFy\"";
+  check "base64: encode 'fo' has one pad (RFC 4648)"
+    (Pipeline.process
+       "let abc = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\" in\n\
+        let enc = fn s ->\n\
+        \  let n = str_len s in\n\
+        \  let buf = strbuf_new () in\n\
+        \  let rec go = fn i ->\n\
+        \    if i >= n then ()\n\
+        \    else\n\
+        \      let b0 = ord (char_at s i) in\n\
+        \      let h1 = i + 1 < n in let h2 = i + 2 < n in\n\
+        \      let b1 = if h1 then ord (char_at s (i + 1)) else 0 in\n\
+        \      let b2 = if h2 then ord (char_at s (i + 2)) else 0 in\n\
+        \      let t = bit_or (bit_or (bit_shl b0 16) (bit_shl b1 8)) b2 in\n\
+        \      let _ = strbuf_push buf (char_at abc (bit_and (bit_shr t 18) 0x3F)) in\n\
+        \      let _ = strbuf_push buf (char_at abc (bit_and (bit_shr t 12) 0x3F)) in\n\
+        \      let _ = strbuf_push buf (if h1 then char_at abc (bit_and (bit_shr t 6) 0x3F) else \"=\") in\n\
+        \      let _ = strbuf_push buf (if h2 then char_at abc (bit_and t 0x3F) else \"=\") in\n\
+        \      go (i + 3) in\n\
+        \  let _ = go 0 in strbuf_to_str buf in\n\
+        enc \"fo\"")
+    "\"Zm8=\"";
+
   (* v0.1.46: hex integer literals. Two probes (bitwise masks, Unicode
      width ranges) wrote everything in decimal because 0xFF lexed as
      `0` then the identifier `xFF`. int_of_string handles the prefix;
