@@ -1334,6 +1334,17 @@ let rec emit_expr (e : Ast.expr) : unit =
   wasm_in_top_level_body := false;
   match e.Ast.node with
   | Ast.Int_lit n ->
+    (* v0.1.41: the Wasm backend's int is i32. Reject a literal outside
+       [-2^31, 2^31-1] here with a source location instead of letting an
+       invalid `i32.const 4294967296` surface later as a wat2wasm error
+       (found by the SHA-256 probe, whose 2^32 modulus is the first
+       out-of-range literal a real program tried to compile). *)
+    if n > 2147483647 || n < -2147483648 then
+      raise (Codegen_error (e.Ast.loc,
+        Printf.sprintf
+          "int literal %d does not fit the Wasm backend's 32-bit int \
+           (range -2147483648 .. 2147483647); the C and LLVM backends \
+           use 64-bit int — see docs/language-reference.md (integers)" n));
     emit_instr (Printf.sprintf "i32.const %d" n)
   | Ast.Float_lit f ->
     (* Phase 34.3: push the f64 literal, bump alloc to get an i32 ptr *)

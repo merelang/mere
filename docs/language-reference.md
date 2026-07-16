@@ -511,7 +511,7 @@ Items previously listed as "not implemented" were implemented incrementally thro
 - **Exhaustiveness check is Phase 1** (bool + variants only): non-exhaustive → **warning** to stderr; evaluation proceeds (case omissions become runtime fallthrough errors).
 - **For int / str / float / tuple / record**, a wildcard arm is required (precise checks come later).
 - **String escapes** are only `\n \t \\ \"` plus Phase 36's `\{` (interp brace escape). No Unicode escape (`\uXXXX`).
-- **Integers are fixed-width**: int is OCaml's `int` (host-dependent, normally 63 bits); no arbitrary precision. LLVM/Wasm use i64 / i32.
+- **Integers are fixed-width**; no arbitrary precision. Per backend (v0.1.41): the **C backend uses 64-bit int** (`long long`; before v0.1.41 it was C `int`, which silently truncated values above 2^31 — found by a SHA-256 probe whose round constants didn't survive), **LLVM uses i64**, the **interpreter uses OCaml's int** (host-dependent, normally 63 bits), and **Wasm uses i32** — an int literal outside `-2^31 .. 2^31-1` is a compile-time error on the Wasm backend rather than a downstream wat2wasm failure. At the C FFI boundary (`extern fn`) int is deliberately C `int`, matching the libc/POSIX ABI.
 - **Float is MVP**: IEEE 754 double; `f_add`-style function prefixes; no `+.` infix.
 - **No nested string literals in interpolation**: `"x = {show \"abc\"}"` is a lexer error (work around via let).
 - **`while` only inside fn bodies**: writing `while` directly under top-level main is codegen-unsupported (top-level Let_rec constraint).

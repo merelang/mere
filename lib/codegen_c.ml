@@ -1091,7 +1091,9 @@ let channel_elem_tag (t : Ast.ty option) : string =
 (* Translate one Lang expression to a C expression string. *)
 let rec emit_expr (e : Ast.expr) : string =
   match e.node with
-  | Ast.Int_lit n -> string_of_int n
+  | Ast.Int_lit n -> string_of_int n ^ "LL"
+    (* v0.1.41: the LL suffix keeps literal arithmetic 64-bit. Without it,
+       `2147483647 + 1` is int+int in C and wraps before any widening. *)
   | Ast.Float_lit f ->
     (* Phase 34.1: emit as C double literal. `%.17g` is safe for round-trip.
        NaN / Infinity use the standard C NAN / INFINITY macros. *)
@@ -2033,7 +2035,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "int_of_str" ->
        (* Phase 22.5: int_of_str s — via atoi (sign + digits). Fail handling
           is omitted (atoi silently returns 0 on invalid input). *)
-       Printf.sprintf "atoi(%s)" (emit_expr arg)
+       Printf.sprintf "atoll(%s)" (emit_expr arg)
      | Ast.Var "str_unescape" ->
        Printf.sprintf "__lang_str_unescape(%s)" (emit_expr arg)
      | Ast.Var "fail" ->
@@ -3034,7 +3036,11 @@ let rec c_type_of (t : Ast.ty) : string =
      | _ ->
        raise (Codegen_error (Loc.dummy,
          "unsupported in C codegen subset: Map[<unresolved>] (K and V must be concrete)")))
-  | Ast.TyInt | Ast.TyBool -> "int"
+  | Ast.TyInt -> "long long"  (* v0.1.41: Mere int is 64-bit on the C backend.
+                                 Plain C `int` silently truncated any value
+                                 above 2^31 (found by the SHA-256 probe: the
+                                 round constants themselves didn't survive). *)
+  | Ast.TyBool -> "int"
   | Ast.TyFloat -> "double"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
@@ -3642,7 +3648,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   in
   match Ast.walk t with
   | Ast.TyInt ->
-    header ^ " {\n  char* buf; asprintf(&buf, \"%d\", v); return buf;\n}"
+    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return buf;\n}"
   | Ast.TyBool ->
     header ^ " { return v ? \"true\" : \"false\"; }"
   | Ast.TyStr ->
@@ -3754,7 +3760,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   let header = Printf.sprintf "__attribute__((noinline)) static const char* to_json_%s(%s v)" tag cty in
   match Ast.walk t with
   | Ast.TyInt ->
-    header ^ " {\n  char* buf; asprintf(&buf, \"%d\", v); return buf;\n}"
+    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return buf;\n}"
   | Ast.TyBool ->
     header ^ " { return v ? \"true\" : \"false\"; }"
   | Ast.TyStr ->
@@ -3995,7 +4001,7 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
   in
   let body =
     match Ast.walk t with
-    | Ast.TyInt -> "  return (int)strtol(j->text, 0, 10);"
+    | Ast.TyInt -> "  return strtoll(j->text, 0, 10);"
     | Ast.TyBool -> "  return j->b;"
     | Ast.TyStr -> "  return j->text;"
     | Ast.TyFloat -> "  return strtod(j->text, 0);"
@@ -5903,7 +5909,8 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
 
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool -> Some "%d"
+  | Ast.TyInt -> Some "%lld"  (* v0.1.41: int is long long on the C backend *)
+  | Ast.TyBool -> Some "%d"
   | Ast.TyFloat -> Some "%g"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> Some "%s"
   | Ast.TyUnit -> Some "()"  (* Phase 27.0: print "()" to match interp *)
@@ -7850,8 +7857,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
              | _ -> [], Ast.walk t
            in
            let args, ret = flatten ty in
+           (* v0.1.41: at the FFI boundary `int` stays C `int` even though
+              Mere int is `long long` internally. The externs users declare
+              are overwhelmingly libc/POSIX functions whose ABI type IS the
+              32-bit int (getpid, setenv, kill, ...); declaring them
+              `long long` would read undefined upper register bits on
+              arm64. Values widen on return / narrow on call implicitly. *)
            let c_param_ty = function
              | Ast.TyStr -> "const char*"
+             | Ast.TyInt -> "int"
              | t -> c_type_of t
            in
            (* Phase 32.2: emit return str as `char*` (libc functions like
@@ -7861,6 +7875,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            let c_ret = match ret with
              | Ast.TyUnit -> "void"
              | Ast.TyStr -> "char*"
+             | Ast.TyInt -> "int"
              | t -> c_type_of t
            in
            let c_args =
