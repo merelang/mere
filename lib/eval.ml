@@ -343,6 +343,25 @@ let builtin_read_file =
          raise (Eval_error (Loc.dummy, "read_file: " ^ msg)))
     | _ -> failwith "read_file: expected str")
 
+(* v0.1.43 (bytes story): binary-safe file read — an int vec of byte
+   values 0..255. `read_file`'s str carries NULs fine here (OCaml
+   strings), but truncates at the first NUL on the C backend; this is
+   the path that means the same thing everywhere. *)
+let builtin_read_file_bytes =
+  V_builtin ("read_file_bytes", fun v ->
+    match v with
+    | V_str path ->
+      (try
+         let ic = open_in_bin path in
+         let len = in_channel_length ic in
+         let buf = Bytes.create len in
+         really_input ic buf 0 len;
+         close_in ic;
+         V_vec (ref (Array.init len (fun i -> V_int (Char.code (Bytes.get buf i)))))
+       with Sys_error msg ->
+         raise (Eval_error (Loc.dummy, "read_file_bytes: " ^ msg)))
+    | _ -> failwith "read_file_bytes: expected str")
+
 (* Phase 19.6: I/O extensions. read_lines, file_exists, env_var, args.
    read_lines / args return str list, so they depend on the prelude's
    `type 'a list`. env_var returns str option (the prelude's `'a option`). *)
@@ -1912,6 +1931,7 @@ let initial_env : env =
     ("print_no_nl", ref builtin_print_no_nl);
     ("print_err", ref builtin_print_err);
     ("read_file", ref builtin_read_file);
+    ("read_file_bytes", ref builtin_read_file_bytes);
     ("write_file", ref builtin_write_file);
     ("read_lines", ref builtin_read_lines);
     ("list_dir", ref builtin_list_dir);

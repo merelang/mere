@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.42" Version.v "0.1.42";
+  check "version is 0.1.43" Version.v "0.1.43";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8036,6 +8036,72 @@ let () =
     (Pipeline.process "bit_shr (0 - 8) 1") "-4";
   check "v0.1.42: bit_and above 2^31 (interp/C are wider than 32 bits)"
     (Pipeline.process "bit_and 4294967295 255") "255";
+  (* v0.1.43 (bytes story, CRC-32 probe): read_file_bytes reads a file
+     as raw bytes into an int vec. read_file's NUL-terminated str
+     silently truncates binary data at the first 0x00 on the C backend
+     (the interp, whose strings carry NULs, does not) — this is the
+     binary-safe path. interp + C only for now. *)
+  (let tmp = Filename.temp_file "mere_rfb_" ".bin" in
+   let oc = open_out_bin tmp in
+   output_string oc "AB\000CD";
+   close_out oc;
+   check "v0.1.43: read_file_bytes reads past NUL (interp)"
+     (Pipeline.process
+        (Printf.sprintf "vec_len (read_file_bytes \"%s\")" tmp))
+     "5";
+   check "v0.1.43: read_file_bytes byte values (interp)"
+     (Pipeline.process
+        (Printf.sprintf
+           "let b = read_file_bytes \"%s\" in\n\
+            (vec_get b 1, vec_get b 2, vec_get b 3)" tmp))
+     "(66, 0, 67)";
+   Sys.remove tmp);
+  check "v0.1.43: C codegen emits the read_file_bytes helper"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "vec_len (read_file_bytes \"x.bin\")") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "static mere_vec_int* __lang_read_file_bytes"
+        && has "__lang_read_file_bytes(\"x.bin\"" then "ok" else "no")
+    "ok";
+  check_raises_containing
+    "v0.1.43: Wasm codegen rejects read_file_bytes honestly"
+    "read_file_bytes is unsupported in Wasm codegen"
+    (fun () ->
+      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
+        (typed_prog "vec_len (read_file_bytes \"x.bin\")") in ());
+  check_raises_containing
+    "v0.1.43: LLVM codegen rejects read_file_bytes honestly"
+    "read_file_bytes is unsupported in LLVM codegen"
+    (fun () ->
+      let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
+        (typed_prog "vec_len (read_file_bytes \"x.bin\")") in ());
+  check "v0.1.43: CRC-32 of \"123456789\" via bitwise builtins"
+    (Pipeline.process
+       "let mask32 = 4294967295 in\n\
+        let crc_byte = fn crc -> fn b ->\n\
+        \  let x = bit_xor crc b in\n\
+        \  let rec go = fn i -> fn c ->\n\
+        \    if i == 8 then c\n\
+        \    else go (i + 1) (if bit_and c 1 == 1\n\
+        \                     then bit_xor (bit_shr c 1) 3988292384\n\
+        \                     else bit_shr c 1) in\n\
+        \  go 0 x in\n\
+        let s = \"123456789\" in\n\
+        let n = str_len s in\n\
+        let rec go = fn i -> fn crc ->\n\
+        \  if i == n then crc\n\
+        \  else go (i + 1) (crc_byte crc (ord (char_at s i))) in\n\
+        bit_xor (go 0 mask32) mask32")
+    "3421780262";
+
   check "v0.1.42: rotr composed from shifts"
     (Pipeline.process
        "let mask32 = 4294967295 in\n\

@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-106 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+113 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -31,7 +31,7 @@ Legend:
 
 ---
 
-## I/O (10)
+## I/O (11)
 
 | Name | Type | Description |
 |---|---|---|
@@ -41,7 +41,8 @@ Legend:
 | `print_bool` | `bool -> unit` | Print bool with newline |
 | `print_err` | `str -> unit` | Write to stderr with newline |
 | `read_line` | `unit -> str` | One line from stdin; empty string on EOF |
-| `read_file` ⚡ | `str -> str` | Read the whole file; raises on failure |
+| `read_file` ⚡ | `str -> str` | Read the whole file **as text**; raises on failure. On the C backend the str is NUL-terminated, so binary data silently truncates at the first 0x00 byte (the interpreter's strings carry NULs) — use `read_file_bytes` for binary (v0.1.43) |
+| `read_file_bytes` ⚡ | `str -> Vec[R, int]` | Read the whole file as raw bytes — one int (0..255) per byte, binary-safe on every supported backend. interp + C only (v0.1.43, CRC-32 probe) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
@@ -393,7 +394,7 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 112)
+## All builtins (alphabetical, 113)
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
@@ -405,7 +406,7 @@ fst gcd id incr int_max int_min int_of_float int_of_str
 is_alpha is_digit is_space iter_n lcm log max min mk_logger
 mk_metrics not odd ord pair pi pow print print_bool
 print_err print_int print_no_nl random_float random_int
-read_file read_line read_lines round show sign sin snd sqrt
+read_file read_file_bytes read_line read_lines round show sign sin snd sqrt
 square str_compare str_contains str_count str_ends_with
 str_index_of str_join str_len str_of_float str_of_int
 str_repeat str_replace str_rev str_split str_starts_with

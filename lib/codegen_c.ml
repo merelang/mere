@@ -275,6 +275,11 @@ let mono_record_instances : (string, string * Ast.ty list) Hashtbl.t =
    codegen emits `mere_vec_<tag>` struct + 4 helpers. *)
 let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
+(* v0.1.43: emitted-on-use flag for the binary-safe file reader; the
+   helper is appended after the vec runtimes (it constructs a
+   mere_vec_int). *)
+let uses_read_file_bytes = ref false
+
 (* Phase 15.7: concrete element types of `OwnedVec[T]` seen in the program.
    Same key strategy as `vec_instances`. OwnedVec is heap-allocated
    (malloc / realloc), not region-bound, and drop-typed so it can't be
@@ -1947,6 +1952,28 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr path_e) (emit_expr arg)
      | Ast.Var "read_file" ->
        Printf.sprintf "__lang_read_file(%s)" (emit_expr arg)
+     | Ast.Var "read_file_bytes" ->
+       (* v0.1.43 (bytes story): binary-safe read into an int vec.
+          Resolve the result Vec's region like vec_new does and make
+          sure the vec_int runtime instance exists. *)
+       let region_var =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) ->
+              if not (Hashtbl.mem vec_instances "int") then
+                Hashtbl.add vec_instances "int" Ast.TyInt;
+              if r = "__heap" then "(&__lang_default_region)"
+              else "__region_" ^ r
+            | _ ->
+              if not (Hashtbl.mem vec_instances "int") then
+                Hashtbl.add vec_instances "int" Ast.TyInt;
+              "(&__lang_default_region)")
+         | None -> unsupported e.loc "read_file_bytes: missing type info"
+       in
+       uses_read_file_bytes := true;
+       Printf.sprintf "__lang_read_file_bytes(%s, %s)"
+         (emit_expr arg) region_var
      | Ast.Var "args" ->
        (* Native CLI: argv[1..] as a str list. The unit arg has no effect;
           evaluate it for side-effect-freedom, then build the list. *)
@@ -6938,6 +6965,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   inner_lift_closure_pending := [];
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
+  uses_read_file_bytes := false;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset channel_instances;
   Hashtbl.reset map_instances;
@@ -7839,6 +7867,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        value typedefs, which are all complete by here). *)
     @ (if copy_fn_decls = [] then [] else copy_fn_decls @ [""])
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
+    @ (if not !uses_read_file_bytes then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.43 (bytes story): binary-safe file read. read_file's";
+               "   NUL-terminated str silently truncates binary data at the";
+               "   first 0x00 byte; this reads the whole file into an int vec";
+               "   (one element per byte, 0..255). */";
+               "static mere_vec_int* __lang_read_file_bytes(const char* path, __lang_region* r) {";
+               "  FILE* f = fopen(path, \"rb\");";
+               "  if (!f) {";
+               "    fprintf(stderr, \"read_file_bytes: cannot open %s\\n\", path);";
+               "    exit(1);";
+               "  }";
+               "  mere_vec_int* v = mere_vec_int_new(r);";
+               "  int c;";
+               "  while ((c = fgetc(f)) != EOF) mere_vec_int_push(v, (long long)c);";
+               "  fclose(f);";
+               "  return v;";
+               "}" ];
+           "" ])
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])

@@ -2195,6 +2195,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     file_io_used := true;
     emit_expr path_e;
     emit_instr "call $__lang_read_file"
+  | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, _) ->
+    unsupported e.Ast.loc
+      "read_file_bytes is unsupported in Wasm codegen (v0.1.43 scope = \
+       interp + C; the host file API returns NUL-terminated strings)"
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc
       "list_dir is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
