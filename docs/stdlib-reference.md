@@ -147,7 +147,7 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 
 ---
 
-## Numeric operations (17)
+## Numeric operations (23)
 
 | Name | Type | Description |
 |---|---|---|
@@ -168,6 +168,12 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `divmod` ⚡ | `int -> int -> (int * int)` | (quotient, remainder); raises on 0 div |
 | `sum_range` | `int -> int -> int` | Sum over `lo..hi` (Gauss formula, O(1)) |
 | `not` | `bool -> bool` | Logical negation |
+| `bit_and` | `int -> int -> int` | Bitwise AND on the backend's native int width (v0.1.42) |
+| `bit_or` | `int -> int -> int` | Bitwise OR (v0.1.42) |
+| `bit_xor` | `int -> int -> int` | Bitwise XOR (v0.1.42) |
+| `bit_not` | `int -> int` | Bitwise complement; numerically `-x - 1` on every backend (v0.1.42) |
+| `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..31` for portable code — int is 64-bit on C, 63-bit on interp, 32-bit on LLVM/Wasm (v0.1.42) |
+| `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
 
 ### Float arithmetic (4)
 
@@ -387,10 +393,11 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 106)
+## All builtins (alphabetical, 112)
 
 ```
-abs args assert atan2 bool_of_str ceil char_at chr clamp const
+abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
+bool_of_str ceil char_at chr clamp const
 cos cube decr divmod e env_var even exit exp f_abs f_add
 f_div f_ge f_gt f_le f_lt f_max f_min f_mul f_neg f_pow
 f_sub fail file_exists flip float_of_int float_of_str floor

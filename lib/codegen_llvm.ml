@@ -1895,6 +1895,12 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_show_type t
         | None -> ())
+     | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
+       (* v0.1.42: str_of_int lowers to `call @show_int`, but only `show`
+          registered the helper — `print (str_of_int x)` under a top-level
+          let produced an undefined @show_int at clang time (same gap as
+          the Wasm backend; found while smoke-testing bitwise builtins). *)
+       add_show_type Ast.TyInt
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
@@ -2417,7 +2423,18 @@ let cast_from_i64 (v : string) (llty : string) : string =
    LLVM type from the AST's `.ty` annotation. *)
 let rec emit_expr (env : env) (e : Ast.expr) : string =
   match e.Ast.node with
-  | Ast.Int_lit n -> string_of_int n
+  | Ast.Int_lit n ->
+    (* v0.1.42: the LLVM backend's int is i32 (the v0.1.41 changelog
+       briefly claimed i64 — measuring said otherwise). Reject literals
+       that don't fit instead of silently emitting a wrapped bit pattern;
+       same policy as the Wasm backend. *)
+    if n > 2147483647 || n < -2147483648 then
+      raise (Codegen_error (e.Ast.loc,
+        Printf.sprintf
+          "int literal %d does not fit the LLVM backend's 32-bit int \
+           (range -2147483648 .. 2147483647); the C backend uses 64-bit \
+           int — see docs/language-reference.md (integers)" n));
+    string_of_int n
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Unit_lit -> "0"  (* unit represented as i32 0 *)
   | Ast.Str_lit s ->
@@ -3247,6 +3264,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let nv = emit_expr env n_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_repeat(ptr %s, i32 %s)" r sv nv);
+    r
+  (* v0.1.42 (bitwise): direct i32 instructions. bit_shr is the
+     arithmetic shift (ashr). *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("bit_and" | "bit_or" | "bit_xor"
+                                                 | "bit_shl" | "bit_shr" as op); _ },
+                               a_e); _ }, b_e) ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    let instr = match op with
+      | "bit_and" -> "and" | "bit_or" -> "or" | "bit_xor" -> "xor"
+      | "bit_shl" -> "shl" | _ -> "ashr"
+    in
+    emit_instr (Printf.sprintf "  %s = %s i32 %s, %s" r instr av bv);
+    r
+  | Ast.App ({ node = Ast.Var "bit_not"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = xor i32 %s, -1" r av);
     r
   | Ast.App ({ node = Ast.Var "str_rev"; _ }, s_e) ->
     let sv = emit_expr env s_e in

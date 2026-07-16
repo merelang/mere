@@ -1895,17 +1895,33 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "not" ->
        Printf.sprintf "(!(%s))" (emit_expr arg)
      | Ast.Var "abs" ->
-       Printf.sprintf "({ int __a = (%s); __a < 0 ? -__a : __a; })" (emit_expr arg)
+       (* v0.1.42: long long temporaries — these survived the v0.1.41
+          64-bit migration with C int temps and silently truncated. *)
+       Printf.sprintf "({ long long __a = (%s); __a < 0 ? -__a : __a; })" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "min"; _ }, a_e) ->
-       Printf.sprintf "({ int __a = (%s); int __b = (%s); __a < __b ? __a : __b; })"
+       Printf.sprintf "({ long long __a = (%s); long long __b = (%s); __a < __b ? __a : __b; })"
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "max"; _ }, a_e) ->
-       Printf.sprintf "({ int __a = (%s); int __b = (%s); __a > __b ? __a : __b; })"
+       Printf.sprintf "({ long long __a = (%s); long long __b = (%s); __a > __b ? __a : __b; })"
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "clamp"; _ }, lo_e); _ }, hi_e) ->
        (* Phase 36: clamp lo hi x — curried 3-arg, same order as interp *)
-       Printf.sprintf "({ int __lo = (%s); int __hi = (%s); int __x = (%s); __x < __lo ? __lo : (__x > __hi ? __hi : __x); })"
+       Printf.sprintf "({ long long __lo = (%s); long long __hi = (%s); long long __x = (%s); __x < __lo ? __lo : (__x > __hi ? __hi : __x); })"
          (emit_expr lo_e) (emit_expr hi_e) (emit_expr arg)
+     (* v0.1.42 (bitwise): direct C operators on long long. bit_shr is
+        the arithmetic shift (signed >>). *)
+     | Ast.App ({ node = Ast.Var "bit_and"; _ }, a_e) ->
+       Printf.sprintf "((%s) & (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bit_or"; _ }, a_e) ->
+       Printf.sprintf "((%s) | (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bit_xor"; _ }, a_e) ->
+       Printf.sprintf "((%s) ^ (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.Var "bit_not" ->
+       Printf.sprintf "(~(%s))" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bit_shl"; _ }, a_e) ->
+       Printf.sprintf "((%s) << (%s))" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bit_shr"; _ }, a_e) ->
+       Printf.sprintf "((%s) >> (%s))" (emit_expr a_e) (emit_expr arg)
      | Ast.Var "chr" ->
        (* Phase 36: chr n — int in [0,255] → single-byte str via char_table *)
        Printf.sprintf "__lang_char_at_chr(%s)" (emit_expr arg)
