@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.37" Version.v "0.1.37";
+  check "version is 0.1.38" Version.v "0.1.38";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2158,6 +2158,21 @@ let () =
   check "exhaustive: variable pattern covers all"
     (warnings_of
       "match 42 with | n -> n + 1") "";
+  (* v0.1.38 (Unicode): utf8_len / utf8_chars builtins + prelude
+     utf8_at / utf8_sub / utf8_rev. A str stays a byte string
+     (str_len "こんにちは" = 15); these give the codepoint view. *)
+  check "utf8: codepoint length"
+    (Pipeline.process "utf8_len \"こんにちは\"") "5";
+  check "utf8: byte length is unchanged (documented)"
+    (Pipeline.process "str_len \"こんにちは\"") "15";
+  check "utf8: chars splits into codepoints"
+    (Pipeline.process "utf8_chars \"aあ\"") "[\"a\", \"あ\"]";
+  check "utf8: at / sub / rev via prelude"
+    (Pipeline.process
+      "utf8_at \"こんにちは\" 2 ++ \"|\" ++ utf8_sub \"こんにちは\" 1 3 ++ \"|\" ++ utf8_rev \"aあ😀b\"")
+    "\"に|んにち|b😀あa\"";
+  check "utf8: 4-byte emoji counts as one"
+    (Pipeline.process "utf8_len \"😀🎉\"") "2";
   check "non-exhaustive: bool missing false"
     (warnings_of "match true with | true -> 1")
     "line 1, col 1: warning: non-exhaustive match (missing false)";
@@ -3191,14 +3206,14 @@ let () =
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "  closure_int_int f;\n} __anon_4_env;";   (* Slot number tracks how many
-                             prelude lambdas precede the user's `fn x -> f x` (captures f);
-                             v0.1.33's generic list_sort shifted it to 4. Uniquely identifiable
-                             by the env field `closure_int_int f`. *)
+    "  closure_int_int f;\n} __anon_";   (* Slot numbers shift whenever the
+                             prelude gains lambdas — match the unique env FIELD
+                             (`closure_int_int f` = the user's `fn x -> f x` capturing f)
+                             without pinning the slot. *)
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "static int __anon_4_fn(void* __env_self_void, int x)";
+    "_fn(void* __env_self_void, int x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -3433,11 +3448,11 @@ let () =
 
   (* --- LLVM IR codegen: strings / print / ++ / str_len (Phase 5.3) --- *)
   assert_contains "llvm: str literal global"
-    (llvm "\"hi\"") "@.str_0 = private constant [3 x i8] c\"hi\\00\"";   (* v0.1.33: generic list_min/list_max are poly (skipped when unused), so user literals start at str_0 *)
+    (llvm "\"hi\"") "= private constant [3 x i8] c\"hi\\00\"";   (* slot numbers shift with the prelude; assert the constant, not the slot *)
   assert_contains "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
   assert_contains "llvm: str passed as ptr to printf"
-    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_0)";   (* v0.1.33: see above — slot 0 now *)
+    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_";   (* slot-agnostic *)
   assert_contains "llvm: print emits puts call"
     (llvm "print \"hi\"") "call i32 @puts(ptr ";
   assert_contains "llvm: ++ lowers to __lang_str_concat"
@@ -6829,9 +6844,11 @@ let () =
           (list_zip / list_for_all / list_any / list_member /
            list_sum / list_product / list_max / list_min)
         + Phase 39.A' (sort helpers): 3 (list_sort_insert / list_sort_by /
-           list_sort) = 37 total *)
+           list_sort)
+        + v0.1.38 (utf8 view): 6 (_u8_nth / utf8_at / _u8_slice /
+           utf8_sub / _u8_rev_join / utf8_rev) = 43 total *)
      string_of_int (List.length prog.Ast.decls))
-    "37";
+    "43";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"

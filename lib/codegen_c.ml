@@ -1937,6 +1937,13 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "read_stdin" ->
        (* Native CLI: read all of stdin as a str. Unit arg has no effect. *)
        Printf.sprintf "((void)(%s), __lang_read_stdin())" (emit_expr arg)
+     | Ast.Var "utf8_len" ->
+       (* v0.1.38 (Unicode): codepoint count of a byte string. *)
+       str_split_used := true;
+       Printf.sprintf "__lang_utf8_len(%s)" (emit_expr arg)
+     | Ast.Var "utf8_chars" ->
+       str_split_used := true;
+       Printf.sprintf "__lang_utf8_chars(%s)" (emit_expr arg)
      | Ast.Var "read_line" ->
        (* v0.1.26 (mlog dogfood): one stdin line at a time — the streaming
           counterpart of read_stdin. Was interpreter-only until a
@@ -5563,6 +5570,45 @@ let metrics_runtime =
 let str_list_helpers =
   String.concat "\n"
     [ "/* Phase 24.3: str_split builds a list_str by tokenizing s by delim. */";
+      "/* v0.1.38 (Unicode): the codepoint view. A str stays bytes; these";
+      "   walk UTF-8 sequences (invalid bytes count as single units). */";
+      "static int __lang_utf8_span(unsigned char b) {";
+      "  if (b < 0x80) return 1;";
+      "  if (b >= 0xC0 && b <= 0xDF) return 2;";
+      "  if (b >= 0xE0 && b <= 0xEF) return 3;";
+      "  if (b >= 0xF0 && b <= 0xF7) return 4;";
+      "  return 1;";
+      "}";
+      "static int __lang_utf8_len(const char* s) {";
+      "  int n = (int)strlen(s), i = 0, c = 0;";
+      "  while (i < n) {";
+      "    int l = __lang_utf8_span((unsigned char)s[i]);";
+      "    i += (l > n - i) ? (n - i) : l;";
+      "    c++;";
+      "  }";
+      "  return c;";
+      "}";
+      "static list_str __lang_utf8_chars(const char* s) {";
+      "  int n = (int)strlen(s);";
+      "  list_str acc = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
+      "  acc->tag = 0;";
+      "  int end = n;";
+      "  while (end > 0) {";
+      "    int st = end - 1;";
+      "    while (st > 0 && (((unsigned char)s[st]) & 0xC0) == 0x80) st--;";
+      "    int l = end - st;";
+      "    char* tok = (char*)__lang_region_alloc(__lang_current_region, (size_t)l + 1);";
+      "    memcpy(tok, s + st, (size_t)l);";
+      "    tok[l] = '\\0';";
+      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
+      "    cons->tag = 1;";
+      "    cons->payload.Cons.f0 = tok;";
+      "    cons->payload.Cons.f1 = acc;";
+      "    acc = cons;";
+      "    end = st;";
+      "  }";
+      "  return acc;";
+      "}";
       "static list_str __lang_str_split(const char* s, const char* delim) {";
       "  size_t slen = strlen(s);";
       "  size_t dlen = strlen(delim);";

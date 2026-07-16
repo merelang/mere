@@ -1915,6 +1915,15 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "str_trim"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_str_trim"
+  | Ast.App ({ node = Ast.Var "utf8_len"; _ }, arg) ->
+    (* v0.1.38 (Unicode): codepoint count. *)
+    str_split_used := true;   (* the helper lives in the list_str blob *)
+    emit_expr arg;
+    emit_instr "call $__lang_utf8_len"
+  | Ast.App ({ node = Ast.Var "utf8_chars"; _ }, arg) ->
+    str_split_used := true;   (* pulls in the list_str cell builders *)
+    emit_expr arg;
+    emit_instr "call $__lang_utf8_chars"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_starts_with"; _ }, s_e); _ }, p_e) ->
     emit_expr s_e;
     emit_expr p_e;
@@ -4632,6 +4641,69 @@ let list_str_runtime_wasm = {|
     (i32.store offset=0 (local.get $p) (i32.const 1))
     (i32.store offset=4 (local.get $p) (local.get $box))
     (local.get $p))
+  ;; v0.1.38 (Unicode): codepoint view. Walk lead bytes; build the char
+  ;; list back-to-front by scanning for sequence starts from the end.
+  (func $__lang_utf8_len (param $s i32) (result i32)
+    (local $n i32) (local $i i32) (local $c i32) (local $b i32) (local $l i32)
+    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local.set $i (i32.const 0))
+    (local.set $c (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.ge_s (local.get $i) (local.get $n)))
+        (local.set $b (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (local.set $l
+          (if (result i32) (i32.lt_u (local.get $b) (i32.const 128))
+            (then (i32.const 1))
+            (else (if (result i32) (i32.and (i32.ge_u (local.get $b) (i32.const 192)) (i32.le_u (local.get $b) (i32.const 223)))
+              (then (i32.const 2))
+              (else (if (result i32) (i32.and (i32.ge_u (local.get $b) (i32.const 224)) (i32.le_u (local.get $b) (i32.const 239)))
+                (then (i32.const 3))
+                (else (if (result i32) (i32.and (i32.ge_u (local.get $b) (i32.const 240)) (i32.le_u (local.get $b) (i32.const 247)))
+                  (then (i32.const 4))
+                  (else (i32.const 1))))))))))
+        (if (i32.gt_s (local.get $l) (i32.sub (local.get $n) (local.get $i)))
+          (then (local.set $l (i32.sub (local.get $n) (local.get $i)))))
+        (local.set $i (i32.add (local.get $i) (local.get $l)))
+        (local.set $c (i32.add (local.get $c) (i32.const 1)))
+        (br $lp)))
+    (local.get $c))
+  (func $__lang_utf8_chars (param $s i32) (result i32)
+    (local $n i32) (local $end i32) (local $st i32) (local $l i32)
+    (local $tok i32) (local $j i32) (local $acc i32)
+    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local.set $acc (call $__lang_list_str_nil))
+    (local.set $end (local.get $n))
+    (block $done
+      (loop $outer
+        (br_if $done (i32.le_s (local.get $end) (i32.const 0)))
+        ;; scan backward to this character's lead byte
+        (local.set $st (i32.sub (local.get $end) (i32.const 1)))
+        (block $found
+          (loop $back
+            (br_if $found (i32.le_s (local.get $st) (i32.const 0)))
+            (br_if $found
+              (i32.ne (i32.and (i32.load8_u (i32.add (local.get $s) (local.get $st))) (i32.const 192))
+                      (i32.const 128)))
+            (local.set $st (i32.sub (local.get $st) (i32.const 1)))
+            (br $back)))
+        (local.set $l (i32.sub (local.get $end) (local.get $st)))
+        ;; copy the char bytes into a fresh NUL-terminated str
+        (local.set $tok (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (i32.add (local.get $tok) (local.get $l)) (i32.const 1)))
+        (local.set $j (i32.const 0))
+        (block $cend
+          (loop $clp
+            (br_if $cend (i32.ge_s (local.get $j) (local.get $l)))
+            (i32.store8 (i32.add (local.get $tok) (local.get $j))
+                        (i32.load8_u (i32.add (i32.add (local.get $s) (local.get $st)) (local.get $j))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $clp)))
+        (i32.store8 (i32.add (local.get $tok) (local.get $l)) (i32.const 0))
+        (local.set $acc (call $__lang_list_str_cons (local.get $tok) (local.get $acc)))
+        (local.set $end (local.get $st))
+        (br $outer)))
+    (local.get $acc))
   ;; str_split s delim — 2-pass: count tokens, then build list back-to-front.
   (func $__lang_str_split (param $s i32) (param $delim i32) (result i32)
     (local $sl i32) (local $dl i32) (local $i i32) (local $cnt i32)

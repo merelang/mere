@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.38 — 2026-07-16
+
+_Unicode (found by ten minutes of typing Japanese at the language):
+**the codepoint view of strings**. A Mere `str` is — and stays — a byte
+string: `str_len "こんにちは"` is 15, `substring` can cut a character in
+half, and `str_rev` scrambles multibyte text; all documented rather than
+changed (byte indexing is what the FFI, the wire protocols, and the
+existing corpus rely on). What was missing was any way to work with
+*text*: two new builtins on all four backends — `utf8_len : str -> int`
+(codepoint count) and `utf8_chars : str -> str list` (split into
+codepoints; invalid bytes count as single units, so they never loop or
+throw) — plus prelude compositions `utf8_at`, `utf8_sub`, and
+`utf8_rev`, written in plain Mere on top of `utf8_chars` so every
+backend gets them for free. `utf8_rev "aあ😀b"` is `"b😀あa"` on interp,
+C, Wasm, and LLVM alike — the first new builtin family to land on all
+four backends at once (str_split's runtime scaffolding made LLVM
+cheap)._
+
+---
+
 ## v0.1.37 — 2026-07-15
 
 _Memory model, ported to Wasm: **`region R { }` reclaims on the Wasm

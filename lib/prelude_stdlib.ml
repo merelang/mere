@@ -243,4 +243,27 @@ let rec result_is_ok = fn r ->
   match r with
   | Err _ -> false
   | Ok _ -> true;
+
+// v0.1.38 (Unicode): the codepoint view of a byte string, composed from
+// the utf8_chars builtin. str_len / substring / char_at stay byte-indexed
+// (documented); use these for text.
+let rec _u8_nth = fn cs -> fn (i: int) ->
+  match cs with
+  | Nil -> ""
+  | Cons (h, t) -> if i == 0 then h else _u8_nth t (i - 1);
+let rec utf8_at = fn (s: str) -> fn (i: int) -> _u8_nth (utf8_chars s) i;
+let rec _u8_slice = fn cs -> fn (start: int) -> fn (len: int) -> fn (acc: str) ->
+  match cs with
+  | Nil -> acc
+  | Cons (h, t) ->
+    if start > 0 then _u8_slice t (start - 1) len acc
+    else if len > 0 then _u8_slice t 0 (len - 1) (acc ++ h)
+    else acc;
+let rec utf8_sub = fn (s: str) -> fn (start: int) -> fn (len: int) ->
+  _u8_slice (utf8_chars s) start len "";
+let rec _u8_rev_join = fn cs -> fn (acc: str) ->
+  match cs with
+  | Nil -> acc
+  | Cons (h, t) -> _u8_rev_join t (h ++ acc);
+let rec utf8_rev = fn (s: str) -> _u8_rev_join (utf8_chars s) "";
 |}
