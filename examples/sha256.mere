@@ -11,7 +11,7 @@
 
 // ---- 32-bit word ops on the 64-bit int -----------------------------------
 
-let mask32 = 4294967295;   // 2^32 - 1
+let mask32 = 0xFFFFFFFF;   // 2^32 - 1
 
 let band = fn a -> fn b -> bit_and a b;
 let bxor = fn a -> fn b -> bit_xor a b;
@@ -26,38 +26,38 @@ let add32 = fn a -> fn b -> bit_and (a + b) mask32;
 
 let k_tbl = fn () ->
   let k = vec_new () in
-  let _ = vec_push k 1116352408 in let _ = vec_push k 1899447441 in
-  let _ = vec_push k 3049323471 in let _ = vec_push k 3921009573 in
-  let _ = vec_push k 961987163 in let _ = vec_push k 1508970993 in
-  let _ = vec_push k 2453635748 in let _ = vec_push k 2870763221 in
-  let _ = vec_push k 3624381080 in let _ = vec_push k 310598401 in
-  let _ = vec_push k 607225278 in let _ = vec_push k 1426881987 in
-  let _ = vec_push k 1925078388 in let _ = vec_push k 2162078206 in
-  let _ = vec_push k 2614888103 in let _ = vec_push k 3248222580 in
-  let _ = vec_push k 3835390401 in let _ = vec_push k 4022224774 in
-  let _ = vec_push k 264347078 in let _ = vec_push k 604807628 in
-  let _ = vec_push k 770255983 in let _ = vec_push k 1249150122 in
-  let _ = vec_push k 1555081692 in let _ = vec_push k 1996064986 in
-  let _ = vec_push k 2554220882 in let _ = vec_push k 2821834349 in
-  let _ = vec_push k 2952996808 in let _ = vec_push k 3210313671 in
-  let _ = vec_push k 3336571891 in let _ = vec_push k 3584528711 in
-  let _ = vec_push k 113926993 in let _ = vec_push k 338241895 in
-  let _ = vec_push k 666307205 in let _ = vec_push k 773529912 in
-  let _ = vec_push k 1294757372 in let _ = vec_push k 1396182291 in
-  let _ = vec_push k 1695183700 in let _ = vec_push k 1986661051 in
-  let _ = vec_push k 2177026350 in let _ = vec_push k 2456956037 in
-  let _ = vec_push k 2730485921 in let _ = vec_push k 2820302411 in
-  let _ = vec_push k 3259730800 in let _ = vec_push k 3345764771 in
-  let _ = vec_push k 3516065817 in let _ = vec_push k 3600352804 in
-  let _ = vec_push k 4094571909 in let _ = vec_push k 275423344 in
-  let _ = vec_push k 430227734 in let _ = vec_push k 506948616 in
-  let _ = vec_push k 659060556 in let _ = vec_push k 883997877 in
-  let _ = vec_push k 958139571 in let _ = vec_push k 1322822218 in
-  let _ = vec_push k 1537002063 in let _ = vec_push k 1747873779 in
-  let _ = vec_push k 1955562222 in let _ = vec_push k 2024104815 in
-  let _ = vec_push k 2227730452 in let _ = vec_push k 2361852424 in
-  let _ = vec_push k 2428436474 in let _ = vec_push k 2756734187 in
-  let _ = vec_push k 3204031479 in let _ = vec_push k 3329325298 in
+  let _ = vec_push k 0x428A2F98 in let _ = vec_push k 0x71374491 in
+  let _ = vec_push k 0xB5C0FBCF in let _ = vec_push k 0xE9B5DBA5 in
+  let _ = vec_push k 0x3956C25B in let _ = vec_push k 0x59F111F1 in
+  let _ = vec_push k 0x923F82A4 in let _ = vec_push k 0xAB1C5ED5 in
+  let _ = vec_push k 0xD807AA98 in let _ = vec_push k 0x12835B01 in
+  let _ = vec_push k 0x243185BE in let _ = vec_push k 0x550C7DC3 in
+  let _ = vec_push k 0x72BE5D74 in let _ = vec_push k 0x80DEB1FE in
+  let _ = vec_push k 0x9BDC06A7 in let _ = vec_push k 0xC19BF174 in
+  let _ = vec_push k 0xE49B69C1 in let _ = vec_push k 0xEFBE4786 in
+  let _ = vec_push k 0x0FC19DC6 in let _ = vec_push k 0x240CA1CC in
+  let _ = vec_push k 0x2DE92C6F in let _ = vec_push k 0x4A7484AA in
+  let _ = vec_push k 0x5CB0A9DC in let _ = vec_push k 0x76F988DA in
+  let _ = vec_push k 0x983E5152 in let _ = vec_push k 0xA831C66D in
+  let _ = vec_push k 0xB00327C8 in let _ = vec_push k 0xBF597FC7 in
+  let _ = vec_push k 0xC6E00BF3 in let _ = vec_push k 0xD5A79147 in
+  let _ = vec_push k 0x06CA6351 in let _ = vec_push k 0x14292967 in
+  let _ = vec_push k 0x27B70A85 in let _ = vec_push k 0x2E1B2138 in
+  let _ = vec_push k 0x4D2C6DFC in let _ = vec_push k 0x53380D13 in
+  let _ = vec_push k 0x650A7354 in let _ = vec_push k 0x766A0ABB in
+  let _ = vec_push k 0x81C2C92E in let _ = vec_push k 0x92722C85 in
+  let _ = vec_push k 0xA2BFE8A1 in let _ = vec_push k 0xA81A664B in
+  let _ = vec_push k 0xC24B8B70 in let _ = vec_push k 0xC76C51A3 in
+  let _ = vec_push k 0xD192E819 in let _ = vec_push k 0xD6990624 in
+  let _ = vec_push k 0xF40E3585 in let _ = vec_push k 0x106AA070 in
+  let _ = vec_push k 0x19A4C116 in let _ = vec_push k 0x1E376C08 in
+  let _ = vec_push k 0x2748774C in let _ = vec_push k 0x34B0BCB5 in
+  let _ = vec_push k 0x391C0CB3 in let _ = vec_push k 0x4ED8AA4A in
+  let _ = vec_push k 0x5B9CCA4F in let _ = vec_push k 0x682E6FF3 in
+  let _ = vec_push k 0x748F82EE in let _ = vec_push k 0x78A5636F in
+  let _ = vec_push k 0x84C87814 in let _ = vec_push k 0x8CC70208 in
+  let _ = vec_push k 0x90BEFFFA in let _ = vec_push k 0xA4506CEB in
+  let _ = vec_push k 0xBEF9A3F7 in let _ = vec_push k 0xC67178F2 in
   k;
 
 // message -> padded byte vector (0x80, zeros, 8-byte big-endian bit length)
@@ -139,10 +139,10 @@ let sha256 = fn msg ->
   let k = k_tbl () in
   let bytes = pad_msg msg in
   let h = vec_new () in
-  let _ = vec_push h 1779033703 in let _ = vec_push h 3144134277 in
-  let _ = vec_push h 1013904242 in let _ = vec_push h 2773480762 in
-  let _ = vec_push h 1359893119 in let _ = vec_push h 2600822924 in
-  let _ = vec_push h 528734635 in let _ = vec_push h 1541459225 in
+  let _ = vec_push h 0x6A09E667 in let _ = vec_push h 0xBB67AE85 in
+  let _ = vec_push h 0x3C6EF372 in let _ = vec_push h 0xA54FF53A in
+  let _ = vec_push h 0x510E527F in let _ = vec_push h 0x9B05688C in
+  let _ = vec_push h 0x1F83D9AB in let _ = vec_push h 0x5BE0CD19 in
   let nblocks = (vec_len bytes) / 64 in
   let rec go = fn i ->
     if i == nblocks then ()

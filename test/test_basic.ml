@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.45" Version.v "0.1.45";
+  check "version is 0.1.46" Version.v "0.1.46";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8197,6 +8197,37 @@ let () =
            "let v = vec_new () in\n\
             let _ = vec_push v 1 in\n\
             write_file_bytes \"x.bin\" v") in ());
+
+  (* v0.1.46: hex integer literals. Two probes (bitwise masks, Unicode
+     width ranges) wrote everything in decimal because 0xFF lexed as
+     `0` then the identifier `xFF`. int_of_string handles the prefix;
+     `0x` with no hex digit stays `0` followed by the ident `x`. *)
+  check "v0.1.46: hex literal 0xFF" (Pipeline.process "0xFF") "255";
+  check "v0.1.46: hex literal uppercase 0Xff" (Pipeline.process "0Xff") "255";
+  check "v0.1.46: hex literal large (SHA-256 constant)"
+    (Pipeline.process "0x6a09e667") "1779033703";
+  check "v0.1.46: hex in bit_and"
+    (Pipeline.process "bit_and 0xDEADBEEF 0xFF") "239";
+  check "v0.1.46: hex zero" (Pipeline.process "0x0") "0";
+  check "v0.1.46: 0x without a hex digit is 0 then ident (error)"
+    (try let _ = Pipeline.process "0x" in "no-error"
+     with _ -> "error")
+    "error";
+  check "v0.1.46: C backend hex literal round-trips as 64-bit"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "0xFF + 1") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     (* lexer normalizes to decimal int; emitter adds the LL suffix *)
+     if has "(255LL + 1LL)" then "ok" else "no")
+    "ok";
 
   (* v0.1.45 (aligned-table probe): display width — terminals draw CJK /
      fullwidth / emoji at 2 columns; utf8_len counts codepoints and CJK

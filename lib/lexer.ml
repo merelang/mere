@@ -345,6 +345,24 @@ let rec tokenize s =
           aux j acc'
         end
       | c when is_digit c ->
+        (* v0.1.46: hex literals. Two probes in a row wrote large bit
+           masks / Unicode range bounds in decimal because 0xFF didn't
+           lex ("unbound variable: xFF"). OCaml's int_of_string does the
+           conversion; the 0x prefix must be followed by a hex digit. *)
+        let is_hex_digit c =
+          is_digit c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+        in
+        if c = '0' && i + 2 < len && (s.[i + 1] = 'x' || s.[i + 1] = 'X')
+           && is_hex_digit s.[i + 2] then begin
+          let rec read_hex j =
+            if j < len && is_hex_digit s.[j] then read_hex (j + 1) else j
+          in
+          let j = read_hex (i + 2) in
+          let n = int_of_string (String.sub s i (j - i)) in
+          let w = j - i in
+          advance w;
+          aux j ((with_width pos w, T_int n) :: acc)
+        end else
         let rec read j =
           if j < len && is_digit s.[j] then read (j + 1) else j
         in
