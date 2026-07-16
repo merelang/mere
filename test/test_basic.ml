@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.44" Version.v "0.1.44";
+  check "version is 0.1.45" Version.v "0.1.45";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -6877,9 +6877,11 @@ let () =
            utf8_sub / _u8_rev_join / utf8_rev)
         + v0.1.39 (scale safety): 13 (merge-sort quartet + the _l*_into /
            _l{max,min}_from / _llen / _range_down accumulator helpers)
-        = 56 total *)
+        + v0.1.45 (display width): 5 (_eaw_width / _u8w_go / utf8_width /
+           pad_right / pad_left)
+        = 61 total *)
      string_of_int (List.length prog.Ast.decls))
-    "56";
+    "61";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
@@ -8195,6 +8197,28 @@ let () =
            "let v = vec_new () in\n\
             let _ = vec_push v 1 in\n\
             write_file_bytes \"x.bin\" v") in ());
+
+  (* v0.1.45 (aligned-table probe): display width — terminals draw CJK /
+     fullwidth / emoji at 2 columns; utf8_len counts codepoints and CJK
+     table columns come out visually broken. utf8_width is East Asian
+     Width (wcwidth-lite) in pure prelude Mere (UTF-8 decoded with
+     div/mod arithmetic); pad_left / pad_right pad on it. *)
+  check "v0.1.45: utf8_width CJK is 2 columns per char"
+    (Pipeline.process "utf8_width \"こんにちは\"") "10";
+  check "v0.1.45: utf8_width mixed ASCII + CJK"
+    (Pipeline.process "utf8_width \"abcあ\"") "5";
+  check "v0.1.45: utf8_width emoji" (Pipeline.process "utf8_width \"😀\"") "2";
+  check "v0.1.45: utf8_width halfwidth katakana is 1 column"
+    (Pipeline.process "utf8_width \"ｱｲｳ\"") "3";
+  check "v0.1.45: utf8_width vs utf8_len (5 codepoints, 10 columns)"
+    (Pipeline.process "(utf8_len \"こんにちは\", utf8_width \"こんにちは\")")
+    "(5, 10)";
+  check "v0.1.45: pad_right pads on display width"
+    (Pipeline.process "pad_right \"りんご\" 8 ++ \"|\"") "\"りんご  |\"";
+  check "v0.1.45: pad_left on ASCII"
+    (Pipeline.process "pad_left \"42\" 5") "\"   42\"";
+  check "v0.1.45: pad_right no-op when already wide enough"
+    (Pipeline.process "pad_right \"wide enough\" 3") "\"wide enough\"";
 
   check "v0.1.42: rotr composed from shifts"
     (Pipeline.process

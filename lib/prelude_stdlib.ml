@@ -308,4 +308,61 @@ let rec _u8_rev_join = fn cs -> fn (acc: str) ->
   | Nil -> acc
   | Cons (h, t) -> _u8_rev_join t (h ++ acc);
 let rec utf8_rev = fn (s: str) -> _u8_rev_join (utf8_chars s) "";
+
+// v0.1.45 (aligned-table probe): DISPLAY width, not codepoint count.
+// Terminals draw CJK / fullwidth / emoji at 2 columns and combining
+// marks at 0 — utf8_len says 5 for a greeting the terminal draws in 10.
+// East Asian Width, wcwidth-lite: the major W/F ranges (decimal, since
+// the lexer has no hex literals). Ambiguous-width characters count 1.
+let rec _eaw_width = fn (cp: int) ->
+  if cp >= 768 && cp <= 879 then 0            // combining marks (0300-036F)
+  else if cp == 12351 then 1                  // 303F, the hole in 2E80-A4CF
+  else if (cp >= 4352 && cp <= 4447)          // 1100-115F  Hangul Jamo
+       || (cp >= 11904 && cp <= 42191)        // 2E80-A4CF  CJK radicals..Yi
+       || (cp >= 43360 && cp <= 43391)        // A960-A97F  Jamo ext-A
+       || (cp >= 44032 && cp <= 55203)        // AC00-D7A3  Hangul syllables
+       || (cp >= 63744 && cp <= 64255)        // F900-FAFF  CJK compat
+       || (cp >= 65040 && cp <= 65049)        // FE10-FE19  vertical forms
+       || (cp >= 65072 && cp <= 65135)        // FE30-FE6F  compat forms
+       || (cp >= 65280 && cp <= 65376)        // FF00-FF60  fullwidth forms
+       || (cp >= 65504 && cp <= 65510)        // FFE0-FFE6  fullwidth signs
+       || (cp >= 127744 && cp <= 128767)      // 1F300-1F6FF emoji blocks
+       || (cp >= 129280 && cp <= 129535)      // 1F900-1F9FF emoji supplement
+       || (cp >= 131072 && cp <= 262141)      // 20000-3FFFD CJK ext B..
+  then 2 else 1;
+// UTF-8 decode by arithmetic (2-byte: cp = b0%32*64 + b1%64, etc.);
+// truncated / stray sequences count as width 1 per byte.
+let rec _u8w_go = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: int) ->
+  if i >= n then acc
+  else
+    let b0 = ord (char_at s i) in
+    if b0 < 194 then _u8w_go s (i + 1) n (acc + 1)
+    else if b0 < 224 then
+      (if i + 1 < n then
+         _u8w_go s (i + 2) n
+           (acc + _eaw_width ((b0 % 32) * 64 + (ord (char_at s (i + 1)) % 64)))
+       else acc + 1)
+    else if b0 < 240 then
+      (if i + 2 < n then
+         _u8w_go s (i + 3) n
+           (acc + _eaw_width ((b0 % 16) * 4096
+                              + (ord (char_at s (i + 1)) % 64) * 64
+                              + (ord (char_at s (i + 2)) % 64)))
+       else acc + 1)
+    else
+      (if i + 3 < n then
+         _u8w_go s (i + 4) n
+           (acc + _eaw_width ((b0 % 8) * 262144
+                              + (ord (char_at s (i + 1)) % 64) * 4096
+                              + (ord (char_at s (i + 2)) % 64) * 64
+                              + (ord (char_at s (i + 3)) % 64)))
+       else acc + 1);
+let rec utf8_width = fn (s: str) -> _u8w_go s 0 (str_len s) 0;
+// column padding on display width — the aligned-table primitives.
+let rec pad_right = fn (s: str) -> fn (w: int) ->
+  let d = w - utf8_width s in
+  if d <= 0 then s else s ++ str_repeat " " d;
+let rec pad_left = fn (s: str) -> fn (w: int) ->
+  let d = w - utf8_width s in
+  if d <= 0 then s else str_repeat " " d ++ s;
 |}

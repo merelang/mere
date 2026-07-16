@@ -1,0 +1,25 @@
+// Aligned CLI table with mixed Japanese / ASCII cells — the probe that
+// forced utf8_width (v0.1.45). Column alignment needs DISPLAY width
+// (East Asian Width: CJK / fullwidth / emoji = 2 columns, combining
+// marks = 0), not the codepoint count: utf8_len says 5 for こんにちは
+// but a terminal draws it in 10 columns.
+//
+// utf8_width / pad_right / pad_left are prelude functions written in
+// pure Mere: UTF-8 is decoded with plain div/mod arithmetic and the
+// width table is a dozen range checks.
+
+let row = fn name -> fn qty -> fn price ->
+  print ("| " ++ pad_right name 12 ++ " | " ++ pad_left (str_of_int qty) 4
+         ++ " | " ++ pad_left (str_of_int price) 6 ++ " |");
+
+let hr = fn () ->
+  print ("+" ++ str_repeat "-" 14 ++ "+" ++ str_repeat "-" 6
+         ++ "+" ++ str_repeat "-" 8 ++ "+");
+
+let _ = hr () in
+let _ = row "apple" 3 120 in
+let _ = row "りんご" 3 120 in
+let _ = row "みかん(小)" 12 80 in
+let _ = row "ぶどう 🍇" 1 512 in
+let _ = row "ｾｰﾙ品" 99 10 in
+hr ()
