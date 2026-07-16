@@ -277,8 +277,9 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* v0.1.43: emitted-on-use flag for the binary-safe file reader; the
    helper is appended after the vec runtimes (it constructs a
-   mere_vec_int). *)
+   mere_vec_int). v0.1.44 adds the write half. *)
 let uses_read_file_bytes = ref false
+let uses_write_file_bytes = ref false
 
 (* Phase 15.7: concrete element types of `OwnedVec[T]` seen in the program.
    Same key strategy as `vec_instances`. OwnedVec is heap-allocated
@@ -1974,6 +1975,14 @@ let rec emit_expr (e : Ast.expr) : string =
        uses_read_file_bytes := true;
        Printf.sprintf "__lang_read_file_bytes(%s, %s)"
          (emit_expr arg) region_var
+     | Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e) ->
+       (* v0.1.44: the write half. The vec arg guarantees the vec_int
+          instance exists (its own c_type_of registered it). *)
+       if not (Hashtbl.mem vec_instances "int") then
+         Hashtbl.add vec_instances "int" Ast.TyInt;
+       uses_write_file_bytes := true;
+       Printf.sprintf "__lang_write_file_bytes(%s, %s)"
+         (emit_expr path_e) (emit_expr arg)
      | Ast.Var "args" ->
        (* Native CLI: argv[1..] as a str list. The unit arg has no effect;
           evaluate it for side-effect-freedom, then build the list. *)
@@ -6966,6 +6975,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   uses_read_file_bytes := false;
+  uses_write_file_bytes := false;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset channel_instances;
   Hashtbl.reset map_instances;
@@ -7885,6 +7895,30 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "  while ((c = fgetc(f)) != EOF) mere_vec_int_push(v, (long long)c);";
                "  fclose(f);";
                "  return v;";
+               "}" ];
+           "" ])
+    @ (if not !uses_write_file_bytes then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.44 (bytes story, write half): write an int vec as raw";
+               "   bytes. Each element must be 0..255. */";
+               "static int __lang_write_file_bytes(const char* path, mere_vec_int* v) {";
+               "  FILE* f = fopen(path, \"wb\");";
+               "  if (!f) {";
+               "    fprintf(stderr, \"write_file_bytes: cannot open %s\\n\", path);";
+               "    exit(1);";
+               "  }";
+               "  for (int i = 0; i < v->len; i++) {";
+               "    long long b = v->data[i];";
+               "    if (b < 0 || b > 255) {";
+               "      fclose(f);";
+               "      fprintf(stderr, \"write_file_bytes: byte value %lld out of range 0..255\\n\", b);";
+               "      exit(1);";
+               "    }";
+               "    fputc((int)b, f);";
+               "  }";
+               "  fclose(f);";
+               "  return 0; /* unit */";
                "}" ];
            "" ])
     @ (if owned_vec_runtimes = [] then []

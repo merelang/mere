@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.43" Version.v "0.1.43";
+  check "version is 0.1.44" Version.v "0.1.44";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8101,6 +8101,100 @@ let () =
         \  else go (i + 1) (crc_byte crc (ord (char_at s i))) in\n\
         bit_xor (go 0 mask32) mask32")
     "3421780262";
+
+  (* v0.1.44 (Mandelbrot probe): unary minus is numeric-overloaded like
+     the binary operators — `-2.5` was a type error and needed f_neg. *)
+  check "v0.1.44: negative float literal" (Pipeline.process "-2.5") "-2.5";
+  check "v0.1.44: float neg in expression"
+    (Pipeline.process "let x = 1.5 in -x * 2.0") "-3.0";
+  check "v0.1.44: unary minus still int by default"
+    (Pipeline.process "-(1 + 2)") "-3";
+  (* v0.1.44: float infix on LLVM — `1.5 + 2.0` emitted `add i32` on
+     double operands (invalid IR, clang rejected); comparisons emitted
+     icmp. Now fadd-family / fcmp. Wasm/C/interp already agreed. *)
+  check "v0.1.44: LLVM emits fadd/fcmp for float infix"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyBool
+       (typed_prog "1.5 + 2.0 < 4.0") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "= fadd double" && has "= fcmp olt double" then "ok" else "no")
+    "ok";
+  check "v0.1.44: LLVM emits fneg for float unary minus"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyFloat
+       (typed_prog "let x = 2.5 in -x") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "= fneg double" then "ok" else "no")
+    "ok";
+  check "v0.1.44: Wasm emits f64.neg for float unary minus"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyFloat
+       (typed_prog "let x = 2.5 in -x") in
+     let nlen = String.length wat in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "f64.neg" then "ok" else "no")
+    "ok";
+  (* v0.1.44: write_file_bytes — the write half of the bytes story. *)
+  (let tmp = Filename.temp_file "mere_wfb_" ".bin" in
+   check "v0.1.44: write_file_bytes / read_file_bytes round-trip (interp)"
+     (Pipeline.process
+        (Printf.sprintf
+           "let v = vec_new () in\n\
+            let _ = vec_push v 80 in\n\
+            let _ = vec_push v 0 in\n\
+            let _ = vec_push v 255 in\n\
+            let _ = write_file_bytes \"%s\" v in\n\
+            let b = read_file_bytes \"%s\" in\n\
+            (vec_len b, vec_get b 0, vec_get b 1, vec_get b 2)" tmp tmp))
+     "(3, 80, 0, 255)";
+   Sys.remove tmp);
+  check "v0.1.44: C codegen emits the write_file_bytes helper"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyUnit
+       (typed_prog
+          "let v = vec_new () in\n\
+           let _ = vec_push v 1 in\n\
+           write_file_bytes \"x.bin\" v") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "static int __lang_write_file_bytes"
+        && has "__lang_write_file_bytes(\"x.bin\"" then "ok" else "no")
+    "ok";
+  check_raises_containing
+    "v0.1.44: Wasm codegen rejects write_file_bytes honestly"
+    "write_file_bytes is unsupported in Wasm codegen"
+    (fun () ->
+      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyUnit
+        (typed_prog
+           "let v = vec_new () in\n\
+            let _ = vec_push v 1 in\n\
+            write_file_bytes \"x.bin\" v") in ());
 
   check "v0.1.42: rotr composed from shifts"
     (Pipeline.process

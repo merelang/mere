@@ -1068,6 +1068,16 @@ let read_file_bytes_scheme =
     body = Ast.TyArrow (Ast.TyStr,
              Ast.TyCon ("Vec", [_rfb_region; Ast.TyInt])) }
 
+(* v0.1.44 (Mandelbrot probe): the write half — PPM's real format is P6
+   (raw bytes) and the P3 escape hatch cost 2.6x the file size. *)
+let _wfb_region = fresh_var ()
+let write_file_bytes_scheme =
+  let rid = match _wfb_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (Ast.TyStr,
+             Ast.TyArrow (Ast.TyCon ("Vec", [_wfb_region; Ast.TyInt]),
+               Ast.TyUnit)) }
+
 let _ovec_push_alpha = fresh_var ()
 let owned_vec_push_scheme =
   let aid = match _ovec_push_alpha with Ast.TyVar v -> v.id | _ -> assert false in
@@ -1322,6 +1332,7 @@ let initial_env : env =
     ("read_lines",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
     ("read_file_bytes", read_file_bytes_scheme);
+    ("write_file_bytes", write_file_bytes_scheme);
     (* Phase 44: file system primitives for the docs site SSG (paper-trial doc 47) *)
     ("list_dir",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
@@ -1533,9 +1544,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        raise_with_suggestion e.loc "unbound variable" name
          (List.map fst env))
   | Ast.Neg a ->
+    (* v0.1.44 (Mandelbrot probe): unary minus follows Bin's numeric
+       overload — binary `1.0 - x` was float-capable for a while, but
+       `-2.5` was still a type error, so negative float literals needed
+       `f_neg`. If the operand is concretely float, Neg is float;
+       otherwise the historical int default stands. *)
     let t = infer env a in
-    unify a.loc Ast.TyInt t;
-    Ast.TyInt
+    (match Ast.walk t with
+     | Ast.TyFloat -> Ast.TyFloat
+     | _ -> unify a.loc Ast.TyInt t; Ast.TyInt)
   | Ast.Bin (op, a, b) ->
     let ta = infer env a in
     let tb = infer env b in

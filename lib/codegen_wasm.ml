@@ -1605,9 +1605,18 @@ let rec emit_expr (e : Ast.expr) : unit =
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
-    emit_instr "i32.const 0";
-    emit_expr inner;
-    emit_instr "i32.sub"
+    (* v0.1.44: unary minus is numeric-overloaded like Bin (the typer
+       stamps the operand type). Float values are boxed f64 pointers. *)
+    (match inner.Ast.ty with
+     | Some t when Ast.walk t = Ast.TyFloat ->
+       emit_expr inner;
+       emit_instr "f64.load offset=0 align=8";
+       emit_instr "f64.neg";
+       emit_float_alloc_from_f64_on_stack ()
+     | _ ->
+       emit_instr "i32.const 0";
+       emit_expr inner;
+       emit_instr "i32.sub")
   | Ast.Bin (Ast.Concat, a, b) ->
     emit_expr a;
     emit_expr b;
@@ -2199,6 +2208,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     unsupported e.Ast.loc
       "read_file_bytes is unsupported in Wasm codegen (v0.1.43 scope = \
        interp + C; the host file API returns NUL-terminated strings)"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, _); _ }, _) ->
+    unsupported e.Ast.loc
+      "write_file_bytes is unsupported in Wasm codegen (v0.1.44 scope = \
+       interp + C)"
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc
       "list_dir is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"

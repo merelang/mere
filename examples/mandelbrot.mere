@@ -1,0 +1,67 @@
+// Mandelbrot -> PPM (P6, raw bytes), in pure Mere.
+//
+// This example forced three v0.1.44 changes:
+//   - unary minus on floats (`-2.5` was a type error; f_neg only)
+//   - float infix on the LLVM backend (it emitted `add i32` on double
+//     operands — invalid IR; interp/C/Wasm had computed it for a while,
+//     and the docs still claimed prefix-only f_add style)
+//   - write_file_bytes, the write half of the binary path: PPM's real
+//     format is P6 (raw bytes); the P3 ASCII escape costs 2.6x the size
+//
+// Note the float annotations on mandel's params: the numeric overload
+// resolves to float only when an operand is concretely float, so
+// unannotated params default to int.
+//
+// View: mere examples/mandelbrot.mere && open mandel_p6.ppm
+
+let width = 400;
+let height = 300;
+let max_iter = 96;
+
+let mandel = fn (cx: float) -> fn (cy: float) ->
+  let rec go = fn i -> fn (zx: float) -> fn (zy: float) ->
+    if i == max_iter then max_iter
+    else
+      let zx2 = zx * zx in
+      let zy2 = zy * zy in
+      if zx2 + zy2 > 4.0 then i
+      else go (i + 1) (zx2 - zy2 + cx) (2.0 * zx * zy + cy) in
+  go 0 0.0 0.0;
+
+let shade = fn it ->
+  if it == max_iter then (0, 0, 0)
+  else
+    let t = (it * 255) / max_iter in
+    (t, (t * t) / 255, 255 - t);
+
+let px_to_cx = fn x -> -2.5 + 3.5 / float_of_int width * float_of_int x;
+let px_to_cy = fn y -> -1.0 + 2.0 / float_of_int height * float_of_int y;
+
+let render_p6 = fn () ->
+  let bytes = vec_new () in
+  let header = "P6\n" ++ str_of_int width ++ " " ++ str_of_int height ++ "\n255\n" in
+  let hn = str_len header in
+  let rec push_hdr = fn i ->
+    if i == hn then ()
+    else let _ = vec_push bytes (ord (char_at header i)) in push_hdr (i + 1) in
+  let _ = push_hdr 0 in
+  let rec row = fn y ->
+    if y == height then ()
+    else
+      let rec col = fn x ->
+        if x == width then ()
+        else
+          let it = mandel (px_to_cx x) (px_to_cy y) in
+          let (r, g, b) = shade it in
+          let _ = vec_push bytes r in
+          let _ = vec_push bytes g in
+          let _ = vec_push bytes b in
+          col (x + 1) in
+      let _ = col 0 in
+      row (y + 1) in
+  let _ = row 0 in
+  bytes;
+
+let bytes = render_p6 () in
+let _ = write_file_bytes "mandel_p6.ppm" bytes in
+print ("wrote mandel_p6.ppm (" ++ str_of_int (vec_len bytes) ++ " bytes)")

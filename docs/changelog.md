@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.44 — 2026-07-16
+
+_The picture that fixed the docs (found by a Mandelbrot renderer): the
+probe went in expecting to measure the "no float infix" tax the docs
+promised — and the docs were wrong in the language's favor. **`+ - * /`
+and the comparisons had been numeric-overloaded for a while** on
+interp, C, and Wasm; the reference still said prefix-only `f_add`
+style, and a docs-faithful reader would write nine needless prefix
+calls per formula. Three real gaps did surface around the stale entry,
+all fixed: **unary minus was int-only** (`-2.5` was a type error;
+negative float literals needed `f_neg`) — now overloaded like the
+binary operators on all four backends (fneg / f64.neg); **the LLVM
+backend emitted `add i32` on double operands** for float infix (invalid
+IR, and `icmp` for float comparisons) — now the fadd family and
+ordered fcmp; and **the write half of the binary path was missing** —
+`write_file_bytes : str -> Vec[R, int] -> unit` joins v0.1.43's reader,
+so PPM's raw P6 replaces the 2.6x-larger P3 ASCII escape.
+`examples/mandelbrot.mere` renders 400x300 in infix math and writes P6
+that is pixel-identical to the P3 version. One honest wrinkle stays:
+the numeric overload resolves to float only on concretely-float
+operands, so unannotated fn params default to int — float-heavy code
+annotates its params. Docs corrected in both places._
+
+---
+
 ## v0.1.43 — 2026-07-16
 
 _Bytes get in the door (found by a 30-line CRC-32 tool): the algorithm
