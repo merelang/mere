@@ -31,21 +31,6 @@ let rec list_iter = fn xs -> fn f ->
   | Nil -> ()
   | Cons (h, t) -> let __ = f h in list_iter t f;
 
-let rec list_map = fn xs -> fn f ->
-  match xs with
-  | Nil -> Nil
-  | Cons (h, t) -> Cons (f h, list_map t f);
-
-let rec list_fold = fn xs -> fn acc -> fn f ->
-  match xs with
-  | Nil -> acc
-  | Cons (h, t) -> list_fold t (f acc h) f;
-
-let rec list_len = fn xs ->
-  match xs with
-  | Nil -> 0
-  | Cons (_, t) -> 1 + list_len t;
-
 let rec list_rev_into = fn acc -> fn xs ->
   match xs with
   | Nil -> acc
@@ -56,12 +41,33 @@ let rec list_rev_into = fn acc -> fn xs ->
 // this binding's body under an env that lacks list_rev_into.
 let rec list_rev = fn xs -> list_rev_into Nil xs;
 
+// v0.1.39: accumulator + reverse — the naive Cons (f h, recurse) shape
+// overflows the stack near a million elements (found by the scale probe).
+let rec _lmap_into = fn xs -> fn f -> fn acc ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> _lmap_into t f (Cons (f h, acc));
+let rec list_map = fn xs -> fn f -> list_rev_into Nil (_lmap_into xs f Nil);
+
+let rec list_fold = fn xs -> fn acc -> fn f ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> list_fold t (f acc h) f;
+
+let rec _llen = fn xs -> fn (acc: int) ->
+  match xs with
+  | Nil -> acc
+  | Cons (_, t) -> _llen t (acc + 1);
+let rec list_len = fn xs -> _llen xs 0;
+
+
+
 // Phase 36: range literal `a..b` desugars to `range a b`.
 // Inclusive lower / inclusive upper: `range 1 5` = [1, 2, 3, 4, 5].
 // b < a -> empty list. Use `list_rev (range b a)` for the reverse direction.
-let rec range = fn (a: int) -> fn (b: int) ->
-  if a > b then Nil
-  else Cons (a, range (a + 1) b);
+let rec _range_down = fn (a: int) -> fn (i: int) -> fn acc ->
+  if i < a then acc else _range_down a (i - 1) (Cons (i, acc));
+let rec range = fn (a: int) -> fn (b: int) -> _range_down a b Nil;
 
 // Phase 36: narrow a list by a predicate (symmetric with list_map / list_iter)
 let rec list_filter = fn xs -> fn p ->
@@ -72,12 +78,13 @@ let rec list_filter = fn xs -> fn p ->
     else list_filter t p;
 
 // Phase 36: take the first n elements (returns all if n exceeds len)
-let rec list_take = fn xs -> fn n ->
-  if n <= 0 then Nil
+let rec _ltake_into = fn xs -> fn (n: int) -> fn acc ->
+  if n <= 0 then acc
   else
     match xs with
-    | Nil -> Nil
-    | Cons (h, t) -> Cons (h, list_take t (n - 1));
+    | Nil -> acc
+    | Cons (h, t) -> _ltake_into t (n - 1) (Cons (h, acc));
+let rec list_take = fn xs -> fn n -> list_rev_into Nil (_ltake_into xs n Nil);
 
 // Phase 36: drop the first n elements
 let rec list_drop = fn xs -> fn n ->
@@ -95,30 +102,31 @@ let rec list_find = fn xs -> fn p ->
 
 // Phase 36: list concatenation (a ++ b). Since Mere's `++` is str-only, this is a separate function.
 let rec list_append = fn xs -> fn ys ->
-  match xs with
-  | Nil -> ys
-  | Cons (h, t) -> Cons (h, list_append t ys);
+  list_rev_into ys (list_rev_into Nil xs);
 
 // Phase 36: flatten 'a list list into 'a list
-let rec list_concat = fn xss ->
+let rec _lconcat_into = fn xss -> fn acc ->
   match xss with
-  | Nil -> Nil
-  | Cons (h, t) -> list_append h (list_concat t);
+  | Nil -> acc
+  | Cons (h, t) -> _lconcat_into t (list_rev_into acc h);
+let rec list_concat = fn xss -> list_rev_into Nil (_lconcat_into xss Nil);
 
 // Phase 36: flatten the result of list_map (the desugar target for multi-gen comprehensions)
-let rec list_flat_map = fn xs -> fn f ->
+let rec _lfm_into = fn xs -> fn f -> fn acc ->
   match xs with
-  | Nil -> Nil
-  | Cons (h, t) -> list_append (f h) (list_flat_map t f);
+  | Nil -> acc
+  | Cons (h, t) -> _lfm_into t f (list_rev_into acc (f h));
+let rec list_flat_map = fn xs -> fn f -> list_rev_into Nil (_lfm_into xs f Nil);
 
 // Phase 36: zip two lists into tuples. When the lengths differ, align with the shorter one.
-let rec list_zip = fn xs -> fn ys ->
+let rec _lzip_into = fn xs -> fn ys -> fn acc ->
   match xs with
-  | Nil -> Nil
+  | Nil -> acc
   | Cons (a, ta) ->
-    match ys with
-    | Nil -> Nil
-    | Cons (b, tb) -> Cons ((a, b), list_zip ta tb);
+    (match ys with
+     | Nil -> acc
+     | Cons (b, tb) -> _lzip_into ta tb (Cons ((a, b), acc)));
+let rec list_zip = fn xs -> fn ys -> list_rev_into Nil (_lzip_into xs ys Nil);
 
 // Phase 36: whether all elements satisfy the predicate
 let rec list_for_all = fn xs -> fn p ->
@@ -146,25 +154,23 @@ let rec list_sum = fn xs -> list_fold xs 0 (fn a -> fn x -> a + x);
 let rec list_product = fn xs -> list_fold xs 1 (fn a -> fn x -> a * x);
 
 // Phase 36: max / min (fail on empty list)
+let rec _lmax_from = fn xs -> fn m ->
+  match xs with
+  | Nil -> m
+  | Cons (h, t) -> _lmax_from t (if h > m then h else m);
 let rec list_max = fn xs ->
   match xs with
   | Nil -> fail "list_max: empty list"
-  | Cons (h, t) ->
-    match t with
-    | Nil -> h
-    | Cons _ ->
-      let m = list_max t in
-      if h > m then h else m;
+  | Cons (h, t) -> _lmax_from t h;
 
+let rec _lmin_from = fn xs -> fn m ->
+  match xs with
+  | Nil -> m
+  | Cons (h, t) -> _lmin_from t (if h < m then h else m);
 let rec list_min = fn xs ->
   match xs with
   | Nil -> fail "list_min: empty list"
-  | Cons (h, t) ->
-    match t with
-    | Nil -> h
-    | Cons _ ->
-      let m = list_min t in
-      if h < m then h else m;
+  | Cons (h, t) -> _lmin_from t h;
 
 // Phase 39.A' #4: insertion sort with a comparator. cmp is a total-order
 // predicate returning true if "a should come before b". Stable (order is
@@ -182,10 +188,46 @@ let rec list_sort_insert = fn cmp -> fn xs -> fn x ->
     if cmp x h then Cons (x, xs)
     else Cons (h, list_sort_insert cmp t x);
 
-let rec list_sort_by = fn cmp -> fn xs ->
+// v0.1.39: merge sort — stable, O(n log n), stack-safe (the merge is
+// tail-recursive via a reversed accumulator; the recursion depth of the
+// sort itself is log n). The insertion sort above turned out to be the
+// bottleneck at scale: 20k elements took ~2 s natively. list_sort_insert
+// stays for direct users.
+let rec _ms_rev = fn xs -> fn acc ->
   match xs with
-  | Nil -> Nil
-  | Cons (h, t) -> list_sort_insert cmp (list_sort_by cmp t) h;
+  | Nil -> acc
+  | Cons (h, t) -> _ms_rev t (Cons (h, acc));
+// (returns the reversed prefix only — a tuple-returning splitter compiles
+// to an sret struct return in C, which defeats clang's sibling-call
+// optimization and overflowed the stack at ~200k elements. The suffix
+// comes from the existing tail-recursive list_drop.)
+let rec _ms_take_rev = fn (i: int) -> fn xs -> fn acc ->
+  if i == 0 then acc
+  else
+    match xs with
+    | Nil -> acc
+    | Cons (h, t) -> _ms_take_rev (i - 1) t (Cons (h, acc));
+// Merges a and b, producing the result REVERSED onto acc. On ties the
+// element from `a` (the earlier half) goes first — stability.
+let rec _ms_merge_rev = fn cmp -> fn a -> fn b -> fn acc ->
+  match a with
+  | Nil -> _ms_rev b acc
+  | Cons (ha, ta) ->
+    (match b with
+     | Nil -> _ms_rev a acc
+     | Cons (hb, tb) ->
+       if cmp hb ha then _ms_merge_rev cmp a tb (Cons (hb, acc))
+       else _ms_merge_rev cmp ta b (Cons (ha, acc)));
+let rec _ms_sort = fn cmp -> fn xs -> fn (len: int) ->
+  if len <= 1 then xs
+  else
+    let half = len / 2 in
+    let revpre = _ms_take_rev half xs Nil in
+    let suf = list_drop xs half in
+    let sa = _ms_sort cmp (_ms_rev revpre Nil) half in
+    let sb = _ms_sort cmp suf (len - half) in
+    _ms_rev (_ms_merge_rev cmp sa sb Nil) Nil;
+let rec list_sort_by = fn cmp -> fn xs -> _ms_sort cmp xs (list_len xs);
 
 // shorthand: natural-order sort for int / str / float.
 // The reason for using `let rec` is that test/test_basic.ml's

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.38" Version.v "0.1.38";
+  check "version is 0.1.39" Version.v "0.1.39";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -1293,6 +1293,18 @@ let () =
      monomorphization plays the dictionary's role on the compiled backends,
      and the interpreter compares structurally at runtime. The prelude's
      list_sort / list_max / list_min become generic for free. *)
+  (* v0.1.39: list_sort_by is a stable merge sort now (the insertion sort
+     took ~2 s at 20k elements natively and O(n^2) beyond; 1M elements
+     sort in well under a second). Stability pinned by a fst-only
+     comparator: ties keep input order. *)
+  check "sort: stable on ties (fst-only comparator)"
+    (Pipeline.process
+       "list_sort_by (fn a -> fn b -> fst a < fst b) [(2, \"b\"), (1, \"x\"), (2, \"a\"), (1, \"y\")]")
+    "[(1, \"x\"), (1, \"y\"), (2, \"b\"), (2, \"a\")]";
+  check "sort: 1000 descending ints round-trip"
+    (Pipeline.process
+       "list_len (list_sort (range 1 1000))")
+    "1000";
   check "ord: polymorphic comparator at two types"
     (Pipeline.process
        "let lt = fn a -> fn b -> a < b in \
@@ -5391,9 +5403,9 @@ let () =
     (vec_codegen_c
        "let m = map_new () in \
         let use = fn (k: str) -> map_has m k in \
+        let f = fn (x: int) -> let m = x + 1 in m * 2 in \
         let _ = map_set m \"a\" 1 in \
-        let mx = list_max (Cons (3, Cons (7, Nil))) in \
-        if use \"a\" then mx else 0")
+        if use \"a\" then f 3 else 0")
     "__auto_type m = ";
   (* v0.1.33: ordering through a type variable — the poly comparator's
      monomorphized instance compares at a concrete type, landing on the
@@ -6846,9 +6858,12 @@ let () =
         + Phase 39.A' (sort helpers): 3 (list_sort_insert / list_sort_by /
            list_sort)
         + v0.1.38 (utf8 view): 6 (_u8_nth / utf8_at / _u8_slice /
-           utf8_sub / _u8_rev_join / utf8_rev) = 43 total *)
+           utf8_sub / _u8_rev_join / utf8_rev)
+        + v0.1.39 (scale safety): 13 (merge-sort quartet + the _l*_into /
+           _l{max,min}_from / _llen / _range_down accumulator helpers)
+        = 56 total *)
      string_of_int (List.length prog.Ast.decls))
-    "43";
+    "56";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
