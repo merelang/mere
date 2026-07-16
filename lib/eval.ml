@@ -362,6 +362,32 @@ let builtin_read_file_bytes =
          raise (Eval_error (Loc.dummy, "read_file_bytes: " ^ msg)))
     | _ -> failwith "read_file_bytes: expected str")
 
+(* v0.1.44: the write half — each vec element must be an int in 0..255. *)
+let builtin_write_file_bytes =
+  V_builtin ("write_file_bytes", fun p ->
+    match p with
+    | V_str path ->
+      V_builtin ("write_file_bytes_partial", fun v ->
+        match v with
+        | V_vec arr ->
+          (try
+             let oc = open_out_bin path in
+             Array.iter (fun elt ->
+               match elt with
+               | V_int b when b >= 0 && b <= 255 ->
+                 output_char oc (Char.chr b)
+               | V_int b ->
+                 close_out oc;
+                 raise (Eval_error (Loc.dummy,
+                   Printf.sprintf "write_file_bytes: byte value %d out of range 0..255" b))
+               | _ -> failwith "write_file_bytes: expected int vec") !arr;
+             close_out oc;
+             V_unit
+           with Sys_error msg ->
+             raise (Eval_error (Loc.dummy, "write_file_bytes: " ^ msg)))
+        | _ -> failwith "write_file_bytes: expected int vec")
+    | _ -> failwith "write_file_bytes: expected str path")
+
 (* Phase 19.6: I/O extensions. read_lines, file_exists, env_var, args.
    read_lines / args return str list, so they depend on the prelude's
    `type 'a list`. env_var returns str option (the prelude's `'a option`). *)
@@ -1932,6 +1958,7 @@ let initial_env : env =
     ("print_err", ref builtin_print_err);
     ("read_file", ref builtin_read_file);
     ("read_file_bytes", ref builtin_read_file_bytes);
+    ("write_file_bytes", ref builtin_write_file_bytes);
     ("write_file", ref builtin_write_file);
     ("read_lines", ref builtin_read_lines);
     ("list_dir", ref builtin_list_dir);
@@ -2465,7 +2492,8 @@ let rec eval_in (env : env) (e : Ast.expr) =
   | Ast.Neg a ->
     (match eval_in env a with
      | V_int x -> V_int (- x)
-     | _ -> type_error e.Ast.loc "unary - requires int")
+     | V_float x -> V_float (-. x)  (* v0.1.44: -2.5 no longer needs f_neg *)
+     | _ -> type_error e.Ast.loc "unary - requires int or float")
   | Ast.Bin (op, a, b) ->
     let va = eval_in env a in
     let vb = eval_in env b in

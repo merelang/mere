@@ -2675,7 +2675,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.Neg inner ->
     let v = emit_expr env inner in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sub i32 0, %s" r v);
+    (match inner.Ast.ty with
+     | Some t when Ast.walk t = Ast.TyFloat ->
+       (* v0.1.44: unary minus is numeric-overloaded like Bin. *)
+       emit_instr (Printf.sprintf "  %s = fneg double %s" r v)
+     | _ ->
+       emit_instr (Printf.sprintf "  %s = sub i32 0, %s" r v));
     r
   | Ast.Bin (Ast.Concat, a, b) ->
     let ra = emit_expr env a in
@@ -2687,7 +2692,24 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let ra = emit_expr env a in
     let rb = emit_expr env b in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = %s i32 %s, %s" r (llvm_binop_int op) ra rb);
+    let is_float =
+      (match a.Ast.ty with Some t -> Ast.walk t = Ast.TyFloat | None -> false)
+      || (match e.Ast.ty with Some t -> Ast.walk t = Ast.TyFloat | None -> false)
+    in
+    if is_float then begin
+      (* v0.1.44 (Mandelbrot probe): + - * / are numeric-overloaded and
+         the interp / C / Wasm backends all computed float infix — LLVM
+         emitted `add i32` on double operands, which clang rejects as
+         invalid IR. Use the fadd family. *)
+      let fop = match op with
+        | Ast.Add -> "fadd" | Ast.Sub -> "fsub"
+        | Ast.Mul -> "fmul" | Ast.Div -> "fdiv"
+        | Ast.Mod | Ast.Concat ->
+          unsupported e.Ast.loc "float % / ++ (unreachable: typer rejects)"
+      in
+      emit_instr (Printf.sprintf "  %s = %s double %s, %s" r fop ra rb)
+    end else
+      emit_instr (Printf.sprintf "  %s = %s i32 %s, %s" r (llvm_binop_int op) ra rb);
     r
   | Ast.Cmp (op, a, b) ->
     let ra = emit_expr env a in
@@ -2711,6 +2733,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        unsupported e.Ast.loc
          "structural == / != on a record / variant / tuple \
           (use the interp, C, or Wasm backend; LLVM specialization pending)"
+     | Ast.TyFloat ->
+       (* v0.1.44: float comparisons are fcmp on double (ordered). The
+          icmp fallthrough was invalid IR on float operands. *)
+       let fpred = match op with
+         | Ast.Eq -> "oeq" | Ast.Ne -> "one"
+         | Ast.Lt -> "olt" | Ast.Le -> "ole"
+         | Ast.Gt -> "ogt" | Ast.Ge -> "oge"
+       in
+       let r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = fcmp %s double %s, %s" r fpred ra rb);
+       r
      | _ ->
        let r = fresh_reg () in
        let opnd_ty = if a_ty = Ast.TyBool then "i1" else "i32" in
@@ -3395,6 +3428,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, _) ->
     unsupported e.Ast.loc
       "read_file_bytes is unsupported in LLVM codegen (v0.1.43 scope = \
+       interp + C)"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, _); _ }, _) ->
+    unsupported e.Ast.loc
+      "write_file_bytes is unsupported in LLVM codegen (v0.1.44 scope = \
        interp + C)"
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc

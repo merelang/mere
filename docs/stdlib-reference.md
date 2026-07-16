@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-113 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+114 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -31,7 +31,7 @@ Legend:
 
 ---
 
-## I/O (11)
+## I/O (12)
 
 | Name | Type | Description |
 |---|---|---|
@@ -44,6 +44,7 @@ Legend:
 | `read_file` ⚡ | `str -> str` | Read the whole file **as text**; raises on failure. On the C backend the str is NUL-terminated, so binary data silently truncates at the first 0x00 byte (the interpreter's strings carry NULs) — use `read_file_bytes` for binary (v0.1.43) |
 | `read_file_bytes` ⚡ | `str -> Vec[R, int]` | Read the whole file as raw bytes — one int (0..255) per byte, binary-safe on every supported backend. interp + C only (v0.1.43, CRC-32 probe) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
+| `write_file_bytes` ⚡ | `str -> Vec[R, int] -> unit` | Write an int vec as raw bytes (each element 0..255) — the write half of the binary path; PPM P6 etc. interp + C only (v0.1.44, Mandelbrot probe) |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
 | `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
@@ -177,6 +178,13 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
 
 ### Float arithmetic (4)
+
+> **Note (v0.1.44)**: the infix operators `+ - * /`, all comparisons, and
+> unary `-` are numeric-overloaded and work directly on floats, on every
+> backend — prefer them. The `f_` functions below remain as ordinary
+> function values (useful for passing to higher-order functions). The
+> overload resolves to float only when an operand is concretely float;
+> annotate fn params (`fn (x: float) -> ...`) in float-heavy code.
 
 | Name | Type | Description |
 |---|---|---|
@@ -394,7 +402,7 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 113)
+## All builtins (alphabetical, 114)
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
@@ -411,7 +419,7 @@ square str_compare str_contains str_count str_ends_with
 str_index_of str_join str_len str_of_float str_of_int
 str_repeat str_replace str_rev str_split str_starts_with
 str_trim str_unescape substring sum_range swap tan time
-to_lower to_upper try_or write_file
+to_lower to_upper try_or write_file write_file_bytes
 ```
 
 Q-010 collection builtins (`vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` / `len`) are registered builtins outside this table; see language-reference / tutorial. Phase 19.2 added **`map_iter : Map[R, K, V] -> (K -> V -> unit) -> unit`** (works in all 4 backends).
