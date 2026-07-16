@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.41 — 2026-07-16
+
+_One int, not four (found by writing SHA-256 in pure Mere): the probe
+aimed at the missing bitwise story and instead hit something under it —
+**the C backend's int was C `int`, 32 bits**, while the interpreter
+tested 63-bit semantics and the docs never said which. SHA-256's round
+constants (36 of them above 2^31) silently truncated and every digest
+came out wrong with zero diagnostics; the minimal repro is
+`2147483647 + 1`, which printed `-2147483648` natively and `2147483648`
+under the interpreter. **The C backend's int is 64-bit (`long long`)
+now**, with `LL`-suffixed literals so literal arithmetic doesn't wrap
+at 32 bits either, `%lld` show/json formats, and `atoll`/`strtoll`
+parsing. At the `extern fn` FFI boundary int deliberately stays C `int`
+— the functions users declare are libc/POSIX symbols whose ABI type IS
+the 32-bit int (declaring `getpid` as returning `long long` would read
+undefined upper register bits on arm64). The **Wasm backend keeps its
+i32 int but now says so**: an int literal outside `-2^31 .. 2^31-1` is
+a compile-time error with a source location instead of an
+`i32.const 4294967296` that only explodes later inside wat2wasm. The
+SHA-256 probe passes all NIST test vectors on interp and C; docs state
+each backend's width honestly. (LLVM was already i64; the probe also
+uncovered an unrelated LLVM crash on this program, tracked separately.)_
+
+---
+
 ## v0.1.40 — 2026-07-16
 
 _Error-handling ergonomics probe (an 8-step fallible config-loader

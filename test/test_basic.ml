@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.40" Version.v "0.1.40";
+  check "version is 0.1.41" Version.v "0.1.41";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2670,9 +2670,9 @@ let () =
   in
   let int_lit_out = codegen "42" in
   assert_contains "codegen: emits stdio.h" int_lit_out "#include <stdio.h>";
-  assert_contains "codegen: int literal printf" int_lit_out "printf(\"%d\\n\", 42)";
+  assert_contains "codegen: int literal printf" int_lit_out "printf(\"%lld\\n\", 42LL)";
   assert_contains "codegen: arithmetic precedence"
-    (codegen "1 + 2 * 3") "(1 + (2 * 3))";
+    (codegen "1 + 2 * 3") "(1LL + (2LL * 3LL))";
   assert_contains "codegen: let + if uses statement-expr"
     (codegen "let x = 5 in if x < 10 then x * 2 else 0")
     "__let_tmp_x = 5";
@@ -2682,7 +2682,7 @@ let () =
      the old binding is visible at the time the RHS is evaluated. *)
   assert_contains "codegen: same-name rebinding uses tmp var"
     (codegen "let x = 1 in let x = x + 10 in x")
-    "__let_tmp_x = (x + 10)";
+    "__let_tmp_x = (x + 10LL)";
   (* Phase 16.3 / DEFERRED §1.5: codegen support for mk_logger / mk_metrics.
      Make the cap builtin, previously interpreter-only, work in C codegen too via
      printf-based emission. Logger record + 3 closure_str_unit fields, Metrics
@@ -2717,33 +2717,33 @@ let () =
     (codegen "true && false") "(1 && 0)";
   assert_contains "codegen: lifts top-level fn"
     (codegen "let inc = fn x -> x + 1 in inc 5")
-    "int inc(int x)";
+    "long long inc(long long x)";
   assert_contains "codegen: lifted fn call site"
     (codegen "let inc = fn x -> x + 1 in inc 5")
-    "inc(5)";
+    "inc(5LL)";
   assert_contains "codegen: let-rec self-recursion"
     (codegen "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5")
-    "fact((n - 1))";
+    "fact((n - 1LL))";
   assert_contains "codegen: mutual rec emits both forward decls"
     (codegen
        "let rec ev = fn n -> if n == 0 then 1 else od (n - 1)\n\
         and od = fn n -> if n == 0 then 0 else ev (n - 1)\n\
         in ev 4")
-    "int ev(int);\nint od(int);";
+    "long long ev(long long);\nlong long od(long long);";
   assert_contains "codegen: nested fn lifted to top level with captures"
     (* Previously rejected; Phase 4.8 lifts inner fns via defunctionalization. *)
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
-    "int __lifted_helper_0(int x, int y)";
+    "long long __lifted_helper_0(long long x, long long y)";
   assert_contains "codegen: lifted inner fn called with captures prepended"
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
-    "__lifted_helper_0(x, 10)";
+    "__lifted_helper_0(x, 10LL)";
   assert_contains "codegen: anonymous fn application via closure"
     (* Phase 4.9-B: anonymous Fun in expression position is now lifted as
        a closure value, and the App goes through closure dispatch. *)
     (codegen "(fn x -> x + 1) 5")
-    "__c.fn(__c.env, 5)";
+    "__c.fn(__c.env, 5LL)";
 
   (* --- C codegen: string support (Phase 4 third slice) --- *)
   assert_contains "codegen: str literal emits C string"
@@ -2764,13 +2764,13 @@ let () =
   (* --- C codegen: str-typed lifted fns (Phase 4 fourth slice) --- *)
   assert_contains "codegen: str-returning fn gets const char* return"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
-    "const char* greet(int n)";
+    "const char* greet(long long n)";
   assert_contains "codegen: str-taking fn gets const char* param"
     (codegen "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
     "const char* exclaim(const char* s)";
   assert_contains "codegen: forward decl carries through the right type"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
-    "const char* greet(int);";
+    "const char* greet(long long);";
   assert_contains "codegen: str_len builtin maps to strlen"
     (codegen "str_len \"abc\"")
     "(int) strlen(\"abc\")";
@@ -2788,10 +2788,10 @@ let () =
   (* --- C codegen: tuple support (Phase 4 fifth slice) --- *)
   assert_contains "codegen: tuple typedef for int*int"
     (codegen "let p = (1, 2) in fst p + snd p")
-    "struct tuple_int_int {\n  int f0;\n  int f1;\n};";
+    "struct tuple_int_int {\n  long long f0;\n  long long f1;\n};";
   assert_contains "codegen: tuple literal uses compound literal"
     (codegen "let p = (1, 2) in fst p")
-    "((tuple_int_int){.f0 = 1, .f1 = 2})";
+    "((tuple_int_int){.f0 = 1LL, .f1 = 2LL})";
   assert_contains "codegen: fst → .f0 access"
     (codegen "let p = (1, 2) in fst p")
     "(p).f0";
@@ -2800,7 +2800,7 @@ let () =
     "(p).f1";
   assert_contains "codegen: mixed-type tuple struct (str, int)"
     (codegen "let p = (\"hi\", 42) in fst p")
-    "struct tuple_str_int {\n  const char* f0;\n  int f1;\n};";
+    "struct tuple_str_int {\n  const char* f0;\n  long long f1;\n};";
   assert_contains "codegen: tuple-returning fn signature"
     (codegen "let split = fn s -> (s, str_len s) in split \"x\"")
     "tuple_str_int split(const char* s)";
@@ -2840,12 +2840,15 @@ let () =
     (codegen_with_decls
       "type CgRectA = { w: int, h: int };\n\
        let r = CgRectA { w = 3, h = 4 } in r.w * r.h")
-    "struct CgRectA {\n  int w;\n  int h;\n};";
+    "struct CgRectA {
+  long long w;
+  long long h;
+};";
   assert_contains "codegen: record literal compound"
     (codegen_with_decls
       "type CgRectB = { w: int, h: int };\n\
        let r = CgRectB { w = 3, h = 4 } in r.w")
-    "((CgRectB){.w = 3, .h = 4})";
+    "((CgRectB){.w = 3LL, .h = 4LL})";
   assert_contains "codegen: record field access"
     (codegen_with_decls
       "type CgRectC = { w: int };\n\
@@ -2942,7 +2945,7 @@ let () =
     (codegen_with_decls
       "type CgRectE = { w: int };\n\
        let mk = fn n -> CgRectE { w = n } in mk 7")
-    "CgRectE mk(int n)";
+    "CgRectE mk(long long n)";
   assert_contains "codegen: record with str field"
     (codegen_with_decls
       "type CgUser = { name: str, age: int };\n\
@@ -2963,7 +2966,7 @@ let () =
     (codegen_with_decls
       "type 'a CgBox3 = { v: 'a };\n\
        CgBox3 { v = 42 }")
-    "((CgBox3_int){.v = 42})";
+    "((CgBox3_int){.v = 42LL})";
 
   (* --- C codegen: complex patterns (Phase 4.14) --- *)
   assert_contains "codegen: P_int compiles to equality"
@@ -3004,7 +3007,7 @@ let () =
     (codegen_with_decls
       "type CgOr2 = OD | OE;\n\
        match OE with | OD | OE -> 99")
-    "{ 99; }";  (* body 99 duplicated for both alternatives *)
+    "{ 99LL; }";  (* body 99 duplicated for both alternatives *)
   assert_contains "codegen: guard emitted in bindings scope"
     (codegen "match 7 with | n when n < 5 -> 100 | _ -> 200")
     "n < 5";
@@ -3157,7 +3160,7 @@ let () =
     (codegen_with_decls
       "type CgCol5 = A | B;\n\
        match A with | A when true -> 0 | _ -> 1")
-    "(1) ? (0)";
+    "(1) ? (0LL)";
 
   (* --- C codegen: closure conversion (Phase 4 eighth slice) ---
      Inner `let n = fn x -> body` is lifted to a top-level fn with
@@ -3166,16 +3169,16 @@ let () =
   assert_contains "codegen: closure captures host param"
     (codegen
       "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
-    "int __lifted_h_0(int x, int y)";
+    "long long __lifted_h_0(long long x, long long y)";
   assert_contains "codegen: closure call site prepends captures"
     (codegen
       "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
-    "__lifted_h_0(x, 10)";
+    "__lifted_h_0(x, 10LL)";
   assert_contains "codegen: closure binding is dropped from let-chain"
     (* The `__auto_type h = ...` should NOT appear since h was lifted. *)
     (codegen
       "let outer = fn x -> let h = fn y -> y + 1 in h 5 in outer 3")
-    "int outer(int x) {\n  return __lifted_h_0(5);";
+    "long long outer(long long x) {\n  return __lifted_h_0(5LL);";
   assert_contains "codegen: nested closure captures from multiple levels"
     (* Inner `h` captures `x` (from g's param) and `n` (from f's param).
        Free-var collection orders captures by source order of usage, so
@@ -3187,7 +3190,7 @@ let () =
            h 1\n\
          in g 2\n\
        in f 3")
-    "int __lifted_h_1(int x, int n, int y)";
+    "long long __lifted_h_1(long long x, long long n, long long y)";
   check_raises "codegen: capture of non-primitive type rejected"
     (* Tuple captures aren't supported yet (only int/bool/str/unit). *)
     (fun () ->
@@ -3206,7 +3209,7 @@ let () =
   assert_contains "codegen: top-level fn gets closure wrapper"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "static int inc_closure_fn(void* __env, int x)";
+    "static long long inc_closure_fn(void* __env, long long x)";
   assert_contains "codegen: top-level fn gets _as_value constant"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
@@ -3214,11 +3217,11 @@ let () =
   assert_contains "codegen: HOF takes closure param"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "int apply(closure_int_int f)";
+    "long long apply(closure_int_int f)";
   assert_contains "codegen: closure dispatch via .fn(.env, x)"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "__c.fn(__c.env, 5)";
+    "__c.fn(__c.env, 5LL)";
   assert_contains "codegen: Var of top-level fn in value pos emits _as_value"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
@@ -3238,7 +3241,7 @@ let () =
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "_fn(void* __env_self_void, int x)";
+    "_fn(void* __env_self_void, long long x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -3321,7 +3324,7 @@ let () =
   assert_contains "codegen: show int emits show_int adapter"
     (codegen "show 42") "show_int";
   assert_contains "codegen: show int call site"
-    (codegen "show 42") "show_int(42)";
+    (codegen "show 42") "show_int(42LL)";
   assert_contains "codegen: show str specialization"
     (codegen "show \"hi\"") "show_str";
   assert_contains "codegen: show bool specialization"
@@ -5235,7 +5238,7 @@ let () =
      PAIN P1's last item). *)
   assert_contains "exit: C backend emits libc exit()"
     (vec_codegen_c "let _ = print \"x\" in exit 2")
-    "exit(2)";
+    "exit(2LL)";
   (* a user fn named after a libm function (fmin/fmax/...) must be renamed
      so it doesn't clash with <math.h> (mstat dogfood N2). *)
   assert_contains "C backend renames a user fn colliding with libm fmin"
@@ -5314,7 +5317,7 @@ let () =
          if b == 0 then a else add_to (a + 1) (b - 1); \
        add_to 0 5" in
   assert_contains "uncurry: direct N-ary twin is emitted"
-    c_src_direct "static int add_to__direct(int a, int b)";
+    c_src_direct "static long long add_to__direct(long long a, long long b)";
   assert_contains "uncurry: saturated self-recursion calls the direct twin"
     c_src_direct "add_to__direct(__da0, __da1)";
   (* v0.1.28 (generic-PQ dogfood B-P2): a tuple shape that exists only as a
@@ -5554,7 +5557,7 @@ let () =
   (* P9: str_of_int lowers to show_int(), so the show_int definition must
      be emitted even without a direct `show` (was an undeclared call). *)
   assert_contains "str_of_int: C backend emits show_int definition"
-    (vec_codegen_c "let _ = str_of_int 42 in 0") "show_int(int v)";
+    (vec_codegen_c "let _ = str_of_int 42 in 0") "show_int(long long v)";
   (* Two top-level fns each with a same-named inner `loop` but different
      captures must not merge capture sets. `fa`'s loop captures only x;
      `fb`'s also captures y. The transitive-capture fixpoint used to
@@ -7983,8 +7986,37 @@ let () =
        in scan 0
      in
      if has "extern int setenv(const char*, const char*, int);"
-        && has "setenv(\"K\", \"V\", 1)" then "ok" else "no")
+        && has "setenv(\"K\", \"V\", 1LL)" then "ok" else "no")
     "ok";
+
+  (* v0.1.41: int is 64-bit (`long long`) on the C backend. The SHA-256
+     probe found that plain C `int` silently truncated every round constant
+     above 2^31 and produced wrong digests with zero diagnostics. Literals
+     carry an LL suffix so literal arithmetic doesn't wrap at 32 bits either.
+     At the extern FFI boundary int intentionally stays C `int` (libc ABI). *)
+  check "v0.1.41: interp int arithmetic beyond 2^31"
+    (Pipeline.process "2147483647 + 1") "2147483648";
+  check "v0.1.41: C codegen int is long long with LL literals"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "2147483647 + 1") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "(2147483647LL + 1LL)" && has "printf(\"%lld\\n\"" then "ok"
+     else "no")
+    "ok";
+  check_raises_containing
+    "v0.1.41: Wasm codegen rejects out-of-range int literal at compile time"
+    "does not fit the Wasm backend's 32-bit int"
+    (fun () ->
+      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
+        (typed_prog "4000000000") in ());
 
   check "§32.4: Wasm codegen emits (import) + call"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
@@ -8017,7 +8049,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "static int total;" && has "total = 42;" then "globalized"
+     if has "static long long total;" && has "total = 42LL;" then "globalized"
      else "not-globalized")
     "globalized";
   check "§30.2: LLVM codegen — top-level let referenced in fn body becomes @global"

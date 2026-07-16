@@ -1,0 +1,179 @@
+// SHA-256 in pure Mere. The language has no bitwise operators (yet), so
+// every bitwise operation is emulated with div/mod arithmetic on int —
+// the "fake ALU" below. It is correct (all NIST test vectors pass) and
+// slow (each AND/XOR is a 32-iteration bit loop); it exists to measure
+// exactly how much a real bitwise story would buy.
+//
+// This program is also the reason Mere's C backend int is 64-bit as of
+// v0.1.41: the round constants above 2^31 silently truncated under the
+// old 32-bit int and every digest came out wrong. On the Wasm backend
+// (i32 int) the 2^32 modulus below is a compile-time error by design.
+
+// ---- the fake ALU: 32-bit ops built from div/mod ------------------------
+
+let rec pow2 = fn n -> if n == 0 then 1 else 2 * pow2 (n - 1);
+
+let m32 = 4294967296;      // 2^32 — the wasm backend's first stumbling block
+let mask32 = 4294967295;   // 2^32 - 1
+
+// combine two 32-bit words bit by bit: 32 iterations of div/mod per call
+let rec bits32 = fn f -> fn a -> fn b -> fn i -> fn p -> fn acc ->
+  if i == 32 then acc
+  else bits32 f a b (i + 1) (p * 2)
+    (acc + (f ((a / p) % 2) ((b / p) % 2)) * p);
+
+let band = fn a -> fn b -> bits32 (fn x -> fn y -> x * y) a b 0 1 0;
+let bxor = fn a -> fn b -> bits32 (fn x -> fn y -> (x + y) % 2) a b 0 1 0;
+let bnot = fn a -> mask32 - a;
+
+let rotr = fn n -> fn x -> (x / pow2 n) + (x % pow2 n) * pow2 (32 - n);
+let shr  = fn n -> fn x -> x / pow2 n;
+let add32 = fn a -> fn b -> (a + b) % m32;
+
+// ---- SHA-256 proper ------------------------------------------------------
+
+let k_tbl = fn () ->
+  let k = vec_new () in
+  let _ = vec_push k 1116352408 in let _ = vec_push k 1899447441 in
+  let _ = vec_push k 3049323471 in let _ = vec_push k 3921009573 in
+  let _ = vec_push k 961987163 in let _ = vec_push k 1508970993 in
+  let _ = vec_push k 2453635748 in let _ = vec_push k 2870763221 in
+  let _ = vec_push k 3624381080 in let _ = vec_push k 310598401 in
+  let _ = vec_push k 607225278 in let _ = vec_push k 1426881987 in
+  let _ = vec_push k 1925078388 in let _ = vec_push k 2162078206 in
+  let _ = vec_push k 2614888103 in let _ = vec_push k 3248222580 in
+  let _ = vec_push k 3835390401 in let _ = vec_push k 4022224774 in
+  let _ = vec_push k 264347078 in let _ = vec_push k 604807628 in
+  let _ = vec_push k 770255983 in let _ = vec_push k 1249150122 in
+  let _ = vec_push k 1555081692 in let _ = vec_push k 1996064986 in
+  let _ = vec_push k 2554220882 in let _ = vec_push k 2821834349 in
+  let _ = vec_push k 2952996808 in let _ = vec_push k 3210313671 in
+  let _ = vec_push k 3336571891 in let _ = vec_push k 3584528711 in
+  let _ = vec_push k 113926993 in let _ = vec_push k 338241895 in
+  let _ = vec_push k 666307205 in let _ = vec_push k 773529912 in
+  let _ = vec_push k 1294757372 in let _ = vec_push k 1396182291 in
+  let _ = vec_push k 1695183700 in let _ = vec_push k 1986661051 in
+  let _ = vec_push k 2177026350 in let _ = vec_push k 2456956037 in
+  let _ = vec_push k 2730485921 in let _ = vec_push k 2820302411 in
+  let _ = vec_push k 3259730800 in let _ = vec_push k 3345764771 in
+  let _ = vec_push k 3516065817 in let _ = vec_push k 3600352804 in
+  let _ = vec_push k 4094571909 in let _ = vec_push k 275423344 in
+  let _ = vec_push k 430227734 in let _ = vec_push k 506948616 in
+  let _ = vec_push k 659060556 in let _ = vec_push k 883997877 in
+  let _ = vec_push k 958139571 in let _ = vec_push k 1322822218 in
+  let _ = vec_push k 1537002063 in let _ = vec_push k 1747873779 in
+  let _ = vec_push k 1955562222 in let _ = vec_push k 2024104815 in
+  let _ = vec_push k 2227730452 in let _ = vec_push k 2361852424 in
+  let _ = vec_push k 2428436474 in let _ = vec_push k 2756734187 in
+  let _ = vec_push k 3204031479 in let _ = vec_push k 3329325298 in
+  k;
+
+// message -> padded byte vector (0x80, zeros, 8-byte big-endian bit length)
+let pad_msg = fn msg ->
+  let bytes = vec_new () in
+  let n = str_len msg in
+  let rec push_bytes = fn i ->
+    if i == n then ()
+    else let _ = vec_push bytes (ord (char_at msg i)) in push_bytes (i + 1) in
+  let _ = push_bytes 0 in
+  let _ = vec_push bytes 128 in
+  let rec push_zeros = fn () ->
+    if (vec_len bytes) % 64 == 56 then ()
+    else let _ = vec_push bytes 0 in push_zeros () in
+  let _ = push_zeros () in
+  let bitlen = n * 8 in
+  let rec push_len = fn i ->
+    if i < 0 then ()
+    else let _ = vec_push bytes ((bitlen / pow2 (8 * i)) % 256) in
+      push_len (i - 1) in
+  let _ = push_len 7 in
+  bytes;
+
+// one 64-byte block starting at byte offset `off`, folded into h (vec of 8)
+let compress = fn k -> fn bytes -> fn off -> fn h ->
+  let w = vec_new () in
+  let rec load = fn i ->
+    if i == 16 then ()
+    else
+      let b0 = vec_get bytes (off + 4 * i) in
+      let b1 = vec_get bytes (off + 4 * i + 1) in
+      let b2 = vec_get bytes (off + 4 * i + 2) in
+      let b3 = vec_get bytes (off + 4 * i + 3) in
+      let _ = vec_push w (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) in
+      load (i + 1) in
+  let _ = load 0 in
+  let rec extend = fn i ->
+    if i == 64 then ()
+    else
+      let x15 = vec_get w (i - 15) in
+      let x2 = vec_get w (i - 2) in
+      let s0 = bxor (bxor (rotr 7 x15) (rotr 18 x15)) (shr 3 x15) in
+      let s1 = bxor (bxor (rotr 17 x2) (rotr 19 x2)) (shr 10 x2) in
+      let _ = vec_push w
+        (add32 (add32 (vec_get w (i - 16)) s0)
+               (add32 (vec_get w (i - 7)) s1)) in
+      extend (i + 1) in
+  let _ = extend 16 in
+  let rec rounds = fn t -> fn a -> fn b -> fn c -> fn d ->
+                   fn e -> fn f -> fn g -> fn hh ->
+    if t == 64 then
+      let _ = vec_set h 0 (add32 (vec_get h 0) a) in
+      let _ = vec_set h 1 (add32 (vec_get h 1) b) in
+      let _ = vec_set h 2 (add32 (vec_get h 2) c) in
+      let _ = vec_set h 3 (add32 (vec_get h 3) d) in
+      let _ = vec_set h 4 (add32 (vec_get h 4) e) in
+      let _ = vec_set h 5 (add32 (vec_get h 5) f) in
+      let _ = vec_set h 6 (add32 (vec_get h 6) g) in
+      vec_set h 7 (add32 (vec_get h 7) hh)
+    else
+      let big_s1 = bxor (bxor (rotr 6 e) (rotr 11 e)) (rotr 25 e) in
+      let ch = bxor (band e f) (band (bnot e) g) in
+      let t1 = add32 (add32 (add32 hh big_s1)
+                            (add32 ch (vec_get k t)))
+                     (vec_get w t) in
+      let big_s0 = bxor (bxor (rotr 2 a) (rotr 13 a)) (rotr 22 a) in
+      let maj = bxor (bxor (band a b) (band a c)) (band b c) in
+      let t2 = add32 big_s0 maj in
+      rounds (t + 1) (add32 t1 t2) a b c (add32 d t1) e f g in
+  rounds 0 (vec_get h 0) (vec_get h 1) (vec_get h 2) (vec_get h 3)
+           (vec_get h 4) (vec_get h 5) (vec_get h 6) (vec_get h 7);
+
+let hex_digits = "0123456789abcdef";
+let rec hex_word = fn x -> fn i -> fn acc ->
+  if i == 8 then acc
+  else hex_word (x / 16) (i + 1) ((char_at hex_digits (x % 16)) ++ acc);
+
+let sha256 = fn msg ->
+  let k = k_tbl () in
+  let bytes = pad_msg msg in
+  let h = vec_new () in
+  let _ = vec_push h 1779033703 in let _ = vec_push h 3144134277 in
+  let _ = vec_push h 1013904242 in let _ = vec_push h 2773480762 in
+  let _ = vec_push h 1359893119 in let _ = vec_push h 2600822924 in
+  let _ = vec_push h 528734635 in let _ = vec_push h 1541459225 in
+  let nblocks = (vec_len bytes) / 64 in
+  let rec go = fn i ->
+    if i == nblocks then ()
+    else let _ = compress k bytes (i * 64) h in go (i + 1) in
+  let _ = go 0 in
+  let rec digest = fn i -> fn acc ->
+    if i == 8 then acc
+    else digest (i + 1) (acc ++ hex_word (vec_get h i) 0 "") in
+  digest 0 "";
+
+// ---- test vectors --------------------------------------------------------
+
+let check = fn name -> fn got -> fn want ->
+  if str_eq got want then print ("ok   " ++ name)
+  else
+    let _ = print ("FAIL " ++ name) in
+    let _ = print ("  got  " ++ got) in
+    print ("  want " ++ want);
+
+let _ = check "empty" (sha256 "")
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" in
+let _ = check "abc" (sha256 "abc")
+  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" in
+let _ = check "two-block" (sha256 "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+  "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" in
+print "done"
