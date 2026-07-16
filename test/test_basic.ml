@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.39" Version.v "0.1.39";
+  check "version is 0.1.40" Version.v "0.1.40";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2173,6 +2173,19 @@ let () =
   (* v0.1.38 (Unicode): utf8_len / utf8_chars builtins + prelude
      utf8_at / utf8_sub / utf8_rev. A str stays a byte string
      (str_len "こんにちは" = 15); these give the codepoint view. *)
+  (* v0.1.40 (fallible-pipeline probe): the `?` / `?!` early-return lets
+     accept `;` as sugar for `in`, like every other let form — they were
+     the one exception. *)
+  check "sugar: let x = e?! with semicolon"
+    (Pipeline.process
+       "let f = fn (r) -> let x = r?!; Ok (x + 1) in \
+        (f (Ok 41), f ((Err \"b\") : (int, str) result))")
+    "(Ok 42, Err \"b\")";
+  check "sugar: let x = e? with semicolon"
+    (Pipeline.process
+       "let g = fn (o) -> let x = o?; Some (x * 2) in \
+        (g (Some 21), g (None : int option))")
+    "(Some 42, None)";
   check "utf8: codepoint length"
     (Pipeline.process "utf8_len \"こんにちは\"") "5";
   check "utf8: byte length is unchanged (documented)"
