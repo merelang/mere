@@ -1376,6 +1376,10 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr,
               Ast.TyArrow (Ast.TyStr,
                 Ast.TyCon ("list", [Ast.TyStr])))));
+    (* v0.1.38 (Unicode): the codepoint view of a byte string. *)
+    ("utf8_len",   mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("utf8_chars", mono (Ast.TyArrow (Ast.TyStr,
+                          Ast.TyCon ("list", [Ast.TyStr]))));
     ("str_join",
        mono (Ast.TyArrow (Ast.TyStr,
               Ast.TyArrow (Ast.TyCon ("list", [Ast.TyStr]),

@@ -3192,6 +3192,19 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_count(ptr %s, ptr %s)" r sv nv);
     r
+  | Ast.App ({ node = Ast.Var "utf8_len"; _ }, s_e) ->
+    (* v0.1.38 (Unicode): codepoint count (span walk, same as interp/C/wasm). *)
+    str_split_used_llvm := true;
+    let sv = emit_expr env s_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_utf8_len(ptr %s)" r sv);
+    r
+  | Ast.App ({ node = Ast.Var "utf8_chars"; _ }, s_e) ->
+    str_split_used_llvm := true;
+    let sv = emit_expr env s_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_utf8_chars(ptr %s)" r sv);
+    r
   | Ast.App ({ node = Ast.Var "str_trim"; _ }, s_e) ->
     (* Phase 36: str_trim — leading + trailing whitespace strip *)
     let sv = emit_expr env s_e in
@@ -7193,6 +7206,136 @@ let str_split_runtime_llvm =
       "  %plp = getelementptr %list_str_node, ptr %p, i32 0, i32 1";
       "  store ptr %pl, ptr %plp";
       "  ret ptr %p";
+      "}";
+      "";
+      (* v0.1.38 (Unicode): codepoint view — span walk identical to the
+         interp / C / Wasm implementations (invalid bytes count as
+         single units). alloca-based loops, no phis. *)
+      "define i32 @__lang_utf8_span(i8 %b) {";
+      "entry:";
+      "  %bu = zext i8 %b to i32";
+      "  %is1 = icmp ult i32 %bu, 128";
+      "  br i1 %is1, label %r1, label %c2";
+      "c2:";
+      "  %ge2 = icmp uge i32 %bu, 192";
+      "  %le2 = icmp ule i32 %bu, 223";
+      "  %in2 = and i1 %ge2, %le2";
+      "  br i1 %in2, label %r2, label %c3";
+      "c3:";
+      "  %ge3 = icmp uge i32 %bu, 224";
+      "  %le3 = icmp ule i32 %bu, 239";
+      "  %in3 = and i1 %ge3, %le3";
+      "  br i1 %in3, label %r3, label %c4";
+      "c4:";
+      "  %ge4 = icmp uge i32 %bu, 240";
+      "  %le4 = icmp ule i32 %bu, 247";
+      "  %in4 = and i1 %ge4, %le4";
+      "  br i1 %in4, label %r4, label %r1b";
+      "r1: ret i32 1";
+      "r2: ret i32 2";
+      "r3: ret i32 3";
+      "r4: ret i32 4";
+      "r1b: ret i32 1";
+      "}";
+      "";
+      "define i32 @__lang_utf8_len(ptr %s) {";
+      "entry:";
+      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %n = trunc i64 %n64 to i32";
+      "  %ip = alloca i32";
+      "  %cp = alloca i32";
+      "  store i32 0, ptr %ip";
+      "  store i32 0, ptr %cp";
+      "  br label %loop";
+      "loop:";
+      "  %i = load i32, ptr %ip";
+      "  %done = icmp sge i32 %i, %n";
+      "  br i1 %done, label %exit, label %body";
+      "body:";
+      "  %bp = getelementptr i8, ptr %s, i32 %i";
+      "  %b = load i8, ptr %bp";
+      "  %l = call i32 @__lang_utf8_span(i8 %b)";
+      "  %rem = sub i32 %n, %i";
+      "  %too = icmp sgt i32 %l, %rem";
+      "  %l2 = select i1 %too, i32 %rem, i32 %l";
+      "  %i2 = add i32 %i, %l2";
+      "  store i32 %i2, ptr %ip";
+      "  %c = load i32, ptr %cp";
+      "  %c2v = add i32 %c, 1";
+      "  store i32 %c2v, ptr %cp";
+      "  br label %loop";
+      "exit:";
+      "  %res = load i32, ptr %cp";
+      "  ret i32 %res";
+      "}";
+      "";
+      "define ptr @__lang_utf8_chars(ptr %s) {";
+      "entry:";
+      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %endp = alloca i32";
+      "  %stp = alloca i32";
+      "  %accp = alloca ptr";
+      "  %n = trunc i64 %n64 to i32";
+      "  store i32 %n, ptr %endp";
+      "  %nil = call ptr @__lang_list_str_nil()";
+      "  store ptr %nil, ptr %accp";
+      "  br label %outer";
+      "outer:";
+      "  %e = load i32, ptr %endp";
+      "  %done = icmp sle i32 %e, 0";
+      "  br i1 %done, label %exit, label %scan_init";
+      "scan_init:";
+      "  %e1 = sub i32 %e, 1";
+      "  store i32 %e1, ptr %stp";
+      "  br label %scan";
+      "scan:";
+      "  %st = load i32, ptr %stp";
+      "  %at0 = icmp sle i32 %st, 0";
+      "  br i1 %at0, label %copy, label %scan_chk";
+      "scan_chk:";
+      "  %sbp = getelementptr i8, ptr %s, i32 %st";
+      "  %sb = load i8, ptr %sbp";
+      "  %sbu = zext i8 %sb to i32";
+      "  %masked = and i32 %sbu, 192";
+      "  %iscont = icmp eq i32 %masked, 128";
+      "  br i1 %iscont, label %scan_dec, label %copy";
+      "scan_dec:";
+      "  %st1 = sub i32 %st, 1";
+      "  store i32 %st1, ptr %stp";
+      "  br label %scan";
+      "copy:";
+      "  %st2 = load i32, ptr %stp";
+      "  %l = sub i32 %e, %st2";
+      "  %l1 = add i32 %l, 1";
+      "  %l64 = sext i32 %l1 to i64";
+      "  %tok = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %l64)";
+      "  %jp = alloca i32";
+      "  store i32 0, ptr %jp";
+      "  br label %cl";
+      "cl:";
+      "  %j = load i32, ptr %jp";
+      "  %cdone = icmp sge i32 %j, %l";
+      "  br i1 %cdone, label %cend, label %cbody";
+      "cbody:";
+      "  %srcoff = add i32 %st2, %j";
+      "  %srcp = getelementptr i8, ptr %s, i32 %srcoff";
+      "  %cb = load i8, ptr %srcp";
+      "  %dstp = getelementptr i8, ptr %tok, i32 %j";
+      "  store i8 %cb, ptr %dstp";
+      "  %j1 = add i32 %j, 1";
+      "  store i32 %j1, ptr %jp";
+      "  br label %cl";
+      "cend:";
+      "  %nulp = getelementptr i8, ptr %tok, i32 %l";
+      "  store i8 0, ptr %nulp";
+      "  %acc = load ptr, ptr %accp";
+      "  %acc2 = call ptr @__lang_list_str_cons(ptr %tok, ptr %acc)";
+      "  store ptr %acc2, ptr %accp";
+      "  store i32 %st2, ptr %endp";
+      "  br label %outer";
+      "exit:";
+      "  %res = load ptr, ptr %accp";
+      "  ret ptr %res";
       "}";
       "";
       (* str_split: returns a list_str ptr. Build the list back-to-front

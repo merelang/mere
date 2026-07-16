@@ -105,6 +105,11 @@ bool_of_str "true"   // true
 | `str_count` | `str -> str -> int` | Non-overlapping occurrence count |
 | `str_index_of` ★ | `str -> str -> int` | First position of needle; -1 if not found. Empty needle returns 0 (Phase 19.1) |
 | `str_split` ★ | `str -> str -> str list` | Split by delimiter; returns `str list`. Requires `type 'a list = ...` declared. Empty delimiter returns a single-element list (Phase 19.1) |
+| `utf8_len` ★ | `str -> int` | Codepoint count (a `str` is bytes; `str_len` is the byte length). Invalid bytes count as single units (v0.1.38) |
+| `utf8_chars` ★ | `str -> str list` | Split into codepoints — the building block for text processing (v0.1.38) |
+| `utf8_at` | `str -> int -> str` | i-th codepoint (prelude, on `utf8_chars`) |
+| `utf8_sub` | `str -> int -> int -> str` | Codepoint-indexed substring (prelude) |
+| `utf8_rev` | `str -> str` | Codepoint-wise reverse — `str_rev` is byte-wise and scrambles multibyte text (prelude) |
 | `str_join` ★ | `str -> str list -> str` | Join with separator. Empty list → empty string (Phase 19.1) |
 | `str_compare` 🌐 | `str -> str -> int` | Lexicographic -1 / 0 / 1 (Phase 31.0 ported to 3 backends; sign-normalized) |
 | `str_repeat` ⚡ | `str -> int -> str` | Repeat N times; raises on N<0 |

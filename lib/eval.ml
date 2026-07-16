@@ -809,6 +809,43 @@ let builtin_str_split =
         | _ -> failwith "str_split: 2nd arg expected str (delimiter)")
     | _ -> failwith "str_split: 1st arg expected str")
 
+(* v0.1.38 (Unicode probe): UTF-8 codepoint helpers. A str stays a byte
+   string (str_len / substring / char_at are byte-indexed, documented);
+   these give the codepoint view. An invalid or truncated sequence
+   counts as a single unit, so they never loop or throw. *)
+let utf8_span_len b =
+  if b < 0x80 then 1
+  else if b >= 0xC0 && b <= 0xDF then 2
+  else if b >= 0xE0 && b <= 0xEF then 3
+  else if b >= 0xF0 && b <= 0xF7 then 4
+  else 1
+
+let builtin_utf8_len =
+  V_builtin ("utf8_len", fun v ->
+    match v with
+    | V_str s ->
+      let n = String.length s in
+      let rec go i acc =
+        if i >= n then acc
+        else go (i + min (utf8_span_len (Char.code s.[i])) (n - i)) (acc + 1)
+      in
+      V_int (go 0 0)
+    | _ -> failwith "utf8_len: expected str")
+
+let builtin_utf8_chars =
+  V_builtin ("utf8_chars", fun v ->
+    match v with
+    | V_str s ->
+      let n = String.length s in
+      let rec go i acc =
+        if i >= n then List.rev acc
+        else
+          let l = min (utf8_span_len (Char.code s.[i])) (n - i) in
+          go (i + l) (String.sub s i l :: acc)
+      in
+      str_list_to_v (go 0 [])
+    | _ -> failwith "utf8_chars: expected str")
+
 let builtin_str_join =
   V_builtin ("str_join", fun sep_val ->
     match sep_val with
@@ -1898,6 +1935,8 @@ let initial_env : env =
     ("str_count", ref builtin_str_count);
     ("str_index_of", ref builtin_str_index_of);
     ("str_split", ref builtin_str_split);
+    ("utf8_len", ref builtin_utf8_len);
+    ("utf8_chars", ref builtin_utf8_chars);
     ("str_join", ref builtin_str_join);
     ("str_compare", ref builtin_str_compare);
     ("str_eq",         ref builtin_str_eq);
