@@ -437,6 +437,10 @@ let rec parse_program_internal tokens =
             `let x = e?! in body` → Result early-return:
               match e with | Err v -> Err v | Ok x -> body *)
          (match rest with
+          (* v0.1.40: the `?` / `?!` early-return lets accept `;` as sugar
+             for `in`, like every other let form (they were the one
+             exception — found by the fallible-pipeline probe). *)
+          | (_, T_question) :: (_, T_semi) :: rest2
           | (_, T_question) :: (_, T_in) :: rest2 ->
             let body, rest = expr rest2 in
             let none_arm =
@@ -447,6 +451,7 @@ let rec parse_program_internal tokens =
               (mkp pos (Ast.P_constr ("Some", Some pat)), None, body)
             in
             mk pos (Ast.Match (value, [none_arm; some_arm])), rest
+          | (_, T_question_bang) :: (_, T_semi) :: rest2
           | (_, T_question_bang) :: (_, T_in) :: rest2 ->
             let body, rest = expr rest2 in
             let err_var = "__err" in

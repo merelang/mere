@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.40 — 2026-07-16
+
+_Error-handling ergonomics probe (an 8-step fallible config-loader
+written three ways): the verdict on the language was mostly good news —
+the `?` / `?!` early-return sugar from Phase 36 already turns a
+seven-level match pyramid into a flat sequence of bindings, and the
+prelude's `result_and_then` family covers combinator style. The probe
+found one genuine inconsistency: **the `?` / `?!` lets were the only
+let form that rejected `;` as sugar for `in`** — `let x = e?!; rest`
+was a parse error while every other `let x = e; rest` works. Fixed;
+both forms now accept both separators._
+
+---
+
 ## v0.1.39 — 2026-07-16
 
 _Scale safety (found by sorting a million elements): **`list_sort_by` is
