@@ -1792,6 +1792,33 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e) ->
        Printf.sprintf "mere_channel_%s_send(%s, %s)"
          (channel_elem_tag ch_e.Ast.ty) (emit_expr ch_e) (emit_expr arg)
+     | Ast.Var "channel_close" ->
+       (* v0.1.47 *)
+       Printf.sprintf "mere_channel_%s_close(%s)"
+         (channel_elem_tag arg.Ast.ty) (emit_expr arg)
+     | Ast.Var "channel_recv_opt" ->
+       (* v0.1.47: low-level _recv_opt returns the raw element + an ok
+          flag; wrap into option[T] (Some=1 / None=0, the fixed tags of
+          `type 'a option = None | Some of 'a`). The option[el] struct is
+          registered/emitted via the downstream match on this value.
+          __auto_type avoids naming the element's C type (c_type_of is
+          not in scope here). *)
+       let tag = channel_elem_tag arg.Ast.ty in
+       let el =
+         match Option.map Ast.walk arg.Ast.ty with
+         | Some (Ast.TyCon ("Channel", [el])) -> Ast.walk el
+         | _ -> Ast.TyInt
+       in
+       let opt_name =
+         match Option.map Ast.walk e.Ast.ty with
+         | Some (Ast.TyCon ("option", args)) ->
+           mono_variant_name "option" (List.map Ast.walk args)
+         | _ -> mono_variant_name "option" [el]
+       in
+       Printf.sprintf
+         "({ int __rok; __auto_type __rv = mere_channel_%s_recv_opt(%s, &__rok); \
+          __rok ? (%s){.tag = 1, .payload.Some = __rv} : (%s){.tag = 0}; })"
+         tag (emit_expr arg) opt_name opt_name
      | Ast.Var "str_len" ->
        "((int) strlen(" ^ emit_expr arg ^ "))"
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
@@ -6908,13 +6935,14 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
          region and frees the message region. *)
       "  __lang_region** regs;";
       "  int len; int cap; int head;";
+      "  int closed;";  (* v0.1.47: graceful shutdown flag *)
       "  pthread_mutex_t m;";
       "  pthread_cond_t c;";
       Printf.sprintf "} %s;" s;
       "";
       Printf.sprintf "static %s* %s_new(void) {" s s;
       Printf.sprintf "  %s* ch = (%s*)malloc(sizeof(%s));" s s s;
-      "  ch->cap = 8; ch->len = 0; ch->head = 0;";
+      "  ch->cap = 8; ch->len = 0; ch->head = 0; ch->closed = 0;";
       Printf.sprintf "  ch->buf = (%s*)malloc(sizeof(%s) * (size_t)ch->cap);" cty cty;
       "  ch->regs = (__lang_region**)malloc(sizeof(__lang_region*) * (size_t)ch->cap);";
       "  pthread_mutex_init(&ch->m, NULL);";
@@ -6927,6 +6955,10 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  __lang_region_init(mr, 256);";
       Printf.sprintf "  v = __mcopy_%s(mr, v);" tag;
       "  pthread_mutex_lock(&ch->m);";
+      (* v0.1.47: sending on a closed channel is a programming error
+         (matches the interpreter, which raises). *)
+      "  if (ch->closed) { pthread_mutex_unlock(&ch->m); \
+        fprintf(stderr, \"channel_send: channel is closed\\n\"); abort(); }";
       "  if (ch->len == ch->cap) {";
       "    int nc = ch->cap * 2;";
       Printf.sprintf "    %s* nb = (%s*)malloc(sizeof(%s) * (size_t)nc);" cty cty cty;
@@ -6948,7 +6980,11 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "";
       Printf.sprintf "static %s %s_recv(%s* ch) {" cty s s;
       "  pthread_mutex_lock(&ch->m);";
-      "  while (ch->len == 0) pthread_cond_wait(&ch->c, &ch->m);";
+      "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);";
+      (* v0.1.47: recv on a closed, drained channel aborts (matches interp;
+         use channel_recv_opt for the shutdown path). *)
+      "  if (ch->len == 0) { pthread_mutex_unlock(&ch->m); \
+        fprintf(stderr, \"channel_recv: channel is closed and empty\\n\"); abort(); }";
       Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
       "  __lang_region* mr = ch->regs[ch->head];";
       "  ch->head = (ch->head + 1) % ch->cap;";
@@ -6957,6 +6993,39 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %s out = __mcopy_%s(__lang_current_region, v);" cty tag;
       "  __lang_region_free(mr);";
       "  free(mr);";
+      "  return out;";
+      "}";
+      "";
+      (* v0.1.47: close — wake every blocked recv/recv_opt so they observe
+         the closed state. *)
+      Printf.sprintf "static int %s_close(%s* ch) {" s s;
+      "  pthread_mutex_lock(&ch->m);";
+      "  ch->closed = 1;";
+      "  pthread_cond_broadcast(&ch->c);";
+      "  pthread_mutex_unlock(&ch->m);";
+      "  return 0;";
+      "}";
+      "";
+      (* v0.1.47: recv_opt low-level — blocks for a value; sets *ok = 0 and
+         returns a zero value once the channel is closed and drained. The
+         emit site wraps this into an option[T] (Some v / None). *)
+      Printf.sprintf "static %s %s_recv_opt(%s* ch, int* ok) {" cty s s;
+      "  pthread_mutex_lock(&ch->m);";
+      "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);";
+      "  if (ch->len == 0) {";
+      "    ch->closed = ch->closed;  /* closed & empty */";
+      "    pthread_mutex_unlock(&ch->m);";
+      Printf.sprintf "    *ok = 0; %s z; memset(&z, 0, sizeof z); return z;" cty;
+      "  }";
+      Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
+      "  __lang_region* mr = ch->regs[ch->head];";
+      "  ch->head = (ch->head + 1) % ch->cap;";
+      "  ch->len--;";
+      "  pthread_mutex_unlock(&ch->m);";
+      Printf.sprintf "  %s out = __mcopy_%s(__lang_current_region, v);" cty tag;
+      "  __lang_region_free(mr);";
+      "  free(mr);";
+      "  *ok = 1;";
       "  return out;";
       "}" ]
 

@@ -1,0 +1,42 @@
+// Concurrent worker pool with graceful shutdown (v0.1.47).
+// The worker loop now terminates: channel_recv_opt returns None once
+// `jobs` is closed and drained, so the worker returns unit (no longer
+// bottom-typed) and can be joined. Main: enqueue, close, collect, join.
+
+let n_jobs = 12;
+let n_workers = 4;
+let work = fn (x: int) -> x * x;
+
+let pool_demo = fn () ->
+  let jobs = channel_new () in
+  let results = channel_new () in
+
+  let worker = fn () ->
+    let rec loop = fn () ->
+      match channel_recv_opt jobs with
+      | None -> ()                                  // closed & drained: stop
+      | Some j -> let _ = channel_send results (work j) in loop () in
+    loop () in
+
+  let rec spawn_workers = fn i -> fn acc ->
+    if i == n_workers then acc
+    else spawn_workers (i + 1) (Cons (spawn worker, acc)) in
+  let handles = spawn_workers 0 Nil in
+
+  let rec enqueue = fn i ->
+    if i == n_jobs then () else let _ = channel_send jobs i in enqueue (i + 1) in
+  let _ = enqueue 0 in
+  let _ = channel_close jobs in                      // signal: no more work
+
+  let rec collect = fn i -> fn total ->
+    if i == n_jobs then total else collect (i + 1) (total + channel_recv results) in
+  let sum = collect 0 0 in
+
+  // join every worker — they have all returned because jobs is closed
+  let rec join_all = fn hs ->
+    match hs with Nil -> () | Cons (h, t) -> let _ = join h in join_all t in
+  let _ = join_all handles in
+
+  print ("sum of squares 0..11 = " ++ str_of_int sum ++ " (all workers joined)");
+
+pool_demo ()

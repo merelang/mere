@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.47 — 2026-07-17
+
+_Graceful shutdown for concurrency (found by a worker pool): the pool —
+main pushes N jobs, W workers pull and process, main collects — hit two
+walls at once. A worker's `channel_recv` loop blocks forever when the
+jobs run out, so **there was no way to stop a worker and join it**; and
+because the loop never returns, its type is bottom (`'a`), which the C
+backend can't emit ("unsupported C codegen type: 'a"). Both are the
+same missing primitive. **`channel_close : Channel[a] -> unit`** marks a
+channel done, and **`channel_recv_opt : Channel[a] -> option[a]`**
+blocks for a value but returns `None` once the channel is closed and
+drained — so a worker loops `match channel_recv_opt jobs with None -> ()
+| Some j -> ...; loop ()`, which terminates (returns unit, no longer
+bottom) and can be joined. `channel_recv` and `channel_send` on a closed
+channel now raise/abort instead of blocking or corrupting. interp + C
+(the native worker-pool / server target); Wasm and LLVM reject the two
+with a pointed compile error. `examples/worker_pool.mere` runs a
+4-worker pool over 12 jobs and joins every worker cleanly. Closes the
+structured-concurrency gap (E-1) that had been waiting for a forcing
+program since the memory model landed._
+
+---
+
 ## v0.1.46 — 2026-07-16
 
 _(Follow-up, no version bump) `examples/base64.mere`: a composition
