@@ -34,7 +34,11 @@ type value =
        Phase 27.1: the 2nd component is the insertion-order key list
        (so that map_iter iterates in deterministic order). The Hashtbl
        itself preserves O(1) lookup. *)
-  | V_channel of value Queue.t * Mutex.t * Condition.t
+  | V_channel of value Queue.t * Mutex.t * Condition.t * bool ref
+    (* v0.1.47: the bool ref is the "closed" flag for graceful shutdown.
+       channel_close sets it; channel_recv_opt returns None once the
+       channel is closed and drained (workers can then return and be
+       joined). *)
     (* `Channel[T]` — blocking FIFO queue for cross-thread communication
        (Q-012 step 3a, concurrency narrowing Sub-Q C). Guarded by a
        Mutex; channel_recv blocks on the Condition until an element is
@@ -1889,14 +1893,18 @@ let builtin_join =
 
 let builtin_channel_new =
   V_builtin ("channel_new", fun _ ->
-    V_channel (Queue.create (), Mutex.create (), Condition.create ()))
+    V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false))
 
 let builtin_channel_send =
   V_builtin ("channel_send", fun ch ->
     match ch with
-    | V_channel (q, m, c) ->
+    | V_channel (q, m, c, closed) ->
       V_builtin ("channel_send_p", fun v ->
         Mutex.lock m;
+        if !closed then begin
+          Mutex.unlock m;
+          raise (Eval_error (Loc.dummy, "channel_send: channel is closed"))
+        end;
         Queue.push v q;
         Condition.signal c;
         Mutex.unlock m;
@@ -1906,13 +1914,50 @@ let builtin_channel_send =
 let builtin_channel_recv =
   V_builtin ("channel_recv", fun ch ->
     match ch with
-    | V_channel (q, m, c) ->
+    | V_channel (q, m, c, closed) ->
       Mutex.lock m;
-      while Queue.is_empty q do Condition.wait c m done;
+      while Queue.is_empty q && not !closed do Condition.wait c m done;
+      (* v0.1.47: a closed, drained channel used to block forever; now
+         recv on it raises (use channel_recv_opt for the shutdown path). *)
+      if Queue.is_empty q then begin
+        Mutex.unlock m;
+        raise (Eval_error (Loc.dummy, "channel_recv: channel is closed and empty"))
+      end;
       let v = Queue.pop q in
       Mutex.unlock m;
       v
     | _ -> failwith "channel_recv: expected a Channel")
+
+(* v0.1.47 (structured concurrency): close a channel. After close, sends
+   raise and channel_recv_opt returns None once the queue drains. *)
+let builtin_channel_close =
+  V_builtin ("channel_close", fun ch ->
+    match ch with
+    | V_channel (_, m, c, closed) ->
+      Mutex.lock m;
+      closed := true;
+      Condition.broadcast c;   (* wake every blocked recv so they see None *)
+      Mutex.unlock m;
+      V_unit
+    | _ -> failwith "channel_close: expected a Channel")
+
+(* channel_recv_opt: block for a value; return None when the channel is
+   closed and empty. This is the primitive that lets a worker loop
+   terminate (return unit) instead of blocking forever — which also
+   means the loop is no longer bottom-typed, so it compiles. *)
+let builtin_channel_recv_opt =
+  V_builtin ("channel_recv_opt", fun ch ->
+    match ch with
+    | V_channel (q, m, c, closed) ->
+      Mutex.lock m;
+      while Queue.is_empty q && not !closed do Condition.wait c m done;
+      let result =
+        if Queue.is_empty q then V_constr ("None", None)
+        else V_constr ("Some", Some (Queue.pop q))
+      in
+      Mutex.unlock m;
+      result
+    | _ -> failwith "channel_recv_opt: expected a Channel")
 
 (* Q-012 Phase 32: par_map f xs — apply f to each element in parallel (one
    OCaml domain per element) and collect the results in the original order.
@@ -1942,6 +1987,8 @@ let initial_env : env =
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);
     ("channel_recv", ref builtin_channel_recv);
+    ("channel_close", ref builtin_channel_close);
+    ("channel_recv_opt", ref builtin_channel_recv_opt);
     ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);
     ("read_stdin", ref builtin_read_stdin);

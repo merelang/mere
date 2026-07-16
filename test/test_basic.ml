@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.46" Version.v "0.1.46";
+  check "version is 0.1.47" Version.v "0.1.47";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2936,6 +2936,76 @@ let () =
        let _ = spawn (fn u -> channel_send ch 7) in \
        channel_recv ch")
     "pthread_cond_wait";
+  (* v0.1.47 (structured concurrency, worker-pool dogfood): channel_close +
+     channel_recv_opt give graceful shutdown. A worker loop that pulls with
+     recv_opt terminates (returns unit) when the channel is closed and
+     drained — which also un-bottoms its type so it compiles. *)
+  check "v0.1.47: channel_recv_opt returns Some for a queued value (interp)"
+    (Pipeline.process
+       "let ch = channel_new () in\n\
+        let _ = channel_send ch 42 in\n\
+        match channel_recv_opt ch with | Some v -> v | None -> 0 - 1")
+    "42";
+  check "v0.1.47: channel_recv_opt returns None once closed and drained (interp)"
+    (Pipeline.process
+       "let ch = channel_new () in\n\
+        let _ = channel_close ch in\n\
+        match channel_recv_opt ch with | Some v -> v | None -> 0 - 1")
+    "-1";
+  check "v0.1.47: worker loop drains then stops on close (interp)"
+    (Pipeline.process
+       "let ch = channel_new () in\n\
+        let _ = channel_send ch 10 in\n\
+        let _ = channel_send ch 20 in\n\
+        let _ = channel_close ch in\n\
+        let rec drain = fn acc ->\n\
+        \  match channel_recv_opt ch with\n\
+        \  | None -> acc\n\
+        \  | Some v -> drain (acc + v) in\n\
+        drain 0")
+    "30";
+  assert_contains "codegen C: channel_close emits the monomorphized close"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = channel_send ch 7 in \
+       let _ = channel_close ch in \
+       match channel_recv_opt ch with | Some v -> v | None -> 0")
+    "mere_channel_int_close";
+  assert_contains "codegen C: channel_recv_opt emits the low-level recv_opt"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = channel_send ch 7 in \
+       let _ = channel_close ch in \
+       match channel_recv_opt ch with | Some v -> v | None -> 0")
+    "mere_channel_int_recv_opt";
+  assert_contains "codegen C: channel struct carries a closed flag"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = channel_close ch in \
+       match channel_recv_opt ch with | Some v -> v | None -> 0")
+    "int closed;";
+  (let typed_prog_local s =
+     let prog = Pipeline.parse_program s in
+     let type_env = ref Typer.initial_env in
+     let mt = Typer.infer !type_env (Ast.desugar_program prog) in
+     (prog, mt)
+   in
+   check_raises_containing
+     "v0.1.47: Wasm rejects channel_close honestly"
+     "channel_close / channel_recv_opt are unsupported in Wasm codegen"
+     (fun () ->
+       let (prog, mt) = typed_prog_local
+         "let ch = channel_new () in\n\
+          let _ = channel_close ch in 0" in
+       let _ = Codegen_wasm.emit_program ~main_ty:mt prog in ());
+   check_raises_containing
+     "v0.1.47: LLVM rejects channel_recv_opt honestly"
+     "channel_close / channel_recv_opt are unsupported in LLVM codegen"
+     (fun () ->
+       let (prog, mt) = typed_prog_local
+         "let ch = channel_new () in\n\
+          match channel_recv_opt ch with | Some v -> v | None -> 0" in
+       let _ = Codegen_llvm.emit_program ~main_ty:mt prog in ()));
   assert_contains "codegen: record update via tmp + statement expr"
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\

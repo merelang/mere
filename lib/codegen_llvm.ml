@@ -3030,6 +3030,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i64 @mere_channel_recv(ptr %s)" raw chv);
     let ety = match e.Ast.ty with Some t -> llvm_ty_of t | None -> "i32" in
     cast_from_i64 raw ety
+  | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt"); _ }, _) ->
+    (* v0.1.47: graceful-shutdown primitives are interp + C only (the
+       worker-pool / server shape they serve is the native target). *)
+    unsupported e.Ast.loc
+      "channel_close / channel_recv_opt are unsupported in LLVM codegen \
+       (v0.1.47 scope = interp + C; concurrency shutdown targets the \
+       native C backend)"
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: call @__mere_mk_logger to build a
        Logger value (= 3 closure_str_unit fields). *)

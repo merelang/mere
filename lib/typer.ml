@@ -1199,6 +1199,23 @@ let channel_recv_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_elem]), _chan_recv_elem) }
 
+(* v0.1.47 (structured concurrency): channel_close : Channel[a] -> unit *)
+let _chan_close_elem = fresh_var ()
+let channel_close_scheme =
+  let aid = match _chan_close_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_close_elem]), Ast.TyUnit) }
+
+(* channel_recv_opt : Channel[a] -> option[a] — None once closed & drained.
+   The primitive that lets a worker loop terminate (return unit) rather
+   than block forever, which also un-bottoms its type so it compiles. *)
+let _chan_recv_opt_elem = fresh_var ()
+let channel_recv_opt_scheme =
+  let aid = match _chan_recv_opt_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_opt_elem]),
+             Ast.TyCon ("option", [_chan_recv_opt_elem])) }
+
 (* Q-012 Phase 32: par_map : ('a -> 'b) -> 'a list -> 'b list. Applies the
    function to each element in parallel and collects the results in order.
    'a and 'b cross thread boundaries, so both must be Send — checked (like
@@ -1304,6 +1321,8 @@ let initial_env : env =
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);
     ("channel_recv", channel_recv_scheme);
+    ("channel_close", channel_close_scheme);
+    ("channel_recv_opt", channel_recv_opt_scheme);
     ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
