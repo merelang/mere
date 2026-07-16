@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.46 — 2026-07-16
+
+_Hex literals (a papercut two probes drove into the ground): both the
+SHA-256 round constants and the East Asian Width range table had to be
+written in decimal, because `0xFF` lexed as the int `0` followed by an
+identifier `xFF` ("unbound variable: xFF"). `0xFF` / `0Xff` now lex as
+ordinary ints — no separate type, same per-backend width — via
+`int_of_string`; a bare `0x` with no hex digit still reads as `0` then
+the identifier `x`. No octal / binary / digit-separator syntax (not yet
+forced). The lexer change is one branch; the value is that the next
+crypto or Unicode probe reads like the reference it's transcribed
+from._
+
+---
+
 ## v0.1.45 — 2026-07-16
 
 _Columns, not codepoints (found by printing a table with Japanese
