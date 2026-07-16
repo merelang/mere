@@ -1057,6 +1057,17 @@ let owned_vec_new_scheme =
   { quantified = [aid];
     body = Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("OwnedVec", [_ovec_new_alpha])) }
 
+(* v0.1.43 (bytes story, CRC-32 probe): read a file as raw bytes into an
+   int vec (0..255 per element). `read_file` returns a NUL-terminated str
+   on the C backend, so a binary file silently truncates at the first
+   0x00 byte there — this is the honest binary-input path. *)
+let _rfb_region = fresh_var ()
+let read_file_bytes_scheme =
+  let rid = match _rfb_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (Ast.TyStr,
+             Ast.TyCon ("Vec", [_rfb_region; Ast.TyInt])) }
+
 let _ovec_push_alpha = fresh_var ()
 let owned_vec_push_scheme =
   let aid = match _ovec_push_alpha with Ast.TyVar v -> v.id | _ -> assert false in
@@ -1310,6 +1321,7 @@ let initial_env : env =
     (* Phase 19.6: I/O extensions. The prelude provides `'a list` / `'a option`. *)
     ("read_lines",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
+    ("read_file_bytes", read_file_bytes_scheme);
     (* Phase 44: file system primitives for the docs site SSG (paper-trial doc 47) *)
     ("list_dir",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
@@ -1722,6 +1734,23 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let result_ty = Ast.TyCon ("Vec", [marker; fresh_var ()]) in
        (* Force the scheme's region tyvar to bind to our marker by
           unifying through the call. *)
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | Ast.Var "read_file_bytes" ->
+       (* v0.1.43: same construction-time region binding as vec_new —
+          the returned int vec lives in the innermost active region
+          (or __heap). Without this the region tyvar stays unresolved
+          and fns taking the vec are never emitted by the C backend. *)
+       let active_region =
+         match !active_regions with
+         | r :: _ -> r
+         | [] -> "__heap"
+       in
+       let marker =
+         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
+       in
+       let result_ty = Ast.TyCon ("Vec", [marker; Ast.TyInt]) in
+       unify e.loc ta Ast.TyStr;
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | Ast.Var "strbuf_new" ->

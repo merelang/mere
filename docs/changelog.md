@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.43 — 2026-07-16
+
+_Bytes get in the door (found by a 30-line CRC-32 tool): the algorithm
+was trivial on the new bitwise builtins — the discovery was on the
+input side. **`read_file` silently truncates binary data at the first
+0x00 byte on the C backend** (NUL-terminated `char*`), while the
+interpreter, whose strings carry NULs, read the same file correctly:
+a 25-byte file read as 2 bytes natively and produced a confidently
+wrong checksum. The str-is-bytes story was only true on interp.
+**`read_file_bytes : str -> Vec[R, int]`** is the binary-safe path —
+one int per byte, 0..255, the whole file, reusing the existing vec
+machinery instead of introducing a bytes type (8 bytes per byte is the
+honest cost until a program forces better). It gets the same
+construction-time region binding as `vec_new` (without it, the region
+tyvar stayed unresolved and functions taking the vec were silently
+never emitted by the C backend — the probe hit that too). interp + C
+for now; Wasm/LLVM reject it with a pointed compile error.
+`examples/crc32.mere` verifies against zlib on both text and
+NUL-bearing files; `read_file`'s docs now state the truncation
+divergence plainly._
+
+---
+
 ## v0.1.42 — 2026-07-16
 
 _The real ALU (paying off the SHA-256 probe): **bitwise builtins on all

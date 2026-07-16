@@ -1,0 +1,49 @@
+// CRC-32 (IEEE, reflected) of a file — the probe that forced the bytes
+// story (v0.1.43). The algorithm is a few lines on the bitwise builtins;
+// the discovery was on the INPUT side: `read_file` returns a
+// NUL-terminated str on the C backend, so a binary file silently
+// truncated at its first 0x00 byte (the interpreter, whose strings carry
+// NULs, read the same file correctly — a cross-backend divergence).
+// `read_file_bytes : str -> Vec[R, int]` is the binary-safe path: one
+// element per byte, 0..255, meaning the same thing on every backend
+// that supports it.
+//
+// Verify against python3 -c "import zlib; print(zlib.crc32(open(F,'rb').read()))"
+
+let mask32 = 4294967295;
+
+// one byte into the running crc (reflected polynomial 0xEDB88320)
+let crc_byte = fn crc -> fn b ->
+  let x = bit_xor crc b in
+  let rec go = fn i -> fn c ->
+    if i == 8 then c
+    else
+      let c2 = if bit_and c 1 == 1
+               then bit_xor (bit_shr c 1) 3988292384
+               else bit_shr c 1 in
+      go (i + 1) c2 in
+  go 0 x;
+
+let crc32_str = fn s ->
+  let n = str_len s in
+  let rec go = fn i -> fn crc ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (ord (char_at s i))) in
+  bit_xor (go 0 mask32) mask32;
+
+let crc32_bytes = fn bytes ->
+  let n = vec_len bytes in
+  let rec go = fn i -> fn crc ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (vec_get bytes i)) in
+  bit_xor (go 0 mask32) mask32;
+
+// sanity: crc32 of "123456789" must be 0xCBF43926 = 3421780262
+let _ = print ("check   " ++ str_of_int (crc32_str "123456789")) in
+let args_v = args () in
+let path = match args_v with | Cons (p, _) -> p | Nil -> "" in
+if str_eq path "" then print "usage: crc32 <file>"
+else
+  let data = read_file_bytes path in
+  let _ = print ("bytes   " ++ str_of_int (vec_len data)) in
+  print ("crc32   " ++ str_of_int (crc32_bytes data))
