@@ -1,0 +1,105 @@
+// Base64 encode/decode (RFC 4648), in pure Mere. This example composes
+// three separate capabilities into one program:
+//   - bitwise builtins (bit_and / bit_or / bit_shl / bit_shr)
+//   - read_file_bytes  (binary in)
+//   - write_file_bytes (binary out)
+// Passing a file path round-trips it: read_file_bytes -> encode ->
+// decode -> write_file_bytes produces a byte-identical copy at <path>.rt.
+// Verify: base64 -i <path> | tr -d '\n'  matches the encoded string.
+
+let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// encode an int vec of bytes -> base64 string
+let encode = fn bytes ->
+  let n = vec_len bytes in
+  let buf = strbuf_new () in
+  let rec go = fn i ->
+    if i >= n then ()
+    else
+      let b0 = vec_get bytes i in
+      let has1 = i + 1 < n in
+      let has2 = i + 2 < n in
+      let b1 = if has1 then vec_get bytes (i + 1) else 0 in
+      let b2 = if has2 then vec_get bytes (i + 2) else 0 in
+      let triple = bit_or (bit_or (bit_shl b0 16) (bit_shl b1 8)) b2 in
+      let c0 = char_at alphabet (bit_and (bit_shr triple 18) 0x3F) in
+      let c1 = char_at alphabet (bit_and (bit_shr triple 12) 0x3F) in
+      let c2 = if has1 then char_at alphabet (bit_and (bit_shr triple 6) 0x3F) else "=" in
+      let c3 = if has2 then char_at alphabet (bit_and triple 0x3F) else "=" in
+      let _ = strbuf_push buf (c0 ++ c1 ++ c2 ++ c3) in
+      go (i + 3) in
+  let _ = go 0 in
+  strbuf_to_str buf;
+
+// value of a base64 character (skip '=' padding at the caller)
+let deval = fn c ->
+  let o = ord c in
+  if o >= 65 && o <= 90 then o - 65          // A-Z -> 0..25
+  else if o >= 97 && o <= 122 then o - 71    // a-z -> 26..51
+  else if o >= 48 && o <= 57 then o + 4      // 0-9 -> 52..61
+  else if o == 43 then 62                     // +
+  else 63;                                    // /
+
+// decode a base64 string -> int vec of bytes
+let decode = fn s ->
+  let out = vec_new () in
+  let n = str_len s in
+  let rec go = fn i ->
+    if i + 3 >= n then ()
+    else
+      let d0 = deval (char_at s i) in
+      let d1 = deval (char_at s (i + 1)) in
+      let ch2 = char_at s (i + 2) in
+      let ch3 = char_at s (i + 3) in
+      let triple = bit_or (bit_or (bit_or (bit_shl d0 18) (bit_shl d1 12))
+                                  (bit_shl (deval ch2) 6)) (deval ch3) in
+      let _ = vec_push out (bit_and (bit_shr triple 16) 0xFF) in
+      let _ = if str_eq ch2 "=" then () else vec_push out (bit_and (bit_shr triple 8) 0xFF) in
+      let _ = if str_eq ch3 "=" then () else vec_push out (bit_and triple 0xFF) in
+      go (i + 4) in
+  let _ = go 0 in
+  out;
+
+// --- known-answer tests (RFC 4648) ---------------------------------------
+
+let bytes_of = fn s ->
+  let v = vec_new () in
+  let n = str_len s in
+  let rec go = fn i ->
+    if i == n then () else let _ = vec_push v (ord (char_at s i)) in go (i + 1) in
+  let _ = go 0 in
+  v;
+
+let check = fn name -> fn got -> fn want ->
+  if str_eq got want then print ("ok   " ++ name)
+  else
+    let _ = print ("FAIL " ++ name) in
+    let _ = print ("  got  " ++ got) in
+    print ("  want " ++ want);
+
+let _ = check "encode ''" (encode (bytes_of "")) "" in
+let _ = check "encode 'f'" (encode (bytes_of "f")) "Zg==" in
+let _ = check "encode 'fo'" (encode (bytes_of "fo")) "Zm8=" in
+let _ = check "encode 'foo'" (encode (bytes_of "foo")) "Zm9v" in
+let _ = check "encode 'foobar'" (encode (bytes_of "foobar")) "Zm9vYmFy" in
+
+// round-trip decode(encode(x)) == x, reported as a byte-length + first byte
+let rt = fn s ->
+  let e = encode (bytes_of s) in
+  let d = decode e in
+  str_of_int (vec_len d);
+let _ = check "roundtrip len 'foobar'" (rt "foobar") "6" in
+
+// file round-trip: read a binary file, base64 it, decode, write back, and
+// let the caller diff. Uses args for the path.
+let args_v = args () in
+match args_v with
+| Cons (path, _) ->
+  let raw = read_file_bytes path in
+  let enc = encode raw in
+  let dec = decode enc in
+  let _ = write_file_bytes (path ++ ".rt") dec in
+  print ("file " ++ path ++ ": " ++ str_of_int (vec_len raw)
+         ++ " bytes -> " ++ str_of_int (str_len enc)
+         ++ " b64 -> " ++ str_of_int (vec_len dec) ++ " bytes (wrote " ++ path ++ ".rt)")
+| Nil -> print "done (pass a file path to test the binary round-trip)"

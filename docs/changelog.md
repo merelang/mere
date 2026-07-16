@@ -6,6 +6,14 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.46 — 2026-07-16
 
+_(Follow-up, no version bump) `examples/base64.mere`: a composition
+probe that confirms the day's three separately-shipped capabilities —
+the bitwise builtins, `read_file_bytes`, and `write_file_bytes` —
+compose in one program. RFC 4648 known-answer vectors pass, and passing
+a file path round-trips arbitrary binary byte-identically
+(`read_file_bytes → encode → decode → write_file_bytes`) on interp and
+C. No new bug surfaced — the value is the integration check itself._
+
 _Hex literals (a papercut two probes drove into the ground): both the
 SHA-256 round constants and the East Asian Width range table had to be
 written in decimal, because `0xFF` lexed as the int `0` followed by an
