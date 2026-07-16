@@ -654,6 +654,12 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (* Phase 16.3: metrics.record uses show_int internally to format
           the integer payload, so register `int` ahead of show_fn_defs. *)
        add_show_type Ast.TyInt
+     | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
+       (* v0.1.42: str_of_int lowers to `call $show_int`, but only `show`
+          registered the helper — `print (str_of_int x)` under a top-level
+          let produced an undefined $show_int at wat2wasm time (found while
+          smoke-testing the bitwise builtins). *)
+       add_show_type Ast.TyInt
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
@@ -1959,6 +1965,20 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr s_e;
     emit_expr n_e;
     emit_instr "call $__lang_str_repeat"
+  (* v0.1.42 (bitwise): direct i32 ops. bit_shr is the arithmetic shift
+     (i32.shr_s); wasm masks shift counts mod 32 by spec. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_and"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e; emit_expr b_e; emit_instr "i32.and"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_or"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e; emit_expr b_e; emit_instr "i32.or"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_xor"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e; emit_expr b_e; emit_instr "i32.xor"
+  | Ast.App ({ node = Ast.Var "bit_not"; _ }, a_e) ->
+    emit_expr a_e; emit_instr "i32.const -1"; emit_instr "i32.xor"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_shl"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e; emit_expr b_e; emit_instr "i32.shl"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_shr"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e; emit_expr b_e; emit_instr "i32.shr_s"
   | Ast.App ({ node = Ast.Var "str_rev"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_str_rev"

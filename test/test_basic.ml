@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.41" Version.v "0.1.41";
+  check "version is 0.1.42" Version.v "0.1.42";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8017,6 +8017,106 @@ let () =
     (fun () ->
       let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
         (typed_prog "4000000000") in ());
+  check_raises_containing
+    "v0.1.42: LLVM codegen rejects out-of-range int literal at compile time"
+    "does not fit the LLVM backend's 32-bit int"
+    (fun () ->
+      let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
+        (typed_prog "4000000000") in ());
+
+  (* v0.1.42 (bitwise builtins, forced by the SHA-256 example): bit_and /
+     bit_or / bit_xor / bit_not / bit_shl / bit_shr on all four backends.
+     bit_shr is the arithmetic (sign-propagating) shift. *)
+  check "v0.1.42: bit_and" (Pipeline.process "bit_and 12 10") "8";
+  check "v0.1.42: bit_or"  (Pipeline.process "bit_or 12 10") "14";
+  check "v0.1.42: bit_xor" (Pipeline.process "bit_xor 12 10") "6";
+  check "v0.1.42: bit_not" (Pipeline.process "bit_not 0") "-1";
+  check "v0.1.42: bit_shl" (Pipeline.process "bit_shl 1 8") "256";
+  check "v0.1.42: bit_shr is arithmetic"
+    (Pipeline.process "bit_shr (0 - 8) 1") "-4";
+  check "v0.1.42: bit_and above 2^31 (interp/C are wider than 32 bits)"
+    (Pipeline.process "bit_and 4294967295 255") "255";
+  check "v0.1.42: rotr composed from shifts"
+    (Pipeline.process
+       "let mask32 = 4294967295 in\n\
+        let rotr = fn n -> fn x ->\n\
+        \  bit_or (bit_shr x n) (bit_and (bit_shl x (32 - n)) mask32) in\n\
+        rotr 8 305419896")  (* 0x12345678 rotr 8 = 0x78123456 *)
+    "2014458966";
+  check "v0.1.42: C codegen emits native bitwise operators"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "bit_xor (bit_and 12 10) (bit_shl 1 2)") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "(12LL) & (10LL)" && has "(1LL) << (2LL)" then "ok" else "no")
+    "ok";
+  check "v0.1.42: Wasm codegen emits i32 bitwise instructions"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "bit_xor (bit_and 12 10) (bit_shr 8 2)") in
+     let nlen = String.length wat in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "i32.and" && has "i32.xor" && has "i32.shr_s" then "ok" else "no")
+    "ok";
+  check "v0.1.42: LLVM codegen emits i32 bitwise instructions"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "bit_xor (bit_and 12 10) (bit_shr 8 2)") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "= and i32" && has "= xor i32" && has "= ashr i32" then "ok"
+     else "no")
+    "ok";
+  (* v0.1.42: str_of_int on a variable under a top-level let lowers to
+     show_int on Wasm/LLVM, but only `show` registered the helper — the
+     emitted module referenced an undefined $show_int / @show_int. *)
+  check "v0.1.42: Wasm emits show_int for str_of_int on a variable"
+    (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyUnit
+       (typed_prog "let a = 1 + 2;\nprint (str_of_int a)") in
+     let nlen = String.length wat in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub wat i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "(func $show_int" then "ok" else "no")
+    "ok";
+  check "v0.1.42: LLVM emits show_int for str_of_int on a variable"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyUnit
+       (typed_prog "let a = 1 + 2;\nprint (str_of_int a)") in
+     let nlen = String.length ll in
+     let has needle =
+       let plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "define" && has "@show_int(" then "ok" else "no")
+    "ok";
 
   check "§32.4: Wasm codegen emits (import) + call"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog

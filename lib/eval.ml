@@ -846,6 +846,34 @@ let builtin_utf8_chars =
       str_list_to_v (go 0 [])
     | _ -> failwith "utf8_chars: expected str")
 
+(* v0.1.42 (bitwise): ops on the interpreter's OCaml int (normally 63
+   bits). bit_shr is the arithmetic shift (asr). Shift counts are
+   masked to 0..62 so out-of-range counts don't hit OCaml's unspecified
+   shift behavior; portable programs should stay in 0..31 anyway (the
+   LLVM / Wasm backends are 32-bit). *)
+let bit_binop name f =
+  V_builtin (name, fun a ->
+    match a with
+    | V_int x ->
+      V_builtin (name ^ "_partial", fun b ->
+        match b with
+        | V_int y -> V_int (f x y)
+        | _ -> failwith (name ^ ": 2nd arg expected int"))
+    | _ -> failwith (name ^ ": 1st arg expected int"))
+
+let builtin_bit_and = bit_binop "bit_and" (land)
+let builtin_bit_or  = bit_binop "bit_or" (lor)
+let builtin_bit_xor = bit_binop "bit_xor" (lxor)
+let builtin_bit_shl = bit_binop "bit_shl"
+  (fun x n -> if n < 0 || n > 62 then 0 else x lsl n)
+let builtin_bit_shr = bit_binop "bit_shr"
+  (fun x n -> if n < 0 then x else x asr (min n 62))
+let builtin_bit_not =
+  V_builtin ("bit_not", fun v ->
+    match v with
+    | V_int x -> V_int (lnot x)
+    | _ -> failwith "bit_not: expected int")
+
 let builtin_str_join =
   V_builtin ("str_join", fun sep_val ->
     match sep_val with
@@ -1937,6 +1965,12 @@ let initial_env : env =
     ("str_split", ref builtin_str_split);
     ("utf8_len", ref builtin_utf8_len);
     ("utf8_chars", ref builtin_utf8_chars);
+    ("bit_and", ref builtin_bit_and);
+    ("bit_or",  ref builtin_bit_or);
+    ("bit_xor", ref builtin_bit_xor);
+    ("bit_not", ref builtin_bit_not);
+    ("bit_shl", ref builtin_bit_shl);
+    ("bit_shr", ref builtin_bit_shr);
     ("str_join", ref builtin_str_join);
     ("str_compare", ref builtin_str_compare);
     ("str_eq",         ref builtin_str_eq);

@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.42 — 2026-07-16
+
+_The real ALU (paying off the SHA-256 probe): **bitwise builtins on all
+four backends** — `bit_and` / `bit_or` / `bit_xor` / `bit_not` /
+`bit_shl` / `bit_shr`, on the backend's native int width, with
+`bit_shr` as the arithmetic shift. They lower to the machine operation
+everywhere: `&`-family operators on C, `i32.and`-family instructions on
+Wasm, `and i32`-family on LLVM, `land`-family on the interpreter.
+`examples/sha256.mere` dropped its div/mod fake ALU for them: one block
+went from ~29 ms (interpreted, bit-loop emulation) to **6.7 µs native**
+— about 4,300× — with all NIST vectors still passing on interp and C.
+Cleanups the rewrite surfaced: `abs`/`min`/`max`/`clamp` still used C
+`int` temporaries after v0.1.41 (silent truncation above 2^31, fixed);
+`str_of_int` on a variable under a top-level let referenced an
+undefined `show_int` on Wasm and LLVM (only `show` registered the
+helper, fixed on both); the LLVM backend now rejects out-of-range int
+literals at compile time like Wasm does — and the v0.1.41 changelog's
+claim that LLVM was i64 is corrected there: **LLVM's int is i32**, and
+widening it to 64-bit remains a deferred item with sha256 as the
+forcing program._
+
+---
+
 ## v0.1.41 — 2026-07-16
 
 _One int, not four (found by writing SHA-256 in pure Mere): the probe
@@ -24,8 +47,11 @@ i32 int but now says so**: an int literal outside `-2^31 .. 2^31-1` is
 a compile-time error with a source location instead of an
 `i32.const 4294967296` that only explodes later inside wat2wasm. The
 SHA-256 probe passes all NIST test vectors on interp and C; docs state
-each backend's width honestly. (LLVM was already i64; the probe also
-uncovered an unrelated LLVM crash on this program, tracked separately.)_
+each backend's width honestly. (This entry originally claimed LLVM was
+already i64 — measuring said otherwise: **LLVM's int is i32**, so it
+now gets the same out-of-range-literal compile error as Wasm, and the
+i64 widening is a known deferred item. The probe also uncovered an
+unrelated LLVM crash on this program, tracked separately.)_
 
 ---
 

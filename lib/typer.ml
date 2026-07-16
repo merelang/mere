@@ -1380,6 +1380,16 @@ let initial_env : env =
     ("utf8_len",   mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("utf8_chars", mono (Ast.TyArrow (Ast.TyStr,
                           Ast.TyCon ("list", [Ast.TyStr]))));
+    (* v0.1.42 (bitwise): int-width ops on the backend's native int
+       (64-bit C / 63-bit interp / 32-bit LLVM+Wasm). bit_shr is the
+       arithmetic (sign-propagating) shift; keep shift counts in 0..31
+       for portable code. *)
+    ("bit_and", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("bit_or",  mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("bit_xor", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("bit_not", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("bit_shl", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("bit_shr", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     ("str_join",
        mono (Ast.TyArrow (Ast.TyStr,
               Ast.TyArrow (Ast.TyCon ("list", [Ast.TyStr]),
