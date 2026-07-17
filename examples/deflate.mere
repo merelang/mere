@@ -1,0 +1,179 @@
+// DEFLATE compressor (gzip container), fixed-Huffman + LZ77, in pure Mere.
+// The counterpart to inflate.mere: a bit WRITER packs variable-length
+// codes LSB-first across byte boundaries; a greedy longest-match LZ77
+// (naive window scan) emits length/distance back-references; literals and
+// the length codes use the fixed-Huffman table. Output is valid gzip:
+// system gunzip AND inflate.mere both round-trip it byte-identically with
+// a verified CRC-32. (Fixed Huffman + greedy matching leaves ~2x on the
+// table vs gzip -9's dynamic Huffman — a completeness gap, not a bug.)
+// Usage: mere examples/deflate.mere <file>  ->  writes <file>.mgz
+
+let mask32 = 0xFFFFFFFF;
+let vec_of = fn xs ->
+  let v = vec_new () in
+  let rec go = fn l -> match l with Nil -> v | Cons (h, t) -> let _ = vec_push v (h : int) in go t in
+  go xs;
+let g_len_base = vec_of (Cons (3, Cons (4, Cons (5, Cons (6, Cons (7, Cons (8, Cons (9, Cons (10, Cons (11, Cons (13, Cons (15, Cons (17, Cons (19, Cons (23, Cons (27, Cons (31, Cons (35, Cons (43, Cons (51, Cons (59, Cons (67, Cons (83, Cons (99, Cons (115, Cons (131, Cons (163, Cons (195, Cons (227, Cons (258, Nil))))))))))))))))))))))))))))));
+let g_len_extra = vec_of (Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (1, Cons (1, Cons (1, Cons (1, Cons (2, Cons (2, Cons (2, Cons (2, Cons (3, Cons (3, Cons (3, Cons (3, Cons (4, Cons (4, Cons (4, Cons (4, Cons (5, Cons (5, Cons (5, Cons (5, Cons (0, Nil))))))))))))))))))))))))))))));
+let g_dist_base = vec_of (Cons (1, Cons (2, Cons (3, Cons (4, Cons (5, Cons (7, Cons (9, Cons (13, Cons (17, Cons (25, Cons (33, Cons (49, Cons (65, Cons (97, Cons (129, Cons (193, Cons (257, Cons (385, Cons (513, Cons (769, Cons (1025, Cons (1537, Cons (2049, Cons (3073, Cons (4097, Cons (6145, Cons (8193, Cons (12289, Cons (16385, Cons (24577, Nil)))))))))))))))))))))))))))))));
+let g_dist_extra = vec_of (Cons (0, Cons (0, Cons (0, Cons (0, Cons (1, Cons (1, Cons (2, Cons (2, Cons (3, Cons (3, Cons (4, Cons (4, Cons (5, Cons (5, Cons (6, Cons (6, Cons (7, Cons (7, Cons (8, Cons (8, Cons (9, Cons (9, Cons (10, Cons (10, Cons (11, Cons (11, Cons (12, Cons (12, Cons (13, Cons (13, Nil)))))))))))))))))))))))))))))));
+
+let crc_byte = fn (crc: int) -> fn (b: int) ->
+  let x = bit_xor crc b in
+  let rec go = fn i -> fn (c: int) ->
+    if i == 8 then c
+    else go (i + 1) (if bit_and c 1 == 1
+                     then bit_xor (bit_shr c 1) 0xEDB88320
+                     else bit_shr c 1) in
+  go 0 x;
+let crc32_vec = fn bytes ->
+  let n = vec_len bytes in
+  let rec go = fn i -> fn (crc: int) ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (vec_get bytes i)) in
+  bit_xor (go 0 mask32) mask32;
+
+// ---- bit writer: state vec [bitbuf, bitcnt]; out = byte vec ------------
+let bw_new = fn () ->
+  let s = vec_new () in
+  let _ = vec_push s 0 in    // bit buffer (accumulates LSB-first)
+  let _ = vec_push s 0 in    // bit count
+  s;
+// push `n` bits of `v` (v's low n bits), LSB-first into the stream
+let bw_bits = fn s -> fn out -> fn (v: int) -> fn (n: int) ->
+  let rec go = fn i ->
+    if i == n then ()
+    else
+      let bit = bit_and (bit_shr v i) 1 in
+      let buf = bit_or (vec_get s 0) (bit_shl bit (vec_get s 1)) in
+      let cnt = (vec_get s 1 : int) + 1 in
+      let _ = vec_set s 0 buf in
+      let _ = vec_set s 1 cnt in
+      let _ = if cnt == 8 then
+          let _ = vec_push out (bit_and buf 0xFF) in
+          let _ = vec_set s 0 0 in
+          vec_set s 1 0
+        else () in
+      go (i + 1) in
+  go 0;
+// flush remaining bits (pad with zeros to a byte)
+let bw_flush = fn s -> fn out ->
+  if (vec_get s 1 : int) > 0 then
+    let _ = vec_push out (bit_and (vec_get s 0) 0xFF) in
+    let _ = vec_set s 0 0 in vec_set s 1 0
+  else ();
+
+// fixed-Huffman literal code + length for a symbol (0..287), returned as
+// (code, nbits). Codes must be emitted MSB-first, so we reverse them.
+let rev_bits = fn (v: int) -> fn (n: int) ->
+  let rec go = fn i -> fn (acc: int) ->
+    if i == n then acc
+    else go (i + 1) (bit_or (bit_shl acc 1) (bit_and (bit_shr v i) 1)) in
+  go 0 0;
+// fixed literal code (already MSB-first per RFC 1951 §3.2.6), we return the
+// value + nbits and let bw_bits push LSB-first, so pre-reverse.
+let fixed_code = fn (sym: int) ->
+  if sym < 144 then (rev_bits (48 + sym) 8, 8)              // 0x30..0xBF, 8 bits
+  else if sym < 256 then (rev_bits (400 + (sym - 144)) 9, 9) // 0x190.., 9 bits
+  else if sym < 280 then (rev_bits (sym - 256) 7, 7)        // 0..23, 7 bits
+  else (rev_bits (192 + (sym - 280)) 8, 8);                 // 0xC0.., 8 bits
+
+
+// length 3..258 -> (code_sym 257.., extra_nbits, extra_val)
+let len_encode = fn (len: int) ->
+  let rec go = fn i ->
+    if i == 28 then
+      // last entry: length 258 exactly
+      (285, 0, 0)
+    else
+      let base = (vec_get g_len_base i : int) in
+      let nb = (vec_get g_len_extra i : int) in
+      let next = (vec_get g_len_base (i + 1) : int) in
+      if len < next then (257 + i, nb, len - base)
+      else go (i + 1) in
+  go 0;
+// distance 1..32768 -> (code_sym 0.., extra_nbits, extra_val)
+let dist_encode = fn (dist: int) ->
+  let rec go = fn i ->
+    if i == 29 then (29, (vec_get g_dist_extra 29 : int), dist - (vec_get g_dist_base 29 : int))
+    else
+      let base = (vec_get g_dist_base i : int) in
+      let nb = (vec_get g_dist_extra i : int) in
+      let next = (vec_get g_dist_base (i + 1) : int) in
+      if dist < next then (i, nb, dist - base)
+      else go (i + 1) in
+  go 0;
+// distance code (5-bit fixed, MSB-first -> reverse for LSB stream)
+let dist_code = fn (sym: int) -> (rev_bits sym 5, 5);
+// longest match at position `p` looking back up to 32768, len up to 258.
+// naive O(window) scan (fine for the probe; a real impl uses a hash chain).
+let find_match = fn data -> fn (p: int) -> fn (n: int) ->
+  let max_back = if p > 32768 then 32768 else p in
+  let rec best = fn (d: int) -> fn (blen: int) -> fn (bdist: int) ->
+    if d > max_back then (blen, bdist)
+    else
+      let start = p - d in
+      let rec mlen = fn (k: int) ->
+        if k == 258 then 258
+        else if p + k >= n then k
+        else if (vec_get data (start + k) : int) == (vec_get data (p + k) : int) then mlen (k + 1)
+        else k in
+      let l = mlen 0 in
+      if l > blen then best (d + 1) l d
+      else best (d + 1) blen bdist in
+  best 1 0 0;
+
+let deflate_fixed = fn data ->
+  let out = vec_new () in
+  // gzip header
+  let _ = vec_push out 0x1F in let _ = vec_push out 0x8B in
+  let _ = vec_push out 8 in let _ = vec_push out 0 in
+  let _ = vec_push out 0 in let _ = vec_push out 0 in let _ = vec_push out 0 in let _ = vec_push out 0 in
+  let _ = vec_push out 0 in let _ = vec_push out 3 in
+  // one fixed-Huffman block, BFINAL=1 BTYPE=01
+  let s = bw_new () in
+  let _ = bw_bits s out 1 1 in   // BFINAL = 1
+  let _ = bw_bits s out 1 2 in   // BTYPE = 01 (fixed)
+  let n = vec_len data in
+  let rec emit = fn i ->
+    if i == n then ()
+    else
+      let (mlen, mdist) = find_match data i n in
+      if mlen >= 3 then
+        let (lsym, lnb, lval) = len_encode mlen in
+        let (lc, lcn) = fixed_code lsym in
+        let _ = bw_bits s out lc lcn in
+        let _ = if lnb > 0 then bw_bits s out lval lnb else () in
+        let (dsym, dnb, dval) = dist_encode mdist in
+        let (dc, dcn) = dist_code dsym in
+        let _ = bw_bits s out dc dcn in
+        let _ = if dnb > 0 then bw_bits s out dval dnb else () in
+        emit (i + mlen)
+      else
+        let (code, nb) = fixed_code (vec_get data i) in
+        let _ = bw_bits s out code nb in
+        emit (i + 1) in
+  let _ = emit 0 in
+  let (ec, en) = fixed_code 256 in   // end-of-block
+  let _ = bw_bits s out ec en in
+  let _ = bw_flush s out in
+  // trailer
+  let push_u32 = fn (v: int) ->
+    let _ = vec_push out (bit_and v 0xFF) in
+    let _ = vec_push out (bit_and (bit_shr v 8) 0xFF) in
+    let _ = vec_push out (bit_and (bit_shr v 16) 0xFF) in
+    vec_push out (bit_and (bit_shr v 24) 0xFF) in
+  let _ = push_u32 (crc32_vec data) in
+  let _ = push_u32 (bit_and n mask32) in
+  out;
+
+let demo = fn () ->
+  let args_v = args () in
+  match args_v with
+  | Nil -> print "usage: deflate <file>"
+  | Cons (path, _) ->
+    let data = read_file_bytes path in
+    let gz = deflate_fixed data in
+    let _ = write_file_bytes (path ++ ".mgz") gz in
+    print (str_of_int (vec_len data) ++ " -> " ++ str_of_int (vec_len gz) ++ " bytes (fixed) " ++ path ++ ".mgz") in
+demo ()
