@@ -1,0 +1,94 @@
+// Conway's Game of Life — probe for read-current/write-next generation
+// semantics over nested vecs. A glider on an 8x8 wrapping grid must
+// translate one cell diagonally every 4 generations; if next-gen writes
+// bleed into the current gen (aliasing at the wrong layer), the glider
+// disintegrates. Ground truth: run 8 gens, glider shifts (+2,+2).
+
+let size = 8;
+
+let grid_new = fn () ->
+  let g = vec_new () in
+  let rec r = fn i ->
+    if i == size then ()
+    else
+      let row = vec_new () in
+      let rec c = fn j ->
+        if j == size then () else let _ = vec_push row 0 in c (j + 1) in
+      let _ = c 0 in
+      let _ = vec_push g row in
+      r (i + 1) in
+  let _ = r 0 in
+  g;
+
+let gget = fn g -> fn (i: int) -> fn (j: int) ->
+  vec_get (vec_get g ((i + size) % size)) ((j + size) % size);
+let gset = fn g -> fn (i: int) -> fn (j: int) -> fn (v: int) ->
+  vec_set (vec_get g i) j v;
+
+let neighbors = fn g -> fn (i: int) -> fn (j: int) ->
+  (gget g (i - 1) (j - 1) : int) + gget g (i - 1) j + gget g (i - 1) (j + 1)
+  + gget g i (j - 1) + gget g i (j + 1)
+  + gget g (i + 1) (j - 1) + gget g (i + 1) j + gget g (i + 1) (j + 1);
+
+let step = fn cur ->
+  let nxt = grid_new () in
+  let rec ri = fn i ->
+    if i == size then ()
+    else
+      let rec cj = fn j ->
+        if j == size then ()
+        else
+          let n = neighbors cur i j in
+          let alive = (gget cur i j : int) == 1 in
+          let v = if alive && (n == 2 || n == 3) then 1
+                  else if (if alive then false else n == 3) then 1
+                  else 0 in
+          let _ = gset nxt i j v in
+          cj (j + 1) in
+      let _ = cj 0 in
+      ri (i + 1) in
+  let _ = ri 0 in
+  nxt;
+
+let render = fn g ->
+  let rec ri = fn i ->
+    if i == size then ()
+    else
+      let buf = strbuf_new () in
+      let rec cj = fn j ->
+        if j == size then ()
+        else
+          let _ = strbuf_push buf (if (gget g i j : int) == 1 then "#" else ".") in
+          cj (j + 1) in
+      let _ = cj 0 in
+      let _ = print (strbuf_to_str buf) in
+      ri (i + 1) in
+  ri 0;
+
+let demo = fn () ->
+  // glider at top-left: (0,1),(1,2),(2,0),(2,1),(2,2)
+  let g0 = grid_new () in
+  let _ = gset g0 0 1 1 in
+  let _ = gset g0 1 2 1 in
+  let _ = gset g0 2 0 1 in
+  let _ = gset g0 2 1 1 in
+  let _ = gset g0 2 2 1 in
+  let rec run_gens = fn g -> fn (k: int) ->
+    if k == 0 then g else run_gens (step g) (k - 1) in
+  let g8 = run_gens g0 8 in
+  // after 8 gens the glider is the same shape shifted (+2,+2):
+  // expect live cells at (2,3),(3,4),(4,2),(4,3),(4,4)
+  let ok = (gget g8 2 3 : int) == 1 && gget g8 3 4 == 1
+        && gget g8 4 2 == 1 && gget g8 4 3 == 1 && gget g8 4 4 == 1 in
+  let total =
+    let rec sum = fn i -> fn (acc: int) ->
+      if i == size then acc
+      else
+        let rec sr = fn j -> fn (a2: int) ->
+          if j == size then a2 else sr (j + 1) (a2 + gget g8 i j) in
+        sum (i + 1) (sr 0 acc) in
+    sum 0 0 in
+  let _ = render g8 in
+  print ("glider ok=" ++ (if ok && total == 5 then "true" else "false")
+         ++ " cells=" ++ str_of_int total) in
+demo ()

@@ -1,0 +1,47 @@
+// Bignum factorial via a Vec[int] of base-10 digits (least significant
+// first) — the honest demonstration of "int is fixed-width, no arbitrary
+// precision": 20! fits in 64-bit, 21! silently wraps, so 30! needs digits.
+// Ground truth: 30! = 265252859812191058636308480000000.
+
+// multiply the digit vector in place by a small int, propagating carry
+let mul_small = fn digits -> fn (m: int) ->
+  let n = vec_len digits in
+  let rec go = fn i -> fn (carry: int) ->
+    if i == n then
+      // push remaining carry digits
+      let rec push_c = fn (c: int) ->
+        if c == 0 then () else
+        let _ = vec_push digits (c % 10) in push_c (c / 10) in
+      push_c carry
+    else
+      let prod = (vec_get digits i : int) * m + carry in
+      let _ = vec_set digits i (prod % 10) in
+      go (i + 1) (prod / 10) in
+  go 0 0;
+
+let to_str = fn digits ->
+  let n = vec_len digits in
+  let buf = strbuf_new () in
+  let rec go = fn i ->
+    if i < 0 then ()
+    else let _ = strbuf_push buf (str_of_int (vec_get digits i)) in go (i - 1) in
+  let _ = go (n - 1) in
+  strbuf_to_str buf;
+
+let demo = fn () ->
+  // show the wrap first: 21! in native int is garbage (negative or wrapped)
+  let rec fact_native = fn (k: int) -> fn (acc: int) ->
+    if k == 0 then acc else fact_native (k - 1) (acc * k) in
+  let f21 = fact_native 21 1 in
+  let _ = print ("native 21! = " ++ str_of_int f21 ++ " (wrapped: " ++
+                 (if f21 < 0 then "yes" else "overflowed-positive") ++ ")") in
+  // now the digit vector: 30!
+  let digits = vec_new () in
+  let _ = vec_push digits 1 in
+  let rec fact = fn (k: int) ->
+    if k == 0 then () else let _ = mul_small digits k in fact (k - 1) in
+  let _ = fact 30 in
+  let s = to_str digits in
+  let want = "265252859812191058636308480000000" in
+  print ("30! = " ++ s ++ " correct=" ++ (if str_eq s want then "true" else "false")) in
+demo ()

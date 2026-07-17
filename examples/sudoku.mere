@@ -1,0 +1,64 @@
+// Sudoku solver (9x9, backtracking) — probe for mutate/undo semantics on
+// a flat Vec[int] plus deep recursion. The undo path (vec_set back to 0
+// after a failed branch) only works if vec_set is genuinely in-place and
+// the recursion sees the same board. Ground truth: a known puzzle with a
+// unique solution; verify a few solved cells and that all 81 are filled.
+
+let bget = fn b -> fn (i: int) -> (vec_get b i : int);
+
+let ok_at = fn b -> fn (pos: int) -> fn (d: int) ->
+  let r = pos / 9 in
+  let c = pos % 9 in
+  let br = (r / 3) * 3 in
+  let bc = (c / 3) * 3 in
+  let rec chk = fn k ->
+    if k == 9 then true
+    else if bget b (r * 9 + k) == d then false
+    else if bget b (k * 9 + c) == d then false
+    else if bget b ((br + k / 3) * 9 + (bc + k % 3)) == d then false
+    else chk (k + 1) in
+  chk 0;
+
+let rec solve = fn b -> fn (pos: int) ->
+  if pos == 81 then true
+  else if bget b pos != 0 then solve b (pos + 1)
+  else
+    let rec try_d = fn d ->
+      if d == 10 then false
+      else if ok_at b pos d then
+        let _ = vec_set b pos d in
+        if solve b (pos + 1) then true
+        else
+          let _ = vec_set b pos 0 in   // undo
+          try_d (d + 1)
+      else try_d (d + 1) in
+    try_d 1;
+
+let demo = fn () ->
+  // a standard puzzle (0 = empty); unique solution starts 534678912...
+  let rows = Cons ("530070000", Cons ("600195000", Cons ("098000060",
+             Cons ("800060003", Cons ("400803001", Cons ("700020006",
+             Cons ("060000280", Cons ("000419005", Cons ("000080079", Nil))))))))) in
+  let b = vec_new () in
+  let rec load = fn rs ->
+    match rs with
+    | Nil -> ()
+    | Cons (row, t) ->
+      let rec cell = fn j ->
+        if j == 9 then ()
+        else let _ = vec_push b (ord (char_at row j) - 48) in cell (j + 1) in
+      let _ = cell 0 in
+      load t in
+  let _ = load rows in
+  let solved = solve b 0 in
+  // verify: solved, no zeros left, and the first row is 534678912
+  let rec no_zero = fn i ->
+    if i == 81 then true
+    else if bget b i == 0 then false else no_zero (i + 1) in
+  let row0 =
+    let rec go = fn j -> fn (acc: str) ->
+      if j == 9 then acc else go (j + 1) (acc ++ str_of_int (bget b j)) in
+    go 0 "" in
+  print ("solved=" ++ (if solved && no_zero 0 then "true" else "false")
+         ++ " row0=" ++ row0) in
+demo ()

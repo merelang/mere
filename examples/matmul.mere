@@ -1,0 +1,56 @@
+// Matrix ops over Vec[Vec[float]] — probe for nested-container semantics.
+// matmul builds a NEW grid while reading two others; transpose likewise.
+// If copy-on-store deep-copies (or fails to) at the wrong layer, the
+// numbers come out wrong. Ground truth: A(2x3) * B(3x2), known product.
+
+let mat_new = fn (rows: int) -> fn (cols: int) -> fn (init: float) ->
+  let m = vec_new () in
+  let rec r = fn i ->
+    if i == rows then ()
+    else
+      let row = vec_new () in
+      let rec c = fn j ->
+        if j == cols then () else let _ = vec_push row init in c (j + 1) in
+      let _ = c 0 in
+      let _ = vec_push m row in
+      r (i + 1) in
+  let _ = r 0 in
+  m;
+
+let mat_set = fn m -> fn (i: int) -> fn (j: int) -> fn (v: float) ->
+  vec_set (vec_get m i) j v;
+let mat_get = fn m -> fn (i: int) -> fn (j: int) ->
+  vec_get (vec_get m i) j;
+
+let matmul = fn a -> fn b -> fn (n: int) -> fn (k: int) -> fn (mcols: int) ->
+  let out = mat_new n mcols 0.0 in
+  let rec ri = fn i ->
+    if i == n then ()
+    else
+      let rec cj = fn j ->
+        if j == mcols then ()
+        else
+          let rec acc = fn t -> fn (s: float) ->
+            if t == k then s
+            else acc (t + 1) (s + (mat_get a i t : float) * mat_get b t j) in
+          let _ = mat_set out i j (acc 0 0.0) in
+          cj (j + 1) in
+      let _ = cj 0 in
+      ri (i + 1) in
+  let _ = ri 0 in
+  out;
+
+let demo = fn () ->
+  // A = [[1,2,3],[4,5,6]]  B = [[7,8],[9,10],[11,12]]
+  let a = mat_new 2 3 0.0 in
+  let _ = mat_set a 0 0 1.0 in let _ = mat_set a 0 1 2.0 in let _ = mat_set a 0 2 3.0 in
+  let _ = mat_set a 1 0 4.0 in let _ = mat_set a 1 1 5.0 in let _ = mat_set a 1 2 6.0 in
+  let b = mat_new 3 2 0.0 in
+  let _ = mat_set b 0 0 7.0 in let _ = mat_set b 0 1 8.0 in
+  let _ = mat_set b 1 0 9.0 in let _ = mat_set b 1 1 10.0 in
+  let _ = mat_set b 2 0 11.0 in let _ = mat_set b 2 1 12.0 in
+  let c = matmul a b 2 3 2 in
+  // expected: [[58,64],[139,154]]
+  print (str_of_float (mat_get c 0 0) ++ " " ++ str_of_float (mat_get c 0 1) ++ " "
+         ++ str_of_float (mat_get c 1 0) ++ " " ++ str_of_float (mat_get c 1 1)) in
+demo ()

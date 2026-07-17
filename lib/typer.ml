@@ -174,6 +174,21 @@ let type_conversion_hint (t1 : Ast.ty) (t2 : Ast.ty) : string option =
     Some "use `str_len s` to get the length, or call a parser yourself"
   | Ast.TyInt, Ast.TyBool ->
     Some "use `if b then 1 else 0` to get an `int` from a `bool`"
+  | Ast.TyFloat, Ast.TyInt ->
+    (* v0.1.50 (matmul probe): the numeric operators default to int when
+       neither operand is CONCRETELY float at inference time — which is
+       exactly what happens when the operands come through a polymorphic
+       helper (its element type is still a tyvar here). The error then
+       surfaces far from its cause. *)
+    Some "the numeric operators (+ - * / < ...) default to int unless an \
+          operand is concretely float at this point — if the values come \
+          through a polymorphic function, annotate a parameter \
+          (fn (x: float) -> ...) or ascribe one operand ((e : float)); \
+          use `float_of_int n` to convert an actual int"
+  | Ast.TyInt, Ast.TyFloat ->
+    Some "use `int_of_float x` to truncate a float to int; if this operand \
+          was MEANT to be int, note the numeric operators pick float as \
+          soon as either side is concretely float"
   | Ast.TyBool, (Ast.TyInt | Ast.TyStr) ->
     Some "wrap in a comparison (e.g. `x == 0`) to get a `bool`"
   | Ast.TyTuple ts1, Ast.TyTuple ts2 when List.length ts1 <> List.length ts2 ->
