@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.57 — 2026-07-18
+
+_The Wasm backend had never actually assembled a float-heavy program with
+functions, and a ray tracer proved it. The probe itself — three spheres, a
+mirror bounce, hard shadows, all vec3 math on (float, float, float) tuples —
+ran identically on the interpreter and C, but the Wasm build died in wat2wasm:
+`local.set expected [i32] but got [f64]`. The cause: floats on Wasm are boxed
+(an i32 pointer to a heap f64), and boxing needs a raw-f64 temp local. The
+machinery to type those temps existed (`local_types`, Phase 34.3) and the
+main-body emitter read it — but the three FUNCTION emitters (top-level, lifted,
+closure adapter) ignored it and blanket-declared every extra local `i32`. So
+float expressions at the top level worked, and any float temp inside a named
+function produced invalid WAT. All three emitters now declare typed locals.
+With that fixed, the ray tracer runs on all three executable backends with an
+identical checksum and a byte-identical PPM (interp / C / Wasm). The checksum
+had to be Adler-style rather than CRC-32 — 0xFFFFFFFF doesn't fit Wasm's 32-bit
+int (the v0.1.41 pointed error, working as designed), and a logical shift
+doesn't exist for it either. The boxing tax, measured: a 96×54 render allocates
+26 MB from the never-freeing bump allocator (~5 KB per pixel); at 320×180 the
+tax exceeds the fixed 64 MB linear memory and traps — the first concrete
+forcing case for the deferred Wasm memory-growth work (E-2). `args` is also
+unsupported on Wasm (pointed error), so the example writes its PPM
+unconditionally instead of arg-gating it. examples/raytrace.mere. suite: 2204
+passed / 0 failed (2 new tests)._
+
+---
+
 ## v0.1.56 — 2026-07-17
 
 _Full namespacing of user value/function names in the C backend — the robust
