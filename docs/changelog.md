@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.51 — 2026-07-17
+
+_Three C-codegen bugs a gzip inflater flushed out. Writing a real
+DEFLATE decompressor (stored + fixed + dynamic Huffman, ~300 lines)
+exercised the closure-lifting and pattern-matching machinery harder
+than any prior program, and each bug was an undeclared-identifier
+compile error the interpreter never saw:_
+
+1. _**Reserved-name params.** A parameter named after a C keyword
+   (`index`) was declared raw but referenced via `c_safe_name` as
+   `index_`. Fixed on both emission paths — lifted-fn params
+   (`format_param`) and anonymous-closure adapters — where deeply
+   curried inner functions land._
+2. _**Cross-host capture confusion.** A plain local variable `p` was
+   dropped from its function's captures because a DIFFERENT function
+   had an inner recursive helper also named `p`: the "exclude
+   inner-lifted fn names from captures" filter used a global,
+   last-write-wins source-name map. Now resolved per-host, so a local
+   and an unrelated inner fn sharing a name stay distinct._
+3. _**Container-typed match fallthrough.** A `match` whose result type
+   is a pointer container (`Vec`) emitted `(Vec___heap_int){0}` — an
+   undeclared struct — for the non-exhaustive default arm, via
+   `mono_variant_name` mangling. Pointer containers now zero to `NULL`._
+
+_With all three fixed, the inflater compiles and runs with no
+workarounds: it decompresses `gzip`-produced files (1 byte to 1 MB,
+stored / fixed / dynamic) byte-identically with a verified CRC-32.
+suite: 2188 passed / 0 failed (5 new regression tests)._
+
+---
+
 ## v0.1.50 — 2026-07-17
 
 _The classics quartet (matmul, Game of Life, Sudoku, bignum): four

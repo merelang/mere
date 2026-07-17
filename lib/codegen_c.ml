@@ -2771,10 +2771,22 @@ let rec emit_expr (e : Ast.expr) : string =
       match match_result_ty with
       | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ abort(); 0; })"
       | Ast.TyStr -> "({ abort(); \"\"; })"
+      | Ast.TyFloat -> "({ abort(); 0.0; })"
+      | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map"), _) ->
+        (* v0.1.51: pointer-typed containers (mere_vec_T* etc.) zero to
+           NULL — is_ptr_ty only covers recursive variants / views. *)
+        "({ abort(); 0; })"
+      | t when is_ptr_ty t ->
+        (* v0.1.51: pointer-represented result types (Vec / Map /
+           recursive variants / views) zero to NULL. The old code ran a
+           `Vec[R,int]` through mono_variant_name and produced
+           `(Vec___heap_int){0}`, an undeclared struct name, instead of
+           the real `mere_vec_int*`. Found by the gzip inflate probe's
+           `vec_of` (`match ... | Nil -> v` returning a Vec). *)
+        "({ abort(); 0; })"
       | Ast.TyTuple ts ->
         Printf.sprintf "({ abort(); (%s){0}; })" (tuple_struct_name ts)
       | Ast.TyCon (n, args) ->
-        (* Phase 22.6: polymorphic types need mono name. *)
         let c_n =
           if args = [] then n
           else mono_variant_name n (List.map Ast.walk args)
@@ -3612,7 +3624,12 @@ type lifted_fn = {
 }
 
 let format_param (n, ty) =
-  Printf.sprintf "%s %s" (c_type_of ty) n
+  (* v0.1.51: the reference side (EVar) always goes through c_safe_name,
+     so a param named after a C reserved word (`index`, `remove`, ...)
+     is referenced as `index_` in the body — the declaration must match,
+     or the body references an undeclared identifier. Found by the gzip
+     inflate probe's `fn (index: int) -> ...`. *)
+  Printf.sprintf "%s %s" (c_type_of ty) (c_safe_name n)
 
 let with_expected_ty (t : Ast.ty) (f : unit -> 'a) : 'a =
   let prev = !current_expected_ty in
@@ -4463,7 +4480,12 @@ let emit_closure_adapter (ce : closure_emission) : string =
        %s\n  \
        return %s;\n}"
     (c_type_of ce.ce_return_ty) ce.ce_adapter_name
-    (c_type_of ce.ce_param_ty) ce.ce_param
+    (* v0.1.51: the body references this param via c_safe_name (so a C
+       reserved word like `index` reads `index_`); the declaration must
+       match. Same fix as format_param, on the anonymous-closure path
+       that deeply-curried inner fns take. Found by the gzip huff_decode
+       probe, whose innermost `fn (index: int) -> ...` becomes a closure. *)
+    (c_type_of ce.ce_param_ty) (c_safe_name ce.ce_param)
     env_unpack body_c
 
 (* String-concat runtime helper: allocates |a| + |b| + 1 bytes from the
@@ -6203,9 +6225,21 @@ let lift_inner_fns
   let captures_map : (string, (string * Ast.ty) list) Hashtbl.t =
     Hashtbl.create 8
   in
+  (* v0.1.51: whether `n` names an inner-lifted fn in `host`. The
+     exclusion below must be PER-HOST: `mere_to_lifted` is a global,
+     last-write-wins source-name map, so a plain local variable named `p`
+     was wrongly excluded from its host's captures because a DIFFERENT
+     host happened to have an inner fn also called `p` (the gzip inflate
+     probe: a local `let p = ...` in one fn, a `let rec p = ...` helper in
+     another). Resolving in lf's own host keeps them distinct. *)
+  let is_inner_lifted_in host n =
+    match Hashtbl.find_opt inner_lifts_by_host host with
+    | Some tbl -> Hashtbl.mem tbl n
+    | None -> false
+  in
   List.iter (fun lf ->
     let filtered = List.filter (fun (n, _) ->
-      not (Hashtbl.mem mere_to_lifted n)) lf.l_captures in
+      not (is_inner_lifted_in lf.l_host n)) lf.l_captures in
     Hashtbl.replace captures_map lf.l_name filtered)
     all_lifted;
   (* v0.1.48 fix: names bound ANYWHERE inside a lifted fn's own body (let
@@ -6280,7 +6314,7 @@ let lift_inner_fns
              transitively via another path)
              skip if cap_n is already in new_caps *)
           if cap_n = lf.l_param then ()
-          else if Hashtbl.mem mere_to_lifted cap_n then ()
+          else if is_inner_lifted_in lf.l_host cap_n then ()  (* v0.1.51: per-host *)
           else if List.mem_assoc cap_n !new_caps then ()
           else if List.mem cap_n
                     (match Hashtbl.find_opt bound_map lf.l_name with
