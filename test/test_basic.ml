@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.50" Version.v "0.1.50";
+  check "version is 0.1.51" Version.v "0.1.51";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,59 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.51 (gzip inflate probe): three C-codegen bugs the dogfood hit,
+     each an undeclared-identifier compile error the interpreter never
+     saw. Assert on the emitted C string (the codegen convention here). *)
+  (* Bug 1: a lifted / closure param named after a C reserved word
+     (`index`) was declared raw but referenced via c_safe_name (`index_`).
+     The declaration must use the sanitized name too. *)
+  assert_contains "v0.1.51: reserved-name param declared with c_safe_name (lifted)"
+    (vec_codegen_c
+       "let g = fn (a: int) -> fn (index: int) -> a + index in g 1 2")
+    "index_";
+  assert_no_contains "v0.1.51: reserved-name param has no raw `long long index` decl"
+    (vec_codegen_c
+       "let g = fn (a: int) -> fn (index: int) -> a + index in g 1 2")
+    "long long index)";
+  (* Bug 2: a local variable named like an inner fn in ANOTHER host was
+     wrongly excluded from its own host's captures (global name map). Here
+     `p` is a local in `fa` and also an inner rec fn in `fb`; `fa`'s inner
+     `use` must still capture the local `p`. Emits valid C (no undeclared
+     `p`); assert the lifted `use` carries a param after its captures. *)
+  check "v0.1.51: local shadowing an inner-fn name in another host still captures"
+    (let c = vec_codegen_c
+       "let fa = fn (x: int) -> \
+        \  let p = x + 1 in \
+        \  let rec use = fn (i: int) -> if i == 0 then 0 else p + use (i - 1) in \
+        \  use 2 in \
+        let fb = fn (y: int) -> \
+        \  let rec p = fn (i: int) -> if i == 0 then 0 else p (i - 1) in \
+        \  p y in \
+        fa 10 + fb 0" in
+     let has needle =
+       let nl = String.length needle and hl = String.length c in
+       let rec sc i = i + nl <= hl && (String.sub c i nl = needle || sc (i + 1)) in
+       sc 0 in
+     (* `use` must take p as a capture: its signature carries two long
+        long params (p, i), not one *)
+     if has "__lifted_use_0(long long" then "ok" else "no")
+    "ok";
+  (* Bug 3: a match whose result type is a pointer-typed container (Vec)
+     emitted `(Vec___heap_int){0}` — an undeclared struct — for the
+     non-exhaustive fallthrough default. Container results must zero to
+     NULL. *)
+  (* the bug signature is the compound literal `(Vec___heap_int){0}`
+     referencing an undeclared struct; the same tag appearing inside
+     closure struct NAMES (`closure_..._Vec___heap_int`) is legitimate. *)
+  assert_no_contains "v0.1.51: container-typed match fallthrough zeroes to NULL not a bogus struct"
+    (vec_codegen_c
+       "let build = fn xs -> \
+        \  let v = vec_new () in \
+        \  let _ = vec_push v 1 in \
+        \  let rec go = fn l -> match l with Nil -> v | Cons (h, t) -> let _ = vec_push v (h : int) in go t in \
+        \  go xs in \
+        vec_len (build (Cons (2, Cons (3, Nil))))")
+    "(Vec___heap_int){0}";
   let c_src_default_region =
     vec_codegen_c
       "let v = vec_new () in let r = vec_push v 7 in vec_len v"
