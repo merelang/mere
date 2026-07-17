@@ -3721,11 +3721,17 @@ let emit_fn (f : fn_decl) : string =
     with_var_types [(f.param, f.param_ty)] (fun () ->
       with_expected_ty f.return_ty (fun () -> emit_expr f.body))
   in
-  Printf.sprintf "%s %s(%s %s) {\n  return %s;\n}"
+  (* v0.1.55: the parameter declaration must go through c_safe_name, like
+     format_param / emit_lifted_fn already do — otherwise a top-level curried
+     function whose param name is a C reserved word (e.g. `y0` / `y1`, the
+     libm Bessel functions) declares `long long y0` but the body captures it
+     into a closure env as `y0_`, an undeclared identifier. The v0.1.51 fix
+     covered format_param and the closure adapter but missed this plain path.
+     Found by a date-arithmetic probe: `fn (y0: int) -> ...`. *)
+  Printf.sprintf "%s %s(%s) {\n  return %s;\n}"
     (c_type_of f.return_ty)
     (c_safe_name f.name)
-    (c_type_of f.param_ty)
-    f.param
+    (format_param (f.param, f.param_ty))
     body_c
 
 let emit_lifted_fn (f : lifted_fn) : string =

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.54" Version.v "0.1.54";
+  check "version is 0.1.55" Version.v "0.1.55";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,20 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.55 (reserved-name param, plain emit_fn path): a top-level curried
+     function whose parameter is a C reserved word — here `y0`, a libm Bessel
+     function — declared the parameter raw (`long long y0`) while the body,
+     capturing it into the returned closure's environment, referenced the
+     c_safe_name'd `y0_`, an undeclared identifier. v0.1.51 fixed format_param
+     and the closure adapter but missed the plain emit_fn path. Found by a
+     date-arithmetic probe. *)
+  check "v0.1.55: reserved-name param `y0` on a top-level curried fn (interp)"
+    (Pipeline.process "let f = fn (y0: int) -> fn (b: int) -> y0 + b in f 40 2")
+    "42";
+  assert_contains "v0.1.55: reserved-name param `y0` sanitized in C decl + capture"
+    (vec_codegen_c "let f = fn (y0: int) -> fn (b: int) -> y0 + b in f 40 2")
+    "y0_";
+
   (* v0.1.54 (reserved-name hygiene, T-1): a user-defined top-level fn named
      after a Mere builtin (`run`, `even`, `show`, ...) was intercepted by the
      builtin's direct-call App-arm in C codegen — `let run = fn x -> ...` then
