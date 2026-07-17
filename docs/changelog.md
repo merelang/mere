@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.50 — 2026-07-17
+
+_The classics quartet (matmul, Game of Life, Sudoku, bignum): four
+textbook programs aimed at four suspected soft spots — nested
+`Vec[Vec[float]]` construction, read-current/write-next generation
+updates, mutate-and-undo backtracking over `vec_set`, and digit-vector
+arithmetic past the fixed-width int. **All four ran correctly on interp
+and C with zero new bugs**: the matrix product is exact, the glider
+translates (+2,+2) in 8 generations, the 9x9 puzzle solves
+(row0=534678912), and 30! comes out to all 33 digits (after 21!
+demonstrates the wrap — identically on both backends). After 26
+releases of probe-driven fixes, that's a measurement of the suite's
+reach, and it's recorded as one. The single real pain was an ERROR
+MESSAGE: when the numeric overload defaults to int through a
+polymorphic helper (matmul's `mat_get`, whose element type is still a
+type variable at inference time), the eventual "expected `float`, got
+`int`" surfaces far from its cause. The unify hint now explains the
+defaulting and both escapes (annotate a parameter / ascribe an
+operand). All four programs join `examples/` (the Life one as `life_glider.mere` — `game_of_life.mere` already existed as the Phase 36 sugar showcase and stays untouched)._
+
+---
+
 ## v0.1.49 — 2026-07-17
 
 _A pub/sub broker, and the bug it flushed out. The dogfood set out to

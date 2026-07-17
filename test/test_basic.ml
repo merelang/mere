@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.49" Version.v "0.1.49";
+  check "version is 0.1.50" Version.v "0.1.50";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8387,6 +8387,91 @@ let () =
         \  let _ = go 0 in strbuf_to_str buf in\n\
         enc \"fo\"")
     "\"Zm8=\"";
+
+  (* v0.1.50 (classics quartet: matmul / life / sudoku / bignum): all four
+     ran correctly on interp and C with zero new bugs — the one real pain
+     was the ERROR when the numeric overload defaults to int through a
+     polymorphic helper (matmul's mat_get): "expected float, got int" far
+     from the cause. The unify hint now explains the defaulting and the
+     two escapes (annotate a param / ascribe an operand). *)
+  check_raises_containing
+    "v0.1.50: float/int mismatch hint explains numeric defaulting"
+    "default to int unless an operand is concretely float"
+    (fun () ->
+      let _ = Pipeline.process
+        "let get = fn v -> fn (i: int) -> vec_get v i in\n\
+         let f = fn v -> fn (s: float) -> s + get v 0 * get v 1 in\n\
+         let xs = vec_new () in\n\
+         let _ = vec_push xs 1.5 in\n\
+         let _ = vec_push xs 2.0 in\n\
+         f xs 0.0" in ());
+  check "v0.1.50: ascription resolves the polymorphic-helper defaulting"
+    (Pipeline.process
+       "let get = fn v -> fn (i: int) -> vec_get v i in\n\
+        let f = fn v -> fn (s: float) -> s + (get v 0 : float) * get v 1 in\n\
+        let xs = vec_new () in\n\
+        let _ = vec_push xs 1.5 in\n\
+        let _ = vec_push xs 2.0 in\n\
+        f xs 0.0")
+    "3.0";
+  check "v0.1.50: digit-vec bignum 15! (fixed-width int demo)"
+    (Pipeline.process
+       "let mul_small = fn digits -> fn (m: int) ->\n\
+        \  let n = vec_len digits in\n\
+        \  let rec go = fn i -> fn (carry: int) ->\n\
+        \    if i == n then\n\
+        \      let rec pc = fn (c: int) ->\n\
+        \        if c == 0 then () else let _ = vec_push digits (c % 10) in pc (c / 10) in\n\
+        \      pc carry\n\
+        \    else\n\
+        \      let prod = (vec_get digits i : int) * m + carry in\n\
+        \      let _ = vec_set digits i (prod % 10) in\n\
+        \      go (i + 1) (prod / 10) in\n\
+        \  go 0 0 in\n\
+        let digits = vec_new () in\n\
+        let _ = vec_push digits 1 in\n\
+        let rec fact = fn (k: int) ->\n\
+        \  if k == 0 then () else let _ = mul_small digits k in fact (k - 1) in\n\
+        let _ = fact 15 in\n\
+        let rec to_s = fn i -> fn (acc: str) ->\n\
+        \  if i < 0 then acc else to_s (i - 1) (acc ++ str_of_int (vec_get digits i)) in\n\
+        to_s (vec_len digits - 1) \"\"")
+    "\"1307674368000\"";
+  check "v0.1.50: one Life generation (blinker rotates)"
+    (Pipeline.process
+       "let size = 5 in\n\
+        let grid_new = fn () ->\n\
+        \  let g = vec_new () in\n\
+        \  let rec r = fn i -> if i == size then () else\n\
+        \    let row = vec_new () in\n\
+        \    let rec c = fn j -> if j == size then () else let _ = vec_push row 0 in c (j + 1) in\n\
+        \    let _ = c 0 in let _ = vec_push g row in r (i + 1) in\n\
+        \  let _ = r 0 in g in\n\
+        let gget = fn g -> fn (i: int) -> fn (j: int) ->\n\
+        \  (vec_get (vec_get g ((i + size) % size)) ((j + size) % size) : int) in\n\
+        let gset = fn g -> fn (i: int) -> fn (j: int) -> fn (v: int) -> vec_set (vec_get g i) j v in\n\
+        let nb = fn g -> fn (i: int) -> fn (j: int) ->\n\
+        \  gget g (i-1) (j-1) + gget g (i-1) j + gget g (i-1) (j+1)\n\
+        \  + gget g i (j-1) + gget g i (j+1)\n\
+        \  + gget g (i+1) (j-1) + gget g (i+1) j + gget g (i+1) (j+1) in\n\
+        let step = fn cur ->\n\
+        \  let nxt = grid_new () in\n\
+        \  let rec ri = fn i -> if i == size then () else\n\
+        \    let rec cj = fn j -> if j == size then () else\n\
+        \      let n = nb cur i j in\n\
+        \      let alive = gget cur i j == 1 in\n\
+        \      let v = if alive && (n == 2 || n == 3) then 1\n\
+        \              else if (if alive then false else n == 3) then 1 else 0 in\n\
+        \      let _ = gset nxt i j v in cj (j + 1) in\n\
+        \    let _ = cj 0 in ri (i + 1) in\n\
+        \  let _ = ri 0 in nxt in\n\
+        let g0 = grid_new () in\n\
+        let _ = gset g0 2 1 1 in\n\
+        let _ = gset g0 2 2 1 in\n\
+        let _ = gset g0 2 3 1 in\n\
+        let g1 = step g0 in\n\
+        (gget g1 1 2, gget g1 2 2, gget g1 3 2, gget g1 2 1, gget g1 2 3)")
+    "(1, 1, 1, 0, 0)";
 
   (* v0.1.46: hex integer literals. Two probes (bitwise masks, Unicode
      width ranges) wrote everything in decimal because 0xFF lexed as
