@@ -1,0 +1,82 @@
+// mgz G1: a gzip writer using STORED (uncompressed) deflate blocks.
+// Valid gzip that the system gunzip must accept — the container, the
+// CRC-32 trailer, and the byte plumbing, before any actual compression.
+// Usage: mgz <file>  ->  writes <file>.gz
+
+let mask32 = 0xFFFFFFFF;
+
+// CRC-32 (reused from the crc32 example, over an int vec)
+let crc_byte = fn (crc: int) -> fn (b: int) ->
+  let x = bit_xor crc b in
+  let rec go = fn i -> fn (c: int) ->
+    if i == 8 then c
+    else go (i + 1) (if bit_and c 1 == 1
+                     then bit_xor (bit_shr c 1) 0xEDB88320
+                     else bit_shr c 1) in
+  go 0 x;
+
+let crc32_vec = fn bytes ->
+  let n = vec_len bytes in
+  let rec go = fn i -> fn (crc: int) ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (vec_get bytes i)) in
+  bit_xor (go 0 mask32) mask32;
+
+// little-endian pushers
+let push_u16 = fn out -> fn (v: int) ->
+  let _ = vec_push out (bit_and v 0xFF) in
+  vec_push out (bit_and (bit_shr v 8) 0xFF);
+let push_u32 = fn out -> fn (v: int) ->
+  let _ = vec_push out (bit_and v 0xFF) in
+  let _ = vec_push out (bit_and (bit_shr v 8) 0xFF) in
+  let _ = vec_push out (bit_and (bit_shr v 16) 0xFF) in
+  vec_push out (bit_and (bit_shr v 24) 0xFF);
+
+let gzip_stored = fn data ->
+  let out = vec_new () in
+  // 10-byte header: magic 1F 8B, CM=8 (deflate), FLG=0, MTIME=0, XFL=0, OS=3
+  let _ = vec_push out 0x1F in
+  let _ = vec_push out 0x8B in
+  let _ = vec_push out 8 in
+  let _ = vec_push out 0 in
+  let _ = push_u32 out 0 in
+  let _ = vec_push out 0 in
+  let _ = vec_push out 3 in
+  // deflate stored blocks (max 65535 bytes each)
+  let n = vec_len data in
+  let rec blocks = fn off ->
+    let remain = n - off in
+    let len = if remain > 65535 then 65535 else remain in
+    let final = off + len >= n in
+    // 3 header bits (BFINAL, BTYPE=00) then pad to byte boundary:
+    // whole byte is 0x01 for the final block, 0x00 otherwise
+    let _ = vec_push out (if final then 1 else 0) in
+    let _ = push_u16 out len in
+    let _ = push_u16 out (bit_and (bit_not len) 0xFFFF) in   // NLEN
+    let rec copy = fn i ->
+      if i == len then () else
+      let _ = vec_push out (vec_get data (off + i)) in copy (i + 1) in
+    let _ = copy 0 in
+    if final then () else blocks (off + len) in
+  let _ = if n == 0 then
+      // empty input still needs one (final, empty) stored block
+      let _ = vec_push out 1 in
+      let _ = push_u16 out 0 in
+      let _ = push_u16 out 0xFFFF in ()
+    else blocks 0 in
+  // trailer: CRC32 then ISIZE, both LE
+  let _ = push_u32 out (crc32_vec data) in
+  let _ = push_u32 out (bit_and n mask32) in
+  out;
+
+let demo = fn () ->
+  let args_v = args () in
+  match args_v with
+  | Nil -> print "usage: mgz <file>"
+  | Cons (path, _) ->
+    let data = read_file_bytes path in
+    let gz = gzip_stored data in
+    let _ = write_file_bytes (path ++ ".gz") gz in
+    print (str_of_int (vec_len data) ++ " bytes -> " ++ str_of_int (vec_len gz)
+           ++ " bytes (stored) " ++ path ++ ".gz") in
+demo ()
