@@ -2082,8 +2082,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        ) updates;
        result_ty
      | _ ->
+       (* v0.1.58 (T-4 census): this fires almost exclusively on an
+          unannotated polymorphic parameter — the update site needs the
+          record type before generalization has pinned it. Point at the
+          one-annotation workaround, like the v0.1.50 float/int hint. *)
        raise (Type_error (e.loc,
-         "record update base must be a record value")))
+         "record update base must be a record value\nhelp: if the base \
+          is a function parameter, annotate it with its record type \
+          (e.g. `fn (a: account) -> { a | ... }`) — the update site must \
+          know the record's type before the parameter is generalized")))
 
 and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list =
   match p.pnode with

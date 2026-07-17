@@ -70,6 +70,13 @@ if [ -f "$G2048_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w -I . $G2048_SRC -> playground/g2048.wat"
 fi
 
+# Ray tracer — imports contrib/dom/dom.mere (canvas FFI), `-I .` likewise.
+RAYTRACE_SRC="contrib/site/playground/raytrace.mere"
+if [ -f "$RAYTRACE_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w -I . "$RAYTRACE_SRC" > "$PLAYGROUND_OUT/raytrace.wat"
+  echo "  mere -w -I . $RAYTRACE_SRC -> playground/raytrace.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do

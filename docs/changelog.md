@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.58 — 2026-07-18
+
+_The ray tracer reaches the browser, and an annotation census closes a
+question. The playground gains `/playground/raytrace.html`: the same ray
+tracer as `examples/raytrace.mere`, compiled to Wasm, drawing to a canvas
+through two new contrib/dom externs — `dom_canvas_fill_style` and
+`dom_canvas_fill_rect`, the frontend FFI's first pixel-output surface (no
+compiler change needed; the extern machinery took five-argument imports as
+is). A headless harness that captures the canvas calls rebuilds the exact
+PPM the native backends produce, and the page's status line shows the same
+Adler checksum — cross-backend parity, visible on a page. Separately, a
+census of the "annotate polymorphic params" wrinkle (T-4) measured what a
+bidirectional-inference fix would actually buy: of 1,484 parameter
+annotations across 255 examples, almost all are stylistic (plain int
+params, vec_get results, and float literals all infer fine unannotated);
+only two patterns genuinely require an annotation — a float flowing
+through a polymorphic binding, and a record update on a polymorphic
+parameter. Both have one-annotation workarounds, so the verdict is no
+type-system surgery: the float case already had a pointed hint (v0.1.50),
+and this release gives the record-update case its twin — the error now
+names the workaround with an example. suite: 2205 passed / 0 failed (1 new
+test)._
+
+---
+
 ## v0.1.57 — 2026-07-18
 
 _The Wasm backend had never actually assembled a float-heavy program with

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.57" Version.v "0.1.57";
+  check "version is 0.1.58" Version.v "0.1.58";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,19 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.58 (T-4 census): the record-update-on-polymorphic-param error
+     now points at the one-annotation workaround, mirroring the v0.1.50
+     float/int hint. The census showed this and float-defaulting are the
+     only two REQUIRED annotation classes (1,484 example annotations are
+     mostly stylistic), so the fix is a hint, not type-system surgery. *)
+  check_raises_containing
+    "v0.1.58: record-update on poly param error carries the annotate hint"
+    "annotate it with its record type"
+    (fun () ->
+      let _ = Pipeline.process
+        "type acc = { bal: int };\n\
+         let dep = fn a -> { a | bal = 1 } in (dep (acc { bal = 0 })).bal" in ());
+
   (* v0.1.57 (raytracer probe, Wasm float locals): a float-boxing temp
      inside a NAMED function was declared `i32` — the fn emitters ignored
      the `local_types` list that fresh_local_f64 maintains and blanket-

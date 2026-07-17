@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ray tracer in Mere — rendered in your browser</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .rt-app {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 2rem;
+      margin: 2rem 0;
+      background: #f7fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+    #rt {
+      width: min(768px, 90vw);
+      aspect-ratio: 16 / 9;
+      image-rendering: pixelated;
+      border-radius: 6px;
+      background: #edf2f7;
+    }
+    .hint { color: #718096; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="g2048.html">2048</a>
+      <a href="raytrace.html" class="active">raytrace</a>
+      <a href="echo.html">echo</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+    </div>
+  </nav>
+
+  <main>
+    <h1>Ray tracer — written in Mere</h1>
+    <p>
+      This image is rendered live in your browser by a ray tracer written in
+      <a href="../index.html">Mere</a>, compiled to WebAssembly. Three spheres
+      on a ground sphere, a directional light, Lambertian + specular shading,
+      hard shadows, and one mirror bounce — the same program as
+      <code>examples/raytrace.mere</code>, which produces a byte-identical
+      image on the interpreter and the C backend.
+    </p>
+
+    <div class="rt-app">
+      <canvas id="rt" width="96" height="54"></canvas>
+      <p id="status" class="hint">rendering…</p>
+    </div>
+
+    <h2>What this page exercises</h2>
+    <ol>
+      <li>
+        Pixels reach the canvas through two <code>extern fn</code>s added for
+        this page — <code>dom_canvas_fill_style</code> and
+        <code>dom_canvas_fill_rect</code> (contrib/dom) — the first pixel
+        output surface in the frontend FFI.
+      </li>
+      <li>
+        Every float on the Wasm backend is boxed (an i32 pointer to a heap
+        f64), so this 96×54 render allocates about 26&nbsp;MB from the bump
+        arena — roughly 5&nbsp;KB per pixel. That measured tax, and the fixed
+        64&nbsp;MB memory it runs inside, are written up honestly in the
+        devlog; a bigger canvas is what the memory-growth work is waiting on.
+      </li>
+      <li>
+        The status line shows an Adler-style checksum of the quantized pixels.
+        It matches the native backends exactly — the same
+        cross-backend-parity discipline as the test suite, visible on a page.
+      </li>
+    </ol>
+  </main>
+  <footer>frontend FFI dogfood — pixels via <code>dom_canvas_fill_rect</code></footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./raytrace.wasm").then(r => r.arrayBuffer());
+    const { glue, attach } = makeDomGlue();
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub,
+      read_file: stub,
+      write_file: stub,
+      __lang_str_of_float: stub,
+      __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin,
+      __lang_cos: Math.cos,
+      __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow,
+      __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();
+  </script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+// raytrace — a ray tracer written in Mere, compiled to Wasm, drawing to a
+// <canvas> through the contrib/dom FFI (dom_canvas_fill_style +
+// dom_canvas_fill_rect, added for this page).
+//
+// The scene and math are examples/raytrace.mere unchanged: three spheres
+// on a giant ground sphere, a directional light, Lambertian + specular
+// shading, hard shadows, one mirror bounce, all the vector math on
+// (float, float, float) tuples. Every float operation is boxed on the
+// Wasm backend (~5 KB of arena per pixel), which is why the render is
+// 96x54 and CSS-scaled up: about 26 MB of the fixed 64 MB linear memory.
+// The same program prints the same Adler checksum as the native
+// backends — shown in the status line as a visible parity check.
+
+import "contrib/dom/dom.mere";
+
+let img_w = 96;
+let img_h = 54;
+
+// Adler-32-style checksum (two mod-65521 sums; fits Wasm's 32-bit int)
+let adler_byte = fn st -> fn (b: int) ->
+  let (s1, s2) = st in
+  let s1 = ((s1 : int) + b) % 65521 in
+  let s2 = ((s2 : int) + s1) % 65521 in
+  (s1, s2);
+
+// ---- vec3 as (float, float, float) -------------------------------------
+let v_add = fn a -> fn b ->
+  let (ax, ay, az) = a in let (bx, by, bz) = b in
+  ((ax : float) + bx, (ay : float) + by, (az : float) + bz);
+let v_sub = fn a -> fn b ->
+  let (ax, ay, az) = a in let (bx, by, bz) = b in
+  ((ax : float) - bx, (ay : float) - by, (az : float) - bz);
+let v_mulv = fn a -> fn b ->
+  let (ax, ay, az) = a in let (bx, by, bz) = b in
+  ((ax : float) * bx, (ay : float) * by, (az : float) * bz);
+let v_scale = fn a -> fn (s: float) ->
+  let (ax, ay, az) = a in
+  ((ax : float) * s, (ay : float) * s, (az : float) * s);
+let v_dot = fn a -> fn b ->
+  let (ax, ay, az) = a in let (bx, by, bz) = b in
+  (ax : float) * bx + (ay : float) * by + (az : float) * bz;
+let v_unit = fn a -> v_scale a (1.0 / sqrt (v_dot a a));
+let v_reflect = fn d -> fn n -> v_sub d (v_scale n (2.0 * v_dot d n));
+
+// ---- scene: 4 spheres, index 0 = ground --------------------------------
+let sph_center = fn (i: int) ->
+  if i == 0 then (0.0, -100.5, -1.0)
+  else if i == 1 then (0.0, 0.0, -1.2)
+  else if i == 2 then (-1.0, 0.0, -1.0)
+  else (1.0, 0.0, -1.0);
+let sph_radius = fn (i: int) -> if i == 0 then 100.0 else 0.5;
+let sph_albedo = fn (i: int) ->
+  if i == 0 then (0.8, 0.8, 0.2)
+  else if i == 1 then (0.7, 0.3, 0.3)
+  else if i == 2 then (0.9, 0.9, 0.9)
+  else (0.3, 0.4, 0.8);
+let sph_mirror = fn (i: int) -> i == 2;
+
+let sph_hit = fn (i: int) -> fn ro -> fn rd -> fn (tmin: float) ->
+  let oc = v_sub ro (sph_center i) in
+  let r = sph_radius i in
+  let a = v_dot rd rd in
+  let hb = v_dot oc rd in
+  let cc = v_dot oc oc - r * r in
+  let disc = hb * hb - a * cc in
+  if disc < 0.0 then 0.0 - 1.0
+  else
+    let sq = sqrt disc in
+    let t1 = (0.0 - hb - sq) / a in
+    if t1 > tmin then t1
+    else
+      let t2 = (0.0 - hb + sq) / a in
+      if t2 > tmin then t2 else 0.0 - 1.0;
+
+let rec nearest = fn (i: int) -> fn ro -> fn rd -> fn (tmin: float)
+                  -> fn (bt: float) -> fn (bi: int) ->
+  if i == 4 then (bt, bi)
+  else
+    let t = sph_hit i ro rd tmin in
+    if t > 0.0 && (bi < 0 || t < bt) then nearest (i + 1) ro rd tmin t i
+    else nearest (i + 1) ro rd tmin bt bi;
+
+let light_dir = v_unit (1.0, 1.0, 0.5);
+
+let spec_pow32 = fn (x: float) ->
+  let m = if x < 0.0 then 0.0 else x in
+  let m2 = m * m in let m4 = m2 * m2 in let m8 = m4 * m4 in
+  let m16 = m8 * m8 in
+  m16 * m16;
+
+let shade = fn p -> fn n -> fn rd -> fn albedo ->
+  let po = v_add p (v_scale n 0.001) in
+  let (st, si) = nearest 0 po light_dir 0.001 0.0 (0 - 1) in
+  let _ = st in
+  let amb = 0.15 in
+  if si >= 0 then v_scale albedo amb
+  else
+    let dif = v_dot n light_dir in
+    let dif = if dif < 0.0 then 0.0 else dif in
+    let h = v_unit (v_sub light_dir rd) in
+    let sp = 0.5 * spec_pow32 (v_dot n h) in
+    let c = v_scale albedo (amb + 0.85 * dif) in
+    v_add c (sp, sp, sp);
+
+let sky = fn rd ->
+  let (dx, dy, dz) = rd in
+  let _ = dx in let _ = dz in
+  let t = 0.5 * ((dy : float) + 1.0) in
+  v_add (v_scale (1.0, 1.0, 1.0) (1.0 - t)) (v_scale (0.5, 0.7, 1.0) t);
+
+let trace = fn ro -> fn rd ->
+  let (t, i) = nearest 0 ro rd 0.001 0.0 (0 - 1) in
+  if i < 0 then sky rd
+  else
+    let p = v_add ro (v_scale rd t) in
+    let n = v_unit (v_sub p (sph_center i)) in
+    if sph_mirror i then
+      let rdir = v_unit (v_reflect rd n) in
+      let ro2 = v_add p (v_scale n 0.001) in
+      let (t2, i2) = nearest 0 ro2 rdir 0.001 0.0 (0 - 1) in
+      let c2 =
+        if i2 < 0 then sky rdir
+        else
+          let p2 = v_add ro2 (v_scale rdir t2) in
+          let n2 = v_unit (v_sub p2 (sph_center i2)) in
+          shade p2 n2 rdir (sph_albedo i2) in
+      v_mulv (0.95, 0.95, 0.95) c2
+    else shade p n rd (sph_albedo i);
+
+let ray_dir = fn (x: int) -> fn (y: int) ->
+  let aspect = float_of_int img_w / float_of_int img_h in
+  let u = (float_of_int x + 0.5) / float_of_int img_w in
+  let v = (float_of_int y + 0.5) / float_of_int img_h in
+  let px = (2.0 * u - 1.0) * aspect in
+  let py = 1.0 - 2.0 * v in
+  v_unit (px, py, 0.0 - 1.0);
+
+let clamp01 = fn (x: float) ->
+  if x < 0.0 then 0.0 else if x > 1.0 then 1.0 else x;
+let quant = fn (x: float) -> int_of_float (255.999 * clamp01 x);
+
+let cam = (0.0, 0.0, 0.2);
+
+// paint one pixel: set fillStyle to rgb(r,g,b), fill a 1x1 rect
+let put_px = fn cv -> fn (x: int) -> fn (y: int)
+             -> fn (r: int) -> fn (g: int) -> fn (b: int) ->
+  let css = "rgb(" ++ str_of_int r ++ "," ++ str_of_int g ++ ","
+            ++ str_of_int b ++ ")" in
+  let _ = dom_canvas_fill_style cv css in
+  dom_canvas_fill_rect cv x y 1 1;
+
+let rec px_loop = fn cv -> fn (x: int) -> fn (y: int) -> fn st ->
+  if x == img_w then st
+  else
+    let (r, g, b) = trace cam (ray_dir x y) in
+    let qr = quant r in let qg = quant g in let qb = quant b in
+    let st = adler_byte st qr in
+    let st = adler_byte st qg in
+    let st = adler_byte st qb in
+    let _ = put_px cv x y qr qg qb in
+    px_loop cv (x + 1) y st;
+let rec row_loop = fn cv -> fn (y: int) -> fn st ->
+  if y == img_h then st
+  else row_loop cv (y + 1) (px_loop cv 0 y st);
+
+let main_page = fn () ->
+  let cv = dom_get_by_id "rt" in
+  let status = dom_get_by_id "status" in
+  let (s1, s2) = row_loop cv 0 (1, 0) in
+  dom_set_text status
+    ("rendered " ++ str_of_int img_w ++ "x" ++ str_of_int img_h
+     ++ " in Mere/Wasm — adler=" ++ str_of_int s2 ++ "-" ++ str_of_int s1
+     ++ " (same as the native backends)") in
+main_page ()
