@@ -1,0 +1,76 @@
+// Pub/sub broker — dogfood probing whether E-1 `select` is forced.
+//
+// Finding: it is NOT. A broker that must react to publishes AND
+// subscribe requests AND shutdown never needs to wait on two channels
+// at once — everything funnels through ONE command inbox as a `cmd`
+// variant (the actor pattern). `select` over multiple channels is a
+// convenience the actor pattern subsumes here.
+//
+// The dogfood also shows channels are first-class message payloads: the
+// Sub command carries a Channel[int] (a subscriber's delivery channel)
+// through the inbox channel. Shutdown uses a poison value (-1) rather
+// than channel_close, so every subscriber-channel touch is Channel[int].
+
+type cmd =
+    Pub of (int * int)             // (topic, value)
+  | Sub of (int * Channel[int])    // (topic, delivery channel)
+  | Stop;
+
+let poison = 0 - 1;
+
+let broker = fn inbox ->
+  let subs0 = vec_new () in
+  let subs1 = vec_new () in
+  let send_all = fn subs -> fn (v: int) ->
+    let n = vec_len subs in
+    let rec go = fn i -> if i == n then () else
+      let _ = channel_send (vec_get subs i) v in go (i + 1) in
+    go 0 in
+  let rec loop = fn () ->
+    match channel_recv_opt inbox with
+    | None -> ()
+    | Some Stop ->
+      let _ = send_all subs0 poison in
+      send_all subs1 poison            // poison every subscriber, then stop
+    | Some (Sub (t, ch)) ->
+      let _ = if t == 0 then vec_push subs0 ch else vec_push subs1 ch in
+      loop ()
+    | Some (Pub (t, v)) ->
+      let _ = if t == 0 then send_all subs0 v else send_all subs1 v in
+      loop () in
+  loop ();
+
+let subscriber = fn ch -> fn out ->
+  let rec loop = fn acc ->
+    let v = channel_recv ch in
+    if v == poison then channel_send out acc else loop (acc + v) in
+  loop 0;
+
+let demo = fn () ->
+  let inbox = channel_new () in
+  let bh = spawn (fn () -> broker inbox) in
+
+  let d0 = channel_new () in
+  let d1 = channel_new () in
+  let r0 = channel_new () in
+  let r1 = channel_new () in
+  let s0 = spawn (fn () -> subscriber d0 r0) in
+  let s1 = spawn (fn () -> subscriber d1 r1) in
+
+  let _ = channel_send inbox (Sub (0, d0)) in
+  let _ = channel_send inbox (Sub (1, d1)) in
+  let _ = channel_send inbox (Pub (0, 1)) in
+  let _ = channel_send inbox (Pub (0, 2)) in
+  let _ = channel_send inbox (Pub (1, 10)) in
+  let _ = channel_send inbox (Pub (0, 3)) in
+  let _ = channel_send inbox (Pub (1, 20)) in
+  let _ = channel_send inbox Stop in
+
+  let t0 = channel_recv r0 in
+  let t1 = channel_recv r1 in
+  let _ = join s0 in
+  let _ = join s1 in
+  let _ = channel_close inbox in
+  let _ = join bh in
+  print ("topic0=" ++ str_of_int t0 ++ " topic1=" ++ str_of_int t1) in
+demo ()

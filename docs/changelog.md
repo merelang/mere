@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.49 — 2026-07-17
+
+_A pub/sub broker, and the bug it flushed out. The dogfood set out to
+force `select` (waiting on multiple channels at once) — and found it
+**isn't needed**: a broker that must react to publishes, subscriptions,
+and shutdown funnels everything through one command inbox as a `cmd`
+variant (the actor pattern), so it never waits on two channels
+simultaneously. The example also shows channels are first-class message
+payloads — a `Sub` command carries a subscriber's `Channel[int]` through
+the inbox. What the dogfood **did** force was a closure-lifting bug in
+the C backend: a recursive `loop` that calls a sibling helper whose own
+nested `rec go` closes over the helper's locals had those locals
+(`hn`, `hv`) leak into `loop`'s capture set. The transitive-capture
+fixpoint (which threads a callee's captures through its callers) added a
+callee's captures without skipping names already bound inside the
+caller, so `loop` was emitted as `__lifted_loop_N(bag, hn, hv, k)` —
+referencing `hn`/`hv` that aren't in its scope ("use of undeclared
+identifier"). Fixed by skipping any callee capture bound anywhere inside
+the caller's body. `examples/pubsub.mere` runs a two-topic broker with
+two subscribers on interp and C alike (`topic0=6 topic1=30`). E-1's
+last piece, `select`, stays deferred — not from lack of trying, but
+because the actor pattern subsumes it._
+
+---
+
 ## v0.1.48 — 2026-07-17
 
 _Timed receive for supervisors (the second half of the concurrency arc):

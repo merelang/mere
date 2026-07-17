@@ -6208,6 +6208,34 @@ let lift_inner_fns
       not (Hashtbl.mem mere_to_lifted n)) lf.l_captures in
     Hashtbl.replace captures_map lf.l_name filtered)
     all_lifted;
+  (* v0.1.48 fix: names bound ANYWHERE inside a lifted fn's own body (let
+     locals, nested-fn params, match-arm binders, with/region names). A
+     callee's capture that is one of these is already in scope inside lf,
+     so it must NOT be threaded into lf's env — doing so over-captures and
+     emits a call passing an out-of-scope identifier (found by the pub/sub
+     dogfood: a helper with a nested `rec go` leaked go's locals `n`/`v`
+     up into the recursive `loop` that called the helper). l_param is
+     already handled separately below. *)
+  let bound_names_in (e : Ast.expr) : string list =
+    let acc = ref [] in
+    let add n = acc := n :: !acc in
+    let rec go (e : Ast.expr) =
+      (match e.Ast.node with
+       | Ast.Fun (p, _, _) -> add p
+       | Ast.Let (pat, _, _) -> List.iter add (pattern_vars pat)
+       | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+       | Ast.With (n, _, _) -> add n
+       | Ast.Region_block (n, _) -> add n
+       | Ast.Match (_, arms) ->
+         List.iter (fun (pat, _, _) -> List.iter add (pattern_vars pat)) arms
+       | _ -> ());
+      walk_children (fun _ _ e -> go e) "" [] e
+    in
+    go e; !acc
+  in
+  let bound_map : (string, string list) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun lf ->
+    Hashtbl.replace bound_map lf.l_name (bound_names_in lf.l_body)) all_lifted;
   (* fixpoint loop *)
   let changed = ref true in
   while !changed do
@@ -6254,6 +6282,11 @@ let lift_inner_fns
           if cap_n = lf.l_param then ()
           else if Hashtbl.mem mere_to_lifted cap_n then ()
           else if List.mem_assoc cap_n !new_caps then ()
+          else if List.mem cap_n
+                    (match Hashtbl.find_opt bound_map lf.l_name with
+                     | Some bs -> bs | None -> []) then ()
+            (* v0.1.48: cap_n is bound inside lf's own body → already in
+               scope at the call site; threading it in would over-capture. *)
           else begin
             new_caps := !new_caps @ [(cap_n, cap_t)];
             changed := true

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.48" Version.v "0.1.48";
+  check "version is 0.1.49" Version.v "0.1.49";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5690,6 +5690,29 @@ let () =
   in
   assert_no_contains "inner-lift: same-named inner fns across hosts don't merge captures"
     c_two_loops "__lifted_loop_0(int x, int y";
+  (* v0.1.48 (pub/sub dogfood): a recursive `loop` that calls a sibling
+     helper whose OWN nested `rec go` closes over the helper's locals
+     (`hn`, `hv`) used to leak those locals into `loop`'s capture set —
+     the transitive-capture fixpoint added a callee's captures without
+     skipping names bound inside the caller. That emitted
+     `__lifted_loop_N(bag, hn, hv, k)` referencing hn/hv, which are not in
+     loop's scope → "use of undeclared identifier 'hn'". Fix: skip callee
+     captures that are bound anywhere inside the caller's body. loop's
+     lifted signature must end `... bag, long long k)`, never carry hv. *)
+  let c_nested_helper =
+    vec_codegen_c
+      "let fa = fn (start: int) -> \
+       \  let bag = vec_new () in \
+       \  let send_all = fn xs -> fn (hv: int) -> \
+       \    let hn = vec_len xs in \
+       \    let rec go = fn i -> if i == hn then () else let _ = vec_push xs (i + hv) in go (i + 1) in \
+       \    go 0 in \
+       \  let rec loop = fn k -> if k <= 0 then vec_len bag else let _ = send_all bag k in loop (k - 1) in \
+       \  loop start in \
+       fa 3"
+  in
+  assert_no_contains "inner-lift: sibling helper's nested-fn locals don't leak into caller"
+    c_nested_helper "long long hv, long long k)";
   assert_contains "vec: C codegen wires vec_new outside region to default arena"
     c_src_default_region "mere_vec_int_new((&__lang_default_region))";
   assert_contains "vec: C codegen routes vec_push to runtime helper"
