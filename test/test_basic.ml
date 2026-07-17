@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.56" Version.v "0.1.56";
+  check "version is 0.1.57" Version.v "0.1.57";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,22 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.57 (raytracer probe, Wasm float locals): a float-boxing temp
+     inside a NAMED function was declared `i32` — the fn emitters ignored
+     the `local_types` list that fresh_local_f64 maintains and blanket-
+     declared every extra local as i32, so any float temp in a fn produced
+     WAT that wat2wasm rejects (`local.set expected [i32] but got [f64]`).
+     Only the main-body emitter read local_types (Phase 34.3), which is why
+     float expressions at the top level worked. The first assertion is
+     order-sensitive: the fn's first minted temp is the boxed 2.0 literal,
+     an f64 slot, so the decl must open with `(local f64`. The WAT
+     assertion lives with the other Wasm codegen tests (after the
+     vec_codegen_wasm helper is defined). *)
+  check "v0.1.57: float fn computes correctly (interp parity)"
+    (Pipeline.process
+       "let dbl = fn (x: float) -> x * 2.0 in int_of_float (dbl 1.5)")
+    "3";
+
   (* v0.1.56 (full namespace): every user VALUE / FUNCTION name is prefixed
      with `mu_` in the C backend, so no user name can collide with a C keyword,
      libc / POSIX symbol, or libm function — the hand-maintained reserved-word
@@ -5958,6 +5974,12 @@ let () =
      adjacent memory (was a corruption in wasm/llvm; C already masked). *)
   assert_contains "chr masks out-of-range index (wasm)"
     (vec_codegen_wasm "chr 65") "(i32.and (local.get $n) (i32.const 255))";
+  (* v0.1.57 (raytracer probe): see the comment in the versioned block —
+     float-boxing temps in named fns must be declared f64, not i32. *)
+  assert_contains "v0.1.57: float temp inside a named fn declares an f64 local (wasm)"
+    (vec_codegen_wasm
+       "let dbl = fn (x: float) -> x * 2.0 in int_of_float (dbl 1.5)")
+    "(local f64";
   assert_contains "chr masks out-of-range index (llvm)"
     (vec_codegen_llvm "chr 65") "and i32 %n, 255";
   (* --- Phase 15.5: codegen of higher-order API (vec_set / vec_iter / vec_fold) --- *)

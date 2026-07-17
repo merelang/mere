@@ -3249,12 +3249,21 @@ let emit_fn_def (f : fn_decl) : string =
   let saved_instrs = !instrs in
   let saved_local_counter = !local_counter in
   let saved_locals = !locals in
+  let saved_local_types = !local_types in
   let saved_host = !current_host_fn_wasm in
   set_inner_lifts_for_host_wasm f.name;
   current_host_fn_wasm := f.name;
   instrs := [];
   (* Param sits at slot 0. let-bindings start from slot 1. *)
   local_counter := 1;
+  (* v0.1.57: track extra-local types from here so Phase 34.3's f64 temp
+     slots (float boxing) are DECLARED f64, not blanket i32. Params claim
+     their slots directly (not via fresh_local), so local_types holds
+     exactly the extra locals, in slot order. Found by a raytracer probe:
+     any float-boxing temp inside a named fn produced invalid WAT
+     (local.set of f64 into an i32 local) — the main-body emitter already
+     read local_types, but the fn emitters hardcoded i32. *)
+  local_types := [];
   locals := [(f.param, 0)];
   let saved_tail = !wasm_tail_pos in
   wasm_tail_pos := true;
@@ -3262,15 +3271,21 @@ let emit_fn_def (f : fn_decl) : string =
   wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - 1 in
+  let extra_types = !local_types in
   instrs := saved_instrs;
   local_counter := saved_local_counter;
   locals := saved_locals;
+  local_types := saved_local_types;
   current_host_fn_wasm := saved_host;
   let local_decl =
     if extra_locals <= 0 then ""
     else
+      let types =
+        if List.length extra_types = extra_locals then extra_types
+        else List.init extra_locals (fun _ -> "i32")
+      in
       Printf.sprintf "    (local%s)\n"
-        (String.concat "" (List.init extra_locals (fun _ -> " i32")))
+        (String.concat "" (List.map (fun t -> " " ^ t) types))
   in
   let indented_body =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
@@ -3289,12 +3304,15 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   let saved_instrs = !instrs in
   let saved_local_counter = !local_counter in
   let saved_locals = !locals in
+  let saved_local_types = !local_types in
   let saved_host = !current_host_fn_wasm in
   instrs := [];
   current_host_fn_wasm := lf.l_host;
   (* Allocate slots: captures at 0..N-1, param at N. *)
   let n_caps = List.length lf.l_captures in
   local_counter := n_caps + 1;
+  (* v0.1.57: typed extra locals (see emit_fn_def). *)
+  local_types := [];
   let cap_locals = List.mapi (fun i n -> (n, i)) lf.l_captures in
   locals := (lf.l_param, n_caps) :: cap_locals;
   let saved_tail = !wasm_tail_pos in
@@ -3303,9 +3321,11 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - (n_caps + 1) in
+  let extra_types = !local_types in
   instrs := saved_instrs;
   local_counter := saved_local_counter;
   locals := saved_locals;
+  local_types := saved_local_types;
   current_host_fn_wasm := saved_host;
   let param_decls =
     String.concat " "
@@ -3314,8 +3334,12 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   let local_decl =
     if extra_locals <= 0 then ""
     else
+      let types =
+        if List.length extra_types = extra_locals then extra_types
+        else List.init extra_locals (fun _ -> "i32")
+      in
       Printf.sprintf "    (local%s)\n"
-        (String.concat "" (List.init extra_locals (fun _ -> " i32")))
+        (String.concat "" (List.map (fun t -> " " ^ t) types))
   in
   let indented_body =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
@@ -3363,6 +3387,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
   let saved_instrs = !instrs in
   let saved_local_counter = !local_counter in
   let saved_locals = !locals in
+  let saved_local_types = !local_types in
   let saved_host = !current_host_fn_wasm in
   (* Phase 26.3: restore the host scope this closure was queued under so
      its body can resolve recursive calls into inner-lifted siblings. *)
@@ -3382,6 +3407,10 @@ let emit_anon_adapter (ce : closure_emission) : string =
     ) ce.ce_captures
   in
   local_counter := 2 + n;
+  (* v0.1.57: typed extra locals (see emit_fn_def). The n capture-unpack
+     locals at slots 2..2+n-1 are i32 (boxed values); fresh-minted temps
+     after them may be f64. *)
+  local_types := [];
   locals := (ce.ce_param, param_slot) :: capture_locals;
   let saved_tail = !wasm_tail_pos in
   wasm_tail_pos := true;
@@ -3389,15 +3418,23 @@ let emit_anon_adapter (ce : closure_emission) : string =
   wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - 2 in
+  let extra_types = !local_types in
   instrs := saved_instrs;
   local_counter := saved_local_counter;
   locals := saved_locals;
+  local_types := saved_local_types;
   current_host_fn_wasm := saved_host;
   let local_decl =
     if extra_locals <= 0 then ""
     else
+      (* first n slots = capture unpacks (i32), then the tracked temps *)
+      let types =
+        if n + List.length extra_types = extra_locals then
+          List.init n (fun _ -> "i32") @ extra_types
+        else List.init extra_locals (fun _ -> "i32")
+      in
       Printf.sprintf "    (local%s)\n"
-        (String.concat "" (List.init extra_locals (fun _ -> " i32")))
+        (String.concat "" (List.map (fun t -> " " ^ t) types))
   in
   let indented_body =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
