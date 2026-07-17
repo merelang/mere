@@ -40,3 +40,13 @@ extern fn dom_input_value: JsRef -> str;
 // no element handle is needed. The browser-side counterpart to native
 // `read_key` (mrog): input for the frontend FFI.
 extern fn dom_on_key: (str -> unit) -> unit;
+
+// v0.1.58 (raytracer dogfood): canvas 2D drawing. The handle is the
+// <canvas> element (from dom_get_by_id); the glue lazily grabs and
+// caches its 2d context. fill_style takes any CSS color string
+// (e.g. "rgb(200,30,30)"); fill_rect is x, y, w, h in canvas pixels.
+// Together they are the minimal pixel-output surface: a renderer sets
+// the style then fills 1x1 rects. Blitting a whole buffer in one call
+// (ImageData) needs typed-buffer FFI and is deliberately future work.
+extern fn dom_canvas_fill_style: JsRef -> str -> unit;
+extern fn dom_canvas_fill_rect: JsRef -> int -> int -> int -> int -> unit;

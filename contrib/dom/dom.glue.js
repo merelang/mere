@@ -140,6 +140,20 @@ export function makeDomGlue() {
         callClosureStr(closurePtr, e.key);
       });
     },
+    // v0.1.58 (raytracer dogfood): canvas 2D drawing. The 2d context is
+    // grabbed lazily from the <canvas> handle and cached on the element.
+    dom_canvas_fill_style: (handleIdx, strPtr) => {
+      const el = handles[handleIdx];
+      if (!el || !el.getContext) return;
+      const ctx = el.__mereCtx || (el.__mereCtx = el.getContext("2d"));
+      if (ctx) ctx.fillStyle = readStr(strPtr);
+    },
+    dom_canvas_fill_rect: (handleIdx, x, y, w, h) => {
+      const el = handles[handleIdx];
+      if (!el || !el.getContext) return;
+      const ctx = el.__mereCtx || (el.__mereCtx = el.getContext("2d"));
+      if (ctx) ctx.fillRect(x, y, w, h);
+    },
   };
 
   const attach = (instance) => {
