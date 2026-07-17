@@ -1,0 +1,42 @@
+// Double-entry ledger — a records-heavy domain model in pure Mere,
+// using lowercase ML-style record type names (money / account / entry /
+// txn) with nested record updates. `apply` updates an account's nested
+// `balance.cents` via `{ a | balance = { a.balance | cents = ... } }`.
+// (Record type names may be lowercase since v0.1.53; record params that
+// are updated must be annotated so the update site knows the type.)
+
+type money = { cents: int };
+type account = { name: str, balance: money };
+type entry = { account: str, delta: int };   // delta in cents
+type txn = { memo: str, debit: entry, credit: entry };
+
+let m = fn (c: int) -> money { cents = c };
+let acct = fn (nm: str) -> account { name = nm, balance = m 0 };
+
+// apply a delta to an account's nested money field
+let apply = fn (a: account) -> fn (d: int) ->
+  { a | balance = { a.balance | cents = (a.balance.cents : int) + d } };
+
+// post a txn to a two-account world (cash, revenue), returning the pair
+let post = fn (cash: account) -> fn (rev: account) -> fn (t: txn) ->
+  let dacct = (t.debit.account : str) in
+  let cash2 = if str_eq dacct "cash" then apply cash (t.debit.delta) else cash in
+  let rev2 = if str_eq (t.credit.account : str) "revenue"
+             then apply rev (t.credit.delta) else rev in
+  (cash2, rev2);
+
+let demo = fn () ->
+  let cash = acct "cash" in
+  let rev = acct "revenue" in
+  // sale of $12.50: debit cash +1250, credit revenue +1250
+  let t = txn { memo = "sale",
+                debit = entry { account = "cash", delta = 1250 },
+                credit = entry { account = "revenue", delta = 1250 } } in
+  let (cash2, rev2) = post cash rev t in
+  let t2 = txn { memo = "sale2",
+                 debit = entry { account = "cash", delta = 375 },
+                 credit = entry { account = "revenue", delta = 375 } } in
+  let (cash3, rev3) = post cash2 rev2 t2 in
+  print (cash3.name ++ "=" ++ str_of_int cash3.balance.cents
+         ++ " " ++ rev3.name ++ "=" ++ str_of_int rev3.balance.cents) in
+demo ()

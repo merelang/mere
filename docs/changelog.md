@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.53 — 2026-07-17
+
+_Lowercase record types, and one more reserved name (found by a
+records-heavy ledger dogfood). Mere's convention is lowercase type names
+with capitalized constructors — `type 'a list = Nil | Cons ...`. Record
+types followed the same convention at declaration (`type addr = { ... }`
+was accepted), but the record *literal* `addr { ... }` only parsed for
+capitalized names, so a lowercase one fell through to a variable
+followed by a block and failed with "expected ';' or '}' in block" — an
+error far from its cause. A registered record name of any case followed
+by `{` now parses as a record literal; nested updates like
+`{ p | home = { p.home | city = ... } }` work throughout. Separately,
+the ledger named a function `acct`, which collided with POSIX `acct(2)`
+at C compile time; a batch of common short POSIX names (`acct`, `dup`,
+`read`, `write`, `open`, `close`, `time`, `stat`, ...) join the
+reserved-word sanitizer. That list is inherently incomplete — namespacing
+all user top-level names is the robust fix, deferred as a larger
+byte-stream change. `examples/ledger.mere` models double-entry
+accounting with nested record updates. suite: 2193 passed / 0 failed
+(3 new tests). One honest wrinkle unchanged: a record parameter that is
+updated must be annotated, so the update site knows its type — the same
+"annotate polymorphic params" rule as the numeric overload._
+
+---
+
 ## v0.1.52 — 2026-07-17
 
 _Inner functions get uncurried too (the real win the gzip probe was

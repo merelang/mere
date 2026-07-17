@@ -1410,6 +1410,33 @@ let rec parse_program_internal tokens =
           | _ ->
             mk pos (Ast.Constr (name, None)), rest
         end
+    (* v0.1.53: lowercase record type names (the ML convention — `type
+       addr = { ... }`, matching `type 'a list` / `option`). The
+       uppercase branch above only fires on capitalized names, so a
+       lowercase record literal `addr { ... }` fell through to Var + block
+       and failed with a confusing "expected ';' or '}' in block". A
+       registered record name followed by `{` is unambiguously a record
+       literal (a value never usefully "applies" to a brace block). *)
+    | (pos, T_ident name) :: ((_, T_lbrace) :: body_rest)
+      when Hashtbl.mem records name ->
+      let rec parse_fields acc toks =
+        match toks with
+        | (_, T_rbrace) :: rest -> List.rev acc, rest
+        | (_, T_ident fname) :: (_, T_eq) :: rest ->
+          let e, rest = expr rest in
+          let acc = (fname, e) :: acc in
+          (match rest with
+           | (_, T_comma) :: rest -> parse_fields acc rest
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ',' or '}' in record literal")))
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected 'field = expr' in record literal"))
+      in
+      let fields, rest = parse_fields [] body_rest in
+      mk pos (Ast.Record_lit (name, fields)), rest
     | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
     | (pos, _) :: _ ->
       raise (Parse_error (pos, "expected literal, identifier, or '('"))

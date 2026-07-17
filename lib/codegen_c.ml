@@ -169,7 +169,15 @@ let c_reserved_keywords =
       calls and are handled separately, so they're not listed here. *)
    "fmin"; "fmax"; "fabs"; "floor"; "ceil"; "round"; "trunc"; "fmod";
    "hypot"; "exp"; "log"; "log2"; "log10"; "cbrt"; "remainder"; "drem";
-   "gamma"; "y0"; "y1"; "j0"; "j1"; "index"; "remove"]
+   "gamma"; "y0"; "y1"; "j0"; "j1"; "index"; "remove";
+   (* v0.1.53: POSIX / libc function names likely to appear as ordinary
+      domain vocabulary (a `let acct = ...` collided with POSIX acct(2),
+      found by a ledger dogfood). This list is inherently incomplete —
+      the robust fix is to namespace all user top-level fn names, deferred
+      as a larger byte-stream change. These are the common short offenders. *)
+   "acct"; "link"; "unlink"; "read"; "write"; "open"; "close"; "creat";
+   "dup"; "pipe"; "kill"; "wait"; "time"; "clock"; "system"; "stat";
+   "chmod"; "chown"; "access"; "seek"; "sync"]
 let c_safe_name (n : string) : string =
   (* Phase 41: convert module-qualified name (`M.foo`) to a C identifier.
      Since `.` is not allowed in C identifiers, replace it with `__`
