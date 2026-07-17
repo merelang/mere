@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.52" Version.v "0.1.52";
+  check "version is 0.1.53" Version.v "0.1.53";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,27 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.53 (records/modules dogfood): lowercase record type names are the
+     ML convention (`type 'a list`, `option`), and `type addr = {...}` was
+     accepted — but the literal `addr { ... }` only parsed for CAPITALIZED
+     names, so it fell through to Var + block with a confusing "expected
+     ';' or '}' in block". A registered record name (any case) followed by
+     `{` now parses as a record literal. *)
+  check "v0.1.53: lowercase record type literal + nested update"
+    (Pipeline.process
+       "type addr = { city: str };\n\
+        type person = { name: str, home: addr };\n\
+        let p = person { name = \"a\", home = addr { city = \"kyoto\" } } in\n\
+        let p2 = { p | home = { p.home | city = \"osaka\" } } in\n\
+        p2.home.city")
+    "\"osaka\"";
+  (* v0.1.53: a top-level fn named after a POSIX function (`acct(2)`,
+     `dup(2)`, ...) collided with the C symbol at compile time. Such names
+     now sanitize like other reserved words. *)
+  assert_contains "v0.1.53: POSIX-name fn sanitized in C"
+    (vec_codegen_c "let acct = fn (x: int) -> x + 1 in acct 41")
+    "acct_";
+
   (* v0.1.52 (inner-fn uncurrying): a curried inner recursive fn used to
      compile to a chain of anonymous closures, allocating a fresh env from
      the region per partial application AND per recursive step — a curried
@@ -5550,14 +5571,14 @@ let () =
      int call inside use_int's body was emitted against str-typed structs. *)
   let c_src_promote =
     vec_codegen_c
-      "let dup = fn x -> (x, x); \
-       let use_int = fn (n: int) -> dup (n + 1); \
-       let p = dup \"s\" in \
+      "let duppair = fn x -> (x, x); \
+       let use_int = fn (n: int) -> duppair (n + 1); \
+       let p = duppair \"s\" in \
        let q = use_int 3 in 0" in
   assert_contains "late second instantiation: int instance emitted"
-    c_src_promote "tuple_int_int dup__int__tuple_int_int(";
+    c_src_promote "tuple_int_int duppair__int__tuple_int_int(";
   assert_contains "late second instantiation: str instance emitted"
-    c_src_promote "tuple_str_str dup__str__tuple_str_str(";
+    c_src_promote "tuple_str_str duppair__str__tuple_str_str(";
   (* v0.1.30 (str-lifetime stage E): copy-on-store — containers own their
      contents. map_set deep-copies key and value into the map's region,
      vec_push/vec_set copy the element, via per-type __mcopy_<tag> fns
