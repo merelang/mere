@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.55" Version.v "0.1.55";
+  check "version is 0.1.56" Version.v "0.1.56";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2682,7 +2682,7 @@ let () =
      the old binding is visible at the time the RHS is evaluated. *)
   assert_contains "codegen: same-name rebinding uses tmp var"
     (codegen "let x = 1 in let x = x + 10 in x")
-    "__let_tmp_x = (x + 10LL)";
+    "__let_tmp_x = (mu_x + 10LL)";
   (* Phase 16.3 / DEFERRED §1.5: codegen support for mk_logger / mk_metrics.
      Make the cap builtin, previously interpreter-only, work in C codegen too via
      printf-based emission. Logger record + 3 closure_str_unit fields, Metrics
@@ -2717,28 +2717,28 @@ let () =
     (codegen "true && false") "(1 && 0)";
   assert_contains "codegen: lifts top-level fn"
     (codegen "let inc = fn x -> x + 1 in inc 5")
-    "long long inc(long long x)";
+    "long long mu_inc(long long mu_x)";
   assert_contains "codegen: lifted fn call site"
     (codegen "let inc = fn x -> x + 1 in inc 5")
     "inc(5LL)";
   assert_contains "codegen: let-rec self-recursion"
     (codegen "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5")
-    "fact((n - 1LL))";
+    "mu_fact((mu_n - 1LL))";
   assert_contains "codegen: mutual rec emits both forward decls"
     (codegen
        "let rec ev = fn n -> if n == 0 then 1 else od (n - 1)\n\
         and od = fn n -> if n == 0 then 0 else ev (n - 1)\n\
         in ev 4")
-    "long long ev(long long);\nlong long od(long long);";
+    "long long mu_ev(long long);\nlong long mu_od(long long);";
   assert_contains "codegen: nested fn lifted to top level with captures"
     (* Previously rejected; Phase 4.8 lifts inner fns via defunctionalization. *)
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
-    "long long __lifted_helper_0(long long x, long long y)";
+    "long long __lifted_helper_0(long long mu_x, long long mu_y)";
   assert_contains "codegen: lifted inner fn called with captures prepended"
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
-    "__lifted_helper_0(x, 10LL)";
+    "__lifted_helper_0(mu_x, 10LL)";
   assert_contains "codegen: anonymous fn application via closure"
     (* Phase 4.9-B: anonymous Fun in expression position is now lifted as
        a closure value, and the App goes through closure dispatch. *)
@@ -2764,13 +2764,13 @@ let () =
   (* --- C codegen: str-typed lifted fns (Phase 4 fourth slice) --- *)
   assert_contains "codegen: str-returning fn gets const char* return"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
-    "const char* greet(long long n)";
+    "const char* mu_greet(long long mu_n)";
   assert_contains "codegen: str-taking fn gets const char* param"
     (codegen "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
-    "const char* exclaim(const char* s)";
+    "const char* mu_exclaim(const char* mu_s)";
   assert_contains "codegen: forward decl carries through the right type"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
-    "const char* greet(long long);";
+    "const char* mu_greet(long long);";
   assert_contains "codegen: str_len builtin maps to strlen"
     (codegen "str_len \"abc\"")
     "(int) strlen(\"abc\")";
@@ -2794,16 +2794,16 @@ let () =
     "((tuple_int_int){.f0 = 1LL, .f1 = 2LL})";
   assert_contains "codegen: fst → .f0 access"
     (codegen "let p = (1, 2) in fst p")
-    "(p).f0";
+    "(mu_p).f0";
   assert_contains "codegen: snd → .f1 access"
     (codegen "let p = (1, 2) in snd p")
-    "(p).f1";
+    "(mu_p).f1";
   assert_contains "codegen: mixed-type tuple struct (str, int)"
     (codegen "let p = (\"hi\", 42) in fst p")
     "struct tuple_str_int {\n  const char* f0;\n  long long f1;\n};";
   assert_contains "codegen: tuple-returning fn signature"
     (codegen "let split = fn s -> (s, str_len s) in split \"x\"")
-    "tuple_str_int split(const char* s)";
+    "tuple_str_int mu_split(const char* mu_s)";
 
   (* --- C codegen: record support (Phase 4 sixth slice) ---
      Records share the codegen path with tuples but with named fields.
@@ -2853,7 +2853,7 @@ let () =
     (codegen_with_decls
       "type CgRectC = { w: int };\n\
        let r = CgRectC { w = 5 } in r.w")
-    "(r).w";
+    "(mu_r).w";
   (* Q-012 step 3b-4a: C backend spawn / join over pthreads (env-less closures).
      The emitted program compiles with clang and runs the closure on a real
      OS thread (validated manually; there is no C compile-run harness). *)
@@ -3063,7 +3063,7 @@ let () =
     (codegen_with_decls
       "type CgRectE = { w: int };\n\
        let mk = fn n -> CgRectE { w = n } in mk 7")
-    "CgRectE mk(long long n)";
+    "CgRectE mu_mk(long long mu_n)";
   assert_contains "codegen: record with str field"
     (codegen_with_decls
       "type CgUser = { name: str, age: int };\n\
@@ -3104,16 +3104,16 @@ let () =
          | CgLN -> 0\n\
          | CgLC (CgN, _) -> 1\n\
          | CgLC (CgS n, _) -> n")
-    "__auto_type n =";
+    "__auto_type mu_n =";
   assert_contains "codegen: P_record destructures named fields"
     (codegen_with_decls
       "type CgPtX = { a: int, b: int };\n\
        match CgPtX { a = 3, b = 4 } with\n\
          | CgPtX { a = x, b = y } -> x + y")
-    "__auto_type x =";
+    "__auto_type mu_x =";
   assert_contains "codegen: P_as binds whole-value"
     (codegen "match 5 with | n as all -> n + all")
-    "__auto_type all = __scrut";
+    "__auto_type mu_all = __scrut";
 
   (* --- C codegen: or-pattern + match guard (Phase 4.15) --- *)
   assert_contains "codegen: or-pattern flattens into two arms"
@@ -3131,7 +3131,7 @@ let () =
     "n < 5";
   assert_contains "codegen: guard with bindings"
     (codegen "match 7 with | n when n > 5 -> n * 10 | _ -> 0")
-    "__auto_type n =";
+    "__auto_type mu_n =";
 
   (* --- C codegen: list show pretty-print (Phase 4.16) --- *)
   assert_contains "codegen: list show emits Cons-iterating formatter"
@@ -3200,7 +3200,7 @@ let () =
     (codegen_with_decls
       "view CgCell3[R] of int { v: int };\n\
        region R { let c = CgCell3 { v = 7 } in c.v }")
-    "(c)->v";
+    "(mu_c)->v";
 
   (* --- C codegen: closure env in default region (Phase 4.20) — closures
        outlive any user region, so their env structs go to a program-lifetime
@@ -3267,7 +3267,7 @@ let () =
     (codegen_with_decls
       "type CgStat3 = SOk | SErr of str;\n\
        match SErr \"hi\" with | SOk -> 0 | SErr m -> str_len m")
-    "__auto_type m =";
+    "__auto_type mu_m =";
   check_raises "codegen: polymorphic variant rejected"
     (fun () ->
       let _ = codegen_with_decls
@@ -3287,16 +3287,16 @@ let () =
   assert_contains "codegen: closure captures host param"
     (codegen
       "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
-    "long long __lifted_h_0(long long x, long long y)";
+    "long long __lifted_h_0(long long mu_x, long long mu_y)";
   assert_contains "codegen: closure call site prepends captures"
     (codegen
       "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
-    "__lifted_h_0(x, 10LL)";
+    "__lifted_h_0(mu_x, 10LL)";
   assert_contains "codegen: closure binding is dropped from let-chain"
     (* The `__auto_type h = ...` should NOT appear since h was lifted. *)
     (codegen
       "let outer = fn x -> let h = fn y -> y + 1 in h 5 in outer 3")
-    "long long outer(long long x) {\n  return __lifted_h_0(5LL);";
+    "long long mu_outer(long long mu_x) {\n  return __lifted_h_0(5LL);";
   assert_contains "codegen: nested closure captures from multiple levels"
     (* Inner `h` captures `x` (from g's param) and `n` (from f's param).
        Free-var collection orders captures by source order of usage, so
@@ -3308,7 +3308,7 @@ let () =
            h 1\n\
          in g 2\n\
        in f 3")
-    "long long __lifted_h_1(long long x, long long n, long long y)";
+    "long long __lifted_h_1(long long mu_x, long long mu_n, long long mu_y)";
   check_raises "codegen: capture of non-primitive type rejected"
     (* Tuple captures aren't supported yet (only int/bool/str/unit). *)
     (fun () ->
@@ -3327,15 +3327,15 @@ let () =
   assert_contains "codegen: top-level fn gets closure wrapper"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "static long long inc_closure_fn(void* __env, long long x)";
+    "static long long mu_inc_closure_fn(void* __env, long long x)";
   assert_contains "codegen: top-level fn gets _as_value constant"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "const closure_int_int inc_as_value =";   (* Phase 36: dropped `static` *)
+    "const closure_int_int mu_inc_as_value =";   (* Phase 36: dropped `static` *)
   assert_contains "codegen: HOF takes closure param"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "long long apply(closure_int_int f)";
+    "long long mu_apply(closure_int_int mu_f)";
   assert_contains "codegen: closure dispatch via .fn(.env, x)"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
@@ -3343,7 +3343,7 @@ let () =
   assert_contains "codegen: Var of top-level fn in value pos emits _as_value"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "apply(inc_as_value)";
+    "mu_apply(mu_inc_as_value)";
 
   (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) ---
      The helpers added to prelude in Phase 36 consume the __anon counter, so
@@ -3359,11 +3359,11 @@ let () =
   assert_contains "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "_fn(void* __env_self_void, long long x)";
+    "_fn(void* __env_self_void, long long mu_x)";
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "__env->f = f";
+    "__env->f = mu_f";
   assert_contains "codegen: captured var rewritten to env access"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
@@ -5141,7 +5141,7 @@ let () =
     (let prog = Pipeline.parse_program borrow_field_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyUnit prog)
-    "(lg)->info";
+    "(mu_lg)->info";
   assert_contains "borrow codegen: LLVM unwraps TyRef for field GEP"
     (let prog = Pipeline.parse_program borrow_field_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
@@ -5288,6 +5288,24 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.56 (full namespace): every user VALUE / FUNCTION name is prefixed
+     with `mu_` in the C backend, so no user name can collide with a C keyword,
+     libc / POSIX symbol, or libm function — the hand-maintained reserved-word
+     list (index / remove / acct / dup / run / y0, six recurrences) is gone.
+     A plain, non-reserved name is now emitted prefixed too, and the prefix is
+     uniform so any missed emission path fails universally (the suite catches
+     it). TYPE names (records / variants) stay un-prefixed — a separate C
+     namespace, left raw to avoid disturbing the recursive-variant machinery. *)
+  assert_contains "v0.1.56: ordinary user fn name is namespaced with mu_"
+    (vec_codegen_c "let foo = fn (x: int) -> x + 1 in foo 41")
+    "long long mu_foo(long long mu_x)";
+  check "v0.1.56: namespaced fn computes correctly (interp parity)"
+    (Pipeline.process "let foo = fn (x: int) -> x + 1 in foo 41") "42";
+  assert_contains "v0.1.56: user variant TYPE name stays un-prefixed (raw)"
+    (vec_codegen_c
+       "let n = (match Cons (1, Nil) with Nil -> 0 | Cons (h, _) -> h) in n")
+    "list_int";
+
   (* v0.1.55 (reserved-name param, plain emit_fn path): a top-level curried
      function whose parameter is a C reserved word — here `y0`, a libm Bessel
      function — declared the parameter raw (`long long y0`) while the body,
@@ -5300,7 +5318,7 @@ let () =
     "42";
   assert_contains "v0.1.55: reserved-name param `y0` sanitized in C decl + capture"
     (vec_codegen_c "let f = fn (y0: int) -> fn (b: int) -> y0 + b in f 40 2")
-    "y0_";
+    "mu_y0";
 
   (* v0.1.54 (reserved-name hygiene, T-1): a user-defined top-level fn named
      after a Mere builtin (`run`, `even`, `show`, ...) was intercepted by the
@@ -5339,9 +5357,9 @@ let () =
   (* v0.1.53: a top-level fn named after a POSIX function (`acct(2)`,
      `dup(2)`, ...) collided with the C symbol at compile time. Such names
      now sanitize like other reserved words. *)
-  assert_contains "v0.1.53: POSIX-name fn sanitized in C"
+  assert_contains "v0.1.53: POSIX-name fn namespaced in C (v0.1.56)"
     (vec_codegen_c "let acct = fn (x: int) -> x + 1 in acct 41")
-    "acct_";
+    "mu_acct";
 
   (* v0.1.52 (inner-fn uncurrying): a curried inner recursive fn used to
      compile to a chain of anonymous closures, allocating a fresh env from
@@ -5384,7 +5402,7 @@ let () =
   assert_contains "v0.1.51: reserved-name param declared with c_safe_name (lifted)"
     (vec_codegen_c
        "let g = fn (a: int) -> fn (index: int) -> a + index in g 1 2")
-    "index_";
+    "mu_index";
   assert_no_contains "v0.1.51: reserved-name param has no raw `long long index` decl"
     (vec_codegen_c
        "let g = fn (a: int) -> fn (index: int) -> a + index in g 1 2")
@@ -5575,7 +5593,7 @@ let () =
          if b == 0 then a else add_to (a + 1) (b - 1); \
        add_to 0 5" in
   assert_contains "uncurry: direct N-ary twin is emitted"
-    c_src_direct "static long long add_to__direct(long long a, long long b)";
+    c_src_direct "static long long mu_add_to__direct(long long mu_a, long long mu_b)";
   assert_contains "uncurry: saturated self-recursion calls the direct twin"
     c_src_direct "add_to__direct(__da0, __da1)";
   (* v0.1.28 (generic-PQ dogfood B-P2): a tuple shape that exists only as a
@@ -5610,9 +5628,9 @@ let () =
        let p = duppair \"s\" in \
        let q = use_int 3 in 0" in
   assert_contains "late second instantiation: int instance emitted"
-    c_src_promote "tuple_int_int duppair__int__tuple_int_int(";
+    c_src_promote "tuple_int_int mu_duppair__int__tuple_int_int(";
   assert_contains "late second instantiation: str instance emitted"
-    c_src_promote "tuple_str_str duppair__str__tuple_str_str(";
+    c_src_promote "tuple_str_str mu_duppair__str__tuple_str_str(";
   (* v0.1.30 (str-lifetime stage E): copy-on-store — containers own their
      contents. map_set deep-copies key and value into the map's region,
      vec_push/vec_set copy the element, via per-type __mcopy_<tag> fns
@@ -5680,7 +5698,7 @@ let () =
         let f = fn (x: int) -> let m = x + 1 in m * 2 in \
         let _ = map_set m \"a\" 1 in \
         if use \"a\" then f 3 else 0")
-    "__auto_type m = ";
+    "__auto_type mu_m = ";
   (* v0.1.33: ordering through a type variable — the poly comparator's
      monomorphized instance compares at a concrete type, landing on the
      derived cmp_<tag> (monomorphization plays the dictionary's role). *)
@@ -8779,7 +8797,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "static long long total;" && has "total = 42LL;" then "globalized"
+     if has "static long long mu_total;" && has "mu_total = 42LL;" then "globalized"
      else "not-globalized")
     "globalized";
   check "§30.2: LLVM codegen — top-level let referenced in fn body becomes @global"
@@ -8912,10 +8930,10 @@ let () =
        "let is_alpha = fn (c: str) -> c == \"_\";\n\
         is_alpha \"_\"") in
      let has_user_fn =
-       let nlen = String.length c and plen = String.length "int is_alpha(" in
+       let nlen = String.length c and plen = String.length "int mu_is_alpha(" in
        let rec scan i =
          if i + plen > nlen then false
-         else if String.sub c i plen = "int is_alpha(" then true
+         else if String.sub c i plen = "int mu_is_alpha(" then true
          else scan (i + 1)
        in scan 0
      in

@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.56 — 2026-07-17
+
+_Full namespacing of user value/function names in the C backend — the robust
+end of the reserved-name whack-a-mole. Six times a user name collided with the
+C namespace (`index`, `remove`, `acct`, `dup`, `run`, `y0`), each patched by
+adding to a hand-maintained reserved-word list or a missed sanitizer path. That
+list is now gone: `c_safe_name` prefixes every user value/function identifier
+with `mu_`, so nothing user-named can collide with a C keyword, a libc/POSIX
+symbol, or a libm function ever again. Two properties make the uniform prefix
+the real fix rather than a bigger list: additions to libm/POSIX can't
+reintroduce the bug, and because the prefix is uniform, any emission path that
+forgets to route a name through `c_safe_name` fails to compile for *every*
+function (not just reserved-named ones), so the test suite surfaces such
+bypasses immediately — that self-verifying property caught two latent
+def/use mismatches during this change (pattern-variable binders and lifted-call
+capture arguments), now fixed. Names emitted directly are unaffected: runtime
+and generated symbols (`__lang_*`, `__anon_*`, `__lifted_*`, `closure_*`,
+`mere_*`), FFI extern names, and the real `int main`. TYPE names (records and
+variants) are a separate C namespace and stay un-prefixed via a new
+`c_type_name`, leaving the recursive-variant machinery untouched. The
+self-hosting byte-identical fixpoint is unaffected — it runs on the WAT backend,
+which shares no naming with the C backend. suite: 2202 passed / 0 failed (~40
+codegen-assertion needles updated to the `mu_` forms; behavior byte-identical
+for programs that never shadowed a builtin). Both halves of the reserved-name
+problem — Mere builtins (v0.1.54) and C symbols (this release) — are now closed._
+
+---
+
 ## v0.1.55 — 2026-07-17
 
 _A reserved-name parameter bug, in the one function-emission path the earlier

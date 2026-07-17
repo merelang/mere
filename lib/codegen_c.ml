@@ -149,50 +149,46 @@ let synthesize_curried_eta (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
    and emit_expr's call-site dispatch to pick the right mangled name. *)
 let multi_inst_fns : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4
 
-(* Phase 22.6: C reserved keywords that can collide with user-defined
-   identifier names (`let case = ...` in json_parser). Mangle by
-   appending `_` so the emitted C is valid while leaving Mere names
-   intact in error messages and AST. *)
-let c_reserved_keywords =
-  ["auto"; "break"; "case"; "char"; "const"; "continue"; "default";
-   "do"; "double"; "else"; "enum"; "extern"; "float"; "for"; "goto";
-   "if"; "inline"; "int"; "long"; "register"; "restrict"; "return";
-   "short"; "signed"; "sizeof"; "static"; "struct"; "switch"; "typedef";
-   "union"; "unsigned"; "void"; "volatile"; "while";
-   (* C99/C11/C23 + stdlib pitfalls *)
-   "_Bool"; "_Complex"; "_Imaginary"; "_Atomic"; "_Static_assert";
-   "_Thread_local"; "_Alignas"; "_Alignof"; "_Generic"; "_Noreturn";
-   "main";
-   (* libm <math.h> / POSIX names a user fn can collide with (the C backend
-      includes math.h). E.g. a `let rec fmin` clashes with libm's fmin.
-      Mere's own math builtins (sqrt/sin/cos/tan/pow) are emitted as libm
-      calls and are handled separately, so they're not listed here. *)
-   "fmin"; "fmax"; "fabs"; "floor"; "ceil"; "round"; "trunc"; "fmod";
-   "hypot"; "exp"; "log"; "log2"; "log10"; "cbrt"; "remainder"; "drem";
-   "gamma"; "y0"; "y1"; "j0"; "j1"; "index"; "remove";
-   (* v0.1.53: POSIX / libc function names likely to appear as ordinary
-      domain vocabulary (a `let acct = ...` collided with POSIX acct(2),
-      found by a ledger dogfood). This list is inherently incomplete —
-      the robust fix is to namespace all user top-level fn names, deferred
-      as a larger byte-stream change. These are the common short offenders. *)
-   "acct"; "link"; "unlink"; "read"; "write"; "open"; "close"; "creat";
-   "dup"; "pipe"; "kill"; "wait"; "time"; "clock"; "system"; "stat";
-   "chmod"; "chown"; "access"; "seek"; "sync"]
+(* module-qualified `M.foo` -> `M__foo` (`.` is illegal in C identifiers);
+   nested `A.B.foo` -> `A__B__foo`. Shared by the value and type manglers. *)
+let flatten_module_dots (n : string) : string =
+  if String.contains n '.' then begin
+    let b = Buffer.create (String.length n) in
+    String.iter (fun c ->
+      if c = '.' then Buffer.add_string b "__"
+      else Buffer.add_char b c) n;
+    Buffer.contents b
+  end else n
+
+(* v0.1.56 (full namespace): every user VALUE / FUNCTION identifier is prefixed
+   with `mu_` in the C backend, so no user name can collide with a C keyword, a
+   libc/POSIX symbol, or a libm function. This replaced a hand-maintained
+   reserved-word list that was inherently incomplete and recurred six times as
+   compile failures (`index`, `remove`, `acct`, `dup`, `run`, `y0`). Two
+   properties make the uniform prefix the robust fix, not just a bigger list:
+     - Nothing user-named can ever collide with the C value namespace again —
+       the list is gone, and libm/POSIX/keyword additions can't reintroduce it.
+     - Because the prefix is uniform, an emission path that forgets to route a
+       user name through c_safe_name fails to compile for EVERY function, not
+       only reserved-named ones, so the suite surfaces bypasses immediately.
+   Names emitted directly (never through here) are unaffected: runtime and
+   generated symbols (`__lang_*`, `__anon_*`, `__lifted_*`, `closure_*`,
+   `mere_*`), FFI extern names (must match the foreign symbol), and the real
+   `int main`. The WAT self-host path uses index-based naming and shares nothing
+   with this, so the byte-identical fixpoint is untouched. The Mere name stays
+   intact in error messages and the AST.
+   TYPE names (records / variants) are a SEPARATE C namespace and go through
+   c_type_name below — left un-prefixed, matching how variant typedefs, node
+   structs, recursive-variant lookups, and construction have always emitted them
+   raw. Keeping types raw avoids disturbing that (recursive-pointer) machinery;
+   type-name collisions with C have never occurred and would be a contained fix. *)
 let c_safe_name (n : string) : string =
-  (* Phase 41: convert module-qualified name (`M.foo`) to a C identifier.
-     Since `.` is not allowed in C identifiers, replace it with `__`
-     (`M.foo` -> `M__foo`). Nested modules (`A.B.foo`) flatten similarly
-     to `A__B__foo`. *)
-  let n =
-    if String.contains n '.' then begin
-      let b = Buffer.create (String.length n) in
-      String.iter (fun c ->
-        if c = '.' then Buffer.add_string b "__"
-        else Buffer.add_char b c) n;
-      Buffer.contents b
-    end else n
-  in
-  if List.mem n c_reserved_keywords then n ^ "_" else n
+  "mu_" ^ flatten_module_dots n
+
+(* Type identifiers (record / variant type names): module-dot flattening only,
+   no prefix — so definition sites (typedefs / struct bodies) and use sites
+   (c_type_of) agree without touching the raw type-name emission machinery. *)
+let c_type_name (n : string) : string = flatten_module_dots n
 
 (* Variant types whose constructors carry payload referencing the same
    type (directly recursive). These are emitted as pointer-typed values:
@@ -541,10 +537,12 @@ let mangled_inst_name (base : string) (arrow : Ast.ty) : string =
     | _ -> List.rev (t :: acc)
   in
   let tys = collect_tys arrow [] in
-  (* Phase 41: if base is module-qualified (`Json.rev_aux`), convert it to a
+  (* Phase 41: if base is module-qualified (`Json.rev_aux`), flatten it to a
      C identifier first, then append the mono suffix
-     (`Json__rev_aux__list_json__...`). *)
-  c_safe_name base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
+     (`Json__rev_aux__list_json__...`). v0.1.56: the base is left UN-prefixed
+     here — every emission and call site routes the whole mangled name through
+     c_safe_name once (a single `mu_`), so prefixing here would double it. *)
+  flatten_module_dots base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
 
 (* Specialized struct name for a polymorphic variant at given args. *)
 let mono_variant_name (name : string) (args : Ast.ty list) : string =
@@ -1808,7 +1806,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let li = Hashtbl.find inner_lifts n in
        let cap_args = List.map (fun (cn, _) ->
          match List.assoc_opt cn !current_env_subst with
-         | Some s -> s | None -> cn) li.captures in
+         | Some s -> s | None -> c_safe_name cn) li.captures in
        let tmps =
          List.mapi (fun i a ->
            Printf.sprintf "__auto_type __ia%d = %s;" i (emit_expr a)) args
@@ -2722,7 +2720,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let cap_args = List.map (fun (n, _) ->
          match List.assoc_opt n !current_env_subst with
          | Some s -> s
-         | None -> n
+         | None -> c_safe_name n
        ) li.captures in
        li.lifted_name ^ "(" ^
        String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
@@ -2741,7 +2739,9 @@ let rec emit_expr (e : Ast.expr) : string =
            match f.Ast.ty with
            | Some t ->
              (match Ast.walk t with
-              | Ast.TyArrow _ as arrow -> mangled_inst_name name arrow
+              (* v0.1.56: route the mangled instance name through c_safe_name
+                 once, exactly like the definition (emit_fn) does. *)
+              | Ast.TyArrow _ as arrow -> c_safe_name (mangled_inst_name name arrow)
               | _ -> c_safe_name name)
            | None -> c_safe_name name
          else c_safe_name name
@@ -3002,9 +3002,9 @@ let rec emit_expr (e : Ast.expr) : string =
             (match Ast.walk t with
              | Ast.TyCon (n, args) when n = name ->
                mono_record_name n (List.map Ast.walk args)
-             | _ -> c_safe_name name)
-          | None -> c_safe_name name
-        else c_safe_name name
+             | _ -> c_type_name name)
+          | None -> c_type_name name
+        else c_type_name name
       in
       "((" ^ cstruct ^ "){" ^ String.concat ", " parts ^ "})"
     end
@@ -3042,7 +3042,9 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
   match pat.Ast.pnode with
   | Ast.P_wild -> ("1", "")
   | Ast.P_var n ->
-    ("1", Printf.sprintf "__auto_type %s = %s; " n v_c)
+    (* v0.1.56: bind under c_safe_name so the declaration matches the
+       namespaced references in the arm body. *)
+    ("1", Printf.sprintf "__auto_type %s = %s; " (c_safe_name n) v_c)
   | Ast.P_int n ->
     (Printf.sprintf "((%s) == %d)" v_c n, "")
   | Ast.P_bool b ->
@@ -3115,7 +3117,7 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     (combined_test, String.concat "" binds)
   | Ast.P_as (inner, n) ->
     let (test, bind) = compile_pattern inner v_c v_ty in
-    let as_bind = Printf.sprintf "__auto_type %s = %s; " n v_c in
+    let as_bind = Printf.sprintf "__auto_type %s = %s; " (c_safe_name n) v_c in
     (test, bind ^ as_bind)
   | Ast.P_or _ ->
     (* Or-patterns are flattened to multiple arms BEFORE compile_pattern
@@ -3238,7 +3240,7 @@ let rec c_type_of (t : Ast.ty) : string =
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     (* Monomorphic user-declared record type. Phase 42: for M-qualified
        names, convert `Shapes.Rect` to the C identifier `Shapes__Rect`. *)
-    c_safe_name name
+    c_type_name name
   | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_variants name ->
     (* Polymorphic variant instantiation — pick the specialized name
        (`list_int`, `opt_str`, ...). For recursive instantiations this
@@ -3249,7 +3251,7 @@ let rec c_type_of (t : Ast.ty) : string =
        M-qualified type name (anticipated for future). Currently variant
        aliases are normalized to the bare name (Light) by the parser, but
        we run them through defensively just like records. *)
-    c_safe_name name
+    c_type_name name
   | other ->
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf
@@ -6934,7 +6936,7 @@ let emit_record_typedef (name : string) : string =
        types accept forward-declared structs). Phase 42: convert
        M-qualified record type names (`Shapes.Rect`) to C identifiers
        (`Shapes__Rect`). *)
-    let cn = c_safe_name name in
+    let cn = c_type_name name in
     Printf.sprintf "typedef struct %s %s;" cn cn
 
 let emit_record_struct_body (name : string) : string =
@@ -6945,7 +6947,7 @@ let emit_record_struct_body (name : string) : string =
       List.map (fun (fname, ft) ->
         Printf.sprintf "  %s %s;" (c_type_of ft) fname) info.Typer.r_fields
     in
-    Printf.sprintf "struct %s {\n%s\n};" (c_safe_name name)
+    Printf.sprintf "struct %s {\n%s\n};" (c_type_name name)
       (String.concat "\n" fields)
 
 (* Emit specialized typedef for a polymorphic record instance. *)
