@@ -353,6 +353,14 @@ let subst_variants
 type lifted_inner = {
   lifted_name : string;
   captures    : (string * Ast.ty) list;
+  (* v0.1.52: if this inner fn is curried (>= 2 params, all concrete
+     types), we ALSO emit an uncurried twin `<lifted_name>__direct` that
+     takes captures + ALL params at once. A saturated N-arg call site
+     then skips the per-partial-application closure allocations (the
+     anonymous-closure chain that made a curried inner recursive fn in a
+     hot loop allocate ~500x — gzip huff_decode). 0 = no twin. The
+     single-param closure form is kept for partial application. *)
+  direct_arity : int;
 }
 (* Phase 22.5: inner_lifts is the ACTIVE scope (per-host fn) — set
    before emitting each host fn's body. inner_lifts_by_host stores the
@@ -1738,6 +1746,28 @@ let rec emit_expr (e : Ast.expr) : string =
         Some (n, args)
       | _ -> None
     in
+    (* v0.1.52: exactly-saturated call to a curried INNER-lifted fn with an
+       uncurried twin. Emits `<lifted>__direct(caps, a1..aN)` — no closure
+       chain. Captures route through env_subst (same as the 1-arg inner
+       path). Falls through to the closure path for partial application. *)
+    let collect_inner_direct e0 =
+      let rec spine e' acc =
+        match e'.Ast.node with
+        | Ast.App (f', a) -> spine f' (a :: acc)
+        | Ast.Var n -> Some (n, acc)
+        | _ -> None
+      in
+      match spine e0 [] with
+      | Some (n, args)
+        when (match Hashtbl.find_opt inner_lifts n with
+              | Some li -> li.direct_arity >= 2
+                           && List.length args = li.direct_arity
+              | None -> false)
+             && not (List.mem_assoc n !current_var_types)
+             && not (List.mem_assoc n !current_env_subst) ->
+        Some (n, args)
+      | _ -> None
+    in
     (match collect_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
      | Some (n, args) ->
        (* Statement-expr temporaries pin the interpreter's left-to-right
@@ -1750,6 +1780,21 @@ let rec emit_expr (e : Ast.expr) : string =
          (String.concat " " tmps) (c_safe_name n)
          (String.concat ", "
             (List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args))
+     | None ->
+    (match collect_inner_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
+     | Some (n, args) ->
+       let li = Hashtbl.find inner_lifts n in
+       let cap_args = List.map (fun (cn, _) ->
+         match List.assoc_opt cn !current_env_subst with
+         | Some s -> s | None -> cn) li.captures in
+       let tmps =
+         List.mapi (fun i a ->
+           Printf.sprintf "__auto_type __ia%d = %s;" i (emit_expr a)) args
+       in
+       Printf.sprintf "({ %s %s__direct(%s); })"
+         (String.concat " " tmps) li.lifted_name
+         (String.concat ", "
+            (cap_args @ List.mapi (fun i _ -> Printf.sprintf "__ia%d" i) args))
      | None ->
     (match f.node with
      | Ast.Var "print" ->
@@ -2684,7 +2729,7 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Closure dispatch via the closure value's fn pointer + env. *)
        Printf.sprintf
          "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
-         (emit_expr f) (emit_expr arg))))
+         (emit_expr f) (emit_expr arg)))))
   | Ast.Constr (raw_name, arg_opt) ->
     (* Phase 41 + 42: since alias_ctor also registers `Traffic.Red` in
        Typer.constructors, look up the qualified raw_name **first** (to
@@ -3738,6 +3783,54 @@ let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
          (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
   Printf.sprintf "%s %s(%s);" (c_type_of f.l_return_ty) f.l_name params
+
+(* v0.1.52: peel a lifted fn's curried layers into (all params, innermost
+   body, final return). Returns None if it isn't worth an uncurried twin
+   (< 2 params or a non-concrete param / return type). *)
+let peel_lifted_direct (f : lifted_fn)
+    : ((string * Ast.ty) list * Ast.expr * Ast.ty) option =
+  let rec peel params body ty =
+    match body.Ast.node, Ast.walk ty with
+    | Ast.Fun (q, _, inner), Ast.TyArrow (qt, rt) ->
+      peel ((q, Ast.walk qt) :: params) inner rt
+    | _ -> (List.rev params, body, Ast.walk ty)
+  in
+  let all_params, inner_body, final_ret =
+    peel [(f.l_param, f.l_param_ty)] f.l_body f.l_return_ty
+  in
+  if List.length all_params >= 2
+     && List.for_all (fun (_, t) -> ty_is_concrete t) all_params
+     && ty_is_concrete final_ret
+  then Some (all_params, inner_body, final_ret)
+  else None
+
+(* v0.1.52: the uncurried N-ary twin `<l_name>__direct` — captures + every
+   curried param as plain C params, no per-partial-application closures.
+   Saturated call sites use it; the single-param closure form (emit_lifted_fn)
+   stays for partial application / value use. *)
+let emit_lifted_fn_direct (f : lifted_fn) : string option =
+  match peel_lifted_direct f with
+  | None -> None
+  | Some (all_params, inner_body, final_ret) ->
+    set_inner_lifts_for_host f.l_host;
+    let all_bindings = f.l_captures @ all_params in
+    let params_c = String.concat ", " (List.map format_param all_bindings) in
+    let body_c =
+      with_var_types all_bindings (fun () ->
+        with_expected_ty final_ret (fun () -> emit_expr inner_body))
+    in
+    Some (Printf.sprintf "%s %s__direct(%s) {\n  return %s;\n}"
+            (c_type_of final_ret) f.l_name params_c body_c)
+
+let emit_lifted_fn_direct_forward_decl (f : lifted_fn) : string option =
+  match peel_lifted_direct f with
+  | None -> None
+  | Some (all_params, _, final_ret) ->
+    let params =
+      String.concat ", "
+        (List.map (fun (_, t) -> c_type_of t) (f.l_captures @ all_params))
+    in
+    Some (Printf.sprintf "%s %s__direct(%s);" (c_type_of final_ret) f.l_name params)
 
 (* Render an anonymous-closure env struct typedef. *)
 let emit_closure_env_typedef (ce : closure_emission) : string =
@@ -6110,7 +6203,24 @@ let lift_inner_fns
       l_host = !current_host;
     } in
     lifted := lf :: !lifted;
-    let entry = { lifted_name; captures } in
+    (* v0.1.52: peel the curried fn layers to see if an uncurried
+       `__direct` twin is worth emitting (>= 2 params, all concrete types
+       + concrete return). Mirrors the top-level uncurrying collection. *)
+    let direct_arity =
+      let rec peel params body ty =
+        match body.Ast.node, Ast.walk ty with
+        | Ast.Fun (q, _, inner), Ast.TyArrow (qt, rt) ->
+          peel ((q, Ast.walk qt) :: params) inner rt
+        | _ -> (List.rev params, Ast.walk ty)
+      in
+      let all_params, final_ret = peel [(p, param_ty)] fn_body return_ty in
+      if List.length all_params >= 2
+         && List.for_all (fun (_, t) -> ty_is_concrete t) all_params
+         && ty_is_concrete final_ret
+      then List.length all_params
+      else 0
+    in
+    let entry = { lifted_name; captures; direct_arity } in
     Hashtbl.replace inner_lifts n entry;  (* keep last-write for back-compat *)
     let host_tbl =
       match Hashtbl.find_opt inner_lifts_by_host !current_host with
@@ -7686,6 +7796,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   anon_closure_counter := 0;
   let fn_defs_main =
     List.map emit_lifted_fn inner_fns
+    (* v0.1.52: uncurried twins of curried inner-lifted fns (saturated
+       calls skip the per-partial-application closure chain). *)
+    @ List.filter_map emit_lifted_fn_direct inner_fns
     @ List.map emit_fn fns
     (* v0.1.27: direct N-ary twins, in fns order (deterministic output —
        the self-host fixpoint depends on byte-stable emission). *)
@@ -7825,6 +7938,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         | Some info -> Some (emit_direct_fn_forward_decl f.name info)
         | None -> None) fns
     @ List.map emit_lifted_fn_forward_decl inner_fns
+    @ List.filter_map emit_lifted_fn_direct_forward_decl inner_fns
     @ closure_adapter_forward_decls
     @ closure_wrapper_forward_decls
     @ show_fn_forward_decls

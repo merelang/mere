@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.51" Version.v "0.1.51";
+  check "version is 0.1.52" Version.v "0.1.52";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,38 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.52 (inner-fn uncurrying): a curried inner recursive fn used to
+     compile to a chain of anonymous closures, allocating a fresh env from
+     the region per partial application AND per recursive step — a curried
+     4-arg inner rec fn in a hot loop allocated ~500x (gzip huff_decode:
+     484 MB to inflate 1 MB). Saturated calls now go through an uncurried
+     `__direct` twin (captures + all params, no closure). Correctness is
+     the regression guard here; the memory win is measured out-of-band. *)
+  check "v0.1.52: curried inner rec fn computes correctly (uncurried twin)"
+    (Pipeline.process
+       "let decode = fn (a: int) -> fn (b: int) -> \
+        \  let rec go = fn (n: int) -> fn (acc: int) -> \
+        \    if n == 0 then acc else go (n - 1) (acc + a * b) in \
+        \  go 4 0 in \
+        decode 3 5")
+    "60";
+  assert_contains "v0.1.52: C backend emits the uncurried inner twin"
+    (vec_codegen_c
+       "let decode = fn (a: int) -> fn (b: int) -> \
+        \  let rec go = fn (n: int) -> fn (acc: int) -> \
+        \    if n == 0 then acc else go (n - 1) (acc + a * b) in \
+        \  go 4 0 in \
+        decode 3 5")
+    "__direct(";
+  check "v0.1.52: uncurried twin recursion is self-consistent (interp == value)"
+    (Pipeline.process
+       "let f = fn (base: int) -> \
+        \  let rec go = fn (i: int) -> fn (s: int) -> fn (p: int) -> \
+        \    if i == 5 then s + p else go (i + 1) (s + i) (p + base) in \
+        \  go 0 0 0 in \
+        f 10")
+    "60";
+
   (* v0.1.51 (gzip inflate probe): three C-codegen bugs the dogfood hit,
      each an undeclared-identifier compile error the interpreter never
      saw. Assert on the emitted C string (the codegen convention here). *)
