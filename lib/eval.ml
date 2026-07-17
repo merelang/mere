@@ -1959,6 +1959,37 @@ let builtin_channel_recv_opt =
       result
     | _ -> failwith "channel_recv_opt: expected a Channel")
 
+(* v0.1.48 (structured concurrency): channel_recv_timeout ch ms — block up
+   to `ms` milliseconds for a value; return None on timeout (or once the
+   channel is closed and drained). Lets a supervisor collect results
+   without hanging on a stuck worker. The reference interpreter polls at
+   1 ms granularity (there is no timed condition wait in the stdlib); the
+   C backend uses pthread_cond_timedwait. *)
+let builtin_channel_recv_timeout =
+  V_builtin ("channel_recv_timeout", fun ch ->
+    match ch with
+    | V_channel (q, m, c, closed) ->
+      let _ = c in
+      V_builtin ("channel_recv_timeout_p", fun tv ->
+        match tv with
+        | V_int ms ->
+          let deadline = Unix.gettimeofday () +. (float_of_int ms /. 1000.0) in
+          let rec poll () =
+            Mutex.lock m;
+            if not (Queue.is_empty q) then begin
+              let v = Queue.pop q in Mutex.unlock m; V_constr ("Some", Some v)
+            end else if !closed then begin
+              Mutex.unlock m; V_constr ("None", None)
+            end else begin
+              Mutex.unlock m;
+              if Unix.gettimeofday () >= deadline then V_constr ("None", None)
+              else begin Unix.sleepf 0.001; poll () end
+            end
+          in
+          poll ()
+        | _ -> failwith "channel_recv_timeout: 2nd arg expected int")
+    | _ -> failwith "channel_recv_timeout: expected a Channel")
+
 (* Q-012 Phase 32: par_map f xs — apply f to each element in parallel (one
    OCaml domain per element) and collect the results in the original order.
    MVP: one domain per element (fine for small lists; a worker pool is a
@@ -1989,6 +2020,7 @@ let initial_env : env =
     ("channel_recv", ref builtin_channel_recv);
     ("channel_close", ref builtin_channel_close);
     ("channel_recv_opt", ref builtin_channel_recv_opt);
+    ("channel_recv_timeout", ref builtin_channel_recv_timeout);
     ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);
     ("read_stdin", ref builtin_read_stdin);

@@ -1819,6 +1819,26 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ int __rok; __auto_type __rv = mere_channel_%s_recv_opt(%s, &__rok); \
           __rok ? (%s){.tag = 1, .payload.Some = __rv} : (%s){.tag = 0}; })"
          tag (emit_expr arg) opt_name opt_name
+     | Ast.App ({ node = Ast.Var "channel_recv_timeout"; _ }, ch_e) ->
+       (* v0.1.48: channel_recv_timeout ch ms — same option wrapping as
+          recv_opt, but with a millisecond deadline. ch_e is the channel,
+          arg is the ms int. *)
+       let tag = channel_elem_tag ch_e.Ast.ty in
+       let el =
+         match Option.map Ast.walk ch_e.Ast.ty with
+         | Some (Ast.TyCon ("Channel", [el])) -> Ast.walk el
+         | _ -> Ast.TyInt
+       in
+       let opt_name =
+         match Option.map Ast.walk e.Ast.ty with
+         | Some (Ast.TyCon ("option", args)) ->
+           mono_variant_name "option" (List.map Ast.walk args)
+         | _ -> mono_variant_name "option" [el]
+       in
+       Printf.sprintf
+         "({ int __rok; __auto_type __rv = mere_channel_%s_recv_timeout(%s, %s, &__rok); \
+          __rok ? (%s){.tag = 1, .payload.Some = __rv} : (%s){.tag = 0}; })"
+         tag (emit_expr ch_e) (emit_expr arg) opt_name opt_name
      | Ast.Var "str_len" ->
        "((int) strlen(" ^ emit_expr arg ^ "))"
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
@@ -7014,6 +7034,36 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);";
       "  if (ch->len == 0) {";
       "    ch->closed = ch->closed;  /* closed & empty */";
+      "    pthread_mutex_unlock(&ch->m);";
+      Printf.sprintf "    *ok = 0; %s z; memset(&z, 0, sizeof z); return z;" cty;
+      "  }";
+      Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
+      "  __lang_region* mr = ch->regs[ch->head];";
+      "  ch->head = (ch->head + 1) % ch->cap;";
+      "  ch->len--;";
+      "  pthread_mutex_unlock(&ch->m);";
+      Printf.sprintf "  %s out = __mcopy_%s(__lang_current_region, v);" cty tag;
+      "  __lang_region_free(mr);";
+      "  free(mr);";
+      "  *ok = 1;";
+      "  return out;";
+      "}";
+      "";
+      (* v0.1.48: recv with a millisecond deadline. Blocks up to `ms`; sets
+         *ok = 0 on timeout (or closed & empty). Uses pthread_cond_timedwait
+         against an absolute CLOCK_REALTIME deadline. *)
+      Printf.sprintf "static %s %s_recv_timeout(%s* ch, int ms, int* ok) {" cty s s;
+      "  struct timespec ts;";
+      "  clock_gettime(CLOCK_REALTIME, &ts);";
+      "  ts.tv_sec += ms / 1000;";
+      "  ts.tv_nsec += (long)(ms % 1000) * 1000000L;";
+      "  if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }";
+      "  pthread_mutex_lock(&ch->m);";
+      "  while (ch->len == 0 && !ch->closed) {";
+      "    int rc = pthread_cond_timedwait(&ch->c, &ch->m, &ts);";
+      "    if (rc == ETIMEDOUT) break;";
+      "  }";
+      "  if (ch->len == 0) {";
       "    pthread_mutex_unlock(&ch->m);";
       Printf.sprintf "    *ok = 0; %s z; memset(&z, 0, sizeof z); return z;" cty;
       "  }";

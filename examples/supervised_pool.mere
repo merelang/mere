@@ -1,0 +1,47 @@
+// Supervised worker pool (v0.1.48): one worker is deliberately slow
+// ("stuck"). The collector uses channel_recv_timeout so a stuck worker
+// can't hang the whole run — it records a timeout and moves on. Without
+// a timed recv, collect(channel_recv results) would block forever.
+
+let n_jobs = 6;
+
+let supervise = fn () ->
+  let jobs = channel_new () in
+  let results = channel_new () in
+
+  let worker = fn () ->
+    let rec loop = fn () ->
+      match channel_recv_opt jobs with
+      | None -> ()
+      | Some j ->
+        // job 3 is "stuck": sleeps far longer than the collector waits
+        let _ = if j == 3 then sleep_ms 2000 else sleep_ms 10 in
+        let _ = channel_send results j in
+        loop () in
+    loop () in
+
+  let rec spawn_workers = fn i -> fn acc ->
+    if i == 2 then acc else spawn_workers (i + 1) (Cons (spawn worker, acc)) in
+  let handles = spawn_workers 0 Nil in
+
+  let rec enqueue = fn i ->
+    if i == n_jobs then () else let _ = channel_send jobs i in enqueue (i + 1) in
+  let _ = enqueue 0 in
+  let _ = channel_close jobs in
+
+  // collect with a 300ms budget per result; count how many arrived vs timed out
+  let rec collect = fn got -> fn timeouts -> fn tries ->
+    if tries == n_jobs then (got, timeouts)
+    else
+      match channel_recv_timeout results 300 with
+      | Some _ -> collect (got + 1) timeouts (tries + 1)
+      | None -> collect got (timeouts + 1) (tries + 1) in
+  let (got, timeouts) = collect 0 0 0 in
+
+  let rec join_all = fn hs ->
+    match hs with Nil -> () | Cons (h, t) -> let _ = join h in join_all t in
+  let _ = join_all handles in
+
+  print ("results=" ++ str_of_int got ++ " timeouts=" ++ str_of_int timeouts);
+
+supervise ()

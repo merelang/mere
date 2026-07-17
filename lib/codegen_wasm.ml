@@ -1921,6 +1921,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     unsupported e.Ast.loc
       "channel_close / channel_recv_opt are unsupported in Wasm codegen \
        (v0.1.47 scope = interp + C)"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_recv_timeout"; _ }, _); _ }, _)
+    when not (List.mem_assoc "channel_recv_timeout" !locals
+              || Hashtbl.mem toplevel_fn_names "channel_recv_timeout"
+              || Hashtbl.mem inner_lifts_wasm "channel_recv_timeout") ->
+    (* v0.1.48 *)
+    unsupported e.Ast.loc
+      "channel_recv_timeout is unsupported in Wasm codegen \
+       (v0.1.48 scope = interp + C)"
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: build a Logger record in linear
        memory (3 closure ptrs, each pointing to an 8-byte { env=prefix,
