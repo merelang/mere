@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.48 — 2026-07-17
+
+_Timed receive for supervisors (the second half of the concurrency arc):
+v0.1.47 let a worker pool shut down cleanly, but a **supervisor still
+had no way to give up on a stuck worker** — `channel_recv` on the
+results channel blocks forever if a job hangs. **`channel_recv_timeout :
+Channel[a] -> int -> option[a]`** blocks up to N milliseconds for a
+value and returns `None` on timeout (or once the channel is closed and
+drained), so a collector records the timeout and moves on instead of
+hanging the whole run. The C backend uses `pthread_cond_timedwait`
+against an absolute `CLOCK_REALTIME` deadline; the reference interpreter
+polls at 1 ms granularity (the stdlib has no timed condition wait).
+interp + C; Wasm and LLVM reject it with a pointed compile error.
+`examples/supervised_pool.mere` runs a pool where one job deliberately
+hangs and the supervisor collects the other five with a 300 ms budget
+(`results=5 timeouts=1`) on interp and C alike. Structured-concurrency
+cancellation is already expressible via `channel_close`; the one
+remaining E-1 piece is `select` over multiple channels, still waiting
+for a forcing program (a genuine multi-source wait)._
+
+---
+
 ## v0.1.47 — 2026-07-17
 
 _Graceful shutdown for concurrency (found by a worker pool): the pool —

@@ -1216,6 +1216,16 @@ let channel_recv_opt_scheme =
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_opt_elem]),
              Ast.TyCon ("option", [_chan_recv_opt_elem])) }
 
+(* v0.1.48: channel_recv_timeout : Channel[a] -> int -> option[a]
+   — None on timeout (or closed & drained). Supervisor-safe collection. *)
+let _chan_recv_to_elem = fresh_var ()
+let channel_recv_timeout_scheme =
+  let aid = match _chan_recv_to_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_to_elem]),
+             Ast.TyArrow (Ast.TyInt,
+               Ast.TyCon ("option", [_chan_recv_to_elem]))) }
+
 (* Q-012 Phase 32: par_map : ('a -> 'b) -> 'a list -> 'b list. Applies the
    function to each element in parallel and collects the results in order.
    'a and 'b cross thread boundaries, so both must be Send — checked (like
@@ -1323,6 +1333,7 @@ let initial_env : env =
     ("channel_recv", channel_recv_scheme);
     ("channel_close", channel_close_scheme);
     ("channel_recv_opt", channel_recv_opt_scheme);
+    ("channel_recv_timeout", channel_recv_timeout_scheme);
     ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));

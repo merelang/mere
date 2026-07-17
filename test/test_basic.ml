@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.47" Version.v "0.1.47";
+  check "version is 0.1.48" Version.v "0.1.48";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2984,6 +2984,38 @@ let () =
        let _ = channel_close ch in \
        match channel_recv_opt ch with | Some v -> v | None -> 0")
     "int closed;";
+  (* v0.1.48 (structured concurrency, supervisor): channel_recv_timeout —
+     block up to N ms for a value, None on timeout. Lets a collector not
+     hang on a stuck worker. *)
+  check "v0.1.48: channel_recv_timeout returns Some for a queued value (interp)"
+    (Pipeline.process
+       "let ch = channel_new () in\n\
+        let _ = channel_send ch 7 in\n\
+        match channel_recv_timeout ch 100 with | Some v -> v | None -> 0 - 1")
+    "7";
+  check "v0.1.48: channel_recv_timeout returns None on timeout (interp)"
+    (Pipeline.process
+       "let ch = channel_new () in\n\
+        match channel_recv_timeout ch 20 with | Some v -> v | None -> 0 - 1")
+    "-1";
+  check "v0.1.48: channel_recv_timeout returns None on a closed channel (interp)"
+    (Pipeline.process
+       "let ch = channel_new () in\n\
+        let _ = channel_close ch in\n\
+        match channel_recv_timeout ch 100 with | Some v -> v | None -> 0 - 1")
+    "-1";
+  assert_contains "codegen C: channel_recv_timeout emits the timed recv"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = channel_send ch 7 in \
+       match channel_recv_timeout ch 50 with | Some v -> v | None -> 0")
+    "mere_channel_int_recv_timeout";
+  assert_contains "codegen C: recv_timeout uses pthread_cond_timedwait"
+    (codegen_with_decls
+      "let ch = channel_new () in \
+       let _ = channel_send ch 7 in \
+       match channel_recv_timeout ch 50 with | Some v -> v | None -> 0")
+    "pthread_cond_timedwait";
   (let typed_prog_local s =
      let prog = Pipeline.parse_program s in
      let type_env = ref Typer.initial_env in
@@ -3005,6 +3037,22 @@ let () =
        let (prog, mt) = typed_prog_local
          "let ch = channel_new () in\n\
           match channel_recv_opt ch with | Some v -> v | None -> 0" in
+       let _ = Codegen_llvm.emit_program ~main_ty:mt prog in ());
+   check_raises_containing
+     "v0.1.48: Wasm rejects channel_recv_timeout honestly"
+     "channel_recv_timeout is unsupported in Wasm codegen"
+     (fun () ->
+       let (prog, mt) = typed_prog_local
+         "let ch = channel_new () in\n\
+          match channel_recv_timeout ch 50 with | Some v -> v | None -> 0" in
+       let _ = Codegen_wasm.emit_program ~main_ty:mt prog in ());
+   check_raises_containing
+     "v0.1.48: LLVM rejects channel_recv_timeout honestly"
+     "channel_recv_timeout is unsupported in LLVM codegen"
+     (fun () ->
+       let (prog, mt) = typed_prog_local
+         "let ch = channel_new () in\n\
+          match channel_recv_timeout ch 50 with | Some v -> v | None -> 0" in
        let _ = Codegen_llvm.emit_program ~main_ty:mt prog in ()));
   assert_contains "codegen: record update via tmp + statement expr"
     (codegen_with_decls
