@@ -1,0 +1,141 @@
+// Line-level diff via an LCS dynamic program with backtracking, in pure Mere.
+// Splits both inputs into lines, fills an (m+1)x(n+1) LCS length table, then
+// walks it from the bottom-right to reconstruct the edit script: a common
+// line (" "), a deletion from A ("-"), or an insertion from B ("+"). Prints a
+// git-style unified body. Probes a 2D DP over string arrays plus a backtrack.
+
+let lines_of = fn (s: str) ->
+  // str_split returns a str list; fold it into a vec, then drop a trailing
+  // empty piece so "a\nb\n" is two lines, not three.
+  let parts = str_split s "\n" in
+  let raw = vec_new () in
+  let rec go = fn l ->
+    match l with
+    | Nil -> ()
+    | Cons (h, t) -> let _ = vec_push raw h in go t in
+  let _ = go parts in
+  let m = vec_len raw in
+  // effective length excludes a single trailing empty piece (no vec_pop, so
+  // copy up to `eff` into a fresh vec).
+  let eff = if m > 0 && str_eq (vec_get raw (m - 1)) "" then m - 1 else m in
+  let v = vec_new () in
+  let rec cp = fn i -> if i == eff then () else let _ = vec_push v (vec_get raw i) in cp (i + 1) in
+  let _ = cp 0 in
+  v;
+
+// LCS length table as a flat vec of size (m+1)*(n+1), row-major.
+let lcs_table = fn a -> fn b ->
+  let m = vec_len a in
+  let n = vec_len b in
+  let w = n + 1 in
+  let dp = vec_new () in
+  let total = (m + 1) * (n + 1) in
+  let rec zero = fn i -> if i == total then () else let _ = vec_push dp 0 in zero (i + 1) in
+  let _ = zero 0 in
+  // fill bottom-up: dp[i][j] over i in m-1..0, j in n-1..0
+  let rec rows = fn i ->
+    if i < 0 then ()
+    else
+      let rec cols = fn j ->
+        if j < 0 then ()
+        else
+          let here = i * w + j in
+          let v =
+            if str_eq (vec_get a i) (vec_get b j) then
+              (vec_get dp ((i + 1) * w + (j + 1)) : int) + 1
+            else
+              let down = (vec_get dp ((i + 1) * w + j) : int) in
+              let right = (vec_get dp (i * w + (j + 1)) : int) in
+              if down > right then down else right in
+          let _ = vec_set dp here v in
+          cols (j - 1) in
+      let _ = cols (n - 1) in
+      rows (i - 1) in
+  let _ = rows (m - 1) in
+  dp;
+
+// walk the table from (0,0) to emit the edit script into `out` (a vec of str,
+// each prefixed with " " / "-" / "+").
+let diff_lines = fn a -> fn b ->
+  let m = vec_len a in
+  let n = vec_len b in
+  let w = n + 1 in
+  let dp = lcs_table a b in
+  let out = vec_new () in
+  let rec walk = fn i -> fn j ->
+    if i >= m && j >= n then ()
+    else if i < m && j < n && str_eq (vec_get a i) (vec_get b j) then
+      let _ = vec_push out (" " ++ vec_get a i) in walk (i + 1) (j + 1)
+    else if j < n && (i >= m || (vec_get dp (i * w + (j + 1)) : int) >= (vec_get dp ((i + 1) * w + j) : int)) then
+      let _ = vec_push out ("+" ++ vec_get b j) in walk i (j + 1)
+    else
+      let _ = vec_push out ("-" ++ vec_get a i) in walk (i + 1) j in
+  let _ = walk 0 0 in
+  out;
+
+// reconstruct A (from " " and "-") and B (from " " and "+") to self-verify.
+let reconstruct = fn script -> fn (want_del: bool) ->
+  let v = vec_new () in
+  let n = vec_len script in
+  let rec go = fn i ->
+    if i == n then ()
+    else
+      let s = vec_get script i in
+      let tag = char_at s 0 in
+      let body = substring s 1 (str_len s) in
+      let _ =
+        if str_eq tag " " then vec_push v body
+        else if want_del && str_eq tag "-" then vec_push v body
+        else if (if want_del then false else true) && str_eq tag "+" then vec_push v body
+        else () in
+      go (i + 1) in
+  let _ = go 0 in
+  v;
+
+let join_lines = fn v ->
+  let n = vec_len v in
+  let rec go = fn i -> fn (acc: str) ->
+    if i == n then acc
+    else go (i + 1) (acc ++ vec_get v i ++ "\n") in
+  go 0 "";
+
+let vec_eq = fn a -> fn b ->
+  if vec_len a != vec_len b then false
+  else
+    let n = vec_len a in
+    let rec go = fn i ->
+      if i == n then true
+      else if str_eq (vec_get a i) (vec_get b i) then go (i + 1) else false in
+    go 0;
+
+let count_tag = fn script -> fn (t: str) ->
+  let n = vec_len script in
+  let rec go = fn i -> fn (c: int) ->
+    if i == n then c
+    else go (i + 1) (if str_eq (char_at (vec_get script i) 0) t then c + 1 else c) in
+  go 0 0;
+
+let run_diff = fn a -> fn b ->
+  let la = lines_of a in
+  let lb = lines_of b in
+  let script = diff_lines la lb in
+  let n = vec_len script in
+  let rec pr = fn i -> if i == n then () else let _ = print (vec_get script i) in pr (i + 1) in
+  let _ = pr 0 in
+  let _ = print ("--- " ++ show (count_tag script "-") ++ " deletions, "
+                 ++ show (count_tag script "+") ++ " insertions") in
+  let ra = reconstruct script true in
+  let rb = reconstruct script false in
+  print (if vec_eq ra la && vec_eq rb lb then "roundtrip OK: script rebuilds both A and B"
+         else "roundtrip FAIL");
+
+// Usage: mere linediff.mere <fileA> <fileB>  (no args -> built-in demo)
+let demo = fn () ->
+  let argv = args () in
+  match argv with
+  | Cons (pa, Cons (pb, _)) -> run_diff (read_file pa) (read_file pb)
+  | _ ->
+    run_diff
+      "apple\nbanana\ncherry\ndate\nfig\n"
+      "apple\nblueberry\ncherry\ndate\ngrape\nfig\n" in
+demo ()
