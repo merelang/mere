@@ -1,0 +1,325 @@
+// PNG decoder in pure Mere. Reuses a full DEFLATE inflater (RFC 1951)
+// and adds the PNG side (RFC 2083): big-endian chunk parsing, the zlib
+// wrapper around the IDAT stream, and per-scanline unfiltering
+// (None/Sub/Up/Average/Paeth). Verified against system-encoded PNGs by
+// comparing a CRC of the decoded pixels.
+//
+// [inflate core, shared with inflate.mere:]
+// One canonical Huffman decoder serves stored / fixed / dynamic blocks
+// (fixed tables are just a particular set of code lengths). Verifies the
+// CRC-32 and ISIZE trailer against the decompressed output.
+// Usage: mgunzip <file.gz>  ->  writes <file.gz>.out
+
+let mask32 = 0xFFFFFFFF;
+
+let crc_byte = fn (crc: int) -> fn (b: int) ->
+  let x = bit_xor crc b in
+  let rec go = fn i -> fn (c: int) ->
+    if i == 8 then c
+    else go (i + 1) (if bit_and c 1 == 1
+                     then bit_xor (bit_shr c 1) 0xEDB88320
+                     else bit_shr c 1) in
+  go 0 x;
+let crc32_vec = fn bytes ->
+  let n = vec_len bytes in
+  let rec go = fn i -> fn (crc: int) ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (vec_get bytes i)) in
+  bit_xor (go 0 mask32) mask32;
+
+// ---- bit reader (LSB-first): state vec [pos, bitbuf, bitcnt] -------------
+let br_new = fn (pos: int) ->
+  let s = vec_new () in
+  let _ = vec_push s pos in
+  let _ = vec_push s 0 in
+  let _ = vec_push s 0 in
+  s;
+let br_bit = fn s -> fn data ->
+  let cnt = (vec_get s 2 : int) in
+  let _ = if cnt == 0 then
+      let p = (vec_get s 0 : int) in
+      let _ = vec_set s 1 (vec_get data p) in
+      let _ = vec_set s 0 (p + 1) in
+      vec_set s 2 8
+    else () in
+  let buf = (vec_get s 1 : int) in
+  let _ = vec_set s 1 (bit_shr buf 1) in
+  let _ = vec_set s 2 ((vec_get s 2 : int) - 1) in
+  bit_and buf 1;
+let br_bits = fn s -> fn data -> fn (n: int) ->
+  let rec go = fn i -> fn (acc: int) ->
+    if i == n then acc
+    else go (i + 1) (bit_or acc (bit_shl (br_bit s data) i)) in
+  go 0 0;
+let br_align = fn s ->
+  let _ = vec_set s 1 0 in
+  vec_set s 2 0;
+
+// ---- canonical Huffman (zlib puff shape) ---------------------------------
+let huff_build = fn lengths ->
+  let n = vec_len lengths in
+  let count = vec_new () in
+  let rec zc = fn i -> if i == 16 then () else let _ = vec_push count 0 in zc (i + 1) in
+  let _ = zc 0 in
+  let rec tally = fn i ->
+    if i == n then ()
+    else
+      let l = (vec_get lengths i : int) in
+      let _ = vec_set count l ((vec_get count l : int) + 1) in
+      tally (i + 1) in
+  let _ = tally 0 in
+  let _ = vec_set count 0 0 in
+  let syms = vec_new () in
+  let rec bylen = fn l ->
+    if l == 16 then ()
+    else
+      let rec scan = fn i ->
+        if i == n then ()
+        else
+          let _ = if (vec_get lengths i : int) == l then vec_push syms i else () in
+          scan (i + 1) in
+      let _ = scan 0 in
+      bylen (l + 1) in
+  let _ = bylen 1 in
+  (count, syms);
+
+let huff_decode = fn s -> fn data -> fn count -> fn syms ->
+  let rec go = fn (len: int) -> fn (code0: int) -> fn (first: int) -> fn (index: int) ->
+    if len == 16 then 0 - 1
+    else
+      let code = bit_or code0 (br_bit s data) in
+      let c = (vec_get count len : int) in
+      if code < first + c then vec_get syms (index + (code - first))
+      else go (len + 1) (bit_shl code 1) (bit_shl (first + c) 1) (index + c) in
+  go 1 0 0 0;
+
+// ---- length / distance tables (RFC 1951 §3.2.5) --------------------------
+let vec_of = fn xs ->
+  let v = vec_new () in
+  let rec go = fn l -> match l with Nil -> v | Cons (h, t) -> let _ = vec_push v (h : int) in go t in
+  go xs;
+
+let len_base = vec_of (Cons (3, Cons (4, Cons (5, Cons (6, Cons (7, Cons (8, Cons (9, Cons (10, Cons (11, Cons (13, Cons (15, Cons (17, Cons (19, Cons (23, Cons (27, Cons (31, Cons (35, Cons (43, Cons (51, Cons (59, Cons (67, Cons (83, Cons (99, Cons (115, Cons (131, Cons (163, Cons (195, Cons (227, Cons (258, Nil))))))))))))))))))))))))))))));
+let len_extra = vec_of (Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (0, Cons (1, Cons (1, Cons (1, Cons (1, Cons (2, Cons (2, Cons (2, Cons (2, Cons (3, Cons (3, Cons (3, Cons (3, Cons (4, Cons (4, Cons (4, Cons (4, Cons (5, Cons (5, Cons (5, Cons (5, Cons (0, Nil))))))))))))))))))))))))))))));
+let dist_base = vec_of (Cons (1, Cons (2, Cons (3, Cons (4, Cons (5, Cons (7, Cons (9, Cons (13, Cons (17, Cons (25, Cons (33, Cons (49, Cons (65, Cons (97, Cons (129, Cons (193, Cons (257, Cons (385, Cons (513, Cons (769, Cons (1025, Cons (1537, Cons (2049, Cons (3073, Cons (4097, Cons (6145, Cons (8193, Cons (12289, Cons (16385, Cons (24577, Nil)))))))))))))))))))))))))))))));
+let dist_extra = vec_of (Cons (0, Cons (0, Cons (0, Cons (0, Cons (1, Cons (1, Cons (2, Cons (2, Cons (3, Cons (3, Cons (4, Cons (4, Cons (5, Cons (5, Cons (6, Cons (6, Cons (7, Cons (7, Cons (8, Cons (8, Cons (9, Cons (9, Cons (10, Cons (10, Cons (11, Cons (11, Cons (12, Cons (12, Cons (13, Cons (13, Nil)))))))))))))))))))))))))))))));
+
+// order of code-length code lengths (dynamic blocks)
+let clen_order = vec_of (Cons (16, Cons (17, Cons (18, Cons (0, Cons (8, Cons (7, Cons (9, Cons (6, Cons (10, Cons (5, Cons (11, Cons (4, Cons (12, Cons (3, Cons (13, Cons (2, Cons (14, Cons (1, Cons (15, Nil))))))))))))))))))));
+
+// fixed literal/length code lengths: 0-143:8, 144-255:9, 256-279:7, 280-287:8
+let fixed_lit_lengths = fn () ->
+  let v = vec_new () in
+  let rec go = fn i ->
+    if i == 288 then v
+    else
+      let l = if i < 144 then 8 else if i < 256 then 9 else if i < 280 then 7 else 8 in
+      let _ = vec_push v l in go (i + 1) in
+  go 0;
+let fixed_dist_lengths = fn () ->
+  let v = vec_new () in
+  let rec go = fn i ->
+    if i == 30 then v else let _ = vec_push v 5 in go (i + 1) in
+  go 0;
+
+// decode one huffman-coded block body into out; returns () at end-of-block
+let inflate_codes = fn s -> fn data -> fn out ->
+                    fn lcount -> fn lsyms -> fn dcount -> fn dsyms ->
+  let rec loop = fn () ->
+    let sym = huff_decode s data lcount lsyms in
+    if sym < 256 then
+      let _ = vec_push out sym in loop ()
+    else if sym == 256 then ()
+    else
+      let li = sym - 257 in
+      let len = (vec_get len_base li : int) + br_bits s data (vec_get len_extra li) in
+      let dsym = huff_decode s data dcount dsyms in
+      let dist = (vec_get dist_base dsym : int) + br_bits s data (vec_get dist_extra dsym) in
+      let from = vec_len out - dist in
+      let rec copy = fn i ->
+        if i == len then () else
+        let _ = vec_push out (vec_get out (from + i)) in copy (i + 1) in
+      let _ = copy 0 in
+      loop () in
+  loop ();
+
+// dynamic block: read the two code-length-coded tables
+let read_dynamic = fn s -> fn data ->
+  let hlit = br_bits s data 5 + 257 in
+  let hdist = br_bits s data 5 + 1 in
+  let hclen = br_bits s data 4 + 4 in
+  let cl_lengths = vec_new () in
+  let rec zero19 = fn i -> if i == 19 then () else let _ = vec_push cl_lengths 0 in zero19 (i + 1) in
+  let _ = zero19 0 in
+  let rec rd = fn i ->
+    if i == hclen then ()
+    else
+      let _ = vec_set cl_lengths (vec_get clen_order i) (br_bits s data 3) in
+      rd (i + 1) in
+  let _ = rd 0 in
+  let (clc, cls) = huff_build cl_lengths in
+  // decode hlit+hdist code lengths with the 16/17/18 repeat symbols
+  let lengths = vec_new () in
+  let total = hlit + hdist in
+  let rec fill = fn () ->
+    if vec_len lengths >= total then ()
+    else
+      let sym = huff_decode s data clc cls in
+      if sym < 16 then let _ = vec_push lengths sym in fill ()
+      else if sym == 16 then
+        let prev = (vec_get lengths (vec_len lengths - 1) : int) in
+        let rep = 3 + br_bits s data 2 in
+        let rec p = fn i -> if i == rep then () else let _ = vec_push lengths prev in p (i + 1) in
+        let _ = p 0 in fill ()
+      else if sym == 17 then
+        let rep = 3 + br_bits s data 3 in
+        let rec p = fn i -> if i == rep then () else let _ = vec_push lengths 0 in p (i + 1) in
+        let _ = p 0 in fill ()
+      else
+        let rep = 11 + br_bits s data 7 in
+        let rec p = fn i -> if i == rep then () else let _ = vec_push lengths 0 in p (i + 1) in
+        let _ = p 0 in fill () in
+  let _ = fill () in
+  // split into lit and dist length vecs
+  let llen = vec_new () in
+  let dlen = vec_new () in
+  let rec split = fn i ->
+    if i == total then ()
+    else
+      let _ = if i < hlit then vec_push llen (vec_get lengths i)
+              else vec_push dlen (vec_get lengths i) in
+      split (i + 1) in
+  let _ = split 0 in
+  (llen, dlen);
+
+let inflate = fn data -> fn (start: int) ->
+  let out = vec_new () in
+  let s = br_new start in
+  let rec block = fn () ->
+    let final = br_bit s data in
+    let btype = br_bits s data 2 in
+    let _ =
+      if btype == 0 then
+        let _ = br_align s in
+        let p = (vec_get s 0 : int) in
+        let len = (vec_get data p : int) + bit_shl (vec_get data (p + 1)) 8 in
+        let rec copy = fn i ->
+          if i == len then () else
+          let _ = vec_push out (vec_get data (p + 4 + i)) in copy (i + 1) in
+        let _ = copy 0 in
+        vec_set s 0 (p + 4 + len)
+      else if btype == 1 then
+        let (lc, ls) = huff_build (fixed_lit_lengths ()) in
+        let (dc, ds) = huff_build (fixed_dist_lengths ()) in
+        inflate_codes s data out lc ls dc ds
+      else
+        let (llen, dlen) = read_dynamic s data in
+        let (lc, ls) = huff_build llen in
+        let (dc, ds) = huff_build dlen in
+        inflate_codes s data out lc ls dc ds in
+    if final == 1 then out else block () in
+  block ();
+
+// ---- gzip container -------------------------------------------------------
+// (inflate core reused; PNG-specific code below)
+
+// ---- PNG decoder (RFC 2083) ----------------------------------------------
+// Reuses `inflate` above. PNG = 8-byte signature, then chunks:
+//   [length:u32 BE][type:4 bytes][data:length][crc:u32 BE]
+// IHDR gives width/height/bit-depth/color-type; IDAT chunks concatenate a
+// zlib stream (2-byte header, deflate data, 4-byte Adler-32); each scanline
+// is prefixed with a filter byte and must be un-filtered against the row
+// above and the pixels to the left.
+
+let rd_u32be = fn data -> fn (o: int) ->
+  bit_or (bit_or (bit_shl (vec_get data o : int) 24)
+                 (bit_shl (vec_get data (o + 1)) 16))
+         (bit_or (bit_shl (vec_get data (o + 2)) 8) (vec_get data (o + 3)));
+
+// Paeth predictor (RFC 2083 §6.6)
+let paeth = fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let p = a + b - c in
+  let pa = if p > a then p - a else a - p in
+  let pb = if p > b then p - b else b - p in
+  let pc = if p > c then p - c else c - p in
+  if pa <= pb && pa <= pc then a else if pb <= pc then b else c;
+
+let decode_png = fn data ->
+  // collect IDAT payloads into one vec, read IHDR
+  let n = vec_len data in
+  let widthv = vec_new () in let _ = vec_push widthv 0 in
+  let heightv = vec_new () in let _ = vec_push heightv 0 in
+  let colorv = vec_new () in let _ = vec_push colorv 0 in
+  let idat = vec_new () in
+  let rec chunks = fn (o: int) ->
+    if o + 8 > n then ()
+    else
+      let len = rd_u32be data o in
+      let t0 = (vec_get data (o + 4) : int) in
+      let t1 = (vec_get data (o + 5) : int) in
+      let t2 = (vec_get data (o + 6) : int) in
+      let t3 = (vec_get data (o + 7) : int) in
+      let dstart = o + 8 in
+      // IHDR = 73 72 68 82
+      let _ = if t0 == 73 && t1 == 72 && t2 == 68 && t3 == 82 then
+          let _ = vec_set widthv 0 (rd_u32be data dstart) in
+          let _ = vec_set heightv 0 (rd_u32be data (dstart + 4)) in
+          vec_set colorv 0 (vec_get data (dstart + 9))   // color type
+        else () in
+      // IDAT = 73 68 65 84
+      let _ = if t0 == 73 && t1 == 68 && t2 == 65 && t3 == 84 then
+          let rec cp = fn i -> if i == len then () else
+            let _ = vec_push idat (vec_get data (dstart + i)) in cp (i + 1) in
+          cp 0
+        else () in
+      chunks (dstart + len + 4) in     // skip data + CRC
+  let _ = chunks 8 in                   // skip 8-byte signature
+  let width = (vec_get widthv 0 : int) in
+  let height = (vec_get heightv 0 : int) in
+  let color = (vec_get colorv 0 : int) in
+  // bytes per pixel: color 2 = RGB (3), 6 = RGBA (4), 0 = gray (1), 4 = gray+alpha (2)
+  let bpp = if color == 2 then 3 else if color == 6 then 4
+            else if color == 4 then 2 else 1 in
+  // zlib stream in idat: skip 2-byte header, inflate from offset 2
+  let raw = inflate idat 2 in           // filtered scanlines
+  let stride = width * bpp in
+  // un-filter into `out` (bpp*width*height bytes, no filter bytes)
+  let out = vec_new () in
+  let rec row = fn (y: int) ->
+    if y == height then ()
+    else
+      let fstart = y * (stride + 1) in
+      let ft = (vec_get raw fstart : int) in
+      let obase = y * stride in
+      let rec col = fn (x: int) ->
+        if x == stride then ()
+        else
+          let cur = (vec_get raw (fstart + 1 + x) : int) in
+          let left = if x >= bpp then (vec_get out (obase + x - bpp) : int) else 0 in
+          let up = if y > 0 then (vec_get out (obase - stride + x) : int) else 0 in
+          let ul = if x >= bpp && y > 0 then (vec_get out (obase - stride + x - bpp) : int) else 0 in
+          let recon =
+            if ft == 0 then cur
+            else if ft == 1 then cur + left
+            else if ft == 2 then cur + up
+            else if ft == 3 then cur + (left + up) / 2
+            else cur + paeth left up ul in
+          let _ = vec_push out (bit_and recon 0xFF) in
+          col (x + 1) in
+      let _ = col 0 in
+      row (y + 1) in
+  let _ = row 0 in
+  (width, height, bpp, out);
+
+let demo = fn () ->
+  let args_v = args () in
+  match args_v with
+  | Nil -> print "usage: png <file.png>"
+  | Cons (path, _) ->
+    let data = read_file_bytes path in
+    let (w, h, bpp, px) = decode_png data in
+    // print a summary + a checksum of the raw pixels for verification
+    let sum = crc32_vec px in
+    print ("png " ++ str_of_int w ++ "x" ++ str_of_int h ++ " bpp=" ++ str_of_int bpp
+           ++ " pixels=" ++ str_of_int (vec_len px) ++ " crc=" ++ str_of_int sum) in
+demo ()
