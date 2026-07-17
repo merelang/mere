@@ -1,0 +1,83 @@
+// Date arithmetic beyond a monthly calendar: convert a civil date to a day
+// number (days since 1970-01-01) and back, then build days-between and
+// add-days on top. There is no date type, so a date is a tuple (y, m, d).
+// The conversions are Howard Hinnant's branchless algorithm, which leans hard
+// on integer division and modulo — the axis this probes. Valid for y >= 1.
+
+let is_leap = fn (y: int) ->
+  (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+
+// days since 1970-01-01 for a civil date (proleptic Gregorian, y >= 1)
+let days_from_civil = fn (y0: int) -> fn (m: int) -> fn (d: int) ->
+  let y = if m <= 2 then y0 - 1 else y0 in
+  let era = y / 400 in
+  let yoe = y - era * 400 in                       // [0, 399]
+  let mp = if m > 2 then m - 3 else m + 9 in       // Mar=0 .. Feb=11
+  let doy = (153 * mp + 2) / 5 + d - 1 in          // [0, 365]
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy in
+  era * 146097 + doe - 719468;
+
+// inverse: day number -> (y, m, d)
+let civil_from_days = fn (z0: int) ->
+  let z = z0 + 719468 in
+  let era = z / 146097 in
+  let doe = z - era * 146097 in                    // [0, 146096]
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365 in  // [0,399]
+  let y = yoe + era * 400 in
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100) in  // [0, 365]
+  let mp = (5 * doy + 2) / 153 in                  // [0, 11]
+  let d = doy - (153 * mp + 2) / 5 + 1 in          // [1, 31]
+  let m = if mp < 10 then mp + 3 else mp - 9 in    // [1, 12]
+  let yy = if m <= 2 then y + 1 else y in
+  (yy, m, d);
+
+// 0 = Sunday .. 6 = Saturday. 1970-01-01 was a Thursday (=4).
+let weekday = fn (y: int) -> fn (m: int) -> fn (d: int) ->
+  let z = days_from_civil y m d in
+  (z % 7 + 4) % 7;
+
+let days_between = fn (y1: int) -> fn (m1: int) -> fn (d1: int) ->
+                   fn (y2: int) -> fn (m2: int) -> fn (d2: int) ->
+  days_from_civil y2 m2 d2 - days_from_civil y1 m1 d1;
+
+// add n days to (y,m,d), returning a new (y,m,d)
+let add_days = fn (y: int) -> fn (m: int) -> fn (d: int) -> fn (n: int) ->
+  civil_from_days (days_from_civil y m d + n);
+
+let dow_name = fn (w: int) ->
+  if w == 0 then "Sun" else if w == 1 then "Mon" else if w == 2 then "Tue"
+  else if w == 3 then "Wed" else if w == 4 then "Thu" else if w == 5 then "Fri"
+  else "Sat";
+
+let pad2 = fn (n: int) -> if n < 10 then "0" ++ show n else show n;
+let fmt = fn (y: int) -> fn (m: int) -> fn (d: int) ->
+  show y ++ "-" ++ pad2 m ++ "-" ++ pad2 d;
+
+let demo = fn () ->
+  // weekdays of some known dates
+  let _ = print (fmt 1970 1 1 ++ " " ++ dow_name (weekday 1970 1 1)) in
+  let _ = print (fmt 2000 1 1 ++ " " ++ dow_name (weekday 2000 1 1)) in
+  let _ = print (fmt 2026 7 17 ++ " " ++ dow_name (weekday 2026 7 17)) in
+  // days between two dates
+  let _ = print ("days 2000-01-01 .. 2026-07-17 = "
+                 ++ show (days_between 2000 1 1 2026 7 17)) in
+  // date arithmetic across a leap-day boundary
+  let (ay, am, ad) = add_days 2024 2 28 1 in
+  let _ = print ("2024-02-28 + 1 = " ++ fmt ay am ad) in   // 2024 is leap -> 02-29
+  let (by, bm, bd) = add_days 2023 2 28 1 in
+  let _ = print ("2023-02-28 + 1 = " ++ fmt by bm bd) in   // 2023 not leap -> 03-01
+  let (cy, cm, cd) = add_days 2026 12 31 1 in
+  let _ = print ("2026-12-31 + 1 = " ++ fmt cy cm cd) in    // year rollover
+  let (ey, em, ed) = add_days 2026 7 17 100 in
+  let _ = print ("2026-07-17 + 100 = " ++ fmt ey em ed) in
+  // round-trip check over a range of day numbers
+  let rec rt = fn (z: int) -> fn (bad: int) ->
+    if z > 30000 then bad
+    else
+      let (yy, mm, dd) = civil_from_days z in
+      let z2 = days_from_civil yy mm dd in
+      rt (z + 1) (if z2 == z then bad else bad + 1) in
+  let bad = rt 0 0 in
+  print (if bad == 0 then "roundtrip OK: 0..30000 day numbers all invert"
+         else "roundtrip FAIL: " ++ show bad ++ " mismatches") in
+demo ()

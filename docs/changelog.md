@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.55 — 2026-07-17
+
+_A reserved-name parameter bug, in the one function-emission path the earlier
+fix had missed. A date-arithmetic probe wrote `fn (y0: int) -> ...`, and `y0`
+(with `y1`, `j0`, `j1`, `gamma`) is a libm Bessel function, already on the
+reserved list. The interpreter ran it fine, but the C backend failed to
+compile: the top-level curried function declared its parameter raw as `long
+long y0`, while the body — which captures that parameter into the returned
+closure's environment — referenced the sanitized `y0_`, an undeclared
+identifier. v0.1.51 had fixed exactly this mismatch for `format_param` and the
+closure adapter after the gzip probe hit it with `index`, but the plain
+`emit_fn` path (a simple top-level curried function, not lifted) still inlined
+the raw parameter name. It now goes through `format_param` like the others, so
+the declaration and every reference agree. The probe itself — day-number
+conversions, days-between, add-days, all as `(y, m, d)` tuples since there is
+no date type — was otherwise new-bug-zero, matching a reference implementation
+on weekdays, intervals, leap boundaries, and a thirty-thousand-day round-trip,
+identically on both backends. suite: 2199 passed / 0 failed (2 new tests)._
+
+---
+
 ## v0.1.54 — 2026-07-17
 
 _User definitions now shadow builtins at the call site (the recurring
