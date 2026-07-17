@@ -1,0 +1,293 @@
+// A small Scheme interpreter in pure Mere: reader (S-expression parser),
+// tree-walking evaluator with lexical closures, and a printer.
+// Probes recursive polymorphic variants (the sexp value IS the AST),
+// exhaustive matching over that variant, and a value that carries a
+// captured environment (SClosure).
+
+type sexp =
+  | SNil
+  | SInt of int
+  | SBool of bool
+  | SSym of str
+  | SPair of sexp * sexp
+  | SClosure of sexp * sexp * sexp   // params-list, body, captured local env (alist)
+  | SPrim of str;
+
+// ---- global environment: parallel growable vecs, scanned newest-first ----
+let g_names = vec_new ();
+let g_vals = vec_new ();
+let define_global = fn name -> fn v ->
+  let _ = vec_push g_names name in
+  let _ = vec_push g_vals v in ();
+let lookup_global = fn name ->
+  let n = vec_len g_names in
+  let rec go = fn i ->
+    if i < 0 then SSym ("<unbound:" ++ name ++ ">")
+    else if str_eq (vec_get g_names i) name then vec_get g_vals i
+    else go (i - 1) in
+  go (n - 1);
+
+// local env is a Lisp alist: SPair (SPair (SSym k, v), rest), ending SNil.
+let rec lookup_local = fn env -> fn name ->
+  match env with
+  | SPair (SPair (SSym k, v), rest) ->
+      if str_eq k name then v else lookup_local rest name
+  | _ -> lookup_global name;
+
+// ---- reader ----------------------------------------------------------
+// state: source string + a 1-cell vec holding the cursor position.
+let is_space = fn (c: int) -> c == 32 || c == 9 || c == 10 || c == 13;
+let is_digit = fn (c: int) -> c >= 48 && c <= 57;
+
+let skip_ws = fn src -> fn pos ->
+  let n = str_len src in
+  let rec go = fn () ->
+    let i = (vec_get pos 0 : int) in
+    if i >= n then ()
+    else
+      let c = ord (char_at src i) in
+      if is_space c then let _ = vec_set pos 0 (i + 1) in go ()
+      else if c == 59 then   // ';' line comment
+        let rec eat = fn () ->
+          let j = (vec_get pos 0 : int) in
+          if j >= n then () else if ord (char_at src j) == 10 then ()
+          else let _ = vec_set pos 0 (j + 1) in eat () in
+        let _ = eat () in go ()
+      else () in
+  go ();
+
+// classify an atom string into SInt / SBool / SSym
+let atom_of = fn tok ->
+  if str_eq tok "#t" then SBool true
+  else if str_eq tok "#f" then SBool false
+  else
+    let c0 = ord (char_at tok 0) in
+    let neg = c0 == 45 in                       // '-'
+    let len = str_len tok in
+    if (is_digit c0 || (neg && len > 1)) then
+      let rec alldig = fn i -> if i >= len then true
+        else if is_digit (ord (char_at tok i)) then alldig (i + 1) else false in
+      if alldig (if neg then 1 else 0) then SInt (int_of_str tok) else SSym tok
+    else SSym tok;
+
+let rec read_sexp = fn src -> fn pos ->
+  let _ = skip_ws src pos in
+  let n = str_len src in
+  let i = (vec_get pos 0 : int) in
+  if i >= n then SSym "<eof>"
+  else
+    let c = ord (char_at src i) in
+    if c == 40 then                              // '('
+      let _ = vec_set pos 0 (i + 1) in read_list src pos
+    else if c == 39 then                         // "'" quote sugar
+      let _ = vec_set pos 0 (i + 1) in
+      let x = read_sexp src pos in
+      SPair (SSym "quote", SPair (x, SNil))
+    else                                         // atom
+      let rec take = fn j ->
+        if j >= n then j
+        else
+          let d = ord (char_at src j) in
+          if is_space d || d == 40 || d == 41 then j else take (j + 1) in
+      let e = take i in
+      let tok = substring src i e in
+      let _ = vec_set pos 0 e in
+      atom_of tok
+and read_list = fn src -> fn pos ->
+  let _ = skip_ws src pos in
+  let n = str_len src in
+  let i = (vec_get pos 0 : int) in
+  if i >= n then SNil
+  else if ord (char_at src i) == 41 then         // ')'
+    let _ = vec_set pos 0 (i + 1) in SNil
+  else
+    let head = read_sexp src pos in
+    let tail = read_list src pos in
+    SPair (head, tail);
+
+// ---- printer ---------------------------------------------------------
+let rec print_sexp = fn s ->
+  match s with
+  | SNil -> "()"
+  | SInt n -> str_of_int n
+  | SBool b -> if b then "#t" else "#f"
+  | SSym x -> x
+  | SClosure (_, _, _) -> "#<closure>"
+  | SPrim name -> "#<prim:" ++ name ++ ">"
+  | SPair (a, d) -> "(" ++ print_sexp a ++ print_tail d
+and print_tail = fn s ->
+  match s with
+  | SNil -> ")"
+  | SPair (a, d) -> " " ++ print_sexp a ++ print_tail d
+  | other -> " . " ++ print_sexp other ++ ")";
+
+// ---- evaluator -------------------------------------------------------
+let truthy = fn s -> match s with SBool false -> false | _ -> true;
+
+let rec eval = fn expr -> fn env ->
+  match expr with
+  | SInt _ -> expr
+  | SBool _ -> expr
+  | SNil -> expr
+  | SClosure (_, _, _) -> expr
+  | SPrim _ -> expr
+  | SSym name -> lookup_local env name
+  | SPair (SSym "quote", SPair (x, SNil)) -> x
+  | SPair (SSym "if", SPair (c, SPair (t, SPair (e, SNil)))) ->
+      if truthy (eval c env) then eval t env else eval e env
+  | SPair (SSym "lambda", SPair (params, SPair (body, SNil))) ->
+      SClosure (params, body, env)
+  | SPair (SSym "let", SPair (bindings, SPair (body, SNil))) ->
+      let env2 = eval_let_bindings bindings env env in
+      eval body env2
+  | SPair (SSym "begin", rest) -> eval_seq rest env SNil
+  | SPair (SSym "and", rest) -> eval_and rest env
+  | SPair (SSym "or", rest) -> eval_or rest env
+  | SPair (op, args) ->
+      let proc = eval op env in
+      let argv = eval_args args env in
+      apply proc argv
+  | _ -> expr
+and eval_args = fn args -> fn env ->
+  match args with
+  | SPair (a, d) -> SPair (eval a env, eval_args d env)
+  | _ -> SNil
+and eval_seq = fn forms -> fn env -> fn last ->
+  match forms with
+  | SPair (a, d) -> eval_seq d env (eval a env)
+  | _ -> last
+and eval_and = fn forms -> fn env ->
+  match forms with
+  | SNil -> SBool true
+  | SPair (a, SNil) -> eval a env
+  | SPair (a, d) -> if truthy (eval a env) then eval_and d env else SBool false
+  | _ -> SBool true
+and eval_or = fn forms -> fn env ->
+  match forms with
+  | SNil -> SBool false
+  | SPair (a, d) -> let v = eval a env in if truthy v then v else eval_or d env
+  | _ -> SBool false
+and eval_let_bindings = fn bindings -> fn eval_env -> fn acc ->
+  // bindings: ((x e) (y e2) ...); evaluate each e in the ORIGINAL env,
+  // accumulate into acc (an alist extending the local env).
+  match bindings with
+  | SPair (SPair (SSym k, SPair (e, SNil)), rest) ->
+      let v = eval e eval_env in
+      eval_let_bindings rest eval_env (SPair (SPair (SSym k, v), acc))
+  | _ -> acc
+and apply = fn proc -> fn argv ->
+  match proc with
+  | SPrim name -> apply_prim name argv
+  | SClosure (params, body, capt) ->
+      let env2 = bind_params params argv capt in
+      eval body env2
+  | _ -> SSym "<not-a-procedure>"
+and bind_params = fn params -> fn argv -> fn env ->
+  match params with
+  | SPair (SSym p, prest) ->
+      (match argv with
+       | SPair (a, arest) -> bind_params prest arest (SPair (SPair (SSym p, a), env))
+       | _ -> env)
+  | _ -> env
+and apply_prim = fn name -> fn argv ->
+  // arithmetic / comparison fold or unary/binary dispatch
+  if str_eq name "+" then SInt (fold_int argv 0 0)
+  else if str_eq name "*" then SInt (fold_int argv 1 1)
+  else if str_eq name "-" then
+    (match argv with
+     | SPair (SInt a, SNil) -> SInt (0 - a)
+     | SPair (SInt a, rest) -> SInt (a - fold_int rest 0 0)
+     | _ -> SInt 0)
+  else if str_eq name "=" then bin_cmp argv 0
+  else if str_eq name "<" then bin_cmp argv 1
+  else if str_eq name ">" then bin_cmp argv 2
+  else if str_eq name "cons" then
+    (match argv with SPair (a, SPair (d, SNil)) -> SPair (a, d) | _ -> SNil)
+  else if str_eq name "car" then
+    (match argv with SPair (SPair (a, _), SNil) -> a | _ -> SNil)
+  else if str_eq name "cdr" then
+    (match argv with SPair (SPair (_, d), SNil) -> d | _ -> SNil)
+  else if str_eq name "null?" then
+    (match argv with SPair (SNil, SNil) -> SBool true | _ -> SBool false)
+  else if str_eq name "not" then
+    (match argv with SPair (x, SNil) -> SBool (if truthy x then false else true) | _ -> SBool false)
+  else if str_eq name "list" then argv
+  else SSym ("<unknown-prim:" ++ name ++ ">")
+and fold_int = fn argv -> fn acc -> fn op ->
+  // op 0 = add, op 1 = mul
+  match argv with
+  | SPair (SInt n, rest) -> fold_int rest (if op == 0 then acc + n else acc * n) op
+  | SPair (_, rest) -> fold_int rest acc op
+  | _ -> acc
+and bin_cmp = fn argv -> fn kind ->
+  match argv with
+  | SPair (SInt a, SPair (SInt b, SNil)) ->
+      let r = if kind == 0 then a == b else if kind == 1 then a < b else a > b in
+      SBool r
+  | _ -> SBool false;
+
+// ---- top-level: define handling + program driver ---------------------
+let eval_top = fn form ->
+  match form with
+  | SPair (SSym "define", SPair (SSym name, SPair (e, SNil))) ->
+      let _ = define_global name (eval e SNil) in SSym name
+  | SPair (SSym "define", SPair (SPair (SSym name, params), SPair (body, SNil))) ->
+      let _ = define_global name (SClosure (params, body, SNil)) in SSym name
+  | _ -> eval form SNil;
+
+// install primitives into the global env
+let install_prims = fn () ->
+  let names = vec_new () in
+  let _ = vec_push names "+" in let _ = vec_push names "-" in let _ = vec_push names "*" in
+  let _ = vec_push names "=" in let _ = vec_push names "<" in let _ = vec_push names ">" in
+  let _ = vec_push names "cons" in let _ = vec_push names "car" in let _ = vec_push names "cdr" in
+  let _ = vec_push names "null?" in let _ = vec_push names "not" in let _ = vec_push names "list" in
+  let m = vec_len names in
+  let rec go = fn i -> if i == m then () else
+    let _ = define_global (vec_get names i) (SPrim (vec_get names i)) in go (i + 1) in
+  go 0;
+
+// read and evaluate every top-level form in `src`, printing each result.
+let run_forms = fn src ->
+  let pos = vec_new () in
+  let _ = vec_push pos 0 in
+  let n = str_len src in
+  let rec go = fn () ->
+    let _ = skip_ws src pos in
+    if (vec_get pos 0 : int) >= n then ()
+    else
+      let form = read_sexp src pos in
+      let v = eval_top form in
+      let _ = print (print_sexp v) in
+      go () in
+  go ();
+
+let program =
+  "(define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))\n"
+  ++ "(define (range a b) (if (= a b) (quote ()) (cons a (range (+ a 1) b))))\n"
+  ++ "(define (map f xs) (if (null? xs) (quote ()) (cons (f (car xs)) (map f (cdr xs)))))\n"
+  ++ "(define (sum xs) (if (null? xs) 0 (+ (car xs) (sum (cdr xs)))))\n"
+  ++ "(define (foldr f z xs) (if (null? xs) z (f (car xs) (foldr f z (cdr xs)))))\n"
+  // lexical closures: make-adder returns a closure capturing n
+  ++ "(define (make-adder n) (lambda (x) (+ x n)))\n"
+  ++ "(define (compose f g) (lambda (x) (f (g x))))\n"
+  ++ "(define inc (make-adder 1))\n"
+  ++ "; the classics\n"
+  ++ "(fact 10)\n"
+  ++ "(range 1 6)\n"
+  ++ "(map (lambda (x) (* x x)) (range 1 6))\n"
+  ++ "(sum (map (lambda (x) (* x x)) (range 1 6)))\n"
+  ++ "(foldr + 0 (range 1 11))\n"
+  // closure capture: (make-adder 10) closes over n=10
+  ++ "((make-adder 10) 5)\n"
+  ++ "((compose inc inc) 40)\n"
+  ++ "(let ((a 3) (b 4)) (+ (* a a) (* b b)))\n"
+  // quote keeps code as data; and/or short-circuit
+  ++ "(quote (the quick brown fox))\n"
+  ++ "(and (< 1 2) (< 2 3) 99)\n"
+  ++ "(or #f (= 1 2) 7)\n";
+
+let boot = fn () ->
+  let _ = install_prims () in
+  run_forms program;
+boot ()
