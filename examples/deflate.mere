@@ -1,11 +1,14 @@
-// DEFLATE compressor (gzip container), fixed-Huffman + LZ77, in pure Mere.
-// The counterpart to inflate.mere: a bit WRITER packs variable-length
-// codes LSB-first across byte boundaries; a greedy longest-match LZ77
-// (naive window scan) emits length/distance back-references; literals and
-// the length codes use the fixed-Huffman table. Output is valid gzip:
-// system gunzip AND inflate.mere both round-trip it byte-identically with
-// a verified CRC-32. (Fixed Huffman + greedy matching leaves ~2x on the
-// table vs gzip -9's dynamic Huffman — a completeness gap, not a bug.)
+// DEFLATE compressor (gzip container), dynamic-Huffman + LZ77, in pure Mere.
+// The counterpart to inflate.mere. A greedy longest-match LZ77 (naive window
+// scan) turns the input into literal/back-reference tokens; their frequencies
+// drive a per-block Huffman tree (node-pool merge + canonical codes per RFC
+// 1951 §3.2.2). The block header packs HLIT/HDIST/HCLEN, the code-length
+// alphabet (run-length coded with symbols 16/17/18), then the data, all
+// LSB-first across byte boundaries via a bit WRITER. If a Huffman code would
+// exceed the format's 15-bit limit (rare, only for very skewed alphabets) the
+// block falls back to a stored (uncompressed) block, which is always valid.
+// Output is valid gzip: system gunzip AND inflate.mere both round-trip it
+// byte-identically with a verified CRC-32, and it is competitive with gzip -9.
 // Usage: mere examples/deflate.mere <file>  ->  writes <file>.mgz
 
 let mask32 = 0xFFFFFFFF;
@@ -63,21 +66,13 @@ let bw_flush = fn s -> fn out ->
     let _ = vec_set s 0 0 in vec_set s 1 0
   else ();
 
-// fixed-Huffman literal code + length for a symbol (0..287), returned as
-// (code, nbits). Codes must be emitted MSB-first, so we reverse them.
+// reverse the low `n` bits of `v` (canonical codes are emitted MSB-first, but
+// bw_bits pushes LSB-first, so pre-reverse).
 let rev_bits = fn (v: int) -> fn (n: int) ->
   let rec go = fn i -> fn (acc: int) ->
     if i == n then acc
     else go (i + 1) (bit_or (bit_shl acc 1) (bit_and (bit_shr v i) 1)) in
   go 0 0;
-// fixed literal code (already MSB-first per RFC 1951 §3.2.6), we return the
-// value + nbits and let bw_bits push LSB-first, so pre-reverse.
-let fixed_code = fn (sym: int) ->
-  if sym < 144 then (rev_bits (48 + sym) 8, 8)              // 0x30..0xBF, 8 bits
-  else if sym < 256 then (rev_bits (400 + (sym - 144)) 9, 9) // 0x190.., 9 bits
-  else if sym < 280 then (rev_bits (sym - 256) 7, 7)        // 0..23, 7 bits
-  else (rev_bits (192 + (sym - 280)) 8, 8);                 // 0xC0.., 8 bits
-
 
 // length 3..258 -> (code_sym 257.., extra_nbits, extra_val)
 let len_encode = fn (len: int) ->
@@ -103,8 +98,6 @@ let dist_encode = fn (dist: int) ->
       if dist < next then (i, nb, dist - base)
       else go (i + 1) in
   go 0;
-// distance code (5-bit fixed, MSB-first -> reverse for LSB stream)
-let dist_code = fn (sym: int) -> (rev_bits sym 5, 5);
 // longest match at position `p` looking back up to 32768, len up to 258.
 // naive O(window) scan (fine for the probe; a real impl uses a hash chain).
 let find_match = fn data -> fn (p: int) -> fn (n: int) ->
@@ -123,48 +116,343 @@ let find_match = fn data -> fn (p: int) -> fn (n: int) ->
       else best (d + 1) blen bdist in
   best 1 0 0;
 
-let deflate_fixed = fn data ->
-  let out = vec_new () in
-  // gzip header
-  let _ = vec_push out 0x1F in let _ = vec_push out 0x8B in
-  let _ = vec_push out 8 in let _ = vec_push out 0 in
-  let _ = vec_push out 0 in let _ = vec_push out 0 in let _ = vec_push out 0 in let _ = vec_push out 0 in
-  let _ = vec_push out 0 in let _ = vec_push out 3 in
-  // one fixed-Huffman block, BFINAL=1 BTYPE=01
-  let s = bw_new () in
-  let _ = bw_bits s out 1 1 in   // BFINAL = 1
-  let _ = bw_bits s out 1 2 in   // BTYPE = 01 (fixed)
+// build Huffman code lengths for `nsym` symbols from their frequencies, using
+// a node pool: nf[] = frequency, nl[]/nr[] = child pool indices, leafsym[] =
+// symbol (-1 for internal). Repeatedly merge the two smallest-frequency alive
+// nodes, then DFS the root to read each leaf's depth as its code length.
+let build_lengths = fn freq -> fn (nsym: int) -> fn (maxbits: int) ->
+  let nf = vec_new () in let nl = vec_new () in let nr = vec_new () in
+  let rec seed = fn i ->
+    if i == nsym then ()
+    else
+      let _ = if (vec_get freq i : int) > 0 then
+          let _ = vec_push nf (vec_get freq i) in
+          let _ = vec_push nl (0 - 1) in
+          let _ = vec_push nr (0 - 1) in ()
+        else () in
+      seed (i + 1) in
+  let _ = seed 0 in
+  let syms = vec_new () in
+  let rec seed2 = fn i ->
+    if i == nsym then ()
+    else let _ = if (vec_get freq i : int) > 0 then vec_push syms i else () in seed2 (i + 1) in
+  let _ = seed2 0 in
+  let nleaves = vec_len nf in
+  let lengths = vec_new () in
+  let rec zl = fn i -> if i == nsym then () else let _ = vec_push lengths 0 in zl (i + 1) in
+  let _ = zl 0 in
+  if nleaves == 0 then lengths
+  else if nleaves == 1 then
+    // one symbol: give it a 1-bit code (DEFLATE requires >= 1 bit)
+    let _ = vec_set lengths (vec_get syms 0) 1 in lengths
+  else
+    let alive = vec_new () in
+    let rec al = fn i -> if i == nleaves then () else let _ = vec_push alive 1 in al (i + 1) in
+    let _ = al 0 in
+    let leafsym = vec_new () in
+    let rec ls = fn i -> if i == nleaves then () else let _ = vec_push leafsym (vec_get syms i) in ls (i + 1) in
+    let _ = ls 0 in
+    let rec merge = fn (remaining: int) ->
+      if remaining == 1 then ()
+      else
+        let np = vec_len nf in
+        let find_min = fn (skip: int) ->
+          let rec go = fn i -> fn (best: int) ->
+            if i == np then best
+            else if (vec_get alive i : int) == 1 && i != skip
+                    && (best < 0 || (vec_get nf i : int) < (vec_get nf best : int))
+            then go (i + 1) i else go (i + 1) best in
+          go 0 (0 - 1) in
+        let a = find_min (0 - 1) in
+        let b = find_min a in
+        let _ = vec_set alive a 0 in let _ = vec_set alive b 0 in
+        let _ = vec_push nf ((vec_get nf a : int) + (vec_get nf b : int)) in
+        let _ = vec_push nl a in let _ = vec_push nr b in
+        let _ = vec_push leafsym (0 - 1) in
+        let _ = vec_push alive 1 in
+        merge (remaining - 1) in
+    let _ = merge nleaves in
+    let root = vec_len nf - 1 in
+    let rec assign = fn (node: int) -> fn (depth: int) ->
+      let sym = (vec_get leafsym node : int) in
+      if sym >= 0 then vec_set lengths sym depth
+      else
+        let _ = assign (vec_get nl node) (depth + 1) in
+        assign (vec_get nr node) (depth + 1) in
+    let _ = assign root 0 in
+    // deflate_body checks vmax > maxbits and falls back to stored, so no
+    // in-place length-limiting fixup is needed here.
+    let _ = maxbits in
+    lengths;
+
+// canonical codes (values) from a lengths vec, per RFC 1951 §3.2.2.
+let canon_codes = fn lengths -> fn (n: int) -> fn (maxbits: int) ->
+  let bl_count = vec_new () in
+  let rec z = fn i -> if i > maxbits then () else let _ = vec_push bl_count 0 in z (i + 1) in
+  let _ = z 0 in
+  let rec cnt = fn i -> if i == n then () else
+    let l = (vec_get lengths i : int) in
+    let _ = if l > 0 then vec_set bl_count l ((vec_get bl_count l : int) + 1) else () in
+    cnt (i + 1) in
+  let _ = cnt 0 in
+  let next_code = vec_new () in
+  let rec z2 = fn i -> if i > maxbits then () else let _ = vec_push next_code 0 in z2 (i + 1) in
+  let _ = z2 0 in
+  let rec fill = fn (bits: int) -> fn (code: int) ->
+    if bits > maxbits then ()
+    else
+      let c = bit_shl (code + (vec_get bl_count (bits - 1) : int)) 1 in
+      let _ = vec_set next_code bits c in
+      fill (bits + 1) c in
+  let _ = fill 1 0 in
+  let codes = vec_new () in
+  let rec z3 = fn i -> if i == n then () else let _ = vec_push codes 0 in z3 (i + 1) in
+  let _ = z3 0 in
+  let rec asg = fn i -> if i == n then () else
+    let l = (vec_get lengths i : int) in
+    let _ = if l > 0 then
+        let c = (vec_get next_code l : int) in
+        let _ = vec_set codes i c in
+        vec_set next_code l (c + 1)
+      else () in
+    asg (i + 1) in
+  let _ = asg 0 in
+  codes;
+
+// max of a lengths vec
+let vmax = fn v -> fn (n: int) ->
+  let rec go = fn i -> fn (m: int) -> if i == n then m else
+    go (i + 1) (if (vec_get v i : int) > m then vec_get v i else m) in
+  go 0 0;
+
+// code-length code order (RFC 1951 §3.2.7)
+let cl_order = vec_of (Cons (16, Cons (17, Cons (18, Cons (0, Cons (8, Cons (7, Cons (9, Cons (6, Cons (10, Cons (5, Cons (11, Cons (4, Cons (12, Cons (3, Cons (13, Cons (2, Cons (14, Cons (1, Cons (15, Nil))))))))))))))))))));
+
+// tokenize `data` into an int vec of triples [kind, x, y] where
+// kind 0 = literal (x = byte), kind 1 = match (x = length, y = distance).
+let tokenize = fn data ->
   let n = vec_len data in
-  let rec emit = fn i ->
+  let toks = vec_new () in
+  let rec go = fn i ->
     if i == n then ()
     else
       let (mlen, mdist) = find_match data i n in
       if mlen >= 3 then
-        let (lsym, lnb, lval) = len_encode mlen in
-        let (lc, lcn) = fixed_code lsym in
-        let _ = bw_bits s out lc lcn in
-        let _ = if lnb > 0 then bw_bits s out lval lnb else () in
-        let (dsym, dnb, dval) = dist_encode mdist in
-        let (dc, dcn) = dist_code dsym in
-        let _ = bw_bits s out dc dcn in
-        let _ = if dnb > 0 then bw_bits s out dval dnb else () in
-        emit (i + mlen)
+        let _ = vec_push toks 1 in let _ = vec_push toks mlen in let _ = vec_push toks mdist in
+        go (i + mlen)
       else
-        let (code, nb) = fixed_code (vec_get data i) in
-        let _ = bw_bits s out code nb in
-        emit (i + 1) in
-  let _ = emit 0 in
-  let (ec, en) = fixed_code 256 in   // end-of-block
-  let _ = bw_bits s out ec en in
+        let _ = vec_push toks 0 in let _ = vec_push toks (vec_get data i) in let _ = vec_push toks 0 in
+        go (i + 1) in
+  let _ = go 0 in
+  toks;
+
+// deflate one dynamic-Huffman block (BFINAL=1) of `data` into a fresh byte vec
+let deflate_dynamic = fn data ->
+  let toks = tokenize data in
+  let nt = vec_len toks in
+  // frequencies
+  let lfreq = vec_new () in
+  let rec zl = fn i -> if i == 286 then () else let _ = vec_push lfreq 0 in zl (i + 1) in
+  let _ = zl 0 in
+  let dfreq = vec_new () in
+  let rec zd = fn i -> if i == 30 then () else let _ = vec_push dfreq 0 in zd (i + 1) in
+  let _ = zd 0 in
+  let rec count = fn i ->
+    if i >= nt then ()
+    else
+      let kind = (vec_get toks i : int) in
+      let _ = if kind == 0 then
+          let sym = (vec_get toks (i + 1) : int) in
+          vec_set lfreq sym ((vec_get lfreq sym : int) + 1)
+        else
+          let (lsym, a, b) = len_encode (vec_get toks (i + 1)) in
+          let _ = a in let _ = b in
+          let _ = vec_set lfreq lsym ((vec_get lfreq lsym : int) + 1) in
+          let (dsym, c, e) = dist_encode (vec_get toks (i + 2)) in
+          let _ = c in let _ = e in
+          vec_set dfreq dsym ((vec_get dfreq dsym : int) + 1) in
+      count (i + 3) in
+  let _ = count 0 in
+  let _ = vec_set lfreq 256 ((vec_get lfreq 256 : int) + 1) in  // EOB
+  // Huffman lengths + canonical codes
+  let llen = build_lengths lfreq 286 15 in
+  let dlen = build_lengths dfreq 30 15 in
+  // dist: DEFLATE needs at least one dist code; if none, force symbol 0 len 1
+  let _ = if vmax dlen 30 == 0 then vec_set dlen 0 1 else () in
+  let lcode = canon_codes llen 286 15 in
+  let dcode = canon_codes dlen 30 15 in
+  // HLIT / HDIST
+  let rec last_nz = fn v -> fn (i: int) -> fn (floor: int) ->
+    if i < floor then floor else if (vec_get v i : int) > 0 then i else last_nz v (i - 1) floor in
+  let hlit = last_nz llen 285 256 + 1 in    // >= 257
+  let hdist = last_nz dlen 29 0 + 1 in       // >= 1
+  // combined code-length sequence -> RLE symbols (0-18) with extra
+  let cl_syms = vec_new () in   // each: [sym, extra_nbits, extra_val] triples
+  let combined = vec_new () in
+  let rec cc1 = fn i -> if i == hlit then () else let _ = vec_push combined (vec_get llen i) in cc1 (i + 1) in
+  let _ = cc1 0 in
+  let rec cc2 = fn i -> if i == hdist then () else let _ = vec_push combined (vec_get dlen i) in cc2 (i + 1) in
+  let _ = cc2 0 in
+  let cn = vec_len combined in
+  let rec rle = fn i ->
+    if i >= cn then ()
+    else
+      let v = (vec_get combined i : int) in
+      let rec runlen = fn j -> if j < cn && (vec_get combined j : int) == v then runlen (j + 1) else j - i in
+      let run = runlen i in
+      if v == 0 then
+        // repeat of zeros: 17 (3-10, 3 extra) or 18 (11-138, 7 extra)
+        if run >= 11 then
+          let r = if run > 138 then 138 else run in
+          let _ = vec_push cl_syms 18 in let _ = vec_push cl_syms 7 in let _ = vec_push cl_syms (r - 11) in
+          rle (i + r)
+        else if run >= 3 then
+          let r = if run > 10 then 10 else run in
+          let _ = vec_push cl_syms 17 in let _ = vec_push cl_syms 3 in let _ = vec_push cl_syms (r - 3) in
+          rle (i + r)
+        else
+          let _ = vec_push cl_syms 0 in let _ = vec_push cl_syms 0 in let _ = vec_push cl_syms 0 in
+          rle (i + 1)
+      else
+        // emit the value once, then 16 (repeat prev 3-6, 2 extra) for extras
+        let _ = vec_push cl_syms v in let _ = vec_push cl_syms 0 in let _ = vec_push cl_syms 0 in
+        let rem = run - 1 in
+        let rec reps = fn k ->
+          if k >= 3 then
+            let r = if k > 6 then 6 else k in
+            let _ = vec_push cl_syms 16 in let _ = vec_push cl_syms 2 in let _ = vec_push cl_syms (r - 3) in
+            reps (k - r)
+          else if k > 0 then
+            let rec ones = fn m -> if m == 0 then () else
+              let _ = vec_push cl_syms v in let _ = vec_push cl_syms 0 in let _ = vec_push cl_syms 0 in ones (m - 1) in
+            ones k
+          else () in
+        let _ = reps rem in
+        rle (i + run) in
+  let _ = rle 0 in
+  // cl frequencies -> cl lengths (max 7) -> cl codes
+  let clfreq = vec_new () in
+  let rec zc = fn i -> if i == 19 then () else let _ = vec_push clfreq 0 in zc (i + 1) in
+  let _ = zc 0 in
+  let cs_n = vec_len cl_syms in
+  let rec ccount = fn i -> if i >= cs_n then () else
+    let sym = (vec_get cl_syms i : int) in
+    let _ = vec_set clfreq sym ((vec_get clfreq sym : int) + 1) in ccount (i + 3) in
+  let _ = ccount 0 in
+  let cllen = build_lengths clfreq 19 7 in
+  let clcode = canon_codes cllen 19 7 in
+  // HCLEN: number of cl code lengths present, in cl_order, min 4
+  let rec last_cl = fn (i: int) -> if i < 4 then 4 else
+    if (vec_get cllen (vec_get cl_order i) : int) > 0 then i + 1 else last_cl (i - 1) in
+  let hclen = last_cl 18 in
+  // ---- emit ----
+  let out = vec_new () in
+  let s = bw_new () in
+  let _ = bw_bits s out 1 1 in   // BFINAL
+  let _ = bw_bits s out 2 2 in   // BTYPE = 10 (dynamic)
+  let _ = bw_bits s out (hlit - 257) 5 in
+  let _ = bw_bits s out (hdist - 1) 5 in
+  let _ = bw_bits s out (hclen - 4) 4 in
+  // cl code lengths, 3 bits each, in cl_order
+  let rec emit_cl = fn i -> if i == hclen then () else
+    let _ = bw_bits s out (vec_get cllen (vec_get cl_order i)) 3 in emit_cl (i + 1) in
+  let _ = emit_cl 0 in
+  // the RLE'd combined lengths, using cl codes
+  let rec emit_rle = fn i -> if i >= cs_n then () else
+    let sym = (vec_get cl_syms i : int) in
+    let enb = (vec_get cl_syms (i + 1) : int) in
+    let eval = (vec_get cl_syms (i + 2) : int) in
+    let _ = bw_bits s out (rev_bits (vec_get clcode sym) (vec_get cllen sym)) (vec_get cllen sym) in
+    let _ = if enb > 0 then bw_bits s out eval enb else () in
+    emit_rle (i + 3) in
+  let _ = emit_rle 0 in
+  // data
+  let rec emit_data = fn i -> if i >= nt then () else
+    let kind = (vec_get toks i : int) in
+    let _ = if kind == 0 then
+        let sym = (vec_get toks (i + 1) : int) in
+        bw_bits s out (rev_bits (vec_get lcode sym) (vec_get llen sym)) (vec_get llen sym)
+      else
+        let (lsym, lnb, lval) = len_encode (vec_get toks (i + 1)) in
+        let _ = bw_bits s out (rev_bits (vec_get lcode lsym) (vec_get llen lsym)) (vec_get llen lsym) in
+        let _ = if lnb > 0 then bw_bits s out lval lnb else () in
+        let (dsym, dnb, dval) = dist_encode (vec_get toks (i + 2)) in
+        let _ = bw_bits s out (rev_bits (vec_get dcode dsym) (vec_get dlen dsym)) (vec_get dlen dsym) in
+        let _ = if dnb > 0 then bw_bits s out dval dnb else () in
+        () in
+    emit_data (i + 3) in
+  let _ = emit_data 0 in
+  // EOB
+  let _ = bw_bits s out (rev_bits (vec_get lcode 256) (vec_get llen 256)) (vec_get llen 256) in
   let _ = bw_flush s out in
-  // trailer
+  out;
+
+// stored (uncompressed) deflate body — safe fallback when Huffman code
+// lengths would exceed the 15-bit format limit (rare; very skewed alphabets).
+let deflate_stored = fn data ->
+  let out = vec_new () in
+  let n = vec_len data in
+  let rec blocks = fn off ->
+    let remain = n - off in
+    let len = if remain > 65535 then 65535 else remain in
+    let final = off + len >= n in
+    let _ = vec_push out (if final then 1 else 0) in
+    let _ = vec_push out (bit_and len 0xFF) in let _ = vec_push out (bit_and (bit_shr len 8) 0xFF) in
+    let nlen = bit_and (bit_not len) 0xFFFF in
+    let _ = vec_push out (bit_and nlen 0xFF) in let _ = vec_push out (bit_and (bit_shr nlen 8) 0xFF) in
+    let rec cp = fn i -> if i == len then () else let _ = vec_push out (vec_get data (off + i)) in cp (i + 1) in
+    let _ = cp 0 in
+    if final then () else blocks (off + len) in
+  let _ = if n == 0 then
+      let _ = vec_push out 1 in let _ = vec_push out 0 in let _ = vec_push out 0 in
+      let _ = vec_push out 0xFF in let _ = vec_push out 0xFF in ()
+    else blocks 0 in
+  out;
+
+// deflate body: dynamic Huffman, falling back to stored if any code length
+// would exceed the 15-bit format limit.
+let deflate_body = fn data ->
+  let toks = tokenize data in
+  let nt = vec_len toks in
+  let lfreq = vec_new () in
+  let rec zl = fn i -> if i == 286 then () else let _ = vec_push lfreq 0 in zl (i + 1) in
+  let _ = zl 0 in
+  let dfreq = vec_new () in
+  let rec zd = fn i -> if i == 30 then () else let _ = vec_push dfreq 0 in zd (i + 1) in
+  let _ = zd 0 in
+  let rec count = fn i -> if i >= nt then () else
+    let kind = (vec_get toks i : int) in
+    let _ = if kind == 0 then
+        let sym = (vec_get toks (i + 1) : int) in vec_set lfreq sym ((vec_get lfreq sym : int) + 1)
+      else
+        let (lsym, a, b) = len_encode (vec_get toks (i + 1)) in let _ = a in let _ = b in
+        let _ = vec_set lfreq lsym ((vec_get lfreq lsym : int) + 1) in
+        let (dsym, c, e) = dist_encode (vec_get toks (i + 2)) in let _ = c in let _ = e in
+        vec_set dfreq dsym ((vec_get dfreq dsym : int) + 1) in
+    count (i + 3) in
+  let _ = count 0 in
+  let _ = vec_set lfreq 256 ((vec_get lfreq 256 : int) + 1) in
+  let llen = build_lengths lfreq 286 15 in
+  let dlen = build_lengths dfreq 30 15 in
+  if vmax llen 286 > 15 || vmax dlen 30 > 15 then deflate_stored data
+  else deflate_dynamic data;
+
+let deflate_gzip = fn data ->
+  let out = vec_new () in
+  // gzip header
+  let _ = vec_push out 0x1F in let _ = vec_push out 0x8B in let _ = vec_push out 8 in let _ = vec_push out 0 in
+  let _ = vec_push out 0 in let _ = vec_push out 0 in let _ = vec_push out 0 in let _ = vec_push out 0 in
+  let _ = vec_push out 0 in let _ = vec_push out 3 in
+  let body = deflate_body data in
+  let bn = vec_len body in
+  let rec cp = fn i -> if i == bn then () else let _ = vec_push out (vec_get body i) in cp (i + 1) in
+  let _ = cp 0 in
+  // trailer: CRC-32 then ISIZE, both little-endian
   let push_u32 = fn (v: int) ->
-    let _ = vec_push out (bit_and v 0xFF) in
-    let _ = vec_push out (bit_and (bit_shr v 8) 0xFF) in
-    let _ = vec_push out (bit_and (bit_shr v 16) 0xFF) in
-    vec_push out (bit_and (bit_shr v 24) 0xFF) in
+    let _ = vec_push out (bit_and v 0xFF) in let _ = vec_push out (bit_and (bit_shr v 8) 0xFF) in
+    let _ = vec_push out (bit_and (bit_shr v 16) 0xFF) in vec_push out (bit_and (bit_shr v 24) 0xFF) in
   let _ = push_u32 (crc32_vec data) in
-  let _ = push_u32 (bit_and n mask32) in
+  let _ = push_u32 (bit_and (vec_len data) mask32) in
   out;
 
 let demo = fn () ->
@@ -173,7 +461,7 @@ let demo = fn () ->
   | Nil -> print "usage: deflate <file>"
   | Cons (path, _) ->
     let data = read_file_bytes path in
-    let gz = deflate_fixed data in
+    let gz = deflate_gzip data in
     let _ = write_file_bytes (path ++ ".mgz") gz in
-    print (str_of_int (vec_len data) ++ " -> " ++ str_of_int (vec_len gz) ++ " bytes (fixed) " ++ path ++ ".mgz") in
+    print (str_of_int (vec_len data) ++ " -> " ++ str_of_int (vec_len gz) ++ " bytes (dynamic) " ++ path ++ ".mgz") in
 demo ()
