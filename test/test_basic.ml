@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.53" Version.v "0.1.53";
+  check "version is 0.1.54" Version.v "0.1.54";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,26 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.54 (reserved-name hygiene, T-1): a user-defined top-level fn named
+     after a Mere builtin (`run`, `even`, `show`, ...) was intercepted by the
+     builtin's direct-call App-arm in C codegen — `let run = fn x -> ...` then
+     `run 21` emitted `__lang_run(...)` (shell exec) instead of calling the
+     user fn. The interpreter already shadowed correctly (later binding wins);
+     only C had the bug. Builtin App-arms now guard on `not (user_shadows
+     name)`, so a user binding wins at the call site too. *)
+  check "v0.1.54: user-defined `run` computes via the user fn (interp)"
+    (Pipeline.process "let run = fn (x: int) -> x * 2 in run 21")
+    "42";
+  assert_contains "v0.1.54: shadowed `run` calls the user fn in C, not __lang_run"
+    (vec_codegen_c "let run = fn (x: int) -> x * 2 in run 21")
+    "run(21LL)";
+  check "v0.1.54: user-defined `even` shadows the builtin (interp)"
+    (Pipeline.process "let even = fn (n: int) -> n + 100 in even 5")
+    "105";
+  assert_contains "v0.1.54: shadowed `even` calls the user fn in C"
+    (vec_codegen_c "let even = fn (n: int) -> n + 100 in even 5")
+    "even(5LL)";
+
   (* v0.1.53 (records/modules dogfood): lowercase record type names are the
      ML convention (`type 'a list`, `option`), and `type addr = {...}` was
      accepted — but the literal `addr { ... }` only parsed for CAPITALIZED

@@ -434,6 +434,20 @@ let current_expected_ty : Ast.ty option ref = ref None
    emit_expr Let (binding the let's name). *)
 let current_var_types : (string * Ast.ty) list ref = ref []
 
+(* T-1 (reserved-name hygiene): a user-defined name — a local, a captured env
+   field, a lifted inner fn, or a top-level fn — must shadow a same-named
+   builtin at call sites. The builtin App-arms below guard on `not
+   (user_shadows name)` so `let run = fn ... in run x` calls the user's `run`
+   instead of the shell-exec builtin. This is strictly safe: `user_shadows` is
+   false unless the user actually bound that name, so programs that don't
+   shadow a builtin are unaffected. Mirrors the older per-builtin guards on
+   `join` / `is_digit` / `is_alpha` / `is_space`. *)
+let user_shadows name =
+  List.mem_assoc name !current_var_types
+  || List.mem_assoc name !current_env_subst
+  || Hashtbl.mem inner_lifts name
+  || Hashtbl.mem toplevel_fn_names name
+
 (* Fresh names for anonymous closures + their env structs. *)
 let anon_closure_counter = ref 0
 let fresh_anon_names () =
@@ -1818,7 +1832,7 @@ let rec emit_expr (e : Ast.expr) : string =
      (* Q-012: spawn a `unit -> unit` closure on a fresh OS thread. Copy the
         closure value onto the heap so the child owns it, then pthread_create
         the trampoline. Returns a ThreadHandle. *)
-     | Ast.Var "spawn" ->
+     | Ast.Var "spawn" when not (user_shadows "spawn") ->
        "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
            __mere_unit_closure* __c = (__mere_unit_closure*)malloc(sizeof(__mere_unit_closure)); \
            __c->env = __cl.env; __c->fn = __cl.fn; \
@@ -1943,13 +1957,13 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "float_of_str" ->
        Printf.sprintf "(atof(%s))" (emit_expr arg)
      (* Phase 34.4: libm math functions — auto-linked via clang -lm *)
-     | Ast.Var "sqrt" ->
+     | Ast.Var "sqrt" when not (user_shadows "sqrt") ->
        Printf.sprintf "sqrt(%s)" (emit_expr arg)
-     | Ast.Var "sin" ->
+     | Ast.Var "sin" when not (user_shadows "sin") ->
        Printf.sprintf "sin(%s)" (emit_expr arg)
-     | Ast.Var "cos" ->
+     | Ast.Var "cos" when not (user_shadows "cos") ->
        Printf.sprintf "cos(%s)" (emit_expr arg)
-     | Ast.Var "tan" ->
+     | Ast.Var "tan" when not (user_shadows "tan") ->
        Printf.sprintf "tan(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e) ->
        Printf.sprintf "pow(%s, %s)" (emit_expr a_e) (emit_expr arg)
@@ -1998,9 +2012,9 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr s_e) (emit_expr arg)
      | Ast.Var "str_rev" ->
        Printf.sprintf "__lang_str_rev(%s)" (emit_expr arg)
-     | Ast.Var "not" ->
+     | Ast.Var "not" when not (user_shadows "not") ->
        Printf.sprintf "(!(%s))" (emit_expr arg)
-     | Ast.Var "abs" ->
+     | Ast.Var "abs" when not (user_shadows "abs") ->
        (* v0.1.42: long long temporaries — these survived the v0.1.41
           64-bit migration with C int temps and silently truncated. *)
        Printf.sprintf "({ long long __a = (%s); __a < 0 ? -__a : __a; })" (emit_expr arg)
@@ -2028,19 +2042,19 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((%s) << (%s))" (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "bit_shr"; _ }, a_e) ->
        Printf.sprintf "((%s) >> (%s))" (emit_expr a_e) (emit_expr arg)
-     | Ast.Var "chr" ->
+     | Ast.Var "chr" when not (user_shadows "chr") ->
        (* Phase 36: chr n — int in [0,255] → single-byte str via char_table *)
        Printf.sprintf "__lang_char_at_chr(%s)" (emit_expr arg)
-     | Ast.Var "ord" ->
+     | Ast.Var "ord" when not (user_shadows "ord") ->
        (* Phase 36: ord s — single-byte str → int *)
        Printf.sprintf "((int)(unsigned char)((%s)[0]))" (emit_expr arg)
      | Ast.Var "to_upper" ->
        Printf.sprintf "__lang_to_upper(%s)" (emit_expr arg)
      | Ast.Var "to_lower" ->
        Printf.sprintf "__lang_to_lower(%s)" (emit_expr arg)
-     | Ast.Var "even" ->
+     | Ast.Var "even" when not (user_shadows "even") ->
        Printf.sprintf "(((%s) %% 2) == 0)" (emit_expr arg)
-     | Ast.Var "odd" ->
+     | Ast.Var "odd" when not (user_shadows "odd") ->
        Printf.sprintf "(((%s) %% 2) != 0)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "gcd"; _ }, a_e) ->
        Printf.sprintf "__lang_gcd(%s, %s)" (emit_expr a_e) (emit_expr arg)
@@ -2083,7 +2097,7 @@ let rec emit_expr (e : Ast.expr) : string =
        uses_write_file_bytes := true;
        Printf.sprintf "__lang_write_file_bytes(%s, %s)"
          (emit_expr path_e) (emit_expr arg)
-     | Ast.Var "args" ->
+     | Ast.Var "args" when not (user_shadows "args") ->
        (* Native CLI: argv[1..] as a str list. The unit arg has no effect;
           evaluate it for side-effect-freedom, then build the list. *)
        args_used := true;
@@ -2098,43 +2112,43 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "utf8_chars" ->
        str_split_used := true;
        Printf.sprintf "__lang_utf8_chars(%s)" (emit_expr arg)
-     | Ast.Var "read_line" ->
+     | Ast.Var "read_line" when not (user_shadows "read_line") ->
        (* v0.1.26 (mlog dogfood): one stdin line at a time — the streaming
           counterpart of read_stdin. Was interpreter-only until a
           constant-memory line processor needed it natively. *)
        Printf.sprintf "((void)(%s), __lang_read_line())" (emit_expr arg)
-     | Ast.Var "run" ->
+     | Ast.Var "run" when not (user_shadows "run") ->
        (* v0.1.13 (mk dogfood): run a command line, return its exit code. *)
        Printf.sprintf "__lang_run(%s)" (emit_expr arg)
-     | Ast.Var "tty_raw" ->
+     | Ast.Var "tty_raw" when not (user_shadows "tty_raw") ->
        (* v0.1.18 (mrog dogfood): raw terminal mode on stdin. *)
        Printf.sprintf "((void)(%s), __lang_tty_raw())" (emit_expr arg)
-     | Ast.Var "tty_restore" ->
+     | Ast.Var "tty_restore" when not (user_shadows "tty_restore") ->
        Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
-     | Ast.Var "read_key" ->
+     | Ast.Var "read_key" when not (user_shadows "read_key") ->
        Printf.sprintf "((void)(%s), __lang_read_key())" (emit_expr arg)
-     | Ast.Var "random_int" ->
+     | Ast.Var "random_int" when not (user_shadows "random_int") ->
        (* v0.1.20 (mrog dogfood P3): uniform int in [0, n). *)
        Printf.sprintf "__lang_random_int(%s)" (emit_expr arg)
-     | Ast.Var "list_dir" ->
+     | Ast.Var "list_dir" when not (user_shadows "list_dir") ->
        (* Phase 44: list_dir path — sorted entries (excl. `.` / `..`), diff = 0
           with interp. Returns list_str, so set the gating flag *)
        list_dir_used := true;
        Printf.sprintf "__lang_list_dir(%s)" (emit_expr arg)
-     | Ast.Var "mkdir_p" ->
+     | Ast.Var "mkdir_p" when not (user_shadows "mkdir_p") ->
        (* Phase 44: equivalent to mkdir -p; skip if already exists *)
        Printf.sprintf "__lang_mkdir_p(%s)" (emit_expr arg)
-     | Ast.Var "file_exists" ->
+     | Ast.Var "file_exists" when not (user_shadows "file_exists") ->
        (* v0.1.15 (mk dogfood P3): whether a path exists (guards file_mtime,
           which raises on a missing path). *)
        Printf.sprintf "__lang_file_exists(%s)" (emit_expr arg)
-     | Ast.Var "file_size" ->
+     | Ast.Var "file_size" when not (user_shadows "file_size") ->
        (* v0.1.21 (mwasm dogfood P1): true byte length via stat. *)
        Printf.sprintf "__lang_file_size(%s)" (emit_expr arg)
-     | Ast.Var "file_mtime" ->
+     | Ast.Var "file_mtime" when not (user_shadows "file_mtime") ->
        (* Phase 44.6: return stat(path).st_mtime as float (seconds) *)
        Printf.sprintf "__lang_file_mtime(%s)" (emit_expr arg)
-     | Ast.Var "sleep_ms" ->
+     | Ast.Var "sleep_ms" when not (user_shadows "sleep_ms") ->
        (* Phase 44.6: usleep(ms * 1000), returning unit (0) *)
        Printf.sprintf "__lang_sleep_ms(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "char_at"; _ }, s_e) ->
@@ -2190,7 +2204,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "atoll(%s)" (emit_expr arg)
      | Ast.Var "str_unescape" ->
        Printf.sprintf "__lang_str_unescape(%s)" (emit_expr arg)
-     | Ast.Var "fail" ->
+     | Ast.Var "fail" when not (user_shadows "fail") ->
        (* Phase 22.4/22.5: fail msg — noreturn helper followed by a default
           literal chosen based on the expected context type. Primitive types
           use dedicated helpers; non-primitive (tuple / record / variant)
@@ -2219,7 +2233,7 @@ let rec emit_expr (e : Ast.expr) : string =
         | other ->
           let c_ty = inline_c_type_of other in
           Printf.sprintf "({ __lang_fail_impl(%s); (%s){0}; })" arg_c c_ty)
-     | Ast.Var "exit" ->
+     | Ast.Var "exit" when not (user_shadows "exit") ->
        (* `exit n` — call libc exit(n) (noreturn), then a default value of the
           expected type so the statement-expression type-checks (unreachable).
           Closes mq PAIN P1's last item (native process exit code). Mirrors
@@ -2237,11 +2251,11 @@ let rec emit_expr (e : Ast.expr) : string =
          | _ -> "0"
        in
        Printf.sprintf "({ exit(%s); %s; })" arg_c default
-     | Ast.Var "fst" ->
+     | Ast.Var "fst" when not (user_shadows "fst") ->
        "(" ^ emit_expr arg ^ ").f0"
-     | Ast.Var "snd" ->
+     | Ast.Var "snd" when not (user_shadows "snd") ->
        "(" ^ emit_expr arg ^ ").f1"
-     | Ast.Var "show" ->
+     | Ast.Var "show" when not (user_shadows "show") ->
        (* Polymorphic builtin — dispatch to the type-specialized
           show_<tag> function based on arg's inferred type. *)
        let arg_ty =
@@ -2518,7 +2532,7 @@ let rec emit_expr (e : Ast.expr) : string =
             mere_owned_vec_%s_push(__new, mere_vec_%s_get(__vc, __i)); \
           } __new; })"
          (emit_expr arg) t_tag t_tag t_tag
-     | Ast.Var "len" ->
+     | Ast.Var "len" when not (user_shadows "len") ->
        (* Phase 15.11: len dispatches at compile time based on arg.ty.
           Vec / OwnedVec / StrBuf / Map → route to the existing _len helpers;
           str → strlen; tuple → static arity constant. *)
