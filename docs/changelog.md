@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.54 — 2026-07-17
+
+_User definitions now shadow builtins at the call site (the recurring
+reserved-name pain, attacked at its other root). A Scheme-interpreter
+probe named a function `run`; on the C backend that call compiled to
+`__lang_run(...)` — the shell-exec builtin — because the builtin's
+direct-call App-arm matched the name before the ordinary user-call path.
+The interpreter had always shadowed correctly (a later `let` binding
+wins), so only C was wrong. This is the same family as the `join` /
+`is_digit` / `is_alpha` / `is_space` guards added case-by-case earlier:
+a builtin App-arm should defer to a same-named user binding. Rather than
+keep playing whack-a-mole, a single `user_shadows` helper (local /
+captured / lifted-inner / top-level) now guards ~30 collision-prone
+builtin arms (`run`, `spawn`, `even`, `odd`, `abs`, `show`, `fail`,
+`exit`, `sqrt`, `sin`, `cos`, `tan`, `chr`, `ord`, `args`, `len`, `not`,
+`fst`, `snd`, `sleep_ms`, `random_int`, `file_*`, `mkdir_p`, `list_dir`,
+`read_line`, `read_key`, `tty_*`). The guard is strictly safe: it fires
+only when the user actually bound that name, so programs that don't
+shadow a builtin are byte-for-byte unaffected. This addresses the Mere
+builtin half of the reserved-name problem; the C-keyword/POSIX half is
+still handled by the `c_safe_name` suffix sanitizer, and full top-level
+namespacing (which would subsume both) remains deferred. suite: 2197
+passed / 0 failed (4 new tests)._
+
+---
+
 ## v0.1.53 — 2026-07-17
 
 _Lowercase record types, and one more reserved name (found by a
