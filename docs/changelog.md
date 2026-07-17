@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.52 — 2026-07-17
+
+_Inner functions get uncurried too (the real win the gzip probe was
+pointing at). v0.1.27 gave curried TOP-LEVEL functions an uncurried
+`__direct` twin so a saturated N-arg call skips the closure chain; inner
+(nested) functions never got it, so a curried inner **recursive**
+function compiled to a chain of anonymous closures — allocating a fresh
+env from the never-freed region on every partial application AND every
+recursive step. In a hot loop that is catastrophic: a 4-arg curried
+inner rec fn called a million times allocated **769 MB** (the same work
+with a single tuple arg: 1.4 MB), and gzip's `huff_decode` made
+inflating 1 MB cost **484 MB**. Now curried inner-lifted functions
+(≥ 2 params, concrete types) also get a `__direct` twin, and saturated
+call sites — including the recursive self-call — use it. Measured: the
+1M-iteration microbenchmark **769 MB → 1.46 MB (~530x)**; gzip inflate
+of 1 MB **484 MB → 34 MB (~14x)**, still byte-identical with a verified
+CRC-32. The single-param closure form stays for partial application, so
+the change is additive and byte-stable (self-host emission unchanged).
+suite: 2191 passed / 0 failed (3 new tests). This closes the memory
+question the C-2 gzip dogfood opened — it was inner-fn currying, not the
+bytes representation._
+
+---
+
 ## v0.1.51 — 2026-07-17
 
 _Three C-codegen bugs a gzip inflater flushed out. Writing a real
