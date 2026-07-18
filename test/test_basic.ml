@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.65" Version.v "0.1.65";
+  check "version is 0.1.66" Version.v "0.1.66";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,68 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
+     function definition. A definition line (trimmed) ends in `{` and has an
+     `mu_`-prefixed identifier immediately before its first `(`. Reports the
+     first repeated symbol, else "ok". *)
+  let no_dup_c_defs c =
+    let seen = Hashtbl.create 256 in
+    let dup = ref "" in
+    List.iter (fun line ->
+      let t = String.trim line in
+      let n = String.length t in
+      if n >= 1 && t.[n-1] = '{' then
+        match String.index_opt t '(' with
+        | Some i ->
+          let before = String.sub t 0 i in
+          let name =
+            List.fold_left (fun acc s -> if String.length s > 0 then s else acc)
+              "" (String.split_on_char ' ' before) in
+          let name =
+            if String.length name > 0 && name.[0] = '*'
+            then String.sub name 1 (String.length name - 1) else name in
+          if String.length name > 3 && String.sub name 0 3 = "mu_" then begin
+            if Hashtbl.mem seen name then (if !dup = "" then dup := name)
+            else Hashtbl.add seen name ()
+          end
+        | None -> ()
+    ) (String.split_on_char '\n' c);
+    if !dup = "" then "ok" else ("dup:" ^ !dup)
+  in
+  (* This 8-fn mutual-recursion group over two Maps of different variant
+     value types reproduces the double-emission: several functions were
+     monomorphized at a concrete region, and per-use-site arrows that
+     differ only in a region variable (which ty_tag erases) accumulated as
+     distinct specs that mangled to one C symbol → two definitions →
+     "redefinition" build failure. The fix dedups specs by emitted symbol.
+     Without it this program yields 16 duplicate definitions. *)
+  let dup_repro_program =
+    "type Val = VI of int | VN;\n\
+     type Meth = Meth of int;\n\
+     type Flow = FN of Val | FR of Val;\n\
+     let rec ev = fn env -> fn ms -> fn (n: int) ->\n\
+      \  if n <= 0 then (if map_has env \"k\" then map_get env \"k\" else call ms n) else ev env ms (n - 1)\n\
+     and call = fn ms -> fn (n: int) ->\n\
+      \  match map_get ms \"f\" with Meth k -> let fr = map_new () in (match rs fr ms n with FN v -> v | FR v -> v)\n\
+     and rs = fn env -> fn ms -> fn (n: int) ->\n\
+      \  if n <= 0 then FN VN else (match es env ms n with FR v -> FR v | FN x -> rs env ms (n - 1))\n\
+     and es = fn env -> fn ms -> fn (n: int) ->\n\
+      \  if n == 0 then FN (ev env ms n) else ri env ms n\n\
+     and ri = fn env -> fn ms -> fn (n: int) ->\n\
+      \  if map_has env \"k\" then FN (ev env ms n) else rw env ms n\n\
+     and rw = fn env -> fn ms -> fn (n: int) ->\n\
+      \  if n <= 0 then FN VN else (match rs env ms (n-1) with FR v -> FR v | FN x -> rc env ms n)\n\
+     and rc = fn env -> fn ms -> fn (n: int) ->\n\
+      \  if wm env ms n then FN (ev env ms n) else FN VN\n\
+     and wm = fn env -> fn ms -> fn (n: int) -> map_has env \"k\";\n\
+     let m = map_new () in\n\
+     let d = map_new () in\n\
+     let _ = map_set m \"k\" (VI 5) in\n\
+     let _ = map_set d \"f\" (Meth 1) in\n\
+     match ev m d 3 with VI r -> r | VN -> 0"
+  in
+  check "v0.1.66: no duplicate C fn definitions (multi-inst spec dedup)"
+    (no_dup_c_defs (vec_codegen_c dup_repro_program)) "ok";
   (* v0.1.65 (mere-ruby dogfood): shortest round-trip float formatting.
      %.12g lost information — str_of_float (0.1 + 0.2) printed "0.3", and
      the original double was unrecoverable from the string. All four

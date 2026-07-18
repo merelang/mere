@@ -3686,6 +3686,22 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   List.concat_map (fun s ->
     match Hashtbl.find_opt multi_specs s.sname with
     | Some specs ->
+      (* v0.1.66 (mere-ruby dogfood): dedup specs by their emitted C symbol
+         before producing fn_decls. The spec list is grown across resolution
+         passes from per-use-site arrows, so a fn called from many sites can
+         accumulate several specs that mangle to the SAME name (identical
+         concrete type, or types differing only in a region variable that
+         ty_tag erases). Emitting one fn_decl per spec then produces
+         duplicate C definitions → "redefinition" build failure. Keying on
+         mangled_inst_name collapses same-symbol specs; distinct
+         instantiations (distinct symbols) are preserved. *)
+      let specs =
+        let seen = Hashtbl.create 4 in
+        List.filter (fun (arrow, _) ->
+          let k = mangled_inst_name s.sname arrow in
+          if Hashtbl.mem seen k then false
+          else (Hashtbl.add seen k (); true)) specs
+      in
       (* Emit one fn_decl per instantiation, mangled name + cloned body. *)
       List.map (fun (arrow, cloned_body) ->
         match Ast.walk arrow with

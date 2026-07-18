@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.66 — 2026-07-18
+
+_A C-backend duplicate-definition bug, found by the mere-ruby dogfood's
+first method milestone. Adding `def` / method calls turned the
+interpreter's evaluator into one large mutual-recursion group threading
+two Maps (locals and methods) through eleven functions, and the C backend
+refused to compile it: eighteen functions were each emitted twice, a
+"redefinition" error. The cause was in per-instantiation
+specialization. A polymorphic function's specialization list is grown,
+across resolution passes, from one concrete arrow type per use site. When
+a function is used from many sites, arrows that differ only in a region
+type variable — which the mangled-name tag erases — accumulate as
+distinct specs that all mangle to the SAME C symbol, so one fn_decl was
+emitted per spec and the identical definitions collided. The two later
+re-scan branches already deduped their arrows; the fix dedups the spec
+list by its emitted C symbol at the single emission chokepoint, so
+same-symbol specs collapse while genuinely distinct instantiations are
+preserved. With the fix mere-ruby's evaluator compiles clean and runs
+`def` / recursion / `return` byte-identical to `ruby`. suite: 2229 passed
+/ 0 failed (1 new test)._
+
+---
+
 ## v0.1.65 — 2026-07-18
 
 _Shortest round-trip float formatting, forced by the newest dogfood. The
