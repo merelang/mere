@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.61 — 2026-07-18
+
+_An extern-in-closure capture bug, found the first time the client side of
+the TCP FFI was driven. The dogfood is mhttp — an HTTP/1.1 client in pure
+Mere over raw `tcp_connect` / `tcp_write` / `tcp_read` (mkv used the server
+side; this is the first `tcp_connect`). Its `send_all` helper called
+`tcp_write` from inside an inner recursive closure, and the C backend
+refused to compile: the closure-lift analysis captured `tcp_write` as a
+free variable and referenced it through the env as the namespaced
+`mu_tcp_write`, while the extern itself is emitted raw. The cause: the
+lift's "globals to exclude from capture" set held top-level fns and
+builtins but not extern fns — so an extern used as a value inside a helper
+was wrongly treated as a captured local. Externs are globals, referenced
+directly in the generated C, so they now join that excluded set. With the
+fix, mhttp parses status lines, case-insensitive headers, Content-Length
+bodies, and chunked transfer-encoding, verified byte-for-byte against curl
+(local server, both framings) and against a live server. suite: 2216
+passed / 0 failed (2 new tests)._
+
+---
+
 ## v0.1.60 — 2026-07-18
 
 _int_of_str semantics pinned across all four backends, caught by a

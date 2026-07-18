@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.60" Version.v "0.1.60";
+  check "version is 0.1.61" Version.v "0.1.61";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,30 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.61 (mhttp dogfood): an extern fn used as a free variable inside
+     an inner closure was captured by the lift analysis and referenced as
+     the namespaced `mu_<name>`, while the extern is emitted raw — a
+     compile error. Externs are globals (referenced directly), so they now
+     join top-level fns / builtins in the lift's excluded `known` set.
+     First hit driving a client-side FFI (tcp_connect + tcp_write) from a
+     helper; the assertion pins the fix with a stand-in extern. *)
+  assert_no_contains "v0.1.61: extern used in an inner closure is not captured/namespaced"
+    (vec_codegen_c
+       "extern fn tcp_write: int -> int -> int -> int;\n\
+        let g = fn (fd: int) -> \
+        \  let rec loop = fn (i: int) -> if i == 0 then 0 else let _ = tcp_write fd i i in loop (i - 1) in \
+        \  loop 3 \
+        in g 7")
+    "mu_tcp_write";
+  assert_contains "v0.1.61: the extern is still emitted/called raw"
+    (vec_codegen_c
+       "extern fn tcp_write: int -> int -> int -> int;\n\
+        let g = fn (fd: int) -> \
+        \  let rec loop = fn (i: int) -> if i == 0 then 0 else let _ = tcp_write fd i i in loop (i - 1) in \
+        \  loop 3 \
+        in g 7")
+    "tcp_write(";
+
   (* v0.1.60 (Result-pipeline probe): int_of_str semantics pinned across
      all four backends — strict decimal, failing (try_or-able) on invalid
      input. The compiled backends were atoi-style (silent 0 / partial
