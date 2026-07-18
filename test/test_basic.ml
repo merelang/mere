@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.61" Version.v "0.1.61";
+  check "version is 0.1.62" Version.v "0.1.62";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,23 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.62 (mdns dogfood): the native UDP FFI — udp_open / udp_send /
+     udp_recv over connected SOCK_DGRAM sockets, reusing the flat arena
+     and tcp_close / tcp_set_timeout. The first datagram-socket capability
+     (mkv/mhttp were TCP). Emitted as self-contained static definitions
+     for a native build, like the tcp_* externs. *)
+  assert_contains "v0.1.62: udp externs emit self-contained native definitions"
+    (vec_codegen_c
+       "extern fn udp_open: str -> int -> int;\n\
+        extern fn udp_send: int -> int -> int -> int;\n\
+        let fd = udp_open \"8.8.8.8\" 53 in udp_send fd 0 12")
+    "static int udp_open(";
+  assert_contains "v0.1.62: udp_recv is emitted"
+    (vec_codegen_c
+       "extern fn udp_recv: int -> int -> int -> int;\n\
+        let fd = 3 in udp_recv fd 0 512")
+    "static int udp_recv(";
+
   (* v0.1.61 (mhttp dogfood): an extern fn used as a free variable inside
      an inner closure was captured by the lift analysis and referenced as
      the namespaced `mu_<name>`, while the extern is emitted raw — a

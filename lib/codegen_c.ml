@@ -4659,6 +4659,7 @@ let emit_closure_adapter (ce : closure_emission) : string =
 let native_ffi_names =
   [ "tcp_connect"; "tcp_listen"; "tcp_accept";
     "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
+    "udp_open"; "udp_send"; "udp_recv";  (* v0.1.62: mdns dogfood *)
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
     "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
@@ -4907,6 +4908,31 @@ let native_ffi_runtime =
       "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }";
       "static int tcp_read(int fd, int p, int cap) { return (int)read(fd, __mem + p, (size_t)cap); }";
       "static int tcp_close(int fd) { close(fd); return 0; }";
+      "/* v0.1.62 (mdns dogfood): connected UDP datagram socket. udp_open";
+      "   resolves host:port and connect()s a SOCK_DGRAM fd so send/recv work";
+      "   without per-call addresses; udp_send writes one datagram from the";
+      "   flat arena at [p, p+len); udp_recv reads one datagram into [p, ...)";
+      "   and returns its length (or -1 on timeout/error). Reuses tcp_close";
+      "   and tcp_set_timeout, which are protocol-agnostic (any fd). */";
+      "static int udp_open(const char* host, int port) {";
+      "  struct addrinfo hints, *res; char portstr[16];";
+      "  memset(&hints, 0, sizeof hints);";
+      "  hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_DGRAM;";
+      "  snprintf(portstr, sizeof portstr, \"%d\", port);";
+      "  if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;";
+      "  int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);";
+      "  if (fd < 0) { freeaddrinfo(res); return -1; }";
+      "  if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) { close(fd); freeaddrinfo(res); return -1; }";
+      "  freeaddrinfo(res); return fd;";
+      "}";
+      "static int udp_send(int fd, int p, int len) {";
+      "  ssize_t n = send(fd, __mem + p, (size_t)len, 0);";
+      "  return (int)n;";
+      "}";
+      "static int udp_recv(int fd, int p, int cap) {";
+      "  ssize_t n = recv(fd, __mem + p, (size_t)cap, 0);";
+      "  return (int)n;";
+      "}";
       "static int tcp_set_timeout(int fd, int ms) {";
       "  struct timeval tv; tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;";
       "  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);";
