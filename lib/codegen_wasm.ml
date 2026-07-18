@@ -2194,8 +2194,15 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr end_e;
     emit_instr "call $__lang_substring"
   | Ast.App ({ node = Ast.Var "int_of_str"; _ }, arg) ->
+    (* v0.1.60: the helper now validates strict decimal — optional
+       whitespace, optional sign, digits — and fails on anything else,
+       matching the interpreter instead of atoi's silent 0. The message
+       is interned here and passed in. *)
     int_of_str_used := true;
+    fail_used := true;
+    let msg_off = intern_show_str "int_of_str: not a valid int" in
     emit_expr arg;
+    emit_instr (Printf.sprintf "i32.const %d" msg_off);
     emit_instr "call $__lang_int_of_str"
   | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
     (* str_of_int is an alias for show_int. *)
@@ -4624,30 +4631,66 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (local.get $r))
-  ;; Phase 26.1: int_of_str s — parse leading sign + digits. Stops at
-  ;; first non-digit byte. Mirrors atoi semantics.
-  (func $__lang_int_of_str (param $s i32) (result i32)
+  ;; v0.1.60: int_of_str s msg — strict decimal parse
+  ;; (WS* [+-]? DIGIT+ WS*); anything else calls $__lang_fail with the
+  ;; interned msg (try_or-able), matching the interpreter instead of the
+  ;; old atoi semantics that silently returned 0 / a partial prefix.
+  (func $__lang_int_of_str (param $s i32) (param $msg i32) (result i32)
     (local $i i32) (local $sign i32) (local $acc i32) (local $c i32)
+    (local $nd i32)
     (local.set $i (i32.const 0))
     (local.set $sign (i32.const 1))
     (local.set $acc (i32.const 0))
-    (local.set $c (i32.load8_u (local.get $s)))
+    (local.set $nd (i32.const 0))
+    (block $lead_done                       ;; skip leading whitespace
+      (loop $lead
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (br_if $lead_done (i32.eqz (i32.or (i32.or
+          (i32.eq (local.get $c) (i32.const 32))
+          (i32.eq (local.get $c) (i32.const 9)))
+          (i32.or
+            (i32.eq (local.get $c) (i32.const 13))
+            (i32.eq (local.get $c) (i32.const 10))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lead)))
+    (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
     (if (i32.eq (local.get $c) (i32.const 45))  ;; '-'
       (then
         (local.set $sign (i32.const -1))
-        (local.set $i (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1))))
+      (else
+        (if (i32.eq (local.get $c) (i32.const 43))  ;; '+'
+          (then (local.set $i (i32.add (local.get $i) (i32.const 1)))))))
     (block $end
       (loop $lp
         (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
-        (br_if $end (i32.eqz (local.get $c)))
         (br_if $end (i32.or
           (i32.lt_s (local.get $c) (i32.const 48))
           (i32.gt_s (local.get $c) (i32.const 57))))
         (local.set $acc (i32.add
           (i32.mul (local.get $acc) (i32.const 10))
           (i32.sub (local.get $c) (i32.const 48))))
+        (local.set $nd (i32.add (local.get $nd) (i32.const 1)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
+    (block $trail_done                      ;; skip trailing whitespace
+      (loop $trail
+        (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (br_if $trail_done (i32.eqz (i32.or (i32.or
+          (i32.eq (local.get $c) (i32.const 32))
+          (i32.eq (local.get $c) (i32.const 9)))
+          (i32.or
+            (i32.eq (local.get $c) (i32.const 13))
+            (i32.eq (local.get $c) (i32.const 10))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $trail)))
+    (if (i32.or
+          (i32.eqz (local.get $nd))          ;; no digits
+          (i32.ne (local.get $c) (i32.const 0)))  ;; junk after
+      (then
+        (call $__lang_fail (local.get $msg))
+        (drop)
+        (return (i32.const 0))))
     (i32.mul (local.get $acc) (local.get $sign)))
   ;; Phase 26.1: str_unescape s — replace backslash-escape sequences
   ;; (\n, \t, \r, \\ , \", \/) with the actual byte. Region-allocated.

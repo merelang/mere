@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.59" Version.v "0.1.59";
+  check "version is 0.1.60" Version.v "0.1.60";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,29 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.60 (Result-pipeline probe): int_of_str semantics pinned across
+     all four backends — strict decimal, failing (try_or-able) on invalid
+     input. The compiled backends were atoi-style (silent 0 / partial
+     prefix) while the interpreter raised: a measured divergence (the
+     same program printed different errors on interp vs C). *)
+  check "v0.1.60: int_of_str fails on invalid input, caught by try_or (interp)"
+    (Pipeline.process "try_or (fn u -> int_of_str \"abc\") (0 - 1)")
+    "-1";
+  check "v0.1.60: int_of_str accepts sign + surrounding whitespace (interp)"
+    (Pipeline.process "int_of_str \" -42 \"") "-42";
+  check "v0.1.60: int_of_str rejects hex-style strings now (spec is strict decimal)"
+    (Pipeline.process "try_or (fn u -> int_of_str \"0x1F\") (0 - 1)")
+    "-1";
+  assert_contains "v0.1.60: C emits the validating helper, not bare atoll"
+    (vec_codegen_c "int_of_str \"7\"")
+    "__lang_int_of_str";
+  assert_contains "v0.1.60: Wasm helper validates and can fail"
+    (Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog "int_of_str \"7\""))
+    "$__lang_int_of_str";
+  assert_contains "v0.1.60: LLVM emits the validating helper, not bare atoi"
+    (Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog "int_of_str \"7\""))
+    "@__lang_int_of_str";
+
   (* v0.1.59 (mgrep dogfood): streaming per-line file input — file_open /
      file_read_line / file_close. read_file loads whole files (a 94 MB
      grep peaked at 1.26 GB RSS); these read one line at a time, and EOF
