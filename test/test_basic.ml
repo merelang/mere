@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.62" Version.v "0.1.62";
+  check "version is 0.1.63" Version.v "0.1.63";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,16 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.63 (mbench dogfood): now_ms — a native monotonic clock (ms since
+     an arbitrary epoch, CLOCK_MONOTONIC) so a Mere program can time ITSELF
+     instead of shelling out to `time`. Emitted as a self-contained static
+     definition for the native build, like the tcp_* / udp_* externs. *)
+  assert_contains "v0.1.63: now_ms extern emits a self-contained native definition"
+    (vec_codegen_c
+       "extern fn now_ms: unit -> int;\n\
+        let a = now_ms () in let b = now_ms () in b - a")
+    "static long long now_ms(";
+
   (* v0.1.62 (mdns dogfood): the native UDP FFI — udp_open / udp_send /
      udp_recv over connected SOCK_DGRAM sockets, reusing the flat arena
      and tcp_close / tcp_set_timeout. The first datagram-socket capability

@@ -4660,6 +4660,7 @@ let native_ffi_names =
   [ "tcp_connect"; "tcp_listen"; "tcp_accept";
     "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
     "udp_open"; "udp_send"; "udp_recv";  (* v0.1.62: mdns dogfood *)
+    "now_ms";                            (* v0.1.63: mbench dogfood *)
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
     "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
@@ -4932,6 +4933,18 @@ let native_ffi_runtime =
       "static int udp_recv(int fd, int p, int cap) {";
       "  ssize_t n = recv(fd, __mem + p, (size_t)cap, 0);";
       "  return (int)n;";
+      "}";
+      "/* v0.1.63 (mbench dogfood): a monotonic millisecond clock. Native";
+      "   wall-clock for in-language timing — the JS host provided now_ms as";
+      "   an extern (Date.now), but the C backend had no native definition, so";
+      "   every timing measurement shelled out to the `time` command. Returns";
+      "   ms since an unspecified epoch (differences are meaningful, not the";
+      "   absolute value); fits the 64-bit int of the C backend. */";
+      "#include <time.h>";
+      "static long long now_ms(void) {";
+      "  struct timespec ts;";
+      "  clock_gettime(CLOCK_MONOTONIC, &ts);";
+      "  return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;";
       "}";
       "static int tcp_set_timeout(int fd, int ms) {";
       "  struct timeval tv; tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;";
