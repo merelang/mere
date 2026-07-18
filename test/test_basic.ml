@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.63" Version.v "0.1.63";
+  check "version is 0.1.64" Version.v "0.1.64";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,19 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.64 (medit dogfood): read_lines on the C backend. It type-checked
+     and ran under the interpreter but the C backend had no arm, so it
+     emitted as an undefined `mu_read_lines` and failed to link. Now it emits
+     __lang_read_lines, matching input_line semantics. The assertion pins the
+     helper's emission; edge-case parity (trailing newline / empty file) is
+     verified against the interpreter out-of-band. *)
+  assert_contains "v0.1.64: read_lines emits its C-backend helper (not mu_read_lines)"
+    (vec_codegen_c "let ls = read_lines \"/etc/hostname\" in ls")
+    "static list_str __lang_read_lines(";
+  assert_no_contains "v0.1.64: read_lines is not left as an undefined user symbol"
+    (vec_codegen_c "let ls = read_lines \"/etc/hostname\" in ls")
+    "mu_read_lines";
+
   (* v0.1.63 (mbench dogfood): now_ms — a native monotonic clock (ms since
      an arbitrary epoch, CLOCK_MONOTONIC) so a Mere program can time ITSELF
      instead of shelling out to `time`. Emitted as a self-contained static
