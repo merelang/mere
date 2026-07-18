@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.63 — 2026-07-18
+
+_A native monotonic clock, so Mere can time itself. Every measurement in
+this project so far shelled out to the `time` command; `now_ms` (a
+self-contained native FFI over `clock_gettime(CLOCK_MONOTONIC)`, emitted
+like the tcp_* / udp_* externs) returns milliseconds since an arbitrary
+epoch, and that is enough to build a benchmark harness in pure Mere. The
+dogfood is mbench: it runs a kernel enough times to span a target
+wall-clock window, then reports iterations, total ms, and ns/iter,
+threading a checksum through the loop so the optimizer cannot delete the
+work. Writing it surfaced the universal benchmark trap first-hand — a
+kernel that ignores the loop counter is loop-invariant and clang -O2
+hoists it out (a plain summation was even strength-reduced to i + C,
+reported as 0 ns/iter). The fix is the universal one: thread the counter
+into every kernel's input. A quiet observation falls out — Mere-on-C
+inherits clang's optimizer wholesale, for better (real kernels run fast)
+and for worse (arithmetic-reducible kernels vanish). suite: 2219 passed /
+0 failed (1 new test)._
+
+---
+
 ## v0.1.62 — 2026-07-18
 
 _A native UDP FFI, opened by a DNS resolver. mkv and mhttp used TCP; the
