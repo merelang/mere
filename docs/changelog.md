@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.67 — 2026-07-18
+
+_A caught `fail` is now silent on the C backend, found by the mere-ruby
+dogfood's exception milestone. mere-ruby implements Ruby `begin/rescue` on
+top of `fail` + `try_or`: a `raise` unwinds via `fail`, and `try_or`
+catches it. But the C runtime's `__lang_fail_impl` printed `fail: <msg>` to
+stderr unconditionally, before checking whether an active `try_or` would
+catch the longjmp — so every rescued exception leaked a stderr line, even
+though the program continued correctly. A caught failure is control flow,
+not an error; it must be silent. The fix reorders the helper to longjmp
+first and print only when the failure is genuinely uncaught (about to
+abort). The LLVM backend and the interpreter were already silent-on-catch,
+so this also removes a cross-backend divergence. suite: 2230 passed / 0
+failed (1 new test)._
+
+---
+
 ## v0.1.66 — 2026-07-18
 
 _A C-backend duplicate-definition bug, found by the mere-ruby dogfood's

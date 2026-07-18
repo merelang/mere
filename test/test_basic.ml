@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.66" Version.v "0.1.66";
+  check "version is 0.1.67" Version.v "0.1.67";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,26 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.67 (mere-ruby dogfood): a fail caught by an active try_or must be
+     silent — it is control flow, not an error. The C backend used to print
+     "fail: ..." to stderr unconditionally, before checking the jmpbuf, so
+     every try_or-caught failure leaked a line (the LLVM backend and interp
+     were already silent). The fix moves the print after the jmpbuf check;
+     assert that in __lang_fail_impl the longjmp precedes the stderr print. *)
+  let idx_of hay needle =
+    let hl = String.length hay and nl = String.length needle in
+    let rec go i =
+      if i + nl > hl then (-1)
+      else if String.sub hay i nl = needle then i else go (i + 1) in
+    go 0 in
+  check "v0.1.67: C fail is silent when caught (longjmp before the stderr print)"
+    (let c = vec_codegen_c "try_or (fn u -> int_of_str \"x\") 0" in
+     let jmp = idx_of c "__lang_fail_jmpbuf_set) { longjmp" in
+     let prn = idx_of c "fprintf(stderr, \"fail:" in
+     if jmp >= 0 && prn >= 0 && jmp < prn then "ordered"
+     else "bad(" ^ string_of_int jmp ^ "," ^ string_of_int prn ^ ")")
+    "ordered";
+
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
      `mu_`-prefixed identifier immediately before its first `(`. Reports the
