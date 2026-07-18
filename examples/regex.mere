@@ -1,0 +1,207 @@
+// regex: a backtracking regular-expression engine in pure Mere.
+// Supported syntax: literals, `.`, `*` `+` `?`, `[...]` classes (ranges,
+// negation), `^` / `$` anchors, `|` alternation, `(...)` grouping, and
+// escapes (\. \* \\ ... plus \d \w \s sugar classes).
+// The matcher is continuation-passing: each node consumes input and calls
+// a continuation with the next position; backtracking falls out of a
+// continuation returning false. Probes heavy higher-order closure use —
+// an axis the examples corpus has not stressed before.
+// Verified against a known-answer corpus (ground truth: Python `re`).
+
+// ---- AST ----------------------------------------------------------------
+// A char class is a list of (lo, hi) byte ranges plus a negation flag.
+type rx =
+  | RChar of int
+  | RAny
+  | RClass of bool * (int * int) list
+  | RStar of rx
+  | RPlus of rx
+  | ROpt of rx
+  | RSeq of rx * rx
+  | RAlt of rx * rx
+  | RStart
+  | REnd
+  | REmpty;
+
+// ---- parser: recursive descent over the pattern bytes -------------------
+// pos is a 1-cell vec cursor, like the Scheme reader.
+let p_peek = fn (pat: str) -> fn pos ->
+  let i = (vec_get pos 0 : int) in
+  if i >= str_len pat then 0 - 1 else ord (char_at pat i);
+let p_next = fn (pat: str) -> fn pos ->
+  let c = p_peek pat pos in
+  let _ = vec_set pos 0 ((vec_get pos 0 : int) + 1) in
+  c;
+
+// escape -> node (sugar classes for \d \w \s)
+let esc_node = fn (c: int) ->
+  if c == 100 then RClass (false, Cons ((48, 57), Nil))                   // \d
+  else if c == 119 then                                                   // \w
+    RClass (false, Cons ((48, 57), Cons ((65, 90), Cons ((97, 122),
+            Cons ((95, 95), Nil)))))
+  else if c == 115 then                                                   // \s
+    RClass (false, Cons ((32, 32), Cons ((9, 13), Nil)))
+  else RChar c;                                                           // \. \* \\ ...
+
+// class body: after '[', up to ']'. Leading '^' negates. `a-z` is a range;
+// a lone '-' (first or last) is a literal.
+let parse_class = fn (pat: str) -> fn pos ->
+  let neg = if p_peek pat pos == 94 then let _ = p_next pat pos in true else false in
+  let rec go = fn ranges ->
+    let c = p_next pat pos in
+    if c < 0 then ranges                       // unterminated: be lenient
+    else if c == 93 then ranges                // ']'
+    else
+      let c = if c == 92 then p_next pat pos else c in   // '\x' inside class
+      if p_peek pat pos == 45 then             // maybe range 'a-z'
+        let save = (vec_get pos 0 : int) in
+        let _ = p_next pat pos in              // consume '-'
+        let hi = p_peek pat pos in
+        if hi == 93 || hi < 0 then             // trailing '-': literal
+          let _ = vec_set pos 0 save in
+          go (Cons ((c, c), ranges))
+        else
+          let hi = p_next pat pos in
+          let hi = if hi == 92 then p_next pat pos else hi in
+          go (Cons ((c, hi), ranges))
+      else go (Cons ((c, c), ranges)) in
+  RClass (neg, go Nil);
+
+let rec parse_alt = fn (pat: str) -> fn pos ->
+  let l = parse_seq pat pos in
+  if p_peek pat pos == 124 then                // '|'
+    let _ = p_next pat pos in
+    RAlt (l, parse_alt pat pos)
+  else l
+and parse_seq = fn (pat: str) -> fn pos ->
+  let c = p_peek pat pos in
+  if c < 0 || c == 124 || c == 41 then REmpty  // end, '|', ')'
+  else
+    let a = parse_rep pat pos in
+    let rest = parse_seq pat pos in
+    (match rest with REmpty -> a | _ -> RSeq (a, rest))
+and parse_rep = fn (pat: str) -> fn pos ->
+  let a = parse_atom pat pos in
+  let c = p_peek pat pos in
+  if c == 42 then let _ = p_next pat pos in RStar a       // '*'
+  else if c == 43 then let _ = p_next pat pos in RPlus a  // '+'
+  else if c == 63 then let _ = p_next pat pos in ROpt a   // '?'
+  else a
+and parse_atom = fn (pat: str) -> fn pos ->
+  let c = p_next pat pos in
+  if c == 46 then RAny                                    // '.'
+  else if c == 94 then RStart                             // '^'
+  else if c == 36 then REnd                               // '$'
+  else if c == 91 then parse_class pat pos                // '['
+  else if c == 40 then                                    // '('
+    let inner = parse_alt pat pos in
+    let _ = p_next pat pos in                             // consume ')'
+    inner
+  else if c == 92 then esc_node (p_next pat pos)          // '\x'
+  else RChar c;
+
+let rx_compile = fn (pat: str) ->
+  let pos = vec_new () in
+  let _ = vec_push pos 0 in
+  parse_alt pat pos;
+
+// ---- matcher: CPS backtracking ------------------------------------------
+let class_hit = fn (neg: bool) -> fn ranges -> fn (c: int) ->
+  let rec go = fn l ->
+    match l with
+    | Nil -> false
+    | Cons ((lo, hi), t) -> if c >= lo && c <= hi then true else go t in
+  let hit = go ranges in
+  if neg then (if hit then false else true) else hit;
+
+// m node s i k: try to match `node` at position i of s; on success call
+// k with the position after the match. Return true iff some alternative
+// makes the whole continuation succeed.
+let rec m = fn node -> fn (s: str) -> fn (i: int) -> fn k ->
+  match node with
+  | REmpty -> k i
+  | RChar c ->
+    if i < str_len s && ord (char_at s i) == c then k (i + 1) else false
+  | RAny ->
+    if i < str_len s then k (i + 1) else false
+  | RClass (neg, ranges) ->
+    if i < str_len s && class_hit neg ranges (ord (char_at s i))
+    then k (i + 1) else false
+  | RStart -> if i == 0 then k i else false
+  | REnd -> if i == str_len s then k i else false
+  | RSeq (a, b) -> m a s i (fn (j: int) -> m b s j k)
+  | RAlt (a, b) -> if m a s i k then true else m b s i k
+  | ROpt a -> if m a s i k then true else k i
+  | RPlus a -> m a s i (fn (j: int) -> m_star a s j k)
+  | RStar a -> m_star a s i k
+and m_star = fn a -> fn (s: str) -> fn (i: int) -> fn k ->
+  // greedy: try one more `a` first (must consume to avoid inf. loop),
+  // fall back to stopping here.
+  if m a s i (fn (j: int) -> if j > i then m_star a s j k else false)
+  then true
+  else k i;
+
+// search semantics (like grep): does the pattern match anywhere?
+let rx_match = fn node -> fn (s: str) ->
+  let accept = fn (j: int) -> let _ = j in true in
+  let rec from = fn (i: int) ->
+    if m node s i accept then true
+    else if i >= str_len s then false
+    else from (i + 1) in
+  from 0;
+
+let rx_test = fn (pat: str) -> fn (s: str) -> rx_match (rx_compile pat) s;
+
+// ---- known-answer corpus (ground truth: Python re.search) ---------------
+let check = fn (pat: str) -> fn (s: str) -> fn (expect: bool) -> fn st ->
+  let got = rx_test pat s in
+  let (n, bad) = st in
+  let ok = if got then expect else (if expect then false else true) in
+  let _ = if ok then () else
+    print ("MISMATCH pat=" ++ pat ++ " s=" ++ s) in
+  ((n : int) + 1, if ok then (bad : int) else bad + 1);
+
+let demo = fn () ->
+  let st = (0, 0) in
+  let st = check "abc" "xabcy" true st in
+  let st = check "abc" "abx" false st in
+  let st = check "^abc" "xabc" false st in
+  let st = check "^abc" "abcd" true st in
+  let st = check "abc$" "xabc" true st in
+  let st = check "abc$" "abcx" false st in
+  let st = check "^abc$" "abc" true st in
+  let st = check "a.c" "azc" true st in
+  let st = check "a.c" "ac" false st in
+  let st = check "ab*c" "ac" true st in
+  let st = check "ab*c" "abbbc" true st in
+  let st = check "ab+c" "ac" false st in
+  let st = check "ab+c" "abbc" true st in
+  let st = check "ab?c" "ac" true st in
+  let st = check "ab?c" "abc" true st in
+  let st = check "ab?c" "abbc" false st in
+  let st = check "a|b" "zzb" true st in
+  let st = check "a|b" "zzc" false st in
+  let st = check "(ab)+" "abab" true st in
+  let st = check "^(ab)+$" "ababa" false st in
+  let st = check "(a|b)*c" "abbac" true st in
+  let st = check "[abc]+" "zzcab" true st in
+  let st = check "[abc]+" "zzz" false st in
+  let st = check "[a-z]+" "HELLO there" true st in
+  let st = check "^[a-z]+$" "HELLOthere" false st in
+  let st = check "[^abc]" "ab" false st in
+  let st = check "[^abc]" "abz" true st in
+  let st = check "[a-]" "-" true st in
+  let st = check "a\\.c" "a.c" true st in
+  let st = check "a\\.c" "abc" false st in
+  let st = check "\\d+" "abc123" true st in
+  let st = check "\\d+" "abcdef" false st in
+  let st = check "^\\w+$" "hello_42" true st in
+  let st = check "^\\w+$" "hello world" false st in
+  let st = check "\\s" "ab cd" true st in
+  let st = check "\\s" "abcd" false st in
+  // the classic backtracking stressor
+  let st = check "(a*)*b" "aaaaab" true st in
+  let st = check "^a*a*a*a*a*b$" "aaaaaaaaaaaaaaaaaaaa" false st in
+  let (n, bad) = st in
+  print (str_of_int n ++ " checks, " ++ str_of_int bad ++ " mismatches") in
+demo ()
