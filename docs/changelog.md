@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.59 — 2026-07-18
+
+_Streaming file input, forced by a grep. The new dogfood is mgrep — a
+grep-lite over the backtracking regex engine (examples/regex.mere, whose
+probe also caught and fixed a real star-backtracking bug in the older
+contrib/regex engine: `a*a` failed on "aa" because a single returned
+end-position cannot give characters back to the rest of a sequence). The
+measurements came in three acts. Act one: grepping a 94 MB file with
+whole-file `read_file` + `str_split` peaked at 1.26 GB of RSS — thirteen
+times the file — which forced the new capability: `file_open` /
+`file_read_line` / `file_close`, an open read handle streaming one line
+at a time, with EOF as option None rather than `read_line`'s ambiguous
+"" sentinel (interp + C; Wasm/LLVM are pointed errors; File is Send but
+not Sync). Act two: streaming alone made it WORSE — 2.4 GB — exposing
+that the CPS matcher allocates its continuation closure on RSeq entry,
+before the first character is tested: ~20 bytes of never-freed arena per
+scanned byte. Act three: first-literal-byte and ^-anchor prefilters (what
+real greps do with memchr) collapse the churn to match candidates — the
+94 MB grep now runs in 100 MB and 1.8 s, output identical to grep -rn.
+The residual 100 MB ≈ the file size is the cleanest number yet for the
+known strings-lifetime hole: even perfectly streamed input accumulates
+its line strings in the program-lifetime region. That, and the
+closure-on-entry pattern, are the next region-reclamation forcing cases.
+suite: 2208 passed / 0 failed (3 new tests)._
+
+---
+
 ## v0.1.58 — 2026-07-18
 
 _The ray tracer reaches the browser, and an annotation census closes a

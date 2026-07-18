@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.58" Version.v "0.1.58";
+  check "version is 0.1.59" Version.v "0.1.59";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,36 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.59 (mgrep dogfood): streaming per-line file input — file_open /
+     file_read_line / file_close. read_file loads whole files (a 94 MB
+     grep peaked at 1.26 GB RSS); these read one line at a time, and EOF
+     is option None rather than read_line's ambiguous "" sentinel. *)
+  check "v0.1.59: file_read_line streams lines and Nones at EOF (interp)"
+    (let tmp = Filename.temp_file "mere_fio" ".txt" in
+     let oc = open_out tmp in
+     output_string oc "alpha\nbeta\ngamma\n";
+     close_out oc;
+     let r = Pipeline.process
+       (Printf.sprintf
+          "let f = file_open \"%s\" in \
+           let rec count = fn (n: int) -> \
+           \  match file_read_line f with None -> n | Some l -> let _ = l in count (n + 1) in \
+           let n = count 0 in let _ = file_close f in n" tmp) in
+     Sys.remove tmp; r)
+    "3";
+  assert_contains "v0.1.59: file builtins emit the C runtime helpers"
+    (vec_codegen_c
+       "let f = file_open \"x\" in \
+        let l = file_read_line f in \
+        let _ = file_close f in match l with None -> 0 | Some s -> str_len s")
+    "__lang_file_read_line";
+  check_raises_containing
+    "v0.1.59: file_open is a pointed error on Wasm"
+    "unsupported in Wasm codegen"
+    (fun () ->
+      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+        "let f = file_open \"x\" in let _ = file_close f in 0") in ());
+
   (* v0.1.58 (T-4 census): the record-update-on-polymorphic-param error
      now points at the one-annotation workaround, mirroring the v0.1.50
      float/int hint. The census showed this and float-defaulting are the

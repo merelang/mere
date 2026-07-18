@@ -141,14 +141,43 @@ and m_star = fn a -> fn (s: str) -> fn (i: int) -> fn k ->
   then true
   else k i;
 
+// Search-position prefilters (v0.1.59, measured by the mgrep dogfood):
+// the CPS matcher allocates its continuation closure on RSeq ENTRY —
+// before the first character is tested — and the region never frees, so
+// naively trying every position costs ~20 bytes of arena per scanned
+// byte (2.0 GB to grep a 94 MB file for a two-char literal). Skipping to
+// positions where the first literal byte matches, and trying only i=0
+// for ^-anchored patterns, collapses the churn to the match candidates.
+let rec first_byte = fn node ->
+  match node with
+  | RChar c -> c
+  | RSeq (a, _) -> first_byte a
+  | _ -> 0 - 1;
+let is_anchored = fn node ->
+  match node with
+  | RStart -> true
+  | RSeq (RStart, _) -> true
+  | _ -> false;
+
 // search semantics (like grep): does the pattern match anywhere?
 let rx_match = fn node -> fn (s: str) ->
   let accept = fn (j: int) -> let _ = j in true in
-  let rec from = fn (i: int) ->
-    if m node s i accept then true
-    else if i >= str_len s then false
-    else from (i + 1) in
-  from 0;
+  if is_anchored node then m node s 0 accept
+  else
+    let fb = first_byte node in
+    let n = str_len s in
+    if fb >= 0 then
+      let rec fromc = fn (i: int) ->
+        if i >= n then false
+        else if ord (char_at s i) == fb && m node s i accept then true
+        else fromc (i + 1) in
+      fromc 0
+    else
+      let rec from = fn (i: int) ->
+        if m node s i accept then true
+        else if i >= n then false
+        else from (i + 1) in
+      from 0;
 
 let rx_test = fn (pat: str) -> fn (s: str) -> rx_match (rx_compile pat) s;
 
