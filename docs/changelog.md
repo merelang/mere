@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.60 — 2026-07-18
+
+_int_of_str semantics pinned across all four backends, caught by a
+Result-pipeline probe. The probe wrote an ordinary config pipeline —
+parse three fields, validate, combine — and the same program printed
+different errors on the interpreter and C: "not a number: abc" versus
+"out of range: 0". The cause: the interpreter's int_of_str raised on
+invalid input (so a try_or bridge caught it), while C was a bare atoll,
+LLVM a bare atoi, and Wasm a hand-rolled stop-at-first-non-digit loop —
+all three silently returning 0 or a partial prefix. The C emitter's own
+comment admitted it: "Fail handling is omitted." The shared spec is now
+strict decimal — optional surrounding whitespace, optional sign, one or
+more digits, nothing else — and invalid input FAILS on every backend,
+catchable by try_or: the interpreter validates before parsing (dropping
+OCaml int_of_string's 0x/0o/0b acceptance, which no compiled backend
+ever had), C gains a validating __lang_int_of_str over strtoll, Wasm's
+WAT helper validates and calls $__lang_fail with an interned message,
+and LLVM gains an IR helper over strtoll + endptr that calls
+__lang_fail_impl. The probe's other measurements — the Result-chain
+nesting tax and two phantom-type wrinkles — are design notes, not code
+changes. suite: 2214 passed / 0 failed (6 new tests)._
+
+---
+
 ## v0.1.59 — 2026-07-18
 
 _Streaming file input, forced by a grep. The new dogfood is mgrep — a

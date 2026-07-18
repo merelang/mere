@@ -727,10 +727,29 @@ let builtin_int_of_str =
   V_builtin ("int_of_str", fun v ->
     match v with
     | V_str s ->
-      (try V_int (int_of_string (String.trim s))
-       with Failure _ ->
-         raise (Eval_error (Loc.dummy,
-           Printf.sprintf "int_of_str: %S is not a valid int" s)))
+      (* v0.1.60 (Result-pipeline probe): the accepted form is now pinned
+         to `WS* [+-]? DIGIT+ WS*` on every backend — the compiled
+         backends used atoi-style parsing that silently returned 0 (or a
+         partial prefix) on invalid input while the interpreter raised,
+         a real cross-backend divergence. OCaml's own int_of_string also
+         accepts 0x/0o/0b/_ forms, which the compiled backends never did,
+         so the strict-decimal validation below is the shared spec. *)
+      let t = String.trim s in
+      let valid =
+        let n = String.length t in
+        if n = 0 then false
+        else
+          let start = if t.[0] = '+' || t.[0] = '-' then 1 else 0 in
+          n > start
+          && (let ok = ref true in
+              String.iteri (fun i c ->
+                if i >= start && (c < '0' || c > '9') then ok := false) t;
+              !ok)
+      in
+      if valid then V_int (int_of_string t)
+      else
+        raise (Eval_error (Loc.dummy,
+          Printf.sprintf "int_of_str: %S is not a valid int" s))
     | _ -> failwith "int_of_str: expected str")
 
 let builtin_bool_of_str =

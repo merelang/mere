@@ -3221,9 +3221,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_space(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "int_of_str"; _ }, arg) ->
+    (* v0.1.60: was a bare atoi (silent 0 on invalid input, diverging from
+       the interpreter's fail). The helper validates strict decimal and
+       calls __lang_fail_impl otherwise — catchable by try_or. *)
     let av = emit_expr env arg in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @atoi(ptr %s)" r av);
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_int_of_str(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "str_unescape"; _ }, arg) ->
     (* Phase 25.4: str_unescape — interpret backslash-escape sequences into
@@ -5242,6 +5245,7 @@ let runtime_decls =
       "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()";
       "declare i32 @atoi(ptr)";
+      "declare i64 @strtoll(ptr, ptr, i32)";
       "declare double @atof(ptr)";  (* Phase 34.2: float_of_str *)
       "declare double @llvm.fabs.f64(double)";  (* Phase 34.2: f_abs *)
       (* Phase 34.4: libm intrinsics + functions (linked via -lm by clang) *)
@@ -5254,6 +5258,7 @@ let runtime_decls =
       "declare i32 @setjmp(ptr) returns_twice";
       "declare void @longjmp(ptr, i32) noreturn";
       "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
+      "@.ios_msg = internal constant [28 x i8] c\"int_of_str: not a valid int\\00\"";
       "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
       "@__lang_fail_jmpbuf_set = global i32 0" ]
 (* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
@@ -7014,6 +7019,42 @@ let str_concat_helper =
       "entry:";
       "  call void @__lang_fail_impl(ptr %msg)";
       "  unreachable";
+      "}";
+      "";
+      (* v0.1.60: validating int parse. strtoll skips leading whitespace
+         and consumes sign + digits; endptr == s means nothing was parsed.
+         After the digits only trailing whitespace may remain. Anything
+         else fails (try_or-able), matching the interpreter. *)
+      "define i32 @__lang_int_of_str(ptr %s) {";
+      "entry:";
+      "  %endp = alloca ptr";
+      "  %v = call i64 @strtoll(ptr %s, ptr %endp, i32 10)";
+      "  %e = load ptr, ptr %endp";
+      "  %none = icmp eq ptr %e, %s";
+      "  br i1 %none, label %bad, label %trail";
+      "trail:";
+      "  %p = phi ptr [ %e, %entry ], [ %pn, %ws ]";
+      "  %c = load i8, ptr %p";
+      "  %isnul = icmp eq i8 %c, 0";
+      "  br i1 %isnul, label %good, label %chk";
+      "chk:";
+      "  %sp = icmp eq i8 %c, 32";
+      "  %tb = icmp eq i8 %c, 9";
+      "  %cr = icmp eq i8 %c, 13";
+      "  %nl = icmp eq i8 %c, 10";
+      "  %w1 = or i1 %sp, %tb";
+      "  %w2 = or i1 %cr, %nl";
+      "  %w = or i1 %w1, %w2";
+      "  br i1 %w, label %ws, label %bad";
+      "ws:";
+      "  %pn = getelementptr i8, ptr %p, i64 1";
+      "  br label %trail";
+      "bad:";
+      "  call void @__lang_fail_impl(ptr @.ios_msg)";
+      "  unreachable";
+      "good:";
+      "  %t = trunc i64 %v to i32";
+      "  ret i32 %t";
       "}";
       "";
       (* Phase 25.1: char builtins. char_at: per-byte from 256-entry

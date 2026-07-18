@@ -284,6 +284,7 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    mere_vec_int). v0.1.44 adds the write half. *)
 let uses_read_file_bytes = ref false
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
+let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
 
 (* Phase 15.7: concrete element types of `OwnedVec[T]` seen in the program.
@@ -2214,10 +2215,14 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "str_of_int" ->
        (* Phase 22.3: str_of_int is the same as show_int. Emit as an alias. *)
        Printf.sprintf "show_int(%s)" (emit_expr arg)
-     | Ast.Var "int_of_str" ->
-       (* Phase 22.5: int_of_str s — via atoi (sign + digits). Fail handling
-          is omitted (atoi silently returns 0 on invalid input). *)
-       Printf.sprintf "atoll(%s)" (emit_expr arg)
+     | Ast.Var "int_of_str" when not (user_shadows "int_of_str") ->
+       (* v0.1.60: was a bare atoll, which silently returned 0 on invalid
+          input while the interpreter raised — a measured cross-backend
+          divergence (a Result pipeline's try_or bridge never fired on C).
+          The helper validates `WS* [+-]? DIGIT+ WS*` and fails otherwise,
+          catchable by try_or like the interpreter. *)
+       uses_int_of_str := true;
+       Printf.sprintf "__lang_int_of_str(%s)" (emit_expr arg)
      | Ast.Var "str_unescape" ->
        Printf.sprintf "__lang_str_unescape(%s)" (emit_expr arg)
      | Ast.Var "fail" when not (user_shadows "fail") ->
@@ -7325,6 +7330,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_instances;
   uses_read_file_bytes := false;
   uses_file_io := false;
+  uses_int_of_str := false;
   uses_write_file_bytes := false;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset channel_instances;
@@ -8231,6 +8237,29 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        value typedefs, which are all complete by here). *)
     @ (if copy_fn_decls = [] then [] else copy_fn_decls @ [""])
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
+    @ (if not !uses_int_of_str then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.60: validating int parse — WS* [+-]? DIGIT+ WS*,";
+               "   anything else fails (catchable by try_or), matching the";
+               "   interpreter instead of atoi's silent 0. */";
+               "static long long __lang_int_of_str(const char* s) {";
+               "  const char* p = s;";
+               "  while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n') p++;";
+               "  const char* q = p;";
+               "  if (*q == '+' || *q == '-') q++;";
+               "  const char* d = q;";
+               "  while (*q >= '0' && *q <= '9') q++;";
+               "  const char* r = q;";
+               "  while (*r == ' ' || *r == '\\t' || *r == '\\r' || *r == '\\n') r++;";
+               "  if (q == d || *r != '\\0') {";
+               "    char buf[128];";
+               "    snprintf(buf, sizeof buf, \"int_of_str: \\\"%s\\\" is not a valid int\", s);";
+               "    __lang_fail_impl(buf);";
+               "  }";
+               "  return strtoll(p, NULL, 10);";
+               "}" ];
+           "" ])
     @ (if not !uses_file_io then []
        else
          [ String.concat "\n"
