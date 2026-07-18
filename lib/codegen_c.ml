@@ -6217,9 +6217,16 @@ let lift_inner_fns
      Let_rec writes into inner_lifts_by_host[current_host]. *)
   let current_host = ref "" in
   (* Globals = top-level lifted fns + builtins (anything in Typer's
-     initial env). Closure captures must exclude these. *)
+     initial env) + extern fns. Closure captures must exclude these:
+     they are referenced directly in the generated C, not through the
+     env. v0.1.61 (mhttp dogfood): externs were missing here, so an
+     `extern fn tcp_write` used inside an inner closure got captured and
+     referenced as the namespaced `mu_tcp_write` while the extern itself
+     is emitted raw — a link/compile error. Found the first time a
+     client-side FFI (tcp_connect + tcp_write) was driven from a helper. *)
   let builtin_names = List.map fst Typer.initial_env in
-  let known = ref (toplevel_names @ builtin_names) in
+  let extern_names = Hashtbl.fold (fun k _ acc -> k :: acc) extern_fn_decls [] in
+  let known = ref (toplevel_names @ builtin_names @ extern_names) in
   let lift_one host_param host_locals n p fn_body value_loc value_ty =
     (* Phase 24.1: subtract host_locals from `known` so that builtins
        shadowed by a local `let` in the host fn (e.g., `let len = ...`)
