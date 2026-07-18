@@ -5493,24 +5493,27 @@ let str_concat_helper =
       "  return r;";
       "}";
       "";
-      (* Phase 34.1 / v0.1.12: str_of_float — %.12g, then append ".0" for
+      (* Phase 34.1 / v0.1.12: str_of_float — ".0" appended for
          integer-valued floats (kept identical to the interp's format_float
-         and the Wasm JS host). *)
+         and the Wasm JS host).
+         v0.1.65 (mere-ruby dogfood): shortest round-trip formatting.
+         %.12g lost information (0.1 + 0.2 printed "0.3"); try %.12g
+         first (unchanged output where it was already faithful), then
+         widen toward %.17g until strtod gives the same double back. *)
       "__attribute__((noinline)) static const char* __lang_str_of_float(double f) {";
-      "  char* buf;";
-      "  asprintf(&buf, \"%.12g\", f);";
+      "  char tmp[32];";
+      "  for (int p = 12; ; p++) {";
+      "    snprintf(tmp, sizeof tmp, \"%.*g\", p, f);";
+      "    if (p >= 17 || strtod(tmp, NULL) == f) break;";
+      "  }";
       "  int has_dot = 0;";
-      "  for (char* p = buf; *p; p++) {";
+      "  for (char* p = tmp; *p; p++) {";
       "    if (*p == '.' || *p == 'e' || *p == 'E' || *p == 'n' || *p == 'i') {";
       "      has_dot = 1; break;";
       "    }";
       "  }";
-      "  if (!has_dot) {";
-      "    char* buf2;";
-      "    asprintf(&buf2, \"%s.0\", buf);";
-      "    free(buf);";
-      "    return (const char*) buf2;";
-      "  }";
+      "  char* buf;";
+      "  asprintf(&buf, has_dot ? \"%s\" : \"%s.0\", tmp);";
       "  return (const char*) buf;";
       "}" ]
 

@@ -54,14 +54,29 @@ type value =
 
 and env = (string * value ref) list
 
-(* v0.1.12 (N4): float → string. OCaml's `string_of_float` renders a
-   whole-valued float with a bare trailing dot ("550."), which is ugly and
-   reads oddly. Normalize to a trailing ".0" ("550.0"). Kept identical to
-   the C runtime (__lang_str_of_float) and the Wasm JS host so all backends
-   agree. Round-trips through float_of_str. *)
+(* v0.1.12 (N4): float → string, normalized to a trailing ".0" for
+   whole-valued floats ("550.0"). Kept identical to the C runtime
+   (__lang_str_of_float), the LLVM helper, and the Wasm JS host so all
+   backends agree.
+
+   v0.1.65 (mere-ruby dogfood): shortest ROUND-TRIP formatting. The old
+   %.12g (OCaml string_of_float) lost information: 0.1 + 0.2 printed as
+   "0.3", and float_of_str could not get the original back. Try %.12g
+   first — every value it already represented faithfully keeps its exact
+   old rendering — then widen toward %.17g until the string parses back
+   to the same double (Ruby / JS / Python print floats this way). *)
 let format_float f =
-  let s = string_of_float f in
-  if String.length s > 0 && s.[String.length s - 1] = '.' then s ^ "0" else s
+  let rec go p =
+    let s = Printf.sprintf "%.*g" p f in
+    if p >= 17 then s
+    else if (try float_of_string s = f with _ -> false) then s
+    else go (p + 1)
+  in
+  let s = go 12 in
+  if String.contains s '.' || String.contains s 'e' || String.contains s 'E'
+     || String.contains s 'n' || String.contains s 'i'
+  then s
+  else s ^ ".0"
 
 (* Try to interpret a value as a Nil-terminated Cons chain.
    Returns Some [v1; v2; ...] when the value walks all the way to Nil,

@@ -103,17 +103,23 @@ const wasmPath = process.argv[2];
       }
     },
     __lang_str_of_float: (f) => {
+      // v0.1.65: shortest round-trip formatting (12 digits first, widen
+      // toward 17 until the string parses back to the same double) —
+      // keep in lockstep with run_wasm.js and the interp / C / LLVM.
       let s;
       if (Number.isNaN(f)) s = "nan";
       else if (f === Infinity) s = "inf";
       else if (f === -Infinity) s = "-inf";
       else {
-        s = f.toPrecision(12);
-        if (s.includes("e") || s.includes("E")) {
-          s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, "$1$2").replace(/\.(e[+-]?\d+)/i, "$1");
-        } else if (s.includes(".")) {
-          s = s.replace(/\.?0+$/, "");
-          if (s === "" || s === "-") s = "0";
+        for (let p = 12; ; p++) {
+          s = f.toPrecision(p);
+          if (s.includes("e") || s.includes("E")) {
+            s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, "$1$2").replace(/\.(e[+-]?\d+)/i, "$1");
+          } else if (s.includes(".")) {
+            s = s.replace(/\.?0+$/, "");
+            if (s === "" || s === "-") s = "0";
+          }
+          if (p >= 17 || Number(s) === f) break;
         }
         if (!/[.eEni]/.test(s)) s += ".0";
       }

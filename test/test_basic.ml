@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.64" Version.v "0.1.64";
+  check "version is 0.1.65" Version.v "0.1.65";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5288,6 +5288,32 @@ let () =
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length c_src > 0 then "ok" else "empty")
     "ok";
+  (* v0.1.65 (mere-ruby dogfood): shortest round-trip float formatting.
+     %.12g lost information — str_of_float (0.1 + 0.2) printed "0.3", and
+     the original double was unrecoverable from the string. All four
+     backends now try 12 significant digits first (unchanged output where
+     12 was already faithful) and widen toward 17 until the string parses
+     back to the same double. Bonus fix found in the same audit: the LLVM
+     helper appended a bare "." to whole-valued floats ("100.") where every
+     other backend renders ".0" ("100.0"). *)
+  check "v0.1.65: str_of_float is shortest round-trip (interp)"
+    (Pipeline.process "str_of_float (0.1 + 0.2)") "\"0.30000000000000004\"";
+  check "v0.1.65: str_of_float 1/3 keeps 16 digits (interp)"
+    (Pipeline.process "str_of_float (1.0 / 3.0)") "\"0.3333333333333333\"";
+  check "v0.1.65: short floats keep their historical rendering (interp)"
+    (Pipeline.process "str_of_float 1.5") "\"1.5\"";
+  check "v0.1.65: whole floats still render .0 (interp)"
+    (Pipeline.process "str_of_float 100.0") "\"100.0\"";
+  assert_contains "v0.1.65: C helper widens precision (%.*g loop)"
+    (vec_codegen_c "str_of_float 1.5")
+    "\"%.*g\", p, f";
+  assert_contains "v0.1.65: LLVM helper appends .0 (not the old bare dot)"
+    (Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog "str_of_float 1.5"))
+    "@.fmt_dot0";
+  assert_contains "v0.1.65: LLVM helper round-trips via strtod"
+    (Codegen_llvm.emit_program ~main_ty:Ast.TyStr (typed_prog "str_of_float 1.5"))
+    "@strtod";
+
   (* v0.1.64 (medit dogfood): read_lines on the C backend. It type-checked
      and ran under the interpreter but the C backend had no arm, so it
      emitted as an undefined `mu_read_lines` and failed to link. Now it emits
