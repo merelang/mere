@@ -24,44 +24,49 @@ type re =
   | RSeq of re * re
   | RAlt of re * re;
 
-// re_match e s i => (matched, end_pos)
-// e: regex AST, s: string, i: start position
-// On success: (true, j) where j is the match end (exclusive). On failure: (false, _).
-let rec re_match = fn (e: re) -> fn (s: str) -> fn (i: int) ->
+// The matcher is continuation-passing: each node consumes input and calls
+// the continuation `k` with the position after its match; backtracking
+// falls out of a continuation returning false, which makes the caller try
+// the next alternative (a shorter star, the other branch of |).
+//
+// This replaced a first-match design that returned (matched, end_pos)
+// directly: a single returned position loses the other ways a node could
+// have matched, so a greedy star could not give characters back to what
+// followed it — `a*a` failed on "aa" (the star ate both a's, the trailing
+// `a` failed, and the sequence had no way to retry the star shorter).
+// Found by a fuller regex probe (examples/regex.mere) testing this engine.
+let rec re_k = fn (e: re) -> fn (s: str) -> fn (i: int) -> fn k ->
   let n = str_len s in
   match e with
   | RChar c ->
-    if i >= n then (false, i)
-    else if char_at s i == c then (true, i + 1)
-    else (false, i)
+    if i < n && char_at s i == c then k (i + 1) else false
   | RAny ->
-    if i >= n then (false, i)
-    else (true, i + 1)
+    if i < n then k (i + 1) else false
   | RSeq (a, b) ->
-    let ra = re_match a s i in
-    if fst ra then re_match b s (snd ra)
-    else (false, i)
+    re_k a s i (fn (j: int) -> re_k b s j k)
   | RAlt (a, b) ->
-    let ra = re_match a s i in
-    if fst ra then ra
-    else re_match b s i
-  | RStar inner ->
-    // zero or more: greedy backtracking
-    let r1 = re_match inner s i in
-    if fst r1 && snd r1 > i then
-      let r2 = re_match (RStar inner) s (snd r1) in
-      if fst r2 then r2
-      else (true, snd r1)
-    else (true, i)
+    if re_k a s i k then true else re_k b s i k
+  | RStar inner -> re_star inner s i k
   | RPlus inner ->
-    // one or more: a . a*
-    let r1 = re_match inner s i in
-    if fst r1 && snd r1 > i then re_match (RStar inner) s (snd r1)
-    else (false, i)
+    re_k inner s i (fn (j: int) -> re_star inner s j k)
   | ROpt inner ->
-    let r1 = re_match inner s i in
-    if fst r1 then r1
-    else (true, i);
+    if re_k inner s i k then true else k i
+and re_star = fn inner -> fn (s: str) -> fn (i: int) -> fn k ->
+  // greedy: try one more `inner` first (it must consume, or we'd loop),
+  // fall back to stopping here.
+  if re_k inner s i (fn (j: int) -> if j > i then re_star inner s j k else false)
+  then true
+  else k i;
+
+// re_match e s i => (matched, end_pos)
+// e: regex AST, s: string, i: start position
+// On success: (true, j) where j is the match end (exclusive) of the first
+// way the whole pattern can match. On failure: (false, i).
+let re_match = fn (e: re) -> fn (s: str) -> fn (i: int) ->
+  let endpos = vec_new () in
+  let _ = vec_push endpos (0 - 1) in
+  let ok = re_k e s i (fn (j: int) -> let _ = vec_set endpos 0 j in true) in
+  (ok, if ok then (vec_get endpos 0 : int) else i);
 
 // search within text: returns the first position where a match is found (-1 if none)
 let regex_search = fn (e: re) -> fn (s: str) ->

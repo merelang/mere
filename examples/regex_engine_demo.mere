@@ -38,4 +38,9 @@ let _ = report "ab?c" r4 "abc";         // match @0, full=yes
 let _ = report "ab?c" r4 "ac";          // match @0, full=yes
 let _ = report "ab?c" r4 "abbc";        // no full (extra b)
 
+// regression: a greedy star must give characters back to what follows it
+// (`a*a` on "aa" failed under the old first-match design; see engine.mere).
+let r5 = RSeq (RStar (RChar "a"), RChar "a");
+let _ = report "a*a" r5 "aa";           // match @0, full=yes
+
 0
