@@ -152,25 +152,29 @@ const wasmPath = process.argv[2];
       }
     },
     // Phase 34.3 (Wasm float): str_of_float / float_of_str host imports.
-    // Approximates OCaml's string_of_float format (%.12g, with a trailing
-    // "." for integer-valued floats).
+    // v0.1.65: shortest ROUND-TRIP formatting, matching the interp / C /
+    // LLVM helpers. Try 12 significant digits first (the historical
+    // format — unchanged output where it was already faithful), then
+    // widen toward 17 until the string parses back to the same double.
     __lang_str_of_float: (f) => {
       let s;
       if (Number.isNaN(f)) s = "nan";
       else if (f === Infinity) s = "inf";
       else if (f === -Infinity) s = "-inf";
       else {
-        // %.12g equivalent: 12 significant digits, strip trailing zeros
-        s = f.toPrecision(12);
-        // Strip trailing zeros in fractional part (mimics %g)
-        if (s.includes('e') || s.includes('E')) {
-          // 1.23000000000e+10 -> 1.23e+10
-          s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, '$1$2').replace(/\.(e[+-]?\d+)/i, '$1');
-        } else if (s.includes('.')) {
-          s = s.replace(/\.?0+$/, '');
-          if (s === '' || s === '-') s = '0';
+        for (let p = 12; ; p++) {
+          // %.{p}g equivalent: p significant digits, strip trailing zeros
+          s = f.toPrecision(p);
+          if (s.includes('e') || s.includes('E')) {
+            // 1.23000000000e+10 -> 1.23e+10
+            s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, '$1$2').replace(/\.(e[+-]?\d+)/i, '$1');
+          } else if (s.includes('.')) {
+            s = s.replace(/\.?0+$/, '');
+            if (s === '' || s === '-') s = '0';
+          }
+          if (p >= 17 || Number(s) === f) break;
         }
-        // OCaml: append "." for plain integer-valued floats
+        // OCaml: append ".0" for plain integer-valued floats
         if (!/[.eEni]/.test(s)) s += '.0';
       }
       const bytes = Buffer.from(s + '\0', 'utf8');

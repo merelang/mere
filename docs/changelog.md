@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.65 — 2026-07-18
+
+_Shortest round-trip float formatting, forced by the newest dogfood. The
+first program mere-ruby (a Ruby subset interpreter in pure Mere) could
+not print was `puts 0.1 + 0.2`: Ruby prints `0.30000000000000004`, but
+`str_of_float` formatted every float at 12 significant digits, printed
+"0.3", and the original double was unrecoverable from the string —
+`float_of_str (str_of_float x)` was not `x`. All four backends (the
+interp's format_float, the C runtime helper, the LLVM IR helper, and the
+Wasm JS hosts) now format at 12 digits first — every value that 12
+digits already represented faithfully keeps its exact old rendering, so
+nothing else changes — and widen toward 17 until the string parses back
+to the same double, the same shortest-round-trip contract Ruby, JS, and
+Python print with. Reading the four implementations side by side also
+surfaced a real pre-existing divergence: the LLVM helper appended a bare
+"." to whole-valued floats ("100.") where every other backend renders
+".0" ("100.0"). Fixed in the same slice; the four backends were verified
+byte-identical on a shared corpus. suite: 2228 passed / 0 failed (7 new
+tests)._
+
+---
+
 ## v0.1.64 — 2026-07-18
 
 _A backend gap closed, found by the medit dogfood. `read_lines : str -> str

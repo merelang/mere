@@ -6622,22 +6622,42 @@ let metrics_runtime_llvm =
       "  ret %Metrics %r3";
       "}" ]
 
-(* Phase 34.2: float → string with interp parity (%.12g + trailing "." for
-   whole numbers). asprintf to format → strchr-like loop to detect special
-   chars → if none, asprintf with "." appended. *)
+(* Phase 34.2: float → string with interp parity.
+   v0.1.65 (mere-ruby dogfood): two fixes. (1) shortest round-trip — the
+   fixed %.12g lost information (0.1 + 0.2 printed "0.3"); format at
+   precision 12 first, widening toward 17 until strtod parses the string
+   back to the same double. (2) whole-valued floats were suffixed with a
+   bare "." here ("100.") while the interp / C / Wasm host all render
+   ".0" ("100.0") — a real cross-backend divergence, now ".0". *)
 let float_helpers_llvm =
   String.concat "\n"
-    [ "@.fmt_12g = private constant [6 x i8] c\"%.12g\\00\"";
-      "@.fmt_dot = private constant [4 x i8] c\"%s.\\00\"";
+    [ "@.fmt_pg = private constant [5 x i8] c\"%.*g\\00\"";
+      "@.fmt_str = private constant [3 x i8] c\"%s\\00\"";
+      "@.fmt_dot0 = private constant [5 x i8] c\"%s.0\\00\"";
+      "";
+      "declare i32 @snprintf(ptr, i64, ptr, ...)";
+      "declare double @strtod(ptr, ptr)";
       "";
       "define ptr @__lang_str_of_float(double %f) {";
       "entry:";
+      "  %tmp = alloca [32 x i8]";
       "  %buf_ptr = alloca ptr";
-      "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_12g, double %f)";
-      "  %buf = load ptr, ptr %buf_ptr";
+      "  br label %try";
+      "try:";
+      "  %prec = phi i32 [ 12, %entry ], [ %prec_next, %try_more ]";
+      "  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %tmp, i64 32, ptr @.fmt_pg, i32 %prec, double %f)";
+      "  %back = call double @strtod(ptr %tmp, ptr null)";
+      "  %roundtrips = fcmp oeq double %back, %f";
+      "  %at_max = icmp sge i32 %prec, 17";
+      "  %done = or i1 %roundtrips, %at_max";
+      "  br i1 %done, label %scan, label %try_more";
+      "try_more:";
+      "  %prec_next = add i32 %prec, 1";
+      "  br label %try";
+      "scan:";
       "  br label %loop";
       "loop:";
-      "  %p = phi ptr [ %buf, %entry ], [ %p_next, %loop_cont ]";
+      "  %p = phi ptr [ %tmp, %scan ], [ %p_next, %loop_cont ]";
       "  %c = load i8, ptr %p";
       "  %is_null = icmp eq i8 %c, 0";
       "  br i1 %is_null, label %no_dot, label %check_char";
@@ -6656,11 +6676,12 @@ let float_helpers_llvm =
       "  %p_next = getelementptr i8, ptr %p, i32 1";
       "  br label %loop";
       "has_dot:";
+      "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_str, ptr %tmp)";
+      "  %buf = load ptr, ptr %buf_ptr";
       "  ret ptr %buf";
       "no_dot:";
-      "  %buf2_ptr = alloca ptr";
-      "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf2_ptr, ptr @.fmt_dot, ptr %buf)";
-      "  %buf2 = load ptr, ptr %buf2_ptr";
+      "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_dot0, ptr %tmp)";
+      "  %buf2 = load ptr, ptr %buf_ptr";
       "  ret ptr %buf2";
       "}" ]
 
