@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.62 — 2026-07-18
+
+_A native UDP FFI, opened by a DNS resolver. mkv and mhttp used TCP; the
+new dogfood, mdns, is the first datagram-socket program, and it needed a
+capability that genuinely did not exist: udp_open / udp_send / udp_recv,
+connected SOCK_DGRAM sockets that send and receive one datagram at a time
+through the flat arena, reusing the protocol-agnostic tcp_close and
+tcp_set_timeout. On top of them mdns builds a DNS query packet byte by
+byte in the arena — a 12-byte header, length-prefixed labels for the
+QNAME, QTYPE/QCLASS — sends one datagram to a resolver, and parses the
+answer section, stepping past compressed names and reading each A
+record's four IPv4 bytes. The same binary-packet construction and
+length-prefixed parsing as a gzip block, but on the wire. Verified
+against `dig +short` on several names (including this project's own
+GitHub-Pages A set) and two resolvers. suite: 2218 passed / 0 failed
+(2 new tests)._
+
+---
+
 ## v0.1.61 — 2026-07-18
 
 _An extern-in-closure capture bug, found the first time the client side of
