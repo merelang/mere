@@ -5156,8 +5156,13 @@ let str_concat_helper =
       "static int __lang_fail_jmpbuf_set = 0;";
       "static jmp_buf __lang_fail_jmpbuf;";
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
-      "  fprintf(stderr, \"fail: %s\\n\", msg);";
+      "  /* v0.1.67 (mere-ruby dogfood): print only when the failure is NOT";
+      "     caught by an active try_or — a caught fail is control flow, not an";
+      "     error, so it must be silent (matching the LLVM backend and the";
+      "     interpreter). Previously this printed unconditionally, leaking a";
+      "     'fail: ...' line on every try_or-caught failure. */";
       "  if (__lang_fail_jmpbuf_set) { longjmp(__lang_fail_jmpbuf, 1); }";
+      "  fprintf(stderr, \"fail: %s\\n\", msg);";
       "  abort();";
       "}";
       "static int __lang_fail_int(const char* msg) {";
