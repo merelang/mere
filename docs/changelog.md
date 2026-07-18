@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.64 — 2026-07-18
+
+_A backend gap closed, found by the medit dogfood. `read_lines : str -> str
+list` type-checked and ran under the interpreter, but the C backend had no
+arm for it — so a compiled program that read a file into lines emitted an
+undefined `mu_read_lines` and failed to link. The surface language promised
+something the native target could not deliver, and the type checker could
+not see it. The fix adds `__lang_read_lines`, a helper that matches the
+interpreter's `input_line` semantics exactly: split on newlines, drop a
+single trailing empty element when the file ends in '\n', and return the
+empty list for an empty file — so "a\nb\n" and "a\nb" both give ["a"; "b"],
+"" gives [], and "\n" gives [""]. Verified line-for-line against the
+interpreter on those edge cases. suite: 2221 passed / 0 failed (2 new
+tests)._
+
+---
+
 ## v0.1.63 — 2026-07-18
 
 _A native monotonic clock, so Mere can time itself. Every measurement in

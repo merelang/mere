@@ -286,6 +286,7 @@ let uses_read_file_bytes = ref false
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
+let uses_read_lines = ref false  (* v0.1.64: read_lines on the C backend *)
 
 (* Phase 15.7: concrete element types of `OwnedVec[T]` seen in the program.
    Same key strategy as `vec_instances`. OwnedVec is heap-allocated
@@ -2067,6 +2068,14 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr path_e) (emit_expr arg)
      | Ast.Var "read_file" ->
        Printf.sprintf "__lang_read_file(%s)" (emit_expr arg)
+     | Ast.Var "read_lines" when not (user_shadows "read_lines") ->
+       (* v0.1.64 (medit dogfood): read a file into a str list, matching the
+          interpreter's `input_line` semantics (no trailing empty element for
+          a file ending in '\n'; an empty file is Nil). Previously the C
+          backend had no arm, so read_lines emitted as an undefined
+          `mu_read_lines` and failed to link. *)
+       uses_read_lines := true;
+       Printf.sprintf "__lang_read_lines(%s)" (emit_expr arg)
      | Ast.Var "read_file_bytes" ->
        (* v0.1.43 (bytes story): binary-safe read into an int vec.
           Resolve the result Vec's region like vec_new does and make
@@ -6069,6 +6078,40 @@ let str_list_helpers =
       "  return head;";
       "}" ]
 
+(* v0.1.64 (medit dogfood): read_lines on the C backend. Matches the
+   interpreter's `input_line` semantics exactly: split the file on '\n',
+   drop a single trailing empty element when the file ends in '\n', and
+   return Nil for an empty file (so "a\nb\n" and "a\nb" both give ["a";"b"],
+   "" gives [], "\n" gives [""]). Builds the list_str back-to-front so the
+   result is in file order. Depends on __lang_read_file and list_str. *)
+let read_lines_helper =
+  String.concat "\n"
+    [ "static list_str __lang_read_lines(const char* path) {";
+      "  const char* content = __lang_read_file(path);";
+      "  size_t n = strlen(content);";
+      "  list_str acc = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
+      "  acc->tag = 0;";
+      "  if (n == 0) return acc;";
+      "  /* effective length drops one trailing newline, matching input_line */";
+      "  size_t i = (content[n - 1] == '\\n') ? n - 1 : n;";
+      "  for (;;) {";
+      "    size_t st = i;";
+      "    while (st > 0 && content[st - 1] != '\\n') st--;";
+      "    size_t len = i - st;";
+      "    char* tok = (char*)__lang_region_alloc(__lang_current_region, len + 1);";
+      "    memcpy(tok, content + st, len);";
+      "    tok[len] = '\\0';";
+      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
+      "    cons->tag = 1;";
+      "    cons->payload.Cons.f0 = tok;";
+      "    cons->payload.Cons.f1 = acc;";
+      "    acc = cons;";
+      "    if (st == 0) break;";
+      "    i = st - 1;  /* skip the '\\n' */";
+      "  }";
+      "  return acc;";
+      "}" ]
+
 (* Phase 15.8: registry that tracks all OwnedVecs. Every struct allocated by
    `owned_vec_new` / `vec_to_owned` is registered in a thread-local list;
    at the end of main, `__mere_owned_vec_free_all` iterates and calls
@@ -7378,6 +7421,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   uses_file_io := false;
   uses_int_of_str := false;
   uses_write_file_bytes := false;
+  uses_read_lines := false;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset channel_instances;
   Hashtbl.reset map_instances;
@@ -8392,7 +8436,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !metrics_used then [metrics_runtime; ""] else [])
     (* Phase 24.3: str_split / str_join — references list_str_node so
        emit after mono variant bodies (= list_str). *)
-    @ (if !str_split_used || !str_join_used || !list_dir_used || !args_used then [str_list_helpers; ""] else [])
+    @ (if !str_split_used || !str_join_used || !list_dir_used || !args_used || !uses_read_lines then [str_list_helpers; ""] else [])
+    @ (if !uses_read_lines then [read_lines_helper; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (let extern_decls =
          Hashtbl.fold (fun name ty acc ->
