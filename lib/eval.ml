@@ -35,6 +35,7 @@ type value =
        (so that map_iter iterates in deterministic order). The Hashtbl
        itself preserves O(1) lookup. *)
   | V_channel of value Queue.t * Mutex.t * Condition.t * bool ref
+  | V_file of in_channel                (* v0.1.59: streaming file read *)
     (* v0.1.47: the bool ref is the "closed" flag for graceful shutdown.
        channel_close sets it; channel_recv_opt returns None once the
        channel is closed and drained (workers can then return and be
@@ -110,6 +111,7 @@ and to_string = function
       to_string k ^ " => " ^ to_string v) !keys in
     "Map[" ^ String.concat ", " parts ^ "]"
   | V_channel _ -> "<channel>"
+  | V_file _ -> "<file>"
   | V_thread _ -> "<thread>"
 
 (* `to_json x` — structural JSON serialization of any value, the derive-y
@@ -125,7 +127,7 @@ and to_json_string = function
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "null"
-  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ -> "null"
+  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ | V_file _ -> "null"
   | V_constr ("Nil", None) -> "[]"
   | V_constr ("Cons", Some (V_tuple [_; _])) as v ->
     (match try_as_list v with
@@ -1945,6 +1947,31 @@ let builtin_channel_close =
    closed and empty. This is the primitive that lets a worker loop
    terminate (return unit) instead of blocking forever — which also
    means the loop is no longer bottom-typed, so it compiles. *)
+(* v0.1.59 (mgrep dogfood): streaming per-line file input. EOF is None
+   (option), not read_line's ambiguous "" sentinel. file_open fails on a
+   missing path (catchable with try_or, matching read_file). *)
+let builtin_file_open =
+  V_builtin ("file_open", fun v ->
+    match v with
+    | V_str path ->
+      (try V_file (open_in path)
+       with Sys_error msg -> failwith ("file_open: " ^ msg))
+    | _ -> failwith "file_open: expected str")
+
+let builtin_file_read_line =
+  V_builtin ("file_read_line", fun v ->
+    match v with
+    | V_file ch ->
+      (try V_constr ("Some", Some (V_str (input_line ch)))
+       with End_of_file -> V_constr ("None", None))
+    | _ -> failwith "file_read_line: expected File")
+
+let builtin_file_close =
+  V_builtin ("file_close", fun v ->
+    match v with
+    | V_file ch -> close_in ch; V_unit
+    | _ -> failwith "file_close: expected File")
+
 let builtin_channel_recv_opt =
   V_builtin ("channel_recv_opt", fun ch ->
     match ch with
@@ -2020,6 +2047,9 @@ let initial_env : env =
     ("channel_recv", ref builtin_channel_recv);
     ("channel_close", ref builtin_channel_close);
     ("channel_recv_opt", ref builtin_channel_recv_opt);
+    ("file_open", ref builtin_file_open);
+    ("file_read_line", ref builtin_file_read_line);
+    ("file_close", ref builtin_file_close);
     ("channel_recv_timeout", ref builtin_channel_recv_timeout);
     ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);

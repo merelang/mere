@@ -592,6 +592,7 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyParam _ | Ast.TyVar _ -> true
   | Ast.TyCon ("Channel", _) -> true
   | Ast.TyCon ("ThreadHandle", _) -> true
+  | Ast.TyCon ("File", _) -> true              (* moving a handle is fine *)
   (* v0.1.29 (mkv dogfood P2): region-bound mutable containers are
      thread-local — the runtimes are lock-free (linear-scan arrays /
      bump buffers), so sharing one across `spawn` is a data race. Their
@@ -621,6 +622,7 @@ let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyParam _ | Ast.TyVar _ -> true
   | Ast.TyCon ("Channel", _) -> true
   | Ast.TyCon ("ThreadHandle", _) -> false     (* single-owner handle *)
+  | Ast.TyCon ("File", _) -> false             (* FILE* reads are not thread-safe *)
   (* v0.1.29 (mkv dogfood P2): see is_send_v — lock-free region-bound
      containers must not be shared across threads. *)
   | Ast.TyCon (("Map" | "Vec" | "StrBuf"), _) -> false
@@ -907,6 +909,9 @@ let () = Hashtbl.replace types "Vec" 2
    and `ThreadHandle` (arity 0, e.g. `let h : ThreadHandle = spawn (...)`). *)
 let () = Hashtbl.replace types "Channel" 1
 let () = Hashtbl.replace types "ThreadHandle" 0
+(* v0.1.59 (mgrep dogfood): File — an open read handle for streaming
+   per-line file input (file_open / file_read_line / file_close). *)
+let () = Hashtbl.replace types "File" 0
 
 (* --- Higher-order Vec API (Phase 12.9) ---
    Schemes that are region-polymorphic and element-type-polymorphic.
@@ -1351,6 +1356,14 @@ let initial_env : env =
     ("channel_recv_timeout", channel_recv_timeout_scheme);
     ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    (* v0.1.59 (mgrep dogfood): streaming per-line file input. read_file
+       loads a whole file (a 94 MB grep peaked at 1.26 GB RSS: whole str +
+       str_split cons cells); these read one line at a time. EOF is None —
+       fixing read_line's ambiguous "" sentinel rather than copying it. *)
+    ("file_open",      mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("File", []))));
+    ("file_read_line", mono (Ast.TyArrow (Ast.TyCon ("File", []),
+                              Ast.TyCon ("option", [Ast.TyStr]))));
+    ("file_close",     mono (Ast.TyArrow (Ast.TyCon ("File", []), Ast.TyUnit)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
        stdio, return its exit code. *)

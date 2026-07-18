@@ -283,6 +283,7 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    helper is appended after the vec runtimes (it constructs a
    mere_vec_int). v0.1.44 adds the write half. *)
 let uses_read_file_bytes = ref false
+let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_write_file_bytes = ref false
 
 (* Phase 15.7: concrete element types of `OwnedVec[T]` seen in the program.
@@ -2110,6 +2111,23 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "utf8_chars" ->
        str_split_used := true;
        Printf.sprintf "__lang_utf8_chars(%s)" (emit_expr arg)
+     | Ast.Var "file_open" when not (user_shadows "file_open") ->
+       (* v0.1.59 (mgrep dogfood): open a read handle; fails (like
+          read_file) on a missing path. *)
+       uses_file_io := true;
+       Printf.sprintf "__lang_file_open(%s)" (emit_expr arg)
+     | Ast.Var "file_read_line" when not (user_shadows "file_read_line") ->
+       (* One line without its newline, or None at EOF — option-wrapped
+          like channel_recv_opt (Some=1 / None=0 fixed tags). *)
+       uses_file_io := true;
+       let opt_name = mono_variant_name "option" [Ast.TyStr] in
+       Printf.sprintf
+         "({ const char* __ln = __lang_file_read_line(%s); \
+          __ln ? (%s){.tag = 1, .payload.Some = __ln} : (%s){.tag = 0}; })"
+         (emit_expr arg) opt_name opt_name
+     | Ast.Var "file_close" when not (user_shadows "file_close") ->
+       uses_file_io := true;
+       Printf.sprintf "({ fclose(%s); 0; })" (emit_expr arg)
      | Ast.Var "read_line" when not (user_shadows "read_line") ->
        (* v0.1.26 (mlog dogfood): one stdin line at a time — the streaming
           counterpart of read_stdin. Was interpreter-only until a
@@ -3183,6 +3201,11 @@ let rec c_type_of (t : Ast.ty) : string =
      | _ ->
        raise (Codegen_error (Loc.dummy,
          "unsupported in C codegen subset: Channel[<unresolved>] (element type must be concrete)")))
+  | Ast.TyCon ("File", _) ->
+    (* v0.1.59 (mgrep dogfood): an open read handle for streaming
+       per-line file input. *)
+    uses_file_io := true;
+    "FILE*"
   | Ast.TyCon ("Map", args) ->
     (* Phase 15.10/15.14/15.15: Map[R, K, V] — per-(K, V) monomorphize.
        K = int / bool / str / tuple / record / nullary variant. *)
@@ -7301,6 +7324,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   uses_read_file_bytes := false;
+  uses_file_io := false;
   uses_write_file_bytes := false;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset channel_instances;
@@ -8207,6 +8231,35 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        value typedefs, which are all complete by here). *)
     @ (if copy_fn_decls = [] then [] else copy_fn_decls @ [""])
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
+    @ (if not !uses_file_io then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.59 (mgrep dogfood): streaming per-line file input.";
+               "   read_file loads whole files (a 94 MB grep peaked at 1.26 GB";
+               "   RSS); these read one line at a time. file_read_line returns";
+               "   NULL at EOF (wrapped into option None at the call site) and";
+               "   strips the trailing newline; the line is copied into the";
+               "   current region like every other native string. */";
+               "static FILE* __lang_file_open(const char* path) {";
+               "  FILE* f = fopen(path, \"r\");";
+               "  if (!f) __lang_fail_impl(path);";
+               "  return f;";
+               "}";
+               "static const char* __lang_file_read_line(FILE* f) {";
+               "  size_t cap = 256, n = 0;";
+               "  char* tmp = (char*)malloc(cap);";
+               "  int c;";
+               "  while ((c = fgetc(f)) != EOF && c != '\\n') {";
+               "    if (n + 1 == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
+               "    tmp[n++] = (char)c;";
+               "  }";
+               "  if (c == EOF && n == 0) { free(tmp); return NULL; }";
+               "  char* buf = (char*)__lang_region_alloc(__lang_current_region, n + 1);";
+               "  memcpy(buf, tmp, n); buf[n] = '\\0';";
+               "  free(tmp);";
+               "  return buf;";
+               "}" ];
+           "" ])
     @ (if not !uses_read_file_bytes then []
        else
          [ String.concat "\n"
