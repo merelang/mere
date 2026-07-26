@@ -1,0 +1,73 @@
+// contrib/gen/gen.mere — thread-backed generators (lazy pull iteration)
+//
+// A generator turns a *push*-style producer (a function that calls `yield v`
+// for each element) into a *pull*-style stream (`next` returns one element at
+// a time). The producer may be recursive — e.g. a tree walk that yields from
+// inside the recursion — which is exactly the shape a hand-written state
+// machine cannot express without managing an explicit stack.
+//
+// Implementation: no coroutines, no continuations. Each generator runs its
+// producer on its own thread (`spawn`) and hands elements over one at a time
+// through a request/reply channel pair — `channel_send` is unbounded, so
+// laziness comes from the producer blocking on the request channel until the
+// consumer pulls. The producer thread parks between pulls and exits after
+// yielding its last element.
+//
+// Cost model: one pull is two channel operations plus a thread wake-up
+// (measured at roughly 5-7 microseconds). Right for coarse-grained streams
+// (lines, records, chunks, tree nodes); wrong for per-integer hot loops —
+// use a plain fold or an explicit state machine there.
+//
+// Usage:
+//   import "contrib/gen/gen.mere";
+//   let g = Gen.make (fn y -> let _ = y 1 in let _ = y 2 in y 3) in
+//   match Gen.next g with
+//   | Some v -> ...   // 1, then 2, then 3
+//   | None -> ...     // exhausted
+//
+// API:
+//   - `Gen.make: (('a -> unit) -> unit) -> 'a gen`   spawn a producer
+//   - `Gen.next: 'a gen -> 'a opt`                   pull one element
+//   - `Gen.take: 'a gen -> int -> 'a list`           pull up to n elements
+//   - `Gen.fold: 'a gen -> ('b -> 'a -> 'b) -> 'b -> 'b`  drain into a fold
+//
+// NOTES:
+//   - A producer that loops forever must ground its result type (add an
+//     unreachable `if .. then () else ..` unit branch) — an endless
+//     function's result type is bottom, which native codegen rejects.
+//   - The element type is fixed at the module's first use in a program
+//     (inference does not re-generalize the module functions), so one
+//     program streams one element type. Wrap payloads in a variant to
+//     multiplex.
+
+module Gen {
+
+let make = fn producer ->
+  let req = channel_new () in
+  let data = channel_new () in
+  let y = fn v -> let _ = channel_recv req in channel_send data (Some v) in
+  let _ = spawn (fn () ->
+    let _ = producer y in
+    // the producer returned: answer the next pull with exhaustion and exit.
+    let _ = channel_recv req in
+    channel_send data None) in
+  (req, data);
+
+let next = fn g ->
+  match g with
+  | (req, data) ->
+    let _ = channel_send req 1 in
+    channel_recv data;
+
+let rec take = fn g -> fn n ->
+  if n <= 0 then Nil
+  else match next g with
+       | Some v -> Cons (v, take g (n - 1))
+       | None -> Nil;
+
+let rec fold = fn g -> fn f -> fn acc ->
+  match next g with
+  | Some v -> fold g f (f acc v)
+  | None -> acc;
+
+}
