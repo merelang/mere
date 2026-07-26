@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.68 — 2026-07-27
+
+_C-backend maps get a hash index: `map_get` / `map_has` / `map_set` lookup
+is now O(1) amortized instead of a linear scan. A concurrency probe (an
+actor-owned "visited set" benchmark) showed the old cost dominating
+everything else: 100k check-and-insert ops against a ~30k-entry map took
+5.8 s (~58 µs/op, ~300x the 97-entry case) — the map, not the messaging,
+was the bottleneck. The struct keeps its insertion-ordered keys/values
+arrays (so `map_iter` order, `map_len`, and `map_delete`'s shift-remove
+behavior are observably unchanged) and adds an open-addressing index of
+array positions: linear probing, power-of-two capacity, rehash at 0.7
+load, rebuilt after a delete (deletes shift positions and are rare).
+Key hashing mirrors the structural key-equality emitter — splitmix64 for
+scalars, FNV-1a for strings, recursive combination for tuple / record /
+variant keys — so keys equal under `key_eq` always hash equal. Same
+benchmark after: 10 ms (~580x). A 5k-entry grow/rehash/delete/iter
+functional check and the full suite verify behavior parity; the
+interpreter's map is untouched (correctness-first reference). suite:
+2230 passed / 0 failed._
+
+---
+
 ## v0.1.67 — 2026-07-18
 
 _A caught `fail` is now silent on the C backend, found by the mere-ruby
