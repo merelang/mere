@@ -5654,6 +5654,20 @@ let region_runtime_helpers =
    associative array. K supports only int / str; V is any concrete type.
    Storage is two parallel arrays (keys[], values[]); when cap is hit, a
    new array is allocated in the same region (arena semantics). *)
+(* Shared hash helpers for the map runtimes (emitted once, before them).
+   splitmix64-style avalanche for scalar keys, FNV-1a for strings. *)
+let map_hash_helpers =
+  String.concat "\n"
+    [ "static unsigned long long __lang_hash_u64(unsigned long long x) {";
+      "  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;";
+      "  x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33; return x;";
+      "}";
+      "static unsigned long long __lang_hash_str(const char* s) {";
+      "  unsigned long long h = 1469598103934665603ULL;";
+      "  while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }";
+      "  return h;";
+      "}" ]
+
 let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   let v_tag = ty_tag v_ty in
@@ -5707,12 +5721,54 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
     | _ -> Printf.sprintf "(%s) == (%s)" a b
   in
   let key_eq_expr a b = key_eq_for k_ty a b in
+  (* hash of a key, mirroring key_eq_for's structural recursion — keys equal
+     under key_eq_for must hash equal. *)
+  let rec key_hash_for k a =
+    match Ast.walk k with
+    | Ast.TyStr -> Printf.sprintf "__lang_hash_str(%s)" a
+    | Ast.TyTuple ts ->
+      let parts = List.mapi (fun i t ->
+        key_hash_for t (Printf.sprintf "(%s).f%d" a i)) ts in
+      List.fold_left (fun acc p ->
+        Printf.sprintf "((%s) * 1000003ULL + (%s))" acc p)
+        "14695981039346656037ULL" parts
+    | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+      let info = Hashtbl.find Typer.records rname in
+      let parts = List.map (fun (fname, fty) ->
+        key_hash_for fty (Printf.sprintf "(%s).%s" a fname)) info.Typer.r_fields in
+      List.fold_left (fun acc p ->
+        Printf.sprintf "((%s) * 1000003ULL + (%s))" acc p)
+        "14695981039346656037ULL" parts
+    | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+      let ctors = Hashtbl.find Exhaustive.type_variants vname in
+      let has_payload = List.exists (fun (_, p) -> p <> None) ctors in
+      if not has_payload then
+        Printf.sprintf "__lang_hash_u64((unsigned long long)(%s).tag)" a
+      else begin
+        let cases =
+          List.map (fun (cname, payload) ->
+            let tag_v = Hashtbl.find variant_tags cname in
+            match payload with
+            | None -> Printf.sprintf "(%s).tag == %d ? %dULL" a tag_v (tag_v + 1)
+            | Some pt ->
+              let pa = Printf.sprintf "(%s).payload.%s" a cname in
+              Printf.sprintf "(%s).tag == %d ? ((%s) * 1000003ULL + %dULL)"
+                a tag_v (key_hash_for (Ast.walk pt) pa) tag_v
+          ) ctors
+        in
+        Printf.sprintf "(%s : 0ULL)" (String.concat " : " cases)
+      end
+    | _ -> Printf.sprintf "__lang_hash_u64((unsigned long long)(%s))" a
+  in
+  let key_hash_expr a = key_hash_for k_ty a in
   String.concat "\n"
     [ Printf.sprintf "typedef struct %s {" struct_name;
       Printf.sprintf "  %s* keys;" c_k;
       Printf.sprintf "  %s* values;" c_v;
       "  int len;";
       "  int cap;";
+      "  int* idx;      /* open-addressing index into keys/values (-1 = empty) */";
+      "  int idx_cap;   /* power of two */";
       "  __lang_region* region;";
       Printf.sprintf "} %s;" struct_name;
       "";
@@ -5725,10 +5781,32 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_k c_k;
       Printf.sprintf "  m->values = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_v c_v;
       "  m->region = r;";
+      "  m->idx_cap = 8;";
+      "  m->idx = (int*)__lang_region_alloc(r, sizeof(int) * 8);";
+      "  for (int i = 0; i < 8; i++) m->idx[i] = -1;";
       "  return m;";
       "}";
       "";
-      (* set: replace if key exists, otherwise append (grow the array on cap hit) *)
+      (* rebuild the hash index at `newcap` slots (also used after delete,
+         where every array index above the removed entry shifts down). *)
+      Printf.sprintf "static void %s_reindex(%s* m, int newcap) {"
+        struct_name struct_name;
+      "  int* ni = (int*)__lang_region_alloc(m->region, sizeof(int) * newcap);";
+      "  for (int i = 0; i < newcap; i++) ni[i] = -1;";
+      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "    unsigned long long h = %s;" (key_hash_expr "m->keys[i]");
+      "    int s = (int)(h & (unsigned long long)(newcap - 1));";
+      "    while (ni[s] != -1) s = (s + 1) & (newcap - 1);";
+      "    ni[s] = i;";
+      "  }";
+      "  m->idx = ni;";
+      "  m->idx_cap = newcap;";
+      "}";
+      "";
+      (* set: replace if key exists, otherwise append (grow the array on cap
+         hit). Lookup goes through the hash index (linear probing); the
+         insertion-order keys/values arrays are unchanged, so map_iter and
+         delete keep their observable behavior. *)
       Printf.sprintf "static int %s_set(%s* m, %s k, %s v) {"
         struct_name struct_name c_k c_v;
       (* v0.1.30 (copy-on-store): the map owns its contents — deep-copy
@@ -5736,9 +5814,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          never dangles when the storer's allocation scope is reclaimed. *)
       Printf.sprintf "  k = __mcopy_%s(m->region, k);" k_tag;
       Printf.sprintf "  v = __mcopy_%s(m->region, v);" v_tag;
-      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
+      "  while (m->idx[s] != -1) {";
+      "    int i = m->idx[s];";
       Printf.sprintf "    if (%s) { m->values[i] = v; return 0; }"
         (key_eq_expr "m->keys[i]" "k");
+      "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  if (m->len == m->cap) {";
       "    int new_cap = m->cap * 2;";
@@ -5755,15 +5837,24 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  m->keys[m->len] = k;";
       "  m->values[m->len] = v;";
       "  m->len++;";
+      "  if (m->len * 10 >= m->idx_cap * 7) {";
+      Printf.sprintf "    %s_reindex(m, m->idx_cap * 2);" struct_name;
+      "  } else {";
+      "    m->idx[s] = m->len - 1;";
+      "  }";
       "  return 0; /* unit */";
       "}";
       "";
       (* get *)
       Printf.sprintf "static %s %s_get(%s* m, %s k) {"
         c_v struct_name struct_name c_k;
-      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
+      "  while (m->idx[s] != -1) {";
+      "    int i = m->idx[s];";
       Printf.sprintf "    if (%s) return m->values[i];"
         (key_eq_expr "m->keys[i]" "k");
+      "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  fprintf(stderr, \"map_get: key not found\\n\");";
       "  abort();";
@@ -5772,9 +5863,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* has *)
       Printf.sprintf "static int %s_has(%s* m, %s k) {"
         struct_name struct_name c_k;
-      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
+      "  while (m->idx[s] != -1) {";
+      "    int i = m->idx[s];";
       Printf.sprintf "    if (%s) return 1;"
         (key_eq_expr "m->keys[i]" "k");
+      "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  return 0;";
       "}";
@@ -5787,15 +5882,21 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          keys / values arrays. No-op if the key is absent. *)
       Printf.sprintf "static int %s_delete(%s* m, %s k) {"
         struct_name struct_name c_k;
-      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
+      "  while (m->idx[s] != -1) {";
+      "    int i = m->idx[s];";
       Printf.sprintf "    if (%s) {" (key_eq_expr "m->keys[i]" "k");
       "      for (int j = i; j < m->len - 1; j++) {";
       "        m->keys[j] = m->keys[j+1];";
       "        m->values[j] = m->values[j+1];";
       "      }";
       "      m->len--;";
+      (* every array index above i just shifted down — rebuild the index. *)
+      Printf.sprintf "      %s_reindex(m, m->idx_cap);" struct_name;
       "      return 0;";
       "    }";
+      "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  return 0;";
       "}" ]
@@ -8451,7 +8552,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
-    @ (if map_runtimes = [] then [] else map_runtimes @ [""])
+    @ (if map_runtimes = [] then [] else (map_hash_helpers :: map_runtimes) @ [""])
     @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
        Metrics struct bodies (= records) and closure_str_unit /
