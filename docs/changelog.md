@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.69 — 2026-07-27
+
+_Residual type variables are erased at C codegen instead of rejected. A
+type variable that survives to codegen is either dead — the bottom result
+of a function that never returns, such as an endless generator loop — or
+genuinely unconstrained; no operation ever inspects such a value, so any
+representation works. `ty_tag` now names it `int` and `c_type_of` emits
+`long long` (the representation the resolver's use-site naming already
+assumes), instead of raising "unsupported C codegen type element: 'a".
+This fixes two failures found by a concurrency probe: an endless producer
+(`let rec go = fn a -> fn b -> ... go b (a + b)`) killed compilation, and
+a top-level fn whose body contained such a loop was silently dropped from
+`resolve_fn_types` while call sites still referenced its `_as_value`
+wrapper (undeclared identifier at the C compile). Both previously needed
+source workarounds (grounding the type with an unreachable unit branch /
+eta-expanding at the call site); the natural spellings now compile and
+run. Two artificial rejections became working programs and their tests
+were converted to positive assertions: an uninstantiated polymorphic
+variant now emits a concrete int instance, and a lifted closure capturing
+a tuple compiles and runs correctly (verified against the interpreter).
+suite: 2230 passed / 0 failed._
+
+---
+
 ## v0.1.68 — 2026-07-27
 
 _C-backend maps get a hash index: `map_get` / `map_has` / `map_set` lookup
