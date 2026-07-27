@@ -3268,12 +3268,14 @@ let () =
       "type CgStat3 = SOk | SErr of str;\n\
        match SErr \"hi\" with | SOk -> 0 | SErr m -> str_len m")
     "__auto_type mu_m =";
-  check_raises "codegen: polymorphic variant rejected"
-    (fun () ->
-      let _ = codegen_with_decls
-        "type 'a CgOpt = CNone | CSome of 'a;\n\
-         CNone"
-      in ());
+  (* A polymorphic variant left uninstantiated used to be rejected; a
+     residual tyvar is now erased to int (nothing ever inspects such a
+     value), so the program emits a concrete int instance instead. *)
+  assert_contains "codegen: polymorphic variant erases residual tyvar"
+    (codegen_with_decls
+      "type 'a CgOpt = CNone | CSome of 'a;\n\
+       CNone")
+    "CgOpt_int";
   assert_contains "codegen: match guard accepted"
     (codegen_with_decls
       "type CgCol5 = A | B;\n\
@@ -3309,12 +3311,14 @@ let () =
          in g 2\n\
        in f 3")
     "long long __lifted_h_1(long long mu_x, long long mu_n, long long mu_y)";
-  check_raises "codegen: capture of non-primitive type rejected"
-    (* Tuple captures aren't supported yet (only int/bool/str/unit). *)
-    (fun () ->
-      let _ = codegen
-        "let outer = fn x -> let t = (x, x) in let h = fn y -> fst t in h 1 in outer 5"
-      in ());
+  (* Tuple captures used to be rejected via the residual-tyvar raise (fst's
+     generalized result type leaked a tyvar into the capture's recorded
+     annotation). With tyvar erasure the program compiles and runs
+     correctly (verified against the interpreter), capturing the tuple. *)
+  assert_contains "codegen: capture of tuple type is lifted"
+    (codegen
+      "let outer = fn x -> let t = (x, x) in let h = fn y -> fst t in h 1 in outer 5")
+    "tuple_int_int";
 
   (* --- C codegen: first-class functions (Phase 4 ninth slice, "Phase A") ---
      Top-level fns can be passed as values via prepared closure wrappers.

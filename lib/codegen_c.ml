@@ -520,9 +520,14 @@ let rec ty_tag (t : Ast.ty) : string =
        level is convenient — downstream lookups (closure_struct_name, etc.)
        then match cleanly. *)
     ty_tag inner
-  | other ->
-    raise (Codegen_error (Loc.dummy,
-      Printf.sprintf "unsupported C codegen type element: %s" (Ast.pp_ty other)))
+  | Ast.TyVar _ | Ast.TyParam _ ->
+    (* A type variable that survives to codegen is either dead (the bottom
+       result of a function that never returns, e.g. an endless generator
+       loop) or unconstrained; no operation ever inspects such a value, so
+       any representation works. Erase to int — the representation the
+       resolver's use-site defaulting already names — instead of rejecting
+       the program. *)
+    "int"
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
@@ -3261,6 +3266,8 @@ let rec c_type_of (t : Ast.ty) : string =
   | Ast.TyFloat -> "double"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> "const char*"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
+  | Ast.TyVar _ | Ast.TyParam _ -> "long long"  (* residual tyvar: dead or
+      unconstrained — erased to int's representation (see ty_tag) *)
   | Ast.TyTuple ts -> tuple_struct_name ts
   | Ast.TyArrow (p, r) -> closure_struct_name p r
   | Ast.TyRef (_, _, inner) ->
