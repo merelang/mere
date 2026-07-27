@@ -31,18 +31,11 @@
 //   - `Gen.take: 'a gen -> int -> 'a list`           pull up to n elements
 //   - `Gen.fold: 'a gen -> ('b -> 'a -> 'b) -> 'b -> 'b`  drain into a fold
 //
-// NOTES:
-//   - A producer that loops forever should ground its result type (add an
-//     unreachable `if .. then () else ..` unit branch). The C backend
-//     erases dead result types at emission (v0.1.69), but an unannotated
-//     polymorphic wrapper like `make` is resolved from its call sites, and
-//     a bottom-typed producer argument leaves the wrapper's own type
-//     unresolved — the resolver then drops it while call sites still
-//     reference it.
-//   - The element type is fixed at the module's first use in a program
-//     (inference does not re-generalize the module functions), so one
-//     program streams one element type. Wrap payloads in a variant to
-//     multiplex.
+// NOTE: the element type is fixed at the module's first use in a program
+// (inference does not re-generalize the module functions), so one program
+// streams one element type. Wrap payloads in a variant to multiplex.
+// (Endless producers work as-is since v0.1.70 — a bottom result type no
+// longer needs grounding.)
 
 module Gen {
 
