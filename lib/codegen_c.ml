@@ -493,6 +493,20 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
                               site was emitted and compilation failed *)
   | Ast.TyVar _ | Ast.TyParam _ -> false
 
+(* Deep-rewrite residual type variables to int — the representation the
+   emission layer's erasure (ty_tag / c_type_of) already names. Used when a
+   referenced-but-never-concretized fn is recovered: its decl types become
+   fully concrete, so the downstream type-instance collectors register the
+   same instances the erased emission will reference. *)
+let rec deep_erase_tyvars (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyInt
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map deep_erase_tyvars ts)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (deep_erase_tyvars a, deep_erase_tyvars b)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map deep_erase_tyvars args)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, deep_erase_tyvars inner)
+  | t -> t
+
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "int"
@@ -3179,7 +3193,7 @@ let rec c_type_of (t : Ast.ty) : string =
        `mere_vec_<tag>*`. args have not been walked yet, so walk them here
        before inspection. Sanitize the element type via ty_tag and register
        it in `vec_instances` (runtime generation is batched in emit_program). *)
-    (match List.map Ast.walk args with
+    (match List.map (fun t -> deep_erase_tyvars (Ast.walk t)) args with
      | [_; elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
        if not (Hashtbl.mem vec_instances tag) then
@@ -3192,7 +3206,7 @@ let rec c_type_of (t : Ast.ty) : string =
     (* Phase 15.7: OwnedVec[T] — heap-allocated. Walk the element type T and
        return `mere_owned_vec_<tag>*`. Monomorphization runs in parallel with
        Vec[R, T]. *)
-    (match List.map Ast.walk args with
+    (match List.map (fun t -> deep_erase_tyvars (Ast.walk t)) args with
      | [elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
        if not (Hashtbl.mem owned_vec_instances tag) then
@@ -3210,8 +3224,10 @@ let rec c_type_of (t : Ast.ty) : string =
   | Ast.TyCon ("Channel", args) ->
     (* Q-012: Channel[T] — heap-allocated blocking FIFO, monomorphized per
        element type to `mere_channel_<tag>*` (registered in channel_instances,
-       runtime batched in emit_program). *)
-    (match List.map Ast.walk args with
+       runtime batched in emit_program). Residual tyvars in the element are
+       erased first (a recovered never-concretized fn body), so the instance
+       registers at the same shape the erased emission names. *)
+    (match List.map (fun t -> deep_erase_tyvars (Ast.walk t)) args with
      | [elem_ty] when ty_is_concrete elem_ty ->
        let tag = ty_tag elem_ty in
        if not (Hashtbl.mem channel_instances tag) then
@@ -3228,7 +3244,7 @@ let rec c_type_of (t : Ast.ty) : string =
   | Ast.TyCon ("Map", args) ->
     (* Phase 15.10/15.14/15.15: Map[R, K, V] — per-(K, V) monomorphize.
        K = int / bool / str / tuple / record / nullary variant. *)
-    (match List.map Ast.walk args with
+    (match List.map (fun t -> deep_erase_tyvars (Ast.walk t)) args with
      | [_; k_ty; v_ty]
        when ty_is_concrete k_ty && ty_is_concrete v_ty ->
        let k_tag = ty_tag k_ty in
@@ -3407,6 +3423,60 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
     | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go e;
+  !found
+
+(* Recovery scan for a referenced-but-unresolved poly fn (its arrow kept a
+   residual tyvar at every use, so the concrete-arrow discovery never saw
+   it). Walks the expr but SKIPS the bound values of known top-level fns —
+   those are the fn definitions themselves, emitted only if resolved — so a
+   hit means the reference sits in code that will actually be emitted (the
+   main spine or another emitted body). Accepts arrows with tyvars; the
+   caller erases them. *)
+let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
+    (e : Ast.expr) : Ast.ty option =
+  let found = ref None in
+  let rec go (e : Ast.expr) =
+    if !found <> None then () else begin
+      (match e.Ast.node with
+       | Ast.Var n when n = name ->
+         (match e.Ast.ty with
+          | Some t ->
+            (match Ast.walk t with Ast.TyArrow _ as ar -> found := Some ar | _ -> ())
+          | None -> ())
+       | _ -> ());
+      match e.Ast.node with
+      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+      | Ast.Unit_lit | Ast.Var _ -> ()
+      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+      | Ast.App (a, b) -> go a; go b
+      | Ast.Neg a | Ast.Annot (a, _) -> go a
+      | Ast.Let (pat, v, b) ->
+        let skip =
+          (match pat.Ast.pnode with
+           | Ast.P_var n -> Hashtbl.mem skel_names n
+           | _ -> false) in
+        (if skip then () else go v); go b
+      | Ast.Let_rec (bs, b) ->
+        List.iter (fun (n, v) -> if Hashtbl.mem skel_names n then () else go v) bs;
+        go b
+      | Ast.With (_, v, b) -> go v; go b
+      | Ast.If (c, t, e_) -> go c; go t; go e_
+      | Ast.Fun (_, _, b) -> go b
+      | Ast.Constr (_, Some a) -> go a
+      | Ast.Constr (_, None) -> ()
+      | Ast.Match (sc, arms) ->
+        go sc;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> go ge | None -> ()); go b) arms
+      | Ast.Tuple es -> List.iter go es
+      | Ast.Region_block (_, b) -> go b
+      | Ast.Ref (_, _, a) -> go a
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+      | Ast.Field_get (a, _) -> go a
+      | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+    end
   in
   go e;
   !found
@@ -3690,7 +3760,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       end
     ) skels
   done;
-  List.concat_map (fun s ->
+  let base = List.concat_map (fun s ->
     match Hashtbl.find_opt multi_specs s.sname with
     | Some specs ->
       (* v0.1.66 (mere-ruby dogfood): dedup specs by their emitted C symbol
@@ -3734,6 +3804,49 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
            Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
              s.sname (Ast.pp_ty other))))
   ) skels
+  in
+  (* Recovery pass: a poly fn that never concretized is normally dead code
+     (an unused helper) and is dropped. But if EMITTED code still references
+     it — its arrow kept a residual tyvar at every use site, e.g. a producer
+     argument whose result is the bottom type of an endless loop — the call
+     site would emit a direct call to an undefined symbol. Scan the emitted
+     spine (root minus skel definitions, plus emitted bodies) for such live
+     references and emit the fn with its tyvars erased to int (matching the
+     emission layer's erasure). Fixpoint: a recovered body may itself
+     reference another unresolved fn. *)
+  let skel_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun s -> Hashtbl.replace skel_names s.sname ()) skels;
+  let emitted_bodies =
+    ref (root :: List.map (fun (f : fn_decl) -> f.body) base) in
+  let recovered_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+  let recovered = ref [] in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun s ->
+      if not (Hashtbl.mem resolved s.sname)
+         && not (Hashtbl.mem multi_specs s.sname)
+         && not (Hashtbl.mem recovered_names s.sname) then begin
+        let hit =
+          List.fold_left (fun acc e ->
+            match acc with
+            | Some _ -> acc
+            | None -> find_live_arrow s.sname skel_names e) None !emitted_bodies
+        in
+        match hit with
+        | Some ar ->
+          (match deep_erase_tyvars ar with
+           | Ast.TyArrow (p, r) ->
+             Hashtbl.replace recovered_names s.sname ();
+             recovered := { name = s.sname; param = s.sparam; body = s.sbody;
+                            param_ty = p; return_ty = r } :: !recovered;
+             emitted_bodies := s.sbody :: !emitted_bodies;
+             changed := true
+           | _ -> ())
+        | None -> ()
+      end) skels
+  done;
+  base @ List.rev !recovered
 
 (* Lifted-inner-fn signature: captures (with types) prepended to the
    original param. Stored separately because fn_decl assumes a single
@@ -6866,6 +6979,7 @@ let collect_mono_variant_instances
     (variant_decls : (string * string list * (string * Ast.ty option) list) list)
     : unit =
   let add name args =
+    let args = List.map deep_erase_tyvars args in
     if List.for_all ty_is_concrete args then begin
       if Hashtbl.mem polymorphic_variants name
          && not (Hashtbl.mem mono_variant_instances (mono_variant_name name args))
@@ -7035,12 +7149,13 @@ let collect_tuple_shapes_in_ty (root_ty : Ast.ty) : Ast.ty list list =
   let rec walk t =
     match Ast.walk t with
     | Ast.TyTuple ts ->
-      if List.for_all ty_is_concrete ts then begin
-        let key = tuple_struct_name ts in
-        if not (Hashtbl.mem seen key) then begin
-          Hashtbl.add seen key ();
-          order := ts :: !order
-        end
+      (* Residual tyvars erase to int (see deep_erase_tyvars): the shape
+         registers under the same name the erased emission uses. *)
+      let ts_c = List.map deep_erase_tyvars ts in
+      let key = tuple_struct_name ts_c in
+      if not (Hashtbl.mem seen key) then begin
+        Hashtbl.add seen key ();
+        order := ts_c :: !order
       end;
       List.iter walk ts
     | Ast.TyArrow (a, b) -> walk a; walk b
@@ -7062,10 +7177,10 @@ let collect_tuple_shapes (root : Ast.expr) : Ast.ty list list =
   let rec walk_ty (t : Ast.ty) =
     match Ast.walk t with
     | Ast.TyTuple ts ->
-      (* Skip polymorphic-shaped tuples — they appear in generalized fn
-         bodies' annotations but aren't part of any concrete run-time
-         shape we need to emit a struct for. *)
-      if List.for_all ty_is_concrete ts then add ts;
+      (* A polymorphic-shaped tuple (generalized fn body annotations) is
+         registered at its erased shape: dead extras are deduped by name,
+         and a recovered never-concretized body needs its erased shape. *)
+      add (List.map deep_erase_tyvars ts);
       List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
     | Ast.TyCon (_, args) -> List.iter walk_ty args

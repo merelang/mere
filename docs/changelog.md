@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.70 — 2026-07-27
+
+_A referenced-but-never-concretized poly fn is now emitted (tyvars erased)
+instead of silently dropped. `resolve_fn_types` treated every fn without a
+concrete arrow as unused and skipped it — but a fn whose arrow keeps a
+residual tyvar at every use site (e.g. an unannotated wrapper taking a
+producer whose result is the bottom type of an endless loop) is NOT dead:
+call sites still emit a direct call, which failed at the C compile with an
+undeclared identifier. The fix is a recovery pass after the resolution
+fixpoint: scan the emitted spine — the program expression minus top-level
+fn definitions, plus the bodies of emitted and recovered fns (their own
+fixpoint) — for live references, and emit such fns with `deep_erase_tyvars`
+(residual tyvars become int, the representation the v0.1.69 emission
+erasure already names). The liveness scan must skip fn-definition bindings:
+scanning the whole expression would resurrect every generic prelude helper
+referenced from other dropped helpers' bodies. Downstream, the type-
+instance collectors learned the same erasure so recovered generic bodies
+register the instances their erased emission references: Channel / Vec /
+OwnedVec / Map element types erase before the concrete gate in c_type_of,
+and tuple-shape / mono-variant collection registers erased shapes (dead
+extras dedup by name). An unannotated polymorphic generator wrapper called
+with an endless producer now compiles and runs end-to-end. suite: 2230
+passed / 0 failed._
+
+---
+
 ## v0.1.69 — 2026-07-27
 
 _Residual type variables are erased at C codegen instead of rejected. A
