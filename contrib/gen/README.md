@@ -23,5 +23,6 @@ One pull costs two channel operations plus a thread wake-up (~5-7 us
 measured). Use it for coarse-grained streams — lines, records, chunks, tree
 nodes — not per-integer hot loops.
 
-See the header of `gen.mere` for the API and the known limitation
-(one element type per program).
+See the header of `gen.mere` for the API and the known limitations
+(endless producers must ground their result type; one element type per
+program).

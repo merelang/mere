@@ -31,9 +31,14 @@
 //   - `Gen.take: 'a gen -> int -> 'a list`           pull up to n elements
 //   - `Gen.fold: 'a gen -> ('b -> 'a -> 'b) -> 'b -> 'b`  drain into a fold
 //
-// NOTE: the element type is fixed at the module's first use in a program
-// (inference does not re-generalize the module functions), so one program
-// streams one element type. Wrap payloads in a variant to multiplex.
+// NOTES:
+//   - A producer that loops forever must ground its result type (add an
+//     unreachable `if .. then () else ..` unit branch) — an endless
+//     function's result type is bottom, which native codegen rejects.
+//   - The element type is fixed at the module's first use in a program
+//     (inference does not re-generalize the module functions), so one
+//     program streams one element type. Wrap payloads in a variant to
+//     multiplex.
 
 module Gen {
 
