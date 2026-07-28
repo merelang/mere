@@ -123,6 +123,17 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   `vec_set` copy the element. A stored value therefore outlives whoever
   stored it, no matter where it was allocated. Strings are immutable, so
   the copies are unobservable.
+  - **Overwriting a heap element repeatedly leaks the old copies.** Because
+    the container's region is bump-allocated, `vec_set`/`map_set` copying a
+    *new* string into a slot that already held one cannot reclaim the old
+    copy — so a hot loop that overwrites the same slot with fresh strings
+    grows O(writes), not O(1) (measured: 4M `vec_set` of a fresh string into
+    index 0 ≈ 550 MB). Scalar (int/bool) elements are unaffected (their
+    "copy" is a no-op). Eliding the copy for a value already resident in the
+    container's region needs type-level region tracking on `str` (deferred);
+    until then, prefer scalar slots for hot-overwrite loops, or a fresh
+    per-batch region. (`map_set` on an *existing key* copies only the value,
+    v0.1.77, so a counter keyed by repeated strings stays O(distinct keys).)
 - **Channel payloads copy through a per-message region**: `channel_send`
   deep-copies into a malloc-backed message region; `channel_recv` copies
   out into the *receiver's* current region and frees the message. A
