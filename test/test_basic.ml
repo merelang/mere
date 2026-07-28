@@ -5372,6 +5372,20 @@ let () =
      else "bogus-mono@" ^ string_of_int (idx_of c "mu_f__int__int__int"))
     "clean";
 
+  (* Wasm recovery pass (port of the C v0.1.70 recovery): a poly helper left
+     with a residual (error) tyvar — result_and_then used only with Ok, so its
+     error type never grounds — must still be EMITTED when emitted code calls
+     it. Before the port, the Wasm backend emitted `call $result_and_then` with
+     no matching `(func $result_and_then ...)`, an invalid module. Assert the
+     definition is now present. *)
+  check "wasm: residual-tyvar poly fn is defined, not just called"
+    (let w = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let r = result_and_then (Ok 40) (fn (x: int) -> Ok (x + 2)) in\n\
+        result_default r 0") in
+     if idx_of w "(func $result_and_then" >= 0 then "defined"
+     else "undefined-but-called")
+    "defined";
+
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
      `mu_`-prefixed identifier immediately before its first `(`. Reports the

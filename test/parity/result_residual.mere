@@ -1,0 +1,5 @@
+// A result helper left with a residual (error) tyvar — only Ok is used, so
+// the error type never grounds. C and Wasm recover it (tyvars erased to int);
+// LLVM cleanly reports it unsupported. Regression for the Wasm recovery port.
+let r = result_and_then (Ok 40) (fn (x: int) -> Ok (x + 2));
+print (str_of_int (result_default r 0))

@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.75 — 2026-07-28
+
+_Port the v0.1.70 referenced-but-unresolved poly-fn recovery to the Wasm
+backend. A polymorphic helper whose arrow keeps a residual type variable at
+every use site (e.g. `result_and_then` applied only to `Ok`, so the error type
+never grounds) is dropped by the resolver as unused — but if emitted code still
+references it, the direct call site emits `call $<name>` to a function that was
+never defined, which C fixed in v0.1.70 but Wasm still hit, producing an
+invalid module (`undefined function variable "$result_and_then"`). The parity
+harness (v0.1.73) surfaced it. Wasm's `resolve_fn_types` now runs the same
+recovery fixpoint C does: after the normal resolution, scan the emitted spine
+(`Codegen_c.find_live_arrow`, which accepts arrows with tyvars and skips
+dropped fn definitions) for live references to still-unresolved skels, and emit
+each with `Codegen_c.deep_erase_tyvars` erasing residual tyvars to int (both
+helpers are backend-agnostic and reused directly). The unconstrained-error
+`result` program now emits a valid module and runs on Wasm (== interp/C == 42);
+LLVM continues to report it a clean codegen error (documented subset limit).
+Added test/parity/result_residual.mere and an in-process guard asserting the
+Wasm definition is emitted, not just called. suite: 2235 passed / 0 failed._
+
 ## v0.1.74 — 2026-07-28
 
 _Parity corpus expansion (test/parity/ 9 -> 21) plus a harness classification

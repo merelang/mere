@@ -985,7 +985,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       end
     ) skels
   done;
-  List.concat_map (fun s ->
+  let base = List.concat_map (fun s ->
     match Hashtbl.find_opt multi_specs s.sname with
     | Some specs ->
       List.map (fun (arrow, cloned_body) ->
@@ -1010,7 +1010,48 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
        | Some _ ->
          raise (Codegen_error (s.sfun.Ast.loc,
            Printf.sprintf "function `%s` has non-arrow inferred type" s.sname)))
-  ) skels
+  ) skels in
+  (* Recovery pass (port of codegen_c.ml's v0.1.70 recovery): a poly fn that
+     never concretized is normally dropped, but if EMITTED code still
+     references it (its arrow kept a residual tyvar at every use site) the
+     direct call site emits `call $<name>` to a function that was never
+     defined — an invalid module (Wasm/LLVM had this bug where C recovered).
+     Scan the emitted spine for such live references and emit the fn with its
+     tyvars erased to int. Fixpoint: a recovered body may reference another
+     unresolved fn. Reuses the backend-agnostic scan/erase from codegen_c. *)
+  let skel_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun s -> Hashtbl.replace skel_names s.sname ()) skels;
+  let emitted_bodies =
+    ref (root :: List.map (fun (f : fn_decl) -> f.body) base) in
+  let recovered_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+  let recovered = ref [] in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun s ->
+      if not (Hashtbl.mem resolved s.sname)
+         && not (Hashtbl.mem multi_specs s.sname)
+         && not (Hashtbl.mem recovered_names s.sname) then begin
+        let hit =
+          List.fold_left (fun acc e ->
+            match acc with
+            | Some _ -> acc
+            | None -> Codegen_c.find_live_arrow s.sname skel_names e) None !emitted_bodies
+        in
+        match hit with
+        | Some ar ->
+          (match Codegen_c.deep_erase_tyvars ar with
+           | Ast.TyArrow (p, r) ->
+             Hashtbl.replace recovered_names s.sname ();
+             recovered := { name = s.sname; param = s.sparam; body = s.sbody;
+                            param_ty = p; return_ty = r } :: !recovered;
+             emitted_bodies := s.sbody :: !emitted_bodies;
+             changed := true
+           | _ -> ())
+        | None -> ()
+      end) skels
+  done;
+  base @ List.rev !recovered
 
 (* Phase 26.3: lift inner Let-Fun / Let_rec to top-level Wasm fns.
    Mirrors codegen_llvm.lift_inner_fns_llvm. Populates inner_lifts_wasm /
