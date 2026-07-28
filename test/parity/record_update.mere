@@ -1,0 +1,5 @@
+// functional record update: { base | field = expr }
+type pt = { x: int, y: int };
+let p = pt { x = 40, y = 2 };
+let q = { p | y = 5 };
+print (str_of_int (q.x + q.y))

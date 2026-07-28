@@ -1,0 +1,4 @@
+// or-pattern in a match arm (shared binding across constructors)
+type v = A of int | B of int | C of int;
+let f = fn (x: v) -> match x with | A n | B n -> n | C n -> n * 10;
+print (str_of_int (f (A 4) + f (B 8) + f (C 3)))

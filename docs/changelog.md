@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.76 — 2026-07-28
+
+_More parity coverage (test/parity/ 22 -> 26) and a documented known
+divergence. Added four shapes that agree across all four backends: an
+or-pattern match arm with a shared binding, functional record update
+(`{ base | f = e }`), float builtins with int_of_float, and a variant whose
+constructors carry different payload shapes. Probing the divergence-prone
+corners recorded their status: a nested let-record/constructor pattern
+(`let pt { x = a } = p`) is a parser limitation (rejected before codegen, not a
+backend gap); `ref`/`:=` mutable cells are not a Mere idiom. One genuine but
+already-known correctness divergence was reconfirmed and is deliberately NOT in
+the pass/fail corpus (it would be a permanent red): a 64-bit integer
+computation (`100000 * 100000` = 10^10) is correct on interp and C but
+silently wrong on LLVM and Wasm, whose integers are i32 — the documented
+i64-widening limitation (a non-goal per the earlier LLVM assessment). No
+compiler change. suite: 2235 passed / 0 failed._
+
 ## v0.1.75 — 2026-07-28
 
 _Port the v0.1.70 referenced-but-unresolved poly-fn recovery to the Wasm

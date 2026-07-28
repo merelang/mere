@@ -1,0 +1,4 @@
+// a variant whose constructors carry different payload shapes
+type v = I of int | S of str | P of int * int;
+let f = fn (x: v) -> match x with | I n -> n | S s -> str_len s | P (a, b) -> a + b;
+print (str_of_int (f (I 10) + f (S "abcd") + f (P (14, 14))))

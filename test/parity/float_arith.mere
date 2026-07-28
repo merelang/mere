@@ -1,0 +1,3 @@
+// float builtins + int_of_float
+let a = f_add 3.5 2.5;
+print (str_of_int (int_of_float (f_mul a 2.0)))
