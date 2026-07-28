@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.71 — 2026-07-28
+
+_C-backend hardening: two latent "compiles-to-C-then-fails" bugs fixed, plus
+the missing compile-and-run test path that let this family recur. (1) The
+`_as_value` closure adapter every top-level fn gets now sanitizes its
+parameter name through `c_safe_name` — a source parameter named like a C
+keyword (`case`, `default`) previously emitted an invalid C parameter
+declaration in the wrapper even when the fn was never used as a value, since
+wrappers are generated for all top-level fns. (2) An extern used in value
+position (passed to a higher-order fn, not directly applied) now lowers to a
+closure adapter `__ext_<name>_as_value` that calls the raw FFI symbol, instead
+of the mangled `mu_<name>` (undeclared — a bare extern is a raw C function,
+not a closure struct). This is the reference-side twin of the v0.1.61 capture
+fix; restricted to a simple `A -> B` signature, a curried/higher-order
+extern-as-value is now a clear compiler error pointing at `fn x -> name x`.
+(3) `scripts/ctest.sh` + `test/ctests/` add a native-backend compile-and-run
+differential harness: each program is emitted to C, compiled with the C
+compiler, and (for extern-free programs) run and diffed against the
+interpreter; it also emits Wasm and assembles it with wat2wasm when available.
+The in-process suite only ever inspected the emitted C as text, so
+undeclared-identifier and closure-type failures escaped it; the harness
+compiles the emitted code for real. The corpus covers the family across both
+backends — reserved-name/keyword params, extern-as-value and extern-in-closure,
+top-level-fn-as-value, inner recursive uncurrying, mutual recursion, tuple
+capture, and multi-variable/deeply-nested captures (the Wasm backend, whose
+identifiers can't collide with C keywords and which already errors cleanly on
+extern-as-value, was confirmed free of the two C miscompiles). Two in-process
+string guards for the fixed regressions were also added. suite: 2232 passed /
+0 failed._
+
 ## v0.1.70 — 2026-07-27
 
 _A referenced-but-never-concretized poly fn is now emitted (tyvars erased)

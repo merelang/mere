@@ -1,0 +1,5 @@
+// EXTERN — syntax-check only. An extern inside an inner closure must not be
+// captured/namespaced.
+extern fn ext_dbl: int -> int;
+let wrap = fn (x: int) -> ext_dbl x;
+wrap 21

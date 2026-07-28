@@ -1,0 +1,4 @@
+// A nested, self-recursive, multi-arg function should lift and uncurry.
+let rec go = fn (n: int) -> fn (acc: int) ->
+  if n <= 0 then acc else go (n - 1) (acc + n);
+print (str_of_int (go 100 0))

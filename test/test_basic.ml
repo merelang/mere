@@ -3331,7 +3331,7 @@ let () =
   assert_contains "codegen: top-level fn gets closure wrapper"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "static long long mu_inc_closure_fn(void* __env, long long x)";
+    "static long long mu_inc_closure_fn(void* __env, long long mu_x)";
   assert_contains "codegen: top-level fn gets _as_value constant"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
@@ -5311,6 +5311,31 @@ let () =
      if jmp >= 0 && prn >= 0 && jmp < prn then "ordered"
      else "bad(" ^ string_of_int jmp ^ "," ^ string_of_int prn ^ ")")
     "ordered";
+
+  (* P1 C-backend hardening (compile-and-run coverage lives in
+     scripts/ctest.sh, which actually invokes the C compiler; these are the
+     in-process string guards for the two regressions it first surfaced). *)
+  (* A top-level fn's generated `_as_value` closure adapter must sanitize its
+     parameter name — a source param named like a C keyword (`case`) otherwise
+     emits an invalid C parameter declaration. *)
+  check "C hardening: _as_value adapter sanitizes a C-keyword param"
+    (let c = vec_codegen_c "let scale = fn (case: int) -> case * 2;\nscale 3" in
+     if idx_of c "mu_scale_closure_fn(void* __env, long long mu_case)" >= 0
+     then "ok" else "unsanitized-param")
+    "ok";
+  (* An extern used in value position (passed, not directly applied) must lower
+     to its closure adapter `__ext_<name>_as_value`, never the mangled
+     `mu_<name>` (a bare extern is a raw C fn, and `mu_<name>` is undeclared). *)
+  check "C hardening: extern-as-value emits its closure adapter, not mu_<name>"
+    (let c = vec_codegen_c
+       "extern fn ext_inc: int -> int;\n\
+        let apply = fn (g: int -> int) -> fn (x: int) -> g x;\n\
+        apply ext_inc 5" in
+     if idx_of c "__ext_ext_inc_as_value" >= 0 && idx_of c "mu_ext_inc" < 0
+     then "ok"
+     else "adapter=" ^ string_of_int (idx_of c "__ext_ext_inc_as_value")
+          ^ " mangled=" ^ string_of_int (idx_of c "mu_ext_inc"))
+    "ok";
 
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
@@ -9179,11 +9204,14 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     (* Bug state: closure body contains sum_aux((__env_self->xs)) — read from env *)
-     (* After fix: sum_aux(xs) — uses local rebinding *)
-     if has "sum_aux((__env_self->xs))" then "env-leak"
-     else if has "sum_aux(xs)" then "local-shadow"
-     else "neither")
+     (* The recursive call's argument must be the tuple-rebound local, not the
+        captured env slot. Post-uncurry the recursive call is the `__direct`
+        twin, so key on the argument binding itself: `__da0 = (__env_self->xs)`
+        is the env leak; its absence means the local rebinding is used. (Keying
+        on `sum_aux(xs)` used to match the wrapper's forwarding call by
+        coincidence — the wrapper param is now sanitized to `mu_xs`.) *)
+     if has "__da0 = (__env_self->xs)" then "env-leak"
+     else "local-shadow")
     "local-shadow";
 
   (* Phase 30.0 (DEFERRED §1.12 fix): verify that a user-defined fn can shadow

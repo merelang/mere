@@ -1,0 +1,5 @@
+// An inner closure capturing a tuple value.
+let make = fn (pair: int * int) -> fn (k: int) ->
+  let (a, b) = pair in a + b + k;
+let f = make (3, 4);
+print (str_of_int (f 5))
