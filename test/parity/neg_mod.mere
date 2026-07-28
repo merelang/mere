@@ -1,0 +1,3 @@
+let a = (0 - 17) / 4;
+let b = (0 - 17) % 4;
+print (str_of_int (a * 100 + b))

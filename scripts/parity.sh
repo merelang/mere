@@ -43,7 +43,7 @@ pass=0; fail=0
 
 # emit_fail_kind <errfile> : "unsup" if the emit error is a clean
 # backend-unsupported, else "hard".
-emit_kind() { grep -q 'unsupported' "$1" 2>/dev/null && echo unsup || echo hard; }
+emit_kind() { grep -qE 'unsupported|not supported in .* codegen subset' "$1" 2>/dev/null && echo unsup || echo hard; }
 
 for f in $FILES; do
   name="$(basename "$f" .mere)"

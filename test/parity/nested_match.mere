@@ -1,0 +1,3 @@
+type tree = Leaf of int | Node of tree * tree;
+let rec sum = fn (t: tree) -> match t with | Leaf n -> n | Node (l, r) -> sum l + sum r;
+print (str_of_int (sum (Node (Node (Leaf 10, Leaf 11), Leaf 21))))

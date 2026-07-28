@@ -1,0 +1,4 @@
+// nested tuple pattern in a let binding
+let t = ((1, 2), (3, 4));
+let ((a, b), (c, e)) = t;
+print (str_of_int (a + b + c + e))

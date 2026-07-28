@@ -1,0 +1,4 @@
+// closure capturing a tuple value (tests capture repr across backends)
+let mk = fn (p: int * int) -> fn (k: int) -> (match p with | (a, b) -> a + b) + k;
+let f = mk (30, 5);
+print (str_of_int (f 7))

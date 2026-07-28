@@ -1,0 +1,4 @@
+let add3 = fn (a: int) -> fn (b: int) -> fn (c: int) -> a + b + c;
+let f = add3 10;
+let g = f 20;
+print (str_of_int (g 12))
