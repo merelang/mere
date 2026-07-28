@@ -1,0 +1,5 @@
+// bitwise builtins (SHA-256 forced these into the language, v0.1.42)
+let rotr = fn (n: int) -> fn (x: int) ->
+  bit_and (bit_or (bit_shr x n) (bit_shl x (32 - n))) 0xFFFFFFFF;
+let a = bit_xor (bit_and 0xF0F0 0xFF00) (bit_or 0x000F 0x00F0);
+print (str_of_int (bit_and (rotr 4 a) 0xFFFF))
