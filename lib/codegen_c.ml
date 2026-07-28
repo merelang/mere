@@ -3425,7 +3425,14 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (_, _, b) -> go b
+    (* A fn parameter named `name` shadows an outer `name` in the body, so a
+       prelude helper whose parameter is named like a user's top-level fn (e.g.
+       list_fold's `f`) must not attribute its param's arrow type to that fn —
+       which would force a bogus monomorphization and a C miscompile. Only the
+       Fun binder is handled: a let / let-rec that binds `name` may itself be
+       the definition of the poly fn whose use sites live in its body, so that
+       body must still be scanned. *)
+    | Ast.Fun (p, _, b) -> if p = name then () else go b
     | Ast.Constr (_, Some a) -> go a
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
@@ -3528,7 +3535,9 @@ let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty
     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (_, _, b) -> go b
+    (* A fn parameter named `name` shadows an outer `name` (see
+       find_concrete_arrow); only the Fun binder is handled. *)
+    | Ast.Fun (p, _, b) -> if p = name then () else go b
     | Ast.Constr (_, Some a) -> go a
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->

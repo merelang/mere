@@ -5357,6 +5357,21 @@ let () =
             redirect read restore release)
     "scoped";
 
+  (* Resolver shadowing: a top-level fn whose name matches a prelude helper's
+     bound parameter (list_fold / list_map take a param `f`) must not be
+     attributed that parameter's arrow type. Before the fix, the concrete-arrow
+     scan walked into the helper's `fn f -> ...` body and read the param `f` as
+     a use of the user's top-level `f`, forcing a bogus `int -> int -> int`
+     monomorphization that treated the tuple parameter as curried and
+     miscompiled on the C backend only. Guard that the spurious mono is gone. *)
+  check "resolver: a shadowing prelude param does not force a bogus mono of a same-named fn"
+    (let c = vec_codegen_c
+       "let f = fn (t: int * int) -> match t with | (a, b) -> a * 10 + b;\n\
+        f (4, 2)" in
+     if idx_of c "mu_f__int__int__int" < 0 then "clean"
+     else "bogus-mono@" ^ string_of_int (idx_of c "mu_f__int__int__int"))
+    "clean";
+
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
      `mu_`-prefixed identifier immediately before its first `(`. Reports the

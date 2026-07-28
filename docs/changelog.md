@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.73 — 2026-07-28
+
+_A four-backend differential (parity) harness — `scripts/parity.sh` +
+`test/parity/` — plus the resolver bug it immediately caught. The harness runs
+each program through every backend (interp / C / LLVM / Wasm) and diffs stdout
+against the interpreter, classifying each backend MATCH / DIFF / MISCOMPILE /
+UNSUP (clean "unsupported" at emit) / SKIP (toolchain absent). It exists to
+catch the "interp-accepts / backend-rejects" and "backends-disagree" family
+before a dogfood stumbles on it. On its first run it found one: a top-level fn
+named `f` taking a tuple and matching on it compiled on interp / LLVM / Wasm
+but MISCOMPILEd on C. Root cause: the concrete-arrow discovery that drives
+per-instantiation monomorphization (find_concrete_arrow /
+find_all_concrete_arrows_in / find_live_arrow) walked into the bodies of
+resolved poly helpers ignoring binder scope — so list_fold / list_map's
+parameter `f` was read as a use of the user's top-level `f`, forcing a bogus
+`int -> int -> int` monomorphization that treated the tuple parameter as
+curried (`.f0` / `.f1` on a scalar). The fix makes those scans skip a `Fun`
+parameter that shadows the searched name; only the Fun binder is treated as
+shadowing, because a let / let-rec binding the name may itself be the poly fn's
+definition whose use sites live in its body (narrowing to Fun keeps chained
+multi-instantiation discovery working). This is the same name-collision family
+as the earlier `index` / `y0` param cases, but in the monomorphizer rather than
+name mangling. Added a corpus of nine self-contained parity programs
+(arithmetic, recursion, let-pattern, tuple/ADT/record match, closures, strings,
+mutual recursion) and an in-process guard for the fixed mono. suite: 2234
+passed / 0 failed._
+
 ## v0.1.72 — 2026-07-28
 
 _`contrib/stream` — region-scoped line streaming combinators, closing the

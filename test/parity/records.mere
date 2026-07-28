@@ -1,0 +1,3 @@
+type pt = { x: int, y: int };
+let p = pt { x = 40, y = 2 };
+print (str_of_int (p.x + p.y))

@@ -1,0 +1,3 @@
+let rec ev = fn (n: int) -> if n == 0 then true else od (n - 1)
+and od = fn (n: int) -> if n == 0 then false else ev (n - 1);
+print (str_of_int (if ev 42 then 1 else 0))
