@@ -1,0 +1,3 @@
+let adder = fn (n: int) -> fn (x: int) -> n + x;
+let add10 = adder 10;
+print (str_of_int (add10 32))

@@ -1,0 +1,2 @@
+let f = fn (t: int * int) -> match t with | (a, b) -> a * 10 + b;
+print (str_of_int (f (4, 2)))
