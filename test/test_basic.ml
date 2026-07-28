@@ -5386,6 +5386,24 @@ let () =
      else "undefined-but-called")
     "defined";
 
+  (* Map accumulator memory: map_set must copy the key into the map's region
+     only when inserting a NEW key, not on every call. Copying up front (before
+     the hash-lookup) leaked one key copy per update into the bump region, so
+     repeatedly setting the same keys (counter / histogram / word-count) grew
+     O(total writes) instead of O(distinct keys). Guard that the key copy
+     `k = __mcopy_str(...)` sits AFTER the lookup loop, and an existing-key
+     update copies only the value. *)
+  check "map_set: key is copied on insert, not on every update"
+    (let c = vec_codegen_c
+       "let m = map_new () in let z = map_set m \"a\" 1 in map_get m \"a\"" in
+     let loop = idx_of c "while (m->idx[s]" in
+     let kcopy = idx_of c "k = __mcopy_str(m->region, k)" in
+     let vupd = idx_of c "m->values[i] = __mcopy_int(m->region, v)" in
+     if loop >= 0 && kcopy > loop && vupd > loop && vupd < kcopy
+     then "post-lookup"
+     else Printf.sprintf "loop=%d kcopy=%d vupd=%d" loop kcopy vupd)
+    "post-lookup";
+
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
      `mu_`-prefixed identifier immediately before its first `(`. Reports the

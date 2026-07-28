@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.77 — 2026-07-28
+
+_Map-accumulator memory fix (C backend), surfaced by a word-frequency dogfood.
+Counting words into a `Map[str, int]` over a 37.6 MB file with only ~13
+distinct words held 62.5 MB of RSS — O(file), not O(distinct keys). Isolated to
+`map_set`: copy-on-store (v0.1.30) deep-copied the key into the map's region
+UP FRONT, before the hash lookup, so every update to an existing key leaked one
+key copy into the never-reclaimed bump region. A pure churn of 8M sets over 3
+keys reproduced it (62.5 MB). The fix copies only what is actually stored: hash
+and key comparison use the caller's (content-identical) key, an existing-key
+update copies just the new value, and only a fresh insert copies the key. Churn
+and word-count both drop to ~1.3 MB (~45x), same output. This is the ubiquitous
+counter / histogram / accumulator pattern (a KV server, a frequency table),
+previously O(total writes). LLVM and Wasm were already flat here (they do not
+copy-on-store). Added an in-process guard that the key copy sits after the
+lookup loop. suite: 2236 passed / 0 failed._
+
 ## v0.1.76 — 2026-07-28
 
 _More parity coverage (test/parity/ 22 -> 26) and a documented known
