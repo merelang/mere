@@ -1,0 +1,5 @@
+let make = fn (n: int) -> fn (s: str) -> fn (b: bool) ->
+  let tag = if b then 1 else 0 in
+  fn (k: int) -> n + k + str_len s + tag;
+let f = make 7 "xyz" true;
+print (str_of_int (f 3))

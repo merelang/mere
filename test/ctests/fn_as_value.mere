@@ -1,0 +1,3 @@
+let inc = fn (x: int) -> x + 1;
+let apply = fn (g: int -> int) -> fn (x: int) -> g x;
+print (str_of_int (apply inc 41))

@@ -1,0 +1,5 @@
+let adder = fn (base: int) ->
+  let bump = base + 1 in
+  fn (x: int) -> base + bump + x;
+let f = adder 10;
+print (str_of_int (f 5))

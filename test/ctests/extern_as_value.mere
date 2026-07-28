@@ -1,0 +1,5 @@
+// EXTERN — syntax-check only. Regression for an extern referenced in value
+// position: must adapt to a closure value, not emit a mangled name.
+extern fn ext_inc: int -> int;
+let apply = fn (g: int -> int) -> fn (x: int) -> g x;
+apply ext_inc 5

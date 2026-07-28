@@ -1372,6 +1372,21 @@ let rec emit_expr (e : Ast.expr) : string =
             unsupported e.loc
               ("inner-lifted fn `" ^ name ^
                "` used as a value — missing inferred type (Phase 39.A2)"))
+       else if Hashtbl.mem extern_fn_decls name then
+         (* An extern in value position (passed, not directly applied) becomes
+            its closure adapter `__ext_<name>_as_value` (a bare extern is a raw
+            C function, not a closure struct). Emitting the mangled `mu_<name>`
+            here was the v0.1.61 mhttp bug's twin on the reference side. *)
+         (match Ast.walk (Hashtbl.find extern_fn_decls name) with
+          | Ast.TyArrow (a, b)
+            when (match Ast.walk a with Ast.TyArrow _ -> false | _ -> true)
+              && (match Ast.walk b with Ast.TyArrow _ -> false | _ -> true)
+              && ty_is_concrete (Ast.walk a) && ty_is_concrete (Ast.walk b) ->
+            "__ext_" ^ name ^ "_as_value"
+          | _ ->
+            unsupported e.loc
+              ("extern `" ^ name ^ "` used as a value must have a simple `A -> B` \
+                type; wrap a curried or higher-order extern as `fn x -> " ^ name ^ " x`"))
        else c_safe_name name))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
@@ -3960,14 +3975,18 @@ let emit_closure_wrapper (f : fn_decl) : string =
   (* Phase 36 (DEFERRED §1.19 fix): `_as_value` is declared `const` (no
      `static`) so the forward decl in `closure_wrapper_forward_decls` can
      link to it. The closure_fn helper stays `static`. *)
+  (* The adapter's parameter is a C declaration, so its name must be
+     sanitized just like any other binding (a source param named like a C
+     keyword — `case`, `default` — otherwise emits an invalid C parameter). *)
+  let sparam = c_safe_name f.param in
   Printf.sprintf
     "static %s %s_closure_fn(void* __env, %s %s) {\n  \
        (void)__env;\n  \
        return %s(%s);\n\
      }\n\
      const %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
-    cret safe carg f.param
-    safe f.param
+    cret safe carg sparam
+    safe sparam
     cstruct safe safe
 
 (* Closure struct typedef for a `(p) -> r` arrow. *)
@@ -8182,11 +8201,51 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let inner_fns = lift_inner_fns toplevel_names fns body_expr in
   (* Closure (first-class fn) machinery: emit a `closure_T1_T2` typedef
      per arrow type used + a wrapper / value const for each top-level fn. *)
-  let arrow_pairs = collect_arrow_types main_expr fns in
+  let base_arrow_pairs = collect_arrow_types main_expr fns in
+  (* An extern used as a first-class value needs the same closure adapter a
+     top-level fn gets — but the adapter calls the RAW extern symbol, not a
+     `mu_`-prefixed one. Restricted to a simple `A -> B` FFI signature (A and
+     B non-arrow, concrete); a curried/higher-order extern-as-value is a clear
+     error at the reference site (see the EVar arm). *)
+  let extern_val_pairs =
+    Hashtbl.fold (fun name ty acc ->
+      match Ast.walk ty with
+      | Ast.TyArrow (a, b) ->
+        let a = Ast.walk a and b = Ast.walk b in
+        (match a, b with
+         | (Ast.TyArrow _, _) | (_, Ast.TyArrow _) -> acc
+         | _ when ty_is_concrete a && ty_is_concrete b -> (name, a, b) :: acc
+         | _ -> acc)
+      | _ -> acc)
+      extern_fn_decls []
+  in
+  let arrow_pairs =
+    (* merge the externs' arrow types in, deduped by closure struct name so a
+       typedef is emitted exactly once. *)
+    let seen = Hashtbl.create 8 in
+    List.iter (fun (p, r) -> Hashtbl.replace seen (closure_struct_name p r) ())
+      base_arrow_pairs;
+    base_arrow_pairs
+    @ List.filter_map (fun (_, a, b) ->
+        let k = closure_struct_name a b in
+        if Hashtbl.mem seen k then None
+        else (Hashtbl.add seen k (); Some (a, b)))
+        extern_val_pairs
+  in
   let closure_typedefs =
     List.map (fun (p, r) -> emit_closure_typedef p r) arrow_pairs
   in
-  let closure_wrappers = List.map emit_closure_wrapper fns in
+  let closure_wrappers =
+    List.map emit_closure_wrapper fns
+    @ List.map (fun (name, a, b) ->
+        let cstruct = closure_struct_name a b in
+        let cret = c_type_of b and carg = c_type_of a in
+        Printf.sprintf
+          "static %s __ext_%s_closure_fn(void* __env, %s __x) { (void)__env; return %s(__x); }\n\
+           const %s __ext_%s_as_value = {.env = NULL, .fn = __ext_%s_closure_fn};"
+          cret name carg name cstruct name name)
+        extern_val_pairs
+  in
   (* Reset anonymous-closure state before generating fn defs (which
      drives emit_expr to populate `pending_closures`). *)
   pending_closures := [];
@@ -8304,6 +8363,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       let cstruct = closure_struct_name f.param_ty f.return_ty in
       Printf.sprintf "extern const %s %s_as_value;" cstruct (c_safe_name f.name))
       fns
+    @ List.map (fun (name, a, b) ->
+        Printf.sprintf "extern const %s __ext_%s_as_value;"
+          (closure_struct_name a b) name)
+        extern_val_pairs
   in
   (* Phase 39.A2: generate env typedef + adapter body for each
      inner-lifted fn used as a value. *)

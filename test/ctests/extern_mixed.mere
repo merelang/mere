@@ -1,0 +1,9 @@
+// EXTERN — syntax-check only. Several externs: one applied directly, one passed
+// as a value, and a str-typed one passed as a value.
+extern fn ext_a: int -> int;
+extern fn ext_b: int -> int;
+extern fn ext_len: str -> int;
+let apply = fn (g: int -> int) -> fn (x: int) -> g x;
+let applys = fn (g: str -> int) -> fn (s: str) -> g s;
+let direct = fn (x: int) -> ext_a x;
+apply ext_b (direct 3) + applys ext_len "hi"

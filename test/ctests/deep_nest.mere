@@ -1,0 +1,5 @@
+let outer = fn (base: int) -> fn (label: str) ->
+  let mid = base * 2 in
+  fn (k: int) -> base + mid + k + str_len label;
+let f = outer 10 "ab";
+print (str_of_int (f 1))

@@ -1,0 +1,7 @@
+// Params/locals named like C keywords or prelude-internal names must be
+// sanitized consistently — including inside the generated `_as_value`
+// closure wrappers that every top-level fn gets.
+let f = fn (index: int) -> fn (p: int) -> index + p;
+let scale = fn (case: int) -> case * 2;
+let remove = 3;
+print (str_of_int (f 10 5 + scale remove))

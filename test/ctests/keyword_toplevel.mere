@@ -1,0 +1,3 @@
+let default = fn (x: int) -> x + 100;
+let apply = fn (g: int -> int) -> fn (x: int) -> g x;
+print (str_of_int (apply default 5))
