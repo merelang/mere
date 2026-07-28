@@ -1,0 +1,3 @@
+let parts = str_split "a,bb,ccc" ",";
+let joined = str_join "-" parts;
+print (str_of_int (str_len joined))

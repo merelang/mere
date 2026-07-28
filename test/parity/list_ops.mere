@@ -1,0 +1,4 @@
+let xs = Cons (1, Cons (2, Cons (3, Cons (4, Nil))));
+let ys = list_map xs (fn (x: int) -> x * x);
+let s = list_fold ys 0 (fn (a: int) -> fn (x: int) -> a + x);
+print (str_of_int (s + list_len xs))

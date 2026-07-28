@@ -1,0 +1,2 @@
+let c = chr (ord "A" + 4);
+print c

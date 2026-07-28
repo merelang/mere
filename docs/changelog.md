@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.74 — 2026-07-28
+
+_Parity corpus expansion (test/parity/ 9 -> 21) plus a harness classification
+fix. Added twelve diverse self-contained programs — nested tuple pattern,
+prelude option/result/list helpers, nested-variant match, string/char ops,
+curry-3, value shadowing, negative div/mod, tuple-capturing closure, boolean
+short-circuit — each run through all four backends. All 21 now agree with the
+interpreter. Two backend divergences surfaced along the way: (1) a nested
+let-tuple pattern (`let ((a,b),(c,e)) = t`) is rejected by C, LLVM, and Wasm
+with a clean "not supported in <backend> codegen subset — use match" (a
+consistent, documented limitation); the harness's emit-classifier now
+recognizes that phrasing as UNSUP rather than a hard failure, so it is not a
+false red. (2) A prelude `result` helper left with a residual (error) tyvar —
+only `Ok` used, so the error type never grounds — makes the Wasm backend emit a
+`call` to an undefined function (invalid module), where the C backend recovers
+it (v0.1.70) and LLVM errors cleanly; the corpus uses a fully-concrete
+`(int, str) result` instead, and the Wasm gap (it should recover like C or
+error like LLVM, not emit an invalid module) is recorded for a follow-up. No
+compiler change. suite: 2234 passed / 0 failed._
+
 ## v0.1.73 — 2026-07-28
 
 _A four-backend differential (parity) harness — `scripts/parity.sh` +

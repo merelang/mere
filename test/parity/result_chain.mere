@@ -1,0 +1,6 @@
+// result helpers over a fully-concrete (int, str) result — both Ok and Err
+// occur, so the error type is ground (an unconstrained error tyvar is a
+// C-recovers / LLVM-Wasm-subset edge, not a clean parity target).
+let check = fn (x: int) -> if x > 0 then Ok x else Err "neg";
+let r = result_and_then (check 40) (fn (y: int) -> check (y + 2));
+print (str_of_int (result_default r 0))
