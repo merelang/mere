@@ -5957,19 +5957,25 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          delete keep their observable behavior. *)
       Printf.sprintf "static int %s_set(%s* m, %s k, %s v) {"
         struct_name struct_name c_k c_v;
-      (* v0.1.30 (copy-on-store): the map owns its contents — deep-copy
-         the key and value into the map's own region so a stored value
-         never dangles when the storer's allocation scope is reclaimed. *)
-      Printf.sprintf "  k = __mcopy_%s(m->region, k);" k_tag;
-      Printf.sprintf "  v = __mcopy_%s(m->region, v);" v_tag;
+      (* v0.1.30 (copy-on-store): the map owns its contents, so a stored value
+         never dangles when the storer's scope is reclaimed. But the deep-copy
+         must happen only for what is actually stored: hashing and key
+         comparison use the caller's (content-identical) key, an existing-key
+         update copies just the new value, and a fresh insert copies the key
+         once. Copying the key up front — before the lookup — leaked one key
+         copy into the region on every update, so repeatedly setting the same
+         keys (the counter / accumulator pattern) grew O(total writes) instead
+         of O(distinct keys). *)
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) { m->values[i] = v; return 0; }"
-        (key_eq_expr "m->keys[i]" "k");
+      Printf.sprintf "    if (%s) { m->values[i] = __mcopy_%s(m->region, v); return 0; }"
+        (key_eq_expr "m->keys[i]" "k") v_tag;
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
+      Printf.sprintf "  k = __mcopy_%s(m->region, k);" k_tag;
+      Printf.sprintf "  v = __mcopy_%s(m->region, v);" v_tag;
       "  if (m->len == m->cap) {";
       "    int new_cap = m->cap * 2;";
       Printf.sprintf "    %s* nk = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_k c_k c_k;
