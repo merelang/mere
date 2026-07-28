@@ -1,0 +1,17 @@
+// Region-scoped line streaming: peak memory is O(longest line), not O(file).
+// See contrib/stream/stream.mere (measured 61.7 MB -> 1.4 MB on a 57 MB file).
+import "contrib/stream/stream.mere";
+
+// Build a small sample file, then stream it back one line at a time.
+let path = "stream_sample.txt";
+let rec build = fn (i: int) -> fn (acc: str) ->
+  if i <= 0 then acc
+  else build (i - 1) (acc ++ "line " ++ str_of_int i ++ ": hello world\n");
+let wrote = write_file path (build 1000 "");
+
+// Print the one matching line (side effect inside the per-line scope) ...
+let printed = Stream.each_line path (fn (line: str) ->
+  if str_contains line "line 42:" then print line else ());
+// ... and count all lines, both in O(longest line) memory.
+let n = Stream.count_lines path (fn (line: str) -> str_contains line "hello");
+print (str_of_int n)

@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.72 — 2026-07-28
+
+_`contrib/stream` — region-scoped line streaming combinators, closing the
+ergonomic side of the strings-lifetime gap. A `str` carries no region tag, so
+the escape checker must assume any line read in a streaming loop may escape and
+keeps it in the program-lifetime region; a naive line loop therefore grows to
+O(file). The reclaim machinery to avoid this has existed since v0.1.31 (a
+`region R {}` block redirects the thread-local current region, and an
+escape-clean block result — an int/bool/unit — is copied out while the block's
+scratch, including the line string, is freed on release), and the memory-model
+doc measured it, but there was no reusable combinator, so a streaming tool had
+to hand-roll the per-line region (mgrep's line loop simply didn't, and grew to
+~file size). `module Stream { each_line, count_lines }` packages the pattern:
+`each_line path cb` runs a side-effecting `str -> unit` callback per line, and
+`count_lines path pred` returns a match count, each processing the line inside
+a per-line region block. Measured on a 57 MB / 1,000,000-line input, native C
+backend: peak RSS 61.7 MB (naive loop) -> 1.4 MB (combinator), a 44x drop, same
+output. Added examples/stream_lines.mere and an in-process codegen guard
+asserting the region redirect -> file read -> restore -> release ordering that
+makes the reclamation hold. The deeper fix — a type-level region tag on `str`
+so region-scoped strings can also be stored into outer containers — remains
+deferred until a dogfood forces it (the streaming case, which is what has
+recurred, is covered by this). Backends: interp + C (per-line file input is not
+implemented on Wasm/LLVM). suite: 2233 passed / 0 failed._
+
 ## v0.1.71 — 2026-07-28
 
 _C-backend hardening: two latent "compiles-to-C-then-fails" bugs fixed, plus

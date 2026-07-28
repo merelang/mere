@@ -131,6 +131,14 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   region runs at constant ~1.5 MB RSS over 8M lines (previously 246 MB);
   a Redis-wire KV server with per-command regions holds flat RSS under
   sustained load.
+- **Ready-made streaming combinators.** `contrib/stream` packages the
+  per-line region loop so a tool does not have to hand-roll it:
+  `import "contrib/stream/stream.mere"; Stream.each_line path cb` (side
+  effect per line) and `Stream.count_lines path pred` keep peak memory at
+  O(longest line) — measured 1.4 MB vs 61.7 MB for the naive loop on a
+  57 MB file. The callback must not let the line escape (storing it into an
+  outer container deep-copies it out and reintroduces O(file) growth); this
+  is the ergonomic path a streaming line tool wants.
 
 Backend note: the interpreter is GC-backed (same value semantics, memory
 behaviour trivially fine). The Wasm backend reclaims region blocks as of

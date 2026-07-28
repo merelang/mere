@@ -5337,6 +5337,26 @@ let () =
           ^ " mangled=" ^ string_of_int (idx_of c "mu_ext_inc"))
     "ok";
 
+  (* Region-scoped line streaming (contrib/stream): a per-line
+     `region R { ... file_read_line ... }` reads the line while the current
+     region is redirected to R, then releases R after copying out the
+     escape-clean result — so per-line strings are reclaimed and peak memory
+     stays O(longest line) instead of O(file). Guard the codegen ordering that
+     makes that hold: redirect -> read -> restore -> release. *)
+  check "streaming: file read runs under a region scope that is released"
+    (let c = vec_codegen_c
+       "let f = file_open \"x\" in\n\
+        region R { match file_read_line f with | None -> 0 | Some line -> str_len line }" in
+     let redirect = idx_of c "__lang_current_region = __region_R" in
+     let read     = idx_of c "__lang_file_read_line(mu_f)" in
+     let restore  = idx_of c "__lang_current_region = __saved_cur_R" in
+     let release  = idx_of c "__lang_region_block_release(__region_R)" in
+     if redirect >= 0 && read > redirect && restore > read && release > restore
+     then "scoped"
+     else Printf.sprintf "redirect=%d read=%d restore=%d release=%d"
+            redirect read restore release)
+    "scoped";
+
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
      `mu_`-prefixed identifier immediately before its first `(`. Reports the
