@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.78 — 2026-07-28
+
+_A race/cancellation example, and the finding that the structured-concurrency
+"select" gap is smaller than assumed. `channel_recv_timeout ch 0` turns out to
+be a general non-blocking try-recv (empty -> None, ready -> Some, verified on
+interp and C), which makes poll-based select and cooperative cancellation
+expressible with the primitives already in the language: examples/race.mere
+spawns N workers, takes the first to finish via a shared results channel, then
+broadcasts one cancel token per worker that each worker observes with a 0-ms
+recv on every step and stops early. So the only genuinely-missing piece of E-1
+is a *blocking* multi-channel select (an efficiency win over busy-polling), not
+a capability gap — it stays deferred. (channel_recv_timeout is interp+C scope,
+v0.1.48, so the example is interp+C; LLVM/Wasm report it cleanly unsupported.)
+No compiler change. suite: 2236 passed / 0 failed._
+
 ## v0.1.77 — 2026-07-28
 
 _Map-accumulator memory fix (C backend), surfaced by a word-frequency dogfood.

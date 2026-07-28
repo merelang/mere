@@ -1,0 +1,41 @@
+// Race N workers, take the first to finish, then cancel the rest — using only
+// the primitives already in the language. Cancellation is poll-based: a worker
+// checks a shared cancel channel with a 0-ms (non-blocking) `channel_recv_timeout`
+// every step, so there is no need for a blocking multi-channel `select`. The
+// same 0-ms recv is a general non-blocking try-recv (empty -> None, ready ->
+// Some), which is what makes poll-based select / cooperative cancellation
+// expressible today.
+//
+// Execution mode: interp + C (channel_recv_timeout is interp+C, v0.1.48).
+
+let n = 4;
+let results = channel_new ();
+let cancel = channel_new ();
+
+let worker = fn (id: int) ->
+  // worker 0 finishes quickly and wins; the others run long and get cancelled
+  let budget = if id == 0 then 100 else 10000000 in
+  let rec loop = fn (i: int) ->
+    if i >= budget then let _ = channel_send results id in ()
+    else match channel_recv_timeout cancel 0 with
+         | Some c -> ()                // observed a cancel token: stop early
+         | None -> loop (i + 1) in     // still live: keep working
+  let _ = loop 0 in ();
+
+let rec spawn_all = fn (i: int) -> fn (acc: ThreadHandle list) ->
+  if i == n then acc
+  else spawn_all (i + 1) (Cons (spawn (fn () -> worker i), acc));
+let handles = spawn_all 0 Nil;
+
+let winner = channel_recv results;                 // first finisher wins the race
+
+// broadcast cancel: one token per worker, so every still-running worker sees one
+let rec cancel_all = fn (i: int) ->
+  if i == n then () else let _ = channel_send cancel 1 in cancel_all (i + 1);
+let _ = cancel_all 0;
+
+let rec join_all = fn (hs: ThreadHandle list) ->
+  match hs with Nil -> () | Cons (h, t) -> let _ = join h in join_all t;
+let _ = join_all handles;
+
+print ("winner=" ++ str_of_int winner ++ " (all workers joined after cancel)")
