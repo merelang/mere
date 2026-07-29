@@ -1,0 +1,12 @@
+// bignum_demo — exercise the contrib/bignum library (a real consumer of the
+// Go-style full-path import). Prints 100!, fib 200, and a few products so the
+// output can be diffed against python/ruby bignum.
+import "github.com/merelang/mere/contrib/bignum/bignum.mere";
+
+let _ = print ("100! = " ++ Bignum.to_str (Bignum.fact 100)) in
+let _ = print ("fib 200 = " ++ Bignum.to_str (Bignum.fib 200)) in
+let a = Bignum.fact 50 in
+let b = Bignum.from_int 999999999 in
+let _ = print ("50! * 999999999 = " ++ Bignum.to_str (Bignum.mul a b)) in
+let _ = print ("cmp(100!, fib200) = " ++ str_of_int (Bignum.cmp (Bignum.fact 100) (Bignum.fib 200))) in
+print "ok"
