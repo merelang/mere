@@ -2871,6 +2871,15 @@ let () =
     (codegen_with_decls
       "let cw = fn u -> print \"x\"; let h = spawn cw in detach h")
     "pthread_detach";
+  (* v0.1.85 (bignum dogfood): a module-level *value* binding carries a dotted
+     name (M.k); the let-temp name must be flattened through c_safe_name or the
+     emitted C had an invalid identifier `__let_tmp_M.k`. Assert the flattened
+     temp appears and the dotted one does not. *)
+  check "codegen C: module value binding flattens the let-temp name"
+    (let c = codegen "module M { let k = 42; } M.k" in
+     if contains c "__let_tmp_M__k" && not (contains c "__let_tmp_M.k")
+     then "ok" else "bad")
+    "ok";
   assert_contains "codegen C: emits the spawn trampoline + ThreadHandle"
     (codegen_with_decls
       "let cw = fn u -> print \"x\"; let h = spawn cw in join h")

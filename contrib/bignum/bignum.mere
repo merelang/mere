@@ -1,0 +1,145 @@
+// contrib/bignum/bignum.mere — arbitrary-precision natural numbers in pure Mere.
+//
+// A big natural is a little-endian list of base-1e9 limbs (least-significant
+// first), normalized so there are no trailing zero limbs; the empty list is 0.
+// Base 1e9 keeps every limb product (< 1e18) inside the 64-bit int, so the
+// arithmetic never overflows on the C backend. Everything is a persistent
+// `int list` — no mutation, no region parameters to thread — so a big value is
+// an ordinary immutable value you can return, compare, and print.
+//
+// Usage:
+//   import "github.com/merelang/mere/contrib/bignum/bignum.mere";
+//   let f = Bignum.to_str (Bignum.fact 100) in ...    // 100!
+//   let big = Bignum.add (Bignum.from_int 1) (Bignum.from_int 2) in ...
+//
+// API:
+//   from_int : int -> big            add : big -> big -> big
+//   mul_small: big -> int -> big     mul : big -> big -> big
+//   cmp      : big -> big -> int      to_str : big -> str
+//   fact     : int -> big            fib : int -> big
+// (big = int list; naturals only — no sign, no subtraction/division yet.)
+
+module Bignum {
+
+// Limbs are base 1e9: each limb is in 0 .. base-1, so a limb product stays
+// under 1e18 < 2^63 on the 64-bit backends. (The Wasm backend's 32-bit int
+// cannot hold that product, so multiply overflows there — see README/PAIN;
+// addition, whose limb sum stays under 2e9 < 2^31, is fine on Wasm.)
+let base = 1000000000;
+
+let rec from_int = fn (n: int) ->
+  if n <= 0 then Nil
+  else Cons (n % base, from_int (n / base));
+
+// strip trailing (most-significant) zero limbs so 0 is uniquely Nil
+let rec normalize = fn (x) ->
+  match x with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    let nt = normalize t in
+    (match nt with
+     | Nil -> if h == 0 then Nil else Cons (h, Nil)
+     | Cons (th, tt) -> Cons (h, Cons (th, tt)));
+
+let rec add_c = fn (a) -> fn (b) -> fn (carry: int) ->
+  match a with
+  | Nil ->
+    (match b with
+     | Nil -> if carry == 0 then Nil else Cons (carry, Nil)
+     | Cons (bh, bt) ->
+       let s = bh + carry in Cons (s % base, add_c Nil bt (s / base)))
+  | Cons (ah, at) ->
+    (match b with
+     | Nil ->
+       let s = ah + carry in Cons (s % base, add_c at Nil (s / base))
+     | Cons (bh, bt) ->
+       let s = ah + bh + carry in Cons (s % base, add_c at bt (s / base)));
+
+let add = fn (a) -> fn (b) -> add_c a b 0;
+
+// multiply by a single int m (0 <= m); m*limb + carry < 1e18 stays in range
+let rec mul_small_c = fn (a) -> fn (m: int) -> fn (carry: int) ->
+  match a with
+  | Nil -> if carry == 0 then Nil else from_int carry
+  | Cons (ah, at) ->
+    let p = ah * m + carry in
+    Cons (p % base, mul_small_c at m (p / base));
+
+let mul_small = fn (a) -> fn (m: int) ->
+  if m == 0 then Nil else mul_small_c a m 0;
+
+// prepend k zero limbs (multiply by base^k)
+let rec shift_left = fn (x) -> fn (k: int) ->
+  if k == 0 then x else Cons (0, shift_left x (k - 1));
+
+// schoolbook multiply: sum of (a * b_i) << i
+let rec mul_go = fn (a) -> fn (b) -> fn (k: int) ->
+  match b with
+  | Nil -> Nil
+  | Cons (bh, bt) ->
+    let partial = shift_left (mul_small a bh) k in
+    add partial (mul_go a bt (k + 1));
+
+let mul = fn (a) -> fn (b) -> normalize (mul_go a b 0);
+
+let rec length = fn (x) -> match x with | Nil -> 0 | Cons (_, t) -> 1 + length t;
+
+let rec rev_onto = fn (xs) -> fn (acc) ->
+  match xs with | Nil -> acc | Cons (h, t) -> rev_onto t (Cons (h, acc));
+
+// -1 / 0 / 1 for a < b / a == b / a > b
+let cmp = fn (a) -> fn (b) ->
+  let na = normalize a in
+  let nb = normalize b in
+  let la = length na in
+  let lb = length nb in
+  if la < lb then 0 - 1
+  else if la > lb then 1
+  else
+    let ra = rev_onto na Nil in   // most-significant first
+    let rb = rev_onto nb Nil in
+    let rec cg = fn (xs) -> fn (ys) ->
+      match xs with
+      | Nil -> 0
+      | Cons (xh, xt) ->
+        (match ys with
+         | Nil -> 0
+         | Cons (yh, yt) ->
+           if xh < yh then 0 - 1 else if xh > yh then 1 else cg xt yt)
+    in cg ra rb;
+
+// zero-pad a non-leading limb to 9 digits
+let pad9 = fn (n: int) ->
+  let s = str_of_int n in
+  let rec padz = fn (k: int) -> fn (acc: str) ->
+    if k <= 0 then acc else padz (k - 1) ("0" ++ acc) in
+  padz (9 - str_len s) "" ++ s;
+
+let to_str = fn (x) ->
+  let nx = normalize x in
+  match nx with
+  | Nil -> "0"
+  | Cons (h0, t0) ->
+    let r = rev_onto (Cons (h0, t0)) Nil in   // most-significant first
+    (match r with
+     | Nil -> "0"
+     | Cons (msb, rest) ->
+       let rec go = fn (xs) -> fn (acc: str) ->
+         match xs with
+         | Nil -> acc
+         | Cons (h, t) -> go t (acc ++ pad9 h)
+       in go rest (str_of_int msb));
+
+// n! as a big natural
+let fact = fn (n: int) ->
+  let rec go = fn (i: int) -> fn (acc) ->
+    if i > n then acc else go (i + 1) (mul_small acc i)
+  in go 1 (from_int 1);
+
+// nth Fibonacci as a big natural (fib 0 = 0, fib 1 = 1)
+let fib = fn (n: int) ->
+  let rec go = fn (i: int) -> fn (a) -> fn (b) ->
+    if i == n then a else go (i + 1) b (add a b)
+  in go 0 (from_int 0) (from_int 1);
+
+}

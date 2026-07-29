@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.85 — 2026-07-29
+
+_A module-level value binding compiles on the C backend, and a new
+`contrib/bignum` library. Writing bignum surfaced the bug: `let base =
+1000000000` inside `module Bignum { ... }` carries a dotted name (`Bignum.base`),
+and the C let-emitter used the raw binder name for its internal temporaries,
+so it emitted `__auto_type __let_tmp_Bignum.base = ...` — a `.` in a C
+identifier, which does not compile. Every earlier contrib module bound only
+functions (whose names already route through name-mangling), so a module
+*value* binding had never been exercised. Fix: flatten the dot for the
+`__let_tmp_` / `__let_result_` temp names (`Bignum__base`); ordinary
+undotted names are untouched, so only the previously-broken module-value case
+changes. Guarded in test_basic.
+
+`contrib/bignum/bignum.mere` is a reusable arbitrary-precision natural-number
+library — little-endian base-1e9 limbs as a persistent `int list`
+(from_int / add / mul_small / mul / cmp / to_str / fact / fib). Base 1e9
+keeps limb products under 2^63 on the 64-bit backends. `examples/bignum_demo.mere`
+imports it by full path and prints 100!, fib 200, and a product that match
+python's bignum exactly on interp and C. Backend reach: interp + C exact;
+Wasm runs add/fib but mul overflows its 32-bit int (a base-1e9 product is
+~1e18); LLVM rejects a polymorphic inner-closure capture (a known
+monomorphization gap) — both documented in the library README. suite: 2244
+passed / 0 failed._
+
 ## v0.1.84 — 2026-07-29
 
 _Fire-and-forget threads: `detach : ThreadHandle -> unit`. `spawn` returns a

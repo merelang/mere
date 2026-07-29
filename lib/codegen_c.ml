@@ -1506,9 +1506,14 @@ let rec emit_expr (e : Ast.expr) : string =
           would then complain about "undeclared identifier main_". Use
           the safe form on both sides. The internal temp names
           (`__let_tmp_<n>`, `__let_result_<n>`) keep the raw Mere name
-          for readability; they're scoped to this expression and don't
-          collide with anything. *)
+          for readability, but they must still be *valid C identifiers*. A
+          module-level value binding (`let base = 1000000000` inside
+          `module M { ... }`) carries a dotted name like `M.base`, and a raw
+          `__let_tmp_M.base` is not valid C. Flatten just the dot for the temp
+          names (`M__base`); ordinary names are unchanged, so this only affects
+          the previously-broken module-value case. *)
        let safe = c_safe_name name in
+       let tmp = flatten_module_dots name in
        if Hashtbl.mem top_globals name
           && List.memq value !top_global_init_values then
          Printf.sprintf
@@ -1523,11 +1528,11 @@ let rec emit_expr (e : Ast.expr) : string =
             free(((__mere_owned_vec_base*)%s)->data); \
             ((__mere_owned_vec_base*)%s)->data = NULL; \
             __let_result_%s; })"
-           name value_c safe name name body_c safe safe name
+           tmp value_c safe tmp tmp body_c safe safe tmp
        else
          Printf.sprintf
            "({ __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s; %s; })"
-           name value_c safe name body_c
+           tmp value_c safe tmp body_c
      | Ast.P_wild | Ast.P_unit ->
        (* Phase 21.1 (DEFERRED §1.7) fix: `let _ = E in B` / `let () = E in B`
           — evaluate E for side effects then continue with B. Block sequence
