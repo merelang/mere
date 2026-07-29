@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.83 — 2026-07-29
+
+_Positioned reads: `file_pread : File -> int -> int -> Vec[R, int]`.
+`file_pread handle offset len` seeks to `offset` and reads up to `len` bytes
+from an open handle, returning them as an int vec (same byte representation
+as read_file_bytes). Reads fewer than `len` bytes only at EOF (partial
+tail). Until now the only binary read was `read_file_bytes`, which loads the
+whole file — fine for a WASM module inspector, useless for a random-access
+format where the point is to touch only the pages you need. This is the
+capability a B-tree file format wants: read one page at an offset without
+paying for the whole file. Interp uses seek_in/really_input on the
+in_channel; the C backend emits `__lang_file_pread` (fseek + a bounded fgetc
+loop building a region vec_int). Scope is interp + C, inheriting the file
+I/O family's boundary — a program that preads first opens the handle with
+file_open, which already refuses cleanly on LLVM/Wasm ("v0.1.59 scope =
+interp + C"), so file_pread needs no separate unsupported arm there.
+Surfaced by the msqlite dogfood (a read-only SQLite reader): it now prints
+`SELECT * FROM t` byte-for-byte against sqlite3 on both interp and C,
+reading the header, sqlite_master, and a table's leaf page by positioned
+reads. suite: 2242 passed / 0 failed._
+
 ## v0.1.82 — 2026-07-29
 
 _The LLVM backend's region allocator grows the arena instead of overrunning

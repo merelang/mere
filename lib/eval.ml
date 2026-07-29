@@ -2006,6 +2006,33 @@ let builtin_file_close =
     | V_file ch -> close_in ch; V_unit
     | _ -> failwith "file_close: expected File")
 
+(* v0.1.83 (msqlite dogfood): positioned read. `file_pread ch off len` seeks
+   to `off` and reads up to `len` bytes, returning a Vec[int]. Reads fewer
+   than `len` bytes only when `off + len` runs past EOF (partial tail); the
+   returned Vec's length is the number of bytes actually read. *)
+let builtin_file_pread =
+  V_builtin ("file_pread", fun fv ->
+    match fv with
+    | V_file ch ->
+      V_builtin ("file_pread_off", fun ov ->
+        match ov with
+        | V_int off ->
+          V_builtin ("file_pread_len", fun lv ->
+            match lv with
+            | V_int len ->
+              let flen = in_channel_length ch in
+              let avail = if off >= flen then 0
+                          else min len (flen - off) in
+              let avail = if avail < 0 then 0 else avail in
+              seek_in ch off;
+              let buf = Bytes.create avail in
+              really_input ch buf 0 avail;
+              V_vec (ref (Array.init avail
+                (fun i -> V_int (Char.code (Bytes.get buf i)))))
+            | _ -> failwith "file_pread: length expected int")
+        | _ -> failwith "file_pread: offset expected int")
+    | _ -> failwith "file_pread: expected File")
+
 let builtin_channel_recv_opt =
   V_builtin ("channel_recv_opt", fun ch ->
     match ch with
@@ -2101,6 +2128,7 @@ let initial_env : env =
     ("print_err", ref builtin_print_err);
     ("read_file", ref builtin_read_file);
     ("read_file_bytes", ref builtin_read_file_bytes);
+    ("file_pread", ref builtin_file_pread);
     ("write_file_bytes", ref builtin_write_file_bytes);
     ("write_file", ref builtin_write_file);
     ("read_lines", ref builtin_read_lines);
