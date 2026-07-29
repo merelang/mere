@@ -283,6 +283,7 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    helper is appended after the vec runtimes (it constructs a
    mere_vec_int). v0.1.44 adds the write half. *)
 let uses_read_file_bytes = ref false
+let uses_file_pread = ref false  (* v0.1.83: file_pread (positioned read) *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -2132,6 +2133,30 @@ let rec emit_expr (e : Ast.expr) : string =
        uses_read_file_bytes := true;
        Printf.sprintf "__lang_read_file_bytes(%s, %s)"
          (emit_expr arg) region_var
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pread"; _ }, ch_e); _ }, off_e) ->
+       (* v0.1.83 (msqlite dogfood): positioned read on an open FILE* handle.
+          `file_pread ch off len` — resolve the result Vec's region like
+          read_file_bytes and build a byte vec from a seek+fread. `arg` is
+          the length (the outermost curried argument). *)
+       let region_var =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) ->
+              if not (Hashtbl.mem vec_instances "int") then
+                Hashtbl.add vec_instances "int" Ast.TyInt;
+              if r = "__heap" then "(&__lang_default_region)"
+              else "__region_" ^ r
+            | _ ->
+              if not (Hashtbl.mem vec_instances "int") then
+                Hashtbl.add vec_instances "int" Ast.TyInt;
+              "(&__lang_default_region)")
+         | None -> unsupported e.loc "file_pread: missing type info"
+       in
+       uses_file_io := true;
+       uses_file_pread := true;
+       Printf.sprintf "__lang_file_pread(%s, %s, %s, %s)"
+         (emit_expr ch_e) (emit_expr off_e) (emit_expr arg) region_var
      | Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e) ->
        (* v0.1.44: the write half. The vec arg guarantees the vec_int
           instance exists (its own c_type_of registered it). *)
@@ -7699,6 +7724,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset vec_instances;
   uses_read_file_bytes := false;
+  uses_file_pread := false;
   uses_file_io := false;
   uses_int_of_str := false;
   uses_write_file_bytes := false;
@@ -8721,6 +8747,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "  int c;";
                "  while ((c = fgetc(f)) != EOF) mere_vec_int_push(v, (long long)c);";
                "  fclose(f);";
+               "  return v;";
+               "}" ];
+           "" ])
+    @ (if not !uses_file_pread then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.83 (msqlite dogfood): positioned read on an open handle.";
+               "   Seeks to `off` and reads up to `len` bytes into an int vec,";
+               "   stopping early only at EOF (partial tail). Unlike";
+               "   read_file_bytes it reads only the requested window, so a";
+               "   random-access format need not load the whole file. */";
+               "static mere_vec_int* __lang_file_pread(FILE* f, long long off, long long len, __lang_region* r) {";
+               "  mere_vec_int* v = mere_vec_int_new(r);";
+               "  if (off < 0 || len <= 0) return v;";
+               "  if (fseek(f, (long)off, SEEK_SET) != 0) return v;";
+               "  for (long long i = 0; i < len; i++) {";
+               "    int c = fgetc(f);";
+               "    if (c == EOF) break;";
+               "    mere_vec_int_push(v, (long long)c);";
+               "  }";
                "  return v;";
                "}" ];
            "" ])

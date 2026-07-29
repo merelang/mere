@@ -2888,6 +2888,15 @@ let () =
     (codegen "random_int 4") "__lang_random_int";
   assert_contains "codegen C: file_size emits __lang_file_size"
     (codegen "file_size \"/tmp/x\"") "__lang_file_size";
+  (* v0.1.83 (msqlite dogfood): positioned read on an open handle. The 3-arg
+     curried call lowers to __lang_file_pread(handle, off, len, region) and
+     pulls in the seek+fread runtime. *)
+  assert_contains "codegen C: file_pread emits __lang_file_pread"
+    (codegen "let f = file_open \"/tmp/x\" in file_pread f 16 4")
+    "__lang_file_pread";
+  assert_contains "codegen C: file_pread emits its seek+fread runtime"
+    (codegen "let f = file_open \"/tmp/x\" in file_pread f 16 4")
+    "fseek(f, (long)off, SEEK_SET)";
   (* v0.1.17 (mk dogfood P5): an inline lambda passed to par_map capturing a
      host-fn param gets inner-lifted; the spawn closure that calls it must
      carry the lifted fn's captures in ITS env (else the injected arg is an

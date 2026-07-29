@@ -1088,6 +1088,21 @@ let read_file_bytes_scheme =
     body = Ast.TyArrow (Ast.TyStr,
              Ast.TyCon ("Vec", [_rfb_region; Ast.TyInt])) }
 
+(* v0.1.83 (msqlite dogfood): positioned read on an open handle.
+   `file_pread handle offset len` reads up to `len` bytes starting at
+   `offset` and returns them as a Vec[int] (same byte representation as
+   read_file_bytes). Unlike read_file_bytes it does not load the whole
+   file — the caller reads only the region it needs (e.g. one B-tree page),
+   which is what random-access binary formats require. *)
+let _fpr_region = fresh_var ()
+let file_pread_scheme =
+  let rid = match _fpr_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("File", []),
+             Ast.TyArrow (Ast.TyInt,
+               Ast.TyArrow (Ast.TyInt,
+                 Ast.TyCon ("Vec", [_fpr_region; Ast.TyInt])))) }
+
 (* v0.1.44 (Mandelbrot probe): the write half — PPM's real format is P6
    (raw bytes) and the P3 escape hatch cost 2.6x the file size. *)
 let _wfb_region = fresh_var ()
@@ -1390,6 +1405,7 @@ let initial_env : env =
     ("read_lines",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
     ("read_file_bytes", read_file_bytes_scheme);
+    ("file_pread", file_pread_scheme);
     ("write_file_bytes", write_file_bytes_scheme);
     (* Phase 44: file system primitives for the docs site SSG (paper-trial doc 47) *)
     ("list_dir",
