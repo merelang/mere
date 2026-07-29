@@ -54,6 +54,54 @@ let current_base_dir : string ref = ref ""
    with `-I /path/to/mere/checkout`. *)
 let import_search_paths : string list ref = ref []
 
+(* Q-013 (Go-style full-path imports): a project may declare a module path in
+   its mere.toml — `[package]\n path = "github.com/owner/repo"`. An import whose
+   path starts with that module path is resolved LOCALLY, relative to the
+   mere.toml's directory (the module root), so in-repo code and external
+   consumers spell the same full-path import identically — the in-repo one
+   resolves to local files, the external one to a vendored `.mere_modules/<full
+   path>/` copy. Identity lives in the import path, so same-name packages from
+   different owners never collide.
+
+   `module_path_of_toml dir` reads `dir/mere.toml` and returns the `path` value
+   in its `[package]` section, if any. *)
+let module_path_of_toml (dir : string) : string option =
+  let toml = Filename.concat dir "mere.toml" in
+  if not (Sys.file_exists toml) then None
+  else
+    try
+      let content = In_channel.with_open_text toml In_channel.input_all in
+      let lines = String.split_on_char '\n' content in
+      let section = ref "" in
+      let found = ref None in
+      List.iter (fun raw ->
+        let line =
+          match String.index_opt raw '#' with
+          | Some i -> String.sub raw 0 i | None -> raw in
+        let t = String.trim line in
+        if String.length t >= 2 && t.[0] = '[' then
+          section := String.sub t 1 (String.length t - 2)
+        else if !section = "package" && !found = None then
+          (* match: path = "..." *)
+          (match String.index_opt t '=' with
+           | Some i when String.trim (String.sub t 0 i) = "path" ->
+             let rhs = String.trim (String.sub t (i + 1) (String.length t - i - 1)) in
+             let n = String.length rhs in
+             if n >= 2 && rhs.[0] = '"' && rhs.[n - 1] = '"' then
+               found := Some (String.sub rhs 1 (n - 2))
+           | _ -> ())) lines;
+      !found
+    with _ -> None
+
+(* Walk up from `dir` to the nearest mere.toml that declares a module path;
+   return (module_root_dir, module_path). *)
+let rec find_module_root (dir : string) : (string * string) option =
+  match module_path_of_toml dir with
+  | Some p -> Some (dir, p)
+  | None ->
+    let parent = Filename.dirname dir in
+    if String.equal parent dir then None else find_module_root parent
+
 (* Region name stack — pushed when entering a `region NAME { ... }` body
    and popped on exit. Used to recognize `R.alloc(expr)` as sugar for
    `&R expr` only when R is a lexically-enclosing region (so existing
@@ -1762,13 +1810,27 @@ let rec parse_program_internal tokens =
       in
       let candidates =
         if Filename.is_relative path then
+          (* Q-013: a full-path import that lives under the current project's
+             declared module path resolves to local files (module root +
+             remainder), tried first. *)
+          let module_local =
+            match find_module_root !current_base_dir with
+            | Some (root, mpath) ->
+              let prefix = mpath ^ "/" in
+              let plen = String.length prefix in
+              if String.length path >= plen && String.sub path 0 plen = prefix
+              then [Filename.concat root (String.sub path plen (String.length path - plen))]
+              else []
+            | None -> []
+          in
           let base_here = Filename.concat !current_base_dir path in
           let modules_here =
             match find_mere_modules !current_base_dir with
             | Some d -> [Filename.concat d path]
             | None -> []
           in
-          (base_here :: modules_here)
+          module_local
+          @ (base_here :: modules_here)
           @ List.map (fun d -> Filename.concat d path) !import_search_paths
         else [path]
       in

@@ -170,3 +170,36 @@ one vendored module in `.mere_modules/hello/greet.mere`. Try:
     wat2wasm --enable-tail-call /tmp/pkg.wat -o /tmp/pkg.wasm
     node scripts/run_wasm.js /tmp/pkg.wasm
     #   → hello, world!
+
+## Full-path imports (Go-style, identity in the path)
+
+To make a package's identity unambiguous, an import path may include the
+package's origin, mirroring its on-disk location:
+
+    import "github.com/owner/http/router.mere";
+
+vendored as `.mere_modules/github.com/owner/http/router.mere`. Because the
+owner is part of the path, two packages named `http` from different owners
+(`github.com/a/http` vs `github.com/b/http`) live at different paths and never
+collide — identity is the path, not a bare name.
+
+### In-repo resolution via a module path
+
+A project can declare its own module path in `mere.toml`:
+
+    [package]
+    name = "mere"
+    path = "github.com/merelang/mere"
+
+An import whose path starts with that module path resolves to **local files**,
+relative to the `mere.toml` directory — so in-repo code and an external
+consumer write the exact same import, the former resolving to the working tree
+and the latter to a vendored `.mere_modules/` copy:
+
+    # inside github.com/merelang/mere, contrib/http/router.mere:
+    import "github.com/merelang/mere/contrib/log/log.mere";   # → ./contrib/log/log.mere
+
+Resolution order for a relative import path is: (1) module-path-local (if it
+matches the declared `path`), (2) importer-relative, (3) nearest
+`.mere_modules/` walk-up, (4) `-I` / `MERE_PATH`. A project with no `path`
+declared is unaffected — full-path imports simply resolve via `.mere_modules/`.

@@ -11661,5 +11661,24 @@ let () =
       | None -> "none")
      "https://x/mere@deadbeef");
 
+   (* Q-013 (Go-style full-path imports): the resolver reads a project's module
+      path from its mere.toml [package] path, so an import under that path
+      resolves to local files. Unit-test the path extraction. *)
+   let tmpdir = Filename.temp_file "mere_modpath_" "" in
+   Sys.remove tmpdir; Unix.mkdir tmpdir 0o755;
+   let oc = open_out (Filename.concat tmpdir "mere.toml") in
+   output_string oc "[package]\nname = \"mere\"\npath = \"github.com/merelang/mere\"\n[dependencies]\nfoo = { git = \"x\", rev = \"y\" }\n";
+   close_out oc;
+   check "Q-013: module path read from mere.toml [package] path"
+     (match Parser.module_path_of_toml tmpdir with Some p -> p | None -> "none")
+     "github.com/merelang/mere";
+   check "Q-013: no path field -> None (a [dependencies] path= is not it)"
+     (let d2 = Filename.temp_file "mere_nomod_" "" in
+      Sys.remove d2; Unix.mkdir d2 0o755;
+      let o2 = open_out (Filename.concat d2 "mere.toml") in
+      output_string o2 "[package]\nname = \"x\"\n"; close_out o2;
+      match Parser.module_path_of_toml d2 with Some p -> p | None -> "none")
+     "none";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
