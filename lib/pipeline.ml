@@ -28,9 +28,10 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
      2048-dogfood P3: then α-rename nested fn bindings to unique names so
      same-named inner fns (e.g. a `let rec go` per if-branch) don't collide
      in the backends' name-keyed inner-fn lift resolution. *)
-  Ast.uniquify_inner_fns_program
-    (Ast.lower_par_map_program
-      { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })
+  Ast.reserve_toplevel_main
+    (Ast.uniquify_inner_fns_program
+      (Ast.lower_par_map_program
+        { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }))
 
 let parse_only s =
   (* Phase 21.2: parse_only is used by pretty-print / AST-shape tests
@@ -82,17 +83,17 @@ let reserved_c_names =
 
 let warn_reserved_name loc name =
   if name = "main" then
-    (* `main` is the synthesized program entry point (the module's trailing
-       expression compiles to `$main` / C `main`). A user binding named
-       `main` collides with it — and the raw collision otherwise only
-       surfaces from a downstream tool (e.g. wat2wasm "redefinition of
-       function $main"), far from the source. Mere has no `main`-function
-       convention: the entry point IS the file's trailing expression. *)
+    (* Mere has no `main`-function convention: the entry point IS the file's
+       trailing expression. A user binding named `main` no longer collides
+       with the synthesized entry — the C backend mangles it (`mu_main`) and
+       the Wasm entry is emitted as `$__mere_main` (exported as "main"), both
+       distinct from a user `$main` — but the name is still misleading, since
+       defining `main` does not make it the entry point. *)
     Printf.eprintf
-      "%s: warning: top-level name `main` is reserved for the program entry \
-       point (the file's trailing expression compiles to it). Rename this \
-       binding (e.g. `run`) — otherwise codegen emits two `main`s and the \
-       build fails downstream.\n%!"
+      "%s: warning: `main` is not special in Mere — the entry point is the \
+       file's trailing expression, not a `main` function. A top-level binding \
+       named `main` compiles fine now, but reads as if it were the entry; \
+       consider renaming it (e.g. `run`).\n%!"
       (Loc.to_string loc)
   else if List.mem name reserved_c_names then
     Printf.eprintf

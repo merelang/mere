@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.87 — 2026-07-29
+
+_A user top-level binding named `main` now compiles on every backend
+(finishing the follow-up left open in v0.1.86). Mere has no `main`
+convention — the entry point is the file's trailing expression — so a `main`
+binding is just an ordinary value that happens to share the synthesized
+entry's name. The C backend already mangled it (`mu_main`), but LLVM and Wasm
+emitted the raw name and hit a duplicate-`main` link/assemble error. Rather
+than patch each backend, the fix is one backend-agnostic pass in the pipeline:
+`Ast.reserve_toplevel_main` alpha-renames a top-level `main` to a reserved
+name (`__mere_user_main`) via the existing scope-aware `rename_free_vars`, so
+an inner `main` (a local let or a parameter) still shadows and is untouched.
+Verified: `let main = fn () -> 42 in main ()` prints 42 on interp, C, LLVM,
+and Wasm. The v0.1.86 note's "not fixed" caveat is superseded. suite passed._
+
 ## v0.1.86 — 2026-07-29
 
 _`str_eq` on the LLVM backend. The interpreter and C backend had string

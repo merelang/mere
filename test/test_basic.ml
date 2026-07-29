@@ -3531,6 +3531,16 @@ let () =
     (llvm "if str_eq \"a\" \"a\" then 1 else 0") "@__lang_str_eq";
   assert_contains "llvm: str_eq runtime is defined"
     (llvm "42") "define i1 @__lang_str_eq(ptr %a, ptr %b)";
+  (* v0.1.87: a user top-level `main` binding is alpha-renamed so it no longer
+     collides with the synthesized entry. The rename is transparent (the
+     program still runs), and the LLVM entry `@main` is defined exactly once. *)
+  (* the collision case is a top-level *decl* `main` (`;`-terminated), not a
+     local `let main = ... in ...`; that decl is what a backend would emit as
+     the entry-colliding `@main` / `$main`. *)
+  check "user top-level main decl runs (renamed transparently)"
+    (Pipeline.process "let main = fn (u: unit) -> 42;\nmain ()") "42";
+  assert_contains "llvm: user main decl is renamed away from the entry"
+    (llvm "let main = fn (u: unit) -> 42;\nmain ()") "@__mere_user_main";
   (* Q-012 step 3b-4d: LLVM backend spawn / join over pthreads. The emitted
      IR compiles with clang and runs the closure on a real OS thread
      (validated manually). *)
