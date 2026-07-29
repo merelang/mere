@@ -22,7 +22,7 @@
 
 extern fn hmac_sha256_hex: str -> str -> str;
 
-import "../http/json_body.mere";
+import "github.com/merelang/mere/contrib/http/json_body.mere";
 
 module GhWebhook {
 

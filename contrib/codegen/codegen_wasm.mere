@@ -15,7 +15,7 @@
 //   contrib/parser/parser.mere - tokenize + parse_decls (transitively
 //                                pulls in lexer + ast)
 
-import "../parser/parser.mere";
+import "github.com/merelang/mere/contrib/parser/parser.mere";
 
 // === emit_state ============================================================
 //
@@ -3200,8 +3200,94 @@ let dirname = fn (path: str) ->
   if last < 0 then "."
   else substring path 0 last;
 
+// ---- Q-013: Go-style full-path imports (self-host side) -------------------
+// An import path that carries its package's origin — "github.com/owner/repo/
+// lib/mod.mere" — resolves via the nearest enclosing mere.toml that declares
+// the matching module path:
+//     [package]
+//     path = "github.com/owner/repo"
+// and is then module-root-relative, so in-repo code and an external consumer
+// spell the same import. Mirrors the OCaml resolver (lib/parser.ml). A plain
+// relative import never probes mere.toml — the historical base-dir-relative
+// resolution is unchanged, and the probe only runs for paths whose first
+// segment looks like a host name (contains a "." and is not dot-relative).
+
+// First segment (before the first "/") contains a dot, and the path is not
+// dot-relative — the shape of a host-qualified full-path import.
+// (Inner loops hoisted to top-level rec fns with explicit args — the same
+// Phase 54.32 wasm-codegen workaround as str_index_of_from_loop below.)
+let rec ifp_seg_end = fn (p: str) -> fn (i: int) ->
+  if i >= str_len p then i
+  else if char_at p i == "/" then i
+  else ifp_seg_end p (i + 1);
+
+let rec ifp_has_dot = fn (p: str) -> fn (e: int) -> fn (i: int) ->
+  if i >= e then false
+  else if char_at p i == "." then true
+  else ifp_has_dot p e (i + 1);
+
+let import_is_full_path = fn (p: str) ->
+  if str_len p == 0 || char_at p 0 == "." then false
+  else
+    let e = ifp_seg_end p 0 in
+    e > 0 && e < str_len p && ifp_has_dot p e 0;
+
+// The `path = "..."` value inside a mere.toml's [package] section ("" when
+// absent). Section-aware so a `path` key under [dependencies] is not taken.
+let rec toml_close_quote = fn (rhs: str) -> fn (n: int) -> fn (i: int) ->
+  if i >= n then (-1)
+  else if char_at rhs i == "\"" then i
+  else toml_close_quote rhs n (i + 1);
+
+let rec toml_pkg_scan = fn (ls: str list) -> fn (in_pkg: bool) ->
+  match ls with
+  | Nil -> ""
+  | Cons (raw, rest) ->
+    let line = str_trim raw in
+    if str_len line >= 2 && char_at line 0 == "[" then
+      toml_pkg_scan rest (str_eq line "[package]")
+    else if in_pkg && str_len line >= 5 && str_eq (substring line 0 4) "path" then
+      let after = str_trim (substring line 4 (str_len line)) in
+      if str_len after >= 1 && char_at after 0 == "=" then
+        let rhs = str_trim (substring after 1 (str_len after)) in
+        let n = str_len rhs in
+        if n >= 2 && char_at rhs 0 == "\"" then
+          let q = toml_close_quote rhs n 1 in
+          if q > 1 then substring rhs 1 q else toml_pkg_scan rest in_pkg
+        else toml_pkg_scan rest in_pkg
+      else toml_pkg_scan rest in_pkg
+    else toml_pkg_scan rest in_pkg;
+
+let toml_package_path = fn (toml: str) ->
+  toml_pkg_scan (str_split toml "\n") false;
+
+// Walk up from `dir` to the nearest mere.toml declaring a module path.
+// Returns (module_root, module_path), or ("", "") when none. A missing
+// mere.toml reads as "": the language-level read_file fails catchably
+// (try_or) on interp/C, and the Wasm host returns an empty string.
+let rec find_module_root_up = fn (dir: str) -> fn (depth: int) ->
+  if depth <= 0 || str_len dir == 0 then ("", "")
+  else
+    let toml = try_or (fn (u: unit) -> read_file (dir ++ "/mere.toml")) "" in
+    let mp = if str_len toml > 0 then toml_package_path toml else "" in
+    if str_len mp > 0 then (dir, mp)
+    else
+      let parent = dirname dir in
+      if str_eq parent dir then ("", "")
+      else find_module_root_up parent (depth - 1);
+
 let resolve_import_path = fn (base_dir: str) -> fn (relative: str) ->
   if str_len relative > 0 && char_at relative 0 == "/" then relative
+  else if import_is_full_path relative then
+    let pair = find_module_root_up base_dir 40 in
+    let (root, mp) = pair in
+    let ml = str_len mp in
+    if ml > 0
+       && str_len relative > ml + 1
+       && str_eq (substring relative 0 ml) mp
+       && char_at relative ml == "/" then
+      root ++ "/" ++ substring relative (ml + 1) (str_len relative)
+    else base_dir ++ "/" ++ relative
   else base_dir ++ "/" ++ relative;
 
 let rec member_str_path = fn (p: str) -> fn (xs: str list) ->

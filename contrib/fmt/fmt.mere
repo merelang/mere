@@ -34,7 +34,7 @@
 // ... / `TCon` reference below now reads as `TyInt` / `TyBool` / ... /
 // `TyCon`.
 
-import "../parser/ast.mere";
+import "github.com/merelang/mere/contrib/parser/ast.mere";
 
 // === Precedence ============================================================
 //

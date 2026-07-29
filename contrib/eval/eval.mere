@@ -15,12 +15,12 @@
 // multi-stage plan. The AST shape is the same one parser.mere builds
 // and fmt.mere consumes (ast.mere is the shared definition).
 
-import "../parser/ast.mere";
+import "github.com/merelang/mere/contrib/parser/ast.mere";
 // Stage 51e: pull the parser in so we can write `parse_and_eval`. Heavy
 // dep, but the alternative (hand-coding ASTs forever) doesn't compose
 // with the browser bridge we want for 51f. `lexer.mere` rides along
 // transitively through `parser.mere`.
-import "../parser/parser.mere";
+import "github.com/merelang/mere/contrib/parser/parser.mere";
 
 // === Value representation ==================================================
 //

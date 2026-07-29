@@ -136,7 +136,10 @@ const wasmPath = process.argv[2];
         new Uint8Array(memory.buffer).set(bytes, ptr);
         return ptr;
       } catch (e) {
-        console.error("read_file failed:", e.message);
+        // A missing file is an expected probe result (the module-path
+        // resolver walks up testing for mere.toml; the language-level
+        // read_file fails catchably) — return 0 silently. Log anything else.
+        if (e.code !== "ENOENT") console.error("read_file failed:", e.message);
         return 0;
       }
     },
