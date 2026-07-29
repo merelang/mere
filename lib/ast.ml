@@ -543,6 +543,42 @@ let uniquify_inner_fns_program (prog : program) : program =
   in
   { decls; main = uniquify_inner_fns_expr prog.main }
 
+(* A user top-level binding named `main` collides with the synthesized program
+   entry (C emits `main`, Wasm exports `$main`). Mere has no main convention —
+   the entry point IS the file's trailing expression — so a `main` binding is
+   only ever an ordinary value that happens to share the entry's name. The C
+   backend already mangles it (`mu_main`), but the LLVM and Wasm backends emit
+   the raw name and produced a duplicate-`main` link/assemble error. Alpha-
+   rename a top-level `main` to a reserved name here, once, so every backend is
+   consistent. Scope-aware via rename_free_vars: an inner `main` (a local let or
+   a parameter) shadows and is left untouched. *)
+let reserve_toplevel_main (prog : program) : program =
+  let binds_main =
+    List.exists (function
+      | Top_let (p, _) -> List.mem "main" (pattern_vars p)
+      | Top_let_rec bs -> List.exists (fun (n, _) -> n = "main") bs
+      | _ -> false) prog.decls
+  in
+  if not binds_main then prog
+  else
+    let fresh = "__mere_user_main" in
+    let lk n = if n = "main" then Some fresh else None in
+    let rn_pat p =
+      match p.pnode with
+      | P_var "main" -> { p with pnode = P_var fresh }
+      | _ -> p
+    in
+    let rn_decl = function
+      | Top_let (p, v) -> Top_let (rn_pat p, rename_free_vars lk v)
+      | Top_let_rec bs ->
+        Top_let_rec
+          (List.map (fun (n, v) ->
+             ((if n = "main" then fresh else n), rename_free_vars lk v)) bs)
+      | other -> other
+    in
+    { decls = List.map rn_decl prog.decls;
+      main = rename_free_vars lk prog.main }
+
 (* Q-012 Phase 32: lower a saturated `par_map f xs` into spawn + channel +
    list_map, so it works on every backend (spawn / channel / list_map all
    codegen already) without a par_map-specific runtime. Expansion:
