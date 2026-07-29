@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.86 — 2026-07-29
+
+_`str_eq` on the LLVM backend. The interpreter and C backend had string
+equality, but the LLVM backend never defined it, so any LLVM-compiled program
+using `str_eq` failed at emit with "unbound variable: str_eq" (surfaced by the
+bignum and mpath dogfoods, both of which pattern on single characters). The
+2-arg call now lowers to a new `@__lang_str_eq` runtime — a byte compare over
+two NUL-terminated strings returning i1 — mirroring the C backend's strcmp
+path. Guarded in test_basic; verified equal/unequal/empty/prefix cases match
+the interpreter on a compiled LLVM binary.
+
+Not fixed here (documented in the mpath dogfood's PAIN): the Wasm backend emits
+a user top-level binding named `main` as `$main`, colliding with the exported
+entry `$main` ("redefinition of function $main"). It is narrow (only a literal
+`main` binding, only on Wasm) with a trivial rename workaround; a proper fix
+mangles or reserves the entry name and is left as a follow-up. suite passed._
+
 ## v0.1.85 — 2026-07-29
 
 _A module-level value binding compiles on the C backend, and a new

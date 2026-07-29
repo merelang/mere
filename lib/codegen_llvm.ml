@@ -3199,6 +3199,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at(ptr %s, i32 %s)" r sv iv);
     r
+  (* v0.1.86: str_eq a b — byte-compare two strings, returns i1 (bool). The
+     C/interp backends already had it; the LLVM backend did not. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_eq"; _ }, a_e); _ }, b_e)
+    when not (Hashtbl.mem toplevel_fn_names "str_eq") ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_eq(ptr %s, ptr %s)" r av bv);
+    r
   (* Phase 30.0 (DEFERRED §1.12 fix): when a user-defined fn with the same
      name exists, skip the builtin dispatch and fall through to the normal
      user fn call path *)
@@ -6744,6 +6753,32 @@ let float_helpers_llvm =
       "  ret ptr %buf2";
       "}" ]
 
+(* v0.1.86: string equality. The C and interp backends have str_eq; the LLVM
+   backend was missing it (a bignum/mpath dogfood hit "unbound variable:
+   str_eq"). Byte-compare two NUL-terminated strings, returning i1. *)
+let str_eq_helper =
+  String.concat "\n"
+    [ "define i1 @__lang_str_eq(ptr %a, ptr %b) {";
+      "entry:";
+      "  br label %loop";
+      "loop:";
+      "  %pa = phi ptr [ %a, %entry ], [ %na, %cont ]";
+      "  %pb = phi ptr [ %b, %entry ], [ %nb, %cont ]";
+      "  %ca = load i8, ptr %pa";
+      "  %cb = load i8, ptr %pb";
+      "  %ne = icmp ne i8 %ca, %cb";
+      "  br i1 %ne, label %diff, label %cont";
+      "cont:";
+      "  %isz = icmp eq i8 %ca, 0";
+      "  %na = getelementptr i8, ptr %pa, i64 1";
+      "  %nb = getelementptr i8, ptr %pb, i64 1";
+      "  br i1 %isz, label %eq, label %loop";
+      "diff:";
+      "  ret i1 0";
+      "eq:";
+      "  ret i1 1";
+      "}" ]
+
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
@@ -8445,6 +8480,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         region_runtime_helpers;
         "";
         str_concat_helper;
+        "";
+        str_eq_helper;
         "";
         float_helpers_llvm;
         "" ]

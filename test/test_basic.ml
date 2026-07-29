@@ -3525,6 +3525,12 @@ let () =
     (llvm "42") "declare i32 @printf(ptr, ...)";
   assert_contains "llvm: defines main"
     (llvm "42") "define i32 @main()";
+  (* v0.1.86: str_eq was unbound on the LLVM backend (a bignum/mpath dogfood
+     hit it). The 2-arg call lowers to the byte-compare runtime. *)
+  assert_contains "llvm: str_eq lowers to the __lang_str_eq runtime"
+    (llvm "if str_eq \"a\" \"a\" then 1 else 0") "@__lang_str_eq";
+  assert_contains "llvm: str_eq runtime is defined"
+    (llvm "42") "define i1 @__lang_str_eq(ptr %a, ptr %b)";
   (* Q-012 step 3b-4d: LLVM backend spawn / join over pthreads. The emitted
      IR compiles with clang and runs the closure on a real OS thread
      (validated manually). *)
