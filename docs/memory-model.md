@@ -163,6 +163,18 @@ and closure-registering externs are rejected inside a region block
 Measured: the playground 2048 with a per-move region holds its bump
 pointer constant across 30,000 moves.
 
+The **default (program-lifetime) arena grows by chaining blocks** rather
+than aborting when it fills: when an allocation would overrun the current
+block, a geometrically larger block is malloc'd and chained on, and blocks
+never move so existing pointers stay valid. The C backend gained this in
+v0.1.25 (a long-running server exhausted the old fixed-cap arena); the LLVM
+backend gained the same bounds-check-and-grow in v0.1.82 — before it, its
+`__lang_region_alloc` was a pure bump with no bounds check, so an
+allocation-heavy program (e.g. a per-pixel renderer) silently overran the
+4 MB arena and crashed while interp/C/Wasm agreed. Guarded by
+`test/parity/region_growth.mere` (a checksum over ~6 MB of live region
+allocations, matching across all four backends).
+
 ---
 
 ## 4. Current state in mere (as of 2026-06-24, Phase 46)

@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.82 — 2026-07-29
+
+_The LLVM backend's region allocator grows the arena instead of overrunning
+it. `__lang_region_alloc` was a pure bump — add the aligned size to the top
+pointer and return, with no bounds check — so once the default 4 MB arena
+filled, allocations ran past the malloc'd buffer and corrupted the heap. An
+allocation-heavy program (a per-pixel renderer that materializes a float
+triple per pixel) crashed with SIGSEGV at larger image sizes on LLVM while
+interp, C, and Wasm all produced the same checksum; the C backend had gained
+bounds-checked, block-chained growth in v0.1.25 (found by a long-running
+server) but the LLVM runtime never received it. The LLVM `%__lang_region`
+struct now carries a 4th `blocks` field (a chain of malloc'd blocks, each with
+a 16-byte header holding the `prev` link so the data that follows stays
+16-aligned); `__lang_region_alloc` compares `top + aligned` against
+`base + cap` and, when it would overrun, chains on a geometrically larger
+block (doubling until it fits) via a new `__lang_region_add_block` helper;
+`__lang_region_init` seeds the first block and `__lang_region_free` walks the
+chain. Blocks never move, so pointers into earlier blocks stay valid across
+growth — matching the C semantics exactly. New guard
+`test/parity/region_growth.mere` folds a checksum over ~6 MB of live region
+allocations (two shallow loops so it exercises arena growth, not stack depth)
+and now matches across all four backends. Guard verified by reverting the
+fix: the LLVM column goes DIFF (empty output from the crash) on the old
+allocator and returns to MATCH with the growth in place. suite: 2240 passed
+/ 0 failed; parity 28/28 (was 27)._
+
 ## v0.1.81 — 2026-07-29
 
 _Go-style full-path imports adopted in-repo: the self-host resolver learns the

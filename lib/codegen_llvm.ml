@@ -5274,18 +5274,42 @@ let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string lis
    The default region is a file-scope global initialized in @main. *)
 let region_runtime_helpers =
   String.concat "\n"
-    [ "%__lang_region = type { ptr, ptr, i64 }";
+    (* A region is a chain of bump-allocated blocks. When the current block
+       fills, a geometrically larger block is chained on instead of writing
+       past the buffer — mirrors the C backend's v0.1.25 growth (found by a
+       long-running server whose per-command allocations exhausted the old
+       fixed-cap region). Before this, the LLVM allocator was a pure bump with
+       no bounds check, so any allocation-heavy program (e.g. a per-pixel
+       renderer) silently overran the 4 MB default arena and corrupted the
+       heap. Blocks never move, so pointers into earlier blocks stay valid
+       across growth. Each block is `malloc(16 + cap)`: a 16-byte header holds
+       the `prev` link (and keeps the data that follows 16-aligned). *)
+    [ "%__lang_region = type { ptr, ptr, i64, ptr }";
       "@__lang_default_region = internal global %__lang_region zeroinitializer";
+      "";
+      "define void @__lang_region_add_block(ptr %r, i64 %cap) {";
+      "entry:";
+      "  %blk_sz = add i64 %cap, 16";
+      "  %b = call ptr @malloc(i64 %blk_sz)";
+      "  %blocks_p = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
+      "  %old = load ptr, ptr %blocks_p";
+      "  store ptr %old, ptr %b";
+      "  store ptr %b, ptr %blocks_p";
+      "  %data = getelementptr i8, ptr %b, i64 16";
+      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
+      "  store ptr %data, ptr %base_p";
+      "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
+      "  store ptr %data, ptr %top_p";
+      "  %cap_p = getelementptr %__lang_region, ptr %r, i32 0, i32 2";
+      "  store i64 %cap, ptr %cap_p";
+      "  ret void";
+      "}";
       "";
       "define void @__lang_region_init(ptr %r, i64 %cap) {";
       "entry:";
-      "  %base = call ptr @malloc(i64 %cap)";
-      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
-      "  store ptr %base, ptr %base_p";
-      "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
-      "  store ptr %base, ptr %top_p";
-      "  %cap_p = getelementptr %__lang_region, ptr %r, i32 0, i32 2";
-      "  store i64 %cap, ptr %cap_p";
+      "  %blocks_p = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
+      "  store ptr null, ptr %blocks_p";
+      "  call void @__lang_region_add_block(ptr %r, i64 %cap)";
       "  ret void";
       "}";
       "";
@@ -5295,6 +5319,31 @@ let region_runtime_helpers =
       "  %aligned = and i64 %n7, -8";
       "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
       "  %top = load ptr, ptr %top_p";
+      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
+      "  %base = load ptr, ptr %base_p";
+      "  %cap_p = getelementptr %__lang_region, ptr %r, i32 0, i32 2";
+      "  %cap = load i64, ptr %cap_p";
+      "  %limit = getelementptr i8, ptr %base, i64 %cap";
+      "  %want = getelementptr i8, ptr %top, i64 %aligned";
+      "  %over = icmp ugt ptr %want, %limit";
+      "  br i1 %over, label %grow, label %use";
+      "grow:";
+      "  %ncap0 = shl i64 %cap, 1";
+      "  br label %growloop";
+      "growloop:";
+      "  %ncap = phi i64 [ %ncap0, %grow ], [ %ncap2, %growbody ]";
+      "  %small = icmp ult i64 %ncap, %aligned";
+      "  br i1 %small, label %growbody, label %growdone";
+      "growbody:";
+      "  %ncap2 = shl i64 %ncap, 1";
+      "  br label %growloop";
+      "growdone:";
+      "  call void @__lang_region_add_block(ptr %r, i64 %ncap)";
+      "  %top2 = load ptr, ptr %top_p";
+      "  %new_top2 = getelementptr i8, ptr %top2, i64 %aligned";
+      "  store ptr %new_top2, ptr %top_p";
+      "  ret ptr %top2";
+      "use:";
       "  %new_top = getelementptr i8, ptr %top, i64 %aligned";
       "  store ptr %new_top, ptr %top_p";
       "  ret ptr %top";
@@ -5302,9 +5351,19 @@ let region_runtime_helpers =
       "";
       "define void @__lang_region_free(ptr %r) {";
       "entry:";
-      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
-      "  %base = load ptr, ptr %base_p";
-      "  call void @free(ptr %base)";
+      "  %blocks_p = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
+      "  %b0 = load ptr, ptr %blocks_p";
+      "  br label %loop";
+      "loop:";
+      "  %b = phi ptr [ %b0, %entry ], [ %prev, %body ]";
+      "  %isnull = icmp eq ptr %b, null";
+      "  br i1 %isnull, label %done, label %body";
+      "body:";
+      "  %prev = load ptr, ptr %b";
+      "  call void @free(ptr %b)";
+      "  br label %loop";
+      "done:";
+      "  store ptr null, ptr %blocks_p";
       "  ret void";
       "}" ]
 
