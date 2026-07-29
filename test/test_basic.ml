@@ -3796,12 +3796,21 @@ let () =
      %__lang_region struct, init/alloc/free helpers, and the global
      @__lang_default_region initialized at @main start. Closure env and
      string concat allocations now go through the bump arena. *)
+  (* The region struct carries a `blocks` chain pointer (4th field) so the
+     arena can grow: when a block fills, a larger one is chained on instead
+     of writing past the buffer. Before this the LLVM allocator was a pure
+     bump with no bounds check, so allocation-heavy programs overran the
+     4 MB default arena and crashed (see test/parity/region_growth.mere). *)
   assert_contains "llvm: __lang_region struct typedef"
-    (llvm "1 + 2") "%__lang_region = type { ptr, ptr, i64 }";
+    (llvm "1 + 2") "%__lang_region = type { ptr, ptr, i64, ptr }";
   assert_contains "llvm: default region global"
     (llvm "1 + 2") "@__lang_default_region = internal global %__lang_region zeroinitializer";
   assert_contains "llvm: region_alloc helper defined"
     (llvm "1 + 2") "define ptr @__lang_region_alloc(ptr %r, i64 %n)";
+  assert_contains "llvm: region_alloc bounds-checks before bumping"
+    (llvm "1 + 2") "%over = icmp ugt ptr %want, %limit";
+  assert_contains "llvm: region grows by chaining a new block"
+    (llvm "1 + 2") "call void @__lang_region_add_block(ptr %r, i64 %ncap)";
   assert_contains "llvm: main initializes default region"
     (llvm "1 + 2")
     "call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";

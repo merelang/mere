@@ -1,0 +1,26 @@
+// Allocation-heavy nested loop mirroring a per-pixel renderer: each of
+// 400*400 steps builds two float triples via vscale. Each triple is a
+// function *return* value, so it escapes its caller and the backend must
+// heap-allocate it in the default region (it cannot sit on the stack). That
+// is well past the 4 MB default arena, so every backend's region allocator
+// must grow the arena instead of writing past it. Before the LLVM backend
+// gained bounds-checked growth this overran the fixed buffer and crashed;
+// the checksum lets all four backends be compared exactly. Recursion is
+// kept shallow (two loops of depth 400) so the check exercises arena
+// growth, not stack depth. The sum is kept mod 65521 so every value fits
+// the Wasm 32-bit int.
+let vscale = fn a -> fn (s: float) -> let (x, y, z) = a in (x * s, y * s, z * s);
+let rec px = fn (x: int) -> fn (y: int) -> fn (acc: int) ->
+  if x == 400 then acc
+  else
+    let fx = float_of_int (x % 97) in
+    let fy = float_of_int (y % 89) in
+    let p = vscale (1.0, 2.0, 3.0) fx in
+    let q = vscale (4.0, 5.0, 6.0) fy in
+    let (px1, py1, pz1) = p in
+    let (qx, qy, qz) = q in
+    let s = px1 + py1 + pz1 + qx + qy + qz in
+    px (x + 1) y ((acc + int_of_float s) % 65521);
+let rec row = fn (y: int) -> fn (acc: int) ->
+  if y == 400 then acc else row (y + 1) (px 0 y acc);
+print (str_of_int (row 0 1))
