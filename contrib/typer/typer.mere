@@ -24,11 +24,11 @@
 //   - It does NOT carry typer-side error suggestions (levenshtein
 //     "did you mean"). MVP is `fail msg`.
 
-import "../parser/ast.mere";
+import "github.com/merelang/mere/contrib/parser/ast.mere";
 // Stage 52b: pull in parser.mere so end-to-end `parse_and_infer src`
 // demos can drive real source strings through tokenize + parse_decls
 // + infer. Same pattern as eval.mere; lexer rides along.
-import "../parser/parser.mere";
+import "github.com/merelang/mere/contrib/parser/parser.mere";
 
 // === Substitution =========================================================
 //

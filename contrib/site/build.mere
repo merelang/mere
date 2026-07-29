@@ -32,8 +32,8 @@
 // Import paths are resolved relative to the importer file (this file)'s
 // directory (Phase 9.5). From contrib/site/ we reference ../markdown/ and
 // ../path/.
-import "../markdown/to_html.mere";
-import "../path/path.mere";
+import "github.com/merelang/mere/contrib/markdown/to_html.mere";
+import "github.com/merelang/mere/contrib/path/path.mere";
 
 // ===== internal helpers =====
 // (For MVP simplicity, kept in one file as top-level `let`s — no module wrap.)

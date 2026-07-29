@@ -31,7 +31,7 @@ extern fn http_current_status: unit -> int;
 extern fn gen_request_id: unit -> str;
 extern fn http_set_header: str -> str -> unit;
 
-import "../log/log.mere";
+import "github.com/merelang/mere/contrib/log/log.mere";
 
 // Split the request line `"METHOD /path"` into (method, path). If
 // the space is missing (shouldn't happen in a well-formed request),

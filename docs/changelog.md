@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.81 — 2026-07-29
+
+_Go-style full-path imports adopted in-repo: the self-host resolver learns the
+module path, and contrib's cross-package imports migrate. v0.1.80 taught the
+OCaml resolver to resolve an import under the project's declared module path
+(`mere.toml [package] path`) to local files; but the self-host toolchain has
+its own import inliner (`inline_imports_in` in contrib/codegen), whose
+`resolve_import_path` only knew base-dir-relative resolution — a first
+migration attempt made the self-host tests fail with a doubled path
+(`contrib/eval/github.com/.../ast.mere`). `resolve_import_path` now mirrors
+the OCaml resolver with its signature unchanged: an import whose first segment
+looks like a host name (contains a dot, not dot-relative) walks up from the
+importing file probing for a mere.toml that declares a matching module path
+and resolves module-root-relative; anything else keeps the historical
+behavior, and plain relative imports never probe. A missing mere.toml reads
+uniformly as "" on every backend (the language-level read_file fails catchably
+under try_or on interp/C; the Wasm host returns an empty string — its ENOENT
+log is now silent since a miss is an expected probe result). The helpers
+follow the file's Phase 54.32 style (inner loops hoisted to top-level rec fns
+with explicit args, the wasm-codegen capture workaround). With that in place,
+the repo declares `path = "github.com/merelang/mere"` in a root mere.toml and
+contrib's 11 cross-package `../` imports (typer/fmt/codegen/eval -> parser,
+http -> log, feed -> xml, site -> markdown/path, webhook -> http) migrate to
+full-path spelling — the same import now works in-repo (module-path-local) and
+vendored (`.mere_modules/<full-path>/`). site/playground keeps its own build
+pipeline untouched. suite: 2238 passed / 0 failed; self-host bootstrap
+fixpoint all-passed; ctest 12/12; parity 27/27._
+
+## v0.1.80 — 2026-07-29
+
+_Module-path-local resolution for Go-style full-path imports (Q-013, compiler
+side). A project declares its module path in `mere.toml` (`[package] path =
+"github.com/owner/repo"`); the OCaml resolver walks up to the nearest such
+mere.toml and resolves an import that starts with the declared path to local
+files relative to the module root. External consumers already resolved
+full-path imports via `.mere_modules/<full-path>/` (the walk-up resolver
+handled deep paths unchanged) — this adds the in-repo half, so a package's
+cross-package imports use the same spelling in-repo and when vendored.
+Resolution order: module-path-local, importer-relative, `.mere_modules`
+walk-up, `-I`/MERE_PATH; a project with no declared path is unaffected. Two
+unit guards; packages.md documents the convention. suite: 2238 passed / 0
+failed._
+
+## v0.1.79 — 2026-07-28
+
+_Doc-only: memory-model.md documents the heap-element overwrite leak in
+copy-on-store containers (a hot loop overwriting the same `vec_set`/`map_set`
+slot with fresh strings grows O(writes) — the container region is
+bump-allocated, so old copies are unreclaimable; measured ~550 MB for 4M
+overwrites; scalar elements unaffected). Eliding the copy needs type-level
+region tracking on `str` (deferred); prefer scalar slots or StrBuf reuse in
+hot-overwrite loops._
+
 ## v0.1.78 — 2026-07-28
 
 _A race/cancellation example, and the finding that the structured-concurrency

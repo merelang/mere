@@ -27,7 +27,7 @@
 //   type feed  = { title: str, link: str, entries: entry list };
 //   parse_feed : str -> feed
 
-import "../xml/xml.mere";
+import "github.com/merelang/mere/contrib/xml/xml.mere";
 
 type Entry = { title: str, link: str, date: str, summary: str };
 type Doc   = { title: str, link: str, entries: Entry list };

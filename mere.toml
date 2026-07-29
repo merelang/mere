@@ -1,0 +1,4 @@
+[package]
+name = "mere"
+path = "github.com/merelang/mere"
+version = "0.1.0"
