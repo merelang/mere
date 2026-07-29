@@ -1927,6 +1927,16 @@ let builtin_join =
     | V_thread d -> ignore (Domain.join d); V_unit
     | _ -> failwith "join: expected a ThreadHandle")
 
+(* v0.1.84 (mhttpd dogfood): fire-and-forget. The reference interpreter has
+   no domain-detach, so this is a no-op that leaves the worker running
+   unawaited — matching the observable fire-and-forget semantics (the C
+   backend calls pthread_detach to release the thread's resources). *)
+let builtin_detach =
+  V_builtin ("detach", fun h ->
+    match h with
+    | V_thread _ -> V_unit
+    | _ -> failwith "detach: expected a ThreadHandle")
+
 let builtin_channel_new =
   V_builtin ("channel_new", fun _ ->
     V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false))
@@ -2103,6 +2113,7 @@ let initial_env : env =
     (* Q-012 step 3a: concurrency primitives *)
     ("spawn", ref builtin_spawn);
     ("join", ref builtin_join);
+    ("detach", ref builtin_detach);
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);
     ("channel_recv", ref builtin_channel_recv);

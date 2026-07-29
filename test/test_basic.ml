@@ -2865,6 +2865,12 @@ let () =
     (codegen_with_decls
       "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "pthread_join";
+  (* v0.1.84 (mhttpd dogfood): fire-and-forget detach for spawn-per-connection
+     servers that never join their handlers. *)
+  assert_contains "codegen C: detach emits a pthread_detach"
+    (codegen_with_decls
+      "let cw = fn u -> print \"x\"; let h = spawn cw in detach h")
+    "pthread_detach";
   assert_contains "codegen C: emits the spawn trampoline + ThreadHandle"
     (codegen_with_decls
       "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
