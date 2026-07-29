@@ -1214,6 +1214,10 @@ let spawn_scheme =
                      Ast.TyCon ("ThreadHandle", [])))
 let join_scheme =
   mono (Ast.TyArrow (Ast.TyCon ("ThreadHandle", []), Ast.TyUnit))
+(* v0.1.84 (mhttpd dogfood): fire-and-forget — release a spawned thread's
+   resources without waiting for it (pthread_detach on the C backend). *)
+let detach_scheme =
+  mono (Ast.TyArrow (Ast.TyCon ("ThreadHandle", []), Ast.TyUnit))
 
 let _chan_new_elem = fresh_var ()
 let channel_new_scheme =
@@ -1363,6 +1367,7 @@ let initial_env : env =
     (* Q-012 step 3a: concurrency primitives *)
     ("spawn",        spawn_scheme);
     ("join",         join_scheme);
+    ("detach",       detach_scheme);
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);
     ("channel_recv", channel_recv_scheme);

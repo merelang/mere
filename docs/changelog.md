@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.84 — 2026-07-29
+
+_Fire-and-forget threads: `detach : ThreadHandle -> unit`. `spawn` returns a
+joinable handle, and the only way to reclaim a worker's resources was
+`join`, which blocks. A server's accept loop that spawns one handler per
+connection and never joins therefore leaked a joinable thread per
+connection, so a long-running server slowly exhausted thread resources.
+`detach h` releases the thread without waiting for it (pthread_detach on the
+C backend; a no-op on the reference interpreter, whose domains are not the
+server target). Surfaced by the mhttpd dogfood (a concurrent HTTP/1.1
+server): with detach plus a fixed pool of arena buffers handed hand-to-hand
+over a channel, mhttpd serves 400 sustained concurrent requests where the
+naive version aborted at ~256 (each connection had leaked a fresh 64 KB from
+the no-free byte arena). No new limitation in the byte arena itself — its
+loud abort-on-exhaustion already told the server to pool and reuse buffers;
+detach is the missing concurrency primitive. suite passed / 0 failed._
+
 ## v0.1.83 — 2026-07-29
 
 _Positioned reads: `file_pread : File -> int -> int -> Vec[R, int]`.

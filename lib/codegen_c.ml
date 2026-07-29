@@ -1885,6 +1885,14 @@ let rec emit_expr (e : Ast.expr) : string =
               || Hashtbl.mem inner_lifts "join"
               || Hashtbl.mem toplevel_fn_names "join") ->
        "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_join(__h.tid, NULL); 0; })"
+     (* v0.1.84 (mhttpd dogfood): fire-and-forget. Release a spawned thread's
+        resources without waiting for it — the pattern a server's accept loop
+        needs, where each connection handler runs unbounded and is never
+        joined. Without this, discarding a spawn handle leaks the joinable
+        thread, and a long-running server eventually exhausts thread
+        resources. *)
+     | Ast.Var "detach" when not (user_shadows "detach") ->
+       "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_detach(__h.tid); 0; })"
      (* Q-012: channel primitives, dispatched to the monomorphized runtime.
         The element tag comes from the channel's resolved type. *)
      | Ast.Var "channel_new" ->
