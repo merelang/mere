@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.90 — 2026-07-30
+
+_`mere install` detects same-major version conflicts instead of silently
+picking one. A module path may resolve to only one revision in a build; if two
+packages in the dependency graph demand the same path at different revs, the
+installer used to fetch both and let the second overwrite the first
+(last-writer-wins). It now tracks the resolved sha per module path and fails
+with both revisions named, asking for explicit reconciliation (pin it in the
+top-level mere.toml). This is the correct answer for Mere's model: it pins
+exact revisions with no version ranges, so there is nothing to minimize over —
+the npm/cargo MVS problem does not arise. Incompatible majors sidestep the
+conflict entirely by living at different module paths (`.../v2`, SIV, v0.1.89),
+which the check leaves untouched (distinct paths → no conflict). Together with
+v0.1.88–89 this closes the version-resolution axis of Q-013 for an exact-pin
+package manager. Hand-tested against a diamond (two libs pinning the same
+library at different revs → conflict; the SIV app with distinct paths →
+installs clean). suite: 2255 passed / 0 failed._
+
+## v0.1.89 — 2026-07-30
+
+_Two `module`s with the same name now coexist correctly on every backend —
+the language-side half of Go-style Semantic Import Versioning (SIV). A library
+and its `/v2` (an incompatible major) both name their module the same
+(`module Greet { ... }`), so their members desugar to identically-qualified
+top-level names (`Greet.hello` defined twice, of different types) that shadow
+by declaration order. The interpreter already honoured that — a closure
+captures the env at its definition and the env prepends, so a reference binds
+to the most-recent prior definition — but the native backends resolve a
+top-level name globally and mis-assigned one version's body to the other (a C
+build emitted `Greet.hello : str -> str` with the *other* version's
+closure-returning body). New pipeline pass `Ast.uniquify_toplevel_module_shadows`
+walks the decls in order and, when a **dotted** (module-qualified) name is
+redefined, alpha-renames the redefinition (`Greet.hello` → `Greet.hello__v2`)
+and rewrites later references, so all four backends see distinct symbols.
+Only dotted redefinitions are touched, so ordinary programs are unaffected.
+
+Verified with the version-resolution dogfood — an app whose two dependencies
+pull incompatible majors of a shared library via SIV distinct paths
+(`.../mgreet` and `.../mgreet/v2`): it now prints the v1 and v2 results
+side by side on interp, C, LLVM, and Wasm. This closes the native gap that the
+dogfood surfaced; combined with the full-path installer (v0.1.88), SIV works
+end to end. Minimal-version selection (MVS, for compatible same-major demands)
+remains the one deferred package axis. suite passed._
+
 ## v0.1.88 — 2026-07-30
 
 _`mere install` grows up to match the Go-style import model (Q-013): full-path

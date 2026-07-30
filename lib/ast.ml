@@ -579,6 +579,54 @@ let reserve_toplevel_main (prog : program) : program =
     { decls = List.map rn_decl prog.decls;
       main = rename_free_vars lk prog.main }
 
+(* Two `module Greet { ... }` at different import paths (SIV: a lib and its
+   `/v2` both name their module `Greet`) desugar to identically-qualified
+   top-level names — `Greet.hello` defined twice, of different types. They
+   shadow by declaration order, and the interpreter honours that (a closure
+   captures the env at its definition, and the env prepends, so a reference
+   binds to the most-recent prior definition). The native backends resolve a
+   top-level name globally, without that scope, and mis-assign one version's
+   body to the other. Resolve the shadow into distinct names here — walk the
+   decls in order, and when a *dotted* (module-qualified) name is redefined,
+   rename the redefinition (`Greet.hello` -> `Greet.hello__v2`) and rewrite
+   every later reference to it, so all four backends see distinct symbols.
+   Only dotted redefinitions are touched, so ordinary programs are unaffected. *)
+let uniquify_toplevel_module_shadows (prog : program) : program =
+  let cur : (string, string) Hashtbl.t = Hashtbl.create 16 in
+  let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let lk n = Hashtbl.find_opt cur n in
+  let is_dotted n = String.contains n '.' in
+  (* Register a binding occurrence of `n`; return the (possibly fresh) name
+     it should be bound under, updating `cur` for later references. *)
+  let bind_name n =
+    if not (is_dotted n) then n
+    else begin
+      let c = (match Hashtbl.find_opt count n with Some c -> c | None -> 0) + 1 in
+      Hashtbl.replace count n c;
+      if c = 1 then n
+      else begin
+        let n' = n ^ "__v" ^ string_of_int c in
+        Hashtbl.replace cur n n';
+        n'
+      end
+    end
+  in
+  let rn_decl = function
+    | Top_let ({ pnode = P_var n; _ } as p, v) ->
+      (* non-recursive: the value is in the scope BEFORE this binding *)
+      let v' = rename_free_vars lk v in
+      let n' = bind_name n in
+      Top_let ({ p with pnode = P_var n' }, v')
+    | Top_let (p, v) -> Top_let (p, rename_free_vars lk v)
+    | Top_let_rec bs ->
+      (* recursive: names are in scope within their own values *)
+      let names' = List.map (fun (n, _) -> bind_name n) bs in
+      Top_let_rec (List.map2 (fun n' (_, v) -> (n', rename_free_vars lk v)) names' bs)
+    | other -> other
+  in
+  let decls = List.map rn_decl prog.decls in
+  { decls; main = rename_free_vars lk prog.main }
+
 (* Q-012 Phase 32: lower a saturated `par_map f xs` into spawn + channel +
    list_map, so it works on every backend (spawn / channel / list_map all
    codegen already) without a par_map-specific runtime. Expansion:
