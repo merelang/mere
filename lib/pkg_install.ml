@@ -323,6 +323,13 @@ let install ~root =
        Hashtbl.replace locked_hash coord e.l_hash)
     (read_lock (Filename.concat root "mere.lock"));
   let seen = Hashtbl.create 16 in
+  (* Same-major version conflict detection: a module path may resolve to only
+     ONE revision in a build. If two packages in the graph demand the same
+     module path at different revs, Mere does not auto-select (it pins exact
+     revs, with no version ranges to minimize over — the MVS problem does not
+     arise); it fails and asks for explicit reconciliation. Incompatible
+     majors avoid this entirely by living at different paths (`.../v2`, SIV). *)
+  let path_sha = Hashtbl.create 16 in
   let entries = ref [] in
   (* Worklist of packages to install: (name, git, subdir option, rev). *)
   let queue = Queue.create () in
@@ -355,6 +362,15 @@ let install ~root =
         | Some sm -> (match sm.pkg_path with Some p -> p | None -> name)
         | None -> name
       in
+      (match Hashtbl.find_opt path_sha mod_path with
+       | Some prev when prev <> sha ->
+         err "version conflict: %s is required at two revisions (%s and %s). \
+              Mere pins exact revisions and does not auto-select — reconcile by \
+              pinning %s in the top-level mere.toml, or give incompatible majors \
+              distinct module paths (e.g. .../v2)."
+           mod_path (String.sub prev 0 (min 8 (String.length prev)))
+           (String.sub sha 0 (min 8 (String.length sha))) mod_path
+       | _ -> Hashtbl.replace path_sha mod_path sha);
       let dst = Filename.concat modules_dir mod_path in
       copy_tree src dst;
       Printf.printf "  installed %s (%s%s @ %s)\n" mod_path git

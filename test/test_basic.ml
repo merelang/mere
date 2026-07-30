@@ -11655,6 +11655,21 @@ let () =
     (Pipeline.process
        "module M { type t = | A | B; } let f = fn (x: M.t) -> match x with | A -> 1 | B -> 2 in f B")
     "2";
+  (* v0.1.89 (SIV): two modules of the same name coexist (a lib and its /v2).
+     Their members shadow by declaration order; the redefinition is
+     alpha-renamed so the native backends don't mis-assign bodies. `a` uses
+     the first M.f (int->int => 11), `b` the second (int->int->int => 30). *)
+  let two_mod =
+    "module M { let f = fn (x: int) -> x + 1; }\n\
+     let a = M.f 10;\n\
+     module M { let f = fn (x: int) -> fn (y: int) -> x + y; }\n\
+     let b = M.f 10 20;\n\
+     a + b"
+  in
+  check "same-named modules coexist (declaration-order shadow)"
+    (Pipeline.process two_mod) "41";
+  assert_contains "codegen C: redefined module member is uniquified"
+    (codegen two_mod) "M__f__v2";
 
   (* Phase 57: package installer (mere.toml parse + path normalise). The
      fetch/copy path shells out to git and is exercised end-to-end by hand
