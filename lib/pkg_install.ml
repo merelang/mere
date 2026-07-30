@@ -63,7 +63,9 @@ let rec walk_rel dir prefix =
 (* ---- manifest parsing (minimal, mere.toml subset) --------------------- *)
 
 type dep = { name : string; git : string; subdir : string option; rev : string }
-type manifest = { pkg_name : string; pkg_version : string; deps : dep list;
+type manifest = { pkg_name : string; pkg_version : string;
+                  pkg_path : string option;  (* [package] path — Go-style module path *)
+                  deps : dep list;
                   host : (string * string) option (* (git, rev) *) }
 
 (* Pull `key = "value"` pairs out of an inline table body like
@@ -87,7 +89,7 @@ let strip_comment line =
 let parse_manifest (content : string) : manifest =
   let lines = String.split_on_char '\n' content in
   let section = ref "" in
-  let pkg_name = ref "" and pkg_version = ref "0.0.0" in
+  let pkg_name = ref "" and pkg_version = ref "0.0.0" and pkg_path = ref "" in
   let host_git = ref "" and host_rev = ref "" in
   let deps = ref [] in
   let simple_kv = Str.regexp "^[ \t]*\\([a-z_]+\\)[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
@@ -113,6 +115,7 @@ let parse_manifest (content : string) : manifest =
         let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
         if k = "name" then pkg_name := v
         else if k = "version" then pkg_version := v
+        else if k = "path" then pkg_path := v
       end
       else if !section = "host" && Str.string_match simple_kv line 0 then begin
         let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
@@ -125,6 +128,7 @@ let parse_manifest (content : string) : manifest =
     else None
   in
   { pkg_name = !pkg_name; pkg_version = !pkg_version;
+    pkg_path = (if !pkg_path = "" then None else Some !pkg_path);
     deps = List.rev !deps; host }
 
 (* ---- fetch + copy ------------------------------------------------------ *)
@@ -265,6 +269,41 @@ let write_lock ~root (entries : lock_entry list) =
   Out_channel.with_open_text (Filename.concat root "mere.lock")
     (fun oc -> Out_channel.output_string oc (Buffer.contents buf))
 
+(* Parse an existing mere.lock back into entries, so a re-install can verify
+   that a pinned (git, subdir, rev) still hashes to the same content — the
+   go.sum-style integrity check that turns the lock from a mere record into a
+   guarantee. *)
+let read_lock path : lock_entry list =
+  if not (Sys.file_exists path) then []
+  else begin
+    let simple_kv = Str.regexp "^[ \t]*\\([a-z_]+\\)[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
+    let entries = ref [] and cur = ref None in
+    let flush () = match !cur with Some e -> entries := e :: !entries; cur := None | None -> () in
+    List.iter
+      (fun raw ->
+        let t = String.trim (strip_comment raw) in
+        if t = "[[package]]" then begin
+          flush ();
+          cur := Some { l_name = ""; l_git = ""; l_subdir = None; l_rev = ""; l_hash = "" }
+        end
+        else if Str.string_match simple_kv raw 0 then begin
+          let k = Str.matched_group 1 raw and v = Str.matched_group 2 raw in
+          match !cur with
+          | Some e ->
+            cur := Some (match k with
+              | "name" -> { e with l_name = v }
+              | "git" -> { e with l_git = v }
+              | "subdir" -> { e with l_subdir = Some v }
+              | "rev" -> { e with l_rev = v }
+              | "hash" -> { e with l_hash = v }
+              | _ -> e)
+          | None -> ()
+        end)
+      (String.split_on_char '\n' (read_file path));
+    flush ();
+    List.rev !entries
+  end
+
 (* ---- top-level install ------------------------------------------------- *)
 
 let install ~root =
@@ -274,15 +313,27 @@ let install ~root =
   let m = parse_manifest (read_file manifest_path) in
   let modules_dir = Filename.concat root ".mere_modules" in
   sh (Printf.sprintf "mkdir -p %s" (q modules_dir));
-  let installed = Hashtbl.create 16 in
+  (* Load any existing lock so we can verify unchanged pins (go.sum style):
+     a coordinate (git, subdir, resolved-sha) must always hash to the same
+     content. Keyed on the resolved sha, which is what the lock records. *)
+  let locked_hash = Hashtbl.create 16 in
+  List.iter
+    (fun e ->
+       let coord = e.l_git ^ "\000" ^ Option.value ~default:"" e.l_subdir ^ "\000" ^ e.l_rev in
+       Hashtbl.replace locked_hash coord e.l_hash)
+    (read_lock (Filename.concat root "mere.lock"));
+  let seen = Hashtbl.create 16 in
   let entries = ref [] in
   (* Worklist of packages to install: (name, git, subdir option, rev). *)
   let queue = Queue.create () in
   List.iter (fun d -> Queue.push (d.name, d.git, d.subdir, d.rev) queue) m.deps;
   while not (Queue.is_empty queue) do
     let (name, git, subdir, rev) = Queue.pop queue in
-    if not (Hashtbl.mem installed name) then begin
-      Hashtbl.add installed name ();
+    (* Dedup on the source coordinate (git, rev, subdir), so a diamond
+       (two packages depending on the same dep at the same rev) installs once. *)
+    let key = git ^ "\000" ^ rev ^ "\000" ^ Option.value ~default:"" subdir in
+    if not (Hashtbl.mem seen key) then begin
+      Hashtbl.add seen key ();
       let (clone, sha) = fetch git rev in
       let src = match subdir with
         | Some s -> Filename.concat clone s
@@ -290,21 +341,51 @@ let install ~root =
       if not (Sys.file_exists src) then
         err "package %S: subdir %s not found in %s"
           name (Option.value ~default:"." subdir) git;
-      let dst = Filename.concat modules_dir name in
+      (* Read the fetched package's own manifest: its [package] path decides
+         WHERE it installs (Go-style full-path layout, so a full-path import
+         resolves), and its [dependencies] are transitive deps to follow. A
+         package with no manifest / no path falls back to its bare LHS name
+         (legacy contrib layout). *)
+      let sub_manifest =
+        let mt = Filename.concat src "mere.toml" in
+        if Sys.file_exists mt then Some (parse_manifest (read_file mt)) else None
+      in
+      let mod_path =
+        match sub_manifest with
+        | Some sm -> (match sm.pkg_path with Some p -> p | None -> name)
+        | None -> name
+      in
+      let dst = Filename.concat modules_dir mod_path in
       copy_tree src dst;
-      Printf.printf "  installed %s (%s%s @ %s)\n" name git
+      Printf.printf "  installed %s (%s%s @ %s)\n" mod_path git
         (match subdir with Some s -> " " ^ s | None -> "")
         (String.sub sha 0 (min 8 (String.length sha)));
-      entries := { l_name = name; l_git = git; l_subdir = subdir;
-                   l_rev = sha; l_hash = dir_hash dst } :: !entries;
-      (* Follow cross-package relative imports (transitive deps). Their
-         source subdir is a sibling under the same clone/repo. *)
+      let h = dir_hash dst in
+      (* go.sum check: the same pinned coordinate must reproduce the same
+         content. A mismatch means the rev's content moved under us (a moved
+         tag / force-push) or the cache is corrupt. *)
+      let coord = git ^ "\000" ^ Option.value ~default:"" subdir ^ "\000" ^ sha in
+      (match Hashtbl.find_opt locked_hash coord with
+       | Some old when old <> h ->
+         err "integrity: %s @ %s content changed since mere.lock (%s vs %s) — \
+              a moved tag/force-push or a corrupt cache. Delete mere.lock to re-pin."
+           mod_path (String.sub sha 0 (min 8 (String.length sha))) old h
+       | _ -> ());
+      entries := { l_name = mod_path; l_git = git; l_subdir = subdir;
+                   l_rev = sha; l_hash = h } :: !entries;
+      (* Transitive deps declared in the fetched package's own manifest —
+         each may live in a DIFFERENT repo (cross-repo full-path deps). *)
+      (match sub_manifest with
+       | Some sm ->
+         List.iter (fun d -> Queue.push (d.name, d.git, d.subdir, d.rev) queue) sm.deps
+       | None -> ());
+      (* Legacy: also follow `../` relative imports (monorepo siblings in the
+         same clone, e.g. contrib's cross-package imports). *)
       (match subdir with
        | Some pkg_subdir ->
          List.iter
            (fun (dep_name, dep_subdir) ->
-             if not (Hashtbl.mem installed dep_name) then
-               Queue.push (dep_name, git, Some dep_subdir, rev) queue)
+             Queue.push (dep_name, git, Some dep_subdir, rev) queue)
            (scan_cross_deps ~pkg_dir:dst ~pkg_subdir)
        | None -> ())
     end
