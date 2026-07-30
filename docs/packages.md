@@ -47,8 +47,9 @@ imports Just Work as long as everything lives under one project root.
 
 ## How to vendor a package
 
-Today, v0.1 requires manual vendoring. There is no `mere install`
-yet and no central registry. Suitable methods:
+Manual vendoring always works — the compiler only cares about the on-disk
+layout, not how the files got there — and `mere install` (below) automates
+it from a manifest. There is no central registry. Suitable manual methods:
 
 **git clone** (recommended for tracked deps):
 
@@ -114,15 +115,24 @@ then:
 
 This fetches each dependency at its pinned `rev` (a monorepo `subdir` is
 supported, so you can depend on one package inside a larger repo) and
-writes it to `.mere_modules/<name>/`. Packages install under their **bare
-source-directory name** — `http`, `db`, `log` — so `.mere_modules/`
-mirrors the source tree and cross-package relative imports keep resolving.
-Cross-package imports (`import "../log/log.mere"`) are followed
-automatically, so transitive dependency packages are pulled in too.
+writes it under its **module path**. Each fetched package's own `mere.toml`
+`[package] path` decides where it lands — `.mere_modules/github.com/owner/repo/`
+— so a Go-style full-path import (`import "github.com/owner/repo/x.mere"`)
+resolves directly. A package with no declared path falls back to its bare
+source-directory name (legacy contrib layout), and `../` relative imports
+inside a monorepo are still followed.
 
-A `mere.lock` is written recording each resolved full commit sha and a
-content hash (including transitive deps) for reproducible installs. The
-compiler resolver is unchanged — `install` just populates `.mere_modules/`.
+**Transitive dependencies across repos** are pulled in automatically: the
+installer reads each fetched package's own `[dependencies]` and follows them,
+so an app that depends on `A` (which depends on `B` in another repo) gets `B`
+too, even though the app never names it.
+
+A `mere.lock` records every resolved package (including transitive) with its
+full commit sha and a content hash. On a later install, that hash is
+**verified**: if a pinned `(git, rev)` coordinate ever produces different
+content — a moved tag, a force-push, a corrupt cache — the install fails
+loudly (go.sum-style integrity), rather than silently building against
+something else.
 
 Still minimal: `rev` is an exact git commit (no version ranges), there's
 no central registry, and installs are whole-package.

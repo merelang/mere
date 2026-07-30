@@ -11688,6 +11688,34 @@ let () =
         (match d2.subdir with None -> "none" | Some _ -> "some") "none";
       check "pkg_install: dep2 rev" d2.rev "def456"
     | _ -> check "pkg_install: dep shape" "wrong" "two deps");
+   check "pkg_install: manifest without path -> None"
+     (match m.pkg_path with None -> "none" | Some _ -> "some") "none";
+   (* v0.1.88: [package] path drives the Go-style full-path install layout. *)
+   let with_path =
+     "[package]\n\
+      name = \"mbignum\"\n\
+      path = \"github.com/284km/mbignum\"\n\
+      version = \"0.1.0\"\n"
+   in
+   check "pkg_install: manifest [package] path parsed"
+     (match (parse_manifest with_path).pkg_path with Some p -> p | None -> "-")
+     "github.com/284km/mbignum";
+   (* v0.1.88: mere.lock round-trips through write_lock / read_lock so a
+      re-install can verify pinned content hashes (go.sum-style). *)
+   (let tmp = Filename.temp_file "mere_lock" ".d" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    write_lock ~root:tmp
+      [ { l_name = "github.com/284km/mbignum"; l_git = "https://x/mbignum";
+          l_subdir = None; l_rev = "abcd"; l_hash = "md5:11" };
+        { l_name = "github.com/284km/mbigfmt"; l_git = "https://x/mbigfmt";
+          l_subdir = Some "sub"; l_rev = "ef01"; l_hash = "md5:22" } ];
+    let back = read_lock (Filename.concat tmp "mere.lock") in
+    check "pkg_install: lock round-trip count" (string_of_int (List.length back)) "2";
+    (match List.find_opt (fun e -> e.l_name = "github.com/284km/mbignum") back with
+     | Some e ->
+       check "pkg_install: lock rev round-trip" e.l_rev "abcd";
+       check "pkg_install: lock hash round-trip" e.l_hash "md5:11"
+     | None -> check "pkg_install: lock entry" "missing" "present"));
    (* require-flattening for the vendored Node host (.mere_host/). *)
    check "pkg_install: rewrite ../contrib require"
      (rewrite_requires "const g = require(\"../contrib/http/http.glue.js\");")

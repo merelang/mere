@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.88 — 2026-07-30
+
+_`mere install` grows up to match the Go-style import model (Q-013): full-path
+layout, cross-repo transitive resolution, and a verifying lockfile. Driven by
+the first genuinely multi-repo dogfood — a 3-repo transitive graph
+`mcalc → mbigfmt → mbignum` where the app never names the leaf. Three gaps
+surfaced and were fixed:_
+
+- _**Full-path layout.** Installs went to `.mere_modules/<bare-name>/`, but a
+  Go-style import resolves to `.mere_modules/github.com/owner/repo/`, so even a
+  direct dependency failed to resolve. The installer now reads each fetched
+  package's own `mere.toml [package] path` and installs under it (bare-name
+  fallback for legacy packages)._
+- _**Cross-repo transitive deps.** The installer only followed `../` relative
+  imports (monorepo siblings); a dependency declaring its own `[dependencies]`
+  in another repo was never followed. It now reads each fetched package's
+  `[dependencies]` and queues them, so transitive cross-repo deps are pulled in
+  (deduped on the `(git, rev, subdir)` coordinate for diamonds)._
+- _**Verifying lock.** `mere.lock` already recorded resolved shas + content
+  hashes; now a re-install parses the existing lock and, if a pinned
+  `(git, rev)` coordinate produces a different hash, fails loudly (go.sum-style
+  tamper/corruption detection) instead of silently building against changed
+  content._
+
+_The resolved lock records the full transitive graph, so `mcalc`'s lock pins
+`mbignum` even though `mcalc` only depends on `mbigfmt`. Verified end-to-end:
+`mcalc fact/fib N` matches python on interp and C, reading both deps out of the
+full-path `.mere_modules/`. Unit tests cover the `[package] path` parse and the
+write_lock/read_lock round-trip; the fetch path is git-integration-tested by
+hand. suite: 2248 passed / 0 failed._
+
 ## v0.1.87 — 2026-07-29
 
 _A user top-level binding named `main` now compiles on every backend
