@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.91 — 2026-07-31
+
+_Real TLS on the native backend: `tcp_starttls` / `tcp_starttls_verified` are
+no longer stubs. Declaring either extern swaps in an OpenSSL-backed runtime —
+`tcp_starttls` does the handshake with SNI; `tcp_starttls_verified` adds peer
+certificate verification and hostname matching (with an optional CA-bundle
+path) — and `tcp_read` / `tcp_write` / `tcp_close` route through the per-fd
+`SSL*` when a socket has been wrapped, so the rest of a client is unchanged
+between HTTP and HTTPS. The whole thing is gated on a `uses_tls` flag set only
+when a program declares a starttls extern: a plaintext TCP program emits zero
+OpenSSL references and still links with just `-lm`, so TLS's external
+dependency is opt-in. A TLS program compiles with, e.g.,
+`-I$(brew --prefix openssl@3)/include -L.../lib -lssl -lcrypto`.
+
+Surfaced and verified by the mhttps dogfood — an HTTPS GET client in pure Mere:
+it fetches `https://example.com/` and `https://api.github.com/` (the latter
+requiring a valid verified handshake) and prints `HTTP/1.1 200 OK` for both.
+test_basic guards that starttls pulls in the OpenSSL runtime and that a
+plaintext program does not. TLS on the Wasm host is still separate (browsers do
+TLS transparently); native LLVM shares the C runtime. suite passed._
+
 ## v0.1.90 — 2026-07-30
 
 _`mere install` detects same-major version conflicts instead of silently

@@ -5581,6 +5581,23 @@ let () =
         let fd = 3 in udp_recv fd 0 512")
     "static int udp_recv(";
 
+  (* v0.1.91 (mhttps dogfood): declaring tcp_starttls* swaps the stub for the
+     real OpenSSL runtime (SNI, handshake, cert verification) and makes
+     tcp_read/write/close route through the SSL*; a program that does NOT use
+     TLS keeps the plaintext path and needs no OpenSSL at build time. *)
+  assert_contains "v0.1.91: tcp_starttls_verified emits the OpenSSL runtime"
+    (vec_codegen_c
+       "extern fn tcp_connect: str -> int -> int;\n\
+        extern fn tcp_starttls_verified: int -> str -> str -> int;\n\
+        let f = tcp_connect \"h\" 443 in tcp_starttls_verified f \"h\" \"\"")
+    "SSL_connect";
+  assert_no_contains "v0.1.91: plaintext tcp emits no OpenSSL"
+    (vec_codegen_c
+       "extern fn tcp_listen: int -> int;\n\
+        extern fn tcp_close: int -> unit;\n\
+        let s = tcp_listen 0 in tcp_close s")
+    "SSL_connect";
+
   (* v0.1.61 (mhttp dogfood): an extern fn used as a free variable inside
      an inner closure was captured by the lift analysis and referenced as
      the namespaced `mu_<name>`, while the extern is emitted raw — a
