@@ -284,6 +284,7 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    mere_vec_int). v0.1.44 adds the write half. *)
 let uses_read_file_bytes = ref false
 let uses_file_pread = ref false  (* v0.1.83: file_pread (positioned read) *)
+let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -5015,7 +5016,7 @@ let native_http_runtime =
       "  return 0;";
       "}" ]
 
-let native_ffi_runtime =
+let native_ffi_runtime ~tls =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -5024,6 +5025,13 @@ let native_ffi_runtime =
       "#include <sys/time.h>";
       "#include <stdint.h>";
       "#include <signal.h>";
+      (if tls then
+         "#include <openssl/ssl.h>\n#include <openssl/err.h>\n#include <openssl/x509v3.h>\n\
+          #define __TLS_MAX 4096\n\
+          static SSL* __tls[__TLS_MAX];\n\
+          static SSL_CTX* __tls_ctx = 0;\n\
+          static SSL_CTX* __tls_get_ctx(void){ if(!__tls_ctx){ __tls_ctx = SSL_CTX_new(TLS_client_method()); SSL_CTX_set_default_verify_paths(__tls_ctx); } return __tls_ctx; }"
+       else "");
       "";
       "#define __MEM_CAP (16 * 1024 * 1024)";
       "static unsigned char __mem[__MEM_CAP];";
@@ -5117,9 +5125,18 @@ let native_ffi_runtime =
       "/* tcp_accept: block until a client connects to the listening fd, and";
       "   return the connected client fd, or -1 on failure. */";
       "static int tcp_accept(int srv) { return (int)accept(srv, 0, 0); }";
-      "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }";
-      "static int tcp_read(int fd, int p, int cap) { return (int)read(fd, __mem + p, (size_t)cap); }";
-      "static int tcp_close(int fd) { close(fd); return 0; }";
+      (if tls then
+         "static int tcp_write(int fd, int p, int len) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_write(__tls[fd], __mem+p, len); return (int)write(fd, __mem + p, (size_t)len); }"
+       else
+         "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }");
+      (if tls then
+         "static int tcp_read(int fd, int p, int cap) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_read(__tls[fd], __mem+p, cap); return (int)read(fd, __mem + p, (size_t)cap); }"
+       else
+         "static int tcp_read(int fd, int p, int cap) { return (int)read(fd, __mem + p, (size_t)cap); }");
+      (if tls then
+         "static int tcp_close(int fd) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]){ SSL_shutdown(__tls[fd]); SSL_free(__tls[fd]); __tls[fd]=0; } close(fd); return 0; }"
+       else
+         "static int tcp_close(int fd) { close(fd); return 0; }");
       "/* v0.1.62 (mdns dogfood): connected UDP datagram socket. udp_open";
       "   resolves host:port and connect()s a SOCK_DGRAM fd so send/recv work";
       "   without per-call addresses; udp_send writes one datagram from the";
@@ -5266,8 +5283,34 @@ let native_ffi_runtime =
       "static char* base64_decode_to_hex(const char* b64){ unsigned char* b=(unsigned char*)malloc(strlen(b64)+1); int n=__from_b64(b64,b); char* r=__to_hex(b,n); free(b); return r; }";
       "static char* random_b64(int n){ if(n<1)n=1; unsigned char* b=(unsigned char*)malloc(n); FILE* f=fopen(\"/dev/urandom\",\"rb\"); if(f){ size_t g=fread(b,1,n,f); (void)g; fclose(f);} else for(int i=0;i<n;i++) b[i]=rand()&0xff; char* r=__to_b64(b,n); free(b); return r; }";
       "static char* hex_xor(const char* a, const char* b){ int la=(int)strlen(a)/2, lb=(int)strlen(b)/2; if(la!=lb) return strdup(\"\"); unsigned char* ba=(unsigned char*)malloc(la?la:1); unsigned char* bb=(unsigned char*)malloc(lb?lb:1); __from_hex(a,ba); __from_hex(b,bb); for(int i=0;i<la;i++) ba[i]^=bb[i]; char* r=__to_hex(ba,la); free(ba); free(bb); return r; }";
-      "static int tcp_starttls(int fd, const char* host){ (void)fd;(void)host; fprintf(stderr,\"native: tcp_starttls unsupported (TLS not implemented; use a plaintext connection)\\n\"); return -1; }";
-      "static int tcp_starttls_verified(int fd, const char* h, const char* ca){ (void)fd;(void)h;(void)ca; fprintf(stderr,\"native: tcp_starttls_verified unsupported (TLS not implemented)\\n\"); return -1; }";
+      (if tls then
+         "/* v0.1.91: real TLS over an already-connected fd via OpenSSL. Wraps\n\
+         \   the fd in an SSL* kept in __tls[fd]; tcp_read/write/close route\n\
+         \   through it. tcp_starttls does SNI but no cert check; _verified adds\n\
+         \   peer verification + hostname match (CA bundle path optional). */\n\
+          static int tcp_starttls(int fd, const char* host){\n\
+         \  if(fd<0||fd>=__TLS_MAX) return -1;\n\
+         \  SSL* ssl = SSL_new(__tls_get_ctx()); if(!ssl) return -1;\n\
+         \  SSL_set_fd(ssl, fd); SSL_set_tlsext_host_name(ssl, host);\n\
+         \  if(SSL_connect(ssl)!=1){ SSL_free(ssl); return -1; }\n\
+         \  __tls[fd]=ssl; return 0;\n\
+          }\n\
+          static int tcp_starttls_verified(int fd, const char* host, const char* ca){\n\
+         \  if(fd<0||fd>=__TLS_MAX) return -1;\n\
+         \  SSL_CTX* ctx = __tls_get_ctx();\n\
+         \  if(ca && ca[0]) SSL_CTX_load_verify_locations(ctx, ca, 0);\n\
+         \  SSL* ssl = SSL_new(ctx); if(!ssl) return -1;\n\
+         \  SSL_set_fd(ssl, fd); SSL_set_tlsext_host_name(ssl, host);\n\
+         \  SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);\n\
+         \  if(!SSL_set1_host(ssl, host)){ SSL_free(ssl); return -1; }\n\
+         \  SSL_set_verify(ssl, SSL_VERIFY_PEER, 0);\n\
+         \  if(SSL_connect(ssl)!=1){ SSL_free(ssl); return -1; }\n\
+         \  if(SSL_get_verify_result(ssl)!=X509_V_OK){ SSL_free(ssl); return -1; }\n\
+         \  __tls[fd]=ssl; return 0;\n\
+          }"
+       else
+         "static int tcp_starttls(int fd, const char* host){ (void)fd;(void)host; fprintf(stderr,\"native: tcp_starttls unsupported (TLS not implemented; use a plaintext connection)\\n\"); return -1; }\n\
+          static int tcp_starttls_verified(int fd, const char* h, const char* ca){ (void)fd;(void)h;(void)ca; fprintf(stderr,\"native: tcp_starttls_verified unsupported (TLS not implemented)\\n\"); return -1; }");
       "/* gen_request_id: 16 random bytes (from /dev/urandom) as a 32-char hex id. */";
       "static char* gen_request_id(void) {";
       "  unsigned char b[16]; FILE* f = fopen(\"/dev/urandom\", \"rb\");";
@@ -7753,6 +7796,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       Hashtbl.replace extern_fn_decls name (Ast.walk ty)
     | _ -> ()
   ) prog.decls;
+  (* v0.1.91: a program that declares tcp_starttls / tcp_starttls_verified as an
+     extern gets the real OpenSSL-backed TLS runtime (and its SSL-aware
+     tcp_read/write/close); everyone else keeps the plaintext path and needs no
+     OpenSSL at build time. *)
+  uses_tls :=
+    Hashtbl.mem extern_fn_decls "tcp_starttls"
+    || Hashtbl.mem extern_fn_decls "tcp_starttls_verified";
   strbuf_used := false;
   logger_used := false;
   metrics_used := false;
@@ -8605,7 +8655,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          them as unresolved `extern` prototypes. *)
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
-       then native_ffi_runtime ^ "\n"
+       then native_ffi_runtime ~tls:!uses_tls ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
