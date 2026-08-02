@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.92" Version.v "0.1.92";
+  check "version is 0.1.93" Version.v "0.1.93";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";

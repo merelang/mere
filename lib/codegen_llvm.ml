@@ -1023,7 +1023,11 @@ let find_all_concrete_arrows_in_llvm (name : string) (exprs : Ast.expr list) : A
     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (_, _, b) -> go b
+    (* A fn parameter named `name` shadows the outer `name` we're scanning for;
+       skip the body so a same-named parameter (e.g. `list_fold`'s `f`) is not
+       mistaken for the function under discovery. Matches the C backend — its
+       absence here surfaced once resolved poly-fn bodies entered the scan. *)
+    | Ast.Fun (p, _, b) -> if p = name then () else go b
     | Ast.Constr (_, Some a) -> go a
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
@@ -1127,8 +1131,20 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   in
   (* Phase 43: re-scan multi-inst fns each pass to catch chained poly
      instantiations (see codegen_c.ml for design). *)
+  (* v0.1.28 (B-P2b): keep a PRISTINE clone of every skel before any
+     unification. Single-resolution unifies the original fn's tyvars in place,
+     which destroys the polymorphic skeleton — so a fn first resolved at one
+     type could never be promoted to multi-inst when a second type shows up
+     (e.g. `list_fold` resolved at int from the prelude, then needed at float
+     inside a generic caller whose float instantiation only becomes visible in
+     a later pass). Cloning specs from the pristine copy keeps every
+     instantiation possible at any point in the fixpoint. LLVM port of the C
+     backend's fix. *)
+  let pristine : (string, Ast.expr) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun s ->
+    Hashtbl.replace pristine s.sname (clone_with_fresh_tyvars_llvm s.sfun)) skels;
   let make_spec arrow s =
-    let cloned_fun = clone_with_fresh_tyvars_llvm s.sfun in
+    let cloned_fun = clone_with_fresh_tyvars_llvm (Hashtbl.find pristine s.sname) in
     let clone_fun_ty =
       match cloned_fun.Ast.ty with
       | Some t -> Ast.walk t
@@ -1151,8 +1167,42 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
         Hashtbl.fold (fun _ specs acc ->
           List.fold_left (fun acc (_, body) -> body :: acc) acc specs
         ) multi_specs []
+        (* v0.1.28 (B-P2b): also scan the bodies of single-resolved poly fns.
+           A usage of poly fn B inside poly fn A's body only becomes concrete
+           once A resolves — before this, B's arrow-discovery scan never saw
+           it, so B stayed single-instantiated at some OTHER type and the
+           emitted call referenced a non-existent instance. *)
+        @ List.filter_map (fun s2 ->
+            if Hashtbl.mem resolved s2.sname then Some s2.sbody else None)
+            skels
       in
-      if Hashtbl.mem resolved s.sname then ()
+      if Hashtbl.mem resolved s.sname then begin
+        (* v0.1.28 (B-P2b): a fn resolved to a single instance may be
+           discovered at a second type later (its other usage sites live in
+           poly-fn bodies that resolve in later passes). Promote it to
+           multi-inst: drop the single resolution and clone one spec per arrow
+           from the pristine skeleton. *)
+        let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
+        let cur = Hashtbl.find resolved s.sname in
+        let cur_str = Ast.pp_ty (Ast.walk cur) in
+        let extra = List.filter (fun a ->
+          Ast.pp_ty (Ast.walk a) <> cur_str) all in
+        let extra =
+          let seen = Hashtbl.create 4 in
+          List.filter (fun a ->
+            let k = Ast.pp_ty (Ast.walk a) in
+            if Hashtbl.mem seen k then false
+            else (Hashtbl.add seen k (); true)) extra
+        in
+        if extra <> [] then begin
+          Hashtbl.remove resolved s.sname;
+          let arrows = cur :: extra in
+          Hashtbl.replace multi_inst_fns_llvm s.sname arrows;
+          Hashtbl.replace multi_specs s.sname
+            (List.map (fun a -> make_spec a s) arrows);
+          progress := true
+        end
+      end
       else if Hashtbl.mem multi_specs s.sname then begin
         (* Phase 43 fix (DEFERRED §1.7): re-scan multi-inst fns each pass. *)
         let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
