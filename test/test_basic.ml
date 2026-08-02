@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.93" Version.v "0.1.93";
+  check "version is 0.1.94" Version.v "0.1.94";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11818,6 +11818,23 @@ let () =
          impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
          let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
          sum [1.0, 2.0]"));
+  (* Instance head on a parametric concrete type (`int list`) — the shape the
+     bignum dogfood needs (Bignum = a transparent int list). Dictionaries are
+     resolved by static type, so an `int list` instance never clashes with a
+     plain `int list`. Here the instance is the list-concatenation monoid. *)
+  check "trait: instance on a parametric type (int list), used generically"
+    (Pipeline.process
+       ("trait Mon 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Mon int list { add = list_append; zero = Nil; }\n\
+         let concat_all = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
+         concat_all [[1, 2], [3], [4, 5]]")) "[1, 2, 3, 4, 5]";
+  check "trait: int and int-list instances of the same trait coexist"
+    (Pipeline.process
+       ("trait Mon 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Mon int      { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         impl Mon int list { add = list_append; zero = Nil; }\n\
+         let fold1 = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
+         (fold1 [10, 20, 30], fold1 [[1], [2, 3]])")) "(60, [1, 2, 3])";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -1,0 +1,53 @@
+// examples/trait_bignum.mere — the trait dogfood's headline case: one generic
+// numeric routine that runs over machine `int` AND arbitrary-precision Bignum.
+//
+// Bignum (contrib/bignum) represents a big natural as a base-1e9 `int list`.
+// That it is a *transparent* `int list` — not a nominal newtype — is exactly
+// the case that stumps runtime type dispatch (a Bignum and a plain list share
+// a representation). Dictionary elaboration sidesteps it: the `Num` dictionary
+// is chosen by the *static* type at each call site, so `int` and `int list`
+// select different instances with no runtime ambiguity.
+//
+// `sum` and `dot` are each written ONCE and used at both types. Exact on the
+// interpreter and the C backend (cross-checked against python's bignum).
+// (Bignum itself is interp/C only — the LLVM backend rejects its polymorphic
+// inner closure captures, and Wasm's 32-bit `mul` overflows; both are library
+// limitations documented in contrib/bignum, unrelated to traits.)
+
+import "github.com/merelang/mere/contrib/bignum/bignum.mere";
+
+trait Num 'a {
+  add  : 'a -> 'a -> 'a;
+  mul  : 'a -> 'a -> 'a;
+  zero : 'a;
+}
+
+impl Num int {
+  add  = fn x -> fn y -> x + y;
+  mul  = fn x -> fn y -> x * y;
+  zero = 0;
+}
+
+// The instance head is the parametric type `int list` — a real trait instance
+// on a transparent alias.
+impl Num int list {
+  add  = Bignum.add;
+  mul  = Bignum.mul;
+  zero = Nil;
+}
+
+// One generic sum and one generic dot (inner product), each `Num 'a => ...`.
+let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);
+let dot = fn xs -> fn ys ->
+  sum (list_map (list_zip xs ys) (fn p -> match p with (a, b) -> mul a b));
+
+// --- machine int ---
+let si = sum [1, 2, 3, 4, 5] in                  // 15
+let di = dot [1, 2, 3] [4, 5, 6] in              // 4 + 10 + 18 = 32
+// --- arbitrary precision, through the SAME sum / dot ---
+let sb = sum [Bignum.fact 20, Bignum.fact 21, Bignum.fact 22] in
+let db = dot [Bignum.fact 10, Bignum.fact 15] [Bignum.fact 5, Bignum.fact 3] in
+let _ = print ("int  sum [1..5]        = " ++ show si) in
+let _ = print ("int  dot               = " ++ show di) in
+let _ = print ("big  sum 20!+21!+22!   = " ++ Bignum.to_str sb) in
+print ("big  dot 10!*5!+15!*3! = " ++ Bignum.to_str db)
