@@ -305,6 +305,13 @@ type trait_obligation =
 
 let trait_obligations : trait_obligation list ref = ref []
 
+(* Local (non-top-level) `let` bindings whose inferred scheme carries trait
+   constraints — e.g. `let sum = fn xs -> ... add ... in ...`. Recorded by
+   `infer`'s Let case (the top-level decl loop captures its own schemes
+   separately). Each entry is the binding's VALUE node plus its constraints,
+   so Trait_elab can wrap that value with dictionary parameters. *)
+let trait_local_constrained : (Ast.expr * (string * int) list) list ref = ref []
+
 (* Collect the trait constraints implied by the obligations recorded so far
    whose dispatch variable is among `qs` (the variables being quantified).
    Empty whenever no traits are in play, so non-trait code is unaffected. *)
@@ -416,7 +423,8 @@ let reset_traits () =
   Hashtbl.reset traits;
   Hashtbl.reset trait_methods;
   Hashtbl.reset trait_impls;
-  trait_obligations := []
+  trait_obligations := [];
+  trait_local_constrained := []
 
 let register_trait name param methods =
   Hashtbl.replace traits name (param, methods);
@@ -1850,6 +1858,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
       let sch =
         if can_generalize then generalize env t else mono t
       in
+      (* A local constrained binding (e.g. `let sum = fn xs -> ... add ...`):
+         record its value node + constraints so Trait_elab can thread a
+         dictionary parameter through it, just as it does for top-level ones. *)
+      if sch.constraints <> [] then
+        trait_local_constrained := (value, sch.constraints) :: !trait_local_constrained;
       (n, sch) :: acc
     ) env bindings in
     infer env' body

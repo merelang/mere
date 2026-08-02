@@ -195,6 +195,22 @@ let elaborate (prog : program) : program =
         Hashtbl.replace binding_params name params
       end) schemes;
 
+    (* Local (non-top-level) constrained `let` bindings: value node -> its
+       ordered [(dict-param, trait)]. Populate var2param here — before the
+       resolve_dict pass — so the body's trait-method uses (whose dispatch
+       variable is the local binding's own quantified variable) resolve to the
+       dict parameter rather than raising "ambiguous". *)
+    let local_params : (expr * (string * string) list) list =
+      List.map (fun (value_node, constraints) ->
+        let params =
+          List.map (fun (trait, vid) ->
+            let p = dict_param_name trait vid in
+            Hashtbl.replace var2param vid p;
+            (p, trait)) constraints
+        in
+        (value_node, params)) !Typer.trait_local_constrained
+    in
+
     (* Resolve the dictionary expression for a trait at a dispatch type. *)
     let resolve_dict loc trait (dispatch : ty) : expr =
       match Ast.walk dispatch with
@@ -240,26 +256,41 @@ let elaborate (prog : program) : program =
           (node, applied)
       ) !Typer.trait_obligations
     in
-    let subst e =
-      match List.find_opt (fun (n, _) -> n == e) replacements with
-      | Some (_, r) -> Some r
-      | None -> None
+    (* Prepend one dictionary parameter per constraint to a function value.
+       The single `TyParam "a"` in each dict record type is freshened to one
+       variable that the body then unifies with the element type via the
+       trait-method uses (`zero` / `add` / ...). *)
+    let wrap_params params value =
+      List.fold_right (fun (p, trait) acc ->
+        let dict_ty = TyCon (dict_type_name trait, [TyParam "a"]) in
+        mk value.loc (Fun (p, Some dict_ty, acc))) params value
     in
-    let rewrite = map_expr subst in
-
-    (* Wrap a constrained binding's value with its leading dictionary params. *)
     let wrap_dict_params name value =
       match Hashtbl.find_opt binding_params name with
       | None -> value
-      | Some params ->
-        List.fold_right (fun (p, trait) acc ->
-          (* Annotate the dict parameter with its record type so the field
-             accesses inside the body type-check; the single `TyParam "a"` is
-             freshened to one variable that the body then unifies with the
-             element type via `zero` / `add`. *)
-          let dict_ty = TyCon (dict_type_name trait, [TyParam "a"]) in
-          mk value.loc (Fun (p, Some dict_ty, acc))) params value
+      | Some params -> wrap_params params value
     in
+
+    (* The rewriter: apply the obligation replacements (trait-method uses ->
+       dict field access, constrained-fn uses -> dict argument), and wrap each
+       local constrained `let` value with its dictionary parameter(s) after
+       rewriting its own body. *)
+    let rec subst e =
+      match List.find_opt (fun (n, _) -> n == e) replacements with
+      | Some (_, r) -> Some r
+      | None ->
+        (match List.find_opt (fun (v, _) -> v == e) local_params with
+         | Some (_, params) ->
+           (match e.node with
+            | Fun (x, ty, fbody) ->
+              (* Rewrite the body (recurse into children, not `e` itself, so
+                 no re-match loop), then prepend the dict parameter(s). *)
+              let fbody' = map_expr subst fbody in
+              Some (wrap_params params { e with node = Fun (x, ty, fbody') })
+            | _ -> None)
+         | None -> None)
+    in
+    let rewrite = map_expr subst in
 
     (* Rewrite each declaration in place, preserving source order (so type /
        value dependencies stay valid). *)
