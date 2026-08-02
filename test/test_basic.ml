@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.95" Version.v "0.1.95";
+  check "version is 0.1.96" Version.v "0.1.96";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3583,25 +3583,25 @@ let () =
        channel_recv ch")
     "store %tuple_int_int";
   assert_contains "llvm: format constant present"
-    (llvm "42") "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"";
+    (llvm "42") "@.fmt_lld = private constant [6 x i8] c\"%lld\\0A\\00\"";
   assert_contains "llvm: int literal call site"
-    (llvm "42") "@printf(ptr @.fmt_d, i32 42)";
+    (llvm "42") "@printf(ptr @.fmt_lld, i64 42)";
   assert_contains "llvm: add lowers to LLVM add"
-    (llvm "1 + 2") "add i32 1, 2";
+    (llvm "1 + 2") "add i64 1, 2";
   assert_contains "llvm: mul lowers to LLVM mul"
-    (llvm "3 * 4") "mul i32 3, 4";
+    (llvm "3 * 4") "mul i64 3, 4";
   assert_contains "llvm: sdiv used for /"
-    (llvm "10 / 2") "sdiv i32 10, 2";
+    (llvm "10 / 2") "sdiv i64 10, 2";
   assert_contains "llvm: srem used for %"
-    (llvm "10 % 3") "srem i32 10, 3";
+    (llvm "10 % 3") "srem i64 10, 3";
   assert_contains "llvm: < lowers to icmp slt"
-    (llvm "if 1 < 2 then 10 else 20") "icmp slt i32 1, 2";
+    (llvm "if 1 < 2 then 10 else 20") "icmp slt i64 1, 2";
   assert_contains "llvm: if emits br on i1"
     (llvm "if 1 < 2 then 10 else 20") "br i1";
   assert_contains "llvm: if uses phi for join"
-    (llvm "if 1 < 2 then 10 else 20") "= phi i32";
+    (llvm "if 1 < 2 then 10 else 20") "= phi i64";
   assert_contains "llvm: let body sees binding"
-    (llvm "let x = 5 in x * x") "mul i32 5, 5";
+    (llvm "let x = 5 in x * x") "mul i64 5, 5";
   (* v0.1.34: && / || short-circuit on every backend — Logic lowers to
      the If emission (a trapping RHS is an effect; the old eager `and i1`
      evaluated it unconditionally). *)
@@ -3615,26 +3615,26 @@ let () =
   (* --- LLVM IR codegen: function lifting + recursion (Phase 5.2) --- *)
   assert_contains "llvm: top-level fn lifted to @name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
-    "define i32 @inc(i32 %x)";
+    "define i64 @inc(i64 %x)";
   assert_contains "llvm: direct call site uses call instr"
     (llvm "let inc = fn x -> x + 1 in inc 5")
-    "call i32 @inc(i32 5)";
+    "call i64 @inc(i64 5)";
   assert_contains "llvm: self-recursion compiles"
     (llvm "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1) in fact 5")
-    "call i32 @fact";
+    "call i64 @fact";
   assert_contains "llvm: mutual recursion emits both definitions"
     (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
-    "define i1 @is_even(i32 %n)";
+    "define i1 @is_even(i64 %n)";
   assert_contains "llvm: mutual recursion second fn"
     (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
-    "define i1 @is_odd(i32 %n)";
+    "define i1 @is_odd(i64 %n)";
   assert_contains "llvm: param accessed via %name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
-    "add i32 %x, 1";
+    "add i64 %x, 1";
 
   (* --- LLVM IR codegen: strings / print / ++ / str_len (Phase 5.3) --- *)
   assert_contains "llvm: str literal global"
@@ -3674,9 +3674,9 @@ let () =
      Tuples lower to named struct types; literals build via insertvalue
      chains, fst/snd via extractvalue at index 0 / 1. *)
   assert_contains "llvm: tuple type definition emitted"
-    (llvm "(1, 2)") "%tuple_int_int = type { i32, i32 }";
+    (llvm "(1, 2)") "%tuple_int_int = type { i64, i64 }";
   assert_contains "llvm: tuple literal uses insertvalue undef"
-    (llvm "(1, 2)") "insertvalue %tuple_int_int undef, i32 1, 0";
+    (llvm "(1, 2)") "insertvalue %tuple_int_int undef, i64 1, 0";
   assert_contains "llvm: tuple literal chains insertvalue"
     (llvm "(1, 2)") "insertvalue %tuple_int_int";
   assert_contains "llvm: fst lowers to extractvalue 0"
@@ -3684,13 +3684,13 @@ let () =
     "extractvalue %tuple_int_int";
   assert_contains "llvm: tuple of mixed types"
     (llvm "(\"hi\", 42)")
-    "%tuple_str_int = type { ptr, i32 }";
+    "%tuple_str_int = type { ptr, i64 }";
   assert_contains "llvm: nested tuple type definition"
     (llvm "((1, 2), 3)")
-    "%tuple_tuple_int_int_int = type { %tuple_int_int, i32 }";
+    "%tuple_tuple_int_int_int = type { %tuple_int_int, i64 }";
   assert_contains "llvm: tuple-arg fn signature"
     (llvm "let sum_pair = fn p -> fst p + snd p in sum_pair (1, 2)")
-    "define i32 @sum_pair(%tuple_int_int %p)";
+    "define i64 @sum_pair(%tuple_int_int %p)";
   assert_contains "llvm: tuple-returning fn signature"
     (llvm "let split = fn s -> (s, str_len s) in split \"hi\"")
     "define %tuple_str_int @split(ptr %s)";
@@ -3703,12 +3703,12 @@ let () =
     (llvm_with_decls
       "type CgLRect = { w: int, h: int };\n\
        let r = CgLRect { w = 3, h = 4 } in r.w * r.h")
-    "%CgLRect = type { i32, i32 }";
+    "%CgLRect = type { i64, i64 }";
   assert_contains "llvm: record literal builds via insertvalue chain"
     (llvm_with_decls
       "type CgLPt = { x: int, y: int };\n\
        let p = CgLPt { x = 1, y = 2 } in p.x")
-    "insertvalue %CgLPt undef, i32 1, 0";
+    "insertvalue %CgLPt undef, i64 1, 0";
   assert_contains "llvm: record field get via extractvalue"
     (llvm_with_decls
       "type CgLPt2 = { x: int, y: int };\n\
@@ -3723,12 +3723,12 @@ let () =
     (llvm_with_decls
       "type CgLPair = { a: str, b: int };\n\
        let p = CgLPair { a = \"hi\", b = 42 } in p.b")
-    "%CgLPair = type { ptr, i32 }";
+    "%CgLPair = type { ptr, i64 }";
   assert_contains "llvm: record-returning fn signature"
     (llvm_with_decls
       "type CgLPt4 = { x: int, y: int };\n\
        let mk = fn n -> CgLPt4 { x = n, y = n + 1 } in (mk 5).x")
-    "define %CgLPt4 @mk(i32 %n)";
+    "define %CgLPt4 @mk(i64 %n)";
 
   (* --- LLVM IR codegen: variant + match (Phase 5.6) ---
      Variants lower to `%V = type { i32 }` (nullary) or `%V = type { i32, T }`
@@ -3768,7 +3768,7 @@ let () =
     (llvm_with_decls
       "type LCol5 = LR5 | LG5;\n\
        match LR5 with | LR5 -> 10 | LG5 -> 20")
-    "= phi i32";
+    "= phi i64";
   assert_contains "llvm: Match payload bound via extractvalue"
     (llvm_with_decls
       "type LStat3 = LOk3 | LErr3 of int;\n\
@@ -3789,7 +3789,7 @@ let () =
     "%closure_int_int = type { ptr, ptr }";
   assert_contains "llvm: closure adapter emitted"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "define i32 @inc_closure_fn(ptr %env_unused, i32 %x)";
+    "define i64 @inc_closure_fn(ptr %env_unused, i64 %x)";
   assert_contains "llvm: fn-as-value builds closure with adapter"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "insertvalue %closure_int_int undef, ptr null, 0";
@@ -3804,7 +3804,7 @@ let () =
     "= call i32 ";
   assert_contains "llvm: HOF receives closure-typed param"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "define i32 @apply(%closure_int_int %f)";
+    "define i64 @apply(%closure_int_int %f)";
 
   (* --- LLVM IR codegen: anonymous Fun + closure-with-captures (Phase 5.7-b) ---
      Inner `fn x -> ...` in expression position lifts to an env struct
@@ -3812,10 +3812,10 @@ let () =
      for now) and re-loaded inside the adapter from `%env_self`. *)
   assert_contains "llvm: anon adapter emitted"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
-    "define i32 @anon_0_fn(ptr %env_self, i32 %x)";
+    "define i64 @anon_0_fn(ptr %env_self, i64 %x)";
   assert_contains "llvm: anon env struct typedef"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
-    "%anon_0_env = type { i32 }";
+    "%anon_0_env = type { i64 }";
   assert_contains "llvm: anon env allocated via malloc"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "= call ptr @malloc";
@@ -3890,7 +3890,7 @@ let () =
     (llvm_with_decls
       "type 'a LCgBox = { v: 'a };\n\
        let b = LCgBox { v = 42 } in b.v")
-    "%LCgBox_int = type { i32 }";
+    "%LCgBox_int = type { i64 }";
   assert_contains "llvm: poly record Record_lit uses mono name"
     (llvm_with_decls
       "type 'a LCgBox2 = { v: 'a };\n\
@@ -3954,7 +3954,7 @@ let () =
     "declare i32 @strcmp(ptr, ptr)";
   assert_contains "llvm: P_int via icmp eq"
     (llvm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
-    "= icmp eq i32 ";
+    "= icmp eq i64 ";
   assert_contains "llvm: P_str via strcmp"
     (llvm "match \"hello\" with | \"hi\" -> 1 | \"hello\" -> 2 | _ -> 9")
     "= call i32 @strcmp(ptr ";
@@ -3990,9 +3990,9 @@ let () =
   assert_contains "llvm: asprintf declared"
     (llvm "print (show 42)") "declare i32 @asprintf(ptr, ptr, ...)";
   assert_contains "llvm: show_int defined"
-    (llvm "show 42") "define ptr @show_int(i32 %x)";
+    (llvm "show 42") "define ptr @show_int(i64 %x)";
   assert_contains "llvm: show int call site"
-    (llvm "show 42") "call ptr @show_int(i32 42)";
+    (llvm "show 42") "call ptr @show_int(i64 42)";
   assert_contains "llvm: show str specialization"
     (llvm "show \"hi\"") "define ptr @show_str(ptr %x)";
   assert_contains "llvm: show bool specialization"
@@ -4029,7 +4029,7 @@ let () =
     "call void @__lang_region_free(ptr ";
   assert_contains "llvm: Ref allocs via region + store"
     (llvm "region R { let x = &R 5 in 42 }")
-    "store i32 5, ptr ";
+    "store i64 5, ptr ";
   assert_contains "llvm: with calls close.fn(env, 0) at scope end"
     (llvm_with_decls
       "drop type LCgConn7 = { id: int, close: unit -> unit };\n\
@@ -4040,7 +4040,7 @@ let () =
     (llvm_with_decls
       "view LCgCell8[R] of int { v: int };\n\
        region R { let c = LCgCell8 { v = 7 } in c.v }")
-    "%LCgCell8 = type { i32 }";
+    "%LCgCell8 = type { i64 }";
   assert_contains "llvm: view construction region-allocates"
     (llvm_with_decls
       "view LCgCell9[R] of int { v: int };\n\
@@ -6381,7 +6381,7 @@ let () =
        "let dbl = fn (x: float) -> x * 2.0 in int_of_float (dbl 1.5)")
     "(local f64";
   assert_contains "chr masks out-of-range index (llvm)"
-    (vec_codegen_llvm "chr 65") "and i32 %n, 255";
+    (vec_codegen_llvm "chr 65") "and i64 %n, 255";
   (* --- Phase 15.5: codegen of higher-order API (vec_set / vec_iter / vec_fold) --- *)
   let src_set =
     "let v = vec_new () in let __ = vec_push v 10 in \
@@ -8686,7 +8686,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "declare i32 @getpid()" && has "call i32 @getpid(" then "ok" else "no")
+     if has "declare i64 @getpid()" && has "call i64 @getpid(" then "ok" else "no")
     "ok";
   check "§32.6: multi-arg curried extern interp (setenv + getenv roundtrip)"
     (Pipeline.process
@@ -8740,12 +8740,10 @@ let () =
     (fun () ->
       let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
         (typed_prog "4000000000") in ());
-  check_raises_containing
-    "v0.1.42: LLVM codegen rejects out-of-range int literal at compile time"
-    "does not fit the LLVM backend's 32-bit int"
-    (fun () ->
-      let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
-        (typed_prog "4000000000") in ());
+  (* v0.1.96: the LLVM backend's int is 64-bit, so a literal that overflows
+     32 bits now compiles (it did not before). *)
+  assert_contains "v0.1.96: LLVM codegen accepts a >32-bit int literal"
+    (llvm "4000000000") "4000000000";
 
   (* v0.1.42 (bitwise builtins, forced by the SHA-256 example): bit_and /
      bit_or / bit_xor / bit_not / bit_shl / bit_shr on all four backends.
@@ -9141,7 +9139,7 @@ let () =
      in
      if has "i32.and" && has "i32.xor" && has "i32.shr_s" then "ok" else "no")
     "ok";
-  check "v0.1.42: LLVM codegen emits i32 bitwise instructions"
+  check "v0.1.96: LLVM codegen emits i64 bitwise instructions"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
        (typed_prog "bit_xor (bit_and 12 10) (bit_shr 8 2)") in
      let nlen = String.length ll in
@@ -9153,7 +9151,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "= and i32" && has "= xor i32" && has "= ashr i32" then "ok"
+     if has "= and i64" && has "= xor i64" && has "= ashr i64" then "ok"
      else "no")
     "ok";
   (* v0.1.42: str_of_int on a variable under a top-level let lowers to

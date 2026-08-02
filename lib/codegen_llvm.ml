@@ -319,11 +319,11 @@ let rec llvm_ty_of (t : Ast.ty) : string =
      | _ ->
        raise (Codegen_error (Loc.dummy,
          "unsupported in LLVM codegen subset: Map[<unresolved>]")))
-  | Ast.TyInt -> "i32"
+  | Ast.TyInt -> "i64"  (* v0.1.96: 64-bit int, matching the C backend *)
   | Ast.TyBool -> "i1"
   | Ast.TyFloat -> "double"  (* Phase 34.2: IEEE 754 double *)
   | Ast.TyStr -> "ptr"
-  | Ast.TyUnit -> "i32"  (* unit becomes int 0 *)
+  | Ast.TyUnit -> "i64"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
   (* Q-012: ThreadHandle wraps a pthread_t (pointer-sized); Channel[T] is a
@@ -340,7 +340,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyCon (name, []) when Hashtbl.mem Typer.types name ->
     if is_recursive_variant_name name then "ptr" else "%" ^ name
   | Ast.TyArrow (p, r) -> "%" ^ closure_struct_name p r
-  | _ -> "i32"  (* best-effort fallback; typer should reject before this *)
+  | _ -> "i64"  (* best-effort fallback; typer should reject before this *)
 
 (* View test: is this Lang type a view? Views are constructed via
    Record_lit with a name in Typer.views; values are ptr to the
@@ -2052,7 +2052,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   let result_reg =
     match Ast.walk t with
     | Ast.TyInt ->
-      emit_asprintf "show_int" "i32 %x"
+      emit_asprintf "show_int" "i64 %x"
     | Ast.TyBool ->
       (* Select between "true" / "false" globals. *)
       let r = fresh_reg () in
@@ -2497,19 +2497,12 @@ let cast_from_i64 (v : string) (llty : string) : string =
 let rec emit_expr (env : env) (e : Ast.expr) : string =
   match e.Ast.node with
   | Ast.Int_lit n ->
-    (* v0.1.42: the LLVM backend's int is i32 (the v0.1.41 changelog
-       briefly claimed i64 — measuring said otherwise). Reject literals
-       that don't fit instead of silently emitting a wrapped bit pattern;
-       same policy as the Wasm backend. *)
-    if n > 2147483647 || n < -2147483648 then
-      raise (Codegen_error (e.Ast.loc,
-        Printf.sprintf
-          "int literal %d does not fit the LLVM backend's 32-bit int \
-           (range -2147483648 .. 2147483647); the C backend uses 64-bit \
-           int — see docs/language-reference.md (integers)" n));
+    (* v0.1.96: the LLVM backend's int is 64-bit (i64), matching the C
+       backend and the interpreter — the full OCaml int range is emitted
+       directly as an i64 immediate. *)
     string_of_int n
   | Ast.Bool_lit b -> if b then "1" else "0"
-  | Ast.Unit_lit -> "0"  (* unit represented as i32 0 *)
+  | Ast.Unit_lit -> "0"  (* unit represented as i64 0 *)
   | Ast.Str_lit s ->
     (* String literals lower to a private constant + return its symbol;
        since pointers are opaque, the global is directly usable as a ptr. *)
@@ -2753,7 +2746,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        (* v0.1.44: unary minus is numeric-overloaded like Bin. *)
        emit_instr (Printf.sprintf "  %s = fneg double %s" r v)
      | _ ->
-       emit_instr (Printf.sprintf "  %s = sub i32 0, %s" r v));
+       emit_instr (Printf.sprintf "  %s = sub i64 0, %s" r v));
     r
   | Ast.Bin (Ast.Concat, a, b) ->
     let ra = emit_expr env a in
@@ -2782,7 +2775,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       in
       emit_instr (Printf.sprintf "  %s = %s double %s, %s" r fop ra rb)
     end else
-      emit_instr (Printf.sprintf "  %s = %s i32 %s, %s" r (llvm_binop_int op) ra rb);
+      emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" r (llvm_binop_int op) ra rb);
     r
   | Ast.Cmp (op, a, b) ->
     let ra = emit_expr env a in
@@ -2819,7 +2812,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        r
      | _ ->
        let r = fresh_reg () in
-       let opnd_ty = if a_ty = Ast.TyBool then "i1" else "i32" in
+       let opnd_ty = if a_ty = Ast.TyBool then "i1" else "i64" in
        emit_instr (Printf.sprintf "  %s = icmp %s %s %s, %s" r (llvm_cmp_int op) opnd_ty ra rb);
        r)
   | Ast.Logic (op, a, b) ->
@@ -2839,7 +2832,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let result_ty =
       match e.Ast.ty with
       | Some ty -> llvm_ty_of ty
-      | None -> "i32"
+      | None -> "i64"
     in
     let cv = emit_expr env cond in
     let l_then = fresh_label "then_" in
@@ -3134,20 +3127,21 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call %%Metrics @__mere_mk_metrics()" r);
     r
   | Ast.App ({ node = Ast.Var "str_len"; _ }, arg) ->
+    (* v0.1.96: int is i64, so strlen's i64 result is the value directly. *)
     let av = emit_expr env arg in
-    let raw = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" raw av);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r raw);
+    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e); _ }, n_e) ->
     (* Phase 19.1.1: str_index_of h n — curried. *)
     let hv = emit_expr env h_e in
     let nv = emit_expr env n_e in
-    let r = fresh_reg () in
+    let raw = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @__lang_str_index_of(ptr %s, ptr %s)"
-                  r hv nv);
+                  raw hv nv);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
     (* Phase 31.0: str_compare a b — sign-normalize the raw strcmp value to
@@ -3163,9 +3157,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let is_gt = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = icmp sgt i32 %s, 0" is_gt raw);
     let r1 = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 1, i32 0" r1 is_gt);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 1, i64 0" r1 is_gt);
     let r2 = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 -1, i32 %s" r2 is_lt r1);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 -1, i64 %s" r2 is_lt r1);
     r2
   (* Phase 34.2: float arithmetic + comparison + unary + conversions *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
@@ -3213,12 +3207,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "float_of_int"; _ }, a_e) ->
     let av = emit_expr env a_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sitofp i32 %s to double" r av);
+    emit_instr (Printf.sprintf "  %s = sitofp i64 %s to double" r av);
     r
   | Ast.App ({ node = Ast.Var "int_of_float"; _ }, a_e) ->
     let av = emit_expr env a_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = fptosi double %s to i32" r av);
+    emit_instr (Printf.sprintf "  %s = fptosi double %s to i64" r av);
     r
   | Ast.App ({ node = Ast.Var "str_of_float"; _ }, a_e) ->
     let av = emit_expr env a_e in
@@ -3259,8 +3253,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
     (* Phase 25.1: substring s start end_ — 3-arg curried. *)
     let sv = emit_expr env s_e in
-    let startv = emit_expr env start_e in
-    let endv = emit_expr env end_e in
+    let startv0 = emit_expr env start_e in
+    let endv0 = emit_expr env end_e in
+    let startv = fresh_reg () and endv = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" startv startv0);
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" endv endv0);
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call ptr @__lang_substring(ptr %s, i32 %s, i32 %s)"
@@ -3270,7 +3267,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let sv = emit_expr env s_e in
     let iv = emit_expr env i_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at(ptr %s, i32 %s)" r sv iv);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at(ptr %s, i64 %s)" r sv iv);
     r
   (* v0.1.86: str_eq a b — byte-compare two strings, returns i1 (bool). The
      C/interp backends already had it; the LLVM backend did not. *)
@@ -3307,8 +3304,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        the interpreter's fail). The helper validates strict decimal and
        calls __lang_fail_impl otherwise — catchable by try_or. *)
     let av = emit_expr env arg in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_int_of_str(ptr %s)" raw av);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_int_of_str(ptr %s)" r av);
+    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
     r
   | Ast.App ({ node = Ast.Var "str_unescape"; _ }, arg) ->
     (* Phase 25.4: str_unescape — interpret backslash-escape sequences into
@@ -3339,15 +3338,19 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     str_count_used_llvm := true;
     let sv = emit_expr env s_e in
     let nv = emit_expr env n_e in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_count(ptr %s, ptr %s)" raw sv nv);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_count(ptr %s, ptr %s)" r sv nv);
+    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
     r
   | Ast.App ({ node = Ast.Var "utf8_len"; _ }, s_e) ->
     (* v0.1.38 (Unicode): codepoint count (span walk, same as interp/C/wasm). *)
     str_split_used_llvm := true;
     let sv = emit_expr env s_e in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_utf8_len(ptr %s)" raw sv);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_utf8_len(ptr %s)" r sv);
+    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
     r
   | Ast.App ({ node = Ast.Var "utf8_chars"; _ }, s_e) ->
     str_split_used_llvm := true;
@@ -3394,7 +3397,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e); _ }, n_e) ->
     let sv = emit_expr env s_e in
-    let nv = emit_expr env n_e in
+    let nv0 = emit_expr env n_e in
+    let nv = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" nv nv0);
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_repeat(ptr %s, i32 %s)" r sv nv);
     r
@@ -3410,12 +3415,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | "bit_and" -> "and" | "bit_or" -> "or" | "bit_xor" -> "xor"
       | "bit_shl" -> "shl" | _ -> "ashr"
     in
-    emit_instr (Printf.sprintf "  %s = %s i32 %s, %s" r instr av bv);
+    emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" r instr av bv);
     r
   | Ast.App ({ node = Ast.Var "bit_not"; _ }, a_e) ->
     let av = emit_expr env a_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = xor i32 %s, -1" r av);
+    emit_instr (Printf.sprintf "  %s = xor i64 %s, -1" r av);
     r
   | Ast.App ({ node = Ast.Var "str_rev"; _ }, s_e) ->
     let sv = emit_expr env s_e in
@@ -3432,25 +3437,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let neg = fresh_reg () in
     let cmp = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sub i32 0, %s" neg nv);
-    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, 0" cmp nv);
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r cmp neg nv);
+    emit_instr (Printf.sprintf "  %s = sub i64 0, %s" neg nv);
+    emit_instr (Printf.sprintf "  %s = icmp slt i64 %s, 0" cmp nv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 %s, i64 %s" r cmp neg nv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "min"; _ }, a_e); _ }, b_e) ->
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
     let cmp = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, %s" cmp av bv);
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r cmp av bv);
+    emit_instr (Printf.sprintf "  %s = icmp slt i64 %s, %s" cmp av bv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 %s, i64 %s" r cmp av bv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "max"; _ }, a_e); _ }, b_e) ->
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
     let cmp = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = icmp sgt i32 %s, %s" cmp av bv);
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r cmp av bv);
+    emit_instr (Printf.sprintf "  %s = icmp sgt i64 %s, %s" cmp av bv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 %s, i64 %s" r cmp av bv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "clamp"; _ }, lo_e); _ }, hi_e); _ }, x_e) ->
     let lov = emit_expr env lo_e in
@@ -3460,16 +3465,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let lo_or_x = fresh_reg () in
     let gt_hi = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, %s" lt_lo xv lov);
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" lo_or_x lt_lo lov xv);
-    emit_instr (Printf.sprintf "  %s = icmp sgt i32 %s, %s" gt_hi lo_or_x hiv);
-    emit_instr (Printf.sprintf "  %s = select i1 %s, i32 %s, i32 %s" r gt_hi hiv lo_or_x);
+    emit_instr (Printf.sprintf "  %s = icmp slt i64 %s, %s" lt_lo xv lov);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 %s, i64 %s" lo_or_x lt_lo lov xv);
+    emit_instr (Printf.sprintf "  %s = icmp sgt i64 %s, %s" gt_hi lo_or_x hiv);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, i64 %s, i64 %s" r gt_hi hiv lo_or_x);
     r
   | Ast.App ({ node = Ast.Var "chr"; _ }, n_e) ->
     (* Phase 36: chr n — via char_table *)
     let nv = emit_expr env n_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at_chr(i32 %s)" r nv);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_char_at_chr(i64 %s)" r nv);
     r
   | Ast.App ({ node = Ast.Var "ord"; _ }, s_e) ->
     (* Phase 36: ord s — load first byte, zext to i32 *)
@@ -3477,7 +3482,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let bv = fresh_reg () in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load i8, ptr %s" bv sv);
-    emit_instr (Printf.sprintf "  %s = zext i8 %s to i32" r bv);
+    emit_instr (Printf.sprintf "  %s = zext i8 %s to i64" r bv);
     r
   | Ast.App ({ node = Ast.Var "to_upper"; _ }, s_e) ->
     let sv = emit_expr env s_e in
@@ -3493,21 +3498,21 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let nv = emit_expr env n_e in
     let rem = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = srem i32 %s, 2" rem nv);
-    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r rem);
+    emit_instr (Printf.sprintf "  %s = srem i64 %s, 2" rem nv);
+    emit_instr (Printf.sprintf "  %s = icmp eq i64 %s, 0" r rem);
     r
   | Ast.App ({ node = Ast.Var "odd"; _ }, n_e) ->
     let nv = emit_expr env n_e in
     let rem = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = srem i32 %s, 2" rem nv);
-    emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" r rem);
+    emit_instr (Printf.sprintf "  %s = srem i64 %s, 2" rem nv);
+    emit_instr (Printf.sprintf "  %s = icmp ne i64 %s, 0" r rem);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "gcd"; _ }, a_e); _ }, b_e) ->
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_gcd(i32 %s, i32 %s)" r av bv);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_gcd(i64 %s, i64 %s)" r av bv);
     r
   | Ast.App ({ node = Ast.Var "bool_of_str"; _ }, s_e) ->
     (* Phase 36: bool_of_str — strcmp s "true". Reuse the dedicated const *)
@@ -3552,18 +3557,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let cv = emit_expr env content_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @__lang_write_file(ptr %s, ptr %s)" r pv cv);
-    r
+    "0"  (* write_file : ... -> unit *)
   | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @show_int(i32 %s)" r av);
+    emit_instr (Printf.sprintf "  %s = call ptr @show_int(i64 %s)" r av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e); _ }, default_e) ->
     (* Phase 25.2: try_or fn default — catch fail via setjmp + longjmp.
        The fn invocation (= apply to unit) is the try branch; on failure use
        default. Save/restore the jmpbuf-set flag to handle nesting. *)
     let result_ty =
-      match e.Ast.ty with Some t -> llvm_ty_of (Ast.walk t) | None -> "i32"
+      match e.Ast.ty with Some t -> llvm_ty_of (Ast.walk t) | None -> "i64"
     in
     let l_try_ok = fresh_label "try_ok_" in
     let l_try_failed = fresh_label "try_failed_" in
@@ -3644,9 +3649,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_instr (Printf.sprintf "  %s = trunc i32 %s to i1" r r_i32);
        r
      | Ast.TyInt | Ast.TyUnit ->
+       (* fail aborts (noreturn); the value is unreachable but must type-check
+          as i64 in this int/unit context. *)
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = call i32 @__lang_fail_int(ptr %s)" r av);
-       r
+       "0"
      | other ->
        (* For ptr / struct / variant / tuple etc. — call fail then emit
           undef. fail aborts so undef is never read. *)
@@ -3693,7 +3700,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @mere_vec_%s_len(ptr %s)"
+                  "  %s = call i64 @mere_vec_%s_len(ptr %s)"
                   r elem_tag av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e); _ }, val_e) ->
@@ -3705,12 +3712,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_push(ptr %s, %s %s)"
                   r elem_tag av (llvm_ty_of elem_ty) xv);
-    r
+    "0"  (* vec_push : ... -> unit; return the i64 unit value *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e); _ }, idx_e) ->
     let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let elem_ty = Hashtbl.find vec_instances elem_tag in
     let av = emit_expr env vec_e in
-    let iv = emit_expr env idx_e in
+    let iv0 = emit_expr env idx_e in
+    let iv = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" iv iv0);
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call %s @mere_vec_%s_get(ptr %s, i32 %s)"
@@ -3721,13 +3730,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let elem_ty = Hashtbl.find vec_instances elem_tag in
     let av = emit_expr env vec_e in
-    let iv = emit_expr env idx_e in
+    let iv0 = emit_expr env idx_e in
+    let iv = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" iv iv0);
     let xv = emit_expr env val_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_set(ptr %s, i32 %s, %s %s)"
                   r elem_tag av iv (llvm_ty_of elem_ty) xv);
-    r
+    "0"
   | Ast.App ({ node = Ast.Var "vec_reverse"; _ }, vec_e) ->
     (* Phase 19.3: vec_reverse v — in-place, per-T helper. *)
     let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
@@ -3736,7 +3747,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_reverse(ptr %s)"
                   r elem_tag av);
-    r
+    "0"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_concat"; _ }, a_e); _ }, b_e) ->
     (* Phase 19.3: vec_concat a b — new region Vec, per-T helper. *)
     let elem_tag = vec_elem_tag_of a_e.Ast.ty a_e.Ast.loc in
@@ -3762,7 +3773,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_sort(ptr %s, %%%s %s)"
                   r elem_tag av outer_cl cv);
-    r
+    "0"
   | Ast.App ({ node = Ast.Var "strbuf_new"; _ }, _arg) ->
     (* Phase 15.9: strbuf_new () — extract the region from the result type's
        TyCon arg and pass it to @mere_strbuf_new. *)
@@ -3793,7 +3804,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @mere_strbuf_len(ptr %s)" r av);
+                  "  %s = call i64 @mere_strbuf_len(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "strbuf_to_str"; _ }, arg) ->
     strbuf_used := true;
@@ -3810,7 +3821,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_strbuf_push(ptr %s, ptr %s)"
                   r sv xv);
-    r
+    "0"
   | Ast.App ({ node = Ast.Var "len"; _ }, arg) ->
     (* Phase 15.11: len ad-hoc dispatch — at compile time, route to the
        corresponding _len helper based on arg.ty. *)
@@ -3825,36 +3836,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let av = emit_expr env arg in
        let r = fresh_reg () in
        emit_instr (Printf.sprintf
-                     "  %s = call i32 @mere_vec_%s_len(ptr %s)" r t_tag av);
+                     "  %s = call i64 @mere_vec_%s_len(ptr %s)" r t_tag av);
        r
      | Ast.TyCon ("OwnedVec", _) ->
        let t_tag = owned_vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        let av = emit_expr env arg in
        let r = fresh_reg () in
        emit_instr (Printf.sprintf
-                     "  %s = call i32 @mere_owned_vec_%s_len(ptr %s)" r t_tag av);
+                     "  %s = call i64 @mere_owned_vec_%s_len(ptr %s)" r t_tag av);
        r
      | Ast.TyCon ("StrBuf", _) ->
        strbuf_used := true;
        let av = emit_expr env arg in
        let r = fresh_reg () in
        emit_instr (Printf.sprintf
-                     "  %s = call i32 @mere_strbuf_len(ptr %s)" r av);
+                     "  %s = call i64 @mere_strbuf_len(ptr %s)" r av);
        r
      | Ast.TyCon ("Map", _) ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        let av = emit_expr env arg in
        let r = fresh_reg () in
        emit_instr (Printf.sprintf
-                     "  %s = call i32 @mere_map_%s_%s_len(ptr %s)"
+                     "  %s = call i64 @mere_map_%s_%s_len(ptr %s)"
                      r k_tag v_tag av);
        r
      | Ast.TyStr ->
        let av = emit_expr env arg in
-       let raw = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" raw av);
        let r = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" r raw);
+       emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" r av);
        r
      | Ast.TyTuple ts ->
        (* Static arity. Emit arg for side effects (but tuples have none). *)
@@ -3878,7 +3887,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           let lv = emit_expr env arg in
           let r = fresh_reg () in
           emit_instr (Printf.sprintf
-                        "  %s = call i32 @mere_list_%s_len(ptr %s)"
+                        "  %s = call i64 @mere_list_%s_len(ptr %s)"
                         r t_tag lv);
           r
         | _ ->
@@ -3916,7 +3925,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @mere_map_%s_%s_len(ptr %s)"
+                  "  %s = call i64 @mere_map_%s_%s_len(ptr %s)"
                   r k_tag v_tag av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_get"; _ }, m_e); _ }, k_e) ->
@@ -3949,7 +3958,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_map_%s_%s_delete(ptr %s, %s %s)"
                   r k_tag v_tag av (llvm_ty_of k_ty) kv);
-    r
+    "0"
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, m_e); _ }, k_e); _ }, v_e) ->
     (* map_set m k v *)
     let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
@@ -3961,7 +3970,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_map_%s_%s_set(ptr %s, %s %s, %s %s)"
                   r k_tag v_tag av (llvm_ty_of k_ty) kv (llvm_ty_of v_ty) vv);
-    r
+    "0"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_iter"; _ }, m_e); _ }, fn_e) ->
     (* Phase 19.2: map_iter m f — per-(K, V) helper.
        Signature: i32 @mere_map_<K>_<V>_iter(ptr m, %closure_<K>_<closure_<V>_unit> outer) *)
@@ -3977,7 +3986,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_map_%s_%s_iter(ptr %s, %%%s %s)"
                   r k_tag v_tag av outer_cl cv);
-    r
+    "0"
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
     (* Phase 15.7: owned_vec_new () — heap-allocated OwnedVec[T].
        Extract the element type T from e.ty (the result Vec's TyCon arg). *)
@@ -3990,7 +3999,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @mere_owned_vec_%s_len(ptr %s)"
+                  "  %s = call i64 @mere_owned_vec_%s_len(ptr %s)"
                   r elem_tag av);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_push"; _ }, vec_e); _ }, val_e) ->
@@ -4002,12 +4011,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_owned_vec_%s_push(ptr %s, %s %s)"
                   r elem_tag av (llvm_ty_of elem_ty) xv);
-    r
+    "0"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_get"; _ }, vec_e); _ }, idx_e) ->
     let elem_tag = owned_vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let elem_ty = Hashtbl.find owned_vec_instances elem_tag in
     let av = emit_expr env vec_e in
-    let iv = emit_expr env idx_e in
+    let iv0 = emit_expr env idx_e in
+    let iv = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" iv iv0);
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call %s @mere_owned_vec_%s_get(ptr %s, i32 %s)"
@@ -4092,7 +4103,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_iter(ptr %s, %%%s %s)"
                   r elem_tag av cname cv);
-    r
+    "0"  (* vec_iter : ... -> unit *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e); _ }, fn_e) ->
     (* Phase 15.6: vec_map v f — per-(T, U) helper.
        Returns ptr to fresh mere_vec_<U>, region-preserving. *)
@@ -5299,12 +5310,12 @@ let emit_fn_def (f : fn_decl) : string =
    (interp's Eval.to_string V_unit = "()" gets print_endline'd). *)
 let main_format_of (t : Ast.ty) : (string * string) option =
   match Ast.walk t with
-  | Ast.TyInt -> Some ("i32", "%d")
+  | Ast.TyInt -> Some ("i64", "%lld")  (* v0.1.96: 64-bit int *)
   | Ast.TyBool -> Some ("i32", "%d")  (* zext from i1 *)
   | Ast.TyFloat -> Some ("double", "float")  (* Phase 34.2: use __lang_str_of_float + puts for interp parity *)
   | Ast.TyStr -> Some ("ptr", "%s")
   | Ast.TyUnit -> Some ("unit", "()")  (* Phase 25.11: print "()" for unit main *)
-  | _ -> Some ("i32", "%d")
+  | _ -> Some ("i64", "%lld")
 
 (* Runtime helpers emitted as LLVM IR. Mirrors codegen_c's runtime
    helpers but inlined into the .ll module so the file is self-contained. *)
@@ -5549,11 +5560,12 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "}";
       "";
       (* len *)
-      Printf.sprintf "define i32 @mere_vec_%s_len(ptr %%v) {" tag;
+      Printf.sprintf "define i64 @mere_vec_%s_len(ptr %%v) {" tag;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
-      "  %len = load i32, ptr %lp";
-      "  ret i32 %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = zext i32 %len32 to i64";
+      "  ret i64 %len";
       "}";
       "";
       (* Phase 15.5: vec_set v i x — in-place mutation. *)
@@ -6072,11 +6084,12 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       "}";
       "";
       (* len *)
-      Printf.sprintf "define i32 @mere_owned_vec_%s_len(ptr %%v) {" tag;
+      Printf.sprintf "define i64 @mere_owned_vec_%s_len(ptr %%v) {" tag;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
-      "  %len = load i32, ptr %lp";
-      "  ret i32 %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = zext i32 %len32 to i64";
+      "  ret i64 %len";
       "}" ]
 
 (* Phase 15.7: vec_to_owned helper per-T.
@@ -6220,11 +6233,11 @@ let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
     try Hashtbl.find variant_tags "Cons" with Not_found -> 1
   in
   String.concat "\n"
-    [ Printf.sprintf "define i32 @mere_list_%s_len(ptr %%l) {" t_tag;
+    [ Printf.sprintf "define i64 @mere_list_%s_len(ptr %%l) {" t_tag;
       "entry:";
       "  br label %check";
       "check:";
-      "  %n = phi i32 [ 0, %entry ], [ %n_next, %body ]";
+      "  %n = phi i64 [ 0, %entry ], [ %n_next, %body ]";
       "  %cur = phi ptr [ %l, %entry ], [ %next, %body ]";
       Printf.sprintf "  %%tagp = getelementptr %%%s, ptr %%cur, i32 0, i32 0" node_struct;
       "  %tagv = load i32, ptr %tagp";
@@ -6234,10 +6247,10 @@ let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
       Printf.sprintf "  %%pp = getelementptr %%%s, ptr %%cur, i32 0, i32 1" node_struct;
       Printf.sprintf "  %%tup = load %%%s, ptr %%pp" tup_struct;
       "  %next = extractvalue " ^ "%" ^ tup_struct ^ " %tup, 1";
-      "  %n_next = add i32 %n, 1";
+      "  %n_next = add i64 %n, 1";
       "  br label %check";
       "end:";
-      "  ret i32 %n";
+      "  ret i64 %n";
       "}" ]
 
 (* Phase 15.14: per-K equality helper for Map. Supports int / bool / str /
@@ -6562,11 +6575,12 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "}";
       "";
       (* len *)
-      Printf.sprintf "define i32 @%s_len(ptr %%m) {" fn_prefix;
+      Printf.sprintf "define i64 @%s_len(ptr %%m) {" fn_prefix;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
-      "  %len = load i32, ptr %lp";
-      "  ret i32 %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = zext i32 %len32 to i64";
+      "  ret i64 %len";
       "}";
       "";
       (* Phase 39.A' #2: delete — shift keys/values down to remove the key *)
@@ -6700,11 +6714,12 @@ let strbuf_runtime_llvm =
       "}";
       "";
       (* len *)
-      "define i32 @mere_strbuf_len(ptr %sb) {";
+      "define i64 @mere_strbuf_len(ptr %sb) {";
       "entry:";
       "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
-      "  %len = load i32, ptr %lp";
-      "  ret i32 %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = zext i32 %len32 to i64";
+      "  ret i64 %len";
       "}" ]
 
 (* Phase 16.3 / DEFERRED §1.5: LLVM IR runtime for Logger / Metrics.
@@ -7046,11 +7061,10 @@ let str_concat_helper =
          Mask to a single byte (n & 0xFF) so out-of-range input can't
          index past the 256-entry table into adjacent memory. Matches the
          C backend ((unsigned char)n) and the wasm backend. *)
-      "define ptr @__lang_char_at_chr(i32 %n) {";
+      "define ptr @__lang_char_at_chr(i64 %n) {";
       "entry:";
       "  call void @__lang_char_table_setup()";
-      "  %m = and i32 %n, 255";
-      "  %n64 = zext i32 %m to i64";
+      "  %n64 = and i64 %n, 255";
       "  %p = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %n64";
       "  ret ptr %p";
       "}";
@@ -7112,25 +7126,25 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 36: gcd via iterative Euclid on |a|, |b|. *)
-      "define i32 @__lang_gcd(i32 %a0, i32 %b0) {";
+      "define i64 @__lang_gcd(i64 %a0, i64 %b0) {";
       "entry:";
-      "  %aneg = icmp slt i32 %a0, 0";
-      "  %na   = sub i32 0, %a0";
-      "  %a1   = select i1 %aneg, i32 %na, i32 %a0";
-      "  %bneg = icmp slt i32 %b0, 0";
-      "  %nb   = sub i32 0, %b0";
-      "  %b1   = select i1 %bneg, i32 %nb, i32 %b0";
+      "  %aneg = icmp slt i64 %a0, 0";
+      "  %na   = sub i64 0, %a0";
+      "  %a1   = select i1 %aneg, i64 %na, i64 %a0";
+      "  %bneg = icmp slt i64 %b0, 0";
+      "  %nb   = sub i64 0, %b0";
+      "  %b1   = select i1 %bneg, i64 %nb, i64 %b0";
       "  br label %loop";
       "loop:";
-      "  %a = phi i32 [ %a1, %entry ], [ %b, %step ]";
-      "  %b = phi i32 [ %b1, %entry ], [ %r, %step ]";
-      "  %zz = icmp eq i32 %b, 0";
+      "  %a = phi i64 [ %a1, %entry ], [ %b, %step ]";
+      "  %b = phi i64 [ %b1, %entry ], [ %r, %step ]";
+      "  %zz = icmp eq i64 %b, 0";
       "  br i1 %zz, label %done, label %step";
       "step:";
-      "  %r = srem i32 %a, %b";
+      "  %r = srem i64 %a, %b";
       "  br label %loop";
       "done:";
-      "  ret i32 %a";
+      "  ret i64 %a";
       "}";
       "";
       (* Phase 36: str_replace — replace all non-overlapping occurrences of
@@ -7284,11 +7298,10 @@ let str_concat_helper =
       "done:";
       "  ret void";
       "}";
-      "define ptr @__lang_char_at(ptr %s, i32 %i) {";
+      "define ptr @__lang_char_at(ptr %s, i64 %i) {";
       "entry:";
       "  call void @__lang_char_table_setup()";
-      "  %i64 = sext i32 %i to i64";
-      "  %cp = getelementptr i8, ptr %s, i64 %i64";
+      "  %cp = getelementptr i8, ptr %s, i64 %i";
       "  %c = load i8, ptr %cp";
       "  %cz = zext i8 %c to i64";
       "  %ent = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %cz";
@@ -8276,7 +8289,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     mint_show_global "s_lbracket" "[";
     mint_show_global "s_rbracket" "]";
     mint_show_global "s_comma_space" ", ";
-    mint_show_format "show_int" "%d";
+    mint_show_format "show_int" "%lld";
     mint_show_format "show_str" "\"%s\"";
     mint_show_format "show_ctor_payload" "%s %s";
     (* Per-type tuple / record / variant format strings + per-ctor
@@ -8422,6 +8435,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     | None -> []
     | Some (_, "%d") ->
       [ "@.fmt_d = private constant [4 x i8] c\"%d\\0A\\00\"" ]
+    | Some (_, "%lld") ->
+      [ "@.fmt_lld = private constant [6 x i8] c\"%lld\\0A\\00\"" ]
     | Some (_, "%s") ->
       [ "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"" ]
     | Some ("unit", _) ->

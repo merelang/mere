@@ -39,13 +39,11 @@ the interpreter and the C backend.
 
 ## Backend support
 
-- **interp / C**: full, exact.
-- **Wasm / LLVM**: `add` (and `fib`, `from_int`, `to_str`) work, but `mul`
-  overflows: these backends use 32-bit ints and a base-1e9 limb product is
-  ~1e18. A 32-bit build would need a smaller base (e.g. 1e4) at ~2× the limb
-  count. (The LLVM backend previously rejected the library's polymorphic inner
-  closure captures outright; that gap is fixed — it now compiles and runs, and
-  `mul` is limited only by the 32-bit width.)
+- **interp / C / LLVM**: full, exact (all three use 64-bit ints, so a base-1e9
+  limb product stays in range).
+- **Wasm**: `add` (and `fib`, `from_int`, `to_str`) work, but `mul` overflows:
+  Wasm ints are 32-bit and a base-1e9 limb product is ~1e18. A Wasm build would
+  need a smaller base (e.g. 1e4) at ~2× the limb count.
 
 The base is 1e9 so that a limb product stays under 2^63 on the 64-bit
 backends; addition's limb sum stays under 2^31, which is why it survives even
