@@ -1319,7 +1319,30 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
   let builtin_names = List.map fst Typer.initial_env in
   let known = ref (toplevel_names @ builtin_names) in
   let current_host = ref "" in
+  (* Every top-level fn body, used to discover the concrete type at which a
+     local (let-generalized) inner fn is actually applied. *)
+  let scan_roots = List.map (fun (f : fn_decl) -> f.body) fns in
   let lift_one _host_param host_locals n p fn_body value_loc value_ty =
+    (* v0.1.95: monomorphize a let-generalized inner fn. A local `let rec`
+       (e.g. bignum's `cmp` helper `cg`) is generalized to a polymorphic scheme
+       even when it is only ever applied at one concrete type; its Fun node's
+       recorded type then still carries free type variables, and any inner
+       closure capturing its parameter would have a non-concrete capture type
+       that the LLVM backend (unlike the erasing C backend) cannot represent.
+       If the fn is applied at exactly one concrete type across the program,
+       unify its recorded type with that arrow — because the Fun node shares
+       its type variables with its body, this concretises the whole body (and
+       hence every capture) in place. *)
+    (match value_ty with
+     | Some t when not (ty_is_concrete (Ast.walk t)) ->
+       let arrows = find_all_concrete_arrows_in_llvm n scan_roots in
+       let distinct =
+         List.sort_uniq compare (List.map (fun a -> Ast.pp_ty (Ast.walk a)) arrows)
+       in
+       (match arrows, distinct with
+        | a :: _, [_] -> (try Typer.unify Loc.dummy t a with _ -> ())
+        | _ -> ())
+     | _ -> ());
     let effective_known =
       List.filter (fun k -> not (List.mem k host_locals)) !known
     in
@@ -4943,8 +4966,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           match List.assoc_opt fv !current_var_types with
           | Some t when ty_is_concrete t -> Ast.walk t
           | _ ->
-            unsupported e.Ast.loc
-              (Printf.sprintf "capture `%s` has non-concrete type" fv)
+            (* The in-scope binding is still polymorphic (a let-generalized
+               enclosing fn, e.g. a local `let rec` whose inner closure
+               captures its parameter). Recover the concrete type by scanning
+               this closure's body for a Var occurrence of `fv` whose recorded
+               type is concrete — after lift-time monomorphization the body
+               carries concrete types. Mirrors the C backend's fallback. *)
+            (match Ast.walk (lookup_var_ty_llvm fn_body fv) with
+             | Ast.TyUnit ->
+               unsupported e.Ast.loc
+                 (Printf.sprintf "capture `%s` has non-concrete type" fv)
+             | t -> t)
         in
         (fv, cty)) fvs
     in
