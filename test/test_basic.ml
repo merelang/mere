@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.67" Version.v "0.1.67";
+  check "version is 0.1.92" Version.v "0.1.92";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -9749,7 +9749,8 @@ let () =
         type_env := (name, Typer.mono ty) :: !type_env
       | Ast.Top_extern_type tn -> Typer.register_type tn [] []
       | Ast.Top_signature _ | Ast.Top_type_alias _
-      | Ast.Top_ctor_alias _ | Ast.Top_record_alias _ -> ()
+      | Ast.Top_ctor_alias _ | Ast.Top_record_alias _
+      | Ast.Top_trait _ | Ast.Top_impl _ -> ()
     ) prog.decls;
     let main_ty =
       Typer.infer !type_env (Ast.desugar_program prog)
@@ -11788,6 +11789,35 @@ let () =
       output_string o2 "[package]\nname = \"x\"\n"; close_out o2;
       match Parser.module_path_of_toml d2 with Some p -> p | None -> "none")
      "none";
+
+  (* --- traits (ad-hoc polymorphism via dictionary elaboration) --- *)
+  let num_trait =
+    "trait Num 'a { add : 'a -> 'a -> 'a; mul : 'a -> 'a -> 'a; zero : 'a; }\n\
+     impl Num int   { add = fn x -> fn y -> x + y; mul = fn x -> fn y -> x * y; zero = 0; }\n\
+     impl Num float { add = fn x -> fn y -> x + y; mul = fn x -> fn y -> x * y; zero = 0.0; }\n\
+     let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n"
+  in
+  check "trait: one generic sum over int"
+    (Pipeline.process (num_trait ^ "sum [1, 2, 3, 4]")) "10";
+  check "trait: same sum over float (return-poly zero resolves via dict)"
+    (Pipeline.process (num_trait ^ "int_of_float (sum [1.5, 2.5, 3.0] * 10.0)")) "70";
+  check "trait: direct method use at a concrete type"
+    (Pipeline.process (num_trait ^ "add (mul 3 4) 5")) "17";
+  check "trait: generic sum over a distinct user type (Mod7)"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         type Mod7 = M7 of int;\n\
+         impl Num Mod7 { add = fn a -> fn b -> (match a with M7 x -> (match b with M7 y -> M7 ((x + y) - (((x + y) / 7) * 7)))); zero = M7 0; }\n\
+         let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
+         match sum [M7 3, M7 5, M7 6] with M7 r -> r")) "0";
+  check "trait: a program with no trait decls is unaffected (identity path)"
+    (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
+  check_raises "trait: use of an unimplemented instance is rejected"
+    (fun () -> Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
+         sum [1.0, 2.0]"));
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

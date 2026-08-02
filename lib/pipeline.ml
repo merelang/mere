@@ -195,12 +195,16 @@ let process_decls eval_env type_env decls =
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->
       Typer.alias_record alias target
+    | Ast.Top_trait _ | Ast.Top_impl _ ->
+      (* Lowered to plain decls by Trait_elab.elaborate before this loop
+         runs; never reached in practice. *)
+      ()
   ) decls
 
 let process ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
-  let prog = parse_program ?base_dir ~search_paths s in
+  let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
@@ -226,7 +230,7 @@ let process ?base_dir ?(search_paths = []) s =
 let exhaustiveness_warnings s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
-  let prog = parse_program s in
+  let prog = Trait_elab.elaborate (parse_program s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
@@ -236,7 +240,7 @@ let exhaustiveness_warnings s =
 let type_of s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
-  let prog = parse_program s in
+  let prog = Trait_elab.elaborate (parse_program s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   (* Type-check decls but skip eval to avoid side effects. *)
@@ -289,13 +293,14 @@ let type_of s =
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->
       Typer.alias_record alias target
+    | Ast.Top_trait _ | Ast.Top_impl _ -> ()
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 
 let process_typed s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
-  let prog = parse_program s in
+  let prog = Trait_elab.elaborate (parse_program s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;

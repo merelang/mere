@@ -28,6 +28,8 @@ type token =
   | T_import          (* import keyword (load decls from another file) *)
   | T_open            (* open keyword (bring module bindings into scope) *)
   | T_extern          (* extern keyword (FFI declaration: `extern fn name: ty;`、Phase 32) *)
+  | T_trait           (* trait keyword (user-defined interface for ad-hoc polymorphism) *)
+  | T_impl            (* impl keyword (trait implementation for a concrete type) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -414,6 +416,8 @@ let rec tokenize s =
           | "import" -> T_import
           | "open" -> T_open
           | "extern" -> T_extern
+          | "trait" -> T_trait
+          | "impl" -> T_impl
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when

@@ -522,6 +522,23 @@ let fmt_top_extern name t =
 let fmt_top_extern_type type_name =
   "extern type " ^ type_name ^ ";"
 
+let fmt_top_trait name param methods =
+  let m_s =
+    methods
+    |> List.map (fun (m, t) -> indent 1 ^ m ^ " : " ^ fmt_ty t ^ ";")
+    |> String.concat "\n"
+  in
+  "trait " ^ name ^ " '" ^ param ^ " {\n" ^ m_s ^ "\n}"
+
+let fmt_top_impl name target methods =
+  let m_s =
+    methods
+    |> List.map (fun (m, v) ->
+         indent 1 ^ m ^ " = " ^ fmt_expr ~prec:prec_top ~ind:1 v ^ ";")
+    |> String.concat "\n"
+  in
+  "impl " ^ name ^ " " ^ fmt_ty target ^ " {\n" ^ m_s ^ "\n}"
+
 let fmt_top_drop name = "drop type " ^ name ^ ";"
 
 (* Q-012: `sync`/`local` type markers format exactly like `drop` (same
@@ -554,6 +571,8 @@ let fmt_top_decl d =
      blocks. They have no surface syntax of their own — skip them so the
      formatter doesn't emit invisible-to-the-user declarations. *)
   | Top_ctor_alias _ | Top_record_alias _ -> None
+  | Top_trait (name, param, methods) -> Some (fmt_top_trait name param methods)
+  | Top_impl (name, target, methods) -> Some (fmt_top_impl name target methods)
 
 (* Phase 47: the parser splits `drop type Foo = { ... };` into two
    adjacent decls — `Top_drop "Foo"` then the type/record definition.
