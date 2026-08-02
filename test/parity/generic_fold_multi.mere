@@ -1,0 +1,15 @@
+// A generic higher-order function that takes BOTH its fold function and its
+// seed as polymorphic parameters, then instantiated at int and at float.
+//
+// Regression for the LLVM multi-instantiation bug (v0.1.28 B-P2b, which the C
+// backend already fixed but the LLVM port lacked): `list_fold`'s float
+// instance is only reachable through `reduce`'s float instantiation, which
+// resolves in a later monomorphization pass. Without the promote-to-multi-inst
+// fix the float call site referenced a non-existent instance and fell back to
+// the int one, so the float result came out as 0.
+let reduce = fn f -> fn seed -> fn xs -> list_fold xs seed f;
+
+let si = reduce (fn a -> fn x -> a + x) 0 [1, 2, 3, 4];
+let sf = reduce (fn (a : float) -> fn (x : float) -> a + x) 0.0 [1.5, 2.5, 3.0];
+let sfi = int_of_float (sf * 10.0);
+print (str_of_int si ++ " " ++ str_of_int sfi)
