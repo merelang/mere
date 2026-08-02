@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.96" Version.v "0.1.96";
+  check "version is 0.1.97" Version.v "0.1.97";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11833,6 +11833,31 @@ let () =
          impl Mon int list { add = list_append; zero = Nil; }\n\
          let fold1 = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
          (fold1 [10, 20, 30], fold1 [[1], [2, 3]])")) "(60, [1, 2, 3])";
+  (* A self-recursive constrained function: its recursive calls thread the
+     same dictionary the function received. *)
+  check "trait: recursive constrained function (self-recursion)"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let rec rsum = fn xs -> match xs with\n\
+         | Nil -> zero\n\
+         | Cons (h, t) -> add h (rsum t);\n\
+         rsum [1, 2, 3, 4, 5]")) "15";
+  check "trait: recursive constrained function works at a second type"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int list { add = list_append; zero = Nil; }\n\
+         let rec rcat = fn xs -> match xs with\n\
+         | Nil -> zero\n\
+         | Cons (h, t) -> add h (rcat t);\n\
+         rcat [[1, 2], [3], [4, 5]]")) "[1, 2, 3, 4, 5]";
+  check_raises "trait: mutually-recursive constrained functions rejected"
+    (fun () -> Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let rec f = fn xs -> match xs with Nil -> zero | Cons (h, t) -> add h (g t)\n\
+         and g = fn xs -> match xs with Nil -> zero | Cons (h, t) -> add h (f t);\n\
+         f [1, 2, 3]"));
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
