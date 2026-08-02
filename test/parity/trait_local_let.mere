@@ -1,0 +1,16 @@
+// A constrained generic function defined in a *local* `let` (not top-level).
+// The dictionary is threaded through the local binding: its trait-method uses
+// resolve to the dict parameter, and the use site passes the concrete dict.
+//
+// Kept at `int` so it runs on all four backends: a local polymorphic function
+// whose use type is not the codegen's default (int) hits a separate,
+// pre-existing "local polymorphic fn not multi-instantiated" limitation on the
+// C / LLVM backends (reproducible without traits). The interpreter and Wasm
+// handle the general case; see the unit tests for other instance types.
+trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }
+impl Num int { add = fn x -> fn y -> x + y; zero = 0; }
+
+let total = fn ys ->
+  let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x) in
+  sum ys;
+print (str_of_int (total [1, 2, 3, 4, 5]))

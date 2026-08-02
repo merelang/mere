@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.97" Version.v "0.1.97";
+  check "version is 0.1.98" Version.v "0.1.98";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11858,6 +11858,34 @@ let () =
          let rec f = fn xs -> match xs with Nil -> zero | Cons (h, t) -> add h (g t)\n\
          and g = fn xs -> match xs with Nil -> zero | Cons (h, t) -> add h (f t);\n\
          f [1, 2, 3]"));
+  (* A constrained generic function defined in a LOCAL `let` (not top-level):
+     the dictionary threads through the local binding. *)
+  check "trait: local constrained let (dictionary threaded through a local let)"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let go = fn () ->\n\
+         \  let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x) in\n\
+         \  sum [1, 2, 3, 4];\n\
+         go ()")) "10";
+  check "trait: local constrained let at a distinct user type"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         type Mod7 = M7 of int;\n\
+         impl Num Mod7 { add = fn a -> fn b -> (match a with M7 x -> (match b with M7 y -> M7 ((x + y) - (((x + y) / 7) * 7)))); zero = M7 0; }\n\
+         let go = fn () ->\n\
+         \  let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x) in\n\
+         \  sum [M7 3, M7 5, M7 6];\n\
+         match go () with M7 r -> r")) "0";
+  check "trait: one local constrained let used at two types"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         impl Num int list { add = list_append; zero = Nil; }\n\
+         let go = fn () ->\n\
+         \  let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x) in\n\
+         \  (sum [1, 2, 3], sum [[4], [5, 6]]);\n\
+         go ()")) "(6, [4, 5, 6])";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
