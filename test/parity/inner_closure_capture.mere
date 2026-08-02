@@ -1,0 +1,19 @@
+// A local `let rec` that is let-generalized but only ever applied at one
+// concrete type, whose inner closure captures the outer parameter. This is
+// the shape of contrib/bignum's `cmp` helper. The LLVM backend previously
+// rejected it ("capture has non-concrete type") because the capture stayed
+// polymorphic; lift-time monomorphization now concretises it.
+let lexcmp = fn a -> fn b ->
+  let rec cg = fn xs -> fn ys ->
+    match xs with
+    | Nil -> 0
+    | Cons (xh, xt) ->
+      (match ys with
+       | Nil -> 1
+       | Cons (yh, yt) ->
+         if xh < yh then 0 - 1
+         else if xh > yh then 1
+         else cg xt yt)
+  in cg a b;
+let r = lexcmp [1, 2, 3] [1, 2, 4] in
+print (str_of_int (r + lexcmp [5, 5] [5, 5] + lexcmp [9] [2]))
