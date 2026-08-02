@@ -422,9 +422,20 @@ let register_trait name param methods =
   Hashtbl.replace traits name (param, methods);
   List.iter (fun (m, t) -> Hashtbl.replace trait_methods m (name, t)) methods
 
-(* Stable key naming the per-type dictionary binding. MVP: only 0-arity
-   instance heads (int / float / bool / str / unit / a nullary user type). *)
-let trait_type_key (t : Ast.ty) : string option =
+(* Stable key naming the per-type dictionary binding. Supports fully-concrete
+   instance heads, including parametric ones (`int list` -> "list_int",
+   `int * int` -> "tuple_int_int"), so a library type that is a transparent
+   alias — e.g. contrib/bignum's `int list` — can be a trait instance. Because
+   dictionaries are resolved by static type, an `int list` instance never
+   collides with a plain `int list` used elsewhere: dispatch is on the type at
+   the use site, not on runtime representation. A type still mentioning a
+   variable (or an arrow) has no key — such an instance is rejected. *)
+let rec trait_type_key (t : Ast.ty) : string option =
+  let keys_of ts =
+    try Some (List.map (fun a ->
+      match trait_type_key a with Some k -> k | None -> raise Exit) ts)
+    with Exit -> None
+  in
   match Ast.walk t with
   | Ast.TyInt -> Some "int"
   | Ast.TyFloat -> Some "float"
@@ -432,6 +443,14 @@ let trait_type_key (t : Ast.ty) : string option =
   | Ast.TyStr -> Some "str"
   | Ast.TyUnit -> Some "unit"
   | Ast.TyCon (name, []) -> Some name
+  | Ast.TyCon (name, args) ->
+    (match keys_of args with
+     | Some ks -> Some (name ^ "_" ^ String.concat "_" ks)
+     | None -> None)
+  | Ast.TyTuple ts ->
+    (match keys_of ts with
+     | Some ks -> Some ("tuple_" ^ String.concat "_" ks)
+     | None -> None)
   | _ -> None
 
 let register_impl trait target =
