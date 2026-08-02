@@ -2043,6 +2043,65 @@ let rec parse_program_internal tokens =
     | (pos, T_view) :: _ ->
       raise (Parse_error (pos,
         "expected 'NAME [R] (of T)? { fields }' after 'view'"))
+    | (_, T_trait) :: (_, T_ident tname) :: (_, T_tyvar param)
+      :: (_, T_lbrace) :: body_rest ->
+      (* `trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }` — a user-defined
+         interface. Method types mention the single param `'a` as TyParam.
+         Lowered to a dictionary record by Trait_elab. *)
+      let rec parse_methods acc toks =
+        match toks with
+        | (_, T_rbrace) :: rest -> List.rev acc, rest
+        | (_, T_ident mname) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          let acc = (mname, t) :: acc in
+          (match rest with
+           | (_, T_semi) :: rest -> parse_methods acc rest
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ';' or '}' in trait body")))
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected 'method : type' in trait body"))
+      in
+      let methods, rest = parse_methods [] body_rest in
+      let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
+      parse_decls (Ast.Top_trait (tname, param, methods) :: decls) rest
+    | (pos, T_trait) :: _ ->
+      raise (Parse_error (pos,
+        "expected `trait Name 'a { method : type; ... }`"))
+    | (pos, T_impl) :: (_, T_ident tname) :: rest ->
+      (* `impl Num int { add = fn x -> fn y -> x + y; zero = 0; }` — a concrete
+         instance. The target type is parsed with the ordinary type parser
+         (it stops at the opening `{`). Lowered to a dictionary value. *)
+      let target, rest = ty rest in
+      (match rest with
+       | (_, T_lbrace) :: body_rest ->
+         let rec parse_impls acc toks =
+           match toks with
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | (_, T_ident mname) :: (_, T_eq) :: rest ->
+             let v, rest = expr rest in
+             let acc = (mname, v) :: acc in
+             (match rest with
+              | (_, T_semi) :: rest -> parse_impls acc rest
+              | (_, T_rbrace) :: rest -> List.rev acc, rest
+              | _ ->
+                raise (Parse_error (pos_of rest,
+                  "expected ';' or '}' in impl body")))
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected 'method = expr' in impl body"))
+         in
+         let impls, rest = parse_impls [] body_rest in
+         let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
+         parse_decls (Ast.Top_impl (tname, target, impls) :: decls) rest
+       | _ ->
+         raise (Parse_error (pos,
+           "expected `{` to start impl body")))
+    | (pos, T_impl) :: _ ->
+      raise (Parse_error (pos,
+        "expected `impl Trait Type { method = expr; ... }`"))
     | (_, T_type) :: rest ->
       let decl, rest = parse_type_decl_after_keyword rest in
       parse_decls (decl :: decls) rest

@@ -166,6 +166,9 @@ let process_decl eval_env type_env decl =
   | Ast.Top_record_alias (alias, target) ->
     Typer.alias_record alias target;
     []
+  | Ast.Top_trait _ | Ast.Top_impl _ ->
+    (* Lowered by Trait_elab.elaborate before this runs. *)
+    []
 
 (* No-op now that the parser natively allows decls-only programs;
    kept as an identity wrapper for backwards-compat with existing tests

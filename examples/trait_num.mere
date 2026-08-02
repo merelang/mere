@@ -1,0 +1,54 @@
+// examples/trait_num.mere — user-defined traits (ad-hoc polymorphism).
+//
+// One generic `sum` works over int, float, AND a distinct user type, thanks
+// to a `Num` trait. Without traits every numeric operator monomorphises to
+// the first concrete type it meets, so `sum` would have to be triplicated
+// (`sum_int` / `sum_float` / `sum_mod7`). The trait lets us write it once.
+//
+// Traits are elaborated to dictionary passing (a source-to-source lowering to
+// plain Mere), so no backend needs special support: this runs on the
+// interpreter and the C / Wasm backends.
+
+trait Num 'a {
+  add  : 'a -> 'a -> 'a;
+  mul  : 'a -> 'a -> 'a;
+  zero : 'a;
+}
+
+impl Num int {
+  add  = fn x -> fn y -> x + y;
+  mul  = fn x -> fn y -> x * y;
+  zero = 0;
+}
+
+impl Num float {
+  add  = fn x -> fn y -> x + y;
+  mul  = fn x -> fn y -> x * y;
+  zero = 0.0;
+}
+
+// A distinct user type: integers mod 7. It has nothing to do with int/float,
+// yet the same `sum` folds over it.
+type Mod7 = M7 of int;
+let m7 = fn n -> M7 (n - ((n / 7) * 7));
+let un7 = fn m -> match m with M7 x -> x;
+
+impl Num Mod7 {
+  add  = fn a -> fn b -> match a with M7 x -> (match b with M7 y -> m7 (x + y));
+  mul  = fn a -> fn b -> match a with M7 x -> (match b with M7 y -> m7 (x * y));
+  zero = M7 0;
+}
+
+// `sum : Num 'a => 'a list -> 'a` — the constraint is inferred, no annotation
+// needed. `zero` (a return-position-polymorphic value) resolves through the
+// same dictionary, which plain runtime dispatch could never do.
+let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);
+
+let si = sum [1, 2, 3, 4, 5] in
+let sm = sum [M7 3, M7 5, M7 6, M7 4] in
+let _ = print ("int  sum          = " ++ show si) in            // 15
+let _ = print ("mod7 sum (mod 7)  = " ++ show (un7 sm)) in      // (3+5+6+4)=18 -> 4
+// float works too; show-of-float is unsupported on the C backend, so scale to
+// an int before printing to stay portable across every backend.
+let sf = sum [1.5, 2.5, 3.0] in
+print ("float sum * 10    = " ++ show (int_of_float (sf * 10.0)))  // 70

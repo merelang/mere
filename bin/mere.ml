@@ -55,6 +55,8 @@ let run_action action label source =
     report_and_exit ~source ~filename:label loc "eval error" msg
   | Mere.Typer.Type_error (loc, msg) ->
     report_and_exit ~source ~filename:label loc "type error" msg
+  | Mere.Trait_elab.Trait_error (loc, msg) ->
+    report_and_exit ~source ~filename:label loc "trait error" msg
   | Mere.Codegen_c.Codegen_error (loc, msg) ->
     report_and_exit ~source ~filename:label loc "codegen error" msg
   | Mere.Codegen_llvm.Codegen_error (loc, msg) ->
@@ -76,7 +78,10 @@ let search_paths : string list ref = ref []
 let infer_program ?base_dir source =
   let open Mere in
   Typer.reset_send_constraints ();
-  let prog = Pipeline.parse_program ?base_dir ~search_paths:!search_paths source in
+  let prog =
+    Trait_elab.elaborate
+      (Pipeline.parse_program ?base_dir ~search_paths:!search_paths source)
+  in
   let type_env = ref Typer.initial_env in
   List.iter (fun decl ->
     match decl with
@@ -127,6 +132,7 @@ let infer_program ?base_dir source =
       Typer.alias_ctor alias target
     | Ast.Top_record_alias (alias, target) ->
       Typer.alias_record alias target
+    | Ast.Top_trait _ | Ast.Top_impl _ -> ()
   ) prog.decls;
   let desugared = Ast.desugar_program prog in
   let main_ty = Typer.infer !type_env desugared in

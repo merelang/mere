@@ -246,9 +246,16 @@ let rec unify loc t1 t2 =
 type scheme = {
   quantified : int list;
   body : Ast.ty;
+  constraints : (string * int) list;
+    (* Trait constraints on this scheme: each `(trait_name, var_id)` says
+       "the quantified variable `var_id` must be an instance of `trait_name`".
+       Populated by generalize when the binding's body used trait methods at
+       a to-be-quantified variable (see trait_obligations below). Empty for
+       every non-trait binding, so existing behaviour is untouched. The
+       trait_elab pass reads these to thread dictionaries. *)
 }
 
-let mono t = { quantified = []; body = t }
+let mono t = { quantified = []; body = t; constraints = [] }
 
 let rec collect_free_vars t acc =
   match Ast.walk t with
@@ -286,13 +293,43 @@ let reset_send_constraints () = pending_send := []
 let pending_send_ids () =
   List.fold_left (fun acc (ty, _) -> collect_free_vars ty acc) [] !pending_send
 
+(* A trait obligation recorded during inference. The `Ast.expr` is the exact
+   Var node (matched later by physical identity) that must be rewritten by the
+   Trait_elab pass. Declared here so `generalize` can turn obligations at a
+   to-be-quantified variable into constraints on the resulting scheme. *)
+type trait_obligation =
+  | Ob_method of Ast.expr * string * string * Ast.ty
+    (* Var node, trait, method name, dispatch type variable *)
+  | Ob_constrained of Ast.expr * (string * Ast.ty) list
+    (* Var node (a constrained binding), [(trait, dispatch type variable)] *)
+
+let trait_obligations : trait_obligation list ref = ref []
+
+(* Collect the trait constraints implied by the obligations recorded so far
+   whose dispatch variable is among `qs` (the variables being quantified).
+   Empty whenever no traits are in play, so non-trait code is unaffected. *)
+let constraints_for_qs qs =
+  let acc =
+    List.concat_map (fun ob ->
+      let pairs = match ob with
+        | Ob_method (_, trait, _, dispatch) -> [(trait, dispatch)]
+        | Ob_constrained (_, cs) -> cs
+      in
+      List.filter_map (fun (trait, dispatch) ->
+        match Ast.walk dispatch with
+        | Ast.TyVar v when List.mem v.id qs -> Some (trait, v.id)
+        | _ -> None) pairs
+    ) !trait_obligations
+  in
+  List.sort_uniq compare acc
+
 let generalize env t =
   let t_free = collect_free_vars t [] in
   let env_free = env_free_vars env in
   let send_ids = pending_send_ids () in
   let qs = List.filter (fun id ->
     not (List.mem id env_free) && not (List.mem id send_ids)) t_free in
-  { quantified = qs; body = t }
+  { constraints = constraints_for_qs qs; quantified = qs; body = t }
 
 (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
    `let x = e in ...` should only generalize x's type if e is syntactically
@@ -333,7 +370,10 @@ let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
   | Ast.TyRef (_, _, inner) -> ty_mentions_mutable_container inner
   | _ -> false
 
-let instantiate sch =
+(* Instantiate a scheme, also returning the (quantified-id -> fresh var)
+   mapping so callers (trait-constraint elaboration) can find the fresh
+   variable a constrained type parameter resolved to. *)
+let instantiate_with_map sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
     match Ast.walk t with
@@ -346,9 +386,60 @@ let instantiate sch =
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
     | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst inner)
   in
-  subst sch.body
+  subst sch.body, mapping
+
+let instantiate sch = fst (instantiate_with_map sch)
 
 type env = (string * scheme) list
+
+(* ---- Trait support (ad-hoc polymorphism via dictionary elaboration) ----
+
+   A trait declares a set of methods parameterised over a single type
+   variable; an impl gives concrete method definitions for one instance type.
+   The typer's only job here is (1) to type-check trait-method uses and
+   constrained generic functions, and (2) to record, at every use site, which
+   type the trait's parameter resolved to. The Trait_elab pass reads these
+   records after inference and rewrites the program into plain Mere
+   (dictionary records threaded as extra parameters) — so no backend needs
+   trait-specific support and, crucially, a program with no trait/impl decls
+   is left completely untouched. *)
+
+(* trait name -> (type-parameter name, methods as (name, ty)). Method types
+   mention the parameter as `TyParam param`. *)
+let traits : (string, string * (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 8
+(* method name -> (owning trait name, method type). *)
+let trait_methods : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 16
+(* registered instance heads: "trait@typekey" -> unit (existence check). *)
+let trait_impls : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let reset_traits () =
+  Hashtbl.reset traits;
+  Hashtbl.reset trait_methods;
+  Hashtbl.reset trait_impls;
+  trait_obligations := []
+
+let register_trait name param methods =
+  Hashtbl.replace traits name (param, methods);
+  List.iter (fun (m, t) -> Hashtbl.replace trait_methods m (name, t)) methods
+
+(* Stable key naming the per-type dictionary binding. MVP: only 0-arity
+   instance heads (int / float / bool / str / unit / a nullary user type). *)
+let trait_type_key (t : Ast.ty) : string option =
+  match Ast.walk t with
+  | Ast.TyInt -> Some "int"
+  | Ast.TyFloat -> Some "float"
+  | Ast.TyBool -> Some "bool"
+  | Ast.TyStr -> Some "str"
+  | Ast.TyUnit -> Some "unit"
+  | Ast.TyCon (name, []) -> Some name
+  | _ -> None
+
+let register_impl trait target =
+  match trait_type_key target with
+  | Some k -> Hashtbl.replace trait_impls (trait ^ "@" ^ k) ()
+  | None -> ()
+
+let has_traits () = Hashtbl.length traits > 0
 
 (* Check whether a type mentions region `name` anywhere in its structure.
    Used by Region_block's escape check. *)
@@ -709,7 +800,7 @@ let fail_scheme =
     | Ast.TyVar v -> v.id
     | _ -> assert false
   in
-  { quantified = [id];
+  { constraints = []; quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, _fail_alpha_init) }
 
 (* `of_json : str -> 'a` — parse a JSON string into a typed value. The
@@ -722,7 +813,7 @@ let of_json_scheme =
     | Ast.TyVar v -> v.id
     | _ -> assert false
   in
-  { quantified = [id];
+  { constraints = []; quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, _of_json_alpha_init) }
 
 (* `of_json_opt : str -> 'a option` — the non-crashing sibling of of_json.
@@ -734,7 +825,7 @@ let of_json_opt_scheme =
     | Ast.TyVar v -> v.id
     | _ -> assert false
   in
-  { quantified = [id];
+  { constraints = []; quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [_of_json_opt_alpha_init])) }
 
 (* `show : 'a -> str` — convert any value to a string. *)
@@ -744,7 +835,7 @@ let show_scheme =
     | Ast.TyVar v -> v.id
     | _ -> assert false
   in
-  { quantified = [id];
+  { constraints = []; quantified = [id];
     body = Ast.TyArrow (_show_alpha_init, Ast.TyStr) }
 
 (* `len : 'a -> int` (Phase 12.6) — ad-hoc polymorphic builtin that
@@ -759,7 +850,7 @@ let len_scheme =
     | Ast.TyVar v -> v.id
     | _ -> assert false
   in
-  { quantified = [id];
+  { constraints = []; quantified = [id];
     body = Ast.TyArrow (_len_alpha, Ast.TyInt) }
 
 (* `fst : ('a * 'b) -> 'a` and `snd : ('a * 'b) -> 'b` — 2-quantified schemes. *)
@@ -768,7 +859,7 @@ let _fst_beta = fresh_var ()
 let fst_scheme =
   let aid = match _fst_alpha with Ast.TyVar v -> v.id | _ -> assert false in
   let bid = match _fst_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; bid];
+  { constraints = []; quantified = [aid; bid];
     body = Ast.TyArrow (Ast.TyTuple [_fst_alpha; _fst_beta], _fst_alpha) }
 
 let _snd_alpha = fresh_var ()
@@ -776,14 +867,14 @@ let _snd_beta = fresh_var ()
 let snd_scheme =
   let aid = match _snd_alpha with Ast.TyVar v -> v.id | _ -> assert false in
   let bid = match _snd_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; bid];
+  { constraints = []; quantified = [aid; bid];
     body = Ast.TyArrow (Ast.TyTuple [_snd_alpha; _snd_beta], _snd_beta) }
 
 (* `id : 'a -> 'a` — identity function. *)
 let _id_alpha = fresh_var ()
 let id_scheme =
   let aid = match _id_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (_id_alpha, _id_alpha) }
 
 (* `swap : ('a * 'b) -> ('b * 'a)` — 2-tuple swap. *)
@@ -792,7 +883,7 @@ let _swap_beta = fresh_var ()
 let swap_scheme =
   let aid = match _swap_alpha with Ast.TyVar v -> v.id | _ -> assert false in
   let bid = match _swap_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; bid];
+  { constraints = []; quantified = [aid; bid];
     body = Ast.TyArrow (Ast.TyTuple [_swap_alpha; _swap_beta],
                         Ast.TyTuple [_swap_beta; _swap_alpha]) }
 
@@ -802,7 +893,7 @@ let _pair_beta = fresh_var ()
 let pair_scheme =
   let aid = match _pair_alpha with Ast.TyVar v -> v.id | _ -> assert false in
   let bid = match _pair_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; bid];
+  { constraints = []; quantified = [aid; bid];
     body = Ast.TyArrow (_pair_alpha,
                         Ast.TyArrow (_pair_beta,
                                      Ast.TyTuple [_pair_alpha; _pair_beta])) }
@@ -813,7 +904,7 @@ let _const_beta = fresh_var ()
 let const_scheme =
   let aid = match _const_alpha with Ast.TyVar v -> v.id | _ -> assert false in
   let bid = match _const_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; bid];
+  { constraints = []; quantified = [aid; bid];
     body = Ast.TyArrow (_const_alpha,
                         Ast.TyArrow (_const_beta, _const_alpha)) }
 
@@ -830,14 +921,14 @@ let flip_scheme =
     Ast.TyArrow (_flip_alpha, Ast.TyArrow (_flip_beta, _flip_gamma)) in
   let arrow_out =
     Ast.TyArrow (_flip_beta, Ast.TyArrow (_flip_alpha, _flip_gamma)) in
-  { quantified = [aid; bid; cid];
+  { constraints = []; quantified = [aid; bid; cid];
     body = Ast.TyArrow (arrow_in, arrow_out) }
 
 (* `try_or : (unit -> 'a) -> 'a -> 'a` — catch Eval_error, return default. *)
 let _try_alpha = fresh_var ()
 let try_or_scheme =
   let aid = match _try_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (
       Ast.TyArrow (Ast.TyUnit, _try_alpha),
       Ast.TyArrow (_try_alpha, _try_alpha)) }
@@ -846,7 +937,7 @@ let try_or_scheme =
 let _exit_alpha = fresh_var ()
 let exit_scheme =
   let aid = match _exit_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyInt, _exit_alpha) }
 
 (* --- Vec builtins (Q-010 narrowed -> implementation, Phase 12.1..12.3) ---
@@ -867,7 +958,7 @@ let _vec_new_region = fresh_var ()
 let vec_new_scheme =
   let aid = match _vec_new_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_new_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (Ast.TyUnit,
       Ast.TyCon ("Vec", [_vec_new_region; _vec_new_elem])) }
 
@@ -876,7 +967,7 @@ let _vec_push_region = fresh_var ()
 let vec_push_scheme =
   let aid = match _vec_push_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_push_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_push_region; _vec_push_elem]),
       Ast.TyArrow (_vec_push_elem, Ast.TyUnit)) }
@@ -886,7 +977,7 @@ let _vec_get_region = fresh_var ()
 let vec_get_scheme =
   let aid = match _vec_get_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_get_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_get_region; _vec_get_elem]),
       Ast.TyArrow (Ast.TyInt, _vec_get_elem)) }
@@ -896,7 +987,7 @@ let _vec_len_region = fresh_var ()
 let vec_len_scheme =
   let aid = match _vec_len_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_len_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (Ast.TyCon ("Vec", [_vec_len_region; _vec_len_elem]),
                         Ast.TyInt) }
 
@@ -924,7 +1015,7 @@ let _vec_iter_region = fresh_var ()
 let vec_iter_scheme =
   let aid = match _vec_iter_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_iter_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_iter_region; _vec_iter_elem]),
       Ast.TyArrow (
@@ -938,7 +1029,7 @@ let vec_map_scheme =
   let tid = match _vec_map_t with Ast.TyVar v -> v.id | _ -> assert false in
   let uid = match _vec_map_u with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_map_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [tid; uid; rid];
+  { constraints = []; quantified = [tid; uid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_map_region; _vec_map_t]),
       Ast.TyArrow (
@@ -952,7 +1043,7 @@ let vec_fold_scheme =
   let tid = match _vec_fold_t with Ast.TyVar v -> v.id | _ -> assert false in
   let uid = match _vec_fold_u with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_fold_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [tid; uid; rid];
+  { constraints = []; quantified = [tid; uid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_fold_region; _vec_fold_t]),
       Ast.TyArrow (
@@ -967,7 +1058,7 @@ let _vec_set_region = fresh_var ()
 let vec_set_scheme =
   let aid = match _vec_set_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_set_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_set_region; _vec_set_elem]),
       Ast.TyArrow (Ast.TyInt,
@@ -979,7 +1070,7 @@ let _vec_reverse_region = fresh_var ()
 let vec_reverse_scheme =
   let aid = match _vec_reverse_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_reverse_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_reverse_region; _vec_reverse_elem]),
       Ast.TyUnit) }
@@ -989,7 +1080,7 @@ let _vec_concat_region = fresh_var ()
 let vec_concat_scheme =
   let aid = match _vec_concat_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_concat_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_concat_region; _vec_concat_elem]),
       Ast.TyArrow (
@@ -1002,7 +1093,7 @@ let _vec_sort_region = fresh_var ()
 let vec_sort_scheme =
   let aid = match _vec_sort_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_sort_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_sort_region; _vec_sort_elem]),
       Ast.TyArrow (
@@ -1019,7 +1110,7 @@ let _vec_filter_region = fresh_var ()
 let vec_filter_scheme =
   let aid = match _vec_filter_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_filter_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_filter_region; _vec_filter_elem]),
       Ast.TyArrow (
@@ -1031,7 +1122,7 @@ let _vec_to_list_region = fresh_var ()
 let vec_to_list_scheme =
   let aid = match _vec_to_list_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_to_list_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_to_list_region; _vec_to_list_elem]),
       Ast.TyCon ("list", [_vec_to_list_elem])) }
@@ -1041,7 +1132,7 @@ let _vec_to_owned_region = fresh_var ()
 let vec_to_owned_scheme =
   let aid = match _vec_to_owned_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _vec_to_owned_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("Vec", [_vec_to_owned_region; _vec_to_owned_elem]),
       Ast.TyCon ("OwnedVec", [_vec_to_owned_elem])) }
@@ -1055,7 +1146,7 @@ let _ovec_to_vec_region = fresh_var ()
 let owned_vec_to_vec_scheme =
   let aid = match _ovec_to_vec_elem with Ast.TyVar v -> v.id | _ -> assert false in
   let rid = match _ovec_to_vec_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; rid];
+  { constraints = []; quantified = [aid; rid];
     body = Ast.TyArrow (
       Ast.TyCon ("OwnedVec", [_ovec_to_vec_elem]),
       Ast.TyCon ("Vec", [_ovec_to_vec_region; _ovec_to_vec_elem])) }
@@ -1074,7 +1165,7 @@ let owned_vec_to_vec_scheme =
 let _ovec_new_alpha = fresh_var ()
 let owned_vec_new_scheme =
   let aid = match _ovec_new_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("OwnedVec", [_ovec_new_alpha])) }
 
 (* v0.1.43 (bytes story, CRC-32 probe): read a file as raw bytes into an
@@ -1084,7 +1175,7 @@ let owned_vec_new_scheme =
 let _rfb_region = fresh_var ()
 let read_file_bytes_scheme =
   let rid = match _rfb_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (Ast.TyStr,
              Ast.TyCon ("Vec", [_rfb_region; Ast.TyInt])) }
 
@@ -1097,7 +1188,7 @@ let read_file_bytes_scheme =
 let _fpr_region = fresh_var ()
 let file_pread_scheme =
   let rid = match _fpr_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (Ast.TyCon ("File", []),
              Ast.TyArrow (Ast.TyInt,
                Ast.TyArrow (Ast.TyInt,
@@ -1108,7 +1199,7 @@ let file_pread_scheme =
 let _wfb_region = fresh_var ()
 let write_file_bytes_scheme =
   let rid = match _wfb_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (Ast.TyStr,
              Ast.TyArrow (Ast.TyCon ("Vec", [_wfb_region; Ast.TyInt]),
                Ast.TyUnit)) }
@@ -1116,7 +1207,7 @@ let write_file_bytes_scheme =
 let _ovec_push_alpha = fresh_var ()
 let owned_vec_push_scheme =
   let aid = match _ovec_push_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (
       Ast.TyCon ("OwnedVec", [_ovec_push_alpha]),
       Ast.TyArrow (_ovec_push_alpha, Ast.TyUnit)) }
@@ -1124,7 +1215,7 @@ let owned_vec_push_scheme =
 let _ovec_get_alpha = fresh_var ()
 let owned_vec_get_scheme =
   let aid = match _ovec_get_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (
       Ast.TyCon ("OwnedVec", [_ovec_get_alpha]),
       Ast.TyArrow (Ast.TyInt, _ovec_get_alpha)) }
@@ -1132,7 +1223,7 @@ let owned_vec_get_scheme =
 let _ovec_len_alpha = fresh_var ()
 let owned_vec_len_scheme =
   let aid = match _ovec_len_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("OwnedVec", [_ovec_len_alpha]), Ast.TyInt) }
 
 (* Pre-register OwnedVec[T] (arity 1) and register it as a drop type.
@@ -1154,14 +1245,14 @@ let () =
 let _strbuf_new_region = fresh_var ()
 let strbuf_new_scheme =
   let rid = match _strbuf_new_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (Ast.TyUnit,
       Ast.TyCon ("StrBuf", [_strbuf_new_region])) }
 
 let _strbuf_push_region = fresh_var ()
 let strbuf_push_scheme =
   let rid = match _strbuf_push_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (
       Ast.TyCon ("StrBuf", [_strbuf_push_region]),
       Ast.TyArrow (Ast.TyStr, Ast.TyUnit)) }
@@ -1169,14 +1260,14 @@ let strbuf_push_scheme =
 let _strbuf_to_str_region = fresh_var ()
 let strbuf_to_str_scheme =
   let rid = match _strbuf_to_str_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (
       Ast.TyCon ("StrBuf", [_strbuf_to_str_region]), Ast.TyStr) }
 
 let _strbuf_len_region = fresh_var ()
 let strbuf_len_scheme =
   let rid = match _strbuf_len_region with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid];
+  { constraints = []; quantified = [rid];
     body = Ast.TyArrow (
       Ast.TyCon ("StrBuf", [_strbuf_len_region]), Ast.TyInt) }
 
@@ -1194,7 +1285,7 @@ let map_new_scheme =
   let rid = match _map_new_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_new_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_new_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (Ast.TyUnit,
       Ast.TyCon ("Map", [_map_new_region; _map_new_k; _map_new_v])) }
 
@@ -1222,27 +1313,27 @@ let detach_scheme =
 let _chan_new_elem = fresh_var ()
 let channel_new_scheme =
   let aid = match _chan_new_elem with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Channel", [_chan_new_elem])) }
 
 let _chan_send_elem = fresh_var ()
 let channel_send_scheme =
   let aid = match _chan_send_elem with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_send_elem]),
              Ast.TyArrow (_chan_send_elem, Ast.TyUnit)) }
 
 let _chan_recv_elem = fresh_var ()
 let channel_recv_scheme =
   let aid = match _chan_recv_elem with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_elem]), _chan_recv_elem) }
 
 (* v0.1.47 (structured concurrency): channel_close : Channel[a] -> unit *)
 let _chan_close_elem = fresh_var ()
 let channel_close_scheme =
   let aid = match _chan_close_elem with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_close_elem]), Ast.TyUnit) }
 
 (* channel_recv_opt : Channel[a] -> option[a] — None once closed & drained.
@@ -1251,7 +1342,7 @@ let channel_close_scheme =
 let _chan_recv_opt_elem = fresh_var ()
 let channel_recv_opt_scheme =
   let aid = match _chan_recv_opt_elem with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_opt_elem]),
              Ast.TyCon ("option", [_chan_recv_opt_elem])) }
 
@@ -1260,7 +1351,7 @@ let channel_recv_opt_scheme =
 let _chan_recv_to_elem = fresh_var ()
 let channel_recv_timeout_scheme =
   let aid = match _chan_recv_to_elem with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid];
+  { constraints = []; quantified = [aid];
     body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_recv_to_elem]),
              Ast.TyArrow (Ast.TyInt,
                Ast.TyCon ("option", [_chan_recv_to_elem]))) }
@@ -1274,7 +1365,7 @@ let _pmap_b = fresh_var ()
 let par_map_scheme =
   let aid = match _pmap_a with Ast.TyVar v -> v.id | _ -> assert false in
   let bid = match _pmap_b with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [aid; bid];
+  { constraints = []; quantified = [aid; bid];
     body = Ast.TyArrow (
       Ast.TyArrow (_pmap_a, _pmap_b),
       Ast.TyArrow (Ast.TyCon ("list", [_pmap_a]),
@@ -1287,7 +1378,7 @@ let map_set_scheme =
   let rid = match _map_set_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_set_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_set_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (
       Ast.TyCon ("Map", [_map_set_region; _map_set_k; _map_set_v]),
       Ast.TyArrow (_map_set_k,
@@ -1300,7 +1391,7 @@ let map_get_scheme =
   let rid = match _map_get_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_get_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_get_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (
       Ast.TyCon ("Map", [_map_get_region; _map_get_k; _map_get_v]),
       Ast.TyArrow (_map_get_k, _map_get_v)) }
@@ -1312,7 +1403,7 @@ let map_has_scheme =
   let rid = match _map_has_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_has_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_has_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (
       Ast.TyCon ("Map", [_map_has_region; _map_has_k; _map_has_v]),
       Ast.TyArrow (_map_has_k, Ast.TyBool)) }
@@ -1324,7 +1415,7 @@ let map_len_scheme =
   let rid = match _map_len_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_len_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_len_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (
       Ast.TyCon ("Map", [_map_len_region; _map_len_k; _map_len_v]),
       Ast.TyInt) }
@@ -1339,7 +1430,7 @@ let map_delete_scheme =
   let rid = match _map_delete_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_delete_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_delete_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (
       Ast.TyCon ("Map", [_map_delete_region; _map_delete_k; _map_delete_v]),
       Ast.TyArrow (_map_delete_k, Ast.TyUnit)) }
@@ -1352,7 +1443,7 @@ let map_iter_scheme =
   let rid = match _map_iter_region with Ast.TyVar v -> v.id | _ -> assert false in
   let kid = match _map_iter_k with Ast.TyVar v -> v.id | _ -> assert false in
   let vid = match _map_iter_v with Ast.TyVar v -> v.id | _ -> assert false in
-  { quantified = [rid; kid; vid];
+  { constraints = []; quantified = [rid; kid; vid];
     body = Ast.TyArrow (
       Ast.TyCon ("Map", [_map_iter_region; _map_iter_k; _map_iter_v]),
       Ast.TyArrow (
@@ -1618,10 +1709,39 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Str_lit _ -> Ast.TyStr
   | Ast.Unit_lit -> Ast.TyUnit
   | Ast.Var name ->
-    (try instantiate (List.assoc name env)
-     with Not_found ->
-       raise_with_suggestion e.loc "unbound variable" name
-         (List.map fst env))
+    (match List.assoc_opt name env with
+     | Some sch ->
+       let ity, mapping = instantiate_with_map sch in
+       (if sch.constraints <> [] then
+          let cs =
+            List.filter_map (fun (tr, vid) ->
+              match List.assoc_opt vid mapping with
+              | Some tv -> Some (tr, tv)
+              | None -> None) sch.constraints
+          in
+          if cs <> [] then
+            trait_obligations := Ob_constrained (e, cs) :: !trait_obligations);
+       ity
+     | None ->
+       (match Hashtbl.find_opt trait_methods name with
+        | Some (trait, mty) ->
+          (* Trait method: freshen its parameter to a dispatch variable and
+             record the obligation so Trait_elab can rewrite this Var to the
+             matching dictionary field access. *)
+          let param = (match Hashtbl.find_opt traits trait with
+            | Some (p, _) -> p | None -> "a") in
+          let inst, fmap = freshen_params mty in
+          let dispatch =
+            match Hashtbl.find_opt fmap param with
+            | Some tv -> tv
+            | None -> fresh_var ()
+          in
+          trait_obligations :=
+            Ob_method (e, trait, name, dispatch) :: !trait_obligations;
+          inst
+        | None ->
+          raise_with_suggestion e.loc "unbound variable" name
+            (List.map fst env)))
   | Ast.Neg a ->
     (* v0.1.44 (Mandelbrot probe): unary minus follows Bin's numeric
        overload — binary `1.0 - x` was float-capable for a while, but
