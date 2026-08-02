@@ -295,14 +295,41 @@ let elaborate (prog : program) : program =
         Top_let (p, wrap_dict_params name (rewrite value))
       | Top_let (p, value) -> Top_let (p, rewrite value)
       | Top_let_rec bindings ->
-        List.iter (fun (n, _) ->
-          if Hashtbl.mem binding_params n then
-            raise (Trait_error (Loc.dummy,
-              Printf.sprintf
-                "recursive constrained function `%s` is not yet supported \
-                 (define it non-recursively, e.g. via list_fold)" n)))
-          bindings;
-        Top_let_rec (List.map (fun (n, v) -> (n, rewrite v)) bindings)
+        let constrained =
+          List.filter (fun (n, _) -> Hashtbl.mem binding_params n) bindings in
+        (match bindings, constrained with
+         | _, [] ->
+           (* No constrained binding in the group — nothing trait-specific. *)
+           Top_let_rec (List.map (fun (n, v) -> (n, rewrite v)) bindings)
+         | [(n, v)], [_] ->
+           (* A single self-recursive constrained function. Its recursive
+              self-calls must pass the same dictionary the function received:
+              intra-let-rec references are typed monomorphically (before
+              generalization), so they carry no constrained-use obligation and
+              must be threaded here. Rewrite `n` (self) to apply the dict
+              parameter(s), alongside the ordinary obligation replacements
+              (which resolve the body's trait-method uses to `dict.method`),
+              then prepend the dict parameter(s). *)
+           let self_params = Hashtbl.find binding_params n in
+           let subst_rec e =
+             match subst e with
+             | Some r -> Some r
+             | None ->
+               (match e.node with
+                | Var m when m = n ->
+                  Some (List.fold_left (fun acc (p, _) ->
+                    mk e.loc (App (acc, mk e.loc (Var p)))) e self_params)
+                | _ -> None)
+           in
+           let v' = map_expr subst_rec v in
+           Top_let_rec [(n, wrap_dict_params n v')]
+         | _ ->
+           let n = fst (List.hd constrained) in
+           raise (Trait_error (Loc.dummy,
+             Printf.sprintf
+               "mutually-recursive constrained function `%s` is not yet \
+                supported (only a single self-recursive constrained function \
+                is handled)" n)))
       | other -> other
     in
     let decls = List.map rewrite_decl prog.decls in

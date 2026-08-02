@@ -1,0 +1,21 @@
+// A self-recursive constrained function: `rsum`'s recursive calls must thread
+// the same Num dictionary it received. Exercised at int and at a distinct
+// user type (Mod7) so the dictionary threading is not int-specific.
+trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }
+impl Num int { add = fn x -> fn y -> x + y; zero = 0; }
+
+type Mod7 = M7 of int;
+let m7 = fn n -> M7 (n - ((n / 7) * 7));
+impl Num Mod7 {
+  add = fn a -> fn b -> (match a with M7 x -> (match b with M7 y -> m7 (x + y)));
+  zero = M7 0;
+}
+let un7 = fn m -> match m with M7 x -> x;
+
+let rec rsum = fn xs -> match xs with
+  | Nil -> zero
+  | Cons (h, t) -> add h (rsum t);
+
+let si = rsum [1, 2, 3, 4, 5] in
+let sm = rsum [M7 3, M7 5, M7 6, M7 4] in
+print (str_of_int si ++ " " ++ str_of_int (un7 sm))
