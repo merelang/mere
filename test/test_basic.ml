@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.102" Version.v "0.1.102";
+  check "version is 0.1.103" Version.v "0.1.103";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11855,6 +11855,27 @@ let () =
          let rec f = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (g t))\n\
          and g = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (f t));\n\
          f [1, 2, 3, 4]")) "10";
+  check "trait: super-trait — impl of sub-trait uses a super method, all impls present"
+    (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool; }\n\
+         trait Ord 'a : Eq 'a { le : 'a -> 'a -> bool; ge : 'a -> 'a -> bool; }\n\
+         impl Eq int { eq = fn a -> fn b -> a == b; }\n\
+         impl Ord int { le = fn a -> fn b -> (if eq a b then true else a == b); ge = fn a -> fn b -> le b a; }\n\
+         if ge 5 5 then 1 else 0")) "1";
+  check_raises "trait: super-trait — impl of sub-trait without the super impl is rejected"
+    (fun () -> ignore (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool; }\n\
+         trait Ord 'a : Eq 'a { le : 'a -> 'a -> bool; }\n\
+         impl Ord int { le = fn a -> fn b -> a == b; }\n\
+         if le 1 1 then 1 else 0")));
+  check_raises "trait: super-trait — the super requirement is transitive"
+    (fun () -> ignore (Pipeline.process
+       ("trait A 'a { a : 'a -> bool; }\n\
+         trait B 'a : A 'a { b : 'a -> bool; }\n\
+         trait C 'a : B 'a { c : 'a -> bool; }\n\
+         impl B int { b = fn x -> true; }\n\
+         impl C int { c = fn x -> true; }\n\
+         if c 1 then 1 else 0")));
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"

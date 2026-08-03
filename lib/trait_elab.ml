@@ -149,9 +149,29 @@ let type_pass (prog : program) : (string, Typer.scheme) Hashtbl.t =
     | Top_ctor_alias (a, t) -> Typer.alias_ctor a t
     | Top_record_alias (a, t) -> Typer.alias_record a t
     | Top_signature _ | Top_type_alias _ -> ()
-    | Top_impl (_, _, methods) ->
-      (* Type-check impl bodies so obligations inside them are recorded. *)
-      List.iter (fun (_, v) -> ignore (Typer.infer !type_env v)) methods
+    | Top_impl (trait, target, methods) ->
+      (* Type-check impl bodies so obligations inside them are recorded, and
+         unify each body with its method signature at the concrete instance
+         type (`param := target`). Without this the body is inferred
+         generically, so a use of another trait's method (e.g. a super-trait
+         method) on the instance value keeps an unresolved dispatch variable
+         and later fails to resolve to a dictionary. Fixing the instance type
+         makes such uses concrete, so they resolve to that trait's concrete
+         dictionary. (Same-trait sibling uses are already inlined away before
+         this pass, so they never reach here to cause a self-referential
+         dictionary.) *)
+      let sigs = match Hashtbl.find_opt Typer.traits trait with
+        | Some (param, msigs) -> Some (param, msigs) | None -> None in
+      List.iter (fun (mname, v) ->
+        let t = Typer.infer !type_env v in
+        match sigs with
+        | Some (param, msigs) ->
+          (match List.assoc_opt mname msigs with
+           | Some mty ->
+             (try Typer.unify v.Ast.loc t (subst_param param target mty)
+              with _ -> ())
+           | None -> ())
+        | None -> ()) methods
     | Top_trait _ -> ()
   ) prog.decls;
   ignore (Typer.infer !type_env prog.main);
@@ -169,12 +189,42 @@ let elaborate (prog : program) : program =
     let trait_info :
       (string, string * (string * ty) list * (string * expr) list) Hashtbl.t =
       Hashtbl.create 8 in
+    (* trait name -> its declared super-traits (direct). *)
+    let trait_supers : (string, string list) Hashtbl.t = Hashtbl.create 8 in
     Typer.reset_traits ();
     List.iter (function
-      | Top_trait (name, param, methods, defaults) ->
+      | Top_trait (name, param, methods, defaults, supers) ->
         Hashtbl.replace trait_info name (param, methods, defaults);
+        Hashtbl.replace trait_supers name supers;
         Typer.register_trait name param methods
       | Top_impl (trait, target, _) -> Typer.register_impl trait target
+      | _ -> ()) prog.decls;
+
+    (* Well-formedness: `impl Sub T` requires an impl of every (transitive)
+       super-trait of `Sub` at `T`. A super-trait is a promise that the
+       instance also satisfies the parent interface; enforce it so a program
+       cannot claim `Ord T` without `Eq T`. (Method *access* needs no special
+       handling: Mere's inference collects a separate constraint for every
+       trait method actually used, so a generic function using both an Ord and
+       an Eq method already receives both dictionaries.) *)
+    let rec all_supers trait seen =
+      let direct = try Hashtbl.find trait_supers trait with Not_found -> [] in
+      List.fold_left (fun acc s ->
+        if List.mem s seen then acc
+        else s :: all_supers s (s :: seen) @ acc) [] direct
+    in
+    List.iter (function
+      | Top_impl (trait, target, _) ->
+        (match Typer.trait_type_key target with
+         | None -> ()  (* non-concrete head is reported elsewhere *)
+         | Some key ->
+           List.iter (fun sup ->
+             if not (Hashtbl.mem Typer.trait_impls (sup ^ "@" ^ key)) then
+               raise (Trait_error (Loc.dummy,
+                 Printf.sprintf
+                   "impl %s %s requires an `impl %s %s` (super-trait of %s)"
+                   trait key sup key trait)))
+             (all_supers trait []))
       | _ -> ()) prog.decls;
 
     (* --- Complete + inline impl bodies, before any type-checking ------------
@@ -370,7 +420,7 @@ let elaborate (prog : program) : program =
        value dependencies stay valid). *)
     let rewrite_decl decl =
       match decl with
-      | Top_trait (name, param, methods, _defaults) ->
+      | Top_trait (name, param, methods, _defaults, _supers) ->
         Top_record (dict_type_name name, [param], methods)
       | Top_impl (trait, target, impls) ->
         let key = match Typer.trait_type_key target with

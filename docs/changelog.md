@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.103 — 2026-08-03
+
+_Super-traits: `trait Ord 'a : Eq 'a { ... }`. A super-trait declares that any
+instance of the sub-trait must also be an instance of the super-trait. `impl
+Ord T` now requires `impl Eq T` (checked transitively, and for every super in a
+multiple-super list `: Eq 'a, Show 'a`); omitting it is a clear error rather
+than a confusing failure at a later use site._
+
+_Method access needs no special dictionary machinery: Mere's inference records
+a separate constraint for every trait method actually used, so a generic
+function that uses both an Ord method and an Eq method on one value already
+receives both dictionaries (there are no signature-level constraint annotations
+that could under-specify this). This is why super-traits reduce, for Mere, to
+the declaration plus the well-formedness guarantee._
+
+_As part of this, impl method bodies are now type-checked at their concrete
+instance type (`param := target`), so an impl body that calls another trait's
+method on the instance value — e.g. a super-trait method — resolves to that
+trait's concrete dictionary instead of leaving an unresolved dispatch variable.
+(Same-trait sibling calls are still inlined before type-checking, so no
+self-referential dictionary arises.) Locked by test/parity/trait_super.mere and
+three test_basic assertions; parity 37/0, unit suite green._
+
 ## v0.1.102 — 2026-08-03
 
 _Support top-level mutually-recursive constrained functions (a `let rec f =
