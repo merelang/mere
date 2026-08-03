@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.100 — 2026-08-03
+
+_Fix a dictionary mix-up when a generic function carries two trait constraints
+on the SAME type variable (e.g. `(Num 'a, Sh 'a) => 'a -> str`). The
+elaboration's variable→dict-parameter map was keyed by the type variable's id
+alone, so the second constraint's dictionary parameter clobbered the first —
+and a `Num` method use resolved to the `Sh` dictionary, failing with
+"record Sh__dict has no field: add"._
+
+_Fix: key the map by (variable id, trait). Since `resolve_dict` already knows
+which trait a method belongs to, each method use now selects the correct
+dictionary. A function constrained by multiple traits on one variable
+elaborates and runs correctly on all four backends. Locked by the parity case
+`trait_multi_constraint.mere` and a `test_basic` assertion; parity 34/0, unit
+2272/0._
+
 ## v0.1.99 — 2026-08-03
 
 _Monomorphize single-use local polymorphic functions on the C and LLVM
