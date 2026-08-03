@@ -4,6 +4,18 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.106 — 2026-08-03
+
+_Extend v0.1.105's local-fn duplication to a single self-RECURSIVE local
+`let rec f = fn ... in body` used at several concrete types. Each type gets its
+own monomorphic copy, and the recursive self-call inside each copy is redirected
+to that copy, so the C and LLVM backends compile it (LLVM previously refused).
+The transform requires that `f` is not shadowed in either its body or its
+continuation, which keeps the self-call rename unconditional and safe. Mutual
+(multi-binding) local `let rec` groups used at several types are still left
+alone — a rarer remaining case. Locked by
+test/parity/local_poly_rec_multi_type.mere; parity green, unit suite green._
+
 ## v0.1.105 — 2026-08-03
 
 _A LOCAL polymorphic function used at several distinct concrete types now
