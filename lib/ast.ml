@@ -137,14 +137,18 @@ type top_decl =
   | Top_record_alias of string * string
     (* Same as Top_ctor_alias but for records. `Top_record_alias
        ("M.Pt", "Pt")` registers `M.Pt` as alias for `Pt`. *)
-  | Top_trait of string * string * (string * ty) list * (string * expr) list
-    (* trait declaration: `trait Num a { add : a -> a -> a; zero : a; }`.
+  | Top_trait of
+      string * string * (string * ty) list * (string * expr) list * string list
+    (* trait declaration: `trait Num a { add : a -> a -> a; zero : a; }`, or
+       with super-traits `trait Ord a : Eq a { le : a -> a -> bool; }`.
        Fields: trait name, the single type-parameter name (`a`), the method
        signatures (name, type — the type mentions the param `a` as a TyParam),
-       and default method bodies (name, expr) for methods written as
-       `m : ty = expr`. An impl that omits such a method inherits the default;
-       a default body may reference sibling methods, which trait_elab inlines
-       per instance before type-checking. A user-defined interface for ad-hoc
+       the default method bodies (name, expr) for methods written as
+       `m : ty = expr`, and the super-trait names (`Eq` above). An impl that
+       omits a defaulted method inherits the default; a default body may
+       reference sibling methods, which trait_elab inlines per instance before
+       type-checking. A super-trait constrains impls: `impl Ord T` requires
+       `impl Eq T` (checked transitively). A user-defined interface for ad-hoc
        polymorphism. The trait_elab pass lowers this to a dictionary record
        type and threads dictionaries through constrained generic functions, so
        no backend (interp / C / LLVM / Wasm) needs trait-specific support. *)

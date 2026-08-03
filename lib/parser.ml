@@ -2043,8 +2043,32 @@ let rec parse_program_internal tokens =
     | (pos, T_view) :: _ ->
       raise (Parse_error (pos,
         "expected 'NAME [R] (of T)? { fields }' after 'view'"))
-    | (_, T_trait) :: (_, T_ident tname) :: (_, T_tyvar param)
-      :: (_, T_lbrace) :: body_rest ->
+    | (_, T_trait) :: (_, T_ident tname) :: (_, T_tyvar param) :: after_param
+      when (match after_param with
+            | (_, T_lbrace) :: _ | (_, T_colon) :: _ -> true | _ -> false) ->
+      (* Optional super-trait list: `trait Ord 'a : Eq 'a, Show 'a { ... }`.
+         Each super names a trait applied to the SAME parameter `'a`. *)
+      let supers, body_rest =
+        match after_param with
+        | (_, T_colon) :: srest ->
+          let rec parse_supers acc toks =
+            match toks with
+            | (_, T_ident sname) :: (_, T_tyvar sp) :: rest when sp = param ->
+              (match rest with
+               | (_, T_comma) :: rest -> parse_supers (sname :: acc) rest
+               | (_, T_lbrace) :: rest -> (List.rev (sname :: acc), rest)
+               | _ ->
+                 raise (Parse_error (pos_of rest,
+                   "expected ',' or '{' after super-trait")))
+            | (pos, _) :: _ ->
+              raise (Parse_error (pos,
+                "expected `SuperTrait '" ^ param ^ "` in super-trait list"))
+            | [] -> raise (Parse_error (pos_of toks, "unexpected end of trait header"))
+          in
+          parse_supers [] srest
+        | (_, T_lbrace) :: rest -> ([], rest)
+        | _ -> ([], after_param)
+      in
       (* `trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }` — a user-defined
          interface. Method types mention the single param `'a` as TyParam.
          Lowered to a dictionary record by Trait_elab. *)
@@ -2078,7 +2102,8 @@ let rec parse_program_internal tokens =
       in
       let methods, defaults, rest = parse_methods [] [] body_rest in
       let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
-      parse_decls (Ast.Top_trait (tname, param, methods, defaults) :: decls) rest
+      parse_decls
+        (Ast.Top_trait (tname, param, methods, defaults, supers) :: decls) rest
     | (pos, T_trait) :: _ ->
       raise (Parse_error (pos,
         "expected `trait Name 'a { method : type; ... }`"))

@@ -1,0 +1,18 @@
+// A super-trait: `Ord 'a : Eq 'a`. An `impl Ord T` requires an `impl Eq T`
+// (checked by trait_elab). A generic function may use both an Ord method (`le`)
+// and an Eq method (`eq`) on the same value — Mere's inference collects a
+// constraint per method used, so both dictionaries are threaded. The Ord impl
+// body also calls the super-trait method `eq`, which resolves to the concrete
+// Eq dictionary.
+trait Eq 'a { eq : 'a -> 'a -> bool; }
+trait Ord 'a : Eq 'a { le : 'a -> 'a -> bool; ge : 'a -> 'a -> bool; }
+impl Eq int { eq = fn a -> fn b -> a == b; }
+impl Ord int {
+  le = fn a -> fn b -> (if eq a b then true else a - b - (((a - b) + 9999) / 9999) * 9999 + 9999 < 9999);
+  ge = fn a -> fn b -> le b a;
+}
+
+let lt = fn x -> fn y -> (if le x y then (if eq x y then false else true) else false);
+let _ = print (if lt 3 4 then "lt34" else "!lt34") in
+let _ = print (if lt 4 4 then "lt44" else "!lt44") in
+print (if ge 5 5 then "ge55" else "!ge55")

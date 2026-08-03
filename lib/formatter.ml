@@ -522,7 +522,15 @@ let fmt_top_extern name t =
 let fmt_top_extern_type type_name =
   "extern type " ^ type_name ^ ";"
 
-let fmt_top_trait name param methods defaults =
+let fmt_top_trait name param methods defaults supers =
+  let super_s =
+    match supers with
+    | [] -> ""
+    | _ ->
+      " : "
+      ^ String.concat ", "
+          (List.map (fun s -> s ^ " '" ^ param) supers)
+  in
   let m_s =
     methods
     |> List.map (fun (m, t) ->
@@ -533,7 +541,7 @@ let fmt_top_trait name param methods defaults =
       | None -> indent 1 ^ m ^ " : " ^ fmt_ty t ^ ";")
     |> String.concat "\n"
   in
-  "trait " ^ name ^ " '" ^ param ^ " {\n" ^ m_s ^ "\n}"
+  "trait " ^ name ^ " '" ^ param ^ super_s ^ " {\n" ^ m_s ^ "\n}"
 
 let fmt_top_impl name target methods =
   let m_s =
@@ -576,8 +584,8 @@ let fmt_top_decl d =
      blocks. They have no surface syntax of their own — skip them so the
      formatter doesn't emit invisible-to-the-user declarations. *)
   | Top_ctor_alias _ | Top_record_alias _ -> None
-  | Top_trait (name, param, methods, defaults) ->
-    Some (fmt_top_trait name param methods defaults)
+  | Top_trait (name, param, methods, defaults, supers) ->
+    Some (fmt_top_trait name param methods defaults supers)
   | Top_impl (name, target, methods) -> Some (fmt_top_impl name target methods)
 
 (* Phase 47: the parser splits `drop type Foo = { ... };` into two
