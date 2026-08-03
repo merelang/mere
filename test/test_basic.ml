@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.103" Version.v "0.1.103";
+  check "version is 0.1.104" Version.v "0.1.104";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11876,6 +11876,19 @@ let () =
          impl B int { b = fn x -> true; }\n\
          impl C int { c = fn x -> true; }\n\
          if c 1 then 1 else 0")));
+  check "trait: local `let rec` self-recursive constrained function"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let total = fn ys -> (let rec sum = fn xs -> (match xs with Nil -> zero | Cons (h, t) -> add h (sum t)) in sum ys) in\n\
+         total [1, 2, 3, 4]")) "10";
+  check "trait: local `let rec` mutually-recursive constrained functions"
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let total = fn ys -> (let rec f = fn xs -> (match xs with Nil -> zero | Cons (h, t) -> add h (g t))\n\
+         and g = fn xs -> (match xs with Nil -> zero | Cons (h, t) -> add h (f t)) in f ys) in\n\
+         total [1, 2, 3]")) "6";
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"

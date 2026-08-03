@@ -1059,6 +1059,34 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
        (match find_all_concrete_arrows_in_llvm n [body] with
         | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
         | _ -> ())
+     | Ast.Let_rec (bindings, body) ->
+       (* Single-use specialization for a local `let rec` group, restricted to
+          trait-constrained (dictionary-taking) members (see the C backend's
+          specialize_single_use_local_fns for the full rationale). Excludes each
+          member's own body so a recursive self-call cannot stand in for an
+          external use. *)
+       let is_dict_taking t =
+         match Ast.walk t with
+         | Ast.TyArrow (a, _) ->
+           (match Ast.walk a with
+            | Ast.TyCon (nm, _) ->
+              String.length nm >= 6
+              && String.sub nm (String.length nm - 6) 6 = "__dict"
+            | _ -> false)
+         | _ -> false
+       in
+       List.iter (fun (n, value) ->
+         match value.Ast.ty with
+         | Some vty
+           when not (ty_is_concrete (Ast.walk vty)) && is_dict_taking vty ->
+           let scan_roots =
+             body :: List.filter_map (fun (_, v) ->
+               if v == value then None else Some v) bindings
+           in
+           (match find_all_concrete_arrows_in_llvm n scan_roots with
+            | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
+            | _ -> ())
+         | _ -> ()) bindings
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
