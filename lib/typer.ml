@@ -1878,8 +1878,16 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
       let tv = infer env_rec value in
       unify value.Ast.loc alpha tv
     ) bindings alphas;
-    let env' = List.fold_left2 (fun acc (n, _) a ->
+    let env' = List.fold_left2 (fun acc (n, value) a ->
       let sch = generalize env a in
+      (* A local recursive constrained binding (e.g.
+         `let rec sum = fn xs -> ... add ... in ...`): record its value node +
+         constraints so Trait_elab threads a dictionary parameter through it and
+         through the group's recursive references — mirroring the local `Let`
+         case above and the top-level `Top_let_rec` handling. *)
+      if sch.constraints <> [] then
+        trait_local_constrained :=
+          (value, sch.constraints) :: !trait_local_constrained;
       (n, sch) :: acc
     ) env bindings alphas in
     infer env' body

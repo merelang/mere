@@ -1,0 +1,12 @@
+// A constrained recursive function defined in a LOCAL `let rec ... in` (inside
+// another function), not at top level. The dictionary is threaded through the
+// local binding AND through its recursive self-call. This local path was
+// previously unsupported ("ambiguous trait constraint"); v0.1.97 only covered
+// top-level self-recursion.
+trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }
+impl Num int { add = fn x -> fn y -> x + y; zero = 0; }
+
+let total = fn ys ->
+  let rec sum = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (sum t)) in
+  sum ys;
+print (str_of_int (total [1, 2, 3, 4]))   // 10

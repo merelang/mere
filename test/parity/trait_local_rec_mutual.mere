@@ -1,0 +1,12 @@
+// Mutually-recursive constrained functions defined in a LOCAL `let rec ... and
+// ... in` (inside another function). trait_elab threads the shared dictionary
+// through every intra-group reference of the local group, just as it does for
+// a top-level group. Previously unsupported on the local path.
+trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }
+impl Num int { add = fn x -> fn y -> x + y; zero = 0; }
+
+let total = fn ys ->
+  let rec f = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (g t))
+  and     g = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (f t)) in
+  f ys;
+print (str_of_int (total [1, 2, 3, 4]))   // 10

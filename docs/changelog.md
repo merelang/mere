@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.104 — 2026-08-03
+
+_Constrained recursive functions in a LOCAL `let rec ... in` — self- and
+mutually-recursive — now work. Previously only top-level `let rec` groups were
+handled; a local one failed with "ambiguous trait constraint". Two changes: the
+typer now records a local `let rec` binding whose scheme carries trait
+constraints into `trait_local_constrained` (it already did this for a local
+non-recursive `let`), and trait_elab threads the group's shared dictionary
+through every intra-group reference of a local `let rec` group, mirroring the
+top-level handling._
+
+_The C and LLVM single-use monomorphization pass is extended to local `let rec`
+groups so a local constrained recursive function used at a single non-int type
+(e.g. float) emits at that type instead of defaulting to int. This is
+restricted to dictionary-taking (trait-constrained) members and excludes each
+member's own body from the use scan, so it cannot mis-specialize a genuinely
+polymorphic recursive function used at several types (e.g. the prelude's
+`list_fold`)._
+
+_Works on all four backends at a single instance type (int / float / user
+variant). Locked by test/parity/trait_local_rec_self.mere,
+trait_local_rec_mutual.mere and two test_basic assertions; parity 39/0, unit
+2283/0. (A local polymorphic recursive group used at several distinct types
+remains gated by the same pre-existing multi-instantiation limit as top-level
+and trait-free polymorphic recursion.)_
+
 ## v0.1.103 — 2026-08-03
 
 _Super-traits: `trait Ord 'a : Eq 'a { ... }`. A super-trait declares that any

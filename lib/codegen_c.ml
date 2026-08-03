@@ -3630,6 +3630,42 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
         | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
         | _ -> ());
        let _ = value in ()
+     | Ast.Let_rec (bindings, body) ->
+       (* Single-use specialization for a local `let rec` group, RESTRICTED to
+          trait-constrained members (a dictionary-taking fn produced by
+          trait_elab, whose first parameter is a `<Trait>__dict` record). This
+          is exactly the local constrained recursive functions this targets;
+          restricting to them avoids mis-specializing a genuinely polymorphic
+          recursive function that is used at several types but whose float use
+          is still hidden inside a caller's own polymorphism at this point
+          (e.g. the prelude's `list_fold`, used at int in one prelude helper
+          and at float through `reduce`) — committing such a fn to a single
+          type would break its later multi-instantiation. A member's EXTERNAL
+          uses live in the continuation and in siblings' bodies (mutual
+          recursion); its own body is excluded so a self-call cannot stand in
+          for an external use. *)
+       let is_dict_taking t =
+         match Ast.walk t with
+         | Ast.TyArrow (a, _) ->
+           (match Ast.walk a with
+            | Ast.TyCon (nm, _) ->
+              String.length nm >= 6
+              && String.sub nm (String.length nm - 6) 6 = "__dict"
+            | _ -> false)
+         | _ -> false
+       in
+       List.iter (fun (n, value) ->
+         match value.Ast.ty with
+         | Some vty
+           when not (ty_is_concrete (Ast.walk vty)) && is_dict_taking vty ->
+           let scan_roots =
+             body :: List.filter_map (fun (_, v) ->
+               if v == value then None else Some v) bindings
+           in
+           (match find_all_concrete_arrows_in n scan_roots with
+            | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
+            | _ -> ())
+         | _ -> ()) bindings
      | _ -> ());
     (* Recurse into every sub-expression so nested local fns are handled. *)
     match e.Ast.node with

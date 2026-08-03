@@ -403,16 +403,56 @@ let elaborate (prog : program) : program =
       match List.find_opt (fun (n, _) -> n == e) replacements with
       | Some (_, r) -> Some r
       | None ->
-        (match List.find_opt (fun (v, _) -> v == e) local_params with
-         | Some (_, params) ->
-           (match e.node with
-            | Fun (x, ty, fbody) ->
-              (* Rewrite the body (recurse into children, not `e` itself, so
-                 no re-match loop), then prepend the dict parameter(s). *)
-              let fbody' = map_expr subst fbody in
-              Some (wrap_params params { e with node = Fun (x, ty, fbody') })
-            | _ -> None)
-         | None -> None)
+        (match e.node with
+         | Let_rec (bindings, body)
+           when List.exists (fun (_, v) ->
+                  List.exists (fun (vn, _) -> vn == v) local_params) bindings ->
+           (* A local recursive `let rec ... and ...` group with at least one
+              constrained member (self- or mutually-recursive). Intra-group
+              references are typed monomorphically — no constrained-use
+              obligation — so thread each constrained member's dictionary
+              parameter(s) through references to it, then wrap each constrained
+              binding with its own parameter(s). Mirrors the top-level
+              `Top_let_rec` handling; because the group is monomorphic its
+              members share the dispatch variable(s), so the dict parameters are
+              in scope across the whole group. *)
+           let group_params =
+             List.filter_map (fun (n, v) ->
+               match List.find_opt (fun (vn, _) -> vn == v) local_params with
+               | Some (_, params) -> Some (n, params)
+               | None -> None) bindings
+           in
+           let subst_rec ex =
+             match subst ex with
+             | Some r -> Some r
+             | None ->
+               (match ex.node with
+                | Var m when List.mem_assoc m group_params ->
+                  let params = List.assoc m group_params in
+                  Some (List.fold_left (fun acc (p, _) ->
+                    mk ex.loc (App (acc, mk ex.loc (Var p)))) ex params)
+                | _ -> None)
+           in
+           let bindings' =
+             List.map (fun (n, v) ->
+               match List.assoc_opt n group_params, v.node with
+               | Some params, Fun (x, ty, fbody) ->
+                 let fbody' = map_expr subst_rec fbody in
+                 (n, wrap_params params { v with node = Fun (x, ty, fbody') })
+               | _ -> (n, map_expr subst_rec v)) bindings
+           in
+           Some { e with node = Let_rec (bindings', map_expr subst_rec body) }
+         | _ ->
+           (match List.find_opt (fun (v, _) -> v == e) local_params with
+            | Some (_, params) ->
+              (match e.node with
+               | Fun (x, ty, fbody) ->
+                 (* Rewrite the body (recurse into children, not `e` itself, so
+                    no re-match loop), then prepend the dict parameter(s). *)
+                 let fbody' = map_expr subst fbody in
+                 Some (wrap_params params { e with node = Fun (x, ty, fbody') })
+               | _ -> None)
+            | None -> None))
     in
     let rewrite = map_expr subst in
 
