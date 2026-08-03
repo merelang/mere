@@ -1,0 +1,13 @@
+// A LOCAL polymorphic function used at several distinct concrete types. The C
+// and LLVM backends lift a local fn to a single top-level fn, so a multi-type
+// use used to default it to one type and miscompile (or be refused). v0.1.105
+// splits such a local fn into one monomorphic copy per use type before lifting,
+// so all four backends agree. (Trait-independent; the interpreter and Wasm
+// already handled it.)
+let go = fn () ->
+  let id = fn x -> x in
+  let a = id 10 in         // int
+  let b = id 2.5 in        // float
+  let c = id true in       // bool
+  a + int_of_float b + (if c then 100 else 0);
+print (str_of_int (go ()))   // 10 + 2 + 100 = 112

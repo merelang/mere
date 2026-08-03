@@ -1,0 +1,9 @@
+// A local higher-order polymorphic function (`apply`) used at two distinct
+// concrete types. Exercises v0.1.105's per-type duplication of a local poly fn
+// when the fn takes another function as an argument.
+let go = fn () ->
+  let apply = fn f -> fn x -> f x in
+  let a = apply (fn n -> n + 1) 10 in                  // int
+  let b = apply (fn (y : float) -> f_mul y 2.0) 2.5 in // float
+  a + int_of_float b;
+print (str_of_int (go ()))   // 11 + 5 = 16

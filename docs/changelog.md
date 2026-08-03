@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.105 — 2026-08-03
+
+_A LOCAL polymorphic function used at several distinct concrete types now
+compiles correctly on the C and LLVM backends (`let id = fn x -> x in
+(id 1, id 1.5)` and friends). Both backends lift a local function to a single
+top-level function, so a multi-type use previously defaulted it to one type and
+miscompiled on C, or was refused on LLVM. The interpreter and Wasm already
+handled it._
+
+_Fix: a pre-pass (`duplicate_multi_use_local_fns`) that, before lifting, splits
+such a local binding into one monomorphic copy per distinct concrete use type
+and rewrites each use to its copy — turning the unsolved "multi-instantiate a
+lifted local fn" problem into the already-solved monomorphic case for every
+backend. It is deliberately conservative: it fires only on a non-recursive
+local `let` (nested inside a function body, so top-level functions are left to
+the ordinary multi-instantiation machinery), only when the function is not
+shadowed and every use is at a concrete type. Implemented once and shared by
+both native backends._
+
+_Locked by test/parity/local_poly_multi_type.mere (int / float / bool) and
+local_poly_multi_type_hof.mere (a higher-order local fn at two types); parity
+39/0, unit suite green. Still open: the recursive local case and top-level
+mutually-recursive functions used at multiple types._
+
 ## v0.1.104 — 2026-08-03
 
 _Constrained recursive functions in a LOCAL `let rec ... in` — self- and

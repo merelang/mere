@@ -3776,6 +3776,184 @@ let clone_with_fresh_tyvars (e : Ast.expr) : Ast.expr =
   in
   clone_expr e
 
+(* v0.1.105 (① increment 2): duplicate a local `let f = fn ... in body` whose
+   fn is used at SEVERAL distinct concrete types into one monomorphic copy per
+   type, rewriting each use to its copy. This turns the unsolved
+   "multi-instantiate a lifted local fn" problem into the already-solved
+   "monomorphic lifted fn" case, so every backend that can lift a monomorphic
+   local fn now handles the multi-type case too (`let id = fn x -> x in
+   (id 1, id 1.5)` and friends). The interpreter and Wasm already handled this;
+   the C backend defaulted such a fn to a single type and miscompiled.
+
+   Conservative on purpose: fires ONLY when the fn is non-recursive, is not
+   shadowed anywhere in its body, and EVERY use of it in the body is at a
+   concrete type (so removing the original binding leaves no dangling
+   polymorphic reference). Otherwise the binding is left untouched — no worse
+   than before. Runs before specialize_single_use_local_fns and fn lifting. *)
+let dup_local_counter = ref 0
+
+let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
+  dup_local_counter := 0;
+  let mk node = { Ast.loc = Loc.dummy; ty = None; node } in
+  (* Walk `e`, collecting the distinct concrete arrow types at which `Var f` is
+     used, and flagging (a) any non-concrete use of f and (b) any binder that
+     shadows f. Stops descending into a scope that rebinds f. *)
+  let analyze f e0 =
+    let arrows : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
+    let nonconcrete = ref false in
+    let shadowed = ref false in
+    let rec go e =
+      match e.Ast.node with
+      | Ast.Var n when n = f ->
+        (match e.Ast.ty with
+         | Some t when ty_is_concrete (Ast.walk t) ->
+           let w = Ast.walk t in
+           (match w with
+            | Ast.TyArrow _ ->
+              let k = Ast.pp_ty w in
+              if not (Hashtbl.mem arrows k) then Hashtbl.add arrows k w
+            | _ -> nonconcrete := true)
+         | _ -> nonconcrete := true)
+      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+      | Ast.Unit_lit | Ast.Var _ -> ()
+      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+      | Ast.App (a, b) -> go a; go b
+      | Ast.Neg a | Ast.Annot (a, _) -> go a
+      | Ast.Let (p, v, b) ->
+        go v; if List.mem f (pattern_vars p) then shadowed := true else go b
+      | Ast.Let_rec (bs, b) ->
+        if List.exists (fun (n, _) -> n = f) bs then shadowed := true
+        else (List.iter (fun (_, v) -> go v) bs; go b)
+      | Ast.With (n, v, b) -> go v; if n = f then shadowed := true else go b
+      | Ast.If (c, t, el) -> go c; go t; go el
+      | Ast.Fun (p, _, b) -> if p = f then shadowed := true else go b
+      | Ast.Constr (_, Some a) -> go a
+      | Ast.Constr (_, None) -> ()
+      | Ast.Match (s, arms) ->
+        go s;
+        List.iter (fun (p, g, b) ->
+          if List.mem f (pattern_vars p) then shadowed := true
+          else ((match g with Some ge -> go ge | None -> ()); go b)) arms
+      | Ast.Tuple es -> List.iter go es
+      | Ast.Region_block (_, b) -> go b
+      | Ast.Ref (_, _, a) -> go a
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+      | Ast.Field_get (a, _) -> go a
+      | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+    in
+    go e0;
+    (Hashtbl.fold (fun _ v acc -> v :: acc) arrows [], !nonconcrete, !shadowed)
+  in
+  (* Replace each `Var f : Ti` with `Var (name_of Ti)`. No shadowing (checked). *)
+  let rewrite_uses f name_of e0 =
+    let rec rw e =
+      let node = match e.Ast.node with
+        | Ast.Var n when n = f ->
+          (match e.Ast.ty with
+           | Some t -> (match name_of (Ast.pp_ty (Ast.walk t)) with
+                        | Some nm -> Ast.Var nm | None -> e.Ast.node)
+           | None -> e.Ast.node)
+        | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+        | Ast.Unit_lit | Ast.Var _ -> e.Ast.node
+        | Ast.Bin (op, a, b) -> Ast.Bin (op, rw a, rw b)
+        | Ast.Cmp (op, a, b) -> Ast.Cmp (op, rw a, rw b)
+        | Ast.Logic (op, a, b) -> Ast.Logic (op, rw a, rw b)
+        | Ast.App (a, b) -> Ast.App (rw a, rw b)
+        | Ast.Neg a -> Ast.Neg (rw a)
+        | Ast.Annot (a, t) -> Ast.Annot (rw a, t)
+        | Ast.Let (p, v, b) -> Ast.Let (p, rw v, rw b)
+        | Ast.Let_rec (bs, b) ->
+          Ast.Let_rec (List.map (fun (n, v) -> (n, rw v)) bs, rw b)
+        | Ast.With (n, v, b) -> Ast.With (n, rw v, rw b)
+        | Ast.If (c, t, el) -> Ast.If (rw c, rw t, rw el)
+        | Ast.Fun (p, t, b) -> Ast.Fun (p, t, rw b)
+        | Ast.Constr (c, a) -> Ast.Constr (c, Option.map rw a)
+        | Ast.Match (s, arms) ->
+          Ast.Match (rw s,
+            List.map (fun (p, g, b) -> (p, Option.map rw g, rw b)) arms)
+        | Ast.Tuple es -> Ast.Tuple (List.map rw es)
+        | Ast.Region_block (r, b) -> Ast.Region_block (r, rw b)
+        | Ast.Ref (m, r, a) -> Ast.Ref (m, r, rw a)
+        | Ast.Record_lit (n, fs) ->
+          Ast.Record_lit (n, List.map (fun (fn, v) -> (fn, rw v)) fs)
+        | Ast.Field_get (a, fn) -> Ast.Field_get (rw a, fn)
+        | Ast.Record_update (a, fs) ->
+          Ast.Record_update (rw a, List.map (fun (fn, v) -> (fn, rw v)) fs)
+      in { e with Ast.node }
+    in rw e0
+  in
+  (* `in_fn` is true once we are inside some function body. Only fns nested in
+     a function body are LOCAL; the outermost `let` chain of the desugared
+     program is the top-level fns, which the ordinary multi-instantiation
+     machinery already handles — transforming those would preempt it and rename
+     their instances. *)
+  let rec go2 (in_fn : bool) (e : Ast.expr) : Ast.expr =
+    let go = go2 in_fn in
+    match e.Ast.node with
+    | Ast.Let ({ Ast.pnode = Ast.P_var f; _ } as pat,
+               ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value), body)
+      when in_fn && not (ty_is_concrete (Ast.walk vty)) ->
+      let arrows, nonconcrete, shadowed = analyze f body in
+      if List.length arrows >= 2 && not nonconcrete && not shadowed then begin
+        (* One monomorphic copy per distinct concrete use type. *)
+        let named =
+          List.map (fun arr ->
+            let k = !dup_local_counter in
+            incr dup_local_counter;
+            (Printf.sprintf "%s__mi%d" f k, arr)) arrows
+        in
+        let name_of key =
+          let rec find = function
+            | (nm, arr) :: rest ->
+              if Ast.pp_ty (Ast.walk arr) = key then Some nm else find rest
+            | [] -> None
+          in find named
+        in
+        let body' = go (rewrite_uses f name_of body) in
+        List.fold_right (fun (nm, arr) acc ->
+          let cl = clone_with_fresh_tyvars value in
+          (match cl.Ast.ty with
+           | Some t -> (try Typer.unify Loc.dummy t arr with _ -> ())
+           | None -> ());
+          mk (Ast.Let ({ Ast.ploc = Loc.dummy; pnode = Ast.P_var nm },
+                       go cl, acc))) named body'
+      end else
+        { e with Ast.node = Ast.Let (pat, go value, go body) }
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> e
+    | Ast.Bin (op, a, b) -> { e with Ast.node = Ast.Bin (op, go a, go b) }
+    | Ast.Cmp (op, a, b) -> { e with Ast.node = Ast.Cmp (op, go a, go b) }
+    | Ast.Logic (op, a, b) -> { e with Ast.node = Ast.Logic (op, go a, go b) }
+    | Ast.App (a, b) -> { e with Ast.node = Ast.App (go a, go b) }
+    | Ast.Neg a -> { e with Ast.node = Ast.Neg (go a) }
+    | Ast.Annot (a, t) -> { e with Ast.node = Ast.Annot (go a, t) }
+    | Ast.Let (p, v, b) -> { e with Ast.node = Ast.Let (p, go v, go b) }
+    | Ast.Let_rec (bs, b) ->
+      { e with Ast.node =
+          Ast.Let_rec (List.map (fun (n, v) -> (n, go v)) bs, go b) }
+    | Ast.With (n, v, b) -> { e with Ast.node = Ast.With (n, go v, go b) }
+    | Ast.If (c, t, el) -> { e with Ast.node = Ast.If (go c, go t, go el) }
+    | Ast.Fun (p, t, b) ->
+      (* Entering a function body: everything below is now local. *)
+      { e with Ast.node = Ast.Fun (p, t, go2 true b) }
+    | Ast.Constr (c, a) -> { e with Ast.node = Ast.Constr (c, Option.map go a) }
+    | Ast.Match (s, arms) ->
+      { e with Ast.node =
+          Ast.Match (go s,
+            List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms) }
+    | Ast.Tuple es -> { e with Ast.node = Ast.Tuple (List.map go es) }
+    | Ast.Region_block (r, b) -> { e with Ast.node = Ast.Region_block (r, go b) }
+    | Ast.Ref (m, r, a) -> { e with Ast.node = Ast.Ref (m, r, go a) }
+    | Ast.Record_lit (n, fs) ->
+      { e with Ast.node =
+          Ast.Record_lit (n, List.map (fun (fn, v) -> (fn, go v)) fs) }
+    | Ast.Field_get (a, fn) -> { e with Ast.node = Ast.Field_get (go a, fn) }
+    | Ast.Record_update (a, fs) ->
+      { e with Ast.node =
+          Ast.Record_update (go a, List.map (fun (fn, v) -> (fn, go v)) fs) }
+  in
+  go2 false root
+
 (* Build fn_decls from the typer-annotated AST. For each skeleton, prefer
    the Fun's own .ty if it's already concrete; otherwise (let-poly
    generalized it) recover a concrete arrow type by scanning the main
@@ -8039,6 +8217,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     in
     walk root
   in
+  (* v0.1.105 (① increment 2): split a local poly fn used at several concrete
+     types into one monomorphic copy per type, before lifting, so the C
+     backend's single-instantiation lifter handles each copy. *)
+  let main_expr = duplicate_multi_use_local_fns main_expr in
   resolve_vec_let_types main_expr;
   (* v0.1.99: monomorphize single-use local polymorphic fns to their concrete
      use type BEFORE skel lifting + fn-type resolution, so generic callees
