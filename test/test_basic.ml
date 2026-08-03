@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.101" Version.v "0.1.101";
+  check "version is 0.1.102" Version.v "0.1.102";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11845,6 +11845,16 @@ let () =
        ("trait Eq 'a { eq : 'a -> 'a -> bool; neq : 'a -> 'a -> bool; }\n\
          impl Eq int { eq = fn a -> fn b -> a == b; }\n\
          if eq 1 1 then 1 else 0")));
+  check "trait: mutually-recursive constrained functions thread the dictionary"
+    (* Top-level mutual recursion (a `let rec ... and ...;` group). Local
+       (`let rec ... in`) constrained recursion — self or mutual — is a
+       separate, still-open path and is not exercised here. *)
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
+         let rec f = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (g t))\n\
+         and g = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (f t));\n\
+         f [1, 2, 3, 4]")) "10";
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"
@@ -11888,13 +11898,16 @@ let () =
          | Nil -> zero\n\
          | Cons (h, t) -> add h (rcat t);\n\
          rcat [[1, 2], [3], [4, 5]]")) "[1, 2, 3, 4, 5]";
-  check_raises "trait: mutually-recursive constrained functions rejected"
-    (fun () -> Pipeline.process
+  (* Top-level mutually-recursive constrained functions are now supported
+     (the dictionary is threaded through every intra-group reference); this
+     used to be rejected outright. *)
+  check "trait: top-level mutually-recursive constrained functions run"
+    (Pipeline.process
        ("trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }\n\
          impl Num int { add = fn x -> fn y -> x + y; zero = 0; }\n\
          let rec f = fn xs -> match xs with Nil -> zero | Cons (h, t) -> add h (g t)\n\
          and g = fn xs -> match xs with Nil -> zero | Cons (h, t) -> add h (f t);\n\
-         f [1, 2, 3]"));
+         f [1, 2, 3]")) "6";
   (* A constrained generic function defined in a LOCAL `let` (not top-level):
      the dictionary threads through the local binding. *)
   check "trait: local constrained let (dictionary threaded through a local let)"
