@@ -1044,6 +1044,48 @@ let find_all_concrete_arrows_in_llvm (name : string) (exprs : Ast.expr list) : A
   List.iter go exprs;
   Hashtbl.fold (fun _ v acc -> v :: acc) seen []
 
+(* v0.1.99: LLVM port of codegen_c's specialize_single_use_local_fns. See the
+   comment there for the full rationale. Monomorphizes a let-generalized local
+   fn used at exactly one concrete type to that type, as a whole-program
+   pre-pass before resolve_fn_types + inner-fn lifting, so the lifted fn and
+   any generic callees inside its body resolve concretely instead of
+   defaulting a residual TyVar to int. *)
+let specialize_single_use_local_fns (root : Ast.expr) : unit =
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Let ({ Ast.pnode = Ast.P_var n; _ },
+                { Ast.node = Ast.Fun _; ty = Some vty; _ }, body)
+       when not (ty_is_concrete (Ast.walk vty)) ->
+       (match find_all_concrete_arrows_in_llvm n [body] with
+        | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
+        | _ -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, _, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go root
+
 (* Phase 25.5: deep-clone an expression with fresh tyvars (LLVM port of
    codegen_c's clone_with_fresh_tyvars). Used for per-instantiation
    specialization — each clone gets its own fresh tyvars so we can unify
@@ -8190,6 +8232,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     walk root
   in
   resolve_vec_let_types main_expr;
+  (* v0.1.99: monomorphize single-use local polymorphic fns to their concrete
+     use type before skel lifting + fn-type resolution (see the fn comment). *)
+  specialize_single_use_local_fns main_expr;
   (* Phase 32.3 (C1 FFI): walk prog.decls to register extern fn names. *)
   Hashtbl.reset extern_fn_decls_llvm;
   List.iter (fun decl ->

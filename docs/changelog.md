@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.99 — 2026-08-03
+
+_Monomorphize single-use local polymorphic functions on the C and LLVM
+backends. A local `let f = fn ... in ...` is let-generalized by the typer, so
+its binding keeps an unresolved scheme while each use site instantiates a fresh
+concrete copy. Both native backends lift such a local fn to one top-level fn
+and default its residual type variable to `int` — so a local fn whose sole use
+is at, say, `float` was emitted as an int-typed C function and the float call
+site mismatched at compile time. (The interpreter and Wasm already handled the
+general case.) This is the long-standing "local polymorphic fn not
+multi-instantiated" limitation that the v0.1.98 trait local-`let` support ran
+into — reproducible without traits._
+
+_Fix: a whole-program pre-pass (`specialize_single_use_local_fns`) run before
+fn-type resolution and inner-fn lifting. When a local fn is used at exactly one
+concrete type, it unifies the binding type with that use arrow; because the
+body's type variables are shared mutable union-find cells, this propagates into
+the body, so the lifted fn AND any generic callee inside it (e.g. `list_fold`)
+resolve concretely. Running before `resolve_fn_types` is essential — the
+top-level multi-instantiator only sees a generic callee's concrete use once the
+enclosing local fn's body is concrete (cf. the v0.1.28 poly-through-poly fix)._
+
+_Effect: a constrained generic function defined in a local `let` now compiles
+on all four backends at any single instance type — `int`, `float`, or a
+user-defined variant. Multiple distinct use types on one local fn are left to
+the existing defaulting (a larger multi-instantiation increment). Locked by the
+trait-free-equivalent parity cases `trait_local_let.mere` (int) and
+`trait_local_let_variant.mere` (user variant); the four-backend differential
+harness stays 33/0 and the unit suite 2271/0._
+
 ## v0.1.91 — 2026-07-31
 
 _Real TLS on the native backend: `tcp_starttls` / `tcp_starttls_verified` are

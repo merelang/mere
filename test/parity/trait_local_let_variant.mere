@@ -1,0 +1,20 @@
+// A constrained generic function defined in a *local* `let`, instantiated at a
+// user-defined variant type (not int). Locks v0.1.99: a let-generalized local
+// fn used at a single concrete non-int type is now monomorphized to that type
+// before lifting, so the lifted C/LLVM fn — and the generic `list_fold` called
+// inside it — resolve concretely instead of defaulting a residual TyVar to int.
+// Before v0.1.99 this failed to compile on the C and LLVM backends.
+type m7 = M7 of int;
+trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }
+impl Num m7 {
+  add = fn x -> fn y ->
+    (match x with M7 a -> (match y with M7 b -> M7 ((a + b) - (((a + b) / 7) * 7))));
+  zero = M7 0;
+}
+
+let unwrap = fn v -> (match v with M7 k -> k);
+let total = fn ys ->
+  let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x) in
+  sum ys;
+// (3+4+5+6) = 18, 18 mod 7 = 4
+print (str_of_int (unwrap (total [M7 3, M7 4, M7 5, M7 6])))
