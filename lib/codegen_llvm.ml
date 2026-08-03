@@ -8259,6 +8259,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     in
     walk root
   in
+  (* v0.1.105 (① increment 2): split a local poly fn used at several concrete
+     types into one monomorphic copy per type before lifting. The pass is pure
+     AST manipulation, so the C backend's implementation is reused. *)
+  let main_expr = Codegen_c.duplicate_multi_use_local_fns main_expr in
   resolve_vec_let_types main_expr;
   (* v0.1.99: monomorphize single-use local polymorphic fns to their concrete
      use type before skel lifting + fn-type resolution (see the fn comment). *)
