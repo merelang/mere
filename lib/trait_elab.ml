@@ -227,6 +227,83 @@ let elaborate (prog : program) : program =
              (all_supers trait []))
       | _ -> ()) prog.decls;
 
+    (* --- Trait objects (`dyn Trait`) -----------------------------------------
+       A heterogeneous collection of values that all implement a trait is
+       expressible in userland as a record of self-capturing closures; this
+       pass just auto-generates that encoding per trait so it isn't hand-written
+       for every instance type. For a trait whose every method has the shape
+       `'a -> R` (a single `self` argument, with `'a` not appearing in R — so no
+       `Self`-returning or multi-`self` methods like `Eq`'s `eq`), generate:
+
+         type Trait__obj = { m1 : unit -> R1; ...; mk : unit -> Rk };
+         let Trait__pack = fn x -> Trait__obj { m1 = fn () -> m1 x; ... };
+
+       `Trait__pack` is an ordinary CONSTRAINED generic function (its body uses
+       the trait methods on `x`), so the existing dictionary-passing elaboration
+       gives it a dict parameter and lowers `m1 x` to `dict.m1 x` — no special
+       handling is needed here or in any backend. A consumer packs a value with
+       `Trait__pack v : Trait__obj` and dispatches with `o.m ()`. The object
+       type is also reachable as the sugar `dyn Trait` (see the parser).
+
+       Generated BEFORE the type pass so `Trait__pack` is typed, constrained,
+       and elaborated like any other constrained binding. *)
+    let ty_mentions_param param t =
+      let rec go t =
+        match Ast.walk t with
+        | TyParam p -> p = param
+        | TyInt | TyFloat | TyBool | TyStr | TyUnit -> false
+        | TyVar _ -> false
+        | TyArrow (a, b) -> go a || go b
+        | TyTuple ts -> List.exists go ts
+        | TyCon (_, args) -> List.exists go args
+        | TyRef (_, _, inner) -> go inner
+      in go t
+    in
+    let obj_type_name trait = trait ^ "__obj" in
+    let pack_name trait = trait ^ "__pack" in
+    let trait_object_decls name param methods =
+      (* Eligible iff nonempty and every method is `param -> R` with R free of
+         `param`. Returns [] (no object type) otherwise. *)
+      let elig =
+        methods <> [] &&
+        List.for_all (fun (_, mty) ->
+          match Ast.walk mty with
+          | TyArrow (a, r) ->
+            (match Ast.walk a with
+             | TyParam p -> p = param && not (ty_mentions_param param r)
+             | _ -> false)
+          | _ -> false) methods
+      in
+      if not elig then []
+      else begin
+        let ret_of mty =
+          match Ast.walk mty with TyArrow (_, r) -> r | _ -> TyUnit in
+        let fields =
+          List.map (fun (m, mty) -> (m, TyArrow (TyUnit, ret_of mty))) methods in
+        let obj_rec = Top_record (obj_type_name name, [], fields) in
+        let x = "__dyn_self" in
+        let lit =
+          mk Loc.dummy (Record_lit (obj_type_name name,
+            List.map (fun (m, _) ->
+              (m, mk Loc.dummy (Fun ("__dyn_u", Some TyUnit,
+                mk Loc.dummy (App (mk Loc.dummy (Var m),
+                                   mk Loc.dummy (Var x))))))) methods))
+        in
+        let packer =
+          Top_let (mk_pat (P_var (pack_name name)),
+                   mk Loc.dummy (Fun (x, None, lit)))
+        in
+        [obj_rec; packer]
+      end
+    in
+    let prog =
+      { prog with decls =
+          List.concat_map (function
+            | Top_trait (name, param, methods, _, _) as d ->
+              d :: trait_object_decls name param methods
+            | d -> [d]) prog.decls }
+    in
+
     (* --- Complete + inline impl bodies, before any type-checking ------------
        Two problems share one solution:
          (1) an impl method body that references a SIBLING trait method (e.g.
@@ -367,8 +444,26 @@ let elaborate (prog : program) : program =
       List.map (fun ob ->
         match ob with
         | Typer.Ob_method (node, trait, meth, dispatch) ->
-          let dict = resolve_dict node.loc trait dispatch in
-          (node, mk node.loc (Field_get (dict, meth)))
+          (match Ast.walk dispatch with
+           | Ast.TyCon (tn, []) when tn = obj_type_name trait ->
+             (* Dispatch on a trait OBJECT (`dyn Trait`): the method use `meth o`
+                becomes `(o : Trait__obj).meth ()` — read the captured thunk from
+                the object record and force it. The annotation fixes the record
+                type at the field access (Mere can't otherwise infer it). Emitted
+                as `fn __self -> ((__self : Trait__obj).meth) ()` so it slots into
+                the same use site as a normal method value. *)
+             let self = "__dyn_disp" in
+             let obj_ty = Ast.TyCon (obj_type_name trait, []) in
+             let body =
+               mk node.loc (App (
+                 mk node.loc (Field_get (
+                   mk node.loc (Annot (mk node.loc (Var self), obj_ty)), meth)),
+                 mk node.loc Unit_lit))
+             in
+             (node, mk node.loc (Fun (self, Some obj_ty, body)))
+           | _ ->
+             let dict = resolve_dict node.loc trait dispatch in
+             (node, mk node.loc (Field_get (dict, meth))))
         | Typer.Ob_constrained (node, cs) ->
           (* Insert one dictionary argument per constraint, in order. *)
           let applied =

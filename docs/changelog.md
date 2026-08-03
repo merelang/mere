@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.108 — 2026-08-03
+
+_Trait objects: `dyn Trait`. A heterogeneous collection of values that all
+implement a trait, with dynamic dispatch — `[dyn Shape (Circ 2), dyn Shape
+(Rect 3)]` is a `(dyn Shape) list`, and a trait method called on a `dyn Shape`
+(`area o`) dispatches dynamically. A function that consumes objects annotates
+its parameter `fn (o : dyn Shape) -> ...` (a function inferred as `Shape 'a =>`
+would instead expect a concrete dictionary-carrying value)._
+
+_Implemented entirely as elaboration, with no new backend support: for an
+object-safe trait (every method takes the trait parameter as its single `self`
+argument and doesn't otherwise mention it — so `area : 'a -> int` qualifies,
+`eq : 'a -> 'a -> bool` does not), trait_elab auto-generates an object record
+`Trait__obj` of self-capturing method thunks plus a constrained packer
+`Trait__pack`. `dyn Trait e` is sugar for `Trait__pack e`; `dyn Trait` (type)
+is sugar for `Trait__obj`; and a method use on a value of object type lowers to
+reading and forcing the captured thunk. Because a `dyn Trait` is just a record
+of closures, every backend handles it unchanged. Adds the `dyn` keyword._
+
+_This is ergonomic sugar over a pattern already expressible by hand (a record
+of self-capturing closures); the sugar removes the per-instance-type
+boilerplate. Locked by test/parity/trait_object.mere, two test_basic
+assertions, and examples/trait_object.mere (circles + squares in one list on
+all four backends); parity 44/0, unit suite green._
+
 ## v0.1.107 — 2026-08-03
 
 _Traits and impls may now be declared inside a `module` body. Previously a

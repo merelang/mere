@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.107" Version.v "0.1.107";
+  check "version is 0.1.108" Version.v "0.1.108";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11897,6 +11897,22 @@ let () =
          }\n\
          impl Eq int { eq = fn a -> fn b -> a == b; }\n\
          M.same 3 3 + M.same 3 4")) "1";
+  check "trait: `dyn Trait` object — heterogeneous list + dynamic dispatch"
+    (Pipeline.process
+       ("trait Shape 'a { area : 'a -> int; }\n\
+         type circ = Circ of int;\n\
+         type rect = Rect of int;\n\
+         impl Shape circ { area = fn s -> (match s with Circ r -> r * r * 3); }\n\
+         impl Shape rect { area = fn s -> (match s with Rect w -> w * w); }\n\
+         let shapes = [dyn Shape (Circ 2), dyn Shape (Rect 3)] in\n\
+         list_fold shapes 0 (fn acc -> fn o -> acc + area o)")) "21";
+  check "trait: a `dyn Trait` parameter annotation types a trait-object consumer"
+    (Pipeline.process
+       ("trait Shape 'a { area : 'a -> int; name : 'a -> str; }\n\
+         type circ = Circ of int;\n\
+         impl Shape circ { area = fn s -> (match s with Circ r -> r * r); name = fn s -> \"c\"; }\n\
+         let describe = fn (o : dyn Shape) -> area o in\n\
+         describe (dyn Shape (Circ 5))")) "25";
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"
