@@ -1,0 +1,59 @@
+// contrib/ordset/ordset.mere — a generic sorted set over an `Ord` key type,
+// as an unbalanced binary search tree. Purely functional (persistent): every
+// `insert` returns a new tree sharing the untouched subtrees.
+//
+// The element type is abstracted by two user traits: `Eq` for equality and
+// `Ord` (a super-trait of `Eq`) for ordering. A consumer supplies `impl Eq T`
+// and `impl Ord T` for its key type T and gets a sorted set for free — the
+// same tree code runs at every instance type.
+//
+// Traits and the `'a tree` type are global (Mere keeps traits/types global
+// even when written inside a `module`); the module namespaces the functions,
+// so a consumer calls `Ordset.of_list` / `Ordset.to_list` etc. but writes
+// bare `impl Ord T`.
+//
+// Usage:
+//   import "github.com/merelang/mere/contrib/ordset/ordset.mere";
+//   impl Eq int  { eq = fn a -> fn b -> a == b; }
+//   impl Ord int { lt = fn a -> fn b -> a < b; }
+//   let s = Ordset.to_list (Ordset.of_list [5, 3, 8, 3, 1]);  // [1, 3, 5, 8]
+//
+// API (t = 'a tree):
+//   empty   : unit -> t              insert : t -> 'a -> t
+//   member  : t -> 'a -> bool        of_list: 'a list -> t
+//   to_list : t -> 'a list  (sorted, deduped)   size : t -> int
+// `empty` is a thunk, not a constant: a top-level polymorphic *value* binding
+// (`empty = Leaf : 'a tree`) can't be monomorphized on the LLVM backend (there
+// is no argument or use site to fix `'a`), so it is exposed as `empty ()`.
+module Ordset {
+  trait Eq 'a { eq : 'a -> 'a -> bool; }
+  trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool; }
+
+  type 'a tree = Leaf | Node of 'a tree * 'a * 'a tree;
+
+  let empty = fn () -> Leaf;
+
+  let rec insert = fn t -> fn x ->
+    (match t with
+     | Leaf -> Node (Leaf, x, Leaf)
+     | Node (l, v, r) ->
+       (if lt x v then Node (insert l x, v, r)
+        else (if eq x v then t else Node (l, v, insert r x))));
+
+  let rec member = fn t -> fn x ->
+    (match t with
+     | Leaf -> false
+     | Node (l, v, r) ->
+       (if eq x v then true
+        else (if lt x v then member l x else member r x)));
+
+  let of_list = fn xs -> list_fold xs Leaf (fn acc -> fn x -> insert acc x);
+
+  let rec to_list = fn t ->
+    (match t with
+     | Leaf -> Nil
+     | Node (l, v, r) -> list_append (to_list l) (Cons (v, to_list r)));
+
+  let rec size = fn t ->
+    (match t with Leaf -> 0 | Node (l, v, r) -> 1 + size l + size r);
+}

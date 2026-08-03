@@ -1,0 +1,24 @@
+// ordset_demo — a real consumer of contrib/ordset (Go-style full-path import).
+// The same generic sorted-set code runs at two different key types (int and a
+// user-defined `color` variant), each supplying its own Eq / Ord instance.
+import "github.com/merelang/mere/contrib/ordset/ordset.mere";
+
+// --- int keys ---
+impl Eq int  { eq = fn a -> fn b -> a == b; }
+impl Ord int { lt = fn a -> fn b -> a < b; }
+
+// --- user-defined key type ---
+type color = Red | Green | Blue;
+let rank = fn c -> (match c with Red -> 0 | Green -> 1 | Blue -> 2);
+impl Eq color  { eq = fn a -> fn b -> rank a == rank b; }
+impl Ord color { lt = fn a -> fn b -> rank a < rank b; }
+
+let name = fn c -> (match c with Red -> "R" | Green -> "G" | Blue -> "B");
+
+let ints = Ordset.to_list (Ordset.of_list [5, 3, 8, 3, 1, 8, 4]);
+let cols = Ordset.to_list (Ordset.of_list [Blue, Red, Green, Red, Blue]);
+
+let _ = print ("sorted ints:  " ++ list_fold ints "" (fn a -> fn x -> a ++ str_of_int x ++ " ")) in
+let _ = print ("sorted colors: " ++ list_fold cols "" (fn a -> fn c -> a ++ name c ++ " ")) in
+let _ = print ("member 4? " ++ (if Ordset.member (Ordset.of_list [5, 3, 8, 4]) 4 then "yes" else "no")) in
+print ("distinct ints: " ++ str_of_int (Ordset.size (Ordset.of_list [5, 3, 8, 3, 1, 8, 4])))

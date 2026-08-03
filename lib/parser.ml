@@ -1713,9 +1713,113 @@ let rec parse_program_internal tokens =
      The path is used to register the FULL path of nested modules
      (e.g., "M.N") in `module_names` so external qualified access
      `M.N.f` parses correctly. *)
+  (* Parse a `trait` declaration given the tokens AFTER the `trait` keyword.
+     Shared by top-level `parse_decls` and `parse_module_body` (traits, like
+     types, are global even when written inside a module). Returns
+     (Top_trait decl, rest). *)
+  let parse_trait_after_keyword toks =
+    match toks with
+    | (_, T_ident tname) :: (_, T_tyvar param) :: after_param
+      when (match after_param with
+            | (_, T_lbrace) :: _ | (_, T_colon) :: _ -> true | _ -> false) ->
+      let supers, body_rest =
+        match after_param with
+        | (_, T_colon) :: srest ->
+          let rec parse_supers acc toks =
+            match toks with
+            | (_, T_ident sname) :: (_, T_tyvar sp) :: rest when sp = param ->
+              (match rest with
+               | (_, T_comma) :: rest -> parse_supers (sname :: acc) rest
+               | (_, T_lbrace) :: rest -> (List.rev (sname :: acc), rest)
+               | _ ->
+                 raise (Parse_error (pos_of rest,
+                   "expected ',' or '{' after super-trait")))
+            | (pos, _) :: _ ->
+              raise (Parse_error (pos,
+                "expected `SuperTrait '" ^ param ^ "` in super-trait list"))
+            | [] -> raise (Parse_error (pos_of toks, "unexpected end of trait header"))
+          in
+          parse_supers [] srest
+        | (_, T_lbrace) :: rest -> ([], rest)
+        | _ -> ([], after_param)
+      in
+      let rec parse_methods acc defs toks =
+        match toks with
+        | (_, T_rbrace) :: rest -> List.rev acc, List.rev defs, rest
+        | (_, T_ident mname) :: (_, T_colon) :: rest ->
+          let t, rest = ty rest in
+          let acc = (mname, t) :: acc in
+          (match rest with
+           | (_, T_eq) :: rest ->
+             let dbody, rest = expr rest in
+             let defs = (mname, dbody) :: defs in
+             (match rest with
+              | (_, T_semi) :: rest -> parse_methods acc defs rest
+              | (_, T_rbrace) :: rest -> List.rev acc, List.rev defs, rest
+              | _ ->
+                raise (Parse_error (pos_of rest,
+                  "expected ';' or '}' in trait body")))
+           | (_, T_semi) :: rest -> parse_methods acc defs rest
+           | (_, T_rbrace) :: rest -> List.rev acc, List.rev defs, rest
+           | _ ->
+             raise (Parse_error (pos_of rest,
+               "expected ';', '=', or '}' in trait body")))
+        | _ ->
+          raise (Parse_error (pos_of toks,
+            "expected 'method : type' in trait body"))
+      in
+      let methods, defaults, rest = parse_methods [] [] body_rest in
+      let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
+      (Ast.Top_trait (tname, param, methods, defaults, supers), rest)
+    | (pos, _) :: _ ->
+      raise (Parse_error (pos,
+        "expected `trait Name 'a { method : type; ... }`"))
+    | [] -> raise (Parse_error (Loc.dummy, "unexpected end after `trait`"))
+  in
+  (* Parse an `impl` declaration given the tokens AFTER the `impl` keyword. *)
+  let parse_impl_after_keyword toks =
+    match toks with
+    | (_, T_ident tname) :: rest ->
+      let target, rest = ty rest in
+      (match rest with
+       | (_, T_lbrace) :: body_rest ->
+         let rec parse_impls acc toks =
+           match toks with
+           | (_, T_rbrace) :: rest -> List.rev acc, rest
+           | (_, T_ident mname) :: (_, T_eq) :: rest ->
+             let v, rest = expr rest in
+             let acc = (mname, v) :: acc in
+             (match rest with
+              | (_, T_semi) :: rest -> parse_impls acc rest
+              | (_, T_rbrace) :: rest -> List.rev acc, rest
+              | _ ->
+                raise (Parse_error (pos_of rest,
+                  "expected ';' or '}' in impl body")))
+           | _ ->
+             raise (Parse_error (pos_of toks,
+               "expected 'method = expr' in impl body"))
+         in
+         let impls, rest = parse_impls [] body_rest in
+         let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
+         (Ast.Top_impl (tname, target, impls), rest)
+       | (pos, _) :: _ ->
+         raise (Parse_error (pos, "expected `{` to start impl body"))
+       | [] -> raise (Parse_error (Loc.dummy, "unexpected end after impl head")))
+    | (pos, _) :: _ ->
+      raise (Parse_error (pos,
+        "expected `impl Trait Type { method = expr; ... }`"))
+    | [] -> raise (Parse_error (Loc.dummy, "unexpected end after `impl`"))
+  in
   let rec parse_module_body cur_path decls toks =
     match toks with
     | (_, T_rbrace) :: rest -> List.rev decls, rest
+    | (_, T_trait) :: rest ->
+      (* Traits are global (like types); keep the decl unprefixed. *)
+      let decl, rest = parse_trait_after_keyword rest in
+      parse_module_body cur_path (decl :: decls) rest
+    | (_, T_impl) :: rest ->
+      let decl, rest = parse_impl_after_keyword rest in
+      parse_module_body cur_path (decl :: decls) rest
     | (pos, T_module) :: (_, T_ident inner_name) :: (_, T_lbrace) :: rest ->
       let _ = pos in
       let inner_path = cur_path ^ "." ^ inner_name in
@@ -2043,102 +2147,12 @@ let rec parse_program_internal tokens =
     | (pos, T_view) :: _ ->
       raise (Parse_error (pos,
         "expected 'NAME [R] (of T)? { fields }' after 'view'"))
-    | (_, T_trait) :: (_, T_ident tname) :: (_, T_tyvar param) :: after_param
-      when (match after_param with
-            | (_, T_lbrace) :: _ | (_, T_colon) :: _ -> true | _ -> false) ->
-      (* Optional super-trait list: `trait Ord 'a : Eq 'a, Show 'a { ... }`.
-         Each super names a trait applied to the SAME parameter `'a`. *)
-      let supers, body_rest =
-        match after_param with
-        | (_, T_colon) :: srest ->
-          let rec parse_supers acc toks =
-            match toks with
-            | (_, T_ident sname) :: (_, T_tyvar sp) :: rest when sp = param ->
-              (match rest with
-               | (_, T_comma) :: rest -> parse_supers (sname :: acc) rest
-               | (_, T_lbrace) :: rest -> (List.rev (sname :: acc), rest)
-               | _ ->
-                 raise (Parse_error (pos_of rest,
-                   "expected ',' or '{' after super-trait")))
-            | (pos, _) :: _ ->
-              raise (Parse_error (pos,
-                "expected `SuperTrait '" ^ param ^ "` in super-trait list"))
-            | [] -> raise (Parse_error (pos_of toks, "unexpected end of trait header"))
-          in
-          parse_supers [] srest
-        | (_, T_lbrace) :: rest -> ([], rest)
-        | _ -> ([], after_param)
-      in
-      (* `trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }` — a user-defined
-         interface. Method types mention the single param `'a` as TyParam.
-         Lowered to a dictionary record by Trait_elab. *)
-      (* Each method is `name : type` or, with a default body,
-         `name : type = expr`. Defaults are collected separately and inlined
-         per-impl by Trait_elab. *)
-      let rec parse_methods acc defs toks =
-        match toks with
-        | (_, T_rbrace) :: rest -> List.rev acc, List.rev defs, rest
-        | (_, T_ident mname) :: (_, T_colon) :: rest ->
-          let t, rest = ty rest in
-          let acc = (mname, t) :: acc in
-          (match rest with
-           | (_, T_eq) :: rest ->
-             let dbody, rest = expr rest in
-             let defs = (mname, dbody) :: defs in
-             (match rest with
-              | (_, T_semi) :: rest -> parse_methods acc defs rest
-              | (_, T_rbrace) :: rest -> List.rev acc, List.rev defs, rest
-              | _ ->
-                raise (Parse_error (pos_of rest,
-                  "expected ';' or '}' in trait body")))
-           | (_, T_semi) :: rest -> parse_methods acc defs rest
-           | (_, T_rbrace) :: rest -> List.rev acc, List.rev defs, rest
-           | _ ->
-             raise (Parse_error (pos_of rest,
-               "expected ';', '=', or '}' in trait body")))
-        | _ ->
-          raise (Parse_error (pos_of toks,
-            "expected 'method : type' in trait body"))
-      in
-      let methods, defaults, rest = parse_methods [] [] body_rest in
-      let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
-      parse_decls
-        (Ast.Top_trait (tname, param, methods, defaults, supers) :: decls) rest
-    | (pos, T_trait) :: _ ->
-      raise (Parse_error (pos,
-        "expected `trait Name 'a { method : type; ... }`"))
-    | (pos, T_impl) :: (_, T_ident tname) :: rest ->
-      (* `impl Num int { add = fn x -> fn y -> x + y; zero = 0; }` — a concrete
-         instance. The target type is parsed with the ordinary type parser
-         (it stops at the opening `{`). Lowered to a dictionary value. *)
-      let target, rest = ty rest in
-      (match rest with
-       | (_, T_lbrace) :: body_rest ->
-         let rec parse_impls acc toks =
-           match toks with
-           | (_, T_rbrace) :: rest -> List.rev acc, rest
-           | (_, T_ident mname) :: (_, T_eq) :: rest ->
-             let v, rest = expr rest in
-             let acc = (mname, v) :: acc in
-             (match rest with
-              | (_, T_semi) :: rest -> parse_impls acc rest
-              | (_, T_rbrace) :: rest -> List.rev acc, rest
-              | _ ->
-                raise (Parse_error (pos_of rest,
-                  "expected ';' or '}' in impl body")))
-           | _ ->
-             raise (Parse_error (pos_of toks,
-               "expected 'method = expr' in impl body"))
-         in
-         let impls, rest = parse_impls [] body_rest in
-         let rest = match rest with (_, T_semi) :: r -> r | _ -> rest in
-         parse_decls (Ast.Top_impl (tname, target, impls) :: decls) rest
-       | _ ->
-         raise (Parse_error (pos,
-           "expected `{` to start impl body")))
-    | (pos, T_impl) :: _ ->
-      raise (Parse_error (pos,
-        "expected `impl Trait Type { method = expr; ... }`"))
+    | (_, T_trait) :: rest ->
+      let decl, rest = parse_trait_after_keyword rest in
+      parse_decls (decl :: decls) rest
+    | (_, T_impl) :: rest ->
+      let decl, rest = parse_impl_after_keyword rest in
+      parse_decls (decl :: decls) rest
     | (_, T_type) :: rest ->
       let decl, rest = parse_type_decl_after_keyword rest in
       parse_decls (decl :: decls) rest

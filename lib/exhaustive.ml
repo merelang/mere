@@ -36,9 +36,19 @@ let rec is_total_pattern (p : Ast.pattern) =
 
 (* For variant types: collect which constructor names appear at the top of
    each arm's pattern.  As-patterns are stripped; or-patterns are flattened. *)
+(* A constructor written inside a `module M { ... }` is parsed as the
+   module-qualified `M.Ctor` (aliased to the bare `Ctor`), but the variant
+   registry keys on the bare name. Normalize to the last dotted segment so a
+   match inside a module isn't wrongly reported non-exhaustive. Constructor
+   names never contain a `.` except this module qualification. *)
+let bare_ctor (name : string) : string =
+  match String.rindex_opt name '.' with
+  | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+  | None -> name
+
 let rec top_level_constructors (p : Ast.pattern) : string list =
   match p.pnode with
-  | Ast.P_constr (name, _) -> [name]
+  | Ast.P_constr (name, _) -> [bare_ctor name]
   | Ast.P_as (inner, _) -> top_level_constructors inner
   | Ast.P_or (p1, p2) ->
     top_level_constructors p1 @ top_level_constructors p2

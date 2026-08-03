@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.107 — 2026-08-03
+
+_Traits and impls may now be declared inside a `module` body. Previously a
+module body accepted only `let` / `let rec` / nested `module` (types were
+already allowed and kept global); `trait` / `impl` were rejected, so a reusable
+trait-based library could not be namespaced. They are now accepted and — like
+types — kept global (the module namespaces only its functions), so a consumer
+writes bare `impl Ord T` but calls `M.of_list`. The top-level trait/impl
+parsing was factored into shared helpers used by both the top-level and
+module-body parsers._
+
+_Also fixes a spurious non-exhaustive-match warning for a `type` declared
+inside a module: the module qualifies constructor uses (`M.Leaf`) but the
+variant registry keys on the bare name, so the exhaustiveness checker now
+normalizes a qualified constructor to its bare last segment before comparing._
+
+_Surfaced by the `contrib/ordset` dogfood — a generic sorted set (BST) over an
+`Ord` key, with a consumer (`examples/ordset_demo.mere`) that instantiates it at
+`int` and a user-defined `color` variant. The dogfood also hit a pre-existing
+limitation (a top-level polymorphic value binding like `empty = Leaf : 'a tree`
+has no use site to fix `'a` and is rejected by the LLVM backend), worked around
+in the library by exposing `empty` as a thunk. Locked by
+test/parity/trait_in_module.mere and a test_basic assertion; parity 43/0, unit
+suite green._
+
 ## v0.1.106 — 2026-08-03
 
 _Extend v0.1.105's local-fn duplication to a single self-RECURSIVE local
