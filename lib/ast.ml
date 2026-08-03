@@ -137,14 +137,17 @@ type top_decl =
   | Top_record_alias of string * string
     (* Same as Top_ctor_alias but for records. `Top_record_alias
        ("M.Pt", "Pt")` registers `M.Pt` as alias for `Pt`. *)
-  | Top_trait of string * string * (string * ty) list
+  | Top_trait of string * string * (string * ty) list * (string * expr) list
     (* trait declaration: `trait Num a { add : a -> a -> a; zero : a; }`.
-       Fields: trait name, the single type-parameter name (`a`), and the
-       method signatures (name, type — the type mentions the param `a` as
-       a TyParam). A user-defined interface for ad-hoc polymorphism. The
-       trait_elab pass lowers this to a dictionary record type and threads
-       dictionaries through constrained generic functions, so no backend
-       (interp / C / LLVM / Wasm) needs trait-specific support. *)
+       Fields: trait name, the single type-parameter name (`a`), the method
+       signatures (name, type — the type mentions the param `a` as a TyParam),
+       and default method bodies (name, expr) for methods written as
+       `m : ty = expr`. An impl that omits such a method inherits the default;
+       a default body may reference sibling methods, which trait_elab inlines
+       per instance before type-checking. A user-defined interface for ad-hoc
+       polymorphism. The trait_elab pass lowers this to a dictionary record
+       type and threads dictionaries through constrained generic functions, so
+       no backend (interp / C / LLVM / Wasm) needs trait-specific support. *)
   | Top_impl of string * ty * (string * expr) list
     (* implementation: `impl Num int { add = fn x -> fn y -> x + y; zero = 0; }`.
        Fields: trait name, the concrete instance type, and the per-method

@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.101 — 2026-08-03
+
+_Trait method DEFAULTS, and impl method bodies that reference sibling methods.
+A trait method may now be written `m : ty = expr`; an impl that omits `m`
+inherits that default. Both this and an impl body that calls a sibling method
+(e.g. `neq = fn a -> fn b -> if eq a b then ...`) previously failed — the
+sibling reference had an unresolved dispatch type ("ambiguous trait
+constraint"), and resolving it to a dictionary field would have required the
+dictionary to reference itself, which Mere has no way to express._
+
+_Both are solved the same way: trait_elab completes each `impl Trait T` before
+any type-checking — every method gets a source body (the impl's own, else the
+trait default, else a "missing method" error), and every reference to a sibling
+method name inside a body is replaced by that sibling's (recursively inlined)
+source body. Cyclic defaults are rejected. After completion each method is a
+self-contained body with no trait-method name references, so type inference
+sees ordinary Mere and the dictionary stays a plain, non-recursive record —
+every backend is unchanged. An impl may still override a default by providing
+the method. Locked by parity cases trait_sibling_method.mere /
+trait_default_method.mere and five test_basic assertions; parity 35/0,
+unit 2277/0._
+
 ## v0.1.100 — 2026-08-03
 
 _Fix a dictionary mix-up when a generic function carries two trait constraints

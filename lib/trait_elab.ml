@@ -164,16 +164,85 @@ let elaborate (prog : program) : program =
   in
   if not has_trait_decls then prog
   else begin
-    (* trait name -> (param, methods) for building dict records / values *)
-    let trait_info : (string, string * (string * ty) list) Hashtbl.t =
+    (* trait name -> (param, methods, defaults) for building dict records /
+       values and filling omitted impl methods. *)
+    let trait_info :
+      (string, string * (string * ty) list * (string * expr) list) Hashtbl.t =
       Hashtbl.create 8 in
     Typer.reset_traits ();
     List.iter (function
-      | Top_trait (name, param, methods) ->
-        Hashtbl.replace trait_info name (param, methods);
+      | Top_trait (name, param, methods, defaults) ->
+        Hashtbl.replace trait_info name (param, methods, defaults);
         Typer.register_trait name param methods
       | Top_impl (trait, target, _) -> Typer.register_impl trait target
       | _ -> ()) prog.decls;
+
+    (* --- Complete + inline impl bodies, before any type-checking ------------
+       Two problems share one solution:
+         (1) an impl method body that references a SIBLING trait method (e.g.
+             `neq = fn a -> fn b -> if eq a b then ... `) — the sibling use has
+             an unresolved dispatch type, so the dictionary-passing rewrite
+             raises "ambiguous", and resolving it to a dict field would make
+             the dictionary reference itself (Mere has no self-referential
+             record binding);
+         (2) DEFAULT methods, whose whole point is to be written in terms of
+             sibling methods.
+       Both are solved by *syntactic inlining* per instance, done here before
+       type_pass: for each `impl Trait T`, every trait method gets a source
+       body (the impl's own, else the trait default, else "missing"), and any
+       reference to a sibling method name inside a body is replaced by that
+       sibling's (recursively inlined) source body. Cycles are rejected. The
+       result is a complete impl — one self-contained body per method, no
+       trait-method name references left — so type_pass sees ordinary Mere and
+       the dictionary is a plain (non-recursive) record. *)
+    let complete_impl trait target impls =
+      match Hashtbl.find_opt trait_info trait with
+      | None -> impls  (* unknown trait — let the later error path report it *)
+      | Some (_param, methods, defaults) ->
+        let method_names = List.map fst methods in
+        let source m =
+          match List.assoc_opt m impls with
+          | Some b -> Some b
+          | None -> List.assoc_opt m defaults
+        in
+        (* Inline sibling-method references in `body`, with `in_progress` the
+           set of methods currently being resolved (cycle guard). *)
+        let rec inline in_progress body =
+          map_expr (fun e ->
+            match e.node with
+            | Var m when List.mem m method_names ->
+              if List.mem m in_progress then
+                raise (Trait_error (e.loc,
+                  Printf.sprintf
+                    "cyclic trait method definitions: `%s` in `impl %s ...`"
+                    m trait))
+              else (match source m with
+                | Some b -> Some (inline (m :: in_progress) b)
+                | None ->
+                  raise (Trait_error (e.loc,
+                    Printf.sprintf
+                      "impl %s: method `%s` (referenced by a sibling) has \
+                       neither an implementation nor a default" trait m)))
+            | _ -> None)
+            body
+        in
+        List.map (fun (m, _mty) ->
+          match source m with
+          | Some b -> (m, inline [m] b)
+          | None ->
+            let key = match Typer.trait_type_key target with
+              | Some k -> k | None -> "?" in
+            raise (Trait_error (Loc.dummy,
+              Printf.sprintf "impl %s %s: missing method `%s`" trait key m)))
+          methods
+    in
+    let prog =
+      { prog with decls =
+          List.map (function
+            | Top_impl (trait, target, impls) ->
+              Top_impl (trait, target, complete_impl trait target impls)
+            | d -> d) prog.decls }
+    in
 
     let schemes = type_pass prog in
 
@@ -301,7 +370,7 @@ let elaborate (prog : program) : program =
        value dependencies stay valid). *)
     let rewrite_decl decl =
       match decl with
-      | Top_trait (name, param, methods) ->
+      | Top_trait (name, param, methods, _defaults) ->
         Top_record (dict_type_name name, [param], methods)
       | Top_impl (trait, target, impls) ->
         let key = match Typer.trait_type_key target with
@@ -310,7 +379,9 @@ let elaborate (prog : program) : program =
             raise (Trait_error (Loc.dummy,
               Printf.sprintf "impl %s: unsupported instance type" trait))
         in
-        let param, methods = Hashtbl.find trait_info trait in
+        (* impls has already been completed (defaults filled, sibling refs
+           inlined) by complete_impl, so every method is present. *)
+        let param, methods, _defaults = Hashtbl.find trait_info trait in
         (* Emit fields in trait-declaration order; each impl body is rewritten
            (an impl may itself use trait methods) and annotated at the concrete
            instance type so numeric-operator defaulting resolves correctly. *)

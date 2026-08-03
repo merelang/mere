@@ -1,0 +1,15 @@
+// A trait method with a DEFAULT body (`neq` in terms of `eq`). An impl that
+// omits `neq` inherits the default; the default's reference to the sibling
+// method `eq` is inlined per instance by trait_elab before type-checking, so
+// no self-referential dictionary is needed. `describe` exercises both the
+// provided method and the inherited default.
+trait Eq 'a {
+  eq  : 'a -> 'a -> bool;
+  neq : 'a -> 'a -> bool = fn x -> fn y -> (if eq x y then false else true);
+}
+impl Eq int { eq = fn a -> fn b -> a == b; }
+
+let describe = fn a -> fn b ->
+  (if eq a b then "eq" else (if neq a b then "neq" else "?"));
+print (describe 3 3);
+print (describe 3 4)
