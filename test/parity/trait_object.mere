@@ -1,0 +1,14 @@
+// Trait objects: a heterogeneous list of `dyn Shape` with dynamic dispatch.
+// `dyn Shape (Circ 2)` packs a value; `area o` dispatches dynamically. A
+// `dyn Trait` lowers to a record of self-capturing closures, so it works on
+// every backend with no special support.
+trait Shape 'a { area : 'a -> int; }
+type circ = Circ of int;
+type rect = Rect of int;
+impl Shape circ { area = fn s -> (match s with Circ r -> r * r * 3); }
+impl Shape rect { area = fn s -> (match s with Rect w -> w * w); }
+
+let shapes = [dyn Shape (Circ 2), dyn Shape (Rect 3), dyn Shape (Circ 1)];
+let total = fn (os : (dyn Shape) list) ->
+  list_fold os 0 (fn acc -> fn o -> acc + area o);
+print (str_of_int (total shapes))   // 12 + 9 + 3 = 24

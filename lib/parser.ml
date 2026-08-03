@@ -215,6 +215,10 @@ let rec parse_program_internal tokens =
     loop base toks
   and simple_ty toks =
     match toks with
+    | (_, T_dyn) :: (_, T_ident trait) :: rest ->
+      (* `dyn Trait` — a trait-object type; sugar for the auto-generated
+         object record `Trait__obj` (see Trait_elab). *)
+      Ast.TyCon (trait ^ "__obj", []), rest
     | (_, T_amp) :: (_, T_ident "mut") :: (_, T_ident region) :: rest ->
       (* `&mut R T` — exclusive write *)
       let inner, rest = simple_ty rest in
@@ -1111,6 +1115,12 @@ let rec parse_program_internal tokens =
     field_chain v rest
   and atom_base toks =
     match toks with
+    | (pos, T_dyn) :: (_, T_ident trait) :: rest ->
+      (* `dyn Trait e` — pack `e` into a trait object; sugar for a call to the
+         auto-generated packer `Trait__pack e` (built directly as a Var so the
+         uppercase name is not mis-parsed as a constructor). *)
+      let arg, rest = atom rest in
+      mk pos (Ast.App (mk pos (Ast.Var (trait ^ "__pack")), arg)), rest
     | (pos, T_amp) :: (_, T_ident "mut") :: (_, T_ident region) :: rest ->
       (* `&mut R v` — exclusive write *)
       let inner, rest = atom rest in

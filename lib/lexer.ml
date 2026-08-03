@@ -30,6 +30,7 @@ type token =
   | T_extern          (* extern keyword (FFI declaration: `extern fn name: ty;`、Phase 32) *)
   | T_trait           (* trait keyword (user-defined interface for ad-hoc polymorphism) *)
   | T_impl            (* impl keyword (trait implementation for a concrete type) *)
+  | T_dyn             (* dyn keyword (trait object: `dyn Trait` type / `dyn Trait e` pack) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -418,6 +419,7 @@ let rec tokenize s =
           | "extern" -> T_extern
           | "trait" -> T_trait
           | "impl" -> T_impl
+          | "dyn" -> T_dyn
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when
