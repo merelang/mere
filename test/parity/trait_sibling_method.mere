@@ -1,0 +1,10 @@
+// An impl method body that references a SIBLING method of the same trait
+// (`neq` calls `eq`). trait_elab inlines the sibling reference per instance
+// before type-checking, so this no longer fails with "ambiguous trait
+// constraint" (and needs no self-referential dictionary).
+trait Eq 'a { eq : 'a -> 'a -> bool; neq : 'a -> 'a -> bool; }
+impl Eq int {
+  eq  = fn a -> fn b -> a == b;
+  neq = fn a -> fn b -> (if eq a b then false else true);
+}
+print (if neq 3 4 then "neq34" else "eq34")

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.100" Version.v "0.1.100";
+  check "version is 0.1.101" Version.v "0.1.101";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11820,6 +11820,31 @@ let () =
          impl Sh  int { sh = fn x -> str_of_int x; }\n\
          let poly = fn x -> sh (add (mul x x) x);\n\
          poly 5")) "\"30\"";
+  check "trait: impl method body may reference a sibling method"
+    (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool; neq : 'a -> 'a -> bool; }\n\
+         impl Eq int { eq = fn a -> fn b -> a == b; neq = fn a -> fn b -> (if eq a b then false else true); }\n\
+         if neq 3 4 then 1 else 0")) "1";
+  check "trait: an omitted method falls back to its default body"
+    (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool; neq : 'a -> 'a -> bool = fn x -> fn y -> (if eq x y then false else true); }\n\
+         impl Eq int { eq = fn a -> fn b -> a == b; }\n\
+         if neq 3 3 then 1 else 0")) "0";
+  check "trait: an impl may override a default method"
+    (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool; neq : 'a -> 'a -> bool = fn x -> fn y -> (if eq x y then false else true); }\n\
+         impl Eq int { eq = fn a -> fn b -> a == b; neq = fn a -> fn b -> a + b == 999; }\n\
+         if neq 3 4 then 1 else 0")) "0";
+  check_raises "trait: cyclic default methods are rejected"
+    (fun () -> ignore (Pipeline.process
+       ("trait Bad 'a { f : 'a -> bool = fn x -> g x; g : 'a -> bool = fn x -> f x; }\n\
+         impl Bad int { }\n\
+         if f 1 then 1 else 0")));
+  check_raises "trait: an omitted method with no default is rejected"
+    (fun () -> ignore (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool; neq : 'a -> 'a -> bool; }\n\
+         impl Eq int { eq = fn a -> fn b -> a == b; }\n\
+         if eq 1 1 then 1 else 0")));
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"
