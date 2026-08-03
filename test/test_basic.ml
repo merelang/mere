@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.106" Version.v "0.1.106";
+  check "version is 0.1.107" Version.v "0.1.107";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11889,6 +11889,14 @@ let () =
          let total = fn ys -> (let rec f = fn xs -> (match xs with Nil -> zero | Cons (h, t) -> add h (g t))\n\
          and g = fn xs -> (match xs with Nil -> zero | Cons (h, t) -> add h (f t)) in f ys) in\n\
          total [1, 2, 3]")) "6";
+  check "trait: trait + impl declared inside a `module` body (global, fns namespaced)"
+    (Pipeline.process
+       ("module M {\n\
+         trait Eq 'a { eq : 'a -> 'a -> bool; }\n\
+         let same = fn a -> fn b -> (if eq a b then 1 else 0);\n\
+         }\n\
+         impl Eq int { eq = fn a -> fn b -> a == b; }\n\
+         M.same 3 3 + M.same 3 4")) "1";
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"
