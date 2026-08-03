@@ -1,0 +1,13 @@
+// Mutually-recursive constrained functions (`f` calls `g`, `g` calls `f`),
+// both constrained by `Num 'a`. trait_elab threads the shared dictionary
+// through every intra-group reference; previously this raised
+// "mutually-recursive constrained function ... is not yet supported".
+// (Used at a single instance type; a polymorphic mutual-rec group used at two
+// distinct types hits a separate, pre-existing backend multi-instantiation
+// limitation that affects trait-free code too.)
+trait Num 'a { add : 'a -> 'a -> 'a; zero : 'a; }
+impl Num int { add = fn x -> fn y -> x + y; zero = 0; }
+
+let rec f = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (g t))
+and     g = fn xs -> (match xs with Nil -> zero | Cons(h, t) -> add h (f t));
+print (str_of_int (f [1, 2, 3, 4]))   // 1 + 2 + 3 + 4 = 10

@@ -404,39 +404,40 @@ let elaborate (prog : program) : program =
       | Top_let_rec bindings ->
         let constrained =
           List.filter (fun (n, _) -> Hashtbl.mem binding_params n) bindings in
-        (match bindings, constrained with
-         | _, [] ->
+        (match constrained with
+         | [] ->
            (* No constrained binding in the group — nothing trait-specific. *)
            Top_let_rec (List.map (fun (n, v) -> (n, rewrite v)) bindings)
-         | [(n, v)], [_] ->
-           (* A single self-recursive constrained function. Its recursive
-              self-calls must pass the same dictionary the function received:
-              intra-let-rec references are typed monomorphically (before
-              generalization), so they carry no constrained-use obligation and
-              must be threaded here. Rewrite `n` (self) to apply the dict
-              parameter(s), alongside the ordinary obligation replacements
-              (which resolve the body's trait-method uses to `dict.method`),
-              then prepend the dict parameter(s). *)
-           let self_params = Hashtbl.find binding_params n in
+         | _ ->
+           (* One or more (mutually) recursive constrained functions.
+              Intra-let-rec references are typed monomorphically (before
+              generalization), so they carry NO constrained-use obligation and
+              must be threaded here: a reference to a constrained group member
+              `m` — the fn itself or a sibling — is applied to the dictionary
+              parameter(s) `m` expects. Because the group is typed
+              monomorphically, mutually-recursive members share the dispatch
+              variable(s), so `m`'s dict parameters have the same names as the
+              current member's own (keyed by (vid, trait)), i.e. they are in
+              scope. This subsumes the single self-recursive case. Sibling
+              obligation replacements (trait-method uses -> dict.method) run via
+              `subst`; then each body gets its own dict parameter(s) prepended. *)
+           let group_names = List.map fst bindings in
            let subst_rec e =
              match subst e with
              | Some r -> Some r
              | None ->
                (match e.node with
-                | Var m when m = n ->
+                | Var m
+                  when List.mem m group_names
+                       && Hashtbl.mem binding_params m ->
+                  let params = Hashtbl.find binding_params m in
                   Some (List.fold_left (fun acc (p, _) ->
-                    mk e.loc (App (acc, mk e.loc (Var p)))) e self_params)
+                    mk e.loc (App (acc, mk e.loc (Var p)))) e params)
                 | _ -> None)
            in
-           let v' = map_expr subst_rec v in
-           Top_let_rec [(n, wrap_dict_params n v')]
-         | _ ->
-           let n = fst (List.hd constrained) in
-           raise (Trait_error (Loc.dummy,
-             Printf.sprintf
-               "mutually-recursive constrained function `%s` is not yet \
-                supported (only a single self-recursive constrained function \
-                is handled)" n)))
+           Top_let_rec (List.map (fun (n, v) ->
+             let v' = map_expr subst_rec v in
+             (n, wrap_dict_params n v')) bindings))
       | other -> other
     in
     let decls = List.map rewrite_decl prog.decls in

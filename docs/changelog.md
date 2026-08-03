@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.102 — 2026-08-03
+
+_Support top-level mutually-recursive constrained functions (a `let rec f =
+... and g = ...;` group where the members require a trait). This used to be
+rejected ("mutually-recursive constrained function ... is not yet supported")._
+
+_Intra-group references are typed monomorphically (before generalization), so
+they carry no constrained-use obligation and must be threaded by hand: a
+reference to a constrained group member — itself or a sibling — is applied to
+the dictionary parameter(s) that member expects. Because the group is typed
+monomorphically, mutually-recursive members share the dispatch variable(s), so
+those dict parameters have the same names as the current member's own and are
+in scope. This generalizes the single self-recursive case (which becomes the
+one-element instance of the same code path)._
+
+_Scope: a single instance type works on all four backends. A polymorphic
+mutual-rec group used at two distinct types hits a separate, pre-existing
+backend multi-instantiation limitation (it fails the same way for trait-free
+mutually-recursive polymorphic code). Local (`let rec ... in`) constrained
+recursion — self or mutual — remains a distinct open path. Locked by
+test/parity/trait_mutual_recursion.mere and two test_basic assertions; parity
+36/0, unit suite green._
+
 ## v0.1.101 — 2026-08-03
 
 _Trait method DEFAULTS, and impl method bodies that reference sibling methods.
