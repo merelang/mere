@@ -1,0 +1,13 @@
+// A generic function constrained by TWO traits on the SAME type variable
+// (`Num 'a` for `add`/`mul`, `Sh 'a` for `sh`). Each constraint gets its own
+// dictionary parameter. Before the (vid, trait)-keyed dictionary map, both
+// constraints shared the type variable's id, so the second dict param clobbered
+// the first and a `Num` method use resolved to the `Sh` dictionary
+// ("record Sh__dict has no field: add"). Locks that fix.
+trait Num 'a { add : 'a -> 'a -> 'a; mul : 'a -> 'a -> 'a; zero : 'a; }
+trait Sh  'a { sh : 'a -> str; }
+impl Num int { add = fn x -> fn y -> x + y; mul = fn x -> fn y -> x * y; zero = 0; }
+impl Sh  int { sh = fn x -> str_of_int x; }
+
+let poly = fn x -> sh (add (mul x x) x);   // : (Num 'a, Sh 'a) => 'a -> str
+print (poly 5)                             // 5*5 + 5 = 30

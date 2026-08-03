@@ -177,10 +177,15 @@ let elaborate (prog : program) : program =
 
     let schemes = type_pass prog in
 
-    (* Global map: a constrained binding's quantified variable id -> the name
-       of the dictionary parameter that binding receives. Also the ordered
+    (* Global map: (a constrained binding's quantified variable id, trait
+       name) -> the name of the dictionary parameter that binding receives.
+       Keyed by (vid, trait), NOT vid alone: one type variable can carry
+       several constraints (e.g. `Num 'a` AND `Sh 'a`), each getting its own
+       dict parameter. Keying by vid alone let the second constraint's param
+       clobber the first, so a `Num` method use resolved to the `Sh`
+       dictionary — "record Sh__dict has no field: add". Also the ordered
        parameter list per binding name (for wrapping its definition). *)
-    let var2param : (int, string) Hashtbl.t = Hashtbl.create 16 in
+    let var2param : (int * string, string) Hashtbl.t = Hashtbl.create 16 in
     (* name -> ordered [(param, trait)] the binding receives *)
     let binding_params : (string, (string * string) list) Hashtbl.t =
       Hashtbl.create 16 in
@@ -189,7 +194,7 @@ let elaborate (prog : program) : program =
         let params =
           List.map (fun (trait, vid) ->
             let p = dict_param_name trait vid in
-            Hashtbl.replace var2param vid p;
+            Hashtbl.replace var2param (vid, trait) p;
             (p, trait)) sch.Typer.constraints
         in
         Hashtbl.replace binding_params name params
@@ -205,7 +210,7 @@ let elaborate (prog : program) : program =
         let params =
           List.map (fun (trait, vid) ->
             let p = dict_param_name trait vid in
-            Hashtbl.replace var2param vid p;
+            Hashtbl.replace var2param (vid, trait) p;
             (p, trait)) constraints
         in
         (value_node, params)) !Typer.trait_local_constrained
@@ -215,7 +220,7 @@ let elaborate (prog : program) : program =
     let resolve_dict loc trait (dispatch : ty) : expr =
       match Ast.walk dispatch with
       | Ast.TyVar v ->
-        (match Hashtbl.find_opt var2param v.id with
+        (match Hashtbl.find_opt var2param (v.id, trait) with
          | Some p -> mk loc (Var p)
          | None ->
            raise (Trait_error (loc,

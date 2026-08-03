@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.98" Version.v "0.1.98";
+  check "version is 0.1.100" Version.v "0.1.100";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11808,6 +11808,18 @@ let () =
          impl Num Mod7 { add = fn a -> fn b -> (match a with M7 x -> (match b with M7 y -> M7 ((x + y) - (((x + y) / 7) * 7)))); zero = M7 0; }\n\
          let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);\n\
          match sum [M7 3, M7 5, M7 6] with M7 r -> r")) "0";
+  check "trait: two constraints on one type variable get distinct dicts"
+    (* `poly` needs both `Num 'a` (add/mul) and `Sh 'a` (sh) — the two
+       constraints share the type variable's id. The dict map is keyed by
+       (vid, trait), so `add` resolves to the Num dict and `sh` to the Sh dict;
+       keying by vid alone previously made the second clobber the first. *)
+    (Pipeline.process
+       ("trait Num 'a { add : 'a -> 'a -> 'a; mul : 'a -> 'a -> 'a; zero : 'a; }\n\
+         trait Sh  'a { sh : 'a -> str; }\n\
+         impl Num int { add = fn x -> fn y -> x + y; mul = fn x -> fn y -> x * y; zero = 0; }\n\
+         impl Sh  int { sh = fn x -> str_of_int x; }\n\
+         let poly = fn x -> sh (add (mul x x) x);\n\
+         poly 5")) "\"30\"";
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"
