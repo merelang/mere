@@ -1,0 +1,10 @@
+// A local self-RECURSIVE polymorphic function used at more than one concrete
+// type. `dup` (a recursive list transform) is applied to an int list and a
+// float list; `cnt` counts. v0.1.106 clones such a local `let rec` into one
+// monomorphic copy per use type, redirecting the recursive self-call inside
+// each copy, so the C and LLVM backends handle it (LLVM previously refused).
+let go = fn () ->
+  let rec cnt = fn xs -> (match xs with Nil -> 0 | Cons(h, t) -> 1 + cnt t) in
+  let rec dup = fn xs -> (match xs with Nil -> Nil | Cons(h, t) -> Cons(h, Cons(h, dup t))) in
+  (cnt (dup [1, 2])) + (cnt (dup [1.0, 2.0, 3.0]));
+print (str_of_int (go ()))   // cnt(dup[2 ints])=4  +  cnt(dup[3 floats])=6  = 10

@@ -3919,6 +3919,44 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
                        go cl, acc))) named body'
       end else
         { e with Ast.node = Ast.Let (pat, go value, go body) }
+    | Ast.Let_rec ([(f, ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value))],
+                   body)
+      when in_fn && not (ty_is_concrete (Ast.walk vty)) ->
+      (* Single self-recursive local `let rec f = fn ... in body` used at
+         several concrete types: one monomorphic copy per type, with the
+         recursive self-call inside each copy redirected to that copy. Mutual
+         (multi-binding) groups at several types are left alone (rarer; still a
+         backend limitation). Requires the value not to shadow `f` internally,
+         so the unconditional self-rename below is safe. *)
+      let arrows, nonconcrete, body_shadow = analyze f body in
+      let _, _, val_shadow = analyze f value in
+      if List.length arrows >= 2 && not nonconcrete
+         && not body_shadow && not val_shadow then begin
+        let named =
+          List.map (fun arr ->
+            let k = !dup_local_counter in
+            incr dup_local_counter;
+            (Printf.sprintf "%s__mi%d" f k, arr)) arrows
+        in
+        let name_of key =
+          let rec find = function
+            | (nm, arr) :: rest ->
+              if Ast.pp_ty (Ast.walk arr) = key then Some nm else find rest
+            | [] -> None
+          in find named
+        in
+        let body' = go (rewrite_uses f name_of body) in
+        List.fold_right (fun (nm, arr) acc ->
+          let cl = clone_with_fresh_tyvars value in
+          (match cl.Ast.ty with
+           | Some t -> (try Typer.unify Loc.dummy t arr with _ -> ())
+           | None -> ());
+          (* Redirect the recursive self-call f -> nm inside the copy. *)
+          let cl = rewrite_uses f (fun _ -> Some nm) cl in
+          mk (Ast.Let_rec ([(nm, go cl)], acc))) named body'
+      end else
+        { e with Ast.node =
+            Ast.Let_rec ([(f, go value)], go body) }
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> e
     | Ast.Bin (op, a, b) -> { e with Ast.node = Ast.Bin (op, go a, go b) }
