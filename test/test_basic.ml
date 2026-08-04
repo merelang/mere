@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.115" Version.v "0.1.115";
+  check "version is 0.1.116" Version.v "0.1.116";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5494,6 +5494,22 @@ let () =
      then "post-lookup"
      else Printf.sprintf "loop=%d kcopy=%d vupd=%d" loop kcopy vupd)
     "post-lookup";
+
+  (* v0.1.116: LLVM/Wasm maps gained the C backend's O(1) open-addressing hash
+     index for index-safe keys (int/str). Guard that the hash path is emitted
+     (not the linear-scan fallback) so a regression is caught. The parity lock
+     files test/parity/map_*.mere are the behavioral guard; these check the
+     emit shape. Compound keys still use the linear runtime by design. *)
+  assert_contains "map: LLVM emits the O(1) hash index for str keys"
+    (let prog = typed_prog
+       "let m = map_new () in let z = map_set m \"a\" 1 in map_get m \"a\"" in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@mere_map_key_hash_str";
+  assert_contains "map: Wasm emits the O(1) hash index for int keys"
+    (let prog = typed_prog
+       "let m = map_new () in let z = map_set m 1 2 in map_get m 1" in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$mere_map_key_hash_int";
 
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an

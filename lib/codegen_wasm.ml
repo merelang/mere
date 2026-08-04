@@ -5871,6 +5871,254 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (i32.const 0))"
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
+(* O(1) Wasm map for scalar keys (int / bool / str / unit): open-addressing
+   hash index over the insertion-order keys/values arrays, mirroring the C
+   backend. Scoped to scalar keys — compound keys (tuple/record/variant) keep
+   the linear runtime above (correct, O(n), but rare). *)
+let wasm_key_hashable (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | _ -> false
+
+(* Emitted once when any scalar-key map exists: a 32-bit integer avalanche
+   mix and an FNV-1a byte hash (str is NUL-terminated, like $__lang_streq). *)
+let map_hash_primitives_wasm =
+  {|  (func $__lang_hash_u32 (param $x i32) (result i32)
+    (local.set $x (i32.xor (i32.xor (local.get $x) (i32.const 61)) (i32.shr_u (local.get $x) (i32.const 16))))
+    (local.set $x (i32.add (local.get $x) (i32.shl (local.get $x) (i32.const 3))))
+    (local.set $x (i32.xor (local.get $x) (i32.shr_u (local.get $x) (i32.const 4))))
+    (local.set $x (i32.mul (local.get $x) (i32.const 668265261)))
+    (local.set $x (i32.xor (local.get $x) (i32.shr_u (local.get $x) (i32.const 15))))
+    (local.get $x))
+  (func $__lang_hash_str (param $s i32) (result i32)
+    (local $h i32) (local $c i32)
+    (local.set $h (i32.const 2166136261))
+    (loop $lp
+      (local.set $c (i32.load8_u (local.get $s)))
+      (if (i32.eqz (local.get $c)) (then (return (local.get $h))))
+      (local.set $h (i32.mul (i32.xor (local.get $h) (local.get $c)) (i32.const 16777619)))
+      (local.set $s (i32.add (local.get $s) (i32.const 1)))
+      (br $lp))
+    (unreachable))|}
+
+(* Per-K hash helper delegating to the right primitive. *)
+let emit_map_key_hash_wasm (k_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let prim = match Ast.walk k_ty with
+    | Ast.TyStr -> "$__lang_hash_str"
+    | _ -> "$__lang_hash_u32" in
+  Printf.sprintf
+    "  (func $mere_map_key_hash_%s (param $a i32) (result i32)\n    (call %s (local.get $a)))"
+    k_tag prim
+
+let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  Printf.sprintf {|
+  (func $mere_map_%s_new (result i32)
+    (local $m i32) (local $keys i32) (local $values i32) (local $idx i32) (local $i i32)
+    (local.set $m (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 24)))
+    (local.set $keys (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (local.set $values (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
+    (local.set $idx (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $idx) (i32.const 32)))
+    (i32.store offset=0 (local.get $m) (local.get $keys))
+    (i32.store offset=4 (local.get $m) (local.get $values))
+    (i32.store offset=8 (local.get $m) (i32.const 0))
+    (i32.store offset=12 (local.get $m) (i32.const 4))
+    (i32.store offset=16 (local.get $m) (local.get $idx))
+    (i32.store offset=20 (local.get $m) (i32.const 8))
+    (local.set $i (i32.const 0))
+    (block $fend (loop $fl
+      (br_if $fend (i32.eq (local.get $i) (i32.const 8)))
+      (i32.store (i32.add (local.get $idx) (i32.mul (local.get $i) (i32.const 4))) (i32.const -1))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $fl)))
+    (local.get $m))
+  (func $mere_map_%s_reindex (param $m i32) (param $newcap i32)
+    (local $ni i32) (local $i i32) (local $s i32) (local $len i32) (local $keys i32) (local $ncm1 i32) (local $h i32)
+    (local.set $ni (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $ni) (i32.mul (local.get $newcap) (i32.const 4))))
+    (local.set $i (i32.const 0))
+    (block $fend (loop $fl
+      (br_if $fend (i32.eq (local.get $i) (local.get $newcap)))
+      (i32.store (i32.add (local.get $ni) (i32.mul (local.get $i) (i32.const 4))) (i32.const -1))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $fl)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $ncm1 (i32.sub (local.get $newcap) (i32.const 1)))
+    (local.set $i (i32.const 0))
+    (block $pend (loop $pl
+      (br_if $pend (i32.eq (local.get $i) (local.get $len)))
+      (local.set $h (call $mere_map_key_hash_%s
+        (i32.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 4))))))
+      (local.set $s (i32.and (local.get $h) (local.get $ncm1)))
+      (block $placed (loop $probe
+        (if (i32.eq (i32.load (i32.add (local.get $ni) (i32.mul (local.get $s) (i32.const 4)))) (i32.const -1))
+          (then
+            (i32.store (i32.add (local.get $ni) (i32.mul (local.get $s) (i32.const 4))) (local.get $i))
+            (br $placed)))
+        (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $ncm1)))
+        (br $probe)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $pl)))
+    (i32.store offset=16 (local.get $m) (local.get $ni))
+    (i32.store offset=20 (local.get $m) (local.get $newcap)))
+  (func $mere_map_%s_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+    (local $h i32) (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
+    (local $keys i32) (local $values i32) (local $len i32) (local $cap i32) (local $occ i32)
+    (local $nk i32) (local $nv i32) (local $i i32) (local $newlen i32)
+    (local.set $h (call $mere_map_key_hash_%s (local.get $k)))
+    (local.set $idx (i32.load offset=16 (local.get $m)))
+    (local.set $idxcap (i32.load offset=20 (local.get $m)))
+    (local.set $icm1 (i32.sub (local.get $idxcap) (i32.const 1)))
+    (local.set $s (i32.and (local.get $h) (local.get $icm1)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (block $done_probe (loop $probe
+      (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
+      (br_if $done_probe (i32.eq (local.get $occ) (i32.const -1)))
+      (if (call $mere_map_key_eq_%s
+            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
+            (local.get $k))
+        (then
+          (i32.store (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 4))) (local.get $v))
+          (return (i32.const 0))))
+      (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
+      (br $probe)))
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $cap (i32.load offset=12 (local.get $m)))
+    (if (i32.eq (local.get $len) (local.get $cap))
+      (then
+        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        (local.set $nk (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (local.get $nk) (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $nv (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (local.get $nv) (i32.mul (local.get $cap) (i32.const 4))))
+        (local.set $i (i32.const 0))
+        (block $cend (loop $cl
+          (br_if $cend (i32.eq (local.get $i) (local.get $len)))
+          (i32.store (i32.add (local.get $nk) (i32.mul (local.get $i) (i32.const 4)))
+                     (i32.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 4)))))
+          (i32.store (i32.add (local.get $nv) (i32.mul (local.get $i) (i32.const 4)))
+                     (i32.load (i32.add (local.get $values) (i32.mul (local.get $i) (i32.const 4)))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $cl)))
+        (i32.store offset=0 (local.get $m) (local.get $nk))
+        (i32.store offset=4 (local.get $m) (local.get $nv))
+        (i32.store offset=12 (local.get $m) (local.get $cap))
+        (local.set $keys (local.get $nk))
+        (local.set $values (local.get $nv))))
+    (i32.store (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 4))) (local.get $k))
+    (i32.store (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4))) (local.get $v))
+    (local.set $newlen (i32.add (local.get $len) (i32.const 1)))
+    (i32.store offset=8 (local.get $m) (local.get $newlen))
+    (if (i32.ge_s (i32.mul (local.get $newlen) (i32.const 10)) (i32.mul (local.get $idxcap) (i32.const 7)))
+      (then (call $mere_map_%s_reindex (local.get $m) (i32.mul (local.get $idxcap) (i32.const 2))))
+      (else (i32.store (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))
+                       (i32.sub (local.get $newlen) (i32.const 1)))))
+    (i32.const 0))
+  (func $mere_map_%s_get (param $m i32) (param $k i32) (result i32)
+    (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $values i32) (local $occ i32)
+    (local.set $idx (i32.load offset=16 (local.get $m)))
+    (local.set $icm1 (i32.sub (i32.load offset=20 (local.get $m)) (i32.const 1)))
+    (local.set $s (i32.and (call $mere_map_key_hash_%s (local.get $k)) (local.get $icm1)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (block $fail (loop $probe
+      (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
+      (br_if $fail (i32.eq (local.get $occ) (i32.const -1)))
+      (if (call $mere_map_key_eq_%s
+            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
+            (local.get $k))
+        (then (return (i32.load (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 4)))))))
+      (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
+      (br $probe)))
+    (unreachable))
+  (func $mere_map_%s_has (param $m i32) (param $k i32) (result i32)
+    (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $occ i32)
+    (local.set $idx (i32.load offset=16 (local.get $m)))
+    (local.set $icm1 (i32.sub (i32.load offset=20 (local.get $m)) (i32.const 1)))
+    (local.set $s (i32.and (call $mere_map_key_hash_%s (local.get $k)) (local.get $icm1)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (block $notf (loop $probe
+      (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
+      (br_if $notf (i32.eq (local.get $occ) (i32.const -1)))
+      (if (call $mere_map_key_eq_%s
+            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
+            (local.get $k))
+        (then (return (i32.const 1))))
+      (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
+      (br $probe)))
+    (i32.const 0))
+  (func $mere_map_%s_len (param $m i32) (result i32)
+    (i32.load offset=8 (local.get $m)))
+  (func $mere_map_%s_iter (param $m i32) (param $cl i32) (result i32)
+    (local $i i32) (local $len i32)
+    (local $keys i32) (local $values i32)
+    (local $outer_env i32) (local $outer_fn i32)
+    (local $k i32) (local $v i32) (local $inner_cl i32)
+    (local.set $len    (i32.load offset=8 (local.get $m)))
+    (local.set $keys   (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $outer_env (i32.load offset=0 (local.get $cl)))
+    (local.set $outer_fn  (i32.load offset=4 (local.get $cl)))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        (local.set $k (i32.load (i32.add (local.get $keys)
+                                  (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $v (i32.load (i32.add (local.get $values)
+                                  (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $inner_cl
+          (call_indirect (type $cl) (local.get $outer_env) (local.get $k)
+                         (local.get $outer_fn)))
+        (drop (call_indirect (type $cl)
+                (i32.load offset=0 (local.get $inner_cl))
+                (local.get $v)
+                (i32.load offset=4 (local.get $inner_cl))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.const 0))
+  (func $mere_map_%s_delete (param $m i32) (param $k i32) (result i32)
+    (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
+    (local $keys i32) (local $values i32) (local $occ i32) (local $len i32) (local $j i32)
+    (local.set $idx (i32.load offset=16 (local.get $m)))
+    (local.set $idxcap (i32.load offset=20 (local.get $m)))
+    (local.set $icm1 (i32.sub (local.get $idxcap) (i32.const 1)))
+    (local.set $s (i32.and (call $mere_map_key_hash_%s (local.get $k)) (local.get $icm1)))
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (block $notf (loop $probe
+      (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
+      (br_if $notf (i32.eq (local.get $occ) (i32.const -1)))
+      (if (call $mere_map_key_eq_%s
+            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
+            (local.get $k))
+        (then
+          (local.set $len (i32.load offset=8 (local.get $m)))
+          (local.set $j (local.get $occ))
+          (block $sdone (loop $sl
+            (br_if $sdone (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
+            (i32.store (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 4)))
+              (i32.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+            (i32.store (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 4)))
+              (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $sl)))
+          (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
+          (call $mere_map_%s_reindex (local.get $m) (local.get $idxcap))
+          (return (i32.const 0))))
+      (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
+      (br $probe)))
+    (i32.const 0))|}
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+
 let map_int_runtime_wasm = {|
   (func $mere_map_int_new (result i32)
     (local $m i32) (local $keys i32) (local $values i32)
@@ -7195,10 +7443,30 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (Hashtbl.fold (fun _tag k_ty acc ->
          emit_map_key_eq_wasm k_ty :: acc) map_key_types [])
   in
+  (* Scalar-key maps use the O(1) hash-index runtime; compound-key maps keep
+     the linear one. The hash primitives + per-K hash helper are emitted only
+     when at least one scalar-key map exists. *)
+  let any_hashable =
+    Hashtbl.fold (fun _tag k_ty acc -> acc || wasm_key_hashable k_ty)
+      map_key_types false
+  in
+  let map_hash_helper_section =
+    if not any_hashable then ""
+    else
+      map_hash_primitives_wasm ^ "\n" ^
+      String.concat "\n"
+        (Hashtbl.fold (fun _tag k_ty acc ->
+           if wasm_key_hashable k_ty then emit_map_key_hash_wasm k_ty :: acc
+           else acc) map_key_types [])
+  in
   let map_runtime_section =
+    map_hash_helper_section ^ "\n" ^
     String.concat "\n"
       (Hashtbl.fold (fun _tag k_ty acc ->
-         emit_map_runtime_wasm k_ty :: acc) map_key_types [])
+         let rt =
+           if wasm_key_hashable k_ty then emit_map_runtime_wasm_hashed k_ty
+           else emit_map_runtime_wasm k_ty in
+         rt :: acc) map_key_types [])
   in
   (* Legacy flags (for tests that still toggle them) — no-op effect since
      the table is the authoritative source. *)

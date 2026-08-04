@@ -1,0 +1,34 @@
+// Exercises the O(1) hash-index paths: growth (forces reindex past load
+// factor), str keys, delete + reinsert, lookups after growth. Output must be
+// identical across all four backends (the index is a perf detail, not a
+// semantics change).
+let rec fill = fn m -> fn i -> fn n ->
+  if i >= n then ()
+  else let _ = map_set m i (i * i) in fill m (i + 1) n;
+
+let m = map_new ();
+let _ = fill m 0 50;                 // 50 entries -> several reindex rounds
+let _ = print (str_of_int (map_len m));            // 50
+let _ = print (str_of_int (map_get m 0));          // 0
+let _ = print (str_of_int (map_get m 7));          // 49
+let _ = print (str_of_int (map_get m 49));         // 2401
+let _ = print (if map_has m 25 then "y" else "n"); // y
+let _ = print (if map_has m 99 then "y" else "n"); // n
+let _ = map_delete m 7;
+let _ = print (if map_has m 7 then "y" else "n");  // n
+let _ = print (str_of_int (map_len m));            // 49
+let _ = map_set m 7 777;                           // reinsert (new tail position)
+let _ = print (str_of_int (map_get m 7));          // 777
+let _ = print (str_of_int (map_len m));            // 50
+
+// str keys
+let s = map_new ();
+let _ = map_set s "alpha" 1;
+let _ = map_set s "beta" 2;
+let _ = map_set s "gamma" 3;
+let _ = map_set s "beta" 22;
+let _ = print (str_of_int (map_get s "beta"));     // 22
+let _ = print (if map_has s "gamma" then "y" else "n"); // y
+let _ = print (if map_has s "delta" then "y" else "n"); // n
+let _ = map_iter s (fn k -> fn v -> print (k ++ "=" ++ str_of_int v));
+print "done"

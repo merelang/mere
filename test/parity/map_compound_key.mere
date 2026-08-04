@@ -1,0 +1,19 @@
+// Compound keys (tuple / variant) are NOT index-safe, so LLVM/Wasm use the
+// linear fallback runtime. Confirms the dispatch keeps them correct.
+type color = Red | Green | Blue;
+
+let t = map_new ();
+let _ = map_set t (1, 2) 12;
+let _ = map_set t (3, 4) 34;
+let _ = map_set t (1, 2) 120;      // update
+let _ = print (str_of_int (map_get t (1, 2)));   // 120
+let _ = print (if map_has t (3, 4) then "y" else "n");  // y
+let _ = print (if map_has t (5, 6) then "y" else "n");  // n
+
+let c = map_new ();
+let _ = map_set c Red 1;
+let _ = map_set c Green 2;
+let _ = map_set c Blue 3;
+let _ = print (str_of_int (map_get c Green));    // 2
+let _ = print (str_of_int (map_len c));          // 3
+print "done"

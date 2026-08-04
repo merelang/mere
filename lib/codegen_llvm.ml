@@ -6737,6 +6737,149 @@ let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
       "  ret i64 %n";
       "}" ]
 
+(* O(1) map (parity with the C backend's v0.1.68 hash index): a key type is
+   "index-safe" when we can emit a straight-line structural hash for it without
+   reading a possibly-uninitialized payload. That covers int / bool / str /
+   unit and tuples / records / all-nullary variants of index-safe types. A
+   variant that carries a payload is NOT index-safe here: hashing it would need
+   to branch on the tag to avoid reading a nullary value's garbage payload
+   field (C gets this for free via short-circuit `?:`, which LLVM `select`
+   can't do). Those rare keys keep the linear-scan runtime — correct, just
+   O(n). int / str (the common keys) are index-safe, so they become O(1). *)
+let rec map_key_index_safe (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyTuple ts -> List.for_all map_key_index_safe ts
+  | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+    let info = Hashtbl.find Typer.records rname in
+    List.for_all (fun (_, ft) -> map_key_index_safe ft) info.Typer.r_fields
+  | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+    let ctors = Hashtbl.find Exhaustive.type_variants vname in
+    List.for_all (fun (_, p) -> p = None) ctors
+  | _ -> false
+
+(* The two scalar hash primitives, mirroring codegen_c's __lang_hash_u64 /
+   __lang_hash_str. Emitted once when any index-safe map exists. *)
+let map_hash_runtime_llvm =
+  let m1 = Printf.sprintf "%Lu" 0xff51afd7ed558ccdL in
+  let m2 = Printf.sprintf "%Lu" 0xc4ceb9fe1a85ec53L in
+  String.concat "\n"
+    [ "define i64 @__lang_hash_u64(i64 %x0) {";
+      "entry:";
+      "  %a = lshr i64 %x0, 33";
+      "  %b = xor i64 %x0, %a";
+      Printf.sprintf "  %%c = mul i64 %%b, %s" m1;
+      "  %d = lshr i64 %c, 33";
+      "  %e = xor i64 %c, %d";
+      Printf.sprintf "  %%f = mul i64 %%e, %s" m2;
+      "  %g = lshr i64 %f, 33";
+      "  %h = xor i64 %f, %g";
+      "  ret i64 %h";
+      "}";
+      "define i64 @__lang_hash_str(ptr %s) {";
+      "entry:";
+      "  br label %loop";
+      "loop:";
+      "  %p = phi ptr [ %s, %entry ], [ %pn, %body ]";
+      "  %h = phi i64 [ 1469598103934665603, %entry ], [ %hn, %body ]";
+      "  %ch = load i8, ptr %p";
+      "  %z = icmp eq i8 %ch, 0";
+      "  br i1 %z, label %done, label %body";
+      "body:";
+      "  %che = zext i8 %ch to i64";
+      "  %hx = xor i64 %h, %che";
+      "  %hn = mul i64 %hx, 1099511628211";
+      "  %pn = getelementptr i8, ptr %p, i32 1";
+      "  br label %loop";
+      "done:";
+      "  ret i64 %h";
+      "}" ]
+
+(* Per-K structural hash helper `@mere_map_key_hash_<K>(<c_k> %a) -> i64`,
+   consistent with `@mere_map_key_eq_<K>` (equal keys hash equal). Only emitted
+   for index-safe K, so this is straight-line (no branches / phi needed). *)
+let emit_map_key_hash_helper_llvm (k_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let c_k = llvm_ty_of k_ty in
+  let reg_counter = ref 0 in
+  let fresh () = incr reg_counter; Printf.sprintf "%%h%d" !reg_counter in
+  let lines = ref [] in
+  let emit s = lines := s :: !lines in
+  (* combine an accumulator register (or seed constant string) with a component
+     hash: acc' = acc * 1000003 + hc. *)
+  let seed = Printf.sprintf "%Lu" 0xcbf29ce484222325L in
+  let combine acc hc =
+    let m = fresh () in
+    emit (Printf.sprintf "  %s = mul i64 %s, 1000003" m acc);
+    let r = fresh () in
+    emit (Printf.sprintf "  %s = add i64 %s, %s" r m hc);
+    r
+  in
+  (* widen a scalar register `a` of llvm type `t` to i64. *)
+  let widen t a =
+    if t = "i64" then a
+    else begin
+      let r = fresh () in
+      emit (Printf.sprintf "  %s = zext %s %s to i64" r t a);
+      r
+    end
+  in
+  let rec go ty a =
+    match Ast.walk ty with
+    | Ast.TyStr ->
+      let r = fresh () in
+      emit (Printf.sprintf "  %s = call i64 @__lang_hash_str(ptr %s)" r a);
+      r
+    | Ast.TyInt | Ast.TyUnit ->
+      let r = fresh () in
+      emit (Printf.sprintf "  %s = call i64 @__lang_hash_u64(i64 %s)" r a);
+      r
+    | Ast.TyBool ->
+      let w = widen "i1" a in
+      let r = fresh () in
+      emit (Printf.sprintf "  %s = call i64 @__lang_hash_u64(i64 %s)" r w);
+      r
+    | Ast.TyTuple ts ->
+      let tup_struct = tuple_struct_name ts in
+      let acc = ref seed in
+      List.iteri (fun i t ->
+        let a_f = fresh () in
+        emit (Printf.sprintf "  %s = extractvalue %%%s %s, %d" a_f tup_struct a i);
+        let hc = go t a_f in
+        acc := combine !acc hc) ts;
+      !acc
+    | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+      let info = Hashtbl.find Typer.records rname in
+      let acc = ref seed in
+      List.iteri (fun i (_, ft) ->
+        let a_f = fresh () in
+        emit (Printf.sprintf "  %s = extractvalue %%%s %s, %d" a_f rname a i);
+        let hc = go ft a_f in
+        acc := combine !acc hc) info.Typer.r_fields;
+      !acc
+    | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+      (* index-safe ⇒ all-nullary ⇒ hash the tag only. *)
+      let a_tag = fresh () in
+      emit (Printf.sprintf "  %s = extractvalue %%%s %s, 0" a_tag vname a);
+      let w = widen "i32" a_tag in
+      let r = fresh () in
+      emit (Printf.sprintf "  %s = call i64 @__lang_hash_u64(i64 %s)" r w);
+      r
+    | _ ->
+      (* best-effort scalar: treat as i64 and mix. *)
+      let w = widen c_k a in
+      let r = fresh () in
+      emit (Printf.sprintf "  %s = call i64 @__lang_hash_u64(i64 %s)" r w);
+      r
+  in
+  let final = go k_ty "%a" in
+  let body = List.rev !lines in
+  String.concat "\n"
+    ([ Printf.sprintf "define i64 @mere_map_key_hash_%s(%s %%a) {" k_tag c_k;
+       "entry:" ]
+     @ body
+     @ [ Printf.sprintf "  ret i64 %s" final; "}" ])
+
 (* Phase 15.14: per-K equality helper for Map. Supports int / bool / str /
    tuple (recursive). Emitted once per K type, shared across (K, V) pairs. *)
 let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
@@ -6890,9 +7033,10 @@ let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
          "}" ])
 
 (* Phase 15.10: Map[R, K, V] per-(K, V) runtime in LLVM IR.
-   Linear-scan, region-allocated parallel arrays (keys[], values[]).
-   K = int / str only; key equality is `icmp eq` for int, `@strcmp` for str. *)
-let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+   Linear-scan, region-allocated parallel arrays (keys[], values[]). Kept as
+   the fallback for key types that are not index-safe (see map_key_index_safe);
+   index-safe keys use emit_map_runtime_llvm_hashed (O(1)) instead. *)
+let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   let v_tag = ty_tag v_ty in
   let c_k = llvm_ty_of k_ty in
@@ -7115,6 +7259,393 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "not_found:";
       "  ret i32 0";
       "}" ]
+
+(* O(1) map runtime for index-safe keys: open-addressing hash index over the
+   insertion-order keys/values arrays, mirroring codegen_c's v0.1.68 design.
+   Struct gains idx (open-addressing table, -1 = empty) + idx_cap (power of 2).
+   get/has/set are O(1) amortized; map_iter / delete keep insertion order.
+   Loops use allocas (mem2reg-friendly) to avoid hand-written phi nodes. *)
+let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+  let k_tag = ty_tag k_ty in
+  let v_tag = ty_tag v_ty in
+  let c_k = llvm_ty_of k_ty in
+  let c_v = llvm_ty_of v_ty in
+  let sn = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  let p = sn in
+  let hash reg out = Printf.sprintf "  %s = call i64 @mere_map_key_hash_%s(%s %s)" out k_tag c_k reg in
+  let key_eq a b out = Printf.sprintf "  %s = call i1 @mere_map_key_eq_%s(%s %s, %s %s)" out k_tag c_k a c_k b in
+  String.concat "\n"
+    [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr, ptr, i32 }" sn;
+      "";
+      (* new *)
+      Printf.sprintf "define ptr @%s_new(ptr %%r) {" p;
+      "entry:";
+      "  %ci = alloca i32";
+      Printf.sprintf "  %%size_p = getelementptr %%%s, ptr null, i32 1" sn;
+      "  %size = ptrtoint ptr %size_p to i64";
+      "  %m = call ptr @__lang_region_alloc(ptr %r, i64 %size)";
+      Printf.sprintf "  %%ksize_p = getelementptr %s, ptr null, i32 1" c_k;
+      "  %ksize = ptrtoint ptr %ksize_p to i64";
+      Printf.sprintf "  %%vsize_p = getelementptr %s, ptr null, i32 1" c_v;
+      "  %vsize = ptrtoint ptr %vsize_p to i64";
+      "  %k_bytes = mul i64 %ksize, 4";
+      "  %v_bytes = mul i64 %vsize, 4";
+      "  %keys = call ptr @__lang_region_alloc(ptr %r, i64 %k_bytes)";
+      "  %values = call ptr @__lang_region_alloc(ptr %r, i64 %v_bytes)";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  store ptr %keys, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" sn;
+      "  store ptr %values, ptr %vp";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  store i32 0, ptr %lp";
+      Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%m, i32 0, i32 3" sn;
+      "  store i32 4, ptr %cp";
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%m, i32 0, i32 4" sn;
+      "  store ptr %r, ptr %rp";
+      "  %idx = call ptr @__lang_region_alloc(ptr %r, i64 32)";
+      Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+      "  store ptr %idx, ptr %ip";
+      Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  store i32 8, ptr %icp";
+      "  store i32 0, ptr %ci";
+      "  br label %fl";
+      "fl:";
+      "  %civ = load i32, ptr %ci";
+      "  %fdone = icmp sge i32 %civ, 8";
+      "  br i1 %fdone, label %fend, label %fbody";
+      "fbody:";
+      "  %fslot = getelementptr i32, ptr %idx, i32 %civ";
+      "  store i32 -1, ptr %fslot";
+      "  %cinext = add i32 %civ, 1";
+      "  store i32 %cinext, ptr %ci";
+      "  br label %fl";
+      "fend:";
+      "  ret ptr %m";
+      "}";
+      "";
+      (* reindex: rebuild idx at newcap slots from the keys[] array. *)
+      Printf.sprintf "define void @%s_reindex(ptr %%m, i32 %%newcap) {" p;
+      "entry:";
+      "  %i = alloca i32";
+      "  %s = alloca i32";
+      Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%m, i32 0, i32 4" sn;
+      "  %reg = load ptr, ptr %rp";
+      "  %nc64 = zext i32 %newcap to i64";
+      "  %nbytes = mul i64 %nc64, 4";
+      "  %ni = call ptr @__lang_region_alloc(ptr %reg, i64 %nbytes)";
+      "  store i32 0, ptr %i";
+      "  br label %fl";
+      "fl:";
+      "  %iv = load i32, ptr %i";
+      "  %fdone = icmp sge i32 %iv, %newcap";
+      "  br i1 %fdone, label %fend, label %fbody";
+      "fbody:";
+      "  %fslot = getelementptr i32, ptr %ni, i32 %iv";
+      "  store i32 -1, ptr %fslot";
+      "  %in = add i32 %iv, 1";
+      "  store i32 %in, ptr %i";
+      "  br label %fl";
+      "fend:";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  %len = load i32, ptr %lp";
+      "  %ncm1 = sub i32 %newcap, 1";
+      "  %ncm1_64 = zext i32 %ncm1 to i64";
+      "  store i32 0, ptr %i";
+      "  br label %pl";
+      "pl:";
+      "  %jv = load i32, ptr %i";
+      "  %pdone = icmp sge i32 %jv, %len";
+      "  br i1 %pdone, label %pend, label %pbody";
+      "pbody:";
+      Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%jv" c_k;
+      Printf.sprintf "  %%kk = load %s, ptr %%kslot" c_k;
+      hash "%kk" "%h";
+      "  %hm = and i64 %h, %ncm1_64";
+      "  %s0 = trunc i64 %hm to i32";
+      "  store i32 %s0, ptr %s";
+      "  br label %probe";
+      "probe:";
+      "  %sv = load i32, ptr %s";
+      "  %nislot = getelementptr i32, ptr %ni, i32 %sv";
+      "  %occ = load i32, ptr %nislot";
+      "  %empty = icmp eq i32 %occ, -1";
+      "  br i1 %empty, label %place, label %pnext";
+      "pnext:";
+      "  %sp1 = add i32 %sv, 1";
+      "  %spm = and i32 %sp1, %ncm1";
+      "  store i32 %spm, ptr %s";
+      "  br label %probe";
+      "place:";
+      "  store i32 %jv, ptr %nislot";
+      "  %jn = add i32 %jv, 1";
+      "  store i32 %jn, ptr %i";
+      "  br label %pl";
+      "pend:";
+      Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+      "  store ptr %ni, ptr %ip";
+      Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  store i32 %newcap, ptr %icp";
+      "  ret void";
+      "}";
+      "";
+      (* set *)
+      Printf.sprintf "define i32 @%s_set(ptr %%m, %s %%k, %s %%v) {" p c_k c_v;
+      "entry:";
+      "  %s = alloca i32";
+      hash "%k" "%h";
+      Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  %idxcap = load i32, ptr %icp";
+      "  %icm1 = sub i32 %idxcap, 1";
+      "  %icm1_64 = zext i32 %icm1 to i64";
+      "  %hm = and i64 %h, %icm1_64";
+      "  %s0 = trunc i64 %hm to i32";
+      "  store i32 %s0, ptr %s";
+      Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+      "  %idx = load ptr, ptr %ip";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" sn;
+      "  %values = load ptr, ptr %vp";
+      "  br label %probe";
+      "probe:";
+      "  %sv = load i32, ptr %s";
+      "  %slot = getelementptr i32, ptr %idx, i32 %sv";
+      "  %occ = load i32, ptr %slot";
+      "  %empty = icmp eq i32 %occ, -1";
+      "  br i1 %empty, label %insert, label %check";
+      "check:";
+      Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
+      Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
+      key_eq "%ck" "%k" "%eq";
+      "  br i1 %eq, label %update, label %pnext";
+      "update:";
+      Printf.sprintf "  %%uvslot = getelementptr %s, ptr %%values, i32 %%occ" c_v;
+      Printf.sprintf "  store %s %%v, ptr %%uvslot" c_v;
+      "  ret i32 0";
+      "pnext:";
+      "  %sp1 = add i32 %sv, 1";
+      "  %spm = and i32 %sp1, %icm1";
+      "  store i32 %spm, ptr %s";
+      "  br label %probe";
+      "insert:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%m, i32 0, i32 3" sn;
+      "  %cap = load i32, ptr %cp";
+      "  %full = icmp eq i32 %len, %cap";
+      "  br i1 %full, label %grow, label %do_store";
+      "grow:";
+      Printf.sprintf "  %%grp = getelementptr %%%s, ptr %%m, i32 0, i32 4" sn;
+      "  %greg = load ptr, ptr %grp";
+      "  %new_cap = mul i32 %cap, 2";
+      "  %gnc64 = zext i32 %new_cap to i64";
+      Printf.sprintf "  %%gksize_p = getelementptr %s, ptr null, i32 1" c_k;
+      "  %gksize = ptrtoint ptr %gksize_p to i64";
+      Printf.sprintf "  %%gvsize_p = getelementptr %s, ptr null, i32 1" c_v;
+      "  %gvsize = ptrtoint ptr %gvsize_p to i64";
+      "  %gk_bytes = mul i64 %gnc64, %gksize";
+      "  %gv_bytes = mul i64 %gnc64, %gvsize";
+      "  %new_keys = call ptr @__lang_region_alloc(ptr %greg, i64 %gk_bytes)";
+      "  %new_values = call ptr @__lang_region_alloc(ptr %greg, i64 %gv_bytes)";
+      "  %len64 = zext i32 %len to i64";
+      "  %kcopy = mul i64 %len64, %gksize";
+      "  %vcopy = mul i64 %len64, %gvsize";
+      "  call ptr @memcpy(ptr %new_keys, ptr %keys, i64 %kcopy)";
+      "  call ptr @memcpy(ptr %new_values, ptr %values, i64 %vcopy)";
+      "  store ptr %new_keys, ptr %kp";
+      "  store ptr %new_values, ptr %vp";
+      "  store i32 %new_cap, ptr %cp";
+      "  br label %do_store";
+      "do_store:";
+      "  %ckeys = load ptr, ptr %kp";
+      "  %cvalues = load ptr, ptr %vp";
+      Printf.sprintf "  %%kslot2 = getelementptr %s, ptr %%ckeys, i32 %%len" c_k;
+      Printf.sprintf "  store %s %%k, ptr %%kslot2" c_k;
+      Printf.sprintf "  %%vslot2 = getelementptr %s, ptr %%cvalues, i32 %%len" c_v;
+      Printf.sprintf "  store %s %%v, ptr %%vslot2" c_v;
+      "  %newlen = add i32 %len, 1";
+      "  store i32 %newlen, ptr %lp";
+      "  %nl10 = mul i32 %newlen, 10";
+      "  %ic7 = mul i32 %idxcap, 7";
+      "  %crowded = icmp sge i32 %nl10, %ic7";
+      "  br i1 %crowded, label %do_reindex, label %do_index";
+      "do_reindex:";
+      "  %newic = mul i32 %idxcap, 2";
+      Printf.sprintf "  call void @%s_reindex(ptr %%m, i32 %%newic)" p;
+      "  ret i32 0";
+      "do_index:";
+      "  %sv2 = load i32, ptr %s";
+      "  %slot2 = getelementptr i32, ptr %idx, i32 %sv2";
+      "  %insidx = sub i32 %newlen, 1";
+      "  store i32 %insidx, ptr %slot2";
+      "  ret i32 0";
+      "}";
+      "";
+      (* get *)
+      Printf.sprintf "define %s @%s_get(ptr %%m, %s %%k) {" c_v p c_k;
+      "entry:";
+      "  %s = alloca i32";
+      hash "%k" "%h";
+      Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  %idxcap = load i32, ptr %icp";
+      "  %icm1 = sub i32 %idxcap, 1";
+      "  %icm1_64 = zext i32 %icm1 to i64";
+      "  %hm = and i64 %h, %icm1_64";
+      "  %s0 = trunc i64 %hm to i32";
+      "  store i32 %s0, ptr %s";
+      Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+      "  %idx = load ptr, ptr %ip";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" sn;
+      "  %values = load ptr, ptr %vp";
+      "  br label %probe";
+      "probe:";
+      "  %sv = load i32, ptr %s";
+      "  %slot = getelementptr i32, ptr %idx, i32 %sv";
+      "  %occ = load i32, ptr %slot";
+      "  %empty = icmp eq i32 %occ, -1";
+      "  br i1 %empty, label %fail, label %check";
+      "check:";
+      Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
+      Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
+      key_eq "%ck" "%k" "%eq";
+      "  br i1 %eq, label %found, label %pnext";
+      "found:";
+      Printf.sprintf "  %%gvslot = getelementptr %s, ptr %%values, i32 %%occ" c_v;
+      Printf.sprintf "  %%gv = load %s, ptr %%gvslot" c_v;
+      Printf.sprintf "  ret %s %%gv" c_v;
+      "pnext:";
+      "  %sp1 = add i32 %sv, 1";
+      "  %spm = and i32 %sp1, %icm1";
+      "  store i32 %spm, ptr %s";
+      "  br label %probe";
+      "fail:";
+      "  call void @abort()";
+      "  unreachable";
+      "}";
+      "";
+      (* has *)
+      Printf.sprintf "define i1 @%s_has(ptr %%m, %s %%k) {" p c_k;
+      "entry:";
+      "  %s = alloca i32";
+      hash "%k" "%h";
+      Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  %idxcap = load i32, ptr %icp";
+      "  %icm1 = sub i32 %idxcap, 1";
+      "  %icm1_64 = zext i32 %icm1 to i64";
+      "  %hm = and i64 %h, %icm1_64";
+      "  %s0 = trunc i64 %hm to i32";
+      "  store i32 %s0, ptr %s";
+      Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+      "  %idx = load ptr, ptr %ip";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  %keys = load ptr, ptr %kp";
+      "  br label %probe";
+      "probe:";
+      "  %sv = load i32, ptr %s";
+      "  %slot = getelementptr i32, ptr %idx, i32 %sv";
+      "  %occ = load i32, ptr %slot";
+      "  %empty = icmp eq i32 %occ, -1";
+      "  br i1 %empty, label %not_found, label %check";
+      "check:";
+      Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
+      Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
+      key_eq "%ck" "%k" "%eq";
+      "  br i1 %eq, label %found, label %pnext";
+      "found:";
+      "  ret i1 1";
+      "pnext:";
+      "  %sp1 = add i32 %sv, 1";
+      "  %spm = and i32 %sp1, %icm1";
+      "  store i32 %spm, ptr %s";
+      "  br label %probe";
+      "not_found:";
+      "  ret i1 0";
+      "}";
+      "";
+      (* len *)
+      Printf.sprintf "define i64 @%s_len(ptr %%m) {" p;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  %len32 = load i32, ptr %lp";
+      "  %len = zext i32 %len32 to i64";
+      "  ret i64 %len";
+      "}";
+      "";
+      (* delete: find via index, shift keys/values down, reindex. *)
+      Printf.sprintf "define i32 @%s_delete(ptr %%m, %s %%k) {" p c_k;
+      "entry:";
+      "  %s = alloca i32";
+      "  %j = alloca i32";
+      hash "%k" "%h";
+      Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  %idxcap = load i32, ptr %icp";
+      "  %icm1 = sub i32 %idxcap, 1";
+      "  %icm1_64 = zext i32 %icm1 to i64";
+      "  %hm = and i64 %h, %icm1_64";
+      "  %s0 = trunc i64 %hm to i32";
+      "  store i32 %s0, ptr %s";
+      Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+      "  %idx = load ptr, ptr %ip";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" sn;
+      "  %values = load ptr, ptr %vp";
+      "  br label %probe";
+      "probe:";
+      "  %sv = load i32, ptr %s";
+      "  %slot = getelementptr i32, ptr %idx, i32 %sv";
+      "  %occ = load i32, ptr %slot";
+      "  %empty = icmp eq i32 %occ, -1";
+      "  br i1 %empty, label %not_found, label %check";
+      "check:";
+      Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
+      Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
+      key_eq "%ck" "%k" "%eq";
+      "  br i1 %eq, label %do_del, label %pnext";
+      "pnext:";
+      "  %sp1 = add i32 %sv, 1";
+      "  %spm = and i32 %sp1, %icm1";
+      "  store i32 %spm, ptr %s";
+      "  br label %probe";
+      "do_del:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  %len = load i32, ptr %lp";
+      "  store i32 %occ, ptr %j";
+      "  br label %shift";
+      "shift:";
+      "  %jv = load i32, ptr %j";
+      "  %j1 = add i32 %jv, 1";
+      "  %sdone = icmp sge i32 %j1, %len";
+      "  br i1 %sdone, label %dec, label %sbody";
+      "sbody:";
+      Printf.sprintf "  %%dk = getelementptr %s, ptr %%keys, i32 %%jv" c_k;
+      Printf.sprintf "  %%sk = getelementptr %s, ptr %%keys, i32 %%j1" c_k;
+      Printf.sprintf "  %%kv = load %s, ptr %%sk" c_k;
+      Printf.sprintf "  store %s %%kv, ptr %%dk" c_k;
+      Printf.sprintf "  %%dv = getelementptr %s, ptr %%values, i32 %%jv" c_v;
+      Printf.sprintf "  %%svl = getelementptr %s, ptr %%values, i32 %%j1" c_v;
+      Printf.sprintf "  %%vv = load %s, ptr %%svl" c_v;
+      Printf.sprintf "  store %s %%vv, ptr %%dv" c_v;
+      "  %jn = add i32 %jv, 1";
+      "  store i32 %jn, ptr %j";
+      "  br label %shift";
+      "dec:";
+      "  %newlen = sub i32 %len, 1";
+      "  store i32 %newlen, ptr %lp";
+      Printf.sprintf "  call void @%s_reindex(ptr %%m, i32 %%idxcap)" p;
+      "  ret i32 0";
+      "not_found:";
+      "  ret i32 0";
+      "}" ]
+
+(* Dispatch: index-safe keys get the O(1) hash runtime, others the linear one. *)
+let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+  if map_key_index_safe k_ty then emit_map_runtime_llvm_hashed k_ty v_ty
+  else emit_map_runtime_llvm_linear k_ty v_ty
 
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic type. Region-
    allocated mutable byte buffer; to_str returns a null-terminated copy
@@ -8996,6 +9527,21 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         emit_map_key_eq_helper_llvm k_ty :: acc
       end) map_instances []
   in
+  (* Per-K structural hash helper for index-safe keys (O(1) map runtime). *)
+  let map_key_hash_helpers =
+    let seen = Hashtbl.create 4 in
+    Hashtbl.fold (fun _key (k_ty, _) acc ->
+      let k_tag = ty_tag k_ty in
+      if Hashtbl.mem seen k_tag || not (map_key_index_safe k_ty) then acc
+      else begin
+        Hashtbl.add seen k_tag ();
+        emit_map_key_hash_helper_llvm k_ty :: acc
+      end) map_instances []
+  in
+  (* The scalar hash primitives are needed iff any index-safe map exists. *)
+  let map_hash_runtime =
+    if map_key_hash_helpers = [] then [] else [map_hash_runtime_llvm]
+  in
   let map_runtimes =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
       emit_map_runtime_llvm k_ty v_ty :: acc) map_instances []
@@ -9096,6 +9642,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !file_io_used_llvm then [file_io_runtime_llvm; ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
+    @ (if map_hash_runtime = [] then [] else map_hash_runtime @ [""])
+    @ (if map_key_hash_helpers = [] then [] else map_key_hash_helpers @ [""])
     @ (if map_key_eq_helpers = [] then [] else map_key_eq_helpers @ [""])
     @ (if map_runtimes = [] then [] else map_runtimes @ [""])
     @ (if map_iter_helpers = [] then [] else map_iter_helpers @ [""])
