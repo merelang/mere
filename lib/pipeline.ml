@@ -10,6 +10,11 @@ let parse_prelude () : Ast.top_decl list =
   prog.Ast.decls
 
 let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
+  (* Clear the parser's per-program declaration tables so a `type` / `module`
+     from a previously-parsed program in this process cannot leak into this one
+     (see Parser.reset_decl_state). Done BEFORE the prelude parse, which then
+     re-registers the prelude's own types / constructors. *)
+  Parser.reset_decl_state ();
   (* Phase 19.4: parse the prelude FIRST so parser.constructors etc.
      have the prelude's types/ctors registered before the user's source
      is tokenized + parsed. Otherwise `Cons` in user code lookups arity

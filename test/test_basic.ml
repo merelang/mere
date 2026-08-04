@@ -48,10 +48,20 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.111" Version.v "0.1.111";
+  check "version is 0.1.112" Version.v "0.1.112";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
+  (* v0.1.112: parser decl tables are reset per program, so a record type in
+     one program does not leak into the next and make a constructor pattern of
+     the same name mis-parse as a record pattern. First program registers a
+     record `Rect`; the second uses `Rect` as a variant constructor. *)
+  let _ = Pipeline.process "type Rect = { w: int, h: int }; let r = Rect { w = 2, h = 3 } in r.w" in
+  check "parser: a record type does not leak into a later program's ctor pattern"
+    (Pipeline.process
+       "type shape = Circ of int | Rect of int;\n\
+        let area = fn s -> (match s with Circ r -> r * r | Rect w -> w) in\n\
+        area (Rect 5)") "5";
   check "factorial"
     (Pipeline.process "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 6") "720";
   check "tuple basic"

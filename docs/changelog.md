@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.112 — 2026-08-04
+
+_Fix a parser declaration-table leak across programs parsed in one process.
+`Pipeline.parse_program` reset only `imported_files`, so the constructor /
+record / module / alias tables accumulated: a `type Rect = { ... }` record in
+one program left `Rect` registered, and a later program's constructor pattern
+`Rect r` then mis-parsed as a record pattern (`expected '{' for record
+pattern`). This bites any host that parses several programs in one process —
+the CI test binary hit it (a `module Shapes { type Rect = {...} }` test
+poisoning a later trait-object test's `Rect` constructor), aborting the run._
+
+_`Pipeline.parse_program` now calls `Parser.reset_decl_state ()` once before
+parsing the prelude (which re-registers its own types / constructors), giving
+each program a clean parser state. The REPL, which drives `Parser.parse_program`
+directly to accumulate definitions across lines, is unaffected. Regression test
+added; the full test binary now runs to completion (2289 checks, 0 failures)._
+
 ## v0.1.111 — 2026-08-04
 
 _Fix an inner-function over-capture on the LLVM and Wasm backends. When a lifted

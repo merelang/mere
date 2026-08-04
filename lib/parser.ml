@@ -127,6 +127,23 @@ let fresh_compose_var () =
    (parse-time expansion). *)
 let aliases : (string, string list * Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Reset the per-program declaration tables. These accumulate constructor /
+   record / module / alias registrations as decls are parsed, and are NOT
+   cleared by `parse_program` (which only resets `imported_files`), so a host
+   that parses several independent programs in one process (the test harness,
+   any REPL-over-Pipeline path) would otherwise leak a `type` from one program
+   into the next — e.g. a record named `Rect` in program A makes a constructor
+   pattern `Rect r` in program B mis-parse as a record pattern. Call this once
+   per top-level program parse, BEFORE the prelude is parsed (the prelude then
+   re-registers its own types/ctors). *)
+let reset_decl_state () =
+  Hashtbl.reset constructors;
+  Hashtbl.reset signatures;
+  Hashtbl.reset records;
+  Hashtbl.reset module_names;
+  Hashtbl.reset module_bindings;
+  Hashtbl.reset aliases
+
 (* Substitute alias params in body with args.  Used when a TyCon (name, args)
    references a known alias. *)
 let substitute_params params args body =
