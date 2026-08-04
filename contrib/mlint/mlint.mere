@@ -15,6 +15,7 @@ import "github.com/merelang/mere/contrib/parser/parser.mere";
 // --- small helpers ---------------------------------------------------------
 let any = fn f -> fn xs -> list_fold xs false (fn acc -> fn x -> (if acc then true else f x));
 let concat_map = fn f -> fn xs -> list_fold xs Nil (fn acc -> fn x -> list_append acc (f x));
+let lmap = fn f -> fn xs -> list_map xs f;   // (f, xs) order; prelude's is (xs, f)
 
 // --- diagnostics -----------------------------------------------------------
 type diag = Diag of str;
@@ -70,62 +71,114 @@ let rec occurs = fn name -> fn e ->
    | ERecordLit (_, fs) -> any (fn fld -> occurs name (match fld with (_, v) -> v)) fs
    | ERecordUpdate (a, fs) -> (if occurs name a then true else any (fn fld -> occurs name (match fld with (_, v) -> v)) fs));
 
-// --- AST walk: collect an unused-let diagnostic + recurse -----------------
-let rec lint_expr = fn e ->
-  let here =
-    (match e with
-     | ELet (PVar x, _, body) ->
-       (if x == "_" then Nil
-        else (if occurs x body then Nil
-              else Cons (Diag ("unused binding: " ++ x), Nil)))
-     | _ -> Nil) in
-  let subs =
-    (match e with
-     | EBin (_, a, b) -> list_append (lint_expr a) (lint_expr b)
-     | ECmp (_, a, b) -> list_append (lint_expr a) (lint_expr b)
-     | ELogic (_, a, b) -> list_append (lint_expr a) (lint_expr b)
-     | EApp (a, b) -> list_append (lint_expr a) (lint_expr b)
-     | ENeg a -> lint_expr a
-     | EAnnot (a, _) -> lint_expr a
-     | EFieldGet (a, _) -> lint_expr a
-     | ELet (_, v, b) -> list_append (lint_expr v) (lint_expr b)
-     | ELetRec (bs, b) -> list_append (concat_map (fn p -> lint_expr (match p with (_, v) -> v)) bs) (lint_expr b)
-     | EIf (c, t, f) -> list_append (lint_expr c) (list_append (lint_expr t) (lint_expr f))
-     | EFun (_, _, b) -> lint_expr b
-     | EConstr (_, Some a) -> lint_expr a
-     | EMatch (s, arms) ->
-       list_append (lint_expr s)
-         (concat_map (fn arm -> (match arm with (_, _, b) -> lint_expr b)) arms)
-     | ETuple es -> concat_map lint_expr es
-     | ERecordLit (_, fs) -> concat_map (fn fld -> lint_expr (match fld with (_, v) -> v)) fs
-     | ERecordUpdate (a, fs) -> list_append (lint_expr a) (concat_map (fn fld -> lint_expr (match fld with (_, v) -> v)) fs)
-     | _ -> Nil) in
-  list_append here subs;
-
-let lint_decl = fn d ->
-  (match d with
-   | TopLet (_, e) -> lint_expr e
-   | TopLetRec bs -> concat_map (fn p -> lint_expr (match p with (_, v) -> v)) bs
+// --- generic AST walk ------------------------------------------------------
+// Immediate sub-expressions of a node (binders' bound names are handled by
+// each rule, not here).
+let collect_subexprs = fn e ->
+  (match e with
+   | EBin (_, a, b) -> Cons (a, Cons (b, Nil))
+   | ECmp (_, a, b) -> Cons (a, Cons (b, Nil))
+   | ELogic (_, a, b) -> Cons (a, Cons (b, Nil))
+   | EApp (a, b) -> Cons (a, Cons (b, Nil))
+   | ENeg a -> Cons (a, Nil)
+   | EAnnot (a, _) -> Cons (a, Nil)
+   | EFieldGet (a, _) -> Cons (a, Nil)
+   | ELet (_, v, b) -> Cons (v, Cons (b, Nil))
+   | ELetRec (bs, b) -> list_append (lmap (fn p -> (match p with (_, v) -> v)) bs) (Cons (b, Nil))
+   | EIf (c, t, f) -> Cons (c, Cons (t, Cons (f, Nil)))
+   | EFun (_, _, b) -> Cons (b, Nil)
+   | EConstr (_, Some a) -> Cons (a, Nil)
+   | EMatch (s, arms) -> Cons (s, lmap (fn arm -> (match arm with (_, _, b) -> b)) arms)
+   | ETuple es -> es
+   | ERecordLit (_, fs) -> lmap (fn fld -> (match fld with (_, v) -> v)) fs
+   | ERecordUpdate (a, fs) -> Cons (a, lmap (fn fld -> (match fld with (_, v) -> v)) fs)
    | _ -> Nil);
 
-// --- lint rules as trait objects ------------------------------------------
-trait Rule 'a { check : 'a -> program -> diag list; }
+// Apply a per-node checker to every sub-expression of `e`.
+let rec walk_all = fn chk -> fn e ->
+  list_append (chk e) (concat_map (walk_all chk) (collect_subexprs e));
+
+// Every top-level expression in a program (each decl's value(s) + the main).
+let prog_exprs = fn prog ->
+  (match prog with (decls, main) ->
+    list_append
+      (concat_map (fn d -> (match d with
+        | TopLet (_, e) -> Cons (e, Nil)
+        | TopLetRec bs -> lmap (fn p -> (match p with (_, v) -> v)) bs
+        | _ -> Nil)) decls)
+      (Cons (main, Nil)));
+
+let rec member = fn x -> fn xs ->
+  (match xs with Nil -> false | Cons (h, t) -> (if h == x then true else member x t));
+
+// --- per-node checkers -----------------------------------------------------
+let chk_unused_let = fn e ->
+  (match e with
+   | ELet (PVar x, _, body) ->
+     (if x == "_" then Nil else (if occurs x body then Nil else Cons (Diag ("unused binding: " ++ x), Nil)))
+   | _ -> Nil);
+let chk_unused_param = fn e ->
+  (match e with
+   | EFun (x, _, body) ->
+     (if x == "_" then Nil else (if occurs x body then Nil else Cons (Diag ("unused parameter: " ++ x), Nil)))
+   | _ -> Nil);
+
+// Shadowing needs an environment of in-scope names, so it threads its own env
+// rather than using walk_all. (Match-arm binders aren't tracked yet.)
+let rec lint_shadow = fn env -> fn e ->
+  (match e with
+   | ELet (PVar x, v, body) ->
+     list_append
+       (if member x env then Cons (Diag ("shadowed binding: " ++ x), Nil) else Nil)
+       (list_append (lint_shadow env v) (lint_shadow (Cons (x, env)) body))
+   | EFun (x, _, body) ->
+     list_append
+       (if member x env then Cons (Diag ("shadowed binding: " ++ x), Nil) else Nil)
+       (lint_shadow (Cons (x, env)) body)
+   | ELetRec (bs, body) ->
+     let env2 = list_append (lmap (fn p -> (match p with (n, _) -> n)) bs) env in
+     list_append
+       (concat_map (fn p -> (match p with (_, v) -> lint_shadow env2 v)) bs)
+       (lint_shadow env2 body)
+   | _ -> concat_map (lint_shadow env) (collect_subexprs e));
+
+// --- lint rules as trait objects (heterogeneous `dyn Rule` list) ----------
+trait Rule 'a { rname : 'a -> str; check : 'a -> program -> diag list; }
 // Leading `|` so a single nullary variant isn't read as a type alias
 // (`type T = Ctor;` without the bar is parsed as an alias to a type `Ctor`).
 type unused_binding_rule = | UnusedBinding;
+type unused_param_rule   = | UnusedParam;
+type shadow_rule         = | ShadowedBinding;
 impl Rule unused_binding_rule {
-  check = fn r -> fn prog ->
-    (match prog with (decls, main) ->
-      list_append (concat_map lint_decl decls) (lint_expr main));
+  rname = fn r -> "unused-binding";
+  check = fn r -> fn prog -> concat_map (walk_all chk_unused_let) (prog_exprs prog);
+}
+impl Rule unused_param_rule {
+  rname = fn r -> "unused-param";
+  check = fn r -> fn prog -> concat_map (walk_all chk_unused_param) (prog_exprs prog);
+}
+impl Rule shadow_rule {
+  rname = fn r -> "shadowing";
+  check = fn r -> fn prog -> concat_map (lint_shadow Nil) (prog_exprs prog);
 }
 
-let rules = [dyn Rule UnusedBinding];
+let rules = [dyn Rule UnusedBinding, dyn Rule UnusedParam, dyn Rule ShadowedBinding];
 
+// Each rule consumer annotates its parameter as `dyn Rule`: without it the
+// typer infers a `Rule 'a =>` constraint (a dictionary-carrying value) rather
+// than object dispatch, which fails to compile on the native backends.
 let lint_program = fn prog ->
-  dedup (sort_diags (concat_map (fn ru -> check ru prog) rules));
+  dedup (sort_diags (concat_map (fn (ru : dyn Rule) -> check ru prog) rules));
 
-// --- driver: lint a sample with two deliberately-unused bindings ----------
-let sample = "let used = 10; let f = fn n -> (let unused1 = n + 1 in n * 2); let g = fn xs -> (match xs with Nil -> 0 | Cons (h, t) -> let unused2 = h in 99); used + f 3 + g Nil";
-let diags = lint_program (parse_program_ast sample);
-let _ = print ("mlint: " ++ str_of_int (list_len diags) ++ " finding(s)") in
+// --- driver ---------------------------------------------------------------
+// A built-in sample exercising all three rules (used when no file is given, so
+// the program runs on every backend); with a path argument it lints that file
+// (`args` / `read_file` are native/interp — a CLI linter's natural target).
+let sample = "let used = 10; let f = fn n -> (let unused1 = n + 1 in n * 2); let paramtest = fn unusedp -> 5; let shadowtest = fn x -> (let x = x + 1 in x); used + f 3 + paramtest 0 + shadowtest 7";
+let src = (match args () with
+           | Cons (path, _) -> read_file path
+           | Nil -> sample);
+let diags = lint_program (parse_program_ast src);
+let active = list_fold rules "" (fn acc -> fn (ru : dyn Rule) -> acc ++ rname ru ++ " ");
+let _ = print ("mlint [" ++ active ++ "]: " ++ str_of_int (list_len diags) ++ " finding(s)") in
 list_fold diags () (fn u -> fn d -> print ("  - " ++ diag_msg d))
