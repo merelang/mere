@@ -26,8 +26,8 @@ _Effect: deriving `Eq` / `Ord` for a variant or record key now compiles on all
 four backends, so ordset over such a key works everywhere. Locked by
 test/parity/struct_eq_cmp.mere (variant/record/tuple/list eq+cmp),
 derive_variant.mere, and two LLVM-IR test_basic assertions; parity 47/0, unit
-suite green. (Structural comparison on the Wasm backend remains a separate
-pre-existing gap.)_
+suite green. (The interp, C, and Wasm backends already implemented structural
+comparison — this brings LLVM to parity, so all four backends now agree.)_
 
 ## v0.1.109 — 2026-08-04
 
