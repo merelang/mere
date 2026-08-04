@@ -1,0 +1,15 @@
+// Map insertion-order + update-in-place + delete, shared by all backends.
+// Locks the ordering contract that the interp (newest-first prepend, reversed
+// on read) and the C/LLVM/Wasm parallel-array runtimes must agree on.
+let m = map_new ();
+let _ = map_set m 10 100;
+let _ = map_set m 20 200;
+let _ = map_set m 30 300;
+let _ = map_set m 20 222;       // update keeps original position
+let _ = map_set m 40 400;
+let _ = map_iter m (fn k -> fn v -> print (str_of_int k ++ "=" ++ str_of_int v));
+let _ = print "--";
+let _ = map_delete m 30;
+let _ = map_iter m (fn k -> fn v -> print (str_of_int k ++ "=" ++ str_of_int v));
+let _ = print (str_of_int (map_len m));
+print "done"

@@ -31,9 +31,10 @@ type value =
        polymorphic hash / eq (note: keys containing closures / refs are
        identified per-ref). The type is TyCon ("Map",
        [TyRef BR R TyUnit; K; V]).
-       Phase 27.1: the 2nd component is the insertion-order key list
-       (so that map_iter iterates in deterministic order). The Hashtbl
-       itself preserves O(1) lookup. *)
+       Phase 27.1: the 2nd component tracks insertion order (so map_iter
+       iterates deterministically). Stored newest-first for O(1) prepend
+       on insert; readers reverse it. The Hashtbl gives O(1) lookup, so a
+       map fills in O(n) rather than the old O(n^2) (`@ [k]` append). *)
   | V_channel of value Queue.t * Mutex.t * Condition.t * bool ref
   | V_file of in_channel                (* v0.1.59: streaming file read *)
   | V_rwfile of Unix.file_descr         (* v0.1.115: read/write handle (file_openrw / file_pwrite / file_pread) *)
@@ -122,9 +123,10 @@ and to_string = function
   | V_strbuf buf ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
   | V_map (tbl, keys) ->
+    (* keys is newest-first (O(1) prepend in map_set); reverse for order. *)
     let parts = List.map (fun k ->
       let v = Hashtbl.find tbl k in
-      to_string k ^ " => " ^ to_string v) !keys in
+      to_string k ^ " => " ^ to_string v) (List.rev !keys) in
     "Map[" ^ String.concat ", " parts ^ "]"
   | V_channel _ -> "<channel>"
   | V_file _ -> "<file>"
@@ -178,7 +180,7 @@ and to_json_string = function
       let v = Hashtbl.find tbl k in
       (* JSON object keys must be strings: use the key's string form. *)
       let ks = match k with V_str s -> s | _ -> to_string k in
-      Ast.escape_string ks ^ ":" ^ to_json_string v) !keys in
+      Ast.escape_string ks ^ ":" ^ to_json_string v) (List.rev !keys) in
     "{" ^ String.concat "," parts ^ "}"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
@@ -1334,9 +1336,12 @@ let builtin_map_set =
     | V_map (tbl, keys) ->
       V_builtin ("map_set_p1", fun k ->
         V_builtin ("map_set_p2", fun vv ->
-          (* Phase 27.1: track insertion order. Only append to keys list
-             for NEW keys; existing keys keep their original position. *)
-          if not (Hashtbl.mem tbl k) then keys := !keys @ [k];
+          (* Phase 27.1: track insertion order. Only record NEW keys;
+             existing keys keep their original position. The list is kept
+             newest-first (O(1) prepend); readers reverse it to recover
+             insertion order. Appending (`@ [k]`) was O(n) per new key =
+             O(n^2) to fill a map (measured this). *)
+          if not (Hashtbl.mem tbl k) then keys := k :: !keys;
           Hashtbl.replace tbl k vv;
           V_unit))
     | _ -> failwith "map_set: expected Map")
@@ -1477,12 +1482,13 @@ let builtin_map_iter =
     | V_map (tbl, keys) ->
       V_builtin ("map_iter_p1", fun f ->
         (* Phase 27.1: iterate in insertion order so output matches
-           C / LLVM / Wasm Map runtime (which all use parallel arrays). *)
+           C / LLVM / Wasm Map runtime (which all use parallel arrays).
+           keys is newest-first (O(1) prepend); reverse to get order. *)
         List.iter (fun k ->
           let vv = Hashtbl.find tbl k in
           let f_k = !apply_value_ref f k in
           ignore (!apply_value_ref f_k vv)
-        ) !keys;
+        ) (List.rev !keys);
         V_unit)
     | _ -> failwith "map_iter: expected Map")
 
