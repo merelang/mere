@@ -1820,9 +1820,43 @@ let rec parse_program_internal tokens =
         "expected `impl Trait Type { method = expr; ... }`"))
     | [] -> raise (Parse_error (Loc.dummy, "unexpected end after `impl`"))
   in
+  (* Parse a `derive` declaration given the tokens AFTER the `derive` keyword:
+     `derive Trait Type;` or `derive (T1, T2, ...) Type;`. Sugar for one empty
+     `impl Ti Type {}` per trait — each trait must be derivable (every method
+     has a default), which Trait_elab fills in. Returns the generated impls. *)
+  let parse_derive_after_keyword toks =
+    let traits, rest =
+      match toks with
+      | (_, T_lparen) :: rest ->
+        let rec loop acc toks =
+          match toks with
+          | (_, T_ident t) :: (_, T_comma) :: rest -> loop (t :: acc) rest
+          | (_, T_ident t) :: (_, T_rparen) :: rest -> (List.rev (t :: acc), rest)
+          | (pos, _) :: _ ->
+            raise (Parse_error (pos, "expected a trait name in the derive list"))
+          | [] -> raise (Parse_error (Loc.dummy, "unterminated derive list"))
+        in loop [] rest
+      | (_, T_ident t) :: rest -> ([t], rest)
+      | (pos, _) :: _ ->
+        raise (Parse_error (pos, "expected trait name(s) after `derive`"))
+      | [] -> raise (Parse_error (Loc.dummy, "unexpected end after `derive`"))
+    in
+    let target, rest = ty rest in
+    let rest =
+      match rest with
+      | (_, T_semi) :: r -> r
+      | (pos, _) :: _ ->
+        raise (Parse_error (pos, "expected ';' after `derive ... Type`"))
+      | [] -> raise (Parse_error (Loc.dummy, "expected ';' after derive"))
+    in
+    (List.map (fun tr -> Ast.Top_impl (tr, target, [])) traits, rest)
+  in
   let rec parse_module_body cur_path decls toks =
     match toks with
     | (_, T_rbrace) :: rest -> List.rev decls, rest
+    | (_, T_derive) :: rest ->
+      let impls, rest = parse_derive_after_keyword rest in
+      parse_module_body cur_path (List.rev_append impls decls) rest
     | (_, T_trait) :: rest ->
       (* Traits are global (like types); keep the decl unprefixed. *)
       let decl, rest = parse_trait_after_keyword rest in
@@ -2163,6 +2197,9 @@ let rec parse_program_internal tokens =
     | (_, T_impl) :: rest ->
       let decl, rest = parse_impl_after_keyword rest in
       parse_decls (decl :: decls) rest
+    | (_, T_derive) :: rest ->
+      let impls, rest = parse_derive_after_keyword rest in
+      parse_decls (List.rev_append impls decls) rest
     | (_, T_type) :: rest ->
       let decl, rest = parse_type_decl_after_keyword rest in
       parse_decls (decl :: decls) rest

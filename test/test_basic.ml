@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.108" Version.v "0.1.108";
+  check "version is 0.1.109" Version.v "0.1.109";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11913,6 +11913,18 @@ let () =
          impl Shape circ { area = fn s -> (match s with Circ r -> r * r); name = fn s -> \"c\"; }\n\
          let describe = fn (o : dyn Shape) -> area o in\n\
          describe (dyn Shape (Circ 5))")) "25";
+  check "trait: `derive` generates instances from a trait's structural defaults"
+    (Pipeline.process
+       ("trait Eq 'a { eq : 'a -> 'a -> bool = fn a -> fn b -> a == b; }\n\
+         trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool = fn a -> fn b -> a < b; }\n\
+         derive (Eq, Ord) int;\n\
+         (if lt 3 4 then 1 else 0) + (if eq 5 5 then 10 else 0)")) "11";
+  check_raises "trait: deriving a trait whose method has no default is rejected"
+    (fun () -> ignore (Pipeline.process
+       ("trait Foo 'a { foo : 'a -> int; }\n\
+         type t = A | B;\n\
+         derive Foo t;\n\
+         foo A")));
   check "trait: a program with no trait decls is unaffected (identity path)"
     (Pipeline.process "let f = fn x -> x + 1 in f 41") "42";
   check_raises "trait: use of an unimplemented instance is rejected"

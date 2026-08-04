@@ -3,11 +3,10 @@
 // user-defined `color` variant), each supplying its own Eq / Ord instance.
 import "github.com/merelang/mere/contrib/ordset/ordset.mere";
 
-// --- int keys ---
-impl Eq int  { eq = fn a -> fn b -> a == b; }
-impl Ord int { lt = fn a -> fn b -> a < b; }
+// --- int keys: `derive` the instances (Eq/Ord have structural defaults) ---
+derive (Eq, Ord) int;
 
-// --- user-defined key type ---
+// --- user-defined key type with a CUSTOM ordering (by rank, not structural) ---
 type color = Red | Green | Blue;
 let rank = fn c -> (match c with Red -> 0 | Green -> 1 | Blue -> 2);
 impl Eq color  { eq = fn a -> fn b -> rank a == rank b; }
