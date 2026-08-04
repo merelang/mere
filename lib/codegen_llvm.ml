@@ -3581,10 +3581,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     unsupported e.Ast.loc
       "channel_recv_timeout is unsupported in LLVM codegen \
        (v0.1.48 scope = interp + C)"
-  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" | "file_close" as fio); _ }, _) ->
-    (* v0.1.59: streaming file input is interp + C only. *)
+  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" | "file_close"
+                              | "file_openrw" | "file_pwrite" | "file_fsync" as fio); _ }, _) ->
+    (* v0.1.59: streaming file input is interp + C only.
+       v0.1.115: the read/write handle (file_openrw / file_pwrite / file_fsync)
+       is likewise interp + C only. *)
     unsupported e.Ast.loc
-      (fio ^ " is unsupported in LLVM codegen (v0.1.59 scope = interp + C)")
+      (fio ^ " is unsupported in LLVM codegen (scope = interp + C)")
   | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt"); _ }, _) ->
     (* v0.1.47: graceful-shutdown primitives are interp + C only (the
        worker-pool / server shape they serve is the native target). *)

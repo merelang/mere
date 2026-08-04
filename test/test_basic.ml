@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.114" Version.v "0.1.114";
+  check "version is 0.1.115" Version.v "0.1.115";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2922,6 +2922,38 @@ let () =
   assert_contains "codegen C: file_pread emits its seek+fread runtime"
     (codegen "let f = file_open \"/tmp/x\" in file_pread f 16 4")
     "fseek(f, (long)off, SEEK_SET)";
+  (* v0.1.115 (mbtree dogfood): positioned WRITE half. file_openrw opens a
+     read/write handle; file_pwrite seeks + fwrites a byte vec at an offset;
+     file_fsync flushes to stable storage. *)
+  check "file_openrw type"
+    (Pipeline.type_of "file_openrw") "(str -> File)";
+  check "file_fsync type"
+    (Pipeline.type_of "file_fsync") "(File -> unit)";
+  check "file_pwrite type"
+    (Pipeline.type_of "file_pwrite") "(File -> (int -> (Vec['a, int] -> int)))";
+  assert_contains "codegen C: file_openrw emits __lang_file_openrw"
+    (codegen "file_openrw \"/tmp/x\"") "__lang_file_openrw";
+  assert_contains "codegen C: file_pwrite emits __lang_file_pwrite"
+    (codegen "let f = file_openrw \"/tmp/x\" in file_pwrite f 8 (vec_new ())")
+    "__lang_file_pwrite";
+  assert_contains "codegen C: file_pwrite emits its seek+fwrite runtime"
+    (codegen "let f = file_openrw \"/tmp/x\" in file_pwrite f 8 (vec_new ())")
+    "fseek(f, (long)off, SEEK_SET)";
+  check "file_pwrite/pread round-trip via /tmp (write @ offset, read back)"
+    (let path = Filename.temp_file "mere_pwrite_test" ".db" in
+     Sys.remove path;
+     Pipeline.process
+       (Printf.sprintf
+          "{ let f = file_openrw %S in \
+             let v = vec_new () in \
+             let _ = vec_push v 65 in \
+             let _ = vec_push v 66 in \
+             let _ = file_pwrite f 4 v in \
+             let _ = file_fsync f in \
+             let back = file_pread f 4 2 in \
+             let _ = file_close f in \
+             vec_fold back \"\" (fn a -> fn b -> a ++ str_of_int b ++ \" \") }" path))
+    "\"65 66 \"";
   (* v0.1.17 (mk dogfood P5): an inline lambda passed to par_map capturing a
      host-fn param gets inner-lifted; the spawn closure that calls it must
      carry the lifted fn's captures in ITS env (else the injected arg is an

@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.115 — 2026-08-04
+
+_Positioned **write** — the write half of the file API, and the forcing
+function for an on-disk store (a paged B-tree dogfood, `mbtree`, comes next)._
+
+_`file_pread` (v0.1.83) could read an arbitrary window of a file, but there was
+no way to write one: `write_file` / `write_file_bytes` only replace a whole
+file. Three new builtins complete random-access file I/O, interp + C only (the
+LLVM/Wasm MVP backends have no filesystem and cleanly refuse):_
+- _`file_openrw : str -> File` — open a read/write handle, creating the file if
+  absent and never truncating an existing one (`r+b`, falling back to `w+b`)._
+- _`file_pwrite : File -> int -> Vec[int] -> int` — seek to the offset and write
+  the byte vec, extending the file past its end if needed; returns the count
+  written._
+- _`file_fsync : File -> unit` — flush buffered writes to stable storage
+  (`fflush` + `fsync`), for commit points in a durable store._
+
+_`file_pread` and `file_close` now also accept the read/write handle, so a store
+reads and writes through one `file_openrw` handle. On the interpreter the handle
+is a `Unix.file_descr` (`V_rwfile`); on C it is a single `FILE*`. Round-trips are
+byte-identical across interp and C._
+
+---
+
 ## v0.1.114 — 2026-08-04
 
 _`contrib/mlint` grows from a one-rule demo into a real linter, and forces a
