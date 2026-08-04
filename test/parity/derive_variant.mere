@@ -1,0 +1,11 @@
+// Deriving Eq / Ord for a variant type — the structural default (`a == b` /
+// `a < b`) now compiles on all four backends (LLVM structural ==/< landed in
+// v0.1.110). Previously this worked on interp / C / Wasm but not LLVM.
+trait Eq 'a { eq : 'a -> 'a -> bool = fn a -> fn b -> a == b; }
+trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool = fn a -> fn b -> a < b; }
+type color = Red | Green | Blue;
+derive (Eq, Ord) color;
+
+let bit = fn b -> (if b then 1 else 0);
+// eq G G = 1, lt R B = 1, lt B R = 0  =>  110b = 6
+print (str_of_int (bit (eq Green Green) * 4 + bit (lt Red Blue) * 2 + bit (lt Blue Red)))

@@ -191,6 +191,15 @@ let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
    the type (used as the function name suffix); value is the type. *)
 let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* v0.1.110: structural == / != and < <= > >= on a compound (tuple / record /
+   variant) lower to per-type `@eq_<tag>` (i1) and `@cmp_<tag>` (i64, <0/0/>0)
+   functions — the LLVM siblings of the C backend's eq_<tag>/cmp_<tag> and the
+   interpreter's value_eq / value_compare. Keyed by ty_tag; the value is the
+   type. A compound's eq/cmp recurses into its components, so these tables hold
+   the transitive closure. *)
+let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+let cmp_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 let is_recursive_variant_name (name : string) : bool =
   Hashtbl.mem recursive_variants name
 
@@ -2031,6 +2040,51 @@ let rec add_show_type (t : Ast.ty) : unit =
       | _ -> ()
     end
 
+(* Register `t` and (transitively) its component types into `tbl` — the set of
+   types that need an `@eq_<tag>` / `@cmp_<tag>` function. Mirrors add_show_type
+   (including the mono-instance registration so typedefs are emitted). *)
+let rec add_struct_deep_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
+  let t = Ast.walk t in
+  if not (ty_is_concrete t) then ()
+  else
+    let tag = ty_tag t in
+    if Hashtbl.mem tbl tag then ()
+    else begin
+      Hashtbl.add tbl tag t;
+      (match t with
+       | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+         let mono = mono_variant_name n args in
+         if not (Hashtbl.mem mono_variant_instances mono) then
+           Hashtbl.add mono_variant_instances mono (n, args)
+       | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+         let mono = mono_record_name n args in
+         if not (Hashtbl.mem mono_record_instances mono) then
+           Hashtbl.add mono_record_instances mono (n, args)
+       | _ -> ());
+      let go = add_struct_deep_type tbl in
+      match t with
+      | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> ()
+      | Ast.TyTuple ts -> List.iter go ts
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+        let (params, fields) = Hashtbl.find polymorphic_records n in
+        let mapping = List.combine params args in
+        List.iter (fun (_, ft) -> go (subst_params mapping ft)) fields
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+        List.iter (fun (_, ft) -> go ft) (record_fields n)
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+        let (params, variants) = Hashtbl.find polymorphic_variants n in
+        let sv = subst_variants params args variants in
+        List.iter (fun (_, arg_opt) ->
+          match arg_opt with Some t -> go t | None -> ()) sv
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+        List.iter (fun (_, arg_opt) ->
+          match arg_opt with Some t -> go t | None -> ()) (variant_shape n)
+      | _ -> ()
+    end
+
+let add_eq_type t = add_struct_deep_type eq_types t
+let add_cmp_type t = add_struct_deep_type cmp_types t
+
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
   let rec walk_expr (e : Ast.expr) =
     (match e.Ast.node with
@@ -2044,6 +2098,46 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
           let produced an undefined @show_int at clang time (same gap as
           the Wasm backend; found while smoke-testing bitwise builtins). *)
        add_show_type Ast.TyInt
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> walk_expr a; walk_expr b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
+    | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.With (_, v, b) -> walk_expr v; walk_expr b
+    | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
+    | Ast.Fun (_, _, b) -> walk_expr b
+    | Ast.Constr (_, Some a) -> walk_expr a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      walk_expr s;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
+    | Ast.Tuple es -> List.iter walk_expr es
+    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Ref (_, _, a) -> walk_expr a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
+    | Ast.Field_get (a, _) -> walk_expr a
+    | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
+  in
+  walk_expr root;
+  List.iter (fun f -> walk_expr f.body) fns
+
+(* v0.1.110: register every compound type that a `==` / `!=` (eq) or
+   `< <= > >=` (cmp) is applied to, plus its transitive components, so the
+   corresponding @eq_<tag> / @cmp_<tag> functions get emitted. *)
+let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
+  let rec walk_expr (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Cmp (op, a, _) ->
+       let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+       if llvm_needs_struct_eq a_ty then
+         (match op with
+          | Ast.Eq | Ast.Ne -> add_eq_type a_ty
+          | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge -> add_cmp_type a_ty)
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
@@ -2434,6 +2528,253 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   reg_counter := saved_reg;
   label_counter := saved_lbl;
   Printf.sprintf "define ptr @show_%s(%s %%x) {\n%s\n}" tag param_ty body
+
+(* v0.1.110: shared layout accessors for eq_/cmp_. Given a value register
+   `v` of a variant type, load its i32 tag and (per constructor) its payload,
+   handling recursive (pointer-to-node) and non-recursive (aggregate) layouts
+   exactly as emit_show_fn does. *)
+let variant_tag_reg mono recursive v =
+  let node_ty = "%" ^ mono ^ "_node" in
+  let r = fresh_reg () in
+  if recursive then begin
+    let p = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0" p node_ty v);
+    emit_instr (Printf.sprintf "  %s = load i32, ptr %s" r p)
+  end else
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" r mono v);
+  r
+
+let variant_payload_reg mono recursive v pty =
+  let node_ty = "%" ^ mono ^ "_node" in
+  let ptr_reg = fresh_reg () in
+  if recursive then begin
+    let pp = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1" pp node_ty v);
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" ptr_reg pp)
+  end else
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" ptr_reg mono v);
+  let pv = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = load %s, ptr %s" pv (llvm_ty_of pty) ptr_reg);
+  pv
+
+(* Variant shape as an ordered `(cname, payload_opt) list` for a TyCon; the
+   index in this list is the runtime tag (matching construction / show). *)
+let variant_shape_of (t : Ast.ty) : (string * string * bool * (string * Ast.ty option) list) option =
+  match Ast.walk t with
+  | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+    let (params, variants) = Hashtbl.find polymorphic_variants n in
+    let mono = mono_variant_name n args in
+    Some (n, mono, is_recursive_variant_name mono, subst_variants params args variants)
+  | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+    Some (n, n, is_recursive_variant_name n, variant_shape n)
+  | _ -> None
+
+(* Record fields as `(field, ty)` list plus the LLVM aggregate name. *)
+let record_fields_of (t : Ast.ty) : (string * (string * Ast.ty) list) option =
+  match Ast.walk t with
+  | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
+    let (params, fields) = Hashtbl.find polymorphic_records n in
+    let mapping = List.combine params args in
+    Some (mono_record_name n args,
+          List.map (fun (fn, ft) -> (fn, subst_params mapping ft)) fields)
+  | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
+    Some (n, record_fields n)
+  | _ -> None
+
+(* `define i1 @eq_<tag>(%ty %a, %ty %b)` — structural equality, short-circuit
+   via direct `ret`. Recurses through @eq_<comp> for each component. *)
+let emit_eq_fn (tag : string) (t : Ast.ty) : string =
+  let saved_instrs = !instrs in
+  let saved_reg = !reg_counter and saved_lbl = !label_counter in
+  reg_counter := 0; label_counter := 0; instrs := [];
+  let pty = llvm_ty_of t in
+  emit_instr "entry:";
+  (match Ast.walk t with
+   | Ast.TyInt | Ast.TyUnit ->
+     let r = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp eq i64 %%a, %%b" r);
+     emit_instr (Printf.sprintf "  ret i1 %s" r)
+   | Ast.TyBool ->
+     let r = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp eq i1 %%a, %%b" r);
+     emit_instr (Printf.sprintf "  ret i1 %s" r)
+   | Ast.TyFloat ->
+     let r = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = fcmp oeq double %%a, %%b" r);
+     emit_instr (Printf.sprintf "  ret i1 %s" r)
+   | Ast.TyStr ->
+     let c = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %%a, ptr %%b)" c);
+     let r = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r c);
+     emit_instr (Printf.sprintf "  ret i1 %s" r)
+   | Ast.TyArrow _ -> emit_instr "  ret i1 0"
+   | Ast.TyTuple ts ->
+     let tname = tuple_struct_name ts in
+     List.iteri (fun i et ->
+       let ea = fresh_reg () and eb = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%a, %d" ea tname i);
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%b, %d" eb tname i);
+       let ec = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i1 @eq_%s(%s %s, %s %s)"
+                     ec (ty_tag et) (llvm_ty_of et) ea (llvm_ty_of et) eb);
+       let cont = fresh_label "eq_cont_" and fail = fresh_label "eq_fail_" in
+       emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" ec cont fail);
+       emit_label fail; emit_instr "  ret i1 0";
+       emit_label cont) ts;
+     emit_instr "  ret i1 1"
+   | _ when record_fields_of t <> None ->
+     let (aggname, fields) = Option.get (record_fields_of t) in
+     List.iteri (fun i (_, ft) ->
+       let ea = fresh_reg () and eb = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%a, %d" ea aggname i);
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%b, %d" eb aggname i);
+       let ec = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i1 @eq_%s(%s %s, %s %s)"
+                     ec (ty_tag ft) (llvm_ty_of ft) ea (llvm_ty_of ft) eb);
+       let cont = fresh_label "eq_cont_" and fail = fresh_label "eq_fail_" in
+       emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" ec cont fail);
+       emit_label fail; emit_instr "  ret i1 0";
+       emit_label cont) fields;
+     emit_instr "  ret i1 1"
+   | _ when variant_shape_of t <> None ->
+     let (_, mono, recursive, variants) = Option.get (variant_shape_of t) in
+     let atag = variant_tag_reg mono recursive "%a" in
+     let btag = variant_tag_reg mono recursive "%b" in
+     let teq = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %s" teq atag btag);
+     let same = fresh_label "eq_same_" and diff = fresh_label "eq_diff_" in
+     emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" teq same diff);
+     emit_label diff; emit_instr "  ret i1 0";
+     emit_label same;
+     List.iteri (fun ctor_tag (_, arg_opt) ->
+       let arm = fresh_label "eq_arm_" and next = fresh_label "eq_next_" in
+       let c = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" c atag ctor_tag);
+       emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
+       emit_label arm;
+       (match arg_opt with
+        | None -> emit_instr "  ret i1 1"
+        | Some pty ->
+          let pa = variant_payload_reg mono recursive "%a" pty in
+          let pb = variant_payload_reg mono recursive "%b" pty in
+          let ec = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call i1 @eq_%s(%s %s, %s %s)"
+                        ec (ty_tag pty) (llvm_ty_of pty) pa (llvm_ty_of pty) pb);
+          emit_instr (Printf.sprintf "  ret i1 %s" ec));
+       emit_label next) variants;
+     emit_instr "  call void @abort()"; emit_instr "  unreachable"
+   | _ -> emit_instr "  ret i1 0");
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs; reg_counter := saved_reg; label_counter := saved_lbl;
+  Printf.sprintf "define i1 @eq_%s(%s %%a, %s %%b) {\n%s\n}" tag pty pty body
+
+(* `define i64 @cmp_<tag>(%ty %a, %ty %b)` — structural compare (<0/0/>0),
+   lexicographic, matching the interpreter's value_compare and C's cmp_<tag>. *)
+let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
+  let saved_instrs = !instrs in
+  let saved_reg = !reg_counter and saved_lbl = !label_counter in
+  reg_counter := 0; label_counter := 0; instrs := [];
+  let pty = llvm_ty_of t in
+  emit_instr "entry:";
+  (* three-way from two i1 predicates gt/lt: (gt - lt) as i64 *)
+  let emit_threeway gt lt =
+    let g = fresh_reg () and l = fresh_reg () and d = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = zext i1 %s to i64" g gt);
+    emit_instr (Printf.sprintf "  %s = zext i1 %s to i64" l lt);
+    emit_instr (Printf.sprintf "  %s = sub i64 %s, %s" d g l);
+    emit_instr (Printf.sprintf "  ret i64 %s" d)
+  in
+  (match Ast.walk t with
+   | Ast.TyInt | Ast.TyUnit ->
+     let gt = fresh_reg () and lt = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp sgt i64 %%a, %%b" gt);
+     emit_instr (Printf.sprintf "  %s = icmp slt i64 %%a, %%b" lt);
+     emit_threeway gt lt
+   | Ast.TyBool ->
+     let gt = fresh_reg () and lt = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp ugt i1 %%a, %%b" gt);
+     emit_instr (Printf.sprintf "  %s = icmp ult i1 %%a, %%b" lt);
+     emit_threeway gt lt
+   | Ast.TyFloat ->
+     let gt = fresh_reg () and lt = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = fcmp ogt double %%a, %%b" gt);
+     emit_instr (Printf.sprintf "  %s = fcmp olt double %%a, %%b" lt);
+     emit_threeway gt lt
+   | Ast.TyStr ->
+     let c = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %%a, ptr %%b)" c);
+     let r = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r c);
+     emit_instr (Printf.sprintf "  ret i64 %s" r)
+   | Ast.TyArrow _ -> emit_instr "  ret i64 0"
+   | Ast.TyTuple ts ->
+     List.iteri (fun i et ->
+       let tname = tuple_struct_name ts in
+       let ea = fresh_reg () and eb = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%a, %d" ea tname i);
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%b, %d" eb tname i);
+       let ci = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i64 @cmp_%s(%s %s, %s %s)"
+                     ci (ty_tag et) (llvm_ty_of et) ea (llvm_ty_of et) eb);
+       let nz = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = icmp ne i64 %s, 0" nz ci);
+       let ret = fresh_label "cmp_ret_" and cont = fresh_label "cmp_cont_" in
+       emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" nz ret cont);
+       emit_label ret; emit_instr (Printf.sprintf "  ret i64 %s" ci);
+       emit_label cont) ts;
+     emit_instr "  ret i64 0"
+   | _ when record_fields_of t <> None ->
+     let (aggname, fields) = Option.get (record_fields_of t) in
+     List.iteri (fun i (_, ft) ->
+       let ea = fresh_reg () and eb = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%a, %d" ea aggname i);
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%b, %d" eb aggname i);
+       let ci = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i64 @cmp_%s(%s %s, %s %s)"
+                     ci (ty_tag ft) (llvm_ty_of ft) ea (llvm_ty_of ft) eb);
+       let nz = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = icmp ne i64 %s, 0" nz ci);
+       let ret = fresh_label "cmp_ret_" and cont = fresh_label "cmp_cont_" in
+       emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" nz ret cont);
+       emit_label ret; emit_instr (Printf.sprintf "  ret i64 %s" ci);
+       emit_label cont) fields;
+     emit_instr "  ret i64 0"
+   | _ when variant_shape_of t <> None ->
+     let (_, mono, recursive, variants) = Option.get (variant_shape_of t) in
+     let atag = variant_tag_reg mono recursive "%a" in
+     let btag = variant_tag_reg mono recursive "%b" in
+     let teq = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %s" teq atag btag);
+     let same = fresh_label "cmp_same_" and diff = fresh_label "cmp_diff_" in
+     emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" teq same diff);
+     emit_label diff;
+     let gt = fresh_reg () and lt = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = icmp ugt i32 %s, %s" gt atag btag);
+     emit_instr (Printf.sprintf "  %s = icmp ult i32 %s, %s" lt atag btag);
+     emit_threeway gt lt;
+     emit_label same;
+     List.iteri (fun ctor_tag (_, arg_opt) ->
+       let arm = fresh_label "cmp_arm_" and next = fresh_label "cmp_next_" in
+       let c = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" c atag ctor_tag);
+       emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
+       emit_label arm;
+       (match arg_opt with
+        | None -> emit_instr "  ret i64 0"
+        | Some pty ->
+          let pa = variant_payload_reg mono recursive "%a" pty in
+          let pb = variant_payload_reg mono recursive "%b" pty in
+          let ci = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call i64 @cmp_%s(%s %s, %s %s)"
+                        ci (ty_tag pty) (llvm_ty_of pty) pa (llvm_ty_of pty) pb);
+          emit_instr (Printf.sprintf "  ret i64 %s" ci));
+       emit_label next) variants;
+     emit_instr "  call void @abort()"; emit_instr "  unreachable"
+   | _ -> emit_instr "  ret i64 0");
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs; reg_counter := saved_reg; label_counter := saved_lbl;
+  Printf.sprintf "define i64 @cmp_%s(%s %%a, %s %%b) {\n%s\n}" tag pty pty body
 
 (* Closure value layout: `{ ptr env, ptr fn }`. The fn pointer's
    concrete signature (T2 (ptr, T1)) is encoded via bitcast at call
@@ -2859,16 +3200,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = icmp %s i32 %s, 0" r (llvm_cmp_int op) cmp);
        r
-     | (Ast.TyTuple _ | Ast.TyCon _) when
-         (op = Ast.Eq || op = Ast.Ne) && llvm_needs_struct_eq a_ty ->
-       (* A compound value is an aggregate / pointer; `icmp eq i32` on it is
-          invalid IR. Structural == is implemented on interp / C / Wasm; the
-          LLVM backend (no deployment path) doesn't specialize it yet, so
-          fail clearly here instead of emitting broken IR. *)
-       let _ = ra and _ = rb in
-       unsupported e.Ast.loc
-         "structural == / != on a record / variant / tuple \
-          (use the interp, C, or Wasm backend; LLVM specialization pending)"
+     | (Ast.TyTuple _ | Ast.TyCon _) when llvm_needs_struct_eq a_ty ->
+       (* v0.1.110: a compound value is an aggregate / pointer, so `icmp` on it
+          is invalid IR. Structural equality lowers to `@eq_<tag>` (i1) and
+          ordering to `@cmp_<tag>` (i64, <0/0/>0), the per-type functions
+          emitted from eq_types / cmp_types (siblings of C's eq_/cmp_). *)
+       let tag = ty_tag a_ty in
+       let lty = llvm_ty_of a_ty in
+       (match op with
+        | Ast.Eq ->
+          let r = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call i1 @eq_%s(%s %s, %s %s)"
+                        r tag lty ra lty rb);
+          r
+        | Ast.Ne ->
+          let e0 = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call i1 @eq_%s(%s %s, %s %s)"
+                        e0 tag lty ra lty rb);
+          let r = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = xor i1 %s, true" r e0);
+          r
+        | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
+          let c = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call i64 @cmp_%s(%s %s, %s %s)"
+                        c tag lty ra lty rb);
+          let r = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = icmp %s i64 %s, 0"
+                        r (llvm_cmp_int op) c);
+          r)
      | Ast.TyFloat ->
        (* v0.1.44: float comparisons are fcmp on double (ordered). The
           icmp fallthrough was invalid IR on float operands. *)
@@ -8123,6 +8482,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset recursive_variants;
   Hashtbl.reset show_types;
+  Hashtbl.reset eq_types;
+  Hashtbl.reset cmp_types;
   Hashtbl.reset vec_instances;
   Hashtbl.reset vec_iter_instances;
   Hashtbl.reset map_iter_instances;
@@ -8334,6 +8695,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      up types only-used-via-show). *)
   collect_mono_instances main_expr fns;
   collect_show_types main_expr fns;
+  collect_eq_cmp_types main_expr fns;
   Hashtbl.iter (fun _ (vn, args) ->
     let (params, variants) = Hashtbl.find polymorphic_variants vn in
     let sv = subst_variants params args variants in
@@ -8424,6 +8786,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   end;
   let show_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
+  in
+  (* v0.1.110: structural eq_/cmp_ functions. No forward `declare`s needed —
+     LLVM IR lets a `call` reference a `define` that appears later in the
+     module, and a `declare` + `define` of the same symbol is a redefinition. *)
+  let eq_cmp_fn_defs =
+    Hashtbl.fold (fun tag t acc -> emit_eq_fn tag t :: acc) eq_types []
+    @ Hashtbl.fold (fun tag t acc -> emit_cmp_fn tag t :: acc) cmp_types []
   in
   (* Phase 25.3: lift inner fns to top-level. Must run BEFORE
      emit_fn_def so emit_expr can see inner_lifts_llvm during body emit.
@@ -8712,6 +9081,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if lifted_defs = [] then [] else lifted_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
+    @ (if eq_cmp_fn_defs = [] then [] else eq_cmp_fn_defs @ [""])
     @ (if anon_adapters = [] then [] else anon_adapters @ [""])
     @ (if !inner_lift_closure_pending_llvm = [] then []
        else
