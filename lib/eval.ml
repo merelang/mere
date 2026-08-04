@@ -36,6 +36,7 @@ type value =
        itself preserves O(1) lookup. *)
   | V_channel of value Queue.t * Mutex.t * Condition.t * bool ref
   | V_file of in_channel                (* v0.1.59: streaming file read *)
+  | V_rwfile of Unix.file_descr         (* v0.1.115: read/write handle (file_openrw / file_pwrite / file_pread) *)
     (* v0.1.47: the bool ref is the "closed" flag for graceful shutdown.
        channel_close sets it; channel_recv_opt returns None once the
        channel is closed and drained (workers can then return and be
@@ -127,6 +128,7 @@ and to_string = function
     "Map[" ^ String.concat ", " parts ^ "]"
   | V_channel _ -> "<channel>"
   | V_file _ -> "<file>"
+  | V_rwfile _ -> "<file>"
   | V_thread _ -> "<thread>"
 
 (* `to_json x` — structural JSON serialization of any value, the derive-y
@@ -142,7 +144,7 @@ and to_json_string = function
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "null"
-  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ | V_file _ -> "null"
+  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ | V_file _ | V_rwfile _ -> "null"
   | V_constr ("Nil", None) -> "[]"
   | V_constr ("Cons", Some (V_tuple [_; _])) as v ->
     (match try_as_list v with
@@ -2014,7 +2016,67 @@ let builtin_file_close =
   V_builtin ("file_close", fun v ->
     match v with
     | V_file ch -> close_in ch; V_unit
+    | V_rwfile fd -> (try Unix.close fd with Unix.Unix_error _ -> ()); V_unit
     | _ -> failwith "file_close: expected File")
+
+(* v0.1.115 (mbtree dogfood): read/write handle. `file_openrw path` opens the
+   file for reading and writing, creating it (empty) if absent and NOT
+   truncating an existing one — the open mode a random-access on-disk store
+   needs. Returns a File handle usable with file_pread / file_pwrite /
+   file_fsync / file_close. *)
+let builtin_file_openrw =
+  V_builtin ("file_openrw", fun v ->
+    match v with
+    | V_str path ->
+      (try V_rwfile (Unix.openfile path [Unix.O_RDWR; Unix.O_CREAT] 0o644)
+       with Unix.Unix_error (e, _, _) ->
+         failwith ("file_openrw: " ^ path ^ ": " ^ Unix.error_message e))
+    | _ -> failwith "file_openrw: expected str")
+
+(* `file_pwrite handle offset bytes` writes the Vec[int]'s bytes at `offset`
+   (extending the file if it writes past the current end) and returns the
+   number of bytes written. The write half of file_pread. *)
+let builtin_file_pwrite =
+  V_builtin ("file_pwrite", fun fv ->
+    match fv with
+    | V_rwfile fd ->
+      V_builtin ("file_pwrite_off", fun ov ->
+        match ov with
+        | V_int off ->
+          V_builtin ("file_pwrite_bytes", fun bv ->
+            match bv with
+            | V_vec arr ->
+              let a = !arr in
+              let len = Array.length a in
+              let buf = Bytes.create len in
+              Array.iteri (fun i x ->
+                match x with
+                | V_int b ->
+                  if b < 0 || b > 255 then
+                    failwith (Printf.sprintf
+                      "file_pwrite: byte value %d out of range 0..255" b);
+                  Bytes.set buf i (Char.chr b)
+                | _ -> failwith "file_pwrite: expected int vec") a;
+              ignore (Unix.lseek fd off Unix.SEEK_SET);
+              let rec write_all pos =
+                if pos >= len then ()
+                else
+                  let n = Unix.write fd buf pos (len - pos) in
+                  if n <= 0 then () else write_all (pos + n)
+              in
+              write_all 0;
+              V_int len
+            | _ -> failwith "file_pwrite: expected int vec")
+        | _ -> failwith "file_pwrite: offset expected int")
+    | _ -> failwith "file_pwrite: expected read/write File (use file_openrw)")
+
+(* `file_fsync handle` flushes buffered writes to stable storage. A durable
+   store calls it at commit points. *)
+let builtin_file_fsync =
+  V_builtin ("file_fsync", fun v ->
+    match v with
+    | V_rwfile fd -> (try Unix.fsync fd with Unix.Unix_error _ -> ()); V_unit
+    | _ -> failwith "file_fsync: expected read/write File (use file_openrw)")
 
 (* v0.1.83 (msqlite dogfood): positioned read. `file_pread ch off len` seeks
    to `off` and reads up to `len` bytes, returning a Vec[int]. Reads fewer
@@ -2038,6 +2100,28 @@ let builtin_file_pread =
               let buf = Bytes.create avail in
               really_input ch buf 0 avail;
               V_vec (ref (Array.init avail
+                (fun i -> V_int (Char.code (Bytes.get buf i)))))
+            | _ -> failwith "file_pread: length expected int")
+        | _ -> failwith "file_pread: offset expected int")
+    | V_rwfile fd ->
+      (* v0.1.115: positioned read on a read/write handle (file_openrw). *)
+      V_builtin ("file_pread_off", fun ov ->
+        match ov with
+        | V_int off ->
+          V_builtin ("file_pread_len", fun lv ->
+            match lv with
+            | V_int len ->
+              let len = if len < 0 then 0 else len in
+              ignore (Unix.lseek fd off Unix.SEEK_SET);
+              let buf = Bytes.create len in
+              let rec read_all pos =
+                if pos >= len then pos
+                else
+                  let n = Unix.read fd buf pos (len - pos) in
+                  if n <= 0 then pos else read_all (pos + n)
+              in
+              let got = read_all 0 in
+              V_vec (ref (Array.init got
                 (fun i -> V_int (Char.code (Bytes.get buf i)))))
             | _ -> failwith "file_pread: length expected int")
         | _ -> failwith "file_pread: offset expected int")
@@ -2122,6 +2206,9 @@ let initial_env : env =
     ("file_open", ref builtin_file_open);
     ("file_read_line", ref builtin_file_read_line);
     ("file_close", ref builtin_file_close);
+    ("file_openrw", ref builtin_file_openrw);
+    ("file_pwrite", ref builtin_file_pwrite);
+    ("file_fsync", ref builtin_file_fsync);
     ("channel_recv_timeout", ref builtin_channel_recv_timeout);
     ("par_map", ref builtin_par_map);
     ("read_line", ref builtin_read_line);

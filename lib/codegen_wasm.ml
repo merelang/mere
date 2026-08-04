@@ -2007,11 +2007,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     uses_threads := true;
     emit_expr ch_e;
     emit_instr "call $mere_channel_recv"
-  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" | "file_close" as fio); _ }, _)
+  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" | "file_close"
+                              | "file_openrw" | "file_pwrite" | "file_fsync" as fio); _ }, _)
     when not (List.mem_assoc fio !locals
               || Hashtbl.mem toplevel_fn_names fio
               || Hashtbl.mem inner_lifts_wasm fio) ->
-    (* v0.1.59: streaming file input is interp + C only. *)
+    (* v0.1.59: streaming file input is interp + C only.
+       v0.1.115: the read/write handle likewise (Wasm has no filesystem). *)
     unsupported e.Ast.loc
       (fio ^ " is unsupported in Wasm codegen (v0.1.59 scope = interp + C)")
   | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt" as cc); _ }, _)

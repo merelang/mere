@@ -1221,6 +1221,21 @@ let file_pread_scheme =
                Ast.TyArrow (Ast.TyInt,
                  Ast.TyCon ("Vec", [_fpr_region; Ast.TyInt])))) }
 
+(* v0.1.115 (mbtree dogfood): positioned WRITE on a read/write handle.
+   `file_pwrite handle offset bytes` writes the Vec[int]'s bytes at `offset`
+   and returns the count written — the write half of file_pread, and the
+   primitive a mutable on-disk store (a paged B-tree) needs. The handle comes
+   from `file_openrw : str -> File` (read+write, create-if-absent, no
+   truncate). `file_fsync : File -> unit` flushes to stable storage. *)
+let _fpw_region = fresh_var ()
+let file_pwrite_scheme =
+  let rid = match _fpw_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("File", []),
+             Ast.TyArrow (Ast.TyInt,
+               Ast.TyArrow (Ast.TyCon ("Vec", [_fpw_region; Ast.TyInt]),
+                 Ast.TyInt))) }
+
 (* v0.1.44 (Mandelbrot probe): the write half — PPM's real format is P6
    (raw bytes) and the P3 escape hatch cost 2.6x the file size. *)
 let _wfb_region = fresh_var ()
@@ -1499,6 +1514,8 @@ let initial_env : env =
        str_split cons cells); these read one line at a time. EOF is None —
        fixing read_line's ambiguous "" sentinel rather than copying it. *)
     ("file_open",      mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("File", []))));
+    ("file_openrw",    mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("File", []))));
+    ("file_fsync",     mono (Ast.TyArrow (Ast.TyCon ("File", []), Ast.TyUnit)));
     ("file_read_line", mono (Ast.TyArrow (Ast.TyCon ("File", []),
                               Ast.TyCon ("option", [Ast.TyStr]))));
     ("file_close",     mono (Ast.TyArrow (Ast.TyCon ("File", []), Ast.TyUnit)));
@@ -1529,6 +1546,7 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
     ("read_file_bytes", read_file_bytes_scheme);
     ("file_pread", file_pread_scheme);
+    ("file_pwrite", file_pwrite_scheme);
     ("write_file_bytes", write_file_bytes_scheme);
     (* Phase 44: file system primitives for the docs site SSG (paper-trial doc 47) *)
     ("list_dir",

@@ -284,6 +284,9 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    mere_vec_int). v0.1.44 adds the write half. *)
 let uses_read_file_bytes = ref false
 let uses_file_pread = ref false  (* v0.1.83: file_pread (positioned read) *)
+let uses_file_pwrite = ref false  (* v0.1.115: file_pwrite (positioned write) *)
+let uses_file_openrw = ref false  (* v0.1.115: file_openrw (read/write open) *)
+let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
@@ -2171,6 +2174,16 @@ let rec emit_expr (e : Ast.expr) : string =
        uses_file_pread := true;
        Printf.sprintf "__lang_file_pread(%s, %s, %s, %s)"
          (emit_expr ch_e) (emit_expr off_e) (emit_expr arg) region_var
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pwrite"; _ }, ch_e); _ }, off_e) ->
+       (* v0.1.115 (mbtree dogfood): positioned write on an open FILE* handle.
+          `file_pwrite ch off bytes` — seek to `off` and fwrite the byte vec;
+          returns the count written. `arg` is the byte vec (outermost arg). *)
+       if not (Hashtbl.mem vec_instances "int") then
+         Hashtbl.add vec_instances "int" Ast.TyInt;
+       uses_file_io := true;
+       uses_file_pwrite := true;
+       Printf.sprintf "__lang_file_pwrite(%s, %s, %s)"
+         (emit_expr ch_e) (emit_expr off_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e) ->
        (* v0.1.44: the write half. The vec arg guarantees the vec_int
           instance exists (its own c_type_of registered it). *)
@@ -2199,6 +2212,17 @@ let rec emit_expr (e : Ast.expr) : string =
           read_file) on a missing path. *)
        uses_file_io := true;
        Printf.sprintf "__lang_file_open(%s)" (emit_expr arg)
+     | Ast.Var "file_openrw" when not (user_shadows "file_openrw") ->
+       (* v0.1.115 (mbtree dogfood): open a read/write handle, creating the
+          file if absent and never truncating an existing one. *)
+       uses_file_io := true;
+       uses_file_openrw := true;
+       Printf.sprintf "__lang_file_openrw(%s)" (emit_expr arg)
+     | Ast.Var "file_fsync" when not (user_shadows "file_fsync") ->
+       (* Flush buffered writes to stable storage. *)
+       uses_file_io := true;
+       uses_file_fsync := true;
+       Printf.sprintf "__lang_file_fsync(%s)" (emit_expr arg)
      | Ast.Var "file_read_line" when not (user_shadows "file_read_line") ->
        (* One line without its newline, or None at EOF — option-wrapped
           like channel_recv_opt (Some=1 / None=0 fixed tags). *)
@@ -8115,6 +8139,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_instances;
   uses_read_file_bytes := false;
   uses_file_pread := false;
+  uses_file_pwrite := false;
+  uses_file_openrw := false;
+  uses_file_fsync := false;
   uses_file_io := false;
   uses_int_of_str := false;
   uses_write_file_bytes := false;
@@ -9173,6 +9200,54 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "    mere_vec_int_push(v, (long long)c);";
                "  }";
                "  return v;";
+               "}" ];
+           "" ])
+    @ (if not !uses_file_openrw then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.115 (mbtree dogfood): open a read/write handle, creating";
+               "   the file if absent and NOT truncating an existing one — the";
+               "   open mode a random-access on-disk store needs. \"r+b\" opens an";
+               "   existing file for update; if it does not exist, \"w+b\" creates";
+               "   it empty. */";
+               "static FILE* __lang_file_openrw(const char* path) {";
+               "  FILE* f = fopen(path, \"r+b\");";
+               "  if (!f) f = fopen(path, \"w+b\");";
+               "  if (!f) __lang_fail_impl(path);";
+               "  return f;";
+               "}" ];
+           "" ])
+    @ (if not !uses_file_pwrite then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.115 (mbtree dogfood): positioned write on an open handle.";
+               "   Seeks to `off` and writes the int vec's bytes (each 0..255),";
+               "   extending the file if it writes past the end. Returns the";
+               "   number of bytes written — the write half of file_pread. */";
+               "static long long __lang_file_pwrite(FILE* f, long long off, mere_vec_int* v) {";
+               "  if (off < 0) return 0;";
+               "  if (fseek(f, (long)off, SEEK_SET) != 0) return 0;";
+               "  for (int i = 0; i < v->len; i++) {";
+               "    long long b = v->data[i];";
+               "    if (b < 0 || b > 255) {";
+               "      fprintf(stderr, \"file_pwrite: byte value %lld out of range 0..255\\n\", b);";
+               "      exit(1);";
+               "    }";
+               "    fputc((int)b, f);";
+               "  }";
+               "  return (long long)v->len;";
+               "}" ];
+           "" ])
+    @ (if not !uses_file_fsync then []
+       else
+         [ String.concat "\n"
+             [ "/* v0.1.115 (mbtree dogfood): flush buffered writes to stable";
+               "   storage. fflush pushes the stdio buffer to the OS; fsync";
+               "   forces the OS to commit it to disk. */";
+               "static int __lang_file_fsync(FILE* f) {";
+               "  fflush(f);";
+               "  fsync(fileno(f));";
+               "  return 0; /* unit */";
                "}" ];
            "" ])
     @ (if not !uses_write_file_bytes then []
