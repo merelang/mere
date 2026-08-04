@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.114 — 2026-08-04
+
+_`contrib/mlint` grows from a one-rule demo into a real linter, and forces a
+C-backend codegen fix._
+
+_`mlint` now carries three rules, all as `dyn Rule` trait objects — unused
+bindings, unused parameters, and shadowed bindings (the last threading its own
+scope environment) — with a two-method trait (`rname` + `check`). It reads a
+source path from `args` and lints that file (falling back to a built-in
+sample), so it runs on the interpreter and the native C backend; the LLVM/Wasm
+MVP backends cleanly refuse `args`/`read_file` (no filesystem)._
+
+_C-backend fix (found by mlint, affects any `dyn Trait`): the arrow-type
+collector skipped **polymorphic** records' field types, but the struct emitter
+monomorphizes a generic trait dictionary `Trait__dict 'a` (left generic on
+`Trait__pack`'s dictionary parameter) at the TyParam-erased default `int`,
+emitting `Trait__dict_int`. When a method's field closure type at `'a = int`
+(`int -> R`) is instantiated nowhere else, the emitted struct referenced an
+undefined C type. `mlint`'s `check : 'a -> program -> diag list` triggered it
+(`int -> program -> diag list` appears nowhere else);
+`examples/trait_object.mere` compiled only because its `int -> int` /
+`int -> str` closures exist elsewhere. Fixed by walking polymorphic-record field
+types at their monomorphized instances in `collect_arrow_types`._
+
+_Ergonomics note recorded in `contrib/mlint/README.md`: a trait-object consumer
+must annotate its parameter as `dyn Trait` (`fn (ru : dyn Rule) -> …`) to select
+object dispatch; an unannotated `fn ru -> check ru …` is inferred with a
+`Rule 'a =>` dictionary constraint instead._
+
+_Full suite including the bootstrap fixpoint stays green — 2291 checks, 0
+failures. Line-numbered diagnostics remain deferred: the self-host AST is
+position-less, and adding spans would ripple through the whole self-host
+compiler plus the bootstrap._
+
+---
+
 ## v0.1.113 — 2026-08-04
 
 _A linter for Mere, written in Mere (`contrib/mlint`), plus two `contrib/parser`

@@ -7528,6 +7528,23 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
         let info = Hashtbl.find Typer.records name in
         if info.Typer.r_params = [] then
           List.iter (fun (_, ft) -> walk_ty ft) info.Typer.r_fields
+        else begin
+          (* Polymorphic record (e.g. a trait dictionary `Trait__dict 'a`):
+             the struct emitter monomorphizes it at `args`, with residual
+             TyParams erased to int (deep_erase_tyvars). A dict record left
+             fully generic — e.g. `Trait__pack`'s dictionary parameter — is
+             emitted as `Trait__dict_int`, whose field closure types
+             (`int -> R`) may appear nowhere else in the program. Walk the
+             substituted field types here so those closure typedefs are
+             collected and the emitted struct body stays well-formed. *)
+          let args_erased = List.map (fun a -> deep_erase_tyvars (Ast.walk a)) args in
+          let mapping =
+            try List.combine info.Typer.r_params args_erased
+            with Invalid_argument _ -> [] in
+          if mapping <> [] then
+            List.iter (fun (_, ft) ->
+              walk_ty (subst_params mapping ft)) info.Typer.r_fields
+        end
       end
     | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
