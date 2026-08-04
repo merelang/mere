@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.113 — 2026-08-04
+
+_A linter for Mere, written in Mere (`contrib/mlint`), plus two `contrib/parser`
+fixes it forced. `mlint` parses source into the shared self-host AST and runs
+lint rules over it — dogfooding the trait system on an AST-sized program: rules
+are `dyn Rule` trait objects, diagnostics `derive (Eq, Ord)` for dedup + sort,
+and `Ord` is a super-trait of `Eq`. Its one rule so far flags a `let` binding
+whose name never occurs in scope; it runs on all four backends._
+
+_Forced upstream in `contrib/parser`:_
+- _`parse_program_ast : str -> program` — the parser only exposed
+  `parse_str_program` (a debug string); AST consumers (a linter, an analyzer)
+  need the `program` value._
+- _the parser defined its own `list_append` fixed to `top_decl list`, which
+  shadowed the prelude's polymorphic `list_append` for every importer (so
+  `list_append` on any other element type failed to type). Renamed the private
+  helper to `append_top_decls`._
+
+_(Both are self-host compiler components; the full suite including the bootstrap
+fixpoint stays green — 2291 checks, 0 failures.) Recorded pain in
+contrib/mlint/README.md: the self-host AST is position-less (message-only
+diagnostics), and `type T = Ctor;` — a single nullary variant — parses as a
+type alias unless written `type T = | Ctor;`._
+
 ## v0.1.112 — 2026-08-04
 
 _Fix a parser declaration-table leak across programs parsed in one process.

@@ -1,0 +1,131 @@
+// contrib/mlint/mlint.mere — a tiny linter for Mere source, written in Mere.
+//
+// It parses a source string into the shared self-host AST
+// (contrib/parser/parser.mere's `parse_program_ast`) and runs a set of lint
+// rules over it. This dogfoods the trait system on a real, AST-sized program:
+//   - lint rules are `dyn Rule` values (dynamic dispatch over a heterogeneous
+//     list of rules), each with `check : 'a -> program -> diag list`;
+//   - diagnostics `derive (Eq, Ord)` so they can be deduplicated and sorted;
+//   - `Ord` is a super-trait of `Eq`, both carrying structural defaults.
+//
+// The self-host AST is position-less, so diagnostics are messages (no line
+// numbers) — a known limitation recorded in PAIN.md.
+import "github.com/merelang/mere/contrib/parser/parser.mere";
+
+// --- small helpers ---------------------------------------------------------
+let any = fn f -> fn xs -> list_fold xs false (fn acc -> fn x -> (if acc then true else f x));
+let concat_map = fn f -> fn xs -> list_fold xs Nil (fn acc -> fn x -> list_append acc (f x));
+
+// --- diagnostics -----------------------------------------------------------
+type diag = Diag of str;
+let diag_msg = fn d -> (match d with Diag m -> m);
+
+// Structural Eq / Ord for user types via builtin ==/< ; `derive` fills the
+// instances from these defaults, so `diag` gets both for free.
+trait Eq 'a  { eq : 'a -> 'a -> bool = fn a -> fn b -> a == b; }
+trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool = fn a -> fn b -> a < b; }
+derive (Eq, Ord) diag;
+
+// insertion sort + dedup adjacent, using the derived Ord/Eq on `diag`
+let rec insert_sorted = fn x -> fn xs ->
+  (match xs with
+   | Nil -> Cons (x, Nil)
+   | Cons (h, t) -> (if lt x h then Cons (x, Cons (h, t)) else Cons (h, insert_sorted x t)));
+let sort_diags = fn ds -> list_fold ds Nil (fn acc -> fn d -> insert_sorted d acc);
+let rec dedup = fn ds ->
+  (match ds with
+   | Nil -> Nil
+   | Cons (h, Nil) -> Cons (h, Nil)
+   | Cons (h, Cons (h2, t)) ->
+     (if eq h h2 then dedup (Cons (h2, t)) else Cons (h, dedup (Cons (h2, t)))));
+
+// --- free-occurrence check (conservative: ignores shadowing, so it never
+// reports a binding as unused when the name reappears) ----------------------
+let rec occurs = fn name -> fn e ->
+  (match e with
+   | EVar v -> v == name
+   | EInt _ -> false
+   | EFloat _ -> false
+   | EBool _ -> false
+   | EStr _ -> false
+   | EUnit -> false
+   | EBin (_, a, b) -> (if occurs name a then true else occurs name b)
+   | ECmp (_, a, b) -> (if occurs name a then true else occurs name b)
+   | ELogic (_, a, b) -> (if occurs name a then true else occurs name b)
+   | EApp (a, b) -> (if occurs name a then true else occurs name b)
+   | ENeg a -> occurs name a
+   | EAnnot (a, _) -> occurs name a
+   | EFieldGet (a, _) -> occurs name a
+   | ELet (_, v, b) -> (if occurs name v then true else occurs name b)
+   | ELetRec (bs, b) -> (if any (fn p -> occurs name (match p with (_, v) -> v)) bs then true else occurs name b)
+   | EIf (c, t, f) -> (if occurs name c then true else (if occurs name t then true else occurs name f))
+   | EFun (_, _, b) -> occurs name b
+   | EConstr (_, None) -> false
+   | EConstr (_, Some a) -> occurs name a
+   | EMatch (s, arms) ->
+     (if occurs name s then true
+      else any (fn arm -> (match arm with (_, g, b) ->
+        (if (match g with Some ge -> occurs name ge | None -> false) then true else occurs name b))) arms)
+   | ETuple es -> any (occurs name) es
+   | ERecordLit (_, fs) -> any (fn fld -> occurs name (match fld with (_, v) -> v)) fs
+   | ERecordUpdate (a, fs) -> (if occurs name a then true else any (fn fld -> occurs name (match fld with (_, v) -> v)) fs));
+
+// --- AST walk: collect an unused-let diagnostic + recurse -----------------
+let rec lint_expr = fn e ->
+  let here =
+    (match e with
+     | ELet (PVar x, _, body) ->
+       (if x == "_" then Nil
+        else (if occurs x body then Nil
+              else Cons (Diag ("unused binding: " ++ x), Nil)))
+     | _ -> Nil) in
+  let subs =
+    (match e with
+     | EBin (_, a, b) -> list_append (lint_expr a) (lint_expr b)
+     | ECmp (_, a, b) -> list_append (lint_expr a) (lint_expr b)
+     | ELogic (_, a, b) -> list_append (lint_expr a) (lint_expr b)
+     | EApp (a, b) -> list_append (lint_expr a) (lint_expr b)
+     | ENeg a -> lint_expr a
+     | EAnnot (a, _) -> lint_expr a
+     | EFieldGet (a, _) -> lint_expr a
+     | ELet (_, v, b) -> list_append (lint_expr v) (lint_expr b)
+     | ELetRec (bs, b) -> list_append (concat_map (fn p -> lint_expr (match p with (_, v) -> v)) bs) (lint_expr b)
+     | EIf (c, t, f) -> list_append (lint_expr c) (list_append (lint_expr t) (lint_expr f))
+     | EFun (_, _, b) -> lint_expr b
+     | EConstr (_, Some a) -> lint_expr a
+     | EMatch (s, arms) ->
+       list_append (lint_expr s)
+         (concat_map (fn arm -> (match arm with (_, _, b) -> lint_expr b)) arms)
+     | ETuple es -> concat_map lint_expr es
+     | ERecordLit (_, fs) -> concat_map (fn fld -> lint_expr (match fld with (_, v) -> v)) fs
+     | ERecordUpdate (a, fs) -> list_append (lint_expr a) (concat_map (fn fld -> lint_expr (match fld with (_, v) -> v)) fs)
+     | _ -> Nil) in
+  list_append here subs;
+
+let lint_decl = fn d ->
+  (match d with
+   | TopLet (_, e) -> lint_expr e
+   | TopLetRec bs -> concat_map (fn p -> lint_expr (match p with (_, v) -> v)) bs
+   | _ -> Nil);
+
+// --- lint rules as trait objects ------------------------------------------
+trait Rule 'a { check : 'a -> program -> diag list; }
+// Leading `|` so a single nullary variant isn't read as a type alias
+// (`type T = Ctor;` without the bar is parsed as an alias to a type `Ctor`).
+type unused_binding_rule = | UnusedBinding;
+impl Rule unused_binding_rule {
+  check = fn r -> fn prog ->
+    (match prog with (decls, main) ->
+      list_append (concat_map lint_decl decls) (lint_expr main));
+}
+
+let rules = [dyn Rule UnusedBinding];
+
+let lint_program = fn prog ->
+  dedup (sort_diags (concat_map (fn ru -> check ru prog) rules));
+
+// --- driver: lint a sample with two deliberately-unused bindings ----------
+let sample = "let used = 10; let f = fn n -> (let unused1 = n + 1 in n * 2); let g = fn xs -> (match xs with Nil -> 0 | Cons (h, t) -> let unused2 = h in 99); used + f 3 + g Nil";
+let diags = lint_program (parse_program_ast sample);
+let _ = print ("mlint: " ++ str_of_int (list_len diags) ++ " finding(s)") in
+list_fold diags () (fn u -> fn d -> print ("  - " ++ diag_msg d))

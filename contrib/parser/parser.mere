@@ -1573,10 +1573,10 @@ let prefix_decl = fn (m: str) -> fn (d: top_decl) ->
   | TopExternFn _ -> d  // extern decls aren't prefixed; their host name matters
   | TopExternType _ -> d;
 
-let rec list_append = fn (xs: top_decl list) -> fn (ys: top_decl list) ->
+let rec append_top_decls = fn (xs: top_decl list) -> fn (ys: top_decl list) ->
   match xs with
   | Nil -> ys
-  | Cons (h, t) -> Cons (h, list_append t ys);
+  | Cons (h, t) -> Cons (h, append_top_decls t ys);
 
 // === Intra-module bare-name rewrite =======================================
 //
@@ -1706,7 +1706,7 @@ let rec flatten_decls = fn (decls: top_decl list) ->
         let renamed = list_map flat_sub (fn (sd: top_decl) -> rename_decl sd renames) in
         list_map renamed (fn (sd: top_decl) -> prefix_decl name sd)
       | _ -> Cons (d, Nil)) in
-    list_append expanded (flatten_decls rest);
+    append_top_decls expanded (flatten_decls rest);
 
 // === Phase 54.13: constructor-arity rewrite ================================
 //
@@ -1896,6 +1896,17 @@ let parse_str_program = fn (src: str) ->
   let (result, rest) = parse_decls Nil toks in
   (match peek_tok rest with
     | TEof -> program_to_str (flatten_and_resolve result)
+    | _ -> fail ("line " ++ show (peek_line rest)
+                 ++ ": unexpected token after program"));
+
+// Like `parse_str_program`, but returns the resolved `program` AST value
+// (`top_decl list * expr`) instead of a debug string — for consumers that walk
+// the AST (a linter, an analyzer) rather than just print it.
+let parse_program_ast = fn (src: str) ->
+  let toks = tokenize src in
+  let (result, rest) = parse_decls Nil toks in
+  (match peek_tok rest with
+    | TEof -> flatten_and_resolve result
     | _ -> fail ("line " ++ show (peek_line rest)
                  ++ ": unexpected token after program"));
 
