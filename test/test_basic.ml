@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.109" Version.v "0.1.109";
+  check "version is 0.1.110" Version.v "0.1.110";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -6321,6 +6321,16 @@ let () =
     (let ll = vec_codegen_llvm
        "let v = vec_new () in let r = vec_push v 7 in vec_len v" in
      if String.length ll > 0 then "ok" else "empty") "ok";
+  (* v0.1.110: structural == / < on a variant lowers to @eq_<tag> / @cmp_<tag>
+     on the LLVM backend (previously UNSUP). *)
+  assert_contains "llvm: variant == emits a structural @eq_ helper"
+    (vec_codegen_llvm
+       "type c = A | B; let x = A in (if x == B then 1 else 0)")
+    "define i1 @eq_c(";
+  assert_contains "llvm: variant < emits a structural @cmp_ helper"
+    (vec_codegen_llvm
+       "type c = A | B; let x = A in (if x < B then 1 else 0)")
+    "define i64 @cmp_c(";
   (* P7: str ordering on the LLVM backend reuses libc strcmp (see the C-backend
      companion assertion near read_stdin). *)
   assert_contains "P7: LLVM backend lowers str `<` via strcmp"

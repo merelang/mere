@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.110 — 2026-08-04
+
+_Structural `==` / `!=` and `<` `<=` `>` `>=` on compound values (variant /
+record / tuple, including recursive ones like list) now work on the LLVM
+backend. Previously the LLVM backend refused structural `==` (a clean UNSUP)
+and mis-compiled structural ordering, so a program comparing compounds — e.g.
+`deriving Eq/Ord` for a variant key — only ran on interp / C / Wasm._
+
+_Implemented as the LLVM siblings of the C backend's `eq_<tag>` / `cmp_<tag>`
+(and the interpreter's `value_eq` / `value_compare`): per-type `define i1
+@eq_<tag>` and `define i64 @cmp_<tag>` (returning <0/0/>0) that recurse
+structurally over components — extractvalue for tuples/records, tag + boxed
+payload for variants (recursive variants via the pointer-to-node layout), and
+`strcmp` for strings — matching how `show_<tag>` already walks these shapes.
+The Cmp handler lowers `==`/`!=` to a call to `@eq_<tag>` and ordering to
+`@cmp_<tag>` compared against 0; the needed types (and their transitive
+components) are collected into `eq_types` / `cmp_types` and emitted._
+
+_Effect: deriving `Eq` / `Ord` for a variant or record key now compiles on all
+four backends, so ordset over such a key works everywhere. Locked by
+test/parity/struct_eq_cmp.mere (variant/record/tuple/list eq+cmp),
+derive_variant.mere, and two LLVM-IR test_basic assertions; parity 47/0, unit
+suite green. (Structural comparison on the Wasm backend remains a separate
+pre-existing gap.)_
+
 ## v0.1.109 — 2026-08-04
 
 _`derive` — generate trait instances from a trait's defaults. `derive (Eq, Ord)

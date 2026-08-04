@@ -1,0 +1,18 @@
+// Structural == / != and < <= > >= on compound values (variant / record /
+// tuple / list) now work on the LLVM backend (v0.1.110) too, via per-type
+// @eq_<tag> / @cmp_<tag> functions — previously an LLVM UNSUP/MISCOMPILE.
+type shape = Circ of int | Rect of (int * int);
+type pt = { x: int, y: int };
+
+let b_variant_eq = (Rect (2, 3) == Rect (2, 3));       // true
+let b_variant_lt = (Circ 5 < Rect (0, 0));             // Circ tag 0 < Rect tag 1 => true
+let b_record_lt  = (pt { x = 1, y = 2 } < pt { x = 1, y = 3 });  // true (y: 2 < 3)
+let b_tuple_ne   = ((1, "a") != (1, "b"));             // true
+let b_list_lt    = ([1, 2] < [1, 2, 3]);               // true (prefix)
+let b_list_gt    = ([1, 3] < [1, 2, 9]);               // false (3 > 2 at index 1)
+
+let bit = fn b -> (if b then 1 else 0);
+// 1 1 1 1 1 0  =>  read as base-2 = 0b111110 = 62
+print (str_of_int (
+  bit b_variant_eq * 32 + bit b_variant_lt * 16 + bit b_record_lt * 8 +
+  bit b_tuple_ne * 4 + bit b_list_lt * 2 + bit b_list_gt))
