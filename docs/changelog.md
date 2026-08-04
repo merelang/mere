@@ -4,6 +4,24 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.111 — 2026-08-04
+
+_Fix an inner-function over-capture on the LLVM and Wasm backends. When a lifted
+inner function A calls another lifted inner function B, A's captures are
+extended with B's (the transitive-capture closure) so A can forward them. But a
+capture of B that is bound *inside A's own body* — a let local, a nested-fn
+param, or a match-arm binder — is already in scope in A and must not be threaded
+in; otherwise A over-captures, and when A's host calls it the host is asked to
+pass a name it never had (`use of undefined value %row` on LLVM, `inner-lifted
+capture ``row`` not in scope` on Wasm)._
+
+_The interpreter and C backend already excluded body-bound names (v0.1.48); this
+ports that exclusion to LLVM and Wasm. Surfaced by examples/sudoku.mere, whose
+inner `cell` (which fills a row) captures the match-arm variable `row` bound in
+its enclosing `load` — sudoku now runs on all four backends (previously
+llvm:MISCOMPILE / wasm:UNSUP). Locked by
+test/parity/inner_capture_match_binder.mere; parity 47/0, unit suite green._
+
 ## v0.1.110 — 2026-08-04
 
 _Structural `==` / `!=` and `<` `<=` `>` `>=` on compound values (variant /

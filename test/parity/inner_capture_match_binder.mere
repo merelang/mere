@@ -1,0 +1,16 @@
+// An inner-lifted function (`cell`) that captures a MATCH-arm-bound variable
+// (`row`) of its enclosing inner function (`load`). The transitive-capture
+// closure must NOT propagate `row` up into `load` (it is bound inside load's
+// own body), or `load`'s host would be asked to pass a `row` it never had.
+// This over-capture was fixed for interp / C in v0.1.48; v0.1.111 ports the
+// exclusion to the LLVM and Wasm backends (surfaced by examples/sudoku.mere,
+// whose inner `cell` captures the match-bound `row`).
+let f = fn xs ->
+  let rec load = fn rs ->
+    (match rs with
+     | Nil -> 0
+     | Cons (row, t) ->
+       let rec cell = fn j -> (if j == 0 then 0 else row + cell (j - 1)) in
+       cell 3 + load t) in
+  load xs;
+print (str_of_int (f [10, 20]))   // (10*3) + (20*3) = 90

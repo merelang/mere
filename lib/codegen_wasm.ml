@@ -1222,12 +1222,64 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
        List.iter (fun (_, e) -> recurse e) fs);
     !acc
   in
+  (* v0.1.111 (port of codegen_c's v0.1.48 fix): names bound ANYWHERE inside a
+     lifted fn's own body (let locals, nested-fn params, match-arm binders,
+     with / region names). A callee's capture that is one of these is already
+     in scope inside lf, so it must NOT be threaded into lf's captures —
+     otherwise lf over-captures and, when lf is itself called, its host is
+     asked to pass a name it never had (surfacing as `inner-lifted capture X
+     not in scope`; found by sudoku, whose inner `cell` captures the match-arm
+     variable `row` bound in its host `load`). *)
+  let bound_names_in (e0 : Ast.expr) : string list =
+    let acc = ref [] in
+    let add n = acc := n :: !acc in
+    let rec go (e : Ast.expr) =
+      (match e.Ast.node with
+       | Ast.Fun (p, _, _) -> add p
+       | Ast.Let (pat, _, _) -> List.iter add (pattern_vars pat)
+       | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+       | Ast.With (n, _, _) -> add n
+       | Ast.Region_block (n, _) -> add n
+       | Ast.Match (_, arms) ->
+         List.iter (fun (pat, _, _) -> List.iter add (pattern_vars pat)) arms
+       | _ -> ());
+      match e.Ast.node with
+      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+      | Ast.Unit_lit | Ast.Var _ -> ()
+      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+      | Ast.App (a, b) -> go a; go b
+      | Ast.Neg a | Ast.Annot (a, _) -> go a
+      | Ast.Let (_, v, b) -> go v; go b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+      | Ast.With (_, v, b) -> go v; go b
+      | Ast.If (c, t, e_) -> go c; go t; go e_
+      | Ast.Fun (_, _, b) -> go b
+      | Ast.Constr (_, Some a) -> go a
+      | Ast.Constr (_, None) -> ()
+      | Ast.Match (s, arms) ->
+        go s;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> go ge | None -> ()); go b) arms
+      | Ast.Tuple es -> List.iter go es
+      | Ast.Region_block (_, b) -> go b
+      | Ast.Ref (_, _, a) -> go a
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+      | Ast.Field_get (a, _) -> go a
+      | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+    in
+    go e0; !acc
+  in
+  let bound_map : (string, string list) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun lf ->
+    Hashtbl.replace bound_map lf.l_name (bound_names_in lf.l_body)) all_lifted;
   let changed = ref true in
   while !changed do
     changed := false;
     List.iter (fun lf ->
       let host_map = mere_to_lifted_for lf.l_host in
       let called_inner = scan_for_called host_map [] lf.l_body lf.l_name in
+      let self_bound =
+        match Hashtbl.find_opt bound_map lf.l_name with Some bs -> bs | None -> [] in
       let cur_caps = Hashtbl.find captures_map lf.l_name in
       let new_caps = ref cur_caps in
       List.iter (fun called_lifted_name ->
@@ -1236,6 +1288,7 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
           if cap_n = lf.l_param then ()
           else if Hashtbl.mem host_map cap_n then ()
           else if List.mem cap_n !new_caps then ()
+          else if List.mem cap_n self_bound then ()
           else begin
             new_caps := !new_caps @ [cap_n];
             changed := true
