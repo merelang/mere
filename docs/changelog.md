@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.109 — 2026-08-04
+
+_`derive` — generate trait instances from a trait's defaults. `derive (Eq, Ord)
+int;` (or single `derive Eq int;`) expands to one empty `impl Ti T {}` per
+listed trait; each empty impl inherits the trait's default method bodies. A
+trait is therefore **derivable iff every method has a default** — deriving a
+trait with a method that has no default is the ordinary "missing method" error._
+
+_This makes structural instances a one-liner: a `trait Eq 'a { eq : 'a -> 'a ->
+bool = fn a -> fn b -> a == b; }` (default in terms of the builtin structural
+`==`) is derivable for any key type, and `derive (Eq, Ord) int;` gives working
+`Eq` / `Ord` instances with no hand-written bodies. Pure sugar over the empty
+impl + default-method machinery (v0.1.101); adds the `derive` keyword and works
+inside `module` bodies too._
+
+_`contrib/ordset` now carries structural defaults on its `Eq` / `Ord` traits and
+`examples/ordset_demo.mere` derives the `int` instances (its `color` key keeps a
+custom rank-based ordering). Note: structural `==` / `<` on a variant / record
+is still an LLVM-backend limitation, so deriving for such a type works on
+interp / C / Wasm but not LLVM (a pre-existing gap, independent of derive).
+Locked by test/parity/derive.mere and two test_basic assertions; parity 45/0,
+unit suite green._
+
 ## v0.1.108 — 2026-08-03
 
 _Trait objects: `dyn Trait`. A heterogeneous collection of values that all

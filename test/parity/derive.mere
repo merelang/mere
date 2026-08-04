@@ -1,0 +1,13 @@
+// `derive (Eq, Ord) int;` generates empty `impl Eq int {}` / `impl Ord int {}`,
+// which inherit the traits' structural defaults (`a == b` / `a < b`). A trait is
+// derivable iff every method has a default. Uses int keys so the builtin
+// comparisons run on every backend (structural ==/< on variants is an LLVM
+// limitation, unrelated to derive).
+trait Eq 'a { eq : 'a -> 'a -> bool = fn a -> fn b -> a == b; }
+trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool = fn a -> fn b -> a < b; }
+derive (Eq, Ord) int;
+
+let cmp3 = fn a -> fn b ->
+  (if lt a b then 0 else (if eq a b then 1 else 2));
+// cmp3 2 5 = 0, cmp3 4 4 = 1, cmp3 7 3 = 2  =>  0*100 + 1*10 + 2 = 12
+print (str_of_int (cmp3 2 5 * 100 + cmp3 4 4 * 10 + cmp3 7 3))

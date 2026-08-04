@@ -26,8 +26,12 @@
 // (`empty = Leaf : 'a tree`) can't be monomorphized on the LLVM backend (there
 // is no argument or use site to fix `'a`), so it is exposed as `empty ()`.
 module Ordset {
-  trait Eq 'a { eq : 'a -> 'a -> bool; }
-  trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool; }
+  // Structural defaults, so a consumer can `derive (Eq, Ord) T;` for a key type
+  // whose builtin `==` / `<` is the intended ordering (int / str / bool and, on
+  // the interp / C / Wasm backends, variant and record types). A key type that
+  // wants a custom ordering supplies its own `impl` method bodies instead.
+  trait Eq 'a { eq : 'a -> 'a -> bool = fn a -> fn b -> a == b; }
+  trait Ord 'a : Eq 'a { lt : 'a -> 'a -> bool = fn a -> fn b -> a < b; }
 
   type 'a tree = Leaf | Node of 'a tree * 'a * 'a tree;
 

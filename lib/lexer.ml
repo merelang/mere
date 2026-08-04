@@ -31,6 +31,7 @@ type token =
   | T_trait           (* trait keyword (user-defined interface for ad-hoc polymorphism) *)
   | T_impl            (* impl keyword (trait implementation for a concrete type) *)
   | T_dyn             (* dyn keyword (trait object: `dyn Trait` type / `dyn Trait e` pack) *)
+  | T_derive          (* derive keyword (`derive (Eq, Ord) T;` — empty impls from trait defaults) *)
   | T_amp             (* &  reference type prefix: `&R T` *)
   | T_match
   | T_with
@@ -420,6 +421,7 @@ let rec tokenize s =
           | "trait" -> T_trait
           | "impl" -> T_impl
           | "dyn" -> T_dyn
+          | "derive" -> T_derive
           | "match" -> T_match
           | "with" -> T_with
           | "when" -> T_when

@@ -8,10 +8,20 @@ sorted set for free; the same tree code runs at every instance type.
 ```mere
 import "github.com/merelang/mere/contrib/ordset/ordset.mere";
 
-impl Eq int  { eq = fn a -> fn b -> a == b; }
-impl Ord int { lt = fn a -> fn b -> a < b; }
+derive (Eq, Ord) int;   // structural instances from the traits' defaults
 
 let s = Ordset.to_list (Ordset.of_list [5, 3, 8, 3, 1]);  // [1, 3, 5, 8]
+```
+
+`Eq` / `Ord` carry structural defaults (`a == b` / `a < b`), so a key type whose
+builtin comparison is the intended ordering can be `derive`d. A key type that
+wants a *custom* ordering supplies its own method bodies instead:
+
+```mere
+type color = Red | Green | Blue;
+let rank = fn c -> (match c with Red -> 0 | Green -> 1 | Blue -> 2);
+impl Eq color  { eq = fn a -> fn b -> rank a == rank b; }
+impl Ord color { lt = fn a -> fn b -> rank a < rank b; }
 ```
 
 Traits and the `'a tree` type are **global** even though they are written inside
@@ -48,5 +58,6 @@ library*. It surfaced:
    an unrepresentable `'a`. Worked around by exposing `empty` as a thunk
    (`empty ()`), which monomorphizes per use. (A known "poly value can't
    monomorphize" limitation, not specific to this library.)
-4. **no `derive`** — `Eq` / `Ord` instances are written by hand per key type.
-   Ergonomic, not a blocker; a future `derive` would remove the boilerplate.
+4. **no `derive`** — originally `Eq` / `Ord` instances were hand-written per key
+   type. Resolved: traits carry structural defaults and `derive (Eq, Ord) T;`
+   generates the empty instances that inherit them.
