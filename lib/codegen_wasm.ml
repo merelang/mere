@@ -2351,6 +2351,28 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr s_e;
     emit_expr n_e;
     emit_instr "call $__lang_str_count"
+  (* Wasm host stubs (browser/worker have no filesystem, argv or a real process
+     exit). Constant stubs for the builtins — no host import needed. Guarded
+     against a user rebinding the name, like the concurrency builtins above.
+     `getenv` is a user `extern` and resolves through the host import object. *)
+  | Ast.App ({ node = Ast.Var "file_exists"; _ }, path_e)
+    when not (List.mem_assoc "file_exists" !locals) ->
+    (* no filesystem — File.exist? is always false. *)
+    emit_expr path_e;
+    emit_instr "drop";
+    emit_instr "i32.const 0"
+  | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
+    when not (List.mem_assoc "print_err" !locals) ->
+    (* stderr — route to the same host sink as print. *)
+    emit_expr arg;
+    emit_instr "call $puts";
+    emit_instr "i32.const 0"
+  | Ast.App ({ node = Ast.Var "exit"; _ }, code_e)
+    when not (List.mem_assoc "exit" !locals) ->
+    (* no process to exit — evaluate the code for effect, then trap. *)
+    emit_expr code_e;
+    emit_instr "drop";
+    emit_instr "unreachable"
   | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
     (* Phase 26.5: WASI-lite — read_file delegated to host import. *)
     file_io_used := true;
