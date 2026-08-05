@@ -146,6 +146,10 @@ let str_split_used_llvm = ref false
 let str_join_used_llvm = ref false
 let str_count_used_llvm = ref false
 let file_io_used_llvm = ref false
+(* binary file I/O: gated separately because the runtime references the
+   mere_vec_int runtime (which is only emitted when an int vec is used). *)
+let uses_read_file_bytes_llvm = ref false
+let uses_write_file_bytes_llvm = ref false
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
 let logger_used = ref false
@@ -4101,14 +4105,29 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_read_file(ptr %s)" r pv);
     r
-  | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, _) ->
-    unsupported e.Ast.loc
-      "read_file_bytes is unsupported in LLVM codegen (v0.1.43 scope = \
-       interp + C)"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, _); _ }, _) ->
-    unsupported e.Ast.loc
-      "write_file_bytes is unsupported in LLVM codegen (v0.1.44 scope = \
-       interp + C)"
+  | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, path_e) ->
+    (* returns Vec[R, int]; resolve R from the result type like vec_new. *)
+    uses_read_file_bytes_llvm := true;
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let region_reg =
+      match Option.map Ast.walk e.Ast.ty with
+      | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
+        if r = "__heap" then "@__lang_default_region"
+        else (match List.assoc_opt r !current_regions with
+              | Some reg -> reg | None -> "@__lang_default_region")
+      | _ -> "@__lang_default_region"
+    in
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_read_file_bytes(ptr %s, ptr %s)" r pv region_reg); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e); _ }, vec_e) ->
+    uses_write_file_bytes_llvm := true;
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let pv = emit_expr env path_e in
+    let vv = emit_expr env vec_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_write_file_bytes(ptr %s, ptr %s)" r pv vv);
+    "0"  (* write_file_bytes : ... -> unit *)
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc
       "list_dir is unsupported in LLVM codegen (Phase 44 MVP scope = interp + C only)"
@@ -9245,6 +9264,78 @@ let file_io_runtime_llvm =
       "  ret i32 0";
       "}" ]
 
+(* Binary file I/O: read/write a whole file as an int vec (0..255 per byte),
+   mirroring the C backend. Gated separately because it references the
+   mere_vec_int runtime; the emit site registers the int vec instance. *)
+let file_bytes_runtime_llvm =
+  String.concat "\n"
+    [ "define ptr @__lang_read_file_bytes(ptr %path, ptr %r) {";
+      "entry:";
+      "  %i = alloca i64";
+      "  %f = call ptr @fopen(ptr %path, ptr @.fopen_rb)";
+      "  %isnull = icmp eq ptr %f, null";
+      "  br i1 %isnull, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_impl(ptr %path)";
+      "  unreachable";
+      "ok:";
+      "  %_se = call i32 @fseek(ptr %f, i64 0, i32 2)";
+      "  %len = call i64 @ftell(ptr %f)";
+      "  %_ss = call i32 @fseek(ptr %f, i64 0, i32 0)";
+      "  %v = call ptr @mere_vec_int_new(ptr %r)";
+      "  %cap = add i64 %len, 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %_rd = call i64 @fread(ptr %buf, i64 1, i64 %len, ptr %f)";
+      "  %_c = call i32 @fclose(ptr %f)";
+      "  store i64 0, ptr %i";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i64, ptr %i";
+      "  %done = icmp sge i64 %iv, %len";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %bp = getelementptr i8, ptr %buf, i64 %iv";
+      "  %byte = load i8, ptr %bp";
+      "  %x = zext i8 %byte to i64";
+      "  %ign = call i32 @mere_vec_int_push(ptr %v, i64 %x)";
+      "  %inext = add i64 %iv, 1";
+      "  store i64 %inext, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  ret ptr %v";
+      "}";
+      "define i32 @__lang_write_file_bytes(ptr %path, ptr %v) {";
+      "entry:";
+      "  %i = alloca i32";
+      "  %bufp = alloca i8";
+      "  %f = call ptr @fopen(ptr %path, ptr @.fopen_wb)";
+      "  %isnull = icmp eq ptr %f, null";
+      "  br i1 %isnull, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_impl(ptr %path)";
+      "  unreachable";
+      "ok:";
+      "  %n64 = call i64 @mere_vec_int_len(ptr %v)";
+      "  %n = trunc i64 %n64 to i32";
+      "  store i32 0, ptr %i";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i32, ptr %i";
+      "  %done = icmp sge i32 %iv, %n";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %x = call i64 @mere_vec_int_get(ptr %v, i32 %iv)";
+      "  %byte = trunc i64 %x to i8";
+      "  store i8 %byte, ptr %bufp";
+      "  %_w = call i64 @fwrite(ptr %bufp, i64 1, i64 1, ptr %f)";
+      "  %inext = add i32 %iv, 1";
+      "  store i32 %inext, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  %_c = call i32 @fclose(ptr %f)";
+      "  ret i32 0";
+      "}" ]
+
 (* Q-012: the spawn trampoline. pthread_create runs it with a heap-allocated
    {env, fn} pair; it invokes the closure as fn(env, unit=0) and frees the
    pair. Closure fns lower to `i32 (ptr, i32)` for a unit -> unit closure. *)
@@ -9402,6 +9493,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_join_used_llvm := false;
   str_count_used_llvm := false;
   file_io_used_llvm := false;
+  uses_read_file_bytes_llvm := false;
+  uses_write_file_bytes_llvm := false;
   logger_used := false;
   metrics_used := false;
   show_string_globals := [];
@@ -9958,7 +10051,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
     @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
-    @ (if !file_io_used_llvm then [file_io_runtime_llvm; ""] else [])
+    @ (if !file_io_used_llvm || !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
+       then [file_io_runtime_llvm; ""] else [])
+    @ (if !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
+       then [file_bytes_runtime_llvm; ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_hash_runtime = [] then [] else map_hash_runtime @ [""])
