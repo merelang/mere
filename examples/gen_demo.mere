@@ -1,0 +1,32 @@
+// contrib/gen demo — thread-backed generators (lazy pull iteration) on the
+// existing spawn + channel primitives, no coroutines. Shows the four API
+// entry points, including a recursive producer (a range emitted from inside
+// recursion). Every generator here is FULLY DRAINED so the producer thread
+// finishes and exits — required on the worker-based Wasm host, where a
+// partially consumed generator (early `take`) would leave a worker alive and
+// keep the process from exiting. See contrib/gen/README.md for that caveat.
+import "../contrib/gen/gen.mere";
+
+let rec sum_list = fn xs -> match xs with Nil -> 0 | Cons (h, t) -> h + sum_list t;
+let rec len_list = fn xs -> match xs with Nil -> 0 | Cons (x, t) -> 1 + len_list t;
+
+// finite producer, drained by take (n larger than the stream)
+let g1 = Gen.make (fn y -> let _ = y 10 in let _ = y 20 in y 30);
+let l1 = Gen.take g1 10;
+let _ = print (str_of_int (len_list l1));   // 3
+let _ = print (str_of_int (sum_list l1));   // 60
+
+// fold drains the whole stream into an accumulator
+let g2 = Gen.make (fn y -> let _ = y 1 in let _ = y 2 in let _ = y 3 in let _ = y 4 in y 5);
+let _ = print (str_of_int (Gen.fold g2 (fn acc -> fn x -> acc + x) 0));   // 15
+
+// recursive producer over a range 0..7, fully drained (take n >= length)
+let rec emit = fn y -> fn i -> fn n -> if i >= n then () else let _ = y i in emit y (i + 1) n;
+let g3 = Gen.make (fn y -> emit y 0 7);
+let _ = print (str_of_int (sum_list (Gen.take g3 100)));   // 0+1+...+6 = 21
+
+// next directly, including exhaustion (None once the producer returns)
+let g4 = Gen.make (fn y -> let _ = y 99 in ());
+let _ = print (str_of_int (match Gen.next g4 with Some v -> v | None -> 0 - 1));   // 99
+let _ = print (str_of_int (match Gen.next g4 with Some v -> v | None -> 0 - 1));   // -1
+print "done"
