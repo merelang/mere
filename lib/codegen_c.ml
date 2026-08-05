@@ -311,6 +311,9 @@ let channel_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    region-bound mutable string buffer, so no per-T monomorphization.
    The runtime is emitted iff this flag is set. *)
 let strbuf_used = ref false
+(* set when any bytes builtin is emitted, so bytes_runtime
+   (the mere_bytes struct + helpers) is injected. *)
+let bytes_used = ref false
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. Triggered by
    `Ast.Var "mk_logger" / "mk_metrics"` in App-head position. The
@@ -1962,6 +1965,31 @@ let rec emit_expr (e : Ast.expr) : string =
          tag (emit_expr ch_e) (emit_expr arg) opt_name opt_name
      | Ast.Var "str_len" ->
        "((int) strlen(" ^ emit_expr arg ^ "))"
+     (* bytes builtins. *)
+     | Ast.Var "bytes_of_hex" ->
+       bytes_used := true; Printf.sprintf "__lang_bytes_of_hex(%s)" (emit_expr arg)
+     | Ast.Var "hex_of_bytes" ->
+       bytes_used := true; Printf.sprintf "__lang_hex_of_bytes(%s)" (emit_expr arg)
+     | Ast.Var "bytes_of_str" ->
+       bytes_used := true; Printf.sprintf "__lang_bytes_of_str(%s)" (emit_expr arg)
+     | Ast.Var "str_of_bytes" ->
+       bytes_used := true; Printf.sprintf "__lang_str_of_bytes(%s)" (emit_expr arg)
+     | Ast.Var "bytes_len" ->
+       bytes_used := true; Printf.sprintf "((long long)(%s)->len)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e) ->
+       bytes_used := true;
+       Printf.sprintf "__lang_bytes_get(%s, %s)" (emit_expr b_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bytes_concat"; _ }, a_e) ->
+       bytes_used := true;
+       Printf.sprintf "__lang_bytes_concat(%s, %s)" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_slice"; _ }, b_e); _ }, start_e) ->
+       bytes_used := true;
+       Printf.sprintf "__lang_bytes_slice(%s, %s, %s)"
+         (emit_expr b_e) (emit_expr start_e) (emit_expr arg)
+     | Ast.Var "bytes_of_vec" ->
+       unsupported e.Ast.loc "bytes_of_vec (C backend not yet — interp only; interp only for now)"
+     | Ast.Var "vec_of_bytes" ->
+       unsupported e.Ast.loc "vec_of_bytes (C backend not yet — interp only; interp only for now)"
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
        (* Phase 19.1.1: str_index_of h n — curried, outer App carries
           the needle. Emits a call to the runtime helper. *)
@@ -6481,6 +6509,75 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  return 0;";
       "}" ]
 
+(* bytes runtime — an immutable length-prefixed byte sequence.
+   `mere_bytes` is a { len; data[] } header with the bytes inline, so a value is
+   a single pointer (fits everywhere str's char* fits) but is binary-safe: no
+   NUL termination. All allocations land in __lang_current_region, matching the
+   str helpers' copy-out semantics. The vec bridge (bytes_of_vec / vec_of_bytes)
+   is interp-only for now — it depends on mere_vec_int's layout. *)
+let bytes_runtime =
+  String.concat "\n"
+    [ "struct mere_bytes { long long len; unsigned char data[]; };";
+      "static mere_bytes* __lang_bytes_alloc(long long len) {";
+      "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(__lang_current_region, sizeof(mere_bytes) + (size_t)len);";
+      "  b->len = len;";
+      "  return b;";
+      "}";
+      "static mere_bytes* __lang_bytes_of_str(const char* s) {";
+      "  long long n = (long long)strlen(s);";
+      "  mere_bytes* b = __lang_bytes_alloc(n);";
+      "  memcpy(b->data, s, (size_t)n);";
+      "  return b;";
+      "}";
+      "static const char* __lang_str_of_bytes(mere_bytes* b) {";
+      "  char* s = (char*)__lang_region_alloc(__lang_current_region, (size_t)b->len + 1);";
+      "  memcpy(s, b->data, (size_t)b->len);";
+      "  s[b->len] = '\\0';";
+      "  return s;";
+      "}";
+      "static const char __lang_hexdig[] = \"0123456789abcdef\";";
+      "static const char* __lang_hex_of_bytes(mere_bytes* b) {";
+      "  char* s = (char*)__lang_region_alloc(__lang_current_region, (size_t)b->len * 2 + 1);";
+      "  for (long long i = 0; i < b->len; i++) {";
+      "    s[i*2]   = __lang_hexdig[b->data[i] >> 4];";
+      "    s[i*2+1] = __lang_hexdig[b->data[i] & 15];";
+      "  }";
+      "  s[b->len*2] = '\\0';";
+      "  return s;";
+      "}";
+      "static int __lang_hexval(char c) {";
+      "  if (c >= '0' && c <= '9') return c - '0';";
+      "  if (c >= 'a' && c <= 'f') return c - 'a' + 10;";
+      "  if (c >= 'A' && c <= 'F') return c - 'A' + 10;";
+      "  fprintf(stderr, \"bytes_of_hex: non-hex character\\n\"); abort();";
+      "}";
+      "static mere_bytes* __lang_bytes_of_hex(const char* h) {";
+      "  long long n = (long long)strlen(h);";
+      "  if (n % 2) { fprintf(stderr, \"bytes_of_hex: odd-length hex string\\n\"); abort(); }";
+      "  mere_bytes* b = __lang_bytes_alloc(n / 2);";
+      "  for (long long i = 0; i < n / 2; i++)";
+      "    b->data[i] = (unsigned char)(__lang_hexval(h[i*2]) * 16 + __lang_hexval(h[i*2+1]));";
+      "  return b;";
+      "}";
+      "static mere_bytes* __lang_bytes_slice(mere_bytes* b, long long start, long long len) {";
+      "  if (start < 0 || len < 0 || start + len > b->len) {";
+      "    fprintf(stderr, \"bytes_slice: range out of bounds\\n\"); abort();";
+      "  }";
+      "  mere_bytes* o = __lang_bytes_alloc(len);";
+      "  memcpy(o->data, b->data + start, (size_t)len);";
+      "  return o;";
+      "}";
+      "static mere_bytes* __lang_bytes_concat(mere_bytes* a, mere_bytes* b) {";
+      "  mere_bytes* o = __lang_bytes_alloc(a->len + b->len);";
+      "  memcpy(o->data, a->data, (size_t)a->len);";
+      "  memcpy(o->data + a->len, b->data, (size_t)b->len);";
+      "  return o;";
+      "}";
+      "static long long __lang_bytes_get(mere_bytes* b, long long i) {";
+      "  if (i < 0 || i >= b->len) { fprintf(stderr, \"bytes_get: index out of range\\n\"); abort(); }";
+      "  return (long long)b->data[i];";
+      "}" ]
+
 (* Phase 15.9: StrBuf[R] runtime — region-allocated mutable string buffer.
    Single-instance (StrBuf has no element type parameter, it's always bytes).
    to_str returns a null-terminated copy in the region. *)
@@ -9075,6 +9172,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !strbuf_used then
          ["typedef struct mere_strbuf mere_strbuf;"; ""]
        else [])
+    @ (if !bytes_used then
+         ["typedef struct mere_bytes mere_bytes;"; ""]
+       else [])
     @ (if map_forward_typedefs = [] then []
        else map_forward_typedefs @ [""])
     (* Closure typedefs reference user struct names (e.g.,
@@ -9282,6 +9382,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
+    @ (if !bytes_used then [bytes_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else (map_hash_helpers :: map_runtimes) @ [""])
     @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
