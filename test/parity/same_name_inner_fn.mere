@@ -1,0 +1,18 @@
+// Three separate top-level fns each with an inner fn of the SAME name (`go`),
+// each capturing a DIFFERENT local. The LLVM backend used to resolve a
+// recursive self-call via a global (last-write-wins) name map, so one host's
+// `go` inherited another host's captures -> "use of undefined value". Fixed by
+// resolving inner-fn names per host (mirroring the C backend). Locked here.
+let f = fn n ->
+  let a = 100 in
+  let rec go = fn i -> if i >= n then 0 else a + go (i + 1) in
+  go 0;
+let g = fn n ->
+  let b = 7 in
+  let rec go = fn i -> if i >= n then 0 else b + go (i + 1) in
+  go 0;
+let h = fn n ->
+  let c = 3 in
+  let rec go = fn i -> if i >= n then 0 else c + go (i + 1) in
+  go 0;
+print (str_of_int (f 3 + g 2 + h 4))   // 300 + 14 + 12 = 326
