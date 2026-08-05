@@ -1531,15 +1531,33 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
     let filtered = List.filter (fun (n, _) ->
       not (Hashtbl.mem mere_to_lifted n)) lf.l_captures in
     Hashtbl.replace captures_map lf.l_name filtered) all_lifted;
-  let rec scan_for_called called_acc (e : Ast.expr) cur_name =
+  (* Resolve an inner-fn name to the lifted fn IN a specific host. The global
+     `mere_to_lifted` is last-write-wins, so two hosts that each have a same-
+     named inner fn (e.g. both a `go`) would collide: lf's recursive self-call
+     would resolve to the OTHER host's lifted fn and inherit its captures (a
+     spurious %var → "use of undefined value" at compile time). Mirrors the C
+     backend's per-host fix (codegen_c.ml, v0.1.48 / v0.1.51). *)
+  let lifted_in_host host n =
+    match Hashtbl.find_opt inner_lifts_by_host_llvm host with
+    | Some tbl ->
+      (match Hashtbl.find_opt tbl n with Some e -> Some e.lifted_name | None -> None)
+    | None -> None
+  in
+  let is_inner_lifted_in host n =
+    match Hashtbl.find_opt inner_lifts_by_host_llvm host with
+    | Some tbl -> Hashtbl.mem tbl n
+    | None -> false
+  in
+  let rec scan_for_called host called_acc (e : Ast.expr) cur_name =
     let acc = ref called_acc in
     (match e.Ast.node with
-     | Ast.Var n when Hashtbl.mem mere_to_lifted n
-                   && Hashtbl.find mere_to_lifted n <> cur_name ->
-       let cl_name = Hashtbl.find mere_to_lifted n in
-       if not (List.mem cl_name !acc) then acc := cl_name :: !acc
+     | Ast.Var n ->
+       (match lifted_in_host host n with
+        | Some cl_name when cl_name <> cur_name ->
+          if not (List.mem cl_name !acc) then acc := cl_name :: !acc
+        | _ -> ())
      | _ -> ());
-    let recurse sub = acc := scan_for_called !acc sub cur_name in
+    let recurse sub = acc := scan_for_called host !acc sub cur_name in
     (match e.Ast.node with
      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
      | Ast.Unit_lit | Ast.Var _ -> ()
@@ -1619,7 +1637,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
   while !changed do
     changed := false;
     List.iter (fun lf ->
-      let called_inner = scan_for_called [] lf.l_body lf.l_name in
+      let called_inner = scan_for_called lf.l_host [] lf.l_body lf.l_name in
       let self_bound =
         match Hashtbl.find_opt bound_map lf.l_name with Some bs -> bs | None -> [] in
       let cur_caps = Hashtbl.find captures_map lf.l_name in
@@ -1628,7 +1646,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
         let other_caps = Hashtbl.find captures_map called_lifted_name in
         List.iter (fun (cap_n, cap_t) ->
           if cap_n = lf.l_param then ()
-          else if Hashtbl.mem mere_to_lifted cap_n then ()
+          else if is_inner_lifted_in lf.l_host cap_n then ()
           else if List.mem_assoc cap_n !new_caps then ()
           else if List.mem cap_n self_bound then ()
           else begin

@@ -12,7 +12,7 @@ let hexdig = "0123456789abcdef";
 let encode = fn (b : bytes) ->
   let n = bytes_len b in
   let buf = strbuf_new () in
-  let rec e_go = fn i ->
+  let rec go = fn i ->
     if i >= n then ()
     else
       let b0 = bytes_get b i in
@@ -26,8 +26,8 @@ let encode = fn (b : bytes) ->
       let c2 = if has1 then char_at alphabet (bit_and (bit_shr triple 6) 0x3F) else "=" in
       let c3 = if has2 then char_at alphabet (bit_and triple 0x3F) else "=" in
       let _ = strbuf_push buf (c0 ++ c1 ++ c2 ++ c3) in
-      e_go (i + 3) in
-  let _ = e_go 0 in
+      go (i + 3) in
+  let _ = go 0 in
   strbuf_to_str buf;
 
 let deval = fn c ->
@@ -45,7 +45,7 @@ let to_hex2 = fn v ->
 let decode = fn s ->
   let hb = strbuf_new () in
   let n = str_len s in
-  let rec d_go = fn i ->
+  let rec go = fn i ->
     if i + 3 >= n then ()
     else
       let d0 = deval (char_at s i) in
@@ -57,8 +57,8 @@ let decode = fn s ->
       let _ = strbuf_push hb (to_hex2 (bit_and (bit_shr triple 16) 0xFF)) in
       let _ = if str_eq ch2 "=" then () else strbuf_push hb (to_hex2 (bit_and (bit_shr triple 8) 0xFF)) in
       let _ = if str_eq ch3 "=" then () else strbuf_push hb (to_hex2 (bit_and triple 0xFF)) in
-      d_go (i + 4) in
-  let _ = d_go 0 in
+      go (i + 4) in
+  let _ = go 0 in
   bytes_of_hex (strbuf_to_str hb);
 
 let check = fn name -> fn got -> fn want ->
