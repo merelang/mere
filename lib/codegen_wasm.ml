@@ -148,6 +148,7 @@ let str_split_used = ref false
 let str_join_used = ref false
 let str_count_used = ref false
 let file_io_used = ref false
+let file_bytes_io_used = ref false  (* binary file I/O host imports (read/write_file_bytes) *)
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -2355,14 +2356,20 @@ let rec emit_expr (e : Ast.expr) : unit =
     file_io_used := true;
     emit_expr path_e;
     emit_instr "call $__lang_read_file"
-  | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, _) ->
-    unsupported e.Ast.loc
-      "read_file_bytes is unsupported in Wasm codegen (v0.1.43 scope = \
-       interp + C; the host file API returns NUL-terminated strings)"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, _); _ }, _) ->
-    unsupported e.Ast.loc
-      "write_file_bytes is unsupported in Wasm codegen (v0.1.44 scope = \
-       interp + C)"
+  | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, path_e) ->
+    (* host returns a length-prefixed byte buffer (mere_bytes layout); convert
+       it to a Vec[int] with the bytes bridge (all in-Wasm, no per-byte host
+       crossing). *)
+    file_bytes_io_used := true; bytes_used := true; bytes_vec_used := true; vec_used := true;
+    emit_expr path_e;
+    emit_instr "call $read_file_bytes";
+    emit_instr "call $__lang_vec_of_bytes"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e); _ }, vec_e) ->
+    file_bytes_io_used := true; bytes_used := true; bytes_vec_used := true; vec_used := true;
+    emit_expr path_e;
+    emit_expr vec_e;
+    emit_instr "call $__lang_bytes_of_vec";  (* vec -> bytesPtr (top of stack) *)
+    emit_instr "call $write_file_bytes"
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc
       "list_dir is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
@@ -7037,6 +7044,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_join_used := false;
   str_count_used := false;
   file_io_used := false;
+  file_bytes_io_used := false;
   map_int_used := false;
   map_str_used := false;
   Hashtbl.reset map_key_types;
@@ -7529,10 +7537,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     then list_str_runtime_wasm else ""
   in
   let file_io_imports =
-    if !file_io_used then
+    (if !file_io_used then
       "  (import \"env\" \"read_file\" (func $__lang_read_file (param i32) (result i32)))\n\
       \  (import \"env\" \"write_file\" (func $__lang_write_file (param i32) (param i32) (result i32)))\n"
-    else ""
+    else "")
+    ^ (if !file_bytes_io_used then
+      "  (import \"env\" \"read_file_bytes\" (func $read_file_bytes (param i32) (result i32)))\n\
+      \  (import \"env\" \"write_file_bytes\" (func $write_file_bytes (param i32) (param i32) (result i32)))\n"
+    else "")
   in
   (* Phase 34.3: float runtime imports (str_of_float / float_of_str).
      Conditional emit would require a check, so always import (harmless
