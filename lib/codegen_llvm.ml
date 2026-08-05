@@ -140,6 +140,7 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate bytes_runtime_llvm *)
+let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge runtime *)
 (* Phase 25.9: stdlib catchup — emit each helper only when used. *)
 let str_split_used_llvm = ref false
 let str_join_used_llvm = ref false
@@ -3682,8 +3683,26 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let lv = emit_expr env len_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_bytes_slice(ptr %s, i64 %s, i64 %s)" r bv sv lv); r
-  | Ast.App ({ node = Ast.Var ("bytes_of_vec" | "vec_of_bytes"); _ }, _) ->
-    unsupported e.Ast.loc "bytes_of_vec / vec_of_bytes (interp only; interp only for now)"
+  | Ast.App ({ node = Ast.Var "bytes_of_vec"; _ }, arg) ->
+    bytes_used := true; bytes_vec_used := true;
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_bytes_of_vec(ptr %s)" r av); r
+  | Ast.App ({ node = Ast.Var "vec_of_bytes"; _ }, arg) ->
+    bytes_used := true; bytes_vec_used := true;
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let region_reg =
+      match Option.map Ast.walk e.Ast.ty with
+      | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
+        if r = "__heap" then "@__lang_default_region"
+        else (match List.assoc_opt r !current_regions with
+              | Some reg -> reg | None -> "@__lang_default_region")
+      | _ -> "@__lang_default_region"
+    in
+    let bv = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_vec_of_bytes(ptr %s, ptr %s)" r bv region_reg); r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e); _ }, n_e) ->
     (* Phase 19.1.1: str_index_of h n — curried. *)
     let hv = emit_expr env h_e in
@@ -7892,6 +7911,60 @@ let bytes_runtime_llvm =
       "  ret ptr %o";
       "}" ]
 
+(* bytes <-> Vec[int] bridge. Calls the mere_vec_int runtime by name (LLVM
+   allows forward refs), so no vec struct layout coupling. Emitted only when
+   used; the emit site registers the int vec instance. *)
+let bytes_vec_bridge_runtime_llvm =
+  String.concat "\n"
+    [ "define ptr @__lang_bytes_of_vec(ptr %v) {";
+      "entry:";
+      "  %i = alloca i32";
+      "  %n64 = call i64 @mere_vec_int_len(ptr %v)";
+      "  %b = call ptr @__lang_bytes_alloc(i64 %n64)";
+      "  %n = trunc i64 %n64 to i32";
+      "  %data = getelementptr i8, ptr %b, i64 8";
+      "  store i32 0, ptr %i";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i32, ptr %i";
+      "  %done = icmp sge i32 %iv, %n";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %x = call i64 @mere_vec_int_get(ptr %v, i32 %iv)";
+      "  %byte = trunc i64 %x to i8";
+      "  %iv64 = sext i32 %iv to i64";
+      "  %dp = getelementptr i8, ptr %data, i64 %iv64";
+      "  store i8 %byte, ptr %dp";
+      "  %inext = add i32 %iv, 1";
+      "  store i32 %inext, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  ret ptr %b";
+      "}";
+      "define ptr @__lang_vec_of_bytes(ptr %b, ptr %r) {";
+      "entry:";
+      "  %i = alloca i64";
+      "  %n = load i64, ptr %b";
+      "  %v = call ptr @mere_vec_int_new(ptr %r)";
+      "  %data = getelementptr i8, ptr %b, i64 8";
+      "  store i64 0, ptr %i";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i64, ptr %i";
+      "  %done = icmp sge i64 %iv, %n";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %dp = getelementptr i8, ptr %data, i64 %iv";
+      "  %byte = load i8, ptr %dp";
+      "  %x = zext i8 %byte to i64";
+      "  %ign = call i32 @mere_vec_int_push(ptr %v, i64 %x)";
+      "  %inext = add i64 %iv, 1";
+      "  store i64 %inext, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  ret ptr %v";
+      "}" ]
+
 let strbuf_runtime_llvm =
   String.concat "\n"
     [ "%mere_strbuf = type { ptr, i32, i32, ptr }";
@@ -9324,6 +9397,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_to_list_instances;
   strbuf_used := false;
   bytes_used := false;
+  bytes_vec_used := false;
   str_split_used_llvm := false;
   str_join_used_llvm := false;
   str_count_used_llvm := false;
@@ -9880,6 +9954,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
     @ (if !bytes_used then [bytes_runtime_llvm; ""] else [])
+    @ (if !bytes_vec_used then [bytes_vec_bridge_runtime_llvm; ""] else [])
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
     @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])

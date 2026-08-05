@@ -1,0 +1,14 @@
+// bytes <-> Vec[int] bridge on all four backends. bytes_of_vec masks each
+// element to a byte; vec_of_bytes expands each byte to an int 0..255.
+let b = bytes_of_hex "deadbeef";
+let v = vec_of_bytes b;
+let _ = print (str_of_int (vec_len v));
+let _ = print (str_of_int (vec_get v 0));
+let _ = print (str_of_int (vec_get v 3));
+let _ = print (hex_of_bytes (bytes_of_vec v));
+let w = vec_new ();
+let _ = vec_push w 0;
+let _ = vec_push w 255;
+let _ = vec_push w 16;
+let _ = print (hex_of_bytes (bytes_of_vec w));
+print "ok"

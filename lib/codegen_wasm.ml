@@ -128,6 +128,7 @@ let vec_higher_order_used = ref false
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate the Wasm bytes runtime *)
+let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge *)
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
 let logger_used = ref false
@@ -2301,8 +2302,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     bytes_used := true; emit_expr a_e; emit_expr b_e; emit_instr "call $__lang_bytes_concat"
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_slice"; _ }, b_e); _ }, start_e); _ }, len_e) ->
     bytes_used := true; emit_expr b_e; emit_expr start_e; emit_expr len_e; emit_instr "call $__lang_bytes_slice"
-  | Ast.App ({ node = Ast.Var ("bytes_of_vec" | "vec_of_bytes"); _ }, _) ->
-    unsupported e.Ast.loc "bytes_of_vec / vec_of_bytes (interp only; interp only for now)"
+  | Ast.App ({ node = Ast.Var "bytes_of_vec"; _ }, arg) ->
+    bytes_used := true; bytes_vec_used := true; vec_used := true;
+    emit_expr arg; emit_instr "call $__lang_bytes_of_vec"
+  | Ast.App ({ node = Ast.Var "vec_of_bytes"; _ }, arg) ->
+    bytes_used := true; bytes_vec_used := true; vec_used := true;
+    emit_expr arg; emit_instr "call $__lang_vec_of_bytes"
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
     substring_used := true;
     emit_expr s_e;
@@ -5617,6 +5622,35 @@ let bytes_runtime_wasm = {|
       (br $lb)))
     (local.get $o))|}
 
+(* bytes <-> Vec[int] bridge. Wasm vecs are untyped (single $mere_vec_*
+   runtime, global bump — no region arg). Wasm allows forward refs, so calling
+   $mere_vec_new / _push / _get / _len by name needs no ordering. *)
+let bytes_vec_bridge_runtime_wasm = {|
+  (func $__lang_bytes_of_vec (param $v i32) (result i32)
+    (local $n i32) (local $b i32) (local $i i32)
+    (local.set $n (call $mere_vec_len (local.get $v)))
+    (local.set $b (call $__lang_bytes_alloc (local.get $n)))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $n)))
+      (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))
+                  (i32.and (call $mere_vec_get (local.get $v) (local.get $i)) (i32.const 255)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $b))
+  (func $__lang_vec_of_bytes (param $b i32) (result i32)
+    (local $n i32) (local $v i32) (local $i i32)
+    (local.set $n (i32.load (local.get $b)))
+    (local.set $v (call $mere_vec_new))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $n)))
+      (drop (call $mere_vec_push (local.get $v)
+              (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $v))|}
+
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic helper set.
    Uses Wasm's bump allocator ($__lang_bump). Layout:
    { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 bytes (same as Vec). *)
@@ -7576,7 +7610,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      blocks and Wasm allows forward refs (bytes helpers call $__lang_strlen). *)
   let strbuf_section =
     (if !strbuf_used then strbuf_runtime_wasm else "")
-    ^ (if !bytes_used then bytes_runtime_wasm else "") in
+    ^ (if !bytes_used then bytes_runtime_wasm else "")
+    ^ (if !bytes_vec_used then bytes_vec_bridge_runtime_wasm else "") in
   (* Phase 15.14: emit per-K key-eq helper + per-K map runtime for each K
      in map_key_types. *)
   let map_key_eq_section =
