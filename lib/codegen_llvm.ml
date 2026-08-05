@@ -244,7 +244,7 @@ let mono_variant_is_recursive
 (* Probe: is the type fully resolved (no tyvars / params / floats)? *)
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
@@ -411,7 +411,7 @@ let fresh_str_global (s : string) : string =
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
@@ -788,7 +788,7 @@ let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
 
 let rec is_trivial_ty_llvm (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all is_trivial_ty_llvm ts
   | _ -> false
 
@@ -1139,7 +1139,7 @@ let clone_with_fresh_tyvars_llvm (e : Ast.expr) : Ast.expr =
          Hashtbl.add map v.id fresh;
          fresh)
     | Ast.TyParam _ as t -> t
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (clone_ty a, clone_ty b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map clone_ty ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map clone_ty args)
