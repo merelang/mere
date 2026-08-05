@@ -1,0 +1,17 @@
+// bytes must behave identically on all four backends.
+// Covers hex round-trip, indexing, slice, concat, the str bridge, and the
+// core win — binary safety: a 0x00 in the middle does not truncate, where a
+// str would. Locked so a backend regression is caught.
+let b = bytes_of_hex "48656c6c6f";
+let _ = print (str_of_int (bytes_len b));
+let _ = print (str_of_int (bytes_get b 0));
+let _ = print (str_of_bytes b);
+let c = bytes_concat b (bytes_of_str " world");
+let _ = print (str_of_bytes c);
+let _ = print (hex_of_bytes c);
+let _ = print (str_of_bytes (bytes_slice c 6 5));
+let z = bytes_of_hex "00ff00";
+let _ = print (str_of_int (bytes_len z));
+let _ = print (hex_of_bytes z);
+let _ = print (str_of_int (bytes_get z 1));
+print "ok"

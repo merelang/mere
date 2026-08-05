@@ -64,6 +64,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
+  | Ast.TyBytes -> "bytes"   (* the binary type *)
   | Ast.TyUnit -> "unit"
   | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used as an fn signature tag *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
@@ -138,6 +139,7 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
+let bytes_used = ref false  (* gate bytes_runtime_llvm *)
 (* Phase 25.9: stdlib catchup — emit each helper only when used. *)
 let str_split_used_llvm = ref false
 let str_join_used_llvm = ref false
@@ -332,6 +334,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyBool -> "i1"
   | Ast.TyFloat -> "double"  (* Phase 34.2: IEEE 754 double *)
   | Ast.TyStr -> "ptr"
+  | Ast.TyBytes -> "ptr"  (* pointer to [i64 len][bytes...] *)
   | Ast.TyUnit -> "i64"  (* unit becomes int 0 *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
@@ -3616,6 +3619,53 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" r av);
     r
+  (* bytes builtins. *)
+  | Ast.App ({ node = Ast.Var "bytes_of_hex"; _ }, arg) ->
+    bytes_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_bytes_of_hex(ptr %s)" r av); r
+  | Ast.App ({ node = Ast.Var "hex_of_bytes"; _ }, arg) ->
+    bytes_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_hex_of_bytes(ptr %s)" r av); r
+  | Ast.App ({ node = Ast.Var "bytes_of_str"; _ }, arg) ->
+    bytes_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_bytes_of_str(ptr %s)" r av); r
+  | Ast.App ({ node = Ast.Var "str_of_bytes"; _ }, arg) ->
+    bytes_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_bytes(ptr %s)" r av); r
+  | Ast.App ({ node = Ast.Var "bytes_len"; _ }, arg) ->
+    bytes_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i64, ptr %s" r av); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e); _ }, i_e) ->
+    bytes_used := true;
+    let bv = emit_expr env b_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_bytes_get(ptr %s, i64 %s)" r bv iv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_concat"; _ }, a_e); _ }, b_e) ->
+    bytes_used := true;
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_bytes_concat(ptr %s, ptr %s)" r av bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_slice"; _ }, b_e); _ }, start_e); _ }, len_e) ->
+    bytes_used := true;
+    let bv = emit_expr env b_e in
+    let sv = emit_expr env start_e in
+    let lv = emit_expr env len_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_bytes_slice(ptr %s, i64 %s, i64 %s)" r bv sv lv); r
+  | Ast.App ({ node = Ast.Var ("bytes_of_vec" | "vec_of_bytes"); _ }, _) ->
+    unsupported e.Ast.loc "bytes_of_vec / vec_of_bytes (interp only; interp only for now)"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e); _ }, n_e) ->
     (* Phase 19.1.1: str_index_of h n — curried. *)
     let hv = emit_expr env h_e in
@@ -7650,6 +7700,180 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic type. Region-
    allocated mutable byte buffer; to_str returns a null-terminated copy
    in the same region. *)
+(* bytes runtime. A bytes value is a `ptr` to [i64 len][i8..],
+   binary-safe. Allocations use @__lang_default_region (matching the str
+   helpers). Loops use allocas to avoid hand-written phi. *)
+let bytes_runtime_llvm =
+  String.concat "\n"
+    [ "@__lang_hexdig = private constant [16 x i8] c\"0123456789abcdef\"";
+      "define ptr @__lang_bytes_alloc(i64 %len) {";
+      "entry:";
+      "  %sz = add i64 %len, 8";
+      "  %b = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  store i64 %len, ptr %b";
+      "  ret ptr %b";
+      "}";
+      "define i64 @__lang_bytes_get(ptr %b, i64 %i) {";
+      "entry:";
+      "  %len = load i64, ptr %b";
+      "  %lo = icmp slt i64 %i, 0";
+      "  %hi = icmp sge i64 %i, %len";
+      "  %oob = or i1 %lo, %hi";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @abort()";
+      "  unreachable";
+      "ok:";
+      "  %d = getelementptr i8, ptr %b, i64 8";
+      "  %p = getelementptr i8, ptr %d, i64 %i";
+      "  %c = load i8, ptr %p";
+      "  %r = zext i8 %c to i64";
+      "  ret i64 %r";
+      "}";
+      "define ptr @__lang_bytes_of_str(ptr %s) {";
+      "entry:";
+      "  %n = call i64 @strlen(ptr %s)";
+      "  %b = call ptr @__lang_bytes_alloc(i64 %n)";
+      "  %d = getelementptr i8, ptr %b, i64 8";
+      "  call ptr @memcpy(ptr %d, ptr %s, i64 %n)";
+      "  ret ptr %b";
+      "}";
+      "define ptr @__lang_str_of_bytes(ptr %b) {";
+      "entry:";
+      "  %n = load i64, ptr %b";
+      "  %sz = add i64 %n, 1";
+      "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %d = getelementptr i8, ptr %b, i64 8";
+      "  call ptr @memcpy(ptr %s, ptr %d, i64 %n)";
+      "  %endp = getelementptr i8, ptr %s, i64 %n";
+      "  store i8 0, ptr %endp";
+      "  ret ptr %s";
+      "}";
+      "define ptr @__lang_hex_of_bytes(ptr %b) {";
+      "entry:";
+      "  %i = alloca i64";
+      "  %n = load i64, ptr %b";
+      "  %sz = mul i64 %n, 2";
+      "  %sz1 = add i64 %sz, 1";
+      "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz1)";
+      "  %data = getelementptr i8, ptr %b, i64 8";
+      "  store i64 0, ptr %i";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i64, ptr %i";
+      "  %done = icmp sge i64 %iv, %n";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %bp = getelementptr i8, ptr %data, i64 %iv";
+      "  %byte = load i8, ptr %bp";
+      "  %b64 = zext i8 %byte to i64";
+      "  %hinib = lshr i64 %b64, 4";
+      "  %lonib = and i64 %b64, 15";
+      "  %hcp = getelementptr [16 x i8], ptr @__lang_hexdig, i64 0, i64 %hinib";
+      "  %hc = load i8, ptr %hcp";
+      "  %lcp = getelementptr [16 x i8], ptr @__lang_hexdig, i64 0, i64 %lonib";
+      "  %lc = load i8, ptr %lcp";
+      "  %o0 = mul i64 %iv, 2";
+      "  %o1 = add i64 %o0, 1";
+      "  %sp0 = getelementptr i8, ptr %s, i64 %o0";
+      "  store i8 %hc, ptr %sp0";
+      "  %sp1 = getelementptr i8, ptr %s, i64 %o1";
+      "  store i8 %lc, ptr %sp1";
+      "  %inext = add i64 %iv, 1";
+      "  store i64 %inext, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  %endo = getelementptr i8, ptr %s, i64 %sz";
+      "  store i8 0, ptr %endo";
+      "  ret ptr %s";
+      "}";
+      "define i64 @__lang_hexval(i8 %c) {";
+      "entry:";
+      "  %c64 = zext i8 %c to i64";
+      "  %isd0 = icmp sge i64 %c64, 48";
+      "  %isd1 = icmp sle i64 %c64, 57";
+      "  %isd = and i1 %isd0, %isd1";
+      "  br i1 %isd, label %dig, label %chkl";
+      "dig:";
+      "  %dv = sub i64 %c64, 48";
+      "  ret i64 %dv";
+      "chkl:";
+      "  %isl0 = icmp sge i64 %c64, 97";
+      "  %isl1 = icmp sle i64 %c64, 102";
+      "  %isl = and i1 %isl0, %isl1";
+      "  br i1 %isl, label %low, label %chku";
+      "low:";
+      "  %lv = sub i64 %c64, 87";
+      "  ret i64 %lv";
+      "chku:";
+      "  %isu0 = icmp sge i64 %c64, 65";
+      "  %isu1 = icmp sle i64 %c64, 70";
+      "  %isu = and i1 %isu0, %isu1";
+      "  br i1 %isu, label %up, label %bad";
+      "up:";
+      "  %uv = sub i64 %c64, 55";
+      "  ret i64 %uv";
+      "bad:";
+      "  call void @abort()";
+      "  unreachable";
+      "}";
+      "define ptr @__lang_bytes_of_hex(ptr %h) {";
+      "entry:";
+      "  %i = alloca i64";
+      "  %n = call i64 @strlen(ptr %h)";
+      "  %half = udiv i64 %n, 2";
+      "  %b = call ptr @__lang_bytes_alloc(i64 %half)";
+      "  %data = getelementptr i8, ptr %b, i64 8";
+      "  store i64 0, ptr %i";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i64, ptr %i";
+      "  %done = icmp sge i64 %iv, %half";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %o0 = mul i64 %iv, 2";
+      "  %o1 = add i64 %o0, 1";
+      "  %hp0 = getelementptr i8, ptr %h, i64 %o0";
+      "  %hc0 = load i8, ptr %hp0";
+      "  %hp1 = getelementptr i8, ptr %h, i64 %o1";
+      "  %hc1 = load i8, ptr %hp1";
+      "  %v0 = call i64 @__lang_hexval(i8 %hc0)";
+      "  %v1 = call i64 @__lang_hexval(i8 %hc1)";
+      "  %hiv = mul i64 %v0, 16";
+      "  %sum = add i64 %hiv, %v1";
+      "  %byte = trunc i64 %sum to i8";
+      "  %dp = getelementptr i8, ptr %data, i64 %iv";
+      "  store i8 %byte, ptr %dp";
+      "  %inext = add i64 %iv, 1";
+      "  store i64 %inext, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  ret ptr %b";
+      "}";
+      "define ptr @__lang_bytes_slice(ptr %b, i64 %start, i64 %len) {";
+      "entry:";
+      "  %o = call ptr @__lang_bytes_alloc(i64 %len)";
+      "  %od = getelementptr i8, ptr %o, i64 8";
+      "  %bd = getelementptr i8, ptr %b, i64 8";
+      "  %srcp = getelementptr i8, ptr %bd, i64 %start";
+      "  call ptr @memcpy(ptr %od, ptr %srcp, i64 %len)";
+      "  ret ptr %o";
+      "}";
+      "define ptr @__lang_bytes_concat(ptr %a, ptr %b) {";
+      "entry:";
+      "  %alen = load i64, ptr %a";
+      "  %blen = load i64, ptr %b";
+      "  %tot = add i64 %alen, %blen";
+      "  %o = call ptr @__lang_bytes_alloc(i64 %tot)";
+      "  %od = getelementptr i8, ptr %o, i64 8";
+      "  %ad = getelementptr i8, ptr %a, i64 8";
+      "  call ptr @memcpy(ptr %od, ptr %ad, i64 %alen)";
+      "  %odb = getelementptr i8, ptr %od, i64 %alen";
+      "  %bd = getelementptr i8, ptr %b, i64 8";
+      "  call ptr @memcpy(ptr %odb, ptr %bd, i64 %blen)";
+      "  ret ptr %o";
+      "}" ]
+
 let strbuf_runtime_llvm =
   String.concat "\n"
     [ "%mere_strbuf = type { ptr, i32, i32, ptr }";
@@ -9081,6 +9305,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset map_instances;
   Hashtbl.reset vec_to_list_instances;
   strbuf_used := false;
+  bytes_used := false;
   str_split_used_llvm := false;
   str_join_used_llvm := false;
   str_count_used_llvm := false;
@@ -9636,6 +9861,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
+    @ (if !bytes_used then [bytes_runtime_llvm; ""] else [])
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
     @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
