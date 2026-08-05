@@ -281,6 +281,7 @@ let rec is_serializable = function
   | Eval.V_str _ | Eval.V_unit -> true
   | Eval.V_closure _ | Eval.V_builtin _ | Eval.V_file _ | Eval.V_rwfile _ -> false
   | Eval.V_vec _ | Eval.V_strbuf _ | Eval.V_map _ -> false
+  | Eval.V_bytes _ -> false  (* no bytes literal syntax; :save can't round-trip it *)
   | Eval.V_channel _ | Eval.V_thread _ -> false
   | Eval.V_constr (_, None) -> true
   | Eval.V_constr (_, Some inner) -> is_serializable inner

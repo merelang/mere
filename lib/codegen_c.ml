@@ -487,7 +487,7 @@ let logicop_to_c = function
    (those shapes are not part of the program's actual run-time types). *)
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
@@ -517,6 +517,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyInt -> "int"
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
+  | Ast.TyBytes -> "bytes"
   | Ast.TyUnit -> "unit"
   | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used in fn signature tags *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
@@ -3359,6 +3360,9 @@ let rec c_type_of (t : Ast.ty) : string =
   | Ast.TyBool -> "int"
   | Ast.TyFloat -> "double"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> "const char*"
+  | Ast.TyBytes -> "mere_bytes*"  (* pointer to a length-prefixed
+                                     buffer { long long len; unsigned char data[] } —
+                                     binary-safe (not NUL-terminated like str). *)
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyVar _ | Ast.TyParam _ -> "long long"  (* residual tyvar: dead or
       unconstrained — erased to int's representation (see ty_tag) *)
@@ -3740,7 +3744,7 @@ let clone_with_fresh_tyvars (e : Ast.expr) : Ast.expr =
          Hashtbl.add map v.id fresh;
          fresh)
     | Ast.TyParam _ as t -> t
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (clone_ty a, clone_ty b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map clone_ty ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map clone_ty args)

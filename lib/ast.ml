@@ -10,6 +10,9 @@ and ty =
   | TyFloat
   | TyBool
   | TyStr
+  | TyBytes                         (* immutable raw byte sequence (a first-class binary type).
+                                       Like TyStr but length-prefixed, not NUL-
+                                       terminated: binary-safe on every backend. *)
   | TyUnit
   | TyArrow of ty * ty
   | TyVar of tyvar
@@ -217,6 +220,7 @@ let pp_ty t =
     | TyFloat -> "float"
     | TyBool -> "bool"
     | TyStr -> "str"
+    | TyBytes -> "bytes"
     | TyUnit -> "unit"
     | TyArrow (a, b) ->
       let sa = aux a in

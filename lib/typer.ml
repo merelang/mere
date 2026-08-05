@@ -156,7 +156,7 @@ let rec occurs id = function
   | Ast.TyVar v when v.id = id -> true
   | Ast.TyVar { link = Some t; _ } -> occurs id t
   | Ast.TyVar _ -> false
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> false
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> false
   | Ast.TyParam _ -> false
   | Ast.TyCon (_, args) -> List.exists (occurs id) args
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
@@ -214,6 +214,7 @@ let rec unify loc t1 t2 =
   | Ast.TyFloat, Ast.TyFloat -> ()
   | Ast.TyBool, Ast.TyBool -> ()
   | Ast.TyStr, Ast.TyStr -> ()
+  | Ast.TyBytes, Ast.TyBytes -> ()
   | Ast.TyUnit, Ast.TyUnit -> ()
   | Ast.TyParam a, Ast.TyParam b when a = b -> ()
   | Ast.TyCon (a, args_a), Ast.TyCon (b, args_b)
@@ -259,7 +260,7 @@ let mono t = { quantified = []; body = t; constraints = [] }
 
 let rec collect_free_vars t acc =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> acc
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> acc
   | Ast.TyParam _ -> acc
   | Ast.TyVar v -> if List.mem v.id acc then acc else v.id :: acc
   | Ast.TyArrow (a, b) -> collect_free_vars b (collect_free_vars a acc)
@@ -384,7 +385,7 @@ let instantiate_with_map sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
     match Ast.walk t with
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit) as t -> t
     | Ast.TyParam _ as t -> t
     | Ast.TyVar v as orig ->
       (try List.assoc v.id mapping with Not_found -> orig)
@@ -476,7 +477,7 @@ let rec mentions_region (name : string) (t : Ast.ty) : bool =
   | Ast.TyArrow (a, b) -> mentions_region name a || mentions_region name b
   | Ast.TyTuple ts -> List.exists (mentions_region name) ts
   | Ast.TyCon (_, args) -> List.exists (mentions_region name) args
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
 (* Replace TyParam by fresh TyVars, sharing per param name within one call.
@@ -494,7 +495,7 @@ let freshen_params t =
   let rec aux t =
     match Ast.walk t with
     | Ast.TyParam p -> lookup p
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (aux a, aux b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map aux ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map aux args)
@@ -548,7 +549,7 @@ let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.
   | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_region from_name to_name) ts)
   | Ast.TyCon (n, args) ->
     Ast.TyCon (n, List.map (subst_region from_name to_name) args)
-  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
+  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
     | Ast.TyParam _ | Ast.TyVar _) as t -> t
 
 let register_type type_name params variants =
@@ -628,7 +629,7 @@ let rec contains_drop_type (t : Ast.ty) : bool =
   | Ast.TyTuple ts -> List.exists contains_drop_type ts
   | Ast.TyRef (_, _, inner) -> contains_drop_type inner
   | Ast.TyArrow _ -> false
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
 (* === Q-012: Send / Sync trait predicates (concurrency narrowing §D) ===
@@ -666,7 +667,7 @@ let rec subst_type_params (m : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_type_params m) ts)
   | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_type_params m) args)
   | Ast.TyRef (mode, r, inner) -> Ast.TyRef (mode, r, subst_type_params m inner)
-  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t0 -> t0
+  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t0 -> t0
 
 (* The concrete types contained in a user-declared record's fields or a
    variant's constructor payloads, with the type's parameters substituted by
@@ -703,7 +704,7 @@ let nominal_contents (name : string) (args : Ast.ty list) : Ast.ty list option =
    optimistic here — spawn-capture analysis rejects unresolved captures. *)
 let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> true
   | Ast.TyArrow _ -> true
   | Ast.TyRef _ -> false                       (* region borrow: thread-local *)
   | Ast.TyTuple ts -> List.for_all (is_send_v visiting) ts
@@ -733,7 +734,7 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
 
 let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> true
   | Ast.TyArrow _ -> true
   | Ast.TyRef _ -> false
   | Ast.TyTuple ts -> List.for_all (is_sync_v visiting) ts
@@ -791,7 +792,7 @@ let instantiate_constr (info : constr_info) =
     match Ast.walk t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -809,7 +810,7 @@ let instantiate_record name (info : record_info) =
     match Ast.walk t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -1221,6 +1222,22 @@ let file_pread_scheme =
                Ast.TyArrow (Ast.TyInt,
                  Ast.TyCon ("Vec", [_fpr_region; Ast.TyInt])))) }
 
+(* bytes <-> Vec[R, int] bridge. Region-quantified like
+   read_file_bytes; the returned Vec lives in the innermost active region
+   (native codegen resolves the region marker at the call site, mirroring
+   read_file_bytes). *)
+let _bov_region = fresh_var ()
+let bytes_of_vec_scheme =
+  let rid = match _bov_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("Vec", [_bov_region; Ast.TyInt]), Ast.TyBytes) }
+let _vob_region = fresh_var ()
+let vec_of_bytes_scheme =
+  let rid = match _vob_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyBytes,
+             Ast.TyCon ("Vec", [_vob_region; Ast.TyInt])) }
+
 (* v0.1.115 (mbtree dogfood): positioned WRITE on a read/write handle.
    `file_pwrite handle offset bytes` writes the Vec[int]'s bytes at `offset`
    and returns the count written — the write half of file_pread, and the
@@ -1601,6 +1618,17 @@ let initial_env : env =
     ("e",           mono Ast.TyFloat);
     ("not",         mono (Ast.TyArrow (Ast.TyBool, Ast.TyBool)));
     ("str_len",     mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
+    (* bytes builtins *)
+    ("bytes_len",   mono (Ast.TyArrow (Ast.TyBytes, Ast.TyInt)));
+    ("bytes_get",   mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("bytes_slice", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyBytes)))));
+    ("bytes_concat", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyBytes, Ast.TyBytes))));
+    ("bytes_of_hex", mono (Ast.TyArrow (Ast.TyStr,   Ast.TyBytes)));
+    ("hex_of_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyStr)));
+    ("bytes_of_str", mono (Ast.TyArrow (Ast.TyStr,   Ast.TyBytes)));
+    ("str_of_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyStr)));
+    ("bytes_of_vec", bytes_of_vec_scheme);
+    ("vec_of_bytes", vec_of_bytes_scheme);
     ("int_of_str",  mono (Ast.TyArrow (Ast.TyStr,  Ast.TyInt)));
     ("bool_of_str", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyBool)));
     ("str_contains",

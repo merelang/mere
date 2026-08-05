@@ -7,6 +7,10 @@ type value =
   | V_float of float
   | V_bool of bool
   | V_str of string
+  | V_bytes of string
+    (* immutable raw byte sequence (a first-class binary type). Held as an OCaml string
+       (which carries NULs), so binary-safe; distinct from V_str at the type
+       level so codegen picks the length-prefixed representation. *)
   | V_unit
   | V_closure of string * Ast.expr * env
   | V_builtin of string * (value -> value)
@@ -56,6 +60,31 @@ type value =
 
 and env = (string * value ref) list
 
+(* hex <-> raw byte string, shared by bytes display / to_json
+   and the bytes_of_hex / hex_of_bytes builtins. Lowercase, 2 chars per byte. *)
+let hex_of_string (s : string) : string =
+  let b = Buffer.create (String.length s * 2) in
+  String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) s;
+  Buffer.contents b
+
+let string_of_hex (h : string) : string =
+  let n = String.length h in
+  if n mod 2 <> 0 then failwith "bytes_of_hex: odd-length hex string";
+  let hexval c =
+    match c with
+    | '0'..'9' -> Char.code c - Char.code '0'
+    | 'a'..'f' -> Char.code c - Char.code 'a' + 10
+    | 'A'..'F' -> Char.code c - Char.code 'A' + 10
+    | _ -> failwith "bytes_of_hex: non-hex character"
+  in
+  let b = Buffer.create (n / 2) in
+  let i = ref 0 in
+  while !i < n do
+    Buffer.add_char b (Char.chr (hexval h.[!i] * 16 + hexval h.[!i + 1]));
+    i := !i + 2
+  done;
+  Buffer.contents b
+
 (* v0.1.12 (N4): float → string, normalized to a trailing ".0" for
    whole-valued floats ("550.0"). Kept identical to the C runtime
    (__lang_str_of_float), the LLVM helper, and the Wasm JS host so all
@@ -93,6 +122,7 @@ let rec try_as_list = function
 
 and to_string = function
   | V_int n -> string_of_int n
+  | V_bytes s -> "bytes[" ^ hex_of_string s ^ "]"
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
@@ -142,6 +172,7 @@ and to_string = function
    written record->JSON writers collapse to `to_json x`. *)
 and to_json_string = function
   | V_int n -> string_of_int n
+  | V_bytes s -> "\"" ^ hex_of_string s ^ "\""  (* JSON has no byte type: hex string *)
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
@@ -2198,8 +2229,91 @@ let builtin_par_map =
         (fun h tail -> V_constr ("Cons", Some (V_tuple [h; tail])))
         results (V_constr ("Nil", None))))
 
+(* `bytes` builtins. Interp holds a bytes value as an OCaml
+   string (NUL-safe), so most of these are thin wrappers. Index / slice raise
+   on out-of-range, matching the str builtins' style. *)
+let bytes_v s = V_bytes s
+let expect_bytes name = function
+  | V_bytes s -> s
+  | _ -> failwith (name ^ ": expected bytes")
+
+let builtin_bytes_len =
+  V_builtin ("bytes_len", fun v -> V_int (String.length (expect_bytes "bytes_len" v)))
+
+let builtin_bytes_get =
+  V_builtin ("bytes_get", fun v ->
+    let s = expect_bytes "bytes_get" v in
+    V_builtin ("bytes_get_p1", fun i ->
+      match i with
+      | V_int i ->
+        if i < 0 || i >= String.length s then
+          raise (Eval_error (Loc.dummy, "bytes_get: index out of range"));
+        V_int (Char.code s.[i])
+      | _ -> failwith "bytes_get: expected int index"))
+
+let builtin_bytes_slice =
+  V_builtin ("bytes_slice", fun v ->
+    let s = expect_bytes "bytes_slice" v in
+    V_builtin ("bytes_slice_p1", fun start ->
+      V_builtin ("bytes_slice_p2", fun len ->
+        match start, len with
+        | V_int start, V_int len ->
+          if start < 0 || len < 0 || start + len > String.length s then
+            raise (Eval_error (Loc.dummy, "bytes_slice: range out of bounds"));
+          bytes_v (String.sub s start len)
+        | _ -> failwith "bytes_slice: expected int start/len")))
+
+let builtin_bytes_concat =
+  V_builtin ("bytes_concat", fun a ->
+    let a = expect_bytes "bytes_concat" a in
+    V_builtin ("bytes_concat_p1", fun b ->
+      bytes_v (a ^ expect_bytes "bytes_concat" b)))
+
+let builtin_bytes_of_hex =
+  V_builtin ("bytes_of_hex", fun v ->
+    match v with V_str s -> bytes_v (string_of_hex s)
+               | _ -> failwith "bytes_of_hex: expected str")
+
+let builtin_hex_of_bytes =
+  V_builtin ("hex_of_bytes", fun v -> V_str (hex_of_string (expect_bytes "hex_of_bytes" v)))
+
+let builtin_bytes_of_str =
+  V_builtin ("bytes_of_str", fun v ->
+    match v with V_str s -> bytes_v s | _ -> failwith "bytes_of_str: expected str")
+
+let builtin_str_of_bytes =
+  V_builtin ("str_of_bytes", fun v -> V_str (expect_bytes "str_of_bytes" v))
+
+let builtin_bytes_of_vec =
+  V_builtin ("bytes_of_vec", fun v ->
+    match v with
+    | V_vec arr ->
+      let a = !arr in
+      let b = Buffer.create (Array.length a) in
+      Array.iter (function
+        | V_int n -> Buffer.add_char b (Char.chr (n land 0xFF))
+        | _ -> failwith "bytes_of_vec: expected int elements") a;
+      bytes_v (Buffer.contents b)
+    | _ -> failwith "bytes_of_vec: expected Vec")
+
+let builtin_vec_of_bytes =
+  V_builtin ("vec_of_bytes", fun v ->
+    let s = expect_bytes "vec_of_bytes" v in
+    V_vec (ref (Array.init (String.length s) (fun i -> V_int (Char.code s.[i])))))
+
 let initial_env : env =
   [ ("print", ref builtin_print);
+    (* bytes builtins *)
+    ("bytes_len", ref builtin_bytes_len);
+    ("bytes_get", ref builtin_bytes_get);
+    ("bytes_slice", ref builtin_bytes_slice);
+    ("bytes_concat", ref builtin_bytes_concat);
+    ("bytes_of_hex", ref builtin_bytes_of_hex);
+    ("hex_of_bytes", ref builtin_hex_of_bytes);
+    ("bytes_of_str", ref builtin_bytes_of_str);
+    ("str_of_bytes", ref builtin_str_of_bytes);
+    ("bytes_of_vec", ref builtin_bytes_of_vec);
+    ("vec_of_bytes", ref builtin_vec_of_bytes);
     (* Q-012 step 3a: concurrency primitives *)
     ("spawn", ref builtin_spawn);
     ("join", ref builtin_join);
