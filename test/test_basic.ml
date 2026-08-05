@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.123" Version.v "0.1.123";
+  check "version is 0.1.124" Version.v "0.1.124";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5488,8 +5488,8 @@ let () =
     (let c = vec_codegen_c
        "let m = map_new () in let z = map_set m \"a\" 1 in map_get m \"a\"" in
      let loop = idx_of c "while (m->idx[s]" in
-     let kcopy = idx_of c "k = __mcopy_str(m->region, k)" in
-     let vupd = idx_of c "m->values[i] = __mcopy_int(m->region, v)" in
+     let kcopy = idx_of c "__mk = __mcopy_str(m->region, __mk)" in
+     let vupd = idx_of c "m->values[i] = __mcopy_int(m->region, __mv)" in
      if loop >= 0 && kcopy > loop && vupd > loop && vupd < kcopy
      then "post-lookup"
      else Printf.sprintf "loop=%d kcopy=%d vupd=%d" loop kcopy vupd)
@@ -6147,7 +6147,7 @@ let () =
   assert_contains "copy-on-store: str copy fn emitted"
     c_src_cos "static const char* __mcopy_str(__lang_region* r, const char* v)";
   assert_contains "copy-on-store: map_set copies the key into the map's region"
-    c_src_cos "k = __mcopy_str(m->region, k);";
+    c_src_cos "__mk = __mcopy_str(m->region, __mk);";
   assert_contains "copy-on-store: vec_push copies the element"
     c_src_cos "x = __mcopy_str(v->region, x);";
   (* v0.1.31 (str-lifetime stage B): region blocks capture value

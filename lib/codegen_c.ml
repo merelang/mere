@@ -6423,7 +6423,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          hit). Lookup goes through the hash index (linear probing); the
          insertion-order keys/values arrays are unchanged, so map_iter and
          delete keep their observable behavior. *)
-      Printf.sprintf "static int %s_set(%s* m, %s k, %s v) {"
+      Printf.sprintf "static int %s_set(%s* m, %s __mk, %s __mv) {"
         struct_name struct_name c_k c_v;
       (* v0.1.30 (copy-on-store): the map owns its contents, so a stored value
          never dangles when the storer's scope is reclaimed. But the deep-copy
@@ -6434,30 +6434,30 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          copy into the region on every update, so repeatedly setting the same
          keys (the counter / accumulator pattern) grew O(total writes) instead
          of O(distinct keys). *)
-      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) { m->values[i] = __mcopy_%s(m->region, v); return 0; }"
-        (key_eq_expr "m->keys[i]" "k") v_tag;
+      Printf.sprintf "    if (%s) { m->values[i] = __mcopy_%s(m->region, __mv); return 0; }"
+        (key_eq_expr "m->keys[i]" "__mk") v_tag;
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
-      Printf.sprintf "  k = __mcopy_%s(m->region, k);" k_tag;
-      Printf.sprintf "  v = __mcopy_%s(m->region, v);" v_tag;
+      Printf.sprintf "  __mk = __mcopy_%s(m->region, __mk);" k_tag;
+      Printf.sprintf "  __mv = __mcopy_%s(m->region, __mv);" v_tag;
       "  if (m->len == m->cap) {";
       "    int new_cap = m->cap * 2;";
-      Printf.sprintf "    %s* nk = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_k c_k c_k;
-      Printf.sprintf "    %s* nv = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_v c_v c_v;
+      Printf.sprintf "    %s* __mnk = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_k c_k c_k;
+      Printf.sprintf "    %s* __mnv = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_v c_v c_v;
       "    for (int i = 0; i < m->len; i++) {";
-      "      nk[i] = m->keys[i];";
-      "      nv[i] = m->values[i];";
+      "      __mnk[i] = m->keys[i];";
+      "      __mnv[i] = m->values[i];";
       "    }";
-      "    m->keys = nk;";
-      "    m->values = nv;";
+      "    m->keys = __mnk;";
+      "    m->values = __mnv;";
       "    m->cap = new_cap;";
       "  }";
-      "  m->keys[m->len] = k;";
-      "  m->values[m->len] = v;";
+      "  m->keys[m->len] = __mk;";
+      "  m->values[m->len] = __mv;";
       "  m->len++;";
       "  if (m->len * 10 >= m->idx_cap * 7) {";
       Printf.sprintf "    %s_reindex(m, m->idx_cap * 2);" struct_name;
@@ -6468,14 +6468,14 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "}";
       "";
       (* get *)
-      Printf.sprintf "static %s %s_get(%s* m, %s k) {"
+      Printf.sprintf "static %s %s_get(%s* m, %s __mk) {"
         c_v struct_name struct_name c_k;
-      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
       Printf.sprintf "    if (%s) return m->values[i];"
-        (key_eq_expr "m->keys[i]" "k");
+        (key_eq_expr "m->keys[i]" "__mk");
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  fprintf(stderr, \"map_get: key not found\\n\");";
@@ -6483,14 +6483,14 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "}";
       "";
       (* has *)
-      Printf.sprintf "static int %s_has(%s* m, %s k) {"
+      Printf.sprintf "static int %s_has(%s* m, %s __mk) {"
         struct_name struct_name c_k;
-      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
       Printf.sprintf "    if (%s) return 1;"
-        (key_eq_expr "m->keys[i]" "k");
+        (key_eq_expr "m->keys[i]" "__mk");
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  return 0;";
@@ -6502,13 +6502,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "";
       (* Phase 39.A' #2: delete — remove the matching key by shifting the
          keys / values arrays. No-op if the key is absent. *)
-      Printf.sprintf "static int %s_delete(%s* m, %s k) {"
+      Printf.sprintf "static int %s_delete(%s* m, %s __mk) {"
         struct_name struct_name c_k;
-      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "k");
+      Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) {" (key_eq_expr "m->keys[i]" "k");
+      Printf.sprintf "    if (%s) {" (key_eq_expr "m->keys[i]" "__mk");
       "      for (int j = i; j < m->len - 1; j++) {";
       "        m->keys[j] = m->keys[j+1];";
       "        m->values[j] = m->values[j+1];";
