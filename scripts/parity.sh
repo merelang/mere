@@ -66,7 +66,7 @@ for f in $FILES; do
   # Wasm
   if [ "$have_wat" = 1 ]; then
     if "$MERE" -w "$f" > "$TMP/w.wat" 2>"$TMP/w.err"; then
-      if wat2wasm --enable-tail-call "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
+      if wat2wasm --enable-tail-call --enable-threads "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
         out="$(node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" 2>/dev/null || true)"
         [ "$out" = "$ref" ] && row="$row wasm:MATCH" || { row="$row wasm:DIFF"; bad=1; }
       else row="$row wasm:MISCOMPILE"; bad=1; fi

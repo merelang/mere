@@ -1,0 +1,14 @@
+// contrib/gen (thread-backed generators) on all four backends. Every generator
+// is FULLY DRAINED (fold / take past the end) so the producer thread finishes
+// and the process exits — required on the Wasm worker host (see
+// contrib/gen/README.md: early stop leaves a worker alive there).
+import "../../contrib/gen/gen.mere";
+let rec sum_list = fn xs -> match xs with Nil -> 0 | Cons (h, t) -> h + sum_list t;
+let g1 = Gen.make (fn y -> let _ = y 10 in let _ = y 20 in y 30);
+let _ = print (str_of_int (sum_list (Gen.take g1 100)));   // 60
+let g2 = Gen.make (fn y -> let _ = y 1 in let _ = y 2 in let _ = y 3 in let _ = y 4 in y 5);
+let _ = print (str_of_int (Gen.fold g2 (fn a -> fn x -> a + x) 0));  // 15
+let rec emit = fn y -> fn i -> fn n -> if i >= n then () else let _ = y i in emit y (i + 1) n;
+let g3 = Gen.make (fn y -> emit y 0 7);
+let _ = print (str_of_int (sum_list (Gen.take g3 100)));   // 21
+print "ok"
