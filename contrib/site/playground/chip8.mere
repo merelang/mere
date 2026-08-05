@@ -1,0 +1,174 @@
+// chip8.mere (playground) — a CHIP-8 emulator running in the browser via the
+// contrib/dom frontend FFI. The CPU core is the same fetch-decode-execute
+// engine as examples/chip8.mere (bytes ROM, bitwise decode, mutable Vec[int]
+// state); here it renders to a <canvas> and is driven by a per-frame callback
+// (dom_on_frame, added for this dogfood) instead of a batch loop. The embedded
+// ROM cycles the hex-digit glyphs 0..F, paced by the delay timer — so the
+// screen visibly animates once the requestAnimationFrame loop starts.
+import "contrib/dom/dom.mere";
+
+let mask8  = fn x -> bit_and x 255;
+let mask12 = fn x -> bit_and x 4095;
+
+let new_vec = fn n -> fn x ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in v;
+
+let blit_bytes = fn mem -> fn at -> fn b ->
+  let n = bytes_len b in
+  let rec go = fn i -> if i >= n then () else let _ = vec_set mem (at + i) (bytes_get b i) in go (i + 1) in
+  go 0;
+
+let geti = fn reg -> vec_get reg 1;
+let seti = fn reg -> fn x -> vec_set reg 1 (mask12 x);
+
+let draw = fn mem -> fn v -> fn reg -> fn disp -> fn x0 -> fn y0 -> fn rows ->
+  let i0 = geti reg in
+  let _ = vec_set v 15 0 in
+  let rec row = fn r ->
+    if r >= rows then ()
+    else
+      let byte = vec_get mem (i0 + r) in
+      let rec col = fn c ->
+        if c >= 8 then ()
+        else
+          let on = bit_and (bit_shr byte (7 - c)) 1 in
+          let _ =
+            if on == 0 then ()
+            else
+              let px = bit_and (x0 + c) 63 in
+              let py = bit_and (y0 + r) 31 in
+              let idx = py * 64 + px in
+              let old = vec_get disp idx in
+              let _ = if old == 1 then vec_set v 15 1 else () in
+              vec_set disp idx (bit_xor old 1) in
+          col (c + 1) in
+      let _ = col 0 in
+      row (r + 1) in
+  row 0;
+
+let rng_next = fn rng ->
+  let s = bit_and (vec_get rng 0 * 25173 + 13849) 65535 in
+  let _ = vec_set rng 0 s in
+  bit_and (bit_shr s 8) 255;
+
+let step = fn mem -> fn v -> fn reg -> fn stack -> fn disp -> fn rng -> fn keys ->
+  let p  = vec_get reg 0 in
+  let op = bit_or (bit_shl (vec_get mem p) 8) (vec_get mem (p + 1)) in
+  let n1  = bit_and (bit_shr op 12) 15 in
+  let x   = bit_and (bit_shr op 8) 15 in
+  let y   = bit_and (bit_shr op 4) 15 in
+  let n   = bit_and op 15 in
+  let nn  = bit_and op 255 in
+  let nnn = bit_and op 4095 in
+  let vx  = vec_get v x in
+  let vy  = vec_get v y in
+  let _ = vec_set reg 0 (mask12 (p + 2)) in
+  let skip = fn () -> vec_set reg 0 (mask12 (vec_get reg 0 + 2)) in
+  if n1 == 0 then
+    (if op == 238 then
+       let sp = vec_get reg 2 - 1 in let _ = vec_set reg 2 sp in vec_set reg 0 (vec_get stack sp)
+     else if op == 224 then
+       let rec cl = fn i -> if i >= 2048 then () else let _ = vec_set disp i 0 in cl (i + 1) in cl 0
+     else ())
+  else if n1 == 1 then vec_set reg 0 nnn
+  else if n1 == 2 then
+    let sp = vec_get reg 2 in let _ = vec_set stack sp (vec_get reg 0) in
+    let _ = vec_set reg 2 (sp + 1) in vec_set reg 0 nnn
+  else if n1 == 3 then (if vx == nn then skip () else ())
+  else if n1 == 4 then (if vx == nn then () else skip ())
+  else if n1 == 5 then (if vx == vy then skip () else ())
+  else if n1 == 6 then vec_set v x nn
+  else if n1 == 7 then vec_set v x (mask8 (vx + nn))
+  else if n1 == 8 then
+    (if n == 0 then vec_set v x vy
+     else if n == 1 then vec_set v x (bit_or vx vy)
+     else if n == 2 then vec_set v x (bit_and vx vy)
+     else if n == 3 then vec_set v x (bit_xor vx vy)
+     else if n == 4 then let s = vx + vy in let _ = vec_set v 15 (if s > 255 then 1 else 0) in vec_set v x (mask8 s)
+     else if n == 5 then let _ = vec_set v 15 (if vx >= vy then 1 else 0) in vec_set v x (mask8 (vx - vy))
+     else if n == 6 then let _ = vec_set v 15 (bit_and vx 1) in vec_set v x (bit_shr vx 1)
+     else if n == 7 then let _ = vec_set v 15 (if vy >= vx then 1 else 0) in vec_set v x (mask8 (vy - vx))
+     else (let _ = vec_set v 15 (bit_and (bit_shr vx 7) 1) in vec_set v x (mask8 (bit_shl vx 1))))
+  else if n1 == 9 then (if vx == vy then () else skip ())
+  else if n1 == 10 then seti reg nnn
+  else if n1 == 11 then vec_set reg 0 (mask12 (vec_get v 0 + nnn))
+  else if n1 == 12 then vec_set v x (bit_and (rng_next rng) nn)
+  else if n1 == 13 then draw mem v reg disp vx vy n
+  else if n1 == 14 then
+    (if nn == 158 then (if vec_get keys vx == 1 then skip () else ())
+     else if nn == 161 then (if vec_get keys vx == 1 then () else skip ())
+     else ())
+  else if n1 == 15 then
+    (if nn == 7 then vec_set v x (vec_get reg 3)
+     else if nn == 21 then vec_set reg 3 vx
+     else if nn == 24 then vec_set reg 4 vx
+     else if nn == 41 then seti reg (vx * 5)
+     else if nn == 30 then seti reg (geti reg + vx)
+     else ())
+  else ();
+
+// --- machine + web wiring -------------------------------------------------
+let mem = new_vec 4096 0;
+let v = new_vec 16 0;
+let reg = new_vec 5 0;
+let stack = new_vec 16 0;
+let disp = new_vec 2048 0;
+let rng = new_vec 1 1;
+let keys = new_vec 16 0;
+
+let font = bytes_of_hex ("F0909090F02060202070F010F080F0F010F010F09090F01010F080F010F0"
+  ++ "F080F090F0F010204040F090F090F0F090F010F0F090F09090E090E090E0F0808080F0E0909090E0F080F080F0F080F08080");
+let _ = blit_bytes mem 0 font;
+
+// ROM: cycle glyphs 0..F at (26,13), paced by the delay timer, forever.
+//   6C0F VC=15   6000 V0=0   [main] 00E0 clear   F029 I=font(V0)
+//   611A V1=26   620D V2=13  D125 draw   6A08 VA=8   FA15 DT=VA
+//   [wait] FB07 VB=DT   3B00 skip if 0   1214 jump wait   7001 V0+=1
+//   80C2 V0 &= VC   1204 jump main
+let rom = bytes_of_hex "6c0f600000e0f029611a620dd1256a08fa15fb073b001212700180c21204";
+let _ = blit_bytes mem 512 rom;
+let _ = vec_set reg 0 512;
+
+// canvas: 64x32 scaled 8x -> 512x256
+let screen = dom_get_by_id "screen";
+let scale = 8;
+
+let render = fn (u: unit) ->
+  let _ = dom_canvas_fill_style screen "#0b0f14" in
+  let _ = dom_canvas_fill_rect screen 0 0 512 256 in
+  let _ = dom_canvas_fill_style screen "#7ee787" in
+  let rec go = fn i ->
+    if i >= 2048 then ()
+    else
+      let _ = if vec_get disp i == 1 then
+                dom_canvas_fill_rect screen (bit_and i 63 * scale) (i / 64 * scale) scale scale
+              else () in
+      go (i + 1) in
+  go 0;
+
+// one animation frame: run a burst of cycles, tick the delay timer, redraw
+let frame = fn (u: unit) ->
+  let rec run = fn k ->
+    if k <= 0 then ()
+    else let _ = step mem v reg stack disp rng keys in run (k - 1) in
+  let _ = run 12 in
+  let d = vec_get reg 3 in
+  let _ = if d > 0 then vec_set reg 3 (d - 1) else () in
+  render ();
+
+let handle_key = fn (k: str) ->
+  // map the CHIP-8 hex keypad (1234/qwer/asdf/zxcv) to keys 0..F, momentary
+  let idx =
+    if str_eq k "1" then 1 else if str_eq k "2" then 2 else if str_eq k "3" then 3
+    else if str_eq k "4" then 12 else if str_eq k "q" then 4 else if str_eq k "w" then 5
+    else if str_eq k "e" then 6 else if str_eq k "r" then 13 else if str_eq k "a" then 7
+    else if str_eq k "s" then 8 else if str_eq k "d" then 9 else if str_eq k "f" then 14
+    else if str_eq k "z" then 10 else if str_eq k "x" then 0 else if str_eq k "c" then 11
+    else if str_eq k "v" then 15 else 0 - 1 in
+  if idx >= 0 then vec_set keys idx 1 else ();
+
+let _ = render () in
+let _ = dom_on_key handle_key in
+dom_on_frame frame

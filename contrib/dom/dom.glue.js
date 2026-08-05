@@ -154,6 +154,14 @@ export function makeDomGlue() {
       const ctx = el.__mereCtx || (el.__mereCtx = el.getContext("2d"));
       if (ctx) ctx.fillRect(x, y, w, h);
     },
+    // Per-frame callback: run the Mere closure once per requestAnimationFrame,
+    // forever. For real-time programs (the CHIP-8 emulator) that must advance
+    // on their own rather than only on input.
+    dom_on_frame: (closurePtr) => {
+      if (typeof requestAnimationFrame === "undefined") return;
+      const loop = () => { callClosure(closurePtr); requestAnimationFrame(loop); };
+      requestAnimationFrame(loop);
+    },
   };
 
   const attach = (instance) => {
