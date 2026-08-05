@@ -1,0 +1,144 @@
+// chip8.mere — a CHIP-8 CPU core in Mere (stage 1: the processor, no display
+// or input yet). Loads a ROM from a `bytes` value into 4 KB of memory at
+// 0x200 and runs a fetch-decode-execute loop over the classic opcodes, with
+// 8-bit register wraparound and VF carry/borrow. A first CPU emulator; being
+// 8-bit, it runs identically on all four backends. A `bytes` value carries the
+// ROM (the binary-type work this exercises), bitwise builtins decode opcodes,
+// and mutable Vec[int] arrays hold memory and registers.
+//
+// State lives in mutable Vec[int] arrays:
+//   mem   4096 bytes         v    V0..VF (16 8-bit registers)
+//   reg   [PC, I, SP, DT, ST]     stack 16 levels (for CALL/RET)
+
+let mask8  = fn x -> bit_and x 255;
+let mask12 = fn x -> bit_and x 4095;
+
+// --- machine construction ------------------------------------------------
+let rec fill = fn v -> fn i -> fn n -> fn x ->
+  if i >= n then () else let _ = vec_set v i x in fill v (i + 1) n x;
+
+let new_vec = fn n -> fn x ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in v;
+
+// load a ROM (bytes) into memory starting at 0x200, PC := 0x200
+let load = fn mem -> fn reg -> fn rom ->
+  let n = bytes_len rom in
+  let rec go = fn i ->
+    if i >= n then () else let _ = vec_set mem (512 + i) (bytes_get rom i) in go (i + 1) in
+  let _ = go 0 in
+  vec_set reg 0 512;   // PC = 0x200
+
+// register/pc accessors on the reg array
+let pc  = fn reg -> vec_get reg 0;
+let seti = fn reg -> fn x -> vec_set reg 1 (mask12 x);
+let geti = fn reg -> vec_get reg 1;
+
+// --- one instruction ------------------------------------------------------
+// Executes the instruction at PC, updating state. PC advances by 2 by default;
+// jumps/calls set it directly, skips add another 2.
+let step = fn mem -> fn v -> fn reg -> fn stack ->
+  let p  = pc reg in
+  let hi = vec_get mem p in
+  let lo = vec_get mem (p + 1) in
+  let op = bit_or (bit_shl hi 8) lo in
+  let n1  = bit_and (bit_shr op 12) 15 in
+  let x   = bit_and (bit_shr op 8) 15 in
+  let y   = bit_and (bit_shr op 4) 15 in
+  let n   = bit_and op 15 in
+  let nn  = bit_and op 255 in
+  let nnn = bit_and op 4095 in
+  let vx  = vec_get v x in
+  let vy  = vec_get v y in
+  let _ = vec_set reg 0 (mask12 (p + 2)) in   // default advance
+  let skip = fn () -> vec_set reg 0 (mask12 (vec_get reg 0 + 2)) in
+  if n1 == 0 then
+    (if op == 238 then                          // 00EE: return
+       let sp = vec_get reg 2 - 1 in
+       let _ = vec_set reg 2 sp in
+       vec_set reg 0 (vec_get stack sp)
+     else ())                                   // 00E0 clear (display stage 2): no-op
+  else if n1 == 1 then vec_set reg 0 nnn        // 1NNN: jump
+  else if n1 == 2 then                          // 2NNN: call
+    let sp = vec_get reg 2 in
+    let _ = vec_set stack sp (vec_get reg 0) in
+    let _ = vec_set reg 2 (sp + 1) in
+    vec_set reg 0 nnn
+  else if n1 == 3 then (if vx == nn then skip () else ())     // 3XNN
+  else if n1 == 4 then (if vx == nn then () else skip ())     // 4XNN
+  else if n1 == 5 then (if vx == vy then skip () else ())     // 5XY0
+  else if n1 == 6 then vec_set v x nn                          // 6XNN
+  else if n1 == 7 then vec_set v x (mask8 (vx + nn))           // 7XNN
+  else if n1 == 8 then                                         // 8XY_
+    (if n == 0 then vec_set v x vy
+     else if n == 1 then vec_set v x (bit_or vx vy)
+     else if n == 2 then vec_set v x (bit_and vx vy)
+     else if n == 3 then vec_set v x (bit_xor vx vy)
+     else if n == 4 then
+       let s = vx + vy in
+       let _ = vec_set v 15 (if s > 255 then 1 else 0) in
+       vec_set v x (mask8 s)
+     else if n == 5 then
+       let _ = vec_set v 15 (if vx >= vy then 1 else 0) in
+       vec_set v x (mask8 (vx - vy))
+     else if n == 6 then
+       let _ = vec_set v 15 (bit_and vx 1) in
+       vec_set v x (bit_shr vx 1)
+     else if n == 7 then
+       let _ = vec_set v 15 (if vy >= vx then 1 else 0) in
+       vec_set v x (mask8 (vy - vx))
+     else (let _ = vec_set v 15 (bit_and (bit_shr vx 7) 1) in
+           vec_set v x (mask8 (bit_shl vx 1))))                // 8XYE
+  else if n1 == 9 then (if vx == vy then () else skip ())      // 9XY0
+  else if n1 == 10 then seti reg nnn                           // ANNN: I = NNN
+  else if n1 == 11 then vec_set reg 0 (mask12 (vec_get v 0 + nnn))  // BNNN
+  else if n1 == 15 then                                        // FX__
+    (if nn == 30 then seti reg (geti reg + vx)                 // FX1E: I += VX
+     else if nn == 51 then                                     // FX33: BCD of VX
+       let i = geti reg in
+       let _ = vec_set mem i (vx / 100) in
+       let _ = vec_set mem (i + 1) ((vx / 10) - (vx / 100) * 10) in
+       vec_set mem (i + 2) (vx - (vx / 10) * 10)
+     else if nn == 85 then                                     // FX55: store V0..VX -> mem[I..]
+       let i = geti reg in
+       let rec go = fn k -> if k > x then () else let _ = vec_set mem (i + k) (vec_get v k) in go (k + 1) in
+       go 0
+     else if nn == 101 then                                    // FX65: load mem[I..] -> V0..VX
+       let i = geti reg in
+       let rec go = fn k -> if k > x then () else let _ = vec_set v k (vec_get mem (i + k)) in go (k + 1) in
+       go 0
+     else ())
+  else ();
+
+// run up to `cycles` instructions (stops early if PC jumps to itself = halt)
+let rec run = fn mem -> fn v -> fn reg -> fn stack -> fn cycles ->
+  if cycles <= 0 then ()
+  else
+    let before = pc reg in
+    let _ = step mem v reg stack in
+    if pc reg == before then ()                // jump-to-self: halt
+    else run mem v reg stack (cycles - 1);
+
+// --- harness --------------------------------------------------------------
+let mem = new_vec 4096 0;
+let v = new_vec 16 0;
+let reg = new_vec 5 0;
+let stack = new_vec 16 0;
+
+// hand-assembled test ROM (hex):
+//   6005 V0=5   6103 V1=3   8014 V0+=V1 (=>8,VF=0)
+//   620A V2=10  8205 V2-=V0 (=>2,VF=1)   A300 I=0x300
+//   F255 store V0..V2 -> mem[0x300..]    120E jump self (halt)
+let rom = bytes_of_hex "600561038014620a8205a300f255120e";
+let _ = load mem reg rom;
+let _ = run mem v reg stack 100;
+
+let _ = print (str_of_int (vec_get v 0));    // 8
+let _ = print (str_of_int (vec_get v 1));    // 3
+let _ = print (str_of_int (vec_get v 2));    // 2
+let _ = print (str_of_int (vec_get v 15));   // 1  (VF from the subtract)
+let _ = print (str_of_int (vec_get mem 768));  // mem[0x300] = 8
+let _ = print (str_of_int (vec_get mem 769));  // mem[0x301] = 3
+let _ = print (str_of_int (vec_get mem 770));  // mem[0x302] = 2
+print "ok"
