@@ -65,6 +65,7 @@
       <a href="counter.html">counter</a>
       <a href="g2048.html">2048</a>
       <a href="raytrace.html">raytrace</a>
+      <a href="chip8.html">chip8</a>
       <a href="echo.html">echo</a>
       <a href="wordcount.html">wordcount</a>
       <a href="selfhost-fmt.html">self-host fmt</a>
@@ -93,7 +94,10 @@
     <a href="g2048.html">2048</a> game, playable with the arrow keys via
     <code>dom_on_key</code>. The <a href="raytrace.html">ray tracer</a>
     renders a scene to a canvas through the pixel FFI
-    (<code>dom_canvas_fill_rect</code>).</p>
+    (<code>dom_canvas_fill_rect</code>), and the
+    <a href="chip8.html">CHIP-8</a> emulator runs a real-time
+    fetch-decode-execute loop, driving the canvas from a per-frame callback
+    (<code>dom_on_frame</code>).</p>
 
     <h3>Source (preview)</h3>
     <pre id="source">// Click a demo button above to view its source here.</pre>
