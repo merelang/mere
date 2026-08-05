@@ -1,43 +1,83 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CHIP-8 — Mere playground</title>
+  <title>CHIP-8 in Mere — a browser emulator</title>
+  <link rel="stylesheet" href="../style.css">
   <style>
-    body { font-family: system-ui, sans-serif; max-width: min(720px, 92vw);
-           margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #1f2328; }
-    h1 { font-size: 1.4rem; }
-    canvas { width: min(640px, 92vw); image-rendering: pixelated;
-             background: #0b0f14; border-radius: 6px; display: block; margin: 1rem 0; }
-    code { background: #f0f1f2; padding: 0.1em 0.35em; border-radius: 4px; }
-    footer { margin-top: 2rem; color: #656d76; font-size: 0.9rem; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #0d1117; color: #e6edf3; } code { background: #21262d; }
+    .game-app {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 2rem;
+      margin: 2rem 0;
+      background: #f7fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
     }
+    #screen {
+      width: min(512px, 90vw);
+      image-rendering: pixelated;
+      background: #0b0f14;
+      border-radius: 6px;
+    }
+    .hint { color: #718096; font-size: 0.9em; }
   </style>
 </head>
 <body>
-  <h1>CHIP-8, written in Mere</h1>
-  <p>
-    A CHIP-8 CPU emulator compiled to WebAssembly from
-    <a href="https://github.com/merelang/mere/blob/main/contrib/site/playground/chip8.mere"><code>chip8.mere</code></a>.
-    The same fetch-decode-execute core runs on all four Mere backends; here it
-    renders to a <code>&lt;canvas&gt;</code> and is driven by a per-frame
-    callback (<code>dom_on_frame</code>, a requestAnimationFrame binding added
-    to <code>contrib/dom</code> for this dogfood). The built-in ROM cycles the
-    hex-digit glyphs <code>0..F</code>, paced by the delay timer.
-  </p>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="g2048.html">2048</a>
+      <a href="raytrace.html">raytrace</a>
+      <a href="chip8.html" class="active">chip8</a>
+      <a href="echo.html">echo</a>
+      <a href="wordcount.html">wordcount</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+    </div>
+  </nav>
 
-  <canvas id="screen" width="512" height="256"></canvas>
+  <main>
+    <h1>CHIP-8 — written in Mere</h1>
 
-  <p>
-    The ROM lives in the module as a <code>bytes</code> value (loaded into 4&nbsp;KB
-    of emulated memory at <code>0x200</code>); opcodes are decoded with the
-    bitwise builtins and sprites are XOR-blitted into a 64&times;32 framebuffer.
-    Keyboard input is wired through <code>dom_on_key</code> onto the CHIP-8
-    hex keypad (<code>1 2 3 4 / q w e r / a s d f / z x c v</code>).
-  </p>
+    <p>
+      A <a href="https://en.wikipedia.org/wiki/CHIP-8">CHIP-8</a> CPU emulator
+      compiled from <a href="https://github.com/merelang/mere">Mere</a> to
+      WebAssembly. The same fetch-decode-execute core runs on all four Mere
+      backends; here it renders to a <code>&lt;canvas&gt;</code> and is driven by
+      a per-frame callback — <code>dom_on_frame</code>, a
+      <code>requestAnimationFrame</code> binding added to <code>contrib/dom</code>
+      for this emulator (the way 2048 needed <code>dom_on_key</code> and the ray
+      tracer needed the canvas). The built-in ROM cycles the hex-digit glyphs
+      <code>0..F</code>, paced by the delay timer, so the screen animates on its
+      own.
+    </p>
+
+    <div class="game-app">
+      <canvas id="screen" width="512" height="256"></canvas>
+      <p class="hint">
+        The ROM rides in the module as a <code>bytes</code> value; opcodes are
+        decoded with the bitwise builtins and sprites are XOR-blitted into a
+        64&times;32 framebuffer. Keys map the CHIP-8 hex keypad
+        (<code>1 2 3 4 / q w e r / a s d f / z x c v</code>).
+      </p>
+    </div>
+
+    <h2>What's happening</h2>
+    <ol>
+      <li><code>mere -w -I . chip8.mere</code> lowers the emulator — 4&nbsp;KB of
+        memory, 16 registers, the opcode table, a 64&times;32 framebuffer — to
+        WebAssembly.</li>
+      <li><code>dom_on_frame</code> registers a <code>requestAnimationFrame</code>
+        loop; each frame runs a burst of CPU cycles, ticks the delay timer, and
+        redraws the changed pixels via <code>dom_canvas_fill_rect</code>.</li>
+      <li><code>dom_on_key</code> feeds key presses onto the emulated keypad.</li>
+    </ol>
+  </main>
 
   <footer>frontend FFI dogfood — a real-time loop via <code>dom_on_frame</code></footer>
 
