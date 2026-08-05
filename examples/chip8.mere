@@ -1,10 +1,16 @@
-// chip8.mere — a CHIP-8 CPU + display in Mere (stages 1-2: processor and
-// 64x32 monochrome screen; input/timers come next). Loads a ROM from a bytes
-// value into 4 KB of memory at 0x200 and runs a fetch-decode-execute loop.
-// Being 8-bit it runs identically on all four backends: a bytes value carries
-// the ROM (the binary-type work this exercises), bitwise builtins decode
-// opcodes and blit sprites, and mutable Vec[int] arrays hold memory, registers
-// and the framebuffer.
+// chip8.mere — a CHIP-8 emulator core in Mere (CPU + 64x32 screen + keypad,
+// timers, and a seeded RNG). Loads a ROM from a bytes value into 4 KB of
+// memory at 0x200 and runs a fetch-decode-execute loop. Being 8-bit it runs
+// identically on all four backends: a bytes value carries the ROM (the binary-
+// type work this exercises), bitwise builtins decode opcodes and blit sprites,
+// and mutable Vec[int] arrays hold memory, registers, and the framebuffer.
+//
+// Everything that would be non-deterministic on a real machine is made
+// reproducible so the four backends stay byte-identical: CXNN uses a seeded
+// 16-bit LCG (kept 16-bit so the multiply never overflows Wasm's 32-bit int),
+// the delay/sound timers tick once per executed instruction, and the keypad
+// reads a preset key array. A browser front end (canvas + real keydown) is the
+// next step and lives outside this batch-testable file.
 //
 // State:
 //   mem 4096   v V0..VF   reg [PC,I,SP,DT,ST]   stack 16   disp 64*32 (0/1)
@@ -58,7 +64,23 @@ let draw = fn mem -> fn v -> fn reg -> fn disp -> fn x0 -> fn y0 -> fn rows ->
       row (r + 1) in
   row 0;
 
-let step = fn mem -> fn v -> fn reg -> fn stack -> fn disp ->
+// Deterministic 16-bit LCG (Turbo-Pascal constants), used for CXNN. Kept
+// 16-bit so the multiply stays under 2^31 and does not overflow Wasm's 32-bit
+// int — the whole emulator is backend-agnostic only because every arithmetic
+// step is masked back into range. rng is a 1-element Vec holding the seed.
+let rng_next = fn rng ->
+  let s = bit_and (vec_get rng 0 * 25173 + 13849) 65535 in
+  let _ = vec_set rng 0 s in
+  bit_and (bit_shr s 8) 255;
+
+// count DT / ST (reg[3] / reg[4]) down toward zero — one host tick
+let tick = fn reg ->
+  let d = vec_get reg 3 in
+  let _ = if d > 0 then vec_set reg 3 (d - 1) else () in
+  let s = vec_get reg 4 in
+  if s > 0 then vec_set reg 4 (s - 1) else ();
+
+let step = fn mem -> fn v -> fn reg -> fn stack -> fn disp -> fn rng -> fn keys ->
   let p  = pc reg in
   let hi = vec_get mem p in
   let lo = vec_get mem (p + 1) in
@@ -110,9 +132,23 @@ let step = fn mem -> fn v -> fn reg -> fn stack -> fn disp ->
   else if n1 == 9 then (if vx == vy then () else skip ())
   else if n1 == 10 then seti reg nnn
   else if n1 == 11 then vec_set reg 0 (mask12 (vec_get v 0 + nnn))
+  else if n1 == 12 then vec_set v x (bit_and (rng_next rng) nn)   // CXNN: VX = rand & NN
   else if n1 == 13 then draw mem v reg disp vx vy n              // DXYN
+  else if n1 == 14 then                                          // EX__: keypad
+    (if nn == 158 then (if vec_get keys vx == 1 then skip () else ())        // EX9E
+     else if nn == 161 then (if vec_get keys vx == 1 then () else skip ())   // EXA1
+     else ())
   else if n1 == 15 then
-    (if nn == 30 then seti reg (geti reg + vx)
+    (if nn == 7 then vec_set v x (vec_get reg 3)                 // FX07: VX = DT
+     else if nn == 21 then vec_set reg 3 vx                      // FX15: DT = VX
+     else if nn == 24 then vec_set reg 4 vx                      // FX18: ST = VX
+     else if nn == 10 then                                       // FX0A: wait for a key
+       let rec scan = fn k ->
+         if k >= 16 then vec_set reg 0 (mask12 (vec_get reg 0 - 2))  // none: repeat (block)
+         else if vec_get keys k == 1 then vec_set v x k
+         else scan (k + 1) in
+       scan 0
+     else if nn == 30 then seti reg (geti reg + vx)
      else if nn == 41 then seti reg (vx * 5)                     // FX29: font sprite addr
      else if nn == 51 then
        let i = geti reg in
@@ -128,12 +164,13 @@ let step = fn mem -> fn v -> fn reg -> fn stack -> fn disp ->
      else ())
   else ();
 
-let rec run = fn mem -> fn v -> fn reg -> fn stack -> fn disp -> fn cycles ->
+let rec run = fn mem -> fn v -> fn reg -> fn stack -> fn disp -> fn rng -> fn keys -> fn cycles ->
   if cycles <= 0 then ()
   else
     let before = pc reg in
-    let _ = step mem v reg stack disp in
-    if pc reg == before then () else run mem v reg stack disp (cycles - 1);
+    let _ = step mem v reg stack disp rng keys in
+    let _ = tick reg in                          // one timer tick per cycle (deterministic)
+    if pc reg == before then () else run mem v reg stack disp rng keys (cycles - 1);
 
 // ASCII dump of the 64x32 framebuffer (only rows/cols that contain pixels are
 // interesting; print the top-left 12x8 window where our test sprite lands).
@@ -159,20 +196,27 @@ let v = new_vec 16 0;
 let reg = new_vec 5 0;
 let stack = new_vec 16 0;
 let disp = new_vec 2048 0;
+let rng = new_vec 1 42;         // fixed RNG seed => deterministic on every backend
+let keys = new_vec 16 0;
+let _ = vec_set keys 6 1;       // pretend key 6 is held down
 
 // standard hex-digit font (16 glyphs x 5 bytes) into mem[0..79]
 let font = bytes_of_hex ("F0909090F02060202070F010F080F0F010F010F09090F01010F080F010F0"
   ++ "F080F090F0F010204040F090F090F0F090F010F0F090F09090E090E090E0F0808080F0E0909090E0F080F080F0F080F08080");
 let _ = blit_bytes mem 0 font;
 
-// hand-assembled ROM: clear, draw the '3' glyph at (5,2), halt.
-//   00E0   clear      6205  V2 = 5 (x)     6302  V3 = 2 (y)
-//   6003   V0 = 3     F029  I = font(V0=3) = 15
-//   D235   draw 5-row glyph at (V2,V3)     1210  jump self
-let rom = bytes_of_hex "00e0620563026003f029d2351210";
+// stage-3 ROM: draw a seeded-random hex digit, set a timer, test the keypad.
+//   C00F  V0 = rand & 0x0F         F029  I = font(V0)
+//   6105  V1 = 5 (x)   6202 V2 = 2 (y)   D125  draw the glyph
+//   6614  V6 = 20      F615  DT = V6     F707  V7 = DT (post-tick)
+//   6806  V8 = 6       E89E  skip if key 6 held   690F  V9 = 15 (should be skipped)
+//   1216  jump self
+let rom = bytes_of_hex "c00ff02961056202d1256614f615f7076806e89e690f1216";
 let _ = load mem reg rom;
-let _ = run mem v reg stack disp 100;
+let _ = run mem v reg stack disp rng keys 200;
 
-let _ = print (str_of_int (vec_get v 15));   // collision flag (0 on a clear screen)
-let _ = dump disp 5 2 8 5;                    // 8x5 window at (5,2): the '3' glyph
+let _ = print (str_of_int (vec_get v 0));    // seeded rand digit (deterministic)
+let _ = print (str_of_int (vec_get v 7));    // DT read back after ticks
+let _ = print (str_of_int (vec_get v 9));    // 0 if the keypad skip fired
+let _ = dump disp 5 2 8 5;                    // the drawn glyph (font of V0)
 print "ok"
