@@ -127,6 +127,7 @@ let vec_higher_order_used = ref false
 
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
+let bytes_used = ref false  (* gate the Wasm bytes runtime *)
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
 let logger_used = ref false
@@ -2283,6 +2284,25 @@ let rec emit_expr (e : Ast.expr) : unit =
     when not (Hashtbl.mem toplevel_fn_names "is_space") ->
     emit_expr arg;
     emit_instr "call $__lang_is_space"
+  (* bytes builtins. *)
+  | Ast.App ({ node = Ast.Var "bytes_of_hex"; _ }, arg) ->
+    bytes_used := true; emit_expr arg; emit_instr "call $__lang_bytes_of_hex"
+  | Ast.App ({ node = Ast.Var "hex_of_bytes"; _ }, arg) ->
+    bytes_used := true; emit_expr arg; emit_instr "call $__lang_hex_of_bytes"
+  | Ast.App ({ node = Ast.Var "bytes_of_str"; _ }, arg) ->
+    bytes_used := true; emit_expr arg; emit_instr "call $__lang_bytes_of_str"
+  | Ast.App ({ node = Ast.Var "str_of_bytes"; _ }, arg) ->
+    bytes_used := true; emit_expr arg; emit_instr "call $__lang_str_of_bytes"
+  | Ast.App ({ node = Ast.Var "bytes_len"; _ }, arg) ->
+    bytes_used := true; emit_expr arg; emit_instr "i32.load"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e); _ }, i_e) ->
+    bytes_used := true; emit_expr b_e; emit_expr i_e; emit_instr "call $__lang_bytes_get"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_concat"; _ }, a_e); _ }, b_e) ->
+    bytes_used := true; emit_expr a_e; emit_expr b_e; emit_instr "call $__lang_bytes_concat"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_slice"; _ }, b_e); _ }, start_e); _ }, len_e) ->
+    bytes_used := true; emit_expr b_e; emit_expr start_e; emit_expr len_e; emit_instr "call $__lang_bytes_slice"
+  | Ast.App ({ node = Ast.Var ("bytes_of_vec" | "vec_of_bytes"); _ }, _) ->
+    unsupported e.Ast.loc "bytes_of_vec / vec_of_bytes (interp only; interp only for now)"
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "substring"; _ }, s_e); _ }, start_e); _ }, end_e) ->
     substring_used := true;
     emit_expr s_e;
@@ -5480,6 +5500,123 @@ let vec_higher_order_runtime = {|
         (br $lp)))
     (local.get $new))|}
 
+(* bytes runtime. A bytes value is an i32 pointer to
+   [i32 len][bytes...] in linear memory (fits the uniform i32 value model like
+   str). bytes_alloc aligns the bump to 4 so the len header is aligned. *)
+let bytes_runtime_wasm = {|
+  (func $__lang_bytes_alloc (param $len i32) (result i32)
+    (local $b i32)
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 3)) (i32.const -4)))
+    (local.set $b (global.get $__lang_bump))
+    (i32.store (local.get $b) (local.get $len))
+    (global.set $__lang_bump (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $len)))
+    (local.get $b))
+  (func $__lang_bytes_get (param $b i32) (param $i i32) (result i32)
+    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
+                (i32.ge_s (local.get $i) (i32.load (local.get $b))))
+      (then (unreachable)))
+    (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+  (func $__lang_bytes_of_str (param $s i32) (result i32)
+    (local $n i32) (local $b i32) (local $i i32)
+    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local.set $b (call $__lang_bytes_alloc (local.get $n)))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $n)))
+      (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))
+                  (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $b))
+  (func $__lang_str_of_bytes (param $b i32) (result i32)
+    (local $n i32) (local $r i32) (local $i i32)
+    (local.set $n (i32.load (local.get $b)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $n)))
+      (i32.store8 (i32.add (local.get $r) (local.get $i))
+                  (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (local.get $n)) (i32.const 0))
+    (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $n)) (i32.const 1)))
+    (local.get $r))
+  (func $__lang_hexchar (param $d i32) (result i32)
+    (if (result i32) (i32.lt_s (local.get $d) (i32.const 10))
+      (then (i32.add (local.get $d) (i32.const 48)))
+      (else (i32.add (local.get $d) (i32.const 87)))))
+  (func $__lang_hex_of_bytes (param $b i32) (result i32)
+    (local $n i32) (local $r i32) (local $i i32) (local $byte i32)
+    (local.set $n (i32.load (local.get $b)))
+    (local.set $r (global.get $__lang_bump))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $n)))
+      (local.set $byte (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+      (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $i) (i32.const 2)))
+                  (call $__lang_hexchar (i32.shr_u (local.get $byte) (i32.const 4))))
+      (i32.store8 (i32.add (i32.add (local.get $r) (i32.mul (local.get $i) (i32.const 2))) (i32.const 1))
+                  (call $__lang_hexchar (i32.and (local.get $byte) (i32.const 15))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 0))
+    (global.set $__lang_bump (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 1)))
+    (local.get $r))
+  (func $__lang_hexval (param $c i32) (result i32)
+    (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 48)) (i32.le_s (local.get $c) (i32.const 57)))
+      (then (i32.sub (local.get $c) (i32.const 48)))
+      (else (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 97)) (i32.le_s (local.get $c) (i32.const 102)))
+        (then (i32.sub (local.get $c) (i32.const 87)))
+        (else (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 65)) (i32.le_s (local.get $c) (i32.const 70)))
+          (then (i32.sub (local.get $c) (i32.const 55)))
+          (else (unreachable))))))))
+  (func $__lang_bytes_of_hex (param $h i32) (result i32)
+    (local $half i32) (local $b i32) (local $i i32)
+    (local.set $half (i32.div_u (call $__lang_strlen (local.get $h)) (i32.const 2)))
+    (local.set $b (call $__lang_bytes_alloc (local.get $half)))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $half)))
+      (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))
+        (i32.add
+          (i32.mul (call $__lang_hexval (i32.load8_u (i32.add (local.get $h) (i32.mul (local.get $i) (i32.const 2))))) (i32.const 16))
+          (call $__lang_hexval (i32.load8_u (i32.add (local.get $h) (i32.add (i32.mul (local.get $i) (i32.const 2)) (i32.const 1)))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $b))
+  (func $__lang_bytes_slice (param $b i32) (param $start i32) (param $len i32) (result i32)
+    (local $o i32) (local $i i32)
+    (local.set $o (call $__lang_bytes_alloc (local.get $len)))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $len)))
+      (i32.store8 (i32.add (i32.add (local.get $o) (i32.const 4)) (local.get $i))
+                  (i32.load8_u (i32.add (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $start)) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (local.get $o))
+  (func $__lang_bytes_concat (param $a i32) (param $b i32) (result i32)
+    (local $alen i32) (local $blen i32) (local $o i32) (local $i i32)
+    (local.set $alen (i32.load (local.get $a)))
+    (local.set $blen (i32.load (local.get $b)))
+    (local.set $o (call $__lang_bytes_alloc (i32.add (local.get $alen) (local.get $blen))))
+    (local.set $i (i32.const 0))
+    (block $ea (loop $la
+      (br_if $ea (i32.eq (local.get $i) (local.get $alen)))
+      (i32.store8 (i32.add (i32.add (local.get $o) (i32.const 4)) (local.get $i))
+                  (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 4)) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $la)))
+    (local.set $i (i32.const 0))
+    (block $eb (loop $lb
+      (br_if $eb (i32.eq (local.get $i) (local.get $blen)))
+      (i32.store8 (i32.add (i32.add (i32.add (local.get $o) (i32.const 4)) (local.get $alen)) (local.get $i))
+                  (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lb)))
+    (local.get $o))|}
+
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic helper set.
    Uses Wasm's bump allocator ($__lang_bump). Layout:
    { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 bytes (same as Vec). *)
@@ -7435,7 +7572,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
-  let strbuf_section = if !strbuf_used then strbuf_runtime_wasm else "" in
+  (* strbuf + bytes share one template slot; both are independent WAT func
+     blocks and Wasm allows forward refs (bytes helpers call $__lang_strlen). *)
+  let strbuf_section =
+    (if !strbuf_used then strbuf_runtime_wasm else "")
+    ^ (if !bytes_used then bytes_runtime_wasm else "") in
   (* Phase 15.14: emit per-K key-eq helper + per-K map runtime for each K
      in map_key_types. *)
   let map_key_eq_section =

@@ -1,0 +1,87 @@
+// Base64 (RFC 4648) on the `bytes` type (a first-class binary type). Unlike base64.mere,
+// which carries binary as Vec[int] and reads/writes files (interpreter + C
+// only), this version is pure in-memory `bytes` and runs byte-identically on
+// ALL FOUR backends — the point of a first-class binary type. `bytes` is
+// immutable, so decode builds its result as a hex string and freezes it with
+// bytes_of_hex (no per-byte container needed).
+
+let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+let hexdig = "0123456789abcdef";
+
+// encode: bytes -> base64 str
+let encode = fn (b : bytes) ->
+  let n = bytes_len b in
+  let buf = strbuf_new () in
+  let rec e_go = fn i ->
+    if i >= n then ()
+    else
+      let b0 = bytes_get b i in
+      let has1 = i + 1 < n in
+      let has2 = i + 2 < n in
+      let b1 = if has1 then bytes_get b (i + 1) else 0 in
+      let b2 = if has2 then bytes_get b (i + 2) else 0 in
+      let triple = bit_or (bit_or (bit_shl b0 16) (bit_shl b1 8)) b2 in
+      let c0 = char_at alphabet (bit_and (bit_shr triple 18) 0x3F) in
+      let c1 = char_at alphabet (bit_and (bit_shr triple 12) 0x3F) in
+      let c2 = if has1 then char_at alphabet (bit_and (bit_shr triple 6) 0x3F) else "=" in
+      let c3 = if has2 then char_at alphabet (bit_and triple 0x3F) else "=" in
+      let _ = strbuf_push buf (c0 ++ c1 ++ c2 ++ c3) in
+      e_go (i + 3) in
+  let _ = e_go 0 in
+  strbuf_to_str buf;
+
+let deval = fn c ->
+  let o = ord c in
+  if o >= 65 && o <= 90 then o - 65
+  else if o >= 97 && o <= 122 then o - 71
+  else if o >= 48 && o <= 57 then o + 4
+  else if o == 43 then 62
+  else 63;
+
+let to_hex2 = fn v ->
+  (char_at hexdig (bit_and (bit_shr v 4) 0xF)) ++ (char_at hexdig (bit_and v 0xF));
+
+// decode: base64 str -> bytes (built as hex, then frozen — all-backend)
+let decode = fn s ->
+  let hb = strbuf_new () in
+  let n = str_len s in
+  let rec d_go = fn i ->
+    if i + 3 >= n then ()
+    else
+      let d0 = deval (char_at s i) in
+      let d1 = deval (char_at s (i + 1)) in
+      let ch2 = char_at s (i + 2) in
+      let ch3 = char_at s (i + 3) in
+      let triple = bit_or (bit_or (bit_or (bit_shl d0 18) (bit_shl d1 12))
+                                  (bit_shl (deval ch2) 6)) (deval ch3) in
+      let _ = strbuf_push hb (to_hex2 (bit_and (bit_shr triple 16) 0xFF)) in
+      let _ = if str_eq ch2 "=" then () else strbuf_push hb (to_hex2 (bit_and (bit_shr triple 8) 0xFF)) in
+      let _ = if str_eq ch3 "=" then () else strbuf_push hb (to_hex2 (bit_and triple 0xFF)) in
+      d_go (i + 4) in
+  let _ = d_go 0 in
+  bytes_of_hex (strbuf_to_str hb);
+
+let check = fn name -> fn got -> fn want ->
+  if str_eq got want then print ("ok   " ++ name)
+  else
+    let _ = print ("FAIL " ++ name) in
+    let _ = print ("  got  " ++ got) in
+    print ("  want " ++ want);
+
+// RFC 4648 known answers (encode)
+let _ = check "encode ''" (encode (bytes_of_str "")) "" in
+let _ = check "encode 'f'" (encode (bytes_of_str "f")) "Zg==" in
+let _ = check "encode 'fo'" (encode (bytes_of_str "fo")) "Zm8=" in
+let _ = check "encode 'foo'" (encode (bytes_of_str "foo")) "Zm9v" in
+let _ = check "encode 'foobar'" (encode (bytes_of_str "foobar")) "Zm9vYmFy" in
+
+// round-trip decode(encode(x)) == x, compared as hex
+let rt = fn s -> hex_of_bytes (decode (encode (bytes_of_str s))) in
+let _ = check "roundtrip 'foobar'" (rt "foobar") (hex_of_bytes (bytes_of_str "foobar")) in
+
+// binary round-trip through base64: a value with an embedded 0x00 and high
+// bytes that a `str` could not carry. This is the binary-type payoff.
+let bin = bytes_of_hex "00ff00deadbeef" in
+let _ = check "encode binary"    (encode bin) "AP8A3q2+7w==" in
+let _ = check "binary roundtrip" (hex_of_bytes (decode (encode bin))) "00ff00deadbeef" in
+print "done"

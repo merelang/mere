@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.118" Version.v "0.1.118";
+  check "version is 0.1.119" Version.v "0.1.119";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5526,6 +5526,16 @@ let () =
        "let b = bytes_of_hex \"00ff00\" in bytes_len b" in
      Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
     "__lang_bytes_of_hex";
+  assert_contains "bytes: LLVM backend emits the bytes runtime"
+    (let prog = typed_prog
+       "let b = bytes_of_hex \"00ff00\" in bytes_len b" in
+     Codegen_llvm.emit_program ~main_ty:Ast.TyInt prog)
+    "@__lang_bytes_of_hex";
+  assert_contains "bytes: Wasm backend emits the bytes runtime"
+    (let prog = typed_prog
+       "let b = bytes_of_hex \"00ff00\" in bytes_len b" in
+     Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
+    "$__lang_bytes_of_hex";
 
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
