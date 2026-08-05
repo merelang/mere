@@ -2361,6 +2361,24 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr path_e;
     emit_instr "drop";
     emit_instr "i32.const 0"
+  | Ast.App ({ node = Ast.Var "random_int"; _ }, n_e)
+    when not (List.mem_assoc "random_int" !locals) ->
+    (* no RNG wired on the Wasm host yet — deterministic 0 (refine to a host
+       Math.random import later). *)
+    emit_expr n_e;
+    emit_instr "drop";
+    emit_instr "i32.const 0"
+  | Ast.App ({ node = Ast.Var "run"; _ }, cmd_e)
+    when not (List.mem_assoc "run" !locals) ->
+    (* no subprocess on a browser/worker host — commands "fail" (nonzero). *)
+    emit_expr cmd_e;
+    emit_instr "drop";
+    emit_instr "i32.const 127"
+  | Ast.App ({ node = Ast.Var "args"; _ }, _)
+    when not (List.mem_assoc "args" !locals) ->
+    (* no argv on a browser/worker host — args() is the empty list. Reuse the
+       Constr emit with args()'s own result type (str list). *)
+    emit_expr { e with Ast.node = Ast.Constr ("Nil", None) }
   | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
     when not (List.mem_assoc "print_err" !locals) ->
     (* stderr — route to the same host sink as print. *)
