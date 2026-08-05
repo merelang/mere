@@ -314,6 +314,9 @@ let strbuf_used = ref false
 (* set when any bytes builtin is emitted, so bytes_runtime
    (the mere_bytes struct + helpers) is injected. *)
 let bytes_used = ref false
+(* set when the bytes <-> Vec[int] bridge is used, so its runtime (which
+   references both mere_bytes and mere_vec_int) is injected after both. *)
+let bytes_vec_used = ref false
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. Triggered by
    `Ast.Var "mk_logger" / "mk_metrics"` in App-head position. The
@@ -1987,9 +1990,20 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "__lang_bytes_slice(%s, %s, %s)"
          (emit_expr b_e) (emit_expr start_e) (emit_expr arg)
      | Ast.Var "bytes_of_vec" ->
-       unsupported e.Ast.loc "bytes_of_vec (C backend not yet — interp only; interp only for now)"
+       bytes_used := true; bytes_vec_used := true;
+       if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+       Printf.sprintf "__lang_bytes_of_vec(%s)" (emit_expr arg)
      | Ast.Var "vec_of_bytes" ->
-       unsupported e.Ast.loc "vec_of_bytes (C backend not yet — interp only; interp only for now)"
+       (* returns Vec[R, int]; resolve R from the result type like read_file_bytes. *)
+       bytes_used := true; bytes_vec_used := true;
+       if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+       let region_var =
+         match Option.map Ast.walk e.Ast.ty with
+         | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
+           if r = "__heap" then "(&__lang_default_region)" else "__region_" ^ r
+         | _ -> "(&__lang_default_region)"
+       in
+       Printf.sprintf "__lang_vec_of_bytes(%s, %s)" (emit_expr arg) region_var
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
        (* Phase 19.1.1: str_index_of h n — curried, outer App carries
           the needle. Emits a call to the runtime helper. *)
@@ -6578,6 +6592,22 @@ let bytes_runtime =
       "  return (long long)b->data[i];";
       "}" ]
 
+(* bytes <-> Vec[int] bridge. Emitted only when the bridge is used (so it can
+   safely reference mere_vec_int), and injected after both the vec_int runtime
+   and bytes_runtime. Each vec element must be 0..255. *)
+let bytes_vec_bridge_runtime =
+  String.concat "\n"
+    [ "static mere_bytes* __lang_bytes_of_vec(mere_vec_int* v) {";
+      "  mere_bytes* b = __lang_bytes_alloc((long long)v->len);";
+      "  for (int i = 0; i < v->len; i++) b->data[i] = (unsigned char)(v->data[i] & 0xFF);";
+      "  return b;";
+      "}";
+      "static mere_vec_int* __lang_vec_of_bytes(mere_bytes* b, __lang_region* r) {";
+      "  mere_vec_int* v = mere_vec_int_new(r);";
+      "  for (long long i = 0; i < b->len; i++) mere_vec_int_push(v, (long long)b->data[i]);";
+      "  return v;";
+      "}" ]
+
 (* Phase 15.9: StrBuf[R] runtime — region-allocated mutable string buffer.
    Single-instance (StrBuf has no element type parameter, it's always bytes).
    to_str returns a null-terminated copy in the region. *)
@@ -8266,6 +8296,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.mem extern_fn_decls "tcp_starttls"
     || Hashtbl.mem extern_fn_decls "tcp_starttls_verified";
   strbuf_used := false;
+  bytes_used := false;
+  bytes_vec_used := false;
   logger_used := false;
   metrics_used := false;
   str_split_used := false;
@@ -9383,6 +9415,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if !bytes_used then [bytes_runtime; ""] else [])
+    @ (if !bytes_vec_used then [bytes_vec_bridge_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else (map_hash_helpers :: map_runtimes) @ [""])
     @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
