@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.122" Version.v "0.1.122";
+  check "version is 0.1.123" Version.v "0.1.123";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -8886,18 +8886,17 @@ let () =
      if has "static mere_vec_int* __lang_read_file_bytes"
         && has "__lang_read_file_bytes(\"x.bin\"" then "ok" else "no")
     "ok";
-  check_raises_containing
-    "v0.1.43: Wasm codegen rejects read_file_bytes honestly"
-    "read_file_bytes is unsupported in Wasm codegen"
-    (fun () ->
-      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
-        (typed_prog "vec_len (read_file_bytes \"x.bin\")") in ());
-  check_raises_containing
-    "v0.1.43: LLVM codegen rejects read_file_bytes honestly"
-    "read_file_bytes is unsupported in LLVM codegen"
-    (fun () ->
-      let _ = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
-        (typed_prog "vec_len (read_file_bytes \"x.bin\")") in ());
+  (* v0.1.123: read_file_bytes is now supported on all backends. *)
+  assert_contains
+    "v0.1.123: Wasm codegen supports read_file_bytes (host import)"
+    (Codegen_wasm.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "vec_len (read_file_bytes \"x.bin\")"))
+    "call $read_file_bytes";
+  assert_contains
+    "v0.1.123: LLVM codegen supports read_file_bytes (libc)"
+    (Codegen_llvm.emit_program ~main_ty:Ast.TyInt
+       (typed_prog "vec_len (read_file_bytes \"x.bin\")"))
+    "@__lang_read_file_bytes";
   check "v0.1.43: CRC-32 of \"123456789\" via bitwise builtins"
     (Pipeline.process
        "let mask32 = 4294967295 in\n\
@@ -9001,15 +9000,14 @@ let () =
      if has "static int __lang_write_file_bytes"
         && has "__lang_write_file_bytes(\"x.bin\"" then "ok" else "no")
     "ok";
-  check_raises_containing
-    "v0.1.44: Wasm codegen rejects write_file_bytes honestly"
-    "write_file_bytes is unsupported in Wasm codegen"
-    (fun () ->
-      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyUnit
-        (typed_prog
-           "let v = vec_new () in\n\
-            let _ = vec_push v 1 in\n\
-            write_file_bytes \"x.bin\" v") in ());
+  assert_contains
+    "v0.1.123: Wasm codegen supports write_file_bytes (host import)"
+    (Codegen_wasm.emit_program ~main_ty:Ast.TyUnit
+       (typed_prog
+          "let v = vec_new () in\n\
+           let _ = vec_push v 1 in\n\
+           write_file_bytes \"x.bin\" v"))
+    "call $write_file_bytes";
 
   (* v0.1.46 (base64 composition probe): the day's separately-shipped
      capabilities — bitwise builtins, read_file_bytes, write_file_bytes —

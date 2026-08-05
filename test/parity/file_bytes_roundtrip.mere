@@ -1,0 +1,17 @@
+// Binary file round-trip via write_file_bytes / read_file_bytes on all four
+// backends (was interpreter + C only; LLVM uses libc, Wasm a host import that
+// hands back a length-prefixed buffer converted through the bytes bridge).
+// Self-contained: writes then reads back the same path.
+let data = vec_new ();
+let _ = vec_push data 0;
+let _ = vec_push data 255;
+let _ = vec_push data 16;
+let _ = vec_push data 222;
+let _ = write_file_bytes "/tmp/mere_parity_fb.bin" data;
+let back = read_file_bytes "/tmp/mere_parity_fb.bin";
+let _ = print (str_of_int (vec_len back));
+let _ = print (str_of_int (vec_get back 0));
+let _ = print (str_of_int (vec_get back 1));
+let _ = print (str_of_int (vec_get back 2));
+let _ = print (str_of_int (vec_get back 3));
+print "ok"

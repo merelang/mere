@@ -154,6 +154,38 @@ const wasmPath = process.argv[2];
         return 1;
       }
     },
+    // Binary file I/O. read_file_bytes returns a pointer to a length-prefixed
+    // buffer [i32 len][raw bytes...] (the mere_bytes layout); the Wasm side
+    // turns it into a Vec[int] via the bytes bridge. On a missing file it
+    // returns an empty buffer (len 0). write_file_bytes reads the same layout.
+    read_file_bytes: (pathPtr) => {
+      const path = readCStr(pathPtr);
+      let buf;
+      try {
+        buf = fs.readFileSync(path);
+      } catch (e) {
+        if (e.code !== "ENOENT") console.error("read_file_bytes failed:", e.message);
+        buf = Buffer.alloc(0);
+      }
+      const ptr = bumpAlloc(4 + buf.length);
+      const dv = new DataView(memory.buffer);
+      dv.setInt32(ptr, buf.length, true);
+      new Uint8Array(memory.buffer).set(buf, ptr + 4);
+      return ptr;
+    },
+    write_file_bytes: (pathPtr, bytesPtr) => {
+      const path = readCStr(pathPtr);
+      try {
+        const dv = new DataView(memory.buffer);
+        const len = dv.getInt32(bytesPtr, true);
+        const mem = new Uint8Array(memory.buffer);
+        fs.writeFileSync(path, Buffer.from(mem.subarray(bytesPtr + 4, bytesPtr + 4 + len)));
+        return 0;
+      } catch (e) {
+        console.error("write_file_bytes failed:", e.message);
+        return 1;
+      }
+    },
     // Phase 34.3 (Wasm float): str_of_float / float_of_str host imports.
     // v0.1.65: shortest ROUND-TRIP formatting, matching the interp / C /
     // LLVM helpers. Try 12 significant digits first (the historical
