@@ -50,3 +50,10 @@ extern fn dom_on_key: (str -> unit) -> unit;
 // (ImageData) needs typed-buffer FFI and is deliberately future work.
 extern fn dom_canvas_fill_style: JsRef -> str -> unit;
 extern fn dom_canvas_fill_rect: JsRef -> int -> int -> int -> int -> unit;
+
+// A per-frame callback driven by the host's requestAnimationFrame loop: the
+// glue calls the `unit -> unit` closure once per animation frame, forever.
+// The counterpart to dom_on_key for programs that must advance on their own
+// (a real-time emulator, an animation) rather than only on input. Added for
+// the CHIP-8 emulator dogfood, which needs a continuous run/redraw loop.
+extern fn dom_on_frame: (unit -> unit) -> unit;

@@ -77,6 +77,13 @@ if [ -f "$RAYTRACE_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w -I . $RAYTRACE_SRC -> playground/raytrace.wat"
 fi
 
+# CHIP-8 emulator — imports contrib/dom (canvas + dom_on_frame), `-I .` too.
+CHIP8_SRC="contrib/site/playground/chip8.mere"
+if [ -f "$CHIP8_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w -I . "$CHIP8_SRC" > "$PLAYGROUND_OUT/chip8.wat"
+  echo "  mere -w -I . $CHIP8_SRC -> playground/chip8.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do
