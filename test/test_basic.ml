@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.117" Version.v "0.1.117";
+  check "version is 0.1.118" Version.v "0.1.118";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5510,6 +5510,22 @@ let () =
        "let m = map_new () in let z = map_set m 1 2 in map_get m 1" in
      Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
     "$mere_map_key_hash_int";
+
+  (* T-2 (note 150): bytes type. Interp is binary-safe (an embedded 0x00 does
+     not truncate, where a str would), and the C backend emits the length-
+     prefixed mere_bytes runtime rather than treating bytes as a char*. *)
+  check "bytes: interp is NUL-safe (0x00 does not truncate the length)"
+    (Pipeline.process "bytes_len (bytes_of_hex \"00ff00\")") "3";
+  check "bytes: interp hex round-trips through concat"
+    (Pipeline.process "hex_of_bytes (bytes_concat (bytes_of_hex \"00ff\") (bytes_of_hex \"10\"))")
+    "\"00ff10\"";
+  check "bytes: interp str bridge and slice"
+    (Pipeline.process "str_of_bytes (bytes_slice (bytes_of_str \"hello world\") 6 5)") "\"world\"";
+  assert_contains "bytes: C backend emits the length-prefixed mere_bytes runtime"
+    (let prog = typed_prog
+       "let b = bytes_of_hex \"00ff00\" in bytes_len b" in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "__lang_bytes_of_hex";
 
   (* v0.1.66 (mere-ruby dogfood): the generated C must contain no duplicate
      function definition. A definition line (trimmed) ends in `{` and has an
