@@ -135,7 +135,7 @@ dom_on_click: (handleIdx, closurePtr) =&gt; {
   const env = view[closurePtr &gt;&gt; 2];
   const fnIdx = view[(closurePtr + 4) &gt;&gt; 2];
   el.addEventListener("click", () =&gt;
-    table.get(fnIdx)(env, 0)
+    table.get(fnIdx)(BigInt(env), 0n)
   );
 },</pre>
   </main>

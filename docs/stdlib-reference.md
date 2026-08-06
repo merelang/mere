@@ -177,7 +177,7 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `bit_or` | `int -> int -> int` | Bitwise OR (v0.1.42) |
 | `bit_xor` | `int -> int -> int` | Bitwise XOR (v0.1.42) |
 | `bit_not` | `int -> int` | Bitwise complement; numerically `-x - 1` on every backend (v0.1.42) |
-| `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..31` for portable code — int is 64-bit on C and LLVM, 63-bit on interp, 32-bit on Wasm (LLVM widened to 64-bit in v0.1.96) |
+| `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..62` for portable code — int is 64-bit on C, LLVM and Wasm (widened in v0.1.96 / v0.1.127), 63-bit on interp |
 | `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
 
 ### Float arithmetic (4)

@@ -1,0 +1,6 @@
+// int <-> float conversions above 2^31 (what a Date.now()-driven clock does).
+let msf = 1754400000000.0;
+let ms = int_of_float msf;
+let _ = print (str_of_int ms);
+let _ = print (str_of_int (int_of_float (msf / 1000.0)));
+print (str_of_float (float_of_int 4611686018427387))

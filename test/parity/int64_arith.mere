@@ -1,0 +1,16 @@
+// 64-bit integer arithmetic (the mclock/mdate trigger, v0.1.127).
+// 10^9 * 10^9 = 10^18 needs i64; epoch-ms divmod is the date-formatting core.
+// Values stay under 2^62 so the 63-bit interpreter is a valid reference.
+let a = 1000000000;
+let big = a * a;
+let ms = 1754400000000;
+let days = ms / 86400000;
+let sod = (ms / 1000) % 86400;
+let _ = print (str_of_int big);
+let _ = print (str_of_int (big + big));
+let _ = print (str_of_int (0 - big));
+let _ = print (str_of_int days);
+let _ = print (str_of_int sod);
+let _ = print (str_of_int (big / 7));
+let _ = print (str_of_int (big % 9973));
+print (if big > 2147483647 then "wide" else "narrow")

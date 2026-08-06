@@ -18,6 +18,9 @@ const { makeSubprocessEnv } = require('./subprocess_env.js');
 // Defined as a named function so its source can be injected into the worker
 // bootstrap verbatim (workers need the same channel ops).
 function makeChannelEnv(getBuffer, bumpAlloc) {
+  // v0.1.127 (i64 value model): channel VALUES are 64-bit. Layout at `ptr`
+  // (8-byte aligned): i32 header words [0]=mutex, [1]=count, [2]=head,
+  // [3]=cap, then a ring of CAP BigInt64 slots starting at byte ptr+16.
   const CAP = 4096;
   const lock = (i32, p) => {
     while (Atomics.compareExchange(i32, p, 0, 1) !== 0) Atomics.wait(i32, p, 1);
@@ -25,7 +28,8 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
   const unlock = (i32, p) => { Atomics.store(i32, p, 0); Atomics.notify(i32, p, 1); };
   return {
     mere_channel_new: (_unit) => {
-      const ptr = bumpAlloc((4 + CAP) * 4);
+      const raw = bumpAlloc(16 + CAP * 8 + 8);
+      const ptr = (raw + 7) & ~7;  // 8-byte align for the BigInt64 ring
       const i32 = new Int32Array(getBuffer());
       const p = ptr >> 2;
       i32[p] = 0; i32[p + 1] = 0; i32[p + 2] = 0; i32[p + 3] = CAP;
@@ -33,10 +37,11 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
     },
     mere_channel_send: (ptr, v) => {
       const i32 = new Int32Array(getBuffer());
+      const ring = new BigInt64Array(getBuffer(), ptr + 16, CAP);
       const p = ptr >> 2;
       lock(i32, p);
       const count = i32[p + 1], cap = i32[p + 3], head = i32[p + 2];
-      i32[p + 4 + ((head + count) % cap)] = v;
+      ring[(head + count) % cap] = BigInt(v);
       Atomics.store(i32, p + 1, count + 1);
       unlock(i32, p);
       Atomics.notify(i32, p + 1);  // wake recv waiters blocked on count
@@ -44,13 +49,14 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
     },
     mere_channel_recv: (ptr) => {
       const i32 = new Int32Array(getBuffer());
+      const ring = new BigInt64Array(getBuffer(), ptr + 16, CAP);
       const p = ptr >> 2;
       for (;;) {
         lock(i32, p);
         const count = i32[p + 1];
         if (count > 0) {
           const head = i32[p + 2], cap = i32[p + 3];
-          const v = i32[p + 4 + head];
+          const v = ring[head];
           Atomics.store(i32, p + 2, (head + 1) % cap);
           Atomics.store(i32, p + 1, count - 1);
           unlock(i32, p);
@@ -84,6 +90,8 @@ const stub = () => 0;
 const env = Object.assign({
   memory,
   puts: (ptr) => process.stdout.write(readCStr(ptr) + '\\n'),
+  print_no_nl: (ptr) => process.stdout.write(readCStr(ptr)),
+  time: () => Date.now() / 1000,
   mere_spawn: stub, mere_join: stub,
   __lang_str_of_float: stub, __lang_float_of_str: stub,
   __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
@@ -95,7 +103,7 @@ const env = Object.assign({
   // in the spawned closure don't collide with other workers or the parent.
   if (instance.exports.__lang_bump) instance.exports.__lang_bump.value = bumpBase;
   const table = instance.exports.__indirect_function_table;
-  try { table.get(fnIdx)(envOff, 0); } catch (e) { /* wasm trap in child */ }
+  try { table.get(fnIdx)(BigInt(envOff), 0n); } catch (e) { /* wasm trap in child */ }
   Atomics.store(new Int32Array(doneSab), 0, 1);
   Atomics.notify(new Int32Array(doneSab), 0);
 })();
@@ -221,6 +229,10 @@ const wasmPath = process.argv[2];
       const s = readCStr(ptr);
       return parseFloat(s);
     },
+    // v0.1.127: wall clock for the `time` builtin (epoch seconds, f64).
+    time: () => Date.now() / 1000,
+    // print without the trailing newline (Mere's print_no_nl builtin).
+    print_no_nl: (ptr) => process.stdout.write(readCStr(ptr)),
     // Phase 34.4: libm functions (anything not in Wasm intrinsics is provided by the host)
     __lang_sin: Math.sin,
     __lang_cos: Math.cos,
@@ -405,10 +417,12 @@ const wasmPath = process.argv[2];
     // Mere's bump allocator does not enforce 4-byte alignment, so the
     // closure record's offset may be misaligned. Int32Array indexing
     // rounds the byte offset to a 4-byte boundary; DataView accepts any.
+    // v0.1.127: the closure type is (param i64 i64) (result i64) — args
+    // cross as BigInt.
     const view = new DataView(memory.buffer);
     const env = view.getInt32(closurePtr, true);
     const fnIdx = view.getInt32(closurePtr + 4, true);
-    return table.get(fnIdx)(env, arg);
+    return table.get(fnIdx)(BigInt(env), BigInt(arg));
   };
   // Expose for hosts that bind extra env imports later (e.g. DOM glue).
   globalThis.__mere_call_closure = callMereClosure;

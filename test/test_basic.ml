@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.126" Version.v "0.1.126";
+  check "version is 0.1.127" Version.v "0.1.127";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -4211,16 +4211,16 @@ let () =
        let _ = spawn (fn u -> channel_send ch 7) in \
        channel_recv ch")
     "call $mere_channel_recv";
-  assert_contains "wasm: int literal becomes i32.const"
-    (wasm "42") "i32.const 42";
-  assert_contains "wasm: add maps to i32.add"
-    (wasm "1 + 2") "i32.add";
-  assert_contains "wasm: mul maps to i32.mul"
+  assert_contains "wasm: int literal becomes i64.const"
+    (wasm "42") "i64.const 42";
+  assert_contains "wasm: add maps to i64.add"
+    (wasm "1 + 2") "i64.add";
+  assert_contains "wasm: mul maps to i64.mul"
     (wasm "3 * 4") "i32.mul";
   assert_contains "wasm: sdiv via i32.div_s"
-    (wasm "10 / 2") "i32.div_s";
+    (wasm "10 / 2") "i64.div_s";
   assert_contains "wasm: < maps to i32.lt_s"
-    (wasm "if 1 < 2 then 10 else 20") "i32.lt_s";
+    (wasm "if 1 < 2 then 10 else 20") "i64.lt_s";
   assert_contains "wasm: if uses if/else/end"
     (wasm "if 1 < 2 then 10 else 20") "if (result i32)";
   assert_contains "wasm: if has else branch"
@@ -4230,9 +4230,9 @@ let () =
   assert_contains "wasm: var reads via local.get"
     (wasm "let x = 5 in x") "local.get 0";
   assert_contains "wasm: locals declared at fn start"
-    (wasm "let x = 5 in x") "(local i32)";
+    (wasm "let x = 5 in x") "(local i64)";
   assert_contains "wasm: bool literal as i32"
-    (wasm "true") "i32.const 1";
+    (wasm "true") "i64.const 1";
   (* v0.1.34: && short-circuits (Logic lowers to If) — the strict
      i32.and evaluated both operands and trapped on guarded vec_get. *)
   assert_contains "wasm: && lowers to a short-circuit if"
@@ -4244,7 +4244,7 @@ let () =
      (Wasm allows forward references). *)
   assert_contains "wasm: top-level fn lifted to (func $name)"
     (wasm "let inc = fn x -> x + 1 in inc 5")
-    "(func $inc (param i32) (result i32)";
+    "(func $inc (param i64) (result i64)";
   assert_contains "wasm: direct call uses call $name"
     (wasm "let inc = fn x -> x + 1 in inc 5")
     "call $inc";
@@ -4273,7 +4273,7 @@ let () =
   assert_contains "wasm: bump pointer global declared"
     (wasm "\"hi\"") "(global $__lang_bump";
   assert_contains "wasm: puts imported"
-    (wasm "\"hi\"") "(import \"env\" \"puts\" (func $puts (param i32)))";
+    (wasm "\"hi\"") "(import \"env\" \"puts\" (func $puts_h (param i32)))";
   assert_contains "wasm: str literal becomes data segment"
     (wasm "\"hi\"") "(data (i32.const ";
   assert_contains "wasm: str_len calls $__lang_strlen"
@@ -4337,7 +4337,7 @@ let () =
     (wasm_with_decls
       "type WCgPt3 = { x: int, y: int };\n\
        let mk = fn n -> WCgPt3 { x = n, y = n + 1 } in (mk 5).x")
-    "(func $mk (param i32) (result i32)";
+    "(func $mk (param i64) (result i64)";
 
   (* --- Wasm codegen: variant + match (Phase 6.6) ---
      Variants live in linear memory too: {i32 tag} (nullary) or {i32 tag, i32 payload}.
@@ -4380,13 +4380,13 @@ let () =
      Anonymous Fun captures env in memory + adapter loads them. *)
   assert_contains "wasm: closure type declared"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "(type $cl (func (param i32) (param i32) (result i32)))";
+    "(type $cl (func (param i64) (param i64) (result i64)))";
   assert_contains "wasm: function table declared"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(table ";
   assert_contains "wasm: top-level adapter emitted"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "(func $inc_closure (param i32) (param i32) (result i32)";
+    "(func $inc_closure (param i64) (param i64) (result i64)";
   assert_contains "wasm: elem section places adapters"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(elem (i32.const 0)";
@@ -4395,7 +4395,7 @@ let () =
     "call_indirect (type $cl)";
   assert_contains "wasm: anonymous Fun adapter emitted"
     (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
-    "(func $anon_0_fn (param i32) (param i32) (result i32)";
+    "(func $anon_0_fn (param i64) (param i64) (result i64)";
   assert_contains "wasm: anonymous adapter loads captures from env"
     (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "i32.load offset=0";
@@ -8828,12 +8828,10 @@ let () =
      if has "(2147483647LL + 1LL)" && has "printf(\"%lld\\n\"" then "ok"
      else "no")
     "ok";
-  check_raises_containing
-    "v0.1.41: Wasm codegen rejects out-of-range int literal at compile time"
-    "does not fit the Wasm backend's 32-bit int"
-    (fun () ->
-      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
-        (typed_prog "4000000000") in ());
+  (* v0.1.127: the Wasm backend's int is 64-bit — the old v0.1.41 rejection
+     of >32-bit literals is gone; the literal now emits. *)
+  assert_contains "v0.1.127: Wasm codegen accepts a >32-bit int literal"
+    (wasm "4000000000") "i64.const 4000000000";
   (* v0.1.96: the LLVM backend's int is 64-bit, so a literal that overflows
      32 bits now compiles (it did not before). *)
   assert_contains "v0.1.96: LLVM codegen accepts a >32-bit int literal"
@@ -9217,7 +9215,7 @@ let () =
      in
      if has "(12LL) & (10LL)" && has "(1LL) << (2LL)" then "ok" else "no")
     "ok";
-  check "v0.1.42: Wasm codegen emits i32 bitwise instructions"
+  check "v0.1.42/127: Wasm codegen emits i64 bitwise instructions"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
        (typed_prog "bit_xor (bit_and 12 10) (bit_shr 8 2)") in
      let nlen = String.length wat in
@@ -9229,7 +9227,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "i32.and" && has "i32.xor" && has "i32.shr_s" then "ok" else "no")
+     if has "i64.and" && has "i64.xor" && has "i64.shr_s" then "ok" else "no")
     "ok";
   check "v0.1.96: LLVM codegen emits i64 bitwise instructions"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt
@@ -9291,7 +9289,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "(import \"env\" \"getpid\" (func $getpid (result i32)))"
+     if has "(import \"env\" \"getpid\" (func $getpid_h (result i32)))"
         && has "call $getpid" then "ok" else "no")
     "ok";
 
@@ -9390,7 +9388,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "(global $total (mut i32)" && has "global.set $total" then "globalized"
+     if has "(global $total (mut i64)" && has "global.set $total" then "globalized"
      else "not-globalized")
     "globalized";
 
@@ -9865,7 +9863,7 @@ let () =
        in
        scan 0
      in
-     if has "(import \"env\" \"dom_set_text\" (func $dom_set_text (param i32) (param i32)))"
+     if has "(import \"env\" \"dom_set_text\" (func $dom_set_text_h (param i32) (param i32)))"
      then "ok" else "missing-or-wrong")
     "ok";
 
@@ -9897,7 +9895,7 @@ let () =
          extern fn dom_get_by_id: str -> JsRef; \
          let btn = dom_get_by_id \"go\" in \
          let _ = dom_on_click btn (fn (u: unit) -> ()) in 0"
-        "(import \"env\" \"dom_on_click\" (func $dom_on_click (param i32) (param i32)))"
+        "(import \"env\" \"dom_on_click\" (func $dom_on_click_h (param i32) (param i32)))"
      then "ok" else "missing")
     "ok";
 
