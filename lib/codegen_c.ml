@@ -2055,6 +2055,10 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "__lang_str_of_float(%s)" (emit_expr arg)
      | Ast.Var "float_of_str" ->
        Printf.sprintf "(atof(%s))" (emit_expr arg)
+     | Ast.Var "time" when not (user_shadows "time") ->
+       (* v0.1.127: wall clock; the unit arg is inert (evaluated for parity
+          with the interpreter, then discarded via the comma operator). *)
+       Printf.sprintf "((void)(%s), __lang_time())" (emit_expr arg)
      (* Phase 34.4: libm math functions — auto-linked via clang -lm *)
      | Ast.Var "sqrt" when not (user_shadows "sqrt") ->
        Printf.sprintf "sqrt(%s)" (emit_expr arg)
@@ -6155,6 +6159,15 @@ let str_concat_helper =
       "  char* buf;";
       "  asprintf(&buf, has_dot ? \"%s\" : \"%s.0\", tmp);";
       "  return (const char*) buf;";
+      "}";
+      "";
+      (* v0.1.127: time () — wall-clock epoch seconds as a double (matches the
+         interpreter's Unix.gettimeofday and the Wasm host's Date.now()/1000).
+         Distinct from now_ms (a monotonic clock for timing differences). *)
+      "static double __lang_time(void) {";
+      "  struct timespec ts;";
+      "  clock_gettime(CLOCK_REALTIME, &ts);";
+      "  return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;";
       "}" ]
 
 (* Region runtime: a bump allocator. `region R { body }` initializes a
@@ -9145,6 +9158,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <string.h>";
       "#include <setjmp.h>";
       "#include <math.h>";  (* Phase 34.4: sqrt / sin / cos / tan / pow / atan2 *)
+      "#include <time.h>";  (* v0.1.127: time () wall clock *)
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
       "";

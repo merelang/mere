@@ -3799,6 +3799,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call double @atof(ptr %s)" r av);
     r
+  | Ast.App ({ node = Ast.Var "time"; _ }, a_e) ->
+    (* v0.1.127: wall clock. Evaluate the unit arg for parity, then discard. *)
+    let _ = emit_expr env a_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @__lang_time()" r);
+    r
   (* Phase 34.4: libm functions (intrinsics where available) *)
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
     when fname = "sqrt" || fname = "sin" || fname = "cos" || fname = "tan" ->
@@ -5939,6 +5945,7 @@ let runtime_decls =
       "declare i32 @atoi(ptr)";
       "declare i64 @strtoll(ptr, ptr, i32)";
       "declare double @atof(ptr)";  (* Phase 34.2: float_of_str *)
+      "declare i32 @clock_gettime(i32, ptr)";  (* v0.1.127: time () *)
       "declare double @llvm.fabs.f64(double)";  (* Phase 34.2: f_abs *)
       (* Phase 34.4: libm intrinsics + functions (linked via -lm by clang) *)
       "declare double @llvm.sqrt.f64(double)";
@@ -8197,6 +8204,24 @@ let float_helpers_llvm =
       "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_dot0, ptr %tmp)";
       "  %buf2 = load ptr, ptr %buf_ptr";
       "  ret ptr %buf2";
+      "}";
+      "";
+      (* v0.1.127: time () — wall-clock epoch seconds as a double. A timespec
+         is {i64 tv_sec; i64 tv_nsec} on both Linux and macOS; CLOCK_REALTIME
+         is 0. Matches the interp's gettimeofday and the C backend. *)
+      "define double @__lang_time() {";
+      "entry:";
+      "  %ts = alloca [2 x i64]";
+      "  %rc = call i32 @clock_gettime(i32 0, ptr %ts)";
+      "  %secp = getelementptr [2 x i64], ptr %ts, i64 0, i64 0";
+      "  %sec = load i64, ptr %secp";
+      "  %nsecp = getelementptr [2 x i64], ptr %ts, i64 0, i64 1";
+      "  %nsec = load i64, ptr %nsecp";
+      "  %secf = sitofp i64 %sec to double";
+      "  %nsecf = sitofp i64 %nsec to double";
+      "  %nsecs = fdiv double %nsecf, 1.000000e+09";
+      "  %r = fadd double %secf, %nsecs";
+      "  ret double %r";
       "}" ]
 
 (* v0.1.86: string equality. The C and interp backends have str_eq; the LLVM
