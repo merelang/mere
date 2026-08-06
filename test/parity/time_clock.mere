@@ -1,0 +1,7 @@
+// time () — wall clock (unit -> float). The absolute value is nondeterministic,
+// so assert only that it is a positive, plausibly-recent epoch (> 2020-01-01)
+// and that it is monotone-ish across two reads. Structural, not value-based.
+let t1 = time () in
+let t2 = time () in
+let _ = print (if t1 > 1577836800.0 then "recent" else "bogus") in
+print (if t2 >= t1 then "monotone" else "backwards")
