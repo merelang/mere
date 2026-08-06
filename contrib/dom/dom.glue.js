@@ -78,7 +78,9 @@ export function makeDomGlue() {
       return;
     }
     try {
-      fn(env, 0);
+      // v0.1.127: the closure type is (param i64 i64) (result i64) — args
+      // cross the JS boundary as BigInt.
+      fn(BigInt(env), 0n);
     } catch (e) {
       console.error("contrib/dom: Mere closure threw", { closurePtr, env, fnIdx, error: e });
     }
@@ -101,7 +103,7 @@ export function makeDomGlue() {
       return;
     }
     try {
-      fn(env, writeStr(arg));
+      fn(BigInt(env), BigInt(writeStr(arg)));
     } catch (e) {
       console.error("contrib/dom: Mere key closure threw", { closurePtr, error: e });
     }

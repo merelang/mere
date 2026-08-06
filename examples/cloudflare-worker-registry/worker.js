@@ -48,7 +48,7 @@ const callHandler = (reqJson) => {
   const env = view.getInt32(handlerClosurePtr, true);
   const fnIdx = view.getInt32(handlerClosurePtr + 4, true);
   const argPtr = writeStr(reqJson);
-  const resultPtr = table.get(fnIdx)(env, argPtr);
+  const resultPtr = Number(table.get(fnIdx)(BigInt(env), BigInt(argPtr)));
   return readCStr(resultPtr);
 };
 

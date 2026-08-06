@@ -2047,7 +2047,10 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "float_of_int" ->
        Printf.sprintf "((double)(%s))" (emit_expr arg)
      | Ast.Var "int_of_float" ->
-       Printf.sprintf "((int)(%s))" (emit_expr arg)
+       (* Mere int is long long on this backend; a bare (int) cast truncated
+          anything above 2^31 (UB in C — clang clamped to INT_MAX), so
+          int_of_float on an epoch-ms value came out as 2147483647. *)
+       Printf.sprintf "((long long)(%s))" (emit_expr arg)
      | Ast.Var "str_of_float" ->
        Printf.sprintf "__lang_str_of_float(%s)" (emit_expr arg)
      | Ast.Var "float_of_str" ->

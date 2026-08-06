@@ -1,0 +1,7 @@
+// bitwise at 64-bit width (FNV-1a-style mixing above 2^31).
+let h0 = 1099511628211;
+let m = bit_and (bit_xor h0 305419896) 4611686018427387903;
+let _ = print (str_of_int m);
+let _ = print (str_of_int (bit_shl 1 40));
+let _ = print (str_of_int (bit_shr h0 8));
+print (str_of_int (bit_or (bit_shl 1 35) 4095))

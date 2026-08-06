@@ -27,12 +27,19 @@ let emit_instr s = instrs := s :: !instrs
 
 (* Local slot bookkeeping. Lang variables map to Wasm locals; we mint
    a fresh slot per Let binding. Wasm locals are typed, so we track the
-   declared type per slot. Most slots are i32 (Mere's uniform value model),
-   but we keep a type list to handle Phase 34.3's f64 temp slots for float. *)
+   declared type per slot. Value slots are i64 (v0.1.127: Mere's uniform
+   value model widened from i32 — ints are true 64-bit, pointers carry a
+   32-bit address zero-extended, wrapped back at memory operations); f64
+   temp slots (Phase 34.3) and raw i32 address temps keep their own types. *)
 let local_counter = ref 0
 let local_types : string list ref = ref []  (* in declaration order; index = slot *)
 let locals : (string * int) list ref = ref []
 let fresh_local () =
+  let n = !local_counter in
+  incr local_counter;
+  local_types := !local_types @ ["i64"];
+  n
+let fresh_local_i32 () =
   let n = !local_counter in
   incr local_counter;
   local_types := !local_types @ ["i32"];
@@ -74,7 +81,10 @@ let fresh_str_offset (s : string) : int =
   off
 
 (* Reset per emit_program. *)
+let print_no_nl_used = ref false
+
 let reset () =
+  print_no_nl_used := false;
   instrs := [];
   local_counter := 0;
   local_types := [];
@@ -571,7 +581,7 @@ let rec add_type_into (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
     end
 
 (* ── v0.1.37: per-type deep-copy fns for region-block copy-out ──
-   `$__mcopy_<tag> (param $v i32) (result i32)` copies a value into fresh
+   `$__mcopy_<tag> (param $v i64) (result i64)` copies a value into fresh
    bump allocations. Scalars pass through (they are raw i32s, not
    pointers); str copies bytes; float re-boxes; tuples / records /
    variant nodes copy structurally; containers / closures / channels
@@ -1317,20 +1327,22 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
 (* Map Lang binop / cmp / logic to Wasm opcodes. All operands are i32
    (bool also widens to i32). *)
 let wasm_binop = function
-  | Ast.Add -> "i32.add"
-  | Ast.Sub -> "i32.sub"
-  | Ast.Mul -> "i32.mul"
-  | Ast.Div -> "i32.div_s"
-  | Ast.Mod -> "i32.rem_s"
+  | Ast.Add -> "i64.add"
+  | Ast.Sub -> "i64.sub"
+  | Ast.Mul -> "i64.mul"
+  | Ast.Div -> "i64.div_s"
+  | Ast.Mod -> "i64.rem_s"
   | Ast.Concat -> raise Exit
 
+(* Wasm comparisons yield i32; call sites extend back to the i64 value
+   model (bools are values). *)
 let wasm_cmp = function
-  | Ast.Eq -> "i32.eq"
-  | Ast.Ne -> "i32.ne"
-  | Ast.Lt -> "i32.lt_s"
-  | Ast.Le -> "i32.le_s"
-  | Ast.Gt -> "i32.gt_s"
-  | Ast.Ge -> "i32.ge_s"
+  | Ast.Eq -> "i64.eq"
+  | Ast.Ne -> "i64.ne"
+  | Ast.Lt -> "i64.lt_s"
+  | Ast.Le -> "i64.le_s"
+  | Ast.Gt -> "i64.gt_s"
+  | Ast.Ge -> "i64.ge_s"
 
 (* float (f64) variants — operators overloaded on float (see typer). *)
 let wasm_binop_float = function
@@ -1417,11 +1429,12 @@ let emit_float_alloc_from_f64_on_stack () : unit =
   emit_instr (Printf.sprintf "local.get %d" tmp_f64);
   emit_instr "f64.store offset=0 align=8";        (* memory[ptr] = f64 *)
   emit_instr "global.get $__lang_bump";            (* push ptr again (= return value) *)
+  emit_instr "i64.extend_i32_u";                   (* ptr becomes a Mere value *)
   emit_instr "global.get $__lang_bump";
   emit_instr "i32.const 8";
   emit_instr "i32.add";
   emit_instr "global.set $__lang_bump"            (* bump += 8 *)
-  (* Stack: [..., ptr] *)
+  (* Stack: [..., ptr as i64] *)
 
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
@@ -1437,29 +1450,21 @@ let rec emit_expr (e : Ast.expr) : unit =
   wasm_in_top_level_body := false;
   match e.Ast.node with
   | Ast.Int_lit n ->
-    (* v0.1.41: the Wasm backend's int is i32. Reject a literal outside
-       [-2^31, 2^31-1] here with a source location instead of letting an
-       invalid `i32.const 4294967296` surface later as a wat2wasm error
-       (found by the SHA-256 probe, whose 2^32 modulus is the first
-       out-of-range literal a real program tried to compile). *)
-    if n > 2147483647 || n < -2147483648 then
-      raise (Codegen_error (e.Ast.loc,
-        Printf.sprintf
-          "int literal %d does not fit the Wasm backend's 32-bit int \
-           (range -2147483648 .. 2147483647); the C and LLVM backends \
-           use 64-bit int — see docs/language-reference.md (integers)" n));
-    emit_instr (Printf.sprintf "i32.const %d" n)
+    (* v0.1.127: the Wasm value model is uniform i64 (the mclock/mdate
+       trigger — epoch-ms exceeds 2^31). The old v0.1.41 rejection of
+       literals outside i32 is gone; the full 64-bit range emits. *)
+    emit_instr (Printf.sprintf "i64.const %d" n)
   | Ast.Float_lit f ->
-    (* Phase 34.3: push the f64 literal, bump alloc to get an i32 ptr *)
+    (* Phase 34.3: push the f64 literal, bump alloc to get a boxed ptr *)
     emit_instr (Printf.sprintf "f64.const %.17g" f);
     emit_float_alloc_from_f64_on_stack ()
   | Ast.Bool_lit b ->
-    emit_instr (Printf.sprintf "i32.const %d" (if b then 1 else 0))
+    emit_instr (Printf.sprintf "i64.const %d" (if b then 1 else 0))
   | Ast.Unit_lit ->
-    emit_instr "i32.const 0"
+    emit_instr "i64.const 0"
   | Ast.Str_lit s ->
     let off = fresh_str_offset s in
-    emit_instr (Printf.sprintf "i32.const %d" off)
+    emit_instr (Printf.sprintf "i64.const %d" off)
   | Ast.Var "pi" when not (List.mem_assoc "pi" !locals) ->
     (* Phase 34.3: float constants — heap-alloc and push an i32 ptr *)
     emit_instr "f64.const 3.14159265358979323846";
@@ -1603,7 +1608,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        (* Allocate a closure value `{ env = 0, fn_idx = idx }` on the
           bump heap, just like the toplevel-fn case below. *)
        emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
-       let base = fresh_local () in
+       let base = fresh_local_i32 () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" base);
        emit_instr (Printf.sprintf "local.get %d" base);
@@ -1616,7 +1621,8 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" base);
        emit_instr (Printf.sprintf "i32.const %d" idx);
        emit_instr "i32.store offset=4";
-       emit_instr (Printf.sprintf "local.get %d" base)
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr "i64.extend_i32_u"
      | None ->
     (match List.assoc_opt name !locals with
      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
@@ -1625,7 +1631,7 @@ let rec emit_expr (e : Ast.expr) : unit =
           `{ env = 0, fn_idx = table_idx }`. *)
        let idx = Hashtbl.find fn_closure_table_idx name in
        emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
-       let base = fresh_local () in
+       let base = fresh_local_i32 () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" base);
        emit_instr (Printf.sprintf "local.get %d" base);
@@ -1638,7 +1644,8 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" base);
        emit_instr (Printf.sprintf "i32.const %d" idx);
        emit_instr "i32.store offset=4";
-       emit_instr (Printf.sprintf "local.get %d" base)
+       emit_instr (Printf.sprintf "local.get %d" base);
+       emit_instr "i64.extend_i32_u"
      | None when Hashtbl.mem top_globals_wasm name ->
        (* Phase 30.2c: top-level non-fn let as a Wasm global *)
        emit_instr (Printf.sprintf "global.get $%s" name)
@@ -1648,7 +1655,7 @@ let rec emit_expr (e : Ast.expr) : unit =
           value (env_offset, fn_idx) as an 8-byte struct to the bump heap. *)
        let li = Hashtbl.find inner_lifts_wasm name in
        let cap_count = List.length li.captures in
-       let env_size = max 4 (cap_count * 4) in
+       let env_size = max 8 (cap_count * 8) in
        let table_idx =
          match Hashtbl.find_opt inner_lift_closures_emitted_wasm li.lifted_name with
          | Some idx -> idx
@@ -1661,8 +1668,8 @@ let rec emit_expr (e : Ast.expr) : unit =
              :: !inner_lift_closure_pending_wasm;
            idx
        in
-       (* Reserve the env area *)
-       let env_base = fresh_local () in
+       (* Reserve the env area (8-byte value slots, v0.1.127) *)
+       let env_base = fresh_local_i32 () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" env_base);
        emit_instr (Printf.sprintf "local.get %d" env_base);
@@ -1681,11 +1688,12 @@ let rec emit_expr (e : Ast.expr) : unit =
          in
          emit_instr (Printf.sprintf "local.get %d" env_base);
          emit_instr (Printf.sprintf "local.get %d" cv_slot);
-         emit_instr (Printf.sprintf "i32.store offset=%d" (i * 4))
+         emit_instr (Printf.sprintf "i64.store offset=%d" (i * 8))
        ) li.captures;
-       (* closure value `{env_offset, fn_table_idx}` written to the bump heap *)
+       (* closure value `{env_offset, fn_table_idx}` written to the bump heap.
+          The record keeps i32 fields — host glue reads it with DataView. *)
        emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
-       let cl_base = fresh_local () in
+       let cl_base = fresh_local_i32 () in
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" cl_base);
        emit_instr (Printf.sprintf "local.get %d" cl_base);
@@ -1698,7 +1706,8 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" cl_base);
        emit_instr (Printf.sprintf "i32.const %d" table_idx);
        emit_instr "i32.store offset=4";
-       emit_instr (Printf.sprintf "local.get %d" cl_base)
+       emit_instr (Printf.sprintf "local.get %d" cl_base);
+       emit_instr "i64.extend_i32_u"
      | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
@@ -1707,13 +1716,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     (match inner.Ast.ty with
      | Some t when Ast.walk t = Ast.TyFloat ->
        emit_expr inner;
+       emit_instr "i32.wrap_i64";
        emit_instr "f64.load offset=0 align=8";
        emit_instr "f64.neg";
        emit_float_alloc_from_f64_on_stack ()
      | _ ->
-       emit_instr "i32.const 0";
+       emit_instr "i64.const 0";
        emit_expr inner;
-       emit_instr "i32.sub")
+       emit_instr "i64.sub")
   | Ast.Bin (Ast.Concat, a, b) ->
     emit_expr a;
     emit_expr b;
@@ -1721,9 +1731,9 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.Bin (op, a, b) ->
     (match a.Ast.ty with
      | Some t when Ast.walk t = Ast.TyFloat ->
-       (* floats are boxed (i32 ptr -> heap f64): load, op, re-box. *)
-       emit_expr a; emit_instr "f64.load offset=0 align=8";
-       emit_expr b; emit_instr "f64.load offset=0 align=8";
+       (* floats are boxed (i64-held ptr -> heap f64): wrap, load, op, re-box. *)
+       emit_expr a; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
+       emit_expr b; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
        emit_instr (wasm_binop_float op);
        emit_float_alloc_from_f64_on_stack ()
      | _ ->
@@ -1734,39 +1744,48 @@ let rec emit_expr (e : Ast.expr) : unit =
     let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
     (match a_ty, op with
      | Ast.TyStr, Ast.Eq ->
+       (* runtime helpers speak the i64 value model: streq returns an
+          i64 bool directly. *)
        emit_expr a; emit_expr b;
        emit_instr "call $__lang_streq"
      | Ast.TyStr, Ast.Ne ->
        emit_expr a; emit_expr b;
        emit_instr "call $__lang_streq";
-       emit_instr "i32.eqz"
+       emit_instr "i64.eqz";
+       emit_instr "i64.extend_i32_u"
      | Ast.TyStr, (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge) ->
        emit_expr a; emit_expr b;
        emit_instr "call $__lang_str_compare";
-       emit_instr "i32.const 0";
-       emit_instr (wasm_cmp op)
+       emit_instr "i64.const 0";
+       emit_instr (wasm_cmp op);
+       emit_instr "i64.extend_i32_u"
      | ty, Ast.Eq when needs_struct_eq ty ->
        emit_expr a; emit_expr b;
        emit_instr (Printf.sprintf "call $eq_%s" (ty_tag ty))
      | ty, Ast.Ne when needs_struct_eq ty ->
        emit_expr a; emit_expr b;
        emit_instr (Printf.sprintf "call $eq_%s" (ty_tag ty));
-       emit_instr "i32.eqz"
+       emit_instr "i64.eqz";
+       emit_instr "i64.extend_i32_u"
      | ty, (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge) when needs_struct_cmp ty ->
        (* v0.1.11 derive-ord: compound ordering via cmp_<tag> (-1/0/1) vs 0. *)
        emit_expr a; emit_expr b;
        emit_instr (Printf.sprintf "call $cmp_%s" (ty_tag ty));
-       emit_instr "i32.const 0";
-       emit_instr (wasm_cmp op)
+       emit_instr "i64.const 0";
+       emit_instr (wasm_cmp op);
+       emit_instr "i64.extend_i32_u"
      | Ast.TyFloat, _ ->
-       (* floats are boxed (i32 ptr): load both f64, compare (result is i32) *)
-       emit_expr a; emit_instr "f64.load offset=0 align=8";
-       emit_expr b; emit_instr "f64.load offset=0 align=8";
-       emit_instr (wasm_cmp_float op)
+       (* floats are boxed (i64-held ptr): wrap, load both f64, compare,
+          extend the i32 comparison result back to an i64 bool *)
+       emit_expr a; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
+       emit_expr b; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
+       emit_instr (wasm_cmp_float op);
+       emit_instr "i64.extend_i32_u"
      | _ ->
        emit_expr a;
        emit_expr b;
-       emit_instr (wasm_cmp op))
+       emit_instr (wasm_cmp op);
+       emit_instr "i64.extend_i32_u")
   | Ast.Logic (op, a, b) ->
     (* v0.1.34: SHORT-CIRCUIT, matching the interpreter and the C
        backend. The old strict `i32.and` / `i32.or` evaluated both
@@ -1781,7 +1800,8 @@ let rec emit_expr (e : Ast.expr) : unit =
      | Ast.Or -> emit_expr Ast.{ e with node = Ast.If (a, const_bool true, b) })
   | Ast.If (cond, t, f) ->
     emit_expr cond;
-    emit_instr "if (result i32)";
+    emit_instr "i32.wrap_i64";      (* i64 bool -> i32 condition *)
+    emit_instr "if (result i64)";
     wasm_tail_pos := saved_tail;
     emit_expr t;
     emit_instr "else";
@@ -1854,7 +1874,8 @@ let rec emit_expr (e : Ast.expr) : unit =
          | Ast.P_var n ->
            let slot = fresh_local () in
            emit_instr (Printf.sprintf "local.get %d" tup_slot);
-           emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+           emit_instr "i32.wrap_i64";
+           emit_instr (Printf.sprintf "i64.load offset=%d" (i * 8));
            emit_instr (Printf.sprintf "local.set %d" slot);
            new_bindings := (n, slot) :: !new_bindings
          | Ast.P_wild -> ()
@@ -1954,12 +1975,18 @@ let rec emit_expr (e : Ast.expr) : unit =
       args;
     emit_instr (Printf.sprintf "call $%s" name);
     (match ret_ty with
-     | Ast.TyUnit -> emit_instr "i32.const 0"
+     | Ast.TyUnit -> emit_instr "i64.const 0"
      | _ -> ())
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $puts";
-    emit_instr "i32.const 0"  (* unit / int 0 *)
+    emit_instr "i64.const 0"  (* unit *)
+  | Ast.App ({ node = Ast.Var "print_no_nl"; _ }, arg)
+    when not (List.mem_assoc "print_no_nl" !locals) ->
+    print_no_nl_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_print_no_nl";
+    emit_instr "i64.const 0"  (* unit *)
   (* Q-012: spawn a `unit -> unit` closure on a Wasm worker. The closure
      value is an i32 pointer to its { env_offset, fn_idx } record in the
      (shared) linear memory; the host reads it and runs the closure on a
@@ -2090,8 +2117,9 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr h_e;
     emit_expr n_e;
     emit_instr "call $__lang_str_index_of";
-    emit_instr "i32.const -1";
-    emit_instr "i32.ne"
+    emit_instr "i64.const -1";
+    emit_instr "i64.ne";
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e); _ }, n_e) ->
     emit_expr s_e;
     emit_expr n_e;
@@ -2099,23 +2127,24 @@ let rec emit_expr (e : Ast.expr) : unit =
   (* v0.1.42 (bitwise): direct i32 ops. bit_shr is the arithmetic shift
      (i32.shr_s); wasm masks shift counts mod 32 by spec. *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_and"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i32.and"
+    emit_expr a_e; emit_expr b_e; emit_instr "i64.and"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_or"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i32.or"
+    emit_expr a_e; emit_expr b_e; emit_instr "i64.or"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_xor"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i32.xor"
+    emit_expr a_e; emit_expr b_e; emit_instr "i64.xor"
   | Ast.App ({ node = Ast.Var "bit_not"; _ }, a_e) ->
-    emit_expr a_e; emit_instr "i32.const -1"; emit_instr "i32.xor"
+    emit_expr a_e; emit_instr "i64.const -1"; emit_instr "i64.xor"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_shl"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i32.shl"
+    emit_expr a_e; emit_expr b_e; emit_instr "i64.shl"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_shr"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i32.shr_s"
+    emit_expr a_e; emit_expr b_e; emit_instr "i64.shr_s"
   | Ast.App ({ node = Ast.Var "str_rev"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_str_rev"
   | Ast.App ({ node = Ast.Var "not"; _ }, arg) ->
     emit_expr arg;
-    emit_instr "i32.eqz"
+    emit_instr "i64.eqz";
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.Var "abs"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_abs"
@@ -2138,7 +2167,9 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "call $__lang_char_at_chr"
   | Ast.App ({ node = Ast.Var "ord"; _ }, arg) ->
     emit_expr arg;
-    emit_instr "i32.load8_u"
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load8_u";
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.Var "to_upper"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_to_upper"
@@ -2147,15 +2178,17 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "call $__lang_to_lower"
   | Ast.App ({ node = Ast.Var "even"; _ }, arg) ->
     emit_expr arg;
-    emit_instr "i32.const 2";
-    emit_instr "i32.rem_s";
-    emit_instr "i32.eqz"
+    emit_instr "i64.const 2";
+    emit_instr "i64.rem_s";
+    emit_instr "i64.eqz";
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.Var "odd"; _ }, arg) ->
     emit_expr arg;
-    emit_instr "i32.const 2";
-    emit_instr "i32.rem_s";
-    emit_instr "i32.const 0";
-    emit_instr "i32.ne"
+    emit_instr "i64.const 2";
+    emit_instr "i64.rem_s";
+    emit_instr "i64.const 0";
+    emit_instr "i64.ne";
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "gcd"; _ }, a_e); _ }, b_e) ->
     emit_expr a_e;
     emit_expr b_e;
@@ -2197,8 +2230,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       | "f_mul" -> "f64.mul" | "f_div" -> "f64.div" | _ -> "f64.add"
     in
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_expr b_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr op;
     emit_float_alloc_from_f64_on_stack ()
@@ -2209,68 +2244,85 @@ let rec emit_expr (e : Ast.expr) : unit =
       | "f_gt" -> "f64.gt" | "f_ge" -> "f64.ge" | _ -> "f64.lt"
     in
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_expr b_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
-    emit_instr op  (* f64.lt etc. return i32 (bool) *)
+    emit_instr op;  (* f64.lt etc. return i32 (bool) *)
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
     when fname = "f_min" || fname = "f_max" ->
     let op = if fname = "f_min" then "f64.min" else "f64.max" in
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_expr b_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr op;
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "f_neg"; _ }, a_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr "f64.neg";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "f_abs"; _ }, a_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr "f64.abs";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "float_of_int"; _ }, a_e) ->
     emit_expr a_e;
-    emit_instr "f64.convert_i32_s";
+    emit_instr "f64.convert_i64_s";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "int_of_float"; _ }, a_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
-    emit_instr "i32.trunc_f64_s"
+    emit_instr "i64.trunc_f64_s"
   | Ast.App ({ node = Ast.Var "str_of_float"; _ }, a_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
-    emit_instr "call $__lang_str_of_float"  (* env import, returns i32 ptr to str *)
+    emit_instr "call $__lang_str_of_float";  (* env import, returns i32 ptr to str *)
+    emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.Var "float_of_str"; _ }, a_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";               (* env import takes an i32 ptr *)
     emit_instr "call $__lang_float_of_str";  (* env import, f64 *)
     emit_float_alloc_from_f64_on_stack ()
   (* Phase 34.4: libm functions — only sqrt is a Wasm intrinsic; others are host imports *)
   | Ast.App ({ node = Ast.Var "sqrt"; _ }, a_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr "f64.sqrt";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
     when fname = "sin" || fname = "cos" || fname = "tan" ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr (Printf.sprintf "call $__lang_%s" fname);
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e); _ }, b_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_expr b_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr "call $__lang_f_pow";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
     emit_expr a_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_expr b_e;
+    emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr "call $__lang_atan2";
     emit_float_alloc_from_f64_on_stack ()
@@ -2296,7 +2348,8 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "str_of_bytes"; _ }, arg) ->
     bytes_used := true; emit_expr arg; emit_instr "call $__lang_str_of_bytes"
   | Ast.App ({ node = Ast.Var "bytes_len"; _ }, arg) ->
-    bytes_used := true; emit_expr arg; emit_instr "i32.load"
+    bytes_used := true; emit_expr arg;
+    emit_instr "i32.wrap_i64"; emit_instr "i32.load"; emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e); _ }, i_e) ->
     bytes_used := true; emit_expr b_e; emit_expr i_e; emit_instr "call $__lang_bytes_get"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_concat"; _ }, a_e); _ }, b_e) ->
@@ -2324,7 +2377,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     fail_used := true;
     let msg_off = intern_show_str "int_of_str: not a valid int" in
     emit_expr arg;
-    emit_instr (Printf.sprintf "i32.const %d" msg_off);
+    emit_instr (Printf.sprintf "i64.const %d" msg_off);
     emit_instr "call $__lang_int_of_str"
   | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
     (* str_of_int is an alias for show_int. *)
@@ -2360,20 +2413,26 @@ let rec emit_expr (e : Ast.expr) : unit =
     (* no filesystem — File.exist? is always false. *)
     emit_expr path_e;
     emit_instr "drop";
-    emit_instr "i32.const 0"
+    emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "random_int"; _ }, n_e)
     when not (List.mem_assoc "random_int" !locals) ->
     (* no RNG wired on the Wasm host yet — deterministic 0 (refine to a host
        Math.random import later). *)
     emit_expr n_e;
     emit_instr "drop";
-    emit_instr "i32.const 0"
+    emit_instr "i64.const 0"
+  | Ast.App ({ node = Ast.Var "time"; _ }, _)
+    when not (List.mem_assoc "time" !locals) ->
+    (* wall-clock epoch seconds as f64 via a host import (Date.now()/1000 in
+       a browser). The unit arg is inert; the raw f64 is boxed like any float. *)
+    emit_instr "call $__lang_time";
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "run"; _ }, cmd_e)
     when not (List.mem_assoc "run" !locals) ->
     (* no subprocess on a browser/worker host — commands "fail" (nonzero). *)
     emit_expr cmd_e;
     emit_instr "drop";
-    emit_instr "i32.const 127"
+    emit_instr "i64.const 127"
   | Ast.App ({ node = Ast.Var "args"; _ }, _)
     when not (List.mem_assoc "args" !locals) ->
     (* no argv on a browser/worker host — args() is the empty list. Reuse the
@@ -2384,7 +2443,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     (* stderr — route to the same host sink as print. *)
     emit_expr arg;
     emit_instr "call $puts";
-    emit_instr "i32.const 0"
+    emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "exit"; _ }, code_e)
     when not (List.mem_assoc "exit" !locals) ->
     (* no process to exit — evaluate the code for effect, then trap. *)
@@ -2434,7 +2493,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        the inner closure, check the flag; if set, return default. *)
     fail_used := true;
     (* Save active counter (depth) — using a fresh local. *)
-    let saved_active = fresh_local () in
+    let saved_active = fresh_local_i32 () in
     let result_slot = fresh_local () in
     emit_instr "global.get $__lang_fail_active";
     emit_instr (Printf.sprintf "local.set %d" saved_active);
@@ -2447,10 +2506,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr fn_e;
     emit_instr (Printf.sprintf "local.set %d" cl_slot);
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
-    emit_instr "i32.load offset=0";   (* env *)
-    emit_instr "i32.const 0";          (* unit arg *)
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";   (* env (i32 record field) *)
+    emit_instr "i64.extend_i32_u";    (* … as an i64 value *)
+    emit_instr "i64.const 0";          (* unit arg *)
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
-    emit_instr "i32.load offset=4";   (* fn_idx *)
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=4";   (* fn_idx (table index stays i32) *)
     emit_instr "call_indirect (type $cl)";
     emit_instr (Printf.sprintf "local.set %d" result_slot);
     (* Restore active counter. *)
@@ -2458,7 +2520,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "global.set $__lang_fail_active";
     (* If fail flag set, drop result + emit default; else use result. *)
     emit_instr "global.get $__lang_fail_flag";
-    emit_instr "if (result i32)";
+    emit_instr "if (result i64)";
     emit_instr "i32.const 0";
     emit_instr "global.set $__lang_fail_flag";
     emit_expr default_e;
@@ -2598,7 +2660,7 @@ let rec emit_expr (e : Ast.expr) : unit =
        (* Static arity. arg may be side-effectful, so drop it. *)
        emit_expr arg;
        emit_instr "drop";
-       emit_instr (Printf.sprintf "i32.const %d" (List.length ts))
+       emit_instr (Printf.sprintf "i64.const %d" (List.length ts))
      | Ast.TyCon (n, _)
        when Hashtbl.mem Exhaustive.type_variants n
             && Hashtbl.mem variant_tags "Cons"
@@ -2721,14 +2783,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "%s $%s" call_op dispatch_name)
   | Ast.App (f, arg) ->
     (* Indirect call via call_indirect on the closure value's table
-       index. closure layout: { env @ offset 0, fn_idx @ offset 4 }. *)
+       index. closure layout: { env @ offset 0, fn_idx @ offset 4 }
+       (i32 record fields; env crosses as an i64 value). *)
     let cl_slot = fresh_local () in
     emit_expr f;
     emit_instr (Printf.sprintf "local.set %d" cl_slot);
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
     emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
     emit_expr arg;
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
     emit_instr "i32.load offset=4";
     let call_op = if saved_tail then "return_call_indirect" else "call_indirect" in
     emit_instr (Printf.sprintf "%s (type $cl)" call_op)
@@ -2739,11 +2805,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     let info = Hashtbl.find Typer.views name in
     let decl_fields = info.Typer.v_fields in
     let n = List.length decl_fields in
-    let base_slot = fresh_local () in
+    let base_slot = fresh_local_i32 () in
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" base_slot);
     emit_instr (Printf.sprintf "local.get %d" base_slot);
-    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr (Printf.sprintf "i32.const %d" (8 * n));
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
     List.iteri (fun i (fname, _) ->
@@ -2755,9 +2821,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       in
       emit_instr (Printf.sprintf "local.get %d" base_slot);
       emit_expr v_expr;
-      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+      emit_instr (Printf.sprintf "i64.store offset=%d" (8 * i))
     ) decl_fields;
-    emit_instr (Printf.sprintf "local.get %d" base_slot)
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.Record_lit (name, fields) ->
     let info =
       match Hashtbl.find_opt Typer.records name with
@@ -2769,11 +2836,11 @@ let rec emit_expr (e : Ast.expr) : unit =
        per-instance specialization needed unlike LLVM. *)
     let decl_fields = info.Typer.r_fields in
     let n = List.length decl_fields in
-    let base_slot = fresh_local () in
+    let base_slot = fresh_local_i32 () in
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" base_slot);
     emit_instr (Printf.sprintf "local.get %d" base_slot);
-    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr (Printf.sprintf "i32.const %d" (8 * n));
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
     List.iteri (fun i (fname, _) ->
@@ -2785,9 +2852,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       in
       emit_instr (Printf.sprintf "local.get %d" base_slot);
       emit_expr v_expr;
-      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+      emit_instr (Printf.sprintf "i64.store offset=%d" (8 * i))
     ) decl_fields;
-    emit_instr (Printf.sprintf "local.get %d" base_slot)
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.Field_get (inner, fname) ->
     let raw_ty =
       match inner.Ast.ty with
@@ -2819,12 +2887,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     let idx = find_idx 0 fields in
     emit_expr inner;
+    emit_instr "i32.wrap_i64";
     (* Phase 19.x: if through a borrow (raw_ty is TyRef), Ref has added a
-       4-byte box, so we need an extra i32.load to unbox. *)
+       box slot, so we need an extra load to unbox. *)
     (match raw_ty with
-     | Ast.TyRef _ -> emit_instr "i32.load offset=0"
+     | Ast.TyRef _ -> emit_instr "i64.load offset=0"; emit_instr "i32.wrap_i64"
      | _ -> ());
-    emit_instr (Printf.sprintf "i32.load offset=%d" (4 * idx))
+    emit_instr (Printf.sprintf "i64.load offset=%d" (8 * idx))
   | Ast.Record_update (base, updates) ->
     let base_ty =
       match base.Ast.ty with
@@ -2839,16 +2908,17 @@ let rec emit_expr (e : Ast.expr) : unit =
     let info = Hashtbl.find Typer.records rname in
     let decl_fields = info.Typer.r_fields in
     let n = List.length decl_fields in
-    let src_slot = fresh_local () in
-    let dst_slot = fresh_local () in
-    (* Evaluate base into src local. *)
+    let src_slot = fresh_local_i32 () in
+    let dst_slot = fresh_local_i32 () in
+    (* Evaluate base into src local (wrapped to its i32 address). *)
     emit_expr base;
+    emit_instr "i32.wrap_i64";
     emit_instr (Printf.sprintf "local.set %d" src_slot);
     (* Reserve memory for new struct. *)
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" dst_slot);
     emit_instr (Printf.sprintf "local.get %d" dst_slot);
-    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr (Printf.sprintf "i32.const %d" (8 * n));
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
     (* Fill in each field: from update if present, else load from src. *)
@@ -2858,10 +2928,11 @@ let rec emit_expr (e : Ast.expr) : unit =
        | Some v_expr -> emit_expr v_expr
        | None ->
          emit_instr (Printf.sprintf "local.get %d" src_slot);
-         emit_instr (Printf.sprintf "i32.load offset=%d" (4 * i)));
-      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+         emit_instr (Printf.sprintf "i64.load offset=%d" (8 * i)));
+      emit_instr (Printf.sprintf "i64.store offset=%d" (8 * i))
     ) decl_fields;
-    emit_instr (Printf.sprintf "local.get %d" dst_slot)
+    emit_instr (Printf.sprintf "local.get %d" dst_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.Constr (raw_cname, arg_opt) ->
     (* Phase 42: try raw qualified lookup first for disambiguation, fall back
        to canonical. variant_tags is keyed by bare names, so use canonical. *)
@@ -2886,25 +2957,26 @@ let rec emit_expr (e : Ast.expr) : unit =
        or a pointer to a separately-allocated tuple/record (already a
        Wasm-side pointer, so no extra boxing is needed). *)
     let has_payload = variant_has_payload type_name in
-    let n_bytes = if has_payload then 8 else 4 in
-    let base_slot = fresh_local () in
+    let n_bytes = if has_payload then 16 else 8 in
+    let base_slot = fresh_local_i32 () in
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" base_slot);
     emit_instr (Printf.sprintf "local.get %d" base_slot);
     emit_instr (Printf.sprintf "i32.const %d" n_bytes);
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
-    (* Store tag at offset 0. *)
+    (* Store tag at offset 0 (an 8-byte slot like every value). *)
     emit_instr (Printf.sprintf "local.get %d" base_slot);
-    emit_instr (Printf.sprintf "i32.const %d" tag);
-    emit_instr "i32.store offset=0";
+    emit_instr (Printf.sprintf "i64.const %d" tag);
+    emit_instr "i64.store offset=0";
     (match arg_opt with
      | None -> ()
      | Some arg ->
        emit_instr (Printf.sprintf "local.get %d" base_slot);
        emit_expr arg;
-       emit_instr "i32.store offset=4");
-    emit_instr (Printf.sprintf "local.get %d" base_slot)
+       emit_instr "i64.store offset=8");
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.Match (scrut, arms) ->
     let scrut_ty =
       match scrut.Ast.ty with
@@ -2915,8 +2987,9 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr scrut;
     emit_instr (Printf.sprintf "local.set %d" scrut_slot);
     (* combine_and pushes both conds, runs i32.and, stores in a fresh local. *)
+    (* condition plumbing is raw i32 (internal booleans, not Mere values) *)
     let combine_and (a : int) (b : int) : int =
-      let slot = fresh_local () in
+      let slot = fresh_local_i32 () in
       emit_instr (Printf.sprintf "local.get %d" a);
       emit_instr (Printf.sprintf "local.get %d" b);
       emit_instr "i32.and";
@@ -2924,7 +2997,7 @@ let rec emit_expr (e : Ast.expr) : unit =
       slot
     in
     let true_cond () =
-      let slot = fresh_local () in
+      let slot = fresh_local_i32 () in
       emit_instr "i32.const 1";
       emit_instr (Printf.sprintf "local.set %d" slot);
       slot
@@ -2938,25 +3011,26 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Ast.P_var n -> (true_cond (), [(n, v_slot)])
       | Ast.P_unit -> (true_cond (), [])
       | Ast.P_int n ->
-        let slot = fresh_local () in
+        let slot = fresh_local_i32 () in
         emit_instr (Printf.sprintf "local.get %d" v_slot);
-        emit_instr (Printf.sprintf "i32.const %d" n);
-        emit_instr "i32.eq";
+        emit_instr (Printf.sprintf "i64.const %d" n);
+        emit_instr "i64.eq";
         emit_instr (Printf.sprintf "local.set %d" slot);
         (slot, [])
       | Ast.P_bool b ->
-        let slot = fresh_local () in
+        let slot = fresh_local_i32 () in
         emit_instr (Printf.sprintf "local.get %d" v_slot);
-        emit_instr (Printf.sprintf "i32.const %d" (if b then 1 else 0));
-        emit_instr "i32.eq";
+        emit_instr (Printf.sprintf "i64.const %d" (if b then 1 else 0));
+        emit_instr "i64.eq";
         emit_instr (Printf.sprintf "local.set %d" slot);
         (slot, [])
       | Ast.P_str s ->
         let lit_off = fresh_str_offset s in
-        let slot = fresh_local () in
+        let slot = fresh_local_i32 () in
         emit_instr (Printf.sprintf "local.get %d" v_slot);
-        emit_instr (Printf.sprintf "i32.const %d" lit_off);
+        emit_instr (Printf.sprintf "i64.const %d" lit_off);
         emit_instr "call $__lang_streq";
+        emit_instr "i32.wrap_i64";
         emit_instr (Printf.sprintf "local.set %d" slot);
         (slot, [])
       | Ast.P_as (inner, n) ->
@@ -2970,7 +3044,8 @@ let rec emit_expr (e : Ast.expr) : unit =
         let conds_bs = List.mapi (fun i p ->
           let elem_slot = fresh_local () in
           emit_instr (Printf.sprintf "local.get %d" v_slot);
-          emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+          emit_instr "i32.wrap_i64";
+          emit_instr (Printf.sprintf "i64.load offset=%d" (i * 8));
           emit_instr (Printf.sprintf "local.set %d" elem_slot);
           let elem_ty = try List.nth elem_tys i with _ -> Ast.TyInt in
           compile_pat p elem_slot elem_ty
@@ -3001,7 +3076,8 @@ let rec emit_expr (e : Ast.expr) : unit =
           let ft = ty_of fname in
           let f_slot = fresh_local () in
           emit_instr (Printf.sprintf "local.get %d" v_slot);
-          emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+          emit_instr "i32.wrap_i64";
+          emit_instr (Printf.sprintf "i64.load offset=%d" (i * 8));
           emit_instr (Printf.sprintf "local.set %d" f_slot);
           compile_pat sub_p f_slot ft
         ) sub_fields in
@@ -3042,11 +3118,12 @@ let rec emit_expr (e : Ast.expr) : unit =
           | Some t -> t
           | None -> unsupported pat.Ast.ploc ("ctor without tag: " ^ cname)
         in
-        let tag_cond = fresh_local () in
+        let tag_cond = fresh_local_i32 () in
         emit_instr (Printf.sprintf "local.get %d" v_slot);
-        emit_instr "i32.load offset=0";
-        emit_instr (Printf.sprintf "i32.const %d" tag);
-        emit_instr "i32.eq";
+        emit_instr "i32.wrap_i64";
+        emit_instr "i64.load offset=0";
+        emit_instr (Printf.sprintf "i64.const %d" tag);
+        emit_instr "i64.eq";
         emit_instr (Printf.sprintf "local.set %d" tag_cond);
         (match sub, pty_opt with
          | None, _ -> (tag_cond, [])
@@ -3059,11 +3136,12 @@ let rec emit_expr (e : Ast.expr) : unit =
               the sub-pattern's load / dereference runs only when the tag
               matches. *)
            let pl_slot = fresh_local () in
-           let result_slot = fresh_local () in
+           let result_slot = fresh_local_i32 () in
            emit_instr (Printf.sprintf "local.get %d" tag_cond);
            emit_instr "if (result i32)";
            emit_instr (Printf.sprintf "local.get %d" v_slot);
-           emit_instr "i32.load offset=4";
+           emit_instr "i32.wrap_i64";
+           emit_instr "i64.load offset=8";
            emit_instr (Printf.sprintf "local.set %d" pl_slot);
            let (sub_cond, sub_bs) = compile_pat sub_pat pl_slot pty in
            emit_instr (Printf.sprintf "local.get %d" sub_cond);
@@ -3097,13 +3175,14 @@ let rec emit_expr (e : Ast.expr) : unit =
           match guard with
           | None -> cond_slot
           | Some g ->
-            let g_slot = fresh_local () in
+            let g_slot = fresh_local_i32 () in
             emit_instr (Printf.sprintf "local.get %d" cond_slot);
             emit_instr "if (result i32)";
             let prev = !locals in
             locals := bindings @ prev;
             emit_expr g;
             locals := prev;
+            emit_instr "i32.wrap_i64";
             emit_instr "else";
             emit_instr "i32.const 0";
             emit_instr "end";
@@ -3111,7 +3190,7 @@ let rec emit_expr (e : Ast.expr) : unit =
             g_slot
         in
         emit_instr (Printf.sprintf "local.get %d" final_cond);
-        emit_instr "if (result i32)";
+        emit_instr "if (result i64)";
         let prev = !locals in
         locals := bindings @ prev;
         wasm_tail_pos := saved_tail;
@@ -3146,8 +3225,8 @@ let rec emit_expr (e : Ast.expr) : unit =
         ce_table_idx = table_idx;
         ce_host = !current_host_fn_wasm }
       :: !pending_closures;
-    let env_slot = fresh_local () in
-    let cl_slot = fresh_local () in
+    let env_slot = fresh_local_i32 () in
+    let cl_slot = fresh_local_i32 () in
     if n = 0 then begin
       emit_instr "i32.const 0";
       emit_instr (Printf.sprintf "local.set %d" env_slot)
@@ -3155,16 +3234,16 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr "global.get $__lang_bump";
       emit_instr (Printf.sprintf "local.set %d" env_slot);
       emit_instr (Printf.sprintf "local.get %d" env_slot);
-      emit_instr (Printf.sprintf "i32.const %d" (n * 4));
+      emit_instr (Printf.sprintf "i32.const %d" (n * 8));
       emit_instr "i32.add";
       emit_instr "global.set $__lang_bump";
       List.iteri (fun i (_, src_slot) ->
         emit_instr (Printf.sprintf "local.get %d" env_slot);
         emit_instr (Printf.sprintf "local.get %d" src_slot);
-        emit_instr (Printf.sprintf "i32.store offset=%d" (i * 4))
+        emit_instr (Printf.sprintf "i64.store offset=%d" (i * 8))
       ) captures
     end;
-    (* Build closure value: { env, fn_idx } at fresh memory slot. *)
+    (* Build closure value: { env, fn_idx } (i32 record fields, host-read). *)
     emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" cl_slot);
@@ -3178,26 +3257,28 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr (Printf.sprintf "i32.const %d" table_idx);
     emit_instr "i32.store offset=4";
-    emit_instr (Printf.sprintf "local.get %d" cl_slot)
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.Tuple elems ->
     (* All elements occupy 4 bytes (i32 / ptr-style offset). The tuple
        value is the base offset into linear memory. RESERVE the memory
        up-front (advance bump immediately) so nested tuples / concat
        inside element evaluation get their own non-overlapping memory. *)
     let n = List.length elems in
-    let base_slot = fresh_local () in
+    let base_slot = fresh_local_i32 () in
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" base_slot);
     emit_instr (Printf.sprintf "local.get %d" base_slot);
-    emit_instr (Printf.sprintf "i32.const %d" (4 * n));
+    emit_instr (Printf.sprintf "i32.const %d" (8 * n));
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
     List.iteri (fun i el ->
       emit_instr (Printf.sprintf "local.get %d" base_slot);
       emit_expr el;
-      emit_instr (Printf.sprintf "i32.store offset=%d" (4 * i))
+      emit_instr (Printf.sprintf "i64.store offset=%d" (8 * i))
     ) elems;
-    emit_instr (Printf.sprintf "local.get %d" base_slot)
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.Region_block (_, body) ->
     (* v0.1.37: regions RECLAIM again — the safe version of the
        save / restore that Phase 16.4 removed as unsound. Three parts
@@ -3365,18 +3446,19 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 2 (into enclosing) *)
     wasm_tail_pos := saved
   | Ast.Ref (_, _, inner) ->
-    (* `&R v` — region-alloc 4 bytes, store value, return ptr. *)
-    let base_slot = fresh_local () in
+    (* `&R v` — region-alloc an 8-byte slot, store the value, return ptr. *)
+    let base_slot = fresh_local_i32 () in
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" base_slot);
     emit_instr (Printf.sprintf "local.get %d" base_slot);
-    emit_instr "i32.const 4";
+    emit_instr "i32.const 8";
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
     emit_instr (Printf.sprintf "local.get %d" base_slot);
     emit_expr inner;
-    emit_instr "i32.store offset=0";
-    emit_instr (Printf.sprintf "local.get %d" base_slot)
+    emit_instr "i64.store offset=0";
+    emit_instr (Printf.sprintf "local.get %d" base_slot);
+    emit_instr "i64.extend_i32_u"
   | Ast.With (name, value, body) ->
     (* `with c = v in body` — bind v, run body, auto-invoke c.close
        if v has a `close: unit -> unit` field. *)
@@ -3464,7 +3546,7 @@ let emit_fn_def (f : fn_decl) : string =
     else
       let types =
         if List.length extra_types = extra_locals then extra_types
-        else List.init extra_locals (fun _ -> "i32")
+        else List.init extra_locals (fun _ -> "i64")
       in
       Printf.sprintf "    (local%s)\n"
         (String.concat "" (List.map (fun t -> " " ^ t) types))
@@ -3475,7 +3557,7 @@ let emit_fn_def (f : fn_decl) : string =
   ignore f.param_ty;
   ignore f.return_ty;
   Printf.sprintf
-    "  (func $%s (param i32) (result i32)\n%s%s)"
+    "  (func $%s (param i64) (result i64)\n%s%s)"
     f.name local_decl indented_body
 
 (* Phase 26.3: emit a lifted inner fn as top-level Wasm fn. Captures
@@ -3511,14 +3593,14 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   current_host_fn_wasm := saved_host;
   let param_decls =
     String.concat " "
-      (List.init (n_caps + 1) (fun _ -> "(param i32)"))
+      (List.init (n_caps + 1) (fun _ -> "(param i64)"))
   in
   let local_decl =
     if extra_locals <= 0 then ""
     else
       let types =
         if List.length extra_types = extra_locals then extra_types
-        else List.init extra_locals (fun _ -> "i32")
+        else List.init extra_locals (fun _ -> "i64")
       in
       Printf.sprintf "    (local%s)\n"
         (String.concat "" (List.map (fun t -> " " ^ t) types))
@@ -3527,14 +3609,14 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
   in
   Printf.sprintf
-    "  (func $%s %s (result i32)\n%s%s)"
+    "  (func $%s %s (result i64)\n%s%s)"
     lf.l_name param_decls local_decl indented_body
 
 (* Env-ignoring adapter so top-level fn `f` can be used as a closure
    value: `(env, x) -> result` that just calls `$f(x)`. *)
 let emit_top_adapter (f : fn_decl) : string =
   Printf.sprintf
-    "  (func $%s_closure (param i32) (param i32) (result i32)\n\
+    "  (func $%s_closure (param i64) (param i64) (result i64)\n\
      \    local.get 1\n\
      \    call $%s)" f.name f.name
 
@@ -3559,7 +3641,7 @@ let emit_eta_adapter_wasm (slug : string) (builtin : string) : string =
     | _ -> "unreachable"
   in
   Printf.sprintf
-    "  (func $eta_%s (param i32) (param i32) (result i32)\n\
+    "  (func $eta_%s (param i64) (param i64) (result i64)\n\
      \    %s)" slug body
 
 (* Adapter for an anonymous Fun. Slot 0 = env ptr, slot 1 = param;
@@ -3583,7 +3665,8 @@ let emit_anon_adapter (ce : closure_emission) : string =
     List.mapi (fun i (cname, _) ->
       let slot = 2 + i in
       emit_instr (Printf.sprintf "local.get %d" env_slot);
-      emit_instr (Printf.sprintf "i32.load offset=%d" (i * 4));
+      emit_instr "i32.wrap_i64";
+      emit_instr (Printf.sprintf "i64.load offset=%d" (i * 8));
       emit_instr (Printf.sprintf "local.set %d" slot);
       (cname, slot)
     ) ce.ce_captures
@@ -3609,11 +3692,11 @@ let emit_anon_adapter (ce : closure_emission) : string =
   let local_decl =
     if extra_locals <= 0 then ""
     else
-      (* first n slots = capture unpacks (i32), then the tracked temps *)
+      (* first n slots = capture unpacks (i64 values), then the tracked temps *)
       let types =
         if n + List.length extra_types = extra_locals then
-          List.init n (fun _ -> "i32") @ extra_types
-        else List.init extra_locals (fun _ -> "i32")
+          List.init n (fun _ -> "i64") @ extra_types
+        else List.init extra_locals (fun _ -> "i64")
       in
       Printf.sprintf "    (local%s)\n"
         (String.concat "" (List.map (fun t -> " " ^ t) types))
@@ -3622,7 +3705,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
     String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
   in
   Printf.sprintf
-    "  (func $%s (param i32) (param i32) (result i32)\n%s%s)"
+    "  (func $%s (param i64) (param i64) (result i64)\n%s%s)"
     ce.ce_adapter_name local_decl indented_body
 
 (* Emit `show_<tag>(x: i32) -> i32` for one type. Returns the WAT
@@ -3632,61 +3715,64 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyInt ->
     (* int → decimal string in a fresh 16-byte buffer, write digits
        right-to-left, return pointer to the first digit. *)
-    {|  (func $show_int (param $n i32) (result i32)
-    (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)
+    {|  (func $show_int (param $n i64) (result i64)
+    (local $buf i32) (local $i i32) (local $abs i64) (local $neg i32)
     (local.set $buf (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 16)))
-    (local.set $i (i32.const 15))
+    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 24)))
+    (local.set $i (i32.const 23))
     (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 0))
-    (if (i32.lt_s (local.get $n) (i32.const 0))
+    (if (i64.lt_s (local.get $n) (i64.const 0))
       (then
         (local.set $neg (i32.const 1))
-        (local.set $abs (i32.sub (i32.const 0) (local.get $n))))
+        ;; wraps at INT64_MIN; div_u/rem_u below read it as the correct
+        ;; unsigned magnitude, so the full i64 range formats right.
+        (local.set $abs (i64.sub (i64.const 0) (local.get $n))))
       (else
         (local.set $neg (i32.const 0))
         (local.set $abs (local.get $n))))
-    (if (i32.eqz (local.get $abs))
+    (if (i64.eqz (local.get $abs))
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))
-        (return (i32.add (local.get $buf) (local.get $i)))))
+        (return (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))))))
     (block $end
       (loop $lp
-        (br_if $end (i32.eqz (local.get $abs)))
+        (br_if $end (i64.eqz (local.get $abs)))
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i))
-          (i32.add (i32.const 48) (i32.rem_u (local.get $abs) (i32.const 10))))
-        (local.set $abs (i32.div_u (local.get $abs) (i32.const 10)))
+          (i32.add (i32.const 48)
+            (i32.wrap_i64 (i64.rem_u (local.get $abs) (i64.const 10)))))
+        (local.set $abs (i64.div_u (local.get $abs) (i64.const 10)))
         (br $lp)))
     (if (local.get $neg)
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
-    (i32.add (local.get $buf) (local.get $i)))|}
+    (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))))|}
   | Ast.TyBool ->
     let t_off = intern_show_str "true" in
     let f_off = intern_show_str "false" in
     Printf.sprintf
-      "  (func $show_bool (param $b i32) (result i32)\n\
-      \    (if (result i32) (local.get $b)\n\
-      \      (then (i32.const %d))\n\
-      \      (else (i32.const %d))))"
+      "  (func $show_bool (param $b i64) (result i64)\n\
+      \    (if (result i64) (i32.wrap_i64 (local.get $b))\n\
+      \      (then (i64.const %d))\n\
+      \      (else (i64.const %d))))"
       t_off f_off
   | Ast.TyStr ->
     let q_off = intern_show_str "\"" in
     (* Phase 26.6 (port of LLVM Phase 25.6): run %s through
        __lang_str_escape so output matches interp's show_str behavior. *)
     Printf.sprintf
-      "  (func $show_str (param $s i32) (result i32)\n\
+      "  (func $show_str (param $s i64) (result i64)\n\
       \    (call $__lang_str_concat\n\
-      \      (call $__lang_str_concat (i32.const %d) (call $__lang_str_escape (local.get $s)))\n\
-      \      (i32.const %d)))"
+      \      (call $__lang_str_concat (i64.const %d) (call $__lang_str_escape (local.get $s)))\n\
+      \      (i64.const %d)))"
       q_off q_off
   | Ast.TyUnit ->
     let off = intern_show_str "()" in
     Printf.sprintf
-      "  (func $show_unit (param $u i32) (result i32)\n\
-      \    (i32.const %d))"
+      "  (func $show_unit (param $u i64) (result i64)\n\
+      \    (i64.const %d))"
       off
   | Ast.TyTuple ts ->
     let comma = intern_show_str ", " in
@@ -3694,7 +3780,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let rparen = intern_show_str ")" in
     let lines = Buffer.create 256 in
     Buffer.add_string lines
-      (Printf.sprintf "  (func $show_%s (param $x i32) (result i32)\n" tag);
+      (Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $r i32)\n";
     Buffer.add_string lines
       (Printf.sprintf "    (local.set $r (i32.const %d))\n" lparen);
@@ -3725,7 +3811,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let suffix = intern_show_str " }" in
     let lines = Buffer.create 256 in
     Buffer.add_string lines
-      (Printf.sprintf "  (func $show_%s (param $x i32) (result i32)\n" tag);
+      (Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $r i32)\n";
     Buffer.add_string lines
       (Printf.sprintf "    (local.set $r (i32.const %d))\n" hdr);
@@ -3759,7 +3845,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let rb = intern_show_str "]" in
     let comma = intern_show_str ", " in
     Printf.sprintf
-      "  (func $show_%s (param $x i32) (result i32)\n\
+      "  (func $show_%s (param $x i64) (result i64)\n\
       \    (local $cur i32) (local $acc i32) (local $first i32)\n\
       \    (local $tag i32) (local $pl i32) (local $h i32)\n\
       \    (local.set $acc (i32.const %d))\n\
@@ -3797,7 +3883,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     in
     let lines = Buffer.create 256 in
     Buffer.add_string lines
-      (Printf.sprintf "  (func $show_%s (param $x i32) (result i32)\n" tag);
+      (Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $tag i32)\n";
     Buffer.add_string lines
       "    (local.set $tag (i32.load offset=0 (local.get $x)))\n";
@@ -3824,7 +3910,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
               prefix (ty_tag pty)
         in
         Printf.sprintf
-          "(if (result i32) (i32.eq (local.get $tag) (i32.const %d))\n\
+          "(if (result i64) (i32.eq (local.get $tag) (i32.const %d))\n\
           \      (then %s)\n\
           \      (else %s))"
           ctor_tag arm_body (emit_branches rest)
@@ -3834,7 +3920,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   | _ ->
     let off = intern_show_str ("<?show_" ^ tag ^ "?>") in
     Printf.sprintf
-      "  (func $show_%s (param $x i32) (result i32)\n\
+      "  (func $show_%s (param $x i64) (result i64)\n\
       \    (i32.const %d))"
       tag off
 
@@ -3847,7 +3933,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
 let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt ->
-    {|  (func $to_json_int (param $n i32) (result i32)
+    {|  (func $to_json_int (param $n i64) (result i64)
     (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)
     (local.set $buf (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 16)))
@@ -3882,15 +3968,15 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let t_off = intern_show_str "true" in
     let f_off = intern_show_str "false" in
     Printf.sprintf
-      "  (func $to_json_bool (param $b i32) (result i32)\n\
-      \    (if (result i32) (local.get $b)\n\
+      "  (func $to_json_bool (param $b i64) (result i64)\n\
+      \    (if (result i64) (local.get $b)\n\
       \      (then (i32.const %d))\n\
       \      (else (i32.const %d))))"
       t_off f_off
   | Ast.TyStr ->
     let q_off = intern_show_str "\"" in
     Printf.sprintf
-      "  (func $to_json_str (param $s i32) (result i32)\n\
+      "  (func $to_json_str (param $s i64) (result i64)\n\
       \    (call $__lang_str_concat\n\
       \      (call $__lang_str_concat (i32.const %d) (call $__lang_str_escape (local.get $s)))\n\
       \      (i32.const %d)))"
@@ -3898,18 +3984,18 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyUnit ->
     let off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_unit (param $u i32) (result i32) (i32.const %d))" off
+      "  (func $to_json_unit (param $u i64) (result i64) (i32.const %d))" off
   | Ast.TyArrow _ ->
     let off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_%s (param $u i32) (result i32) (i32.const %d))" tag off
+      "  (func $to_json_%s (param $u i64) (result i64) (i32.const %d))" tag off
   | Ast.TyTuple ts ->
     let comma = intern_show_str "," in
     let lb = intern_show_str "[" in
     let rb = intern_show_str "]" in
     let lines = Buffer.create 256 in
     Buffer.add_string lines
-      (Printf.sprintf "  (func $to_json_%s (param $x i32) (result i32)\n" tag);
+      (Printf.sprintf "  (func $to_json_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $r i32)\n";
     Buffer.add_string lines
       (Printf.sprintf "    (local.set $r (i32.const %d))\n" lb);
@@ -3939,7 +4025,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let suffix = intern_show_str "}" in
     let lines = Buffer.create 256 in
     Buffer.add_string lines
-      (Printf.sprintf "  (func $to_json_%s (param $x i32) (result i32)\n" tag);
+      (Printf.sprintf "  (func $to_json_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $r i32)\n";
     Buffer.add_string lines
       (Printf.sprintf "    (local.set $r (i32.const %d))\n" hdr);
@@ -3968,7 +4054,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let rb = intern_show_str "]" in
     let comma = intern_show_str "," in
     Printf.sprintf
-      "  (func $to_json_%s (param $x i32) (result i32)\n\
+      "  (func $to_json_%s (param $x i64) (result i64)\n\
       \    (local $cur i32) (local $acc i32) (local $first i32)\n\
       \    (local $tag i32) (local $pl i32) (local $h i32)\n\
       \    (local.set $acc (i32.const %d))\n\
@@ -3995,8 +4081,8 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
     let null_off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_%s (param $x i32) (result i32)\n\
-      \    (if (result i32) (i32.eq (i32.load offset=0 (local.get $x)) (i32.const %d))\n\
+      "  (func $to_json_%s (param $x i64) (result i64)\n\
+      \    (if (result i64) (i32.eq (i32.load offset=0 (local.get $x)) (i32.const %d))\n\
       \      (then (i32.const %d))\n\
       \      (else (call $to_json_%s (i32.load offset=4 (local.get $x))))))"
       tag none_tag null_off (ty_tag (Ast.walk inner))
@@ -4016,7 +4102,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     in
     let lines = Buffer.create 256 in
     Buffer.add_string lines
-      (Printf.sprintf "  (func $to_json_%s (param $x i32) (result i32)\n" tag);
+      (Printf.sprintf "  (func $to_json_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $tag i32)\n";
     Buffer.add_string lines
       "    (local.set $tag (i32.load offset=0 (local.get $x)))\n";
@@ -4043,7 +4129,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
               prefix (ty_tag pty) suffix
         in
         Printf.sprintf
-          "(if (result i32) (i32.eq (local.get $tag) (i32.const %d))\n\
+          "(if (result i64) (i32.eq (local.get $tag) (i32.const %d))\n\
           \      (then %s)\n\
           \      (else %s))"
           ctor_tag arm_body (emit_branches rest)
@@ -4053,13 +4139,15 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   | _ ->
     let off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_%s (param $x i32) (result i32) (i32.const %d))" tag off
+      "  (func $to_json_%s (param $x i64) (result i64) (i32.const %d))" tag off
 
 (* Structural equality for compound types on Wasm. A compound value is a
    linear-memory offset, so `i32.eq` would compare offsets, not contents —
    `eq_<tag>` compares field/element/payload-wise instead. Mirrors show /
    to_json; kept in sync with codegen_c / eval. *)
 let emit_eq_fn (tag : string) (t : Ast.ty) : string =
+  (* i64 value model: params are values; addresses wrap to i32, fields are
+     8-byte slots. eq_* returns an i64 bool. *)
   let and_chain items =
     List.fold_right (fun e acc -> Printf.sprintf "(i32.and %s %s)" e acc)
       items "(i32.const 1)"
@@ -4067,27 +4155,27 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool ->
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n\
-      \    (i32.eq (local.get $a) (local.get $b)))" tag
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n\
+      \    (i64.extend_i32_u (i64.eq (local.get $a) (local.get $b))))" tag
   | Ast.TyStr ->
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n\
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n\
       \    (call $__lang_streq (local.get $a) (local.get $b)))" tag
   | Ast.TyUnit ->
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 1))" tag
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64) (i64.const 1))" tag
   | Ast.TyArrow _ ->
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64) (i64.const 0))" tag
   | Ast.TyTuple ts ->
     let elems =
       List.mapi (fun i et ->
         Printf.sprintf
-          "(call $eq_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
-          (ty_tag et) (i * 4) (i * 4)) ts
+          "(i32.wrap_i64 (call $eq_%s (i64.load offset=%d (i32.wrap_i64 (local.get $a))) (i64.load offset=%d (i32.wrap_i64 (local.get $b)))))"
+          (ty_tag et) (i * 8) (i * 8)) ts
     in
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n    %s)"
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n    (i64.extend_i32_u %s))"
       tag (and_chain elems)
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
     let info = Hashtbl.find Typer.records n in
@@ -4099,11 +4187,11 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
       List.mapi (fun i (_, ft) ->
         let _ = subst_params mapping ft in
         Printf.sprintf
-          "(call $eq_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
-          (ty_tag (subst_params mapping ft)) (i * 4) (i * 4)) info.Typer.r_fields
+          "(i32.wrap_i64 (call $eq_%s (i64.load offset=%d (i32.wrap_i64 (local.get $a))) (i64.load offset=%d (i32.wrap_i64 (local.get $b)))))"
+          (ty_tag (subst_params mapping ft)) (i * 8) (i * 8)) info.Typer.r_fields
     in
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n    %s)"
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n    (i64.extend_i32_u %s))"
       tag (and_chain elems)
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n || n = "list" ->
     let vs =
@@ -4120,7 +4208,7 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
       | [] -> []
     in
     let rec payload_dispatch = function
-      | [] -> "(i32.const 1)"
+      | [] -> "(i64.const 1)"
       | (cname, arg_opt) :: rest ->
         (match arg_opt with
          | None -> payload_dispatch rest
@@ -4131,30 +4219,30 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
              | Some t -> t | None -> 0
            in
            Printf.sprintf
-             "(if (result i32) (i32.eq (local.get $ta) (i32.const %d))\n\
-             \      (then (call $eq_%s (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $b))))\n\
+             "(if (result i64) (i32.eq (local.get $ta) (i32.const %d))\n\
+             \      (then (call $eq_%s (i64.load offset=8 (i32.wrap_i64 (local.get $a))) (i64.load offset=8 (i32.wrap_i64 (local.get $b)))))\n\
              \      (else %s))"
              ctag (ty_tag pty) (payload_dispatch rest))
     in
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32)\n\
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n\
       \    (local $ta i32)\n\
-      \    (local.set $ta (i32.load offset=0 (local.get $a)))\n\
-      \    (if (result i32) (i32.ne (local.get $ta) (i32.load offset=0 (local.get $b)))\n\
-      \      (then (i32.const 0))\n\
+      \    (local.set $ta (i32.wrap_i64 (i64.load offset=0 (i32.wrap_i64 (local.get $a)))))\n\
+      \    (if (result i64) (i32.ne (local.get $ta) (i32.wrap_i64 (i64.load offset=0 (i32.wrap_i64 (local.get $b)))))\n\
+      \      (then (i64.const 0))\n\
       \      (else %s)))"
       tag (payload_dispatch vs)
   | _ ->
     Printf.sprintf
-      "  (func $eq_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64) (i64.const 0))" tag
 
 (* v0.1.11 derive-ord: structural compare returning -1/0/1, the ordering
    sibling of emit_eq_fn. Lexicographic first-non-zero via `local.tee $c`
    chains. Variants order by tag (declaration order) then payload — matching
    the interpreter's value_compare and the C backend's cmp_<tag>. *)
 let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
-  (* Right-fold a list of i32-producing compare exprs into "first non-zero,
-     else next; last is the tiebreak". Needs a `(local $c i32)`. *)
+  (* i64 value model: cmp_* takes i64 values and returns -1/0/1 as i64.
+     Internal chains work in i32 and extend at the boundary. *)
   let rec chain = function
     | [] -> "(i32.const 0)"
     | [last] -> last
@@ -4166,30 +4254,30 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool ->
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
-      \    (i32.sub (i32.gt_s (local.get $a) (local.get $b)) (i32.lt_s (local.get $a) (local.get $b))))" tag
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64)\n\
+      \    (i64.extend_i32_s (i32.sub (i64.gt_s (local.get $a) (local.get $b)) (i64.lt_s (local.get $a) (local.get $b)))))" tag
   | Ast.TyFloat ->
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
-      \    (i32.sub\n\
-      \      (f64.gt (f64.load offset=0 align=8 (local.get $a)) (f64.load offset=0 align=8 (local.get $b)))\n\
-      \      (f64.lt (f64.load offset=0 align=8 (local.get $a)) (f64.load offset=0 align=8 (local.get $b)))))" tag
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64)\n\
+      \    (i64.extend_i32_s (i32.sub\n\
+      \      (f64.gt (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $a))) (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $b))))\n\
+      \      (f64.lt (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $a))) (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $b)))))))" tag
   | Ast.TyStr ->
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64)\n\
       \    (call $__lang_str_compare (local.get $a) (local.get $b)))" tag
   | Ast.TyUnit | Ast.TyArrow _ ->
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64) (i64.const 0))" tag
   | Ast.TyTuple ts ->
     let elems =
       List.mapi (fun i et ->
         Printf.sprintf
-          "(call $cmp_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
-          (ty_tag et) (i * 4) (i * 4)) ts
+          "(i32.wrap_i64 (call $cmp_%s (i64.load offset=%d (i32.wrap_i64 (local.get $a))) (i64.load offset=%d (i32.wrap_i64 (local.get $b)))))"
+          (ty_tag et) (i * 8) (i * 8)) ts
     in
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n    (local $c i32)\n    %s)"
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64)\n    (local $c i32)\n    (i64.extend_i32_s %s))"
       tag (chain elems)
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
     let info = Hashtbl.find Typer.records n in
@@ -4199,11 +4287,11 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
     let elems =
       List.mapi (fun i (_, ft) ->
         Printf.sprintf
-          "(call $cmp_%s (i32.load offset=%d (local.get $a)) (i32.load offset=%d (local.get $b)))"
-          (ty_tag (subst_params mapping ft)) (i * 4) (i * 4)) info.Typer.r_fields
+          "(i32.wrap_i64 (call $cmp_%s (i64.load offset=%d (i32.wrap_i64 (local.get $a))) (i64.load offset=%d (i32.wrap_i64 (local.get $b)))))"
+          (ty_tag (subst_params mapping ft)) (i * 8) (i * 8)) info.Typer.r_fields
     in
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n    (local $c i32)\n    %s)"
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64)\n    (local $c i32)\n    (i64.extend_i32_s %s))"
       tag (chain elems)
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n || n = "list" ->
     let vs =
@@ -4218,7 +4306,7 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
       | [] -> []
     in
     let rec payload_dispatch = function
-      | [] -> "(i32.const 0)"
+      | [] -> "(i64.const 0)"
       | (cname, arg_opt) :: rest ->
         (match arg_opt with
          | None -> payload_dispatch rest
@@ -4226,26 +4314,26 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
            let pty = subst_params mapping pty in
            let ctag = match Hashtbl.find_opt variant_tags cname with Some t -> t | None -> 0 in
            Printf.sprintf
-             "(if (result i32) (i32.eq (local.get $ta) (i32.const %d))\n\
-             \      (then (call $cmp_%s (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $b))))\n\
+             "(if (result i64) (i32.eq (local.get $ta) (i32.const %d))\n\
+             \      (then (call $cmp_%s (i64.load offset=8 (i32.wrap_i64 (local.get $a))) (i64.load offset=8 (i32.wrap_i64 (local.get $b)))))\n\
              \      (else %s))"
              ctag (ty_tag pty) (payload_dispatch rest))
     in
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32)\n\
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64)\n\
       \    (local $ta i32) (local $tb i32)\n\
-      \    (local.set $ta (i32.load offset=0 (local.get $a)))\n\
-      \    (local.set $tb (i32.load offset=0 (local.get $b)))\n\
-      \    (if (result i32) (i32.ne (local.get $ta) (local.get $tb))\n\
-      \      (then (i32.sub (i32.gt_s (local.get $ta) (local.get $tb)) (i32.lt_s (local.get $ta) (local.get $tb))))\n\
+      \    (local.set $ta (i32.wrap_i64 (i64.load offset=0 (i32.wrap_i64 (local.get $a)))))\n\
+      \    (local.set $tb (i32.wrap_i64 (i64.load offset=0 (i32.wrap_i64 (local.get $b)))))\n\
+      \    (if (result i64) (i32.ne (local.get $ta) (local.get $tb))\n\
+      \      (then (i64.extend_i32_s (i32.sub (i32.gt_s (local.get $ta) (local.get $tb)) (i32.lt_s (local.get $ta) (local.get $tb)))))\n\
       \      (else %s)))"
       tag (payload_dispatch vs)
   | _ ->
     Printf.sprintf
-      "  (func $cmp_%s (param $a i32) (param $b i32) (result i32) (i32.const 0))" tag
+      "  (func $cmp_%s (param $a i64) (param $b i64) (result i64) (i64.const 0))" tag
 
 let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
-  let header = Printf.sprintf "  (func $__mcopy_%s (param $v i32) (result i32)" tag in
+  let header = Printf.sprintf "  (func $__mcopy_%s (param $v i64) (result i64)" tag in
   let field_copy src_expr ft =
     if wasm_unboxed ft then src_expr
     else Printf.sprintf "(call $__mcopy_%s %s)" (ty_tag ft) src_expr
@@ -4320,7 +4408,7 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
                match Hashtbl.find_opt variant_tags cname with
                | Some t -> t | None -> 0 in
              Printf.sprintf
-               "(if (result i32) (i32.eq (local.get $t) (i32.const %d))\n\
+               "(if (result i64) (i32.eq (local.get $t) (i32.const %d))\n\
                \      (then (call $__mcopy_%s (i32.load offset=4 (local.get $v))))\n\
                \      (else %s))"
                ctag (ty_tag pty) (payload_dispatch rest))
@@ -4337,19 +4425,25 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
 let runtime_helpers = {|
-  (func $__lang_strlen (param $s i32) (result i32)
+  (func $__lang_strlen (param $s8 i64) (result i64)
     (local $i i32)
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
         (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (local.get $i))
-  (func $__lang_str_concat (param $a i32) (param $b i32) (result i32)
+    (i64.extend_i32_s (local.get $i)))
+  (func $__lang_str_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $la i32) (local $lb i32) (local $r i32) (local $i i32)
-    (local.set $la (call $__lang_strlen (local.get $a)))
-    (local.set $lb (call $__lang_strlen (local.get $b)))
+    (local $a i32)
+    (local $b i32)
+    (local.set $a (i32.wrap_i64 (local.get $a8)))
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
+    (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (block $end_a
@@ -4372,14 +4466,16 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
                (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; v0.1.37: deep-copy a NUL-terminated str into fresh bump space.
   ;; Region blocks copy their result out before releasing the block's
   ;; allocations (the safe version of the save/restore that Phase 16.4
   ;; removed as unsound).
-  (func $__mcopy_str (param $s i32) (result i32)
+  (func $__mcopy_str (param $s8 i64) (result i64)
     (local $l i32) (local $r i32) (local $i i32)
-    (local.set $l (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $l (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (block $end
@@ -4391,45 +4487,57 @@ let runtime_helpers = {|
         (br $lp)))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $l)) (i32.const 1)))
-    (local.get $r))
-  (func $__lang_streq (param $a i32) (param $b i32) (result i32)
+    (i64.extend_i32_s (local.get $r)))
+  (func $__lang_streq (param $a8 i64) (param $b8 i64) (result i64)
     (local $ba i32) (local $bb i32)
+    (local $a i32)
+    (local $b i32)
+    (local.set $a (i32.wrap_i64 (local.get $a8)))
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
     (block $not_eq
       (loop $lp
         (local.set $ba (i32.load8_u (local.get $a)))
         (local.set $bb (i32.load8_u (local.get $b)))
         (br_if $not_eq (i32.ne (local.get $ba) (local.get $bb)))
         (if (i32.eqz (local.get $ba))
-          (then (return (i32.const 1))))
+          (then (return (i64.extend_i32_s (i32.const 1)))))
         (local.set $a (i32.add (local.get $a) (i32.const 1)))
         (local.set $b (i32.add (local.get $b) (i32.const 1)))
         (br $lp)))
-    (i32.const 0))
+    (i64.extend_i32_s (i32.const 0)))
   ;; Phase 31.0: str_compare — returns -1 / 0 / 1 (sign-normalized, matches
   ;; interp's `compare s t` from OCaml stdlib).
-  (func $__lang_str_compare (param $a i32) (param $b i32) (result i32)
+  (func $__lang_str_compare (param $a8 i64) (param $b8 i64) (result i64)
     (local $ba i32) (local $bb i32)
+    (local $a i32)
+    (local $b i32)
+    (local.set $a (i32.wrap_i64 (local.get $a8)))
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
     (loop $lp
       (local.set $ba (i32.load8_u (local.get $a)))
       (local.set $bb (i32.load8_u (local.get $b)))
       (if (i32.lt_u (local.get $ba) (local.get $bb))
-        (then (return (i32.const -1))))
+        (then (return (i64.extend_i32_s (i32.const -1)))))
       (if (i32.gt_u (local.get $ba) (local.get $bb))
-        (then (return (i32.const 1))))
+        (then (return (i64.extend_i32_s (i32.const 1)))))
       (if (i32.eqz (local.get $ba))
-        (then (return (i32.const 0))))
+        (then (return (i64.extend_i32_s (i32.const 0)))))
       (local.set $a (i32.add (local.get $a) (i32.const 1)))
       (local.set $b (i32.add (local.get $b) (i32.const 1)))
       (br $lp))
     (unreachable))
   ;; Phase 19.1.1: str_index_of — returns position of needle in haystack,
   ;; -1 if not found. Empty needle returns 0.
-  (func $__lang_str_index_of (param $h i32) (param $n i32) (result i32)
+  (func $__lang_str_index_of (param $h8 i64) (param $n8 i64) (result i64)
     (local $hlen i32) (local $nlen i32) (local $i i32) (local $j i32)
     (local $match i32)
-    (local.set $hlen (call $__lang_strlen (local.get $h)))
-    (local.set $nlen (call $__lang_strlen (local.get $n)))
-    (if (i32.eqz (local.get $nlen)) (then (return (i32.const 0))))
+    (local $h i32)
+    (local $n i32)
+    (local.set $h (i32.wrap_i64 (local.get $h8)))
+    (local.set $n (i32.wrap_i64 (local.get $n8)))
+    (local.set $hlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $h)))))
+    (local.set $nlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $n)))))
+    (if (i32.eqz (local.get $nlen)) (then (return (i64.extend_i32_s (i32.const 0)))))
     (local.set $i (i32.const 0))
     (block $end_outer
       (loop $lp_outer
@@ -4449,52 +4557,60 @@ let runtime_helpers = {|
               (then (local.set $match (i32.const 0)) (br $end_inner)))
             (local.set $j (i32.add (local.get $j) (i32.const 1)))
             (br $lp_inner)))
-        (if (local.get $match) (then (return (local.get $i))))
+        (if (local.get $match) (then (return (i64.extend_i32_s (local.get $i)))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_outer)))
-    (i32.const -1))
+    (i64.extend_i32_s (i32.const -1)))
   ;; Phase 36: __lang_is_ws — ASCII whitespace test (space/tab/lf/cr/ff)
-  (func $__lang_is_ws (param $c i32) (result i32)
-    (i32.or
+  (func $__lang_is_ws (param $c8 i64) (result i64)
+    (local $c i32)
+    (local.set $c (i32.wrap_i64 (local.get $c8)))
+    (i64.extend_i32_s (i32.or
       (i32.or
         (i32.or (i32.eq (local.get $c) (i32.const 32))
                 (i32.eq (local.get $c) (i32.const 9)))
         (i32.or (i32.eq (local.get $c) (i32.const 10))
                 (i32.eq (local.get $c) (i32.const 13))))
-      (i32.eq (local.get $c) (i32.const 12))))
+      (i32.eq (local.get $c) (i32.const 12)))))
   ;; Phase 36: str_starts_with — bool (i32 0/1)
-  (func $__lang_str_starts_with (param $s i32) (param $p i32) (result i32)
+  (func $__lang_str_starts_with (param $s8 i64) (param $p8 i64) (result i64)
     (local $i i32) (local $cs i32) (local $cp i32)
+    (local $s i32)
+    (local $p i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $p (i32.wrap_i64 (local.get $p8)))
     (local.set $i (i32.const 0))
     (loop $lp
       (local.set $cp (i32.load8_u (i32.add (local.get $p) (local.get $i))))
-      (if (i32.eqz (local.get $cp)) (then (return (i32.const 1))))
+      (if (i32.eqz (local.get $cp)) (then (return (i64.extend_i32_s (i32.const 1)))))
       (local.set $cs (i32.load8_u (i32.add (local.get $s) (local.get $i))))
-      (if (i32.ne (local.get $cs) (local.get $cp)) (then (return (i32.const 0))))
+      (if (i32.ne (local.get $cs) (local.get $cp)) (then (return (i64.extend_i32_s (i32.const 0)))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))
     (unreachable))
   ;; Phase 36: str_trim — strip leading + trailing whitespace
-  (func $__lang_str_trim (param $s i32) (result i32)
+  (func $__lang_str_trim (param $s8 i64) (result i64)
     (local $p i32) (local $len i32) (local $r i32) (local $i i32) (local $c i32)
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $p (local.get $s))
     ;; skip leading whitespace
     (block $end_lead
       (loop $lp_lead
         (local.set $c (i32.load8_u (local.get $p)))
         (br_if $end_lead (i32.eqz (local.get $c)))
-        (br_if $end_lead (i32.eqz (call $__lang_is_ws (local.get $c))))
+        (br_if $end_lead (i32.eqz (i32.wrap_i64 (call $__lang_is_ws (i64.extend_i32_s (local.get $c))))))
         (local.set $p (i32.add (local.get $p) (i32.const 1)))
         (br $lp_lead)))
     ;; compute remaining length
-    (local.set $len (call $__lang_strlen (local.get $p)))
+    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))
     ;; trim trailing
     (block $end_trail
       (loop $lp_trail
         (br_if $end_trail (i32.eqz (local.get $len)))
         (local.set $c (i32.load8_u (i32.add (local.get $p)
                                             (i32.sub (local.get $len) (i32.const 1)))))
-        (br_if $end_trail (i32.eqz (call $__lang_is_ws (local.get $c))))
+        (br_if $end_trail (i32.eqz (i32.wrap_i64 (call $__lang_is_ws (i64.extend_i32_s (local.get $c))))))
         (local.set $len (i32.sub (local.get $len) (i32.const 1)))
         (br $lp_trail)))
     ;; copy [p, p+len) to bump
@@ -4510,35 +4626,43 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: str_ends_with — bool (i32 0/1)
-  (func $__lang_str_ends_with (param $s i32) (param $p i32) (result i32)
+  (func $__lang_str_ends_with (param $s8 i64) (param $p8 i64) (result i64)
     (local $sl i32) (local $pl i32) (local $i i32)
-    (local.set $sl (call $__lang_strlen (local.get $s)))
-    (local.set $pl (call $__lang_strlen (local.get $p)))
-    (if (i32.gt_s (local.get $pl) (local.get $sl)) (then (return (i32.const 0))))
+    (local $s i32)
+    (local $p i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $p (i32.wrap_i64 (local.get $p8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $pl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))
+    (if (i32.gt_s (local.get $pl) (local.get $sl)) (then (return (i64.extend_i32_s (i32.const 0)))))
     (local.set $i (i32.const 0))
     (loop $lp
-      (if (i32.eq (local.get $i) (local.get $pl)) (then (return (i32.const 1))))
+      (if (i32.eq (local.get $i) (local.get $pl)) (then (return (i64.extend_i32_s (i32.const 1)))))
       (if (i32.ne
             (i32.load8_u (i32.add (i32.add (local.get $s)
                                            (i32.sub (local.get $sl) (local.get $pl)))
                                   (local.get $i)))
             (i32.load8_u (i32.add (local.get $p) (local.get $i))))
-        (then (return (i32.const 0))))
+        (then (return (i64.extend_i32_s (i32.const 0)))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))
     (unreachable))
   ;; Phase 36: str_repeat s n
-  (func $__lang_str_repeat (param $s i32) (param $n i32) (result i32)
+  (func $__lang_str_repeat (param $s8 i64) (param $n8 i64) (result i64)
     (local $sl i32) (local $r i32) (local $i i32) (local $j i32)
+    (local $s i32)
+    (local $n i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (local.get $n8)))
     (if (i32.le_s (local.get $n) (i32.const 0))
       (then
         (local.set $r (global.get $__lang_bump))
         (i32.store8 (local.get $r) (i32.const 0))
         (global.set $__lang_bump (i32.add (local.get $r) (i32.const 1)))
-        (return (local.get $r))))
-    (local.set $sl (call $__lang_strlen (local.get $s)))
+        (return (i64.extend_i32_s (local.get $r)))))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (block $end_outer
@@ -4561,11 +4685,13 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $sl)))
                (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: str_rev
-  (func $__lang_str_rev (param $s i32) (result i32)
+  (func $__lang_str_rev (param $s8 i64) (result i64)
     (local $sl i32) (local $r i32) (local $i i32)
-    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (block $end
@@ -4580,38 +4706,42 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: chr n — return char_table entry pointer for byte n.
   ;; Mask to a single byte (n & 0xFF) so out-of-range input can't index
   ;; past the 256-entry table into adjacent memory. Matches the C backend
   ;; ((unsigned char)n) and the self-host $chr (i32.store8 truncation).
-  (func $__lang_char_at_chr (param $n i32) (result i32)
+  (func $__lang_char_at_chr (param $n8 i64) (result i64)
+    (local $n i32)
+    (local.set $n (i32.wrap_i64 (local.get $n8)))
     (call $__lang_char_at_setup)
-    (i32.add (global.get $__lang_char_table)
-      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 2))))
+    (i64.extend_i32_s (i32.add (global.get $__lang_char_table)
+      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 2)))))
   ;; Phase 36: abs / min / max / clamp
-  (func $__lang_abs (param $n i32) (result i32)
-    (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.sub (i32.const 0) (local.get $n)))))
+  (func $__lang_abs (param $n i64) (result i64)
+    (if (i64.lt_s (local.get $n) (i64.const 0))
+      (then (return (i64.sub (i64.const 0) (local.get $n)))))
     (local.get $n))
-  (func $__lang_min (param $a i32) (param $b i32) (result i32)
-    (if (i32.lt_s (local.get $a) (local.get $b))
+  (func $__lang_min (param $a i64) (param $b i64) (result i64)
+    (if (i64.lt_s (local.get $a) (local.get $b))
       (then (return (local.get $a))))
     (local.get $b))
-  (func $__lang_max (param $a i32) (param $b i32) (result i32)
-    (if (i32.gt_s (local.get $a) (local.get $b))
+  (func $__lang_max (param $a i64) (param $b i64) (result i64)
+    (if (i64.gt_s (local.get $a) (local.get $b))
       (then (return (local.get $a))))
     (local.get $b))
-  (func $__lang_clamp (param $lo i32) (param $hi i32) (param $x i32) (result i32)
-    (if (i32.lt_s (local.get $x) (local.get $lo))
+  (func $__lang_clamp (param $lo i64) (param $hi i64) (param $x i64) (result i64)
+    (if (i64.lt_s (local.get $x) (local.get $lo))
       (then (return (local.get $lo))))
-    (if (i32.gt_s (local.get $x) (local.get $hi))
+    (if (i64.gt_s (local.get $x) (local.get $hi))
       (then (return (local.get $hi))))
     (local.get $x))
   ;; Phase 36: to_upper / to_lower — ASCII case conversion
-  (func $__lang_to_upper (param $s i32) (result i32)
+  (func $__lang_to_upper (param $s8 i64) (result i64)
     (local $sl i32) (local $r i32) (local $i i32) (local $c i32)
-    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (block $end
@@ -4627,10 +4757,12 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
-    (local.get $r))
-  (func $__lang_to_lower (param $s i32) (result i32)
+    (i64.extend_i32_s (local.get $r)))
+  (func $__lang_to_lower (param $s8 i64) (result i64)
     (local $sl i32) (local $r i32) (local $i i32) (local $c i32)
-    (local.set $sl (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (block $end
@@ -4646,40 +4778,48 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: gcd via iterative Euclid on |a|, |b|
-  (func $__lang_gcd (param $a0 i32) (param $b0 i32) (result i32)
-    (local $a i32) (local $b i32) (local $t i32)
+  (func $__lang_gcd (param $a0 i64) (param $b0 i64) (result i64)
+    (local $a i64) (local $b i64) (local $t i64)
     (local.set $a (local.get $a0))
     (local.set $b (local.get $b0))
-    (if (i32.lt_s (local.get $a) (i32.const 0))
-      (then (local.set $a (i32.sub (i32.const 0) (local.get $a)))))
-    (if (i32.lt_s (local.get $b) (i32.const 0))
-      (then (local.set $b (i32.sub (i32.const 0) (local.get $b)))))
+    (if (i64.lt_s (local.get $a) (i64.const 0))
+      (then (local.set $a (i64.sub (i64.const 0) (local.get $a)))))
+    (if (i64.lt_s (local.get $b) (i64.const 0))
+      (then (local.set $b (i64.sub (i64.const 0) (local.get $b)))))
     (block $end
       (loop $lp
-        (br_if $end (i32.eqz (local.get $b)))
+        (br_if $end (i64.eqz (local.get $b)))
         (local.set $t (local.get $b))
-        (local.set $b (i32.rem_s (local.get $a) (local.get $b)))
+        (local.set $b (i64.rem_s (local.get $a) (local.get $b)))
         (local.set $a (local.get $t))
         (br $lp)))
     (local.get $a))
   ;; Phase 36: bool_of_str — "true" → 1, otherwise → 0
-  (func $__lang_bool_of_str (param $s i32) (result i32)
-    (if (i32.ne (i32.load8_u (local.get $s)) (i32.const 116)) (then (return (i32.const 0))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.const 114)) (then (return (i32.const 0))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 2))) (i32.const 117)) (then (return (i32.const 0))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 3))) (i32.const 101)) (then (return (i32.const 0))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 4))) (i32.const 0)) (then (return (i32.const 0))))
-    (i32.const 1))
+  (func $__lang_bool_of_str (param $s8 i64) (result i64)
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (if (i32.ne (i32.load8_u (local.get $s)) (i32.const 116)) (then (return (i64.extend_i32_s (i32.const 0)))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.const 114)) (then (return (i64.extend_i32_s (i32.const 0)))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 2))) (i32.const 117)) (then (return (i64.extend_i32_s (i32.const 0)))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 3))) (i32.const 101)) (then (return (i64.extend_i32_s (i32.const 0)))))
+    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 4))) (i32.const 0)) (then (return (i64.extend_i32_s (i32.const 0)))))
+    (i64.extend_i32_s (i32.const 1)))
   ;; Phase 36: str_replace s old new — replace all non-overlapping occurrences
-  (func $__lang_str_replace (param $s i32) (param $old i32) (param $new i32) (result i32)
+  (func $__lang_str_replace (param $s8 i64) (param $old8 i64) (param $new8 i64) (result i64)
     (local $slen i32) (local $olen i32) (local $nlen i32)
     (local $r i32) (local $bi i32) (local $i i32) (local $j i32) (local $match i32)
-    (local.set $olen (call $__lang_strlen (local.get $old)))
-    (if (i32.eqz (local.get $olen)) (then (return (local.get $s))))
-    (local.set $slen (call $__lang_strlen (local.get $s)))
-    (local.set $nlen (call $__lang_strlen (local.get $new)))
+    (local $s i32)
+    (local $old i32)
+    (local $new i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $old (i32.wrap_i64 (local.get $old8)))
+    (local.set $new (i32.wrap_i64 (local.get $new8)))
+    (local.set $olen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $old)))))
+    (if (i32.eqz (local.get $olen)) (then (return (i64.extend_i32_s (local.get $s)))))
+    (local.set $slen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $nlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $new)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $bi (i32.const 0))
     (local.set $i (i32.const 0))
@@ -4722,17 +4862,19 @@ let runtime_helpers = {|
         (br $lp_outer)))
     (i32.store8 (i32.add (local.get $r) (local.get $bi)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $bi)) (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; Phase 26.1/26.2: fail msg — if a try_or scope is active, set the
   ;; failure flag and return 0 (the caller's expected result type is i32
   ;; for everything in Wasm). Otherwise print + trap. The flag /
   ;; active-counter globals are declared at module level.
-  (func $__lang_fail (param $msg i32) (result i32)
+  (func $__lang_fail (param $msg8 i64) (result i64)
+    (local $msg i32)
+    (local.set $msg (i32.wrap_i64 (local.get $msg8)))
     (if (global.get $__lang_fail_active)
       (then
         (global.set $__lang_fail_flag (i32.const 1))
-        (return (i32.const 0))))
-    (call $puts (local.get $msg))
+        (return (i64.extend_i32_s (i32.const 0)))))
+    (call $puts_h (local.get $msg))
     (unreachable))
   ;; Phase 26.1: char_at s i — return pointer to a single-byte string
   ;; (preallocated 256-entry static char_table). Mirrors C/LLVM.
@@ -4754,34 +4896,50 @@ let runtime_helpers = {|
                         (i32.const 0))
             (local.set $k (i32.add (local.get $k) (i32.const 1)))
             (br $lp))))))
-  (func $__lang_char_at (param $s i32) (param $i i32) (result i32)
+  (func $__lang_char_at (param $s8 i64) (param $i8 i64) (result i64)
+    (local $s i32)
+    (local $i i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (call $__lang_char_at_setup)
-    (i32.add (global.get $__lang_char_table)
-             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 2))))
-  (func $__lang_is_digit (param $s i32) (result i32)
+    (i64.extend_i32_s (i32.add (global.get $__lang_char_table)
+             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 2)))))
+  (func $__lang_is_digit (param $s8 i64) (result i64)
     (local $c i32)
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $c (i32.load8_u (local.get $s)))
-    (i32.and (i32.ge_s (local.get $c) (i32.const 48))
-             (i32.le_s (local.get $c) (i32.const 57))))
-  (func $__lang_is_alpha (param $s i32) (result i32)
+    (i64.extend_i32_s (i32.and (i32.ge_s (local.get $c) (i32.const 48))
+             (i32.le_s (local.get $c) (i32.const 57)))))
+  (func $__lang_is_alpha (param $s8 i64) (result i64)
     (local $c i32)
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $c (i32.load8_u (local.get $s)))
-    (i32.or
+    (i64.extend_i32_s (i32.or
       (i32.and (i32.ge_s (local.get $c) (i32.const 97))
                (i32.le_s (local.get $c) (i32.const 122)))
       (i32.and (i32.ge_s (local.get $c) (i32.const 65))
-               (i32.le_s (local.get $c) (i32.const 90)))))
-  (func $__lang_is_space (param $s i32) (result i32)
+               (i32.le_s (local.get $c) (i32.const 90))))))
+  (func $__lang_is_space (param $s8 i64) (result i64)
     (local $c i32)
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $c (i32.load8_u (local.get $s)))
-    (i32.or
+    (i64.extend_i32_s (i32.or
       (i32.or (i32.eq (local.get $c) (i32.const 32))
               (i32.eq (local.get $c) (i32.const 9)))
       (i32.or (i32.eq (local.get $c) (i32.const 10))
-              (i32.eq (local.get $c) (i32.const 13)))))
+              (i32.eq (local.get $c) (i32.const 13))))))
   ;; Phase 26.1: substring s start end_ — region alloc + memcpy.
-  (func $__lang_substring (param $s i32) (param $start i32) (param $end_ i32) (result i32)
+  (func $__lang_substring (param $s8 i64) (param $start8 i64) (param $end_8 i64) (result i64)
     (local $len i32) (local $r i32) (local $i i32)
+    (local $s i32)
+    (local $start i32)
+    (local $end_ i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $start (i32.wrap_i64 (local.get $start8)))
+    (local.set $end_ (i32.wrap_i64 (local.get $end_8)))
     (local.set $len (i32.sub (local.get $end_) (local.get $start)))
     (if (i32.lt_s (local.get $len) (i32.const 0))
       (then (local.set $len (i32.const 0))))
@@ -4798,17 +4956,19 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; v0.1.60: int_of_str s msg — strict decimal parse
   ;; (WS* [+-]? DIGIT+ WS*); anything else calls $__lang_fail with the
   ;; interned msg (try_or-able), matching the interpreter instead of the
   ;; old atoi semantics that silently returned 0 / a partial prefix.
-  (func $__lang_int_of_str (param $s i32) (param $msg i32) (result i32)
-    (local $i i32) (local $sign i32) (local $acc i32) (local $c i32)
+  (func $__lang_int_of_str (param $s8 i64) (param $msg i64) (result i64)
+    (local $s i32)
+    (local $i i32) (local $sign i64) (local $acc i64) (local $c i32)
     (local $nd i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $i (i32.const 0))
-    (local.set $sign (i32.const 1))
-    (local.set $acc (i32.const 0))
+    (local.set $sign (i64.const 1))
+    (local.set $acc (i64.const 0))
     (local.set $nd (i32.const 0))
     (block $lead_done                       ;; skip leading whitespace
       (loop $lead
@@ -4824,7 +4984,7 @@ let runtime_helpers = {|
     (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))
     (if (i32.eq (local.get $c) (i32.const 45))  ;; '-'
       (then
-        (local.set $sign (i32.const -1))
+        (local.set $sign (i64.const -1))
         (local.set $i (i32.add (local.get $i) (i32.const 1))))
       (else
         (if (i32.eq (local.get $c) (i32.const 43))  ;; '+'
@@ -4835,9 +4995,9 @@ let runtime_helpers = {|
         (br_if $end (i32.or
           (i32.lt_s (local.get $c) (i32.const 48))
           (i32.gt_s (local.get $c) (i32.const 57))))
-        (local.set $acc (i32.add
-          (i32.mul (local.get $acc) (i32.const 10))
-          (i32.sub (local.get $c) (i32.const 48))))
+        (local.set $acc (i64.add
+          (i64.mul (local.get $acc) (i64.const 10))
+          (i64.extend_i32_s (i32.sub (local.get $c) (i32.const 48)))))
         (local.set $nd (i32.add (local.get $nd) (i32.const 1)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
@@ -4856,16 +5016,17 @@ let runtime_helpers = {|
           (i32.eqz (local.get $nd))          ;; no digits
           (i32.ne (local.get $c) (i32.const 0)))  ;; junk after
       (then
-        (call $__lang_fail (local.get $msg))
-        (drop)
-        (return (i32.const 0))))
-    (i32.mul (local.get $acc) (local.get $sign)))
+        (drop (call $__lang_fail (local.get $msg)))
+        (return (i64.const 0))))
+    (i64.mul (local.get $acc) (local.get $sign)))
   ;; Phase 26.1: str_unescape s — replace backslash-escape sequences
   ;; (\n, \t, \r, \\ , \", \/) with the actual byte. Region-allocated.
-  (func $__lang_str_unescape (param $s i32) (result i32)
+  (func $__lang_str_unescape (param $s8 i64) (result i64)
     (local $n i32) (local $r i32) (local $i i32) (local $j i32)
     (local $c i32) (local $ec i32)
-    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (local.set $j (i32.const 0))
@@ -4895,13 +5056,15 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; Phase 26.6: str_escape s — backslash-escape newline / tab / cr / backslash
   ;; / quote. show_str pipes through this so output matches interp. Worst-case
   ;; 2x byte expansion, region-allocated.
-  (func $__lang_str_escape (param $s i32) (result i32)
+  (func $__lang_str_escape (param $s8 i64) (result i64)
     (local $n i32) (local $r i32) (local $i i32) (local $j i32) (local $c i32) (local $ec i32)
-    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
     (local.set $j (i32.const 0))
@@ -4935,36 +5098,37 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
-    (local.get $r))|}
+    (i64.extend_i32_s (local.get $r)))|}
 
 (* Phase 26.5: list_str cell builders + str_split / str_join / str_count.
    Cells layout (Phase 26.0 boxed): {i32 tag, i32 payload_ptr}. For Cons,
    payload_ptr points to a 2-word tuple {str_ptr, list_str_ptr}. *)
 let list_str_runtime_wasm = {|
-  (func $__lang_list_str_nil (result i32)
+  (func $__lang_list_str_nil (result i64)
     (local $p i32)
     (local.set $p (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))
-    (i32.store offset=0 (local.get $p) (i32.const 0))
-    (local.get $p))
-  (func $__lang_list_str_cons (param $head i32) (param $tail i32) (result i32)
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))
+    (i64.store offset=0 (local.get $p) (i64.const 0))
+    (i64.extend_i32_u (local.get $p)))
+  (func $__lang_list_str_cons (param $head i64) (param $tail i64) (result i64)
     (local $p i32) (local $box i32)
-    ;; Tuple payload box: 8 bytes (str_ptr + list_str_ptr).
+    ;; Tuple payload box: 16 bytes (str value + list value, 8-byte slots).
     (local.set $box (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $box) (i32.const 8)))
-    (i32.store offset=0 (local.get $box) (local.get $head))
-    (i32.store offset=4 (local.get $box) (local.get $tail))
-    ;; Cons cell: 8 bytes (tag=1 + payload_ptr).
+    (global.set $__lang_bump (i32.add (local.get $box) (i32.const 16)))
+    (i64.store offset=0 (local.get $box) (local.get $head))
+    (i64.store offset=8 (local.get $box) (local.get $tail))
+    ;; Cons cell: 16 bytes (tag=1 + payload value).
     (local.set $p (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))
-    (i32.store offset=0 (local.get $p) (i32.const 1))
-    (i32.store offset=4 (local.get $p) (local.get $box))
-    (local.get $p))
-  ;; v0.1.38 (Unicode): codepoint view. Walk lead bytes; build the char
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))
+    (i64.store offset=0 (local.get $p) (i64.const 1))
+    (i64.store offset=8 (local.get $p) (i64.extend_i32_u (local.get $box)))
+    (i64.extend_i32_u (local.get $p)))
   ;; list back-to-front by scanning for sequence starts from the end.
-  (func $__lang_utf8_len (param $s i32) (result i32)
+  (func $__lang_utf8_len (param $s8 i64) (result i64)
     (local $n i32) (local $i i32) (local $c i32) (local $b i32) (local $l i32)
-    (local.set $n (call $__lang_strlen (local.get $s)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $i (i32.const 0))
     (local.set $c (i32.const 0))
     (block $end
@@ -4986,12 +5150,14 @@ let list_str_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (local.get $l)))
         (local.set $c (i32.add (local.get $c) (i32.const 1)))
         (br $lp)))
-    (local.get $c))
-  (func $__lang_utf8_chars (param $s i32) (result i32)
+    (i64.extend_i32_s (local.get $c)))
+  (func $__lang_utf8_chars (param $s8 i64) (result i64)
     (local $n i32) (local $end i32) (local $st i32) (local $l i32)
     (local $tok i32) (local $j i32) (local $acc i32)
-    (local.set $n (call $__lang_strlen (local.get $s)))
-    (local.set $acc (call $__lang_list_str_nil))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $acc (i32.wrap_i64 (call $__lang_list_str_nil)))
     (local.set $end (local.get $n))
     (block $done
       (loop $outer
@@ -5019,23 +5185,27 @@ let list_str_runtime_wasm = {|
             (local.set $j (i32.add (local.get $j) (i32.const 1)))
             (br $clp)))
         (i32.store8 (i32.add (local.get $tok) (local.get $l)) (i32.const 0))
-        (local.set $acc (call $__lang_list_str_cons (local.get $tok) (local.get $acc)))
+        (local.set $acc (i32.wrap_i64 (call $__lang_list_str_cons (i64.extend_i32_s (local.get $tok)) (i64.extend_i32_s (local.get $acc)))))
         (local.set $end (local.get $st))
         (br $outer)))
-    (local.get $acc))
+    (i64.extend_i32_s (local.get $acc)))
   ;; str_split s delim — 2-pass: count tokens, then build list back-to-front.
-  (func $__lang_str_split (param $s i32) (param $delim i32) (result i32)
+  (func $__lang_str_split (param $s8 i64) (param $delim8 i64) (result i64)
     (local $sl i32) (local $dl i32) (local $i i32) (local $cnt i32)
     (local $starts i32) (local $lens i32) (local $tstart i32) (local $tidx i32)
     (local $tlen i32) (local $tk i32) (local $j i32) (local $match i32)
     (local $nil i32) (local $tail i32) (local $bi i32) (local $b_off i32)
-    (local.set $sl (call $__lang_strlen (local.get $s)))
-    (local.set $dl (call $__lang_strlen (local.get $delim)))
+    (local $s i32)
+    (local $delim i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $delim (i32.wrap_i64 (local.get $delim8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $dl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $delim)))))
     ;; Empty delim: return Cons(s, Nil) (matches interp / C / LLVM).
     (if (i32.eqz (local.get $dl))
       (then
-        (local.set $nil (call $__lang_list_str_nil))
-        (return (call $__lang_list_str_cons (local.get $s) (local.get $nil)))))
+        (local.set $nil (i32.wrap_i64 (call $__lang_list_str_nil)))
+        (return (call $__lang_list_str_cons (i64.extend_i32_s (local.get $s)) (i64.extend_i32_s (local.get $nil))))))
     ;; Pass 1: count delim occurrences (non-overlapping).
     (local.set $i (i32.const 0))
     (local.set $cnt (i32.const 0))
@@ -5116,7 +5286,7 @@ let list_str_runtime_wasm = {|
       (i32.add (local.get $lens) (i32.mul (local.get $tidx) (i32.const 4)))
       (i32.sub (local.get $sl) (local.get $tstart)))
     ;; Build Cons list back-to-front from index $cnt down to 0.
-    (local.set $nil (call $__lang_list_str_nil))
+    (local.set $nil (i32.wrap_i64 (call $__lang_list_str_nil)))
     (local.set $tail (local.get $nil))
     (local.set $bi (local.get $cnt))
     (block $end_b
@@ -5139,33 +5309,37 @@ let list_str_runtime_wasm = {|
             (local.set $j (i32.add (local.get $j) (i32.const 1)))
             (br $lp_cp)))
         (i32.store8 (i32.add (local.get $tk) (local.get $tlen)) (i32.const 0))
-        (local.set $tail (call $__lang_list_str_cons (local.get $tk) (local.get $tail)))
+        (local.set $tail (i32.wrap_i64 (call $__lang_list_str_cons (i64.extend_i32_s (local.get $tk)) (i64.extend_i32_s (local.get $tail)))))
         (br_if $end_b (i32.eqz (local.get $bi)))
         (local.set $bi (i32.sub (local.get $bi) (i32.const 1)))
         (br $lp_b)))
-    (local.get $tail))
+    (i64.extend_i32_s (local.get $tail)))
   ;; str_join sep xs — walk list_str, concat with sep.
-  (func $__lang_str_join (param $sep i32) (param $xs i32) (result i32)
+  (func $__lang_str_join (param $sep8 i64) (param $xs8 i64) (result i64)
     (local $sl i32) (local $cur i32) (local $box i32) (local $head i32)
     (local $total i32) (local $first i32) (local $r i32) (local $pos i32)
     (local $hl i32)
-    (local.set $sl (call $__lang_strlen (local.get $sep)))
+    (local $sep i32)
+    (local $xs i32)
+    (local.set $sep (i32.wrap_i64 (local.get $sep8)))
+    (local.set $xs (i32.wrap_i64 (local.get $xs8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $sep)))))
     ;; Pass 1: total length.
     (local.set $cur (local.get $xs))
     (local.set $total (i32.const 0))
     (local.set $first (i32.const 1))
     (block $end_len
       (loop $lp_len
-        (br_if $end_len (i32.eqz (i32.load offset=0 (local.get $cur))))
-        (local.set $box (i32.load offset=4 (local.get $cur)))
-        (local.set $head (i32.load offset=0 (local.get $box)))
+        (br_if $end_len (i64.eqz (i64.load offset=0 (local.get $cur))))
+        (local.set $box (i32.wrap_i64 (i64.load offset=8 (local.get $cur))))
+        (local.set $head (i32.wrap_i64 (i64.load offset=0 (local.get $box))))
         (if (i32.eqz (local.get $first))
           (then (local.set $total (i32.add (local.get $total) (local.get $sl)))))
         (local.set $total
           (i32.add (local.get $total)
-                   (call $__lang_strlen (local.get $head))))
+                   (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $head))))))
         (local.set $first (i32.const 0))
-        (local.set $cur (i32.load offset=4 (local.get $box)))
+        (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $box))))
         (br $lp_len)))
     ;; Allocate result + null terminator.
     (local.set $r (global.get $__lang_bump))
@@ -5177,9 +5351,9 @@ let list_str_runtime_wasm = {|
     (local.set $first (i32.const 1))
     (block $end_w
       (loop $lp_w
-        (br_if $end_w (i32.eqz (i32.load offset=0 (local.get $cur))))
-        (local.set $box (i32.load offset=4 (local.get $cur)))
-        (local.set $head (i32.load offset=0 (local.get $box)))
+        (br_if $end_w (i64.eqz (i64.load offset=0 (local.get $cur))))
+        (local.set $box (i32.wrap_i64 (i64.load offset=8 (local.get $cur))))
+        (local.set $head (i32.wrap_i64 (i64.load offset=0 (local.get $box))))
         (if (i32.eqz (local.get $first))
           (then
             ;; memcpy sep.
@@ -5194,7 +5368,7 @@ let list_str_runtime_wasm = {|
                 (br $lp_cs)))
             (local.set $pos (i32.add (local.get $pos) (local.get $sl)))))
         ;; memcpy head.
-        (local.set $hl (call $__lang_strlen (local.get $head)))
+        (local.set $hl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $head)))))
         (local.set $first (i32.const 0))
         (block $end_ch
           (local.set $first (i32.const 0))
@@ -5210,17 +5384,21 @@ let list_str_runtime_wasm = {|
             (local.set $hl (i32.sub (local.get $hl) (i32.const 1)))
             (br $lp_ch)))
         (local.set $first (i32.const 0))
-        (local.set $cur (i32.load offset=4 (local.get $box)))
+        (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $box))))
         (br $lp_w)))
     (i32.store8 (i32.add (local.get $r) (local.get $total)) (i32.const 0))
-    (local.get $r))
+    (i64.extend_i32_s (local.get $r)))
   ;; str_count s n — non-overlapping count of n in s.
-  (func $__lang_str_count (param $s i32) (param $n i32) (result i32)
+  (func $__lang_str_count (param $s8 i64) (param $n8 i64) (result i64)
     (local $sl i32) (local $nl i32) (local $i i32) (local $j i32)
     (local $acc i32) (local $match i32)
-    (local.set $sl (call $__lang_strlen (local.get $s)))
-    (local.set $nl (call $__lang_strlen (local.get $n)))
-    (if (i32.eqz (local.get $nl)) (then (return (i32.const 0))))
+    (local $s i32)
+    (local $n i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (local.get $n8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $nl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $n)))))
+    (if (i32.eqz (local.get $nl)) (then (return (i64.extend_i32_s (i32.const 0)))))
     (local.set $i (i32.const 0))
     (local.set $acc (i32.const 0))
     (block $end
@@ -5247,7 +5425,7 @@ let list_str_runtime_wasm = {|
           (else
             (local.set $i (i32.add (local.get $i) (i32.const 1)))))
         (br $lp)))
-    (local.get $acc))|}
+    (i64.extend_i32_s (local.get $acc)))|}
 
 (* Phase 15.4: Vec[R, T] runtime — all element types share one
    implementation because every Mere value lowers to a 4-byte i32 in
@@ -5257,19 +5435,21 @@ let list_str_runtime_wasm = {|
    Push reallocates by appending a fresh buffer at the bump pointer
    (arena semantics — old buffers leak until process exit). *)
 let vec_runtime = {|
-  (func $mere_vec_new (result i32)
+  (func $mere_vec_new (result i64)
     (local $v i32) (local $buf i32)
     (local.set $v (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $v) (i32.const 16)))
     (local.set $buf (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 32)))
     (i32.store offset=0 (local.get $v) (local.get $buf))
     (i32.store offset=4 (local.get $v) (i32.const 0))
     (i32.store offset=8 (local.get $v) (i32.const 4))
-    (local.get $v))
-  (func $mere_vec_push (param $v i32) (param $x i32) (result i32)
+    (i64.extend_i32_s (local.get $v)))
+  (func $mere_vec_push (param $v8 i64) (param $x i64) (result i64)
     (local $len i32) (local $cap i32) (local $buf i32)
     (local $new_buf i32) (local $i i32)
+    (local $v i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $cap (i32.load offset=8 (local.get $v)))
     (if (i32.eq (local.get $len) (local.get $cap))
@@ -5278,150 +5458,169 @@ let vec_runtime = {|
         (local.set $new_buf (global.get $__lang_bump))
         (global.set $__lang_bump
           (i32.add (local.get $new_buf)
-                   (i32.mul (local.get $cap) (i32.const 4))))
+                   (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $buf (i32.load offset=0 (local.get $v)))
         (local.set $i (i32.const 0))
         (block $copy_end
           (loop $copy_lp
             (br_if $copy_end (i32.eq (local.get $i) (local.get $len)))
-            (i32.store
+            (i64.store
               (i32.add (local.get $new_buf)
-                       (i32.mul (local.get $i) (i32.const 4)))
-              (i32.load
+                       (i32.mul (local.get $i) (i32.const 8)))
+              (i64.load
                 (i32.add (local.get $buf)
-                         (i32.mul (local.get $i) (i32.const 4)))))
+                         (i32.mul (local.get $i) (i32.const 8)))))
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (br $copy_lp)))
         (i32.store offset=0 (local.get $v) (local.get $new_buf))
         (i32.store offset=8 (local.get $v) (local.get $cap))))
     (local.set $buf (i32.load offset=0 (local.get $v)))
-    (i32.store
+    (i64.store
       (i32.add (local.get $buf)
-               (i32.mul (local.get $len) (i32.const 4)))
+               (i32.mul (local.get $len) (i32.const 8)))
       (local.get $x))
     (i32.store offset=4 (local.get $v) (i32.add (local.get $len) (i32.const 1)))
-    (i32.const 0))
-  (func $mere_vec_get (param $v i32) (param $i i32) (result i32)
+    (i64.extend_i32_s (i32.const 0)))
+  (func $mere_vec_get (param $v8 i64) (param $i8 i64) (result i64)
     (local $len i32) (local $buf i32)
+    (local $v i32)
+    (local $i i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
                 (i32.ge_s (local.get $i) (local.get $len)))
       (then (unreachable)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
-    (i32.load
+    (i64.load
       (i32.add (local.get $buf)
-               (i32.mul (local.get $i) (i32.const 4)))))
-  (func $mere_vec_len (param $v i32) (result i32)
-    (i32.load offset=4 (local.get $v)))
-  (func $mere_vec_set (param $v i32) (param $i i32) (param $x i32) (result i32)
+               (i32.mul (local.get $i) (i32.const 8)))))
+  (func $mere_vec_len (param $v8 i64) (result i64)
+    (local $v i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (i64.extend_i32_s (i32.load offset=4 (local.get $v))))
+  (func $mere_vec_set (param $v8 i64) (param $i8 i64) (param $x i64) (result i64)
     (local $len i32) (local $buf i32)
+    (local $v i32)
+    (local $i i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
                 (i32.ge_s (local.get $i) (local.get $len)))
       (then (unreachable)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
-    (i32.store
-      (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))
+    (i64.store
+      (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 8)))
       (local.get $x))
-    (i32.const 0))
+    (i64.extend_i32_s (i32.const 0)))
   ;; Phase 15.7: OwnedVec helpers — in Wasm all values are i32 and the
   ;; bump allocator is also shared, so the runtime representations of Vec
   ;; and OwnedVec are the same. owned_vec_* aliases as a thin wrapper to
   ;; $mere_vec_*. Deep copy (vec_to_owned / owned_vec_to_vec) uses $mere_vec_clone.
-  (func $mere_vec_clone (param $src i32) (result i32)
+  (func $mere_vec_clone (param $src8 i64) (result i64)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
-    (local.set $new (call $mere_vec_new))
+    (local $src i32)
+    (local.set $src (i32.wrap_i64 (local.get $src8)))
+    (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
     (local.set $len (i32.load offset=4 (local.get $src)))
     (local.set $buf (i32.load offset=0 (local.get $src)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
-        (drop (call $mere_vec_push
-                 (local.get $new)
-                 (i32.load (i32.add (local.get $buf)
-                                    (i32.mul (local.get $i) (i32.const 4))))))
+        (drop (i32.wrap_i64 (call $mere_vec_push (i64.extend_i32_s (local.get $new)) (i64.load (i32.add (local.get $buf)
+                                    (i32.mul (local.get $i) (i32.const 8)))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (local.get $new))
+    (i64.extend_i32_s (local.get $new)))
   ;; Phase 19.3: vec_reverse — in-place swap, returns 0 (unit).
-  (func $mere_vec_reverse (param $v i32) (result i32)
-    (local $lo i32) (local $hi i32) (local $buf i32) (local $tmp i32)
+  (func $mere_vec_reverse (param $v8 i64) (result i64)
+    (local $lo i32) (local $hi i32) (local $buf i32) (local $tmp i64)
+    (local $v i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $lo (i32.const 0))
     (local.set $hi (i32.sub (i32.load offset=4 (local.get $v)) (i32.const 1)))
     (block $end
       (loop $lp
         (br_if $end (i32.ge_s (local.get $lo) (local.get $hi)))
-        (local.set $tmp (i32.load
-          (i32.add (local.get $buf) (i32.mul (local.get $lo) (i32.const 4)))))
-        (i32.store
-          (i32.add (local.get $buf) (i32.mul (local.get $lo) (i32.const 4)))
-          (i32.load (i32.add (local.get $buf)
-                             (i32.mul (local.get $hi) (i32.const 4)))))
-        (i32.store
-          (i32.add (local.get $buf) (i32.mul (local.get $hi) (i32.const 4)))
+        (local.set $tmp (i64.load
+          (i32.add (local.get $buf) (i32.mul (local.get $lo) (i32.const 8)))))
+        (i64.store
+          (i32.add (local.get $buf) (i32.mul (local.get $lo) (i32.const 8)))
+          (i64.load (i32.add (local.get $buf)
+                             (i32.mul (local.get $hi) (i32.const 8)))))
+        (i64.store
+          (i32.add (local.get $buf) (i32.mul (local.get $hi) (i32.const 8)))
           (local.get $tmp))
         (local.set $lo (i32.add (local.get $lo) (i32.const 1)))
         (local.set $hi (i32.sub (local.get $hi) (i32.const 1)))
         (br $lp)))
-    (i32.const 0))
+    (i64.extend_i32_s (i32.const 0)))
   ;; Phase 19.3: vec_sort — in-place insertion sort.
   ;; cmp: closure_T_(closure_T_int). outer_fn(env, a) → inner closure_T_int,
   ;; inner_fn(inner.env, b) → i32 (negative/0/positive).
-  (func $mere_vec_sort (param $v i32) (param $cmp i32) (result i32)
+  (func $mere_vec_sort (param $v8 i64) (param $cmp i64) (result i64)
     (local $i i32) (local $j i32) (local $len i32) (local $buf i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $key i32) (local $j_val i32)
+    (local $key i64) (local $j_val i64)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32)
-    (local $cmp_res i32)
+    (local $cmp_res i64)
+    (local $v i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
-    (local.set $outer_env (i32.load offset=0 (local.get $cmp)))
-    (local.set $outer_fn  (i32.load offset=4 (local.get $cmp)))
+    (local.set $outer_env (i32.load offset=0 (i32.wrap_i64 (local.get $cmp))))
+    (local.set $outer_fn  (i32.load offset=4 (i32.wrap_i64 (local.get $cmp))))
     (local.set $i (i32.const 1))
     (block $end_outer
       (loop $lp_outer
         (br_if $end_outer (i32.ge_s (local.get $i) (local.get $len)))
-        (local.set $key (i32.load
-          (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 4)))))
+        (local.set $key (i64.load
+          (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 8)))))
         (local.set $j (i32.sub (local.get $i) (i32.const 1)))
         (block $end_inner
           (loop $lp_inner
             (br_if $end_inner (i32.lt_s (local.get $j) (i32.const 0)))
-            (local.set $j_val (i32.load
-              (i32.add (local.get $buf) (i32.mul (local.get $j) (i32.const 4)))))
-            (local.set $inner_cl
+            (local.set $j_val (i64.load
+              (i32.add (local.get $buf) (i32.mul (local.get $j) (i32.const 8)))))
+            (local.set $inner_cl (i32.wrap_i64
               (call_indirect (type $cl)
-                (local.get $outer_env) (local.get $j_val) (local.get $outer_fn)))
+                (i64.extend_i32_u (local.get $outer_env)) (local.get $j_val)
+                (local.get $outer_fn))))
             (local.set $inner_env (i32.load offset=0 (local.get $inner_cl)))
             (local.set $inner_fn  (i32.load offset=4 (local.get $inner_cl)))
             (local.set $cmp_res
               (call_indirect (type $cl)
-                (local.get $inner_env) (local.get $key) (local.get $inner_fn)))
-            (br_if $end_inner (i32.le_s (local.get $cmp_res) (i32.const 0)))
+                (i64.extend_i32_u (local.get $inner_env)) (local.get $key)
+                (local.get $inner_fn)))
+            (br_if $end_inner (i64.le_s (local.get $cmp_res) (i64.const 0)))
             ;; shift: data[j+1] = data[j]
-            (i32.store
+            (i64.store
               (i32.add (local.get $buf)
                        (i32.mul (i32.add (local.get $j) (i32.const 1))
-                                (i32.const 4)))
+                                (i32.const 8)))
               (local.get $j_val))
             (local.set $j (i32.sub (local.get $j) (i32.const 1)))
             (br $lp_inner)))
         ;; place key at j+1
-        (i32.store
+        (i64.store
           (i32.add (local.get $buf)
                    (i32.mul (i32.add (local.get $j) (i32.const 1))
-                            (i32.const 4)))
+                            (i32.const 8)))
           (local.get $key))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_outer)))
-    (i32.const 0))
-  ;; Phase 19.3: vec_concat — new Vec, copy a then b.
-  (func $mere_vec_concat (param $a i32) (param $b i32) (result i32)
+    (i64.const 0))
+  (func $mere_vec_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $new i32) (local $i i32) (local $alen i32) (local $blen i32)
     (local $abuf i32) (local $bbuf i32)
-    (local.set $new (call $mere_vec_new))
+    (local $a i32)
+    (local $b i32)
+    (local.set $a (i32.wrap_i64 (local.get $a8)))
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
     (local.set $alen (i32.load offset=4 (local.get $a)))
     (local.set $blen (i32.load offset=4 (local.get $b)))
     (local.set $abuf (i32.load offset=0 (local.get $a)))
@@ -5430,29 +5629,29 @@ let vec_runtime = {|
     (block $end_a
       (loop $lp_a
         (br_if $end_a (i32.eq (local.get $i) (local.get $alen)))
-        (drop (call $mere_vec_push (local.get $new)
-                (i32.load (i32.add (local.get $abuf)
-                                   (i32.mul (local.get $i) (i32.const 4))))))
+        (drop (i32.wrap_i64 (call $mere_vec_push (i64.extend_i32_s (local.get $new)) (i64.extend_i32_s (i32.load (i32.add (local.get $abuf)
+                                   (i32.mul (local.get $i) (i32.const 8))))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_a)))
     (local.set $i (i32.const 0))
     (block $end_b
       (loop $lp_b
         (br_if $end_b (i32.eq (local.get $i) (local.get $blen)))
-        (drop (call $mere_vec_push (local.get $new)
-                (i32.load (i32.add (local.get $bbuf)
-                                   (i32.mul (local.get $i) (i32.const 4))))))
+        (drop (i32.wrap_i64 (call $mere_vec_push (i64.extend_i32_s (local.get $new)) (i64.extend_i32_s (i32.load (i32.add (local.get $bbuf)
+                                   (i32.mul (local.get $i) (i32.const 8))))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp_b)))
-    (local.get $new))|}
+    (i64.extend_i32_s (local.get $new)))|}
 
 (* Phase 15.5: vec_iter / vec_fold helpers. References (type $cl) and
    uses call_indirect, so the module must declare a funcref table when
    this block is emitted (even if no closure entries exist). *)
 let vec_higher_order_runtime = {|
-  (func $mere_vec_iter (param $v i32) (param $cl i32) (result i32)
+  (func $mere_vec_iter (param $v8 i64) (param $cl8 i64) (result i64)
     (local $i i32) (local $len i32) (local $buf i32)
-    (local $env i32) (local $fn i32)
+    (local $env i32) (local $fn i32) (local $v i32) (local $cl i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $env (i32.load offset=0 (local.get $cl)))
@@ -5463,17 +5662,19 @@ let vec_higher_order_runtime = {|
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
         (drop
           (call_indirect (type $cl)
-            (local.get $env)
-            (i32.load (i32.add (local.get $buf)
-                               (i32.mul (local.get $i) (i32.const 4))))
+            (i64.extend_i32_u (local.get $env))
+            (i64.load (i32.add (local.get $buf)
+                               (i32.mul (local.get $i) (i32.const 8))))
             (local.get $fn)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (i32.const 0))
-  (func $mere_vec_fold (param $v i32) (param $init_acc i32) (param $outer_cl i32) (result i32)
-    (local $i i32) (local $len i32) (local $buf i32) (local $acc i32)
-    (local $outer_env i32) (local $outer_fn i32)
-    (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32) (local $elem i32)
+    (i64.const 0))
+  (func $mere_vec_fold (param $v8 i64) (param $init_acc i64) (param $outer_cl8 i64) (result i64)
+    (local $i i32) (local $len i32) (local $buf i32) (local $acc i64)
+    (local $outer_env i32) (local $outer_fn i32) (local $v i32) (local $outer_cl i32)
+    (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32) (local $elem i64)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $outer_cl (i32.wrap_i64 (local.get $outer_cl8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $outer_env (i32.load offset=0 (local.get $outer_cl)))
@@ -5484,29 +5685,31 @@ let vec_higher_order_runtime = {|
       (loop $lp
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
         (local.set $elem
-          (i32.load (i32.add (local.get $buf)
-                             (i32.mul (local.get $i) (i32.const 4)))))
+          (i64.load (i32.add (local.get $buf)
+                             (i32.mul (local.get $i) (i32.const 8)))))
         ;; inner = outer(env, acc)
-        (local.set $inner_cl
+        (local.set $inner_cl (i32.wrap_i64
           (call_indirect (type $cl)
-            (local.get $outer_env)
+            (i64.extend_i32_u (local.get $outer_env))
             (local.get $acc)
-            (local.get $outer_fn)))
+            (local.get $outer_fn))))
         (local.set $inner_env (i32.load offset=0 (local.get $inner_cl)))
         (local.set $inner_fn (i32.load offset=4 (local.get $inner_cl)))
         ;; acc = inner(inner_env, elem)
         (local.set $acc
           (call_indirect (type $cl)
-            (local.get $inner_env)
+            (i64.extend_i32_u (local.get $inner_env))
             (local.get $elem)
             (local.get $inner_fn)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (local.get $acc))
-  (func $mere_vec_map (param $v i32) (param $cl i32) (result i32)
+  (func $mere_vec_map (param $v8 i64) (param $cl8 i64) (result i64)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
-    (local $env i32) (local $fn i32) (local $mapped i32)
-    (local.set $new (call $mere_vec_new))
+    (local $env i32) (local $fn i32) (local $mapped i64) (local $v i32) (local $cl i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $cl (i32.wrap_i64 (local.get $cl8)))
+    (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $env (i32.load offset=0 (local.get $cl)))
@@ -5517,18 +5720,21 @@ let vec_higher_order_runtime = {|
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
         (local.set $mapped
           (call_indirect (type $cl)
-            (local.get $env)
-            (i32.load (i32.add (local.get $buf)
-                               (i32.mul (local.get $i) (i32.const 4))))
+            (i64.extend_i32_u (local.get $env))
+            (i64.load (i32.add (local.get $buf)
+                               (i32.mul (local.get $i) (i32.const 8))))
             (local.get $fn)))
-        (drop (call $mere_vec_push (local.get $new) (local.get $mapped)))
+        (drop (call $mere_vec_push (i64.extend_i32_u (local.get $new)) (local.get $mapped)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (local.get $new))
-  (func $mere_vec_filter (param $v i32) (param $cl i32) (result i32)
+    (i64.extend_i32_u (local.get $new)))
+  (func $mere_vec_filter (param $v8 i64) (param $cl8 i64) (result i64)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
-    (local $env i32) (local $fn i32) (local $elem i32) (local $keep i32)
-    (local.set $new (call $mere_vec_new))
+    (local $env i32) (local $fn i32) (local $elem i64) (local $keep i64)
+    (local $v i32) (local $cl i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $cl (i32.wrap_i64 (local.get $cl8)))
+    (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $env (i32.load offset=0 (local.get $cl)))
@@ -5538,40 +5744,48 @@ let vec_higher_order_runtime = {|
       (loop $lp
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
         (local.set $elem
-          (i32.load (i32.add (local.get $buf)
-                             (i32.mul (local.get $i) (i32.const 4)))))
+          (i64.load (i32.add (local.get $buf)
+                             (i32.mul (local.get $i) (i32.const 8)))))
         (local.set $keep
           (call_indirect (type $cl)
-            (local.get $env)
+            (i64.extend_i32_u (local.get $env))
             (local.get $elem)
             (local.get $fn)))
-        (if (local.get $keep)
+        (if (i32.wrap_i64 (local.get $keep))
           (then
-            (drop (call $mere_vec_push (local.get $new) (local.get $elem)))))
+            (drop (call $mere_vec_push (i64.extend_i32_u (local.get $new)) (local.get $elem)))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (local.get $new))|}
+    (i64.extend_i32_u (local.get $new)))|}
 
 (* bytes runtime. A bytes value is an i32 pointer to
    [i32 len][bytes...] in linear memory (fits the uniform i32 value model like
    str). bytes_alloc aligns the bump to 4 so the len header is aligned. *)
 let bytes_runtime_wasm = {|
-  (func $__lang_bytes_alloc (param $len i32) (result i32)
+  (func $__lang_bytes_alloc (param $len8 i64) (result i64)
     (local $b i32)
+    (local $len i32)
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
     (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 3)) (i32.const -4)))
     (local.set $b (global.get $__lang_bump))
     (i32.store (local.get $b) (local.get $len))
     (global.set $__lang_bump (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $len)))
-    (local.get $b))
-  (func $__lang_bytes_get (param $b i32) (param $i i32) (result i32)
+    (i64.extend_i32_s (local.get $b)))
+  (func $__lang_bytes_get (param $b8 i64) (param $i8 i64) (result i64)
+    (local $b i32)
+    (local $i i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
                 (i32.ge_s (local.get $i) (i32.load (local.get $b))))
       (then (unreachable)))
-    (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
-  (func $__lang_bytes_of_str (param $s i32) (result i32)
+    (i64.extend_i32_s (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i)))))
+  (func $__lang_bytes_of_str (param $s8 i64) (result i64)
     (local $n i32) (local $b i32) (local $i i32)
-    (local.set $n (call $__lang_strlen (local.get $s)))
-    (local.set $b (call $__lang_bytes_alloc (local.get $n)))
+    (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $n)))))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
@@ -5579,9 +5793,11 @@ let bytes_runtime_wasm = {|
                   (i32.load8_u (i32.add (local.get $s) (local.get $i))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (local.get $b))
-  (func $__lang_str_of_bytes (param $b i32) (result i32)
+    (i64.extend_i32_s (local.get $b)))
+  (func $__lang_str_of_bytes (param $b8 i64) (result i64)
     (local $n i32) (local $r i32) (local $i i32)
+    (local $b i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
@@ -5593,13 +5809,17 @@ let bytes_runtime_wasm = {|
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (local.get $n)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $n)) (i32.const 1)))
-    (local.get $r))
-  (func $__lang_hexchar (param $d i32) (result i32)
-    (if (result i32) (i32.lt_s (local.get $d) (i32.const 10))
+    (i64.extend_i32_s (local.get $r)))
+  (func $__lang_hexchar (param $d8 i64) (result i64)
+    (local $d i32)
+    (local.set $d (i32.wrap_i64 (local.get $d8)))
+    (i64.extend_i32_s (if (result i32) (i32.lt_s (local.get $d) (i32.const 10))
       (then (i32.add (local.get $d) (i32.const 48)))
-      (else (i32.add (local.get $d) (i32.const 87)))))
-  (func $__lang_hex_of_bytes (param $b i32) (result i32)
+      (else (i32.add (local.get $d) (i32.const 87))))))
+  (func $__lang_hex_of_bytes (param $b8 i64) (result i64)
     (local $n i32) (local $r i32) (local $i i32) (local $byte i32)
+    (local $b i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
     (local.set $r (global.get $__lang_bump))
     (local.set $i (i32.const 0))
@@ -5607,39 +5827,49 @@ let bytes_runtime_wasm = {|
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
       (local.set $byte (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
       (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $i) (i32.const 2)))
-                  (call $__lang_hexchar (i32.shr_u (local.get $byte) (i32.const 4))))
+                  (i32.wrap_i64 (call $__lang_hexchar (i64.extend_i32_s (i32.shr_u (local.get $byte) (i32.const 4))))))
       (i32.store8 (i32.add (i32.add (local.get $r) (i32.mul (local.get $i) (i32.const 2))) (i32.const 1))
-                  (call $__lang_hexchar (i32.and (local.get $byte) (i32.const 15))))
+                  (i32.wrap_i64 (call $__lang_hexchar (i64.extend_i32_s (i32.and (local.get $byte) (i32.const 15))))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 1)))
-    (local.get $r))
-  (func $__lang_hexval (param $c i32) (result i32)
-    (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 48)) (i32.le_s (local.get $c) (i32.const 57)))
+    (i64.extend_i32_s (local.get $r)))
+  (func $__lang_hexval (param $c8 i64) (result i64)
+    (local $c i32)
+    (local.set $c (i32.wrap_i64 (local.get $c8)))
+    (i64.extend_i32_s (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 48)) (i32.le_s (local.get $c) (i32.const 57)))
       (then (i32.sub (local.get $c) (i32.const 48)))
       (else (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 97)) (i32.le_s (local.get $c) (i32.const 102)))
         (then (i32.sub (local.get $c) (i32.const 87)))
         (else (if (result i32) (i32.and (i32.ge_s (local.get $c) (i32.const 65)) (i32.le_s (local.get $c) (i32.const 70)))
           (then (i32.sub (local.get $c) (i32.const 55)))
-          (else (unreachable))))))))
-  (func $__lang_bytes_of_hex (param $h i32) (result i32)
+          (else (unreachable)))))))))
+  (func $__lang_bytes_of_hex (param $h8 i64) (result i64)
     (local $half i32) (local $b i32) (local $i i32)
-    (local.set $half (i32.div_u (call $__lang_strlen (local.get $h)) (i32.const 2)))
-    (local.set $b (call $__lang_bytes_alloc (local.get $half)))
+    (local $h i32)
+    (local.set $h (i32.wrap_i64 (local.get $h8)))
+    (local.set $half (i32.div_u (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $h)))) (i32.const 2)))
+    (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $half)))))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $half)))
       (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))
         (i32.add
-          (i32.mul (call $__lang_hexval (i32.load8_u (i32.add (local.get $h) (i32.mul (local.get $i) (i32.const 2))))) (i32.const 16))
-          (call $__lang_hexval (i32.load8_u (i32.add (local.get $h) (i32.add (i32.mul (local.get $i) (i32.const 2)) (i32.const 1)))))))
+          (i32.mul (i32.wrap_i64 (call $__lang_hexval (i64.extend_i32_s (i32.load8_u (i32.add (local.get $h) (i32.mul (local.get $i) (i32.const 2))))))) (i32.const 16))
+          (i32.wrap_i64 (call $__lang_hexval (i64.extend_i32_s (i32.load8_u (i32.add (local.get $h) (i32.add (i32.mul (local.get $i) (i32.const 2)) (i32.const 1)))))))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (local.get $b))
-  (func $__lang_bytes_slice (param $b i32) (param $start i32) (param $len i32) (result i32)
+    (i64.extend_i32_s (local.get $b)))
+  (func $__lang_bytes_slice (param $b8 i64) (param $start8 i64) (param $len8 i64) (result i64)
     (local $o i32) (local $i i32)
-    (local.set $o (call $__lang_bytes_alloc (local.get $len)))
+    (local $b i32)
+    (local $start i32)
+    (local $len i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (local.set $start (i32.wrap_i64 (local.get $start8)))
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
+    (local.set $o (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $len)))))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $len)))
@@ -5647,12 +5877,16 @@ let bytes_runtime_wasm = {|
                   (i32.load8_u (i32.add (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $start)) (local.get $i))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (local.get $o))
-  (func $__lang_bytes_concat (param $a i32) (param $b i32) (result i32)
+    (i64.extend_i32_s (local.get $o)))
+  (func $__lang_bytes_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $alen i32) (local $blen i32) (local $o i32) (local $i i32)
+    (local $a i32)
+    (local $b i32)
+    (local.set $a (i32.wrap_i64 (local.get $a8)))
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $alen (i32.load (local.get $a)))
     (local.set $blen (i32.load (local.get $b)))
-    (local.set $o (call $__lang_bytes_alloc (i32.add (local.get $alen) (local.get $blen))))
+    (local.set $o (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (i32.add (local.get $alen) (local.get $blen))))))
     (local.set $i (i32.const 0))
     (block $ea (loop $la
       (br_if $ea (i32.eq (local.get $i) (local.get $alen)))
@@ -5667,42 +5901,43 @@ let bytes_runtime_wasm = {|
                   (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lb)))
-    (local.get $o))|}
+    (i64.extend_i32_s (local.get $o)))|}
 
 (* bytes <-> Vec[int] bridge. Wasm vecs are untyped (single $mere_vec_*
    runtime, global bump — no region arg). Wasm allows forward refs, so calling
    $mere_vec_new / _push / _get / _len by name needs no ordering. *)
 let bytes_vec_bridge_runtime_wasm = {|
-  (func $__lang_bytes_of_vec (param $v i32) (result i32)
+  (func $__lang_bytes_of_vec (param $v i64) (result i64)
     (local $n i32) (local $b i32) (local $i i32)
-    (local.set $n (call $mere_vec_len (local.get $v)))
-    (local.set $b (call $__lang_bytes_alloc (local.get $n)))
+    (local.set $n (i32.wrap_i64 (call $mere_vec_len (local.get $v))))
+    (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $n)))))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
       (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))
-                  (i32.and (call $mere_vec_get (local.get $v) (local.get $i)) (i32.const 255)))
+                  (i32.and (i32.wrap_i64 (call $mere_vec_get (local.get $v) (i64.extend_i32_s (local.get $i)))) (i32.const 255)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (local.get $b))
-  (func $__lang_vec_of_bytes (param $b i32) (result i32)
-    (local $n i32) (local $v i32) (local $i i32)
+    (i64.extend_i32_u (local.get $b)))
+  (func $__lang_vec_of_bytes (param $b8 i64) (result i64)
+    (local $n i32) (local $v i32) (local $i i32) (local $b i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
-    (local.set $v (call $mere_vec_new))
+    (local.set $v (i32.wrap_i64 (call $mere_vec_new)))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
-      (drop (call $mere_vec_push (local.get $v)
-              (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i)))))
+      (drop (call $mere_vec_push (i64.extend_i32_u (local.get $v))
+              (i64.extend_i32_u (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp)))
-    (local.get $v))|}
+    (i64.extend_i32_u (local.get $v)))|}
 
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic helper set.
    Uses Wasm's bump allocator ($__lang_bump). Layout:
    { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 bytes (same as Vec). *)
 let strbuf_runtime_wasm = {|
-  (func $mere_strbuf_new (result i32)
+  (func $mere_strbuf_new (result i64)
     (local $sb i32) (local $buf i32)
     (local.set $sb (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $sb) (i32.const 16)))
@@ -5711,11 +5946,15 @@ let strbuf_runtime_wasm = {|
     (i32.store offset=0 (local.get $sb) (local.get $buf))
     (i32.store offset=4 (local.get $sb) (i32.const 0))
     (i32.store offset=8 (local.get $sb) (i32.const 16))
-    (local.get $sb))
-  (func $mere_strbuf_push (param $sb i32) (param $s i32) (result i32)
+    (i64.extend_i32_s (local.get $sb)))
+  (func $mere_strbuf_push (param $sb8 i64) (param $s8 i64) (result i64)
     (local $slen i32) (local $len i32) (local $cap i32) (local $buf i32)
     (local $new_buf i32) (local $i i32)
-    (local.set $slen (call $__lang_strlen (local.get $s)))
+    (local $sb i32)
+    (local $s i32)
+    (local.set $sb (i32.wrap_i64 (local.get $sb8)))
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (local.set $slen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (block $resize_end
       (loop $resize_lp
         (local.set $len (i32.load offset=4 (local.get $sb)))
@@ -5755,9 +5994,11 @@ let strbuf_runtime_wasm = {|
         (br $cp2_lp)))
     (i32.store offset=4 (local.get $sb)
       (i32.add (local.get $len) (local.get $slen)))
-    (i32.const 0))
-  (func $mere_strbuf_to_str (param $sb i32) (result i32)
+    (i64.extend_i32_s (i32.const 0)))
+  (func $mere_strbuf_to_str (param $sb8 i64) (result i64)
     (local $len i32) (local $out i32) (local $buf i32) (local $i i32)
+    (local $sb i32)
+    (local.set $sb (i32.wrap_i64 (local.get $sb8)))
     (local.set $len (i32.load offset=4 (local.get $sb)))
     (local.set $buf (i32.load offset=0 (local.get $sb)))
     (local.set $out (global.get $__lang_bump))
@@ -5773,9 +6014,11 @@ let strbuf_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $cp_lp)))
     (i32.store8 (i32.add (local.get $out) (local.get $len)) (i32.const 0))
-    (local.get $out))
-  (func $mere_strbuf_len (param $sb i32) (result i32)
-    (i32.load offset=4 (local.get $sb)))|}
+    (i64.extend_i32_s (local.get $out)))
+  (func $mere_strbuf_len (param $sb8 i64) (result i64)
+    (local $sb i32)
+    (local.set $sb (i32.wrap_i64 (local.get $sb8)))
+    (i64.extend_i32_s (i32.load offset=4 (local.get $sb))))|}
 
 (* Phase 15.10: Map[R, K, V] runtime — per-K only (V is i32 for all).
    Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 bytes.
@@ -5787,6 +6030,9 @@ let strbuf_runtime_wasm = {|
    (0/1). Tuple elements are i32 stored at offset 4*i within the
    tuple's memory block. *)
 let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
+  (* i64 value model: a/b are i64 values; `build` yields an i32 condition,
+     extended to an i64 bool at the function boundary. Compound keys hold
+     wrapped i32 addresses in locals; fields are 8-byte slots. *)
   let k_tag = ty_tag k_ty in
   let local_counter = ref 0 in
   let fresh_loc prefix =
@@ -5797,31 +6043,30 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
   let emit_eq_for_atom ty a_expr b_expr =
     match Ast.walk ty with
     | Ast.TyInt | Ast.TyBool ->
-      Printf.sprintf "(i32.eq %s %s)" a_expr b_expr
+      Printf.sprintf "(i64.eq %s %s)" a_expr b_expr
     | Ast.TyStr ->
-      Printf.sprintf "(call $__lang_streq %s %s)" a_expr b_expr
-    | _ -> Printf.sprintf "(i32.eq %s %s)" a_expr b_expr
+      Printf.sprintf "(i32.wrap_i64 (call $__lang_streq %s %s))" a_expr b_expr
+    | _ -> Printf.sprintf "(i64.eq %s %s)" a_expr b_expr
   in
   let compound_eq fields_offsets a_expr b_expr =
-    (* For each (offset, field_ty) compute eq and AND together,
-       loading from offset 4*idx. *)
     let a_loc = fresh_loc "ta" in
     let b_loc = fresh_loc "tb" in
     locals := (a_loc, "i32") :: !locals;
     locals := (b_loc, "i32") :: !locals;
     let setup =
-      Printf.sprintf "(local.set %s %s) (local.set %s %s)" a_loc a_expr b_loc b_expr
+      Printf.sprintf "(local.set %s (i32.wrap_i64 %s)) (local.set %s (i32.wrap_i64 %s))"
+        a_loc a_expr b_loc b_expr
     in
     let parts = List.map (fun (off, t) ->
-      let fa = Printf.sprintf "(i32.load offset=%d (local.get %s))" off a_loc in
-      let fb = Printf.sprintf "(i32.load offset=%d (local.get %s))" off b_loc in
+      let fa = Printf.sprintf "(i64.load offset=%d (local.get %s))" off a_loc in
+      let fb = Printf.sprintf "(i64.load offset=%d (local.get %s))" off b_loc in
       t, fa, fb) fields_offsets in
     parts, setup, a_loc, b_loc
   in
   let rec build ty a_expr b_expr =
     match Ast.walk ty with
     | Ast.TyTuple ts ->
-      let fields_off = List.mapi (fun i t -> (i * 4, t)) ts in
+      let fields_off = List.mapi (fun i t -> (i * 8, t)) ts in
       let parts, setup, _, _ = compound_eq fields_off a_expr b_expr in
       let combined =
         match parts with
@@ -5834,7 +6079,7 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
       Printf.sprintf "(block (result i32) %s %s)" setup combined
     | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
       let info = Hashtbl.find Typer.records rname in
-      let fields_off = List.mapi (fun i (_, ft) -> (i * 4, ft))
+      let fields_off = List.mapi (fun i (_, ft) -> (i * 8, ft))
         info.Typer.r_fields in
       let parts, setup, _, _ = compound_eq fields_off a_expr b_expr in
       let combined =
@@ -5847,13 +6092,11 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
       in
       Printf.sprintf "(block (result i32) %s %s)" setup combined
     | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
-      (* Phase 15.15/15.16: variant — compare tags at offset 0, then
-         dispatch on tag to compare payload (or short-circuit to true for
-         nullary ctors). *)
       let ctors = Hashtbl.find Exhaustive.type_variants vname in
       let has_payload = List.exists (fun (_, p) -> p <> None) ctors in
       if not has_payload then
-        Printf.sprintf "(i32.eq (i32.load offset=0 %s) (i32.load offset=0 %s))"
+        Printf.sprintf
+          "(i64.eq (i64.load offset=0 (i32.wrap_i64 %s)) (i64.load offset=0 (i32.wrap_i64 %s)))"
           a_expr b_expr
       else begin
         let a_loc = fresh_loc "va" in
@@ -5861,17 +6104,16 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
         locals := (a_loc, "i32") :: !locals;
         locals := (b_loc, "i32") :: !locals;
         let setup =
-          Printf.sprintf "(local.set %s %s) (local.set %s %s)" a_loc a_expr b_loc b_expr
+          Printf.sprintf "(local.set %s (i32.wrap_i64 %s)) (local.set %s (i32.wrap_i64 %s))"
+            a_loc a_expr b_loc b_expr
         in
-        let tag_a = Printf.sprintf "(i32.load offset=0 (local.get %s))" a_loc in
-        let tag_b = Printf.sprintf "(i32.load offset=0 (local.get %s))" b_loc in
-        let pl_a = Printf.sprintf "(i32.load offset=4 (local.get %s))" a_loc in
-        let pl_b = Printf.sprintf "(i32.load offset=4 (local.get %s))" b_loc in
+        let tag_a = Printf.sprintf "(i32.wrap_i64 (i64.load offset=0 (local.get %s)))" a_loc in
+        let tag_b = Printf.sprintf "(i32.wrap_i64 (i64.load offset=0 (local.get %s)))" b_loc in
+        let pl_a = Printf.sprintf "(i64.load offset=8 (local.get %s))" a_loc in
+        let pl_b = Printf.sprintf "(i64.load offset=8 (local.get %s))" b_loc in
         let tags_eq =
           Printf.sprintf "(i32.eq %s %s)" tag_a tag_b
         in
-        (* Build nested if/else chain over ctors. Default branch is 1
-           (nullary or covered). *)
         let branches = List.filter_map (fun (cname, payload) ->
           match payload with
           | None -> None
@@ -5901,7 +6143,7 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
         (List.rev_map (fun (n, t) -> Printf.sprintf "(local %s %s)" n t) !locals)
       ^ "\n"
   in
-  Printf.sprintf "  (func $mere_map_key_eq_%s (param $a i32) (param $b i32) (result i32)\n%s    %s)"
+  Printf.sprintf "  (func $mere_map_key_eq_%s (param $a i64) (param $b i64) (result i64)\n%s    (i64.extend_i32_u %s))"
     k_tag local_decls body_expr
 
 (* Phase 15.14: emit one Wasm map runtime per K type (new/set/get/has/len),
@@ -5910,23 +6152,25 @@ let emit_map_key_eq_wasm (k_ty : Ast.ty) : string =
 let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   Printf.sprintf "
-  (func $mere_map_%s_new (result i32)
+  (func $mere_map_%s_new (result i64)
     (local $m i32) (local $keys i32) (local $values i32)
     (local.set $m (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
     (local.set $keys (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 32)))
     (i32.store offset=0 (local.get $m) (local.get $keys))
     (i32.store offset=4 (local.get $m) (local.get $values))
     (i32.store offset=8 (local.get $m) (i32.const 0))
     (i32.store offset=12 (local.get $m) (i32.const 4))
-    (local.get $m))
-  (func $mere_map_%s_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+    (i64.extend_i32_u (local.get $m)))
+  (func $mere_map_%s_set (param $m8 i64) (param $k i64) (param $v i64) (result i64)
+    (local $m i32)
     (local $i i32) (local $len i32) (local $cap i32)
     (local $keys i32) (local $values i32)
     (local $new_keys i32) (local $new_values i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
@@ -5934,16 +6178,16 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (block $scan_done
       (loop $scan_lp
         (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
-        (if (call $mere_map_key_eq_%s
-              (i32.load (i32.add (local.get $keys)
-                                 (i32.mul (local.get $i) (i32.const 4))))
-              (local.get $k))
+        (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+              (i64.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 8))))
+              (local.get $k)))
           (then
-            (i32.store
+            (i64.store
               (i32.add (local.get $values)
-                       (i32.mul (local.get $i) (i32.const 4)))
+                       (i32.mul (local.get $i) (i32.const 8)))
               (local.get $v))
-            (return (i32.const 0))))
+            (return (i64.const 0))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     (local.set $cap (i32.load offset=12 (local.get $m)))
@@ -5962,16 +6206,16 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (block $cp_end
           (loop $cp_lp
             (br_if $cp_end (i32.eq (local.get $i) (local.get $len)))
-            (i32.store
+            (i64.store
               (i32.add (local.get $new_keys)
-                       (i32.mul (local.get $i) (i32.const 4)))
-              (i32.load (i32.add (local.get $keys)
-                                 (i32.mul (local.get $i) (i32.const 4)))))
-            (i32.store
+                       (i32.mul (local.get $i) (i32.const 8)))
+              (i64.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 8)))))
+            (i64.store
               (i32.add (local.get $new_values)
-                       (i32.mul (local.get $i) (i32.const 4)))
-              (i32.load (i32.add (local.get $values)
-                                 (i32.mul (local.get $i) (i32.const 4)))))
+                       (i32.mul (local.get $i) (i32.const 8)))
+              (i64.load (i32.add (local.get $values)
+                                 (i32.mul (local.get $i) (i32.const 8)))))
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (br $cp_lp)))
         (i32.store offset=0 (local.get $m) (local.get $new_keys))
@@ -5979,17 +6223,19 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (i32.store offset=12 (local.get $m) (local.get $cap))
         (local.set $keys (local.get $new_keys))
         (local.set $values (local.get $new_values))))
-    (i32.store
-      (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 4)))
+    (i64.store
+      (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 8)))
       (local.get $k))
-    (i32.store
-      (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4)))
+    (i64.store
+      (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 8)))
       (local.get $v))
     (i32.store offset=8 (local.get $m)
       (i32.add (local.get $len) (i32.const 1)))
-    (i32.const 0))
-  (func $mere_map_%s_get (param $m i32) (param $k i32) (result i32)
+    (i64.const 0))
+  (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
+    (local $m i32)
     (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
@@ -5997,41 +6243,46 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (block $scan_done
       (loop $scan_lp
         (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
-        (if (call $mere_map_key_eq_%s
-              (i32.load (i32.add (local.get $keys)
-                                 (i32.mul (local.get $i) (i32.const 4))))
-              (local.get $k))
+        (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+              (i64.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 8))))
+              (local.get $k)))
           (then
-            (return (i32.load (i32.add (local.get $values)
-                                       (i32.mul (local.get $i) (i32.const 4)))))))
+            (return (i64.load (i32.add (local.get $values)
+                                       (i32.mul (local.get $i) (i32.const 8)))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     (unreachable))
-  (func $mere_map_%s_has (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_%s_has (param $m8 i64) (param $k i64) (result i64)
+    (local $m i32)
     (local $i i32) (local $len i32) (local $keys i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
         (br_if $scan_done (i32.eq (local.get $i) (local.get $len)))
-        (if (call $mere_map_key_eq_%s
-              (i32.load (i32.add (local.get $keys)
-                                 (i32.mul (local.get $i) (i32.const 4))))
-              (local.get $k))
-          (then (return (i32.const 1))))
+        (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+              (i64.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 8))))
+              (local.get $k)))
+          (then (return (i64.const 1))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
-    (i32.const 0))
-  (func $mere_map_%s_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))
+    (i64.const 0))
+  (func $mere_map_%s_len (param $m8 i64) (result i64)
+    (i64.extend_i32_s (i32.load offset=8 (i32.wrap_i64 (local.get $m8)))))
   ;; Phase 19.2: map_iter — call outer(k) → inner closure, then inner(v).
   ;; outer closure: { env@0, fn_idx@4 }; outer(env, k) returns inner closure ptr.
-  (func $mere_map_%s_iter (param $m i32) (param $cl i32) (result i32)
+  (func $mere_map_%s_iter (param $m8 i64) (param $cl8 i64) (result i64)
+    (local $m i32) (local $cl i32)
     (local $i i32) (local $len i32)
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $k i32) (local $v i32) (local $inner_cl i32)
+    (local $k i64) (local $v i64) (local $inner_cl i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
+    (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
     (local.set $keys   (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
@@ -6041,23 +6292,25 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (block $end
       (loop $lp
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
-        (local.set $k (i32.load (i32.add (local.get $keys)
-                                  (i32.mul (local.get $i) (i32.const 4)))))
-        (local.set $v (i32.load (i32.add (local.get $values)
-                                  (i32.mul (local.get $i) (i32.const 4)))))
-        (local.set $inner_cl
-          (call_indirect (type $cl) (local.get $outer_env) (local.get $k)
-                         (local.get $outer_fn)))
+        (local.set $k (i64.load (i32.add (local.get $keys)
+                                  (i32.mul (local.get $i) (i32.const 8)))))
+        (local.set $v (i64.load (i32.add (local.get $values)
+                                  (i32.mul (local.get $i) (i32.const 8)))))
+        (local.set $inner_cl (i32.wrap_i64
+          (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
+                         (local.get $outer_fn))))
         (drop (call_indirect (type $cl)
-                (i32.load offset=0 (local.get $inner_cl))
+                (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
                 (local.get $v)
                 (i32.load offset=4 (local.get $inner_cl))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (i32.const 0))
+    (i64.const 0))
   ;; Phase 39.A' #2: map_delete — when the key matches, shift keys/values down
-  (func $mere_map_%s_delete (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_%s_delete (param $m8 i64) (param $k i64) (result i64)
+    (local $m i32)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
@@ -6065,28 +6318,28 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (block $find_done
       (loop $find_lp
         (br_if $find_done (i32.eq (local.get $i) (local.get $len)))
-        (if (call $mere_map_key_eq_%s
-              (i32.load (i32.add (local.get $keys)
-                                 (i32.mul (local.get $i) (i32.const 4))))
-              (local.get $k))
+        (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+              (i64.load (i32.add (local.get $keys)
+                                 (i32.mul (local.get $i) (i32.const 8))))
+              (local.get $k)))
           (then
             (local.set $j (local.get $i))
             (block $shift_done
               (loop $shift_lp
                 (br_if $shift_done (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
-                (i32.store
-                  (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 4)))
-                  (i32.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
-                (i32.store
-                  (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 4)))
-                  (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+                (i64.store
+                  (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 8)))
+                  (i64.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 8)))))
+                (i64.store
+                  (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 8)))
+                  (i64.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 8)))))
                 (local.set $j (i32.add (local.get $j) (i32.const 1)))
                 (br $shift_lp)))
             (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
-            (return (i32.const 0))))
+            (return (i64.const 0))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $find_lp)))
-    (i32.const 0))"
+    (i64.const 0))"
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
 (* O(1) Wasm map for scalar keys (int / bool / str / unit): open-addressing
@@ -6101,19 +6354,24 @@ let wasm_key_hashable (t : Ast.ty) : bool =
 (* Emitted once when any scalar-key map exists: a 32-bit integer avalanche
    mix and an FNV-1a byte hash (str is NUL-terminated, like $__lang_streq). *)
 let map_hash_primitives_wasm =
-  {|  (func $__lang_hash_u32 (param $x i32) (result i32)
+  (* v0.1.127: hash the full i64 key (fold hi into lo first), mix in i32. *)
+  {|  (func $__lang_hash_u32 (param $x8 i64) (result i64)
+    (local $x i32)
+    (local.set $x (i32.xor (i32.wrap_i64 (local.get $x8))
+                           (i32.wrap_i64 (i64.shr_u (local.get $x8) (i64.const 32)))))
     (local.set $x (i32.xor (i32.xor (local.get $x) (i32.const 61)) (i32.shr_u (local.get $x) (i32.const 16))))
     (local.set $x (i32.add (local.get $x) (i32.shl (local.get $x) (i32.const 3))))
     (local.set $x (i32.xor (local.get $x) (i32.shr_u (local.get $x) (i32.const 4))))
     (local.set $x (i32.mul (local.get $x) (i32.const 668265261)))
     (local.set $x (i32.xor (local.get $x) (i32.shr_u (local.get $x) (i32.const 15))))
-    (local.get $x))
-  (func $__lang_hash_str (param $s i32) (result i32)
-    (local $h i32) (local $c i32)
+    (i64.extend_i32_u (local.get $x)))
+  (func $__lang_hash_str (param $s8 i64) (result i64)
+    (local $h i32) (local $c i32) (local $s i32)
+    (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $h (i32.const 2166136261))
     (loop $lp
       (local.set $c (i32.load8_u (local.get $s)))
-      (if (i32.eqz (local.get $c)) (then (return (local.get $h))))
+      (if (i32.eqz (local.get $c)) (then (return (i64.extend_i32_u (local.get $h)))))
       (local.set $h (i32.mul (i32.xor (local.get $h) (local.get $c)) (i32.const 16777619)))
       (local.set $s (i32.add (local.get $s) (i32.const 1)))
       (br $lp))
@@ -6126,20 +6384,20 @@ let emit_map_key_hash_wasm (k_ty : Ast.ty) : string =
     | Ast.TyStr -> "$__lang_hash_str"
     | _ -> "$__lang_hash_u32" in
   Printf.sprintf
-    "  (func $mere_map_key_hash_%s (param $a i32) (result i32)\n    (call %s (local.get $a)))"
+    "  (func $mere_map_key_hash_%s (param $a i64) (result i64)\n    (call %s (local.get $a)))"
     k_tag prim
 
 let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   Printf.sprintf {|
-  (func $mere_map_%s_new (result i32)
+  (func $mere_map_%s_new (result i64)
     (local $m i32) (local $keys i32) (local $values i32) (local $idx i32) (local $i i32)
     (local.set $m (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 24)))
     (local.set $keys (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 32)))
     (local.set $idx (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $idx) (i32.const 32)))
     (i32.store offset=0 (local.get $m) (local.get $keys))
@@ -6154,7 +6412,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (i32.store (i32.add (local.get $idx) (i32.mul (local.get $i) (i32.const 4))) (i32.const -1))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $fl)))
-    (local.get $m))
+    (i64.extend_i32_u (local.get $m)))
   (func $mere_map_%s_reindex (param $m i32) (param $newcap i32)
     (local $ni i32) (local $i i32) (local $s i32) (local $len i32) (local $keys i32) (local $ncm1 i32) (local $h i32)
     (local.set $ni (global.get $__lang_bump))
@@ -6171,8 +6429,8 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local.set $i (i32.const 0))
     (block $pend (loop $pl
       (br_if $pend (i32.eq (local.get $i) (local.get $len)))
-      (local.set $h (call $mere_map_key_hash_%s
-        (i32.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 4))))))
+      (local.set $h (i32.wrap_i64 (call $mere_map_key_hash_%s
+        (i64.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 8)))))))
       (local.set $s (i32.and (local.get $h) (local.get $ncm1)))
       (block $placed (loop $probe
         (if (i32.eq (i32.load (i32.add (local.get $ni) (i32.mul (local.get $s) (i32.const 4)))) (i32.const -1))
@@ -6185,11 +6443,14 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (br $pl)))
     (i32.store offset=16 (local.get $m) (local.get $ni))
     (i32.store offset=20 (local.get $m) (local.get $newcap)))
-  (func $mere_map_%s_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+  (func $mere_map_%s_set (param $m8 i64) (param $k i64) (param $v i64) (result i64)
+    (local $m i32)
     (local $h i32) (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
     (local $keys i32) (local $values i32) (local $len i32) (local $cap i32) (local $occ i32)
     (local $nk i32) (local $nv i32) (local $i i32) (local $newlen i32)
-    (local.set $h (call $mere_map_key_hash_%s (local.get $k)))
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
+    (local.set $h (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))))
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $idxcap (i32.load offset=20 (local.get $m)))
     (local.set $icm1 (i32.sub (local.get $idxcap) (i32.const 1)))
@@ -6199,12 +6460,12 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (block $done_probe (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $done_probe (i32.eq (local.get $occ) (i32.const -1)))
-      (if (call $mere_map_key_eq_%s
-            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
-            (local.get $k))
+      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+            (local.get $k)))
         (then
-          (i32.store (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 4))) (local.get $v))
-          (return (i32.const 0))))
+          (i64.store (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8))) (local.get $v))
+          (return (i64.const 0))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     (local.set $len (i32.load offset=8 (local.get $m)))
@@ -6213,16 +6474,16 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (then
         (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
         (local.set $nk (global.get $__lang_bump))
-        (global.set $__lang_bump (i32.add (local.get $nk) (i32.mul (local.get $cap) (i32.const 4))))
+        (global.set $__lang_bump (i32.add (local.get $nk) (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $nv (global.get $__lang_bump))
-        (global.set $__lang_bump (i32.add (local.get $nv) (i32.mul (local.get $cap) (i32.const 4))))
+        (global.set $__lang_bump (i32.add (local.get $nv) (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $i (i32.const 0))
         (block $cend (loop $cl
           (br_if $cend (i32.eq (local.get $i) (local.get $len)))
-          (i32.store (i32.add (local.get $nk) (i32.mul (local.get $i) (i32.const 4)))
-                     (i32.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 4)))))
-          (i32.store (i32.add (local.get $nv) (i32.mul (local.get $i) (i32.const 4)))
-                     (i32.load (i32.add (local.get $values) (i32.mul (local.get $i) (i32.const 4)))))
+          (i64.store (i32.add (local.get $nk) (i32.mul (local.get $i) (i32.const 8)))
+                     (i64.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 8)))))
+          (i64.store (i32.add (local.get $nv) (i32.mul (local.get $i) (i32.const 8)))
+                     (i64.load (i32.add (local.get $values) (i32.mul (local.get $i) (i32.const 8)))))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $cl)))
         (i32.store offset=0 (local.get $m) (local.get $nk))
@@ -6230,55 +6491,62 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
         (i32.store offset=12 (local.get $m) (local.get $cap))
         (local.set $keys (local.get $nk))
         (local.set $values (local.get $nv))))
-    (i32.store (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 4))) (local.get $k))
-    (i32.store (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4))) (local.get $v))
+    (i64.store (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 8))) (local.get $k))
+    (i64.store (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 8))) (local.get $v))
     (local.set $newlen (i32.add (local.get $len) (i32.const 1)))
     (i32.store offset=8 (local.get $m) (local.get $newlen))
     (if (i32.ge_s (i32.mul (local.get $newlen) (i32.const 10)) (i32.mul (local.get $idxcap) (i32.const 7)))
       (then (call $mere_map_%s_reindex (local.get $m) (i32.mul (local.get $idxcap) (i32.const 2))))
       (else (i32.store (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))
                        (i32.sub (local.get $newlen) (i32.const 1)))))
-    (i32.const 0))
-  (func $mere_map_%s_get (param $m i32) (param $k i32) (result i32)
+    (i64.const 0))
+  (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
+    (local $m i32)
     (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $values i32) (local $occ i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $icm1 (i32.sub (i32.load offset=20 (local.get $m)) (i32.const 1)))
-    (local.set $s (i32.and (call $mere_map_key_hash_%s (local.get $k)) (local.get $icm1)))
+    (local.set $s (i32.and (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))) (local.get $icm1)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
     (block $fail (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $fail (i32.eq (local.get $occ) (i32.const -1)))
-      (if (call $mere_map_key_eq_%s
-            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
-            (local.get $k))
-        (then (return (i32.load (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 4)))))))
+      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+            (local.get $k)))
+        (then (return (i64.load (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8)))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     (unreachable))
-  (func $mere_map_%s_has (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_%s_has (param $m8 i64) (param $k i64) (result i64)
+    (local $m i32)
     (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $occ i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $icm1 (i32.sub (i32.load offset=20 (local.get $m)) (i32.const 1)))
-    (local.set $s (i32.and (call $mere_map_key_hash_%s (local.get $k)) (local.get $icm1)))
+    (local.set $s (i32.and (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))) (local.get $icm1)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (block $notf (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $notf (i32.eq (local.get $occ) (i32.const -1)))
-      (if (call $mere_map_key_eq_%s
-            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
-            (local.get $k))
-        (then (return (i32.const 1))))
+      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+            (local.get $k)))
+        (then (return (i64.const 1))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
-    (i32.const 0))
-  (func $mere_map_%s_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))
-  (func $mere_map_%s_iter (param $m i32) (param $cl i32) (result i32)
+    (i64.const 0))
+  (func $mere_map_%s_len (param $m8 i64) (result i64)
+    (i64.extend_i32_s (i32.load offset=8 (i32.wrap_i64 (local.get $m8)))))
+  (func $mere_map_%s_iter (param $m8 i64) (param $cl8 i64) (result i64)
+    (local $m i32) (local $cl i32)
     (local $i i32) (local $len i32)
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $k i32) (local $v i32) (local $inner_cl i32)
+    (local $k i64) (local $v i64) (local $inner_cl i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
+    (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
     (local.set $keys   (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
@@ -6288,76 +6556,78 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (block $end
       (loop $lp
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
-        (local.set $k (i32.load (i32.add (local.get $keys)
-                                  (i32.mul (local.get $i) (i32.const 4)))))
-        (local.set $v (i32.load (i32.add (local.get $values)
-                                  (i32.mul (local.get $i) (i32.const 4)))))
-        (local.set $inner_cl
-          (call_indirect (type $cl) (local.get $outer_env) (local.get $k)
-                         (local.get $outer_fn)))
+        (local.set $k (i64.load (i32.add (local.get $keys)
+                                  (i32.mul (local.get $i) (i32.const 8)))))
+        (local.set $v (i64.load (i32.add (local.get $values)
+                                  (i32.mul (local.get $i) (i32.const 8)))))
+        (local.set $inner_cl (i32.wrap_i64
+          (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
+                         (local.get $outer_fn))))
         (drop (call_indirect (type $cl)
-                (i32.load offset=0 (local.get $inner_cl))
+                (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
                 (local.get $v)
                 (i32.load offset=4 (local.get $inner_cl))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (i32.const 0))
-  (func $mere_map_%s_delete (param $m i32) (param $k i32) (result i32)
+    (i64.const 0))
+  (func $mere_map_%s_delete (param $m8 i64) (param $k i64) (result i64)
+    (local $m i32)
     (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
     (local $keys i32) (local $values i32) (local $occ i32) (local $len i32) (local $j i32)
+    (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $idxcap (i32.load offset=20 (local.get $m)))
     (local.set $icm1 (i32.sub (local.get $idxcap) (i32.const 1)))
-    (local.set $s (i32.and (call $mere_map_key_hash_%s (local.get $k)) (local.get $icm1)))
+    (local.set $s (i32.and (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))) (local.get $icm1)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
     (block $notf (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $notf (i32.eq (local.get $occ) (i32.const -1)))
-      (if (call $mere_map_key_eq_%s
-            (i32.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 4))))
-            (local.get $k))
+      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+            (local.get $k)))
         (then
           (local.set $len (i32.load offset=8 (local.get $m)))
           (local.set $j (local.get $occ))
           (block $sdone (loop $sl
             (br_if $sdone (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
-            (i32.store (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 4)))
-              (i32.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
-            (i32.store (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 4)))
-              (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
+            (i64.store (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 8)))
+              (i64.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 8)))))
+            (i64.store (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 8)))
+              (i64.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 8)))))
             (local.set $j (i32.add (local.get $j) (i32.const 1)))
             (br $sl)))
           (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
           (call $mere_map_%s_reindex (local.get $m) (local.get $idxcap))
-          (return (i32.const 0))))
+          (return (i64.const 0))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
-    (i32.const 0))|}
+    (i64.const 0))|}
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
 let map_int_runtime_wasm = {|
-  (func $mere_map_int_new (result i32)
+  (func $mere_map_int_new (result i64)
     (local $m i32) (local $keys i32) (local $values i32)
     (local.set $m (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
     (local.set $keys (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
-    (i32.store offset=0 (local.get $m) (local.get $keys))
-    (i32.store offset=4 (local.get $m) (local.get $values))
-    (i32.store offset=8 (local.get $m) (i32.const 0))
-    (i32.store offset=12 (local.get $m) (i32.const 4))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 32)))
+    (i32.store offset=0 (i32.wrap_i64 (local.get $m)) (local.get $keys))
+    (i32.store offset=4 (i32.wrap_i64 (local.get $m)) (local.get $values))
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m)) (i32.const 0))
+    (i32.store offset=12 (i32.wrap_i64 (local.get $m)) (i32.const 4))
     (local.get $m))
-  (func $mere_map_int_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+  (func $mere_map_int_set (param $m i64) (param $k i64) (param $v i64) (result i64)
     (local $i i32) (local $len i32) (local $cap i32)
     (local $keys i32) (local $values i32)
     (local $new_keys i32) (local $new_values i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
+    (local.set $values (i32.load offset=4 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
@@ -6374,7 +6644,7 @@ let map_int_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     ;; not found: append, grow if full
-    (local.set $cap (i32.load offset=12 (local.get $m)))
+    (local.set $cap (i32.load offset=12 (i32.wrap_i64 (local.get $m))))
     (if (i32.eq (local.get $len) (local.get $cap))
       (then
         (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
@@ -6402,9 +6672,9 @@ let map_int_runtime_wasm = {|
                                  (i32.mul (local.get $i) (i32.const 4)))))
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (br $cp_lp)))
-        (i32.store offset=0 (local.get $m) (local.get $new_keys))
-        (i32.store offset=4 (local.get $m) (local.get $new_values))
-        (i32.store offset=12 (local.get $m) (local.get $cap))
+        (i32.store offset=0 (i32.wrap_i64 (local.get $m)) (local.get $new_keys))
+        (i32.store offset=4 (i32.wrap_i64 (local.get $m)) (local.get $new_values))
+        (i32.store offset=12 (i32.wrap_i64 (local.get $m)) (local.get $cap))
         (local.set $keys (local.get $new_keys))
         (local.set $values (local.get $new_values))))
     (i32.store
@@ -6413,14 +6683,14 @@ let map_int_runtime_wasm = {|
     (i32.store
       (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4)))
       (local.get $v))
-    (i32.store offset=8 (local.get $m)
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m))
       (i32.add (local.get $len) (i32.const 1)))
     (i32.const 0))
-  (func $mere_map_int_get (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_int_get (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
+    (local.set $values (i32.load offset=4 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
@@ -6434,10 +6704,10 @@ let map_int_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     (unreachable))
-  (func $mere_map_int_has (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_int_has (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $len i32) (local $keys i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
@@ -6449,14 +6719,14 @@ let map_int_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     (i32.const 0))
-  (func $mere_map_int_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))
+  (func $mere_map_int_len (param $m i64) (result i64)
+    (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
   ;; Phase 39.A' #2: map_delete (int-key variant)
-  (func $mere_map_int_delete (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_int_delete (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
+    (local.set $values (i32.load offset=4 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $find_done
       (loop $find_lp
@@ -6478,7 +6748,7 @@ let map_int_runtime_wasm = {|
                   (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
                 (local.set $j (i32.add (local.get $j) (i32.const 1)))
                 (br $shift_lp)))
-            (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
+            (i32.store offset=8 (i32.wrap_i64 (local.get $m)) (i32.sub (local.get $len) (i32.const 1)))
             (return (i32.const 0))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $find_lp)))
@@ -6486,26 +6756,26 @@ let map_int_runtime_wasm = {|
 
 (* Same shape with $__lang_streq for key comparison (str keys). *)
 let map_str_runtime_wasm = {|
-  (func $mere_map_str_new (result i32)
+  (func $mere_map_str_new (result i64)
     (local $m i32) (local $keys i32) (local $values i32)
     (local.set $m (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
     (local.set $keys (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 16)))
-    (i32.store offset=0 (local.get $m) (local.get $keys))
-    (i32.store offset=4 (local.get $m) (local.get $values))
-    (i32.store offset=8 (local.get $m) (i32.const 0))
-    (i32.store offset=12 (local.get $m) (i32.const 4))
+    (global.set $__lang_bump (i32.add (local.get $values) (i32.const 32)))
+    (i32.store offset=0 (i32.wrap_i64 (local.get $m)) (local.get $keys))
+    (i32.store offset=4 (i32.wrap_i64 (local.get $m)) (local.get $values))
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m)) (i32.const 0))
+    (i32.store offset=12 (i32.wrap_i64 (local.get $m)) (i32.const 4))
     (local.get $m))
-  (func $mere_map_str_set (param $m i32) (param $k i32) (param $v i32) (result i32)
+  (func $mere_map_str_set (param $m i64) (param $k i64) (param $v i64) (result i64)
     (local $i i32) (local $len i32) (local $cap i32)
     (local $keys i32) (local $values i32)
     (local $new_keys i32) (local $new_values i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
+    (local.set $values (i32.load offset=4 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
@@ -6522,7 +6792,7 @@ let map_str_runtime_wasm = {|
             (return (i32.const 0))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
-    (local.set $cap (i32.load offset=12 (local.get $m)))
+    (local.set $cap (i32.load offset=12 (i32.wrap_i64 (local.get $m))))
     (if (i32.eq (local.get $len) (local.get $cap))
       (then
         (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
@@ -6550,9 +6820,9 @@ let map_str_runtime_wasm = {|
                                  (i32.mul (local.get $i) (i32.const 4)))))
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (br $cp_lp)))
-        (i32.store offset=0 (local.get $m) (local.get $new_keys))
-        (i32.store offset=4 (local.get $m) (local.get $new_values))
-        (i32.store offset=12 (local.get $m) (local.get $cap))
+        (i32.store offset=0 (i32.wrap_i64 (local.get $m)) (local.get $new_keys))
+        (i32.store offset=4 (i32.wrap_i64 (local.get $m)) (local.get $new_values))
+        (i32.store offset=12 (i32.wrap_i64 (local.get $m)) (local.get $cap))
         (local.set $keys (local.get $new_keys))
         (local.set $values (local.get $new_values))))
     (i32.store
@@ -6561,14 +6831,14 @@ let map_str_runtime_wasm = {|
     (i32.store
       (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 4)))
       (local.get $v))
-    (i32.store offset=8 (local.get $m)
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m))
       (i32.add (local.get $len) (i32.const 1)))
     (i32.const 0))
-  (func $mere_map_str_get (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_str_get (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
+    (local.set $values (i32.load offset=4 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
@@ -6583,10 +6853,10 @@ let map_str_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     (unreachable))
-  (func $mere_map_str_has (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_str_has (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $len i32) (local $keys i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan_lp
@@ -6599,14 +6869,14 @@ let map_str_runtime_wasm = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
     (i32.const 0))
-  (func $mere_map_str_len (param $m i32) (result i32)
-    (i32.load offset=8 (local.get $m)))
+  (func $mere_map_str_len (param $m i64) (result i64)
+    (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
   ;; Phase 39.A' #2: map_delete (str-key variant) — when the key matches, shift keys/values
-  (func $mere_map_str_delete (param $m i32) (param $k i32) (result i32)
+  (func $mere_map_str_delete (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
-    (local.set $len (i32.load offset=8 (local.get $m)))
-    (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+    (local.set $keys (i32.load offset=0 (i32.wrap_i64 (local.get $m))))
+    (local.set $values (i32.load offset=4 (i32.wrap_i64 (local.get $m))))
     (local.set $i (i32.const 0))
     (block $find_done
       (loop $find_lp
@@ -6629,7 +6899,7 @@ let map_str_runtime_wasm = {|
                   (i32.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 4)))))
                 (local.set $j (i32.add (local.get $j) (i32.const 1)))
                 (br $shift_lp)))
-            (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
+            (i32.store offset=8 (i32.wrap_i64 (local.get $m)) (i32.sub (local.get $len) (i32.const 1)))
             (return (i32.const 0))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $find_lp)))
@@ -6645,7 +6915,7 @@ let map_str_runtime_wasm = {|
 let of_json_runtime_wasm : string = {ojw|
   (global $__mj_p (mut i32) (i32.const 0))
   (global $__mj_err (mut i32) (i32.const 0))
-  (func $__oj_alloc (param $n i32) (result i32)
+  (func $__oj_alloc (param $n i64) (result i64)
     (local $r i32)
     (local.set $r (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $r) (local.get $n)))
@@ -6659,7 +6929,7 @@ let of_json_runtime_wasm : string = {ojw|
         (i32.or (i32.eq (local.get $c) (i32.const 10)) (i32.eq (local.get $c) (i32.const 13))))))
       (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
       (br $lp))))
-  (func $__mj_cell (param $kind i32) (result i32)
+  (func $__mj_cell (param $kind i64) (result i64)
     (local $r i32)
     (local.set $r (call $__oj_alloc (i32.const 16)))
     (i32.store offset=0 (local.get $r) (local.get $kind))
@@ -6667,7 +6937,7 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store offset=8 (local.get $r) (i32.const 0))
     (i32.store offset=12 (local.get $r) (i32.const 0))
     (local.get $r))
-  (func $__mj_atoi (param $s i32) (result i32)
+  (func $__mj_atoi (param $s i64) (result i64)
     (local $r i32) (local $neg i32) (local $c i32)
     (local.set $r (i32.const 0)) (local.set $neg (i32.const 0))
     (if (i32.eq (i32.load8_u (local.get $s)) (i32.const 45))
@@ -6679,8 +6949,8 @@ let of_json_runtime_wasm : string = {ojw|
       (local.set $r (i32.add (i32.mul (local.get $r) (i32.const 10)) (i32.sub (local.get $c) (i32.const 48))))
       (local.set $s (i32.add (local.get $s) (i32.const 1)))
       (br $lp)))
-    (if (result i32) (local.get $neg) (then (i32.sub (i32.const 0) (local.get $r))) (else (local.get $r))))
-  (func $__mj_pstr (result i32)
+    (if (result i64) (local.get $neg) (then (i32.sub (i32.const 0) (local.get $r))) (else (local.get $r))))
+  (func $__mj_pstr (result i64)
     (local $r i32) (local $len i32) (local $c i32) (local $e i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
     (local.set $r (global.get $__lang_bump))
@@ -6695,9 +6965,9 @@ let of_json_runtime_wasm : string = {ojw|
           (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
           (local.set $e (i32.load8_u (global.get $__mj_p)))
           (local.set $c
-            (if (result i32) (i32.eq (local.get $e) (i32.const 110)) (then (i32.const 10))
-            (else (if (result i32) (i32.eq (local.get $e) (i32.const 116)) (then (i32.const 9))
-            (else (if (result i32) (i32.eq (local.get $e) (i32.const 114)) (then (i32.const 13))
+            (if (result i64) (i32.eq (local.get $e) (i32.const 110)) (then (i32.const 10))
+            (else (if (result i64) (i32.eq (local.get $e) (i32.const 116)) (then (i32.const 9))
+            (else (if (result i64) (i32.eq (local.get $e) (i32.const 114)) (then (i32.const 13))
             (else (local.get $e))))))))))
       (i32.store8 (i32.add (local.get $r) (local.get $len)) (local.get $c))
       (local.set $len (i32.add (local.get $len) (i32.const 1)))
@@ -6706,7 +6976,7 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (local.get $r))
-  (func $__mj_num (result i32)
+  (func $__mj_num (result i64)
     (local $r i32) (local $len i32) (local $c i32)
     (local.set $r (global.get $__lang_bump))
     (local.set $len (i32.const 0))
@@ -6726,7 +6996,7 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (local.get $r))
-  (func $__mj_value (result i32)
+  (func $__mj_value (result i64)
     (local $c i32) (local $cell i32)
     (call $__mj_ws)
     (local.set $c (i32.load8_u (global.get $__mj_p)))
@@ -6761,7 +7031,7 @@ let of_json_runtime_wasm : string = {ojw|
         (return (local.get $cell))))
     (global.set $__mj_err (i32.const 1))
     (call $__mj_cell (i32.const 0)))
-  (func $__mj_array (result i32)
+  (func $__mj_array (result i64)
     (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
     (local $node i32) (local $item i32) (local $c i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
@@ -6792,7 +7062,7 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store offset=4 (local.get $cell) (local.get $count))
     (i32.store offset=8 (local.get $cell) (local.get $head))
     (local.get $cell))
-  (func $__mj_object (result i32)
+  (func $__mj_object (result i64)
     (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
     (local $node i32) (local $key i32) (local $val i32) (local $c i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
@@ -6832,11 +7102,11 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store offset=4 (local.get $cell) (local.get $count))
     (i32.store offset=8 (local.get $cell) (local.get $head))
     (local.get $cell))
-  (func $__mj_parse (param $s i32) (result i32)
+  (func $__mj_parse (param $s i64) (result i64)
     (global.set $__mj_p (local.get $s))
     (global.set $__mj_err (i32.const 0))
     (call $__mj_value))
-  (func $__mj_field (param $obj i32) (param $key i32) (result i32)
+  (func $__mj_field (param $obj i64) (param $key i64) (result i64)
     (local $node i32)
     (if (i32.ne (i32.load offset=0 (local.get $obj)) (i32.const 5))
       (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))
@@ -6849,7 +7119,7 @@ let of_json_runtime_wasm : string = {ojw|
       (br $lp)))
     (global.set $__mj_err (i32.const 1))
     (i32.const 0))
-  (func $__mj_index (param $arr i32) (param $i i32) (result i32)
+  (func $__mj_index (param $arr i64) (param $i i64) (result i64)
     (local $node i32)
     (local.set $node (i32.load offset=8 (local.get $arr)))
     (block $done (loop $lp
@@ -6858,7 +7128,7 @@ let of_json_runtime_wasm : string = {ojw|
       (local.set $node (i32.load offset=4 (local.get $node)))
       (local.set $i (i32.sub (local.get $i) (i32.const 1)))
       (br $lp)))
-    (if (result i32) (i32.eqz (local.get $node)) (then (i32.const 0)) (else (i32.load offset=0 (local.get $node)))))
+    (if (result i64) (i32.eqz (local.get $node)) (then (i32.const 0)) (else (i32.load offset=0 (local.get $node)))))
 |ojw}
 
 (* Emit `$__ojnode_<tag>` (mj_node -> value) + `$of_json_<tag>` (str ->
@@ -6866,7 +7136,7 @@ let of_json_runtime_wasm : string = {ojw|
 let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
   let b = Buffer.create 512 in
   let node = Printf.sprintf "$__ojnode_%s" tag in
-  Buffer.add_string b (Printf.sprintf "  (func %s (param $j i32) (result i32)\n" node);
+  Buffer.add_string b (Printf.sprintf "  (func %s (param $j i64) (result i64)\n" node);
   (match Ast.walk t with
    | Ast.TyInt ->
      Buffer.add_string b
@@ -6938,7 +7208,7 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
      Buffer.add_string b "    (local $r i32)\n";
      Buffer.add_string b
        (Printf.sprintf
-       "    (if (result i32) (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 0))\n\
+       "    (if (result i64) (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 0))\n\
        \      (then\n\
        \        (local.set $r (call $__oj_alloc (i32.const 8)))\n\
        \        (i32.store offset=0 (local.get $r) (i32.const %d))\n\
@@ -7019,7 +7289,7 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
   (* strict string entry: trap on error *)
   Buffer.add_string b
     (Printf.sprintf
-       "  (func $of_json_%s (param $s i32) (result i32)\n\
+       "  (func $of_json_%s (param $s i64) (result i64)\n\
        \    (local $v i32)\n\
        \    (local.set $v (call $__ojnode_%s (call $__mj_parse (local.get $s))))\n\
        \    (if (global.get $__mj_err) (then unreachable))\n\
@@ -7032,11 +7302,11 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
   let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
   let some_tag = try Hashtbl.find variant_tags "Some" with Not_found -> 1 in
   Printf.sprintf
-    "  (func $of_json_opt_%s (param $s i32) (result i32)\n\
+    "  (func $of_json_opt_%s (param $s i64) (result i64)\n\
     \    (local $v i32) (local $r i32)\n\
     \    (local.set $v (call $__ojnode_%s (call $__mj_parse (local.get $s))))\n\
     \    (local.set $r (call $__oj_alloc (i32.const 8)))\n\
-    \    (if (result i32) (global.get $__mj_err)\n\
+    \    (if (result i64) (global.get $__mj_err)\n\
     \      (then (i32.store offset=0 (local.get $r) (i32.const %d)) (local.get $r))\n\
     \      (else (i32.store offset=0 (local.get $r) (i32.const %d)) (i32.store offset=4 (local.get $r) (local.get $v)) (local.get $r))))\n"
     inner_tag inner_tag none_tag some_tag
@@ -7329,14 +7599,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
    | Ast.TyUnit ->
      emit_instr "drop";
      let unit_off = intern_show_str "()" in
-     emit_instr (Printf.sprintf "i32.const %d" unit_off);
+     emit_instr (Printf.sprintf "i64.const %d" unit_off);
      emit_instr "call $puts";
      emit_instr "i32.const 0"
    | Ast.TyFloat ->
      (* Phase 34.3: float main result — load f64 from ptr, str_of_float via
-        env import (JS formats like OCaml's string_of_float), then puts *)
+        env import (JS formats like OCaml's string_of_float), then puts.
+        The host import returns an i32 str ptr; extend for $puts (i64). *)
+     emit_instr "i32.wrap_i64";
      emit_instr "f64.load offset=0 align=8";
      emit_instr "call $__lang_str_of_float";
+     emit_instr "i64.extend_i32_u";
      emit_instr "call $puts";
      emit_instr "i32.const 0"
    | _ ->
@@ -7350,7 +7623,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (* Phase 34.3: declare typed locals (i32 / f64) via local_types *)
       let types =
         if List.length !local_types = local_count then !local_types
-        else List.init local_count (fun _ -> "i32")
+        else List.init local_count (fun _ -> "i64")
       in
       Printf.sprintf "    (local%s)\n"
         (String.concat "" (List.map (fun t -> " " ^ t) types))
@@ -7379,13 +7652,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       let load_caps =
         List.mapi (fun i _ ->
           Printf.sprintf
-            "    local.get 0\n    i32.load offset=%d"
-            (i * 4))
+            "    local.get 0\n    i32.wrap_i64\n    i64.load offset=%d"
+            (i * 8))
           captures
         |> String.concat "\n"
       in
       Printf.sprintf
-        "  (func $%s_inner_closure_fn (param i32) (param i32) (result i32)\n%s\n    local.get 1\n    call $%s)"
+        "  (func $%s_inner_closure_fn (param i64) (param i64) (result i64)\n%s\n    local.get 1\n    call $%s)"
         lifted_name load_caps lifted_name
     ) !inner_lift_closure_pending_wasm
   in
@@ -7402,25 +7675,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       let warn_prefix_off  = fresh_str_offset " [WARN] " in
       let error_prefix_off = fresh_str_offset " [ERROR] " in
       Printf.sprintf {|
-  (func $__mere_logger_info_fn (param $env i32) (param $msg i32) (result i32)
+  (func $__mere_logger_info_fn (param $env i64) (param $msg i64) (result i64)
     (local $tmp i32)
     (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
     (call $puts (local.get $tmp))
     (i32.const 0))
-  (func $__mere_logger_warn_fn (param $env i32) (param $msg i32) (result i32)
+  (func $__mere_logger_warn_fn (param $env i64) (param $msg i64) (result i64)
     (local $tmp i32)
     (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
     (call $puts (local.get $tmp))
     (i32.const 0))
-  (func $__mere_logger_error_fn (param $env i32) (param $msg i32) (result i32)
+  (func $__mere_logger_error_fn (param $env i64) (param $msg i64) (result i64)
     (local $tmp i32)
     (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
     (call $puts (local.get $tmp))
     (i32.const 0))
-  (func $__mere_mk_logger (param $prefix i32) (result i32)
+  (func $__mere_mk_logger (param $prefix i64) (result i64)
     (local $logger i32) (local $cl i32)
     ;; Logger record: 3 ptrs to closures = 12 bytes
     (local.set $logger (global.get $__lang_bump))
@@ -7457,12 +7730,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       let rec_prefix_off = fresh_str_offset "[METRIC] " in
       let eq_off         = fresh_str_offset "=" in
       Printf.sprintf {|
-  (func $__mere_metrics_inc_fn (param $env i32) (param $name i32) (result i32)
+  (func $__mere_metrics_inc_fn (param $env i64) (param $name i64) (result i64)
     (local $tmp i32)
     (local.set $tmp (call $__lang_str_concat (i32.const %d) (local.get $name)))
     (call $puts (local.get $tmp))
     (i32.const 0))
-  (func $__mere_metrics_record_inner_fn (param $env i32) (param $n i32) (result i32)
+  (func $__mere_metrics_record_inner_fn (param $env i64) (param $n i64) (result i64)
     (local $tmp i32) (local $ns i32)
     (local.set $ns (call $show_int (local.get $n)))
     (local.set $tmp (call $__lang_str_concat (i32.const %d) (local.get $env)))
@@ -7470,14 +7743,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $ns)))
     (call $puts (local.get $tmp))
     (i32.const 0))
-  (func $__mere_metrics_record_outer_fn (param $env i32) (param $name i32) (result i32)
+  (func $__mere_metrics_record_outer_fn (param $env i64) (param $name i64) (result i64)
     (local $cl i32)
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
     (i32.store offset=0 (local.get $cl) (local.get $name))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
     (local.get $cl))
-  (func $__mere_mk_metrics (result i32)
+  (func $__mere_mk_metrics (result i64)
     (local $m i32) (local $cl i32)
     ;; Metrics record: 2 ptrs = 8 bytes
     (local.set $m (global.get $__lang_bump))
@@ -7506,7 +7779,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     else
       String.concat "\n"
         (List.map (fun (name, _) ->
-          Printf.sprintf "  (global $%s (mut i32) (i32.const 0))" name)
+          Printf.sprintf "  (global $%s (mut i64) (i64.const 0))" name)
           top_globals_list) ^ "\n"
   in
   let eta_adapters =
@@ -7576,14 +7849,40 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if !str_split_used || !str_join_used || !str_count_used
     then list_str_runtime_wasm else ""
   in
+  (* v0.1.127 boundary: host imports keep the 32-bit JS-friendly ABI
+     (pointers / small ints as i32); each is imported under $<name>_h and
+     an i64 shim with the internal name adapts to the uniform i64 value
+     model. Imports must precede all definitions, so the shim funcs are
+     collected separately (boundary_shims) and emitted after them. *)
   let file_io_imports =
-    (if !file_io_used then
-      "  (import \"env\" \"read_file\" (func $__lang_read_file (param i32) (result i32)))\n\
-      \  (import \"env\" \"write_file\" (func $__lang_write_file (param i32) (param i32) (result i32)))\n"
+    (if !print_no_nl_used then
+      "  (import \"env\" \"print_no_nl\" (func $__lang_print_no_nl_h (param i32)))\n"
+    else "")
+    ^ (if !file_io_used then
+      "  (import \"env\" \"read_file\" (func $__lang_read_file_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"write_file\" (func $__lang_write_file_h (param i32) (param i32) (result i32)))\n"
     else "")
     ^ (if !file_bytes_io_used then
-      "  (import \"env\" \"read_file_bytes\" (func $read_file_bytes (param i32) (result i32)))\n\
-      \  (import \"env\" \"write_file_bytes\" (func $write_file_bytes (param i32) (param i32) (result i32)))\n"
+      "  (import \"env\" \"read_file_bytes\" (func $read_file_bytes_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"write_file_bytes\" (func $write_file_bytes_h (param i32) (param i32) (result i32)))\n"
+    else "")
+  in
+  let boundary_shims =
+    "  (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))\n"
+    ^ (if !print_no_nl_used then
+      "  (func $__lang_print_no_nl (param i64) (call $__lang_print_no_nl_h (i32.wrap_i64 (local.get 0))))\n"
+    else "")
+    ^ (if !file_io_used then
+      "  (func $__lang_read_file (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $__lang_read_file_h (i32.wrap_i64 (local.get 0)))))\n\
+      \  (func $__lang_write_file (param i64) (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $__lang_write_file_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1)))))\n"
+    else "")
+    ^ (if !file_bytes_io_used then
+      "  (func $read_file_bytes (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $read_file_bytes_h (i32.wrap_i64 (local.get 0)))))\n\
+      \  (func $write_file_bytes (param i64) (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $write_file_bytes_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1)))))\n"
     else "")
   in
   (* Phase 34.3: float runtime imports (str_of_float / float_of_str).
@@ -7591,7 +7890,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      even when unused). *)
   let float_io_imports =
     "  (import \"env\" \"__lang_str_of_float\" (func $__lang_str_of_float (param f64) (result i32)))\n\
-    \  (import \"env\" \"__lang_float_of_str\" (func $__lang_float_of_str (param i32) (result f64)))\n"
+    \  (import \"env\" \"__lang_float_of_str\" (func $__lang_float_of_str (param i32) (result f64)))\n\
+    \  (import \"env\" \"time\" (func $__lang_time (result f64)))\n"
   in
   (* Phase 34.4: libm host imports (sin / cos / tan / pow / atan2). sqrt
      uses the Wasm intrinsic, so no host import is needed. *)
@@ -7616,24 +7916,36 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         | _ -> [], Ast.walk t
       in
       let args, ret = flatten ty in
-      let params =
-        args
-        |> List.filter (fun t -> t <> Ast.TyUnit)
-        |> List.map (fun _ -> " (param i32)")
-        |> String.concat ""
-      in
-      let result =
-        match ret with
-        | Ast.TyUnit -> ""
-        | _ -> " (result i32)"
-      in
-      Printf.sprintf "  (import \"env\" \"%s\" (func $%s%s%s))\n"
-        name name params result
+      let n_params =
+        args |> List.filter (fun t -> t <> Ast.TyUnit) |> List.length in
+      (* Host ABI stays 32-bit (pointers / numbers as JS-friendly i32):
+         import the host function as $<name>_h and emit an i64 shim under
+         the internal name, wrapping each arg and extending the result. *)
+      let h_params =
+        String.concat "" (List.init n_params (fun _ -> " (param i32)")) in
+      let h_result = match ret with Ast.TyUnit -> "" | _ -> " (result i32)" in
+      let s_params =
+        String.concat "" (List.init n_params (fun _ -> " (param i64)")) in
+      let s_result = match ret with Ast.TyUnit -> "" | _ -> " (result i64)" in
+      let call_args =
+        String.concat "" (List.init n_params (fun i ->
+          Printf.sprintf " (i32.wrap_i64 (local.get %d))" i)) in
+      let call =
+        Printf.sprintf "(call $%s_h%s)" name call_args in
+      let body = match ret with
+        | Ast.TyUnit -> call
+        | _ -> Printf.sprintf "(i64.extend_i32_u %s)" call in
+      (Printf.sprintf "  (import \"env\" \"%s\" (func $%s_h%s%s))\n"
+         name name h_params h_result,
+       Printf.sprintf "  (func $%s%s%s\n    %s)\n"
+         name s_params s_result body)
       :: acc)
       extern_fn_decls_wasm []
   in
-  let extern_imports = String.concat "" extern_imports in
+  let extern_shims = String.concat "" (List.map snd extern_imports) in
+  let extern_imports = String.concat "" (List.map fst extern_imports) in
   let file_io_imports = file_io_imports ^ extern_imports in
+  let boundary_shims = boundary_shims ^ extern_shims in
   (* Q-012: threading imports + memory mode. When the program spawns, the
      module imports one host-created shared memory (so every worker instance
      shares it) and pulls the spawn/join host functions; otherwise it keeps
@@ -7641,18 +7953,34 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let file_io_imports =
     if !uses_threads then
       file_io_imports
-      ^ "  (import \"env\" \"mere_spawn\" (func $mere_spawn (param i32) (result i32)))\n\
-        \  (import \"env\" \"mere_join\" (func $mere_join (param i32) (result i32)))\n\
-        \  (import \"env\" \"mere_channel_new\" (func $mere_channel_new (param i32) (result i32)))\n\
-        \  (import \"env\" \"mere_channel_send\" (func $mere_channel_send (param i32) (param i32) (result i32)))\n\
-        \  (import \"env\" \"mere_channel_recv\" (func $mere_channel_recv (param i32) (result i32)))\n"
+      ^ "  (import \"env\" \"mere_spawn\" (func $mere_spawn_h (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_join\" (func $mere_join_h (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_new\" (func $mere_channel_new_h (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_send\" (func $mere_channel_send_h (param i32) (param i64) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_recv\" (func $mere_channel_recv_h (param i32) (result i64)))\n"
     else file_io_imports
   in
-  let memory_section =
+  let boundary_shims =
     if !uses_threads then
+      boundary_shims
+      ^ "  (func $mere_spawn (param i64) (result i64)\n\
+        \    (i64.extend_i32_u (call $mere_spawn_h (i32.wrap_i64 (local.get 0)))))\n\
+        \  (func $mere_join (param i64) (result i64)\n\
+        \    (i64.extend_i32_u (call $mere_join_h (i32.wrap_i64 (local.get 0)))))\n\
+        \  (func $mere_channel_new (param i64) (result i64)\n\
+        \    (i64.extend_i32_u (call $mere_channel_new_h (i32.wrap_i64 (local.get 0)))))\n\
+        \  (func $mere_channel_send (param i64) (param i64) (result i64)\n\
+        \    (i64.extend_i32_u (call $mere_channel_send_h (i32.wrap_i64 (local.get 0)) (local.get 1))))\n\
+        \  (func $mere_channel_recv (param i64) (result i64)\n\
+        \    (call $mere_channel_recv_h (i32.wrap_i64 (local.get 0))))\n"
+    else boundary_shims
+  in
+  let memory_section =
+    (if !uses_threads then
       "  (import \"env\" \"memory\" (memory 1024 65536 shared))\n\
       \  (export \"memory\" (memory 0))\n"
-    else "  (memory (export \"memory\") 1024)\n"
+    else "  (memory (export \"memory\") 1024)\n")
+    ^ boundary_shims
   in
   let vec_runtime_section = if !vec_used then vec_runtime else "" in
   let vec_higher_order_section =
@@ -7711,7 +8039,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let vec_to_list_section =
     if not !vec_to_list_used then "" else
     Printf.sprintf "
-  (func $mere_vec_to_list (param $v i32) (result i32)
+  (func $mere_vec_to_list (param $v i64) (result i64)
     (local $len i32) (local $i i32) (local $acc i32)
     (local $tup i32) (local $node i32)
     (local.set $len (i32.load offset=4 (local.get $v)))
@@ -7743,7 +8071,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let list_len_section =
     if not !list_len_used then "" else
     Printf.sprintf "
-  (func $mere_list_len (param $l i32) (result i32)
+  (func $mere_list_len (param $l i64) (result i64)
     (local $n i32) (local $tag i32) (local $payload i32)
     (local.set $n (i32.const 0))
     (block $end
@@ -7759,13 +8087,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   Printf.sprintf
     "(module\n\
-     \  (type $cl (func (param i32) (param i32) (result i32)))\n\
-     \  (import \"env\" \"puts\" (func $puts (param i32)))\n\
+     \  (type $cl (func (param i64) (param i64) (result i64)))\n\
+     \  (import \"env\" \"puts\" (func $puts_h (param i32)))\n\
      %s\
      %s\
      %s\
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
-  (global $__rgn_tmp (mut i32) (i32.const 0))\n\
+  (global $__rgn_tmp (mut i64) (i64.const 0))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\

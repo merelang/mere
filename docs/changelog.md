@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.127 — 2026-08-06
+
+_The Wasm backend's int is now **64-bit** — the receipt from "The Int That
+Stayed 32 Bits" came due. The trigger was exactly the documented one: a real
+dogfood (a Date.now()-driven clock, and mere-ruby running Ruby arithmetic)
+that needs 64-bit integers in the browser. Epoch-milliseconds (~1.75e12)
+overflowed i32: the clock trapped at `int_of_float`, and any Ruby snippet
+above 2^31 either failed to compile (literals, loudly) or couldn't run._
+
+_The design is the uniform one the receipt named for long-running use: every
+value slot widens from 4 to 8 bytes — ints are true i64, pointers carry a
+32-bit address zero-extended, wrapped back to i32 exactly at memory
+operations, tags/indices/the allocator stay 32-bit internally. The JS
+boundary keeps its 32-bit ABI (host imports are declared `$name_h` taking
+i32 pointers; generated in-module shims adapt), so hosts stay BigInt-free
+except where true i64 values cross: the closure call type
+`(param i64 i64) (result i64)` (JS glue passes `BigInt(env)`) and channel
+payloads (the ring is now BigInt64)._
+
+_Verified: the four-backend parity suite is **59/0** including three new
+int64 cases (big-literal arithmetic, epoch divmod, `int_of_float` above
+2^31, 64-bit bitwise); ctest 12/0; self-host fixpoint all-passed; a live
+clock prints the correct time on Node; and mere-ruby — a 17k-line Ruby
+interpreter — compiles to Wasm (500k lines of WAT), validates, and computes
+`1234567890123 + 1` correctly. Also fixed en route: the C backend's
+`int_of_float` truncated through a 32-bit `(int)` cast (epoch-ms came out
+as `INT_MAX`), and `time` / `print_no_nl` gained Wasm host wiring._
+
+---
+
 ## v0.1.115 — 2026-08-04
 
 _Positioned **write** — the write half of the file API, and the forcing
