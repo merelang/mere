@@ -12,6 +12,9 @@ let usage () =
   print_endline "  mere -lle <expr>      emit LLVM IR for an inline expression";
   print_endline "  mere -w <file.mere>   emit Wasm (WAT, use wat2wasm + Node.js)";
   print_endline "  mere -we <expr>       emit Wasm (WAT) for an inline expression";
+  print_endline "  mere -w --component <file.mere>";
+  print_endline "                        emit Wasm in Component Model shape (exports";
+  print_endline "                        run + cabi_realloc; feed to wasm-tools component)";
   print_endline "  mere -r               start interactive REPL";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
@@ -74,6 +77,12 @@ let run_action action label source =
    repo `import "contrib/http/router.mere"` as long as the compiler
    was invoked with `-I /path/to/mere/checkout`. *)
 let search_paths : string list ref = ref []
+
+(* --component: emit the Wasm backend in WebAssembly Component Model shape
+   (exports `run` + `cabi_realloc`, no ambient env imports). Opt-in; the
+   default core-module output is unchanged. Extracted from argv in
+   preprocess_argv, like -I. See aidocs note 152. *)
+let component_flag : bool ref = ref false
 
 let infer_program ?base_dir source =
   let open Mere in
@@ -161,7 +170,7 @@ let compile_to_llvm ?base_dir source =
 let compile_to_wasm ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir source in
-  Codegen_wasm.emit_program ~main_ty prog
+  Codegen_wasm.emit_program ~main_ty ~component:!component_flag prog
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -261,6 +270,7 @@ let preprocess_argv () : string array =
   let rec walk kept dirs = function
     | [] -> (List.rev kept, List.rev dirs)
     | "-I" :: d :: rest -> walk kept (d :: dirs) rest
+    | "--component" :: rest -> component_flag := true; walk kept dirs rest
     | tok :: rest -> walk (tok :: kept) dirs rest
   in
   let (kept, dashI_dirs) = walk [] [] argv in
