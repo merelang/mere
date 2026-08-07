@@ -1,0 +1,124 @@
+// Parity lock for the RISC-V RV32I emulator shape (examples/riscv.mere).
+// A compact core that assembles and runs a tiny program touching each of the
+// harder-to-encode instruction formats — R (ADD), I (ADDI/LW/JALR), S (SW),
+// B (BLT, with its scattered, sign-extended immediate) and J (JAL) — so a
+// backend that mishandles the 32-bit masking, sign extension, or bit-field
+// (un)packing diverges from the interpreter. This is the rung that the
+// uniform 64-bit value model (Wasm included) unblocked: a 32-bit add needs
+// headroom above 32 bits before masking. The fetch-decode loop is named
+// `run` to keep the top-level builtin-shadowing fix (v0.1.130) locked here too.
+
+let mask32 = fn x -> bit_and x 4294967295;
+let signed32 = fn x ->
+  let m = mask32 x in if bit_and m 2147483648 == 0 then m else m - 4294967296;
+let sign_ext = fn v -> fn bits ->
+  let half = bit_shl 1 (bits - 1) in
+  if bit_and v half == 0 then v else v - bit_shl 1 bits;
+let new_vec = fn n -> fn x ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in v;
+let ld32 = fn mem -> fn a ->
+  vec_get mem a + vec_get mem (a+1)*256 + vec_get mem (a+2)*65536 + vec_get mem (a+3)*16777216;
+let st32 = fn mem -> fn a -> fn v ->
+  let _ = vec_set mem a (bit_and v 255) in
+  let _ = vec_set mem (a+1) (bit_and (bit_shr v 8) 255) in
+  let _ = vec_set mem (a+2) (bit_and (bit_shr v 16) 255) in
+  vec_set mem (a+3) (bit_and (bit_shr v 24) 255);
+let wrx = fn x -> fn i -> fn v -> if i == 0 then () else vec_set x i (mask32 v);
+
+let imm_i = fn inst -> sign_ext (bit_and (bit_shr inst 20) 4095) 12;
+let imm_s = fn inst -> sign_ext (bit_or (bit_shl (bit_and (bit_shr inst 25) 127) 5) (bit_and (bit_shr inst 7) 31)) 12;
+let imm_b = fn inst ->
+  let b12 = bit_and (bit_shr inst 31) 1 in let b11 = bit_and (bit_shr inst 7) 1 in
+  let b10_5 = bit_and (bit_shr inst 25) 63 in let b4_1 = bit_and (bit_shr inst 8) 15 in
+  sign_ext (bit_or (bit_shl b12 12) (bit_or (bit_shl b11 11) (bit_or (bit_shl b10_5 5) (bit_shl b4_1 1)))) 13;
+let imm_j = fn inst ->
+  let b20 = bit_and (bit_shr inst 31) 1 in let b19_12 = bit_and (bit_shr inst 12) 255 in
+  let b11 = bit_and (bit_shr inst 20) 1 in let b10_1 = bit_and (bit_shr inst 21) 1023 in
+  sign_ext (bit_or (bit_shl b20 20) (bit_or (bit_shl b19_12 12) (bit_or (bit_shl b11 11) (bit_shl b10_1 1)))) 21;
+
+let step = fn mem -> fn x -> fn st ->
+  let pc = vec_get st 0 in
+  let inst = ld32 mem pc in
+  let _ = vec_set st 0 (mask32 (pc + 4)) in
+  let op = bit_and inst 127 in
+  let rd = bit_and (bit_shr inst 7) 31 in
+  let f3 = bit_and (bit_shr inst 12) 7 in
+  let rs1 = bit_and (bit_shr inst 15) 31 in
+  let rs2 = bit_and (bit_shr inst 20) 31 in
+  let f7 = bit_and (bit_shr inst 25) 127 in
+  let a = vec_get x rs1 in
+  let b = vec_get x rs2 in
+  if op == 0x6F then let _ = wrx x rd (mask32 (pc + 4)) in vec_set st 0 (mask32 (pc + imm_j inst))  // JAL
+  else if op == 0x67 then                                                                            // JALR
+    let t = bit_and (mask32 (a + imm_i inst)) 4294967294 in
+    let _ = wrx x rd (mask32 (pc + 4)) in vec_set st 0 t
+  else if op == 0x63 then                                                                            // BLT (only f3=4 used)
+    if signed32 a < signed32 b then vec_set st 0 (mask32 (pc + imm_b inst)) else ()
+  else if op == 0x03 then wrx x rd (ld32 mem (mask32 (a + imm_i inst)))                              // LW
+  else if op == 0x23 then st32 mem (mask32 (a + imm_s inst)) b                                       // SW
+  else if op == 0x13 then wrx x rd (mask32 (a + imm_i inst))                                         // ADDI
+  else if op == 0x33 then (if f7 == 0 then wrx x rd (mask32 (a + b)) else wrx x rd (mask32 (a - b))) // ADD/SUB
+  else vec_set st 1 1;                                                                               // ECALL/other -> halt
+
+let rec run = fn mem -> fn x -> fn st -> fn budget ->
+  if budget <= 0 then () else if vec_get st 1 == 1 then () else let _ = step mem x st in run mem x st (budget - 1);
+
+let asm_r = fn f7 -> fn rs2 -> fn rs1 -> fn f3 -> fn rd -> fn op ->
+  bit_or (bit_shl f7 25) (bit_or (bit_shl rs2 20) (bit_or (bit_shl rs1 15) (bit_or (bit_shl f3 12) (bit_or (bit_shl rd 7) op))));
+let asm_i = fn imm -> fn rs1 -> fn f3 -> fn rd -> fn op ->
+  bit_or (bit_shl (bit_and imm 4095) 20) (bit_or (bit_shl rs1 15) (bit_or (bit_shl f3 12) (bit_or (bit_shl rd 7) op)));
+let asm_s = fn imm -> fn rs2 -> fn rs1 -> fn f3 -> fn op ->
+  let i = bit_and imm 4095 in
+  bit_or (bit_shl (bit_shr i 5) 25) (bit_or (bit_shl rs2 20) (bit_or (bit_shl rs1 15) (bit_or (bit_shl f3 12) (bit_or (bit_shl (bit_and i 31) 7) op))));
+let asm_b = fn imm -> fn rs2 -> fn rs1 -> fn f3 -> fn op ->
+  let i = bit_and imm 8191 in
+  let b12 = bit_and (bit_shr i 12) 1 in let b11 = bit_and (bit_shr i 11) 1 in
+  let b10_5 = bit_and (bit_shr i 5) 63 in let b4_1 = bit_and (bit_shr i 1) 15 in
+  bit_or (bit_shl b12 31) (bit_or (bit_shl b10_5 25) (bit_or (bit_shl rs2 20) (bit_or (bit_shl rs1 15) (bit_or (bit_shl f3 12) (bit_or (bit_shl b4_1 8) (bit_or (bit_shl b11 7) op))))));
+let asm_j = fn imm -> fn rd -> fn op ->
+  let i = bit_and imm 2097151 in
+  let b20 = bit_and (bit_shr i 20) 1 in let b19_12 = bit_and (bit_shr i 12) 255 in
+  let b11 = bit_and (bit_shr i 11) 1 in let b10_1 = bit_and (bit_shr i 1) 1023 in
+  bit_or (bit_shl b20 31) (bit_or (bit_shl b19_12 12) (bit_or (bit_shl b11 20) (bit_or (bit_shl b10_1 21) (bit_or (bit_shl rd 7) op))));
+
+let mem = new_vec 65536 0;
+let x = new_vec 32 0;
+let st = new_vec 2 0;
+
+//   0x00 addi x1,x0,0      sum=0
+//   0x04 addi x2,x0,1      i=1
+//   0x08 addi x3,x0,6      limit=6
+//   0x0C add  x1,x1,x2     loop: sum += i
+//   0x10 addi x2,x2,1      i++
+//   0x14 blt  x2,x3,-8     if i<6 goto loop
+//   0x18 jal  x5,+8        jump over the ecall; x5 = 0x1C
+//   0x1C ecall             (skipped)
+//   0x20 sw   x1,0(x0)     mem[0] = 15
+//   0x24 lw   x4,0(x0)     x4 = 15
+//   0x28 ecall             halt
+let prog = vec_new ();
+let _ = vec_push prog (asm_i 0 0 0 1 0x13);
+let _ = vec_push prog (asm_i 1 0 0 2 0x13);
+let _ = vec_push prog (asm_i 6 0 0 3 0x13);
+let _ = vec_push prog (asm_r 0 2 1 0 1 0x33);
+let _ = vec_push prog (asm_i 1 2 0 2 0x13);
+let _ = vec_push prog (asm_b (0 - 8) 3 2 4 0x63);
+let _ = vec_push prog (asm_j 8 5 0x6F);
+let _ = vec_push prog (asm_i 0 0 0 0 0x73);
+let _ = vec_push prog (asm_s 0 1 0 2 0x23);
+let _ = vec_push prog (asm_i 0 0 2 4 0x03);
+let _ = vec_push prog (asm_i 0 0 0 0 0x73);
+
+let rec lay = fn i ->
+  if i >= vec_len prog then () else let _ = st32 mem (i * 4) (vec_get prog i) in lay (i + 1);
+let _ = lay 0;
+let _ = run mem x st 1000;
+
+let _ = print (str_of_int (vec_get x 1));    // x1 = 15  (1+2+3+4+5)
+let _ = print (str_of_int (vec_get x 2));    // x2 = 6   (loop counter at exit)
+let _ = print (str_of_int (vec_get x 4));    // x4 = 15  (loaded from mem[0])
+let _ = print (str_of_int (vec_get x 5));    // x5 = 28  (JAL return address 0x1C)
+let _ = print (str_of_int (ld32 mem 0));     // mem[0] = 15
+0
