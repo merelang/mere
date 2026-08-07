@@ -38,9 +38,9 @@
   (table 66 funcref)
   (export "__indirect_function_table" (table 0))
   (elem (i32.const 0) $handle_key_closure $frame_closure $render_closure $step_closure $rng_next_closure $draw_closure $seti_closure $geti_closure $blit_bytes_closure $new_vec_closure $mask12_closure $mask8_closure $pad_left_closure $pad_right_closure $utf8_width_closure $_u8w_go_closure $_eaw_width_closure $utf8_rev_closure $_u8_rev_join_closure $utf8_sub_closure $_u8_slice_closure $utf8_at_closure $_u8_nth_closure $list_product_closure $list_sum_closure $range_closure $_range_down_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn $anon_12_fn $anon_13_fn $anon_14_fn $anon_15_fn $anon_16_fn $anon_17_fn $anon_18_fn $anon_19_fn $anon_20_fn $anon_21_fn $anon_22_fn $anon_23_fn $anon_24_fn $anon_25_fn $anon_26_fn $anon_27_fn $anon_28_fn $anon_29_fn $anon_30_fn $anon_31_fn $anon_32_fn $anon_33_fn $anon_34_fn $anon_35_fn $anon_36_fn $anon_37_fn)
-  (global $__lang_bump (export "__lang_bump") (mut i32) (i32.const 816))
+  (global $__lang_bump (export "__lang_bump") (mut i32) (i32.const 1952))
 (global $__rgn_tmp (mut i64) (i64.const 0))
-  (global $__lang_char_table i32 (i32.const 304))
+  (global $__lang_char_table i32 (i32.const 416))
   (global $__lang_char_table_initialized (mut i32) (i32.const 0))
   (global $__lang_fail_flag (mut i32) (i32.const 0))
   (global $__lang_fail_active (mut i32) (i32.const 0))
@@ -53,46 +53,70 @@
   (global $keys (mut i64) (i64.const 0))
   (global $screen (mut i64) (i64.const 0))
   (global $scale (mut i64) (i64.const 0))
-  (data (i32.const 16) "1\00")
-  (data (i32.const 18) "2\00")
-  (data (i32.const 20) "3\00")
-  (data (i32.const 22) "4\00")
-  (data (i32.const 24) "q\00")
-  (data (i32.const 26) "w\00")
-  (data (i32.const 28) "e\00")
-  (data (i32.const 30) "r\00")
-  (data (i32.const 32) "a\00")
-  (data (i32.const 34) "s\00")
-  (data (i32.const 36) "d\00")
-  (data (i32.const 38) "f\00")
-  (data (i32.const 40) "z\00")
-  (data (i32.const 42) "x\00")
-  (data (i32.const 44) "c\00")
-  (data (i32.const 46) "v\00")
-  (data (i32.const 48) "#0b0f14\00")
-  (data (i32.const 56) "#7ee787\00")
-  (data (i32.const 64) "\00")
-  (data (i32.const 65) "()\00")
-  (data (i32.const 68) "F0909090F02060202070F010F080F0F010F010F09090F01010F080F010F0\00")
-  (data (i32.const 129) "F080F090F0F010204040F090F090F0F090F010F0F090F09090E090E090E0F0808080F0E0909090E0F080F080F0F080F08080\00")
-  (data (i32.const 230) "6c0f600000e0f029611a620dd1256a08fa15fb073b001212700180c21204\00")
-  (data (i32.const 291) "screen\00")
-  (data (i32.const 298) "\00")
-  (data (i32.const 299) "\00")
-  (data (i32.const 300) " \00")
-  (data (i32.const 302) " \00")
+  (data (i32.const 16) "\01\00\00\001\00")
+  (data (i32.const 22) "\01\00\00\002\00")
+  (data (i32.const 28) "\01\00\00\003\00")
+  (data (i32.const 34) "\01\00\00\004\00")
+  (data (i32.const 40) "\01\00\00\00q\00")
+  (data (i32.const 46) "\01\00\00\00w\00")
+  (data (i32.const 52) "\01\00\00\00e\00")
+  (data (i32.const 58) "\01\00\00\00r\00")
+  (data (i32.const 64) "\01\00\00\00a\00")
+  (data (i32.const 70) "\01\00\00\00s\00")
+  (data (i32.const 76) "\01\00\00\00d\00")
+  (data (i32.const 82) "\01\00\00\00f\00")
+  (data (i32.const 88) "\01\00\00\00z\00")
+  (data (i32.const 94) "\01\00\00\00x\00")
+  (data (i32.const 100) "\01\00\00\00c\00")
+  (data (i32.const 106) "\01\00\00\00v\00")
+  (data (i32.const 112) "\07\00\00\00#0b0f14\00")
+  (data (i32.const 124) "\07\00\00\00#7ee787\00")
+  (data (i32.const 136) "\00\00\00\00\00")
+  (data (i32.const 141) "\02\00\00\00()\00")
+  (data (i32.const 148) "\3c\00\00\00F0909090F02060202070F010F080F0F010F010F09090F01010F080F010F0\00")
+  (data (i32.const 213) "\64\00\00\00F080F090F0F010204040F090F090F0F090F010F0F090F09090E090E090E0F0808080F0E0909090E0F080F080F0F080F08080\00")
+  (data (i32.const 318) "\3c\00\00\006c0f600000e0f029611a620dd1256a08fa15fb073b001212700180c21204\00")
+  (data (i32.const 383) "\06\00\00\00screen\00")
+  (data (i32.const 394) "\00\00\00\00\00")
+  (data (i32.const 399) "\00\00\00\00\00")
+  (data (i32.const 404) "\01\00\00\00 \00")
+  (data (i32.const 410) "\01\00\00\00 \00")
 
+  ;; byte-safe str: linear-memory layout is [i32 len][len bytes]['\0'].
+  ;; A `str` value is the address of byte0; the 4-byte length header sits
+  ;; immediately before it (addr-4). NUL-free strings stay C/host-interop
+  ;; compatible (the trailing '\0' is preserved); embedded NULs survive
+  ;; because length comes from the header, not a NUL scan. Wasm permits
+  ;; unaligned i32 access, so the header needs no alignment.
+  (func $__lang_str_alloc (param $len8 i64) (result i64)
+    (local $len i32) (local $p i32)
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
+    (i32.store (global.get $__lang_bump) (local.get $len))          ;; header
+    (local.set $p (i32.add (global.get $__lang_bump) (i32.const 4))) ;; byte0
+    (i32.store8 (i32.add (local.get $p) (local.get $len)) (i32.const 0)) ;; NUL
+    (global.set $__lang_bump
+      (i32.add (local.get $p) (i32.add (local.get $len) (i32.const 1))))
+    (i64.extend_i32_u (local.get $p)))
+  ;; str length = i32 header at addr-4 (byte-safe: counts embedded NULs).
   (func $__lang_strlen (param $s8 i64) (result i64)
-    (local $i i32)
-    (local $s i32)
-    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (i64.extend_i32_u
+      (i32.load (i32.sub (i32.wrap_i64 (local.get $s8)) (i32.const 4)))))
+  ;; Copy `len` raw bytes into a fresh header'd str. Used to finalize
+  ;; right-to-left digit buffers (show_int / to_json_int) whose result
+  ;; pointer floats inside a scratch region with no room for a header.
+  (func $__lang_str_copyn (param $src8 i64) (param $len8 i64) (result i64)
+    (local $src i32) (local $len i32) (local $dst i32) (local $i i32)
+    (local.set $src (i32.wrap_i64 (local.get $src8)))
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
+    (local.set $dst (i32.wrap_i64 (call $__lang_str_alloc (i64.extend_i32_u (local.get $len)))))
     (local.set $i (i32.const 0))
-    (block $end
-      (loop $lp
-        (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))
-        (local.set $i (i32.add (local.get $i) (i32.const 1)))
-        (br $lp)))
-    (i64.extend_i32_s (local.get $i)))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $len)))
+      (i32.store8 (i32.add (local.get $dst) (local.get $i))
+                  (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (i64.extend_i32_u (local.get $dst)))
   (func $__lang_str_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $la i32) (local $lb i32) (local $r i32) (local $i i32)
     (local $a i32)
@@ -101,7 +125,7 @@
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
     (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end_a
       (loop $lp_a
@@ -123,6 +147,7 @@
     (global.set $__lang_bump
       (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
                (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; v0.1.37: deep-copy a NUL-terminated str into fresh bump space.
   ;; Region blocks copy their result out before releasing the block's
@@ -133,7 +158,7 @@
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $l (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -144,45 +169,60 @@
         (br $lp)))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $l)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
+  ;; byte-safe: compare lengths (from header) then bytes over that length,
+  ;; so embedded NULs count instead of terminating the scan.
   (func $__lang_streq (param $a8 i64) (param $b8 i64) (result i64)
-    (local $ba i32) (local $bb i32)
+    (local $la i32) (local $lb i32) (local $i i32)
     (local $a i32)
     (local $b i32)
     (local.set $a (i32.wrap_i64 (local.get $a8)))
     (local.set $b (i32.wrap_i64 (local.get $b8)))
-    (block $not_eq
+    (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
+    (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
+    (if (i32.ne (local.get $la) (local.get $lb))
+      (then (return (i64.extend_i32_s (i32.const 0)))))
+    (local.set $i (i32.const 0))
+    (block $end
       (loop $lp
-        (local.set $ba (i32.load8_u (local.get $a)))
-        (local.set $bb (i32.load8_u (local.get $b)))
-        (br_if $not_eq (i32.ne (local.get $ba) (local.get $bb)))
-        (if (i32.eqz (local.get $ba))
-          (then (return (i64.extend_i32_s (i32.const 1)))))
-        (local.set $a (i32.add (local.get $a) (i32.const 1)))
-        (local.set $b (i32.add (local.get $b) (i32.const 1)))
+        (br_if $end (i32.eq (local.get $i) (local.get $la)))
+        (if (i32.ne (i32.load8_u (i32.add (local.get $a) (local.get $i)))
+                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))
+          (then (return (i64.extend_i32_s (i32.const 0)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (i64.extend_i32_s (i32.const 0)))
+    (i64.extend_i32_s (i32.const 1)))
   ;; Phase 31.0: str_compare — returns -1 / 0 / 1 (sign-normalized, matches
   ;; interp's `compare s t` from OCaml stdlib).
+  ;; byte-safe: memcmp over min(la,lb), then length tiebreak.
   (func $__lang_str_compare (param $a8 i64) (param $b8 i64) (result i64)
+    (local $la i32) (local $lb i32) (local $n i32) (local $i i32)
     (local $ba i32) (local $bb i32)
     (local $a i32)
     (local $b i32)
     (local.set $a (i32.wrap_i64 (local.get $a8)))
     (local.set $b (i32.wrap_i64 (local.get $b8)))
-    (loop $lp
-      (local.set $ba (i32.load8_u (local.get $a)))
-      (local.set $bb (i32.load8_u (local.get $b)))
-      (if (i32.lt_u (local.get $ba) (local.get $bb))
-        (then (return (i64.extend_i32_s (i32.const -1)))))
-      (if (i32.gt_u (local.get $ba) (local.get $bb))
-        (then (return (i64.extend_i32_s (i32.const 1)))))
-      (if (i32.eqz (local.get $ba))
-        (then (return (i64.extend_i32_s (i32.const 0)))))
-      (local.set $a (i32.add (local.get $a) (i32.const 1)))
-      (local.set $b (i32.add (local.get $b) (i32.const 1)))
-      (br $lp))
-    (unreachable))
+    (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
+    (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
+    (local.set $n (select (local.get $la) (local.get $lb) (i32.lt_u (local.get $la) (local.get $lb))))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $n)))
+        (local.set $ba (i32.load8_u (i32.add (local.get $a) (local.get $i))))
+        (local.set $bb (i32.load8_u (i32.add (local.get $b) (local.get $i))))
+        (if (i32.lt_u (local.get $ba) (local.get $bb))
+          (then (return (i64.extend_i32_s (i32.const -1)))))
+        (if (i32.gt_u (local.get $ba) (local.get $bb))
+          (then (return (i64.extend_i32_s (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (if (i32.lt_u (local.get $la) (local.get $lb))
+      (then (return (i64.extend_i32_s (i32.const -1)))))
+    (if (i32.gt_u (local.get $la) (local.get $lb))
+      (then (return (i64.extend_i32_s (i32.const 1)))))
+    (i64.extend_i32_s (i32.const 0)))
   ;; Phase 19.1.1: str_index_of — returns position of needle in haystack,
   ;; -1 if not found. Empty needle returns 0.
   (func $__lang_str_index_of (param $h8 i64) (param $n8 i64) (result i64)
@@ -230,21 +270,27 @@
                 (i32.eq (local.get $c) (i32.const 13))))
       (i32.eq (local.get $c) (i32.const 12)))))
   ;; Phase 36: str_starts_with — bool (i32 0/1)
+  ;; byte-safe: bound the compare by the prefix length (header), not a NUL.
   (func $__lang_str_starts_with (param $s8 i64) (param $p8 i64) (result i64)
-    (local $i i32) (local $cs i32) (local $cp i32)
+    (local $i i32) (local $sl i32) (local $pl i32)
     (local $s i32)
     (local $p i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $p (i32.wrap_i64 (local.get $p8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $pl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))
+    (if (i32.gt_u (local.get $pl) (local.get $sl))
+      (then (return (i64.extend_i32_s (i32.const 0)))))
     (local.set $i (i32.const 0))
-    (loop $lp
-      (local.set $cp (i32.load8_u (i32.add (local.get $p) (local.get $i))))
-      (if (i32.eqz (local.get $cp)) (then (return (i64.extend_i32_s (i32.const 1)))))
-      (local.set $cs (i32.load8_u (i32.add (local.get $s) (local.get $i))))
-      (if (i32.ne (local.get $cs) (local.get $cp)) (then (return (i64.extend_i32_s (i32.const 0)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $lp))
-    (unreachable))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $pl)))
+        (if (i32.ne (i32.load8_u (i32.add (local.get $s) (local.get $i)))
+                    (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+          (then (return (i64.extend_i32_s (i32.const 0)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i64.extend_i32_s (i32.const 1)))
   ;; Phase 36: str_trim — strip leading + trailing whitespace
   (func $__lang_str_trim (param $s8 i64) (result i64)
     (local $p i32) (local $len i32) (local $r i32) (local $i i32) (local $c i32)
@@ -271,7 +317,7 @@
         (local.set $len (i32.sub (local.get $len) (i32.const 1)))
         (br $lp_trail)))
     ;; copy [p, p+len) to bump
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end_copy
       (loop $lp_copy
@@ -283,6 +329,7 @@
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: str_ends_with — bool (i32 0/1)
   (func $__lang_str_ends_with (param $s8 i64) (param $p8 i64) (result i64)
@@ -315,12 +362,13 @@
     (local.set $n (i32.wrap_i64 (local.get $n8)))
     (if (i32.le_s (local.get $n) (i32.const 0))
       (then
-        (local.set $r (global.get $__lang_bump))
+        (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
         (i32.store8 (local.get $r) (i32.const 0))
         (global.set $__lang_bump (i32.add (local.get $r) (i32.const 1)))
+        (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.const 0))
         (return (i64.extend_i32_s (local.get $r)))))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end_outer
       (loop $lp_outer
@@ -342,6 +390,7 @@
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $sl)))
                (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: str_rev
   (func $__lang_str_rev (param $s8 i64) (result i64)
@@ -349,7 +398,7 @@
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -363,6 +412,7 @@
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: chr n — return char_table entry pointer for byte n.
   ;; Mask to a single byte (n & 0xFF) so out-of-range input can't index
@@ -372,8 +422,8 @@
     (local $n i32)
     (local.set $n (i32.wrap_i64 (local.get $n8)))
     (call $__lang_char_at_setup)
-    (i64.extend_i32_s (i32.add (global.get $__lang_char_table)
-      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 2)))))
+    (i64.extend_i32_s (i32.add (i32.add (global.get $__lang_char_table)
+      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 6))) (i32.const 4))))
   ;; Phase 36: abs / min / max / clamp
   (func $__lang_abs (param $n i64) (result i64)
     (if (i64.lt_s (local.get $n) (i64.const 0))
@@ -399,7 +449,7 @@
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -414,13 +464,14 @@
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_to_lower (param $s8 i64) (result i64)
     (local $sl i32) (local $r i32) (local $i i32) (local $c i32)
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -435,6 +486,7 @@
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: gcd via iterative Euclid on |a|, |b|
   (func $__lang_gcd (param $a0 i64) (param $b0 i64) (result i64)
@@ -477,7 +529,7 @@
     (if (i32.eqz (local.get $olen)) (then (return (i64.extend_i32_s (local.get $s)))))
     (local.set $slen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $nlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $new)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $bi (i32.const 0))
     (local.set $i (i32.const 0))
     (block $end_outer
@@ -519,6 +571,7 @@
         (br $lp_outer)))
     (i32.store8 (i32.add (local.get $r) (local.get $bi)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $bi)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 26.1/26.2: fail msg — if a try_or scope is active, set the
   ;; failure flag and return 0 (the caller's expected result type is i32
@@ -547,9 +600,13 @@
         (block $end
           (loop $lp
             (br_if $end (i32.eq (local.get $k) (i32.const 256)))
-            (i32.store8 (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 2)))
+            ;; byte-safe entry: stride 6 = [i32 len=1][char][NUL]; the str
+            ;; pointer returned is base + k*6 + 4 (header at base + k*6).
+            (i32.store   (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 6)))
+                         (i32.const 1))
+            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 6))) (i32.const 4))
                         (local.get $k))
-            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 2))) (i32.const 1))
+            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 6))) (i32.const 5))
                         (i32.const 0))
             (local.set $k (i32.add (local.get $k) (i32.const 1)))
             (br $lp))))))
@@ -559,8 +616,8 @@
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $i (i32.wrap_i64 (local.get $i8)))
     (call $__lang_char_at_setup)
-    (i64.extend_i32_s (i32.add (global.get $__lang_char_table)
-             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 2)))))
+    (i64.extend_i32_s (i32.add (i32.add (global.get $__lang_char_table)
+             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 6))) (i32.const 4))))
   (func $__lang_is_digit (param $s8 i64) (result i64)
     (local $c i32)
     (local $s i32)
@@ -600,7 +657,7 @@
     (local.set $len (i32.sub (local.get $end_) (local.get $start)))
     (if (i32.lt_s (local.get $len) (i32.const 0))
       (then (local.set $len (i32.const 0))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -613,6 +670,7 @@
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; v0.1.60: int_of_str s msg — strict decimal parse
   ;; (WS* [+-]? DIGIT+ WS*); anything else calls $__lang_fail with the
@@ -684,7 +742,7 @@
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (local.set $j (i32.const 0))
     (block $end
@@ -713,6 +771,7 @@
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 26.6: str_escape s — backslash-escape newline / tab / cr / backslash
   ;; / quote. show_str pipes through this so output matches interp. Worst-case
@@ -722,7 +781,7 @@
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (local.set $j (i32.const 0))
     (block $end
@@ -755,6 +814,7 @@
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_list_str_nil (result i64)
     (local $p i32)
@@ -826,8 +886,9 @@
             (br $back)))
         (local.set $l (i32.sub (local.get $end) (local.get $st)))
         ;; copy the char bytes into a fresh NUL-terminated str
-        (local.set $tok (global.get $__lang_bump))
+        (local.set $tok (i32.add (global.get $__lang_bump) (i32.const 4)))
         (global.set $__lang_bump (i32.add (i32.add (local.get $tok) (local.get $l)) (i32.const 1)))
+        (i32.store (i32.sub (local.get $tok) (i32.const 4)) (local.get $l))
         (local.set $j (i32.const 0))
         (block $cend
           (loop $clp
@@ -946,9 +1007,10 @@
         (local.set $b_off (i32.mul (local.get $bi) (i32.const 4)))
         (local.set $tstart (i32.load (i32.add (local.get $starts) (local.get $b_off))))
         (local.set $tlen (i32.load (i32.add (local.get $lens) (local.get $b_off))))
-        (local.set $tk (global.get $__lang_bump))
+        (local.set $tk (i32.add (global.get $__lang_bump) (i32.const 4)))
         (global.set $__lang_bump
           (i32.add (local.get $tk) (i32.add (local.get $tlen) (i32.const 1))))
+        (i32.store (i32.sub (local.get $tk) (i32.const 4)) (local.get $tlen))
         ;; memcpy
         (local.set $j (i32.const 0))
         (block $end_cp
@@ -994,7 +1056,7 @@
         (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $box))))
         (br $lp_len)))
     ;; Allocate result + null terminator.
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (global.set $__lang_bump
       (i32.add (local.get $r) (i32.add (local.get $total) (i32.const 1))))
     ;; Pass 2: write.
@@ -1039,6 +1101,7 @@
         (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $box))))
         (br $lp_w)))
     (i32.store8 (i32.add (local.get $r) (local.get $total)) (i32.const 0))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; str_count s n — non-overlapping count of n in s.
   (func $__lang_str_count (param $s8 i64) (param $n8 i64) (result i64)
@@ -1322,7 +1385,7 @@
     (local $b i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
@@ -1332,6 +1395,7 @@
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (local.get $n)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $n)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_hexchar (param $d8 i64) (result i64)
     (local $d i32)
@@ -1344,7 +1408,7 @@
     (local $b i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
@@ -1357,6 +1421,7 @@
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_hexval (param $c8 i64) (result i64)
     (local $c i32)
@@ -1428,112 +1493,112 @@
   (func $handle_key (param i64) (result i64)
     (local i64)
     local.get 0
-    i64.const 16
+    i64.const 20
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 1
     else
     local.get 0
-    i64.const 18
+    i64.const 26
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 2
     else
     local.get 0
-    i64.const 20
+    i64.const 32
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 3
     else
     local.get 0
-    i64.const 22
+    i64.const 38
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 12
     else
     local.get 0
-    i64.const 24
+    i64.const 44
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 4
     else
     local.get 0
-    i64.const 26
+    i64.const 50
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 5
     else
     local.get 0
-    i64.const 28
+    i64.const 56
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 6
     else
     local.get 0
-    i64.const 30
+    i64.const 62
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 13
     else
     local.get 0
-    i64.const 32
+    i64.const 68
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 7
     else
     local.get 0
-    i64.const 34
+    i64.const 74
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 8
     else
     local.get 0
-    i64.const 36
+    i64.const 80
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 9
     else
     local.get 0
-    i64.const 38
+    i64.const 86
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 14
     else
     local.get 0
-    i64.const 40
+    i64.const 92
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 10
     else
     local.get 0
-    i64.const 42
+    i64.const 98
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 0
     else
     local.get 0
-    i64.const 44
+    i64.const 104
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
     i64.const 11
     else
     local.get 0
-    i64.const 46
+    i64.const 110
     call $__lang_streq
     i32.wrap_i64
     if (result i64)
@@ -1574,9 +1639,15 @@
     end)
   (func $frame (param i64) (result i64)
     (local i64)
+    global.get $mem
+    global.get $v
+    global.get $reg
+    global.get $stack
+    global.get $disp
+    global.get $rng
+    global.get $keys
     i64.const 12
-    drop
-    i64.const 127
+    call $__lifted_run_0
     drop
     global.get $reg
     i64.const 3
@@ -1602,7 +1673,7 @@
     return_call $render)
   (func $render (param i64) (result i64)
     global.get $screen
-    i64.const 48
+    i64.const 116
     call $dom_canvas_fill_style
     i64.const 0
     drop
@@ -1615,7 +1686,7 @@
     i64.const 0
     drop
     global.get $screen
-    i64.const 56
+    i64.const 128
     call $dom_canvas_fill_style
     i64.const 0
     drop
@@ -2196,7 +2267,7 @@
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
-    i64.const 64
+    i64.const 140
     local.get 1
     i32.wrap_i64
     i32.load offset=4
@@ -2852,11 +2923,17 @@
     i32.load offset=4
     call_indirect (type $cl)
     drop
+    local.get 0
+    local.get 1
+    local.get 2
+    local.get 3
+    local.get 4
+    local.get 5
+    local.get 6
     local.get 7
     i64.const 1
     i64.sub
-    drop
-    i64.const 127
+    return_call $__lifted_run_0
     end)
   (func $handle_key_closure (param i64) (param i64) (result i64)
     local.get 1
@@ -3330,7 +3407,7 @@
     local.set 4
     local.get 4
     if (result i64)
-    i64.const 298
+    i64.const 398
     else
     local.get 3
     i32.wrap_i64
@@ -3736,7 +3813,7 @@
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
-    i64.const 299
+    i64.const 403
     local.get 4
     i32.wrap_i64
     i32.load offset=4
@@ -4245,7 +4322,7 @@
     local.get 2
     else
     local.get 2
-    i64.const 300
+    i64.const 408
     local.get 3
     call $__lang_str_repeat
     call $__lang_str_concat
@@ -4269,7 +4346,7 @@
     if (result i64)
     local.get 2
     else
-    i64.const 302
+    i64.const 414
     local.get 3
     call $__lang_str_repeat
     local.get 2
@@ -5662,7 +5739,7 @@
     end
     end)
   (func $show_unit (param $u i64) (result i64)
-    (i64.const 65))
+    (i64.const 145))
   (func $main (export "main") (result i32)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i32 i32)
     i64.const 4096
@@ -5756,8 +5833,8 @@
     i32.load offset=4
     call_indirect (type $cl)
     global.set $keys
-    i64.const 68
-    i64.const 129
+    i64.const 152
+    i64.const 217
     call $__lang_str_concat
     call $__lang_bytes_of_hex
     local.set 7
@@ -5784,7 +5861,7 @@
     i32.load offset=4
     call_indirect (type $cl)
     drop
-    i64.const 230
+    i64.const 322
     call $__lang_bytes_of_hex
     local.set 10
     global.get $mem
@@ -5815,7 +5892,7 @@
     i64.const 512
     call $mere_vec_set
     drop
-    i64.const 291
+    i64.const 387
     call $dom_get_by_id
     global.set $screen
     i64.const 8
@@ -5869,7 +5946,7 @@
     call $dom_on_frame
     i64.const 0
     drop
-    i64.const 65
+    i64.const 145
     call $puts
     i32.const 0)
 )
