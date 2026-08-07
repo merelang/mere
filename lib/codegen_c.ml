@@ -5944,16 +5944,20 @@ let str_concat_helper =
       (* Phase 36: str_trim — strip leading + trailing ASCII whitespace
          (OCaml String.trim semantics: space / tab / newline / cr / form-feed). *)
       "static const char* __lang_str_trim(const char* s) {";
-      "  while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r' || *s == '\\x0c') s++;";
-      "  size_t len = __lang_str_size(s);";
-      "  while (len > 0) {";
-      "    char c = s[len - 1];";
-      "    if (c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\x0c') len--;";
+      (* Index by offset, never advance s: the length header is only valid at
+         the string's start pointer, so str_size(s) must see the original s. *)
+      "  size_t n = __lang_str_size(s);";
+      "  size_t a = 0;";
+      "  while (a < n && (s[a] == ' ' || s[a] == '\\t' || s[a] == '\\n' || s[a] == '\\r' || s[a] == '\\x0c')) a++;";
+      "  size_t b = n;";
+      "  while (b > a) {";
+      "    char c = s[b - 1];";
+      "    if (c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\x0c') b--;";
       "    else break;";
       "  }";
+      "  size_t len = b - a;";
       "  char* buf = __lang_str_alloc(__lang_current_region, len);";
-      "  if (len > 0) memcpy(buf, s, len);";
-      "  buf[len] = '\\0';";
+      "  if (len > 0) memcpy(buf, s + a, len);";
       "  return buf;";
       "}";
       "";
@@ -6749,7 +6753,7 @@ let strbuf_runtime =
       "}";
       "";
       "static int mere_strbuf_push(mere_strbuf* sb, const char* s) {";
-      "  int slen = (int)strlen(s);";
+      "  int slen = (int)__lang_str_size(s);";
       "  while (sb->len + slen > sb->cap) {";
       "    int new_cap = sb->cap * 2;";
       "    char* new_data = (char*)__lang_region_alloc(sb->region, sizeof(char) * new_cap);";
@@ -6857,7 +6861,7 @@ let str_list_helpers =
       "  return 1;";
       "}";
       "static int __lang_utf8_len(const char* s) {";
-      "  int n = (int)strlen(s), i = 0, c = 0;";
+      "  int n = (int)__lang_str_size(s), i = 0, c = 0;";
       "  while (i < n) {";
       "    int l = __lang_utf8_span((unsigned char)s[i]);";
       "    i += (l > n - i) ? (n - i) : l;";
@@ -6866,7 +6870,7 @@ let str_list_helpers =
       "  return c;";
       "}";
       "static list_str __lang_utf8_chars(const char* s) {";
-      "  int n = (int)strlen(s);";
+      "  int n = (int)__lang_str_size(s);";
       "  list_str acc = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  acc->tag = 0;";
       "  int end = n;";
@@ -6887,8 +6891,8 @@ let str_list_helpers =
       "  return acc;";
       "}";
       "static list_str __lang_str_split(const char* s, const char* delim) {";
-      "  size_t slen = strlen(s);";
-      "  size_t dlen = strlen(delim);";
+      "  size_t slen = __lang_str_size(s);";
+      "  size_t dlen = __lang_str_size(delim);";
       "  list_str nil_node = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  nil_node->tag = 0;";
       "  if (dlen == 0) {";
@@ -6939,13 +6943,13 @@ let str_list_helpers =
       "/* Phase 24.3: str_join sep xs — concat list_str elements with sep. */";
       "static const char* __lang_str_join(const char* sep, list_str xs) {";
       "  if (xs->tag == 0) return \"\";";
-      "  size_t seplen = strlen(sep);";
+      "  size_t seplen = __lang_str_size(sep);";
       "  size_t total = 0;";
       "  int first = 1;";
       "  list_str cur = xs;";
       "  while (cur->tag == 1) {";
       "    if (!first) total += seplen;";
-      "    total += strlen(cur->payload.Cons.f0);";
+      "    total += __lang_str_size(cur->payload.Cons.f0);";
       "    first = 0;";
       "    cur = cur->payload.Cons.f1;";
       "  }";
