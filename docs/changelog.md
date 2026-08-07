@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.128 — 2026-08-06
+
+_First native MIDI input capability — the seed of a MIDI dogfood. Six
+`extern fn` entry points (`midi_init`, `midi_default_input`,
+`midi_open_input`, `midi_poll`, `midi_read`, `midi_close`), backed by a
+PortMidi runtime in the C backend. The polling model (`midi_poll` then
+`midi_read`) matches the synchronous FFI shape that `tcp_*`/`udp_*` already
+use, and a whole MIDI message packs into one int, so — unlike the socket
+externs — the read side needs no byte arena._
+
+_The surface is uniformly `int -> int`: the two conceptually-nullary calls
+take an ignored dummy `0`. That is not cosmetic — the codegen synthesizes a
+first-class closure adapter (`name(__x)`) for every concrete `A -> B` extern,
+so a `unit -> int` signature would emit `midi_init(__x)` against a
+`void`-param C function and fail to compile. Keeping everything `int -> int`
+sidesteps it and matches the arena-FFI convention._
+
+_The PortMidi runtime (and its `#include <portmidi.h>`) is emitted only when
+a program declares a `midi_*` extern (a new `uses_midi` gate, mirroring
+`uses_tls`), so non-MIDI native builds need no portmidi. Native-C only, like
+the socket capabilities; linking asks for `-lportmidi` the same way TLS asks
+for `-lssl`. Example: `examples/midi_listen.mere` echoes Note On/Off as note
+names (C4, A4, …) with velocity and channel._
+
+_Verified: generated C compiles, links, and runs against a faithful
+PortMidi stub — the "no input device" exit path is clean, and a scripted
+event stream decodes correctly (Note On C4 vel80, Note Off C4, Note On A4
+vel100). The gate excludes portmidi from non-MIDI programs (tcp_smoke: 0
+refs)._
+
+---
+
 ## v0.1.127 — 2026-08-06
 
 _The Wasm backend's int is now **64-bit** — the receipt from "The Int That
@@ -3868,7 +3900,7 @@ the outside world".
 - **Phase 32.1**: lexer (T_extern) + AST (Top_extern) + parser + typer +
   pipeline + repl + bin + 9 mocks via `lookup_extern` in eval.ml (getpid /
   getppid / getenv / setenv / system / sleep / srand / rand / unix_time).
-- **Phase 32.0**: `40_ffi_design.md` paper trial — fixed syntax / typing /
+- **Phase 32.0**: FFI design — fixed syntax / typing /
   ABI / per-backend strategy. MVP type range is int / bool / str / unit
   only; float / tuple / record / variant / callback deferred.
 

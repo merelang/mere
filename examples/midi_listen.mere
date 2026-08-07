@@ -1,0 +1,76 @@
+// midi_listen — echo Note On/Off from a MIDI keyboard as note names.
+//
+// Milestone 1 of the native MIDI capability (v0.1.128): prove that
+// midi_poll / midi_read work end to end against a real keyboard.
+//
+// MIDI is a native-C-only capability (like tcp_*/udp_*). The polling
+// model (midi_poll then midi_read) matches the synchronous FFI shape,
+// and one MIDI message packs into a single int, so no byte arena is
+// needed on the read side.
+//
+// Build & run (needs PortMidi):
+//   brew install portmidi
+//   ./mere -c examples/midi_listen.mere > /tmp/midi.c
+//   clang /tmp/midi.c -o /tmp/midi -lportmidi \
+//     -I"$(brew --prefix portmidi)/include" -L"$(brew --prefix portmidi)/lib"
+//   /tmp/midi        # then play a key on the keyboard
+
+// The whole surface is int -> int (the native arena-FFI convention). The
+// two conceptually-nullary calls take an ignored dummy argument (0).
+extern fn midi_init:          int -> int;   // PortMidi init; device count, -1 on error
+extern fn midi_default_input: int -> int;   // default input device id, -1 if none
+extern fn midi_open_input:    int -> int;   // open device -> handle (>=0) / -1
+extern fn midi_poll:          int -> int;   // 1 = event pending, 0 = none, -1 = error
+extern fn midi_read:          int -> int;   // packed msg (status | d1<<8 | d2<<16) / -1
+extern fn midi_close:         int -> int;   // returns 0
+
+// note number -> pitch class. Twelve fixed-width (2) fields; a trailing
+// space marks a natural, "#" marks a sharp.
+let names = "C C#D D#E F F#G G#A A#B ";
+let pitch_class = fn (n: int) ->
+  let pc = n - (n / 12) * 12 in
+  let a = char_at names (pc * 2) in
+  let b = char_at names (pc * 2 + 1) in
+  if str_eq b " " then a else a ++ b;
+
+// MIDI note 60 = middle C = C4 (Roland convention).
+let note_name = fn (n: int) ->
+  pitch_class n ++ show (n / 12 - 1);
+
+let print_event = fn (msg: int) ->
+  let status = bit_and msg 0xFF in
+  let d1     = bit_and (bit_shr msg 8) 0xFF in
+  let d2     = bit_and (bit_shr msg 16) 0xFF in
+  let kind   = bit_and status 0xF0 in
+  let ch     = bit_and status 0x0F in
+  if (kind == 0x90) && (d2 > 0) then
+    print ("Note On   " ++ note_name d1 ++ "  vel=" ++ show d2 ++ "  ch=" ++ show (ch + 1))
+  else if (kind == 0x80) || ((kind == 0x90) && (d2 == 0)) then
+    print ("Note Off  " ++ note_name d1 ++ "  ch=" ++ show (ch + 1))
+  else
+    ();   // CC / pitch-bend / clock etc. — ignored in the minimal cut
+
+let rec pump = fn (h: int) ->
+  if midi_poll h > 0 then
+    let msg = midi_read h in
+    let _   = if msg < 0 then () else print_event msg in
+    pump h
+  else
+    let _ = sleep_ms 1 in   // idle: don't peg a CPU core
+    pump h;
+
+// --- main -----------------------------------------------------------
+let n = midi_init 0 in
+if n < 0 then
+  print "midi: init failed"
+else
+  let dev = midi_default_input 0 in
+  if dev < 0 then
+    print "midi: no input device found"
+  else
+    let h = midi_open_input dev in
+    if h < 0 then
+      print "midi: open failed"
+    else
+      let _ = print ("midi: listening on device " ++ show dev ++ "  (Ctrl-C to stop)") in
+      pump h

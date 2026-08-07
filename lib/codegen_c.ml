@@ -288,6 +288,7 @@ let uses_file_pwrite = ref false  (* v0.1.115: file_pwrite (positioned write) *)
 let uses_file_openrw = ref false  (* v0.1.115: file_openrw (read/write open) *)
 let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
+let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -5267,6 +5268,8 @@ let native_ffi_names =
     "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
     "udp_open"; "udp_send"; "udp_recv";  (* v0.1.62: mdns dogfood *)
     "now_ms";                            (* v0.1.63: mbench dogfood *)
+    "midi_init"; "midi_default_input"; "midi_open_input";  (* v0.1.128: midi dogfood *)
+    "midi_poll"; "midi_read"; "midi_close";
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
     "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
@@ -5410,7 +5413,7 @@ let native_http_runtime =
       "  return 0;";
       "}" ]
 
-let native_ffi_runtime ~tls =
+let native_ffi_runtime ~tls ~midi =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -5574,6 +5577,48 @@ let native_ffi_runtime ~tls =
       "  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);";
       "  return 0;";
       "}";
+      (if midi then
+         "/* --- MIDI input (PortMidi) — v0.1.128, midi dogfood. Polling model\n\
+          \   (Pm_Poll/Pm_Read) matches the synchronous FFI shape, and a MIDI\n\
+          \   message packs into one int, so no byte arena is needed. Build:\n\
+          \   add -lportmidi to the clang line (brew install portmidi), the\n\
+          \   same way TLS asks for -lssl. Emitted only when a program declares\n\
+          \   a midi_* extern, so non-MIDI builds don't need portmidi. */\n\
+          #include <portmidi.h>\n\
+          #define __MIDI_MAX_STREAMS 16\n\
+          static PortMidiStream* __midi_streams[__MIDI_MAX_STREAMS];\n\
+          static int __midi_nstreams = 0;\n\
+          static int __midi_inited = 0;\n\
+          \  /* Every entry point is int -> int (the arena-FFI convention): the\n\
+          \     nullary ones take an ignored dummy so the generated first-class\n\
+          \     closure adapter (name(__x)) type-checks. */\n\
+          static int midi_init(int __u) {\n\
+          \  (void)__u;\n\
+          \  if (!__midi_inited) { if (Pm_Initialize() != pmNoError) return -1; __midi_inited = 1; }\n\
+          \  return Pm_CountDevices();\n\
+          }\n\
+          static int midi_default_input(int __u) { (void)__u; return (int)Pm_GetDefaultInputDeviceID(); }\n\
+          static int midi_open_input(int dev) {\n\
+          \  if (__midi_nstreams >= __MIDI_MAX_STREAMS) return -1;\n\
+          \  PortMidiStream* s;\n\
+          \  if (Pm_OpenInput(&s, (PmDeviceID)dev, NULL, 128, NULL, NULL) != pmNoError) return -1;\n\
+          \  int h = __midi_nstreams++; __midi_streams[h] = s; return h;\n\
+          }\n\
+          static int midi_poll(int h) {\n\
+          \  if (h < 0 || h >= __midi_nstreams) return -1;\n\
+          \  return (Pm_Poll(__midi_streams[h]) == pmGotData) ? 1 : 0;\n\
+          }\n\
+          static int midi_read(int h) {\n\
+          \  if (h < 0 || h >= __midi_nstreams) return -1;\n\
+          \  PmEvent ev; int n = Pm_Read(__midi_streams[h], &ev, 1);\n\
+          \  if (n <= 0) return -1;\n\
+          \  return (int)ev.message;\n\
+          }\n\
+          static int midi_close(int h) {\n\
+          \  if (h >= 0 && h < __midi_nstreams && __midi_streams[h]) { Pm_Close(__midi_streams[h]); __midi_streams[h] = NULL; }\n\
+          \  return 0;\n\
+          }"
+       else "");
       "";
       "/* --- crypto: real SHA-256 core + HMAC-SHA256 + PBKDF2 + base64,";
       "   backing the SCRAM-SHA-256 handshake contrib/db/pg uses for password";
@@ -8311,6 +8356,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   uses_tls :=
     Hashtbl.mem extern_fn_decls "tcp_starttls"
     || Hashtbl.mem extern_fn_decls "tcp_starttls_verified";
+  (* v0.1.128: declaring a midi_* extern pulls in the PortMidi runtime (and
+     asks the clang line for -lportmidi); everyone else needs no portmidi. *)
+  uses_midi :=
+    Hashtbl.mem extern_fn_decls "midi_open_input"
+    || Hashtbl.mem extern_fn_decls "midi_read"
+    || Hashtbl.mem extern_fn_decls "midi_init";
   strbuf_used := false;
   bytes_used := false;
   bytes_vec_used := false;
@@ -9174,7 +9225,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          them as unresolved `extern` prototypes. *)
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
-       then native_ffi_runtime ~tls:!uses_tls ^ "\n"
+       then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
