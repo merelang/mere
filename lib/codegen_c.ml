@@ -1177,7 +1177,8 @@ let rec emit_expr (e : Ast.expr) : string =
       if String.contains s '.' || String.contains s 'e' || String.contains s 'E'
       then s else s ^ ".0"
   | Ast.Bool_lit b -> if b then "1" else "0"
-  | Ast.Str_lit s -> Ast.escape_string s
+  | Ast.Str_lit s ->
+    Printf.sprintf "__lang_str_dup_n(%s, %d)" (Ast.escape_string s) (String.length s)
   | Ast.Var name ->
     (* Phase 24.1: shadowing check — if the name is bound as a local
        (in current_var_types) or by a captured env field
@@ -4768,7 +4769,7 @@ static char* __mj_pstr(__mj_ps* p) {
   size_t cap = 16, len = 0; char* buf = (char*)malloc(cap);
   while (p->pos < p->n) {
     char c = p->s[p->pos];
-    if (c == '"') { p->pos++; buf[len] = 0; return buf; }
+    if (c == '"') { p->pos++; buf[len] = 0; return __lang_str_dup_n(buf, len); }
     if (c == '\\' && p->pos + 1 < p->n) {
       p->pos++; char e = p->s[p->pos]; char out = e;
       if (e=='n') out='\n'; else if (e=='t') out='\t'; else if (e=='r') out='\r';
@@ -5790,6 +5791,16 @@ let str_concat_helper =
       "  memcpy(r, s, n);";
       "  return r;";
       "}";
+      (* String literals lower to a __lang_str_dup_n call: a fresh
+         header-carrying copy of the first N bytes (N is the literal's exact
+         byte length, so embedded NULs copy faithfully). Mere strings compare
+         by value, so a fresh allocation per evaluation is semantically
+         transparent; the region bump keeps it cheap. *)
+      "static const char* __lang_str_dup_n(const char* s, size_t n) {";
+      "  char* r = __lang_str_alloc(__lang_current_region, n);";
+      "  memcpy(r, s, n);";
+      "  return r;";
+      "}";
       "";
       "static const char* __lang_str_concat(const char* a, const char* b) {";
       "  size_t la = strlen(a), lb = strlen(b);";
@@ -5811,19 +5822,24 @@ let str_concat_helper =
          single-character str. A 256-entry static table holds a per-char
          pointer, and char_at returns the matching entry from the table.
          is_digit / is_alpha / is_space classify the first byte via ctype.h. *)
-      "static char __lang_char_table[256][2];";
+      (* 256 pre-built single-byte strings, each carrying a length header so
+         char_at / chr return byte-safe strs without a per-call allocation.
+         Layout {size_t __n; char __c[2]} puts __n at offset 0 and __c at 8
+         (size_t alignment), so __lang_str_size(&entry.__c[0]) reads __n == 1. *)
+      "static struct { size_t __n; char __c[2]; } __lang_char_table[256];";
       "static int __lang_char_table_init = 0;";
       "static void __lang_char_table_setup(void) {";
       "  if (__lang_char_table_init) return;";
       "  for (int k = 0; k < 256; k++) {";
-      "    __lang_char_table[k][0] = (char)k;";
-      "    __lang_char_table[k][1] = '\\0';";
+      "    __lang_char_table[k].__n = 1;";
+      "    __lang_char_table[k].__c[0] = (char)k;";
+      "    __lang_char_table[k].__c[1] = '\\0';";
       "  }";
       "  __lang_char_table_init = 1;";
       "}";
       "static const char* __lang_char_at(const char* s, int i) {";
       "  __lang_char_table_setup();";
-      "  return __lang_char_table[(unsigned char)s[i]];";
+      "  return __lang_char_table[(unsigned char)s[i]].__c;";
       "}";
       "static int __lang_is_digit(const char* s) {";
       "  unsigned char c = (unsigned char)s[0];";
@@ -5963,7 +5979,7 @@ let str_concat_helper =
       (* Phase 36: chr n — return pointer to char_table entry for byte n. *)
       "static const char* __lang_char_at_chr(int n) {";
       "  __lang_char_table_setup();";
-      "  return __lang_char_table[(unsigned char)n];";
+      "  return __lang_char_table[(unsigned char)n].__c;";
       "}";
       "";
       (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
@@ -6117,9 +6133,9 @@ let str_concat_helper =
       "static const char* __lang_read_key(void) {";
       "  char c;";
       "  ssize_t n = read(0, &c, 1);";
-      "  char* s = (char*)__lang_region_alloc(__lang_current_region, 2);";
-      "  if (n <= 0) { s[0] = 0; return s; }";
-      "  s[0] = c; s[1] = 0;";
+      "  if (n <= 0) return __lang_str_alloc(__lang_current_region, 0);";
+      "  char* s = __lang_str_alloc(__lang_current_region, 1);";
+      "  s[0] = c;";
       "  return s;";
       "}";
       "";
@@ -9250,6 +9266,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "static char* __lang_str_alloc(__lang_region* r, size_t len);";
       "static size_t __lang_str_size(const char* s);";
       "static const char* __lang_str_of_cstr(const char* s);";
+      "static const char* __lang_str_dup_n(const char* s, size_t n);";
       "";
       (* Stage 1 native full-stack: if any Wasm-memory-model FFI extern
          (tcp_* / mem_* / str_ptr) is used, emit the native runtime that

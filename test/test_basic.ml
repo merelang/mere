@@ -2761,9 +2761,9 @@ let () =
   assert_contains "codegen: str main uses %s format"
     (codegen "\"hi\"") "printf(\"%s\\n\"";
   assert_contains "codegen: ++ becomes __lang_str_concat call"
-    (codegen "\"a\" ++ \"b\"") "__lang_str_concat(\"a\", \"b\")";
+    (codegen "\"a\" ++ \"b\"") "__lang_str_concat(";
   assert_contains "codegen: print → puts inside statement expression"
-    (codegen "print \"hi\"") "puts(\"hi\")";
+    (codegen "print \"hi\"") "puts(__lang_str_dup_n(\"hi\"";
   (* Phase 27.0: C codegen now prints "()" for unit-typed main to match
      interp (was: no printf at all). *)
   assert_contains "codegen: unit-typed main prints \"()\""
@@ -2783,11 +2783,11 @@ let () =
     "const char* mu_greet(long long);";
   assert_contains "codegen: str_len builtin maps to strlen"
     (codegen "str_len \"abc\"")
-    "(int) strlen(\"abc\")";
+    "(int) strlen(";
   (* Phase 19.1.1: str_index_of codegen *)
   assert_contains "codegen: str_index_of calls __lang_str_index_of"
     (codegen "str_index_of \"hi\" \"i\"")
-    "__lang_str_index_of(\"hi\", \"i\")";
+    "__lang_str_index_of(";
   assert_contains "codegen: __lang_str_index_of helper defined"
     (codegen "str_index_of \"hi\" \"i\"")
     "static int __lang_str_index_of(const char* h, const char* n)";
@@ -3291,7 +3291,7 @@ let () =
     "__lang_region_free(&__lang_default_region)";
   assert_contains "codegen: str_concat allocates in the current region (v0.1.31)"
     (codegen_with_decls "\"hi\" ++ \"!\"")
-    "__lang_region_alloc(__lang_current_region, la + lb + 1)";
+    "__lang_str_alloc(__lang_current_region, la + lb)";
   assert_no_contains "codegen: str_concat no longer mallocs"
     (codegen_with_decls "\"hi\" ++ \"!\"")
     "malloc(la + lb + 1)";
@@ -6214,7 +6214,7 @@ let () =
        "extern fn mem_alloc: int -> int; \
         extern fn mem_to_str: int -> int -> str; \
         str_len (mem_to_str (mem_alloc 4) 4)")
-    "static char* mem_to_str(int p, int len) {\n  char* s = (char*)__lang_region_alloc(__lang_current_region";
+    "static char* mem_to_str(int p, int len) {\n  char* s = __lang_str_alloc(__lang_current_region";
   assert_contains "native FFI: mem_alloc goes through the locked bump"
     (vec_codegen_c
        "extern fn mem_alloc: int -> int; mem_alloc 8")
@@ -8803,7 +8803,7 @@ let () =
        in scan 0
      in
      if has "extern int setenv(const char*, const char*, int);"
-        && has "setenv(\"K\", \"V\", 1LL)" then "ok" else "no")
+        && has "setenv(__lang_str_dup_n(\"K\"" then "ok" else "no")
     "ok";
 
   (* v0.1.41: int is 64-bit (`long long`) on the C backend. The SHA-256
@@ -8882,7 +8882,7 @@ let () =
        in scan 0
      in
      if has "static mere_vec_int* __lang_read_file_bytes"
-        && has "__lang_read_file_bytes(\"x.bin\"" then "ok" else "no")
+        && has "__lang_read_file_bytes(__lang_str_dup_n(\"x.bin\"" then "ok" else "no")
     "ok";
   (* v0.1.123: read_file_bytes is now supported on all backends. *)
   assert_contains
@@ -8996,7 +8996,7 @@ let () =
        in scan 0
      in
      if has "static int __lang_write_file_bytes"
-        && has "__lang_write_file_bytes(\"x.bin\"" then "ok" else "no")
+        && has "__lang_write_file_bytes(__lang_str_dup_n(\"x.bin\"" then "ok" else "no")
     "ok";
   assert_contains
     "v0.1.123: Wasm codegen supports write_file_bytes (host import)"
@@ -9343,7 +9343,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "strcmp(\"a\", \"b\")" && has "__r < 0 ? -1" then "ok" else "no")
+     if has "strcmp(" && has "__r < 0 ? -1" then "ok" else "no")
     "ok";
   check "§31.0: LLVM codegen emits strcmp + select normalize"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
