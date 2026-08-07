@@ -3919,9 +3919,15 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     Buffer.contents lines
   | _ ->
     let off = intern_show_str ("<?show_" ^ tag ^ "?>") in
+    (* Str offsets are i64 values in this backend (cf. show_bool / show_str,
+       which push i64.const). The fallback previously emitted `i32.const`,
+       producing a function that fails validation (result i64, body i32) —
+       latent because a closure/opaque-typed program value is rarely compiled
+       to Wasm. Surfaced by the component-model func(string)->string slice,
+       whose top-level value is a closure. *)
     Printf.sprintf
       "  (func $show_%s (param $x i64) (result i64)\n\
-      \    (i32.const %d))"
+      \    (i64.const %d))"
       tag off
 
 (* JSON sibling of emit_show_fn (derive slice, Wasm). Emits `to_json_<tag>`
