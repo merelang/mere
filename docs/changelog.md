@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.129 — 2026-08-07
+
+_Byte-safe strings on the Wasm backend — the arc that made C strings
+byte-safe (v0.1.127) now extends to Wasm. A `str` in linear memory is
+`[i32 len][bytes][NUL]`: the length header lives immediately before the
+pointer, so embedded NULs survive (`("a" ++ chr 0 ++ "b")` has length 3)
+while NUL-free strings stay host/C-interop compatible via the preserved
+terminator. `__lang_strlen` reads the header; a new `__lang_str_alloc`
+centralises header-writing allocation; every string producer (concat,
+substring, trim, rev, repeat, replace, upper/lower, escape/unescape,
+split/join, str_of_bytes, hex_of_bytes, char_at, show_int, JSON string
+cells, read_stdin) and every string literal now carries a header, and
+`==` / `compare` / `starts_with` compare over the header length instead
+of scanning to a NUL. Host glue (`run_wasm.js`, playground) writes the
+header for `read_file` / `str_of_float` / `getenv` / arg strings. This
+gives the browser mere-ruby playground binary-safe strings (`pack` /
+`unpack1` / embedded-NUL `length` now match ruby byte-for-byte)._
+
+---
+
 ## v0.1.128 — 2026-08-06
 
 _First native MIDI input capability — the seed of a MIDI dogfood. Six

@@ -136,13 +136,14 @@ const wasmPath = process.argv[2];
       const path = readCStr(pathPtr);
       try {
         const content = fs.readFileSync(path, "utf8");
-        // Allocate via bump: find global $__lang_bump and bump it.
-        // For simplicity, write to a fixed scratch region near the end of
-        // memory. Phase 27.2 MVP: bump pointer is at a known global.
-        const bytes = Buffer.from(content + "\0", "utf8");
-        const ptr = bumpAlloc(bytes.length);
-        new Uint8Array(memory.buffer).set(bytes, ptr);
-        return ptr;
+        // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
+        const body = Buffer.from(content, "utf8");
+        const ptr = bumpAlloc(4 + body.length + 1);
+        const mem = new Uint8Array(memory.buffer);
+        new DataView(memory.buffer).setInt32(ptr, body.length, true);
+        mem.set(body, ptr + 4);
+        mem[ptr + 4 + body.length] = 0;
+        return ptr + 4;
       } catch (e) {
         // A missing file is an expected probe result (the module-path
         // resolver walks up testing for mere.toml; the language-level
@@ -220,10 +221,14 @@ const wasmPath = process.argv[2];
         // OCaml: append ".0" for plain integer-valued floats
         if (!/[.eEni]/.test(s)) s += '.0';
       }
-      const bytes = Buffer.from(s + '\0', 'utf8');
-      const ptr = bumpAlloc(bytes.length);
-      new Uint8Array(memory.buffer).set(bytes, ptr);
-      return ptr;
+      // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
+      const body = Buffer.from(s, 'utf8');
+      const ptr = bumpAlloc(4 + body.length + 1);
+      const mem = new Uint8Array(memory.buffer);
+      new DataView(memory.buffer).setInt32(ptr, body.length, true);
+      mem.set(body, ptr + 4);
+      mem[ptr + 4 + body.length] = 0;
+      return ptr + 4;
     },
     __lang_float_of_str: (ptr) => {
       const s = readCStr(ptr);
@@ -268,10 +273,14 @@ const wasmPath = process.argv[2];
       const name = readCStr(namePtr);
       const v = process.env[name];
       if (v === undefined) return 0;  // NULL — Mere expects str, segfault risk
-      const bytes = Buffer.from(v + "\0", "utf8");
-      const ptr = bumpAlloc(bytes.length);
-      new Uint8Array(memory.buffer).set(bytes, ptr);
-      return ptr;
+      // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
+      const body = Buffer.from(v, "utf8");
+      const ptr = bumpAlloc(4 + body.length + 1);
+      const mem = new Uint8Array(memory.buffer);
+      new DataView(memory.buffer).setInt32(ptr, body.length, true);
+      mem.set(body, ptr + 4);
+      mem[ptr + 4 + body.length] = 0;
+      return ptr + 4;
     },
     setenv: (namePtr, valuePtr, _overwrite) => {
       const name = readCStr(namePtr);
@@ -298,10 +307,14 @@ const wasmPath = process.argv[2];
     arg_get: (n) => {
       const args = process.argv.slice(3);
       const v = args[n | 0] || "";
-      const bytes = Buffer.from(v + "\0", "utf8");
-      const ptr = bumpAlloc(bytes.length);
-      new Uint8Array(memory.buffer).set(bytes, ptr);
-      return ptr;
+      // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
+      const body = Buffer.from(v, "utf8");
+      const ptr = bumpAlloc(4 + body.length + 1);
+      const mem = new Uint8Array(memory.buffer);
+      new DataView(memory.buffer).setInt32(ptr, body.length, true);
+      mem.set(body, ptr + 4);
+      mem[ptr + 4 + body.length] = 0;
+      return ptr + 4;
     },
     // TCP + byte-buffer + crypto externs come from the shared pg_env
     // module; they're merged into `env` below with Object.assign.
