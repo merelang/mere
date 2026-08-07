@@ -7317,7 +7317,7 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
     \      (else (i32.store offset=0 (local.get $r) (i32.const %d)) (i32.store offset=4 (local.get $r) (local.get $v)) (local.get $r))))\n"
     inner_tag inner_tag none_tag some_tag
 
-let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   ignore main_ty;
   reset ();
   Hashtbl.reset toplevel_fn_names;
@@ -7587,6 +7587,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      stack-top has body's i32 result; pipe through show_<tag> if needed,
      then puts. Unit main: drop result, call puts on "()" literal. *)
   let main_ty_walked = Ast.walk main_ty in
+  if component then
+    (* Component target (note 152): $main returns the top-level value's raw
+       pointer as an i32 instead of printing it; $run then lowers/dispatches it
+       to the canonical ABI. Slice 1 = string result (TyStr); Slice 2 = a
+       function value (TyArrow), whose closure record ptr $run calls with the
+       lifted argument. Both return the raw pointer via i32.wrap_i64 (no
+       show_str quote-wrapping — a component value is raw, not interp display).
+       Other result types drop to 0 for now (later slices). *)
+    (match main_ty_walked with
+     | Ast.TyStr | Ast.TyArrow _ -> emit_instr "i32.wrap_i64"
+     | _ -> emit_instr "drop"; emit_instr "i32.const 0")
+  else
   (match main_ty_walked with
    | Ast.TyInt ->
      emit_instr "call $show_int";
@@ -7908,7 +7920,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     \  (import \"env\" \"__lang_f_pow\" (func $__lang_f_pow (param f64) (param f64) (result f64)))\n\
     \  (import \"env\" \"__lang_atan2\" (func $__lang_atan2 (param f64) (param f64) (result f64)))\n"
   in
-  let file_io_imports = file_io_imports ^ float_io_imports ^ libm_imports in
+  let file_io_imports =
+    if component then
+      (* Component target (note 152): a WebAssembly component must not carry
+         ambient `env` imports. Replace the float/time/libm host imports with
+         in-module stubs so a pure run()->string program has zero imports and
+         is componentizable. Math/time are not yet routed through WASI (later
+         slices); a pure Slice-1 program never calls them, so trapping stubs
+         (time returns 0) are safe. Programs that actually use these under
+         --component will trap — a documented Slice-1 limitation. *)
+      "  (func $__lang_str_of_float (param f64) (result i32) unreachable)\n\
+      \  (func $__lang_float_of_str (param i32) (result f64) unreachable)\n\
+      \  (func $__lang_time (result f64) (f64.const 0))\n\
+      \  (func $__lang_sin (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_cos (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_tan (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_f_pow (param f64) (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_atan2 (param f64) (param f64) (result f64) unreachable)\n"
+    else file_io_imports ^ float_io_imports ^ libm_imports
+  in
   (* Phase 32.4 (C1 FFI): declare extern fns as env host imports.
      Represent str / bool / int / unit all as i32. Unit arguments produce
      no param; unit return produces no result. *)
@@ -8091,10 +8121,72 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         (br $lp)))
     (local.get $n))" cons_tag_v
   in
+  (* Phase(component): opt-in WebAssembly Component Model export shape.
+     Emits cabi_realloc (wrapping the bump allocator) + a `run` export that
+     calls $main (which yields a str ptr for a string-typed program) and
+     lowers it to the canonical ABI string: retptr -> [ptr, len]. Note 152. *)
+  (* Under --component, the ambient `env.puts` import is replaced by a no-op
+     in-module stub (pure Slice-1 programs do not print). Note 152. *)
+  let puts_decl =
+    if component then "  (func $puts_h (param i32))\n"
+    else "  (import \"env\" \"puts\" (func $puts_h (param i32)))\n"
+  in
+  let component_section =
+    if not component then "" else
+    let cabi_realloc =
+      "  (func $cabi_realloc (export \"cabi_realloc\") (param $o i32) (param $os i32) (param $al i32) (param $ns i32) (result i32)\n\
+      \    (local $p i32)\n\
+      \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.sub (local.get $al) (i32.const 1))) (i32.sub (i32.const 0) (local.get $al))))\n\
+      \    (local.set $p (global.get $__lang_bump))\n\
+      \    (global.set $__lang_bump (i32.add (local.get $p) (local.get $ns)))\n\
+      \    (local.get $p))\n"
+    in
+    (* Given a Mere str ptr in local $s, allocate an 8-byte return area
+       (align 4) and store the canonical ABI string [ptr, len]; leave the
+       retptr as the result. Shared by every run shape returning a string. *)
+    let lower_str_tail =
+      "    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 3)) (i32.const -4)))\n\
+      \    (local.set $ret (global.get $__lang_bump))\n\
+      \    (global.set $__lang_bump (i32.add (local.get $ret) (i32.const 8)))\n\
+      \    (i32.store offset=0 (local.get $ret) (local.get $s))\n\
+      \    (i32.store offset=4 (local.get $ret) (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))\n\
+      \    (local.get $ret))\n"
+    in
+    cabi_realloc ^
+    (match main_ty_walked with
+     (* Slice 1: func() -> string. $main returns the raw str ptr; lower it. *)
+     | Ast.TyStr ->
+       "  (func $run (export \"run\") (result i32)\n\
+       \    (local $s i32) (local $ret i32)\n\
+       \    (local.set $s (call $main))\n" ^ lower_str_tail
+     (* Slice 2: func(string) -> string. The top-level value is a closure
+        (record { env @0, fn_idx @4 }). Lift the incoming (ptr,len) into a
+        fresh NUL-terminated Mere str (manual byte copy — no bulk-memory
+        dependency), call the closure via call_indirect (env, arg, fn_idx),
+        then lower the result string. *)
+     | Ast.TyArrow (a, b) when Ast.walk a = Ast.TyStr && Ast.walk b = Ast.TyStr ->
+       "  (func $run (export \"run\") (param $p i32) (param $n i32) (result i32)\n\
+       \    (local $arg i32) (local $cl i32) (local $s i32) (local $ret i32) (local $i i32)\n\
+       \    (local.set $arg (global.get $__lang_bump))\n\
+       \    (global.set $__lang_bump (i32.add (local.get $arg) (i32.add (local.get $n) (i32.const 1))))\n\
+       \    (block $done (loop $lp\n\
+       \      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n\
+       \      (i32.store8 (i32.add (local.get $arg) (local.get $i)) (i32.load8_u (i32.add (local.get $p) (local.get $i))))\n\
+       \      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n\
+       \      (br $lp)))\n\
+       \    (i32.store8 (i32.add (local.get $arg) (local.get $n)) (i32.const 0))\n\
+       \    (local.set $cl (call $main))\n\
+       \    (local.set $s (i32.wrap_i64 (call_indirect (type $cl)\n\
+       \      (i64.extend_i32_u (i32.load offset=0 (local.get $cl)))\n\
+       \      (i64.extend_i32_u (local.get $arg))\n\
+       \      (i32.load offset=4 (local.get $cl)))))\n" ^ lower_str_tail
+     (* Not yet supported under --component (later slices). *)
+     | _ -> "  (func $run (export \"run\") (result i32) unreachable)\n")
+  in
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i64) (param i64) (result i64)))\n\
-     \  (import \"env\" \"puts\" (func $puts_h (param i32)))\n\
+     %s\
      %s\
      %s\
      %s\
@@ -8116,8 +8208,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      %s\
      %s\
      %s\
+     %s\
      \  (func $main (export \"main\") (result i32)\n%s%s)\n\
      )\n"
+    puts_decl
     file_io_imports
     memory_section
     table_section bump_init char_table_offset
@@ -8127,4 +8221,4 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     vec_to_list_section list_len_section
-    fn_section local_decl indented_body
+    fn_section component_section local_decl indented_body
