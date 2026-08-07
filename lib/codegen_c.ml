@@ -5765,12 +5765,28 @@ let native_ffi_runtime ~tls ~midi =
 
 let str_concat_helper =
   String.concat "\n"
-    [ "static const char* __lang_str_concat(const char* a, const char* b) {";
+    [ (* Byte-safe strings (v0.1.x): a Mere `str` is a `char*` pointing at
+         `[size_t len][len bytes]['\\0']` — a length header sits just before the
+         data, and a NUL terminator just after. NUL-free strings stay fully
+         C-interop-compatible (printf %s / fopen), while embedded NULs survive
+         because length comes from the header, not strlen. Every string the
+         runtime produces goes through __lang_str_alloc; __lang_str_size reads
+         the header. region_alloc returns 8-byte-aligned blocks, so the size_t
+         header is aligned. *)
+      "static char* __lang_str_alloc(__lang_region* r, size_t len) {";
+      "  size_t* p = (size_t*) __lang_region_alloc(r, sizeof(size_t) + len + 1);";
+      "  p[0] = len;";
+      "  char* d = (char*)(p + 1);";
+      "  d[len] = '\\0';";
+      "  return d;";
+      "}";
+      "static size_t __lang_str_size(const char* s) { return ((const size_t*)s)[-1]; }";
+      "";
+      "static const char* __lang_str_concat(const char* a, const char* b) {";
       "  size_t la = strlen(a), lb = strlen(b);";
-      "  char* r = (char*) __lang_region_alloc(__lang_current_region, la + lb + 1);";
+      "  char* r = __lang_str_alloc(__lang_current_region, la + lb);";
       "  memcpy(r, a, la);";
       "  memcpy(r + la, b, lb);";
-      "  r[la + lb] = '\\0';";
       "  return r;";
       "}";
       "";
