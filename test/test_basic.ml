@@ -2781,9 +2781,8 @@ let () =
   assert_contains "codegen: forward decl carries through the right type"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
     "const char* mu_greet(long long);";
-  assert_contains "codegen: str_len builtin maps to strlen"
-    (codegen "str_len \"abc\"")
-    "(int) strlen(";
+  assert_contains "codegen: str_len builtin maps to __lang_str_size"
+    (codegen "str_len \"abc\"") "__lang_str_size(";
   (* Phase 19.1.1: str_index_of codegen *)
   assert_contains "codegen: str_index_of calls __lang_str_index_of"
     (codegen "str_index_of \"hi\" \"i\"")
@@ -6973,11 +6972,11 @@ let () =
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
     "mere_vec_int_len";
-  assert_contains "len: C codegen dispatches str → strlen"
+  assert_contains "len: C codegen dispatches str → __lang_str_size"
     (let prog = Pipeline.parse_program len_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
-    "((int)strlen";
+    "((int)__lang_str_size";
   assert_contains "len: LLVM codegen dispatches Vec"
     (let prog = Pipeline.parse_program len_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in

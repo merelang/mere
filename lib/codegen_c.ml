@@ -1413,17 +1413,17 @@ let rec emit_expr (e : Ast.expr) : string =
     let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
     (match Ast.walk a_ty, op with
      | Ast.TyStr, Ast.Eq ->
-       Printf.sprintf "(strcmp(%s, %s) == 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(__lang_str_cmp(%s, %s) == 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Ne ->
-       Printf.sprintf "(strcmp(%s, %s) != 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(__lang_str_cmp(%s, %s) != 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Lt ->
-       Printf.sprintf "(strcmp(%s, %s) < 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(__lang_str_cmp(%s, %s) < 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Le ->
-       Printf.sprintf "(strcmp(%s, %s) <= 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(__lang_str_cmp(%s, %s) <= 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Gt ->
-       Printf.sprintf "(strcmp(%s, %s) > 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(__lang_str_cmp(%s, %s) > 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Ge ->
-       Printf.sprintf "(strcmp(%s, %s) >= 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(__lang_str_cmp(%s, %s) >= 0)" (emit_expr a) (emit_expr b)
      | ty, Ast.Eq when needs_struct_eq ty ->
        (* Compound value (tuple / record / variant): C can't `==` a struct,
           so compare structurally via eq_<tag>. *)
@@ -1969,7 +1969,7 @@ let rec emit_expr (e : Ast.expr) : string =
           __rok ? (%s){.tag = 1, .payload.Some = __rv} : (%s){.tag = 0}; })"
          tag (emit_expr ch_e) (emit_expr arg) opt_name opt_name
      | Ast.Var "str_len" ->
-       "((int) strlen(" ^ emit_expr arg ^ "))"
+       "((int) __lang_str_size(" ^ emit_expr arg ^ "))"
      (* bytes builtins. *)
      | Ast.Var "bytes_of_hex" ->
        bytes_used := true; Printf.sprintf "__lang_bytes_of_hex(%s)" (emit_expr arg)
@@ -2016,7 +2016,7 @@ let rec emit_expr (e : Ast.expr) : string =
           -1/0/1. Sign-normalize strcmp's raw value to align behavior across
           the 3 backends. *)
        Printf.sprintf
-         "({ int __r = strcmp(%s, %s); __r < 0 ? -1 : (__r > 0 ? 1 : 0); })"
+         "({ int __r = __lang_str_cmp(%s, %s); __r < 0 ? -1 : (__r > 0 ? 1 : 0); })"
          (emit_expr a_e) (emit_expr arg)
      (* Phase 34.1: float arithmetic + comparison + unary *)
      | Ast.App ({ node = Ast.Var "f_add"; _ }, a_e) ->
@@ -2098,7 +2098,7 @@ let rec emit_expr (e : Ast.expr) : string =
        (* str_eq a b — curried 2-arg; same as the `==`-on-str path
           (strcmp). Interp / Wasm have str_eq as a function; the C backend
           previously only had the `==` operator (mq dogfood P6). *)
-       Printf.sprintf "(strcmp(%s, %s) == 0)"
+       Printf.sprintf "(__lang_str_cmp(%s, %s) == 0)"
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_replace"; _ }, s_e); _ }, old_e) ->
        (* Phase 36: str_replace s old new — curried 3-arg *)
@@ -2735,7 +2735,7 @@ let rec emit_expr (e : Ast.expr) : string =
           Printf.sprintf "mere_map_%s_%s_len(%s)"
             k_tag v_tag (emit_expr arg)
         | Ast.TyStr ->
-          Printf.sprintf "((int)strlen(%s))" (emit_expr arg)
+          Printf.sprintf "((int)__lang_str_size(%s))" (emit_expr arg)
         | Ast.TyTuple ts ->
           (* Static arity — just emit the constant. Arg evaluated for
              side effects but discarded. *)
@@ -5137,9 +5137,11 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     (* Closures copy shallowly: their envs live in the default region. *)
     header ^ " { (void)r; return v; }"
   | Ast.TyStr ->
-    header ^ " {\n  size_t n = strlen(v);\n  \
-              char* s = (char*)__lang_region_alloc(r, n + 1);\n  \
-              memcpy(s, v, n + 1);\n  return s;\n}"
+    (* Deep-copy a str into region r, preserving its length header (so a
+       copied map key/value stays byte-safe, embedded NULs and all). *)
+    header ^ " {\n  size_t n = __lang_str_size(v);\n  \
+              char* s = __lang_str_alloc(r, n);\n  \
+              memcpy(s, v, n);\n  return s;\n}"
   | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"
                 | "ThreadHandle"), _) ->
     header ^ " { (void)r; return v; }"
@@ -5782,6 +5784,16 @@ let str_concat_helper =
       "  return d;";
       "}";
       "static size_t __lang_str_size(const char* s) { return ((const size_t*)s)[-1]; }";
+      (* Byte-safe comparison: memcmp over the shorter length (so embedded NULs
+         participate), then break ties by length. For NUL-free strings this
+         matches strcmp exactly, so existing behavior is preserved. *)
+      "static int __lang_str_cmp(const char* a, const char* b) {";
+      "  size_t la = __lang_str_size(a), lb = __lang_str_size(b);";
+      "  size_t m = la < lb ? la : lb;";
+      "  int r = m ? memcmp(a, b, m) : 0;";
+      "  if (r != 0) return r;";
+      "  return la < lb ? -1 : (la > lb ? 1 : 0);";
+      "}";
       (* Copy a plain NUL-terminated C string into a header-carrying Mere str.
          Used at boundaries where a headerless C string enters Mere: asprintf
          results (show_* / str_of_int / str_of_float / format), getenv, argv. *)
@@ -5803,7 +5815,7 @@ let str_concat_helper =
       "}";
       "";
       "static const char* __lang_str_concat(const char* a, const char* b) {";
-      "  size_t la = strlen(a), lb = strlen(b);";
+      "  size_t la = __lang_str_size(a), lb = __lang_str_size(b);";
       "  char* r = __lang_str_alloc(__lang_current_region, la + lb);";
       "  memcpy(r, a, la);";
       "  memcpy(r + la, b, lb);";
@@ -5813,9 +5825,12 @@ let str_concat_helper =
       (* Phase 19.1.1: str_index_of — return position of needle in
          haystack, -1 if not found. Empty needle returns 0. *)
       "static int __lang_str_index_of(const char* h, const char* n) {";
-      "  if (n[0] == '\\0') return 0;";
-      "  const char* p = strstr(h, n);";
-      "  return p == NULL ? -1 : (int)(p - h);";
+      "  size_t hn = __lang_str_size(h), nn = __lang_str_size(n);";
+      "  if (nn == 0) return 0;";
+      "  if (nn > hn) return -1;";
+      "  for (size_t i = 0; i + nn <= hn; i++)";
+      "    if (memcmp(h + i, n, nn) == 0) return (int)i;";
+      "  return -1;";
       "}";
       "";
       (* Phase 22.3: char-string helpers. In Mere a char is represented as a
@@ -5895,7 +5910,7 @@ let str_concat_helper =
          Convert newline / tab / backslash / double-quote into backslash
          escape form. Stays consistent with interp's show_str. *)
       "static const char* __lang_str_escape(const char* s) {";
-      "  size_t n = strlen(s);";
+      "  size_t n = __lang_str_size(s);";
       "  char* r = __lang_str_alloc(__lang_current_region, n * 2);";
       "  size_t j = 0;";
       "  for (size_t i = 0; i < n; i++) {";
@@ -5916,8 +5931,8 @@ let str_concat_helper =
       (* Phase 24.4: str_count s needle — non-overlapping count. *)
       "static int __lang_str_count(const char* s, const char* n) {";
       "  if (n[0] == '\\0') return 0;";
-      "  size_t slen = strlen(s);";
-      "  size_t nlen = strlen(n);";
+      "  size_t slen = __lang_str_size(s);";
+      "  size_t nlen = __lang_str_size(n);";
       "  int acc = 0;";
       "  for (size_t i = 0; i + nlen <= slen; ) {";
       "    if (memcmp(s + i, n, nlen) == 0) { acc++; i += nlen; }";
@@ -5930,7 +5945,7 @@ let str_concat_helper =
          (OCaml String.trim semantics: space / tab / newline / cr / form-feed). *)
       "static const char* __lang_str_trim(const char* s) {";
       "  while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r' || *s == '\\x0c') s++;";
-      "  size_t len = strlen(s);";
+      "  size_t len = __lang_str_size(s);";
       "  while (len > 0) {";
       "    char c = s[len - 1];";
       "    if (c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\x0c') len--;";
@@ -5944,14 +5959,15 @@ let str_concat_helper =
       "";
       (* Phase 36: str_starts_with — bool. *)
       "static int __lang_str_starts_with(const char* s, const char* p) {";
-      "  size_t pl = strlen(p);";
-      "  return strncmp(s, p, pl) == 0;";
+      "  size_t pl = __lang_str_size(p);";
+      "  if (__lang_str_size(s) < pl) return 0;";
+      "  return memcmp(s, p, pl) == 0;";
       "}";
       "";
       (* Phase 36: str_ends_with — bool. *)
       "static int __lang_str_ends_with(const char* s, const char* p) {";
-      "  size_t sl = strlen(s);";
-      "  size_t pl = strlen(p);";
+      "  size_t sl = __lang_str_size(s);";
+      "  size_t pl = __lang_str_size(p);";
       "  if (pl > sl) return 0;";
       "  return memcmp(s + sl - pl, p, pl) == 0;";
       "}";
@@ -5959,7 +5975,7 @@ let str_concat_helper =
       (* Phase 36: str_repeat s n — concat n copies of s. *)
       "static const char* __lang_str_repeat(const char* s, int n) {";
       "  if (n <= 0) return \"\";";
-      "  size_t sl = strlen(s);";
+      "  size_t sl = __lang_str_size(s);";
       "  size_t total = sl * (size_t)n;";
       "  char* buf = __lang_str_alloc(__lang_current_region, total);";
       "  for (int i = 0; i < n; i++) memcpy(buf + i * sl, s, sl);";
@@ -5969,7 +5985,7 @@ let str_concat_helper =
       "";
       (* Phase 36: str_rev — byte-level reverse. *)
       "static const char* __lang_str_rev(const char* s) {";
-      "  size_t sl = strlen(s);";
+      "  size_t sl = __lang_str_size(s);";
       "  char* buf = __lang_str_alloc(__lang_current_region, sl);";
       "  for (size_t i = 0; i < sl; i++) buf[i] = s[sl - 1 - i];";
       "  buf[sl] = '\\0';";
@@ -5984,7 +6000,7 @@ let str_concat_helper =
       "";
       (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
       "static const char* __lang_to_upper(const char* s) {";
-      "  size_t sl = strlen(s);";
+      "  size_t sl = __lang_str_size(s);";
       "  char* buf = __lang_str_alloc(__lang_current_region, sl);";
       "  for (size_t i = 0; i < sl; i++) {";
       "    char c = s[i];";
@@ -5994,7 +6010,7 @@ let str_concat_helper =
       "  return buf;";
       "}";
       "static const char* __lang_to_lower(const char* s) {";
-      "  size_t sl = strlen(s);";
+      "  size_t sl = __lang_str_size(s);";
       "  char* buf = __lang_str_alloc(__lang_current_region, sl);";
       "  for (size_t i = 0; i < sl; i++) {";
       "    char c = s[i];";
@@ -6016,9 +6032,9 @@ let str_concat_helper =
          of old replaced by new_str. Empty old returns s unchanged. *)
       "static const char* __lang_str_replace(const char* s, const char* old, const char* new_str) {";
       "  if (old[0] == '\\0') return s;";
-      "  size_t slen = strlen(s);";
-      "  size_t olen = strlen(old);";
-      "  size_t nlen = strlen(new_str);";
+      "  size_t slen = __lang_str_size(s);";
+      "  size_t olen = __lang_str_size(old);";
+      "  size_t nlen = __lang_str_size(new_str);";
       "  /* Worst-case size: every char becomes new_str-length. */";
       "  size_t cap = slen + 1;";
       "  if (nlen > olen) cap += (slen / (olen > 0 ? olen : 1)) * (nlen - olen) + nlen;";
@@ -6083,7 +6099,7 @@ let str_concat_helper =
       "static int __lang_write_file(const char* path, const char* content) {";
       "  FILE* f = fopen(path, \"wb\");";
       "  if (!f) __lang_fail_impl(path);";
-      "  size_t len = strlen(content);";
+      "  size_t len = __lang_str_size(content);";
       "  if (len > 0) { size_t w = fwrite(content, 1, len, f); (void)w; }";
       "  fclose(f);";
       "  return 0;";
@@ -6176,7 +6192,7 @@ let str_concat_helper =
       "}";
       "static int __lang_mkdir_p(const char* path) {";
       "  /* recursive mkdir -p: skip if exists; on failure call __lang_fail_impl */";
-      "  size_t n = strlen(path);";
+      "  size_t n = __lang_str_size(path);";
       "  if (n == 0) return 0;";
       "  char* buf = (char*)malloc(n + 1);";
       "  memcpy(buf, path, n + 1);";
@@ -6199,7 +6215,7 @@ let str_concat_helper =
          backslash / quote / slash); pass others through unchanged. Handles
          escapes inside string literals for json_parser and the like. *)
       "static const char* __lang_str_unescape(const char* s) {";
-      "  size_t n = strlen(s);";
+      "  size_t n = __lang_str_size(s);";
       "  char* r = __lang_str_alloc(__lang_current_region, n);";
       "  size_t i = 0, j = 0;";
       "  while (i < n) {";
@@ -6382,7 +6398,8 @@ let map_hash_helpers =
       "}";
       "static unsigned long long __lang_hash_str(const char* s) {";
       "  unsigned long long h = 1469598103934665603ULL;";
-      "  while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }";
+      "  size_t n = __lang_str_size(s);";
+      "  for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }";
       "  return h;";
       "}" ]
 
@@ -6640,7 +6657,7 @@ let bytes_runtime =
       "  return b;";
       "}";
       "static mere_bytes* __lang_bytes_of_str(const char* s) {";
-      "  long long n = (long long)strlen(s);";
+      "  long long n = (long long)__lang_str_size(s);";
       "  mere_bytes* b = __lang_bytes_alloc(n);";
       "  memcpy(b->data, s, (size_t)n);";
       "  return b;";
@@ -9265,6 +9282,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          producer emitted in between can allocate through them. *)
       "static char* __lang_str_alloc(__lang_region* r, size_t len);";
       "static size_t __lang_str_size(const char* s);";
+      "static int __lang_str_cmp(const char* a, const char* b);";
       "static const char* __lang_str_of_cstr(const char* s);";
       "static const char* __lang_str_dup_n(const char* s, size_t n);";
       "";
