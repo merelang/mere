@@ -164,6 +164,7 @@ let file_bytes_io_used = ref false  (* binary file I/O host imports (read/write_
    the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
 let wasm_component_command = ref false
 let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
+let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -2429,7 +2430,10 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "time"; _ }, _)
     when not (List.mem_assoc "time" !locals) ->
     (* wall-clock epoch seconds as f64 via a host import (Date.now()/1000 in
-       a browser). The unit arg is inert; the raw f64 is boxed like any float. *)
+       a browser). The unit arg is inert; the raw f64 is boxed like any float.
+       Phase 2: in a command component, $__lang_time is backed by wasi
+       clock_time_get (realtime) instead of the f64.const 0 stub. *)
+    if !wasm_component_command then wasm_time_used := true;
     emit_instr "call $__lang_time";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "run"; _ }, cmd_e)
@@ -7346,6 +7350,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   ignore main_ty;
   wasm_component_command := component && (Ast.walk main_ty = Ast.TyUnit);
   wasm_args_used := false;
+  wasm_time_used := false;
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
@@ -7957,9 +7962,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          (time returns 0) are safe. Programs that actually use these under
          --component will trap — a documented Slice-1 limitation. *)
       "  (func $__lang_str_of_float (param f64) (result i32) unreachable)\n\
-      \  (func $__lang_float_of_str (param i32) (result f64) unreachable)\n\
-      \  (func $__lang_time (result f64) (f64.const 0))\n\
-      \  (func $__lang_sin (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_float_of_str (param i32) (result f64) unreachable)\n"
+      ^ (if !wasm_component_command && !wasm_time_used then ""
+         (* command + time(): the real wasi-backed $__lang_time is emitted in
+            puts_decl (with the clock_time_get import); skip the stub here. *)
+         else "  (func $__lang_time (result f64) (f64.const 0))\n")
+      ^ "  (func $__lang_sin (param f64) (result f64) unreachable)\n\
       \  (func $__lang_cos (param f64) (result f64) unreachable)\n\
       \  (func $__lang_tan (param f64) (result f64) unreachable)\n\
       \  (func $__lang_f_pow (param f64) (param f64) (result f64) unreachable)\n\
@@ -8216,8 +8224,25 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
           \    (i64.extend_i32_u (local.get $acc)))\n"
           nil_t cons_t
       in
+      (* time() support: import wasi clock_time_get and emit a real
+         $__lang_time (realtime epoch nanoseconds -> f64 seconds) in place of
+         the f64.const 0 stub. Gated on wasm_time_used. *)
+      let clock_import =
+        if not !wasm_time_used then "" else
+        "  (import \"wasi_snapshot_preview1\" \"clock_time_get\" (func $clock_time_get (param i32 i64 i32) (result i32)))\n"
+      in
+      let clock_fn =
+        if not !wasm_time_used then "" else
+        "  (func $__lang_time (result f64)\n\
+        \    (local $t i32)\n\
+        \    (local.set $t (global.get $__lang_bump))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $t) (i32.const 8)))\n\
+        \    (drop (call $clock_time_get (i32.const 0) (i64.const 0) (local.get $t)))\n\
+        \    (f64.div (f64.convert_i64_u (i64.load (local.get $t))) (f64.const 1000000000)))\n"
+      in
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
       ^ args_imports
+      ^ clock_import
       ^ "  (func $puts_h (param $p i32)\n\
         \    (local $len i32) (local $b i32)\n\
         \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
@@ -8231,6 +8256,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
         \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
       ^ args_fn
+      ^ clock_fn
     else
       "  (func $puts_h (param i32))\n"
   in
