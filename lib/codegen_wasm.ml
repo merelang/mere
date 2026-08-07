@@ -1466,6 +1466,21 @@ let emit_float_alloc_from_f64_on_stack () : unit =
   emit_instr "global.set $__lang_bump"            (* bump += 8 *)
   (* Stack: [..., ptr as i64] *)
 
+(* A host/stdlib builtin name (`run`, `time`, `args`, `exit`, …) is only a
+   builtin when the user hasn't bound that name themselves. Mirrors
+   codegen_c's `user_shadows`: a user's local OR top-level definition always
+   wins over the builtin fallback. Without the top-level checks, a program
+   with e.g. `let rec run = …` (a CPU-emulator loop) would collide with the
+   subprocess `run` builtin and miscompile the call into `i64.const 127`.
+   `toplevel_fn_names` / `fn_closure_table_idx` are populated before any body
+   (fn or main) is emitted and survive `reset ()`, so they are reliable here. *)
+let user_shadows_wasm name =
+  List.mem_assoc name !locals
+  || Hashtbl.mem toplevel_fn_names name
+  || Hashtbl.mem fn_closure_table_idx name
+  || Hashtbl.mem top_globals_wasm name
+  || Hashtbl.mem inner_lifts_wasm name
+
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
   (* Snapshot inbound tail-position + top-level-body flags. All
@@ -1495,11 +1510,11 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.Str_lit s ->
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i64.const %d" off)
-  | Ast.Var "pi" when not (List.mem_assoc "pi" !locals) ->
+  | Ast.Var "pi" when not (user_shadows_wasm "pi") ->
     (* Phase 34.3: float constants — heap-alloc and push an i32 ptr *)
     emit_instr "f64.const 3.14159265358979323846";
     emit_float_alloc_from_f64_on_stack ()
-  | Ast.Var "e" when not (List.mem_assoc "e" !locals) ->
+  | Ast.Var "e" when not (user_shadows_wasm "e") ->
     emit_instr "f64.const 2.7182818284590452354";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.Var name ->
@@ -2017,7 +2032,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "call $puts";
     emit_instr "i64.const 0"  (* unit *)
   | Ast.App ({ node = Ast.Var "print_no_nl"; _ }, arg)
-    when not (List.mem_assoc "print_no_nl" !locals) ->
+    when not (user_shadows_wasm "print_no_nl") ->
     print_no_nl_used := true;
     emit_expr arg;
     emit_instr "call $__lang_print_no_nl";
@@ -2444,20 +2459,20 @@ let rec emit_expr (e : Ast.expr) : unit =
      against a user rebinding the name, like the concurrency builtins above.
      `getenv` is a user `extern` and resolves through the host import object. *)
   | Ast.App ({ node = Ast.Var "file_exists"; _ }, path_e)
-    when not (List.mem_assoc "file_exists" !locals) ->
+    when not (user_shadows_wasm "file_exists") ->
     (* no filesystem — File.exist? is always false. *)
     emit_expr path_e;
     emit_instr "drop";
     emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "random_int"; _ }, n_e)
-    when not (List.mem_assoc "random_int" !locals) ->
+    when not (user_shadows_wasm "random_int") ->
     (* no RNG wired on the Wasm host yet — deterministic 0 (refine to a host
        Math.random import later). *)
     emit_expr n_e;
     emit_instr "drop";
     emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "time"; _ }, _)
-    when not (List.mem_assoc "time" !locals) ->
+    when not (user_shadows_wasm "time") ->
     (* wall-clock epoch seconds as f64 via a host import (Date.now()/1000 in
        a browser). The unit arg is inert; the raw f64 is boxed like any float.
        Phase 2: in a command component, $__lang_time is backed by wasi
@@ -2466,13 +2481,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "call $__lang_time";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "run"; _ }, cmd_e)
-    when not (List.mem_assoc "run" !locals) ->
+    when not (user_shadows_wasm "run") ->
     (* no subprocess on a browser/worker host — commands "fail" (nonzero). *)
     emit_expr cmd_e;
     emit_instr "drop";
     emit_instr "i64.const 127"
   | Ast.App ({ node = Ast.Var "args"; _ }, _)
-    when not (List.mem_assoc "args" !locals) ->
+    when not (user_shadows_wasm "args") ->
     if !wasm_component_command then begin
       (* Phase 2: a command component has real argv via the WASI adapter.
          $__lang_args builds a str list (argv[1..], skipping the program name
@@ -2484,7 +2499,7 @@ let rec emit_expr (e : Ast.expr) : unit =
          Constr emit with args()'s own result type (str list). *)
       emit_expr { e with Ast.node = Ast.Constr ("Nil", None) }
   | Ast.App ({ node = Ast.Var "env_var"; _ }, name_e)
-    when not (List.mem_assoc "env_var" !locals) ->
+    when not (user_shadows_wasm "env_var") ->
     if !wasm_component_command then begin
       (* Phase 2: env_var name -> str option, via wasi environ_get. Returns
          Some value if an entry "name=value" exists, else None. *)
@@ -2499,13 +2514,13 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_expr { e with Ast.node = Ast.Constr ("None", None) }
     end
   | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
-    when not (List.mem_assoc "print_err" !locals) ->
+    when not (user_shadows_wasm "print_err") ->
     (* stderr — route to the same host sink as print. *)
     emit_expr arg;
     emit_instr "call $puts";
     emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "exit"; _ }, code_e)
-    when not (List.mem_assoc "exit" !locals) ->
+    when not (user_shadows_wasm "exit") ->
     (* no process to exit — evaluate the code for effect, then trap. *)
     emit_expr code_e;
     emit_instr "drop";
@@ -2516,7 +2531,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr path_e;
     emit_instr "call $__lang_read_file"
   | Ast.App ({ node = Ast.Var "read_stdin"; _ }, arg)
-    when not (List.mem_assoc "read_stdin" !locals) ->
+    when not (user_shadows_wasm "read_stdin") ->
     if !wasm_component_command then begin
       (* Phase 2: a command component reads all of stdin via wasi fd_read
          ($__lang_read_stdin returns a NUL-terminated Mere str). *)
@@ -2532,7 +2547,7 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
     end
   | Ast.App ({ node = Ast.Var "read_line"; _ }, arg)
-    when not (List.mem_assoc "read_line" !locals) ->
+    when not (user_shadows_wasm "read_line") ->
     (* No stdin on a browser host — one line reads as the empty string. *)
     emit_expr arg;
     emit_instr "drop";
