@@ -1,0 +1,97 @@
+// Parity lock for the MOS 6502 emulator shape (examples/mos6502.mere).
+// A compact, self-contained CPU that exercises the features that make the
+// 6502 harder than CHIP-8 — several addressing modes, status flags, a
+// relative branch loop, and a JSR/RTS round trip through the page-1 stack —
+// so a backend that miscompiles any of them diverges from the interpreter.
+// It deliberately names its fetch-decode loop `run` (a host builtin name) to
+// keep the top-level-shadowing fix (v0.1.130) locked on the emulator shape,
+// not just the synthetic toplevel_shadows_builtin test.
+
+let mask8  = fn x -> bit_and x 255;
+let mask16 = fn x -> bit_and x 65535;
+let new_vec = fn n -> fn x ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in v;
+let blit = fn mem -> fn at -> fn b ->
+  let n = bytes_len b in
+  let rec go = fn i -> if i >= n then () else let _ = vec_set mem (at + i) (bytes_get b i) in go (i + 1) in
+  go 0;
+
+// reg: [A X Y SP PC C Z N HALT]
+let fetch = fn mem -> fn reg ->
+  let pc = vec_get reg 4 in
+  let b = vec_get mem pc in
+  let _ = vec_set reg 4 (mask16 (pc + 1)) in b;
+let fetch16 = fn mem -> fn reg -> let lo = fetch mem reg in let hi = fetch mem reg in lo + hi * 256;
+let set_zn = fn reg -> fn v ->
+  let _ = vec_set reg 6 (if v == 0 then 1 else 0) in
+  vec_set reg 7 (if bit_and v 128 == 0 then 0 else 1);
+let push = fn mem -> fn reg -> fn v ->
+  let sp = vec_get reg 3 in
+  let _ = vec_set mem (256 + sp) (mask8 v) in vec_set reg 3 (mask8 (sp - 1));
+let pull = fn mem -> fn reg -> let sp = mask8 (vec_get reg 3 + 1) in let _ = vec_set reg 3 sp in vec_get mem (256 + sp);
+
+let step = fn mem -> fn reg ->
+  let op = fetch mem reg in
+  if op == 0xA9 then let v = fetch mem reg in let _ = vec_set reg 0 v in set_zn reg v          // LDA #imm
+  else if op == 0xA2 then let v = fetch mem reg in let _ = vec_set reg 1 v in set_zn reg v     // LDX #imm
+  else if op == 0x85 then vec_set mem (fetch mem reg) (vec_get reg 0)                           // STA zp
+  else if op == 0x86 then vec_set mem (fetch mem reg) (vec_get reg 1)                           // STX zp
+  else if op == 0x8D then vec_set mem (fetch16 mem reg) (vec_get reg 0)                         // STA abs
+  else if op == 0x18 then vec_set reg 5 0                                                        // CLC
+  else if op == 0x65 then                                                                        // ADC zp
+    let m = vec_get mem (fetch mem reg) in
+    let sum = vec_get reg 0 + m + vec_get reg 5 in
+    let res = mask8 sum in
+    let _ = vec_set reg 5 (if sum > 255 then 1 else 0) in
+    let _ = vec_set reg 0 res in set_zn reg res
+  else if op == 0xCA then let v = mask8 (vec_get reg 1 - 1) in let _ = vec_set reg 1 v in set_zn reg v   // DEX
+  else if op == 0xD0 then                                                                        // BNE rel
+    let rel = fetch mem reg in
+    if vec_get reg 6 == 0 then
+      let off = if rel >= 128 then rel - 256 else rel in
+      vec_set reg 4 (mask16 (vec_get reg 4 + off))
+    else ()
+  else if op == 0x20 then                                                                        // JSR abs
+    let t = fetch16 mem reg in
+    let ret = mask16 (vec_get reg 4 - 1) in
+    let _ = push mem reg (bit_and (bit_shr ret 8) 255) in
+    let _ = push mem reg (bit_and ret 255) in
+    vec_set reg 4 t
+  else if op == 0x60 then let lo = pull mem reg in let hi = pull mem reg in vec_set reg 4 (mask16 (lo + hi * 256 + 1))  // RTS
+  else vec_set reg 8 1;                                                                          // BRK -> halt
+
+let rec run = fn mem -> fn reg -> fn budget ->
+  if budget <= 0 then ()
+  else if vec_get reg 8 == 1 then ()
+  else let _ = step mem reg in run mem reg (budget - 1);
+
+let mem = new_vec 65536 0;
+let reg = new_vec 9 0;
+let _ = vec_set reg 3 0xFF;      // SP = $FF
+let _ = vec_set reg 4 0x0600;    // PC = $0600
+
+//   0600 A9 00     LDA #$00       ; sum = 0
+//   0602 A2 05     LDX #$05       ; counter = 5
+//   0604 86 00     STX $00        ; loop: $00 = X
+//   0606 18        CLC
+//   0607 65 00     ADC $00        ; A += $00
+//   0609 CA        DEX
+//   060A D0 F8     BNE $0604      ; -8 = $F8
+//   060C 20 13 06  JSR $0613      ; A = double(A)
+//   060F 8D 00 02  STA $0200      ; store result at $0200
+//   0612 00        BRK            ; halt
+//   0613 85 01     sub: STA $01   ; $01 = A
+//   0615 18        CLC
+//   0616 65 01     ADC $01        ; A += $01  (double)
+//   0618 60        RTS
+let prog = bytes_of_hex ("a900a2058600186500cad0f8201306" ++ "8d000200850118650160");
+let _ = blit mem 0x0600 prog;
+let _ = run mem reg 1000;
+
+let _ = print (str_of_int (vec_get reg 0));      // A: (5+4+3+2+1)=15, doubled = 30
+let _ = print (str_of_int (vec_get mem 0x0200)); // 30
+let _ = print (str_of_int (vec_get reg 1));      // X = 0
+let _ = print (str_of_int (vec_get reg 6));      // Z after ADC of 15 (nonzero) = 0
+0
