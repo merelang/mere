@@ -7587,17 +7587,17 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      stack-top has body's i32 result; pipe through show_<tag> if needed,
      then puts. Unit main: drop result, call puts on "()" literal. *)
   let main_ty_walked = Ast.walk main_ty in
-  if component then
-    (* Component target (note 152): $main returns the top-level value's raw
-       pointer as an i32 instead of printing it; $run then lowers/dispatches it
-       to the canonical ABI. Slice 1 = string result (TyStr); Slice 2 = a
-       function value (TyArrow), whose closure record ptr $run calls with the
-       lifted argument. Both return the raw pointer via i32.wrap_i64 (no
-       show_str quote-wrapping — a component value is raw, not interp display).
-       Other result types drop to 0 for now (later slices). *)
-    (match main_ty_walked with
-     | Ast.TyStr | Ast.TyArrow _ -> emit_instr "i32.wrap_i64"
-     | _ -> emit_instr "drop"; emit_instr "i32.const 0")
+  (* Component target (note 152): for value-returning reactor exports (TyStr,
+     TyArrow) $main returns the top-level value's raw pointer as an i32 (no
+     show_str quote-wrapping — a component value is raw, not interp display),
+     which $run then lowers/dispatches to the canonical ABI. Command-style
+     programs (TyUnit; Phase 2) and unsupported types fall through to the
+     normal epilogue so the program's prints and the trailing "()" still reach
+     stdout via $puts -> fd_write. *)
+  let component_reactor =
+    component && (match main_ty_walked with Ast.TyStr | Ast.TyArrow _ -> true | _ -> false)
+  in
+  if component_reactor then emit_instr "i32.wrap_i64"
   else
   (match main_ty_walked with
    | Ast.TyInt ->
@@ -8128,8 +8128,33 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   (* Under --component, the ambient `env.puts` import is replaced by a no-op
      in-module stub (pure Slice-1 programs do not print). Note 152. *)
   let puts_decl =
-    if component then "  (func $puts_h (param i32))\n"
-    else "  (import \"env\" \"puts\" (func $puts_h (param i32)))\n"
+    if not component then
+      "  (import \"env\" \"puts\" (func $puts_h (param i32)))\n"
+    else if main_ty_walked = Ast.TyUnit then
+      (* Phase 2 (note 152): a unit/CLI program prints via WASI. Import
+         Preview 1 fd_write and write the NUL-terminated Mere string plus a
+         trailing newline (matching C's puts) to stdout (fd 1). Componentized
+         with the wasi_snapshot_preview1 command adapter, this yields a
+         wasi:cli/run component that `wasmtime run` executes.
+         NB: the command adapter's fd_write only honors the FIRST iovec entry
+         (a scatter write of 2 iovecs silently drops the 2nd), so we issue two
+         single-iovec writes: the string, then the newline. Scratch (16 bytes
+         bump): iovec @0..7, nwritten @8..11, newline byte @12. *)
+      "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n\
+      \  (func $puts_h (param $p i32)\n\
+      \    (local $len i32) (local $b i32)\n\
+      \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
+      \    (local.set $b (global.get $__lang_bump))\n\
+      \    (global.set $__lang_bump (i32.add (local.get $b) (i32.const 16)))\n\
+      \    (i32.store offset=0 (local.get $b) (local.get $p))\n\
+      \    (i32.store offset=4 (local.get $b) (local.get $len))\n\
+      \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8))))\n\
+      \    (i32.store8 offset=12 (local.get $b) (i32.const 10))\n\
+      \    (i32.store offset=0 (local.get $b) (i32.add (local.get $b) (i32.const 12)))\n\
+      \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
+      \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
+    else
+      "  (func $puts_h (param i32))\n"
   in
   let component_section =
     if not component then "" else
@@ -8152,6 +8177,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \    (i32.store offset=4 (local.get $ret) (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))\n\
       \    (local.get $ret))\n"
     in
+    if main_ty_walked = Ast.TyUnit then
+      (* Phase 2: command component. No cabi_realloc/run — export _start,
+         which runs $main (its prints, and the trailing "()", reach stdout
+         via $puts -> fd_write). Feed to `wasm-tools component new --adapt
+         wasi_snapshot_preview1=<command adapter>` for a wasi:cli/run comp. *)
+      "  (func (export \"_start\") (drop (call $main)))\n"
+    else
     cabi_realloc ^
     (match main_ty_walked with
      (* Slice 1: func() -> string. $main returns the raw str ptr; lower it. *)
