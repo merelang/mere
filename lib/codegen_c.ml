@@ -4522,14 +4522,14 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   in
   match Ast.walk t with
   | Ast.TyInt ->
-    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return buf;\n}"
+    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_of_cstr(buf);\n}"
   | Ast.TyBool ->
     header ^ " { return v ? \"true\" : \"false\"; }"
   | Ast.TyStr ->
     (* Phase 23.5: escape special chars so show_str's output matches
        interp (which shows backslash-n as 2 literal chars, not a real
        newline). *)
-    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return buf; }"
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return \"()\"; }"
   | Ast.TyTuple ts ->
@@ -4538,7 +4538,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         Printf.sprintf "show_%s(v.f%d)" (ty_tag et) i) ts
     in
     let fmt = "(" ^ String.concat ", " (List.map (fun _ -> "%s") ts) ^ ")" in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
       header fmt (String.concat ", " parts)
   | Ast.TyArrow _ ->
     header ^ " { (void)v; return \"<closure>\"; }"
@@ -4565,7 +4565,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
            __cur = __cur->payload.Cons.f1;\n  \
            __first = 0;\n  \
          }\n  \
-         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __buf;\n\
+         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_of_cstr(__buf);\n\
        }"
       header cty elem_show elem_show
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
@@ -4581,7 +4581,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         (List.map (fun (fname, _) -> fname ^ " = %s") info.Typer.r_fields) ^
       " }"
     in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
       header fmt (String.concat ", " fields_parts)
   | Ast.TyCon (name, args) ->
     (* Variant — either monomorphic or polymorphic instance. Find its
@@ -4612,7 +4612,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
             dot tag_n cname
         | Some ty ->
           Printf.sprintf
-            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(v%spayload.%s)); return buf; }"
+            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(v%spayload.%s)); return __lang_str_of_cstr(buf); }"
             dot tag_n cname (ty_tag ty) dot cname)
         variants
     in
@@ -4634,11 +4634,11 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   let header = Printf.sprintf "__attribute__((noinline)) static const char* to_json_%s(%s v)" tag cty in
   match Ast.walk t with
   | Ast.TyInt ->
-    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return buf;\n}"
+    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_of_cstr(buf);\n}"
   | Ast.TyBool ->
     header ^ " { return v ? \"true\" : \"false\"; }"
   | Ast.TyStr ->
-    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return buf; }"
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return \"null\"; }"
   | Ast.TyArrow _ ->
@@ -4649,7 +4649,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         Printf.sprintf "to_json_%s(v.f%d)" (ty_tag et) i) ts
     in
     let fmt = "[" ^ String.concat "," (List.map (fun _ -> "%s") ts) ^ "]" in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
       header fmt (String.concat ", " parts)
   | Ast.TyCon ("list", [elem_ty]) when Hashtbl.mem polymorphic_variants "list" ->
     let elem = "to_json_" ^ ty_tag (Ast.walk elem_ty) in
@@ -4670,7 +4670,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
            __cur = __cur->payload.Cons.f1;\n  \
            __first = 0;\n  \
          }\n  \
-         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __buf;\n\
+         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_of_cstr(__buf);\n\
        }"
       header cty elem elem
   | Ast.TyCon ("option", [inner]) ->
@@ -4695,7 +4695,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         (List.map (fun (fname, _) -> "\\\"" ^ fname ^ "\\\":%s") info.Typer.r_fields) ^
       "}"
     in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return buf;\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
       header fmt (String.concat ", " fields_parts)
   | Ast.TyCon (name, args) ->
     let variants =
@@ -4722,7 +4722,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
             dot tag_n cname
         | Some ty ->
           Printf.sprintf
-            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(v%spayload.%s)); return buf; }"
+            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(v%spayload.%s)); return __lang_str_of_cstr(buf); }"
             dot tag_n cname (ty_tag ty) dot cname)
         variants
     in
@@ -5781,6 +5781,15 @@ let str_concat_helper =
       "  return d;";
       "}";
       "static size_t __lang_str_size(const char* s) { return ((const size_t*)s)[-1]; }";
+      (* Copy a plain NUL-terminated C string into a header-carrying Mere str.
+         Used at boundaries where a headerless C string enters Mere: asprintf
+         results (show_* / str_of_int / str_of_float / format), getenv, argv. *)
+      "static const char* __lang_str_of_cstr(const char* s) {";
+      "  size_t n = strlen(s);";
+      "  char* r = __lang_str_alloc(__lang_current_region, n);";
+      "  memcpy(r, s, n);";
+      "  return r;";
+      "}";
       "";
       "static const char* __lang_str_concat(const char* a, const char* b) {";
       "  size_t la = strlen(a), lb = strlen(b);";
@@ -6219,7 +6228,7 @@ let str_concat_helper =
       "  }";
       "  char* buf;";
       "  asprintf(&buf, has_dot ? \"%s\" : \"%s.0\", tmp);";
-      "  return (const char*) buf;";
+      "  return __lang_str_of_cstr(buf);";
       "}";
       "";
       (* v0.1.127: time () — wall-clock epoch seconds as a double (matches the
@@ -9240,6 +9249,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          producer emitted in between can allocate through them. *)
       "static char* __lang_str_alloc(__lang_region* r, size_t len);";
       "static size_t __lang_str_size(const char* s);";
+      "static const char* __lang_str_of_cstr(const char* s);";
       "";
       (* Stage 1 native full-stack: if any Wasm-memory-model FFI extern
          (tcp_* / mem_* / str_ptr) is used, emit the native runtime that
