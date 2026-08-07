@@ -20,6 +20,21 @@ exception Codegen_error of Loc.t * string
 let unsupported loc what =
   raise (Codegen_error (loc, "unsupported (wasm codegen, Phase 6.1 MVP): " ^ what))
 
+(* Host builtins with no Wasm lowering yet. Like codegen_llvm.ml's twin list,
+   this makes the gap loud: without it these fall through to the generic
+   "unbound variable" tail, which reads like a user typo rather than a
+   backend hole. It is the Wasm column of the host-builtin support
+   matrix, in code; a real arm (or an explicit `unsupported` arm) fires
+   before the tail, so an entry here is inert once the builtin is handled.
+   Names that already have a stub (file_exists/args/run/random_int/exit) or
+   an explicit unsupported arm (file_open family, list_dir, mkdir_p,
+   file_mtime, sleep_ms, channel_close/recv_opt/recv_timeout) are NOT listed. *)
+let host_builtins_without_wasm_lowering =
+  [ "print_int"; "print_bool";
+    "read_key"; "tty_raw"; "tty_restore"; "file_size";
+    "read_lines"; "file_pread"; "file_pwrite";
+    "random_float"; "detach" ]
+
 (* Accumulator for the function body's instructions (one WAT token per
    list entry). The driver concatenates them with newlines + indent. *)
 let instrs : string list ref = ref []
@@ -1716,7 +1731,12 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr "i32.store offset=4";
        emit_instr (Printf.sprintf "local.get %d" cl_base);
        emit_instr "i64.extend_i32_u"
-     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name)))
+     | None ->
+       if List.mem name host_builtins_without_wasm_lowering then
+         unsupported e.Ast.loc
+           (name ^ " has no Wasm lowering yet (host builtin; scope = interp + C)")
+       else
+         unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner
   | Ast.Neg inner ->
     (* v0.1.44: unary minus is numeric-overloaded like Bin (the typer

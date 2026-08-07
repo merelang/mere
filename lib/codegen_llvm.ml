@@ -13,6 +13,26 @@ exception Codegen_error of Loc.t * string
 let unsupported loc what =
   raise (Codegen_error (loc, "unsupported (llvm codegen, Phase 5.1 MVP): " ^ what))
 
+(* Host builtins with no LLVM lowering yet. These have a type in typer's
+   builtin env and an interp/C implementation, but no LLVM arm — so today a
+   program using one falls through to the generic "unbound variable" at the
+   Var-resolution tail, which reads like a user typo rather than a backend
+   gap. This list makes the hole loud and named ("no LLVM lowering yet")
+   instead of silent. It is the LLVM column of the host-builtin support
+   matrix, expressed in code; when a builtin gains a real LLVM arm
+   that arm fires before the tail and its entry here becomes inert. Names
+   with an explicit `unsupported` arm already (file_open family, list_dir,
+   mkdir_p, file_mtime, sleep_ms, channel_close/recv_opt/recv_timeout) are
+   deliberately NOT listed — they are already loud. *)
+let host_builtins_without_llvm_lowering =
+  [ "print_no_nl"; "print_err"; "print_int"; "print_bool";
+    "read_line"; "read_stdin"; "read_key";
+    "tty_raw"; "tty_restore"; "file_size"; "exit";
+    "read_lines"; "file_pread"; "file_pwrite";
+    "env_var"; "args"; "run";
+    "file_exists"; "random_int"; "random_float";
+    "detach"; "par_map" ]
+
 (* SSA register / basic-block label counter. Reset per emit_program. *)
 let reg_counter = ref 0
 let fresh_reg () =
@@ -3225,7 +3245,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                     ("inner-lifted fn `" ^ name ^ "`: type is not an arrow"))
         | None -> unsupported e.Ast.loc
                     ("inner-lifted fn `" ^ name ^ "`: type is unknown"))
-     | None -> unsupported e.Ast.loc ("unbound variable: " ^ name))))
+     | None ->
+       if List.mem name host_builtins_without_llvm_lowering then
+         unsupported e.Ast.loc
+           (name ^ " has no LLVM lowering yet (host builtin; scope = interp + C)")
+       else
+         unsupported e.Ast.loc ("unbound variable: " ^ name))))
   | Ast.Annot (inner, _) -> emit_expr env inner
   | Ast.Neg inner ->
     let v = emit_expr env inner in
