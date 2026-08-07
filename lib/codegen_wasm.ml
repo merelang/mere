@@ -165,6 +165,7 @@ let file_bytes_io_used = ref false  (* binary file I/O host imports (read/write_
 let wasm_component_command = ref false
 let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
+let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -2454,6 +2455,21 @@ let rec emit_expr (e : Ast.expr) : unit =
       (* no argv on a browser/worker host — args() is the empty list. Reuse the
          Constr emit with args()'s own result type (str list). *)
       emit_expr { e with Ast.node = Ast.Constr ("Nil", None) }
+  | Ast.App ({ node = Ast.Var "env_var"; _ }, name_e)
+    when not (List.mem_assoc "env_var" !locals) ->
+    if !wasm_component_command then begin
+      (* Phase 2: env_var name -> str option, via wasi environ_get. Returns
+         Some value if an entry "name=value" exists, else None. *)
+      wasm_env_used := true;
+      emit_expr name_e;
+      emit_instr "i32.wrap_i64";
+      emit_instr "call $__lang_env_var"
+    end else begin
+      (* no environ on a browser/worker host — env_var is always None. *)
+      emit_expr name_e;
+      emit_instr "drop";
+      emit_expr { e with Ast.node = Ast.Constr ("None", None) }
+    end
   | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
     when not (List.mem_assoc "print_err" !locals) ->
     (* stderr — route to the same host sink as print. *)
@@ -7351,6 +7367,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_component_command := component && (Ast.walk main_ty = Ast.TyUnit);
   wasm_args_used := false;
   wasm_time_used := false;
+  wasm_env_used := false;
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
@@ -8240,9 +8257,65 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (drop (call $clock_time_get (i32.const 0) (i64.const 0) (local.get $t)))\n\
         \    (f64.div (f64.convert_i64_u (i64.load (local.get $t))) (f64.const 1000000000)))\n"
       in
+      (* env_var support: import wasi environ_sizes_get/environ_get and emit
+         $__lang_env_var, which scans "KEY=VALUE" entries for one matching the
+         name and returns Some (value ptr, NUL-terminated so usable directly)
+         or None. Gated on wasm_env_used. *)
+      let env_imports =
+        if not !wasm_env_used then "" else
+        "  (import \"wasi_snapshot_preview1\" \"environ_sizes_get\" (func $environ_sizes_get (param i32 i32) (result i32)))\n\
+        \  (import \"wasi_snapshot_preview1\" \"environ_get\" (func $environ_get (param i32 i32) (result i32)))\n"
+      in
+      let env_fn =
+        if not !wasm_env_used then "" else
+        let some_t = (try Hashtbl.find variant_tags "Some" with Not_found -> 1) in
+        let none_t = (try Hashtbl.find variant_tags "None" with Not_found -> 0) in
+        Printf.sprintf
+          "  (func $__lang_env_var (param $name i32) (result i64)\n\
+          \    (local $nl i32) (local $cnt i32) (local $bufsz i32) (local $envp i32) (local $buf i32)\n\
+          \    (local $i i32) (local $e i32) (local $j i32) (local $ok i32) (local $sz i32) (local $cell i32)\n\
+          \    (local.set $nl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $name)))))\n\
+          \    (local.set $sz (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $sz) (i32.const 8)))\n\
+          \    (drop (call $environ_sizes_get (local.get $sz) (i32.add (local.get $sz) (i32.const 4))))\n\
+          \    (local.set $cnt (i32.load (local.get $sz)))\n\
+          \    (local.set $bufsz (i32.load offset=4 (local.get $sz)))\n\
+          \    (local.set $envp (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $envp) (i32.mul (local.get $cnt) (i32.const 4))))\n\
+          \    (local.set $buf (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $buf) (local.get $bufsz)))\n\
+          \    (drop (call $environ_get (local.get $envp) (local.get $buf)))\n\
+          \    (local.set $i (i32.const 0))\n\
+          \    (block $done (loop $lp\n\
+          \      (br_if $done (i32.ge_u (local.get $i) (local.get $cnt)))\n\
+          \      (local.set $e (i32.load (i32.add (local.get $envp) (i32.mul (local.get $i) (i32.const 4)))))\n\
+          \      (local.set $j (i32.const 0))\n\
+          \      (local.set $ok (i32.const 1))\n\
+          \      (block $cend (loop $clp\n\
+          \        (br_if $cend (i32.ge_u (local.get $j) (local.get $nl)))\n\
+          \        (if (i32.ne (i32.load8_u (i32.add (local.get $e) (local.get $j))) (i32.load8_u (i32.add (local.get $name) (local.get $j))))\n\
+          \          (then (local.set $ok (i32.const 0)) (br $cend)))\n\
+          \        (local.set $j (i32.add (local.get $j) (i32.const 1)))\n\
+          \        (br $clp)))\n\
+          \      (if (i32.and (local.get $ok) (i32.eq (i32.load8_u (i32.add (local.get $e) (local.get $nl))) (i32.const 61)))\n\
+          \        (then\n\
+          \          (local.set $cell (global.get $__lang_bump))\n\
+          \          (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+          \          (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+          \          (i64.store offset=8 (local.get $cell) (i64.extend_i32_u (i32.add (i32.add (local.get $e) (local.get $nl)) (i32.const 1))))\n\
+          \          (return (i64.extend_i32_u (local.get $cell)))))\n\
+          \      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n\
+          \      (br $lp)))\n\
+          \    (local.set $cell (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+          \    (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+          \    (i64.extend_i32_u (local.get $cell)))\n"
+          some_t none_t
+      in
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
       ^ args_imports
       ^ clock_import
+      ^ env_imports
       ^ "  (func $puts_h (param $p i32)\n\
         \    (local $len i32) (local $b i32)\n\
         \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
@@ -8257,6 +8330,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
       ^ args_fn
       ^ clock_fn
+      ^ env_fn
     else
       "  (func $puts_h (param i32))\n"
   in
