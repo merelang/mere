@@ -2467,6 +2467,19 @@ let rec emit_expr (e : Ast.expr) : unit =
     file_io_used := true;
     emit_expr path_e;
     emit_instr "call $__lang_read_file"
+  | Ast.App ({ node = Ast.Var "read_stdin"; _ }, arg)
+    when not (List.mem_assoc "read_stdin" !locals) ->
+    (* A browser/worker host has no stdin — read_stdin is the empty string.
+       (The unit arg is inert; evaluate it for effect, then drop.) *)
+    emit_expr arg;
+    emit_instr "drop";
+    emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
+  | Ast.App ({ node = Ast.Var "read_line"; _ }, arg)
+    when not (List.mem_assoc "read_line" !locals) ->
+    (* No stdin on a browser host — one line reads as the empty string. *)
+    emit_expr arg;
+    emit_instr "drop";
+    emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
   | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, path_e) ->
     (* host returns a length-prefixed byte buffer (mere_bytes layout); convert
        it to a Vec[int] with the bytes bridge (all in-Wasm, no per-byte host
