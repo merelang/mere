@@ -5488,7 +5488,7 @@ let native_ffi_runtime ~tls ~midi =
       "   Allocates in the current region (v0.1.32 — it used to malloc and";
       "   leak; now a per-request region block reclaims these too). */";
       "static char* mem_to_str(int p, int len) {";
-      "  char* s = (char*)__lang_region_alloc(__lang_current_region, (size_t)len + 1);";
+      "  char* s = __lang_str_alloc(__lang_current_region, (size_t)len);";
       "  memcpy(s, __mem + p, len); s[len] = 0; return s;";
       "}";
       "";
@@ -5860,7 +5860,7 @@ let str_concat_helper =
       "static const char* __lang_substring(const char* s, int start, int end_) {";
       "  int len = end_ - start;";
       "  if (len < 0) len = 0;";
-      "  char* r = (char*) __lang_region_alloc(__lang_current_region, len + 1);";
+      "  char* r = __lang_str_alloc(__lang_current_region, len);";
       "  memcpy(r, s + start, (size_t)len);";
       "  r[len] = '\\0';";
       "  return r;";
@@ -5871,7 +5871,7 @@ let str_concat_helper =
          escape form. Stays consistent with interp's show_str. *)
       "static const char* __lang_str_escape(const char* s) {";
       "  size_t n = strlen(s);";
-      "  char* r = (char*) __lang_region_alloc(__lang_current_region, n * 2 + 1);";
+      "  char* r = __lang_str_alloc(__lang_current_region, n * 2);";
       "  size_t j = 0;";
       "  for (size_t i = 0; i < n; i++) {";
       "    char c = s[i];";
@@ -5911,7 +5911,7 @@ let str_concat_helper =
       "    if (c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\x0c') len--;";
       "    else break;";
       "  }";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, len + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, len);";
       "  if (len > 0) memcpy(buf, s, len);";
       "  buf[len] = '\\0';";
       "  return buf;";
@@ -5936,7 +5936,7 @@ let str_concat_helper =
       "  if (n <= 0) return \"\";";
       "  size_t sl = strlen(s);";
       "  size_t total = sl * (size_t)n;";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, total + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, total);";
       "  for (int i = 0; i < n; i++) memcpy(buf + i * sl, s, sl);";
       "  buf[total] = '\\0';";
       "  return buf;";
@@ -5945,7 +5945,7 @@ let str_concat_helper =
       (* Phase 36: str_rev — byte-level reverse. *)
       "static const char* __lang_str_rev(const char* s) {";
       "  size_t sl = strlen(s);";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, sl + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, sl);";
       "  for (size_t i = 0; i < sl; i++) buf[i] = s[sl - 1 - i];";
       "  buf[sl] = '\\0';";
       "  return buf;";
@@ -5960,7 +5960,7 @@ let str_concat_helper =
       (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
       "static const char* __lang_to_upper(const char* s) {";
       "  size_t sl = strlen(s);";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, sl + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, sl);";
       "  for (size_t i = 0; i < sl; i++) {";
       "    char c = s[i];";
       "    buf[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;";
@@ -5970,7 +5970,7 @@ let str_concat_helper =
       "}";
       "static const char* __lang_to_lower(const char* s) {";
       "  size_t sl = strlen(s);";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, sl + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, sl);";
       "  for (size_t i = 0; i < sl; i++) {";
       "    char c = s[i];";
       "    buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;";
@@ -6019,7 +6019,7 @@ let str_concat_helper =
       "  fseek(f, 0, SEEK_END);";
       "  long len = ftell(f);";
       "  fseek(f, 0, SEEK_SET);";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, (size_t)len + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, (size_t)len);";
       "  if (len > 0) { size_t r = fread(buf, 1, (size_t)len, f); (void)r; }";
       "  buf[len] = '\\0';";
       "  fclose(f);";
@@ -6033,7 +6033,7 @@ let str_concat_helper =
       "    n += r;";
       "    if (n == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
       "  }";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, n + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, n);";
       "  memcpy(buf, tmp, n); buf[n] = '\\0';";
       "  free(tmp);";
       "  return buf;";
@@ -6050,7 +6050,7 @@ let str_concat_helper =
       "    if (n + 1 == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
       "    tmp[n++] = (char)c;";
       "  }";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, n + 1);";
+      "  char* buf = __lang_str_alloc(__lang_current_region, n);";
       "  memcpy(buf, tmp, n); buf[n] = '\\0';";
       "  free(tmp);";
       "  return buf;";
@@ -6175,7 +6175,7 @@ let str_concat_helper =
          escapes inside string literals for json_parser and the like. *)
       "static const char* __lang_str_unescape(const char* s) {";
       "  size_t n = strlen(s);";
-      "  char* r = (char*) __lang_region_alloc(__lang_current_region, n + 1);";
+      "  char* r = __lang_str_alloc(__lang_current_region, n);";
       "  size_t i = 0, j = 0;";
       "  while (i < n) {";
       "    if (s[i] == '\\\\' && i + 1 < n) {";
@@ -6621,14 +6621,14 @@ let bytes_runtime =
       "  return b;";
       "}";
       "static const char* __lang_str_of_bytes(mere_bytes* b) {";
-      "  char* s = (char*)__lang_region_alloc(__lang_current_region, (size_t)b->len + 1);";
+      "  char* s = __lang_str_alloc(__lang_current_region, (size_t)b->len);";
       "  memcpy(s, b->data, (size_t)b->len);";
       "  s[b->len] = '\\0';";
       "  return s;";
       "}";
       "static const char __lang_hexdig[] = \"0123456789abcdef\";";
       "static const char* __lang_hex_of_bytes(mere_bytes* b) {";
-      "  char* s = (char*)__lang_region_alloc(__lang_current_region, (size_t)b->len * 2 + 1);";
+      "  char* s = __lang_str_alloc(__lang_current_region, (size_t)b->len * 2);";
       "  for (long long i = 0; i < b->len; i++) {";
       "    s[i*2]   = __lang_hexdig[b->data[i] >> 4];";
       "    s[i*2+1] = __lang_hexdig[b->data[i] & 15];";
@@ -6725,7 +6725,7 @@ let strbuf_runtime =
       "     wide default region so the returned str outlives the StrBuf's";
       "     scoped region. Avoids dangling pointers when";
       "     `region R { ...; strbuf_to_str b }` returns a value out of R. */";
-      "  char* r = (char*)__lang_region_alloc(__lang_current_region, sb->len + 1);";
+      "  char* r = __lang_str_alloc(__lang_current_region, sb->len);";
       "  for (int i = 0; i < sb->len; i++) r[i] = sb->data[i];";
       "  r[sb->len] = '\\0';";
       "  return r;";
@@ -6832,7 +6832,7 @@ let str_list_helpers =
       "    int st = end - 1;";
       "    while (st > 0 && (((unsigned char)s[st]) & 0xC0) == 0x80) st--;";
       "    int l = end - st;";
-      "    char* tok = (char*)__lang_region_alloc(__lang_current_region, (size_t)l + 1);";
+      "    char* tok = __lang_str_alloc(__lang_current_region, (size_t)l);";
       "    memcpy(tok, s + st, (size_t)l);";
       "    tok[l] = '\\0';";
       "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
@@ -6874,7 +6874,7 @@ let str_list_helpers =
       "  for (size_t i = 0; i + dlen <= slen; ) {";
       "    if (memcmp(s + i, delim, dlen) == 0) {";
       "      size_t tlen = i - start;";
-      "      char* tok = (char*)__lang_region_alloc(__lang_current_region, tlen + 1);";
+      "      char* tok = __lang_str_alloc(__lang_current_region, tlen);";
       "      memcpy(tok, s + start, tlen);";
       "      tok[tlen] = '\\0';";
       "      cells[idx]->payload.Cons.f0 = tok;";
@@ -6886,7 +6886,7 @@ let str_list_helpers =
       "  }";
       "  /* last token */";
       "  size_t tlen = slen - start;";
-      "  char* tok = (char*)__lang_region_alloc(__lang_current_region, tlen + 1);";
+      "  char* tok = __lang_str_alloc(__lang_current_region, tlen);";
       "  memcpy(tok, s + start, tlen);";
       "  tok[tlen] = '\\0';";
       "  cells[idx]->payload.Cons.f0 = tok;";
@@ -6907,7 +6907,7 @@ let str_list_helpers =
       "    first = 0;";
       "    cur = cur->payload.Cons.f1;";
       "  }";
-      "  char* r = (char*)__lang_region_alloc(__lang_current_region, total + 1);";
+      "  char* r = __lang_str_alloc(__lang_current_region, total);";
       "  size_t pos = 0;";
       "  first = 1;";
       "  cur = xs;";
@@ -6943,7 +6943,7 @@ let str_list_helpers =
       "    if (strcmp(ent->d_name, \".\") == 0 || strcmp(ent->d_name, \"..\") == 0) continue;";
       "    if (n == cap) { cap *= 2; arr = (const char**)realloc(arr, cap * sizeof(char*)); }";
       "    size_t nlen = strlen(ent->d_name);";
-      "    char* copy = (char*)__lang_region_alloc(__lang_current_region, nlen + 1);";
+      "    char* copy = __lang_str_alloc(__lang_current_region, nlen);";
       "    memcpy(copy, ent->d_name, nlen + 1);";
       "    arr[n++] = copy;";
       "  }";
@@ -6976,7 +6976,7 @@ let str_list_helpers =
       "    int i = __lang_argc - k;  /* reverse so argv[1] ends up first */";
       "    const char* a = __lang_argv[i];";
       "    size_t nlen = strlen(a);";
-      "    char* copy = (char*)__lang_region_alloc(__lang_current_region, nlen + 1);";
+      "    char* copy = __lang_str_alloc(__lang_current_region, nlen);";
       "    memcpy(copy, a, nlen + 1);";
       "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->tag = 1;";
@@ -7007,7 +7007,7 @@ let read_lines_helper =
       "    size_t st = i;";
       "    while (st > 0 && content[st - 1] != '\\n') st--;";
       "    size_t len = i - st;";
-      "    char* tok = (char*)__lang_region_alloc(__lang_current_region, len + 1);";
+      "    char* tok = __lang_str_alloc(__lang_current_region, len);";
       "    memcpy(tok, content + st, len);";
       "    tok[len] = '\\0';";
       "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
@@ -9235,6 +9235,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          depend only on malloc/pthread. *)
       region_runtime_helpers;
       "";
+      (* Byte-safe string primitives are DEFINED later (str_concat_helper), but
+         forward-declared here — after __lang_region exists — so every string
+         producer emitted in between can allocate through them. *)
+      "static char* __lang_str_alloc(__lang_region* r, size_t len);";
+      "static size_t __lang_str_size(const char* s);";
+      "";
       (* Stage 1 native full-stack: if any Wasm-memory-model FFI extern
          (tcp_* / mem_* / str_ptr) is used, emit the native runtime that
          backs them (a flat byte arena + POSIX sockets) instead of leaving
@@ -9376,7 +9382,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "    tmp[n++] = (char)c;";
                "  }";
                "  if (c == EOF && n == 0) { free(tmp); return NULL; }";
-               "  char* buf = (char*)__lang_region_alloc(__lang_current_region, n + 1);";
+               "  char* buf = __lang_str_alloc(__lang_current_region, n);";
                "  memcpy(buf, tmp, n); buf[n] = '\\0';";
                "  free(tmp);";
                "  return buf;";
