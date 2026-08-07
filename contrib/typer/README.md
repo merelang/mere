@@ -6,10 +6,7 @@ the same type inferencer. §S2.B closes once 52a–52g land.
 
 `typer.mere` is now ~920 lines.
 
-> See [`internal design notes`][paper]
-> for the full plan.
-
-[paper]: https://github.com/284km/internal design notes
+> See the design notes for the full plan.
 
 ## Files
 

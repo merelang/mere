@@ -923,8 +923,8 @@ For details see [codegen.md](codegen.md).
 Interpreter mode (`mere file.mere`) and codegen output match for the same program (including formatting like `[1, 2, 3]`). At **4-backend feature parity**, int / functions / strings / tuples / records / variants / closures / polymorphism / recursive variants / complex patterns / show / region / view / `with` Drop / list pretty-printing / Q-010 collections (Vec / OwnedVec / StrBuf / Map) + higher-order API + conversions + len + with-Drop / signature spread / Result helpers / try_or / inner-fn lifting / top-level value-binding globalization / str_compare / FFI (extern fn) all work (reached incrementally through Phases 15-32).
 
 The **feature-parity gap** between interpreter and the 3 codegen backends is now nearly zero; remaining items:
-- **First-class value use of builtins** (`let f = vec_new in ...`) is interpreter-only (DEFERRED §1.2; future).
-- **Auto scope-bound Drop for OwnedVec** isn't supported (explicit `with` or main-exit bulk free only; DEFERRED §1.3; B1 NLL/Linear types is at the paper-trial stage).
+- **First-class value use of builtins** (`let f = vec_new in ...`) is interpreter-only (future work).
+- **Auto scope-bound Drop for OwnedVec** isn't supported (explicit `with` or main-exit bulk free only; NLL / linear types are future work).
 - `float` / `'a list`-typed builtins (`read_lines` / `args` / `env_var` / `file_exists` etc.) are **interpreter-only** (codegen comes in a separate phase).
 - LLVM / Wasm accept only **uniform payload for Map K with payload variants** (C allows mixed).
 
