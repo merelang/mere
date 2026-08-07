@@ -8180,6 +8180,47 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
        \      (i64.extend_i32_u (i32.load offset=0 (local.get $cl)))\n\
        \      (i64.extend_i32_u (local.get $arg))\n\
        \      (i32.load offset=4 (local.get $cl)))))\n" ^ lower_str_tail
+     (* Slice 3: func(string) -> result<f64, string> (the eval shape). The
+        closure returns a Mere variant record { tag:i64 @0, payload:i64 @8 }
+        (Ok=tag 0, Err=tag 1). Ok's payload is a boxed-float ptr (points to an
+        f64); Err's payload is a Mere str ptr. Re-lower to the canonical
+        result<f64,string>: a 16-byte, 8-aligned return area with disc:u8 @0
+        (0=ok,1=err) and payload @8 (ok: f64; err: string (ptr @8, len @12)). *)
+     | Ast.TyArrow (a, b)
+       when Ast.walk a = Ast.TyStr
+            && (match Ast.walk b with
+                | Ast.TyCon ("result", [x; y]) ->
+                  Ast.walk x = Ast.TyFloat && Ast.walk y = Ast.TyStr
+                | _ -> false) ->
+       "  (func $run (export \"run\") (param $p i32) (param $n i32) (result i32)\n\
+       \    (local $arg i32) (local $cl i32) (local $rec i32) (local $ret i32) (local $i i32)\n\
+       \    (local.set $arg (global.get $__lang_bump))\n\
+       \    (global.set $__lang_bump (i32.add (local.get $arg) (i32.add (local.get $n) (i32.const 1))))\n\
+       \    (block $done (loop $lp\n\
+       \      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n\
+       \      (i32.store8 (i32.add (local.get $arg) (local.get $i)) (i32.load8_u (i32.add (local.get $p) (local.get $i))))\n\
+       \      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n\
+       \      (br $lp)))\n\
+       \    (i32.store8 (i32.add (local.get $arg) (local.get $n)) (i32.const 0))\n\
+       \    (local.set $cl (call $main))\n\
+       \    (local.set $rec (i32.wrap_i64 (call_indirect (type $cl)\n\
+       \      (i64.extend_i32_u (i32.load offset=0 (local.get $cl)))\n\
+       \      (i64.extend_i32_u (local.get $arg))\n\
+       \      (i32.load offset=4 (local.get $cl)))))\n\
+       \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
+       \    (local.set $ret (global.get $__lang_bump))\n\
+       \    (global.set $__lang_bump (i32.add (local.get $ret) (i32.const 16)))\n\
+       \    (if (i32.eqz (i32.load offset=0 (local.get $rec)))\n\
+       \      (then\n\
+       \        (i32.store8 offset=0 (local.get $ret) (i32.const 0))\n\
+       \        (f64.store offset=8 align=8 (local.get $ret)\n\
+       \          (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=8 (local.get $rec))))))\n\
+       \      (else\n\
+       \        (i32.store8 offset=0 (local.get $ret) (i32.const 1))\n\
+       \        (i32.store offset=8 (local.get $ret) (i32.wrap_i64 (i64.load offset=8 (local.get $rec))))\n\
+       \        (i32.store offset=12 (local.get $ret)\n\
+       \          (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (i32.wrap_i64 (i64.load offset=8 (local.get $rec))))))))) \n\
+       \    (local.get $ret))\n"
      (* Not yet supported under --component (later slices). *)
      | _ -> "  (func $run (export \"run\") (result i32) unreachable)\n")
   in
