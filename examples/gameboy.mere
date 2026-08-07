@@ -1,0 +1,321 @@
+// gameboy.mere — a Sharp LR35902 (Game Boy CPU) core in Mere.
+//
+// The LR35902 is the third rung on the emulator ladder after CHIP-8 and the
+// MOS 6502 (examples/chip8.mere, examples/mos6502.mere). It is an 8080/Z80
+// hybrid and brings two things the 6502 does not:
+//   * 16-bit register *pairs* — BC, DE, HL, plus SP — so arithmetic and
+//     addressing cross the 8/16-bit boundary (ADD HL,rr, LD rr,nn, PUSH/POP),
+//   * the *half-carry* (H) flag: carry out of bit 3 on 8-bit ops and out of
+//     bit 11 on the 16-bit ADD HL — the detail every Game Boy emulator has to
+//     get exactly right for BCD/DAA and flag-sensitive code.
+// Its opcode map is also far more regular than the 6502's: the LD r,r' block
+// is `01 ddd sss` and the ALU block is `10 ooo sss`, so most of the 256-entry
+// table decodes from bit-fields rather than a giant per-opcode switch. The
+// CB prefix opens a second 256-entry table (rotates / SWAP / BIT / RES / SET).
+//
+// Being 8-bit data / 16-bit address it runs identically on all four Mere
+// backends. Scope is a stage-1 CPU core: no PPU/graphics, no timers, no
+// interrupts, no DAA/STOP; a hand-assembled program runs until HALT.
+//
+// reg slots: [A B C D E H L SP PC  Z N H C  HALT]  (SP/PC are 16-bit)
+//   flags are one 0/1 slot each; the F register is only materialized for
+//   PUSH/POP AF (not used by the stage-1 program).
+
+let mask8  = fn x -> bit_and x 255;
+let mask16 = fn x -> bit_and x 65535;
+let hi8 = fn x -> bit_and (bit_shr x 8) 255;
+let lo8 = fn x -> bit_and x 255;
+
+let new_vec = fn n -> fn x ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in v;
+let blit_bytes = fn mem -> fn at -> fn b ->
+  let n = bytes_len b in
+  let rec go = fn i -> if i >= n then () else let _ = vec_set mem (at + i) (bytes_get b i) in go (i + 1) in
+  go 0;
+
+// reg slot indices
+let rA = 0; let rB = 1; let rC = 2; let rD = 3; let rE = 4; let rH = 5; let rL = 6;
+let rSP = 7; let rPC = 8;
+let fZ = 9; let fN = 10; let fH = 11; let fC = 12;
+let rHALT = 13;
+
+let fetch = fn mem -> fn reg ->
+  let pc = vec_get reg rPC in
+  let b = vec_get mem pc in
+  let _ = vec_set reg rPC (mask16 (pc + 1)) in b;
+let fetch16 = fn mem -> fn reg -> let l = fetch mem reg in let h = fetch mem reg in l + h * 256;
+
+// 16-bit register pairs
+let get_hl = fn reg -> vec_get reg rH * 256 + vec_get reg rL;
+let get_bc = fn reg -> vec_get reg rB * 256 + vec_get reg rC;
+let get_de = fn reg -> vec_get reg rD * 256 + vec_get reg rE;
+let set_hl = fn reg -> fn v -> let _ = vec_set reg rH (hi8 v) in vec_set reg rL (lo8 v);
+let set_bc = fn reg -> fn v -> let _ = vec_set reg rB (hi8 v) in vec_set reg rC (lo8 v);
+let set_de = fn reg -> fn v -> let _ = vec_set reg rD (hi8 v) in vec_set reg rE (lo8 v);
+
+// opcode register index 0..7 = B C D E H L (HL) A  (Game Boy encoding order)
+let get_r = fn mem -> fn reg -> fn idx ->
+  if idx == 0 then vec_get reg rB
+  else if idx == 1 then vec_get reg rC
+  else if idx == 2 then vec_get reg rD
+  else if idx == 3 then vec_get reg rE
+  else if idx == 4 then vec_get reg rH
+  else if idx == 5 then vec_get reg rL
+  else if idx == 6 then vec_get mem (get_hl reg)
+  else vec_get reg rA;
+let set_r = fn mem -> fn reg -> fn idx -> fn val ->
+  let v = mask8 val in
+  if idx == 0 then vec_set reg rB v
+  else if idx == 1 then vec_set reg rC v
+  else if idx == 2 then vec_set reg rD v
+  else if idx == 3 then vec_set reg rE v
+  else if idx == 4 then vec_set reg rH v
+  else if idx == 5 then vec_set reg rL v
+  else if idx == 6 then vec_set mem (get_hl reg) v
+  else vec_set reg rA v;
+
+let set_flags = fn reg -> fn z -> fn n -> fn h -> fn c ->
+  let _ = vec_set reg fZ z in
+  let _ = vec_set reg fN n in
+  let _ = vec_set reg fH h in
+  vec_set reg fC c;
+
+// hardware stack (SP is 16-bit, pre-decrement on push)
+let push16 = fn mem -> fn reg -> fn v ->
+  let sp = mask16 (vec_get reg rSP - 2) in
+  let _ = vec_set reg rSP sp in
+  let _ = vec_set mem sp (lo8 v) in
+  vec_set mem (mask16 (sp + 1)) (hi8 v);
+let pop16 = fn mem -> fn reg ->
+  let sp = vec_get reg rSP in
+  let lo = vec_get mem sp in
+  let hi = vec_get mem (mask16 (sp + 1)) in
+  let _ = vec_set reg rSP (mask16 (sp + 2)) in
+  lo + hi * 256;
+
+// A-register ALU (subop 0..7 = ADD ADC SUB SBC AND XOR OR CP), with the GB
+// half-carry rules. CP is SUB with the result discarded.
+let alu = fn reg -> fn sub -> fn m ->
+  let a = vec_get reg rA in
+  let c0 = vec_get reg fC in
+  if sub == 0 || sub == 1 then                       // ADD / ADC
+    let carry = if sub == 1 then c0 else 0 in
+    let r = a + m + carry in
+    let h = if bit_and a 15 + bit_and m 15 + carry > 15 then 1 else 0 in
+    let rr = mask8 r in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 h (if r > 255 then 1 else 0) in
+    vec_set reg rA rr
+  else if sub == 2 || sub == 3 || sub == 7 then      // SUB / SBC / CP
+    let carry = if sub == 3 then c0 else 0 in
+    let r = a - m - carry in
+    let h = if bit_and a 15 - bit_and m 15 - carry < 0 then 1 else 0 in
+    let rr = mask8 r in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 1 h (if r < 0 then 1 else 0) in
+    if sub == 7 then () else vec_set reg rA rr        // CP discards the result
+  else if sub == 4 then                              // AND
+    let rr = bit_and a m in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 1 0 in vec_set reg rA rr
+  else if sub == 5 then                              // XOR
+    let rr = bit_xor a m in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 0 0 in vec_set reg rA rr
+  else                                               // OR
+    let rr = bit_or a m in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 0 0 in vec_set reg rA rr;
+
+// INC/DEC of an 8-bit register (idx): C flag is preserved, H is the nibble
+// carry/borrow.
+let inc_r = fn mem -> fn reg -> fn idx ->
+  let v = get_r mem reg idx in
+  let r = mask8 (v + 1) in
+  let _ = set_r mem reg idx r in
+  let _ = vec_set reg fZ (if r == 0 then 1 else 0) in
+  let _ = vec_set reg fN 0 in
+  vec_set reg fH (if bit_and v 15 == 15 then 1 else 0);
+let dec_r = fn mem -> fn reg -> fn idx ->
+  let v = get_r mem reg idx in
+  let r = mask8 (v - 1) in
+  let _ = set_r mem reg idx r in
+  let _ = vec_set reg fZ (if r == 0 then 1 else 0) in
+  let _ = vec_set reg fN 1 in
+  vec_set reg fH (if bit_and v 15 == 0 then 1 else 0);
+
+// ADD HL,rr — 16-bit add; H is carry out of bit 11, C out of bit 15, N=0, Z kept.
+let add_hl = fn reg -> fn rr ->
+  let hl = get_hl reg in
+  let r = hl + rr in
+  let _ = vec_set reg fN 0 in
+  let _ = vec_set reg fH (if bit_and hl 4095 + bit_and rr 4095 > 4095 then 1 else 0) in
+  let _ = vec_set reg fC (if r > 65535 then 1 else 0) in
+  set_hl reg (mask16 r);
+
+// pick a 16-bit pair by the opcode's bits 4-5 (0=BC 1=DE 2=HL 3=SP)
+let get_pair = fn reg -> fn p ->
+  if p == 0 then get_bc reg else if p == 1 then get_de reg
+  else if p == 2 then get_hl reg else vec_get reg rSP;
+let set_pair = fn reg -> fn p -> fn v ->
+  if p == 0 then set_bc reg v else if p == 1 then set_de reg v
+  else if p == 2 then set_hl reg v else vec_set reg rSP (mask16 v);
+
+// evaluate a branch condition cc (0=NZ 1=Z 2=NC 3=C)
+let cond = fn reg -> fn cc ->
+  if cc == 0 then (if vec_get reg fZ == 0 then 1 else 0)
+  else if cc == 1 then vec_get reg fZ
+  else if cc == 2 then (if vec_get reg fC == 0 then 1 else 0)
+  else vec_get reg fC;
+
+// CB-prefixed op: rotate/shift/SWAP (grp 0), BIT (1), RES (2), SET (3)
+let cb = fn mem -> fn reg ->
+  let op = fetch mem reg in
+  let grp = bit_shr op 6 in
+  let n = bit_and (bit_shr op 3) 7 in
+  let idx = bit_and op 7 in
+  let v = get_r mem reg idx in
+  if grp == 1 then                                   // BIT n,r
+    let _ = vec_set reg fZ (if bit_and v (bit_shl 1 n) == 0 then 1 else 0) in
+    let _ = vec_set reg fN 0 in
+    vec_set reg fH 1
+  else if grp == 2 then                              // RES n,r
+    set_r mem reg idx (bit_and v (bit_xor (bit_shl 1 n) 255))
+  else if grp == 3 then                              // SET n,r
+    set_r mem reg idx (bit_or v (bit_shl 1 n))
+  else                                               // grp 0: n selects the shift
+    if n == 6 then                                   // SWAP r
+      let r = bit_or (bit_shr v 4) (mask8 (bit_shl v 4)) in
+      let _ = set_r mem reg idx r in
+      set_flags reg (if r == 0 then 1 else 0) 0 0 0
+    else if n == 0 then                              // RLC r
+      let c = bit_shr v 7 in
+      let r = mask8 (bit_or (bit_shl v 1) c) in
+      let _ = set_r mem reg idx r in
+      set_flags reg (if r == 0 then 1 else 0) 0 0 c
+    else if n == 1 then                              // RRC r
+      let c = bit_and v 1 in
+      let r = bit_or (bit_shr v 1) (bit_shl c 7) in
+      let _ = set_r mem reg idx r in
+      set_flags reg (if r == 0 then 1 else 0) 0 0 c
+    else ();                                         // other shifts out of stage-1 scope
+
+let step = fn mem -> fn reg ->
+  let op = fetch mem reg in
+  if op == 0x00 then ()                                                   // NOP
+  else if op == 0x76 then vec_set reg rHALT 1                             // HALT
+  else if op == 0xCB then cb mem reg
+  // 16-bit immediate loads: 00 pp 0001
+  else if op == 0x01 then set_bc reg (fetch16 mem reg)
+  else if op == 0x11 then set_de reg (fetch16 mem reg)
+  else if op == 0x21 then set_hl reg (fetch16 mem reg)
+  else if op == 0x31 then vec_set reg rSP (fetch16 mem reg)
+  // indirect A loads/stores + HL post-inc/dec
+  else if op == 0x02 then vec_set mem (get_bc reg) (vec_get reg rA)       // LD (BC),A
+  else if op == 0x12 then vec_set mem (get_de reg) (vec_get reg rA)       // LD (DE),A
+  else if op == 0x0A then vec_set reg rA (vec_get mem (get_bc reg))       // LD A,(BC)
+  else if op == 0x1A then vec_set reg rA (vec_get mem (get_de reg))       // LD A,(DE)
+  else if op == 0x22 then let a = get_hl reg in let _ = vec_set mem a (vec_get reg rA) in set_hl reg (mask16 (a + 1))  // LD (HL+),A
+  else if op == 0x32 then let a = get_hl reg in let _ = vec_set mem a (vec_get reg rA) in set_hl reg (mask16 (a - 1))  // LD (HL-),A
+  else if op == 0x2A then let a = get_hl reg in let _ = vec_set reg rA (vec_get mem a) in set_hl reg (mask16 (a + 1))  // LD A,(HL+)
+  else if op == 0x3A then let a = get_hl reg in let _ = vec_set reg rA (vec_get mem a) in set_hl reg (mask16 (a - 1))  // LD A,(HL-)
+  // INC/DEC 16-bit pair: 00 pp 0011 / 00 pp 1011
+  else if op == 0x03 || op == 0x13 || op == 0x23 || op == 0x33 then
+    let p = bit_and (bit_shr op 4) 3 in set_pair reg p (mask16 (get_pair reg p + 1))
+  else if op == 0x0B || op == 0x1B || op == 0x2B || op == 0x3B then
+    let p = bit_and (bit_shr op 4) 3 in set_pair reg p (mask16 (get_pair reg p - 1))
+  // ADD HL,rr: 00 pp 1001
+  else if op == 0x09 || op == 0x19 || op == 0x29 || op == 0x39 then
+    add_hl reg (get_pair reg (bit_and (bit_shr op 4) 3))
+  // INC/DEC 8-bit: 00 ddd 100 / 00 ddd 101
+  else if op < 0x40 && bit_and op 7 == 4 then inc_r mem reg (bit_and (bit_shr op 3) 7)
+  else if op < 0x40 && bit_and op 7 == 5 then dec_r mem reg (bit_and (bit_shr op 3) 7)
+  // LD r,n: 00 ddd 110
+  else if op < 0x40 && bit_and op 7 == 6 then set_r mem reg (bit_and (bit_shr op 3) 7) (fetch mem reg)
+  // LD r,r' block: 01 ddd sss  (0x76 already handled as HALT)
+  else if op >= 0x40 && op <= 0x7F then
+    set_r mem reg (bit_and (bit_shr op 3) 7) (get_r mem reg (bit_and op 7))
+  // ALU block: 10 ooo sss
+  else if op >= 0x80 && op <= 0xBF then
+    alu reg (bit_and (bit_shr op 3) 7) (get_r mem reg (bit_and op 7))
+  // ALU A,n immediate: 11 ooo 110
+  else if op == 0xC6 || op == 0xCE || op == 0xD6 || op == 0xDE
+       || op == 0xE6 || op == 0xEE || op == 0xF6 || op == 0xFE then
+    alu reg (bit_and (bit_shr op 3) 7) (fetch mem reg)
+  // jumps
+  else if op == 0xC3 then vec_set reg rPC (fetch16 mem reg)               // JP nn
+  else if op == 0xC2 || op == 0xCA || op == 0xD2 || op == 0xDA then       // JP cc,nn
+    let t = fetch16 mem reg in
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then vec_set reg rPC t else ()
+  else if op == 0x18 then                                                 // JR n
+    let rel = fetch mem reg in
+    let off = if rel >= 128 then rel - 256 else rel in
+    vec_set reg rPC (mask16 (vec_get reg rPC + off))
+  else if op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38 then       // JR cc,n
+    let rel = fetch mem reg in
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then
+      let off = if rel >= 128 then rel - 256 else rel in
+      vec_set reg rPC (mask16 (vec_get reg rPC + off))
+    else ()
+  // calls / returns
+  else if op == 0xCD then                                                 // CALL nn
+    let t = fetch16 mem reg in
+    let _ = push16 mem reg (vec_get reg rPC) in vec_set reg rPC t
+  else if op == 0xC4 || op == 0xCC || op == 0xD4 || op == 0xDC then       // CALL cc,nn
+    let t = fetch16 mem reg in
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then
+      let _ = push16 mem reg (vec_get reg rPC) in vec_set reg rPC t
+    else ()
+  else if op == 0xC9 then vec_set reg rPC (pop16 mem reg)                 // RET
+  else if op == 0xC0 || op == 0xC8 || op == 0xD0 || op == 0xD8 then       // RET cc
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then vec_set reg rPC (pop16 mem reg) else ()
+  // push / pop (0x?5 / 0x?1, pair by bits 4-5; F5/F1 are AF)
+  else if op == 0xC5 then push16 mem reg (get_bc reg)
+  else if op == 0xD5 then push16 mem reg (get_de reg)
+  else if op == 0xE5 then push16 mem reg (get_hl reg)
+  else if op == 0xC1 then set_bc reg (pop16 mem reg)
+  else if op == 0xD1 then set_de reg (pop16 mem reg)
+  else if op == 0xE1 then set_hl reg (pop16 mem reg)
+  else vec_set reg rHALT 1;                                               // unknown -> halt
+
+let rec run = fn mem -> fn reg -> fn budget ->
+  if budget <= 0 then ()
+  else if vec_get reg rHALT == 1 then ()
+  else let _ = step mem reg in run mem reg (budget - 1);
+
+// --- harness --------------------------------------------------------------
+let mem = new_vec 65536 0;
+let reg = new_vec 14 0;
+let _ = vec_set reg rSP 0xFFFE;      // stack top (Game Boy boot value)
+let _ = vec_set reg rPC 0x0100;      // cartridge entry point
+
+// Hand-assembled program (origin $0100):
+//   0100 3E 0F      LD A,$0F       ; A=0x0F
+//   0102 C6 01      ADD A,$01      ; A=0x10; H=1 (bit-3 carry), C=0, Z=0
+//   0104 CB 37      SWAP A         ; A=0x01 (swap nibbles); Z=0,N=0,H=0,C=0
+//   0106 06 05      LD B,$05       ; B=5
+//   0108 0E 00      LD C,$00       ; C=0 (running sum)
+//   010A 79         LD A,C         ; loop: A=C
+//   010B 80         ADD A,B        ; A=C+B
+//   010C 4F         LD C,A         ; C=A
+//   010D 05         DEC B
+//   010E 20 FA      JR NZ,$010A    ; back while B!=0  (-6 = $FA)
+//   0110 21 FF 0F   LD HL,$0FFF
+//   0113 11 01 00   LD DE,$0001    ; use DE (not BC) so the loop's sum in C survives
+//   0116 19         ADD HL,DE      ; HL=$1000; 16-bit H=1 (bit-11 carry), C=0
+//   0117 CD 1D 01   CALL $011D     ; A=$AB
+//   011A 00         NOP
+//   011B 76         HALT
+//   011C 00         (pad)
+//   011D 3E AB      sub: LD A,$AB
+//   011F C9         RET
+let prog = bytes_of_hex ("3e0fc601cb3706050e0079804f0520fa" ++ "21ff0f11010019cd1d010076003eabc9");
+let _ = blit_bytes mem 0x0100 prog;
+let _ = run mem reg 1000;
+
+let _ = print (str_of_int (vec_get reg rA));     // 171  ($AB, from the subroutine)
+let _ = print (str_of_int (vec_get reg rB));     // 0    (loop counter exhausted)
+let _ = print (str_of_int (vec_get reg rC));     // 15   (sum 5+4+3+2+1, preserved in C)
+let _ = print (str_of_int (get_hl reg));         // 4096 ($1000, after ADD HL,DE)
+let _ = print (str_of_int (vec_get reg fZ));     // 1    (last DEC B left B=0; ADD HL,DE keeps Z)
+let _ = print (str_of_int (vec_get reg fN));     // 0    (ADD HL,DE clears N)
+let _ = print (str_of_int (vec_get reg fH));     // 1    (16-bit half-carry from ADD HL,DE)
+let _ = print (str_of_int (vec_get reg fC));     // 0
+print "ok"
