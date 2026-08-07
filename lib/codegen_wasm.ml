@@ -166,6 +166,7 @@ let wasm_component_command = ref false
 let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
+let wasm_stdin_used = ref false  (* command component called read_stdin() -> emit $__lang_read_stdin + wasi fd_read import *)
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -2489,11 +2490,20 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "call $__lang_read_file"
   | Ast.App ({ node = Ast.Var "read_stdin"; _ }, arg)
     when not (List.mem_assoc "read_stdin" !locals) ->
-    (* A browser/worker host has no stdin — read_stdin is the empty string.
-       (The unit arg is inert; evaluate it for effect, then drop.) *)
-    emit_expr arg;
-    emit_instr "drop";
-    emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
+    if !wasm_component_command then begin
+      (* Phase 2: a command component reads all of stdin via wasi fd_read
+         ($__lang_read_stdin returns a NUL-terminated Mere str). *)
+      wasm_stdin_used := true;
+      emit_expr arg;
+      emit_instr "drop";
+      emit_instr "call $__lang_read_stdin"
+    end else begin
+      (* A browser/worker host has no stdin — read_stdin is the empty string.
+         (The unit arg is inert; evaluate it for effect, then drop.) *)
+      emit_expr arg;
+      emit_instr "drop";
+      emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
+    end
   | Ast.App ({ node = Ast.Var "read_line"; _ }, arg)
     when not (List.mem_assoc "read_line" !locals) ->
     (* No stdin on a browser host — one line reads as the empty string. *)
@@ -7364,10 +7374,12 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
 
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   ignore main_ty;
-  wasm_component_command := component && (Ast.walk main_ty = Ast.TyUnit);
+  wasm_component_command :=
+    component && (match Ast.walk main_ty with Ast.TyUnit | Ast.TyInt -> true | _ -> false);
   wasm_args_used := false;
   wasm_time_used := false;
   wasm_env_used := false;
+  wasm_stdin_used := false;
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
@@ -7989,6 +8001,24 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \  (func $__lang_tan (param f64) (result f64) unreachable)\n\
       \  (func $__lang_f_pow (param f64) (param f64) (result f64) unreachable)\n\
       \  (func $__lang_atan2 (param f64) (param f64) (result f64) unreachable)\n"
+      (* File I/O is not yet componentized (needs WASI filesystem — Phase 3).
+         In component mode the env host imports ($<name>_h) are dropped, but
+         the boundary shim wrappers ($__lang_read_file etc.) that call them are
+         still emitted. Provide trapping stubs for the referenced _h hosts so
+         the module validates; the stdin/args/stdout paths work, a file
+         operation traps. A command reading via read_stdin (mq's pipe mode,
+         mere-calc) never hits these. *)
+      ^ (if !file_io_used then
+           "  (func $__lang_read_file_h (param i32) (result i32) unreachable)\n\
+           \  (func $__lang_write_file_h (param i32) (param i32) (result i32) unreachable)\n"
+         else "")
+      ^ (if !file_bytes_io_used then
+           "  (func $read_file_bytes_h (param i32) (result i32) unreachable)\n\
+           \  (func $write_file_bytes_h (param i32) (param i32) (result i32) unreachable)\n"
+         else "")
+      ^ (if !print_no_nl_used then
+           "  (func $__lang_print_no_nl_h (param i32) unreachable)\n"
+         else "")
     else file_io_imports ^ float_io_imports ^ libm_imports
   in
   (* Phase 32.4 (C1 FFI): declare extern fns as env host imports.
@@ -8182,7 +8212,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let puts_decl =
     if not component then
       "  (import \"env\" \"puts\" (func $puts_h (param i32)))\n"
-    else if main_ty_walked = Ast.TyUnit then
+    else if main_ty_walked = Ast.TyUnit || main_ty_walked = Ast.TyInt then
       (* Phase 2 (note 152): a unit/CLI program prints via WASI. Import
          Preview 1 fd_write and write the NUL-terminated Mere string plus a
          trailing newline (matching C's puts) to stdout (fd 1). Componentized
@@ -8312,10 +8342,39 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
           \    (i64.extend_i32_u (local.get $cell)))\n"
           some_t none_t
       in
+      (* read_stdin support: import wasi fd_read and emit $__lang_read_stdin,
+         which reads all of fd 0 in 4KB chunks into contiguous bump memory,
+         NUL-terminates, and returns the Mere str ptr. Gated on wasm_stdin_used. *)
+      let stdin_import =
+        if not !wasm_stdin_used then "" else
+        "  (import \"wasi_snapshot_preview1\" \"fd_read\" (func $fd_read (param i32 i32 i32 i32) (result i32)))\n"
+      in
+      let stdin_fn =
+        if not !wasm_stdin_used then "" else
+        "  (func $__lang_read_stdin (result i64)\n\
+        \    (local $iov i32) (local $start i32) (local $p i32) (local $nread i32)\n\
+        \    (local.set $iov (global.get $__lang_bump))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $iov) (i32.const 12)))\n\
+        \    (local.set $start (global.get $__lang_bump))\n\
+        \    (local.set $p (local.get $start))\n\
+        \    (block $eof (loop $lp\n\
+        \      (i32.store offset=0 (local.get $iov) (local.get $p))\n\
+        \      (i32.store offset=4 (local.get $iov) (i32.const 4096))\n\
+        \      (drop (call $fd_read (i32.const 0) (local.get $iov) (i32.const 1) (i32.add (local.get $iov) (i32.const 8))))\n\
+        \      (local.set $nread (i32.load offset=8 (local.get $iov)))\n\
+        \      (br_if $eof (i32.eqz (local.get $nread)))\n\
+        \      (local.set $p (i32.add (local.get $p) (local.get $nread)))\n\
+        \      (global.set $__lang_bump (local.get $p))\n\
+        \      (br $lp)))\n\
+        \    (i32.store8 (local.get $p) (i32.const 0))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 1)))\n\
+        \    (i64.extend_i32_u (local.get $start)))\n"
+      in
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
       ^ args_imports
       ^ clock_import
       ^ env_imports
+      ^ stdin_import
       ^ "  (func $puts_h (param $p i32)\n\
         \    (local $len i32) (local $b i32)\n\
         \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
@@ -8331,6 +8390,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ^ args_fn
       ^ clock_fn
       ^ env_fn
+      ^ stdin_fn
     else
       "  (func $puts_h (param i32))\n"
   in
@@ -8355,8 +8415,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \    (i32.store offset=4 (local.get $ret) (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))\n\
       \    (local.get $ret))\n"
     in
-    if main_ty_walked = Ast.TyUnit then
-      (* Phase 2: command component. No cabi_realloc/run — export _start,
+    if main_ty_walked = Ast.TyUnit || main_ty_walked = Ast.TyInt then
+      (* Phase 2: command component (unit or int/exit-code main). No
+         cabi_realloc/run — export _start,
          which runs $main (its prints, and the trailing "()", reach stdout
          via $puts -> fd_write). Feed to `wasm-tools component new --adapt
          wasi_snapshot_preview1=<command adapter>` for a wasi:cli/run comp. *)
