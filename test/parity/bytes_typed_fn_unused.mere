@@ -1,0 +1,23 @@
+// Regression lock for a C-backend typedef bug surfaced by splitting the CPU
+// emulators into modules. When a function has a `bytes` parameter its closure
+// typedef refers to `mere_bytes` by pointer, but the C backend only emitted
+// the `mere_bytes` forward declaration when a bytes *builtin was actually
+// called* (`bytes_used`). A `bytes`-taking helper that is referenced by type
+// but never called with a bytes value — e.g. a ROM-loader imported from a
+// shared module by an emulator that never loads a ROM — left `mere_bytes`
+// undeclared, so the emitted C failed to compile. The forward typedef is now
+// always emitted (harmless when unused; the full struct stays gated).
+
+// A bytes-typed helper, referenced as a first-class value but never called
+// with a bytes argument, and no `bytes` value is constructed anywhere here.
+let blit = fn mem -> fn b -> let n = bytes_len b in vec_set mem 0 n;
+let use_as_value = fn f -> 1;   // consumes `blit` as a value -> its arrow type is live
+
+let v = vec_new ();
+let _ = vec_push v 7;
+let _ = vec_push v 0;
+let _ = use_as_value blit;      // references blit's (bytes-taking) type; no bytes made
+let _ = vec_set v 1 (vec_get v 0 + 35);
+let _ = print (str_of_int (vec_get v 0));   // 7
+let _ = print (str_of_int (vec_get v 1));   // 42
+0

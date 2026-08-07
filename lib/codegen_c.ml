@@ -9343,9 +9343,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !strbuf_used then
          ["typedef struct mere_strbuf mere_strbuf;"; ""]
        else [])
-    @ (if !bytes_used then
-         ["typedef struct mere_bytes mere_bytes;"; ""]
-       else [])
+    (* Always forward-declare mere_bytes: closure typedefs reference it by
+       pointer (`mere_bytes*`) whenever any function *signature* mentions
+       bytes — e.g. a `bytes`-taking helper imported from another module but
+       never called — even though `bytes_used` (an actual bytes builtin call)
+       stays false and the full struct below is omitted. The forward decl is
+       enough for the pointer types and an unused typedef is harmless. *)
+    @ ["typedef struct mere_bytes mere_bytes;"; ""]
     @ (if map_forward_typedefs = [] then []
        else map_forward_typedefs @ [""])
     (* Closure typedefs reference user struct names (e.g.,
