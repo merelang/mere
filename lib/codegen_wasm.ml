@@ -86,14 +86,21 @@ let wasm_string_escape (s : string) : string =
   Buffer.contents buf
 
 let fresh_str_offset (s : string) : int =
+  (* byte-safe: emit [i32 len header][bytes]['\0'] and return the address of
+     byte0 (= off + 4). The length header lets embedded NULs survive. *)
   let off = !str_offset_counter in
-  let bytes_len = String.length s + 1 in
-  str_offset_counter := off + bytes_len;
+  let n = String.length s in
+  str_offset_counter := off + 4 + n + 1;
+  let len_hdr =
+    Printf.sprintf "\\%02x\\%02x\\%02x\\%02x"
+      (n land 0xff) ((n asr 8) land 0xff)
+      ((n asr 16) land 0xff) ((n asr 24) land 0xff)
+  in
   let escaped = wasm_string_escape s in
   str_data_decls :=
-    Printf.sprintf "  (data (i32.const %d) \"%s\\00\")" off escaped
+    Printf.sprintf "  (data (i32.const %d) \"%s%s\\00\")" off len_hdr escaped
     :: !str_data_decls;
-  off
+  off + 4
 
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
@@ -3809,7 +3816,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))
-        (return (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))))))
+        (return (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))))
     (block $end
       (loop $lp
         (br_if $end (i64.eqz (local.get $abs)))
@@ -3823,7 +3830,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
-    (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))))|}
+    (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))|}
   | Ast.TyBool ->
     let t_off = intern_show_str "true" in
     let f_off = intern_show_str "false" in
@@ -4031,7 +4038,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))
-        (return (i32.add (local.get $buf) (local.get $i)))))
+        (return (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 15) (local.get $i)))))))
     (block $end
       (loop $lp
         (br_if $end (i32.eqz (local.get $abs)))
@@ -4044,7 +4051,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
-    (i32.add (local.get $buf) (local.get $i)))|}
+    (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 15) (local.get $i)))))|}
   | Ast.TyBool ->
     let t_off = intern_show_str "true" in
     let f_off = intern_show_str "false" in
@@ -4506,17 +4513,41 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
 let runtime_helpers = {|
+  ;; byte-safe str: linear-memory layout is [i32 len][len bytes]['\0'].
+  ;; A `str` value is the address of byte0; the 4-byte length header sits
+  ;; immediately before it (addr-4). NUL-free strings stay C/host-interop
+  ;; compatible (the trailing '\0' is preserved); embedded NULs survive
+  ;; because length comes from the header, not a NUL scan. Wasm permits
+  ;; unaligned i32 access, so the header needs no alignment.
+  (func $__lang_str_alloc (param $len8 i64) (result i64)
+    (local $len i32) (local $p i32)
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
+    (i32.store (global.get $__lang_bump) (local.get $len))          ;; header
+    (local.set $p (i32.add (global.get $__lang_bump) (i32.const 4))) ;; byte0
+    (i32.store8 (i32.add (local.get $p) (local.get $len)) (i32.const 0)) ;; NUL
+    (global.set $__lang_bump
+      (i32.add (local.get $p) (i32.add (local.get $len) (i32.const 1))))
+    (i64.extend_i32_u (local.get $p)))
+  ;; str length = i32 header at addr-4 (byte-safe: counts embedded NULs).
   (func $__lang_strlen (param $s8 i64) (result i64)
-    (local $i i32)
-    (local $s i32)
-    (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (i64.extend_i32_u
+      (i32.load (i32.sub (i32.wrap_i64 (local.get $s8)) (i32.const 4)))))
+  ;; Copy `len` raw bytes into a fresh header'd str. Used to finalize
+  ;; right-to-left digit buffers (show_int / to_json_int) whose result
+  ;; pointer floats inside a scratch region with no room for a header.
+  (func $__lang_str_copyn (param $src8 i64) (param $len8 i64) (result i64)
+    (local $src i32) (local $len i32) (local $dst i32) (local $i i32)
+    (local.set $src (i32.wrap_i64 (local.get $src8)))
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
+    (local.set $dst (i32.wrap_i64 (call $__lang_str_alloc (i64.extend_i32_u (local.get $len)))))
     (local.set $i (i32.const 0))
-    (block $end
-      (loop $lp
-        (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))
-        (local.set $i (i32.add (local.get $i) (i32.const 1)))
-        (br $lp)))
-    (i64.extend_i32_s (local.get $i)))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $len)))
+      (i32.store8 (i32.add (local.get $dst) (local.get $i))
+                  (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (i64.extend_i32_u (local.get $dst)))
   (func $__lang_str_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $la i32) (local $lb i32) (local $r i32) (local $i i32)
     (local $a i32)
@@ -4525,7 +4556,7 @@ let runtime_helpers = {|
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
     (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end_a
       (loop $lp_a
@@ -4547,6 +4578,7 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))
                (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; v0.1.37: deep-copy a NUL-terminated str into fresh bump space.
   ;; Region blocks copy their result out before releasing the block's
@@ -4557,7 +4589,7 @@ let runtime_helpers = {|
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $l (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -4568,45 +4600,60 @@ let runtime_helpers = {|
         (br $lp)))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $l)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
+  ;; byte-safe: compare lengths (from header) then bytes over that length,
+  ;; so embedded NULs count instead of terminating the scan.
   (func $__lang_streq (param $a8 i64) (param $b8 i64) (result i64)
-    (local $ba i32) (local $bb i32)
+    (local $la i32) (local $lb i32) (local $i i32)
     (local $a i32)
     (local $b i32)
     (local.set $a (i32.wrap_i64 (local.get $a8)))
     (local.set $b (i32.wrap_i64 (local.get $b8)))
-    (block $not_eq
+    (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
+    (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
+    (if (i32.ne (local.get $la) (local.get $lb))
+      (then (return (i64.extend_i32_s (i32.const 0)))))
+    (local.set $i (i32.const 0))
+    (block $end
       (loop $lp
-        (local.set $ba (i32.load8_u (local.get $a)))
-        (local.set $bb (i32.load8_u (local.get $b)))
-        (br_if $not_eq (i32.ne (local.get $ba) (local.get $bb)))
-        (if (i32.eqz (local.get $ba))
-          (then (return (i64.extend_i32_s (i32.const 1)))))
-        (local.set $a (i32.add (local.get $a) (i32.const 1)))
-        (local.set $b (i32.add (local.get $b) (i32.const 1)))
+        (br_if $end (i32.eq (local.get $i) (local.get $la)))
+        (if (i32.ne (i32.load8_u (i32.add (local.get $a) (local.get $i)))
+                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))
+          (then (return (i64.extend_i32_s (i32.const 0)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
-    (i64.extend_i32_s (i32.const 0)))
+    (i64.extend_i32_s (i32.const 1)))
   ;; Phase 31.0: str_compare — returns -1 / 0 / 1 (sign-normalized, matches
   ;; interp's `compare s t` from OCaml stdlib).
+  ;; byte-safe: memcmp over min(la,lb), then length tiebreak.
   (func $__lang_str_compare (param $a8 i64) (param $b8 i64) (result i64)
+    (local $la i32) (local $lb i32) (local $n i32) (local $i i32)
     (local $ba i32) (local $bb i32)
     (local $a i32)
     (local $b i32)
     (local.set $a (i32.wrap_i64 (local.get $a8)))
     (local.set $b (i32.wrap_i64 (local.get $b8)))
-    (loop $lp
-      (local.set $ba (i32.load8_u (local.get $a)))
-      (local.set $bb (i32.load8_u (local.get $b)))
-      (if (i32.lt_u (local.get $ba) (local.get $bb))
-        (then (return (i64.extend_i32_s (i32.const -1)))))
-      (if (i32.gt_u (local.get $ba) (local.get $bb))
-        (then (return (i64.extend_i32_s (i32.const 1)))))
-      (if (i32.eqz (local.get $ba))
-        (then (return (i64.extend_i32_s (i32.const 0)))))
-      (local.set $a (i32.add (local.get $a) (i32.const 1)))
-      (local.set $b (i32.add (local.get $b) (i32.const 1)))
-      (br $lp))
-    (unreachable))
+    (local.set $la (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $a)))))
+    (local.set $lb (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $b)))))
+    (local.set $n (select (local.get $la) (local.get $lb) (i32.lt_u (local.get $la) (local.get $lb))))
+    (local.set $i (i32.const 0))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $n)))
+        (local.set $ba (i32.load8_u (i32.add (local.get $a) (local.get $i))))
+        (local.set $bb (i32.load8_u (i32.add (local.get $b) (local.get $i))))
+        (if (i32.lt_u (local.get $ba) (local.get $bb))
+          (then (return (i64.extend_i32_s (i32.const -1)))))
+        (if (i32.gt_u (local.get $ba) (local.get $bb))
+          (then (return (i64.extend_i32_s (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (if (i32.lt_u (local.get $la) (local.get $lb))
+      (then (return (i64.extend_i32_s (i32.const -1)))))
+    (if (i32.gt_u (local.get $la) (local.get $lb))
+      (then (return (i64.extend_i32_s (i32.const 1)))))
+    (i64.extend_i32_s (i32.const 0)))
   ;; Phase 19.1.1: str_index_of — returns position of needle in haystack,
   ;; -1 if not found. Empty needle returns 0.
   (func $__lang_str_index_of (param $h8 i64) (param $n8 i64) (result i64)
@@ -4654,21 +4701,27 @@ let runtime_helpers = {|
                 (i32.eq (local.get $c) (i32.const 13))))
       (i32.eq (local.get $c) (i32.const 12)))))
   ;; Phase 36: str_starts_with — bool (i32 0/1)
+  ;; byte-safe: bound the compare by the prefix length (header), not a NUL.
   (func $__lang_str_starts_with (param $s8 i64) (param $p8 i64) (result i64)
-    (local $i i32) (local $cs i32) (local $cp i32)
+    (local $i i32) (local $sl i32) (local $pl i32)
     (local $s i32)
     (local $p i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $p (i32.wrap_i64 (local.get $p8)))
+    (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
+    (local.set $pl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))
+    (if (i32.gt_u (local.get $pl) (local.get $sl))
+      (then (return (i64.extend_i32_s (i32.const 0)))))
     (local.set $i (i32.const 0))
-    (loop $lp
-      (local.set $cp (i32.load8_u (i32.add (local.get $p) (local.get $i))))
-      (if (i32.eqz (local.get $cp)) (then (return (i64.extend_i32_s (i32.const 1)))))
-      (local.set $cs (i32.load8_u (i32.add (local.get $s) (local.get $i))))
-      (if (i32.ne (local.get $cs) (local.get $cp)) (then (return (i64.extend_i32_s (i32.const 0)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $lp))
-    (unreachable))
+    (block $end
+      (loop $lp
+        (br_if $end (i32.eq (local.get $i) (local.get $pl)))
+        (if (i32.ne (i32.load8_u (i32.add (local.get $s) (local.get $i)))
+                    (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+          (then (return (i64.extend_i32_s (i32.const 0)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i64.extend_i32_s (i32.const 1)))
   ;; Phase 36: str_trim — strip leading + trailing whitespace
   (func $__lang_str_trim (param $s8 i64) (result i64)
     (local $p i32) (local $len i32) (local $r i32) (local $i i32) (local $c i32)
@@ -4695,7 +4748,7 @@ let runtime_helpers = {|
         (local.set $len (i32.sub (local.get $len) (i32.const 1)))
         (br $lp_trail)))
     ;; copy [p, p+len) to bump
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end_copy
       (loop $lp_copy
@@ -4707,6 +4760,7 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: str_ends_with — bool (i32 0/1)
   (func $__lang_str_ends_with (param $s8 i64) (param $p8 i64) (result i64)
@@ -4739,12 +4793,13 @@ let runtime_helpers = {|
     (local.set $n (i32.wrap_i64 (local.get $n8)))
     (if (i32.le_s (local.get $n) (i32.const 0))
       (then
-        (local.set $r (global.get $__lang_bump))
+        (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
         (i32.store8 (local.get $r) (i32.const 0))
         (global.set $__lang_bump (i32.add (local.get $r) (i32.const 1)))
+        (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.const 0))
         (return (i64.extend_i32_s (local.get $r)))))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end_outer
       (loop $lp_outer
@@ -4766,6 +4821,7 @@ let runtime_helpers = {|
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $sl)))
                (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: str_rev
   (func $__lang_str_rev (param $s8 i64) (result i64)
@@ -4773,7 +4829,7 @@ let runtime_helpers = {|
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -4787,6 +4843,7 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: chr n — return char_table entry pointer for byte n.
   ;; Mask to a single byte (n & 0xFF) so out-of-range input can't index
@@ -4796,8 +4853,8 @@ let runtime_helpers = {|
     (local $n i32)
     (local.set $n (i32.wrap_i64 (local.get $n8)))
     (call $__lang_char_at_setup)
-    (i64.extend_i32_s (i32.add (global.get $__lang_char_table)
-      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 2)))))
+    (i64.extend_i32_s (i32.add (i32.add (global.get $__lang_char_table)
+      (i32.mul (i32.and (local.get $n) (i32.const 255)) (i32.const 6))) (i32.const 4))))
   ;; Phase 36: abs / min / max / clamp
   (func $__lang_abs (param $n i64) (result i64)
     (if (i64.lt_s (local.get $n) (i64.const 0))
@@ -4823,7 +4880,7 @@ let runtime_helpers = {|
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -4838,13 +4895,14 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_to_lower (param $s8 i64) (result i64)
     (local $sl i32) (local $r i32) (local $i i32) (local $c i32)
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $sl (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -4859,6 +4917,7 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $sl)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $sl)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 36: gcd via iterative Euclid on |a|, |b|
   (func $__lang_gcd (param $a0 i64) (param $b0 i64) (result i64)
@@ -4901,7 +4960,7 @@ let runtime_helpers = {|
     (if (i32.eqz (local.get $olen)) (then (return (i64.extend_i32_s (local.get $s)))))
     (local.set $slen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $nlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $new)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $bi (i32.const 0))
     (local.set $i (i32.const 0))
     (block $end_outer
@@ -4943,6 +5002,7 @@ let runtime_helpers = {|
         (br $lp_outer)))
     (i32.store8 (i32.add (local.get $r) (local.get $bi)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $bi)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 26.1/26.2: fail msg — if a try_or scope is active, set the
   ;; failure flag and return 0 (the caller's expected result type is i32
@@ -4971,9 +5031,13 @@ let runtime_helpers = {|
         (block $end
           (loop $lp
             (br_if $end (i32.eq (local.get $k) (i32.const 256)))
-            (i32.store8 (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 2)))
+            ;; byte-safe entry: stride 6 = [i32 len=1][char][NUL]; the str
+            ;; pointer returned is base + k*6 + 4 (header at base + k*6).
+            (i32.store   (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 6)))
+                         (i32.const 1))
+            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 6))) (i32.const 4))
                         (local.get $k))
-            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 2))) (i32.const 1))
+            (i32.store8 (i32.add (i32.add (local.get $base) (i32.mul (local.get $k) (i32.const 6))) (i32.const 5))
                         (i32.const 0))
             (local.set $k (i32.add (local.get $k) (i32.const 1)))
             (br $lp))))))
@@ -4983,8 +5047,8 @@ let runtime_helpers = {|
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $i (i32.wrap_i64 (local.get $i8)))
     (call $__lang_char_at_setup)
-    (i64.extend_i32_s (i32.add (global.get $__lang_char_table)
-             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 2)))))
+    (i64.extend_i32_s (i32.add (i32.add (global.get $__lang_char_table)
+             (i32.mul (i32.load8_u (i32.add (local.get $s) (local.get $i))) (i32.const 6))) (i32.const 4))))
   (func $__lang_is_digit (param $s8 i64) (result i64)
     (local $c i32)
     (local $s i32)
@@ -5024,7 +5088,7 @@ let runtime_helpers = {|
     (local.set $len (i32.sub (local.get $end_) (local.get $start)))
     (if (i32.lt_s (local.get $len) (i32.const 0))
       (then (local.set $len (i32.const 0))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -5037,6 +5101,7 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; v0.1.60: int_of_str s msg — strict decimal parse
   ;; (WS* [+-]? DIGIT+ WS*); anything else calls $__lang_fail with the
@@ -5108,7 +5173,7 @@ let runtime_helpers = {|
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (local.set $j (i32.const 0))
     (block $end
@@ -5137,6 +5202,7 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; Phase 26.6: str_escape s — backslash-escape newline / tab / cr / backslash
   ;; / quote. show_str pipes through this so output matches interp. Worst-case
@@ -5146,7 +5212,7 @@ let runtime_helpers = {|
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (local.set $j (i32.const 0))
     (block $end
@@ -5179,6 +5245,7 @@ let runtime_helpers = {|
     (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))
     (global.set $__lang_bump
       (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))|}
 
 (* Phase 26.5: list_str cell builders + str_split / str_join / str_count.
@@ -5255,8 +5322,9 @@ let list_str_runtime_wasm = {|
             (br $back)))
         (local.set $l (i32.sub (local.get $end) (local.get $st)))
         ;; copy the char bytes into a fresh NUL-terminated str
-        (local.set $tok (global.get $__lang_bump))
+        (local.set $tok (i32.add (global.get $__lang_bump) (i32.const 4)))
         (global.set $__lang_bump (i32.add (i32.add (local.get $tok) (local.get $l)) (i32.const 1)))
+        (i32.store (i32.sub (local.get $tok) (i32.const 4)) (local.get $l))
         (local.set $j (i32.const 0))
         (block $cend
           (loop $clp
@@ -5375,9 +5443,10 @@ let list_str_runtime_wasm = {|
         (local.set $b_off (i32.mul (local.get $bi) (i32.const 4)))
         (local.set $tstart (i32.load (i32.add (local.get $starts) (local.get $b_off))))
         (local.set $tlen (i32.load (i32.add (local.get $lens) (local.get $b_off))))
-        (local.set $tk (global.get $__lang_bump))
+        (local.set $tk (i32.add (global.get $__lang_bump) (i32.const 4)))
         (global.set $__lang_bump
           (i32.add (local.get $tk) (i32.add (local.get $tlen) (i32.const 1))))
+        (i32.store (i32.sub (local.get $tk) (i32.const 4)) (local.get $tlen))
         ;; memcpy
         (local.set $j (i32.const 0))
         (block $end_cp
@@ -5423,7 +5492,7 @@ let list_str_runtime_wasm = {|
         (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $box))))
         (br $lp_len)))
     ;; Allocate result + null terminator.
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (global.set $__lang_bump
       (i32.add (local.get $r) (i32.add (local.get $total) (i32.const 1))))
     ;; Pass 2: write.
@@ -5468,6 +5537,7 @@ let list_str_runtime_wasm = {|
         (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $box))))
         (br $lp_w)))
     (i32.store8 (i32.add (local.get $r) (local.get $total)) (i32.const 0))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   ;; str_count s n — non-overlapping count of n in s.
   (func $__lang_str_count (param $s8 i64) (param $n8 i64) (result i64)
@@ -5880,7 +5950,7 @@ let bytes_runtime_wasm = {|
     (local $b i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
@@ -5890,6 +5960,7 @@ let bytes_runtime_wasm = {|
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (local.get $n)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $n)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_hexchar (param $d8 i64) (result i64)
     (local $d i32)
@@ -5902,7 +5973,7 @@ let bytes_runtime_wasm = {|
     (local $b i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $n (i32.load (local.get $b)))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
       (br_if $end (i32.eq (local.get $i) (local.get $n)))
@@ -5915,6 +5986,7 @@ let bytes_runtime_wasm = {|
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (i32.const 2))) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (i64.extend_i32_s (local.get $r)))
   (func $__lang_hexval (param $c8 i64) (result i64)
     (local $c i32)
@@ -7034,7 +7106,7 @@ let of_json_runtime_wasm : string = {ojw|
   (func $__mj_pstr (result i64)
     (local $r i32) (local $len i32) (local $c i32) (local $e i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $len (i32.const 0))
     (block $end (loop $lp
       (local.set $c (i32.load8_u (global.get $__mj_p)))
@@ -7056,10 +7128,11 @@ let of_json_runtime_wasm : string = {ojw|
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (local.get $r))
   (func $__mj_num (result i64)
     (local $r i32) (local $len i32) (local $c i32)
-    (local.set $r (global.get $__lang_bump))
+    (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $len (i32.const 0))
     (block $end (loop $lp
       (local.set $c (i32.load8_u (global.get $__mj_p)))
@@ -7076,6 +7149,7 @@ let of_json_runtime_wasm : string = {ojw|
       (br $lp)))
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
+    (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (local.get $r))
   (func $__mj_value (result i64)
     (local $c i32) (local $cell i32)
@@ -7938,11 +8012,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \  (export \"__indirect_function_table\" (table 0))\n"
     else ""
   in
-  (* Phase 26.1: reserve 512 bytes for __lang_char_table (256 * 2-byte cells).
+  (* Phase 26.1: reserve bytes for __lang_char_table. Byte-safe strings use
+     6-byte cells [i32 len=1][char][NUL], so 256 * 6 = 1536 bytes.
      Always reserved (low overhead) so the char_at helper can lazy-init it
      on first call without needing per-module conditional layout. *)
   let char_table_offset = !str_offset_counter in
-  let bump_init = !str_offset_counter + 512 in
+  let bump_init = !str_offset_counter + 1536 in
   (* Phase 26.5: list_str runtime + file I/O host imports — conditional. *)
   let list_str_runtime_section =
     if !str_split_used || !str_join_used || !str_count_used
@@ -8375,7 +8450,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (local $iov i32) (local $start i32) (local $p i32) (local $nread i32)\n\
         \    (local.set $iov (global.get $__lang_bump))\n\
         \    (global.set $__lang_bump (i32.add (local.get $iov) (i32.const 12)))\n\
-        \    (local.set $start (global.get $__lang_bump))\n\
+        \    (local.set $start (i32.add (global.get $__lang_bump) (i32.const 4)))\n\
         \    (local.set $p (local.get $start))\n\
         \    (block $eof (loop $lp\n\
         \      (i32.store offset=0 (local.get $iov) (local.get $p))\n\
@@ -8388,6 +8463,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \      (br $lp)))\n\
         \    (i32.store8 (local.get $p) (i32.const 0))\n\
         \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 1)))\n\
+        \    (i32.store (i32.sub (local.get $start) (i32.const 4)) (i32.sub (local.get $p) (local.get $start)))\n\
         \    (i64.extend_i32_u (local.get $start)))\n"
       in
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
