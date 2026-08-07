@@ -1,0 +1,31 @@
+// Regression lock: a user's TOP-LEVEL binding must shadow a host/stdlib
+// builtin of the same name on every backend. This caught a Wasm-only
+// miscompile where a top-level `let rec run` (a CPU-emulator loop) collided
+// with the subprocess `run` builtin: the guard only excluded *local*
+// shadowing, so `run acc 0` lowered to `i64.const 127` (the browser-stub
+// exit code) and the follow-on application called 127 as a closure —
+// "table index out of bounds". The C/LLVM backends already guarded against
+// top-level shadowing (`user_shadows`); Wasm now does too.
+//
+// Note: names are chosen to also be valid C identifiers (not `time`/`exit`,
+// which collide with libc on the C/LLVM backends — see docs/patterns.md §5).
+
+// `run` as a recursive, curried, multi-arg top-level fn — called via the
+// closure path (this is what miscompiled). Sums 1..n by counting down.
+let rec run = fn acc -> fn n ->
+  if n <= 0 then acc else run (acc + n) (n - 1);
+
+// More builtin names bound at top level (both Wasm-stubbed host builtins,
+// both valid C identifiers). Exercised so a mis-dispatch would diverge.
+let args = fn x -> x + 100;          // builtin `args`: unit -> str list
+let random_int = fn x -> x * x;      // builtin `random_int`: int -> int
+
+let _ = print (show (run 0 5));        // 15
+let _ = print (show (args 7));         // 107
+let _ = print (show (random_int 6));   // 36
+
+// Pass the user's `run` around as a first-class value, then apply it —
+// forces materialization of the top-level fn as a closure value.
+let apply2 = fn f -> f 0 4;
+let _ = print (show (apply2 run));     // 10
+0
