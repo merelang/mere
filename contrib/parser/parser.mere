@@ -22,7 +22,7 @@
 // Slice 2 also drags in minimal pattern (PWild / PVar) for `let`'s bound
 // name. The remaining 9 pattern variants stay in Stage 50c.
 //
-// See aidocs/projects/lang/50_self_hosted_parser_paper.md for the full
+// See the design notes for the full
 // multi-stage plan. The AST shape mirrors contrib/fmt/fmt.mere so the
 // eventual parse -> format pipe shares one definition — variants not yet
 // emitted by this slice (EMatch, EAnnot, ERecord*, EFieldGet) live there.

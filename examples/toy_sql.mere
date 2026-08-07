@@ -1,6 +1,6 @@
 // toy_sql.mere — Mere dogfood: simple SQL engine (toy ORM)
 //
-// Purpose: dogfood example for the B1 paper trial (internal design notes).
+// Purpose: dogfood example for the B1 linear-types design.
 //   Write a realistic application of 1000+ LoC to observe demand for N1
 //   (OwnedVec auto-Drop) / N2 (NLL borrow) / N3 (Linear types).
 //

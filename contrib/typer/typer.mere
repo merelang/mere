@@ -13,14 +13,14 @@
 //   52f: top-level + cross-validation harness
 //   52g: browser bridge — live in-browser type-checker
 //
-// See aidocs/projects/lang/52_self_hosted_typer_paper.md for the full
+// See the design notes for the full
 // plan. The AST shape is `contrib/parser/ast.mere`'s `ty` plus the new
 // `TyMeta of int` variant introduced for inference.
 //
 // What this file is NOT:
 //   - It does NOT yet implement `infer` — that lands in 52b.
 //   - It does NOT cover borrow checker / region / capability / effect
-//     — those are deferred per the paper trial (Phase 11 / 36 territory).
+//     — those are deferred (Phase 11 / 36 territory).
 //   - It does NOT carry typer-side error suggestions (levenshtein
 //     "did you mean"). MVP is `fail msg`.
 

@@ -9,7 +9,7 @@
 //   dune exec mere -- contrib/site/build.mere docs _site
 //   # converts *.md under docs/ to _site/*.html and generates _site/index.html
 //
-// MVP scope (per paper-trial 47 doc):
+// MVP scope:
 //   - enumerate `*.md` under input_dir via list_dir
 //   - read each .md and split into a line list via read_file + str_split("\n")
 //   - extract page title from the first `# Title` line (fallback: filename)

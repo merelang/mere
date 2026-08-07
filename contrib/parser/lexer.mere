@@ -4,12 +4,12 @@
 // Tokenizes a Mere source string into a (line, token) list. Scope is
 // what the self-host fmt's AST covers: literals, identifiers, the
 // 12-precedence-level operator set, the standard keywords, and the
-// common punctuation. Out of scope (deferred per the §S1 paper trial):
+// common punctuation. Out of scope (deferred):
 // `module` / `import` / `open` / `extern` / `region` / `view` / Phase
 // 36 sugars beyond `..` and `\` lambda shorthand.
 //
 // The output feeds the parser stages (50b/c/d/e) that come next.
-// See aidocs/projects/lang/50_self_hosted_parser_paper.md for the
+// See the design notes for the
 // full multi-stage plan.
 
 // === Token type ============================================================

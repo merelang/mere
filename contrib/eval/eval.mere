@@ -11,7 +11,7 @@
 //   - 51e: minimal builtins (extern fn) + top-level decl integration
 //   - 51f: browser bridge — live in-browser Mere REPL
 //
-// See aidocs/projects/lang/51_self_hosted_eval_paper.md for the full
+// See the design notes for the full
 // multi-stage plan. The AST shape is the same one parser.mere builds
 // and fmt.mere consumes (ast.mere is the shared definition).
 

@@ -5511,7 +5511,7 @@ let () =
      Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog)
     "$mere_map_key_hash_int";
 
-  (* T-2 (note 150): bytes type. Interp is binary-safe (an embedded 0x00 does
+  (* T-2: bytes type. Interp is binary-safe (an embedded 0x00 does
      not truncate, where a str would), and the C backend emits the length-
      prefixed mere_bytes runtime rather than treating bytes as a char*. *)
   check "bytes: interp is NUL-safe (0x00 does not truncate the length)"

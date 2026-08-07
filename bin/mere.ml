@@ -81,7 +81,7 @@ let search_paths : string list ref = ref []
 (* --component: emit the Wasm backend in WebAssembly Component Model shape
    (exports `run` + `cabi_realloc`, no ambient env imports). Opt-in; the
    default core-module output is unchanged. Extracted from argv in
-   preprocess_argv, like -I. See aidocs note 152. *)
+   preprocess_argv, like -I. *)
 let component_flag : bool ref = ref false
 
 let infer_program ?base_dir source =

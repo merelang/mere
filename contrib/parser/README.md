@@ -7,8 +7,7 @@ directory holds the in-progress Mere self-host so that
 instead of hand-coded AST literals.
 
 Together with `contrib/fmt/`, this directory completes the §S1
-self-host plan (see
-[the paper trial](../../../aidocs/projects/lang/50_self_hosted_parser_paper.md)).
+self-host plan.
 
 ## Files
 
@@ -164,7 +163,7 @@ Productions still deferred:
   (`<\|` / `\|>` / `<<` / `>>` / `@@` / `?` / `?!` / `<-`) — add as
   dogfood demands.
 
-## What's deferred (per the §S1 paper trial)
+## What's deferred
 
 - Float literals — `mere fmt` rarely formats float-heavy code; add later
   if Stage 50e Top-level needs them.

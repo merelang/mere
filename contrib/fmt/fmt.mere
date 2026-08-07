@@ -14,7 +14,7 @@
 // - Comment preservation. Same as the OCaml side — comments are
 //   discarded by the lexer.
 //
-// See aidocs/projects/lang/49_self_hosted_fmt_paper.md for the full
+// See the design notes for the full
 // staging plan.
 
 // === Types =================================================================

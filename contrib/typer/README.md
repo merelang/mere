@@ -6,10 +6,7 @@ the same type inferencer. §S2.B closes once 52a–52g land.
 
 `typer.mere` is now ~920 lines.
 
-> See [`aidocs/projects/lang/52_self_hosted_typer_paper.md`][paper]
-> for the full plan.
-
-[paper]: https://github.com/284km/aidocs/blob/main/projects/lang/52_self_hosted_typer_paper.md
+> See the design notes for the full plan.
 
 ## Files
 

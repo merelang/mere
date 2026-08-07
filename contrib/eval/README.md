@@ -8,8 +8,7 @@ browser. The §S1 plan was self-host fmt + parser; §S2 is the
 evaluator.
 
 Together with `contrib/parser/` (Phase 50) and `contrib/fmt/`
-(Phase 49), this directory will complete the §S2 vision
-(see [the paper trial](../../../aidocs/projects/lang/51_self_hosted_eval_paper.md)).
+(Phase 49), this directory will complete the §S2 vision.
 
 ## Files
 

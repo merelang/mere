@@ -4,9 +4,8 @@ The OCaml `Mere.Formatter` (lib/formatter.ml, ~600 lines) is the
 reference implementation; this directory holds the in-progress Mere
 self-host of the same pretty-printer.
 
-Self-hosting is staged so each step lands as a runnable artifact —
-see [the paper trial](../../../aidocs/projects/lang/49_self_hosted_fmt_paper.md)
-for the multi-phase plan.
+Self-hosting is staged so each step lands as a runnable artifact,
+following a multi-phase plan.
 
 ## Files
 

@@ -1565,7 +1565,7 @@ let initial_env : env =
     ("file_pread", file_pread_scheme);
     ("file_pwrite", file_pwrite_scheme);
     ("write_file_bytes", write_file_bytes_scheme);
-    (* Phase 44: file system primitives for the docs site SSG (paper-trial doc 47) *)
+    (* Phase 44: file system primitives for the docs site SSG *)
     ("list_dir",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("list", [Ast.TyStr]))));
     ("mkdir_p",

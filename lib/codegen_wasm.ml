@@ -174,7 +174,7 @@ let str_join_used = ref false
 let str_count_used = ref false
 let file_io_used = ref false
 let file_bytes_io_used = ref false  (* binary file I/O host imports (read/write_file_bytes) *)
-(* Phase 2 (note 152): true while emitting a command-style component
+(* Phase 2: true while emitting a command-style component
    (--component on a unit/CLI program). Command components get real WASI via
    the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
 let wasm_component_command = ref false
@@ -7668,7 +7668,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      stack-top has body's i32 result; pipe through show_<tag> if needed,
      then puts. Unit main: drop result, call puts on "()" literal. *)
   let main_ty_walked = Ast.walk main_ty in
-  (* Component target (note 152): for value-returning reactor exports (TyStr,
+  (* Component target: for value-returning reactor exports (TyStr,
      TyArrow) $main returns the top-level value's raw pointer as an i32 (no
      show_str quote-wrapping — a component value is raw, not interp display),
      which $run then lowers/dispatches to the canonical ABI. Command-style
@@ -8003,7 +8003,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   in
   let file_io_imports =
     if component then
-      (* Component target (note 152): a WebAssembly component must not carry
+      (* Component target: a WebAssembly component must not carry
          ambient `env` imports. Replace the float/time/libm host imports with
          in-module stubs so a pure run()->string program has zero imports and
          is componentizable. Math/time are not yet routed through WASI (later
@@ -8226,14 +8226,14 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   (* Phase(component): opt-in WebAssembly Component Model export shape.
      Emits cabi_realloc (wrapping the bump allocator) + a `run` export that
      calls $main (which yields a str ptr for a string-typed program) and
-     lowers it to the canonical ABI string: retptr -> [ptr, len]. Note 152. *)
+     lowers it to the canonical ABI string: retptr -> [ptr, len]. *)
   (* Under --component, the ambient `env.puts` import is replaced by a no-op
-     in-module stub (pure Slice-1 programs do not print). Note 152. *)
+     in-module stub (pure Slice-1 programs do not print). *)
   let puts_decl =
     if not component then
       "  (import \"env\" \"puts\" (func $puts_h (param i32)))\n"
     else if main_ty_walked = Ast.TyUnit || main_ty_walked = Ast.TyInt then
-      (* Phase 2 (note 152): a unit/CLI program prints via WASI. Import
+      (* Phase 2: a unit/CLI program prints via WASI. Import
          Preview 1 fd_write and write the NUL-terminated Mere string plus a
          trailing newline (matching C's puts) to stdout (fd 1). Componentized
          with the wasi_snapshot_preview1 command adapter, this yields a
