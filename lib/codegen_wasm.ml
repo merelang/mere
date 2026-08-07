@@ -159,6 +159,11 @@ let str_join_used = ref false
 let str_count_used = ref false
 let file_io_used = ref false
 let file_bytes_io_used = ref false  (* binary file I/O host imports (read/write_file_bytes) *)
+(* Phase 2 (note 152): true while emitting a command-style component
+   (--component on a unit/CLI program). Command components get real WASI via
+   the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
+let wasm_component_command = ref false
+let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -2435,9 +2440,16 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "i64.const 127"
   | Ast.App ({ node = Ast.Var "args"; _ }, _)
     when not (List.mem_assoc "args" !locals) ->
-    (* no argv on a browser/worker host — args() is the empty list. Reuse the
-       Constr emit with args()'s own result type (str list). *)
-    emit_expr { e with Ast.node = Ast.Constr ("Nil", None) }
+    if !wasm_component_command then begin
+      (* Phase 2: a command component has real argv via the WASI adapter.
+         $__lang_args builds a str list (argv[1..], skipping the program name
+         to match the C backend) from wasi args_get. *)
+      wasm_args_used := true;
+      emit_instr "call $__lang_args"
+    end else
+      (* no argv on a browser/worker host — args() is the empty list. Reuse the
+         Constr emit with args()'s own result type (str list). *)
+      emit_expr { e with Ast.node = Ast.Constr ("Nil", None) }
   | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
     when not (List.mem_assoc "print_err" !locals) ->
     (* stderr — route to the same host sink as print. *)
@@ -7319,6 +7331,8 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
 
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   ignore main_ty;
+  wasm_component_command := component && (Ast.walk main_ty = Ast.TyUnit);
+  wasm_args_used := false;
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
@@ -8140,19 +8154,70 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          (a scatter write of 2 iovecs silently drops the 2nd), so we issue two
          single-iovec writes: the string, then the newline. Scratch (16 bytes
          bump): iovec @0..7, nwritten @8..11, newline byte @12. *)
-      "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n\
-      \  (func $puts_h (param $p i32)\n\
-      \    (local $len i32) (local $b i32)\n\
-      \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
-      \    (local.set $b (global.get $__lang_bump))\n\
-      \    (global.set $__lang_bump (i32.add (local.get $b) (i32.const 16)))\n\
-      \    (i32.store offset=0 (local.get $b) (local.get $p))\n\
-      \    (i32.store offset=4 (local.get $b) (local.get $len))\n\
-      \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8))))\n\
-      \    (i32.store8 offset=12 (local.get $b) (i32.const 10))\n\
-      \    (i32.store offset=0 (local.get $b) (i32.add (local.get $b) (i32.const 12)))\n\
-      \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
-      \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
+      (* args() support (opt-in via wasm_args_used, set during emit_expr):
+         import wasi args_sizes_get/args_get and emit $__lang_args, which
+         builds a str list of argv[1..] (skipping the program name, matching
+         the C backend). Cons cell = { tag:i64 @0, payload:i64 @8 -> tuple };
+         tuple = { head:i64 @0, tail:i64 @8 }; Nil = { tag:i64 @0 }. argv[i]
+         is a NUL-terminated string, usable directly as a Mere str ptr. *)
+      let args_imports =
+        if not !wasm_args_used then "" else
+        "  (import \"wasi_snapshot_preview1\" \"args_sizes_get\" (func $args_sizes_get (param i32 i32) (result i32)))\n\
+        \  (import \"wasi_snapshot_preview1\" \"args_get\" (func $args_get (param i32 i32) (result i32)))\n"
+      in
+      let args_fn =
+        if not !wasm_args_used then "" else
+        let cons_t = (try Hashtbl.find variant_tags "Cons" with Not_found -> 1) in
+        let nil_t = (try Hashtbl.find variant_tags "Nil" with Not_found -> 0) in
+        Printf.sprintf
+          "  (func $__lang_args (result i64)\n\
+          \    (local $argc i32) (local $bufsz i32) (local $argv i32) (local $buf i32)\n\
+          \    (local $i i32) (local $acc i32) (local $tup i32) (local $cell i32) (local $sz i32)\n\
+          \    (local.set $sz (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $sz) (i32.const 8)))\n\
+          \    (drop (call $args_sizes_get (local.get $sz) (i32.add (local.get $sz) (i32.const 4))))\n\
+          \    (local.set $argc (i32.load (local.get $sz)))\n\
+          \    (local.set $bufsz (i32.load offset=4 (local.get $sz)))\n\
+          \    (local.set $argv (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $argv) (i32.mul (local.get $argc) (i32.const 4))))\n\
+          \    (local.set $buf (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $buf) (local.get $bufsz)))\n\
+          \    (drop (call $args_get (local.get $argv) (local.get $buf)))\n\
+          \    (local.set $acc (global.get $__lang_bump))\n\
+          \    (global.set $__lang_bump (i32.add (local.get $acc) (i32.const 16)))\n\
+          \    (i64.store offset=0 (local.get $acc) (i64.const %d))\n\
+          \    (local.set $i (local.get $argc))\n\
+          \    (block $done (loop $lp\n\
+          \      (br_if $done (i32.le_s (local.get $i) (i32.const 1)))\n\
+          \      (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n\
+          \      (local.set $tup (global.get $__lang_bump))\n\
+          \      (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 16)))\n\
+          \      (i64.store offset=0 (local.get $tup) (i64.extend_i32_u (i32.load (i32.add (local.get $argv) (i32.mul (local.get $i) (i32.const 4))))))\n\
+          \      (i64.store offset=8 (local.get $tup) (i64.extend_i32_u (local.get $acc)))\n\
+          \      (local.set $cell (global.get $__lang_bump))\n\
+          \      (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+          \      (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+          \      (i64.store offset=8 (local.get $cell) (i64.extend_i32_u (local.get $tup)))\n\
+          \      (local.set $acc (local.get $cell))\n\
+          \      (br $lp)))\n\
+          \    (i64.extend_i32_u (local.get $acc)))\n"
+          nil_t cons_t
+      in
+      "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
+      ^ args_imports
+      ^ "  (func $puts_h (param $p i32)\n\
+        \    (local $len i32) (local $b i32)\n\
+        \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
+        \    (local.set $b (global.get $__lang_bump))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $b) (i32.const 16)))\n\
+        \    (i32.store offset=0 (local.get $b) (local.get $p))\n\
+        \    (i32.store offset=4 (local.get $b) (local.get $len))\n\
+        \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8))))\n\
+        \    (i32.store8 offset=12 (local.get $b) (i32.const 10))\n\
+        \    (i32.store offset=0 (local.get $b) (i32.add (local.get $b) (i32.const 12)))\n\
+        \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
+        \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
+      ^ args_fn
     else
       "  (func $puts_h (param i32))\n"
   in
