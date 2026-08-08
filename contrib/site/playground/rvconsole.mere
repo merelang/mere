@@ -1,0 +1,148 @@
+// rvconsole.mere — the Mere RISC-V (RV32IM) emulator, compiled to WebAssembly,
+// hosting a fantasy console in the browser. The cartridge is a flat RV32IM
+// binary that `mere -rv` produced from a Mere program (see game.mere); the
+// program draws into a 64x32 framebuffer with `fb_set`, reads the d-pad with
+// `key`, and ends each frame with `present`. This emulator serves those three:
+//   - `fb_set x y v`  -> a byte store at 0x7F8000 + y*64 + x  (we read it back
+//                        each frame and blit it to the <canvas>)
+//   - `key n`         -> a byte load at 0x7F9000 + n, which we refresh from the
+//                        host's polled arrow keys (dom_key_held) every frame
+//   - `present ()`    -> ecall a7=100, which ends the frame slice; the CPU
+//                        resumes right after it next frame, so the program's
+//                        main loop is a coroutine driven by requestAnimationFrame.
+// Same RV32IM core as memu/riscv-console; only the I/O edges differ.
+
+import "contrib/dom/dom.mere";
+
+let mask32 = fn x -> bit_and x 4294967295;
+let signed32 = fn x -> let m = mask32 x in if bit_and m 2147483648 == 0 then m else m - 4294967296;
+let sign_ext = fn v -> fn bits -> let half = bit_shl 1 (bits - 1) in if bit_and v half == 0 then v else v - bit_shl 1 bits;
+let sra32 = fn v -> fn s -> let m = mask32 v in let r = bit_shr m s in
+  if bit_and m 2147483648 == 0 || s == 0 then mask32 r else mask32 (bit_or r (bit_shl 4294967295 (32 - s)));
+let new_vec = fn n -> fn x -> let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in let _ = go 0 in v;
+let ld32 = fn mem -> fn a -> vec_get mem a + vec_get mem (a+1)*256 + vec_get mem (a+2)*65536 + vec_get mem (a+3)*16777216;
+let st32 = fn mem -> fn a -> fn v ->
+  let _ = vec_set mem a (bit_and v 255) in let _ = vec_set mem (a+1) (bit_and (bit_shr v 8) 255) in
+  let _ = vec_set mem (a+2) (bit_and (bit_shr v 16) 255) in vec_set mem (a+3) (bit_and (bit_shr v 24) 255);
+let wrx = fn x -> fn i -> fn v -> if i == 0 then () else vec_set x i (mask32 v);
+let mulhu32 = fn a -> fn b ->
+  let al = bit_and a 65535 in let ah = bit_shr (mask32 a) 16 in let bl = bit_and b 65535 in let bh = bit_shr (mask32 b) 16 in
+  let ll = al*bl in let lh = al*bh in let hl = ah*bl in let hh = ah*bh in
+  let mid = bit_shr ll 16 + bit_and lh 65535 + bit_and hl 65535 in
+  mask32 (hh + bit_shr lh 16 + bit_shr hl 16 + bit_shr mid 16);
+let imm_i = fn inst -> sign_ext (bit_and (bit_shr inst 20) 4095) 12;
+let imm_s = fn inst -> sign_ext (bit_or (bit_shl (bit_and (bit_shr inst 25) 127) 5) (bit_and (bit_shr inst 7) 31)) 12;
+let imm_b = fn inst -> let b12 = bit_and (bit_shr inst 31) 1 in let b11 = bit_and (bit_shr inst 7) 1 in
+  let b10_5 = bit_and (bit_shr inst 25) 63 in let b4_1 = bit_and (bit_shr inst 8) 15 in
+  sign_ext (bit_or (bit_shl b12 12) (bit_or (bit_shl b11 11) (bit_or (bit_shl b10_5 5) (bit_shl b4_1 1)))) 13;
+let imm_u = fn inst -> bit_and inst 4294963200;
+let imm_j = fn inst -> let b20 = bit_and (bit_shr inst 31) 1 in let b19_12 = bit_and (bit_shr inst 12) 255 in
+  let b11 = bit_and (bit_shr inst 20) 1 in let b10_1 = bit_and (bit_shr inst 21) 1023 in
+  sign_ext (bit_or (bit_shl b20 20) (bit_or (bit_shl b19_12 12) (bit_or (bit_shl b11 11) (bit_shl b10_1 1)))) 21;
+let step = fn mem -> fn x -> fn st ->
+  let pc = vec_get st 0 in let inst = ld32 mem pc in let _ = vec_set st 0 (mask32 (pc+4)) in
+  let op = bit_and inst 127 in let rd = bit_and (bit_shr inst 7) 31 in let f3 = bit_and (bit_shr inst 12) 7 in
+  let rs1 = bit_and (bit_shr inst 15) 31 in let rs2 = bit_and (bit_shr inst 20) 31 in let f7 = bit_and (bit_shr inst 25) 127 in
+  let a = vec_get x rs1 in let b = vec_get x rs2 in
+  if op == 0x37 then wrx x rd (imm_u inst)
+  else if op == 0x17 then wrx x rd (mask32 (pc + imm_u inst))
+  else if op == 0x6F then let _ = wrx x rd (mask32 (pc+4)) in vec_set st 0 (mask32 (pc + imm_j inst))
+  else if op == 0x67 then let t = bit_and (mask32 (a + imm_i inst)) 4294967294 in let _ = wrx x rd (mask32 (pc+4)) in vec_set st 0 t
+  else if op == 0x63 then
+    let take = if f3 == 0 then (if a==b then 1 else 0) else if f3 == 1 then (if a==b then 0 else 1)
+      else if f3 == 4 then (if signed32 a < signed32 b then 1 else 0) else if f3 == 5 then (if signed32 a >= signed32 b then 1 else 0)
+      else if f3 == 6 then (if mask32 a < mask32 b then 1 else 0) else (if mask32 a >= mask32 b then 1 else 0) in
+    if take == 1 then vec_set st 0 (mask32 (pc + imm_b inst)) else ()
+  else if op == 0x03 then let addr = mask32 (a + imm_i inst) in
+    if f3 == 2 then wrx x rd (ld32 mem addr) else if f3 == 0 then wrx x rd (sign_ext (vec_get mem addr) 8)
+    else if f3 == 4 then wrx x rd (vec_get mem addr)
+    else if f3 == 1 then wrx x rd (sign_ext (vec_get mem addr + vec_get mem (mask32 (addr+1))*256) 16)
+    else if f3 == 5 then wrx x rd (vec_get mem addr + vec_get mem (mask32 (addr+1))*256) else ()
+  else if op == 0x23 then let addr = mask32 (a + imm_s inst) in
+    if f3 == 2 then st32 mem addr b else if f3 == 0 then vec_set mem addr (bit_and b 255)
+    else if f3 == 1 then let _ = vec_set mem addr (bit_and b 255) in vec_set mem (mask32 (addr+1)) (bit_and (bit_shr b 8) 255) else ()
+  else if op == 0x13 then let imm = imm_i inst in
+    if f3 == 0 then wrx x rd (mask32 (a+imm)) else if f3 == 2 then wrx x rd (if signed32 a < imm then 1 else 0)
+    else if f3 == 3 then wrx x rd (if mask32 a < mask32 imm then 1 else 0) else if f3 == 4 then wrx x rd (bit_xor a imm)
+    else if f3 == 6 then wrx x rd (bit_or a imm) else if f3 == 7 then wrx x rd (bit_and a imm)
+    else if f3 == 1 then wrx x rd (mask32 (bit_shl a (bit_and rs2 31))) else if f7 == 0 then wrx x rd (bit_shr (mask32 a) (bit_and rs2 31))
+    else wrx x rd (sra32 a (bit_and rs2 31))
+  else if op == 0x33 && f7 == 1 then
+    (if f3 == 0 then wrx x rd (mask32 (a*b)) else if f3 == 3 then wrx x rd (mulhu32 a b)
+     else if f3 == 1 then let uu = mulhu32 a b in let an = bit_shr (mask32 a) 31 in let bn = bit_shr (mask32 b) 31 in
+       wrx x rd (mask32 (uu - (if an==1 then mask32 b else 0) - (if bn==1 then mask32 a else 0)))
+     else if f3 == 2 then let uu = mulhu32 a b in let an = bit_shr (mask32 a) 31 in wrx x rd (mask32 (uu - (if an==1 then mask32 b else 0)))
+     else if f3 == 4 then let sa = signed32 a in let sb = signed32 b in
+       if sb==0 then wrx x rd 4294967295 else if sa == (0-2147483648) && sb == (0-1) then wrx x rd 2147483648 else wrx x rd (mask32 (sa/sb))
+     else if f3 == 5 then let bu = mask32 b in if bu==0 then wrx x rd 4294967295 else wrx x rd (mask32 (mask32 a / bu))
+     else if f3 == 6 then let sa = signed32 a in let sb = signed32 b in
+       if sb==0 then wrx x rd (mask32 sa) else if sa == (0-2147483648) && sb == (0-1) then wrx x rd 0 else wrx x rd (mask32 (sa - (sa/sb)*sb))
+     else if f3 == 7 then let au = mask32 a in let bu = mask32 b in if bu==0 then wrx x rd au else wrx x rd (mask32 (au - (au/bu)*bu))
+     else vec_set st 1 1)
+  else if op == 0x33 then let sh = bit_and b 31 in
+    if f3 == 0 then (if f7==0 then wrx x rd (mask32 (a+b)) else wrx x rd (mask32 (a-b)))
+    else if f3 == 1 then wrx x rd (mask32 (bit_shl a sh)) else if f3 == 2 then wrx x rd (if signed32 a < signed32 b then 1 else 0)
+    else if f3 == 3 then wrx x rd (if mask32 a < mask32 b then 1 else 0) else if f3 == 4 then wrx x rd (bit_xor a b)
+    else if f3 == 5 then (if f7==0 then wrx x rd (bit_shr (mask32 a) sh) else wrx x rd (sra32 a sh))
+    else if f3 == 6 then wrx x rd (bit_or a b) else wrx x rd (bit_and a b)
+  else if op == 0x73 then let a7 = vec_get x 17 in
+    if a7 == 93 then vec_set st 1 1 else if a7 == 100 then vec_set st 1 2 else ()
+  else if op == 0x0F then () else vec_set st 1 1;
+
+// --- memory + cartridge: 8 MB flat, program at 0, served by the host --------
+let fbb = 8355840;    // 0x7F8000 framebuffer base (64x32 bytes)
+let keyb = 8359936;   // 0x7F9000 key MMIO base (4 bytes: right,left,up,down)
+let mem = new_vec 8388608 0;
+let x = new_vec 32 0;
+let st = new_vec 2 0;
+let romn = dom_rom_size 0;
+let rec romld = fn i -> if i >= romn then () else let _ = vec_set mem i (dom_rom_byte i) in romld (i+1);
+let _ = romld 0;
+let _ = vec_set st 0 0;
+
+let rec drive = fn budget -> if budget <= 0 then () else if vec_get st 1 != 0 then () else let _ = step mem x st in drive (budget-1);
+
+// --- canvas blit: 64x32 framebuffer, scaled, dirty-pixel repaint ------------
+let screen = dom_get_by_id "screen";
+let scale = 8;
+let color_of = fn s ->
+  if s == 7 then "#39d7ff"        // player  (cyan)
+  else if s == 5 then "#ffd23f"   // coin    (yellow)
+  else if s == 2 then "#4a5568"   // border  (slate)
+  else if s == 3 then "#2f6f4f"   // (spare) green
+  else "#0d1117";                 // background
+let prev = new_vec 2048 (0 - 1);  // -1 => repaint everything on the first frame
+let laststyle = new_vec 1 (0 - 1);
+let render = fn (u : unit) ->
+  let _ = vec_set laststyle 0 (0 - 1) in
+  let rec go = fn i ->
+    if i >= 2048 then ()
+    else
+      let s = vec_get mem (fbb + i) in
+      let _ =
+        if s == vec_get prev i then ()
+        else
+          let _ = vec_set prev i s in
+          let _ = if vec_get laststyle 0 == s then ()
+                  else let _ = dom_canvas_fill_style screen (color_of s) in vec_set laststyle 0 s in
+          let y = i / 64 in let xx = i - y * 64 in
+          dom_canvas_fill_rect screen (xx * scale) (y * scale) scale scale in
+      go (i + 1) in
+  go 0;
+
+// one animation frame: refresh the key MMIO from the host, run the CPU until it
+// calls present (or exits), then blit. The region reclaims per-frame garbage.
+let frame = fn (u : unit) ->
+  region rr {
+    let _ = vec_set mem (keyb+0) (dom_key_held 0) in    // right
+    let _ = vec_set mem (keyb+1) (dom_key_held 1) in    // left
+    let _ = vec_set mem (keyb+2) (dom_key_held 2) in    // up
+    let _ = vec_set mem (keyb+3) (dom_key_held 3) in    // down
+    let _ = if vec_get st 1 == 1 then () else           // 1 = program exited: freeze
+              let _ = vec_set st 1 0 in drive 5000000 in
+    render ()
+  };
+
+let _ = dom_on_frame frame;
+()

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RISC-V fantasy console — Mere on its own CPU, in the browser</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .game-app {
+      display: flex; flex-direction: column; align-items: center; gap: 1rem;
+      padding: 2rem; margin: 2rem 0;
+      background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+    }
+    #screen {
+      width: min(512px, 90vw); image-rendering: pixelated;
+      background: #0d1117; border-radius: 6px;
+    }
+    .hint { color: #718096; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="g2048.html">2048</a>
+      <a href="raytrace.html">raytrace</a>
+      <a href="chip8.html">chip8</a>
+      <a href="gameboy.html">gameboy</a>
+      <a href="rvconsole.html" class="active">risc-v console</a>
+      <a href="echo.html">echo</a>
+      <a href="wordcount.html">wordcount</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+    </div>
+  </nav>
+
+  <main>
+    <h1>A RISC-V fantasy console — written in Mere</h1>
+
+    <p>
+      Two Mere programs, all the way down. The <strong>cartridge</strong> is a
+      Mere program compiled by <code>mere -rv</code> straight to a flat
+      <strong>RV32IM</strong> binary — no assembler, no linker. The
+      <strong>console</strong> is the Mere-written RISC-V emulator (the same
+      RV32IM core as <a href="https://github.com/284km/memu">memu</a>) compiled
+      to WebAssembly. So this page is a Mere-authored CPU, running in the
+      browser, executing a Mere-authored game.
+    </p>
+
+    <div class="game-app">
+      <canvas id="screen" width="512" height="256"></canvas>
+      <p class="hint">
+        Use the <strong>arrow keys</strong> to move the cyan block around the
+        field (the yellow dots are just scenery). Every frame, the emulator
+        refreshes a memory-mapped input register from your held keys, runs the
+        RV32IM cartridge until it calls <code>present</code>, then blits the
+        64&times;32 framebuffer to the <code>&lt;canvas&gt;</code>.
+      </p>
+    </div>
+
+    <h2>How the two halves meet</h2>
+    <p>
+      The cartridge and console share a tiny hardware contract — three
+      operations the <code>mere -rv</code> backend lowers to bare machine code
+      and memory-mapped I/O:
+    </p>
+    <ul>
+      <li><code>fb_set x y v</code> — store shade <code>v</code> (0..7) at
+        framebuffer pixel <code>(x, y)</code>: a byte write to
+        <code>0x7F8000 + y*64 + x</code>.</li>
+      <li><code>key n</code> — read the held state of button <code>n</code>
+        (0=right, 1=left, 2=up, 3=down): a byte read from the input register at
+        <code>0x7F9000 + n</code>, which the host refreshes each frame from
+        <code>dom_key_held</code>.</li>
+      <li><code>present ()</code> — end the frame and yield to the host via an
+        <code>ecall</code> (a7=100). The CPU resumes on the next instruction
+        next frame, so the cartridge's main loop is a coroutine driven by
+        <code>requestAnimationFrame</code> — the player position lives on the
+        RISC-V call stack, not in any global.</li>
+    </ul>
+
+    <h2>What's happening</h2>
+    <ol>
+      <li><code>mere -rv game.mere &gt; game.bin</code> lowers the cartridge to
+        a ~3&nbsp;KB flat RV32IM binary.</li>
+      <li><code>mere -w -I . rvconsole.mere</code> lowers the RV32IM emulator to
+        WebAssembly.</li>
+      <li>The page <code>fetch</code>es <code>game.bin</code> and hands it to
+        the glue (<code>setRom</code>); the module reads it a byte at a time
+        through <code>dom_rom_size</code> / <code>dom_rom_byte</code> into its
+        emulated RAM at address&nbsp;0.</li>
+      <li>Each <code>requestAnimationFrame</code> polls the keys, runs the CPU
+        to the next <code>present</code>, and repaints the framebuffer via
+        <code>dom_canvas_fill_rect</code>.</li>
+    </ol>
+  </main>
+
+  <footer>frontend FFI dogfood — a Mere-authored CPU running a Mere-authored game</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./rvconsole.wasm").then(r => r.arrayBuffer());
+    const rom = new Uint8Array(await fetch("./game.bin").then(r => r.arrayBuffer()));
+    const { glue, attach, setRom } = makeDomGlue();
+    setRom(rom);
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub, time: stub,
+      read_file: stub, write_file: stub,
+      __lang_str_of_float: stub, __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();   // loads the cartridge, then dom_on_frame drives the loop
+  </script>
+</body>
+</html>

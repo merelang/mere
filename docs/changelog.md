@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.151 — 2026-08-08
+
+_RV32I fantasy-console I/O + a browser build. Two new externs the `mere -rv`
+backend lowers to memory-mapped I/O and a syscall, turning a `mere -rv` program
+into a playable cartridge: `key n` reads the held state of button `n` from an
+input register at `0x7F9000 + n` (a `lbu`), and `present ()` ends a frame and
+yields to the host via `ecall a7=100`, resuming on the next instruction next
+frame — so a program's main loop is a coroutine whose state lives on the RISC-V
+call stack. Paired with the existing `fb_set` (framebuffer store), these three
+are the whole hardware contract. `contrib/site/playground/rvconsole.mere` is
+the memu RV32IM emulator compiled to WebAssembly and wired to the DOM (ROM via
+`dom_rom_byte`, input via `dom_key_held`, framebuffer blitted to a `<canvas>`),
+and `game.mere` is an arrow-key-playable cartridge; both ship to the playground.
+`lib/codegen_riscv.ml`, `contrib/site/build_full.sh`, `contrib/site/build.mere`._
+
+---
+
 ## v0.1.150 — 2026-08-08
 
 _Full structural `==` / `!=` on the RV32I backend. A comparison at a compound
