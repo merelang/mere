@@ -1,0 +1,43 @@
+// A tiny playable fantasy-console cartridge, written in Mere and compiled to a
+// flat RV32IM binary by `mere -rv`. It runs on the Mere-written RISC-V emulator
+// (see the browser page), which serves input and blits the framebuffer.
+//
+//   fb_set x y v   store shade v (0..7) at framebuffer pixel (x, y), 64x32
+//   key n          held state (0/1) of button n: 0=right 1=left 2=up 3=down
+//   present ()     end this frame and yield to the host; returns next frame
+//
+// State lives on the call stack: `loop` recurses once per frame with the new
+// player position, so there are no globals and nothing to allocate per frame.
+extern fn fb_set: int -> int -> int -> unit;
+extern fn key: int -> int;
+extern fn present: unit -> unit;
+
+let clamp = fn v -> fn lo -> fn hi -> if v < lo then lo else if v > hi then hi else v;
+
+// shade of pixel (x,y) for a player whose 4x4 block sits at (px,py): border,
+// two static "coins", and the player on top. No closures — a saturated call.
+let shade_at = fn px -> fn py -> fn x -> fn y ->
+  let inpl = if x >= px && x < px + 4 && y >= py && y < py + 4 then 1 else 0 in
+  let c1 = (x - 12) * (x - 12) + (y - 8) * (y - 8) in
+  let c2 = (x - 50) * (x - 50) + (y - 23) * (y - 23) in
+  let border = if x == 0 || x == 63 || y == 0 || y == 31 then 2 else 0 in
+  if inpl == 1 then 7
+  else if c1 < 5 then 5
+  else if c2 < 5 then 5
+  else border;
+
+let rec drawrow = fn px -> fn py -> fn y -> fn x ->
+  if x >= 64 then ()
+  else let _ = fb_set x y (shade_at px py x y) in drawrow px py y (x + 1);
+let rec drawcol = fn px -> fn py -> fn y ->
+  if y >= 32 then () else let _ = drawrow px py y 0 in drawcol px py (y + 1);
+
+let rec loop = fn px -> fn py ->
+  let _ = drawcol px py 0 in
+  let _ = present () in
+  let nx = clamp (px + key 0 - key 1) 1 59 in
+  let ny = clamp (py + key 3 - key 2) 1 27 in
+  loop nx ny;
+
+let _ = loop 30 14;
+()

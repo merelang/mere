@@ -858,6 +858,24 @@ and compile_app env e =
     emit_word (enc_r 0 t0 t1 0 t0 0x33);                     (* addr = FB_BASE + off *)
     emit_word (enc_s 0 a2 t0 0 0x23);                        (* sb v, 0(addr) *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* unit *)
+  | Ast.Var "key" when List.length args = 1 ->
+    (* fantasy-console input: read the held state (0/1) of button n from the
+       MMIO key register at KEY_BASE + n. A host emulator refreshes these bytes
+       from its own polled input before running each frame slice.
+       `extern fn key: int -> int;` types it. *)
+    compile_expr env (List.hd args);                         (* a0 = n *)
+    li t1 0x7F9000;                                          (* KEY_BASE *)
+    emit_word (enc_r 0 a0 t1 0 t0 0x33);                     (* addr = KEY_BASE + n *)
+    emit_word (enc_i 0 t0 4 a0 0x03)                         (* lbu a0, 0(addr) *)
+  | Ast.Var "present" when List.length args = 1 ->
+    (* fantasy-console vsync: end the current frame and yield to the host via a
+       dedicated ecall (a7 = 100). The host blits the framebuffer, then resumes
+       the CPU where it left off, so `present` returns and the program's main
+       loop continues into the next frame. `extern fn present: unit -> unit;`. *)
+    compile_expr env (List.hd args);                         (* evaluate the () arg *)
+    emit_word (enc_i 100 zero 0 a7 0x13);                    (* li a7, 100 *)
+    emit_word (enc_i 0 zero 0 zero 0x73);                    (* ecall (present) *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                       (* unit *)
   (* Map builtins -> the rv-prelude's rvmap_* helpers (the typer forces the
      Map type on `map_new` by name, so these can't just be shadowed). Types
      are erased at codegen, so the Vec-based repr flows through fine. *)

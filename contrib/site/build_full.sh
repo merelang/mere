@@ -90,6 +90,25 @@ if [ -f "$GAMEBOY_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w -I . $GAMEBOY_SRC -> playground/gameboy.wat"
 fi
 
+# RISC-V fantasy console: the RV32IM emulator to Wasm, and the cartridge
+# (game.mere) to a flat RV32IM binary via `mere -rv`. The emulator's RAM is an
+# 8 MB Vec[int] (the `mere -rv` memory map puts the stack near 8 MB); a bump
+# allocator building that vec peaks well above the 64 MB default linear memory,
+# so we raise the module's memory to 3072 pages (192 MB). This is the only
+# playground module that needs more than the default.
+RVCONSOLE_SRC="contrib/site/playground/rvconsole.mere"
+if [ -f "$RVCONSOLE_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w -I . "$RVCONSOLE_SRC" \
+    | perl -pe 's/\(memory \(export "memory"\) 1024\)/(memory (export "memory") 3072)/' \
+    > "$PLAYGROUND_OUT/rvconsole.wat"
+  echo "  mere -w -I . $RVCONSOLE_SRC -> playground/rvconsole.wat (memory 3072)"
+fi
+RVCONSOLE_ROM_SRC="contrib/site/playground/game.mere"
+if [ -f "$RVCONSOLE_ROM_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -rv "$RVCONSOLE_ROM_SRC" > "$PLAYGROUND_OUT/game.bin"
+  echo "  mere -rv $RVCONSOLE_ROM_SRC -> playground/game.bin"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do
@@ -115,10 +134,12 @@ if [ -d "$PLAYGROUND_OUT" ]; then
     echo "  cp contrib/dom/dom.glue.js -> playground/dom.glue.js"
   fi
 
-  # Stage any playground ROMs (e.g. dmg-acid2.gb) that pages fetch at runtime.
-  for gb in contrib/site/playground/*.gb; do
-    [ -f "$gb" ] || continue
-    cp "$gb" "$PLAYGROUND_OUT/" && echo "  cp $(basename "$gb") -> playground/"
+  # Stage any playground ROMs (e.g. dmg-acid2.gb, RISC-V game.bin) that pages
+  # fetch at runtime. (game.bin is regenerated above; this also covers any
+  # ROMs checked in without a build step.)
+  for rom in contrib/site/playground/*.gb contrib/site/playground/*.bin; do
+    [ -f "$rom" ] || continue
+    cp "$rom" "$PLAYGROUND_OUT/" && echo "  cp $(basename "$rom") -> playground/"
   done
 fi
 
