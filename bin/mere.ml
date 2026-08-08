@@ -15,6 +15,9 @@ let usage () =
   print_endline "  mere -w --component <file.mere>";
   print_endline "                        emit Wasm in Component Model shape (exports";
   print_endline "                        run + cabi_realloc; feed to wasm-tools component)";
+  print_endline "  mere -rv <file.mere>  emit a flat RV32IM binary (runs on the Mere RISC-V";
+  print_endline "                        emulator; integer subset — see codegen_riscv.ml)";
+  print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
   print_endline "  mere -r               start interactive REPL";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
@@ -65,6 +68,8 @@ let run_action action label source =
   | Mere.Codegen_llvm.Codegen_error (loc, msg) ->
     report_and_exit ~source ~filename:label loc "codegen error" msg
   | Mere.Codegen_wasm.Codegen_error (loc, msg) ->
+    report_and_exit ~source ~filename:label loc "codegen error" msg
+  | Mere.Codegen_riscv.Codegen_error (loc, msg) ->
     report_and_exit ~source ~filename:label loc "codegen error" msg
   | Sys_error msg ->
     Printf.eprintf "io error: %s\n" msg;
@@ -171,6 +176,11 @@ let compile_to_wasm ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_wasm.emit_program ~main_ty ~component:!component_flag prog
+
+let compile_to_riscv ?base_dir source =
+  let open Mere in
+  let (prog, main_ty) = infer_program ?base_dir source in
+  Codegen_riscv.emit_program ~main_ty prog
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -342,6 +352,12 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action (compile_to_wasm ~base_dir:base) path source
+  | [_; "-rve"; expr] ->
+    run_action compile_to_riscv "<inline>" expr
+  | [_; "-rv"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (compile_to_riscv ~base_dir:base) path source
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Mere.Pipeline.type_of path source
