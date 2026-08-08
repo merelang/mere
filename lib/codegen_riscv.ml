@@ -716,6 +716,35 @@ and compile_app env e =
     compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_to_str"))
   | Ast.Var "strbuf_len" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_len"))
+  | Ast.Var "vec_new" when List.length args = 1 ->
+    compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"))
+  | Ast.Var "vec_push" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=x *)
+    emit (Jal (ra, "__vec_push"))
+  | Ast.Var "vec_len" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a0 0x03)                         (* lw a0, 0(vec) — len *)
+  | Ast.Var "vec_get" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=i *)
+    emit_word (enc_i 8 a0 2 t0 0x03);                        (* dataptr *)
+    emit_word (enc_i 2 a1 1 t1 0x13);                        (* slli t1, i, 2 *)
+    emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* t0 = dataptr + i*4 *)
+    emit_word (enc_i 0 t0 2 a0 0x03)                         (* a0 = data[i] *)
+  | Ast.Var "vec_set" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = x *)
+    pop a1; pop a0;                                          (* a1=i, a0=vec *)
+    emit_word (enc_i 8 a0 2 t0 0x03);                        (* dataptr *)
+    emit_word (enc_i 2 a1 1 t1 0x13);                        (* slli t1, i, 2 *)
+    emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
+    emit_word (enc_s 0 a2 t0 2 0x23);                        (* data[i] = x *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   | Ast.Var "show" when List.length args = 1 ->
     (* polymorphic show: only the int case is supported (all the self-hosted
        compiler's uses are `show <int>`); resolve via the arg's type *)
@@ -1208,6 +1237,51 @@ let emit_strbuf () =
   emit_word (enc_i 0 a0 2 a0 0x03);                (* len header *)
   emit_word (enc_i 0 ra 0 zero 0x67)
 
+(* Vec: a mutable growable word array. Cell = [len][cap][dataptr]; dataptr ->
+   a cap-word buffer. __vec_new(_) -> cell; __vec_push(vec, x) appends (growing,
+   doubling cap). vec_get / vec_set / vec_len are inlined at the call site. *)
+let emit_vec () =
+  emit (Label "__vec_new");                        (* a0 ignored *)
+  emit_word (enc_i 4 zero 0 t2 0x13);              (* cap = 4 words *)
+  emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
+  emit_word (enc_i 16 gp 0 gp 0x13);               (* bump 4 words *)
+  emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
+  emit_word (enc_i 12 gp 0 gp 0x13);               (* bump 3 words *)
+  emit_word (enc_s 0 zero t1 2 0x23);              (* len = 0 *)
+  emit_word (enc_s 4 t2 t1 2 0x23);                (* cap = 4 *)
+  emit_word (enc_s 8 t0 t1 2 0x23);                (* dataptr *)
+  emit_word (enc_i 0 t1 0 a0 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label "__vec_push");                       (* a0=vec, a1=x ; leaf *)
+  emit_word (enc_i 0 a0 2 t0 0x03);                (* len *)
+  emit_word (enc_i 4 a0 2 t1 0x03);                (* cap *)
+  emit_word (enc_i 8 a0 2 t2 0x03);                (* dataptr *)
+  emit (Branch (1, t0, t1, ".vp_store"));          (* len != cap -> store *)
+  emit_word (enc_i 1 t1 1 t3 0x13);                (* slli t3, cap, 1 = newcap *)
+  emit_word (enc_s 4 t3 a0 2 0x23);                (* cell.cap = newcap *)
+  emit_word (enc_i 2 t3 1 t4 0x13);                (* slli t4, newcap, 2 = bytes *)
+  emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
+  emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += bytes *)
+  emit_word (enc_s 8 t5 a0 2 0x23);                (* cell.dataptr = newbuf *)
+  emit (Label ".vp_copy");
+  emit (Branch (0, t0, zero, ".vp_after"));        (* beq len,x0 -> done *)
+  emit_word (enc_i 0 t2 2 t3 0x03);                (* lw t3, 0(t2) *)
+  emit_word (enc_s 0 t3 t5 2 0x23);                (* sw t3, 0(t5) *)
+  emit_word (enc_i 4 t2 0 t2 0x13);
+  emit_word (enc_i 4 t5 0 t5 0x13);
+  emit_word (enc_i (-1) t0 0 t0 0x13);
+  emit (Jal (zero, ".vp_copy"));
+  emit (Label ".vp_after");
+  emit_word (enc_i 0 a0 2 t0 0x03);                (* reload len *)
+  emit_word (enc_i 8 a0 2 t2 0x03);                (* reload dataptr *)
+  emit (Label ".vp_store");
+  emit_word (enc_i 2 t0 1 t3 0x13);                (* slli t3, len, 2 *)
+  emit_word (enc_r 0 t3 t2 0 t3 0x33);             (* t3 = dataptr + len*4 *)
+  emit_word (enc_s 0 a1 t3 2 0x23);                (* databuf[len] = x *)
+  emit_word (enc_i 1 t0 0 t0 0x13);                (* len++ *)
+  emit_word (enc_s 0 t0 a0 2 0x23);                (* store len *)
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
 (* target of a refutable-let mismatch: abort with exit(2) *)
 let emit_pat_fail () =
   emit (Label "__pat_fail");
@@ -1355,6 +1429,7 @@ let build_items (prog : Ast.program) : item list =
   emit_str_of_int ();
   emit_substring ();
   emit_strbuf ();
+  emit_vec ();
   emit_pat_fail ();
   emit_main main_body;
   Hashtbl.iter (fun name (params, body) ->

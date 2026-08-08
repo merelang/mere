@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.144 — 2026-08-08
+
+_Vec — a mutable, growable array — on the RV32I backend (M3). A Vec is a
+`[len][cap][dataptr]` cell over a cap-word buffer; `vec_push` doubles the
+buffer when full (allocating a new one and copying, since the bump heap can't
+realloc). `vec_new` / `vec_push` are runtime helpers; `vec_get` / `vec_set` /
+`vec_len` are inlined. Verified byte-identical to the interpreter across
+push/get/set/len, growth well past the initial capacity, and an iterating
+sum. (`ref` turned out to be unused in the self-hosted compiler — Mere's
+mutability flows through Vec/Map, so no separate reference cell is needed.)
+Remaining for self-host: the `Map` collection and a tail of string builtins
+(`str_replace` / `str_join` / `str_split` / …). `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.143 — 2026-08-08
 
 _A big step toward self-hosting on RV32I — driven by feeding the Mere-written
