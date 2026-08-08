@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.137 — 2026-08-08
+
+_The RV32I backend grows a heap (M2, first slice) — tuples. `_start` now
+sets `gp` as a bump-heap top pointer (heap at 0x10000, below the print
+buffer and stack); a tuple literal evaluates its elements onto the memory
+stack, bump-allocates an n-word block, and fills it (no call between the
+bump and the stores, so the block pointer stays put), leaving the pointer
+as its value. A tuple-pattern `let (a, b, ...) = e` loads each field into
+its binding. This is the first non-integer value representation — values
+are now "a word that is either an int or a heap pointer". Verified
+byte-identical to the interpreter across tuple construction, 3-field
+tuples, tuple-returning functions, elements that are themselves calls,
+tuple-in/tuple-out (swap), and nested-tuple dot products. Next slices:
+ADTs + Match, strings, closures. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.136 — 2026-08-08
 
 _A disassembler for the RV32I backend — the debugging surface the direct
