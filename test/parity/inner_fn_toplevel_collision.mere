@@ -1,0 +1,25 @@
+// Regression lock: an inner (lifted) fn and a top-level fn may share a name.
+// `build` has an inner `let rec go` loop; there is also a top-level `let rec go`
+// with different captures and type. The backends lift inner fns to top-level
+// symbols, so both wanted to be `go`; the LLVM backend resolved the top-level
+// call against the lifted inner one and passed it the inner one's captures
+// ("use of undefined value"). uniquify_inner_fns_program now seeds its table
+// with the top-level names, so the colliding inner `go` is renamed. Surfaced
+// by an RV32I test harness (a new_vec-style helper plus a `run`/`go` loop).
+
+let build = fn n ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v (i + 100) in go (i + 1) in
+  let _ = go 0 in v;
+
+let v = build 4;                       // [100, 101, 102, 103]
+
+let acc = vec_new ();
+let _ = vec_push acc 0;
+let rec go = fn k ->                    // top-level `go`: different captures + type
+  if k >= 4 then () else let _ = vec_set acc 0 (vec_get acc 0 + vec_get v k) in go (k + 1);
+let _ = go 0;
+
+let _ = print (str_of_int (vec_get acc 0));   // 406  (100+101+102+103)
+let _ = print (str_of_int (vec_get v 2));     // 102
+0

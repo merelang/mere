@@ -495,8 +495,7 @@ let uq_counter = ref 0
    lift map — single-use inner names (the common case, and what most tests
    assert on) are left untouched, and nothing leaks into pretty-printing of
    collision-free code. `seen` is a per-host set of already-taken names. *)
-let uniquify_inner_fns_expr (e0 : expr) : expr =
-  let seen : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr =
   let is_fun ex = match ex.node with Fun _ -> true | _ -> false in
   (* claim a name for an inner fn: keep it if free, else return a fresh one *)
   let claim n =
@@ -557,14 +556,30 @@ let uniquify_inner_fns_expr (e0 : expr) : expr =
   uq e0
 
 let uniquify_inner_fns_program (prog : program) : program =
+  (* Share one `seen` table across all top-level decls + main so an inner fn
+     name reused in two different top-level scopes (e.g. a `go` loop helper in
+     two places) lifts to two distinct symbols. Per-decl tables let the names
+     collide, which the LLVM backend miscompiled — one lifted body ended up
+     referencing the other's captured variable ("use of undefined value"). *)
+  let seen : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  (* Seed with every top-level binding name. A lifted inner fn must not collide
+     with a real top-level symbol of the same name: an inner `go` in one helper
+     and a top-level `go` both lift/emit as `go`, and the LLVM backend then
+     resolved a call to the top-level `go` against the lifted inner one (calling
+     it with the inner one's captures — "use of undefined value"). Seeding forces
+     the colliding inner fn to be renamed. *)
+  List.iter (function
+    | Top_let (p, _) -> List.iter (fun n -> Hashtbl.replace seen n ()) (pattern_vars p)
+    | Top_let_rec bs -> List.iter (fun (n, _) -> Hashtbl.replace seen n ()) bs
+    | _ -> ()) prog.decls;
   let decls =
     List.map (function
-      | Top_let (p, e) -> Top_let (p, uniquify_inner_fns_expr e)
-      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, e) -> (n, uniquify_inner_fns_expr e)) bs)
+      | Top_let (p, e) -> Top_let (p, uniquify_inner_fns_expr seen e)
+      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, e) -> (n, uniquify_inner_fns_expr seen e)) bs)
       | d -> d)
       prog.decls
   in
-  { decls; main = uniquify_inner_fns_expr prog.main }
+  { decls; main = uniquify_inner_fns_expr seen prog.main }
 
 (* A user top-level binding named `main` collides with the synthesized program
    entry (C emits `main`, Wasm exports `$main`). Mere has no main convention —
