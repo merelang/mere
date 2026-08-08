@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.139 — 2026-08-08
+
+_Strings on the RV32I backend (M2, third slice). A string is a pointer to
+`[len:4][bytes][pad to 4]`. Literals become rodata blocks emitted after the
+code, loaded by a new `LoadAddr` item (lui+addi of the label's absolute
+address — the binary loads at 0, so absolute = offset); a new `Bytes` item
+carries the raw data. `print` writes the bytes then a newline
+(print_endline semantics, matching the interpreter), `++` calls a new
+`__str_concat` runtime helper that bump-allocates and byte-copies both
+operands, and `str_len` reads the length header. Verified byte-identical to
+the interpreter for literals, concat chains, `str_len`, and strings flowing
+through functions, an ADT payload, and tuple destructuring. `mere -rvs` now
+also lists the rodata. Next: closures (the last M2 piece before selfhost).
+`lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.138 — 2026-08-08
 
 _ADTs and pattern matching on the RV32I backend (M2, second slice). A
