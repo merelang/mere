@@ -482,6 +482,19 @@ and compile_bin env op l r =
      | _ -> with_operands env l r (fun rl rr -> emit_binop op a0 rl rr l.loc))
 
 and compile_cmp env op l r =
+  (* string comparison: compare content, not pointers *)
+  if l.Ast.ty = Some Ast.TyStr then begin
+    compile_expr env l; push a0;
+    compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
+    (match op with
+     | Ast.Eq -> emit (Jal (ra, "__str_eq"))
+     | Ast.Ne -> emit (Jal (ra, "__str_eq")); emit_word (enc_i 1 a0 4 a0 0x13)   (* xori a0,1 *)
+     | Ast.Lt -> emit (Jal (ra, "__str_cmp")); emit_word (enc_i 0 a0 2 a0 0x13)  (* slti a0,a0,0 *)
+     | Ast.Le -> emit (Jal (ra, "__str_cmp")); emit_word (enc_i 1 a0 2 a0 0x13)  (* slti a0,a0,1 *)
+     | Ast.Gt -> emit (Jal (ra, "__str_cmp")); emit_word (enc_r 0 a0 zero 2 a0 0x33) (* slt a0,x0,a0 *)
+     | Ast.Ge -> emit (Jal (ra, "__str_cmp")); emit_word (enc_i 0 a0 2 a0 0x13);
+                emit_word (enc_i 1 a0 4 a0 0x13))                                 (* !(d<0) *)
+  end else
   (* `x < k` / `x <= k` with a small literal fold into slti *)
   match op, r.node with
   | Ast.Lt, Ast.Int_lit n when is_small n ->
@@ -545,6 +558,51 @@ and compile_app env e =
   | Ast.Var "str_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)
+  | Ast.Var "print_no_nl" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
+    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
+    emit_word (enc_i 64 zero 0 a7 0x13);
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall *)
+  | Ast.Var "str_of_int" when List.length args = 1 ->
+    compile_expr env (List.hd args); emit (Jal (ra, "__str_of_int"))
+  | Ast.Var "ord" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 4 a0 4 a0 0x03)                     (* lbu a0, 4(a0) — first byte *)
+  | Ast.Var "chr" when List.length args = 1 ->
+    compile_expr env (List.hd args);                     (* a0 = byte value *)
+    emit_word (enc_i 0 a0 0 t2 0x13);                    (* mv t2, a0 *)
+    alloc_words t0 2;
+    li t1 1; emit_word (enc_s 0 t1 t0 2 0x23);           (* sw len=1 *)
+    emit_word (enc_s 4 t2 t0 0 0x23);                    (* sb byte, 4(t0) *)
+    emit_word (enc_i 0 t0 0 a0 0x13)                     (* mv a0, t0 *)
+  | Ast.Var "char_at" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;            (* a0=s, a1=i *)
+    emit_word (enc_r 0 a1 a0 0 t0 0x33);                 (* add t0, s, i *)
+    emit_word (enc_i 4 t0 4 t0 0x03);                    (* lbu t0, 4(t0) *)
+    alloc_words t1 2;
+    li t2 1; emit_word (enc_s 0 t2 t1 2 0x23);           (* sw len=1 *)
+    emit_word (enc_s 4 t0 t1 0 0x23);                    (* sb byte *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
+  | Ast.Var "str_eq" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    emit (Jal (ra, "__str_eq"))
+  | Ast.Var "str_compare" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    emit (Jal (ra, "__str_cmp"))
+  | Ast.Var "substring" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                    (* a2 = len *)
+    pop a1; pop a0;                                      (* a1 = start, a0 = s *)
+    emit (Jal (ra, "__substring"))
   | Ast.Var f when is_top f && not (List.mem_assoc f env)
                    && List.length args = List.length (fst (Hashtbl.find tops f)) ->
     (* fast path: a saturated direct call to a known top-level function.
@@ -787,6 +845,135 @@ let emit_str_concat () =
   emit_word (enc_i 0 t3 0 a0 0x13);                     (* mv a0, t3 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
+(* __str_eq(a0=s1, a1=s2) -> a0 = 1 if byte-equal else 0. Leaf. *)
+let emit_str_eq () =
+  emit (Label "__str_eq");
+  emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0) — len1 *)
+  emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1) — len2 *)
+  emit (Branch (1, t0, t1, ".se_ne"));                  (* bne t0, t1, ne *)
+  emit_word (enc_i 4 a0 0 t2 0x13);                     (* addi t2, a0, 4 *)
+  emit_word (enc_i 4 a1 0 t3 0x13);                     (* addi t3, a1, 4 *)
+  emit (Label ".se_loop");
+  emit (Branch (0, t0, zero, ".se_eq"));                (* beq t0, x0, eq *)
+  emit_word (enc_i 0 t2 0 t4 0x03);                     (* lb t4, 0(t2) *)
+  emit_word (enc_i 0 t3 0 t5 0x03);                     (* lb t5, 0(t3) *)
+  emit (Branch (1, t4, t5, ".se_ne"));                  (* bne t4, t5, ne *)
+  emit_word (enc_i 1 t2 0 t2 0x13);
+  emit_word (enc_i 1 t3 0 t3 0x13);
+  emit_word (enc_i (-1) t0 0 t0 0x13);
+  emit (Jal (zero, ".se_loop"));
+  emit (Label ".se_eq"); li a0 1; emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label ".se_ne"); li a0 0; emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* __str_cmp(a0=s1, a1=s2) -> a0 = <0 / 0 / >0 lexicographically. Leaf. *)
+let emit_str_cmp () =
+  emit (Label "__str_cmp");
+  emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0) — len1 *)
+  emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1) — len2 *)
+  emit_word (enc_i 0 t0 0 t2 0x13);                     (* mv t2, t0  — min = len1 *)
+  emit (Branch (5, t2, t1, ".cm_min"));                 (* bge t2, t1 -> min already t1? no *)
+  emit (Jal (zero, ".cm_have"));                        (* t2 (=len1) < len1? fallthrough handling *)
+  emit (Label ".cm_min");
+  emit_word (enc_i 0 t1 0 t2 0x13);                     (* mv t2, t1  — min = len2 (len1>=len2) *)
+  emit (Label ".cm_have");
+  emit_word (enc_i 4 a0 0 t3 0x13);                     (* addi t3, a0, 4 *)
+  emit_word (enc_i 4 a1 0 t4 0x13);                     (* addi t4, a1, 4 *)
+  emit (Label ".cm_loop");
+  emit (Branch (0, t2, zero, ".cm_len"));               (* beq t2, x0 -> compare lengths *)
+  emit_word (enc_i 0 t3 4 t5 0x03);                     (* lbu t5, 0(t3) *)
+  emit_word (enc_i 0 t4 4 t6 0x03);                     (* lbu t6, 0(t4) *)
+  emit_word (enc_r 0x20 t6 t5 0 a0 0x33);               (* sub a0, t5, t6 *)
+  emit (Branch (1, a0, zero, ".cm_done"));              (* bne a0, x0, done *)
+  emit_word (enc_i 1 t3 0 t3 0x13);
+  emit_word (enc_i 1 t4 0 t4 0x13);
+  emit_word (enc_i (-1) t2 0 t2 0x13);
+  emit (Jal (zero, ".cm_loop"));
+  emit (Label ".cm_len");
+  emit_word (enc_r 0x20 t1 t0 0 a0 0x33);               (* sub a0, len1, len2 *)
+  emit (Label ".cm_done");
+  (* normalize to -1 / 0 / 1 (matches the interpreter's str_compare) *)
+  emit (Branch (0, a0, zero, ".cm_ret"));               (* beq a0, x0 -> 0 *)
+  emit (Branch (4, a0, zero, ".cm_neg"));               (* blt a0, x0 -> -1 *)
+  li a0 1; emit (Jal (zero, ".cm_ret"));
+  emit (Label ".cm_neg"); li a0 (-1);
+  emit (Label ".cm_ret");
+  emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
+(* __str_of_int(a0=n) -> a0 = heap [len][decimal bytes]. Leaf; uses the
+   0x60000 scratch to build digits, then copies into a fresh heap block. *)
+let emit_str_of_int () =
+  emit (Label "__str_of_int");
+  emit_word (enc_i 0 a0 0 t4 0x13);                     (* mv t4, a0 — value *)
+  emit_word (enc_i 0 zero 0 t3 0x13);                   (* neg flag = 0 *)
+  emit (Branch (5, t4, zero, ".si_pos"));               (* bge t4, x0 *)
+  emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* neg *)
+  emit_word (enc_i 1 zero 0 t3 0x13);
+  emit (Label ".si_pos");
+  emit_word (enc_u 0x60 t1 0x37);                       (* lui t1, 0x60 *)
+  emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — cursor *)
+  emit_word (enc_i 10 zero 0 t6 0x13);                  (* divisor 10 *)
+  emit (Label ".si_loop");
+  emit_word (enc_r 1 t6 t4 6 t5 0x33);                  (* rem t5, t4, 10 *)
+  emit_word (enc_r 1 t6 t4 4 t4 0x33);                  (* div t4, t4, 10 *)
+  emit_word (enc_i 48 t5 0 t5 0x13);                    (* + '0' *)
+  emit_word (enc_s 0 t5 t2 0 0x23);                     (* sb t5, 0(t2) *)
+  emit_word (enc_i (-1) t2 0 t2 0x13);
+  emit (Branch (1, t4, zero, ".si_loop"));              (* bne t4, x0 *)
+  emit (Branch (0, t3, zero, ".si_nosign"));            (* beq t3, x0 *)
+  emit_word (enc_i 45 zero 0 t5 0x13);                  (* '-' *)
+  emit_word (enc_s 0 t5 t2 0 0x23);
+  emit_word (enc_i (-1) t2 0 t2 0x13);
+  emit (Label ".si_nosign");
+  emit_word (enc_i 1 t2 0 t0 0x13);                     (* t0 = start = cursor+1 *)
+  emit_word (enc_u 0x60 t1 0x37);                       (* t1 = 0x60000 *)
+  emit_word (enc_i 63 t1 0 t1 0x13);                    (* t1 = END = 0x6003F *)
+  emit_word (enc_r 0x20 t2 t1 0 t1 0x33);               (* t1 = END - cursor = len *)
+  emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)
+  emit_word (enc_s 0 t1 t3 2 0x23);                     (* sw len, 0(t3) *)
+  emit_word (enc_i 3 t1 0 t4 0x13);                     (* round4(len)+4 *)
+  emit_word (enc_i (-4) t4 7 t4 0x13);
+  emit_word (enc_i 4 t4 0 t4 0x13);
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* gp = t3 + words *)
+  emit_word (enc_i 4 t3 0 t5 0x13);                     (* dst = t3+4 *)
+  emit (Label ".si_copy");
+  emit (Branch (0, t1, zero, ".si_cdone"));             (* beq t1, x0 *)
+  emit_word (enc_i 0 t0 0 t6 0x03);                     (* lb t6, 0(t0) *)
+  emit_word (enc_s 0 t6 t5 0 0x23);                     (* sb t6, 0(t5) *)
+  emit_word (enc_i 1 t0 0 t0 0x13);
+  emit_word (enc_i 1 t5 0 t5 0x13);
+  emit_word (enc_i (-1) t1 0 t1 0x13);
+  emit (Jal (zero, ".si_copy"));
+  emit (Label ".si_cdone");
+  emit_word (enc_i 0 t3 0 a0 0x13);                     (* mv a0, t3 *)
+  emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
+(* __substring(a0=s, a1=start, a2=end) -> a0 = heap [len][bytes], len=end-start.
+   Matches the interpreter's substring(s, start, end) (end exclusive). Leaf. *)
+let emit_substring () =
+  emit (Label "__substring");
+  emit_word (enc_r 0x20 a1 a2 0 a2 0x33);               (* sub a2, a2, a1 — len = end - start *)
+  emit_word (enc_i 0 gp 0 t0 0x13);                     (* t0 = result = gp *)
+  emit_word (enc_s 0 a2 t0 2 0x23);                     (* sw len, 0(t0) *)
+  emit_word (enc_i 3 a2 0 t1 0x13);                     (* round4(len)+4 *)
+  emit_word (enc_i (-4) t1 7 t1 0x13);
+  emit_word (enc_i 4 t1 0 t1 0x13);
+  emit_word (enc_r 0 t1 t0 0 gp 0x33);                  (* gp = t0 + words *)
+  emit_word (enc_r 0 a1 a0 0 t2 0x33);                  (* t2 = s + start *)
+  emit_word (enc_i 4 t2 0 t2 0x13);                     (* src = s+4+start *)
+  emit_word (enc_i 4 t0 0 t3 0x13);                     (* dst = t0+4 *)
+  emit_word (enc_i 0 a2 0 t4 0x13);                     (* t4 = count *)
+  emit (Label ".ss_loop");
+  emit (Branch (0, t4, zero, ".ss_done"));
+  emit_word (enc_i 0 t2 0 t5 0x03);                     (* lb t5, 0(t2) *)
+  emit_word (enc_s 0 t5 t3 0 0x23);                     (* sb t5, 0(t3) *)
+  emit_word (enc_i 1 t2 0 t2 0x13);
+  emit_word (enc_i 1 t3 0 t3 0x13);
+  emit_word (enc_i (-1) t4 0 t4 0x13);
+  emit (Jal (zero, ".ss_loop"));
+  emit (Label ".ss_done");
+  emit_word (enc_i 0 t0 0 a0 0x13);                     (* mv a0, t0 *)
+  emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
 (* --- two-pass assembly: assign addresses, then encode ------------------- *)
 let assemble (prog : item list) : string =
   (* pass 1: label -> byte address *)
@@ -915,6 +1102,10 @@ let build_items (prog : Ast.program) : item list =
   emit_start ();
   emit_print_int ();
   emit_str_concat ();
+  emit_str_eq ();
+  emit_str_cmp ();
+  emit_str_of_int ();
+  emit_substring ();
   emit_function ~label:"__main" ~params:[] ~body:main_body;
   Hashtbl.iter (fun name (params, body) ->
     if Hashtbl.mem reachable name then
