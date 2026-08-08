@@ -138,10 +138,24 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.Fun (_, _, b) -> vars_in b acc
   | Ast.App (a, b) -> vars_in a (vars_in b acc)
   | Ast.Tuple elems -> List.fold_left (fun ac el -> vars_in el ac) acc elems
+  | Ast.Constr (_, Some a) -> vars_in a acc
+  | Ast.Match (scrut, arms) ->
+    List.fold_left (fun ac (_, g, b) ->
+      let ac = vars_in b ac in
+      match g with Some gg -> vars_in gg ac | None -> ac) (vars_in scrut acc) arms
   | _ -> acc
 
 (* the tops map: top-level function name -> (params, body) *)
 let tops : (string, string list * Ast.expr) Hashtbl.t = Hashtbl.create 64
+
+(* constructor name -> tag (index within its type, declaration order), read
+   by Constr (writes the tag) and Match (compares against it). Distinct only
+   within a type, which is all Match needs. Populated from Top_type decls. *)
+let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 32
+let tag_of loc name =
+  match Hashtbl.find_opt variant_tags (Ast.canonical_ctor name) with
+  | Some t -> t
+  | None -> err loc (Printf.sprintf "RV32I: unknown constructor `%s`" name)
 
 (* peel the leading chain of `let f = fn ...` / `let rec f = fn ...` into
    `tops`, returning the remaining expression as the program's main body. *)
@@ -165,12 +179,16 @@ let slot_off i = i * 4
 
 (* count binding introductions to size a function frame (each named binding
    gets a distinct slot — P_var lets and each P_var inside a tuple pattern) *)
-let pvars_in_pattern p =
+let rec pvars_in_pattern p =
   match p.Ast.pnode with
   | Ast.P_var _ -> 1
-  | Ast.P_tuple pats ->
-    List.fold_left (fun n q -> match q.Ast.pnode with Ast.P_var _ -> n + 1 | _ -> n) 0 pats
-  | _ -> 0
+  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> 0
+  | Ast.P_tuple pats -> List.fold_left (fun n q -> n + pvars_in_pattern q) 0 pats
+  | Ast.P_constr (_, Some sub) -> pvars_in_pattern sub
+  | Ast.P_constr (_, None) -> 0
+  | Ast.P_as (inner, _) -> 1 + pvars_in_pattern inner
+  | Ast.P_or (a, _) -> pvars_in_pattern a
+  | Ast.P_record (_, fields) -> List.fold_left (fun n (_, q) -> n + pvars_in_pattern q) 0 fields
 
 let rec count_lets (e : Ast.expr) : int =
   match e.node with
@@ -180,6 +198,13 @@ let rec count_lets (e : Ast.expr) : int =
   | Ast.If (a, b, c) -> count_lets a + count_lets b + count_lets c
   | Ast.App (a, b) -> count_lets a + count_lets b
   | Ast.Tuple elems -> List.fold_left (fun n el -> n + count_lets el) 0 elems
+  | Ast.Constr (_, Some a) -> count_lets a
+  | Ast.Match (scrut, arms) ->
+    (* +1 for the scrutinee stash slot, plus each arm's pattern bindings *)
+    count_lets scrut + 1
+    + List.fold_left (fun n (pat, guard, body) ->
+        n + pvars_in_pattern pat + count_lets body
+        + (match guard with Some g -> count_lets g | None -> 0)) 0 arms
   | _ -> 0
 
 let is_top name = Hashtbl.mem tops name
@@ -228,6 +253,16 @@ let simple_reg (env : env) (e : Ast.expr) : int option =
      | Some idx -> (match loc_of idx with Reg r -> Some r | Mem _ -> None)
      | None -> None)
   | _ -> None
+
+(* store a0 into / load a0 from a binding's home location *)
+let store_a0_to idx =
+  match loc_of idx with
+  | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv sX, a0 *)
+  | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23)    (* sw a0, slot(fp) *)
+let load_to_a0 idx =
+  match loc_of idx with
+  | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                      (* mv a0, sX *)
+  | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03)    (* lw a0, slot(fp) *)
 
 let emit_binop op rd rs1 rs2 loc =
   match op with
@@ -312,6 +347,22 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
       emit_word (enc_s (i * 4) t0 t1 2 0x23)                         (* sw t0, i*4(t1) *)
     done;
     emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
+  | Ast.Constr (name, None) ->
+    (* nullary constructor: a 1-word block holding just the tag *)
+    let tag = tag_of e.loc name in
+    alloc_words t1 1;
+    li t0 tag; emit_word (enc_s 0 t0 t1 2 0x23);                     (* sw t0, 0(t1) *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
+  | Ast.Constr (name, Some arg) ->
+    (* [tag][payload]; payload is one word (an int, or a pointer — a tuple
+       pointer when the constructor has several fields) *)
+    compile_expr env arg; push a0;
+    let tag = tag_of e.loc name in
+    alloc_words t1 2;
+    pop t0; emit_word (enc_s 4 t0 t1 2 0x23);                        (* sw t0, 4(t1) — payload *)
+    li t0 tag; emit_word (enc_s 0 t0 t1 2 0x23);                     (* sw t0, 0(t1) — tag *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
+  | Ast.Match (scrut, arms) -> compile_match env scrut arms
   | Ast.Annot (a, _) -> compile_expr env a
   | Ast.App (_, _) -> compile_app env e
   | Ast.Fun _ ->
@@ -410,9 +461,70 @@ and compile_app env e =
     for i = arity - 1 downto 0 do pop (a0 + i) done;
     emit (Jal (ra, "u_" ^ f))
   | Ast.Var f ->
-    err e.loc (Printf.sprintf "RV32I M0: call to unknown function `%s`" f)
+    err e.loc (Printf.sprintf "RV32I: call to unknown function `%s`" f)
   | _ ->
-    err head.loc "RV32I M0: only calls to named top-level functions are supported"
+    err head.loc "RV32I: only calls to named top-level functions are supported"
+
+and compile_match env scrut arms =
+  compile_expr env scrut;                          (* a0 = scrutinee *)
+  let sidx = !slot_ctr in incr slot_ctr;
+  store_a0_to sidx;                                (* stash it (survives arm bodies) *)
+  let l_end = fresh_label ".mend" in
+  List.iter (fun (pat, guard, body) ->
+    let l_next = fresh_label ".marm" in
+    load_to_a0 sidx;                               (* reload scrutinee into a0 *)
+    let env' = compile_pattern_bind env pat l_next in
+    (match guard with
+     | Some g -> compile_expr env' g; emit (Branch (0, a0, zero, l_next))  (* beqz a0 -> next *)
+     | None -> ());
+    compile_expr env' body;
+    emit (Jal (zero, l_end));
+    emit (Label l_next)
+  ) arms;
+  emit (Label l_end)   (* typer guarantees exhaustiveness, so some arm matched *)
+
+(* Test the pattern against the value in a0; branch to l_fail on mismatch,
+   bind its variables on match, and return the extended env. Supports the
+   top level plus one level of sub-structure (enough for Option/Result and
+   typical enums); deeper nesting raises Codegen_error. *)
+and compile_pattern_bind env pat l_fail =
+  match pat.Ast.pnode with
+  | Ast.P_wild | Ast.P_unit -> env
+  | Ast.P_var name ->
+    let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; (name, idx) :: env
+  | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
+  | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
+  | Ast.P_tuple pats -> bind_tuple_fields env pats
+  | Ast.P_constr (name, sub) ->
+    let tag = tag_of pat.Ast.ploc name in
+    emit_word (enc_i 0 a0 2 t0 0x03);              (* lw t0, 0(a0) — tag *)
+    li t1 tag; emit (Branch (1, t0, t1, l_fail));  (* bne t0, t1, fail *)
+    (match sub with
+     | None -> env
+     | Some subp ->
+       emit_word (enc_i 4 a0 2 a0 0x03);           (* lw a0, 4(a0) — payload *)
+       (match subp.Ast.pnode with
+        | Ast.P_wild | Ast.P_unit -> env
+        | Ast.P_var name -> let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; (name, idx) :: env
+        | Ast.P_tuple pats -> bind_tuple_fields env pats
+        | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
+        | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
+        | _ -> err subp.Ast.ploc "RV32I: this nested constructor payload pattern is not supported yet"))
+  | _ -> err pat.Ast.ploc "RV32I: this match pattern is not supported yet"
+
+(* a0 = tuple pointer; bind each P_var field (tuple patterns are irrefutable) *)
+and bind_tuple_fields env pats =
+  emit_word (enc_i 0 a0 0 t1 0x13);                (* mv t1, a0 — tuple ptr *)
+  let env = ref env in
+  List.iteri (fun i p ->
+    match p.Ast.pnode with
+    | Ast.P_wild -> ()
+    | Ast.P_var name ->
+      emit_word (enc_i (i * 4) t1 2 a0 0x03);      (* lw a0, i*4(t1) *)
+      let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; env := (name, idx) :: !env
+    | _ -> err p.Ast.ploc "RV32I: nested tuple patterns are not supported yet"
+  ) pats;
+  !env
 
 (* --- function + runtime emission ----------------------------------------- *)
 
@@ -585,6 +697,14 @@ let build_items (prog : Ast.program) : item list =
   items := [];
   lbl_counter := 0;
   Hashtbl.reset tops;
+  Hashtbl.reset variant_tags;
+  (* record constructor tags (index within each type) from Top_type decls *)
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_type (_, _, variants) ->
+      List.iteri (fun i (cname, _) -> Hashtbl.replace variant_tags cname i) variants
+    | _ -> ()
+  ) prog.Ast.decls;
   let full = Ast.desugar_program prog in
   let main_body = split_tops full in
   (* reachability: which top-level fns does the program actually use? *)
