@@ -1,0 +1,21 @@
+// Regression lock: two top-level `let`s that bind the SAME name must stay
+// distinct on every backend. A function defined before the rebind captures
+// the first binding; code after the rebind sees the second. The interpreter
+// gets this right through its lexical environment, but the C / LLVM / Wasm
+// backends flatten top-level fns by name — before uniquify_toplevel_shadows
+// they collapsed the two `helper`s into one, so `use_first` miscompiled: C and
+// LLVM failed to build (a hybrid instance with a mismatched parameter type),
+// and Wasm silently returned the wrong answer. Surfaced by a CPU emulator that
+// had both a register-`load` helper and a later ROM-copy `let rec load`.
+
+let helper = fn a -> fn b -> a + b;                 // helper #1 : int -> int -> int
+let use_first = fn x -> helper x 10;                // captures helper #1
+let rec helper = fn n -> if n <= 0 then 0 else 1 + helper (n - 1);  // helper #2 shadows
+
+let _ = print (str_of_int (use_first 5));           // 15  (helper #1: 5 + 10)
+let _ = print (str_of_int (helper 4));              // 4   (helper #2: counts down)
+
+// an inner binder that reuses the shadowed name must NOT be renamed away
+let inner = fn helper -> helper + 1;                // param named `helper`
+let _ = print (str_of_int (inner 41));              // 42
+0

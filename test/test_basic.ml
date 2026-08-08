@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.131" Version.v "0.1.131";
+  check "version is 0.1.132" Version.v "0.1.132";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -9489,7 +9489,9 @@ let () =
           | Cons (h, t) -> list_rev_into (Cons (h, acc)) t;\n\
         let _ = list_rev_into Nil (Cons (1, Nil));\n\
         0") in
-     (* Count $list_rev_into definitions — must be 1. *)
+     (* uniquify_toplevel_shadows renames the user's shadowing `list_rev_into`
+        to `list_rev_into__v2`, so it is emitted as exactly one definition and
+        can never collide with the stdlib one. *)
      let count p =
        let nlen = String.length wat and plen = String.length p in
        let rec scan i acc =
@@ -9498,7 +9500,7 @@ let () =
          else scan (i + 1) acc
        in scan 0 0
      in
-     if count "(func $list_rev_into " = 1 then "ok" else "dup-or-missing")
+     if count "(func $list_rev_into__v2 " = 1 then "ok" else "dup-or-missing")
     "ok";
 
   (* Phase 26.2: Wasm try_or via fail flag + active-counter. *)
@@ -9674,7 +9676,9 @@ let () =
        in
        scan 0
      in
-     if has "define %closure_list_int_list_int @list_rev_into(" = 1 then "ok"
+     (* uniquify_toplevel_shadows renames the user's shadowing definition to
+        `list_rev_into__v2`, emitted exactly once. *)
+     if has "define %closure_list_int_list_int @list_rev_into__v2(" = 1 then "ok"
      else "duplicate-or-missing")
     "ok";
 

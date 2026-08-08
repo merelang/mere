@@ -614,24 +614,29 @@ let reserve_toplevel_main (prog : program) : program =
    rename the redefinition (`Greet.hello` -> `Greet.hello__v2`) and rewrite
    every later reference to it, so all four backends see distinct symbols.
    Only dotted redefinitions are touched, so ordinary programs are unaffected. *)
-let uniquify_toplevel_module_shadows (prog : program) : program =
+let uniquify_toplevel_shadows (prog : program) : program =
   let cur : (string, string) Hashtbl.t = Hashtbl.create 16 in
   let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
   let lk n = Hashtbl.find_opt cur n in
-  let is_dotted n = String.contains n '.' in
-  (* Register a binding occurrence of `n`; return the (possibly fresh) name
-     it should be bound under, updating `cur` for later references. *)
+  (* Register a binding occurrence of `n`; return the (possibly fresh) name it
+     should be bound under, updating `cur` for later free references. The first
+     binding of a name keeps it; a later top-level binding that shadows it is
+     renamed to `n__vC` and subsequent references resolve to the new name.
+     Applies to every top-level name (module-dotted or plain). The interpreter
+     resolves shadowing through its lexical environment, but the C / LLVM / Wasm
+     backends flatten top-level fns by name — without this pass two same-named
+     top-level lets collapse into one, miscompiling the earlier one's call sites
+     (e.g. `let load = ...` used by a function defined before a later
+     `let rec load = ...`). `rename_free_vars` is scope-aware, so inner binders
+     that reuse a shadowed name are left untouched. *)
   let bind_name n =
-    if not (is_dotted n) then n
+    let c = (match Hashtbl.find_opt count n with Some c -> c | None -> 0) + 1 in
+    Hashtbl.replace count n c;
+    if c = 1 then n
     else begin
-      let c = (match Hashtbl.find_opt count n with Some c -> c | None -> 0) + 1 in
-      Hashtbl.replace count n c;
-      if c = 1 then n
-      else begin
-        let n' = n ^ "__v" ^ string_of_int c in
-        Hashtbl.replace cur n n';
-        n'
-      end
+      let n' = n ^ "__v" ^ string_of_int c in
+      Hashtbl.replace cur n n';
+      n'
     end
   in
   let rn_decl = function
