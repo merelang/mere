@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.141 — 2026-08-08
+
+_String builtins + content comparison on the RV32I backend (M3, first
+slice toward self-hosting). `==` / `!=` / `<` / `<=` / `>` / `>=` on
+`str`-typed operands now compare content, not pointers (dispatched on the
+typer's `.ty`), via new `__str_eq` / `__str_cmp` runtime helpers (the
+latter normalised to -1/0/1, matching the interpreter). New builtins:
+`str_of_int` (itoa into a heap string), `str_eq`, `str_compare`, `ord`,
+`chr`, `char_at`, `substring` (end-exclusive, matching the interpreter's
+`String.sub s start (end-start)`), and `print_no_nl`. Verified
+byte-identical to the interpreter across equality/ordering, signed
+`str_of_int`, char access, and substring. Next M3 steps: records, then
+attempting the Mere-written `selfhost-compile`. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.140 — 2026-08-08
 
 _Closures on the RV32I backend (M2, final slice) — the last piece before
