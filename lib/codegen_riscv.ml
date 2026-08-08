@@ -165,6 +165,8 @@ let rec free_vars_of (e : Ast.expr) : string list =
   | Ast.Tuple es -> List.concat_map free_vars_of es
   | Ast.Constr (_, Some a) -> free_vars_of a
   | Ast.Constr (_, None) -> []
+  | Ast.Record_lit (_, fields) -> List.concat_map (fun (_, e) -> free_vars_of e) fields
+  | Ast.Field_get (e, _) -> free_vars_of e
   | Ast.Match (s, arms) ->
     free_vars_of s
     @ List.concat_map (fun (p, g, b) ->
@@ -199,6 +201,8 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.App (a, b) -> vars_in a (vars_in b acc)
   | Ast.Tuple elems -> List.fold_left (fun ac el -> vars_in el ac) acc elems
   | Ast.Constr (_, Some a) -> vars_in a acc
+  | Ast.Record_lit (_, fields) -> List.fold_left (fun ac (_, e) -> vars_in e ac) acc fields
+  | Ast.Field_get (e, _) -> vars_in e acc
   | Ast.Match (scrut, arms) ->
     List.fold_left (fun ac (_, g, b) ->
       let ac = vars_in b ac in
@@ -216,6 +220,23 @@ let tag_of loc name =
   match Hashtbl.find_opt variant_tags (Ast.canonical_ctor name) with
   | Some t -> t
   | None -> err loc (Printf.sprintf "RV32I: unknown constructor `%s`" name)
+
+(* record type name -> field names in declaration order. A record value is a
+   heap block laid out in that order; a field's offset is its index. *)
+let record_fields : (string, string list) Hashtbl.t = Hashtbl.create 16
+let rec resolve_ty (t : Ast.ty) : Ast.ty =
+  match t with Ast.TyVar { Ast.link = Some t'; _ } -> resolve_ty t' | _ -> t
+let record_order loc name =
+  match Hashtbl.find_opt record_fields name with
+  | Some fs -> fs
+  | None -> err loc (Printf.sprintf "RV32I: unknown record type `%s`" name)
+let field_index loc recname field =
+  let rec go i = function
+    | [] -> err loc (Printf.sprintf "RV32I: record `%s` has no field `%s`" recname field)
+    | f :: _ when f = field -> i
+    | _ :: rest -> go (i + 1) rest
+  in
+  go 0 (record_order loc recname)
 
 (* peel the leading chain of `let f = fn ...` / `let rec f = fn ...` into
    `tops`, returning the remaining expression as the program's main body. *)
@@ -259,6 +280,8 @@ let rec count_lets (e : Ast.expr) : int =
   | Ast.App (a, b) -> count_lets a + count_lets b
   | Ast.Tuple elems -> List.fold_left (fun n el -> n + count_lets el) 0 elems
   | Ast.Constr (_, Some a) -> count_lets a
+  | Ast.Record_lit (_, fields) -> List.fold_left (fun n (_, e) -> n + count_lets e) 0 fields
+  | Ast.Field_get (e, _) -> count_lets e
   | Ast.Match (scrut, arms) ->
     (* +1 for the scrutinee stash slot, plus each arm's pattern bindings *)
     count_lets scrut + 1
@@ -394,8 +417,12 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
       | _ -> err p.Ast.ploc "RV32I: nested tuple patterns are not supported yet"
     ) pats;
     compile_expr !env body
+  | Ast.Let ({ pnode = Ast.P_record (typename, fpats); _ }, rhs, body) ->
+    compile_expr env rhs;
+    let env = bind_record_fields env typename fpats e.loc in
+    compile_expr env body
   | Ast.Let (_, _, _) ->
-    err e.loc "RV32I: only `let x = ...`, `let _ = ...`, and `let (a, b) = ...` are supported"
+    err e.loc "RV32I: only `let x = ...`, `let _ = ...`, `let (a, b) = ...`, and `let T { .. } = ...` are supported"
   | Ast.Tuple elems ->
     (* evaluate elements (each may call/alloc), then allocate the block and
        fill it — no call happens between the bump and the stores *)
@@ -423,6 +450,27 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     li t0 tag; emit_word (enc_s 0 t0 t1 2 0x23);                     (* sw t0, 0(t1) — tag *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
   | Ast.Match (scrut, arms) -> compile_match env scrut arms
+  | Ast.Record_lit (typename, fields) ->
+    (* heap block with fields in declaration order *)
+    let order = record_order e.loc typename in
+    List.iter (fun fname ->
+      match List.assoc_opt fname fields with
+      | Some fe -> compile_expr env fe; push a0
+      | None -> err e.loc (Printf.sprintf "RV32I: record `%s` missing field `%s`" typename fname)
+    ) order;
+    let n = List.length order in
+    alloc_words t1 n;
+    for i = n - 1 downto 0 do pop t0; emit_word (enc_s (i * 4) t0 t1 2 0x23) done;
+    emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
+  | Ast.Field_get (obj, field) ->
+    compile_expr env obj;                                          (* a0 = record ptr *)
+    let recname =
+      match (match obj.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+      | Ast.TyCon (n, _) -> n
+      | _ -> err e.loc (Printf.sprintf "RV32I: cannot resolve record type for field `%s`" field)
+    in
+    let idx = field_index e.loc recname field in
+    emit_word (enc_i (idx * 4) a0 2 a0 0x03)                        (* lw a0, idx*4(a0) *)
   | Ast.Annot (a, _) -> compile_expr env a
   | Ast.App (_, _) -> compile_app env e
   | Ast.Fun (param, _, body) ->
@@ -656,6 +704,7 @@ and compile_pattern_bind env pat l_fail =
   | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_tuple pats -> bind_tuple_fields env pats
+  | Ast.P_record (typename, fpats) -> bind_record_fields env typename fpats pat.Ast.ploc
   | Ast.P_constr (name, sub) ->
     let tag = tag_of pat.Ast.ploc name in
     emit_word (enc_i 0 a0 2 t0 0x03);              (* lw t0, 0(a0) — tag *)
@@ -685,6 +734,21 @@ and bind_tuple_fields env pats =
       let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; env := (name, idx) :: !env
     | _ -> err p.Ast.ploc "RV32I: nested tuple patterns are not supported yet"
   ) pats;
+  !env
+
+(* a0 = record pointer; bind each field pattern by its declared offset *)
+and bind_record_fields env typename fpats loc =
+  emit_word (enc_i 0 a0 0 t1 0x13);                (* mv t1, a0 — record ptr *)
+  let env = ref env in
+  List.iter (fun (fname, fpat) ->
+    match fpat.Ast.pnode with
+    | Ast.P_wild -> ()
+    | Ast.P_var name ->
+      let fi = field_index loc typename fname in
+      emit_word (enc_i (fi * 4) t1 2 a0 0x03);     (* lw a0, fi*4(t1) *)
+      let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; env := (name, idx) :: !env
+    | _ -> err fpat.Ast.ploc "RV32I: nested record patterns are not supported yet"
+  ) fpats;
   !env
 
 (* --- function + runtime emission ----------------------------------------- *)
@@ -1078,11 +1142,14 @@ let build_items (prog : Ast.program) : item list =
   lambdas := [];
   Hashtbl.reset tops;
   Hashtbl.reset variant_tags;
-  (* record constructor tags (index within each type) from Top_type decls *)
+  Hashtbl.reset record_fields;
+  (* constructor tags + record field orders from the type declarations *)
   List.iter (fun decl ->
     match decl with
     | Ast.Top_type (_, _, variants) ->
       List.iteri (fun i (cname, _) -> Hashtbl.replace variant_tags cname i) variants
+    | Ast.Top_record (name, _, fields) ->
+      Hashtbl.replace record_fields name (List.map fst fields)
     | _ -> ()
   ) prog.Ast.decls;
   let full = Ast.desugar_program prog in
