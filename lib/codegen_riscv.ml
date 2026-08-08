@@ -791,6 +791,21 @@ and compile_app env e =
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s 0 a2 t0 2 0x23);                        (* data[i] = x *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
+  | Ast.Var "fb_set" when List.length args = 3 ->
+    (* fantasy-console framebuffer: store byte v at FB_BASE + y*64 + x. The
+       64x32 framebuffer lives at 0x7F8000 (above the stack); an emulator
+       renders it. `extern fn fb_set: int -> int -> int -> unit;` types it. *)
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = v *)
+    pop a1; pop a0;                                          (* a1 = y, a0 = x *)
+    emit_word (enc_i 6 a1 1 t0 0x13);                        (* slli t0, y, 6  (y*64) *)
+    emit_word (enc_r 0 a0 t0 0 t0 0x33);                     (* add t0, t0, x *)
+    li t1 0x7F8000;                                          (* FB_BASE *)
+    emit_word (enc_r 0 t0 t1 0 t0 0x33);                     (* addr = FB_BASE + off *)
+    emit_word (enc_s 0 a2 t0 0 0x23);                        (* sb v, 0(addr) *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                       (* unit *)
   (* Map builtins -> the rv-prelude's rvmap_* helpers (the typer forces the
      Map type on `map_new` by name, so these can't just be shadowed). Types
      are erased at codegen, so the Vec-based repr flows through fine. *)
