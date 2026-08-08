@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.135 — 2026-08-08
+
+_Register allocation for the RV32I backend (M1). The M0 stack machine kept
+every named binding in a memory frame slot and every intermediate on the
+memory stack; M1 puts a function's params and lets in the callee-saved
+registers s1..s11 (spilling only the 12th-plus binding to memory), folds
+the hot `n - 1` / `n < 2` of recursion into a single `addi` / `slti`, and
+reads binop/comparison operands straight out of their registers when
+possible — a value in a callee-saved register survives the other operand's
+evaluation, nested calls included, so no spill is needed. Static
+instruction count drops 16–32% (~23% average) across the sample programs;
+still byte-identical to the interpreter across factorial, Fibonacci(25),
+Ackermann, deep recursion (sumto 1000), gcd, and a 14-local function that
+exercises the memory-overflow path. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.134 — 2026-08-08
 
 _A fifth backend — Mere lowers to native RV32IM machine code. Where `-c`
