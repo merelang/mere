@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.142 — 2026-08-08
+
+_Records on the RV32I backend (M3, second slice). A record is a heap block
+whose fields are laid out in declaration order (from the `Top_record`
+decl); a `Record_lit` reorders its fields to that order, evaluates, and
+fills the block, a `p.field` reads the field's slot (the field's index is
+resolved from `p`'s type via the typer's `.ty`), and a record pattern
+`T { f = a, .. }` binds each field by its offset — in both `let` and
+`match`. Verified byte-identical to the interpreter across construction,
+field access, out-of-order literals, record pattern destructuring in
+`let`, a string field, nested records (`s.a.x`), and field patterns with
+guards in `match`. Next: attempt the Mere-written `selfhost-compile`.
+`lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.141 — 2026-08-08
 
 _String builtins + content comparison on the RV32I backend (M3, first
