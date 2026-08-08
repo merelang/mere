@@ -4,6 +4,17 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.148 — 2026-08-08
+
+_Correct `==` / `!=` on enums (RV32I). A comparison at a non-primitive type was
+comparing heap pointers; now an all-nullary variant type (an enum) compares its
+tag word, which is exact. Compound values (tuples, functions, payload-carrying
+constructors) would need a recursive structural equality — they now raise a
+clear Codegen_error pointing at pattern matching instead of silently comparing
+pointers. Ints/bools/type-variables are unaffected. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.147 — 2026-08-08 — the Mere compiler runs on the Mere CPU
 
 _The self-hosting tower closes: the Mere-written compiler (lexer + parser +
