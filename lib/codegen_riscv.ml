@@ -174,8 +174,53 @@ let rec flatten_app (e : Ast.expr) =
   | Ast.App (f, a) -> let (h, args) = flatten_app f in (h, args @ [a])
   | _ -> (e, [])
 
-(* slot_ctr tracks the next free frame slot within the function being compiled *)
+(* --- register allocation (M1) -------------------------------------------
+   Named bindings (params + lets) live in callee-saved registers s1..s11.
+   They are callee-saved, so a value in an s-register survives any nested
+   call (the callee saves/restores it) — which is exactly what lets us read
+   an operand straight out of its register even when the other operand does
+   a call. Functions with more than 11 live names spill the overflow to
+   fp-relative memory slots. Evaluation temporaries still use the memory
+   stack, which is always correct across calls. *)
+
+let sregs = [| 9; 18; 19; 20; 21; 22; 23; 24; 25; 26; 27 |]   (* s1..s11 *)
+let nregs = Array.length sregs
+
+(* per-function frame shape, set by emit_function *)
+let cur_nsaved = ref 0        (* how many s-registers this function uses *)
+let cur_noverflow = ref 0     (* how many bindings spilled to memory *)
+
+type loc = Reg of int | Mem of int   (* Mem i = fp-relative word slot i *)
+
+(* binding index -> where it lives. Indices 0..nsaved-1 use sregs[i];
+   the rest live in memory slots 0..noverflow-1. *)
+let loc_of (idx : int) : loc =
+  if idx < !cur_nsaved then Reg sregs.(idx)
+  else Mem (idx - !cur_nsaved)
+
+let is_small n = n >= -2048 && n <= 2047
+
+(* binding_ctr tracks the next binding index within the function *)
 let slot_ctr = ref 0
+
+(* If e is a variable that currently lives in a register, that register —
+   used to read an operand in place without emitting any code. *)
+let simple_reg (env : env) (e : Ast.expr) : int option =
+  match e.node with
+  | Ast.Var x ->
+    (match List.assoc_opt x env with
+     | Some idx -> (match loc_of idx with Reg r -> Some r | Mem _ -> None)
+     | None -> None)
+  | _ -> None
+
+let emit_binop op rd rs1 rs2 loc =
+  match op with
+  | Ast.Add -> emit_word (enc_r 0 rs2 rs1 0 rd 0x33)
+  | Ast.Sub -> emit_word (enc_r 0x20 rs2 rs1 0 rd 0x33)
+  | Ast.Mul -> emit_word (enc_r 1 rs2 rs1 0 rd 0x33)
+  | Ast.Div -> emit_word (enc_r 1 rs2 rs1 4 rd 0x33)
+  | Ast.Mod -> emit_word (enc_r 1 rs2 rs1 6 rd 0x33)
+  | Ast.Concat -> err loc "RV32I: string concat (^) is not supported yet"
 
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   match e.node with
@@ -184,13 +229,16 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Unit_lit -> li a0 0
   | Ast.Var v ->
     (match List.assoc_opt v env with
-     | Some slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03)   (* lw a0, slot(fp) *)
+     | Some idx ->
+       (match loc_of idx with
+        | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                   (* mv  a0, sX *)
+        | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03))(* lw  a0, slot(fp) *)
      | None ->
        if is_top v then
          err e.loc (Printf.sprintf
-           "RV32I M0: `%s` used as a value (higher-order / partial application not supported yet)" v)
+           "RV32I: `%s` used as a value (higher-order / partial application not supported yet)" v)
        else
-         err e.loc (Printf.sprintf "RV32I M0: unbound variable `%s`" v))
+         err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v))
   | Ast.Neg a ->
     compile_expr env a;
     emit_word (enc_r 0x20 a0 zero 0 a0 0x33)                         (* sub a0, x0, a0 *)
@@ -209,9 +257,11 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     emit (Label l_end)
   | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body) ->
     compile_expr env rhs;
-    let slot = !slot_ctr in incr slot_ctr;
-    emit_word (enc_s (slot_off slot) a0 fp 2 0x23);                  (* sw a0, slot(fp) *)
-    compile_expr ((name, slot) :: env) body
+    let idx = !slot_ctr in incr slot_ctr;
+    (match loc_of idx with
+     | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv  sX, a0 *)
+     | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23));  (* sw  a0, slot(fp) *)
+    compile_expr ((name, idx) :: env) body
   | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
     compile_expr env rhs;
     compile_expr env body
@@ -227,31 +277,54 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Float_lit _ -> err e.loc "RV32I M0: floats are not supported yet"
   | _ -> err e.loc "RV32I M0: this expression form is not supported yet"
 
+(* Evaluate l and r so that left ends in reg RL and right in reg RR, then
+   run [k RL RR]. Reads operands straight from their registers when possible
+   (s-registers survive the other operand's evaluation, calls included);
+   otherwise spills the left result to the memory stack across r. *)
+and with_operands env l r (k : int -> int -> unit) =
+  match simple_reg env l, simple_reg env r with
+  | Some a, Some b -> k a b
+  | None, Some b -> compile_expr env l; k a0 b            (* left -> a0, right in place *)
+  | Some a, None -> compile_expr env r; k a a0            (* right -> a0, left in place (s-reg) *)
+  | None, None ->
+    compile_expr env l; push a0;
+    compile_expr env r; pop t0;                           (* t0 = left, a0 = right *)
+    k t0 a0
+
 and compile_bin env op l r =
-  compile_expr env l; push a0;
-  compile_expr env r; pop t0;         (* t0 = left, a0 = right *)
-  (match op with
-   | Ast.Add -> emit_word (enc_r 0 a0 t0 0 a0 0x33)      (* add  a0, t0, a0 *)
-   | Ast.Sub -> emit_word (enc_r 0x20 a0 t0 0 a0 0x33)   (* sub  a0, t0, a0 *)
-   | Ast.Mul -> emit_word (enc_r 1 a0 t0 0 a0 0x33)      (* mul  a0, t0, a0 *)
-   | Ast.Div -> emit_word (enc_r 1 a0 t0 4 a0 0x33)      (* div  a0, t0, a0 *)
-   | Ast.Mod -> emit_word (enc_r 1 a0 t0 6 a0 0x33)      (* rem  a0, t0, a0 *)
-   | Ast.Concat -> err l.loc "RV32I M0: string concat (^) is not supported yet")
+  match op, r.node with
+  (* immediate fast paths: `x + k` / `x - k` for a small literal k (the hot
+     `n - 1` / `n + 1` of recursion) fold into a single addi *)
+  | Ast.Add, Ast.Int_lit n when is_small n ->
+    compile_expr env l; emit_word (enc_i n a0 0 a0 0x13)            (* addi a0, a0, n *)
+  | Ast.Sub, Ast.Int_lit n when is_small (- n) ->
+    compile_expr env l; emit_word (enc_i (- n) a0 0 a0 0x13)        (* addi a0, a0, -n *)
+  | _ ->
+    (match op, l.node with
+     | Ast.Add, Ast.Int_lit n when is_small n ->
+       compile_expr env r; emit_word (enc_i n a0 0 a0 0x13)
+     | _ -> with_operands env l r (fun rl rr -> emit_binop op a0 rl rr l.loc))
 
 and compile_cmp env op l r =
-  compile_expr env l; push a0;
-  compile_expr env r; pop t0;         (* t0 = left, a0 = right *)
-  (match op with
-   | Ast.Eq -> emit_word (enc_r 0x20 a0 t0 0 a0 0x33);   (* sub a0,t0,a0 *)
-              emit_word (enc_i 1 a0 3 a0 0x13)           (* sltiu a0,a0,1 *)
-   | Ast.Ne -> emit_word (enc_r 0x20 a0 t0 0 a0 0x33);   (* sub a0,t0,a0 *)
-              emit_word (enc_r 0 a0 zero 3 a0 0x33)      (* sltu a0,x0,a0 *)
-   | Ast.Lt -> emit_word (enc_r 0 a0 t0 2 a0 0x33)       (* slt a0,t0,a0 *)
-   | Ast.Gt -> emit_word (enc_r 0 t0 a0 2 a0 0x33)       (* slt a0,a0,t0 *)
-   | Ast.Le -> emit_word (enc_r 0 t0 a0 2 a0 0x33);      (* slt a0,a0,t0 *)
-              emit_word (enc_i 1 a0 4 a0 0x13)           (* xori a0,a0,1 *)
-   | Ast.Ge -> emit_word (enc_r 0 a0 t0 2 a0 0x33);      (* slt a0,t0,a0 *)
-              emit_word (enc_i 1 a0 4 a0 0x13))          (* xori a0,a0,1 *)
+  (* `x < k` / `x <= k` with a small literal fold into slti *)
+  match op, r.node with
+  | Ast.Lt, Ast.Int_lit n when is_small n ->
+    compile_expr env l; emit_word (enc_i n a0 2 a0 0x13)            (* slti a0, a0, n *)
+  | Ast.Le, Ast.Int_lit n when is_small (n + 1) ->
+    compile_expr env l; emit_word (enc_i (n + 1) a0 2 a0 0x13)      (* slti a0, a0, n+1 *)
+  | _ ->
+    with_operands env l r (fun rl rr ->
+      match op with
+      | Ast.Eq -> emit_word (enc_r 0x20 rr rl 0 a0 0x33);           (* sub  a0, rl, rr *)
+                 emit_word (enc_i 1 a0 3 a0 0x13)                   (* sltiu a0, a0, 1 *)
+      | Ast.Ne -> emit_word (enc_r 0x20 rr rl 0 a0 0x33);           (* sub  a0, rl, rr *)
+                 emit_word (enc_r 0 a0 zero 3 a0 0x33)              (* sltu a0, x0, a0 *)
+      | Ast.Lt -> emit_word (enc_r 0 rr rl 2 a0 0x33)               (* slt  a0, rl, rr *)
+      | Ast.Gt -> emit_word (enc_r 0 rl rr 2 a0 0x33)               (* slt  a0, rr, rl *)
+      | Ast.Le -> emit_word (enc_r 0 rl rr 2 a0 0x33);              (* slt  a0, rr, rl *)
+                 emit_word (enc_i 1 a0 4 a0 0x13)                   (* xori a0, a0, 1 *)
+      | Ast.Ge -> emit_word (enc_r 0 rr rl 2 a0 0x33);              (* slt  a0, rl, rr *)
+                 emit_word (enc_i 1 a0 4 a0 0x13))                  (* xori a0, a0, 1 *)
 
 and compile_logic env op l r =
   let l_end = fresh_label ".land" in
@@ -301,22 +374,41 @@ and compile_app env e =
 let emit_function ~label ~params ~body =
   let nparams = List.length params in
   let nlets = count_lets body in
-  let slots = nparams + nlets in
-  let fsz = slots * 4 + 8 in
+  let total = nparams + nlets in                        (* named bindings *)
+  let nsaved = min total nregs in                       (* bindings in s-regs *)
+  let noverflow = total - nsaved in                     (* bindings in memory *)
+  cur_nsaved := nsaved;
+  cur_noverflow := noverflow;
+  (* frame words: [overflow slots][saved s-regs][saved fp][saved ra] *)
+  let sreg_base = noverflow in
+  let fp_slot = noverflow + nsaved in
+  let ra_slot = fp_slot + 1 in
+  let fsz = (ra_slot + 1) * 4 in
   emit (Label label);
   (* prologue *)
   emit_word (enc_i (-fsz) sp 0 sp 0x13);                (* addi sp, sp, -fsz *)
-  emit_word (enc_s (slots * 4 + 4) ra sp 2 0x23);       (* sw   ra, (slots*4+4)(sp) *)
-  emit_word (enc_s (slots * 4) fp sp 2 0x23);           (* sw   fp, (slots*4)(sp) *)
+  emit_word (enc_s (ra_slot * 4) ra sp 2 0x23);         (* sw   ra, ra_slot(sp) *)
+  emit_word (enc_s (fp_slot * 4) fp sp 2 0x23);         (* sw   fp, fp_slot(sp) *)
+  for k = 0 to nsaved - 1 do
+    emit_word (enc_s ((sreg_base + k) * 4) sregs.(k) sp 2 0x23)   (* sw sX, slot(sp) *)
+  done;
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
-  List.iteri (fun i _ -> emit_word (enc_s (slot_off i) (a0 + i) fp 2 0x23)) params;
-  (* body — params occupy slots 0..nparams-1, lets take the rest *)
+  (* move incoming args (a0..) to each param's home location *)
+  List.iteri (fun i _ ->
+    match loc_of i with
+    | Reg r -> emit_word (enc_i 0 (a0 + i) 0 r 0x13)               (* mv sX, aI *)
+    | Mem slot -> emit_word (enc_s (slot_off slot) (a0 + i) fp 2 0x23)  (* sw aI, slot(fp) *)
+  ) params;
+  (* body — params are binding indices 0..nparams-1, lets continue from there *)
   slot_ctr := nparams;
   let env = List.mapi (fun i p -> (p, i)) params in
   compile_expr env body;
-  (* epilogue (result already in a0) *)
-  emit_word (enc_i (slots * 4 + 4) fp 2 ra 0x03);       (* lw   ra, (slots*4+4)(fp) *)
-  emit_word (enc_i (slots * 4) fp 2 t0 0x03);           (* lw   t0, (slots*4)(fp) — old fp *)
+  (* epilogue (result already in a0, which we never touch here) *)
+  for k = 0 to nsaved - 1 do
+    emit_word (enc_i ((sreg_base + k) * 4) fp 2 sregs.(k) 0x03)   (* lw sX, slot(fp) *)
+  done;
+  emit_word (enc_i (ra_slot * 4) fp 2 ra 0x03);         (* lw   ra, ra_slot(fp) *)
+  emit_word (enc_i (fp_slot * 4) fp 2 t0 0x03);         (* lw   t0, fp_slot(fp) — old fp *)
   emit_word (enc_i fsz fp 0 sp 0x13);                   (* addi sp, fp, fsz *)
   emit_word (enc_i 0 t0 0 fp 0x13);                     (* addi fp, t0, 0 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* jalr x0, ra, 0 (ret) *)
