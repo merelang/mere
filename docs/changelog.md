@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.150 — 2026-08-08
+
+_Full structural `==` / `!=` on the RV32I backend. A comparison at a compound
+type (tuple, record, or payload-carrying variant) now generates a per-type
+`__eq_<tag>(a,b)` helper that recurses over the structure — mirroring
+codegen_c's `eq_<tag>`. Helpers are deduped by a type tag and emitted from a
+worklist, so recursive types (e.g. a cons list) terminate; type parameters are
+substituted with the concrete arguments at the use site, so `list int` and
+`list str` get distinct monomorphic helpers. Verified byte-identical to the
+interpreter across tuples, records, single- and tuple-payload constructors,
+`Circle 5` vs `Dot`, a recursive `ilist`, `option`, and a tuple with a string
+field. Only `==` on functions is rejected. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.149 — 2026-08-08
 
 _A framebuffer primitive for the RV32I backend: `fb_set x y v` lowers to a
