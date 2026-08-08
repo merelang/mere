@@ -258,7 +258,11 @@ let field_index loc recname field =
    global to its region slot index. *)
 let globals : (string option * Ast.expr) list ref = ref []
 let globals_map : (string, int) Hashtbl.t = Hashtbl.create 32
-let globals_base = 0x10000   (* region start; the heap begins just above it *)
+(* Globals + heap sit well above the code (the program loads at 0). The code
+   must stay below this; the self-hosted compiler is ~90KB, so 2MB is ample.
+   Layout: code [0, 0x200000) | globals+heap [0x200000, →) | stack ↓ from
+   0x7E0000 | print scratch 0x7F0000. Needs an ≥8MB emulator. *)
+let globals_base = 0x200000
 
 (* Peel top-level bindings: functions go to `tops`, value/effect bindings to
    `globals` (peeling continues past them, unlike a leading-prefix scan). The
@@ -381,13 +385,14 @@ let load_to_a0 idx =
   | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                      (* mv a0, sX *)
   | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03)    (* lw a0, slot(fp) *)
 
-(* top-level value bindings live in a fixed region at globals_base (0x10000) *)
+(* top-level value bindings live in a fixed region at globals_base. Load the
+   full slot address (li handles any offset, so the global count is unbounded). *)
 let load_global_to_a0 gi =
-  emit_word (enc_u 0x10 a0 0x37);                                 (* lui a0, 0x10 *)
-  emit_word (enc_i (gi * 4) a0 2 a0 0x03)                         (* lw a0, gi*4(a0) *)
+  li a0 (globals_base + gi * 4);
+  emit_word (enc_i 0 a0 2 a0 0x03)                                (* lw a0, 0(a0) *)
 let store_a0_to_global gi =
-  emit_word (enc_u 0x10 t1 0x37);                                 (* lui t1, 0x10 *)
-  emit_word (enc_s (gi * 4) a0 t1 2 0x23)                         (* sw a0, gi*4(t1) *)
+  li t1 (globals_base + gi * 4);
+  emit_word (enc_s 0 a0 t1 2 0x23)                                (* sw a0, 0(t1) *)
 
 let emit_binop op rd rs1 rs2 loc =
   match op with
