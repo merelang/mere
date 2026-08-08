@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.138 — 2026-08-08
+
+_ADTs and pattern matching on the RV32I backend (M2, second slice). A
+constructor is a heap block `[tag][payload]` — the tag is the variant's
+index within its type (from Top_type decls), the payload is one word (an
+int, or a pointer; a tuple pointer when the constructor has several
+fields). `match` stashes the scrutinee in a binding slot, then for each arm
+tests the pattern (constructor tag compare, int/bool literal, or an
+irrefutable tuple/var bind) — branching to the next arm on mismatch — and
+binds its variables before running the body; guards are supported. Covers
+the top level plus one level of sub-structure, enough for Option/Result and
+typical enums (deeper nesting raises a clear Codegen_error). Verified
+byte-identical to the interpreter across a nullary enum, single- and
+tuple-payload constructors, a recursive `ilist` (sum/len/max over a
+hand-rolled cons list), and the built-in `option`. Next: strings, then
+closures. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.137 — 2026-08-08
 
 _The RV32I backend grows a heap (M2, first slice) — tuples. `_start` now
