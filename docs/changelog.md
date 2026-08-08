@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.143 — 2026-08-08
+
+_A big step toward self-hosting on RV32I — driven by feeding the Mere-written
+compiler (lexer + parser + typer + codegen) through `mere -rv` and closing
+each gap it hit:_
+
+- _**Top-level value bindings (globals).** Non-function top-level `let`s now
+  live in a fixed memory region (below the heap), initialised in order at the
+  start of `__main`; any top-level function can read them. The peeler no
+  longer stops at the first non-function binding, so functions defined after a
+  value binding are still lifted._
+- _**Recursive local closures** (`let rec f = fn ... in ...`): the closure is
+  allocated first and `f` bound to it before the captures are filled, so the
+  body's self-reference resolves._
+- _**Fully-recursive pattern binding** (arbitrarily nested tuples / records /
+  constructors; `as`-patterns; string patterns) via a container-pointer parked
+  on the stack. **Record update** `{ r | f = e }`. `region { }` is a no-op
+  (the bump heap doesn't reclaim)._
+- _**String / char builtins:** `str_of_int`, `ord`, `chr`, `char_at`,
+  `substring`, `print_no_nl`, `fail`, and int-only `show`; plus **StrBuf**
+  (`strbuf_new` / `strbuf_push` / `strbuf_to_str` / `strbuf_len`)._
+- _**> 8-argument calls:** args beyond a0–a7 are passed on the stack with
+  caller cleanup._
+- _**Fix:** a user binding (local / global / top-level) now shadows a
+  same-named builtin, matching the interpreter._
+
+_All existing RV32I tests remain byte-identical to the interpreter. The
+self-hosted compiler now gets much deeper before hitting the remaining gaps
+(more string builtins like `str_replace`, and the `Vec`/`Map` collections).
+`lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.142 — 2026-08-08
 
 _Records on the RV32I backend (M3, second slice). A record is a heap block
