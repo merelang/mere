@@ -57,3 +57,10 @@ extern fn dom_canvas_fill_rect: JsRef -> int -> int -> int -> int -> unit;
 // (a real-time emulator, an animation) rather than only on input. Added for
 // the CHIP-8 emulator dogfood, which needs a continuous run/redraw loop.
 extern fn dom_on_frame: (unit -> unit) -> unit;
+
+// ROM access for emulators: the host holds the fetched cartridge and serves it
+// a byte at a time, so a large ROM need not be embedded in the module.
+// `dom_rom_size`'s argument is ignored (a placeholder, since the FFI takes an
+// int). Added for the Game Boy emulator dogfood.
+extern fn dom_rom_size: int -> int;
+extern fn dom_rom_byte: int -> int;

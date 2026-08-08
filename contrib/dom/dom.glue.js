@@ -23,6 +23,11 @@ export function makeDomGlue() {
   let memory = null;
   let table = null;
 
+  // Cartridge/ROM bytes served to the Wasm module a byte at a time (so an
+  // emulator can load a ROM without embedding it in the module). Set via
+  // `setRom` before running; `dom_rom_size` / `dom_rom_byte` read it.
+  let romBytes = new Uint8Array(0);
+
   // Handle 0 is reserved as a "null" sentinel — `dom_get_by_id` returns
   // it when the id doesn't match anything, and the other ops are
   // defensively no-ops on it. User-allocated handles start at 1.
@@ -164,7 +169,13 @@ export function makeDomGlue() {
       const loop = () => { callClosure(closurePtr); requestAnimationFrame(loop); };
       requestAnimationFrame(loop);
     },
+    // ROM access for emulators: the host holds the fetched cartridge and serves
+    // it a byte at a time, so large ROMs need not be embedded in the module.
+    dom_rom_size: (_ignored) => romBytes.length,
+    dom_rom_byte: (i) => romBytes[i] | 0,
   };
+
+  const setRom = (u8) => { romBytes = u8; };
 
   const attach = (instance) => {
     memory = instance.exports.memory;
@@ -177,5 +188,5 @@ export function makeDomGlue() {
     }
   };
 
-  return { glue, attach };
+  return { glue, attach, setRom };
 }

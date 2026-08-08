@@ -1,0 +1,524 @@
+// gameboy.mere — a Game Boy emulator compiled to WebAssembly for the browser.
+//
+// The same machine as memu/gameboy-full (CPU + timer + interrupts + PPU +
+// MBC1), wired to the page: the host serves the cartridge a byte at a time via
+// dom_rom_byte, a requestAnimationFrame loop (dom_on_frame) runs a slice of the
+// CPU each frame, and the 160x144 framebuffer is blitted to a <canvas> with the
+// classic DMG green palette. Loads mattcurrie's dmg-acid2 PPU test ROM, whose
+// reference face exercises the background, window, and sprites.
+
+import "contrib/dom/dom.mere";
+
+let mask8  = fn x -> bit_and x 255;
+let mask16 = fn x -> bit_and x 65535;
+let hi8 = fn x -> bit_and (bit_shr x 8) 255;
+let lo8 = fn x -> bit_and x 255;
+let new_vec = fn n -> fn x ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in v;
+
+// reg: [A B C D E H L SP PC  Z N H C  IME HALT]
+let rA=0; let rB=1; let rC=2; let rD=3; let rE=4; let rH=5; let rL=6;
+let rSP=7; let rPC=8; let fZ=9; let fN=10; let fH=11; let fC=12; let rIME=13; let rHALT=14;
+let rHALTED=15; let rEI=16;   // HALT-waiting flag; EI-enable delay counter
+
+// memory + MBC1 cartridge banking (see gb_machine.mere). bank 0 fixed at
+// $0000-$3FFF; a bank-select write ($2000-$3FFF) copies the bank into the
+// $4000-$7FFF window, so ordinary reads stay plain mem[].
+let mem = new_vec 65536 0;
+let romn = dom_rom_size 0;                       // the host serves the fetched cartridge
+let rom = new_vec romn 0;
+let rec romld = fn i -> if i >= romn then () else let _ = vec_set rom i (dom_rom_byte i) in romld (i + 1);
+let _ = romld 0;
+let mbc = new_vec 1 1;
+let set_bank = fn b ->
+  let bb = if b == 0 then 1 else b in
+  let _ = vec_set mbc 0 bb in
+  let base = bb * 16384 in
+  let rec cp = fn i -> if i >= 16384 then () else
+    let _ = vec_set mem (16384 + i) (if base + i < romn then vec_get rom (base + i) else 0) in cp (i + 1) in
+  cp 0;
+let rec initload = fn i -> if i >= 32768 then () else
+  let _ = vec_set mem i (if i < romn then vec_get rom i else 0) in initload (i + 1);
+let _ = initload 0;
+let rd = fn mem -> fn a -> vec_get mem (mask16 a);
+let wr = fn mem -> fn a -> fn v ->
+  let addr = mask16 a in
+  if addr >= 0x2000 && addr <= 0x3FFF then set_bank (bit_and v 31)
+  else if addr < 0x8000 then ()
+  else vec_set mem addr (mask8 v);
+
+let fetch = fn mem -> fn reg ->
+  let pc = vec_get reg rPC in let b = vec_get mem pc in
+  let _ = vec_set reg rPC (mask16 (pc + 1)) in b;
+let fetch16 = fn mem -> fn reg -> let l = fetch mem reg in let h = fetch mem reg in l + h * 256;
+
+let get_hl = fn reg -> vec_get reg rH * 256 + vec_get reg rL;
+let get_bc = fn reg -> vec_get reg rB * 256 + vec_get reg rC;
+let get_de = fn reg -> vec_get reg rD * 256 + vec_get reg rE;
+let set_hl = fn reg -> fn v -> let _ = vec_set reg rH (hi8 v) in vec_set reg rL (lo8 v);
+let set_bc = fn reg -> fn v -> let _ = vec_set reg rB (hi8 v) in vec_set reg rC (lo8 v);
+let set_de = fn reg -> fn v -> let _ = vec_set reg rD (hi8 v) in vec_set reg rE (lo8 v);
+
+// packed F register (for PUSH/POP AF): Z N H C in the high nibble
+let pack_f = fn reg ->
+  bit_or (bit_shl (vec_get reg fZ) 7) (bit_or (bit_shl (vec_get reg fN) 6)
+  (bit_or (bit_shl (vec_get reg fH) 5) (bit_shl (vec_get reg fC) 4)));
+let unpack_f = fn reg -> fn f ->
+  let _ = vec_set reg fZ (bit_and (bit_shr f 7) 1) in
+  let _ = vec_set reg fN (bit_and (bit_shr f 6) 1) in
+  let _ = vec_set reg fH (bit_and (bit_shr f 5) 1) in
+  vec_set reg fC (bit_and (bit_shr f 4) 1);
+
+// opcode reg idx 0..7 = B C D E H L (HL) A
+let get_r = fn mem -> fn reg -> fn idx ->
+  if idx == 0 then vec_get reg rB else if idx == 1 then vec_get reg rC
+  else if idx == 2 then vec_get reg rD else if idx == 3 then vec_get reg rE
+  else if idx == 4 then vec_get reg rH else if idx == 5 then vec_get reg rL
+  else if idx == 6 then rd mem (get_hl reg) else vec_get reg rA;
+let set_r = fn mem -> fn reg -> fn idx -> fn val ->
+  let v = mask8 val in
+  if idx == 0 then vec_set reg rB v else if idx == 1 then vec_set reg rC v
+  else if idx == 2 then vec_set reg rD v else if idx == 3 then vec_set reg rE v
+  else if idx == 4 then vec_set reg rH v else if idx == 5 then vec_set reg rL v
+  else if idx == 6 then wr mem (get_hl reg) v else vec_set reg rA v;
+
+let set_flags = fn reg -> fn z -> fn n -> fn h -> fn c ->
+  let _ = vec_set reg fZ z in let _ = vec_set reg fN n in
+  let _ = vec_set reg fH h in vec_set reg fC c;
+
+let push16 = fn mem -> fn reg -> fn v ->
+  let sp = mask16 (vec_get reg rSP - 2) in
+  let _ = vec_set reg rSP sp in
+  let _ = wr mem sp (lo8 v) in wr mem (mask16 (sp + 1)) (hi8 v);
+let pop16 = fn mem -> fn reg ->
+  let sp = vec_get reg rSP in
+  let r = rd mem sp + rd mem (mask16 (sp + 1)) * 256 in
+  let _ = vec_set reg rSP (mask16 (sp + 2)) in r;
+
+// A-register ALU (0..7 = ADD ADC SUB SBC AND XOR OR CP), GB half-carry
+let alu = fn reg -> fn sub -> fn m ->
+  let a = vec_get reg rA in let c0 = vec_get reg fC in
+  if sub == 0 || sub == 1 then
+    let carry = if sub == 1 then c0 else 0 in
+    let r = a + m + carry in
+    let h = if bit_and a 15 + bit_and m 15 + carry > 15 then 1 else 0 in
+    let rr = mask8 r in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 h (if r > 255 then 1 else 0) in
+    vec_set reg rA rr
+  else if sub == 2 || sub == 3 || sub == 7 then
+    let carry = if sub == 3 then c0 else 0 in
+    let r = a - m - carry in
+    let h = if bit_and a 15 - bit_and m 15 - carry < 0 then 1 else 0 in
+    let rr = mask8 r in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 1 h (if r < 0 then 1 else 0) in
+    if sub == 7 then () else vec_set reg rA rr
+  else if sub == 4 then
+    let rr = bit_and a m in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 1 0 in vec_set reg rA rr
+  else if sub == 5 then
+    let rr = bit_xor a m in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 0 0 in vec_set reg rA rr
+  else
+    let rr = bit_or a m in
+    let _ = set_flags reg (if rr == 0 then 1 else 0) 0 0 0 in vec_set reg rA rr;
+
+let inc_r = fn mem -> fn reg -> fn idx ->
+  let v = get_r mem reg idx in let r = mask8 (v + 1) in
+  let _ = set_r mem reg idx r in
+  let _ = vec_set reg fZ (if r == 0 then 1 else 0) in
+  let _ = vec_set reg fN 0 in
+  vec_set reg fH (if bit_and v 15 == 15 then 1 else 0);
+let dec_r = fn mem -> fn reg -> fn idx ->
+  let v = get_r mem reg idx in let r = mask8 (v - 1) in
+  let _ = set_r mem reg idx r in
+  let _ = vec_set reg fZ (if r == 0 then 1 else 0) in
+  let _ = vec_set reg fN 1 in
+  vec_set reg fH (if bit_and v 15 == 0 then 1 else 0);
+
+let add_hl = fn reg -> fn rr ->
+  let hl = get_hl reg in let r = hl + rr in
+  let _ = vec_set reg fN 0 in
+  let _ = vec_set reg fH (if bit_and hl 4095 + bit_and rr 4095 > 4095 then 1 else 0) in
+  let _ = vec_set reg fC (if r > 65535 then 1 else 0) in
+  set_hl reg (mask16 r);
+
+let get_pair = fn reg -> fn p ->
+  if p == 0 then get_bc reg else if p == 1 then get_de reg
+  else if p == 2 then get_hl reg else vec_get reg rSP;
+let set_pair = fn reg -> fn p -> fn v ->
+  if p == 0 then set_bc reg v else if p == 1 then set_de reg v
+  else if p == 2 then set_hl reg v else vec_set reg rSP (mask16 v);
+
+let cond = fn reg -> fn cc ->
+  if cc == 0 then (if vec_get reg fZ == 0 then 1 else 0)
+  else if cc == 1 then vec_get reg fZ
+  else if cc == 2 then (if vec_get reg fC == 0 then 1 else 0)
+  else vec_get reg fC;
+
+// DAA — the classic. Adjusts A into BCD after an add/sub.
+let daa = fn reg ->
+  let a0 = vec_get reg rA in
+  let n = vec_get reg fN in let h = vec_get reg fH in let c = vec_get reg fC in
+  if n == 0 then
+    let c1 = if c == 1 || a0 > 0x99 then 1 else 0 in
+    let a1 = if c1 == 1 then a0 + 0x60 else a0 in
+    let a2 = if h == 1 || bit_and a1 15 > 0x09 then a1 + 0x06 else a1 in
+    let r = mask8 a2 in
+    let _ = vec_set reg rA r in
+    let _ = vec_set reg fZ (if r == 0 then 1 else 0) in
+    let _ = vec_set reg fH 0 in vec_set reg fC c1
+  else
+    let a1 = if c == 1 then a0 - 0x60 else a0 in
+    let a2 = if h == 1 then a1 - 0x06 else a1 in
+    let r = mask8 a2 in
+    let _ = vec_set reg rA r in
+    let _ = vec_set reg fZ (if r == 0 then 1 else 0) in
+    vec_set reg fH 0;   // C left unchanged on subtract path
+
+// CB rotate/shift on a value (returns result; sets flags per op)
+let cb_rot = fn reg -> fn n -> fn v ->
+  if n == 0 then                                   // RLC
+    let c = bit_shr v 7 in let r = mask8 (bit_or (bit_shl v 1) c) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r
+  else if n == 1 then                              // RRC
+    let c = bit_and v 1 in let r = bit_or (bit_shr v 1) (bit_shl c 7) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r
+  else if n == 2 then                              // RL
+    let c = bit_shr v 7 in let r = mask8 (bit_or (bit_shl v 1) (vec_get reg fC)) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r
+  else if n == 3 then                              // RR
+    let c = bit_and v 1 in let r = bit_or (bit_shr v 1) (bit_shl (vec_get reg fC) 7) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r
+  else if n == 4 then                              // SLA
+    let c = bit_shr v 7 in let r = mask8 (bit_shl v 1) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r
+  else if n == 5 then                              // SRA (arith)
+    let c = bit_and v 1 in let r = bit_or (bit_shr v 1) (bit_and v 128) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r
+  else if n == 6 then                              // SWAP
+    let r = bit_or (bit_shr v 4) (mask8 (bit_shl v 4)) in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 0 in r
+  else                                             // SRL
+    let c = bit_and v 1 in let r = bit_shr v 1 in
+    let _ = set_flags reg (if r == 0 then 1 else 0) 0 0 c in r;
+
+let cb = fn mem -> fn reg ->
+  let op = fetch mem reg in
+  let grp = bit_shr op 6 in
+  let bitn = bit_and (bit_shr op 3) 7 in
+  let idx = bit_and op 7 in
+  let v = get_r mem reg idx in
+  if grp == 0 then set_r mem reg idx (cb_rot reg bitn v)          // rot/shift/swap
+  else if grp == 1 then                                          // BIT
+    let _ = vec_set reg fZ (if bit_and v (bit_shl 1 bitn) == 0 then 1 else 0) in
+    let _ = vec_set reg fN 0 in vec_set reg fH 1
+  else if grp == 2 then set_r mem reg idx (bit_and v (bit_xor (bit_shl 1 bitn) 255))  // RES
+  else set_r mem reg idx (bit_or v (bit_shl 1 bitn));            // SET
+
+let step = fn mem -> fn reg ->
+  let op = fetch mem reg in
+  if op == 0x00 then ()                                                  // NOP
+  else if op == 0x76 then vec_set reg rHALTED 1                          // HALT: wait for interrupt
+  else if op == 0x10 then let _ = fetch mem reg in ()                    // STOP (skip operand byte)
+  else if op == 0xF3 then vec_set reg rIME 0                             // DI
+  else if op == 0xFB then vec_set reg rEI 2                              // EI (delayed enable)
+  else if op == 0xCB then cb mem reg
+  // 16-bit immediate loads
+  else if op == 0x01 then set_bc reg (fetch16 mem reg)
+  else if op == 0x11 then set_de reg (fetch16 mem reg)
+  else if op == 0x21 then set_hl reg (fetch16 mem reg)
+  else if op == 0x31 then vec_set reg rSP (fetch16 mem reg)
+  // LD (nn),SP
+  else if op == 0x08 then let a = fetch16 mem reg in let sp = vec_get reg rSP in
+    let _ = wr mem a (lo8 sp) in wr mem (mask16 (a + 1)) (hi8 sp)
+  // indirect A loads/stores + HL inc/dec
+  else if op == 0x02 then wr mem (get_bc reg) (vec_get reg rA)
+  else if op == 0x12 then wr mem (get_de reg) (vec_get reg rA)
+  else if op == 0x0A then vec_set reg rA (rd mem (get_bc reg))
+  else if op == 0x1A then vec_set reg rA (rd mem (get_de reg))
+  else if op == 0x22 then let a = get_hl reg in let _ = wr mem a (vec_get reg rA) in set_hl reg (mask16 (a + 1))
+  else if op == 0x32 then let a = get_hl reg in let _ = wr mem a (vec_get reg rA) in set_hl reg (mask16 (a - 1))
+  else if op == 0x2A then let a = get_hl reg in let _ = vec_set reg rA (rd mem a) in set_hl reg (mask16 (a + 1))
+  else if op == 0x3A then let a = get_hl reg in let _ = vec_set reg rA (rd mem a) in set_hl reg (mask16 (a - 1))
+  // high loads
+  else if op == 0xE0 then wr mem (0xFF00 + fetch mem reg) (vec_get reg rA)         // LDH (n),A
+  else if op == 0xF0 then vec_set reg rA (rd mem (0xFF00 + fetch mem reg))         // LDH A,(n)
+  else if op == 0xE2 then wr mem (0xFF00 + vec_get reg rC) (vec_get reg rA)        // LD (C),A
+  else if op == 0xF2 then vec_set reg rA (rd mem (0xFF00 + vec_get reg rC))        // LD A,(C)
+  else if op == 0xEA then wr mem (fetch16 mem reg) (vec_get reg rA)                // LD (nn),A
+  else if op == 0xFA then vec_set reg rA (rd mem (fetch16 mem reg))                // LD A,(nn)
+  // INC/DEC 16-bit
+  else if op == 0x03 || op == 0x13 || op == 0x23 || op == 0x33 then
+    let p = bit_and (bit_shr op 4) 3 in set_pair reg p (mask16 (get_pair reg p + 1))
+  else if op == 0x0B || op == 0x1B || op == 0x2B || op == 0x3B then
+    let p = bit_and (bit_shr op 4) 3 in set_pair reg p (mask16 (get_pair reg p - 1))
+  else if op == 0x09 || op == 0x19 || op == 0x29 || op == 0x39 then
+    add_hl reg (get_pair reg (bit_and (bit_shr op 4) 3))
+  // SP arithmetic
+  else if op == 0xE8 then                                                          // ADD SP,r8
+    let sp = vec_get reg rSP in let rel = fetch mem reg in
+    let off = if rel >= 128 then rel - 256 else rel in
+    let _ = vec_set reg fZ 0 in let _ = vec_set reg fN 0 in
+    let _ = vec_set reg fH (if bit_and sp 15 + bit_and rel 15 > 15 then 1 else 0) in
+    let _ = vec_set reg fC (if bit_and sp 255 + bit_and rel 255 > 255 then 1 else 0) in
+    vec_set reg rSP (mask16 (sp + off))
+  else if op == 0xF8 then                                                          // LD HL,SP+r8
+    let sp = vec_get reg rSP in let rel = fetch mem reg in
+    let off = if rel >= 128 then rel - 256 else rel in
+    let _ = vec_set reg fZ 0 in let _ = vec_set reg fN 0 in
+    let _ = vec_set reg fH (if bit_and sp 15 + bit_and rel 15 > 15 then 1 else 0) in
+    let _ = vec_set reg fC (if bit_and sp 255 + bit_and rel 255 > 255 then 1 else 0) in
+    set_hl reg (mask16 (sp + off))
+  else if op == 0xF9 then vec_set reg rSP (get_hl reg)                             // LD SP,HL
+  // INC/DEC 8-bit: 00 ddd 100 / 101
+  else if op < 0x40 && bit_and op 7 == 4 then inc_r mem reg (bit_and (bit_shr op 3) 7)
+  else if op < 0x40 && bit_and op 7 == 5 then dec_r mem reg (bit_and (bit_shr op 3) 7)
+  // LD r,n
+  else if op < 0x40 && bit_and op 7 == 6 then set_r mem reg (bit_and (bit_shr op 3) 7) (fetch mem reg)
+  // accumulator rotates
+  else if op == 0x07 then let a = vec_get reg rA in let c = bit_shr a 7 in
+    let _ = vec_set reg rA (mask8 (bit_or (bit_shl a 1) c)) in set_flags reg 0 0 0 c   // RLCA
+  else if op == 0x0F then let a = vec_get reg rA in let c = bit_and a 1 in
+    let _ = vec_set reg rA (bit_or (bit_shr a 1) (bit_shl c 7)) in set_flags reg 0 0 0 c  // RRCA
+  else if op == 0x17 then let a = vec_get reg rA in let c = bit_shr a 7 in
+    let _ = vec_set reg rA (mask8 (bit_or (bit_shl a 1) (vec_get reg fC))) in set_flags reg 0 0 0 c  // RLA
+  else if op == 0x1F then let a = vec_get reg rA in let c = bit_and a 1 in
+    let _ = vec_set reg rA (bit_or (bit_shr a 1) (bit_shl (vec_get reg fC) 7)) in set_flags reg 0 0 0 c  // RRA
+  // DAA / CPL / SCF / CCF
+  else if op == 0x27 then daa reg
+  else if op == 0x2F then let _ = vec_set reg rA (bit_and (bit_xor (vec_get reg rA) 255) 255) in
+    let _ = vec_set reg fN 1 in vec_set reg fH 1                                     // CPL
+  else if op == 0x37 then let _ = vec_set reg fN 0 in let _ = vec_set reg fH 0 in vec_set reg fC 1  // SCF
+  else if op == 0x3F then let _ = vec_set reg fN 0 in let _ = vec_set reg fH 0 in
+    vec_set reg fC (if vec_get reg fC == 0 then 1 else 0)                            // CCF
+  // LD r,r' block (0x40-0x7F except 0x76)
+  else if op >= 0x40 && op <= 0x7F then
+    set_r mem reg (bit_and (bit_shr op 3) 7) (get_r mem reg (bit_and op 7))
+  // ALU block 0x80-0xBF
+  else if op >= 0x80 && op <= 0xBF then
+    alu reg (bit_and (bit_shr op 3) 7) (get_r mem reg (bit_and op 7))
+  // ALU A,n immediate: 11 ooo 110
+  else if op == 0xC6 || op == 0xCE || op == 0xD6 || op == 0xDE
+       || op == 0xE6 || op == 0xEE || op == 0xF6 || op == 0xFE then
+    alu reg (bit_and (bit_shr op 3) 7) (fetch mem reg)
+  // jumps
+  else if op == 0xC3 then vec_set reg rPC (fetch16 mem reg)
+  else if op == 0xC2 || op == 0xCA || op == 0xD2 || op == 0xDA then
+    let t = fetch16 mem reg in if cond reg (bit_and (bit_shr op 3) 3) == 1 then vec_set reg rPC t else ()
+  else if op == 0xE9 then vec_set reg rPC (get_hl reg)                              // JP (HL)
+  else if op == 0x18 then let rel = fetch mem reg in
+    let off = if rel >= 128 then rel - 256 else rel in vec_set reg rPC (mask16 (vec_get reg rPC + off))
+  else if op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38 then
+    let rel = fetch mem reg in
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then
+      let off = if rel >= 128 then rel - 256 else rel in vec_set reg rPC (mask16 (vec_get reg rPC + off))
+    else ()
+  // calls / returns
+  else if op == 0xCD then let t = fetch16 mem reg in let _ = push16 mem reg (vec_get reg rPC) in vec_set reg rPC t
+  else if op == 0xC4 || op == 0xCC || op == 0xD4 || op == 0xDC then
+    let t = fetch16 mem reg in
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then let _ = push16 mem reg (vec_get reg rPC) in vec_set reg rPC t else ()
+  else if op == 0xC9 then vec_set reg rPC (pop16 mem reg)                           // RET
+  else if op == 0xD9 then let _ = vec_set reg rIME 1 in vec_set reg rPC (pop16 mem reg)  // RETI
+  else if op == 0xC0 || op == 0xC8 || op == 0xD0 || op == 0xD8 then
+    if cond reg (bit_and (bit_shr op 3) 3) == 1 then vec_set reg rPC (pop16 mem reg) else ()
+  // RST
+  else if op == 0xC7 || op == 0xCF || op == 0xD7 || op == 0xDF
+       || op == 0xE7 || op == 0xEF || op == 0xF7 || op == 0xFF then
+    let _ = push16 mem reg (vec_get reg rPC) in vec_set reg rPC (bit_and op 0x38)
+  // push / pop (incl AF)
+  else if op == 0xC5 then push16 mem reg (get_bc reg)
+  else if op == 0xD5 then push16 mem reg (get_de reg)
+  else if op == 0xE5 then push16 mem reg (get_hl reg)
+  else if op == 0xF5 then push16 mem reg (vec_get reg rA * 256 + pack_f reg)        // PUSH AF
+  else if op == 0xC1 then set_bc reg (pop16 mem reg)
+  else if op == 0xD1 then set_de reg (pop16 mem reg)
+  else if op == 0xE1 then set_hl reg (pop16 mem reg)
+  else if op == 0xF1 then let v = pop16 mem reg in                                  // POP AF
+    let _ = vec_set reg rA (hi8 v) in unpack_f reg (bit_and v 0xF0)
+  else vec_set reg rHALT 1;                                                         // unknown -> halt
+
+// --- full machine: timer + interrupts + PPU (background) -------------------
+let ctab = bytes_of_hex "01030202010102010502020201010201010302020101020103020202010102010203020201010201020202020101020102030202030303010202020201010201010101010101020101010101010102010101010101010201010101010101020101010101010102010101010101010201020202020202010201010101010102010101010101010201010101010101020101010101010102010101010101010201010101010101020101010101010102010101010101010201010101010101020102030304030402040204030103060204020303000304020402040300030002040303020000040204040104000000020403030201000402040302040100000204";
+
+let reg = new_vec 17 0;
+let sys = new_vec 3 0;           // [div T-acc, tima T-acc, ppu dot-acc]
+let fb  = new_vec 23040 0;       // 160x144 palette-indexed framebuffer
+let bgc = new_vec 23040 0;       // raw BG/window color index (for sprite priority)
+// mem/rom loaded at the top (with MBC1)
+let _ = vec_set reg rA 0x01;
+let _ = set_bc reg 0x0013; let _ = set_de reg 0x00D8; let _ = set_hl reg 0x014D;
+let _ = vec_set reg rSP 0xFFFE; let _ = vec_set reg rPC 0x0100;
+let _ = set_flags reg 1 0 1 1;
+
+let tick = fn mc ->
+  let t = mc * 4 in
+  let _ = vec_set sys 0 (vec_get sys 0 + t) in
+  let rec dl = fn () -> if vec_get sys 0 >= 256 then let _ = vec_set sys 0 (vec_get sys 0 - 256) in let _ = vec_set mem 0xFF04 (bit_and (vec_get mem 0xFF04 + 1) 255) in dl () else () in
+  let _ = dl () in
+  let tac = vec_get mem 0xFF07 in
+  if bit_and tac 4 == 0 then ()
+  else
+    let sel = bit_and tac 3 in
+    let period = if sel == 0 then 1024 else if sel == 1 then 16 else if sel == 2 then 64 else 256 in
+    let _ = vec_set sys 1 (vec_get sys 1 + t) in
+    let rec tl = fn () ->
+      if vec_get sys 1 >= period then
+        let _ = vec_set sys 1 (vec_get sys 1 - period) in
+        let nt = vec_get mem 0xFF05 + 1 in
+        let _ = if nt > 255 then let _ = vec_set mem 0xFF05 (vec_get mem 0xFF06) in vec_set mem 0xFF0F (bit_or (vec_get mem 0xFF0F) 4)
+                else vec_set mem 0xFF05 nt in
+        tl ()
+      else () in
+    tl ();
+
+// look up a 2-bit color from a background/window tilemap at pixel (mapx,mapy)
+let tilecolor = fn unsig -> fn mapbase -> fn mapx -> fn mapy ->
+  let tile = vec_get mem (mapbase + (mapy / 8) * 32 + (mapx / 8)) in
+  let addr = if unsig != 0 then 0x8000 + tile * 16
+             else 0x9000 + (if tile >= 128 then tile - 256 else tile) * 16 in
+  let lo = vec_get mem (addr + (bit_and mapy 7) * 2) in
+  let hi = vec_get mem (addr + (bit_and mapy 7) * 2 + 1) in
+  let b = 7 - bit_and mapx 7 in
+  bit_or (bit_and (bit_shr lo b) 1) (bit_shl (bit_and (bit_shr hi b) 1) 1);
+
+// render one scanline: background, then window, then sprites
+let render_line = fn ly ->
+  let lcdc = vec_get mem 0xFF40 in
+  if bit_and lcdc 128 == 0 then ()
+  else
+    let bgp = vec_get mem 0xFF47 in
+    let scy = vec_get mem 0xFF42 in let scx = vec_get mem 0xFF43 in
+    let wy = vec_get mem 0xFF4A in let wx = vec_get mem 0xFF4B in
+    let bgmap = if bit_and lcdc 8 == 0 then 0x9800 else 0x9C00 in
+    let winmap = if bit_and lcdc 64 == 0 then 0x9800 else 0x9C00 in
+    let unsig = bit_and lcdc 16 in
+    let winon = if bit_and lcdc 32 != 0 && ly >= wy then 1 else 0 in
+    // background + window
+    let rec px = fn x ->
+      if x >= 160 then ()
+      else
+        let c =
+          if winon == 1 && x + 7 >= wx then tilecolor unsig winmap (x + 7 - wx) (ly - wy)
+          else if bit_and lcdc 1 != 0 then tilecolor unsig bgmap (bit_and (x + scx) 255) (bit_and (ly + scy) 255)
+          else 0 in
+        let _ = vec_set bgc (ly * 160 + x) c in
+        let _ = vec_set fb (ly * 160 + x) (bit_and (bit_shr bgp (c * 2)) 3) in
+        px (x + 1) in
+    let _ = px 0 in
+    // sprites (OBJ). Draw OAM 39..0 so lower indices land on top.
+    if bit_and lcdc 2 == 0 then ()
+    else
+      let height = if bit_and lcdc 4 == 0 then 8 else 16 in
+      let rec spr = fn i ->
+        if i < 0 then ()
+        else
+          let sy = vec_get mem (0xFE00 + i * 4) - 16 in
+          let sx = vec_get mem (0xFE00 + i * 4 + 1) - 8 in
+          let traw = vec_get mem (0xFE00 + i * 4 + 2) in
+          let flags = vec_get mem (0xFE00 + i * 4 + 3) in
+          let _ =
+            if ly >= sy && ly < sy + height then
+              let row0 = ly - sy in
+              let row = if bit_and flags 64 != 0 then height - 1 - row0 else row0 in
+              let tile = if height == 16 then bit_and traw 254 else traw in
+              let addr = 0x8000 + (tile + (if row >= 8 then 1 else 0)) * 16 + (bit_and row 7) * 2 in
+              let lo = vec_get mem addr in let hi = vec_get mem (addr + 1) in
+              let pal = if bit_and flags 16 == 0 then vec_get mem 0xFF48 else vec_get mem 0xFF49 in
+              let behind = bit_and flags 128 in let xf = bit_and flags 32 in
+              let rec sp = fn c ->
+                if c >= 8 then ()
+                else
+                  let b = if xf != 0 then c else 7 - c in
+                  let ci = bit_or (bit_and (bit_shr lo b) 1) (bit_shl (bit_and (bit_shr hi b) 1) 1) in
+                  let x = sx + c in
+                  let _ =
+                    if ci == 0 || x < 0 || x >= 160 then ()
+                    else if behind != 0 && vec_get bgc (ly * 160 + x) != 0 then ()
+                    else vec_set fb (ly * 160 + x) (bit_and (bit_shr pal (ci * 2)) 3) in
+                  sp (c + 1) in
+              sp 0
+            else () in
+          spr (i - 1) in
+      spr 39;
+
+// advance the PPU by mc M-cycles: step scanlines, render, drive LY + VBlank
+let ppu = fn mc ->
+  let _ = vec_set sys 2 (vec_get sys 2 + mc * 4) in
+  let rec ll = fn () ->
+    if vec_get sys 2 >= 456 then
+      let _ = vec_set sys 2 (vec_get sys 2 - 456) in
+      let ly = vec_get mem 0xFF44 in
+      let _ = if ly < 144 then render_line ly else () in
+      let nly = ly + 1 in
+      let _ = if nly == 144 then vec_set mem 0xFF0F (bit_or (vec_get mem 0xFF0F) 1) else () in
+      let _ = vec_set mem 0xFF44 (if nly > 153 then 0 else nly) in
+      ll ()
+    else () in
+  ll ();
+
+let lowbit = fn m -> if bit_and m 1 == 1 then 0 else if bit_and m 2 == 2 then 1 else if bit_and m 4 == 4 then 2 else if bit_and m 8 == 8 then 3 else 4;
+let service = fn () ->
+  let pend = bit_and (bit_and (vec_get mem 0xFFFF) (vec_get mem 0xFF0F)) 0x1F in
+  if pend == 0 then ()
+  else
+    let _ = vec_set reg rHALTED 0 in
+    if vec_get reg rIME == 0 then ()
+    else
+      let b = lowbit pend in
+      let _ = vec_set reg rIME 0 in
+      let _ = vec_set mem 0xFF0F (bit_and (vec_get mem 0xFF0F) (bit_xor (bit_shl 1 b) 255)) in
+      let _ = push16 mem reg (vec_get reg rPC) in
+      let _ = vec_set reg rPC (0x40 + b * 8) in
+      let _ = tick 5 in ppu 5;
+
+let rec drive = fn budget ->
+  if budget <= 0 then ()
+  else if vec_get reg rHALT == 1 then ()
+  else
+    let halted = vec_get reg rHALTED in
+    let _ =
+      if halted == 1 then let _ = tick 1 in ppu 1
+      else
+        let pc = vec_get reg rPC in
+        let op = vec_get mem pc in
+        let cyc = if op == 0xCB then (let cb = vec_get mem (bit_and (pc + 1) 0xFFFF) in if bit_and cb 7 == 6 then 4 else 2)
+                  else bytes_get ctab op in
+        let _ = step mem reg in let _ = tick cyc in ppu cyc in
+    let _ = if vec_get reg rEI == 2 then vec_set reg rEI 1
+            else if vec_get reg rEI == 1 then (let _ = vec_set reg rEI 0 in vec_set reg rIME 1)
+            else () in
+    let _ = service () in
+    drive (budget - 1);
+
+// --- browser front end: run frames + blit the framebuffer to a canvas -------
+let screen = dom_get_by_id "screen";
+let scale = 3;
+
+// DMG palette (classic green), darkest..lightest indexed by shade 3..0
+let color_of = fn s -> if s == 0 then "#9bbc0f" else if s == 1 then "#8bac0f" else if s == 2 then "#306230" else "#0f380f";
+
+// blit the framebuffer: one fill_style per shade, then rects for its pixels
+let render = fn (u : unit) ->
+  let rec shade = fn s ->
+    if s >= 4 then ()
+    else
+      let _ = dom_canvas_fill_style screen (color_of s) in
+      let rec pxl = fn i ->
+        if i >= 23040 then ()
+        else
+          let _ = if vec_get fb i == s then dom_canvas_fill_rect screen (bit_and i 159 * scale) (i / 160 * scale) scale scale else () in
+          pxl (i + 1) in
+      let _ = pxl 0 in
+      shade (s + 1) in
+  shade 0;
+
+// one animation frame: run ~a frame's worth of instructions, then repaint
+let frame = fn (u : unit) ->
+  let _ = drive 30000 in
+  render ();
+
+let _ = dom_on_frame frame;
+0
