@@ -239,6 +239,10 @@ let tag_of loc name =
 (* record type name -> field names in declaration order. A record value is a
    heap block laid out in that order; a field's offset is its index. *)
 let record_fields : (string, string list) Hashtbl.t = Hashtbl.create 16
+(* richer type info for structural equality: type params + constructor payload
+   types / record field types, from Top_type / Top_record decls *)
+let type_variants : (string, string list * (string * Ast.ty option) list) Hashtbl.t = Hashtbl.create 16
+let type_records : (string, string list * (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 16
 let rec resolve_ty (t : Ast.ty) : Ast.ty =
   match t with Ast.TyVar { Ast.link = Some t'; _ } -> resolve_ty t' | _ -> t
 let record_order loc name =
@@ -252,6 +256,44 @@ let field_index loc recname field =
     | _ :: rest -> go (i + 1) rest
   in
   go 0 (record_order loc recname)
+
+(* --- structural equality (==/!=) on compound types ----------------------
+   Generate a per-type `__eq_<tag>(a,b) -> 0/1` helper (deduped by ty_tag,
+   emitted on a worklist so recursive types terminate), mirroring codegen_c's
+   eq_<tag>. Type params are substituted with the concrete args at the use
+   site, so `list int` and `list str` get distinct, monomorphic helpers. *)
+let rec ty_tag (t : Ast.ty) : string =
+  match resolve_ty t with
+  | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
+  | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
+  | Ast.TyTuple ts -> "t" ^ String.concat "_" (List.map ty_tag ts) ^ "_"
+  | Ast.TyCon (n, []) -> n
+  | Ast.TyCon (n, args) -> n ^ "_" ^ String.concat "_" (List.map ty_tag args) ^ "_"
+  | Ast.TyParam p -> "p" ^ p
+  | Ast.TyVar _ -> "var"
+  | Ast.TyArrow _ -> "fn"
+  | Ast.TyRef (_, _, t) -> "r" ^ ty_tag t
+
+let rec subst_ty (env : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+  match resolve_ty t with
+  | Ast.TyParam p -> (match List.assoc_opt p env with Some t' -> t' | None -> Ast.TyParam p)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_ty env) args)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_ty env) ts)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (subst_ty env a, subst_ty env b)
+  | Ast.TyRef (m, r, t) -> Ast.TyRef (m, r, subst_ty env t)
+  | other -> other
+
+(* pending structural-eq helpers: (tag, concrete ty). `request_eq` returns the
+   helper's label, queuing it once. *)
+let eq_pending : (string * Ast.ty) list ref = ref []
+let eq_requested : (string, unit) Hashtbl.t = Hashtbl.create 32
+let request_eq (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  if not (Hashtbl.mem eq_requested tag) then begin
+    Hashtbl.replace eq_requested tag ();
+    eq_pending := (tag, t) :: !eq_pending
+  end;
+  "__eq_" ^ tag
 
 (* peel the leading chain of `let f = fn ...` / `let rec f = fn ...` into
    `tops`, returning the remaining expression as the program's main body. *)
@@ -640,14 +682,24 @@ and compile_cmp env op l r =
      | Ast.Eq -> emit_word (enc_i 1 a0 3 a0 0x13)                   (* sltiu a0,a0,1 *)
      | _ -> emit_word (enc_r 0 a0 zero 3 a0 0x33))                  (* sltu a0,x0,a0 *)
   end
+  (* structural `==`/`!=` on a compound value (tuple / record / payload-carrying
+     variant): compare by value via a generated per-type __eq_<tag> helper *)
+  else if (op = Ast.Eq || op = Ast.Ne) &&
+          (let t = (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) in
+           match t with
+           | Ast.TyTuple _ -> true
+           | Ast.TyCon (n, _) -> Hashtbl.mem type_records n || Hashtbl.mem type_variants n
+           | _ -> false) then begin
+    let t = (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) in
+    compile_expr env l; push a0;
+    compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
+    emit (Jal (ra, request_eq t));                                 (* a0 = 0/1 *)
+    if op = Ast.Ne then emit_word (enc_i 1 a0 4 a0 0x13)           (* xori a0,a0,1 *)
+  end
   else begin
     (match (op, (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit)) with
-     | (Ast.Eq | Ast.Ne), (Ast.TyTuple _ | Ast.TyArrow _) ->
-       err l.loc "RV32I: structural `==`/`!=` on tuples/functions is not supported (use pattern matching)"
-     | (Ast.Eq | Ast.Ne), Ast.TyCon (n, _) when Hashtbl.mem type_all_nullary n
-                                                 && Hashtbl.find type_all_nullary n = false ->
-       err l.loc (Printf.sprintf
-         "RV32I: structural `==`/`!=` on `%s` (a payload-carrying type) is not supported (use pattern matching)" n)
+     | (Ast.Eq | Ast.Ne), Ast.TyArrow _ ->
+       err l.loc "RV32I: `==`/`!=` on functions is not supported"
      | _ -> ());
   (* `x < k` / `x <= k` with a small literal fold into slti *)
   match op, r.node with
@@ -1367,6 +1419,85 @@ let emit_pat_fail () =
   emit_word (enc_i 2 zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(2) *)
 
+(* --- structural equality helpers (__eq_<tag>) ---------------------------- *)
+let rec zip_tyenv ps args =
+  match ps, args with p :: ps', a :: args' -> (p, a) :: zip_tyenv ps' args' | _ -> []
+
+(* compare aggregate fields (each an (offset, field type)); x in a0, y in a1.
+   Non-leaf: parks x/y/ra on the stack and short-circuits on the first
+   unequal field. *)
+let emit_agg_eq (fields : (int * Ast.ty) list) =
+  let l_false = fresh_label ".eqf" in
+  let l_done = fresh_label ".eqd" in
+  emit_word (enc_i (-12) sp 0 sp 0x13);
+  emit_word (enc_s 8 ra sp 2 0x23);                     (* save ra *)
+  emit_word (enc_s 4 a0 sp 2 0x23);                     (* save x *)
+  emit_word (enc_s 0 a1 sp 2 0x23);                     (* save y *)
+  List.iter (fun (i, fty) ->
+    emit_word (enc_i 4 sp 2 t0 0x03);                   (* t0 = x *)
+    emit_word (enc_i (i * 4) t0 2 a0 0x03);             (* a0 = x[i] *)
+    emit_word (enc_i 0 sp 2 t0 0x03);                   (* t0 = y *)
+    emit_word (enc_i (i * 4) t0 2 a1 0x03);             (* a1 = y[i] *)
+    emit (Jal (ra, request_eq fty));                    (* a0 = eq(x[i], y[i]) *)
+    emit (Branch (0, a0, zero, l_false))                (* beqz a0 -> false *)
+  ) fields;
+  li a0 1; emit (Jal (zero, l_done));
+  emit (Label l_false); li a0 0;
+  emit (Label l_done);
+  emit_word (enc_i 8 sp 2 ra 0x03);
+  emit_word (enc_i 12 sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
+let emit_variant_eq senv (variants : (string * Ast.ty option) list) =
+  let l_false = fresh_label ".eqf" in
+  let l_done = fresh_label ".eqd" in
+  emit_word (enc_i (-4) sp 0 sp 0x13);
+  emit_word (enc_s 0 ra sp 2 0x23);                     (* save ra *)
+  emit_word (enc_i 0 a0 2 t0 0x03);                     (* t0 = tag x *)
+  emit_word (enc_i 0 a1 2 t1 0x03);                     (* t1 = tag y *)
+  emit (Branch (1, t0, t1, l_false));                   (* tags differ -> false *)
+  List.iteri (fun k (_ctor, payload) ->
+    match payload with
+    | None -> ()                                        (* nullary: same tag => equal *)
+    | Some pty ->
+      let l_nk = fresh_label ".eqnk" in
+      li t2 k; emit (Branch (1, t0, t2, l_nk));         (* if tag != k, skip *)
+      emit_word (enc_i 4 a1 2 t3 0x03);                 (* t3 = y payload *)
+      emit_word (enc_i 4 a0 2 a0 0x03);                 (* a0 = x payload *)
+      emit_word (enc_i 0 t3 0 a1 0x13);                 (* a1 = t3 *)
+      emit (Jal (ra, request_eq (subst_ty senv pty)));  (* a0 = eq(payloads) *)
+      emit (Jal (zero, l_done));
+      emit (Label l_nk)
+  ) variants;
+  li a0 1; emit (Jal (zero, l_done));                   (* matched a nullary ctor *)
+  emit (Label l_false); li a0 0;
+  emit (Label l_done);
+  emit_word (enc_i 0 sp 2 ra 0x03);
+  emit_word (enc_i 4 sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
+let emit_eq_helper (tag, ty) =
+  emit (Label ("__eq_" ^ tag));
+  match resolve_ty ty with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit ->
+    emit_word (enc_r 0x20 a1 a0 0 t0 0x33);             (* sub t0, a0, a1 *)
+    emit_word (enc_i 1 t0 3 a0 0x13);                   (* sltiu a0, t0, 1 *)
+    emit_word (enc_i 0 ra 0 zero 0x67)
+  | Ast.TyStr | Ast.TyBytes -> emit (Jal (zero, "__str_eq"))   (* tail call *)
+  | Ast.TyTuple ts -> emit_agg_eq (List.mapi (fun i t -> (i, t)) ts)
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
+    let (params, fields) = Hashtbl.find type_records n in
+    let senv = zip_tyenv params args in
+    emit_agg_eq (List.mapi (fun i (_, fty) -> (i, subst_ty senv fty)) fields)
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let (params, variants) = Hashtbl.find type_variants n in
+    emit_variant_eq (zip_tyenv params args) variants
+  | _ ->
+    (* unknown/opaque: fall back to a word (identity) compare *)
+    emit_word (enc_r 0x20 a1 a0 0 t0 0x33);
+    emit_word (enc_i 1 t0 3 a0 0x13);
+    emit_word (enc_i 0 ra 0 zero 0x67)
+
 (* --- two-pass assembly: assign addresses, then encode ------------------- *)
 let assemble (prog : item list) : string =
   (* pass 1: label -> byte address *)
@@ -1472,19 +1603,25 @@ let build_items (prog : Ast.program) : item list =
   string_data := [];
   lambdas := [];
   globals := [];
+  eq_pending := [];
+  Hashtbl.reset eq_requested;
   Hashtbl.reset globals_map;
   Hashtbl.reset tops;
   Hashtbl.reset variant_tags;
   Hashtbl.reset record_fields;
+  Hashtbl.reset type_variants;
+  Hashtbl.reset type_records;
   (* constructor tags + record field orders from the type declarations *)
   List.iter (fun decl ->
     match decl with
-    | Ast.Top_type (tname, _, variants) ->
+    | Ast.Top_type (tname, params, variants) ->
       List.iteri (fun i (cname, _) -> Hashtbl.replace variant_tags cname i) variants;
       Hashtbl.replace type_all_nullary tname
-        (List.for_all (fun (_, payload) -> payload = None) variants)
-    | Ast.Top_record (name, _, fields) ->
-      Hashtbl.replace record_fields name (List.map fst fields)
+        (List.for_all (fun (_, payload) -> payload = None) variants);
+      Hashtbl.replace type_variants tname (params, variants)
+    | Ast.Top_record (name, params, fields) ->
+      Hashtbl.replace record_fields name (List.map fst fields);
+      Hashtbl.replace type_records name (params, fields)
     | _ -> ()
   ) prog.Ast.decls;
   let full = Ast.desugar_program prog in
@@ -1528,6 +1665,14 @@ let build_items (prog : Ast.program) : item list =
       drain ()
   in
   drain ();
+  (* drain the structural-eq worklist (a helper may request more, e.g. for
+     recursive types; eq_requested dedups so it terminates) *)
+  let rec drain_eq () =
+    match !eq_pending with
+    | [] -> ()
+    | h :: rest -> eq_pending := rest; emit_eq_helper h; drain_eq ()
+  in
+  drain_eq ();
   (* string literals collected during compilation, placed after the code *)
   List.iter (fun (label, bytes) -> emit (Label label); emit (Bytes bytes)) !string_data;
   List.rev !items
