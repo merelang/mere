@@ -188,7 +188,16 @@ let rec collect_fun (e : Ast.expr) =
    Over-approximation is fine: reachability filters against the tops map. *)
 let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
-  | Ast.Var v -> v :: acc
+  | Ast.Var v ->
+    (* map_* builtins lower to the rv-prelude's rvmap_* helpers; pull those in *)
+    (match v with
+     | "map_new" -> "rvmap_new" :: v :: acc
+     | "map_set" -> "rvmap_set" :: v :: acc
+     | "map_get" -> "rvmap_get" :: v :: acc
+     | "map_has" -> "rvmap_has" :: v :: acc
+     | "map_delete" -> "rvmap_delete" :: v :: acc
+     | "map_iter" -> "rvmap_iter" :: v :: acc
+     | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
   | Ast.Str_lit _ | Ast.Float_lit _ -> acc
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
@@ -677,7 +686,7 @@ and compile_app env e =
     emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4  — bytes *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write string) *)
-    emit_word (enc_u 0x60 t0 0x37);                      (* lui  t0, 0x60  — scratch *)
+    emit_word (enc_u 0x7F0 t0 0x37);                      (* lui  t0, 0x60  — scratch *)
     emit_word (enc_i 10 zero 0 t1 0x13);                 (* li   t1, '\n' *)
     emit_word (enc_s 0 t1 t0 0 0x23);                    (* sb   t1, 0(t0) *)
     emit_word (enc_i 0 t0 0 a1 0x13);                    (* mv   a1, t0 *)
@@ -745,6 +754,15 @@ and compile_app env e =
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s 0 a2 t0 2 0x23);                        (* data[i] = x *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
+  (* Map builtins -> the rv-prelude's rvmap_* helpers (the typer forces the
+     Map type on `map_new` by name, so these can't just be shadowed). Types
+     are erased at codegen, so the Vec-based repr flows through fine. *)
+  | Ast.Var "map_new" when List.length args = 1 -> call_top env "rvmap_new" args
+  | Ast.Var "map_set" when List.length args = 3 -> call_top env "rvmap_set" args
+  | Ast.Var "map_get" when List.length args = 2 -> call_top env "rvmap_get" args
+  | Ast.Var "map_has" when List.length args = 2 -> call_top env "rvmap_has" args
+  | Ast.Var "map_delete" when List.length args = 2 -> call_top env "rvmap_delete" args
+  | Ast.Var "map_iter" when List.length args = 2 -> call_top env "rvmap_iter" args
   | Ast.Var "show" when List.length args = 1 ->
     (* polymorphic show: only the int case is supported (all the self-hosted
        compiler's uses are `show <int>`); resolve via the arg's type *)
@@ -790,6 +808,14 @@ and compile_app env e =
     pop a1; pop a0;                                      (* a1 = start, a0 = s *)
     emit (Jal (ra, "__substring"))
   | _ -> compile_indirect env head args
+
+(* call a known top-level function (an rv-prelude helper) directly: evaluate
+   the args into a0.. and jal its label *)
+and call_top env name args =
+  let n = List.length args in
+  List.iter (fun arg -> compile_expr env arg; push a0) args;
+  for i = n - 1 downto 0 do pop (a0 + i) done;
+  emit (Jal (ra, "u_" ^ name))
 
 (* general application: evaluate the head to a closure value and apply the
    arguments one at a time via indirect (curried) calls *)
@@ -991,7 +1017,7 @@ let emit_main main_body =
 (* _start MUST be the first bytes (loaded at address 0, PC starts there) *)
 let emit_start () =
   emit (Label "_start");
-  emit_word (enc_u 0x70 sp 0x37);                       (* lui  sp, 0x70  (sp = 0x70000) *)
+  emit_word (enc_u 0x7E0 sp 0x37);                       (* lui  sp, 0x70  (sp = 0x70000) *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (* heap top starts just above the globals region (0x10000 + nglobals*4) *)
   li gp (globals_base + Hashtbl.length globals_map * 4);
@@ -1012,7 +1038,7 @@ let emit_print_int () =
   emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* sub t4, x0, t4  — negate *)
   emit_word (enc_i 1 zero 0 t3 0x13);                   (* addi t3, x0, 1 *)
   emit (Label ".pi_pos");
-  emit_word (enc_u 0x60 t1 0x37);                       (* lui t1, 0x60    — BUF *)
+  emit_word (enc_u 0x7F0 t1 0x37);                       (* lui t1, 0x60    — BUF *)
   emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — END cursor *)
   emit_word (enc_i 10 zero 0 t5 0x13);                  (* addi t5, x0, 10 — '\n' *)
   emit_word (enc_s 0 t5 t2 0 0x23);                     (* sb  t5, 0(t2)   — store newline *)
@@ -1031,7 +1057,7 @@ let emit_print_int () =
   emit_word (enc_i (-1) t2 0 t2 0x13);                  (* addi t2, t2, -1 *)
   emit (Label ".pi_nosign");
   emit_word (enc_i 1 t2 0 a1 0x13);                     (* addi a1, t2, 1  — buf start *)
-  emit_word (enc_u 0x60 t0 0x37);                       (* lui t0, 0x60 *)
+  emit_word (enc_u 0x7F0 t0 0x37);                       (* lui t0, 0x60 *)
   emit_word (enc_i 63 t0 0 t0 0x13);                    (* addi t0, t0, 63 — END *)
   emit_word (enc_r 0x20 t2 t0 0 a2 0x33);               (* sub a2, t0, t2  — len = END - cursor *)
   emit_word (enc_i 64 zero 0 a7 0x13);                  (* addi a7, x0, 64 — write syscall *)
@@ -1139,7 +1165,7 @@ let emit_str_of_int () =
   emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* neg *)
   emit_word (enc_i 1 zero 0 t3 0x13);
   emit (Label ".si_pos");
-  emit_word (enc_u 0x60 t1 0x37);                       (* lui t1, 0x60 *)
+  emit_word (enc_u 0x7F0 t1 0x37);                       (* lui t1, 0x60 *)
   emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — cursor *)
   emit_word (enc_i 10 zero 0 t6 0x13);                  (* divisor 10 *)
   emit (Label ".si_loop");
@@ -1155,7 +1181,7 @@ let emit_str_of_int () =
   emit_word (enc_i (-1) t2 0 t2 0x13);
   emit (Label ".si_nosign");
   emit_word (enc_i 1 t2 0 t0 0x13);                     (* t0 = start = cursor+1 *)
-  emit_word (enc_u 0x60 t1 0x37);                       (* t1 = 0x60000 *)
+  emit_word (enc_u 0x7F0 t1 0x37);                       (* t1 = 0x60000 *)
   emit_word (enc_i 63 t1 0 t1 0x13);                    (* t1 = END = 0x6003F *)
   emit_word (enc_r 0x20 t2 t1 0 t1 0x33);               (* t1 = END - cursor = len *)
   emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)

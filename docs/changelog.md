@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.145 — 2026-08-08
+
+_An injected Mere-source runtime prelude for the RV32I backend
+(`lib/rv_prelude.ml`) — the string / char-class / Map tail the self-hosted
+compiler needs, written on top of the primitives codegen_riscv emits instead
+of hand-assembled. `mere -rv` prepends it to the user source, so it goes
+through the normal typer + desugar; the definitions shadow the builtins of
+the same name (compile_app resolves user bindings first) and reachability
+emits only the ones a program uses. Provides `is_digit`/`is_alpha`/`is_space`,
+`not`, and `str_starts_with` / `str_ends_with` / `str_index_of` /
+`str_contains` / `str_repeat` / `str_rev` / `to_lower` / `to_upper` /
+`str_trim` / `str_join` / `str_split` / `str_replace` / `str_unescape` /
+`int_of_str`. **Map** is an assoc-list in a one-cell Vec with `str_eq` keys
+(mirroring the self-hosted Wasm backend): since the typer forces the `Map`
+type on the `map_new` name, codegen_riscv intercepts the `map_*` builtins and
+dispatches to `rvmap_*` helpers. Also relocated the print scratch buffer out
+of the heap region (to 0x7F0000, stack to 0x7E0000) so large programs don't
+clobber it. Verified byte-identical to the interpreter across the whole
+string/Map surface; existing tests still pass. With this, the Mere-written
+compiler compiles to a ~94k-instruction RV32I binary and runs on the emulator
+(reaching its own typer) — the last correctness gaps on real input are being
+chased. `lib/codegen_riscv.ml`, `lib/rv_prelude.ml`._
+
+---
+
 ## v0.1.144 — 2026-08-08
 
 _Vec — a mutable, growable array — on the RV32I backend (M3). A Vec is a

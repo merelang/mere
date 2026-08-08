@@ -179,14 +179,20 @@ let compile_to_wasm ?base_dir source =
   let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_wasm.emit_program ~main_ty ~component:!component_flag prog
 
+(* The RV32I backend prepends a Mere-source runtime prelude (string / Map /
+   char-class helpers written on top of the primitives codegen_riscv emits).
+   It carries no imports, so gluing it ahead of the user source is safe;
+   line-number shifts in diagnostics are the only cost. *)
+let rv_source source = Mere.Rv_prelude.contents ^ "\n" ^ source
+
 let compile_to_riscv ?base_dir source =
   let open Mere in
-  let (prog, main_ty) = infer_program ?base_dir source in
+  let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_program ~main_ty prog
 
 let listing_riscv ?base_dir source =
   let open Mere in
-  let (prog, main_ty) = infer_program ?base_dir source in
+  let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_listing ~main_ty prog
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
