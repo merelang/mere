@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.147 — 2026-08-08 — the Mere compiler runs on the Mere CPU
+
+_The self-hosting tower closes: the Mere-written compiler (lexer + parser +
+typer + Wasm codegen), lowered by `mere -rv` to a ~380KB RV32IM binary, runs
+on the Mere-written RV32I emulator and emits WAT byte-identical to the
+interpreter. Self-language → self-backend → self-CPU._
+
+_The last bug was a memory-map overlap: the globals+heap region sat at 0x10000
+(64KB), but the self-hosted compiler's code is ~88KB and extended past it, so
+a global write corrupted the code and the program jumped into garbage. Small
+programs (<64KB of code) never hit it. Fix: move globals+heap to 0x200000
+(2MB), well above any code — layout is now code [0,2MB) | globals+heap ↑ |
+stack ↓ from 0x7E0000 | print scratch 0x7F0000 (needs an ≥8MB emulator). Global
+slot addressing now materialises the full address, so the global count is
+unbounded. Verified: the self-hosted compiler produces byte-identical WAT on
+RV32I for arithmetic, let/if, and a recursive factorial (133 lines of WAT);
+all existing tests still pass. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.146 — 2026-08-08
 
 _Long-range conditional branches on the RV32I backend. A bare B-type branch
