@@ -49,12 +49,14 @@
     <div class="game-app">
       <canvas id="screen" width="480" height="432"></canvas>
       <p class="hint">
-        Running <a href="https://github.com/mattcurrie/dmg-acid2">dmg-acid2</a>,
-        the reference PPU test: the head is the background, the header text is the
-        window, and the eyes / nose / mouth are sprites. The cartridge is served
-        to the Wasm module a byte at a time via a small <code>dom_rom_byte</code>
-        host import, and the 160&times;144 framebuffer is blitted with the classic
-        DMG green palette.
+        A tiny playable cartridge (<code>game.gb</code>, hand-written in RGBDS
+        assembly): use the <strong>arrow keys</strong> to move the sprite. The
+        same emulator also runs <a href="https://github.com/mattcurrie/dmg-acid2">dmg-acid2</a>,
+        the reference PPU test (swap the fetched ROM to <code>dmg-acid2.gb</code>).
+        The cartridge is served to the Wasm module a byte at a time via a small
+        <code>dom_rom_byte</code> host import; keys are polled through
+        <code>dom_key_held</code>; and the 160&times;144 framebuffer is blitted
+        with the classic DMG green palette.
       </p>
     </div>
 
@@ -78,7 +80,7 @@
     import { makeDomGlue } from "./dom.glue.js";
 
     const wasmBytes = await fetch("./gameboy.wasm").then(r => r.arrayBuffer());
-    const rom = new Uint8Array(await fetch("./dmg-acid2.gb").then(r => r.arrayBuffer()));
+    const rom = new Uint8Array(await fetch("./game.gb").then(r => r.arrayBuffer()));
     const { glue, attach, setRom } = makeDomGlue();
     setRom(rom);
 

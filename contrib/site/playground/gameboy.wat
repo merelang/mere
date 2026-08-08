@@ -18,6 +18,7 @@
   (import "env" "dom_canvas_fill_rect" (func $dom_canvas_fill_rect_h (param i32) (param i32) (param i32) (param i32) (param i32)))
   (import "env" "dom_on_key" (func $dom_on_key_h (param i32)))
   (import "env" "dom_on_click" (func $dom_on_click_h (param i32) (param i32)))
+  (import "env" "dom_key_held" (func $dom_key_held_h (param i32) (result i32)))
   (import "env" "dom_set_text" (func $dom_set_text_h (param i32) (param i32)))
   (memory (export "memory") 1024)
   (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))
@@ -39,11 +40,13 @@
     (call $dom_on_key_h (i32.wrap_i64 (local.get 0))))
   (func $dom_on_click (param i64) (param i64)
     (call $dom_on_click_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1))))
+  (func $dom_key_held (param i64) (result i64)
+    (i64.extend_i32_u (call $dom_key_held_h (i32.wrap_i64 (local.get 0)))))
   (func $dom_set_text (param i64) (param i64)
     (call $dom_set_text_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1))))
-  (table 124 funcref)
+  (table 125 funcref)
   (export "__indirect_function_table" (table 0))
-  (elem (i32.const 0) $frame_closure $render_closure $color_of_closure $drive_closure $service_closure $lowbit_closure $ppu_closure $render_line_closure $tilecolor_closure $tick_closure $step_closure $cb_closure $cb_rot_closure $daa_closure $cond_closure $set_pair_closure $get_pair_closure $add_hl_closure $dec_r_closure $inc_r_closure $alu_closure $pop16_closure $push16_closure $set_flags_closure $set_r_closure $get_r_closure $unpack_f_closure $pack_f_closure $set_de_closure $set_bc_closure $set_hl_closure $get_de_closure $get_bc_closure $get_hl_closure $fetch16_closure $fetch_closure $wr_closure $rd_closure $initload_closure $set_bank_closure $romld_closure $new_vec_closure $lo8_closure $hi8_closure $mask16_closure $mask8_closure $pad_left_closure $pad_right_closure $utf8_width_closure $_u8w_go_closure $_eaw_width_closure $utf8_rev_closure $_u8_rev_join_closure $utf8_sub_closure $_u8_slice_closure $utf8_at_closure $_u8_nth_closure $list_product_closure $list_sum_closure $range_closure $_range_down_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn $anon_12_fn $anon_13_fn $anon_14_fn $anon_15_fn $anon_16_fn $anon_17_fn $anon_18_fn $anon_19_fn $anon_20_fn $anon_21_fn $anon_22_fn $anon_23_fn $anon_24_fn $anon_25_fn $anon_26_fn $anon_27_fn $anon_28_fn $anon_29_fn $anon_30_fn $anon_31_fn $anon_32_fn $anon_33_fn $anon_34_fn $anon_35_fn $anon_36_fn $anon_37_fn $anon_38_fn $anon_39_fn $anon_40_fn $anon_41_fn $anon_42_fn $anon_43_fn $anon_44_fn $anon_45_fn $anon_46_fn $anon_47_fn $anon_48_fn $anon_49_fn $anon_50_fn $anon_51_fn $anon_52_fn $anon_53_fn $anon_54_fn $anon_55_fn $anon_56_fn $anon_57_fn $anon_58_fn $anon_59_fn $anon_60_fn $anon_61_fn)
+  (elem (i32.const 0) $frame_closure $render_closure $color_of_closure $drive_closure $service_closure $lowbit_closure $ppu_closure $render_line_closure $tilecolor_closure $tick_closure $step_closure $cb_closure $cb_rot_closure $daa_closure $cond_closure $set_pair_closure $get_pair_closure $add_hl_closure $dec_r_closure $inc_r_closure $alu_closure $pop16_closure $push16_closure $set_flags_closure $set_r_closure $get_r_closure $unpack_f_closure $pack_f_closure $set_de_closure $set_bc_closure $set_hl_closure $get_de_closure $get_bc_closure $get_hl_closure $fetch16_closure $fetch_closure $wr_closure $joypad_closure $rd_closure $initload_closure $set_bank_closure $romld_closure $new_vec_closure $lo8_closure $hi8_closure $mask16_closure $mask8_closure $pad_left_closure $pad_right_closure $utf8_width_closure $_u8w_go_closure $_eaw_width_closure $utf8_rev_closure $_u8_rev_join_closure $utf8_sub_closure $_u8_slice_closure $utf8_at_closure $_u8_nth_closure $list_product_closure $list_sum_closure $range_closure $_range_down_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn $anon_12_fn $anon_13_fn $anon_14_fn $anon_15_fn $anon_16_fn $anon_17_fn $anon_18_fn $anon_19_fn $anon_20_fn $anon_21_fn $anon_22_fn $anon_23_fn $anon_24_fn $anon_25_fn $anon_26_fn $anon_27_fn $anon_28_fn $anon_29_fn $anon_30_fn $anon_31_fn $anon_32_fn $anon_33_fn $anon_34_fn $anon_35_fn $anon_36_fn $anon_37_fn $anon_38_fn $anon_39_fn $anon_40_fn $anon_41_fn $anon_42_fn $anon_43_fn $anon_44_fn $anon_45_fn $anon_46_fn $anon_47_fn $anon_48_fn $anon_49_fn $anon_50_fn $anon_51_fn $anon_52_fn $anon_53_fn $anon_54_fn $anon_55_fn $anon_56_fn $anon_57_fn $anon_58_fn $anon_59_fn $anon_60_fn $anon_61_fn)
   (global $__lang_bump (export "__lang_bump") (mut i32) (i32.const 2155))
 (global $__rgn_tmp (mut i64) (i64.const 0))
   (global $__lang_char_table i32 (i32.const 619))
@@ -1499,11 +1502,15 @@
       (br $lb)))
     (i64.extend_i32_s (local.get $o)))
   (func $frame (param i64) (result i64)
+    global.get $__lang_bump
     i64.const 30000
     call $drive
     drop
     i64.const 0
-    return_call $render)
+    call $render
+    global.set $__rgn_tmp
+    global.set $__lang_bump
+    global.get $__rgn_tmp)
   (func $render (param i64) (result i64)
     global.get $screen
     global.get $fb
@@ -2001,7 +2008,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 62
+    i32.const 63
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2114,7 +2121,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 63
+    i32.const 64
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2145,7 +2152,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 64
+    i32.const 65
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2176,7 +2183,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 65
+    i32.const 66
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2373,7 +2380,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 66
+    i32.const 67
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2404,7 +2411,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 67
+    i32.const 68
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2435,7 +2442,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 68
+    i32.const 69
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2466,7 +2473,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 69
+    i32.const 70
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2497,7 +2504,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 70
+    i32.const 71
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2528,7 +2535,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 71
+    i32.const 72
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2559,7 +2566,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 72
+    i32.const 73
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2590,7 +2597,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 73
+    i32.const 74
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2621,7 +2628,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 74
+    i32.const 75
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2652,7 +2659,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 75
+    i32.const 76
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2683,7 +2690,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 76
+    i32.const 77
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2714,7 +2721,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 77
+    i32.const 78
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2745,7 +2752,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 78
+    i32.const 79
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2800,7 +2807,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 79
+    i32.const 80
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2831,7 +2838,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 80
+    i32.const 81
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2862,7 +2869,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 81
+    i32.const 82
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2923,7 +2930,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 82
+    i32.const 83
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2954,7 +2961,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 83
+    i32.const 84
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2985,10 +2992,85 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 84
+    i32.const 85
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
+  (func $joypad (param i64) (result i64)
+    (local i64 i64 i64 i64)
+    local.get 0
+    i64.const 48
+    i64.and
+    local.set 1
+    i64.const 0
+    call $dom_key_held
+    i64.const 1
+    call $dom_key_held
+    i64.const 1
+    i64.shl
+    i64.const 2
+    call $dom_key_held
+    i64.const 2
+    i64.shl
+    i64.const 3
+    call $dom_key_held
+    i64.const 3
+    i64.shl
+    i64.or
+    i64.or
+    i64.or
+    local.set 2
+    i64.const 4
+    call $dom_key_held
+    i64.const 5
+    call $dom_key_held
+    i64.const 1
+    i64.shl
+    i64.const 6
+    call $dom_key_held
+    i64.const 2
+    i64.shl
+    i64.const 7
+    call $dom_key_held
+    i64.const 3
+    i64.shl
+    i64.or
+    i64.or
+    i64.or
+    local.set 3
+    local.get 1
+    i64.const 16
+    i64.and
+    i64.const 0
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 2
+    else
+    local.get 1
+    i64.const 32
+    i64.and
+    i64.const 0
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 3
+    else
+    i64.const 0
+    end
+    end
+    local.set 4
+    i64.const 192
+    local.get 1
+    local.get 4
+    i64.const 15
+    i64.xor
+    i64.const 15
+    i64.and
+    i64.or
+    i64.or)
   (func $rd (param i64) (result i64)
     (local i32 i32)
     global.get $__lang_bump
@@ -3016,7 +3098,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 85
+    i32.const 86
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3125,7 +3207,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 86
+    i32.const 87
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3174,7 +3256,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 87
+    i32.const 88
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3205,7 +3287,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 88
+    i32.const 89
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3271,7 +3353,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 89
+    i32.const 90
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3562,7 +3644,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 90
+    i32.const 91
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3593,7 +3675,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 91
+    i32.const 92
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3624,7 +3706,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 92
+    i32.const 93
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3655,7 +3737,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 93
+    i32.const 94
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3686,7 +3768,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 94
+    i32.const 95
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3727,7 +3809,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 95
+    i32.const 96
     i32.store offset=4
     local.get 4
     i64.extend_i32_u
@@ -3772,7 +3854,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 96
+    i32.const 97
     i32.store offset=4
     local.get 4
     i64.extend_i32_u
@@ -3807,7 +3889,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 97
+    i32.const 98
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3838,7 +3920,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 98
+    i32.const 99
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3869,7 +3951,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 99
+    i32.const 100
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -4578,6 +4660,7 @@
     i64.const 0
     end)
   (func $__lifted_pxl_1 (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+    (local i64 i64)
     local.get 4
     i64.const 23040
     i64.ge_s
@@ -4586,6 +4669,16 @@
     if (result i64)
     i64.const 0
     else
+    local.get 4
+    i64.const 160
+    i64.div_s
+    local.set 5
+    local.get 4
+    local.get 5
+    i64.const 160
+    i64.mul
+    i64.sub
+    local.set 6
     local.get 0
     local.get 4
     call $mere_vec_get
@@ -4595,14 +4688,10 @@
     i32.wrap_i64
     if (result i64)
     local.get 2
-    local.get 4
-    i64.const 159
-    i64.and
+    local.get 6
     local.get 3
     i64.mul
-    local.get 4
-    i64.const 160
-    i64.div_s
+    local.get 5
     local.get 3
     i64.mul
     local.get 3
@@ -4763,6 +4852,9 @@
   (func $wr_closure (param i64) (param i64) (result i64)
     local.get 1
     call $wr)
+  (func $joypad_closure (param i64) (param i64) (result i64)
+    local.get 1
+    call $joypad)
   (func $rd_closure (param i64) (param i64) (result i64)
     local.get 1
     call $rd)
@@ -4872,7 +4964,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 100
+    i32.const 101
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -5019,7 +5111,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 101
+    i32.const 102
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -5157,7 +5249,7 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 102
+    i32.const 103
     i32.store offset=4
     local.get 3
     i64.extend_i32_u)
@@ -5197,7 +5289,7 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 103
+    i32.const 104
     i32.store offset=4
     local.get 3
     i64.extend_i32_u)
@@ -5349,7 +5441,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 104
+    i32.const 105
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -5394,7 +5486,7 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 105
+    i32.const 106
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
@@ -5590,7 +5682,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 106
+    i32.const 107
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -5748,7 +5840,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 107
+    i32.const 108
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -5793,7 +5885,7 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 108
+    i32.const 109
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
@@ -6230,7 +6322,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 109
+    i32.const 110
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -6247,6 +6339,18 @@
     local.get 2
     call $mask16
     local.set 4
+    local.get 4
+    i64.const 65280
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 3
+    i64.const 65280
+    local.get 1
+    call $joypad
+    call $mere_vec_set
+    else
     local.get 4
     i64.const 8192
     i64.ge_s
@@ -6280,6 +6384,7 @@
     local.get 1
     call $mask8
     call $mere_vec_set
+    end
     end
     end)
   (func $anon_21_fn (param i64) (param i64) (result i64)
@@ -6468,7 +6573,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 110
+    i32.const 111
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -6606,7 +6711,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 111
+    i32.const 112
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -6651,7 +6756,7 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 112
+    i32.const 113
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
@@ -6813,7 +6918,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 113
+    i32.const 114
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -6858,7 +6963,7 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 114
+    i32.const 115
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
@@ -6910,7 +7015,7 @@
     local.get 5
     i32.store offset=0
     local.get 6
-    i32.const 115
+    i32.const 116
     i32.store offset=4
     local.get 6
     i64.extend_i32_u)
@@ -6985,7 +7090,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 116
+    i32.const 117
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -7145,7 +7250,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 117
+    i32.const 118
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -7657,7 +7762,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 118
+    i32.const 119
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -7800,7 +7905,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 119
+    i32.const 120
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -8047,7 +8152,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 120
+    i32.const 121
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -8220,7 +8325,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 121
+    i32.const 122
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -11987,7 +12092,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 122
+    i32.const 123
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
@@ -12032,7 +12137,7 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 123
+    i32.const 124
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
@@ -12169,6 +12274,7 @@
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
     (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))
+  (func $__mcopy_unit (param $v i64) (result i64) (local.get $v))
   (func $main (export "main") (result i32)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i32)
     i64.const 0
