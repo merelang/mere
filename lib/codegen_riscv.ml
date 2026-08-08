@@ -27,6 +27,7 @@ let err loc msg = raise (Codegen_error (loc, msg))
 let zero = 0
 let ra = 1
 let sp = 2
+let gp = 3            (* repurposed as the bump-heap top pointer *)
 let fp = 8            (* s0 *)
 let t0 = 5
 let t1 = 6
@@ -106,6 +107,12 @@ let pop rd =
   emit_word (enc_i 0 sp 2 rd 0x03);                    (* lw   rd, 0(sp) *)
   emit_word (enc_i 4 sp 0 sp 0x13)                     (* addi sp, sp, 4 *)
 
+(* bump-allocate n words, leaving the block pointer in rd. The caller must
+   not make any call between this and its field stores (rd/gp are volatile). *)
+let alloc_words rd n =
+  emit_word (enc_i 0 gp 0 rd 0x13);                    (* mv   rd, gp *)
+  emit_word (enc_i (n * 4) gp 0 gp 0x13)               (* addi gp, gp, n*4 *)
+
 (* --- program shape: peel top-level fn bindings, find the main body ------- *)
 
 (* peel `fn a -> fn b -> body` into ([a;b], body) *)
@@ -130,6 +137,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
     List.fold_left (fun ac (_, e) -> vars_in e ac) (vars_in b acc) bs
   | Ast.Fun (_, _, b) -> vars_in b acc
   | Ast.App (a, b) -> vars_in a (vars_in b acc)
+  | Ast.Tuple elems -> List.fold_left (fun ac el -> vars_in el ac) acc elems
   | _ -> acc
 
 (* the tops map: top-level function name -> (params, body) *)
@@ -155,15 +163,23 @@ type env = (string * int) list
 
 let slot_off i = i * 4
 
-(* count P_var lets to size a function frame (each gets a distinct slot) *)
+(* count binding introductions to size a function frame (each named binding
+   gets a distinct slot — P_var lets and each P_var inside a tuple pattern) *)
+let pvars_in_pattern p =
+  match p.Ast.pnode with
+  | Ast.P_var _ -> 1
+  | Ast.P_tuple pats ->
+    List.fold_left (fun n q -> match q.Ast.pnode with Ast.P_var _ -> n + 1 | _ -> n) 0 pats
+  | _ -> 0
+
 let rec count_lets (e : Ast.expr) : int =
   match e.node with
-  | Ast.Let ({ pnode = Ast.P_var _; _ }, a, b) -> 1 + count_lets a + count_lets b
-  | Ast.Let (_, a, b) -> count_lets a + count_lets b
+  | Ast.Let (p, a, b) -> pvars_in_pattern p + count_lets a + count_lets b
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> count_lets a + count_lets b
   | Ast.Neg a | Ast.Annot (a, _) -> count_lets a
   | Ast.If (a, b, c) -> count_lets a + count_lets b + count_lets c
   | Ast.App (a, b) -> count_lets a + count_lets b
+  | Ast.Tuple elems -> List.fold_left (fun n el -> n + count_lets el) 0 elems
   | _ -> 0
 
 let is_top name = Hashtbl.mem tops name
@@ -265,8 +281,37 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
     compile_expr env rhs;
     compile_expr env body
+  | Ast.Let ({ pnode = Ast.P_tuple pats; _ }, rhs, body) ->
+    (* destructure a heap tuple: rhs -> pointer, load each field into its binding *)
+    compile_expr env rhs;
+    emit_word (enc_i 0 a0 0 t1 0x13);                                (* mv t1, a0 (tuple ptr) *)
+    let env = ref env in
+    List.iteri (fun i p ->
+      match p.Ast.pnode with
+      | Ast.P_wild -> ()
+      | Ast.P_var name ->
+        emit_word (enc_i (i * 4) t1 2 a0 0x03);                      (* lw a0, i*4(t1) *)
+        let idx = !slot_ctr in incr slot_ctr;
+        (match loc_of idx with
+         | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                  (* mv sX, a0 *)
+         | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23));
+        env := (name, idx) :: !env
+      | _ -> err p.Ast.ploc "RV32I: nested tuple patterns are not supported yet"
+    ) pats;
+    compile_expr !env body
   | Ast.Let (_, _, _) ->
-    err e.loc "RV32I M0: only `let x = ...` and `let _ = ...` patterns are supported"
+    err e.loc "RV32I: only `let x = ...`, `let _ = ...`, and `let (a, b) = ...` are supported"
+  | Ast.Tuple elems ->
+    (* evaluate elements (each may call/alloc), then allocate the block and
+       fill it — no call happens between the bump and the stores *)
+    List.iter (fun el -> compile_expr env el; push a0) elems;
+    let n = List.length elems in
+    alloc_words t1 n;                                                (* t1 = block ptr *)
+    for i = n - 1 downto 0 do
+      pop t0;
+      emit_word (enc_s (i * 4) t0 t1 2 0x23)                         (* sw t0, i*4(t1) *)
+    done;
+    emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
   | Ast.Annot (a, _) -> compile_expr env a
   | Ast.App (_, _) -> compile_app env e
   | Ast.Fun _ ->
@@ -418,6 +463,7 @@ let emit_start () =
   emit (Label "_start");
   emit_word (enc_u 0x70 sp 0x37);                       (* lui  sp, 0x70  (sp = 0x70000) *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
+  emit_word (enc_u 0x10 gp 0x37);                       (* lui  gp, 0x10  (heap top = 0x10000) *)
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
   li a0 0;
@@ -495,9 +541,47 @@ let assemble (prog : item list) : string =
   ) prog;
   Buffer.contents buf
 
+(* --- assembly listing: a human-readable view of the emitted code --------- *)
+let listing (prog : item list) : string =
+  let labels : (string, int) Hashtbl.t = Hashtbl.create 64 in
+  let addr = ref 0 in
+  List.iter (fun it -> match it with
+    | Label name -> Hashtbl.replace labels name !addr
+    | Word _ | Jal _ | Branch _ -> addr := !addr + 4) prog;
+  let buf = Buffer.create 4096 in
+  let here = ref 0 in
+  List.iter (fun it ->
+    match it with
+    | Label name -> Buffer.add_string buf (Printf.sprintf "%s:\n" name)
+    | Word w ->
+      Buffer.add_string buf
+        (Printf.sprintf "  %6x:  %08x  %s\n" !here w (Riscv_disasm.disasm_word ~pc:!here w));
+      here := !here + 4
+    | Jal (rd, name) ->
+      let off = (try Hashtbl.find labels name with Not_found -> !here) - !here in
+      let w = enc_j off rd 0x6F in
+      let mn = if rd = 0 then Printf.sprintf "j %s" name
+               else Printf.sprintf "jal %s, %s" (Riscv_disasm.r rd) name in
+      Buffer.add_string buf (Printf.sprintf "  %6x:  %08x  %s\n" !here w mn);
+      here := !here + 4
+    | Branch (f3, rs1, rs2, name) ->
+      let off = (try Hashtbl.find labels name with Not_found -> !here) - !here in
+      let w = enc_b off rs2 rs1 f3 0x63 in
+      let m = [| "beq"; "bne"; "?"; "?"; "blt"; "bge"; "bltu"; "bgeu" |].(f3) in
+      let mn =
+        if rs2 = 0 && f3 = 0 then Printf.sprintf "beqz %s, %s" (Riscv_disasm.r rs1) name
+        else if rs2 = 0 && f3 = 1 then Printf.sprintf "bnez %s, %s" (Riscv_disasm.r rs1) name
+        else Printf.sprintf "%s %s, %s, %s" m (Riscv_disasm.r rs1) (Riscv_disasm.r rs2) name in
+      Buffer.add_string buf (Printf.sprintf "  %6x:  %08x  %s\n" !here w mn);
+      here := !here + 4
+  ) prog;
+  Buffer.contents buf
+
 (* --- entry point --------------------------------------------------------- *)
-let emit_program ~main_ty (prog : Ast.program) : string =
-  ignore main_ty;
+
+(* build the symbolic item list for a program (shared by emit_program /
+   emit_listing) *)
+let build_items (prog : Ast.program) : item list =
   items := [];
   lbl_counter := 0;
   Hashtbl.reset tops;
@@ -522,4 +606,12 @@ let emit_program ~main_ty (prog : Ast.program) : string =
     if Hashtbl.mem reachable name then
       emit_function ~label:("u_" ^ name) ~params ~body
   ) tops;
-  assemble (List.rev !items)
+  List.rev !items
+
+let emit_program ~main_ty (prog : Ast.program) : string =
+  ignore main_ty;
+  assemble (build_items prog)
+
+let emit_listing ~main_ty (prog : Ast.program) : string =
+  ignore main_ty;
+  listing (build_items prog)
