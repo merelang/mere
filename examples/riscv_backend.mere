@@ -1,0 +1,21 @@
+// A demo for the RV32IM backend (v0.1.134).
+//
+//   mere -rv examples/riscv_backend.mere > prog.bin
+//
+// emits a flat little-endian binary — no external assembler or linker — that
+// runs on the Mere-written RISC-V emulator (examples/riscv.mere, or the memu
+// project's riscv-runc), printing 3628800 / 6765 / 21 (gcd 1071 462). The
+// self-made language compiled to the self-made CPU.
+//
+// The M0 backend covers the integer core: arithmetic, comparisons, &&/||, if,
+// let, top-level (mutually) recursive functions, saturated calls, print_int.
+// Only the functions reachable from the trailing expression are emitted, so
+// the prelude is skipped and features it needs (lists, closures) never appear.
+
+let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1);
+let rec fib  = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+let rec gcd  = fn a -> fn b -> if b == 0 then a else gcd b (a - a / b * b);
+
+let _ = print_int (fact 10);
+let _ = print_int (fib 20);
+let _ = print_int (gcd 1071 462);

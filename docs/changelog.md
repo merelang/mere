@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.134 — 2026-08-08
+
+_A fifth backend — Mere lowers to native RV32IM machine code. Where `-c`
+/ `-ll` / `-w` delegate to a C compiler / LLVM / a Wasm runtime,
+`mere -rv file.mere` emits a **flat little-endian binary** directly (no
+external assembler or linker) that runs on the Mere-written RV32I
+emulator: the self-made language now runs on the self-made CPU. This is
+the M0 vertical slice — 32-bit integers, arithmetic, comparisons,
+short-circuit `&&`/`||`, `if`, `let`, top-level (mutually) recursive
+functions, saturated calls, and `print_int` — lowered by a simple stack
+machine (a0 accumulator, fp-relative frame slots, no register allocation
+yet) with a two-pass label assembler and a self-contained `_start` /
+`print_int` (itoa + `ecall write`) runtime. Only the top-level functions
+reachable from `main` are emitted, so the prelude is skipped entirely.
+Anything outside the slice (closures, strings, ADTs, heap) raises a clear
+`Codegen_error`. Verified byte-identical to the interpreter across
+recursion (factorial, Fibonacci, Ackermann), mutual recursion, gcd,
+short-circuit logic, and signed div/mod. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.129 — 2026-08-07
 
 _Byte-safe strings on the Wasm backend — the arc that made C strings
