@@ -167,6 +167,7 @@ let rec free_vars_of (e : Ast.expr) : string list =
   | Ast.Constr (_, None) -> []
   | Ast.Record_lit (_, fields) -> List.concat_map (fun (_, e) -> free_vars_of e) fields
   | Ast.Field_get (e, _) -> free_vars_of e
+  | Ast.Record_update (base, ups) -> free_vars_of base @ List.concat_map (fun (_, e) -> free_vars_of e) ups
   | Ast.Match (s, arms) ->
     free_vars_of s
     @ List.concat_map (fun (p, g, b) ->
@@ -203,6 +204,8 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.Constr (_, Some a) -> vars_in a acc
   | Ast.Record_lit (_, fields) -> List.fold_left (fun ac (_, e) -> vars_in e ac) acc fields
   | Ast.Field_get (e, _) -> vars_in e acc
+  | Ast.Record_update (base, ups) ->
+    List.fold_left (fun ac (_, e) -> vars_in e ac) (vars_in base acc) ups
   | Ast.Match (scrut, arms) ->
     List.fold_left (fun ac (_, g, b) ->
       let ac = vars_in b ac in
@@ -240,6 +243,17 @@ let field_index loc recname field =
 
 (* peel the leading chain of `let f = fn ...` / `let rec f = fn ...` into
    `tops`, returning the remaining expression as the program's main body. *)
+(* top-level value bindings (globals): (name option, initializer) in order.
+   `None` is an effectful `let _ = e` at top level. Stored in a fixed memory
+   region so any top-level function can read them; `globals_map` maps a named
+   global to its region slot index. *)
+let globals : (string option * Ast.expr) list ref = ref []
+let globals_map : (string, int) Hashtbl.t = Hashtbl.create 32
+let globals_base = 0x10000   (* region start; the heap begins just above it *)
+
+(* Peel top-level bindings: functions go to `tops`, value/effect bindings to
+   `globals` (peeling continues past them, unlike a leading-prefix scan). The
+   remaining expression is the program's main body. *)
 let rec split_tops (e : Ast.expr) : Ast.expr =
   match e.node with
   | Ast.Let ({ pnode = Ast.P_var name; _ }, ({ node = Ast.Fun _; _ } as f), body) ->
@@ -248,6 +262,14 @@ let rec split_tops (e : Ast.expr) : Ast.expr =
   | Ast.Let_rec (bindings, body)
     when List.for_all (fun (_, v) -> match v.Ast.node with Ast.Fun _ -> true | _ -> false) bindings ->
     List.iter (fun (name, f) -> Hashtbl.replace tops name (collect_fun f)) bindings;
+    split_tops body
+  | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body) ->
+    let idx = Hashtbl.length globals_map in
+    Hashtbl.replace globals_map name idx;
+    globals := !globals @ [(Some name, rhs)];
+    split_tops body
+  | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
+    globals := !globals @ [(None, rhs)];
     split_tops body
   | _ -> e
 
@@ -274,6 +296,7 @@ let rec pvars_in_pattern p =
 let rec count_lets (e : Ast.expr) : int =
   match e.node with
   | Ast.Let (p, a, b) -> pvars_in_pattern p + count_lets a + count_lets b
+  | Ast.Let_rec (bs, b) -> List.length bs + count_lets b   (* fn bodies lift to lambdas *)
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> count_lets a + count_lets b
   | Ast.Neg a | Ast.Annot (a, _) -> count_lets a
   | Ast.If (a, b, c) -> count_lets a + count_lets b + count_lets c
@@ -282,6 +305,8 @@ let rec count_lets (e : Ast.expr) : int =
   | Ast.Constr (_, Some a) -> count_lets a
   | Ast.Record_lit (_, fields) -> List.fold_left (fun n (_, e) -> n + count_lets e) 0 fields
   | Ast.Field_get (e, _) -> count_lets e
+  | Ast.Record_update (base, ups) ->
+    List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets base) ups
   | Ast.Match (scrut, arms) ->
     (* +1 for the scrutinee stash slot, plus each arm's pattern bindings *)
     count_lets scrut + 1
@@ -347,6 +372,14 @@ let load_to_a0 idx =
   | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                      (* mv a0, sX *)
   | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03)    (* lw a0, slot(fp) *)
 
+(* top-level value bindings live in a fixed region at globals_base (0x10000) *)
+let load_global_to_a0 gi =
+  emit_word (enc_u 0x10 a0 0x37);                                 (* lui a0, 0x10 *)
+  emit_word (enc_i (gi * 4) a0 2 a0 0x03)                         (* lw a0, gi*4(a0) *)
+let store_a0_to_global gi =
+  emit_word (enc_u 0x10 t1 0x37);                                 (* lui t1, 0x10 *)
+  emit_word (enc_s (gi * 4) a0 t1 2 0x23)                         (* sw a0, gi*4(t1) *)
+
 let emit_binop op rd rs1 rs2 loc =
   match op with
   | Ast.Add -> emit_word (enc_r 0 rs2 rs1 0 rd 0x33)
@@ -368,11 +401,14 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
         | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                   (* mv  a0, sX *)
         | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03))(* lw  a0, slot(fp) *)
      | None ->
-       if is_top v then
-         err e.loc (Printf.sprintf
-           "RV32I: `%s` used as a value (higher-order / partial application not supported yet)" v)
-       else
-         err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v))
+       (match Hashtbl.find_opt globals_map v with
+        | Some gi -> load_global_to_a0 gi                         (* top-level value binding *)
+        | None ->
+          if is_top v then
+            err e.loc (Printf.sprintf
+              "RV32I: `%s` used as a value (higher-order / partial application not supported yet)" v)
+          else
+            err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v)))
   | Ast.Neg a ->
     compile_expr env a;
     emit_word (enc_r 0x20 a0 zero 0 a0 0x33)                         (* sub a0, x0, a0 *)
@@ -399,30 +435,12 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
     compile_expr env rhs;
     compile_expr env body
-  | Ast.Let ({ pnode = Ast.P_tuple pats; _ }, rhs, body) ->
-    (* destructure a heap tuple: rhs -> pointer, load each field into its binding *)
+  | Ast.Let (pat, rhs, body) ->
+    (* aggregate / refutable let: destructure via the general pattern binder.
+       A refutable let that fails jumps to __pat_fail (abort). *)
     compile_expr env rhs;
-    emit_word (enc_i 0 a0 0 t1 0x13);                                (* mv t1, a0 (tuple ptr) *)
-    let env = ref env in
-    List.iteri (fun i p ->
-      match p.Ast.pnode with
-      | Ast.P_wild -> ()
-      | Ast.P_var name ->
-        emit_word (enc_i (i * 4) t1 2 a0 0x03);                      (* lw a0, i*4(t1) *)
-        let idx = !slot_ctr in incr slot_ctr;
-        (match loc_of idx with
-         | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                  (* mv sX, a0 *)
-         | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23));
-        env := (name, idx) :: !env
-      | _ -> err p.Ast.ploc "RV32I: nested tuple patterns are not supported yet"
-    ) pats;
-    compile_expr !env body
-  | Ast.Let ({ pnode = Ast.P_record (typename, fpats); _ }, rhs, body) ->
-    compile_expr env rhs;
-    let env = bind_record_fields env typename fpats e.loc in
+    let env = bind_pattern env pat "__pat_fail" in
     compile_expr env body
-  | Ast.Let (_, _, _) ->
-    err e.loc "RV32I: only `let x = ...`, `let _ = ...`, `let (a, b) = ...`, and `let T { .. } = ...` are supported"
   | Ast.Tuple elems ->
     (* evaluate elements (each may call/alloc), then allocate the block and
        fill it — no call happens between the bump and the stores *)
@@ -485,14 +503,57 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     emit (LoadAddr (t0, label));                                    (* t0 = &lambda code *)
     emit_word (enc_s 0 t0 t1 2 0x23);                               (* sw t0, 0(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
+  | Ast.Let_rec ([ (f, ({ node = Ast.Fun (param, _, fbody); _ }) ) ], body) ->
+    (* local recursive closure. Bind f to its own closure BEFORE filling the
+       captures, so the body's self-reference (a normal capture of f) reads
+       the block pointer we just allocated. *)
+    let fidx = !slot_ctr in incr slot_ctr;
+    let env_f = (f, fidx) :: env in
+    let fnexpr_fvs =
+      dedup (free_vars_of { e with node = Ast.Fun (param, None, fbody) })
+      |> List.filter (fun n -> List.mem_assoc n env_f) in
+    let label = fresh_label "__lam_" in
+    lambdas := (label, fnexpr_fvs, param, fbody) :: !lambdas;
+    let k = List.length fnexpr_fvs in
+    alloc_words t1 (k + 1);                                         (* [code][cap...] *)
+    emit (LoadAddr (t0, label)); emit_word (enc_s 0 t0 t1 2 0x23);  (* store code ptr *)
+    emit_word (enc_i 0 t1 0 a0 0x13); store_a0_to fidx;            (* bind f = block ptr *)
+    List.iteri (fun i name ->
+      load_to_a0 (List.assoc name env_f);                          (* f resolves to the block ptr *)
+      emit_word (enc_s ((i + 1) * 4) a0 t1 2 0x23)
+    ) fnexpr_fvs;
+    compile_expr env_f body
   | Ast.Let_rec _ ->
-    err e.loc "RV32I: local `let rec` is not supported yet (define functions at top level)"
+    err e.loc "RV32I: only single-binding local `let rec f = fn ...` is supported"
   | Ast.Str_lit s ->
     let label = fresh_label "str_" in
     string_data := (label, mk_str_block s) :: !string_data;
     emit (LoadAddr (a0, label))                                     (* a0 = &block *)
+  | Ast.Region_block (_, body) -> compile_expr env body             (* bump heap: no reclamation *)
   | Ast.Float_lit _ -> err e.loc "RV32I: floats are not supported yet"
-  | _ -> err e.loc "RV32I: this expression form is not supported yet"
+  | Ast.With _ -> err e.loc "RV32I: `with` expressions are not supported yet"
+  | Ast.Ref _ -> err e.loc "RV32I: `&` references are not supported yet"
+  | Ast.Record_update (base, updates) ->
+    let recname =
+      match (match base.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+      | Ast.TyCon (n, _) -> n
+      | _ -> err e.loc "RV32I: cannot resolve record type for update" in
+    let order = record_order e.loc recname in
+    let n = List.length order in
+    compile_expr env base; push a0;                                (* base ptr parked *)
+    List.iteri (fun i fname ->
+      (match List.assoc_opt fname updates with
+       | Some ue -> compile_expr env ue                            (* replaced field *)
+       | None ->
+         emit_word (enc_i (i * 4) sp 2 a0 0x03);                   (* peek base ptr (i items up) *)
+         let fi = field_index e.loc recname fname in
+         emit_word (enc_i (fi * 4) a0 2 a0 0x03));                 (* copy base.field *)
+      push a0
+    ) order;
+    alloc_words t1 n;
+    for i = n - 1 downto 0 do pop t0; emit_word (enc_s (i * 4) t0 t1 2 0x23) done;
+    pop t0;                                                        (* drop base ptr *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                               (* mv a0, t1 *)
 
 (* Evaluate l and r so that left ends in reg RL and right in reg RR, then
    run [k RL RR]. Reads operands straight from their registers when possible
@@ -586,6 +647,26 @@ and compile_logic env op l r =
 and compile_app env e =
   let (head, args) = flatten_app e in
   match head.node with
+  (* A user binding always wins over a same-named builtin. Check locals /
+     globals / top-level functions BEFORE the builtin names below. *)
+  | Ast.Var f when List.mem_assoc f env || Hashtbl.mem globals_map f ->
+    compile_indirect env head args
+  | Ast.Var f when is_top f ->
+    let arity = List.length (fst (Hashtbl.find tops f)) in
+    if List.length args <> arity then compile_indirect env head args
+    else begin
+      let argv = Array.of_list args in
+      if arity <= 8 then begin
+        List.iter (fun arg -> compile_expr env arg; push a0) args;
+        for i = arity - 1 downto 0 do pop (a0 + i) done
+      end else begin
+        for j = arity - 1 downto 8 do compile_expr env argv.(j); push a0 done;
+        for j = 0 to 7 do compile_expr env argv.(j); push a0 done;
+        for j = 7 downto 0 do pop (a0 + j) done
+      end;
+      emit (Jal (ra, "u_" ^ f));
+      if arity > 8 then emit_word (enc_i ((arity - 8) * 4) sp 0 sp 0x13)
+    end
   | Ast.Var "print_int" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit (Jal (ra, "__print_int"))
@@ -606,6 +687,16 @@ and compile_app env e =
   | Ast.Var "str_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)
+  | Ast.Var "fail" when List.length args = 1 ->
+    (* fail msg : abort — write the message, then exit(1). Never returns. *)
+    compile_expr env (List.hd args);                     (* a0 = msg str *)
+    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
+    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
+    emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
+    emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write) *)
+    emit_word (enc_i 93 zero 0 a7 0x13);                 (* li a7, 93 *)
+    emit_word (enc_i 1 zero 0 a0 0x13);                  (* li a0, 1 *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (exit) *)
   | Ast.Var "print_no_nl" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
@@ -614,6 +705,24 @@ and compile_app env e =
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall *)
   | Ast.Var "str_of_int" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__str_of_int"))
+  | Ast.Var "strbuf_new" when List.length args = 1 ->
+    compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_new"))
+  | Ast.Var "strbuf_push" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;            (* a0=buf, a1=s *)
+    emit (Jal (ra, "__strbuf_push"))
+  | Ast.Var "strbuf_to_str" when List.length args = 1 ->
+    compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_to_str"))
+  | Ast.Var "strbuf_len" when List.length args = 1 ->
+    compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_len"))
+  | Ast.Var "show" when List.length args = 1 ->
+    (* polymorphic show: only the int case is supported (all the self-hosted
+       compiler's uses are `show <int>`); resolve via the arg's type *)
+    let arg = List.hd args in
+    (match (match arg.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+     | Ast.TyInt -> compile_expr env arg; emit (Jal (ra, "__str_of_int"))
+     | _ -> err e.loc "RV32I: `show` is only supported on int values")
   | Ast.Var "ord" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 4 a0 4 a0 0x03)                     (* lbu a0, 4(a0) — first byte *)
@@ -651,28 +760,20 @@ and compile_app env e =
     emit_word (enc_i 0 a0 0 a2 0x13);                    (* a2 = len *)
     pop a1; pop a0;                                      (* a1 = start, a0 = s *)
     emit (Jal (ra, "__substring"))
-  | Ast.Var f when is_top f && not (List.mem_assoc f env)
-                   && List.length args = List.length (fst (Hashtbl.find tops f)) ->
-    (* fast path: a saturated direct call to a known top-level function.
-       Args go in a0.., a plain jal — the register-allocated calling
-       convention. Everything else goes through closures below. *)
-    let arity = List.length args in
-    if arity > 8 then err e.loc "RV32I: functions with more than 8 args are not supported yet";
-    List.iter (fun arg -> compile_expr env arg; push a0) args;
-    for i = arity - 1 downto 0 do pop (a0 + i) done;
-    emit (Jal (ra, "u_" ^ f))
-  | _ ->
-    (* general path: evaluate the head to a closure value and apply the
-       arguments one at a time via indirect (curried) calls *)
-    compile_expr env head;                               (* a0 = closure *)
-    List.iter (fun arg ->
-      push a0;                                           (* save the closure *)
-      compile_expr env arg;                              (* a0 = arg *)
-      emit_word (enc_i 0 a0 0 a1 0x13);                  (* mv a1, a0 (arg) *)
-      pop a0;                                            (* a0 = closure (its own env) *)
-      emit_word (enc_i 0 a0 2 t1 0x03);                  (* lw t1, 0(a0) — code ptr *)
-      emit_word (enc_i 0 t1 0 ra 0x67)                   (* jalr ra, t1 — call; result in a0 *)
-    ) args
+  | _ -> compile_indirect env head args
+
+(* general application: evaluate the head to a closure value and apply the
+   arguments one at a time via indirect (curried) calls *)
+and compile_indirect env head args =
+  compile_expr env head;                               (* a0 = closure *)
+  List.iter (fun arg ->
+    push a0;                                            (* save the closure *)
+    compile_expr env arg;                               (* a0 = arg *)
+    emit_word (enc_i 0 a0 0 a1 0x13);                   (* mv a1, a0 (arg) *)
+    pop a0;                                             (* a0 = closure (its own env) *)
+    emit_word (enc_i 0 a0 2 t1 0x03);                   (* lw t1, 0(a0) — code ptr *)
+    emit_word (enc_i 0 t1 0 ra 0x67)                    (* jalr ra, t1 — call; result in a0 *)
+  ) args
 
 and compile_match env scrut arms =
   compile_expr env scrut;                          (* a0 = scrutinee *)
@@ -696,15 +797,60 @@ and compile_match env scrut arms =
    bind its variables on match, and return the extended env. Supports the
    top level plus one level of sub-structure (enough for Option/Result and
    typical enums); deeper nesting raises Codegen_error. *)
-and compile_pattern_bind env pat l_fail =
+and compile_pattern_bind env pat l_fail = bind_pattern env pat l_fail
+
+(* Fully-recursive pattern binder. The value under test is in a0; branches to
+   l_fail on a literal/constructor mismatch, binds variables on match, returns
+   the extended env. For aggregate patterns the container pointer is parked on
+   the memory stack so arbitrarily-nested sub-patterns can recurse without
+   fighting over scratch registers. *)
+and bind_pattern env pat l_fail =
   match pat.Ast.pnode with
   | Ast.P_wild | Ast.P_unit -> env
   | Ast.P_var name ->
     let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; (name, idx) :: env
   | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
-  | Ast.P_tuple pats -> bind_tuple_fields env pats
-  | Ast.P_record (typename, fpats) -> bind_record_fields env typename fpats pat.Ast.ploc
+  | Ast.P_str s ->
+    (* compare the scrutinee (a0) against the literal; mismatch -> l_fail *)
+    push a0;
+    let label = fresh_label "str_" in
+    string_data := (label, mk_str_block s) :: !string_data;
+    emit (LoadAddr (a1, label));                   (* a1 = literal *)
+    pop a0;                                         (* a0 = scrutinee *)
+    emit (Jal (ra, "__str_eq"));                    (* a0 = 1 if equal *)
+    emit (Branch (0, a0, zero, l_fail));            (* beq a0, x0 -> fail *)
+    env
+  | Ast.P_as (inner, name) ->
+    (* bind the whole value to `name`, then also match the inner pattern *)
+    push a0;
+    let idx = !slot_ctr in incr slot_ctr; store_a0_to idx;
+    let env = (name, idx) :: env in
+    emit_word (enc_i 0 sp 2 a0 0x03);              (* peek: a0 = the value *)
+    let env = bind_pattern env inner l_fail in
+    pop t0;                                        (* drop saved value *)
+    env
+  | Ast.P_tuple pats ->
+    push a0;                                       (* park tuple ptr *)
+    let env = ref env in
+    List.iteri (fun i p ->
+      emit_word (enc_i 0 sp 2 a0 0x03);            (* peek tuple ptr *)
+      emit_word (enc_i (i * 4) a0 2 a0 0x03);      (* a0 = field i *)
+      env := bind_pattern !env p l_fail
+    ) pats;
+    pop t0;
+    !env
+  | Ast.P_record (typename, fpats) ->
+    push a0;                                       (* park record ptr *)
+    let env = ref env in
+    List.iter (fun (fname, fpat) ->
+      let fi = field_index pat.Ast.ploc typename fname in
+      emit_word (enc_i 0 sp 2 a0 0x03);            (* peek record ptr *)
+      emit_word (enc_i (fi * 4) a0 2 a0 0x03);     (* a0 = field *)
+      env := bind_pattern !env fpat l_fail
+    ) fpats;
+    pop t0;
+    !env
   | Ast.P_constr (name, sub) ->
     let tag = tag_of pat.Ast.ploc name in
     emit_word (enc_i 0 a0 2 t0 0x03);              (* lw t0, 0(a0) — tag *)
@@ -712,44 +858,9 @@ and compile_pattern_bind env pat l_fail =
     (match sub with
      | None -> env
      | Some subp ->
-       emit_word (enc_i 4 a0 2 a0 0x03);           (* lw a0, 4(a0) — payload *)
-       (match subp.Ast.pnode with
-        | Ast.P_wild | Ast.P_unit -> env
-        | Ast.P_var name -> let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; (name, idx) :: env
-        | Ast.P_tuple pats -> bind_tuple_fields env pats
-        | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
-        | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
-        | _ -> err subp.Ast.ploc "RV32I: this nested constructor payload pattern is not supported yet"))
-  | _ -> err pat.Ast.ploc "RV32I: this match pattern is not supported yet"
-
-(* a0 = tuple pointer; bind each P_var field (tuple patterns are irrefutable) *)
-and bind_tuple_fields env pats =
-  emit_word (enc_i 0 a0 0 t1 0x13);                (* mv t1, a0 — tuple ptr *)
-  let env = ref env in
-  List.iteri (fun i p ->
-    match p.Ast.pnode with
-    | Ast.P_wild -> ()
-    | Ast.P_var name ->
-      emit_word (enc_i (i * 4) t1 2 a0 0x03);      (* lw a0, i*4(t1) *)
-      let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; env := (name, idx) :: !env
-    | _ -> err p.Ast.ploc "RV32I: nested tuple patterns are not supported yet"
-  ) pats;
-  !env
-
-(* a0 = record pointer; bind each field pattern by its declared offset *)
-and bind_record_fields env typename fpats loc =
-  emit_word (enc_i 0 a0 0 t1 0x13);                (* mv t1, a0 — record ptr *)
-  let env = ref env in
-  List.iter (fun (fname, fpat) ->
-    match fpat.Ast.pnode with
-    | Ast.P_wild -> ()
-    | Ast.P_var name ->
-      let fi = field_index loc typename fname in
-      emit_word (enc_i (fi * 4) t1 2 a0 0x03);     (* lw a0, fi*4(t1) *)
-      let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; env := (name, idx) :: !env
-    | _ -> err fpat.Ast.ploc "RV32I: nested record patterns are not supported yet"
-  ) fpats;
-  !env
+       emit_word (enc_i 4 a0 2 a0 0x03);           (* a0 = payload *)
+       bind_pattern env subp l_fail)
+  | Ast.P_or (_, _) -> err pat.Ast.ploc "RV32I: or-patterns are not supported yet"
 
 (* --- function + runtime emission ----------------------------------------- *)
 
@@ -791,10 +902,18 @@ let emit_function ~label ~params ~body =
   let total = nparams + count_lets body in
   emit (Label label);
   let fr = emit_prologue total in
+  let (_, _, _, _, fsz) = fr in
   List.iteri (fun i _ ->
+    (* args 0..7 arrive in a0..a7; args 8+ on the incoming stack, now at
+       fp + fsz + (i-8)*4 (the prologue subtracted fsz from sp) *)
+    let src_into_t0 () =
+      if i < 8 then emit_word (enc_i 0 (a0 + i) 0 t0 0x13)          (* mv t0, aI *)
+      else emit_word (enc_i (fsz + (i - 8) * 4) fp 2 t0 0x03) in    (* lw t0, stackarg *)
     match loc_of i with
-    | Reg r -> emit_word (enc_i 0 (a0 + i) 0 r 0x13)               (* mv sX, aI *)
-    | Mem slot -> emit_word (enc_s (slot_off slot) (a0 + i) fp 2 0x23)
+    | Reg r ->
+      if i < 8 then emit_word (enc_i 0 (a0 + i) 0 r 0x13)           (* mv sX, aI *)
+      else emit_word (enc_i (fsz + (i - 8) * 4) fp 2 r 0x03)        (* lw sX, stackarg *)
+    | Mem slot -> src_into_t0 (); emit_word (enc_s (slot_off slot) t0 fp 2 0x23)
   ) params;
   slot_ctr := nparams;
   compile_expr (List.mapi (fun i p -> (p, i)) params) body;
@@ -823,12 +942,30 @@ let emit_lambda ~label ~captures ~param ~body =
   compile_expr env body;
   emit_epilogue fr
 
+(* __main: initialise the top-level value bindings (in order, into the
+   globals region), then run the program's main expression *)
+let emit_main main_body =
+  let total =
+    List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets main_body) !globals in
+  emit (Label "__main");
+  let fr = emit_prologue total in
+  slot_ctr := 0;
+  List.iter (fun (nameopt, init) ->
+    compile_expr [] init;
+    match nameopt with
+    | Some name -> store_a0_to_global (Hashtbl.find globals_map name)
+    | None -> ()
+  ) !globals;
+  compile_expr [] main_body;
+  emit_epilogue fr
+
 (* _start MUST be the first bytes (loaded at address 0, PC starts there) *)
 let emit_start () =
   emit (Label "_start");
   emit_word (enc_u 0x70 sp 0x37);                       (* lui  sp, 0x70  (sp = 0x70000) *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
-  emit_word (enc_u 0x10 gp 0x37);                       (* lui  gp, 0x10  (heap top = 0x10000) *)
+  (* heap top starts just above the globals region (0x10000 + nglobals*4) *)
+  li gp (globals_base + Hashtbl.length globals_map * 4);
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
   li a0 0;
@@ -1038,6 +1175,46 @@ let emit_substring () =
   emit_word (enc_i 0 t0 0 a0 0x13);                     (* mv a0, t0 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
+(* StrBuf: a 1-word mutable cell holding a str pointer. strbuf_push replaces
+   the held string with its concatenation (simple, correct; O(n^2) worst case).
+   __strbuf_new(_) -> cell; __strbuf_push(buf, s) mutates; __strbuf_to_str /
+   __strbuf_len read it. *)
+let emit_strbuf () =
+  emit (Label "__strbuf_new");                     (* a0 ignored *)
+  emit_word (enc_i 0 gp 0 t0 0x13);                (* t0 = empty str = gp *)
+  emit_word (enc_s 0 zero t0 2 0x23);              (* [len=0] *)
+  emit_word (enc_i 4 gp 0 gp 0x13);                (* bump 1 word *)
+  emit_word (enc_i 0 gp 0 t1 0x13);                (* t1 = cell = gp *)
+  emit_word (enc_s 0 t0 t1 2 0x23);                (* cell.str = empty *)
+  emit_word (enc_i 4 gp 0 gp 0x13);                (* bump 1 word *)
+  emit_word (enc_i 0 t1 0 a0 0x13);                (* mv a0, cell *)
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; non-leaf *)
+  emit_word (enc_i (-8) sp 0 sp 0x13);
+  emit_word (enc_s 4 ra sp 2 0x23);                (* save ra *)
+  emit_word (enc_s 0 a0 sp 2 0x23);                (* save buf *)
+  emit_word (enc_i 0 a0 2 a0 0x03);                (* a0 = buf.str (current) *)
+  emit (Jal (ra, "__str_concat"));                 (* a0 = concat(cur, s) *)
+  emit_word (enc_i 0 sp 2 t0 0x03);                (* t0 = buf *)
+  emit_word (enc_s 0 a0 t0 2 0x23);                (* buf.str = new *)
+  emit_word (enc_i 4 sp 2 ra 0x03);                (* restore ra *)
+  emit_word (enc_i 8 sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = str *)
+  emit_word (enc_i 0 a0 2 a0 0x03);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label "__strbuf_len");                     (* a0=buf -> a0 = len *)
+  emit_word (enc_i 0 a0 2 a0 0x03);                (* str ptr *)
+  emit_word (enc_i 0 a0 2 a0 0x03);                (* len header *)
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* target of a refutable-let mismatch: abort with exit(2) *)
+let emit_pat_fail () =
+  emit (Label "__pat_fail");
+  emit_word (enc_i 93 zero 0 a7 0x13);
+  emit_word (enc_i 2 zero 0 a0 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(2) *)
+
 (* --- two-pass assembly: assign addresses, then encode ------------------- *)
 let assemble (prog : item list) : string =
   (* pass 1: label -> byte address *)
@@ -1140,6 +1317,8 @@ let build_items (prog : Ast.program) : item list =
   lbl_counter := 0;
   string_data := [];
   lambdas := [];
+  globals := [];
+  Hashtbl.reset globals_map;
   Hashtbl.reset tops;
   Hashtbl.reset variant_tags;
   Hashtbl.reset record_fields;
@@ -1164,7 +1343,9 @@ let build_items (prog : Ast.program) : item list =
       | None -> ()
     end
   in
+  (* reachability roots: the main body AND every global initializer *)
   List.iter visit (vars_in main_body []);
+  List.iter (fun (_, init) -> List.iter visit (vars_in init [])) !globals;
   (* layout: _start, runtime, main, reachable fns, then string rodata *)
   emit_start ();
   emit_print_int ();
@@ -1173,7 +1354,9 @@ let build_items (prog : Ast.program) : item list =
   emit_str_cmp ();
   emit_str_of_int ();
   emit_substring ();
-  emit_function ~label:"__main" ~params:[] ~body:main_body;
+  emit_strbuf ();
+  emit_pat_fail ();
+  emit_main main_body;
   Hashtbl.iter (fun name (params, body) ->
     if Hashtbl.mem reachable name then
       emit_function ~label:("u_" ^ name) ~params ~body
