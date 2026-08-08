@@ -228,6 +228,9 @@ let tops : (string, string list * Ast.expr) Hashtbl.t = Hashtbl.create 64
    by Constr (writes the tag) and Match (compares against it). Distinct only
    within a type, which is all Match needs. Populated from Top_type decls. *)
 let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 32
+(* variant type name -> are ALL its constructors nullary? (an "enum"). Such
+   values are 1-word [tag] blocks, so structural `==` is just a tag compare. *)
+let type_all_nullary : (string, bool) Hashtbl.t = Hashtbl.create 16
 let tag_of loc name =
   match Hashtbl.find_opt variant_tags (Ast.canonical_ctor name) with
   | Some t -> t
@@ -617,7 +620,35 @@ and compile_cmp env op l r =
      | Ast.Gt -> emit (Jal (ra, "__str_cmp")); emit_word (enc_r 0 a0 zero 2 a0 0x33) (* slt a0,x0,a0 *)
      | Ast.Ge -> emit (Jal (ra, "__str_cmp")); emit_word (enc_i 0 a0 2 a0 0x13);
                 emit_word (enc_i 1 a0 4 a0 0x13))                                 (* !(d<0) *)
-  end else
+  end
+  (* `==`/`!=` on a non-primitive value must compare structure, not the heap
+     pointer. Enums (all-nullary variant types) are just a tag word, so a tag
+     compare is exact. Compound values (tuples, records, payload-carrying
+     constructors) would need a recursive structural eq — reject them clearly
+     rather than silently comparing pointers. Ints/bools/type-variables fall
+     through to the integer path below (the only `==` the code needs). *)
+  else if (op = Ast.Eq || op = Ast.Ne) &&
+          (match (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+           | Ast.TyCon (n, _) -> Hashtbl.find_opt type_all_nullary n = Some true
+           | _ -> false) then begin
+    compile_expr env l; push a0;
+    compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
+    emit_word (enc_i 0 a0 2 t0 0x03);                               (* lw t0, 0(l) — tag *)
+    emit_word (enc_i 0 a1 2 t1 0x03);                               (* lw t1, 0(r) — tag *)
+    emit_word (enc_r 0x20 t1 t0 0 a0 0x33);                         (* sub a0, t0, t1 *)
+    (match op with
+     | Ast.Eq -> emit_word (enc_i 1 a0 3 a0 0x13)                   (* sltiu a0,a0,1 *)
+     | _ -> emit_word (enc_r 0 a0 zero 3 a0 0x33))                  (* sltu a0,x0,a0 *)
+  end
+  else begin
+    (match (op, (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit)) with
+     | (Ast.Eq | Ast.Ne), (Ast.TyTuple _ | Ast.TyArrow _) ->
+       err l.loc "RV32I: structural `==`/`!=` on tuples/functions is not supported (use pattern matching)"
+     | (Ast.Eq | Ast.Ne), Ast.TyCon (n, _) when Hashtbl.mem type_all_nullary n
+                                                 && Hashtbl.find type_all_nullary n = false ->
+       err l.loc (Printf.sprintf
+         "RV32I: structural `==`/`!=` on `%s` (a payload-carrying type) is not supported (use pattern matching)" n)
+     | _ -> ());
   (* `x < k` / `x <= k` with a small literal fold into slti *)
   match op, r.node with
   | Ast.Lt, Ast.Int_lit n when is_small n ->
@@ -637,6 +668,7 @@ and compile_cmp env op l r =
                  emit_word (enc_i 1 a0 4 a0 0x13)                   (* xori a0, a0, 1 *)
       | Ast.Ge -> emit_word (enc_r 0 rr rl 2 a0 0x33);              (* slt  a0, rl, rr *)
                  emit_word (enc_i 1 a0 4 a0 0x13))                  (* xori a0, a0, 1 *)
+  end
 
 and compile_logic env op l r =
   let l_end = fresh_label ".land" in
@@ -1432,8 +1464,10 @@ let build_items (prog : Ast.program) : item list =
   (* constructor tags + record field orders from the type declarations *)
   List.iter (fun decl ->
     match decl with
-    | Ast.Top_type (_, _, variants) ->
-      List.iteri (fun i (cname, _) -> Hashtbl.replace variant_tags cname i) variants
+    | Ast.Top_type (tname, _, variants) ->
+      List.iteri (fun i (cname, _) -> Hashtbl.replace variant_tags cname i) variants;
+      Hashtbl.replace type_all_nullary tname
+        (List.for_all (fun (_, payload) -> payload = None) variants)
     | Ast.Top_record (name, _, fields) ->
       Hashtbl.replace record_fields name (List.map fst fields)
     | _ -> ()
