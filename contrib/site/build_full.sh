@@ -84,6 +84,12 @@ if [ -f "$CHIP8_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w -I . $CHIP8_SRC -> playground/chip8.wat"
 fi
 
+GAMEBOY_SRC="contrib/site/playground/gameboy.mere"
+if [ -f "$GAMEBOY_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
+  dune exec mere -- -w -I . "$GAMEBOY_SRC" > "$PLAYGROUND_OUT/gameboy.wat"
+  echo "  mere -w -I . $GAMEBOY_SRC -> playground/gameboy.wat"
+fi
+
 # 3. Compile each .wat to .wasm via wat2wasm.
 if [ -d "$PLAYGROUND_OUT" ]; then
   for wat in "$PLAYGROUND_OUT"/*.wat; do
@@ -108,6 +114,12 @@ if [ -d "$PLAYGROUND_OUT" ]; then
     cp contrib/dom/dom.glue.js "$PLAYGROUND_OUT/dom.glue.js"
     echo "  cp contrib/dom/dom.glue.js -> playground/dom.glue.js"
   fi
+
+  # Stage any playground ROMs (e.g. dmg-acid2.gb) that pages fetch at runtime.
+  for gb in contrib/site/playground/*.gb; do
+    [ -f "$gb" ] || continue
+    cp "$gb" "$PLAYGROUND_OUT/" && echo "  cp $(basename "$gb") -> playground/"
+  done
 fi
 
 # 5. Custom domain. The GitHub Actions Pages deploy serves whatever is

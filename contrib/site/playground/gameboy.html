@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Game Boy in Mere — a browser emulator</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .game-app {
+      display: flex; flex-direction: column; align-items: center; gap: 1rem;
+      padding: 2rem; margin: 2rem 0;
+      background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+    }
+    #screen {
+      width: min(480px, 90vw); image-rendering: pixelated;
+      background: #9bbc0f; border-radius: 6px;
+    }
+    .hint { color: #718096; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-links">
+      <a href="../index.html">index</a>
+      <a href="playground.html">playground</a>
+      <a href="counter.html">counter</a>
+      <a href="g2048.html">2048</a>
+      <a href="raytrace.html">raytrace</a>
+      <a href="chip8.html">chip8</a>
+      <a href="gameboy.html" class="active">gameboy</a>
+      <a href="echo.html">echo</a>
+      <a href="wordcount.html">wordcount</a>
+      <a href="selfhost-fmt.html">self-host fmt</a>
+    </div>
+  </nav>
+
+  <main>
+    <h1>Game Boy — written in Mere</h1>
+
+    <p>
+      A Sharp LR35902 (Game Boy) emulator compiled from
+      <a href="https://github.com/merelang/mere">Mere</a> to WebAssembly. The
+      same machine that passes Blargg's <code>cpu_instrs</code> suite (11/11,
+      interrupts included) on all four Mere backends — CPU, timer, interrupt
+      controller, PPU, and MBC1 cartridge banking — here renders to a
+      <code>&lt;canvas&gt;</code>, driven per frame by <code>dom_on_frame</code>.
+    </p>
+
+    <div class="game-app">
+      <canvas id="screen" width="480" height="432"></canvas>
+      <p class="hint">
+        Running <a href="https://github.com/mattcurrie/dmg-acid2">dmg-acid2</a>,
+        the reference PPU test: the head is the background, the header text is the
+        window, and the eyes / nose / mouth are sprites. The cartridge is served
+        to the Wasm module a byte at a time via a small <code>dom_rom_byte</code>
+        host import, and the 160&times;144 framebuffer is blitted with the classic
+        DMG green palette.
+      </p>
+    </div>
+
+    <h2>What's happening</h2>
+    <ol>
+      <li><code>mere -w -I . gameboy.mere</code> lowers the whole machine —
+        the LR35902 core, the timer/interrupt spine, the scanline PPU, and MBC1
+        banking — to WebAssembly.</li>
+      <li>The page <code>fetch</code>es <code>dmg-acid2.gb</code> and hands it to
+        the glue (<code>setRom</code>); the module pulls it in through
+        <code>dom_rom_size</code> / <code>dom_rom_byte</code>.</li>
+      <li>Each <code>requestAnimationFrame</code> runs a slice of the CPU
+        (advancing the timer, PPU, and interrupts) and repaints the framebuffer
+        via <code>dom_canvas_fill_rect</code>.</li>
+    </ol>
+  </main>
+
+  <footer>frontend FFI dogfood — a full Game Boy machine in the browser</footer>
+
+  <script type="module">
+    import { makeDomGlue } from "./dom.glue.js";
+
+    const wasmBytes = await fetch("./gameboy.wasm").then(r => r.arrayBuffer());
+    const rom = new Uint8Array(await fetch("./dmg-acid2.gb").then(r => r.arrayBuffer()));
+    const { glue, attach, setRom } = makeDomGlue();
+    setRom(rom);
+
+    const stub = () => 0;
+    const env = {
+      ...glue,
+      puts: stub, time: stub,
+      read_file: stub, write_file: stub,
+      __lang_str_of_float: stub, __lang_float_of_str: () => 0.0,
+      __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+      __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+    };
+
+    const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+    attach(instance);
+    instance.exports.main();   // loads the ROM, then dom_on_frame drives the loop
+  </script>
+</body>
+</html>
