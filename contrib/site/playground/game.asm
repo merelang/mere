@@ -46,6 +46,32 @@ Main:
     ld a, %10000010
     ldh [$FF40], a
 
+    ; --- sound on: NR52 master, NR51 routing, NR50 volume ---
+    ld a, $80
+    ldh [$FF26], a             ; NR52: APU on
+    ld a, $FF
+    ldh [$FF25], a             ; NR51: both channels to L+R
+    ld a, $77
+    ldh [$FF24], a             ; NR50: max volume, both sides
+
+    ; startup arpeggio on channel 1 (four ascending notes)
+    ld de, $060A
+    call PlayNote
+    ld c, 10
+    call WaitFrames
+    ld de, $0672
+    call PlayNote
+    ld c, 10
+    call WaitFrames
+    ld de, $06D6
+    call PlayNote
+    ld c, 10
+    call WaitFrames
+    ld de, $072A
+    call PlayNote
+    ld c, 10
+    call WaitFrames
+
 Loop:
 .wv:
     ldh a, [$FF44]             ; wait for LY == 144 (VBlank)
@@ -81,9 +107,45 @@ Loop:
 .nd:
     ld [$FE00], a
 
+    ; beep while any direction is held (re-trigger each frame -> sustained tone)
+    ld a, b
+    and $0F
+    cp $0F
+    jr z, .quiet
+    ld de, $06D6
+    call PlayNote
+.quiet:
+
     ; wait for LY to leave 144 so we only move once per frame
 .leave:
     ldh a, [$FF44]
     cp 144
     jr z, .leave
     jr Loop
+
+; Trigger a 0.25s note on channel 1. freq_reg: lo in E, hi (bits2-0) in D.
+PlayNote:
+    ld a, %10000000            ; NR11: 50% duty, length index 0 -> ~0.25s
+    ldh [$FF11], a
+    ld a, $F0                  ; NR12: volume 15, no envelope
+    ldh [$FF12], a
+    ld a, e
+    ldh [$FF13], a             ; NR13: frequency low
+    ld a, d
+    or %11000000               ; NR14: trigger + length-enable + freq high
+    ldh [$FF14], a
+    ret
+
+; Wait C VBlanks (C != 0).
+WaitFrames:
+.w1:
+    ldh a, [$FF44]
+    cp 144
+    jr nz, .w1
+.w2:
+    ldh a, [$FF44]
+    cp 144
+    jr z, .w2
+    dec c
+    jr nz, WaitFrames
+    ret

@@ -15,6 +15,7 @@
   (import "env" "dom_canvas_fill_style" (func $dom_canvas_fill_style_h (param i32) (param i32)))
   (import "env" "dom_on_frame" (func $dom_on_frame_h (param i32)))
   (import "env" "dom_rom_size" (func $dom_rom_size_h (param i32) (result i32)))
+  (import "env" "dom_audio_tone" (func $dom_audio_tone_h (param i32) (param i32) (param i32)))
   (import "env" "dom_canvas_fill_rect" (func $dom_canvas_fill_rect_h (param i32) (param i32) (param i32) (param i32) (param i32)))
   (import "env" "dom_on_key" (func $dom_on_key_h (param i32)))
   (import "env" "dom_on_click" (func $dom_on_click_h (param i32) (param i32)))
@@ -34,6 +35,8 @@
     (call $dom_on_frame_h (i32.wrap_i64 (local.get 0))))
   (func $dom_rom_size (param i64) (result i64)
     (i64.extend_i32_u (call $dom_rom_size_h (i32.wrap_i64 (local.get 0)))))
+  (func $dom_audio_tone (param i64) (param i64) (param i64)
+    (call $dom_audio_tone_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1)) (i32.wrap_i64 (local.get 2))))
   (func $dom_canvas_fill_rect (param i64) (param i64) (param i64) (param i64) (param i64)
     (call $dom_canvas_fill_rect_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1)) (i32.wrap_i64 (local.get 2)) (i32.wrap_i64 (local.get 3)) (i32.wrap_i64 (local.get 4))))
   (func $dom_on_key (param i64)
@@ -44,9 +47,9 @@
     (i64.extend_i32_u (call $dom_key_held_h (i32.wrap_i64 (local.get 0)))))
   (func $dom_set_text (param i64) (param i64)
     (call $dom_set_text_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1))))
-  (table 125 funcref)
+  (table 133 funcref)
   (export "__indirect_function_table" (table 0))
-  (elem (i32.const 0) $frame_closure $render_closure $color_of_closure $drive_closure $service_closure $lowbit_closure $ppu_closure $render_line_closure $tilecolor_closure $tick_closure $step_closure $cb_closure $cb_rot_closure $daa_closure $cond_closure $set_pair_closure $get_pair_closure $add_hl_closure $dec_r_closure $inc_r_closure $alu_closure $pop16_closure $push16_closure $set_flags_closure $set_r_closure $get_r_closure $unpack_f_closure $pack_f_closure $set_de_closure $set_bc_closure $set_hl_closure $get_de_closure $get_bc_closure $get_hl_closure $fetch16_closure $fetch_closure $wr_closure $joypad_closure $rd_closure $initload_closure $set_bank_closure $romld_closure $new_vec_closure $lo8_closure $hi8_closure $mask16_closure $mask8_closure $pad_left_closure $pad_right_closure $utf8_width_closure $_u8w_go_closure $_eaw_width_closure $utf8_rev_closure $_u8_rev_join_closure $utf8_sub_closure $_u8_slice_closure $utf8_at_closure $_u8_nth_closure $list_product_closure $list_sum_closure $range_closure $_range_down_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn $anon_12_fn $anon_13_fn $anon_14_fn $anon_15_fn $anon_16_fn $anon_17_fn $anon_18_fn $anon_19_fn $anon_20_fn $anon_21_fn $anon_22_fn $anon_23_fn $anon_24_fn $anon_25_fn $anon_26_fn $anon_27_fn $anon_28_fn $anon_29_fn $anon_30_fn $anon_31_fn $anon_32_fn $anon_33_fn $anon_34_fn $anon_35_fn $anon_36_fn $anon_37_fn $anon_38_fn $anon_39_fn $anon_40_fn $anon_41_fn $anon_42_fn $anon_43_fn $anon_44_fn $anon_45_fn $anon_46_fn $anon_47_fn $anon_48_fn $anon_49_fn $anon_50_fn $anon_51_fn $anon_52_fn $anon_53_fn $anon_54_fn $anon_55_fn $anon_56_fn $anon_57_fn $anon_58_fn $anon_59_fn $anon_60_fn $anon_61_fn)
+  (elem (i32.const 0) $frame_closure $render_closure $color_of_closure $drive_closure $service_closure $lowbit_closure $ppu_closure $render_line_closure $tilecolor_closure $tick_closure $step_closure $cb_closure $cb_rot_closure $daa_closure $cond_closure $set_pair_closure $get_pair_closure $add_hl_closure $dec_r_closure $inc_r_closure $alu_closure $pop16_closure $push16_closure $set_flags_closure $set_r_closure $get_r_closure $unpack_f_closure $pack_f_closure $set_de_closure $set_bc_closure $set_hl_closure $get_de_closure $get_bc_closure $get_hl_closure $fetch16_closure $fetch_closure $wr_closure $joypad_closure $apu_len_step_closure $apu_off_closure $apu_trigger_closure $apu_freq_closure $rd_closure $initload_closure $set_bank_closure $romld_closure $new_vec_closure $lo8_closure $hi8_closure $mask16_closure $mask8_closure $pad_left_closure $pad_right_closure $utf8_width_closure $_u8w_go_closure $_eaw_width_closure $utf8_rev_closure $_u8_rev_join_closure $utf8_sub_closure $_u8_slice_closure $utf8_at_closure $_u8_nth_closure $list_product_closure $list_sum_closure $range_closure $_range_down_closure $list_fold_closure $anon_0_fn $anon_1_fn $anon_2_fn $anon_3_fn $anon_4_fn $anon_5_fn $anon_6_fn $anon_7_fn $anon_8_fn $anon_9_fn $anon_10_fn $anon_11_fn $anon_12_fn $anon_13_fn $anon_14_fn $anon_15_fn $anon_16_fn $anon_17_fn $anon_18_fn $anon_19_fn $anon_20_fn $anon_21_fn $anon_22_fn $anon_23_fn $anon_24_fn $anon_25_fn $anon_26_fn $anon_27_fn $anon_28_fn $anon_29_fn $anon_30_fn $anon_31_fn $anon_32_fn $anon_33_fn $anon_34_fn $anon_35_fn $anon_36_fn $anon_37_fn $anon_38_fn $anon_39_fn $anon_40_fn $anon_41_fn $anon_42_fn $anon_43_fn $anon_44_fn $anon_45_fn $anon_46_fn $anon_47_fn $anon_48_fn $anon_49_fn $anon_50_fn $anon_51_fn $anon_52_fn $anon_53_fn $anon_54_fn $anon_55_fn $anon_56_fn $anon_57_fn $anon_58_fn $anon_59_fn $anon_60_fn $anon_61_fn $anon_62_fn $anon_63_fn $anon_64_fn $anon_65_fn)
   (global $__lang_bump (export "__lang_bump") (mut i32) (i32.const 2155))
 (global $__rgn_tmp (mut i64) (i64.const 0))
   (global $__lang_char_table i32 (i32.const 619))
@@ -74,6 +77,8 @@
   (global $romn (mut i64) (i64.const 0))
   (global $rom (mut i64) (i64.const 0))
   (global $mbc (mut i64) (i64.const 0))
+  (global $apu (mut i64) (i64.const 0))
+  (global $apuacc (mut i64) (i64.const 0))
   (global $ctab (mut i64) (i64.const 0))
   (global $reg (mut i64) (i64.const 0))
   (global $sys (mut i64) (i64.const 0))
@@ -2019,7 +2024,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 63
+    i32.const 67
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2042,6 +2047,19 @@
     global.get $mem
     i64.const 0
     call $__lifted_dl_5
+    drop
+    global.get $apuacc
+    i64.const 0
+    global.get $apuacc
+    i64.const 0
+    call $mere_vec_get
+    local.get 0
+    i64.add
+    call $mere_vec_set
+    drop
+    global.get $apuacc
+    i64.const 0
+    call $__lifted_al_6
     drop
     global.get $mem
     i64.const 65287
@@ -2103,7 +2121,7 @@
     local.get 4
     global.get $mem
     i64.const 0
-    return_call $__lifted_tl_6
+    return_call $__lifted_tl_7
     end)
   (func $step (param i64) (result i64)
     (local i32 i32)
@@ -2132,7 +2150,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 64
+    i32.const 68
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2163,7 +2181,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 65
+    i32.const 69
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2194,7 +2212,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 66
+    i32.const 70
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2391,7 +2409,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 67
+    i32.const 71
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2422,7 +2440,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 68
+    i32.const 72
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2453,7 +2471,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 69
+    i32.const 73
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2484,7 +2502,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 70
+    i32.const 74
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2515,7 +2533,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 71
+    i32.const 75
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2546,7 +2564,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 72
+    i32.const 76
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2577,7 +2595,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 73
+    i32.const 77
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2608,7 +2626,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 74
+    i32.const 78
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2639,7 +2657,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 75
+    i32.const 79
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2670,7 +2688,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 76
+    i32.const 80
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2701,7 +2719,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 77
+    i32.const 81
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2732,7 +2750,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 78
+    i32.const 82
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2763,7 +2781,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 79
+    i32.const 83
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2818,7 +2836,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 80
+    i32.const 84
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2849,7 +2867,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 81
+    i32.const 85
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2880,7 +2898,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 82
+    i32.const 86
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2941,7 +2959,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 83
+    i32.const 87
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -2972,7 +2990,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 84
+    i32.const 88
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3003,7 +3021,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 85
+    i32.const 89
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3082,6 +3100,78 @@
     i64.and
     i64.or
     i64.or)
+  (func $apu_len_step (param i64) (result i64)
+    global.get $apu
+    i64.const 0
+    return_call $__lifted_ch_8)
+  (func $apu_off (param i64) (result i64)
+    global.get $apu
+    i64.const 0
+    i64.const 0
+    call $mere_vec_set
+    drop
+    global.get $apu
+    i64.const 4
+    i64.const 0
+    call $mere_vec_set
+    drop
+    i64.const 0
+    i64.const 0
+    i64.const 0
+    call $dom_audio_tone
+    i64.const 0
+    drop
+    i64.const 1
+    i64.const 0
+    i64.const 0
+    call $dom_audio_tone
+    i64.const 0)
+  (func $apu_trigger (param i64) (result i64)
+    (local i32 i32)
+    global.get $__lang_bump
+    local.set 1
+    local.get 1
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 1
+    local.get 0
+    i64.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 2
+    local.get 2
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 2
+    local.get 1
+    i32.store offset=0
+    local.get 2
+    i32.const 90
+    i32.store offset=4
+    local.get 2
+    i64.extend_i32_u)
+  (func $apu_freq (param i64) (result i64)
+    local.get 0
+    i64.const 2048
+    i64.ge_s
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    i64.const 0
+    else
+    i64.const 131072
+    i64.const 2048
+    local.get 0
+    i64.sub
+    i64.div_s
+    end)
   (func $rd (param i64) (result i64)
     (local i32 i32)
     global.get $__lang_bump
@@ -3109,7 +3199,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 86
+    i32.const 91
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3170,7 +3260,7 @@
     global.get $romn
     global.get $rom
     i64.const 0
-    return_call $__lifted_cp_7)
+    return_call $__lifted_cp_9)
   (func $romld (param i64) (result i64)
     local.get 0
     global.get $romn
@@ -3218,7 +3308,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 87
+    i32.const 92
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3267,7 +3357,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 88
+    i32.const 93
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3298,7 +3388,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 89
+    i32.const 94
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3364,7 +3454,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 90
+    i32.const 95
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3655,7 +3745,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 91
+    i32.const 96
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3686,7 +3776,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 92
+    i32.const 97
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3717,7 +3807,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 93
+    i32.const 98
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3748,7 +3838,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 94
+    i32.const 99
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3779,7 +3869,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 95
+    i32.const 100
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3820,7 +3910,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 96
+    i32.const 101
     i32.store offset=4
     local.get 4
     i64.extend_i32_u
@@ -3865,7 +3955,7 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 97
+    i32.const 102
     i32.store offset=4
     local.get 4
     i64.extend_i32_u
@@ -3900,7 +3990,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 98
+    i32.const 103
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3931,7 +4021,7 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 99
+    i32.const 104
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
@@ -3962,11 +4052,11 @@
     local.get 1
     i32.store offset=0
     local.get 2
-    i32.const 100
+    i32.const 105
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
-  (func $__lifted_go_8 (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_go_10 (param i64) (param i64) (param i64) (param i64) (result i64)
     local.get 3
     local.get 0
     i64.ge_s
@@ -3985,9 +4075,9 @@
     local.get 3
     i64.const 1
     i64.add
-    return_call $__lifted_go_8
+    return_call $__lifted_go_10
     end)
-  (func $__lifted_cp_7 (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_cp_9 (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
     local.get 4
     i64.const 16384
     i64.ge_s
@@ -4025,9 +4115,86 @@
     local.get 4
     i64.const 1
     i64.add
-    return_call $__lifted_cp_7
+    return_call $__lifted_cp_9
     end)
-  (func $__lifted_tl_6 (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_ch_8 (param i64) (param i64) (result i64)
+    (local i64)
+    local.get 1
+    i64.const 4
+    i64.gt_s
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    i64.const 0
+    else
+    local.get 0
+    local.get 1
+    call $mere_vec_get
+    i64.const 1
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 0
+    local.get 1
+    i64.const 3
+    i64.add
+    call $mere_vec_get
+    i64.const 0
+    i64.gt_s
+    i64.extend_i32_u
+    else
+    i64.const 0
+    end
+    i32.wrap_i64
+    if (result i64)
+    local.get 0
+    local.get 1
+    i64.const 3
+    i64.add
+    call $mere_vec_get
+    i64.const 1
+    i64.sub
+    local.set 2
+    local.get 0
+    local.get 1
+    i64.const 3
+    i64.add
+    local.get 2
+    call $mere_vec_set
+    drop
+    local.get 2
+    i64.const 0
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 0
+    local.get 1
+    i64.const 0
+    call $mere_vec_set
+    drop
+    local.get 1
+    i64.const 4
+    i64.div_s
+    i64.const 0
+    i64.const 0
+    call $dom_audio_tone
+    i64.const 0
+    else
+    i64.const 0
+    end
+    else
+    i64.const 0
+    end
+    drop
+    local.get 0
+    local.get 1
+    i64.const 4
+    i64.add
+    return_call $__lifted_ch_8
+    end)
+  (func $__lifted_tl_7 (param i64) (param i64) (param i64) (param i64) (result i64)
     (local i64)
     local.get 0
     i64.const 1
@@ -4084,7 +4251,34 @@
     local.get 1
     local.get 2
     i64.const 0
-    return_call $__lifted_tl_6
+    return_call $__lifted_tl_7
+    else
+    i64.const 0
+    end)
+  (func $__lifted_al_6 (param i64) (param i64) (result i64)
+    local.get 0
+    i64.const 0
+    call $mere_vec_get
+    i64.const 4096
+    i64.ge_s
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 0
+    i64.const 0
+    local.get 0
+    i64.const 0
+    call $mere_vec_get
+    i64.const 4096
+    i64.sub
+    call $mere_vec_set
+    drop
+    i64.const 0
+    call $apu_len_step
+    drop
+    local.get 0
+    i64.const 0
+    return_call $__lifted_al_6
     else
     i64.const 0
     end)
@@ -4868,6 +5062,18 @@
   (func $joypad_closure (param i64) (param i64) (result i64)
     local.get 1
     call $joypad)
+  (func $apu_len_step_closure (param i64) (param i64) (result i64)
+    local.get 1
+    call $apu_len_step)
+  (func $apu_off_closure (param i64) (param i64) (result i64)
+    local.get 1
+    call $apu_off)
+  (func $apu_trigger_closure (param i64) (param i64) (result i64)
+    local.get 1
+    call $apu_trigger)
+  (func $apu_freq_closure (param i64) (param i64) (result i64)
+    local.get 1
+    call $apu_freq)
   (func $rd_closure (param i64) (param i64) (result i64)
     local.get 1
     call $rd)
@@ -4943,7 +5149,7 @@
   (func $list_fold_closure (param i64) (param i64) (result i64)
     local.get 1
     call $list_fold)
-  (func $anon_37_fn (param i64) (param i64) (result i64)
+  (func $anon_38_fn (param i64) (param i64) (result i64)
     (local i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -4977,11 +5183,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 101
+    i32.const 106
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_38_fn (param i64) (param i64) (result i64)
+  (func $anon_39_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i32 i32 i64 i32 i64 i32 i64 i32 i32 i32 i32 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -5090,7 +5296,7 @@
     unreachable
     end
     end)
-  (func $anon_36_fn (param i64) (param i64) (result i64)
+  (func $anon_37_fn (param i64) (param i64) (result i64)
     (local i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5124,11 +5330,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 102
+    i32.const 107
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_39_fn (param i64) (param i64) (result i64)
+  (func $anon_40_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5197,7 +5403,7 @@
     i32.load offset=4
     return_call_indirect (type $cl)
     end)
-  (func $anon_35_fn (param i64) (param i64) (result i64)
+  (func $anon_36_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i32)
     local.get 0
     i32.wrap_i64
@@ -5235,6 +5441,46 @@
     i32.wrap_i64
     i32.load offset=4
     return_call_indirect (type $cl))
+  (func $anon_35_fn (param i64) (param i64) (result i64)
+    (local i32 i32)
+    global.get $__lang_bump
+    local.set 2
+    local.get 2
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 2
+    local.get 1
+    i64.store offset=0
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 3
+    local.get 3
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 3
+    local.get 2
+    i32.store offset=0
+    local.get 3
+    i32.const 108
+    i32.store offset=4
+    local.get 3
+    i64.extend_i32_u)
+  (func $anon_41_fn (param i64) (param i64) (result i64)
+    (local i64)
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=0
+    local.set 2
+    local.get 2
+    local.get 1
+    i64.add)
   (func $anon_34_fn (param i64) (param i64) (result i64)
     (local i32 i32)
     global.get $__lang_bump
@@ -5262,51 +5508,11 @@
     local.get 2
     i32.store offset=0
     local.get 3
-    i32.const 103
+    i32.const 109
     i32.store offset=4
     local.get 3
     i64.extend_i32_u)
-  (func $anon_40_fn (param i64) (param i64) (result i64)
-    (local i64)
-    local.get 0
-    i32.wrap_i64
-    i64.load offset=0
-    local.set 2
-    local.get 2
-    local.get 1
-    i64.add)
-  (func $anon_33_fn (param i64) (param i64) (result i64)
-    (local i32 i32)
-    global.get $__lang_bump
-    local.set 2
-    local.get 2
-    i32.const 8
-    i32.add
-    global.set $__lang_bump
-    local.get 2
-    local.get 1
-    i64.store offset=0
-    global.get $__lang_bump
-    i32.const 3
-    i32.add
-    i32.const -4
-    i32.and
-    global.set $__lang_bump
-    global.get $__lang_bump
-    local.set 3
-    local.get 3
-    i32.const 8
-    i32.add
-    global.set $__lang_bump
-    local.get 3
-    local.get 2
-    i32.store offset=0
-    local.get 3
-    i32.const 104
-    i32.store offset=4
-    local.get 3
-    i64.extend_i32_u)
-  (func $anon_41_fn (param i64) (param i64) (result i64)
+  (func $anon_42_fn (param i64) (param i64) (result i64)
     (local i64)
     local.get 0
     i32.wrap_i64
@@ -5315,7 +5521,7 @@
     local.get 2
     local.get 1
     i64.mul)
-  (func $anon_32_fn (param i64) (param i64) (result i64)
+  (func $anon_33_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32 i64 i32 i64 i32 i64 i32 i32 i32 i32 i64)
     local.get 0
     i32.wrap_i64
@@ -5401,7 +5607,7 @@
     unreachable
     end
     end)
-  (func $anon_31_fn (param i64) (param i64) (result i64)
+  (func $anon_32_fn (param i64) (param i64) (result i64)
     (local i64 i64)
     local.get 0
     i32.wrap_i64
@@ -5420,7 +5626,7 @@
     i32.wrap_i64
     i32.load offset=4
     return_call_indirect (type $cl))
-  (func $anon_30_fn (param i64) (param i64) (result i64)
+  (func $anon_31_fn (param i64) (param i64) (result i64)
     (local i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5454,11 +5660,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 105
+    i32.const 110
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_42_fn (param i64) (param i64) (result i64)
+  (func $anon_43_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5499,11 +5705,11 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 106
+    i32.const 111
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
-  (func $anon_43_fn (param i64) (param i64) (result i64)
+  (func $anon_44_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i32 i32 i64 i32 i64 i32 i64 i32 i32 i32 i32 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -5661,7 +5867,7 @@
     unreachable
     end
     end)
-  (func $anon_29_fn (param i64) (param i64) (result i64)
+  (func $anon_30_fn (param i64) (param i64) (result i64)
     (local i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5695,11 +5901,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 107
+    i32.const 112
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_44_fn (param i64) (param i64) (result i64)
+  (func $anon_45_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -5742,7 +5948,7 @@
     i32.wrap_i64
     i32.load offset=4
     return_call_indirect (type $cl))
-  (func $anon_28_fn (param i64) (param i64) (result i64)
+  (func $anon_29_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32 i64 i32 i64 i32 i64 i32 i32 i32 i32 i64)
     local.get 0
     i32.wrap_i64
@@ -5819,7 +6025,7 @@
     unreachable
     end
     end)
-  (func $anon_27_fn (param i64) (param i64) (result i64)
+  (func $anon_28_fn (param i64) (param i64) (result i64)
     (local i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5853,11 +6059,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 108
+    i32.const 113
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_45_fn (param i64) (param i64) (result i64)
+  (func $anon_46_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -5898,11 +6104,11 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 109
+    i32.const 114
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
-  (func $anon_46_fn (param i64) (param i64) (result i64)
+  (func $anon_47_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -6226,7 +6432,7 @@
     end
     end
     end)
-  (func $anon_26_fn (param i64) (param i64) (result i64)
+  (func $anon_27_fn (param i64) (param i64) (result i64)
     (local i64 i64)
     local.get 0
     i32.wrap_i64
@@ -6251,7 +6457,7 @@
     call $__lang_str_repeat
     call $__lang_str_concat
     end)
-  (func $anon_25_fn (param i64) (param i64) (result i64)
+  (func $anon_26_fn (param i64) (param i64) (result i64)
     (local i64 i64)
     local.get 0
     i32.wrap_i64
@@ -6276,7 +6482,7 @@
     local.get 2
     call $__lang_str_concat
     end)
-  (func $anon_24_fn (param i64) (param i64) (result i64)
+  (func $anon_25_fn (param i64) (param i64) (result i64)
     (local i64 i64)
     local.get 0
     i32.wrap_i64
@@ -6288,10 +6494,10 @@
     local.get 3
     local.get 1
     i64.const 0
-    call $__lifted_go_8
+    call $__lifted_go_10
     drop
     local.get 3)
-  (func $anon_23_fn (param i64) (param i64) (result i64)
+  (func $anon_24_fn (param i64) (param i64) (result i64)
     (local i64)
     local.get 0
     i32.wrap_i64
@@ -6301,6 +6507,234 @@
     local.get 1
     call $mask16
     call $mere_vec_get)
+  (func $anon_23_fn (param i64) (param i64) (result i64)
+    (local i64 i32 i32)
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=0
+    local.set 2
+    global.get $__lang_bump
+    local.set 3
+    local.get 3
+    i32.const 16
+    i32.add
+    global.set $__lang_bump
+    local.get 3
+    local.get 1
+    i64.store offset=0
+    local.get 3
+    local.get 2
+    i64.store offset=8
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 4
+    local.get 4
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 4
+    local.get 3
+    i32.store offset=0
+    local.get 4
+    i32.const 115
+    i32.store offset=4
+    local.get 4
+    i64.extend_i32_u)
+  (func $anon_48_fn (param i64) (param i64) (result i64)
+    (local i64 i64 i32 i32)
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=0
+    local.set 2
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=8
+    local.set 3
+    global.get $__lang_bump
+    local.set 4
+    local.get 4
+    i32.const 24
+    i32.add
+    global.set $__lang_bump
+    local.get 4
+    local.get 1
+    i64.store offset=0
+    local.get 4
+    local.get 2
+    i64.store offset=8
+    local.get 4
+    local.get 3
+    i64.store offset=16
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 5
+    local.get 5
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 5
+    local.get 4
+    i32.store offset=0
+    local.get 5
+    i32.const 116
+    i32.store offset=4
+    local.get 5
+    i64.extend_i32_u)
+  (func $anon_49_fn (param i64) (param i64) (result i64)
+    (local i64 i64 i64 i32 i32)
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=0
+    local.set 2
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=8
+    local.set 3
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=16
+    local.set 4
+    global.get $__lang_bump
+    local.set 5
+    local.get 5
+    i32.const 32
+    i32.add
+    global.set $__lang_bump
+    local.get 5
+    local.get 1
+    i64.store offset=0
+    local.get 5
+    local.get 2
+    i64.store offset=8
+    local.get 5
+    local.get 3
+    i64.store offset=16
+    local.get 5
+    local.get 4
+    i64.store offset=24
+    global.get $__lang_bump
+    i32.const 3
+    i32.add
+    i32.const -4
+    i32.and
+    global.set $__lang_bump
+    global.get $__lang_bump
+    local.set 6
+    local.get 6
+    i32.const 8
+    i32.add
+    global.set $__lang_bump
+    local.get 6
+    local.get 5
+    i32.store offset=0
+    local.get 6
+    i32.const 117
+    i32.store offset=4
+    local.get 6
+    i64.extend_i32_u)
+  (func $anon_50_fn (param i64) (param i64) (result i64)
+    (local i64 i64 i64 i64 i64 i64 i64 i64)
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=0
+    local.set 2
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=8
+    local.set 3
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=16
+    local.set 4
+    local.get 0
+    i32.wrap_i64
+    i64.load offset=24
+    local.set 5
+    global.get $mem
+    local.get 2
+    call $mere_vec_get
+    global.get $mem
+    local.get 1
+    call $mere_vec_get
+    i64.const 7
+    i64.and
+    i64.const 8
+    i64.shl
+    i64.or
+    local.set 6
+    local.get 6
+    call $apu_freq
+    local.set 7
+    global.get $mem
+    local.get 3
+    call $mere_vec_get
+    i64.const 4
+    i64.shr_s
+    local.set 8
+    global.get $mem
+    local.get 1
+    call $mere_vec_get
+    i64.const 64
+    i64.and
+    i64.const 0
+    i64.ne
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    i64.const 64
+    global.get $mem
+    local.get 4
+    call $mere_vec_get
+    i64.const 63
+    i64.and
+    i64.sub
+    else
+    i64.const 0
+    end
+    local.set 9
+    global.get $apu
+    local.get 5
+    i64.const 1
+    call $mere_vec_set
+    drop
+    global.get $apu
+    local.get 5
+    i64.const 1
+    i64.add
+    local.get 7
+    call $mere_vec_set
+    drop
+    global.get $apu
+    local.get 5
+    i64.const 2
+    i64.add
+    local.get 8
+    call $mere_vec_set
+    drop
+    global.get $apu
+    local.get 5
+    i64.const 3
+    i64.add
+    local.get 9
+    call $mere_vec_set
+    drop
+    local.get 5
+    i64.const 4
+    i64.div_s
+    local.get 7
+    local.get 8
+    call $dom_audio_tone
+    i64.const 0)
   (func $anon_22_fn (param i64) (param i64) (result i64)
     (local i64 i32 i32)
     local.get 0
@@ -6335,12 +6769,12 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 110
+    i32.const 118
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_47_fn (param i64) (param i64) (result i64)
-    (local i64 i64 i64)
+  (func $anon_51_fn (param i64) (param i64) (result i64)
+    (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
     i64.load offset=0
@@ -6397,6 +6831,151 @@
     local.get 1
     call $mask8
     call $mere_vec_set
+    drop
+    local.get 4
+    i64.const 65300
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 1
+    i64.const 128
+    i64.and
+    i64.const 0
+    i64.ne
+    i64.extend_i32_u
+    else
+    i64.const 0
+    end
+    i32.wrap_i64
+    if (result i64)
+    i64.const 0
+    call $apu_trigger
+    local.set 8
+    local.get 8
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65297
+    local.get 8
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 7
+    local.get 7
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65298
+    local.get 7
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 6
+    local.get 6
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65299
+    local.get 6
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 5
+    local.get 5
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65300
+    local.get 5
+    i32.wrap_i64
+    i32.load offset=4
+    return_call_indirect (type $cl)
+    else
+    local.get 4
+    i64.const 65305
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 1
+    i64.const 128
+    i64.and
+    i64.const 0
+    i64.ne
+    i64.extend_i32_u
+    else
+    i64.const 0
+    end
+    i32.wrap_i64
+    if (result i64)
+    i64.const 4
+    call $apu_trigger
+    local.set 12
+    local.get 12
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65302
+    local.get 12
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 11
+    local.get 11
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65303
+    local.get 11
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 10
+    local.get 10
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65304
+    local.get 10
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 9
+    local.get 9
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 65305
+    local.get 9
+    i32.wrap_i64
+    i32.load offset=4
+    return_call_indirect (type $cl)
+    else
+    local.get 4
+    i64.const 65318
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    local.get 1
+    i64.const 128
+    i64.and
+    i64.const 0
+    i64.eq
+    i64.extend_i32_u
+    else
+    i64.const 0
+    end
+    i32.wrap_i64
+    if (result i64)
+    i64.const 0
+    return_call $apu_off
+    else
+    i64.const 0
+    end
+    end
+    end
     end
     end
     end)
@@ -6586,11 +7165,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 111
+    i32.const 119
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_48_fn (param i64) (param i64) (result i64)
+  (func $anon_52_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -6724,11 +7303,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 112
+    i32.const 120
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_49_fn (param i64) (param i64) (result i64)
+  (func $anon_53_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -6769,11 +7348,11 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 113
+    i32.const 121
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
-  (func $anon_50_fn (param i64) (param i64) (result i64)
+  (func $anon_54_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -6931,11 +7510,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 114
+    i32.const 122
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_51_fn (param i64) (param i64) (result i64)
+  (func $anon_55_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -6976,11 +7555,11 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 115
+    i32.const 123
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
-  (func $anon_52_fn (param i64) (param i64) (result i64)
+  (func $anon_56_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -7028,11 +7607,11 @@
     local.get 5
     i32.store offset=0
     local.get 6
-    i32.const 116
+    i32.const 124
     i32.store offset=4
     local.get 6
     i64.extend_i32_u)
-  (func $anon_53_fn (param i64) (param i64) (result i64)
+  (func $anon_57_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -7103,11 +7682,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 117
+    i32.const 125
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_54_fn (param i64) (param i64) (result i64)
+  (func $anon_58_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -7263,11 +7842,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 118
+    i32.const 126
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_55_fn (param i64) (param i64) (result i64)
+  (func $anon_59_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -7775,11 +8354,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 119
+    i32.const 127
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_56_fn (param i64) (param i64) (result i64)
+  (func $anon_60_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -7918,11 +8497,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 120
+    i32.const 128
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_57_fn (param i64) (param i64) (result i64)
+  (func $anon_61_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -8165,11 +8744,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 121
+    i32.const 129
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_58_fn (param i64) (param i64) (result i64)
+  (func $anon_62_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -8338,11 +8917,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 122
+    i32.const 130
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_59_fn (param i64) (param i64) (result i64)
+  (func $anon_63_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -12105,11 +12684,11 @@
     local.get 3
     i32.store offset=0
     local.get 4
-    i32.const 123
+    i32.const 131
     i32.store offset=4
     local.get 4
     i64.extend_i32_u)
-  (func $anon_60_fn (param i64) (param i64) (result i64)
+  (func $anon_64_fn (param i64) (param i64) (result i64)
     (local i64 i64 i32 i32)
     local.get 0
     i32.wrap_i64
@@ -12150,11 +12729,11 @@
     local.get 4
     i32.store offset=0
     local.get 5
-    i32.const 124
+    i32.const 132
     i32.store offset=4
     local.get 5
     i64.extend_i32_u)
-  (func $anon_61_fn (param i64) (param i64) (result i64)
+  (func $anon_65_fn (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 0
     i32.wrap_i64
@@ -12289,7 +12868,7 @@
     (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))
   (func $__mcopy_unit (param $v i64) (result i64) (local.get $v))
   (func $main (export "main") (result i32)
-    (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i32)
+    (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i32)
     i64.const 0
     global.set $rA
     i64.const 1
@@ -12372,10 +12951,7 @@
     i64.const 0
     call $initload
     drop
-    i64.const 73
-    call $__lang_bytes_of_hex
-    global.set $ctab
-    i64.const 17
+    i64.const 8
     call $new_vec
     local.set 3
     local.get 3
@@ -12387,8 +12963,8 @@
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
-    global.set $reg
-    i64.const 3
+    global.set $apu
+    i64.const 1
     call $new_vec
     local.set 4
     local.get 4
@@ -12400,8 +12976,11 @@
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
-    global.set $sys
-    i64.const 23040
+    global.set $apuacc
+    i64.const 73
+    call $__lang_bytes_of_hex
+    global.set $ctab
+    i64.const 17
     call $new_vec
     local.set 5
     local.get 5
@@ -12413,8 +12992,8 @@
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
-    global.set $fb
-    i64.const 23040
+    global.set $reg
+    i64.const 3
     call $new_vec
     local.set 6
     local.get 6
@@ -12426,6 +13005,32 @@
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
+    global.set $sys
+    i64.const 23040
+    call $new_vec
+    local.set 7
+    local.get 7
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 0
+    local.get 7
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    global.set $fb
+    i64.const 23040
+    call $new_vec
+    local.set 8
+    local.get 8
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 0
+    local.get 8
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
     global.set $bgc
     global.get $reg
     global.get $rA
@@ -12434,39 +13039,39 @@
     drop
     global.get $reg
     call $set_bc
-    local.set 7
-    local.get 7
+    local.set 9
+    local.get 9
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
     i64.const 19
-    local.get 7
+    local.get 9
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
     drop
     global.get $reg
     call $set_de
-    local.set 8
-    local.get 8
+    local.set 10
+    local.get 10
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
     i64.const 216
-    local.get 8
+    local.get 10
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
     drop
     global.get $reg
     call $set_hl
-    local.set 9
-    local.get 9
+    local.set 11
+    local.get 11
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
     i64.const 333
-    local.get 9
+    local.get 11
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
@@ -12483,6 +13088,26 @@
     drop
     global.get $reg
     call $set_flags
+    local.set 15
+    local.get 15
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 1
+    local.get 15
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    local.set 14
+    local.get 14
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 0
+    local.get 14
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
     local.set 13
     local.get 13
     i32.wrap_i64
@@ -12498,28 +13123,8 @@
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
-    i64.const 0
+    i64.const 1
     local.get 12
-    i32.wrap_i64
-    i32.load offset=4
-    call_indirect (type $cl)
-    local.set 11
-    local.get 11
-    i32.wrap_i64
-    i32.load offset=0
-    i64.extend_i32_u
-    i64.const 1
-    local.get 11
-    i32.wrap_i64
-    i32.load offset=4
-    call_indirect (type $cl)
-    local.set 10
-    local.get 10
-    i32.wrap_i64
-    i32.load offset=0
-    i64.extend_i32_u
-    i64.const 1
-    local.get 10
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
@@ -12531,30 +13136,30 @@
     global.set $scale
     i64.const 23040
     call $new_vec
-    local.set 14
-    local.get 14
+    local.set 16
+    local.get 16
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
     i64.const 0
     i64.const 1
     i64.sub
-    local.get 14
+    local.get 16
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
     global.set $prev
     i64.const 1
     call $new_vec
-    local.set 15
-    local.get 15
+    local.set 17
+    local.get 17
     i32.wrap_i64
     i32.load offset=0
     i64.extend_i32_u
     i64.const 0
     i64.const 1
     i64.sub
-    local.get 15
+    local.get 17
     i32.wrap_i64
     i32.load offset=4
     call_indirect (type $cl)
@@ -12566,18 +13171,18 @@
     i32.and
     global.set $__lang_bump
     global.get $__lang_bump
-    local.set 16
-    local.get 16
+    local.set 18
+    local.get 18
     i32.const 8
     i32.add
     global.set $__lang_bump
-    local.get 16
+    local.get 18
     i32.const 0
     i32.store offset=0
-    local.get 16
+    local.get 18
     i32.const 0
     i32.store offset=4
-    local.get 16
+    local.get 18
     i64.extend_i32_u
     call $dom_on_frame
     i64.const 0
