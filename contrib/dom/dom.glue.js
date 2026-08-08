@@ -28,6 +28,22 @@ export function makeDomGlue() {
   // `setRom` before running; `dom_rom_size` / `dom_rom_byte` read it.
   let romBytes = new Uint8Array(0);
 
+  // Held-key state for games polled via dom_key_held. Button codes:
+  // 0=right 1=left 2=up 3=down 4=A 5=B 6=select 7=start.
+  const held = [0, 0, 0, 0, 0, 0, 0, 0];
+  const KEYMAP = {
+    ArrowRight: 0, ArrowLeft: 1, ArrowUp: 2, ArrowDown: 3,
+    z: 4, Z: 4, x: 5, X: 5, Shift: 6, Enter: 7,
+  };
+  if (typeof document !== "undefined") {
+    document.addEventListener("keydown", (e) => {
+      const c = KEYMAP[e.key]; if (c !== undefined) { held[c] = 1; e.preventDefault(); }
+    });
+    document.addEventListener("keyup", (e) => {
+      const c = KEYMAP[e.key]; if (c !== undefined) { held[c] = 0; e.preventDefault(); }
+    });
+  }
+
   // Handle 0 is reserved as a "null" sentinel — `dom_get_by_id` returns
   // it when the id doesn't match anything, and the other ops are
   // defensively no-ops on it. User-allocated handles start at 1.
@@ -173,6 +189,7 @@ export function makeDomGlue() {
     // it a byte at a time, so large ROMs need not be embedded in the module.
     dom_rom_size: (_ignored) => romBytes.length,
     dom_rom_byte: (i) => romBytes[i] | 0,
+    dom_key_held: (code) => held[code] | 0,
   };
 
   const setRom = (u8) => { romBytes = u8; };

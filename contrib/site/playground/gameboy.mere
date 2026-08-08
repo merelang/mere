@@ -43,9 +43,21 @@ let rec initload = fn i -> if i >= 32768 then () else
   let _ = vec_set mem i (if i < romn then vec_get rom i else 0) in initload (i + 1);
 let _ = initload 0;
 let rd = fn mem -> fn a -> vec_get mem (mask16 a);
+// joypad ($FF00): the game writes a group-select (bit4=0 -> direction keys,
+// bit5=0 -> action keys) then reads back the 4 button bits (0 = pressed). We
+// compute those from the host's polled key state (dom_key_held) at write time.
+let joypad = fn v ->
+  let sel = bit_and v 0x30 in
+  let dir = bit_or (dom_key_held 0) (bit_or (bit_shl (dom_key_held 1) 1)
+            (bit_or (bit_shl (dom_key_held 2) 2) (bit_shl (dom_key_held 3) 3))) in
+  let act = bit_or (dom_key_held 4) (bit_or (bit_shl (dom_key_held 5) 1)
+            (bit_or (bit_shl (dom_key_held 6) 2) (bit_shl (dom_key_held 7) 3))) in
+  let bits = if bit_and sel 0x10 == 0 then dir else if bit_and sel 0x20 == 0 then act else 0 in
+  bit_or 0xC0 (bit_or sel (bit_and (bit_xor bits 15) 15));   // held -> 0 (pressed)
 let wr = fn mem -> fn a -> fn v ->
   let addr = mask16 a in
-  if addr >= 0x2000 && addr <= 0x3FFF then set_bank (bit_and v 31)
+  if addr == 0xFF00 then vec_set mem 0xFF00 (joypad v)
+  else if addr >= 0x2000 && addr <= 0x3FFF then set_bank (bit_and v 31)
   else if addr < 0x8000 then ()
   else vec_set mem addr (mask8 v);
 
@@ -509,16 +521,23 @@ let render = fn (u : unit) ->
       let rec pxl = fn i ->
         if i >= 23040 then ()
         else
-          let _ = if vec_get fb i == s then dom_canvas_fill_rect screen (bit_and i 159 * scale) (i / 160 * scale) scale scale else () in
+          let y = i / 160 in
+          let x = i - y * 160 in
+          let _ = if vec_get fb i == s then dom_canvas_fill_rect screen (x * scale) (y * scale) scale scale else () in
           pxl (i + 1) in
       let _ = pxl 0 in
       shade (s + 1) in
   shade 0;
 
 // one animation frame: run ~a frame's worth of instructions, then repaint
+// Each frame runs inside a region block so the per-scanline render closures and
+// other transient garbage are reclaimed — otherwise the linear memory fills up
+// after a few seconds. mem/reg/fb are global, so their mutations persist.
 let frame = fn (u : unit) ->
-  let _ = drive 30000 in
-  render ();
+  region R {
+    let _ = drive 30000 in
+    render ()
+  };
 
 let _ = dom_on_frame frame;
 0

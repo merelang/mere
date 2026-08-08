@@ -64,3 +64,9 @@ extern fn dom_on_frame: (unit -> unit) -> unit;
 // int). Added for the Game Boy emulator dogfood.
 extern fn dom_rom_size: int -> int;
 extern fn dom_rom_byte: int -> int;
+
+// Polled key state for games: returns 1 if the button with the given code is
+// currently held (0-3 = right/left/up/down, 4-7 = A/B/select/start), else 0.
+// Unlike dom_on_key (keydown only) this reflects press-and-hold, which a game's
+// per-frame input poll needs. Added for the Game Boy emulator dogfood.
+extern fn dom_key_held: int -> int;
