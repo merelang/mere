@@ -18,6 +18,8 @@ let usage () =
   print_endline "  mere -rv <file.mere>  emit a flat RV32IM binary (runs on the Mere RISC-V";
   print_endline "                        emulator; integer subset — see codegen_riscv.ml)";
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
+  print_endline "  mere -rvs <file.mere> print an RV32IM assembly listing (disassembled)";
+  print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
   print_endline "  mere -r               start interactive REPL";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
@@ -181,6 +183,11 @@ let compile_to_riscv ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_riscv.emit_program ~main_ty prog
+
+let listing_riscv ?base_dir source =
+  let open Mere in
+  let (prog, main_ty) = infer_program ?base_dir source in
+  Codegen_riscv.emit_listing ~main_ty prog
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -358,6 +365,19 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action (compile_to_riscv ~base_dir:base) path source
+  | [_; "-rvse"; expr] ->
+    run_action listing_riscv "<inline>" expr
+  | [_; "-rvs"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (listing_riscv ~base_dir:base) path source
+  | [_; "-rvd"; path] ->
+    (* disassemble a flat RV32I binary (e.g. one emitted by `mere -rv`) *)
+    let ic = open_in_bin path in
+    let n = in_channel_length ic in
+    let bytes = really_input_string ic n in
+    close_in ic;
+    print_string (Mere.Riscv_disasm.disasm_binary bytes)
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Mere.Pipeline.type_of path source
