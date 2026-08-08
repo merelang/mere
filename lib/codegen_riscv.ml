@@ -1323,8 +1323,8 @@ let assemble (prog : item list) : string =
   List.iter (fun it ->
     match it with
     | Label name -> Hashtbl.replace labels name !addr
-    | Word _ | Jal _ | Branch _ -> addr := !addr + 4
-    | LoadAddr _ -> addr := !addr + 8
+    | Word _ | Jal _ -> addr := !addr + 4
+    | Branch _ | LoadAddr _ -> addr := !addr + 8   (* branch = inverted-cond + jal (long range) *)
     | Bytes b -> addr := !addr + String.length b
   ) prog;
   let target name here =
@@ -1352,7 +1352,11 @@ let assemble (prog : item list) : string =
     | Word w -> put_word (w land 0xFFFFFFFF); here := !here + 4
     | Jal (rd, name) -> put_word (enc_j (target name !here) rd 0x6F); here := !here + 4
     | Branch (f3, rs1, rs2, name) ->
-      put_word (enc_b (target name !here) rs2 rs1 f3 0x63); here := !here + 4
+      (* long-range branch: invert the condition to skip a J-type jump, which
+         has ±1MB reach (a bare B-type is only ±4KB and silently truncates) *)
+      put_word (enc_b 8 rs2 rs1 (f3 lxor 1) 0x63);        (* b<!cond> rs1,rs2, +8 *)
+      put_word (enc_j (target name (!here + 4)) zero 0x6F); (* jal x0, name *)
+      here := !here + 8
     | LoadAddr (rd, name) ->
       let a = abs name in
       let hi = (a + 0x800) asr 12 in
@@ -1370,8 +1374,8 @@ let listing (prog : item list) : string =
   let addr = ref 0 in
   List.iter (fun it -> match it with
     | Label name -> Hashtbl.replace labels name !addr
-    | Word _ | Jal _ | Branch _ -> addr := !addr + 4
-    | LoadAddr _ -> addr := !addr + 8
+    | Word _ | Jal _ -> addr := !addr + 4
+    | Branch _ | LoadAddr _ -> addr := !addr + 8
     | Bytes b -> addr := !addr + String.length b) prog;
   let buf = Buffer.create 4096 in
   let here = ref 0 in
@@ -1390,15 +1394,13 @@ let listing (prog : item list) : string =
       Buffer.add_string buf (Printf.sprintf "  %6x:  %08x  %s\n" !here w mn);
       here := !here + 4
     | Branch (f3, rs1, rs2, name) ->
-      let off = (try Hashtbl.find labels name with Not_found -> !here) - !here in
-      let w = enc_b off rs2 rs1 f3 0x63 in
       let m = [| "beq"; "bne"; "?"; "?"; "blt"; "bge"; "bltu"; "bgeu" |].(f3) in
       let mn =
         if rs2 = 0 && f3 = 0 then Printf.sprintf "beqz %s, %s" (Riscv_disasm.r rs1) name
         else if rs2 = 0 && f3 = 1 then Printf.sprintf "bnez %s, %s" (Riscv_disasm.r rs1) name
         else Printf.sprintf "%s %s, %s, %s" m (Riscv_disasm.r rs1) (Riscv_disasm.r rs2) name in
-      Buffer.add_string buf (Printf.sprintf "  %6x:  %08x  %s\n" !here w mn);
-      here := !here + 4
+      Buffer.add_string buf (Printf.sprintf "  %6x:  (br+jal)  %s  (long-range)\n" !here mn);
+      here := !here + 8
     | LoadAddr (rd, name) ->
       Buffer.add_string buf (Printf.sprintf "  %6x:  (la)      la %s, %s\n" !here (Riscv_disasm.r rd) name);
       here := !here + 8

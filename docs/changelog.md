@@ -4,6 +4,17 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.146 — 2026-08-08
+
+_Long-range conditional branches on the RV32I backend. A bare B-type branch
+reaches only ±4KB and silently truncated its offset in large functions (the
+self-hosted compiler has functions well past that). Every conditional branch
+is now emitted as an inverted branch skipping a J-type jump (±1MB reach), so
+branch targets are correct at any distance. All existing tests stay
+byte-identical to the interpreter. `lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.145 — 2026-08-08
 
 _An injected Mere-source runtime prelude for the RV32I backend
