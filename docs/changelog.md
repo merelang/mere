@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.136 — 2026-08-08
+
+_A disassembler for the RV32I backend — the debugging surface the direct
+byte-emitter skipped. `lib/riscv_disasm.ml` decodes one RV32IM word to a
+readable mnemonic (mirroring the emulator's imm_* decoders, inverse of the
+enc_* encoders), recognising the mv / li / ret / j / nop / beqz pseudo-ops.
+Two new modes use it: `mere -rvs file.mere` prints an assembly listing of
+the compiler's own output (address, hex, mnemonic, with real label names on
+jumps/branches), and `mere -rvd file.bin` disassembles a flat binary. This
+makes the register-allocated code inspectable — e.g. factorial shows the
+param pinned in s1, `n <= 1` folded to `slti a0, a0, 2`, and `n * fact(n-1)`
+as `mul a0, s1, a0` — and sets up debugging for the heap/closure work
+ahead._
+
+---
+
 ## v0.1.135 — 2026-08-08
 
 _Register allocation for the RV32I backend (M1). The M0 stack machine kept
