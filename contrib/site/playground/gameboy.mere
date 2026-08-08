@@ -43,6 +43,43 @@ let rec initload = fn i -> if i >= 32768 then () else
   let _ = vec_set mem i (if i < romn then vec_get rom i else 0) in initload (i + 1);
 let _ = initload 0;
 let rd = fn mem -> fn a -> vec_get mem (mask16 a);
+
+// --- APU (minimal): the two pulse channels driven onto host audio channels ---
+// State per channel, 4 ints each: [on, freqHz, vol, lenCounter]. ch1 at 0, ch2
+// at 4. A trigger write (NRx4 bit7) starts a note; the length counter (clocked
+// at 256 Hz, see `tick`) silences it when it expires (0 = sustain forever).
+let apu = new_vec 8 0;
+let apuacc = new_vec 1 0;                 // M-cycle accumulator for the 256 Hz clock
+// GB pulse frequency: 131072 / (2048 - freq_reg) Hz.
+let apu_freq = fn r -> if r >= 2048 then 0 else 131072 / (2048 - r);
+// base = 0 (ch1) or 4 (ch2); nr1/2/3/4 are that channel's register addresses.
+let apu_trigger = fn base -> fn nr1 -> fn nr2 -> fn nr3 -> fn nr4 ->
+  let r = bit_or (vec_get mem nr3) (bit_shl (bit_and (vec_get mem nr4) 7) 8) in
+  let f = apu_freq r in
+  let vol = bit_shr (vec_get mem nr2) 4 in
+  let len = if bit_and (vec_get mem nr4) 64 != 0 then 64 - bit_and (vec_get mem nr1) 63 else 0 in
+  let _ = vec_set apu base 1 in
+  let _ = vec_set apu (base + 1) f in
+  let _ = vec_set apu (base + 2) vol in
+  let _ = vec_set apu (base + 3) len in
+  dom_audio_tone (base / 4) f vol;
+// NR52 bit7 cleared: all sound off.
+let apu_off = fn () ->
+  let _ = vec_set apu 0 0 in let _ = vec_set apu 4 0 in
+  let _ = dom_audio_tone 0 0 0 in dom_audio_tone 1 0 0;
+// one 256 Hz length-counter step: decrement active channels, silence at 0.
+let apu_len_step = fn () ->
+  let rec ch = fn base ->
+    if base > 4 then ()
+    else
+      let _ = if vec_get apu base == 1 && vec_get apu (base + 3) > 0 then
+                let nl = vec_get apu (base + 3) - 1 in
+                let _ = vec_set apu (base + 3) nl in
+                if nl == 0 then let _ = vec_set apu base 0 in dom_audio_tone (base / 4) 0 0 else ()
+              else () in
+      ch (base + 4) in
+  ch 0;
+
 // joypad ($FF00): the game writes a group-select (bit4=0 -> direction keys,
 // bit5=0 -> action keys) then reads back the 4 button bits (0 = pressed). We
 // compute those from the host's polled key state (dom_key_held) at write time.
@@ -59,7 +96,12 @@ let wr = fn mem -> fn a -> fn v ->
   if addr == 0xFF00 then vec_set mem 0xFF00 (joypad v)
   else if addr >= 0x2000 && addr <= 0x3FFF then set_bank (bit_and v 31)
   else if addr < 0x8000 then ()
-  else vec_set mem addr (mask8 v);
+  else
+    let _ = vec_set mem addr (mask8 v) in
+    if addr == 0xFF14 && bit_and v 0x80 != 0 then apu_trigger 0 0xFF11 0xFF12 0xFF13 0xFF14
+    else if addr == 0xFF19 && bit_and v 0x80 != 0 then apu_trigger 4 0xFF16 0xFF17 0xFF18 0xFF19
+    else if addr == 0xFF26 && bit_and v 0x80 == 0 then apu_off ()
+    else ();
 
 let fetch = fn mem -> fn reg ->
   let pc = vec_get reg rPC in let b = vec_get mem pc in
@@ -370,6 +412,10 @@ let tick = fn mc ->
   let _ = vec_set sys 0 (vec_get sys 0 + t) in
   let rec dl = fn () -> if vec_get sys 0 >= 256 then let _ = vec_set sys 0 (vec_get sys 0 - 256) in let _ = vec_set mem 0xFF04 (bit_and (vec_get mem 0xFF04 + 1) 255) in dl () else () in
   let _ = dl () in
+  // APU frame-sequencer length clock at 256 Hz (every 4096 M-cycles).
+  let _ = vec_set apuacc 0 (vec_get apuacc 0 + mc) in
+  let rec al = fn () -> if vec_get apuacc 0 >= 4096 then let _ = vec_set apuacc 0 (vec_get apuacc 0 - 4096) in let _ = apu_len_step () in al () else () in
+  let _ = al () in
   let tac = vec_get mem 0xFF07 in
   if bit_and tac 4 == 0 then ()
   else

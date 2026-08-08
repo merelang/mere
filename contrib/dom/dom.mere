@@ -70,3 +70,9 @@ extern fn dom_rom_byte: int -> int;
 // Unlike dom_on_key (keydown only) this reflects press-and-hold, which a game's
 // per-frame input poll needs. Added for the Game Boy emulator dogfood.
 extern fn dom_key_held: int -> int;
+
+// A tone on one of up to four audio channels: dom_audio_tone(chan, freqHz, vol)
+// where vol is 0..15 (0 = silence that channel). The host drives a Web Audio
+// oscillator per channel, so an emulator's sound unit can map its channels onto
+// real audio. Added for the Game Boy APU dogfood.
+extern fn dom_audio_tone: int -> int -> int -> unit;

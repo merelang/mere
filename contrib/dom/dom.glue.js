@@ -35,8 +35,31 @@ export function makeDomGlue() {
     ArrowRight: 0, ArrowLeft: 1, ArrowUp: 2, ArrowDown: 3,
     z: 4, Z: 4, x: 5, X: 5, Shift: 6, Enter: 7,
   };
+  // Web Audio: up to four tone channels, driven by dom_audio_tone. Oscillators
+  // are created lazily and stay silent (gain 0) until the emulator's sound unit
+  // sets a frequency + volume. Browsers block audio until a user gesture, so the
+  // context is also resumed on the first keydown.
+  let audioCtx = null;
+  const audioChans = [];   // [{ osc, gain }]
+  const ensureAudio = () => {
+    if (audioCtx || typeof AudioContext === "undefined") return;
+    audioCtx = new AudioContext();
+    for (let i = 0; i < 4; i++) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = (i === 3) ? "sawtooth" : "square";   // ch3 ~ noise-ish
+      osc.frequency.value = 440;
+      gain.gain.value = 0;
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start();
+      audioChans.push({ osc, gain });
+    }
+  };
+  const resumeAudio = () => { ensureAudio(); if (audioCtx && audioCtx.state === "suspended") audioCtx.resume(); };
+
   if (typeof document !== "undefined") {
     document.addEventListener("keydown", (e) => {
+      resumeAudio();
       const c = KEYMAP[e.key]; if (c !== undefined) { held[c] = 1; e.preventDefault(); }
     });
     document.addEventListener("keyup", (e) => {
@@ -190,6 +213,16 @@ export function makeDomGlue() {
     dom_rom_size: (_ignored) => romBytes.length,
     dom_rom_byte: (i) => romBytes[i] | 0,
     dom_key_held: (code) => held[code] | 0,
+    // Play/silence one tone channel. vol is 0..15 (0 or freq<=0 => silent). The
+    // gain is scaled down and capped so mixing four channels can't clip.
+    dom_audio_tone: (chan, freq, vol) => {
+      ensureAudio();
+      if (!audioCtx) return;
+      const c = audioChans[chan]; if (!c) return;
+      if (freq <= 0 || vol <= 0) { c.gain.gain.value = 0; return; }
+      c.osc.frequency.value = freq;
+      c.gain.gain.value = Math.min(0.08, (vol / 15) * 0.08);
+    },
   };
 
   const setRom = (u8) => { romBytes = u8; };

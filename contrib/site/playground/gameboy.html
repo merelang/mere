@@ -50,13 +50,17 @@
       <canvas id="screen" width="480" height="432"></canvas>
       <p class="hint">
         A tiny playable cartridge (<code>game.gb</code>, hand-written in RGBDS
-        assembly): use the <strong>arrow keys</strong> to move the sprite. The
-        same emulator also runs <a href="https://github.com/mattcurrie/dmg-acid2">dmg-acid2</a>,
+        assembly): use the <strong>arrow keys</strong> to move the sprite — it
+        plays a startup arpeggio and beeps while you move (audio starts on your
+        first key press, per the browser autoplay policy). The same emulator
+        also runs <a href="https://github.com/mattcurrie/dmg-acid2">dmg-acid2</a>,
         the reference PPU test (swap the fetched ROM to <code>dmg-acid2.gb</code>).
         The cartridge is served to the Wasm module a byte at a time via a small
         <code>dom_rom_byte</code> host import; keys are polled through
-        <code>dom_key_held</code>; and the 160&times;144 framebuffer is blitted
-        with the classic DMG green palette.
+        <code>dom_key_held</code>; the APU's two pulse channels drive
+        <code>dom_audio_tone</code> onto Web Audio; and the 160&times;144
+        framebuffer is blitted (only the pixels that changed each frame) with
+        the classic DMG green palette.
       </p>
     </div>
 
@@ -69,8 +73,9 @@
         the glue (<code>setRom</code>); the module pulls it in through
         <code>dom_rom_size</code> / <code>dom_rom_byte</code>.</li>
       <li>Each <code>requestAnimationFrame</code> runs a slice of the CPU
-        (advancing the timer, PPU, and interrupts) and repaints the framebuffer
-        via <code>dom_canvas_fill_rect</code>.</li>
+        (advancing the timer, PPU, interrupts, and APU), repaints the pixels
+        that changed via <code>dom_canvas_fill_rect</code>, and maps the sound
+        channels onto Web Audio through <code>dom_audio_tone</code>.</li>
     </ol>
   </main>
 
