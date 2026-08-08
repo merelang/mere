@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.140 — 2026-08-08
+
+_Closures on the RV32I backend (M2, final slice) — the last piece before
+self-hosting. A closure is a heap block `[code_ptr][captured...]`; `fn x ->
+body` captures the locals its body uses, lifts the body to a top-level
+lambda (`code(env in a0, arg in a1)` — captures loaded from the env at
+entry, param from a1), and evaluates to the block. Application splits two
+ways: a saturated direct call to a known top-level function keeps the fast
+register-allocated `jal` path, while everything else (lambdas, higher-order
+params, curried/partial application through values) evaluates the head to a
+closure and applies arguments one at a time via an indirect `jalr`. That
+unlocks first-class and higher-order functions: verified byte-identical to
+the interpreter for apply/twice/compose, free-variable capture, and — the
+milestone — the prelude's own `list_map` / `list_fold` / `list_filter` /
+`range` / `list_product` driven by lambda arguments over a `Cons`/`Nil`
+list, all running on the Mere-written CPU. (Partial application of a bare
+top-level function still wants an explicit lambda; a follow-up.)
+`lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.139 — 2026-08-08
 
 _Strings on the RV32I backend (M2, third slice). A string is a pointer to

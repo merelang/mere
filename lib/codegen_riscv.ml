@@ -130,6 +130,49 @@ let alloc_words rd n =
   emit_word (enc_i 0 gp 0 rd 0x13);                    (* mv   rd, gp *)
   emit_word (enc_i (n * 4) gp 0 gp 0x13)               (* addi gp, gp, n*4 *)
 
+(* pending lambdas to lift: (label, captured var names, param, body). Filled
+   by the Fun case, drained (and possibly extended) by build_items. *)
+let lambdas : (string * string list * string * Ast.expr) list ref = ref []
+
+(* the variables a pattern binds *)
+let rec pat_vars (p : Ast.pattern) : string list =
+  match p.Ast.pnode with
+  | Ast.P_var x -> [x]
+  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
+  | Ast.P_tuple ps -> List.concat_map pat_vars ps
+  | Ast.P_constr (_, Some s) -> pat_vars s
+  | Ast.P_constr (_, None) -> []
+  | Ast.P_as (inner, x) -> x :: pat_vars inner
+  | Ast.P_or (a, _) -> pat_vars a
+  | Ast.P_record (_, fs) -> List.concat_map (fun (_, q) -> pat_vars q) fs
+
+(* free variables of an expression (respecting binders) — used to decide
+   what a lambda must capture *)
+let rec free_vars_of (e : Ast.expr) : string list =
+  let rm names lst = List.filter (fun x -> not (List.mem x names)) lst in
+  match e.node with
+  | Ast.Var x -> [x]
+  | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit | Ast.Str_lit _ | Ast.Float_lit _ -> []
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> free_vars_of a @ free_vars_of b
+  | Ast.Neg a | Ast.Annot (a, _) -> free_vars_of a
+  | Ast.If (a, b, c) -> free_vars_of a @ free_vars_of b @ free_vars_of c
+  | Ast.Let (p, rhs, body) -> free_vars_of rhs @ rm (pat_vars p) (free_vars_of body)
+  | Ast.Let_rec (bs, body) ->
+    let names = List.map fst bs in
+    rm names (List.concat_map (fun (_, e) -> free_vars_of e) bs @ free_vars_of body)
+  | Ast.Fun (x, _, b) -> rm [x] (free_vars_of b)
+  | Ast.App (a, b) -> free_vars_of a @ free_vars_of b
+  | Ast.Tuple es -> List.concat_map free_vars_of es
+  | Ast.Constr (_, Some a) -> free_vars_of a
+  | Ast.Constr (_, None) -> []
+  | Ast.Match (s, arms) ->
+    free_vars_of s
+    @ List.concat_map (fun (p, g, b) ->
+        rm (pat_vars p) (free_vars_of b @ (match g with Some gg -> free_vars_of gg | None -> []))) arms
+  | _ -> []
+
+let dedup lst = List.fold_left (fun acc x -> if List.mem x acc then acc else x :: acc) [] lst |> List.rev
+
 (* --- program shape: peel top-level fn bindings, find the main body ------- *)
 
 (* peel `fn a -> fn b -> body` into ([a;b], body) *)
@@ -382,10 +425,20 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Match (scrut, arms) -> compile_match env scrut arms
   | Ast.Annot (a, _) -> compile_expr env a
   | Ast.App (_, _) -> compile_app env e
-  | Ast.Fun _ ->
-    err e.loc "RV32I M0: nested/anonymous functions (closures) are not supported yet"
+  | Ast.Fun (param, _, body) ->
+    (* closure = [code_ptr][captured...]; capture the locals the body uses *)
+    let fvs = dedup (free_vars_of e) |> List.filter (fun n -> List.mem_assoc n env) in
+    let label = fresh_label "__lam_" in
+    lambdas := (label, fvs, param, body) :: !lambdas;
+    let k = List.length fvs in
+    List.iter (fun name -> load_to_a0 (List.assoc name env); push a0) fvs;
+    alloc_words t1 (k + 1);                                         (* [code][cap...] *)
+    for i = k - 1 downto 0 do pop t0; emit_word (enc_s ((i + 1) * 4) t0 t1 2 0x23) done;
+    emit (LoadAddr (t0, label));                                    (* t0 = &lambda code *)
+    emit_word (enc_s 0 t0 t1 2 0x23);                               (* sw t0, 0(t1) *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
   | Ast.Let_rec _ ->
-    err e.loc "RV32I M0: local `let rec` is not supported yet (define functions at top level)"
+    err e.loc "RV32I: local `let rec` is not supported yet (define functions at top level)"
   | Ast.Str_lit s ->
     let label = fresh_label "str_" in
     string_data := (label, mk_str_block s) :: !string_data;
@@ -492,22 +545,28 @@ and compile_app env e =
   | Ast.Var "str_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)
-  | Ast.Var f when is_top f ->
-    let (params, _) = Hashtbl.find tops f in
-    let arity = List.length params in
-    if List.length args <> arity then
-      err e.loc (Printf.sprintf
-        "RV32I M0: `%s` expects %d argument(s) but got %d (partial application not supported)"
-        f arity (List.length args));
-    if arity > 8 then err e.loc "RV32I M0: functions with more than 8 args are not supported yet";
-    (* evaluate args left-to-right, spilling each; then load into a0.. *)
+  | Ast.Var f when is_top f && not (List.mem_assoc f env)
+                   && List.length args = List.length (fst (Hashtbl.find tops f)) ->
+    (* fast path: a saturated direct call to a known top-level function.
+       Args go in a0.., a plain jal — the register-allocated calling
+       convention. Everything else goes through closures below. *)
+    let arity = List.length args in
+    if arity > 8 then err e.loc "RV32I: functions with more than 8 args are not supported yet";
     List.iter (fun arg -> compile_expr env arg; push a0) args;
     for i = arity - 1 downto 0 do pop (a0 + i) done;
     emit (Jal (ra, "u_" ^ f))
-  | Ast.Var f ->
-    err e.loc (Printf.sprintf "RV32I: call to unknown function `%s`" f)
   | _ ->
-    err head.loc "RV32I: only calls to named top-level functions are supported"
+    (* general path: evaluate the head to a closure value and apply the
+       arguments one at a time via indirect (curried) calls *)
+    compile_expr env head;                               (* a0 = closure *)
+    List.iter (fun arg ->
+      push a0;                                           (* save the closure *)
+      compile_expr env arg;                              (* a0 = arg *)
+      emit_word (enc_i 0 a0 0 a1 0x13);                  (* mv a1, a0 (arg) *)
+      pop a0;                                            (* a0 = closure (its own env) *)
+      emit_word (enc_i 0 a0 2 t1 0x03);                  (* lw t1, 0(a0) — code ptr *)
+      emit_word (enc_i 0 t1 0 ra 0x67)                   (* jalr ra, t1 — call; result in a0 *)
+    ) args
 
 and compile_match env scrut arms =
   compile_expr env scrut;                          (* a0 = scrutinee *)
@@ -572,47 +631,75 @@ and bind_tuple_fields env pats =
 
 (* --- function + runtime emission ----------------------------------------- *)
 
-let emit_function ~label ~params ~body =
-  let nparams = List.length params in
-  let nlets = count_lets body in
-  let total = nparams + nlets in                        (* named bindings *)
-  let nsaved = min total nregs in                       (* bindings in s-regs *)
-  let noverflow = total - nsaved in                     (* bindings in memory *)
+(* Emit the prologue for a function with `total` named bindings, sets
+   cur_nsaved/cur_noverflow, and returns the frame parameters for the
+   matching epilogue. Incoming argument registers (a0..) are untouched. *)
+let emit_prologue total =
+  let nsaved = min total nregs in
+  let noverflow = total - nsaved in
   cur_nsaved := nsaved;
   cur_noverflow := noverflow;
-  (* frame words: [overflow slots][saved s-regs][saved fp][saved ra] *)
-  let sreg_base = noverflow in
+  let sreg_base = noverflow in           (* [overflow][saved s-regs][fp][ra] *)
   let fp_slot = noverflow + nsaved in
   let ra_slot = fp_slot + 1 in
   let fsz = (ra_slot + 1) * 4 in
-  emit (Label label);
-  (* prologue *)
   emit_word (enc_i (-fsz) sp 0 sp 0x13);                (* addi sp, sp, -fsz *)
   emit_word (enc_s (ra_slot * 4) ra sp 2 0x23);         (* sw   ra, ra_slot(sp) *)
   emit_word (enc_s (fp_slot * 4) fp sp 2 0x23);         (* sw   fp, fp_slot(sp) *)
   for k = 0 to nsaved - 1 do
-    emit_word (enc_s ((sreg_base + k) * 4) sregs.(k) sp 2 0x23)   (* sw sX, slot(sp) *)
+    emit_word (enc_s ((sreg_base + k) * 4) sregs.(k) sp 2 0x23)
   done;
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
-  (* move incoming args (a0..) to each param's home location *)
-  List.iteri (fun i _ ->
-    match loc_of i with
-    | Reg r -> emit_word (enc_i 0 (a0 + i) 0 r 0x13)               (* mv sX, aI *)
-    | Mem slot -> emit_word (enc_s (slot_off slot) (a0 + i) fp 2 0x23)  (* sw aI, slot(fp) *)
-  ) params;
-  (* body — params are binding indices 0..nparams-1, lets continue from there *)
-  slot_ctr := nparams;
-  let env = List.mapi (fun i p -> (p, i)) params in
-  compile_expr env body;
-  (* epilogue (result already in a0, which we never touch here) *)
+  (nsaved, sreg_base, fp_slot, ra_slot, fsz)
+
+let emit_epilogue (nsaved, sreg_base, fp_slot, ra_slot, fsz) =
+  (* result already in a0, which the teardown never touches *)
   for k = 0 to nsaved - 1 do
-    emit_word (enc_i ((sreg_base + k) * 4) fp 2 sregs.(k) 0x03)   (* lw sX, slot(fp) *)
+    emit_word (enc_i ((sreg_base + k) * 4) fp 2 sregs.(k) 0x03)
   done;
   emit_word (enc_i (ra_slot * 4) fp 2 ra 0x03);         (* lw   ra, ra_slot(fp) *)
   emit_word (enc_i (fp_slot * 4) fp 2 t0 0x03);         (* lw   t0, fp_slot(fp) — old fp *)
   emit_word (enc_i fsz fp 0 sp 0x13);                   (* addi sp, fp, fsz *)
   emit_word (enc_i 0 t0 0 fp 0x13);                     (* addi fp, t0, 0 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* jalr x0, ra, 0 (ret) *)
+
+(* a top-level function: args arrive in a0.. (direct convention) *)
+let emit_function ~label ~params ~body =
+  let nparams = List.length params in
+  let total = nparams + count_lets body in
+  emit (Label label);
+  let fr = emit_prologue total in
+  List.iteri (fun i _ ->
+    match loc_of i with
+    | Reg r -> emit_word (enc_i 0 (a0 + i) 0 r 0x13)               (* mv sX, aI *)
+    | Mem slot -> emit_word (enc_s (slot_off slot) (a0 + i) fp 2 0x23)
+  ) params;
+  slot_ctr := nparams;
+  compile_expr (List.mapi (fun i p -> (p, i)) params) body;
+  emit_epilogue fr
+
+(* a lifted lambda: closure env ptr in a0, the (single) argument in a1.
+   Bindings are captures (indices 0..k-1) then the param (index k). *)
+let emit_lambda ~label ~captures ~param ~body =
+  let k = List.length captures in
+  let total = k + 1 + count_lets body in
+  emit (Label label);
+  let fr = emit_prologue total in
+  (* load captured values from the closure env (a0), env[i+1] -> binding i *)
+  List.iteri (fun i _ ->
+    emit_word (enc_i ((i + 1) * 4) a0 2 t0 0x03);                  (* lw t0, (i+1)*4(a0) *)
+    match loc_of i with
+    | Reg r -> emit_word (enc_i 0 t0 0 r 0x13)                     (* mv sX, t0 *)
+    | Mem slot -> emit_word (enc_s (slot_off slot) t0 fp 2 0x23)
+  ) captures;
+  (* the argument (a1) -> the param binding (index k) *)
+  (match loc_of k with
+   | Reg r -> emit_word (enc_i 0 a1 0 r 0x13)                      (* mv sX, a1 *)
+   | Mem slot -> emit_word (enc_s (slot_off slot) a1 fp 2 0x23));
+  slot_ctr := k + 1;
+  let env = List.mapi (fun i c -> (c, i)) captures @ [(param, k)] in
+  compile_expr env body;
+  emit_epilogue fr
 
 (* _start MUST be the first bytes (loaded at address 0, PC starts there) *)
 let emit_start () =
@@ -801,6 +888,7 @@ let build_items (prog : Ast.program) : item list =
   items := [];
   lbl_counter := 0;
   string_data := [];
+  lambdas := [];
   Hashtbl.reset tops;
   Hashtbl.reset variant_tags;
   (* record constructor tags (index within each type) from Top_type decls *)
@@ -832,6 +920,16 @@ let build_items (prog : Ast.program) : item list =
     if Hashtbl.mem reachable name then
       emit_function ~label:("u_" ^ name) ~params ~body
   ) tops;
+  (* drain the lambda worklist — emitting a lambda may enqueue more *)
+  let rec drain () =
+    match !lambdas with
+    | [] -> ()
+    | (label, captures, param, body) :: rest ->
+      lambdas := rest;
+      emit_lambda ~label ~captures ~param ~body;
+      drain ()
+  in
+  drain ();
   (* string literals collected during compilation, placed after the code *)
   List.iter (fun (label, bytes) -> emit (Label label); emit (Bytes bytes)) !string_data;
   List.rev !items
