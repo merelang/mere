@@ -4,6 +4,18 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.149 — 2026-08-08
+
+_A framebuffer primitive for the RV32I backend: `fb_set x y v` lowers to a
+byte store into a 64×32 framebuffer at 0x7F8000 (above the stack). Declared in
+a program as `extern fn fb_set: int -> int -> int -> unit;`, it lets a Mere
+program draw pixels; an emulator that renders that region turns it into a tiny
+"fantasy console" — a Mere program, compiled by `mere -rv`, drawing graphics
+on the Mere RISC-V CPU (see the memu project's riscv-console demo).
+`lib/codegen_riscv.ml`._
+
+---
+
 ## v0.1.148 — 2026-08-08
 
 _Correct `==` / `!=` on enums (RV32I). A comparison at a non-primitive type was
