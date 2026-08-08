@@ -33,7 +33,7 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
      2048-dogfood P3: then α-rename nested fn bindings to unique names so
      same-named inner fns (e.g. a `let rec go` per if-branch) don't collide
      in the backends' name-keyed inner-fn lift resolution. *)
-  Ast.uniquify_toplevel_module_shadows
+  Ast.uniquify_toplevel_shadows
     (Ast.reserve_toplevel_main
       (Ast.uniquify_inner_fns_program
         (Ast.lower_par_map_program
