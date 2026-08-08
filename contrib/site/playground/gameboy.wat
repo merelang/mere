@@ -81,6 +81,8 @@
   (global $bgc (mut i64) (i64.const 0))
   (global $screen (mut i64) (i64.const 0))
   (global $scale (mut i64) (i64.const 0))
+  (global $prev (mut i64) (i64.const 0))
+  (global $laststyle (mut i64) (i64.const 0))
   (data (i32.const 16) "\07\00\00\00#9bbc0f\00")
   (data (i32.const 28) "\07\00\00\00#8bac0f\00")
   (data (i32.const 40) "\07\00\00\00#306230\00")
@@ -1512,11 +1514,20 @@
     global.set $__lang_bump
     global.get $__rgn_tmp)
   (func $render (param i64) (result i64)
-    global.get $screen
+    global.get $laststyle
+    i64.const 0
+    i64.const 0
+    i64.const 1
+    i64.sub
+    call $mere_vec_set
+    drop
     global.get $fb
+    global.get $prev
+    global.get $laststyle
+    global.get $screen
     global.get $scale
     i64.const 0
-    return_call $__lifted_shade_0)
+    return_call $__lifted_go_uq1_0)
   (func $color_of (param i64) (result i64)
     local.get 0
     i64.const 0
@@ -1844,7 +1855,7 @@
     global.get $sys
     global.get $mem
     i64.const 0
-    return_call $__lifted_ll_2)
+    return_call $__lifted_ll_1)
   (func $render_line (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
     global.get $mem
@@ -1947,7 +1958,7 @@
     global.get $fb
     local.get 2
     i64.const 0
-    call $__lifted_px_3
+    call $__lifted_px_2
     drop
     local.get 1
     i64.const 2
@@ -1978,7 +1989,7 @@
     global.get $bgc
     global.get $fb
     i64.const 39
-    return_call $__lifted_spr_4
+    return_call $__lifted_spr_3
     end
     end)
   (func $tilecolor (param i64) (result i64)
@@ -2030,7 +2041,7 @@
     global.get $sys
     global.get $mem
     i64.const 0
-    call $__lifted_dl_6
+    call $__lifted_dl_5
     drop
     global.get $mem
     i64.const 65287
@@ -2092,7 +2103,7 @@
     local.get 4
     global.get $mem
     i64.const 0
-    return_call $__lifted_tl_7
+    return_call $__lifted_tl_6
     end)
   (func $step (param i64) (result i64)
     (local i32 i32)
@@ -3159,7 +3170,7 @@
     global.get $romn
     global.get $rom
     i64.const 0
-    return_call $__lifted_cp_8)
+    return_call $__lifted_cp_7)
   (func $romld (param i64) (result i64)
     local.get 0
     global.get $romn
@@ -3955,7 +3966,7 @@
     i32.store offset=4
     local.get 2
     i64.extend_i32_u)
-  (func $__lifted_go_9 (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_go_8 (param i64) (param i64) (param i64) (param i64) (result i64)
     local.get 3
     local.get 0
     i64.ge_s
@@ -3974,9 +3985,9 @@
     local.get 3
     i64.const 1
     i64.add
-    return_call $__lifted_go_9
+    return_call $__lifted_go_8
     end)
-  (func $__lifted_cp_8 (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_cp_7 (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
     local.get 4
     i64.const 16384
     i64.ge_s
@@ -4014,9 +4025,9 @@
     local.get 4
     i64.const 1
     i64.add
-    return_call $__lifted_cp_8
+    return_call $__lifted_cp_7
     end)
-  (func $__lifted_tl_7 (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_tl_6 (param i64) (param i64) (param i64) (param i64) (result i64)
     (local i64)
     local.get 0
     i64.const 1
@@ -4073,11 +4084,11 @@
     local.get 1
     local.get 2
     i64.const 0
-    return_call $__lifted_tl_7
+    return_call $__lifted_tl_6
     else
     i64.const 0
     end)
-  (func $__lifted_dl_6 (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_dl_5 (param i64) (param i64) (param i64) (result i64)
     local.get 0
     i64.const 0
     call $mere_vec_get
@@ -4109,11 +4120,11 @@
     local.get 0
     local.get 1
     i64.const 0
-    return_call $__lifted_dl_6
+    return_call $__lifted_dl_5
     else
     i64.const 0
     end)
-  (func $__lifted_sp_5 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_sp_4 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
     (local i64 i64 i64)
     local.get 9
     i64.const 8
@@ -4232,9 +4243,9 @@
     local.get 9
     i64.const 1
     i64.add
-    return_call $__lifted_sp_5
+    return_call $__lifted_sp_4
     end)
-  (func $__lifted_spr_4 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_spr_3 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
     local.get 5
     i64.const 0
@@ -4405,7 +4416,7 @@
     local.get 4
     local.get 16
     i64.const 0
-    call $__lifted_sp_5
+    call $__lifted_sp_4
     else
     i64.const 0
     end
@@ -4418,9 +4429,9 @@
     local.get 5
     i64.const 1
     i64.sub
-    return_call $__lifted_spr_4
+    return_call $__lifted_spr_3
     end)
-  (func $__lifted_px_3 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_px_2 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
     (local i64 i64 i64 i64 i64 i64 i64)
     local.get 13
     i64.const 160
@@ -4579,9 +4590,9 @@
     local.get 13
     i64.const 1
     i64.add
-    return_call $__lifted_px_3
+    return_call $__lifted_px_2
     end)
-  (func $__lifted_ll_2 (param i64) (param i64) (param i64) (result i64)
+  (func $__lifted_ll_1 (param i64) (param i64) (param i64) (result i64)
     (local i64 i64)
     local.get 0
     i64.const 2
@@ -4655,13 +4666,13 @@
     local.get 0
     local.get 1
     i64.const 0
-    return_call $__lifted_ll_2
+    return_call $__lifted_ll_1
     else
     i64.const 0
     end)
-  (func $__lifted_pxl_1 (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
-    (local i64 i64)
-    local.get 4
+  (func $__lifted_go_uq1_0 (param i64) (param i64) (param i64) (param i64) (param i64) (param i64) (result i64)
+    (local i64 i64 i64)
+    local.get 5
     i64.const 23040
     i64.ge_s
     i64.extend_i32_u
@@ -4669,36 +4680,67 @@
     if (result i64)
     i64.const 0
     else
-    local.get 4
-    i64.const 160
-    i64.div_s
-    local.set 5
-    local.get 4
-    local.get 5
-    i64.const 160
-    i64.mul
-    i64.sub
-    local.set 6
     local.get 0
-    local.get 4
+    local.get 5
     call $mere_vec_get
+    local.set 6
+    local.get 6
     local.get 1
+    local.get 5
+    call $mere_vec_get
     i64.eq
     i64.extend_i32_u
     i32.wrap_i64
     if (result i64)
-    local.get 2
-    local.get 6
-    local.get 3
-    i64.mul
-    local.get 5
-    local.get 3
-    i64.mul
-    local.get 3
-    local.get 3
-    call $dom_canvas_fill_rect
     i64.const 0
     else
+    local.get 1
+    local.get 5
+    local.get 6
+    call $mere_vec_set
+    drop
+    local.get 2
+    i64.const 0
+    call $mere_vec_get
+    local.get 6
+    i64.eq
+    i64.extend_i32_u
+    i32.wrap_i64
+    if (result i64)
+    i64.const 0
+    else
+    local.get 3
+    local.get 6
+    call $color_of
+    call $dom_canvas_fill_style
+    i64.const 0
+    drop
+    local.get 2
+    i64.const 0
+    local.get 6
+    call $mere_vec_set
+    end
+    drop
+    local.get 5
+    i64.const 160
+    i64.div_s
+    local.set 7
+    local.get 5
+    local.get 7
+    i64.const 160
+    i64.mul
+    i64.sub
+    local.set 8
+    local.get 3
+    local.get 8
+    local.get 4
+    i64.mul
+    local.get 7
+    local.get 4
+    i64.mul
+    local.get 4
+    local.get 4
+    call $dom_canvas_fill_rect
     i64.const 0
     end
     drop
@@ -4707,39 +4749,10 @@
     local.get 2
     local.get 3
     local.get 4
+    local.get 5
     i64.const 1
     i64.add
-    return_call $__lifted_pxl_1
-    end)
-  (func $__lifted_shade_0 (param i64) (param i64) (param i64) (param i64) (result i64)
-    local.get 3
-    i64.const 4
-    i64.ge_s
-    i64.extend_i32_u
-    i32.wrap_i64
-    if (result i64)
-    i64.const 0
-    else
-    local.get 0
-    local.get 3
-    call $color_of
-    call $dom_canvas_fill_style
-    i64.const 0
-    drop
-    local.get 1
-    local.get 3
-    local.get 0
-    local.get 2
-    i64.const 0
-    call $__lifted_pxl_1
-    drop
-    local.get 0
-    local.get 1
-    local.get 2
-    local.get 3
-    i64.const 1
-    i64.add
-    return_call $__lifted_shade_0
+    return_call $__lifted_go_uq1_0
     end)
   (func $frame_closure (param i64) (param i64) (result i64)
     local.get 1
@@ -6275,7 +6288,7 @@
     local.get 3
     local.get 1
     i64.const 0
-    call $__lifted_go_9
+    call $__lifted_go_8
     drop
     local.get 3)
   (func $anon_23_fn (param i64) (param i64) (result i64)
@@ -12276,7 +12289,7 @@
     (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))
   (func $__mcopy_unit (param $v i64) (result i64) (local.get $v))
   (func $main (export "main") (result i32)
-    (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i32)
+    (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i32)
     i64.const 0
     global.set $rA
     i64.const 1
@@ -12516,6 +12529,36 @@
     global.set $screen
     i64.const 3
     global.set $scale
+    i64.const 23040
+    call $new_vec
+    local.set 14
+    local.get 14
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 0
+    i64.const 1
+    i64.sub
+    local.get 14
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    global.set $prev
+    i64.const 1
+    call $new_vec
+    local.set 15
+    local.get 15
+    i32.wrap_i64
+    i32.load offset=0
+    i64.extend_i32_u
+    i64.const 0
+    i64.const 1
+    i64.sub
+    local.get 15
+    i32.wrap_i64
+    i32.load offset=4
+    call_indirect (type $cl)
+    global.set $laststyle
     global.get $__lang_bump
     i32.const 3
     i32.add
@@ -12523,18 +12566,18 @@
     i32.and
     global.set $__lang_bump
     global.get $__lang_bump
-    local.set 14
-    local.get 14
+    local.set 16
+    local.get 16
     i32.const 8
     i32.add
     global.set $__lang_bump
-    local.get 14
+    local.get 16
     i32.const 0
     i32.store offset=0
-    local.get 14
+    local.get 16
     i32.const 0
     i32.store offset=4
-    local.get 14
+    local.get 16
     i64.extend_i32_u
     call $dom_on_frame
     i64.const 0
