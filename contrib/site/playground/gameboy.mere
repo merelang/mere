@@ -512,22 +512,28 @@ let scale = 3;
 // DMG palette (classic green), darkest..lightest indexed by shade 3..0
 let color_of = fn s -> if s == 0 then "#9bbc0f" else if s == 1 then "#8bac0f" else if s == 2 then "#306230" else "#0f380f";
 
-// blit the framebuffer: one fill_style per shade, then rects for its pixels
+// Dirty-pixel blit: only repaint pixels that changed since the last frame
+// (a game leaves most of the screen static, so this is ~a sprite's worth of
+// rects per frame instead of all 23,040). `prev` holds the last painted frame;
+// `laststyle` avoids redundant fill_style calls within a repaint.
+let prev = new_vec 23040 (0 - 1);       // -1 => first frame repaints everything
+let laststyle = new_vec 1 (0 - 1);
 let render = fn (u : unit) ->
-  let rec shade = fn s ->
-    if s >= 4 then ()
+  let _ = vec_set laststyle 0 (0 - 1) in
+  let rec go = fn i ->
+    if i >= 23040 then ()
     else
-      let _ = dom_canvas_fill_style screen (color_of s) in
-      let rec pxl = fn i ->
-        if i >= 23040 then ()
+      let s = vec_get fb i in
+      let _ =
+        if s == vec_get prev i then ()
         else
-          let y = i / 160 in
-          let x = i - y * 160 in
-          let _ = if vec_get fb i == s then dom_canvas_fill_rect screen (x * scale) (y * scale) scale scale else () in
-          pxl (i + 1) in
-      let _ = pxl 0 in
-      shade (s + 1) in
-  shade 0;
+          let _ = vec_set prev i s in
+          let _ = if vec_get laststyle 0 == s then ()
+                  else let _ = dom_canvas_fill_style screen (color_of s) in vec_set laststyle 0 s in
+          let y = i / 160 in let x = i - y * 160 in
+          dom_canvas_fill_rect screen (x * scale) (y * scale) scale scale in
+      go (i + 1) in
+  go 0;
 
 // one animation frame: run ~a frame's worth of instructions, then repaint
 // Each frame runs inside a region block so the per-scanline render closures and
