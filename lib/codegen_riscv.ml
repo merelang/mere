@@ -80,6 +80,8 @@ type item =
   | Label of string                   (* zero-width address marker *)
   | Jal of int * string               (* rd, target label -> J-type (op 0x6F) *)
   | Branch of int * int * int * string (* f3, rs1, rs2, target -> B-type (op 0x63) *)
+  | LoadAddr of int * string          (* rd, label -> lui+addi loading label's absolute addr (8 bytes) *)
+  | Bytes of string                   (* raw data (rodata); length is a multiple of 4 *)
 
 let items : item list ref = ref []
 let emit x = items := x :: !items
@@ -87,6 +89,21 @@ let emit_word w = emit (Word w)
 
 let lbl_counter = ref 0
 let fresh_label prefix = incr lbl_counter; prefix ^ string_of_int !lbl_counter
+
+(* string literals collected as rodata blocks (label, raw bytes), emitted
+   after the code. A string value is a pointer to [len:4][bytes][pad to 4]. *)
+let string_data : (string * string) list ref = ref []
+let mk_str_block (s : string) : string =
+  let len = String.length s in
+  let b = Buffer.create (8 + len) in
+  Buffer.add_char b (Char.chr (len land 0xFF));
+  Buffer.add_char b (Char.chr ((len lsr 8) land 0xFF));
+  Buffer.add_char b (Char.chr ((len lsr 16) land 0xFF));
+  Buffer.add_char b (Char.chr ((len lsr 24) land 0xFF));
+  Buffer.add_string b s;
+  let pad = (4 - ((4 + len) land 3)) land 3 in
+  for _ = 1 to pad do Buffer.add_char b '\000' done;
+  Buffer.contents b
 
 (* load a 32-bit immediate into rd *)
 let li rd v =
@@ -271,7 +288,7 @@ let emit_binop op rd rs1 rs2 loc =
   | Ast.Mul -> emit_word (enc_r 1 rs2 rs1 0 rd 0x33)
   | Ast.Div -> emit_word (enc_r 1 rs2 rs1 4 rd 0x33)
   | Ast.Mod -> emit_word (enc_r 1 rs2 rs1 6 rd 0x33)
-  | Ast.Concat -> err loc "RV32I: string concat (^) is not supported yet"
+  | Ast.Concat -> err loc "RV32I: internal — string concat is handled in compile_bin"
 
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   match e.node with
@@ -369,9 +386,12 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     err e.loc "RV32I M0: nested/anonymous functions (closures) are not supported yet"
   | Ast.Let_rec _ ->
     err e.loc "RV32I M0: local `let rec` is not supported yet (define functions at top level)"
-  | Ast.Str_lit _ -> err e.loc "RV32I M0: strings are not supported yet"
-  | Ast.Float_lit _ -> err e.loc "RV32I M0: floats are not supported yet"
-  | _ -> err e.loc "RV32I M0: this expression form is not supported yet"
+  | Ast.Str_lit s ->
+    let label = fresh_label "str_" in
+    string_data := (label, mk_str_block s) :: !string_data;
+    emit (LoadAddr (a0, label))                                     (* a0 = &block *)
+  | Ast.Float_lit _ -> err e.loc "RV32I: floats are not supported yet"
+  | _ -> err e.loc "RV32I: this expression form is not supported yet"
 
 (* Evaluate l and r so that left ends in reg RL and right in reg RR, then
    run [k RL RR]. Reads operands straight from their registers when possible
@@ -389,6 +409,13 @@ and with_operands env l r (k : int -> int -> unit) =
 
 and compile_bin env op l r =
   match op, r.node with
+  (* string concat: evaluate both pointers, call the runtime helper *)
+  | Ast.Concat, _ ->
+    compile_expr env l; push a0;
+    compile_expr env r;
+    emit_word (enc_i 0 a0 0 a1 0x13);                    (* mv a1, a0 (right) *)
+    pop a0;                                              (* a0 = left *)
+    emit (Jal (ra, "__str_concat"))
   (* immediate fast paths: `x + k` / `x - k` for a small literal k (the hot
      `n - 1` / `n + 1` of recursion) fold into a single addi *)
   | Ast.Add, Ast.Int_lit n when is_small n ->
@@ -448,6 +475,23 @@ and compile_app env e =
   | Ast.Var "print_int" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit (Jal (ra, "__print_int"))
+  | Ast.Var "print" when List.length args = 1 ->
+    (* print_endline semantics: write the bytes, then a trailing newline *)
+    compile_expr env (List.hd args);                     (* a0 = string ptr *)
+    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw   a2, 0(a0)  — len *)
+    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4  — bytes *)
+    emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
+    emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write string) *)
+    emit_word (enc_u 0x60 t0 0x37);                      (* lui  t0, 0x60  — scratch *)
+    emit_word (enc_i 10 zero 0 t1 0x13);                 (* li   t1, '\n' *)
+    emit_word (enc_s 0 t1 t0 0 0x23);                    (* sb   t1, 0(t0) *)
+    emit_word (enc_i 0 t0 0 a1 0x13);                    (* mv   a1, t0 *)
+    emit_word (enc_i 1 zero 0 a2 0x13);                  (* li   a2, 1 *)
+    emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (write '\n') *)
+  | Ast.Var "str_len" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)
   | Ast.Var f when is_top f ->
     let (params, _) = Hashtbl.find tops f in
     let arity = List.length params in
@@ -619,6 +663,43 @@ let emit_print_int () =
   emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* jalr x0, ra, 0 (ret) *)
 
+(* __str_concat(a0=left, a1=right) -> a0 = new [len][bytes] block. A leaf;
+   allocates via gp and byte-copies both operands' payloads. *)
+let emit_str_concat () =
+  emit (Label "__str_concat");
+  emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0)  — len1 *)
+  emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1)  — len2 *)
+  emit_word (enc_r 0 t1 t0 0 t2 0x33);                  (* add t2, t0, t1 — total *)
+  emit_word (enc_i 0 gp 0 t3 0x13);                     (* mv t3, gp     — result ptr *)
+  emit_word (enc_s 0 t2 t3 2 0x23);                     (* sw t2, 0(t3)  — store total len *)
+  emit_word (enc_i 3 t2 0 t4 0x13);                     (* addi t4, t2, 3 *)
+  emit_word (enc_i (-4) t4 7 t4 0x13);                  (* andi t4, t4, -4 — round4(total) *)
+  emit_word (enc_i 4 t4 0 t4 0x13);                     (* addi t4, t4, 4  — + len word *)
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* add gp, t3, t4  — new heap top *)
+  emit_word (enc_i 4 a0 0 t5 0x13);                     (* addi t5, a0, 4  — src1 *)
+  emit_word (enc_i 4 t3 0 t6 0x13);                     (* addi t6, t3, 4  — dst *)
+  emit (Label ".sc_l1");
+  emit (Branch (0, t0, zero, ".sc_d1"));                (* beq t0, x0, d1 *)
+  emit_word (enc_i 0 t5 0 a2 0x03);                     (* lb a2, 0(t5) *)
+  emit_word (enc_s 0 a2 t6 0 0x23);                     (* sb a2, 0(t6) *)
+  emit_word (enc_i 1 t5 0 t5 0x13);                     (* addi t5, t5, 1 *)
+  emit_word (enc_i 1 t6 0 t6 0x13);                     (* addi t6, t6, 1 *)
+  emit_word (enc_i (-1) t0 0 t0 0x13);                  (* addi t0, t0, -1 *)
+  emit (Jal (zero, ".sc_l1"));
+  emit (Label ".sc_d1");
+  emit_word (enc_i 4 a1 0 t5 0x13);                     (* addi t5, a1, 4  — src2 *)
+  emit (Label ".sc_l2");
+  emit (Branch (0, t1, zero, ".sc_d2"));                (* beq t1, x0, d2 *)
+  emit_word (enc_i 0 t5 0 a2 0x03);                     (* lb a2, 0(t5) *)
+  emit_word (enc_s 0 a2 t6 0 0x23);                     (* sb a2, 0(t6) *)
+  emit_word (enc_i 1 t5 0 t5 0x13);                     (* addi t5, t5, 1 *)
+  emit_word (enc_i 1 t6 0 t6 0x13);                     (* addi t6, t6, 1 *)
+  emit_word (enc_i (-1) t1 0 t1 0x13);                  (* addi t1, t1, -1 *)
+  emit (Jal (zero, ".sc_l2"));
+  emit (Label ".sc_d2");
+  emit_word (enc_i 0 t3 0 a0 0x13);                     (* mv a0, t3 *)
+  emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
 (* --- two-pass assembly: assign addresses, then encode ------------------- *)
 let assemble (prog : item list) : string =
   (* pass 1: label -> byte address *)
@@ -628,10 +709,17 @@ let assemble (prog : item list) : string =
     match it with
     | Label name -> Hashtbl.replace labels name !addr
     | Word _ | Jal _ | Branch _ -> addr := !addr + 4
+    | LoadAddr _ -> addr := !addr + 8
+    | Bytes b -> addr := !addr + String.length b
   ) prog;
   let target name here =
     match Hashtbl.find_opt labels name with
     | Some a -> a - here
+    | None -> failwith ("codegen_riscv: undefined label " ^ name)
+  in
+  let abs name =
+    match Hashtbl.find_opt labels name with
+    | Some a -> a
     | None -> failwith ("codegen_riscv: undefined label " ^ name)
   in
   (* pass 2: encode *)
@@ -650,6 +738,14 @@ let assemble (prog : item list) : string =
     | Jal (rd, name) -> put_word (enc_j (target name !here) rd 0x6F); here := !here + 4
     | Branch (f3, rs1, rs2, name) ->
       put_word (enc_b (target name !here) rs2 rs1 f3 0x63); here := !here + 4
+    | LoadAddr (rd, name) ->
+      let a = abs name in
+      let hi = (a + 0x800) asr 12 in
+      let lo = a - (hi lsl 12) in
+      put_word (enc_u (hi land 0xFFFFF) rd 0x37);        (* lui  rd, hi *)
+      put_word (enc_i lo rd 0 rd 0x13);                  (* addi rd, rd, lo *)
+      here := !here + 8
+    | Bytes b -> Buffer.add_string buf b; here := !here + String.length b
   ) prog;
   Buffer.contents buf
 
@@ -659,7 +755,9 @@ let listing (prog : item list) : string =
   let addr = ref 0 in
   List.iter (fun it -> match it with
     | Label name -> Hashtbl.replace labels name !addr
-    | Word _ | Jal _ | Branch _ -> addr := !addr + 4) prog;
+    | Word _ | Jal _ | Branch _ -> addr := !addr + 4
+    | LoadAddr _ -> addr := !addr + 8
+    | Bytes b -> addr := !addr + String.length b) prog;
   let buf = Buffer.create 4096 in
   let here = ref 0 in
   List.iter (fun it ->
@@ -686,6 +784,12 @@ let listing (prog : item list) : string =
         else Printf.sprintf "%s %s, %s, %s" m (Riscv_disasm.r rs1) (Riscv_disasm.r rs2) name in
       Buffer.add_string buf (Printf.sprintf "  %6x:  %08x  %s\n" !here w mn);
       here := !here + 4
+    | LoadAddr (rd, name) ->
+      Buffer.add_string buf (Printf.sprintf "  %6x:  (la)      la %s, %s\n" !here (Riscv_disasm.r rd) name);
+      here := !here + 8
+    | Bytes b ->
+      Buffer.add_string buf (Printf.sprintf "  %6x:  .bytes %d\n" !here (String.length b));
+      here := !here + String.length b
   ) prog;
   Buffer.contents buf
 
@@ -696,6 +800,7 @@ let listing (prog : item list) : string =
 let build_items (prog : Ast.program) : item list =
   items := [];
   lbl_counter := 0;
+  string_data := [];
   Hashtbl.reset tops;
   Hashtbl.reset variant_tags;
   (* record constructor tags (index within each type) from Top_type decls *)
@@ -718,14 +823,17 @@ let build_items (prog : Ast.program) : item list =
     end
   in
   List.iter visit (vars_in main_body []);
-  (* layout: _start first, then the runtime, then main, then reachable fns *)
+  (* layout: _start, runtime, main, reachable fns, then string rodata *)
   emit_start ();
   emit_print_int ();
+  emit_str_concat ();
   emit_function ~label:"__main" ~params:[] ~body:main_body;
   Hashtbl.iter (fun name (params, body) ->
     if Hashtbl.mem reachable name then
       emit_function ~label:("u_" ^ name) ~params ~body
   ) tops;
+  (* string literals collected during compilation, placed after the code *)
+  List.iter (fun (label, bytes) -> emit (Label label); emit (Bytes bytes)) !string_data;
   List.rev !items
 
 let emit_program ~main_ty (prog : Ast.program) : string =
