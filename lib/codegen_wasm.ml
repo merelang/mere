@@ -189,6 +189,14 @@ let wasm_args_used = ref false  (* command component called args() -> emit $__la
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
 let wasm_stdin_used = ref false  (* command component called read_stdin() -> emit $__lang_read_stdin + wasi fd_read import *)
+(* Phase 3 sockets: a command component that declares the mhttp-style socket /
+   raw-memory externs (tcp_connect/read/write/close, mem_alloc/get_u8/copy_str/
+   to_str, str_ptr) gets in-module _h helpers backed by p2 wasi:sockets +
+   linear memory, instead of env host imports. *)
+let wasm_socket_ffi = ref false
+let socket_ffi_externs =
+  ["tcp_connect"; "tcp_read"; "tcp_write"; "tcp_close";
+   "mem_alloc"; "mem_get_u8"; "mem_copy_str"; "mem_to_str"; "str_ptr"]
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -7495,6 +7503,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_time_used := false;
   wasm_env_used := false;
   wasm_stdin_used := false;
+  wasm_socket_ffi := false;
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
@@ -8168,8 +8177,17 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       let body = match ret with
         | Ast.TyUnit -> call
         | _ -> Printf.sprintf "(i64.extend_i32_u %s)" call in
-      (Printf.sprintf "  (import \"env\" \"%s\" (func $%s_h%s%s))\n"
-         name name h_params h_result,
+      (* Phase 3 sockets: in a command component, the mhttp-style socket /
+         raw-memory externs are backed by in-module _h helpers (p2 wasi:sockets
+         + linear memory), not an env import. Keep the i64 shim; drop the import. *)
+      let import_str =
+        if !wasm_component_command && List.mem name socket_ffi_externs then begin
+          wasm_socket_ffi := true; ""
+        end else
+          Printf.sprintf "  (import \"env\" \"%s\" (func $%s_h%s%s))\n"
+            name name h_params h_result
+      in
+      (import_str,
        Printf.sprintf "  (func $%s%s%s\n    %s)\n"
          name s_params s_result body)
       :: acc)
@@ -8564,7 +8582,98 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (i32.store (i32.sub (local.get $start) (i32.const 4)) (i32.sub (local.get $p) (local.get $start)))\n\
         \    (i64.extend_i32_u (local.get $start)))\n"
       in
+      (* Phase 3 sockets: p2 wasi:sockets imports + in-module _h helpers for
+         the mhttp-style socket / raw-memory externs. TCP client only (IPv4
+         literal host, no DNS); build with `wasm-tools component embed --world
+         <w> <wasi.wit>` (extracted from the command adapter) then
+         `component new --adapt`, and run `wasmtime -S inherit-network=y`. *)
+      let socket_imports =
+        if not !wasm_socket_ffi then "" else
+        "  (import \"wasi:sockets/instance-network@0.2.3\" \"instance-network\" (func $sock_instnet (result i32)))\n\
+        \  (import \"wasi:sockets/tcp-create-socket@0.2.3\" \"create-tcp-socket\" (func $sock_create (param i32 i32)))\n\
+        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.start-connect\" (func $sock_connect (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
+        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.subscribe\" (func $sock_subscribe (param i32) (result i32)))\n\
+        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.finish-connect\" (func $sock_finish (param i32 i32)))\n\
+        \  (import \"wasi:sockets/tcp@0.2.3\" \"[resource-drop]tcp-socket\" (func $sock_drop (param i32)))\n\
+        \  (import \"wasi:io/poll@0.2.3\" \"[method]pollable.block\" (func $sock_block (param i32)))\n\
+        \  (import \"wasi:io/poll@0.2.3\" \"[resource-drop]pollable\" (func $poll_drop (param i32)))\n\
+        \  (import \"wasi:io/streams@0.2.3\" \"[method]output-stream.blocking-write-and-flush\" (func $sock_swrite (param i32 i32 i32 i32)))\n\
+        \  (import \"wasi:io/streams@0.2.3\" \"[method]input-stream.blocking-read\" (func $sock_sread (param i32 i64 i32)))\n\
+        \  (import \"wasi:io/streams@0.2.3\" \"[resource-drop]input-stream\" (func $in_drop (param i32)))\n\
+        \  (import \"wasi:io/streams@0.2.3\" \"[resource-drop]output-stream\" (func $out_drop (param i32)))\n"
+      in
+      let socket_helpers =
+        if not !wasm_socket_ffi then "" else
+        "  (func $cabi_realloc (export \"cabi_realloc\") (param i32 i32 i32 i32) (result i32) (local $p i32)\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.sub (local.get 2) (i32.const 1))) (i32.sub (i32.const 0) (local.get 2))))\n\
+        \    (local.set $p (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $p) (local.get 3))) (local.get $p))\n\
+        \  (func $mem_alloc_h (param $n i32) (result i32) (local $p i32)\n\
+        \    (local.set $p (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $p) (local.get $n))) (local.get $p))\n\
+        \  (func $mem_get_u8_h (param $p i32) (param $o i32) (result i32) (i32.load8_u (i32.add (local.get $p) (local.get $o))))\n\
+        \  (func $str_ptr_h (param $s i32) (result i32) (local.get $s))\n\
+        \  (func $mem_copy_str_h (param $p i32) (param $o i32) (param $s i32) (result i32) (local $len i32) (local $i i32)\n\
+        \    (local.set $len (i32.load (i32.sub (local.get $s) (i32.const 4))))\n\
+        \    (block $e (loop $l (br_if $e (i32.ge_u (local.get $i) (local.get $len)))\n\
+        \      (i32.store8 (i32.add (i32.add (local.get $p) (local.get $o)) (local.get $i)) (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l))) (local.get $len))\n\
+        \  (func $mem_to_str_h (param $p i32) (param $len i32) (result i32) (local $st i32) (local $i i32)\n\
+        \    (local.set $st (i32.add (global.get $__lang_bump) (i32.const 4)))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $st) (i32.add (local.get $len) (i32.const 1))))\n\
+        \    (block $e (loop $l (br_if $e (i32.ge_u (local.get $i) (local.get $len)))\n\
+        \      (i32.store8 (i32.add (local.get $st) (local.get $i)) (i32.load8_u (i32.add (local.get $p) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l)))\n\
+        \    (i32.store8 (i32.add (local.get $st) (local.get $len)) (i32.const 0))\n\
+        \    (i32.store (i32.sub (local.get $st) (i32.const 4)) (local.get $len)) (local.get $st))\n\
+        \  (func $__parse_ipv4 (param $s i32) (param $out i32) (local $i i32) (local $oct i32) (local $b i32) (local $c i32)\n\
+        \    (block $done (loop $lp\n\
+        \      (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n\
+        \      (if (i32.or (i32.eqz (local.get $c)) (i32.eq (local.get $c) (i32.const 46)))\n\
+        \        (then (i32.store8 (i32.add (local.get $out) (local.get $oct)) (local.get $b))\n\
+        \              (local.set $oct (i32.add (local.get $oct) (i32.const 1))) (local.set $b (i32.const 0))\n\
+        \              (br_if $done (i32.eqz (local.get $c))))\n\
+        \        (else (local.set $b (i32.add (i32.mul (local.get $b) (i32.const 10)) (i32.sub (local.get $c) (i32.const 48))))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $lp))))\n\
+        \  (func $tcp_connect_h (param $host i32) (param $port i32) (result i32)\n\
+        \    (local $net i32) (local $sock i32) (local $poll i32) (local $fd i32) (local $s i32)\n\
+        \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 64)))\n\
+        \    (call $__parse_ipv4 (local.get $host) (local.get $s))\n\
+        \    (local.set $net (call $sock_instnet))\n\
+        \    (call $sock_create (i32.const 0) (i32.add (local.get $s) (i32.const 8)))\n\
+        \    (local.set $sock (i32.load (i32.add (local.get $s) (i32.const 12))))\n\
+        \    (call $sock_connect (local.get $sock) (local.get $net) (i32.const 0) (local.get $port)\n\
+        \      (i32.load8_u (local.get $s)) (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.load8_u (i32.add (local.get $s) (i32.const 2))) (i32.load8_u (i32.add (local.get $s) (i32.const 3)))\n\
+        \      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.add (local.get $s) (i32.const 24)))\n\
+        \    (local.set $poll (call $sock_subscribe (local.get $sock))) (call $sock_block (local.get $poll))\n\
+        \    (call $poll_drop (local.get $poll))\n\
+        \    (call $sock_finish (local.get $sock) (i32.add (local.get $s) (i32.const 32)))\n\
+        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 12)))\n\
+        \    (i32.store offset=0 (local.get $fd) (local.get $sock))\n\
+        \    (i32.store offset=4 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 36))))\n\
+        \    (i32.store offset=8 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 40))))\n\
+        \    (local.get $fd))\n\
+        \  (func $tcp_read_h (param $fd i32) (param $buf i32) (param $len i32) (result i32)\n\
+        \    (local $in i32) (local $s i32) (local $dp i32) (local $dl i32) (local $i i32) (local $n i32)\n\
+        \    (local.set $in (i32.load offset=4 (local.get $fd)))\n\
+        \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 16)))\n\
+        \    (call $sock_sread (local.get $in) (i64.extend_i32_u (local.get $len)) (local.get $s))\n\
+        \    (if (i32.load8_u (local.get $s)) (then (return (i32.const 0))))\n\
+        \    (local.set $dp (i32.load (i32.add (local.get $s) (i32.const 4))))\n\
+        \    (local.set $dl (i32.load (i32.add (local.get $s) (i32.const 8))))\n\
+        \    (local.set $n (select (local.get $len) (local.get $dl) (i32.lt_u (local.get $len) (local.get $dl))))\n\
+        \    (block $e (loop $l (br_if $e (i32.ge_u (local.get $i) (local.get $n)))\n\
+        \      (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.load8_u (i32.add (local.get $dp) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l))) (local.get $n))\n\
+        \  (func $tcp_write_h (param $fd i32) (param $buf i32) (param $len i32) (result i32) (local $out i32) (local $s i32)\n\
+        \    (local.set $out (i32.load offset=8 (local.get $fd)))\n\
+        \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 16)))\n\
+        \    (call $sock_swrite (local.get $out) (local.get $buf) (local.get $len) (local.get $s)) (local.get $len))\n\
+        \  (func $tcp_close_h (param $fd i32)\n\
+        \    (call $in_drop (i32.load offset=4 (local.get $fd)))\n\
+        \    (call $out_drop (i32.load offset=8 (local.get $fd)))\n\
+        \    (call $sock_drop (i32.load offset=0 (local.get $fd))))\n"
+      in
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
+      ^ socket_imports
       ^ args_imports
       ^ clock_import
       ^ env_imports
@@ -8588,6 +8697,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ^ env_fn
       ^ stdin_fn
       ^ file_fn
+      ^ socket_helpers
     else
       "  (func $puts_h (param i32))\n"
   in
