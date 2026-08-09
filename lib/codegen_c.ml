@@ -5322,7 +5322,7 @@ let native_http_runtime =
       "static char __http_req_body[1 << 20]; static int __http_req_body_len = 0;";
       "static char __http_req_head[16384]; static int __http_req_head_len = 0;";
       "";
-      "static char* http_current_body(void) { return __http_req_body; }";
+      "static const char* http_current_body(void) { return __lang_str_of_cstr(__http_req_body); }";
       "static int http_set_status(int c) { __http_status = c; return 0; }";
       "static int http_set_content_type(const char* ct) {";
       "  strncpy(__http_ctype, ct, sizeof __http_ctype - 1);";
@@ -5335,7 +5335,7 @@ let native_http_runtime =
       "  if (r > 0) __http_extra_len += r; return 0;";
       "}";
       "/* case-insensitive lookup of a request header value (\"\" if absent). */";
-      "static char* http_get_header(const char* name) {";
+      "static const char* http_get_header(const char* name) {";
       "  static char val[4096];";
       "  int nl = (int)strlen(name);";
       "  const char* p = __http_req_head;";
@@ -5351,12 +5351,12 @@ let native_http_runtime =
       "        while (*v == ' ' || *v == '\\t') v++;";
       "        int vlen = eol ? (int)(eol - v) : (int)strlen(v);";
       "        if (vlen > (int)sizeof val - 1) vlen = sizeof val - 1;";
-      "        memcpy(val, v, vlen); val[vlen] = 0; return val;";
+      "        memcpy(val, v, vlen); val[vlen] = 0; return __lang_str_of_cstr(val);";
       "      }";
       "    }";
       "    if (!eol) break; p = eol + 2;";
       "  }";
-      "  val[0] = 0; return val;";
+      "  val[0] = 0; return __lang_str_of_cstr(val);";
       "}";
       "";
       "static int http_serve(int port, closure_str_str handler) {";
@@ -5405,9 +5405,9 @@ let native_http_runtime =
       "    /* reset per-request response state */";
       "    __http_status = 200; strcpy(__http_ctype, \"text/plain\");";
       "    __http_extra_len = 0; __http_extra_hdrs[0] = 0;";
-      "    const char* body = handler.fn(handler.env, reqline);";
-      "    if (!body) body = \"\";";
-      "    char head[9216]; size_t blen = strlen(body);";
+      "    const char* body = handler.fn(handler.env, __lang_str_of_cstr(reqline));";
+      "    if (!body) body = __lang_str_of_cstr(\"\");";
+      "    char head[9216]; size_t blen = __lang_str_size(body);";
       "    int hn = snprintf(head, sizeof head,";
       "      \"HTTP/1.1 %d\\r\\nContent-Type: %s\\r\\nContent-Length: %zu\\r\\n%sConnection: close\\r\\n\\r\\n\",";
       "      __http_status, __http_ctype, blen, __http_extra_hdrs);";
@@ -5672,7 +5672,7 @@ let native_ffi_runtime ~tls ~midi =
       "}";
       "static const char __hexd[] = \"0123456789abcdef\";";
       "static char* __to_hex(const unsigned char* b, int n) {";
-      "  char* s = (char*)malloc(n*2+1);";
+      "  char* s = __lang_str_alloc(__lang_current_region, (size_t)(n*2));";
       "  for (int i=0;i<n;i++){ s[i*2]=__hexd[b[i]>>4]; s[i*2+1]=__hexd[b[i]&15]; }";
       "  s[n*2]=0; return s;";
       "}";
@@ -5682,7 +5682,7 @@ let native_ffi_runtime ~tls ~midi =
       "}";
       "static const char __b64e[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";";
       "static char* __to_b64(const unsigned char* d, int n) {";
-      "  int ol=((n+2)/3)*4; char* o=(char*)malloc(ol+1); int j=0;";
+      "  int ol=((n+2)/3)*4; char* o=__lang_str_alloc(__lang_current_region, (size_t)ol); int j=0;";
       "  for(int i=0;i<n;i+=3){ int v=d[i]<<16; if(i+1<n)v|=d[i+1]<<8; if(i+2<n)v|=d[i+2];";
       "    o[j++]=__b64e[(v>>18)&63]; o[j++]=__b64e[(v>>12)&63];";
       "    o[j++]=(i+1<n)?__b64e[(v>>6)&63]:'='; o[j++]=(i+2<n)?__b64e[v&63]:'='; }";
@@ -5724,7 +5724,7 @@ let native_ffi_runtime ~tls ~midi =
       "static char* base64_encode_hex(const char* hex){ unsigned char* b=(unsigned char*)malloc(strlen(hex)/2+1); int n=__from_hex(hex,b); char* r=__to_b64(b,n); free(b); return r; }";
       "static char* base64_decode_to_hex(const char* b64){ unsigned char* b=(unsigned char*)malloc(strlen(b64)+1); int n=__from_b64(b64,b); char* r=__to_hex(b,n); free(b); return r; }";
       "static char* random_b64(int n){ if(n<1)n=1; unsigned char* b=(unsigned char*)malloc(n); FILE* f=fopen(\"/dev/urandom\",\"rb\"); if(f){ size_t g=fread(b,1,n,f); (void)g; fclose(f);} else for(int i=0;i<n;i++) b[i]=rand()&0xff; char* r=__to_b64(b,n); free(b); return r; }";
-      "static char* hex_xor(const char* a, const char* b){ int la=(int)strlen(a)/2, lb=(int)strlen(b)/2; if(la!=lb) return strdup(\"\"); unsigned char* ba=(unsigned char*)malloc(la?la:1); unsigned char* bb=(unsigned char*)malloc(lb?lb:1); __from_hex(a,ba); __from_hex(b,bb); for(int i=0;i<la;i++) ba[i]^=bb[i]; char* r=__to_hex(ba,la); free(ba); free(bb); return r; }";
+      "static char* hex_xor(const char* a, const char* b){ int la=(int)strlen(a)/2, lb=(int)strlen(b)/2; if(la!=lb) return (char*)__lang_str_of_cstr(\"\"); unsigned char* ba=(unsigned char*)malloc(la?la:1); unsigned char* bb=(unsigned char*)malloc(lb?lb:1); __from_hex(a,ba); __from_hex(b,bb); for(int i=0;i<la;i++) ba[i]^=bb[i]; char* r=__to_hex(ba,la); free(ba); free(bb); return r; }";
       (if tls then
          "/* v0.1.91: real TLS over an already-connected fd via OpenSSL. Wraps\n\
          \   the fd in an SSL* kept in __tls[fd]; tcp_read/write/close route\n\
@@ -5758,7 +5758,7 @@ let native_ffi_runtime ~tls ~midi =
       "  unsigned char b[16]; FILE* f = fopen(\"/dev/urandom\", \"rb\");";
       "  if (f) { size_t got = fread(b, 1, 16, f); (void)got; fclose(f); }";
       "  else { for (int i = 0; i < 16; i++) b[i] = (unsigned char)(rand() & 0xff); }";
-      "  char* id = (char*)malloc(33); static const char* hx = \"0123456789abcdef\";";
+      "  char* id = __lang_str_alloc(__lang_current_region, 32); static const char* hx = \"0123456789abcdef\";";
       "  for (int i = 0; i < 16; i++) { id[i*2] = hx[b[i]>>4]; id[i*2+1] = hx[b[i]&15]; }";
       "  id[32] = 0; return id;";
       "}";
@@ -8975,10 +8975,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ List.map (fun (name, a, b) ->
         let cstruct = closure_struct_name a b in
         let cret = c_type_of b and carg = c_type_of a in
+        (* A `unit` parameter is erased at the C boundary: `extern fn f:
+           unit -> str` becomes `str f(void)`. The adapter still has to
+           take an argument to fit the closure signature, so it accepts
+           one and drops it — passing it through called a 0-arity
+           function with an argument and failed to compile. *)
+        let call =
+          match Ast.walk a with
+          | Ast.TyUnit -> Printf.sprintf "(void)__x; return %s()" name
+          | _ -> Printf.sprintf "return %s(__x)" name
+        in
         Printf.sprintf
-          "static %s __ext_%s_closure_fn(void* __env, %s __x) { (void)__env; return %s(__x); }\n\
+          "static %s __ext_%s_closure_fn(void* __env, %s __x) { (void)__env; %s; }\n\
            const %s __ext_%s_as_value = {.env = NULL, .fn = __ext_%s_closure_fn};"
-          cret name carg name cstruct name name)
+          cret name carg call cstruct name name)
         extern_val_pairs
   in
   (* Reset anonymous-closure state before generating fn defs (which

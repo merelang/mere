@@ -4121,61 +4121,62 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt ->
     {|  (func $to_json_int (param $n i64) (result i64)
-    (local $buf i32) (local $i i32) (local $abs i32) (local $neg i32)
+    (local $buf i32) (local $i i32) (local $abs i64) (local $neg i32)
     (local.set $buf (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 16)))
-    (local.set $i (i32.const 15))
+    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 24)))
+    (local.set $i (i32.const 23))
     (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 0))
-    (if (i32.lt_s (local.get $n) (i32.const 0))
+    (if (i64.lt_s (local.get $n) (i64.const 0))
       (then
         (local.set $neg (i32.const 1))
-        (local.set $abs (i32.sub (i32.const 0) (local.get $n))))
+        (local.set $abs (i64.sub (i64.const 0) (local.get $n))))
       (else
         (local.set $neg (i32.const 0))
         (local.set $abs (local.get $n))))
-    (if (i32.eqz (local.get $abs))
+    (if (i64.eqz (local.get $abs))
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))
-        (return (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 15) (local.get $i)))))))
+        (return (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))))
     (block $end
       (loop $lp
-        (br_if $end (i32.eqz (local.get $abs)))
+        (br_if $end (i64.eqz (local.get $abs)))
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i))
-          (i32.add (i32.const 48) (i32.rem_u (local.get $abs) (i32.const 10))))
-        (local.set $abs (i32.div_u (local.get $abs) (i32.const 10)))
+          (i32.add (i32.const 48)
+            (i32.wrap_i64 (i64.rem_u (local.get $abs) (i64.const 10)))))
+        (local.set $abs (i64.div_u (local.get $abs) (i64.const 10)))
         (br $lp)))
     (if (local.get $neg)
       (then
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))
-    (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 15) (local.get $i)))))|}
+    (call $__lang_str_copyn (i64.extend_i32_u (i32.add (local.get $buf) (local.get $i))) (i64.extend_i32_u (i32.sub (i32.const 23) (local.get $i)))))|}
   | Ast.TyBool ->
     let t_off = intern_show_str "true" in
     let f_off = intern_show_str "false" in
     Printf.sprintf
       "  (func $to_json_bool (param $b i64) (result i64)\n\
-      \    (if (result i64) (local.get $b)\n\
-      \      (then (i32.const %d))\n\
-      \      (else (i32.const %d))))"
+      \    (if (result i64) (i32.wrap_i64 (local.get $b))\n\
+      \      (then (i64.const %d))\n\
+      \      (else (i64.const %d))))"
       t_off f_off
   | Ast.TyStr ->
     let q_off = intern_show_str "\"" in
     Printf.sprintf
       "  (func $to_json_str (param $s i64) (result i64)\n\
       \    (call $__lang_str_concat\n\
-      \      (call $__lang_str_concat (i32.const %d) (call $__lang_str_escape (local.get $s)))\n\
-      \      (i32.const %d)))"
+      \      (call $__lang_str_concat (i64.const %d) (call $__lang_str_escape (local.get $s)))\n\
+      \      (i64.const %d)))"
       q_off q_off
   | Ast.TyUnit ->
     let off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_unit (param $u i64) (result i64) (i32.const %d))" off
+      "  (func $to_json_unit (param $u i64) (result i64) (i64.const %d))" off
   | Ast.TyArrow _ ->
     let off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_%s (param $u i64) (result i64) (i32.const %d))" tag off
+      "  (func $to_json_%s (param $u i64) (result i64) (i64.const %d))" tag off
   | Ast.TyTuple ts ->
     let comma = intern_show_str "," in
     let lb = intern_show_str "[" in
@@ -4183,24 +4184,24 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let lines = Buffer.create 256 in
     Buffer.add_string lines
       (Printf.sprintf "  (func $to_json_%s (param $x i64) (result i64)\n" tag);
-    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines "    (local $r i64)\n";
     Buffer.add_string lines
-      (Printf.sprintf "    (local.set $r (i32.const %d))\n" lb);
+      (Printf.sprintf "    (local.set $r (i64.const %d))\n" lb);
     List.iteri (fun i ety ->
       if i > 0 then
         Buffer.add_string lines
           (Printf.sprintf
-             "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+             "    (local.set $r (call $__lang_str_concat (local.get $r) (i64.const %d)))\n"
              comma);
       Buffer.add_string lines
         (Printf.sprintf
            "    (local.set $r (call $__lang_str_concat (local.get $r) \
-            (call $to_json_%s (i32.load offset=%d (local.get $x)))))\n"
-           (ty_tag ety) (i * 4))
+            (call $to_json_%s (i64.load offset=%d (i32.wrap_i64 (local.get $x))))))\n"
+           (ty_tag ety) (i * 8))
     ) ts;
     Buffer.add_string lines
       (Printf.sprintf
-         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))" rb);
+         "    (call $__lang_str_concat (local.get $r) (i64.const %d)))" rb);
     Buffer.contents lines
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
     let info = Hashtbl.find Typer.records n in
@@ -4213,9 +4214,9 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let lines = Buffer.create 256 in
     Buffer.add_string lines
       (Printf.sprintf "  (func $to_json_%s (param $x i64) (result i64)\n" tag);
-    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines "    (local $r i64)\n";
     Buffer.add_string lines
-      (Printf.sprintf "    (local.set $r (i32.const %d))\n" hdr);
+      (Printf.sprintf "    (local.set $r (i64.const %d))\n" hdr);
     List.iteri (fun i (fname, ft) ->
       let ft = subst_params mapping ft in
       let sep =
@@ -4224,17 +4225,17 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
       in
       Buffer.add_string lines
         (Printf.sprintf
-           "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+           "    (local.set $r (call $__lang_str_concat (local.get $r) (i64.const %d)))\n"
            sep);
       Buffer.add_string lines
         (Printf.sprintf
            "    (local.set $r (call $__lang_str_concat (local.get $r) \
-            (call $to_json_%s (i32.load offset=%d (local.get $x)))))\n"
-           (ty_tag ft) (i * 4))
+            (call $to_json_%s (i64.load offset=%d (i32.wrap_i64 (local.get $x))))))\n"
+           (ty_tag ft) (i * 8))
     ) info.Typer.r_fields;
     Buffer.add_string lines
       (Printf.sprintf
-         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))" suffix);
+         "    (call $__lang_str_concat (local.get $r) (i64.const %d)))" suffix);
     Buffer.contents lines
   | Ast.TyCon ("list", [elem_ty]) ->
     let lb = intern_show_str "[" in
@@ -4242,25 +4243,24 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let comma = intern_show_str "," in
     Printf.sprintf
       "  (func $to_json_%s (param $x i64) (result i64)\n\
-      \    (local $cur i32) (local $acc i32) (local $first i32)\n\
-      \    (local $tag i32) (local $pl i32) (local $h i32)\n\
-      \    (local.set $acc (i32.const %d))\n\
-      \    (local.set $cur (local.get $x))\n\
+      \    (local $cur i32) (local $acc i64) (local $first i32)\n\
+      \    (local $pl i32)\n\
+      \    (local.set $acc (i64.const %d))\n\
+      \    (local.set $cur (i32.wrap_i64 (local.get $x)))\n\
       \    (local.set $first (i32.const 1))\n\
       \    (block $end\n\
       \      (loop $lp\n\
-      \        (local.set $tag (i32.load offset=0 (local.get $cur)))\n\
-      \        (br_if $end (i32.eqz (local.get $tag)))\n\
-      \        (local.set $pl (i32.load offset=4 (local.get $cur)))\n\
-      \        (local.set $h (i32.load offset=0 (local.get $pl)))\n\
+      \        (br_if $end (i64.eqz (i64.load offset=0 (local.get $cur))))\n\
+      \        (local.set $pl (i32.wrap_i64 (i64.load offset=8 (local.get $cur))))\n\
       \        (if (i32.eqz (local.get $first))\n\
       \          (then\n\
-      \            (local.set $acc (call $__lang_str_concat (local.get $acc) (i32.const %d)))))\n\
-      \        (local.set $acc (call $__lang_str_concat (local.get $acc) (call $to_json_%s (local.get $h))))\n\
+      \            (local.set $acc (call $__lang_str_concat (local.get $acc) (i64.const %d)))))\n\
+      \        (local.set $acc (call $__lang_str_concat (local.get $acc)\n\
+      \          (call $to_json_%s (i64.load offset=0 (local.get $pl)))))\n\
       \        (local.set $first (i32.const 0))\n\
-      \        (local.set $cur (i32.load offset=4 (local.get $pl)))\n\
+      \        (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $pl))))\n\
       \        (br $lp)))\n\
-      \    (call $__lang_str_concat (local.get $acc) (i32.const %d)))"
+      \    (call $__lang_str_concat (local.get $acc) (i64.const %d)))"
       tag lb comma (ty_tag elem_ty) rb
   | Ast.TyCon ("option", [inner]) ->
     (* option is a transparent JSON nullable: None -> null, Some x -> x.
@@ -4269,9 +4269,10 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let null_off = intern_show_str "null" in
     Printf.sprintf
       "  (func $to_json_%s (param $x i64) (result i64)\n\
-      \    (if (result i64) (i32.eq (i32.load offset=0 (local.get $x)) (i32.const %d))\n\
-      \      (then (i32.const %d))\n\
-      \      (else (call $to_json_%s (i32.load offset=4 (local.get $x))))))"
+      \    (if (result i64)\n\
+      \        (i64.eq (i64.load offset=0 (i32.wrap_i64 (local.get $x))) (i64.const %d))\n\
+      \      (then (i64.const %d))\n\
+      \      (else (call $to_json_%s (i64.load offset=8 (i32.wrap_i64 (local.get $x)))))))"
       tag none_tag null_off (ty_tag (Ast.walk inner))
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
     let vs =
@@ -4292,7 +4293,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
       (Printf.sprintf "  (func $to_json_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $tag i32)\n";
     Buffer.add_string lines
-      "    (local.set $tag (i32.load offset=0 (local.get $x)))\n";
+      "    (local.set $tag (i32.wrap_i64 (i64.load offset=0 (i32.wrap_i64 (local.get $x)))))\n";
     let rec emit_branches = function
       | [] -> "(unreachable)"
       | (cname, arg_opt) :: rest ->
@@ -4305,14 +4306,14 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         let arm_body =
           match arg_opt with
           | None ->
-            Printf.sprintf "(i32.const %d)" (intern_show_str ("\"" ^ cname ^ "\""))
+            Printf.sprintf "(i64.const %d)" (intern_show_str ("\"" ^ cname ^ "\""))
           | Some pty ->
             let pty = subst_params mapping pty in
             let prefix = intern_show_str ("{\"" ^ cname ^ "\":") in
             let suffix = intern_show_str "}" in
             Printf.sprintf
-              "(call $__lang_str_concat (call $__lang_str_concat (i32.const %d) \
-               (call $to_json_%s (i32.load offset=4 (local.get $x)))) (i32.const %d))"
+              "(call $__lang_str_concat (call $__lang_str_concat (i64.const %d) \
+               (call $to_json_%s (i64.load offset=8 (i32.wrap_i64 (local.get $x))))) (i64.const %d))"
               prefix (ty_tag pty) suffix
         in
         Printf.sprintf
@@ -4326,7 +4327,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   | _ ->
     let off = intern_show_str "null" in
     Printf.sprintf
-      "  (func $to_json_%s (param $x i64) (result i64) (i32.const %d))" tag off
+      "  (func $to_json_%s (param $x i64) (result i64) (i64.const %d))" tag off
 
 (* Structural equality for compound types on Wasm. A compound value is a
    linear-memory offset, so `i32.eq` would compare offsets, not contents —
