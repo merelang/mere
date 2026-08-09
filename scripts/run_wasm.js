@@ -127,6 +127,10 @@ const wasmPath = process.argv[2];
     return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
   };
 
+  // Open file descriptors for positioned I/O, indexed by the handle value
+  // Mere sees. Slot 0 is reserved as a null sentinel.
+  const openFiles = [undefined];
+
   const env = {
     puts: (ptr) => {
       // C's puts appends a newline; match that.
@@ -181,6 +185,61 @@ const wasmPath = process.argv[2];
       dv.setInt32(ptr, buf.length, true);
       new Uint8Array(memory.buffer).set(buf, ptr + 4);
       return ptr;
+    },
+    // Positioned file I/O on an open handle (v0.1.153) — what a paged
+    // store needs, since read/write_file_bytes only replace a whole file.
+    // The Mere-side value is an index into `openFiles`; the host owns the
+    // descriptor, exactly as the browser host will own an OPFS access
+    // handle. Handle 0 is a null sentinel so a failed open is falsy.
+    file_openrw: (pathPtr) => {
+      const path = readCStr(pathPtr);
+      try {
+        // "r+" then "w+": create if absent, never truncate an existing file.
+        let fd;
+        try { fd = fs.openSync(path, "r+"); }
+        catch (e) { fd = fs.openSync(path, "w+"); }
+        openFiles.push(fd);
+        return openFiles.length - 1;
+      } catch (e) {
+        console.error("file_openrw failed:", e.message);
+        return 0;
+      }
+    },
+    // Returns a mere_bytes buffer [i32 len][raw bytes] on the Mere heap;
+    // the Wasm side converts it to Vec[int]. A short read (past EOF) comes
+    // back as a shorter buffer, matching the C runtime's fgetc loop.
+    file_pread: (handle, off, len) => {
+      const fd = openFiles[handle];
+      const buf = Buffer.alloc(Math.max(0, len));
+      let got = 0;
+      if (fd !== undefined && len > 0 && off >= 0) {
+        try { got = fs.readSync(fd, buf, 0, len, off); } catch (e) { got = 0; }
+      }
+      const ptr = bumpAlloc(4 + got);
+      new DataView(memory.buffer).setInt32(ptr, got, true);
+      new Uint8Array(memory.buffer).set(buf.subarray(0, got), ptr + 4);
+      return ptr;
+    },
+    file_pwrite: (handle, off, bytesPtr) => {
+      const fd = openFiles[handle];
+      if (fd === undefined || off < 0) return 0;
+      const len = new DataView(memory.buffer).getInt32(bytesPtr, true);
+      const mem = new Uint8Array(memory.buffer);
+      const src = Buffer.from(mem.subarray(bytesPtr + 4, bytesPtr + 4 + len));
+      try { return fs.writeSync(fd, src, 0, len, off); } catch (e) { return 0; }
+    },
+    file_fsync: (handle) => {
+      const fd = openFiles[handle];
+      if (fd !== undefined) { try { fs.fsyncSync(fd); } catch (e) { /* ignore */ } }
+      return 0;
+    },
+    file_close: (handle) => {
+      const fd = openFiles[handle];
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+        openFiles[handle] = undefined;
+      }
+      return 0;
     },
     write_file_bytes: (pathPtr, bytesPtr) => {
       const path = readCStr(pathPtr);

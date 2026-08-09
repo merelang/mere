@@ -1,0 +1,51 @@
+// Positioned file I/O on an open handle, across the backends.
+//
+// file_openrw / file_pread / file_pwrite / file_fsync were interp + C
+// only until v0.1.153; Wasm now implements them over host imports, with
+// bytes crossing in the mere_bytes layout rather than one call per byte.
+// LLVM still refuses them at emit time, which parity reports as UNSUP.
+//
+// The point of the case is the *positioned* part: write at an offset
+// past the end (extending the file), overwrite a window in the middle
+// without disturbing its neighbours, and read back a window that starts
+// mid-file. A whole-file read/replace pair cannot express any of that.
+
+let path = "/tmp/mere_parity_pio.bin";
+let _ = write_file path "";
+
+let f = file_openrw path;
+
+// Fill 0..15 with a known ramp, one byte at a time from offset 0.
+let ramp = vec_new ();
+let rec fill = fn (i: int) ->
+  if i == 16 then ()
+  else let _ = vec_push ramp (i * 3) in fill (i + 1);
+let _ = fill 0;
+let _ = file_pwrite f 0 ramp;
+
+// Overwrite a 3-byte window in the middle.
+let patch = vec_new ();
+let _ = vec_push patch 200;
+let _ = vec_push patch 201;
+let _ = vec_push patch 202;
+let _ = file_pwrite f 5 patch;
+
+// Write past the current end — the file has to extend.
+let tail = vec_new ();
+let _ = vec_push tail 255;
+let _ = file_pwrite f 31 tail;
+
+let _ = file_fsync f;
+let _ = file_close f;
+
+// Reopen (durability) and read three separate windows back.
+let g = file_openrw path;
+
+let _ = print (show (vec_to_list (file_pread g 0 8)));
+let _ = print (show (vec_to_list (file_pread g 5 3)));
+let _ = print (show (vec_to_list (file_pread g 31 1)));
+
+// A read that runs past EOF comes back short rather than padded.
+let _ = print (show (len (file_pread g 30 16)));
+let _ = file_close g;
+print "pio ok"

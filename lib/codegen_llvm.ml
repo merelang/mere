@@ -6775,7 +6775,8 @@ let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
 (* Phase 15.12: vec_to_list per-T helper.
    Builds the Cons chain bottom-up (start from Nil, prepend each elem in
    reverse). Allocates list nodes + tuple payloads in the default region.
-   Layout: list_<T>_node = { i32 tag, %tuple_<T>_list_<T> payload }. *)
+   Layout: list_<T>_node = { i32 tag, ptr payload }, where payload points
+   at a heap %tuple_<T>_list_<T>. *)
 let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
     : string =
   let t_tag = ty_tag elem_ty in
@@ -6826,10 +6827,19 @@ let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
       "  %new_node = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %node_size)";
       Printf.sprintf "  %%ntp = getelementptr %%%s, ptr %%new_node, i32 0, i32 0" node_struct;
       Printf.sprintf "  store i32 %d, ptr %%ntp" cons_tag;
+      (* v0.1.153: the payload field is a POINTER to the tuple (the Phase 24
+         boxed-payload layout), not the tuple inline. Storing the struct by
+         value wrote 16 bytes into an 8-byte slot, corrupting the node that
+         followed it — vec_to_list segfaulted on this backend for any input. *)
       Printf.sprintf "  %%npp = getelementptr %%%s, ptr %%new_node, i32 0, i32 1" node_struct;
-      Printf.sprintf "  %%tup = insertvalue %%%s undef, %s %%elem, 0" tup_struct c_elem;
-      Printf.sprintf "  %%tup2 = insertvalue %%%s %%tup, ptr %%acc, 1" tup_struct;
-      Printf.sprintf "  store %%%s %%tup2, ptr %%npp" tup_struct;
+      Printf.sprintf "  %%tup_size_p = getelementptr %%%s, ptr null, i32 1" tup_struct;
+      "  %tup_size = ptrtoint ptr %tup_size_p to i64";
+      "  %tup = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %tup_size)";
+      Printf.sprintf "  %%f0 = getelementptr %%%s, ptr %%tup, i32 0, i32 0" tup_struct;
+      Printf.sprintf "  store %s %%elem, ptr %%f0" c_elem;
+      Printf.sprintf "  %%f1 = getelementptr %%%s, ptr %%tup, i32 0, i32 1" tup_struct;
+      "  store ptr %acc, ptr %f1";
+      "  store ptr %tup, ptr %npp";
       "  %i_next = sub i32 %i, 1";
       "  br label %check";
       "end:";

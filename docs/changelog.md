@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.153 — 2026-08-09
+
+_Positioned file I/O on the Wasm backend, and the three broken builtins that
+finding it uncovered. `file_openrw` / `file_pread` / `file_pwrite` /
+`file_fsync` / `file_close` were interp + C only, on the reasoning that Wasm
+has no filesystem. That is true of the browser main thread and false of a
+Worker, which gets synchronous positioned read / write / flush from an OPFS
+access handle — the same contract these builtins already describe. They now
+lower to host imports, with bytes crossing in the `mere_bytes` layout the
+`read_file_bytes` path already uses, so there is no per-byte host crossing and
+the host never needs to know the Vec layout. `scripts/run_wasm.js` backs them
+with positioned `fs` calls against a handle table._
+
+_The result: mbtree — a persistent B+-tree written against those builtins —
+compiles to Wasm unchanged and passes its durability selftest (20 keys, node
+splits, a root split, fsync, close, reopen) on interp, C and Wasm alike. A tree
+file written by the C backend reads back correctly under Wasm and interp, and
+the reverse, so the on-disk format is one format across backends rather than
+three that happen to agree._
+
+_Getting there needed three fixes to builtins that were stale for the i64 value
+model and that nothing exercised. `show` over any composite type emitted WAT
+that wat2wasm rejected — the tuple, record, variant and list emitters all still
+built 4-byte cells with i32 fields and kept the str accumulator in an i32 local
+— so `print (show [1, 2, 3])` could not be assembled at all. `vec_to_list` on
+Wasm had the same rot. On LLVM, `vec_to_list` stored the payload tuple into the
+node by value, but the Phase 24 variant layout makes that field a pointer, so
+16 bytes went into an 8-byte slot and the helper segfaulted for any input.
+`test/parity/show_composite.mere` and `test/parity/file_pio.mere` cover both
+gaps; the existing 68 parity inputs only ever showed scalars and never opened a
+file handle. Full suite: parity 70/70, dune runtest 2306/0._
+
+_Known, not fixed: `args()` on the plain Wasm backend is hardcoded to the empty
+list even though `run_wasm.js` supplies `arg_count` / `arg_get`, so a CLI
+program silently sees no arguments there while the C backend sees them. Correct
+for a browser host, wrong under Node._
+
+---
+
 ## v0.1.152 — 2026-08-09
 
 _The chat client rewritten in Mere, and the four stale host boundaries it

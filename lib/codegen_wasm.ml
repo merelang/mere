@@ -181,6 +181,11 @@ let str_join_used = ref false
 let str_count_used = ref false
 let file_io_used = ref false
 let file_bytes_io_used = ref false  (* binary file I/O host imports (read/write_file_bytes) *)
+(* v0.1.153: positioned file I/O on an open handle (file_openrw / file_pread /
+   file_pwrite / file_fsync / file_close). Separate from file_bytes_io_used
+   because a paged store rewrites one node at a time and never wants the
+   whole-file read/replace pair. *)
+let file_pio_used = ref false
 (* Phase 2: true while emitting a command-style component
    (--component on a unit/CLI program). Command components get real WASI via
    the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
@@ -2097,13 +2102,57 @@ let rec emit_expr (e : Ast.expr) : unit =
     uses_threads := true;
     emit_expr ch_e;
     emit_instr "call $mere_channel_recv"
-  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" | "file_close"
-                              | "file_openrw" | "file_pwrite" | "file_fsync" as fio); _ }, _)
+  (* v0.1.153: positioned file I/O. The handle is an opaque host index (the
+     host owns the descriptor), and bytes cross in the mere_bytes layout the
+     read_file_bytes path already uses, so no per-byte host crossing and no
+     Vec layout knowledge on the host side.
+
+     "Wasm has no filesystem" was true of the browser main thread only. A
+     Worker gets synchronous positioned read / write / flush from an OPFS
+     access handle, which is exactly this contract — so a store written
+     against these builtins compiles to every backend unchanged. *)
+  | Ast.App ({ node = Ast.Var "file_openrw"; _ }, path_e)
+    when not (List.mem_assoc "file_openrw" !locals
+              || Hashtbl.mem toplevel_fn_names "file_openrw"
+              || Hashtbl.mem inner_lifts_wasm "file_openrw") ->
+    file_pio_used := true;
+    emit_expr path_e;
+    emit_instr "call $file_openrw"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pread"; _ },
+                                                ch_e); _ }, off_e); _ }, len_e)
+    when not (List.mem_assoc "file_pread" !locals
+              || Hashtbl.mem toplevel_fn_names "file_pread"
+              || Hashtbl.mem inner_lifts_wasm "file_pread") ->
+    file_pio_used := true; bytes_used := true; bytes_vec_used := true; vec_used := true;
+    emit_expr ch_e;
+    emit_expr off_e;
+    emit_expr len_e;
+    emit_instr "call $file_pread";
+    emit_instr "call $__lang_vec_of_bytes"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pwrite"; _ },
+                                                ch_e); _ }, off_e); _ }, vec_e)
+    when not (List.mem_assoc "file_pwrite" !locals
+              || Hashtbl.mem toplevel_fn_names "file_pwrite"
+              || Hashtbl.mem inner_lifts_wasm "file_pwrite") ->
+    file_pio_used := true; bytes_used := true; bytes_vec_used := true; vec_used := true;
+    emit_expr ch_e;
+    emit_expr off_e;
+    emit_expr vec_e;
+    emit_instr "call $__lang_bytes_of_vec";
+    emit_instr "call $file_pwrite"
+  | Ast.App ({ node = Ast.Var ("file_fsync" | "file_close" as fio); _ }, ch_e)
     when not (List.mem_assoc fio !locals
               || Hashtbl.mem toplevel_fn_names fio
               || Hashtbl.mem inner_lifts_wasm fio) ->
-    (* v0.1.59: streaming file input is interp + C only.
-       v0.1.115: the read/write handle likewise (Wasm has no filesystem). *)
+    file_pio_used := true;
+    emit_expr ch_e;
+    emit_instr (Printf.sprintf "call $%s" fio)
+  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" as fio); _ }, _)
+    when not (List.mem_assoc fio !locals
+              || Hashtbl.mem toplevel_fn_names fio
+              || Hashtbl.mem inner_lifts_wasm fio) ->
+    (* v0.1.59: streaming line input stays interp + C — it needs a decoder
+       and a buffered cursor the host would have to own per handle. *)
     unsupported e.Ast.loc
       (fio ^ " is unsupported in Wasm codegen (v0.1.59 scope = interp + C)")
   | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt" as cc); _ }, _)
@@ -3892,26 +3941,30 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let lparen = intern_show_str "(" in
     let rparen = intern_show_str ")" in
     let lines = Buffer.create 256 in
+    (* v0.1.153: fields are 8-byte i64 slots and a str value is an i64, so
+       the accumulator and the interned constants are i64 and the loads are
+       i64 at offset i*8. The i32-era shape here made `show` unassemblable
+       for every composite type on this backend. *)
     Buffer.add_string lines
       (Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n" tag);
-    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines "    (local $r i64)\n";
     Buffer.add_string lines
-      (Printf.sprintf "    (local.set $r (i32.const %d))\n" lparen);
+      (Printf.sprintf "    (local.set $r (i64.const %d))\n" lparen);
     List.iteri (fun i ety ->
       if i > 0 then
         Buffer.add_string lines
           (Printf.sprintf
-             "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+             "    (local.set $r (call $__lang_str_concat (local.get $r) (i64.const %d)))\n"
              comma);
       Buffer.add_string lines
         (Printf.sprintf
            "    (local.set $r (call $__lang_str_concat (local.get $r) \
-            (call $show_%s (i32.load offset=%d (local.get $x)))))\n"
-           (ty_tag ety) (i * 4))
+            (call $show_%s (i64.load offset=%d (i32.wrap_i64 (local.get $x))))))\n"
+           (ty_tag ety) (i * 8))
     ) ts;
     Buffer.add_string lines
       (Printf.sprintf
-         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))"
+         "    (call $__lang_str_concat (local.get $r) (i64.const %d)))"
          rparen);
     Buffer.contents lines
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
@@ -3925,9 +3978,9 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let lines = Buffer.create 256 in
     Buffer.add_string lines
       (Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n" tag);
-    Buffer.add_string lines "    (local $r i32)\n";
+    Buffer.add_string lines "    (local $r i64)\n";
     Buffer.add_string lines
-      (Printf.sprintf "    (local.set $r (i32.const %d))\n" hdr);
+      (Printf.sprintf "    (local.set $r (i64.const %d))\n" hdr);
     List.iteri (fun i (fname, ft) ->
       let ft = subst_params mapping ft in
       let sep =
@@ -3936,17 +3989,17 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       in
       Buffer.add_string lines
         (Printf.sprintf
-           "    (local.set $r (call $__lang_str_concat (local.get $r) (i32.const %d)))\n"
+           "    (local.set $r (call $__lang_str_concat (local.get $r) (i64.const %d)))\n"
            sep);
       Buffer.add_string lines
         (Printf.sprintf
            "    (local.set $r (call $__lang_str_concat (local.get $r) \
-            (call $show_%s (i32.load offset=%d (local.get $x)))))\n"
-           (ty_tag ft) (i * 4))
+            (call $show_%s (i64.load offset=%d (i32.wrap_i64 (local.get $x))))))\n"
+           (ty_tag ft) (i * 8))
     ) info.Typer.r_fields;
     Buffer.add_string lines
       (Printf.sprintf
-         "    (call $__lang_str_concat (local.get $r) (i32.const %d)))"
+         "    (call $__lang_str_concat (local.get $r) (i64.const %d)))"
          suffix);
     Buffer.contents lines
   | Ast.TyCon ("list", [elem_ty]) ->
@@ -3957,27 +4010,32 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let lb = intern_show_str "[" in
     let rb = intern_show_str "]" in
     let comma = intern_show_str ", " in
+    (* v0.1.153: rebuilt for the i64 value model. This walker still read
+       8-byte cells with i32 fields and kept the accumulator str in an i32
+       local, so `show` applied to ANY list emitted WAT that wat2wasm
+       rejected — `print (show [1, 2, 3])` could not be assembled at all.
+       Cells are 16 bytes: tag at 0, payload pointer at 8; the payload
+       tuple holds head at 0 and tail at 8, both i64. *)
     Printf.sprintf
       "  (func $show_%s (param $x i64) (result i64)\n\
-      \    (local $cur i32) (local $acc i32) (local $first i32)\n\
-      \    (local $tag i32) (local $pl i32) (local $h i32)\n\
-      \    (local.set $acc (i32.const %d))\n\
-      \    (local.set $cur (local.get $x))\n\
+      \    (local $cur i32) (local $acc i64) (local $first i32)\n\
+      \    (local $pl i32)\n\
+      \    (local.set $acc (i64.const %d))\n\
+      \    (local.set $cur (i32.wrap_i64 (local.get $x)))\n\
       \    (local.set $first (i32.const 1))\n\
       \    (block $end\n\
       \      (loop $lp\n\
-      \        (local.set $tag (i32.load offset=0 (local.get $cur)))\n\
-      \        (br_if $end (i32.eqz (local.get $tag)))\n\
-      \        (local.set $pl (i32.load offset=4 (local.get $cur)))\n\
-      \        (local.set $h (i32.load offset=0 (local.get $pl)))\n\
+      \        (br_if $end (i64.eqz (i64.load offset=0 (local.get $cur))))\n\
+      \        (local.set $pl (i32.wrap_i64 (i64.load offset=8 (local.get $cur))))\n\
       \        (if (i32.eqz (local.get $first))\n\
       \          (then\n\
-      \            (local.set $acc (call $__lang_str_concat (local.get $acc) (i32.const %d)))))\n\
-      \        (local.set $acc (call $__lang_str_concat (local.get $acc) (call $show_%s (local.get $h))))\n\
+      \            (local.set $acc (call $__lang_str_concat (local.get $acc) (i64.const %d)))))\n\
+      \        (local.set $acc (call $__lang_str_concat (local.get $acc)\n\
+      \          (call $show_%s (i64.load offset=0 (local.get $pl)))))\n\
       \        (local.set $first (i32.const 0))\n\
-      \        (local.set $cur (i32.load offset=4 (local.get $pl)))\n\
+      \        (local.set $cur (i32.wrap_i64 (i64.load offset=8 (local.get $pl))))\n\
       \        (br $lp)))\n\
-      \    (call $__lang_str_concat (local.get $acc) (i32.const %d)))"
+      \    (call $__lang_str_concat (local.get $acc) (i64.const %d)))"
       tag lb comma (ty_tag elem_ty) rb
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
     let vs =
@@ -3999,7 +4057,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       (Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n" tag);
     Buffer.add_string lines "    (local $tag i32)\n";
     Buffer.add_string lines
-      "    (local.set $tag (i32.load offset=0 (local.get $x)))\n";
+      "    (local.set $tag (i32.wrap_i64 (i64.load offset=0 (i32.wrap_i64 (local.get $x)))))\n";
     (* Nested if/else chain over each ctor's tag. *)
     let rec emit_branches = function
       | [] -> "(unreachable)"
@@ -4013,13 +4071,13 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         let arm_body =
           match arg_opt with
           | None ->
-            Printf.sprintf "(i32.const %d)" (intern_show_str cname)
+            Printf.sprintf "(i64.const %d)" (intern_show_str cname)
           | Some pty ->
             let pty = subst_params mapping pty in
             let prefix = intern_show_str (cname ^ " ") in
             Printf.sprintf
-              "(call $__lang_str_concat (i32.const %d) \
-               (call $show_%s (i32.load offset=4 (local.get $x))))"
+              "(call $__lang_str_concat (i64.const %d) \
+               (call $show_%s (i64.load offset=8 (i32.wrap_i64 (local.get $x)))))"
               prefix (ty_tag pty)
         in
         Printf.sprintf
@@ -7552,6 +7610,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   str_count_used := false;
   file_io_used := false;
   file_bytes_io_used := false;
+  file_pio_used := false;
   map_int_used := false;
   map_str_used := false;
   Hashtbl.reset map_key_types;
@@ -8076,6 +8135,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       "  (import \"env\" \"read_file_bytes\" (func $read_file_bytes_h (param i32) (result i32)))\n\
       \  (import \"env\" \"write_file_bytes\" (func $write_file_bytes_h (param i32) (param i32) (result i32)))\n"
     else "")
+    ^ (if !file_pio_used then
+      "  (import \"env\" \"file_openrw\" (func $file_openrw_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_pread\" (func $file_pread_h (param i32) (param i32) (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_pwrite\" (func $file_pwrite_h (param i32) (param i32) (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_fsync\" (func $file_fsync_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_close\" (func $file_close_h (param i32) (result i32)))\n"
+    else "")
   in
   let boundary_shims =
     "  (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))\n"
@@ -8093,6 +8159,20 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \    (i64.extend_i32_u (call $read_file_bytes_h (i32.wrap_i64 (local.get 0)))))\n\
       \  (func $write_file_bytes (param i64) (param i64) (result i64)\n\
       \    (i64.extend_i32_u (call $write_file_bytes_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1)))))\n"
+    else "")
+    ^ (if !file_pio_used then
+      "  (func $file_openrw (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $file_openrw_h (i32.wrap_i64 (local.get 0)))))\n\
+      \  (func $file_pread (param i64) (param i64) (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $file_pread_h (i32.wrap_i64 (local.get 0))\n\
+      \      (i32.wrap_i64 (local.get 1)) (i32.wrap_i64 (local.get 2)))))\n\
+      \  (func $file_pwrite (param i64) (param i64) (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $file_pwrite_h (i32.wrap_i64 (local.get 0))\n\
+      \      (i32.wrap_i64 (local.get 1)) (i32.wrap_i64 (local.get 2)))))\n\
+      \  (func $file_fsync (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $file_fsync_h (i32.wrap_i64 (local.get 0)))))\n\
+      \  (func $file_close (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $file_close_h (i32.wrap_i64 (local.get 0)))))\n"
     else "")
   in
   (* Phase 34.3: float runtime imports (str_of_float / float_of_str).
@@ -8145,6 +8225,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ^ (if !file_bytes_io_used then
            "  (func $read_file_bytes_h (param i32) (result i32) unreachable)\n\
            \  (func $write_file_bytes_h (param i32) (param i32) (result i32) unreachable)\n"
+         else "")
+      ^ (if !file_pio_used then
+           "  (func $file_openrw_h (param i32) (result i32) unreachable)\n\
+           \  (func $file_pread_h (param i32) (param i32) (param i32) (result i32) unreachable)\n\
+           \  (func $file_pwrite_h (param i32) (param i32) (param i32) (result i32) unreachable)\n\
+           \  (func $file_fsync_h (param i32) (result i32) unreachable)\n\
+           \  (func $file_close_h (param i32) (result i32) unreachable)\n"
          else "")
       ^ (if !print_no_nl_used then
            "  (func $__lang_print_no_nl_h (param i32) unreachable)\n"
@@ -8296,34 +8383,39 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let vec_to_list_section =
     if not !vec_to_list_used then "" else
     Printf.sprintf "
-  (func $mere_vec_to_list (param $v i64) (result i64)
-    (local $len i32) (local $i i32) (local $acc i32)
+  ;; v0.1.153: rebuilt for the i64 value model. This helper still assumed
+  ;; the old 4-byte one — it loaded the Vec header straight off an i64
+  ;; local and packed 8-byte cells with i32 fields, so any program that
+  ;; called vec_to_list emitted WAT that wat2wasm rejected outright. Cells
+  ;; are 16 bytes with i64 fields, matching $__lang_args.
+  (func $mere_vec_to_list (param $v8 i64) (result i64)
+    (local $v i32) (local $len i32) (local $i i32) (local $acc i32)
     (local $tup i32) (local $node i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
-    ;; allocate Nil node (8 bytes)
+    ;; Nil cell (16 bytes): { tag }
     (local.set $acc (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $acc) (i32.const 8)))
-    (i32.store offset=0 (local.get $acc) (i32.const %d))  ;; nil_tag
-    (i32.store offset=4 (local.get $acc) (i32.const 0))
+    (global.set $__lang_bump (i32.add (local.get $acc) (i32.const 16)))
+    (i64.store offset=0 (local.get $acc) (i64.const %d))  ;; nil_tag
     (local.set $i (i32.sub (local.get $len) (i32.const 1)))
     (block $end
       (loop $lp
         (br_if $end (i32.lt_s (local.get $i) (i32.const 0)))
-        ;; allocate tuple (8 bytes): { f0=vec[i], f1=acc }
+        ;; tuple (16 bytes): { f0 = vec[i], f1 = acc }
         (local.set $tup (global.get $__lang_bump))
-        (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 8)))
-        (i32.store offset=0 (local.get $tup)
-          (call $mere_vec_get (local.get $v) (local.get $i)))
-        (i32.store offset=4 (local.get $tup) (local.get $acc))
-        ;; allocate Cons node (8 bytes): { tag=cons_tag, payload=tup }
+        (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 16)))
+        (i64.store offset=0 (local.get $tup)
+          (call $mere_vec_get (local.get $v8) (i64.extend_i32_s (local.get $i))))
+        (i64.store offset=8 (local.get $tup) (i64.extend_i32_u (local.get $acc)))
+        ;; Cons cell (16 bytes): { tag, payload }
         (local.set $node (global.get $__lang_bump))
-        (global.set $__lang_bump (i32.add (local.get $node) (i32.const 8)))
-        (i32.store offset=0 (local.get $node) (i32.const %d))  ;; cons_tag
-        (i32.store offset=4 (local.get $node) (local.get $tup))
+        (global.set $__lang_bump (i32.add (local.get $node) (i32.const 16)))
+        (i64.store offset=0 (local.get $node) (i64.const %d))  ;; cons_tag
+        (i64.store offset=8 (local.get $node) (i64.extend_i32_u (local.get $tup)))
         (local.set $acc (local.get $node))
         (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (br $lp)))
-    (local.get $acc))" nil_tag_v cons_tag_v
+    (i64.extend_i32_u (local.get $acc)))" nil_tag_v cons_tag_v
   in
   let list_len_section =
     if not !list_len_used then "" else
