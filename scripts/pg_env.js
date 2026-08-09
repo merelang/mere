@@ -63,11 +63,18 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     while (end < bytes.length && bytes[end] !== 0) end++;
     return Buffer.from(bytes.subarray(ptr, end)).toString('utf8');
   };
+  // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
+  // $__lang_strlen reads the length from ptr-4, so a header-less write
+  // yields a str whose length is whatever preceded it on the heap.
   const writeStr = (s) => {
-    const bytes = Buffer.from(s + '\0', 'utf8');
-    const ptr = bumpAlloc(bytes.length);
-    new Uint8Array(getMemory()).set(bytes, ptr);
-    return ptr;
+    const utf8 = Buffer.from(s || '', 'utf8');
+    const start = bumpAlloc(4 + utf8.length + 1);
+    // Views must be taken after bumpAlloc — growing detaches the buffer.
+    new DataView(getMemory()).setInt32(start, utf8.length, true);
+    const mem = new Uint8Array(getMemory());
+    mem.set(utf8, start + 4);
+    mem[start + 4 + utf8.length] = 0;
+    return start + 4;
   };
 
   return {

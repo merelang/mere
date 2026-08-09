@@ -45,11 +45,19 @@ function makeHttpGlue() {
   // that region was too small and its wraparound corrupted Mere-side
   // strings that were live for the whole handler.
   const PAGE = 64 * 1024;
+  // Mere str layout is `[i32 len][bytes][NUL]` and the value is a
+  // pointer to byte0, so the length lives at ptr-4 — that is what
+  // `$__lang_strlen` loads. Writing only NUL-terminated bytes (the old
+  // shape) makes every host-supplied string read back as whatever the
+  // preceding 4 heap bytes happen to say, which is usually 0: the
+  // request line arrived intact in memory and Mere saw "".
+  // scripts/run_wasm.js already emits the header, but it open-codes the
+  // same five lines at each call site, so the fix never reached the two
+  // glues that share a writeStr helper.
   const writeStr = (s) => {
     if (!memory || !langBump) return 0;
     const utf8 = Buffer.from(s, "utf8");
-    const total = utf8.length + 1;
-    const aligned = (total + 7) & ~7;
+    const aligned = (4 + utf8.length + 1 + 7) & ~7;
     const start = langBump.value;
     const needed = start + aligned;
     const capacity = memory.buffer.byteLength;
@@ -57,11 +65,13 @@ function makeHttpGlue() {
       const growPages = Math.ceil((needed - capacity) / PAGE);
       memory.grow(growPages);
     }
+    // Re-read the views AFTER any grow — it detaches the old buffer.
+    new DataView(memory.buffer).setInt32(start, utf8.length, true);
     const bytes = new Uint8Array(memory.buffer);
-    bytes.set(utf8, start);
-    bytes[start + utf8.length] = 0;
+    bytes.set(utf8, start + 4);
+    bytes[start + 4 + utf8.length] = 0;
     langBump.value = start + aligned;
-    return start;
+    return start + 4;
   };
 
   const callClosure = (closurePtr, argPtr) => {
@@ -79,7 +89,14 @@ function makeHttpGlue() {
       console.error("contrib/http: closure fn_idx not in table", { closurePtr, env, fnIdx });
       return 0;
     }
-    return fn(env, argPtr);
+    // v0.1.127 made the closure type `(param i64 i64) (result i64)`, so
+    // both args must cross the JS boundary as BigInt, and the returned
+    // pointer has to come back as a Number for pointer arithmetic.
+    // contrib/dom was updated at the time; this glue was not, so every
+    // contrib/http demo threw "Cannot convert N to a BigInt" on the
+    // first request when built with a current compiler.
+    const result = fn(BigInt(env), BigInt(argPtr));
+    return typeof result === "bigint" ? Number(result) : result;
   };
 
   // Per-request slots. `http_serve` populates the body pointer + resets
@@ -240,6 +257,39 @@ function makeHttpGlue() {
     http_stream_write: (ptr) => {
       if (!activeRes || !streamStarted) return;
       try { activeRes.write(readCStr(ptr)); } catch (e) { /* client gone */ }
+    },
+    // Send a file straight from disk as the response body, with an
+    // explicit Content-Type. Returns 1 on success, 0 if the file could
+    // not be read — in which case nothing has been written and the
+    // caller is free to run its own 404 path.
+    //
+    // This exists because Mere strings are NUL-terminated: `read_file`
+    // on a binary asset stops at the first zero byte. A .wasm module
+    // begins with one (`\0asm`), so before this a Mere server could not
+    // serve its own compiled client — contrib/http/static.mere would
+    // read "" and 404 it. Here the bytes never enter Mere at all; the
+    // host reads them and writes them, so the string representation
+    // never comes up.
+    //
+    // Like http_stream_start, this flushes headers, so the handler
+    // should return "" afterwards and let the normal path close the
+    // response.
+    http_send_file: (pathPtr, ctPtr) => {
+      if (!activeRes || streamStarted) return 0;
+      let buf;
+      try {
+        buf = require("fs").readFileSync(readCStr(pathPtr));
+      } catch (e) {
+        return 0;
+      }
+      activeRes.writeHead(currentStatus, {
+        ...currentHeaders,
+        "Content-Type": readCStr(ctPtr),
+        "Content-Length": buf.length,
+      });
+      activeRes.write(buf);
+      streamStarted = true;
+      return 1;
     },
     sse_broadcast: (channelPtr, payloadPtr) => {
       broadcast(readCStr(channelPtr), readCStr(payloadPtr));
