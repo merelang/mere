@@ -1,0 +1,34 @@
+// `show` over composite types, across the backends.
+//
+// Every one of these was unassemblable on Wasm until v0.1.153: the show
+// emitter still built 4-byte cells with i32 fields and kept the str
+// accumulator in an i32 local, so wat2wasm rejected the module outright
+// — `print (show [1, 2, 3])` could not be built at all. The failure was
+// loud but nothing exercised it, because the parity inputs only ever
+// showed scalars.
+//
+// vec_to_list had the same rot and is covered here too, since its result
+// is a list whose printing goes through the same path.
+
+type color = Red | Green | Blue of int;
+type pt = { x: int, y: str };
+
+let _ = print (show [1, 2, 3]);
+let _ = print (show (1, "two"));
+let _ = print (show (pt { x = 5, y = "hi" }));
+let _ = print (show Red);
+let _ = print (show (Blue 7));
+let _ = print (show [(1, "a"), (2, "b")]);
+let _ = print (show (Some 3));
+let _ = print (show [Red, Blue 2]);
+
+let v = vec_new ();
+let _ = vec_push v 10;
+let _ = vec_push v 20;
+let _ = print (show (vec_to_list v));
+
+// An empty vec still has to produce a well-formed Nil.
+let empty = vec_new ();
+let _ = vec_push empty 1;
+let _ = vec_set empty 0 9;
+print (show (vec_to_list empty))
