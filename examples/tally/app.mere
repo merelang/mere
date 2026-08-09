@@ -1,0 +1,205 @@
+// examples/tally/app.mere — the UI half of the tally app.
+//
+// A local-first counter board. Every read and write goes to a durable
+// log owned by examples/tally/store.mere, which runs off this thread;
+// the server is contacted only when you press sync. So the board works
+// with the server down, and syncing is an explicit merge rather than a
+// fetch.
+//
+// The three-way split is what this example is for:
+//
+//   this file        UI thread. DOM, no storage, no filesystem.
+//   store.mere       storage thread. kvlog over positioned file I/O.
+//   server.mere      the other replica. The SAME kvlog source.
+//
+// Everything crossing a thread or a network is a callback, and nothing
+// inside either endpoint is. That line is the whole subject: `handle` in
+// store.mere returns its reply as a value and reads like ordinary code,
+// while every caller here has to name a continuation.
+//
+// Build:
+//   mere -w examples/tally/app.mere   > /tmp/tally_app.wat
+//   mere -w examples/tally/store.mere > /tmp/tally_store.wat
+//   wat2wasm --enable-tail-call /tmp/tally_app.wat   -o examples/tally/app.wasm
+//   wat2wasm --enable-tail-call /tmp/tally_store.wat -o examples/tally/store.wasm
+//
+// Verify without a browser:
+//   node scripts/run_dom_headless.mjs examples/tally/app.wasm \
+//     http://localhost:8080 --worker examples/tally/store.wasm \
+//     --set label=coffee --fire add:submit --fire sync:click
+
+// Ask the storage thread a question; the answer arrives later. This is
+// postMessage in a browser and a deferred in-process call under Node —
+// the Mere side cannot tell, which is the point.
+extern fn worker_call: str -> (str -> unit) -> unit;
+
+import "../../contrib/dom/dom.mere";
+
+// ---- elements -------------------------------------------------------
+
+let board = dom_get_by_id "board" in
+let status_el = dom_get_by_id "status" in
+let log_el = dom_get_by_id "log" in
+let add_form = dom_get_by_id "add" in
+let label_in = dom_get_by_id "label" in
+let sync_btn = dom_get_by_id "sync" in
+
+let log_buf = vec_new () in
+let _ = vec_push log_buf "" in
+let log = fn (msg: str) ->
+  let next = vec_get log_buf 0 ++ msg ++ "\n" in
+  let _ = vec_set log_buf 0 next in
+  let _ = dom_set_text log_el next in
+  dom_scroll_to_end log_el
+in
+
+// ---- the wire format ------------------------------------------------
+//
+// Both the store and the server speak "<key>\t<value>\n" per line. One
+// format for both replicas keeps the merge below symmetric.
+
+let rec parse_lines = fn (xs) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (line, rest) ->
+    let i = str_index_of line "\t" in
+    if i < 0 then parse_lines rest
+    else
+      Cons ((substring line 0 i, substring line (i + 1) (str_len line)),
+            parse_lines rest)
+in
+
+let parse_state = fn (body: str) -> parse_lines (str_split body "\n") in
+
+let rec render_state = fn (xs) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons ((k, v), rest) -> render_state rest (acc ++ k ++ "\t" ++ v ++ "\n")
+in
+
+let num = fn (s: str) -> if str_eq s "" then 0 else try_or (fn () -> int_of_str s) 0 in
+
+let rec lookup = fn (xs) -> fn (k: str) ->
+  match xs with
+  | Nil -> ""
+  | Cons ((k2, v2), rest) -> if str_eq k2 k then v2 else lookup rest k
+in
+
+let rec upsert = fn (xs) -> fn (k: str) -> fn (v: str) ->
+  match xs with
+  | Nil -> Cons ((k, v), Nil)
+  | Cons ((k2, v2), rest) ->
+    if str_eq k2 k then Cons ((k, v), rest) else Cons ((k2, v2), upsert rest k v)
+in
+
+// Counters only ever go up, so the larger count wins and the merge needs
+// no clocks or tie-breaks. That is the whole reason this app counts
+// things: a mergeable data type keeps the sync honest without a vector
+// clock, which is a different dogfood.
+let rec merge = fn (into) -> fn (from) ->
+  match from with
+  | Nil -> into
+  | Cons ((k, v), rest) ->
+    let mine = lookup into k in
+    let winner = if num v > num mine then v else mine in
+    merge (upsert into k winner) rest
+in
+
+// ---- rendering ------------------------------------------------------
+
+let row = fn (k: str) -> fn (v: str) ->
+  let li = dom_create "li" in
+  let name = dom_create "span" in
+  let _ = dom_set_attr name "class" "name" in
+  let _ = dom_set_text name k in
+  let count = dom_create "span" in
+  let _ = dom_set_attr count "class" "count" in
+  let _ = dom_set_text count v in
+  let btn = dom_create "button" in
+  let _ = dom_set_text btn "+1" in
+  // Named so a headless run can press it; also what a real page wants
+  // for accessibility hooks.
+  let _ = dom_set_attr btn "id" ("bump-" ++ k) in
+  // The reply carries the new count, so the row updates itself and no
+  // reload of the board is needed.
+  let _ = dom_on_click btn (fn (u: unit) ->
+    worker_call ("bump\t" ++ k) (fn (reply: str) -> dom_set_text count reply)) in
+  let _ = dom_append li name in
+  let _ = dom_append li count in
+  let _ = dom_append li btn in
+  dom_append board li
+in
+
+let rec draw = fn (xs) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((k, v), rest) -> let _ = row k v in draw rest
+in
+
+// Setting textContent drops every child, which is how a board gets
+// cleared without a dom_remove binding.
+let render_board = fn (xs) ->
+  let _ = dom_set_text board "" in
+  draw xs
+in
+
+let refresh = fn (u: unit) ->
+  worker_call "all" (fn (reply: str) -> render_board (parse_state reply))
+in
+
+// ---- sync -----------------------------------------------------------
+//
+// Writing a merged state back to the store is an ordinary fold over a
+// list, except that each step is a round trip. With only callbacks to
+// work with, the fold has to be rewritten as a recursion that carries
+// its own continuation and calls it when the list runs out. This is the
+// shape every sequential-async loop takes here, and it is the clearest
+// cost of having no way to name the result of a call.
+
+let rec push_all = fn (xs) -> fn (k: unit -> unit) ->
+  match xs with
+  | Nil -> k ()
+  | Cons ((key, v), rest) ->
+    worker_call ("set\t" ++ key ++ "\t" ++ v)
+      (fn (reply: str) -> push_all rest k)
+in
+
+let sync = fn (u: unit) ->
+  let _ = dom_set_text status_el "syncing…" in
+  // Four steps, each waiting on the previous one: read local, fetch
+  // remote, write the merge back locally, publish it. Nesting one level
+  // per step is unavoidable without an async abstraction.
+  worker_call "all" (fn (local_body: str) ->
+    let local = parse_state local_body in
+    dom_fetch_async "GET" "/api/state" "" (fn (remote_body: str) ->
+      if dom_fetch_status () != 200 then
+        let _ = dom_set_text status_el "offline" in
+        log ("sync failed: GET /api/state -> " ++ show (dom_fetch_status ()))
+      else
+        let merged = merge local (parse_state remote_body) in
+        push_all merged (fn (u2: unit) ->
+          let _ = dom_fetch_header "Content-Type" "text/plain" in
+          dom_fetch_async "POST" "/api/state" (render_state merged "")
+            (fn (post_reply: str) ->
+              let _ = dom_set_text status_el "synced" in
+              let _ = log ("synced " ++ show (list_len merged) ++ " counter(s)") in
+              refresh ()))))
+in
+
+// ---- startup --------------------------------------------------------
+
+let add = fn (u: unit) ->
+  let label = str_trim (dom_input_value label_in) in
+  if str_eq label "" then ()
+  else
+    let _ = dom_set_value label_in "" in
+    worker_call ("set\t" ++ label ++ "\t0") (fn (reply: str) ->
+      let _ = log ("added " ++ label) in
+      refresh ())
+in
+
+let _ = dom_set_text status_el "local" in
+let _ = dom_on_submit add_form add in
+let _ = dom_on_click sync_btn sync in
+let _ = refresh () in
+0

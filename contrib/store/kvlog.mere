@@ -1,0 +1,113 @@
+// contrib/store/kvlog.mere — an append-only key/value log.
+//
+// A durable string-keyed store in ~90 lines, built on the positioned
+// file I/O added in v0.1.153 (file_openrw / file_size / file_pread /
+// file_pwrite / file_fsync). A write appends one record and fsyncs; a
+// read replays the log and keeps the last value seen for each key.
+//
+// It exists to be the SAME store on both sides of a local-first app:
+// compiled to C it is the server's copy, compiled to Wasm it is the
+// browser's, and the file it produces is byte-identical either way. The
+// point is not the data structure — a replayed log is the simplest thing
+// that is honestly durable — but that one Mere source holds both copies.
+//
+// Record framing, repeated to the end of the file:
+//
+//   [u32 be keylen][key bytes][u32 be vallen][val bytes]
+//
+// Bytes rather than text, because a value may contain anything. `ord` and
+// `chr` round-trip a str one byte at a time, which is UTF-8 safe: str_len
+// counts bytes and substring indexes them.
+//
+// Public API:
+//
+//   kvlog_set  : str -> str -> str -> unit    (path, key, value)
+//   kvlog_get  : str -> str -> str            ("" when absent)
+//   kvlog_all  : str -> (str * str) list      latest value per key, in
+//                                             first-appearance order
+//
+// Two deliberate costs for a store this size: a read replays the whole
+// log, and a write reopens the file. Neither hides anything about
+// durability, which is what this is here to exercise.
+//
+// Shape note: every helper takes the byte buffer as an explicit
+// parameter rather than closing over it. A `let rec` that captures a Vec
+// is rejected by both compiled backends ("captured variable has no
+// recorded type" on C, "inner-lifted capture not in scope" on Wasm), so
+// the buffer has to travel as an argument. Element types stay pinned to
+// int by `ord` and the arithmetic, which is what keeps these helpers
+// monomorphic enough to compile.
+
+// Replace an existing key's value in place, so rendered order stays
+// stable as values change; otherwise append.
+let rec kvlog_upsert = fn (xs) -> fn (k: str) -> fn (v: str) ->
+  match xs with
+  | Nil -> Cons ((k, v), Nil)
+  | Cons ((k2, v2), rest) ->
+    if str_eq k2 k then Cons ((k, v), rest)
+    else Cons ((k2, v2), kvlog_upsert rest k v);
+
+let kvlog_put_u32 = fn (b) -> fn (n: int) ->
+  let _ = vec_push b ((n / 16777216) % 256) in
+  let _ = vec_push b ((n / 65536) % 256) in
+  let _ = vec_push b ((n / 256) % 256) in
+  vec_push b (n % 256);
+
+let rec kvlog_put_str = fn (b) -> fn (s: str) -> fn (i: int) ->
+  if i == str_len s then ()
+  else
+    let _ = vec_push b (ord (substring s i (i + 1))) in
+    kvlog_put_str b s (i + 1);
+
+let kvlog_record = fn (k: str) -> fn (v: str) ->
+  let b = vec_new () in
+  let _ = kvlog_put_u32 b (str_len k) in
+  let _ = kvlog_put_str b k 0 in
+  let _ = kvlog_put_u32 b (str_len v) in
+  let _ = kvlog_put_str b v 0 in
+  b;
+
+let kvlog_set = fn (path: str) -> fn (k: str) -> fn (v: str) ->
+  // openrw creates the file when absent and never truncates, so the size
+  // read right after it is the append offset.
+  let f = file_openrw path in
+  let end_off = file_size path in
+  let _ = file_pwrite f end_off (kvlog_record k v) in
+  let _ = file_fsync f in
+  file_close f;
+
+let kvlog_u32 = fn (b) -> fn (i: int) ->
+  vec_get b i * 16777216 + vec_get b (i + 1) * 65536
+    + vec_get b (i + 2) * 256 + vec_get b (i + 3);
+
+let rec kvlog_take = fn (b) -> fn (i: int) -> fn (m: int) -> fn (acc: str) ->
+  if m == 0 then acc
+  else kvlog_take b (i + 1) (m - 1) (acc ++ chr (vec_get b i));
+
+let rec kvlog_scan = fn (b) -> fn (n: int) -> fn (i: int) -> fn (acc) ->
+  // A record needs both length prefixes before it can be trusted; a torn
+  // tail (a crash part-way through an append) just ends the replay.
+  if i + 8 > n then acc
+  else
+    let kl = kvlog_u32 b i in
+    let vl = kvlog_u32 b (i + 4 + kl) in
+    if i + 8 + kl + vl > n then acc
+    else
+      kvlog_scan b n (i + 8 + kl + vl)
+        (kvlog_upsert acc (kvlog_take b (i + 4) kl "")
+                          (kvlog_take b (i + 8 + kl) vl ""));
+
+let kvlog_all = fn (path: str) ->
+  let f = file_openrw path in
+  let n = file_size path in
+  let b = file_pread f 0 n in
+  let _ = file_close f in
+  kvlog_scan b n 0 Nil;
+
+let rec kvlog_lookup = fn (xs) -> fn (k: str) ->
+  match xs with
+  | Nil -> ""
+  | Cons ((k2, v2), rest) -> if str_eq k2 k then v2 else kvlog_lookup rest k;
+
+let kvlog_get = fn (path: str) -> fn (k: str) ->
+  kvlog_lookup (kvlog_all path) k;

@@ -1,0 +1,103 @@
+// examples/tally/server.mere — the other replica of the tally app.
+//
+// Holds an authoritative copy of the counters and serves the browser
+// client that holds the other one. The interesting line is the import
+// below: contrib/store/kvlog.mere is the same source examples/tally/
+// store.mere runs in the browser, so the two replicas are not "a server
+// store and a client store that agree on a format" — they are one store
+// compiled twice, and the log files are byte-compatible either way.
+//
+// Merge rule matches the client's: counters only rise, so the larger
+// value wins and no clock is needed.
+//
+// Endpoints:
+//   GET  /                  the client page
+//   GET  /api/state         "<key>\t<value>\n" per counter
+//   POST /api/state         same format; merged in, returns the result
+//   GET  /static/*          examples/tally (including the two .wasm)
+//   GET  /vendor/*          contrib/dom + contrib/worker host glue
+//
+// Run:
+//   mere -w examples/tally/server.mere > /tmp/tally_server.wat
+//   wat2wasm --enable-tail-call /tmp/tally_server.wat -o /tmp/tally_server.wasm
+//   node scripts/run_http_server.js /tmp/tally_server.wasm
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../../contrib/http/access_log.mere";
+import "../../contrib/http/cors.mere";
+import "../../contrib/http/static.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/store/kvlog.mere";
+
+let db = "/tmp/mere_tally_server.log" in
+
+let num = fn (s: str) -> if str_eq s "" then 0 else try_or (fn () -> int_of_str s) 0 in
+
+let rec render_state = fn (xs) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons ((k, v), rest) -> render_state rest (acc ++ k ++ "\t" ++ v ++ "\n")
+in
+
+let rec parse_lines = fn (xs) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (line, rest) ->
+    let i = str_index_of line "\t" in
+    if i < 0 then parse_lines rest
+    else
+      Cons ((substring line 0 i, substring line (i + 1) (str_len line)),
+            parse_lines rest)
+in
+
+// Apply one incoming counter, keeping whichever side is further along.
+let merge_one = fn (k: str) -> fn (v: str) ->
+  let mine = kvlog_get db k in
+  if num v > num mine then kvlog_set db k v else ()
+in
+
+let rec merge_all = fn (xs) ->
+  match xs with
+  | Nil -> ()
+  | Cons ((k, v), rest) -> let _ = merge_one k v in merge_all rest
+in
+
+let get_state = fn (req: str) ->
+  let _ = http_set_content_type "text/plain; charset=utf-8" in
+  render_state (kvlog_all db) ""
+in
+
+let post_state = fn (req: str) ->
+  let _ = merge_all (parse_lines (str_split (http_current_body ()) "\n")) in
+  let _ = http_set_content_type "text/plain; charset=utf-8" in
+  render_state (kvlog_all db) ""
+in
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  read_file "examples/tally/index.html"
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"           home,
+  Cons (route "GET"  "/api/state"  get_state,
+  Cons (route "POST" "/api/state"  post_state,
+  Nil))) in
+
+let handle =
+  serve_static_fallback "/static/" "examples/tally"
+    (serve_static_fallback "/vendor/" "contrib"
+      (router routes not_found)) in
+
+let _ = print ("tally server on :8080 (db=" ++ db ++ ")") in
+let _ = http_serve 8080 (with_access_log (with_cors "*" handle)) in
+0

@@ -2111,6 +2111,16 @@ let rec emit_expr (e : Ast.expr) : unit =
      Worker gets synchronous positioned read / write / flush from an OPFS
      access handle, which is exactly this contract — so a store written
      against these builtins compiles to every backend unchanged. *)
+  (* file_size belongs with the positioned group: a log-structured store
+     needs the end of the file to append to, and reading the whole thing
+     just to measure it is what the group exists to avoid. *)
+  | Ast.App ({ node = Ast.Var "file_size"; _ }, path_e)
+    when not (List.mem_assoc "file_size" !locals
+              || Hashtbl.mem toplevel_fn_names "file_size"
+              || Hashtbl.mem inner_lifts_wasm "file_size") ->
+    file_pio_used := true;
+    emit_expr path_e;
+    emit_instr "call $file_size"
   | Ast.App ({ node = Ast.Var "file_openrw"; _ }, path_e)
     when not (List.mem_assoc "file_openrw" !locals
               || Hashtbl.mem toplevel_fn_names "file_openrw"
@@ -8140,7 +8150,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \  (import \"env\" \"file_pread\" (func $file_pread_h (param i32) (param i32) (param i32) (result i32)))\n\
       \  (import \"env\" \"file_pwrite\" (func $file_pwrite_h (param i32) (param i32) (param i32) (result i32)))\n\
       \  (import \"env\" \"file_fsync\" (func $file_fsync_h (param i32) (result i32)))\n\
-      \  (import \"env\" \"file_close\" (func $file_close_h (param i32) (result i32)))\n"
+      \  (import \"env\" \"file_close\" (func $file_close_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_size\" (func $file_size_h (param i32) (result i32)))\n"
     else "")
   in
   let boundary_shims =
@@ -8172,7 +8183,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \  (func $file_fsync (param i64) (result i64)\n\
       \    (i64.extend_i32_u (call $file_fsync_h (i32.wrap_i64 (local.get 0)))))\n\
       \  (func $file_close (param i64) (result i64)\n\
-      \    (i64.extend_i32_u (call $file_close_h (i32.wrap_i64 (local.get 0)))))\n"
+      \    (i64.extend_i32_u (call $file_close_h (i32.wrap_i64 (local.get 0)))))\n\
+      \  (func $file_size (param i64) (result i64)\n\
+      \    (i64.extend_i32_u (call $file_size_h (i32.wrap_i64 (local.get 0)))))\n"
     else "")
   in
   (* Phase 34.3: float runtime imports (str_of_float / float_of_str).
@@ -8231,7 +8244,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
            \  (func $file_pread_h (param i32) (param i32) (param i32) (result i32) unreachable)\n\
            \  (func $file_pwrite_h (param i32) (param i32) (param i32) (result i32) unreachable)\n\
            \  (func $file_fsync_h (param i32) (result i32) unreachable)\n\
-           \  (func $file_close_h (param i32) (result i32) unreachable)\n"
+           \  (func $file_close_h (param i32) (result i32) unreachable)\n\
+           \  (func $file_size_h (param i32) (result i32) unreachable)\n"
          else "")
       ^ (if !print_no_nl_used then
            "  (func $__lang_print_no_nl_h (param i32) unreachable)\n"

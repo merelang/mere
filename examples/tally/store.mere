@@ -1,0 +1,60 @@
+// examples/tally/store.mere — the storage half of the tally app.
+//
+// This is the code that runs OFF the UI thread. In a browser it is
+// instantiated inside a Worker, because the only synchronous positioned
+// file I/O a browser offers is an OPFS access handle and that API exists
+// only in a Worker. Under Node the same module runs against the
+// filesystem. Either way the Mere source is the same, and so is the log
+// file it writes — contrib/store/kvlog.mere is also what the server
+// runs, compiled to C.
+//
+// The host hands each incoming message to `handle` and sends the
+// returned string back as the reply, exactly as contrib/http hands a
+// request to a Mere closure. Because every reply is a return value, this
+// side of the boundary is entirely straight-line code: nothing here is
+// aware that the caller sees an asynchronous round trip.
+//
+// Protocol (tab-separated, replies are plain text):
+//
+//   all              -> "<key>\t<value>\n" per entry
+//   bump\t<key>      -> the new count
+//   set\t<key>\t<v>  -> "ok"
+
+extern fn worker_serve: (str -> str) -> unit;
+
+import "../../contrib/store/kvlog.mere";
+
+let db = "/tmp/mere_tally.log" in
+
+let rec render = fn (xs) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons ((k, v), rest) -> render rest (acc ++ k ++ "\t" ++ v ++ "\n")
+in
+
+let handle = fn (req: str) ->
+  if str_eq req "all" then render (kvlog_all db) ""
+  else
+    let i = str_index_of req "\t" in
+    if i < 0 then "err unknown command"
+    else
+      let cmd = substring req 0 i in
+      let rest = substring req (i + 1) (str_len req) in
+      if str_eq cmd "bump" then
+        let cur = kvlog_get db rest in
+        let n = (if str_eq cur "" then 0 else try_or (fn () -> int_of_str cur) 0) + 1 in
+        let _ = kvlog_set db rest (show n) in
+        show n
+      else if str_eq cmd "set" then
+        let j = str_index_of rest "\t" in
+        if j < 0 then "err set needs a value"
+        else
+          let k = substring rest 0 j in
+          let v = substring rest (j + 1) (str_len rest) in
+          let _ = kvlog_set db k v in
+          "ok"
+      else "err unknown command"
+in
+
+let _ = worker_serve handle in
+0
