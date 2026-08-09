@@ -2,14 +2,16 @@
 <meta charset="utf-8">
 <title>Mere chat</title>
 <link rel="stylesheet" href="/static/style.css">
-<script src="/static/app.js" defer></script>
 
 <h1>Mere chat</h1>
 <p class="subtitle">
-  Server-Sent Events demo. Every open tab holds a long-lived
-  <code>GET /sse/chat</code> connection; when anyone POSTs a message,
-  the Mere handler pushes a <code>data: {...}</code> frame out to
-  every subscriber. Open this page in two tabs to see it live.
+  Server-Sent Events demo, Mere on both ends. Every open tab holds a
+  long-lived <code>GET /sse/chat</code> connection; when anyone POSTs a
+  message, the Mere handler pushes a <code>data: {...}</code> frame out
+  to every subscriber. Open this page in two tabs to see it live.
+  The browser half is <code>app.mere</code> compiled to Wasm — there is
+  no application JavaScript on this page, only the
+  <code>contrib/dom</code> host glue.
 </p>
 
 <div id="status">connecting…</div>
@@ -23,3 +25,30 @@
 </form>
 
 <pre id="log"></pre>
+
+<script type="module">
+  import { makeDomGlue } from "/vendor/dom.glue.js";
+
+  const wasmBytes = await fetch("/static/app.wasm").then((r) => r.arrayBuffer());
+  const { glue, attach } = makeDomGlue();
+
+  // Mere's prelude references the float / libm imports even when the
+  // program never does float math, so they have to exist.
+  const stub = () => 0;
+  const env = {
+    ...glue,
+    puts: (ptr) => console.log("[mere]", ptr),
+    time: () => Date.now() / 1000,
+    __lang_str_of_float: stub,
+    __lang_float_of_str: () => 0.0,
+    __lang_sin: Math.sin,
+    __lang_cos: Math.cos,
+    __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow,
+    __lang_atan2: Math.atan2,
+  };
+
+  const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+  attach(instance);
+  instance.exports.main();
+</script>

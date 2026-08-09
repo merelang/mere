@@ -76,3 +76,77 @@ extern fn dom_key_held: int -> int;
 // oscillator per channel, so an emulator's sound unit can map its channels onto
 // real audio. Added for the Game Boy APU dogfood.
 extern fn dom_audio_tone: int -> int -> int -> unit;
+
+// ---------------------------------------------------------------------
+// v0.1.152 (chat dogfood): the document-shaped web app.
+//
+// Everything above this line was driven by games and emulators, which
+// paint one canvas or rewrite one element's text. A chat client is the
+// first browser program whose DOM *structure* changes and that has to
+// talk to a server, so it forces three groups the games never needed:
+// element construction, request/response, and server push.
+// ---------------------------------------------------------------------
+
+// Element construction. `dom_create` wraps `document.createElement` and
+// returns a detached handle — nothing renders until `dom_append` puts it
+// under a parent that is already in the document.
+extern fn dom_create: str -> JsRef;
+extern fn dom_append: JsRef -> JsRef -> unit;
+
+// `element.setAttribute(name, value)` and `input.value = s`. Setting
+// `value` needs its own fn because it is a property, not an attribute:
+// assigning the attribute does not move the caret or clear a typed-in
+// field, which is what a form reset needs.
+extern fn dom_set_attr: JsRef -> str -> str -> unit;
+extern fn dom_set_value: JsRef -> str -> unit;
+
+// Scroll a container to its bottom (`el.scrollTop = el.scrollHeight`).
+// The append-only panes of a chat — the message list and the log — both
+// want this after every insertion.
+extern fn dom_scroll_to_end: JsRef -> unit;
+
+// `form.addEventListener("submit", ...)` with `preventDefault()` already
+// applied by the host, since a Mere closure has no handle on the event
+// object and a form that navigates away would kill the Wasm instance.
+extern fn dom_on_submit: JsRef -> (unit -> unit) -> unit;
+
+// Queue one header for the NEXT dom_fetch / dom_fetch_async call, then
+// forget it. Mirrors `http_fetch_add_header` in the native runners so
+// that request-building code reads the same on both sides.
+extern fn dom_fetch_header: str -> str -> unit;
+
+// Request/response, offered in BOTH shapes on purpose (chat dogfood) —
+// the point is to compare what the two do to Mere code, not to bless
+// one. Both report status out-of-band through `dom_fetch_status`,
+// exactly as the native `http_fetch` / `http_fetch_status` pair does;
+// that pattern survives here because a single-threaded event loop runs
+// each callback to completion before the next one starts.
+//
+//   dom_fetch        blocking. Returns the response body, so callers
+//                    stay straight-line and identical to native code.
+//                    Costs a frozen UI thread for the whole round trip
+//                    (synchronous XMLHttpRequest under the hood).
+//
+//   dom_fetch_async  non-blocking. Hands the body to a callback, so the
+//                    continuation has to be written as a closure and
+//                    chained requests nest.
+//
+// `dom_fetch_status` refers to the most recently COMPLETED request: the
+// return of `dom_fetch`, or the callback currently running.
+extern fn dom_fetch: str -> str -> str -> str;
+extern fn dom_fetch_async: str -> str -> str -> (str -> unit) -> unit;
+extern fn dom_fetch_status: unit -> int;
+
+// Server push: `new EventSource(url)`. The first closure receives each
+// message's `data` field; the second receives connection state changes
+// as "open" / "error". No unsubscribe — the stream lives as long as the
+// page, which is all a chat client wants. Push cannot be expressed as a
+// return value, so this is a callback in every design; it is the reason
+// a frontend needs closures even if every request stays blocking.
+extern fn dom_sse: str -> (str -> unit) -> (str -> unit) -> unit;
+
+// Minutes to add to UTC to get the viewer's local wall clock (JST =
+// 540). Needed because a timestamp rendered in UTC reads as wrong to a
+// human, and the conversion itself is ordinary arithmetic that belongs
+// in Mere rather than in the host.
+extern fn dom_tz_offset: unit -> int;

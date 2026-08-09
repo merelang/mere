@@ -21,9 +21,14 @@
 // canonicalise the filesystem path — but stops the common
 // `?../../../etc/passwd` attack.
 //
-// Empty file contents are treated as 404 (a compromise since our
-// `read_file` extern returns "" for ENOENT; distinguishing genuinely
-// empty files needs a `file_exists` extern which we haven't added).
+// Binary-safe: bytes are handed to the client by the host via
+// `http_send_file` and never pass through a Mere `str`. That matters
+// because Mere strings are NUL-terminated, so the older `read_file`
+// path stopped at the first zero byte — a .wasm asset (which begins
+// with `\0asm`) read back as "" and 404'd, meaning a Mere server could
+// not serve its own compiled browser client. Routing the bytes around
+// Mere also removes the old "empty file is indistinguishable from
+// ENOENT" compromise: `http_send_file` reports that difference.
 //
 // Public API:
 //
@@ -36,6 +41,8 @@
 
 extern fn http_set_status: int -> unit;
 extern fn http_set_content_type: str -> unit;
+// (path, content_type) -> 1 on success, 0 if the file could not be read.
+extern fn http_send_file: str -> str -> int;
 
 import "./query.mere";
 
@@ -72,6 +79,7 @@ let mime_of = fn (path: str) ->
   else if str_ends_with path ".webp" then "image/webp"
   else if str_ends_with path ".woff" then "font/woff"
   else if str_ends_with path ".woff2" then "font/woff2"
+  else if str_ends_with path ".wasm" then "application/wasm"
   else "application/octet-stream";
 
 let serve_static_fallback = fn (url_prefix: str) -> fn (fs_root: str) -> fn (inner: str -> str) -> fn (req: str) ->
@@ -92,11 +100,11 @@ let serve_static_fallback = fn (url_prefix: str) -> fn (fs_root: str) -> fn (inn
     else
       let rel = substring path (str_len url_prefix) (str_len path) in
       let full = fs_root ++ "/" ++ rel in
-      let content = read_file full in
-      if str_len content == 0 then
+      // The host writes the bytes and the headers; on success the body
+      // is already on the wire, so the handler returns "" and the
+      // runner just closes the response.
+      if http_send_file full (mime_of rel) == 1 then ""
+      else
         let _ = http_set_status 404 in
         let _ = http_set_content_type "text/plain" in
-        "not found: " ++ path ++ "\n"
-      else
-        let _ = http_set_content_type (mime_of rel) in
-        content;
+        "not found: " ++ path ++ "\n";

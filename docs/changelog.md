@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.152 — 2026-08-09
+
+_The chat client rewritten in Mere, and the four stale host boundaries it
+exposed. `examples/chat/app.mere` replaces the 74 lines of hand-written
+JavaScript that `examples/http_chat.mere` used to serve, so both halves of the
+demo are now Mere and both share `contrib/http/escape.mere` for JSON escaping —
+one implementation compiled to C on the server and Wasm in the browser.
+`contrib/dom` gains 12 externs in the three groups a document-shaped app needs
+and a game does not: element construction (`dom_create` / `dom_append` /
+`dom_set_attr` / `dom_set_value` / `dom_scroll_to_end` / `dom_on_submit`),
+request/response (`dom_fetch` blocking + `dom_fetch_async` callback, sharing
+`dom_fetch_status` / `dom_fetch_header`), and server push (`dom_sse`). Both
+request shapes ship deliberately: the app performs its bootstrap through each
+so the cost of a callback continuation is visible in Mere source rather than
+argued about._
+
+_Four host-side boundaries had drifted from the compiler and only a real app
+touched them. **`str` layout**: `mere_strbuf_to_str` in `lib/codegen_wasm.ml`
+hand-rolled its bump allocation and skipped the `[i32 len]` header that
+`__lang_strlen` reads from `ptr-4`, so every `strbuf_to_str` result read back as
+`""` on Wasm alone — invisible under `print`, which exits through the host and
+scans to NUL. The same header was missing from the `writeStr` helpers in
+`contrib/http/http.glue.js`, `contrib/dom/dom.glue.js`, `scripts/run_wasm.js`
+and `scripts/pg_env.js`; `run_wasm.js` had the correct sequence open-coded at
+four call sites, which is why the fix never reached the shared helpers.
+**Closure ABI**: `http.glue.js` still passed plain numbers to the
+`(param i64 i64)` closure type v0.1.127 introduced, so every `contrib/http`
+demo threw on its first request when rebuilt. **Scratch memory**:
+`dom.glue.js` still wrote host strings into a fixed 4KB window at 56K that
+wrapped around, which a multi-KB bootstrap response overruns. **Missing
+import**: the runners never supplied `time`, which the prelude imports
+unconditionally. `test/parity/strbuf.mere` closes the coverage gap that let the
+first of these live — StrBuf had no parity case among the other 68._
+
+_`contrib/http/static.mere` now serves assets through a new `http_send_file`
+host extern instead of `read_file`. Mere strings are NUL-terminated, so the old
+path truncated any binary file at its first zero byte, and a `.wasm` module
+begins with one: the server could not serve its own compiled client. Bytes now
+go from disk to socket without entering Mere, which also distinguishes an empty
+file from ENOENT. `scripts/run_dom_headless.mjs` runs a `mere -w` module
+against `contrib/dom` under Node with a small DOM, `fetch`, synchronous XHR and
+`EventSource`, so browser-targeted Mere is testable without a browser._
+
+---
+
 ## v0.1.151 — 2026-08-08
 
 _RV32I fantasy-console I/O + a browser build. Two new externs the `mere -rv`

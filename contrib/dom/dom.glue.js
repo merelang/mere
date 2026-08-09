@@ -22,6 +22,7 @@ export function makeDomGlue() {
   // instantiates. Until then the dom_* fns are no-ops that warn.
   let memory = null;
   let table = null;
+  let langBump = null;
 
   // Cartridge/ROM bytes served to the Wasm module a byte at a time (so an
   // emulator can load a ROM without embedding it in the module). Set via
@@ -72,6 +73,12 @@ export function makeDomGlue() {
   // defensively no-ops on it. User-allocated handles start at 1.
   const handles = [null];
 
+  // Out-of-band request state, mirroring scripts/http_fetch_env.js on
+  // the native side: the status of the most recently completed request,
+  // and headers queued by `dom_fetch_header` for the next one.
+  let lastFetchStatus = 0;
+  let nextFetchHeaders = [];
+
   const readStr = (ptr) => {
     if (!memory) return "";
     const bytes = new Uint8Array(memory.buffer);
@@ -80,27 +87,47 @@ export function makeDomGlue() {
     return new TextDecoder("utf-8").decode(bytes.subarray(ptr, end));
   };
 
-  // Scratch buffer for returning strings to Mere. Sits high in memory;
-  // each call to `dom_input_value` overwrites the previous result, so
-  // copy via Mere's str_* builtins if you need to keep it across calls.
-  // 56KB matches the convention in `scripts/run_wasm.js`.
-  let scratchOffset = 56 * 1024;
-  const SCRATCH_LIMIT = 60 * 1024;
+  // Allocate strings bound for Mere on the shared bump heap by advancing
+  // the module's exported `$__lang_bump`, growing memory a page at a time.
+  //
+  // This replaces a fixed 4KB scratch window (56K..60K) that wrapped
+  // around when it filled. The wraparound was survivable for the demos
+  // this glue shipped with — `dom_input_value` on a short text field,
+  // `dom_on_key` handing over a key name — because none of them kept a
+  // host string alive past the next call. The chat client breaks that
+  // assumption twice over: a bootstrap response is multi-KB (already
+  // larger than the whole window), and every message it parses out of a
+  // response stays live for the lifetime of the page. Both would be
+  // silently overwritten, or would silently overwrite Mere's own heap.
+  // contrib/http/http.glue.js made this same move earlier for inbound
+  // request bodies; contrib/dom never got the fix.
+  //
+  // Consequence worth knowing: host strings are now permanent. The bump
+  // arena has no free, so a long-lived SSE stream grows linear memory
+  // monotonically — fine for a chat tab, a real constraint for anything
+  // meant to run for days.
+  const PAGE = 64 * 1024;
 
+  // Mere str layout is `[i32 len][bytes][NUL]` and the value points at
+  // byte0, so `$__lang_strlen` loads the length from ptr-4. Writing only
+  // NUL-terminated bytes makes every host-supplied string read back as
+  // whatever the preceding 4 heap bytes say — usually 0, i.e. "".
   const writeStr = (s) => {
-    if (!memory) return 0;
+    if (!memory || !langBump) return 0;
     const utf8 = new TextEncoder().encode(s);
-    const total = utf8.length + 1;
-    if (scratchOffset + total > SCRATCH_LIMIT) {
-      // Wrap around — `dom_input_value` doesn't keep ownership across
-      // calls anyway, so we can safely reset.
-      scratchOffset = 56 * 1024;
+    const aligned = (4 + utf8.length + 1 + 7) & ~7;
+    const start = langBump.value;
+    const needed = start + aligned;
+    if (needed > memory.buffer.byteLength) {
+      memory.grow(Math.ceil((needed - memory.buffer.byteLength) / PAGE));
     }
-    const ptr = scratchOffset;
-    new Uint8Array(memory.buffer).set(utf8, ptr);
-    new Uint8Array(memory.buffer)[ptr + utf8.length] = 0;
-    scratchOffset += total;
-    return ptr;
+    // Re-read the views AFTER grow — `memory.grow` detaches the old buffer.
+    new DataView(memory.buffer).setInt32(start, utf8.length, true);
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.set(utf8, start + 4);
+    bytes[start + 4 + utf8.length] = 0;
+    langBump.value = start + aligned;
+    return start + 4;
   };
 
   const callClosure = (closurePtr) => {
@@ -223,6 +250,107 @@ export function makeDomGlue() {
       c.osc.frequency.value = freq;
       c.gain.gain.value = Math.min(0.08, (vol / 15) * 0.08);
     },
+
+    // --- v0.1.152 (chat dogfood): element construction ----------------
+    dom_create: (tagPtr) => {
+      if (typeof document === "undefined") return 0;
+      handles.push(document.createElement(readStr(tagPtr)));
+      return handles.length - 1;
+    },
+    dom_append: (parentIdx, childIdx) => {
+      const parent = handles[parentIdx];
+      const child = handles[childIdx];
+      if (parent && child) parent.appendChild(child);
+    },
+    dom_set_attr: (handleIdx, namePtr, valuePtr) => {
+      const el = handles[handleIdx];
+      if (el) el.setAttribute(readStr(namePtr), readStr(valuePtr));
+    },
+    dom_set_value: (handleIdx, valuePtr) => {
+      const el = handles[handleIdx];
+      if (el) el.value = readStr(valuePtr);
+    },
+    dom_scroll_to_end: (handleIdx) => {
+      const el = handles[handleIdx];
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+    dom_on_submit: (handleIdx, closurePtr) => {
+      const el = handles[handleIdx];
+      if (!el) {
+        console.warn("contrib/dom: dom_on_submit on null handle", { handleIdx });
+        return;
+      }
+      el.addEventListener("submit", (e) => {
+        // Always suppress the native submit: navigating away tears down
+        // the Wasm instance, taking the whole app with it.
+        e.preventDefault();
+        callClosure(closurePtr);
+      });
+    },
+
+    // --- v0.1.152 (chat dogfood): request / response ------------------
+    dom_fetch_header: (namePtr, valuePtr) => {
+      nextFetchHeaders.push([readStr(namePtr), readStr(valuePtr)]);
+    },
+    dom_fetch_status: () => lastFetchStatus,
+    // Blocking form. Synchronous XMLHttpRequest is the only way to hand
+    // a response back as a return value on the main thread; it freezes
+    // the UI for the whole round trip and browsers log a deprecation
+    // warning. Kept because it makes browser code identical to native
+    // `http_fetch` code — measuring that trade is the point.
+    dom_fetch: (methodPtr, urlPtr, bodyPtr) => {
+      const method = readStr(methodPtr) || "GET";
+      const url = readStr(urlPtr);
+      const body = readStr(bodyPtr);
+      const headers = nextFetchHeaders; nextFetchHeaders = [];
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open(method, url, false);          // false = synchronous
+        for (const [k, v] of headers) xhr.setRequestHeader(k, v);
+        xhr.send(body.length > 0 ? body : null);
+        lastFetchStatus = xhr.status;
+        return writeStr(xhr.responseText || "");
+      } catch (e) {
+        console.error("contrib/dom: dom_fetch failed", { method, url, error: e });
+        lastFetchStatus = 0;
+        return writeStr("");
+      }
+    },
+    // Callback form. The Mere closure runs in a later JS turn, so the
+    // `dom_fetch_status` slot is set immediately before dispatch and is
+    // read back inside the callback — safe only because the event loop
+    // runs each callback to completion before starting the next.
+    dom_fetch_async: (methodPtr, urlPtr, bodyPtr, closurePtr) => {
+      const method = readStr(methodPtr) || "GET";
+      const url = readStr(urlPtr);
+      const body = readStr(bodyPtr);
+      const headers = nextFetchHeaders; nextFetchHeaders = [];
+      const init = { method };
+      if (body.length > 0) init.body = body;
+      if (headers.length > 0) init.headers = Object.fromEntries(headers);
+      fetch(url, init)
+        .then((r) => r.text().then((text) => ({ status: r.status, text })))
+        .then(({ status, text }) => {
+          lastFetchStatus = status;
+          callClosureStr(closurePtr, text);
+        })
+        .catch((e) => {
+          console.error("contrib/dom: dom_fetch_async failed", { method, url, error: e });
+          lastFetchStatus = 0;
+          callClosureStr(closurePtr, "");
+        });
+    },
+
+    // --- v0.1.152 (chat dogfood): server push -------------------------
+    dom_sse: (urlPtr, onMessagePtr, onStatusPtr) => {
+      if (typeof EventSource === "undefined") return;
+      const es = new EventSource(readStr(urlPtr));
+      es.onopen = () => callClosureStr(onStatusPtr, "open");
+      es.onerror = () => callClosureStr(onStatusPtr, "error");
+      es.onmessage = (e) => callClosureStr(onMessagePtr, e.data);
+    },
+
+    dom_tz_offset: () => -new Date().getTimezoneOffset(),
   };
 
   const setRom = (u8) => { romBytes = u8; };
@@ -230,10 +358,18 @@ export function makeDomGlue() {
   const attach = (instance) => {
     memory = instance.exports.memory;
     table = instance.exports.__indirect_function_table;
+    langBump = instance.exports.__lang_bump;
     if (!table) {
       throw new Error(
         "contrib/dom: instance does not export __indirect_function_table " +
         "— recompile with a current `mere -w` (Phase 48.2+)"
+      );
+    }
+    if (!langBump) {
+      throw new Error(
+        "contrib/dom: instance does not export __lang_bump — recompile " +
+        "with a current `mere -w` (needed so host-written strings share " +
+        "the Mere heap instead of a fixed scratch window)"
       );
     }
   };
