@@ -1,0 +1,30 @@
+// `to_json` over the shapes a web app actually serializes.
+//
+// Same rot as show_composite: every case of the Wasm to_json emitter still
+// built 4-byte cells with i32 fields and kept the accumulator str in an i32
+// local, so wat2wasm rejected any module that serialized anything. That took
+// the whole backend away from mere-blog, which serializes typed records for
+// every response — the app could not be built for Wasm at all.
+//
+// Scalars were broken too, in a way a smaller test would miss: to_json_int
+// read its i64 argument with i32 comparisons, so sign and magnitude both
+// came out wrong past the low word.
+
+type color = Red | Blue of int;
+type pt = { x: int, y: str, ok: bool };
+
+let _ = print (to_json 42);
+let _ = print (to_json (0 - 7));
+let _ = print (to_json 0);
+let _ = print (to_json "quote\" and \\ backslash");
+let _ = print (to_json true);
+let _ = print (to_json [1, 2, 3]);
+let _ = print (to_json (pt { x = 5, y = "hi", ok = false }));
+let _ = print (to_json [pt { x = 1, y = "a", ok = true },
+                        pt { x = 2, y = "b", ok = false }]);
+let _ = print (to_json (Some 3));
+let _ = print (to_json (None: int option));
+let _ = print (to_json Red);
+let _ = print (to_json (Blue 7));
+let _ = print (to_json (1, "two"));
+print (to_json [Some 1, None])

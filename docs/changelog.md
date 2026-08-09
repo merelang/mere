@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.155 — 2026-08-10
+
+_Four boundaries that a database-backed web app walks straight into, found by
+building an admin UI for the mere-blog dogfood._
+
+_**`to_json` on Wasm** had the same rot `show` did at v0.1.153: every case of
+the emitter built 4-byte cells with i32 fields and kept the accumulator str in
+an i32 local, so a module that serialized anything was rejected by wat2wasm.
+`to_json_int` also read its i64 argument through i32 comparisons, so sign and
+magnitude were wrong past the low word. mere-blog serializes a typed record on
+every response, so the whole Wasm backend was unavailable to it.
+`test/parity/to_json_composite.mere` covers it._
+
+_**The native runtime handed Mere raw C strings.** A Mere `str` is
+`[size_t len][bytes][NUL]` with the value at byte0, so `__lang_str_size` reads
+the length from `s[-1]` — and the native HTTP server passed a `static char[]`
+request line straight to the handler, which read back as "". Every route on a
+native build 404'd. Same for `http_current_body` and `http_get_header`, and for
+the crypto/encoding externs: `__to_hex` / `__to_b64` / `gen_request_id`
+malloc'd their results, so `sha256_hex` returned "" and every password hash
+with it. They now allocate through `__lang_str_alloc`._
+
+_**A `unit` parameter broke extern closure adapters on C.** `extern fn f: unit
+-> str` lowers to `str f(void)`, but the adapter that lets it be used as a
+value passed its argument through, calling a 0-arity function with one._
+
+_**The native HTTP response measured its body with `strlen`.** A Mere str
+carries its length and may contain NULs, so a `.wasm` read through `read_file`
+was truncated at its first zero byte — a native Mere server could not serve its
+own compiled client. It now uses `__lang_str_size`._
+
+_Together those let mere-blog build and run natively against Postgres with a
+current compiler — signup, cookie sessions, authenticated post creation — and
+serve a Wasm admin client whose form validates drafts with the same
+`validate.mere` the server enforces, compiled to Wasm on one side and C on the
+other. parity 71/71, dune runtest 2306/0._
+
+_Known and not fixed: `of_json` on Wasm is still entirely 4-byte-model, runtime
+and generated decoders both, so typed request decoding has no Wasm backend
+until that is rebuilt. Native and interpreter are unaffected._
+
+---
+
 ## v0.1.154 — 2026-08-10
 
 _A local-first app in Mere, split across three replicas of one store.
