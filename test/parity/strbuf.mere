@@ -1,0 +1,32 @@
+// StrBuf → str across the backends.
+//
+// The result of `strbuf_to_str` has to carry a real `[i32 len]` header,
+// not just a NUL terminator. The Wasm backend regressed here: it
+// hand-rolled its own bump allocation and skipped the header, so every
+// buffer read back as "". Nothing caught it because `print` goes out
+// through the host, which scans to NUL — the damage only appears once
+// the value is measured or concatenated again. So this case checks the
+// length and a re-concatenation, not just the printed text.
+
+let b = strbuf_new ();
+let _ = strbuf_push b "a";
+let _ = strbuf_push b "bc";
+let s = strbuf_to_str b;
+let _ = print s;
+let _ = print (show (str_len s));
+let _ = print ("[" ++ s ++ "]" ++ show (str_len ("[" ++ s ++ "]")));
+
+// An empty buffer still needs a well-formed header.
+let e = strbuf_to_str (strbuf_new ());
+let _ = print (show (str_len e));
+let _ = print ("<" ++ e ++ ">");
+
+// Push past the initial capacity so the grow-and-copy path runs too.
+let big = strbuf_new ();
+let rec fill = fn (i: int) ->
+  if i == 0 then ()
+  else let _ = strbuf_push big "0123456789" in fill (i - 1);
+let _ = fill 40;
+let bs = strbuf_to_str big;
+let _ = print (show (str_len bs));
+print (substring bs 0 12)

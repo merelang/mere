@@ -6185,9 +6185,13 @@ let strbuf_runtime_wasm = {|
     (local.set $sb (i32.wrap_i64 (local.get $sb8)))
     (local.set $len (i32.load offset=4 (local.get $sb)))
     (local.set $buf (i32.load offset=0 (local.get $sb)))
-    (local.set $out (global.get $__lang_bump))
-    (global.set $__lang_bump
-      (i32.add (local.get $out) (i32.add (local.get $len) (i32.const 1))))
+    ;; Allocate through $__lang_str_alloc so the result carries the
+    ;; `[i32 len]` header that $__lang_strlen reads from addr-4. Hand
+    ;; rolling the bump here (as this did) produced a str whose length
+    ;; was whatever preceded it on the heap — usually 0, so every
+    ;; strbuf_to_str result read back as "" on this backend only.
+    (local.set $out
+      (i32.wrap_i64 (call $__lang_str_alloc (i64.extend_i32_u (local.get $len)))))
     (local.set $i (i32.const 0))
     (block $cp_end
       (loop $cp_lp
