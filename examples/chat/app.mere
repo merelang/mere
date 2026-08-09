@@ -1,0 +1,223 @@
+// examples/chat/app.mere — the chat client, in Mere.
+//
+// Replaces the 74-line hand-written app.js that this demo used to ship
+// with. Same page, same server (examples/http_chat.mere), same wire
+// protocol; the difference is that the browser half is now Mere
+// compiled to Wasm and dispatched through contrib/dom.
+//
+// Build (the server serves this .wasm, so build it before running):
+//   mere -w examples/chat/app.mere > /tmp/app.wat
+//   wat2wasm --enable-tail-call /tmp/app.wat -o examples/chat/app.wasm
+//
+// Verify without a browser:
+//   node scripts/run_dom_headless.mjs examples/chat/app.wasm \
+//     http://localhost:8080 --set text=hi --fire compose:submit
+//
+// What this demo is really measuring
+// ----------------------------------
+// Every browser program Mere had before this one was a game or an
+// emulator: it painted a canvas, or rewrote one element's text, and it
+// never talked to a server. So the frontend FFI had never been asked
+// for a request/response, and Mere had never run anywhere that refuses
+// to let a read block. Native I/O — read_file, http_fetch, the KV
+// store — all return values. The browser does not.
+//
+// So `bootstrap_blocking` and `bootstrap_async` below do the exact same
+// job in the two available shapes, on purpose, to make the cost of each
+// visible in Mere source rather than in the abstract. Swap which one
+// the startup line at the bottom calls to compare them live.
+//
+// Note also what is NOT duplicated: `jstr` comes from
+// contrib/http/escape.mere — the same module examples/http_chat.mere
+// uses to build the JSON it sends back. One escaping implementation,
+// compiled to C on the server and to Wasm on the client.
+
+import "../../contrib/dom/dom.mere";
+import "../../contrib/json/json.mere";
+import "../../contrib/http/escape.mere";
+
+// ---- element handles ------------------------------------------------
+
+let messages = dom_get_by_id "messages" in
+let status_el = dom_get_by_id "status" in
+let log_el = dom_get_by_id "log" in
+let form = dom_get_by_id "compose" in
+let author_in = dom_get_by_id "author" in
+let text_in = dom_get_by_id "text" in
+
+// ---- log pane -------------------------------------------------------
+
+// Mere has no mutable cell, so the accumulated log text lives in a
+// single slot of a vec allocated once — the same trick counter.mere
+// uses for its int. The bump arena is page-lifetime, so it survives
+// across event firings.
+let log_buf = vec_new () in
+let _ = vec_push log_buf "" in
+
+let log = fn (msg: str) ->
+  let next = vec_get log_buf 0 ++ msg ++ "\n" in
+  let _ = vec_set log_buf 0 next in
+  let _ = dom_set_text log_el next in
+  dom_scroll_to_end log_el
+in
+
+let set_status = fn (label: str) -> fn (cls: str) ->
+  let _ = dom_set_text status_el label in
+  dom_set_attr status_el "class" cls
+in
+
+// ---- time -----------------------------------------------------------
+
+// The host supplies only the viewer's UTC offset; splitting a unix
+// timestamp into a wall clock is ordinary arithmetic and stays in Mere.
+let pad2 = fn (n: int) -> if n < 10 then "0" ++ show n else show n in
+
+let hhmmss = fn (ts: int) ->
+  let local = ts + dom_tz_offset () * 60 in
+  let secs = local % 86400 in
+  pad2 (secs / 3600) ++ ":" ++ pad2 ((secs % 3600) / 60) ++ ":" ++ pad2 (secs % 60)
+in
+
+// ---- JSON field access ----------------------------------------------
+
+let jstr_of = fn (v: Json.json) ->
+  match v with
+  | Json.JStr s -> s
+  | Json.JNum n -> show n
+  | _ -> ""
+in
+
+let jfield = fn (obj: Json.json) -> fn (key: str) ->
+  match obj with
+  | Json.JObj fields ->
+    let rec look = fn (xs) ->
+      match xs with
+      | Nil -> ""
+      | Cons ((k, v), rest) -> if str_eq k key then jstr_of v else look rest
+    in
+    look fields
+  | _ -> ""
+in
+
+// ---- rendering ------------------------------------------------------
+
+// Dedup by message id: the bootstrap GET and the SSE stream overlap, so
+// a message that arrives while the page is loading can show up twice.
+let seen = map_new () in
+
+let span = fn (cls: str) -> fn (txt: str) ->
+  let e = dom_create "span" in
+  let _ = dom_set_attr e "class" cls in
+  let _ = dom_set_text e txt in
+  e
+in
+
+let append_message = fn (m: Json.json) ->
+  let id = jfield m "id" in
+  if map_has seen id then ()
+  else
+    let _ = map_set seen id 1 in
+    let ts = try_or (fn () -> int_of_str (jfield m "ts")) 0 in
+    let li = dom_create "li" in
+    let _ = dom_append li (span "author" (jfield m "author")) in
+    let _ = dom_append li (span "text" (jfield m "text")) in
+    let _ = dom_append li (span "ts" (hhmmss ts)) in
+    let _ = dom_append messages li in
+    dom_scroll_to_end messages
+in
+
+let rec render_all = fn (xs) ->
+  match xs with
+  | Nil -> 0
+  | Cons (m, rest) -> let _ = append_message m in 1 + render_all rest
+in
+
+// Render a whole `[{...}, {...}]` bootstrap body; returns how many
+// messages were drawn.
+let render_body = fn (body: str) ->
+  match try_or (fn () -> Json.parse_json body) Json.JNull with
+  | Json.JArr xs -> render_all xs
+  | _ -> let _ = log ("bad bootstrap payload: " ++ body) in 0
+in
+
+let report_bootstrap = fn (n: int) ->
+  log ("bootstrapped " ++ show n ++ " message(s)")
+in
+
+let report_bootstrap_failure = fn (u: unit) ->
+  log ("bootstrap GET /api/messages failed: " ++ show (dom_fetch_status ()))
+in
+
+// ---- the comparison -------------------------------------------------
+//
+// Blocking: the response is the return value, so the code is a
+// straight-line sequence and reads identically to the same logic
+// written against native `http_fetch`. The cost is invisible in the
+// source and very visible in the browser — the tab is frozen for the
+// whole round trip.
+
+let bootstrap_blocking = fn (u: unit) ->
+  let body = dom_fetch "GET" "/api/messages" "" in
+  if dom_fetch_status () == 200 then report_bootstrap (render_body body)
+  else report_bootstrap_failure ()
+in
+
+// Callback: the continuation becomes a closure. For one request the
+// difference is a level of indentation. It stops being cosmetic the
+// moment a second request depends on the first, because there is no
+// way to name the result — the rest of the function has to move inside
+// the closure.
+
+let bootstrap_async = fn (u: unit) ->
+  dom_fetch_async "GET" "/api/messages" "" (fn (body: str) ->
+    if dom_fetch_status () == 200 then report_bootstrap (render_body body)
+    else report_bootstrap_failure ())
+in
+
+// ---- server push ----------------------------------------------------
+//
+// Push has no blocking form: the server decides when a message exists,
+// so this is a closure no matter which shape requests take. Any
+// frontend needs first-class closures for this reason alone.
+
+let connect = fn (u: unit) ->
+  dom_sse "/sse/chat"
+    (fn (data: str) ->
+      match try_or (fn () -> Json.parse_json data) Json.JNull with
+      | Json.JNull -> log ("bad SSE payload: " ++ data)
+      | m -> append_message m)
+    (fn (state: str) ->
+      if str_eq state "open" then
+        let _ = set_status "live · listening" "live" in
+        log "SSE open"
+      else
+        let _ = set_status "disconnected · retrying" "dead" in
+        log "SSE error")
+in
+
+// ---- sending --------------------------------------------------------
+//
+// Send stays on the async path even though bootstrap does not: this one
+// fires while the user is typing, and a frozen field between keystrokes
+// is the difference the blocking form actually costs.
+
+let send = fn (u: unit) ->
+  let author = dom_input_value author_in in
+  let text = dom_input_value text_in in
+  if str_eq (str_trim text) "" then ()
+  else
+    let a = if str_eq (str_trim author) "" then "anon" else author in
+    let payload = "\{\"author\":" ++ jstr a ++ ",\"text\":" ++ jstr text ++ "}" in
+    let _ = dom_fetch_header "Content-Type" "application/json" in
+    let _ = dom_set_value text_in "" in
+    dom_fetch_async "POST" "/api/messages" payload (fn (body: str) ->
+      log ("POST /api/messages -> " ++ show (dom_fetch_status ())))
+in
+
+// ---- startup --------------------------------------------------------
+
+let _ = set_status "connecting…" "" in
+let _ = dom_on_submit form send in
+let _ = bootstrap_blocking () in
+let _ = connect () in
+0

@@ -1,4 +1,9 @@
-// http_chat: minimal SSE-based chat room.
+// http_chat: minimal SSE-based chat room, Mere on both ends.
+//
+// The browser half is examples/chat/app.mere compiled to Wasm; this
+// file serves it and talks to it. Both halves share
+// contrib/http/escape.mere for JSON string escaping — one
+// implementation, compiled to two different targets.
 //
 // The eighth contrib/http demo. First one with a LONG-LIVED HTTP
 // connection: /sse/chat is hijacked by contrib/http/http.glue.js
@@ -6,6 +11,10 @@
 // /api/messages lands, the Mere handler stores the message in KV
 // and calls `sse_broadcast "chat" <json>` — the glue then writes
 // a `data:` frame to every open EventSource stream.
+//
+// Build the client first — it is served from /static/app.wasm:
+//   mere -w examples/chat/app.mere > /tmp/app.wat
+//   wat2wasm --enable-tail-call /tmp/app.wat -o examples/chat/app.wasm
 //
 // Endpoints:
 //   GET  /                       HTML chat UI
@@ -110,7 +119,12 @@ let routes =
   Nil))) in
 
 let handle_routed = router routes not_found in
-let handle_with_static = serve_static_fallback "/static/" "examples/chat" handle_routed in
+// Two static mounts: the app's own assets (including app.wasm, the
+// compiled Mere client), and the contrib/dom host glue that index.html
+// imports as an ES module.
+let handle_with_static =
+  serve_static_fallback "/static/" "examples/chat"
+    (serve_static_fallback "/vendor/" "contrib/dom" handle_routed) in
 
 let _ = print ("starting chat on :8080 (msgs=" ++ msgs_db_path ++ ")") in
 let _ = http_serve 8080
