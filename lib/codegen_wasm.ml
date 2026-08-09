@@ -196,8 +196,9 @@ let wasm_stdin_used = ref false  (* command component called read_stdin() -> emi
 let wasm_socket_ffi = ref false
 let socket_ffi_externs =
   ["tcp_connect"; "tcp_listen"; "tcp_accept"; "tcp_read"; "tcp_write"; "tcp_close";
-   "udp_open"; "udp_send"; "udp_recv";
-   "mem_alloc"; "mem_get_u8"; "mem_copy_str"; "mem_to_str"; "str_ptr"]
+   "udp_open"; "udp_send"; "udp_recv"; "tcp_set_timeout";
+   "mem_alloc"; "mem_get_u8"; "mem_set_u8"; "mem_get_u16be"; "mem_set_u16be";
+   "mem_copy_str"; "mem_to_str"; "str_ptr"]
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -8631,6 +8632,16 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (func $mem_alloc_h (param $n i32) (result i32) (local $p i32)\n\
         \    (local.set $p (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $p) (local.get $n))) (local.get $p))\n\
         \  (func $mem_get_u8_h (param $p i32) (param $o i32) (result i32) (i32.load8_u (i32.add (local.get $p) (local.get $o))))\n\
+        \  (func $mem_set_u8_h (param $p i32) (param $o i32) (param $v i32) (result i32)\n\
+        \    (i32.store8 (i32.add (local.get $p) (local.get $o)) (local.get $v)) (local.get $v))\n\
+        \  (func $mem_get_u16be_h (param $p i32) (param $o i32) (result i32)\n\
+        \    (i32.or (i32.shl (i32.load8_u (i32.add (local.get $p) (local.get $o))) (i32.const 8))\n\
+        \            (i32.load8_u (i32.add (i32.add (local.get $p) (local.get $o)) (i32.const 1)))))\n\
+        \  (func $mem_set_u16be_h (param $p i32) (param $o i32) (param $v i32) (result i32)\n\
+        \    (i32.store8 (i32.add (local.get $p) (local.get $o)) (i32.shr_u (local.get $v) (i32.const 8)))\n\
+        \    (i32.store8 (i32.add (i32.add (local.get $p) (local.get $o)) (i32.const 1)) (i32.and (local.get $v) (i32.const 255)))\n\
+        \    (local.get $v))\n\
+        \  (func $tcp_set_timeout_h (param $fd i32) (param $ms i32) (result i32) (i32.const 0))\n\
         \  (func $str_ptr_h (param $s i32) (result i32) (local.get $s))\n\
         \  (func $mem_copy_str_h (param $p i32) (param $o i32) (param $s i32) (result i32) (local $len i32) (local $i i32)\n\
         \    (local.set $len (i32.load (i32.sub (local.get $s) (i32.const 4))))\n\
