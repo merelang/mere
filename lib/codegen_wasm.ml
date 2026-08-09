@@ -196,6 +196,7 @@ let wasm_stdin_used = ref false  (* command component called read_stdin() -> emi
 let wasm_socket_ffi = ref false
 let socket_ffi_externs =
   ["tcp_connect"; "tcp_listen"; "tcp_accept"; "tcp_read"; "tcp_write"; "tcp_close";
+   "udp_open"; "udp_send"; "udp_recv";
    "mem_alloc"; "mem_get_u8"; "mem_copy_str"; "mem_to_str"; "str_ptr"]
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
@@ -8606,6 +8607,17 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[method]resolve-address-stream.subscribe\" (func $sock_rsub (param i32) (result i32)))\n\
         \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[method]resolve-address-stream.resolve-next-address\" (func $sock_rnext (param i32 i32)))\n\
         \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[resource-drop]resolve-address-stream\" (func $rstream_drop (param i32)))\n\
+        \  (import \"wasi:sockets/udp-create-socket@0.2.3\" \"create-udp-socket\" (func $ucreate (param i32 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]udp-socket.start-bind\" (func $ubind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]udp-socket.finish-bind\" (func $ufbind (param i32 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]udp-socket.stream\" (func $ustream (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[resource-drop]udp-socket\" (func $udrop (param i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]outgoing-datagram-stream.check-send\" (func $ucheck (param i32 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]outgoing-datagram-stream.send\" (func $usend (param i32 i32 i32 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[resource-drop]outgoing-datagram-stream\" (func $odrop (param i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]incoming-datagram-stream.subscribe\" (func $insub (param i32) (result i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]incoming-datagram-stream.receive\" (func $ureceive (param i32 i64 i32)))\n\
+        \  (import \"wasi:sockets/udp@0.2.3\" \"[resource-drop]incoming-datagram-stream\" (func $idrop (param i32)))\n\
         \  (import \"wasi:io/streams@0.2.3\" \"[method]output-stream.blocking-write-and-flush\" (func $sock_swrite (param i32 i32 i32 i32)))\n\
         \  (import \"wasi:io/streams@0.2.3\" \"[method]input-stream.blocking-read\" (func $sock_sread (param i32 i64 i32)))\n\
         \  (import \"wasi:io/streams@0.2.3\" \"[resource-drop]input-stream\" (func $in_drop (param i32)))\n\
@@ -8678,7 +8690,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (local.set $poll (call $sock_subscribe (local.get $sock))) (call $sock_block (local.get $poll))\n\
         \    (call $poll_drop (local.get $poll))\n\
         \    (call $sock_finish (local.get $sock) (i32.add (local.get $s) (i32.const 32)))\n\
-        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 12)))\n\
+        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 16)))\n\
         \    (i32.store offset=0 (local.get $fd) (local.get $sock))\n\
         \    (i32.store offset=4 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 36))))\n\
         \    (i32.store offset=8 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 40))))\n\
@@ -8714,7 +8726,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (call $sock_fbind (local.get $sock) (i32.add (local.get $s) (i32.const 32)))\n\
         \    (call $sock_listen (local.get $sock) (i32.add (local.get $s) (i32.const 40)))\n\
         \    (call $sock_flisten (local.get $sock) (i32.add (local.get $s) (i32.const 48)))\n\
-        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 12)))\n\
+        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 16)))\n\
         \    (i32.store offset=0 (local.get $fd) (local.get $sock))\n\
         \    (i32.store offset=4 (local.get $fd) (i32.const 0)) (i32.store offset=8 (local.get $fd) (i32.const 0))\n\
         \    (local.get $fd))\n\
@@ -8725,16 +8737,71 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 32)))\n\
         \    (local.set $poll (call $sock_subscribe (local.get $sock))) (call $sock_block (local.get $poll)) (call $poll_drop (local.get $poll))\n\
         \    (call $sock_accept (local.get $sock) (local.get $s))\n\
-        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 12)))\n\
+        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 16)))\n\
         \    (i32.store offset=0 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 4))))\n\
         \    (i32.store offset=4 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 8))))\n\
         \    (i32.store offset=8 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 12))))\n\
         \    (local.get $fd))\n\
+        \  (func $udp_open_h (param $host i32) (param $port i32) (result i32)\n\
+        \    (local $net i32) (local $sock i32) (local $fd i32) (local $s i32)\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
+        \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 128)))\n\
+        \    (local.set $net (call $sock_instnet))\n\
+        \    (if (i32.and (i32.ge_u (i32.load8_u (local.get $host)) (i32.const 48)) (i32.le_u (i32.load8_u (local.get $host)) (i32.const 57)))\n\
+        \      (then (call $__parse_ipv4 (local.get $host) (local.get $s)))\n\
+        \      (else (call $__resolve_ipv4 (local.get $net) (local.get $host) (local.get $s))))\n\
+        \    (call $ucreate (i32.const 0) (i32.add (local.get $s) (i32.const 8)))\n\
+        \    (local.set $sock (i32.load (i32.add (local.get $s) (i32.const 12))))\n\
+        \    (call $ubind (local.get $sock) (local.get $net) (i32.const 0) (i32.const 0)\n\
+        \      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)\n\
+        \      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.add (local.get $s) (i32.const 24)))\n\
+        \    (call $ufbind (local.get $sock) (i32.add (local.get $s) (i32.const 32)))\n\
+        \    (call $ustream (local.get $sock) (i32.const 1) (i32.const 0) (local.get $port)\n\
+        \      (i32.load8_u (local.get $s)) (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.load8_u (i32.add (local.get $s) (i32.const 2))) (i32.load8_u (i32.add (local.get $s) (i32.const 3)))\n\
+        \      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.add (local.get $s) (i32.const 40)))\n\
+        \    (local.set $fd (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $fd) (i32.const 16)))\n\
+        \    (i32.store offset=0 (local.get $fd) (local.get $sock))\n\
+        \    (i32.store offset=4 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 44))))\n\
+        \    (i32.store offset=8 (local.get $fd) (i32.load (i32.add (local.get $s) (i32.const 48))))\n\
+        \    (i32.store offset=12 (local.get $fd) (i32.const 1))\n\
+        \    (local.get $fd))\n\
+        \  (func $udp_send_h (param $fd i32) (param $buf i32) (param $len i32) (result i32)\n\
+        \    (local $out i32) (local $s i32)\n\
+        \    (local.set $out (i32.load offset=8 (local.get $fd)))\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
+        \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 128)))\n\
+        \    (call $ucheck (local.get $out) (local.get $s))\n\
+        \    (i32.store offset=0 (i32.add (local.get $s) (i32.const 16)) (local.get $buf))\n\
+        \    (i32.store offset=4 (i32.add (local.get $s) (i32.const 16)) (local.get $len))\n\
+        \    (i32.store8 offset=8 (i32.add (local.get $s) (i32.const 16)) (i32.const 0))\n\
+        \    (call $usend (local.get $out) (i32.add (local.get $s) (i32.const 16)) (i32.const 1) (i32.add (local.get $s) (i32.const 64)))\n\
+        \    (local.get $len))\n\
+        \  (func $udp_recv_h (param $fd i32) (param $buf i32) (param $len i32) (result i32)\n\
+        \    (local $in i32) (local $s i32) (local $poll i32) (local $rec i32) (local $dp i32) (local $dl i32) (local $n i32) (local $i i32)\n\
+        \    (local.set $in (i32.load offset=4 (local.get $fd)))\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
+        \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 64)))\n\
+        \    (local.set $poll (call $insub (local.get $in))) (call $sock_block (local.get $poll)) (call $poll_drop (local.get $poll))\n\
+        \    (call $ureceive (local.get $in) (i64.const 1) (local.get $s))\n\
+        \    (if (i32.eqz (i32.load (i32.add (local.get $s) (i32.const 8)))) (then (return (i32.const 0))))\n\
+        \    (local.set $rec (i32.load (i32.add (local.get $s) (i32.const 4))))\n\
+        \    (local.set $dp (i32.load (local.get $rec)))\n\
+        \    (local.set $dl (i32.load (i32.add (local.get $rec) (i32.const 4))))\n\
+        \    (local.set $n (select (local.get $len) (local.get $dl) (i32.lt_u (local.get $len) (local.get $dl))))\n\
+        \    (block $e (loop $l (br_if $e (i32.ge_u (local.get $i) (local.get $n)))\n\
+        \      (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.load8_u (i32.add (local.get $dp) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l))) (local.get $n))\n\
         \  (func $tcp_close_h (param $fd i32) (local $in i32) (local $out i32)\n\
-        \    (local.set $in (i32.load offset=4 (local.get $fd))) (local.set $out (i32.load offset=8 (local.get $fd)))\n\
-        \    (if (local.get $in) (then (call $in_drop (local.get $in))))\n\
-        \    (if (local.get $out) (then (call $out_drop (local.get $out))))\n\
-        \    (call $sock_drop (i32.load offset=0 (local.get $fd))))\n"
+        \    (if (i32.load offset=12 (local.get $fd))\n\
+        \      (then\n\
+        \        (call $idrop (i32.load offset=4 (local.get $fd)))\n\
+        \        (call $odrop (i32.load offset=8 (local.get $fd)))\n\
+        \        (call $udrop (i32.load offset=0 (local.get $fd))))\n\
+        \      (else\n\
+        \        (local.set $in (i32.load offset=4 (local.get $fd))) (local.set $out (i32.load offset=8 (local.get $fd)))\n\
+        \        (if (local.get $in) (then (call $in_drop (local.get $in))))\n\
+        \        (if (local.get $out) (then (call $out_drop (local.get $out))))\n\
+        \        (call $sock_drop (i32.load offset=0 (local.get $fd))))))\n"
       in
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
       ^ socket_imports
