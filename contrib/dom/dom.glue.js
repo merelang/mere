@@ -23,6 +23,8 @@ export function makeDomGlue() {
   let memory = null;
   let table = null;
   let langBump = null;
+  // Supplied by the embedder; see worker_call below.
+  let workerTransport = null;
 
   // Cartridge/ROM bytes served to the Wasm module a byte at a time (so an
   // emulator can load a ROM without embedding it in the module). Set via
@@ -351,9 +353,35 @@ export function makeDomGlue() {
     },
 
     dom_tz_offset: () => -new Date().getTimezoneOffset(),
+
+    // Ask another Mere module — one that owns storage and therefore has
+    // to live off this thread — a question, and hand its answer to a
+    // closure. The transport is injected with `setWorkerTransport`
+    // because the two ends have separate linear memories: this side
+    // marshals to and from a JS string, and whoever supplies the
+    // transport marshals into the other module. In a browser that
+    // transport is postMessage to a Worker; under Node it is a deferred
+    // in-process call. Mere sees the same asynchronous shape either way.
+    worker_call: (reqPtr, closurePtr) => {
+      const request = readStr(reqPtr);
+      if (!workerTransport) {
+        console.error("contrib/dom: worker_call with no transport set", { request });
+        callClosureStr(closurePtr, "");
+        return;
+      }
+      Promise.resolve(workerTransport(request)).then(
+        (reply) => callClosureStr(closurePtr, reply === undefined ? "" : String(reply)),
+        (err) => {
+          console.error("contrib/dom: worker transport failed", { request, err });
+          callClosureStr(closurePtr, "");
+        });
+    },
   };
 
   const setRom = (u8) => { romBytes = u8; };
+
+  // fn(requestString) -> reply string or Promise<string>.
+  const setWorkerTransport = (fn) => { workerTransport = fn; };
 
   const attach = (instance) => {
     memory = instance.exports.memory;
@@ -374,5 +402,5 @@ export function makeDomGlue() {
     }
   };
 
-  return { glue, attach, setRom };
+  return { glue, attach, setRom, setWorkerTransport };
 }

@@ -233,6 +233,11 @@ const wasmPath = process.argv[2];
       if (fd !== undefined) { try { fs.fsyncSync(fd); } catch (e) { /* ignore */ } }
       return 0;
     },
+    // Size by path, so an append-only store can find its end without
+    // reading the file to measure it.
+    file_size: (pathPtr) => {
+      try { return fs.statSync(readCStr(pathPtr)).size; } catch (e) { return 0; }
+    },
     file_close: (handle) => {
       const fd = openFiles[handle];
       if (fd !== undefined) {

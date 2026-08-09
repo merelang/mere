@@ -85,6 +85,10 @@ const wasmPath = process.argv[2];
   // Reuse the same set of env imports as scripts/run_wasm.js so any
   // extern fn a Mere program declares (getpid, sleep, str_of_float, …)
   // resolves. The http glue takes precedence for the http_serve name.
+  // Open descriptors for positioned I/O, indexed by the handle Mere sees.
+  // Slot 0 is a null sentinel.
+  const openFiles = [undefined];
+
   const env = {
     puts: (ptr) => {
       process.stdout.write(readCStr(ptr) + "\n");
@@ -145,6 +149,59 @@ const wasmPath = process.argv[2];
     __lang_tan: Math.tan,
     __lang_f_pow: Math.pow,
     __lang_atan2: Math.atan2,
+    // Positioned file I/O (v0.1.153), same contract as run_wasm.js: the
+    // handle is an index into `openFiles` and the host owns the
+    // descriptor. A server that keeps its state in contrib/store/kvlog
+    // needs these, and so does any paged store.
+    file_openrw: (pathPtr) => {
+      const path = readCStr(pathPtr);
+      try {
+        let fd;
+        try { fd = fs.openSync(path, "r+"); }
+        catch (e) { fd = fs.openSync(path, "w+"); }
+        openFiles.push(fd);
+        return openFiles.length - 1;
+      } catch (e) {
+        console.error("file_openrw failed:", e.message);
+        return 0;
+      }
+    },
+    file_size: (pathPtr) => {
+      try { return fs.statSync(readCStr(pathPtr)).size; } catch (e) { return 0; }
+    },
+    file_pread: (handle, off, len) => {
+      const fd = openFiles[handle];
+      const buf = Buffer.alloc(Math.max(0, len));
+      let got = 0;
+      if (fd !== undefined && len > 0 && off >= 0) {
+        try { got = fs.readSync(fd, buf, 0, len, off); } catch (e) { got = 0; }
+      }
+      const ptr = bumpAlloc(4 + got);
+      new DataView(memory.buffer).setInt32(ptr, got, true);
+      new Uint8Array(memory.buffer).set(buf.subarray(0, got), ptr + 4);
+      return ptr;
+    },
+    file_pwrite: (handle, off, bytesPtr) => {
+      const fd = openFiles[handle];
+      if (fd === undefined || off < 0) return 0;
+      const len = new DataView(memory.buffer).getInt32(bytesPtr, true);
+      const mem = new Uint8Array(memory.buffer);
+      const src = Buffer.from(mem.subarray(bytesPtr + 4, bytesPtr + 4 + len));
+      try { return fs.writeSync(fd, src, 0, len, off); } catch (e) { return 0; }
+    },
+    file_fsync: (handle) => {
+      const fd = openFiles[handle];
+      if (fd !== undefined) { try { fs.fsyncSync(fd); } catch (e) { /* ignore */ } }
+      return 0;
+    },
+    file_close: (handle) => {
+      const fd = openFiles[handle];
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+        openFiles[handle] = undefined;
+      }
+      return 0;
+    },
     getpid: () => process.pid,
     getppid: () => process.ppid,
     unix_time: () => Math.floor(Date.now() / 1000),

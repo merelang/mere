@@ -12,6 +12,10 @@
 //   --set <id>=<value>     seed an input's value before main() runs
 //   --fire <id>:<event>    dispatch an event after main() (repeatable)
 //   --wait <ms>            settle time after the last --fire (default 1000)
+//   --settle <ms>          settle time after main() before firing (default 300)
+//   --worker <store.wasm>  a second module that owns storage, reached
+//                          through worker_call (replies land in a later
+//                          turn, as a Worker or a network would)
 //
 // Example (with examples/http_chat.mere serving on :8080):
 //   node scripts/run_dom_headless.mjs examples/chat/app.wasm \
@@ -21,6 +25,7 @@
 // get a working handle — no page fixture to keep in sync.
 
 import { readFileSync } from "node:fs";
+import * as fsSync from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -68,7 +73,12 @@ class El {
     this._text = String(v);
     this.children = [];
   }
-  setAttribute(k, v) { this.attributes[k] = v; }
+  setAttribute(k, v) {
+    this.attributes[k] = v;
+    // An element the program created becomes addressable once it names
+    // itself, so --fire can reach a row's button.
+    if (k === "id") { this.id = v; byId.set(v, this); }
+  }
   appendChild(c) { this.children.push(c); return c; }
   addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); }
   fire(ev, obj = {}) {
@@ -154,9 +164,141 @@ if (!globalThis.EventSource) {
   };
 }
 
+// ---- storage module (--worker) --------------------------------------
+//
+// A second Mere module, the one that owns durable state. In a browser it
+// runs inside a Worker so it can use an OPFS access handle; here it runs
+// in this process against the filesystem. What matters for the app under
+// test is that its replies arrive in a LATER turn, so the deferral below
+// is deliberate rather than an artifact of the harness.
+
+const makeStoreHost = async (wasmPath) => {
+  let memory = null, table = null, langBump = null, handler = null;
+  const PAGE = 64 * 1024;
+  const openFiles = [undefined];
+
+  const readStr = (ptr) => {
+    const bytes = new Uint8Array(memory.buffer);
+    let end = ptr;
+    while (end < bytes.length && bytes[end] !== 0) end++;
+    return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
+  };
+  // Mere str layout: [i32 len][bytes][NUL], value points at byte0.
+  const writeStr = (s) => {
+    const utf8 = Buffer.from(s, "utf8");
+    const aligned = (4 + utf8.length + 1 + 7) & ~7;
+    const start = langBump.value;
+    if (start + aligned > memory.buffer.byteLength) {
+      memory.grow(Math.ceil((start + aligned - memory.buffer.byteLength) / PAGE));
+    }
+    new DataView(memory.buffer).setInt32(start, utf8.length, true);
+    const mem = new Uint8Array(memory.buffer);
+    mem.set(utf8, start + 4);
+    mem[start + 4 + utf8.length] = 0;
+    langBump.value = start + aligned;
+    return start + 4;
+  };
+  const bumpAlloc = (n) => {
+    const aligned = (n + 7) & ~7;
+    const start = langBump.value;
+    if (start + aligned > memory.buffer.byteLength) {
+      memory.grow(Math.ceil((start + aligned - memory.buffer.byteLength) / PAGE));
+    }
+    langBump.value = start + aligned;
+    return start;
+  };
+
+  const stub = () => 0;
+  const env = {
+    puts: () => 0,
+    time: () => Date.now() / 1000,
+    read_file: stub,
+    write_file: stub,
+    __lang_str_of_float: stub,
+    __lang_float_of_str: () => 0.0,
+    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+    // The positioned file I/O the store is built on (v0.1.153). An OPFS
+    // access handle offers exactly these five operations, which is why
+    // the same store source compiles for a browser Worker.
+    file_openrw: (pathPtr) => {
+      const path = readStr(pathPtr);
+      try {
+        let fd;
+        try { fd = fsSync.openSync(path, "r+"); }
+        catch (e) { fd = fsSync.openSync(path, "w+"); }
+        openFiles.push(fd);
+        return openFiles.length - 1;
+      } catch (e) { return 0; }
+    },
+    file_size: (pathPtr) => {
+      try { return fsSync.statSync(readStr(pathPtr)).size; } catch (e) { return 0; }
+    },
+    file_pread: (handle, off, len) => {
+      const fd = openFiles[handle];
+      const buf = Buffer.alloc(Math.max(0, len));
+      let got = 0;
+      if (fd !== undefined && len > 0 && off >= 0) {
+        try { got = fsSync.readSync(fd, buf, 0, len, off); } catch (e) { got = 0; }
+      }
+      const ptr = bumpAlloc(4 + got);
+      new DataView(memory.buffer).setInt32(ptr, got, true);
+      new Uint8Array(memory.buffer).set(buf.subarray(0, got), ptr + 4);
+      return ptr;
+    },
+    file_pwrite: (handle, off, bytesPtr) => {
+      const fd = openFiles[handle];
+      if (fd === undefined || off < 0) return 0;
+      const len = new DataView(memory.buffer).getInt32(bytesPtr, true);
+      const mem = new Uint8Array(memory.buffer);
+      const src = Buffer.from(mem.subarray(bytesPtr + 4, bytesPtr + 4 + len));
+      try { return fsSync.writeSync(fd, src, 0, len, off); } catch (e) { return 0; }
+    },
+    file_fsync: (handle) => {
+      const fd = openFiles[handle];
+      if (fd !== undefined) { try { fsSync.fsyncSync(fd); } catch (e) {} }
+      return 0;
+    },
+    file_close: (handle) => {
+      const fd = openFiles[handle];
+      if (fd !== undefined) { try { fsSync.closeSync(fd); } catch (e) {} openFiles[handle] = undefined; }
+      return 0;
+    },
+    // The store registers its message handler exactly as an HTTP handler
+    // registers with http_serve: the host keeps the closure and calls it
+    // per message.
+    worker_serve: (closurePtr) => { handler = closurePtr; },
+  };
+
+  const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), { env });
+  memory = instance.exports.memory;
+  table = instance.exports.__indirect_function_table;
+  langBump = instance.exports.__lang_bump;
+  instance.exports.main();
+
+  return (request) => {
+    if (handler === null) return "";
+    const view = new DataView(memory.buffer);
+    const envPtr = view.getInt32(handler, true);
+    const fnIdx = view.getInt32(handler + 4, true);
+    const fn = table.get(fnIdx);
+    const argPtr = writeStr(request);
+    const reply = fn(BigInt(envPtr), BigInt(argPtr));
+    return readStr(typeof reply === "bigint" ? Number(reply) : reply);
+  };
+};
+
 // ---- run ------------------------------------------------------------
 
-const { glue, attach } = makeDomGlue();
+const { glue, attach, setWorkerTransport } = makeDomGlue();
+
+const workerPath = optValues("worker")[0];
+if (workerPath) {
+  const storeCall = await makeStoreHost(workerPath);
+  // Reply in a later turn, the way a Worker or a network would.
+  setWorkerTransport((request) =>
+    new Promise((resolve) => setTimeout(() => resolve(storeCall(request)), 0)));
+}
 const stub = () => 0;
 const env = {
   ...glue,
@@ -178,6 +320,12 @@ const env = {
 const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), { env });
 attach(instance);
 instance.exports.main();
+
+// An app whose startup is asynchronous has not drawn anything yet when
+// main() returns, so nothing is clickable until its first round trips
+// land. Settle before reporting or firing.
+const settleMs = parseInt(optValues("settle")[0] || "300", 10);
+await new Promise((r) => setTimeout(r, settleMs));
 
 const report = (label) => {
   console.log(`\n===== ${label} =====`);

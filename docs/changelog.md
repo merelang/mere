@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.154 — 2026-08-10
+
+_A local-first app in Mere, split across three replicas of one store.
+`contrib/store/kvlog.mere` is an append-only key/value log over the
+positioned file I/O from v0.1.153: a write appends a record and fsyncs, a
+read replays. `examples/tally` runs it three ways — `store.mere` owns the
+browser's copy off the UI thread, `server.mere` owns the authoritative
+copy, and both `import` the same kvlog source, so the two replicas are
+one store compiled twice rather than two stores that agree on a format.
+A log written by the C backend reads back under Wasm and interp, and the
+reverse. `file_size` joins the positioned group on Wasm, since an
+append-only store needs the end of the file without reading it._
+
+_The UI half (`app.mere`) reaches storage through a new `worker_call`
+binding in contrib/dom: a request string in, a reply handed to a closure
+later. In a browser that is postMessage to a Worker, which is where the
+store has to live because an OPFS access handle — the only synchronous
+positioned file I/O a browser offers — exists only off the main thread.
+`scripts/run_dom_headless.mjs --worker <store.wasm>` runs the same split
+under Node with replies deferred to a later turn, so the asynchrony is
+faithful and the whole app is testable without a browser: add a counter,
+reopen in a fresh process and see it persisted, press +1, sync against a
+running server, and lose the server and watch it fall back to local.
+`examples/tally/store.worker.js` carries the OPFS binding and is the one
+piece with no automated coverage here._
+
+_What the split says about the language. Every endpoint is straight-line
+code — `handle` in store.mere returns its reply as a value and never
+mentions asynchrony — and every crossing is a callback. With one request
+in flight that costs an indentation level, which is what the chat client
+measured in v0.1.152. The cost shows up when steps depend on each other:
+sync reads local state, fetches remote, writes the merge back key by key,
+then publishes it, and the middle step is an ordinary fold over a list
+where each element is a round trip. Written against callbacks it becomes
+a recursion that carries its own continuation and calls it when the list
+runs out. That rewrite — a fold that cannot be a fold — is the clearest
+argument so far for giving Mere a way to name the result of a call._
+
+_Also found: a `let rec` that closes over a Vec is rejected by both
+compiled backends ("captured variable has no recorded type" on C,
+"inner-lifted capture not in scope" on Wasm), so kvlog threads its byte
+buffer through as an explicit parameter. And `dom_set_text el ""` turns
+out to be the way to clear a container, since setting textContent drops
+every child — no `dom_remove` binding needed yet._
+
+---
+
 ## v0.1.153 — 2026-08-09
 
 _Positioned file I/O on the Wasm backend, and the three broken builtins that

@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere tally — local-first</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .2rem; }
+  .subtitle { color: #555; margin-top: 0; }
+  #board { list-style: none; padding: 0; }
+  #board li { display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem;
+              border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: .4rem; }
+  .name { flex: 1; }
+  .count { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 2.5rem; text-align: right; }
+  button { font: inherit; padding: .3em .9em; border: none; border-radius: 5px;
+           background: #2b6cb0; color: #fff; cursor: pointer; }
+  #status { display: inline-block; font-size: .85rem; color: #555; margin-bottom: .5rem; }
+  #log { background: #1a202c; color: #e2e8f0; padding: .75em; border-radius: 5px;
+         font: 12px/1.5 ui-monospace, Menlo, monospace; max-height: 8rem; overflow: auto; }
+</style>
+
+<h1>Mere tally</h1>
+<p class="subtitle">
+  A local-first counter board. Reads and writes go to a durable log owned
+  by <code>store.mere</code>, which runs off the UI thread; the server is
+  contacted only when you press sync. Both the browser's copy and the
+  server's are <code>contrib/store/kvlog.mere</code> — one Mere source
+  compiled to Wasm on one side and to C on the other.
+</p>
+
+<div id="status">starting…</div>
+
+<ul id="board"></ul>
+
+<form id="add">
+  <input id="label" placeholder="new counter" size="24" required>
+  <button type="submit">add</button>
+</form>
+
+<p><button id="sync">sync with server</button></p>
+
+<pre id="log"></pre>
+
+<script type="module">
+  import { makeDomGlue } from "/vendor/dom/dom.glue.js";
+
+  const stub = () => 0;
+  const env0 = {
+    puts: () => 0,
+    time: () => Date.now() / 1000,
+    read_file: stub,
+    write_file: stub,
+    __lang_str_of_float: stub,
+    __lang_float_of_str: () => 0.0,
+    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+  };
+
+  const { glue, attach, setWorkerTransport } = makeDomGlue();
+
+  // The storage module has to run in a Worker: the only synchronous
+  // positioned file I/O a browser offers is an OPFS access handle, and
+  // that API exists only off the main thread. The Worker side is not
+  // written yet — see contrib/store/README.md — so until it lands this
+  // page reports the gap rather than pretending to be durable.
+  let nextId = 1;
+  const pending = new Map();
+  let worker = null;
+  try {
+    worker = new Worker("/static/store.worker.js", { type: "module" });
+    worker.onmessage = (e) => {
+      const { id, reply } = e.data;
+      const resolve = pending.get(id);
+      if (resolve) { pending.delete(id); resolve(reply); }
+    };
+    setWorkerTransport((request) => new Promise((resolve) => {
+      const id = nextId++;
+      pending.set(id, resolve);
+      worker.postMessage({ id, request });
+    }));
+  } catch (err) {
+    console.error("tally: storage worker unavailable", err);
+    setWorkerTransport(() => "");
+  }
+
+  const bytes = await fetch("/static/app.wasm").then((r) => r.arrayBuffer());
+  const { instance } = await WebAssembly.instantiate(bytes, { env: { ...env0, ...glue } });
+  attach(instance);
+  instance.exports.main();
+</script>
