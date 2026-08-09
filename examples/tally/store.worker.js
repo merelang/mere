@@ -16,11 +16,11 @@
 // that opens files by name at runtime would need a different shape —
 // probably an explicit "mount" step in the protocol.
 //
-// Verified: the Node path (scripts/run_dom_headless.mjs --worker), which
-// exercises the same store.mere and the same message protocol. The OPFS
-// binding below has not been run in this repo's CI, which has no
-// browser; open examples/tally/index.html against examples/tally/
-// server.mere to exercise it.
+// Covered two ways: scripts/run_dom_headless.mjs --worker exercises the
+// same store.mere and message protocol under Node, and
+// scripts/check_browser.mjs drives this file in Chrome — writing through
+// the store, reloading, and restarting the browser to confirm the
+// counters come back off disk.
 
 const DB_PATH = "/tmp/mere_tally.log";   // store.mere's `db`
 const OPFS_NAME = "tally.log";           // what it becomes in OPFS

@@ -27,8 +27,15 @@ under Node with replies deferred to a later turn, so the asynchrony is
 faithful and the whole app is testable without a browser: add a counter,
 reopen in a fresh process and see it persisted, press +1, sync against a
 running server, and lose the server and watch it fall back to local.
-`examples/tally/store.worker.js` carries the OPFS binding and is the one
-piece with no automated coverage here._
+`examples/tally/store.worker.js` carries the OPFS binding, and
+`scripts/check_browser.mjs` drives it in Chrome: write through the store,
+reload, restart the browser process, and confirm the counters come back
+off disk. Playwright is not a dependency, so a missing install is a SKIP.
+The check also confirms `createSyncAccessHandle` is absent on the main
+thread, which is the constraint the whole split exists for. A log written
+by the browser through OPFS parses identically under `kvlog.mere`
+compiled to C and run natively, and compiled to Wasm and run under Node —
+one source, three hosts, one byte format._
 
 _What the split says about the language. Every endpoint is straight-line
 code — `handle` in store.mere returns its reply as a value and never
