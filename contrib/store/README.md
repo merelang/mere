@@ -40,8 +40,16 @@ exists only inside a Worker. So a browser deployment splits in two:
 
 `scripts/run_dom_headless.mjs --worker <store.wasm>` runs that same split
 under Node against the filesystem, with replies deferred to a later turn
-so the asynchrony is faithful. The OPFS binding itself has no automated
-coverage — this repo's CI has no browser.
+so the asynchrony is faithful. `scripts/check_browser.mjs` covers the
+OPFS binding itself by driving the page in Chrome: it writes through the
+store, reloads, restarts the browser process, and checks the counters
+came back off disk. Playwright is not a dependency here, so a missing
+install is a SKIP.
+
+The log a browser writes is the same file everything else reads. A run of
+the check produces an OPFS `tally.log` that `kvlog.mere` parses
+identically when compiled to C and run natively, and when compiled to
+Wasm and run under Node — one source, three hosts, one format.
 
 One asymmetry worth knowing: acquiring an OPFS handle is asynchronous
 even though operating on it is synchronous. `file_openrw` is a
