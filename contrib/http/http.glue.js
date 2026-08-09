@@ -19,6 +19,7 @@
 // to the closure so the http import can start firing.
 
 const { makeWsEnv } = require("../../scripts/ws_env.js");
+const { checkAbi } = require("../../scripts/mere_abi.js");
 
 function makeHttpGlue() {
   let memory = null;
@@ -335,6 +336,7 @@ function makeHttpGlue() {
   };
 
   const attach = (instance) => {
+    checkAbi(instance, "contrib/http");
     memory = instance.exports.memory;
     table = instance.exports.__indirect_function_table;
     langBump = instance.exports.__lang_bump;

@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.157 — 2026-08-10
+
+_An ABI number, so a host and a module can refuse each other._
+
+_Nearly every bug the three dogfoods turned up was one shape: a boundary written
+when a Mere value was 4 bytes and a `str` was a plain C string, left behind when
+both changed. A host and a compiled module agree on far more than the import
+list — the value representation, the string layout, how a closure is called —
+and none of it is checked, so an older host links cleanly and then returns empty
+strings or crashes on the first request. That is how a request line arrived as
+"", how a password hash hashed to nothing, and how a result set came back with
+every column empty._
+
+_Every module now exports `__mere_abi`, and every host checks it before touching
+the instance: `scripts/mere_abi.js` for the Node runners and contrib/http,
+inlined in contrib/dom since it loads in a browser. A module without the global
+is refused as pre-ABI-1 with a note to recompile; a newer one tells the host to
+update. The self-host emitter in `contrib/codegen/codegen_wasm.mere` emits the
+same global, so both codegens stay in step and the bootstrap fixpoint still
+holds._
+
+_ABI 1 names what was implicit: i64 values with addresses in the low word,
+`[i32 len][bytes][NUL]` strings whose value points at byte0, closure records of
+`{ i32 env, i32 fn_idx }` called as `(i64, i64) -> i64`, 8-byte compound fields
+and 16-byte `{ tag, payload }` variant cells._
+
+_An audit of the remaining host boundaries found three more of the same shape,
+all in `run_http_server.js` and all fixed by routing through the shared
+`writeStr` rather than open-coding the layout a fourth time: `getenv`,
+`sha256_hex` and `__lang_str_of_float`. Open-coding is precisely how these
+drifted — `run_wasm.js` grew the length header at each of its own call sites and
+none of the copies elsewhere followed. parity 72/72, dune runtest 2306/0._
+
+---
+
 ## v0.1.156 — 2026-08-10
 
 _`of_json` gets a working Wasm backend, and the last of the raw-C-string

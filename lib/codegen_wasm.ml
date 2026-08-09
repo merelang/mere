@@ -9079,6 +9079,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      %s\
      %s\
      %s\
+     \  (global $__mere_abi (export \"__mere_abi\") i32 (i32.const 1))\n\
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
   (global $__rgn_tmp (mut i64) (i64.const 0))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\

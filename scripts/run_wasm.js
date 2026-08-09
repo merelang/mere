@@ -5,6 +5,7 @@
 // Usage: node run_wasm.js <path-to-wasm>
 
 const fs = require('fs');
+const { checkAbi } = require("./mere_abi.js");
 const { Worker } = require('worker_threads');
 const { makePgEnv } = require('./pg_env.js');
 const { makeHttpFetchEnv } = require('./http_fetch_env.js');
@@ -483,6 +484,7 @@ const wasmPath = process.argv[2];
   // instantiate(Module, imports) resolves to the Instance directly (unlike
   // instantiate(bytes, imports) which resolves to { instance, module }).
   const instance = await WebAssembly.instantiate(wasmModule, { env });
+  checkAbi(instance, "scripts/run_wasm.js");
   memory = needsSharedMem ? sharedMemory : instance.exports.memory;
   langBump = instance.exports.__lang_bump || null;
 

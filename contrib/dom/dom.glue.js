@@ -17,6 +17,10 @@
 // instantiation — the env imports must be ready *before* the instance,
 // but the glue needs the instance's memory + table to do anything.
 
+// Keep in step with scripts/mere_abi.js; this module is loaded in a
+// browser, where require() is not available.
+const MERE_ABI = 1;
+
 export function makeDomGlue() {
   // Closure state — populated by `attach` after the Wasm module
   // instantiates. Until then the dom_* fns are no-ops that warn.
@@ -384,6 +388,15 @@ export function makeDomGlue() {
   const setWorkerTransport = (fn) => { workerTransport = fn; };
 
   const attach = (instance) => {
+    // A module built by an older compiler links fine and then hands back
+    // empty strings, so refuse it here rather than debug it later.
+    const g = instance.exports.__mere_abi;
+    const abi = g === undefined ? undefined : (g.value !== undefined ? g.value : g);
+    if (abi !== MERE_ABI) {
+      throw new Error(
+        `contrib/dom: module ABI ${abi === undefined ? "pre-1" : abi}, host ABI ${MERE_ABI}` +
+        " — recompile with a current `mere -w`");
+    }
     memory = instance.exports.memory;
     table = instance.exports.__indirect_function_table;
     langBump = instance.exports.__lang_bump;
