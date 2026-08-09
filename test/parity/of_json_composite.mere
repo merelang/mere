@@ -1,0 +1,43 @@
+// `of_json` / `of_json_opt` over the shapes a request body actually takes.
+//
+// The Wasm decoder was written for the 4-byte value model and never
+// revisited: the parser runtime carried i64 signatures over i32 bodies,
+// and the generated decoders built records with 4-byte fields and
+// variant cells of 8 bytes. So typed request decoding had no Wasm
+// backend at all — mere-blog, which decodes every request body this way,
+// could only be built natively.
+//
+// The integer case is deliberately past 2^53: the old decoder
+// accumulated in i32, so anything larger came back truncated rather than
+// failing loudly.
+
+type pt = { x: int, y: str, ok: bool };
+type color = Red | Blue of int;
+
+let p = (of_json "\{\"x\":5,\"y\":\"hi\",\"ok\":true}" : pt);
+let _ = print (show p.x ++ "/" ++ p.y ++ "/" ++ show p.ok);
+
+let _ = print (show (of_json "[1,2,3]" : int list));
+let _ = print (show (of_json "[\"a\",\"b\"]" : str list));
+let _ = print (show (of_json "[]" : int list));
+
+// Nested: a list of records, re-serialized so the whole tree is checked.
+let ps = (of_json "[\{\"x\":1,\"y\":\"a\",\"ok\":true},\{\"x\":2,\"y\":\"b\",\"ok\":false}]" : pt list);
+let _ = print (to_json ps);
+
+// of_json_opt is the None-on-error sibling: a malformed body must not trap.
+let ok = (of_json_opt "\{\"x\":1,\"y\":\"z\",\"ok\":false}" : pt option);
+let _ = print (match ok with Some q -> "some " ++ show q.x ++ q.y | None -> "none");
+let bad = (of_json_opt "not json at all" : pt option);
+let _ = print (match bad with Some q -> "some" | None -> "none");
+let missing = (of_json_opt "\{\"x\":1}" : pt option);
+let _ = print (match missing with Some q -> "some" | None -> "none");
+
+// Whole i64 range, not just the low word.
+let _ = print (show (of_json "-9007199254740993" : int));
+let _ = print (show (of_json "0" : int));
+
+// Variants: a bare string is a nullary ctor, a single-key object carries
+// a payload — the shape to_json produces.
+let _ = print (to_json (of_json "\"Red\"" : color));
+print (to_json (of_json "\{\"Blue\":7}" : color))

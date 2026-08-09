@@ -174,13 +174,20 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       while (bytes[src] !== 0) bytes[d++] = bytes[src++];
       return d - (dst | 0);
     },
+    // Every column value a driver reads off the wire becomes a Mere str
+    // here, so it needs the `[i32 len][bytes][NUL]` layout with the value
+    // pointing at byte0 — raw bytes read back with whatever length
+    // preceded them, which showed up as an entire result set of empty
+    // fields. The C backend's mem_to_str already allocates this way.
     mem_to_str: (ptr, len) => {
       const n = len | 0;
-      const dst = bumpAlloc(n + 1);
+      const start = bumpAlloc(4 + n + 1);
+      // Views must be taken after bumpAlloc — growing detaches the buffer.
+      new DataView(getMemory()).setInt32(start, n, true);
       const bytes = new Uint8Array(getMemory());
-      bytes.copyWithin(dst, ptr | 0, (ptr | 0) + n);
-      bytes[dst + n] = 0;
-      return dst;
+      bytes.copyWithin(start + 4, ptr | 0, (ptr | 0) + n);
+      bytes[start + 4 + n] = 0;
+      return start + 4;
     },
 
     // ---- Crypto ---------------------------------------------------------

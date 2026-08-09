@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.156 — 2026-08-10
+
+_`of_json` gets a working Wasm backend, and the last of the raw-C-string
+handoffs go._
+
+_**The Wasm JSON decoder was written for the 4-byte value model.** The parser
+runtime carried i64 signatures over i32 bodies, and the generated `__ojnode_*`
+decoders built records with 4-byte fields and variant cells of 8 bytes, so
+typed request decoding had no Wasm backend at all. The runtime's JSON tree is
+private to the parser and now says so — i32 throughout — while every decoder
+produces a real Mere value: 8-byte record and tuple slots, 16-byte
+`{ tag, payload }` cells, and `__mj_atoi` accumulating in i64 so a number past
+2^53 survives. `test/parity/of_json_composite.mere` covers records, lists,
+options (including None-on-error), nested lists of records, variants both
+nullary and payload-carrying, and the wide integer._
+
+_**`show` and `to_json` on C returned bare string literals** for bool, unit,
+closures, the empty list, nullary constructors and every `null` — and a bare
+literal is not a Mere str, which carries its length in the word before byte0.
+`print (show true)` looked fine because print formats with %s and stops at the
+NUL; `print ("x" ++ show true)` segfaulted, and `str_len (show true)` returned
+whatever preceded the literal in rodata. Same for `str_repeat` at n≤0,
+`str_join` of an empty list, and `__lang_fail_str`._
+
+_**Two Wasm hosts still handed over raw bytes**: `mem_to_str` in
+`scripts/pg_env.js`, which is where every column value a database driver reads
+off the wire becomes a str — an entire result set came back empty — and
+`read_file` in `scripts/run_http_server.js`. And `contrib/http/http.glue.js`
+read the response body by scanning for a NUL, so a `.wasm` asset served out of
+`read_file` truncated to nothing at its first byte._
+
+_Together these close the gap the previous entry left open: mere-blog now
+builds and runs on **both** backends against Postgres — signup, cookie
+sessions, typed request decoding, authenticated post creation — and serves the
+same Wasm admin client byte-identically from either. The admin UI's browser
+checks pass against the native binary and the Wasm host alike. parity 72/72,
+dune runtest 2306/0._
+
+---
+
 ## v0.1.155 — 2026-08-10
 
 _Four boundaries that a database-backed web app walks straight into, found by

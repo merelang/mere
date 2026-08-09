@@ -7172,7 +7172,7 @@ let map_str_runtime_wasm = {|
 let of_json_runtime_wasm : string = {ojw|
   (global $__mj_p (mut i32) (i32.const 0))
   (global $__mj_err (mut i32) (i32.const 0))
-  (func $__oj_alloc (param $n i64) (result i64)
+  (func $__oj_alloc (param $n i32) (result i32)
     (local $r i32)
     (local.set $r (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $r) (local.get $n)))
@@ -7186,7 +7186,7 @@ let of_json_runtime_wasm : string = {ojw|
         (i32.or (i32.eq (local.get $c) (i32.const 10)) (i32.eq (local.get $c) (i32.const 13))))))
       (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
       (br $lp))))
-  (func $__mj_cell (param $kind i64) (result i64)
+  (func $__mj_cell (param $kind i32) (result i32)
     (local $r i32)
     (local.set $r (call $__oj_alloc (i32.const 16)))
     (i32.store offset=0 (local.get $r) (local.get $kind))
@@ -7194,20 +7194,20 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store offset=8 (local.get $r) (i32.const 0))
     (i32.store offset=12 (local.get $r) (i32.const 0))
     (local.get $r))
-  (func $__mj_atoi (param $s i64) (result i64)
-    (local $r i32) (local $neg i32) (local $c i32)
-    (local.set $r (i32.const 0)) (local.set $neg (i32.const 0))
+  (func $__mj_atoi (param $s i32) (result i64)
+    (local $r i64) (local $neg i32) (local $c i32)
+    (local.set $r (i64.const 0)) (local.set $neg (i32.const 0))
     (if (i32.eq (i32.load8_u (local.get $s)) (i32.const 45))
       (then (local.set $neg (i32.const 1)) (local.set $s (i32.add (local.get $s) (i32.const 1)))))
     (block $end (loop $lp
       (local.set $c (i32.load8_u (local.get $s)))
       (br_if $end (i32.lt_u (local.get $c) (i32.const 48)))
       (br_if $end (i32.gt_u (local.get $c) (i32.const 57)))
-      (local.set $r (i32.add (i32.mul (local.get $r) (i32.const 10)) (i32.sub (local.get $c) (i32.const 48))))
+      (local.set $r (i64.add (i64.mul (local.get $r) (i64.const 10)) (i64.extend_i32_u (i32.sub (local.get $c) (i32.const 48)))))
       (local.set $s (i32.add (local.get $s) (i32.const 1)))
       (br $lp)))
-    (if (result i64) (local.get $neg) (then (i32.sub (i32.const 0) (local.get $r))) (else (local.get $r))))
-  (func $__mj_pstr (result i64)
+    (if (result i64) (local.get $neg) (then (i64.sub (i64.const 0) (local.get $r))) (else (local.get $r))))
+  (func $__mj_pstr (result i32)
     (local $r i32) (local $len i32) (local $c i32) (local $e i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
     (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
@@ -7222,9 +7222,9 @@ let of_json_runtime_wasm : string = {ojw|
           (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
           (local.set $e (i32.load8_u (global.get $__mj_p)))
           (local.set $c
-            (if (result i64) (i32.eq (local.get $e) (i32.const 110)) (then (i32.const 10))
-            (else (if (result i64) (i32.eq (local.get $e) (i32.const 116)) (then (i32.const 9))
-            (else (if (result i64) (i32.eq (local.get $e) (i32.const 114)) (then (i32.const 13))
+            (if (result i32) (i32.eq (local.get $e) (i32.const 110)) (then (i32.const 10))
+            (else (if (result i32) (i32.eq (local.get $e) (i32.const 116)) (then (i32.const 9))
+            (else (if (result i32) (i32.eq (local.get $e) (i32.const 114)) (then (i32.const 13))
             (else (local.get $e))))))))))
       (i32.store8 (i32.add (local.get $r) (local.get $len)) (local.get $c))
       (local.set $len (i32.add (local.get $len) (i32.const 1)))
@@ -7234,7 +7234,7 @@ let of_json_runtime_wasm : string = {ojw|
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (local.get $r))
-  (func $__mj_num (result i64)
+  (func $__mj_num (result i32)
     (local $r i32) (local $len i32) (local $c i32)
     (local.set $r (i32.add (global.get $__lang_bump) (i32.const 4)))
     (local.set $len (i32.const 0))
@@ -7255,7 +7255,7 @@ let of_json_runtime_wasm : string = {ojw|
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
     (local.get $r))
-  (func $__mj_value (result i64)
+  (func $__mj_value (result i32)
     (local $c i32) (local $cell i32)
     (call $__mj_ws)
     (local.set $c (i32.load8_u (global.get $__mj_p)))
@@ -7290,7 +7290,7 @@ let of_json_runtime_wasm : string = {ojw|
         (return (local.get $cell))))
     (global.set $__mj_err (i32.const 1))
     (call $__mj_cell (i32.const 0)))
-  (func $__mj_array (result i64)
+  (func $__mj_array (result i32)
     (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
     (local $node i32) (local $item i32) (local $c i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
@@ -7321,7 +7321,7 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store offset=4 (local.get $cell) (local.get $count))
     (i32.store offset=8 (local.get $cell) (local.get $head))
     (local.get $cell))
-  (func $__mj_object (result i64)
+  (func $__mj_object (result i32)
     (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
     (local $node i32) (local $key i32) (local $val i32) (local $c i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
@@ -7361,24 +7361,24 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store offset=4 (local.get $cell) (local.get $count))
     (i32.store offset=8 (local.get $cell) (local.get $head))
     (local.get $cell))
-  (func $__mj_parse (param $s i64) (result i64)
+  (func $__mj_parse (param $s i32) (result i32)
     (global.set $__mj_p (local.get $s))
     (global.set $__mj_err (i32.const 0))
     (call $__mj_value))
-  (func $__mj_field (param $obj i64) (param $key i64) (result i64)
+  (func $__mj_field (param $obj i32) (param $key i32) (result i32)
     (local $node i32)
     (if (i32.ne (i32.load offset=0 (local.get $obj)) (i32.const 5))
       (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))
     (local.set $node (i32.load offset=8 (local.get $obj)))
     (block $done (loop $lp
       (br_if $done (i32.eqz (local.get $node)))
-      (if (call $__lang_streq (i32.load offset=0 (local.get $node)) (local.get $key))
+      (if (i32.wrap_i64 (call $__lang_streq (i64.extend_i32_u (i32.load offset=0 (local.get $node))) (i64.extend_i32_u (local.get $key))))
         (then (return (i32.load offset=4 (local.get $node)))))
       (local.set $node (i32.load offset=8 (local.get $node)))
       (br $lp)))
     (global.set $__mj_err (i32.const 1))
     (i32.const 0))
-  (func $__mj_index (param $arr i64) (param $i i64) (result i64)
+  (func $__mj_index (param $arr i32) (param $i i32) (result i32)
     (local $node i32)
     (local.set $node (i32.load offset=8 (local.get $arr)))
     (block $done (loop $lp
@@ -7387,7 +7387,7 @@ let of_json_runtime_wasm : string = {ojw|
       (local.set $node (i32.load offset=4 (local.get $node)))
       (local.set $i (i32.sub (local.get $i) (i32.const 1)))
       (br $lp)))
-    (if (result i64) (i32.eqz (local.get $node)) (then (i32.const 0)) (else (i32.load offset=0 (local.get $node)))))
+    (if (result i32) (i32.eqz (local.get $node)) (then (i32.const 0)) (else (i32.load offset=0 (local.get $node)))))
 |ojw}
 
 (* Emit `$__ojnode_<tag>` (mj_node -> value) + `$of_json_<tag>` (str ->
@@ -7395,42 +7395,58 @@ let of_json_runtime_wasm : string = {ojw|
 let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
   let b = Buffer.create 512 in
   let node = Printf.sprintf "$__ojnode_%s" tag in
-  Buffer.add_string b (Printf.sprintf "  (func %s (param $j i64) (result i64)\n" node);
+  (* v0.1.156: `$j` is a JSON-tree cell — an i32 address private to the
+     parser — and the result is a Mere value, so i64. Everything this
+     builds is in the i64 value model: record and tuple fields are 8-byte
+     slots, and variant cells are 16 bytes { tag, payload }. The previous
+     shape built 4-byte fields and 8-byte cells, so a decoded record was
+     unreadable by the rest of the program even when it assembled. *)
+  Buffer.add_string b (Printf.sprintf "  (func %s (param $j i32) (result i64)\n" node);
+  let bad = "(then (global.set $__mj_err (i32.const 1)) (return (i64.const 0)))" in
   (match Ast.walk t with
    | Ast.TyInt ->
      Buffer.add_string b
-       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 2)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n\
-       \    (call $__mj_atoi (i32.load offset=4 (local.get $j))))\n"
+       (Printf.sprintf
+          "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 2)) %s)\n\
+          \    (call $__mj_atoi (i32.load offset=4 (local.get $j))))\n" bad)
    | Ast.TyBool ->
      Buffer.add_string b
-       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 1)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n\
-       \    (i32.load offset=4 (local.get $j)))\n"
+       (Printf.sprintf
+          "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 1)) %s)\n\
+          \    (i64.extend_i32_u (i32.load offset=4 (local.get $j))))\n" bad)
    | Ast.TyStr ->
      Buffer.add_string b
-       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 3)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n\
-       \    (i32.load offset=4 (local.get $j)))\n"
+       (Printf.sprintf
+          "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 3)) %s)\n\
+          \    (i64.extend_i32_u (i32.load offset=4 (local.get $j))))\n" bad)
    | Ast.TyUnit ->
-     Buffer.add_string b "    (drop (local.get $j)) (i32.const 0))\n"
+     Buffer.add_string b "    (drop (local.get $j)) (i64.const 0))\n"
    | Ast.TyTuple ts ->
      let n = List.length ts in
      Buffer.add_string b "    (local $r i32)\n";
      Buffer.add_string b
-       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 4)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n";
-     Buffer.add_string b (Printf.sprintf "    (local.set $r (call $__oj_alloc (i32.const %d)))\n" (4 * n));
+       (Printf.sprintf
+          "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 4)) %s)\n" bad);
+     Buffer.add_string b
+       (Printf.sprintf "    (local.set $r (call $__oj_alloc (i32.const %d)))\n" (8 * n));
      List.iteri (fun i et ->
        Buffer.add_string b
          (Printf.sprintf
-            "    (i32.store offset=%d (local.get $r) (call $__ojnode_%s (call $__mj_index (local.get $j) (i32.const %d))))\n"
-            (4 * i) (ty_tag (Ast.walk et)) i)) ts;
-     Buffer.add_string b "    (local.get $r))\n"
+            "    (i64.store offset=%d (local.get $r) (call $__ojnode_%s (call $__mj_index (local.get $j) (i32.const %d))))\n"
+            (8 * i) (ty_tag (Ast.walk et)) i)) ts;
+     Buffer.add_string b "    (i64.extend_i32_u (local.get $r)))\n"
    | Ast.TyCon ("list", [elem]) ->
      let elem_tag = ty_tag (Ast.walk elem) in
      let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
      let cons_tag = try Hashtbl.find variant_tags "Cons" with Not_found -> 1 in
-     Buffer.add_string b "    (local $it i32) (local $rev i32) (local $rn i32) (local $acc i32) (local $pl i32) (local $node i32)\n";
      Buffer.add_string b
-       "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 4)) (then (global.set $__mj_err (i32.const 1)) (return (i32.const 0))))\n";
-     (* reverse the item list into $rev *)
+       "    (local $it i32) (local $rev i32) (local $rn i32) (local $acc i32) (local $pl i32) (local $node i32)\n";
+     Buffer.add_string b
+       (Printf.sprintf
+          "    (if (i32.ne (i32.load offset=0 (local.get $j)) (i32.const 4)) %s)\n" bad);
+     (* Reverse the parser's item list first, so the fold below builds the
+        Mere list front-to-back. Those scratch nodes stay in the parser's
+        own 8-byte i32 shape; only what the fold produces is a Mere value. *)
      Buffer.add_string b "    (local.set $rev (i32.const 0))\n";
      Buffer.add_string b "    (local.set $it (i32.load offset=8 (local.get $j)))\n";
      Buffer.add_string b
@@ -7442,24 +7458,25 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
        \      (local.set $rev (local.get $rn))\n\
        \      (local.set $it (i32.load offset=4 (local.get $it)))\n\
        \      (br $l1)))\n";
-     (* acc = Nil *)
-     Buffer.add_string b (Printf.sprintf "    (local.set $acc (call $__oj_alloc (i32.const 8)))\n    (i32.store offset=0 (local.get $acc) (i32.const %d))\n" nil_tag);
-     (* fold rev: acc = Cons(decode item, acc) *)
+     Buffer.add_string b
+       (Printf.sprintf
+          "    (local.set $acc (call $__oj_alloc (i32.const 16)))\n\
+          \    (i64.store offset=0 (local.get $acc) (i64.const %d))\n" nil_tag);
      Buffer.add_string b
        (Printf.sprintf
        "    (block $r2 (loop $l2\n\
        \      (br_if $r2 (i32.eqz (local.get $rev)))\n\
-       \      (local.set $pl (call $__oj_alloc (i32.const 8)))\n\
-       \      (i32.store offset=0 (local.get $pl) (call $__ojnode_%s (i32.load offset=0 (local.get $rev))))\n\
-       \      (i32.store offset=4 (local.get $pl) (local.get $acc))\n\
-       \      (local.set $node (call $__oj_alloc (i32.const 8)))\n\
-       \      (i32.store offset=0 (local.get $node) (i32.const %d))\n\
-       \      (i32.store offset=4 (local.get $node) (local.get $pl))\n\
+       \      (local.set $pl (call $__oj_alloc (i32.const 16)))\n\
+       \      (i64.store offset=0 (local.get $pl) (call $__ojnode_%s (i32.load offset=0 (local.get $rev))))\n\
+       \      (i64.store offset=8 (local.get $pl) (i64.extend_i32_u (local.get $acc)))\n\
+       \      (local.set $node (call $__oj_alloc (i32.const 16)))\n\
+       \      (i64.store offset=0 (local.get $node) (i64.const %d))\n\
+       \      (i64.store offset=8 (local.get $node) (i64.extend_i32_u (local.get $pl)))\n\
        \      (local.set $acc (local.get $node))\n\
        \      (local.set $rev (i32.load offset=4 (local.get $rev)))\n\
        \      (br $l2)))\n"
        elem_tag cons_tag);
-     Buffer.add_string b "    (local.get $acc))\n"
+     Buffer.add_string b "    (i64.extend_i32_u (local.get $acc)))\n"
    | Ast.TyCon ("option", [inner]) ->
      let inner_tag = ty_tag (Ast.walk inner) in
      let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
@@ -7469,29 +7486,30 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
        (Printf.sprintf
        "    (if (result i64) (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 0))\n\
        \      (then\n\
-       \        (local.set $r (call $__oj_alloc (i32.const 8)))\n\
-       \        (i32.store offset=0 (local.get $r) (i32.const %d))\n\
-       \        (local.get $r))\n\
+       \        (local.set $r (call $__oj_alloc (i32.const 16)))\n\
+       \        (i64.store offset=0 (local.get $r) (i64.const %d))\n\
+       \        (i64.extend_i32_u (local.get $r)))\n\
        \      (else\n\
-       \        (local.set $r (call $__oj_alloc (i32.const 8)))\n\
-       \        (i32.store offset=0 (local.get $r) (i32.const %d))\n\
-       \        (i32.store offset=4 (local.get $r) (call $__ojnode_%s (local.get $j)))\n\
-       \        (local.get $r))))\n"
+       \        (local.set $r (call $__oj_alloc (i32.const 16)))\n\
+       \        (i64.store offset=0 (local.get $r) (i64.const %d))\n\
+       \        (i64.store offset=8 (local.get $r) (call $__ojnode_%s (local.get $j)))\n\
+       \        (i64.extend_i32_u (local.get $r)))))\n"
        none_tag some_tag inner_tag)
    | Ast.TyCon (name, args) when Hashtbl.mem Typer.records name ->
      let info = Hashtbl.find Typer.records name in
      let mapping = if info.Typer.r_params = [] then [] else List.combine info.Typer.r_params args in
      let n = List.length info.Typer.r_fields in
      Buffer.add_string b "    (local $r i32)\n";
-     Buffer.add_string b (Printf.sprintf "    (local.set $r (call $__oj_alloc (i32.const %d)))\n" (4 * n));
+     Buffer.add_string b
+       (Printf.sprintf "    (local.set $r (call $__oj_alloc (i32.const %d)))\n" (8 * n));
      List.iteri (fun i (fname, ft) ->
        let ft = subst_params mapping ft in
        let key = intern_show_str fname in
        Buffer.add_string b
          (Printf.sprintf
-            "    (i32.store offset=%d (local.get $r) (call $__ojnode_%s (call $__mj_field (local.get $j) (i32.const %d))))\n"
-            (4 * i) (ty_tag (Ast.walk ft)) key)) info.Typer.r_fields;
-     Buffer.add_string b "    (local.get $r))\n"
+            "    (i64.store offset=%d (local.get $r) (call $__ojnode_%s (call $__mj_field (local.get $j) (i32.const %d))))\n"
+            (8 * i) (ty_tag (Ast.walk ft)) key)) info.Typer.r_fields;
+     Buffer.add_string b "    (i64.extend_i32_u (local.get $r)))\n"
    | Ast.TyCon (name, args) ->
      (* general variant: STR -> nullary; OBJ{1} -> payload ctor *)
      let vs =
@@ -7511,7 +7529,6 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
          (cname, match arg_opt with Some t -> Some (subst_params mapping t) | None -> None)) vs
      in
      Buffer.add_string b "    (local $r i32) (local $k i32) (local $v i32)\n";
-     (* nullary from STR *)
      Buffer.add_string b "    (if (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 3)) (then\n";
      List.iter (fun (cname, arg_opt) ->
        match arg_opt with
@@ -7520,12 +7537,11 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
          let nm = intern_show_str cname in
          Buffer.add_string b
            (Printf.sprintf
-              "      (if (call $__lang_streq (i32.load offset=4 (local.get $j)) (i32.const %d)) (then\n\
-              \        (local.set $r (call $__oj_alloc (i32.const 8))) (i32.store offset=0 (local.get $r) (i32.const %d)) (return (local.get $r))))\n"
+              "      (if (i32.wrap_i64 (call $__lang_streq (i64.extend_i32_u (i32.load offset=4 (local.get $j))) (i64.const %d))) (then\n\
+              \        (local.set $r (call $__oj_alloc (i32.const 16))) (i64.store offset=0 (local.get $r) (i64.const %d)) (return (i64.extend_i32_u (local.get $r)))))\n"
               nm tag_n)
        | Some _ -> ()) variants;
      Buffer.add_string b "      ))\n";
-     (* payload from OBJ single-key *)
      Buffer.add_string b "    (if (i32.eq (i32.load offset=0 (local.get $j)) (i32.const 5)) (then\n";
      Buffer.add_string b "      (local.set $k (i32.load offset=0 (i32.load offset=8 (local.get $j))))\n";
      Buffer.add_string b "      (local.set $v (i32.load offset=4 (i32.load offset=8 (local.get $j))))\n";
@@ -7536,21 +7552,21 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
          let nm = intern_show_str cname in
          Buffer.add_string b
            (Printf.sprintf
-              "      (if (call $__lang_streq (local.get $k) (i32.const %d)) (then\n\
-              \        (local.set $r (call $__oj_alloc (i32.const 8))) (i32.store offset=0 (local.get $r) (i32.const %d))\n\
-              \        (i32.store offset=4 (local.get $r) (call $__ojnode_%s (local.get $v))) (return (local.get $r))))\n"
+              "      (if (i32.wrap_i64 (call $__lang_streq (i64.extend_i32_u (local.get $k)) (i64.const %d))) (then\n\
+              \        (local.set $r (call $__oj_alloc (i32.const 16))) (i64.store offset=0 (local.get $r) (i64.const %d))\n\
+              \        (i64.store offset=8 (local.get $r) (call $__ojnode_%s (local.get $v))) (return (i64.extend_i32_u (local.get $r)))))\n"
               nm tag_n (ty_tag (Ast.walk ty)))
        | None -> ()) variants;
      Buffer.add_string b "      ))\n";
-     Buffer.add_string b "    (global.set $__mj_err (i32.const 1)) (i32.const 0))\n"
+     Buffer.add_string b "    (global.set $__mj_err (i32.const 1)) (i64.const 0))\n"
    | _ ->
-     Buffer.add_string b "    (drop (local.get $j)) (global.set $__mj_err (i32.const 1)) (i32.const 0))\n");
+     Buffer.add_string b "    (drop (local.get $j)) (global.set $__mj_err (i32.const 1)) (i64.const 0))\n");
   (* strict string entry: trap on error *)
   Buffer.add_string b
     (Printf.sprintf
        "  (func $of_json_%s (param $s i64) (result i64)\n\
-       \    (local $v i32)\n\
-       \    (local.set $v (call $__ojnode_%s (call $__mj_parse (local.get $s))))\n\
+       \    (local $v i64)\n\
+       \    (local.set $v (call $__ojnode_%s (call $__mj_parse (i32.wrap_i64 (local.get $s)))))\n\
        \    (if (global.get $__mj_err) (then unreachable))\n\
        \    (local.get $v))\n"
        tag tag);
@@ -7562,13 +7578,14 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
   let some_tag = try Hashtbl.find variant_tags "Some" with Not_found -> 1 in
   Printf.sprintf
     "  (func $of_json_opt_%s (param $s i64) (result i64)\n\
-    \    (local $v i32) (local $r i32)\n\
-    \    (local.set $v (call $__ojnode_%s (call $__mj_parse (local.get $s))))\n\
-    \    (local.set $r (call $__oj_alloc (i32.const 8)))\n\
+    \    (local $v i64) (local $r i32)\n\
+    \    (local.set $v (call $__ojnode_%s (call $__mj_parse (i32.wrap_i64 (local.get $s)))))\n\
+    \    (local.set $r (call $__oj_alloc (i32.const 16)))\n\
     \    (if (result i64) (global.get $__mj_err)\n\
-    \      (then (i32.store offset=0 (local.get $r) (i32.const %d)) (local.get $r))\n\
-    \      (else (i32.store offset=0 (local.get $r) (i32.const %d)) (i32.store offset=4 (local.get $r) (local.get $v)) (local.get $r))))\n"
+    \      (then (i64.store offset=0 (local.get $r) (i64.const %d)) (i64.extend_i32_u (local.get $r)))\n\
+    \      (else (i64.store offset=0 (local.get $r) (i64.const %d)) (i64.store offset=8 (local.get $r) (local.get $v)) (i64.extend_i32_u (local.get $r)))))\n"
     inner_tag inner_tag none_tag some_tag
+
 
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   ignore main_ty;

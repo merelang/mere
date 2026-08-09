@@ -96,11 +96,15 @@ const wasmPath = process.argv[2];
     read_file: (pathPtr) => {
       const p = readCStr(pathPtr);
       try {
-        const content = fs.readFileSync(p, "utf8");
-        const bytes = Buffer.from(content + "\0", "utf8");
-        const ptr = bumpAlloc(bytes.length);
-        new Uint8Array(memory.buffer).set(bytes, ptr);
-        return ptr;
+        // Read as bytes, not utf8 text: a Mere str carries its length, so
+        // a binary asset (the compiled admin client, say) survives intact.
+        const buf = fs.readFileSync(p);
+        const start = bumpAlloc(4 + buf.length + 1);
+        new DataView(memory.buffer).setInt32(start, buf.length, true);
+        const mem = new Uint8Array(memory.buffer);
+        mem.set(buf, start + 4);
+        mem[start + 4 + buf.length] = 0;
+        return start + 4;
       } catch (e) {
         console.error("read_file failed:", e.message);
         return 0;
