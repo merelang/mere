@@ -2842,11 +2842,17 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr str_e;
     emit_instr "call $mere_strbuf_push"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
+    (* A 2-tuple is a pair of i64 slots at offsets 0 and 8 (same layout as a
+       record). The tuple value is an i64 pointer, so wrap to i32 before the
+       load and read the i64 field. (This previously emitted i32.load
+       offset=0/4 — a stale layout that failed Wasm validation.) *)
     emit_expr arg;
-    emit_instr "i32.load offset=0"
+    emit_instr "i32.wrap_i64";
+    emit_instr "i64.load offset=0"
   | Ast.App ({ node = Ast.Var "snd"; _ }, arg) ->
     emit_expr arg;
-    emit_instr "i32.load offset=4"
+    emit_instr "i32.wrap_i64";
+    emit_instr "i64.load offset=8"
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem inner_lifts_wasm name ->
     (* Phase 26.3: inner-lifted call — emit captures (looked up via
