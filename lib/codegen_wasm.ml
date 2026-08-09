@@ -8640,6 +8640,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (func $__resolve_ipv4 (param $net i32) (param $host i32) (param $out i32)\n\
         \    (local $strm i32) (local $poll i32) (local $r i32) (local $hlen i32)\n\
         \    (local.set $hlen (i32.load (i32.sub (local.get $host) (i32.const 4))))\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
         \    (local.set $r (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $r) (i32.const 64)))\n\
         \    (call $sock_resolve (local.get $net) (local.get $host) (local.get $hlen) (local.get $r))\n\
         \    (local.set $strm (i32.load (i32.add (local.get $r) (i32.const 4))))\n\
@@ -8658,6 +8659,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (call $rstream_drop (local.get $strm)))\n\
         \  (func $tcp_connect_h (param $host i32) (param $port i32) (result i32)\n\
         \    (local $net i32) (local $sock i32) (local $poll i32) (local $fd i32) (local $s i32)\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
         \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 64)))\n\
         \    (local.set $net (call $sock_instnet))\n\
         \    (if (i32.and (i32.ge_u (i32.load8_u (local.get $host)) (i32.const 48)) (i32.le_u (i32.load8_u (local.get $host)) (i32.const 57)))\n\
@@ -8679,6 +8681,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (func $tcp_read_h (param $fd i32) (param $buf i32) (param $len i32) (result i32)\n\
         \    (local $in i32) (local $s i32) (local $dp i32) (local $dl i32) (local $i i32) (local $n i32)\n\
         \    (local.set $in (i32.load offset=4 (local.get $fd)))\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
         \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 16)))\n\
         \    (call $sock_sread (local.get $in) (i64.extend_i32_u (local.get $len)) (local.get $s))\n\
         \    (if (i32.load8_u (local.get $s)) (then (return (i32.const 0))))\n\
@@ -8690,6 +8693,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l))) (local.get $n))\n\
         \  (func $tcp_write_h (param $fd i32) (param $buf i32) (param $len i32) (result i32) (local $out i32) (local $s i32)\n\
         \    (local.set $out (i32.load offset=8 (local.get $fd)))\n\
+        \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
         \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 16)))\n\
         \    (call $sock_swrite (local.get $out) (local.get $buf) (local.get $len) (local.get $s)) (local.get $len))\n\
         \  (func $tcp_close_h (param $fd i32)\n\
