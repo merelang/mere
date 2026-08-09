@@ -8597,6 +8597,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (import \"wasi:sockets/tcp@0.2.3\" \"[resource-drop]tcp-socket\" (func $sock_drop (param i32)))\n\
         \  (import \"wasi:io/poll@0.2.3\" \"[method]pollable.block\" (func $sock_block (param i32)))\n\
         \  (import \"wasi:io/poll@0.2.3\" \"[resource-drop]pollable\" (func $poll_drop (param i32)))\n\
+        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"resolve-addresses\" (func $sock_resolve (param i32 i32 i32 i32)))\n\
+        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[method]resolve-address-stream.subscribe\" (func $sock_rsub (param i32) (result i32)))\n\
+        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[method]resolve-address-stream.resolve-next-address\" (func $sock_rnext (param i32 i32)))\n\
+        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[resource-drop]resolve-address-stream\" (func $rstream_drop (param i32)))\n\
         \  (import \"wasi:io/streams@0.2.3\" \"[method]output-stream.blocking-write-and-flush\" (func $sock_swrite (param i32 i32 i32 i32)))\n\
         \  (import \"wasi:io/streams@0.2.3\" \"[method]input-stream.blocking-read\" (func $sock_sread (param i32 i64 i32)))\n\
         \  (import \"wasi:io/streams@0.2.3\" \"[resource-drop]input-stream\" (func $in_drop (param i32)))\n\
@@ -8633,11 +8637,32 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \              (br_if $done (i32.eqz (local.get $c))))\n\
         \        (else (local.set $b (i32.add (i32.mul (local.get $b) (i32.const 10)) (i32.sub (local.get $c) (i32.const 48))))))\n\
         \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $lp))))\n\
+        \  (func $__resolve_ipv4 (param $net i32) (param $host i32) (param $out i32)\n\
+        \    (local $strm i32) (local $poll i32) (local $r i32) (local $hlen i32)\n\
+        \    (local.set $hlen (i32.load (i32.sub (local.get $host) (i32.const 4))))\n\
+        \    (local.set $r (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $r) (i32.const 64)))\n\
+        \    (call $sock_resolve (local.get $net) (local.get $host) (local.get $hlen) (local.get $r))\n\
+        \    (local.set $strm (i32.load (i32.add (local.get $r) (i32.const 4))))\n\
+        \    (local.set $poll (call $sock_rsub (local.get $strm))) (call $sock_block (local.get $poll)) (call $poll_drop (local.get $poll))\n\
+        \    (block $done (loop $lp\n\
+        \      (call $sock_rnext (local.get $strm) (i32.add (local.get $r) (i32.const 8)))\n\
+        \      (br_if $done (i32.load8_u (i32.add (local.get $r) (i32.const 8))))\n\
+        \      (br_if $done (i32.eqz (i32.load8_u (i32.add (local.get $r) (i32.const 10)))))\n\
+        \      (if (i32.eqz (i32.load8_u (i32.add (local.get $r) (i32.const 12))))\n\
+        \        (then (i32.store8 offset=0 (local.get $out) (i32.load8_u (i32.add (local.get $r) (i32.const 14))))\n\
+        \              (i32.store8 offset=1 (local.get $out) (i32.load8_u (i32.add (local.get $r) (i32.const 15))))\n\
+        \              (i32.store8 offset=2 (local.get $out) (i32.load8_u (i32.add (local.get $r) (i32.const 16))))\n\
+        \              (i32.store8 offset=3 (local.get $out) (i32.load8_u (i32.add (local.get $r) (i32.const 17))))\n\
+        \              (br $done)))\n\
+        \      (br $lp)))\n\
+        \    (call $rstream_drop (local.get $strm)))\n\
         \  (func $tcp_connect_h (param $host i32) (param $port i32) (result i32)\n\
         \    (local $net i32) (local $sock i32) (local $poll i32) (local $fd i32) (local $s i32)\n\
         \    (local.set $s (global.get $__lang_bump)) (global.set $__lang_bump (i32.add (local.get $s) (i32.const 64)))\n\
-        \    (call $__parse_ipv4 (local.get $host) (local.get $s))\n\
         \    (local.set $net (call $sock_instnet))\n\
+        \    (if (i32.and (i32.ge_u (i32.load8_u (local.get $host)) (i32.const 48)) (i32.le_u (i32.load8_u (local.get $host)) (i32.const 57)))\n\
+        \      (then (call $__parse_ipv4 (local.get $host) (local.get $s)))\n\
+        \      (else (call $__resolve_ipv4 (local.get $net) (local.get $host) (local.get $s))))\n\
         \    (call $sock_create (i32.const 0) (i32.add (local.get $s) (i32.const 8)))\n\
         \    (local.set $sock (i32.load (i32.add (local.get $s) (i32.const 12))))\n\
         \    (call $sock_connect (local.get $sock) (local.get $net) (i32.const 0) (local.get $port)\n\
