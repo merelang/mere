@@ -8496,7 +8496,20 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 1)))\n\
         \    (i32.store (i32.sub (local.get $start) (i32.const 4)) (i32.sub (local.get $p) (local.get $start)))\n\
         \    (local.get $start))\n\
-        \  (func $__lang_write_file_h (param i32) (param i32) (result i32) unreachable)\n"
+        \  (func $__lang_write_file_h (param $path i32) (param $content i32) (result i32)\n\
+        \    (local $plen i32) (local $clen i32) (local $fd i32) (local $iov i32)\n\
+        \    (local.set $plen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $path)))))\n\
+        \    (local.set $clen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $content)))))\n\
+        \    (local.set $iov (global.get $__lang_bump))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $iov) (i32.const 16)))\n\
+        \    (if (call $path_open (i32.const 3) (i32.const 1) (local.get $path) (local.get $plen) (i32.const 9) (i64.const 64) (i64.const 64) (i32.const 0) (i32.add (local.get $iov) (i32.const 12)))\n\
+        \      (then unreachable))\n\
+        \    (local.set $fd (i32.load offset=12 (local.get $iov)))\n\
+        \    (i32.store offset=0 (local.get $iov) (local.get $content))\n\
+        \    (i32.store offset=4 (local.get $iov) (local.get $clen))\n\
+        \    (drop (call $fd_write (local.get $fd) (local.get $iov) (i32.const 1) (i32.add (local.get $iov) (i32.const 8))))\n\
+        \    (drop (call $fd_close (local.get $fd)))\n\
+        \    (i32.const 0))\n"
       in
       let stdin_fn =
         if not !wasm_stdin_used then "" else
