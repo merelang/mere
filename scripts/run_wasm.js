@@ -326,11 +326,20 @@ const wasmPath = process.argv[2];
   // Outbound HTTP (http_fetch and friends) — same curl-based
   // implementation as run_http_server.js. Any Mere CLI that declares
   // `extern fn http_fetch: ...` can now make outbound calls too.
+  // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
+  // The env fns above open-code this; this shared helper (handed to the
+  // http_fetch / subprocess envs) was left on the older header-less
+  // shape, so every string those externs returned read back with
+  // whatever length preceded it on the heap.
   const writeStr = (s) => {
-    const utf8 = Buffer.from((s || "") + "\0", "utf8");
-    const ptr = bumpAlloc(utf8.length);
-    new Uint8Array(memory.buffer).set(utf8, ptr);
-    return ptr;
+    const utf8 = Buffer.from(s || "", "utf8");
+    const start = bumpAlloc(4 + utf8.length + 1);
+    // Views must be taken after bumpAlloc — growing detaches the buffer.
+    new DataView(memory.buffer).setInt32(start, utf8.length, true);
+    const mem = new Uint8Array(memory.buffer);
+    mem.set(utf8, start + 4);
+    mem[start + 4 + utf8.length] = 0;
+    return start + 4;
   };
   Object.assign(env, makeHttpFetchEnv({ readCStr, writeStr }));
   Object.assign(env, makeSubprocessEnv({ readCStr, writeStr }));

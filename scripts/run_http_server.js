@@ -57,13 +57,24 @@ const wasmPath = process.argv[2];
     return start;
   };
 
-  // Copy a JS string into a fresh scratch slot and return the ptr.
+  // Copy a JS string onto the Mere heap and return a str value.
   // Used by extern fns that need to hand a str back to Mere.
+  //
+  // byte-safe str layout: [i32 len][bytes][NUL]; the value points at
+  // byte0, and $__lang_strlen loads the length from ptr-4. Writing only
+  // NUL-terminated bytes leaves the length as whatever preceded the
+  // allocation, which shows up as truncated or empty strings the moment
+  // the value is concatenated (print goes via the host and scans to
+  // NUL, so it hides the bug).
   const writeStr = (s) => {
-    const utf8 = Buffer.from((s || "") + "\0", "utf8");
-    const ptr = bumpAlloc(utf8.length);
-    new Uint8Array(memory.buffer).set(utf8, ptr);
-    return ptr;
+    const utf8 = Buffer.from(s || "", "utf8");
+    const start = bumpAlloc(4 + utf8.length + 1);
+    // Views must be taken after bumpAlloc — growing detaches the buffer.
+    new DataView(memory.buffer).setInt32(start, utf8.length, true);
+    const mem = new Uint8Array(memory.buffer);
+    mem.set(utf8, start + 4);
+    mem[start + 4 + utf8.length] = 0;
+    return start + 4;
   };
 
   const { glue: httpGlue, attach: attachHttp, broadcast } = makeHttpGlue();
@@ -137,6 +148,11 @@ const wasmPath = process.argv[2];
     getpid: () => process.pid,
     getppid: () => process.ppid,
     unix_time: () => Math.floor(Date.now() / 1000),
+    // Float seconds since the epoch. Distinct from `unix_time`: the
+    // prelude references this one whether or not the program does any
+    // float math, so a module that never mentions time still imports
+    // it and fails to link without it.
+    time: () => Date.now() / 1000,
     // Monotonic milliseconds since process start, truncated to i32.
     // Uses performance.now() so subtracting two samples always gives
     // the correct elapsed even if the wall clock jumps. Stays in
