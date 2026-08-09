@@ -8341,12 +8341,37 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          import wasi args_sizes_get/args_get and emit $__lang_args, which
          builds a str list of argv[1..] (skipping the program name, matching
          the C backend). Cons cell = { tag:i64 @0, payload:i64 @8 -> tuple };
-         tuple = { head:i64 @0, tail:i64 @8 }; Nil = { tag:i64 @0 }. argv[i]
-         is a NUL-terminated string, usable directly as a Mere str ptr. *)
+         tuple = { head:i64 @0, tail:i64 @8 }; Nil = { tag:i64 @0 }. Each
+         argv[i] (and each env value) is a bare NUL-terminated buffer with no
+         length header, so it is copied into a proper header'd Mere str via
+         $__lang_cstr_to_str before use (strlen reads the i32 header at ptr-4). *)
       let args_imports =
         if not !wasm_args_used then "" else
         "  (import \"wasi_snapshot_preview1\" \"args_sizes_get\" (func $args_sizes_get (param i32 i32) (result i32)))\n\
         \  (import \"wasi_snapshot_preview1\" \"args_get\" (func $args_get (param i32 i32) (result i32)))\n"
+      in
+      (* Copy a bare NUL-terminated C string into a fresh length-header'd Mere
+         str ([len:i32 @-4][bytes][NUL]); return the data pointer. Shared by
+         args() and env_var(), whose WASI-provided strings lack the header. *)
+      let cstr_to_str_fn =
+        if not (!wasm_args_used || !wasm_env_used) then "" else
+        "  (func $__lang_cstr_to_str (param $c i32) (result i32)\n\
+        \    (local $n i32) (local $start i32) (local $i i32)\n\
+        \    (block $e (loop $l\n\
+        \      (br_if $e (i32.eqz (i32.load8_u (i32.add (local.get $c) (local.get $n)))))\n\
+        \      (local.set $n (i32.add (local.get $n) (i32.const 1)))\n\
+        \      (br $l)))\n\
+        \    (local.set $start (i32.add (global.get $__lang_bump) (i32.const 4)))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $start) (i32.add (local.get $n) (i32.const 1))))\n\
+        \    (local.set $i (i32.const 0))\n\
+        \    (block $ce (loop $cl\n\
+        \      (br_if $ce (i32.ge_u (local.get $i) (local.get $n)))\n\
+        \      (i32.store8 (i32.add (local.get $start) (local.get $i)) (i32.load8_u (i32.add (local.get $c) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n\
+        \      (br $cl)))\n\
+        \    (i32.store8 (i32.add (local.get $start) (local.get $n)) (i32.const 0))\n\
+        \    (i32.store (i32.sub (local.get $start) (i32.const 4)) (local.get $n))\n\
+        \    (local.get $start))\n"
       in
       let args_fn =
         if not !wasm_args_used then "" else
@@ -8375,7 +8400,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
           \      (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n\
           \      (local.set $tup (global.get $__lang_bump))\n\
           \      (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 16)))\n\
-          \      (i64.store offset=0 (local.get $tup) (i64.extend_i32_u (i32.load (i32.add (local.get $argv) (i32.mul (local.get $i) (i32.const 4))))))\n\
+          \      (i64.store offset=0 (local.get $tup) (i64.extend_i32_u (call $__lang_cstr_to_str (i32.load (i32.add (local.get $argv) (i32.mul (local.get $i) (i32.const 4)))))))\n\
           \      (i64.store offset=8 (local.get $tup) (i64.extend_i32_u (local.get $acc)))\n\
           \      (local.set $cell (global.get $__lang_bump))\n\
           \      (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
@@ -8447,7 +8472,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
           \          (local.set $cell (global.get $__lang_bump))\n\
           \          (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
           \          (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
-          \          (i64.store offset=8 (local.get $cell) (i64.extend_i32_u (i32.add (i32.add (local.get $e) (local.get $nl)) (i32.const 1))))\n\
+          \          (i64.store offset=8 (local.get $cell) (i64.extend_i32_u (call $__lang_cstr_to_str (i32.add (i32.add (local.get $e) (local.get $nl)) (i32.const 1)))))\n\
           \          (return (i64.extend_i32_u (local.get $cell)))))\n\
           \      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n\
           \      (br $lp)))\n\
@@ -8557,6 +8582,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (i32.store offset=0 (local.get $b) (i32.add (local.get $b) (i32.const 12)))\n\
         \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
         \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
+      ^ cstr_to_str_fn
       ^ args_fn
       ^ clock_fn
       ^ env_fn
