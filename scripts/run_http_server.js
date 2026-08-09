@@ -8,6 +8,7 @@
 // Usage: node scripts/run_http_server.js <path-to-wasm>
 
 const fs = require("fs");
+const { checkAbi } = require("./mere_abi.js");
 const path = require("path");
 const { makeHttpGlue } = require("../contrib/http/http.glue.js");
 const { makePgEnv } = require("./pg_env.js");
@@ -142,10 +143,7 @@ const wasmPath = process.argv[2];
         }
         if (!/[.eEni]/.test(s)) s += ".0";
       }
-      const bytes = Buffer.from(s + "\0", "utf8");
-      const ptr = bumpAlloc(bytes.length);
-      new Uint8Array(memory.buffer).set(bytes, ptr);
-      return ptr;
+      return writeStr(s);
     },
     __lang_float_of_str: (ptr) => parseFloat(readCStr(ptr)),
     __lang_sin: Math.sin,
@@ -239,10 +237,7 @@ const wasmPath = process.argv[2];
       const name = readCStr(namePtr);
       const v = process.env[name];
       if (v === undefined) return 0;
-      const bytes = Buffer.from(v + "\0", "utf8");
-      const ptr = bumpAlloc(bytes.length);
-      new Uint8Array(memory.buffer).set(bytes, ptr);
-      return ptr;
+      return writeStr(v);
     },
     setenv: (namePtr, valuePtr, _overwrite) => {
       const name = readCStr(namePtr);
@@ -267,10 +262,7 @@ const wasmPath = process.argv[2];
     sha256_hex: (ptr) => {
       const s = readCStr(ptr);
       const hex = require("crypto").createHash("sha256").update(s).digest("hex");
-      const bytes = Buffer.from(hex + "\0", "utf8");
-      const outPtr = bumpAlloc(bytes.length);
-      new Uint8Array(memory.buffer).set(bytes, outPtr);
-      return outPtr;
+      return writeStr(hex);
     },
     // hmac_sha256_hex : str -> str -> str  (key, message → 64-char hex).
     // Wraps Node's `crypto.createHmac('sha256', key)` so Mere-side
@@ -338,6 +330,7 @@ const wasmPath = process.argv[2];
   }));
 
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+  checkAbi(instance, "scripts/run_http_server.js");
   memory = instance.exports.memory;
   langBump = instance.exports.__lang_bump;
   if (!langBump) {

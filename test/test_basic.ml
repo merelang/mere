@@ -11435,9 +11435,12 @@ let () =
     (* Length history: 96522 -> 96676 (Stage 55f: return_call_indirect TCO)
        -> 97209 (Stage 55g: PConstr payload checks now short-circuit behind
        an if/else instead of an eager i32.and — the fix that closed the
-       bootstrap fixpoint). *)
+       bootstrap fixpoint)
+       -> 97272 (v0.1.156: the emitter now exports a __mere_abi global, so
+       a host can refuse a module built for a different value
+       representation instead of failing on first use). *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "97209";
+      "examples/oneshot_codegen.mere" "97272";
 
     (* Stage 55g: THE bootstrap fixpoint. Compile a test program T with
        (A) the self-host compiler running under the interpreter, and

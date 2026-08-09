@@ -2870,6 +2870,11 @@ let wrap_module = fn (locals_decl: str) -> fn (body: str)
   // Growth-on-demand via memory.grow would be cleaner but requires
   // instrumenting every bump-alloc site — deferred.
   "  (memory (export \"memory\") 1024)\n" ++
+  // The host checks this before touching the module: a host built for a
+  // different value representation links cleanly and then hands back
+  // empty strings, so the mismatch has to be refusable. Keep in step with
+  // lib/codegen_wasm.ml and scripts/mere_abi.js.
+  "  (global $__mere_abi (export \"__mere_abi\") i32 (i32.const 1))\n" ++
   "  (global $__lang_bump (mut i32) (i32.const " ++ show bump_start ++ "))\n" ++
   closure_decls ++
   data_decls ++
