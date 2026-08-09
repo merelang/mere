@@ -3203,7 +3203,9 @@ let () =
     (codegen_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
-    "if (v->tag == 0) return \"[]\"";
+    (* v0.1.156: the empty-list case returns a real Mere str rather than a
+       bare C literal, which has no length word in front of it. *)
+    "if (v->tag == 0) return __lang_str_of_cstr(\"[]\")";
   assert_contains "codegen: list show separator is \", \""
     (codegen_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\

@@ -4525,14 +4525,14 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyInt ->
     header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_of_cstr(buf);\n}"
   | Ast.TyBool ->
-    header ^ " { return v ? \"true\" : \"false\"; }"
+    header ^ " { return __lang_str_of_cstr(v ? \"true\" : \"false\"); }"
   | Ast.TyStr ->
     (* Phase 23.5: escape special chars so show_str's output matches
        interp (which shows backslash-n as 2 literal chars, not a real
        newline). *)
     header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
   | Ast.TyUnit ->
-    header ^ " { (void)v; return \"()\"; }"
+    header ^ " { (void)v; return __lang_str_of_cstr(\"()\"); }"
   | Ast.TyTuple ts ->
     let parts =
       List.mapi (fun i et ->
@@ -4542,7 +4542,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
       header fmt (String.concat ", " parts)
   | Ast.TyArrow _ ->
-    header ^ " { (void)v; return \"<closure>\"; }"
+    header ^ " { (void)v; return __lang_str_of_cstr(\"<closure>\"); }"
   | Ast.TyCon ("list", [elem_ty]) when Hashtbl.mem polymorphic_variants "list" ->
     (* Special case: render `'a list` as `[a, b, c]` to match the
        interpreter's pretty printing. Requires the user-declared
@@ -4551,7 +4551,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let elem_show = "show_" ^ ty_tag (Ast.walk elem_ty) in
     Printf.sprintf
       "%s {\n  \
-         if (v->tag == 0) return \"[]\";\n  \
+         if (v->tag == 0) return __lang_str_of_cstr(\"[]\");\n  \
          const char* __acc = \"[\";\n  \
          %s __cur = v;\n  \
          int __first = 1;\n  \
@@ -4609,7 +4609,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         in
         match arg_opt with
         | None ->
-          Printf.sprintf "  if (v%stag == %d) return \"%s\";"
+          Printf.sprintf "  if (v%stag == %d) return __lang_str_of_cstr(\"%s\");"
             dot tag_n cname
         | Some ty ->
           Printf.sprintf
@@ -4617,10 +4617,10 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
             dot tag_n cname (ty_tag ty) dot cname)
         variants
     in
-    Printf.sprintf "%s {\n%s\n  return \"<unknown>\";\n}"
+    Printf.sprintf "%s {\n%s\n  return __lang_str_of_cstr(\"<unknown>\");\n}"
       header (String.concat "\n" cases)
   | _ ->
-    Printf.sprintf "%s { (void)v; return \"<unsupported>\"; }" header
+    Printf.sprintf "%s { (void)v; return __lang_str_of_cstr(\"<unsupported>\"); }" header
 
 let emit_show_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static const char* show_%s(%s);" tag (c_type_of t)
@@ -4637,13 +4637,13 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyInt ->
     header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_of_cstr(buf);\n}"
   | Ast.TyBool ->
-    header ^ " { return v ? \"true\" : \"false\"; }"
+    header ^ " { return __lang_str_of_cstr(v ? \"true\" : \"false\"); }"
   | Ast.TyStr ->
     header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
   | Ast.TyUnit ->
-    header ^ " { (void)v; return \"null\"; }"
+    header ^ " { (void)v; return __lang_str_of_cstr(\"null\"); }"
   | Ast.TyArrow _ ->
-    header ^ " { (void)v; return \"null\"; }"
+    header ^ " { (void)v; return __lang_str_of_cstr(\"null\"); }"
   | Ast.TyTuple ts ->
     let parts =
       List.mapi (fun i et ->
@@ -4656,7 +4656,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let elem = "to_json_" ^ ty_tag (Ast.walk elem_ty) in
     Printf.sprintf
       "%s {\n  \
-         if (v->tag == 0) return \"[]\";\n  \
+         if (v->tag == 0) return __lang_str_of_cstr(\"[]\");\n  \
          const char* __acc = \"[\";\n  \
          %s __cur = v;\n  \
          int __first = 1;\n  \
@@ -4681,7 +4681,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let dot = if is_ptr then "->" else "." in
     let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
     Printf.sprintf
-      "%s {\n  if (v%stag == %d) return \"null\";\n  return to_json_%s(v%spayload.Some);\n}"
+      "%s {\n  if (v%stag == %d) return __lang_str_of_cstr(\"null\");\n  return to_json_%s(v%spayload.Some);\n}"
       header dot none_tag (ty_tag (Ast.walk inner)) dot
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     let info = Hashtbl.find Typer.records name in
@@ -4719,7 +4719,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         in
         match arg_opt with
         | None ->
-          Printf.sprintf "  if (v%stag == %d) return \"\\\"%s\\\"\";"
+          Printf.sprintf "  if (v%stag == %d) return __lang_str_of_cstr(\"\\\"%s\\\"\");"
             dot tag_n cname
         | Some ty ->
           Printf.sprintf
@@ -4727,10 +4727,10 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
             dot tag_n cname (ty_tag ty) dot cname)
         variants
     in
-    Printf.sprintf "%s {\n%s\n  return \"null\";\n}"
+    Printf.sprintf "%s {\n%s\n  return __lang_str_of_cstr(\"null\");\n}"
       header (String.concat "\n" cases)
   | _ ->
-    Printf.sprintf "%s { (void)v; return \"null\"; }" header
+    Printf.sprintf "%s { (void)v; return __lang_str_of_cstr(\"null\"); }" header
 
 let emit_to_json_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static const char* to_json_%s(%s);" tag (c_type_of t)
@@ -5893,7 +5893,7 @@ let str_concat_helper =
       "  __lang_fail_impl(msg); return 0;";
       "}";
       "static const char* __lang_fail_str(const char* msg) {";
-      "  __lang_fail_impl(msg); return \"\";";
+      "  __lang_fail_impl(msg); return __lang_str_of_cstr(\"\");";
       "}";
       "";
       (* Phase 22.5: substring s start end_ — region alloc + memcpy. *)
@@ -5978,7 +5978,7 @@ let str_concat_helper =
       "";
       (* Phase 36: str_repeat s n — concat n copies of s. *)
       "static const char* __lang_str_repeat(const char* s, int n) {";
-      "  if (n <= 0) return \"\";";
+      "  if (n <= 0) return __lang_str_of_cstr(\"\");";
       "  size_t sl = __lang_str_size(s);";
       "  size_t total = sl * (size_t)n;";
       "  char* buf = __lang_str_alloc(__lang_current_region, total);";
@@ -6942,7 +6942,7 @@ let str_list_helpers =
       "";
       "/* Phase 24.3: str_join sep xs — concat list_str elements with sep. */";
       "static const char* __lang_str_join(const char* sep, list_str xs) {";
-      "  if (xs->tag == 0) return \"\";";
+      "  if (xs->tag == 0) return __lang_str_of_cstr(\"\");";
       "  size_t seplen = __lang_str_size(sep);";
       "  size_t total = 0;";
       "  int first = 1;";

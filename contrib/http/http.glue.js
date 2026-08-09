@@ -33,6 +33,17 @@ function makeHttpGlue() {
     return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
   };
 
+  // Read a Mere str as raw bytes, taking the length from the word at
+  // ptr-4 instead of scanning for a NUL. Response bodies come through
+  // here because an asset served straight out of read_file is binary —
+  // a .wasm begins with a zero byte, so a NUL scan returned nothing.
+  const readStrBytes = (ptr) => {
+    if (!memory || !ptr) return Buffer.alloc(0);
+    const len = new DataView(memory.buffer).getInt32(ptr - 4, true);
+    if (len < 0 || ptr + len > memory.buffer.byteLength) return Buffer.alloc(0);
+    return Buffer.from(new Uint8Array(memory.buffer).subarray(ptr, ptr + len));
+  };
+
   // WebSocket hub — /ws/<channel> upgrade path. Hooked on the server's
   // `upgrade` event down in http_serve below. Extras (ws_broadcast /
   // ws_client_count) are merged into the returned glue object.
@@ -192,7 +203,7 @@ function makeHttpGlue() {
           const reqLine = req.method + " " + req.url;
           const reqPtr = writeStr(reqLine);
           const respPtr = callClosure(closurePtr, reqPtr);
-          const respBody = readCStr(respPtr);
+          const respBody = readStrBytes(respPtr);
           currentBodyPtr = 0;
           if (streamStarted) {
             // Handler already sent headers + one or more chunks via
