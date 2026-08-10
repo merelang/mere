@@ -15,6 +15,8 @@
 // written by hand in app.mere, once per field, and forgetting a line of it
 // is silent.
 
+import "../../contrib/json/json.mere";
+
 // ---- the record ------------------------------------------------------
 
 type category = Travel | Meals | Supplies | Other of str;
@@ -166,18 +168,93 @@ let rec line_problems = fn (xs: line list) -> fn (i: int) ->
     in
     list_append here (line_problems rest (i + 1));
 
+// ---- the record, seen by field name ----------------------------------
+//
+// A record already has a total, name-keyed view of itself: the one the
+// compiler synthesises for `to_json`. Reading it back gives the field
+// names, in declaration order, without anything here listing them — which
+// is the whole of what the hand-written field table in app.mere used to
+// provide, minus the labels.
+//
+// `claim_with` has to name `claim` because `of_json` is directed by an
+// annotation at the call site: `to_json` is polymorphic and `of_json` is
+// not, so this trio cannot be written once for every record. One copy per
+// record type is the cost today.
+
+let claim_json = fn (c: claim) ->
+  match Json.parse_json (to_json c) with
+  | Json.JObj fs -> fs
+  | _ -> Nil;
+
+// Fields a text control can edit: everything except the structural ones
+// (`lines` is an array, and a record-valued field would be an object).
+let rec scalar_names = fn (fs: (str * Json.json) list) ->
+  match fs with
+  | Nil -> Nil
+  | Cons ((k, v), rest) ->
+    match v with
+    | Json.JArr _ -> scalar_names rest
+    | Json.JObj _ -> scalar_names rest
+    | _ -> Cons (k, scalar_names rest);
+
+let claim_fields = fn (c: claim) -> scalar_names (claim_json c);
+
+let rec lookup_json = fn (fs: (str * Json.json) list) -> fn (name: str) ->
+  match fs with
+  | Nil -> Json.JNull
+  | Cons ((k, v), rest) -> if str_eq k name then v else lookup_json rest name;
+
+let claim_text = fn (c: claim) -> fn (name: str) ->
+  match lookup_json (claim_json c) name with
+  | Json.JStr s -> s
+  | Json.JNum n -> show n
+  | Json.JBool b -> if b then "1" else "0"
+  | _ -> "";
+
+// Replace one field from text. The shape to write back is taken from the
+// shape that is there — which is exact except for an absent optional,
+// where `null` cannot say what it would have held. Text is the right
+// guess for a text control, and the only fields this is used on are ones
+// a text control edits.
+let claim_with = fn (c: claim) -> fn (name: str) -> fn (v: str) ->
+  let rec repl = fn (fs: (str * Json.json) list) ->
+    match fs with
+    | Nil -> Nil
+    | Cons ((k, jv), rest) ->
+      if str_eq k name then
+        Cons ((k, (match jv with
+                   | Json.JNum _ -> Json.JNum (try_or (fn () -> int_of_str (str_trim v)) 0)
+                   | Json.JBool _ -> Json.JBool (str_eq v "1")
+                   | _ -> if str_eq (str_trim v) "" && str_eq name "note" then Json.JNull
+                          else if str_eq (str_trim v) "" && str_eq name "approver" then Json.JNull
+                          else Json.JStr v)), rest)
+      else Cons ((k, jv), repl rest) in
+  (of_json (Json.to_json_str (Json.JObj (repl (claim_json c)))) : claim);
+
+// The one place a field name is tied to the rule that judges it. Nothing
+// in the declaration can say this, so it is written down — but once, and
+// on the side both replicas already import.
+let rule_for = fn (name: str) ->
+  if str_eq name "title" then check_title
+  else if str_eq name "spent_on" then check_spent_on
+  else if str_eq name "purpose" then check_purpose
+  else fn (v: str) -> "";
+
 let claim_problems = fn (c: claim) ->
-  let add = fn (field: str) -> fn (msg: str) ->
-    if str_eq msg "" then Nil else Cons (problem { field = field, message = msg }, Nil) in
+  let rec per_field = fn (names: str list) ->
+    match names with
+    | Nil -> Nil
+    | Cons (n, rest) ->
+      let msg = rule_for n (claim_text c n) in
+      if str_eq msg "" then per_field rest
+      else Cons (problem { field = n, message = msg }, per_field rest) in
   list_concat (
-    Cons (add "title" (check_title c.title),
-    Cons (add "spent_on" (check_spent_on c.spent_on),
-    Cons (add "purpose" (check_purpose c.purpose),
+    Cons (per_field (claim_fields c),
     Cons ((match c.lines with
            | Nil -> Cons (problem { field = "lines",
                                     message = "A claim needs at least one line" }, Nil)
            | Cons (_, _) -> Nil),
-    Cons (line_problems c.lines 0, Nil))))));
+    Cons (line_problems c.lines 0, Nil))));
 
 let blank_line = line { desc = "", amount = 0, category = Travel };
 

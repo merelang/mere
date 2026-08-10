@@ -1,50 +1,43 @@
 // examples/claims/app.mere — the browser half of the expense claim.
 //
-// Stage 0 of the shared-schema dogfood: written the way you would write it
-// today, so that what has to be written by hand is visible and countable.
+// Stage 2 of the shared-schema dogfood: the form is the record.
 //
-// What is already single-source, and cost nothing:
+// Nothing here lists the fields. `claim_fields` reads them off the record
+// itself — the compiler already synthesises a total, name-keyed view of
+// every record for `to_json`, and reading that back gives the names in
+// declaration order. `claim_text` and `claim_with` read and replace one by
+// name through the same view. The controls on the page are built from that
+// list at startup; index.html has a `<div id="form">` and no field markup.
 //
-//   the wire format   `to_json` / `of_json` are synthesised from the
-//                     declaration in schema.mere. Neither side writes down
-//                     a field name for the network, and a field added to
-//                     the record is on the wire in both directions at once
-//   the rules         check_title, check_spent_on, ... are the same
-//                     functions the server runs. One implementation, one
-//                     message string
-//   the errors        a `problem list` is a declared type, so the server's
-//                     complaints arrive as records, not as text to parse
+// Measured, by adding a `cost_center: str` field to `claim` and counting:
 //
-// What is still hand-written, once per field, and is the point of the
-// exercise:
+//                            stage 0                    stage 2
+//   type claim               edit                       edit
+//   blank_claim              COMPILE ERROR if omitted   COMPILE ERROR
+//   a rule + claim_problems  silent                     — (derived)
+//   the field table here     silent                     — (gone)
+//   index.html markup        silent                     — (generated)
 //
-//   the field table   below. id, label, which control, how to read it out
-//                     of the record and how to put it back. Nothing in the
-//                     record declaration says any of it
-//   the markup        index.html, which repeats every id a fourth time
+// Two edits, in one file, and the compiler forces the second. Nothing is
+// silent. That was checked rather than assumed: adding the field and
+// changing nothing else puts a control labelled "Cost center" on the page
+// and round-trips its value to storage.
 //
-// Measured, by actually adding a `cost_center: str` field to `claim` and
-// counting what had to change and what noticed:
+// What is left here is the residue a type genuinely does not carry — a
+// label, whether a field wants more than one line, whether it belongs to
+// the user at all — and every one of those has a default, so a new field
+// needs no entry.
 //
-//   1. schema.mere  `type claim`                    the change itself
-//   2. schema.mere  `blank_claim`                   COMPILE ERROR if omitted
-//   3. schema.mere  a rule + `claim_problems`       silent
-//   4. app.mere     the `fields` table below        silent
-//   5. index.html   the markup and its `err-` div   silent
+// Two things this did not fix, both worth naming:
 //
-// Four edits in Mere and one in HTML, of which the compiler catches
-// exactly one. Stopping after 1 and 2 leaves a program where both replicas
-// compile, the server stores the field, the browser round-trips it — and
-// it never appears on screen. That was checked, not assumed: the rendered
-// page mentions `cost_center` zero times.
-//
-// The half that cost nothing is worth naming too. Adding the field
-// required no change to the wire format in either direction, to the
-// server's storage, to its validation dispatch, or to the JSON decoding.
-// Those used to be hand-written — examples/profile has a `serialize` and a
-// `parse_pairs` — and they were the worst of the silent sites, because a
-// field missing from `serialize` edits fine, counts as unsaved, and is
-// simply never sent.
+//   `of_json` is not polymorphic     `to_json` is, but `of_json` is
+//                                    directed by an annotation at the call
+//                                    site, so `claim_with` has to name
+//                                    `claim`. One copy per record type
+//   the rule table                   `rule_for` in schema.mere still ties
+//                                    a field name to its rule by hand.
+//                                    Nothing in the declaration can say it,
+//                                    but nothing checks the names either
 //
 // Build:
 //   mere -w examples/claims/app.mere > /tmp/claims_app.wat
@@ -63,13 +56,6 @@ type model = {
   hidden: str list       // fields whose complaint is currently suppressed
 };
 
-type field = {
-  id: str,
-  get: claim -> str,
-  set: claim -> str -> claim,
-  check: str -> str
-};
-
 let store = store_new (model {
   saved = blank_claim, current = blank_claim, problems = Nil, hidden = Nil
 }) in
@@ -83,40 +69,43 @@ let problems_el = dom_get_by_id "problems" in
 let save_btn = dom_get_by_id "save" in
 let submit_btn = dom_get_by_id "submit" in
 let add_btn = dom_get_by_id "add-line" in
+let form_el = dom_get_by_id "form" in
 
 let set_status = fn (s: str) -> dom_set_text status_el s in
 
-// ---- the hand-written field table -----------------------------------
+// ---- what the declaration cannot say --------------------------------
 //
-// One entry per top-level field. `get` and `set` exist because a record
-// field cannot be named at runtime; `check` exists because nothing ties a
-// rule in schema.mere to the field it judges.
+// The field list itself is no longer written here: `claim_fields` reads it
+// off the record, in declaration order. What is left is the residue — the
+// things a type genuinely does not carry. A label, whether a field wants
+// more than one line, and whether it belongs to the user at all.
+//
+// Every one of these falls back to a default, so a field added to the
+// record needs no entry: it gets a label made from its own name and a
+// one-line text box.
 
-let opt_str = fn (o: str option) -> match o with Some s -> s | None -> "";
-let some_if = fn (s: str) -> if str_eq (str_trim s) "" then None else Some s;
+let titleize = fn (name: str) ->
+  let rec spaced = fn (i: int) -> fn (acc: str) ->
+    if i >= str_len name then acc
+    else
+      let ch = substring name i (i + 1) in
+      spaced (i + 1) (acc ++ (if str_eq ch "_" then " " else ch)) in
+  let s = spaced 0 "" in
+  to_upper (substring s 0 1) ++ substring s 1 (str_len s)
+in
 
-let fields =
-  Cons (field { id = "title",
-                get = fn (c: claim) -> c.title,
-                set = fn (c: claim) -> fn (v: str) -> { c | title = v },
-                check = check_title },
-  Cons (field { id = "spent_on",
-                get = fn (c: claim) -> c.spent_on,
-                set = fn (c: claim) -> fn (v: str) -> { c | spent_on = v },
-                check = check_spent_on },
-  Cons (field { id = "purpose",
-                get = fn (c: claim) -> c.purpose,
-                set = fn (c: claim) -> fn (v: str) -> { c | purpose = v },
-                check = check_purpose },
-  Cons (field { id = "approver",
-                get = fn (c: claim) -> opt_str c.approver,
-                set = fn (c: claim) -> fn (v: str) -> { c | approver = some_if v },
-                check = fn (v: str) -> "" },
-  Cons (field { id = "note",
-                get = fn (c: claim) -> opt_str c.note,
-                set = fn (c: claim) -> fn (v: str) -> { c | note = some_if v },
-                check = fn (v: str) -> "" },
-  Nil))))) in
+let label_for = fn (name: str) ->
+  if str_eq name "spent_on" then "Date spent (YYYY-MM-DD)"
+  else if str_eq name "approver" then "Approver (required over " ++ yen 100000 ++ ")"
+  else if str_eq name "note" then "Note (optional)"
+  else titleize name
+in
+
+let multiline = fn (name: str) -> str_eq name "purpose" in
+
+// `status` is the server's to set, so it is shown and not edited. Nothing
+// in `type claim` distinguishes it from `title`.
+let editable = fn (name: str) -> not (str_eq name "status") in
 
 // ---- list helpers ----------------------------------------------------
 
@@ -159,27 +148,27 @@ in
 
 // ---- edits -----------------------------------------------------------
 
-let edit = fn (f: field) -> fn (text: str) ->
-  store_update store (fn (m: model) -> { m | current = f.set m.current text })
+let edit = fn (name: str) -> fn (text: str) ->
+  store_update store (fn (m: model) -> { m | current = claim_with m.current name text })
 in
 
 // A field is judged when the user leaves it, and the verdict replaces
 // whatever the server said about the same field.
-let judge = fn (f: field) -> fn (text: str) ->
+let judge = fn (name: str) -> fn (text: str) ->
   store_update store (fn (m: model) ->
-    let msg = f.check text in
+    let msg = rule_for name text in
     let rec without = fn (ps: problem list) ->
       match ps with
       | Nil -> Nil
-      | Cons (p, rest) -> if str_eq p.field f.id then without rest else Cons (p, without rest) in
+      | Cons (p, rest) -> if str_eq p.field name then without rest else Cons (p, without rest) in
     let kept = without m.problems in
     { m | problems = if str_eq msg "" then kept
-                     else Cons (problem { field = f.id, message = msg }, kept),
-          hidden = drop_id m.hidden f.id })
+                     else Cons (problem { field = name, message = msg }, kept),
+          hidden = drop_id m.hidden name })
 in
 
-let forgive = fn (f: field) ->
-  store_update store (fn (m: model) -> { m | hidden = Cons (f.id, m.hidden) })
+let forgive = fn (name: str) ->
+  store_update store (fn (m: model) -> { m | hidden = Cons (name, m.hidden) })
 in
 
 let edit_line = fn (i: int) -> fn (g: line -> line) ->
@@ -191,17 +180,17 @@ in
 
 let show_problem = fn (id: str) -> fn (msg: str) ->
   let _ = dom_set_text (dom_get_by_id ("err-" ++ id)) msg in
-  let input = dom_get_by_id id in
+  let input = dom_get_by_id ("f-" ++ id) in
   if str_eq msg "" then dom_remove_attr input "aria-invalid"
   else dom_set_attr input "aria-invalid" "true"
 in
 
-let rec paint_field_problems = fn (fs: field list) -> fn (m: model) ->
-  match fs with
+let rec paint_field_problems = fn (names: str list) -> fn (m: model) ->
+  match names with
   | Nil -> ()
-  | Cons (f, rest) ->
-    let msg = if member m.hidden f.id then "" else assoc_problem m.problems f.id in
-    let _ = show_problem f.id msg in
+  | Cons (n, rest) ->
+    let msg = if member m.hidden n then "" else assoc_problem m.problems n in
+    let _ = show_problem n msg in
     paint_field_problems rest m
 in
 
@@ -216,7 +205,7 @@ let rec unfielded = fn (ps: problem list) -> fn (acc: str) ->
 in
 
 let _ = store_watch store (fn (m: model) ->
-  let _ = paint_field_problems fields m in
+  let _ = paint_field_problems (claim_fields m.current) m in
   let _ = dom_set_text (dom_get_by_id "err-lines") (assoc_problem m.problems "lines") in
   let _ = dom_set_text total_el (yen (claim_total m.current)) in
   let _ = dom_set_text problems_el (unfielded m.problems "") in
@@ -350,11 +339,12 @@ let _ = store_watch store (fn (m: model) ->
 let adopt = fn (c: claim) ->
   let _ = store_update store (fn (m: model) ->
     { m | saved = c, current = c, problems = Nil, hidden = Nil }) in
-  let rec push = fn (fs: field list) ->
-    match fs with
+  let rec push = fn (names: str list) ->
+    match names with
     | Nil -> ()
-    | Cons (f, rest) -> let _ = dom_set_value (dom_get_by_id f.id) (f.get c) in push rest in
-  let _ = push fields in
+    | Cons (n, rest) ->
+      let _ = dom_set_value (dom_get_by_id ("f-" ++ n)) (claim_text c n) in push rest in
+  let _ = push (claim_fields c) in
   redraw_lines ()
 in
 
@@ -408,18 +398,50 @@ in
 
 // ---- wiring ----------------------------------------------------------
 
-let rec wire = fn (fs: field list) ->
-  match fs with
-  | Nil -> ()
-  | Cons (f, rest) ->
-    let el = dom_get_by_id f.id in
-    let _ = dom_on_input el (fn (t: str) -> edit f t) in
-    let _ = dom_on_blur el (fn (t: str) -> judge f t) in
-    let _ = dom_on_focus el (fn (u: unit) -> forgive f) in
-    wire rest
+// Build one control, from nothing but the field's name. There is no
+// markup for these in index.html: the form is what the record says it is.
+let build_field = fn (name: str) ->
+  let wrap = dom_create "div" in
+  let _ = dom_set_attr wrap "class" "field" in
+
+  let lab = dom_create "label" in
+  let _ = dom_set_attr lab "for" ("f-" ++ name) in
+  let _ = dom_set_text lab (label_for name) in
+
+  let el = dom_create (if multiline name then "textarea" else "input") in
+  // Prefixed, because a field name is the record's and the page has ids
+  // of its own — `status` is both a field of `claim` and the element this
+  // app writes its progress into.
+  let _ = dom_set_attr el "id" ("f-" ++ name) in
+  let _ = dom_set_attr el "autocomplete" "off" in
+  let _ = if multiline name then dom_set_attr el "rows" "2" else () in
+  let _ = if editable name then () else dom_set_attr el "readonly" "true" in
+
+  let err = dom_create "div" in
+  let _ = dom_set_attr err "class" "err" in
+  let _ = dom_set_attr err "id" ("err-" ++ name) in
+
+  let _ = dom_append wrap lab in
+  let _ = dom_append wrap el in
+  let _ = dom_append wrap err in
+  let _ = dom_append form_el wrap in
+
+  if editable name then
+    let _ = dom_on_input el (fn (t: str) -> edit name t) in
+    let _ = dom_on_blur el (fn (t: str) -> judge name t) in
+    dom_on_focus el (fn (u: unit) -> forgive name)
+  else ()
 in
 
-let _ = wire fields in
+let rec build_form = fn (names: str list) ->
+  match names with
+  | Nil -> ()
+  | Cons (n, rest) -> let _ = build_field n in build_form rest
+in
+
+// The form exists because the record does. Adding a field to `claim` puts
+// a labelled control on the page with no edit here at all.
+let _ = build_form (claim_fields blank_claim) in
 
 let _ = dom_on_click add_btn (fn (u: unit) ->
   let _ = store_update store (fn (m: model) ->
