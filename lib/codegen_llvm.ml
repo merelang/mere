@@ -1389,6 +1389,14 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
 
 (* Phase 25.3: lookup a free var's concrete type by scanning the inner
    fn body. Mirrors codegen_c's lookup_var_ty. *)
+(* v0.1.165: `ty_is_concrete` is the wrong question for a capture. A
+   `Vec[R, int]` whose REGION is still a variable is not concrete, yet
+   llvm_ty_of lowers every Vec to `ptr` and never looks at the region — so
+   rejecting it left the capture untyped and it silently became i64. What
+   matters is only whether the backend can represent the type at all. *)
+let ty_is_lowerable_llvm (t : Ast.ty) : bool =
+  match llvm_ty_of t with _ -> true | exception _ -> false
+
 let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
   (* v0.1.165: a capture whose type is recorded but not fully concrete used
      to fall through to the TyUnit initial value, which lowers to i64 — so a
@@ -1406,7 +1414,7 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
     match e.Ast.node with
     | Ast.Var n when n = name ->
       (match e.Ast.ty with
-       | Some t when ty_is_concrete (Ast.walk t) ->
+       | Some t when ty_is_lowerable_llvm (Ast.walk t) ->
          found := Some (Ast.walk t); stop := true
        | Some t -> if !fallback = None then fallback := Some (Ast.walk t)
        | None -> ())
@@ -1419,7 +1427,7 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
       (* The binding site carries the concrete type; a later `Var` use of
          the same name may have been generalized. *)
       (match v.Ast.ty with
-       | Some t when List.mem name (pattern_vars pat) && ty_is_concrete (Ast.walk t) ->
+       | Some t when List.mem name (pattern_vars pat) && ty_is_lowerable_llvm (Ast.walk t) ->
          found := Some (Ast.walk t); stop := true
        | _ -> ());
       if not !stop then (go v; go b)
@@ -1491,24 +1499,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
     let captures =
       List.map (fun fv ->
         let ty = try lookup_var_ty_llvm fn_body fv with _ -> Ast.TyUnit in
-        let ty =
-          if ty_is_concrete ty then ty
-          else
-            (* v0.1.165: the occurrence inside the inner fn can carry a
-               generalized type — a `Vec[R, int]` read back through a
-               polymorphic helper keeps its region and element as
-               variables — while the binding site in the enclosing scope
-               has the concrete one. Look there before giving up, or the
-               capture is declared i64 and the call site passes a ptr. *)
-            (match
-               List.find_map (fun root ->
-                 match (try Some (lookup_var_ty_llvm root fv) with _ -> None) with
-                 | Some t when ty_is_concrete t -> Some t
-                 | _ -> None) scan_roots
-             with
-             | Some t -> t
-             | None -> ty)
-        in
+
         (fv, ty)) body_fvs
     in
     let lifted_name = fresh_inner_name_llvm n in
