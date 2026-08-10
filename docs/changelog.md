@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.161 — 2026-08-10
+
+_Sequencing for callback-shaped work, and what it does not fix._
+
+_Everything that crosses a thread or a network hands its result to a closure.
+One such call costs an indentation level, which is nothing. The cost shows up
+when steps depend on each other: an ordinary fold over a list where each element
+is a round trip cannot be written as a fold, and becomes a recursion carrying
+its own continuation. The tally client had exactly that recursion written out by
+hand, and so would every app that sequenced two requests._
+
+_`contrib/async/async.mere` carries it once. A Task is `(str -> unit) -> unit`;
+`async_each` is the fold, `async_map` collects results in list order rather than
+completion order, `async_then` chains, `async_all` fans out and joins. It is
+ordinary Mere — no language support, just the callback shape given names — and
+`test/parity/async_combinators.mere` pins the ordering across all four
+backends. examples/tally/app.mere now uses it and the hand-rolled recursion is
+gone._
+
+_What it does not fix is the nesting: `async_then` still puts each step inside
+the previous one's closure, so the four-step sync in tally is four levels deep.
+Removing that needs syntax, not a library — some form of do-notation or await —
+and shipping the combinators first is how to find out how much of the pain was
+the fold and how much is the nesting. On the evidence of one app: the fold was
+the part worth removing, and the nesting is legible enough to live with for now._
+
+_Found while writing it: an extern cannot be partially applied on the Wasm
+backend. `worker_call req` emits a direct one-argument call rather than a
+closure, so a Task built from an extern still needs an explicit
+`fn (cb) -> extern req cb`. Worth eta-wrapping the way nullary builtins already
+are._
+
+---
+
 ## v0.1.160 — 2026-08-10
 
 _A request's allocations can be released when the request ends._

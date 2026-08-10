@@ -34,6 +34,7 @@
 extern fn worker_call: str -> (str -> unit) -> unit;
 
 import "../../contrib/dom/dom.mere";
+import "../../contrib/async/async.mere";
 
 // ---- elements -------------------------------------------------------
 
@@ -150,18 +151,23 @@ in
 // ---- sync -----------------------------------------------------------
 //
 // Writing a merged state back to the store is an ordinary fold over a
-// list, except that each step is a round trip. With only callbacks to
-// work with, the fold has to be rewritten as a recursion that carries
-// its own continuation and calls it when the list runs out. This is the
-// shape every sequential-async loop takes here, and it is the clearest
-// cost of having no way to name the result of a call.
+// list, except that each step is a round trip. Without a way to name a
+// call's result, that fold has to become a recursion carrying its own
+// continuation — so contrib/async carries it once, and this reads as the
+// fold it always was. What the library cannot remove is the nesting
+// below: each step of sync still sits inside the previous one's closure,
+// which is the part that would need syntax.
 
-let rec push_all = fn (xs) -> fn (k: unit -> unit) ->
-  match xs with
-  | Nil -> k ()
-  | Cons ((key, v), rest) ->
-    worker_call ("set\t" ++ key ++ "\t" ++ v)
-      (fn (reply: str) -> push_all rest k)
+// The fold is a fold again: contrib/async owns the recursion that used
+// to be written out here, and at every other call site that sequenced
+// two requests. The inner `fn (cb) -> ...` is not decoration — an extern
+// cannot be partially applied on the Wasm backend, so `worker_call req`
+// is not yet a Task on its own.
+let push_all = fn (xs) -> fn (k: unit -> unit) ->
+  async_each xs
+    (fn (kv) -> match kv with (key, v) ->
+      fn (cb: str -> unit) -> worker_call ("set\t" ++ key ++ "\t" ++ v) cb)
+    k
 in
 
 let sync = fn (u: unit) ->
