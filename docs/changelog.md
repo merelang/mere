@@ -4,6 +4,24 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.162 — 2026-08-10
+
+_`mere install` fetches before checking out._
+
+_A dependency's repo is cloned once and cached, keyed by repo-and-rev, but an
+existing cache was never refreshed. So the first install after a new commit was
+pushed failed with `fatal: reference is not a tree: <sha>`, and the only remedy
+was deleting `~/.mere/cache` by hand — a git error with no mention of a cache,
+a long way from the cause. It now fetches before checkout._
+
+_Found while repointing the mere-blog dogfood at a current revision, which also
+repaired its packaged path: its host was pinned to a release whose JS glue
+predates the current value representation, so a build made with a current
+compiler linked and then failed on its first request. With everything pinned to
+one commit, `mere serve` runs that app on the vendored host end to end._
+
+---
+
 ## v0.1.161 — 2026-08-10
 
 _Sequencing for callback-shaped work, and what it does not fix._

@@ -146,7 +146,12 @@ let fetch git rev =
   if not (Sys.file_exists dir) then begin
     sh (Printf.sprintf "mkdir -p %s" (q (cache_root ())));
     sh (Printf.sprintf "git clone --quiet %s %s" (q git) (q dir))
-  end;
+  end else
+    (* A cached clone is older than any rev pushed since it was made, so
+       repointing a dependency at a newer commit failed with "reference
+       is not a tree", and the only remedy was deleting ~/.mere/cache by
+       hand. Refresh before checking out. *)
+    sh (Printf.sprintf "git -C %s fetch --quiet --all --tags" (q dir));
   sh (Printf.sprintf "git -C %s -c advice.detachedHead=false checkout --quiet %s"
         (q dir) (q rev));
   let sha = sh_read (Printf.sprintf "git -C %s rev-parse HEAD" (q dir)) in
