@@ -1,0 +1,42 @@
+// A name out of the JSON has to be a constructor of the variant being
+// decoded — not merely a string, and not merely a constructor of something.
+//
+// The interpreter's decoder built a nullary constructor from whatever
+// string arrived, without asking whether the variant had a case by that
+// name, so `of_json_opt "\"Nonsense\""` at a `status` returned `Some`
+// holding a value outside its own type — and `to_json` printed it straight
+// back out. Both compiled backends answered `None`, so the reference the
+// parity harness compares against was the one in the wrong; the divergence
+// only showed up because examples/claims round-trips a variant field.
+//
+// The object form was checked for existence but not for ownership, which
+// let a payload case belonging to an unrelated variant through.
+
+type status = Draft | Submitted | Rejected of str;
+type other  = Pending | Cancelled of str;
+type box = { s: status };
+
+let read = fn (src: str) ->
+  match (of_json_opt src : box option) with
+  | Some b -> "Some " ++ to_json b
+  | None -> "None"
+in
+
+// Cases that belong here.
+let _ = print (read "\{\"s\":\"Draft\"}") in
+let _ = print (read "\{\"s\":\"Submitted\"}") in
+let _ = print (read "\{\"s\":\{\"Rejected\":\"too vague\"}}") in
+
+// A name no variant has.
+let _ = print (read "\{\"s\":\"Nonsense\"}") in
+
+// A case of a different variant, in both forms. `Pending` is nullary and
+// `Cancelled` carries a payload, so this covers the string branch and the
+// object branch of the check.
+let _ = print (read "\{\"s\":\"Pending\"}") in
+let _ = print (read "\{\"s\":\{\"Cancelled\":\"x\"}}") in
+
+// A case of this variant, in the wrong shape: `Rejected` carries a payload
+// and cannot arrive as a bare string.
+let _ = print (read "\{\"s\":\"Rejected\"}") in
+0

@@ -2814,10 +2814,34 @@ let rec of_json_value (t : Ast.ty) (j : jtree) : value =
      | _ -> mismatch ("a JSON object for record " ^ name))
   | Ast.TyCon (name, args), _ ->
     (* general variant: JSON string -> nullary ctor; {"Ctor": payload} -> Ctor payload *)
+    (* v0.1.177: a name out of the JSON has to be a constructor OF THIS
+       variant. The nullary branch used to build `V_constr (cname, None)`
+       from whatever string arrived, so `of_json_opt "\"Nonsense\""` at a
+       `status` returned `Some` holding a value that is not any case of the
+       type — and `to_json` printed it straight back out. The C and Wasm
+       decoders both answered None, so the interpreter, which is the parity
+       harness's reference, was the one in the wrong.
+
+       The object branch checked that the constructor exists but not that it
+       belongs here, which lets a payload case from an unrelated variant
+       through; `type_name` closes both. *)
+    let of_this_variant cname =
+      match Hashtbl.find_opt Typer.constructors cname with
+      | Some info when info.Typer.type_name = name -> Some info
+      | _ -> None
+    in
     (match j with
-     | JStr cname -> V_constr (cname, None)
+     | JStr cname ->
+       (match of_this_variant cname with
+        | Some { Typer.arg = None; _ } -> V_constr (cname, None)
+        | Some _ ->
+          raise (Json_parse_error
+                   (Printf.sprintf "of_json: %s of %s carries a payload" cname name))
+        | None ->
+          raise (Json_parse_error
+                   (Printf.sprintf "of_json: %s is not a case of %s" cname name)))
      | JObj [(cname, payload)] ->
-       (match Hashtbl.find_opt Typer.constructors cname with
+       (match of_this_variant cname with
         | Some info ->
           (match info.Typer.arg with
            | Some argty ->
@@ -2826,7 +2850,7 @@ let rec of_json_value (t : Ast.ty) (j : jtree) : value =
            | None -> V_constr (cname, None))
         | None ->
           raise (Json_parse_error
-                   (Printf.sprintf "of_json: unknown constructor %s" cname)))
+                   (Printf.sprintf "of_json: %s is not a case of %s" cname name)))
      | _ -> mismatch ("a variant value for " ^ name))
   | _ ->
     mismatch "a matching JSON shape for the target type"

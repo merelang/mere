@@ -211,25 +211,50 @@ let claim_text = fn (c: claim) -> fn (name: str) ->
   | Json.JBool b -> if b then "1" else "0"
   | _ -> "";
 
-// Replace one field from text. The shape to write back is taken from the
-// shape that is there — which is exact except for an absent optional,
-// where `null` cannot say what it would have held. Text is the right
-// guess for a text control, and the only fields this is used on are ones
-// a text control edits.
+// Replace one field from text.
+//
+// The shape to write back is taken from the shape that is there, which is
+// exact — except for an absent optional, where `null` cannot say what it
+// would have held. The first version guessed "string" and named the two
+// fields that needed clearing, which was wrong the moment a claim gained
+// an `int option`: setting it produced a string and the decode failed.
+//
+// So where the value cannot say, ask the decoder instead: try the shapes
+// in order and keep the first that survives `of_json_opt`. Blank text
+// tries `null` first, which is how an optional field is cleared without
+// anything here knowing which fields are optional.
+//
+// `claim_with` names `claim` because `of_json` is directed by an
+// annotation at the call site: `to_json` is polymorphic and `of_json` is
+// not, so this cannot be written once for every record. One copy per
+// record type is the cost today.
 let claim_with = fn (c: claim) -> fn (name: str) -> fn (v: str) ->
-  let rec repl = fn (fs: (str * Json.json) list) ->
+  let rec repl = fn (fs: (str * Json.json) list) -> fn (jv: Json.json) ->
     match fs with
     | Nil -> Nil
-    | Cons ((k, jv), rest) ->
-      if str_eq k name then
-        Cons ((k, (match jv with
-                   | Json.JNum _ -> Json.JNum (try_or (fn () -> int_of_str (str_trim v)) 0)
-                   | Json.JBool _ -> Json.JBool (str_eq v "1")
-                   | _ -> if str_eq (str_trim v) "" && str_eq name "note" then Json.JNull
-                          else if str_eq (str_trim v) "" && str_eq name "approver" then Json.JNull
-                          else Json.JStr v)), rest)
-      else Cons ((k, jv), repl rest) in
-  (of_json (Json.to_json_str (Json.JObj (repl (claim_json c)))) : claim);
+    | Cons ((k, old), rest) ->
+      if str_eq k name then Cons ((k, jv), rest)
+      else Cons ((k, old), repl rest jv) in
+  let attempt = fn (jv: Json.json) ->
+    (of_json_opt (Json.to_json_str (Json.JObj (repl (claim_json c) jv))) : claim option) in
+  let rec first = fn (candidates: Json.json list) ->
+    match candidates with
+    | Nil -> c
+    | Cons (jv, rest) ->
+      match attempt jv with
+      | Some out -> out
+      | None -> first rest in
+  let n = try_or (fn () -> int_of_str (str_trim v)) 0 in
+  let candidates =
+    if str_eq (str_trim v) "" then
+      Cons (Json.JNull, Cons (Json.JStr v, Cons (Json.JNum 0, Nil)))
+    else
+      match lookup_json (claim_json c) name with
+      | Json.JNum _ -> Cons (Json.JNum n, Nil)
+      | Json.JBool _ -> Cons (Json.JBool (str_eq v "1"), Nil)
+      | Json.JStr _ -> Cons (Json.JStr v, Nil)
+      | _ -> Cons (Json.JStr v, Cons (Json.JNum n, Cons (Json.JNull, Nil))) in
+  first candidates;
 
 // The one place a field name is tied to the rule that judges it. Nothing
 // in the declaration can say this, so it is written down — but once, and
