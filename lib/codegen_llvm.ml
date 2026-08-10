@@ -166,6 +166,10 @@ let str_split_used_llvm = ref false
 let str_join_used_llvm = ref false
 let str_count_used_llvm = ref false
 let file_io_used_llvm = ref false
+(* v0.1.163: positioned file I/O (file_openrw / file_size / file_pread /
+   file_pwrite / file_fsync / file_close), the group a paged or
+   append-only store is built on. *)
+let file_pio_used_llvm = ref false
 (* binary file I/O: gated separately because the runtime references the
    mere_vec_int runtime (which is only emitted when an int vec is used). *)
 let uses_read_file_bytes_llvm = ref false
@@ -361,6 +365,11 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyStr -> "ptr"
   | Ast.TyBytes -> "ptr"  (* pointer to [i64 len][bytes...] *)
   | Ast.TyUnit -> "i64"  (* unit becomes int 0 *)
+  (* v0.1.163: a File handle travels as i64 like every other Mere value —
+     lifted inner functions type all their parameters uniformly, so a raw
+     `ptr` could not be passed through one. The runtime converts at its
+     own boundary. *)
+  | Ast.TyCon ("File", _) -> "i64"
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
   (* Q-012: ThreadHandle wraps a pthread_t (pointer-sized); Channel[T] is a
@@ -3632,11 +3641,62 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     unsupported e.Ast.loc
       "channel_recv_timeout is unsupported in LLVM codegen \
        (v0.1.48 scope = interp + C)"
-  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" | "file_close"
-                              | "file_openrw" | "file_pwrite" | "file_fsync" as fio); _ }, _) ->
-    (* v0.1.59: streaming file input is interp + C only.
-       v0.1.115: the read/write handle (file_openrw / file_pwrite / file_fsync)
-       is likewise interp + C only. *)
+  (* v0.1.163: positioned file I/O. Same contract as interp / C / Wasm —
+     the handle is a FILE*, bytes cross as a Vec[int] — so a store written
+     against these builtins now compiles on all four backends. *)
+  | Ast.App ({ node = Ast.Var "file_openrw"; _ }, path_e) ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_file_openrw(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.Var "file_size"; _ }, path_e) ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_file_size_path(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pread"; _ },
+                                                ch_e); _ }, off_e); _ }, len_e) ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let region_reg =
+      match Option.map Ast.walk e.Ast.ty with
+      | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
+        if r = "__heap" then "@__lang_default_region"
+        else (match List.assoc_opt r !current_regions with
+              | Some reg -> reg | None -> "@__lang_default_region")
+      | _ -> "@__lang_default_region"
+    in
+    let f = emit_expr env ch_e in
+    let off = emit_expr env off_e in
+    let len = emit_expr env len_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+      "  %s = call ptr @__lang_file_pread(i64 %s, i64 %s, i64 %s, ptr %s)"
+      r f off len region_reg);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pwrite"; _ },
+                                                ch_e); _ }, off_e); _ }, vec_e) ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let f = emit_expr env ch_e in
+    let off = emit_expr env off_e in
+    let v = emit_expr env vec_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+      "  %s = call i64 @__lang_file_pwrite(i64 %s, i64 %s, ptr %s)" r f off v);
+    r
+  | Ast.App ({ node = Ast.Var ("file_fsync" | "file_close" as fio); _ }, ch_e) ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    let f = emit_expr env ch_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_%s(i64 %s)" r fio f);
+    r
+  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line"
+                              as fio); _ }, _) ->
+    (* v0.1.59: streaming line input stays interp + C — it needs a decoder
+       and a buffered cursor the runtime would have to own per handle. *)
     unsupported e.Ast.loc
       (fio ^ " is unsupported in LLVM codegen (scope = interp + C)")
   | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt"); _ }, _) ->
@@ -9266,6 +9326,122 @@ let str_join_runtime_llvm =
       "  ret ptr %r";
       "}" ]
 
+let file_pio_runtime_llvm =
+  String.concat "\n"
+    [ "declare i32 @fgetc(ptr)";
+      "declare i32 @fputc(i32, ptr)";
+      "declare i32 @fflush(ptr)";
+      "@.fopen_rp = internal constant [4 x i8] c\"r+b\\00\"";
+      "@.fopen_wp = internal constant [4 x i8] c\"w+b\\00\"";
+      "";
+      "; Open for update, creating the file if absent and never truncating";
+      "; an existing one — the mode a random-access store needs.";
+      "define i64 @__lang_file_openrw(ptr %path) {";
+      "entry:";
+      "  %f = call ptr @fopen(ptr %path, ptr @.fopen_rp)";
+      "  %isnull = icmp eq ptr %f, null";
+      "  br i1 %isnull, label %create, label %done";
+      "create:";
+      "  %f2 = call ptr @fopen(ptr %path, ptr @.fopen_wp)";
+      "  br label %done";
+      "done:";
+      "  %r = phi ptr [ %f, %entry ], [ %f2, %create ]";
+      "  %h = ptrtoint ptr %r to i64";
+      "  ret i64 %h";
+      "}";
+      "";
+      "; Size by path: an append-only store needs its end without reading";
+      "; the file to find it. A missing file reports 0.";
+      "define i64 @__lang_file_size_path(ptr %path) {";
+      "entry:";
+      "  %f = call ptr @fopen(ptr %path, ptr @.fopen_rb)";
+      "  %isnull = icmp eq ptr %f, null";
+      "  br i1 %isnull, label %none, label %ok";
+      "none:";
+      "  ret i64 0";
+      "ok:";
+      "  %se = call i32 @fseek(ptr %f, i64 0, i32 2)";
+      "  %n = call i64 @ftell(ptr %f)";
+      "  %cl = call i32 @fclose(ptr %f)";
+      "  ret i64 %n";
+      "}";
+      "";
+      "; Read a window as a Vec[int], one int per byte. A read past EOF";
+      "; comes back short rather than padded, matching the C runtime.";
+      "define ptr @__lang_file_pread(i64 %h, i64 %off, i64 %len, ptr %rgn) {";
+      "entry:";
+      "  %f = inttoptr i64 %h to ptr";
+      "  %v = call ptr @mere_vec_int_new(ptr %rgn)";
+      "  %b1 = icmp slt i64 %off, 0";
+      "  %b2 = icmp sle i64 %len, 0";
+      "  %bad = or i1 %b1, %b2";
+      "  br i1 %bad, label %done, label %seek";
+      "seek:";
+      "  %se = call i32 @fseek(ptr %f, i64 %off, i32 0)";
+      "  %seok = icmp eq i32 %se, 0";
+      "  br i1 %seok, label %loop, label %done";
+      "loop:";
+      "  %i = phi i64 [ 0, %seek ], [ %i2, %body ]";
+      "  %fin = icmp sge i64 %i, %len";
+      "  br i1 %fin, label %done, label %read";
+      "read:";
+      "  %c = call i32 @fgetc(ptr %f)";
+      "  %eof = icmp eq i32 %c, -1";
+      "  br i1 %eof, label %done, label %body";
+      "body:";
+      "  %c64 = sext i32 %c to i64";
+      "  %ign = call i32 @mere_vec_int_push(ptr %v, i64 %c64)";
+      "  %i2 = add i64 %i, 1";
+      "  br label %loop";
+      "done:";
+      "  ret ptr %v";
+      "}";
+      "";
+      "; Write the vec's bytes at an offset, extending the file if it runs";
+      "; past the end. Returns the count written.";
+      "define i64 @__lang_file_pwrite(i64 %h, i64 %off, ptr %v) {";
+      "entry:";
+      "  %f = inttoptr i64 %h to ptr";
+      "  %bad = icmp slt i64 %off, 0";
+      "  br i1 %bad, label %zero, label %seek";
+      "zero:";
+      "  ret i64 0";
+      "seek:";
+      "  %se = call i32 @fseek(ptr %f, i64 %off, i32 0)";
+      "  %ok = icmp eq i32 %se, 0";
+      "  br i1 %ok, label %pre, label %zero";
+      "pre:";
+      "  %n = call i64 @mere_vec_int_len(ptr %v)";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [ 0, %pre ], [ %i2, %body ]";
+      "  %fin = icmp sge i64 %i, %n";
+      "  br i1 %fin, label %done, label %body";
+      "body:";
+      "  %iw = trunc i64 %i to i32";
+      "  %x = call i64 @mere_vec_int_get(ptr %v, i32 %iw)";
+      "  %b = trunc i64 %x to i32";
+      "  %ign = call i32 @fputc(i32 %b, ptr %f)";
+      "  %i2 = add i64 %i, 1";
+      "  br label %loop";
+      "done:";
+      "  ret i64 %n";
+      "}";
+      "";
+      "define i64 @__lang_file_fsync(i64 %h) {";
+      "entry:";
+      "  %f = inttoptr i64 %h to ptr";
+      "  %r = call i32 @fflush(ptr %f)";
+      "  ret i64 0";
+      "}";
+      "";
+      "define i64 @__lang_file_close(i64 %h) {";
+      "entry:";
+      "  %f = inttoptr i64 %h to ptr";
+      "  %r = call i32 @fclose(ptr %f)";
+      "  ret i64 0";
+      "}" ]
+
 let file_io_runtime_llvm =
   String.concat "\n"
     [ "declare ptr @fopen(ptr, ptr)";
@@ -9553,6 +9729,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_join_used_llvm := false;
   str_count_used_llvm := false;
   file_io_used_llvm := false;
+  file_pio_used_llvm := false;
   uses_read_file_bytes_llvm := false;
   uses_write_file_bytes_llvm := false;
   logger_used := false;
@@ -10115,6 +10292,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        then [file_io_runtime_llvm; ""] else [])
     @ (if !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
        then [file_bytes_runtime_llvm; ""] else [])
+    @ (if !file_pio_used_llvm then [file_pio_runtime_llvm; ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_hash_runtime = [] then [] else map_hash_runtime @ [""])
