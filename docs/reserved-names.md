@@ -59,13 +59,39 @@ Most likely to hit: **`read`** / **`write`** (when writing file-I/O wrappers); *
 - **Public lib fns (contrib)**: verb phrase (`run_case` / `power_of`)
 - **Internal fns of a module-ified lib**: prefix (`m_div`) to suggest the module's family
 
-## 3. See also
+## 3. A different axis: shadowing a *builtin*
+
+The list above is about names the **C compiler** already owns. A separate
+hazard is a name **Mere** already owns: a top-level `let join = ...` is a
+perfectly good C identifier, but `join` is also the thread builtin, and a
+backend that lowers `join x` to `pthread_join` without first asking whether
+the user bound that name miscompiles the program.
+
+The rule is that a user binding — local, lifted inner fn, or top-level —
+**always wins** over a same-named builtin. `user_shadows` in codegen_c,
+`user_shadows_llvm` in codegen_llvm and the equivalent guard in codegen_wasm
+implement it, and `test/parity/shadow_builtin.mere` plus
+`test/parity/toplevel_shadows_builtin.mere` lock it down across the four
+backends the parity harness runs.
+
+Unlike a C collision, this one is **not** linted, because there is nothing
+wrong with the program: shadowing is legal and the intent is unambiguous.
+It is the backend's job to honour it. The guards were added one incident at
+a time, though, so if you shadow a builtin and get a compile failure deep in
+the emitted code rather than the behaviour you wrote, that is a bug in the
+backend — `join` on LLVM was exactly that, fixed in v0.1.169.
+
+Names most likely to collide this way: **`join`** (string-join helper),
+**`run`** (any interpreter or driver loop), **`args`**, **`show`**,
+**`time`**.
+
+## 4. See also
 
 - **Linter implementation**: [`lib/pipeline.ml:42-82`](../lib/pipeline.ml) (Phase 38.A3)
 - **patterns.md §5**: condensed version of this doc
 - **language-reference.md**: Mere language reserved words (`let` / `fn` / `match` / `if` etc.) are separate — they're rejected by the parser and can't be used as binding names.
 
-## 4. Future extensions (DEFERRED)
+## 5. Future extensions (DEFERRED)
 
 | Stage | Content |
 |---|---|

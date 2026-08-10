@@ -1,0 +1,30 @@
+// A user-defined name must win over a same-named builtin, on every backend.
+//
+// `join` is the one that bites in practice: it is the obvious name for a
+// string-join helper and it is also the thread builtin. C has guarded it
+// since Phase 30.0; LLVM guarded str_eq / is_digit / is_alpha / is_space
+// and missed join, so a program with its own `join` compiled on three
+// backends and failed in the assembler on the fourth — it had lowered the
+// call to pthread_join(i64) and handed it a str list.
+//
+// The failure only appears when the shadowing definition is applied, so
+// each of these is called, not merely defined.
+
+let rec join = fn (xs) -> fn (sep: str) ->
+  match xs with
+  | Nil -> ""
+  | Cons (a, rest) ->
+    match rest with
+    | Nil -> a
+    | Cons (_, _) -> a ++ sep ++ join rest sep
+in
+
+let is_digit = fn (s: str) -> str_eq s "0" || str_eq s "1" in
+let is_space = fn (s: str) -> str_eq s " " in
+
+let _ = print (join (Cons ("a", Cons ("b", Cons ("c", Nil)))) "-") in
+let _ = print (join Nil "-") in
+let _ = print (show (is_digit "1")) in
+let _ = print (show (is_digit "x")) in
+let _ = print (show (is_space " ")) in
+0

@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.169 — 2026-08-10
+
+_`args ()` on LLVM — the last reason a Mere CLI ran on three backends out of
+four — and the shadowing hole finding it exposed._
+
+_The B+-tree in `mbtree` has run on all four backends since v0.1.163, when
+positioned file I/O landed on LLVM. Its command line had not: `args` was still
+interp + C, so `mere -ll` refused the program that wrapped the store. LLVM now
+stores `main`'s argc/argv into globals and folds them into a `str list`,
+dropping the program name, which is what interp and C hand back. `main` keeps
+its no-argument signature unless the program actually asks for argv. The
+strings are argv's own rather than copies into the current region: a str is a
+plain NUL-terminated pointer on this backend and argv outlives the program, so
+there is nothing to allocate and nothing that can outlive what it points at._
+
+_Writing the parity case for it turned up something worse. The test defined a
+`join` helper — the obvious name for joining strings — and LLVM lowered the
+call to `pthread_join(i64)` and handed it a `str list`. `join` is also the
+thread builtin, and LLVM guarded `str_eq` / `is_digit` / `is_alpha` /
+`is_space` against a user's same-named binding but not `join`, which C has
+guarded since Phase 30.0 with a comment predicting exactly this. The guards had
+been added one incident at a time; they now go through one `user_shadows_llvm`
+that asks about locals, lifted inner fns and top-level fns alike, the way C's
+`user_shadows` does. `test/parity/shadow_builtin.mere` locks it down, and
+docs/reserved-names.md gained the section distinguishing this axis — a name
+Mere owns — from the C-symbol collisions the rest of that document is about._
+
+_`mbtree data.db set 42 100` / `get` / `selftest` now produce identical output
+on interp, C, LLVM and Wasm. parity 76/76, dune runtest 2308/0. `mere -v` also
+reports the truth again: `lib/version.ml` had been left at 0.1.151 while the
+changelog ran to 0.1.168._
+
+---
+
 ## v0.1.168 — 2026-08-10
 
 _A list you can filter and edit, and the three bindings it forced._

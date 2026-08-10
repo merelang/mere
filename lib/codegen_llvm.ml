@@ -29,7 +29,7 @@ let host_builtins_without_llvm_lowering =
     "read_line"; "read_stdin"; "read_key";
     "tty_raw"; "tty_restore"; "file_size"; "exit";
     "read_lines"; "file_pread"; "file_pwrite";
-    "env_var"; "args"; "run";
+    "env_var"; "run";
     "file_exists"; "random_int"; "random_float";
     "detach"; "par_map" ]
 
@@ -170,6 +170,10 @@ let file_io_used_llvm = ref false
    file_pwrite / file_fsync / file_close), the group a paged or
    append-only store is built on. *)
 let file_pio_used_llvm = ref false
+(* v0.1.169: `args ()`. Gates the argc/argv globals, the list builder, and
+   main's parameter list — a module that never asks for argv keeps the
+   `main()` signature it has always had. *)
+let args_used_llvm = ref false
 (* binary file I/O: gated separately because the runtime references the
    mere_vec_int runtime (which is only emitted when an int vec is used). *)
 let uses_read_file_bytes_llvm = ref false
@@ -603,6 +607,20 @@ let current_host_fn_llvm : string ref = ref ""
    polymorphic `.ty` from let-poly generalization. Saved/restored
    around each fn body emit. *)
 let current_var_types : (string * Ast.ty) list ref = ref []
+
+(* A user-defined name — a local, a lifted inner fn, or a top-level fn —
+   must shadow a same-named builtin at its call sites. The builtin App arms
+   that guard on this fall through to the ordinary call paths instead, so
+   `let join = ...` calls the user's join rather than pthread_join. False
+   unless the name was actually bound, so programs that shadow nothing are
+   unaffected. Mirrors codegen_c's `user_shadows`; the arms here grew their
+   guards one incident at a time, which is how `join` came to be missing
+   one. *)
+let user_shadows_llvm (env : (string * string) list) (name : string) : bool =
+  List.mem_assoc name env
+  || List.mem_assoc name !current_var_types
+  || Hashtbl.mem inner_lifts_llvm name
+  || Hashtbl.mem toplevel_fn_names name
 
 (* Type the parent context expects this expression to have. Set by
    emit_fn_def / emit_anon_adapter as the body's return type, so
@@ -3648,7 +3666,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       tidp c);
     emit_instr (Printf.sprintf "  %s = load i64, ptr %s" tid tidp);
     tid
-  | Ast.App ({ node = Ast.Var "join"; _ }, h) ->
+  (* Only the thread `join` builtin when the user has not bound that name.
+     `join` is a very common user identifier — a string-join helper above
+     all — and without this guard one lowers to pthread_join(i64), which
+     type-checks in Mere and then fails in the assembler on whatever the
+     user's join actually returns. C has guarded this since Phase 30.0;
+     LLVM guarded str_eq / is_digit / is_alpha / is_space and missed this
+     one, so the same program compiled on C and not on LLVM. *)
+  | Ast.App ({ node = Ast.Var "join"; _ }, h)
+    when not (user_shadows_llvm env "join") ->
     let hv = emit_expr env h in
     emit_instr (Printf.sprintf "  call i32 @pthread_join(i64 %s, ptr null)" hv);
     "0"  (* unit *)
@@ -3683,6 +3709,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let pv = emit_expr env path_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_file_openrw(ptr %s)" r pv);
+    r
+  (* v0.1.169: `args ()`. The unit argument carries no information, but it
+     is still evaluated — the caller may have written a side-effecting
+     expression there, and dropping it would change what the program does.
+     Borrows __lang_list_str_nil / _cons, hence the str_split flag. *)
+  | Ast.App ({ node = Ast.Var "args"; _ }, unit_e)
+    when not (user_shadows_llvm env "args") ->
+    args_used_llvm := true;
+    str_split_used_llvm := true;
+    ignore (emit_expr env unit_e);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_args()" r);
     r
   | Ast.App ({ node = Ast.Var "file_size"; _ }, path_e) ->
     file_io_used_llvm := true; file_pio_used_llvm := true;
@@ -3972,7 +4010,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* v0.1.86: str_eq a b — byte-compare two strings, returns i1 (bool). The
      C/interp backends already had it; the LLVM backend did not. *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_eq"; _ }, a_e); _ }, b_e)
-    when not (Hashtbl.mem toplevel_fn_names "str_eq") ->
+    when not (user_shadows_llvm env "str_eq") ->
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
     let r = fresh_reg () in
@@ -3982,19 +4020,19 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      name exists, skip the builtin dispatch and fall through to the normal
      user fn call path *)
   | Ast.App ({ node = Ast.Var "is_digit"; _ }, arg)
-    when not (Hashtbl.mem toplevel_fn_names "is_digit") ->
+    when not (user_shadows_llvm env "is_digit") ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_digit(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "is_alpha"; _ }, arg)
-    when not (Hashtbl.mem toplevel_fn_names "is_alpha") ->
+    when not (user_shadows_llvm env "is_alpha") ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_alpha(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "is_space"; _ }, arg)
-    when not (Hashtbl.mem toplevel_fn_names "is_space") ->
+    when not (user_shadows_llvm env "is_space") ->
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_is_space(ptr %s)" r av);
@@ -9360,6 +9398,42 @@ let str_join_runtime_llvm =
       "  ret ptr %r";
       "}" ]
 
+(* v0.1.169: `args ()` on LLVM — argv[1..] as a str list, in order, with the
+   program name dropped, matching interp and C. argc/argv reach here through
+   globals that main() stores on entry.
+
+   The strings are argv's own, not copies. A str is a plain NUL-terminated
+   pointer on this backend, and argv's storage outlives the process's own
+   code, so there is nothing to allocate and nothing that can outlive what it
+   points at — whereas a copy into the current region would die at the end of
+   a `region` block the caller happened to be inside. *)
+let args_runtime_llvm =
+  String.concat "\n"
+    [ "@__lang_argc = internal global i32 0";
+      "@__lang_argv = internal global ptr null";
+      "";
+      "define ptr @__lang_args() {";
+      "entry:";
+      "  %nil = call ptr @__lang_list_str_nil()";
+      "  %argc = load i32, ptr @__lang_argc";
+      "  %argv = load ptr, ptr @__lang_argv";
+      "  br label %loop";
+      "loop:";
+      (* Walk backwards and prepend, so argv[1] ends up at the head. *)
+      "  %i = phi i32 [ %argc, %entry ], [ %i2, %body ]";
+      "  %acc = phi ptr [ %nil, %entry ], [ %cons, %body ]";
+      "  %more = icmp sgt i32 %i, 1";
+      "  br i1 %more, label %body, label %done";
+      "body:";
+      "  %i2 = sub i32 %i, 1";
+      "  %slot = getelementptr ptr, ptr %argv, i32 %i2";
+      "  %s = load ptr, ptr %slot";
+      "  %cons = call ptr @__lang_list_str_cons(ptr %s, ptr %acc)";
+      "  br label %loop";
+      "done:";
+      "  ret ptr %acc";
+      "}" ]
+
 let file_pio_runtime_llvm =
   String.concat "\n"
     [ "declare i32 @fgetc(ptr)";
@@ -9764,6 +9838,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_count_used_llvm := false;
   file_io_used_llvm := false;
   file_pio_used_llvm := false;
+  args_used_llvm := false;
   uses_read_file_bytes_llvm := false;
   uses_write_file_bytes_llvm := false;
   logger_used := false;
@@ -10182,7 +10257,23 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     emit_instr "  call void @__mere_owned_vec_free_all()";
   emit_instr "  call void @__lang_region_free(ptr @__lang_default_region)";
   emit_instr "  ret i32 0";
-  let body = String.concat "\n" (List.rev !instrs) in
+  let body =
+    let lines = List.rev !instrs in
+    (* v0.1.169: hand argv to @__lang_args. This is spliced in after the
+       fact rather than emitted with the rest of the prologue, because
+       whether the program calls `args ()` is only known once its body has
+       been emitted. *)
+    let lines =
+      match lines with
+      | entry :: rest when !args_used_llvm ->
+        entry
+        :: "  store i32 %__argc, ptr @__lang_argc"
+        :: "  store ptr %__argv, ptr @__lang_argv"
+        :: rest
+      | _ -> lines
+    in
+    String.concat "\n" lines
+  in
   (* Drain pending closures (anonymous Funs accumulated during all of
      the above emits). Draining can push more pendings — keep going
      until the queue is empty. *)
@@ -10383,6 +10474,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
        then [file_bytes_runtime_llvm; ""] else [])
     @ (if !file_pio_used_llvm then [file_pio_runtime_llvm; ""] else [])
+    @ (if !args_used_llvm then [args_runtime_llvm; ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_hash_runtime = [] then [] else map_hash_runtime @ [""])
@@ -10509,7 +10601,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        if eta_lines = [] then []
        else "; Phase 35.2: nullary factory builtins as first-class values"
             :: eta_lines @ [""])
-    @ [ "define i32 @main() {";
+    @ [ (if !args_used_llvm then "define i32 @main(i32 %__argc, ptr %__argv) {"
+         else "define i32 @main() {");
         body;
         "}";
         "" ]
