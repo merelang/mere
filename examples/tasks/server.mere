@@ -1,0 +1,137 @@
+// examples/tasks/server.mere — storage for the tasks client.
+//
+// Deliberately thin. This dogfood is about what a list you can filter and
+// edit demands of contrib/dom; the server is here so that editing has
+// somewhere to go and so that a failed save has something to retry
+// against. State lives in contrib/store/kvlog.mere, the same append-only
+// log the tally app uses.
+//
+// A task is stored as `task/<id>` -> `<done>\t<title>`, with done as "0"
+// or "1". Ids are minted from a counter kept under `next`.
+//
+// One endpoint takes every mutation as a tab-separated command rather
+// than three REST routes: the client's shape is what this example is
+// about, and a smaller server keeps that in view.
+//
+//   GET  /api/tasks              "<id>\t<done>\t<title>\n" per task
+//   POST /api/tasks   add\t<title>          -> the new id
+//                     rename\t<id>\t<title> -> "ok"
+//                     done\t<id>\t<0|1>     -> "ok"
+//                     delete\t<id>          -> "ok"
+//
+//   POST /api/flaky   <0|1>      fail the next N saves on purpose, so the
+//                                client's retry path can be exercised
+//                                without unplugging anything.
+//
+// Run:
+//   mere -w examples/tasks/server.mere > /tmp/tasks.wat
+//   wat2wasm --enable-tail-call /tmp/tasks.wat -o /tmp/tasks.wasm
+//   node scripts/run_http_server.js /tmp/tasks.wasm
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../../contrib/http/access_log.mere";
+import "../../contrib/http/arena.mere";
+import "../../contrib/http/cors.mere";
+import "../../contrib/http/static.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/store/kvlog.mere";
+
+let db = "/tmp/mere_tasks.log" in
+
+let num = fn (s: str) -> if str_eq s "" then 0 else try_or (fn () -> int_of_str s) 0 in
+
+// Split on the first tab; the value keeps any further tabs, so a title
+// containing one survives.
+let split1 = fn (s: str) ->
+  let i = str_index_of s "\t" in
+  if i < 0 then (s, "") else (substring s 0 i, substring s (i + 1) (str_len s))
+in
+
+let rec render = fn (xs) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons ((k, v), rest) ->
+    // An empty value is a delete tombstone, not a task.
+    if str_starts_with k "task/" && not (str_eq v "") then
+      let id = substring k 5 (str_len k) in
+      let (done, title) = split1 v in
+      render rest (acc ++ id ++ "\t" ++ done ++ "\t" ++ title ++ "\n")
+    else render rest acc
+in
+
+let list_tasks = fn (req: str) ->
+  let _ = http_set_content_type "text/plain; charset=utf-8" in
+  render (kvlog_all db) ""
+in
+
+// A deliberate fault injector. Retry-with-backoff is one of the three
+// capabilities this dogfood exists to force, and a path that is never
+// taken is a path that is never tested.
+let set_flaky = fn (req: str) ->
+  let _ = kvlog_set db "flaky" (str_trim (http_current_body ())) in
+  let _ = http_set_content_type "text/plain" in
+  "ok\n"
+in
+
+let mutate = fn (req: str) ->
+  let flaky = num (kvlog_get db "flaky") in
+  if flaky > 0 then
+    let _ = kvlog_set db "flaky" (show (flaky - 1)) in
+    let _ = http_set_status 503 in
+    "flaky\n"
+  else
+    let (op, rest) = split1 (http_current_body ()) in
+    let _ = http_set_content_type "text/plain; charset=utf-8" in
+    if str_eq op "add" then
+      let id = show (num (kvlog_get db "next") + 1) in
+      let _ = kvlog_set db "next" id in
+      let _ = kvlog_set db ("task/" ++ id) ("0\t" ++ str_trim rest) in
+      let _ = http_set_status 201 in
+      id ++ "\n"
+    else
+      let (id, value) = split1 rest in
+      let cur = kvlog_get db ("task/" ++ id) in
+      if str_eq cur "" then
+        let _ = http_set_status 404 in "no such task\n"
+      else
+        let (done, title) = split1 cur in
+        if str_eq op "rename" then
+          let _ = kvlog_set db ("task/" ++ id) (done ++ "\t" ++ value) in "ok\n"
+        else if str_eq op "done" then
+          let _ = kvlog_set db ("task/" ++ id) (value ++ "\t" ++ title) in "ok\n"
+        else if str_eq op "delete" then
+          // The log has no delete, so a tombstone stands in: an empty
+          // record replaces the task and the renderer skips it.
+          let _ = kvlog_set db ("task/" ++ id) "" in "ok\n"
+        else
+          let _ = http_set_status 400 in "unknown op\n"
+in
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  read_file "examples/tasks/index.html"
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"           home,
+  Cons (route "GET"  "/api/tasks"  list_tasks,
+  Cons (route "POST" "/api/tasks"  mutate,
+  Cons (route "POST" "/api/flaky"  set_flaky,
+  Nil)))) in
+
+let handle =
+  serve_static_fallback "/static/" "examples/tasks"
+    (serve_static_fallback "/vendor/" "contrib"
+      (router routes not_found)) in
+
+let _ = print ("tasks server on :8080 (db=" ++ db ++ ")") in
+let _ = http_serve 8080 (with_arena (with_access_log (with_cors "*" handle))) in
+0

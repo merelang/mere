@@ -11,6 +11,8 @@
 //
 //   --set <id>=<value>     seed an input's value before main() runs
 //   --fire <id>:<event>    dispatch an event after main() (repeatable)
+//   --type <id>=<text>     set a field's value and fire `input`, the way
+//                          a keystroke does (repeatable, in order)
 //   --wait <ms>            settle time after the last --fire (default 1000)
 //   --settle <ms>          settle time after main() before firing (default 300)
 //   --worker <store.wasm>  a second module that owns storage, reached
@@ -79,7 +81,11 @@ class El {
     // itself, so --fire can reach a row's button.
     if (k === "id") { this.id = v; byId.set(v, this); }
   }
-  appendChild(c) { this.children.push(c); return c; }
+  appendChild(c) { c.parent = this; this.children.push(c); return c; }
+  remove() {
+    const p = this.parent;
+    if (p) { p.children = p.children.filter((c) => c !== this); this.parent = null; }
+  }
   addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); }
   fire(ev, obj = {}) {
     for (const fn of this.listeners[ev] || []) fn({ preventDefault() {}, ...obj });
@@ -337,14 +343,28 @@ const report = (label) => {
 
 report("after main()");
 
-for (const spec of optValues("fire")) {
-  const colon = spec.lastIndexOf(":");
-  lookup(spec.slice(0, colon)).fire(spec.slice(colon + 1));
+// --type and --fire run in the order they appear on the command line, so
+// a filter can be typed and then a button pressed in one run.
+const actions = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === "--type") actions.push(["type", argv[i + 1]]);
+  if (argv[i] === "--fire") actions.push(["fire", argv[i + 1]]);
+}
+for (const [kind, spec] of actions) {
+  if (kind === "type") {
+    const eq = spec.indexOf("=");
+    const el = lookup(spec.slice(0, eq));
+    el.value = spec.slice(eq + 1);
+    el.fire("input");
+  } else {
+    const colon = spec.lastIndexOf(":");
+    lookup(spec.slice(0, colon)).fire(spec.slice(colon + 1));
+  }
 }
 
-if (optValues("fire").length > 0) {
+if (actions.length > 0) {
   await new Promise((r) => setTimeout(r, waitMs));
-  report(`after ${optValues("fire").join(", ")}`);
+  report(`after ${actions.map(([k, v]) => `${k} ${v}`).join(", ")}`);
 }
 
 process.exit(0);

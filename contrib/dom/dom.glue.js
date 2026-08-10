@@ -358,6 +358,30 @@ export function makeDomGlue() {
 
     dom_tz_offset: () => -new Date().getTimezoneOffset(),
 
+    // --- v0.1.168 (tasks dogfood): editing a list in place -----------
+    dom_remove: (handleIdx) => {
+      const el = handles[handleIdx];
+      // The handle slot is deliberately left occupied: Mere may still be
+      // holding this JsRef, and a detached node is a valid target for
+      // everything else here.
+      if (el && el.remove) el.remove();
+    },
+    dom_on_input: (handleIdx, closurePtr) => {
+      const el = handles[handleIdx];
+      if (!el) {
+        console.warn("contrib/dom: dom_on_input on null handle", { handleIdx });
+        return;
+      }
+      el.addEventListener("input", () =>
+        callClosureStr(closurePtr, el.value !== undefined ? el.value : ""));
+    },
+    // setTimeout with a cancellable handle. Debounce needs the cancel:
+    // every keystroke drops the pending callback and queues a new one, so
+    // only the last one runs.
+    dom_set_timeout: (ms, closurePtr) =>
+      Number(setTimeout(() => callClosure(closurePtr), ms)),
+    dom_clear_timeout: (handle) => { clearTimeout(handle); },
+
     // A page has no command line, so `args()` is the empty list. The
     // builtin now asks the host rather than being hardcoded to Nil, so
     // the host has to answer — reporting 0 gives a browser program the

@@ -1,0 +1,231 @@
+// examples/tasks/app.mere — a task list you can filter and edit.
+//
+// The chat and tally clients only ever appended, and a list that only
+// grows can be redrawn wholesale: `dom_set_text list ""` drops every
+// child and the rest is rebuilt from state. This one cannot, and that is
+// why it exists. Each row holds an <input> you type into, so redrawing
+// the list while you are editing would take the field out from under the
+// caret. Every row that still belongs on screen has to be left exactly
+// where it is.
+//
+// Three bindings fall out of that, and each is here because this app
+// cannot be written without it:
+//
+//   dom_remove        take one row out and leave its siblings — and
+//                     their focus, selection and half-typed text — alone
+//   dom_on_input      fire on every keystroke, so the filter can narrow
+//                     as you type rather than on submit
+//   dom_set_timeout   two different reasons. Debounce: a keystroke
+//                     cancels the pending work and queues new work, so
+//                     only the last one runs. Retry: a save that fails
+//                     comes back later, with the delay doubling.
+//
+// Build:
+//   mere -w examples/tasks/app.mere > /tmp/tasks_app.wat
+//   wat2wasm --enable-tail-call /tmp/tasks_app.wat -o examples/tasks/app.wasm
+//
+// Verify without a browser:
+//   node scripts/run_dom_headless.mjs examples/tasks/app.wasm \
+//     http://localhost:8080 --type search=al --wait 900
+
+import "../../contrib/dom/dom.mere";
+
+// ---- elements -------------------------------------------------------
+
+let list_el = dom_get_by_id "list" in
+let search_in = dom_get_by_id "search" in
+let add_form = dom_get_by_id "add" in
+let add_in = dom_get_by_id "title" in
+let status_el = dom_get_by_id "status" in
+
+// ---- state ----------------------------------------------------------
+//
+// Mere has no mutable cell, so each piece of state is one slot of a vec
+// allocated once — the arena is page-lifetime, so it survives across
+// event firings. `tasks` is what the server last told us; `rows` is what
+// is currently on screen, as (id, row handle) so a row can be found and
+// removed by id without touching its neighbours.
+
+let tasks = vec_new () in
+let _ = vec_push tasks Nil in
+let rows = vec_new () in
+let _ = vec_push rows Nil in
+let filter_timer = vec_new () in
+let _ = vec_push filter_timer 0 in
+let retry_delay = vec_new () in
+let _ = vec_push retry_delay 400 in
+
+let set_status = fn (s: str) -> dom_set_text status_el s in
+
+// ---- parsing --------------------------------------------------------
+
+let split1 = fn (s: str) ->
+  let i = str_index_of s "\t" in
+  if i < 0 then (s, "") else (substring s 0 i, substring s (i + 1) (str_len s))
+in
+
+let rec parse_lines = fn (xs) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (line, rest) ->
+    if str_eq line "" then parse_lines rest
+    else
+      let (id, r1) = split1 line in
+      let (done, title) = split1 r1 in
+      Cons ((id, done, title), parse_lines rest)
+in
+
+let rec assoc_row = fn (xs) -> fn (id: str) ->
+  match xs with
+  | Nil -> None
+  | Cons ((rid, h), rest) -> if str_eq rid id then Some h else assoc_row rest id
+in
+
+let rec drop_row = fn (xs) -> fn (id: str) ->
+  match xs with
+  | Nil -> Nil
+  | Cons ((rid, h), rest) ->
+    if str_eq rid id then rest else Cons ((rid, h), drop_row rest id)
+in
+
+let matches = fn (needle: str) -> fn (title: str) ->
+  if str_eq needle "" then true else str_contains (to_lower title) (to_lower needle)
+in
+
+// ---- saving, with retry ---------------------------------------------
+//
+// A save that fails comes back later rather than being dropped, and the
+// delay doubles each time. Without a timer the only options are to give
+// up or to spin.
+
+let rec save = fn (body: str) -> fn (attempt: int) ->
+  let _ = dom_fetch_header "Content-Type" "text/plain" in
+  dom_fetch_async "POST" "/api/tasks" body (fn (resp: str) ->
+    let st = dom_fetch_status () in
+    if st == 200 || st == 201 then
+      let _ = vec_set retry_delay 0 400 in
+      set_status "saved"
+    else if attempt >= 5 then
+      set_status ("gave up after " ++ show attempt ++ " attempts")
+    else
+      let delay = vec_get retry_delay 0 in
+      let _ = vec_set retry_delay 0 (delay * 2) in
+      let _ = set_status ("save failed (" ++ show st ++ "), retrying in "
+                          ++ show delay ++ "ms") in
+      let _ = dom_set_timeout delay (fn (u: unit) -> save body (attempt + 1)) in
+      ())
+in
+
+// ---- rendering ------------------------------------------------------
+//
+// A row is built once and then left alone. Nothing below rebuilds a row
+// that is already on screen, because the <input> inside it may be the
+// one the user is typing into.
+
+let build_row = fn (id: str) -> fn (done: str) -> fn (title: str) ->
+  let li = dom_create "li" in
+  let _ = dom_set_attr li "id" ("task-" ++ id) in
+
+  let check = dom_create "button" in
+  let _ = dom_set_attr check "id" ("done-" ++ id) in
+  let _ = dom_set_text check (if str_eq done "1" then "done" else "todo") in
+  let _ = dom_on_click check (fn (u: unit) ->
+    let next = if str_eq (dom_input_value check) "" then "1" else "1" in
+    let _ = dom_set_text check "done" in
+    save ("done\t" ++ id ++ "\t" ++ next) 0) in
+
+  let edit = dom_create "input" in
+  let _ = dom_set_attr edit "id" ("edit-" ++ id) in
+  let _ = dom_set_attr edit "class" "title" in
+  let _ = dom_set_value edit title in
+  // Every keystroke schedules a save and cancels the one before it, so a
+  // burst of typing costs one request rather than one per character.
+  let pending = vec_new () in
+  let _ = vec_push pending 0 in
+  let _ = dom_on_input edit (fn (text: str) ->
+    let _ = dom_clear_timeout (vec_get pending 0) in
+    let t = dom_set_timeout 400 (fn (u: unit) ->
+      save ("rename\t" ++ id ++ "\t" ++ text) 0) in
+    vec_set pending 0 t) in
+
+  let del = dom_create "button" in
+  let _ = dom_set_attr del "id" ("del-" ++ id) in
+  let _ = dom_set_text del "delete" in
+  let _ = dom_on_click del (fn (u: unit) ->
+    // Remove this row only. Redrawing the list instead would rebuild
+    // every other row, including one being edited.
+    let _ = dom_remove li in
+    let _ = vec_set rows 0 (drop_row (vec_get rows 0) id) in
+    save ("delete\t" ++ id) 0) in
+
+  let _ = dom_append li check in
+  let _ = dom_append li edit in
+  let _ = dom_append li del in
+  let _ = dom_append list_el li in
+  li
+in
+
+// Reconcile what is on screen against what should be. Rows that should
+// stay are not touched at all; rows that should go are removed one by
+// one; rows that should appear are built and appended. This is the whole
+// reason dom_remove exists in contrib/dom.
+let render = fn (u: unit) ->
+  let needle = dom_input_value search_in in
+  let all = vec_get tasks 0 in
+  let cur = vec_get rows 0 in
+  let rec prune = fn (xs) -> fn (keep) ->
+    match xs with
+    | Nil -> keep
+    | Cons ((rid, h), rest) ->
+      let rec still = fn (ts) ->
+        match ts with
+        | Nil -> false
+        | Cons ((id, d, title), tr) ->
+          if str_eq id rid then matches needle title else still tr in
+      if still all then prune rest (Cons ((rid, h), keep))
+      else let _ = dom_remove h in prune rest keep in
+  let kept = prune cur Nil in
+  let rec add = fn (ts) -> fn (acc) ->
+    match ts with
+    | Nil -> acc
+    | Cons ((id, d, title), tr) ->
+      if not (matches needle title) then add tr acc
+      else
+        match assoc_row acc id with
+        | Some _ -> add tr acc
+        | None -> add tr (Cons ((id, build_row id d title), acc)) in
+  vec_set rows 0 (add all kept)
+in
+
+let refresh = fn (u: unit) ->
+  dom_fetch_async "GET" "/api/tasks" "" (fn (body: str) ->
+    if dom_fetch_status () != 200 then set_status "could not load tasks"
+    else
+      let _ = vec_set tasks 0 (parse_lines (str_split body "\n")) in
+      let _ = render () in
+      set_status ("loaded " ++ show (list_len (vec_get tasks 0)) ++ " task(s)"))
+in
+
+// ---- startup --------------------------------------------------------
+
+// Filtering as you type, debounced: the work is scheduled, and the next
+// keystroke cancels it. Without the cancel this would re-render on every
+// character; without the input event it could only run on submit.
+let _ = dom_on_input search_in (fn (text: str) ->
+  let _ = dom_clear_timeout (vec_get filter_timer 0) in
+  let t = dom_set_timeout 250 (fn (u: unit) -> render ()) in
+  vec_set filter_timer 0 t) in
+
+let _ = dom_on_submit add_form (fn (u: unit) ->
+  let title = str_trim (dom_input_value add_in) in
+  if str_eq title "" then ()
+  else
+    let _ = dom_set_value add_in "" in
+    let _ = dom_fetch_header "Content-Type" "text/plain" in
+    dom_fetch_async "POST" "/api/tasks" ("add\t" ++ title) (fn (resp: str) ->
+      if dom_fetch_status () == 201 then refresh ()
+      else set_status "could not add")) in
+
+let _ = set_status "loading…" in
+let _ = refresh () in
+0
