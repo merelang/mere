@@ -1,0 +1,146 @@
+// examples/profile/server.mere — storage and the rules the client cannot
+// know.
+//
+// Thin, like the tasks server, but with one job that matters to the
+// dogfood: it rejects things. A form's error state is only interesting
+// when it has two sources. The client checks what it can see — a missing
+// name, an address with no @ — and the server checks what only it can:
+// here, that a display name is not one of the reserved ones. A client
+// that has to merge both into the same error state is the realistic case,
+// and the reason POST answers 422 with per-field messages rather than a
+// bare failure.
+//
+//   GET  /api/profile          "<field>\t<value>\n" per field
+//   POST /api/profile          same shape in; 200 on success, or 422 with
+//                              "<field>\t<message>\n" per rejected field
+//
+// Run:
+//   mere -w examples/profile/server.mere > /tmp/profile.wat
+//   wat2wasm --enable-tail-call /tmp/profile.wat -o /tmp/profile.wasm
+//   node scripts/run_http_server.js /tmp/profile.wasm
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../../contrib/http/access_log.mere";
+import "../../contrib/http/arena.mere";
+import "../../contrib/http/cors.mere";
+import "../../contrib/http/static.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/store/kvlog.mere";
+
+let db = "/tmp/mere_profile.log" in
+
+let split1 = fn (s: str) ->
+  let i = str_index_of s "\t" in
+  if i < 0 then (s, "") else (substring s 0 i, substring s (i + 1) (str_len s))
+in
+
+let rec parse_pairs = fn (xs: str list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (line, rest) ->
+    if str_eq line "" then parse_pairs rest
+    else let (k, v) = split1 line in Cons ((k, v), parse_pairs rest)
+in
+
+let rec assoc = fn (xs: (str * str) list) -> fn (k: str) ->
+  match xs with
+  | Nil -> ""
+  | Cons ((key, v), rest) -> if str_eq key k then v else assoc rest k
+in
+
+let field_names = Cons ("name", Cons ("email", Cons ("bio",
+  Cons ("theme", Cons ("notify", Nil))))) in
+
+let rec render = fn (ks: str list) -> fn (acc: str) ->
+  match ks with
+  | Nil -> acc
+  | Cons (k, rest) ->
+    render rest (acc ++ k ++ "\t" ++ kvlog_get db ("profile/" ++ k) ++ "\n")
+in
+
+let get_profile = fn (req: str) ->
+  let _ = http_set_content_type "text/plain; charset=utf-8" in
+  render field_names ""
+in
+
+// The rules. The first two duplicate the client's own checks on purpose:
+// a browser can be bypassed, so the server repeats them, and the client
+// gets to prove it renders a rejection it did not predict. The third is
+// the one the client genuinely cannot make — it depends on what else
+// exists.
+let reserved = Cons ("root", Cons ("admin", Cons ("support", Nil))) in
+
+let rec is_reserved = fn (xs: str list) -> fn (v: str) ->
+  match xs with
+  | Nil -> false
+  | Cons (r, rest) -> if str_eq r (to_lower v) then true else is_reserved rest v
+in
+
+let validate = fn (ps: (str * str) list) ->
+  let name = str_trim (assoc ps "name") in
+  let email = assoc ps "email" in
+  let bio = assoc ps "bio" in
+  let e_name =
+    if str_eq name "" then "Name is required"
+    else if is_reserved reserved name then "That name is reserved — pick another"
+    else "" in
+  let at = str_index_of email "@" in
+  let e_email =
+    if str_eq (str_trim email) "" then "Email is required"
+    else if at < 1 || at >= str_len email - 1 then
+      "Email needs an @ with something on both sides"
+    else "" in
+  let e_bio = if str_len bio > 200 then "Bio is longer than 200 characters" else "" in
+  let errs = "" in
+  let errs = if str_eq e_name "" then errs else errs ++ "name\t" ++ e_name ++ "\n" in
+  let errs = if str_eq e_email "" then errs else errs ++ "email\t" ++ e_email ++ "\n" in
+  let errs = if str_eq e_bio "" then errs else errs ++ "bio\t" ++ e_bio ++ "\n" in
+  errs
+in
+
+let rec store = fn (ks: str list) -> fn (ps: (str * str) list) ->
+  match ks with
+  | Nil -> ()
+  | Cons (k, rest) ->
+    let _ = kvlog_set db ("profile/" ++ k) (assoc ps k) in
+    store rest ps
+in
+
+let put_profile = fn (req: str) ->
+  let ps = parse_pairs (str_split (http_current_body ()) "\n") in
+  let _ = http_set_content_type "text/plain; charset=utf-8" in
+  let errs = validate ps in
+  if not (str_eq errs "") then
+    let _ = http_set_status 422 in errs
+  else
+    let _ = store field_names ps in
+    "ok\n"
+in
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  read_file "examples/profile/index.html"
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"            home,
+  Cons (route "GET"  "/api/profile" get_profile,
+  Cons (route "POST" "/api/profile" put_profile,
+  Nil))) in
+
+let handle =
+  serve_static_fallback "/static/" "examples/profile"
+    (serve_static_fallback "/vendor/" "contrib"
+      (router routes not_found)) in
+
+let _ = print ("profile server on :8080 (db=" ++ db ++ ")") in
+let _ = http_serve 8080 (with_arena (with_access_log (with_cors "*" handle))) in
+0

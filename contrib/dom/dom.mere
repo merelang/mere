@@ -179,3 +179,39 @@ extern fn dom_on_input: JsRef -> (str -> unit) -> unit;
 // backoff is built from.
 extern fn dom_set_timeout: int -> (unit -> unit) -> int;
 extern fn dom_clear_timeout: int -> unit;
+
+// ---------------------------------------------------------------------
+// v0.1.170 (profile dogfood): what a form needs and a list does not.
+//
+// A list is edited one field at a time and every keystroke is worth
+// acting on. A form is a set of fields with a shape: it is valid or it
+// is not, it differs from what was loaded or it does not, and its
+// controls are not all text. `input` and `click` cannot express any of
+// that — validation on every keystroke scolds you mid-word, a <select>
+// has no keystrokes at all, and a checkbox has no value, it has a
+// checked-ness.
+// ---------------------------------------------------------------------
+
+// `blur` and `focus`, with the field's current value handed to the blur
+// closure. These two are what makes validation feel like a form rather
+// than a nag: check when the user leaves the field, and take the
+// complaint back down the moment they return to fix it.
+extern fn dom_on_blur: JsRef -> (str -> unit) -> unit;
+extern fn dom_on_focus: JsRef -> (unit -> unit) -> unit;
+
+// `change`. For a <select> or a checkbox this is the event that means
+// "the user picked something" — `input` fires for text as it is typed,
+// but a dropdown produces one change and no keystrokes.
+extern fn dom_on_change: JsRef -> (str -> unit) -> unit;
+
+// Checkbox state. A checkbox has no useful `value`: its meaning is in
+// `el.checked`, a property that is not the attribute of the same name,
+// so nothing already here can read or write it.
+extern fn dom_checked: JsRef -> bool;
+extern fn dom_set_checked: JsRef -> bool -> unit;
+
+// `element.removeAttribute(name)`. The counterpart dom_set_attr has
+// been missing since v0.1.152: a form can disable its save button while
+// the input is invalid, but with only setAttribute it can never enable
+// it again.
+extern fn dom_remove_attr: JsRef -> str -> unit;

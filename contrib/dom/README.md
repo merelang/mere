@@ -9,13 +9,15 @@ exist, click and key input — enough for games and emulators). v0.1.152
 added the groups a document-shaped app needs: building elements,
 request/response, and server push. v0.1.168 added what a list you can
 filter and edit needs: removing one node, input events, and timers.
+v0.1.170 added what a form needs and a list does not: blur, focus and
+change, checkbox state, and removing an attribute.
 
 ## Files
 
 | file | content | lines |
 |---|---|---|
-| `dom.mere` | `extern type JsRef;` + 28 `extern fn` declarations | ~190 |
-| `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | ~380 |
+| `dom.mere` | `extern type JsRef;` + 34 `extern fn` declarations | ~215 |
+| `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | ~490 |
 
 ## API
 
@@ -32,6 +34,9 @@ filter and edit needs: removing one node, input events, and timers.
 | `dom_input_value` | `JsRef -> str` | `element.value` |
 | `dom_scroll_to_end` | `JsRef -> unit` | `el.scrollTop = el.scrollHeight` |
 | `dom_remove` | `JsRef -> unit` | `element.remove()` — detaches one node, siblings keep focus and caret |
+| `dom_remove_attr` | `JsRef -> str -> unit` | `element.removeAttribute(name)` — the counterpart `dom_set_attr` lacked |
+| `dom_checked` | `JsRef -> bool` | `input.checked` — a checkbox's meaning is not in its `value` |
+| `dom_set_checked` | `JsRef -> bool -> unit` | `input.checked = ...` |
 
 ### Events
 
@@ -40,6 +45,9 @@ filter and edit needs: removing one node, input events, and timers.
 | `dom_on_click` | `JsRef -> (unit -> unit) -> unit` | `element.addEventListener("click", ...)` |
 | `dom_on_submit` | `JsRef -> (unit -> unit) -> unit` | `"submit"`, with `preventDefault()` applied by the host |
 | `dom_on_input` | `JsRef -> (str -> unit) -> unit` | `"input"`, with the field's current value — fires on every keystroke |
+| `dom_on_change` | `JsRef -> (str -> unit) -> unit` | `"change"` — a `<select>` has no keystrokes; a checkbox reports `"1"` / `"0"` |
+| `dom_on_blur` | `JsRef -> (str -> unit) -> unit` | `"blur"`, with the field's value — where validation belongs |
+| `dom_on_focus` | `JsRef -> (unit -> unit) -> unit` | `"focus"` — where taking the complaint back down belongs |
 | `dom_on_key` | `(str -> unit) -> unit` | `document.addEventListener("keydown", ...)`; passes the key name |
 | `dom_set_timeout` | `int -> (unit -> unit) -> int` | `setTimeout`, returning a cancellable handle |
 | `dom_clear_timeout` | `int -> unit` | `clearTimeout` — what makes a debounce a debounce |
@@ -186,11 +194,35 @@ filter and queues a new one, so a burst of typing costs one re-render
 rather than one per character. Retry: a save that fails comes back on a
 doubling delay instead of being dropped.
 
+## A form, as opposed to a list
+
+A list is edited one item at a time and every keystroke is worth acting
+on. A form is a set of fields with a shape: it is valid or it is not, it
+differs from what was loaded or it does not, and its controls are not all
+text. `input` and `click` cannot express any of that.
+
+`dom_on_blur` / `dom_on_focus` / `dom_on_change` / `dom_checked` /
+`dom_set_checked` / `dom_remove_attr` exist for that, and
+`examples/profile` is the app that forced them. Validation runs on blur,
+because checking on every keystroke tells someone their email is invalid
+while they are still typing the part before the `@`; the complaint comes
+back down on focus, because they have returned to fix it. A `<select>`
+emits `change` and no keystrokes at all, so without it the theme picker
+would be inert. A checkbox has no useful `value` — its meaning is
+`el.checked`, a property that is not the attribute of the same name. And
+`dom_remove_attr` closes a hole `dom_set_attr` had left since v0.1.152: a
+form could disable its save button while the input was invalid and then
+never enable it again.
+
+`examples/profile/browser_check.mjs` asserts the part a headless harness
+cannot: it can *fire* a blur, but only a browser can *cause* one by the
+user clicking the next field.
+
 ## Limitations
 
-- **No `change` / `blur` / `focus` events**: `click`, `submit`, `input`,
-  `keydown` and the animation frame are wired; the rest follow the same
-  shape.
+- **No pointer / drag events**: `click`, `submit`, `input`, `change`,
+  `blur`, `focus`, `keydown` and the animation frame are wired;
+  `pointerdown` and friends follow the same shape.
 - **Single global handle table**: handles are never freed. An app that
   creates many ephemeral elements leaks entries; wiring handlers at
   startup and appending steadily (a chat log) is fine.

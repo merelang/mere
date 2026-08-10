@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.170 — 2026-08-10
+
+_A form, as opposed to a list — and the six bindings that separate the two._
+
+_The three browser clients before this one were lists. A list is edited one item
+at a time, every keystroke is worth acting on, and the only question the UI ever
+asks is "what is on screen". `examples/profile` is a settings form, which is a
+different animal: it is a set of fields with a shape. It is valid or it is not.
+It differs from what was loaded or it does not. Answering either question means
+holding two versions of the same record at once — what the server confirmed and
+what the user has done since — and comparing them. The change count, whether
+Save is offered, what Revert restores: all three are derived from that pair,
+none of them is a flag anyone sets._
+
+_Six bindings fall out, and each is here because the form cannot be written
+without it. `dom_on_blur` and `dom_on_focus` are what make validation feel like
+a form rather than a nag — judge the field when the user leaves it, take the
+complaint back down when they return to fix it; checking on every keystroke
+tells someone their email is invalid while they are still typing the part
+before the `@`. `dom_on_change` is the only event a `<select>` produces, so
+without it the theme picker is inert. `dom_checked` / `dom_set_checked` exist
+because a checkbox has no useful `value` — its meaning is `el.checked`, a
+property that is not the attribute of the same name. And `dom_remove_attr`
+closes a hole `dom_set_attr` left in v0.1.152: a form could disable its save
+button while the input was invalid and then never enable it again._
+
+_The fields are described once — id, label, a getter, a setter, a check — and
+everything else loops over that list: painting, comparing, validating,
+reverting. Record fields cannot be named at runtime, so without the get/set
+pair each of those loops would have been written out once per field._
+
+_The server rejects things on purpose. The client checks what it can see; the
+server also enforces a rule the client cannot know (a reserved display name)
+and answers 422 with per-field messages, which land in the same error state a
+local complaint does. `run_dom_headless.mjs` gained `--pick` and `--check` for
+the two controls that are not text, `removeAttribute` and `checked` in its DOM
+stub, and `value` / `checked` in its dump — a filled-in form used to render
+identically to an empty one. `examples/profile/browser_check.mjs` covers what
+the stub cannot: it can fire a blur, but only a browser can cause one. 15/15 in
+Chrome, parity 76/76, dune runtest 2308/0._
+
+_Correction: the version bump in v0.1.169 left `test/test_basic.ml`'s version
+assertion pinned at 0.1.151, so that slice's suite was red as committed. Fixed
+here._
+
+---
+
 ## v0.1.169 — 2026-08-10
 
 _`args ()` on LLVM — the last reason a Mere CLI ran on three backends out of
