@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.172 — 2026-08-10
+
+_Shadowing a builtin, in general — the family the `join` fix in v0.1.169 was
+one member of._
+
+_Each backend dispatches on builtin names in about a hundred match arms, and
+each arm decided on its own whether to ask if the program had bound that name
+itself. Those questions had been added one incident at a time, after someone
+was bitten: C had guarded 39 of 95, Wasm 14 of 139, LLVM 6 of 70. The rest were
+silent. `let str_len = fn (s: str) -> 999` returned 999 on the interpreter and
+5 on all three compiled backends — no error, no warning, a different answer.
+Both a top-level and a local binding were affected._
+
+_Each backend now asks once, before any builtin arm can match: if the head of
+the application spine is a name the program bound, the call goes to the
+ordinary call paths — inner-lifted fn, top-level fn, or closure value — and
+never meets the builtin arms. Those three paths were already contiguous at the
+end of each backend's App group, so they lifted out into one function
+(`emit_user_app`, and a trio of local helpers in codegen_c) with nothing
+duplicated. Safe by construction: the guard is false unless the program
+actually bound the name, so a program that shadows nothing reaches exactly the
+arms it reached before._
+
+_The first version of the guard was wrong in a way worth recording. It asked
+whether a name was bound **anywhere** in the program, but top-level bindings
+are sequential — the typer rejects a forward reference — so a builtin used
+above a later same-named binding is still the builtin. Under the first version
+a helper written before `let show = ...` silently started calling the user's
+show. Each backend now records the declaration position of every top-level fn
+and the guard compares against the body being emitted, with `<=` so a
+recursive fn still counts as binding its own name. Wasm needed the position
+question asked ahead of its name-only tables (`fn_closure_table_idx`,
+`top_globals_wasm` also hold top-level fn names), and LLVM needed the cursor
+reset for main's body, which it emits without a host-scope switch._
+
+_`test/parity/shadow_builtin.mere` covers the shapes the guard has to
+recognise separately: bound at top level, locally, or as a capturing inner fn
+that gets lifted; called with one argument or three (the name three levels
+down a spine); used as a value rather than called; and the ordering rule.
+parity 77/77, dune runtest 2308/0._
+
+_Swept up while here: `file_size` / `file_pread` / `file_pwrite` left the LLVM
+"no lowering yet" list they had been on since v0.1.163, the stale claim in
+`test/parity/file_pio.mere` that LLVM refuses positioned I/O, and the example
+count in `mere --help` (118 → 282)._
+
+---
+
 ## v0.1.171 — 2026-08-10
 
 _contrib/state: the one-slot-vec trick, named — and the thing naming it does

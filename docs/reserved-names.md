@@ -68,18 +68,34 @@ backend that lowers `join x` to `pthread_join` without first asking whether
 the user bound that name miscompiles the program.
 
 The rule is that a user binding — local, lifted inner fn, or top-level —
-**always wins** over a same-named builtin. `user_shadows` in codegen_c,
-`user_shadows_llvm` in codegen_llvm and the equivalent guard in codegen_wasm
-implement it, and `test/parity/shadow_builtin.mere` plus
-`test/parity/toplevel_shadows_builtin.mere` lock it down across the four
-backends the parity harness runs.
+**wins** over a same-named builtin, from its declaration onward.
 
-Unlike a C collision, this one is **not** linted, because there is nothing
-wrong with the program: shadowing is legal and the intent is unambiguous.
-It is the backend's job to honour it. The guards were added one incident at
-a time, though, so if you shadow a builtin and get a compile failure deep in
-the emitted code rather than the behaviour you wrote, that is a bug in the
-backend — `join` on LLVM was exactly that, fixed in v0.1.169.
+Until v0.1.172 each backend enforced that with a private guard on individual
+builtins, added one incident at a time: C had 39 of 95 dispatch arms guarded,
+Wasm 14 of 139, LLVM 6 of 70. The rest were silent — `let str_len = fn (s:
+str) -> 999` returned 999 on the interpreter and 5 on all three compiled
+backends, with no error and no warning. Each backend now asks the question
+once, before any builtin arm can match: if the head of an application spine
+is a name the program bound, the call goes to the ordinary call paths and
+never meets the builtin arms at all.
+
+**Declaration order matters**, because top-level bindings are sequential —
+the typer rejects a forward reference. A builtin used *above* a later
+same-named binding is still the builtin:
+
+```mere
+let show_of = fn (n: int) -> "SHOWN " ++ show n;   // the builtin show
+let show = fn (n: int) -> "MY SHOW";               // from here on, yours
+```
+
+`test/parity/shadow_builtin.mere` and `test/parity/toplevel_shadows_builtin.mere`
+lock all of this down across the four backends the parity harness runs:
+top-level, local and lifted-inner bindings, one- and three-argument calls,
+use in value position, and the ordering rule above.
+
+Unlike a C collision, this is **not** linted, because there is nothing wrong
+with the program: shadowing is legal and the intent is unambiguous. It is the
+backend's job to honour it.
 
 Names most likely to collide this way: **`join`** (string-join helper),
 **`run`** (any interpreter or driver loop), **`args`**, **`show`**,

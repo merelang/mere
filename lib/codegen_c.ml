@@ -44,6 +44,18 @@ let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 16
    runs so Var-in-value-position can pick the right closure wrapper
    const, and App-in-head-position can choose direct vs indirect call. *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* v0.1.172: declaration position of each top-level fn. Top-level bindings
+   are sequential — the typer rejects a forward reference — so `show` used
+   above a later `let show = ...` is still the builtin, and the shadowing
+   guard has to ask "bound before here?" rather than "bound anywhere?".
+   `<=` rather than `<` so a recursive fn counts as binding its own name. *)
+let toplevel_fn_pos : (string, int) Hashtbl.t = Hashtbl.create 8
+let current_toplevel_pos = ref max_int
+let toplevel_binds_here name =
+  match Hashtbl.find_opt toplevel_fn_pos name with
+  | Some p -> p <= !current_toplevel_pos
+  | None -> Hashtbl.mem toplevel_fn_names name
+
 
 (* v0.1.27 (mlog dogfood P4): curried top-level fns whose exactly-saturated
    call sites compile to a direct N-ary C call. Level-by-level application
@@ -407,6 +419,14 @@ let set_inner_lifts_for_host (host : string) : unit =
   (match Hashtbl.find_opt inner_lifts_by_host host with
    | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts k v) tbl
    | None -> ());
+  (* v0.1.172: the host also fixes where we are in the file, which is what
+     the shadowing guard needs — a builtin used inside fn #3 is not affected
+     by a same-named binding introduced at #9. "$main" and lifted helpers
+     with no recorded position fall back to "everything is in scope". *)
+  current_toplevel_pos :=
+    (match Hashtbl.find_opt toplevel_fn_pos host with
+     | Some p -> p
+     | None -> max_int);
   current_host_fn := host
 
 (* Anonymous closure (Phase B): a Fun in expression position becomes a
@@ -457,7 +477,20 @@ let user_shadows name =
   List.mem_assoc name !current_var_types
   || List.mem_assoc name !current_env_subst
   || Hashtbl.mem inner_lifts name
-  || Hashtbl.mem toplevel_fn_names name
+  || toplevel_binds_here name
+
+(* The head of an application spine: `f a b c` is App (App (App (f, a), b), c),
+   so a three-argument builtin is matched with the name three levels down. A
+   guard has to ask about the same name the builtin arms will match on. *)
+let rec app_spine_head_c (x : Ast.expr) : Ast.expr =
+  match x.Ast.node with
+  | Ast.App (g, _) -> app_spine_head_c g
+  | _ -> x
+
+let app_head_user_bound_c (x : Ast.expr) : bool =
+  match (app_spine_head_c x).Ast.node with
+  | Ast.Var n -> user_shadows n
+  | _ -> false
 
 (* Fresh names for anonymous closures + their env structs. *)
 let anon_closure_counter = ref 0
@@ -1872,7 +1905,73 @@ let rec emit_expr (e : Ast.expr) : string =
          (String.concat ", "
             (cap_args @ List.mapi (fun i _ -> Printf.sprintf "__ia%d" i) args))
      | None ->
+    (* v0.1.172: a name the user bound is the user's, not the builtin's.
+       The arms below dispatch on builtin names, and 56 of the 95 asked
+       nothing about whether the program had defined something of its own by
+       that name — the guards had been added one incident at a time. The
+       three ordinary call shapes are lifted out here so the general guard
+       has somewhere to send a call it must not let the builtin arms see. *)
+    let emit_closure_call () =
+       (* Closure dispatch via the closure value's fn pointer + env. *)
+       Printf.sprintf
+         "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
+         (emit_expr f) (emit_expr arg)
+    in
+    let emit_inner_lift_call name =
+       (* Defunctionalized direct call (Phase 4.8).
+          Phase 22.5 fix: capture name might refer to a closure-env field
+          if the call site is inside an adapter (e.g., `parse_number =
+          fn s -> fn i -> ...lifted_scan i...` where the second fn is
+          a closure capturing s). Route capture refs through
+          current_env_subst the same way bare Var emission does. *)
+       let li = Hashtbl.find inner_lifts name in
+       let cap_args = List.map (fun (n, _) ->
+         match List.assoc_opt n !current_env_subst with
+         | Some s -> s
+         | None -> c_safe_name n
+       ) li.captures in
+       li.lifted_name ^ "(" ^
+       String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
+    in
+    let emit_toplevel_call name =
+       (* Direct call to a known top-level fn — fast path, no closure.
+          Guarded so a same-named local binding / captured parameter (e.g.
+          the prelude `list_fold`'s parameter `f` vs a user top-level `let
+          f`) falls through to the closure-value call path instead. *)
+       (* Phase 23.3: per-instantiation dispatch. If name is multi-inst,
+          use the call site's Var.ty (walked, which is the specific
+          arrow type for this use) to pick the mangled name. *)
+       let fn_name =
+         if Hashtbl.mem multi_inst_fns name then
+           match f.Ast.ty with
+           | Some t ->
+             (match Ast.walk t with
+              (* v0.1.56: route the mangled instance name through c_safe_name
+                 once, exactly like the definition (emit_fn) does. *)
+              | Ast.TyArrow _ as arrow -> c_safe_name (mangled_inst_name name arrow)
+              | _ -> c_safe_name name)
+           | None -> c_safe_name name
+         else c_safe_name name
+       in
+       fn_name ^ "(" ^ emit_expr arg ^ ")"
+    in
+    let emit_user_call name =
+      if Hashtbl.mem inner_lifts name then emit_inner_lift_call name
+      else if Hashtbl.mem toplevel_fn_names name
+              && not (List.mem_assoc name !current_var_types)
+              && not (List.mem_assoc name !current_env_subst)
+      then emit_toplevel_call name
+      else emit_closure_call ()
+    in
     (match f.node with
+     (* Safe by construction: user_shadows is false unless the program
+        actually bound that name, so a program that shadows nothing reaches
+        exactly the arms it reached before. The second arm is for a
+        multi-argument spine — `substring s a b` matches here with f still an
+        App — where emit_closure_call recurses through emit_expr f and meets
+        this guard again one level down. *)
+     | Ast.Var name when user_shadows name -> emit_user_call name
+     | Ast.App _ when app_head_user_bound_c f -> emit_closure_call ()
      | Ast.Var "print" ->
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
      | Ast.Var "print_err" ->
@@ -2890,49 +2989,7 @@ let rec emit_expr (e : Ast.expr) : string =
           } __new; })"
          (emit_expr vec_e) (emit_expr arg) elem_tag elem_tag
          elem_tag elem_tag
-     | Ast.Var name when Hashtbl.mem inner_lifts name ->
-       (* Defunctionalized direct call (Phase 4.8).
-          Phase 22.5 fix: capture name might refer to a closure-env field
-          if the call site is inside an adapter (e.g., `parse_number =
-          fn s -> fn i -> ...lifted_scan i...` where the second fn is
-          a closure capturing s). Route capture refs through
-          current_env_subst the same way bare Var emission does. *)
-       let li = Hashtbl.find inner_lifts name in
-       let cap_args = List.map (fun (n, _) ->
-         match List.assoc_opt n !current_env_subst with
-         | Some s -> s
-         | None -> c_safe_name n
-       ) li.captures in
-       li.lifted_name ^ "(" ^
-       String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
-     | Ast.Var name when Hashtbl.mem toplevel_fn_names name
-                         && not (List.mem_assoc name !current_var_types)
-                         && not (List.mem_assoc name !current_env_subst) ->
-       (* Direct call to a known top-level fn — fast path, no closure.
-          Guarded so a same-named local binding / captured parameter (e.g.
-          the prelude `list_fold`'s parameter `f` vs a user top-level `let
-          f`) falls through to the closure-value call path instead. *)
-       (* Phase 23.3: per-instantiation dispatch. If name is multi-inst,
-          use the call site's Var.ty (walked, which is the specific
-          arrow type for this use) to pick the mangled name. *)
-       let fn_name =
-         if Hashtbl.mem multi_inst_fns name then
-           match f.Ast.ty with
-           | Some t ->
-             (match Ast.walk t with
-              (* v0.1.56: route the mangled instance name through c_safe_name
-                 once, exactly like the definition (emit_fn) does. *)
-              | Ast.TyArrow _ as arrow -> c_safe_name (mangled_inst_name name arrow)
-              | _ -> c_safe_name name)
-           | None -> c_safe_name name
-         else c_safe_name name
-       in
-       fn_name ^ "(" ^ emit_expr arg ^ ")"
-     | _ ->
-       (* Closure dispatch via the closure value's fn pointer + env. *)
-       Printf.sprintf
-         "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
-         (emit_expr f) (emit_expr arg)))))
+     | _ -> emit_closure_call ()))))
   | Ast.Constr (raw_name, arg_opt) ->
     (* Phase 41 + 42: since alias_ctor also registers `Traffic.Red` in
        Typer.constructors, look up the qualified raw_name **first** (to
@@ -8637,6 +8694,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      toplevel_fn_names branch and get dispatched (then mangled by
      multi_inst_fns lookup). *)
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  (* v0.1.172: source order, so the shadowing guard can tell a binding that
+     is already in scope from one that appears further down the file. *)
+  Hashtbl.reset toplevel_fn_pos;
+  List.iteri (fun i s ->
+    if not (Hashtbl.mem toplevel_fn_pos s.sname) then
+      Hashtbl.add toplevel_fn_pos s.sname i) skels;
+  current_toplevel_pos := max_int;
   (* v0.1.27 (mlog dogfood P4): find curried top-level fns eligible for the
      direct N-ary calling convention. The Fun chain is peeled by the
      RESOLVED type (so a poly fn resolved to a single concrete instance
