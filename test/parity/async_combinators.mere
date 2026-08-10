@@ -1,0 +1,34 @@
+// contrib/async sequencing, which is ordinary Mere: a Task is
+// `(str -> unit) -> unit`, and these combinators only rearrange
+// closures. The property worth pinning is ORDER — async_each must not
+// start a step before the previous one answered, and async_map must
+// return results in list order rather than completion order.
+
+type Task = (str -> unit) -> unit;
+
+let step = fn (label: str) -> fn (k: str -> unit) ->
+  let _ = print ("run " ++ label) in k ("<" ++ label ++ ">");
+
+let async_pure = fn (a: str) -> fn (k: str -> unit) -> k a;
+
+let async_then = fn (t: Task) -> fn (f: str -> Task) -> fn (k: str -> unit) ->
+  t (fn (a: str) -> (f a) k);
+
+let rec async_each = fn (xs) -> fn (mk) -> fn (k: unit -> unit) ->
+  match xs with
+  | Nil -> k ()
+  | Cons (x, rest) -> (mk x) (fn (_a: str) -> async_each rest mk k);
+
+let rec async_map = fn (xs) -> fn (mk) -> fn (k: str list -> unit) ->
+  match xs with
+  | Nil -> k Nil
+  | Cons (x, rest) ->
+    (mk x) (fn (a: str) ->
+      async_map rest mk (fn (tl: str list) -> k (Cons (a, tl))));
+
+let _ = async_each [ "a", "b", "c" ] step (fn (u: unit) -> print "each done");
+let _ = async_each [] step (fn (u: unit) -> print "empty done");
+let _ = async_map [ "x", "y" ] step (fn (rs: str list) -> print ("map -> " ++ show rs));
+let _ = async_then (step "one") (fn (r: str) -> step ("two" ++ r))
+          (fn (r: str) -> print ("then -> " ++ r));
+async_pure "done" (fn (s: str) -> print s)

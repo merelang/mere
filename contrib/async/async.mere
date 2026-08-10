@@ -1,0 +1,85 @@
+// contrib/async/async.mere — sequencing for callback-shaped work.
+//
+// Everything that crosses a thread or a network in Mere hands its result
+// to a closure: `dom_fetch_async`, `dom_sse`, `worker_call`. One such
+// call costs a level of indentation, which is nothing. The cost arrives
+// when steps depend on each other, because there is no way to name the
+// result of a call — so an ordinary fold over a list, where each element
+// is a round trip, cannot be written as a fold. It becomes a recursion
+// that carries its own continuation:
+//
+//   let rec push_all = fn (xs) -> fn (k: unit -> unit) ->
+//     match xs with
+//     | Nil -> k ()
+//     | Cons ((key, v), rest) ->
+//       worker_call ("set\t" ++ key ++ "\t" ++ v)
+//         (fn (reply: str) -> push_all rest k)
+//
+// That recursion is the same every time, so it belongs in a library
+// rather than in every app that sequences two requests. A Task is a
+// computation that will hand a str to a continuation:
+//
+//   type Task = (str -> unit) -> unit
+//
+// `dom_fetch_async "GET" url ""` is already a Task once its first three
+// arguments are applied, and so is `worker_call req`. Nothing here needs
+// language support; it is the callback shape given names.
+//
+// What this does NOT fix: nesting. `async_then` still puts each step
+// inside the previous one's closure, so a four-step chain is four levels
+// deep. Naming a call's result without nesting is a syntax question
+// (some form of do-notation or await), and the point of shipping the
+// combinators first is to find out how much of the pain is the fold and
+// how much is the nesting.
+
+type Task = (str -> unit) -> unit;
+
+// A Task that is already finished.
+let async_pure = fn (a: str) -> fn (k: str -> unit) -> k a;
+
+// Run `t`, then run whatever `f` makes of its result. The monadic bind,
+// though nothing here depends on calling it that.
+let async_then = fn (t: Task) -> fn (f: str -> Task) -> fn (k: str -> unit) ->
+  t (fn (a: str) -> (f a) k);
+
+// Run `t` and ignore its result, then continue. For a request whose
+// answer is an acknowledgement.
+let async_seq = fn (t: Task) -> fn (rest: Task) -> fn (k: str -> unit) ->
+  t (fn (_a: str) -> rest k);
+
+// The fold that could not be a fold: run one Task per element, in order,
+// and call `k` when the list runs out. Each step waits for the previous
+// one, which is what makes it a sequence rather than a fan-out.
+let rec async_each = fn (xs) -> fn (mk) -> fn (k: unit -> unit) ->
+  match xs with
+  | Nil -> k ()
+  | Cons (x, rest) -> (mk x) (fn (_a: str) -> async_each rest mk k);
+
+// Same, collecting each result in order. The accumulator is threaded
+// through the continuation because there is nowhere else to put it.
+let rec async_map = fn (xs) -> fn (mk) -> fn (k: str list -> unit) ->
+  match xs with
+  | Nil -> k Nil
+  | Cons (x, rest) ->
+    (mk x) (fn (a: str) ->
+      async_map rest mk (fn (tl: str list) -> k (Cons (a, tl))));
+
+// Run every Task at once and call `k` after the last one answers,
+// whatever order they answer in. A counter in a one-slot vec stands in
+// for the mutable cell Mere does not have.
+let async_all = fn (xs) -> fn (mk) -> fn (k: unit -> unit) ->
+  let total = list_len xs in
+  if total == 0 then k ()
+  else
+    let left = vec_new () in
+    let _ = vec_push left total in
+    let rec go = fn (ys) ->
+      match ys with
+      | Nil -> ()
+      | Cons (y, rest) ->
+        let _ = (mk y) (fn (_a: str) ->
+          let n = vec_get left 0 - 1 in
+          let _ = vec_set left 0 n in
+          if n == 0 then k () else ()) in
+        go rest in
+    go xs;
