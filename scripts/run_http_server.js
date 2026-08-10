@@ -8,7 +8,7 @@
 // Usage: node scripts/run_http_server.js <path-to-wasm>
 
 const fs = require("fs");
-const { checkAbi } = require("./mere_abi.js");
+const { checkAbi, makeMarshal } = require("./mere_host.js");
 const path = require("path");
 const { makeHttpGlue } = require("../contrib/http/http.glue.js");
 const { makePgEnv } = require("./pg_env.js");
@@ -26,57 +26,14 @@ const wasmPath = process.argv[2];
   const wasmBytes = fs.readFileSync(wasmPath);
   let memory;
 
-  const readCStr = (ptr) => {
-    const bytes = new Uint8Array(memory.buffer);
-    let end = ptr;
-    while (end < bytes.length && bytes[end] !== 0) end++;
-    return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
-  };
-
-  // Allocate on the shared Mere heap by advancing the `$__lang_bump`
-  // global (exported from the Wasm module). This replaces the older
-  // fixed 4KB scratch region (60K..64K), which was too small for
-  // realistic extern returns — a multi-MB http_fetch body would
-  // wrap the region and clobber the Mere heap sitting just above
-  // it. Sharing the same bump pointer means Mere allocations and
-  // extern-returned strings never collide.
-  //
-  // Memory is grown one 64KB page at a time when the current bump +
-  // requested size exceeds the total buffer length.
+  // The boundary helpers come from scripts/mere_host.js; the copies that
+  // used to sit here are how this runner ended up two revisions behind on
+  // the string layout while run_wasm.js was correct.
   let langBump;  // set in bindMemory after instantiate
-  const PAGE = 64 * 1024;
-  const bumpAlloc = (n) => {
-    const aligned = (n + 7) & ~7;
-    const start = langBump.value;
-    const needed = start + aligned;
-    const capacity = memory.buffer.byteLength;
-    if (needed > capacity) {
-      const growPages = Math.ceil((needed - capacity) / PAGE);
-      memory.grow(growPages);
-    }
-    langBump.value = start + aligned;
-    return start;
-  };
-
-  // Copy a JS string onto the Mere heap and return a str value.
-  // Used by extern fns that need to hand a str back to Mere.
-  //
-  // byte-safe str layout: [i32 len][bytes][NUL]; the value points at
-  // byte0, and $__lang_strlen loads the length from ptr-4. Writing only
-  // NUL-terminated bytes leaves the length as whatever preceded the
-  // allocation, which shows up as truncated or empty strings the moment
-  // the value is concatenated (print goes via the host and scans to
-  // NUL, so it hides the bug).
-  const writeStr = (s) => {
-    const utf8 = Buffer.from(s || "", "utf8");
-    const start = bumpAlloc(4 + utf8.length + 1);
-    // Views must be taken after bumpAlloc — growing detaches the buffer.
-    new DataView(memory.buffer).setInt32(start, utf8.length, true);
-    const mem = new Uint8Array(memory.buffer);
-    mem.set(utf8, start + 4);
-    mem[start + 4 + utf8.length] = 0;
-    return start + 4;
-  };
+  const { bumpAlloc, writeStr, readCStr } = makeMarshal({
+    getMemory: () => memory,
+    getBump: () => langBump,
+  });
 
   const { glue: httpGlue, attach: attachHttp, broadcast } = makeHttpGlue();
   const fetchEnv = makeHttpFetchEnv({ readCStr, writeStr });

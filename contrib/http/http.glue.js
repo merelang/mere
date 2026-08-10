@@ -19,97 +19,30 @@
 // to the closure so the http import can start firing.
 
 const { makeWsEnv } = require("../../scripts/ws_env.js");
-const { checkAbi } = require("../../scripts/mere_abi.js");
+const { checkAbi, makeMarshal, makeClosureCaller } = require("../../scripts/mere_host.js");
 
 function makeHttpGlue() {
   let memory = null;
   let table = null;
   let langBump = null;  // exported __lang_bump global from the Wasm module
 
-  const readCStr = (ptr) => {
-    if (!memory) return "";
-    const bytes = new Uint8Array(memory.buffer);
-    let end = ptr;
-    while (end < bytes.length && bytes[end] !== 0) end++;
-    return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
-  };
-
-  // Read a Mere str as raw bytes, taking the length from the word at
-  // ptr-4 instead of scanning for a NUL. Response bodies come through
-  // here because an asset served straight out of read_file is binary —
-  // a .wasm begins with a zero byte, so a NUL scan returned nothing.
-  const readStrBytes = (ptr) => {
-    if (!memory || !ptr) return Buffer.alloc(0);
-    const len = new DataView(memory.buffer).getInt32(ptr - 4, true);
-    if (len < 0 || ptr + len > memory.buffer.byteLength) return Buffer.alloc(0);
-    return Buffer.from(new Uint8Array(memory.buffer).subarray(ptr, ptr + len));
-  };
+  // All four boundary operations come from scripts/mere_host.js — the
+  // copies that used to live here are how this glue drifted two ABI
+  // revisions behind the compiler.
+  const { writeStr, readCStr, readStrBytes } = makeMarshal({
+    getMemory: () => memory,
+    getBump: () => langBump,
+  });
+  const callClosure = makeClosureCaller({
+    getMemory: () => memory,
+    getTable: () => table,
+    who: "contrib/http",
+  });
 
   // WebSocket hub — /ws/<channel> upgrade path. Hooked on the server's
   // `upgrade` event down in http_serve below. Extras (ws_broadcast /
   // ws_client_count) are merged into the returned glue object.
   const ws = makeWsEnv({ readCStr });
-
-  // Allocate on the shared Mere bump heap so extern-returned strings
-  // and Mere allocations never collide. Grow memory one 64KB page at
-  // a time when needed. This replaces the older fixed 4KB scratch
-  // region (56K..60K) — for realistic HTTP request bodies (multi-MB)
-  // that region was too small and its wraparound corrupted Mere-side
-  // strings that were live for the whole handler.
-  const PAGE = 64 * 1024;
-  // Mere str layout is `[i32 len][bytes][NUL]` and the value is a
-  // pointer to byte0, so the length lives at ptr-4 — that is what
-  // `$__lang_strlen` loads. Writing only NUL-terminated bytes (the old
-  // shape) makes every host-supplied string read back as whatever the
-  // preceding 4 heap bytes happen to say, which is usually 0: the
-  // request line arrived intact in memory and Mere saw "".
-  // scripts/run_wasm.js already emits the header, but it open-codes the
-  // same five lines at each call site, so the fix never reached the two
-  // glues that share a writeStr helper.
-  const writeStr = (s) => {
-    if (!memory || !langBump) return 0;
-    const utf8 = Buffer.from(s, "utf8");
-    const aligned = (4 + utf8.length + 1 + 7) & ~7;
-    const start = langBump.value;
-    const needed = start + aligned;
-    const capacity = memory.buffer.byteLength;
-    if (needed > capacity) {
-      const growPages = Math.ceil((needed - capacity) / PAGE);
-      memory.grow(growPages);
-    }
-    // Re-read the views AFTER any grow — it detaches the old buffer.
-    new DataView(memory.buffer).setInt32(start, utf8.length, true);
-    const bytes = new Uint8Array(memory.buffer);
-    bytes.set(utf8, start + 4);
-    bytes[start + 4 + utf8.length] = 0;
-    langBump.value = start + aligned;
-    return start + 4;
-  };
-
-  const callClosure = (closurePtr, argPtr) => {
-    if (!memory || !table) {
-      console.error("contrib/http: callClosure invoked before attach()");
-      return 0;
-    }
-    // Mere's bump allocator does not enforce 4-byte alignment, so use
-    // DataView (which accepts any byte offset) rather than Int32Array.
-    const view = new DataView(memory.buffer);
-    const env = view.getInt32(closurePtr, true);
-    const fnIdx = view.getInt32(closurePtr + 4, true);
-    const fn = table.get(fnIdx);
-    if (typeof fn !== "function") {
-      console.error("contrib/http: closure fn_idx not in table", { closurePtr, env, fnIdx });
-      return 0;
-    }
-    // v0.1.127 made the closure type `(param i64 i64) (result i64)`, so
-    // both args must cross the JS boundary as BigInt, and the returned
-    // pointer has to come back as a Number for pointer arithmetic.
-    // contrib/dom was updated at the time; this glue was not, so every
-    // contrib/http demo threw "Cannot convert N to a BigInt" on the
-    // first request when built with a current compiler.
-    const result = fn(BigInt(env), BigInt(argPtr));
-    return typeof result === "bigint" ? Number(result) : result;
-  };
 
   // Per-request slots. `http_serve` populates the body pointer + resets
   // status / content-type / extra headers to defaults before dispatch;

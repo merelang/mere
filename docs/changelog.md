@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.158 — 2026-08-10
+
+_One definition of the host boundary, instead of five._
+
+_v0.1.157 added a number so a host and a module could refuse each other. This
+removes the reason they drifted in the first place: `readCStr`, `writeStr`,
+`bumpAlloc` and the closure caller existed in five separate copies, and a fix to
+one never reached the others. `run_wasm.js` grew the string length header and
+open-coded it at four call sites; contrib/dom learned the i64 closure convention
+and contrib/http did not; a fixed 4KB scratch window outlived the move to the
+shared heap in exactly one glue. Each was a wrong answer at runtime, never a
+link error._
+
+_`scripts/mere_host.js` now holds all of it — `makeMarshal` for the four value
+operations plus `writeBytes` / `readBytes` / `copyToStr` for the byte buffers a
+driver moves, and `makeClosureCaller` for dispatch — with the layout written
+down once at the top. `run_wasm.js`, `run_http_server.js`, `pg_env.js` and
+`contrib/http/http.glue.js` all use it: 251 lines deleted, 48 added._
+
+_`contrib/dom/dom.glue.js` keeps its copy, because it is an ES module a browser
+fetches and cannot require the shared one. That is now the only place the layout
+appears twice, so `scripts/check_host_abi.js` checks it: the ABI constants must
+agree, and the copy must still write the length header, return a pointer past
+it, and pass closure arguments as BigInt. Each of those three was wrong in some
+host at some point._
+
+_parity 72/72, dune runtest 2306/0; the chat, tally and mere-blog apps all
+rebuild and pass their checks. The ABI guard earned itself immediately — a
+stale mbtree build from before v0.1.157 was refused by name instead of quietly
+returning empty strings._
+
+---
+
 ## v0.1.157 — 2026-08-10
 
 _An ABI number, so a host and a module can refuse each other._

@@ -54,28 +54,19 @@ function tcpCall(op, arg1, arg2) {
   return Atomics.load(tcpCtrl, 4);
 }
 
+const { makeMarshal } = require("./mere_host.js");
+
 function makePgEnv({ getMemory, bumpAlloc }) {
   // readCStr is trivially built from getMemory, so both harnesses share
   // the same NUL-scan without needing to pass it in.
-  const readCStr = (ptr) => {
-    const bytes = new Uint8Array(getMemory());
-    let end = ptr;
-    while (end < bytes.length && bytes[end] !== 0) end++;
-    return Buffer.from(bytes.subarray(ptr, end)).toString('utf8');
-  };
-  // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-  // $__lang_strlen reads the length from ptr-4, so a header-less write
-  // yields a str whose length is whatever preceded it on the heap.
-  const writeStr = (s) => {
-    const utf8 = Buffer.from(s || '', 'utf8');
-    const start = bumpAlloc(4 + utf8.length + 1);
-    // Views must be taken after bumpAlloc — growing detaches the buffer.
-    new DataView(getMemory()).setInt32(start, utf8.length, true);
-    const mem = new Uint8Array(getMemory());
-    mem.set(utf8, start + 4);
-    mem[start + 4 + utf8.length] = 0;
-    return start + 4;
-  };
+  // Boundary helpers from scripts/mere_host.js. mem_to_str below is the
+  // one place a driver turns wire bytes into a str, so it goes through
+  // the same writer as everything else — its own copy wrote no length
+  // header, which read back as an entire result set of empty columns.
+  const { writeStr, readCStr, copyToStr } = makeMarshal({
+    getMemory: () => ({ buffer: getMemory() }),
+    bumpAlloc,
+  });
 
   return {
     // ---- Sync TCP -------------------------------------------------------
@@ -179,16 +170,7 @@ function makePgEnv({ getMemory, bumpAlloc }) {
     // pointing at byte0 — raw bytes read back with whatever length
     // preceded them, which showed up as an entire result set of empty
     // fields. The C backend's mem_to_str already allocates this way.
-    mem_to_str: (ptr, len) => {
-      const n = len | 0;
-      const start = bumpAlloc(4 + n + 1);
-      // Views must be taken after bumpAlloc — growing detaches the buffer.
-      new DataView(getMemory()).setInt32(start, n, true);
-      const bytes = new Uint8Array(getMemory());
-      bytes.copyWithin(start + 4, ptr | 0, (ptr | 0) + n);
-      bytes[start + 4 + n] = 0;
-      return start + 4;
-    },
+    mem_to_str: (ptr, len) => copyToStr(ptr, len),
 
     // ---- Crypto ---------------------------------------------------------
     // SHA-1 — MySQL's `mysql_native_password` auth needs it. Modern

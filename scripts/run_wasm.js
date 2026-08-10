@@ -5,7 +5,7 @@
 // Usage: node run_wasm.js <path-to-wasm>
 
 const fs = require('fs');
-const { checkAbi } = require("./mere_abi.js");
+const { checkAbi, makeMarshal } = require("./mere_host.js");
 const { Worker } = require('worker_threads');
 const { makePgEnv } = require('./pg_env.js');
 const { makeHttpFetchEnv } = require('./http_fetch_env.js');
@@ -121,12 +121,15 @@ const wasmPath = process.argv[2];
   let memory; // captured after instantiate
 
   // Read a C-style null-terminated string from linear memory at offset.
-  const readCStr = (ptr) => {
-    const bytes = new Uint8Array(memory.buffer);
-    let end = ptr;
-    while (end < bytes.length && bytes[end] !== 0) end++;
-    return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
-  };
+  // Boundary helpers come from scripts/mere_host.js. This runner used to
+  // open-code the str layout at four call sites and keep a fifth copy in
+  // a shared helper — the reason the length header landed here and in no
+  // other host.
+  let langBump = null;  // set after instantiate
+  const { bumpAlloc, writeStr, writeBytes, readCStr } = makeMarshal({
+    getMemory: () => memory,
+    getBump: () => langBump,
+  });
 
   // Open file descriptors for positioned I/O, indexed by the handle value
   // Mere sees. Slot 0 is reserved as a null sentinel.
@@ -141,14 +144,7 @@ const wasmPath = process.argv[2];
       const path = readCStr(pathPtr);
       try {
         const content = fs.readFileSync(path, "utf8");
-        // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-        const body = Buffer.from(content, "utf8");
-        const ptr = bumpAlloc(4 + body.length + 1);
-        const mem = new Uint8Array(memory.buffer);
-        new DataView(memory.buffer).setInt32(ptr, body.length, true);
-        mem.set(body, ptr + 4);
-        mem[ptr + 4 + body.length] = 0;
-        return ptr + 4;
+        return writeStr(content);
       } catch (e) {
         // A missing file is an expected probe result (the module-path
         // resolver walks up testing for mere.toml; the language-level
@@ -181,11 +177,7 @@ const wasmPath = process.argv[2];
         if (e.code !== "ENOENT") console.error("read_file_bytes failed:", e.message);
         buf = Buffer.alloc(0);
       }
-      const ptr = bumpAlloc(4 + buf.length);
-      const dv = new DataView(memory.buffer);
-      dv.setInt32(ptr, buf.length, true);
-      new Uint8Array(memory.buffer).set(buf, ptr + 4);
-      return ptr;
+      return writeBytes(buf);
     },
     // Positioned file I/O on an open handle (v0.1.153) — what a paged
     // store needs, since read/write_file_bytes only replace a whole file.
@@ -216,10 +208,7 @@ const wasmPath = process.argv[2];
       if (fd !== undefined && len > 0 && off >= 0) {
         try { got = fs.readSync(fd, buf, 0, len, off); } catch (e) { got = 0; }
       }
-      const ptr = bumpAlloc(4 + got);
-      new DataView(memory.buffer).setInt32(ptr, got, true);
-      new Uint8Array(memory.buffer).set(buf.subarray(0, got), ptr + 4);
-      return ptr;
+      return writeBytes(buf.subarray(0, got));
     },
     file_pwrite: (handle, off, bytesPtr) => {
       const fd = openFiles[handle];
@@ -286,14 +275,7 @@ const wasmPath = process.argv[2];
         // OCaml: append ".0" for plain integer-valued floats
         if (!/[.eEni]/.test(s)) s += '.0';
       }
-      // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-      const body = Buffer.from(s, 'utf8');
-      const ptr = bumpAlloc(4 + body.length + 1);
-      const mem = new Uint8Array(memory.buffer);
-      new DataView(memory.buffer).setInt32(ptr, body.length, true);
-      mem.set(body, ptr + 4);
-      mem[ptr + 4 + body.length] = 0;
-      return ptr + 4;
+      return writeStr(s);
     },
     __lang_float_of_str: (ptr) => {
       const s = readCStr(ptr);
@@ -339,13 +321,7 @@ const wasmPath = process.argv[2];
       const v = process.env[name];
       if (v === undefined) return 0;  // NULL — Mere expects str, segfault risk
       // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-      const body = Buffer.from(v, "utf8");
-      const ptr = bumpAlloc(4 + body.length + 1);
-      const mem = new Uint8Array(memory.buffer);
-      new DataView(memory.buffer).setInt32(ptr, body.length, true);
-      mem.set(body, ptr + 4);
-      mem[ptr + 4 + body.length] = 0;
-      return ptr + 4;
+      const body = Buffer.from(v);
     },
     setenv: (namePtr, valuePtr, _overwrite) => {
       const name = readCStr(namePtr);
@@ -372,14 +348,7 @@ const wasmPath = process.argv[2];
     arg_get: (n) => {
       const args = process.argv.slice(3);
       const v = args[n | 0] || "";
-      // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-      const body = Buffer.from(v, "utf8");
-      const ptr = bumpAlloc(4 + body.length + 1);
-      const mem = new Uint8Array(memory.buffer);
-      new DataView(memory.buffer).setInt32(ptr, body.length, true);
-      mem.set(body, ptr + 4);
-      mem[ptr + 4 + body.length] = 0;
-      return ptr + 4;
+        return writeStr(v);
     },
     // TCP + byte-buffer + crypto externs come from the shared pg_env
     // module; they're merged into `env` below with Object.assign.
@@ -391,53 +360,9 @@ const wasmPath = process.argv[2];
   // Outbound HTTP (http_fetch and friends) — same curl-based
   // implementation as run_http_server.js. Any Mere CLI that declares
   // `extern fn http_fetch: ...` can now make outbound calls too.
-  // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-  // The env fns above open-code this; this shared helper (handed to the
-  // http_fetch / subprocess envs) was left on the older header-less
-  // shape, so every string those externs returned read back with
-  // whatever length preceded it on the heap.
-  const writeStr = (s) => {
-    const utf8 = Buffer.from(s || "", "utf8");
-    const start = bumpAlloc(4 + utf8.length + 1);
-    // Views must be taken after bumpAlloc — growing detaches the buffer.
-    new DataView(memory.buffer).setInt32(start, utf8.length, true);
-    const mem = new Uint8Array(memory.buffer);
-    mem.set(utf8, start + 4);
-    mem[start + 4 + utf8.length] = 0;
-    return start + 4;
-  };
   Object.assign(env, makeHttpFetchEnv({ readCStr, writeStr }));
   Object.assign(env, makeSubprocessEnv({ readCStr, writeStr }));
 
-  // Allocate on the shared Mere heap by advancing `$__lang_bump`
-  // (mirrors the newer run_http_server.js). Grows memory one 64KB
-  // page at a time when a write would exceed the current buffer.
-  // Small allocations (env / getenv strings, single args) don't
-  // trigger growth; the self-host CLI reading multi-KB source files
-  // does.
-  let langBump = null;  // set after instantiate
-  const PAGE = 64 * 1024;
-  const bumpAlloc = (n) => {
-    if (!langBump) {
-      // Legacy fallback for pre-Phase-55 wasm that didn't export
-      // __lang_bump. A fixed high-offset scratch worked for the
-      // tiny compute demos this runner was originally shipped for.
-      // Real programs should recompile with a current mere.
-      const p = scratchOffset;
-      scratchOffset += (n + 7) & ~7;
-      return p;
-    }
-    const aligned = (n + 7) & ~7;
-    const start = langBump.value;
-    const needed = start + aligned;
-    if (needed > memory.buffer.byteLength) {
-      const growPages = Math.ceil((needed - memory.buffer.byteLength) / PAGE);
-      memory.grow(growPages);
-    }
-    langBump.value = start + aligned;
-    return start;
-  };
-  let scratchOffset = 56 * 1024;  // used only when langBump is absent
 
   // Q-012: if the module imports a shared memory (a threaded program), the
   // host must create it so every worker instance shares one memory. Detect
