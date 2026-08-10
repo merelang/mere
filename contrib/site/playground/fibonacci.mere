@@ -1,0 +1,13 @@
+// fibonacci — playground demo button. Kept identical to the `fibonacci`
+// entry in playground.html's SOURCES.
+let rec fib = fn n ->
+  if n < 2 then n
+  else fib (n - 1) + fib (n - 2);
+let _ = print "Fibonacci sequence:";
+let rec loop = fn i ->
+  if i > 15 then ()
+  else
+    let _ = print ("fib(" ++ show i ++ ") = " ++ show (fib i)) in
+    loop (i + 1);
+let _ = loop 0;
+0

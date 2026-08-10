@@ -63,12 +63,12 @@ if [ -f "$SELFHOST_COMPILE_SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
   echo "  mere -w $SELFHOST_COMPILE_SRC -> playground/selfhost-compile.wat"
 fi
 
-# The contrib/dom demos. These used to ship as checked-in .wat that the
+# The playground demos. These used to ship as checked-in .wat that the
 # copy step carried straight through, so they were assembled from whatever
 # compiler produced them however long ago — and a stale module and a
 # current dom.glue.js do not agree on the string layout or the closure
 # ABI. Compile them from source like everything else.
-for demo in counter echo wordcount; do
+for demo in counter echo wordcount hello fizzbuzz fibonacci; do
   SRC="contrib/site/playground/$demo.mere"
   if [ -f "$SRC" ] && [ -d "$PLAYGROUND_OUT" ]; then
     dune exec mere -- -w -I . "$SRC" > "$PLAYGROUND_OUT/$demo.wat"

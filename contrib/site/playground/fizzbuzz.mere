@@ -1,0 +1,14 @@
+// fizzbuzz — playground demo button. Kept identical to the `fizzbuzz`
+// entry in playground.html's SOURCES.
+let rec fizzbuzz = fn i -> fn n ->
+  if i > n then ()
+  else
+    let s =
+      if i % 15 == 0 then "FizzBuzz"
+      else if i % 3 == 0 then "Fizz"
+      else if i % 5 == 0 then "Buzz"
+      else show i in
+    let _ = print s in
+    fizzbuzz (i + 1) n;
+let _ = fizzbuzz 1 20;
+0
