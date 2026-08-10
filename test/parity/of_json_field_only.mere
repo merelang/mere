@@ -1,0 +1,47 @@
+// Container types reachable only through a record field, decoded and never
+// constructed.
+//
+// The C backend collects the structs it must declare by walking the
+// expression tree and the fn signatures — everything the program mentions.
+// It did not walk the field types of a record declaration, so a type that
+// appears only there was never declared:
+//
+//   type item = { name: str };
+//   type f    = { title: str, items: item list, note: str option };
+//
+// `list_item`, `option_str` and `item` itself are all reachable only as
+// field types of `f`. The emitted C referred to them and did not declare
+// them — `unknown type name 'list_item'`.
+//
+// It stayed latent for a long time because a program that builds one of
+// those values anywhere registers it on the way past: writing `Some x` or
+// `Cons (item {...}, Nil)` once is enough. The failure needs a record whose
+// container-typed fields are *only ever decoded*, which is precisely what a
+// program looks like once the schema is shared and the codec is generated —
+// `of_json` becomes the only producer. examples/claims found it.
+//
+// So this case decodes and re-encodes and touches those fields no other
+// way. That restriction is the test: an earlier draft called `list_len` on
+// the list and matched `Some` on the option, and passed on the broken
+// compiler — mentioning a constructor, even to take a value apart, is
+// enough to register the type. Only the scalar fields are read here.
+
+type item = { name: str, qty: int };
+type addr = { city: str, zip: str };
+type form = {
+  title: str,
+  home: addr,               // a record reachable only as a field
+  items: item list,         // list of a record reachable only as a field
+  note: str option,         // option_str, likewise
+  tag: int option,          // option_int exists via the prelude — the
+                            // control that made this look like it worked
+  labels: str list
+};
+
+let f = (of_json "\{\"title\":\"t\",\"home\":\{\"city\":\"kyoto\",\"zip\":\"600\"},\"items\":[\{\"name\":\"a\",\"qty\":2},\{\"name\":\"b\",\"qty\":3}],\"note\":\"hi\",\"tag\":null,\"labels\":[\"x\",\"y\"]}" : form) in
+
+let _ = print (f.title ++ "/" ++ f.home.city ++ "/" ++ f.home.zip) in
+// Round-trip: the whole tree back out again, so the encoder is checked on
+// the same shapes the decoder just built.
+let _ = print (to_json f) in
+0
