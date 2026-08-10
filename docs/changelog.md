@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.164 — 2026-08-10
+
+_A partially applied extern is a value, not a call._
+
+_The Wasm extern path collapses a curried `App` chain into one `call $name`,
+taking the argument count from the call site rather than the declaration. That
+is right when the application is saturated and emits a call with the wrong
+arity when it is not, so `worker_call req` on a two-argument extern produced WAT
+that wat2wasm rejected outright. Found while writing contrib/async, where the
+whole premise is that an extern with its request applied is already a Task —
+the tally client had to wrap every one in `fn (cb) -> … cb`._
+
+_Under-application now eta-wraps: the missing arguments become a lambda and the
+expression routes through the ordinary anonymous-closure path, so the partial
+application is a closure like any other value. The wrapper is gone from
+examples/tally/app.mere. Two regression tests pin both halves — a partial
+application reaches its callee through `call_indirect`, a saturated one still
+emits a direct `call`. parity 73/73, dune runtest 2308/0._
+
+---
+
 ## v0.1.163 — 2026-08-10
 
 _Positioned file I/O on LLVM, closing the last backend gap in that group._
