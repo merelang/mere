@@ -358,6 +358,13 @@ export function makeDomGlue() {
 
     dom_tz_offset: () => -new Date().getTimezoneOffset(),
 
+    // A page has no command line, so `args()` is the empty list. The
+    // builtin now asks the host rather than being hardcoded to Nil, so
+    // the host has to answer — reporting 0 gives a browser program the
+    // same empty list it always had.
+    arg_count: () => 0,
+    arg_get: () => 0,
+
     // Ask another Mere module — one that owns storage and therefore has
     // to live off this thread — a question, and hand its answer to a
     // closure. The transport is injected with `setWorkerTransport`

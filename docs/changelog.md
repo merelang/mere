@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.159 — 2026-08-10
+
+_`args()` returns the arguments on a plain Wasm host._
+
+_The runners have supplied `arg_count` / `arg_get` for a long time; the builtin
+was never wired to them and returned Nil unconditionally, so a CLI compiled to
+Wasm silently saw no arguments while the same source on C saw them all — a
+disagreement with no error anywhere. It now builds the list from the host, and a
+host that reports 0 yields Nil, which is what the hardcoded empty list got right
+for a browser. contrib/dom answers 0 so a page keeps the behaviour it had._
+
+_Verified by running the same program on both backends with arguments: `foo bar`
+gives `n=2 [foo] [bar]` on C and on Wasm. parity 72/72, dune runtest 2306/0._
+
+---
+
 ## v0.1.158 — 2026-08-10
 
 _One definition of the host boundary, instead of five._

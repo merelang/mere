@@ -190,6 +190,7 @@ let file_pio_used = ref false
    (--component on a unit/CLI program). Command components get real WASI via
    the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
 let wasm_component_command = ref false
+let wasm_args_host_used = ref false  (* args() on a plain host: emit $__lang_args_host + arg_count/arg_get imports *)
 let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
@@ -2563,10 +2564,15 @@ let rec emit_expr (e : Ast.expr) : unit =
          to match the C backend) from wasi args_get. *)
       wasm_args_used := true;
       emit_instr "call $__lang_args"
-    end else
-      (* no argv on a browser/worker host — args() is the empty list. Reuse the
-         Constr emit with args()'s own result type (str list). *)
-      emit_expr { e with Ast.node = Ast.Constr ("Nil", None) }
+    end else begin
+      (* v0.1.159: build the list from the host's arg_count / arg_get. A
+         browser host reports 0 and the loop yields Nil, which is what the
+         old hardcoded empty list got right; under Node it now returns the
+         arguments the runner was actually given, matching the C backend
+         instead of silently disagreeing with it. *)
+      wasm_args_host_used := true;
+      emit_instr "call $__lang_args_host"
+    end
   | Ast.App ({ node = Ast.Var "env_var"; _ }, name_e)
     when not (user_shadows_wasm "env_var") ->
     if !wasm_component_command then begin
@@ -7592,6 +7598,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_component_command :=
     component && (match Ast.walk main_ty with Ast.TyUnit | Ast.TyInt -> true | _ -> false);
   wasm_args_used := false;
+  wasm_args_host_used := false;
   wasm_time_used := false;
   wasm_env_used := false;
   wasm_stdin_used := false;
@@ -8163,6 +8170,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       "  (import \"env\" \"read_file_bytes\" (func $read_file_bytes_h (param i32) (result i32)))\n\
       \  (import \"env\" \"write_file_bytes\" (func $write_file_bytes_h (param i32) (param i32) (result i32)))\n"
     else "")
+    ^ (if !wasm_args_host_used then
+      "  (import \"env\" \"arg_count\" (func $arg_count_h (result i32)))\n\
+      \  (import \"env\" \"arg_get\" (func $arg_get_h (param i32) (result i32)))\n"
+    else "")
     ^ (if !file_pio_used then
       "  (import \"env\" \"file_openrw\" (func $file_openrw_h (param i32) (result i32)))\n\
       \  (import \"env\" \"file_pread\" (func $file_pread_h (param i32) (param i32) (param i32) (result i32)))\n\
@@ -8256,6 +8267,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ^ (if !file_bytes_io_used then
            "  (func $read_file_bytes_h (param i32) (result i32) unreachable)\n\
            \  (func $write_file_bytes_h (param i32) (param i32) (result i32) unreachable)\n"
+         else "")
+      ^ (if !wasm_args_host_used then
+           "  (func $arg_count_h (result i32) unreachable)\n\
+           \  (func $arg_get_h (param i32) (result i32) unreachable)\n"
          else "")
       ^ (if !file_pio_used then
            "  (func $file_openrw_h (param i32) (result i32) unreachable)\n\
@@ -8411,6 +8426,39 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   in
   let nil_tag_v =
     try Hashtbl.find variant_tags "Nil" with Not_found -> 0
+  in
+  (* v0.1.159: args() on a plain (non-component) host. The runners have
+     supplied arg_count / arg_get for a long time; only the builtin was
+     never wired to them, so a CLI compiled to Wasm silently saw no
+     arguments while the same source on C saw them all. A browser host
+     reports 0 and this yields Nil, which is the behaviour the hardcoded
+     empty list got right. *)
+  let args_host_section =
+    if not !wasm_args_host_used then "" else
+    Printf.sprintf
+      "  (func $__lang_args_host (result i64)\n\
+      \    (local $n i32) (local $i i32) (local $acc i32) (local $tup i32) (local $cell i32)\n\
+      \    (local.set $n (call $arg_count_h))\n\
+      \    (local.set $acc (global.get $__lang_bump))\n\
+      \    (global.set $__lang_bump (i32.add (local.get $acc) (i32.const 16)))\n\
+      \    (i64.store offset=0 (local.get $acc) (i64.const %d))\n\
+      \    (local.set $i (local.get $n))\n\
+      \    (block $done (loop $lp\n\
+      \      (br_if $done (i32.le_s (local.get $i) (i32.const 0)))\n\
+      \      (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n\
+      \      (local.set $tup (global.get $__lang_bump))\n\
+      \      (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 16)))\n\
+      \      (i64.store offset=0 (local.get $tup)\n\
+      \        (i64.extend_i32_u (call $arg_get_h (local.get $i))))\n\
+      \      (i64.store offset=8 (local.get $tup) (i64.extend_i32_u (local.get $acc)))\n\
+      \      (local.set $cell (global.get $__lang_bump))\n\
+      \      (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+      \      (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+      \      (i64.store offset=8 (local.get $cell) (i64.extend_i32_u (local.get $tup)))\n\
+      \      (local.set $acc (local.get $cell))\n\
+      \      (br $lp)))\n\
+      \    (i64.extend_i32_u (local.get $acc)))\n"
+      nil_tag_v cons_tag_v
   in
   let vec_to_list_section =
     if not !vec_to_list_used then "" else
@@ -9110,5 +9158,5 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
-    vec_to_list_section list_len_section
+    (args_host_section ^ vec_to_list_section) list_len_section
     fn_section component_section local_decl indented_body
