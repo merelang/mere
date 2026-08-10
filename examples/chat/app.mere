@@ -35,6 +35,7 @@
 import "../../contrib/dom/dom.mere";
 import "../../contrib/json/json.mere";
 import "../../contrib/http/escape.mere";
+import "../../contrib/state/cell.mere";
 
 // ---- element handles ------------------------------------------------
 
@@ -47,16 +48,14 @@ let text_in = dom_get_by_id "text" in
 
 // ---- log pane -------------------------------------------------------
 
-// Mere has no mutable cell, so the accumulated log text lives in a
-// single slot of a vec allocated once — the same trick counter.mere
-// uses for its int. The bump arena is page-lifetime, so it survives
-// across event firings.
-let log_buf = vec_new () in
-let _ = vec_push log_buf "" in
+// The accumulated log text. A cell is a one-slot vec — the bump arena is
+// page-lifetime, so it survives across event firings — with the name
+// doing the explaining rather than a comment at every site.
+let log_buf = cell_new "" in
 
 let log = fn (msg: str) ->
-  let next = vec_get log_buf 0 ++ msg ++ "\n" in
-  let _ = vec_set log_buf 0 next in
+  let next = cell_get log_buf ++ msg ++ "\n" in
+  let _ = cell_set log_buf next in
   let _ = dom_set_text log_el next in
   dom_scroll_to_end log_el
 in

@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.171 — 2026-08-10
+
+_contrib/state: the one-slot-vec trick, named — and the thing naming it does
+not fix._
+
+_Mere has no mutable cell, and every browser client built one the same way: a
+vec allocated once, pushed once, then read and written at index 0. It works —
+the bump arena is page-lifetime, so the slot survives across event firings — and
+by v0.1.170 there were ten of them across four apps, each with a comment
+explaining the trick. `contrib/state/cell` names it: `cell_new` / `cell_get` /
+`cell_set`, three lines over the same vec._
+
+_That is the smaller half, because the noise was never the real problem.
+`examples/profile` shipped with three of those cells and seven hand-written
+calls to a recompute function, one after each mutation site; the seventh was
+added during debugging, and the eighth would have been a screen quietly
+disagreeing with the state behind it. `contrib/state/store` holds one value and
+a list of watchers, and `store_update` writes and then tells them. The seven
+calls became zero, and the app's three cells became one store._
+
+_Making the screen derived forced the app to be honest about something the
+first draft had fudged. Focusing a field takes its complaint off the screen but
+does not make the value right — Save has to stay withheld until the field is
+left and re-judged. The ad-hoc version got that by writing to the DOM behind
+the state's back, which worked only because nothing else ever repainted. The
+model now carries "what is wrong" and "what we are currently saying out loud"
+as two separate facts, which is what they always were._
+
+_`examples/tasks` keeps cells and no store, deliberately: its screen is not
+derived from its state but reconciled against it — rows that stopped matching
+are removed one at a time so the row being typed into is never rebuilt — and a
+watcher that redrew on every write would destroy the one thing that app exists
+to protect. Two of its four cells are a timer handle and a retry delay that
+nothing renders at all._
+
+_chat, tally and tasks moved to `cell`; profile moved to `store`. All four
+still pass their harnesses (chat and tally and tasks headless, profile 15/15 in
+Chrome). `test/parity/store_watch.mere` locks watcher order, the immediate
+first run, read-modify-write, and two stores at different types across all four
+backends. parity 77/77, dune runtest 2308/0._
+
+---
+
 ## v0.1.170 — 2026-08-10
 
 _A form, as opposed to a list — and the six bindings that separate the two._

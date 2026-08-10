@@ -1,0 +1,43 @@
+// contrib/state/cell.mere — a mutable slot, named.
+//
+// Mere has no mutable cell, and every browser client here has built one
+// out of a vec: allocate, push once, then read and write index 0. It
+// works — the arena is page-lifetime, so the slot survives across event
+// firings — and it is four operations to say one thing, repeated with a
+// comment explaining itself each time.
+//
+//   let filter_timer = vec_new () in
+//   let _ = vec_push filter_timer 0 in
+//   ... vec_get filter_timer 0 ... vec_set filter_timer 0 t ...
+//
+// becomes
+//
+//   let filter_timer = cell_new 0 in
+//   ... cell_get filter_timer ... cell_set filter_timer t ...
+//
+// This is the smaller half of contrib/state and deliberately so. Most
+// state that reaches the screen wants [store.mere] instead, which adds
+// the part a cell cannot have: watchers, so the screen is a function of
+// the state rather than something every mutation site has to remember to
+// update. A cell is for the rest — a pending timer handle, a retry delay,
+// a flag no one renders — where there is nothing to derive and a watcher
+// would be ceremony.
+//
+// Public API:
+//
+//   cell_new : T -> Cell[T]
+//   cell_get : Cell[T] -> T
+//   cell_set : Cell[T] -> T -> unit
+//
+// A cell is a one-slot vec, which is what it always was; the value is
+// that the name now says so, and that `cell_set c v` cannot be written
+// with the wrong index.
+
+let cell_new = fn (initial) ->
+  let c = vec_new () in
+  let _ = vec_push c initial in
+  c;
+
+let cell_get = fn (c) -> vec_get c 0;
+
+let cell_set = fn (c) -> fn (v) -> vec_set c 0 v;
