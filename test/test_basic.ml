@@ -4150,6 +4150,10 @@ let () =
       | Ast.Top_type (name, params, variants) ->
         Typer.register_type name params variants
       | Ast.Top_drop name -> Typer.register_drop_type name
+      | Ast.Top_extern (name, ty) ->
+        (* An extern is an ordinary binding to the type env; the backend
+           turns it into a host import. *)
+        type_env := (name, Typer.mono ty) :: !type_env
       | Ast.Top_view (name, region, fields) ->
         Typer.register_view name region fields
       | Ast.Top_let (pat, value) ->
@@ -4186,6 +4190,21 @@ let () =
   check "P3: collision-free inner fn keeps its name (interp unaffected)"
     (Pipeline.process "let f = fn (n: int) -> (let rec go = fn (k: int) -> if k == 0 then n else go (k - 1) in go 3) in f 7")
     "7";
+  (* v0.1.164: an extern applied to fewer arguments than it declares is a
+     value, not a call. The extern path collapses a curried App chain into
+     one `call $name`, which emitted the wrong arity for a partial
+     application — `worker_call req` on a two-argument extern produced WAT
+     wat2wasm rejected. It now eta-wraps, so the partial application
+     builds a closure and reaches its callee through the function table. *)
+  assert_contains "wasm: a partially applied extern becomes a closure"
+    (wasm_with_decls "extern fn two: str -> (str -> unit) -> unit;\n\
+           let task = two \"hi\" in\n\
+           let _ = task (fn (s: str) -> print s) in 0")
+    "call_indirect";
+  assert_contains "wasm: a saturated extern still calls directly"
+    (wasm_with_decls "extern fn two: str -> (str -> unit) -> unit;\n\
+           let _ = two \"hi\" (fn (s: str) -> print s) in 0")
+    "call $two";
   assert_contains "wasm: emits (module"
     (wasm "42") "(module";
   assert_contains "wasm: exports main with i32 result"

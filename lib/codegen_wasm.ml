@@ -345,6 +345,47 @@ let synthesize_curried_eta_wasm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
   in
   wrap (n - 1) inner_apps ret_ty
 
+(* v0.1.164: an extern applied to fewer arguments than it declares. The
+   extern path collapses a curried App chain into one `call $name`, which
+   is right when the application is saturated and emits a call with the
+   wrong arity when it is not — `worker_call req` on a two-argument
+   extern produced WAT that wat2wasm rejected. Wrapping the missing
+   arguments in a lambda routes the whole thing through the ordinary
+   anonymous-closure path, so a partially applied extern becomes a value
+   like any other. *)
+let eta_wrap_partial_extern (partial : Ast.expr) (missing : Ast.ty list)
+    (ret_ty : Ast.ty) (loc : Loc.t) : Ast.expr =
+  let mk node ty = Ast.{ node; ty = Some ty; loc } in
+  let names = List.mapi (fun i _ -> Printf.sprintf "__eta%d" i) missing in
+  (* Apply the fresh parameters left to right, tracking the result type. *)
+  let rec apply acc acc_ty ns ts =
+    match ns, ts with
+    | [], [] -> acc
+    | n :: ns', t :: ts' ->
+      let res =
+        match Ast.walk acc_ty with Ast.TyArrow (_, b) -> b | _ -> ret_ty in
+      apply (mk (Ast.App (acc, mk (Ast.Var n) t)) res) res ns' ts'
+    | _ -> acc
+  in
+  let partial_ty =
+    match partial.Ast.ty with
+    | Some t -> t
+    | None -> List.fold_right (fun a b -> Ast.TyArrow (a, b)) missing ret_ty
+  in
+  let body = apply partial partial_ty names missing in
+  (* Then close over them right to left. *)
+  let rec wrap ns ts body_acc body_ty =
+    match List.rev ns, List.rev ts with
+    | [], [] -> body_acc
+    | n :: _, t :: _ ->
+      let fn_ty = Ast.TyArrow (t, body_ty) in
+      let node = mk (Ast.Fun (n, Some t, body_acc)) fn_ty in
+      wrap (List.rev (List.tl (List.rev ns))) (List.rev (List.tl (List.rev ts)))
+        node fn_ty
+    | _ -> body_acc
+  in
+  wrap names missing body ret_ty
+
 let eta_adapters_wasm : (string, string * Ast.ty * int) Hashtbl.t =
   Hashtbl.create 4
 
@@ -2033,16 +2074,37 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Ast.TyArrow (_, r) -> result_ty r
       | t -> t
     in
-    let ret_ty = result_ty (Hashtbl.find extern_fn_decls_wasm name) in
-    List.iter (fun a ->
-      match a.Ast.node with
-      | Ast.Unit_lit -> ()
-      | _ -> emit_expr a)
-      args;
-    emit_instr (Printf.sprintf "call $%s" name);
-    (match ret_ty with
-     | Ast.TyUnit -> emit_instr "i64.const 0"
-     | _ -> ())
+    let decl_ty = Hashtbl.find extern_fn_decls_wasm name in
+    let ret_ty = result_ty decl_ty in
+    (* Arity from the declaration, not from the call site: an extern
+       applied to fewer arguments is a value, not a call. *)
+    let rec arg_types t =
+      match Ast.walk t with
+      | Ast.TyArrow (a, b) -> a :: arg_types b
+      | _ -> []
+    in
+    let declared = arg_types decl_ty in
+    let given = List.length args in
+    if given < List.length declared then begin
+      (* Drop the arguments already supplied and close over the rest. *)
+      let rec drop n xs = if n <= 0 then xs else match xs with
+        | [] -> [] | _ :: t -> drop (n - 1) t in
+      let missing = drop given declared in
+      emit_expr
+        (eta_wrap_partial_extern
+           { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc }
+           missing ret_ty e.Ast.loc)
+    end else begin
+      List.iter (fun a ->
+        match a.Ast.node with
+        | Ast.Unit_lit -> ()
+        | _ -> emit_expr a)
+        args;
+      emit_instr (Printf.sprintf "call $%s" name);
+      (match ret_ty with
+       | Ast.TyUnit -> emit_instr "i64.const 0"
+       | _ -> ())
+    end
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $puts";
