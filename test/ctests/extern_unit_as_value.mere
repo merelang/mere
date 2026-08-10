@@ -1,0 +1,25 @@
+// EXTERN — syntax-check only. An extern whose RESULT is `unit`, used in
+// value position.
+//
+// `unit` is erased on both sides of the C boundary but to different
+// things: Mere's unit is the int 0, and `extern fn f: unit -> unit` is
+// `void f(void)`. The closure adapter returned the call directly, so it
+// returned void from a function declared to return int and the emitted C
+// would not compile. An extern of that shape therefore could not be used
+// as a value at all — which is the shape of middleware: contrib/http's
+// `with_arena` wraps `http_arena_mark`, and any native build of a server
+// using it failed here.
+//
+// Both argument and result are exercised, since the argument was already
+// handled and the result was not.
+extern fn ext_tick: unit -> unit;
+extern fn ext_note: int -> unit;
+extern fn ext_read: unit -> int;
+
+let run_once = fn (g: unit -> unit) -> g ();
+let run_with = fn (g: int -> unit) -> g 7;
+let read_via = fn (g: unit -> int) -> g ();
+
+let _ = run_once ext_tick;
+let _ = run_with ext_note;
+read_via ext_read

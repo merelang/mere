@@ -9074,10 +9074,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            take an argument to fit the closure signature, so it accepts
            one and drops it — passing it through called a 0-arity
            function with an argument and failed to compile. *)
+        (* A `unit` RESULT is erased the same way: `extern fn f: unit ->
+           unit` is `void f(void)` in C, so the adapter must call it and
+           then produce Mere's unit (0) itself. Returning the call
+           directly returned void from a function declared to return int,
+           which the C compiler rejects — so an extern of that shape could
+           not be used as a value at all, and any native build of a server
+           using contrib/http's `with_arena` failed to compile. *)
+        let arg = match Ast.walk a with Ast.TyUnit -> "" | _ -> "__x" in
+        let drop_arg = match Ast.walk a with Ast.TyUnit -> "(void)__x; " | _ -> "" in
         let call =
-          match Ast.walk a with
-          | Ast.TyUnit -> Printf.sprintf "(void)__x; return %s()" name
-          | _ -> Printf.sprintf "return %s(__x)" name
+          match Ast.walk b with
+          | Ast.TyUnit -> Printf.sprintf "%s%s(%s); return 0" drop_arg name arg
+          | _ -> Printf.sprintf "%sreturn %s(%s)" drop_arg name arg
         in
         Printf.sprintf
           "static %s __ext_%s_closure_fn(void* __env, %s __x) { (void)__env; %s; }\n\

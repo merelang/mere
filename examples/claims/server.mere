@@ -1,0 +1,158 @@
+// examples/claims/server.mere — storage and the rules only this side knows.
+//
+// The claim crosses as JSON produced by `to_json` and read back by
+// `of_json`, both synthesised from the declaration in schema.mere, so
+// there is no wire format written down anywhere. Changing a field in the
+// schema changes what both replicas send and expect, together.
+//
+// Validation runs here as well as in the browser, from the same functions
+// — a browser can be bypassed — and then this side adds what it alone can
+// answer: whether the named approver exists, whether the total needs one,
+// and whether the claim is in a state that may be edited at all.
+//
+//   GET  /api/claim          the stored claim, as JSON
+//   POST /api/claim          save a draft; 422 with a `problem list` when
+//                            rejected, the same shape the browser renders
+//   POST /api/claim/submit   draft -> submitted, if the rules allow
+//   GET  /api/approvers      the directory the browser cannot know
+//
+// Run:
+//   mere -w examples/claims/server.mere > /tmp/claims.wat
+//   wat2wasm --enable-tail-call /tmp/claims.wat -o /tmp/claims.wasm
+//   node scripts/run_http_server.js /tmp/claims.wasm
+//
+// Wasm host only, for now. `mere -c` emits and compiles, but the native
+// HTTP runtime implements six externs and not the two the middleware
+// below needs — `http_current_status` (access_log) and `http_arena_mark`
+// (the per-request arena reset). So a server that releases its
+// per-request allocations exists on one host and not the other, which is
+// a gap worth its own slice rather than a detour inside this one.
+
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../../contrib/http/access_log.mere";
+import "../../contrib/http/arena.mere";
+import "../../contrib/http/cors.mere";
+import "../../contrib/http/static.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/store/kvlog.mere";
+import "schema.mere";
+
+let db = "/tmp/mere_claims.log" in
+
+// The directory. A browser has no way to know this list is authoritative,
+// which is the point: one rule below cannot be checked client-side.
+let approvers = Cons ("hoshino", Cons ("kato", Cons ("mizuki", Nil))) in
+
+let rec known_approver = fn (xs: str list) -> fn (name: str) ->
+  match xs with
+  | Nil -> false
+  | Cons (a, rest) -> if str_eq a name then true else known_approver rest name;
+
+let json = fn (s: str) ->
+  let _ = http_set_content_type "application/json; charset=utf-8" in s
+in
+
+let load = fn (u: unit) ->
+  let stored = kvlog_get db "claim" in
+  if str_eq stored "" then blank_claim
+  else match (of_json_opt stored : claim option) with
+       | Some c -> c
+       | None -> blank_claim
+in
+
+let store = fn (c: claim) -> kvlog_set db "claim" (to_json c) in
+
+let get_claim = fn (req: str) -> json (to_json (load ())) in
+
+let get_approvers = fn (req: str) -> json (to_json approvers) in
+
+// The rules this side adds on top of the shared ones. Each is something
+// the browser genuinely cannot decide by looking at the form.
+let server_problems = fn (c: claim) ->
+  let over_cap = claim_total c > 100000 in
+  let named =
+    match c.approver with
+    | Some a -> str_trim a
+    | None -> "" in
+  let e_missing =
+    if over_cap && str_eq named "" then
+      Cons (problem { field = "approver",
+                      message = "A claim over " ++ yen 100000 ++ " needs an approver" }, Nil)
+    else Nil in
+  let e_unknown =
+    if not (str_eq named "") && not (known_approver approvers named) then
+      Cons (problem { field = "approver",
+                      message = "There is no approver called " ++ named }, Nil)
+    else Nil in
+  list_append e_missing e_unknown
+in
+
+let save_claim = fn (req: str) ->
+  match (of_json_opt (http_current_body ()) : claim option) with
+  | None ->
+    let _ = http_set_status 400 in
+    json (to_json (Cons (problem { field = "", message = "unreadable body" }, Nil)))
+  | Some incoming ->
+    let current = load () in
+    if not (is_draft current.status) then
+      let _ = http_set_status 409 in
+      json (to_json (Cons (problem { field = "",
+                                     message = "This claim is " ++ status_label current.status
+                                               ++ " and can no longer be edited" }, Nil)))
+    else
+      // The status is not the browser's to set: keep whatever this side
+      // already had, whatever the body claimed.
+      let c = { incoming | status = current.status } in
+      let problems = list_append (claim_problems c) (server_problems c) in
+      match problems with
+      | Cons (_, _) ->
+        let _ = http_set_status 422 in json (to_json problems)
+      | Nil ->
+        let _ = store c in json (to_json c)
+in
+
+let submit_claim = fn (req: str) ->
+  let c = load () in
+  if not (is_draft c.status) then
+    let _ = http_set_status 409 in
+    json (to_json (Cons (problem { field = "",
+                                   message = "Already " ++ status_label c.status }, Nil)))
+  else
+    let problems = list_append (claim_problems c) (server_problems c) in
+    match problems with
+    | Cons (_, _) ->
+      let _ = http_set_status 422 in json (to_json problems)
+    | Nil ->
+      let submitted = { c | status = Submitted } in
+      let _ = store submitted in json (to_json submitted)
+in
+
+let home = fn (req: str) ->
+  let _ = http_set_content_type "text/html; charset=utf-8" in
+  read_file "examples/claims/index.html"
+in
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found: " ++ req ++ "\n"
+in
+
+let routes =
+  Cons (route "GET"  "/"                 home,
+  Cons (route "GET"  "/api/claim"        get_claim,
+  Cons (route "GET"  "/api/approvers"    get_approvers,
+  Cons (route "POST" "/api/claim"        save_claim,
+  Cons (route "POST" "/api/claim/submit" submit_claim,
+  Nil))))) in
+
+let handle =
+  serve_static_fallback "/static/" "examples/claims"
+    (serve_static_fallback "/vendor/" "contrib"
+      (router routes not_found)) in
+
+let _ = print ("claims server on :8080 (db=" ++ db ++ ")") in
+let _ = http_serve 8080 (with_arena (with_access_log (with_cors "*" handle))) in
+0
