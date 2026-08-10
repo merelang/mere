@@ -130,6 +130,18 @@ type fn_decl = {
 }
 
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* v0.1.172: declaration position of each top-level fn. Top-level bindings
+   are sequential — the typer rejects a forward reference — so `show` used
+   above a later `let show = ...` is still the builtin, and the shadowing
+   guard has to ask "bound before here?" rather than "bound anywhere?".
+   `<=` rather than `<` so a recursive fn counts as binding its own name. *)
+let toplevel_fn_pos : (string, int) Hashtbl.t = Hashtbl.create 8
+let current_toplevel_pos = ref max_int
+let toplevel_binds_here name =
+  match Hashtbl.find_opt toplevel_fn_pos name with
+  | Some p -> p <= !current_toplevel_pos
+  | None -> Hashtbl.mem toplevel_fn_names name
+
 
 (* Phase 30.2c (DEFERRED §1.10 fix, Wasm): keep the names of top-level
    non-fn lets. In Wasm all values are i32 (literal int / ptr to linear
@@ -427,7 +439,15 @@ let set_inner_lifts_for_host_wasm (host : string) : unit =
   Hashtbl.reset inner_lifts_wasm;
   (match Hashtbl.find_opt inner_lifts_by_host_wasm host with
    | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts_wasm k v) tbl
-   | None -> ())
+   | None -> ());
+  (* v0.1.172: the host also fixes where we are in the file, which is what
+     the shadowing guard needs — a builtin used inside fn #3 is not affected
+     by a same-named binding introduced at #9. "$main" and lifted helpers
+     with no recorded position fall back to "everything is in scope". *)
+  current_toplevel_pos :=
+    (match Hashtbl.find_opt toplevel_fn_pos host with
+     | Some p -> p
+     | None -> max_int)
 
 (* Wasm tail-call proposal — set to true only while emit_expr is
    producing a value in tail position of the enclosing function
@@ -1532,11 +1552,34 @@ let emit_float_alloc_from_f64_on_stack () : unit =
    `toplevel_fn_names` / `fn_closure_table_idx` are populated before any body
    (fn or main) is emitted and survive `reset ()`, so they are reliable here. *)
 let user_shadows_wasm name =
+  (* Locals and lifted inner fns are lexically in scope by construction, so
+     they decide on their own. For a top-level name the question is where we
+     are in the file, and it has to be asked before the name-only tables:
+     `fn_closure_table_idx` and `top_globals_wasm` also hold top-level fn
+     names, and answering from those would put a binding in scope above its
+     own declaration. *)
   List.mem_assoc name !locals
-  || Hashtbl.mem toplevel_fn_names name
-  || Hashtbl.mem fn_closure_table_idx name
-  || Hashtbl.mem top_globals_wasm name
   || Hashtbl.mem inner_lifts_wasm name
+  || (match Hashtbl.find_opt toplevel_fn_pos name with
+      | Some p -> p <= !current_toplevel_pos
+      | None ->
+        Hashtbl.mem toplevel_fn_names name
+        || Hashtbl.mem fn_closure_table_idx name
+        || Hashtbl.mem top_globals_wasm name)
+
+(* The head of an application spine: `f a b c` is App (App (App (f, a), b), c),
+   so a three-argument builtin is matched at the outermost App with the name
+   three levels down. A guard has to ask about the same name the builtin arms
+   will match on, which is this one. *)
+let rec app_spine_head_wasm (x : Ast.expr) : Ast.expr =
+  match x.Ast.node with
+  | Ast.App (g, _) -> app_spine_head_wasm g
+  | _ -> x
+
+let app_head_user_bound_wasm (x : Ast.expr) : bool =
+  match (app_spine_head_wasm x).Ast.node with
+  | Ast.Var n -> user_shadows_wasm n
+  | _ -> false
 
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_expr (e : Ast.expr) : unit =
@@ -2015,6 +2058,18 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_expr body)
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
+  (* v0.1.172: a name the user bound is the user's, not the builtin's.
+     Every arm below this one dispatches on a builtin name, and only 14 of
+     the 139 asked whether the program had defined something of its own by
+     that name — those guards had been added one incident at a time, after
+     someone was bitten. This is the general form: if the head of the
+     application spine is a name the program bound, the call goes straight
+     to the ordinary call paths and never meets the builtin arms.
+
+     Safe by construction: `app_head_user_bound_wasm` is false unless the
+     program actually bound that name, so a program that shadows nothing
+     reaches exactly the arms it reached before. *)
+  | Ast.App _ when app_head_user_bound_wasm e -> emit_user_app saved_tail e
   | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
     let arg_ty =
       match arg.Ast.ty with
@@ -2990,54 +3045,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "i32.wrap_i64";
     emit_instr "i64.load offset=8"
-  | Ast.App ({ node = Ast.Var name; _ }, arg)
-    when Hashtbl.mem inner_lifts_wasm name ->
-    (* Phase 26.3: inner-lifted call — emit captures (looked up via
-       current locals) + arg, then call $<lifted_name>. *)
-    let li = Hashtbl.find inner_lifts_wasm name in
-    List.iter (fun cap ->
-      match List.assoc_opt cap !locals with
-      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
-      | None when Hashtbl.mem top_globals_wasm cap ->
-        emit_instr (Printf.sprintf "global.get $%s" cap)
-      | None -> unsupported e.Ast.loc
-          (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
-    ) li.captures;
-    emit_expr arg;
-    let call_op = if saved_tail then "return_call" else "call" in
-    emit_instr (Printf.sprintf "%s $%s" call_op li.lifted_name)
-  | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
-    when Hashtbl.mem toplevel_fn_names name ->
-    emit_expr arg;
-    let dispatch_name =
-      if Hashtbl.mem multi_inst_fns_wasm name then
-        match f_ty with
-        | Some t ->
-          (match Ast.walk t with
-           | Ast.TyArrow _ as arrow -> mangled_inst_name_wasm name arrow
-           | _ -> name)
-        | None -> name
-      else name
-    in
-    let call_op = if saved_tail then "return_call" else "call" in
-    emit_instr (Printf.sprintf "%s $%s" call_op dispatch_name)
-  | Ast.App (f, arg) ->
-    (* Indirect call via call_indirect on the closure value's table
-       index. closure layout: { env @ offset 0, fn_idx @ offset 4 }
-       (i32 record fields; env crosses as an i64 value). *)
-    let cl_slot = fresh_local () in
-    emit_expr f;
-    emit_instr (Printf.sprintf "local.set %d" cl_slot);
-    emit_instr (Printf.sprintf "local.get %d" cl_slot);
-    emit_instr "i32.wrap_i64";
-    emit_instr "i32.load offset=0";
-    emit_instr "i64.extend_i32_u";
-    emit_expr arg;
-    emit_instr (Printf.sprintf "local.get %d" cl_slot);
-    emit_instr "i32.wrap_i64";
-    emit_instr "i32.load offset=4";
-    let call_op = if saved_tail then "return_call_indirect" else "call_indirect" in
-    emit_instr (Printf.sprintf "%s (type $cl)" call_op)
+  (* v0.1.172: every call whose head the user bound lands here, whether it
+     reached this point by falling past the builtin arms or by being sent
+     past them from the guard above. *)
+  | Ast.App _ -> emit_user_app saved_tail e
   | Ast.Record_lit (name, fields) when Hashtbl.mem Typer.views name ->
     (* View literal: same memory layout as a record (i32 per field),
        allocated from the active region's bump pointer. In Wasm all
@@ -3745,6 +3756,62 @@ let rec emit_expr (e : Ast.expr) : unit =
      considers the fallback `| _ ->` redundant. We'd like to keep explicit
      unsupported errors tagged by node_name, but leaving a wildcard in each
      case would produce unused warnings — so completely removed. *)
+
+and emit_user_app (saved_tail : bool) (e : Ast.expr) : unit =
+  (* The three shapes an ordinary call can take: an inner-lifted fn, a
+     top-level fn, or a closure value. Split out of emit_expr so that the
+     shadowing guard has somewhere to send a call it must not let the
+     builtin arms see. *)
+  match e.Ast.node with
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem inner_lifts_wasm name ->
+    (* Phase 26.3: inner-lifted call — emit captures (looked up via
+       current locals) + arg, then call $<lifted_name>. *)
+    let li = Hashtbl.find inner_lifts_wasm name in
+    List.iter (fun cap ->
+      match List.assoc_opt cap !locals with
+      | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
+      | None when Hashtbl.mem top_globals_wasm cap ->
+        emit_instr (Printf.sprintf "global.get $%s" cap)
+      | None -> unsupported e.Ast.loc
+          (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
+    ) li.captures;
+    emit_expr arg;
+    let call_op = if saved_tail then "return_call" else "call" in
+    emit_instr (Printf.sprintf "%s $%s" call_op li.lifted_name)
+  | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
+    when Hashtbl.mem toplevel_fn_names name ->
+    emit_expr arg;
+    let dispatch_name =
+      if Hashtbl.mem multi_inst_fns_wasm name then
+        match f_ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyArrow _ as arrow -> mangled_inst_name_wasm name arrow
+           | _ -> name)
+        | None -> name
+      else name
+    in
+    let call_op = if saved_tail then "return_call" else "call" in
+    emit_instr (Printf.sprintf "%s $%s" call_op dispatch_name)
+  | Ast.App (f, arg) ->
+    (* Indirect call via call_indirect on the closure value's table
+       index. closure layout: { env @ offset 0, fn_idx @ offset 4 }
+       (i32 record fields; env crosses as an i64 value). *)
+    let cl_slot = fresh_local () in
+    emit_expr f;
+    emit_instr (Printf.sprintf "local.set %d" cl_slot);
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
+    emit_expr arg;
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=4";
+    let call_op = if saved_tail then "return_call_indirect" else "call_indirect" in
+    emit_instr (Printf.sprintf "%s (type $cl)" call_op)
+  | _ -> failwith "emit_user_app: not an application"
 
 (* Emit one top-level fn definition. Params are positional locals
    starting at slot 0; let-binding locals are mint-ed afterwards.
@@ -7825,6 +7892,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   ) prog.decls;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  (* v0.1.172: source order, so the shadowing guard can tell a binding that
+     is already in scope from one that appears further down the file. *)
+  Hashtbl.reset toplevel_fn_pos;
+  List.iteri (fun i s ->
+    if not (Hashtbl.mem toplevel_fn_pos s.sname) then
+      Hashtbl.add toplevel_fn_pos s.sname i) skels;
+  current_toplevel_pos := max_int;
   (* Phase 30.2c (DEFERRED §1.10): make those top-level non-fn lets that are
      referenced from skels' fn bodies into Wasm `(global $name (mut i32))`. *)
   let fvs_used_in_skels_wasm =

@@ -1,9 +1,9 @@
 // Positioned file I/O on an open handle, across the backends.
 //
 // file_openrw / file_pread / file_pwrite / file_fsync were interp + C
-// only until v0.1.153; Wasm now implements them over host imports, with
+// only until v0.1.153, when Wasm implemented them over host imports with
 // bytes crossing in the mere_bytes layout rather than one call per byte.
-// LLVM still refuses them at emit time, which parity reports as UNSUP.
+// LLVM followed in v0.1.163, so all four backends run this now.
 //
 // The point of the case is the *positioned* part: write at an offset
 // past the end (extending the file), overwrite a window in the middle

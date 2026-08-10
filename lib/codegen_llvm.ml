@@ -27,8 +27,8 @@ let unsupported loc what =
 let host_builtins_without_llvm_lowering =
   [ "print_no_nl"; "print_err"; "print_int"; "print_bool";
     "read_line"; "read_stdin"; "read_key";
-    "tty_raw"; "tty_restore"; "file_size"; "exit";
-    "read_lines"; "file_pread"; "file_pwrite";
+    "tty_raw"; "tty_restore"; "exit";
+    "read_lines";
     "env_var"; "run";
     "file_exists"; "random_int"; "random_float";
     "detach"; "par_map" ]
@@ -479,6 +479,18 @@ type fn_decl = {
 
 (* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* v0.1.172: declaration position of each top-level fn. Top-level bindings
+   are sequential — the typer rejects a forward reference — so `show` used
+   above a later `let show = ...` is still the builtin, and the shadowing
+   guard has to ask "bound before here?" rather than "bound anywhere?".
+   `<=` rather than `<` so a recursive fn counts as binding its own name. *)
+let toplevel_fn_pos : (string, int) Hashtbl.t = Hashtbl.create 8
+let current_toplevel_pos = ref max_int
+let toplevel_binds_here name =
+  match Hashtbl.find_opt toplevel_fn_pos name with
+  | Some p -> p <= !current_toplevel_pos
+  | None -> Hashtbl.mem toplevel_fn_names name
+
 
 (* Phase 30.2b (DEFERRED §1.10 fix, LLVM): keep the names and types of
    top-level non-fn lets. emit_expr Var "name" loads @name. *)
@@ -575,7 +587,15 @@ let set_inner_lifts_for_host_llvm (host : string) : unit =
   Hashtbl.reset inner_lifts_llvm;
   (match Hashtbl.find_opt inner_lifts_by_host_llvm host with
    | Some tbl -> Hashtbl.iter (fun k v -> Hashtbl.add inner_lifts_llvm k v) tbl
-   | None -> ())
+   | None -> ());
+  (* v0.1.172: the host also fixes where we are in the file, which is what
+     the shadowing guard needs — a builtin used inside fn #3 is not affected
+     by a same-named binding introduced at #9. "$main" and lifted helpers
+     with no recorded position fall back to "everything is in scope". *)
+  current_toplevel_pos :=
+    (match Hashtbl.find_opt toplevel_fn_pos host with
+     | Some p -> p
+     | None -> max_int)
 
 type lifted_fn_llvm = {
   l_name      : string;
@@ -620,7 +640,21 @@ let user_shadows_llvm (env : (string * string) list) (name : string) : bool =
   List.mem_assoc name env
   || List.mem_assoc name !current_var_types
   || Hashtbl.mem inner_lifts_llvm name
-  || Hashtbl.mem toplevel_fn_names name
+  || toplevel_binds_here name
+
+(* The head of an application spine: `f a b c` is App (App (App (f, a), b), c),
+   so a builtin taking three arguments is matched at the outermost App and the
+   name is three levels down. A shadowing guard has to ask about the same name
+   the builtin arms will match on, which is this one. *)
+let rec app_spine_head (e : Ast.expr) : Ast.expr =
+  match e.Ast.node with
+  | Ast.App (f, _) -> app_spine_head f
+  | _ -> e
+
+let app_head_user_bound (env : (string * string) list) (e : Ast.expr) : bool =
+  match (app_spine_head e).Ast.node with
+  | Ast.Var name -> user_shadows_llvm env name
+  | _ -> false
 
 (* Type the parent context expects this expression to have. Set by
    emit_fn_def / emit_anon_adapter as the body's return type, so
@@ -3553,6 +3587,20 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           (the interp accepted every pattern) — a backend parity gap
           surfaced by the mere-blog dogfood. *)
        emit_expr env { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
+  (* v0.1.172: a name the user bound is the user's, not the builtin's.
+     Every arm below this one dispatches on a builtin name without asking
+     whether the program defined something of its own by that name, and a
+     handful of them had grown a private guard after someone was bitten —
+     `join` was the most recent, in v0.1.169. This is the general form: if
+     the head of the application spine is a name the program bound, the
+     call goes straight to the ordinary call paths and never meets the
+     builtin arms at all.
+
+     Safe by construction: `app_head_user_bound` is false unless the
+     program actually bound that name, so a program that shadows nothing
+     reaches exactly the arms it reached before. Externs are untouched —
+     they live in their own table, not in the ones consulted here. *)
+  | Ast.App _ when app_head_user_bound env e -> emit_user_app env e
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     let av = emit_expr env arg in
     let tname =
@@ -4917,172 +4965,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   av (llvm_ty_of acc_ty) initv outer_cl_name cv);
     ignore inner_cl_name;
     r
-  | Ast.App ({ node = Ast.Var name; _ }, arg)
-    when Hashtbl.mem inner_lifts_llvm name ->
-    (* Phase 25.3: inner-lifted fn call. Prepend captures (by name from env)
-       then the arg. *)
-    let li = Hashtbl.find inner_lifts_llvm name in
-    let av = emit_expr env arg in
-    let arg_ty_str =
-      match arg.Ast.ty with
-      | Some t -> llvm_ty_of (Ast.walk t)
-      | None -> "i32"
-    in
-    let cap_args =
-      List.map (fun (cn, cty) ->
-        let cv =
-          match List.assoc_opt cn env with
-          | Some v -> v
-          | None when Hashtbl.mem top_globals_llvm cn ->
-            (* Phase 36 (DEFERRED §1.14 fix): if a captured free var is a
-               top-level global, load it before passing.
-               Pass the loaded value of `ptr @cn`, not `ptr %cn` (register). *)
-            let r = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
-                          r (llvm_ty_of cty) cn);
-            r
-          | None -> "%" ^ cn  (* fallback *)
-        in
-        Printf.sprintf "%s %s" (llvm_ty_of cty) cv
-      ) li.captures
-    in
-    let all_args = String.concat ", " (cap_args @ [Printf.sprintf "%s %s" arg_ty_str av]) in
-    let ret_ty =
-      match e.Ast.ty with
-      | Some t -> llvm_ty_of (Ast.walk t)
-      | None -> "i32"
-    in
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call %s @%s(%s)" r ret_ty li.lifted_name all_args);
-    r
-  | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
-    when Hashtbl.mem toplevel_fn_names name ->
-    let av = emit_expr env arg in
-    let ret_ty =
-      match e.Ast.ty with
-      | Some t -> llvm_ty_of t
-      | None -> "i32"
-    in
-    let arg_ty =
-      (* Prefer current_var_types for Var args (in case the AST .ty is
-         still polymorphic from let-rec generalization). *)
-      let from_var_types =
-        match arg.Ast.node with
-        | Ast.Var n ->
-          (match List.assoc_opt n !current_var_types with
-           | Some t when ty_is_concrete t -> Some (llvm_ty_of (Ast.walk t))
-           | _ -> None)
-        | _ -> None
-      in
-      match from_var_types with
-      | Some s -> s
-      | None ->
-        (match arg.Ast.ty with
-         | Some t -> llvm_ty_of t
-         | None -> "i32")
-    in
-    (* Phase 25.5: per-instantiation dispatch. If name is multi-inst, use
-       the call site's f.ty (the head Var's specific arrow type for this
-       use) to pick the mangled name. *)
-    let dispatch_name =
-      if Hashtbl.mem multi_inst_fns_llvm name then
-        match f_ty with
-        | Some t ->
-          (match Ast.walk t with
-           | Ast.TyArrow _ as arrow -> mangled_inst_name_llvm name arrow
-           | _ -> name)
-        | None -> name
-      else name
-    in
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty dispatch_name arg_ty av);
-    r
-  | Ast.App (f, arg) ->
-    (* Closure dispatch via the closure value's fn pointer. *)
-    let arrow_ty =
-      (* Prefer current_var_types if the head is a Var with a known
-         concrete binding — fn body may carry polymorphic .ty. *)
-      let from_var_types =
-        match f.Ast.node with
-        | Ast.Var n ->
-          (match List.assoc_opt n !current_var_types with
-           | Some t when ty_is_concrete t -> Some (Ast.walk t)
-           | _ -> None)
-        | _ -> None
-      in
-      match from_var_types with
-      | Some t -> t
-      | None ->
-        (match f.Ast.ty with
-         | Some t -> Ast.walk t
-         | None -> unsupported f.Ast.loc "closure call: missing fn type")
-    in
-    (* Phase 25.10/25.12: if arrow_ty still has free tyvars, try to recover
-       concrete types from arg.ty / e.ty / current_var_types. Useful when
-       a polymorphic callback (e.g., the f in `list_iter xs f`) leaves the
-       App-result tyvar unconstrained. *)
-    let arrow_ty =
-      if ty_is_concrete arrow_ty then arrow_ty
-      else begin
-        (match arg.Ast.ty, e.Ast.ty with
-         | Some pt, Some rt when ty_is_concrete (Ast.walk pt) && ty_is_concrete (Ast.walk rt) ->
-           let target = Ast.TyArrow (Ast.walk pt, Ast.walk rt) in
-           (try Typer.unify Loc.dummy arrow_ty target with _ -> ())
-         | _ -> ());
-        let walked = Ast.walk arrow_ty in
-        if ty_is_concrete walked then walked
-        else begin
-          (* Fall back to arg's concrete binding from current_var_types if arg
-             is a Var. This handles `list_iter t f` inside list_iter's body
-             where f is a captured var with concrete (str -> unit) type. *)
-          let arg_concrete =
-            match arg.Ast.node with
-            | Ast.Var n ->
-              (match List.assoc_opt n !current_var_types with
-               | Some t when ty_is_concrete (Ast.walk t) -> Some (Ast.walk t)
-               | _ -> None)
-            | _ -> None
-          in
-          (match arg_concrete, e.Ast.ty with
-           | Some pt, Some rt when ty_is_concrete (Ast.walk rt) ->
-             let target = Ast.TyArrow (pt, Ast.walk rt) in
-             (try Typer.unify Loc.dummy arrow_ty target with _ -> ())
-           | _ -> ());
-          Ast.walk arrow_ty
-        end
-      end
-    in
-    let cname =
-      match arrow_ty with
-      | Ast.TyArrow (p, r) -> closure_struct_name (Ast.walk p) (Ast.walk r)
-      | _ -> unsupported f.Ast.loc "closure call on non-arrow"
-    in
-    let ret_ty =
-      match e.Ast.ty with
-      | Some t -> llvm_ty_of t
-      | None -> "i32"
-    in
-    (* Phase 25.12: derive arg_ty from arrow_ty's p (which we just fixed
-       up) instead of arg.Ast.ty directly. arg.Ast.ty might still be a
-       free TyVar even though arrow_ty's p is concrete. *)
-    let arg_ty =
-      match arrow_ty with
-      | Ast.TyArrow (p, _) when ty_is_concrete (Ast.walk p) -> llvm_ty_of (Ast.walk p)
-      | _ ->
-        (match arg.Ast.ty with
-         | Some t -> llvm_ty_of t
-         | None -> "i32")
-    in
-    let cv = emit_expr env f in
-    let av = emit_expr env arg in
-    let env_reg = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" env_reg cname cv);
-    let fn_reg = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fn_reg cname cv);
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s)"
-                  r ret_ty fn_reg env_reg arg_ty av);
-    r
+  (* Phase 30.0 / v0.1.172: every call whose head the user bound lands
+     here, whether it reached this point by falling past the builtin arms
+     or by being sent past them from the guard above. *)
+  | Ast.App _ -> emit_user_app env e
   | Ast.Tuple elems ->
     let tname =
       match e.Ast.ty with
@@ -5923,6 +5809,180 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     else
       let bits = Int64.bits_of_float f in
       Printf.sprintf "0x%016Lx" bits
+
+and emit_user_app (env : env) (e : Ast.expr) : string =
+  (* The three shapes an ordinary call can take: an inner-lifted fn, a
+     top-level fn, or a closure value. Split out of emit_expr so that the
+     shadowing guard has somewhere to send a call it must not let the
+     builtin arms see. *)
+  match e.Ast.node with
+  | Ast.App ({ node = Ast.Var name; _ }, arg)
+    when Hashtbl.mem inner_lifts_llvm name ->
+    (* Phase 25.3: inner-lifted fn call. Prepend captures (by name from env)
+       then the arg. *)
+    let li = Hashtbl.find inner_lifts_llvm name in
+    let av = emit_expr env arg in
+    let arg_ty_str =
+      match arg.Ast.ty with
+      | Some t -> llvm_ty_of (Ast.walk t)
+      | None -> "i32"
+    in
+    let cap_args =
+      List.map (fun (cn, cty) ->
+        let cv =
+          match List.assoc_opt cn env with
+          | Some v -> v
+          | None when Hashtbl.mem top_globals_llvm cn ->
+            (* Phase 36 (DEFERRED §1.14 fix): if a captured free var is a
+               top-level global, load it before passing.
+               Pass the loaded value of `ptr @cn`, not `ptr %cn` (register). *)
+            let r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
+                          r (llvm_ty_of cty) cn);
+            r
+          | None -> "%" ^ cn  (* fallback *)
+        in
+        Printf.sprintf "%s %s" (llvm_ty_of cty) cv
+      ) li.captures
+    in
+    let all_args = String.concat ", " (cap_args @ [Printf.sprintf "%s %s" arg_ty_str av]) in
+    let ret_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of (Ast.walk t)
+      | None -> "i32"
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s @%s(%s)" r ret_ty li.lifted_name all_args);
+    r
+  | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
+    when Hashtbl.mem toplevel_fn_names name ->
+    let av = emit_expr env arg in
+    let ret_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    let arg_ty =
+      (* Prefer current_var_types for Var args (in case the AST .ty is
+         still polymorphic from let-rec generalization). *)
+      let from_var_types =
+        match arg.Ast.node with
+        | Ast.Var n ->
+          (match List.assoc_opt n !current_var_types with
+           | Some t when ty_is_concrete t -> Some (llvm_ty_of (Ast.walk t))
+           | _ -> None)
+        | _ -> None
+      in
+      match from_var_types with
+      | Some s -> s
+      | None ->
+        (match arg.Ast.ty with
+         | Some t -> llvm_ty_of t
+         | None -> "i32")
+    in
+    (* Phase 25.5: per-instantiation dispatch. If name is multi-inst, use
+       the call site's f.ty (the head Var's specific arrow type for this
+       use) to pick the mangled name. *)
+    let dispatch_name =
+      if Hashtbl.mem multi_inst_fns_llvm name then
+        match f_ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyArrow _ as arrow -> mangled_inst_name_llvm name arrow
+           | _ -> name)
+        | None -> name
+      else name
+    in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty dispatch_name arg_ty av);
+    r
+  | Ast.App (f, arg) ->
+    (* Closure dispatch via the closure value's fn pointer. *)
+    let arrow_ty =
+      (* Prefer current_var_types if the head is a Var with a known
+         concrete binding — fn body may carry polymorphic .ty. *)
+      let from_var_types =
+        match f.Ast.node with
+        | Ast.Var n ->
+          (match List.assoc_opt n !current_var_types with
+           | Some t when ty_is_concrete t -> Some (Ast.walk t)
+           | _ -> None)
+        | _ -> None
+      in
+      match from_var_types with
+      | Some t -> t
+      | None ->
+        (match f.Ast.ty with
+         | Some t -> Ast.walk t
+         | None -> unsupported f.Ast.loc "closure call: missing fn type")
+    in
+    (* Phase 25.10/25.12: if arrow_ty still has free tyvars, try to recover
+       concrete types from arg.ty / e.ty / current_var_types. Useful when
+       a polymorphic callback (e.g., the f in `list_iter xs f`) leaves the
+       App-result tyvar unconstrained. *)
+    let arrow_ty =
+      if ty_is_concrete arrow_ty then arrow_ty
+      else begin
+        (match arg.Ast.ty, e.Ast.ty with
+         | Some pt, Some rt when ty_is_concrete (Ast.walk pt) && ty_is_concrete (Ast.walk rt) ->
+           let target = Ast.TyArrow (Ast.walk pt, Ast.walk rt) in
+           (try Typer.unify Loc.dummy arrow_ty target with _ -> ())
+         | _ -> ());
+        let walked = Ast.walk arrow_ty in
+        if ty_is_concrete walked then walked
+        else begin
+          (* Fall back to arg's concrete binding from current_var_types if arg
+             is a Var. This handles `list_iter t f` inside list_iter's body
+             where f is a captured var with concrete (str -> unit) type. *)
+          let arg_concrete =
+            match arg.Ast.node with
+            | Ast.Var n ->
+              (match List.assoc_opt n !current_var_types with
+               | Some t when ty_is_concrete (Ast.walk t) -> Some (Ast.walk t)
+               | _ -> None)
+            | _ -> None
+          in
+          (match arg_concrete, e.Ast.ty with
+           | Some pt, Some rt when ty_is_concrete (Ast.walk rt) ->
+             let target = Ast.TyArrow (pt, Ast.walk rt) in
+             (try Typer.unify Loc.dummy arrow_ty target with _ -> ())
+           | _ -> ());
+          Ast.walk arrow_ty
+        end
+      end
+    in
+    let cname =
+      match arrow_ty with
+      | Ast.TyArrow (p, r) -> closure_struct_name (Ast.walk p) (Ast.walk r)
+      | _ -> unsupported f.Ast.loc "closure call on non-arrow"
+    in
+    let ret_ty =
+      match e.Ast.ty with
+      | Some t -> llvm_ty_of t
+      | None -> "i32"
+    in
+    (* Phase 25.12: derive arg_ty from arrow_ty's p (which we just fixed
+       up) instead of arg.Ast.ty directly. arg.Ast.ty might still be a
+       free TyVar even though arrow_ty's p is concrete. *)
+    let arg_ty =
+      match arrow_ty with
+      | Ast.TyArrow (p, _) when ty_is_concrete (Ast.walk p) -> llvm_ty_of (Ast.walk p)
+      | _ ->
+        (match arg.Ast.ty with
+         | Some t -> llvm_ty_of t
+         | None -> "i32")
+    in
+    let cv = emit_expr env f in
+    let av = emit_expr env arg in
+    let env_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" env_reg cname cv);
+    let fn_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fn_reg cname cv);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s)"
+                  r ret_ty fn_reg env_reg arg_ty av);
+    r
+  | _ -> unsupported e.Ast.loc "emit_user_app: not an application"
 
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture
    from `%env_self`, then evaluate the original Fun body with the
@@ -10037,6 +10097,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   close_open_regions main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
+  (* v0.1.172: source order, so the shadowing guard can tell a binding that
+     is already in scope from one that appears further down the file. *)
+  Hashtbl.reset toplevel_fn_pos;
+  List.iteri (fun i s ->
+    if not (Hashtbl.mem toplevel_fn_pos s.sname) then
+      Hashtbl.add toplevel_fn_pos s.sname i) skels;
+  current_toplevel_pos := max_int;
   (* Phase 30.2b (DEFERRED §1.10): make those top-level non-fn lets that are
      referenced from skels' fn bodies into @name LLVM globals. Unreferenced
      ones stay as let-in in the body (= alloca / register). *)
@@ -10214,6 +10281,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   reg_counter := 0;
   label_counter := 0;
   instrs := [];
+  (* v0.1.172: main's body sits below every top-level declaration, so every
+     one of them is in scope here. Unlike C and Wasm this backend has no
+     `set_inner_lifts_for_host "$main"` to carry the position, so it is set
+     directly — without this the cursor keeps whatever the last emitted fn
+     body left behind and main sees only part of the file. *)
+  current_toplevel_pos := max_int;
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";

@@ -1,30 +1,74 @@
 // A user-defined name must win over a same-named builtin, on every backend.
 //
-// `join` is the one that bites in practice: it is the obvious name for a
-// string-join helper and it is also the thread builtin. C has guarded it
-// since Phase 30.0; LLVM guarded str_eq / is_digit / is_alpha / is_space
-// and missed join, so a program with its own `join` compiled on three
-// backends and failed in the assembler on the fourth — it had lowered the
-// call to pthread_join(i64) and handed it a str list.
+// This started as a regression lock for `join` — the obvious name for a
+// string-join helper and also the thread builtin, which LLVM lowered to
+// pthread_join(i64) and handed a str list (v0.1.169). Fixing that one name
+// was fixing one instance of a family: the backends dispatch on builtin
+// names in about a hundred match arms each, and the guards asking whether
+// the program had bound that name itself had been added one at a time,
+// after someone was bitten. C had 39 of 95, Wasm 14 of 139, LLVM 6 of 70.
 //
-// The failure only appears when the shadowing definition is applied, so
-// each of these is called, not merely defined.
+// The rest were silent. `let str_len = fn (s: str) -> 999` returned 999 on
+// the interpreter and 5 on all three compiled backends — no error, no
+// warning, just a different answer. v0.1.172 replaced the private guards
+// with one general one per backend, and this file is what holds it.
+//
+// Every case below is a shape the guard has to recognise separately:
+// the name can be bound at top level, locally, or as an inner fn that
+// captures (which gets lifted); the call can take one argument or three
+// (so the name sits three levels down an application spine); and the
+// binding can be used as a value rather than called.
+//
+// One of them is about position rather than shape. Top-level bindings are
+// sequential — the typer rejects a forward reference — so `show_of` below,
+// declared above `let show`, uses the *builtin* show, and `show` declared
+// after it is a different function. The first attempt at the general guard
+// asked "is this name bound anywhere in the program", which got this case
+// backwards and would have quietly changed what `show_of` printed.
 
+// --- top level, one argument -----------------------------------------
+let str_len = fn (s: str) -> 999;
+
+// --- top level, three arguments: the name is three App levels down ----
+let substring = fn (a: str) -> fn (b: int) -> fn (c: int) -> "MINE";
+
+// --- `show` is not an ordinary builtin: it is compiled per argument type,
+//     so shadowing it has to bypass that dispatch entirely. It is also the
+//     ordering case: show_of is declared first and must keep the builtin,
+//     while everything after `let show` gets the user's. -----------------
+let show_of = fn (n: int) -> "SHOWN " ++ show n;
+let show = fn (n: int) -> "MY SHOW";
+
+// --- the original case: a string-join helper vs the thread builtin ----
 let rec join = fn (xs) -> fn (sep: str) ->
   match xs with
   | Nil -> ""
   | Cons (a, rest) ->
     match rest with
     | Nil -> a
-    | Cons (_, _) -> a ++ sep ++ join rest sep
-in
+    | Cons (_, _) -> a ++ sep ++ join rest sep;
 
-let is_digit = fn (s: str) -> str_eq s "0" || str_eq s "1" in
-let is_space = fn (s: str) -> str_eq s " " in
+// --- an inner fn that captures, so it is lifted rather than inlined ---
+let outer = fn (n: int) ->
+  let str_len = fn (s: str) -> n * 100 in
+  str_len "abcde";
 
-let _ = print (join (Cons ("a", Cons ("b", Cons ("c", Nil)))) "-") in
-let _ = print (join Nil "-") in
-let _ = print (show (is_digit "1")) in
-let _ = print (show (is_digit "x")) in
-let _ = print (show (is_space " ")) in
+// --- a local binding, shadowing only inside this fn -------------------
+let local_shadow = fn (u: unit) ->
+  let to_upper = fn (s: str) -> "LOCAL" in
+  to_upper "x";
+
+// --- the shadowing binding passed as a value, then applied ------------
+let apply_to = fn (f) -> f "abc";
+let to_lower = fn (s: str) -> "AS VALUE";
+
+let _ = print (show_of 7);
+let _ = print (show 7);
+let _ = print ("str_len abcde = " ++ show_of (str_len "abcde"));
+let _ = print (substring "abcdef" 1 3);
+let _ = print (join (Cons ("a", Cons ("b", Cons ("c", Nil)))) "-");
+let _ = print (join Nil "-");
+let _ = print ("lifted = " ++ show_of (outer 7));
+let _ = print (local_shadow ());
+let _ = print (apply_to to_lower);
 0

@@ -38,7 +38,7 @@ let usage () =
   print_endline "                        (evaluated after any -I flags).";
   print_endline "";
   print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
-  print_endline "Examples: examples/ (118 .mere files; see examples/README.md for category index)"
+  print_endline "Examples: examples/ (282 .mere files; see examples/README.md for category index)"
 
 let version () =
   Printf.printf "mere v%s\n" Mere.Version.v
