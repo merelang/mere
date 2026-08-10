@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere profile</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .1rem; }
+  .subtitle { color: #555; margin-top: 0; }
+  .field { margin: 1rem 0; }
+  label { display: block; font-weight: 600; font-size: .9rem; margin-bottom: .2rem; }
+  input[type=text], textarea, select {
+    width: 100%; box-sizing: border-box; font: inherit; padding: .45em;
+    border: 1px solid #cbd5e0; border-radius: 4px; background: #fff; }
+  input:focus, textarea:focus, select:focus { border-color: #90cdf4; outline: none; background: #f7fbff; }
+  [aria-invalid="true"] { border-color: #e53e3e; background: #fff5f5; }
+  .err { color: #c53030; font-size: .85rem; min-height: 1.2em; }
+  .row { display: flex; align-items: center; gap: .5rem; }
+  .row label { margin: 0; font-weight: 400; }
+  .actions { display: flex; align-items: center; gap: .75rem; margin-top: 1.25rem; }
+  button { font: inherit; padding: .4em 1em; border: none; border-radius: 4px;
+           background: #2b6cb0; color: #fff; cursor: pointer; }
+  button#revert { background: #edf2f7; color: #2d3748; }
+  button[disabled] { opacity: .45; cursor: default; }
+  #summary { font-size: .9rem; color: #2d3748; }
+  #status { font-size: .85rem; color: #555; }
+</style>
+
+<h1>Mere profile</h1>
+<p class="subtitle">
+  A form holds two versions of the same record: what the server confirmed
+  and what you have done since. Everything below the fields is derived
+  from the difference — the change count, whether Save is offered, what
+  Revert restores. Fields are judged when you leave them, not while you
+  type, and the complaint comes down when you go back to fix it.
+</p>
+
+<div class="field">
+  <label for="name">Name</label>
+  <input type="text" id="name" autocomplete="off">
+  <div class="err" id="err-name"></div>
+</div>
+
+<div class="field">
+  <label for="email">Email</label>
+  <input type="text" id="email" autocomplete="off">
+  <div class="err" id="err-email"></div>
+</div>
+
+<div class="field">
+  <label for="bio">Bio</label>
+  <textarea id="bio" rows="3"></textarea>
+  <div class="err" id="err-bio"></div>
+</div>
+
+<div class="field">
+  <label for="theme">Theme</label>
+  <select id="theme">
+    <option value="system">Follow the system</option>
+    <option value="light">Light</option>
+    <option value="dark">Dark</option>
+  </select>
+  <div class="err" id="err-theme"></div>
+</div>
+
+<div class="field row">
+  <input type="checkbox" id="notify">
+  <label for="notify">Email me when something changes</label>
+</div>
+
+<div class="actions">
+  <button id="save" disabled>Save</button>
+  <button id="revert" disabled>Revert</button>
+  <span id="summary">…</span>
+</div>
+
+<p id="status">…</p>
+
+<script type="module">
+  import { makeDomGlue } from "/vendor/dom/dom.glue.js";
+
+  const stub = () => 0;
+  const base = {
+    puts: () => 0,
+    time: () => Date.now() / 1000,
+    read_file: stub,
+    write_file: stub,
+    __lang_str_of_float: stub,
+    __lang_float_of_str: () => 0.0,
+    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+  };
+
+  const { glue, attach } = makeDomGlue();
+  const bytes = await fetch("/static/app.wasm").then((r) => r.arrayBuffer());
+  const { instance } = await WebAssembly.instantiate(bytes, { env: { ...base, ...glue } });
+  attach(instance);
+  instance.exports.main();
+</script>

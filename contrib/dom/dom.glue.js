@@ -382,6 +382,50 @@ export function makeDomGlue() {
       Number(setTimeout(() => callClosure(closurePtr), ms)),
     dom_clear_timeout: (handle) => { clearTimeout(handle); },
 
+    // --- v0.1.170 (profile dogfood): what a form needs ----------------
+    dom_on_blur: (handleIdx, closurePtr) => {
+      const el = handles[handleIdx];
+      if (!el) {
+        console.warn("contrib/dom: dom_on_blur on null handle", { handleIdx });
+        return;
+      }
+      el.addEventListener("blur", () =>
+        callClosureStr(closurePtr, el.value !== undefined ? el.value : ""));
+    },
+    dom_on_focus: (handleIdx, closurePtr) => {
+      const el = handles[handleIdx];
+      if (!el) {
+        console.warn("contrib/dom: dom_on_focus on null handle", { handleIdx });
+        return;
+      }
+      el.addEventListener("focus", () => callClosure(closurePtr));
+    },
+    // For a checkbox the value is the useless string "on", so hand the
+    // closure the checked-ness instead — that is what the change means.
+    dom_on_change: (handleIdx, closurePtr) => {
+      const el = handles[handleIdx];
+      if (!el) {
+        console.warn("contrib/dom: dom_on_change on null handle", { handleIdx });
+        return;
+      }
+      el.addEventListener("change", () =>
+        callClosureStr(closurePtr,
+          el.type === "checkbox" ? (el.checked ? "1" : "0")
+                                 : (el.value !== undefined ? el.value : "")));
+    },
+    dom_checked: (handleIdx) => {
+      const el = handles[handleIdx];
+      return el && el.checked ? 1 : 0;
+    },
+    dom_set_checked: (handleIdx, value) => {
+      const el = handles[handleIdx];
+      if (el) el.checked = value !== 0;
+    },
+    dom_remove_attr: (handleIdx, namePtr) => {
+      const el = handles[handleIdx];
+      if (el) el.removeAttribute(readStr(namePtr));
+    },
+
     // A page has no command line, so `args()` is the empty list. The
     // builtin now asks the host rather than being hardcoded to Nil, so
     // the host has to answer — reporting 0 gives a browser program the

@@ -13,6 +13,8 @@
 //   --fire <id>:<event>    dispatch an event after main() (repeatable)
 //   --type <id>=<text>     set a field's value and fire `input`, the way
 //                          a keystroke does (repeatable, in order)
+//   --pick <id>=<value>    choose in a <select>: set value, fire `change`
+//   --check <id>=<0|1>     toggle a checkbox: set `checked`, fire `change`
 //   --wait <ms>            settle time after the last --fire (default 1000)
 //   --settle <ms>          settle time after main() before firing (default 300)
 //   --worker <store.wasm>  a second module that owns storage, reached
@@ -65,6 +67,10 @@ class El {
     this.listeners = {};
     this.scrollTop = 0;
     this.scrollHeight = 0;
+    // A checkbox's meaning lives here, not in `value`. `type` is what the
+    // glue looks at to decide which of the two a `change` is about.
+    this.checked = false;
+    this.type = "";
   }
   get textContent() {
     return this.children.length
@@ -81,6 +87,7 @@ class El {
     // itself, so --fire can reach a row's button.
     if (k === "id") { this.id = v; byId.set(v, this); }
   }
+  removeAttribute(k) { delete this.attributes[k]; }
   appendChild(c) { c.parent = this; this.children.push(c); return c; }
   remove() {
     const p = this.parent;
@@ -93,7 +100,12 @@ class El {
   dump(indent = "") {
     const attrs = Object.entries(this.attributes)
       .map(([k, v]) => ` ${k}="${v}"`).join("");
-    const open = `${indent}<${this.tagName}${attrs}>`;
+    // A form's state is in `value` and `checked`, not in text — without
+    // these a dump of a filled-in form looks identical to an empty one.
+    const props =
+      (this.value ? ` value="${this.value}"` : "") +
+      (this.checked ? ` checked` : "");
+    const open = `${indent}<${this.tagName}${attrs}${props}>`;
     if (!this.children.length) {
       return this._text ? `${open}${this._text}` : open;
     }
@@ -348,6 +360,8 @@ report("after main()");
 const actions = [];
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === "--type") actions.push(["type", argv[i + 1]]);
+  if (argv[i] === "--pick") actions.push(["pick", argv[i + 1]]);
+  if (argv[i] === "--check") actions.push(["check", argv[i + 1]]);
   if (argv[i] === "--fire") actions.push(["fire", argv[i + 1]]);
 }
 for (const [kind, spec] of actions) {
@@ -356,6 +370,20 @@ for (const [kind, spec] of actions) {
     const el = lookup(spec.slice(0, eq));
     el.value = spec.slice(eq + 1);
     el.fire("input");
+  } else if (kind === "pick") {
+    // A <select>: the user picks, and the only event is `change`.
+    const eq = spec.indexOf("=");
+    const el = lookup(spec.slice(0, eq));
+    el.value = spec.slice(eq + 1);
+    el.fire("change");
+  } else if (kind === "check") {
+    // A checkbox has no value worth reading; toggling it is a change of
+    // `checked`, and `type` is how the glue knows to report that instead.
+    const eq = spec.indexOf("=");
+    const el = lookup(spec.slice(0, eq));
+    el.type = "checkbox";
+    el.checked = spec.slice(eq + 1) !== "0";
+    el.fire("change");
   } else {
     const colon = spec.lastIndexOf(":");
     lookup(spec.slice(0, colon)).fire(spec.slice(colon + 1));
