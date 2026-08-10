@@ -1857,6 +1857,15 @@ let rec emit_expr (e : Ast.expr) : unit =
        if List.mem name host_builtins_without_wasm_lowering then
          unsupported e.Ast.loc
            (name ^ " has no Wasm lowering yet (host builtin; scope = interp + C)")
+       else if Hashtbl.mem multi_inst_fns_wasm name then
+         (* v0.1.173: the name IS bound — it is a polymorphic fn used at more
+            than one type, so it exists only as mangled per-instantiation
+            copies and there is no single function to hand out as a value.
+            Saying "unbound variable" here sent the reader looking for a
+            missing definition instead of at the real limitation. *)
+         unsupported e.Ast.loc
+           (name ^ " is used at several types, so it has no single value form \
+                    on Wasm yet — call it directly, or give it one type")
        else
          unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner

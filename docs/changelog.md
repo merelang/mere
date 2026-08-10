@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.173 — 2026-08-10
+
+_Two bugs behind one build failure: a regression from v0.1.172, and the latent
+one it exposed._
+
+_v0.1.172 left mere-ruby unable to compile — 19 `use of undeclared identifier
+'mu_..._as_value'` — while parity, ctest and the OCaml suite all stayed green.
+Both harnesses that compare stdout are blind to a program that never links, and
+`scripts/ctest.sh`, which does invoke the C compiler, had not been run._
+
+_The regression: in codegen_c the two arms that made a direct call to a
+top-level or inner-lifted fn were folded into the new shadowing guard. That
+guard is position-aware — a builtin used above a later same-named binding is
+still the builtin — so any call it declined fell through to the closure path
+instead of the direct one. Which of the three call shapes to use is a question
+about what the name is, not about where in the file the caller sits, so the
+fallthrough arm is back. (LLVM and Wasm were never affected: their equivalent
+arms stayed in the match as a catch-all after the builtin arms.)_
+
+_The latent bug that made it fatal: a polymorphic fn used at more than one type
+is emitted once per instantiation under a mangled name, and `_as_value` closure
+wrappers are only defined for those. The unmangled name stays registered in
+`toplevel_fn_names` so source-level call sites still dispatch — so value
+position asked for `<base>_as_value`, which is never defined. `let ident = fn
+(x) -> x` used at two types and then passed as a value has never compiled on
+the C backend; it now picks the instance from the reference's own type, the
+same way the direct-call path does. Wasm refuses this case, which is honest —
+it has no single function to hand out either — but said "unbound variable" for
+a variable that is plainly bound, and now names the actual limitation._
+
+_`test/parity/multi_inst_as_value.mere` covers it. A parity case rather than a
+ctest because Wasm's refusal is a documented UNSUP there, and because parity
+reports a backend whose output will not compile as MISCOMPILE — which is
+exactly the signal that was missing. mere-ruby builds again and its corpus is
+51/51 against ruby. parity 78/78, ctest 12/12, dune runtest 2308/0._
+
+---
+
 ## v0.1.172 — 2026-08-10
 
 _Shadowing a builtin, in general — the family the `join` fix in v0.1.169 was
