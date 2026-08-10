@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.177 — 2026-08-11
+
+_Stage 4 of the shared-schema dogfood: change the schema in ways other than
+adding a `str`, and see what the derived machinery does. It found a hole in the
+mechanism and a soundness hole underneath it._
+
+_The mechanism first. `claim_with` took the JSON shape to write back from the
+shape already there, which is exact except for an absent optional — `null`
+cannot say what it would have held. The first version guessed "string" and named
+the two fields that needed clearing, and adding a `seat: int option` to the
+record broke setting it: the guess produced a string and the decode failed.
+Where the value cannot say, ask the decoder instead — try the shapes in order
+and keep the first that survives `of_json_opt`. Blank text tries `null` first,
+which is how an optional is cleared without anything knowing which fields are
+optional. All four cases now behave: an optional `str` and an optional `int`
+clear to `None`, a required `str` blanks to `""`, a required `int` to `0`, and
+the hardcoded field names are gone._
+
+_Underneath it: the probe set every field from text, including the variant-typed
+`status`, and `"7"` was accepted. The interpreter's decoder built a nullary
+constructor from whatever string arrived without asking whether the variant had
+a case by that name, so `of_json_opt` returned `Some` holding a value outside
+its own type, which `to_json` then printed straight back out. Both compiled
+backends answered `None` — the reference the parity harness compares against was
+the one in the wrong, which is why nothing had caught it. The object form was
+checked for existence but not ownership, letting a payload case of an unrelated
+variant through; `constr_info.type_name` closes both, and a case of this variant
+arriving in the wrong shape (`"Rejected"` as a bare string when it carries a
+payload) is refused too._
+
+_`test/parity/of_json_variant_tag.mere` holds it and fails without the fix. It
+took a dogfood that round-trips a variant field through a form to surface, which
+is the same shape as v0.1.175's finding: the boundary bugs live where a value is
+only ever decoded. parity 80/80, ctest 13/13, dune runtest 2308/0, claims
+browser check 14/14._
+
+---
+
 ## v0.1.176 — 2026-08-11
 
 _Stage 2 of the shared-schema dogfood: the form is the record._
