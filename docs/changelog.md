@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.165 — 2026-08-10
+
+_A capture the LLVM backend cannot type is refused instead of guessed._
+
+_When an inner fn is lifted, each captured variable becomes a parameter, and the
+capture's type came from the first `Var` occurrence inside the fn body whose
+recorded type was fully concrete. When none was, the search fell through to its
+initial value — `TyUnit`, which lowers to `i64`. So a capture the backend could
+not type was silently declared `i64` while the call site passed a pointer, and
+the failure surfaced as a clang type error about an SSA register, several steps
+from the cause. That is what stopped the mbtree dogfood from building here._
+
+_The lookup now prefers a concrete type, falls back to any recorded one, and
+takes the binding site's type when a later use has been generalized; failing all
+of that it raises a Mere codegen error naming the variable. mbtree's real
+blocker is now stated plainly: `unsupported LLVM codegen type element: 'a` —
+capturing a **polymorphic** value, which this backend cannot represent and the
+lifting code already says so in a comment. The monomorphisation there covers a
+local `let rec` applied at one type; a polymorphic top-level helper captured by
+an inner fn is still open._
+
+_parity 73/73, dune runtest 2308/0._
+
+---
+
 ## v0.1.164 — 2026-08-10
 
 _A partially applied extern is a value, not a call._
