@@ -1390,7 +1390,16 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
 (* Phase 25.3: lookup a free var's concrete type by scanning the inner
    fn body. Mirrors codegen_c's lookup_var_ty. *)
 let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
-  let found = ref Ast.TyUnit in
+  (* v0.1.165: a capture whose type is recorded but not fully concrete used
+     to fall through to the TyUnit initial value, which lowers to i64 — so a
+     captured `Vec[R, int]` was declared i64 in the lifted function's
+     signature while the call site passed a ptr, and the emitted IR did not
+     typecheck. `Vec[R, T]` is rejected by ty_is_concrete whenever the region
+     is still a variable, even though llvm_ty_of ignores the region entirely
+     and lowers every Vec to ptr. So prefer a concrete type, fall back to any
+     recorded type, and refuse loudly rather than guessing i64. *)
+  let found = ref None in
+  let fallback = ref None in
   let stop = ref false in
   let rec go (e : Ast.expr) =
     if !stop then () else
@@ -1398,14 +1407,22 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
     | Ast.Var n when n = name ->
       (match e.Ast.ty with
        | Some t when ty_is_concrete (Ast.walk t) ->
-         found := Ast.walk t; stop := true
-       | _ -> ())
+         found := Some (Ast.walk t); stop := true
+       | Some t -> if !fallback = None then fallback := Some (Ast.walk t)
+       | None -> ())
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> ()
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let (pat, v, b) ->
+      (* The binding site carries the concrete type; a later `Var` use of
+         the same name may have been generalized. *)
+      (match v.Ast.ty with
+       | Some t when List.mem name (pattern_vars pat) && ty_is_concrete (Ast.walk t) ->
+         found := Some (Ast.walk t); stop := true
+       | _ -> ());
+      if not !stop then (go v; go b)
     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
@@ -1422,7 +1439,15 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
     | Ast.Field_get (a, _) -> go a
     | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
   in
-  go body; !found
+  go body;
+  match !found, !fallback with
+  | Some t, _ -> t
+  | None, Some t -> t
+  | None, None ->
+    raise (Codegen_error (body.Ast.loc,
+      Printf.sprintf
+        "cannot determine the type of captured variable `%s` — an inner fn \
+         capturing it cannot be lifted" name))
 
 (* Phase 25.3: lift inner Let-Fun / Let_rec to top-level lifted fns.
    Same algorithm as codegen_c's lift_inner_fns, adapted to populate
@@ -1465,7 +1490,25 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
     let body_fvs = free_vars fn_body (p :: effective_known) in
     let captures =
       List.map (fun fv ->
-        let ty = lookup_var_ty_llvm fn_body fv in
+        let ty = try lookup_var_ty_llvm fn_body fv with _ -> Ast.TyUnit in
+        let ty =
+          if ty_is_concrete ty then ty
+          else
+            (* v0.1.165: the occurrence inside the inner fn can carry a
+               generalized type — a `Vec[R, int]` read back through a
+               polymorphic helper keeps its region and element as
+               variables — while the binding site in the enclosing scope
+               has the concrete one. Look there before giving up, or the
+               capture is declared i64 and the call site passes a ptr. *)
+            (match
+               List.find_map (fun root ->
+                 match (try Some (lookup_var_ty_llvm root fv) with _ -> None) with
+                 | Some t when ty_is_concrete t -> Some t
+                 | _ -> None) scan_roots
+             with
+             | Some t -> t
+             | None -> ty)
+        in
         (fv, ty)) body_fvs
     in
     let lifted_name = fresh_inner_name_llvm n in
