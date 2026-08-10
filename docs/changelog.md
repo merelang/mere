@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.166 — 2026-08-10
+
+_Two corrections to the capture typing added in v0.1.165, and a precise account
+of what still blocks mbtree on LLVM._
+
+_`ty_is_concrete` is the wrong question to ask about a capture. A
+`Vec[R, int]` whose region is still a variable is not concrete, yet
+`llvm_ty_of` lowers every Vec to `ptr` and never looks at the region — so
+rejecting it left the capture untyped. The lookup now asks whether the backend
+can represent the type at all._
+
+_v0.1.165 also fell back to searching every top-level fn body for a concrete
+type of the captured NAME. Names are not unique across functions, so a capture
+of `b : Vec[R, int]` picked up an unrelated `b : int` from elsewhere in the
+program and was declared `i64`. Removed — a wrong type is worse than no type,
+and the loud error is what should happen._
+
+_What still blocks mbtree, stated exactly: `get_i8`, a top-level curried helper,
+is not among the backend's `fn_decl`s, so the free-variable scan treats it as a
+capture of the inner fn that uses it. Its type carries an unresolved region, and
+the emitted call site refers to `%get_i8` — an SSA value that does not exist,
+because the value is a top-level function. Two things would have to change: the
+name would have to be known as a top-level binding so it is never captured, or a
+captured top-level function would have to be materialised at the call site._
+
+_A fix was attempted and backed out: tagging the region position of
+`Vec` / `Map` / `StrBuf` leniently makes a struct's name depend on how far
+unification has progressed, so the same type got registered under one name and
+referred to under another, and `test/parity/bytes_typed_fn_unused.mere`
+regressed to `llvm:MISCOMPILE`. Any real fix has to keep the tag stable.
+parity 73/73, dune runtest 2308/0._
+
+---
+
 ## v0.1.165 — 2026-08-10
 
 _A capture the LLVM backend cannot type is refused instead of guessed._
