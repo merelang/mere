@@ -1,0 +1,434 @@
+// examples/claims/app.mere — the browser half of the expense claim.
+//
+// Stage 0 of the shared-schema dogfood: written the way you would write it
+// today, so that what has to be written by hand is visible and countable.
+//
+// What is already single-source, and cost nothing:
+//
+//   the wire format   `to_json` / `of_json` are synthesised from the
+//                     declaration in schema.mere. Neither side writes down
+//                     a field name for the network, and a field added to
+//                     the record is on the wire in both directions at once
+//   the rules         check_title, check_spent_on, ... are the same
+//                     functions the server runs. One implementation, one
+//                     message string
+//   the errors        a `problem list` is a declared type, so the server's
+//                     complaints arrive as records, not as text to parse
+//
+// What is still hand-written, once per field, and is the point of the
+// exercise:
+//
+//   the field table   below. id, label, which control, how to read it out
+//                     of the record and how to put it back. Nothing in the
+//                     record declaration says any of it
+//   the markup        index.html, which repeats every id a fourth time
+//
+// Measured, by actually adding a `cost_center: str` field to `claim` and
+// counting what had to change and what noticed:
+//
+//   1. schema.mere  `type claim`                    the change itself
+//   2. schema.mere  `blank_claim`                   COMPILE ERROR if omitted
+//   3. schema.mere  a rule + `claim_problems`       silent
+//   4. app.mere     the `fields` table below        silent
+//   5. index.html   the markup and its `err-` div   silent
+//
+// Four edits in Mere and one in HTML, of which the compiler catches
+// exactly one. Stopping after 1 and 2 leaves a program where both replicas
+// compile, the server stores the field, the browser round-trips it — and
+// it never appears on screen. That was checked, not assumed: the rendered
+// page mentions `cost_center` zero times.
+//
+// The half that cost nothing is worth naming too. Adding the field
+// required no change to the wire format in either direction, to the
+// server's storage, to its validation dispatch, or to the JSON decoding.
+// Those used to be hand-written — examples/profile has a `serialize` and a
+// `parse_pairs` — and they were the worst of the silent sites, because a
+// field missing from `serialize` edits fine, counts as unsaved, and is
+// simply never sent.
+//
+// Build:
+//   mere -w examples/claims/app.mere > /tmp/claims_app.wat
+//   wat2wasm --enable-tail-call /tmp/claims_app.wat -o examples/claims/app.wasm
+
+import "../../contrib/dom/dom.mere";
+import "../../contrib/state/store.mere";
+import "schema.mere";
+
+// ---- state ----------------------------------------------------------
+
+type model = {
+  saved: claim,
+  current: claim,
+  problems: problem list,
+  hidden: str list       // fields whose complaint is currently suppressed
+};
+
+type field = {
+  id: str,
+  get: claim -> str,
+  set: claim -> str -> claim,
+  check: str -> str
+};
+
+let store = store_new (model {
+  saved = blank_claim, current = blank_claim, problems = Nil, hidden = Nil
+}) in
+
+let lines_el = dom_get_by_id "lines-list" in
+let total_el = dom_get_by_id "total" in
+let summary_el = dom_get_by_id "summary" in
+let status_el = dom_get_by_id "status" in
+let claim_status_el = dom_get_by_id "claim-status" in
+let problems_el = dom_get_by_id "problems" in
+let save_btn = dom_get_by_id "save" in
+let submit_btn = dom_get_by_id "submit" in
+let add_btn = dom_get_by_id "add-line" in
+
+let set_status = fn (s: str) -> dom_set_text status_el s in
+
+// ---- the hand-written field table -----------------------------------
+//
+// One entry per top-level field. `get` and `set` exist because a record
+// field cannot be named at runtime; `check` exists because nothing ties a
+// rule in schema.mere to the field it judges.
+
+let opt_str = fn (o: str option) -> match o with Some s -> s | None -> "";
+let some_if = fn (s: str) -> if str_eq (str_trim s) "" then None else Some s;
+
+let fields =
+  Cons (field { id = "title",
+                get = fn (c: claim) -> c.title,
+                set = fn (c: claim) -> fn (v: str) -> { c | title = v },
+                check = check_title },
+  Cons (field { id = "spent_on",
+                get = fn (c: claim) -> c.spent_on,
+                set = fn (c: claim) -> fn (v: str) -> { c | spent_on = v },
+                check = check_spent_on },
+  Cons (field { id = "purpose",
+                get = fn (c: claim) -> c.purpose,
+                set = fn (c: claim) -> fn (v: str) -> { c | purpose = v },
+                check = check_purpose },
+  Cons (field { id = "approver",
+                get = fn (c: claim) -> opt_str c.approver,
+                set = fn (c: claim) -> fn (v: str) -> { c | approver = some_if v },
+                check = fn (v: str) -> "" },
+  Cons (field { id = "note",
+                get = fn (c: claim) -> opt_str c.note,
+                set = fn (c: claim) -> fn (v: str) -> { c | note = some_if v },
+                check = fn (v: str) -> "" },
+  Nil))))) in
+
+// ---- list helpers ----------------------------------------------------
+
+let rec assoc_problem = fn (ps: problem list) -> fn (k: str) ->
+  match ps with
+  | Nil -> ""
+  | Cons (p, rest) -> if str_eq p.field k then p.message else assoc_problem rest k
+in
+
+let rec member = fn (xs: str list) -> fn (k: str) ->
+  match xs with
+  | Nil -> false
+  | Cons (x, rest) -> if str_eq x k then true else member rest k
+in
+
+let rec drop_id = fn (xs: str list) -> fn (k: str) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (x, rest) -> if str_eq x k then drop_id rest k else Cons (x, drop_id rest k)
+in
+
+let rec set_line = fn (xs: line list) -> fn (i: int) -> fn (f: line -> line) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (l, rest) ->
+    if i == 0 then Cons (f l, rest) else Cons (l, set_line rest (i - 1) f)
+in
+
+let rec drop_line = fn (xs: line list) -> fn (i: int) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (l, rest) -> if i == 0 then rest else Cons (l, drop_line rest (i - 1))
+in
+
+let rec append_line = fn (xs: line list) ->
+  match xs with
+  | Nil -> Cons (blank_line, Nil)
+  | Cons (l, rest) -> Cons (l, append_line rest)
+in
+
+// ---- edits -----------------------------------------------------------
+
+let edit = fn (f: field) -> fn (text: str) ->
+  store_update store (fn (m: model) -> { m | current = f.set m.current text })
+in
+
+// A field is judged when the user leaves it, and the verdict replaces
+// whatever the server said about the same field.
+let judge = fn (f: field) -> fn (text: str) ->
+  store_update store (fn (m: model) ->
+    let msg = f.check text in
+    let rec without = fn (ps: problem list) ->
+      match ps with
+      | Nil -> Nil
+      | Cons (p, rest) -> if str_eq p.field f.id then without rest else Cons (p, without rest) in
+    let kept = without m.problems in
+    { m | problems = if str_eq msg "" then kept
+                     else Cons (problem { field = f.id, message = msg }, kept),
+          hidden = drop_id m.hidden f.id })
+in
+
+let forgive = fn (f: field) ->
+  store_update store (fn (m: model) -> { m | hidden = Cons (f.id, m.hidden) })
+in
+
+let edit_line = fn (i: int) -> fn (g: line -> line) ->
+  store_update store (fn (m: model) ->
+    { m | current = { m.current | lines = set_line m.current.lines i g } })
+in
+
+// ---- painting --------------------------------------------------------
+
+let show_problem = fn (id: str) -> fn (msg: str) ->
+  let _ = dom_set_text (dom_get_by_id ("err-" ++ id)) msg in
+  let input = dom_get_by_id id in
+  if str_eq msg "" then dom_remove_attr input "aria-invalid"
+  else dom_set_attr input "aria-invalid" "true"
+in
+
+let rec paint_field_problems = fn (fs: field list) -> fn (m: model) ->
+  match fs with
+  | Nil -> ()
+  | Cons (f, rest) ->
+    let msg = if member m.hidden f.id then "" else assoc_problem m.problems f.id in
+    let _ = show_problem f.id msg in
+    paint_field_problems rest m
+in
+
+// Problems that belong to no field on screen — the server's refusals
+// about the claim as a whole.
+let rec unfielded = fn (ps: problem list) -> fn (acc: str) ->
+  match ps with
+  | Nil -> acc
+  | Cons (p, rest) ->
+    if str_eq p.field "" then unfielded rest (acc ++ p.message ++ " ")
+    else unfielded rest acc
+in
+
+let _ = store_watch store (fn (m: model) ->
+  let _ = paint_field_problems fields m in
+  let _ = dom_set_text (dom_get_by_id "err-lines") (assoc_problem m.problems "lines") in
+  let _ = dom_set_text total_el (yen (claim_total m.current)) in
+  let _ = dom_set_text problems_el (unfielded m.problems "") in
+  let _ = dom_set_text claim_status_el ("status: " ++ status_label m.current.status) in
+  let dirty = not (str_eq (to_json m.current) (to_json m.saved)) in
+  let _ = dom_set_text summary_el (if dirty then "unsaved changes" else "no unsaved changes") in
+  let _ = if dirty then dom_remove_attr save_btn "disabled"
+          else dom_set_attr save_btn "disabled" "true" in
+  if is_draft m.current.status then dom_remove_attr submit_btn "disabled"
+  else dom_set_attr submit_btn "disabled" "true") in
+
+// ---- the line rows ---------------------------------------------------
+//
+// Rebuilt only when the number of lines changes. Typing never rebuilds a
+// row, which is the rule examples/tasks established: a row holding the
+// field you are typing into must keep its identity.
+
+let build_row = fn (i: int) -> fn (l: line) ->
+  let li = dom_create "li" in
+  let _ = dom_set_attr li "id" ("line-" ++ show i) in
+
+  let desc = dom_create "input" in
+  let _ = dom_set_attr desc "id" ("line-" ++ show i ++ "-desc") in
+  let _ = dom_set_attr desc "class" "desc" in
+  let _ = dom_set_value desc l.desc in
+  let _ = dom_on_input desc (fn (t: str) ->
+    edit_line i (fn (x: line) -> { x | desc = t })) in
+
+  let amount = dom_create "input" in
+  let _ = dom_set_attr amount "id" ("line-" ++ show i ++ "-amount") in
+  let _ = dom_set_attr amount "class" "amount" in
+  let _ = dom_set_value amount (show l.amount) in
+  let _ = dom_on_input amount (fn (t: str) ->
+    let n = try_or (fn () -> int_of_str (str_trim t)) 0 in
+    edit_line i (fn (x: line) -> { x | amount = n })) in
+
+  let cat = dom_create "select" in
+  let _ = dom_set_attr cat "id" ("line-" ++ show i ++ "-category") in
+  let _ = dom_set_attr cat "class" "cat" in
+  let rec add_option = fn (names: str list) ->
+    match names with
+    | Nil -> ()
+    | Cons (n, rest) ->
+      let o = dom_create "option" in
+      let _ = dom_set_attr o "value" n in
+      let _ = dom_set_text o (category_label (category_of_name n)) in
+      let _ = dom_append cat o in
+      add_option rest in
+  let _ = add_option (Cons ("travel", Cons ("meals", Cons ("supplies",
+                      Cons ("other", Nil))))) in
+  let _ = dom_set_value cat (category_name l.category) in
+
+  // `Other` carries its own text, so the row needs a control the other
+  // three cases do not use.
+  let kind = dom_create "input" in
+  let _ = dom_set_attr kind "id" ("line-" ++ show i ++ "-kind") in
+  let _ = dom_set_attr kind "class" "kind" in
+  let _ = dom_set_attr kind "placeholder" "what kind?" in
+  let _ = dom_set_value kind (match l.category with Other s -> s | _ -> "") in
+  let _ = if str_eq (category_name l.category) "other" then dom_remove_attr kind "hidden"
+          else dom_set_attr kind "hidden" "true" in
+  let _ = dom_on_input kind (fn (t: str) ->
+    edit_line i (fn (x: line) ->
+      match x.category with Other _ -> { x | category = Other t } | _ -> x)) in
+
+  let _ = dom_on_change cat (fn (t: str) ->
+    let _ = if str_eq t "other" then dom_remove_attr kind "hidden"
+            else dom_set_attr kind "hidden" "true" in
+    let picked = if str_eq t "other" then Other (dom_input_value kind)
+                 else category_of_name t in
+    edit_line i (fn (x: line) -> { x | category = picked })) in
+
+  let err = dom_create "span" in
+  let _ = dom_set_attr err "id" ("err-line-" ++ show i) in
+  let _ = dom_set_attr err "class" "rowerr" in
+
+  let del = dom_create "button" in
+  let _ = dom_set_attr del "id" ("del-line-" ++ show i) in
+  let _ = dom_set_text del "×" in
+
+  let _ = dom_append li desc in
+  let _ = dom_append li amount in
+  let _ = dom_append li cat in
+  let _ = dom_append li kind in
+  let _ = dom_append li del in
+  let _ = dom_append li err in
+  let _ = dom_append lines_el li in
+  del
+in
+
+let rec build_rows = fn (xs: line list) -> fn (i: int) ->
+  match xs with
+  | Nil -> ()
+  | Cons (l, rest) ->
+    let del = build_row i l in
+    let _ = dom_on_click del (fn (u: unit) ->
+      let _ = store_update store (fn (m: model) ->
+        { m | current = { m.current | lines = drop_line m.current.lines i } }) in
+      ()) in
+    build_rows rest (i + 1)
+in
+
+// Structural changes only. `dom_set_text el ""` drops every child, which
+// is safe here and nowhere else in this file.
+let redraw_lines = fn (u: unit) ->
+  let m = store_get store in
+  let _ = dom_set_text lines_el "" in
+  build_rows m.current.lines 0
+in
+
+// The row error spans are outside the field table, so they are painted
+// from the same watcher by index.
+let rec paint_line_problems = fn (xs: line list) -> fn (i: int) -> fn (ps: problem list) ->
+  match xs with
+  | Nil -> ()
+  | Cons (_, rest) ->
+    let one = fn (suffix: str) -> assoc_problem ps ("line-" ++ show i ++ "-" ++ suffix) in
+    let msg = let d = one "desc" in
+              if not (str_eq d "") then d
+              else let a = one "amount" in
+                   if not (str_eq a "") then a else one "category" in
+    let _ = dom_set_text (dom_get_by_id ("err-line-" ++ show i)) msg in
+    paint_line_problems rest (i + 1) ps
+in
+
+let _ = store_watch store (fn (m: model) ->
+  paint_line_problems m.current.lines 0 m.problems) in
+
+// ---- server ----------------------------------------------------------
+
+let adopt = fn (c: claim) ->
+  let _ = store_update store (fn (m: model) ->
+    { m | saved = c, current = c, problems = Nil, hidden = Nil }) in
+  let rec push = fn (fs: field list) ->
+    match fs with
+    | Nil -> ()
+    | Cons (f, rest) -> let _ = dom_set_value (dom_get_by_id f.id) (f.get c) in push rest in
+  let _ = push fields in
+  redraw_lines ()
+in
+
+let load = fn (u: unit) ->
+  dom_fetch_async "GET" "/api/claim" "" (fn (body: str) ->
+    if dom_fetch_status () != 200 then set_status "could not load the claim"
+    else
+      match (of_json_opt body : claim option) with
+      | None -> set_status "the server sent something unreadable"
+      | Some c -> let _ = adopt c in set_status "loaded")
+in
+
+let take_problems = fn (body: str) ->
+  match (of_json_opt body : problem list option) with
+  | Some ps -> store_update store (fn (m: model) -> { m | problems = ps, hidden = Nil })
+  | None -> store_update store (fn (m: model) ->
+      { m | problems = Cons (problem { field = "", message = body }, Nil), hidden = Nil })
+in
+
+let post = fn (path: str) -> fn (body: str) -> fn (ok_label: str) ->
+  let _ = dom_fetch_header "Content-Type" "application/json" in
+  dom_fetch_async "POST" path body (fn (resp: str) ->
+    let st = dom_fetch_status () in
+    if st == 200 then
+      match (of_json_opt resp : claim option) with
+      | Some c -> let _ = adopt c in set_status ok_label
+      | None -> set_status "saved, but the reply was unreadable"
+    else
+      let _ = take_problems resp in
+      set_status (if st == 422 then "the server rejected some fields"
+                  else "refused (" ++ show st ++ ")"))
+in
+
+// The browser checks first, so a claim that cannot pass never leaves.
+let save = fn (u: unit) ->
+  let m = store_get store in
+  match claim_problems m.current with
+  | Cons (_, _) ->
+    let _ = store_update store (fn (m2: model) ->
+      { m2 | problems = claim_problems m2.current, hidden = Nil }) in
+    set_status "fix the marked fields first"
+  | Nil ->
+    let _ = set_status "saving…" in
+    post "/api/claim" (to_json m.current) "saved"
+in
+
+let submit = fn (u: unit) ->
+  let _ = set_status "submitting…" in
+  post "/api/claim/submit" "" "submitted"
+in
+
+// ---- wiring ----------------------------------------------------------
+
+let rec wire = fn (fs: field list) ->
+  match fs with
+  | Nil -> ()
+  | Cons (f, rest) ->
+    let el = dom_get_by_id f.id in
+    let _ = dom_on_input el (fn (t: str) -> edit f t) in
+    let _ = dom_on_blur el (fn (t: str) -> judge f t) in
+    let _ = dom_on_focus el (fn (u: unit) -> forgive f) in
+    wire rest
+in
+
+let _ = wire fields in
+
+let _ = dom_on_click add_btn (fn (u: unit) ->
+  let _ = store_update store (fn (m: model) ->
+    { m | current = { m.current | lines = append_line m.current.lines } }) in
+  redraw_lines ()) in
+
+let _ = dom_on_click save_btn (fn (u: unit) -> save ()) in
+let _ = dom_on_click submit_btn (fn (u: unit) -> submit ()) in
+
+let _ = set_status "loading…" in
+let _ = load () in
+0

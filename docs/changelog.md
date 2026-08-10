@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.174 — 2026-08-11
+
+_`examples/claims`: the shared-schema dogfood, stage 0 — build it the way you
+would build it today, and count what is written by hand._
+
+_An expense claim: title, date, purpose, a list of lines each with a category
+that may carry its own text, an optional note and approver, a status. Enough
+type variety that a naive answer to "generate the boilerplate" would not
+survive it. `schema.mere` declares the record and the rules, and both replicas
+import it._
+
+_Half the boundary already costs nothing, which is worth stating before the
+complaint. `to_json` / `of_json` are synthesised per type, so neither side
+writes down a field name for the network — `examples/profile` has a hand-written
+`serialize` and `parse_pairs`, and this one has neither. The validation
+functions are the same functions on both sides, so a rule and its message exist
+once. `problem` is a declared type, so the server's refusals arrive as records
+rather than as text to parse, and a server-only rule (over ¥100,000 needs an
+approver, and the approver must exist) lands in the same error slot a local
+complaint would._
+
+_The measured half: adding a `cost_center: str` field to `claim` takes four
+edits in Mere and one in HTML, and the compiler catches exactly one of them —
+the record initializer. The rule, the field table and the markup are all
+silent. Stopping after the record and its initializer leaves a program where
+both replicas compile, the server stores the field and the browser round-trips
+it, and it never appears on screen; the rendered page mentions it zero times.
+That is the number stage 2 exists to move._
+
+_Two compiler findings fell out on the way. An extern whose result is `unit`
+could not be used as a value at all: `unit` is Mere's int 0 and C's `void`, and
+the closure adapter returned the call directly, so the emitted C returned void
+from a function declared to return int. That is the shape of middleware —
+contrib/http's `with_arena` wraps `http_arena_mark` — so no native build of a
+server using it could compile. Fixed, with `test/ctests/extern_unit_as_value.mere`
+holding it. And `of_json` on the C backend does not register container
+instances that are reachable only through a record field type: a record with
+both a nested record and a `list`/`option` field emits `unknown type name
+'list_item'`. It is latent because a program that constructs one of those
+values by hand anywhere registers it — which the claims app happens to do, and
+a generated codec would not. That one is stage 1._
+
+_The native HTTP runtime implements six externs, and `with_arena` /
+`with_access_log` need two it does not have (`http_arena_mark`,
+`http_current_status`). So a server that releases its per-request allocations
+exists on the Wasm host and not the native one. Recorded, not fixed here.
+parity 78/78, ctest 13/13, dune runtest 2308/0._
+
+---
+
 ## v0.1.173 — 2026-08-10
 
 _Two bugs behind one build failure: a regression from v0.1.172, and the latent

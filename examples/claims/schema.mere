@@ -1,0 +1,188 @@
+// examples/claims/schema.mere — the shape of an expense claim, and the
+// rules that hold for it, in one file that both replicas import.
+//
+// This is the half of the boundary that already works. The types are
+// declared once, and `to_json` / `of_json` are synthesised per type by the
+// compiler, so nothing here hand-writes a wire format: the browser sends
+// `to_json claim` and the server decodes it back into the same record.
+// The validation below is likewise one implementation — the browser runs
+// it to decide what to complain about, and the server runs the same
+// functions on the way in, because a browser can be bypassed.
+//
+// What is NOT here, and is the point of the dogfood: nothing in a record
+// declaration says what a field is called on screen, which control edits
+// it, or which of these rules applies to it. That table still has to be
+// written by hand in app.mere, once per field, and forgetting a line of it
+// is silent.
+
+// ---- the record ------------------------------------------------------
+
+type category = Travel | Meals | Supplies | Other of str;
+
+type status = Draft | Submitted | Approved | Rejected of str;
+
+type line = { desc: str, amount: int, category: category };
+
+type claim = {
+  title: str,
+  spent_on: str,            // YYYY-MM-DD
+  purpose: str,
+  lines: line list,
+  note: str option,
+  approver: str option,
+  status: status
+};
+
+// A rejected field, in the shape both sides exchange them. One record, so
+// a complaint the server raises and one the browser raised are the same
+// kind of thing and render through the same code.
+type problem = { field: str, message: str };
+
+// ---- enums as text ---------------------------------------------------
+//
+// A <select> trades in strings, and so does the JSON on the wire for the
+// nullary cases. These two are hand-written for the same reason the field
+// table is: a variant declaration does not say what its cases are called.
+
+let category_name = fn (c: category) ->
+  match c with
+  | Travel -> "travel"
+  | Meals -> "meals"
+  | Supplies -> "supplies"
+  | Other s -> "other";
+
+let category_of_name = fn (s: str) ->
+  if str_eq s "travel" then Travel
+  else if str_eq s "meals" then Meals
+  else if str_eq s "supplies" then Supplies
+  else Other "";
+
+let category_label = fn (c: category) ->
+  match c with
+  | Travel -> "Travel"
+  | Meals -> "Meals"
+  | Supplies -> "Supplies"
+  | Other s -> "Other";
+
+let status_label = fn (s: status) ->
+  match s with
+  | Draft -> "draft"
+  | Submitted -> "submitted"
+  | Approved -> "approved"
+  | Rejected reason -> "rejected: " ++ reason;
+
+let is_draft = fn (s: status) ->
+  match s with
+  | Draft -> true
+  | Rejected r -> true
+  | _ -> false;
+
+// ---- derived ---------------------------------------------------------
+
+let rec lines_total = fn (xs: line list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (l, rest) -> l.amount + lines_total rest;
+
+let claim_total = fn (c: claim) -> lines_total c.lines;
+
+// Money is held as whole yen; the display form is the only place a
+// separator appears.
+let rec group3 = fn (s: str) ->
+  if str_len s <= 3 then s
+  else group3 (substring s 0 (str_len s - 3)) ++ "," ++
+       substring s (str_len s - 3) (str_len s);
+
+let yen = fn (n: int) -> "¥" ++ group3 (show n);
+
+// ---- rules -----------------------------------------------------------
+//
+// Each returns "" when the value is acceptable. They take the field's
+// value rather than the whole claim so the browser can run one of them on
+// blur without re-judging the entire form.
+
+let required = fn (label: str) -> fn (v: str) ->
+  if str_eq (str_trim v) "" then label ++ " is required" else "";
+
+let check_title = fn (v: str) ->
+  let e = required "Title" v in
+  if not (str_eq e "") then e
+  else if str_len v > 60 then "Title is longer than 60 characters"
+  else "";
+
+let check_purpose = fn (v: str) ->
+  let e = required "Purpose" v in
+  if not (str_eq e "") then e
+  else if str_len v > 200 then "Purpose is longer than 200 characters"
+  else "";
+
+// A date is checked by shape, not by calendar: the point is that the rule
+// is the same one on both sides, not that it is a complete date library.
+let check_spent_on = fn (v: str) ->
+  let e = required "Date" v in
+  if not (str_eq e "") then e
+  else if str_len v != 10 then "Date must look like YYYY-MM-DD"
+  else if not (str_eq (substring v 4 5) "-" && str_eq (substring v 7 8) "-") then
+    "Date must look like YYYY-MM-DD"
+  else "";
+
+let check_desc = fn (v: str) -> required "Description" v;
+
+let check_amount_text = fn (v: str) ->
+  if str_eq (str_trim v) "" then "Amount is required"
+  else if try_or (fn () -> let _ = int_of_str (str_trim v) in false) true then
+    "Amount must be a whole number of yen"
+  else if int_of_str (str_trim v) <= 0 then "Amount must be more than zero"
+  else if int_of_str (str_trim v) > 1000000 then
+    "A single line over ¥1,000,000 needs to be split"
+  else "";
+
+// A category of Other carries its own text, which is then required.
+let check_category = fn (c: category) ->
+  match c with
+  | Other s -> if str_eq (str_trim s) "" then "Say what kind of expense this is" else ""
+  | _ -> "";
+
+// The whole-claim rules, which no single field can answer on its own.
+// Both replicas run these; the server runs them again because a browser
+// can be bypassed, and adds the ones only it can know.
+let rec line_problems = fn (xs: line list) -> fn (i: int) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (l, rest) ->
+    let tag = fn (suffix: str) -> "line-" ++ show i ++ "-" ++ suffix in
+    let here =
+      let d = check_desc l.desc in
+      let a = if l.amount <= 0 then "Amount must be more than zero"
+              else if l.amount > 1000000 then
+                "A single line over ¥1,000,000 needs to be split"
+              else "" in
+      let c = check_category l.category in
+      list_append
+        (if str_eq d "" then Nil else Cons (problem { field = tag "desc", message = d }, Nil))
+        (list_append
+          (if str_eq a "" then Nil else Cons (problem { field = tag "amount", message = a }, Nil))
+          (if str_eq c "" then Nil else Cons (problem { field = tag "category", message = c }, Nil)))
+    in
+    list_append here (line_problems rest (i + 1));
+
+let claim_problems = fn (c: claim) ->
+  let add = fn (field: str) -> fn (msg: str) ->
+    if str_eq msg "" then Nil else Cons (problem { field = field, message = msg }, Nil) in
+  list_concat (
+    Cons (add "title" (check_title c.title),
+    Cons (add "spent_on" (check_spent_on c.spent_on),
+    Cons (add "purpose" (check_purpose c.purpose),
+    Cons ((match c.lines with
+           | Nil -> Cons (problem { field = "lines",
+                                    message = "A claim needs at least one line" }, Nil)
+           | Cons (_, _) -> Nil),
+    Cons (line_problems c.lines 0, Nil))))));
+
+let blank_line = line { desc = "", amount = 0, category = Travel };
+
+let blank_claim = claim {
+  title = "", spent_on = "", purpose = "",
+  lines = Cons (blank_line, Nil),
+  note = None, approver = None, status = Draft
+};

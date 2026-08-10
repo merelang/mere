@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere claims</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .1rem; }
+  .subtitle { color: #555; margin-top: 0; }
+  .field { margin: .9rem 0; }
+  label { display: block; font-weight: 600; font-size: .9rem; margin-bottom: .2rem; }
+  input[type=text], textarea, select {
+    box-sizing: border-box; font: inherit; padding: .4em;
+    border: 1px solid #cbd5e0; border-radius: 4px; background: #fff; width: 100%; }
+  input:focus, textarea:focus, select:focus { border-color: #90cdf4; outline: none; background: #f7fbff; }
+  [aria-invalid="true"] { border-color: #e53e3e; background: #fff5f5; }
+  .err { color: #c53030; font-size: .85rem; min-height: 1.2em; }
+  #lines li { list-style: none; display: flex; gap: .4rem; align-items: flex-start;
+              padding: .35rem 0; border-bottom: 1px solid #edf2f7; }
+  #lines ul { padding: 0; margin: 0; }
+  #lines .desc { flex: 3; } #lines .amount { flex: 1; text-align: right; }
+  #lines .cat { flex: 1.4; } #lines .kind { flex: 1.4; }
+  #lines .rowerr { color: #c53030; font-size: .8rem; }
+  .totals { display: flex; justify-content: space-between; align-items: baseline;
+            margin: .8rem 0; font-size: 1.05rem; }
+  button { font: inherit; padding: .35em .9em; border: none; border-radius: 4px;
+           background: #edf2f7; color: #2d3748; cursor: pointer; }
+  button#save, button#submit { background: #2b6cb0; color: #fff; }
+  button[disabled] { opacity: .45; cursor: default; }
+  .actions { display: flex; gap: .6rem; align-items: center; margin-top: 1.2rem; }
+  #summary { font-size: .9rem; color: #2d3748; }
+  #status { font-size: .85rem; color: #555; }
+  #claim-status { font-size: .85rem; color: #2d3748; }
+  #problems { color: #c53030; font-size: .9rem; }
+</style>
+
+<h1>Mere claims</h1>
+<p class="subtitle">
+  An expense claim. The record, the wire format and every rule below come
+  from one <code>schema.mere</code> that this page and the server both
+  import — nothing here writes down a field name for the network. What is
+  still written by hand, once per field, is the table that says what a
+  field is called on screen and which control edits it. That is what this
+  example exists to measure.
+</p>
+
+<div class="field">
+  <label for="title">Title</label>
+  <input type="text" id="title" autocomplete="off">
+  <div class="err" id="err-title"></div>
+</div>
+
+<div class="field">
+  <label for="spent_on">Date spent (YYYY-MM-DD)</label>
+  <input type="text" id="spent_on" autocomplete="off" placeholder="2026-08-11">
+  <div class="err" id="err-spent_on"></div>
+</div>
+
+<div class="field">
+  <label for="purpose">Purpose</label>
+  <textarea id="purpose" rows="2"></textarea>
+  <div class="err" id="err-purpose"></div>
+</div>
+
+<div class="field">
+  <label>Lines</label>
+  <div id="lines"><ul id="lines-list"></ul></div>
+  <div class="err" id="err-lines"></div>
+  <button id="add-line">add a line</button>
+</div>
+
+<div class="totals">
+  <span>Total</span><strong id="total">¥0</strong>
+</div>
+
+<div class="field">
+  <label for="approver">Approver (required over ¥100,000)</label>
+  <input type="text" id="approver" autocomplete="off" placeholder="hoshino / kato / mizuki">
+  <div class="err" id="err-approver"></div>
+</div>
+
+<div class="field">
+  <label for="note">Note (optional)</label>
+  <input type="text" id="note" autocomplete="off">
+  <div class="err" id="err-note"></div>
+</div>
+
+<div class="actions">
+  <button id="save" disabled>Save draft</button>
+  <button id="submit">Submit</button>
+  <span id="summary">…</span>
+</div>
+
+<p id="claim-status"></p>
+<p id="problems"></p>
+<p id="status">…</p>
+
+<script type="module">
+  import { makeDomGlue } from "/vendor/dom/dom.glue.js";
+
+  const stub = () => 0;
+  const base = {
+    puts: () => 0,
+    time: () => Date.now() / 1000,
+    read_file: stub,
+    write_file: stub,
+    __lang_str_of_float: stub,
+    __lang_float_of_str: () => 0.0,
+    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+  };
+
+  const { glue, attach } = makeDomGlue();
+  const bytes = await fetch("/static/app.wasm").then((r) => r.arrayBuffer());
+  const { instance } = await WebAssembly.instantiate(bytes, { env: { ...base, ...glue } });
+  attach(instance);
+  instance.exports.main();
+</script>
