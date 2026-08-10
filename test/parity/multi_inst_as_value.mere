@@ -1,0 +1,40 @@
+// A polymorphic top-level fn used at two types AND passed as a value.
+//
+// This is the case that stopped mere-ruby compiling. The parity harness
+// catches it because a backend whose output does not compile is reported
+// as MISCOMPILE, not merely as different output — the emitted C named an
+// identifier that was never defined, so it never ran at all.
+//
+// A polymorphic fn used at more than one type is emitted once per
+// instantiation under a mangled name, and the `_as_value` closure wrapper
+// is only defined for those. The unmangled name stays registered in
+// toplevel_fn_names so call sites written in source terms still dispatch —
+// which meant value position asked for `<base>_as_value`, a wrapper that
+// is never defined. `use of undeclared identifier 'mu_ident_as_value'`.
+//
+// The bug was latent for as long as ordinary calls to such a fn took the
+// direct-call path and only genuine value uses reached it. v0.1.172's
+// shadowing guard briefly routed every declined call through the closure
+// path as well, which turned it into 19 undeclared identifiers in
+// mere-ruby while parity and the OCaml suite stayed green.
+//
+// Wasm reports UNSUP here, which is the documented kind of refusal: it
+// emits per-instantiation copies too and has no single function to hand
+// out as a value, and it now says so instead of claiming the name is
+// unbound.
+
+let ident = fn (x) -> x;
+
+// Two instantiations, so `ident` becomes multi-inst.
+let use_str = fn (u: unit) -> ident "s";
+let use_bool = fn (u: unit) -> ident true;
+
+// Value position: this is what needs a wrapper for the int instance.
+let apply = fn (g: int -> int) -> fn (n: int) -> g n;
+
+// And an ordinary direct call, which must stay a direct call.
+let twice = fn (n: int) -> ident n + ident n;
+
+print (str_of_int (apply ident 41) ++ use_str ()
+       ++ (if use_bool () then "!" else "?")
+       ++ str_of_int (twice 4))

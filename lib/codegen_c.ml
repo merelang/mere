@@ -1369,7 +1369,27 @@ let rec emit_expr (e : Ast.expr) : string =
           `<name>_as_value`. Without this, e.g. the prelude `list_fold`'s
           parameter `f` resolved to a user top-level `let f`. *)
        if List.mem_assoc name !current_var_types then c_safe_name name
-       else if Hashtbl.mem toplevel_fn_names name then c_safe_name name ^ "_as_value"
+       else if Hashtbl.mem toplevel_fn_names name then
+         (* v0.1.173: a polymorphic fn used at more than one type is emitted
+            once per instantiation under a mangled name, and `_as_value`
+            wrappers are only defined for those. The unmangled name is still
+            registered in toplevel_fn_names (so call sites written in source
+            terms dispatch), so asking for `<base>_as_value` here named a
+            wrapper that is never defined — `let ident = fn (x) -> x` used at
+            two types and then passed as a value failed to compile with an
+            undeclared identifier. Pick the instance the same way the direct
+            call path does, from this reference's own type. *)
+         let base =
+           if Hashtbl.mem multi_inst_fns name then
+             match e.Ast.ty with
+             | Some t ->
+               (match Ast.walk t with
+                | Ast.TyArrow _ as arrow -> c_safe_name (mangled_inst_name name arrow)
+                | _ -> c_safe_name name)
+             | None -> c_safe_name name
+           else c_safe_name name
+         in
+         base ^ "_as_value"
        else if Hashtbl.mem inner_lifts name then
          (* Phase 39.A2 (DEFERRED patterns.md §8): materialize the inner-lifted
             fn so it can be used in value position. Pack the captures into an
@@ -2989,6 +3009,16 @@ let rec emit_expr (e : Ast.expr) : string =
           } __new; })"
          (emit_expr vec_e) (emit_expr arg) elem_tag elem_tag
          elem_tag elem_tag
+     (* Reached when the guard above did not fire — the name is a top-level
+        fn declared below this body, so the builtin arms were allowed to try
+        first and none of them matched. It is still a direct call: which of
+        the three call shapes to use is a question about what the name is,
+        not about where in the file we are. Dropping this arm and leaning on
+        the guard alone made every such call go out through the closure
+        path, which emits `<name>_as_value` — a wrapper only defined for the
+        resolved fn list, so mere-ruby stopped compiling with 19 undeclared
+        identifiers. *)
+     | Ast.Var name -> emit_user_call name
      | _ -> emit_closure_call ()))))
   | Ast.Constr (raw_name, arg_opt) ->
     (* Phase 41 + 42: since alias_ctor also registers `Traffic.Red` in
