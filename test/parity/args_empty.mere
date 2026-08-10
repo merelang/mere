@@ -1,0 +1,26 @@
+// `args ()` across the backends.
+//
+// The parity harness runs every program with no arguments, so what this
+// case pins down is the empty end of the contract: all four backends
+// agree that a program invoked with nothing after its name sees an empty
+// list, and — the part that actually regressed before — all four can
+// still emit and run a program that asks at all.
+//
+// LLVM was the last holdout: `args` had no lowering there until v0.1.169,
+// so anything with a command line ran on three backends out of four. The
+// non-empty end is covered by the CLI examples, which the harness cannot
+// exercise because it passes no argv.
+
+let rec bracket_all = fn (xs) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons (a, rest) -> bracket_all rest (acc ++ "[" ++ a ++ "]")
+in
+
+let av = args () in
+let _ = print ("count=" ++ show (list_len av)) in
+let _ = print ("bracket_alled=" ++ bracket_all av "") in
+// Asking twice must not consume anything: `args` reads argv, it does not
+// pop from it.
+let _ = print ("again=" ++ show (list_len (args ()))) in
+0

@@ -162,7 +162,7 @@ In interpreter mode, "Mere runs on top of OCaml." Once we can emit native binari
 - Nested or-patterns (or inside constructor / tuple / record).
 - **Placing `while cond do body` directly under top-level main** — top-level Let_rec constraint; inside an fn body is fine.
 - **String interpolation with nested string literals** (`"x = {show \"abc\"}"`) — workaround via a let binding.
-- Some stdlib builtins (`read_lines` / `args` / `env_var` / `file_exists` etc.) are **interpreter-only**. Phase 34 brought float / libm (sqrt / sin / cos / tan / f_pow / atan2) to the 3 backends.
+- Some stdlib builtins (`read_lines` / `env_var` / `file_exists` etc.) are **interpreter-only**. Phase 34 brought float / libm (sqrt / sin / cos / tan / f_pow / atan2) to the 3 backends. `args` is no longer among them: it reaches all four backends as of v0.1.169 (LLVM stores argc/argv from `main` into globals; Wasm folds the host's `arg_count` / `arg_get`).
 - GC for strings / closure envs / variant nodes (currently a region arena bulk-freed at main exit — suitable for short-lived runs).
 - LLVM / Wasm with payload-mixed variants as Map K (uniform payload only) — C accepts mixed.
 

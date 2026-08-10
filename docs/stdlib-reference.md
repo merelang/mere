@@ -62,7 +62,7 @@ args ()                             // → ["foo", "bar"] (mere prog foo bar)
 run "clang -O2 main.c -o app"       // → 0 on success, nonzero exit code otherwise
 ```
 
-**★ Codegen status**: `print` / `print_no_nl` / `print_int` / `print_bool` / `print_err` / `read_file` / `write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `read_lines` / `args` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). The native-CLI / dogfood builtins `run` / `print_err` / `file_exists` / `file_mtime` / `file_size` / `tty_raw` / `tty_restore` / `read_key` / `random_int` also work on the **C native** backend (added for the `mk` / `mrog` / `mwasm` dogfoods, v0.1.13-v0.1.21).
+**★ Codegen status**: `print` / `print_no_nl` / `print_int` / `print_bool` / `print_err` / `read_file` / `write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `read_lines` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). `args` works on **all four** backends: C and LLVM read the argc/argv their `main` was handed, Wasm folds the host's `arg_count` / `arg_get` (v0.1.159 for Wasm, v0.1.169 for LLVM). The native-CLI / dogfood builtins `run` / `print_err` / `file_exists` / `file_mtime` / `file_size` / `tty_raw` / `tty_restore` / `read_key` / `random_int` also work on the **C native** backend (added for the `mk` / `mrog` / `mwasm` dogfoods, v0.1.13-v0.1.21).
 
 ```
 let _ = print "Hello";
