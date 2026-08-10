@@ -36,29 +36,13 @@
 <p class="subtitle">
   An expense claim. The record, the wire format and every rule below come
   from one <code>schema.mere</code> that this page and the server both
-  import — nothing here writes down a field name for the network. What is
-  still written by hand, once per field, is the table that says what a
-  field is called on screen and which control edits it. That is what this
-  example exists to measure.
+  import. The form itself is not written down anywhere either: the fields
+  below are the fields of the record, read off it in declaration order and
+  built at startup. Adding a field to <code>claim</code> puts a labelled
+  control here with no edit to this file.
 </p>
 
-<div class="field">
-  <label for="title">Title</label>
-  <input type="text" id="title" autocomplete="off">
-  <div class="err" id="err-title"></div>
-</div>
-
-<div class="field">
-  <label for="spent_on">Date spent (YYYY-MM-DD)</label>
-  <input type="text" id="spent_on" autocomplete="off" placeholder="2026-08-11">
-  <div class="err" id="err-spent_on"></div>
-</div>
-
-<div class="field">
-  <label for="purpose">Purpose</label>
-  <textarea id="purpose" rows="2"></textarea>
-  <div class="err" id="err-purpose"></div>
-</div>
+<div id="form"></div>
 
 <div class="field">
   <label>Lines</label>
@@ -69,18 +53,6 @@
 
 <div class="totals">
   <span>Total</span><strong id="total">¥0</strong>
-</div>
-
-<div class="field">
-  <label for="approver">Approver (required over ¥100,000)</label>
-  <input type="text" id="approver" autocomplete="off" placeholder="hoshino / kato / mizuki">
-  <div class="err" id="err-approver"></div>
-</div>
-
-<div class="field">
-  <label for="note">Note (optional)</label>
-  <input type="text" id="note" autocomplete="off">
-  <div class="err" id="err-note"></div>
 </div>
 
 <div class="actions">

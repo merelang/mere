@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.176 — 2026-08-11
+
+_Stage 2 of the shared-schema dogfood: the form is the record._
+
+_The plan was to let the app pick the mechanism rather than choose one in
+advance, and the app picked one that needs no language change at all. A record
+already has a total, name-keyed view of itself — the one the compiler
+synthesises for `to_json`. Reading it back gives the field names in declaration
+order, and replacing one key and decoding gives a setter. `claim_fields` /
+`claim_text` / `claim_with` are that, in about forty lines of schema.mere, and
+the controls on the page are built from the list at startup. index.html now has
+a `<div id="form">` and no field markup._
+
+_Measured the same way as stage 0, by adding a `cost_center: str` field:_
+
+| | stage 0 | stage 2 |
+|---|---|---|
+| `type claim` | edit | edit |
+| `blank_claim` | compile error if omitted | compile error |
+| a rule + `claim_problems` | silent | derived |
+| the field table in app.mere | silent | gone |
+| index.html markup | silent | generated |
+
+_Two edits, in one file, and the compiler forces the second. **Silent sites 3 →
+0.** Checked rather than assumed: adding the field and changing nothing else
+puts a control labelled "Cost center" on the page and round-trips its value to
+storage. `claim_problems` is derived too — it walks the same field list and
+applies `rule_for`, so a rule is registered in one place instead of two._
+
+_Two mechanisms were considered and rejected on evidence. A build-time
+generator over `contrib/parser` foundered on the parser itself: the self-hosted
+parser has no expression-level record literal, field access or record update
+(`ERecordLit` and friends are declared in ast.mere and never constructed), so it
+cannot parse a schema file that also contains rules — the prerequisite is larger
+than the generator. Compiler-synthesised derive was not needed once the JSON
+view turned out to be enough._
+
+_Two things this does not fix, both named in the source. `of_json` is not
+polymorphic — `to_json` is, but `of_json` is directed by an annotation at the
+call site, so `claim_with` has to name `claim` and there is one copy per record
+type. And `rule_for` still ties a field name to its rule by hand; nothing in a
+declaration can say which rule judges which field, but nothing checks the names
+either._
+
+_`examples/claims/browser_check.mjs` covers what a dump cannot: that a generated
+`<input>` behaves like one, that leaving it runs the rule the schema associates
+with its name, and that the server's own refusals land in the generated error
+slots. 14/14 in Chrome. parity 79/79, ctest 13/13, dune runtest 2308/0._
+
+---
+
 ## v0.1.175 — 2026-08-11
 
 _Stage 1 of the shared-schema dogfood: a type reachable only as another type's
