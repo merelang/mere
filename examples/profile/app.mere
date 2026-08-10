@@ -10,9 +10,8 @@
 // comparing them.
 //
 // That is the point of this example. The state here is not a list that
-// grows; it is a small structured value with a history of exactly one
-// step, and every interaction reads it, derives something from it, and
-// writes a modified copy back.
+// grows; it is a small structured value, and every interaction reads it,
+// derives something from it, and writes a modified copy back.
 //
 // It also needs controls a list does not. `input` fires for text as it is
 // typed, but a <select> produces no keystrokes and a checkbox has no
@@ -31,6 +30,7 @@
 //     http://localhost:8080 --type name=Ada --fire name:blur --wait 300
 
 import "../../contrib/dom/dom.mere";
+import "../../contrib/state/store.mere";
 
 type Profile = { name: str, email: str, bio: str, theme: str, notify: bool };
 
@@ -38,7 +38,7 @@ type Profile = { name: str, email: str, bio: str, theme: str, notify: bool };
 // validated and reverted by the same code. Without the get/set pair there
 // is no way to say "this field" as a value — a record field cannot be
 // named at runtime — and every one of those loops would have to be
-// written out five times.
+// written out once per field.
 type Field = {
   id: str,
   label: str,
@@ -49,31 +49,51 @@ type Field = {
 
 // ---- state ----------------------------------------------------------
 //
-// Mere has no mutable cell, so state is one slot of a vec allocated once;
-// the arena is page-lifetime, so it survives across event firings. This
-// app holds three of them, and the interesting one is the pair:
+// One store, holding one record. The first draft of this app had three
+// one-slot vecs — the way every browser client here has faked a mutable
+// cell — and seven hand-written calls to a recompute function, one after
+// each mutation site. The seventh was added during debugging. The eighth
+// would have been a screen quietly disagreeing with the state behind it.
+//
+// contrib/state/store inverts that: `store_update` writes and then tells
+// the watchers, so what is on screen is a function of the state rather
+// than something the mutation sites are each responsible for
+// maintaining.
+//
+// The four parts, and why each is separate:
 //
 //   saved    what the server last confirmed
 //   current  what the user has done since
+//   errors   the verdict on each field — what is actually wrong
+//   hidden   the fields whose verdict is currently not being shown
 //
-// Nearly everything on screen is derived from the difference between
-// those two. "3 unsaved changes" is a comparison. Whether Save is enabled
-// is a comparison. Revert is an assignment of one to the other. Keeping
-// the pair is what makes those one-liners instead of bookkeeping.
+// saved and current are a pair because nearly everything on screen is
+// derived from their difference: "3 unsaved changes" is a comparison,
+// whether Save is offered is a comparison, and Revert is an assignment of
+// one to the other.
+//
+// errors and hidden are separate for a subtler reason. Focusing a field
+// takes its complaint off the screen, but it does not make the value
+// right — Save must stay withheld until the field is left and re-judged.
+// The first draft got this by writing to the DOM behind the state's back,
+// which worked only because nothing else ever repainted. Once the screen
+// is derived, "what is wrong" and "what we are currently saying out loud"
+// have to be two different facts.
+
+type Model = {
+  saved: Profile,
+  current: Profile,
+  errors: (str * str) list,
+  hidden: str list
+};
 
 let blank = Profile {
   name = "", email = "", bio = "", theme = "system", notify = false
 } in
 
-let saved = vec_new () in
-let _ = vec_push saved blank in
-let current = vec_new () in
-let _ = vec_push current blank in
-// (field id, message) for every field currently complaining. An assoc
-// list rather than a record so the generic loops keep working: a record
-// of errors would need its own five getters and setters.
-let errors = vec_new () in
-let _ = vec_push errors Nil in
+let model = store_new (Model {
+  saved = blank, current = blank, errors = Nil, hidden = Nil
+}) in
 
 let status_el = dom_get_by_id "status" in
 let summary_el = dom_get_by_id "summary" in
@@ -153,22 +173,16 @@ let rec any_error = fn (xs: (str * str) list) ->
   | Cons ((_, v), rest) -> if str_eq v "" then any_error rest else true
 in
 
-// ---- painting -------------------------------------------------------
-
-let show_error = fn (id: str) -> fn (msg: str) ->
-  let el = dom_get_by_id ("err-" ++ id) in
-  let _ = dom_set_text el msg in
-  let input = dom_get_by_id id in
-  if str_eq msg "" then dom_remove_attr input "aria-invalid"
-  else dom_set_attr input "aria-invalid" "true"
+let rec member = fn (xs: str list) -> fn (k: str) ->
+  match xs with
+  | Nil -> false
+  | Cons (x, rest) -> if str_eq x k then true else member rest k
 in
 
-let set_error = fn (id: str) -> fn (msg: str) ->
-  let next =
-    if str_eq msg "" then without (vec_get errors 0) id
-    else Cons ((id, msg), without (vec_get errors 0) id) in
-  let _ = vec_set errors 0 next in
-  show_error id msg
+let rec drop_id = fn (xs: str list) -> fn (k: str) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (x, rest) -> if str_eq x k then drop_id rest k else Cons (x, drop_id rest k)
 in
 
 // Count the fields whose current value differs from the saved one. This
@@ -182,11 +196,37 @@ let rec diff_count = fn (fs: Field list) -> fn (cur: Profile) -> fn (sav: Profil
     d + diff_count rest cur sav
 in
 
+// ---- what the screen is a function of -------------------------------
+//
+// Two watchers, registered once. Nothing below ever calls them: they run
+// because the store was written to.
+//
+// They own the parts of the page the user is not holding — the messages,
+// the counts, the disabled flags. They deliberately do not own the input
+// values, because for the field being typed in the DOM is ahead of the
+// state, and writing to it would move the caret out from under the
+// caller. Those are pushed only on load and revert, below.
+
+let rec paint_errors = fn (fs: Field list) -> fn (m: Model) ->
+  match fs with
+  | Nil -> ()
+  | Cons (f, rest) ->
+    let msg = if member m.hidden f.id then "" else assoc m.errors f.id in
+    let _ = dom_set_text (dom_get_by_id ("err-" ++ f.id)) msg in
+    let input = dom_get_by_id f.id in
+    let _ =
+      if str_eq msg "" then dom_remove_attr input "aria-invalid"
+      else dom_set_attr input "aria-invalid" "true" in
+    paint_errors rest m
+in
+
+let _ = store_watch model (fn (m: Model) -> paint_errors fields m) in
+
 // Save is offered when there is something to save and nothing to fix.
 // Both halves are derived, neither is stored.
-let refresh_summary = fn (u: unit) ->
-  let n = diff_count fields (vec_get current 0) (vec_get saved 0) in
-  let bad = any_error (vec_get errors 0) in
+let _ = store_watch model (fn (m: Model) ->
+  let n = diff_count fields m.current m.saved in
+  let bad = any_error m.errors in
   let _ = dom_set_text summary_el
     (if n == 0 then "No unsaved changes"
      else if n == 1 then "1 unsaved change"
@@ -195,26 +235,45 @@ let refresh_summary = fn (u: unit) ->
     if n == 0 || bad then dom_set_attr save_btn "disabled" "true"
     else dom_remove_attr save_btn "disabled" in
   if n == 0 then dom_set_attr revert_btn "disabled" "true"
-  else dom_remove_attr revert_btn "disabled"
-in
+  else dom_remove_attr revert_btn "disabled") in
 
-// Push a whole profile into the controls. Used on load and on revert —
-// the two moments where the DOM is behind the state rather than ahead of
-// it. Ordinary editing never calls this: the field the user is typing in
-// is already correct, and writing to it would move the caret.
-let rec paint_fields = fn (fs: Field list) -> fn (p: Profile) ->
+// Push a whole profile into the controls. The two moments where the DOM
+// is behind the state rather than ahead of it, and the only two places
+// that write to an input.
+let rec push_values = fn (fs: Field list) -> fn (p: Profile) ->
   match fs with
   | Nil -> ()
   | Cons (f, rest) ->
     let _ = dom_set_value (dom_get_by_id f.id) (f.get p) in
-    let _ = set_error f.id "" in
-    paint_fields rest p
+    push_values rest p
 in
 
-let paint = fn (p: Profile) ->
-  let _ = paint_fields fields p in
+let adopt = fn (p: Profile) ->
+  let _ = push_values fields p in
   let _ = dom_set_checked notify_box p.notify in
-  refresh_summary ()
+  store_update model (fn (m: Model) ->
+    { m | saved = p, current = p, errors = Nil, hidden = Nil })
+in
+
+// ---- state edits ----------------------------------------------------
+//
+// Every one of these is the whole interaction. There is no second line
+// telling the screen about it.
+
+let edit = fn (f: Field) -> fn (text: str) ->
+  store_update model (fn (m: Model) -> { m | current = f.set m.current text })
+in
+
+let judge = fn (f: Field) -> fn (text: str) ->
+  store_update model (fn (m: Model) ->
+    let msg = f.check text in
+    let errs = if str_eq msg "" then without m.errors f.id
+               else Cons ((f.id, msg), without m.errors f.id) in
+    { m | errors = errs, hidden = drop_id m.hidden f.id })
+in
+
+let forgive = fn (f: Field) ->
+  store_update model (fn (m: Model) -> { m | hidden = Cons (f.id, m.hidden) })
 in
 
 // ---- server ---------------------------------------------------------
@@ -232,7 +291,7 @@ let rec parse_pairs = fn (xs: str list) ->
     else let (k, v) = split1 line in Cons ((k, v), parse_pairs rest)
 in
 
-let profile_of_pairs = fn (ps) ->
+let profile_of_pairs = fn (ps: (str * str) list) ->
   Profile {
     name = assoc ps "name",
     email = assoc ps "email",
@@ -250,60 +309,48 @@ let serialize = fn (p: Profile) ->
   "notify\t" ++ (if p.notify then "1" else "0") ++ "\n"
 in
 
-// The server validates too, and says which field it objected to. Its
-// answer lands in the same error state the client's own checks use, so a
-// rejection looks identical whichever side noticed.
-let rec show_server_errors = fn (ps: (str * str) list) ->
-  match ps with
-  | Nil -> ()
-  | Cons ((k, v), rest) -> let _ = set_error k v in show_server_errors rest
-in
-
 let load = fn (u: unit) ->
   dom_fetch_async "GET" "/api/profile" "" (fn (body: str) ->
     if dom_fetch_status () != 200 then set_status "could not load the profile"
     else
-      let p = profile_of_pairs (parse_pairs (str_split body "\n")) in
-      let _ = vec_set saved 0 p in
-      let _ = vec_set current 0 p in
-      let _ = paint p in
+      let _ = adopt (profile_of_pairs (parse_pairs (str_split body "\n"))) in
       set_status "loaded")
 in
 
+// The server validates too, and says which field it objected to. Its
+// answer replaces the error state wholesale and unhides everything: a
+// rejection the user did not predict is worth showing immediately, and it
+// looks identical to one the client noticed itself.
 let save = fn (u: unit) ->
-  let p = vec_get current 0 in
+  let p = (store_get model).current in
   let _ = set_status "saving…" in
   let _ = dom_fetch_header "Content-Type" "text/plain" in
   dom_fetch_async "POST" "/api/profile" (serialize p) (fn (body: str) ->
     let st = dom_fetch_status () in
     if st == 200 then
-      // The save is what makes current the new baseline. Until this
-      // line runs, every "unsaved changes" count on screen was true.
-      let _ = vec_set saved 0 p in
-      let _ = refresh_summary () in
+      // The save is what makes current the new baseline. Until this line
+      // runs, every "unsaved changes" count on screen was true.
+      let _ = store_update model (fn (m: Model) -> { m | saved = p }) in
       set_status "saved"
     else if st == 422 then
-      let _ = show_server_errors (parse_pairs (str_split body "\n")) in
-      let _ = refresh_summary () in
+      let _ = store_update model (fn (m: Model) ->
+        { m | errors = parse_pairs (str_split body "\n"), hidden = Nil }) in
       set_status "the server rejected some fields"
     else set_status ("save failed (" ++ show st ++ ")"))
 in
 
 let revert = fn (u: unit) ->
-  let p = vec_get saved 0 in
-  let _ = vec_set current 0 p in
-  let _ = vec_set errors 0 Nil in
-  let _ = paint p in
+  let _ = adopt (store_get model).saved in
   set_status "reverted to the last saved version"
 in
 
 // ---- wiring ---------------------------------------------------------
 //
 // Three events per text field, and each is a different question.
-//   input  — the user changed something; record it and recount.
+//   input  — the user changed something; record it.
 //   blur   — the user is done with this field; now is a fair time to
 //            judge it.
-//   focus  — the user came back to fix it; stop complaining.
+//   focus  — the user came back to fix it; stop saying so out loud.
 // Doing validation on input instead would tell someone their email is
 // invalid while they are still typing the part before the @.
 
@@ -312,30 +359,20 @@ let rec wire = fn (fs: Field list) ->
   | Nil -> ()
   | Cons (f, rest) ->
     let el = dom_get_by_id f.id in
-    let _ = dom_on_input el (fn (text: str) ->
-      let _ = vec_set current 0 (f.set (vec_get current 0) text) in
-      refresh_summary ()) in
-    let _ = dom_on_blur el (fn (text: str) ->
-      let _ = set_error f.id (f.check text) in
-      refresh_summary ()) in
-    let _ = dom_on_focus el (fn (u: unit) ->
-      // Take the complaint down but keep it in state: the field is
-      // still wrong until it is left again and re-checked.
-      let _ = show_error f.id "" in
-      ()) in
+    let _ = dom_on_input el (fn (text: str) -> edit f text) in
+    let _ = dom_on_blur el (fn (text: str) -> judge f text) in
+    let _ = dom_on_focus el (fn (u: unit) -> forgive f) in
     // A <select> emits change and no keystrokes at all, so without this
     // the theme picker would be inert.
-    let _ = dom_on_change el (fn (text: str) ->
-      let _ = vec_set current 0 (f.set (vec_get current 0) text) in
-      refresh_summary ()) in
+    let _ = dom_on_change el (fn (text: str) -> edit f text) in
     wire rest
 in
 
 let _ = wire fields in
 
 let _ = dom_on_change notify_box (fn (text: str) ->
-  let _ = vec_set current 0 { (vec_get current 0) | notify = str_eq text "1" } in
-  refresh_summary ()) in
+  store_update model (fn (m: Model) ->
+    { m | current = { m.current | notify = str_eq text "1" } })) in
 
 let _ = dom_on_click save_btn (fn (u: unit) -> save ()) in
 let _ = dom_on_click revert_btn (fn (u: unit) -> revert ()) in

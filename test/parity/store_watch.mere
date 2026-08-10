@@ -1,0 +1,36 @@
+// contrib/state/store across the backends.
+//
+// The store is a pair of vecs — a one-slot cell and a list of watchers —
+// and the second half is the part worth pinning down: a Vec of closures,
+// pushed to at one point in the program and called back from another. It
+// is also the shape the browser clients rely on, and they cannot be run
+// by this harness at all.
+//
+// What is checked: watchers run in registration order, a new watcher runs
+// immediately with the value already in the store, update sees the
+// previous value, and every watcher sees the same value the store then
+// reports.
+
+import "../../contrib/state/store.mere";
+
+let st = store_new 1 in
+
+let _ = store_watch st (fn (n: int) -> print ("a saw " ++ show n)) in
+let _ = store_watch st (fn (n: int) -> print ("b saw " ++ show n)) in
+
+// Read-modify-write: the function is handed the current value.
+let _ = store_update st (fn (n: int) -> n * 10) in
+
+// A watcher registered later still gets told the current value at once,
+// then joins the others.
+let _ = store_watch st (fn (n: int) -> print ("c saw " ++ show n)) in
+let _ = store_set st 7 in
+
+let _ = print ("final " ++ show (store_get st)) in
+
+// A second store of a different type: the API is polymorphic in the
+// state, and both instances have to survive monomorphization.
+let names = store_new "" in
+let _ = store_watch names (fn (s: str) -> print ("name is [" ++ s ++ "]")) in
+let _ = store_update names (fn (s: str) -> s ++ "ada") in
+0

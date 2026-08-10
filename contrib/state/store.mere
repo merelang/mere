@@ -1,0 +1,81 @@
+// contrib/state/store.mere — one place to put the state, and a way to be
+// told when it changes.
+//
+// Mere has no mutable cell, and every browser client so far has built one
+// the same way: a vec allocated once, pushed once, then read and written
+// at index 0. It works — the arena is page-lifetime, so the slot survives
+// across event firings — but it says nothing about what it is, and it
+// spreads. Four apps had ten of them.
+//
+//   let filter_timer = vec_new () in
+//   let _ = vec_push filter_timer 0 in
+//   ... vec_get filter_timer 0 ... vec_set filter_timer 0 t ...
+//
+// A cell that named itself would fix the noise. It would not fix the
+// actual bug, which is that anything on screen derived from state has to
+// be recomputed by hand after every write, and nothing notices when a
+// caller forgets. examples/profile called its recompute in seven places,
+// and the eighth would have been a screen quietly disagreeing with the
+// state behind it.
+//
+// So this is not a cell library. A store holds one value and a list of
+// watchers; `store_update` writes and then tells everyone. The screen
+// stops being something the mutation sites maintain and becomes a
+// function of the state, which is the only arrangement that cannot drift.
+//
+// Public API:
+//
+//   store_new    : S -> Store[S]
+//   store_get    : Store[S] -> S
+//   store_watch  : Store[S] -> (S -> unit) -> unit
+//   store_set    : Store[S] -> S -> unit
+//   store_update : Store[S] -> (S -> S) -> unit
+//
+// A store is a pair of vecs — the one-slot cell and the watcher list —
+// rather than a declared record, because a record would need a region
+// parameter and a pair infers one. That is an implementation detail: read
+// `Store[S]` above as "whatever store_new returns".
+//
+// `store_watch` runs the watcher immediately with the current value. A
+// watcher is a function of the state, so it has to run once to make the
+// screen true; deferring that to a manual first paint is the same class
+// of bug this module exists to remove.
+//
+// Watchers must not update the store. Nothing here detects it, and the
+// result is unbounded recursion. Painting is what they are for.
+
+let store_new = fn (initial) ->
+  let cell = vec_new () in
+  let _ = vec_push cell initial in
+  let subs = vec_new () in
+  (cell, subs);
+
+let store_get = fn (st) ->
+  let (cell, _) = st in
+  vec_get cell 0;
+
+let rec store_notify_from = fn (subs) -> fn (i: int) -> fn (v) ->
+  if i >= vec_len subs then ()
+  else
+    let f = vec_get subs i in
+    let _ = f v in
+    store_notify_from subs (i + 1) v;
+
+let store_set = fn (st) -> fn (v) ->
+  let (cell, subs) = st in
+  let _ = vec_set cell 0 v in
+  store_notify_from subs 0 v;
+
+// The read-modify-write shape, which is what almost every caller wants:
+// a mutation is a function of the old state, not a value computed at the
+// call site from a read that might already be stale.
+let store_update = fn (st) -> fn (f) ->
+  let (cell, subs) = st in
+  let next = f (vec_get cell 0) in
+  let _ = vec_set cell 0 next in
+  store_notify_from subs 0 next;
+
+let store_watch = fn (st) -> fn (f) ->
+  let (cell, subs) = st in
+  let _ = vec_push subs f in
+  f (vec_get cell 0);

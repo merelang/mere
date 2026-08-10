@@ -29,6 +29,7 @@
 //     http://localhost:8080 --type search=al --wait 900
 
 import "../../contrib/dom/dom.mere";
+import "../../contrib/state/cell.mere";
 
 // ---- elements -------------------------------------------------------
 
@@ -40,20 +41,22 @@ let status_el = dom_get_by_id "status" in
 
 // ---- state ----------------------------------------------------------
 //
-// Mere has no mutable cell, so each piece of state is one slot of a vec
-// allocated once — the arena is page-lifetime, so it survives across
-// event firings. `tasks` is what the server last told us; `rows` is what
-// is currently on screen, as (id, row handle) so a row can be found and
-// removed by id without touching its neighbours.
+// Four cells (contrib/state/cell — a one-slot vec, page-lifetime, so it
+// survives across event firings). `tasks` is what the server last told
+// us; `rows` is what is currently on screen, as (id, row handle) so a row
+// can be found and removed by id without touching its neighbours; the
+// other two are a pending timer and the current backoff.
+//
+// Cells rather than a store (contrib/state/store, which examples/profile
+// uses) because the screen here is not derived from the state — it is
+// reconciled against it. A watcher that rebuilt the list on every write
+// would destroy the row being typed in, which is the one thing this app
+// exists to avoid.
 
-let tasks = vec_new () in
-let _ = vec_push tasks Nil in
-let rows = vec_new () in
-let _ = vec_push rows Nil in
-let filter_timer = vec_new () in
-let _ = vec_push filter_timer 0 in
-let retry_delay = vec_new () in
-let _ = vec_push retry_delay 400 in
+let tasks = cell_new Nil in
+let rows = cell_new Nil in
+let filter_timer = cell_new 0 in
+let retry_delay = cell_new 400 in
 
 let set_status = fn (s: str) -> dom_set_text status_el s in
 
@@ -103,13 +106,13 @@ let rec save = fn (body: str) -> fn (attempt: int) ->
   dom_fetch_async "POST" "/api/tasks" body (fn (resp: str) ->
     let st = dom_fetch_status () in
     if st == 200 || st == 201 then
-      let _ = vec_set retry_delay 0 400 in
+      let _ = cell_set retry_delay 400 in
       set_status "saved"
     else if attempt >= 5 then
       set_status ("gave up after " ++ show attempt ++ " attempts")
     else
-      let delay = vec_get retry_delay 0 in
-      let _ = vec_set retry_delay 0 (delay * 2) in
+      let delay = cell_get retry_delay in
+      let _ = cell_set retry_delay (delay * 2) in
       let _ = set_status ("save failed (" ++ show st ++ "), retrying in "
                           ++ show delay ++ "ms") in
       let _ = dom_set_timeout delay (fn (u: unit) -> save body (attempt + 1)) in
@@ -140,13 +143,12 @@ let build_row = fn (id: str) -> fn (done: str) -> fn (title: str) ->
   let _ = dom_set_value edit title in
   // Every keystroke schedules a save and cancels the one before it, so a
   // burst of typing costs one request rather than one per character.
-  let pending = vec_new () in
-  let _ = vec_push pending 0 in
+  let pending = cell_new 0 in
   let _ = dom_on_input edit (fn (text: str) ->
-    let _ = dom_clear_timeout (vec_get pending 0) in
+    let _ = dom_clear_timeout (cell_get pending) in
     let t = dom_set_timeout 400 (fn (u: unit) ->
       save ("rename\t" ++ id ++ "\t" ++ text) 0) in
-    vec_set pending 0 t) in
+    cell_set pending t) in
 
   let del = dom_create "button" in
   let _ = dom_set_attr del "id" ("del-" ++ id) in
@@ -155,7 +157,7 @@ let build_row = fn (id: str) -> fn (done: str) -> fn (title: str) ->
     // Remove this row only. Redrawing the list instead would rebuild
     // every other row, including one being edited.
     let _ = dom_remove li in
-    let _ = vec_set rows 0 (drop_row (vec_get rows 0) id) in
+    let _ = cell_set rows (drop_row (cell_get rows) id) in
     save ("delete\t" ++ id) 0) in
 
   let _ = dom_append li check in
@@ -171,8 +173,8 @@ in
 // reason dom_remove exists in contrib/dom.
 let render = fn (u: unit) ->
   let needle = dom_input_value search_in in
-  let all = vec_get tasks 0 in
-  let cur = vec_get rows 0 in
+  let all = cell_get tasks in
+  let cur = cell_get rows in
   let rec prune = fn (xs) -> fn (keep) ->
     match xs with
     | Nil -> keep
@@ -194,16 +196,16 @@ let render = fn (u: unit) ->
         match assoc_row acc id with
         | Some _ -> add tr acc
         | None -> add tr (Cons ((id, build_row id d title), acc)) in
-  vec_set rows 0 (add all kept)
+  cell_set rows (add all kept)
 in
 
 let refresh = fn (u: unit) ->
   dom_fetch_async "GET" "/api/tasks" "" (fn (body: str) ->
     if dom_fetch_status () != 200 then set_status "could not load tasks"
     else
-      let _ = vec_set tasks 0 (parse_lines (str_split body "\n")) in
+      let _ = cell_set tasks (parse_lines (str_split body "\n")) in
       let _ = render () in
-      set_status ("loaded " ++ show (list_len (vec_get tasks 0)) ++ " task(s)"))
+      set_status ("loaded " ++ show (list_len (cell_get tasks)) ++ " task(s)"))
 in
 
 // ---- startup --------------------------------------------------------
@@ -212,9 +214,9 @@ in
 // keystroke cancels it. Without the cancel this would re-render on every
 // character; without the input event it could only run on submit.
 let _ = dom_on_input search_in (fn (text: str) ->
-  let _ = dom_clear_timeout (vec_get filter_timer 0) in
+  let _ = dom_clear_timeout (cell_get filter_timer) in
   let t = dom_set_timeout 250 (fn (u: unit) -> render ()) in
-  vec_set filter_timer 0 t) in
+  cell_set filter_timer t) in
 
 let _ = dom_on_submit add_form (fn (u: unit) ->
   let title = str_trim (dom_input_value add_in) in

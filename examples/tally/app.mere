@@ -35,6 +35,7 @@ extern fn worker_call: str -> (str -> unit) -> unit;
 
 import "../../contrib/dom/dom.mere";
 import "../../contrib/async/async.mere";
+import "../../contrib/state/cell.mere";
 
 // ---- elements -------------------------------------------------------
 
@@ -45,11 +46,10 @@ let add_form = dom_get_by_id "add" in
 let label_in = dom_get_by_id "label" in
 let sync_btn = dom_get_by_id "sync" in
 
-let log_buf = vec_new () in
-let _ = vec_push log_buf "" in
+let log_buf = cell_new "" in
 let log = fn (msg: str) ->
-  let next = vec_get log_buf 0 ++ msg ++ "\n" in
-  let _ = vec_set log_buf 0 next in
+  let next = cell_get log_buf ++ msg ++ "\n" in
+  let _ = cell_set log_buf next in
   let _ = dom_set_text log_el next in
   dom_scroll_to_end log_el
 in
