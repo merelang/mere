@@ -150,3 +150,32 @@ extern fn dom_sse: str -> (str -> unit) -> (str -> unit) -> unit;
 // human, and the conversion itself is ordinary arithmetic that belongs
 // in Mere rather than in the host.
 extern fn dom_tz_offset: unit -> int;
+
+// ---------------------------------------------------------------------
+// v0.1.168 (tasks dogfood): editing a list in place.
+//
+// The chat and tally clients only ever append, and a board that only
+// grows can be redrawn wholesale — `dom_set_text el ""` drops every
+// child and the rest is rebuilt. A list you can filter and edit cannot:
+// redrawing destroys the row you are typing in. These three are what a
+// list that survives being edited needs.
+// ---------------------------------------------------------------------
+
+// `element.remove()`. Detaches one node and leaves its siblings alone,
+// which is the whole point — the rows that stay keep their identity, and
+// with it focus, selection and any text typed into them.
+extern fn dom_remove: JsRef -> unit;
+
+// `element.addEventListener("input", ...)`, with the field's current
+// value handed to the closure. Fires on every keystroke, unlike
+// dom_on_submit — which is what makes a live filter possible and a
+// debounce necessary.
+extern fn dom_on_input: JsRef -> (str -> unit) -> unit;
+
+// setTimeout / clearTimeout. The handle comes back so a pending callback
+// can be cancelled, which is the difference between a debounce and a
+// pile of queued work: every keystroke cancels the previous timer and
+// starts a new one, so only the last one fires. Also what a retry with
+// backoff is built from.
+extern fn dom_set_timeout: int -> (unit -> unit) -> int;
+extern fn dom_clear_timeout: int -> unit;

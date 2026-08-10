@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mere tasks</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .1rem; }
+  .subtitle { color: #555; margin-top: 0; }
+  #search { width: 100%; box-sizing: border-box; padding: .5em; font: inherit; margin: .5rem 0 1rem; }
+  #list { list-style: none; padding: 0; }
+  #list li { display: flex; gap: .5rem; align-items: center; padding: .35rem 0;
+             border-bottom: 1px solid #edf2f7; }
+  #list input.title { flex: 1; font: inherit; padding: .3em; border: 1px solid transparent;
+                      border-radius: 4px; }
+  #list input.title:focus { border-color: #90cdf4; outline: none; background: #f7fbff; }
+  button { font: inherit; padding: .25em .7em; border: none; border-radius: 4px;
+           background: #edf2f7; color: #2d3748; cursor: pointer; }
+  #list button[id^="del-"] { background: #fed7d7; color: #822727; }
+  form { display: flex; gap: .5rem; margin-top: 1rem; }
+  form input { flex: 1; font: inherit; padding: .4em; }
+  form button { background: #2b6cb0; color: #fff; }
+  #status { font-size: .85rem; color: #555; }
+</style>
+
+<h1>Mere tasks</h1>
+<p class="subtitle">
+  Type in the search box to narrow the list as you go; type in a task to
+  rename it. Both are debounced, and a rename that fails comes back on a
+  doubling delay. The point of the example is that filtering never
+  rebuilds a row that stays — so the field you are editing keeps its
+  focus and its caret while the list changes around it.
+</p>
+
+<input id="search" placeholder="filter tasks…" autocomplete="off">
+
+<ul id="list"></ul>
+
+<form id="add">
+  <input id="title" placeholder="new task" autocomplete="off" required>
+  <button type="submit">add</button>
+</form>
+
+<p id="status">…</p>
+
+<script type="module">
+  import { makeDomGlue } from "/vendor/dom/dom.glue.js";
+
+  const stub = () => 0;
+  const base = {
+    puts: () => 0,
+    time: () => Date.now() / 1000,
+    read_file: stub,
+    write_file: stub,
+    __lang_str_of_float: stub,
+    __lang_float_of_str: () => 0.0,
+    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+    __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
+  };
+
+  const { glue, attach } = makeDomGlue();
+  const bytes = await fetch("/static/app.wasm").then((r) => r.arrayBuffer());
+  const { instance } = await WebAssembly.instantiate(bytes, { env: { ...base, ...glue } });
+  attach(instance);
+  instance.exports.main();
+</script>

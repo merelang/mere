@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.168 — 2026-08-10
+
+_A list you can filter and edit, and the three bindings it forced._
+
+_Every browser client so far only appended, and a list that only grows can be
+redrawn wholesale: `dom_set_text el ""` drops every child and the rest is
+rebuilt from state. `examples/tasks` cannot. Each row holds an `<input>` you
+type into, so rebuilding the list while you are editing takes the field out from
+under the caret — which makes three things necessary rather than convenient.
+`dom_remove` detaches one node and leaves its siblings, and their focus and
+half-typed text, alone. `dom_on_input` fires on every keystroke, so the filter
+can narrow as you type instead of on submit. `dom_set_timeout` /
+`dom_clear_timeout` do two jobs: a keystroke cancels the pending filter and
+queues a new one, so a burst of typing costs one re-render rather than one per
+character; and a save that fails comes back on a doubling delay instead of being
+dropped._
+
+_Filtering reconciles rather than redraws: rows that stopped matching are
+removed one at a time, rows that started matching are built and appended, and a
+row that stays is never touched. The browser check asserts exactly that — after
+typing in the search box, the row being edited is the same DOM node with its
+caret still at offset 3 — along with delete removing exactly one row, and a save
+failing and landing on the retry. All nine pass in Chrome._
+
+_`examples/tasks/server.mere` is deliberately thin: contrib/store/kvlog behind
+one tab-separated mutation endpoint, plus `POST /api/flaky` to fail the next N
+saves on purpose, because a retry path that is never taken is a path that is
+never tested. `scripts/run_dom_headless.mjs` gained `--type <id>=<text>`, which
+sets a field and fires `input` the way a keystroke does, and its DOM stub now
+implements `remove()`. parity 74/74, dune runtest 2308/0._
+
+---
+
 ## v0.1.167 — 2026-08-10
 
 _An open region is closed to the heap before codegen, which unblocks the last

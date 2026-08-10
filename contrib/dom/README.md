@@ -7,14 +7,15 @@ loaded in a browser.
 Started as the Phase 48 C2 frontend-FFI MVP (elements that already
 exist, click and key input — enough for games and emulators). v0.1.152
 added the groups a document-shaped app needs: building elements,
-request/response, and server push.
+request/response, and server push. v0.1.168 added what a list you can
+filter and edit needs: removing one node, input events, and timers.
 
 ## Files
 
 | file | content | lines |
 |---|---|---|
-| `dom.mere` | `extern type JsRef;` + 22 `extern fn` declarations | ~150 |
-| `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | ~330 |
+| `dom.mere` | `extern type JsRef;` + 28 `extern fn` declarations | ~190 |
+| `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | ~380 |
 
 ## API
 
@@ -30,6 +31,7 @@ request/response, and server push.
 | `dom_set_value` | `JsRef -> str -> unit` | `input.value = ...` (a property, not an attribute) |
 | `dom_input_value` | `JsRef -> str` | `element.value` |
 | `dom_scroll_to_end` | `JsRef -> unit` | `el.scrollTop = el.scrollHeight` |
+| `dom_remove` | `JsRef -> unit` | `element.remove()` — detaches one node, siblings keep focus and caret |
 
 ### Events
 
@@ -37,7 +39,10 @@ request/response, and server push.
 |---|---|---|
 | `dom_on_click` | `JsRef -> (unit -> unit) -> unit` | `element.addEventListener("click", ...)` |
 | `dom_on_submit` | `JsRef -> (unit -> unit) -> unit` | `"submit"`, with `preventDefault()` applied by the host |
+| `dom_on_input` | `JsRef -> (str -> unit) -> unit` | `"input"`, with the field's current value — fires on every keystroke |
 | `dom_on_key` | `(str -> unit) -> unit` | `document.addEventListener("keydown", ...)`; passes the key name |
+| `dom_set_timeout` | `int -> (unit -> unit) -> int` | `setTimeout`, returning a cancellable handle |
+| `dom_clear_timeout` | `int -> unit` | `clearTimeout` — what makes a debounce a debounce |
 | `dom_on_frame` | `(unit -> unit) -> unit` | a `requestAnimationFrame` loop |
 | `dom_key_held` | `int -> int` | polled key state for games (0-3 = d-pad, 4-7 = A/B/select/start) |
 
@@ -161,13 +166,31 @@ do anything.
   `__indirect_function_table`. The closure's captured env lives in
   Mere's bump arena, so it survives for the lifetime of the page.
 
+## Editing a list in place
+
+A list that only grows can be redrawn wholesale — `dom_set_text el ""`
+drops every child and the rest is rebuilt from state, which is what the
+chat and tally clients do. A list you can filter and edit cannot: a row
+holding an `<input>` you are typing into must not be rebuilt, or the
+field goes out from under the caret.
+
+`dom_remove`, `dom_on_input` and the timer pair exist for that, and
+`examples/tasks` is the app that forced them: filtering removes only the
+rows that stopped matching and appends only the ones that started, so a
+row that stays is never touched. Its browser check asserts exactly that —
+after typing in the search box, the row being edited is the same DOM node
+with its caret still at offset 3.
+
+The timers do two jobs there. Debounce: a keystroke cancels the pending
+filter and queues a new one, so a burst of typing costs one re-render
+rather than one per character. Retry: a save that fails comes back on a
+doubling delay instead of being dropped.
+
 ## Limitations
 
-- **No node removal or replacement**: elements can be created and
-  appended but not detached, so a list can only grow. Add
-  `dom_remove` + a glue entry when an app actually needs it.
-- **No `input` / `change` / `blur` events**: `click`, `submit`, `keydown`
-  and the animation frame are wired; the rest follow the same shape.
+- **No `change` / `blur` / `focus` events**: `click`, `submit`, `input`,
+  `keydown` and the animation frame are wired; the rest follow the same
+  shape.
 - **Single global handle table**: handles are never freed. An app that
   creates many ephemeral elements leaks entries; wiring handlers at
   startup and appending steadily (a chat log) is fine.
