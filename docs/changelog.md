@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.167 — 2026-08-10
+
+_An open region is closed to the heap before codegen, which unblocks the last
+LLVM gap the dogfoods hit._
+
+_`vec_new` and `file_pread` hand back a `Vec[R, T]` whose region no `region`
+block ever constrained, and the typer is content to leave R open. That is
+harmless on the C backend, which erases types, and fatal on LLVM, which does
+not — and the failure arrived three removes from its cause. An open R makes the
+Vec non-concrete; a helper taking one is therefore not resolvable and gets
+dropped from the backend's function list; the inner fn that uses it treats it as
+a capture instead of a known top-level name; and the emitted call site refers to
+an SSA value that does not exist. What clang reported was a type mismatch on a
+register several functions away._
+
+_A pass before lifting closes any open region variable to the default heap
+region. That is completing the inference rather than working around it, which is
+what keeps every downstream name stable — an earlier attempt tagged open regions
+leniently instead, and made a struct's name depend on how far unification had
+progressed, so the same type was registered under one name and referred to under
+another._
+
+_The B+-tree from the mbtree dogfood now compiles and runs on LLVM, and a tree
+it writes there reads back correctly under the C backend.
+`test/parity/lifted_vec_capture.mere` locks the shape. mbtree's CLI still needs
+`args()`, which has no LLVM lowering. parity 74/74, dune runtest 2308/0._
+
+---
+
 ## v0.1.166 — 2026-08-10
 
 _Two corrections to the capture typing added in v0.1.165, and a precise account
