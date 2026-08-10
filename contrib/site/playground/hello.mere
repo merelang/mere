@@ -1,0 +1,14 @@
+// hello — the playground's first demo button.
+//
+// Kept identical to the `hello` entry in playground.html's SOURCES, so
+// the editor text and the prebuilt .wasm behind the button are the same
+// program. They used to drift: the committed hello.wat printed
+// "Hello, …!" while the editor showed this.
+let _ = print "Hello from Mere - Wasm playground!";
+let _ = print "============================";
+let x = 1 + 2 * 3;
+let _ = print ("1 + 2 * 3 = " ++ show x);
+let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1);
+let _ = print ("5! = " ++ show (fact 5));
+let _ = print ("10! = " ++ show (fact 10));
+0
