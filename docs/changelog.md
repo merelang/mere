@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.163 — 2026-08-10
+
+_Positioned file I/O on LLVM, closing the last backend gap in that group._
+
+_`file_openrw` / `file_size` / `file_pread` / `file_pwrite` / `file_fsync` /
+`file_close` were interp + C + Wasm; parity reported `llvm:UNSUP` for
+`test/parity/file_pio.mere`. The LLVM runtime now implements them over libc
+with the same contract as everywhere else — a handle, bytes crossing as a
+`Vec[int]`, a short read past EOF rather than a padded one — and that case is
+`llvm:MATCH`. All four backends agree on writing past the end, overwriting a
+window in the middle, and reading a window back after a reopen._
+
+_A `File` travels as an i64 here rather than a raw `ptr`: lifted inner
+functions type every parameter uniformly, so a pointer could not be passed
+through one. The runtime converts at its own boundary._
+
+_Not fixed, and worth naming because it is what stops the mbtree dogfood from
+building on LLVM: a lifted inner function declares all its parameters `i64`,
+so passing a **closure** to one fails to typecheck in the emitted IR. `args()`
+also has no LLVM lowering. Neither is about files — mbtree hits both — but they
+are the two things between this backend and running that dogfood. parity 73/73,
+dune runtest 2306/0._
+
+---
+
 ## v0.1.162 — 2026-08-10
 
 _`mere install` fetches before checking out._
