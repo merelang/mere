@@ -95,6 +95,19 @@ node scripts/run_dom_headless.mjs examples/chat/app.wasm \
 Elements are created on demand, so any id the program asks for works
 without a page fixture.
 
+## Testing with one
+
+Some claims a dump cannot settle — whether a node is the *same* node,
+where the caret is, whether the browser generated a `blur`. Each app that
+makes one carries its own check, run against its own server and skipped
+when Playwright is absent:
+
+| check | what only a browser can show |
+|---|---|
+| `scripts/check_browser.mjs` (tally) | OPFS: state survives a browser restart |
+| `examples/tasks/browser_check.mjs` | the row being edited is the same node, caret intact |
+| `examples/profile/browser_check.mjs` | blur and focus as the user causes them, by moving between fields |
+
 ## Usage
 
 ### Mere side
@@ -185,9 +198,11 @@ field goes out from under the caret.
 `dom_remove`, `dom_on_input` and the timer pair exist for that, and
 `examples/tasks` is the app that forced them: filtering removes only the
 rows that stopped matching and appends only the ones that started, so a
-row that stays is never touched. Its browser check asserts exactly that —
-after typing in the search box, the row being edited is the same DOM node
-with its caret still at offset 3.
+row that stays is never touched. `examples/tasks/browser_check.mjs`
+asserts exactly that — after typing in the search box, the row being
+edited is the same DOM node with its caret still at offset 3. It takes a
+real browser: a rebuilt row would look identical in a headless dump, and
+the caret is the only thing that tells them apart.
 
 The timers do two jobs there. Debounce: a keystroke cancels the pending
 filter and queues a new one, so a burst of typing costs one re-render
