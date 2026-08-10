@@ -9904,6 +9904,62 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     | _ -> ()
   ) prog.decls;
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
+  (* v0.1.166: a region variable no `region` block ever constrained is the
+     default heap region, and the typer is content to leave it open — the
+     C backend erases types so it never notices. This backend does notice:
+     a `Vec[R, int]` with an open R is not concrete, which drops the
+     helper that takes one out of the resolved fn list, which turns it
+     into a capture, which cannot be typed. Closing those variables here
+     is completing the inference rather than papering over it, so every
+     downstream name stays stable — tagging an open region leniently
+     instead makes a struct's name depend on how far unification has got.
+     Only the region position of the region-parameterised containers is
+     touched; an open ELEMENT type is a genuinely polymorphic value and
+     still refused. *)
+  let close_open_regions (e : Ast.expr) : unit =
+    let rec close_ty (t : Ast.ty) =
+      match Ast.walk t with
+      | Ast.TyCon (("Vec" | "Map" | "StrBuf"), region :: rest) ->
+        (match Ast.walk region with
+         | Ast.TyVar v when v.Ast.link = None ->
+           v.Ast.link <- Some (Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit))
+         | other -> close_ty other);
+        List.iter close_ty rest
+      | Ast.TyCon (_, args) -> List.iter close_ty args
+      | Ast.TyArrow (a, b) -> close_ty a; close_ty b
+      | Ast.TyTuple ts -> List.iter close_ty ts
+      | Ast.TyRef (_, _, inner) -> close_ty inner
+      | _ -> ()
+    in
+    let rec go (x : Ast.expr) =
+      (match x.Ast.ty with Some t -> close_ty t | None -> ());
+      match x.Ast.node with
+      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+      | Ast.Unit_lit | Ast.Var _ -> ()
+      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+      | Ast.App (a, b) -> go a; go b
+      | Ast.Neg a | Ast.Annot (a, _) -> go a
+      | Ast.Let (_, v, b) -> go v; go b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+      | Ast.With (_, v, b) -> go v; go b
+      | Ast.If (c, t, e_) -> go c; go t; go e_
+      | Ast.Fun (_, _, b) -> go b
+      | Ast.Constr (_, Some a) -> go a
+      | Ast.Constr (_, None) -> ()
+      | Ast.Match (sc, arms) ->
+        go sc;
+        List.iter (fun (_, g, b) ->
+          (match g with Some ge -> go ge | None -> ()); go b) arms
+      | Ast.Tuple es -> List.iter go es
+      | Ast.Region_block (_, b) -> go b
+      | Ast.Ref (_, _, a) -> go a
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, x2) -> go x2) fs
+      | Ast.Field_get (a, _) -> go a
+      | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, x2) -> go x2) fs
+    in
+    go e
+  in
+  close_open_regions main_expr;
   let skels, body_expr = lift_fn_skels main_expr in
   List.iter (fun s -> Hashtbl.replace toplevel_fn_names s.sname ()) skels;
   (* Phase 30.2b (DEFERRED §1.10): make those top-level non-fn lets that are

@@ -1,0 +1,29 @@
+// An inner `let rec` that captures a Vec and a helper that takes one.
+//
+// The LLVM backend used to fail this at three removes. `file_pread` and
+// `vec_new` hand back a `Vec[R, T]` whose region no `region` block ever
+// constrained, so the typer leaves R open — harmless on a backend that
+// erases types, fatal on one that does not. An open R makes the Vec
+// non-concrete, which drops any helper taking one out of the resolved
+// function list, which turns that helper into a capture of the inner fn,
+// which then cannot be typed. The symptom was a clang error about an SSA
+// register several steps from the cause; the fix is to close an open
+// region to the default heap region before codegen, which is completing
+// the inference rather than working around it.
+
+let get_at = fn v -> fn i -> vec_get v i;
+let width = 2;
+
+let sum_row = fn base ->
+  let v = vec_new () in
+  let _ = vec_push v 10 in
+  let _ = vec_push v 20 in
+  let _ = vec_push v 30 in
+  let _ = vec_push v 40 in
+  let rec go = fn i -> fn acc ->
+    if i == width then acc
+    else go (i + 1) (acc + get_at v (base + i)) in
+  go 0 0;
+
+let _ = print (show (sum_row 0));
+print (show (sum_row 2))
