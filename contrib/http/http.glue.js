@@ -92,6 +92,15 @@ function makeHttpGlue() {
   let activeRes = null;
   let streamStarted = false;
 
+  // Per-request arena checkpoint. A handler wrapped in contrib/http's
+  // with_arena calls `http_arena_mark` on entry; once the response has
+  // been read out of linear memory the bump pointer goes back, so the
+  // request's whole working set — parsed body, intermediate strings,
+  // every string this glue wrote in — is reclaimed. Opt-in from the Mere
+  // side, because it is only sound when nothing the handler allocated
+  // outlives the response.
+  let arenaMark = null;
+
   const glue = {
     http_serve: (port, closurePtr) => {
       const http = require("http");
@@ -138,6 +147,8 @@ function makeHttpGlue() {
           const reqPtr = writeStr(reqLine);
           const respPtr = callClosure(closurePtr, reqPtr);
           const respBody = readStrBytes(respPtr);
+          // Copy taken; the request's allocations can go.
+          if (arenaMark !== null && langBump) { langBump.value = arenaMark; arenaMark = null; }
           currentBodyPtr = 0;
           if (streamStarted) {
             // Handler already sent headers + one or more chunks via
@@ -239,6 +250,7 @@ function makeHttpGlue() {
     sse_broadcast: (channelPtr, payloadPtr) => {
       broadcast(readCStr(channelPtr), readCStr(payloadPtr));
     },
+    http_arena_mark: () => { arenaMark = langBump ? langBump.value : null; return 0; },
     http_current_body: () => currentBodyPtr,
     http_set_status: (code) => { currentStatus = code | 0; },
     http_set_content_type: (ptr) => { currentContentType = readCStr(ptr); },

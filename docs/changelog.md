@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.160 — 2026-08-10
+
+_A request's allocations can be released when the request ends._
+
+_The default region is a bump arena with no free, so a long-lived server keeps
+every request's working memory forever — the parsed body, the strings a handler
+concatenated on the way to a response, and every string the host wrote in. A
+handler that builds a 200-piece string cost 162,840 bytes per request, none of
+it reclaimed. The dogfoods noted this as a constraint twice without measuring
+it; the number above is a 300-request run against a Node host, reading the
+module's own `__lang_bump`._
+
+_`contrib/http/arena.mere` marks the arena on the way into a request, and the
+glue rewinds it once the response has been copied out of linear memory. Same
+handler, same run: **24 bytes per request**, and 200 consecutive responses are
+byte-identical, so nothing is reclaimed early. A plain `region` block around the
+handler gets most of the way there on its own (162,840 → 722, the copied-out
+response), which is worth knowing when no host cooperation is available._
+
+_It is opt-in, and the reason is the rule it depends on: nothing a handler
+allocates may outlive its response. That holds for ordinary request/response
+work and fails for a handler that stashes a value in something longer-lived —
+an in-memory session store, a cache, a subscriber list. mere-blog is exactly
+that case and deliberately does not use it; `examples/tally/server.mere` keeps
+all its state in a log file and does._
+
+_parity 72/72, dune runtest 2306/0; the tally client still syncs against the
+wrapped server._
+
+---
+
 ## v0.1.159 — 2026-08-10
 
 _`args()` returns the arguments on a plain Wasm host._

@@ -28,6 +28,10 @@ extern fn http_set_status: int -> unit;
 extern fn http_set_content_type: str -> unit;
 
 import "../../contrib/http/access_log.mere";
+// Every counter this server holds lives in the log file, not in memory,
+// so nothing a handler allocates has to outlive its response — the
+// condition with_arena needs.
+import "../../contrib/http/arena.mere";
 import "../../contrib/http/cors.mere";
 import "../../contrib/http/static.mere";
 import "../../contrib/http/router.mere";
@@ -99,5 +103,5 @@ let handle =
       (router routes not_found)) in
 
 let _ = print ("tally server on :8080 (db=" ++ db ++ ")") in
-let _ = http_serve 8080 (with_access_log (with_cors "*" handle)) in
+let _ = http_serve 8080 (with_arena (with_access_log (with_cors "*" handle))) in
 0
