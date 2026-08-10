@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.175 — 2026-08-11
+
+_Stage 1 of the shared-schema dogfood: a type reachable only as another type's
+field is still a type the C backend has to declare._
+
+_The C backend decides which structs to emit by walking what the program
+mentions — the expression tree and the function signatures. Neither walk
+descended into a record declaration's field types, so:_
+
+```mere
+type item = { name: str };
+type f    = { title: str, items: item list, note: str option };
+```
+
+_left `item`, `list_item` and `option_str` undeclared while the emitted code
+referred to all three. `unknown type name 'list_item'`._
+
+_Two walks were short, and both are fixed the same way. `collect_record_names`
+now follows a record's field types when it registers it, so a record reachable
+only as another record's field element gets declared; and
+`collect_mono_variant_instances` walks monomorphic record declarations the way
+it already walked monomorphic variant declarations, so container
+specializations reachable only as field types get registered. `seen` is set
+before recursing, so a self-referential record terminates._
+
+_This had been latent since records and `of_json` first coexisted, because a
+program that builds one of those values anywhere registers the type on the way
+past — and, as the test found the hard way, so does taking one apart:
+mentioning `Some` in a pattern is enough. The failure needs container-typed
+fields that are **only ever decoded**, which is exactly what a program looks
+like once the schema is shared and the codec is synthesised, since `of_json`
+becomes the only producer. examples/claims was written that way and found it;
+`test/parity/of_json_field_only.mere` holds it, and reads only the scalar
+fields on purpose — an earlier draft called `list_len` and matched `Some`, and
+passed on the broken compiler._
+
+_examples/claims now emits and compiles as C; what stops a native build is only
+the two HTTP externs the native runtime does not implement, which is the gap
+recorded in v0.1.174 and still its own slice. parity 79/79, ctest 13/13, dune
+runtest 2308/0._
+
+---
+
 ## v0.1.174 — 2026-08-11
 
 _`examples/claims`: the shared-schema dogfood, stage 0 — build it the way you

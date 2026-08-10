@@ -7839,6 +7839,19 @@ let collect_mono_variant_instances
       List.iter (fun (_cname, arg_opt) ->
         match arg_opt with Some t -> walk_ty t | None -> ()) variants
   ) variant_decls;
+  (* v0.1.175: the same hole, for monomorphic RECORD decls. `type f = {
+     note: str option }` declares a container instance the expression tree
+     may never construct — with `of_json` as the only producer, nothing in
+     the program ever writes `Some ...` — so `option_str` went unregistered
+     and the emitted C named an undeclared type. It stayed latent because a
+     program that builds one of those values anywhere registers it, so the
+     failure needed a record whose container-typed field is only ever
+     decoded. Which is exactly what a schema shared with a generated codec
+     looks like. *)
+  Hashtbl.iter (fun _rname (info : Typer.record_info) ->
+    if info.r_params = [] then
+      List.iter (fun (_, ft) -> walk_ty ft) info.r_fields)
+    Typer.records;
   (* Also walk substituted payload types of each collected instance so
      tuples that appear only inside variant payloads (e.g.
      `tuple_int_list_int` inside Cons) get found by later collectors.
@@ -8053,13 +8066,22 @@ let emit_tuple_struct_body (elems : Ast.ty list) : string =
 let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
   let seen = Hashtbl.create 8 in
   let order = ref [] in
-  let add name =
+  let rec add name =
     if Hashtbl.mem Typer.records name && not (Hashtbl.mem seen name) then begin
       Hashtbl.add seen name ();
-      order := name :: !order
+      order := name :: !order;
+      (* v0.1.175: a record needs the records its fields are made of. The
+         walk only ever saw types the program mentions, so a record
+         reachable solely as another record's field element — `items: item
+         list`, where nothing constructs an `item` because `of_json` is the
+         only producer — was never declared, and the list node struct
+         referred to an undeclared `item`. `seen` is set before recursing,
+         so a self-referential record terminates. *)
+      let info = Hashtbl.find Typer.records name in
+      if info.r_params = [] then
+        List.iter (fun (_, ft) -> walk_ty ft) info.r_fields
     end
-  in
-  let rec walk_ty (t : Ast.ty) =
+  and walk_ty (t : Ast.ty) =
     match Ast.walk t with
     | Ast.TyCon (name, args) -> add name; List.iter walk_ty args
     | Ast.TyTuple ts -> List.iter walk_ty ts
