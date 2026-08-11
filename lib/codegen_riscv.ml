@@ -903,6 +903,16 @@ and compile_app env e =
       "RV32I --bare: there is no host to print to — write to a device through \
        the machine capability instead (e.g. `raw_poke8 uart 0 c` on a window \
        over the UART at 0x10000000)"
+  | Ast.Var "print_bool" when List.length args = 1 ->
+    (* the same rewrite the LLVM and Wasm backends use: print of a literal,
+       rather than a second runtime path that formats a bool *)
+    let arg = List.hd args in
+    let str b = { arg with Ast.node = Ast.Str_lit b; Ast.ty = Some Ast.TyStr } in
+    compile_app env
+      { e with Ast.node =
+          Ast.App ({ arg with Ast.node = Ast.Var "print"; Ast.ty = None },
+                   { arg with Ast.node = Ast.If (arg, str "true", str "false");
+                              Ast.ty = Some Ast.TyStr }) }
   | Ast.Var "print_int" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit (Jal (ra, "__print_int"))
@@ -1050,6 +1060,47 @@ and compile_app env e =
      a program running under a host, and unlike raw memory there is no window
      to narrow: a CSR has no base and length. The hardware's own privilege
      modes are what will separate a kernel from a user process later. *)
+  (* Windows over memory the runtime owns, so a kernel can find them without
+     hardcoding an address that moves with --ram. They narrow from the machine
+     capability like any other window — no new authority, just coordinates. *)
+  | Ast.Var ("trap_save" | "machine_scratch") when List.length args = 1 ->
+    if not !bare then
+      err e.loc (Printf.sprintf
+        "RV32I: %s needs the bare-metal target (mere -rv --bare)"
+        (match head.node with Ast.Var v -> v | _ -> "this"));
+    let (base, len) =
+      match head.node with
+      | Ast.Var "trap_save" -> (trap_save_base (), 32 * 4)
+      (* between the handler slot and the print scratch buffer: the reserved
+         region's unused middle, which is where task stacks come from *)
+      | _ -> (trap_handler_slot () + 0x100, 0x10000 - 0x1200)
+    in
+    compile_expr env (List.hd args);                       (* a0 = machine *)
+    (* narrow it properly, so a machine window that somehow did not contain
+       this still faults rather than being taken at its word *)
+    li a1 (base - 0);
+    emit_word (enc_i 0 a0 2 t0 0x03);                      (* t0 = mach.base *)
+    emit_word (enc_r 0x20 t0 a1 0 a1 0x33);                (* a1 = base - mach.base *)
+    li a2 len;
+    emit_word (enc_i 4 a0 2 t1 0x03);                      (* t1 = mach.len *)
+    emit_word (enc_r 0 a2 a1 0 t2 0x33);                   (* t2 = off + len *)
+    emit (Branch (6, t1, t2, "__raw_fault"));
+    alloc_words t3 2;
+    li t4 base;
+    emit_word (enc_s 0 t4 t3 2 0x23);
+    emit_word (enc_s 4 a2 t3 2 0x23);
+    emit_word (enc_i 0 t3 0 a0 0x13)
+  (* A closure is [code_ptr][captures...] and the value is that block's address.
+     A task is a closure, so starting one means building a context whose PC is
+     its code and whose a0 is its env — which is the block itself. *)
+  | Ast.Var "raw_base" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a0 0x03)                       (* lw a0, 0(a0) — base *)
+  | Ast.Var "closure_code" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a0 0x03)                       (* lw a0, 0(a0) *)
+  | Ast.Var "closure_env" when List.length args = 1 ->
+    compile_expr env (List.hd args)                        (* the pointer itself *)
   | Ast.Var "set_trap_handler" when List.length args = 1 ->
     if not !bare then
       err e.loc "RV32I: set_trap_handler needs the bare-metal target (mere -rv --bare)";

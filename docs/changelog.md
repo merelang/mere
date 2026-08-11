@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.192 — 2026-08-11
+
+_Preemptive multitasking. Two Mere tasks, neither yielding, on a machine with
+no operating system._
+
+_A context switch turned out to need no new mechanism. The trampoline already
+saves the interrupted register set to a known place and restores from that same
+place before `mret`, so switching tasks is a memory copy in the middle of a
+handler: the save area into the outgoing task's TCB, the incoming task's TCB
+back into the save area, and its PC as the handler's result. The scheduler in
+[examples/riscv_bare_sched.mere](../examples/riscv_bare_sched.mere) is thirty
+lines of ordinary Mere._
+
+_What a bare program could not do was **name** any of it, so five primitives
+went in — all narrowing from the machine capability, so none of them hands out
+authority the program did not already have. Only coordinates:_
+
+- _`trap_save mach` — the save area, so a handler can reach both sides of a switch_
+- _`machine_scratch mach` — reserved RAM the runtime is not using, which is where
+  a task stack comes from. A bare program owns no fixed address of its own: the
+  heap grows up from 2MB and the stack down from the top, so any address it picks
+  is one the compiler is already using. The timer example's first draft learned
+  this by sharing a word with a top-level binding._
+- _`raw_base w` — a window's base as a number, because a stack pointer is an
+  address and the hardware wants the number. Not authority: touching anything
+  still needs a window._
+- _`closure_code f` / `closure_env f` — a task IS a closure, so starting one means
+  building a context whose PC is its code and whose a0 is its environment. ABI
+  knowledge, which a kernel legitimately has._
+
+_One word must **not** be switched, and finding out why is the interesting part:
+`gp`, the heap's bump pointer. Save and restore it per task and two tasks
+allocate over each other, each rolling the pointer back to where it stood when it
+last ran. The heap is machine state, not task state. That is a real collision
+between this language's memory model and concurrency, and the answer here — share
+the bump pointer, leave the word alone across a switch — is the simplest one that
+is correct. A per-task heap would be the other, and it is not needed yet._
+
+_Also: the RV32I backend had `print_int` but not `print_bool`, which the parity
+file added in v0.1.190 immediately caught by being the one file `-rv` refused.
+It lowers the way LLVM and Wasm do it, as `print` of a literal._
+
+_Two new tests. parity 84/84, ctest 13/13, `dune runtest` 2334/0. The
+interpreter-vs-emulator sweep of `test/parity` is 39 identical / 38 refused / 8
+mismatching — one better than last slice, since print_int_bool now runs there
+too._
+
+---
+
 ## v0.1.191 — 2026-08-11
 
 _The machine takes traps, and a Mere closure services them. A timer interrupt

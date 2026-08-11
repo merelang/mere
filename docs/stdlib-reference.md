@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-196 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+201 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -411,7 +411,7 @@ let m = mk_metrics () in
 
 For a complete cap-passing example see [examples/effects.mere](../examples/effects.mere).
 
-### Raw memory, CSRs and traps (8, RV32I bare-metal only)
+### Raw memory, CSRs, traps and tasks (13, RV32I bare-metal only)
 
 A `Raw` is a **window onto physical memory** — the one capability that is not a
 record of functions, because its operations lower to load and store
@@ -430,6 +430,11 @@ outside it; every access bounds-checks the offset, and widening faults.
 | `raw_window` | `Raw -> int -> int -> Raw` | A window over `[off, off+len)` of another. Faults if that is not inside it |
 | `csr_read` | `int -> int` | A machine CSR by number — the number must be a literal (it is an immediate field of the instruction) |
 | `csr_write` | `int -> int -> unit` | Write a machine CSR. Not behind a capability: a CSR has no base and length to narrow, and the hardware's privilege modes are what separate a kernel from a user process |
+| `raw_base` | `Raw -> int` | A window's base as a number. Not authority — touching anything still needs a window — but a stack pointer is an address and hardware wants the number |
+| `trap_save` | `Raw -> Raw` | The trap trampoline's 31-word register save area. A context switch is a copy through this: outgoing registers to a TCB, incoming registers back |
+| `machine_scratch` | `Raw -> Raw` | Reserved RAM the runtime is not using — where task stacks come from. A bare program owns no fixed address of its own: the heap grows up from 2MB and the stack down from the top |
+| `closure_code` | `(unit -> unit) -> int` | A closure's entry point. A task IS a closure, so starting one means building a context whose PC is this |
+| `closure_env` | `(unit -> unit) -> int` | Its environment — the value the first argument register must hold when that PC is entered. ABI knowledge, which a kernel has |
 | `set_trap_handler` | `(int -> int) -> unit` | Install a trap handler. The argument is `mcause`; the result is the PC to resume at. Anything else (`mepc` 0x341, `mtval` 0x343) is a `csr_read` away. **A closure, not a named function**: a handler needs the machine capability to do anything useful and an interrupt has no caller to hand it one, so it captures instead. Codegen emits the trampoline that saves the register set and returns with `mret` |
 | `raw_peek8`  | `Raw -> int -> int` | The byte at that offset |
 | `raw_peek32` | `Raw -> int -> int` | The 32-bit word at that offset |
@@ -443,6 +448,13 @@ let main = fn (mach: Raw) ->
   let uart = raw_window mach 0x10000000 256 in    // the UART, and nothing else
   putc uart 65;
 ```
+
+A context switch needs no new mechanism: the trampoline saves the interrupted
+register set to the area `trap_save` hands back and restores from it before
+`mret`, so a handler swaps tasks by copying through it and returning the
+incoming task's PC. `gp` is the one word to leave alone — the heap is machine
+state, not task state, and switching it makes two tasks allocate over each
+other. See [examples/riscv_bare_sched.mere](../examples/riscv_bare_sched.mere).
 
 Device MMIO sits above any RAM (the UART data register is at `0x10000000`, the
 address QEMU's `virt` machine uses), so a device address does not move when
@@ -475,7 +487,7 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 123)
+## All builtins (alphabetical, 128)
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
@@ -487,7 +499,8 @@ fst gcd id incr int_max int_min int_of_float int_of_str
 is_alpha is_digit is_space iter_n lcm log max min mk_logger
 mk_metrics not odd ord pair pi pow print print_bool
 print_err print_int print_no_nl random_float random_int
-csr_read csr_write raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window
+closure_code closure_env csr_read csr_write machine_scratch
+raw_base raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window trap_save
 stdin_byte
 read_file read_file_bytes read_line read_lines round show sign sin snd sqrt
 square str_compare str_contains str_count str_ends_with

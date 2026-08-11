@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.191" Version.v "0.1.191";
+  check "version is 0.1.192" Version.v "0.1.192";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12246,10 +12246,34 @@ let () =
   rv_contains "rv32i: set_trap_handler points mtvec at the trampoline"
     "let main = fn (m: Raw) -> set_trap_handler (fn c -> csr_read 0x341 + 4);\n()"
     "csrrw zero, 0x305, t1";
+  (* what a scheduler needs: the save area to swap register sets through, RAM
+     for task stacks, a closure's entry point, and a window's base as a number *)
+  check "rv32i: a context switch compiles out of the scheduler primitives"
+    (try
+       let (prog, mt) =
+         rv_typed
+           "let main = fn (m: Raw) ->\n\
+            \  let save = trap_save m in\n\
+            \  let scratch = machine_scratch m in\n\
+            \  let t = fn () -> () in\n\
+            \  let _ = raw_poke32 save 8 (raw_base scratch + 4096) in\n\
+            \  let _ = raw_poke32 save 40 (closure_env t) in\n\
+            \  let _ = set_trap_handler (fn c -> closure_code t) in\n\
+            \  ();\n\
+            ()" in
+       let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
+       if String.length bin > 64 then "assembled" else "suspiciously short"
+     with e -> Printexc.to_string e) "assembled";
   rv_err_contains "rv32i: a computed CSR number is refused"
     "let main = fn (m: Raw) -> csr_write (300 + 40) 1;\n()"
     "the CSR number must be a literal";
   Codegen_riscv.bare := false;
+  (* and outside --bare they are refused. Reachable from the main body on
+     purpose: a top-level fn nothing calls is never emitted, so a guard inside
+     one would never fire. *)
+  rv_err_contains "rv32i: set_trap_handler needs --bare"
+    "let _ = set_trap_handler (fn c -> c);"
+    "set_trap_handler needs the bare-metal target";
   check "rv32i: a call inside a region resolves its label"
     (try
        let (prog, mt) =

@@ -1,0 +1,111 @@
+// Preemptive multitasking, in Mere, on a machine with no operating system.
+//
+//   mere -rv --bare examples/riscv_bare_sched.mere > prog.bin
+//   ./rvrun
+//
+// Two tasks run forever, each printing its own letter. Neither yields, neither
+// knows about the other, and neither cooperates: the timer interrupts whichever
+// one is running and the handler swaps register sets. The output alternates
+// AAAA...BBBB...AAAA, which is the whole claim.
+//
+// What makes this possible is that the trap trampoline already saves the
+// interrupted register set to a known place and restores from that same place
+// before `mret`. So a context switch is not a new mechanism — it is a memory
+// copy in the middle of a handler:
+//
+//     save area  ->  the outgoing task's TCB      (plus mepc, its resume PC)
+//     the incoming task's TCB  ->  save area      (its PC becomes the result)
+//
+// Two things a bare program cannot otherwise name, and now can:
+//
+//   trap_save mach        the save area, so the handler can reach both sides
+//   machine_scratch mach  RAM the runtime reserved and is not using, which is
+//                         where a task stack comes from — a bare program owns no
+//                         fixed address of its own (the heap grows up from 2MB,
+//                         the stack down from the top of RAM)
+//
+// And starting a task at all needs its entry point. A task IS a closure, so
+// `closure_code` gives the PC to start it at and `closure_env` the value its
+// first argument register must hold. That is ABI knowledge, which a kernel has.
+//
+// One word is deliberately NOT switched: gp, the heap's bump pointer. The heap
+// is machine state, not task state — save and restore it per task and two tasks
+// allocate over each other, each rolling the pointer back to where it was when
+// it last ran. Leaving it alone keeps allocation monotonic across the switch.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+// a fixed-size int vec, zeroed — the shape a TCB wants
+let new_vec = fn (n: int) -> fn (x: int) ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in
+  v;
+
+let interval = 300000;        // instructions between ticks
+let stack_size = 8192;        // per task
+let x_sp = 2;                 // register numbers, as the save area indexes them
+let x_gp = 3;
+let x_a0 = 10;
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let clint = raw_window mach 0x10008000 16 in
+  let save = trap_save mach in
+  let scratch = machine_scratch mach in
+
+  // A task: print a letter every so often, forever. No allocation, so nothing
+  // here depends on which task last touched the heap.
+  let spinner = fn (c: int) -> fn () ->
+    let rec loop = fn i ->
+      let _ = if i % 40000 == 0 then putc uart c else () in
+      loop (i + 1) in
+    loop 0;
+
+  let tcb0 = new_vec 32 0 in    // the context that set all this up
+  let tcb1 = new_vec 32 0 in    // the second task, built by hand below
+  let state = new_vec 1 0 in    // which one is running
+
+  // Hand-build the second task's context: a stack of its own out of the
+  // runtime's spare RAM, its closure's environment in a0, and its entry PC.
+  let task_b = spinner 66 in                                   // 'B'
+  let _ = vec_set tcb1 x_sp (raw_base scratch + stack_size) in
+  let _ = vec_set tcb1 x_a0 (closure_env task_b) in
+  let _ = vec_set tcb1 0 (closure_code task_b) in
+
+  let handler = fn cause ->
+    let cur = vec_get state 0 in
+    let out = if cur == 0 then tcb0 else tcb1 in
+    let into = if cur == 0 then tcb1 else tcb0 in
+    let rec store = fn i ->
+      if i > 31 then ()
+      else let _ = vec_set out i (raw_peek32 save (i * 4)) in store (i + 1) in
+    let _ = store 1 in
+    let _ = vec_set out 0 (csr_read 0x341) in                  // where it was
+    let rec load = fn i ->
+      if i > 31 then ()
+      else
+        let _ = if i == x_gp then ()                           // the heap is shared
+                else raw_poke32 save (i * 4) (vec_get into i) in
+        load (i + 1) in
+    let _ = load 1 in
+    let _ = vec_set state 0 (1 - cur) in
+    let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+    vec_get into 0 in
+
+  let _ = set_trap_handler handler in
+  let _ = uart_puts uart "scheduling two tasks:\n" 0 in
+  let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+  let _ = csr_write 0x304 128 in                               // mie.MTIE
+  let _ = csr_write 0x300 8 in                                 // mstatus.MIE
+  // task A, which is this context, from here on
+  let _ = (spinner 65) () in
+  ();
+
+()
