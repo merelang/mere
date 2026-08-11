@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.185" Version.v "0.1.185";
+  check "version is 0.1.186" Version.v "0.1.186";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12171,6 +12171,15 @@ let () =
      check they collided silently and the program jumped into rodata *)
   rv_contains "rv32i: an allocation checks the heap against the stack"
     "let _ = print (str_of_int 42);" "bgeu gp, sp, __oom";
+  (* the layout is derived from the RAM size rather than three hardcoded
+     immediates: the default must stay exactly where it has always been, and
+     `--ram` must move the stack (and with it the heap's ceiling) *)
+  rv_contains "rv32i: the default layout puts the stack at 0x7E0000"
+    "let _ = print_int 1;" "lui sp, 0x7e0";
+  Codegen_riscv.ram_bytes := 32 * 1024 * 1024;
+  rv_contains "rv32i: --ram moves the stack to the top of RAM"
+    "let _ = print_int 1;" "lui sp, 0x1fe0";
+  Codegen_riscv.ram_bytes := 8 * 1024 * 1024;
   check "rv32i: a call inside a region resolves its label"
     (try
        let (prog, mt) =

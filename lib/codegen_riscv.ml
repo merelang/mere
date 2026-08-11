@@ -318,10 +318,30 @@ let request_eq (t : Ast.ty) : string =
 let globals : (string option * Ast.expr) list ref = ref []
 let globals_map : (string, int) Hashtbl.t = Hashtbl.create 32
 (* Globals + heap sit well above the code (the program loads at 0). The code
-   must stay below this; the self-hosted compiler is ~90KB, so 2MB is ample.
-   Layout: code [0, 0x200000) | globals+heap [0x200000, →) | stack ↓ from
-   0x7E0000 | print scratch 0x7F0000. Needs an ≥8MB emulator. *)
+   must stay below this; the self-hosted compiler is ~300KB, so 2MB is ample. *)
 let globals_base = 0x200000
+
+(* RAM layout, derived from the RAM size so it is no longer three hardcoded
+   immediates. The top `reserved_top` bytes hold the scratch buffer the print
+   helpers build digits in plus the fantasy-console MMIO; the stack starts
+   just below that and grows down; the heap grows up from globals_base. So
+   everything between the two growing ends is theirs, and the reserved region
+   is never in the heap's path.
+
+     code [0, globals_base) | globals+heap ↑ | ... | stack ↓ from stack_top
+     | print scratch | framebuffer | keys | end of RAM
+
+   At the default 8MB these come out at exactly the addresses this backend has
+   always used (stack 0x7E0000, scratch 0x7F0000, fb 0x7F8000, keys 0x7F9000),
+   so an emulator sized to match needs no change. `mere -rv --ram <MB>` raises
+   it: a program whose live heap exceeds ~5.8MB has no other way to run, which
+   is where the self-hosted compiler now sits. *)
+let ram_bytes = ref 0x800000                       (* 8MB *)
+let reserved_top = 0x20000                         (* 128KB: scratch + fb + keys *)
+let stack_top () = !ram_bytes - reserved_top
+let scratch_base () = stack_top () + 0x10000
+let fb_base () = stack_top () + 0x18000
+let key_base () = stack_top () + 0x19000
 
 (* Peel top-level bindings: functions go to `tops`, value/effect bindings to
    `globals` (peeling continues past them, unlike a leading-prefix scan). The
@@ -849,7 +869,7 @@ and compile_app env e =
     emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4  — bytes *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write string) *)
-    emit_word (enc_u 0x7F0 t0 0x37);                      (* lui  t0, 0x60  — scratch *)
+    li t0 (scratch_base ());                              (* t0 = print scratch *)
     emit_word (enc_i 10 zero 0 t1 0x13);                 (* li   t1, '\n' *)
     emit_word (enc_s 0 t1 t0 0 0x23);                    (* sb   t1, 0(t0) *)
     emit_word (enc_i 0 t0 0 a1 0x13);                    (* mv   a1, t0 *)
@@ -919,8 +939,9 @@ and compile_app env e =
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   | Ast.Var "fb_set" when List.length args = 3 ->
     (* fantasy-console framebuffer: store byte v at FB_BASE + y*64 + x. The
-       64x32 framebuffer lives at 0x7F8000 (above the stack); an emulator
-       renders it. `extern fn fb_set: int -> int -> int -> unit;` types it. *)
+       64x32 framebuffer lives in the reserved region above the stack (0x7F8000
+       at the default 8MB); an emulator renders it.
+       `extern fn fb_set: int -> int -> int -> unit;` types it. *)
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1); push a0;
     compile_expr env (List.nth args 2);
@@ -928,7 +949,7 @@ and compile_app env e =
     pop a1; pop a0;                                          (* a1 = y, a0 = x *)
     emit_word (enc_i 6 a1 1 t0 0x13);                        (* slli t0, y, 6  (y*64) *)
     emit_word (enc_r 0 a0 t0 0 t0 0x33);                     (* add t0, t0, x *)
-    li t1 0x7F8000;                                          (* FB_BASE *)
+    li t1 (fb_base ());                                      (* FB_BASE *)
     emit_word (enc_r 0 t0 t1 0 t0 0x33);                     (* addr = FB_BASE + off *)
     emit_word (enc_s 0 a2 t0 0 0x23);                        (* sb v, 0(addr) *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* unit *)
@@ -938,7 +959,7 @@ and compile_app env e =
        from its own polled input before running each frame slice.
        `extern fn key: int -> int;` types it. *)
     compile_expr env (List.hd args);                         (* a0 = n *)
-    li t1 0x7F9000;                                          (* KEY_BASE *)
+    li t1 (key_base ());                                     (* KEY_BASE *)
     emit_word (enc_r 0 a0 t1 0 t0 0x33);                     (* addr = KEY_BASE + n *)
     emit_word (enc_i 0 t0 4 a0 0x03)                         (* lbu a0, 0(addr) *)
   | Ast.Var "present" when List.length args = 1 ->
@@ -1226,7 +1247,7 @@ let emit_main main_body =
 (* _start MUST be the first bytes (loaded at address 0, PC starts there) *)
 let emit_start () =
   emit (Label "_start");
-  emit_word (enc_u 0x7E0 sp 0x37);                      (* lui  sp, 0x7E0  (sp = 0x7E0000) *)
+  li sp (stack_top ());                                 (* sp = top of RAM, minus MMIO *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (* heap top starts just above the globals region (globals_base + n*4) *)
   li gp (globals_base + Hashtbl.length globals_map * 4);
@@ -1238,7 +1259,7 @@ let emit_start () =
   emit (Jal (zero, "__hang"))                           (* safety: spin if it ever returns *)
 
 (* print_int: itoa(a0) + '\n' -> ecall write. A leaf; clobbers t*/a* only.
-   Scratch decimal buffer lives at 0x60000 (below sp, above the program). *)
+   The decimal digits are built in the reserved scratch buffer above sp. *)
 let emit_print_int () =
   emit (Label "__print_int");
   emit_word (enc_i 0 a0 0 t4 0x13);                     (* addi t4, a0, 0  — t4 = value *)
@@ -1247,7 +1268,7 @@ let emit_print_int () =
   emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* sub t4, x0, t4  — negate *)
   emit_word (enc_i 1 zero 0 t3 0x13);                   (* addi t3, x0, 1 *)
   emit (Label ".pi_pos");
-  emit_word (enc_u 0x7F0 t1 0x37);                       (* lui t1, 0x60    — BUF *)
+  li t1 (scratch_base ());                               (* t1 = BUF *)
   emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — END cursor *)
   emit_word (enc_i 10 zero 0 t5 0x13);                  (* addi t5, x0, 10 — '\n' *)
   emit_word (enc_s 0 t5 t2 0 0x23);                     (* sb  t5, 0(t2)   — store newline *)
@@ -1266,7 +1287,7 @@ let emit_print_int () =
   emit_word (enc_i (-1) t2 0 t2 0x13);                  (* addi t2, t2, -1 *)
   emit (Label ".pi_nosign");
   emit_word (enc_i 1 t2 0 a1 0x13);                     (* addi a1, t2, 1  — buf start *)
-  emit_word (enc_u 0x7F0 t0 0x37);                       (* lui t0, 0x60 *)
+  li t0 (scratch_base ());
   emit_word (enc_i 63 t0 0 t0 0x13);                    (* addi t0, t0, 63 — END *)
   emit_word (enc_r 0x20 t2 t0 0 a2 0x33);               (* sub a2, t0, t2  — len = END - cursor *)
   emit_word (enc_i 64 zero 0 a7 0x13);                  (* addi a7, x0, 64 — write syscall *)
@@ -1366,7 +1387,7 @@ let emit_str_cmp () =
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
 (* __str_of_int(a0=n) -> a0 = heap [len][decimal bytes]. Leaf; uses the
-   0x60000 scratch to build digits, then copies into a fresh heap block. *)
+   the reserved scratch buffer to build digits, then copies into a heap block. *)
 let emit_str_of_int () =
   emit (Label "__str_of_int");
   emit_word (enc_i 0 a0 0 t4 0x13);                     (* mv t4, a0 — value *)
@@ -1375,7 +1396,7 @@ let emit_str_of_int () =
   emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* neg *)
   emit_word (enc_i 1 zero 0 t3 0x13);
   emit (Label ".si_pos");
-  emit_word (enc_u 0x7F0 t1 0x37);                       (* lui t1, 0x60 *)
+  li t1 (scratch_base ());
   emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — cursor *)
   emit_word (enc_i 10 zero 0 t6 0x13);                  (* divisor 10 *)
   emit (Label ".si_loop");
@@ -1391,7 +1412,7 @@ let emit_str_of_int () =
   emit_word (enc_i (-1) t2 0 t2 0x13);
   emit (Label ".si_nosign");
   emit_word (enc_i 1 t2 0 t0 0x13);                     (* t0 = start = cursor+1 *)
-  emit_word (enc_u 0x7F0 t1 0x37);                       (* t1 = 0x60000 *)
+  li t1 (scratch_base ());
   emit_word (enc_i 63 t1 0 t1 0x13);                    (* t1 = END = 0x6003F *)
   emit_word (enc_r 0x20 t2 t1 0 t1 0x33);               (* t1 = END - cursor = len *)
   emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)
