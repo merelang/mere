@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.200 — 2026-08-11
+
+_`mere -rvg`: a debug map, so a program compiled to machine code can be debugged
+at the source lines it was written as._
+
+_Nothing in any backend emitted debug information — no DWARF, no source maps, no
+line directives — so "which line is this?" was unanswerable everywhere. On the
+RV32I backend that showed up as a working method: every hard bug in the bare-metal
+arc was found by instrumenting the emulator **by hand**, a ring buffer of program
+counters here, a store watchpoint on a save area there, a register dump at trap
+entry. Ten instruments, written and thrown away, and once by patching codegen to
+print two registers from inside `__oom`._
+
+_The map is a text sidecar, because the binary has no header to hold anything —
+this backend emits code and nothing else. One record per line, addresses
+ascending:_
+
+```
+S <addr> <name>                                 every label
+F <addr> <name> fsz= ra= fp= params= line=      a function and its frame
+L <addr> <line> <col>                           the statement starting here
+```
+
+_Two properties it was worth designing for. It is emitted from **the same item
+list the assembler consumes**, via a zero-width `Meta` item that the assembler and
+the listing both ignore — so `-rv` and `-rvg` agree by construction, there is no
+separate debug build, and the map describes the bytes that actually ran. And the
+line numbers are the ones **the programmer wrote**: source positions arrive counted
+from the top of the prelude-plus-source text the driver builds, and the map
+subtracts the prelude, so an address whose line lands inside the prelude gets no
+record — the honest answer for code nobody wrote. (That offset is the same one
+that makes `-rv` diagnostics report line 133 for a three-line file; fixing the
+diagnostics is a separate change.)_
+
+_Frame layout is uniform on this backend, so `fsz` / `ra` / `fp` describe it
+completely and a backtrace is two loads per frame with no guessing._
+
+_The reader lives in the memu project as `riscv-dbg`: breakpoints on source lines,
+a backtrace, and **reverse stepping** through an undo log — one fixed-size record
+per instruction, so going back applies the inverse rather than replaying from a
+snapshot. It is exact, and tested as such (N instructions forward and N back
+restore every register and a checksum of the heap), and it crosses traps: `S`
+walks out of an interrupt handler and onto the line the timer interrupted. Which
+is the shape of the thing this arc kept needing and building by hand._
+
+_Three tests on the map. `dune runtest` 2339/0, ctest 13/13._
+
+---
+
 ## v0.1.199 — 2026-08-11
 
 _Documentation for the bare-metal work, which existed only as twelve changelog
