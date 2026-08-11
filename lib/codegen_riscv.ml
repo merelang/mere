@@ -369,6 +369,13 @@ let stack_top () = !load_base + !ram_bytes - reserved_top
    stack, so no program allocation can land on them. *)
 let trap_save_base () = stack_top () + 0x1000
 let trap_handler_slot () = stack_top () + 0x1100
+(* one word of trap depth. The save area is a single global, so the trampoline is
+   not reentrant: a trap taken while the handler is running overwrites the
+   interrupted context with the handler's own registers, and the machine later
+   resumes a task holding another task's — or the handler's — values. That failure
+   is silent and arrives much later, as a jump through a pointer that used to be
+   something else. Counting instead makes it loud at the moment it happens. *)
+let trap_depth_slot () = stack_top () + 0x1104
 let scratch_base () = stack_top () + 0x10000
 let fb_base () = stack_top () + 0x18000
 let key_base () = stack_top () + 0x19000
@@ -1870,6 +1877,13 @@ let emit_trap_entry () =
   emit_word (enc_i 0x340 zero 2 t1 0x73);               (* csrrs t1, mscratch, x0 *)
   emit_word (enc_s (5 * 4) t1 t0 2 0x23);               (* sw the interrupted t0 *)
   emit_word (enc_i 0x340 t0 1 zero 0x73);               (* csrrw x0, mscratch, t0 *)
+  (* Only now is every register safely in the save area, so only now is a
+     register free to think with. Checking the depth any earlier would clobber
+     one before saving it — which is the very bug this check exists to catch. *)
+  emit_word (enc_i 0x104 t0 2 t1 0x03);                 (* lw t1, depth *)
+  emit (Branch (1, t1, zero, "__trap_nested"));
+  emit_word (enc_i 1 zero 0 t1 0x13);
+  emit_word (enc_s 0x104 t1 t0 2 0x23);                 (* depth = 1 *)
   (* call the registered closure: a0 = its env, a1 = mcause *)
   emit_word (enc_i 0x342 zero 2 a1 0x73);               (* csrrs a1, mcause, x0 *)
   li t1 (trap_handler_slot ());
@@ -1879,11 +1893,31 @@ let emit_trap_entry () =
   emit_word (enc_i 0x341 a0 1 zero 0x73);               (* csrrw x0, mepc, a0 *)
   (* restore and return *)
   li t0 (trap_save_base ());
+  emit_word (enc_s 0x104 zero t0 2 0x23);               (* depth = 0 *)
   for i = 1 to 31 do
     if i <> 5 then emit_word (enc_i (i * 4) t0 2 i 0x03) (* lw xI, i*4(t0) *)
   done;
   emit_word (enc_i (5 * 4) t0 2 t0 0x03);               (* lw t0 last *)
-  emit_word 0x30200073                                  (* mret *)
+  emit_word 0x30200073;                                 (* mret *)
+  (* Reached only when a trap arrives inside the handler. The interrupted
+     context is already gone at this point — the entry sequence above has
+     overwritten it — so there is nothing to resume and no honest way to
+     continue. Say what happened and stop. *)
+  emit (Label "__trap_nested");
+  let label = "str__nested" in
+  string_data := (label, mk_str_block
+    "mere: trap inside a trap handler — the save area is not reentrant, so the \
+     interrupted context is lost. A handler must not fault (and must not \
+     allocate: that is how it usually happens).\n") :: !string_data;
+  emit (LoadAddr (t0, label));
+  emit_word (enc_i 0 t0 2 a2 0x03);
+  emit_word (enc_i 4 t0 0 a1 0x13);
+  emit_word (enc_i 1 zero 0 a0 0x13);
+  emit_word (enc_i 64 zero 0 a7 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73);
+  emit_word (enc_i 93 zero 0 a7 0x13);
+  emit_word (enc_i 5 zero 0 a0 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73)                  (* exit(5) *)
 
 (* an offset outside the window it was applied to: the capability's bound is
    the whole point, so this stops rather than reaching past it *)
