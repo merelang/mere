@@ -1,5 +1,5 @@
-// contrib/state/store.mere — one place to put the state, and a way to be
-// told when it changes.
+// contrib/state/store.mere — one place to put the state, a way to be told
+// when it changes, and a way to stop being told.
 //
 // Mere has no mutable cell, and every browser client so far has built one
 // the same way: a vec allocated once, pushed once, then read and written
@@ -25,57 +25,114 @@
 //
 // Public API:
 //
-//   store_new    : S -> Store[S]
-//   store_get    : Store[S] -> S
-//   store_watch  : Store[S] -> (S -> unit) -> unit
-//   store_set    : Store[S] -> S -> unit
-//   store_update : Store[S] -> (S -> S) -> unit
+//   store_new     : S -> Store[S]
+//   store_get     : Store[S] -> S
+//   store_watch   : Store[S] -> (S -> unit) -> int      returns a token
+//   store_unwatch : Store[S] -> int -> unit
+//   store_set     : Store[S] -> S -> unit
+//   store_update  : Store[S] -> (S -> S) -> unit
+//   store_watcher_count : Store[S] -> int
 //
-// A store is a pair of vecs — the one-slot cell and the watcher list —
-// rather than a declared record, because a record would need a region
-// parameter and a pair infers one. That is an implementation detail: read
-// `Store[S]` above as "whatever store_new returns".
+// A store is a triple of cells — the value, the watcher list, and the next
+// token — rather than a declared record, because a record would need a
+// region parameter and a tuple infers one. Read `Store[S]` above as
+// "whatever store_new returns".
 //
 // `store_watch` runs the watcher immediately with the current value. A
 // watcher is a function of the state, so it has to run once to make the
-// screen true; deferring that to a manual first paint is the same class
-// of bug this module exists to remove.
+// screen true; deferring that to a manual first paint is the same class of
+// bug this module exists to remove.
+//
+// ---- on taking a watcher back ----------------------------------------
+//
+// The token exists because a page with more than one view needs it. A view
+// that is torn down leaves its watchers behind otherwise: they keep
+// running on every write, painting into nodes that are no longer in the
+// document, and the cost grows with how much the user has navigated.
+// examples/claims measured it — one visit to its form registers two
+// watchers, and three round trips between its two tabs left eleven
+// running, nine of them painting nothing anybody can see.
+//
+// Nothing here can make a caller give the token back. `store_unwatch` is
+// an ordinary call that can simply not be made, and Mere's one mechanism
+// for enforced release — a `drop type` bound by `with`, whose `close` runs
+// at scope end — does not fit: a subscription's lifetime is not the scope
+// that created it. The view is built in one event and torn down in
+// another, so by the time `with` would close the handle the view has not
+// even been shown. The shape is recorded here rather than solved.
 //
 // Watchers must not update the store. Nothing here detects it, and the
 // result is unbounded recursion. Painting is what they are for.
 
+// The three slots are one-element vecs written out longhand rather than
+// contrib/state/cell, because a store instantiated at two different state
+// types puts `cell_new` at three types derived from S, and that shape does
+// not survive monomorphization on C or LLVM today. The builtin vec does,
+// so the module that names the trick does not get to use it.
+
 let store_new = fn (initial) ->
-  let cell = vec_new () in
-  let _ = vec_push cell initial in
+  let value = vec_new () in
+  let _ = vec_push value initial in
   let subs = vec_new () in
-  (cell, subs);
+  let _ = vec_push subs Nil in
+  let next = vec_new () in
+  let _ = vec_push next 1 in
+  (value, subs, next);
 
 let store_get = fn (st) ->
-  let (cell, _) = st in
-  vec_get cell 0;
+  let (value, _, _) = st in
+  vec_get value 0;
 
-let rec store_notify_from = fn (subs) -> fn (i: int) -> fn (v) ->
-  if i >= vec_len subs then ()
-  else
-    let f = vec_get subs i in
-    let _ = f v in
-    store_notify_from subs (i + 1) v;
+let rec store_notify = fn (subs) -> fn (v) ->
+  match subs with
+  | Nil -> ()
+  | Cons ((_, f), rest) -> let _ = f v in store_notify rest v;
 
 let store_set = fn (st) -> fn (v) ->
-  let (cell, subs) = st in
-  let _ = vec_set cell 0 v in
-  store_notify_from subs 0 v;
+  let (value, subs, _) = st in
+  let _ = vec_set value 0 v in
+  store_notify (vec_get subs 0) v;
 
 // The read-modify-write shape, which is what almost every caller wants:
 // a mutation is a function of the old state, not a value computed at the
 // call site from a read that might already be stale.
 let store_update = fn (st) -> fn (f) ->
-  let (cell, subs) = st in
-  let next = f (vec_get cell 0) in
-  let _ = vec_set cell 0 next in
-  store_notify_from subs 0 next;
+  let (value, subs, _) = st in
+  let nextv = f (vec_get value 0) in
+  let _ = vec_set value 0 nextv in
+  store_notify (vec_get subs 0) nextv;
+
+// Appended rather than prepended, so watchers run in registration order.
+let rec append_sub = fn (xs) -> fn (entry) ->
+  match xs with
+  | Nil -> Cons (entry, Nil)
+  | Cons (x, rest) -> Cons (x, append_sub rest entry);
 
 let store_watch = fn (st) -> fn (f) ->
-  let (cell, subs) = st in
-  let _ = vec_push subs f in
-  f (vec_get cell 0);
+  let (value, subs, next) = st in
+  let token = vec_get next 0 in
+  let _ = vec_set next 0 (token + 1) in
+  let _ = vec_set subs 0 (append_sub (vec_get subs 0) (token, f)) in
+  let _ = f (vec_get value 0) in
+  token;
+
+let store_unwatch = fn (st) -> fn (token: int) ->
+  let (_, subs, _) = st in
+  let rec without = fn (xs) ->
+    match xs with
+    | Nil -> Nil
+    | Cons ((t, f), rest) ->
+      if t == token then without rest else Cons ((t, f), without rest) in
+  vec_set subs 0 (without (vec_get subs 0));
+
+// How many watchers are registered. Not part of the working API — it is
+// here so a page that builds and discards views can be asked whether it is
+// accumulating them, which is the only way that failure is visible at all.
+let rec count_subs = fn (xs) ->
+  match xs with
+  | Nil -> 0
+  | Cons (_, rest) -> 1 + count_subs rest;
+
+let store_watcher_count = fn (st) ->
+  let (_, subs, _) = st in
+  count_subs (vec_get subs 0);

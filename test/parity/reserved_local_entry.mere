@@ -1,0 +1,39 @@
+// A binding called `entry` is an ordinary name.
+//
+// LLVM keeps values and basic-block labels in one namespace, and every
+// function this backend emits opens with a block called `entry`. A
+// parameter of that name claimed the slot first, and the module would not
+// assemble at all: "unable to create block named 'entry'". Not a wrong
+// answer — no answer, from a name nothing warns about.
+//
+// `entry` is a natural name for an element of an association list, which
+// is how it turned up: contrib/state/store's `append_sub` takes one.
+//
+// Same family as the C reserved-name list in docs/reserved-names.md, one
+// namespace over — and the reason the fix renames the parameter rather
+// than the block is that `entry:` is written into every hand-authored
+// runtime blob in codegen_llvm.
+//
+// Each of the shapes that emits a parameter separately: a top-level fn, an
+// inner fn that captures (lifted, so the capture and the parameter are
+// both emitted), and an anonymous fn used as a value (a closure adapter).
+
+let rec append = fn (xs: (str * int) list) -> fn (entry: str * int) ->
+  match xs with
+  | Nil -> Cons (entry, Nil)
+  | Cons (x, rest) -> Cons (x, append rest entry);
+
+let total = fn (base: int) ->
+  // captures `base`, so it is lifted and takes `entry` alongside the capture
+  let rec sum = fn (entry: (str * int) list) ->
+    match entry with
+    | Nil -> base
+    | Cons ((_, n), rest) -> n + sum rest in
+  sum;
+
+let apply_to = fn (f: str -> str) -> fn (entry: str) -> f entry;
+
+let xs = append (append Nil ("a", 3)) ("b", 4) in
+let _ = print (show (total 100 xs)) in
+let _ = print (apply_to (fn (entry: str) -> "[" ++ entry ++ "]") "value") in
+0

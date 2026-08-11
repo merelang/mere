@@ -33,6 +33,17 @@ let host_builtins_without_llvm_lowering =
     "file_exists"; "random_int"; "random_float";
     "detach"; "par_map" ]
 
+(* v0.1.178: LLVM keeps values and basic-block labels in one namespace, so a
+   parameter called `entry` claims the slot the function's own entry block
+   needs and the module will not assemble at all — "unable to create block
+   named 'entry'". The entry label is written into every hand-authored
+   runtime blob in this file, so the parameter is what moves. Same family as
+   the C reserved-name list in docs/reserved-names.md, one namespace over. *)
+let llvm_reserved_locals = [ "entry" ]
+
+let llvm_safe_local (n : string) : string =
+  if List.mem n llvm_reserved_locals then n ^ "_" else n
+
 (* SSA register / basic-block label counter. Reset per emit_program. *)
 let reg_counter = ref 0
 let fresh_reg () =
@@ -5840,7 +5851,7 @@ and emit_user_app (env : env) (e : Ast.expr) : string =
             emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
                           r (llvm_ty_of cty) cn);
             r
-          | None -> "%" ^ cn  (* fallback *)
+          | None -> "%" ^ llvm_safe_local cn  (* fallback *)
         in
         Printf.sprintf "%s %s" (llvm_ty_of cty) cv
       ) li.captures
@@ -6016,7 +6027,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
                     v (llvm_ty_of cty) p);
       (cname, v)) ce.ce_env_fields
   in
-  let env = (ce.ce_param, "%" ^ ce.ce_param) :: cap_env in
+  let env = (ce.ce_param, "%" ^ llvm_safe_local ce.ce_param) :: cap_env in
   current_var_types :=
     (ce.ce_param, ce.ce_param_ty) ::
     List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
@@ -6041,7 +6052,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
   Printf.sprintf
     "define %s @%s(ptr %%env_self, %s %%%s) {\n%s\n}"
     (llvm_ty_of ce.ce_return_ty) ce.ce_adapter_name
-    (llvm_ty_of ce.ce_param_ty) ce.ce_param body
+    (llvm_ty_of ce.ce_param_ty) (llvm_safe_local ce.ce_param) body
 
 (* Phase 25.3: emit a lifted inner fn as top-level @-named LLVM IR.
    Captures + param prepended as parameters. The body's free vars resolve
@@ -6061,7 +6072,7 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   emit_instr "entry:";
   let env =
     List.map (fun (n, _) -> (n, "%" ^ n)) lf.l_captures
-    @ [(lf.l_param, "%" ^ lf.l_param)]
+    @ [(lf.l_param, "%" ^ llvm_safe_local lf.l_param)]
   in
   current_var_types :=
     List.map (fun (n, t) -> (n, t)) lf.l_captures
@@ -6075,7 +6086,8 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   current_host_fn_llvm := saved_host;
   let params =
     String.concat ", "
-      (List.map (fun (n, t) -> Printf.sprintf "%s %%%s" (llvm_ty_of t) n)
+      (List.map (fun (n, t) ->
+         Printf.sprintf "%s %%%s" (llvm_ty_of t) (llvm_safe_local n))
          (lf.l_captures @ [(lf.l_param, lf.l_param_ty)]))
   in
   Printf.sprintf "define %s @%s(%s) {\n%s\n}"
@@ -6107,7 +6119,7 @@ let emit_fn_def (f : fn_decl) : string =
   current_expected_ty := Some f.return_ty;
   current_host_fn_llvm := f.name;
   emit_instr "entry:";
-  let env = [(f.param, "%" ^ f.param)] in
+  let env = [(f.param, "%" ^ llvm_safe_local f.param)] in
   let rv = emit_expr env f.body in
   emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
@@ -6116,7 +6128,8 @@ let emit_fn_def (f : fn_decl) : string =
   current_expected_ty := saved_exp;
   current_host_fn_llvm := saved_host;
   Printf.sprintf "define %s @%s(%s %%%s) {\n%s\n}"
-    (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty) f.param body
+    (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty)
+    (llvm_safe_local f.param) body
 
 (* Convert the program's main result type to (LLVM type, printf format).
    Phase 25.11: `unit` now prints "()" to match interp's behavior

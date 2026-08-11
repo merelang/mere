@@ -44,6 +44,7 @@
 //   wat2wasm --enable-tail-call /tmp/claims_app.wat -o examples/claims/app.wasm
 
 import "../../contrib/dom/dom.mere";
+import "../../contrib/state/cell.mere";
 import "../../contrib/state/store.mere";
 import "schema.mere";
 
@@ -60,16 +61,25 @@ let store = store_new (model {
   saved = blank_claim, current = blank_claim, problems = Nil, hidden = Nil
 }) in
 
-let lines_el = dom_get_by_id "lines-list" in
-let total_el = dom_get_by_id "total" in
-let summary_el = dom_get_by_id "summary" in
+// Page furniture, which outlives any view.
 let status_el = dom_get_by_id "status" in
 let claim_status_el = dom_get_by_id "claim-status" in
 let problems_el = dom_get_by_id "problems" in
-let save_btn = dom_get_by_id "save" in
-let submit_btn = dom_get_by_id "submit" in
-let add_btn = dom_get_by_id "add-line" in
-let form_el = dom_get_by_id "form" in
+let view_el = dom_get_by_id "view" in
+let watchers_el = dom_get_by_id "watchers" in
+let tab_form_btn = dom_get_by_id "tab-form" in
+let tab_summary_btn = dom_get_by_id "tab-summary" in
+
+// The elements a view owns are created by that view, so they exist only
+// while it is open. A cell holds the current view's handles because the
+// code that paints them runs later, from a watcher, and cannot be passed
+// them.
+let form_el = cell_new (dom_get_by_id "view") in
+let lines_el = cell_new (dom_get_by_id "view") in
+let total_el = cell_new (dom_get_by_id "view") in
+let summary_el = cell_new (dom_get_by_id "view") in
+let save_btn = cell_new (dom_get_by_id "view") in
+let submit_btn = cell_new (dom_get_by_id "view") in
 
 let set_status = fn (s: str) -> dom_set_text status_el s in
 
@@ -176,6 +186,25 @@ let edit_line = fn (i: int) -> fn (g: line -> line) ->
     { m | current = { m.current | lines = set_line m.current.lines i g } })
 in
 
+// Every watcher a view registers goes in here, so that closing the view
+// can hand them all back. Nothing makes this happen — `store_unwatch` is
+// an ordinary call, and forgetting it is exactly the leak this version was
+// built to show.
+let view_tokens = cell_new Nil in
+
+let watch_here = fn (f) ->
+  cell_set view_tokens (Cons (store_watch store f, cell_get view_tokens))
+in
+
+let close_view = fn (u: unit) ->
+  let rec release = fn (ts: int list) ->
+    match ts with
+    | Nil -> ()
+    | Cons (t, rest) -> let _ = store_unwatch store t in release rest in
+  let _ = release (cell_get view_tokens) in
+  cell_set view_tokens Nil
+in
+
 // ---- painting --------------------------------------------------------
 
 let show_problem = fn (id: str) -> fn (msg: str) ->
@@ -204,18 +233,20 @@ let rec unfielded = fn (ps: problem list) -> fn (acc: str) ->
     else unfielded rest acc
 in
 
-let _ = store_watch store (fn (m: model) ->
+let watch_form_chrome = fn (u: unit) ->
+  watch_here (fn (m: model) ->
   let _ = paint_field_problems (claim_fields m.current) m in
   let _ = dom_set_text (dom_get_by_id "err-lines") (assoc_problem m.problems "lines") in
-  let _ = dom_set_text total_el (yen (claim_total m.current)) in
+  let _ = dom_set_text (cell_get total_el) (yen (claim_total m.current)) in
   let _ = dom_set_text problems_el (unfielded m.problems "") in
   let _ = dom_set_text claim_status_el ("status: " ++ status_label m.current.status) in
   let dirty = not (str_eq (to_json m.current) (to_json m.saved)) in
-  let _ = dom_set_text summary_el (if dirty then "unsaved changes" else "no unsaved changes") in
-  let _ = if dirty then dom_remove_attr save_btn "disabled"
-          else dom_set_attr save_btn "disabled" "true" in
-  if is_draft m.current.status then dom_remove_attr submit_btn "disabled"
-  else dom_set_attr submit_btn "disabled" "true") in
+  let _ = dom_set_text (cell_get summary_el) (if dirty then "unsaved changes" else "no unsaved changes") in
+  let _ = if dirty then dom_remove_attr (cell_get save_btn) "disabled"
+          else dom_set_attr (cell_get save_btn) "disabled" "true" in
+  if is_draft m.current.status then dom_remove_attr (cell_get submit_btn) "disabled"
+  else dom_set_attr (cell_get submit_btn) "disabled" "true")
+in
 
 // ---- the line rows ---------------------------------------------------
 //
@@ -292,7 +323,7 @@ let build_row = fn (i: int) -> fn (l: line) ->
   let _ = dom_append li kind in
   let _ = dom_append li del in
   let _ = dom_append li err in
-  let _ = dom_append lines_el li in
+  let _ = dom_append (cell_get lines_el) li in
   del
 in
 
@@ -312,7 +343,7 @@ in
 // is safe here and nowhere else in this file.
 let redraw_lines = fn (u: unit) ->
   let m = store_get store in
-  let _ = dom_set_text lines_el "" in
+  let _ = dom_set_text (cell_get lines_el) "" in
   build_rows m.current.lines 0
 in
 
@@ -331,8 +362,10 @@ let rec paint_line_problems = fn (xs: line list) -> fn (i: int) -> fn (ps: probl
     paint_line_problems rest (i + 1) ps
 in
 
-let _ = store_watch store (fn (m: model) ->
-  paint_line_problems m.current.lines 0 m.problems) in
+let watch_line_problems = fn (u: unit) ->
+  watch_here (fn (m: model) ->
+    paint_line_problems m.current.lines 0 m.problems)
+in
 
 // ---- server ----------------------------------------------------------
 
@@ -424,7 +457,7 @@ let build_field = fn (name: str) ->
   let _ = dom_append wrap lab in
   let _ = dom_append wrap el in
   let _ = dom_append wrap err in
-  let _ = dom_append form_el wrap in
+  let _ = dom_append (cell_get form_el) wrap in
 
   if editable name then
     let _ = dom_on_input el (fn (t: str) -> edit name t) in
@@ -439,18 +472,122 @@ let rec build_form = fn (names: str list) ->
   | Cons (n, rest) -> let _ = build_field n in build_form rest
 in
 
-// The form exists because the record does. Adding a field to `claim` puts
-// a labelled control on the page with no edit here at all.
-let _ = build_form (claim_fields blank_claim) in
+// ---- views -----------------------------------------------------------
+//
+// Two of them, over one store. Each builds its own controls and registers
+// its own watchers, and switching drops the old view's DOM wholesale.
+//
+// Which is the point of this version. Dropping the nodes does not drop the
+// watchers: contrib/state has no way to take one back, so every visit
+// leaves another copy running, painting into elements that are no longer
+// in the document. The counter in the tab bar is how that becomes visible.
 
-let _ = dom_on_click add_btn (fn (u: unit) ->
-  let _ = store_update store (fn (m: model) ->
-    { m | current = { m.current | lines = append_line m.current.lines } }) in
-  redraw_lines ()) in
+let mk = fn (tag: str) -> fn (cls: str) -> fn (parent) ->
+  let e = dom_create tag in
+  let _ = if str_eq cls "" then () else dom_set_attr e "class" cls in
+  let _ = dom_append parent e in
+  e
+in
 
-let _ = dom_on_click save_btn (fn (u: unit) -> save ()) in
-let _ = dom_on_click submit_btn (fn (u: unit) -> submit ()) in
+let open_form = fn (u: unit) ->
+  let root = mk "div" "" view_el in
+  let fields_box = mk "div" "" root in
+  let _ = dom_set_attr fields_box "id" "form" in
+  let _ = cell_set form_el fields_box in
+
+  let lines_box = mk "div" "field" root in
+  let lab = mk "label" "" lines_box in
+  let _ = dom_set_text lab "Lines" in
+  let ul = mk "ul" "" (mk "div" "" lines_box) in
+  let _ = dom_set_attr ul "id" "lines-list" in
+  let _ = cell_set lines_el ul in
+  let lines_err = mk "div" "err" lines_box in
+  let _ = dom_set_attr lines_err "id" "err-lines" in
+  let add_btn = mk "button" "" lines_box in
+  let _ = dom_set_attr add_btn "id" "add-line" in
+  let _ = dom_set_text add_btn "add a line" in
+
+  let totals = mk "div" "totals" root in
+  let tl = mk "span" "" totals in
+  let _ = dom_set_text tl "Total" in
+  let tv = mk "strong" "" totals in
+  let _ = dom_set_attr tv "id" "total" in
+  let _ = cell_set total_el tv in
+
+  let actions = mk "div" "actions" root in
+  let sb = mk "button" "" actions in
+  let _ = dom_set_attr sb "id" "save" in
+  let _ = dom_set_text sb "Save draft" in
+  let _ = cell_set save_btn sb in
+  let ub = mk "button" "" actions in
+  let _ = dom_set_attr ub "id" "submit" in
+  let _ = dom_set_text ub "Submit" in
+  let _ = cell_set submit_btn ub in
+  let sm = mk "span" "" actions in
+  let _ = dom_set_attr sm "id" "summary" in
+  let _ = cell_set summary_el sm in
+
+  let c = (store_get store).current in
+  let _ = build_form (claim_fields c) in
+  let _ = redraw_lines () in
+  let rec push = fn (names: str list) ->
+    match names with
+    | Nil -> ()
+    | Cons (n, rest) ->
+      let _ = dom_set_value (dom_get_by_id ("f-" ++ n)) (claim_text c n) in push rest in
+  let _ = push (claim_fields c) in
+
+  let _ = dom_on_click add_btn (fn (u2: unit) ->
+    let _ = store_update store (fn (m: model) ->
+      { m | current = { m.current | lines = append_line m.current.lines } }) in
+    redraw_lines ()) in
+  let _ = dom_on_click sb (fn (u2: unit) -> save ()) in
+  let _ = dom_on_click ub (fn (u2: unit) -> submit ()) in
+
+  let _ = watch_form_chrome () in
+  watch_line_problems ()
+in
+
+// A read-only view of the same state. One watcher, no controls — the cheap
+// half of the round trip, and the half that shows the leak, because
+// nothing it registers is ever taken back.
+let open_summary = fn (u: unit) ->
+  let table = mk "table" "" view_el in
+  let _ = dom_set_attr table "id" "summary-table" in
+  let row = fn (id: str) -> fn (label: str) ->
+    let tr = mk "tr" "" table in
+    let td1 = mk "td" "" tr in
+    let _ = dom_set_text td1 label in
+    let td2 = mk "td" "n" tr in
+    let _ = dom_set_attr td2 "id" id in
+    td2 in
+  let r_title = row "sum-title" "Title" in
+  let r_lines = row "sum-lines" "Lines" in
+  let r_total = row "sum-total" "Total" in
+  let r_status = row "sum-status" "Status" in
+  watch_here (fn (m: model) ->
+    let _ = dom_set_text r_title (if str_eq m.current.title "" then "(untitled)"
+                                  else m.current.title) in
+    let _ = dom_set_text r_lines (show (list_len m.current.lines)) in
+    let _ = dom_set_text r_total (yen (claim_total m.current)) in
+    dom_set_text r_status (status_label m.current.status))
+in
+
+let show_tab = fn (name: str) ->
+  let _ = close_view () in
+  let _ = dom_set_text view_el "" in
+  let _ = if str_eq name "form" then open_form () else open_summary () in
+  let _ = dom_set_attr tab_form_btn "aria-current"
+            (if str_eq name "form" then "true" else "false") in
+  let _ = dom_set_attr tab_summary_btn "aria-current"
+            (if str_eq name "form" then "false" else "true") in
+  dom_set_text watchers_el ("watchers: " ++ show (store_watcher_count store))
+in
+
+let _ = dom_on_click tab_form_btn (fn (u: unit) -> show_tab "form") in
+let _ = dom_on_click tab_summary_btn (fn (u: unit) -> show_tab "summary") in
 
 let _ = set_status "loading…" in
 let _ = load () in
+let _ = show_tab "form" in
 0

@@ -5,7 +5,7 @@ Two modules, and the choice between them is the whole point.
 | file | for | API |
 |---|---|---|
 | `cell.mere` | a slot nothing is derived from | `cell_new` / `cell_get` / `cell_set` |
-| `store.mere` | state the screen is a function of | `store_new` / `store_get` / `store_watch` / `store_set` / `store_update` |
+| `store.mere` | state the screen is a function of | `store_new` / `store_get` / `store_watch` / `store_unwatch` / `store_set` / `store_update` |
 
 ## Where this came from
 
@@ -67,15 +67,39 @@ Two of its four cells are a pending timer handle and a retry delay, which
 nothing renders at all. There is nothing to derive from those, and a
 watcher would be ceremony.
 
+## Taking a watcher back
+
+`store_watch` returns a token and `store_unwatch` takes it. That exists
+because a page with more than one view needs it, which `examples/claims`
+demonstrated by growing two tabs over one store:
+
+| | watchers after three round trips |
+|---|---|
+| without unsubscribe | 11 |
+| with | 2 |
+
+A view that is torn down leaves its watchers behind otherwise. They keep
+running on every write, painting into nodes no longer in the document, and
+the cost grows with how much the user has navigated — nine of those eleven
+were painting nothing anybody could see.
+
+**Nothing makes a caller give the token back.** `store_unwatch` is an
+ordinary call that can simply not be made. Mere's one mechanism for
+enforced release — a `drop type` bound by `with`, whose `close` runs at
+scope end — does not fit: a subscription's lifetime is not the scope that
+created it. The view is built in one event and torn down in another, so by
+the time `with` would close the handle the view has not even been shown.
+That is a real gap and it is recorded rather than papered over.
+
 ## Limitations
 
 - **Watchers must not update the store.** Nothing detects it; the result
   is unbounded recursion.
-- **No unsubscribe.** The watcher list only grows, which suits a page that
-  wires its handlers at startup and then runs.
+- **Releasing is by convention.** See above: the token can be dropped on
+  the floor and only a counter will tell you.
 - **No equality check.** Every `store_set` notifies, even with an
   unchanged value. Adding one would need `S` to be comparable.
-- **Not thread-safe.** A store is a pair of vecs with no synchronisation.
+- **Not thread-safe.** A store is three vec slots with no synchronisation.
   For state shared across threads, see the actor pattern in `mkv`.
 
 ## Position
