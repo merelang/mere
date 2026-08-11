@@ -2281,6 +2281,153 @@ let parse_program ?(base_dir = Sys.getcwd ()) ?(search_paths = []) tokens =
   import_search_paths := search_paths;
   parse_program_internal tokens
 
+(* ---------------------------------------------------------------------------
+   Parsing that does not stop at the first error.
+
+   `parse_program` raises on the first syntax error, which is the right shape
+   for a compiler driver — a file with a syntax error is not going to be
+   compiled — but it means a file with three broken functions tells you about
+   one of them, three times in a row. An editor needs all of them at once, and
+   so does anybody fixing a file they just pasted.
+
+   The recovery unit is a **top-level declaration**, which is the boundary the
+   language already draws: declarations are separated by `;` and nothing at
+   depth zero straddles one. So on an error we delete the declaration that
+   contains it, and parse the file again. What comes back is a program built
+   from the declarations that *did* parse, plus every error found on the way.
+
+   Re-parsing rather than resuming is a deliberate trade. The parser is
+   functional over an immutable token list, so there is no cursor to reset and
+   no half-built state to unwind: deleting a span and starting over is exact,
+   and it needs no changes to the 130-odd places that raise. It costs one pass
+   per error, which for an editor re-parsing on every keystroke is not the
+   expensive part.
+
+   Errors from an *imported* file are not recovered from: their positions
+   belong to another file's token list, so there is nothing here to delete.
+   The first one is reported and the walk stops. *)
+
+let max_recovered_errors = 20
+
+(* Bracket depth before each token, so a `;` at depth 0 can be told from one
+   inside `{ ... }`. Anything unbalanced leaves the tail at a depth that never
+   returns to 0, which is exactly what makes the deletion swallow it. *)
+let depths (tokens : (Loc.t * Lexer.token) list) : int array =
+  let open Lexer in
+  let n = List.length tokens in
+  let out = Array.make n 0 in
+  let d = ref 0 in
+  List.iteri (fun i (_, t) ->
+    (match t with
+     | T_rparen | T_rbrace | T_rbracket -> decr d
+     | _ -> ());
+    out.(i) <- !d;
+    (match t with
+     | T_lparen | T_lbrace | T_lbracket -> incr d
+     | _ -> ())) tokens;
+  out
+
+(* The token index the error is about: the first token at exactly that
+   position. None means the position is not from this token list — an imported
+   file's, or a synthesized `Loc.dummy`. *)
+let index_of_loc (tokens : (Loc.t * Lexer.token) list) (loc : Loc.t) : int option =
+  if loc.Loc.line = 0 then None
+  else
+    let rec go i = function
+      | [] -> None
+      | (l, _) :: rest ->
+        if l.Loc.line = loc.Loc.line && l.Loc.col = loc.Loc.col then Some i
+        else go (i + 1) rest
+    in
+    go 0 tokens
+
+(* A token that can only be the start of a top-level declaration, and is at
+   column 1. The column is the point: depth-0 `;` is the language's real
+   boundary, but a declaration with an unbalanced `(` never comes back to depth
+   0, so without a second opinion one missing paren deletes the rest of the file
+   — which is the failure mode this whole exercise is about. Every top-level
+   declaration in this language's own sources begins in column 1 (the formatter
+   emits nothing else), so an indented `let` is a local binding and one flush
+   left is a new declaration. It is a heuristic, and it is only ever consulted
+   about *where to resume after an error*. *)
+let starts_decl (loc : Loc.t) (t : Lexer.token) =
+  loc.Loc.col = 1 &&
+  let open Lexer in
+  match t with
+  | T_let | T_type | T_module | T_import | T_signature | T_open | T_extern
+  | T_trait | T_impl | T_derive | T_view | T_drop -> true
+  | _ -> false
+
+(* Delete the declaration containing token `e`: from its start through the next
+   boundary. Returns None when there is nothing left to delete, so the caller
+   stops instead of looping. *)
+let delete_decl_around (tokens : (Loc.t * Lexer.token) list) (e : int)
+  : (Loc.t * Lexer.token) list option =
+  let open Lexer in
+  let d = depths tokens in
+  let arr = Array.of_list tokens in
+  let n = Array.length arr in
+  let semi i = d.(i) = 0 && (match snd arr.(i) with T_semi -> true | _ -> false) in
+  let decl i = let (l, t) = arr.(i) in starts_decl l t in
+  (* Backwards for the start: whichever of "after the previous declaration's
+     `;`" and "the last declaration keyword" is closer. *)
+  let start = ref 0 in
+  for i = 0 to min e (n - 1) do
+    if semi i && i < e then start := i + 1;
+    if decl i then start := i
+  done;
+  (* Forwards for the end. The `;` is consumed (it belonged to the broken
+     declaration); a declaration keyword is not (it begins the next one). The
+     EOF token is always kept: the parser needs it. *)
+  let eof_index = n - 1 in
+  let stop = ref eof_index in
+  let i = ref (max (e + 1) (!start + 1)) in
+  let found = ref false in
+  while not !found && !i < eof_index do
+    if semi !i then (stop := !i + 1; found := true)
+    else if decl !i then (stop := !i; found := true)
+    else incr i
+  done;
+  if !stop <= !start then None
+  else begin
+    let keep = ref [] in
+    for i = n - 1 downto 0 do
+      if i < !start || i >= !stop then keep := arr.(i) :: !keep
+    done;
+    Some !keep
+  end
+
+let parse_program_recover ?base_dir ?search_paths tokens
+  : Ast.program * (Loc.t * string) list =
+  let parse toks =
+    match base_dir, search_paths with
+    | Some d, Some sp -> parse_program ~base_dir:d ~search_paths:sp toks
+    | Some d, None -> parse_program ~base_dir:d toks
+    | None, Some sp -> parse_program ~search_paths:sp toks
+    | None, None -> parse_program toks
+  in
+  (* When even the last resort fails there is no tree to hand back; an empty one
+     keeps the caller's type honest, and the error list is what it wanted. *)
+  let nothing =
+    { Ast.decls = [];
+      main = Ast.{ loc = Loc.dummy; ty = None; node = Ast.Unit_lit } }
+  in
+  let rec go toks errors rounds =
+    match parse toks with
+    | prog -> (prog, List.rev errors)
+    | exception Parse_error (loc, msg) ->
+      let errors = (loc, msg) :: errors in
+      if rounds >= max_recovered_errors then (nothing, List.rev errors)
+      else
+        match index_of_loc toks loc with
+        | None -> (nothing, List.rev errors)
+        | Some e ->
+          (match delete_decl_around toks e with
+           | None -> (nothing, List.rev errors)
+           | Some toks' -> go toks' errors (rounds + 1))
+  in
+  go tokens [] 0
+
 let parse tokens =
   let prog = parse_program tokens in
   match prog.decls with

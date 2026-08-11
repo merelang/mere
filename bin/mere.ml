@@ -54,9 +54,13 @@ let version () =
 let read_file path =
   In_channel.with_open_text path In_channel.input_all
 
-let report_and_exit ~source ~filename loc kind msg =
-  prerr_endline (Mere.Diagnostic.format ~source ~filename loc kind msg);
-  exit 1
+(* Import search paths accumulated from `-I <dir>` flags and the
+   `MERE_PATH` env var. Populated before the arg-parse match runs (see
+   `preprocess_argv` at `main`), read here for every parse_program
+   call. Level 1 package system: lets a Mere program in an unrelated
+   repo `import "contrib/http/router.mere"` as long as the compiler
+   was invoked with `-I /path/to/mere/checkout`. *)
+let search_paths : string list ref = ref []
 
 (* `~rv` marks the RV32I paths, which compile a *concatenation* — the Mere-source
    prelude, then the user's file. Every position a diagnostic carries is counted
@@ -68,23 +72,56 @@ let report_and_exit ~source ~filename loc kind msg =
    A position inside the prelude is not remapped into the user's file, because
    there is no honest line there to point at: it is shown against the prelude's
    own text instead, which also makes a prelude bug legible as one. *)
-let run_action ?(rv = false) action label source =
-  let report loc kind msg =
-    if not rv then report_and_exit ~source ~filename:label loc kind msg
+let run_action ?(rv = false) ?base_dir action label source =
+  let render ~source ~filename loc kind msg =
+    Mere.Diagnostic.format ~source ~filename loc kind msg
+  in
+  let locate loc =
+    (* On the -rv paths a position is counted from the top of the prelude the
+       driver glued in front of the source; see Rv_prelude.origin_of. *)
+    if not rv then (source, label, loc)
     else
       match Mere.Rv_prelude.origin_of loc with
-      | Mere.Rv_prelude.User loc ->
-        report_and_exit ~source ~filename:label loc kind msg
+      | Mere.Rv_prelude.User loc -> (source, label, loc)
       | Mere.Rv_prelude.Prelude loc ->
-        report_and_exit ~source:Mere.Rv_prelude.contents
-          ~filename:"<rv-prelude>" loc kind msg
+        (Mere.Rv_prelude.contents, "<rv-prelude>", loc)
+  in
+  let report loc kind msg =
+    let (src, name, loc) = locate loc in
+    prerr_endline (render ~source:src ~filename:name loc kind msg);
+    exit 1
+  in
+  (* A syntax error is never the only one worth knowing about: the parse stopped
+     at the first, but the file may have five. Re-parse with declaration-level
+     recovery and report all of them, in source order. Only reached when the
+     compile already failed, so the second pass costs nothing on a good file. *)
+  let report_syntax loc msg =
+    let all =
+      try Mere.Pipeline.syntax_errors ?base_dir ~search_paths:!search_paths source
+      with _ -> []
+    in
+    match all with
+    (* Nothing more to say than the parse already did — including the case where
+       the user's file is fine and the error is in a prelude glued in front of
+       it, which the re-parse of that file alone cannot see. *)
+    | [] | [_] -> report loc "parse error" msg
+    | _ ->
+      (* These positions came from parsing the user's source on its own, so they
+         are already the lines they wrote — no prelude to subtract. *)
+      let blocks =
+        List.map (fun (l, m) ->
+          render ~source ~filename:label l "parse error" m) all
+      in
+      prerr_endline (String.concat "\n\n" blocks);
+      Printf.eprintf "\n%d syntax errors\n" (List.length all);
+      exit 1
   in
   try
     let result = action source in
     print_endline result
   with
   | Mere.Lexer.Lex_error (loc, msg) -> report loc "lex error" msg
-  | Mere.Parser.Parse_error (loc, msg) -> report loc "parse error" msg
+  | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
   | Mere.Eval.Eval_error (loc, msg) -> report loc "eval error" msg
   | Mere.Typer.Type_error (loc, msg) -> report loc "type error" msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
@@ -95,14 +132,6 @@ let run_action ?(rv = false) action label source =
   | Sys_error msg ->
     Printf.eprintf "io error: %s\n" msg;
     exit 1
-
-(* Import search paths accumulated from `-I <dir>` flags and the
-   `MERE_PATH` env var. Populated before the arg-parse match runs (see
-   `preprocess_argv` at `main`), read here for every parse_program
-   call. Level 1 package system: lets a Mere program in an unrelated
-   repo `import "contrib/http/router.mere"` as long as the compiler
-   was invoked with `-I /path/to/mere/checkout`. *)
-let search_paths : string list ref = ref []
 
 (* --component: emit the Wasm backend in WebAssembly Component Model shape
    (exports `run` + `cabi_realloc`, no ambient env imports). Opt-in; the
@@ -272,7 +301,7 @@ let rv_flags mode args =
       | "-rvs" -> listing_riscv ~base_dir
       | _ -> debug_map_riscv ~base_dir
     in
-    Some (fun () -> run_action ~rv:true action path (read_file path))
+    Some (fun () -> run_action ~rv:true ~base_dir action path (read_file path))
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -344,7 +373,7 @@ let fmt_inplace_files paths =
 let fmt_to_stdout path =
   let source = read_file path in
   let base = Filename.dirname path in
-  run_action (format_source ~base_dir:base) path source
+  run_action ~base_dir:base (format_source ~base_dir:base) path source
 
 (* Enable ANSI color in diagnostics when stderr is a TTY and the
    environment hasn't opted out via NO_COLOR (https://no-color.org/). *)
@@ -431,19 +460,19 @@ let () =
   | [_; "-c"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action (compile_to_c ~base_dir:base) path source
+    run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
   | [_; "-lle"; expr] ->
     run_action compile_to_llvm "<inline>" expr
   | [_; "-ll"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action (compile_to_llvm ~base_dir:base) path source
+    run_action ~base_dir:base (compile_to_llvm ~base_dir:base) path source
   | [_; "-we"; expr] ->
     run_action compile_to_wasm "<inline>" expr
   | [_; "-w"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action (compile_to_wasm ~base_dir:base) path source
+    run_action ~base_dir:base (compile_to_wasm ~base_dir:base) path source
   | [_; "-rve"; expr] ->
     run_action ~rv:true compile_to_riscv "<inline>" expr
   | [_; "-rvse"; expr] ->
@@ -477,7 +506,7 @@ let () =
        resolves relative to the running file. *)
     let base = Filename.dirname path in
     Mere.Eval.program_argv := [];
-    run_action
+    run_action ~base_dir:base
       (Mere.Pipeline.process ~base_dir:base ~search_paths:!search_paths)
       path source
   | _ :: path :: rest_args when String.length path > 0 && path.[0] <> '-' ->
@@ -488,7 +517,7 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     Mere.Eval.program_argv := rest_args;
-    run_action
+    run_action ~base_dir:base
       (Mere.Pipeline.process ~base_dir:base ~search_paths:!search_paths)
       path source
   | _ ->
