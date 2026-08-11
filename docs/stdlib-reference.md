@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-114 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+187 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`

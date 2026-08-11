@@ -1,8 +1,8 @@
 # Mere examples
 
-A collection of runnable `.mere` programs for Mere (142 total: 47 in
-Phase 36 + 5 in Phase 37/38 + 5 algorithms + 14 extended algorithms added
-later). Run with `dune exec ./bin/mere.exe -- examples/<file>.mere`
+A collection of runnable `.mere` programs for Mere (285 files, counting the
+multi-file apps under their own directories). Run with
+`dune exec ./bin/mere.exe -- examples/<file>.mere`
 to execute via the interpreter, or use the `-c` / `-ll` / `-w` flags to
 codegen to one of the C / LLVM IR / Wasm backends.
 
@@ -160,6 +160,26 @@ with ⭐).
 | [sudoku_check.mere](sudoku_check.mere) ⭐ | validity check of a 9x9 sudoku board. Check that 1..9 are exhaustively present for 9 rows + 9 cols + 9 (3x3 boxes). Generate box cells via `list_for_all` + `list_member` + list comprehension; verify with 3 scenarios (correct / row dup / col dup) |
 | [calc.mere](calc.mere) ⭐ | operator-precedence arithmetic parser + evaluator. tokenize -> recursive descent (expr / term / factor / primary) -> eval. Handles `+ - * /` precedence, unary minus, and nested parentheses. Error propagation via `?!` Result chain. Verifies 10 cases (incl. division by zero / syntax error) |
 | [maze_solver.mere](maze_solver.mere) ⭐ | BFS pathfinding on an ASCII maze (8x12). `#` = wall, `S` = start, `G` = goal. OwnedVec[str] as queue, Maps for dist + prev. Computes shortest distance and visualizes path with `*` |
+
+### Browser apps (Wasm + contrib/dom), and what each one forced
+
+Each of these is a directory, not a file: a Mere client compiled to Wasm, a
+Mere server, and the page that loads them. They exist to make the language
+answer a question it had not been asked, and the capability each one forced
+is listed beside it — the app is the instrument, not the deliverable.
+
+| App | What it forced |
+|---|---|
+| [chat/](chat/) | The frontend FFI's first request/response and server push. Replaced a hand-written `app.js`; `jstr` is shared with the server, so one escaping implementation compiles to C on one side and Wasm on the other |
+| [tally/](tally/) | Local-first: one `contrib/store/kvlog` source compiled for both replicas, over OPFS in the browser. Forced positioned file I/O on Wasm, and a browser check that survives a browser restart |
+| [tasks/](tasks/) | A list you can filter **and edit**. A row holding an `<input>` must not be rebuilt, which forced `dom_remove`, `dom_on_input` and the timer pair (debounce, retry-with-backoff) |
+| [profile/](profile/) | A form, as opposed to a list — valid or not, changed or not. Forced `dom_on_blur` / `on_focus` / `on_change` / `checked` / `remove_attr`, and produced `contrib/state` (a cell, and a store whose watchers make the screen a function of the state) |
+| [claims/](claims/) | One `schema.mere` for the record, the wire format and the rules, imported by both replicas. Adding a field to the record is **two edits and nothing silent**; the form is generated from the declaration. Produced `contrib/schema`, `of_json_like`, and the four native HTTP externs a middleware stack needs |
+
+Each carries a `browser_check.mjs` (or `scripts/check_browser.mjs` for
+tally) that drives it in a real Chrome, for the claims a headless dump
+cannot settle — focus and caret survival, `blur` as the user causes it,
+state surviving a restart. Missing Playwright is a SKIP, not a failure.
 
 ### Q-010 collection basics
 
