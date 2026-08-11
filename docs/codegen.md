@@ -306,6 +306,20 @@ C codegen, LLVM codegen, and Wasm codegen are parallel implementations. AST + ty
 
 ---
 
+## A fifth backend, without a C compiler under it
+
+Everything above delegates the last mile: the C backend hands off to `clang`, the
+LLVM backend to LLVM, the Wasm backend to `wat2wasm` and a host. `mere -rv` does
+not. It emits **flat little-endian RV32IM machine code** — its own instruction
+encoders, its own two-pass assembler, its own branch relaxation — so
+`mere -rv f.mere > prog.bin` produces something a CPU starts executing at address
+0 with nothing in between.
+
+That makes it the one backend where the runtime is visible: a bump allocator in a
+register, a frame layout, a `_start`, and (under `--bare`) no operating system at
+all. See [bare-metal.md](bare-metal.md) for the memory map, the capability rules
+and the trap trampoline.
+
 ## 7. References
 
 | Doc | Content |
