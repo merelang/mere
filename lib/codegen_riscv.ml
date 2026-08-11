@@ -376,6 +376,12 @@ let trap_handler_slot () = stack_top () + 0x1100
    is silent and arrives much later, as a jump through a pointer that used to be
    something else. Counting instead makes it loud at the moment it happens. *)
 let trap_depth_slot () = stack_top () + 0x1104
+(* The handler gets a stack of its own, growing down from here. Running it on the
+   interrupted task's stack is how a kernel invites the whole class of problem
+   where the handler's frame lands somewhere it should not — and it means the
+   handler's frame size becomes a constraint on every task's stack. 8KB, in the
+   reserved region, below where machine_scratch starts. *)
+let trap_stack_top () = stack_top () + 0x4000
 let scratch_base () = stack_top () + 0x10000
 let fb_base () = stack_top () + 0x18000
 let key_base () = stack_top () + 0x19000
@@ -1088,7 +1094,7 @@ and compile_app env e =
       | Ast.Var "trap_save" -> (trap_save_base (), 32 * 4)
       (* between the handler slot and the print scratch buffer: the reserved
          region's unused middle, which is where task stacks come from *)
-      | _ -> (trap_handler_slot () + 0x100, 0x10000 - 0x1200)
+      | _ -> (trap_stack_top (), 0x10000 - 0x4000)
     in
     compile_expr env (List.hd args);                       (* a0 = machine *)
     (* narrow it properly, so a machine window that somehow did not contain
@@ -1884,6 +1890,7 @@ let emit_trap_entry () =
   emit (Branch (1, t1, zero, "__trap_nested"));
   emit_word (enc_i 1 zero 0 t1 0x13);
   emit_word (enc_s 0x104 t1 t0 2 0x23);                 (* depth = 1 *)
+  li sp (trap_stack_top ());                            (* the handler's own stack *)
   (* call the registered closure: a0 = its env, a1 = mcause *)
   emit_word (enc_i 0x342 zero 2 a1 0x73);               (* csrrs a1, mcause, x0 *)
   li t1 (trap_handler_slot ());

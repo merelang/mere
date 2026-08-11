@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.197 — 2026-08-11
+
+_A third hypothesis for the allocating-handler corruption, also disproved. The
+change it prompted is worth keeping anyway: the trap handler gets a stack of its
+own._
+
+_Until now the handler ran on whichever task's stack it interrupted. That is a
+design smell independent of any bug — it makes the handler's frame size a
+constraint on every task's stack, and it means a task with a nearly-full stack
+turns any trap into a memory-corrupting event. The trampoline now switches `sp`
+to a dedicated 8KB stack in the reserved region once every register is safely
+saved, which is what a kernel does and for these reasons. `machine_scratch`
+starts above it, so task stacks are unaffected except for being 8KB smaller._
+
+_It does not fix the corruption. Three mechanisms are now ruled out — the
+header-before-bump window (v0.1.193), trampoline reentrancy (v0.1.195), and the
+handler's stack placement (here) — against a signature that is precise:_
+
+- _a task resumes with `a0` holding a pointer to the **trap save area's window
+  block** — a two-word `Raw` value that only the handler ever constructs;_
+- _the next closure tail call reads word 0 of it as a code pointer, which is the
+  save area's base, and jumps there;_
+- _from then on the machine executes its own saved registers as instructions._
+
+_Every write to that `a0` slot comes from the trampoline's own save instruction,
+so the value was in `a0` at trap entry, meaning the interrupted code held it —
+and the only code that holds it is the handler. Which would be reentrancy, which
+the depth check says is not happening. One of those two statements is wrong and
+finding out which is the next probe: log the first forty writes to the slot rather
+than the last, and see the value's first appearance instead of its aftermath._
+
+_Recorded rather than guessed at. The rule stands and every example keeps it: a
+trap handler must not allocate. All six bare-metal examples verified (uart, timer,
+sched, shell, user, selfhost — the last still byte-identical to the interpreter),
+`dune runtest` 2336/0, ctest 13/13._
+
+---
+
 ## v0.1.196 — 2026-08-11
 
 _The self-hosted Mere compiler, running as a user process on a Mere kernel, on a
