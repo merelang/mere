@@ -236,6 +236,10 @@ let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
 (* Types that need a `show_<tag>` function emitted. Key is ty_tag of
    the type (used as the function name suffix); value is the type. *)
 let show_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+(* v0.1.184: to_json is show with different literals — same structural walk,
+   same per-type functions, JSON shapes instead of Mere ones. Kept in its own
+   table because a program can use one without the other. *)
+let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
 (* v0.1.110: structural == / != and < <= > >= on a compound (tuple / record /
    variant) lower to per-type `@eq_<tag>` (i1) and `@cmp_<tag>` (i64, <0/0/>0)
@@ -2258,14 +2262,14 @@ let llvm_needs_struct_eq (t : Ast.ty) : bool =
     || name = "list"
   | _ -> false
 
-let rec add_show_type (t : Ast.ty) : unit =
+let rec add_struct_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
   let t = Ast.walk t in
   if not (ty_is_concrete t) then ()
   else
     let tag = ty_tag t in
-    if Hashtbl.mem show_types tag then ()
+    if Hashtbl.mem tbl tag then ()
     else begin
-      Hashtbl.add show_types tag t;
+      Hashtbl.add tbl tag t;
       (* For polymorphic types, register the mono instance so typedef
          emission picks them up — needed when the program only uses
          this type via show (no constructor call to seed
@@ -2283,25 +2287,28 @@ let rec add_show_type (t : Ast.ty) : unit =
       (* Recurse into dependent types. *)
       match t with
       | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> ()
-      | Ast.TyTuple ts -> List.iter add_show_type ts
+      | Ast.TyTuple ts -> List.iter (add_struct_type tbl) ts
       | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
         let (params, fields) = Hashtbl.find polymorphic_records n in
         let mapping = List.combine params args in
-        List.iter (fun (_, ft) -> add_show_type (subst_params mapping ft)) fields
+        List.iter (fun (_, ft) -> add_struct_type tbl (subst_params mapping ft)) fields
       | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
         let fields = record_fields n in
-        List.iter (fun (_, ft) -> add_show_type ft) fields
+        List.iter (fun (_, ft) -> add_struct_type tbl ft) fields
       | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
         let (params, variants) = Hashtbl.find polymorphic_variants n in
         let sv = subst_variants params args variants in
         List.iter (fun (_, arg_opt) ->
-          match arg_opt with Some t -> add_show_type t | None -> ()) sv
+          match arg_opt with Some t -> add_struct_type tbl t | None -> ()) sv
       | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
         let vs = variant_shape n in
         List.iter (fun (_, arg_opt) ->
-          match arg_opt with Some t -> add_show_type t | None -> ()) vs
+          match arg_opt with Some t -> add_struct_type tbl t | None -> ()) vs
       | _ -> ()
     end
+
+let add_show_type (t : Ast.ty) : unit = add_struct_type show_types t
+let add_to_json_type (t : Ast.ty) : unit = add_struct_type to_json_types t
 
 (* Register `t` and (transitively) its component types into `tbl` — the set of
    types that need an `@eq_<tag>` / `@cmp_<tag>` function. Mirrors add_show_type
@@ -2351,6 +2358,10 @@ let add_cmp_type t = add_struct_deep_type cmp_types t
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
   let rec walk_expr (e : Ast.expr) =
     (match e.Ast.node with
+     | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
+       (match arg.Ast.ty with
+        | Some t -> add_to_json_type t
+        | None -> ())
      | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
        (match arg.Ast.ty with
         | Some t -> add_show_type t
@@ -2453,8 +2464,12 @@ let mint_show_format name fmt =
       name bytes_len escaped
     :: !show_format_globals
 
-(* Emit a single show_<tag> function for the given type. *)
-let emit_show_fn (tag : string) (t : Ast.ty) : string =
+(* Emit a single show_<tag> (or to_json_<tag>) function for the given type.
+   v0.1.184: the two differ only in literals — the structural walk, the
+   per-type functions and the recursion are identical, so they are one
+   emitter with a mode rather than two that drift. *)
+let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
+  let pfx = if json then "to_json" else "show" in
   let saved_instrs = !instrs in
   let saved_reg = !reg_counter and saved_lbl = !label_counter in
   reg_counter := 0;
@@ -2479,7 +2494,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   let result_reg =
     match Ast.walk t with
     | Ast.TyInt ->
-      emit_asprintf "show_int" "i64 %x"
+      emit_asprintf (pfx ^ "_int") "i64 %x"
     | Ast.TyBool ->
       (* Select between "true" / "false" globals. *)
       let r = fresh_reg () in
@@ -2495,13 +2510,13 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       let p = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = alloca ptr" p);
       emit_instr (Printf.sprintf
-                    "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_show_str, ptr %s)"
-                    p esc);
+                    "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s_str, ptr %s)"
+                    p pfx esc);
       let r = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
       r
     | Ast.TyUnit ->
-      "@.s_unit"
+      (if json then "@.s_json_null" else "@.s_unit")
     | Ast.TyTuple ts ->
       (* Show each element, then asprintf "(%s, %s, ...)" with them. *)
       let tname = tuple_struct_name ts in
@@ -2510,12 +2525,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
           let e = fresh_reg () in
           emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, %d" e tname i);
           let s = fresh_reg () in
-          emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
-                        s (ty_tag ety) (llvm_ty_of ety) e);
+          emit_instr (Printf.sprintf "  %s = call ptr @%s_%s(%s %s)"
+                        s pfx (ty_tag ety) (llvm_ty_of ety) e);
           Printf.sprintf "ptr %s" s
         ) ts
       in
-      emit_asprintf ("show_" ^ tag) (String.concat ", " elem_strs)
+      emit_asprintf (pfx ^ "_" ^ tag) (String.concat ", " elem_strs)
     | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_records n ->
       let (params, fields) = Hashtbl.find polymorphic_records n in
       let mapping = List.combine params args in
@@ -2526,12 +2541,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
           let e = fresh_reg () in
           emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, %d" e mono i);
           let s = fresh_reg () in
-          emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
-                        s (ty_tag ft) (llvm_ty_of ft) e);
+          emit_instr (Printf.sprintf "  %s = call ptr @%s_%s(%s %s)"
+                        s pfx (ty_tag ft) (llvm_ty_of ft) e);
           Printf.sprintf "ptr %s" s
         ) sf
       in
-      emit_asprintf ("show_" ^ tag) (String.concat ", " field_strs)
+      emit_asprintf (pfx ^ "_" ^ tag) (String.concat ", " field_strs)
     | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
       let fields = record_fields n in
       let field_strs =
@@ -2539,12 +2554,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
           let e = fresh_reg () in
           emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%x, %d" e n i);
           let s = fresh_reg () in
-          emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
-                        s (ty_tag ft) (llvm_ty_of ft) e);
+          emit_instr (Printf.sprintf "  %s = call ptr @%s_%s(%s %s)"
+                        s pfx (ty_tag ft) (llvm_ty_of ft) e);
           Printf.sprintf "ptr %s" s
         ) fields
       in
-      emit_asprintf ("show_" ^ tag) (String.concat ", " field_strs)
+      emit_asprintf (pfx ^ "_" ^ tag) (String.concat ", " field_strs)
     | Ast.TyCon ("list", [elem_ty])
       when is_recursive_variant_name (mono_variant_name "list" [elem_ty]) ->
       (* `'a list` special-case: render as `[a, b, c]` instead of the
@@ -2599,8 +2614,8 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       let t = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 1" t payload_struct pl);
       let h_str = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
-                    h_str (ty_tag elem_ty) (llvm_ty_of elem_ty) h);
+      emit_instr (Printf.sprintf "  %s = call ptr @%s_%s(%s %s)"
+                    h_str pfx (ty_tag elem_ty) (llvm_ty_of elem_ty) h);
       let is_first = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = load i1, ptr %s" is_first first_p);
       let acc_cur = fresh_reg () in
@@ -2618,8 +2633,8 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       emit_label nfirst_lbl;
       let tmp = fresh_reg () in
       emit_instr (Printf.sprintf
-                    "  %s = call ptr @__lang_str_concat(ptr %s, ptr @.s_comma_space)"
-                    tmp acc_cur);
+                    "  %s = call ptr @__lang_str_concat(ptr %s, ptr @.s_%s)"
+                    tmp acc_cur (if json then "comma" else "comma_space"));
       let new_acc_2 = fresh_reg () in
       emit_instr (Printf.sprintf
                     "  %s = call ptr @__lang_str_concat(ptr %s, ptr %s)"
@@ -2640,6 +2655,10 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
       let (params, variants) = Hashtbl.find polymorphic_variants n in
       let sv = subst_variants params args variants in
+      (* JSON has its own spelling for an option: the value, or null. The
+         generic variant form would say {"Some":4} and "None", which is not
+         what the other backends emit and not what of_json reads back. *)
+      let json_option = json && n = "option" in
       let mono = mono_variant_name n args in
       let recursive = is_recursive_variant_name mono in
       let node_ty = "%" ^ mono ^ "_node" in
@@ -2667,7 +2686,8 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         let s =
           match arg_opt with
           | None ->
-            "@.s_ctor_" ^ cname
+            if json_option then "@.s_json_null"
+            else (if json then "@.s_jctor_" ^ cname else "@.s_ctor_" ^ cname)
           | Some pty ->
             (* Phase 25.0: payload is boxed (ptr). Load the ptr, then
                dereference to get the payload value. *)
@@ -2683,17 +2703,20 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
             emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
                           p_reg (llvm_ty_of pty) ptr_reg);
             let ps = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
-                          ps (ty_tag pty) (llvm_ty_of pty) p_reg);
-            (* Build "Ctor payload_str" *)
-            let p = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = alloca ptr" p);
-            emit_instr (Printf.sprintf
-                          "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_show_ctor_payload, ptr @.s_ctor_%s, ptr %s)"
-                          p cname ps);
-            let r = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
-            r
+            emit_instr (Printf.sprintf "  %s = call ptr @%s_%s(%s %s)"
+                          ps pfx (ty_tag pty) (llvm_ty_of pty) p_reg);
+            if json_option then ps
+            else begin
+              (* Build "Ctor payload_str" / {"Ctor":payload_str} *)
+              let p = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = alloca ptr" p);
+              emit_instr (Printf.sprintf
+                            "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s_ctor_payload, ptr @.s_%sctor_%s, ptr %s)"
+                            p pfx (if json then "j" else "") cname ps);
+              let r = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+              r
+            end
         in
         let end_label = fresh_label "show_armend_" in
         emit_instr (Printf.sprintf "  br label %%%s" end_label);
@@ -2738,7 +2761,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         emit_label arm_label;
         let s =
           match arg_opt with
-          | None -> "@.s_ctor_" ^ cname
+          | None -> (if json then "@.s_jctor_" ^ cname else "@.s_ctor_" ^ cname)
           | Some pty ->
             (* Phase 25.0: payload is boxed (ptr). Load the ptr, then
                dereference to get the payload value. *)
@@ -2754,13 +2777,13 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
             emit_instr (Printf.sprintf "  %s = load %s, ptr %s"
                           p_reg (llvm_ty_of pty) ptr_reg);
             let ps = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
-                          ps (ty_tag pty) (llvm_ty_of pty) p_reg);
+            emit_instr (Printf.sprintf "  %s = call ptr @%s_%s(%s %s)"
+                          ps pfx (ty_tag pty) (llvm_ty_of pty) p_reg);
             let p = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = alloca ptr" p);
             emit_instr (Printf.sprintf
-                          "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_show_ctor_payload, ptr @.s_ctor_%s, ptr %s)"
-                          p cname ps);
+                          "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s_ctor_payload, ptr @.s_%sctor_%s, ptr %s)"
+                          p pfx (if json then "j" else "") cname ps);
             let r = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
             r
@@ -2783,14 +2806,14 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       emit_instr (Printf.sprintf "  %s = phi ptr %s" r phi_parts);
       r
     | _ ->
-      "@.s_unit"  (* unknown — fallback to "()" *)
+      (if json then "@.s_json_null" else "@.s_unit")  (* unknown — fallback to "()" *)
   in
   emit_instr (Printf.sprintf "  ret ptr %s" result_reg);
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved_instrs;
   reg_counter := saved_reg;
   label_counter := saved_lbl;
-  Printf.sprintf "define ptr @show_%s(%s %%x) {\n%s\n}" tag param_ty body
+  Printf.sprintf "define ptr @%s_%s(%s %%x) {\n%s\n}" pfx tag param_ty body
 
 (* v0.1.110: shared layout accessors for eq_/cmp_. Given a value register
    `v` of a variant type, load its i32 tag and (per constructor) its payload,
@@ -3696,6 +3719,22 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" r tname av);
+    r
+  (* v0.1.184: to_json, dispatched on the ARGUMENT's type (show dispatches
+     the same way). LLVM had neither this nor of_json, so every program that
+     touched JSON was unchecked here — five of the seven cases the parity
+     harness reported LLVM refusing. of_json is still missing: it needs a
+     JSON parser in IR, a slice of its own with nothing else riding on it. *)
+  | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
+    let arg_ty =
+      match arg.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "to_json: missing arg type"
+    in
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @to_json_%s(%s %s)"
+                  r (ty_tag arg_ty) (llvm_ty_of arg_ty) av);
     r
   | Ast.App ({ node = Ast.Var "show"; _ }, arg) ->
     let arg_ty =
@@ -9950,6 +9989,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset mono_record_instances;
   Hashtbl.reset recursive_variants;
   Hashtbl.reset show_types;
+  Hashtbl.reset to_json_types;
   Hashtbl.reset eq_types;
   Hashtbl.reset cmp_types;
   Hashtbl.reset vec_instances;
@@ -10321,8 +10361,55 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       | _ -> ()
     ) show_types
   end;
+  (* v0.1.184: the same registration, JSON-shaped. `null` stands in for both
+     unit and None; a nullary constructor is a quoted string and a carrying
+     one is a single-key object, matching what C and Wasm emit. *)
+  if Hashtbl.length to_json_types > 0 then begin
+    mint_show_global "s_json_null" "null";
+    mint_show_global "s_true" "true";
+    mint_show_global "s_false" "false";
+    mint_show_global "s_comma" ",";
+    mint_show_global "s_lbracket" "[";
+    mint_show_global "s_rbracket" "]";
+    mint_show_format "to_json_int" "%lld";
+    mint_show_format "to_json_str" "\"%s\"";
+    mint_show_format "to_json_ctor_payload" "{%s:%s}";
+    let registered_jctors = Hashtbl.create 4 in
+    let mint_jctor cname =
+      if not (Hashtbl.mem registered_jctors cname) then begin
+        Hashtbl.add registered_jctors cname ();
+        mint_show_global ("s_jctor_" ^ cname) ("\"" ^ cname ^ "\"")
+      end
+    in
+    Hashtbl.iter (fun tag t ->
+      match Ast.walk t with
+      | Ast.TyTuple ts ->
+        mint_show_format ("to_json_" ^ tag)
+          ("[" ^ String.concat ","
+                   (List.init (List.length ts) (fun _ -> "%s")) ^ "]")
+      | Ast.TyCon (n, _) when Hashtbl.mem polymorphic_records n
+                           || Hashtbl.mem Typer.records n ->
+        let fs =
+          if Hashtbl.mem polymorphic_records n then
+            snd (Hashtbl.find polymorphic_records n)
+          else record_fields n
+        in
+        mint_show_format ("to_json_" ^ tag)
+          ("{" ^ String.concat ","
+                   (List.map (fun (fname, _) -> "\"" ^ fname ^ "\":%s") fs) ^ "}")
+      | Ast.TyCon (n, args) when Hashtbl.mem polymorphic_variants n ->
+        let (params, variants) = Hashtbl.find polymorphic_variants n in
+        List.iter (fun (cname, _) -> mint_jctor cname)
+          (subst_variants params args variants)
+      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+        List.iter (fun (cname, _) -> mint_jctor cname) (variant_shape n)
+      | _ -> ()
+    ) to_json_types
+  end;
   let show_fn_defs =
-    Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []
+    Hashtbl.fold (fun tag t acc -> emit_struct_fn tag t :: acc) show_types []
+    @ Hashtbl.fold (fun tag t acc -> emit_struct_fn ~json:true tag t :: acc)
+        to_json_types []
   in
   (* v0.1.110: structural eq_/cmp_ functions. No forward `declare`s needed —
      LLVM IR lets a `call` reference a `define` that appears later in the

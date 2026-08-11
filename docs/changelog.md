@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.184 — 2026-08-11
+
+_`to_json` on LLVM, and a parity harness that counts what it did not check._
+
+_This one is not a dogfood, and saying so is the point. Nothing forces `to_json`
+on LLVM: everything native in this repo goes through C, and no app names LLVM.
+Inventing an app to justify the capability would invert the discipline the
+browser dogfoods have been run on all week — apps force capabilities, not the
+reverse._
+
+_What justifies it is coverage, and coverage is a number. `scripts/parity.sh`
+treated a clean refusal as a passing row, so a backend that checked nothing said
+so in a word buried in a line. It now tallies per backend and names the cases:_
+
+```
+unchecked on llvm: 7 of 83 (refused at emit time)
+    nested_tuple
+    of_json_composite
+    ...
+```
+
+_Five of LLVM's seven were the JSON family, and that number grows with every
+test that touches `to_json` — `contrib/schema` being a library means future apps
+using it would go unchecked there too._
+
+_`to_json` turned out to be `show` with different literals: the same structural
+walk, the same per-type functions, the same recursion. So it is not a second
+emitter but one with a mode — `emit_struct_fn ~json:true` — which is also the
+arrangement that keeps them from drifting. The differences are all shape: `[..]`
+for a tuple, `{"f":..}` for a record, `","` rather than `", "` in a list, a
+quoted name for a nullary constructor and a single-key object for a carrying
+one, and `null` for unit. Option is the one real special case — JSON spells it
+as the value or `null`, not as `{"Some":4}` and `"None"` — and getting that
+wrong was the last diff before the backends agreed._
+
+_LLVM's blind spot is 7 → 6, and every remaining case is `of_json`. That stays
+deferred: decoding needs a JSON parser written in the target language, C and
+Wasm each have their own hand-written one, and nothing rides on a third. The
+number is in the harness now, so the cost of leaving it is visible rather than
+argued about._
+
+_parity 83/83, ctest 13/13, dune runtest 2308/0._
+
+---
+
 ## v0.1.183 — 2026-08-11
 
 _`of_json_like`: the target type from a witness value, so a decoder can live
