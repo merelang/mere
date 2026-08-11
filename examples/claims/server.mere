@@ -14,6 +14,8 @@
 //   POST /api/claim          save a draft; 422 with a `problem list` when
 //                            rejected, the same shape the browser renders
 //   POST /api/claim/submit   draft -> submitted, if the rules allow
+//   POST /api/claim/reset    back to an empty draft, so a check that
+//                            submits can be run twice
 //   GET  /api/approvers      the directory the browser cannot know
 //
 // Run:
@@ -131,6 +133,15 @@ let submit_claim = fn (req: str) ->
       let _ = store submitted in json (to_json submitted)
 in
 
+// Back to an empty draft. A submitted claim refuses further edits, which
+// is the rule working, and also means a test that submits cannot run
+// twice. Same role as tasks' fault injector: a path the app itself never
+// takes, so that a path it does take can be exercised repeatedly.
+let reset_claim = fn (req: str) ->
+  let _ = store blank_claim in
+  json (to_json blank_claim)
+in
+
 let home = fn (req: str) ->
   let _ = http_set_content_type "text/html; charset=utf-8" in
   read_file "examples/claims/index.html"
@@ -146,7 +157,8 @@ let routes =
   Cons (route "GET"  "/api/approvers"    get_approvers,
   Cons (route "POST" "/api/claim"        save_claim,
   Cons (route "POST" "/api/claim/submit" submit_claim,
-  Nil))))) in
+  Cons (route "POST" "/api/claim/reset"  reset_claim,
+  Nil)))))) in
 
 let handle =
   serve_static_fallback "/static/" "examples/claims"

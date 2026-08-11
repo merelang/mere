@@ -30,6 +30,13 @@
   #status { font-size: .85rem; color: #555; }
   #claim-status { font-size: .85rem; color: #2d3748; }
   #problems { color: #c53030; font-size: .9rem; }
+  .tabs { display: flex; gap: .4rem; align-items: baseline; margin-bottom: 1rem;
+          border-bottom: 1px solid #e2e8f0; padding-bottom: .5rem; }
+  .tabs button[aria-current="true"] { background: #2b6cb0; color: #fff; }
+  #watchers { margin-left: auto; font-size: .8rem; color: #718096; }
+  #summary-table { width: 100%; border-collapse: collapse; }
+  #summary-table td { padding: .3rem 0; border-bottom: 1px solid #edf2f7; }
+  #summary-table td.n { text-align: right; }
 </style>
 
 <h1>Mere claims</h1>
@@ -38,28 +45,18 @@
   from one <code>schema.mere</code> that this page and the server both
   import. The form itself is not written down anywhere either: the fields
   below are the fields of the record, read off it in declaration order and
-  built at startup. Adding a field to <code>claim</code> puts a labelled
-  control here with no edit to this file.
+  built when the Form view opens. The two tabs are the point of this
+  version: each builds its own controls and watchers, and the counter on
+  the right is how many watchers the store is holding.
 </p>
 
-<div id="form"></div>
-
-<div class="field">
-  <label>Lines</label>
-  <div id="lines"><ul id="lines-list"></ul></div>
-  <div class="err" id="err-lines"></div>
-  <button id="add-line">add a line</button>
+<div class="tabs">
+  <button id="tab-form">Form</button>
+  <button id="tab-summary">Summary</button>
+  <span id="watchers"></span>
 </div>
 
-<div class="totals">
-  <span>Total</span><strong id="total">¥0</strong>
-</div>
-
-<div class="actions">
-  <button id="save" disabled>Save draft</button>
-  <button id="submit">Submit</button>
-  <span id="summary">…</span>
-</div>
+<div id="view"></div>
 
 <p id="claim-status"></p>
 <p id="problems"></p>

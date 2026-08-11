@@ -70,6 +70,10 @@ page.on("pageerror", (e) => console.log("[pageerror]", e.message));
 const err = (name) => page.textContent("#err-" + name);
 const disabled = (id) => page.$eval("#" + id, (el) => el.disabled);
 
+// Back to an empty draft first: this check submits, and a submitted claim
+// refuses further edits, so without the reset it can only run once.
+await page.request.post(BASE + "api/claim/reset", { data: "" });
+
 // Start from a known draft.
 await page.request.post(BASE + "api/claim", {
   headers: { "Content-Type": "application/json" },
@@ -100,6 +104,33 @@ check("the loaded values are in the generated controls",
   (await page.inputValue("#f-title")) === "Kyoto trip"
   && (await page.inputValue("#f-spent_on")) === "2026-08-11");
 check("nothing is unsaved on arrival", (await disabled("save")));
+
+// --- a view is built and torn down, and takes its watchers with it ----
+// Nothing in the language makes the second half happen; store_unwatch is an
+// ordinary call. What is checked is that the app makes it, because the
+// alternative is measurable: before close_view existed, three round trips
+// left eleven watchers running, nine of them painting into detached nodes.
+const watchers = async () =>
+  Number((await page.textContent("#watchers")).replace("watchers: ", ""));
+const opening = await watchers();
+for (let i = 0; i < 3; i++) {
+  await page.click("#tab-summary");
+  await page.waitForTimeout(80);
+  await page.click("#tab-form");
+  await page.waitForTimeout(80);
+}
+check("three round trips between views leave no watchers behind",
+  (await watchers()) === opening, `${opening} -> ${await watchers()}`);
+
+await page.click("#tab-summary");
+await page.waitForTimeout(120);
+check("the summary view is one watcher, not the form's two",
+  (await watchers()) === 1, String(await watchers()));
+check("and it renders from the same state",
+  (await page.textContent("#sum-title")) === "Kyoto trip",
+  await page.textContent("#sum-title"));
+await page.click("#tab-form");
+await page.waitForTimeout(120);
 
 // --- a generated control is a real control ---------------------------
 await page.fill("#f-title", "");

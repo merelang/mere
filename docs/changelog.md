@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.178 — 2026-08-11
+
+_A page with two views, so that a watcher's lifetime becomes a question — and
+the answer that `drop type` cannot give._
+
+_`examples/claims` grew a tab bar over one store: a Form view that builds the
+generated controls, the line rows and the actions, and a read-only Summary view.
+Switching drops the old view's DOM wholesale. Dropping the nodes did not drop
+the watchers, because contrib/state had no way to take one back, so **three
+round trips between the tabs left eleven watchers running, nine of them painting
+into nodes no longer in the document.** The counter in the tab bar is how that
+became visible at all._
+
+_`store_watch` now returns a token and `store_unwatch` takes it; the app
+collects a view's tokens and releases them on close. **11 → 2, and constant
+however far the user navigates.**_
+
+_The language question this was chosen to ask has a negative answer, which is
+worth having. Mere's one mechanism for enforced release is a `drop type` bound
+by `with`, whose `close` runs at scope end — and **a subscription's lifetime is
+not the scope that created it.** The view is built in one event and torn down in
+another, so by the time `with` would close the handle the view has not even been
+shown. A drop type also cannot be placed in a region, which is where the watcher
+list lives. So releasing stays a convention, recorded in contrib/state's README
+rather than papered over._
+
+_Two compiler findings on the way. A binding called `entry` did not compile on
+LLVM at all: values and basic-block labels share one namespace there and every
+emitted function opens with a block called `entry`, so a parameter of that name
+claimed the slot first — "unable to create block named 'entry'". Not a wrong
+answer, no answer, from a name nothing warns about; `entry` is the obvious name
+for an element of an association list, which is how it turned up.
+`llvm_safe_local` renames the parameter, since the `entry:` label is written
+into every hand-authored runtime blob in that file.
+`test/parity/reserved_local_entry.mere` holds it across the shapes that emit a
+parameter separately — top-level fn, lifted inner fn, closure adapter._
+
+_And the store could not use contrib/state's own `cell`: a store instantiated at
+two different state types puts `cell_new` at three types derived from S, and
+that shape does not survive monomorphization on C or LLVM. The builtin vec does,
+so the module that names the trick writes its three slots out longhand. Recorded
+in the source; a minimal repro is not yet isolated._
+
+_parity 81/81, ctest 13/13, dune runtest 2308/0, claims browser check 17/17 —
+including that three round trips between views leave no watchers behind._
+
+---
+
 ## v0.1.177 — 2026-08-11
 
 _Stage 4 of the shared-schema dogfood: change the schema in ways other than
