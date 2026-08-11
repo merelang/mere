@@ -165,6 +165,7 @@ In interpreter mode, "Mere runs on top of OCaml." Once we can emit native binari
 - Some stdlib builtins (`read_lines` / `env_var` / `file_exists` etc.) are **interpreter-only**. Phase 34 brought float / libm (sqrt / sin / cos / tan / f_pow / atan2) to the 3 backends. `args` is no longer among them: it reaches all four backends as of v0.1.169 (LLVM stores argc/argv from `main` into globals; Wasm folds the host's `arg_count` / `arg_get`).
 - GC for strings / closure envs / variant nodes (currently a region arena bulk-freed at main exit — suitable for short-lived runs).
 - LLVM / Wasm with payload-mixed variants as Map K (uniform payload only) — C accepts mixed.
+- **`of_json` on LLVM**. `to_json` landed there in v0.1.184 by sharing the `show` emitter — the two differ only in literals — but decoding needs a JSON parser written in the target language, and C and Wasm each have their own hand-written one. `scripts/parity.sh` now reports what each backend did not check, which is where this shows up: six of eighty-three, all but one of them `of_json`.
 
 ### CLI
 

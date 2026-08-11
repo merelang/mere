@@ -286,8 +286,10 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 ## JSON, derive-style (5 ★)
 
 Structural JSON, compile-time-specialized per type (no trait machinery),
-like `show`. `to_json` works on interp / C / Wasm; `of_json` and its
-siblings on interp / C / Wasm.
+like `show`. `to_json` works on **all four** backends — on LLVM it shares
+the emitter with `show`, since the two differ only in literals (v0.1.184).
+`of_json` and its siblings are interp / C / Wasm: decoding needs a JSON
+parser in the target language, and LLVM has no hand-written one.
 
 | Name | Type | Description |
 |---|---|---|
