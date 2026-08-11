@@ -1994,6 +1994,14 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App _ when app_head_user_bound_c f -> emit_closure_call ()
      | Ast.Var "print" ->
        "({ puts(" ^ emit_expr arg ^ "); 0; })"
+     (* print_int / print_bool had no arm at all: the names fell through to the
+        closure path and emitted a call to an undefined `mu_print_int`, so the
+        refusal came from clang as "use of undeclared identifier" — a documented
+        builtin, failing at the wrong layer. *)
+     | Ast.Var "print_int" ->
+       "({ printf(\"%lld\\n\", (long long)(" ^ emit_expr arg ^ ")); 0; })"
+     | Ast.Var "print_bool" ->
+       "({ puts((" ^ emit_expr arg ^ ") ? \"true\" : \"false\"); 0; })"
      | Ast.Var "print_err" ->
        (* v0.1.13 (mk dogfood P2): write to stderr with a newline, mirroring
           print → puts. A native CLI needs diagnostics separate from stdout. *)

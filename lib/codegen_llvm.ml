@@ -2366,11 +2366,12 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_show_type t
         | None -> ())
-     | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
+     | Ast.App ({ node = Ast.Var ("str_of_int" | "print_int"); _ }, _) ->
        (* v0.1.42: str_of_int lowers to `call @show_int`, but only `show`
           registered the helper — `print (str_of_int x)` under a top-level
           let produced an undefined @show_int at clang time (same gap as
-          the Wasm backend; found while smoke-testing bitwise builtins). *)
+          the Wasm backend; found while smoke-testing bitwise builtins).
+          print_int lowers *through* str_of_int, so it registers here too. *)
        add_show_type Ast.TyInt
      | _ -> ());
     match e.Ast.node with
@@ -3799,6 +3800,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
     "0"  (* unit / int 0 *)
+  (* print_int / print_bool: `print (str_of_int x)` and `print (if x then ...)`
+     already work here, so these are a rewrite rather than new runtime calls.
+     They used to be refused as "no LLVM lowering", which made a documented
+     builtin backend-dependent for no reason. *)
+  | Ast.App ({ node = Ast.Var "print_int"; _ }, arg) ->
+    emit_expr env
+      { e with Ast.node =
+          Ast.App ({ arg with Ast.node = Ast.Var "print"; Ast.ty = None },
+                   { arg with Ast.node =
+                       Ast.App ({ arg with Ast.node = Ast.Var "str_of_int";
+                                           Ast.ty = None }, arg);
+                              Ast.ty = Some Ast.TyStr }) }
+  | Ast.App ({ node = Ast.Var "print_bool"; _ }, arg) ->
+    let str b = { arg with Ast.node = Ast.Str_lit b; Ast.ty = Some Ast.TyStr } in
+    emit_expr env
+      { e with Ast.node =
+          Ast.App ({ arg with Ast.node = Ast.Var "print"; Ast.ty = None },
+                   { arg with Ast.node = Ast.If (arg, str "true", str "false");
+                              Ast.ty = Some Ast.TyStr }) }
   (* Q-012: spawn a unit -> unit closure on a fresh pthread. Copy the
      closure's {env, fn} onto the heap so the child owns it, then
      pthread_create the trampoline. Result is the pthread_t as i64. *)

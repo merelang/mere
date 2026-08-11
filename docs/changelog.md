@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.190 — 2026-08-11
+
+_`print_int` and `print_bool`, which the reference has claimed for every backend
+since Phase 22 and which only the interpreter had._
+
+_Found while smoke-testing the RV32I work: `let f = fn n -> let _ = print_int n
+in n;` would not compile on the **C** backend. Not a shadowing or value-position
+subtlety — codegen_c had no arm for the name at all, so it fell through to the
+closure path and emitted a call to an undefined `mu_print_int`. The refusal then
+arrived from clang, as "use of undeclared identifier", about a symbol the user
+never wrote. LLVM and Wasm at least said what they meant ("no lowering yet"),
+though LLVM's message named its scope as "interp + C", which was not true
+either._
+
+_So a documented builtin worked in one of four places, and the one that failed
+worst failed at the wrong layer. All four now agree. C prints through `printf`
+(`%lld`, matching its int width) and `puts` for the bool. LLVM and Wasm route
+through the `str_of_int` they already had, so neither needed a new runtime call
+or host import — `print_int x` becomes `print (str_of_int x)` at emit time. That
+also needed `print_int` added to each one's use-scan, since the helper
+`@show_int` / `$show_int` is only defined when something registers it: exactly
+the v0.1.42 gap, one level further in._
+
+_`test/parity/print_int_bool.mere` keeps the four in step over zero, negatives
+and a bool from a comparison. parity 84/84, ctest 13/13, `dune runtest`
+2329/0._
+
+_The reference line that claimed all this now says what actually happened._
+
+---
+
 ## v0.1.189 — 2026-08-11
 
 _Machine CSRs, and a non-blocking byte of stdin so a UART can have a receive
