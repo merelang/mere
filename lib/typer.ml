@@ -1613,6 +1613,30 @@ let initial_env : env =
        and an interrupt has no caller to hand it one — so it captures instead. *)
     ("set_trap_handler",
        mono (Ast.TyArrow (Ast.TyArrow (Ast.TyInt, Ast.TyInt), Ast.TyUnit)));
+    (* What a scheduler needs and a bare program cannot otherwise name.
+         trap_save mach       — the trampoline's 31-word register save area, so a
+                                handler can swap one task's registers for another's
+         machine_scratch mach — reserved RAM the runtime is not using, which is
+                                where task stacks come from: a bare program owns
+                                no fixed address of its own (the heap grows up
+                                from 2MB and the stack down from the top)
+         closure_code / closure_env — a closure's entry point and its environment.
+                                A task IS a closure; starting one means building a
+                                context whose PC is its code and whose a0 is its
+                                env. This is ABI knowledge, which a kernel has.
+       All narrow from the machine capability, so they hand out no new authority
+       — only the coordinates of memory the program could already name. *)
+    (* a window's base as a number. Not authority — you still need a window to
+       touch anything — but a stack pointer or a DMA descriptor is an address,
+       and hardware wants the number. *)
+    ("raw_base",    mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyInt)));
+    ("trap_save",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyCon ("Raw", []))));
+    ("machine_scratch",
+                    mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyCon ("Raw", []))));
+    ("closure_code",
+                    mono (Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit), Ast.TyInt)));
+    ("closure_env",
+                    mono (Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit), Ast.TyInt)));
     ("csr_read",    mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("csr_write",   mono (Ast.TyArrow (Ast.TyInt,
                             Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
