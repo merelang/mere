@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.201" Version.v "0.1.201";
+  check "version is 0.1.202" Version.v "0.1.202";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12129,6 +12129,22 @@ let () =
      locked below failed at assembly time ("undefined label u_f") — a hard
      crash that nothing in the suite would have caught. These assert on the
      emitted listing, so they lock the instruction actually chosen. *)
+  (* The -rv path compiles a concatenation — the Mere-source prelude, then the
+     user's file — so every position it produces is counted from the top of that
+     text. A type error in a three-line file used to be reported at "line 133".
+     One function answers "where is this really?" for both the diagnostics and
+     the debug map, so they cannot drift apart. *)
+  let prelude_lines = Rv_prelude.lines () in
+  check "rv prelude: the line after the prelude is the user's line 1"
+    (match Rv_prelude.origin_of (Loc.mk ~line:(prelude_lines + 1) ~col:5 ()) with
+     | Rv_prelude.User l -> Printf.sprintf "user %d:%d" l.Loc.line l.Loc.col
+     | Rv_prelude.Prelude _ -> "prelude")
+    "user 1:5";
+  check "rv prelude: a position inside the prelude is not remapped into the user's file"
+    (match Rv_prelude.origin_of (Loc.mk ~line:3 ~col:1 ()) with
+     | Rv_prelude.User _ -> "user"
+     | Rv_prelude.Prelude l -> Printf.sprintf "prelude %d" l.Loc.line)
+    "prelude 3";
   let rv_typed src =
     let prog = Pipeline.parse_program src in
     let type_env = ref Typer.initial_env in

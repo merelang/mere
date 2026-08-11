@@ -1,0 +1,114 @@
+// The context switch, checked by a machine nobody here wrote.
+//
+//   mere -rv --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_sched.mere > virt.bin
+//   qemu-system-riscv32 -M virt -bios none -nographic -kernel virt.bin
+//
+// The mechanism and the reasoning are examples/riscv_bare_sched.mere's — read
+// that one first; this is the same scheduler on QEMU virt's addresses, and it
+// stops after a fixed number of switches so its output can be diffed.
+//
+// Why bother running *this* one on somebody else's machine. A context switch is
+// the place where an emulator and the code it runs can be wrong together and
+// nobody notices: the trampoline saves 31 registers to a known place and the
+// emulator restores them, so if the two agreed on a wrong order, order-dependent
+// corruption would be invisible in every test we own. QEMU restores the register
+// set its own way, from the same bytes.
+//
+// It also checks the one rule that was hardest to arrive at — `gp` switches with
+// the rest, because each task gets a heap of its own — against a machine with no
+// stake in it.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+let new_vec = fn (n: int) -> fn (x: int) ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in
+  v;
+
+let interval = 200000;        // 10 MHz on virt: 20ms
+let switches = 6;             // then stop, so the run is finite and diffable
+let x_sp = 2;                 // register numbers, as the save area indexes them
+let x_gp = 3;
+let x_a0 = 10;
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let mtime = raw_window mach 0x0200bff8 8 in
+  let mtimecmp = raw_window mach 0x02004000 8 in
+  let save = trap_save mach in
+  let scratch = machine_scratch mach in
+
+  let tcb0 = new_vec 32 0 in
+  let tcb1 = new_vec 32 0 in
+  let state = new_vec 1 0 in    // which task is running
+  let count = new_vec 1 0 in    // switches so far
+
+  // Each task prints its letter once per time it is resumed — when the switch
+  // counter it can see has moved — rather than once every N iterations. That
+  // makes the output a function of the *switches* and not of the clock's rate,
+  // which is what lets the same binary be diffed between this board (10 MHz of
+  // real time per slice) and an emulator whose clock counts instructions.
+  let spinner = fn (c: int) -> fn () ->
+    let rec loop = fn last ->
+      let n = vec_get count 0 in
+      let _ = if n != last then putc uart c else () in
+      loop n in
+    loop (0 - 1);
+
+  let task_b = spinner 66 in                                   // 'B'
+  let _ = vec_set tcb1 x_sp (raw_base scratch + raw_len scratch) in
+  let _ = vec_set tcb1 x_gp (raw_base scratch) in
+  let _ = vec_set tcb1 x_a0 (closure_env task_b) in
+  let _ = vec_set tcb1 0 (closure_code task_b) in
+
+  let handler = fn cause ->
+    let cur = vec_get state 0 in
+    let out = if cur == 0 then tcb0 else tcb1 in
+    let into = if cur == 0 then tcb1 else tcb0 in
+    let rec store = fn i ->
+      if i > 31 then ()
+      else let _ = vec_set out i (raw_peek32 save (i * 4)) in store (i + 1) in
+    let _ = store 1 in
+    let _ = vec_set out 0 (csr_read 0x341) in                  // where it was
+    let rec load = fn i ->
+      if i > 31 then ()
+      else
+        let _ = raw_poke32 save (i * 4) (vec_get into i) in    // gp too: own heaps
+        load (i + 1) in
+    let _ = load 1 in
+    let _ = vec_set state 0 (1 - cur) in
+    let _ = vec_set count 0 (vec_get count 0 + 1) in
+    let _ = raw_poke32 mtimecmp 0 (raw_peek32 mtime 0 + interval) in
+    vec_get into 0 in
+
+  let _ = set_trap_handler handler in
+  let _ = uart_puts uart "scheduling two tasks:\n" 0 in
+  let _ = raw_poke32 mtimecmp 0 (raw_peek32 mtime 0 + interval) in
+  let _ = csr_write 0x304 128 in                               // mie.MTIE
+  let _ = csr_write 0x300 8 in                                 // mstatus.MIE
+
+  // Task A is this context, printing on the same rule, and it stops the machine
+  // once enough switches have happened. Every 'A' after the first one is proof
+  // that task A was resumed from a TCB that the switch out of task B wrote.
+  let rec wait = fn last ->
+    let n = vec_get count 0 in
+    let _ = if n != last then putc uart 65 else () in          // 'A'
+    if n >= switches then () else wait n in
+  let _ = wait (0 - 1) in
+
+  let _ = csr_write 0x300 0 in                                 // interrupts off
+  let _ = csr_write 0x305 0 in                                 // then mtvec
+  let _ = putc uart 10 in
+  let _ = uart_puts uart "switched enough, stopping\n" 0 in
+
+  let test = raw_window mach 0x00100000 8 in
+  raw_poke32 test 0 0x5555;                                    // power off
+
+()

@@ -58,29 +58,40 @@ let report_and_exit ~source ~filename loc kind msg =
   prerr_endline (Mere.Diagnostic.format ~source ~filename loc kind msg);
   exit 1
 
-let run_action action label source =
+(* `~rv` marks the RV32I paths, which compile a *concatenation* — the Mere-source
+   prelude, then the user's file. Every position a diagnostic carries is counted
+   from the top of that text, so without this a type error in a three-line file
+   was reported at "line 133", against a snippet from the wrong line or none at
+   all. The debug map (`-rvg`) already subtracted the prelude; the diagnostics
+   did not.
+
+   A position inside the prelude is not remapped into the user's file, because
+   there is no honest line there to point at: it is shown against the prelude's
+   own text instead, which also makes a prelude bug legible as one. *)
+let run_action ?(rv = false) action label source =
+  let report loc kind msg =
+    if not rv then report_and_exit ~source ~filename:label loc kind msg
+    else
+      match Mere.Rv_prelude.origin_of loc with
+      | Mere.Rv_prelude.User loc ->
+        report_and_exit ~source ~filename:label loc kind msg
+      | Mere.Rv_prelude.Prelude loc ->
+        report_and_exit ~source:Mere.Rv_prelude.contents
+          ~filename:"<rv-prelude>" loc kind msg
+  in
   try
     let result = action source in
     print_endline result
   with
-  | Mere.Lexer.Lex_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "lex error" msg
-  | Mere.Parser.Parse_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "parse error" msg
-  | Mere.Eval.Eval_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "eval error" msg
-  | Mere.Typer.Type_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "type error" msg
-  | Mere.Trait_elab.Trait_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "trait error" msg
-  | Mere.Codegen_c.Codegen_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "codegen error" msg
-  | Mere.Codegen_llvm.Codegen_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "codegen error" msg
-  | Mere.Codegen_wasm.Codegen_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "codegen error" msg
-  | Mere.Codegen_riscv.Codegen_error (loc, msg) ->
-    report_and_exit ~source ~filename:label loc "codegen error" msg
+  | Mere.Lexer.Lex_error (loc, msg) -> report loc "lex error" msg
+  | Mere.Parser.Parse_error (loc, msg) -> report loc "parse error" msg
+  | Mere.Eval.Eval_error (loc, msg) -> report loc "eval error" msg
+  | Mere.Typer.Type_error (loc, msg) -> report loc "type error" msg
+  | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
+  | Mere.Codegen_c.Codegen_error (loc, msg) -> report loc "codegen error" msg
+  | Mere.Codegen_llvm.Codegen_error (loc, msg) -> report loc "codegen error" msg
+  | Mere.Codegen_wasm.Codegen_error (loc, msg) -> report loc "codegen error" msg
+  | Mere.Codegen_riscv.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Sys_error msg ->
     Printf.eprintf "io error: %s\n" msg;
     exit 1
@@ -193,15 +204,6 @@ let compile_to_wasm ?base_dir source =
    line-number shifts in diagnostics are the only cost. *)
 let rv_source source = Mere.Rv_prelude.contents ^ "\n" ^ source
 
-(* Lines the prelude occupies, so the debug map can report the line the person
-   wrote rather than the line of the concatenation. Counted the same way
-   `rv_source` builds it: the prelude, then one newline, then the source. *)
-let rv_prelude_lines () =
-  let s = Mere.Rv_prelude.contents in
-  let n = ref 1 in
-  String.iter (fun c -> if c = '\n' then incr n) s;
-  !n
-
 (* `--ram <MB>` sets the RAM the emitted binary expects: the stack starts at
    the top of it and the heap grows up from 2MB, so this is the knob for a
    program whose live heap outgrows the 8MB default. The emulator running the
@@ -242,7 +244,7 @@ let set_riscv_load_base v =
 
 let debug_map_riscv ?base_dir source =
   let open Mere in
-  Codegen_riscv.dbg_line_base := rv_prelude_lines ();
+  Codegen_riscv.dbg_line_base := Rv_prelude.lines ();
   let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_debug_map ~main_ty prog
 
@@ -270,7 +272,7 @@ let rv_flags mode args =
       | "-rvs" -> listing_riscv ~base_dir
       | _ -> debug_map_riscv ~base_dir
     in
-    Some (fun () -> run_action action path (read_file path))
+    Some (fun () -> run_action ~rv:true action path (read_file path))
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -443,9 +445,9 @@ let () =
     let base = Filename.dirname path in
     run_action (compile_to_wasm ~base_dir:base) path source
   | [_; "-rve"; expr] ->
-    run_action compile_to_riscv "<inline>" expr
+    run_action ~rv:true compile_to_riscv "<inline>" expr
   | [_; "-rvse"; expr] ->
-    run_action listing_riscv "<inline>" expr
+    run_action ~rv:true listing_riscv "<inline>" expr
   (* -rv (binary) / -rvs (listing) / -rvg (debug map), each with `--bare`,
      `--ram <MB>` and `--load-base <addr>` in any order. `--bare` means no host
      syscalls beyond the emulator's exit, and the program's top-level `main` is

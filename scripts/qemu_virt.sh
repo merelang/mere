@@ -17,11 +17,17 @@
 #   * the trap contract: mtvec, mstatus.MIE, mie.MTIE, the CLINT's compare
 #     register, and the PC the handler returns for mepc
 #
+# Set MEMU to a checkout of the memu project and each image is run on *both*
+# machines — QEMU and the Mere-written emulator — and their output diffed. That
+# turns this from "the binary behaves as expected" into a differential test
+# between two independent implementations of the same board.
+#
 # Skips (exit 0) when qemu-system-riscv32 is absent, so it can be wired into a
 # build without making QEMU a dependency.
 #
 # Usage:
 #   sh scripts/qemu_virt.sh
+#   MEMU=/path/to/memu sh scripts/qemu_virt.sh     # also diff against our own
 #
 # Prerequisites: dune-built _build/default/bin/mere.exe, qemu-system-riscv32
 #   (macOS: brew install qemu, Debian/Ubuntu: apt install qemu-system-misc)
@@ -47,6 +53,20 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0
 fail=0
 
+# Our own emulator, built once, if a memu checkout was pointed at. It reads
+# `prog.bin` from the working directory and takes the RAM size plus `virt` for
+# the board's layout.
+RVRUN=""
+if [ -n "$MEMU" ] && [ -f "$MEMU/riscv-runc/rv32i_run.mere" ]; then
+  if "$MERE" -c "$MEMU/riscv-runc/rv32i_run.mere" > "$TMP/rvrun.c" 2>/dev/null \
+     && cc -O2 -w "$TMP/rvrun.c" -o "$TMP/rvrun" 2>/dev/null; then
+    RVRUN="$TMP/rvrun"
+    echo "qemu_virt: cross-checking against the Mere emulator in \$MEMU"
+  else
+    echo "qemu_virt: could not build the Mere emulator from \$MEMU — QEMU only" >&2
+  fi
+fi
+
 # Run one image and diff its output. QEMU stops on its own: each program writes
 # 0x5555 to virt's test finisher at 0x00100000 to power the machine off. The
 # timeout is a backstop for a program that never gets there — without one, a
@@ -63,15 +83,32 @@ check() {
   got=$(perl -e 'alarm 30; exec @ARGV' \
     "$QEMU" -M virt -bios none -nographic -no-reboot -kernel "$bin" 2>&1 || true)
 
-  if [ "$got" = "$expected" ]; then
-    printf '  ok    %s (%s bytes)\n' "$name" "$(wc -c < "$bin" | tr -d ' ')"
-    pass=$((pass + 1))
-  else
-    printf '  FAIL  %s\n' "$name"
+  if [ "$got" != "$expected" ]; then
+    printf '  FAIL  %s (qemu)\n' "$name"
     printf '    expected:\n%s\n' "$expected" | sed 's/^/      /'
     printf '    got:\n%s\n' "$got" | sed 's/^/      /'
     fail=$((fail + 1))
+    return
   fi
+
+  # The same bytes on our own machine. Any disagreement here is one of the two
+  # emulators being wrong, which is the whole reason to run both.
+  if [ -n "$RVRUN" ]; then
+    cp "$bin" "$TMP/prog.bin"
+    ours=$(cd "$TMP" && perl -e 'alarm 300; exec @ARGV' ./rvrun 8 virt 2>&1 || true)
+    if [ "$ours" != "$expected" ]; then
+      printf '  FAIL  %s (memu disagrees with qemu)\n' "$name"
+      printf '    qemu:\n%s\n' "$got" | sed 's/^/      /'
+      printf '    memu:\n%s\n' "$ours" | sed 's/^/      /'
+      fail=$((fail + 1))
+      return
+    fi
+    printf '  ok    %s (%s bytes, identical on both)\n' \
+      "$name" "$(wc -c < "$bin" | tr -d ' ')"
+  else
+    printf '  ok    %s (%s bytes)\n' "$name" "$(wc -c < "$bin" | tr -d ' ')"
+  fi
+  pass=$((pass + 1))
 }
 
 echo "qemu_virt: $($QEMU --version | head -1)"
@@ -85,6 +122,12 @@ check examples/riscv_virt_timer.mere 'tick 1
 tick 2
 tick 3
 three ticks, stopping'
+
+# The letters come one per switch rather than one per N iterations, so this is a
+# function of the scheduler and not of how fast either machine's clock runs.
+check examples/riscv_virt_sched.mere 'scheduling two tasks:
+ABABABA
+switched enough, stopping'
 
 echo "qemu_virt: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
