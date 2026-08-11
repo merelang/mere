@@ -31,10 +31,8 @@ let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
 
 // The 16550 line-status register is at +5; bit 5 means the transmitter holding
 // register is empty. Nothing here needs to wait for it, but reading it shows a
-// device register being read back through the same window. (Bit 5 is extracted
-// with division because the RV32I backend has no bitwise builtins yet — a real
-// driver would want `bit_and` here.)
-let tx_ready = fn (uart: Raw) -> raw_peek8 uart 5 / 32 % 2 == 1;
+// device register being read back through the same window.
+let tx_ready = fn (uart: Raw) -> bit_and (raw_peek8 uart 5) 32 != 0;
 
 let main = fn (mach: Raw) ->
   let uart = raw_window mach 0x10000000 256 in

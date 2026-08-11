@@ -976,6 +976,65 @@ and compile_app env e =
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s 0 a2 t0 2 0x23);                        (* data[i] = x *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
+  (* --- bitwise -----------------------------------------------------------
+     A device driver cannot be written without these: the UART example had to
+     extract a line-status bit with `/ 32 % 2`. `bit_shr` is documented as
+     arithmetic on every backend (it equals floor division by 2^n), so it
+     lowers to SRA and not SRL.
+
+     Shift counts of 32 or more: RV32's shifts use only the low 5 bits of the
+     count, so a bare SLL would make `bit_shl x 33` mean `x << 1`. What the
+     other backends give, once their 64-bit result is read as 32 bits, is zero
+     for a left shift and the sign bit for a right shift — so that is what
+     this emits. Constant counts fold; a dynamic count pays three extra
+     instructions for the left shift and a branch for the right. (A *negative*
+     dynamic count is the one case that still differs: constants are exact,
+     but the runtime path treats it as huge-unsigned.) *)
+  | Ast.Var ("bit_and" | "bit_or" | "bit_xor") when List.length args = 2 ->
+    let f3 = match head.node with
+      | Ast.Var "bit_and" -> 7 | Ast.Var "bit_or" -> 6 | _ -> 4 in
+    (match (List.nth args 1).Ast.node with
+     | Ast.Int_lit n when is_small n ->
+       compile_expr env (List.nth args 0);
+       emit_word (enc_i n a0 f3 a0 0x13)                     (* andi/ori/xori *)
+     | _ ->
+       compile_expr env (List.nth args 0); push a0;
+       compile_expr env (List.nth args 1);
+       emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+       emit_word (enc_r 0 a1 a0 f3 a0 0x33))                 (* and/or/xor *)
+  | Ast.Var "bit_not" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i (-1) a0 4 a0 0x13)                      (* xori a0, a0, -1 *)
+  | Ast.Var ("bit_shl" | "bit_shr") when List.length args = 2 ->
+    let left = (match head.node with Ast.Var "bit_shl" -> true | _ -> false) in
+    (match (List.nth args 1).Ast.node with
+     | Ast.Int_lit n ->
+       compile_expr env (List.nth args 0);
+       if left then begin
+         if n < 0 || n >= 32 then li a0 0
+         else emit_word (enc_i n a0 1 a0 0x13)                (* slli *)
+       end else begin
+         if n < 0 then ()                                     (* interp: unchanged *)
+         else emit_word (enc_i (0x400 lor (min n 31)) a0 5 a0 0x13)  (* srai *)
+       end
+     | _ ->
+       compile_expr env (List.nth args 0); push a0;
+       compile_expr env (List.nth args 1);
+       emit_word (enc_i 0 a0 0 a1 0x13);                      (* a1 = count *)
+       pop a0;                                                (* a0 = value *)
+       if left then begin
+         emit_word (enc_r 0 a1 a0 1 a0 0x33);                 (* sll  a0, a0, a1 *)
+         emit_word (enc_i 32 a1 3 t0 0x13);                   (* sltiu t0, a1, 32 *)
+         emit_word (enc_r 0x20 t0 zero 0 t0 0x33);            (* sub  t0, x0, t0 *)
+         emit_word (enc_r 0 t0 a0 7 a0 0x33)                  (* and  a0, a0, t0 *)
+       end else begin
+         let l_ok = fresh_label ".shr" in
+         emit_word (enc_i 32 a1 3 t0 0x13);                   (* sltiu t0, a1, 32 *)
+         emit (Branch (1, t0, zero, l_ok));                   (* bnez t0 -> ok *)
+         emit_word (enc_i 31 zero 0 a1 0x13);                 (* li   a1, 31 *)
+         emit (Label l_ok);
+         emit_word (enc_r 0x20 a1 a0 5 a0 0x33)               (* sra  a0, a0, a1 *)
+       end)
   (* --- raw memory, behind a window capability -------------------------
      A `Raw` value is a 2-word heap block [base][len]. Offsets are relative
      to the window, so code holding a UART window cannot express an address
@@ -1353,15 +1412,21 @@ let emit_start () =
   emit (Jal (zero, "__hang"))                           (* safety: spin if it ever returns *)
 
 (* print_int: itoa(a0) + '\n' -> ecall write. A leaf; clobbers t*/a* only.
-   The decimal digits are built in the reserved scratch buffer above sp. *)
+   The decimal digits are built in the reserved scratch buffer above sp.
+
+   The value is made *negative* rather than positive before the digit loop,
+   and each digit comes out as -(x % 10). Negating a positive is always safe;
+   negating INT_MIN is not, and this used to do exactly that — 0x80000000
+   stayed negative, every remainder came out negative, and `'0' + negative`
+   printed punctuation. `bit_shl 1 31` found it. *)
 let emit_print_int () =
   emit (Label "__print_int");
   emit_word (enc_i 0 a0 0 t4 0x13);                     (* addi t4, a0, 0  — t4 = value *)
-  emit_word (enc_i 0 zero 0 t3 0x13);                   (* addi t3, x0, 0  — neg flag *)
-  emit (Branch (5, t4, zero, ".pi_pos"));               (* bge t4, x0, pos *)
-  emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* sub t4, x0, t4  — negate *)
-  emit_word (enc_i 1 zero 0 t3 0x13);                   (* addi t3, x0, 1 *)
-  emit (Label ".pi_pos");
+  emit_word (enc_i 1 zero 0 t3 0x13);                   (* addi t3, x0, 1  — assume neg *)
+  emit (Branch (4, t4, zero, ".pi_neg"));               (* blt t4, x0, neg *)
+  emit_word (enc_i 0 zero 0 t3 0x13);                   (* addi t3, x0, 0 *)
+  emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* sub t4, x0, t4  — now <= 0 *)
+  emit (Label ".pi_neg");
   li t1 (scratch_base ());                               (* t1 = BUF *)
   emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — END cursor *)
   emit_word (enc_i 10 zero 0 t5 0x13);                  (* addi t5, x0, 10 — '\n' *)
@@ -1369,7 +1434,8 @@ let emit_print_int () =
   emit_word (enc_i (-1) t2 0 t2 0x13);                  (* addi t2, t2, -1 *)
   emit_word (enc_i 10 zero 0 t6 0x13);                  (* addi t6, x0, 10 — divisor *)
   emit (Label ".pi_loop");
-  emit_word (enc_r 1 t6 t4 6 t5 0x33);                  (* rem  t5, t4, t6 *)
+  emit_word (enc_r 1 t6 t4 6 t5 0x33);                  (* rem  t5, t4, t6  (<= 0) *)
+  emit_word (enc_r 0x20 t5 zero 0 t5 0x33);             (* sub  t5, x0, t5  — digit 0..9 *)
   emit_word (enc_r 1 t6 t4 4 t4 0x33);                  (* div  t4, t4, t6 *)
   emit_word (enc_i 48 t5 0 t5 0x13);                    (* addi t5, t5, '0' *)
   emit_word (enc_s 0 t5 t2 0 0x23);                     (* sb   t5, 0(t2) *)
@@ -1485,16 +1551,18 @@ let emit_str_cmp () =
 let emit_str_of_int () =
   emit (Label "__str_of_int");
   emit_word (enc_i 0 a0 0 t4 0x13);                     (* mv t4, a0 — value *)
-  emit_word (enc_i 0 zero 0 t3 0x13);                   (* neg flag = 0 *)
-  emit (Branch (5, t4, zero, ".si_pos"));               (* bge t4, x0 *)
-  emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* neg *)
-  emit_word (enc_i 1 zero 0 t3 0x13);
-  emit (Label ".si_pos");
+  (* the value is made negative, not positive — see __print_int on INT_MIN *)
+  emit_word (enc_i 1 zero 0 t3 0x13);                   (* neg flag = 1 *)
+  emit (Branch (4, t4, zero, ".si_neg"));               (* blt t4, x0 *)
+  emit_word (enc_i 0 zero 0 t3 0x13);
+  emit_word (enc_r 0x20 t4 zero 0 t4 0x33);             (* t4 = -t4, now <= 0 *)
+  emit (Label ".si_neg");
   li t1 (scratch_base ());
   emit_word (enc_i 63 t1 0 t2 0x13);                    (* addi t2, t1, 63 — cursor *)
   emit_word (enc_i 10 zero 0 t6 0x13);                  (* divisor 10 *)
   emit (Label ".si_loop");
-  emit_word (enc_r 1 t6 t4 6 t5 0x33);                  (* rem t5, t4, 10 *)
+  emit_word (enc_r 1 t6 t4 6 t5 0x33);                  (* rem t5, t4, 10  (<= 0) *)
+  emit_word (enc_r 0x20 t5 zero 0 t5 0x33);             (* t5 = -t5 — digit 0..9 *)
   emit_word (enc_r 1 t6 t4 4 t4 0x33);                  (* div t4, t4, 10 *)
   emit_word (enc_i 48 t5 0 t5 0x13);                    (* + '0' *)
   emit_word (enc_s 0 t5 t2 0 0x23);                     (* sb t5, 0(t2) *)
