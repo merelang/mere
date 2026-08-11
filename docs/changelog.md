@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.179 — 2026-08-11
+
+_The monomorphization gap v0.1.178 recorded without a repro, isolated to seven
+lines — and made loud, which is as far as this slice goes._
+
+_The shape, self-contained and with no imports:_
+
+```mere
+let hold = fn (v) -> let c = vec_new () in let _ = vec_push c v in c;
+let mk = fn (v) -> (hold v, hold 1);      // parameter-derived AND fixed
+let (a1, a2) = mk 1 in
+let (b1, b2) = mk "s" in ...
+```
+
+_A polymorphic helper called at both a parameter-derived type and a fixed one,
+inside a function that is itself used at two types. Written `(hold v, hold v)`
+it is fine, and used directly at two types it is fine; it is the combination._
+
+_What it produced: `hold` monomorphized into an `int` copy and a `str` copy,
+both declarations with the right signature and **both bodies with the `int`
+one's operations** — a `mere_vec_str*` function calling `mere_vec_int_push`. Not
+a wrong answer, no answer, and only when the C compiler saw it, with a message
+about pointer conversions naming nothing in the source._
+
+_The mechanism, traced: codegen keeps a pristine clone of each polymorphic
+skeleton and unifies a fresh copy with every instantiation's arrow. That unify
+was wrapped in `try ... with _ -> ()`, and when it fails the spec's body belongs
+to another type. It cannot fail while the skeleton is genuinely polymorphic —
+and here it is not. Instrumenting the clone showed the typer hands codegen
+`hold` already fixed at `int -> Vec[__heap, int]`, while `mk` beside it is still
+`'a -> ...`. Written `(hold v, hold v)` the skeleton arrives polymorphic._
+
+_All three compiled backends now refuse instead of emitting, with a message that
+names the function, the arrow it cannot take, and the type it is stuck at. That
+turns a wrong program into a named one; it is not the fix. The fix is upstream
+of codegen, in whatever fixes the skeleton before it is cloned, and
+`test/parity/poly_helper_fixed_and_free.mere` will change from UNSUP to a real
+answer when that lands._
+
+_This is why contrib/state/store writes its three one-slot vecs out longhand
+instead of using contrib/state/cell: a store instantiated at two state types
+calls `cell_new` at a type derived from S and at plain `int` for its token
+counter. The module that names the trick does not get to use it, and now says
+why. parity 82/82, ctest 13/13, dune runtest 2308/0._
+
+---
+
 ## v0.1.178 — 2026-08-11
 
 _A page with two views, so that a watcher's lifetime becomes a question — and

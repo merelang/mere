@@ -1329,7 +1329,23 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       | Some t -> Ast.walk t
       | None -> Ast.TyUnit
     in
-    (try Typer.unify Loc.dummy clone_fun_ty arrow with _ -> ());
+    (* v0.1.179: this used to swallow the failure, and a spec whose clone
+       will not take the target arrow is a spec whose body belongs to a
+       different type. It was emitted anyway — the declaration got the right
+       signature and the body kept the operations of whatever type the
+       skeleton was already fixed at. Refusing is not the fix; it is the
+       difference between a wrong program and a named one. See
+       test/parity/poly_helper_fixed_and_free.mere. *)
+    (try Typer.unify Loc.dummy clone_fun_ty arrow
+     with _ ->
+       unsupported s.sfun.Ast.loc (Printf.sprintf
+         "unsupported: cannot instantiate `%s` at %s — its skeleton is \
+          already fixed at %s, so this instance would be emitted with the \
+          other one's body. A polymorphic helper called at both a fixed type \
+          and a parameter-derived type, inside a fn used at two types, hits \
+          this."
+         s.sname (Ast.pp_ty (Ast.walk arrow))
+         (Ast.pp_ty (Ast.walk clone_fun_ty))));
     let cloned_body =
       match cloned_fun.Ast.node with
       | Ast.Fun (_, _, b) -> b

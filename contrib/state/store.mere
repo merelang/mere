@@ -65,10 +65,14 @@
 // result is unbounded recursion. Painting is what they are for.
 
 // The three slots are one-element vecs written out longhand rather than
-// contrib/state/cell, because a store instantiated at two different state
-// types puts `cell_new` at three types derived from S, and that shape does
-// not survive monomorphization on C or LLVM today. The builtin vec does,
-// so the module that names the trick does not get to use it.
+// contrib/state/cell. A store instantiated at two different state types
+// calls `cell_new` at a type derived from S and at plain `int` for the
+// token counter, and that combination is refused by the compiled backends
+// — the skeleton reaches codegen already fixed at one type, so the second
+// instance has nothing to unify with. It used to be emitted wrongly and in
+// silence; since v0.1.179 it is a named refusal.
+// test/parity/poly_helper_fixed_and_free.mere holds the shape. So the
+// module that names the trick does not get to use it.
 
 let store_new = fn (initial) ->
   let value = vec_new () in
