@@ -1,0 +1,71 @@
+// A machine that interrupts itself, and a Mere closure that services it.
+//
+//   mere -rv --bare examples/riscv_bare_timer.mere > prog.bin
+//   ./rvrun
+//
+// The main loop below does nothing but spin. The ticks arrive anyway, because
+// the timer fires between instructions and the trap trampoline hands control to
+// the registered handler. That is the whole mechanism preemption is built on:
+// once a handler runs without the interrupted code's cooperation, a scheduler is
+// a matter of what the handler chooses to return.
+//
+// Why the handler is *registered* rather than named: it needs the machine
+// capability to do anything useful — reading a counter out of RAM here, saving a
+// register set in a scheduler — and an interrupt has no caller to hand it one.
+// So it captures instead, which is what a closure is for. `set_trap_handler`
+// takes it, stores it, and points mtvec at the trampoline codegen emitted.
+//
+// The handler's argument is mcause; its result is the PC to resume at. Anything
+// else it wants is a `csr_read` away — mepc (0x341) to resume where the machine
+// was, mtval (0x343) for a faulting address — so nothing has to be packed into a
+// tuple, which would mean allocating inside a trap.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+let rec put_dec = fn (uart: Raw) -> fn (n: int) ->
+  let _ = if n >= 10 then put_dec uart (n / 10) else () in
+  putc uart (48 + n % 10);
+
+let interval = 200000;        // in instructions: this clock counts work done
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let clint = raw_window mach 0x10008000 16 in   // mtime at +0, mtimecmp at +8
+  // The handler's state is an ordinary Mere cell it captures — not a fixed RAM
+  // address. A bare program does not own any: the heap grows up from 2MB (where
+  // top-level bindings live) and the stack down from the top, so picking an
+  // address means picking one the compiler is already using. The first draft of
+  // this example used 0x200000 and quietly shared a word with `interval`.
+  let ticks = vec_new () in
+  let _ = vec_push ticks 0 in
+
+  let _ = set_trap_handler (fn cause ->
+    let n = vec_get ticks 0 + 1 in
+    let _ = vec_set ticks 0 n in
+    let _ = uart_puts uart "tick " 0 in
+    let _ = put_dec uart n in
+    let _ = putc uart 10 in
+    // re-arm, or the deadline stays in the past and every instruction traps
+    let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+    csr_read 0x341) in                           // resume where we were
+
+  let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+  let _ = csr_write 0x304 128 in                 // mie.MTIE — timer interrupts
+  let _ = csr_write 0x300 8 in                   // mstatus.MIE — interrupts at all
+
+  let rec spin = fn i -> if vec_get ticks 0 >= 5 then i else spin (i + 1) in
+  let _ = spin 0 in
+  // Interrupts off before the epilogue: with them on, the handler keeps firing
+  // between the characters of this line and the output interleaves. A kernel
+  // does the same thing around anything it needs to finish uninterrupted.
+  let _ = csr_write 0x300 0 in
+  let _ = uart_puts uart "five ticks, stopping\n" 0 in
+  ();
+
+()

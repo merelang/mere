@@ -2044,7 +2044,8 @@ let rec emit_expr (e : Ast.expr) : string =
         arrived from clang as "type specifier missing" — loud, but about the
         wrong thing. There is no honest physical address in a hosted process. *)
      | Ast.Var ("raw_window" | "raw_peek8" | "raw_peek32"
-               | "raw_poke8" | "raw_poke32" | "csr_read" | "csr_write") ->
+               | "raw_poke8" | "raw_poke32" | "csr_read" | "csr_write"
+               | "set_trap_handler") ->
        unsupported e.Ast.loc
          "raw memory and CSRs (raw_window / raw_peek* / raw_poke* / csr_read / \
           csr_write) are only available on the RV32I bare-metal target \

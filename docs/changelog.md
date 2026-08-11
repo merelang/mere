@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.191 — 2026-08-11
+
+_The machine takes traps, and a Mere closure services them. A timer interrupt
+arrives while the program is doing something else._
+
+_A trap handler cannot be an ordinary function: it is entered with every
+register live and it leaves with `mret`, not `ret`. The tempting move is to give
+the language a `naked fn` or an interrupt attribute. That is not needed —
+codegen already emits `_start`, so it can emit the trampoline too, and the user
+writes plain Mere._
+
+_The harder question was how a handler gets the machine capability. It needs one
+for anything useful (a context switch is a memory copy), and an interrupt has no
+caller to hand it anything. So the handler is **registered rather than named**:
+`set_trap_handler (fn cause -> ...)` takes a closure, which captures whatever it
+needs. The trampoline stores it, points mtvec at itself, and calls it with
+mcause; the result is the PC to resume at. Everything else the handler might want
+is a `csr_read` away — mepc, mtval — so nothing has to be packed into a tuple,
+which would mean allocating inside a trap._
+
+_`mscratch` holds the save area's address, because at trap entry there is no
+free register to build one in — which is what that CSR exists for. `gp`, the
+bump pointer, is saved and restored with the rest, so whatever the handler
+allocated is reclaimed when it returns: a region per trap, for free. The
+corollary, worth stating, is that a handler must not leave an allocated value
+somewhere that outlives it._
+
+_On the emulator side traps vector to mtvec with mepc / mcause / mtval set and
+MIE moved into MPIE. Three causes so far: an unimplemented instruction (2), a
+load or store past the end of RAM (5 / 7), and the timer (0x80000007). The
+access faults are an improvement in their own right — an address past RAM used
+to take the **emulator** down with a Mere "index out of bounds", reporting the
+host's problem instead of the guest's. A guest with mtvec still zero halts, as
+before, rather than jumping to address 0._
+
+_The timer is a CLINT with mtime and mtimecmp in the MMIO region. mtime advances
+once per instruction: a clock in units of work done, which is what a
+deterministic emulator can honestly offer and enough for a scheduler tick. The
+interrupt is taken between instructions._
+
+_[examples/riscv_bare_timer.mere](../examples/riscv_bare_timer.mere) arms it and
+spins. The ticks arrive anyway, which is the mechanism preemption is made of:
+once a handler runs without the interrupted code's cooperation, a scheduler is a
+matter of what that handler chooses to return._
+
+_The example's first draft kept its tick counter at `0x200000` and quietly shared
+a word with a top-level binding — that address is where globals live. A bare
+program owns no fixed RAM: the heap grows up from 2MB and the stack down from the
+top. The handler's state is an ordinary Mere cell it captures instead, which is
+both correct and the better demonstration._
+
+_Three new tests (twenty-one on this backend). parity 84/84, ctest 13/13,
+`dune runtest` 2332/0._
+
+---
+
 ## v0.1.190 — 2026-08-11
 
 _`print_int` and `print_bool`, which the reference has claimed for every backend
