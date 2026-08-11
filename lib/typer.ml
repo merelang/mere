@@ -1630,6 +1630,7 @@ let initial_env : env =
        touch anything — but a stack pointer or a DMA descriptor is an address,
        and hardware wants the number. *)
     ("raw_base",    mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyInt)));
+    ("raw_len",     mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyInt)));
     ("trap_save",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyCon ("Raw", []))));
     ("machine_scratch",
                     mono (Ast.TyArrow (Ast.TyCon ("Raw", []), Ast.TyCon ("Raw", []))));

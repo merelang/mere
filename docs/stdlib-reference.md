@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-201 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+202 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -411,7 +411,7 @@ let m = mk_metrics () in
 
 For a complete cap-passing example see [examples/effects.mere](../examples/effects.mere).
 
-### Raw memory, CSRs, traps and tasks (13, RV32I bare-metal only)
+### Raw memory, CSRs, traps and tasks (14, RV32I bare-metal only)
 
 A `Raw` is a **window onto physical memory** — the one capability that is not a
 record of functions, because its operations lower to load and store
@@ -430,6 +430,7 @@ outside it; every access bounds-checks the offset, and widening faults.
 | `raw_window` | `Raw -> int -> int -> Raw` | A window over `[off, off+len)` of another. Faults if that is not inside it |
 | `csr_read` | `int -> int` | A machine CSR by number — the number must be a literal (it is an immediate field of the instruction) |
 | `csr_write` | `int -> int -> unit` | Write a machine CSR. Not behind a capability: a CSR has no base and length to narrow, and the hardware's privilege modes are what separate a kernel from a user process |
+| `raw_len` | `Raw -> int` | Its length — so a kernel can partition a window it was handed without hardcoding the runtime's geometry |
 | `raw_base` | `Raw -> int` | A window's base as a number. Not authority — touching anything still needs a window — but a stack pointer is an address and hardware wants the number |
 | `trap_save` | `Raw -> Raw` | The trap trampoline's 31-word register save area. A context switch is a copy through this: outgoing registers to a TCB, incoming registers back |
 | `machine_scratch` | `Raw -> Raw` | Reserved RAM the runtime is not using — where task stacks come from. A bare program owns no fixed address of its own: the heap grows up from 2MB and the stack down from the top |
@@ -452,9 +453,13 @@ let main = fn (mach: Raw) ->
 A context switch needs no new mechanism: the trampoline saves the interrupted
 register set to the area `trap_save` hands back and restores from it before
 `mret`, so a handler swaps tasks by copying through it and returning the
-incoming task's PC. `gp` is the one word to leave alone — the heap is machine
-state, not task state, and switching it makes two tasks allocate over each
-other. See [examples/riscv_bare_sched.mere](../examples/riscv_bare_sched.mere).
+incoming task's PC. Switch **every** register, `gp` included, and give each
+task a heap arena of its own (carve it from `machine_scratch` — heap up from
+the bottom, stack down from the top). Sharing one heap looks workable until a
+`region R { }` in one task rolls the bump pointer back and frees what another
+task allocated meanwhile; the rule that survives is that contexts share `gp`
+only if they genuinely share a heap, and a context that uses regions must not.
+See [examples/riscv_bare_sched.mere](../examples/riscv_bare_sched.mere).
 
 Device MMIO sits above any RAM (the UART data register is at `0x10000000`, the
 address QEMU's `virt` machine uses), so a device address does not move when
@@ -487,7 +492,7 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 128)
+## All builtins (alphabetical, 129)
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
@@ -500,7 +505,7 @@ is_alpha is_digit is_space iter_n lcm log max min mk_logger
 mk_metrics not odd ord pair pi pow print print_bool
 print_err print_int print_no_nl random_float random_int
 closure_code closure_env csr_read csr_write machine_scratch
-raw_base raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window trap_save
+raw_base raw_len raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window trap_save
 stdin_byte
 read_file read_file_bytes read_line read_lines round show sign sin snd sqrt
 square str_compare str_contains str_count str_ends_with
