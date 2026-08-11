@@ -1904,6 +1904,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
       let sch =
         if can_generalize then generalize env t else mono t
       in
+
       (* A local constrained binding (e.g. `let sum = fn xs -> ... add ...`):
          record its value node + constraints so Trait_elab can thread a
          dictionary parameter through it, just as it does for top-level ones. *)

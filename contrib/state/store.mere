@@ -64,28 +64,14 @@
 // Watchers must not update the store. Nothing here detects it, and the
 // result is unbounded recursion. Painting is what they are for.
 
-// The three slots are one-element vecs written out longhand rather than
-// contrib/state/cell. A store instantiated at two different state types
-// calls `cell_new` at a type derived from S and at plain `int` for the
-// token counter, and that combination is refused by the compiled backends
-// — the skeleton reaches codegen already fixed at one type, so the second
-// instance has nothing to unify with. It used to be emitted wrongly and in
-// silence; since v0.1.179 it is a named refusal.
-// test/parity/poly_helper_fixed_and_free.mere holds the shape. So the
-// module that names the trick does not get to use it.
+import "cell.mere";
 
 let store_new = fn (initial) ->
-  let value = vec_new () in
-  let _ = vec_push value initial in
-  let subs = vec_new () in
-  let _ = vec_push subs Nil in
-  let next = vec_new () in
-  let _ = vec_push next 1 in
-  (value, subs, next);
+  (cell_new initial, cell_new Nil, cell_new 1);
 
 let store_get = fn (st) ->
   let (value, _, _) = st in
-  vec_get value 0;
+  cell_get value;
 
 let rec store_notify = fn (subs) -> fn (v) ->
   match subs with
@@ -94,17 +80,17 @@ let rec store_notify = fn (subs) -> fn (v) ->
 
 let store_set = fn (st) -> fn (v) ->
   let (value, subs, _) = st in
-  let _ = vec_set value 0 v in
-  store_notify (vec_get subs 0) v;
+  let _ = cell_set value v in
+  store_notify (cell_get subs) v;
 
 // The read-modify-write shape, which is what almost every caller wants:
 // a mutation is a function of the old state, not a value computed at the
 // call site from a read that might already be stale.
 let store_update = fn (st) -> fn (f) ->
   let (value, subs, _) = st in
-  let nextv = f (vec_get value 0) in
-  let _ = vec_set value 0 nextv in
-  store_notify (vec_get subs 0) nextv;
+  let nextv = f (cell_get value) in
+  let _ = cell_set value nextv in
+  store_notify (cell_get subs) nextv;
 
 // Appended rather than prepended, so watchers run in registration order.
 let rec append_sub = fn (xs) -> fn (entry) ->
@@ -114,10 +100,10 @@ let rec append_sub = fn (xs) -> fn (entry) ->
 
 let store_watch = fn (st) -> fn (f) ->
   let (value, subs, next) = st in
-  let token = vec_get next 0 in
-  let _ = vec_set next 0 (token + 1) in
-  let _ = vec_set subs 0 (append_sub (vec_get subs 0) (token, f)) in
-  let _ = f (vec_get value 0) in
+  let token = cell_get next in
+  let _ = cell_set next (token + 1) in
+  let _ = cell_set subs (append_sub (cell_get subs) (token, f)) in
+  let _ = f (cell_get value) in
   token;
 
 let store_unwatch = fn (st) -> fn (token: int) ->
@@ -127,7 +113,7 @@ let store_unwatch = fn (st) -> fn (token: int) ->
     | Nil -> Nil
     | Cons ((t, f), rest) ->
       if t == token then without rest else Cons ((t, f), without rest) in
-  vec_set subs 0 (without (vec_get subs 0));
+  cell_set subs (without (cell_get subs));
 
 // How many watchers are registered. Not part of the working API — it is
 // here so a page that builds and discards views can be asked whether it is
@@ -139,4 +125,4 @@ let rec count_subs = fn (xs) ->
 
 let store_watcher_count = fn (st) ->
   let (_, subs, _) = st in
-  count_subs (vec_get subs 0);
+  count_subs (cell_get subs);

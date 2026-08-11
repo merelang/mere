@@ -99,7 +99,7 @@ That is a real gap and it is recorded rather than papered over.
   the floor and only a counter will tell you.
 - **No equality check.** Every `store_set` notifies, even with an
   unchanged value. Adding one would need `S` to be comparable.
-- **Not thread-safe.** A store is three vec slots with no synchronisation.
+- **Not thread-safe.** A store is three cells with no synchronisation.
   For state shared across threads, see the actor pattern in `mkv`.
 
 ## Position
