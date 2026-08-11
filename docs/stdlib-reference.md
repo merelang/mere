@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-192 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+195 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -52,6 +52,7 @@ Legend:
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
 | `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12 |
 | `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code (interp + C native; v0.1.13) |
+| `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native) |
 
 ```
 file_exists "/etc/hosts"            // → true
@@ -410,7 +411,7 @@ let m = mk_metrics () in
 
 For a complete cap-passing example see [examples/effects.mere](../examples/effects.mere).
 
-### Raw memory (5, RV32I bare-metal only)
+### Raw memory and CSRs (7, RV32I bare-metal only)
 
 A `Raw` is a **window onto physical memory** — the one capability that is not a
 record of functions, because its operations lower to load and store
@@ -427,6 +428,8 @@ outside it; every access bounds-checks the offset, and widening faults.
 | Name | Type | Description |
 |---|---|---|
 | `raw_window` | `Raw -> int -> int -> Raw` | A window over `[off, off+len)` of another. Faults if that is not inside it |
+| `csr_read` | `int -> int` | A machine CSR by number — the number must be a literal (it is an immediate field of the instruction) |
+| `csr_write` | `int -> int -> unit` | Write a machine CSR. Not behind a capability: a CSR has no base and length to narrow, and the hardware's privilege modes are what separate a kernel from a user process |
 | `raw_peek8`  | `Raw -> int -> int` | The byte at that offset |
 | `raw_peek32` | `Raw -> int -> int` | The 32-bit word at that offset |
 | `raw_poke8`  | `Raw -> int -> int -> unit` | Store a byte |
@@ -471,7 +474,7 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 119)
+## All builtins (alphabetical, 122)
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
@@ -483,7 +486,8 @@ fst gcd id incr int_max int_min int_of_float int_of_str
 is_alpha is_digit is_space iter_n lcm log max min mk_logger
 mk_metrics not odd ord pair pi pow print print_bool
 print_err print_int print_no_nl random_float random_int
-raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window
+csr_read csr_write raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window
+stdin_byte
 read_file read_file_bytes read_line read_lines round show sign sin snd sqrt
 square str_compare str_contains str_count str_ends_with
 str_index_of str_join str_len str_of_float str_of_int

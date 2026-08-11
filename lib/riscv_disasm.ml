@@ -102,7 +102,19 @@ let disasm_word ~pc (inst : int) : string =
             else sp "sra %s, %s, %s" (r rd) (r rs1) (r rs2)
      | 6 -> sp "or %s, %s, %s" (r rd) (r rs1) (r rs2)
      | _ -> sp "and %s, %s, %s" (r rd) (r rs1) (r rs2))
-  | 0x73 -> if inst = 0x73 then "ecall" else "ebreak"
+  | 0x73 ->
+    (* SYSTEM: the CSR instructions carry the register number in the immediate
+       field, so without this every one of them read as "ebreak" *)
+    let csr = (inst lsr 20) land 0xFFF in
+    let m = [| ""; "csrrw"; "csrrs"; "csrrc"; ""; "csrrwi"; "csrrsi"; "csrrci" |].(f3) in
+    if f3 = 1 || f3 = 2 || f3 = 3 then
+      sp "%s %s, 0x%x, %s" m (r rd) csr (r rs1)
+    else if f3 = 5 || f3 = 6 || f3 = 7 then
+      sp "%s %s, 0x%x, %d" m (r rd) csr rs1        (* rs1 field is the immediate *)
+    else if inst = 0x30200073 then "mret"
+    else if inst = 0x10500073 then "wfi"
+    else if inst = 0x73 then "ecall"
+    else "ebreak"
   | 0x0F -> "fence"
   | _ -> sp ".word 0x%08x" inst
 
