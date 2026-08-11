@@ -4,6 +4,77 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.185 — 2026-08-11
+
+_Three holes in the RV32I backend, found by asking what a program that never
+returns would need._
+
+_The next dogfood for this backend is a bare-metal kernel: a scheduler, a trap
+handler, a shell. Every one of those is a loop that never ends, and Mere has no
+loop construct — iteration is recursion. So the first question was how long a
+recursion this backend can actually sustain, and the answer was: not long, and
+it does not say so. A zero-allocation tail-recursive counter completed at
+500,000 and died silently at 1,000,000; raising the emulator's instruction
+budget twentyfold did not change that, so it was the stack, not the clock._
+
+_**Tail calls.** A saturated call in tail position now tears the frame down
+first and jumps, so the callee returns straight to our caller and the stack
+stays flat. The tail-position bookkeeping mirrors codegen_wasm's
+`wasm_tail_pos` (which lowers to `return_call`): compile_expr clears the flag
+for every subexpression and the cases whose value IS the enclosing value —
+if branches, let bodies, match arms, annotations — put it back. Direct calls
+become `j u_f` instead of `jal ra, u_f`; the closure form, which is the shape a
+local `let rec loop = fn ...` actually takes, becomes `jalr x0` on the code
+pointer. Calls with nine or more arguments keep the old path: args 9+ travel on
+the caller's stack, which a teardown would drop. The counter now runs
+10,000,000 iterations in constant stack._
+
+_**Regions.** `region R { ... }` compiled to its body and nothing else — the
+comment said "no reclamation" and meant it. `gp` is the only allocation state
+on this backend, so the fix is the one Wasm already uses on `__lang_bump`:
+park it on entry, roll it back at the closing brace. Eight rounds of 100,000
+allocations inside a region now complete with a flat heap; the same program
+without the region reports exhaustion. The body is deliberately not in tail
+position — a tail call out of a region would skip the rollback._
+
+_A region also could not call anything. `vars_in`, which decides
+which top-level functions are reachable and therefore emitted, had no
+`Region_block` case, so a function called only from inside a region was never
+emitted and assembly died with `undefined label u_f`. Two lines reproduce it:
+`let f = fn x -> x + 1;` and `region R { f 41 }`. It stayed hidden because a
+region body of nothing but builtins resolves fine. `free_vars_of` had the same
+gap, which would have dropped a capture._
+
+_**Heap exhaustion.** The heap grows up from 2MB and the stack grows down from
+0x7E0000 with nothing between them, and when they met the bump pointer
+overwrote a live frame's return address with whatever it was allocating — the
+program then jumped into the middle of a string. No message, no exit code, just
+an emulator reporting a wild load. Every bump now checks `bgeu gp, sp` and
+lands on `__oom`, which prints and exits 3._
+
+_That check immediately reported something. The self-hosted compiler, compiled
+with `-rv` and run on the Mere-written RV32I emulator, now says it is out of
+memory — and with the check patched out it dies the old way, on a wild load, so
+this is not a regression from this slice. The self-hosted codegen's output has
+grown about a hundredfold since that demo was first verified (a five-line input
+now emits ~5,200 lines of WAT, nearly all of it fixed prelude), and building
+that with `++` on a bump allocator that never reclaims needs far more than the
+5.86MB this memory map leaves. Recorded, not fixed: it wants a configurable RAM
+size and a memory map that separates the MMIO region from the heap's path,
+which is the same work the kernel needs._
+
+_This backend had **zero** automated coverage — the region bug was a hard crash
+that nothing in the suite would have caught. Seven tests now assert on the
+emitted listing, so they lock the instruction actually chosen (`j` vs `jal`,
+the bump park/restore, the heap check) rather than just that codegen ran.
+parity 83/83, ctest 13/13, `dune runtest` 2315/0. A differential sweep of
+`test/parity` through the
+interpreter and through `-rv` + the emulator: 37 identical, 41 rejected by the
+backend as unsupported, 6 mismatching — byte-for-byte the same three numbers
+and the same six files before and after this slice._
+
+---
+
 ## v0.1.184 — 2026-08-11
 
 _`to_json` on LLVM, and a parity harness that counts what it did not check._
