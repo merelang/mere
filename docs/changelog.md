@@ -4,6 +4,67 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.194 — 2026-08-11
+
+_A user process. A separately compiled, ordinary Mere program running under a
+Mere kernel, printing through kernel syscalls, preempted by the timer, and
+unaware that any of that is happening._
+
+```
+kernel: starting a user process at 8MB
+user: hello from a user process
+user: I do not know a kernel exists
+user: fib 20 = 6765
+user: exiting
+kernel: user process exited after 9 syscalls and 21 ticks
+```
+
+_The user program in
+[examples/riscv_user_prog.mere](../examples/riscv_user_prog.mere) is not `--bare`,
+holds no capability, names no device and touches no CSR. It calls `print`. That
+lowers to the same `ecall` every hosted Mere program on this emulator has always
+used — what changed is **who answers**: with mtvec set, an environment call traps
+(cause 11) and the kernel in
+[examples/riscv_bare_user.mere](../examples/riscv_bare_user.mere) reads fd, buffer
+and length out of the register save area and writes the bytes to the UART. Neither
+the emulator nor the user program is in that conversation. That is the whole idea
+of a syscall boundary, and it is why the user program needs no cooperation: it asks
+the machine, and the machine now has a kernel._
+
+_**`--load-base <addr>`** is what makes two programs fit in one address space.
+Everything PC-relative in the emitted binary never cared where it lived; the
+absolute parts did, and they all went through three places — the globals region,
+the stack top, and the assembler's resolution of `la` for string literals and
+lambda entries. They now shift together. The kernel says where its user process
+goes; the process does not know._
+
+_One thing this got wrong first, and the mistake is the interesting part. v0.1.192
+found that `gp` — the heap's bump pointer — must **not** be switched between tasks,
+because two tasks in one program share a heap and switching it makes them allocate
+over each other. Carrying that rule over to a user process broke immediately: the
+kernel resumed with the user's `gp`, its next allocation landed at the user's heap
+top, and the out-of-memory check compared that against the kernel's much lower
+stack and correctly declared the heap exhausted._
+
+_So the rule is not about tasks at all. **Switch `gp` exactly when the two contexts
+do not share a heap.** Two tasks in one program share one; two programs built with
+different `--load-base` do not. Both examples now say so, and say why._
+
+_On the emulator side (memu): `ecall` traps to `mtvec` when a kernel is installed
+and falls back to the host ABI when none is, and a second image `user.bin` loads at
+8MB if the file is there — a bootloader's job, done by the bootloader, since a
+kernel with no filesystem has to get its first process from somewhere. The
+instruction fetch is guarded now too, which is what made the previous slice's
+debugging possible at all._
+
+_A consequence worth noting: any `--bare` program that installs a trap vector must
+clear it before returning, or `_start`'s exit `ecall` vectors into its own handler
+instead of halting. The timer and shell examples now do._
+
+_Two new tests. `dune runtest` 2336/0, ctest 13/13, parity 84/84._
+
+---
+
 ## v0.1.193 — 2026-08-11
 
 _A shell, on a machine with no operating system. And a rule the previous slice

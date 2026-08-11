@@ -319,7 +319,15 @@ let globals : (string option * Ast.expr) list ref = ref []
 let globals_map : (string, int) Hashtbl.t = Hashtbl.create 32
 (* Globals + heap sit well above the code (the program loads at 0). The code
    must stay below this; the self-hosted compiler is ~300KB, so 2MB is ample. *)
-let globals_base = 0x200000
+(* Where this program is loaded. Zero for the machine's first program, which the
+   emulator drops at address 0; a user process lives somewhere else, and the
+   kernel that loads it says where. Branches and calls are PC-relative and do not
+   care, but the absolute references do: the globals region, the stack, the
+   reserved area, and every `la` of a string literal or lambda entry. All of them
+   go through this. *)
+let load_base = ref 0
+
+let globals_base () = !load_base + 0x200000
 
 (* RAM layout, derived from the RAM size so it is no longer three hardcoded
    immediates. The top `reserved_top` bytes hold the scratch buffer the print
@@ -355,7 +363,7 @@ let machine_len = mmio_base + mmio_len
 (* -rv --bare: the program is handed the machine and does its own I/O *)
 let bare = ref false
 let reserved_top = 0x20000                         (* 128KB: scratch + fb + keys *)
-let stack_top () = !ram_bytes - reserved_top
+let stack_top () = !load_base + !ram_bytes - reserved_top
 (* the trap trampoline's register save area (x1..x31) and the one word holding
    the registered handler closure. Both sit in the reserved region above the
    stack, so no program allocation can land on them. *)
@@ -489,10 +497,10 @@ let load_to_a0 idx =
 (* top-level value bindings live in a fixed region at globals_base. Load the
    full slot address (li handles any offset, so the global count is unbounded). *)
 let load_global_to_a0 gi =
-  li a0 (globals_base + gi * 4);
+  li a0 (globals_base () + gi * 4);
   emit_word (enc_i 0 a0 2 a0 0x03)                                (* lw a0, 0(a0) *)
 let store_a0_to_global gi =
-  li t1 (globals_base + gi * 4);
+  li t1 (globals_base () + gi * 4);
   emit_word (enc_s 0 a0 t1 2 0x23)                                (* sw a0, 0(t1) *)
 
 (* --- tail calls ----------------------------------------------------------
@@ -1508,7 +1516,7 @@ let emit_start () =
   li sp (stack_top ());                                 (* sp = top of RAM, minus MMIO *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (* heap top starts just above the globals region (globals_base + n*4) *)
-  li gp (globals_base + Hashtbl.length globals_map * 4);
+  li gp (globals_base () + Hashtbl.length globals_map * 4);
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
   li a0 0;
@@ -1997,7 +2005,7 @@ let assemble (prog : item list) : string =
   in
   let abs name =
     match Hashtbl.find_opt labels name with
-    | Some a -> a
+    | Some a -> !load_base + a          (* absolute means absolute in RAM *)
     | None -> failwith ("codegen_riscv: undefined label " ^ name)
   in
   (* pass 2: encode *)

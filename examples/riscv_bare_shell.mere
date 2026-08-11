@@ -192,6 +192,7 @@ let main = fn (mach: Raw) ->
   let _ = uart_puts uart "mere kernel, two tasks. type `help`.\n" 0 in
   let _ = shell () in
   let _ = csr_write 0x300 0 in
+  let _ = csr_write 0x305 0 in       // else _start's exit ecall traps here forever
   let _ = uart_puts uart "halted\n" 0 in
   ();
 
