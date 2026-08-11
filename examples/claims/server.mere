@@ -18,17 +18,20 @@
 //                            submits can be run twice
 //   GET  /api/approvers      the directory the browser cannot know
 //
-// Run:
+// Run on the Wasm host:
 //   mere -w examples/claims/server.mere > /tmp/claims.wat
 //   wat2wasm --enable-tail-call /tmp/claims.wat -o /tmp/claims.wasm
 //   node scripts/run_http_server.js /tmp/claims.wasm
 //
-// Wasm host only, for now. `mere -c` emits and compiles, but the native
-// HTTP runtime implements six externs and not the two the middleware
-// below needs — `http_current_status` (access_log) and `http_arena_mark`
-// (the per-request arena reset). So a server that releases its
-// per-request allocations exists on one host and not the other, which is
-// a gap worth its own slice rather than a detour inside this one.
+// Or natively, from the same source:
+//   mere -c examples/claims/server.mere > /tmp/claims.c
+//   cc -O2 /tmp/claims.c -o /tmp/claims && /tmp/claims
+//
+// Both, since v0.1.180. The native HTTP runtime used to implement six
+// externs and the middleware below needs four more — `http_current_status`
+// and `unix_time` for access_log, `http_arena_mark` for the per-request
+// arena, `http_send_file` for static — so a server with a middleware stack
+// could be built for one host and not the other.
 
 extern fn http_serve: int -> (str -> str) -> unit;
 extern fn http_current_body: unit -> str;

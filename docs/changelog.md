@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.180 — 2026-08-11
+
+_The native HTTP runtime gets the four externs a middleware stack needs, so
+`examples/claims` runs on both hosts from the one source._
+
+_It implemented six. contrib/http's middlewares need four more:
+`http_current_status` and `unix_time` for access_log, `http_arena_mark` for the
+per-request arena, `http_send_file` for static. A server with a middleware stack
+could therefore be built for the Node host and not the native one — which is
+half of "the same source runs on both", and the half nobody had checked because
+the browser dogfoods only ever ran the Wasm host._
+
+_All four are in. The arena checkpoint is the interesting one: the C region is a
+chain of malloc'd blocks with a bump pointer, so a mark records the block chain
+and the pointer, and the release frees every block newer than the mark and winds
+the pointer back. It runs after the response has gone out on the socket, not
+before, because the body it just wrote lives in that arena. The checkpoint is
+taken where the request began rather than wherever the handler calls
+`http_arena_mark`, so the request line and the body copy — made by the accept
+loop before the handler is entered — are inside it too. Still opt-in: nothing is
+released unless a handler asks._
+
+_`http_send_file` writes the file straight to the socket without it passing
+through a Mere `str`, which is the point of that binding — a str is
+NUL-terminated and a file is not — and tells the accept loop not to write a
+second response after it._
+
+_Measured on the native build: **116 KB reclaimed per request**, with no new
+blocks allocated, so the region stays in its first 4 MB. Two thousand 404s in a
+row moved RSS 3920 → 1920 KB, i.e. down. Two thousand requests that read the
+kvlog moved it 1920 → 6336 KB, which locates the remaining growth precisely:
+not the HTTP arena, but `contrib/store/kvlog` re-reading its file per request.
+Named, not fixed._
+
+_`examples/claims/browser_check.mjs` passes 17/17 against the native server,
+unchanged from the Wasm host. parity 82/82, ctest 13/13, dune runtest 2308/0._
+
+---
+
 ## v0.1.179 — 2026-08-11
 
 _The monomorphization gap v0.1.178 recorded without a repro, isolated to seven
