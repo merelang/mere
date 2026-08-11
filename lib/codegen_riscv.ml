@@ -337,6 +337,23 @@ let globals_base = 0x200000
    it: a program whose live heap exceeds ~5.8MB has no other way to run, which
    is where the self-hosted compiler now sits. *)
 let ram_bytes = ref 0x800000                       (* 8MB *)
+
+(* Device MMIO lives above any RAM, so a device address does not move when the
+   RAM size does — a program can name one as a literal and be right at every
+   `--ram`. The UART is at QEMU virt's address so a driver written against it
+   is not inventing a private convention; the rest are ours for now, because
+   this target keeps RAM at 0 rather than QEMU's 0x80000000. (The framebuffer
+   and key registers of the fantasy console predate this and still live in the
+   reserved top of RAM.) *)
+let mmio_base = 0x10000000                         (* 256MB: UART data at +0 *)
+let mmio_len = 0x10000
+(* what the bare-metal entry point is handed: RAM plus the MMIO page, i.e.
+   everything this machine has. Narrowing it is the only way to get anything
+   else, so a driver's reach is visible in the signature that gave it one. *)
+let machine_len = mmio_base + mmio_len
+
+(* -rv --bare: the program is handed the machine and does its own I/O *)
+let bare = ref false
 let reserved_top = 0x20000                         (* 128KB: scratch + fb + keys *)
 let stack_top () = !ram_bytes - reserved_top
 let scratch_base () = stack_top () + 0x10000
@@ -502,6 +519,16 @@ let emit_frame_teardown () =
   emit_word (enc_i (fp_slot * 4) fp 2 t0 0x03);         (* lw   t0, fp_slot(fp) — old fp *)
   emit_word (enc_i fsz fp 0 sp 0x13);                   (* addi sp, fp, fsz *)
   emit_word (enc_i 0 t0 0 fp 0x13)                      (* addi fp, t0, 0 *)
+
+(* Shared by the raw peek/poke arms: a0 = the Raw window, a1 = the offset.
+   Faults unless [off, off+width) lies inside the window, then leaves the
+   absolute address in t0. Clobbers t0/t1/t2 and leaves a1/a2 alone. *)
+let emit_raw_bounds width =
+  emit_word (enc_i 0 a0 2 t0 0x03);                     (* t0 = w.base *)
+  emit_word (enc_i 4 a0 2 t1 0x03);                     (* t1 = w.len *)
+  emit_word (enc_i width a1 0 t2 0x13);                 (* t2 = off + width *)
+  emit (Branch (6, t1, t2, "__raw_fault"));             (* w.len < off+width -> fault *)
+  emit_word (enc_r 0 a1 t0 0 t0 0x33)                   (* t0 = base + off *)
 
 let emit_binop op rd rs1 rs2 loc =
   match op with
@@ -861,6 +888,16 @@ and compile_app env e =
         if arity > 8 then emit_word (enc_i ((arity - 8) * 4) sp 0 sp 0x13)
       end
     end
+  (* On bare metal there is no host to print to. The print builtins lower to
+     the emulator's write syscall, which a real machine does not answer, so
+     --bare refuses them rather than letting a program depend on a courtesy
+     that disappears on hardware. A UART window is three lines away. *)
+  | Ast.Var ("print" | "print_int" | "print_no_nl" | "print_err")
+    when !bare && List.length args = 1 ->
+    err e.loc
+      "RV32I --bare: there is no host to print to — write to a device through \
+       the machine capability instead (e.g. `raw_poke8 uart 0 c` on a window \
+       over the UART at 0x10000000)"
   | Ast.Var "print_int" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit (Jal (ra, "__print_int"))
@@ -939,6 +976,49 @@ and compile_app env e =
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s 0 a2 t0 2 0x23);                        (* data[i] = x *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
+  (* --- raw memory, behind a window capability -------------------------
+     A `Raw` value is a 2-word heap block [base][len]. Offsets are relative
+     to the window, so code holding a UART window cannot express an address
+     outside it, and `raw_window` can only narrow — it refuses to widen.
+     Every access bounds-checks the offset against the window's length: the
+     length is a runtime field, so there is nothing to fold at compile time
+     even when the offset is a literal. Three instructions on an MMIO poke is
+     a price worth paying for the guarantee being real rather than nominal. *)
+  | Ast.Var "raw_window" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;             (* w *)
+    compile_expr env (List.nth args 1); push a0;             (* off *)
+    compile_expr env (List.nth args 2);                      (* len *)
+    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = len *)
+    pop a1; pop a0;                                          (* a1 = off, a0 = w *)
+    emit_word (enc_i 0 a0 2 t0 0x03);                        (* t0 = w.base *)
+    emit_word (enc_i 4 a0 2 t1 0x03);                        (* t1 = w.len *)
+    emit_word (enc_r 0 a2 a1 0 t2 0x33);                     (* t2 = off + len *)
+    emit (Branch (6, t1, t2, "__raw_fault"));                (* w.len < off+len -> fault *)
+    alloc_words t3 2;
+    emit_word (enc_r 0 a1 t0 0 t4 0x33);                     (* t4 = base + off *)
+    emit_word (enc_s 0 t4 t3 2 0x23);                        (* [0] = base *)
+    emit_word (enc_s 4 a2 t3 2 0x23);                        (* [1] = len *)
+    emit_word (enc_i 0 t3 0 a0 0x13)
+  | Ast.Var ("raw_peek8" | "raw_peek32") when List.length args = 2 ->
+    let wide = (match head.node with Ast.Var "raw_peek32" -> true | _ -> false) in
+    compile_expr env (List.nth args 0); push a0;              (* w *)
+    compile_expr env (List.nth args 1);                       (* off *)
+    emit_word (enc_i 0 a0 0 a1 0x13);                         (* a1 = off *)
+    pop a0;                                                   (* a0 = w *)
+    emit_raw_bounds (if wide then 4 else 1);                  (* t0 = base + off *)
+    if wide then emit_word (enc_i 0 t0 2 a0 0x03)             (* lw  a0, 0(t0) *)
+    else emit_word (enc_i 0 t0 4 a0 0x03)                     (* lbu a0, 0(t0) *)
+  | Ast.Var ("raw_poke8" | "raw_poke32") when List.length args = 3 ->
+    let wide = (match head.node with Ast.Var "raw_poke32" -> true | _ -> false) in
+    compile_expr env (List.nth args 0); push a0;              (* w *)
+    compile_expr env (List.nth args 1); push a0;              (* off *)
+    compile_expr env (List.nth args 2);                       (* v *)
+    emit_word (enc_i 0 a0 0 a2 0x13);                         (* a2 = v *)
+    pop a1; pop a0;                                           (* a1 = off, a0 = w *)
+    emit_raw_bounds (if wide then 4 else 1);                  (* t0 = base + off *)
+    if wide then emit_word (enc_s 0 a2 t0 2 0x23)             (* sw a2, 0(t0) *)
+    else emit_word (enc_s 0 a2 t0 0 0x23);                    (* sb a2, 0(t0) *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                        (* unit *)
   | Ast.Var "fb_set" when List.length args = 3 ->
     (* fantasy-console framebuffer: store byte v at FB_BASE + y*64 + x. The
        64x32 framebuffer lives in the reserved region above the stack (0x7F8000
@@ -1229,7 +1309,7 @@ let emit_lambda ~label ~captures ~param ~body =
 
 (* __main: initialise the top-level value bindings (in order, into the
    globals region), then run the program's main expression *)
-let emit_main main_body =
+let emit_main ?bare_entry main_body =
   let total =
     List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets main_body) !globals in
   emit (Label "__main");
@@ -1244,6 +1324,18 @@ let emit_main main_body =
   tail_pos := true;                       (* a tail call here returns to _start *)
   compile_expr [] main_body;
   tail_pos := false;
+  (* --bare: build the machine capability and hand it to the program's `main`.
+     Constructed here rather than exposed as a builtin on purpose — a function
+     that mints one would make every signature meaningless. *)
+  (match bare_entry with
+   | None -> ()
+   | Some entry ->
+     alloc_words t1 2;
+     emit_word (enc_s 0 zero t1 2 0x23);                 (* base = 0 *)
+     li t0 machine_len;
+     emit_word (enc_s 4 t0 t1 2 0x23);                   (* len = RAM + MMIO *)
+     emit_word (enc_i 0 t1 0 a0 0x13);
+     emit (Jal (ra, "u_" ^ entry)));
   emit_epilogue fr
 
 (* _start MUST be the first bytes (loaded at address 0, PC starts there) *)
@@ -1564,6 +1656,22 @@ let emit_oom () =
   emit_word (enc_i 3 zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(3) *)
 
+(* an offset outside the window it was applied to: the capability's bound is
+   the whole point, so this stops rather than reaching past it *)
+let emit_raw_fault () =
+  emit (Label "__raw_fault");
+  let label = "str__rawfault" in
+  string_data := (label, mk_str_block "mere: raw access outside its window\n") :: !string_data;
+  emit (LoadAddr (t0, label));
+  emit_word (enc_i 0 t0 2 a2 0x03);                     (* lw   a2, 0(t0) — len *)
+  emit_word (enc_i 4 t0 0 a1 0x13);                     (* addi a1, t0, 4 — bytes *)
+  emit_word (enc_i 1 zero 0 a0 0x13);
+  emit_word (enc_i 64 zero 0 a7 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall write *)
+  emit_word (enc_i 93 zero 0 a7 0x13);
+  emit_word (enc_i 4 zero 0 a0 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(4) *)
+
 let emit_pat_fail () =
   emit (Label "__pat_fail");
   emit_word (enc_i 93 zero 0 a7 0x13);
@@ -1787,9 +1895,34 @@ let build_items (prog : Ast.program) : item list =
       | None -> ()
     end
   in
+  (* --bare hands the machine to a top-level `main` that nothing calls, so it
+     is a reachability root of its own. A user top-level `main` has already
+     been alpha-renamed by Ast.reserve_toplevel_main. *)
+  let bare_entry =
+    if not !bare then None
+    else begin
+      let name =
+        if Hashtbl.mem tops "__mere_user_main" then Some "__mere_user_main"
+        else if Hashtbl.mem tops "main" then Some "main"
+        else None in
+      match name with
+      | None ->
+        err main_body.Ast.loc
+          "RV32I --bare: the program needs a top-level `main` that takes the \
+           machine capability — `let main = fn (m: Raw) -> ...`"
+      | Some n ->
+        let (ps, _) = Hashtbl.find tops n in
+        if List.length ps <> 1 then
+          err main_body.Ast.loc (Printf.sprintf
+            "RV32I --bare: `main` must take exactly one argument (the machine \
+             capability, of type `Raw`), but it takes %d" (List.length ps));
+        Some n
+    end
+  in
   (* reachability roots: the main body AND every global initializer *)
   List.iter visit (vars_in main_body []);
   List.iter (fun (_, init) -> List.iter visit (vars_in init [])) !globals;
+  (match bare_entry with Some n -> visit n | None -> ());
   (* layout: _start, runtime, main, reachable fns, then string rodata *)
   emit_start ();
   emit_print_int ();
@@ -1802,7 +1935,8 @@ let build_items (prog : Ast.program) : item list =
   emit_vec ();
   emit_pat_fail ();
   emit_oom ();
-  emit_main main_body;
+  emit_raw_fault ();
+  emit_main ?bare_entry main_body;
   Hashtbl.iter (fun name (params, body) ->
     if Hashtbl.mem reachable name then
       emit_function ~label:("u_" ^ name) ~params ~body

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.186" Version.v "0.1.186";
+  check "version is 0.1.187" Version.v "0.1.187";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12180,6 +12180,42 @@ let () =
   rv_contains "rv32i: --ram moves the stack to the top of RAM"
     "let _ = print_int 1;" "lui sp, 0x1fe0";
   Codegen_riscv.ram_bytes := 8 * 1024 * 1024;
+  (* raw memory is a window capability, not an ambient builtin: `Raw` is
+     opaque so nothing can forge one, every access bounds-checks the offset
+     against the window it was handed, and --bare is the only thing that hands
+     one out. *)
+  let rv_err_contains name src needle =
+    let msg =
+      try
+        let (prog, mt) = rv_typed src in
+        ignore (Codegen_riscv.emit_program ~main_ty:mt prog);
+        "(compiled without error)"
+      with Codegen_riscv.Codegen_error (_, m) -> m
+         | Typer.Type_error (_, m) -> m
+         | e -> Printexc.to_string e
+    in
+    let nl = String.length needle and hl = String.length msg in
+    let rec loop i = i + nl <= hl && (String.sub msg i nl = needle || loop (i + 1)) in
+    check name (if loop 0 then needle else "MISSING, got: " ^ msg) needle
+  in
+  rv_err_contains "rv32i: a Raw window cannot be forged out of ints"
+    "let _ = raw_poke8 (raw_window 0 0 1) 0 65;"
+    "expected `Raw`, got `int`";
+  Codegen_riscv.bare := true;
+  (* reachable through --bare's entry, so the access is actually emitted *)
+  rv_contains "rv32i: a raw access bounds-checks its offset"
+    "let main = fn (m: Raw) -> raw_poke8 m 0 65;\n()"
+    "bltu t1, t2, __raw_fault";
+  rv_contains "rv32i: --bare hands the machine to main"
+    "let main = fn (m: Raw) -> raw_poke8 m 0 65;\n()"
+    "jal ra, u___mere_user_main";
+  rv_err_contains "rv32i: --bare needs a main taking the machine capability"
+    "let _ = print_int 0;"
+    "needs a top-level `main` that takes the machine capability";
+  rv_err_contains "rv32i: --bare refuses the print builtins"
+    "let main = fn (m: Raw) -> print \"x\";\n()"
+    "there is no host to print to";
+  Codegen_riscv.bare := false;
   check "rv32i: a call inside a region resolves its label"
     (try
        let (prog, mt) =

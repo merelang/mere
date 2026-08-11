@@ -1075,6 +1075,18 @@ let () = Hashtbl.replace types "ThreadHandle" 0
    per-line file input (file_open / file_read_line / file_close). *)
 let () = Hashtbl.replace types "File" 0
 
+(* Raw — a window onto physical memory, for the RV32I bare-metal target.
+   Opaque and deliberately unforgeable: there is no constructor and no
+   function that mints one. The only source is the argument the bare-metal
+   entry point is handed, and `raw_window` can only narrow it. So "this
+   function cannot touch raw memory" is a property you read off a signature,
+   which is the whole reason the address space is behind a value rather than
+   behind ambient builtins like the framebuffer's `fb_set`.
+
+   Offsets are relative to the window, so a driver holding a UART window
+   cannot even express an address outside it. *)
+let () = Hashtbl.replace types "Raw" 0
+
 (* --- Higher-order Vec API (Phase 12.9) ---
    Schemes that are region-polymorphic and element-type-polymorphic.
      vec_iter : forall R T. Vec[R, T] -> (T -> unit) -> unit
@@ -1579,6 +1591,25 @@ let initial_env : env =
     ("file_read_line", mono (Ast.TyArrow (Ast.TyCon ("File", []),
                               Ast.TyCon ("option", [Ast.TyStr]))));
     ("file_close",     mono (Ast.TyArrow (Ast.TyCon ("File", []), Ast.TyUnit)));
+    (* raw physical memory, RV32I bare-metal only (see the `Raw` note above).
+         raw_window w off len -> a window over [off, off+len) of w
+         raw_peek8/32  w off      -> the byte / word at that offset
+         raw_poke8/32  w off v    -> store it
+       Every one of these bounds-checks the offset against the window it was
+       handed, so narrowing is the only way to widen reach — there isn't one. *)
+    ("raw_window",  mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt,
+                              Ast.TyArrow (Ast.TyInt, Ast.TyCon ("Raw", []))))));
+    ("raw_peek8",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("raw_peek32",  mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("raw_poke8",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt,
+                              Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))));
+    ("raw_poke32",  mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt,
+                              Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
        stdio, return its exit code. *)

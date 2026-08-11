@@ -2049,6 +2049,16 @@ let builtin_file_read_line =
        with End_of_file -> V_constr ("None", None))
     | _ -> failwith "file_read_line: expected File")
 
+(* Raw physical memory exists only on the RV32I bare-metal target: there is no
+   honest interpretation of a physical address in a hosted process, so these
+   refuse loudly rather than pretending. They are bound at all (rather than
+   left unbound) so the failure names the reason instead of reading like a
+   typo. *)
+let raw_only_on_bare name =
+  V_builtin (name, fun _ ->
+    failwith (name ^ ": raw memory is only available on the RV32I bare-metal \
+                      target (mere -rv --bare)"))
+
 let builtin_file_close =
   V_builtin ("file_close", fun v ->
     match v with
@@ -2323,6 +2333,11 @@ let initial_env : env =
     ("channel_recv", ref builtin_channel_recv);
     ("channel_close", ref builtin_channel_close);
     ("channel_recv_opt", ref builtin_channel_recv_opt);
+    ("raw_window", ref (raw_only_on_bare "raw_window"));
+    ("raw_peek8", ref (raw_only_on_bare "raw_peek8"));
+    ("raw_peek32", ref (raw_only_on_bare "raw_peek32"));
+    ("raw_poke8", ref (raw_only_on_bare "raw_poke8"));
+    ("raw_poke32", ref (raw_only_on_bare "raw_poke32"));
     ("file_open", ref builtin_file_open);
     ("file_read_line", ref builtin_file_read_line);
     ("file_close", ref builtin_file_close);

@@ -4,6 +4,73 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.187 — 2026-08-11
+
+_Raw memory, as a capability rather than an ambient builtin. `mere -rv --bare`
+hands a program the machine and it writes to a UART._
+
+_A kernel needs to reach hardware, and this backend's answer so far was one
+builtin per device with the address baked into codegen: `fb_set` stores to the
+framebuffer, `key` loads from the key register, `present` ends a frame. Adding
+a UART, a timer and an interrupt controller that way means a compiler change
+per device, which is the opposite of what a dogfood is for — the kernel would
+teach the language nothing. The alternative that fits what this language
+already says about itself (README: effects are capability values you pass) is
+to make the address space a value._
+
+_A **`Raw`** is a window onto physical memory: a base and a length. It is
+opaque, nothing constructs one, and there is no function that mints one — the
+only source is the argument `--bare` hands to the program's top-level `main`,
+and `raw_window` can only narrow. Offsets are relative to the window, so a
+driver holding a UART window cannot express an address outside it. All three
+ways out are closed and each fails differently: forging one from ints is a type
+error, widening one faults at construction, and an offset past the end faults
+at the access._
+
+_So this reads as a promise rather than a hope:_
+
+```
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+```
+
+_`putc` can touch the UART and nothing else — not the heap, not the stack, not
+another device — and that is visible in its signature instead of being a claim
+about its body and every body it calls. That is the whole argument for a value
+over an ambient builtin._
+
+_The bounds check is not free and not optional: a window's length is a runtime
+field, so there is nothing to fold at compile time even when the offset is a
+literal. Three instructions on an MMIO poke buys a guarantee that holds, which
+is the better trade than a nominal one._
+
+_Device MMIO now sits above any RAM — the UART's data register is at
+`0x10000000`, the address QEMU's `virt` machine uses, so a driver written today
+is not inventing a private convention. `--ram` is capped so RAM can never reach
+it, which means a device address does not move when the RAM size does. (The
+fantasy console's framebuffer and keys predate this and still live in the
+reserved top of RAM; they move with `--ram` and will migrate when that demo is
+next touched.)_
+
+_`--bare` also refuses `print` / `print_int` / `print_no_nl` / `print_err`:
+those lower to the emulator's write syscall, which no real machine answers, and
+a bare program that depends on the courtesy would break the moment it left the
+emulator. A UART window is three lines away — see
+[examples/riscv_bare_uart.mere](../examples/riscv_bare_uart.mere), which prints
+through one and reads the 16550 line-status register back._
+
+_Every other backend refuses these names, because there is no honest physical
+address in a hosted process. The C backend had to be taught to: without an arm
+of its own the raw_\* names fell through to the closure path and emitted a call
+to an undefined `mu_raw_poke8` plus an unknown `Raw` C type, so the refusal
+arrived from clang as "type specifier missing" — loud, but about the wrong
+thing. LLVM and Wasm already refused._
+
+_Five new tests, fourteen on this backend now. parity 83/83, ctest 13/13,
+`dune runtest` 2322/0; the interpreter-vs-emulator sweep of `test/parity` is
+unchanged at 37 / 41 / 6._
+
+---
+
 ## v0.1.186 — 2026-08-11
 
 _A RAM size instead of three hardcoded addresses, and the self-hosted compiler
