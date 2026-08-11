@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.199" Version.v "0.1.199";
+  check "version is 0.1.200" Version.v "0.1.200";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12268,6 +12268,29 @@ let () =
     "let main = fn (m: Raw) -> csr_write (300 + 40) 1;\n()"
     "the CSR number must be a literal";
   Codegen_riscv.bare := false;
+  (* The debug map (`mere -rvg`) is emitted from the same item list the assembler
+     consumes, so it describes the bytes that run. Line numbers are the user's:
+     source positions arrive counted from the top of the prelude-plus-source text,
+     and the map subtracts the prelude. *)
+  let rv_map src =
+    let (prog, mt) = rv_typed src in
+    Codegen_riscv.dbg_line_base := 0;
+    Codegen_riscv.emit_debug_map ~main_ty:mt prog
+  in
+  let rv_map_contains name src needle =
+    let hay = try rv_map src with e -> "EXCEPTION: " ^ Printexc.to_string e in
+    let nl = String.length needle and hl = String.length hay in
+    let rec loop i = i + nl <= hl && (String.sub hay i nl = needle || loop (i + 1)) in
+    check name (if loop 0 then needle else "MISSING, got: " ^ hay) needle
+  in
+  rv_map_contains "rv32i: the map names every function with its frame layout"
+    "let sq = fn n -> n * n;\nlet _ = print_int (sq 7);"
+    "u_sq fsz=12 ra=8 fp=4 params=1 line=1";
+  rv_map_contains "rv32i: the map carries a line table"
+    "let sq = fn n -> n * n;\nlet _ = print_int (sq 7);"
+    "L ";
+  rv_map_contains "rv32i: the map names labels, so any pc can be attributed"
+    "let _ = print_int 1;" "S 0 _start";
   (* --load-base shifts everything absolute so two programs fit in one address
      space: the globals region, the stack, and every `la` of a literal. Branches
      and calls are PC-relative and need no help. *)

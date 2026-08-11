@@ -20,6 +20,7 @@ let usage () =
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
   print_endline "  mere -rvs <file.mere> print an RV32IM assembly listing (disassembled)";
   print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
+  print_endline "  mere -rvg <file.mere> print the debug map (symbols, frames, line table)";
   print_endline "        -rv/-rvs accept `--ram <MB>` (default 8): the RAM the";
   print_endline "        binary expects — the stack starts at the top of it";
   print_endline "        `--load-base <addr>`: load somewhere other than 0";
@@ -190,6 +191,15 @@ let compile_to_wasm ?base_dir source =
    line-number shifts in diagnostics are the only cost. *)
 let rv_source source = Mere.Rv_prelude.contents ^ "\n" ^ source
 
+(* Lines the prelude occupies, so the debug map can report the line the person
+   wrote rather than the line of the concatenation. Counted the same way
+   `rv_source` builds it: the prelude, then one newline, then the source. *)
+let rv_prelude_lines () =
+  let s = Mere.Rv_prelude.contents in
+  let n = ref 1 in
+  String.iter (fun c -> if c = '\n' then incr n) s;
+  !n
+
 (* `--ram <MB>` sets the RAM the emitted binary expects: the stack starts at
    the top of it and the heap grows up from 2MB, so this is the knob for a
    program whose live heap outgrows the 8MB default. The emulator running the
@@ -227,6 +237,12 @@ let set_riscv_load_base v =
     exit 1
   end;
   Mere.Codegen_riscv.load_base := n
+
+let debug_map_riscv ?base_dir source =
+  let open Mere in
+  Codegen_riscv.dbg_line_base := rv_prelude_lines ();
+  let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
+  Codegen_riscv.emit_debug_map ~main_ty prog
 
 let run_riscv_bare mode path =
   Mere.Codegen_riscv.bare := true;
@@ -444,6 +460,20 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action (listing_riscv ~base_dir:base) path source
+  | [_; "-rvg"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (debug_map_riscv ~base_dir:base) path source
+  | [_; "-rvg"; "--bare"; path] ->
+    Mere.Codegen_riscv.bare := true;
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (debug_map_riscv ~base_dir:base) path source
+  | [_; "-rvg"; "--load-base"; b; "--ram"; mb; path] ->
+    set_riscv_load_base b; set_riscv_ram mb;
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (debug_map_riscv ~base_dir:base) path source
   | [_; "-rvd"; path] ->
     (* disassemble a flat RV32I binary (e.g. one emitted by `mere -rv`) *)
     let ic = open_in_bin path in

@@ -26,9 +26,15 @@ matching device side lives: a UART, a CLINT, CSRs and traps.
 | `--bare` | No host. The program's top-level `main` is handed the machine as a `Raw`; the print builtins are refused |
 | `--load-base <addr>` | Load somewhere other than address 0, 4KB-aligned. Everything absolute in the binary shifts with it |
 
+`-rvg <file>` emits the debug map. It takes the same flags, and must be given the
+same ones as the `-rv` that produced the binary — the map records addresses, and
+`--bare` / `--ram` / `--load-base` move them.
+
 `-rvs` prints an assembly listing (the same flags apply) and `-rvd` disassembles
-a binary. Reading its own listings is this backend's debugging story, so the
-disassembler knows the CSR instructions, `mret` and `wfi`.
+a binary. The disassembler knows the CSR instructions, `mret` and `wfi`.
+
+`-rvg` prints a **debug map** for the binary, which is what makes source-level
+debugging possible — see below.
 
 ## Memory map
 
@@ -227,6 +233,44 @@ Worth being precise about what isolates that process: **the type system, not the
 hardware.** Everything runs in machine mode, and the process is contained because
 without `--bare` it cannot obtain a `Raw` at all — not because an MMU would stop
 it. A real privilege boundary is future work.
+
+## Debugging: the map, and what reads it
+
+The binary has no header to hold debug information — this backend emits code and
+nothing else — so `mere -rvg` writes a text sidecar. One record per line,
+addresses ascending:
+
+```
+S <addr> <name>                                 every label
+F <addr> <name> fsz= ra= fp= params= line=      a function and its frame
+L <addr> <line> <col>                           the statement starting here
+```
+
+Two properties worth knowing:
+
+- The map comes from **the same item list the assembler consumes**, so `-rv` and
+  `-rvg` agree by construction. There is no separate debug build, and the map
+  describes the bytes you actually ran.
+- Line numbers are the ones **you** wrote. Source positions arrive counted from
+  the top of the prelude-plus-source text the driver builds, and the map subtracts
+  it; an address whose line lands inside the prelude gets no record at all, which
+  is the honest answer for code the programmer did not write.
+
+Frame layout is uniform (`[overflow][saved s-regs][fp][ra]`), so `fsz` / `ra` /
+`fp` describe it completely: `lw ra, ra(fp)` and `lw fp, fp(fp)` walk to the
+caller, which is all a backtrace needs.
+
+```sh
+mere -rv  --bare prog.mere > prog.bin
+mere -rvg --bare prog.mere > prog.map
+```
+
+The reader is `riscv-dbg` in the [memu](https://github.com/284km/memu) project: a
+debugger that stops at source lines, prints a backtrace, and **steps backwards**
+via an undo log — one record per instruction, so reverse is exact rather than
+replayed, and it crosses traps. Breaking inside an interrupt handler and stepping
+back onto the line the timer interrupted is the thing that makes the map worth
+emitting.
 
 ## Deferred, on purpose
 

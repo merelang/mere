@@ -82,6 +82,11 @@ type item =
   | Branch of int * int * int * string (* f3, rs1, rs2, target -> B-type (op 0x63) *)
   | LoadAddr of int * string          (* rd, label -> lui+addi loading label's absolute addr (8 bytes) *)
   | Bytes of string                   (* raw data (rodata); length is a multiple of 4 *)
+  (* Zero-width, and invisible to the assembler and the listing: a line of the
+     debug map, stamped with whatever address it happens to sit at. The map is a
+     separate artifact (`mere -rvg`) because the binary has no header to put it
+     in — this backend emits code and nothing else. *)
+  | Meta of string
 
 let items : item list ref = ref []
 let emit x = items := x :: !items
@@ -536,6 +541,30 @@ let store_a0_to_global gi =
    the tail-propagating cases reinstate it explicitly. *)
 let tail_pos = ref false
 
+(* Debug map (see `mere -rvg`). The line table is emitted as zero-width Meta
+   items whenever the source line changes, so `-rv` and `-rvg` produce the same
+   bytes: the map describes the binary you shipped rather than a separate debug
+   build. `dbg_line` is reset per function so a function beginning on a line the
+   previous one already mentioned still gets an entry. *)
+let dbg_line = ref (-1)
+(* How many lines of prelude the driver prepended. Source positions arrive
+   counted from the top of that combined text, and a debugger needs the line the
+   person actually wrote; an address whose line lands inside the prelude has no
+   user source and gets no entry at all, which is the honest answer for it. *)
+let dbg_line_base = ref 0
+let dbg_mark (loc : Loc.t) =
+  if loc.Loc.line > 0 && loc.Loc.line <> !dbg_line then begin
+    dbg_line := loc.Loc.line;
+    let user = loc.Loc.line - !dbg_line_base in
+    if user > 0 then
+      emit (Meta (Printf.sprintf "L %d %d" user loc.Loc.col))
+  end
+
+(* the same adjustment for a function's own line, 0 when it is prelude code *)
+let dbg_user_line (loc : Loc.t) =
+  let n = loc.Loc.line - !dbg_line_base in
+  if n > 0 then n else 0
+
 (* The epilogue's frame teardown without the final `ret` — shared with tail
    calls, which have already placed their arguments in a0.. and must not
    disturb them. Touches ra / fp / sp / t0 and the saved s-registers only. *)
@@ -577,6 +606,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
      this expression's value put `saved_tail` back before recursing *)
   let saved_tail = !tail_pos in
   tail_pos := false;
+  dbg_mark e.Ast.loc;
   match e.node with
   | Ast.Int_lit n -> li a0 n
   | Ast.Bool_lit b -> li a0 (if b then 1 else 0)
@@ -1460,6 +1490,10 @@ let emit_function ~label ~params ~body =
   let nparams = List.length params in
   let total = nparams + count_lets body in
   emit (Label label);
+  dbg_line := -1;
+  emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=%d line=%d"
+                label ((total + 2) * 4) ((total + 1) * 4) (total * 4)
+                nparams (dbg_user_line body.Ast.loc)));
   let fr = emit_prologue total in
   let (_, _, _, _, fsz) = fr in
   List.iteri (fun i _ ->
@@ -1486,6 +1520,10 @@ let emit_lambda ~label ~captures ~param ~body =
   let k = List.length captures in
   let total = k + 1 + count_lets body in
   emit (Label label);
+  dbg_line := -1;
+  emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=1 line=%d"
+                label ((total + 2) * 4) ((total + 1) * 4) (total * 4)
+                (dbg_user_line body.Ast.loc)));
   let fr = emit_prologue total in
   (* load captured values from the closure env (a0), env[i+1] -> binding i *)
   List.iteri (fun i _ ->
@@ -1511,6 +1549,10 @@ let emit_main ?bare_entry main_body =
   let total =
     List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets main_body) !globals in
   emit (Label "__main");
+  dbg_line := -1;
+  emit (Meta (Printf.sprintf "F __main fsz=%d ra=%d fp=%d params=0 line=%d"
+                ((total + 2) * 4) ((total + 1) * 4) (total * 4)
+                (dbg_user_line main_body.Ast.loc)));
   let fr = emit_prologue total in
   slot_ctr := 0;
   List.iter (fun (nameopt, init) ->
@@ -2066,6 +2108,7 @@ let assemble (prog : item list) : string =
   List.iter (fun it ->
     match it with
     | Label name -> Hashtbl.replace labels name !addr
+    | Meta _ -> ()
     | Word _ | Jal _ -> addr := !addr + 4
     | Branch _ | LoadAddr _ -> addr := !addr + 8   (* branch = inverted-cond + jal (long range) *)
     | Bytes b -> addr := !addr + String.length b
@@ -2091,7 +2134,7 @@ let assemble (prog : item list) : string =
   let here = ref 0 in
   List.iter (fun it ->
     match it with
-    | Label _ -> ()
+    | Label _ | Meta _ -> ()
     | Word w -> put_word (w land 0xFFFFFFFF); here := !here + 4
     | Jal (rd, name) -> put_word (enc_j (target name !here) rd 0x6F); here := !here + 4
     | Branch (f3, rs1, rs2, name) ->
@@ -2117,6 +2160,7 @@ let listing (prog : item list) : string =
   let addr = ref 0 in
   List.iter (fun it -> match it with
     | Label name -> Hashtbl.replace labels name !addr
+    | Meta _ -> ()
     | Word _ | Jal _ -> addr := !addr + 4
     | Branch _ | LoadAddr _ -> addr := !addr + 8
     | Bytes b -> addr := !addr + String.length b) prog;
@@ -2125,6 +2169,7 @@ let listing (prog : item list) : string =
   List.iter (fun it ->
     match it with
     | Label name -> Buffer.add_string buf (Printf.sprintf "%s:\n" name)
+    | Meta _ -> ()
     | Word w ->
       Buffer.add_string buf
         (Printf.sprintf "  %6x:  %08x  %s\n" !here w (Riscv_disasm.disasm_word ~pc:!here w));
@@ -2150,6 +2195,39 @@ let listing (prog : item list) : string =
     | Bytes b ->
       Buffer.add_string buf (Printf.sprintf "  %6x:  .bytes %d\n" !here (String.length b));
       here := !here + String.length b
+  ) prog;
+  Buffer.contents buf
+
+(* --- the debug map ------------------------------------------------------
+   A text sidecar for a binary that has nowhere to keep it. One record per
+   line, addresses ascending, so a reader can walk it once:
+
+     S <addr> <name>                     every label, so any PC can be named
+     F <addr> <name> fsz= ra= fp= params= line=
+                                         a function, with the frame layout a
+                                         backtrace needs: fsz is the whole
+                                         frame, ra/fp are offsets from fp
+     L <addr> <line> <col>               the statement starting here
+
+   Frame layout is uniform on this backend ([overflow][saved s-regs][fp][ra]),
+   so three numbers describe it completely, and `lw ra, ra(fp)` /
+   `lw fp, fp(fp)` walks to the caller. *)
+let debug_map (prog : item list) : string =
+  let buf = Buffer.create 4096 in
+  Buffer.add_string buf
+    (Printf.sprintf "# mere-rv32 debug map v1 load_base=%d ram=%d\n"
+       !load_base !ram_bytes);
+  let addr = ref 0 in
+  List.iter (fun it ->
+    match it with
+    | Label name ->
+      Buffer.add_string buf (Printf.sprintf "S %d %s\n" (!load_base + !addr) name)
+    | Meta text ->
+      Buffer.add_string buf (Printf.sprintf "%c %d %s\n" text.[0] (!load_base + !addr)
+                               (String.sub text 2 (String.length text - 2)))
+    | Word _ | Jal _ -> addr := !addr + 4
+    | Branch _ | LoadAddr _ -> addr := !addr + 8
+    | Bytes b -> addr := !addr + String.length b
   ) prog;
   Buffer.contents buf
 
@@ -2272,3 +2350,7 @@ let emit_program ~main_ty (prog : Ast.program) : string =
 let emit_listing ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
   listing (build_items prog)
+
+let emit_debug_map ~main_ty (prog : Ast.program) : string =
+  ignore main_ty;
+  debug_map (build_items prog)
