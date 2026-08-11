@@ -15,7 +15,7 @@
 // written by hand in app.mere, once per field, and forgetting a line of it
 // is silent.
 
-import "../../contrib/json/json.mere";
+import "../../contrib/schema/reflect.mere";
 
 // ---- the record ------------------------------------------------------
 
@@ -170,91 +170,16 @@ let rec line_problems = fn (xs: line list) -> fn (i: int) ->
 
 // ---- the record, seen by field name ----------------------------------
 //
-// A record already has a total, name-keyed view of itself: the one the
-// compiler synthesises for `to_json`. Reading it back gives the field
-// names, in declaration order, without anything here listing them — which
-// is the whole of what the hand-written field table in app.mere used to
-// provide, minus the labels.
-//
-// `claim_with` has to name `claim` because `of_json` is directed by an
-// annotation at the call site: `to_json` is polymorphic and `of_json` is
-// not, so this trio cannot be written once for every record. One copy per
-// record type is the cost today.
+// contrib/schema/reflect does this now, for any record. It used to live
+// here because `of_json` takes its target type from an annotation at the
+// call site, so the setter had to name `claim` and could not be shared;
+// `of_json_like` (v0.1.183) takes it from a witness value, which a setter
+// always has.
 
-let claim_json = fn (c: claim) ->
-  match Json.parse_json (to_json c) with
-  | Json.JObj fs -> fs
-  | _ -> Nil;
-
-// Fields a text control can edit: everything except the structural ones
-// (`lines` is an array, and a record-valued field would be an object).
-let rec scalar_names = fn (fs: (str * Json.json) list) ->
-  match fs with
-  | Nil -> Nil
-  | Cons ((k, v), rest) ->
-    match v with
-    | Json.JArr _ -> scalar_names rest
-    | Json.JObj _ -> scalar_names rest
-    | _ -> Cons (k, scalar_names rest);
-
-let claim_fields = fn (c: claim) -> scalar_names (claim_json c);
-
-let rec lookup_json = fn (fs: (str * Json.json) list) -> fn (name: str) ->
-  match fs with
-  | Nil -> Json.JNull
-  | Cons ((k, v), rest) -> if str_eq k name then v else lookup_json rest name;
-
-let claim_text = fn (c: claim) -> fn (name: str) ->
-  match lookup_json (claim_json c) name with
-  | Json.JStr s -> s
-  | Json.JNum n -> show n
-  | Json.JBool b -> if b then "1" else "0"
-  | _ -> "";
-
-// Replace one field from text.
-//
-// The shape to write back is taken from the shape that is there, which is
-// exact — except for an absent optional, where `null` cannot say what it
-// would have held. The first version guessed "string" and named the two
-// fields that needed clearing, which was wrong the moment a claim gained
-// an `int option`: setting it produced a string and the decode failed.
-//
-// So where the value cannot say, ask the decoder instead: try the shapes
-// in order and keep the first that survives `of_json_opt`. Blank text
-// tries `null` first, which is how an optional field is cleared without
-// anything here knowing which fields are optional.
-//
-// `claim_with` names `claim` because `of_json` is directed by an
-// annotation at the call site: `to_json` is polymorphic and `of_json` is
-// not, so this cannot be written once for every record. One copy per
-// record type is the cost today.
+let claim_fields = fn (c: claim) -> schema_fields c;
+let claim_text = fn (c: claim) -> fn (name: str) -> schema_text c name;
 let claim_with = fn (c: claim) -> fn (name: str) -> fn (v: str) ->
-  let rec repl = fn (fs: (str * Json.json) list) -> fn (jv: Json.json) ->
-    match fs with
-    | Nil -> Nil
-    | Cons ((k, old), rest) ->
-      if str_eq k name then Cons ((k, jv), rest)
-      else Cons ((k, old), repl rest jv) in
-  let attempt = fn (jv: Json.json) ->
-    (of_json_opt (Json.to_json_str (Json.JObj (repl (claim_json c) jv))) : claim option) in
-  let rec first = fn (candidates: Json.json list) ->
-    match candidates with
-    | Nil -> c
-    | Cons (jv, rest) ->
-      match attempt jv with
-      | Some out -> out
-      | None -> first rest in
-  let n = try_or (fn () -> int_of_str (str_trim v)) 0 in
-  let candidates =
-    if str_eq (str_trim v) "" then
-      Cons (Json.JNull, Cons (Json.JStr v, Cons (Json.JNum 0, Nil)))
-    else
-      match lookup_json (claim_json c) name with
-      | Json.JNum _ -> Cons (Json.JNum n, Nil)
-      | Json.JBool _ -> Cons (Json.JBool (str_eq v "1"), Nil)
-      | Json.JStr _ -> Cons (Json.JStr v, Nil)
-      | _ -> Cons (Json.JStr v, Cons (Json.JNum n, Cons (Json.JNull, Nil))) in
-  first candidates;
+  schema_with c name v;
 
 // The one place a field name is tied to the rule that judges it. Nothing
 // in the declaration can say this, so it is written down — but once, and

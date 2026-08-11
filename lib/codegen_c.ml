@@ -2573,6 +2573,36 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> unsupported e.loc "to_json: missing arg type info"
        in
        Printf.sprintf "to_json_%s(%s)" (ty_tag arg_ty) (emit_expr arg)
+     (* v0.1.183: `of_json_like w s` is `of_json s` with the target type
+        taken from the witness rather than from an annotation. Here that is
+        the same thing — this node's type IS the witness's, since the scheme
+        is `'a -> str -> 'a` — so the only difference is that the witness
+        has to be evaluated for its effects and then dropped. *)
+     | Ast.App ({ node = Ast.Var "of_json_opt_like"; _ }, w_e) ->
+       let inner =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("option", [inner]) when ty_is_concrete (Ast.walk inner) ->
+              Ast.walk inner
+            | _ ->
+              unsupported e.loc
+                "of_json_opt_like: cannot tell what to decode into")
+         | None -> unsupported e.loc "of_json_opt_like: missing type info"
+       in
+       Printf.sprintf "({ (void)(%s); of_json_opt_%s(%s); })"
+         (emit_expr w_e) (ty_tag inner) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "of_json_like"; _ }, w_e) ->
+       let target_ty =
+         match e.Ast.ty with
+         | Some t when ty_is_concrete (Ast.walk t) -> Ast.walk t
+         | _ ->
+           unsupported e.loc
+             "of_json_like: cannot tell what to decode into (the witness's \
+              type is not concrete here)"
+       in
+       Printf.sprintf "({ (void)(%s); of_json_%s(%s); })"
+         (emit_expr w_e) (ty_tag target_ty) (emit_expr arg)
      | Ast.Var "of_json" ->
        (* Deserialization mirror: dispatch on the call node's RESULT type
           (the `'a` in `str -> 'a`), read from this App node's inferred ty. *)
@@ -7857,6 +7887,25 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_into to_json_types t
         | None -> ())
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "of_json_like"; _ }, _); _ }, _) ->
+       (* Same decoder as of_json; the target is this node's type, which is
+          the witness's. Registered separately because the head is an App. *)
+       (match e.Ast.ty with
+        | Some t -> add_into of_json_types t
+        | None -> ())
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "of_json_opt_like"; _ }, _); _ }, _) ->
+       (* Only when the target is known. Inside the generic setter's own
+          skeleton it is still a variable, and `ty_tag` has no name for one;
+          the instantiated copies are what register the real types. *)
+       (match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyCon ("option", [inner]) when ty_is_concrete (Ast.walk inner) ->
+             add_into of_json_types inner;
+             let it = Ast.walk inner in
+             Hashtbl.replace of_json_opt_types (ty_tag it) it
+           | _ -> ())
+        | None -> ())
      | Ast.App ({ node = Ast.Var "of_json"; _ }, _) ->
        (* of_json specializes on the RESULT type (this App node's ty). *)
        (match e.Ast.ty with
@@ -7981,7 +8030,13 @@ let collect_mono_variant_instances
     | Ast.Record_update (a, fs) -> walk_expr a; List.iter (fun (_, e) -> walk_expr e) fs
   in
   walk_expr root;
-  List.iter (fun f -> walk_ty f.param_ty; walk_ty f.return_ty) fns;
+  (* v0.1.183: bodies too, not just signatures. A type that appears only
+     inside a monomorphized body — `person option`, produced by
+     `of_json_opt_like` inside a generic setter whose own signature never
+     mentions an option — was never registered, and the emitted C named a
+     struct it had not declared. *)
+  List.iter (fun f ->
+    walk_ty f.param_ty; walk_ty f.return_ty; walk_expr f.body) fns;
   (* DEFERRED §8.3 fix: monomorphic variant decls (`type expr = | ELetRec
      of (str * expr) list * expr | ...`) declare payload types
      containing concrete `list T` / `option T` specializations whose

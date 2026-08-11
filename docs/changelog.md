@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.183 — 2026-08-11
+
+_`of_json_like`: the target type from a witness value, so a decoder can live
+inside a polymorphic function — and `contrib/schema`, which is what that was
+for._
+
+_`of_json` reads its target type off the call node. At a use site with an
+annotation that is exactly right; inside a generic helper it is a variable, and
+the interpreter has no runtime types to resolve it with. The monomorphizing
+backends managed — with v0.1.182's fix a generic setter compiled and ran
+correctly on C — so a program could be compiled and not interpreted, which is
+the wrong kind of split for a language whose parity harness treats the
+interpreter as the reference._
+
+_A witness closes it. `of_json_like : 'a -> str -> 'a` takes a value of the
+target type; the interpreter reads the type off its runtime shape (a record
+carries its type's name, a constructor gives one through `Typer.constructors`)
+and the compiled backends read it off its static type, which is the same
+variable the result unifies with. `of_json_opt_like` is the non-crashing form,
+and the one a generic setter actually needs: it tries a shape and finds out
+whether it decoded. The witness is never an imposition — replacing one field of
+a record means holding the record._
+
+_`contrib/schema/reflect` is the payoff: `schema_fields` / `schema_text` /
+`schema_with` over any record, from the name-keyed view the compiler already
+synthesises for `to_json`. `examples/claims` had carried a per-record copy of
+exactly this since v0.1.176 and now imports it, so a form generated from a
+record declaration is a library rather than a trick in one app._
+
+_Two collection gaps surfaced while wiring it. `collect_mono_variant_instances`
+walked fn signatures and not fn bodies, so `person option` — produced by
+`of_json_opt_like` inside a generic setter whose own signature never mentions an
+option — was never registered and the emitted C named an undeclared struct. And
+the new collector arms called `ty_tag` before checking the type was concrete,
+which inside the generic skeleton it is not._
+
+_A polymorphic record still needs the annotation: a value carries its type's
+name but not its type arguments, so a witness cannot describe `Box[int]`. LLVM
+is unchanged — it has no `to_json` at all, which is a separate gap._
+
+_`test/parity/schema_reflect.mere` runs the one implementation over two record
+types. parity 83/83, ctest 13/13, dune runtest 2308/0, claims browser check
+17/17 against the native server._
+
+---
+
 ## v0.1.182 — 2026-08-11
 
 _The monomorphization bug, found and fixed. `specialize_single_use_local_fns`

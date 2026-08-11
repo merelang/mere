@@ -283,17 +283,45 @@ let sub = fn a -> fn b -> a - b in (flip sub) 3 10   // 7 (= sub 10 3)
 
 ---
 
-## JSON, derive-style (3 ★)
+## JSON, derive-style (5 ★)
 
 Structural JSON, compile-time-specialized per type (no trait machinery),
-like `show`. `to_json` works on interp / C / Wasm; `of_json` /
-`of_json_opt` on interp / C (native).
+like `show`. `to_json` works on interp / C / Wasm; `of_json` and its
+siblings on interp / C / Wasm.
 
 | Name | Type | Description |
 |---|---|---|
 | `to_json` ★ | `'a -> str` | Serialize any value to JSON structurally |
 | `of_json` ★ | `str -> 'a` | Parse JSON into a typed value; **fails fast** on error (trusted input) |
 | `of_json_opt` ★ | `str -> 'a option` | Same, but returns `None` on any error (safe for untrusted input) |
+| `of_json_like` ★ | `'a -> str -> 'a` | Target type from a witness value instead of an annotation (v0.1.183) |
+| `of_json_opt_like` ★ | `'a -> str -> 'a option` | The non-crashing witness form |
+
+### Decoding inside a polymorphic function
+
+`of_json` reads the target type off the call node, which is fine at a use
+site with an annotation and impossible inside a generic helper: there the
+node's type is a variable, and the interpreter has no runtime types to
+resolve it with. So a generic "decode it back" had to name the record type,
+and every record needed its own copy.
+
+A witness supplies the type instead. The interpreter reads it off the
+value's runtime shape — a record carries its type's name — and the compiled
+backends read it off the witness's static type, which is the same variable
+the result unifies with:
+
+```mere
+let with_field = fn (rec_) -> fn (name: str) -> fn (v: str) ->
+  ... of_json_opt_like rec_ (rebuilt_json) ...
+```
+
+The witness is a value the caller already has whenever this comes up:
+replacing one field of a record means holding the record. `contrib/schema`
+is this, and `examples/claims` generates its whole form from it.
+
+A polymorphic record still needs the annotation — a value carries its
+type's name but not its type arguments, so a witness cannot describe
+`Box[int]`.
 
 The `of_json` result type comes from the use site — annotate the
 expression: `(of_json s : T)`. A JSON object maps to a record's fields (by

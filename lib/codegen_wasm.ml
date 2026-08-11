@@ -748,6 +748,25 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (match arg.Ast.ty with
         | Some t -> add_type_into to_json_types t
         | None -> ())
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "of_json_like"; _ }, _); _ }, _) ->
+       (* Same decoder as of_json; the target is this node's type, which is
+          the witness's. Registered separately because the head is an App. *)
+       (match e.Ast.ty with
+        | Some t -> add_type_into of_json_types t
+        | None -> ())
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "of_json_opt_like"; _ }, _); _ }, _) ->
+       (* Only when the target is known. Inside the generic setter's own
+          skeleton it is still a variable, and `ty_tag` has no name for one;
+          the instantiated copies are what register the real types. *)
+       (match e.Ast.ty with
+        | Some t ->
+          (match Ast.walk t with
+           | Ast.TyCon ("option", [inner]) when ty_is_concrete (Ast.walk inner) ->
+             add_type_into of_json_types inner;
+             let it = Ast.walk inner in
+             Hashtbl.replace of_json_opt_types (ty_tag it) it
+           | _ -> ())
+        | None -> ())
      | Ast.App ({ node = Ast.Var "of_json"; _ }, _) ->
        (match e.Ast.ty with
         | Some t -> add_type_into of_json_types t
@@ -2112,6 +2131,38 @@ let rec emit_expr (e : Ast.expr) : unit =
     in
     emit_expr arg;
     emit_instr (Printf.sprintf "call $to_json_%s" (ty_tag arg_ty))
+  (* v0.1.183: `of_json_like w s` is `of_json s` with the target type taken
+     from the witness rather than from an annotation. Here that is the same
+     type — the scheme is `'a -> str -> 'a`, so this node's type IS the
+     witness's — and the only extra work is evaluating the witness for its
+     effects and dropping it. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "of_json_opt_like"; _ }, w_e); _ }, arg) ->
+    let inner =
+      match e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("option", [inner]) when ty_is_concrete (Ast.walk inner) ->
+           Ast.walk inner
+         | _ -> unsupported e.Ast.loc "of_json_opt_like: cannot tell what to decode into")
+      | None -> unsupported e.Ast.loc "of_json_opt_like: missing type info"
+    in
+    emit_expr w_e;
+    emit_instr "drop";
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $of_json_opt_%s" (ty_tag inner))
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "of_json_like"; _ }, w_e); _ }, arg) ->
+    let target_ty =
+      match e.Ast.ty with
+      | Some t when ty_is_concrete (Ast.walk t) -> Ast.walk t
+      | _ ->
+        unsupported e.Ast.loc
+          "of_json_like: cannot tell what to decode into (the witness's type \
+           is not concrete here)"
+    in
+    emit_expr w_e;
+    emit_instr "drop";
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $of_json_%s" (ty_tag target_ty))
   | Ast.App ({ node = Ast.Var "of_json"; _ }, arg) ->
     let target_ty =
       match e.Ast.ty with

@@ -844,6 +844,49 @@ let of_json_scheme =
   { constraints = []; quantified = [id];
     body = Ast.TyArrow (Ast.TyStr, _of_json_alpha_init) }
 
+(* `of_json_like : 'a -> str -> 'a` — decode into the shape of a value you
+   already have. Same decoder as `of_json`; the difference is where the
+   target type comes from.
+
+   `of_json` reads it off the call node, which is why it cannot be used
+   inside a polymorphic function on the interpreter: there the node's type
+   is a variable, and the interpreter has no runtime types to resolve it
+   with. The monomorphizing backends do fine, so a generic "decode one
+   field back" helper compiled and did not interpret — a split worth
+   closing rather than documenting.
+
+   A witness closes it. The interpreter reads the target type off the
+   value's own runtime shape (records and constructors carry their type
+   name), and the compiled backends read it off the witness's static type,
+   which is the same variable the result unifies with. So the helper is
+   polymorphic on all four.
+
+   The witness is a value the caller already has whenever this comes up:
+   replacing one field of a record means holding the record. *)
+let _of_json_like_alpha_init = fresh_var ()
+let of_json_like_scheme =
+  let id = match _of_json_like_alpha_init with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { constraints = []; quantified = [id];
+    body = Ast.TyArrow (_of_json_like_alpha_init,
+                        Ast.TyArrow (Ast.TyStr, _of_json_like_alpha_init)) }
+
+(* `of_json_opt_like : 'a -> str -> 'a option` — the non-crashing sibling of
+   of_json_like, and the one a generic setter actually needs: it tries a
+   shape and finds out whether it decoded. *)
+let _of_json_opt_like_alpha_init = fresh_var ()
+let of_json_opt_like_scheme =
+  let id = match _of_json_opt_like_alpha_init with
+    | Ast.TyVar v -> v.id
+    | _ -> assert false
+  in
+  { constraints = []; quantified = [id];
+    body = Ast.TyArrow (_of_json_opt_like_alpha_init,
+             Ast.TyArrow (Ast.TyStr,
+               Ast.TyCon ("option", [_of_json_opt_like_alpha_init]))) }
+
 (* `of_json_opt : str -> 'a option` — the non-crashing sibling of of_json.
    Returns None on any parse / shape error instead of failing, so it is safe
    for untrusted input (HTTP request bodies etc.). *)
@@ -1719,6 +1762,8 @@ let initial_env : env =
     ("show",        show_scheme);
     ("to_json",     show_scheme);
     ("of_json",     of_json_scheme);
+    ("of_json_like", of_json_like_scheme);
+    ("of_json_opt_like", of_json_opt_like_scheme);
     ("of_json_opt", of_json_opt_scheme);
     ("len",         len_scheme);
     ("fst",         fst_scheme);
