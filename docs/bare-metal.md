@@ -26,15 +26,12 @@ matching device side lives: a UART, a CLINT, CSRs and traps.
 | `--bare` | No host. The program's top-level `main` is handed the machine as a `Raw`; the print builtins are refused |
 | `--load-base <addr>` | Load somewhere other than address 0, 4KB-aligned. Everything absolute in the binary shifts with it |
 
-`-rvg <file>` emits the debug map. It takes the same flags, and must be given the
-same ones as the `-rv` that produced the binary — the map records addresses, and
-`--bare` / `--ram` / `--load-base` move them.
-
-`-rvs` prints an assembly listing (the same flags apply) and `-rvd` disassembles
-a binary. The disassembler knows the CSR instructions, `mret` and `wfi`.
-
-`-rvg` prints a **debug map** for the binary, which is what makes source-level
-debugging possible — see below.
+The three flags may come in any order. `-rvg <file>` prints the **debug map** that
+makes source-level debugging possible (see below); it must be given the same flags
+as the `-rv` that produced the binary, since the map records addresses and all
+three of them move addresses. `-rvs` prints an assembly listing and `-rvd`
+disassembles a binary — the disassembler knows the CSR instructions, `mret` and
+`wfi`.
 
 ## Memory map
 
@@ -262,9 +259,37 @@ fib 20 = 6765
 mtime advances
 ```
 
-`sh scripts/qemu_virt.sh` builds both `examples/riscv_virt_*.mere` programs, runs
+`sh scripts/qemu_virt.sh` builds the `examples/riscv_virt_*.mere` programs, runs
 them, and diffs the output. It skips cleanly when QEMU is not installed, so it is
 an optional check rather than a dependency.
+
+Three programs run: a bare one (UART, a run-time-allocated string, recursion),
+a timer handler, and **the scheduler** — two tasks preempted by the clock, which
+is the case most worth an outsider's opinion. A context switch is where an
+emulator and the code it runs can be wrong *together*: the trampoline saves 31
+registers to a known place and the emulator restores them, so if the two agreed
+on a wrong order, nothing we own would notice. QEMU restores the register set its
+own way, from the same bytes.
+
+With `MEMU` pointed at a [memu](https://github.com/284km/memu) checkout, each
+image is run on **both** machines and their output diffed:
+
+```sh
+MEMU=../memu sh scripts/qemu_virt.sh
+  ok    riscv_virt_hello (4309 bytes, identical on both)
+  ok    riscv_virt_timer (4597 bytes, identical on both)
+  ok    riscv_virt_sched (7777 bytes, identical on both)
+```
+
+That is the point of the exercise: not "the binary does what we expected" but
+*two independent implementations of this board agree, byte for byte, about the
+same image*. Our emulator takes `virt` as its second argument to place RAM at
+2GB; everything else about it is unchanged.
+
+For that diff to mean anything the output has to be a function of the program
+rather than of the clock, which is why the scheduler prints one letter per
+**switch** instead of one per N iterations: virt gives each task 20ms of real
+time, our emulator counts instructions, and both produce `ABABABA`.
 
 **What it checks that our own emulator cannot:** instruction encodings, against a
 decoder nobody here wrote. The layout `_start` builds, at a load base above 2GB.
@@ -336,16 +361,12 @@ emitting.
   (`fb_set`, `key`, `present`) at RAM-relative addresses, so they cannot be used
   together with a non-default `--ram`. Migrating them into the MMIO region and
   onto `raw_*` would remove the last hardware builtins that are not capabilities.
-- **The kernel examples under QEMU.** A bare program and a trap handler both boot
-  on `virt` now (above), which covers the backend and the trap contract. The
-  scheduler, the shell and the user process do not yet: they name our CLINT
-  addresses, the shell wants a receive side, and loading a second image needs
-  `-device loader` rather than `-kernel`. Each is a swap of addresses, not a
-  redesign.
-- **Running a `virt` image on our own emulator too**, which would make the same
-  bytes runnable on both and turn the comparison into a differential test. It
-  needs `riscv-runc` to learn a DRAM base (its RAM is indexed by absolute
-  address) and virt's CLINT layout.
+- **The shell and the user process under QEMU.** A bare program, a trap handler
+  and the scheduler all boot on `virt` now, which covers the backend, the trap
+  contract and the context switch. The shell would need its input piped in to be
+  diffable, and the user-process pair needs a second image loaded with `-device
+  loader` rather than `-kernel`. Both are a swap of addresses plus an invocation,
+  not a redesign.
 - **Nested traps** halt rather than nesting. Depth-indexed save areas would let a
   handler fault survivably.
 - No MMU, no privilege modes, no PLIC (the UART is polled), no filesystem, and

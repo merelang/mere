@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.202 — 2026-08-12
+
+_Two loose ends from the bare-metal work: diagnostics that report the line you
+wrote, and the differential test the QEMU port was aiming at._
+
+**The line you wrote.** The `-rv` path compiles a *concatenation* — a Mere-source
+runtime prelude, then the user's file — so every position it produced was counted
+from the top of that text, and a type error in a three-line file was reported at
+"line 133", against a snippet from an unrelated line or none at all. The debug map
+already subtracted the prelude; the diagnostics did not.
+
+One function now answers "where is this really?" for both, so they cannot drift
+apart. A position that lands *inside* the prelude is deliberately **not** remapped
+into the user's file — there is no honest line there to point at — and is shown
+against the prelude's own text under the name `<rv-prelude>`, which also makes a
+prelude bug legible as one.
+
+**Two independent machines, same bytes.** v0.1.201 booted a bare program and a
+trap handler on QEMU's `virt` board. Two additions finish the thought:
+
+- `examples/riscv_virt_sched.mere` — the **context switch** on virt. This is the
+  case most worth an outsider's opinion: the trampoline saves 31 registers to a
+  known place and the emulator restores them, so if the two agreed on a wrong
+  order, order-dependent corruption would be invisible to every test we own. It
+  also checks the rule that was hardest to arrive at (`gp` switches with the rest,
+  because each task has a heap of its own) against a machine with no stake in it.
+- `scripts/qemu_virt.sh` now takes `MEMU=<memu checkout>` and runs each image on
+  **both** machines — QEMU and the Mere-written emulator — diffing the two. All
+  three examples are byte-identical on both.
+
+For that diff to mean anything the output has to be a function of the program
+rather than of the clock, so the scheduler prints one letter per **switch** rather
+than one per N iterations: virt gives each task 20ms of real time, our emulator
+counts instructions, and both print `ABABABA`.
+
+_The emulator side of this is in the memu project: `./rvrun 8 virt` places RAM at
+2GB and moves the CLINT to virt's addresses. What had to change there was the
+decode *order* — it asked "is this a device?" first, which is only right while the
+devices are above RAM._
+
+_Still not on virt: the shell (its input would have to be piped in to be diffable)
+and the user-process pair (a second image needs `-device loader` rather than
+`-kernel`)._
+
+---
+
 ## v0.1.201 — 2026-08-11
 
 _The backend's output boots on a machine nobody here wrote: QEMU's `virt` board._

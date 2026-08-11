@@ -143,3 +143,27 @@ let rec _miter = fn node -> fn f -> fn seen ->
     else let _ = f kk vv in _miter rest f (Cons (kk, seen));
 let rvmap_iter = fn m -> fn f -> _miter (vec_get m 0) f Nil;
 |mere}
+
+(* Lines the prelude occupies once it is glued ahead of the user source, so a
+   position in the concatenation can be turned back into the line the person
+   actually wrote. Counted the way the driver builds that text: the prelude,
+   then one newline, then the source.
+
+   Every position the -rv path produces — a type error's, the debug map's —
+   arrives in concatenated coordinates, which is why a three-line file used to
+   report a type error at "line 133". *)
+let lines () =
+  let n = ref 1 in
+  String.iter (fun c -> if c = '\n' then incr n) contents;
+  !n
+
+(* Where a concatenated position really is. `Prelude` means the diagnostic is
+   about code the user did not write: reporting it against their file would
+   point at a line that either does not exist or says something unrelated, so
+   the caller shows the prelude's own text instead. *)
+type origin = User of Loc.t | Prelude of Loc.t
+
+let origin_of (loc : Loc.t) : origin =
+  let n = lines () in
+  if loc.Loc.line > n then User { loc with Loc.line = loc.Loc.line - n }
+  else Prelude loc

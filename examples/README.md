@@ -200,9 +200,12 @@ answer a question it had not been asked, and what it forced is listed beside it.
 | [riscv_bare_selfhost.mere](riscv_bare_selfhost.mere) + [riscv_user_selfhost.mere](riscv_user_selfhost.mere) | The tower closing: Mere's own self-hosted compiler as a user process on a Mere kernel, emitting WAT byte-identical to the native interpreter |
 | [riscv_virt_hello.mere](riscv_virt_hello.mere) | The same backend aimed at **QEMU's `virt` board** — an implementation of the ISA nobody here wrote. Forced the machine window to be a `max` rather than a sum, because virt puts the devices *below* RAM |
 | [riscv_virt_timer.mere](riscv_virt_timer.mere) | The trap contract, checked by a third party: `mtvec`, `mstatus.MIE`, `mie.MTIE`, a real 10 MHz CLINT, and the PC the handler returns for `mepc` |
+| [riscv_virt_sched.mere](riscv_virt_sched.mere) | The **context switch** — where an emulator and the code it runs can be wrong together, since a wrong register order would be invisible to every test we own. Prints one letter per switch, so the output is a function of the scheduler and not of either machine's clock rate |
 
-`sh scripts/qemu_virt.sh` runs the two `riscv_virt_*` programs under QEMU and
-diffs their output (skipped when QEMU is absent).
+`sh scripts/qemu_virt.sh` runs the three `riscv_virt_*` programs under QEMU and
+diffs their output (skipped when QEMU is absent). With `MEMU` pointed at a memu
+checkout it runs each image on **both** machines and diffs those against each
+other — two independent implementations of the same board, same bytes.
 
 See [bare-metal.md](../docs/bare-metal.md) for the memory map, the capability
 rules, the two that are easy to get wrong (when to switch `gp`, and why a handler
