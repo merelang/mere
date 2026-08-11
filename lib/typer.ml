@@ -1607,6 +1607,12 @@ let initial_env : env =
        native, like read_key — which blocks, and so cannot serve a device
        emulator polling a line-status register. *)
     ("stdin_byte",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    (* register a trap handler: `int -> int` takes mcause and returns the PC to
+       resume at. A closure rather than a named function, because a handler needs
+       the machine capability to do anything (a context switch is a memory copy)
+       and an interrupt has no caller to hand it one — so it captures instead. *)
+    ("set_trap_handler",
+       mono (Ast.TyArrow (Ast.TyArrow (Ast.TyInt, Ast.TyInt), Ast.TyUnit)));
     ("csr_read",    mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("csr_write",   mono (Ast.TyArrow (Ast.TyInt,
                             Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));

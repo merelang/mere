@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.190" Version.v "0.1.190";
+  check "version is 0.1.191" Version.v "0.1.191";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12234,6 +12234,18 @@ let () =
     "let main = fn (m: Raw) -> csr_write 0x305 4096;\n()" "csrrw zero, 0x305, a0";
   rv_contains "rv32i: csr_read emits csrrs from x0"
     "let main = fn (m: Raw) -> csr_read 0x341;\n()" "csrrs a0, 0x341, zero";
+  (* the trap trampoline: entered with every register live, so it swaps t0 with
+     mscratch to get a pointer to work with, and leaves with mret rather than
+     ret. set_trap_handler stores the closure and vectors mtvec at it. *)
+  rv_contains "rv32i: the trap trampoline gets its scratch pointer from mscratch"
+    "let main = fn (m: Raw) -> set_trap_handler (fn c -> csr_read 0x341 + 4);\n()"
+    "csrrw t0, 0x340, t0";
+  rv_contains "rv32i: the trap trampoline returns with mret"
+    "let main = fn (m: Raw) -> set_trap_handler (fn c -> csr_read 0x341 + 4);\n()"
+    "mret";
+  rv_contains "rv32i: set_trap_handler points mtvec at the trampoline"
+    "let main = fn (m: Raw) -> set_trap_handler (fn c -> csr_read 0x341 + 4);\n()"
+    "csrrw zero, 0x305, t1";
   rv_err_contains "rv32i: a computed CSR number is refused"
     "let main = fn (m: Raw) -> csr_write (300 + 40) 1;\n()"
     "the CSR number must be a literal";

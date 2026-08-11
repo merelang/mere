@@ -1,6 +1,6 @@
 # Stdlib reference (mere)
 
-195 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+196 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -411,7 +411,7 @@ let m = mk_metrics () in
 
 For a complete cap-passing example see [examples/effects.mere](../examples/effects.mere).
 
-### Raw memory and CSRs (7, RV32I bare-metal only)
+### Raw memory, CSRs and traps (8, RV32I bare-metal only)
 
 A `Raw` is a **window onto physical memory** — the one capability that is not a
 record of functions, because its operations lower to load and store
@@ -430,6 +430,7 @@ outside it; every access bounds-checks the offset, and widening faults.
 | `raw_window` | `Raw -> int -> int -> Raw` | A window over `[off, off+len)` of another. Faults if that is not inside it |
 | `csr_read` | `int -> int` | A machine CSR by number — the number must be a literal (it is an immediate field of the instruction) |
 | `csr_write` | `int -> int -> unit` | Write a machine CSR. Not behind a capability: a CSR has no base and length to narrow, and the hardware's privilege modes are what separate a kernel from a user process |
+| `set_trap_handler` | `(int -> int) -> unit` | Install a trap handler. The argument is `mcause`; the result is the PC to resume at. Anything else (`mepc` 0x341, `mtval` 0x343) is a `csr_read` away. **A closure, not a named function**: a handler needs the machine capability to do anything useful and an interrupt has no caller to hand it one, so it captures instead. Codegen emits the trampoline that saves the register set and returns with `mret` |
 | `raw_peek8`  | `Raw -> int -> int` | The byte at that offset |
 | `raw_peek32` | `Raw -> int -> int` | The 32-bit word at that offset |
 | `raw_poke8`  | `Raw -> int -> int -> unit` | Store a byte |
@@ -474,7 +475,7 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 122)
+## All builtins (alphabetical, 123)
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
@@ -492,7 +493,7 @@ read_file read_file_bytes read_line read_lines round show sign sin snd sqrt
 square str_compare str_contains str_count str_ends_with
 str_index_of str_join str_len str_of_float str_of_int
 str_repeat str_replace str_rev str_split str_starts_with
-str_trim str_unescape substring sum_range swap tan time
+set_trap_handler str_trim str_unescape substring sum_range swap tan time
 to_lower to_upper try_or write_file write_file_bytes
 ```
 

@@ -356,6 +356,11 @@ let machine_len = mmio_base + mmio_len
 let bare = ref false
 let reserved_top = 0x20000                         (* 128KB: scratch + fb + keys *)
 let stack_top () = !ram_bytes - reserved_top
+(* the trap trampoline's register save area (x1..x31) and the one word holding
+   the registered handler closure. Both sit in the reserved region above the
+   stack, so no program allocation can land on them. *)
+let trap_save_base () = stack_top () + 0x1000
+let trap_handler_slot () = stack_top () + 0x1100
 let scratch_base () = stack_top () + 0x10000
 let fb_base () = stack_top () + 0x18000
 let key_base () = stack_top () + 0x19000
@@ -1045,6 +1050,20 @@ and compile_app env e =
      a program running under a host, and unlike raw memory there is no window
      to narrow: a CSR has no base and length. The hardware's own privilege
      modes are what will separate a kernel from a user process later. *)
+  | Ast.Var "set_trap_handler" when List.length args = 1 ->
+    if not !bare then
+      err e.loc "RV32I: set_trap_handler needs the bare-metal target (mere -rv --bare)";
+    (* store the closure, point mscratch at the save area, and vector mtvec at
+       the trampoline. Three CSR-and-store instructions and the machine is
+       taking traps. *)
+    compile_expr env (List.hd args);                       (* a0 = closure *)
+    li t1 (trap_handler_slot ());
+    emit_word (enc_s 0 a0 t1 2 0x23);                      (* sw a0, 0(slot) *)
+    li t1 (trap_save_base ());
+    emit_word (enc_i 0x340 t1 1 zero 0x73);                (* csrrw x0, mscratch, t1 *)
+    emit (LoadAddr (t1, "__trap_entry"));
+    emit_word (enc_i 0x305 t1 1 zero 0x73);                (* csrrw x0, mtvec, t1 *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                     (* unit *)
   | Ast.Var ("csr_read" | "csr_write") when not !bare ->
     err e.loc
       "RV32I: csr_read / csr_write need the bare-metal target (mere -rv --bare)"
@@ -1759,6 +1778,55 @@ let emit_oom () =
   emit_word (enc_i 3 zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(3) *)
 
+(* --- the trap trampoline ------------------------------------------------
+   A trap handler cannot be an ordinary function: it is entered with every
+   register live and it leaves with `mret`, not `ret`. The language does not
+   need to know that. Codegen emits the trampoline — exactly as it already
+   emits `_start` — and the user writes a plain Mere closure.
+
+   Registered rather than named, because a handler needs the machine
+   capability to do anything useful (a context switch is a memory copy), and
+   an interrupt has no caller to hand it one. A closure captures it instead.
+   `set_trap_handler (fn cause -> ...)` stores the closure here and points
+   mtvec at the trampoline.
+
+   The handler's argument is mcause; its result is the PC to resume at, which
+   the trampoline writes to mepc. Everything else it wants — mepc, mtval — is
+   a `csr_read` away, so nothing has to be packed into a tuple (which would
+   mean allocating inside a trap).
+
+   mscratch holds the save area's address: at entry there is no free register
+   to build it in, which is what that CSR is for.
+
+   `gp` (the bump pointer) is saved and restored with the rest, so whatever
+   the handler allocated is reclaimed when it returns — a region per trap,
+   for free. The corollary is that a handler must not stash an allocated
+   value somewhere that outlives it. *)
+let emit_trap_entry () =
+  emit (Label "__trap_entry");
+  (* t0 <- save area, mscratch <- the interrupted t0 *)
+  emit_word (enc_i 0x340 t0 1 t0 0x73);                 (* csrrw t0, mscratch, t0 *)
+  for i = 1 to 31 do
+    if i <> 5 then emit_word (enc_s (i * 4) i t0 2 0x23) (* sw xI, i*4(t0) *)
+  done;
+  emit_word (enc_i 0x340 zero 2 t1 0x73);               (* csrrs t1, mscratch, x0 *)
+  emit_word (enc_s (5 * 4) t1 t0 2 0x23);               (* sw the interrupted t0 *)
+  emit_word (enc_i 0x340 t0 1 zero 0x73);               (* csrrw x0, mscratch, t0 *)
+  (* call the registered closure: a0 = its env, a1 = mcause *)
+  emit_word (enc_i 0x342 zero 2 a1 0x73);               (* csrrs a1, mcause, x0 *)
+  li t1 (trap_handler_slot ());
+  emit_word (enc_i 0 t1 2 a0 0x03);                     (* lw a0, 0(t1) — closure *)
+  emit_word (enc_i 0 a0 2 t2 0x03);                     (* lw t2, 0(a0) — code ptr *)
+  emit_word (enc_i 0 t2 0 ra 0x67);                     (* jalr ra, t2 *)
+  emit_word (enc_i 0x341 a0 1 zero 0x73);               (* csrrw x0, mepc, a0 *)
+  (* restore and return *)
+  li t0 (trap_save_base ());
+  for i = 1 to 31 do
+    if i <> 5 then emit_word (enc_i (i * 4) t0 2 i 0x03) (* lw xI, i*4(t0) *)
+  done;
+  emit_word (enc_i (5 * 4) t0 2 t0 0x03);               (* lw t0 last *)
+  emit_word 0x30200073                                  (* mret *)
+
 (* an offset outside the window it was applied to: the capability's bound is
    the whole point, so this stops rather than reaching past it *)
 let emit_raw_fault () =
@@ -2039,6 +2107,7 @@ let build_items (prog : Ast.program) : item list =
   emit_pat_fail ();
   emit_oom ();
   emit_raw_fault ();
+  if !bare then emit_trap_entry ();
   emit_main ?bare_entry main_body;
   Hashtbl.iter (fun name (params, body) ->
     if Hashtbl.mem reachable name then

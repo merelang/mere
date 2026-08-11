@@ -2351,6 +2351,7 @@ let initial_env : env =
     ("channel_close", ref builtin_channel_close);
     ("channel_recv_opt", ref builtin_channel_recv_opt);
     ("stdin_byte", ref builtin_stdin_byte);
+    ("set_trap_handler", ref (bare_only "set_trap_handler"));
     ("csr_read", ref (bare_only "csr_read"));
     ("csr_write", ref (bare_only "csr_write"));
     ("raw_window", ref (bare_only "raw_window"));
