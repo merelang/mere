@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.193" Version.v "0.1.193";
+  check "version is 0.1.194" Version.v "0.1.194";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12268,6 +12268,18 @@ let () =
     "let main = fn (m: Raw) -> csr_write (300 + 40) 1;\n()"
     "the CSR number must be a literal";
   Codegen_riscv.bare := false;
+  (* --load-base shifts everything absolute so two programs fit in one address
+     space: the globals region, the stack, and every `la` of a literal. Branches
+     and calls are PC-relative and need no help. *)
+  Codegen_riscv.load_base := 0x800000;
+  Codegen_riscv.ram_bytes := 4 * 1024 * 1024;
+  rv_contains "rv32i: --load-base moves the stack into the loaded region"
+    "let _ = print_int 1;" "lui sp, 0xbe0";
+  rv_contains "rv32i: --load-base moves the globals region too"
+    "let _ = print_int 1;" "lui gp, 0xa00";
+  Codegen_riscv.load_base := 0;
+  Codegen_riscv.ram_bytes := 8 * 1024 * 1024;
+
   (* and outside --bare they are refused. Reachable from the main body on
      purpose: a top-level fn nothing calls is never emitted, so a guard inside
      one would never fire. *)

@@ -1,0 +1,163 @@
+// The kernel side of a user process: load nothing, service syscalls, preempt.
+//
+//   mere -rv --bare examples/riscv_bare_user.mere > prog.bin
+//   mere -rv --load-base 8388608 --ram 4 examples/riscv_user_prog.mere > user.bin
+//   ./rvrun 16
+//
+// The user program is a *separately compiled, ordinary* Mere program. It is not
+// `--bare`, it never sees a capability, and it does not know a kernel exists: its
+// `print` lowers to the same `ecall` every hosted Mere program on this emulator
+// has always used. What changed is who answers. With mtvec set, an environment
+// call vectors to the kernel, so the handler below is the one that reads the
+// arguments out of the register save area and writes the bytes to the UART.
+//
+// That is the whole idea of a syscall boundary, and the reason the user program
+// needs no cooperation: it asks the machine, and the machine now has a kernel.
+//
+// `--load-base` is what makes two programs fit in one address space. Everything
+// PC-relative in the emitted binary already did not care where it lived; the
+// absolute parts — globals, stack, string literals — shift with the flag.
+//
+// The kernel runs the user process as a task, so the timer preempts it exactly
+// like the spinner in riscv_bare_sched.mere. Nothing in the user program is aware
+// of that either.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+let rec put_dec = fn (uart: Raw) -> fn (n: int) ->
+  let _ = if n >= 10 then put_dec uart (n / 10) else () in
+  putc uart (48 + n % 10);
+
+let new_vec = fn (n: int) -> fn (x: int) ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in
+  v;
+
+// Top level, so calling them allocates nothing: a trap handler must not allocate
+// (see the note on v0.1.193 — an allocating handler corrupts what it interrupted).
+let rec store_regs = fn (save: Raw) -> fn tcb -> fn (i: int) ->
+  if i > 31 then ()
+  else
+    let _ = vec_set tcb i (raw_peek32 save (i * 4)) in
+    store_regs save tcb (i + 1);
+
+// Every register, gp included — and that is the difference from
+// riscv_bare_sched.mere, which skips it.
+//
+// Whether to switch gp is exactly the question "do these two contexts share a
+// heap?". Two tasks inside one program do: the bump pointer is machine state and
+// switching it makes them allocate over each other. A user process does not. It
+// was built with --load-base, so its heap lives in its own megabytes, and leaving
+// the kernel's gp in place means the kernel allocates at the user's heap top —
+// where the out-of-memory check, comparing that against the kernel's much lower
+// stack, immediately and correctly declares the heap exhausted. Which is how this
+// example first failed.
+let rec load_regs = fn (save: Raw) -> fn tcb -> fn (i: int) ->
+  if i > 31 then ()
+  else
+    let _ = raw_poke32 save (i * 4) (vec_get tcb i) in
+    load_regs save tcb (i + 1);
+
+// write(fd, buf, len): copy the user's bytes to the UART one at a time. The
+// buffer is a physical address in the user process's own memory, which the kernel
+// can reach because it holds the machine — and the user process cannot, because it
+// holds nothing.
+let rec write_out = fn (uart: Raw) -> fn (mem: Raw) -> fn (buf: int) -> fn (n: int) ->
+  if n <= 0 then ()
+  else
+    let _ = putc uart (raw_peek8 mem buf) in
+    write_out uart mem (buf + 1) (n - 1);
+
+let user_base = 8388608;           // where the bootloader put the second image
+let user_stack = 12451840;         // 0xBE0000: the top of its 4 MB, as --ram 4 lays out
+let user_heap = 10485760;          // 0xA00000: load_base + 2MB, where its globals start
+let x_gp = 3;
+let interval = 60000;
+let timer_cause = 2147483655;      // 0x80000007
+let sys_ecall = 11;                // environment call from M-mode
+let x_sp = 2;
+let x_a0 = 10;
+let x_a1 = 11;
+let x_a2 = 12;
+let x_a7 = 17;
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let clint = raw_window mach 0x10008000 16 in
+  let save = trap_save mach in
+  let mem = raw_window mach 0 268435456 in       // all of RAM: the kernel's privilege
+
+  let ticks = new_vec 1 0 in
+  let calls = new_vec 1 0 in
+  let live = new_vec 1 1 in                      // is the user process still running?
+  let tcb_k = new_vec 32 0 in
+  let tcb_u = new_vec 32 0 in
+  let state = new_vec 1 0 in                     // 0 = kernel, 1 = user
+
+  // The user process starts at its own _start, on its own stack, with no
+  // arguments and no capability.
+  let _ = vec_set tcb_u x_sp user_stack in
+  let _ = vec_set tcb_u x_gp user_heap in
+  let _ = vec_set tcb_u 0 user_base in
+
+  let handler = fn cause ->
+    if cause == sys_ecall then
+      let n = vec_get calls 0 + 1 in
+      let _ = vec_set calls 0 n in
+      let num = raw_peek32 save (x_a7 * 4) in
+      let a1 = raw_peek32 save (x_a1 * 4) in
+      let a2 = raw_peek32 save (x_a2 * 4) in
+      if num == 64 then                          // write
+        let _ = write_out uart mem a1 a2 in
+        let _ = raw_poke32 save (x_a0 * 4) a2 in // bytes written
+        csr_read 0x341 + 4
+      else
+        // exit: the process is done. Park it and hand the CPU back to the kernel
+        // for good, which is what the scheduler checks `live` for.
+        let _ = vec_set live 0 0 in
+        let _ = load_regs save tcb_k 1 in
+        let _ = vec_set state 0 0 in
+        vec_get tcb_k 0
+    else if cause != timer_cause then
+      csr_read 0x341 + 4                         // a fault: step over it
+    else
+      let _ = vec_set ticks 0 (vec_get ticks 0 + 1) in
+      let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+      if vec_get live 0 == 0 then csr_read 0x341 // nothing to switch to any more
+      else
+        let cur = vec_get state 0 in
+        let out = if cur == 0 then tcb_k else tcb_u in
+        let into = if cur == 0 then tcb_u else tcb_k in
+        let _ = store_regs save out 1 in
+        let _ = vec_set out 0 (csr_read 0x341) in
+        let _ = load_regs save into 1 in
+        let _ = vec_set state 0 (1 - cur) in
+        vec_get into 0 in
+
+  let _ = set_trap_handler handler in
+  let _ = uart_puts uart "kernel: starting a user process at 8MB\n" 0 in
+  let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+  let _ = csr_write 0x304 128 in
+  let _ = csr_write 0x300 8 in
+
+  // Wait for it to finish. The timer is what gives it the CPU in the first place.
+  let rec wait = fn i -> if vec_get live 0 == 0 then i else wait (i + 1) in
+  let _ = wait 0 in
+
+  let _ = csr_write 0x300 0 in
+  let _ = uart_puts uart "kernel: user process exited after " 0 in
+  let _ = put_dec uart (vec_get calls 0) in
+  let _ = uart_puts uart " syscalls and " 0 in
+  let _ = put_dec uart (vec_get ticks 0) in
+  let _ = uart_puts uart " ticks\n" 0 in
+  let _ = csr_write 0x305 0 in                   // no kernel any more: let ecall exit
+  ();
+
+()

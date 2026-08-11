@@ -1,0 +1,21 @@
+// An ordinary Mere program that happens to run as a user process.
+//
+//   mere -rv --load-base 8388608 --ram 4 examples/riscv_user_prog.mere > user.bin
+//
+// Nothing here knows about a kernel. There is no capability, no `--bare`, no CSR,
+// no device address — `print` is `print`. It lowers to the same `ecall` that every
+// hosted program on this emulator has always used, and with a kernel installed
+// that call vectors to the kernel instead of to the emulator's own tiny ABI.
+//
+// `--load-base` is the only unusual thing about building it, and that is the
+// kernel's decision rather than this program's: it says where the image lives, so
+// the globals, the stack and the string literals land there instead of at 0.
+//
+// See examples/riscv_bare_user.mere for the other side.
+
+let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+let _ = print "user: hello from a user process";
+let _ = print "user: I do not know a kernel exists";
+let _ = print ("user: fib 20 = " ++ str_of_int (fib 20));
+let _ = print "user: exiting";

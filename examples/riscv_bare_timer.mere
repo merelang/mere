@@ -65,6 +65,9 @@ let main = fn (mach: Raw) ->
   // between the characters of this line and the output interleaves. A kernel
   // does the same thing around anything it needs to finish uninterrupted.
   let _ = csr_write 0x300 0 in
+  // and mtvec, or the exit ecall in _start vectors straight back into this
+  // handler instead of halting the machine
+  let _ = csr_write 0x305 0 in
   let _ = uart_puts uart "five ticks, stopping\n" 0 in
   ();
 

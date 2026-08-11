@@ -22,6 +22,7 @@ let usage () =
   print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
   print_endline "        -rv/-rvs accept `--ram <MB>` (default 8): the RAM the";
   print_endline "        binary expects — the stack starts at the top of it";
+  print_endline "        `--load-base <addr>`: load somewhere other than 0";
   print_endline "        and `--bare`: no host syscalls; the program's top-level";
   print_endline "        `main` is handed the machine as a `Raw` capability";
   print_endline "  mere -r               start interactive REPL";
@@ -214,6 +215,18 @@ let listing_riscv ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_listing ~main_ty prog
+
+(* `--load-base <hex or dec>` puts the program somewhere other than address 0.
+   A kernel loading a user process decides where it goes; everything absolute in
+   the emitted binary (globals, stack, string literals) shifts with it. *)
+let set_riscv_load_base v =
+  let n = try int_of_string v with _ -> -1 in
+  if n < 0 || n land 0xFFF <> 0 then begin
+    Printf.eprintf
+      "error: --load-base takes a 4KB-aligned address (got `%s`)\n" v;
+    exit 1
+  end;
+  Mere.Codegen_riscv.load_base := n
 
 let run_riscv_bare mode path =
   Mere.Codegen_riscv.bare := true;
@@ -410,6 +423,16 @@ let () =
     run_action (listing_riscv ~base_dir:base) path source
   (* --bare: no host syscalls beyond the emulator's exit, and the program's
      top-level `main` is handed the machine capability it does its I/O through *)
+  | [_; "-rv"; "--load-base"; base; path] ->
+    set_riscv_load_base base;
+    let source = read_file path in
+    let base_dir = Filename.dirname path in
+    run_action (compile_to_riscv ~base_dir) path source
+  | [_; "-rv"; "--load-base"; base; "--ram"; mb; path] ->
+    set_riscv_load_base base; set_riscv_ram mb;
+    let source = read_file path in
+    let base_dir = Filename.dirname path in
+    run_action (compile_to_riscv ~base_dir) path source
   | [_; ("-rv" | "-rvs" as mode); "--bare"; path] ->
     run_riscv_bare mode path
   | [_; ("-rv" | "-rvs" as mode); "--bare"; "--ram"; mb; path] ->
