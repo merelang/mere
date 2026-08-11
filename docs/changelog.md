@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.181 — 2026-08-11
+
+_Two corrections and a better repro. No new capability._
+
+_The monomorphization repro from v0.1.179 used `vec_new` and read as if mutable
+containers, the narrow value restriction or the region model were involved.
+None of them are. Reduced further, `hold` allocates nothing:_
+
+```mere
+let hold = fn (v) -> (v, v);
+let mk = fn (v) -> (hold v, hold 1);   // parameter-derived AND fixed
+let (a1, a2) = mk 1 in
+let (b1, b2) = mk "s" in ...
+```
+
+_Three neighbouring shapes compile and run — one instantiation of `mk`, `hold`
+called only at the parameter-derived type, and `hold` used directly at two types
+— so it is the combination and nothing smaller.
+`test/parity/poly_helper_fixed_and_free.mere` now holds that version._
+
+_The search for where the skeleton gets fixed narrowed without landing.
+`generalize` is called on `hold` and `instantiate` substitutes without mutating,
+so use sites cannot be reaching back to the definition — and yet by the time
+codegen takes its pristine clone the skeleton reads `int -> (int * int)` while
+`mk` beside it is still `'a -> (('a * 'a) * (int * int))`. Whatever fixes it
+runs before codegen. Recorded in the test rather than guessed at._
+
+_The second correction is to v0.1.180's memory measurement, and is written into
+that entry: two samples read as a leak in `contrib/store/kvlog`, and nine
+thousand requests show RSS oscillating (4528, 3568, 5840, 7536, 6656, 8272 KB)
+rather than climbing. That is malloc churn as the region takes and returns
+blocks. The native HTTP arena is doing its job; there is no kvlog leak to fix,
+and the item is withdrawn rather than carried._
+
+_parity 82/82, ctest 13/13, dune runtest 2308/0._
+
+---
+
 ## v0.1.180 — 2026-08-11
 
 _The native HTTP runtime gets the four externs a middleware stack needs, so
@@ -32,11 +70,15 @@ NUL-terminated and a file is not — and tells the accept loop not to write a
 second response after it._
 
 _Measured on the native build: **116 KB reclaimed per request**, with no new
-blocks allocated, so the region stays in its first 4 MB. Two thousand 404s in a
-row moved RSS 3920 → 1920 KB, i.e. down. Two thousand requests that read the
-kvlog moved it 1920 → 6336 KB, which locates the remaining growth precisely:
-not the HTTP arena, but `contrib/store/kvlog` re-reading its file per request.
-Named, not fixed._
+blocks allocated on the paths that fit, so the region stays in its first 4 MB.
+Two thousand 404s in a row moved RSS 3920 → 1920 KB, i.e. down._
+
+_(Correction, made while writing v0.1.181: this entry first read a second
+measurement — 1920 → 6336 KB over two thousand requests that read the kvlog —
+as locating a leak in `contrib/store/kvlog`. Sampling nine thousand requests
+instead of two thousand shows RSS oscillating rather than climbing: 4528, 3568,
+5840, 7536, 6656, 8272 KB. That is malloc churn as the region takes and returns
+blocks, not a per-request leak, and two samples were not enough to say which.)_
 
 _`examples/claims/browser_check.mjs` passes 17/17 against the native server,
 unchanged from the Wasm host. parity 82/82, ctest 13/13, dune runtest 2308/0._
