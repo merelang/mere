@@ -1,0 +1,60 @@
+// contrib/schema/reflect over two different record types, in one program.
+//
+// The point is that there is one implementation. Before `of_json_like`, a
+// generic "replace one field and decode it back" could not be written at
+// all: `of_json` takes its target type from an annotation at the call site,
+// so a helper had to name the record type and every record needed a copy.
+// examples/claims carried one.
+//
+// A witness value supplies the type instead. The interpreter reads it off
+// the value's runtime shape — a record carries its type's name — and the
+// compiled backends read it off the witness's static type, which is the
+// same variable the result unifies with. So the same three functions serve
+// `person` and `item` here, and the record they belong to is never named.
+
+import "../../contrib/schema/reflect.mere";
+
+type person = { name: str, age: int, note: str option, active: bool };
+type item = { sku: str, qty: int };
+
+let p = person { name = "Ada", age = 36, note = Some "founder", active = true } in
+let i = item { sku = "A-1", qty = 7 } in
+
+let rec join = fn (xs: str list) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons (x, r) -> join r (acc ++ x ++ " ")
+in
+
+// The field list comes off the record, in declaration order.
+let _ = print (join (schema_fields p) "") in
+let _ = print (join (schema_fields i) "") in
+
+// Reading by name, across types.
+let _ = print (schema_text p "name" ++ "/" ++ schema_text p "age"
+               ++ "/" ++ schema_text p "note" ++ "/" ++ schema_text p "active") in
+let _ = print (schema_text i "sku" ++ "/" ++ schema_text i "qty") in
+
+// Writing by name. A str field, an int field, and a bool field — the shape
+// written back is taken from the shape that is already there.
+let p2 = schema_with p "name" "Grace" in
+let p3 = schema_with p2 "age" "41" in
+let p4 = schema_with p3 "active" "0" in
+let _ = print (p4.name ++ "/" ++ show p4.age ++ "/" ++ show p4.active) in
+
+// An absent optional cannot say what it would have held, so the candidates
+// are tried against the decoder. Setting text, then clearing it.
+let cleared = schema_with p4 "note" "" in
+let _ = print (match cleared.note with Some s -> "some " ++ s | None -> "none") in
+let refilled = schema_with cleared "note" "back" in
+let _ = print (match refilled.note with Some s -> "some " ++ s | None -> "none") in
+
+// The other type goes through the same functions.
+let i2 = schema_with i "qty" "12" in
+let _ = print (i2.sku ++ "/" ++ show i2.qty) in
+
+// A name no field has leaves the record alone — no complaint, which is one
+// of this module's stated limitations.
+let untouched = schema_with i2 "nope" "x" in
+let _ = print (show untouched.qty) in
+0

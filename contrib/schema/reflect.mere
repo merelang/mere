@@ -1,0 +1,103 @@
+// contrib/schema/reflect.mere — a record, seen by field name.
+//
+// A record already has a total, name-keyed view of itself: the one the
+// compiler synthesises for `to_json`. Reading it back gives the field names
+// in declaration order, and replacing one key and decoding gives a setter.
+// That is the whole of this module, and it is what lets a form be generated
+// from a record declaration rather than written out beside it —
+// examples/claims builds its controls from `schema_fields` and edits them
+// through `schema_with`, and adding a field to the record puts a labelled
+// control on the page with no other edit.
+//
+// It could not be a module until v0.1.183. `of_json` takes its target type
+// from an annotation at the call site, so a generic "decode it back" could
+// not be written once: every record type needed its own copy, and
+// examples/claims had one. `of_json_like` takes the target from a witness
+// value instead, which a field setter always has — replacing one field of a
+// record means holding the record.
+//
+// Public API:
+//
+//   schema_fields : 'a -> str list          scalar field names, in order
+//   schema_text   : 'a -> str -> str        one field, as text
+//   schema_with   : 'a -> str -> str -> 'a  one field, replaced from text
+//
+// "Scalar" means what a text control can edit: everything except a field
+// whose value is an object or an array. A record-valued or list-valued
+// field is structure, and structure is the caller's business.
+//
+// The shape written back is taken from the shape that is there, which is
+// exact except for an absent optional — `null` cannot say what it would
+// have held. Where the value cannot say, ask the decoder: candidates are
+// tried in order and the first that survives wins. Blank text tries `null`
+// first, which is how an optional is cleared without this module knowing
+// which fields are optional.
+//
+// Limitations:
+//
+//   - A polymorphic record needs the annotation after all. A value carries
+//     its type's name at runtime but not its type arguments, so the witness
+//     cannot describe `Box[int]`.
+//   - Field names cross as text. A caller that names one wrong gets no
+//     complaint from the compiler, only a field that never changes.
+//   - Every read and write is a JSON round trip of the whole record. Right
+//     for a form; wrong for a loop.
+
+import "../json/json.mere";
+
+let schema_json = fn (rec_) ->
+  match Json.parse_json (to_json rec_) with
+  | Json.JObj fs -> fs
+  | _ -> Nil;
+
+let rec schema_scalar_names = fn (fs: (str * Json.json) list) ->
+  match fs with
+  | Nil -> Nil
+  | Cons ((k, v), rest) ->
+    match v with
+    | Json.JArr _ -> schema_scalar_names rest
+    | Json.JObj _ -> schema_scalar_names rest
+    | _ -> Cons (k, schema_scalar_names rest);
+
+let schema_fields = fn (rec_) -> schema_scalar_names (schema_json rec_);
+
+let rec schema_lookup = fn (fs: (str * Json.json) list) -> fn (name: str) ->
+  match fs with
+  | Nil -> Json.JNull
+  | Cons ((k, v), rest) -> if str_eq k name then v else schema_lookup rest name;
+
+let schema_text = fn (rec_) -> fn (name: str) ->
+  match schema_lookup (schema_json rec_) name with
+  | Json.JStr s -> s
+  | Json.JNum n -> show n
+  | Json.JBool b -> if b then "1" else "0"
+  | _ -> "";
+
+let schema_with = fn (rec_) -> fn (name: str) -> fn (v: str) ->
+  let rec repl = fn (fs: (str * Json.json) list) -> fn (jv: Json.json) ->
+    match fs with
+    | Nil -> Nil
+    | Cons ((k, old), rest) ->
+      if str_eq k name then Cons ((k, jv), rest)
+      else Cons ((k, old), repl rest jv) in
+  let attempt = fn (jv: Json.json) ->
+    of_json_opt_like rec_
+      (Json.to_json_str (Json.JObj (repl (schema_json rec_) jv))) in
+  let rec first = fn (candidates: Json.json list) ->
+    match candidates with
+    | Nil -> rec_
+    | Cons (jv, rest) ->
+      match attempt jv with
+      | Some out -> out
+      | None -> first rest in
+  let n = try_or (fn () -> int_of_str (str_trim v)) 0 in
+  let candidates =
+    if str_eq (str_trim v) "" then
+      Cons (Json.JNull, Cons (Json.JStr v, Cons (Json.JNum 0, Nil)))
+    else
+      match schema_lookup (schema_json rec_) name with
+      | Json.JNum _ -> Cons (Json.JNum n, Nil)
+      | Json.JBool _ -> Cons (Json.JBool (str_eq v "1"), Nil)
+      | Json.JStr _ -> Cons (Json.JStr v, Nil)
+      | _ -> Cons (Json.JStr v, Cons (Json.JNum n, Cons (Json.JNull, Nil))) in
+  first candidates;

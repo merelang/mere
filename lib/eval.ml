@@ -2855,8 +2855,87 @@ let rec of_json_value (t : Ast.ty) (j : jtree) : value =
   | _ ->
     mismatch "a matching JSON shape for the target type"
 
+(* Is every corner of this type known? A type variable anywhere means the
+   call node cannot say what to decode into. *)
+let rec oj_ty_is_concrete (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> false
+  | Ast.TyArrow (a, b) -> oj_ty_is_concrete a && oj_ty_is_concrete b
+  | Ast.TyTuple ts -> List.for_all oj_ty_is_concrete ts
+  | Ast.TyCon (_, args) -> List.for_all oj_ty_is_concrete args
+  | Ast.TyRef (_, _, inner) -> oj_ty_is_concrete inner
+  | _ -> true
+
+(* The target type a witness value stands for. Records and constructors
+   carry their type's name at runtime, which is what makes the witness form
+   of of_json work on the interpreter at all. A value cannot carry its type
+   ARGUMENTS, so a polymorphic record still needs the annotation. *)
+let rec oj_ty_of_value (loc : Loc.t) (v : value) : Ast.ty =
+  match v with
+  | V_int _ -> Ast.TyInt
+  | V_float _ -> Ast.TyFloat
+  | V_bool _ -> Ast.TyBool
+  | V_str _ -> Ast.TyStr
+  | V_unit -> Ast.TyUnit
+  | V_tuple vs -> Ast.TyTuple (List.map (oj_ty_of_value loc) vs)
+  | V_record (name, _) -> Ast.TyCon (name, [])
+  | V_constr (cname, _) ->
+    (match Hashtbl.find_opt Typer.constructors cname with
+     | Some info -> Ast.TyCon (info.Typer.type_name, [])
+     | None ->
+       type_error loc ("of_json_like: unknown constructor " ^ cname
+                       ^ " in the witness"))
+  | _ ->
+    type_error loc
+      "of_json_like: the witness must be a record, a constructor, a tuple or \
+       a scalar — a closure or a handle cannot say what to decode into"
+
 let rec eval_in (env : env) (e : Ast.expr) =
   match e.Ast.node with
+  (* of_json_like: the target type comes from a witness value rather than
+     from the call node, so this one works inside a polymorphic function —
+     where the node's type is a variable and there is nothing here to
+     resolve it with. The witness's runtime shape carries what is needed:
+     a record and a constructor both know their type's name. *)
+  | Ast.App ({ Ast.node = Ast.App ({ Ast.node = Ast.Var "of_json_like"; _ },
+                                   witness_e); _ }, arg) ->
+    let witness = eval_in env witness_e in
+    let s =
+      match eval_in env arg with
+      | V_str s -> s
+      | _ -> type_error e.Ast.loc "of_json_like: expected a str argument"
+    in
+    (* The node's own type wins when it is already concrete: the compiled
+       backends use it, and agreeing with them keeps a polymorphic record
+       (which the witness cannot describe, since a value does not carry its
+       type arguments) working wherever the annotation does reach. *)
+    let target =
+      match e.Ast.ty with
+      | Some t when oj_ty_is_concrete t -> Ast.walk t
+      | _ -> oj_ty_of_value e.Ast.loc witness
+    in
+    (try of_json_value target (parse_json_tree s)
+     with Json_parse_error msg -> type_error e.Ast.loc msg)
+  (* The non-crashing witness form. Same target as of_json_like; None on any
+     failure, which is what a caller trying candidate shapes needs. *)
+  | Ast.App ({ Ast.node = Ast.App ({ Ast.node = Ast.Var "of_json_opt_like"; _ },
+                                   witness_e); _ }, arg) ->
+    let witness = eval_in env witness_e in
+    let s =
+      match eval_in env arg with
+      | V_str s -> s
+      | _ -> type_error e.Ast.loc "of_json_opt_like: expected a str argument"
+    in
+    let target =
+      match e.Ast.ty with
+      | Some t when oj_ty_is_concrete t ->
+        (match Ast.walk t with
+         | Ast.TyCon ("option", [inner]) -> Ast.walk inner
+         | other -> other)
+      | _ -> oj_ty_of_value e.Ast.loc witness
+    in
+    (try V_constr ("Some", Some (of_json_value target (parse_json_tree s)))
+     with _ -> V_constr ("None", None))
   (* of_json applied directly: decode the string using the call node's type. *)
   | Ast.App ({ Ast.node = Ast.Var "of_json"; _ }, arg) ->
     let s =
