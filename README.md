@@ -40,6 +40,7 @@ source tree is needed to build or run an app.
 
 - **2035 tests passing**
 - **🏆 Bootstrap fixpoint — truly self-hosting** (v0.1.10, 2026-07-12): the Mere-in-Mere compiler, **compiled by itself and run as wasm, produces byte-identical output to the reference** — and that output runs correctly. Compiling a program with (A) the compiler under the interpreter and (B) the compiler compiled by itself yields the same WAT, byte for byte (CI-verified by a permanent fixpoint regression test). Getting there required guaranteed tail calls in the self-host codegen (`return_call_indirect`, Stage 55f) and fixing three latent self-compilation bugs (an eager pattern-check payload dereference, pointer-equality string compares in the untyped self-host codegen, and a missing `\r` lexer escape — Stage 55g). See [docs/changelog.md](docs/changelog.md).
+- **🏗️ A fifth backend, and an operating system on top of it** (v0.1.134–198): `mere -rv` emits a flat RV32IM binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host — raw memory arrives as an unforgeable window capability, traps as ordinary Mere closures. On that: a preemptive scheduler, a shell, a syscall boundary, and finally **Mere's own self-hosted compiler running as a user process on a Mere kernel, on a CPU written in Mere**, emitting WAT byte-identical to the native interpreter. See [docs/bare-metal.md](docs/bare-metal.md).
 - **📦 Package system v0.2**: `mere install` reads a `mere.toml`, fetches git dependencies (monorepo `subdir` supported) into `.mere_modules/`, resolves transitive cross-package imports, and writes a `mere.lock`. An optional `[host]` entry also vendors the Node runtime host into `.mere_host/`, so `mere serve app.wasm` runs a compiled server with no compiler source tree. See [docs/packages.md](docs/packages.md).
 - **🧵 Concurrency**: `spawn` / `channel` / `join` + `par_map` on all four backends (interp / C / LLVM / Wasm), with a `Send` / `Sync` type discipline (move / use-after-move analysis, HM-integrated Send bound for polymorphic channels). See `examples/parallel_compute.mere`, `examples/par_map.mere`.
 - **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **All 18 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc` / `time`. 13 of the 18 have CI compile-time verification via `bootstrap_wat_ok` (wat2wasm-checks the emitted module).
@@ -82,7 +83,7 @@ source tree is needed to build or run an app.
 | import | `import "./path";` pulls in another file (importer-relative + canonical) |
 | Collections | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + higher-order API (iter/map/fold/filter/to_list/to_owned) — **insertion-order Map iter** (Phase 27.1) |
 | stdlib | 90+ builtins: I/O / conversion / strings (`str_split` / `str_join` / `str_compare` / `str_index_of` etc.) / numerics / polymorphic helpers / float / errors / Logger / Metrics |
-| codegen | C / LLVM IR / Wasm (WAT) backends at parity + Wasm runtime validation (details in [codegen.md](docs/codegen.md)). Q-010 collections (4 kinds) + higher-order API + conversions + `len` ad-hoc poly + per-instantiation specialization of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level value bindings globalized to file scope (Phase 30.2). |
+| codegen | C / LLVM IR / Wasm (WAT) backends at parity, plus a fifth that emits **RV32IM machine code directly** — no assembler, no linker, and `--bare` for no operating system either ([bare-metal.md](docs/bare-metal.md)) + Wasm runtime validation (details in [codegen.md](docs/codegen.md)). Q-010 collections (4 kinds) + higher-order API + conversions + `len` ad-hoc poly + per-instantiation specialization of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level value bindings globalized to file scope (Phase 30.2). |
 | FFI | `extern fn <name>: <ty>;` calls libc functions from all 4 backends (interp + C / LLVM / Wasm). Curried multi-arg; types int / bool / str / unit (Phase 32). |
 | REPL | persistent env, multi-line input, `:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | Error UX | Rust-style multi-line code frame, ANSI colors (TTY only), Levenshtein-based typo suggestions (including record fields and qualified names), type-conversion hints |
@@ -164,6 +165,7 @@ $ dune exec ./bin/mere.exe -e '
 - **[Patterns / cookbook](docs/patterns.md)** — common idioms
 - **[Memory model](docs/memory-model.md)** — memory management options, region/view, current and future
 - **[Codegen](docs/codegen.md)** — three-backend (C / LLVM IR / Wasm) strategy + per-slice table
+- **[Bare metal](docs/bare-metal.md)** — the RV32I backend: `--bare`, the memory map, raw memory as a capability, traps, tasks, a user process
 - **[HTTP demos](docs/http-demos.md)** — twelve `examples/http_*.mere` servers, catalog + patterns
 - **[Database](docs/db.md)** — pure-Mere Postgres client + pool + LISTEN/NOTIFY, 16 demos
 - **[Packages](docs/packages.md)** — `.mere_modules/` package resolution (v0.1)
@@ -240,7 +242,7 @@ mere/
 ├── test/test_basic.ml  # 1947 tests
 ├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
 ├── examples/           # *.mere sample programs
-└── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / changelog
+└── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / bare-metal / changelog
 ```
 
 ## Name

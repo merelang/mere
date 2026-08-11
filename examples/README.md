@@ -1,6 +1,6 @@
 # Mere examples
 
-A collection of runnable `.mere` programs for Mere (285 files, counting the
+A collection of runnable `.mere` programs for Mere (289 files, counting the
 multi-file apps under their own directories). Run with
 `dune exec ./bin/mere.exe -- examples/<file>.mere`
 to execute via the interpreter, or use the `-c` / `-ll` / `-w` flags to
@@ -78,7 +78,7 @@ with ⭐).
 | ~~`csv_parser.mere`~~ | **Promoted in Phase 41 to [contrib/csv/parser.mere](../contrib/csv/parser.mere)** (wrapped in module Csv) |
 | [word_count.mere](word_count.mere) ⭐ | word count |
 | [template_engine.mere](template_engine.mere) ⭐ | mustache-like `{{KEY}}` substitution engine (Map + StrBuf + str_index_of) |
-| ~~`json_writer.mere`~~ | **Promoted in Phase 40 to [contrib/json/writer.mere](../contrib/json/writer.mere)** |
+| ~~`json_writer.mere`~~ | **Promoted in Phase 40 to contrib/json, and since merged into [contrib/json/json.mere](../contrib/json/json.mere) so the parser and writer share a type** |
 | [inventory.mere](inventory.mere) ⭐ | inventory management (Map + Vec + variant) |
 | [word_freq.mere](word_freq.mere) ⭐ | word frequency counter (Map + str_split + map_iter), insertion order |
 | [mini_shell.mere](mini_shell.mere) ⭐ | a simple shell batch evaluator (variant command + state) |
@@ -180,6 +180,28 @@ Each carries a `browser_check.mjs` (or `scripts/check_browser.mjs` for
 tally) that drives it in a real Chrome, for the claims a headless dump
 cannot settle — focus and caret survival, `blur` as the user causes it,
 state surviving a restart. Missing Playwright is a SKIP, not a failure.
+
+### Bare metal on the RV32I backend, and what each one forced
+
+`mere -rv` lowers a program to a flat RV32IM binary, and `--bare` hands it the
+machine instead of a host: no syscalls, no operating system, and a `Raw` window
+capability as the only way to reach a device. These run on the Mere-written RV32I
+emulator (the `memu` project's `riscv-runc`). Each one exists to make the language
+answer a question it had not been asked, and what it forced is listed beside it.
+
+| File | What it forced |
+|---|---|
+| [riscv_bare_uart.mere](riscv_bare_uart.mere) | Raw memory as a **window capability** — opaque, unforgeable, narrowing-only — so `putc` taking a UART window can be read as a promise about what it cannot touch. Forced `--bare`, the `Raw` type, `raw_window` / `raw_peek*` / `raw_poke*`, and MMIO addresses that live above any RAM |
+| [riscv_bare_echo.mere](riscv_bare_echo.mere) | The receive half. Polling a line-status register must not stop the machine, which `read_key` does — so it forced Mere's `stdin_byte` (non-blocking, -1 when nothing is ready) on the emulator's side |
+| [riscv_bare_timer.mere](riscv_bare_timer.mere) | A trap handler that is an ordinary **closure**, not a `naked fn`: codegen emits the trampoline, and the handler captures what it needs because an interrupt has no caller to hand it anything. Forced `set_trap_handler`, `csr_read` / `csr_write`, and a CLINT |
+| [riscv_bare_sched.mere](riscv_bare_sched.mere) | Preemptive multitasking — two tasks, neither yielding. A context switch turned out to be a memory copy through the trampoline's save area, so it forced only coordinates: `trap_save`, `machine_scratch`, `raw_base` / `raw_len`, `closure_code` / `closure_env` |
+| [riscv_bare_shell.mere](riscv_bare_shell.mere) | Nothing new in the language, which was the point — and it found the arc's hardest bug: a `region` rollback in one task frees what another task allocated, so **contexts share the bump pointer only if they share a heap** |
+| [riscv_bare_user.mere](riscv_bare_user.mere) + [riscv_user_prog.mere](riscv_user_prog.mere) | A syscall boundary. The user program is *ordinary* — not `--bare`, no capability — and calls `print`; with a kernel installed that `ecall` vectors to the kernel instead of the host. Forced `--load-base`, so two programs fit in one address space |
+| [riscv_bare_selfhost.mere](riscv_bare_selfhost.mere) + [riscv_user_selfhost.mere](riscv_user_selfhost.mere) | The tower closing: Mere's own self-hosted compiler as a user process on a Mere kernel, emitting WAT byte-identical to the native interpreter |
+
+See [bare-metal.md](../docs/bare-metal.md) for the memory map, the capability
+rules and the two that are easy to get wrong (when to switch `gp`, and why a
+handler wants its own stack).
 
 ### Q-010 collection basics
 

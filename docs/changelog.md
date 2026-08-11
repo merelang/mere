@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.199 — 2026-08-11
+
+_Documentation for the bare-metal work, which existed only as twelve changelog
+entries and seven example headers._
+
+_The arc built a fifth backend, an operating system on it and a user process on
+that, and none of it was discoverable: the README did not mention RV32I at all,
+`codegen.md` documented three backends, and the nine new examples were missing
+from the category index. Someone arriving at the repository could not find the
+tower, let alone the rules for using it._
+
+_[docs/bare-metal.md](bare-metal.md) is now the one place: flags, the memory map,
+raw memory as a window capability and the three ways out that are closed, CSRs
+and why they are deliberately **not** a capability, the trap trampoline and its two
+non-obvious properties, tasks, and **when to switch `gp`** — the rule that took
+the arc's hardest bug to find. It ends with what is deferred on purpose (the
+fantasy console's ambient framebuffer, a QEMU boot for external verification,
+nested traps, and the absence of an MMU) so the gaps are recorded rather than
+implied._
+
+_Also stated plainly there, because it would otherwise be easy to overclaim: what
+isolates the user process is **the type system, not the hardware**. Everything
+runs in machine mode; the process is contained because without `--bare` it cannot
+obtain a `Raw` at all, not because an MMU would stop it._
+
+_The examples index gains a section in the same shape as the browser apps —
+each example beside the thing it forced — and a broken link found on the way
+(`contrib/json/writer.mere`, merged into `json.mere` in 31b4c45) is fixed where
+this file referenced it._
+
+---
+
 ## v0.1.198 — 2026-08-11
 
 _The allocating-handler corruption, solved. The mechanism was none of the three
