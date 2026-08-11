@@ -21,10 +21,12 @@ let usage () =
   print_endline "  mere -rvs <file.mere> print an RV32IM assembly listing (disassembled)";
   print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
   print_endline "  mere -rvg <file.mere> print the debug map (symbols, frames, line table)";
-  print_endline "        -rv/-rvs accept `--ram <MB>` (default 8): the RAM the";
-  print_endline "        binary expects — the stack starts at the top of it";
+  print_endline "        -rv/-rvs/-rvg accept these in any order:";
+  print_endline "        `--ram <MB>` (default 8): the RAM the binary expects —";
+  print_endline "        the stack starts at the top of it";
   print_endline "        `--load-base <addr>`: load somewhere other than 0";
-  print_endline "        and `--bare`: no host syscalls; the program's top-level";
+  print_endline "        (QEMU virt wants 0x80000000 — see docs/bare-metal.md)";
+  print_endline "        `--bare`: no host syscalls; the program's top-level";
   print_endline "        `main` is handed the machine as a `Raw` capability";
   print_endline "  mere -r               start interactive REPL";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
@@ -244,12 +246,31 @@ let debug_map_riscv ?base_dir source =
   let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_debug_map ~main_ty prog
 
-let run_riscv_bare mode path =
-  Mere.Codegen_riscv.bare := true;
-  let source = read_file path in
-  let base = Filename.dirname path in
-  let action = if mode = "-rv" then compile_to_riscv else listing_riscv in
-  run_action (action ~base_dir:base) path source
+(* The RV32I family takes three independent switches — `--bare`, `--ram <MB>`,
+   `--load-base <addr>` — and matching them as literal argument lists means one
+   arm per combination, so the arms that existed were the combinations somebody
+   had needed so far. Booting QEMU's `virt` machine wants all three at once
+   (bare, at 0x80000000, with a RAM size), which had no arm. Parse them in any
+   order instead, once, for every mode that accepts them. *)
+let rv_flags mode args =
+  let rec go = function
+    | "--bare" :: rest -> Mere.Codegen_riscv.bare := true; go rest
+    | "--ram" :: mb :: rest -> set_riscv_ram mb; go rest
+    | "--load-base" :: b :: rest -> set_riscv_load_base b; go rest
+    | [path] when String.length path > 0 && path.[0] <> '-' -> Some path
+    | _ -> None
+  in
+  match go args with
+  | None -> None
+  | Some path ->
+    let base_dir = Filename.dirname path in
+    let action =
+      match mode with
+      | "-rv" -> compile_to_riscv ~base_dir
+      | "-rvs" -> listing_riscv ~base_dir
+      | _ -> debug_map_riscv ~base_dir
+    in
+    Some (fun () -> run_action action path (read_file path))
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -423,57 +444,16 @@ let () =
     run_action (compile_to_wasm ~base_dir:base) path source
   | [_; "-rve"; expr] ->
     run_action compile_to_riscv "<inline>" expr
-  | [_; "-rv"; path] ->
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (compile_to_riscv ~base_dir:base) path source
-  | [_; "-rv"; "--ram"; mb; path] ->
-    set_riscv_ram mb;
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (compile_to_riscv ~base_dir:base) path source
-  | [_; "-rvs"; "--ram"; mb; path] ->
-    set_riscv_ram mb;
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (listing_riscv ~base_dir:base) path source
-  (* --bare: no host syscalls beyond the emulator's exit, and the program's
-     top-level `main` is handed the machine capability it does its I/O through *)
-  | [_; "-rv"; "--load-base"; base; path] ->
-    set_riscv_load_base base;
-    let source = read_file path in
-    let base_dir = Filename.dirname path in
-    run_action (compile_to_riscv ~base_dir) path source
-  | [_; "-rv"; "--load-base"; base; "--ram"; mb; path] ->
-    set_riscv_load_base base; set_riscv_ram mb;
-    let source = read_file path in
-    let base_dir = Filename.dirname path in
-    run_action (compile_to_riscv ~base_dir) path source
-  | [_; ("-rv" | "-rvs" as mode); "--bare"; path] ->
-    run_riscv_bare mode path
-  | [_; ("-rv" | "-rvs" as mode); "--bare"; "--ram"; mb; path] ->
-    set_riscv_ram mb;
-    run_riscv_bare mode path
   | [_; "-rvse"; expr] ->
     run_action listing_riscv "<inline>" expr
-  | [_; "-rvs"; path] ->
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (listing_riscv ~base_dir:base) path source
-  | [_; "-rvg"; path] ->
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (debug_map_riscv ~base_dir:base) path source
-  | [_; "-rvg"; "--bare"; path] ->
-    Mere.Codegen_riscv.bare := true;
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (debug_map_riscv ~base_dir:base) path source
-  | [_; "-rvg"; "--load-base"; b; "--ram"; mb; path] ->
-    set_riscv_load_base b; set_riscv_ram mb;
-    let source = read_file path in
-    let base = Filename.dirname path in
-    run_action (debug_map_riscv ~base_dir:base) path source
+  (* -rv (binary) / -rvs (listing) / -rvg (debug map), each with `--bare`,
+     `--ram <MB>` and `--load-base <addr>` in any order. `--bare` means no host
+     syscalls beyond the emulator's exit, and the program's top-level `main` is
+     handed the machine capability it does its I/O through. *)
+  | _ :: (("-rv" | "-rvs" | "-rvg") as mode) :: (_ :: _ as rest) ->
+    (match rv_flags mode rest with
+     | Some run -> run ()
+     | None -> usage (); exit 1)
   | [_; "-rvd"; path] ->
     (* disassemble a flat RV32I binary (e.g. one emitted by `mere -rv`) *)
     let ic = open_in_bin path in

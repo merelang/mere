@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.201 — 2026-08-11
+
+_The backend's output boots on a machine nobody here wrote: QEMU's `virt` board._
+
+_Every layer of the bare-metal work is self-written — the compiler, the fifth
+backend, the kernel, and the RV32I emulator it runs on. So when something
+misbehaves, "is the binary wrong or is the emulator wrong?" has no answer inside
+the stack; agreeing with yourself is not evidence. QEMU is an independent
+implementation of the same specification, which is what the Klaus and Blargg
+suites are for the 6502 and Game Boy emulators in the sibling project._
+
+```sh
+mere -rv --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_hello.mere > virt.bin
+qemu-system-riscv32 -M virt -bios none -nographic -kernel virt.bin
+```
+
+_Two programs boot: `riscv_virt_hello.mere` (UART, a run-time-allocated string,
+recursion, the CLINT read back) and `riscv_virt_timer.mere` (a registered Mere
+closure servicing a real timer interrupt). `sh scripts/qemu_virt.sh` builds both,
+runs them and diffs the output; it skips cleanly when QEMU is absent, so this is
+an optional check rather than a dependency._
+
+_What QEMU checks that our own emulator cannot: instruction encodings against a
+decoder nobody here wrote, the layout `_start` builds at a load base above 2GB,
+the 16550 protocol against a real device model, and — the one most worth an
+outside opinion — the trap contract: `mtvec`, `mstatus.MIE`, `mie.MTIE`, the
+CLINT's compare register, and the PC a handler returns for `mepc`._
+
+_The **one** thing that had to change in codegen: the machine window's length is
+now a `max` rather than a sum. It was `mmio_base + mmio_len`, which is right only
+while the devices are above RAM — the arrangement the default base 0 forces. virt
+inverts it: DRAM at `0x80000000` with every device beneath it, so a program handed
+`[0, 0x10010000)` could not name its own RAM. The bounds checks were already
+unsigned, so a length past 2GB is not a negative number to them._
+
+_Also: the `-rv` family's flags (`--bare`, `--ram`, `--load-base`) are now parsed
+in any order rather than matched as literal argument lists, which is why the
+combination this needed — all three at once — did not exist before. That removes
+eight arms whose only distinction was which combinations somebody had happened to
+want._
+
+_Not yet on virt: the scheduler, shell and user-process examples (they name our
+CLINT addresses; the shell wants a receive side; a second image needs `-device
+loader`), and running a virt image on our own emulator, which would make the same
+bytes runnable on both. Both are address swaps rather than redesigns — see
+`docs/bare-metal.md`._
+
+---
+
 ## v0.1.200 — 2026-08-11
 
 _`mere -rvg`: a debug map, so a program compiled to machine code can be debugged

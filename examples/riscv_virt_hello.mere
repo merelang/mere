@@ -1,0 +1,74 @@
+// The same backend, aimed at somebody else's machine: QEMU's `virt` board.
+//
+//   mere -rv --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_hello.mere > virt.bin
+//   qemu-system-riscv32 -M virt -bios none -nographic -kernel virt.bin
+//
+// Nothing here is QEMU-specific except three addresses. The point of running it
+// is that QEMU is *not ours*: when a bare-metal program misbehaves, "is the
+// binary wrong or is the emulator wrong?" has no answer inside a stack where
+// every layer is self-written. A third-party implementation of the same ISA is
+// the answer, the way the Klaus and Blargg suites are for the 6502 and Game Boy
+// emulators in this project's sibling.
+//
+// What QEMU checks that our emulator cannot: instruction encodings, the layout
+// `_start` sets up, `la` of a string literal at a load base above 2GB, and the
+// 16550 protocol the UART driver speaks.
+//
+// virt puts DRAM at 0x80000000 and the devices *below* it, which is the mirror
+// image of this backend's default (RAM at 0, devices above). The program does
+// not have to care: it is handed a window over the whole machine and narrows it.
+
+// Same driver as examples/riscv_bare_uart.mere, unchanged. A 16550 at +0 for
+// data, +5 for line status, bit 5 = transmitter empty. Polling it is what makes
+// output survive a real device's latency rather than a device that accepts a
+// byte per store.
+let tx_ready = fn (uart: Raw) -> bit_and (raw_peek8 uart 5) 32 != 0;
+
+let rec drain = fn (uart: Raw) -> fn (spins: int) ->
+  if spins <= 0 then () else if tx_ready uart then () else drain uart (spins - 1);
+
+let putc = fn (uart: Raw) -> fn (c: int) ->
+  let _ = drain uart 10000 in
+  raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+let rec put_dec = fn (uart: Raw) -> fn (n: int) ->
+  let _ = if n >= 10 then put_dec uart (n / 10) else () in
+  putc uart (48 + n % 10);
+
+// Enough work to exercise the parts of the backend a print alone would not:
+// recursion with a live frame, multiplication, and the heap.
+let rec fib = fn (n: int) -> if n < 2 then n else fib (n - 1) + fib (n - 2);
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+
+  let _ = uart_puts uart "hello from qemu virt\n" 0 in
+
+  // A string built at run time: this allocates, so it proves the heap and the
+  // stack are where `_start` said they were, 2GB up.
+  let _ = uart_puts uart ("built at run time: " ++ str_of_int (7 * 6) ++ "\n") 0 in
+
+  let _ = uart_puts uart "fib 20 = " 0 in
+  let _ = put_dec uart (fib 20) in
+  let _ = putc uart 10 in
+
+  // mtime on virt's CLINT: 0x0200bff8, and it is a real clock rather than our
+  // emulator's instruction counter. Reading it twice must not go backwards.
+  let clint = raw_window mach 0x0200bff8 8 in
+  let t0 = raw_peek32 clint 0 in
+  let t1 = raw_peek32 clint 0 in
+  let _ = uart_puts uart (if t1 >= t0 then "mtime advances\n" else "mtime went backwards\n") 0 in
+
+  // virt's test finisher: write 0x5555 to power the machine off with a pass
+  // status. An ordinary poke through an ordinary window — a way to exit is a
+  // device on this board, not a language feature.
+  let test = raw_window mach 0x00100000 8 in
+  raw_poke32 test 0 0x5555;
+
+()

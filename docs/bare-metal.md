@@ -76,6 +76,11 @@ against it is not learning a private convention. The fantasy console's
 framebuffer and key registers predate this and still live in the reserved top of
 RAM, which means they move with `--ram`; see the deferred list at the end.
 
+Which side the devices are on depends on where RAM was put, and the machine
+window is a `max` rather than a sum for that reason: at the default base the
+devices are above RAM, and on `virt` (below) RAM starts at 2GB and every device
+is beneath it.
+
 ## Raw memory is a capability
 
 A `Raw` is a **window**: a base and a length. It is opaque, nothing constructs
@@ -234,6 +239,59 @@ hardware.** Everything runs in machine mode, and the process is contained becaus
 without `--bare` it cannot obtain a `Raw` at all — not because an MMU would stop
 it. A real privilege boundary is future work.
 
+## Booting somebody else's machine
+
+Everything above runs on an emulator written in Mere, in this project's sibling.
+That is a problem the moment something misbehaves: when the compiler, the
+backend, the kernel *and* the machine are all self-written, "is the binary wrong
+or is the emulator wrong?" has no answer inside the stack. Agreeing with yourself
+is not evidence.
+
+QEMU's `virt` board is the answer — an independent implementation of the same
+specification. The same backend targets it with flags alone:
+
+```sh
+mere -rv --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_hello.mere > virt.bin
+qemu-system-riscv32 -M virt -bios none -nographic -kernel virt.bin
+```
+
+```
+hello from qemu virt
+built at run time: 42
+fib 20 = 6765
+mtime advances
+```
+
+`sh scripts/qemu_virt.sh` builds both `examples/riscv_virt_*.mere` programs, runs
+them, and diffs the output. It skips cleanly when QEMU is not installed, so it is
+an optional check rather than a dependency.
+
+**What it checks that our own emulator cannot:** instruction encodings, against a
+decoder nobody here wrote. The layout `_start` builds, at a load base above 2GB.
+The 16550 protocol, against a real device model. And the trap contract — `mtvec`,
+`mstatus.MIE`, `mie.MTIE`, the CLINT's compare register, and the PC a handler
+returns for `mepc` — which is the part most worth an outside opinion, because our
+emulator implements one side of it and was written by the same person as the code
+testing it.
+
+Three addresses differ from our machine, and they are the whole port:
+
+| | ours | virt |
+|---|---|---|
+| DRAM base | `0` | `0x80000000` |
+| CLINT | `0x10008000` (mtime), `+8` (mtimecmp) | `0x0200bff8` (mtime), `0x02004000` (mtimecmp) |
+| a way to exit | the host `ecall` in `_start` | write `0x5555` to the test finisher at `0x00100000` |
+
+The exit is worth noticing: on `virt` powering the machine off is an ordinary
+`raw_poke32` through an ordinary window. A way to stop is a device on this board,
+not a language feature.
+
+Two things a `virt` program must know: `mtime` there is a **10 MHz clock**, not
+our emulator's instruction counter, so an interval is in real time rather than in
+work done; and both CLINT registers are 64-bit, of which these examples touch the
+low word only — honest for a program that runs for a fraction of a second, since
+the high word stays zero for seven minutes.
+
 ## Debugging: the map, and what reads it
 
 The binary has no header to hold debug information — this backend emits code and
@@ -278,9 +336,16 @@ emitting.
   (`fb_set`, `key`, `present`) at RAM-relative addresses, so they cannot be used
   together with a non-default `--ram`. Migrating them into the MMIO region and
   onto `raw_*` would remove the last hardware builtins that are not capabilities.
-- **Booting the same kernel under QEMU** would give an external reference — the
-  way Klaus and Blargg do for the 6502 and Game Boy emulators — and separate a
-  kernel bug from an emulator bug. It needs RAM relocated to `0x80000000`.
+- **The kernel examples under QEMU.** A bare program and a trap handler both boot
+  on `virt` now (above), which covers the backend and the trap contract. The
+  scheduler, the shell and the user process do not yet: they name our CLINT
+  addresses, the shell wants a receive side, and loading a second image needs
+  `-device loader` rather than `-kernel`. Each is a swap of addresses, not a
+  redesign.
+- **Running a `virt` image on our own emulator too**, which would make the same
+  bytes runnable on both and turn the comparison into a differential test. It
+  needs `riscv-runc` to learn a DRAM base (its RAM is indexed by absolute
+  address) and virt's CLINT layout.
 - **Nested traps** halt rather than nesting. Depth-indexed save areas would let a
   handler fault survivably.
 - No MMU, no privilege modes, no PLIC (the UART is polled), no filesystem, and

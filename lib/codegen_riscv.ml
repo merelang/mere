@@ -360,10 +360,6 @@ let ram_bytes = ref 0x800000                       (* 8MB *)
    reserved top of RAM.) *)
 let mmio_base = 0x10000000                         (* 256MB: UART data at +0 *)
 let mmio_len = 0x10000
-(* what the bare-metal entry point is handed: RAM plus the MMIO page, i.e.
-   everything this machine has. Narrowing it is the only way to get anything
-   else, so a driver's reach is visible in the signature that gave it one. *)
-let machine_len = mmio_base + mmio_len
 
 (* -rv --bare: the program is handed the machine and does its own I/O *)
 let bare = ref false
@@ -397,6 +393,20 @@ let trap_stack_top () = stack_top () + 0x10000        (* just below print scratc
 let scratch_base () = stack_top () + 0x10000
 let fb_base () = stack_top () + 0x18000
 let key_base () = stack_top () + 0x19000
+
+(* What the bare-metal entry point is handed: a window from address 0 to the end
+   of everything this machine has. Narrowing it is the only way to get anything
+   else, so a driver's reach is visible in the signature that gave it one.
+
+   It is a `max` rather than a sum because which of RAM and MMIO is on top
+   depends on where RAM was put. At the default base 0 the devices are above RAM
+   (that is why `mmio_base` can be a literal a program names at any `--ram`).
+   Booting QEMU's `virt` machine inverts it: DRAM starts at 0x80000000 and every
+   device — the CLINT at 0x02000000, the UART at 0x10000000, the test finisher at
+   0x00100000 — is *below* it. Either way the window has to reach the higher of
+   the two, and the bounds checks are unsigned, so a length past 2GB is not a
+   negative number to them. *)
+let machine_len () = max (mmio_base + mmio_len) (!load_base + !ram_bytes)
 
 (* Peel top-level bindings: functions go to `tops`, value/effect bindings to
    `globals` (peeling continues past them, unlike a leading-prefix scan). The
@@ -1572,8 +1582,8 @@ let emit_main ?bare_entry main_body =
    | Some entry ->
      alloc_words t1 2;
      emit_word (enc_s 0 zero t1 2 0x23);                 (* base = 0 *)
-     li t0 machine_len;
-     emit_word (enc_s 4 t0 t1 2 0x23);                   (* len = RAM + MMIO *)
+     li t0 (machine_len ());
+     emit_word (enc_s 4 t0 t1 2 0x23);                   (* len = RAM and devices *)
      emit_word (enc_i 0 t1 0 a0 0x13);
      emit (Jal (ra, "u_" ^ entry)));
   emit_epilogue fr

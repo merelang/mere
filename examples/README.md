@@ -198,10 +198,16 @@ answer a question it had not been asked, and what it forced is listed beside it.
 | [riscv_bare_shell.mere](riscv_bare_shell.mere) | Nothing new in the language, which was the point — and it found the arc's hardest bug: a `region` rollback in one task frees what another task allocated, so **contexts share the bump pointer only if they share a heap** |
 | [riscv_bare_user.mere](riscv_bare_user.mere) + [riscv_user_prog.mere](riscv_user_prog.mere) | A syscall boundary. The user program is *ordinary* — not `--bare`, no capability — and calls `print`; with a kernel installed that `ecall` vectors to the kernel instead of the host. Forced `--load-base`, so two programs fit in one address space |
 | [riscv_bare_selfhost.mere](riscv_bare_selfhost.mere) + [riscv_user_selfhost.mere](riscv_user_selfhost.mere) | The tower closing: Mere's own self-hosted compiler as a user process on a Mere kernel, emitting WAT byte-identical to the native interpreter |
+| [riscv_virt_hello.mere](riscv_virt_hello.mere) | The same backend aimed at **QEMU's `virt` board** — an implementation of the ISA nobody here wrote. Forced the machine window to be a `max` rather than a sum, because virt puts the devices *below* RAM |
+| [riscv_virt_timer.mere](riscv_virt_timer.mere) | The trap contract, checked by a third party: `mtvec`, `mstatus.MIE`, `mie.MTIE`, a real 10 MHz CLINT, and the PC the handler returns for `mepc` |
+
+`sh scripts/qemu_virt.sh` runs the two `riscv_virt_*` programs under QEMU and
+diffs their output (skipped when QEMU is absent).
 
 See [bare-metal.md](../docs/bare-metal.md) for the memory map, the capability
-rules and the two that are easy to get wrong (when to switch `gp`, and why a
-handler wants its own stack).
+rules, the two that are easy to get wrong (when to switch `gp`, and why a handler
+wants its own stack), and what booting `virt` checks that our own emulator
+cannot.
 
 ### Q-010 collection basics
 

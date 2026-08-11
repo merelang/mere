@@ -1,0 +1,78 @@
+// Traps and timer interrupts, checked against somebody else's machine.
+//
+//   mere -rv --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_timer.mere > virt.bin
+//   qemu-system-riscv32 -M virt -bios none -nographic -kernel virt.bin
+//
+// The same mechanism as examples/riscv_bare_timer.mere — a registered Mere
+// closure servicing an interrupt through the trampoline codegen emits — with
+// nothing changed but three addresses and the clock's units.
+//
+// This is the part of the bare-metal work most worth pointing at a third party.
+// A trap is a contract between the code and the machine: mtvec, mstatus.MIE,
+// mie.MTIE, the CLINT's compare register, mepc on the way out. Our emulator
+// implements one side of that contract *and* was written by the same person as
+// the code testing it, so agreeing with itself proves nothing. QEMU is an
+// independent implementation of the same specification.
+//
+// Two real differences from our emulator:
+//
+//   * The CLINT is at virt's addresses: mtimecmp for hart 0 at 0x02004000,
+//     mtime at 0x0200bff8. Ours put them at 0x10008000 because keeping RAM at
+//     address 0 left the low addresses unusable for devices.
+//   * mtime is a *clock*, 10 MHz on virt, not our emulator's instruction
+//     counter. The interval below is therefore in real microseconds-ish, and the
+//     spin loop is waiting on the wall rather than on its own progress.
+//
+// Both registers are 64-bit and this only touches the low word, which is honest
+// for a demo that runs for a fraction of a second: at 10 MHz the high word stays
+// zero for seven minutes.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+let rec put_dec = fn (uart: Raw) -> fn (n: int) ->
+  let _ = if n >= 10 then put_dec uart (n / 10) else () in
+  putc uart (48 + n % 10);
+
+let interval = 1000000;        // 10 MHz clock: 0.1 seconds
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  // Two windows rather than one: on virt the compare register and the clock are
+  // 32KB apart, and a window that spanned both would hand the handler authority
+  // over every device in between.
+  let mtime = raw_window mach 0x0200bff8 8 in
+  let mtimecmp = raw_window mach 0x02004000 8 in
+
+  let ticks = vec_new () in
+  let _ = vec_push ticks 0 in
+
+  let _ = set_trap_handler (fn cause ->
+    let n = vec_get ticks 0 + 1 in
+    let _ = vec_set ticks 0 n in
+    let _ = uart_puts uart "tick " 0 in
+    let _ = put_dec uart n in
+    let _ = putc uart 10 in
+    // re-arm, or the deadline stays in the past and every instruction traps
+    let _ = raw_poke32 mtimecmp 0 (raw_peek32 mtime 0 + interval) in
+    csr_read 0x341) in                           // resume where we were
+
+  let _ = raw_poke32 mtimecmp 0 (raw_peek32 mtime 0 + interval) in
+  let _ = csr_write 0x304 128 in                 // mie.MTIE — timer interrupts
+  let _ = csr_write 0x300 8 in                   // mstatus.MIE — interrupts at all
+
+  let rec spin = fn i -> if vec_get ticks 0 >= 3 then i else spin (i + 1) in
+  let _ = spin 0 in
+  let _ = csr_write 0x300 0 in                   // interrupts off, then mtvec
+  let _ = csr_write 0x305 0 in
+  let _ = uart_puts uart "three ticks, stopping\n" 0 in
+
+  let test = raw_window mach 0x00100000 8 in
+  raw_poke32 test 0 0x5555;                      // virt's test finisher: power off
+
+()
