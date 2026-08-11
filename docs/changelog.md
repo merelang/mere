@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.186 — 2026-08-11
+
+_A RAM size instead of three hardcoded addresses, and the self-hosted compiler
+runs on the RV32I emulator again._
+
+_v0.1.185 ended by reporting that the self-hosted compiler no longer fits on
+this backend. The reason it did not fit was not really its appetite: the stack
+top, the print scratch buffer and the fantasy-console framebuffer were three
+immediates baked into codegen, which pinned the heap's ceiling at 0x7E0000 and
+gave every program on this backend the same 5.86MB no matter what it was doing._
+
+_They now derive from one number. The top 128KB of RAM holds the scratch buffer
+and the MMIO; the stack starts just below that and grows down; the heap grows up
+from 2MB; everything between the two growing ends belongs to them. At the
+default 8MB every address comes out exactly where it has always been, so an
+emulator sized for the old layout needs no change. `mere -rv --ram <MB>` (and
+`-rvs --ram`) raises it._
+
+_With that, the measurement the previous slice could not make: the self-hosted
+compiler's heap peaks somewhere between 14 and 18MB — it fails at `--ram 16`
+and completes at `--ram 20`. At 20MB it compiles `1+2` on the Mere-written
+RV32I emulator and emits WAT byte-identical to the native interpreter. The
+tower from v0.1.147 stands again, and this time the requirement is written down
+rather than implied: a binary says how much RAM it wants, an emulator is told
+the same number, and a mismatch fails loudly at the first allocation past the
+limit instead of corrupting a frame._
+
+_The emulator side of that (a RAM size argument, and dropping the 100M
+instruction budget the compiler ran past) lives in the memu project, not here.
+Two tests lock the layout: the default still puts the stack at 0x7E0000, and
+`--ram 32` moves it to 0x1FE0000. `dune runtest` 2317/0; the
+interpreter-vs-emulator sweep of `test/parity` at the default size is unchanged
+at 37 identical / 41 refused / 6 mismatching._
+
+---
+
 ## v0.1.185 — 2026-08-11
 
 _Three holes in the RV32I backend, found by asking what a program that never

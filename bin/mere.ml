@@ -20,6 +20,8 @@ let usage () =
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
   print_endline "  mere -rvs <file.mere> print an RV32IM assembly listing (disassembled)";
   print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
+  print_endline "        -rv/-rvs accept `--ram <MB>` (default 8): the RAM the";
+  print_endline "        binary expects — the stack starts at the top of it";
   print_endline "  mere -r               start interactive REPL";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
@@ -184,6 +186,19 @@ let compile_to_wasm ?base_dir source =
    It carries no imports, so gluing it ahead of the user source is safe;
    line-number shifts in diagnostics are the only cost. *)
 let rv_source source = Mere.Rv_prelude.contents ^ "\n" ^ source
+
+(* `--ram <MB>` sets the RAM the emitted binary expects: the stack starts at
+   the top of it and the heap grows up from 2MB, so this is the knob for a
+   program whose live heap outgrows the 8MB default. The emulator running the
+   binary has to be sized to match. *)
+let set_riscv_ram mb =
+  let n = try int_of_string mb with _ -> 0 in
+  if n < 4 then begin
+    Printf.eprintf
+      "error: --ram takes a size in MB, at least 4 (got `%s`)\n" mb;
+    exit 1
+  end;
+  Mere.Codegen_riscv.ram_bytes := n * 1024 * 1024
 
 let compile_to_riscv ?base_dir source =
   let open Mere in
@@ -371,6 +386,16 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action (compile_to_riscv ~base_dir:base) path source
+  | [_; "-rv"; "--ram"; mb; path] ->
+    set_riscv_ram mb;
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (compile_to_riscv ~base_dir:base) path source
+  | [_; "-rvs"; "--ram"; mb; path] ->
+    set_riscv_ram mb;
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action (listing_riscv ~base_dir:base) path source
   | [_; "-rvse"; expr] ->
     run_action listing_riscv "<inline>" expr
   | [_; "-rvs"; path] ->
