@@ -38,6 +38,10 @@ command -v "$CC" >/dev/null 2>&1 || { echo "parity: no C compiler" >&2; exit 0; 
 have_wat=0; command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && have_wat=1
 
 [ $# -gt 0 ] && FILES="$*" || FILES="$(ls "$ROOT"/test/parity/*.mere)"
+
+# A clean refusal is a documented limitation, not a failure — and also a case
+# that backend did not get checked on. Tallied per backend below.
+unsup_c=0; unsup_llvm=0; unsup_wasm=0; unsup_names=""
 TMP="${TMPDIR:-/tmp}/mere_parity.$$"; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 
@@ -73,10 +77,29 @@ for f in $FILES; do
     else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; }; fi
   else row="$row wasm:SKIP"; fi
 
+  # A backend that refused is a backend this case did not check. Counted so
+  # the blind spot is a number rather than a word buried in a passing row.
+  for b in c llvm wasm; do
+    case "$row" in
+      *"$b:UNSUP"*) unsup_names="$unsup_names $b/$name"
+                    eval "unsup_$b=\$((unsup_$b + 1))" ;;
+    esac
+  done
+
   if [ "$bad" = 0 ]; then echo "PASS $name  [interp=$ref ]$row"; pass=$((pass + 1))
   else echo "FAIL $name  [interp=$ref ]$row"; fail=$((fail + 1)); fi
 done
 
 echo "----"
 echo "parity: $pass passed, $fail failed"
+total=$((pass + fail))
+for b in c llvm wasm; do
+  eval "n=\$unsup_$b"
+  [ "$n" -gt 0 ] && {
+    echo "unchecked on $b: $n of $total (refused at emit time)"
+    for entry in $unsup_names; do
+      case "$entry" in "$b/"*) echo "    ${entry#$b/}" ;; esac
+    done
+  }
+done
 [ "$fail" -eq 0 ]
