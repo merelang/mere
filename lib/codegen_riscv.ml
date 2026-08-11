@@ -124,11 +124,20 @@ let pop rd =
   emit_word (enc_i 0 sp 2 rd 0x03);                    (* lw   rd, 0(sp) *)
   emit_word (enc_i 4 sp 0 sp 0x13)                     (* addi sp, sp, 4 *)
 
+(* The heap grows up from globals_base and the stack grows down from the top
+   of RAM with nothing in between, so the two collide silently: the bump
+   pointer walks into a live frame, overwrites a saved return address with
+   whatever it allocates, and the function returns into the middle of a
+   string. Check after every bump — one not-taken branch — so exhaustion is
+   reported instead of corrupting the program. *)
+let emit_oom_check () = emit (Branch (7, gp, sp, "__oom"))   (* bgeu gp, sp -> __oom *)
+
 (* bump-allocate n words, leaving the block pointer in rd. The caller must
    not make any call between this and its field stores (rd/gp are volatile). *)
 let alloc_words rd n =
   emit_word (enc_i 0 gp 0 rd 0x13);                    (* mv   rd, gp *)
-  emit_word (enc_i (n * 4) gp 0 gp 0x13)               (* addi gp, gp, n*4 *)
+  emit_word (enc_i (n * 4) gp 0 gp 0x13);              (* addi gp, gp, n*4 *)
+  emit_oom_check ()
 
 (* pending lambdas to lift: (label, captured var names, param, body). Filled
    by the Fun case, drained (and possibly extended) by build_items. *)
@@ -161,6 +170,7 @@ let rec free_vars_of (e : Ast.expr) : string list =
     let names = List.map fst bs in
     rm names (List.concat_map (fun (_, e) -> free_vars_of e) bs @ free_vars_of body)
   | Ast.Fun (x, _, b) -> rm [x] (free_vars_of b)
+  | Ast.Region_block (_, b) -> free_vars_of b
   | Ast.App (a, b) -> free_vars_of a @ free_vars_of b
   | Ast.Tuple es -> List.concat_map free_vars_of es
   | Ast.Constr (_, Some a) -> free_vars_of a
@@ -208,6 +218,10 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.Let_rec (bs, b) ->
     List.fold_left (fun ac (_, e) -> vars_in e ac) (vars_in b acc) bs
   | Ast.Fun (_, _, b) -> vars_in b acc
+  (* a region body is ordinary code: without this, a function called only
+     from inside `region R { ... }` is never marked reachable and its label
+     is never emitted (`undefined label u_f` at assembly time) *)
+  | Ast.Region_block (_, b) -> vars_in b acc
   | Ast.App (a, b) -> vars_in a (vars_in b acc)
   | Ast.Tuple elems -> List.fold_left (fun ac el -> vars_in el ac) acc elems
   | Ast.Constr (_, Some a) -> vars_in a acc
@@ -439,6 +453,34 @@ let store_a0_to_global gi =
   li t1 (globals_base + gi * 4);
   emit_word (enc_s 0 a0 t1 2 0x23)                                (* sw a0, 0(t1) *)
 
+(* --- tail calls ----------------------------------------------------------
+   Mere has no loop construct: iteration is recursion, so without tail-call
+   elimination every long-running loop grows the stack until it collides with
+   the heap. `tail_pos` marks the positions whose value IS the enclosing
+   function's value; a saturated call there tears the frame down first and
+   jumps, so the callee returns straight to our caller and the stack stays
+   flat. Mirrors codegen_wasm's `wasm_tail_pos` (which lowers to Wasm's
+   `return_call`); compile_expr clears the flag for every subexpression and
+   the tail-propagating cases reinstate it explicitly. *)
+let tail_pos = ref false
+
+(* The epilogue's frame teardown without the final `ret` — shared with tail
+   calls, which have already placed their arguments in a0.. and must not
+   disturb them. Touches ra / fp / sp / t0 and the saved s-registers only. *)
+let emit_frame_teardown () =
+  let nsaved = !cur_nsaved in
+  let sreg_base = !cur_noverflow in
+  let fp_slot = !cur_noverflow + nsaved in
+  let ra_slot = fp_slot + 1 in
+  let fsz = (ra_slot + 1) * 4 in
+  for k = 0 to nsaved - 1 do
+    emit_word (enc_i ((sreg_base + k) * 4) fp 2 sregs.(k) 0x03)
+  done;
+  emit_word (enc_i (ra_slot * 4) fp 2 ra 0x03);         (* lw   ra, ra_slot(fp) *)
+  emit_word (enc_i (fp_slot * 4) fp 2 t0 0x03);         (* lw   t0, fp_slot(fp) — old fp *)
+  emit_word (enc_i fsz fp 0 sp 0x13);                   (* addi sp, fp, fsz *)
+  emit_word (enc_i 0 t0 0 fp 0x13)                      (* addi fp, t0, 0 *)
+
 let emit_binop op rd rs1 rs2 loc =
   match op with
   | Ast.Add -> emit_word (enc_r 0 rs2 rs1 0 rd 0x33)
@@ -449,6 +491,10 @@ let emit_binop op rd rs1 rs2 loc =
   | Ast.Concat -> err loc "RV32I: internal — string concat is handled in compile_bin"
 
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
+  (* every subexpression starts out non-tail; the cases below whose value is
+     this expression's value put `saved_tail` back before recursing *)
+  let saved_tail = !tail_pos in
+  tail_pos := false;
   match e.node with
   | Ast.Int_lit n -> li a0 n
   | Ast.Bool_lit b -> li a0 (if b then 1 else 0)
@@ -479,9 +525,11 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     let l_end = fresh_label ".endif" in
     compile_expr env c;
     emit (Branch (0, a0, zero, l_else));                             (* beq a0, x0, else *)
+    tail_pos := saved_tail;
     compile_expr env t;
     emit (Jal (zero, l_end));                                        (* j end *)
     emit (Label l_else);
+    tail_pos := saved_tail;
     compile_expr env e2;
     emit (Label l_end)
   | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body) ->
@@ -490,15 +538,18 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     (match loc_of idx with
      | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv  sX, a0 *)
      | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23));  (* sw  a0, slot(fp) *)
+    tail_pos := saved_tail;
     compile_expr ((name, idx) :: env) body
   | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
     compile_expr env rhs;
+    tail_pos := saved_tail;
     compile_expr env body
   | Ast.Let (pat, rhs, body) ->
     (* aggregate / refutable let: destructure via the general pattern binder.
        A refutable let that fails jumps to __pat_fail (abort). *)
     compile_expr env rhs;
     let env = bind_pattern env pat "__pat_fail" in
+    tail_pos := saved_tail;
     compile_expr env body
   | Ast.Tuple elems ->
     (* evaluate elements (each may call/alloc), then allocate the block and
@@ -526,7 +577,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     pop t0; emit_word (enc_s 4 t0 t1 2 0x23);                        (* sw t0, 4(t1) — payload *)
     li t0 tag; emit_word (enc_s 0 t0 t1 2 0x23);                     (* sw t0, 0(t1) — tag *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
-  | Ast.Match (scrut, arms) -> compile_match env scrut arms
+  | Ast.Match (scrut, arms) -> compile_match env scrut arms ~tail:saved_tail
   | Ast.Record_lit (typename, fields) ->
     (* heap block with fields in declaration order *)
     let order = record_order e.loc typename in
@@ -548,8 +599,8 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     in
     let idx = field_index e.loc recname field in
     emit_word (enc_i (idx * 4) a0 2 a0 0x03)                        (* lw a0, idx*4(a0) *)
-  | Ast.Annot (a, _) -> compile_expr env a
-  | Ast.App (_, _) -> compile_app env e
+  | Ast.Annot (a, _) -> tail_pos := saved_tail; compile_expr env a
+  | Ast.App (_, _) -> tail_pos := saved_tail; compile_app env e
   | Ast.Fun (param, _, body) ->
     (* closure = [code_ptr][captured...]; capture the locals the body uses *)
     let fvs = dedup (free_vars_of e) |> List.filter (fun n -> List.mem_assoc n env) in
@@ -581,6 +632,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
       load_to_a0 (List.assoc name env_f);                          (* f resolves to the block ptr *)
       emit_word (enc_s ((i + 1) * 4) a0 t1 2 0x23)
     ) fnexpr_fvs;
+    tail_pos := saved_tail;
     compile_expr env_f body
   | Ast.Let_rec _ ->
     err e.loc "RV32I: only single-binding local `let rec f = fn ...` is supported"
@@ -588,7 +640,19 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     let label = fresh_label "str_" in
     string_data := (label, mk_str_block s) :: !string_data;
     emit (LoadAddr (a0, label))                                     (* a0 = &block *)
-  | Ast.Region_block (_, body) -> compile_expr env body             (* bump heap: no reclamation *)
+  | Ast.Region_block (_, body) ->
+    (* LIFO reclamation: park the heap top, run the body, roll back — the
+       same thing the Wasm backend does by saving and restoring __lang_bump.
+       Everything the body allocated becomes reusable at the closing brace,
+       which is what lets a long-running loop hold a flat heap. The body is
+       deliberately NOT in tail position: a tail call out of it would skip
+       the rollback. A value allocated inside and returned out is dangling,
+       exactly as on the other backends — region tagging is what rules it
+       out, not the codegen. *)
+    push gp;
+    compile_expr env body;
+    pop t0;
+    emit_word (enc_i 0 t0 0 gp 0x13)                                (* mv gp, t0 *)
   | Ast.Float_lit _ -> err e.loc "RV32I: floats are not supported yet"
   | Ast.With _ -> err e.loc "RV32I: `with` expressions are not supported yet"
   | Ast.Ref _ -> err e.loc "RV32I: `&` references are not supported yet"
@@ -743,17 +807,22 @@ and compile_logic env op l r =
      emit (Label l_end))
 
 and compile_app env e =
+  let tail_here = !tail_pos in
+  tail_pos := false;
   let (head, args) = flatten_app e in
   match head.node with
   (* A user binding always wins over a same-named builtin. Check locals /
      globals / top-level functions BEFORE the builtin names below. *)
   | Ast.Var f when List.mem_assoc f env || Hashtbl.mem globals_map f ->
-    compile_indirect env head args
+    compile_indirect ~tail:tail_here env head args
   | Ast.Var f when is_top f ->
     let arity = List.length (fst (Hashtbl.find tops f)) in
-    if List.length args <> arity then compile_indirect env head args
+    if List.length args <> arity then compile_indirect ~tail:tail_here env head args
     else begin
       let argv = Array.of_list args in
+      (* args 9+ travel on the caller's stack, which a frame teardown would
+         drop, so only the register-only shape takes the tail path *)
+      let tail = tail_here && arity <= 8 in
       if arity <= 8 then begin
         List.iter (fun arg -> compile_expr env arg; push a0) args;
         for i = arity - 1 downto 0 do pop (a0 + i) done
@@ -762,8 +831,13 @@ and compile_app env e =
         for j = 0 to 7 do compile_expr env argv.(j); push a0 done;
         for j = 7 downto 0 do pop (a0 + j) done
       end;
-      emit (Jal (ra, "u_" ^ f));
-      if arity > 8 then emit_word (enc_i ((arity - 8) * 4) sp 0 sp 0x13)
+      if tail then begin
+        emit_frame_teardown ();
+        emit (Jal (zero, "u_" ^ f))          (* the callee returns to our caller *)
+      end else begin
+        emit (Jal (ra, "u_" ^ f));
+        if arity > 8 then emit_word (enc_i ((arity - 8) * 4) sp 0 sp 0x13)
+      end
     end
   | Ast.Var "print_int" when List.length args = 1 ->
     compile_expr env (List.hd args);
@@ -929,7 +1003,7 @@ and compile_app env e =
     emit_word (enc_i 0 a0 0 a2 0x13);                    (* a2 = len *)
     pop a1; pop a0;                                      (* a1 = start, a0 = s *)
     emit (Jal (ra, "__substring"))
-  | _ -> compile_indirect env head args
+  | _ -> compile_indirect ~tail:tail_here env head args
 
 (* call a known top-level function (an rv-prelude helper) directly: evaluate
    the args into a0.. and jal its label *)
@@ -941,18 +1015,27 @@ and call_top env name args =
 
 (* general application: evaluate the head to a closure value and apply the
    arguments one at a time via indirect (curried) calls *)
-and compile_indirect env head args =
+and compile_indirect ?(tail = false) env head args =
   compile_expr env head;                               (* a0 = closure *)
-  List.iter (fun arg ->
+  let last = List.length args - 1 in
+  List.iteri (fun i arg ->
     push a0;                                            (* save the closure *)
     compile_expr env arg;                               (* a0 = arg *)
     emit_word (enc_i 0 a0 0 a1 0x13);                   (* mv a1, a0 (arg) *)
     pop a0;                                             (* a0 = closure (its own env) *)
     emit_word (enc_i 0 a0 2 t1 0x03);                   (* lw t1, 0(a0) — code ptr *)
-    emit_word (enc_i 0 t1 0 ra 0x67)                    (* jalr ra, t1 — call; result in a0 *)
+    (* only the final application of a curried chain is in tail position; the
+       earlier ones still have work to do with their result. This is the shape
+       a local `let rec loop = fn ...` takes, so it is the one that matters
+       most for a long-running loop. *)
+    if tail && i = last then begin
+      emit_frame_teardown ();
+      emit_word (enc_i 0 t1 0 zero 0x67)                (* jalr x0, t1 — tail call *)
+    end else
+      emit_word (enc_i 0 t1 0 ra 0x67)                  (* jalr ra, t1 — call; result in a0 *)
   ) args
 
-and compile_match env scrut arms =
+and compile_match env scrut arms ~tail =
   compile_expr env scrut;                          (* a0 = scrutinee *)
   let sidx = !slot_ctr in incr slot_ctr;
   store_a0_to sidx;                                (* stash it (survives arm bodies) *)
@@ -964,6 +1047,7 @@ and compile_match env scrut arms =
     (match guard with
      | Some g -> compile_expr env' g; emit (Branch (0, a0, zero, l_next))  (* beqz a0 -> next *)
      | None -> ());
+    tail_pos := tail;
     compile_expr env' body;
     emit (Jal (zero, l_end));
     emit (Label l_next)
@@ -1062,15 +1146,12 @@ let emit_prologue total =
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (nsaved, sreg_base, fp_slot, ra_slot, fsz)
 
-let emit_epilogue (nsaved, sreg_base, fp_slot, ra_slot, fsz) =
+(* the frame parameters come from cur_nsaved / cur_noverflow, which the
+   matching prologue set — the same source the tail path reads, so the two
+   teardowns cannot drift apart *)
+let emit_epilogue (_ : int * int * int * int * int) =
   (* result already in a0, which the teardown never touches *)
-  for k = 0 to nsaved - 1 do
-    emit_word (enc_i ((sreg_base + k) * 4) fp 2 sregs.(k) 0x03)
-  done;
-  emit_word (enc_i (ra_slot * 4) fp 2 ra 0x03);         (* lw   ra, ra_slot(fp) *)
-  emit_word (enc_i (fp_slot * 4) fp 2 t0 0x03);         (* lw   t0, fp_slot(fp) — old fp *)
-  emit_word (enc_i fsz fp 0 sp 0x13);                   (* addi sp, fp, fsz *)
-  emit_word (enc_i 0 t0 0 fp 0x13);                     (* addi fp, t0, 0 *)
+  emit_frame_teardown ();
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* jalr x0, ra, 0 (ret) *)
 
 (* a top-level function: args arrive in a0.. (direct convention) *)
@@ -1093,7 +1174,9 @@ let emit_function ~label ~params ~body =
     | Mem slot -> src_into_t0 (); emit_word (enc_s (slot_off slot) t0 fp 2 0x23)
   ) params;
   slot_ctr := nparams;
+  tail_pos := true;                       (* the body's value is the function's *)
   compile_expr (List.mapi (fun i p -> (p, i)) params) body;
+  tail_pos := false;
   emit_epilogue fr
 
 (* a lifted lambda: closure env ptr in a0, the (single) argument in a1.
@@ -1116,7 +1199,9 @@ let emit_lambda ~label ~captures ~param ~body =
    | Mem slot -> emit_word (enc_s (slot_off slot) a1 fp 2 0x23));
   slot_ctr := k + 1;
   let env = List.mapi (fun i c -> (c, i)) captures @ [(param, k)] in
+  tail_pos := true;
   compile_expr env body;
+  tail_pos := false;
   emit_epilogue fr
 
 (* __main: initialise the top-level value bindings (in order, into the
@@ -1133,15 +1218,17 @@ let emit_main main_body =
     | Some name -> store_a0_to_global (Hashtbl.find globals_map name)
     | None -> ()
   ) !globals;
+  tail_pos := true;                       (* a tail call here returns to _start *)
   compile_expr [] main_body;
+  tail_pos := false;
   emit_epilogue fr
 
 (* _start MUST be the first bytes (loaded at address 0, PC starts there) *)
 let emit_start () =
   emit (Label "_start");
-  emit_word (enc_u 0x7E0 sp 0x37);                       (* lui  sp, 0x70  (sp = 0x70000) *)
+  emit_word (enc_u 0x7E0 sp 0x37);                      (* lui  sp, 0x7E0  (sp = 0x7E0000) *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
-  (* heap top starts just above the globals region (0x10000 + nglobals*4) *)
+  (* heap top starts just above the globals region (globals_base + n*4) *)
   li gp (globals_base + Hashtbl.length globals_map * 4);
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
@@ -1199,6 +1286,7 @@ let emit_str_concat () =
   emit_word (enc_i (-4) t4 7 t4 0x13);                  (* andi t4, t4, -4 — round4(total) *)
   emit_word (enc_i 4 t4 0 t4 0x13);                     (* addi t4, t4, 4  — + len word *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* add gp, t3, t4  — new heap top *)
+  emit_oom_check ();
   emit_word (enc_i 4 a0 0 t5 0x13);                     (* addi t5, a0, 4  — src1 *)
   emit_word (enc_i 4 t3 0 t6 0x13);                     (* addi t6, t3, 4  — dst *)
   emit (Label ".sc_l1");
@@ -1312,6 +1400,7 @@ let emit_str_of_int () =
   emit_word (enc_i (-4) t4 7 t4 0x13);
   emit_word (enc_i 4 t4 0 t4 0x13);
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* gp = t3 + words *)
+  emit_oom_check ();
   emit_word (enc_i 4 t3 0 t5 0x13);                     (* dst = t3+4 *)
   emit (Label ".si_copy");
   emit (Branch (0, t1, zero, ".si_cdone"));             (* beq t1, x0 *)
@@ -1336,6 +1425,7 @@ let emit_substring () =
   emit_word (enc_i (-4) t1 7 t1 0x13);
   emit_word (enc_i 4 t1 0 t1 0x13);
   emit_word (enc_r 0 t1 t0 0 gp 0x33);                  (* gp = t0 + words *)
+  emit_oom_check ();
   emit_word (enc_r 0 a1 a0 0 t2 0x33);                  (* t2 = s + start *)
   emit_word (enc_i 4 t2 0 t2 0x13);                     (* src = s+4+start *)
   emit_word (enc_i 4 t0 0 t3 0x13);                     (* dst = t0+4 *)
@@ -1364,6 +1454,7 @@ let emit_strbuf () =
   emit_word (enc_i 0 gp 0 t1 0x13);                (* t1 = cell = gp *)
   emit_word (enc_s 0 t0 t1 2 0x23);                (* cell.str = empty *)
   emit_word (enc_i 4 gp 0 gp 0x13);                (* bump 1 word *)
+  emit_oom_check ();
   emit_word (enc_i 0 t1 0 a0 0x13);                (* mv a0, cell *)
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; non-leaf *)
@@ -1395,6 +1486,7 @@ let emit_vec () =
   emit_word (enc_i 16 gp 0 gp 0x13);               (* bump 4 words *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
   emit_word (enc_i 12 gp 0 gp 0x13);               (* bump 3 words *)
+  emit_oom_check ();
   emit_word (enc_s 0 zero t1 2 0x23);              (* len = 0 *)
   emit_word (enc_s 4 t2 t1 2 0x23);                (* cap = 4 *)
   emit_word (enc_s 8 t0 t1 2 0x23);                (* dataptr *)
@@ -1410,6 +1502,7 @@ let emit_vec () =
   emit_word (enc_i 2 t3 1 t4 0x13);                (* slli t4, newcap, 2 = bytes *)
   emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
   emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += bytes *)
+  emit_oom_check ();
   emit_word (enc_s 8 t5 a0 2 0x23);                (* cell.dataptr = newbuf *)
   emit (Label ".vp_copy");
   emit (Branch (0, t0, zero, ".vp_after"));        (* beq len,x0 -> done *)
@@ -1431,6 +1524,23 @@ let emit_vec () =
   emit_word (enc_i 0 ra 0 zero 0x67)
 
 (* target of a refutable-let mismatch: abort with exit(2) *)
+(* heap exhaustion: report it and stop. The bump allocator never frees, so a
+   long-running program eventually walks gp into the stack; before this it
+   corrupted a frame and jumped into rodata with no message at all. *)
+let emit_oom () =
+  emit (Label "__oom");
+  let label = "str__oom" in
+  string_data := (label, mk_str_block "mere: out of memory (heap reached the stack)\n") :: !string_data;
+  emit (LoadAddr (t0, label));
+  emit_word (enc_i 0 t0 2 a2 0x03);                     (* lw   a2, 0(t0) — len *)
+  emit_word (enc_i 4 t0 0 a1 0x13);                     (* addi a1, t0, 4 — bytes *)
+  emit_word (enc_i 1 zero 0 a0 0x13);                   (* li   a0, 1     — fd *)
+  emit_word (enc_i 64 zero 0 a7 0x13);                  (* li   a7, 64    — write *)
+  emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall *)
+  emit_word (enc_i 93 zero 0 a7 0x13);
+  emit_word (enc_i 3 zero 0 a0 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(3) *)
+
 let emit_pat_fail () =
   emit (Label "__pat_fail");
   emit_word (enc_i 93 zero 0 a7 0x13);
@@ -1668,6 +1778,7 @@ let build_items (prog : Ast.program) : item list =
   emit_strbuf ();
   emit_vec ();
   emit_pat_fail ();
+  emit_oom ();
   emit_main main_body;
   Hashtbl.iter (fun name (params, body) ->
     if Hashtbl.mem reachable name then

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.184" Version.v "0.1.184";
+  check "version is 0.1.185" Version.v "0.1.185";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12123,6 +12123,62 @@ let () =
          \  let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x) in\n\
          \  (sum [1, 2, 3], sum [[4], [5, 6]]);\n\
          go ()")) "(6, [4, 5, 6])";
+
+  (* --- RV32I backend: tail calls, region reclamation, heap-exhaustion check.
+     The -rv backend had no automated coverage at all, and the region bug
+     locked below failed at assembly time ("undefined label u_f") — a hard
+     crash that nothing in the suite would have caught. These assert on the
+     emitted listing, so they lock the instruction actually chosen. *)
+  let rv_typed src =
+    let prog = Pipeline.parse_program src in
+    let type_env = ref Typer.initial_env in
+    let mt = Typer.infer !type_env (Ast.desugar_program prog) in
+    (prog, mt)
+  in
+  let rv_contains name src needle =
+    let hay =
+      try
+        let (prog, mt) = rv_typed src in
+        Codegen_riscv.emit_listing ~main_ty:mt prog
+      with e -> "EXCEPTION: " ^ Printexc.to_string e
+    in
+    let nl = String.length needle and hl = String.length hay in
+    let rec loop i = i + nl <= hl && (String.sub hay i nl = needle || loop (i + 1)) in
+    check name (if loop 0 then needle else "MISSING: " ^ needle) needle
+  in
+  (* Mere iterates by recursing, so without this a long-running loop grows the
+     stack until it meets the heap. A self call in tail position must reuse
+     the frame: `j`, not `jal`. *)
+  rv_contains "rv32i: a self tail call reuses the frame"
+    "let rec loop = fn i -> if i >= 10 then i else loop (i + 1);\n\
+     let _ = print_int (loop 0);" "j u_loop";
+  rv_contains "rv32i: a non-tail call is still a call"
+    "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1);\n\
+     let _ = print_int (fact 5);" "jal ra, u_fact";
+  (* the shape a local loop actually takes: a closure, called indirectly *)
+  rv_contains "rv32i: a local `let rec` tail call jumps through the closure"
+    "let run = fn n -> let rec loop = fn i -> if i >= n then i else loop (i + 1) in loop 0;\n\
+     let _ = print_int (run 10);" "jalr zero, 0(t1)";
+  (* `region R { }` parks the bump pointer and rolls it back at the closing
+     brace, which is what lets a long-running loop hold a flat heap *)
+  rv_contains "rv32i: a region parks the bump pointer"
+    "let f = fn x -> x + 1;\n\
+     let _ = print_int (region R { f 41 });" "sw gp, 0(sp)";
+  rv_contains "rv32i: a region restores the bump pointer"
+    "let f = fn x -> x + 1;\n\
+     let _ = print_int (region R { f 41 });" "mv gp, t0";
+  (* the heap grows up and the stack grows down into the same gap; before this
+     check they collided silently and the program jumped into rodata *)
+  rv_contains "rv32i: an allocation checks the heap against the stack"
+    "let _ = print (str_of_int 42);" "bgeu gp, sp, __oom";
+  check "rv32i: a call inside a region resolves its label"
+    (try
+       let (prog, mt) =
+         rv_typed "let f = fn x -> x + 1;\n\
+                   let _ = print_int (region R { f 41 });" in
+       let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
+       if String.length bin > 64 then "assembled" else "suspiciously short"
+     with e -> Printexc.to_string e) "assembled";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
