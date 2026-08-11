@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.203 — 2026-08-12
+
+_The parser no longer stops at the first syntax error._
+
+_A file with three broken functions told you about one of them, three times in a
+row: fix, recompile, learn about the next one. `mere <file>` now reports all of
+them, in source order, with a count at the end._
+
+```
+parse error: expected literal, identifier, or '('
+  --> app.mere:3:20
+parse error: expected type
+  --> app.mere:7:16
+parse error: expected 'ident = expr' after 'with'
+  --> app.mere:12:15
+
+3 syntax errors
+```
+
+_This is the first slice of a language-server arc, and it is the one that pays off
+on its own: an editor cannot underline three mistakes if the compiler only knows
+about one, and neither can a person._
+
+**How.** `Parser.parse_program_recover` parses, and on an error **deletes the
+declaration that contains it** and parses the whole file again, collecting errors
+until it succeeds (or hits 20). Re-parsing rather than resuming is deliberate: the
+parser is functional over an immutable token list, so there is no cursor to reset
+and no half-built state to unwind — deleting a span and starting over is exact, and
+it needs no changes to the 130-odd places that raise. It costs one pass per error,
+which for an editor re-parsing on every keystroke is not the expensive part.
+`parse_program` itself is untouched, so nothing on the good path changed.
+
+**Where a declaration ends** is the interesting part. `;` at bracket depth zero is
+the language's real boundary — but a declaration with an unbalanced `(` never
+returns to depth zero, so a depth-only rule deletes the rest of the file and hides
+every later error, which is the exact failure being fixed. So a **declaration
+keyword in column 1** is accepted as a boundary too: every top-level declaration in
+this language's sources starts flush left (the formatter emits nothing else), so an
+indented `let` is a local binding and one in column 1 is a new declaration. It is a
+heuristic, and it is consulted only about where to resume after an error.
+
+_Errors from an **imported** file are not recovered from — their positions belong to
+another file's token list, so there is nothing in this one to delete. The first is
+reported and the walk stops._
+
+---
+
 ## v0.1.202 — 2026-08-12
 
 _Two loose ends from the bare-metal work: diagnostics that report the line you

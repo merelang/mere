@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.202" Version.v "0.1.202";
+  check "version is 0.1.203" Version.v "0.1.203";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12129,6 +12129,34 @@ let () =
      locked below failed at assembly time ("undefined label u_f") — a hard
      crash that nothing in the suite would have caught. These assert on the
      emitted listing, so they lock the instruction actually chosen. *)
+  (* Recovery at declaration boundaries. `parse_program` stops at the first
+     syntax error, so a file with three broken functions told you about one of
+     them, three times in a row; an editor needs all of them, and so does
+     anybody fixing a file they just pasted. Note `bad2`, whose `(` is never
+     closed: bracket depth never returns to 0 after it, so a depth-only
+     boundary would delete the rest of the file and hide `bad3`. *)
+  let recover src = Parser.parse_program_recover (Lexer.tokenize src) in
+  let broken =
+    "let good1 = fn x -> x + 1;\n\
+     let bad1 = fn x -> x +;\n\
+     let good2 = fn y -> y * 2;\n\
+     let bad2 = fn (q: -> q;\n\
+     let bad3 = match with | _ -> 1;\n\
+     let good3 = 42;\n"
+  in
+  let (recovered, errs) = recover broken in
+  check "recovery: reports every syntax error, not just the first"
+    (string_of_int (List.length errs)) "3";
+  check "recovery: in source order"
+    (String.concat "," (List.map (fun (l, _) -> string_of_int l.Loc.line) errs))
+    "2,4,5";
+  check "recovery: the declarations that did parse survive"
+    (string_of_int (List.length recovered.Ast.decls)) "3";
+  check "recovery: a clean program reports nothing"
+    (string_of_int
+       (List.length (snd (recover "let f = fn x -> x;\nlet _ = print_int (f 1);\n"))))
+    "0";
+
   (* The -rv path compiles a concatenation — the Mere-source prelude, then the
      user's file — so every position it produces is counted from the top of that
      text. A type error in a three-line file used to be reported at "line 133".

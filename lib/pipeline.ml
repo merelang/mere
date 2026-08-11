@@ -39,6 +39,22 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
         (Ast.lower_par_map_program
           { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))
 
+(* Every syntax error in a source string, not just the first: lex, then parse
+   with declaration-level recovery. Used by the CLI to report a whole file's
+   worth at once, and the shape an editor wants.
+
+   The prelude is parsed first for the same reason `parse_program` does it —
+   constructors have to be registered before the user's source is parsed, or
+   `Cons` in user code looks up arity 0. *)
+let syntax_errors ?base_dir ?(search_paths = []) s : (Loc.t * string) list =
+  Parser.reset_decl_state ();
+  ignore (parse_prelude ());
+  let tokens = Lexer.tokenize s in
+  let (_, errors) =
+    Parser.parse_program_recover ?base_dir ~search_paths tokens
+  in
+  errors
+
 let parse_only s =
   (* Phase 21.2: parse_only is used by pretty-print / AST-shape tests
      where the prelude noise (let-rec helpers wrapping the user's expr)
