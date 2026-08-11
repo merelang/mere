@@ -22,6 +22,8 @@ let usage () =
   print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
   print_endline "        -rv/-rvs accept `--ram <MB>` (default 8): the RAM the";
   print_endline "        binary expects — the stack starts at the top of it";
+  print_endline "        and `--bare`: no host syscalls; the program's top-level";
+  print_endline "        `main` is handed the machine as a `Raw` capability";
   print_endline "  mere -r               start interactive REPL";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
@@ -193,9 +195,12 @@ let rv_source source = Mere.Rv_prelude.contents ^ "\n" ^ source
    binary has to be sized to match. *)
 let set_riscv_ram mb =
   let n = try int_of_string mb with _ -> 0 in
-  if n < 4 then begin
+  (* the ceiling keeps RAM below the device MMIO region, so a device address
+     never moves when the RAM size does *)
+  let max_mb = Mere.Codegen_riscv.mmio_base / (1024 * 1024) in
+  if n < 4 || n > max_mb then begin
     Printf.eprintf
-      "error: --ram takes a size in MB, at least 4 (got `%s`)\n" mb;
+      "error: --ram takes a size in MB, from 4 to %d (got `%s`)\n" max_mb mb;
     exit 1
   end;
   Mere.Codegen_riscv.ram_bytes := n * 1024 * 1024
@@ -209,6 +214,13 @@ let listing_riscv ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_listing ~main_ty prog
+
+let run_riscv_bare mode path =
+  Mere.Codegen_riscv.bare := true;
+  let source = read_file path in
+  let base = Filename.dirname path in
+  let action = if mode = "-rv" then compile_to_riscv else listing_riscv in
+  run_action (action ~base_dir:base) path source
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -396,6 +408,13 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action (listing_riscv ~base_dir:base) path source
+  (* --bare: no host syscalls beyond the emulator's exit, and the program's
+     top-level `main` is handed the machine capability it does its I/O through *)
+  | [_; ("-rv" | "-rvs" as mode); "--bare"; path] ->
+    run_riscv_bare mode path
+  | [_; ("-rv" | "-rvs" as mode); "--bare"; "--ram"; mb; path] ->
+    set_riscv_ram mb;
+    run_riscv_bare mode path
   | [_; "-rvse"; expr] ->
     run_action listing_riscv "<inline>" expr
   | [_; "-rvs"; path] ->

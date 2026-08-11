@@ -1,0 +1,46 @@
+// A bare-metal program for the RV32I backend: no host syscalls, no ambient
+// I/O builtins, no operating system.
+//
+//   mere -rv --bare examples/riscv_bare_uart.mere > prog.bin
+//
+// runs on an RV32IM emulator whose UART data register is at 0x10000000 (the
+// address QEMU's `virt` machine uses), and prints through it.
+//
+// The point is how the program reaches the hardware. `--bare` hands `main` a
+// `Raw` — a *window* onto the machine — and that argument is the only source
+// of one: `Raw` is opaque, nothing constructs it, and `raw_window` can only
+// narrow. So `putc` below can be read as a promise. It takes a window over
+// the UART and can touch nothing else: not the heap, not the stack, not
+// another device. Widening the window it was given faults, and so does an
+// offset past its end.
+//
+// That is why raw memory is a value here rather than an ambient builtin like
+// the fantasy console's `fb_set`: with an ambient one, "does this function
+// scribble on memory?" is a question about its whole body, and every body it
+// calls. With a window it is a question about its signature.
+
+// A driver: give it the UART window and it can write bytes to the UART. The
+// offsets are relative to the window, so 0 is the UART's data register.
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+// The 16550 line-status register is at +5; bit 5 means the transmitter holding
+// register is empty. Nothing here needs to wait for it, but reading it shows a
+// device register being read back through the same window. (Bit 5 is extracted
+// with division because the RV32I backend has no bitwise builtins yet — a real
+// driver would want `bit_and` here.)
+let tx_ready = fn (uart: Raw) -> raw_peek8 uart 5 / 32 % 2 == 1;
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let _ = uart_puts uart "hello from bare metal\n" 0 in
+  let _ = uart_puts uart (if tx_ready uart then "uart reports tx ready\n"
+                          else "uart reports tx busy\n") 0 in
+  ();
+
+()

@@ -2030,6 +2030,16 @@ let rec emit_expr (e : Ast.expr) : string =
         resources. *)
      | Ast.Var "detach" when not (user_shadows "detach") ->
        "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_detach(__h.tid); 0; })"
+     (* Raw physical memory is RV32I bare-metal only. Without this arm the
+        raw_* names fell through to the closure path and emitted a call to an
+        undefined `mu_raw_poke8` plus an unknown `Raw` C type, so the refusal
+        arrived from clang as "type specifier missing" — loud, but about the
+        wrong thing. There is no honest physical address in a hosted process. *)
+     | Ast.Var ("raw_window" | "raw_peek8" | "raw_peek32"
+               | "raw_poke8" | "raw_poke32") ->
+       unsupported e.Ast.loc
+         "raw memory (raw_window / raw_peek* / raw_poke*) is only available on \
+          the RV32I bare-metal target (mere -rv --bare)"
      (* Q-012: channel primitives, dispatched to the monomorphized runtime.
         The element tag comes from the channel's resolved type. *)
      | Ast.Var "channel_new" ->
