@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.200" Version.v "0.1.200";
+  check "version is 0.1.201" Version.v "0.1.201";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12267,6 +12267,20 @@ let () =
   rv_err_contains "rv32i: a computed CSR number is refused"
     "let main = fn (m: Raw) -> csr_write (300 + 40) 1;\n()"
     "the CSR number must be a literal";
+  (* Relocated to QEMU virt's DRAM base, where the devices are BELOW RAM instead
+     of above it. The machine window has to reach the higher of the two, so it is
+     a max, not a sum: at 0x80000000 + 8MB the length is 0x80800000, and with the
+     old `mmio_base + mmio_len` a program on virt could not name its own RAM.
+     The stack moves with the base, and both immediates are above 2GB — which the
+     unsigned bounds checks and `li`'s lui/addi pair have to survive. *)
+  Codegen_riscv.load_base := 0x80000000;
+  rv_contains "rv32i: --load-base moves the stack to virt's DRAM base"
+    "let main = fn (m: Raw) -> raw_poke8 m 0 65;\n()" "lui sp, 0x807e0";
+  rv_contains "rv32i: the machine window reaches RAM when RAM is above the devices"
+    "let main = fn (m: Raw) -> raw_poke8 m 0 65;\n()" "lui t0, 0x80800";
+  Codegen_riscv.load_base := 0;
+  rv_contains "rv32i: at the default base the window still stops above the MMIO page"
+    "let main = fn (m: Raw) -> raw_poke8 m 0 65;\n()" "lui t0, 0x10010";
   Codegen_riscv.bare := false;
   (* The debug map (`mere -rvg`) is emitted from the same item list the assembler
      consumes, so it describes the bytes that run. Line numbers are the user's:
