@@ -1,0 +1,198 @@
+// A shell, on a machine with no operating system.
+//
+//   mere -rv --bare examples/riscv_bare_shell.mere > prog.bin
+//   ./rvrun                       # then type at it
+//   printf 'help\nbg\nbg\nfault\nhalt\n' | ./rvrun
+//
+// Everything under it was built in the slices before this one: a UART reached
+// through a window capability, a trap trampoline, a timer, and a scheduler that
+// swaps register sets. This file adds no new machinery — it is ordinary Mere.
+//
+// Two things worth watching while it runs:
+//
+//   `bg` twice reports a counter that climbed while the shell sat waiting for
+//   your keystroke. Nothing yielded to it: the timer took the CPU away from the
+//   shell and the handler gave it to the other task.
+//
+//   `fault` reads an address the machine does not have. The same handler that
+//   schedules also fields the access fault, reports it, and steps over the
+//   faulting instruction — so a bad command does not take the machine down.
+//
+// Each command is processed inside `region R { ... }`. The shell allocates while
+// it parses, and this backend's heap never frees, so without that a long enough
+// session would walk the bump pointer into the stack. With it the heap is flat
+// no matter how many commands you type.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+let rx_ready = fn (uart: Raw) -> bit_and (raw_peek8 uart 5) 1 != 0;
+let rx_byte = fn (uart: Raw) -> raw_peek8 uart 0;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+let rec put_dec = fn (uart: Raw) -> fn (n: int) ->
+  let _ = if n >= 10 then put_dec uart (n / 10) else () in
+  putc uart (48 + n % 10);
+
+let new_vec = fn (n: int) -> fn (x: int) ->
+  let v = vec_new () in
+  let rec go = fn i -> if i >= n then () else let _ = vec_push v x in go (i + 1) in
+  let _ = go 0 in
+  v;
+
+// does the typed line begin with this word, and end or continue with a space?
+let rec matches = fn (buf) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then
+    (if vec_len buf <= i then 1 else if vec_get buf i == 32 then 1 else 0)
+  else if vec_len buf <= i then 0
+  else if vec_get buf i != ord (char_at s i) then 0
+  else matches buf s (i + 1);
+
+let rec parse_dec = fn (buf) -> fn (i: int) -> fn (acc: int) ->
+  if i >= vec_len buf then acc
+  else
+    let c = vec_get buf i in
+    if c >= 48 && c <= 57 then parse_dec buf (i + 1) (acc * 10 + c - 48) else acc;
+
+// The register copies live at top level, not inside the handler, because a
+// top-level function allocates nothing while a local `let rec` is a closure and
+// a closure is a heap block. An allocating handler corrupts the program it
+// interrupted — reproducibly, in this shell, and the mechanism is not yet
+// isolated (see the note in the changelog). "Do not allocate in an interrupt
+// handler" is a rule real kernels keep for their own reasons; here it is load
+// bearing.
+let rec store_regs = fn (save: Raw) -> fn tcb -> fn (i: int) ->
+  if i > 31 then ()
+  else
+    let _ = vec_set tcb i (raw_peek32 save (i * 4)) in
+    store_regs save tcb (i + 1);
+
+let rec load_regs = fn (save: Raw) -> fn tcb -> fn (i: int) ->
+  if i > 31 then ()
+  else
+    // gp, the heap's bump pointer, is machine state and not task state
+    let _ = if i == 3 then () else raw_poke32 save (i * 4) (vec_get tcb i) in
+    load_regs save tcb (i + 1);
+
+let interval = 20000;
+let stack_size = 8192;
+let x_sp = 2;
+let x_a0 = 10;
+let timer_cause = 2147483655;      // 0x80000007
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let clint = raw_window mach 0x10008000 16 in
+  let save = trap_save mach in
+  let scratch = machine_scratch mach in
+
+  let ticks = new_vec 1 0 in
+  let bg_count = new_vec 1 0 in
+  let faults = new_vec 1 0 in
+
+  // The other task: it only counts. Silent on purpose — the point is that `bg`
+  // reports progress the shell never gave it a chance to make.
+  let background = fn () ->
+    let rec loop = fn i ->
+      let _ = vec_set bg_count 0 i in
+      loop (i + 1) in
+    loop 0 in
+
+  let tcb0 = new_vec 32 0 in
+  let tcb1 = new_vec 32 0 in
+  let state = new_vec 1 0 in
+  let _ = vec_set tcb1 x_sp (raw_base scratch + stack_size) in
+  let _ = vec_set tcb1 x_a0 (closure_env background) in
+  let _ = vec_set tcb1 0 (closure_code background) in
+
+  let handler = fn cause ->
+    if cause != timer_cause then
+      // an access fault, or anything else the machine could not do: count it and
+      // step over the instruction that caused it
+      let _ = vec_set faults 0 (vec_get faults 0 + 1) in
+      csr_read 0x341 + 4
+    else
+      let _ = vec_set ticks 0 (vec_get ticks 0 + 1) in
+      let cur = vec_get state 0 in
+      let out = if cur == 0 then tcb0 else tcb1 in
+      let into = if cur == 0 then tcb1 else tcb0 in
+      let _ = store_regs save out 1 in
+      let _ = vec_set out 0 (csr_read 0x341) in
+      let _ = load_regs save into 1 in
+      let _ = vec_set state 0 (1 - cur) in
+      let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+      vec_get into 0 in
+
+  let _ = set_trap_handler handler in
+  let _ = raw_poke32 clint 8 (raw_peek32 clint 0 + interval) in
+  let _ = csr_write 0x304 128 in
+  let _ = csr_write 0x300 8 in
+
+  let rec read_line = fn (buf) ->
+    if rx_ready uart then
+      let c = rx_byte uart in
+      if c == 10 then 1
+      else if c == 13 then 1
+      else
+        let _ = putc uart c in                  // echo
+        let _ = vec_push buf c in
+        read_line buf
+    else read_line buf in
+
+  let run = fn (buf) ->
+    if matches buf "help" 0 == 1 then
+      let _ = uart_puts uart "commands: help ticks bg faults echo peek fault halt\n" 0 in 1
+    else if matches buf "ticks" 0 == 1 then
+      let _ = uart_puts uart "timer ticks: " 0 in
+      let _ = put_dec uart (vec_get ticks 0) in
+      let _ = putc uart 10 in 1
+    else if matches buf "bg" 0 == 1 then
+      let _ = uart_puts uart "background task is at " 0 in
+      let _ = put_dec uart (vec_get bg_count 0) in
+      let _ = putc uart 10 in 1
+    else if matches buf "faults" 0 == 1 then
+      let _ = uart_puts uart "faults handled: " 0 in
+      let _ = put_dec uart (vec_get faults 0) in
+      let _ = putc uart 10 in 1
+    else if matches buf "echo" 0 == 1 then
+      let rec say = fn i ->
+        if i >= vec_len buf then () else let _ = putc uart (vec_get buf i) in say (i + 1) in
+      let _ = say 5 in
+      let _ = putc uart 10 in 1
+    else if matches buf "peek" 0 == 1 then
+      let addr = parse_dec buf 5 0 in
+      let w = raw_window mach addr 4 in
+      let _ = put_dec uart (raw_peek32 w 0) in
+      let _ = putc uart 10 in 1
+    else if matches buf "fault" 0 == 1 then
+      // an address inside what the capability covers and outside what the
+      // machine has: the handler fields it and we come back here
+      let bad = raw_window mach 0x08000000 4 in
+      let _ = raw_peek32 bad 0 in
+      let _ = uart_puts uart "survived a fault\n" 0 in 1
+    else if matches buf "halt" 0 == 1 then 0
+    else if vec_len buf == 0 then 1
+    else
+      let _ = uart_puts uart "unknown command\n" 0 in 1 in
+
+  let rec shell = fn () ->
+    let go =
+      region R {
+        let _ = uart_puts uart "mere> " 0 in
+        let buf = vec_new () in
+        let _ = read_line buf in
+        let _ = putc uart 10 in
+        run buf
+      } in
+    if go == 0 then () else shell () in
+
+  let _ = uart_puts uart "mere kernel, two tasks. type `help`.\n" 0 in
+  let _ = shell () in
+  let _ = csr_write 0x300 0 in
+  let _ = uart_puts uart "halted\n" 0 in
+  ();
+
+()

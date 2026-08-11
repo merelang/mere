@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.193 — 2026-08-11
+
+_A shell, on a machine with no operating system. And a rule the previous slice
+got wrong._
+
+_[examples/riscv_bare_shell.mere](../examples/riscv_bare_shell.mere) reads a line
+from the UART, dispatches a handful of commands, and reports on the machine it is
+running on: `bg` twice shows a counter that climbed while the shell sat waiting
+for a keystroke — nothing yielded to it, the timer took the CPU away and the
+handler gave it to the other task. `fault` reads an address the machine does not
+have, and the same handler that schedules fields the access fault, counts it, and
+steps over the faulting instruction, so a bad command does not take the machine
+down. Each command runs inside `region R { ... }`, which is what keeps the heap
+flat across a session on a backend whose allocator never frees._
+
+_It needed no new language features. That is the point of the slice, and it is
+also the signal that this dogfood has stopped generating pressure._
+
+_**The correction.** v0.1.191 said the trampoline's save-and-restore of `gp` gives
+"a region per trap, for free". That is wrong, and this shell is what proved it: a
+trap handler that allocates corrupts the program it interrupted. Reproducibly —
+three sessions, three corruptions — and cleanly fixed by moving the handler's two
+register-copy loops to top level, where they are functions rather than closures
+and so allocate nothing._
+
+_Two candidate mechanisms were investigated and neither fully explains it. The
+runtime's variable-size allocators did claim a block and write its header
+**before** advancing `gp`, which leaves a window where an allocating trap lands
+on a block that already has contents; those are reordered here to bump first and
+fill after (`__str_concat`, `__str_of_int`, `__substring`, `__strbuf_new` — the
+vec allocators were already in the right order). That is a real latent bug and
+worth fixing on its own, but it was not the whole story: with it fixed the
+corruption still reproduced. Removing the handler's allocation fixes it; so does
+not rolling `gp` back. The honest state is that the interaction between a bump
+allocator and an involuntary interruption is not yet understood, and the working
+rule — **do not allocate in an interrupt handler** — is one real kernels keep
+anyway. It is now what the example does and why._
+
+_`dune runtest` 2334/0, ctest 13/13, parity 84/84; the interpreter-vs-emulator
+sweep is unchanged at 39 / 38 / 8._
+
+---
+
 ## v0.1.192 — 2026-08-11
 
 _Preemptive multitasking. Two Mere tasks, neither yielding, on a machine with
@@ -79,6 +122,10 @@ bump pointer, is saved and restored with the rest, so whatever the handler
 allocated is reclaimed when it returns: a region per trap, for free. The
 corollary, worth stating, is that a handler must not leave an allocated value
 somewhere that outlives it._
+
+_**(v0.1.193: that last paragraph is wrong. An allocating handler corrupts the
+program it interrupted, reproducibly. The rule is that a trap handler must not
+allocate at all — see v0.1.193.)**_
 
 _On the emulator side traps vector to mtvec with mepc / mcause / mtval set and
 MIE moved into MPIE. Three causes so far: an unimplemented instruction (2), a

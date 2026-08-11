@@ -1566,13 +1566,13 @@ let emit_str_concat () =
   emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0)  — len1 *)
   emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1)  — len2 *)
   emit_word (enc_r 0 t1 t0 0 t2 0x33);                  (* add t2, t0, t1 — total *)
-  emit_word (enc_i 0 gp 0 t3 0x13);                     (* mv t3, gp     — result ptr *)
-  emit_word (enc_s 0 t2 t3 2 0x23);                     (* sw t2, 0(t3)  — store total len *)
   emit_word (enc_i 3 t2 0 t4 0x13);                     (* addi t4, t2, 3 *)
   emit_word (enc_i (-4) t4 7 t4 0x13);                  (* andi t4, t4, -4 — round4(total) *)
   emit_word (enc_i 4 t4 0 t4 0x13);                     (* addi t4, t4, 4  — + len word *)
-  emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* add gp, t3, t4  — new heap top *)
+  emit_word (enc_i 0 gp 0 t3 0x13);                     (* mv t3, gp     — result ptr *)
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* add gp, t3, t4  — bump first *)
   emit_oom_check ();
+  emit_word (enc_s 0 t2 t3 2 0x23);                     (* sw t2, 0(t3)  — then the header *)
   emit_word (enc_i 4 a0 0 t5 0x13);                     (* addi t5, a0, 4  — src1 *)
   emit_word (enc_i 4 t3 0 t6 0x13);                     (* addi t6, t3, 4  — dst *)
   emit (Label ".sc_l1");
@@ -1682,13 +1682,13 @@ let emit_str_of_int () =
   li t1 (scratch_base ());
   emit_word (enc_i 63 t1 0 t1 0x13);                    (* t1 = END = 0x6003F *)
   emit_word (enc_r 0x20 t2 t1 0 t1 0x33);               (* t1 = END - cursor = len *)
-  emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)
-  emit_word (enc_s 0 t1 t3 2 0x23);                     (* sw len, 0(t3) *)
   emit_word (enc_i 3 t1 0 t4 0x13);                     (* round4(len)+4 *)
   emit_word (enc_i (-4) t4 7 t4 0x13);
   emit_word (enc_i 4 t4 0 t4 0x13);
-  emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* gp = t3 + words *)
+  emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* bump first *)
   emit_oom_check ();
+  emit_word (enc_s 0 t1 t3 2 0x23);                     (* then sw len, 0(t3) *)
   emit_word (enc_i 4 t3 0 t5 0x13);                     (* dst = t3+4 *)
   emit (Label ".si_copy");
   emit (Branch (0, t1, zero, ".si_cdone"));             (* beq t1, x0 *)
@@ -1707,13 +1707,13 @@ let emit_str_of_int () =
 let emit_substring () =
   emit (Label "__substring");
   emit_word (enc_r 0x20 a1 a2 0 a2 0x33);               (* sub a2, a2, a1 — len = end - start *)
-  emit_word (enc_i 0 gp 0 t0 0x13);                     (* t0 = result = gp *)
-  emit_word (enc_s 0 a2 t0 2 0x23);                     (* sw len, 0(t0) *)
   emit_word (enc_i 3 a2 0 t1 0x13);                     (* round4(len)+4 *)
   emit_word (enc_i (-4) t1 7 t1 0x13);
   emit_word (enc_i 4 t1 0 t1 0x13);
-  emit_word (enc_r 0 t1 t0 0 gp 0x33);                  (* gp = t0 + words *)
+  emit_word (enc_i 0 gp 0 t0 0x13);                     (* t0 = result = gp *)
+  emit_word (enc_r 0 t1 t0 0 gp 0x33);                  (* bump first *)
   emit_oom_check ();
+  emit_word (enc_s 0 a2 t0 2 0x23);                     (* then sw len, 0(t0) *)
   emit_word (enc_r 0 a1 a0 0 t2 0x33);                  (* t2 = s + start *)
   emit_word (enc_i 4 t2 0 t2 0x13);                     (* src = s+4+start *)
   emit_word (enc_i 4 t0 0 t3 0x13);                     (* dst = t0+4 *)
@@ -1736,13 +1736,12 @@ let emit_substring () =
    __strbuf_len read it. *)
 let emit_strbuf () =
   emit (Label "__strbuf_new");                     (* a0 ignored *)
-  emit_word (enc_i 0 gp 0 t0 0x13);                (* t0 = empty str = gp *)
-  emit_word (enc_s 0 zero t0 2 0x23);              (* [len=0] *)
-  emit_word (enc_i 4 gp 0 gp 0x13);                (* bump 1 word *)
-  emit_word (enc_i 0 gp 0 t1 0x13);                (* t1 = cell = gp *)
-  emit_word (enc_s 0 t0 t1 2 0x23);                (* cell.str = empty *)
-  emit_word (enc_i 4 gp 0 gp 0x13);                (* bump 1 word *)
+  emit_word (enc_i 0 gp 0 t0 0x13);                (* t0 = empty str *)
+  emit_word (enc_i 4 gp 0 t1 0x13);                (* t1 = cell *)
+  emit_word (enc_i 8 gp 0 gp 0x13);                (* bump both words first *)
   emit_oom_check ();
+  emit_word (enc_s 0 zero t0 2 0x23);              (* [len=0] *)
+  emit_word (enc_s 0 t0 t1 2 0x23);                (* cell.str = empty *)
   emit_word (enc_i 0 t1 0 a0 0x13);                (* mv a0, cell *)
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; non-leaf *)
