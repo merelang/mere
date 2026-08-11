@@ -21,7 +21,9 @@
 // Each command is processed inside `region R { ... }`. The shell allocates while
 // it parses, and this backend's heap never frees, so without that a long enough
 // session would walk the bump pointer into the stack. With it the heap is flat
-// no matter how many commands you type.
+// no matter how many commands you type — and it is exactly this rollback that
+// forces the two tasks onto separate heaps (see load_regs below): rolling back
+// a heap someone else is allocating into frees their live data.
 
 let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
 let rx_ready = fn (uart: Raw) -> bit_and (raw_peek8 uart 5) 1 != 0;
@@ -57,29 +59,32 @@ let rec parse_dec = fn (buf) -> fn (i: int) -> fn (acc: int) ->
     let c = vec_get buf i in
     if c >= 48 && c <= 57 then parse_dec buf (i + 1) (acc * 10 + c - 48) else acc;
 
-// The register copies live at top level, not inside the handler, because a
-// top-level function allocates nothing while a local `let rec` is a closure and
-// a closure is a heap block. An allocating handler corrupts the program it
-// interrupted — reproducibly, in this shell, and the mechanism is not yet
-// isolated (see the note in the changelog). "Do not allocate in an interrupt
-// handler" is a rule real kernels keep for their own reasons; here it is load
-// bearing.
+// The register copies live at top level so the handler allocates nothing —
+// good practice in any kernel, though no longer load-bearing here (see below).
 let rec store_regs = fn (save: Raw) -> fn tcb -> fn (i: int) ->
   if i > 31 then ()
   else
     let _ = vec_set tcb i (raw_peek32 save (i * 4)) in
     store_regs save tcb (i + 1);
 
+// Every register, gp included. This shell once shared the bump pointer between
+// its two tasks (skipping gp here), and that was wrong in a way worth spelling
+// out: each `region R { ... }` below parks gp and rolls it back, and with a
+// shared heap that rollback FREES whatever the other task allocated in between —
+// its live closure, in this case. The background task then resumed with a
+// pointer into reused memory, jumped through it, and died quietly behind the
+// fault-tolerant handler while the counter froze. The rule from the user-process
+// slice applies inside one program too: a context that uses regions must not
+// share a heap. So each task gets its own arena, and gp switches with the rest.
 let rec load_regs = fn (save: Raw) -> fn tcb -> fn (i: int) ->
   if i > 31 then ()
   else
-    // gp, the heap's bump pointer, is machine state and not task state
-    let _ = if i == 3 then () else raw_poke32 save (i * 4) (vec_get tcb i) in
+    let _ = raw_poke32 save (i * 4) (vec_get tcb i) in
     load_regs save tcb (i + 1);
 
 let interval = 20000;
-let stack_size = 8192;
 let x_sp = 2;
+let x_gp = 3;
 let x_a0 = 10;
 let timer_cause = 2147483655;      // 0x80000007
 
@@ -104,7 +109,12 @@ let main = fn (mach: Raw) ->
   let tcb0 = new_vec 32 0 in
   let tcb1 = new_vec 32 0 in
   let state = new_vec 1 0 in
-  let _ = vec_set tcb1 x_sp (raw_base scratch + stack_size) in
+  // The background task's own world, carved out of the runtime's spare RAM:
+  // its heap grows up from the bottom of the window and its stack down from
+  // the top, the same shape the main program has — so the out-of-memory check
+  // (gp meets sp) guards this task's arena for free.
+  let _ = vec_set tcb1 x_sp (raw_base scratch + raw_len scratch) in
+  let _ = vec_set tcb1 x_gp (raw_base scratch) in
   let _ = vec_set tcb1 x_a0 (closure_env background) in
   let _ = vec_set tcb1 0 (closure_code background) in
 

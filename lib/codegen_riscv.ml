@@ -379,9 +379,16 @@ let trap_depth_slot () = stack_top () + 0x1104
 (* The handler gets a stack of its own, growing down from here. Running it on the
    interrupted task's stack is how a kernel invites the whole class of problem
    where the handler's frame lands somewhere it should not — and it means the
-   handler's frame size becomes a constraint on every task's stack. 8KB, in the
-   reserved region, below where machine_scratch starts. *)
-let trap_stack_top () = stack_top () + 0x4000
+   handler's frame size becomes a constraint on every task's stack.
+
+   It sits ABOVE machine_scratch, and that placement carries weight: the
+   out-of-memory check compares gp against sp, and during a trap sp is this
+   stack. With task arenas below it, an allocation in the handler still has
+   gp < sp and the check even guards the trap stack itself — an arena that
+   grows into it is refused. With the stack below the arenas (as it first
+   was), a handler allocating while an arena task was interrupted compared a
+   high gp against a low sp and declared the heap exhausted, spuriously. *)
+let trap_stack_top () = stack_top () + 0x10000        (* just below print scratch *)
 let scratch_base () = stack_top () + 0x10000
 let fb_base () = stack_top () + 0x18000
 let key_base () = stack_top () + 0x19000
@@ -1094,7 +1101,7 @@ and compile_app env e =
       | Ast.Var "trap_save" -> (trap_save_base (), 32 * 4)
       (* between the handler slot and the print scratch buffer: the reserved
          region's unused middle, which is where task stacks come from *)
-      | _ -> (trap_stack_top (), 0x10000 - 0x4000)
+      | _ -> (stack_top () + 0x2000, 0xC000)      (* below the trap stack *)
     in
     compile_expr env (List.hd args);                       (* a0 = machine *)
     (* narrow it properly, so a machine window that somehow did not contain
@@ -1117,6 +1124,12 @@ and compile_app env e =
   | Ast.Var "raw_base" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                       (* lw a0, 0(a0) — base *)
+  | Ast.Var "raw_len" when List.length args = 1 ->
+    (* the window's length, so a kernel can partition one it was handed
+       (a task's stack at the top, its heap at the bottom) without
+       hardcoding the runtime's reserved-region geometry *)
+    compile_expr env (List.hd args);
+    emit_word (enc_i 4 a0 2 a0 0x03)                       (* lw a0, 4(a0) — len *)
   | Ast.Var "closure_code" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                       (* lw a0, 0(a0) *)
@@ -1837,6 +1850,12 @@ let emit_vec () =
    corrupted a frame and jumped into rodata with no message at all. *)
 let emit_oom () =
   emit (Label "__oom");
+  (* Take the machine back first. If the program installed a trap handler, the
+     write and exit ecalls below would vector to it — and a handler that "steps
+     over" faults would swallow them, letting execution fall off the end of
+     this helper into whatever is emitted next. A dying runtime owes the
+     program nothing; it owes the person at the terminal a message. *)
+  emit_word (enc_i 0x305 zero 1 zero 0x73);             (* csrrw x0, mtvec, x0 *)
   let label = "str__oom" in
   string_data := (label, mk_str_block "mere: out of memory (heap reached the stack)\n") :: !string_data;
   emit (LoadAddr (t0, label));
@@ -1930,6 +1949,12 @@ let emit_trap_entry () =
    the whole point, so this stops rather than reaching past it *)
 let emit_raw_fault () =
   emit (Label "__raw_fault");
+  (* Take the machine back first. If the program installed a trap handler, the
+     write and exit ecalls below would vector to it — and a handler that "steps
+     over" faults would swallow them, letting execution fall off the end of
+     this helper into whatever is emitted next. A dying runtime owes the
+     program nothing; it owes the person at the terminal a message. *)
+  emit_word (enc_i 0x305 zero 1 zero 0x73);             (* csrrw x0, mtvec, x0 *)
   let label = "str__rawfault" in
   string_data := (label, mk_str_block "mere: raw access outside its window\n") :: !string_data;
   emit (LoadAddr (t0, label));
@@ -1944,6 +1969,12 @@ let emit_raw_fault () =
 
 let emit_pat_fail () =
   emit (Label "__pat_fail");
+  (* Take the machine back first. If the program installed a trap handler, the
+     write and exit ecalls below would vector to it — and a handler that "steps
+     over" faults would swallow them, letting execution fall off the end of
+     this helper into whatever is emitted next. A dying runtime owes the
+     program nothing; it owes the person at the terminal a message. *)
+  emit_word (enc_i 0x305 zero 1 zero 0x73);             (* csrrw x0, mtvec, x0 *)
   emit_word (enc_i 93 zero 0 a7 0x13);
   emit_word (enc_i 2 zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(2) *)

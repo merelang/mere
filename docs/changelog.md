@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.198 — 2026-08-11
+
+_The allocating-handler corruption, solved. The mechanism was none of the three
+suspects — it was `region`, and the "fixed" shell had been quietly broken all
+along._
+
+_The tell was in the emulator's register log: task0's `gp` moved **backwards**
+while it ran — the shell's per-command `region R { ... }` rollback. The rest
+follows. The region parked the bump pointer, a timer switch let the background
+task allocate its loop closure above the mark, and the rollback freed it — live —
+for the next command to overwrite. The task then resumed with `a0` pointing into
+reused memory and jumped through whatever now sat at its closure's first word._
+
+_**Sharing the bump pointer between tasks was the bug.** v0.1.192's rule ("gp is
+machine state; never switch it") missed the other direction: with a shared heap,
+anything that rolls the pointer back frees what the other context allocated
+meanwhile. The rule that survives contact is the user-process one, applied inside
+a single program: **contexts share `gp` only if they genuinely share a heap, and a
+context that uses regions must not.** The scheduler and shell examples now give
+each task an arena carved from `machine_scratch` — heap up from the bottom, stack
+down from the top, so the out-of-memory check guards each task for free — and
+switch every register. `raw_len` (the partner of `raw_base`) went in so a kernel
+can partition a window it was handed without hardcoding the runtime's geometry._
+
+_**And v0.1.193's fix had fixed nothing.** Making the handler allocation-free
+moved the corruption out of sight, not out of existence: in the shipped shell the
+background task's counter froze a few commands in and never advanced again — the
+task was dead, resuming into reused memory every slice, and the fault-stepping
+handler swallowed the evidence. The falsification test was the counter, probed
+between heavy commands: 864, 864, 864. With per-task heaps it climbs monotonically,
+**and the original repro passes with the handler allocating** — the rule "a trap
+handler must not allocate" is back to being good practice rather than load-bearing._
+
+_Two adjacent holes found on the way, both real:_
+
+- _The dedicated trap stack (v0.1.197) sat **below** `machine_scratch`, so a
+  handler allocating while an arena task was interrupted compared a high `gp`
+  against a low `sp` and declared the heap exhausted, spuriously. The stack now
+  sits above the arenas, where the same check instead **protects** it: an arena
+  that grows into the trap stack is refused._
+- _The runtime's abort paths (`__oom`, `__raw_fault`, `__pat_fail`) report and
+  exit via `ecall` — which, with a kernel installed, vectored to the program's own
+  handler; a handler that steps over faults swallowed both ecalls and execution
+  fell off the end of the helper into whatever was emitted next. They now take the
+  machine back (`csrrw x0, mtvec, x0`) before reporting: a dying runtime owes the
+  program nothing, but it owes the person at the terminal a message._
+
+_All six bare-metal examples verified, the background counter climbing, the
+self-hosted compiler still byte-identical under its kernel. `dune runtest`
+2336/0, ctest 13/13._
+
+---
+
 ## v0.1.197 — 2026-08-11
 
 _A third hypothesis for the allocating-handler corruption, also disproved. The

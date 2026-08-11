@@ -2352,6 +2352,7 @@ let initial_env : env =
     ("channel_recv_opt", ref builtin_channel_recv_opt);
     ("stdin_byte", ref builtin_stdin_byte);
     ("raw_base", ref (bare_only "raw_base"));
+    ("raw_len", ref (bare_only "raw_len"));
     ("trap_save", ref (bare_only "trap_save"));
     ("machine_scratch", ref (bare_only "machine_scratch"));
     ("closure_code", ref (bare_only "closure_code"));

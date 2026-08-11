@@ -28,10 +28,14 @@
 // `closure_code` gives the PC to start it at and `closure_env` the value its
 // first argument register must hold. That is ABI knowledge, which a kernel has.
 //
-// One word is deliberately NOT switched: gp, the heap's bump pointer. The heap
-// is machine state, not task state — save and restore it per task and two tasks
-// allocate over each other, each rolling the pointer back to where it was when
-// it last ran. Leaving it alone keeps allocation monotonic across the switch.
+// gp — the heap's bump pointer — switches with the rest, because each task gets
+// a heap of its own. This example originally shared one heap and skipped gp,
+// reasoning that per-task save/restore of a shared pointer makes tasks allocate
+// over each other (true). What that missed is the other direction: with a shared
+// heap, anything that rolls the pointer back — a `region R { }` in one task —
+// frees whatever the other task allocated meanwhile. The shell example died of
+// exactly that. The rule that survives contact: contexts share gp only if they
+// share a heap, and a context that uses regions must not share one.
 
 let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
 
@@ -49,7 +53,6 @@ let new_vec = fn (n: int) -> fn (x: int) ->
   v;
 
 let interval = 300000;        // instructions between ticks
-let stack_size = 8192;        // per task
 let x_sp = 2;                 // register numbers, as the save area indexes them
 let x_gp = 3;
 let x_a0 = 10;
@@ -72,10 +75,13 @@ let main = fn (mach: Raw) ->
   let tcb1 = new_vec 32 0 in    // the second task, built by hand below
   let state = new_vec 1 0 in    // which one is running
 
-  // Hand-build the second task's context: a stack of its own out of the
-  // runtime's spare RAM, its closure's environment in a0, and its entry PC.
+  // Hand-build the second task's context: an arena of its own out of the
+  // runtime's spare RAM — heap up from the bottom, stack down from the top,
+  // the same shape the main program has, so the out-of-memory check (gp meets
+  // sp) guards this task too — plus its closure's env in a0 and its entry PC.
   let task_b = spinner 66 in                                   // 'B'
-  let _ = vec_set tcb1 x_sp (raw_base scratch + stack_size) in
+  let _ = vec_set tcb1 x_sp (raw_base scratch + raw_len scratch) in
+  let _ = vec_set tcb1 x_gp (raw_base scratch) in
   let _ = vec_set tcb1 x_a0 (closure_env task_b) in
   let _ = vec_set tcb1 0 (closure_code task_b) in
 
@@ -91,8 +97,7 @@ let main = fn (mach: Raw) ->
     let rec load = fn i ->
       if i > 31 then ()
       else
-        let _ = if i == x_gp then ()                           // the heap is shared
-                else raw_poke32 save (i * 4) (vec_get into i) in
+        let _ = raw_poke32 save (i * 4) (vec_get into i) in    // gp too: own heaps
         load (i + 1) in
     let _ = load 1 in
     let _ = vec_set state 0 (1 - cur) in
