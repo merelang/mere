@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.195 — 2026-08-11
+
+_Chasing the allocating-handler corruption from v0.1.193. Two hypotheses tested
+and disproved, one narrowed to a single instruction, and a permanent diagnostic
+for the class._
+
+_The repro is deterministic: the shell with its register-copy loops moved back
+**inside** the handler (where they are closures, and a closure is an allocation),
+driven by a 33-command session. It stops at exactly the same byte every time._
+
+_Working backwards with the emulator, which is where this backend's debugging
+lives:_
+
+- _the guest ends up executing the **trap save area** as if it were code — `mcause`
+  2 (illegal instruction), the PC marching forward four bytes per trap because
+  the fault path returns `mepc + 4`;_
+- _it got there from `jalr zero, 0(t1)` — the tail call this backend emits for a
+  closure — with **`t1` holding the save area's base address**;_
+- _`t1` was loaded two instructions earlier by `lw t1, 0(a0)`, the code-pointer
+  fetch. So `a0` was pointing at the two-word block a `Raw` window is, not at a
+  closure: word 0 of that block is the window's base, and the window in question
+  is the save area._
+
+_A pointer to the save-area window is a value only the **handler** ever holds. So
+some register belonging to the handler ends up restored into a task. That reads
+like a reentrancy failure — the save area is one global buffer, so a trap taken
+while the handler runs would overwrite the interrupted context with the handler's
+own. The trampoline now **counts trap depth** and refuses to nest, printing what
+happened and stopping, because with one save area there is nothing left to
+resume. It is placed after the register-save loop, since checking any earlier
+would clobber a register before saving it — which is the exact bug it exists to
+catch._
+
+_**And it does not fire on the repro.** So the corruption is not a nested trap
+either. That is worth as much as a positive result: two mechanisms are now ruled
+out (the header-before-bump window, fixed in v0.1.193 and not the cause; and
+reentrancy, ruled out here), and the failure is pinned to one instruction with a
+known-wrong register. What remains unexplained is how a handler-local pointer
+reaches a task's register file at all._
+
+_The rule stands and is now enforced by construction in every example: **a trap
+handler must not allocate.** The nested-trap check stays regardless — it turns a
+whole class of silent corruption into a sentence, which is this project's usual
+trade._
+
+_All five bare-metal examples verified after the trampoline change (uart, timer,
+sched, shell, user), `dune runtest` 2336/0, ctest 13/13._
+
+---
+
 ## v0.1.194 — 2026-08-11
 
 _A user process. A separately compiled, ordinary Mere program running under a
