@@ -1,49 +1,35 @@
 // A polymorphic helper called at both a fixed type and a parameter-derived
 // one, inside a function that is itself used at two types.
 //
-// The compiled backends refuse this, and the refusal is the point of the
-// case: until v0.1.179 they emitted it, wrongly and in silence. `hold` was
-// monomorphized into an `int` copy and a `str` copy; both declarations got
-// the right signature, and both bodies got the `int` one's operations. The
-// generated C was a `mere_vec_str*` function calling `mere_vec_int_push`,
-// which is not a wrong answer but no answer — it only failed when the C
-// compiler saw it, with a message about pointer conversions naming nothing
-// in this file.
+// This ran wrong, then refused, and now works; the file has outlived two
+// expectations and is kept because the shape is easy to break again.
 //
-// The mechanism: codegen keeps a pristine clone of every polymorphic
-// skeleton and unifies a fresh copy with each instantiation's arrow. When
-// the clone cannot take the arrow the spec is wrong, and that failure was
-// swallowed. It cannot happen while the skeleton is genuinely polymorphic
-// — and here it is not. The typer hands codegen `hold` already fixed at
-// `int -> Vec[__heap, int]`, so the `str` instance has nothing to unify
-// with. Written the other way (`hold v, hold v`), the skeleton arrives
-// polymorphic and both instances are correct; that shape is exercised by
-// contrib/state's store and the other examples.
+// It used to be emitted wrongly and in silence. `hold` was monomorphized
+// into an `int` copy and a `str` copy; both declarations got the right
+// signature, and both bodies got the `int` one's operations — a
+// `mere_vec_str*` function calling `mere_vec_int_push` in the first version
+// of this test, which used a vec. Not a wrong answer, no answer, and only
+// when the C compiler saw it.
 //
-// So this file locks in the refusal, not the behaviour. The real fix is
-// upstream of codegen — whatever fixes the skeleton before it is cloned —
-// and when it lands, this case starts producing `1s2` on all four
-// backends and the expectation here changes with it.
+// The cause was `specialize_single_use_local_fns`, a codegen pass that
+// fixes a local polymorphic fn's type in place when the body contains
+// exactly one concrete use of it. `hold 1` is concrete and `hold v` is not
+// — not yet, because it only resolves once `mk` is instantiated — so the
+// pass read "one concrete arrow" as "used at one type" and unified the
+// definition with `int`. The other instantiation then had nothing left to
+// unify with. It now also requires that the body contain no unresolved use
+// of the name, which is what `hold v` is.
 //
-// Reduced from contrib/state/store, which has to write its three one-slot
-// vecs out longhand instead of using contrib/state/cell for this reason:
-// a store instantiated at two state types calls `cell_new` at a type
-// derived from S and at plain `int` for its token counter.
-//
-// The reduction went further than expected. `hold` here allocates nothing —
-// it is `fn (v) -> (v, v)` — so the narrow value restriction, mutable
+// `hold` here allocates nothing, so the narrow value restriction, mutable
 // containers and the region model are all out of the picture. Three
-// neighbouring shapes compile and run: the same program with only one
-// instantiation of `mk`, the same with `hold` called only at the
-// parameter-derived type, and `hold` used directly at two types. It is the
-// combination and nothing smaller.
+// neighbouring shapes always worked and still do: one instantiation of
+// `mk`, `hold` called only at the parameter-derived type, and `hold` used
+// directly at two types. It was the combination and nothing smaller.
 //
-// Where the binding happens is narrowed but not found. `generalize` is
-// called on `hold` and `instantiate` substitutes without mutating, so uses
-// cannot be reaching back to the definition; yet by the time codegen takes
-// its pristine clone the skeleton reads `int -> (int * int)` while `mk`
-// beside it is still `'a -> (('a * 'a) * (int * int))`. Whatever fixes it
-// runs before codegen and is the subject of the next slice.
+// contrib/state/store was the program that found it — a store instantiated
+// at two state types calls `cell_new` at a type derived from S and at plain
+// `int` for its token counter — and it uses contrib/state/cell again now
+// that this works.
 
 let hold = fn (v) -> (v, v);
 

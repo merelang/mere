@@ -3786,6 +3786,48 @@ let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty
    serve two types on one shared body); that is a separate, larger
    multi-instantiation increment. Zero concrete uses (fn only escapes as a
    value) is also left to the existing defaulting. *)
+(* v0.1.182: does this name have a use whose arrow is not concrete yet?
+   `find_all_concrete_arrows_in` only reports uses it can already read, and
+   the single-use specialization below treated "exactly one concrete arrow"
+   as "used at exactly one type". A use sitting inside a polymorphic fn is
+   not concrete yet and is still a use — it resolves later, once that fn is
+   instantiated, and it may resolve to a different type. Specializing on
+   the strength of the one readable arrow fixed the definition at that type
+   and the other instantiation was then emitted with the wrong body. *)
+let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
+  let found = ref false in
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n when n = name ->
+       (match e.Ast.ty with
+        | Some t when not (ty_is_concrete (Ast.walk t)) -> found := true
+        | None -> found := true
+        | _ -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (_, v, b) -> go v; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (p, _, b) -> if p <> name then go b
+    | Ast.Constr (_, a) -> (match a with Some x -> go x | None -> ())
+    | Ast.Match (s, arms) ->
+      go s; List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Ref (_, _, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, v) -> go v) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, v) -> go v) fs
+  in
+  List.iter go exprs; !found
+
 let specialize_single_use_local_fns (root : Ast.expr) : unit =
   let rec go (e : Ast.expr) =
     (match e.Ast.node with
@@ -3793,7 +3835,8 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
                 ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value), body)
        when not (ty_is_concrete (Ast.walk vty)) ->
        (match find_all_concrete_arrows_in n [body] with
-        | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
+        | [arrow] when not (has_unresolved_use_of n [body]) ->
+          (try Typer.unify Loc.dummy vty arrow with _ -> ())
         | _ -> ());
        let _ = value in ()
      | Ast.Let_rec (bindings, body) ->

@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.182 — 2026-08-11
+
+_The monomorphization bug, found and fixed. `specialize_single_use_local_fns`
+read "one concrete use" as "used at one type"._
+
+_Three slices ago this was a silent miscompile; two ago it became a named
+refusal; here it is a working program. The cause is one line of judgement in a
+codegen pass._
+
+_`specialize_single_use_local_fns` fixes a local polymorphic fn's type in place
+when its body contains exactly one concrete use of it — a good optimisation,
+since a fn used at one type needs no multi-instantiation machinery. But
+`find_all_concrete_arrows_in` only reports the uses it can already read, and a
+use sitting inside a polymorphic function is not concrete **yet**:_
+
+```mere
+let hold = fn (v) -> (v, v);
+let mk = fn (v) -> (hold v, hold 1);
+```
+
+_`hold 1` is concrete. `hold v` is not, and only becomes so once `mk` is
+instantiated — at which point it may be a different type. The pass counted one
+arrow, unified `hold`'s definition with `int`, and the `str` instantiation had
+nothing left to unify with, so it was emitted with the `int` body. It now also
+requires that the body contain no unresolved use of the name. False only when a
+use genuinely cannot be read yet, so a fn that really is used at one type still
+specializes._
+
+_How it was found is worth recording, because reasoning about it was wrong
+three times. Instrumenting `generalize` showed `hold` correctly generic with one
+quantified variable. Instrumenting the skeleton collection showed it arriving at
+codegen as `int -> (int * int)`. Removing each post-typing pass in turn changed
+nothing. Watching the specific type variable's binding site printed
+`Loc.dummy` — which is not a source location at all, and which only codegen
+uses._
+
+_The payoff: `contrib/state/store` uses `contrib/state/cell` again. It had been
+writing its three one-slot vecs out longhand since v0.1.178 for exactly this
+reason — a store instantiated at two state types calls `cell_new` at a type
+derived from S and at plain `int` for its token counter — so the module that
+names the trick can now use it._
+
+_`test/parity/poly_helper_fixed_and_free.mere` has outlived two expectations
+(wrong, then refused, now `1s2` on all four backends) and is kept because the
+shape is easy to break again. parity 82/82, ctest 13/13, dune runtest 2308/0,
+claims browser check 17/17 against the native server, and all five browser
+clients rebuild._
+
+---
+
 ## v0.1.181 — 2026-08-11
 
 _Two corrections and a better repro. No new capability._
