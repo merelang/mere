@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.187" Version.v "0.1.187";
+  check "version is 0.1.188" Version.v "0.1.188";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12198,6 +12198,16 @@ let () =
     let rec loop i = i + nl <= hl && (String.sub msg i nl = needle || loop (i + 1)) in
     check name (if loop 0 then needle else "MISSING, got: " ^ msg) needle
   in
+  (* bitwise: a driver needs these to read a status bit. bit_shr is arithmetic
+     on every backend, so it must be SRA; a constant mask folds to ANDI. *)
+  rv_contains "rv32i: bit_and with a small literal folds to andi"
+    "let _ = print_int (bit_and 0x1234 255);" "andi a0, a0, 255";
+  rv_contains "rv32i: bit_shr is an arithmetic shift"
+    "let _ = print_int (bit_shr 1024 3);" "srai a0, a0, 3";
+  (* itoa builds digits from a negative value: negating INT_MIN cannot work,
+     and doing it printed punctuation for 0x80000000 (found by bit_shl 1 31) *)
+  rv_contains "rv32i: itoa negates each digit, not the value"
+    "let _ = print_int 5;" "neg t5, t5";
   rv_err_contains "rv32i: a Raw window cannot be forged out of ints"
     "let _ = raw_poke8 (raw_window 0 0 1) 0 65;"
     "expected `Raw`, got `int`";

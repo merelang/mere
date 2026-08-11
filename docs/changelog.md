@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.188 — 2026-08-11
+
+_Bitwise operators on the RV32I backend, and the INT_MIN bug they found._
+
+_The UART example from the previous slice had to read a status bit with
+`/ 32 % 2`, because this backend had no `bit_and`. A device driver is mostly
+masks and shifts, so that was the next thing in the way. All six lower now:
+AND / OR / XOR as R-type, or the I-type form when the operand is a small
+literal, `bit_not` as `xori -1`, and `bit_shl` / `bit_shr` as SLL / **SRA** —
+arithmetic, because `bit_shr` is documented as floor division by 2^n on every
+backend._
+
+_Shift counts of 32 or more needed a decision. RV32 shifts use only the low
+five bits of the count, so a bare SLL would quietly make `bit_shl x 33` mean
+`x << 1`. What the other backends produce, read back as 32 bits, is zero for a
+left shift and the sign bit for a right shift, so that is what this emits:
+folded when the count is constant, and three extra instructions (or a branch)
+when it is not. A silently different answer was not on the table._
+
+_Then `bit_shl 1 31` printed `-./,),(-*,(`._
+
+_Not a shift bug — `str_of_int` and `print_int` both began by negating a
+negative value to make it positive, and 0x80000000 negated is still
+0x80000000. Every remainder after that came out negative and `'0' + negative`
+is punctuation. Both helpers now go the other way: make the value **negative**
+(negating a positive is always safe) and take each digit as `-(x % 10)`. So
+INT_MIN prints. This had been latent since the backend's first slice; nothing
+before now had produced 0x80000000, because nothing before now could shift._
+
+_The bitwise builtins take three files off the interpreter-vs-emulator sweep's
+"refused" list. One joins the matching set; the other two ask for integers
+wider than 32 bits (`int64_bitwise` shifts 1 by 40, and `riscv_core` is the
+RV32I emulator itself, which needs headroom above 32 bits before masking), so
+they cannot match on a 32-bit target and are recorded as such. The sweep now
+reads 38 identical / 38 refused / 8 mismatching._
+
+_Three new tests. parity 83/83, ctest 13/13, `dune runtest` 2325/0. The UART
+example reads its status bit with `bit_and` now._
+
+---
+
 ## v0.1.187 — 2026-08-11
 
 _Raw memory, as a capability rather than an ambient builtin. `mere -rv --bare`
