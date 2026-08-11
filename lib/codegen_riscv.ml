@@ -474,9 +474,11 @@ let store_a0_to_global gi =
   emit_word (enc_s 0 a0 t1 2 0x23)                                (* sw a0, 0(t1) *)
 
 (* --- tail calls ----------------------------------------------------------
-   Mere has no loop construct: iteration is recursion, so without tail-call
+   Iteration is recursion here: explicitly, and also under `while`, which the
+   parser desugars to a tail-recursive local closure. So without tail-call
    elimination every long-running loop grows the stack until it collides with
-   the heap. `tail_pos` marks the positions whose value IS the enclosing
+   the heap — a `while` counting to 300,000 used to die on this backend.
+   `tail_pos` marks the positions whose value IS the enclosing
    function's value; a saturated call there tears the frame down first and
    jumps, so the callee returns straight to our caller and the stack stays
    flat. Mirrors codegen_wasm's `wasm_tail_pos` (which lowers to Wasm's
