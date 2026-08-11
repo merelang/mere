@@ -46,12 +46,14 @@ _Three holes in the RV32I backend, found by asking what a program that never
 returns would need._
 
 _The next dogfood for this backend is a bare-metal kernel: a scheduler, a trap
-handler, a shell. Every one of those is a loop that never ends, and Mere has no
-loop construct — iteration is recursion. So the first question was how long a
-recursion this backend can actually sustain, and the answer was: not long, and
-it does not say so. A zero-allocation tail-recursive counter completed at
+handler, a shell. Every one of those is a loop that never ends, and iteration
+here is recursion — explicitly, and also under `while`, which the parser
+desugars to a tail-recursive local closure. So the first question was how long
+a recursion this backend can actually sustain, and the answer was: not long,
+and it does not say so. A zero-allocation tail-recursive counter completed at
 500,000 and died silently at 1,000,000; raising the emulator's instruction
-budget twentyfold did not change that, so it was the stack, not the clock._
+budget twentyfold did not change that, so it was the stack, not the clock. A
+`while` loop, which pays for a closure frame per iteration, died at 300,000._
 
 _**Tail calls.** A saturated call in tail position now tears the frame down
 first and jumps, so the callee returns straight to our caller and the stack
@@ -60,8 +62,8 @@ stays flat. The tail-position bookkeeping mirrors codegen_wasm's
 for every subexpression and the cases whose value IS the enclosing value —
 if branches, let bodies, match arms, annotations — put it back. Direct calls
 become `j u_f` instead of `jal ra, u_f`; the closure form, which is the shape a
-local `let rec loop = fn ...` actually takes, becomes `jalr x0` on the code
-pointer. Calls with nine or more arguments keep the old path: args 9+ travel on
+local `let rec loop = fn ...` and every desugared `while` actually take,
+becomes `jalr x0` on the code pointer. Calls with nine or more arguments keep the old path: args 9+ travel on
 the caller's stack, which a teardown would drop. The counter now runs
 10,000,000 iterations in constant stack._
 
