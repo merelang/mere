@@ -793,7 +793,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
        (* Phase 16.3: metrics.record uses show_int internally to format
           the integer payload, so register `int` ahead of show_fn_defs. *)
        add_show_type Ast.TyInt
-     | Ast.App ({ node = Ast.Var "str_of_int"; _ }, _) ->
+     | Ast.App ({ node = Ast.Var ("str_of_int" | "print_int"); _ }, _) ->
        (* v0.1.42: str_of_int lowers to `call $show_int`, but only `show`
           registered the helper — `print (str_of_int x)` under a top-level
           let produced an undefined $show_int at wat2wasm time (found while
@@ -2240,6 +2240,23 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "call $puts";
     emit_instr "i64.const 0"  (* unit *)
+  (* print_int / print_bool: `print (str_of_int x)` already works here, so
+     these are a rewrite rather than new host imports. They used to be refused
+     as "no Wasm lowering", which left a documented builtin working only in the
+     interpreter. *)
+  | Ast.App ({ node = Ast.Var "print_int"; _ }, arg) ->
+    emit_expr { arg with Ast.node =
+                  Ast.App ({ arg with Ast.node = Ast.Var "str_of_int";
+                                      Ast.ty = None }, arg);
+                         Ast.ty = Some Ast.TyStr };
+    emit_instr "call $puts";
+    emit_instr "i64.const 0"
+  | Ast.App ({ node = Ast.Var "print_bool"; _ }, arg) ->
+    let str b = { arg with Ast.node = Ast.Str_lit b; Ast.ty = Some Ast.TyStr } in
+    emit_expr { arg with Ast.node = Ast.If (arg, str "true", str "false");
+                         Ast.ty = Some Ast.TyStr };
+    emit_instr "call $puts";
+    emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "print_no_nl"; _ }, arg)
     when not (user_shadows_wasm "print_no_nl") ->
     print_no_nl_used := true;

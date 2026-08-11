@@ -1,0 +1,18 @@
+// Parity lock for print_int / print_bool. The stdlib reference claimed both
+// worked on every backend; in fact only the interpreter had them. C emitted a
+// call to an undefined `mu_print_int` (so the refusal arrived from the C
+// compiler, about the wrong thing), and LLVM and Wasm refused them outright as
+// "no lowering yet". They now lower everywhere — C through printf, the other
+// two by going through the str_of_int they already had — so this file exists to
+// keep the four in step, negatives and zero included.
+
+let _ = print_int 0;
+let _ = print_int 7;
+let _ = print_int (0 - 42);
+let _ = print_int 1234567890;
+let _ = print_bool true;
+let _ = print_bool false;
+let _ = print_bool (1 < 2);
+let n = 5;
+let _ = print_int (n * n);
+print_bool (n == 5)
