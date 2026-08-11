@@ -29,14 +29,28 @@
 // vecs out longhand instead of using contrib/state/cell for this reason:
 // a store instantiated at two state types calls `cell_new` at a type
 // derived from S and at plain `int` for its token counter.
+//
+// The reduction went further than expected. `hold` here allocates nothing —
+// it is `fn (v) -> (v, v)` — so the narrow value restriction, mutable
+// containers and the region model are all out of the picture. Three
+// neighbouring shapes compile and run: the same program with only one
+// instantiation of `mk`, the same with `hold` called only at the
+// parameter-derived type, and `hold` used directly at two types. It is the
+// combination and nothing smaller.
+//
+// Where the binding happens is narrowed but not found. `generalize` is
+// called on `hold` and `instantiate` substitutes without mutating, so uses
+// cannot be reaching back to the definition; yet by the time codegen takes
+// its pristine clone the skeleton reads `int -> (int * int)` while `mk`
+// beside it is still `'a -> (('a * 'a) * (int * int))`. Whatever fixes it
+// runs before codegen and is the subject of the next slice.
 
-let hold = fn (v) -> let c = vec_new () in let _ = vec_push c v in c;
-let peek = fn (c) -> vec_get c 0;
+let hold = fn (v) -> (v, v);
 
 // `hold v` is parameter-derived; `hold 1` is fixed. Both in one body.
 let mk = fn (v) -> (hold v, hold 1);
 
 let (a1, a2) = mk 1 in
 let (b1, b2) = mk "s" in
-let _ = print (show (peek a1) ++ peek b1 ++ show (peek a2 + peek b2)) in
+let _ = print (show (fst a1) ++ fst b1 ++ show (snd a2 + snd b2)) in
 0
