@@ -1597,6 +1597,19 @@ let initial_env : env =
          raw_poke8/32  w off v    -> store it
        Every one of these bounds-checks the offset against the window it was
        handed, so narrowing is the only way to widen reach — there isn't one. *)
+    (* machine control-and-status registers, RV32I bare-metal only. The number
+       is an immediate field of the instruction, so codegen requires a literal.
+       Unlike raw memory these are not behind a capability: a CSR has no base
+       and length to narrow, and the hardware already has a privilege mechanism
+       for them (machine / supervisor / user mode). Duplicating that in the type
+       system before there is a user mode to protect would be speculative. *)
+    (* non-blocking single-byte stdin: -1 when nothing is ready. interp + C
+       native, like read_key — which blocks, and so cannot serve a device
+       emulator polling a line-status register. *)
+    ("stdin_byte",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("csr_read",    mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("csr_write",   mono (Ast.TyArrow (Ast.TyInt,
+                            Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
     ("raw_window",  mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
                             Ast.TyArrow (Ast.TyInt,
                               Ast.TyArrow (Ast.TyInt, Ast.TyCon ("Raw", []))))));

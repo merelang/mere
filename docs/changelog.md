@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.189 — 2026-08-11
+
+_Machine CSRs, and a non-blocking byte of stdin so a UART can have a receive
+side._
+
+_**CSRs.** `csr_read` / `csr_write` lower to CSRRS-from-x0 and CSRRW-to-x0, and
+the register number has to be a literal — it is a 12-bit field of the
+instruction, so a computed one has nowhere to go, and saying so beats emitting
+something that reads a register nobody asked for. They are `--bare` only: a
+trap vector means nothing under a host. Unlike raw memory they are **not**
+behind a capability, and that is a decision rather than an oversight — a CSR
+has no base and length to narrow, and the hardware already has machine /
+supervisor / user mode to separate a kernel from a user process. Duplicating
+that in the type system before there is a user mode to protect would be
+speculative._
+
+_The disassembler had been rendering every CSR instruction as `ebreak`, because
+it only knew `inst = 0x73`. It now decodes the six CSR forms plus `mret` and
+`wfi`, which matters more than it sounds: this backend's debugging story is
+reading its own listings._
+
+_**A receive side.** The plan for the UART's input half was "the emulator reads
+host stdin with `read_key`", and that does not work: `read_key` blocks. A CPU
+polling a line-status register cannot stop the machine to find out whether a
+byte is waiting — and once there are timer interrupts it will have other things
+to do while nothing is arriving. So the dogfood forced a new builtin instead:
+**`stdin_byte : unit -> int`**, one byte or -1 when nothing is ready, on the
+interpreter and the C native backend (select with a zero timeout, so it leaves
+stdin's flags alone and composes with `tty_raw` and with a plain pipe alike)._
+
+_With that, [examples/riscv_bare_echo.mere](../examples/riscv_bare_echo.mere)
+echoes what you type through the UART and stops at `q` — polling the status
+register, reading the data register, all through the window capability `main`
+was handed, with no host syscall anywhere in it. That is the last piece the
+shell needs._
+
+_Four new tests (eighteen on this backend). parity 83/83, ctest 13/13,
+`dune runtest` 2329/0._
+
+_Recorded while here, unrelated and pre-existing: on the **C** backend
+`let f = fn n -> let _ = print_int n in n;` does not compile — the builtin ends
+up in value position and the emitted C calls an undefined `mu_print_int`. It
+reproduces on the pre-session compiler, so it is not from this arc; `print` on a
+str refuses at codegen instead. Worth its own slice._
+
+---
+
 ## v0.1.188 — 2026-08-11
 
 _Bitwise operators on the RV32I backend, and the INT_MIN bug they found._

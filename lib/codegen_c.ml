@@ -2036,10 +2036,11 @@ let rec emit_expr (e : Ast.expr) : string =
         arrived from clang as "type specifier missing" — loud, but about the
         wrong thing. There is no honest physical address in a hosted process. *)
      | Ast.Var ("raw_window" | "raw_peek8" | "raw_peek32"
-               | "raw_poke8" | "raw_poke32") ->
+               | "raw_poke8" | "raw_poke32" | "csr_read" | "csr_write") ->
        unsupported e.Ast.loc
-         "raw memory (raw_window / raw_peek* / raw_poke*) is only available on \
-          the RV32I bare-metal target (mere -rv --bare)"
+         "raw memory and CSRs (raw_window / raw_peek* / raw_poke* / csr_read / \
+          csr_write) are only available on the RV32I bare-metal target \
+          (mere -rv --bare)"
      (* Q-012: channel primitives, dispatched to the monomorphized runtime.
         The element tag comes from the channel's resolved type. *)
      | Ast.Var "channel_new" ->
@@ -2431,6 +2432,8 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
      | Ast.Var "read_key" when not (user_shadows "read_key") ->
        Printf.sprintf "((void)(%s), __lang_read_key())" (emit_expr arg)
+     | Ast.Var "stdin_byte" when not (user_shadows "stdin_byte") ->
+       Printf.sprintf "((void)(%s), __lang_stdin_byte())" (emit_expr arg)
      | Ast.Var "random_int" when not (user_shadows "random_int") ->
        (* v0.1.20 (mrog dogfood P3): uniform int in [0, n). *)
        Printf.sprintf "__lang_random_int(%s)" (emit_expr arg)
@@ -6429,6 +6432,20 @@ let str_concat_helper =
       "static int __lang_tty_restore(void) {";
       "  if (__lang_tio_saved && isatty(0)) tcsetattr(0, TCSANOW, &__lang_saved_tio);";
       "  return 0;";
+      "}";
+      (* A UART emulator has to answer "is a byte waiting?" without stopping
+         the machine to find out, and read_key blocks. -1 means nothing is
+         ready; select with a zero timeout leaves stdin's flags alone. *)
+      "#include <sys/select.h>";
+      "static int __lang_stdin_byte(void) {";
+      "  fd_set fds; struct timeval tv;";
+      "  FD_ZERO(&fds); FD_SET(0, &fds);";
+      "  tv.tv_sec = 0; tv.tv_usec = 0;";
+      "  if (select(1, &fds, NULL, NULL, &tv) <= 0) return -1;";
+      "  unsigned char c;";
+      "  ssize_t n = read(0, &c, 1);";
+      "  if (n <= 0) return -1;";
+      "  return (int)c;";
       "}";
       "static const char* __lang_read_key(void) {";
       "  char c;";

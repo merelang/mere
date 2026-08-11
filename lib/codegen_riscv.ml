@@ -1035,6 +1035,41 @@ and compile_app env e =
          emit (Label l_ok);
          emit_word (enc_r 0x20 a1 a0 5 a0 0x33)               (* sra  a0, a0, a1 *)
        end)
+  (* --- machine CSRs -------------------------------------------------------
+     The CSR number is a 12-bit field of the instruction, so it has to be a
+     literal — a computed one has nowhere to go. `csr_read` uses CSRRS with x0
+     as the source so it reads without writing; `csr_write` uses CSRRW with x0
+     as the destination so it writes without needing the old value.
+
+     These are --bare only. A trap vector or a timer comparand means nothing to
+     a program running under a host, and unlike raw memory there is no window
+     to narrow: a CSR has no base and length. The hardware's own privilege
+     modes are what will separate a kernel from a user process later. *)
+  | Ast.Var ("csr_read" | "csr_write") when not !bare ->
+    err e.loc
+      "RV32I: csr_read / csr_write need the bare-metal target (mere -rv --bare)"
+  | Ast.Var "csr_read" when List.length args = 1 ->
+    (match (List.hd args).Ast.node with
+     | Ast.Int_lit n when n >= 0 && n <= 0xFFF ->
+       emit_word (enc_i n zero 2 a0 0x73)                     (* csrrs a0, csr, x0 *)
+     | Ast.Int_lit n ->
+       err e.loc (Printf.sprintf "RV32I: CSR number %d is out of range (0..0xFFF)" n)
+     | _ ->
+       err e.loc
+         "RV32I: the CSR number must be a literal — it is an immediate field of \
+          the instruction, so there is nowhere to put a computed one")
+  | Ast.Var "csr_write" when List.length args = 2 ->
+    (match (List.nth args 0).Ast.node with
+     | Ast.Int_lit n when n >= 0 && n <= 0xFFF ->
+       compile_expr env (List.nth args 1);                    (* a0 = value *)
+       emit_word (enc_i n a0 1 zero 0x73);                    (* csrrw x0, csr, a0 *)
+       emit_word (enc_i 0 zero 0 a0 0x13)                     (* unit *)
+     | Ast.Int_lit n ->
+       err e.loc (Printf.sprintf "RV32I: CSR number %d is out of range (0..0xFFF)" n)
+     | _ ->
+       err e.loc
+         "RV32I: the CSR number must be a literal — it is an immediate field of \
+          the instruction, so there is nowhere to put a computed one")
   (* --- raw memory, behind a window capability -------------------------
      A `Raw` value is a 2-word heap block [base][len]. Offsets are relative
      to the window, so code holding a UART window cannot express an address

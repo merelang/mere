@@ -370,6 +370,23 @@ let builtin_read_key =
       V_str (if n = 0 then "" else Bytes.sub_string buf 0 1)
     | _ -> failwith "read_key: expected unit")
 
+(* Non-blocking single-byte stdin: -1 when nothing is ready. read_key blocks,
+   which a device emulator cannot afford — polling a UART's line-status register
+   must not stop the machine. select with a zero timeout leaves stdin's flags
+   alone, so this composes with tty_raw and with a plain pipe alike. *)
+let builtin_stdin_byte =
+  V_builtin ("stdin_byte", fun v ->
+    match v with
+    | V_unit ->
+      let (ready, _, _) = Unix.select [Unix.stdin] [] [] 0.0 in
+      if ready = [] then V_int (-1)
+      else begin
+        let buf = Bytes.create 1 in
+        let n = Unix.read Unix.stdin buf 0 1 in
+        if n = 0 then V_int (-1) else V_int (Char.code (Bytes.get buf 0))
+      end
+    | _ -> failwith "stdin_byte: expected unit")
+
 let builtin_print_no_nl =
   V_builtin ("print_no_nl", fun v ->
     (match v with
@@ -2049,15 +2066,15 @@ let builtin_file_read_line =
        with End_of_file -> V_constr ("None", None))
     | _ -> failwith "file_read_line: expected File")
 
-(* Raw physical memory exists only on the RV32I bare-metal target: there is no
-   honest interpretation of a physical address in a hosted process, so these
-   refuse loudly rather than pretending. They are bound at all (rather than
-   left unbound) so the failure names the reason instead of reading like a
-   typo. *)
-let raw_only_on_bare name =
+(* Physical memory and machine CSRs exist only on the RV32I bare-metal target:
+   there is no honest interpretation of a physical address or a trap vector in
+   a hosted process, so these refuse loudly rather than pretending. They are
+   bound at all (rather than left unbound) so the failure names the reason
+   instead of reading like a typo. *)
+let bare_only name =
   V_builtin (name, fun _ ->
-    failwith (name ^ ": raw memory is only available on the RV32I bare-metal \
-                      target (mere -rv --bare)"))
+    failwith (name ^ ": only available on the RV32I bare-metal target \
+                      (mere -rv --bare)"))
 
 let builtin_file_close =
   V_builtin ("file_close", fun v ->
@@ -2333,11 +2350,14 @@ let initial_env : env =
     ("channel_recv", ref builtin_channel_recv);
     ("channel_close", ref builtin_channel_close);
     ("channel_recv_opt", ref builtin_channel_recv_opt);
-    ("raw_window", ref (raw_only_on_bare "raw_window"));
-    ("raw_peek8", ref (raw_only_on_bare "raw_peek8"));
-    ("raw_peek32", ref (raw_only_on_bare "raw_peek32"));
-    ("raw_poke8", ref (raw_only_on_bare "raw_poke8"));
-    ("raw_poke32", ref (raw_only_on_bare "raw_poke32"));
+    ("stdin_byte", ref builtin_stdin_byte);
+    ("csr_read", ref (bare_only "csr_read"));
+    ("csr_write", ref (bare_only "csr_write"));
+    ("raw_window", ref (bare_only "raw_window"));
+    ("raw_peek8", ref (bare_only "raw_peek8"));
+    ("raw_peek32", ref (bare_only "raw_peek32"));
+    ("raw_poke8", ref (bare_only "raw_poke8"));
+    ("raw_poke32", ref (bare_only "raw_poke32"));
     ("file_open", ref builtin_file_open);
     ("file_read_line", ref builtin_file_read_line);
     ("file_close", ref builtin_file_close);

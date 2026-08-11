@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.188" Version.v "0.1.188";
+  check "version is 0.1.189" Version.v "0.1.189";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12208,6 +12208,11 @@ let () =
      and doing it printed punctuation for 0x80000000 (found by bit_shl 1 31) *)
   rv_contains "rv32i: itoa negates each digit, not the value"
     "let _ = print_int 5;" "neg t5, t5";
+  (* CSRs: the number is an immediate field, so it has to be a literal, and
+     they only exist on bare metal *)
+  rv_err_contains "rv32i: csr_read needs --bare"
+    "let _ = print_int (csr_read 0x340);"
+    "csr_read / csr_write need the bare-metal target";
   rv_err_contains "rv32i: a Raw window cannot be forged out of ints"
     "let _ = raw_poke8 (raw_window 0 0 1) 0 65;"
     "expected `Raw`, got `int`";
@@ -12225,6 +12230,13 @@ let () =
   rv_err_contains "rv32i: --bare refuses the print builtins"
     "let main = fn (m: Raw) -> print \"x\";\n()"
     "there is no host to print to";
+  rv_contains "rv32i: csr_write emits csrrw with the number as an immediate"
+    "let main = fn (m: Raw) -> csr_write 0x305 4096;\n()" "csrrw zero, 0x305, a0";
+  rv_contains "rv32i: csr_read emits csrrs from x0"
+    "let main = fn (m: Raw) -> csr_read 0x341;\n()" "csrrs a0, 0x341, zero";
+  rv_err_contains "rv32i: a computed CSR number is refused"
+    "let main = fn (m: Raw) -> csr_write (300 + 40) 1;\n()"
+    "the CSR number must be a literal";
   Codegen_riscv.bare := false;
   check "rv32i: a call inside a region resolves its label"
     (try

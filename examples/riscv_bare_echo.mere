@@ -1,0 +1,48 @@
+// Bare-metal input: poll a UART, echo what arrives, stop at 'q'.
+//
+//   mere -rv --bare examples/riscv_bare_echo.mere > prog.bin
+//   printf 'hello\nq' | ./rvrun          # or type at it, and press q
+//
+// The receive half of examples/riscv_bare_uart.mere. Everything still goes
+// through the window capability `main` was handed — the driver below can reach
+// the UART and nothing else — and there is no host syscall anywhere in it.
+//
+// The loop is a spin: read the line-status register until bit 0 says a byte is
+// waiting, then read the data register. That is the honest shape for a machine
+// with no interrupt controller yet; when there is one, this becomes a handler
+// and the CPU gets to do something else in between.
+
+let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
+let rx_ready = fn (uart: Raw) -> bit_and (raw_peek8 uart 5) 1 != 0;
+let rx_byte = fn (uart: Raw) -> raw_peek8 uart 0;
+
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else
+    let _ = putc uart (ord (char_at s i)) in
+    uart_puts uart s (i + 1);
+
+// decimal, most significant digit first, without a heap or str_of_int
+let rec put_dec = fn (uart: Raw) -> fn (n: int) ->
+  let _ = if n >= 10 then put_dec uart (n / 10) else () in
+  putc uart (48 + n % 10);
+
+let rec echo = fn (uart: Raw) -> fn (n: int) ->
+  if rx_ready uart then
+    let c = rx_byte uart in
+    if c == 113 then n                          // 'q' ends the loop
+    else
+      let _ = putc uart c in
+      echo uart (n + 1)
+  else echo uart n;                             // nothing yet — keep polling
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let _ = uart_puts uart "echo (q quits): " 0 in
+  let n = echo uart 0 in
+  let _ = uart_puts uart "\nbytes echoed: " 0 in
+  let _ = put_dec uart n in
+  let _ = putc uart 10 in
+  ();
+
+()
