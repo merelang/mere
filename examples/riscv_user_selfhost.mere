@@ -1,0 +1,17 @@
+// The self-hosted Mere compiler, built to run as a user process.
+//
+//   mere -rv --load-base 8388608 --ram 24 examples/riscv_user_selfhost.mere > user.bin
+//   mere -rv --bare examples/riscv_bare_selfhost.mere > prog.bin
+//   ./rvrun 40
+//
+// This is the same self-hosted compiler that lives in contrib/ — lexer, parser,
+// type annotator, Wasm codegen, all written in Mere — asked to compile a small
+// program and print the WAT. There is nothing bare-metal about it: it calls
+// `print`, and the kernel on the other side answers.
+//
+// 24 MB, because the compiler's heap peaks between 14 and 18 MB and `mere -rv`'s
+// allocator never frees. That measurement is why `--ram` exists.
+
+import "../contrib/codegen/codegen_wasm.mere";
+
+let _ = print (parse_and_emit "let x = 10 in x * x + 1");

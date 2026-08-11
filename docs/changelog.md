@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.196 — 2026-08-11
+
+_The self-hosted Mere compiler, running as a user process on a Mere kernel, on a
+CPU written in Mere._
+
+```
+kernel: running the self-hosted Mere compiler as a user process
+(module
+  ... 5,224 more lines of WAT ...
+kernel: user process exited after 3 syscalls and 3727 ticks
+```
+
+_The WAT is byte-identical to what the native interpreter emits for the same
+input. It reached the UART through kernel write syscalls, from a process the timer
+preempted 3,727 times along the way._
+
+_Nothing new was needed. The compiler image is
+[examples/riscv_user_selfhost.mere](../examples/riscv_user_selfhost.mere) — the
+contrib self-hosted compiler asked to compile `let x = 10 in x * x + 1` and print
+the result, with no idea it is a user process. The kernel is
+[examples/riscv_bare_selfhost.mere](../examples/riscv_bare_selfhost.mere), which is
+v0.1.194's kernel with a bigger tenant: 24MB for the image, because the compiler's
+heap peaks between 14 and 18MB and this backend's allocator never frees. That
+measurement, made back in v0.1.186, is why `--ram` exists._
+
+_The tower, bottom to top: a language; a backend of its own that emits RV32IM; a
+CPU written in that language to run it; a kernel written in it too, with traps, a
+timer, a scheduler and a syscall boundary; and the language's own compiler running
+as a process on that kernel._
+
+_v0.1.147 reached the third floor of that and called it the north star. This is
+the fifth._
+
+---
+
 ## v0.1.195 — 2026-08-11
 
 _Chasing the allocating-handler corruption from v0.1.193. Two hypotheses tested
