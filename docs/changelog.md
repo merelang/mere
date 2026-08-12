@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.217 — 2026-08-12
+
+_Two C-backend bugs the mpng dogfood found, both of which emitted C that a C
+compiler rejects._
+
+**A `let rec`'s names leaked into every later function.** The inner-fn lifting pass
+keeps a set of names that are *not* captures — top-level names, builtins, externs,
+and the siblings of a `let rec`. The sibling names were added to that set and never
+removed, so a **later** top-level function whose parameter had the same name had it
+taken for one of them: not recorded as a capture, and the lifted body then referred
+to an identifier nothing declared.
+
+The line that was supposed to put the set back read `let _ = known_before in`,
+which does nothing. `known_before` was already being taken two lines above.
+
+_What it took to see it: `png.mere` has an inner `let rec row`, `encode.mere` has a
+parameter called `row`, and the second one lost it. Neither file alone reproduces,
+which is why this survived — the failure needs two files and a name in common._
+
+**An unresolved region marker tagged as `int`.** `ty_tag` erases a type variable
+that survives to codegen (a dead result, an unconstrained value) to `int`, on the
+reasoning that no operation ever inspects such a value. That is true of values and
+false of a **region marker**: the marker sits in a type's first slot, the typedef
+for the same type was emitted from a copy where it had resolved to `__heap`, and
+the two spellings — `Vec_int_int` and `Vec___heap_int` — are a prototype for a type
+that does not exist. An unresolved marker now tags as the default region.
+
+_Both were found by compiling the program and running the result, which is what
+`CC_CHECK=1` does in the dogfood and what `scripts/ctest.sh` does here. Neither is
+visible on the interpreter; neither is visible from reading the emitted C without a
+compiler. Both have twelve-line repros in the dogfood's PAIN.md, and regression
+tests here that name the wrong spelling as well as the right one._
+
+---
+
 ## v0.1.216 — 2026-08-12
 
 _`bytes` gets its I/O boundary: `read_bytes`, `write_bytes`, `print_bytes`._
