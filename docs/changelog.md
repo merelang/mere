@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.227 — 2026-08-13
+
+_A capability that quietly did nothing now refuses._
+
+`tcp_set_timeout` had a Wasm helper that ignored both arguments and returned `0` —
+the same value the C version returns on success. So a program set a deadline, was
+told it had one, and blocked forever on the next read. Measured at ten minutes
+before it was killed.
+
+That is worse than not having the capability at all: a missing feature is a compile
+error, a silent no-op is a hang. It is refused at the call site now, with the reason,
+until WASI's poll is wired up. A socket program that never sets a deadline is
+unaffected.
+
+**`scripts/socket_parity.sh`** is what found it, and is why this was possible to find
+at all. `parity.sh` runs eighty-odd programs across four backends and **none of them
+opens a socket**, because a socket program needs two endpoints and a host willing to
+grant a network. So the whole socket family — `tcp_listen` through `tcp_close`, all of
+it implemented against p2 `wasi:sockets` — had never been run. It works: the same
+round trip prints the same four lines natively and under `wasmtime -S
+inherit-network=y`.
+
+Two things stay unequal and are recorded rather than fixed:
+
+- **A failed read is `0` on Wasm**, the same value C uses for a clean end of stream.
+  Distinguishing them means decoding WASI's `stream-error` variant instead of its
+  is-error bit. The check above deliberately does not assert on it.
+- **`sleep_ms` is interp + C only**, which is why the parity program contains no
+  clock at all.
+
+The general shape is the one note 153 named: a capability with a per-backend
+implementation and no single place that says which backends really have it. This is
+the second silent gap found by running one, after `print_int` in v0.1.190.
+
 ## v0.1.226 — 2026-08-13
 
 _A failed read says which failure it was._

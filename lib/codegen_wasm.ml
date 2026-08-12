@@ -2223,6 +2223,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     let name, args =
       collect { Ast.node = outer_app; ty = e.Ast.ty; loc = e.Ast.loc } []
     in
+    (* v0.1.227: `tcp_set_timeout` had an in-module helper that did nothing and
+       returned 0 — the same value the C version returns on success. A program that
+       set a deadline was told it had one, and then blocked forever on the next
+       read: worse than not having the capability, because a missing feature is a
+       compile error and a silent no-op is a hang (measured at ten minutes before it
+       was killed). Refused here, at the call, until WASI's poll is wired up. *)
+    if name = "tcp_set_timeout" then
+      unsupported e.Ast.loc
+        "tcp_set_timeout has no Wasm lowering: WASI's sockets have no receive \
+         deadline here, and this used to compile to a no-op that reported success \
+         and left the next read blocking forever. A program that needs a bounded \
+         wait needs the native backend";
     let rec result_ty t =
       match Ast.walk t with
       | Ast.TyArrow (_, r) -> result_ty r
