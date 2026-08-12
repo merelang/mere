@@ -5,20 +5,27 @@
    an editor. The driver in the CLI does the reading and writing and nothing
    else.
 
-   What it does so far is diagnostics — the file's errors, republished on every
-   keystroke — which is the half of a language server that changes how it feels
-   to write code. Hover, completion and go-to-definition all want the same thing
-   underneath (a position, resolved against a typed tree), and that is the next
-   slice rather than this one.
+   Diagnostics — the file's errors, republished on every keystroke — plus hover,
+   which is the first of the questions that are really "what is under the
+   cursor?" (`Query` answers that; completion and go-to-definition ask it too).
 
-   The check it runs is `Pipeline.diagnostics`, which is the check the compiler
-   runs. A language server that agrees with the compiler on good days is worse
+   The check it runs is `Pipeline.check`, which is the check the compiler runs. A language server that agrees with the compiler on good days is worse
    than none: it teaches you to distrust the underline. *)
 
+(* What the server remembers about an open file: the buffer's text, and the
+   typed tree from the last check that produced one. The tree may be older than
+   the text — it is whatever last type-checked — which is the right trade for a
+   hover: an answer from a moment ago beats no answer while a line is half
+   typed. *)
+type doc = {
+  text : string;
+  tree : Ast.program option;
+}
+
 type state = {
-  (* uri -> the buffer's current text. The editor owns the file while it is
-     open; what is on disk may be older, and is not consulted. *)
-  docs : (string * string) list;
+  (* uri -> the buffer. The editor owns the file while it is open; what is on
+     disk may be older, and is not consulted. *)
+  docs : (string * doc) list;
   shutting_down : bool;
 }
 
@@ -160,21 +167,24 @@ let publish uri (diags : Pipeline.diagnostic list) =
     (Json.Obj [ ("uri", Json.Str uri);
                 ("diagnostics", Json.List (List.map diagnostic_json diags)) ])
 
-(* Check one document and produce the notification for it. Every failure mode of
-   the compiler that is not a diagnostic — a stack overflow on a pathological
-   input, an IO error from an import — becomes a single diagnostic at the top of
-   the file rather than a dead server: an editor cannot be left with no answer. *)
+(* Check one document: the notification to send, and the typed tree if it
+   type-checked. Every failure mode of the compiler that is not a diagnostic — a
+   stack overflow on a pathological input, an IO error from an import — becomes a
+   single diagnostic at the top of the file rather than a dead server: an editor
+   cannot be left with no answer. *)
 let check_document ?search_paths uri text =
-  let diags =
-    try
-      Pipeline.diagnostics ?base_dir:(base_dir_of_uri uri) ?search_paths text
-    with e ->
-      [ { Pipeline.d_loc = Loc.mk ~line:1 ~col:1 ();
-          d_kind = "internal error";
-          d_msg = Printexc.to_string e;
-          d_severity = Pipeline.Error } ]
-  in
-  publish uri diags
+  try
+    let (tree, diags) =
+      Pipeline.check ?base_dir:(base_dir_of_uri uri) ?search_paths text
+    in
+    (publish uri diags, tree)
+  with e ->
+    (publish uri
+       [ { Pipeline.d_loc = Loc.mk ~line:1 ~col:1 ();
+           d_kind = "internal error";
+           d_msg = Printexc.to_string e;
+           d_severity = Pipeline.Error } ],
+     None)
 
 let server_capabilities =
   Json.Obj [
@@ -182,10 +192,43 @@ let server_capabilities =
        for large files and a real source of desynchronisation bugs; the check
        re-reads the whole buffer anyway, so there is nothing to gain here yet. *)
     ("textDocumentSync", Json.Num 1.0);
+    ("hoverProvider", Json.Bool true);
   ]
 
-let set_doc state uri text =
-  { state with docs = (uri, text) :: List.remove_assoc uri state.docs }
+let set_doc state uri text tree =
+  let previous = List.assoc_opt uri state.docs in
+  let tree =
+    match tree with
+    | Some _ -> tree
+    (* Keep the last tree that type-checked: while a line is half typed the file
+       does not check, and a hover from a moment ago is better than none. *)
+    | None -> (match previous with Some d -> d.tree | None -> None)
+  in
+  { state with docs = (uri, { text; tree }) :: List.remove_assoc uri state.docs }
+
+(* Hover. The position arrives 0-based and Mere counts from 1; `Query.node_at`
+   finds the narrowest node whose token contains it, and the typer has already
+   written that node's type onto it. *)
+let hover state uri (params : Json.t) =
+  let position = Json.member "position" params in
+  let line = Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" position)) in
+  let col = Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" position)) in
+  match List.assoc_opt uri state.docs with
+  | None -> Json.Null
+  | Some { tree = None; _ } -> Json.Null
+  | Some { tree = Some prog; _ } ->
+    (match Query.node_at prog (line + 1) (col + 1) with
+     | None -> Json.Null
+     | Some node ->
+       (match Query.describe node with
+        | None -> Json.Null
+        | Some text ->
+          Json.Obj [
+            ("contents",
+             Json.Obj [ ("kind", Json.Str "markdown");
+                        ("value", Json.Str ("```mere\n" ^ text ^ "\n```")) ]);
+            ("range", range_of_loc node.Ast.loc);
+          ]))
 
 (* One message in, the messages to send back out. `exit` is signalled by the
    third component so the driver can stop without this module knowing what a
@@ -209,10 +252,15 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
   | Some "initialized" -> (state, [], false)
   | Some "shutdown" -> ({ state with shutting_down = true }, [ response id Json.Null ], false)
   | Some "exit" -> (state, [], true)
+  | Some "textDocument/hover" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (hover state uri params) ], false)
+     | None -> (state, [ response id Json.Null ], false))
   | Some "textDocument/didOpen" ->
     (match uri_of doc, Json.to_string_opt (Json.member "text" doc) with
      | Some uri, Some text ->
-       (set_doc state uri text, [ check_document ?search_paths uri text ], false)
+       let (note, tree) = check_document ?search_paths uri text in
+       (set_doc state uri text tree, [ note ], false)
      | _ -> (state, [], false))
   | Some "textDocument/didChange" ->
     (* Full sync: the last content change is the whole document. *)
@@ -224,14 +272,17 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
         | last :: _ ->
           (match Json.to_string_opt (Json.member "text" last) with
            | Some text ->
-             (set_doc state uri text, [ check_document ?search_paths uri text ], false)
+             let (note, tree) = check_document ?search_paths uri text in
+             (set_doc state uri text tree, [ note ], false)
            | None -> (state, [], false))
         | [] -> (state, [], false)))
   | Some "textDocument/didSave" ->
     (match uri_of doc with
      | Some uri ->
        (match List.assoc_opt uri state.docs with
-        | Some text -> (state, [ check_document ?search_paths uri text ], false)
+        | Some d ->
+          let (note, tree) = check_document ?search_paths uri d.text in
+          (set_doc state uri d.text tree, [ note ], false)
         | None -> (state, [], false))
      | None -> (state, [], false))
   | Some "textDocument/didClose" ->

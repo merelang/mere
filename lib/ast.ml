@@ -774,3 +774,39 @@ let desugar_program (prog : program) : expr =
     | Top_trait _ -> body
     | Top_impl _ -> body
   ) prog.decls prog.main
+
+(* The sub-expressions of a node, in source order.
+
+   Written once, here, because everything that answers a question about a
+   position in a file needs it — what is the type here, where was this defined,
+   what is in scope — and each of those writing its own 26-case match is how the
+   cases drift apart. Patterns and types are not expressions and are not
+   included; a caller that wants them looks at the node itself. *)
+let children (e : expr) : expr list =
+  match e.node with
+  | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> []
+  | Neg a | Annot (a, _) | Field_get (a, _) | Region_block (_, a) | Ref (_, _, a) -> [a]
+  | Bin (_, a, b) | Cmp (_, a, b) | Logic (_, a, b) | App (a, b) -> [a; b]
+  | Let (_, a, b) -> [a; b]
+  | With (_, a, b) -> [a; b]
+  | If (a, b, c) -> [a; b; c]
+  | Fun (_, _, body) -> [body]
+  | Let_rec (bindings, body) -> List.map snd bindings @ [body]
+  | Constr (_, arg) -> (match arg with Some a -> [a] | None -> [])
+  | Match (scrutinee, arms) ->
+    scrutinee
+    :: List.concat_map (fun (_, guard, body) ->
+         (match guard with Some g -> [g] | None -> []) @ [body]) arms
+  | Tuple items -> items
+  | Record_lit (_, fields) -> List.map snd fields
+  | Record_update (base, fields) -> base :: List.map snd fields
+
+(* The expressions a top-level declaration contains. *)
+let decl_exprs (d : top_decl) : expr list =
+  match d with
+  | Top_let (_, e) -> [e]
+  | Top_let_rec bindings -> List.map snd bindings
+  | Top_type _ | Top_signature _ | Top_record _ | Top_type_alias _
+  | Top_view _ | Top_extern _ | Top_extern_type _ | Top_drop _
+  | Top_sync _ | Top_local _ | Top_ctor_alias _ | Top_record_alias _
+  | Top_trait _ | Top_impl _ -> []
