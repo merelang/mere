@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.203" Version.v "0.1.203";
+  check "version is 0.1.204" Version.v "0.1.204";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12129,6 +12129,95 @@ let () =
      locked below failed at assembly time ("undefined label u_f") — a hard
      crash that nothing in the suite would have caught. These assert on the
      emitted listing, so they lock the instruction actually chosen. *)
+  (* JSON, and the language server built on it. Everything the server decides is
+     a function from a message and a state to the messages that go back, so the
+     protocol is testable without a socket, a subprocess, or an editor. *)
+  let round_trip src = Json.to_string (Json.parse src) in
+  check "json: round-trips an object"
+    (round_trip {|{"a":1,"b":[true,null,"x"]}|}) {|{"a":1,"b":[true,null,"x"]}|};
+  check "json: integers do not print a decimal point"
+    (Json.to_string (Json.Num 3.0)) "3";
+  check "json: escapes what has to be escaped"
+    (Json.to_string (Json.Str "a\"b\\c\nd")) {|"a\"b\\c\nd"|};
+  check "json: decodes \\u into utf-8"
+    (match Json.parse {|"\u3042"|} with Json.Str s -> s | _ -> "?") "\xe3\x81\x82";
+  check "json: a header's byte count is read whatever its case"
+    (match Lsp.content_length "content-length: 42\nX: y" with
+     | Some n -> string_of_int n | None -> "none") "42";
+  (* The framing is a byte count, so a multi-byte character must not be counted
+     as one — the editor would read the next message from the wrong offset. *)
+  check "lsp: a frame counts bytes, not characters"
+    (Lsp.frame (Json.Str "\xe3\x81\x82"))
+    "Content-Length: 5\r\n\r\n\"\xe3\x81\x82\"";
+  let didopen uri text =
+    Json.Obj [ ("jsonrpc", Json.Str "2.0");
+               ("method", Json.Str "textDocument/didOpen");
+               ("params", Json.Obj [ ("textDocument",
+                  Json.Obj [ ("uri", Json.Str uri); ("text", Json.Str text) ]) ]) ]
+  in
+  let diags_of msgs =
+    match msgs with
+    | [ m ] -> Json.to_list (Json.member "diagnostics" (Json.member "params" m))
+    | _ -> []
+  in
+  let (state, out, stop) =
+    Lsp.handle Lsp.initial (didopen "file:///tmp/a.mere" "let a = fn x -> x +;\nlet b = fn (q: -> q;\n")
+  in
+  check "lsp: opening a broken file publishes every syntax error"
+    (string_of_int (List.length (diags_of out))) "2";
+  check "lsp: a notification is not an exit" (string_of_bool stop) "false";
+  check "lsp: the buffer is remembered, not re-read from disk"
+    (string_of_int (List.length state.Lsp.docs)) "1";
+  (* Positions cross a boundary here: Mere counts lines and columns from 1, the
+     protocol counts both from 0, and the width is what makes the underline
+     cover the token instead of one character of it. *)
+  check "lsp: positions are zero-based, and the range has width"
+    (match diags_of out with
+     | d :: _ ->
+       let r = Json.member "range" d in
+       let pt k = Json.member k r in
+       Printf.sprintf "%d:%d-%d:%d"
+         (Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" (pt "start"))))
+         (Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" (pt "start"))))
+         (Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" (pt "end"))))
+         (Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" (pt "end"))))
+     | [] -> "none")
+    "0:19-0:20";
+  let (_, out, _) =
+    Lsp.handle Lsp.initial (didopen "file:///tmp/b.mere" "let f = fn (n: int) -> n + 1;\nlet _ = print_int (f 41);\n")
+  in
+  check "lsp: a file with nothing wrong publishes an empty list"
+    (string_of_int (List.length (diags_of out))) "0";
+  let (_, out, _) =
+    Lsp.handle Lsp.initial (didopen "file:///tmp/c.mere" "let _ = print_int \"x\";\n")
+  in
+  check "lsp: a file that parses is type-checked too"
+    (match diags_of out with
+     | d :: _ ->
+       (match Json.to_string_opt (Json.member "message" d) with
+        | Some m -> String.sub m 0 (min 10 (String.length m))
+        | None -> "?")
+     | [] -> "none")
+    "type error";
+  let (_, out, stop) =
+    Lsp.handle Lsp.initial
+      (Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("method", Json.Str "exit") ])
+  in
+  check "lsp: exit stops the loop" (string_of_bool stop) "true";
+  check "lsp: exit says nothing" (string_of_int (List.length out)) "0";
+  let (_, out, _) =
+    Lsp.handle Lsp.initial
+      (Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 7.0);
+                  ("method", Json.Str "textDocument/hover") ])
+  in
+  check "lsp: an unimplemented request is refused, not ignored"
+    (match out with
+     | [ m ] ->
+       (match Json.to_int_opt (Json.member "code" (Json.member "error" m)) with
+        | Some c -> string_of_int c | None -> "no code")
+     | _ -> "no reply")
+    "-32601";
+
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
      them, three times in a row; an editor needs all of them, and so does

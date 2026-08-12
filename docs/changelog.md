@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.204 — 2026-08-12
+
+_`mere lsp` — a language server. Diagnostics in the editor, from the check the
+compiler runs._
+
+_The second slice of the language-server arc (the first was recovering from
+syntax errors, so there is more than one to show). What it does is diagnostics:
+every syntax error in the buffer, republished on each keystroke, and the first
+type error once the file parses. Hover and completion want a position resolved
+against a typed tree, which is the next slice._
+
+```sh
+mere lsp        # LSP over stdin/stdout; see docs/lsp.md for editor setup
+```
+
+**The check is the compiler's check.** `infer_program` — parse, elaborate, type,
+plus the borrow/move/Send analyses — moved out of the CLI into `Pipeline`, where
+the server calls the same function the four backends start from. A language
+server that agrees with the compiler on good days is worse than none: it teaches
+you to distrust the underline. `Pipeline.diagnostics` is the one entry point that
+answers "what is wrong with this text", as data rather than as an exception.
+
+**Everything the server decides is a function.** `Lsp.handle : state -> message ->
+state * message list * bool` — so the protocol is tested in the suite without a
+socket, a subprocess or an editor, and the only untested part is three lines of IO
+in `Lsp.serve`. `scripts/lsp_smoke.sh` covers the process end to end by piping a
+canned editor session through the real wire format.
+
+**Also new: `Json`** — a JSON value, parser and writer (~230 lines), because this
+project has two dependencies and reading a protocol this small is not worth a
+third. It decodes `\uXXXX` into UTF-8 including surrogate pairs, and prints
+integers without a decimal point, since an editor reading `"line": 3.0` strictly
+is entitled to object.
+
+_Known gaps, all written down in `docs/lsp.md`: one type error at a time (the
+typer still raises on the first), positions inside imported files are reported
+against the importing file, and sync is full-text rather than incremental._
+
+---
+
 ## v0.1.203 — 2026-08-12
 
 _The parser no longer stops at the first syntax error._
