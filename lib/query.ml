@@ -169,3 +169,41 @@ let definition_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
      | Some b when b.b_loc.Loc.line > 0 && not b.b_prelude -> Some b.b_loc
      | _ -> None)
   | _ -> None
+
+(* --- what could go here ---------------------------------------------------
+
+   Completion is the same two questions again — what is under the cursor, what is
+   in scope there — plus one decision: what to offer. The answer here is "every
+   name that is visible at this position", which is small, correct, and does not
+   pretend to rank. An editor filters by what has been typed already, so offering
+   the whole scope is not the same as showing it.
+
+   Prelude names are included and marked, because `str_len` is exactly what
+   somebody wants offered even though there is nowhere in their file to jump
+   to. *)
+
+type completion = {
+  c_name : string;
+  c_ty : Ast.ty option;
+  c_prelude : bool;
+}
+
+(* Innermost first, and one entry per name: an inner binding shadows an outer one
+   of the same name, and offering both would be offering a name that cannot be
+   reached. *)
+let completions_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
+  : completion list =
+  let seen = Hashtbl.create 64 in
+  List.filter_map (fun b ->
+    if Hashtbl.mem seen b.b_name then None
+    else begin
+      Hashtbl.add seen b.b_name ();
+      (* `_` is what the language calls a binding it means to ignore, and a
+         leading underscore in the prelude marks a helper the prelude wrote for
+         itself. Neither is something to offer back. *)
+      if b.b_name = "_"
+         || (b.b_prelude && String.length b.b_name > 0 && b.b_name.[0] = '_')
+      then None
+      else Some { c_name = b.b_name; c_ty = b.b_ty; c_prelude = b.b_prelude }
+    end)
+    (scope_at ?prelude_decls prog line col)

@@ -194,6 +194,9 @@ let server_capabilities =
     ("textDocumentSync", Json.Num 1.0);
     ("hoverProvider", Json.Bool true);
     ("definitionProvider", Json.Bool true);
+    (* No trigger characters: this language has no `.` member access to complete
+       after, so the editor asks when the user asks. *)
+    ("completionProvider", Json.Obj [ ("resolveProvider", Json.Bool false) ]);
   ]
 
 let set_doc state uri text tree =
@@ -235,6 +238,35 @@ let hover state uri (params : Json.t) =
                         ("value", Json.Str ("```mere\n" ^ text ^ "\n```")) ]);
             ("range", range_of_loc node.Ast.loc);
           ]))
+
+(* Completion: every name visible at the position. The kind is what an editor
+   draws the icon from — 3 is Function, 6 is Variable — and a name whose type is
+   an arrow is a function as far as anybody looking at the list is concerned.
+   The type goes in `detail`, which is the line an editor shows beside the name. *)
+let completion state uri (params : Json.t) =
+  match ask state uri params with
+  | None -> Json.List []
+  | Some (prog, line, col) ->
+    let items =
+      List.map (fun (c : Query.completion) ->
+        let ty = Option.map Ast.pp_ty c.Query.c_ty in
+        let is_fn =
+          match c.Query.c_ty with
+          | Some t -> (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
+          | None -> false
+        in
+        Json.Obj ([
+          ("label", Json.Str c.Query.c_name);
+          ("kind", Json.Num (if is_fn then 3.0 else 6.0));
+        ] @ (match ty with Some t -> [ ("detail", Json.Str t) ] | None -> [])
+          @ (if c.Query.c_prelude then [ ("sortText", Json.Str ("z" ^ c.Query.c_name)) ]
+             else [])))
+        (Query.completions_at ~prelude_decls:(Pipeline.prelude_decl_count ())
+           prog line col)
+    in
+    (* `isIncomplete: false` — this is the whole scope, so the editor may filter
+       it as the user keeps typing instead of asking again. *)
+    Json.Obj [ ("isIncomplete", Json.Bool false); ("items", Json.List items) ]
 
 (* Go to definition: the same node search, plus the scope around it. Answers only
    for a name bound in this file — a builtin or a prelude name has no position
@@ -280,6 +312,10 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
     (match uri_of doc with
      | Some uri -> (state, [ response id (definition state uri params) ], false)
      | None -> (state, [ response id Json.Null ], false))
+  | Some "textDocument/completion" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (completion state uri params) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
   | Some "textDocument/didOpen" ->
     (match uri_of doc, Json.to_string_opt (Json.member "text" doc) with
      | Some uri, Some text ->
