@@ -7,7 +7,7 @@ mere lsp
 Speaks LSP over stdin and stdout. What it does today is **diagnostics** — every
 syntax error in the buffer, republished on each keystroke, and the first type
 error once the file parses — **hover**, which reports the type inference gave
-whatever is under the cursor, and **go to definition**.
+whatever is under the cursor, **go to definition**, and **completion**.
 
 It is the same check the compiler runs — `Pipeline.check`, which the CLI also
 goes through. A language server that agrees with the compiler on good days
@@ -42,9 +42,10 @@ same on stdout, so a client that can start a process can talk to it.
 
 | method | behaviour |
 |---|---|
-| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider` |
+| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider`, `completionProvider` |
 | `textDocument/hover` | the inferred type of the narrowest node under the cursor, as `name : type` when it is a name |
 | `textDocument/definition` | where the name under the cursor was bound, when that is somewhere in this file |
+| `textDocument/completion` | every name visible at the cursor, innermost first, with its type |
 | `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
 | `textDocument/didClose` | publish an empty list, clearing the underlines |
 | `shutdown` / `exit` | as specified |
@@ -57,6 +58,18 @@ lines and columns to the protocol's 0-based ones.
 The buffer is what gets checked, not the file on disk — an editor owns a file
 while it is open. But `import` still resolves against the **file's** directory,
 taken from the document URI, so imports work in an unsaved buffer.
+
+**Warnings are diagnostics too** (severity 2): a non-exhaustive `match`, a
+top-level name that collides with a C keyword. They used to be printed to stderr
+from inside the compiler, which is fine for a terminal and useless to anything
+else — an editor cannot underline a line written to a stream it is not reading.
+The pipeline hands them over as data now and the CLI does its own printing.
+
+**A syntax error inside an `import`** is published against **that file's** URI,
+where its line numbers mean something, rather than against the buffer. The server
+remembers which other files it has spoken about and clears them when the import is
+fixed — a diagnostic stays on screen until the server says otherwise, and "never
+mind" is exactly the message nobody thinks to send.
 
 ## Hover, and what a position means here
 
@@ -97,27 +110,38 @@ Two things it deliberately declines to answer:
 - **A parameter** points at the `fn` that introduced it rather than at the
   parameter name, because `Fun` carries the name but not the name's own position.
 
+## Completion
+
+Every name visible at the position, innermost first, one entry per name — an
+inner binding shadows an outer one, and offering both would offer a name that
+cannot be reached. Each carries its inferred type as the `detail` line, and a
+kind so the editor draws a function icon for a function.
+
+Prelude names are offered (`str_len` is exactly what you want in the list) but
+`sortText` puts them after the file's own names, and the prelude's internal
+helpers — the ones it names with a leading underscore — are left out.
+
+There are no trigger characters: this language has no `.` member access to
+complete after, so the list arrives when the editor asks for it. The response is
+marked complete, so an editor filters it as you keep typing rather than asking
+again.
+
 ## What it does not answer yet
 
-- **Completion.** It asks the same two questions this slice answers — what is
-  under the cursor, what is in scope there — and mostly needs a decision about
-  what to offer where. That is the next slice.
 - **More than one type error.** Syntax errors are all reported, because the
   parser recovers at declaration boundaries (v0.1.203). The type-checker still
   raises on the first problem, so a file that parses gets one type error at a
   time. Making the typer collect instead of raise is its own slice, and a larger
   one — every `raise` in it is a place that currently gets to assume the rest of
   the pass will not run.
-- **Positions inside imported files.** An error in an imported file is reported
-  with the position it has *there*, against the importing file's URI, which is
-  wrong. Diagnostics need to carry the file they came from before this can be
-  fixed properly.
+
 - **Incremental sync.** The whole buffer arrives on every change. The check
   re-reads all of it anyway, so incremental sync would buy nothing yet and cost
   a class of desynchronisation bugs.
-- **Warnings.** The compiler's warnings (a top-level name that collides with a C
-  keyword, say) are printed to stderr by the pipeline rather than returned as
-  data, so they do not become diagnostics. Only errors are underlined.
+- **Type errors inside imported files** are still reported against the importing
+  file. Syntax errors carry the file they came from and are published against it;
+  type errors do not, because by then the imported declarations have been merged
+  into one program and nothing records where each came from.
 
 ## Testing it
 

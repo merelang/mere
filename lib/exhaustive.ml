@@ -238,17 +238,44 @@ let reset () =
   warnings := [];
   deferred := []
 
-let take () =
+(* The warnings, each with the position it is about, and without the position
+   repeated inside the text. A language server needs the position as data to draw
+   the underline; the formatted line is what a terminal wants, and that is what
+   `take` still produces.
+
+   Two things this does that the string form did not have to. The message is
+   stripped of the `line L, col C: warning: ` prefix `check_match` builds into it,
+   because a caller that has the position will render its own. And the list is
+   de-duplicated: type inference visits a declaration's body once as a
+   declaration and again as part of the desugared program, so a match inside one
+   is recorded twice, and a warning shown twice is a bug report waiting to
+   happen. *)
+let strip_prefix (loc : Loc.t) (msg : string) : string =
+  let prefix = Loc.to_string loc ^ ": warning: " in
+  let pl = String.length prefix in
+  if String.length msg >= pl && String.sub msg 0 pl = prefix
+  then String.sub msg pl (String.length msg - pl)
+  else msg
+
+let take_located () =
   (* Run deferred checks now that typing is done — scrut tys have walked. *)
   let ws_def =
     List.concat_map (fun (loc, scrut_ty, arms) ->
-      check_match loc scrut_ty arms
+      List.map (fun m -> (loc, strip_prefix loc m)) (check_match loc scrut_ty arms)
     ) (List.rev !deferred)
   in
-  let ws = List.rev !warnings @ ws_def in
+  let ws = List.map (fun m -> (Loc.dummy, m)) (List.rev !warnings) @ ws_def in
   warnings := [];
   deferred := [];
-  ws
+  let seen = Hashtbl.create 16 in
+  List.filter (fun w ->
+    if Hashtbl.mem seen w then false else (Hashtbl.add seen w (); true)) ws
+
+let take () =
+  List.map (fun (loc, msg) ->
+    if loc.Loc.line = 0 then msg
+    else Printf.sprintf "%s: warning: %s" (Loc.to_string loc) msg)
+    (take_located ())
 
 let record_match loc scrut_ty arms =
   deferred := (loc, scrut_ty, arms) :: !deferred

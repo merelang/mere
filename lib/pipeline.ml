@@ -56,7 +56,8 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
    The prelude is parsed first for the same reason `parse_program` does it —
    constructors have to be registered before the user's source is parsed, or
    `Cons` in user code looks up arity 0. *)
-let syntax_errors ?base_dir ?(search_paths = []) s : (Loc.t * string) list =
+let syntax_errors ?base_dir ?(search_paths = []) s
+  : (string option * Loc.t * string) list =
   Parser.reset_decl_state ();
   ignore (parse_prelude ());
   let tokens = Lexer.tokenize s in
@@ -113,6 +114,16 @@ let reserved_c_names =
     "main";
   ]
 
+(* Warnings the compiler produces while checking, collected rather than printed.
+   They used to go straight to stderr, which is fine for a terminal and useless to
+   anything else: an editor cannot underline a line that was written to a stream it
+   is not reading. The CLI prints them now, which is the only place that should
+   decide how a warning looks. *)
+let warnings : (Loc.t * string) list ref = ref []
+let reset_warnings () = warnings := []
+let take_warnings () = let ws = List.rev !warnings in warnings := []; ws
+let warn loc msg = warnings := (loc, msg) :: !warnings
+
 let warn_reserved_name loc name =
   if name = "main" then
     (* Mere has no `main`-function convention: the entry point IS the file's
@@ -121,18 +132,18 @@ let warn_reserved_name loc name =
        the Wasm entry is emitted as `$__mere_main` (exported as "main"), both
        distinct from a user `$main` — but the name is still misleading, since
        defining `main` does not make it the entry point. *)
-    Printf.eprintf
-      "%s: warning: `main` is not special in Mere — the entry point is the \
-       file's trailing expression, not a `main` function. A top-level binding \
-       named `main` compiles fine now, but reads as if it were the entry; \
-       consider renaming it (e.g. `run`).\n%!"
-      (Loc.to_string loc)
+    warn loc
+      "`main` is not special in Mere — the entry point is the file's trailing \
+       expression, not a `main` function. A top-level binding named `main` \
+       compiles fine now, but reads as if it were the entry; consider renaming \
+       it (e.g. `run`)." 
   else if List.mem name reserved_c_names then
-    Printf.eprintf
-      "%s: warning: top-level name `%s` collides with a C keyword or libc/libm \
-       symbol — this will be a compile error at codegen. Renaming is \
-       recommended (e.g. `%s_` / `m_%s` / `%s_v`) (see docs/patterns.md §5)\n%!"
-      (Loc.to_string loc) name name name name
+    warn loc
+      (Printf.sprintf
+         "top-level name `%s` collides with a C keyword or libc/libm symbol — \
+          this will be a compile error at codegen. Renaming is recommended \
+          (e.g. `%s_` / `m_%s` / `%s_v`) (see docs/patterns.md §5)"
+         name name name name)
 
 let rec warn_reserved_in_pattern (p : Ast.pattern) : unit =
   match p.Ast.pnode with
@@ -438,24 +449,43 @@ type diagnostic = {
   d_kind : string;
   d_msg : string;
   d_severity : severity;
+  (* The file the position belongs to, when it is not the text being checked —
+     an error inside an `import`, whose line numbers mean nothing in the
+     importing file. `None` means "the text you handed me". *)
+  d_file : string option;
 }
 
 let check ?base_dir ?(search_paths = []) (source : string)
   : Ast.program option * diagnostic list =
-  let err kind (loc, msg) =
-    { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error }
+  let err ?file kind (loc, msg) =
+    { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error; d_file = file }
   in
+  let warning (loc, msg) =
+    { d_loc = loc; d_kind = "warning"; d_msg = msg;
+      d_severity = Warning; d_file = None }
+  in
+  reset_warnings ();
+  Exhaustive.reset ();
   match syntax_errors ?base_dir ~search_paths source with
-  | (_ :: _) as errs -> (None, List.map (err "parse error") errs)
+  | (_ :: _) as errs ->
+    (None, List.map (fun (file, loc, msg) -> err ?file "parse error" (loc, msg)) errs)
   | [] ->
     (try
        let (prog, _) = infer_program ?base_dir ~search_paths source in
        (* Type inference writes the type it found onto every node it visited, so
           the program that comes back is the answer to every later question about
-          a position in this text. *)
-       (Some prog, [])
+          a position in this text. Warnings are only worth reporting once the
+          file checks: while it does not, they are noise about code the person is
+          in the middle of writing. *)
+       let ws =
+         List.map warning (take_warnings ())
+         @ List.map (fun (loc, msg) -> warning (loc, msg)) (Exhaustive.take_located ())
+       in
+       (Some prog, ws)
      with
      | Lexer.Lex_error (loc, msg) -> (None, [err "lex error" (loc, msg)])
+     | Parser.Parse_error_in_file (file, loc, msg) ->
+       (None, [err ~file "parse error" (loc, msg)])
      | Parser.Parse_error (loc, msg) -> (None, [err "parse error" (loc, msg)])
      | Typer.Type_error (loc, msg) -> (None, [err "type error" (loc, msg)])
      | Trait_elab.Trait_error (loc, msg) -> (None, [err "trait error" (loc, msg)])

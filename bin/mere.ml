@@ -110,18 +110,41 @@ let run_action ?(rv = false) ?base_dir action label source =
       (* These positions came from parsing the user's source on its own, so they
          are already the lines they wrote — no prelude to subtract. *)
       let blocks =
-        List.map (fun (l, m) ->
-          render ~source ~filename:label l "parse error" m) all
+        List.map (fun (file, l, m) ->
+          (* An error from an imported file is rendered against that file, whose
+             lines its position actually refers to. *)
+          match file with
+          | None -> render ~source ~filename:label l "parse error" m
+          | Some f ->
+            render ~source:(try read_file f with _ -> "") ~filename:f l
+              "parse error" m) all
       in
       prerr_endline (String.concat "\n\n" blocks);
       Printf.eprintf "\n%d syntax errors\n" (List.length all);
       exit 1
   in
+  (* Warnings the check collected. They used to be printed from inside the
+     pipeline, which meant nothing but a terminal could ever see them; now the
+     pipeline hands them over and the CLI decides how they look. *)
+  let print_warnings () =
+    List.iter (fun (loc, msg) ->
+      Printf.eprintf "%s: warning: %s\n%!" (Mere.Loc.to_string loc) msg)
+      (Mere.Pipeline.take_warnings ())
+  in
   try
     let result = action source in
+    print_warnings ();
     print_endline result
   with
-  | Mere.Lexer.Lex_error (loc, msg) -> report loc "lex error" msg
+  | Mere.Lexer.Lex_error (loc, msg) -> print_warnings (); report loc "lex error" msg
+  | Mere.Parser.Parse_error_in_file (file, loc, msg) ->
+    (* The position is a line in the imported file, so it is reported against
+       that file rather than against the one being compiled. *)
+    print_warnings ();
+    prerr_endline
+      (Mere.Diagnostic.format ~source:(try read_file file with _ -> "")
+         ~filename:file loc "parse error" msg);
+    exit 1
   | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
   | Mere.Eval.Eval_error (loc, msg) -> report loc "eval error" msg
   | Mere.Typer.Type_error (loc, msg) -> report loc "type error" msg

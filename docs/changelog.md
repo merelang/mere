@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.208 — 2026-08-12
+
+_Diagnostics become data: which file a position belongs to, and warnings too._
+
+**A syntax error inside an `import` is reported against the file it is in.** Its
+line numbers describe *that* file, so reporting it against the importing one was
+underlining an innocent line. `Parse_error_in_file` carries the path from the
+import that raised it, the CLI renders the snippet from that file, and the
+language server publishes against that file's URI — remembering which other files
+it has spoken about so it can clear them when the import is fixed. A diagnostic
+stays on an editor's screen until the server says otherwise, and "never mind" is
+exactly the message nobody thinks to send.
+
+**Warnings are diagnostics now** (severity 2 in the protocol): a non-exhaustive
+`match`, a top-level name that collides with a C keyword. They were printed to
+stderr from inside the pipeline, which is fine for a terminal and useless to
+anything else — an editor cannot underline a line written to a stream it is not
+reading. The pipeline collects them; the CLI prints them, which is where the
+decision about how a warning looks belongs.
+
+Two things that fixing this exposed. The non-exhaustive-match warnings arrived
+**twice**, because type inference visits a declaration's body once as a
+declaration and again as part of the desugared program — de-duplicated now. And
+the messages carried their own `line L, col C:` prefix, which read as
+`warning: line 3, col 29: warning: …` once a caller with the position added its
+own; the position is data and the text no longer repeats it.
+
+_Still not carried: **type** errors from an imported file. By the time the typer
+runs, the imported declarations have been merged into one program and nothing
+records which file each came from._
+
+---
+
+## v0.1.207 — 2026-08-12
+
+_Completion — the third of the three questions that are really one question._
+
+_Fifth slice of the language-server arc, and the one that needed no new
+machinery: `Query.scope_at` already knew what is visible at a position, so this is
+that list, de-duplicated by name and dressed for the protocol._
+
+Every name visible at the cursor, innermost first, one entry per name — an inner
+binding shadows an outer one, and offering both would offer a name that cannot be
+reached. Each carries its inferred type as the `detail` line and a kind, so an
+editor draws a function icon for a function.
+
+Two judgements about what *not* to offer: the prelude's internal helpers (the ones
+it names with a leading underscore) are left out, and `_` is not a name anybody
+wants back. Prelude names themselves are offered — `str_len` is exactly what you
+want in the list — with `sortText` putting them after the file's own names.
+
+_That completes hover / definition / completion. All three are `Query.node_at` and
+`Query.scope_at` with a different answer attached, which is what moving the check
+into the library bought: the editor's three questions turned out to be one
+question the compiler could already answer._
+
+---
+
 ## v0.1.206 — 2026-08-12
 
 _Go to definition._
