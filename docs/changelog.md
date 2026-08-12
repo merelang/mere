@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.222 — 2026-08-12
+
+_A positioned write that takes the byte type the language grew afterwards._
+
+```mere
+let n = file_pwrite_bytes h off (bytes_of_str line)
+```
+
+`file_pwrite` was added for the mbtree dogfood in v0.1.115 and takes `Vec[int]`.
+The `bytes` type arrived in v0.1.216 and got its I/O boundary in v0.1.219 — so the
+language had a byte string, and the one API that writes at an offset could not take
+it. The mraft dogfood's write-ahead log had to explode every record into a Vec with
+**one boxed int per byte** before writing it.
+
+`file_pwrite_bytes : File -> int -> bytes -> int` is the same operation over
+`bytes`. Both remain: mbtree builds its pages as Vecs and has no reason to change.
+
+All four backends, `test/parity/file_pwrite_bytes.mere`. Two of them cost almost
+nothing:
+
+- **Wasm**: the host import already took a bytes pointer — the Vec version converts
+  first and then calls it. The new path is the same call with nothing in between.
+- **LLVM**: one `fwrite` instead of a loop, since `bytes` is `{ i64 len, i8 data[] }`
+  and `bytes_len` already loads from that layout.
+- **C**: the runtime function had to be defined next to the bytes runtime rather
+  than with the other `file_*` ones, because those are emitted before
+  `struct mere_bytes` has a body — the same ordering the ByteBuf freeze hit in
+  v0.1.218.
+
+The LLVM path also registers the `Vec[int]` instance even though it uses no Vec: the
+positioned-IO runtime is emitted as one block and `file_pread`'s body calls the Vec
+accessors regardless. A program that only writes bytes carries a few unused
+functions, which is cheaper than splitting the block into per-function flags.
+
 ## v0.1.221 — 2026-08-12
 
 _A program's output no longer depends on whether someone redirected it._

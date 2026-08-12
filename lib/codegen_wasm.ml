@@ -32,7 +32,7 @@ let unsupported loc what =
 let host_builtins_without_wasm_lowering =
   [ "print_int"; "print_bool";
     "read_key"; "tty_raw"; "tty_restore"; "file_size";
-    "read_lines"; "file_pread"; "file_pwrite";
+    "read_lines"; "file_pread"; "file_pwrite"; "file_pwrite_bytes";
     "random_float"; "detach" ]
 
 (* Accumulator for the function body's instructions (one WAT token per
@@ -2392,6 +2392,19 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr off_e;
     emit_expr vec_e;
     emit_instr "call $__lang_bytes_of_vec";
+    emit_instr "call $file_pwrite"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App
+                 ({ node = Ast.Var "file_pwrite_bytes"; _ }, ch_e); _ }, off_e); _ },
+             b_e)
+    when not (List.mem_assoc "file_pwrite_bytes" !locals
+              || Hashtbl.mem toplevel_fn_names "file_pwrite_bytes"
+              || Hashtbl.mem inner_lifts_wasm "file_pwrite_bytes") ->
+    (* v0.1.222: the host import already takes a bytes pointer — the vec version
+       just converts first. So this is the same call with nothing in between. *)
+    file_pio_used := true; bytes_used := true;
+    emit_expr ch_e;
+    emit_expr off_e;
+    emit_expr b_e;
     emit_instr "call $file_pwrite"
   | Ast.App ({ node = Ast.Var ("file_fsync" | "file_close" as fio); _ }, ch_e)
     when not (List.mem_assoc fio !locals

@@ -1853,6 +1853,15 @@ let initial_env : env =
     ("read_file_bytes", read_file_bytes_scheme);
     ("file_pread", file_pread_scheme);
     ("file_pwrite", file_pwrite_scheme);
+    (* v0.1.222 (mraft dogfood): the same positioned write, taking `bytes`.
+       file_pwrite predates the bytes type by a hundred versions and takes
+       Vec[int], so a program holding a byte string had to explode it into one
+       boxed int per byte to write it at an offset. Both exist: mbtree builds its
+       pages as Vecs and has no reason to change. *)
+    ("file_pwrite_bytes",
+     mono (Ast.TyArrow (Ast.TyCon ("File", []),
+             Ast.TyArrow (Ast.TyInt,
+               Ast.TyArrow (Ast.TyBytes, Ast.TyInt)))));
     ("write_file_bytes", write_file_bytes_scheme);
     (* Phase 44: file system primitives for the docs site SSG *)
     ("list_dir",

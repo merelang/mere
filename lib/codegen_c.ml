@@ -327,6 +327,7 @@ let vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 let uses_read_file_bytes = ref false
 let uses_file_pread = ref false  (* v0.1.83: file_pread (positioned read) *)
 let uses_file_pwrite = ref false  (* v0.1.115: file_pwrite (positioned write) *)
+let uses_file_pwrite_bytes = ref false  (* v0.1.222: the same over `bytes` *)
 let uses_file_openrw = ref false  (* v0.1.115: file_openrw (read/write open) *)
 let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
@@ -2443,6 +2444,14 @@ let rec emit_expr (e : Ast.expr) : string =
        uses_file_io := true;
        uses_file_pwrite := true;
        Printf.sprintf "__lang_file_pwrite(%s, %s, %s)"
+         (emit_expr ch_e) (emit_expr off_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pwrite_bytes"; _ }, ch_e); _ },
+                off_e) ->
+       (* v0.1.222 (mraft dogfood): `file_pwrite_bytes ch off bytes` — the same
+          seek-and-write, without turning a byte string into a vec of ints. *)
+       bytes_used := true;
+       uses_file_pwrite_bytes := true;
+       Printf.sprintf "__lang_file_pwrite_bytes(%s, %s, %s)"
          (emit_expr ch_e) (emit_expr off_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e) ->
        (* v0.1.44: the write half. The vec arg guarantees the vec_int
@@ -7225,6 +7234,18 @@ let strbuf_runtime =
 (* ByteBuf[R]: the same shape as StrBuf, for bytes. Random access is the point —
    `bytes` is immutable and StrBuf appends only — and one byte per byte is the
    other point, against Vec[R, int]'s eight. *)
+(* v0.1.222 (mraft dogfood): positioned write of a byte string. Defined here
+   rather than with the other file_* runtimes because those are emitted before
+   `struct mere_bytes` has a body — the same ordering the ByteBuf freeze hit. *)
+let file_pwrite_bytes_runtime =
+  String.concat "\n"
+    [ "static long long __lang_file_pwrite_bytes(FILE* f, long long off, mere_bytes* b) {";
+      "  if (off < 0) return 0;";
+      "  if (fseek(f, (long)off, SEEK_SET) != 0) return 0;";
+      "  size_t n = fwrite(b->data, 1, (size_t)b->len, f);";
+      "  return (long long)n;";
+      "}" ]
+
 let bytebuf_runtime =
   String.concat "\n"
     [ "typedef struct mere_bytebuf {";
@@ -8962,6 +8983,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   uses_read_file_bytes := false;
   uses_file_pread := false;
   uses_file_pwrite := false;
+  uses_file_pwrite_bytes := false;
   uses_file_openrw := false;
   uses_file_fsync := false;
   uses_file_io := false;
@@ -10156,6 +10178,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if !bytes_used then [bytes_runtime; ""] else [])
+    (* Also after it, for the same reason: it dereferences a mere_bytes. *)
+    @ (if !uses_file_pwrite_bytes then [file_pwrite_bytes_runtime; ""] else [])
     (* After the bytes runtime: freezing a ByteBuf calls __lang_bytes_alloc. *)
     @ (if !bytebuf_used then [bytebuf_runtime; ""] else [])
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime; ""] else [])

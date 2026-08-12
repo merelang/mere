@@ -3984,6 +3984,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
       "  %s = call i64 @__lang_file_pwrite(i64 %s, i64 %s, ptr %s)" r f off v);
     r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App
+                 ({ node = Ast.Var "file_pwrite_bytes"; _ }, ch_e); _ }, off_e); _ },
+             b_e) ->
+    (* v0.1.222: the same positioned write over `bytes`, which is one fwrite
+       instead of a loop — the vec version predates the type. *)
+    file_io_used_llvm := true; file_pio_used_llvm := true; bytes_used := true;
+    (* The positioned-IO runtime is emitted as one block, and file_pread's body
+       calls the Vec[int] accessors whether or not this program has a Vec — so
+       using any of it registers the instance. A program that only writes bytes
+       carries a few unused functions; the alternative is splitting the block into
+       per-function flags, which is more moving parts than the dead IR is worth. *)
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let f = emit_expr env ch_e in
+    let off = emit_expr env off_e in
+    let b = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+      "  %s = call i64 @__lang_file_pwrite_bytes(i64 %s, i64 %s, ptr %s)" r f off b);
+    r
   | Ast.App ({ node = Ast.Var ("file_fsync" | "file_close" as fio); _ }, ch_e) ->
     file_io_used_llvm := true; file_pio_used_llvm := true;
     let f = emit_expr env ch_e in
@@ -9785,6 +9804,25 @@ let file_pio_runtime_llvm =
       "";
       "; Write the vec's bytes at an offset, extending the file if it runs";
       "; past the end. Returns the count written.";
+      (* v0.1.222 (mraft dogfood): bytes go out in one fwrite. `bytes` is
+         { i64 len, i8 data[] }, the same layout bytes_len loads from. *)
+      "define i64 @__lang_file_pwrite_bytes(i64 %h, i64 %off, ptr %b) {";
+      "entry_pwb:";
+      "  %fb = inttoptr i64 %h to ptr";
+      "  %badb = icmp slt i64 %off, 0";
+      "  br i1 %badb, label %zerob, label %seekb";
+      "zerob:";
+      "  ret i64 0";
+      "seekb:";
+      "  %seb = call i32 @fseek(ptr %fb, i64 %off, i32 0)";
+      "  %okb = icmp eq i32 %seb, 0";
+      "  br i1 %okb, label %writeb, label %zerob";
+      "writeb:";
+      "  %nb = load i64, ptr %b";
+      "  %datab = getelementptr i8, ptr %b, i64 8";
+      "  %wb = call i64 @fwrite(ptr %datab, i64 1, i64 %nb, ptr %fb)";
+      "  ret i64 %wb";
+      "}";
       "define i64 @__lang_file_pwrite(i64 %h, i64 %off, ptr %v) {";
       "entry:";
       "  %f = inttoptr i64 %h to ptr";
