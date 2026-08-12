@@ -13,6 +13,10 @@
 let prelude_count = ref 0
 let prelude_decl_count () = !prelude_count
 
+(* How many entries of Parser.declared_types belong to the prelude rather than to the
+   program being checked. *)
+let prelude_type_count = ref 0
+
 (* The name prelude positions carry. It is not a path and no file exists at it:
    that is the point — a position from the prelude is Mere code, but not *this*
    program's, and anything that turns a position into a place has to be able to
@@ -38,6 +42,9 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
     if prelude then parse_prelude () else []
   in
   prelude_count := List.length prelude_decls;
+  (* The parser's type-name table now holds the prelude's; anything the user declares
+     lands in front of it (the list is consed). See warn_declared_types. *)
+  prelude_type_count := List.length !Parser.declared_types;
   let tokens = Lexer.tokenize s in
   let user_prog =
     match base_dir with
@@ -151,6 +158,45 @@ let warn_reserved_name loc name =
           (e.g. `%s_` / `m_%s` / `%s_v`) (see docs/patterns.md §5)"
          name name name name)
 
+(* C struct tags and typedefs from the headers the C backend emits. A Mere `type`
+   lowers to `typedef struct <name> <name>;`, which claims both the tag namespace and
+   the ordinary one — so it collides with `union wait` in <sys/wait.h> and with the
+   `wait()` declaration next to it. The mraft dogfood named a type `wait` and got the
+   failure from clang, because this check only ever looked at `let` names.
+
+   Function and keyword collisions are covered by `reserved_c_names` above, which
+   applies to type names too for the same reason (a typedef is an ordinary
+   identifier). This list is only the struct tags, which a function-name list has no
+   reason to contain. *)
+let reserved_c_type_names =
+  [
+    (* <sys/wait.h>, <sys/resource.h> *)
+    "wait"; "rusage";
+    (* <time.h>, <sys/time.h> *)
+    "tm"; "timespec"; "timeval"; "timezone"; "itimerval";
+    (* <sys/stat.h>, <dirent.h> *)
+    "stat"; "dirent";
+    (* <sys/socket.h>, <netinet/in.h>, <netdb.h> *)
+    "sockaddr"; "sockaddr_in"; "sockaddr_in6"; "msghdr"; "cmsghdr"; "iovec";
+    "linger"; "in_addr"; "in6_addr"; "ip_mreq"; "ipv6_mreq";
+    "addrinfo"; "hostent"; "servent"; "protoent"; "netent";
+    (* <termios.h>, <sys/select.h>, <signal.h> *)
+    "termios"; "winsize"; "fd_set"; "sigaction"; "sigevent"; "sigaltstack";
+    (* <stdio.h>, <stdlib.h> *)
+    "div_t"; "ldiv_t"; "lldiv_t"; "lconv";
+    (* <pthread.h> — emitted whenever a program spawns *)
+    "sched_param";
+  ]
+
+let warn_reserved_type_name loc name =
+  if List.mem name reserved_c_names || List.mem name reserved_c_type_names then
+    warn loc
+      (Printf.sprintf
+         "type name `%s` collides with a C type, keyword or libc symbol — this will \
+          be a compile error at codegen, from the C compiler rather than from here. \
+          Renaming is recommended (e.g. `%s_` / `m_%s`) (see docs/patterns.md \194\1675)"
+         name name name)
+
 let rec warn_reserved_in_pattern (p : Ast.pattern) : unit =
   match p.Ast.pnode with
   | Ast.P_var n -> warn_reserved_name p.Ast.ploc n
@@ -164,7 +210,18 @@ let rec warn_reserved_in_pattern (p : Ast.pattern) : unit =
     warn_reserved_in_pattern b
   | _ -> ()
 
+(* Warn about type names C cannot take. Done from the parser's table rather than from
+   the decls, because a `Top_type` carries no position and a warning an editor cannot
+   place is a warning nobody sees. *)
+let warn_declared_types () =
+  let all = !Parser.declared_types in
+  let mine = List.length all - !prelude_type_count in
+  List.iteri
+    (fun i (name, loc) -> if i < mine then warn_reserved_type_name loc name)
+    all
+
 let process_decls eval_env type_env decls =
+  warn_declared_types ();
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
@@ -387,6 +444,9 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
     Trait_elab.elaborate
       (parse_program ?base_dir ~search_paths source)
   in
+  (* The same warnings process_decls raises. This is the path an editor takes, and a
+     warning it cannot see is one nobody sees. *)
+  warn_declared_types ();
   let type_env = ref Typer.initial_env in
   (* With `on_error`, a declaration that does not type-check is *reported* and the
      walk continues, so a file with three broken functions says so three times
