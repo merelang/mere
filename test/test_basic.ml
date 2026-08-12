@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.223" Version.v "0.1.223";
+  check "version is 0.1.224" Version.v "0.1.224";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11710,6 +11710,43 @@ let () =
         let lg = MkLogger 0 in \
         let _ = spawn (fn () -> let _ = lg in ()) in \
         ()") "()";
+  (* v0.1.224 (mraft dogfood P5): a variable bound by a *constructor* pattern is
+     capturable when its type is known. The capture check's pattern binder handled
+     P_var and tuples-over-tuples and gave up on everything else, binding those
+     names with an unknown type — so this was refused with "cannot capture `p` of
+     unknown type" even with `int list` written on the parameter, and the workaround
+     was to ascribe `(p : int)` to a fresh name and capture that. *)
+  check "move: a name bound by a constructor pattern can cross a spawn"
+    (Pipeline.process
+       "let rec each = fn (xs: int list) -> \
+          match xs with \
+          | Nil -> () \
+          | Cons (p, rest) -> let _ = spawn (fn () -> print_int p) in each rest in \
+        let _ = each (Cons (7, Nil)) in \
+        \"went\"") "\"went\"";
+  (* And it stays refused when the payload's type really is unknown, with the
+     diagnosis it deserves: polymorphic rather than unknown. *)
+  check_raises_containing "move: a polymorphic payload still cannot cross a spawn"
+    "polymorphic type"
+    (fun () -> Pipeline.process
+       "let rec first = fn (xs) -> \
+          match xs with \
+          | Nil -> () \
+          | Cons (v, _) -> let _ = spawn (fn () -> let _ = v in ()) in () in \
+        let _ = first Nil in \
+        0");
+  (* A record pattern's field is decomposed the same way. The type is named
+     `CapPair` rather than `Pair` because the typer's type registries are global to
+     the process and never reset, so a `view Pair` declared by an earlier test is
+     still registered here — see the separate fix for that. *)
+  check "move: a record pattern's field can cross a spawn"
+    (Pipeline.process
+       "type CapPair = { a: int, b: int }; \
+        let p = CapPair { a = 1, b = 2 } in \
+        let _ = (match p with CapPair { a = x, b = _ } -> \
+                   let _ = spawn (fn () -> print_int x) in ()) in \
+        \"fields\"") "\"fields\"";
+
   (* v0.1.29 (mkv dogfood P2): region-bound mutable containers are neither
      Send nor Sync — their runtimes are lock-free, so a shared Map/Vec
      across spawn is a data race. It previously compiled (the region

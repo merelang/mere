@@ -93,10 +93,20 @@ let rec free_vars (e : Ast.expr) : SS.t =
 
 (* --- binding-env construction --- *)
 
-(* Bind a pattern's variables with fresh ids. For P_var the type is exactly
-   the bound value's type; for a tuple pattern over a tuple type we split
-   component-wise; anything else binds with an unknown type (None), which
-   makes those bindings rejected if captured — sound but conservative. *)
+(* Bind a pattern's variables with fresh ids, giving each the type it actually has
+   where that can be worked out. Anything left over binds with an unknown type
+   (None), which makes those bindings rejected if captured — sound, and the reason
+   it is worth working out as much as possible.
+ 
+   Constructor and record patterns were in that leftover case until v0.1.223, so
+   `match ports with Cons (p, rest) -> ... spawn (fn () -> f p)` was refused with
+   "cannot capture `p` of unknown type", even with `ports : int list` written down.
+   The mraft dogfood hit it on every peer it spawned a thread for, and the
+   workaround — `let q = (p : int) in`, capturing `q` — reads like superstition.
+ 
+   The declared payload type is enough: the constructor registry knows the type
+   parameters and the payload, and the scrutinee's own arguments say what to put in
+   for them. No unification, and nothing this pass is allowed to mutate. *)
 let rec bind_pattern (env : venv) (p : Ast.pattern) (ty : Ast.ty option) : venv =
   match p.Ast.pnode, Option.map Ast.walk ty with
   | Ast.P_var n, _ -> (n, { id = fresh_id (); ty }) :: env
@@ -105,9 +115,28 @@ let rec bind_pattern (env : venv) (p : Ast.pattern) (ty : Ast.ty option) : venv 
     bind_pattern env inner ty
   | Ast.P_tuple ps, Some (Ast.TyTuple ts) when List.length ps = List.length ts ->
     List.fold_left2 (fun env p t -> bind_pattern env p (Some t)) env ps ts
-  | _ ->
-    List.fold_left (fun env n -> (n, { id = fresh_id (); ty = None }) :: env)
-      env (pattern_vars p)
+  | Ast.P_constr (cname, Some inner), Some (Ast.TyCon (tname, args)) ->
+    (match Hashtbl.find_opt Typer.constructors cname with
+     | Some { Typer.params; arg = Some arg_ty; type_name }
+       when type_name = tname && List.length params = List.length args ->
+       bind_pattern env inner
+         (Some (Typer.subst_type_params (List.combine params args) arg_ty))
+     | _ -> bind_unknown env p)
+  | Ast.P_record (rname, fields), Some (Ast.TyCon (tname, args)) ->
+    (match Hashtbl.find_opt Typer.records rname with
+     | Some { Typer.r_params; r_fields }
+       when rname = tname && List.length r_params = List.length args ->
+       let m = List.combine r_params args in
+       List.fold_left (fun env (fname, fpat) ->
+         match List.assoc_opt fname r_fields with
+         | Some fty -> bind_pattern env fpat (Some (Typer.subst_type_params m fty))
+         | None -> bind_unknown env fpat) env fields
+     | _ -> bind_unknown env p)
+  | _ -> bind_unknown env p
+
+and bind_unknown (env : venv) (p : Ast.pattern) : venv =
+  List.fold_left (fun env n -> (n, { id = fresh_id (); ty = None }) :: env)
+    env (pattern_vars p)
 
 let bind_name (env : venv) (n : string) (ty : Ast.ty option) : venv =
   (n, { id = fresh_id (); ty }) :: env
