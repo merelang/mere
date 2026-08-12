@@ -207,3 +207,108 @@ let completions_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
       else Some { c_name = b.b_name; c_ty = b.b_ty; c_prelude = b.b_prelude }
     end)
     (scope_at ?prelude_decls prog line col)
+
+(* --- what is in this file -------------------------------------------------
+
+   The outline an editor shows in its breadcrumbs and its symbol search. Only
+   what has a position: a value declaration is located by the pattern that names
+   it, and a `let rec` by the expression it binds. A `type` declaration has no
+   position in the tree at all — `Top_type` carries a name and its variants and
+   nothing else — so it cannot honestly be pointed at, and is left out rather
+   than pointed at the wrong line. *)
+
+type symbol = {
+  s_name : string;
+  s_loc : Loc.t;
+  s_is_fn : bool;
+}
+
+let symbols ?(prelude_decls = 0) (prog : Ast.program) : symbol list =
+  let is_fn (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Fun _ -> true
+    | _ ->
+      (match e.Ast.ty with
+       | Some t -> (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
+       | None -> false)
+  in
+  List.concat (List.mapi (fun i d ->
+    if i < prelude_decls then []
+    else
+      match d with
+      | Ast.Top_let (pat, (v : Ast.expr)) ->
+        List.map (fun (name, loc) ->
+          { s_name = name; s_loc = loc; s_is_fn = is_fn v })
+          (pattern_bindings pat)
+      | Ast.Top_let_rec bindings ->
+        List.map (fun (name, (v : Ast.expr)) ->
+          { s_name = name; s_loc = v.Ast.loc; s_is_fn = is_fn v }) bindings
+      | _ -> []) prog.Ast.decls)
+
+(* --- colour, from what the compiler knows --------------------------------
+
+   Syntax highlighting is normally a pile of regular expressions guessing at a
+   language. The compiler does not have to guess: it knows that this name is a
+   parameter and that one is a top-level function, that this is a constructor and
+   that this is a type. Semantic tokens are how that reaches the editor.
+
+   Only what the tree can say for certain is emitted. Keywords, strings and
+   numbers are left to the grammar, which is perfectly good at them; what it
+   cannot do is tell a parameter from a global, and that is exactly what is
+   returned here. *)
+
+type token_kind =
+  | Tk_function     (* a name bound to something arrow-typed *)
+  | Tk_variable     (* any other bound name *)
+  | Tk_parameter    (* a function's own parameter *)
+  | Tk_constructor  (* Some, Cons, ... *)
+
+let token_kind_name = function
+  | Tk_function -> "function"
+  | Tk_variable -> "variable"
+  | Tk_parameter -> "parameter"
+  | Tk_constructor -> "enumMember"
+
+type token = {
+  t_loc : Loc.t;
+  t_kind : token_kind;
+}
+
+(* Every occurrence of a name in the file, classified. Walks the whole tree,
+   carrying the parameters in scope so a use of one can be told from a use of a
+   global — the distinction a grammar cannot make and the one worth having. *)
+let semantic_tokens ?(prelude_decls = 0) (prog : Ast.program) : token list =
+  let out = ref [] in
+  let emit loc kind =
+    (* A position from an imported file is not in this file's text; colouring by
+       its line and column would paint an unrelated line. *)
+    if loc.Loc.line > 0 && loc.Loc.file = None then
+      out := { t_loc = loc; t_kind = kind } :: !out
+  in
+  let arrow (e : Ast.expr) =
+    match e.Ast.ty with
+    | Some t -> (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
+    | None -> (match e.Ast.node with Ast.Fun _ -> true | _ -> false)
+  in
+  let rec walk params (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var name ->
+       if String.length name > 0 && name.[0] >= 'A' && name.[0] <= 'Z' then
+         emit e.Ast.loc Tk_constructor
+       else if List.mem name params then emit e.Ast.loc Tk_parameter
+       else emit e.Ast.loc (if arrow e then Tk_function else Tk_variable)
+     | Ast.Constr (_, _) -> emit e.Ast.loc Tk_constructor
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Fun (param, _, body) -> walk (param :: params) body
+    | _ -> List.iter (walk params) (Ast.children e)
+  in
+  List.iteri (fun i d ->
+    if i >= prelude_decls then List.iter (walk []) (Ast.decl_exprs d)) prog.Ast.decls;
+  walk [] prog.Ast.main;
+  (* The protocol wants them in order, and encodes each one relative to the one
+     before it. *)
+  List.sort (fun a b ->
+    match compare a.t_loc.Loc.line b.t_loc.Loc.line with
+    | 0 -> compare a.t_loc.Loc.col b.t_loc.Loc.col
+    | c -> c) (List.rev !out)

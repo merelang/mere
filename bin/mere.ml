@@ -296,18 +296,7 @@ let rv_flags mode args =
    pattern-arity lookup) and then skip the prelude decls when emitting,
    so the formatted output is just the user's own source. *)
 let format_source ~base_dir source =
-  let prelude_decls = Mere.Pipeline.parse_prelude () in
-  let n_prelude = List.length prelude_decls in
-  let prog = Mere.Pipeline.parse_program ~prelude:true ~base_dir
-               ~search_paths:!search_paths source in
-  let user_decls =
-    let rec drop n xs = if n <= 0 then xs else match xs with
-      | [] -> []
-      | _ :: rest -> drop (n - 1) rest
-    in
-    drop n_prelude prog.decls
-  in
-  Mere.Formatter.format_program { prog with decls = user_decls }
+  Mere.Pipeline.format_source ~base_dir ~search_paths:!search_paths source
 
 (* Apply [f] to each file path; collect any lex/parse failures and
    report them with a code frame, then exit 1. Continues past

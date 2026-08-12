@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.211 — 2026-08-12
+
+_Formatting, an outline, and colour that is not guessing._
+
+**`textDocument/formatting`** runs the function `mere fmt` runs. That is the whole
+point of it living in `Pipeline` rather than in the CLI: format-on-save and the
+command line cannot come to different conclusions about what formatted means. It
+declines twice, deliberately — a file that does not parse is left alone, because
+replacing a buffer with the best guess of a parser that failed is how somebody
+loses work, and an already-formatted file produces no edit rather than an edit
+that changes nothing. It also re-adds the trailing newline the CLI's
+`print_endline` supplies, without which format-on-save would strip it from every
+file, every time.
+
+**`textDocument/documentSymbol`** lists the file's value declarations for the
+outline, telling a function from a value by its type. `type` declarations are
+absent and honestly so: `Top_type` carries a name and its variants and no
+position, so it cannot be pointed at without guessing.
+
+**`textDocument/semanticTokens/full`** is the compiler saying which names are
+parameters, which are functions, which are constructors. Syntax highlighting is
+normally regular expressions guessing at a language; this one does not have to
+guess. The editor's grammar keeps what it is good at — keywords, strings,
+numbers — and the distinction it *cannot* make, a parameter from a global, comes
+from the tree.
+
+_The encoding is five integers per token and every one is relative to the token
+before it, which is compact and unforgiving: wrong deltas paint the file at an
+offset. The test decodes the stream back into positions and names rather than
+asserting on the numbers._
+
+_The VS Code extension needed no change for any of this — it asks the server what
+it can do during `initialize`, so three new capabilities simply started working.
+That is the argument for keeping the two apart, arriving on schedule._
+
+---
+
 ## v0.1.210 — 2026-08-12
 
 _Positions know which file they came from, and the typer reports more than one
