@@ -598,8 +598,24 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyCon (name, args) ->
     (* Polymorphic instantiation (e.g., `int list` → `list_int`).
        Phase 15.1: for Vec[R, T]'s region marker (TyRef _ R TyUnit),
-       use only the region name as the tag. *)
-    name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+       use only the region name as the tag.
+
+       An *unresolved* region marker — a type variable still sitting in that
+       slot — tags as the default region rather than falling through to the
+       TyVar case below, which erases to `int`. The typedef for the same type is
+       emitted from a copy where the region did resolve to `__heap`, so erasing
+       produced two names for one type: `Vec_int_int` in a forward declaration
+       and `Vec___heap_int` in the typedef, and a prototype for a type that does
+       not exist. Found by the mpng dogfood (PAIN.md P5). *)
+    let region_parameterised =
+      match name with "Vec" | "Map" | "StrBuf" -> true | _ -> false
+    in
+    let tag_arg i a =
+      match i, Ast.walk a with
+      | 0, (Ast.TyVar _ | Ast.TyParam _) when region_parameterised -> "__heap"
+      | _ -> ty_tag a
+    in
+    name ^ "_" ^ String.concat "_" (List.mapi tag_arg args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
     (* Region marker — use the region name itself as the tag. *)
     r
@@ -7745,8 +7761,17 @@ let lift_inner_fns
       ) fn_specs;
       List.iter (fun (_, p, fn_body, _, _) ->
         walk_in_fn p [] fn_body) fn_specs;
-      let _ = known_before in
-      walk_in_fn host_param (rec_names @ host_locals) body
+      walk_in_fn host_param (rec_names @ host_locals) body;
+      (* Restore: a `let rec`'s names are in scope for its own bindings and its
+         body, and nowhere else. Leaving them in `known` leaked them into every
+         *later* top-level function, where a parameter of the same name was then
+         taken for one of them — so it was not recorded as a capture, and the
+         emitted C referred to an identifier it never declared.
+         `known_before` was already being taken here; the line that put it back
+         was `let _ = known_before in`, which does nothing. Found by the mpng
+         dogfood: `png.mere` has an inner `let rec row`, `encode.mere` has a
+         parameter called `row`, and the second one lost it. *)
+      known := known_before
     | Ast.Fun (_, _, body) ->
       walk_in_fn host_param host_locals body
     | _ -> walk_children walk_in_fn host_param host_locals e

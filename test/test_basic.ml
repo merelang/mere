@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.216" Version.v "0.1.216";
+  check "version is 0.1.217" Version.v "0.1.217";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12810,6 +12810,58 @@ let () =
         let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
         contains (Codegen_llvm.emit_program ~main_ty prog) "!DISubprogram"))
     "false";
+
+  (* Two C-backend bugs the mpng dogfood found, both of which emitted C that a C
+     compiler rejects — so neither was visible on the interpreter, and neither was
+     visible from reading the output without compiling it. Both tests compile the
+     emitted C in `scripts/ctest.sh`; these check the text, which is what fails
+     first and says why. *)
+  (* P5: an unresolved region marker in a Vec type tagged as `int` — the erasure
+     meant for a dead type variable — while the typedef for the same type was
+     emitted with `__heap`. Two names for one type, and a forward declaration of
+     something nobody defines. The test names both spellings, since which one
+     appears is the whole question. *)
+  let p5_src =
+    "let f = fn data ->\n\
+     \  let rec go = fn (i: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) -> fn acc ->\n\
+     \    if i >= 3 then acc\n\
+     \    else\n\
+     \      let _ = vec_push acc (vec_get data i + a + b + c) in\n\
+     \      go (i + 1) a b c acc in\n\
+     \  go 0 1 2 3 (vec_new ());\n\
+     let v = vec_new ();\n\
+     let _ = vec_push v 5;\n\
+     let _ = print_int (vec_get (f v) 0);"
+  in
+  check "c: an unresolved region marker tags as the default region, not as int"
+    (let c = codegen p5_src in
+     Printf.sprintf "%b %b"
+       (contains c "closure_Vec___heap_int") (contains c "closure_Vec_int_int"))
+    "true false";
+
+  (* P6: a `let rec`'s names leaked into `known` and stayed there, so a *later*
+     function's parameter of the same name was taken for one of them and never
+     recorded as a capture. The lifted body then referred to an identifier that
+     was never declared. *)
+  check "c: a later function's parameter is not mistaken for an earlier `let rec` name"
+    (let c = codegen
+       "let a = fn (n: int) ->\n\
+        \  let rec row = fn (y: int) -> if y >= n then 0 else row (y + 1) in\n\
+        \  row 0;\n\
+        let b = fn row -> fn (k: int) ->\n\
+        \  let out = vec_new () in\n\
+        \  let rec go = fn (i: int) ->\n\
+        \    if i >= vec_len row then out\n\
+        \    else let _ = vec_push out (vec_get row i + k) in go (i + 1) in\n\
+        \  go 0;\n\
+        let v = vec_new ();\n\
+        let _ = vec_push v 5;\n\
+        let _ = print_int (a 3 + vec_get (b v 1) 0);"
+     in
+     (* The lifted loop must take `row` as a capture. Without it the body reads
+        mu_row and nothing declares it. *)
+     string_of_bool (contains c "mere_vec_int* mu_row"))
+    "true";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
