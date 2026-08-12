@@ -312,3 +312,105 @@ let semantic_tokens ?(prelude_decls = 0) (prog : Ast.program) : token list =
     match compare a.t_loc.Loc.line b.t_loc.Loc.line with
     | 0 -> compare a.t_loc.Loc.col b.t_loc.Loc.col
     | c -> c) (List.rev !out)
+
+(* --- every occurrence of one binding --------------------------------------
+
+   Find references and rename are the same question — where else is *this* name,
+   meaning this binding rather than every name spelled the same. Shadowing is the
+   whole difficulty: two `x`es in one file may be two different things, and a
+   rename that treats them as one is a rename that breaks the program.
+
+   So the walk resolves each occurrence to the binding it actually refers to,
+   and the answer is the occurrences that resolved to the same one. Binder sites
+   are included, which is what lets the cursor be on the definition. *)
+
+let occurrences ?(prelude_decls = 0) (prog : Ast.program)
+  : (Loc.t * binding) list =
+  let out = ref [] in
+  let emit loc b = if loc.Loc.line > 0 then out := (loc, b) :: !out in
+  (* A name resolves to the innermost binding of that name in scope. *)
+  let resolve env name = List.find_opt (fun b -> b.b_name = name) env in
+  let bind_pattern env pat =
+    List.map (fun (n, l) -> binding_of (n, l) None) (pattern_bindings pat) @ env
+  in
+  let rec walk env (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var name ->
+       (match resolve env name with Some b -> emit e.Ast.loc b | None -> ())
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Let (pat, value, body) ->
+      walk env value;
+      let env' = bind_pattern env pat in
+      (* The binder itself is an occurrence: a cursor on the definition should
+         find the uses, not nothing. *)
+      List.iter (fun (n, l) ->
+        match resolve env' n with Some b -> emit l b | None -> ())
+        (pattern_bindings pat);
+      walk env' body
+    | Ast.Let_rec (bindings, body) ->
+      let env' =
+        List.map (fun (n, (v : Ast.expr)) -> binding_of (n, v.Ast.loc) v.Ast.ty)
+          bindings @ env
+      in
+      List.iter (fun (_, v) -> walk env' v) bindings;
+      walk env' body
+    | Ast.Fun (param, ty, body) -> walk (binding_of (param, e.Ast.loc) ty :: env) body
+    | Ast.With (name, value, body) ->
+      walk env value;
+      walk (binding_of (name, e.Ast.loc) value.Ast.ty :: env) body
+    | Ast.Match (scrutinee, arms) ->
+      walk env scrutinee;
+      List.iter (fun (pat, guard, body) ->
+        let env' = bind_pattern env pat in
+        List.iter (fun (n, l) ->
+          match resolve env' n with Some b -> emit l b | None -> ())
+          (pattern_bindings pat);
+        (match guard with Some g -> walk env' g | None -> ());
+        walk env' body) arms
+    | _ -> List.iter (walk env) (Ast.children e)
+  in
+  let top =
+    List.concat (List.mapi (fun i d ->
+      let prelude = i < prelude_decls in
+      match d with
+      | Ast.Top_let (pat, (v : Ast.expr)) ->
+        List.map (fun b -> binding_of ~prelude b v.Ast.ty) (pattern_bindings pat)
+      | Ast.Top_let_rec bindings ->
+        List.map (fun (n, (v : Ast.expr)) ->
+          binding_of ~prelude (n, v.Ast.loc) v.Ast.ty) bindings
+      | _ -> []) prog.Ast.decls)
+  in
+  List.iteri (fun i d ->
+    if i >= prelude_decls then begin
+      (* A top-level declaration's own name is an occurrence too. *)
+      (match d with
+       | Ast.Top_let (pat, _) ->
+         List.iter (fun (n, l) ->
+           match resolve top n with Some b -> emit l b | None -> ())
+           (pattern_bindings pat)
+       | _ -> ());
+      List.iter (walk top) (Ast.decl_exprs d)
+    end) prog.Ast.decls;
+  walk top prog.Ast.main;
+  List.rev !out
+
+(* Two occurrences are of the same binding when they resolved to the same one —
+   same name, introduced at the same place. *)
+let same_binding (a : binding) (b : binding) =
+  a.b_name = b.b_name
+  && a.b_loc.Loc.line = b.b_loc.Loc.line
+  && a.b_loc.Loc.col = b.b_loc.Loc.col
+  && a.b_loc.Loc.file = b.b_loc.Loc.file
+
+(* Every place the binding under the cursor appears, and the binding itself.
+   `None` when the cursor is not on a name. *)
+let references_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
+  : (binding * Loc.t list) option =
+  let all = occurrences ?prelude_decls prog in
+  match List.find_opt (fun (loc, _) -> covers loc line col) all with
+  | None -> None
+  | Some (_, target) ->
+    Some (target,
+          List.filter_map (fun (loc, b) ->
+            if same_binding b target then Some loc else None) all)

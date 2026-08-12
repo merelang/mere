@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.213 — 2026-08-12
+
+_Find references, and rename._
+
+_The same question — where else is **this** binding — and the difficulty in both is
+shadowing: two `x`es in one file may be two different things, and treating them as
+one is a rename that breaks the program._
+
+```mere
+let x = 1;                        // renaming this one touches
+let f = fn (n: int) ->
+  let x = n + 1 in                // ... not this one, nor
+  x + x;                          // ... these
+let _ = print_int (f x + x);      // ... but these two
+```
+
+So the walk resolves **every occurrence to the binding it refers to**, and the
+answer is the occurrences that resolved to the same one — the reverse of what
+go-to-definition does, and the one shape `Query` was missing. Binder positions are
+included, so the cursor may be on the definition rather than on a use.
+
+**Rename refuses what the file does not own.** A prelude name or a builtin has its
+definition somewhere the edit cannot reach, and renaming the uses while leaving
+the definition is worse than refusing. The refusal is returned from
+`prepareRename`, which is where an editor asks before offering a box to type in —
+so it arrives as a message rather than as a broken file.
+
+_That is the LSP's list done: diagnostics, hover, definition, completion, outline,
+formatting, semantic tokens, references, rename. What is left is deliberate —
+incremental sync (nothing to gain yet), and the twenty typer `raise` sites whose
+worst case is one error per declaration rather than all of them._
+
+---
+
 ## v0.1.212 — 2026-08-12
 
 _`mere -c -g`: a debugger on the compiled program shows the Mere source._
