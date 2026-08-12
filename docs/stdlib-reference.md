@@ -42,7 +42,10 @@ Legend:
 | `print_err` | `str -> unit` | Write to stderr with newline |
 | `read_line` | `unit -> str` | One line from stdin; empty string on EOF |
 | `read_file` ⚡ | `str -> str` | Read the whole file **as text**; raises on failure. On the C backend the str is NUL-terminated, so binary data silently truncates at the first 0x00 byte (the interpreter's strings carry NULs) — use `read_file_bytes` for binary (v0.1.43) |
-| `read_file_bytes` ⚡ | `str -> Vec[R, int]` | Read the whole file as raw bytes — one int (0..255) per byte, binary-safe on every supported backend. interp + C only (v0.1.43, CRC-32 probe) |
+| `read_file_bytes` ⚡ | `str -> Vec[R, int]` | Read the whole file as raw bytes — one int (0..255) per byte, binary-safe on every supported backend. interp + C only (v0.1.43, CRC-32 probe). Costs eight bytes per byte; prefer `read_bytes` |
+| `read_bytes` ⚡ | `str -> bytes` | The whole file as a `bytes`: one byte per byte, and no NUL hazard. interp + C (v0.1.216, mpng dogfood) |
+| `write_bytes` ⚡ | `str -> bytes -> unit` | Write a `bytes` to a file. interp + C |
+| `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout, unbuffered and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. interp + C + LLVM (v0.1.216) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
 | `write_file_bytes` ⚡ | `str -> Vec[R, int] -> unit` | Write an int vec as raw bytes (each element 0..255) — the write half of the binary path; PPM P6 etc. interp + C only (v0.1.44, Mandelbrot probe) |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |

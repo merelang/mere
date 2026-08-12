@@ -3838,6 +3838,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
     "0"  (* unit / int 0 *)
+  (* print_bytes: `fwrite` with the length, which is the whole reason `bytes`
+     exists as a type. `puts` would stop at the first zero byte, and did — see the
+     mpng dogfood, where the same program wrote different files on different
+     backends. *)
+  | Ast.App ({ node = Ast.Var "print_bytes"; _ }, arg) ->
+    bytes_used := true;
+    let bv = emit_expr env arg in
+    emit_instr (Printf.sprintf "  call i64 @__lang_print_bytes(ptr %s)" bv);
+    "0"
   (* print_int / print_bool: `print (str_of_int x)` and `print (if x then ...)`
      already work here, so these are a rewrite rather than new runtime calls.
      They used to be refused as "no LLVM lowering", which made a documented
@@ -8190,6 +8199,19 @@ let bytes_runtime_llvm =
       "  %b = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
       "  store i64 %len, ptr %b";
       "  ret ptr %b";
+      "}";
+      (* A write with the length, which is the point of the type. `write(1, ...)`
+         rather than `fwrite` to stdout: getting at `stdout` from IR means naming
+         a symbol that differs between platforms (`__stdoutp`, `stdout`), and the
+         file descriptor is the same everywhere. It is also unbuffered, which is
+         what `print_no_nl` promises. *)
+      "declare i64 @write(i32, ptr, i64)";
+      "define i64 @__lang_print_bytes(ptr %b) {";
+      "entry:";
+      "  %len = load i64, ptr %b";
+      "  %data = getelementptr i8, ptr %b, i64 8";
+      "  call i64 @write(i32 1, ptr %data, i64 %len)";
+      "  ret i64 0";
       "}";
       "define i64 @__lang_bytes_get(ptr %b, i64 %i) {";
       "entry:";

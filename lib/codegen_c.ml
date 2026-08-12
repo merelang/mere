@@ -2151,6 +2151,20 @@ let rec emit_expr (e : Ast.expr) : string =
        bytes_used := true; Printf.sprintf "__lang_str_of_bytes(%s)" (emit_expr arg)
      | Ast.Var "bytes_len" ->
        bytes_used := true; Printf.sprintf "((long long)(%s)->len)" (emit_expr arg)
+     (* The I/O boundary. `fwrite` with the length, not `fputs`: a `bytes` may
+        contain a zero byte, and `print_no_nl` on a `str` could not, which is the
+        bug this exists to make unnecessary. *)
+     | Ast.Var "print_bytes" ->
+       bytes_used := true;
+       Printf.sprintf
+         "({ mere_bytes* __pb = %s; fwrite(__pb->data, 1, (size_t)__pb->len, stdout); \
+          fflush(stdout); 0; })" (emit_expr arg)
+     | Ast.Var "read_bytes" ->
+       bytes_used := true;
+       Printf.sprintf "__lang_read_bytes(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "write_bytes"; _ }, path_e) ->
+       bytes_used := true;
+       Printf.sprintf "__lang_write_bytes(%s, %s)" (emit_expr path_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e) ->
        bytes_used := true;
        Printf.sprintf "__lang_bytes_get(%s, %s)" (emit_expr b_e) (emit_expr arg)
@@ -7001,6 +7015,23 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
 let bytes_runtime =
   String.concat "\n"
     [ "struct mere_bytes { long long len; unsigned char data[]; };";
+      "static mere_bytes* __lang_read_bytes(const char* path) {";
+      "  FILE* f = fopen(path, \"rb\");";
+      "  if (!f) { fprintf(stderr, \"read_bytes: %s\\n\", path); exit(1); }";
+      "  fseek(f, 0, SEEK_END); long long n = ftell(f); fseek(f, 0, SEEK_SET);";
+      "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(__lang_current_region, sizeof(mere_bytes) + (size_t)n);";
+      "  b->len = n;";
+      "  if (n > 0 && fread(b->data, 1, (size_t)n, f) != (size_t)n) { fclose(f); fprintf(stderr, \"read_bytes: short read\\n\"); exit(1); }";
+      "  fclose(f);";
+      "  return b;";
+      "}";
+      "static long long __lang_write_bytes(const char* path, mere_bytes* b) {";
+      "  FILE* f = fopen(path, \"wb\");";
+      "  if (!f) { fprintf(stderr, \"write_bytes: %s\\n\", path); exit(1); }";
+      "  fwrite(b->data, 1, (size_t)b->len, f);";
+      "  fclose(f);";
+      "  return 0;";
+      "}";
       "static mere_bytes* __lang_bytes_alloc(long long len) {";
       "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(__lang_current_region, sizeof(mere_bytes) + (size_t)len);";
       "  b->len = len;";

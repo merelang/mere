@@ -2311,6 +2311,48 @@ let builtin_bytes_of_str =
 let builtin_str_of_bytes =
   V_builtin ("str_of_bytes", fun v -> V_str (expect_bytes "str_of_bytes" v))
 
+(* The I/O boundary for `bytes`, which is where its absence hurt: everything in
+   memory could be a `bytes` already, but reading, writing and printing one had to
+   go through `str` or `Vec[int]`.
+
+   Through `str` does not work at all in the compiled backends, where a `str` is a
+   NUL-terminated C string: `print_no_nl (chr 0)` writes nothing there and the zero
+   byte on the interpreter, so the same program produced different files depending
+   on which backend ran it. A `bytes` carries its length in every backend, which is
+   why these three can be correct. Found by the mpng dogfood. *)
+let builtin_print_bytes =
+  V_builtin ("print_bytes", fun v ->
+    print_string (expect_bytes "print_bytes" v);
+    flush stdout;
+    V_unit)
+
+let builtin_read_bytes =
+  V_builtin ("read_bytes", fun v ->
+    match v with
+    | V_str path ->
+      (try
+         let ic = open_in_bin path in
+         let n = in_channel_length ic in
+         let s = really_input_string ic n in
+         close_in ic;
+         bytes_v s
+       with Sys_error msg -> raise (Eval_error (Loc.dummy, "read_bytes: " ^ msg)))
+    | _ -> failwith "read_bytes: expected str")
+
+let builtin_write_bytes =
+  V_builtin ("write_bytes", fun p ->
+    match p with
+    | V_str path ->
+      V_builtin ("write_bytes_partial", fun v ->
+        let s = expect_bytes "write_bytes" v in
+        (try
+           let oc = open_out_bin path in
+           output_string oc s;
+           close_out oc;
+           V_unit
+         with Sys_error msg -> raise (Eval_error (Loc.dummy, "write_bytes: " ^ msg))))
+    | _ -> failwith "write_bytes: expected str")
+
 let builtin_bytes_of_vec =
   V_builtin ("bytes_of_vec", fun v ->
     match v with
@@ -2337,6 +2379,9 @@ let initial_env : env =
     ("bytes_concat", ref builtin_bytes_concat);
     ("bytes_of_hex", ref builtin_bytes_of_hex);
     ("hex_of_bytes", ref builtin_hex_of_bytes);
+    ("print_bytes",  ref builtin_print_bytes);
+    ("read_bytes",   ref builtin_read_bytes);
+    ("write_bytes",  ref builtin_write_bytes);
     ("bytes_of_str", ref builtin_bytes_of_str);
     ("str_of_bytes", ref builtin_str_of_bytes);
     ("bytes_of_vec", ref builtin_bytes_of_vec);
