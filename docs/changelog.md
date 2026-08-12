@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.220 — 2026-08-12
+
+_Type inference was quadratic in the number of bindings. It is linear now._
+
+```
+                     inference (mere -t)      LSP, per keystroke
+  4 000 bindings     0.16s  ->  0.02s          524ms  ->    32ms
+  8 000 bindings     0.50s  ->  0.04s         1834ms  ->    65ms
+ 16 000 bindings     1.72s  ->  0.09s         7741ms  ->   135ms
+ 22 466 lines (real)                          5261ms  ->  1251ms
+```
+
+`generalize` decided which type variables to quantify by collecting the free
+variables of **every scheme in the environment** and quantifying what was not
+among them. That is the textbook definition, and it costs O(environment) per
+binding — so checking N bindings cost O(N²).
+
+Nobody noticed while the compiler only ran once per file. The LSP shipped in
+v0.1.207 re-checks the whole document on every keystroke, which turned a cost
+nobody paid into 5.3 seconds of latency per character on a 22k-line file. The
+profile named one function.
+
+The fix is levels (Rémy's ranks): each type variable records how many
+generalizable bindings it was created inside, unification lowers that number
+when a variable escapes into an outer type, and generalization quantifies
+exactly the variables still deeper than the binding — no environment scan at
+all. The `level` field on `Ast.tyvar` is the whole representational cost.
+
+**The old definition is kept as an oracle.** `MERE_LEVEL_CHECK=1` computes both
+answers at every generalization and reports any disagreement (add
+`MERE_LEVEL_CHECK_TRACE=1` for a call stack). They agree on all 2421 tests and
+on 390 further files — contrib, examples and the dogfood repositories. Since
+the quantified set is the *only* thing this change can affect, that comparison
+is the correctness argument, and the switch stays so the next change to the
+level discipline is checked against the definition it replaced.
+
+It found three real defects while being written, none of which any test caught:
+
+- **`check_pattern` ran outside the binding's level**, so the fresh variables it
+  makes for a tuple pattern's components dragged the value's variables out with
+  them: `let (f, g) = (fn x -> x, fn x -> x + 1) in f` stopped being
+  polymorphic. `pp_ty` prints `('a -> 'a)` either way, which is why the existing
+  test passed.
+- **`trait_elab` has its own copy of the declaration loop** and did not get the
+  level discipline, which cost polymorphism for every binding in a program using
+  traits.
+- **The value restriction's monomorphic path** left variables looking local to
+  the binding they had just escaped, so the next binding out would quantify
+  them — the one direction of this change that would have been unsound.
+
+The declaration loop now exists in six copies (three in `pipeline`, one in
+`trait_elab`, two in the tests). Each had to be found and fixed by hand here.
+
 ## v0.1.219 — 2026-08-12
 
 _`print_bytes` on Wasm, which makes it all four backends._

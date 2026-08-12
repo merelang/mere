@@ -232,6 +232,18 @@ a free-variable computation over types and the environment, and
 `generalize` / `instantiate` functions around the `let` and variable
 cases. It's the natural next ~80 lines.
 
+One warning about those 80 lines, from having written them: "the free
+variables of the environment" is the right definition and the wrong
+program. It reads the entire environment once per binding, so a file
+with N bindings costs O(N²) — which is invisible on the examples in
+this tutorial, invisible in a batch compiler, and then very visible
+the day an editor starts re-checking the file on every keystroke.
+The standard fix is *levels*: stamp each variable with how many
+`let`s it was created inside, have unification lower that number when
+a variable escapes outward, and generalize exactly the variables still
+deeper than the binding. Same answer, no scan. Mere switched in
+v0.1.220 and kept the old definition as a cross-check.
+
 Mere's real typer does all of this — see
 [`contrib/typer/typer.mere`](https://github.com/merelang/mere/blob/main/contrib/typer/typer.mere),
 which extends this same unification core with let-generalization,

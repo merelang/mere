@@ -3,6 +3,13 @@
 type tyvar = {
   id : int;
   mutable link : ty option;
+  (* How far inside nested `let`s this variable was created (Remy's ranks).
+     A variable belongs to the binding being generalized exactly when its level
+     is deeper than the level that binding sits at, which is what lets
+     generalization skip looking at the environment at all — see Typer.generalize
+     for why that mattered enough to put a field here. Lowered by unification,
+     never raised. *)
+  mutable level : int;
 }
 
 and ty =

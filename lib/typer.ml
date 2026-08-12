@@ -168,10 +168,41 @@ let report_or_raise loc msg =
   | None -> raise (Type_error (loc, msg))
 
 let counter = ref 0
+
+(* How many generalizable bindings we are currently inside. Every variable
+   created now records this, and `generalize` quantifies exactly the variables
+   recorded deeper than the level the binding sits at. See `generalize`. *)
+let cur_level = ref 0
+
+let reset_levels () = cur_level := 0
+
+(* Infer the right-hand side of a binding that is about to be generalized.
+   Restores the level even when inference raises, because the typer's recovery
+   mode catches Type_error at the declaration and keeps going: a level left
+   raised would make every later binding think its variables came from outside. *)
+let enter_level f =
+  incr cur_level;
+  Fun.protect ~finally:(fun () -> decr cur_level) f
+
 let fresh_var () =
   let id = !counter in
   incr counter;
-  Ast.TyVar { id; link = None }
+  Ast.TyVar { id; link = None; level = !cur_level }
+
+(* Linking `v := t` makes every variable in `t` reachable from wherever `v` is,
+   so each of them is now at least as far out as `v` — otherwise generalizing an
+   outer binding would quantify a variable that is still visible from inside it.
+   Levels only ever move outward, which is what makes this monotone and cheap. *)
+let rec adjust_level lvl t =
+  match t with
+  | Ast.TyVar ({ link = None; _ } as v) -> if v.level > lvl then v.level <- lvl
+  | Ast.TyVar { link = Some t'; _ } -> adjust_level lvl t'
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> ()
+  | Ast.TyParam _ -> ()
+  | Ast.TyCon (_, args) -> List.iter (adjust_level lvl) args
+  | Ast.TyArrow (a, b) -> adjust_level lvl a; adjust_level lvl b
+  | Ast.TyTuple ts -> List.iter (adjust_level lvl) ts
+  | Ast.TyRef (_, _, inner) -> adjust_level lvl inner
 
 let rec occurs id = function
   | Ast.TyVar v when v.id = id -> true
@@ -252,8 +283,10 @@ let rec unify loc t1 t2 =
   | Ast.TyVar v, t | t, Ast.TyVar v ->
     if occurs v.id t then
       report_or_raise loc "occurs check failed (cyclic type)"
-    else
+    else begin
+      adjust_level v.level t;
       v.link <- Some t
+    end
   | _ ->
     let base =
       Printf.sprintf "expected `%s`, got `%s`" (Ast.pp_ty t1) (Ast.pp_ty t2)
@@ -354,12 +387,78 @@ let constraints_for_qs qs =
   in
   List.sort_uniq compare acc
 
+(* The variables of `t` created deeper than `lvl` — i.e. inside the binding being
+   generalized, and therefore not reachable from anything outside it. *)
+let rec collect_local_vars lvl t acc =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> acc
+  | Ast.TyParam _ -> acc
+  | Ast.TyVar v ->
+    if v.level > lvl && not (List.mem v.id acc) then v.id :: acc else acc
+  | Ast.TyArrow (a, b) -> collect_local_vars lvl b (collect_local_vars lvl a acc)
+  | Ast.TyTuple ts -> List.fold_left (fun a t -> collect_local_vars lvl t a) acc ts
+  | Ast.TyCon (_, args) ->
+    List.fold_left (fun a t -> collect_local_vars lvl t a) acc args
+  | Ast.TyRef (_, _, inner) -> collect_local_vars lvl inner acc
+
+(* Lower every free variable of `t` that is NOT being quantified to `lvl`, so it
+   reads as belonging to the enclosing scope — which it now does. *)
+let rec demote_unquantified lvl qs t =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> ()
+  | Ast.TyParam _ -> ()
+  | Ast.TyVar v -> if not (List.mem v.id qs) && v.level > lvl then v.level <- lvl
+  | Ast.TyArrow (a, b) -> demote_unquantified lvl qs a; demote_unquantified lvl qs b
+  | Ast.TyTuple ts -> List.iter (demote_unquantified lvl qs) ts
+  | Ast.TyCon (_, args) -> List.iter (demote_unquantified lvl qs) args
+  | Ast.TyRef (_, _, inner) -> demote_unquantified lvl qs inner
+
+(* Set MERE_LEVEL_CHECK=1 to have every generalization computed both ways and
+   compared. The two agree over the whole test suite, contrib and examples; the
+   switch stays so that a future change to the level discipline is checked
+   against the definition it replaced rather than against nothing. *)
+let level_check = match Sys.getenv_opt "MERE_LEVEL_CHECK" with
+  | Some ("" | "0") | None -> false
+  | Some _ -> true
+
+let level_check_failures = ref 0
+
 let generalize env t =
-  let t_free = collect_free_vars t [] in
-  let env_free = env_free_vars env in
   let send_ids = pending_send_ids () in
-  let qs = List.filter (fun id ->
-    not (List.mem id env_free) && not (List.mem id send_ids)) t_free in
+  (* A variable is generalizable when it was created inside this binding and is
+     not pinned by a pending Send obligation.
+
+     This used to ask the environment instead: collect every free variable of
+     every scheme in scope and quantify what was not among them. That is the
+     textbook definition and it is O(env) per binding, so type-checking N
+     top-level bindings cost O(N^2) — 16k bindings took 1.7s, and the LSP, which
+     re-checks the whole file on every keystroke, took 5.3s per keystroke on a
+     22k-line file. Levels answer the same question in O(|t|). *)
+  let local = collect_local_vars !cur_level t [] in
+  let qs = List.filter (fun id -> not (List.mem id send_ids)) local in
+  (* A variable this binding declined to quantify — pinned by a Send obligation —
+     outlives the binding, so it must stop claiming to be local or the next
+     binding out would quantify it. *)
+  if List.length qs <> List.length local then
+    demote_unquantified !cur_level qs t;
+  if level_check then begin
+    let env_free = env_free_vars env in
+    let qs_old = List.filter (fun id ->
+      not (List.mem id env_free) && not (List.mem id send_ids))
+      (collect_free_vars t []) in
+    if List.sort compare qs <> List.sort compare qs_old then begin
+      incr level_check_failures;
+      Printf.eprintf
+        "MERE_LEVEL_CHECK: generalize %s at level %d: levels gave [%s], \
+         environment scan gave [%s]\n%!"
+        (Ast.pp_ty t) !cur_level
+        (String.concat ";" (List.map string_of_int (List.sort compare qs)))
+        (String.concat ";" (List.map string_of_int (List.sort compare qs_old)));
+      if Sys.getenv_opt "MERE_LEVEL_CHECK_TRACE" <> None then
+        prerr_string (Printexc.raw_backtrace_to_string
+                        (Printexc.get_callstack 12))
+    end
+  end;
   { constraints = constraints_for_qs qs; quantified = qs; body = t }
 
 (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
@@ -2104,8 +2203,14 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     unify else_.loc tt te;
     tt
   | Ast.Let (pat, value, body) ->
-    let tv = infer env value in
-    let bindings = check_pattern pat tv in
+    (* check_pattern makes fresh variables for the pattern's components and
+       unifies them with the value's type, so they belong to this binding and are
+       made at its level. Made outside it, they would drag the value's own
+       variables out with them and `let (f, g) = (fn x -> x, ...)` would stop
+       being polymorphic. *)
+    let bindings =
+      enter_level (fun () ->
+        let tv = infer env value in check_pattern pat tv) in
     (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
        If value is syntactically a value (Fun, literal, Var, etc), generalize.
        If value is an App but the inferred type doesn't involve a mutable
@@ -2117,7 +2222,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
         is_value value || not (ty_mentions_mutable_container t)
       in
       let sch =
-        if can_generalize then generalize env t else mono t
+        if can_generalize then generalize env t
+        else begin
+          (* The value restriction keeps this binding monomorphic, but its type
+             was inferred one level in. Left there, its variables would look
+             local to the next binding out and be quantified by it — the one
+             direction of this change that would be unsound. *)
+          adjust_level !cur_level t;
+          mono t
+        end
       in
 
       (* A local constrained binding (e.g. `let sum = fn xs -> ... add ...`):
@@ -2132,14 +2245,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     (* Mutual recursion: fresh vars for ALL names first, infer each value
        under env_rec (which has all names mono-bound), unify each, then
        generalize each against the OUTER env. *)
-    let alphas = List.map (fun _ -> fresh_var ()) bindings in
+    let alphas = enter_level (fun () -> List.map (fun _ -> fresh_var ()) bindings) in
     let env_rec = List.fold_left2 (fun acc (n, _) a ->
       (n, mono a) :: acc
     ) env bindings alphas in
-    List.iter2 (fun (_, value) alpha ->
-      let tv = infer env_rec value in
-      unify value.Ast.loc alpha tv
-    ) bindings alphas;
+    enter_level (fun () ->
+      List.iter2 (fun (_, value) alpha ->
+        let tv = infer env_rec value in
+        unify value.Ast.loc alpha tv
+      ) bindings alphas);
     let env' = List.fold_left2 (fun acc (n, value) a ->
       let sch = generalize env a in
       (* A local recursive constrained binding (e.g.
@@ -2157,7 +2271,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     (* Phase 3.1: `with c = v in body` requires v's type to be a Drop type
        (declared via `drop type ...`). At runtime, the value's `close`
        field (if present) is invoked when the with-scope ends. *)
-    let tv = infer env value in
+    let tv = enter_level (fun () -> infer env value) in
     if not (contains_drop_type tv) then
       raise (Type_error (e.loc,
         Printf.sprintf

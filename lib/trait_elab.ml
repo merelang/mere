@@ -120,19 +120,21 @@ let type_pass (prog : program) : (string, Typer.scheme) Hashtbl.t =
     match decl with
     | Top_let (pat, value) ->
       let outer = !type_env in
-      let t = Typer.infer outer value in
-      let bindings = Typer.check_pattern pat t in
+      let bindings =
+        Typer.enter_level (fun () ->
+          let t = Typer.infer outer value in Typer.check_pattern pat t) in
       type_env := List.fold_left (fun acc (n, ty) ->
         let sch = Typer.generalize outer ty in
         Hashtbl.replace schemes n sch;
         (n, sch) :: acc) outer bindings
     | Top_let_rec bindings ->
       let outer = !type_env in
-      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+      let alphas =
+        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
       let env_rec = List.fold_left2 (fun acc (n, _) a ->
         (n, Typer.mono a) :: acc) outer bindings alphas in
       List.iter2 (fun (_, value) alpha ->
-        let t = Typer.infer env_rec value in
+        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.loc alpha t) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
         let sch = Typer.generalize outer a in
