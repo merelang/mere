@@ -348,7 +348,7 @@ Granularity is one mapping per function, which is what the table carries. Prelud
 functions are absent: their lines belong to another text, and claiming them would
 point the debugger at the wrong file.
 
-## Debugging a compiled program: `mere -c -g`
+## Debugging a compiled program: `mere -c -g`, `mere -ll -g`
 
 ```sh
 mere -c -g app.mere > app.c && clang -g app.c -o app
@@ -379,10 +379,44 @@ a file did not come from the source being compiled.** The lexer stamps positions
 from an `import` with their path, and the prelude is tokenised as `<prelude>`, so
 neither can be claimed as a line of this file. That check is the whole of it.
 
-The other backends have nothing equivalent yet. LLVM would want `!dbg` metadata
-and a `DISubprogram` per function; Wasm a source map. The RV32I backend has its
-own answer, a debug map (`mere -rvg`, see [bare-metal.md](bare-metal.md)), which
-exists because a flat binary has no header to put debug information in.
+### LLVM: `mere -ll -g`
+
+```sh
+mere -ll -g app.mere > app.ll && clang -g app.ll -o app
+lldb app -o "b twice"
+# Breakpoint 2: where = app`twice at app.mere:2:1
+```
+
+The same destination — a DWARF line table naming the `.mere` — reached the most
+directly of the three, because **LLVM IR carries debug information itself**.
+There is nobody to divide the work with: a `DISubprogram` per function, a
+`DILocation`, and a `!dbg` on the instructions.
+
+On *every* instruction, which is the one constraint that shapes this: a function
+with a subprogram whose calls have no location is something the verifier objects
+to, so the location is attached in `emit_instr` rather than at chosen points. All
+the instructions of a function share one location — the line its body began on —
+which is the same granularity the C backend arrives at for a different reason.
+
+`Debug Info Version` in the module flags is not optional. Without it the metadata
+is stripped as being from an older LLVM, and the debugger shows nothing, with no
+error anywhere to explain why.
+
+### Checking it
+
+`sh scripts/debug_info.sh` compiles a program through both backends and asks
+`lldb` where each function is. A breakpoint resolving to `app.mere:8` is the
+evidence; the emitted text looking right is not.
+
+```
+  ok    C    both resolves to app.mere:8
+  ok    LLVM both resolves to app.mere:8
+```
+
+The RV32I backend has its own answer, a debug map (`mere -rvg`, see
+[bare-metal.md](bare-metal.md)), which exists because a flat binary has no header
+to put debug information in. With Wasm's source map above, that is every backend:
+each one reaching the same place by whatever route its output allows.
 
 ## A fifth backend, without a C compiler under it
 

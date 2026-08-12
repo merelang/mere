@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.215 — 2026-08-12
+
+_`mere -ll -g`: the LLVM backend, too. Every backend can now be debugged as Mere._
+
+```sh
+mere -ll -g app.mere > app.ll && clang -g app.ll -o app
+lldb app -o "b twice"
+# Breakpoint 2: where = app`twice at app.mere:2:1
+```
+
+The same destination as the C backend's `#line` — a DWARF line table naming the
+`.mere` — reached the most **directly** of the three, because LLVM IR carries
+debug information itself. There is nobody to divide the work with: a
+`DISubprogram` per function, a `DILocation`, and a `!dbg` on the instructions.
+
+On *every* instruction, which is the constraint that shapes this. A function with
+a subprogram whose calls have no location is something the verifier objects to, so
+the location is attached in `emit_instr` — the one choke point every instruction
+already goes through — rather than at chosen points. All of a function's
+instructions share one location, the line its body began on, which is the same
+granularity the C backend arrives at for an entirely different reason.
+
+`Debug Info Version` in the module flags is not optional: without it the metadata
+is stripped as being from an older LLVM and the debugger shows nothing, with no
+error anywhere to explain why. It has a test of its own for that reason.
+
+**`sh scripts/debug_info.sh`** compiles a program through both backends and asks
+`lldb` where each function is, because a breakpoint resolving to `app.mere:8` is
+evidence and emitted text looking right is not:
+
+```
+  ok    C    both resolves to app.mere:8
+  ok    LLVM both resolves to app.mere:8
+```
+
+_That closes Q-021, and with it every backend: C `#line`, LLVM `!dbg`, Wasm a
+source map, RV32I its own debug map — each reaching the same place by whatever
+route its output allows. The interpreter needs none, being where the source
+already is._
+
+---
+
 ## v0.1.214 — 2026-08-12
 
 _`mere -wg`, and a source map: the browser's debugger shows Mere source._

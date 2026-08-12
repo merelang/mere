@@ -60,7 +60,45 @@ let fresh_label base =
 (* Accumulated instruction lines (without leading indent / newline).
    Reset per emit_program, appended via emit_instr from emit_expr. *)
 let instrs : string list ref = ref []
-let emit_instr s = instrs := s :: !instrs
+(* `-ll -g`: debug metadata, so a debugger on the compiled program shows the Mere
+   source. Unlike the C backend (which borrows the C compiler's `#line`) and the
+   Wasm one (which needs a tool holding the assembled binary), LLVM IR carries
+   debug information itself — a `!dbg` on each instruction pointing at a
+   DILocation, and a DISubprogram per function. There is nobody else to divide
+   the work with, which makes this the most direct of the three.
+
+   One constraint drives the shape: a function with a DISubprogram must have
+   locations on its call instructions, or the verifier objects. So when this is
+   on, *every* instruction emitted inside a function gets the same location —
+   the line the function's body started at, which is the granularity the other
+   two backends settled at too. *)
+let debug_file : string option ref = ref None
+
+(* The `, !dbg !N` to append while emitting a function's body, empty outside
+   one. *)
+let debug_loc_suffix = ref ""
+
+(* (function name, line) in emission order, for the metadata at the end. *)
+let debug_subprograms : (string * int) list ref = ref []
+
+(* Metadata numbering, fixed in advance so a function can refer to its own nodes
+   while the module is still being built: !0..!4 are the module-wide ones, then
+   two per function — the subprogram, and the location its instructions share. *)
+let dbg_subprogram_id n = 3 + (n * 2)
+let dbg_location_id n = 4 + (n * 2)
+
+let emit_instr s =
+  let s =
+    (* A label is not an instruction, and neither is a bare brace. *)
+    if !debug_loc_suffix = "" then s
+    else
+      let t = String.trim s in
+      if t = "" || t = "}" || (String.length t > 0 && t.[String.length t - 1] = ':')
+      then s
+      else s ^ !debug_loc_suffix
+  in
+  instrs := s :: !instrs
+
 let emit_label s = instrs := (s ^ ":") :: !instrs
 
 (* env: maps Lang variable name -> LLVM SSA value (e.g. "%t3" or "42").
@@ -6238,16 +6276,35 @@ let emit_fn_def (f : fn_decl) : string =
   current_host_fn_llvm := f.name;
   emit_instr "entry:";
   let env = [(f.param, "%" ^ llvm_safe_local f.param)] in
+  (* A position that names a file came from the prelude or an import: not a line
+     of the source being compiled, so it gets no debug information. *)
+  let dbg =
+    match !debug_file with
+    | Some _ when f.body.Ast.loc.Loc.line > 0 && f.body.Ast.loc.Loc.file = None ->
+      debug_subprograms := (f.name, f.body.Ast.loc.Loc.line) :: !debug_subprograms;
+      let n = List.length !debug_subprograms in
+      Some n
+    | _ -> None
+  in
+  let saved_suffix = !debug_loc_suffix in
+  (match dbg with
+   | Some n -> debug_loc_suffix := Printf.sprintf ", !dbg !%d" (dbg_location_id n)
+   | None -> debug_loc_suffix := "");
   let rv = emit_expr env f.body in
   emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
+  debug_loc_suffix := saved_suffix;
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved;
   current_var_types := saved_types;
   current_expected_ty := saved_exp;
   current_host_fn_llvm := saved_host;
-  Printf.sprintf "define %s @%s(%s %%%s) {\n%s\n}"
+  Printf.sprintf "define %s @%s(%s %%%s)%s {\n%s\n}"
     (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty)
-    (llvm_safe_local f.param) body
+    (llvm_safe_local f.param)
+    (match dbg with
+     | Some n -> Printf.sprintf " !dbg !%d" (dbg_subprogram_id n)
+     | None -> "")
+    body
 
 (* Convert the program's main result type to (LLVM type, printf format).
    Phase 25.11: `unit` now prints "()" to match interp's behavior
@@ -9990,6 +10047,8 @@ let channel_runtime_llvm =
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  debug_subprograms := [];
+  debug_loc_suffix := "";
   reg_counter := 0;
   label_counter := 0;
   instrs := [];
@@ -10858,5 +10917,42 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         body;
         "}";
         "" ]
+  in
+  let parts =
+    match !debug_file with
+    | None -> parts
+    | Some file ->
+      (* The metadata block. `Debug Info Version` is not optional: without it the
+         rest is stripped as being from an older LLVM. The language is recorded as
+         C99 because DWARF has no code for Mere, and a debugger only reads it to
+         decide how to print things it will not be printing here. *)
+      let subs = List.rev !debug_subprograms in
+      let dir = Filename.dirname file and base = Filename.basename file in
+      let header =
+        [ "";
+          "!llvm.module.flags = !{!0}";
+          "!llvm.dbg.cu = !{!1}";
+          "!0 = !{i32 2, !\"Debug Info Version\", i32 3}";
+          Printf.sprintf
+            "!1 = distinct !DICompileUnit(language: DW_LANG_C99, file: !2, \
+             producer: \"mere\", isOptimized: false, runtimeVersion: 0, \
+             emissionKind: FullDebug)";
+          Printf.sprintf "!2 = !DIFile(filename: \"%s\", directory: \"%s\")" base dir;
+          "!3 = !DISubroutineType(types: !{null})" ]
+      in
+      (* !3 is the shared signature: a debugger that wanted argument types would
+         need real ones, and inventing them would be worse than saying nothing. *)
+      let per_fn =
+        List.concat (List.mapi (fun i (name, line) ->
+          let n = i + 1 in
+          [ Printf.sprintf
+              "!%d = distinct !DISubprogram(name: \"%s\", scope: !2, file: !2, \
+               line: %d, type: !3, scopeLine: %d, spFlags: DISPFlagDefinition, \
+               unit: !1)"
+              (dbg_subprogram_id n) name line line;
+            Printf.sprintf "!%d = !DILocation(line: %d, column: 1, scope: !%d)"
+              (dbg_location_id n) line (dbg_subprogram_id n) ]) subs)
+      in
+      parts @ header @ per_fn @ [ "" ]
   in
   String.concat "\n" parts
