@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.204" Version.v "0.1.204";
+  check "version is 0.1.205" Version.v "0.1.205";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12208,7 +12208,7 @@ let () =
   let (_, out, _) =
     Lsp.handle Lsp.initial
       (Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 7.0);
-                  ("method", Json.Str "textDocument/hover") ])
+                  ("method", Json.Str "textDocument/rename") ])
   in
   check "lsp: an unimplemented request is refused, not ignored"
     (match out with
@@ -12217,6 +12217,70 @@ let () =
         | Some c -> string_of_int c | None -> "no code")
      | _ -> "no reply")
     "-32601";
+
+  (* Hover, and the position resolution under it. A `Loc.t` is a line, a column
+     and a width — the token the node was built from, not a span over its
+     subtree — so "the node here" is the narrowest node whose own token contains
+     the cursor. That is what makes hovering inside a call answer about the piece
+     under the cursor rather than about the whole application. *)
+  let hover_at src line col =
+    let doc =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didOpen");
+                 ("params", Json.Obj [ ("textDocument",
+                    Json.Obj [ ("uri", Json.Str "file:///tmp/h.mere");
+                               ("text", Json.Str src) ]) ]) ]
+    in
+    let (state, _, _) = Lsp.handle Lsp.initial doc in
+    let ask =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 2.0);
+                 ("method", Json.Str "textDocument/hover");
+                 ("params", Json.Obj [
+                    ("textDocument", Json.Obj [ ("uri", Json.Str "file:///tmp/h.mere") ]);
+                    ("position", Json.Obj [ ("line", Json.Num (float_of_int line));
+                                            ("character", Json.Num (float_of_int col)) ]) ]) ]
+    in
+    match Lsp.handle state ask with
+    | (_, [ reply ], _) ->
+      (match Json.to_string_opt
+               (Json.member "value" (Json.member "contents" (Json.member "result" reply))) with
+       | Some v -> v
+       | None -> "(nothing)")
+    | _ -> "(no reply)"
+  in
+  let src = "let twice = fn (n: int) -> n * 2;\nlet hi = fn (who: str) -> \"hi \" ++ who;\nlet _ = print_int (twice 21);\n" in
+  check "hover: a name reports the type inference gave it"
+    (hover_at src 2 20) "```mere\ntwice : (int -> int)\n```";
+  check "hover: a parameter inside a function body"
+    (hover_at src 1 37) "```mere\nwho : str\n```";
+  check "hover: a literal is its own type"
+    (hover_at src 2 26) "```mere\nint\n```";
+  check "hover: whitespace has nothing to say"
+    (hover_at src 0 0) "(nothing)";
+  (* A hover needs a typed tree, and a buffer mid-edit does not have one. The
+     last tree that checked is kept for exactly this. *)
+  let stale =
+    let open_doc text =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didOpen");
+                 ("params", Json.Obj [ ("textDocument",
+                    Json.Obj [ ("uri", Json.Str "file:///tmp/s.mere");
+                               ("text", Json.Str text) ]) ]) ]
+    in
+    let change text =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didChange");
+                 ("params", Json.Obj [
+                    ("textDocument", Json.Obj [ ("uri", Json.Str "file:///tmp/s.mere") ]);
+                    ("contentChanges", Json.List [ Json.Obj [ ("text", Json.Str text) ] ]) ]) ]
+    in
+    let (st, _, _) = Lsp.handle Lsp.initial (open_doc "let n = 41;\nlet _ = print_int n;\n") in
+    let (st, _, _) = Lsp.handle st (change "let n = 41;\nlet _ = print_int n +;\n") in
+    match List.assoc_opt "file:///tmp/s.mere" st.Lsp.docs with
+    | Some d -> (match d.Lsp.tree with Some _ -> "kept" | None -> "lost")
+    | None -> "gone"
+  in
+  check "hover: an edit that does not compile keeps the last tree that did" stale "kept";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of

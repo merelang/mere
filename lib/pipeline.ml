@@ -430,19 +430,26 @@ type diagnostic = {
   d_severity : severity;
 }
 
-let diagnostics ?base_dir ?(search_paths = []) (source : string) : diagnostic list =
+let check ?base_dir ?(search_paths = []) (source : string)
+  : Ast.program option * diagnostic list =
   let err kind (loc, msg) =
     { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error }
   in
   match syntax_errors ?base_dir ~search_paths source with
-  | (_ :: _) as errs -> List.map (err "parse error") errs
+  | (_ :: _) as errs -> (None, List.map (err "parse error") errs)
   | [] ->
     (try
-       ignore (infer_program ?base_dir ~search_paths source);
-       []
+       let (prog, _) = infer_program ?base_dir ~search_paths source in
+       (* Type inference writes the type it found onto every node it visited, so
+          the program that comes back is the answer to every later question about
+          a position in this text. *)
+       (Some prog, [])
      with
-     | Lexer.Lex_error (loc, msg) -> [err "lex error" (loc, msg)]
-     | Parser.Parse_error (loc, msg) -> [err "parse error" (loc, msg)]
-     | Typer.Type_error (loc, msg) -> [err "type error" (loc, msg)]
-     | Trait_elab.Trait_error (loc, msg) -> [err "trait error" (loc, msg)]
-     | Eval.Eval_error (loc, msg) -> [err "eval error" (loc, msg)])
+     | Lexer.Lex_error (loc, msg) -> (None, [err "lex error" (loc, msg)])
+     | Parser.Parse_error (loc, msg) -> (None, [err "parse error" (loc, msg)])
+     | Typer.Type_error (loc, msg) -> (None, [err "type error" (loc, msg)])
+     | Trait_elab.Trait_error (loc, msg) -> (None, [err "trait error" (loc, msg)])
+     | Eval.Eval_error (loc, msg) -> (None, [err "eval error" (loc, msg)]))
+
+let diagnostics ?base_dir ?search_paths (source : string) : diagnostic list =
+  snd (check ?base_dir ?search_paths source)

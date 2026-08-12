@@ -4,12 +4,13 @@
 mere lsp
 ```
 
-Speaks LSP over stdin and stdout. What it does today is **diagnostics**: every
+Speaks LSP over stdin and stdout. What it does today is **diagnostics** — every
 syntax error in the buffer, republished on each keystroke, and the first type
-error once the file parses.
+error once the file parses — and **hover**, which reports the type inference gave
+whatever is under the cursor.
 
-It is the same check the compiler runs — `Pipeline.diagnostics`, which the CLI
-also goes through. A language server that agrees with the compiler on good days
+It is the same check the compiler runs — `Pipeline.check`, which the CLI also
+goes through. A language server that agrees with the compiler on good days
 is worse than none, because it teaches you to distrust the underline.
 
 ## Editors
@@ -41,7 +42,8 @@ same on stdout, so a client that can start a process can talk to it.
 
 | method | behaviour |
 |---|---|
-| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`) |
+| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider` |
+| `textDocument/hover` | the inferred type of the narrowest node under the cursor, as `name : type` when it is a name |
 | `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
 | `textDocument/didClose` | publish an empty list, clearing the underlines |
 | `shutdown` / `exit` | as specified |
@@ -55,11 +57,28 @@ The buffer is what gets checked, not the file on disk — an editor owns a file
 while it is open. But `import` still resolves against the **file's** directory,
 taken from the document URI, so imports work in an unsaved buffer.
 
+## Hover, and what a position means here
+
+A `Loc.t` in this compiler is a line, a column and a **width** — the token a node
+was built from, not a span over its subtree. So "the node at this position" means
+the narrowest node whose own token contains the cursor, which is what makes
+hovering inside a call answer about the piece under the cursor rather than about
+the whole application.
+
+The type comes from the typer having written it onto the node (`e.ty <- Some t`)
+during the check that produced the diagnostics. There is no second inference pass
+and no separate index: the hover is reading what the compiler already concluded.
+
+The server keeps **the last tree that type-checked**. While a line is half typed
+the file does not check, and an answer from a moment ago beats no answer at all —
+so hover keeps working through an edit, and catches up when the file is valid
+again.
+
 ## What it does not answer yet
 
-- **Hover, completion, go-to-definition.** These want the same thing underneath:
-  a position resolved against a typed tree. The tree is there; the resolution is
-  the next slice.
+- **Completion and go-to-definition.** Both ask the same question hover does
+  (`Query.node_at`), plus a notion of scope: what is bound here, and where. That
+  is the next slice.
 - **More than one type error.** Syntax errors are all reported, because the
   parser recovers at declaration boundaries (v0.1.203). The type-checker still
   raises on the first problem, so a file that parses gets one type error at a
@@ -73,6 +92,9 @@ taken from the document URI, so imports work in an unsaved buffer.
 - **Incremental sync.** The whole buffer arrives on every change. The check
   re-reads all of it anyway, so incremental sync would buy nothing yet and cost
   a class of desynchronisation bugs.
+- **Warnings.** The compiler's warnings (a top-level name that collides with a C
+  keyword, say) are printed to stderr by the pipeline rather than returned as
+  data, so they do not become diagnostics. Only errors are underlined.
 
 ## Testing it
 

@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.205 — 2026-08-12
+
+_Hover: the type inference gave whatever is under the cursor._
+
+_Third slice of the language-server arc. Point at a name and the editor shows
+`twice : (int -> int)`; point at a literal and it shows `int`._
+
+**There is no second inference pass and no index.** The typer already writes the
+type it found onto every node it visits (`e.ty <- Some t`), so the check that
+produced the diagnostics leaves behind a tree that knows the answer. `Pipeline.check`
+now hands that tree back instead of dropping it, and the server keeps it per open
+document.
+
+**What "the node at this position" means here**, since it is not obvious: a `Loc.t`
+in this compiler is a line, a column and a **width** — the token a node was built
+from, not a span over its subtree. So the node at a position is the *narrowest*
+node whose own token contains the cursor. That is what makes hovering inside a call
+answer about the piece under the cursor rather than about the whole application.
+`Query.node_at` is that search, and `Ast.children` is the one generic child walk it
+needed — written once, because every position question (this one, go-to-definition,
+completion) needs it and three hand-written 26-case matches would drift apart.
+
+**The last tree that type-checked is kept.** While a line is half typed the file
+does not check, and an answer from a moment ago beats no answer at all — so hover
+keeps working through an edit and catches up when the file is valid again. The test
+for this edits a good file into a broken one and asserts the tree survived.
+
+---
+
 ## v0.1.204 — 2026-08-12
 
 _`mere lsp` — a language server. Diagnostics in the editor, from the check the
