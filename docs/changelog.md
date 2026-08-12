@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.223 — 2026-08-12
+
+_The reserved-name warning now looks at type names, which is where it was needed._
+
+```
+line 1, col 6: warning: type name `wait` collides with a C type, keyword or libc
+symbol — this will be a compile error at codegen, from the C compiler rather than
+from here.
+```
+
+A Mere `type` lowers to `typedef struct <name> <name>;`, which claims both C's tag
+namespace and its ordinary one. `type wait = ...` therefore collides with
+`union wait` in `<sys/wait.h>` **and** with the `wait()` declared beside it, and the
+failure arrived from clang:
+
+```
+error: use of 'wait' with tag type that does not match previous declaration
+```
+
+The compiler has had a list of libc and C-keyword names since v0.1.55 and warns when
+a top-level `let` collides with one. It never ran for `type` declarations. The mraft
+dogfood named a type `wait` on its first day and got the collision from the C
+compiler — the same "documented thing failing at the wrong layer" shape as the
+`print_int` bug in v0.1.190.
+
+The function list applies to type names unchanged (a typedef is an ordinary
+identifier), plus a new list of the struct tags the emitted headers bring in:
+`wait`, `tm`, `timeval`, `timespec`, `stat`, `dirent`, `sockaddr`, `addrinfo`,
+`hostent`, `termios`, `winsize`, `sigaction`, `iovec`, `fd_set`, `div_t` and the
+rest of that family.
+
+Two things about the implementation are worth recording:
+
+- **`Top_type` carries no position**, and adding one touches ten files. So the
+  parser records `(name, loc)` for each type it declares — the same shape as the
+  per-program tables it already keeps for constructors and records — and Pipeline
+  reads that. A warning an editor cannot place is a warning nobody sees.
+- The warning is raised on **both** paths: `process_decls`, which the compiler
+  takes, and `infer_program`, which the editor takes. It went in on the first one
+  only, and the test that checks it through `Pipeline.diagnostics` failed — which is
+  exactly the test being worth writing.
+
+Nothing in `examples/` or `contrib/` trips it.
+
 ## v0.1.222 — 2026-08-12
 
 _A positioned write that takes the byte type the language grew afterwards._

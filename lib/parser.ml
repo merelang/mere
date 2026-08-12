@@ -142,7 +142,14 @@ let aliases : (string, string list * Ast.ty) Hashtbl.t = Hashtbl.create 8
    pattern `Rect r` in program B mis-parse as a record pattern. Call this once
    per top-level program parse, BEFORE the prelude is parsed (the prelude then
    re-registers its own types/ctors). *)
+(* Every type name this program declared, with the position of the name token.
+   Recorded because `Ast.Top_type` and friends carry no location, and a warning
+   without a position is one an editor cannot show. Pipeline reads this after
+   parsing to check the names against C's; see `reserved_c_type_names` there. *)
+let declared_types : (string * Loc.t) list ref = ref []
+
 let reset_decl_state () =
+  declared_types := [];
   Hashtbl.reset constructors;
   Hashtbl.reset signatures;
   Hashtbl.reset records;
@@ -1577,7 +1584,7 @@ let rec parse_program_internal tokens =
   let parse_type_decl_after_keyword toks =
     let params, rest = parse_type_params toks in
     match rest with
-    | (_, T_ident type_name) :: (_, T_eq) :: (_, T_lbrace) :: body_rest ->
+    | (tpos, T_ident type_name) :: (_, T_eq) :: (_, T_lbrace) :: body_rest ->
       let rec parse_fields acc toks =
         match toks with
         | (_, T_rbrace) :: rest -> List.rev acc, rest
@@ -1596,12 +1603,14 @@ let rec parse_program_internal tokens =
       in
       let fields, toks = parse_fields [] body_rest in
       Hashtbl.replace records type_name fields;
+      declared_types := (type_name, tpos) :: !declared_types;
       (match toks with
        | (_, T_semi) :: rest ->
          Ast.Top_record (type_name, params, fields), rest
        | _ ->
          raise (Parse_error (pos_of toks, "expected ';' after record declaration")))
-    | (_, T_ident type_name) :: (_, T_eq) :: body_rest ->
+    | (tpos, T_ident type_name) :: (_, T_eq) :: body_rest ->
+      declared_types := (type_name, tpos) :: !declared_types;
       let is_variant_body =
         match body_rest with
         | (_, T_pipe) :: _ -> true

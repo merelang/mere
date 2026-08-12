@@ -456,6 +456,19 @@ C codegen emits top-level fns directly as C functions, so names that already exi
 | `signed` / `unsigned` / `register` / `static` / `auto` | C storage classes / modifiers |
 | `goto` / `return` / `break` / `continue` | C control-flow keywords |
 
+**Type names collide too, and for one more reason.** A `type` lowers to
+`typedef struct <name> <name>;`, which claims C's **tag** namespace as well as its
+ordinary one — so a type named `wait` collides with `union wait` in `<sys/wait.h>`
+*and* with the `wait()` declared beside it. The list above applies unchanged (a
+typedef is an ordinary identifier), plus the struct tags the emitted headers bring
+in: `wait`, `tm`, `timeval`, `timespec`, `stat`, `dirent`, `sockaddr`, `addrinfo`,
+`hostent`, `termios`, `winsize`, `sigaction`, `iovec`, `fd_set`, `div_t` and family.
+
+The mraft dogfood named a type `wait` and found this from clang rather than from the
+compiler: the check existed and had only ever looked at `let` names. **Warned about
+since v0.1.223**, on the type name itself, on both the compiler's path and the
+editor's.
+
 **Workarounds**: shorten by 1-2 chars (`mergesort` → `msort`, `div` → `divi`, `short` → `small_doc`), use a verb phrase (`sort_list` / `power_int`), or add a prefix (`mere_sort`), etc. The interpreter is unaffected, so verification looks fine until codegen is attempted. **Phase 38.A3 added a linter that warns at parse time** ([lib/pipeline.ml:42-82](../lib/pipeline.ml)).
 
 **The full reserved-name list (~110 names) is in [docs/reserved-names.md](reserved-names.md)**.

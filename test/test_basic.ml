@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.222" Version.v "0.1.222";
+  check "version is 0.1.223" Version.v "0.1.223";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12542,6 +12542,43 @@ let () =
     (String.concat "," (List.map (fun (d : Pipeline.diagnostic) ->
        string_of_int d.Pipeline.d_loc.Loc.line) errs))
     "1,2";
+  (* v0.1.223 (mraft dogfood): a `type` whose name is C's. The reserved-name check
+     had only ever looked at `let` names, so `type wait = ...` emitted
+     `typedef struct wait wait;` and the failure came from clang — a documented
+     collision surfacing at the wrong layer. The position matters as much as the
+     message: an editor has to be able to put it on the name. *)
+  let warnings_of src =
+    List.filter (fun (d : Pipeline.diagnostic) ->
+      d.Pipeline.d_severity = Pipeline.Warning)
+      (Pipeline.diagnostics src)
+  in
+  let type_name_warnings =
+    warnings_of "type wait = Waiting | Finished of int;\nlet _ = print \"x\";\n"
+  in
+  check "reserved type name: warned about, on the name itself"
+    (String.concat ";" (List.map (fun (d : Pipeline.diagnostic) ->
+       Printf.sprintf "%d:%d" d.Pipeline.d_loc.Loc.line d.Pipeline.d_loc.Loc.col)
+       type_name_warnings))
+    "1:6";
+  check "reserved type name: the message names the type"
+    (match type_name_warnings with
+     | d :: _ ->
+       (* No substring helper in scope here; a fold over the message is enough. *)
+       let msg = d.Pipeline.d_msg in
+       let needle = "`wait`" in
+       let n = String.length needle in
+       let found = ref false in
+       String.iteri (fun i _ ->
+         if not !found && i + n <= String.length msg
+            && String.sub msg i n = needle then found := true) msg;
+       if !found then "names it" else msg
+     | [] -> "no warning")
+    "names it";
+  check "reserved type name: an ordinary name warns about nothing"
+    (string_of_int (List.length
+       (warnings_of "type waiting_on = Idle | Finished of int;\nlet _ = print \"x\";\n")))
+    "0";
+
   check "type recovery: a good file still reports nothing"
     (string_of_int (List.length (type_errors_of "let f = fn (n: int) -> n + 1;\nlet _ = print_int (f 1);\n")))
     "0";
