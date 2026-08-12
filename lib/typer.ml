@@ -778,6 +778,53 @@ let rec contains_drop_type (t : Ast.ty) : bool =
    REJECT unresolved captures, closing the soundness hole flagged in review. *)
 let sync_types : (string, unit) Hashtbl.t = Hashtbl.create 8
 let local_types : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+(* Forget every type this process has been told about, except the ones it was born
+   knowing. The parser has had `reset_decl_state` for exactly this reason since types
+   could shadow across two parses in one process; the typer's own registries were
+   never cleared, and for a compiler that never mattered — one process checks one
+   program.
+
+   The language server is one process checking one document over and over. So a
+   constructor renamed from `Alpha` to `Gamma` left `Alpha` registered, and the editor
+   went on accepting a name that no longer exists — no diagnostic, until the build
+   failed. The same leak made a `view` and a later `type` of the same name collide.
+
+   The built-in capability records (Logger, Metrics) are registered at module load, so
+   a plain reset deletes them for good. The pristine state is snapshotted on the first
+   call instead of at a chosen point in this file: the first call comes from
+   Pipeline.parse_program before any program's declarations are processed, which is
+   exactly when the tables hold module-load state and nothing else. *)
+let builtin_snapshot :
+  ((string, constr_info) Hashtbl.t
+   * (string, int) Hashtbl.t
+   * (string, record_info) Hashtbl.t
+   * (string, view_info) Hashtbl.t
+   * (string, unit) Hashtbl.t
+   * (string, unit) Hashtbl.t
+   * (string, unit) Hashtbl.t
+   * (string, string) Hashtbl.t) option ref = ref None
+
+let reset_type_registries () =
+  match !builtin_snapshot with
+  | None ->
+    builtin_snapshot :=
+      Some (Hashtbl.copy constructors, Hashtbl.copy types, Hashtbl.copy records,
+            Hashtbl.copy views, Hashtbl.copy drop_types, Hashtbl.copy sync_types,
+            Hashtbl.copy local_types, Hashtbl.copy Ast.record_aliases)
+  | Some (c, t, r, v, d, sy, l, ra) ->
+    let restore tbl snap =
+      Hashtbl.reset tbl;
+      Hashtbl.iter (fun k value -> Hashtbl.replace tbl k value) snap
+    in
+    restore constructors c;
+    restore types t;
+    restore records r;
+    restore views v;
+    restore drop_types d;
+    restore sync_types sy;
+    restore local_types l;
+    restore Ast.record_aliases ra
 let register_sync_type name = Hashtbl.replace sync_types name ()
 let register_local_type name = Hashtbl.replace local_types name ()
 

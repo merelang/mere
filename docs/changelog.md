@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.225 — 2026-08-13
+
+_The editor stopped accepting names that no longer exist._
+
+Rename a constructor and keep using the old name:
+
+```mere
+type t = Gamma | Delta;
+let x = Alpha in print "b"      // Alpha was renamed away
+```
+
+The compiler says `unknown constructor: Alpha`. The language server said nothing —
+clean file, no diagnostic, until the build failed. Three versions of one document,
+driven through `mere lsp`:
+
+```
+v1  type t = Alpha | Beta;               clean
+v2  type t = Gamma | Delta; ... Alpha    clean          <- wrong
+v3  type t = Gamma | Delta; ... Gamma    clean
+```
+
+The parser has had `reset_decl_state` since a `type` in one program could shadow one
+in the next. The **typer's** registries — constructors, types, records, views, drop /
+sync / local types, record aliases — were never cleared. A compiler process checks one
+program, so nothing ever noticed; a language server checks one document per keystroke.
+The same leak made a `view Pair` and a later `type Pair` collide, which is how this
+was found: a test declaring a record hit "view Pair must be constructed inside a
+region block".
+
+Two changes, and the second is the one worth reading:
+
+- `Typer.reset_type_registries ()` runs next to the parser's reset. It restores a
+  snapshot rather than emptying the tables, because the built-in capability records
+  (`Logger`, `Metrics`) are registered at module load and a plain reset deletes them
+  permanently. The snapshot is taken on the first call — which comes before any
+  program's declarations are processed — so it does not depend on where in the file it
+  is written.
+- **What types exist is now established by `parse_program`**, not only by whichever
+  later walk happens to visit the declarations. `Typer.infer` on a desugared program
+  never registered anything, so a caller that skipped `process_decls` type-checked
+  against whatever the *previous* program in this process had declared. Dozens of
+  tests did exactly that and passed, because nothing was ever cleared: resetting
+  without this made `Nil` unknown. Registering is idempotent, so the later walks are
+  unaffected.
+
+That second point is the real defect. The first is what exposed it.
+
 ## v0.1.224 — 2026-08-13
 
 _A name bound by a constructor pattern can cross a thread boundary._

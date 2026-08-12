@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.224" Version.v "0.1.224";
+  check "version is 0.1.225" Version.v "0.1.225";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11710,6 +11710,31 @@ let () =
         let lg = MkLogger 0 in \
         let _ = spawn (fn () -> let _ = lg in ()) in \
         ()") "()";
+  (* v0.1.225: the typer's type registries are per-program, and were not. A compiler
+     process checks one program, so nothing noticed; the language server checks one
+     document per keystroke, and a constructor renamed from Alpha to Gamma left Alpha
+     registered — the editor accepted a name that no longer existed and said nothing
+     until the build failed.
+
+     Two checks in one process, which is the condition that produces it. *)
+  let ctor_errors src =
+    List.length (List.filter (fun (d : Pipeline.diagnostic) ->
+      d.Pipeline.d_severity = Pipeline.Error) (Pipeline.diagnostics src))
+  in
+  let _ = ctor_errors "type reg_t = Alpha | Beta;\nlet _ = print \"a\";\n" in
+  check "type registry: a renamed constructor is not still accepted"
+    (string_of_int
+       (ctor_errors "type reg_t = Gamma | Delta;\nlet x = Alpha in print \"b\"\n"))
+    "1";
+  check "type registry: and the new name is fine"
+    (string_of_int
+       (ctor_errors "type reg_t = Gamma | Delta;\nlet x = Gamma in print \"c\"\n"))
+    "0";
+  (* The built-in capability records are registered at module load, so a reset that
+     forgets them breaks every later program. *)
+  check "type registry: the built-in records survive a reset"
+    (Pipeline.type_of "mk_logger \"x\"") "Logger";
+
   (* v0.1.224 (mraft dogfood P5): a variable bound by a *constructor* pattern is
      capturable when its type is known. The capture check's pattern binder handled
      P_var and tuples-over-tuples and gave up on everything else, binding those

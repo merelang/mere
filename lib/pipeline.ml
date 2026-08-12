@@ -28,12 +28,34 @@ let parse_prelude () : Ast.top_decl list =
   let prog = Parser.parse_program tokens in
   prog.Ast.decls
 
+(* The declarations that say what types exist. Kept next to `parse_program` because
+   that is where they are now applied; `process_decls` and `Trait_elab` still make the
+   same calls on their own walks, which is harmless (each registrar replaces). *)
+let register_declared_types (decls : Ast.top_decl list) : unit =
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_type (name, params, variants) -> Typer.register_type name params variants
+    | Ast.Top_extern_type name -> Typer.register_type name [] []
+    | Ast.Top_record (name, params, fields) -> Typer.register_record name params fields
+    | Ast.Top_view (name, region, fields) -> Typer.register_view name region fields
+    | Ast.Top_drop name -> Typer.register_drop_type name
+    | Ast.Top_sync name -> Typer.register_sync_type name
+    | Ast.Top_local name -> Typer.register_local_type name
+    | Ast.Top_ctor_alias (alias, target) -> Typer.alias_ctor alias target
+    | Ast.Top_record_alias (alias, target) -> Typer.alias_record alias target
+    | _ -> ()) decls
+
 let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
   (* Clear the parser's per-program declaration tables so a `type` / `module`
      from a previously-parsed program in this process cannot leak into this one
      (see Parser.reset_decl_state). Done BEFORE the prelude parse, which then
      re-registers the prelude's own types / constructors. *)
   Parser.reset_decl_state ();
+  (* And the typer's registries, which are the same kind of per-program state and
+     were never cleared: one process checking two programs had the first one's
+     constructors, records and views still registered for the second. A compiler
+     never noticed; the language server checks one document per keystroke. *)
+  Typer.reset_type_registries ();
   (* Phase 19.4: parse the prelude FIRST so parser.constructors etc.
      have the prelude's types/ctors registered before the user's source
      is tokenized + parsed. Otherwise `Cons` in user code lookups arity
@@ -56,11 +78,22 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
      2048-dogfood P3: then α-rename nested fn bindings to unique names so
      same-named inner fns (e.g. a `let rec go` per if-branch) don't collide
      in the backends' name-keyed inner-fn lift resolution. *)
-  Ast.uniquify_toplevel_shadows
-    (Ast.reserve_toplevel_main
-      (Ast.uniquify_inner_fns_program
-        (Ast.lower_par_map_program
-          { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))
+  let prog =
+    Ast.uniquify_toplevel_shadows
+      (Ast.reserve_toplevel_main
+        (Ast.uniquify_inner_fns_program
+          (Ast.lower_par_map_program
+            { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))
+  in
+  (* Tell the typer what this program declares, here rather than only when the
+     declarations are later walked. What types exist is a fact about the program, and
+     making it one keeps every entry point consistent: `Typer.infer` on a desugared
+     program never registered anything, so a caller that skipped `process_decls`
+     type-checked against whatever the *previous* program in this process had
+     declared. That worked only because nothing was ever cleared. Registering is
+     idempotent, so the later walk is unaffected. *)
+  register_declared_types prog.Ast.decls;
+  prog
 
 (* Every syntax error in a source string, not just the first: lex, then parse
    with declaration-level recovery. Used by the CLI to report a whole file's
