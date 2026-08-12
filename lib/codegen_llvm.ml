@@ -3837,6 +3837,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
     let av = emit_expr env arg in
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
+    emit_instr "  call i32 @fflush(ptr null)";
     "0"  (* unit / int 0 *)
   (* print_bytes: `fwrite` with the length, which is the whole reason `bytes`
      exists as a type. `puts` would stop at the first zero byte, and did — see the
@@ -6341,6 +6342,12 @@ let runtime_decls =
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @memcmp(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
+      (* Same reason the C backend line-buffers stdout: `print` must mean the
+         same thing piped as it does on a terminal, or a long-running program
+         logs nothing until it exits. fflush(NULL) flushes every open output
+         stream and needs no platform-specific `stdout` global, which the IR
+         would otherwise have to name differently per libc. *)
+      "declare i32 @fflush(ptr)";
       "declare i32 @printf(ptr, ...)";
       (* Q-012: POSIX threads. pthread_t is pointer-sized on LP64, carried as
          i64. The spawn trampoline unpacks a heap {env, fn} pair and invokes
@@ -9708,7 +9715,8 @@ let file_pio_runtime_llvm =
   String.concat "\n"
     [ "declare i32 @fgetc(ptr)";
       "declare i32 @fputc(i32, ptr)";
-      "declare i32 @fflush(ptr)";
+      (* @fflush is declared with the always-emitted prelude (print flushes
+         through it), so declaring it again here is a redefinition error. *)
       "@.fopen_rp = internal constant [4 x i8] c\"r+b\\00\"";
       "@.fopen_wp = internal constant [4 x i8] c\"w+b\\00\"";
       "";

@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.221 — 2026-08-12
+
+_A program's output no longer depends on whether someone redirected it._
+
+`print` lowered to `puts`, and nothing in the runtime ever called `fflush`. C
+line-buffers a terminal and fully buffers a pipe, so a program whose output was
+redirected to a file printed nothing until it exited or accumulated 4KB.
+
+Every dogfood until now was a batch program — it printed and exited, and exiting
+flushed. The mraft dogfood is the first Mere program meant to be *watched while
+running*, and it logged nothing at all: a server started with `> log 2>&1` looked
+identical to one that had hung.
+
+The C backend now emits `setvbuf(stdout, NULL, _IOLBF, 0)` in `main`; the LLVM
+backend flushes after each `print` (`fflush(NULL)`, which needs no
+platform-specific `stdout` global — glibc and macOS name it differently). Both
+give piped output the same behaviour a terminal already had.
+
+The LLVM change also removed a duplicate `declare i32 @fflush(ptr)`: the file
+positioned-IO runtime had its own, and the second declaration is an error rather
+than a redefinition LLVM tolerates. `scripts/parity.sh` caught it — `file_pio`
+was the only program that emitted both.
+
 ## v0.1.220 — 2026-08-12
 
 _Type inference was quadratic in the number of bindings. It is linear now._
