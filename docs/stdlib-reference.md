@@ -79,6 +79,40 @@ args ()                             // → ["foo", "bar"] (mere prog foo bar)
 run "clang -O2 main.c -o app"       // → 0 on success, nonzero exit code otherwise
 ```
 
+**Sockets** are `extern fn` declarations rather than builtins — the C backend defines
+them when a program declares them (`native_ffi_names` in `codegen_c.ml`), which is why
+they take flat-arena offsets rather than `bytes`. They are native-only in practice.
+
+| name | type | notes |
+|---|---|---|
+| `tcp_listen` | `int -> int` | Bind a listener on a port (all interfaces), `SO_REUSEADDR`; the fd, or -1 |
+| `tcp_accept` | `int -> int` | Accept one connection; the fd, or -1 |
+| `tcp_connect` | `str -> int -> int` | Dial host:port; the fd, or -1 |
+| `tcp_write` | `int -> int -> int -> int` | Write `len` bytes from an arena offset |
+| `tcp_read` | `int -> int -> int -> int` | Read into an arena offset. **See the codes below** |
+| `tcp_set_timeout` | `int -> int -> int` | `SO_RCVTIMEO` / `SO_SNDTIMEO` in milliseconds |
+| `tcp_close` | `int -> unit` | Close the fd |
+
+**What `tcp_read` returns** (v0.1.226, mraft dogfood). A count when it read something,
+and `0` at end of stream — a peer that closed cleanly, which is information rather
+than a failure. A negative result says *which* failure, because with a timeout set
+these are opposite events for the caller:
+
+| | meaning | what a caller does |
+|---|---|---|
+| `-1` | nothing arrived before the deadline | wait again |
+| `-2` | the connection is gone | reconnect |
+| `-3` | any other error | usually give up |
+
+Before v0.1.226 every failure was `-1`, and a program that needed the difference had
+to time the call and ask whether it had failed slowly enough to have been a timeout —
+inferring a cause from a duration. Every existing `< 0` check is unaffected.
+`scripts/tcp_read_codes.sh` produces all three rather than describing them.
+
+**The Wasm path does not agree**, and is a known gap: its `tcp_read` goes through
+WASI `sock_sread` and returns `0` on error, which in C means end of stream. No parity
+test covers sockets, which is why nobody had noticed.
+
 **Positioned file I/O** (`file_openrw` through `file_close`) works on **all four**
 backends: interp and C natively, Wasm over host imports since v0.1.153 (bytes cross
 in the `mere_bytes` layout rather than one call per byte), LLVM since v0.1.163. It

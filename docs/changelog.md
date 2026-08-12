@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.226 — 2026-08-13
+
+_A failed read says which failure it was._
+
+```
+> 0   bytes read
+  0   the peer closed cleanly — end of stream, not an error
+ -1   nothing arrived before the deadline
+ -2   the connection is gone
+ -3   anything else
+```
+
+`tcp_read` returned read(2)'s `-1` for everything. With `SO_RCVTIMEO` set that covers
+two opposite events: the deadline passed with nothing arriving, and the connection
+broke. One means wait again, the other means reconnect. The mraft dogfood told them
+apart by timing the call and asking whether it had failed slowly enough to have been a
+timeout — inferring a cause from a duration, and recorded as that repository's P4.
+
+The codes stay negative, so every existing `< 0` check is unaffected.
+
+`scripts/tcp_read_codes.sh` **produces** all three rather than describing them: a
+socket nobody writes to, a peer that closes cleanly, and a peer that aborts with data
+still unread in its own receive queue — which is what makes `close()` send RST instead
+of FIN, and the only reliable way to get `ECONNRESET` without `setsockopt(SO_LINGER)`.
+
+Two things this turned up:
+
+- **The socket externs were documented nowhere.** Same as the positioned-IO family in
+  v0.1.222: real, on every network program, and absent from the stdlib reference.
+  Both are now in it.
+- **Wasm disagrees about `0`.** Its `tcp_read` goes through WASI `sock_sread` and
+  returns `0` on error, where C returns `0` only at end of stream. So a program that
+  treats `0` as "the peer closed" is wrong there. No parity test covers sockets, which
+  is why nobody had noticed; recorded rather than fixed, because fixing it means
+  mapping WASI's error set and there is no Wasm program that opens a socket yet.
+
+This answers the concrete case. The general question mraft's P4 asks — how a
+capability reports *why* it failed, rather than only that it did, across an FFI
+boundary that is C-shaped — is not answered by a convention about negative integers,
+and is still open.
+
 ## v0.1.225 — 2026-08-13
 
 _The editor stopped accepting names that no longer exist._
