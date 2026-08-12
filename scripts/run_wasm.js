@@ -92,6 +92,9 @@ const env = Object.assign({
   memory,
   puts: (ptr) => process.stdout.write(readCStr(ptr) + '\\n'),
   print_no_nl: (ptr) => process.stdout.write(readCStr(ptr)),
+  // A pointer and a length: a zero is a byte, not an end.
+  print_bytes: (ptr, len) =>
+    process.stdout.write(Buffer.from(memory.buffer, ptr, len)),
   time: () => Date.now() / 1000,
   mere_spawn: stub, mere_join: stub,
   __lang_str_of_float: stub, __lang_float_of_str: stub,
@@ -285,6 +288,11 @@ const wasmPath = process.argv[2];
     time: () => Date.now() / 1000,
     // print without the trailing newline (Mere's print_no_nl builtin).
     print_no_nl: (ptr) => process.stdout.write(readCStr(ptr)),
+    // print_bytes takes a pointer *and a length*, which is the whole reason
+    // it exists: a byte sequence is exactly what a NUL-terminated string
+    // cannot carry, because a zero is a byte and not an end.
+    print_bytes: (ptr, len) =>
+      process.stdout.write(Buffer.from(memory.buffer, ptr, len)),
     // Phase 34.4: libm functions (anything not in Wasm intrinsics is provided by the host)
     __lang_sin: Math.sin,
     __lang_cos: Math.cos,

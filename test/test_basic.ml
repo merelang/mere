@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.218" Version.v "0.1.218";
+  check "version is 0.1.219" Version.v "0.1.219";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5594,6 +5594,19 @@ let () =
     (let c = codegen "let _ = print_bytes (bytes_of_hex \"4100\");" in
      string_of_bool (contains c "fwrite(__pb->data" && not (contains c "fputs(__lang_bytes")))
     "true";
+  check "bytes: the Wasm backend asks the host for a pointer and a length"
+    (let prog = Pipeline.parse_program "let _ = print_bytes (bytes_of_hex \"4100\");\n()" in
+     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     let wat = Codegen_wasm.emit_program ~main_ty prog in
+     (* Its printing goes through a host import, and `print_no_nl`'s takes a
+        NUL-terminated pointer — which is exactly what a byte sequence cannot be.
+        Gated on use, so a program without it imports nothing new. *)
+     Printf.sprintf "%b %b"
+       (contains wat "(import \"env\" \"print_bytes\" (func $__lang_print_bytes_h (param i32) (param i32)))")
+       (let p2 = Pipeline.parse_program "let _ = print \"x\";" in
+        let t2 = Typer.infer Typer.initial_env (Ast.desugar_program p2) in
+        contains (Codegen_wasm.emit_program ~main_ty:t2 p2) "print_bytes"))
+    "true false";
   check "bytes: the LLVM backend writes the length too"
     (let prog = Pipeline.parse_program "let _ = print_bytes (bytes_of_hex \"4100\");\n()" in
      let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in

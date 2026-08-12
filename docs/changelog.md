@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.219 — 2026-08-12
+
+_`print_bytes` on Wasm, which makes it all four backends._
+
+```
+interp: 41004228290a
+C:      41004228290a
+LLVM:   41004228290a
+Wasm:   41004228290a
+```
+
+Wasm was the one backend that had to refuse this, and the reason was the host
+boundary rather than codegen: its printing goes through an `env.print_no_nl(ptr)`
+import that reads a **NUL-terminated** string out of linear memory, which is
+exactly what a byte sequence cannot be. So it needed a new import taking a
+pointer *and a length* — `env.print_bytes(ptr, len)` — and the host side in
+`scripts/run_wasm.js` to write that many bytes from memory.
+
+**Gated on use**, like the imports around it: a program that does not call
+`print_bytes` declares nothing new and runs on an older host unchanged. That
+mattered here, since the playground ships prebuilt `.wasm` files.
+
+_The test names both halves: the import must appear when the builtin is used, and
+must not appear when it is not._
+
+---
+
 ## v0.1.218 — 2026-08-12
 
 _`ByteBuf[R]`: the mutable byte buffer that was missing._

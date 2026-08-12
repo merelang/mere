@@ -104,9 +104,14 @@ let fresh_str_offset (s : string) : int =
 
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
+(* print_bytes needs its own host import: `print_no_nl` takes a NUL-terminated
+   pointer, which is exactly what a byte sequence cannot be. Gated, so a program
+   that does not use it imports nothing new and runs on an older host. *)
+let print_bytes_used = ref false
 
 let reset () =
   print_no_nl_used := false;
+  print_bytes_used := false;
   instrs := [];
   local_counter := 0;
   local_types := [];
@@ -2280,6 +2285,15 @@ let rec emit_expr (e : Ast.expr) : unit =
     print_no_nl_used := true;
     emit_expr arg;
     emit_instr "call $__lang_print_no_nl";
+    emit_instr "i64.const 0"  (* unit *)
+  (* print_bytes: hand the host the data pointer and the length. A `bytes` is
+     [i32 len][data...], so the data starts four bytes in. *)
+  | Ast.App ({ node = Ast.Var "print_bytes"; _ }, arg)
+    when not (user_shadows_wasm "print_bytes") ->
+    bytes_used := true;
+    print_bytes_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_print_bytes";
     emit_instr "i64.const 0"  (* unit *)
   (* Q-012: spawn a `unit -> unit` closure on a Wasm worker. The closure
      value is an i32 pointer to its { env_offset, fn_idx } record in the
@@ -8411,6 +8425,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (if !print_no_nl_used then
       "  (import \"env\" \"print_no_nl\" (func $__lang_print_no_nl_h (param i32)))\n"
     else "")
+    ^ (if !print_bytes_used then
+      "  (import \"env\" \"print_bytes\" (func $__lang_print_bytes_h (param i32) (param i32)))\n"
+    else "")
     ^ (if !file_io_used then
       "  (import \"env\" \"read_file\" (func $__lang_read_file_h (param i32) (result i32)))\n\
       \  (import \"env\" \"write_file\" (func $__lang_write_file_h (param i32) (param i32) (result i32)))\n"
@@ -8436,6 +8453,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     "  (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))\n"
     ^ (if !print_no_nl_used then
       "  (func $__lang_print_no_nl (param i64) (call $__lang_print_no_nl_h (i32.wrap_i64 (local.get 0))))\n"
+    else "")
+    ^ (if !print_bytes_used then
+      "  (func $__lang_print_bytes (param i64)\n\
+      \    (call $__lang_print_bytes_h\n\
+      \      (i32.add (i32.wrap_i64 (local.get 0)) (i32.const 4))\n\
+      \      (i32.load (i32.wrap_i64 (local.get 0)))))\n"
     else "")
     ^ (if !file_io_used then
       "  (func $__lang_read_file (param i64) (result i64)\n\
@@ -8531,6 +8554,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          else "")
       ^ (if !print_no_nl_used then
            "  (func $__lang_print_no_nl_h (param i32) unreachable)\n"
+         else "")
+      ^ (if !print_bytes_used then
+           "  (func $__lang_print_bytes_h (param i32) (param i32) unreachable)\n"
          else "")
     else file_io_imports ^ float_io_imports ^ libm_imports
   in
