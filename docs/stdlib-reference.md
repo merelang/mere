@@ -52,7 +52,7 @@ Legend:
 | `bytebuf_push` | `ByteBuf[R] -> int -> unit` | Append, growing the buffer |
 | `bytes_of_bytebuf` | `ByteBuf[R] -> bytes` | Freeze a copy, which can then leave the region |
 | `bytebuf_of_bytes` | `bytes -> ByteBuf[R]` | The other way, for editing |
-| `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout, unbuffered and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. interp + C + LLVM (v0.1.216) |
+| `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout, unbuffered and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. **All four backends** (v0.1.216, Wasm in v0.1.219) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
 | `write_file_bytes` ⚡ | `str -> Vec[R, int] -> unit` | Write an int vec as raw bytes (each element 0..255) — the write half of the binary path; PPM P6 etc. interp + C only (v0.1.44, Mandelbrot probe) |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
