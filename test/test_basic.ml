@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.214" Version.v "0.1.214";
+  check "version is 0.1.215" Version.v "0.1.215";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12755,6 +12755,39 @@ let () =
      them would point a browser's debugger at the wrong file. *)
   check "wasm -wg: prelude functions are not in it"
     (string_of_bool (contains m "F list_map")) "false";
+
+  (* `-ll -g`: LLVM IR carries its own debug information, so unlike C (which
+     borrows the C compiler's `#line`) and Wasm (which needs a tool holding the
+     assembled binary) there is nobody to divide the work with. A DISubprogram per
+     function, and a `!dbg` on every instruction inside it — every instruction,
+     because a function with a subprogram whose calls lack locations is something
+     the verifier objects to. *)
+  let ll_with_debug src =
+    let prog = Pipeline.parse_program src in
+    let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_llvm.debug_file := Some "app.mere";
+    let out = Codegen_llvm.emit_program ~main_ty prog in
+    Codegen_llvm.debug_file := None;
+    out
+  in
+  let ll = ll_with_debug "let twice = fn (n: int) ->\n  n * 2;\nlet _ = print_int (twice 21);\n" in
+  check "ll -g: the function points at the line it was written on"
+    (string_of_bool (contains ll "!DISubprogram(name: \"twice\", scope: !2, file: !2, line: 2"))
+    "true";
+  check "ll -g: its instructions carry a location"
+    (string_of_bool (contains ll ", !dbg !"))
+    "true";
+  (* Without this the rest is stripped as being from an older LLVM, and the
+     debugger shows nothing — with no error anywhere to explain why. *)
+  check "ll -g: the module says which debug info version it speaks"
+    (string_of_bool (contains ll "!\"Debug Info Version\", i32 3"))
+    "true";
+  check "ll: without -g there is no metadata at all"
+    (string_of_bool
+       (let prog = Pipeline.parse_program "let f = fn (n: int) -> n + 1;\nlet _ = print_int (f 1);\n" in
+        let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+        contains (Codegen_llvm.emit_program ~main_ty prog) "!DISubprogram"))
+    "false";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of

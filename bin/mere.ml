@@ -8,7 +8,7 @@ let usage () =
   print_endline "  mere -te <expr>       print the inferred type of an inline expression";
   print_endline "  mere -c <file.mere>   emit C source (compile with clang)";
   print_endline "  mere -ce <expr>       emit C source for an inline expression";
-  print_endline "        -c takes `-g`: emit #line directives back to the .mere";
+  print_endline "        -c and -ll take `-g`: debug information back to the .mere";
   print_endline "        source, so a debugger shows the program you wrote";
   print_endline "  mere -ll <file.mere>  emit LLVM IR (compile with clang)";
   print_endline "  mere -lle <expr>      emit LLVM IR for an inline expression";
@@ -448,6 +448,11 @@ let () =
     run_action Mere.Pipeline.type_of "<inline>" expr
   | [_; "-ce"; expr] ->
     run_action compile_to_c "<inline>" expr
+  | [_; "-ll"; "-g"; path] | [_; "-ll"; path; "-g"] ->
+    Mere.Codegen_llvm.debug_file := Some path;
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base (compile_to_llvm ~base_dir:base) path source
   | [_; "-c"; "-g"; path] | [_; "-c"; path; "-g"] ->
     let source = read_file path in
     let base = Filename.dirname path in
