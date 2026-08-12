@@ -29,6 +29,7 @@ let usage () =
   print_endline "        `--bare`: no host syscalls; the program's top-level";
   print_endline "        `main` is handed the machine as a `Raw` capability";
   print_endline "  mere -r               start interactive REPL";
+  print_endline "  mere lsp              run the language server (JSON-RPC on stdin/stdout)";
   print_endline "  mere fmt <file.mere>          format source (writes to stdout)";
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
   print_endline "  mere fmt --check <files...>   exit 1 if any file needs formatting";
@@ -140,77 +141,7 @@ let run_action ?(rv = false) ?base_dir action label source =
 let component_flag : bool ref = ref false
 
 let infer_program ?base_dir source =
-  let open Mere in
-  Typer.reset_send_constraints ();
-  let prog =
-    Trait_elab.elaborate
-      (Pipeline.parse_program ?base_dir ~search_paths:!search_paths source)
-  in
-  let type_env = ref Typer.initial_env in
-  List.iter (fun decl ->
-    match decl with
-    | Ast.Top_let (pat, value) ->
-      (* Warn on reserved top-level names (incl. `main`, the entry point)
-         on the compile paths too — not just the interp path — so the
-         collision is caught here instead of surfacing as a cryptic
-         downstream error (e.g. wat2wasm "redefinition of $main"). *)
-      Pipeline.warn_reserved_in_pattern pat;
-      let outer_env = !type_env in
-      let t = Typer.infer outer_env value in
-      let bindings = Typer.check_pattern pat t in
-      type_env := List.fold_left (fun acc (n, ty) ->
-        let sch = Typer.generalize outer_env ty in
-        (n, sch) :: acc) outer_env bindings
-    | Ast.Top_let_rec bindings ->
-      List.iter (fun (n, value) ->
-        Pipeline.warn_reserved_name value.Ast.loc n) bindings;
-      let outer_env = !type_env in
-      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
-      let env_rec = List.fold_left2 (fun acc (n, _) a ->
-        (n, Typer.mono a) :: acc) outer_env bindings alphas in
-      List.iter2 (fun (_, value) alpha ->
-        let t = Typer.infer env_rec value in
-        Typer.unify value.Ast.loc alpha t) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = Typer.generalize outer_env a in
-        (n, sch) :: acc) outer_env bindings alphas
-    | Ast.Top_type (name, params, variants) ->
-      Typer.register_type name params variants
-    | Ast.Top_signature _ -> ()
-    | Ast.Top_record (name, params, fields) ->
-      Typer.register_record name params fields
-    | Ast.Top_type_alias _ -> ()
-    | Ast.Top_view (name, region, fields) ->
-      Typer.register_view name region fields
-    | Ast.Top_drop name ->
-      Typer.register_drop_type name
-    | Ast.Top_sync name ->
-      Typer.register_sync_type name
-    | Ast.Top_local name ->
-      Typer.register_local_type name
-    | Ast.Top_extern (name, ty) ->
-      type_env := (name, Typer.mono ty) :: !type_env
-    | Ast.Top_extern_type type_name ->
-      Typer.register_type type_name [] []
-    | Ast.Top_ctor_alias (alias, target) ->
-      Typer.alias_ctor alias target
-    | Ast.Top_record_alias (alias, target) ->
-      Typer.alias_record alias target
-    | Ast.Top_trait _ | Ast.Top_impl _ -> ()
-  ) prog.decls;
-  let desugared = Ast.desugar_program prog in
-  let main_ty = Typer.infer !type_env desugared in
-  (* v0.1.29 (mkv dogfood P2): the compile path ran type inference only —
-     the interp path's safety analyses (channel-element Send obligations,
-     borrow conflicts, spawn-capture move/Send/Sync classification) were
-     silently skipped under -c / -l / -w. A shared mutable Map captured by
-     spawned threads was rejected by `mere file.mere` but compiled fine by
-     `mere -c file.mere` — and raced at runtime. Run the same checks the
-     run path runs (Pipeline.run_program lines up with this order). *)
-  Typer.discharge_send_constraints ();
-  Typer.check_borrows [] desugared;
-  Move_check.check desugared;
-  (prog, main_ty)
+  Mere.Pipeline.infer_program ?base_dir ~search_paths:!search_paths source
 
 let compile_to_c ?base_dir source =
   let open Mere in
@@ -475,6 +406,10 @@ let () =
     run_action ~base_dir:base (compile_to_wasm ~base_dir:base) path source
   | [_; "-rve"; expr] ->
     run_action ~rv:true compile_to_riscv "<inline>" expr
+  | [_; "lsp"] ->
+    (* The editor speaks on stdin and listens on stdout, so nothing else may be
+       written there — every diagnostic goes back as a protocol message. *)
+    Mere.Lsp.serve ~search_paths:!search_paths ()
   | [_; "-rvse"; expr] ->
     run_action ~rv:true listing_riscv "<inline>" expr
   (* -rv (binary) / -rvs (listing) / -rvg (debug map), each with `--bare`,

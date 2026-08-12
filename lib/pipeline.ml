@@ -328,3 +328,121 @@ let process_typed s =
   let _ = Typer.infer !type_env prog.main in
   Typer.discharge_send_constraints ();
   Eval.to_string (Eval.eval_in !eval_env prog.main)
+
+(* Parse, elaborate and type-check a source string, returning the program and the
+   type of its main expression.
+
+   This lived in the CLI, which was fine while the CLI was the only thing that
+   compiled anything. A language server needs the *same* check — not a second
+   implementation that agrees with it on good days — so it lives here, and the
+   CLI calls it. Everything downstream (the four backends, the RV32I one) starts
+   from what this returns. *)
+let infer_program ?base_dir ?(search_paths = []) source =
+  Typer.reset_send_constraints ();
+  let prog =
+    Trait_elab.elaborate
+      (parse_program ?base_dir ~search_paths source)
+  in
+  let type_env = ref Typer.initial_env in
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_let (pat, value) ->
+      (* Warn on reserved top-level names (incl. `main`, the entry point)
+         on the compile paths too — not just the interp path — so the
+         collision is caught here instead of surfacing as a cryptic
+         downstream error (e.g. wat2wasm "redefinition of $main"). *)
+      warn_reserved_in_pattern pat;
+      let outer_env = !type_env in
+      let t = Typer.infer outer_env value in
+      let bindings = Typer.check_pattern pat t in
+      type_env := List.fold_left (fun acc (n, ty) ->
+        let sch = Typer.generalize outer_env ty in
+        (n, sch) :: acc) outer_env bindings
+    | Ast.Top_let_rec bindings ->
+      List.iter (fun (n, value) ->
+        warn_reserved_name value.Ast.loc n) bindings;
+      let outer_env = !type_env in
+      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+      let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        (n, Typer.mono a) :: acc) outer_env bindings alphas in
+      List.iter2 (fun (_, value) alpha ->
+        let t = Typer.infer env_rec value in
+        Typer.unify value.Ast.loc alpha t) bindings alphas;
+      type_env := List.fold_left2 (fun acc (n, _) a ->
+        let sch = Typer.generalize outer_env a in
+        (n, sch) :: acc) outer_env bindings alphas
+    | Ast.Top_type (name, params, variants) ->
+      Typer.register_type name params variants
+    | Ast.Top_signature _ -> ()
+    | Ast.Top_record (name, params, fields) ->
+      Typer.register_record name params fields
+    | Ast.Top_type_alias _ -> ()
+    | Ast.Top_view (name, region, fields) ->
+      Typer.register_view name region fields
+    | Ast.Top_drop name ->
+      Typer.register_drop_type name
+    | Ast.Top_sync name ->
+      Typer.register_sync_type name
+    | Ast.Top_local name ->
+      Typer.register_local_type name
+    | Ast.Top_extern (name, ty) ->
+      type_env := (name, Typer.mono ty) :: !type_env
+    | Ast.Top_extern_type type_name ->
+      Typer.register_type type_name [] []
+    | Ast.Top_ctor_alias (alias, target) ->
+      Typer.alias_ctor alias target
+    | Ast.Top_record_alias (alias, target) ->
+      Typer.alias_record alias target
+    | Ast.Top_trait _ | Ast.Top_impl _ -> ()
+  ) prog.decls;
+  let desugared = Ast.desugar_program prog in
+  let main_ty = Typer.infer !type_env desugared in
+  (* v0.1.29 (mkv dogfood P2): the compile path ran type inference only —
+     the interp path's safety analyses (channel-element Send obligations,
+     borrow conflicts, spawn-capture move/Send/Sync classification) were
+     silently skipped under -c / -l / -w. A shared mutable Map captured by
+     spawned threads was rejected by `mere file.mere` but compiled fine by
+     `mere -c file.mere` — and raced at runtime. Run the same checks the
+     run path runs (run_program lines up with this order). *)
+  Typer.discharge_send_constraints ();
+  Typer.check_borrows [] desugared;
+  Move_check.check desugared;
+  (prog, main_ty)
+
+(* Everything wrong with a source string, as data rather than as an exception.
+
+   Syntax first, and all of it (see `syntax_errors`): a file that does not parse
+   cannot be type-checked, and reporting one error while four are visible is what
+   this exists to stop. Only when it parses does the type-checker run — and that
+   one stops at its first complaint, because the typer raises. So a clean parse
+   yields at most one type error, which is honest but not yet good; making the
+   typer collect is its own slice.
+
+   Positions are the ones in the string handed in. Errors from an imported file
+   are reported with the position they have *there*, which is misleading in an
+   editor and is why they carry the file they came from once that exists. *)
+type severity = Error | Warning
+
+type diagnostic = {
+  d_loc : Loc.t;
+  d_kind : string;
+  d_msg : string;
+  d_severity : severity;
+}
+
+let diagnostics ?base_dir ?(search_paths = []) (source : string) : diagnostic list =
+  let err kind (loc, msg) =
+    { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error }
+  in
+  match syntax_errors ?base_dir ~search_paths source with
+  | (_ :: _) as errs -> List.map (err "parse error") errs
+  | [] ->
+    (try
+       ignore (infer_program ?base_dir ~search_paths source);
+       []
+     with
+     | Lexer.Lex_error (loc, msg) -> [err "lex error" (loc, msg)]
+     | Parser.Parse_error (loc, msg) -> [err "parse error" (loc, msg)]
+     | Typer.Type_error (loc, msg) -> [err "type error" (loc, msg)]
+     | Trait_elab.Trait_error (loc, msg) -> [err "trait error" (loc, msg)]
+     | Eval.Eval_error (loc, msg) -> [err "eval error" (loc, msg)])

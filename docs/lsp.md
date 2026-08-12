@@ -1,0 +1,86 @@
+# The language server
+
+```sh
+mere lsp
+```
+
+Speaks LSP over stdin and stdout. What it does today is **diagnostics**: every
+syntax error in the buffer, republished on each keystroke, and the first type
+error once the file parses.
+
+It is the same check the compiler runs — `Pipeline.diagnostics`, which the CLI
+also goes through. A language server that agrees with the compiler on good days
+is worse than none, because it teaches you to distrust the underline.
+
+## Editors
+
+**Neovim** (built-in client, no plugin):
+
+```lua
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "mere",
+  callback = function(args)
+    vim.lsp.start({
+      name = "mere",
+      cmd = { "mere", "lsp" },
+      root_dir = vim.fs.dirname(vim.fs.find({ "mere.toml", ".git" }, { upward = true })[1]),
+    })
+  end,
+})
+vim.filetype.add({ extension = { mere = "mere" } })
+```
+
+**VS Code** needs an extension to launch it; the server side of that extension is
+`{ command: "mere", args: ["lsp"] }` with `documentSelector: [{ language: "mere" }]`.
+
+**Anything else**: the command is `mere lsp`, there are no arguments and no
+configuration. It reads `Content-Length`-framed JSON-RPC on stdin and writes the
+same on stdout, so a client that can start a process can talk to it.
+
+## What it answers
+
+| method | behaviour |
+|---|---|
+| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`) |
+| `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
+| `textDocument/didClose` | publish an empty list, clearing the underlines |
+| `shutdown` / `exit` | as specified |
+| anything else with an id | `-32601 method not found`, rather than silence |
+
+Diagnostics carry a range with a **width**, so the underline covers the token
+rather than one character of it, and positions are converted from Mere's 1-based
+lines and columns to the protocol's 0-based ones.
+
+The buffer is what gets checked, not the file on disk — an editor owns a file
+while it is open. But `import` still resolves against the **file's** directory,
+taken from the document URI, so imports work in an unsaved buffer.
+
+## What it does not answer yet
+
+- **Hover, completion, go-to-definition.** These want the same thing underneath:
+  a position resolved against a typed tree. The tree is there; the resolution is
+  the next slice.
+- **More than one type error.** Syntax errors are all reported, because the
+  parser recovers at declaration boundaries (v0.1.203). The type-checker still
+  raises on the first problem, so a file that parses gets one type error at a
+  time. Making the typer collect instead of raise is its own slice, and a larger
+  one — every `raise` in it is a place that currently gets to assume the rest of
+  the pass will not run.
+- **Positions inside imported files.** An error in an imported file is reported
+  with the position it has *there*, against the importing file's URI, which is
+  wrong. Diagnostics need to carry the file they came from before this can be
+  fixed properly.
+- **Incremental sync.** The whole buffer arrives on every change. The check
+  re-reads all of it anyway, so incremental sync would buy nothing yet and cost
+  a class of desynchronisation bugs.
+
+## Testing it
+
+`sh scripts/lsp_smoke.sh` drives the real process through its wire format: a
+canned session that opens a file with three syntax errors, edits it into one with
+a type error, then into a clean one, and checks the framing and the three
+`publishDiagnostics` that come back.
+
+The handler itself is a function — message and state in, messages out — so the
+suite tests it directly, without a process. That split is deliberate: the only
+untested part is the three lines of IO in `Lsp.serve`.
