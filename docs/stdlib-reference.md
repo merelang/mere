@@ -59,6 +59,12 @@ Legend:
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
 | `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
 | `file_size` | `str -> int` | File size in bytes (stat); binary-safe length where `str_len` (strlen) stops at a NUL. interp + C native (v0.1.21) |
+| `file_openrw` | `str -> File` | Open a read/write handle, creating the file if absent and **not** truncating it. The handle for everything below (v0.1.115, mbtree dogfood) |
+| `file_pread` | `File -> int -> int -> Vec[R, int]` | Read at most `len` bytes starting at an offset; a read past the end comes back short rather than padded |
+| `file_pwrite` | `File -> int -> Vec[R, int] -> int` | Write a byte vec (each element 0..255) at an offset, extending the file if it writes past the end; returns the count written |
+| `file_pwrite_bytes` | `File -> int -> bytes -> int` | The same over `bytes`, without exploding a byte string into one boxed int per byte (v0.1.222, mraft dogfood) |
+| `file_fsync` | `File -> unit` | Force the OS to commit this handle's writes to stable storage. The difference between "written" and "durable", and what a store calls at a commit point |
+| `file_close` | `File -> unit` | Close the handle |
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
 | `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12 |
 | `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code (interp + C native; v0.1.13) |
@@ -72,6 +78,13 @@ read_lines "data.txt"               // → ["line1", "line2", ...]
 args ()                             // → ["foo", "bar"] (mere prog foo bar)
 run "clang -O2 main.c -o app"       // → 0 on success, nonzero exit code otherwise
 ```
+
+**Positioned file I/O** (`file_openrw` through `file_close`) works on **all four**
+backends: interp and C natively, Wasm over host imports since v0.1.153 (bytes cross
+in the `mere_bytes` layout rather than one call per byte), LLVM since v0.1.163. It
+is the group a paged store or a write-ahead log needs, and it was documented only in
+the changelog until v0.1.222 — which is how the mraft dogfood came to write its log
+through the Vec-taking call for a whole slice before noticing.
 
 **★ Codegen status**: `print` / `print_no_nl` / `print_int` / `print_bool` / `print_err` / `read_file` / `write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `print_int` / `print_bool` were the exception until v0.1.190 — this line claimed them for years while only the interpreter had them; C emitted a call to an undefined symbol and LLVM / Wasm refused outright. They now lower on all four (C through `printf`, LLVM and Wasm through the `str_of_int` they already had), locked by `test/parity/print_int_bool.mere`. `read_lines` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). `args` works on **all four** backends: C and LLVM read the argc/argv their `main` was handed, Wasm folds the host's `arg_count` / `arg_get` (v0.1.159 for Wasm, v0.1.169 for LLVM). The native-CLI / dogfood builtins `run` / `print_err` / `file_exists` / `file_mtime` / `file_size` / `tty_raw` / `tty_restore` / `read_key` / `random_int` also work on the **C native** backend (added for the `mk` / `mrog` / `mwasm` dogfoods, v0.1.13-v0.1.21).
 

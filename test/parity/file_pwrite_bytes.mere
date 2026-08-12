@@ -1,0 +1,34 @@
+// Positioned write of a byte string, across the backends.
+//
+// file_pwrite (v0.1.115, mbtree dogfood) takes a Vec[int], which predates the
+// bytes type by a hundred versions: a program holding a byte string had to
+// explode it into one boxed int per byte to write it at an offset. The mraft
+// dogfood's write-ahead log did exactly that, once per record.
+//
+// Both exist. mbtree builds its pages as Vecs and has no reason to change; this
+// is for everything that already has bytes in hand.
+
+let path = "/tmp/mere_parity_pwb.bin";
+let _ = write_file path "";
+
+let f = file_openrw path;
+
+// Three writes: at zero, appended at the end of the first, and past the end so
+// the file has to extend. The offsets are what makes this positioned rather than
+// a whole-file replace.
+let n1 = file_pwrite_bytes f 0 (bytes_of_str "hello ");
+let n2 = file_pwrite_bytes f n1 (bytes_of_str "world");
+let n3 = file_pwrite_bytes f 20 (bytes_of_str "!");
+let _ = file_fsync f;
+let _ = file_close f;
+
+let _ = print (str_of_int n1 ++ " " ++ str_of_int n2 ++ " " ++ str_of_int n3);
+
+// Reopened, so what is read back came off the filesystem rather than a buffer.
+let g = file_openrw path;
+let _ = print (str_of_bytes (bytes_of_vec (file_pread g 0 11)));
+// The gap between the second and third writes is zero bytes, not garbage.
+let _ = print (show (vec_to_list (file_pread g 11 10)));
+let _ = print (str_of_bytes (bytes_of_vec (file_pread g 20 1)));
+let _ = file_close g;
+print "pwb ok"

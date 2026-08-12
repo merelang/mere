@@ -2230,6 +2230,36 @@ let builtin_file_pwrite =
         | _ -> failwith "file_pwrite: offset expected int")
     | _ -> failwith "file_pwrite: expected read/write File (use file_openrw)")
 
+(* v0.1.222 (mraft dogfood): the same positioned write over `bytes`. The Vec
+   version predates the bytes type, so a program with a byte string in hand had to
+   turn it into one boxed int per byte first. *)
+let builtin_file_pwrite_bytes =
+  V_builtin ("file_pwrite_bytes", fun fv ->
+    match fv with
+    | V_rwfile fd ->
+      V_builtin ("file_pwrite_bytes_off", fun ov ->
+        match ov with
+        | V_int off ->
+          V_builtin ("file_pwrite_bytes_data", fun bv ->
+            match bv with
+            | V_bytes s ->
+              (* V_bytes carries an immutable string; Unix.write wants bytes. *)
+              let buf = Bytes.of_string s in
+              let len = Bytes.length buf in
+              ignore (Unix.lseek fd off Unix.SEEK_SET);
+              let rec write_all pos =
+                if pos >= len then ()
+                else
+                  let n = Unix.write fd buf pos (len - pos) in
+                  if n <= 0 then () else write_all (pos + n)
+              in
+              write_all 0;
+              V_int len
+            | _ -> failwith "file_pwrite_bytes: expected bytes")
+        | _ -> failwith "file_pwrite_bytes: offset expected int")
+    | _ ->
+      failwith "file_pwrite_bytes: expected read/write File (use file_openrw)")
+
 (* `file_fsync handle` flushes buffered writes to stable storage. A durable
    store calls it at commit points. *)
 let builtin_file_fsync =
@@ -2518,6 +2548,7 @@ let initial_env : env =
     ("file_close", ref builtin_file_close);
     ("file_openrw", ref builtin_file_openrw);
     ("file_pwrite", ref builtin_file_pwrite);
+    ("file_pwrite_bytes", ref builtin_file_pwrite_bytes);
     ("file_fsync", ref builtin_file_fsync);
     ("channel_recv_timeout", ref builtin_channel_recv_timeout);
     ("par_map", ref builtin_par_map);
