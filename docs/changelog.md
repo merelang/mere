@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.218 — 2026-08-12
+
+_`ByteBuf[R]`: the mutable byte buffer that was missing._
+
+_v0.1.216 gave `bytes` a way out of the program. What it still had no answer for
+was building or editing one: `bytes` is immutable, `StrBuf` appends only and is
+text, and `Vec[R, int]` does the job at **eight bytes per byte**. The thing that
+asked for it was reconstructing a PNG scanline, which reads the row above it —
+already reconstructed — and writes the row it is on. Random access both ways, and
+bytes._
+
+```
+bytebuf_new  : int -> ByteBuf[R]                 n zeroed bytes
+bytebuf_len  : ByteBuf[R] -> int
+bytebuf_get  : ByteBuf[R] -> int -> int
+bytebuf_set  : ByteBuf[R] -> int -> int -> unit
+bytebuf_push : ByteBuf[R] -> int -> unit         appends, growing
+bytes_of_bytebuf : ByteBuf[R] -> bytes           freeze a copy
+bytebuf_of_bytes : bytes -> ByteBuf[R]
+```
+
+Region-bound like `StrBuf`, and for the same reason: the bytes live in a region and
+the region is tracked by a pointer inside the struct rather than by the marker.
+Freezing copies into the current region, so a `bytes` frozen inside
+`region R { }` can be returned out of it — the mistake `strbuf_to_str` had to fix
+once already.
+
+**interp + C**, which is where byte I/O lives.
+
+_Measured on the dogfood, decoding a 736×724 RGBA PNG: peak RSS **164MB → 117MB**,
+with byte-identical output. The reconstructed image is 2.1MB of bytes, which was
+17MB of `int`s._
+
+_Adding the type re-found v0.1.217's P5 immediately: `ByteBuf`'s region marker
+tagged as `int` in one place and `__heap` in another, because the new name was not
+in the list of region-parameterised constructors. Same bug, same shape, caught this
+time by the test that already existed for it._
+
+---
+
 ## v0.1.217 — 2026-08-12
 
 _Two C-backend bugs the mpng dogfood found, both of which emitted C that a C

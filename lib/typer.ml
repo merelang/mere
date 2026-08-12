@@ -1379,6 +1379,55 @@ let () =
    be placed in a region. Just like `vec_new`, a typer special
    handler for `App (Var "strbuf_new", _)` binds the region from
    active_regions. *)
+(* ByteBuf[R]: a mutable byte buffer, region-bound like StrBuf. One byte per byte,
+   with random access — which is the pair `bytes` (immutable) and `StrBuf`
+   (append-only text) leave uncovered, and what reconstructing a PNG scanline
+   needs: it reads the row above and writes the row it is on. *)
+let _bytebuf_new_region = fresh_var ()
+let bytebuf_new_scheme =
+  let rid = match _bytebuf_new_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyInt, Ast.TyCon ("ByteBuf", [_bytebuf_new_region])) }
+
+let _bytebuf_len_region = fresh_var ()
+let bytebuf_len_scheme =
+  let rid = match _bytebuf_len_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("ByteBuf", [_bytebuf_len_region]), Ast.TyInt) }
+
+let _bytebuf_get_region = fresh_var ()
+let bytebuf_get_scheme =
+  let rid = match _bytebuf_get_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("ByteBuf", [_bytebuf_get_region]),
+             Ast.TyArrow (Ast.TyInt, Ast.TyInt)) }
+
+let _bytebuf_set_region = fresh_var ()
+let bytebuf_set_scheme =
+  let rid = match _bytebuf_set_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("ByteBuf", [_bytebuf_set_region]),
+             Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))) }
+
+let _bytebuf_push_region = fresh_var ()
+let bytebuf_push_scheme =
+  let rid = match _bytebuf_push_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("ByteBuf", [_bytebuf_push_region]),
+             Ast.TyArrow (Ast.TyInt, Ast.TyUnit)) }
+
+let _bytes_of_bytebuf_region = fresh_var ()
+let bytes_of_bytebuf_scheme =
+  let rid = match _bytes_of_bytebuf_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyCon ("ByteBuf", [_bytes_of_bytebuf_region]), Ast.TyBytes) }
+
+let _bytebuf_of_bytes_region = fresh_var ()
+let bytebuf_of_bytes_scheme =
+  let rid = match _bytebuf_of_bytes_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (Ast.TyBytes, Ast.TyCon ("ByteBuf", [_bytebuf_of_bytes_region])) }
+
 let _strbuf_new_region = fresh_var ()
 let strbuf_new_scheme =
   let rid = match _strbuf_new_region with Ast.TyVar v -> v.id | _ -> assert false in
@@ -1903,6 +1952,13 @@ let initial_env : env =
     ("owned_vec_push", owned_vec_push_scheme);
     ("owned_vec_get",  owned_vec_get_scheme);
     ("owned_vec_len",  owned_vec_len_scheme);
+    ("bytebuf_new",    bytebuf_new_scheme);
+    ("bytebuf_len",    bytebuf_len_scheme);
+    ("bytebuf_get",    bytebuf_get_scheme);
+    ("bytebuf_set",    bytebuf_set_scheme);
+    ("bytebuf_push",   bytebuf_push_scheme);
+    ("bytes_of_bytebuf", bytes_of_bytebuf_scheme);
+    ("bytebuf_of_bytes", bytebuf_of_bytes_scheme);
     ("strbuf_new",     strbuf_new_scheme);
     ("strbuf_push",    strbuf_push_scheme);
     ("strbuf_to_str",  strbuf_to_str_scheme);
