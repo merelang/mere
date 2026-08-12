@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.224 — 2026-08-13
+
+_A name bound by a constructor pattern can cross a thread boundary._
+
+```mere
+match ports with
+| Cons (p, rest) -> let _ = spawn (fn () -> sender p out) in ...
+```
+
+That was refused with `cannot capture \`p\` of unknown type across a thread
+boundary`, with `ports : int list` written down two lines above. The capture check's
+pattern binder handled `P_var` and a tuple pattern over a tuple type, and bound
+everything else — constructor patterns, record patterns — with an unknown type, which
+makes those names unusable across `spawn`. The mraft dogfood hit it on every peer it
+spawned a thread for, and the workaround (`let q = (p : int) in`, capture `q`) reads
+like superstition because it is: an ascription that tells the program nothing it did
+not already know.
+
+The declared payload type is enough to do better, with no unification and nothing
+this pass may mutate: the constructor registry knows the type parameters and the
+payload type, and the scrutinee's own arguments say what to substitute for them.
+Record patterns get the same treatment, field by field.
+
+**The diagnosis in the dogfood's PAIN.md was wrong**, and worth recording as such. It
+said the Send check ran before inference had propagated the annotation — a plausible
+story about pass ordering, told without looking. The types were fully resolved; the
+binder simply never looked at that shape of pattern. A payload whose type genuinely
+is a variable is still refused, and now says so accurately (`of polymorphic type`
+rather than `of unknown type`).
+
 ## v0.1.223 — 2026-08-12
 
 _The reserved-name warning now looks at type names, which is where it was needed._
