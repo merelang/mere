@@ -87,11 +87,14 @@ let is_digit c = c >= '0' && c <= '9'
 let is_alpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_'
 let is_ident_cont c = is_alpha c || is_digit c
 
-let rec tokenize s =
+(* `?file` stamps every position this produces with the file it came from. Only
+   an `import` passes it: for the source being compiled, "no file" already means
+   the right thing to everything that reports a position. *)
+let rec tokenize ?file s =
   let len = String.length s in
   let line = ref 1 in
   let col = ref 1 in
-  let here () = Loc.mk ~line:(!line) ~col:(!col) () in
+  let here () = Loc.mk ?file ~line:(!line) ~col:(!col) () in
   let with_width (pos : Loc.t) (w : int) : Loc.t = { pos with width = w } in
   let advance n = col := !col + n in
   let newline () =
@@ -323,13 +326,13 @@ let rec tokenize s =
               (match last with
                | `Lit s -> lit_tokens s
                | `Expr src ->
-                 let inner = strip_eof (tokenize src) in
+                 let inner = strip_eof (tokenize ?file src) in
                  lparen_tok :: inner @ [rparen_tok])
             | first :: more ->
               let first_toks = match first with
                 | `Lit s -> lit_tokens s
                 | `Expr src ->
-                  let inner = strip_eof (tokenize src) in
+                  let inner = strip_eof (tokenize ?file src) in
                   lparen_tok :: inner @ [rparen_tok]
               in
               first_toks @ (plus_plus_tok :: emit more)

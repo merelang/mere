@@ -65,11 +65,15 @@ from inside the compiler, which is fine for a terminal and useless to anything
 else — an editor cannot underline a line written to a stream it is not reading.
 The pipeline hands them over as data now and the CLI does its own printing.
 
-**A syntax error inside an `import`** is published against **that file's** URI,
-where its line numbers mean something, rather than against the buffer. The server
-remembers which other files it has spoken about and clears them when the import is
-fixed — a diagnostic stays on screen until the server says otherwise, and "never
-mind" is exactly the message nobody thinks to send.
+**An error inside an `import`** — of any kind — is published against **that
+file's** URI,
+where its line numbers mean something, rather than against the buffer. A position
+carries the file it came from (the lexer stamps every token from an imported
+file), so this works for a type error raised long after the parse, not just for a
+syntax error. The server remembers which other files it has spoken about and
+clears them when the import is fixed — a diagnostic stays on screen until the
+server says otherwise, and "never mind" is exactly the message nobody thinks to
+send.
 
 ## Hover, and what a position means here
 
@@ -128,22 +132,17 @@ again.
 
 ## What it does not answer yet
 
-- **More than one type error _per declaration_.** Since v0.1.209 the check
-  recovers at declaration boundaries — the same boundary the parser uses — so a
-  file with three broken functions reports three errors, and a declaration that
-  failed binds its names to a fresh variable so later uses do not cascade into a
-  second error about the same mistake. Inside one declaration the typer still
-  stops at the first problem: making *that* collect means teaching every `raise`
-  in it to produce a value and carry on, which is a different and much larger
-  change.
+- **The rarer type errors still stop a declaration.** A mismatch and an unknown
+  name are collected — those are nearly all of them — and inference carries on
+  with a fresh variable. The other twenty or so `raise` sites in the typer still
+  end that declaration's check, and the recovery at the declaration boundary
+  picks up from there. So the worst case is one error for a declaration rather
+  than all of them, never one error for the file.
 
 - **Incremental sync.** The whole buffer arrives on every change. The check
   re-reads all of it anyway, so incremental sync would buy nothing yet and cost
   a class of desynchronisation bugs.
-- **Type errors inside imported files** are still reported against the importing
-  file. Syntax errors carry the file they came from and are published against it;
-  type errors do not, because by then the imported declarations have been merged
-  into one program and nothing records where each came from.
+
 
 ## Testing it
 

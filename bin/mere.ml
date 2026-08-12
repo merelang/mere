@@ -77,15 +77,20 @@ let run_action ?(rv = false) ?base_dir action label source =
   let render ~source ~filename loc kind msg =
     Mere.Diagnostic.format ~source ~filename loc kind msg
   in
-  let locate loc =
-    (* On the -rv paths a position is counted from the top of the prelude the
-       driver glued in front of the source; see Rv_prelude.origin_of. *)
-    if not rv then (source, label, loc)
-    else
-      match Mere.Rv_prelude.origin_of loc with
-      | Mere.Rv_prelude.User loc -> (source, label, loc)
-      | Mere.Rv_prelude.Prelude loc ->
-        (Mere.Rv_prelude.contents, "<rv-prelude>", loc)
+  let locate (loc : Mere.Loc.t) =
+    (* A position that names a file came from an `import`: it is about that file's
+       line 12, not this one's, so it is rendered against that file. *)
+    match loc.Mere.Loc.file with
+    | Some f -> ((try read_file f with _ -> ""), f, loc)
+    | None ->
+      (* On the -rv paths a position is counted from the top of the prelude the
+         driver glued in front of the source; see Rv_prelude.origin_of. *)
+      if not rv then (source, label, loc)
+      else
+        match Mere.Rv_prelude.origin_of loc with
+        | Mere.Rv_prelude.User loc -> (source, label, loc)
+        | Mere.Rv_prelude.Prelude loc ->
+          (Mere.Rv_prelude.contents, "<rv-prelude>", loc)
   in
   let report loc kind msg =
     let (src, name, loc) = locate loc in
@@ -114,10 +119,12 @@ let run_action ?(rv = false) ?base_dir action label source =
           (* An error from an imported file is rendered against that file, whose
              lines its position actually refers to. *)
           match file with
-          | None -> render ~source ~filename:label l "parse error" m
           | Some f ->
             render ~source:(try read_file f with _ -> "") ~filename:f l
-              "parse error" m) all
+              "parse error" m
+          | None ->
+            let (src, name, l) = locate l in
+            render ~source:src ~filename:name l "parse error" m) all
       in
       prerr_endline (String.concat "\n\n" blocks);
       Printf.eprintf "\n%d syntax errors\n" (List.length all);
@@ -148,7 +155,8 @@ let run_action ?(rv = false) ?base_dir action label source =
     | _ ->
       let blocks =
         List.map (fun (d : Mere.Pipeline.diagnostic) ->
-          render ~source ~filename:label d.Mere.Pipeline.d_loc
+          let (src, name, loc) = locate d.Mere.Pipeline.d_loc in
+          render ~source:src ~filename:name loc
             d.Mere.Pipeline.d_kind d.Mere.Pipeline.d_msg) all
       in
       prerr_endline (String.concat "\n\n" blocks);

@@ -358,7 +358,16 @@ let process_typed s =
    implementation that agrees with it on good days — so it lives here, and the
    CLI calls it. Everything downstream (the four backends, the RV32I one) starts
    from what this returns. *)
-let infer_program ?base_dir ?(search_paths = []) ?on_error source =
+let rec infer_program ?base_dir ?(search_paths = []) ?on_error source =
+  match on_error with
+  | Some _ ->
+    (* However this ends, the sink goes away with it: one left installed would
+       make the compiler itself collect errors instead of stopping at the first. *)
+    Fun.protect ~finally:(fun () -> Typer.error_sink := None)
+      (fun () -> infer_program_inner ?base_dir ~search_paths ?on_error source)
+  | None -> infer_program_inner ?base_dir ~search_paths ?on_error source
+
+and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
   Typer.reset_send_constraints ();
   let prog =
     Trait_elab.elaborate
@@ -378,6 +387,19 @@ let infer_program ?base_dir ?(search_paths = []) ?on_error source =
      too. *)
   let recovering = on_error <> None in
   let report loc msg = match on_error with Some f -> f (loc, msg) | None -> () in
+  (* The typer collects too, for the two kinds of error that account for nearly
+     all of them: a mismatch and an unknown name. So a single declaration can
+     report more than one problem, and the per-declaration guard below is what
+     catches the rest — the errors the typer still raises at. *)
+  Typer.error_sink := (match on_error with
+    | None -> None
+    | Some f ->
+      (* A pathological input can produce errors without end once inference is
+         allowed to continue past them. Past a hundred, nobody is reading. *)
+      let count = ref 0 in
+      Some (fun (loc, msg) ->
+        incr count;
+        if !count <= 100 then f (loc, msg)));
   (* A declaration that failed still binds its names — to a fresh variable, which
      unifies with anything. Otherwise every later use of the name is a second
      error about the same mistake, and the real errors are buried. *)
@@ -508,7 +530,11 @@ type diagnostic = {
 
 let check ?base_dir ?(search_paths = []) (source : string)
   : Ast.program option * diagnostic list =
+  (* A position knows which file it came from (the lexer stamps imported ones),
+     so a diagnostic does too — including a type error, which is raised long after
+     the parse and could not otherwise say. *)
   let err ?file kind (loc, msg) =
+    let file = match file with Some f -> Some f | None -> loc.Loc.file in
     { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error; d_file = file }
   in
   let warning (loc, msg) =

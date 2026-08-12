@@ -146,6 +146,27 @@ let raise_with_suggestion loc kind target candidates =
   in
   raise (Type_error (loc, msg))
 
+(* Collecting instead of stopping.
+
+   The typer raises at its first complaint, which is what a compiler wants: past
+   a type error there is nothing useful to emit. An editor wants the opposite —
+   every mistake in the file, at once — so when a sink is installed the error is
+   reported and inference carries on.
+
+   What it carries on *with* is the question. A fresh type variable unifies with
+   anything, so it neither invents a second error nor silences a real one further
+   along; the alternative, a distinguished error type, would have to be taught to
+   every match on `ty` in five backends. Only the two sites that produce nearly
+   every real error collect this way — a mismatch and an unbound name. The rest
+   still raise, and the caller recovers at the declaration, which is the boundary
+   the parser recovers at too. *)
+let error_sink : ((Loc.t * string) -> unit) option ref = ref None
+
+let report_or_raise loc msg =
+  match !error_sink with
+  | Some f -> f (loc, msg)
+  | None -> raise (Type_error (loc, msg))
+
 let counter = ref 0
 let fresh_var () =
   let id = !counter in
@@ -230,7 +251,7 @@ let rec unify loc t1 t2 =
   | Ast.TyVar v1, Ast.TyVar v2 when v1.id = v2.id -> ()
   | Ast.TyVar v, t | t, Ast.TyVar v ->
     if occurs v.id t then
-      raise (Type_error (loc, "occurs check failed (cyclic type)"))
+      report_or_raise loc "occurs check failed (cyclic type)"
     else
       v.link <- Some t
   | _ ->
@@ -242,7 +263,9 @@ let rec unify loc t1 t2 =
       | Some hint -> base ^ "\nhelp: " ^ hint
       | None -> base
     in
-    raise (Type_error (loc, msg))
+    (* Left unlinked when collecting: neither type is more right than the other,
+       and forcing one on the other is how a single mistake becomes five. *)
+    report_or_raise loc msg
 
 type scheme = {
   quantified : int list;
@@ -1933,8 +1956,17 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
             Ob_method (e, trait, name, dispatch) :: !trait_obligations;
           inst
         | None ->
-          raise_with_suggestion e.loc "unbound variable" name
-            (List.map fst env)))
+          (* An unknown name is one mistake, not a reason to stop reading the
+             file: report it, call it "some type", and keep checking the rest. *)
+          (match !error_sink with
+           | None ->
+             raise_with_suggestion e.loc "unbound variable" name
+               (List.map fst env)
+           | Some f ->
+             (try
+                raise_with_suggestion e.loc "unbound variable" name
+                  (List.map fst env)
+              with Type_error (loc, msg) -> f (loc, msg); fresh_var ()))))
   | Ast.Neg a ->
     (* v0.1.44 (Mandelbrot probe): unary minus follows Bin's numeric
        overload — binary `1.0 - x` was float-capable for a while, but

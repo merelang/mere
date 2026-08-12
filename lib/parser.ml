@@ -2031,7 +2031,10 @@ let rec parse_program_internal tokens =
           with Sys_error msg ->
             raise (Parse_error (pos, "import: " ^ msg))
         in
-        let toks_imp = Lexer.tokenize source in
+        (* Stamp the imported file's tokens with its path, so a position from
+           it says so wherever it ends up — including inside a type error, long
+           after the parse that produced it. *)
+        let toks_imp = Lexer.tokenize ~file:canonical source in
         (* Switch base_dir to the imported file's directory so any
            `import` inside it resolves relative to ITS location. *)
         let saved = !current_base_dir in

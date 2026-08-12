@@ -51,7 +51,7 @@ let render_extra (line : string) : string =
   | _ -> line
 
 let format ~source ~filename loc kind msg =
-  let { Loc.line; col; width } = loc in
+  let { Loc.line; col; width; _ } = loc in
   let headline, extras = split_msg msg in
   let caret_glyphs = max 1 width in
   if line = 0 then
