@@ -131,6 +131,30 @@ let run_action ?(rv = false) ?base_dir action label source =
       Printf.eprintf "%s: warning: %s\n%!" (Mere.Loc.to_string loc) msg)
       (Mere.Pipeline.take_warnings ())
   in
+  (* The same courtesy for type errors that `report_syntax` does for syntax ones:
+     the compile stopped at the first, but the file may have four. Re-check with
+     the recovering path and print all of them. Only reached once something has
+     already failed, so a good file pays nothing. *)
+  let report_type loc msg =
+    let all =
+      try
+        List.filter (fun (d : Mere.Pipeline.diagnostic) ->
+          d.Mere.Pipeline.d_severity = Mere.Pipeline.Error)
+          (Mere.Pipeline.diagnostics ?base_dir ~search_paths:!search_paths source)
+      with _ -> []
+    in
+    match all with
+    | [] | [_] -> report loc "type error" msg
+    | _ ->
+      let blocks =
+        List.map (fun (d : Mere.Pipeline.diagnostic) ->
+          render ~source ~filename:label d.Mere.Pipeline.d_loc
+            d.Mere.Pipeline.d_kind d.Mere.Pipeline.d_msg) all
+      in
+      prerr_endline (String.concat "\n\n" blocks);
+      Printf.eprintf "\n%d errors\n" (List.length all);
+      exit 1
+  in
   try
     let result = action source in
     print_warnings ();
@@ -147,7 +171,7 @@ let run_action ?(rv = false) ?base_dir action label source =
     exit 1
   | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
   | Mere.Eval.Eval_error (loc, msg) -> report loc "eval error" msg
-  | Mere.Typer.Type_error (loc, msg) -> report loc "type error" msg
+  | Mere.Typer.Type_error (loc, msg) -> print_warnings (); report_type loc msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
   | Mere.Codegen_c.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_llvm.Codegen_error (loc, msg) -> report loc "codegen error" msg
