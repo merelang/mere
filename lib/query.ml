@@ -57,3 +57,115 @@ let describe (e : Ast.expr) : string option =
     (match e.Ast.node with
      | Ast.Var name -> Some (name ^ " : " ^ ty)
      | _ -> Some ty)
+
+(* --- what is bound where -------------------------------------------------
+
+   Go-to-definition and completion both need the same thing hover did not: not
+   just the node under the cursor, but what names are visible there and where
+   each one came from.
+
+   Scope is recomputed by walking down to the position rather than kept in an
+   index. The walk is cheap (it descends one path, not the whole tree), it cannot
+   go stale, and it has no invalidation to get wrong — the same reason hover reads
+   the typer's annotations instead of building its own table. *)
+
+type binding = {
+  b_name : string;
+  b_loc : Loc.t;          (* where the name was introduced *)
+  b_ty : Ast.ty option;   (* what it was inferred to be, when that is known *)
+  (* From the auto-imported prelude rather than from this file. Such a binding is
+     a real name in scope — completion should offer it — but its position is a
+     line in the prelude's own text, so nothing may send an editor there. *)
+  b_prelude : bool;
+}
+
+(* Names a pattern introduces, each with the position it introduced them at. *)
+let rec pattern_bindings (p : Ast.pattern) : (string * Loc.t) list =
+  match p.Ast.pnode with
+  | Ast.P_var name -> [ (name, p.Ast.ploc) ]
+  | Ast.P_as (inner, name) -> (name, p.Ast.ploc) :: pattern_bindings inner
+  | Ast.P_constr (_, Some sub) -> pattern_bindings sub
+  | Ast.P_tuple ps -> List.concat_map pattern_bindings ps
+  | Ast.P_record (_, fields) -> List.concat_map (fun (_, p) -> pattern_bindings p) fields
+  (* An or-pattern binds the same names on both sides, so one side is enough. *)
+  | Ast.P_or (a, _) -> pattern_bindings a
+  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit
+  | Ast.P_constr (_, None) -> []
+
+let binding_of ?(prelude = false) (name, loc) ty =
+  { b_name = name; b_loc = loc; b_ty = ty; b_prelude = prelude }
+
+(* Everything visible at a position, innermost first, so the first match for a
+   name is the one that shadows the others.
+
+   A binder contributes to the scope of the parts of itself where it is actually
+   visible: a `let` binds its body but not its own value expression, a `fn` binds
+   its body, a `let rec` binds both. Getting that wrong is how a language server
+   ends up sending you to the wrong `x`. *)
+let scope_at ?(prelude_decls = 0) (prog : Ast.program) (line : int) (col : int)
+  : binding list =
+  let acc = ref [] in
+  let found = ref false in
+  let rec walk (env : binding list) (e : Ast.expr) =
+    (* Once the position is inside this node's own token, the scope around it is
+       the answer — but keep walking, since a child may be narrower. *)
+    if covers e.Ast.loc line col then (acc := env; found := true);
+    match e.Ast.node with
+    | Ast.Let (pat, value, body) ->
+      walk env value;
+      let env' =
+        List.map (fun b -> binding_of b (Option.map (fun t -> t) value.Ast.ty)) (pattern_bindings pat)
+        @ env
+      in
+      walk env' body
+    | Ast.Let_rec (bindings, body) ->
+      let env' =
+        List.map (fun (n, (v : Ast.expr)) -> binding_of (n, v.Ast.loc) v.Ast.ty) bindings @ env
+      in
+      List.iter (fun (_, v) -> walk env' v) bindings;
+      walk env' body
+    | Ast.Fun (param, ty, body) ->
+      walk (binding_of (param, e.Ast.loc) ty :: env) body
+    | Ast.With (name, value, body) ->
+      walk env value;
+      walk (binding_of (name, e.Ast.loc) value.Ast.ty :: env) body
+    | Ast.Match (scrutinee, arms) ->
+      walk env scrutinee;
+      List.iter (fun (pat, guard, body) ->
+        let env' =
+          List.map (fun b -> binding_of b None) (pattern_bindings pat) @ env
+        in
+        (match guard with Some g -> walk env' g | None -> ());
+        walk env' body) arms
+    | _ -> List.iter (walk env) (Ast.children e)
+  in
+  (* Top-level declarations are visible to each other regardless of order, which
+     is what the pipeline does when it hoists them. The first `prelude_decls` of
+     them are the prelude's, and are marked rather than dropped. *)
+  let top =
+    List.concat (List.mapi (fun i d ->
+      let prelude = i < prelude_decls in
+      match d with
+      | Ast.Top_let (pat, (v : Ast.expr)) ->
+        List.map (fun b -> binding_of ~prelude b v.Ast.ty) (pattern_bindings pat)
+      | Ast.Top_let_rec bindings ->
+        List.map (fun (n, (v : Ast.expr)) ->
+          binding_of ~prelude (n, v.Ast.loc) v.Ast.ty) bindings
+      | _ -> []) prog.Ast.decls)
+  in
+  List.iter (fun d -> List.iter (walk top) (Ast.decl_exprs d)) prog.Ast.decls;
+  walk top prog.Ast.main;
+  if !found then !acc else top
+
+(* Where the name under the cursor was introduced. `None` when the cursor is not
+   on a name, or the name is a builtin — a builtin has no source position to go
+   to, and inventing one would be worse than saying nothing. *)
+let definition_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
+  : Loc.t option =
+  match node_at prog line col with
+  | Some { Ast.node = Ast.Var name; _ } ->
+    (match List.find_opt (fun b -> b.b_name = name)
+             (scope_at ?prelude_decls prog line col) with
+     | Some b when b.b_loc.Loc.line > 0 && not b.b_prelude -> Some b.b_loc
+     | _ -> None)
+  | _ -> None

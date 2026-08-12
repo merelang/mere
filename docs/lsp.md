@@ -6,8 +6,8 @@ mere lsp
 
 Speaks LSP over stdin and stdout. What it does today is **diagnostics** — every
 syntax error in the buffer, republished on each keystroke, and the first type
-error once the file parses — and **hover**, which reports the type inference gave
-whatever is under the cursor.
+error once the file parses — **hover**, which reports the type inference gave
+whatever is under the cursor, and **go to definition**.
 
 It is the same check the compiler runs — `Pipeline.check`, which the CLI also
 goes through. A language server that agrees with the compiler on good days
@@ -42,8 +42,9 @@ same on stdout, so a client that can start a process can talk to it.
 
 | method | behaviour |
 |---|---|
-| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider` |
+| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider` |
 | `textDocument/hover` | the inferred type of the narrowest node under the cursor, as `name : type` when it is a name |
+| `textDocument/definition` | where the name under the cursor was bound, when that is somewhere in this file |
 | `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
 | `textDocument/didClose` | publish an empty list, clearing the underlines |
 | `shutdown` / `exit` | as specified |
@@ -74,11 +75,33 @@ the file does not check, and an answer from a moment ago beats no answer at all 
 so hover keeps working through an edit, and catches up when the file is valid
 again.
 
+## Go to definition, and scope
+
+Scope is recomputed by walking down to the position, not kept in an index. The
+walk descends one path rather than the whole tree, it cannot go stale, and it has
+no invalidation to get wrong — the same reason hover reads the typer's
+annotations instead of building a table beside them.
+
+A binder is in scope for the parts of itself where it is really visible: a `let`
+binds its body but not its own value expression, a `fn` binds its body, a
+`let rec` binds both, a match arm's pattern binds that arm. Getting that wrong is
+how a server sends you to the wrong `x`, so each case is a test.
+
+Two things it deliberately declines to answer:
+
+- **A prelude name** (`print_int`, `str_len`) is genuinely in scope, but its
+  position is a line in the prelude's *own* text. Jumping there would send the
+  editor to an arbitrary line of the user's file, so it answers nothing at all.
+  The count of prelude declarations is recorded when the program is parsed, which
+  is what makes them distinguishable.
+- **A parameter** points at the `fn` that introduced it rather than at the
+  parameter name, because `Fun` carries the name but not the name's own position.
+
 ## What it does not answer yet
 
-- **Completion and go-to-definition.** Both ask the same question hover does
-  (`Query.node_at`), plus a notion of scope: what is bound here, and where. That
-  is the next slice.
+- **Completion.** It asks the same two questions this slice answers — what is
+  under the cursor, what is in scope there — and mostly needs a decision about
+  what to offer where. That is the next slice.
 - **More than one type error.** Syntax errors are all reported, because the
   parser recovers at declaration boundaries (v0.1.203). The type-checker still
   raises on the first problem, so a file that parses gets one type error at a

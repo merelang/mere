@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.205" Version.v "0.1.205";
+  check "version is 0.1.206" Version.v "0.1.206";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12281,6 +12281,56 @@ let () =
     | None -> "gone"
   in
   check "hover: an edit that does not compile keeps the last tree that did" stale "kept";
+
+  (* Go to definition: the same node search as hover, plus scope. A binder is in
+     scope for the parts of itself where it is really visible — a `let` binds its
+     body but not its own value — and getting that wrong is how a server sends
+     you to the wrong `x`. *)
+  let define_at src line col =
+    let doc =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didOpen");
+                 ("params", Json.Obj [ ("textDocument",
+                    Json.Obj [ ("uri", Json.Str "file:///tmp/d.mere");
+                               ("text", Json.Str src) ]) ]) ]
+    in
+    let (state, _, _) = Lsp.handle Lsp.initial doc in
+    let ask =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 2.0);
+                 ("method", Json.Str "textDocument/definition");
+                 ("params", Json.Obj [
+                    ("textDocument", Json.Obj [ ("uri", Json.Str "file:///tmp/d.mere") ]);
+                    ("position", Json.Obj [ ("line", Json.Num (float_of_int line));
+                                            ("character", Json.Num (float_of_int col)) ]) ]) ]
+    in
+    match Lsp.handle state ask with
+    | (_, [ reply ], _) ->
+      let result = Json.member "result" reply in
+      (match result with
+       | Json.Null -> "(none)"
+       | _ ->
+         let start = Json.member "start" (Json.member "range" result) in
+         Printf.sprintf "%d:%d"
+           (Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" start)))
+           (Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" start))))
+    | _ -> "(no reply)"
+  in
+  let dsrc =
+    "let twice = fn (n: int) -> n * 2;\n\
+     let apply = fn (f: int -> int) -> fn (x: int) ->\n\
+     \  let y = f x in\n\
+     \  y + y;\n\
+     let _ = print_int (apply twice 21);\n"
+  in
+  check "definition: a top-level name" (define_at dsrc 4 26) "0:4";
+  check "definition: a local `let`, not the top-level name it shadows"
+    (define_at dsrc 3 2) "2:6";
+  check "definition: a function parameter" (define_at dsrc 2 10) "1:12";
+  (* A prelude name is genuinely in scope, but its position is a line in the
+     prelude's own text — sending an editor there would be a lie. *)
+  check "definition: a prelude name has nowhere in this file to go"
+    (define_at dsrc 4 8) "(none)";
+  check "definition: whitespace" (define_at dsrc 0 0) "(none)";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
