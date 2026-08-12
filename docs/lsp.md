@@ -128,12 +128,14 @@ again.
 
 ## What it does not answer yet
 
-- **More than one type error.** Syntax errors are all reported, because the
-  parser recovers at declaration boundaries (v0.1.203). The type-checker still
-  raises on the first problem, so a file that parses gets one type error at a
-  time. Making the typer collect instead of raise is its own slice, and a larger
-  one — every `raise` in it is a place that currently gets to assume the rest of
-  the pass will not run.
+- **More than one type error _per declaration_.** Since v0.1.209 the check
+  recovers at declaration boundaries — the same boundary the parser uses — so a
+  file with three broken functions reports three errors, and a declaration that
+  failed binds its names to a fresh variable so later uses do not cascade into a
+  second error about the same mistake. Inside one declaration the typer still
+  stops at the first problem: making *that* collect means teaching every `raise`
+  in it to produce a value and carry on, which is a different and much larger
+  change.
 
 - **Incremental sync.** The whole buffer arrives on every change. The check
   re-reads all of it anyway, so incremental sync would buy nothing yet and cost

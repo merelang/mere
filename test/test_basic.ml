@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.208" Version.v "0.1.208";
+  check "version is 0.1.209" Version.v "0.1.209";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12426,6 +12426,45 @@ let () =
         with Not_found -> "clean")
      | _ -> "?")
     "clean";
+
+  (* The typer stops at its first complaint, so a file with three broken
+     functions used to report one of them. The declaration is the boundary it
+     recovers at — the same one the parser uses — and a declaration that failed
+     binds its names to a fresh variable so later uses do not turn into a second
+     error about the same mistake. *)
+  let type_errors_of src =
+    List.filter (fun (d : Pipeline.diagnostic) ->
+      d.Pipeline.d_severity = Pipeline.Error)
+      (Pipeline.diagnostics src)
+  in
+  let errs =
+    type_errors_of
+      "let a = fn (n: int) -> n + \"x\";\n\
+       let b = fn (s: str) -> s + 1;\n\
+       let c = fn (n: int) -> n * 2;\n\
+       let _ = print_int (c 21);\n"
+  in
+  check "type recovery: one error per broken declaration, not one per file"
+    (String.concat "," (List.map (fun (d : Pipeline.diagnostic) ->
+       string_of_int d.Pipeline.d_loc.Loc.line) errs))
+    "1,2";
+  check "type recovery: a good file still reports nothing"
+    (string_of_int (List.length (type_errors_of "let f = fn (n: int) -> n + 1;\nlet _ = print_int (f 1);\n")))
+    "0";
+  (* A name whose declaration failed is bound to a fresh variable, so using it
+     later is not a second error about the same mistake. *)
+  check "type recovery: a failed declaration's name does not cascade"
+    (string_of_int (List.length (type_errors_of
+       "let broken = fn (n: int) -> n + \"x\";\n\
+        let _ = print_int (broken 1);\n\
+        let _ = print_int (broken 2);\n")))
+    "1";
+  (* The compiler's own path is unchanged: it raises at the first error, because
+     a compiler that carries on past one has nothing useful to emit. *)
+  check "type recovery: the compile path still raises at the first error"
+    (try ignore (Pipeline.infer_program "let a = fn (n: int) -> n + \"x\";\nlet _ = print_int 1;\n"); "compiled"
+     with Typer.Type_error _ -> "raised")
+    "raised";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of

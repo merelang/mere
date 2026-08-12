@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.209 — 2026-08-12
+
+_More than one type error at a time._
+
+_A file with three broken functions reported one of them: fix, recheck, learn
+about the next. The check now recovers at **declaration** boundaries — the same
+boundary the parser recovers at — so it reports one error per broken declaration,
+in the editor and in the terminal._
+
+```
+type error: expected `int`, got `str`
+  --> app.mere:1:28
+type error: expected `int`, got `str`
+  --> app.mere:2:24
+
+2 errors
+```
+
+**A declaration that failed still binds its names**, to a fresh type variable that
+unifies with anything. Otherwise every later use of the name is a second error
+about the same mistake and the real ones are buried — the test for that uses a
+broken function twice and expects exactly one error.
+
+**The compiler's path is unchanged.** Recovery is opt-in (`infer_program
+?on_error`): without it the first error is raised exactly as before, because a
+compiler that carries on past a type error has nothing useful to emit. One code
+path, two behaviours, rather than a second implementation to keep in step.
+
+_The typer still stops at the first problem **within** a declaration. Making that
+collect means teaching every one of its 22 `raise` sites to produce a value and
+carry on — a different and much larger change, and one that needs an error type
+that unifies silently, or every recovery invents cascades of its own._
+
+_One wrinkle worth recording: the pass over the desugared program re-visits every
+declaration's body, so it re-raises the error the declaration loop already
+reported. Diagnostics are de-duplicated, which is what makes that harmless — and
+is the same fix the duplicated exhaustiveness warnings needed in v0.1.208._
+
+---
+
 ## v0.1.208 — 2026-08-12
 
 _Diagnostics become data: which file a position belongs to, and warnings too._

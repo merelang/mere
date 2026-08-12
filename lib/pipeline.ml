@@ -358,13 +358,46 @@ let process_typed s =
    implementation that agrees with it on good days — so it lives here, and the
    CLI calls it. Everything downstream (the four backends, the RV32I one) starts
    from what this returns. *)
-let infer_program ?base_dir ?(search_paths = []) source =
+let infer_program ?base_dir ?(search_paths = []) ?on_error source =
   Typer.reset_send_constraints ();
   let prog =
     Trait_elab.elaborate
       (parse_program ?base_dir ~search_paths source)
   in
   let type_env = ref Typer.initial_env in
+  (* With `on_error`, a declaration that does not type-check is *reported* and the
+     walk continues, so a file with three broken functions says so three times
+     instead of once. Without it — the compiler's path — the first error is raised
+     and nothing changes, because a compiler that carries on past a type error has
+     nothing useful to emit.
+
+     The typer itself still raises at the first problem *within* a declaration.
+     Making it collect means teaching every `raise` in it to produce a value and
+     carry on, which is a different and much larger change; the declaration is the
+     boundary the language already draws, and it is the one the parser recovers at
+     too. *)
+  let recovering = on_error <> None in
+  let report loc msg = match on_error with Some f -> f (loc, msg) | None -> () in
+  (* A declaration that failed still binds its names — to a fresh variable, which
+     unifies with anything. Otherwise every later use of the name is a second
+     error about the same mistake, and the real errors are buried. *)
+  let bind_unknown pat =
+    try
+      let bindings = Typer.check_pattern pat (Typer.fresh_var ()) in
+      type_env := List.fold_left (fun acc (n, ty) ->
+        (n, Typer.mono ty) :: acc) !type_env bindings
+    with _ -> ()
+  in
+  let guard_decl pat_opt names f =
+    if not recovering then f ()
+    else
+      try f () with
+      | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
+        report loc msg;
+        (match pat_opt with Some pat -> bind_unknown pat | None -> ());
+        List.iter (fun n ->
+          type_env := (n, Typer.mono (Typer.fresh_var ())) :: !type_env) names
+  in
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
@@ -373,25 +406,27 @@ let infer_program ?base_dir ?(search_paths = []) source =
          collision is caught here instead of surfacing as a cryptic
          downstream error (e.g. wat2wasm "redefinition of $main"). *)
       warn_reserved_in_pattern pat;
-      let outer_env = !type_env in
-      let t = Typer.infer outer_env value in
-      let bindings = Typer.check_pattern pat t in
-      type_env := List.fold_left (fun acc (n, ty) ->
-        let sch = Typer.generalize outer_env ty in
-        (n, sch) :: acc) outer_env bindings
+      guard_decl (Some pat) [] (fun () ->
+        let outer_env = !type_env in
+        let t = Typer.infer outer_env value in
+        let bindings = Typer.check_pattern pat t in
+        type_env := List.fold_left (fun acc (n, ty) ->
+          let sch = Typer.generalize outer_env ty in
+          (n, sch) :: acc) outer_env bindings)
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
-      let outer_env = !type_env in
-      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
-      let env_rec = List.fold_left2 (fun acc (n, _) a ->
-        (n, Typer.mono a) :: acc) outer_env bindings alphas in
-      List.iter2 (fun (_, value) alpha ->
-        let t = Typer.infer env_rec value in
-        Typer.unify value.Ast.loc alpha t) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = Typer.generalize outer_env a in
-        (n, sch) :: acc) outer_env bindings alphas
+      guard_decl None (List.map fst bindings) (fun () ->
+        let outer_env = !type_env in
+        let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.mono a) :: acc) outer_env bindings alphas in
+        List.iter2 (fun (_, value) alpha ->
+          let t = Typer.infer env_rec value in
+          Typer.unify value.Ast.loc alpha t) bindings alphas;
+        type_env := List.fold_left2 (fun acc (n, _) a ->
+          let sch = Typer.generalize outer_env a in
+          (n, sch) :: acc) outer_env bindings alphas)
     | Ast.Top_type (name, params, variants) ->
       Typer.register_type name params variants
     | Ast.Top_signature _ -> ()
@@ -417,7 +452,16 @@ let infer_program ?base_dir ?(search_paths = []) source =
     | Ast.Top_trait _ | Ast.Top_impl _ -> ()
   ) prog.decls;
   let desugared = Ast.desugar_program prog in
-  let main_ty = Typer.infer !type_env desugared in
+  (* The desugared program re-visits every declaration's body, so when recovering
+     this pass usually re-raises the first error the loop above already reported.
+     `check` de-duplicates, which is what makes that harmless. *)
+  let main_ty =
+    if not recovering then Typer.infer !type_env desugared
+    else
+      try Typer.infer !type_env desugared with
+      | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
+        report loc msg; Ast.TyUnit
+  in
   (* v0.1.29 (mkv dogfood P2): the compile path ran type inference only —
      the interp path's safety analyses (channel-element Send obligations,
      borrow conflicts, spawn-capture move/Send/Sync classification) were
@@ -425,9 +469,16 @@ let infer_program ?base_dir ?(search_paths = []) source =
      spawned threads was rejected by `mere file.mere` but compiled fine by
      `mere -c file.mere` — and raced at runtime. Run the same checks the
      run path runs (run_program lines up with this order). *)
-  Typer.discharge_send_constraints ();
-  Typer.check_borrows [] desugared;
-  Move_check.check desugared;
+  let post () =
+    Typer.discharge_send_constraints ();
+    Typer.check_borrows [] desugared;
+    Move_check.check desugared
+  in
+  (if not recovering then post ()
+   else
+     try post () with
+     | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
+       report loc msg);
   (prog, main_ty)
 
 (* Everything wrong with a source string, as data rather than as an exception.
@@ -470,8 +521,10 @@ let check ?base_dir ?(search_paths = []) (source : string)
   | (_ :: _) as errs ->
     (None, List.map (fun (file, loc, msg) -> err ?file "parse error" (loc, msg)) errs)
   | [] ->
+    let type_errors = ref [] in
+    let on_error (loc, msg) = type_errors := (loc, msg) :: !type_errors in
     (try
-       let (prog, _) = infer_program ?base_dir ~search_paths source in
+       let (prog, _) = infer_program ?base_dir ~search_paths ~on_error source in
        (* Type inference writes the type it found onto every node it visited, so
           the program that comes back is the answer to every later question about
           a position in this text. Warnings are only worth reporting once the
@@ -481,7 +534,21 @@ let check ?base_dir ?(search_paths = []) (source : string)
          List.map warning (take_warnings ())
          @ List.map (fun (loc, msg) -> warning (loc, msg)) (Exhaustive.take_located ())
        in
-       (Some prog, ws)
+       (* One entry per distinct complaint: the declaration loop and the pass over
+          the desugared program see the same nodes, so the same error arrives
+          twice. Errors first — an editor sorts by position, but a person reading
+          a terminal wants what is broken before what is merely suspect. *)
+       let seen = Hashtbl.create 16 in
+       let errs =
+         List.filter (fun (loc, msg) ->
+           if Hashtbl.mem seen (loc, msg) then false
+           else (Hashtbl.add seen (loc, msg) (); true))
+           (List.rev !type_errors)
+       in
+       let errs = List.map (err "type error") errs in
+       (* A file that did not type-check has a tree, but one full of holes: it is
+          only worth handing back when nothing went wrong. *)
+       ((if errs = [] then Some prog else None), errs @ ws)
      with
      | Lexer.Lex_error (loc, msg) -> (None, [err "lex error" (loc, msg)])
      | Parser.Parse_error_in_file (file, loc, msg) ->
