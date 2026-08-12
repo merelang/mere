@@ -1766,6 +1766,13 @@ let initial_env : env =
     ("bytes_concat", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyBytes, Ast.TyBytes))));
     ("bytes_of_hex", mono (Ast.TyArrow (Ast.TyStr,   Ast.TyBytes)));
     ("hex_of_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyStr)));
+    (* The I/O boundary. Without these, a byte sequence could be built but not
+       written: `print_no_nl` takes a `str`, which is NUL-terminated in the
+       compiled backends, so a zero byte ended the output there and did not on the
+       interpreter. A `bytes` carries its length everywhere. *)
+    ("print_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyUnit)));
+    ("read_bytes",  mono (Ast.TyArrow (Ast.TyStr,   Ast.TyBytes)));
+    ("write_bytes", mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyBytes, Ast.TyUnit))));
     ("bytes_of_str", mono (Ast.TyArrow (Ast.TyStr,   Ast.TyBytes)));
     ("str_of_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyStr)));
     ("bytes_of_vec", bytes_of_vec_scheme);

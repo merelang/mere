@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.215" Version.v "0.1.215";
+  check "version is 0.1.216" Version.v "0.1.216";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5536,6 +5536,28 @@ let () =
      prefixed mere_bytes runtime rather than treating bytes as a char*. *)
   check "bytes: interp is NUL-safe (0x00 does not truncate the length)"
     (Pipeline.process "bytes_len (bytes_of_hex \"00ff00\")") "3";
+  (* The I/O boundary for bytes, which is the half that was missing: everything
+     in memory could be a `bytes` already, but reading, writing and printing one
+     had to go through `str` — and a `str` is NUL-terminated in the compiled
+     backends, so a zero byte ended the output there and did not on the
+     interpreter. The same program wrote different files depending on which
+     backend ran it, which the mpng dogfood found the hard way. *)
+  check "bytes: a round trip through a file keeps every byte, zeros included"
+    (Pipeline.process
+       "let p = \"/tmp/mere_bytes_test.bin\" in\n\
+        let _ = write_bytes p (bytes_of_hex \"00ff0041\") in\n\
+        hex_of_bytes (read_bytes p)")
+    "\"00ff0041\"";
+  check "bytes: print_bytes is emitted as a length-carrying write, not a string print"
+    (let c = codegen "let _ = print_bytes (bytes_of_hex \"4100\");" in
+     string_of_bool (contains c "fwrite(__pb->data" && not (contains c "fputs(__lang_bytes")))
+    "true";
+  check "bytes: the LLVM backend writes the length too"
+    (let prog = Pipeline.parse_program "let _ = print_bytes (bytes_of_hex \"4100\");\n()" in
+     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     let ll = Codegen_llvm.emit_program ~main_ty prog in
+     string_of_bool (contains ll "@__lang_print_bytes" && contains ll "declare i64 @write(i32, ptr, i64)"))
+    "true";
   check "bytes: interp hex round-trips through concat"
     (Pipeline.process "hex_of_bytes (bytes_concat (bytes_of_hex \"00ff\") (bytes_of_hex \"10\"))")
     "\"00ff10\"";

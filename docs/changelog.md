@@ -4,6 +4,58 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.216 — 2026-08-12
+
+_`bytes` gets its I/O boundary: `read_bytes`, `write_bytes`, `print_bytes`._
+
+_The `bytes` type has existed for a while — `bytes_len` / `get` / `slice` /
+`concat` / `of_hex` / `of_str` / `of_vec` and their inverses, across interp, C,
+LLVM and Wasm. What it had no way to do was **leave the program**. Reading,
+writing and printing a byte sequence all went through `str` or `Vec[int]`._
+
+_Through `str` does not work, and the [mpng](https://github.com/284km/mpng)
+dogfood found out the hard way:_
+
+```mere
+let _ = print_no_nl (chr 65);
+let _ = print_no_nl (chr 0);
+let _ = print_no_nl (chr 66);
+```
+
+_The interpreter writes `41 00 42`. Compiled with `-c`, the same program writes
+`41 42` — a `str` is a NUL-terminated C string there, so `"\0"` and `""` are the
+same value and nothing downstream can tell them apart. A PNG decoder writing a PPM
+produced a file seven bytes short of correct, and only on some backends._
+
+**The fix is not in printing.** A `bytes` carries its length in every backend
+(`{ len; data[] }` in C and LLVM, an OCaml string in the interpreter), which is
+what makes these three correct where `print_no_nl` cannot be:
+
+| | |
+|---|---|
+| `read_bytes : str -> bytes` | interp + C |
+| `write_bytes : str -> bytes -> unit` | interp + C |
+| `print_bytes : bytes -> unit` | interp + C + LLVM |
+
+_LLVM's writes through `write(1, …)` rather than `fwrite` to stdout: reaching
+`stdout` from IR means naming a symbol that differs between platforms
+(`__stdoutp`, `stdout`), and a file descriptor is the same everywhere — and
+unbuffered, which is what the name promises._
+
+_Wasm refuses `print_bytes` at compile time: its printing goes through a host
+import that takes a NUL-terminated pointer, so this needs a host-side change
+rather than a codegen one. Loud, not silent._
+
+_The dogfood now reads and writes through `bytes` end to end, which is the check
+that the design is the right one — 28 cases, on the interpreter and compiled,
+producing identical files._
+
+_Also noticed while testing, unrelated and unfixed: `exit 0` as a program's
+trailing expression breaks the LLVM backend (`unsupported LLVM codegen type
+element: 'a`, since `exit : int -> 'a`)._
+
+---
+
 ## v0.1.215 — 2026-08-12
 
 _`mere -ll -g`: the LLVM backend, too. Every backend can now be debugged as Mere._
