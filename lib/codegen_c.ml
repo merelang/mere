@@ -354,6 +354,8 @@ let channel_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
    region-bound mutable string buffer, so no per-T monomorphization.
    The runtime is emitted iff this flag is set. *)
 let strbuf_used = ref false
+(* ByteBuf[R]: like StrBuf but bytes — one per byte, random access, growable. *)
+let bytebuf_used = ref false
 (* set when any bytes builtin is emitted, so bytes_runtime
    (the mere_bytes struct + helpers) is injected. *)
 let bytes_used = ref false
@@ -608,7 +610,7 @@ let rec ty_tag (t : Ast.ty) : string =
        and `Vec___heap_int` in the typedef, and a prototype for a type that does
        not exist. Found by the mpng dogfood (PAIN.md P5). *)
     let region_parameterised =
-      match name with "Vec" | "Map" | "StrBuf" -> true | _ -> false
+      match name with "Vec" | "Map" | "StrBuf" | "ByteBuf" -> true | _ -> false
     in
     let tag_arg i a =
       match i, Ast.walk a with
@@ -3067,6 +3069,43 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "strbuf_len" ->
        strbuf_used := true;
        Printf.sprintf "mere_strbuf_len(%s)" (emit_expr arg)
+     | Ast.Var "bytebuf_new" ->
+       (* The region comes from the result type's marker, exactly as strbuf_new
+          does — the buffer's bytes are allocated in it. *)
+       bytebuf_used := true;
+       let region_name =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("ByteBuf", [Ast.TyRef (_, r, Ast.TyUnit)]) -> r
+            | _ -> "__heap")
+         | None -> "__heap"
+       in
+       let region_var =
+         if region_name = "__heap" then "(&__lang_default_region)"
+         else "__region_" ^ region_name
+       in
+       Printf.sprintf "mere_bytebuf_new(%s, %s)" region_var (emit_expr arg)
+     | Ast.Var "bytebuf_len" ->
+       bytebuf_used := true;
+       Printf.sprintf "mere_bytebuf_len(%s)" (emit_expr arg)
+     | Ast.Var "bytes_of_bytebuf" ->
+       bytebuf_used := true; bytes_used := true;
+       Printf.sprintf "mere_bytes_of_bytebuf(%s)" (emit_expr arg)
+     | Ast.Var "bytebuf_of_bytes" ->
+       bytebuf_used := true; bytes_used := true;
+       Printf.sprintf "mere_bytebuf_of_bytes(%s, %s)"
+         "(&__lang_default_region)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bytebuf_get"; _ }, bb_e) ->
+       bytebuf_used := true;
+       Printf.sprintf "mere_bytebuf_get(%s, %s)" (emit_expr bb_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "bytebuf_push"; _ }, bb_e) ->
+       bytebuf_used := true;
+       Printf.sprintf "mere_bytebuf_push(%s, %s)" (emit_expr bb_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_set"; _ }, bb_e); _ }, i_e) ->
+       bytebuf_used := true;
+       Printf.sprintf "mere_bytebuf_set(%s, %s, %s)"
+         (emit_expr bb_e) (emit_expr i_e) (emit_expr arg)
      | Ast.Var "strbuf_to_str" ->
        strbuf_used := true;
        Printf.sprintf "mere_strbuf_to_str(%s)" (emit_expr arg)
@@ -3551,6 +3590,11 @@ let rec c_type_of (t : Ast.ty) : string =
        region ptr inside the struct. *)
     strbuf_used := true;
     "mere_strbuf*"
+  | Ast.TyCon ("ByteBuf", _) ->
+    (* Same shape as StrBuf, and for the same reason: the region is tracked by a
+       pointer inside the struct rather than by the marker. *)
+    bytebuf_used := true;
+    "mere_bytebuf*"
   | Ast.TyCon ("Channel", args) ->
     (* Q-012: Channel[T] — heap-allocated blocking FIFO, monomorphized per
        element type to `mere_channel_<tag>*` (registered in channel_instances,
@@ -7172,6 +7216,75 @@ let strbuf_runtime =
       "";
       "static int mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
 
+(* ByteBuf[R]: the same shape as StrBuf, for bytes. Random access is the point —
+   `bytes` is immutable and StrBuf appends only — and one byte per byte is the
+   other point, against Vec[R, int]'s eight. *)
+let bytebuf_runtime =
+  String.concat "\n"
+    [ "typedef struct mere_bytebuf {";
+      "  unsigned char* data;";
+      "  long long len;";
+      "  long long cap;";
+      "  __lang_region* region;";
+      "} mere_bytebuf;";
+      "";
+      "static mere_bytebuf* mere_bytebuf_new(__lang_region* r, long long n) {";
+      "  mere_bytebuf* bb = (mere_bytebuf*)__lang_region_alloc(r, sizeof(mere_bytebuf));";
+      "  long long cap = n > 0 ? n : 1;";
+      "  bb->data = (unsigned char*)__lang_region_alloc(r, (size_t)cap);";
+      "  for (long long i = 0; i < n; i++) bb->data[i] = 0;";
+      "  bb->len = n;";
+      "  bb->cap = cap;";
+      "  bb->region = r;";
+      "  return bb;";
+      "}";
+      "";
+      "static long long mere_bytebuf_len(mere_bytebuf* bb) { return bb->len; }";
+      "";
+      "static long long mere_bytebuf_get(mere_bytebuf* bb, long long i) {";
+      "  if (i < 0 || i >= bb->len) {";
+      "    fprintf(stderr, \"bytebuf_get: index %lld out of bounds (len = %lld)\\n\", i, bb->len);";
+      "    exit(1);";
+      "  }";
+      "  return (long long)bb->data[i];";
+      "}";
+      "";
+      "static long long mere_bytebuf_set(mere_bytebuf* bb, long long i, long long v) {";
+      "  if (i < 0 || i >= bb->len) {";
+      "    fprintf(stderr, \"bytebuf_set: index %lld out of bounds (len = %lld)\\n\", i, bb->len);";
+      "    exit(1);";
+      "  }";
+      "  bb->data[i] = (unsigned char)(v & 255);";
+      "  return 0; /* unit */";
+      "}";
+      "";
+      "static long long mere_bytebuf_push(mere_bytebuf* bb, long long v) {";
+      "  if (bb->len + 1 > bb->cap) {";
+      "    long long new_cap = bb->cap * 2 + 16;";
+      "    unsigned char* nd = (unsigned char*)__lang_region_alloc(bb->region, (size_t)new_cap);";
+      "    for (long long i = 0; i < bb->len; i++) nd[i] = bb->data[i];";
+      "    bb->data = nd;";
+      "    bb->cap = new_cap;";
+      "  }";
+      "  bb->data[bb->len] = (unsigned char)(v & 255);";
+      "  bb->len += 1;";
+      "  return 0; /* unit */";
+      "}";
+      "";
+      "static mere_bytes* mere_bytes_of_bytebuf(mere_bytebuf* bb) {";
+      "  /* Into the current region, so a `bytes` frozen inside `region R { }` can";
+      "     be returned out of it — the same reason strbuf_to_str does. */";
+      "  mere_bytes* b = __lang_bytes_alloc(bb->len);";
+      "  for (long long i = 0; i < bb->len; i++) b->data[i] = bb->data[i];";
+      "  return b;";
+      "}";
+      "";
+      "static mere_bytebuf* mere_bytebuf_of_bytes(__lang_region* r, mere_bytes* b) {";
+      "  mere_bytebuf* bb = mere_bytebuf_new(r, b->len);";
+      "  for (long long i = 0; i < b->len; i++) bb->data[i] = b->data[i];";
+      "  return bb;";
+      "}" ]
+
 (* Phase 16.3 / DEFERRED §1.5: codegen runtime for mk_logger / mk_metrics.
    To expose the cap (implemented as V_builtin in the interpreter) on the C
    side too, provide factory functions returning the Logger / Metrics struct
@@ -8874,6 +8987,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     || Hashtbl.mem extern_fn_decls "midi_read"
     || Hashtbl.mem extern_fn_decls "midi_init";
   strbuf_used := false;
+  bytebuf_used := false;
   bytes_used := false;
   bytes_vec_used := false;
   logger_used := false;
@@ -9824,7 +9938,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        never called — even though `bytes_used` (an actual bytes builtin call)
        stays false and the full struct below is omitted. The forward decl is
        enough for the pointer types and an unused typedef is harmless. *)
-    @ ["typedef struct mere_bytes mere_bytes;"; ""]
+    @ ["typedef struct mere_bytes mere_bytes;";
+       (* Forward, for the same reason: a closure struct that returns one is
+          declared before the runtime that defines it. *)
+       "typedef struct mere_bytebuf mere_bytebuf;"; ""]
     @ (if map_forward_typedefs = [] then []
        else map_forward_typedefs @ [""])
     (* Closure typedefs reference user struct names (e.g.,
@@ -10033,6 +10150,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
     @ (if !bytes_used then [bytes_runtime; ""] else [])
+    (* After the bytes runtime: freezing a ByteBuf calls __lang_bytes_alloc. *)
+    @ (if !bytebuf_used then [bytebuf_runtime; ""] else [])
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else (map_hash_helpers :: map_runtimes) @ [""])
     @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])

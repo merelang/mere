@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.217" Version.v "0.1.217";
+  check "version is 0.1.218" Version.v "0.1.218";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5542,6 +5542,36 @@ let () =
      backends, so a zero byte ended the output there and did not on the
      interpreter. The same program wrote different files depending on which
      backend ran it, which the mpng dogfood found the hard way. *)
+  (* ByteBuf[R]: the mutable half. `bytes` is immutable and `StrBuf` appends only,
+     so neither can reconstruct a PNG scanline — which reads the row above it and
+     writes the row it is on. One byte per byte is the other half of the point:
+     Vec[R, int] does the same job at eight. *)
+  check "bytebuf: new is zeroed, set and get address bytes, push grows"
+    (Pipeline.process
+       "let b = bytebuf_new 4 in\n\
+        let _ = bytebuf_set b 0 65 in\n\
+        let _ = bytebuf_set b 2 66 in\n\
+        let _ = bytebuf_push b 67 in\n\
+        hex_of_bytes (bytes_of_bytebuf b)")
+    "\"4100420043\"";
+  check "bytebuf: a zero byte is a byte, not a terminator"
+    (Pipeline.process
+       "let b = bytebuf_of_bytes (bytes_of_hex \"004100\") in\n\
+        str_of_int (bytebuf_len b) ++ \":\" ++ str_of_int (bytebuf_get b 1)")
+    "\"3:65\"";
+  check "bytebuf: out of bounds is an error, not a silent read"
+    (try ignore (Pipeline.process "let b = bytebuf_new 2 in bytebuf_get b 5"); "allowed"
+     with _ -> "refused")
+    "refused";
+  check "bytebuf: the C backend emits a byte-per-byte buffer, region-allocated"
+    (let c = codegen
+       "let b = bytebuf_new 3;\n\
+        let _ = bytebuf_set b 0 65;\n\
+        let _ = print (hex_of_bytes (bytes_of_bytebuf b));" in
+     string_of_bool
+       (contains c "unsigned char* data;" && contains c "mere_bytebuf_set"
+        && contains c "mere_bytes_of_bytebuf"))
+    "true";
   check "bytes: a round trip through a file keeps every byte, zeros included"
     (Pipeline.process
        "let p = \"/tmp/mere_bytes_test.bin\" in\n\

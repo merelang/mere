@@ -45,6 +45,13 @@ Legend:
 | `read_file_bytes` ⚡ | `str -> Vec[R, int]` | Read the whole file as raw bytes — one int (0..255) per byte, binary-safe on every supported backend. interp + C only (v0.1.43, CRC-32 probe). Costs eight bytes per byte; prefer `read_bytes` |
 | `read_bytes` ⚡ | `str -> bytes` | The whole file as a `bytes`: one byte per byte, and no NUL hazard. interp + C (v0.1.216, mpng dogfood) |
 | `write_bytes` ⚡ | `str -> bytes -> unit` | Write a `bytes` to a file. interp + C |
+| `bytebuf_new` | `int -> ByteBuf[R]` | n zeroed bytes, region-bound and mutable. One byte per byte, with random access — which `bytes` (immutable) and `StrBuf` (append-only text) leave uncovered (v0.1.218, mpng dogfood) |
+| `bytebuf_len` | `ByteBuf[R] -> int` | |
+| `bytebuf_get` | `ByteBuf[R] -> int -> int` | The byte at an index; out of bounds is an error |
+| `bytebuf_set` | `ByteBuf[R] -> int -> int -> unit` | Write a byte (masked to 0..255) |
+| `bytebuf_push` | `ByteBuf[R] -> int -> unit` | Append, growing the buffer |
+| `bytes_of_bytebuf` | `ByteBuf[R] -> bytes` | Freeze a copy, which can then leave the region |
+| `bytebuf_of_bytes` | `bytes -> ByteBuf[R]` | The other way, for editing |
 | `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout, unbuffered and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. interp + C + LLVM (v0.1.216) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
 | `write_file_bytes` ⚡ | `str -> Vec[R, int] -> unit` | Write an int vec as raw bytes (each element 0..255) — the write half of the binary path; PPM P6 etc. interp + C only (v0.1.44, Mandelbrot probe) |

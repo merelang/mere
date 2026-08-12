@@ -22,6 +22,12 @@ type value =
        narrowed -> first implementation stage). Backed by a mutable array ref;
        push reallocates. Trivial[R] when element type is Trivial[R]. *)
   | V_strbuf of Buffer.t
+  (* A mutable byte buffer: one byte per byte, random access, and growable.
+     `StrBuf` is the same shape for text and cannot serve — it appends only, and a
+     string ends at a zero byte in the compiled backends. `Vec[R, int]` can do the
+     access but costs eight bytes per byte. What needed this was reconstructing a
+     PNG scanline, which reads the row above it and writes the row it is on. *)
+  | V_bytebuf of bytebuf
     (* `StrBuf[R]` — region-aware mutable string buffer (Phase 12.7,
        Q-010 narrowed). Minimal implementation of design doc
        13_region_std_types.md §4. Internally an OCaml Buffer holding
@@ -57,6 +63,8 @@ type value =
     (* `ThreadHandle` — a worker spawned on a fresh OCaml 5 domain
        (Sub-Q A: OS-thread / Domain-like). `join` blocks on Domain.join.
        The domain runs the `unit -> unit` closure passed to `spawn`. *)
+
+and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int }
 
 and env = (string * value ref) list
 
@@ -123,6 +131,7 @@ let rec try_as_list = function
 and to_string = function
   | V_int n -> string_of_int n
   | V_bytes s -> "bytes[" ^ hex_of_string s ^ "]"
+  | V_bytebuf b -> "bytebuf[" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "]"
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
@@ -173,6 +182,8 @@ and to_string = function
 and to_json_string = function
   | V_int n -> string_of_int n
   | V_bytes s -> "\"" ^ hex_of_string s ^ "\""  (* JSON has no byte type: hex string *)
+  | V_bytebuf b ->
+    "\"" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "\""
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
@@ -1339,6 +1350,91 @@ let builtin_owned_vec_len =
 (* StrBuf[R] builtins (Phase 12.7) — a mutable string buffer inside a
    region. Implemented as an OCaml Buffer; push appends, and to_str
    returns a snapshot. *)
+(* --- ByteBuf: a mutable byte buffer ---------------------------------------
+
+   `bytebuf_new n` is n zeroed bytes with random access; `push` grows it. The two
+   halves exist because the two things that need it are different: reconstructing
+   a PNG scanline reads the row above and writes the row it is on (random access,
+   fixed size), and building a file appends (growth). Freezing gives a `bytes`,
+   which is the type that can leave the program. *)
+
+let expect_bytebuf who v =
+  match v with
+  | V_bytebuf b -> b
+  | _ -> failwith (who ^ ": expected ByteBuf")
+
+let bb_ensure (b : bytebuf) (n : int) =
+  if n > Bytes.length b.bb_data then begin
+    let cap = max n (max 64 (Bytes.length b.bb_data * 2)) in
+    let bigger = Bytes.make cap '\000' in
+    Bytes.blit b.bb_data 0 bigger 0 b.bb_len;
+    b.bb_data <- bigger
+  end
+
+let builtin_bytebuf_new =
+  V_builtin ("bytebuf_new", fun v ->
+    match v with
+    | V_int n when n >= 0 ->
+      V_bytebuf { bb_data = Bytes.make (max n 1) '\000'; bb_len = n }
+    | V_int _ -> failwith "bytebuf_new: negative length"
+    | _ -> failwith "bytebuf_new: expected int")
+
+let builtin_bytebuf_len =
+  V_builtin ("bytebuf_len", fun v -> V_int (expect_bytebuf "bytebuf_len" v).bb_len)
+
+let builtin_bytebuf_get =
+  V_builtin ("bytebuf_get", fun v ->
+    let b = expect_bytebuf "bytebuf_get" v in
+    V_builtin ("bytebuf_get_p1", fun i ->
+      match i with
+      | V_int i when i >= 0 && i < b.bb_len ->
+        V_int (Char.code (Bytes.get b.bb_data i))
+      | V_int i ->
+        raise (Eval_error (Loc.dummy,
+          Printf.sprintf "bytebuf_get: index %d out of bounds (len = %d)" i b.bb_len))
+      | _ -> failwith "bytebuf_get: expected int"))
+
+let builtin_bytebuf_set =
+  V_builtin ("bytebuf_set", fun v ->
+    let b = expect_bytebuf "bytebuf_set" v in
+    V_builtin ("bytebuf_set_p1", fun i ->
+      match i with
+      | V_int i ->
+        V_builtin ("bytebuf_set_p2", fun x ->
+          match x with
+          | V_int x when i >= 0 && i < b.bb_len ->
+            Bytes.set b.bb_data i (Char.chr (x land 255)); V_unit
+          | V_int _ ->
+            raise (Eval_error (Loc.dummy,
+              Printf.sprintf "bytebuf_set: index %d out of bounds (len = %d)" i b.bb_len))
+          | _ -> failwith "bytebuf_set: expected int")
+      | _ -> failwith "bytebuf_set: expected int"))
+
+let builtin_bytebuf_push =
+  V_builtin ("bytebuf_push", fun v ->
+    let b = expect_bytebuf "bytebuf_push" v in
+    V_builtin ("bytebuf_push_p1", fun x ->
+      match x with
+      | V_int x ->
+        bb_ensure b (b.bb_len + 1);
+        Bytes.set b.bb_data b.bb_len (Char.chr (x land 255));
+        b.bb_len <- b.bb_len + 1;
+        V_unit
+      | _ -> failwith "bytebuf_push: expected int"))
+
+let builtin_bytes_of_bytebuf =
+  V_builtin ("bytes_of_bytebuf", fun v ->
+    let b = expect_bytebuf "bytes_of_bytebuf" v in
+    V_bytes (Bytes.sub_string b.bb_data 0 b.bb_len))
+
+let builtin_bytebuf_of_bytes =
+  V_builtin ("bytebuf_of_bytes", fun v ->
+    match v with
+    | V_bytes s ->
+      V_bytebuf { bb_data = Bytes.of_string (if s = "" then "\000" else s);
+                  bb_len = String.length s }
+    | _ -> failwith "bytebuf_of_bytes: expected bytes")
+
 let builtin_strbuf_new =
   V_builtin ("strbuf_new", fun v ->
     match v with
@@ -2379,6 +2475,13 @@ let initial_env : env =
     ("bytes_concat", ref builtin_bytes_concat);
     ("bytes_of_hex", ref builtin_bytes_of_hex);
     ("hex_of_bytes", ref builtin_hex_of_bytes);
+    ("bytebuf_new",  ref builtin_bytebuf_new);
+    ("bytebuf_len",  ref builtin_bytebuf_len);
+    ("bytebuf_get",  ref builtin_bytebuf_get);
+    ("bytebuf_set",  ref builtin_bytebuf_set);
+    ("bytebuf_push", ref builtin_bytebuf_push);
+    ("bytes_of_bytebuf", ref builtin_bytes_of_bytebuf);
+    ("bytebuf_of_bytes", ref builtin_bytebuf_of_bytes);
     ("print_bytes",  ref builtin_print_bytes);
     ("read_bytes",   ref builtin_read_bytes);
     ("write_bytes",  ref builtin_write_bytes);
