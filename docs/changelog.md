@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.214 — 2026-08-12
+
+_`mere -wg`, and a source map: the browser's debugger shows Mere source._
+
+```sh
+mere -w  app.mere > app.wat
+mere -wg app.mere > app.map.txt
+wat2wasm --enable-tail-call --debug-names app.wat -o app.wasm
+node scripts/wasm_sourcemap.js app.wasm app.map.txt app.mere
+```
+
+Writes `app.wasm.map` and appends a `sourceMappingURL` custom section, which is
+what Chrome and Firefox look for. The playground runs on this backend, so this is
+the debugger a Mere program in a browser has been missing.
+
+**The compiler cannot produce the map, and that is not a limitation but a fact
+about the format.** A Wasm source map addresses *byte offsets in the assembled
+binary*; this backend emits text for `wat2wasm` to assemble. So the work splits
+the way the RV32I debug map splits: `mere -wg` says which function came from which
+line, the binary says where each function ended up (its name section), and a
+script joins them by name. Whoever knows the addresses is not whoever knows the
+source.
+
+**The check is the interesting part.** A source map is easy to produce and hard to
+trust — the segments are VLQ deltas, so an error in one shifts every mapping after
+it, and the result still looks like a source map. So `scripts/wasm_sourcemap.sh`
+decodes the map back and compares it against `wasm-objdump`:
+
+```
+  ok    0x001550 is <both>, and the map says line 8
+  ok    0x00155c is <thrice>, and the map says line 5
+  ok    0x001564 is <twice>, and the map says line 2
+```
+
+_Prelude functions are absent from the table, by the rule v0.1.212 established: a
+position that names a file did not come from the source being compiled. And the
+binary still validates after the section is appended, which the check also
+confirms — appending to a Wasm file is only harmless when it is done right._
+
+---
+
 ## v0.1.213 — 2026-08-12
 
 _Find references, and rename._

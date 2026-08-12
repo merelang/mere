@@ -306,6 +306,48 @@ C codegen, LLVM codegen, and Wasm codegen are parallel implementations. AST + ty
 
 ---
 
+## A source map for the browser: `mere -wg`
+
+```sh
+mere -w  app.mere > app.wat
+mere -wg app.mere > app.map.txt
+wat2wasm --enable-tail-call --debug-names app.wat -o app.wasm
+node scripts/wasm_sourcemap.js app.wasm app.map.txt app.mere
+```
+
+Writes `app.wasm.map` and appends a `sourceMappingURL` custom section to the
+binary. Chrome and Firefox read that section, fetch the map, and show **Mere
+source** in the debugger instead of disassembled Wasm.
+
+**Why this is a tool and not the compiler.** A Wasm source map addresses *byte
+offsets in the assembled binary*, and this backend emits text for `wat2wasm` to
+assemble. Nobody in that chain knows both halves: the compiler knows which
+function came from which line (`mere -wg`), the binary knows where each function
+ended up (its name section, from `--debug-names`), and the script matches them by
+name. It is the same division as the RV32I debug map, for the same reason —
+whoever knows the addresses is not whoever knows the source.
+
+Two things about the format that are easy to get wrong:
+
+- Every mapping is on **generated line 0**, and the "column" is the byte offset
+  into the `.wasm`. That is the convention, not an approximation.
+- The segments are VLQ and every field but the first is a **delta** from the
+  previous one, so being wrong by one shifts everything after it.
+
+Which is why `sh scripts/wasm_sourcemap.sh` does not stop at producing a map: it
+decodes the map back into (offset → line) pairs and compares them against what
+`wasm-objdump` independently says is at those offsets.
+
+```
+  ok    0x001550 is <both>, and the map says line 8
+  ok    0x00155c is <thrice>, and the map says line 5
+  ok    0x001564 is <twice>, and the map says line 2
+```
+
+Granularity is one mapping per function, which is what the table carries. Prelude
+functions are absent: their lines belong to another text, and claiming them would
+point the debugger at the wrong file.
+
 ## Debugging a compiled program: `mere -c -g`
 
 ```sh
