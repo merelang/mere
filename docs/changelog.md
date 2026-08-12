@@ -37,10 +37,16 @@ _Measured on the dogfood, decoding a 736×724 RGBA PNG: peak RSS **164MB → 117
 with byte-identical output. The reconstructed image is 2.1MB of bytes, which was
 17MB of `int`s._
 
-_Adding the type re-found v0.1.217's P5 immediately: `ByteBuf`'s region marker
-tagged as `int` in one place and `__heap` in another, because the new name was not
-in the list of region-parameterised constructors. Same bug, same shape, caught this
-time by the test that already existed for it._
+_Adding the type re-found v0.1.217's P5 immediately, and twice — in both
+directions. Once because `ByteBuf` was missing from the list of
+region-parameterised constructors, so the marker erased to `int`. Then again with
+the names the other way round, which produced the better fix: **a type whose C
+representation does not depend on its region should not carry the region in its tag
+at all.** `StrBuf` and `ByteBuf` both lower to one C type each, with the region
+tracked by a pointer inside the struct, so `StrBuf___heap` was never carrying
+information — only an opportunity to disagree. Both now tag as their bare name,
+which removes the class rather than the instance, and gives `StrBuf` the fix for a
+bug it had never happened to trip._
 
 ---
 

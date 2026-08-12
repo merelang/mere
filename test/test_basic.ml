@@ -5563,6 +5563,18 @@ let () =
     (try ignore (Pipeline.process "let b = bytebuf_new 2 in bytebuf_get b 5"); "allowed"
      with _ -> "refused")
     "refused";
+  (* A type whose C representation does not depend on its region should not carry
+     the region in its tag: one spelling resolved the marker and the other did
+     not, and the two names were a closure type nobody defined. Same class as
+     v0.1.217's P5, found by adding a second such type. *)
+  check "c: StrBuf and ByteBuf tags carry no region"
+    (let c = codegen
+       "let b = bytebuf_new 2;\n\
+        let f = fn (n: int) -> bytebuf_new n;\n\
+        let _ = print_int (bytebuf_len (f 3) + bytebuf_len b);" in
+     Printf.sprintf "%b %b"
+       (contains c "closure_int_ByteBuf") (contains c "ByteBuf___heap"))
+    "true false";
   check "bytebuf: the C backend emits a byte-per-byte buffer, region-allocated"
     (let c = codegen
        "let b = bytebuf_new 3;\n\
