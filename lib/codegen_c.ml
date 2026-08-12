@@ -10271,6 +10271,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else "/* Phase 35.1: nullary factory builtins as first-class values */"
             :: eta_lines @ [""])
     @ [ "int main(int argc, char** argv) {";
+        (* Line-buffer stdout so `print` means the same thing whether the program
+           is watched in a terminal or piped to a file. C's default is to switch
+           to full buffering when stdout is not a tty, which for a batch program
+           is invisible and for a long-running one is not: the mraft dogfood's
+           server logged nothing at all until it exited, because 4KB of output
+           had not accumulated yet. A program's log is how it is watched, and it
+           should not stop existing because someone redirected it. *)
+        "  setvbuf(stdout, NULL, _IOLBF, 0);";
         (if !args_used then "  __lang_argc = argc; __lang_argv = argv;"
          else "  (void)argc; (void)argv;");
         "  __lang_region_init(&__lang_default_region, 1 << 22);";
