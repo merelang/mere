@@ -4,6 +4,15 @@
 (* Phase 19.4: parses the auto-imported prelude and returns its decls.
    When the user's parse starts, these decls are inserted at the front of
    the user decls. Disabled by `?prelude:false` (for tests / debug). *)
+(* How many of a parsed program's declarations came from the auto-imported
+   prelude, which is prepended to every user program. It matters to anything that
+   turns a name into a *place*: a prelude binding's position is a line in the
+   prelude's own text, and reporting it against the user's file would send an
+   editor somewhere arbitrary. The number is a constant of the build (the prelude
+   does not change), so recording it as parse_program runs is exact. *)
+let prelude_count = ref 0
+let prelude_decl_count () = !prelude_count
+
 let parse_prelude () : Ast.top_decl list =
   let tokens = Lexer.tokenize Prelude_stdlib.contents in
   let prog = Parser.parse_program tokens in
@@ -22,6 +31,7 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
   let prelude_decls =
     if prelude then parse_prelude () else []
   in
+  prelude_count := List.length prelude_decls;
   let tokens = Lexer.tokenize s in
   let user_prog =
     match base_dir with

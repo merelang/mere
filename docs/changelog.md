@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.206 — 2026-08-12
+
+_Go to definition._
+
+_Fourth slice of the language-server arc, and the first that needs **scope**: not
+just what is under the cursor, but what is bound there and where each name came
+from._
+
+**Scope is recomputed, not indexed.** `Query.scope_at` walks down to the position
+and collects the binders on the way. The walk descends one path rather than the
+whole tree, it cannot go stale, and there is no invalidation to get wrong — the
+same reason hover reads the typer's annotations instead of building a table beside
+them.
+
+A binder covers the parts of itself where it is really visible: a `let` binds its
+body but not its own value expression, a `fn` binds its body, a `let rec` binds
+both, a match arm's pattern binds that arm. Each of those is a test, because
+getting one wrong is how a server sends you to the wrong `x`.
+
+**Two answers it declines to give**, both because the honest answer is nothing:
+
+- A **prelude name** (`print_int`) is genuinely in scope, but its position is a
+  line in the prelude's own text — jumping there would send the editor to an
+  arbitrary line of the user's file. Prelude bindings are therefore *marked*
+  rather than dropped (completion will want them), which needed the pipeline to
+  record how many declarations the prelude contributed.
+- A **parameter** resolves to the `fn` that introduced it rather than to the
+  parameter name, since `Fun` carries the name but not the name's own position.
+
+---
+
 ## v0.1.205 — 2026-08-12
 
 _Hover: the type inference gave whatever is under the cursor._

@@ -193,6 +193,7 @@ let server_capabilities =
        re-reads the whole buffer anyway, so there is nothing to gain here yet. *)
     ("textDocumentSync", Json.Num 1.0);
     ("hoverProvider", Json.Bool true);
+    ("definitionProvider", Json.Bool true);
   ]
 
 let set_doc state uri text tree =
@@ -206,18 +207,23 @@ let set_doc state uri text tree =
   in
   { state with docs = (uri, { text; tree }) :: List.remove_assoc uri state.docs }
 
-(* Hover. The position arrives 0-based and Mere counts from 1; `Query.node_at`
-   finds the narrowest node whose token contains it, and the typer has already
-   written that node's type onto it. *)
-let hover state uri (params : Json.t) =
+(* The position a request asks about, translated into Mere's 1-based counting,
+   together with the tree to ask. *)
+let ask state uri (params : Json.t) =
   let position = Json.member "position" params in
   let line = Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" position)) in
   let col = Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" position)) in
   match List.assoc_opt uri state.docs with
+  | Some { tree = Some prog; _ } -> Some (prog, line + 1, col + 1)
+  | _ -> None
+
+(* Hover: `Query.node_at` finds the narrowest node whose token contains the
+   cursor, and the typer has already written that node's type onto it. *)
+let hover state uri (params : Json.t) =
+  match ask state uri params with
   | None -> Json.Null
-  | Some { tree = None; _ } -> Json.Null
-  | Some { tree = Some prog; _ } ->
-    (match Query.node_at prog (line + 1) (col + 1) with
+  | Some (prog, line, col) ->
+    (match Query.node_at prog line col with
      | None -> Json.Null
      | Some node ->
        (match Query.describe node with
@@ -229,6 +235,20 @@ let hover state uri (params : Json.t) =
                         ("value", Json.Str ("```mere\n" ^ text ^ "\n```")) ]);
             ("range", range_of_loc node.Ast.loc);
           ]))
+
+(* Go to definition: the same node search, plus the scope around it. Answers only
+   for a name bound in this file — a builtin or a prelude name has no position
+   here to jump to, and sending an editor to an arbitrary line of another text
+   would be worse than saying nothing. *)
+let definition state uri (params : Json.t) =
+  match ask state uri params with
+  | None -> Json.Null
+  | Some (prog, line, col) ->
+    (match Query.definition_at ~prelude_decls:(Pipeline.prelude_decl_count ())
+             prog line col with
+     | None -> Json.Null
+     | Some loc ->
+       Json.Obj [ ("uri", Json.Str uri); ("range", range_of_loc loc) ])
 
 (* One message in, the messages to send back out. `exit` is signalled by the
    third component so the driver can stop without this module knowing what a
@@ -255,6 +275,10 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
   | Some "textDocument/hover" ->
     (match uri_of doc with
      | Some uri -> (state, [ response id (hover state uri params) ], false)
+     | None -> (state, [ response id Json.Null ], false))
+  | Some "textDocument/definition" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (definition state uri params) ], false)
      | None -> (state, [ response id Json.Null ], false))
   | Some "textDocument/didOpen" ->
     (match uri_of doc, Json.to_string_opt (Json.member "text" doc) with
