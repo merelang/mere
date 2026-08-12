@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.211" Version.v "0.1.211";
+  check "version is 0.1.212" Version.v "0.1.212";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12601,6 +12601,59 @@ let () =
   check "semantic tokens: a constructor is one"
     (tokens_of "type color = Red | Green;\nlet c = Red;\nlet _ = print (match c with | Red -> \"r\" | Green -> \"g\");\n")
     "1:8/3/enumMember 2:8/5/function 2:21/1/variable";
+
+  (* `-c -g`: the emitted C carries `#line` directives back to the Mere source, so
+     a debugger on the compiled program shows the program that was written. Two
+     things make this simple on this backend: a function body is emitted as one C
+     line, so a directive per function is the finest granularity the output has;
+     and a directive applies to the line *after* it, which is why it goes inside
+     the braces rather than before the signature. *)
+  let c_with_debug src =
+    (* The C backend reads the types inference wrote onto the tree, so the tree
+       has to have been through it. *)
+    let prog = Pipeline.parse_program src in
+    let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_c.debug_file := Some "app.mere";
+    let out = Codegen_c.emit_program ~main_ty prog in
+    Codegen_c.debug_file := None;
+    out
+  in
+  let c_debug = c_with_debug "let twice = fn (n: int) ->\n  n * 2;\nlet _ = print_int (twice 20);\n" in
+  let contains hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec loop i = i + nl <= hl && (String.sub hay i nl = needle || loop (i + 1)) in
+    loop 0
+  in
+  check "c -g: the body is attributed to the line it was written on"
+    (string_of_bool (contains c_debug "{\n#line 2 \"app.mere\"\n  return"))
+    "true";
+  (* What follows a user function is runtime and prelude code with no Mere source
+     at all. Naming a file that does not exist is how a debugger is told to show
+     nothing for those frames, rather than an arbitrary line of the user's. *)
+  check "c -g: what is not the user's code says so"
+    (string_of_bool (contains c_debug "#line 1 \"<mere runtime>\""))
+    "true";
+  (* The prelude is Mere code, but not *this* program's — its positions are lines
+     in the prelude's own text, and claiming them would point at the wrong file.
+     It is tokenised with a name, which is the whole check. *)
+  check "c -g: prelude functions are not claimed as lines of the user's file"
+    (let rec count i acc =
+       let needle = "#line " in
+       if i + 6 > String.length c_debug then acc
+       else if String.sub c_debug i 6 = needle
+               && (let rest = String.sub c_debug i (min 40 (String.length c_debug - i)) in
+                   contains rest "app.mere")
+       then count (i + 1) (acc + 1)
+       else count (i + 1) acc
+     in
+     string_of_int (count 0 0))
+    "1";
+  check "c: without -g the emitted C has no directives at all"
+    (string_of_bool
+       (let prog = Pipeline.parse_program "let _ = print_int 1;" in
+        let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+        contains (Codegen_c.emit_program ~main_ty prog) "#line"))
+    "false";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of

@@ -8,6 +8,8 @@ let usage () =
   print_endline "  mere -te <expr>       print the inferred type of an inline expression";
   print_endline "  mere -c <file.mere>   emit C source (compile with clang)";
   print_endline "  mere -ce <expr>       emit C source for an inline expression";
+  print_endline "        -c takes `-g`: emit #line directives back to the .mere";
+  print_endline "        source, so a debugger shows the program you wrote";
   print_endline "  mere -ll <file.mere>  emit LLVM IR (compile with clang)";
   print_endline "  mere -lle <expr>      emit LLVM IR for an inline expression";
   print_endline "  mere -w <file.mere>   emit Wasm (WAT, use wat2wasm + Node.js)";
@@ -197,6 +199,11 @@ let component_flag : bool ref = ref false
 
 let infer_program ?base_dir source =
   Mere.Pipeline.infer_program ?base_dir ~search_paths:!search_paths source
+
+(* `-c -g <file>`: the emitted C carries `#line` directives back to the Mere
+   source, so a debugger on the compiled program shows the program that was
+   written rather than the one that was generated. *)
+let set_c_debug path = Mere.Codegen_c.debug_file := Some path
 
 let compile_to_c ?base_dir source =
   let open Mere in
@@ -432,6 +439,11 @@ let () =
     run_action Mere.Pipeline.type_of "<inline>" expr
   | [_; "-ce"; expr] ->
     run_action compile_to_c "<inline>" expr
+  | [_; "-c"; "-g"; path] | [_; "-c"; path; "-g"] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    set_c_debug path;
+    run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
   | [_; "-c"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in

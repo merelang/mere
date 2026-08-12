@@ -306,6 +306,42 @@ C codegen, LLVM codegen, and Wasm codegen are parallel implementations. AST + ty
 
 ---
 
+## Debugging a compiled program: `mere -c -g`
+
+```sh
+mere -c -g app.mere > app.c && clang -g app.c -o app
+lldb app -o "b mu_twice"
+# Breakpoint 1: where = app`mu_twice + 8 at app.mere:2:40
+```
+
+The emitted C carries `#line` directives back to the Mere source, so a debugger
+on the compiled program shows the program that was written rather than the one
+that was generated. Off by default: without `-g` the output is byte-identical to
+what it always was.
+
+Two facts about this backend make it simple, and worth stating because they are
+not true of most C emitters:
+
+- **A function's whole body is emitted as one C line.** So a directive per
+  function is not a coarse approximation — it is the finest granularity the
+  output has. It goes *inside* the braces, because a `#line` applies to the line
+  after it, and that puts the body on exactly the line the programmer wrote.
+- **What lies between functions is runtime and prelude code with no Mere source
+  at all.** Each user function is therefore followed by a directive naming a file
+  that does not exist (`<mere runtime>`), so a debugger shows *no* source for
+  those frames — which is the truth — instead of an arbitrary line of the user's
+  file.
+
+The rule for what counts as the user's code is one line: **a position that names
+a file did not come from the source being compiled.** The lexer stamps positions
+from an `import` with their path, and the prelude is tokenised as `<prelude>`, so
+neither can be claimed as a line of this file. That check is the whole of it.
+
+The other backends have nothing equivalent yet. LLVM would want `!dbg` metadata
+and a `DISubprogram` per function; Wasm a source map. The RV32I backend has its
+own answer, a debug map (`mere -rvg`, see [bare-metal.md](bare-metal.md)), which
+exists because a flat binary has no header to put debug information in.
+
 ## A fifth backend, without a C compiler under it
 
 Everything above delegates the last mile: the C backend hands off to `clang`, the

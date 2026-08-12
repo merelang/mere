@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.212 — 2026-08-12
+
+_`mere -c -g`: a debugger on the compiled program shows the Mere source._
+
+```sh
+mere -c -g app.mere > app.c && clang -g app.c -o app
+lldb app -o "b mu_twice"
+# Breakpoint 1: where = app`mu_twice + 8 at app.mere:2:40
+```
+
+_Verified with `lldb` and `dwarfdump`, not by reading the emitted text: the line
+table names `app.mere`, and a breakpoint on a function resolves to the line it was
+written on._
+
+**This was reported as "not mechanical after all" in the notes for v0.1.202**, and
+the reason given was that `codegen_c` is expression-oriented and does not know
+which output line it is on, so `#line` — which applies to the *next* line —
+cannot be placed. That turned out to be looking at the wrong thing. A function's
+whole body is emitted as **one C line**, so a directive per function is not a
+coarse approximation but the finest granularity the output has; put it inside the
+braces and the body lands on exactly the line the programmer wrote. No
+line-tracking writer, no second pass.
+
+The other half of the problem is what to say about the code that has no Mere
+source — the runtime, and the prelude. Each user function is followed by a
+directive naming a file that does not exist (`<mere runtime>`), so a debugger
+shows *no* source for those frames, which is the truth, rather than an arbitrary
+line of the user's file.
+
+**The rule for "is this the user's code" is one line**, and it is the one v0.1.210
+made possible: *a position that names a file did not come from the source being
+compiled.* Imports were already stamped; the prelude is now tokenised as
+`<prelude>`, so neither can be claimed. An earlier attempt counted prelude
+declarations instead and was wrong — `Trait_elab` reorders the list, so the
+prelude's are not the first N by the time codegen sees them.
+
+_Off by default: without `-g` the emitted C is byte-identical to what it always
+was, which the suite checks. LLVM (`!dbg`) and Wasm (source maps) remain
+unanswered; the RV32I backend has had its own since v0.1.200._
+
+---
+
 ## v0.1.211 — 2026-08-12
 
 _Formatting, an outline, and colour that is not guessing._
