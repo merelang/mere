@@ -209,6 +209,18 @@ let check_document ?search_paths (previous : string list) uri text =
   (publish uri mine :: List.map for_other others @ List.map (fun u -> publish u []) cleared,
    tree, others)
 
+(* The vocabulary of semantic tokens, in the order the legend declares them —
+   a token names its type by index into this list. *)
+let token_legend =
+  [ Query.Tk_function; Query.Tk_variable; Query.Tk_parameter; Query.Tk_constructor ]
+
+let token_index kind =
+  let rec go i = function
+    | [] -> 0
+    | k :: rest -> if k = kind then i else go (i + 1) rest
+  in
+  go 0 token_legend
+
 let server_capabilities =
   Json.Obj [
     (* 1 = full text on every change. Incremental sync is a real optimisation
@@ -220,6 +232,19 @@ let server_capabilities =
     (* No trigger characters: this language has no `.` member access to complete
        after, so the editor asks when the user asks. *)
     ("completionProvider", Json.Obj [ ("resolveProvider", Json.Bool false) ]);
+    ("documentSymbolProvider", Json.Bool true);
+    ("documentFormattingProvider", Json.Bool true);
+    (* The legend is the agreement about what the numbers in the token stream
+       mean: the server picks the vocabulary, and every token is an index into
+       it. *)
+    ("semanticTokensProvider",
+     Json.Obj [
+       ("legend",
+        Json.Obj [
+          ("tokenTypes", Json.List (List.map (fun k -> Json.Str (Query.token_kind_name k))
+                                      token_legend));
+          ("tokenModifiers", Json.List []) ]);
+       ("full", Json.Bool true) ]);
   ]
 
 let extra_of state uri =
@@ -295,6 +320,96 @@ let completion state uri (params : Json.t) =
        it as the user keeps typing instead of asking again. *)
     Json.Obj [ ("isIncomplete", Json.Bool false); ("items", Json.List items) ]
 
+(* Semantic highlighting: the compiler saying which names are parameters, which
+   are functions, which are constructors — the distinctions a regular expression
+   cannot make.
+
+   The encoding is five integers per token, and every one of them is *relative*:
+   the line is a delta from the previous token's line, and the character is a
+   delta from the previous token's character when they share a line. It is a
+   compact format for a stream that arrives in order, and getting the deltas
+   wrong paints the file at an offset, which is why the order is fixed in
+   `Query.semantic_tokens` rather than here. *)
+let semantic_tokens state uri =
+  match List.assoc_opt uri state.docs with
+  | Some { tree = Some prog; _ } ->
+    let toks =
+      Query.semantic_tokens ~prelude_decls:(Pipeline.prelude_decl_count ()) prog
+    in
+    let data = ref [] in
+    let prev_line = ref 0 and prev_col = ref 0 in
+    List.iter (fun (t : Query.token) ->
+      let line = t.Query.t_loc.Loc.line - 1 in
+      let col = t.Query.t_loc.Loc.col - 1 in
+      let dline = line - !prev_line in
+      let dcol = if dline = 0 then col - !prev_col else col in
+      let len = max 1 t.Query.t_loc.Loc.width in
+      data := [ dline; dcol; len; token_index t.Query.t_kind; 0 ] :: !data;
+      prev_line := line;
+      prev_col := col) toks;
+    Json.Obj [ ("data",
+                Json.List (List.map (fun n -> Json.Num (float_of_int n))
+                             (List.concat (List.rev !data)))) ]
+  | _ -> Json.Obj [ ("data", Json.List []) ]
+
+(* The outline. Kinds are the protocol's numbers: 12 is Function, 13 is Variable.
+   The selection range is the name itself, which is what an editor highlights when
+   you pick the entry; the full range is the same here, because a declaration's
+   extent is not something the tree records. *)
+let document_symbols state uri =
+  match List.assoc_opt uri state.docs with
+  | Some { tree = Some prog; _ } ->
+    Json.List
+      (List.map (fun (s : Query.symbol) ->
+         let r = range_of_loc s.Query.s_loc in
+         Json.Obj [
+           ("name", Json.Str s.Query.s_name);
+           ("kind", Json.Num (if s.Query.s_is_fn then 12.0 else 13.0));
+           ("range", r);
+           ("selectionRange", r);
+         ])
+         (Query.symbols ~prelude_decls:(Pipeline.prelude_decl_count ()) prog))
+  | _ -> Json.List []
+
+(* Formatting: the whole document, replaced. `mere fmt` and this are the same
+   function, so format-on-save and the command line cannot come to different
+   conclusions about what formatted means.
+
+   A file that does not parse is left alone. An editor asking to format a file
+   mid-edit is normal, and replacing a buffer with the best guess of a parser
+   that failed is how somebody loses work. *)
+let formatting state uri =
+  match List.assoc_opt uri state.docs with
+  | None -> Json.List []
+  | Some doc ->
+    (match
+       (try Some (Pipeline.format_source ?base_dir:(base_dir_of_uri uri) doc.text)
+        with _ -> None)
+     with
+     | None -> Json.List []
+     | Some formatted ->
+       (* The formatter returns the program, and the CLI is what adds the final
+          newline (`print_endline`). Without doing the same here, format-on-save
+          would strip the trailing newline from every file, every time. *)
+       let formatted =
+         if formatted = "" || formatted.[String.length formatted - 1] = '\n'
+         then formatted else formatted ^ "\n"
+       in
+       if formatted = doc.text then Json.List [] else
+       (* The end of the document, counted the way the protocol does: one past
+          the last line, character zero, which covers the final newline whether
+          or not there is one. *)
+       let lines = List.length (String.split_on_char '\n' doc.text) in
+       Json.List [
+         Json.Obj [
+           ("range",
+            Json.Obj [ ("start", position 1 1);
+                       ("end", Json.Obj [ ("line", Json.Num (float_of_int lines));
+                                          ("character", Json.Num 0.0) ]) ]);
+           ("newText", Json.Str formatted);
+         ]
+       ])
+
 (* Go to definition: the same node search, plus the scope around it. Answers only
    for a name bound in this file — a builtin or a prelude name has no position
    here to jump to, and sending an editor to an arbitrary line of another text
@@ -343,6 +458,18 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
     (match uri_of doc with
      | Some uri -> (state, [ response id (completion state uri params) ], false)
      | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/documentSymbol" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (document_symbols state uri) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/formatting" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (formatting state uri) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/semanticTokens/full" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (semantic_tokens state uri) ], false)
+     | None -> (state, [ response id Json.Null ], false))
   | Some "textDocument/didOpen" ->
     (match uri_of doc, Json.to_string_opt (Json.member "text" doc) with
      | Some uri, Some text ->

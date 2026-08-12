@@ -586,3 +586,19 @@ let check ?base_dir ?(search_paths = []) (source : string)
 
 let diagnostics ?base_dir ?search_paths (source : string) : diagnostic list =
   snd (check ?base_dir ?search_paths source)
+
+(* Format a source string the way `mere fmt` does — the same function, so the
+   editor's format-on-save and the command line cannot disagree about what
+   formatted means.
+
+   The prelude is parsed along with the source (constructors have to be
+   registered before the user's code is parsed) and then dropped: what comes back
+   is the person's own file, reformatted. *)
+let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
+  let prelude_decls = parse_prelude () in
+  let n_prelude = List.length prelude_decls in
+  let prog = parse_program ~prelude:true ~base_dir ~search_paths source in
+  let rec drop n xs =
+    if n <= 0 then xs else match xs with [] -> [] | _ :: rest -> drop (n - 1) rest
+  in
+  Formatter.format_program { prog with Ast.decls = drop n_prelude prog.Ast.decls }

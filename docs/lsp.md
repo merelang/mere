@@ -7,7 +7,8 @@ mere lsp
 Speaks LSP over stdin and stdout. What it does today is **diagnostics** — every
 syntax error in the buffer, republished on each keystroke, and the first type
 error once the file parses — **hover**, which reports the type inference gave
-whatever is under the cursor, **go to definition**, and **completion**.
+whatever is under the cursor, **go to definition**, **completion**, an
+**outline**, **formatting**, and **semantic highlighting**.
 
 It is the same check the compiler runs — `Pipeline.check`, which the CLI also
 goes through. A language server that agrees with the compiler on good days
@@ -43,10 +44,13 @@ same on stdout, so a client that can start a process can talk to it.
 
 | method | behaviour |
 |---|---|
-| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider`, `completionProvider` |
+| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider`, `completionProvider`, `documentSymbolProvider`, `documentFormattingProvider`, `semanticTokensProvider` |
 | `textDocument/hover` | the inferred type of the narrowest node under the cursor, as `name : type` when it is a name |
 | `textDocument/definition` | where the name under the cursor was bound, when that is somewhere in this file |
 | `textDocument/completion` | every name visible at the cursor, innermost first, with its type |
+| `textDocument/documentSymbol` | the file's top-level declarations, for the outline and symbol search |
+| `textDocument/formatting` | the whole document, formatted — the same function `mere fmt` runs |
+| `textDocument/semanticTokens/full` | which names are parameters, functions, constructors |
 | `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
 | `textDocument/didClose` | publish an empty list, clearing the underlines |
 | `shutdown` / `exit` | as specified |
@@ -131,6 +135,27 @@ complete after, so the list arrives when the editor asks for it. The response is
 marked complete, so an editor filters it as you keep typing rather than asking
 again.
 
+## Formatting, the outline, and colour
+
+**Formatting** is `mere fmt`'s own function, so format-on-save and the command
+line cannot come to different conclusions about what formatted means. Two
+refusals worth knowing: a file that does not parse is left alone (replacing a
+buffer with the best guess of a parser that failed is how somebody loses work),
+and an already-formatted file produces *no edit at all* rather than an edit that
+changes nothing.
+
+**The outline** lists the file's value declarations, telling a function from a
+value by its type. A `type` declaration is missing from it, and honestly so:
+`Top_type` carries a name and its variants and no position at all, so it cannot
+be pointed at without guessing which line it is on.
+
+**Semantic tokens** are the compiler saying which names are parameters, which are
+functions, which are constructors — the distinctions a regular expression cannot
+make, and the reason an editor's grammar is only half the story. The grammar
+still handles keywords, strings and numbers, which it is perfectly good at. A
+constructor in a *pattern* is not tokenised: patterns are not expressions, and
+the walk that produces these follows expressions.
+
 ## What it does not answer yet
 
 - **The rarer type errors still stop a declaration.** A mismatch and an unknown
@@ -140,6 +165,9 @@ again.
   picks up from there. So the worst case is one error for a declaration rather
   than all of them, never one error for the file.
 
+- **Find references and rename.** Both want the reverse of `scope_at` — every
+  use of a binding rather than the binding for a use — which is a walk this does
+  not have yet.
 - **Incremental sync.** The whole buffer arrives on every change. The check
   re-reads all of it anyway, so incremental sync would buy nothing yet and cost
   a class of desynchronisation bugs.

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.210" Version.v "0.1.210";
+  check "version is 0.1.211" Version.v "0.1.211";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12514,6 +12514,93 @@ let () =
          d.Pipeline.d_loc.Loc.line
      | [] -> "(no error)")
     "mere_test_lib.mere:1";
+
+  (* The outline, and formatting. Both are the compiler answering with something
+     it already had: the declarations it parsed, and the formatter `mere fmt`
+     runs — the same function, so format-on-save and the command line cannot
+     come to different conclusions about what formatted means. *)
+  let ask_doc uri text meth =
+    let doc =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didOpen");
+                 ("params", Json.Obj [ ("textDocument",
+                    Json.Obj [ ("uri", Json.Str uri); ("text", Json.Str text) ]) ]) ]
+    in
+    let (state, _, _) = Lsp.handle Lsp.initial doc in
+    let ask =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 2.0);
+                 ("method", Json.Str meth);
+                 ("params", Json.Obj [
+                    ("textDocument", Json.Obj [ ("uri", Json.Str uri) ]) ]) ]
+    in
+    match Lsp.handle state ask with
+    | (_, [ reply ], _) -> Json.member "result" reply
+    | _ -> Json.Null
+  in
+  let outline =
+    ask_doc "file:///tmp/o.mere"
+      "let twice = fn (n: int) -> n * 2;\nlet total = 41;\nlet _ = print_int (twice total);\n"
+      "textDocument/documentSymbol"
+  in
+  check "outline: names, with a function told from a value"
+    (String.concat "," (List.map (fun sym ->
+       Printf.sprintf "%s/%d"
+         (Option.value ~default:"?" (Json.to_string_opt (Json.member "name" sym)))
+         (Option.value ~default:0 (Json.to_int_opt (Json.member "kind" sym))))
+       (Json.to_list outline)))
+    "twice/12,total/13";
+  let edits text =
+    Json.to_list (ask_doc "file:///tmp/p.mere" text "textDocument/formatting")
+  in
+  check "formatting: an untidy file comes back tidied"
+    (match edits "let   twice=fn (n:int)->n*2;\nlet _ = print_int (twice 21);\n" with
+     | [ e ] -> Option.value ~default:"?" (Json.to_string_opt (Json.member "newText" e))
+     | _ -> "(no edit)")
+    "let twice = fn (n: int) -> n * 2;\n\nlet _ = print_int (twice 21);\n";
+  (* The formatter returns the program; the CLI is what adds the final newline.
+     Without doing the same, format-on-save would strip it from every file. *)
+  check "formatting: an already-formatted file produces no edit at all"
+    (string_of_int
+       (List.length (edits "let twice = fn (n: int) -> n * 2;\n\nlet _ = print_int (twice 21);\n")))
+    "0";
+  (* Replacing a buffer with the best guess of a parser that failed is how
+     somebody loses work. *)
+  check "formatting: a file that does not parse is left alone"
+    (string_of_int (List.length (edits "let a = fn x -> x +;\n"))) "0";
+
+  (* Semantic tokens: the compiler saying which names are parameters, which are
+     functions, which are constructors — the distinction a regular expression
+     cannot make. The encoding is five integers per token and every one is
+     relative to the token before it, so getting the deltas wrong paints the file
+     at an offset. Decoding them back is the only honest way to check. *)
+  let tokens_of text =
+    let raw =
+      Json.to_list
+        (Json.member "data"
+           (ask_doc "file:///tmp/s.mere" text "textDocument/semanticTokens/full"))
+    in
+    let nums = List.map (fun v -> Option.value ~default:(-1) (Json.to_int_opt v)) raw in
+    let legend = [ "function"; "variable"; "parameter"; "enumMember" ] in
+    let rec go acc line col = function
+      | dl :: dc :: len :: tt :: _ :: rest ->
+        let line = line + dl in
+        let col = if dl = 0 then col + dc else dc in
+        let name = try List.nth legend tt with _ -> "?" in
+        go (Printf.sprintf "%d:%d/%d/%s" line col len name :: acc) line col rest
+      | _ -> List.rev acc
+    in
+    String.concat " " (go [] 0 0 nums)
+  in
+  check "semantic tokens: a parameter is told from a function"
+    (tokens_of "let twice = fn (n: int) -> n * 2;\nlet _ = print_int (twice 21);\n")
+    "0:27/1/parameter 1:8/9/function 1:19/5/function";
+  (* `Red` in the value position is a constructor; the `Red` in a match *pattern*
+     is not tokenised, because patterns are not expressions and the walk that
+     produces these follows expressions. The grammar still colours it, being
+     capitalised. *)
+  check "semantic tokens: a constructor is one"
+    (tokens_of "type color = Red | Green;\nlet c = Red;\nlet _ = print (match c with | Red -> \"r\" | Green -> \"g\");\n")
+    "1:8/3/enumMember 2:8/5/function 2:21/1/variable";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
