@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.209" Version.v "0.1.209";
+  check "version is 0.1.210" Version.v "0.1.210";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12465,6 +12465,55 @@ let () =
     (try ignore (Pipeline.infer_program "let a = fn (n: int) -> n + \"x\";\nlet _ = print_int 1;\n"); "compiled"
      with Typer.Type_error _ -> "raised")
     "raised";
+
+  (* Inside one declaration, too: a mismatch and an unknown name are reported and
+     inference carries on with a fresh variable, which unifies with anything and
+     so neither invents a second error nor hides a real one further along. *)
+  let errs =
+    type_errors_of
+      "let f = fn (n: int) ->\n\
+       \  let a = n + \"x\" in\n\
+       \  nosuchname a;\n\
+       let _ = print_int 1;\n"
+  in
+  check "type recovery: more than one error inside a single declaration"
+    (String.concat "," (List.map (fun (d : Pipeline.diagnostic) ->
+       string_of_int d.Pipeline.d_loc.Loc.line) errs))
+    "2,3";
+  check "type recovery: an unknown name is reported, not fatal"
+    (String.concat "|" (List.filter_map (fun (d : Pipeline.diagnostic) ->
+       if String.length d.Pipeline.d_msg >= 8
+          && String.sub d.Pipeline.d_msg 0 8 = "unbound "
+       then Some "found" else None) errs))
+    "found";
+  (* The sink must not outlive the call that installed it: one left behind would
+     make the compiler collect errors instead of stopping at the first. *)
+  check "type recovery: the sink does not leak into the compiler's path"
+    (try ignore (Pipeline.infer_program "let a = fn (n: int) -> n + \"x\";\nlet _ = print_int 1;\n"); "compiled"
+     with Typer.Type_error _ -> "raised")
+    "raised";
+  (* A position knows the file it came from, so an error inside an `import` is
+     reported against that file rather than against the line of the import. *)
+  check "diagnostics: a position from an imported file names it"
+    (let dir = Filename.get_temp_dir_name () in
+     let lib = Filename.concat dir "mere_test_lib.mere" in
+     let oc = open_out lib in
+     output_string oc "let helper = fn (n: int) -> n + \"boom\";\n";
+     close_out oc;
+     let ds =
+       Pipeline.diagnostics ~base_dir:dir
+         ("import \"./mere_test_lib.mere\";\nlet _ = print_int (helper 1);\n")
+     in
+     Sys.remove lib;
+     match List.filter (fun (d : Pipeline.diagnostic) ->
+             d.Pipeline.d_severity = Pipeline.Error) ds with
+     | d :: _ ->
+       Printf.sprintf "%s:%d"
+         (match d.Pipeline.d_file with
+          | Some f -> Filename.basename f | None -> "(this file)")
+         d.Pipeline.d_loc.Loc.line
+     | [] -> "(no error)")
+    "mere_test_lib.mere:1";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of

@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.210 — 2026-08-12
+
+_Positions know which file they came from, and the typer reports more than one
+problem per declaration._
+
+**A position carries its file.** `Loc.t` gained `file : string option`, and since
+the lexer is the only thing in the compiler that builds a position, stamping the
+tokens of an `import`ed file was a one-line change that everything downstream
+inherits: an error raised deep in the typer, about a node that came from another
+file, now knows which file it is about without anybody having threaded that
+through. The CLI renders the snippet from that file; the language server publishes
+against that file's URI. Before this, only *syntax* errors could say where they
+came from — by the time the typer runs, imported declarations have been merged
+into one program.
+
+**The typer collects.** The two sites that account for nearly every real type
+error — a mismatch in `unify`, and an unknown name — report and carry on instead
+of raising, when a sink is installed. So one declaration can report four problems
+rather than the first one.
+
+What it carries on *with* is the interesting choice: a **fresh type variable**,
+which unifies with anything, so it neither invents a second error nor silences a
+real one further along. A distinguished error type would be the textbook answer
+and would have to be taught to every match on `ty` in five backends. On a
+mismatch the two types are left unlinked, since neither is more right than the
+other and forcing one on the other is how one mistake becomes five.
+
+The other twenty `raise` sites are unchanged: they end that declaration's check,
+and v0.1.209's recovery picks up at the next one. The compiler's path is
+untouched — no sink, same first-error-raises behaviour — and the sink is installed
+under `Fun.protect`, because one left behind would make the compiler collect
+errors instead of stopping. There is a cap of a hundred, because a pathological
+file can produce errors without end once inference is allowed past them and
+nobody is reading the hundred and first.
+
+---
+
 ## v0.1.209 — 2026-08-12
 
 _More than one type error at a time._
