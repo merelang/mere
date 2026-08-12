@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.206" Version.v "0.1.206";
+  check "version is 0.1.207" Version.v "0.1.207";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12331,6 +12331,58 @@ let () =
   check "definition: a prelude name has nowhere in this file to go"
     (define_at dsrc 4 8) "(none)";
   check "definition: whitespace" (define_at dsrc 0 0) "(none)";
+
+  (* Completion: the same two questions again — what is under the cursor, what is
+     in scope there — plus a decision about what to offer. Innermost first, one
+     entry per name, since an inner binding shadows an outer one and offering
+     both would offer a name that cannot be reached. *)
+  let complete_at src line col =
+    let doc =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didOpen");
+                 ("params", Json.Obj [ ("textDocument",
+                    Json.Obj [ ("uri", Json.Str "file:///tmp/c.mere");
+                               ("text", Json.Str src) ]) ]) ]
+    in
+    let (state, _, _) = Lsp.handle Lsp.initial doc in
+    let ask =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 2.0);
+                 ("method", Json.Str "textDocument/completion");
+                 ("params", Json.Obj [
+                    ("textDocument", Json.Obj [ ("uri", Json.Str "file:///tmp/c.mere") ]);
+                    ("position", Json.Obj [ ("line", Json.Num (float_of_int line));
+                                            ("character", Json.Num (float_of_int col)) ]) ]) ]
+    in
+    match Lsp.handle state ask with
+    | (_, [ reply ], _) ->
+      Json.to_list (Json.member "items" (Json.member "result" reply))
+    | _ -> []
+  in
+  let label i = Option.value ~default:"?" (Json.to_string_opt (Json.member "label" i)) in
+  let is_local i = Json.member "sortText" i = Json.Null in
+  let items = complete_at dsrc 3 4 in
+  check "completion: the names from this file come first, innermost outwards"
+    (String.concat "," (List.map label (List.filter is_local items)))
+    "y,x,f,twice,apply";
+  check "completion: a function is offered as one (kind 3)"
+    (match List.find_opt (fun i -> label i = "twice") items with
+     | Some i ->
+       Printf.sprintf "%s %s"
+         (Option.value ~default:"?" (Json.to_string_opt (Json.member "detail" i)))
+         (match Json.to_int_opt (Json.member "kind" i) with
+          | Some k -> string_of_int k | None -> "?")
+     | None -> "missing")
+    "(int -> int) 3";
+  check "completion: prelude names are offered, and sort after the local ones"
+    (match List.find_opt (fun i -> label i = "list_map") items with
+     | Some i -> if is_local i then "unsorted" else "sorted after"
+     | None -> "missing")
+    "sorted after";
+  check "completion: the prelude's own helpers are not offered"
+    (string_of_int
+       (List.length (List.filter (fun i ->
+          let l = label i in String.length l > 0 && l.[0] = '_') items)))
+    "0";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
