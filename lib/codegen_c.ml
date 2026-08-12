@@ -5846,6 +5846,8 @@ let native_ffi_runtime ~tls ~midi =
       "#include <sys/time.h>";
       "#include <stdint.h>";
       "#include <signal.h>";
+      (* tcp_read reads errno to say which failure it was. *)
+      "#include <errno.h>";
       (if tls then
          "#include <openssl/ssl.h>\n#include <openssl/err.h>\n#include <openssl/x509v3.h>\n\
           #define __TLS_MAX 4096\n\
@@ -5950,10 +5952,34 @@ let native_ffi_runtime ~tls ~midi =
          "static int tcp_write(int fd, int p, int len) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_write(__tls[fd], __mem+p, len); return (int)write(fd, __mem + p, (size_t)len); }"
        else
          "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }");
+      (* v0.1.226 (mraft dogfood P4): a failed read says *which* failure it was.
+         read(2) returns -1 for everything, and with SO_RCVTIMEO set that covers
+         both "the deadline passed with nothing arriving" and "the connection
+         broke" — opposite events for a caller, one of which means wait longer and
+         the other means reconnect. mraft told them apart by timing the call and
+         asking whether it had failed slowly enough, which infers a cause from a
+         duration. The codes stay negative, so every existing `< 0` check is
+         unaffected:
+
+           -1  nothing arrived before the deadline (EAGAIN / EWOULDBLOCK)
+           -2  the connection is gone (ECONNRESET / EPIPE / ENOTCONN / ETIMEDOUT)
+           -3  any other error *)
+      "static int __lang_read_code(void) {";
+      "  switch (errno) {";
+      "    case EAGAIN:";
+      "#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN";
+      "    case EWOULDBLOCK:";
+      "#endif";
+      "      return -1;";
+      "    case ECONNRESET: case EPIPE: case ENOTCONN: case ETIMEDOUT:";
+      "      return -2;";
+      "    default: return -3;";
+      "  }";
+      "}";
       (if tls then
-         "static int tcp_read(int fd, int p, int cap) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_read(__tls[fd], __mem+p, cap); return (int)read(fd, __mem + p, (size_t)cap); }"
+         "static int tcp_read(int fd, int p, int cap) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_read(__tls[fd], __mem+p, cap); { long long n = (long long)read(fd, __mem + p, (size_t)cap); return n < 0 ? __lang_read_code() : (int)n; } }"
        else
-         "static int tcp_read(int fd, int p, int cap) { return (int)read(fd, __mem + p, (size_t)cap); }");
+         "static int tcp_read(int fd, int p, int cap) { long long n = (long long)read(fd, __mem + p, (size_t)cap); return n < 0 ? __lang_read_code() : (int)n; }");
       (if tls then
          "static int tcp_close(int fd) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]){ SSL_shutdown(__tls[fd]); SSL_free(__tls[fd]); __tls[fd]=0; } close(fd); return 0; }"
        else
