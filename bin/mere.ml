@@ -14,6 +14,8 @@ let usage () =
   print_endline "  mere -lle <expr>      emit LLVM IR for an inline expression";
   print_endline "  mere -w <file.mere>   emit Wasm (WAT, use wat2wasm + Node.js)";
   print_endline "  mere -we <expr>       emit Wasm (WAT) for an inline expression";
+  print_endline "  mere -wg <file.mere>  print the table a Wasm source map is built";
+  print_endline "                        from (see scripts/wasm_sourcemap.js)";
   print_endline "  mere -w --component <file.mere>";
   print_endline "                        emit Wasm in Component Model shape (exports";
   print_endline "                        run + cabi_realloc; feed to wasm-tools component)";
@@ -214,6 +216,13 @@ let compile_to_llvm ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_llvm.emit_program ~main_ty prog
+
+(* `-wg`: the table that a source map is built from. See scripts/wasm_sourcemap.js,
+   which matches it against the assembled binary. *)
+let wasm_debug_map ~path ?base_dir source =
+  let open Mere in
+  let (prog, main_ty) = infer_program ?base_dir source in
+  Codegen_wasm.emit_debug_map ~main_ty ~component:!component_flag ~source:path prog
 
 let compile_to_wasm ?base_dir source =
   let open Mere in
@@ -466,6 +475,10 @@ let () =
     (* The editor speaks on stdin and listens on stdout, so nothing else may be
        written there — every diagnostic goes back as a protocol message. *)
     Mere.Lsp.serve ~search_paths:!search_paths ()
+  | [_; "-wg"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base (wasm_debug_map ~path ~base_dir:base) path source
   | [_; "-rvse"; expr] ->
     run_action ~rv:true listing_riscv "<inline>" expr
   (* -rv (binary) / -rvs (listing) / -rvg (debug map), each with `--bare`,

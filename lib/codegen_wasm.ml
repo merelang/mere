@@ -129,6 +129,24 @@ type fn_decl = {
   return_ty : Ast.ty;
 }
 
+(* Which Mere line each emitted function came from, in the order they are
+   emitted. It is collected always — it costs nothing and changes no output — and
+   printed only by `mere -wg`, which is what a source map is built from.
+
+   A Wasm source map maps *byte offsets in the assembled binary*, and this
+   backend emits text for `wat2wasm` to assemble. So the compiler cannot produce
+   the map itself: it says which function came from which line, and the tool that
+   has the binary matches the two up by name. Same division as the RV32I debug
+   map, for the same reason — whoever knows the addresses is not whoever knows
+   the source. *)
+let debug_fn_lines : (string * int) list ref = ref []
+
+let record_fn_line (name : string) (loc : Loc.t) =
+  (* A position that names a file came from the prelude or an import, and is not
+     a line of the source being compiled. *)
+  if loc.Loc.line > 0 && loc.Loc.file = None then
+    debug_fn_lines := (name, loc.Loc.line) :: !debug_fn_lines
+
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 (* v0.1.172: declaration position of each top-level fn. Top-level bindings
    are sequential — the typer rejects a forward reference — so `show` used
@@ -3956,6 +3974,7 @@ let emit_fn_def (f : fn_decl) : string =
   in
   ignore f.param_ty;
   ignore f.return_ty;
+  record_fn_line f.name f.body.Ast.loc;
   Printf.sprintf
     "  (func $%s (param i64) (result i64)\n%s%s)"
     f.name local_decl indented_body
@@ -7817,6 +7836,7 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
 
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   ignore main_ty;
+  debug_fn_lines := [];
   wasm_component_command :=
     component && (match Ast.walk main_ty with Ast.TyUnit | Ast.TyInt -> true | _ -> false);
   wasm_args_used := false;
@@ -9389,3 +9409,17 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     (args_host_section ^ vec_to_list_section) list_len_section
     fn_section component_section local_decl indented_body
+
+(* The table `mere -wg` prints: which Mere line each Wasm function came from.
+   A tool with the assembled binary turns this into a source map, matching the
+   names against the binary's name section. *)
+let emit_debug_map ?(main_ty = Ast.TyInt) ?(component = false)
+    ~(source : string) (prog : Ast.program) : string =
+  ignore (emit_program ~main_ty ~component prog);
+  let buf = Buffer.create 256 in
+  Buffer.add_string buf
+    (Printf.sprintf "# mere-wasm debug map v1 source=%s\n" source);
+  List.iter (fun (name, line) ->
+    Buffer.add_string buf (Printf.sprintf "F %s %d\n" name line))
+    (List.rev !debug_fn_lines);
+  Buffer.contents buf

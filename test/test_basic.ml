@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.213" Version.v "0.1.213";
+  check "version is 0.1.214" Version.v "0.1.214";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12733,6 +12733,28 @@ let () =
      | Some p -> p
      | None -> "(none)")
     "f";
+
+  (* `mere -wg`: which Mere line each Wasm function came from. The compiler
+     cannot produce the source map itself — a Wasm map addresses *byte offsets in
+     the assembled binary*, and this backend emits text for wat2wasm to assemble.
+     So it says which function came from which line, and the tool holding the
+     binary matches them by name. The same division as the RV32I debug map, for
+     the same reason: whoever knows the addresses is not whoever knows the
+     source. *)
+  let wasm_map src =
+    let prog = Pipeline.parse_program src in
+    let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_wasm.emit_debug_map ~main_ty ~source:"app.mere" prog
+  in
+  let m = wasm_map "let twice = fn (n: int) ->\n  n * 2;\nlet _ = print_int (twice 21);\n" in
+  check "wasm -wg: names the function and the line it came from"
+    (string_of_bool (contains m "F twice 2")) "true";
+  check "wasm -wg: says which source it is about"
+    (string_of_bool (contains m "source=app.mere")) "true";
+  (* The prelude is Mere code, but its lines are lines of another text; claiming
+     them would point a browser's debugger at the wrong file. *)
+  check "wasm -wg: prelude functions are not in it"
+    (string_of_bool (contains m "F list_map")) "false";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
