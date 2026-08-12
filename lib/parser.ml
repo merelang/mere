@@ -2,6 +2,12 @@
 
 exception Parse_error of Loc.t * string
 
+(* A syntax error inside an `import`ed file. Its position is a line in *that*
+   file, which means nothing in the one being compiled: reporting it as an
+   ordinary Parse_error is how an editor ends up underlining an innocent line.
+   The path travels with it so whoever reports it can say where. *)
+exception Parse_error_in_file of string * Loc.t * string
+
 let starts_with_upper s =
   String.length s > 0 &&
   let c = s.[0] in
@@ -2032,7 +2038,13 @@ let rec parse_program_internal tokens =
         current_base_dir := Filename.dirname canonical;
         let prog_imp =
           try parse_program_internal toks_imp
-          with ex ->
+          with
+          | Parse_error (loc, msg) ->
+            current_base_dir := saved;
+            (* Only the innermost import tags the error: an error two files deep
+               belongs to the file it is in, not to whoever imported it. *)
+            raise (Parse_error_in_file (canonical, loc, msg))
+          | ex ->
             current_base_dir := saved;
             raise ex
         in
@@ -2397,8 +2409,10 @@ let delete_decl_around (tokens : (Loc.t * Lexer.token) list) (e : int)
     Some !keep
   end
 
+(* An error, and the file it is about — `None` for the text being parsed, `Some
+   path` for one it imported. *)
 let parse_program_recover ?base_dir ?search_paths tokens
-  : Ast.program * (Loc.t * string) list =
+  : Ast.program * (string option * Loc.t * string) list =
   let parse toks =
     match base_dir, search_paths with
     | Some d, Some sp -> parse_program ~base_dir:d ~search_paths:sp toks
@@ -2415,8 +2429,12 @@ let parse_program_recover ?base_dir ?search_paths tokens
   let rec go toks errors rounds =
     match parse toks with
     | prog -> (prog, List.rev errors)
+    (* An error in an imported file ends the walk: the broken declaration is in
+       another token list, and there is nothing in this one to delete. *)
+    | exception Parse_error_in_file (file, loc, msg) ->
+      (nothing, List.rev ((Some file, loc, msg) :: errors))
     | exception Parse_error (loc, msg) ->
-      let errors = (loc, msg) :: errors in
+      let errors = (None, loc, msg) :: errors in
       if rounds >= max_recovered_errors then (nothing, List.rev errors)
       else
         match index_of_loc toks loc with

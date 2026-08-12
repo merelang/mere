@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.207" Version.v "0.1.207";
+  check "version is 0.1.208" Version.v "0.1.208";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12384,6 +12384,49 @@ let () =
           let l = label i in String.length l > 0 && l.[0] = '_') items)))
     "0";
 
+  (* Diagnostics as data: which file a position belongs to, and warnings. Both
+     exist because something other than a terminal started reading them. *)
+  let open_doc uri text =
+    Json.Obj [ ("jsonrpc", Json.Str "2.0");
+               ("method", Json.Str "textDocument/didOpen");
+               ("params", Json.Obj [ ("textDocument",
+                  Json.Obj [ ("uri", Json.Str uri); ("text", Json.Str text) ]) ]) ]
+  in
+  let published msgs =
+    List.map (fun m ->
+      let p = Json.member "params" m in
+      (Option.value ~default:"?" (Json.to_string_opt (Json.member "uri" p)),
+       List.map (fun d ->
+         (Option.value ~default:0 (Json.to_int_opt (Json.member "severity" d)),
+          Option.value ~default:"" (Json.to_string_opt (Json.member "message" d))))
+         (Json.to_list (Json.member "diagnostics" p)))) msgs
+  in
+  let (_, out, _) =
+    Lsp.handle Lsp.initial
+      (open_doc "file:///tmp/w.mere"
+         "type color = Red | Green;\n\
+          let name = fn (c: color) -> match c with | Red -> \"r\";\n\
+          let _ = print (name Red);\n")
+  in
+  check "warnings: a non-exhaustive match is a diagnostic, not a line on stderr"
+    (match published out with
+     | [ (_, [ (sev, msg) ]) ] ->
+       let head = "warning: non-exhaustive match" in
+       let hl = String.length head in
+       Printf.sprintf "%d %b" sev
+         (String.length msg >= hl && String.sub msg 0 hl = head)
+     | _ -> "(not one warning)")
+    "2 true";
+  (* The message used to carry its own `line L, col C:` prefix, which read as
+     `warning: line 3, col 29: warning: ...` once something else added the kind. *)
+  check "warnings: the position is data, not text repeated inside the message"
+    (match published out with
+     | [ (_, [ (_, msg) ]) ] ->
+       (try ignore (Str.search_forward (Str.regexp_string "col") msg 0); "repeated"
+        with Not_found -> "clean")
+     | _ -> "?")
+    "clean";
+
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of
      them, three times in a row; an editor needs all of them, and so does
@@ -12403,7 +12446,7 @@ let () =
   check "recovery: reports every syntax error, not just the first"
     (string_of_int (List.length errs)) "3";
   check "recovery: in source order"
-    (String.concat "," (List.map (fun (l, _) -> string_of_int l.Loc.line) errs))
+    (String.concat "," (List.map (fun (_, (l : Loc.t), _) -> string_of_int l.Loc.line) errs))
     "2,4,5";
   check "recovery: the declarations that did parse survive"
     (string_of_int (List.length recovered.Ast.decls)) "3";

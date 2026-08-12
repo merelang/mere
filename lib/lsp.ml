@@ -20,6 +20,12 @@
 type doc = {
   text : string;
   tree : Ast.program option;
+  (* Other files this document's diagnostics were published against — an
+     `import` with a syntax error in it. They have to be remembered so they can
+     be cleared: a diagnostic an editor was told about stays on screen until the
+     server says otherwise, and "the import is fixed now" is exactly the message
+     nobody would think to send. *)
+  extra : string list;
 }
 
 type state = {
@@ -167,24 +173,41 @@ let publish uri (diags : Pipeline.diagnostic list) =
     (Json.Obj [ ("uri", Json.Str uri);
                 ("diagnostics", Json.List (List.map diagnostic_json diags)) ])
 
-(* Check one document: the notification to send, and the typed tree if it
-   type-checked. Every failure mode of the compiler that is not a diagnostic — a
-   stack overflow on a pathological input, an IO error from an import — becomes a
-   single diagnostic at the top of the file rather than a dead server: an editor
-   cannot be left with no answer. *)
-let check_document ?search_paths uri text =
-  try
-    let (tree, diags) =
-      Pipeline.check ?base_dir:(base_dir_of_uri uri) ?search_paths text
-    in
-    (publish uri diags, tree)
-  with e ->
-    (publish uri
+(* Check one document: the notifications to send, the typed tree if it
+   type-checked, and the other files that were published about.
+
+   Every failure mode of the compiler that is not a diagnostic — a stack overflow
+   on a pathological input, an IO error from an import — becomes a single
+   diagnostic at the top of the file rather than a dead server: an editor cannot
+   be left with no answer. *)
+let check_document ?search_paths (previous : string list) uri text =
+  let (tree, diags) =
+    try Pipeline.check ?base_dir:(base_dir_of_uri uri) ?search_paths text
+    with e ->
+      (None,
        [ { Pipeline.d_loc = Loc.mk ~line:1 ~col:1 ();
            d_kind = "internal error";
            d_msg = Printexc.to_string e;
-           d_severity = Pipeline.Error } ],
-     None)
+           d_severity = Pipeline.Error;
+           d_file = None } ])
+  in
+  (* A diagnostic about another file is published against *that* file's URI,
+     where its line numbers mean something. *)
+  let others =
+    List.sort_uniq compare
+      (List.filter_map (fun (d : Pipeline.diagnostic) ->
+         Option.map (fun p -> "file://" ^ p) d.Pipeline.d_file) diags)
+  in
+  let mine = List.filter (fun (d : Pipeline.diagnostic) -> d.Pipeline.d_file = None) diags in
+  let for_other u =
+    publish u
+      (List.filter (fun (d : Pipeline.diagnostic) ->
+         Option.map (fun p -> "file://" ^ p) d.Pipeline.d_file = Some u) diags)
+  in
+  (* Clear whatever we said about files that are no longer implicated. *)
+  let cleared = List.filter (fun u -> not (List.mem u others)) previous in
+  (publish uri mine :: List.map for_other others @ List.map (fun u -> publish u []) cleared,
+   tree, others)
 
 let server_capabilities =
   Json.Obj [
@@ -199,7 +222,10 @@ let server_capabilities =
     ("completionProvider", Json.Obj [ ("resolveProvider", Json.Bool false) ]);
   ]
 
-let set_doc state uri text tree =
+let extra_of state uri =
+  match List.assoc_opt uri state.docs with Some d -> d.extra | None -> []
+
+let set_doc state uri text tree extra =
   let previous = List.assoc_opt uri state.docs in
   let tree =
     match tree with
@@ -208,7 +234,8 @@ let set_doc state uri text tree =
        does not check, and a hover from a moment ago is better than none. *)
     | None -> (match previous with Some d -> d.tree | None -> None)
   in
-  { state with docs = (uri, { text; tree }) :: List.remove_assoc uri state.docs }
+  { state with
+    docs = (uri, { text; tree; extra }) :: List.remove_assoc uri state.docs }
 
 (* The position a request asks about, translated into Mere's 1-based counting,
    together with the tree to ask. *)
@@ -319,8 +346,9 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
   | Some "textDocument/didOpen" ->
     (match uri_of doc, Json.to_string_opt (Json.member "text" doc) with
      | Some uri, Some text ->
-       let (note, tree) = check_document ?search_paths uri text in
-       (set_doc state uri text tree, [ note ], false)
+       let (notes, tree, extra) =
+         check_document ?search_paths (extra_of state uri) uri text in
+       (set_doc state uri text tree extra, notes, false)
      | _ -> (state, [], false))
   | Some "textDocument/didChange" ->
     (* Full sync: the last content change is the whole document. *)
@@ -332,8 +360,9 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
         | last :: _ ->
           (match Json.to_string_opt (Json.member "text" last) with
            | Some text ->
-             let (note, tree) = check_document ?search_paths uri text in
-             (set_doc state uri text tree, [ note ], false)
+             let (notes, tree, extra) =
+               check_document ?search_paths (extra_of state uri) uri text in
+             (set_doc state uri text tree extra, notes, false)
            | None -> (state, [], false))
         | [] -> (state, [], false)))
   | Some "textDocument/didSave" ->
@@ -341,16 +370,19 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
      | Some uri ->
        (match List.assoc_opt uri state.docs with
         | Some d ->
-          let (note, tree) = check_document ?search_paths uri d.text in
-          (set_doc state uri d.text tree, [ note ], false)
+          let (notes, tree, extra) =
+            check_document ?search_paths d.extra uri d.text in
+          (set_doc state uri d.text tree extra, notes, false)
         | None -> (state, [], false))
      | None -> (state, [], false))
   | Some "textDocument/didClose" ->
     (match uri_of doc with
      | Some uri ->
-       (* Clear the underlines: the file is no longer the editor's problem. *)
+       (* Clear the underlines — this file's and any it implicated: the file is
+          no longer the editor's problem. *)
+       let cleared = List.map (fun u -> publish u []) (extra_of state uri) in
        ({ state with docs = List.remove_assoc uri state.docs },
-        [ publish uri [] ], false)
+        publish uri [] :: cleared, false)
      | None -> (state, [], false))
   | Some m when is_request ->
     (state, [ error_response id (-32601) ("method not found: " ^ m) ], false)
