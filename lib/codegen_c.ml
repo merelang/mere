@@ -597,6 +597,12 @@ let rec ty_tag (t : Ast.ty) : string =
     (* Recursive arrow → use the same naming used by closure_struct_name. *)
     "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
+  (* StrBuf[R] and ByteBuf[R] lower to one C type each — `mere_strbuf*`,
+     `mere_bytebuf*` — which does not depend on the region: the region is a
+     pointer inside the struct. So the region does not belong in the tag either,
+     and leaving it out removes the whole class of mismatch where one spelling
+     resolved the marker and the other did not. *)
+  | Ast.TyCon (("StrBuf" | "ByteBuf") as name, _) -> name
   | Ast.TyCon (name, args) ->
     (* Polymorphic instantiation (e.g., `int list` → `list_int`).
        Phase 15.1: for Vec[R, T]'s region marker (TyRef _ R TyUnit),
