@@ -31,8 +31,9 @@ vim.api.nvim_create_autocmd("FileType", {
 vim.filetype.add({ extension = { mere = "mere" } })
 ```
 
-**VS Code** needs an extension to launch it; the server side of that extension is
-`{ command: "mere", args: ["lsp"] }` with `documentSelector: [{ language: "mere" }]`.
+**VS Code**: install the [Mere extension](https://github.com/merelang/mere-vscode),
+which starts this server and speaks to it. It finds `mere` on PATH; `mere.path`
+points it at a local build.
 
 **Anything else**: the command is `mere lsp`, there are no arguments and no
 configuration. It reads `Content-Length`-framed JSON-RPC on stdin and writes the
