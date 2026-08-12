@@ -233,6 +233,11 @@ let server_capabilities =
        after, so the editor asks when the user asks. *)
     ("completionProvider", Json.Obj [ ("resolveProvider", Json.Bool false) ]);
     ("documentSymbolProvider", Json.Bool true);
+    ("referencesProvider", Json.Bool true);
+    (* `prepareSupport` lets the editor ask, before showing its rename box,
+       whether this thing can be renamed at all — which is how a refusal becomes
+       a message instead of a failed edit. *)
+    ("renameProvider", Json.Obj [ ("prepareProvider", Json.Bool true) ]);
     ("documentFormattingProvider", Json.Bool true);
     (* The legend is the agreement about what the numbers in the token stream
        mean: the server picks the vocabulary, and every token is an index into
@@ -352,6 +357,56 @@ let semantic_tokens state uri =
                              (List.concat (List.rev !data)))) ]
   | _ -> Json.Obj [ ("data", Json.List []) ]
 
+(* Find references, and rename, which are the same question: where else is *this*
+   binding — not every name spelled the same. Shadowing is the difficulty, and it
+   is answered by resolving each occurrence to the binding it refers to. *)
+let references state uri (params : Json.t) =
+  match ask state uri params with
+  | None -> Json.List []
+  | Some (prog, line, col) ->
+    (match Query.references_at ~prelude_decls:(Pipeline.prelude_decl_count ())
+             prog line col with
+     | None -> Json.List []
+     | Some (_, locs) ->
+       Json.List (List.map (fun loc ->
+         Json.Obj [ ("uri", Json.Str uri); ("range", range_of_loc loc) ]) locs))
+
+(* What can be renamed: a binding this file owns. A prelude name or a builtin
+   cannot be — the edit would rename the uses and leave the definition, which is
+   worse than refusing. Answering the prepare request with an error is how the
+   editor says so before offering a box to type in. *)
+let renameable state uri params =
+  match ask state uri params with
+  | None -> None
+  | Some (prog, line, col) ->
+    (match Query.references_at ~prelude_decls:(Pipeline.prelude_decl_count ())
+             prog line col with
+     | Some (b, locs) when not b.Query.b_prelude && b.Query.b_loc.Loc.file = None ->
+       Some (b, locs)
+     | _ -> None)
+
+let prepare_rename state uri params =
+  match renameable state uri params with
+  | None -> Json.Null
+  | Some (b, _) ->
+    Json.Obj [ ("range", range_of_loc b.Query.b_loc);
+               ("placeholder", Json.Str b.Query.b_name) ]
+
+let rename state uri (params : Json.t) =
+  match Json.to_string_opt (Json.member "newName" params) with
+  | None -> Json.Null
+  | Some new_name ->
+    (match renameable state uri params with
+     | None -> Json.Null
+     | Some (_, locs) ->
+       Json.Obj [
+         ("changes",
+          Json.Obj [
+            (uri,
+             Json.List (List.map (fun loc ->
+               Json.Obj [ ("range", range_of_loc loc);
+                          ("newText", Json.Str new_name) ]) locs)) ]) ])
+
 (* The outline. Kinds are the protocol's numbers: 12 is Function, 13 is Variable.
    The selection range is the name itself, which is what an editor highlights when
    you pick the entry; the full range is the same here, because a declaration's
@@ -458,6 +513,18 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
     (match uri_of doc with
      | Some uri -> (state, [ response id (completion state uri params) ], false)
      | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/references" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (references state uri params) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/prepareRename" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (prepare_rename state uri params) ], false)
+     | None -> (state, [ response id Json.Null ], false))
+  | Some "textDocument/rename" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (rename state uri params) ], false)
+     | None -> (state, [ response id Json.Null ], false))
   | Some "textDocument/documentSymbol" ->
     (match uri_of doc with
      | Some uri -> (state, [ response id (document_symbols state uri) ], false)

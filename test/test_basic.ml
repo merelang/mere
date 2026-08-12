@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.212" Version.v "0.1.212";
+  check "version is 0.1.213" Version.v "0.1.213";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -12207,8 +12207,10 @@ let () =
   check "lsp: exit says nothing" (string_of_int (List.length out)) "0";
   let (_, out, _) =
     Lsp.handle Lsp.initial
+      (* Any method the server does not implement; this one has been chosen
+         twice already because the previous choice stopped being true. *)
       (Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 7.0);
-                  ("method", Json.Str "textDocument/rename") ])
+                  ("method", Json.Str "textDocument/signatureHelp") ])
   in
   check "lsp: an unimplemented request is refused, not ignored"
     (match out with
@@ -12654,6 +12656,83 @@ let () =
         let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
         contains (Codegen_c.emit_program ~main_ty prog) "#line"))
     "false";
+
+  (* Find references and rename are the same question — where else is *this*
+     binding, not every name spelled the same. Shadowing is the whole difficulty:
+     the two `x`es below are different things, and a rename that treats them as
+     one breaks the program. *)
+  let shadowed =
+    "let x = 1;\n\
+     let f = fn (n: int) ->\n\
+     \  let x = n + 1 in\n\
+     \  x + x;\n\
+     let _ = print_int (f x + x);\n"
+  in
+  let ask_at uri text meth line col extra =
+    let doc =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0");
+                 ("method", Json.Str "textDocument/didOpen");
+                 ("params", Json.Obj [ ("textDocument",
+                    Json.Obj [ ("uri", Json.Str uri); ("text", Json.Str text) ]) ]) ]
+    in
+    let (state, _, _) = Lsp.handle Lsp.initial doc in
+    let ask =
+      Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 2.0);
+                 ("method", Json.Str meth);
+                 ("params", Json.Obj ([
+                    ("textDocument", Json.Obj [ ("uri", Json.Str uri) ]);
+                    ("position", Json.Obj [ ("line", Json.Num (float_of_int line));
+                                            ("character", Json.Num (float_of_int col)) ]) ]
+                    @ extra)) ]
+    in
+    match Lsp.handle state ask with
+    | (_, [ reply ], _) -> Json.member "result" reply
+    | _ -> Json.Null
+  in
+  let places v =
+    String.concat " " (List.map (fun x ->
+      let st = Json.member "start" (Json.member "range" x) in
+      Printf.sprintf "%d:%d"
+        (Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" st)))
+        (Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" st))))
+      (Json.to_list v))
+  in
+  check "references: the inner `x`, and not the outer one it shadows"
+    (places (ask_at "file:///tmp/r.mere" shadowed "textDocument/references" 3 2 []))
+    "2:6 3:2 3:6";
+  check "references: the outer `x`, and not the inner one that shadows it"
+    (places (ask_at "file:///tmp/r.mere" shadowed "textDocument/references" 4 21 []))
+    "0:4 4:21 4:25";
+  (* The cursor is usually on a use, but it may be on the definition, and that
+     has to find the uses rather than nothing. *)
+  check "references: the cursor on a definition finds the uses"
+    (places (ask_at "file:///tmp/r.mere" shadowed "textDocument/references" 0 4 []))
+    "0:4 4:21 4:25";
+  check "rename: edits exactly the occurrences of that binding"
+    (let r = ask_at "file:///tmp/r.mere" shadowed "textDocument/rename" 3 2
+               [ ("newName", Json.Str "y") ] in
+     match Json.member "changes" r with
+     | Json.Obj [ (_, edits) ] ->
+       Printf.sprintf "%s -> %s" (places edits)
+         (match Json.to_list edits with
+          | e :: _ -> Option.value ~default:"?" (Json.to_string_opt (Json.member "newText" e))
+          | [] -> "?")
+     | _ -> "(no changes)")
+    "2:6 3:2 3:6 -> y";
+  (* Renaming a prelude name would rewrite the uses and leave the definition,
+     which is worse than refusing. The prepare request is where an editor asks. *)
+  check "rename: a prelude name is refused before the box is offered"
+    (match ask_at "file:///tmp/r.mere" shadowed "textDocument/prepareRename" 4 8 [] with
+     | Json.Null -> "refused"
+     | _ -> "offered")
+    "refused";
+  check "rename: a name this file owns is offered"
+    (match Json.to_string_opt
+             (Json.member "placeholder"
+                (ask_at "file:///tmp/r.mere" shadowed "textDocument/prepareRename" 1 4 [])) with
+     | Some p -> p
+     | None -> "(none)")
+    "f";
 
   (* Recovery at declaration boundaries. `parse_program` stops at the first
      syntax error, so a file with three broken functions told you about one of

@@ -8,7 +8,8 @@ Speaks LSP over stdin and stdout. What it does today is **diagnostics** — ever
 syntax error in the buffer, republished on each keystroke, and the first type
 error once the file parses — **hover**, which reports the type inference gave
 whatever is under the cursor, **go to definition**, **completion**, an
-**outline**, **formatting**, and **semantic highlighting**.
+**outline**, **formatting**, **semantic highlighting**, **find references** and
+**rename**.
 
 It is the same check the compiler runs — `Pipeline.check`, which the CLI also
 goes through. A language server that agrees with the compiler on good days
@@ -51,6 +52,8 @@ same on stdout, so a client that can start a process can talk to it.
 | `textDocument/documentSymbol` | the file's top-level declarations, for the outline and symbol search |
 | `textDocument/formatting` | the whole document, formatted — the same function `mere fmt` runs |
 | `textDocument/semanticTokens/full` | which names are parameters, functions, constructors |
+| `textDocument/references` | every occurrence of the binding under the cursor |
+| `textDocument/rename` / `prepareRename` | the same occurrences, rewritten; refuses what this file does not own |
 | `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
 | `textDocument/didClose` | publish an empty list, clearing the underlines |
 | `shutdown` / `exit` | as specified |
@@ -156,6 +159,30 @@ still handles keywords, strings and numbers, which it is perfectly good at. A
 constructor in a *pattern* is not tokenised: patterns are not expressions, and
 the walk that produces these follows expressions.
 
+## References and rename
+
+The same question, and the difficulty in both is **shadowing**: two `x`es in one
+file may be two different things, and treating them as one is a rename that
+breaks the program. So the walk resolves every occurrence to the binding it
+actually refers to, and the answer is the occurrences that resolved to the same
+one.
+
+```mere
+let x = 1;                        // renaming this one touches
+let f = fn (n: int) ->
+  let x = n + 1 in                // ... not this one, nor
+  x + x;                          // ... these
+let _ = print_int (f x + x);      // ... but these two
+```
+
+Binder positions are included, so the cursor may be on the definition rather than
+on a use.
+
+**Rename refuses what this file does not own.** A prelude name or a builtin has
+its definition somewhere the edit cannot reach, and renaming the uses while
+leaving the definition is worse than refusing. The refusal comes back from
+`prepareRename`, which is where an editor asks before offering a box to type in.
+
 ## What it does not answer yet
 
 - **The rarer type errors still stop a declaration.** A mismatch and an unknown
@@ -165,9 +192,6 @@ the walk that produces these follows expressions.
   picks up from there. So the worst case is one error for a declaration rather
   than all of them, never one error for the file.
 
-- **Find references and rename.** Both want the reverse of `scope_at` — every
-  use of a binding rather than the binding for a use — which is a walk this does
-  not have yet.
 - **Incremental sync.** The whole buffer arrives on every change. The check
   re-reads all of it anyway, so incremental sync would buy nothing yet and cost
   a class of desynchronisation bugs.
