@@ -109,9 +109,16 @@ to time the call and ask whether it had failed slowly enough to have been a time
 inferring a cause from a duration. Every existing `< 0` check is unaffected.
 `scripts/tcp_read_codes.sh` produces all three rather than describing them.
 
-**The Wasm path does not agree**, and is a known gap: its `tcp_read` goes through
-WASI `sock_sread` and returns `0` on error, which in C means end of stream. No parity
-test covers sockets, which is why nobody had noticed.
+**On Wasm** the whole family works — `scripts/socket_parity.sh` runs the same round
+trip natively and under `wasmtime -S inherit-network=y` and compares — with two
+differences:
+
+- **A failed read returns `0`**, the same value C uses for a clean end of stream.
+  Telling them apart means decoding WASI's `stream-error` variant rather than its
+  is-error bit.
+- **`tcp_set_timeout` is refused at codegen** (v0.1.227). It used to compile to a
+  no-op that returned success, so a program that set a deadline blocked forever on
+  the next read. A bounded wait needs the native backend.
 
 **Positioned file I/O** (`file_openrw` through `file_close`) works on **all four**
 backends: interp and C natively, Wasm over host imports since v0.1.153 (bytes cross
