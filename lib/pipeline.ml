@@ -170,8 +170,11 @@ let process_decls eval_env type_env decls =
     | Ast.Top_let (pat, value) ->
       warn_reserved_in_pattern pat;
       let outer_env = !type_env in
-      let t = Typer.infer outer_env value in
-      let bindings = Typer.check_pattern pat t in
+      (* Pattern variables belong to this binding — see Typer's Let case. *)
+      let bindings =
+        Typer.enter_level (fun () ->
+          let t = Typer.infer outer_env value in
+          Typer.check_pattern pat t) in
       let v = Eval.eval_in !eval_env value in
       (match Eval.match_pattern pat v with
        | None ->
@@ -187,12 +190,13 @@ let process_decls eval_env type_env decls =
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
-      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+      let alphas =
+        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
       let env_rec = List.fold_left2 (fun acc (n, _) a ->
         (n, Typer.mono a) :: acc
       ) outer_env bindings alphas in
       List.iter2 (fun (_, value) alpha ->
-        let t = Typer.infer env_rec value in
+        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.Ast.loc alpha t
       ) bindings alphas;
       let placeholders = List.map (fun (n, _) -> (n, ref Eval.V_unit)) bindings in
@@ -297,8 +301,11 @@ let type_of s =
     | Ast.Top_let (pat, value) ->
       warn_reserved_in_pattern pat;
       let outer_env = !type_env in
-      let t = Typer.infer outer_env value in
-      let bindings = Typer.check_pattern pat t in
+      (* Pattern variables belong to this binding — see Typer's Let case. *)
+      let bindings =
+        Typer.enter_level (fun () ->
+          let t = Typer.infer outer_env value in
+          Typer.check_pattern pat t) in
       type_env := List.fold_left (fun acc (n, ty) ->
         let sch = Typer.generalize outer_env ty in
         (n, sch) :: acc) outer_env bindings;
@@ -307,12 +314,13 @@ let type_of s =
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
-      let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+      let alphas =
+        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
       let env_rec = List.fold_left2 (fun acc (n, _) a ->
         (n, Typer.mono a) :: acc
       ) outer_env bindings alphas in
       List.iter2 (fun (_, value) alpha ->
-        let t = Typer.infer env_rec value in
+        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.Ast.loc alpha t
       ) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
@@ -436,7 +444,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
       warn_reserved_in_pattern pat;
       guard_decl (Some pat) [] (fun () ->
         let outer_env = !type_env in
-        let t = Typer.infer outer_env value in
+        let t = Typer.enter_level (fun () -> Typer.infer outer_env value) in
         let bindings = Typer.check_pattern pat t in
         type_env := List.fold_left (fun acc (n, ty) ->
           let sch = Typer.generalize outer_env ty in
@@ -446,11 +454,12 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         warn_reserved_name value.Ast.loc n) bindings;
       guard_decl None (List.map fst bindings) (fun () ->
         let outer_env = !type_env in
-        let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
+        let alphas =
+        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
         let env_rec = List.fold_left2 (fun acc (n, _) a ->
           (n, Typer.mono a) :: acc) outer_env bindings alphas in
         List.iter2 (fun (_, value) alpha ->
-          let t = Typer.infer env_rec value in
+          let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
           Typer.unify value.Ast.loc alpha t) bindings alphas;
         type_env := List.fold_left2 (fun acc (n, _) a ->
           let sch = Typer.generalize outer_env a in

@@ -197,6 +197,35 @@ leaving the definition is worse than refusing. The refusal comes back from
   a class of desynchronisation bugs.
 
 
+## What it costs per keystroke
+
+Re-checking the whole document on every change is only reasonable if checking is
+cheap, and this is the first thing that ever made the compiler's own cost
+visible — a batch compiler that takes two seconds is fine, an editor that takes
+two seconds per character is not.
+
+Measured end to end, driving the server the way an editor does (didChange, then
+wait for `publishDiagnostics`):
+
+| document | per keystroke |
+|---|---|
+| 4 000 lines | 32ms |
+| 8 000 lines | 65ms |
+| 16 000 lines | 135ms |
+| 22 466 lines (mere-ruby's `main.mere`) | 1251ms |
+
+Those numbers are from v0.1.220. Before it they were 524ms, 1834ms, 7741ms and
+5261ms: `generalize` scanned the whole type environment per binding, so checking
+was quadratic in the number of bindings. `scripts/infer_scaling.sh` is the guard
+that keeps it linear.
+
+The largest file is still over a second, and the remaining cost is spread evenly
+across parsing, inference and the move checker rather than concentrated in one
+place. Getting below it means not re-checking everything — which is what
+incremental sync above is really for, and neither is worth doing on a guess about
+which documents people actually edit.
+
+
 ## Testing it
 
 `sh scripts/lsp_smoke.sh` drives the real process through its wire format: a
@@ -207,3 +236,8 @@ a type error, then into a clean one, and checks the framing and the three
 The handler itself is a function — message and state in, messages out — so the
 suite tests it directly, without a process. That split is deliberate: the only
 untested part is the three lines of IO in `Lsp.serve`.
+
+`sh scripts/infer_scaling.sh` guards the latency above, by measuring rather than
+asserting: two files eight times apart, failing if the larger takes more than 20x
+the smaller. Linear predicts 8x and quadratic predicts 64x, so the bound survives
+a busy machine and still fails the moment an environment scan comes back.
