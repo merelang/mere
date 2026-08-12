@@ -31,6 +31,36 @@
 
 exception Codegen_error of Loc.t * string
 
+(* `-c -g`: emit `#line` directives so a debugger shows the Mere source of a
+   C-compiled program rather than the C it was compiled from.
+
+   Two facts about this backend make it simple. A function's whole body is
+   emitted as **one C line**, so a directive before the function is not a coarse
+   approximation — it is the finest granularity the output has. And what is
+   between functions is runtime and prelude code with no Mere source at all, so
+   each user function is followed by a directive naming a file that does not
+   exist: a debugger then shows no source for those frames, which is the truth,
+   rather than an arbitrary line of the user's file.
+
+   Off by default, so the emitted C is byte-identical to what it always was. *)
+let debug_file : string option ref = ref None
+
+(* A position that names a file is not from the source being compiled — it came
+   from the prelude or from an `import`, and claiming it as a line of this file
+   would point a debugger at the wrong text. That check is the whole rule, and it
+   is why the prelude is tokenised with a name. *)
+let line_directive (loc : Loc.t) : string =
+  match !debug_file with
+  | None -> ""
+  | Some _ when loc.Loc.line <= 0 || loc.Loc.file <> None -> ""
+  | Some file -> Printf.sprintf "#line %d \"%s\"\n" loc.Loc.line file
+
+(* After a function: the lines that follow are runtime, not the user's program. *)
+let line_directive_end () =
+  match !debug_file with
+  | None -> ""
+  | Some _ -> "#line 1 \"<mere runtime>\"\n"
+
 let unsupported loc what =
   raise (Codegen_error (loc,
     Printf.sprintf "unsupported in C codegen subset: %s" what))
@@ -4561,11 +4591,16 @@ let emit_fn (f : fn_decl) : string =
      into a closure env as `y0_`, an undeclared identifier. The v0.1.51 fix
      covered format_param and the closure adapter but missed this plain path.
      Found by a date-arithmetic probe: `fn (y0: int) -> ...`. *)
-  Printf.sprintf "%s %s(%s) {\n  return %s;\n}"
+  (* The directive goes *inside* the braces, because it applies to the line
+     after it: with the whole body on one line, that puts the body exactly on the
+     line the programmer wrote, rather than one past it. *)
+  Printf.sprintf "%s %s(%s) {\n%s  return %s;\n}\n%s"
     (c_type_of f.return_ty)
     (c_safe_name f.name)
     (format_param (f.param, f.param_ty))
+    (line_directive f.body.Ast.loc)
     body_c
+    (line_directive_end ())
 
 let emit_lifted_fn (f : lifted_fn) : string =
   (* Same host scope as the host fn it was lifted from — for sibling
@@ -4580,8 +4615,10 @@ let emit_lifted_fn (f : lifted_fn) : string =
     with_var_types all_bindings (fun () ->
       with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body))
   in
-  Printf.sprintf "%s %s(%s) {\n  return %s;\n}"
-    (c_type_of f.l_return_ty) f.l_name params body_c
+  Printf.sprintf "%s %s(%s) {\n%s  return %s;\n}\n%s"
+    (c_type_of f.l_return_ty) f.l_name params
+    (line_directive f.l_body.Ast.loc) body_c
+    (line_directive_end ())
 
 (* v0.1.27: the direct N-ary twin of a curried top-level fn. The innermost
    body is emitted a second time with every level's param as a plain C
@@ -4595,8 +4632,10 @@ let emit_direct_fn (name : string) (info : direct_fn_info) : string =
     with_var_types info.d_params (fun () ->
       with_expected_ty info.d_ret (fun () -> emit_expr info.d_body))
   in
-  Printf.sprintf "static %s %s__direct(%s) {\n  return %s;\n}"
-    (c_type_of info.d_ret) (c_safe_name name) params_c body_c
+  Printf.sprintf "static %s %s__direct(%s) {\n%s  return %s;\n}\n%s"
+    (c_type_of info.d_ret) (c_safe_name name) params_c
+    (line_directive info.d_body.Ast.loc) body_c
+    (line_directive_end ())
 
 let emit_direct_fn_forward_decl (name : string) (info : direct_fn_info) : string =
   Printf.sprintf "static %s %s__direct(%s);"

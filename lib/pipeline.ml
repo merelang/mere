@@ -13,8 +13,14 @@
 let prelude_count = ref 0
 let prelude_decl_count () = !prelude_count
 
+(* The name prelude positions carry. It is not a path and no file exists at it:
+   that is the point — a position from the prelude is Mere code, but not *this*
+   program's, and anything that turns a position into a place has to be able to
+   tell. *)
+let prelude_file = "<prelude>"
+
 let parse_prelude () : Ast.top_decl list =
-  let tokens = Lexer.tokenize Prelude_stdlib.contents in
+  let tokens = Lexer.tokenize ~file:prelude_file Prelude_stdlib.contents in
   let prog = Parser.parse_program tokens in
   prog.Ast.decls
 
