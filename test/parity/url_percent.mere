@@ -1,0 +1,35 @@
+// url_percent_demo: the percent-encode sets, one line each.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/url/percent.mere";
+
+let show_set = fn (label: str) -> fn (should: int -> bool) -> fn (s: str) ->
+  print (label ++ ": " ++ Percent.encode should s);
+
+let sample = "a b\"c#d<e>f'g?h`i\{j}k/l:m;n=o@p[q\\r]s^t|u$v%w&x+y,z";
+
+let _ = print "=== the sets, on one sample ===";
+let _ = show_set "c0_control   " Percent.c0_control sample;
+let _ = show_set "fragment     " Percent.fragment sample;
+let _ = show_set "query        " Percent.query sample;
+let _ = show_set "special_query" Percent.special_query sample;
+let _ = show_set "path         " Percent.path sample;
+let _ = show_set "userinfo     " Percent.userinfo sample;
+let _ = show_set "component    " Percent.component sample;
+
+let _ = print "=== non-ASCII goes out as UTF-8 bytes ===";
+let _ = print ("あ path      : " ++ Percent.encode Percent.path "あ");
+let _ = print ("💩 component : " ++ Percent.encode Percent.component "💩");
+
+let _ = print "=== decode ===";
+let _ = print ("round trip   : " ++ Percent.decode (Percent.encode Percent.component sample));
+let _ = print ("utf8 back    : " ++ Percent.decode "%E3%81%82");
+let _ = print ("lowercase hex: " ++ Percent.decode "%e3%81%82");
+
+let _ = print "=== a malformed escape is left alone, per spec ===";
+let _ = print ("bare percent : " ++ Percent.decode "100%");
+let _ = print ("short escape : " ++ Percent.decode "%A");
+let _ = print ("not hex      : " ++ Percent.decode "%ZZ");
+let _ = print ("literal pct  : " ++ Percent.decode "50%%20off");
+0
