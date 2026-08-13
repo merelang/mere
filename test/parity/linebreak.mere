@@ -1,0 +1,120 @@
+// contrib/unicode's line breaking, held to one output on every backend.
+// Conformance against UAX #14 is scripts/linebreak_conformance.sh's job (19,338
+// cases from the UCD's own test file); this file is about the four backends
+// agreeing.
+//
+// Not an idle question here: the table is a 32,625-character string literal read
+// with char_at, so a backend whose strings behaved differently would produce a
+// different table rather than a different algorithm.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/unicode/linebreak.mere";
+
+let cp = fn (n: int) -> str_of_codepoint n;
+
+// `x` where a break is prohibited and `/` where one is allowed, which is the test
+// file's notation with its two characters swapped for ASCII.
+let marks = fn (s: str) ->
+  list_fold (list_map (LineBreak.opportunities s)
+                      (fn (b: bool) -> if b then "/" else "x"))
+            "" (fn (a: str) -> fn (b: str) -> a ++ b);
+
+let show1 = fn (label: str) -> fn (s: str) -> print (label ++ "  " ++ marks s);
+
+let _ = print "=== the shape of the answer: one position per code point ===";
+let _ = show1 "empty        " "";
+let _ = show1 "a            " "a";
+let _ = show1 "ab           " "ab";
+let _ = show1 "a b          " "a b";
+let _ = show1 "a  b         " "a  b";
+
+let _ = print "=== LB4/5/6: hard breaks ===";
+let _ = show1 "a LF b       " ("a" ++ cp 0x0A ++ "b");
+let _ = show1 "a CRLF b     " ("a" ++ cp 0x0D ++ cp 0x0A ++ "b");
+let _ = show1 "a CR b       " ("a" ++ cp 0x0D ++ "b");
+let _ = show1 "a NEL b      " ("a" ++ cp 0x0085 ++ "b");
+let _ = show1 "a SP LF b    " ("a " ++ cp 0x0A ++ "b");
+
+let _ = print "=== LB7/8/18: spaces, and the zero width space ===";
+let _ = show1 "a ZWSP b     " ("a" ++ cp 0x200B ++ "b");
+let _ = show1 "a ZWSP SP b  " ("a" ++ cp 0x200B ++ " b");
+let _ = show1 "a SP SP SP b " "a   b";
+
+let _ = print "=== LB8a/9/10: a ZWJ, folded and unfolded ===";
+let _ = show1 "a ZWJ b      " ("a" ++ cp 0x200D ++ "b");
+let _ = show1 "ZWJ a        " (cp 0x200D ++ "a");
+let _ = show1 "ZWJ CM a     " (cp 0x200D ++ cp 0x0308 ++ "a");
+let _ = show1 "a CM b       " ("a" ++ cp 0x0308 ++ "b");
+let _ = show1 "SP CM a      " (" " ++ cp 0x0308 ++ "a");
+
+let _ = print "=== LB11/12/12a: word joiner and non-breaking space ===";
+let _ = show1 "a WJ b       " ("a" ++ cp 0x2060 ++ "b");
+let _ = show1 "a NBSP b     " ("a" ++ cp 0x00A0 ++ "b");
+let _ = show1 "a SP NBSP b  " ("a " ++ cp 0x00A0 ++ "b");
+let _ = show1 "a HY NBSP b  " ("a-" ++ cp 0x00A0 ++ "b");
+
+let _ = print "=== LB13/14/16: brackets keep their company, even after spaces ===";
+let _ = show1 "( a          " "( a";
+let _ = show1 "a )          " "a )";
+let _ = show1 "a ) SP NS    " ("a ) " ++ cp 0x3005);
+let _ = show1 "a ! b        " "a ! b";
+
+let _ = print "=== LB15a/15b/19/19a: quotation marks ===";
+let _ = show1 "a LDQ b      " ("a " ++ cp 0x201C ++ " b");
+let _ = show1 "LDQ SP a     " (cp 0x201C ++ " a");
+let _ = show1 "a SP RDQ b   " ("a " ++ cp 0x201D ++ " b");
+let _ = show1 "cjk LDQ cjk  " ("日" ++ cp 0x201C ++ "本");
+let _ = show1 "a QUOTE b    " "a \"b\"";
+
+let _ = print "=== LB15c/15d/29: the decimal mark ===";
+let _ = show1 "subtract .5  " "n .5";
+let _ = show1 "a . b        " "a . b";
+let _ = show1 "e.g.         " "e.g.";
+
+let _ = print "=== LB20a/21/21a/21b: hyphens ===";
+let _ = show1 "-abc         " "-abc";
+let _ = show1 "a -b         " "a -b";
+let _ = show1 "well-known   " "well-known";
+let _ = show1 "a HY b       " "a - b";
+
+let _ = print "=== LB23/23a/24/25: numbers and letters ===";
+let _ = show1 "a1           " "a1";
+let _ = show1 "1a           " "1a";
+let _ = show1 "1,000        " "1,000";
+let _ = show1 "$1           " "$1";
+let _ = show1 "1%           " "1%";
+let _ = show1 "(1)          " "(1)";
+let _ = show1 "1.5          " "1.5";
+let _ = show1 "-1           " "-1";
+
+let _ = print "=== LB26/27: Hangul ===";
+let _ = show1 "L V T        " (cp 0x1100 ++ cp 0x1161 ++ cp 0x11A8);
+let _ = show1 "LV T         " (cp 0xAC00 ++ cp 0x11A8);
+let _ = show1 "syllable PO  " (cp 0xAC00 ++ "%");
+let _ = show1 "PR syllable  " ("$" ++ cp 0xAC00);
+
+let _ = print "=== LB28a: Brahmic orthographic syllables ===";
+let _ = show1 "AK VI AK     " (cp 0x1B05 ++ cp 0x1B44 ++ cp 0x1B05);
+let _ = show1 "AK VF        " (cp 0x1B05 ++ cp 0x1B35);
+let _ = show1 "AP AK        " (cp 0x1B03 ++ cp 0x1B05);
+
+let _ = print "=== LB30/30a/30b: parentheses, flags, emoji ===";
+let _ = show1 "a (          " "a(";
+let _ = show1 "cjk wide (   " ("日" ++ cp 0xFF08);
+let _ = show1 ") a          " ")a";
+let _ = show1 "RI RI        " (cp 0x1F1EF ++ cp 0x1F1F5);
+let _ = show1 "RI x3        " (cp 0x1F1EF ++ cp 0x1F1F5 ++ cp 0x1F1EF);
+let _ = show1 "EB EM        " (cp 0x1F44D ++ cp 0x1F3FD);
+
+let _ = print "=== text: CJK breaks between characters, Latin does not ===";
+let _ = show1 "japanese     " "日本語";
+let _ = show1 "mixed        " "日本語のtext";
+let _ = show1 "hello world  " "hello world";
+
+let _ = print "=== split_lines ===";
+let _ = print (str_join "|" (LineBreak.split_lines "hello world again"));
+let _ = print (str_join "|" (LineBreak.split_lines "日本語"));
+let _ = print (str_join "|" (LineBreak.split_lines "a-b c"));
+let _ = print (str_join "|" (LineBreak.split_lines ""));
+0

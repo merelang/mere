@@ -173,6 +173,11 @@ jobs:
       - name: unicode_parity (vs node's Intl.Segmenter)
         run: sh scripts/unicode_parity.sh
 
+      # No oracle exists for UAX #14, so this one runs the Unicode Consortium's
+      # own conformance file, vendored under test/data so it needs no network.
+      - name: linebreak_conformance (UCD test file)
+        run: sh scripts/linebreak_conformance.sh
+
       - name: host_matrix (every builtin on every backend)
         run: sh scripts/host_matrix.sh
 
