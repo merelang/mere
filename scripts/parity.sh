@@ -163,13 +163,19 @@ wasm_diag_stream=out
 # the harness unable to see the very difference this slice had just fixed —
 # `boom` and `fail: boom` both normalized to `boom`, so removing the fix still
 # passed. A normalization is a place a gate stops looking.
-payload() { sed -e 's/^.*: eval error: //' "$1" | tail -1; }
+# The FIRST line, not the last: a failure the interpreter can point at renders with
+# source context under it (`--> file:line`, then the lines), so the last line of that
+# is a line of the program. A `fail` call carries no location and renders on one line.
+payload() { sed -e 's/^.*eval error: //' "$1" | head -1; }
 
 # $1=label $2=stream(out|err) $3=exit status. Reads $TMP/f.out and $TMP/f.err.
 check_fail_backend() {
   _lbl=$1; _stream=$2; _rc=$3
+  # Where the diagnostic is decides which end of the file it is at: on stderr it is
+  # the whole file and the message is its first line; on a single-sink backend it is
+  # the last line of the program's own output.
   if [ "$_stream" = out ]; then
-    _pay="$(payload "$TMP/f.out")"; _out="$(sed '$d' "$TMP/f.out")"
+    _pay="$(tail -1 "$TMP/f.out")"; _out="$(sed '$d' "$TMP/f.out")"
   else
     _pay="$(payload "$TMP/f.err")"; _out="$(cat "$TMP/f.out")"
   fi

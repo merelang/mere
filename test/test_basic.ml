@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.246" Version.v "0.1.246";
+  check "version is 0.1.247" Version.v "0.1.247";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3679,10 +3679,19 @@ let () =
     (llvm "1 + 2") "add i64 1, 2";
   assert_contains "llvm: mul lowers to LLVM mul"
     (llvm "3 * 4") "mul i64 3, 4";
-  assert_contains "llvm: sdiv used for /"
-    (llvm "10 / 2") "sdiv i64 10, 2";
-  assert_contains "llvm: srem used for %"
-    (llvm "10 % 3") "srem i64 10, 3";
+  (* v0.1.247: integer / and % go through a helper that checks the divisor —
+     `sdiv i64 x, 0` is immediate undefined behaviour in IR. The instruction is
+     still there, inside @__lang_idiv, which these two also assert. *)
+  assert_contains "llvm: / calls the checked division helper"
+    (llvm "10 / 2") "call i64 @__lang_idiv(i64 10, i64 2)";
+  assert_contains "llvm: % calls the checked remainder helper"
+    (llvm "10 % 3") "call i64 @__lang_imod(i64 10, i64 3)";
+  assert_contains "llvm: the helper still uses sdiv"
+    (llvm "10 / 2") "%q = sdiv i64 %a, %b";
+  assert_contains "llvm: the helper still uses srem"
+    (llvm "10 % 3") "%r = srem i64 %a, %b";
+  assert_contains "llvm: dividing by zero raises rather than being undefined"
+    (llvm "10 / 2") "call void @__lang_fail_impl(ptr @.divzero_msg)";
   assert_contains "llvm: < lowers to icmp slt"
     (llvm "if 1 < 2 then 10 else 20") "icmp slt i64 1, 2";
   assert_contains "llvm: if emits br on i1"

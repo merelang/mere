@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.247 — 2026-08-14
+
+_`x / 0` was four different things, and three of them were not failures. The gate built
+last slice is what made fixing it a two-line test._
+
+```
+  lib/codegen_c.ml                     __lang_idiv / __lang_imod: a checked divisor
+  lib/codegen_llvm.ml                  the same, as IR functions
+  lib/codegen_wasm.ml                  the same, with the message interned per program
+  test/parity/fail/uncaught_div_zero   new
+  test/parity/fail/uncaught_mod_zero   new
+  scripts/parity.sh                    the message is the first line of stderr, not the last
+```
+
+**What it did before.** The interpreter raised `division by zero`. The C backend emitted
+a bare `a / b`, which is **undefined behaviour in C**: this machine's arm64 quietly
+answered 0 and the program carried on printing, while an x86-64 build of the same source
+raises SIGFPE. LLVM emitted `sdiv`, undefined in IR and therefore something the optimizer
+may assume never happens. Wasm trapped — a defined failure, but a silent one, with no
+message at all. **A wrong answer, a crash, or a silent death, depending on the backend
+and the CPU.**
+
+All four raise now, with the interpreter's messages (`division by zero` and `modulo by
+zero` — it distinguishes them, so the others do too), catchable with `try_or`. It costs a
+branch per division. `INT_MIN / -1` is the other undefined case in C and IR and wraps
+now, matching what the interpreter already produced.
+
+**The `-rv` backend is the exception, and it was measured rather than assumed**: built
+for QEMU's `virt` board and run there, `17 / 0` is `-1` and `17 % 0` is `17`, the RISC-V
+specification's non-trapping answer. That backend targets bare metal, where there is no
+stream to write a diagnostic to and no process to exit, so the platform's answer is the
+answer. Making it raise would mean deciding what a machine-mode trap means for the kernel
+that runs on it, which is its own piece of work.
+
+**And the harness needed one more fix to see any of it.** Its notion of "the message" was
+the *last* line of stderr, which works for a `fail` call — that carries no location and
+renders on one line — and not for a failure the interpreter can point at, which renders
+with `--> file:line` and the source under it. The message is the first line. A
+single-sink backend is the mirror image: there the diagnostic is the *last* line of the
+program's own output. Two ends, because the two files are different files.
+
+---
+
 ## v0.1.246 — 2026-08-14
 
 _The parity harness compared stdout, so the failure surface of the language was the one

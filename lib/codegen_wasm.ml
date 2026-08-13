@@ -120,6 +120,11 @@ let fresh_str_offset (s : string) : int =
    message. Set at the top of emit_program; see the note there. *)
 let fail_prefix_offset = ref 0
 
+(* Offsets of the interned "division by zero" / "modulo by zero" messages, minted
+   alongside the tag. The two differ because the interpreter's two differ. *)
+let divzero_msg_offset = ref 0
+let modzero_msg_offset = ref 0
+
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
 (* print_bytes needs its own host import: `print_no_nl` takes a NUL-terminated
@@ -1982,7 +1987,18 @@ let rec emit_expr (e : Ast.expr) : unit =
        emit_instr (wasm_binop_float op);
        emit_float_alloc_from_f64_on_stack ()
      | _ ->
-       emit_expr a; emit_expr b; emit_instr (wasm_binop op))
+       emit_expr a; emit_expr b;
+       (* Integer / and % go through a helper that checks the divisor. `i64.div_s`
+          by zero traps, which is a defined failure but a silent one: the program
+          died with no message at all, where the interpreter named it. Also the
+          only backend where INT_MIN / -1 traps rather than wrapping. *)
+       (match op with
+        | Ast.Div | Ast.Mod ->
+          fail_used := true;
+          emit_instr (Printf.sprintf "i64.const %d"
+                        (if op = Ast.Div then !divzero_msg_offset else !modzero_msg_offset));
+          emit_instr (if op = Ast.Div then "call $__lang_idiv" else "call $__lang_imod")
+        | _ -> emit_instr (wasm_binop op)))
   | Ast.Cmp (op, a, b) ->
     (* Phase 26.1: TyStr eq/ne via $__lang_streq; ordering (< <= > >=) via
        $__lang_str_compare (3-way, -1/0/1) compared to 0. *)
@@ -5454,6 +5470,27 @@ let runtime_helpers = {|
         (return (i64.extend_i32_s (i32.const 0)))))
     (call $puts_h (local.get $msg))
     (unreachable))
+  ;; Integer division and remainder with a checked divisor. i64.div_s by zero
+  ;; traps, which is a defined failure but a silent one — the program died with no
+  ;; message where the interpreter named it — and INT_MIN / -1 traps here where it
+  ;; wraps everywhere else. The message comes in as a parameter because this text
+  ;; is a constant and the string is interned per program.
+  (func $__lang_idiv (param $a i64) (param $b i64) (param $msg i64) (result i64)
+    (if (i64.eqz (local.get $b))
+      (then
+        (drop (call $__lang_fail (local.get $msg)))
+        (return (i64.const 0))))
+    (if (i64.eq (local.get $b) (i64.const -1))
+      (then (return (i64.sub (i64.const 0) (local.get $a)))))
+    (i64.div_s (local.get $a) (local.get $b)))
+  (func $__lang_imod (param $a i64) (param $b i64) (param $msg i64) (result i64)
+    (if (i64.eqz (local.get $b))
+      (then
+        (drop (call $__lang_fail (local.get $msg)))
+        (return (i64.const 0))))
+    (if (i64.eq (local.get $b) (i64.const -1))
+      (then (return (i64.const 0))))
+    (i64.rem_s (local.get $a) (local.get $b)))
   ;; Phase 26.1: char_at s i — return pointer to a single-byte string
   ;; (preallocated 256-entry static char_table). Mirrors C/LLVM.
   ;; The table itself is set up at module-init by storing 256 pairs of
@@ -7974,6 +8011,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      lazily at the use site put the offset in the code and left the bytes out —
      which reads as an empty tag rather than as an error. *)
   fail_prefix_offset := fresh_str_offset "fail: ";
+  divzero_msg_offset := fresh_str_offset "division by zero";
+  modzero_msg_offset := fresh_str_offset "modulo by zero";
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;

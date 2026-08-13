@@ -20,6 +20,8 @@ let _ = print "=== each kind of failure is caught, and none of them prints ===";
 let _ = probe "fail" (fn () -> fail "boom");
 let _ = probe "assert false" (fn () -> let _ = assert false "nope" in 1);
 let _ = probe "divmod by zero" (fn () -> let (q, r) = divmod 1 0 in q);
+let _ = probe "bare / by zero" (fn () -> let z = 0 in 17 / z);
+let _ = probe "bare % by zero" (fn () -> let z = 0 in 17 % z);
 let _ = probe "pow negative exp" (fn () -> pow 2 (0 - 1));
 let _ = probe "int_of_str junk" (fn () -> int_of_str "abc");
 let _ = probe "no failure" (fn () -> 42);

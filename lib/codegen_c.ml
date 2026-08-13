@@ -1573,6 +1573,13 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
   | Ast.Bin (Ast.Concat, a, b) ->
     "__lang_str_concat(" ^ emit_expr a ^ ", " ^ emit_expr b ^ ")"
+  (* Integer / and % go through a helper that checks the divisor; see the note on
+     __lang_idiv. Float division is IEEE and must keep giving inf / nan, so this
+     arm looks at the operand type rather than the operator. *)
+  | Ast.Bin ((Ast.Div | Ast.Mod) as op, a, b)
+    when (match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt) = Ast.TyInt ->
+    let f = if op = Ast.Div then "__lang_idiv" else "__lang_imod" in
+    f ^ "(" ^ emit_expr a ^ ", " ^ emit_expr b ^ ")"
   | Ast.Bin (op, a, b) ->
     "(" ^ emit_expr a ^ " " ^ binop_to_c op ^ " " ^ emit_expr b ^ ")"
   | Ast.Cmp (op, a, b) ->
@@ -6640,6 +6647,26 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 36: gcd via Euclid (abs(a), abs(b)) *)
+      (* Integer division by zero was a bare `a / b` in the emitted C, which is
+         undefined behaviour — so what the program did depended on the CPU: this
+         machine's arm64 quietly answered 0 and 17, an x86-64 build of the same
+         source raises SIGFPE. The interpreter has always raised. One branch per
+         division buys a defined answer on every target.
+
+         b == -1 is the other undefined case (INT_MIN / -1 does not fit); the
+         unsigned negation is the two's-complement wraparound the interpreter
+         already produces. *)
+      "static long long __lang_idiv(long long a, long long b) {";
+      "  if (b == 0) __lang_fail_impl(\"division by zero\");";
+      "  if (b == -1) return (long long)(0ULL - (unsigned long long)a);";
+      "  return a / b;";
+      "}";
+      "static long long __lang_imod(long long a, long long b) {";
+      "  if (b == 0) __lang_fail_impl(\"modulo by zero\");";
+      "  if (b == -1) return 0;";
+      "  return a % b;";
+      "}";
+      "";
       (* `int` here truncated both arguments: the language's int is 64-bit on
          this backend, so gcd 3037000493 3037000493 came back as 1257966803 —
          the low 32 bits, negated and abs'd. Every probe of gcd had used small
