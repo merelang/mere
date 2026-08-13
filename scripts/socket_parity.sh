@@ -84,11 +84,15 @@ native=$("$TMP/sock_native" | grep -E '^(listen|connect|read|eof) ' | tr '\n' '|
 
 # A different port for the Wasm run: the native one may still be in TIME_WAIT.
 sed "s/$PORT/$((PORT + 1))/g" "$TMP/sock.mere" > "$TMP/sockw.mere"
+# A failure here used to exit 0. It cannot mean "toolchain absent" — that was
+# checked above and the script already skipped for it — so by this point a failed
+# component build is a failed component build, and reporting it as a skip made a
+# real break look like an environment that was merely incomplete.
 if ! MERE="$MERE" sh "$ROOT/scripts/build-component.sh" "$TMP/sockw.mere" \
        "$TMP/sock.component.wasm" >"$TMP/build.log" 2>&1; then
-  echo "socket_parity: component build failed — skipping"
-  tail -3 "$TMP/build.log"
-  exit 0
+  echo "socket_parity: FAILED — the component build broke" >&2
+  tail -20 "$TMP/build.log" >&2
+  exit 1
 fi
 wasm=$(wasmtime run -S inherit-network=y "$TMP/sock.component.wasm" 2>/dev/null \
        | grep -E '^(listen|connect|read|eof) ' | tr '\n' '|')
