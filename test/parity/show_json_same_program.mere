@@ -1,0 +1,59 @@
+// `show` and `to_json` over the same shapes, in one program.
+//
+// The two emitters registered their string constants in separate blocks that
+// each unconditionally minted the names they needed — and they need some of
+// the same ones: `s_true`, `s_false`, `s_lbracket`, `s_rbracket`. A program
+// that used only one of the two was fine, so every existing test passed; a
+// program that used both emitted `@.s_true` twice and LLVM rejected the
+// module outright with `redefinition of global`. Nothing about the failure
+// mentioned show or to_json.
+//
+// It surfaced from an unrelated direction: adding a prelude helper whose
+// error path calls `show` gave every program a show emitter, and the first
+// to_json test in the suite stopped compiling. That is the shape of the bug
+// worth pinning — not "the prelude grew", but "two registrations, one
+// namespace, no check".
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+type shade = Light | Dark of int;
+type box = { w: int, tall: bool };
+
+// Bools: `s_true` / `s_false` are wanted by both emitters.
+let _ = print (show true ++ " " ++ to_json false);
+let _ = print (show false ++ " " ++ to_json true);
+
+// Lists: `s_lbracket` / `s_rbracket` likewise.
+let xs = Cons (1, Cons (2, Cons (3, Nil)));
+let _ = print (show xs);
+let _ = print (to_json xs);
+let _ = print (show (Cons (true, Cons (false, Nil))));
+let _ = print (to_json (Cons (true, Cons (false, Nil))));
+
+// Tuples and records reach the per-type format strings of both emitters.
+let _ = print (show (1, true));
+let _ = print (to_json (1, true));
+let _ = print (show (1, "two", false));
+let _ = print (to_json (1, "two", false));
+
+let b = box { w = 3, tall = true };
+let _ = print (show b);
+let _ = print (to_json b);
+
+// The same constructor names through both, including a nullary one (which is
+// a bare name to `show` and a quoted string to `to_json`).
+let _ = print (show Light ++ " " ++ to_json Light);
+let _ = print (show (Dark 7) ++ " " ++ to_json (Dark 7));
+let _ = print (show (Cons (Light, Cons (Dark 2, Nil))));
+let _ = print (to_json (Cons (Light, Cons (Dark 2, Nil))));
+
+// Options: `null` for to_json, `None` for show. The `None` comes out of a
+// function so that it is typed without a bare annotation.
+let maybe = fn (b: bool) -> if b then Some 5 else None;
+let _ = print (show (maybe false) ++ " " ++ to_json (maybe false));
+let _ = print (show (maybe true) ++ " " ++ to_json (maybe true));
+
+// Nested, so the two walks meet inside each other's shapes.
+let _ = print (show (Cons ((1, true), Cons ((2, false), Nil))));
+let _ = print (to_json (Cons ((1, true), Cons ((2, false), Nil))));
+0

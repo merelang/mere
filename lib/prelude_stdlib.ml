@@ -442,4 +442,69 @@ let rec pad_right = fn (s: str) -> fn (w: int) ->
 let rec pad_left = fn (s: str) -> fn (w: int) ->
   let d = w - utf8_width s in
   if d <= 0 then s else str_repeat " " d ++ s;
+
+// --- small integer helpers -------------------------------------------------
+// These were interpreter builtins with no lowering on any compiled backend:
+// `mere -c` emitted a reference to a name the C compiler had never heard of, so
+// they worked in the REPL and failed at link time, and no test used them.
+// Defining them here as Mere source gives all five backends the same one, which
+// is cheaper than five codegen cases and cannot drift between them.
+//
+// Each reproduces exactly what the interpreter builtin did, including the two
+// failures: `pow` with a negative exponent and a false `assert` both raise the
+// message they always raised. "Exactly" had to be checked rather than assumed —
+// the obvious Mere one-liner was the wrong function four times out of ten:
+// `sum_range` and `pow` recursed where the builtin was closed-form and O(log e),
+// which is a stack overflow rather than a slow answer; `lcm` multiplied before
+// dividing, which overflows for operands whose lcm fits but whose product does
+// not; and `divmod` left its documented zero failure to `/`, which does not mean
+// the same thing on every backend.
+//
+// `int_max` and `int_min` are deliberately NOT here. They cannot be a portable
+// literal: the interpreter's int is OCaml's 63-bit native int and the C backend's
+// is a 64-bit long long, so `4611686018427387903 + 1` is negative on one and
+// positive on the other. That is a language question, not a missing definition.
+let sign = fn (n: int) -> if n > 0 then 1 else if n < 0 then 0 - 1 else 0;
+let incr = fn (n: int) -> n + 1;
+let decr = fn (n: int) -> n - 1;
+let square = fn (n: int) -> n * n;
+let cube = fn (n: int) -> n * n * n;
+// Gauss, with the halving moved inside the product. `(b - a + 1) * (a + b) / 2`
+// forms an intermediate twice the size of its own answer, which made the range
+// where this is portable half the range of the result: summing -3037000493..0 has
+// an answer both int widths hold and an intermediate only the 64-bit one does, so
+// the interpreter and the compiled backends disagreed. Exactly one of the two
+// factors is even — an odd count means the endpoints share parity — so one of them
+// can always be halved first.
+let sum_range = fn (a: int) -> fn (b: int) ->
+  if a > b then 0
+  else
+    let n = b - a + 1 in
+    if n % 2 == 0 then n / 2 * (a + b) else n * ((a + b) / 2);
+// Square-and-multiply, the builtin's algorithm rather than one that agrees with
+// it on small inputs: the squaring order is what fixes the wraparound on an
+// overflowing exponent, so a linear version would be a different function past
+// the int width as well as O(e) deep.
+// The accumulator is a top-level `_` helper rather than an inner `let rec`, which
+// is what the rest of this file does and now has a demonstrated reason: an inner
+// fn in the prelude takes `__lifted_helper_0` away from the first inner fn in the
+// user's program, and seven codegen tests assert generated names by index.
+let rec _pow_go = fn (acc: int) -> fn (sq: int) -> fn (n: int) ->
+  if n == 0 then acc
+  else if n % 2 == 1 then _pow_go (acc * sq) (sq * sq) (n / 2)
+  else _pow_go acc (sq * sq) (n / 2);
+let pow = fn (b: int) -> fn (e: int) ->
+  if e < 0 then fail ("pow: negative exponent " ++ show e) else _pow_go 1 b e;
+// Via gcd, which already had lowerings. Zero is absorbing rather than a division
+// by zero, and the division comes before the multiplication.
+let lcm = fn (a: int) -> fn (b: int) ->
+  if a == 0 || b == 0 then 0 else abs (a / gcd a b * b);
+// Truncated division, matching `/` and `%`: divmod (0 - 17) 5 is (-3, -2). The
+// zero check is written out because `/` by zero is not one thing across the
+// backends — the interpreter raises and C and LLVM return 0 — so deferring to it
+// would have made a documented failure depend on which backend you built with.
+let divmod = fn (a: int) -> fn (b: int) ->
+  if b == 0 then fail "divmod: division by zero" else (a / b, a % b);
+let assert = fn (cond: bool) -> fn (msg: str) ->
+  if cond then () else fail ("assertion failed: " ++ msg);
 |}

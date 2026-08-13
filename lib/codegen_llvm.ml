@@ -2493,23 +2493,46 @@ let show_format_globals = ref []
 (* String global for an arbitrary literal — adds a unique label.
    Different from fresh_str_global (which is per-call); these are
    shared / pre-registered at the start of show emission. *)
+(* Names already emitted, mapped to the content they were emitted with.
+   The show registration and the to_json registration are separate blocks
+   that legitimately want some of the same names (`s_true`, `s_lbracket`,
+   ...), and a program using both `show` and `to_json` reached each block —
+   emitting the global twice, which LLVM rejects as a redefinition. Minting
+   is therefore idempotent by name, and a second mint with *different*
+   content is a codegen bug rather than something to resolve last-wins. *)
+let minted_globals : (string, string) Hashtbl.t = Hashtbl.create 64
+
+let mint_once name content emit =
+  match Hashtbl.find_opt minted_globals name with
+  | Some prev when prev = content -> ()
+  | Some prev ->
+    failwith
+      (Printf.sprintf
+         "LLVM codegen: global @.%s minted twice with different content \
+          (%S then %S)" name prev content)
+  | None ->
+    Hashtbl.add minted_globals name content;
+    emit ()
+
 let mint_show_global name content =
-  let bytes_len = String.length content + 1 in
-  let escaped = llvm_string_escape content in
-  show_string_globals :=
-    Printf.sprintf "@.%s = private constant [%d x i8] c\"%s\\00\""
-      name bytes_len escaped
-    :: !show_string_globals
+  mint_once name content (fun () ->
+    let bytes_len = String.length content + 1 in
+    let escaped = llvm_string_escape content in
+    show_string_globals :=
+      Printf.sprintf "@.%s = private constant [%d x i8] c\"%s\\00\""
+        name bytes_len escaped
+      :: !show_string_globals)
 
 let mint_show_format name fmt =
   (* `fmt` is the OCaml string content (e.g. "%d") — emit it as the LLVM
      constant body and let LLVM count the bytes correctly. *)
-  let bytes_len = String.length fmt + 1 in
-  let escaped = llvm_string_escape fmt in
-  show_format_globals :=
-    Printf.sprintf "@.fmt_%s = private constant [%d x i8] c\"%s\\00\""
-      name bytes_len escaped
-    :: !show_format_globals
+  mint_once ("fmt_" ^ name) fmt (fun () ->
+    let bytes_len = String.length fmt + 1 in
+    let escaped = llvm_string_escape fmt in
+    show_format_globals :=
+      Printf.sprintf "@.fmt_%s = private constant [%d x i8] c\"%s\\00\""
+        name bytes_len escaped
+      :: !show_format_globals)
 
 (* Emit a single show_<tag> (or to_json_<tag>) function for the given type.
    v0.1.184: the two differ only in literals — the structural walk, the
@@ -4308,12 +4331,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "int_of_str"; _ }, arg) ->
     (* v0.1.60: was a bare atoi (silent 0 on invalid input, diverging from
        the interpreter's fail). The helper validates strict decimal and
-       calls __lang_fail_impl otherwise — catchable by try_or. *)
+       calls __lang_fail_impl otherwise — catchable by try_or.
+       The helper parsed with strtoll and then truncated to i32 to hand back,
+       which int_of_str "3037000493" answered as -1257966803 and the largest
+       int as -1. int is i64 on this backend (v0.1.127); the return width was
+       left behind. *)
     let av = emit_expr env arg in
-    let raw = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_int_of_str(ptr %s)" raw av);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_int_of_str(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "str_unescape"; _ }, arg) ->
     (* Phase 25.4: str_unescape — interpret backslash-escape sequences into
@@ -9097,7 +9122,7 @@ let str_concat_helper =
          and consumes sign + digits; endptr == s means nothing was parsed.
          After the digits only trailing whitespace may remain. Anything
          else fails (try_or-able), matching the interpreter. *)
-      "define i32 @__lang_int_of_str(ptr %s) {";
+      "define i64 @__lang_int_of_str(ptr %s) {";
       "entry:";
       "  %endp = alloca ptr";
       "  %v = call i64 @strtoll(ptr %s, ptr %endp, i32 10)";
@@ -9125,8 +9150,7 @@ let str_concat_helper =
       "  call void @__lang_fail_impl(ptr @.ios_msg)";
       "  unreachable";
       "good:";
-      "  %t = trunc i64 %v to i32";
-      "  ret i32 %t";
+      "  ret i64 %v";
       "}";
       "";
       (* Phase 25.1: char builtins. char_at: per-byte from 256-entry
@@ -10188,6 +10212,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   metrics_used := false;
   show_string_globals := [];
   show_format_globals := [];
+  Hashtbl.reset minted_globals;
   (* Register variant tags + classify into mono / poly. Polymorphic
      variants and records are deferred to mono-instance emission. *)
   Hashtbl.iter (fun name vs ->

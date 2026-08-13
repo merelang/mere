@@ -1,0 +1,92 @@
+// Every deterministic int builtin, with arguments above 2^31.
+//
+// This file exists because of one wrong answer. `gcd 3037000493 3037000493` came
+// back as 1257966803 on the C backend and as 3037000493 on the other three: the
+// generated runtime declared `static int __lang_gcd(int, int)` while the
+// language's int is 64-bit there, so both arguments were truncated to their low
+// 32 bits. Nothing was missing and nothing failed to compile — the builtin was
+// recorded as present and correct on all four backends, because every probe of it
+// had used a one-digit literal.
+//
+// So the gap was not in the list of builtins under test, it was in the *values*.
+// A backend can implement a builtin at a narrower width than the language and
+// still answer every small question correctly. The only argument that finds it is
+// one that does not fit.
+//
+// Values stay inside ±(2^62 - 1) on purpose: int is 63-bit on the interpreter and
+// 64-bit on the compiled backends, so anything that overflows the smaller one is a
+// documented difference rather than a bug, and would make this file report noise.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let show2 = fn (t: (int * int)) -> let (a, b) = t in "(" ++ show a ++ "," ++ show b ++ ")";
+
+let big = 3037000493;             // just over 2^31 — the value that found the bug
+let b32 = 4294967296;             // 2^32
+let b40 = 1099511627776;          // 2^40
+let hi = 4611686018427387903;     // the interpreter's largest int
+let nbig = 0 - 3037000493;
+
+let _ = print "=== the literals survive the trip at all ===";
+let _ = print (show big ++ " " ++ show b32 ++ " " ++ show b40 ++ " " ++ show hi);
+let _ = print (str_of_int big ++ " " ++ str_of_int nbig ++ " " ++ str_of_int hi);
+let _ = print (show (int_of_str "3037000493") ++ " " ++ show (int_of_str "-3037000493")
+               ++ " " ++ show (int_of_str "4611686018427387903"));
+let _ = print_int big;
+let _ = print_int hi;
+
+let _ = print "=== sign / abs / parity, where a narrow cast flips the sign ===";
+let _ = print (show (sign big) ++ " " ++ show (sign nbig) ++ " " ++ show (sign b32)
+               ++ " " ++ show (sign hi));
+let _ = print (show (abs big) ++ " " ++ show (abs nbig) ++ " " ++ show (abs b40)
+               ++ " " ++ show (abs hi));
+let _ = print (show (even big) ++ " " ++ show (odd big) ++ " " ++ show (even b32)
+               ++ " " ++ show (even b40) ++ " " ++ show (odd hi));
+let _ = print (show (incr big) ++ " " ++ show (decr big) ++ " " ++ show (incr b32)
+               ++ " " ++ show (decr b32));
+
+let _ = print "=== min / max / clamp ===";
+let _ = print (show (min big b32) ++ " " ++ show (max big b32) ++ " " ++ show (min nbig big)
+               ++ " " ++ show (max nbig big) ++ " " ++ show (min b40 hi));
+let _ = print (show (clamp 0 big b32) ++ " " ++ show (clamp big b40 0)
+               ++ " " ++ show (clamp nbig big b32));
+
+let _ = print "=== gcd / lcm: the wrong answer this file was written for ===";
+let _ = print (show (gcd big big) ++ " " ++ show (gcd b32 big) ++ " " ++ show (gcd b32 b40)
+               ++ " " ++ show (gcd nbig big) ++ " " ++ show (gcd b40 0));
+let _ = print (show (lcm big 1) ++ " " ++ show (lcm big big) ++ " " ++ show (lcm b32 2)
+               ++ " " ++ show (lcm 2147483647 2147483646) ++ " " ++ show (lcm b40 0));
+
+let _ = print "=== divmod / pow / sum_range past 2^31 ===";
+let _ = print (show2 (divmod b40 big) ++ " " ++ show2 (divmod (0 - b40) big)
+               ++ " " ++ show2 (divmod b40 b32) ++ " " ++ show2 (divmod big b40));
+let _ = print (show (pow 2 40) ++ " " ++ show (pow 2 61) ++ " " ++ show (pow big 1)
+               ++ " " ++ show (pow (0 - 2) 41) ++ " " ++ show (pow 10 18));
+// The last one is the case that made `sum_range` halve inside its product: the
+// answer fits both int widths and the naive intermediate fits only the wider one.
+let _ = print (show (sum_range 1 2000000000) ++ " " ++ show (sum_range big (big + 3))
+               ++ " " ++ show (sum_range nbig 0) ++ " " ++ show (sum_range nbig big)
+               ++ " " ++ show (sum_range 1 3037000493));
+
+let _ = print "=== square / cube, kept inside the smaller int ===";
+let _ = print (show (square 2147483647) ++ " " ++ show (square (0 - 2147483647))
+               ++ " " ++ show (cube 1000000) ++ " " ++ show (cube (0 - 1000000)));
+
+let _ = print "=== bit operations, which is where a 32-bit mask would show ===";
+let _ = print (show (bit_and big b32) ++ " " ++ show (bit_or big b32)
+               ++ " " ++ show (bit_xor big b40) ++ " " ++ show (bit_and b40 b40));
+let _ = print (show (bit_not big) ++ " " ++ show (bit_not nbig) ++ " " ++ show (bit_not 0)
+               ++ " " ++ show (bit_not hi));
+let _ = print (show (bit_shl 1 40) ++ " " ++ show (bit_shl 1 61) ++ " " ++ show (bit_shl big 20)
+               ++ " " ++ show (bit_shr b40 20) ++ " " ++ show (bit_shr hi 40)
+               ++ " " ++ show (bit_shr big 1));
+let _ = print (show (bit_and (bit_shl 1 40) (bit_not 0)) ++ " "
+               ++ show (bit_xor (bit_shl 1 61) (bit_shl 1 40)));
+
+let _ = print "=== through float and back, which is a second narrowing ===";
+let _ = print (show (float_of_int b32) ++ " " ++ show (float_of_int b40)
+               ++ " " ++ show (float_of_int nbig));
+let _ = print (show (int_of_float (float_of_int b40)) ++ " "
+               ++ show (int_of_float (float_of_int nbig)) ++ " "
+               ++ show (int_of_float 3037000493.0));
+0
