@@ -20,12 +20,15 @@ let unsupported loc what =
    gap. This list makes the hole loud and named ("no LLVM lowering yet")
    instead of silent. It is the LLVM column of the host-builtin support
    matrix, expressed in code; when a builtin gains a real LLVM arm
+   (The matrix itself is generated: docs/host-matrix.md, from
+   scripts/host_matrix.sh. Entries here that the matrix reports as `yes` are
+   inert and were removed in v0.1.228 — a list that lies is worse than none.)
    that arm fires before the tail and its entry here becomes inert. Names
    with an explicit `unsupported` arm already (file_open family, list_dir,
    mkdir_p, file_mtime, sleep_ms, channel_close/recv_opt/recv_timeout) are
    deliberately NOT listed — they are already loud. *)
 let host_builtins_without_llvm_lowering =
-  [ "print_no_nl"; "print_err"; "print_int"; "print_bool";
+  [ "print_no_nl"; "print_err";
     (* v0.1.228: found by scripts/host_matrix.sh, which asks the compiler instead of
        remembering. These arrived with the `bytes` type in v0.1.216, after this list
        was written, and fell straight through to "unbound variable" — the exact hole
@@ -36,7 +39,7 @@ let host_builtins_without_llvm_lowering =
     "read_lines";
     "env_var"; "run";
     "file_exists"; "random_int"; "random_float";
-    "detach"; "par_map" ]
+    "detach" ]
 
 (* v0.1.178: LLVM keeps values and basic-block labels in one namespace, so a
    parameter called `entry` claims the slot the function's own entry block

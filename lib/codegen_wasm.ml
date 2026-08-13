@@ -25,20 +25,22 @@ let unsupported loc what =
    "unbound variable" tail, which reads like a user typo rather than a
    backend hole. It is the Wasm column of the host-builtin support
    matrix, in code; a real arm (or an explicit `unsupported` arm) fires
+   (The matrix itself is generated: docs/host-matrix.md, from
+   scripts/host_matrix.sh. Entries here that the matrix reports as `yes` are
+   inert and were removed in v0.1.228 — a list that lies is worse than none.)
    before the tail, so an entry here is inert once the builtin is handled.
    Names that already have a stub (file_exists/args/run/random_int/exit) or
    an explicit unsupported arm (file_open family, list_dir, mkdir_p,
    file_mtime, sleep_ms, channel_close/recv_opt/recv_timeout) are NOT listed. *)
 let host_builtins_without_wasm_lowering =
-  [ "print_int"; "print_bool";
-    (* v0.1.228: found by scripts/host_matrix.sh. Both came with the `bytes` type in
+  [ (* v0.1.228: found by scripts/host_matrix.sh. Both came with the `bytes` type in
        v0.1.216, after this list was written, and fell through to "unbound variable"
        — the exact hole the list exists to close, reopened by a later feature.
        (`par_map` is handled at the tail instead: it is desugared before codegen, so
        this name never reaches here.) *)
     "read_bytes"; "write_bytes";
-    "read_key"; "tty_raw"; "tty_restore"; "file_size";
-    "read_lines"; "file_pread"; "file_pwrite"; "file_pwrite_bytes";
+    "read_key"; "tty_raw"; "tty_restore";
+    "read_lines"; "file_pread";
     "random_float"; "detach" ]
 
 (* Accumulator for the function body's instructions (one WAT token per
