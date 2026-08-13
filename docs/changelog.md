@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.237 — 2026-08-13
+
+_A decoder's interesting behaviour is all in its error cases, and the Encoding Standard
+specifies how many U+FFFD a malformed sequence produces — which is not one per byte._
+
+```
+  contrib/encoding/decode.mere   UTF-8, windows-1252, and the label table
+  scripts/encoding_parity.sh     71,424 sequences swept against node's TextDecoder
+```
+
+**`contrib/encoding/decode.mere`.** Bytes off a wire into a `str`. Decoding never fails —
+every malformed sequence becomes U+FFFD — so `decode_utf8` returns a `str` rather than an
+`?str`. The only thing that can fail is recognising a label, and `decode` returns `?str` for
+a *different* reason: the label named a real encoding that is not implemented yet, so a
+caller can tell "unknown encoding" from "known but unsupported" and say so instead of
+guessing.
+
+**Two facts here are counter-intuitive enough to be worth stating outright.**
+
+`ascii` **means windows-1252**. So do `latin1`, `iso-8859-1`, `us-ascii` and
+`ansi_x3.4-1968`. The Standard folds them into one encoding on purpose, because that is what
+the deployed web already did — so a page that calls itself `ascii` and contains byte 0x80
+has a euro sign in it, and an implementation that "helpfully" treats `ascii` as 7-bit
+produces U+FFFD where every browser produces `€`.
+
+And **the replacement count is specified**: `F1 80 80 41` is one U+FFFD then `A`, because
+those three bytes were a valid *prefix* and are one error together, while `E0 80 80` is
+three, because `E0` requires its first continuation in `A0..BF` — so `80` is not part of the
+sequence at all, and each remaining byte is then reconsidered on its own and fails on its
+own. Getting this wrong changes how many characters a page has, which changes every offset
+after it, and is invisible on valid input.
+
+That same bound mechanism does all the other rejecting with no separate checks afterwards:
+`ED` requires `80..9F`, which is exactly what keeps the surrogates unrepresentable, and `F0`
+requires `90..BF` while `F4` requires `80..8F`, bounding the range at both ends.
+
+**The gate sweeps rather than samples**, because the error cases are invisible on valid
+input: every single byte (256), **every two-byte sequence (65,536)**, every three-byte lead
+× first continuation (4,096), every four-byte lead × first continuation (1,280), and every
+byte through windows-1252 (256) — 71,424 comparisons against node's `TextDecoder`. The
+two-byte sweep is exhaustive; the three- and four-byte sweeps are exhaustive in the
+dimension that carries the logic, with the rest held valid. Neither side builds an input as
+a string literal — both loop over the byte — so there is no escaping layer to get wrong.
+Labels are checked rather than derived (40 of them, including three that must *not*
+resolve), and that gap is printed as a SKIP: the harness cannot discover a label nobody
+listed.
+
+**A new, measured consequence of the LLVM backend's `str`.** A decoded 0x00 is U+0000, and
+because that backend's `str` is `strlen`-based, `str_of_codepoint 0` yields the **empty**
+string — the character does not truncate the text, it **vanishes**, and every offset after it
+shifts by one. `41 00 42` decodes to length 3 on interp, C and Wasm, and to length 2 on
+LLVM. Silent loss is worse than truncation for anything that then indexes the result, so
+this is documented as 0x01..0xFF-safe there for now, and `test/parity/encoding_decode.mere`
+omits 0x00 with the reason written at the top rather than asserting the bug.
+
+**Shift_JIS and EUC-JP resolve as labels but have no decoder yet.** They need the JIS X 0208
+index — 6,879 code points — which is the first table in this project too large to write as
+code, and that question deserves settling once rather than per encoding. `meta charset`
+sniffing is likewise absent on purpose: it is a scan for tags and belongs with an HTML
+tokenizer, and doing it in two places is how the two come to disagree.
+
+---
+
 ## v0.1.236 — 2026-08-13
 
 _An IPv6 address has many spellings and exactly one canonical form, so the serialiser is as

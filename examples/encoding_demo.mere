@@ -1,0 +1,61 @@
+// encoding_demo: what the Encoding Standard's decoders actually do.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../contrib/encoding/decode.mere";
+
+let cps = fn (s: str) ->
+  let rec go = fn (i: int) -> fn (acc: str) ->
+    if i >= utf8_len s then acc
+    else
+      let c = codepoint_at s i in
+      let name = if c == 65533 then "FFFD" else show c in
+      go (i + 1) (acc ++ (if acc == "" then "" else " ") ++ name) in
+  go 0 "";
+
+let u8 = fn (label: str) -> fn (hex: str) ->
+  print ("  " ++ hex ++ "  " ++ label ++ "\n      -> "
+         ++ cps (Encoding.decode_utf8 (bytes_of_hex hex))
+         ++ "   [" ++ Encoding.decode_utf8 (bytes_of_hex hex) ++ "]");
+
+let _ = print "=== valid UTF-8 ===";
+let _ = u8 "one byte      " "41";
+let _ = u8 "two bytes     " "c3a9";
+let _ = u8 "three bytes   " "e38182";
+let _ = u8 "four bytes    " "f09f92a9";
+let _ = u8 "a leading BOM is removed" "efbbbf41";
+
+let _ = print "\n=== how many replacements? not one per byte ===";
+let _ = u8 "valid prefix, then A: ONE error" "f1808041";
+let _ = u8 "out of range for E0:  THREE" "e08080";
+let _ = u8 "and the same shape for a surrogate" "eda080";
+let _ = u8 "C3 needs a continuation, 28 is not one" "41c32842";
+
+let _ = print "\n=== windows-1252, which is also what `ascii` means ===";
+let show1252 = fn (hex: str) ->
+  print ("  " ++ hex ++ " -> " ++ cps (Encoding.decode_windows_1252 (bytes_of_hex hex))
+         ++ "   [" ++ Encoding.decode_windows_1252 (bytes_of_hex hex) ++ "]");
+let _ = show1252 "80";
+let _ = show1252 "9192";
+let _ = show1252 "81";
+
+let _ = print "\n=== labels: an alias is not a different encoding ===";
+let l = fn (s: str) ->
+  match Encoding.label_of s with
+  | None -> print ("  [" ++ s ++ "] -> nobody recognises that")
+  | Some n -> print ("  [" ++ s ++ "] -> " ++ n);
+let _ = l "UTF-8";
+let _ = l "  utf8  ";
+let _ = l "ascii";
+let _ = l "iso-8859-1";
+let _ = l "x-sjis";
+let _ = l "eucjp";
+
+let _ = print "\n=== a known encoding this slice has not implemented ===";
+let d = fn (name: str) ->
+  match Encoding.decode name (bytes_of_hex "82a0") with
+  | None -> print ("  " ++ name ++ " -> known label, no decoder yet")
+  | Some s -> print ("  " ++ name ++ " -> " ++ cps s);
+let _ = d "utf-8";
+let _ = d "shift_jis";
+0

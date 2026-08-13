@@ -1,0 +1,130 @@
+// contrib/encoding held to one output on every backend. Correctness against the
+// Encoding Standard is scripts/encoding_parity.sh's job (it sweeps 71,424
+// sequences against node's TextDecoder); this file is about the four backends
+// agreeing.
+//
+// Byte 0x00 is deliberately absent from this corpus, and the reason is a real
+// limitation rather than an oversight. A decoded 0x00 is U+0000, and on the LLVM
+// backend a `str` is strlen-based, so `str_of_codepoint 0` yields the EMPTY
+// string: the character does not truncate the text, it VANISHES, and every
+// offset after it shifts by one. Measured on this exact code — `41 00 42`
+// decodes to length 3 on interp, C and Wasm, and to length 2 on LLVM. Until a
+// byte-safe str lands there, a decoder is ASCII-and-above safe only, and this
+// test would be asserting the bug rather than the behaviour.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/encoding/decode.mere";
+
+// codepoint_at takes a codepoint index, not a byte offset.
+let cps = fn (s: str) ->
+  let rec go = fn (i: int) -> fn (acc: str) ->
+    if i >= utf8_len s then acc
+    else go (i + 1) (acc ++ (if acc == "" then "" else " ")
+                     ++ show (codepoint_at s i)) in
+  go 0 "";
+
+let u8 = fn (hex: str) ->
+  print (hex ++ "  -> " ++ cps (Encoding.decode_utf8 (bytes_of_hex hex)));
+
+let cp = fn (hex: str) ->
+  print (hex ++ "  -> " ++ cps (Encoding.decode_windows_1252 (bytes_of_hex hex)));
+
+let _ = print "=== UTF-8, valid ===";
+let _ = u8 "41";
+let _ = u8 "7f";
+let _ = u8 "c280";
+let _ = u8 "c3a9";
+let _ = u8 "dfbf";
+let _ = u8 "e0a080";
+let _ = u8 "e38182";
+let _ = u8 "efbfbf";
+let _ = u8 "f0908080";
+let _ = u8 "f09f92a9";
+let _ = u8 "f48fbfbf";
+let _ = u8 "41c3a9e38182f09f92a9";
+
+let _ = print "=== a leading BOM is removed, elsewhere it is a character ===";
+let _ = u8 "efbbbf41";
+let _ = u8 "41efbbbf";
+let _ = u8 "efbbbf";
+
+let _ = print "=== truncated: one error at the end of the stream ===";
+let _ = u8 "c3";
+let _ = u8 "e381";
+let _ = u8 "f09f92";
+
+let _ = print "=== the maximal-subpart rule: a valid prefix is ONE error ===";
+let _ = u8 "e18041";
+let _ = u8 "f1808041";
+let _ = u8 "f18041";
+let _ = u8 "e0a041";
+let _ = u8 "c341";
+let _ = u8 "41c32842";
+
+let _ = print "=== and an out-of-range continuation is not part of it ===";
+let _ = u8 "c080";
+let _ = u8 "c1bf";
+let _ = u8 "e08080";
+let _ = u8 "e09f80";
+let _ = u8 "eda080";
+let _ = u8 "edbfbf";
+let _ = u8 "ed9fbf";
+let _ = u8 "f08f8080";
+let _ = u8 "f4908080";
+
+let _ = print "=== never a lead byte ===";
+let _ = u8 "80";
+let _ = u8 "bf";
+let _ = u8 "8080";
+let _ = u8 "fe";
+let _ = u8 "ff";
+let _ = u8 "f5808080";
+let _ = u8 "f888808080";
+
+let _ = print "=== windows-1252: identity except 27 bytes in 0x80..0x9f ===";
+let _ = cp "41";
+let _ = cp "80";
+let _ = cp "81";
+let _ = cp "8d";
+let _ = cp "8f";
+let _ = cp "90";
+let _ = cp "9d";
+let _ = cp "9f";
+let _ = cp "a0";
+let _ = cp "ff";
+let _ = cp "808182838485868788898a8b8c8d8e8f";
+let _ = cp "909192939495969798999a9b9c9d9e9f";
+
+let _ = print "=== labels ===";
+let l = fn (s: str) ->
+  match Encoding.label_of s with
+  | None -> print ("[" ++ s ++ "]  -> UNKNOWN")
+  | Some n -> print ("[" ++ s ++ "]  -> " ++ n);
+let _ = l "utf-8";
+let _ = l "UTF-8";
+let _ = l "  utf8  ";
+let _ = l "ascii";
+let _ = l "latin1";
+let _ = l "ISO-8859-1";
+let _ = l "SJIS";
+let _ = l "windows-31j";
+let _ = l "euc-jp";
+let _ = l "eucjp";
+let _ = l "nonsense-xyz";
+
+let _ = print "=== decode dispatch: an unimplemented encoding is not a bad label ===";
+let d = fn (name: str) -> fn (hex: str) ->
+  match Encoding.decode name (bytes_of_hex hex) with
+  | None -> print (name ++ "  -> UNIMPLEMENTED")
+  | Some s -> print (name ++ "  -> " ++ cps s);
+let _ = d "utf-8" "e38182";
+let _ = d "windows-1252" "8082";
+let _ = d "shift_jis" "82a0";
+let _ = d "euc-jp" "a4a2";
+
+let _ = print "=== decode_labelled falls back to UTF-8 ===";
+let _ = print (cps (Encoding.decode_labelled "utf-8" (bytes_of_hex "e38182")));
+let _ = print (cps (Encoding.decode_labelled "nonsense" (bytes_of_hex "e38182")));
+let _ = print (cps (Encoding.decode_labelled "shift_jis" (bytes_of_hex "e38182")));
+0
