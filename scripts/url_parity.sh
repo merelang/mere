@@ -156,5 +156,80 @@ else
   fail=1
 fi
 
+# --- authority: scheme / userinfo / host / port, against node --------------
+#
+# One line per input, five fields, so a mismatch names the field rather than
+# just the URL. Inputs node rejects are expected to come back INVALID from us
+# too — a parser that accepts more than the oracle is the failure mode that
+# matters for anything that then makes a request.
+
+CORPUS="$TMP/corpus.txt"
+cat > "$CORPUS" <<'URLS'
+http://EXAMPLE.com:80/a
+https://a:b@h:443/x
+HTTP://h
+http://h:8080
+http://0x7f.1
+http://0177.1
+http://127.0.0.1
+http://1.2
+http://256.1.1.1
+http://1.2.3.4.5
+http://[::1]:81/
+http://[::1
+foo://Host:99/p
+foo://Host
+http://h:/
+http://h:99999
+http://h:abc
+http://user@h/
+http://user:pw@h/
+http://a@b@h/
+mailto:x@y
+http://
+not a url
+http://h/p?q#f
+URLS
+
+cat > "$TMP/auth.js" <<'NODE'
+const fs = require("fs");
+for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+  if (!line) continue;
+  let out;
+  try {
+    const u = new URL(line);
+    out = [u.protocol.replace(/:$/, ""), u.username, u.password,
+           u.hostname, u.port].join("|");
+  } catch (e) { out = "INVALID"; }
+  console.log(out);
+}
+NODE
+node "$TMP/auth.js" "$CORPUS" > "$TMP/auth_want.txt"
+
+{
+  echo 'import "../contrib/url/host.mere";'
+  echo 'let p = fn (s: str) ->'
+  echo '  match Url.parse s with'
+  echo '  | None -> print "INVALID"'
+  echo '  | Some u -> print (u.scheme ++ "|" ++ u.username ++ "|" ++ u.password'
+  echo '                     ++ "|" ++ u.host ++ "|" ++ u.port);'
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    printf 'let _ = p "%s";\n' "$line"
+  done < "$CORPUS"
+  echo '0'
+} > "$ROOT/examples/.url_auth_tmp.mere"
+( ulimit -t 60; "$MERE" "$ROOT/examples/.url_auth_tmp.mere" ) | sed '$d' > "$TMP/auth_ours.txt"
+rm -f "$ROOT/examples/.url_auth_tmp.mere"
+
+if diff -q "$TMP/auth_want.txt" "$TMP/auth_ours.txt" >/dev/null; then
+  echo "  ok    authority  ($(grep -c . "$CORPUS") inputs agree on scheme|user|pass|host|port)"
+else
+  echo "  FAIL  authority"
+  paste -d'\t' "$CORPUS" "$TMP/auth_want.txt" "$TMP/auth_ours.txt" \
+    | awk -F'\t' '$2 != $3 { printf "        %-24s node=%-34s ours=%s\n", $1, $2, $3 }'
+  fail=1
+fi
+
 [ "$fail" = 0 ] && echo "url_parity: ok" || echo "url_parity: FAILED"
 [ "$fail" = 0 ]

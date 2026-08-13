@@ -1,0 +1,342 @@
+// contrib/url/host.mere — the scheme and authority half of a WHATWG URL.
+//
+// Cleaning, the scheme, and the authority split into userinfo / host / port.
+// The path, query and fragment are the next slice; `rest` hands them over
+// untouched.
+//
+// Why a `?url_parts` and not a `fail`: on the wasm backend `fail` sets a flag
+// and returns a sentinel rather than unwinding, so a caller between the failure
+// and its `try_or` still runs and can trap the module. A URL parser's whole job
+// includes rejecting input, so the rejection has to be a value.
+//
+// Usage:
+//   import "contrib/url/host.mere";
+//   match Url.parse "http://EXAMPLE.com:80/a" with
+//   | Some u -> u.host                      // "example.com", port elided
+//   | None -> "invalid"
+//
+// The two behaviours worth knowing about, because both are the kind of thing
+// that turns into a security bug when an implementation guesses:
+//
+//   * a domain is lowercased, an opaque host is not. `http://EXAMPLE.com` has
+//     host `example.com`; `foo://EXAMPLE.com` has host `EXAMPLE.com`.
+//   * a host that parses as a number is an IPv4 address, in any base the
+//     Standard allows. `http://0x7f.1` is `127.0.0.1`. An implementation that
+//     only understands dotted decimal will let that through an allowlist.
+
+import "percent.mere";
+
+type url_parts = {
+  scheme: str,      // lowercased, no trailing colon
+  username: str,
+  password: str,
+  host: str,        // "example.com" / "127.0.0.1" / "[::1]" / "" for no authority
+  port: str,        // "" when absent or the scheme's default
+  rest: str,        // path + query + fragment, unparsed
+  special: bool,
+};
+
+module Url {
+
+  // --- special schemes ---------------------------------------------------
+  // The Standard's list. `special` changes three things: backslashes count as
+  // separators, the default port is elided, and a host is required.
+
+  let is_special = fn (scheme: str) ->
+    scheme == "http" || scheme == "https" || scheme == "ws"
+    || scheme == "wss" || scheme == "ftp" || scheme == "file";
+
+  let default_port = fn (scheme: str) ->
+    if scheme == "http" || scheme == "ws" then "80"
+    else if scheme == "https" || scheme == "wss" then "443"
+    else if scheme == "ftp" then "21"
+    else "";
+
+  // --- cleaning ----------------------------------------------------------
+  // Leading and trailing C0 controls and spaces are stripped; tabs, line feeds
+  // and carriage returns are removed from anywhere. Both before parsing, so a
+  // URL pasted out of an email is the URL it looks like.
+
+  let rec _strip_lead = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then ""
+    else if ord (char_at s i) <= 0x20 then _strip_lead s (i + 1) n
+    else substring s i n;
+
+  let rec _strip_trail = fn (s: str) -> fn (n: int) ->
+    if n <= 0 then ""
+    else if ord (char_at s (n - 1)) <= 0x20 then _strip_trail s (n - 1)
+    else substring s 0 n;
+
+  let clean = fn (s: str) ->
+    let a = _strip_lead s 0 (str_len s) in
+    let b = _strip_trail a (str_len a) in
+    str_replace (str_replace (str_replace b "\t" "") "\n" "") "\r" "";
+
+  // --- scheme ------------------------------------------------------------
+  // ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"  — case-insensitive.
+  // Returns the length of the scheme, or -1 when there is not one, which is
+  // how a relative reference and `mailto:` tell themselves apart.
+
+  let _is_alpha = fn (b: int) -> (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+  let _is_digit = fn (b: int) -> b >= 48 && b <= 57;
+
+  // There is no str_last_index_of, and both places that need one below want the
+  // LAST occurrence rather than the first: userinfo ends at the last `@` so a
+  // password may contain one, and the port follows the last `:`.
+  let rec _last_of = fn (s: str) -> fn (c: str) -> fn (i: int) ->
+    if i < 0 then 0 - 1
+    else if (char_at s i) == c then i
+    else _last_of s c (i - 1);
+
+  let last_index_of = fn (s: str) -> fn (c: str) ->
+    _last_of s c (str_len s - 1);
+
+  let rec _scheme_end = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then 0 - 1
+    else
+      let b = ord (char_at s i) in
+      if b == 0x3A then i
+      else if _is_alpha b || _is_digit b || b == 0x2B || b == 0x2D || b == 0x2E
+      then _scheme_end s (i + 1) n
+      else 0 - 1;
+
+  let scheme_len = fn (s: str) ->
+    if str_len s == 0 then 0 - 1
+    else if not (_is_alpha (ord (char_at s 0))) then 0 - 1
+    else _scheme_end s 1 (str_len s);
+
+  // --- IPv4, in every base the Standard allows ---------------------------
+  // A part is hex with a 0x prefix, octal with a leading 0, decimal otherwise.
+  // -1 for anything else, which makes the host a domain rather than an error.
+
+  let _digit_val = fn (b: int) ->
+    if b >= 48 && b <= 57 then b - 48
+    else if b >= 65 && b <= 70 then b - 55
+    else if b >= 97 && b <= 102 then b - 87
+    else 0 - 1;
+
+  let rec _parse_radix = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+                         fn (radix: int) -> fn (acc: int) ->
+    if i >= n then acc
+    else
+      let d = _digit_val (ord (char_at s i)) in
+      if d < 0 || d >= radix then 0 - 1
+      else _parse_radix s (i + 1) n radix (acc * radix + d);
+
+  let _ipv4_number = fn (part: str) ->
+    let n = str_len part in
+    if n == 0 then 0 - 1
+    else if n >= 2 && (char_at part 0) == "0"
+            && (to_lower (char_at part 1)) == "x" then
+      // 0x with nothing after it is zero, not a failure.
+      (if n == 2 then 0 else _parse_radix part 2 n 16 0)
+    else if n >= 2 && (char_at part 0) == "0" then _parse_radix part 1 n 8 0
+    else _parse_radix part 0 n 10 0;
+
+  let rec _all_numbers = fn (parts) -> fn (acc) ->
+    match parts with
+    | Nil -> Some (list_rev acc)
+    | Cons (h, t) ->
+      let v = _ipv4_number h in
+      if v < 0 then None else _all_numbers t (Cons (v, acc));
+
+  // The last part absorbs the remaining octets, so `1.2` is 1.0.0.2 and
+  // `0x7f.1` is 127.0.0.1. Each earlier part must fit in one octet.
+  let rec _fits = fn (nums) -> fn (left: int) ->
+    match nums with
+    | Nil -> true
+    | Cons (h, t) ->
+      match t with
+      | Nil -> h < left
+      | Cons (_, _) -> if h > 255 then false else _fits t left;
+
+  let rec _pow256 = fn (k: int) -> if k <= 0 then 1 else 256 * _pow256 (k - 1);
+
+  let rec _to_octets = fn (nums) -> fn (count: int) -> fn (acc) ->
+    match nums with
+    | Nil -> list_rev acc
+    | Cons (h, t) ->
+      match t with
+      | Nil ->
+        // Spread the final number over the octets nobody claimed.
+        let rec spread = fn (v: int) -> fn (k: int) -> fn (out) ->
+          if k < 0 then out
+          else spread v (k - 1) (Cons ((v / (_pow256 k)) % 256, out)) in
+        list_rev (spread h (4 - count) acc)
+      | Cons (_, _) -> _to_octets t count (Cons (h, acc));
+
+  // Whether the host is an IPv4 attempt at all, which decides what a failure
+  // means. If the last label is a number then the host IS an address and a bad
+  // one is invalid; if it is not, the host is a domain and IPv4 never applies.
+  //
+  // Conflating the two is the bug the oracle caught: `http://256.1.1.1` was
+  // being accepted as a hostname called "256.1.1.1", and an allowlist that
+  // resolves that name later is not checking what it thinks it is.
+  let rec _last_label = fn (parts) -> fn (fallback: str) ->
+    match parts with
+    | Nil -> fallback
+    | Cons (h, t) -> _last_label t h;
+
+  let ends_in_number = fn (host: str) ->
+    let trimmed =
+      if str_len host > 1 && str_ends_with host "."
+      then substring host 0 (str_len host - 1)
+      else host in
+    let parts = str_split trimmed "." in
+    if list_len parts == 0 then false
+    else _ipv4_number (_last_label parts "") >= 0;
+
+  // "" when the parse fails. Only meaningful when ends_in_number said yes.
+  let try_ipv4 = fn (host: str) ->
+    // A single trailing dot is allowed and dropped: `1.2.3.4.` is an address.
+    let trimmed =
+      if str_len host > 1 && str_ends_with host "."
+      then substring host 0 (str_len host - 1)
+      else host in
+    let parts = str_split trimmed "." in
+    let n = list_len parts in
+    if n > 4 then ""
+    else
+      match _all_numbers parts Nil with
+      | None -> ""
+      | Some nums ->
+        if not (_fits nums (_pow256 (5 - n))) then ""
+        else
+          str_join "." (list_map (_to_octets nums n Nil) (fn (o: int) -> show o));
+
+  // --- host --------------------------------------------------------------
+
+  let _lower_domain = fn (h: str) -> to_lower h;
+
+  // An IPv6 literal is carried through in its brackets: parsing and
+  // re-serialising one is its own job and this slice does not need it.
+  let parse_host = fn (h: str) -> fn (special: bool) ->
+    if str_len h == 0 then Some ""
+    else if str_starts_with h "[" then
+      (if str_ends_with h "]" then Some h else None)
+    else if not special then Some h        // opaque: no case folding, no IPv4
+    else
+      let lowered = _lower_domain h in
+      if ends_in_number lowered then
+        let v4 = try_ipv4 lowered in
+        if v4 == "" then None else Some v4
+      else Some lowered;
+
+  // --- port --------------------------------------------------------------
+  // Digits only. An empty port after the colon is not an error, it is no port.
+  // The scheme's default is elided so two spellings of one address compare
+  // equal.
+
+  let rec _all_digits = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then true
+    else if _is_digit (ord (char_at s i)) then _all_digits s (i + 1) n
+    else false;
+
+  let parse_port = fn (p: str) -> fn (scheme: str) ->
+    if str_len p == 0 then Some ""
+    else if not (_all_digits p 0 (str_len p)) then None
+    else
+      let v = _parse_radix p 0 (str_len p) 10 0 in
+      if v > 65535 then None
+      else
+        let canon = show v in
+        if canon == default_port scheme then Some "" else Some canon;
+
+  // --- the authority -----------------------------------------------------
+  // userinfo is everything before the LAST `@`, so a password may contain one.
+  // The host ends at the last `:` that is not inside brackets.
+
+  let _split_userinfo = fn (auth: str) ->
+    let at = last_index_of auth "@" in
+    if at < 0 then ("", "", auth)
+    else
+      let ui = substring auth 0 at in
+      let rest = substring auth (at + 1) (str_len auth) in
+      let colon = str_index_of ui ":" in
+      if colon < 0 then (ui, "", rest)
+      else (substring ui 0 colon,
+            substring ui (colon + 1) (str_len ui),
+            rest);
+
+  // Where the authority stops: the first of `/`, `?` or `#`. Backslash counts
+  // as a slash for the special schemes, which is why it is folded first.
+  let rec _auth_end = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then n
+    else
+      let c = char_at s i in
+      if c == "/" || c == "?" || c == "#" then i
+      else _auth_end s (i + 1) n;
+
+  let _split_port = fn (hostport: str) ->
+    if str_starts_with hostport "[" then
+      let close = str_index_of hostport "]" in
+      if close < 0 then (hostport, "")
+      else
+        let after = substring hostport (close + 1) (str_len hostport) in
+        if str_starts_with after ":" then
+          (substring hostport 0 (close + 1),
+           substring after 1 (str_len after))
+        else (hostport, "")
+    else
+      let colon = last_index_of hostport ":" in
+      if colon < 0 then (hostport, "")
+      else (substring hostport 0 colon,
+            substring hostport (colon + 1) (str_len hostport));
+
+  // --- parse -------------------------------------------------------------
+  // Absolute URLs only in this slice: without a scheme there is nothing to
+  // resolve against, and resolution against a base is the next one's job.
+
+  let parse = fn (input: str) ->
+    let s = clean input in
+    let slen = scheme_len s in
+    if slen <= 0 then None
+    else
+      let scheme = to_lower (substring s 0 slen) in
+      let special = is_special scheme in
+      let raw_after = substring s (slen + 1) (str_len s) in
+      // For a special scheme a backslash is a slash, everywhere.
+      let after = if special then str_replace raw_after "\\" "/" else raw_after in
+      if str_starts_with after "//" then
+        let body = substring after 2 (str_len after) in
+        let ae = _auth_end body 0 (str_len body) in
+        let auth = substring body 0 ae in
+        let rest = substring body ae (str_len body) in
+        let (raw_user, raw_pass, hostport) = _split_userinfo auth in
+        // `http://a@b@h/` has username `a%40b`: the userinfo set includes `@`,
+        // so an unencoded one would re-split differently on the way out.
+        let user = Percent.encode Percent.userinfo raw_user in
+        let pass = Percent.encode Percent.userinfo raw_pass in
+        let (h, p) = _split_port hostport in
+        match parse_host h special with
+        | None -> None
+        | Some host ->
+          // A special scheme must have a host; `http://` alone is not a URL.
+          if special && host == "" then None
+          else
+            match parse_port p scheme with
+            | None -> None
+            | Some port ->
+              Some (url_parts { scheme = scheme, username = user,
+                                password = pass, host = host, port = port,
+                                rest = rest, special = special })
+      else
+        // No authority. `mailto:x@y` keeps `x@y` as an opaque path, and a
+        // special scheme without `//` is invalid.
+        if special then None
+        else
+          Some (url_parts { scheme = scheme, username = "", password = "",
+                            host = "", port = "", rest = after,
+                            special = false });
+
+  // scheme://user:pass@host:port — what an origin check compares.
+  let origin = fn (u: url_parts) ->
+    let cred =
+      if u.username == "" && u.password == "" then ""
+      else if u.password == "" then u.username ++ "@"
+      else u.username ++ ":" ++ u.password ++ "@" in
+    let portpart = if u.port == "" then "" else ":" ++ u.port in
+    if u.host == "" then u.scheme ++ ":"
+    else u.scheme ++ "://" ++ cred ++ u.host ++ portpart;
+
+}

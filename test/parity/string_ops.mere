@@ -1,3 +1,24 @@
 let parts = str_split "a,bb,ccc" ",";
 let joined = str_join "-" parts;
-print (str_of_int (str_len joined))
+let _ = print (str_of_int (str_len joined));
+
+// str_replace, with the length of every result printed as well as the result.
+// The length is the point: on the C backend a str carries its length in a
+// header word, str_replace was allocating a buffer without one, and the length
+// it then reported was whatever bytes preceded the buffer. The text alone would
+// not have caught that on every input — the length does.
+let show1 = fn (label: str) -> fn (r: str) ->
+  print (label ++ " [" ++ r ++ "] " ++ show (str_len r));
+
+let _ = show1 "shorter" (str_replace "abcabc" "b" "");
+let _ = show1 "absent" (str_replace "abc" "x" "");
+let _ = show1 "equal" (str_replace "abcabc" "b" "Z");
+let _ = show1 "longer" (str_replace "abcabc" "b" "ZZZZ");
+let _ = show1 "whole" (str_replace "aaa" "aaa" "b");
+let _ = show1 "empty-subject" (str_replace "" "a" "b");
+let _ = show1 "empty-needle" (str_replace "abc" "" "Z");
+let _ = show1 "overlapping" (str_replace "aaaa" "aa" "b");
+let _ = show1 "utf8" (str_replace "あいあ" "い" "");
+let _ = show1 "grow-from-one" (str_replace "x" "x" "0123456789");
+let _ = show1 "then-concat" (str_replace "abc" "b" "" ++ "|tail");
+0

@@ -1,0 +1,52 @@
+// The scheme and authority half of contrib/url, held to one output on every
+// backend. Correctness against the Standard is scripts/url_parity.sh's job
+// (it diffs against node); this file is about the four backends agreeing.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/url/host.mere";
+
+let p = fn (s: str) ->
+  match Url.parse s with
+  | None -> print (s ++ "  -> INVALID")
+  | Some u -> print (s ++ "  -> " ++ Url.origin u ++ "  rest=[" ++ u.rest ++ "]");
+
+let _ = print "=== scheme and case folding ===";
+let _ = p "HTTP://EXAMPLE.com/a";
+let _ = p "foo://EXAMPLE.com/a";
+let _ = p "mailto:x@y";
+
+let _ = print "=== default ports elide, others do not ===";
+let _ = p "http://h:80/";
+let _ = p "https://h:443/";
+let _ = p "ws://h:80/";
+let _ = p "ftp://h:21/";
+let _ = p "http://h:8080/";
+let _ = p "foo://h:80/";
+let _ = p "http://h:/";
+
+let _ = print "=== userinfo ===";
+let _ = p "http://user@h/";
+let _ = p "http://user:pw@h/";
+let _ = p "http://a@b@h/";
+
+let _ = print "=== a host that is a number is an address, in any base ===";
+let _ = p "http://127.0.0.1/";
+let _ = p "http://0x7f.1/";
+let _ = p "http://0177.1/";
+let _ = p "http://1.2/";
+let _ = p "http://[::1]:81/";
+
+let _ = print "=== and a bad number is invalid, not a hostname ===";
+let _ = p "http://256.1.1.1/";
+let _ = p "http://1.2.3.4.5/";
+let _ = p "http://h:99999/";
+let _ = p "http://h:abc/";
+let _ = p "http://";
+let _ = p "not a url";
+
+let _ = print "=== cleaning: surrounding space out, tabs and newlines out ===";
+let _ = p "  http://h/a  ";
+let _ = p "ht\ttp://h/a";
+let _ = p "http://h\\a\\b";
+0

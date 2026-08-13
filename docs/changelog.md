@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.233 — 2026-08-13
+
+_Two gates, two classes of bug: the oracle found three places the parser was too
+permissive, and the backend-parity test found that `str_replace` had never worked
+when compiled to C._
+
+```
+  contrib/url/host.mere        scheme / userinfo / host / port, WHATWG
+  scripts/url_parity.sh        + authority section, 24 inputs vs node, per field
+  lib/codegen_c.ml             str_replace: allocate a str, not a raw buffer
+  test/parity/string_ops.mere  str_replace across four backends, with lengths
+```
+
+**`contrib/url/host.mere`.** The scheme and authority half of a WHATWG URL: cleaning,
+the scheme, userinfo / host / port, and `origin`. `rest` hands the path, query and
+fragment over untouched for the next slice. It returns `?url_parts` rather than failing,
+because rejecting input is half of what a URL parser does — and on the wasm backend
+`fail` sets a flag and returns a sentinel instead of unwinding, so a caller sitting
+between the failure and its `try_or` still runs. A rejection has to be a value.
+
+Two behaviours in here are the kind that become security bugs when an implementation
+guesses. A host that parses as a number is an **address**, in any base the Standard
+allows: `http://0x7f.1` is `127.0.0.1`, and an allowlist that only understands dotted
+decimal passes it through as a hostname and then resolves it to localhost. And a domain
+is lowercased while an opaque host is not — case folding belongs to the special schemes,
+not to hosts.
+
+**The authority gate: 24 inputs against node, compared field by field.** One line per
+input as `scheme|user|pass|host|port`, so a mismatch names the field rather than just
+the URL. Inputs node rejects must come back `None` from us too, because a parser that
+accepts *more* than the oracle is the failure mode that matters for anything that then
+makes a request. It found three:
+
+* `http://256.1.1.1` and `http://1.2.3.4.5` were accepted as hostnames. Conflating "the
+  IPv4 parse failed" with "so it must be a domain" is exactly the hole above, from the
+  other side. Fixed by asking first whether the host *ends in a number*: if it does the
+  host is an address and a bad one is invalid, and if it does not IPv4 never applies.
+* `http://a@b@h/` produced an unencoded username. The userinfo set includes `@`, so it
+  would re-split differently on the way out. Now `Percent.encode Percent.userinfo`.
+
+**`str_replace` was returning a buffer with no length header on the C backend.** A Mere
+`str` in C carries its length in a `size_t` at `[-1]`, written by `__lang_str_alloc`.
+`__lang_str_replace` allocated with the raw `__lang_region_alloc` instead, so
+`__lang_str_size` of its result read whatever bytes happened to precede the buffer in the
+region. Those bytes were zero often enough that **every replacement came back empty** —
+which is how this surfaced: `Url.clean` removes tabs with `str_replace`, so on the C
+backend it returned `""` and every valid URL was rejected, while node and the interpreter
+agreed with each other the whole time. The cap is a worst case, so the header is also
+corrected down to what was actually written. The empty-needle guard now tests the length
+rather than `old[0]`, so a needle that *is* a NUL byte is replaceable like any other.
+
+A sweep for the same shape found no other instance: `__lang_str_alloc` is the only other
+function that region-allocates directly, which is its job.
+
+`str_replace` had no cross-backend coverage at all — only an interpreter test — which is
+why this survived. `test/parity/string_ops.mere` now exercises eleven cases (shorter,
+longer, equal, absent, whole-string, empty subject, empty needle, overlapping, UTF-8,
+grow-from-one, then-concatenated) and **prints the length of every result as well as the
+text**. The length is the point: the text alone would not have caught a garbage header on
+every input. Reverting the fix turns that test red.
+
+---
+
 ## v0.1.232 — 2026-08-13
 
 _A percent-encode set is a list of bytes somebody transcribed, so it was checked against
