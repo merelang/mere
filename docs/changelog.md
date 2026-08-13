@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.232 — 2026-08-13
+
+_A percent-encode set is a list of bytes somebody transcribed, so it was checked against
+somebody else's implementation instead._
+
+```
+  contrib/url/percent.mere   7 sets, encode / decode
+  scripts/url_parity.sh      derives each set from node's URL, byte by byte
+```
+
+**`contrib/url/percent.mere`.** The URL Standard has no single escaping rule; it has a
+stack of percent-encode sets, and which one applies depends on the component being
+written. Getting the component wrong is not cosmetic — a `#` left unencoded in a path ends
+the path. So `encode` takes the set as a predicate on a byte and the named sets are
+supersets of one another: `c0_control ⊂ fragment`, and
+`c0_control ⊂ query ⊂ special_query`, and `query ⊂ path ⊂ userinfo ⊂ component`.
+
+Encoding walks bytes, not codepoints, which is what the Standard says and is the reason a
+`str` being a byte buffer is the right shape here. Decoding leaves a `%` that is not
+followed by two hex digits exactly as it found it: refusing would make a literal percent
+sign unrepresentable, and decoding it as zero would invent a NUL.
+
+**`scripts/url_parity.sh` derives the sets rather than asserting them.** For each byte in
+0x20..0x7E it puts that byte alone into a component of an http URL, reads node's
+serialisation back, and records whether it came out as `%XX`. That is node's set for the
+component; ours is diffed against it. A fixture file would only have covered the bytes
+somebody thought to write down — and this found two wrong sets on the first run:
+`fragment` was missing `` ` `` and `path` was missing `^`.
+
+`^` in the path set is in there because the oracle encodes it, which is not the same thing
+as the prose naming it. That is recorded at the definition, so the next person sees a
+citation rather than a magic number.
+
+Four bytes per component cannot be probed this way and the harness prints them as SKIP
+rather than passing them silently: a byte that delimits the component under test ends it
+instead of being escaped in it, a lone space is stripped by URL parsing before escaping
+happens, `.` in a path is resolved away, and `\` is normalised to `/` for the special
+schemes.
+
+`test/parity/url_percent.mere` holds all four backends to the same output.
+`scripts/url_parity.sh` skips when node is absent, like `qemu_virt.sh` does.
+
+**`contrib/http/query.mere`'s `url_encode` / `url_decode` are deliberately untouched.**
+They implement the query-string convention a server wants — an allowlist of `alnum -_.~` —
+which is not any of the Standard's sets. Changing them would change every existing
+caller's behaviour, so the two live side by side with the difference written down.
+
+Not here yet: the parser itself, punycode, and `decode` into `bytes`. That last one is
+blocked on the llvm `str` being `strlen`-based, so `Percent.decode "%00"` differs by
+backend; until that changes, callers that can receive `%00` should treat this as ASCII-safe.
+
+---
+
 ## v0.1.231 — 2026-08-13
 
 _The codepoint pair, written in the prelude rather than five times._

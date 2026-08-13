@@ -1,0 +1,123 @@
+// contrib/url/percent.mere — percent-encoding and -decoding, WHATWG sets.
+//
+// The URL Standard does not have one escaping rule; it has a stack of
+// "percent-encode sets", each a superset of the one before it, and which one
+// applies depends on which component of the URL you are writing. Getting the
+// component wrong is not cosmetic: a `#` left unescaped in a path ends the
+// path, and a `%` mis-decoded twice turns `%2500` into a NUL.
+//
+// So the encoder here takes the set as a predicate rather than baking one in,
+// and the named wrappers are the spec's sets:
+//
+//   c0_control  — the floor: C0 controls and everything above 0x7E
+//   fragment    — c0_control plus SPACE " < > backtick
+//   query       — c0_control plus SPACE " # < >
+//   special_query — query plus '        (for http/https/ws/wss/ftp/file)
+//   path        — query plus ? ^ backtick { }
+//   userinfo    — path plus / : ; = @ [ \ ] ^ |
+//   component   — userinfo plus $ % & + ,   (for a value going into a query)
+//
+// Usage:
+//   import "contrib/url/percent.mere";
+//   Percent.encode Percent.path "a b#c"        // "a%20b%23c"
+//   Percent.decode "a%20b"                     // "a b"
+//
+// Bytes, not codepoints. Encoding walks the UTF-8 bytes of the input, which is
+// what the standard says to do, and is why `str` being a byte buffer is the
+// right shape for this. Decoding produces bytes, so its result can hold
+// arbitrary values — see the caveat at the bottom.
+
+module Percent {
+
+  // --- the sets, as predicates on a byte ---------------------------------
+  // Each answers "must this byte be written as %XX?".
+
+  let c0_control = fn (b: int) -> b < 0x20 || b > 0x7E;
+
+  let fragment = fn (b: int) ->
+    c0_control b || b == 0x20 || b == 0x22 || b == 0x3C || b == 0x3E
+    || b == 0x60;
+
+  let query = fn (b: int) ->
+    c0_control b || b == 0x20 || b == 0x22 || b == 0x23 || b == 0x3C || b == 0x3E;
+
+  let special_query = fn (b: int) -> query b || b == 0x27;
+
+  // `^` is here because the oracle encodes it, not because the prose named it:
+  // scripts/url_parity.sh derives each set from node's URL byte by byte, and
+  // node writes %5E in a path. Matching a shipped implementation beats matching
+  // a reading of the spec, and the harness is what would notice if that changed.
+  let path = fn (b: int) ->
+    query b || b == 0x3F || b == 0x5E || b == 0x60 || b == 0x7B || b == 0x7D;
+
+  let userinfo = fn (b: int) ->
+    path b || b == 0x2F || b == 0x3A || b == 0x3B || b == 0x3D || b == 0x40
+    || b == 0x5B || b == 0x5C || b == 0x5D || b == 0x5E || b == 0x7C;
+
+  let component = fn (b: int) ->
+    userinfo b || b == 0x24 || b == 0x25 || b == 0x26 || b == 0x2B || b == 0x2C;
+
+  // --- hex ---------------------------------------------------------------
+
+  let _hex_digit = fn (d: int) -> if d < 10 then chr (48 + d) else chr (55 + d);
+
+  // -1 for anything that is not a hex digit, so a malformed escape is
+  // detectable rather than silently decoding as zero.
+  let _hex_val = fn (b: int) ->
+    if b >= 48 && b <= 57 then b - 48
+    else if b >= 65 && b <= 70 then b - 55
+    else if b >= 97 && b <= 102 then b - 87
+    else 0 - 1;
+
+  // --- encode ------------------------------------------------------------
+
+  let rec _enc = fn (should: int -> bool) -> fn (s: str) -> fn buf ->
+                 fn (i: int) -> fn (n: int) ->
+    if i >= n then strbuf_to_str buf
+    else
+      let b = ord (char_at s i) in
+      let _ =
+        if should b then
+          let _ = strbuf_push buf "%" in
+          let _ = strbuf_push buf (_hex_digit (bit_shr b 4)) in
+          strbuf_push buf (_hex_digit (bit_and b 15))
+        else strbuf_push buf (chr b) in
+      _enc should s buf (i + 1) n;
+
+  let encode = fn (should: int -> bool) -> fn (s: str) ->
+    _enc should s (strbuf_new ()) 0 (str_len s);
+
+  // --- decode ------------------------------------------------------------
+  //
+  // A `%` that is not followed by two hex digits is left alone, byte for byte.
+  // That is the standard's behaviour and it matters: refusing would make a
+  // literal percent sign in user input unrepresentable, and decoding it as
+  // zero would invent a NUL.
+
+  let rec _dec = fn (s: str) -> fn buf -> fn (i: int) -> fn (n: int) ->
+    if i >= n then strbuf_to_str buf
+    else
+      let b = ord (char_at s i) in
+      if b == 0x25 && i + 2 < n then
+        let hi = _hex_val (ord (char_at s (i + 1))) in
+        let lo = _hex_val (ord (char_at s (i + 2))) in
+        if hi >= 0 && lo >= 0 then
+          let _ = strbuf_push buf (chr (hi * 16 + lo)) in
+          _dec s buf (i + 3) n
+        else
+          let _ = strbuf_push buf (chr b) in
+          _dec s buf (i + 1) n
+      else
+        let _ = strbuf_push buf (chr b) in
+        _dec s buf (i + 1) n;
+
+  let decode = fn (s: str) -> _dec s (strbuf_new ()) 0 (str_len s);
+
+}
+
+// Caveat, and the reason there is no `decode_to_bytes` here yet: a decoded
+// value is bytes, and a `str` holding a NUL is not representable on the LLVM
+// backend, whose str is strlen-based. `Percent.decode "%00"` therefore differs
+// by backend. Until that is fixed, callers that can receive %00 should treat
+// this as ASCII-safe only; the URL parser above it never decodes into a path it
+// then measures.
