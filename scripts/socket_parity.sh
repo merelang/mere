@@ -88,7 +88,14 @@ sed "s/$PORT/$((PORT + 1))/g" "$TMP/sock.mere" > "$TMP/sockw.mere"
 # checked above and the script already skipped for it — so by this point a failed
 # component build is a failed component build, and reporting it as a skip made a
 # real break look like an environment that was merely incomplete.
-if ! MERE="$MERE" sh "$ROOT/scripts/build-component.sh" "$TMP/sockw.mere" \
+#
+# Executed directly rather than through `sh`, which is not a style choice:
+# build-component.sh declares `#!/usr/bin/env bash` and uses `set -o pipefail`,
+# which its pipeline needs — without it a failing `wasm-tools component wit`
+# would be swallowed by the `sed` after it and produce an empty WIT. Prefixing
+# `sh` overrides that shebang, and on a system where /bin/sh is dash the script
+# died on the `set` line. macOS never showed it, because there /bin/sh is bash.
+if ! MERE="$MERE" "$ROOT/scripts/build-component.sh" "$TMP/sockw.mere" \
        "$TMP/sock.component.wasm" >"$TMP/build.log" 2>&1; then
   echo "socket_parity: FAILED — the component build broke" >&2
   tail -20 "$TMP/build.log" >&2
