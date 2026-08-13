@@ -170,6 +170,9 @@ jobs:
       - name: encoding_parity (vs node's TextDecoder)
         run: sh scripts/encoding_parity.sh
 
+      - name: unicode_parity (vs node's Intl.Segmenter)
+        run: sh scripts/unicode_parity.sh
+
       - name: host_matrix (every builtin on every backend)
         run: sh scripts/host_matrix.sh
 
