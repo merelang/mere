@@ -1,8 +1,8 @@
-// contrib/url/host.mere — the scheme and authority half of a WHATWG URL.
+// contrib/url/host.mere — a WHATWG URL parser.
 //
-// Cleaning, the scheme, and the authority split into userinfo / host / port.
-// The path, query and fragment are the next slice; `rest` hands them over
-// untouched.
+// Cleaning, the scheme, the authority (userinfo / host / port), and — via
+// `path.mere` — the path, query and fragment. Absolute URLs only: resolving a
+// reference against a base is not here yet.
 //
 // Why a `?url_parts` and not a `fail`: on the wasm backend `fail` sets a flag
 // and returns a sentinel rather than unwinding, so a caller between the failure
@@ -11,28 +11,43 @@
 //
 // Usage:
 //   import "contrib/url/host.mere";
-//   match Url.parse "http://EXAMPLE.com:80/a" with
-//   | Some u -> u.host                      // "example.com", port elided
+//   match Url.parse "http://EXAMPLE.com:80/a/../b" with
+//   | Some u -> Url.href u                  // "http://example.com/b"
 //   | None -> "invalid"
 //
-// The two behaviours worth knowing about, because both are the kind of thing
-// that turns into a security bug when an implementation guesses:
+// The behaviours worth knowing about, because these are the kind of thing that
+// turns into a security bug when an implementation guesses:
 //
-//   * a domain is lowercased, an opaque host is not. `http://EXAMPLE.com` has
-//     host `example.com`; `foo://EXAMPLE.com` has host `EXAMPLE.com`.
 //   * a host that parses as a number is an IPv4 address, in any base the
 //     Standard allows. `http://0x7f.1` is `127.0.0.1`. An implementation that
 //     only understands dotted decimal will let that through an allowlist.
+//   * a domain is lowercased, an opaque host is not. `http://EXAMPLE.com` has
+//     host `example.com`; `foo://EXAMPLE.com` has host `EXAMPLE.com`.
+//   * a special scheme's authority does not need two slashes, or any. `http:h`
+//     is `http://h/`, and so are `http:/h` and `http:\\h`. A check that keys on
+//     `"//"` being present sees a relative reference where there is a host.
+//   * the path is never decoded. `%2f` stays `%2f`, so it is not a separator.
+//
+// Three fields are booleans rather than being folded into the strings, because
+// they are separate state and the serialisation needs them: `foo://` and `foo:`
+// both have host `""` but only one has an authority, and `http://h/?` has an
+// empty query that still serialises its `?`.
 
 import "percent.mere";
+import "path.mere";
 
 type url_parts = {
-  scheme: str,      // lowercased, no trailing colon
+  scheme: str,        // lowercased, no trailing colon
   username: str,
   password: str,
-  host: str,        // "example.com" / "127.0.0.1" / "[::1]" / "" for no authority
-  port: str,        // "" when absent or the scheme's default
-  rest: str,        // path + query + fragment, unparsed
+  host: str,          // "example.com" / "127.0.0.1" / "[::1]" / ""
+  port: str,          // "" when absent or the scheme's default
+  has_authority: bool,
+  path: str,          // normalised and encoded, or opaque
+  query: str,         // without the "?"
+  has_query: bool,
+  fragment: str,      // without the "#"
+  has_fragment: bool,
   special: bool,
 };
 
@@ -258,14 +273,24 @@ module Url {
             substring ui (colon + 1) (str_len ui),
             rest);
 
-  // Where the authority stops: the first of `/`, `?` or `#`. Backslash counts
-  // as a slash for the special schemes, which is why it is folded first.
+  // Where the authority stops: the first of `/`, `?` or `#`, plus `\` for a
+  // special scheme. `http://u\p@h/` has host `u` — the backslash ends the
+  // authority before the `@` is ever reached, so the `u\p` is not userinfo.
   let rec _auth_end = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+                      fn (special: bool) ->
     if i >= n then n
     else
       let c = char_at s i in
-      if c == "/" || c == "?" || c == "#" then i
-      else _auth_end s (i + 1) n;
+      if c == "/" || c == "?" || c == "#" || (special && c == "\\") then i
+      else _auth_end s (i + 1) n special;
+
+  // A special scheme takes any run of slashes and backslashes before its
+  // authority, including none at all.
+  let rec _skip_slashes = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then i
+    else
+      let c = char_at s i in
+      if c == "/" || c == "\\" then _skip_slashes s (i + 1) n else i;
 
   let _split_port = fn (hostport: str) ->
     if str_starts_with hostport "[" then
@@ -284,8 +309,55 @@ module Url {
             substring hostport (colon + 1) (str_len hostport));
 
   // --- parse -------------------------------------------------------------
-  // Absolute URLs only in this slice: without a scheme there is nothing to
-  // resolve against, and resolution against a base is the next one's job.
+  // Absolute URLs only: without a base there is nothing to resolve a relative
+  // reference against, and resolution is the next slice's job.
+
+  let _with_authority = fn (scheme: str) -> fn (special: bool) ->
+                        fn (body: str) ->
+    let ae = _auth_end body 0 (str_len body) special in
+    let auth = substring body 0 ae in
+    let tail = substring body ae (str_len body) in
+    let (raw_user, raw_pass, hostport) = _split_userinfo auth in
+    // `http://a@b@h/` has username `a%40b`: the userinfo set includes `@`, so
+    // an unencoded one would re-split differently on the way out.
+    let user = Percent.encode Percent.userinfo raw_user in
+    let pass = Percent.encode Percent.userinfo raw_pass in
+    let (h, p) = _split_port hostport in
+    match parse_host h special with
+    | None -> None
+    | Some host ->
+      // A special scheme must have a host; `http://` alone is not a URL. A
+      // non-special one may have an empty host — `foo://` is a URL.
+      if special && host == "" then None
+      else
+        match parse_port p scheme with
+        | None -> None
+        | Some port ->
+          let (nofrag, raw_frag, has_frag) = Path.split_fragment tail in
+          let (raw_path, raw_query, has_q) = Path.split_query nofrag in
+          Some (url_parts {
+            scheme = scheme, username = user, password = pass,
+            host = host, port = port, has_authority = true,
+            path = Path.normalize raw_path special,
+            query = Path.encode_query raw_query special, has_query = has_q,
+            fragment = Path.encode_fragment raw_frag, has_fragment = has_frag,
+            special = special });
+
+  // No authority. The path is opaque only when it does not start with `/`:
+  // `foo:/a/../b` is `foo:/b`, but `foo:a/../b` keeps its dots and `mailto:x@y`
+  // keeps its `@`.
+  let _no_authority = fn (scheme: str) -> fn (after: str) ->
+                      fn (is_opaque: bool) ->
+    let (nofrag, raw_frag, has_frag) = Path.split_fragment after in
+    let (raw_path, raw_query, has_q) = Path.split_query nofrag in
+    Some (url_parts {
+      scheme = scheme, username = "", password = "",
+      host = "", port = "", has_authority = false,
+      path = if is_opaque then Path.opaque raw_path
+             else Path.normalize raw_path false,
+      query = Path.encode_query raw_query false, has_query = has_q,
+      fragment = Path.encode_fragment raw_frag, has_fragment = has_frag,
+      special = false });
 
   let parse = fn (input: str) ->
     let s = clean input in
@@ -294,49 +366,41 @@ module Url {
     else
       let scheme = to_lower (substring s 0 slen) in
       let special = is_special scheme in
-      let raw_after = substring s (slen + 1) (str_len s) in
-      // For a special scheme a backslash is a slash, everywhere.
-      let after = if special then str_replace raw_after "\\" "/" else raw_after in
-      if str_starts_with after "//" then
-        let body = substring after 2 (str_len after) in
-        let ae = _auth_end body 0 (str_len body) in
-        let auth = substring body 0 ae in
-        let rest = substring body ae (str_len body) in
-        let (raw_user, raw_pass, hostport) = _split_userinfo auth in
-        // `http://a@b@h/` has username `a%40b`: the userinfo set includes `@`,
-        // so an unencoded one would re-split differently on the way out.
-        let user = Percent.encode Percent.userinfo raw_user in
-        let pass = Percent.encode Percent.userinfo raw_pass in
-        let (h, p) = _split_port hostport in
-        match parse_host h special with
-        | None -> None
-        | Some host ->
-          // A special scheme must have a host; `http://` alone is not a URL.
-          if special && host == "" then None
-          else
-            match parse_port p scheme with
-            | None -> None
-            | Some port ->
-              Some (url_parts { scheme = scheme, username = user,
-                                password = pass, host = host, port = port,
-                                rest = rest, special = special })
+      let after = substring s (slen + 1) (str_len s) in
+      if special then
+        // The authority is not optional for a special scheme, and the slashes
+        // before it are: `http:h`, `http:/h`, `http:\\h` and `http:///h` all
+        // have host `h`. An empty authority is then rejected below.
+        let start = _skip_slashes after 0 (str_len after) in
+        _with_authority scheme special (substring after start (str_len after))
+      else if str_starts_with after "//" then
+        _with_authority scheme special (substring after 2 (str_len after))
       else
-        // No authority. `mailto:x@y` keeps `x@y` as an opaque path, and a
-        // special scheme without `//` is invalid.
-        if special then None
-        else
-          Some (url_parts { scheme = scheme, username = "", password = "",
-                            host = "", port = "", rest = after,
-                            special = false });
+        // `\` is not an authority marker for a non-special scheme: `foo:\\h` is
+        // an opaque path.
+        _no_authority scheme after (not (str_starts_with after "/"));
+
+  // --- serialisation -----------------------------------------------------
+
+  let _cred = fn (u: url_parts) ->
+    if u.username == "" && u.password == "" then ""
+    else if u.password == "" then u.username ++ "@"
+    else u.username ++ ":" ++ u.password ++ "@";
 
   // scheme://user:pass@host:port — what an origin check compares.
   let origin = fn (u: url_parts) ->
-    let cred =
-      if u.username == "" && u.password == "" then ""
-      else if u.password == "" then u.username ++ "@"
-      else u.username ++ ":" ++ u.password ++ "@" in
     let portpart = if u.port == "" then "" else ":" ++ u.port in
-    if u.host == "" then u.scheme ++ ":"
-    else u.scheme ++ "://" ++ cred ++ u.host ++ portpart;
+    if not u.has_authority then u.scheme ++ ":"
+    else u.scheme ++ "://" ++ _cred u ++ u.host ++ portpart;
+
+  // The whole URL back out. Round-tripping is the honest test of the parse: a
+  // field that was dropped or a delimiter that was invented shows up here.
+  let href = fn (u: url_parts) ->
+    let portpart = if u.port == "" then "" else ":" ++ u.port in
+    let auth =
+      if u.has_authority then "//" ++ _cred u ++ u.host ++ portpart else "" in
+    let q = if u.has_query then "?" ++ u.query else "" in
+    let f = if u.has_fragment then "#" ++ u.fragment else "" in
+    u.scheme ++ ":" ++ auth ++ u.path ++ q ++ f;
 
 }

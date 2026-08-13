@@ -1,22 +1,24 @@
 # contrib/url — URL handling (Mere implementation)
 
-Percent-encoding to the WHATWG URL Standard's sets, and the scheme-and-authority
-half of the parser. The path, query and fragment are the next slice.
+A WHATWG URL parser: cleaning, scheme, authority, path, query, fragment, and
+serialisation back out. Absolute URLs only — resolving a relative reference
+against a base is not here yet.
 
 ## Files
 
 | file | exports | lines |
 |---|---|---|
 | `percent.mere` | `module Percent { c0_control, fragment, query, special_query, path, userinfo, component, encode, decode }` | ~120 |
-| `host.mere` | `type url_parts`, `module Url { parse, origin, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number, last_index_of }` | ~340 |
+| `path.mere` | `module Path { split_fragment, split_query, is_single_dot, is_double_dot, normalize, opaque, encode_query, encode_fragment }` | ~110 |
+| `host.mere` | `type url_parts`, `module Url { parse, href, origin, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number, last_index_of }` | ~400 |
 
 ## Usage
 
 ```
 import "contrib/url/host.mere";
 
-match Url.parse "http://EXAMPLE.com:80/a" with
-| Some u -> u.host ++ u.rest      // "example.com" ++ "/a" — port 80 elided
+match Url.parse "http://EXAMPLE.com:80/a/../b" with
+| Some u -> Url.href u            // "http://example.com/b"
 | None -> "invalid"
 
 Percent.encode Percent.path "a b#c"      // "a%20b%23c"
@@ -28,9 +30,15 @@ of what a URL parser does — and on the wasm backend `fail` sets a flag and
 returns a sentinel instead of unwinding, so a caller between the failure and its
 `try_or` still runs. A rejection has to be a value.
 
-## The two behaviours worth knowing about
+Three fields of `url_parts` are booleans — `has_authority`, `has_query`,
+`has_fragment` — because presence and content are separate state and the
+serialisation needs both. `foo://` and `foo:` have the same empty host but only
+one has an authority; `http://h/?` has an empty query that still writes its `?`.
+Folding either into the string would lose a distinction the Standard keeps.
 
-Both are the kind of thing that becomes a security bug when an implementation
+## The behaviours worth knowing about
+
+These are the kind of thing that becomes a security bug when an implementation
 guesses instead of reading the standard.
 
 **A host that parses as a number is an address, in any base.** `http://0x7f.1`
@@ -48,10 +56,34 @@ URLs. Accepting them as hostnames was the bug.
 `example.com`, but `foo://EXAMPLE.com` has host `EXAMPLE.com` — case folding is a
 property of the special schemes, not of hosts.
 
+**A special scheme's authority needs no slashes — or any number of them.**
+`http:h`, `http:/h`, `http:\\h` and `http:///h` all have host `h`. A check that
+keys on `"//"` being present sees a relative reference where there is in fact a
+host. And a backslash *ends* the authority: `http://u\p@h/` has host `u`, not
+`h`, because the `\` comes before the `@` ever does.
+
+**The path is never decoded.** `%2f` stays `%2f` in whatever case it arrived in,
+so it is not a separator; `%41` stays `%41`. Decoding either would turn an
+escaped slash into a real one, which is a path-traversal bug with a long
+history. Dot segments *are* resolved, and the match includes their encoded
+spellings (`%2e`, `.%2e`, `%2e%2e`, case-insensitively) but only as a whole
+segment — `..%2f` is a segment beginning with two dots, not a dot segment.
+
+**Backslash folding belongs to the path, not the whole URL.**
+`http://h/a\b?c\d#e\f` has path `/a/b` and query `c\d` — the query keeps its
+backslash, unencoded, and so does the fragment.
+
 Also: the default port is elided (`http://h:80` and `http://h` have the same
-origin), userinfo ends at the **last** `@` so a password may contain one, and
+origin), userinfo ends at the **last** `@` so a password may contain one,
 userinfo is percent-encoded on the way out (`http://a@b@h/` has username `a%40b`
-— an unencoded `@` would re-split differently when serialised).
+— an unencoded `@` would re-split differently when serialised), and a trailing
+dot segment leaves an empty segment behind so the trailing slash survives
+(`/a/b/..` is `/a/`, not `/a`).
+
+An **opaque path** — no authority and no leading `/` — is not segmented and gets
+only the `c0_control` set, which is why `mailto:a b` keeps its space. A path is
+opaque only in that case: `foo:/a/../b` is `foo:/b`, but `foo:a/../b` keeps its
+dots.
 
 ## How this was checked
 
@@ -63,12 +95,16 @@ of the same specification that nobody here wrote. Two ways:
   node's set, which is diffed against ours. Derivation rather than fixtures,
   because a fixture file only covers the bytes somebody thought to write down.
   It found `fragment` missing `` ` `` and `path` missing `^` on the first run.
-* **The authority, per field.** 24 inputs, each compared as
-  `scheme|user|pass|host|port` so a mismatch names the field rather than just
-  the URL. Inputs node rejects must come back `None` from us too: a parser that
-  accepts *more* than the oracle is the failure mode that matters for anything
-  that then makes a request. This found three bugs — the two numeric hosts
-  above, and the unencoded username.
+* **The parse, per field.** 95 inputs, each compared as
+  `scheme|user|pass|host|port|path|search|hash|href` so a mismatch names the
+  field rather than just the URL. Inputs node rejects must come back `None` from
+  us too: a parser that accepts *more* than the oracle is the failure mode that
+  matters for anything that then makes a request. This found three bugs — the
+  two numeric hosts above, and the unencoded username.
+
+  `href` is in there because it is the only field that pins state the other
+  eight cannot show. It is also what catches a dropped field or an invented
+  delimiter, which a per-field check on its own will miss.
 
 Some bytes cannot be probed by derivation and the harness prints them as SKIP
 rather than passing them silently: a byte that delimits the component under test
@@ -84,8 +120,6 @@ every URL was rejected — with node agreeing with the interpreter the whole tim
 
 ## Not here yet
 
-- Path normalisation (`.` / `..`), the query, and the fragment. `rest` hands
-  them over untouched.
 - Resolution against a base URL. Absolute URLs only.
 - IPv6 parsing and re-serialisation. A literal is carried through in its
   brackets, and only checked for a closing one.

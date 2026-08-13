@@ -1,0 +1,47 @@
+// url_parse_demo: what contrib/url does to a URL, field by field.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../contrib/url/host.mere";
+
+let field = fn (label: str) -> fn (v: str) ->
+  if v == "" then "" else "  " ++ label ++ "=" ++ v;
+
+let flag = fn (label: str) -> fn (b: bool) -> if b then "  " ++ label else "";
+
+let dump = fn (s: str) ->
+  match Url.parse s with
+  | None -> print (s ++ "\n  -> INVALID")
+  | Some u ->
+    print (s ++ "\n  -> " ++ Url.href u
+           ++ "\n    " ++ field "scheme" u.scheme ++ field "user" u.username
+           ++ field "pass" u.password ++ field "host" u.host
+           ++ field "port" u.port ++ field "path" u.path
+           ++ field "query" u.query ++ field "frag" u.fragment
+           ++ flag "+authority" u.has_authority ++ flag "+query" u.has_query
+           ++ flag "+frag" u.has_fragment ++ flag "+special" u.special);
+
+let _ = print "=== canonicalisation: case, default port, dot segments ===";
+let _ = dump "HTTP://EXAMPLE.com:80/a/b/../c";
+
+let _ = print "\n=== a numeric host is an address, in any base ===";
+let _ = dump "http://0x7f.1/";
+let _ = dump "http://0177.1/";
+let _ = dump "http://1.2/";
+
+let _ = print "\n=== and a bad one is invalid, not a hostname ===";
+let _ = dump "http://256.1.1.1/";
+
+let _ = print "\n=== a special scheme needs no slashes; a backslash is one ===";
+let _ = dump "http:h";
+let _ = dump "http://h/a\\b?c\\d";
+
+let _ = print "\n=== presence is not content: an empty query still has its ? ===";
+let _ = dump "http://h/?";
+let _ = dump "http://h/";
+
+let _ = print "\n=== no authority, and the opaque path that comes with it ===";
+let _ = dump "mailto:a b";
+let _ = dump "foo:/a/../b";
+let _ = dump "foo:a/../b";
+0

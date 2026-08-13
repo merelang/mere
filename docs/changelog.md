@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.234 — 2026-08-13
+
+_The rest of the URL, and two places where the previous slice's simplifications
+turned out to be wrong about where a delimiter stops mattering._
+
+```
+  contrib/url/path.mere    dot segments, query / fragment split, per-piece encoding
+  contrib/url/host.mere    the authority rules corrected; href
+  scripts/url_parity.sh    95 inputs vs node, nine fields each
+```
+
+**`contrib/url/path.mere`.** Splitting `rest` into path / query / fragment, resolving `.`
+and `..`, and encoding each piece with its own set. The fragment starts at the **first**
+`#` and the query at the first `?` before it; neither delimiter is special inside the
+fragment, so `#a?b` is a fragment of `a?b`.
+
+A dot segment is matched on the **whole** segment and includes its percent-encoded
+spellings case-insensitively — `.`, `%2e`, `..`, `.%2e`, `%2e.`, `%2e%2e`. So `/a/%2E/b` is
+`/a/b`, but `/a/..%2f` is left exactly as it is: `..%2f` is a segment that begins with two
+dots, not a dot segment. And a **trailing** dot segment leaves an empty segment behind,
+which is what keeps the trailing slash: `/a/b/..` is `/a/`, not `/a`.
+
+The path is never decoded. `%41` stays `%41` and `%2f` stays `%2f` in whatever case it
+arrived in — decoding an escaped slash into a separator is a path-traversal bug with a long
+history.
+
+An **opaque path** — no authority *and* no leading `/` — is not segmented and gets only the
+`c0_control` set, which is why `mailto:a b` keeps its space. `foo:/a/../b` is `foo:/b`, but
+`foo:a/../b` keeps its dots.
+
+**Two things the previous slice had wrong, both found by widening the oracle corpus.**
+
+* **A special scheme's authority needs no slashes, or any number of them.** `http:h`,
+  `http:/h`, `http:\\h` and `http:///h` all have host `h`. The old code required `"//"` and
+  rejected the rest, so it saw a relative reference where there was in fact a host — which
+  is the shape of a real allowlist bypass. A backslash also *ends* an authority:
+  `http://u\p@h/` has host `u`, because the `\` comes before the `@` ever does.
+* **Backslash folding belongs to the path, not the whole URL.** The old code folded `\` to
+  `/` across everything after the scheme. `http://h/a\b?c\d#e\f` has path `/a/b` but query
+  `c\d` and fragment `e\f`, both keeping the backslash and both leaving it unencoded.
+
+**`href`, and three booleans.** `has_authority`, `has_query` and `has_fragment` are fields
+rather than being folded into the strings, because presence and content are separate state:
+`foo://` and `foo:` have the same empty host but only one has an authority, and
+`http://h/?` has an empty query that still serialises its `?`. `href` is what needs them,
+and round-tripping is the honest test of a parse — a dropped field or an invented delimiter
+shows up there and nowhere else.
+
+**The gate is now one section of nine fields over 95 inputs**
+(`scheme|user|pass|host|port|path|search|hash|href`), up from five fields over 24. `search`
+and `hash` are derived from the two bools to match node's shape, where the delimiter is
+carried when the component is non-empty and dropped when it is present but empty.
+
+`test/parity/url_host.mere` grew to match, and `examples/url_parse_demo.mere` prints every
+field of a parse. Both hold all four backends to one output.
+
+One find worth writing down for anyone else generating Mere source from a shell: a `{` in a
+string literal opens interpolation, so a corpus entry like `mailto:a{b` has to be escaped
+as `\{`. The compiler's error message says so exactly, which is the only reason this cost
+one run instead of an afternoon.
+
+---
+
 ## v0.1.233 — 2026-08-13
 
 _Two gates, two classes of bug: the oracle found three places the parser was too

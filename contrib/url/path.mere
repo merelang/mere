@@ -1,0 +1,106 @@
+// contrib/url/path.mere — the path, query and fragment of a WHATWG URL.
+//
+// Three jobs, and they are separate because the Standard treats them
+// separately:
+//
+//   * splitting `rest` into path / query / fragment. The fragment starts at the
+//     FIRST `#`; the query at the first `?` before it. Neither delimiter is
+//     special inside the fragment, so `#a?b` is a fragment of `a?b`.
+//   * resolving `.` and `..` segments in a path that has one. A path is only
+//     opaque when there is no authority and it does not start with `/`.
+//   * percent-encoding each piece with its own set — the path set for a path,
+//     the query set (or `special_query`) for a query, the fragment set for a
+//     fragment, and nothing but `c0_control` for an opaque path.
+//
+// Two things measured against another implementation rather than read off the
+// prose, because both are easy to get plausibly wrong:
+//
+//   * a dot segment is matched on the WHOLE segment and includes its
+//     percent-encoded spellings, case-insensitively: `.`, `%2e`, `..`, `.%2e`,
+//     `%2e.`, `%2e%2e`. So `/a/%2E/b` is `/a/b`, but `/a/..%2f` is left alone —
+//     `..%2f` is not a dot segment, it is a segment that starts with two dots.
+//   * a trailing dot segment leaves an empty segment behind, which is what
+//     keeps the trailing slash: `/a/b/..` is `/a/`, not `/a`.
+//
+// The path is never decoded. `%41` stays `%41` and `%2f` stays `%2f` in
+// whatever case it arrived in — decoding it would turn an escaped slash into a
+// separator, which is a path-traversal bug with a long history.
+
+import "percent.mere";
+
+module Path {
+
+  // --- splitting ---------------------------------------------------------
+  // `has` is separate from the string because they are separate state: a URL
+  // ending in a bare `?` has an empty query that still serialises the `?`, and
+  // `http://h/?` and `http://h/` are not the same URL.
+
+  let split_fragment = fn (s: str) ->
+    let i = str_index_of s "#" in
+    if i < 0 then (s, "", false)
+    else (substring s 0 i, substring s (i + 1) (str_len s), true);
+
+  let split_query = fn (s: str) ->
+    let i = str_index_of s "?" in
+    if i < 0 then (s, "", false)
+    else (substring s 0 i, substring s (i + 1) (str_len s), true);
+
+  // --- dot segments ------------------------------------------------------
+
+  let is_single_dot = fn (seg: str) ->
+    let s = to_lower seg in s == "." || s == "%2e";
+
+  let is_double_dot = fn (seg: str) ->
+    let s = to_lower seg in
+    s == ".." || s == ".%2e" || s == "%2e." || s == "%2e%2e";
+
+  // --- list helpers ------------------------------------------------------
+  // `_pop` returns the list itself when empty rather than a fresh `Nil`: a bare
+  // `Nil` here is polymorphic and needs an annotation to survive codegen, and
+  // there is nothing to annotate it with that is not already `out`'s type.
+
+  let _is_last = fn (t) -> match t with Nil -> true | Cons (_, _) -> false;
+  let _pop = fn (out) -> match out with Nil -> out | Cons (_, t) -> t;
+  let _tail = fn (l) -> match l with Nil -> l | Cons (_, t) -> t;
+
+  // --- normalisation -----------------------------------------------------
+  // `out` accumulates in reverse. A `..` pops it; a `.` does not; anything else
+  // is encoded and pushed. Either dot segment, when it is the last one, pushes
+  // an empty segment so the path keeps its trailing slash.
+
+  let rec _walk = fn (segs) -> fn (out) ->
+    match segs with
+    | Nil -> out
+    | Cons (h, t) ->
+      if is_double_dot h then
+        let popped = _pop out in
+        _walk t (if _is_last t then Cons ("", popped) else popped)
+      else if is_single_dot h then
+        _walk t (if _is_last t then Cons ("", out) else out)
+      else
+        _walk t (Cons (Percent.encode Percent.path h, out));
+
+  // A special scheme's backslash is a slash, and it is folded here rather than
+  // over the whole input: it is a separator only in the path and the authority.
+  // `http://h/a\b?c\d` has path `/a/b` and query `c\d`, both unencoded.
+  let normalize = fn (raw: str) -> fn (special: bool) ->
+    let folded = if special then str_replace raw "\\" "/" else raw in
+    if str_len folded == 0 then
+      // A special URL's path is never empty; anything else's may be.
+      (if special then "/" else "")
+    else
+      let segs = _tail (str_split folded "/") in
+      "/" ++ str_join "/" (list_rev (_walk segs Nil));
+
+  // An opaque path is not segmented, so nothing is resolved and only the
+  // c0_control set applies — a space survives in `mailto:a b`.
+  let opaque = fn (raw: str) -> Percent.encode Percent.c0_control raw;
+
+  // --- query and fragment ------------------------------------------------
+
+  let encode_query = fn (raw: str) -> fn (special: bool) ->
+    Percent.encode (if special then Percent.special_query else Percent.query) raw;
+
+  let encode_fragment = fn (raw: str) -> Percent.encode Percent.fragment raw;
+
+}
