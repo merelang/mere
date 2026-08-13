@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.238 — 2026-08-13
+
+_The first table in this project too large to write as code — so it is generated, and the
+question of what a 35KB literal does to five backends is answered by measuring it._
+
+```
+  scripts/gen_jis_index.sh        derives both JIS indexes from the Standard's own files
+  contrib/encoding/jis_index.mere generated: 2 x 8,836 slots as fixed-width hex
+  contrib/encoding/jis.mere       Shift_JIS and EUC-JP
+  scripts/encoding_parity.sh      + 196,608 sequences, compared a different way
+```
+
+**The table question, settled by measurement.** A 35,344-character string literal compiles
+and runs **identically on interp, C, LLVM and Wasm**, and `mere -rv` emits a 37,633-byte
+RV32I image from it — so the worry about what a large literal does to a backend's rodata is
+answered rather than assumed. (RV32I verified at emit; running it needs an emulator that
+lives elsewhere.) No startup expansion, no data file, no compression: a slot is four O(1)
+`char_at` reads.
+
+**The encoding of the table is decided by the LLVM backend's `str`, not by size.** Raw 16-bit
+values would be half as long, and are unusable: a `str` there is `strlen`-based and a raw
+table is full of 0x00 bytes (U+00A2 is `00 A2`). Fixed-width hexadecimal is NUL-free by
+construction, and `0000` doubles as the hole sentinel because U+0000 is not a mapping either
+table produces. Two open questions meeting in one design decision is worth writing down.
+
+**`contrib/encoding/jis.mere`.** Shift_JIS and EUC-JP. Four details that are easy to get
+plausibly wrong: Shift_JIS's lead offset is **two** numbers (0x81 below 0xA0, 0xC1 above,
+because the single-byte katakana range sits in the middle of what would otherwise be one
+contiguous lead range); there is a **private-use window past the end of the table** (pointers
+8836..10715 are U+E000 onwards, the vendor extensions the encoding grew); an unmapped pair
+**puts an ASCII trail byte back** (`82 40` is U+FFFD then `@`, the same rule as UTF-8's);
+and EUC-JP has **two tables and a three-byte form**, a 0x8F lead selecting JIS X 0212 for the
+pair that follows it.
+
+**The tables are derived from the Standard, not from node — and that is a change of oracle
+with a measured reason.** node's `shift_jis` is ICU's CP932. Its `index jis0208` is
+**identical** to the Standard's in all 8,836 slots, but its `index jis0212` maps **21**
+pointers the Standard does not (from pointer 7708, the small Roman numerals), it remaps three
+single bytes in a cycle (0x1A→U+001C→U+007F→U+001A), it treats 0x80 as an error where the
+Standard returns U+0080, and its error recovery consumes a malformed sequence whole instead
+of putting an ASCII trail back. A browser implements the Standard, and accepting 21 code
+points the Standard does not is the same failure mode `contrib/url` guards against — agreeing
+with an implementation instead of a specification, in the permissive direction.
+
+So the generator reads the Standard's published index files and **pins each file's
+`Identifier:` hash**, which is the oracle-version lesson applied to a data file that states
+its own version.
+
+**The gate keeps node, and asserts something exact rather than something weaker.** Strict
+equality would be asserting ICU. Instead: **the two implementations never disagree about
+which character a byte sequence is** — 75,547 inputs that both call characters, all
+agreeing — and every remaining difference must be either error handling (U+FFFD on at least
+one side) or the named three-cycle. Anything else is a table or pointer bug and fails. The
+sweep is exhaustive over all three two-byte spaces (196,608 more sequences, 268,032 in
+total).
+
+That framing was not chosen up front. The first run reported thousands of differences; each
+class was then measured and named, and what fell out was that the disagreements are entirely
+about error handling and never about identity. A gate that says that is more useful than one
+that says "equal".
+
+---
+
 ## v0.1.237 — 2026-08-13
 
 _A decoder's interesting behaviour is all in its error cases, and the Encoding Standard

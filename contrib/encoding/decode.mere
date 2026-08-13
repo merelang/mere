@@ -27,6 +27,8 @@
 //   | Some name -> Encoding.decode name (read_bytes "page.html")
 //   | None -> ""
 
+import "jis.mere";
+
 module Encoding {
 
   let replacement = 65533;   // U+FFFD
@@ -194,14 +196,18 @@ module Encoding {
     _sb b 0 (bytes_len b) (strbuf_new ());
 
   // --- dispatch ----------------------------------------------------------
-  // `None` for a name this slice does not implement yet, which is a different
-  // answer from `label_of` returning `None` for a label nobody recognises. A
-  // caller that gets `None` here knows the page named a real encoding and
-  // should say so rather than guess.
+  // Still `?str`, and still for a reason: an encoding whose label resolves but
+  // which has no decoder here is a different answer from a label nobody
+  // recognises, and a caller should be able to say which happened rather than
+  // guess. Every label `label_of` returns now has a decoder, so the `None` is
+  // reserved for the next encoding added to the label table ahead of its
+  // decoder.
 
   let decode = fn (name: str) -> fn (b: bytes) ->
     if name == "utf-8" then Some (decode_utf8 b)
     else if name == "windows-1252" then Some (decode_windows_1252 b)
+    else if name == "shift_jis" then Some (Jis.decode_shift_jis b)
+    else if name == "euc-jp" then Some (Jis.decode_euc_jp b)
     else None;
 
   // The whole job in one call: a label off a page and its bytes. Falls back to

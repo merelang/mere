@@ -68,6 +68,8 @@ fail=0
 cat > "$TMP/sweep.js" <<'NODE'
 const u8 = new TextDecoder("utf-8");
 const cp = new TextDecoder("windows-1252");
+const sj = new TextDecoder("shift_jis");
+const ej = new TextDecoder("euc-jp");
 const out = [];
 const emit = (dec, bytes) => {
   const s = dec.decode(new Uint8Array(bytes));
@@ -78,6 +80,10 @@ for (let a = 0; a < 256; a++) for (let b = 0; b < 256; b++) emit(u8, [a, b]);
 for (let a = 0xe0; a <= 0xef; a++) for (let c = 0; c < 256; c++) emit(u8, [a, c, 0x80]);
 for (let a = 0xf0; a <= 0xf4; a++) for (let c = 0; c < 256; c++) emit(u8, [a, c, 0x80, 0x80]);
 for (let a = 0; a < 256; a++) emit(cp, [a]);
+for (let a = 0; a < 256; a++) for (let b = 0; b < 256; b++) emit(sj, [a, b]);
+for (let a = 0; a < 256; a++) for (let b = 0; b < 256; b++) emit(ej, [a, b]);
+// EUC-JP's three-byte form: 0x8F selects JIS X 0212 for the pair after it.
+for (let a = 0; a < 256; a++) for (let b = 0; b < 256; b++) emit(ej, [0x8f, a, b]);
 process.stdout.write(out.join("\n") + "\n");
 NODE
 node "$TMP/sweep.js" > "$TMP/want.txt"
@@ -101,6 +107,8 @@ let cps = fn (s: str) ->
 let u8 = fn (hex: str) -> print (cps (Encoding.decode_utf8 (bytes_of_hex hex)));
 let cp = fn (hex: str) ->
   print (cps (Encoding.decode_windows_1252 (bytes_of_hex hex)));
+let sj = fn (hex: str) -> print (cps (Jis.decode_shift_jis (bytes_of_hex hex)));
+let ej = fn (hex: str) -> print (cps (Jis.decode_euc_jp (bytes_of_hex hex)));
 
 let rec one = fn (a: int) ->
   if a > 255 then 0 else let _ = u8 (hx a) in one (a + 1);
@@ -125,11 +133,31 @@ let rec four = fn (a: int) ->
 let rec sb = fn (a: int) ->
   if a > 255 then 0 else let _ = cp (hx a) in sb (a + 1);
 
+let rec sj_inner = fn (a: int) -> fn (b: int) ->
+  if b > 255 then 0 else let _ = sj (hx a ++ hx b) in sj_inner a (b + 1);
+let rec sj_all = fn (a: int) ->
+  if a > 255 then 0 else let _ = sj_inner a 0 in sj_all (a + 1);
+
+let rec ej_inner = fn (a: int) -> fn (b: int) ->
+  if b > 255 then 0 else let _ = ej (hx a ++ hx b) in ej_inner a (b + 1);
+let rec ej_all = fn (a: int) ->
+  if a > 255 then 0 else let _ = ej_inner a 0 in ej_all (a + 1);
+
+// The three-byte form: 0x8F selects JIS X 0212 for the pair after it.
+let rec ej3_inner = fn (a: int) -> fn (b: int) ->
+  if b > 255 then 0
+  else let _ = ej ("8f" ++ hx a ++ hx b) in ej3_inner a (b + 1);
+let rec ej3_all = fn (a: int) ->
+  if a > 255 then 0 else let _ = ej3_inner a 0 in ej3_all (a + 1);
+
 let _ = one 0;
 let _ = two 0;
 let _ = three 0xE0;
 let _ = four 0xF0;
 let _ = sb 0;
+let _ = sj_all 0;
+let _ = ej_all 0;
+let _ = ej3_all 0;
 0
 MERE
 ( ulimit -t 300; "$MERE" "$ROOT/examples/.enc_sweep_tmp.mere" ) | sed '$d' > "$TMP/ours.txt"
@@ -151,15 +179,76 @@ report() {
   fi
 }
 
+# Shift_JIS and EUC-JP need a different comparison, because for these two node is
+# not the Standard: its `shift_jis` is ICU's CP932. Measured, not assumed:
+#
+#   * `index jis0208` is IDENTICAL in all 8,836 slots, and `index jis0212`
+#     differs in 21 that ICU maps and the Standard does not (from pointer 7708,
+#     the small Roman numerals — NEC/IBM extensions).
+#   * ICU remaps three single bytes in a cycle, 0x1A→U+001C→U+007F→U+001A, and
+#     treats 0x80 as an error where the Standard returns U+0080.
+#   * ICU's error recovery consumes a malformed sequence whole; the Standard puts
+#     an ASCII trail byte back, so `82 40` is U+FFFD then `@` rather than one
+#     U+FFFD. The same rule as UTF-8's, for the same reason.
+#
+# So strict equality would be asserting ICU. What IS asserted is the strongest
+# statement that survives those differences, and it is a strong one: **the two
+# implementations never disagree about WHICH character a byte sequence is.** Every
+# difference must be either an error-handling difference (U+FFFD on at least one
+# side) or the named three-cycle. Anything else is a table or pointer bug and
+# fails.
+report_jis() {
+  name=$1; from=$2; count=$3
+  sed -n "${from},$((from + count - 1))p" "$TMP/want.txt" > "$TMP/sec_want"
+  sed -n "${from},$((from + count - 1))p" "$TMP/ours.txt" > "$TMP/sec_ours"
+  # The section's line index maps back to its input bytes: for the 2-byte sweeps
+  # index i is (i>>8, i&255), and for the 0x8F sweep the same pair after the 0x8F.
+  # Arguments by environment rather than by position: `node -e` does not put them
+  # at a stable index in process.argv.
+  JIS_WANT="$TMP/sec_want" JIS_OURS="$TMP/sec_ours" JIS_COUNT="$count" JIS_NAME="$name" \
+  node -e '
+    const fs = require("fs");
+    const w = fs.readFileSync(process.env.JIS_WANT, "utf8").split("\n");
+    const o = fs.readFileSync(process.env.JIS_OURS, "utf8").split("\n");
+    const F = "65533", cycle = new Set([0x1a, 0x1c, 0x7f]);
+    let agree = 0, bothChar = 0, errShape = 0, threeCycle = 0;
+    const unexplained = [];
+    for (let i = 0; i < +process.env.JIS_COUNT; i++) {
+      const a = w[i], b = o[i];
+      const aF = a.split(" ").includes(F), bF = b.split(" ").includes(F);
+      if (!aF && !bF) bothChar++;
+      if (a === b) { agree++; continue; }
+      if (aF || bF) { errShape++; continue; }
+      const x = i >> 8, y = i & 255;
+      if (cycle.has(x) || cycle.has(y)) { threeCycle++; continue; }
+      unexplained.push(x.toString(16).padStart(2, "0") + " " + y.toString(16).padStart(2, "0") +
+                       "  node[" + a + "]  ours[" + b + "]");
+    }
+    const pad = (s) => "  " + s;
+    if (unexplained.length) {
+      console.log("  FAIL  " + process.env.JIS_NAME);
+      console.log("        " + unexplained.length + " differences that are neither error handling nor the ICU three-cycle:");
+      for (const u of unexplained.slice(0, 8)) console.log("          " + u);
+      process.exit(1);
+    }
+    console.log("  ok    " + process.env.JIS_NAME + "  (" + bothChar +
+      " inputs both call characters, all agreeing; " + errShape +
+      " error-handling differences, " + threeCycle + " ICU three-cycle)");
+  ' || fail=1
+}
+
 if [ "$(wc -l < "$TMP/want.txt")" != "$(wc -l < "$TMP/ours.txt")" ]; then
   echo "  FAIL  sweep produced $(wc -l < "$TMP/ours.txt") lines, expected $(wc -l < "$TMP/want.txt")"
   fail=1
 else
-  report "utf8 1-byte"     1     256
-  report "utf8 2-byte"     257   65536
-  report "utf8 3-byte lead" 65793 4096
-  report "utf8 4-byte lead" 69889 1280
-  report "windows-1252"    71169 256
+  report "utf8 1-byte"      1      256
+  report "utf8 2-byte"      257    65536
+  report "utf8 3-byte lead" 65793  4096
+  report "utf8 4-byte lead" 69889  1280
+  report "windows-1252"     71169  256
+  report_jis "shift_jis 2-byte" 71425  65536
+  report_jis "euc-jp 2-byte"    136961 65536
+  report_jis "euc-jp 8F 3-byte" 202497 65536
 fi
 
 # --- labels ----------------------------------------------------------------
