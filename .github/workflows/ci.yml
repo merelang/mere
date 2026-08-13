@@ -77,11 +77,33 @@ jobs:
 
       # clang, because the LLVM backend's output is LLVM IR and gcc cannot
       # compile it — parity.sh would report MISCOMPILE for every case rather
-      # than skipping. wabt for the wasm backend.
+      # than skipping. wabt for the wasm backend. lldb for debug_info, which
+      # only asks where a breakpoint resolves and never runs the process, so
+      # none of this touches ptrace.
       - name: Install harness tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang wabt
+          sudo apt-get install -y clang wabt lldb
+
+      # socket_parity builds a Wasm component and compares its socket behaviour
+      # against the C build, so it needs the component toolchain: wasm-tools,
+      # wasmtime, and the WASI command adapter that ships inside jco. Pinned to
+      # the versions development runs against, for the reason the node pin
+      # exists — a tool that decides a gate's answer is a versioned dependency.
+      - name: Install the Wasm component toolchain
+        run: |
+          set -e
+          WASM_TOOLS=1.255.0
+          WASMTIME=46.0.1
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS}/wasm-tools-${WASM_TOOLS}-x86_64-linux.tar.gz" \
+            | tar -xz -C /tmp
+          install "/tmp/wasm-tools-${WASM_TOOLS}-x86_64-linux/wasm-tools" "$HOME/.local/bin/"
+          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME}/wasmtime-v${WASMTIME}-x86_64-linux.tar.xz" \
+            | tar -xJ -C /tmp
+          install "/tmp/wasmtime-v${WASMTIME}-x86_64-linux/wasmtime" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          npm install -g @bytecodealliance/jco@1.27.0
 
       # Best effort: qemu_virt.sh is the differential check against an emulator
       # nobody here wrote, and it skips cleanly when the binary is absent. It is
@@ -104,9 +126,13 @@ jobs:
       - name: Toolchain preflight
         run: |
           set -e
-          for t in clang node python3 wat2wasm wasm-objdump; do
+          for t in clang lldb node python3 wat2wasm wasm-objdump wasm-tools wasmtime; do
             command -v "$t" >/dev/null 2>&1 || { echo "required tool missing: $t"; exit 1; }
           done
+          # socket_parity finds the WASI command adapter inside the global jco
+          # install, and skips without it — so its absence is asserted here too.
+          adapter="$(npm root -g)/@bytecodealliance/jco/lib/wasi_snapshot_preview1.command.wasm"
+          [ -f "$adapter" ] || { echo "WASI command adapter missing: $adapter"; exit 1; }
           for f in --enable-tail-call --enable-threads; do
             wat2wasm --help 2>&1 | grep -q -- "$f" \
               || { echo "wat2wasm does not support $f"; exit 1; }
@@ -119,10 +145,12 @@ jobs:
           clang --version | head -1
           node --version
           wat2wasm --version
+          lldb --version | head -1
+          wasm-tools --version
+          wasmtime --version
           command -v qemu-system-riscv32 >/dev/null 2>&1 \
             && qemu-system-riscv32 --version | head -1 \
             || echo "qemu-system-riscv32 absent: qemu_virt will skip"
-          echo "lldb is deliberately not installed: debug_info will skip"
 
       # The build matrix runs this too, but without wat2wasm and node it skips
       # the self-host codegen cross-validation — 2,225 cases there against 2,430
@@ -163,9 +191,7 @@ jobs:
       - name: wasm_sourcemap
         run: sh scripts/wasm_sourcemap.sh
 
-      # Skips without lldb, and the log says so. Kept as a step so the gap is
-      # visible in the run rather than only in this comment.
-      - name: debug_info
+      - name: debug_info (lldb agrees where each line is)
         run: sh scripts/debug_info.sh
 
       - name: qemu_virt (vs an emulator nobody here wrote)
