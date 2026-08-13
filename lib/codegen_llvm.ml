@@ -26,6 +26,11 @@ let unsupported loc what =
    deliberately NOT listed — they are already loud. *)
 let host_builtins_without_llvm_lowering =
   [ "print_no_nl"; "print_err"; "print_int"; "print_bool";
+    (* v0.1.228: found by scripts/host_matrix.sh, which asks the compiler instead of
+       remembering. These arrived with the `bytes` type in v0.1.216, after this list
+       was written, and fell straight through to "unbound variable" — the exact hole
+       the list exists to close, reopened by a later feature. *)
+    "read_bytes"; "write_bytes";
     "read_line"; "read_stdin"; "read_key";
     "tty_raw"; "tty_restore"; "exit";
     "read_lines";

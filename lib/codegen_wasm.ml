@@ -31,6 +31,12 @@ let unsupported loc what =
    file_mtime, sleep_ms, channel_close/recv_opt/recv_timeout) are NOT listed. *)
 let host_builtins_without_wasm_lowering =
   [ "print_int"; "print_bool";
+    (* v0.1.228: found by scripts/host_matrix.sh. Both came with the `bytes` type in
+       v0.1.216, after this list was written, and fell through to "unbound variable"
+       — the exact hole the list exists to close, reopened by a later feature.
+       (`par_map` is handled at the tail instead: it is desugared before codegen, so
+       this name never reaches here.) *)
+    "read_bytes"; "write_bytes";
     "read_key"; "tty_raw"; "tty_restore"; "file_size";
     "read_lines"; "file_pread"; "file_pwrite"; "file_pwrite_bytes";
     "random_float"; "detach" ]
@@ -1924,6 +1930,16 @@ let rec emit_expr (e : Ast.expr) : unit =
          unsupported e.Ast.loc
            (name ^ " is used at several types, so it has no single value form \
                     on Wasm yet — call it directly, or give it one type")
+       else if String.length name >= 5 && String.sub name 0 5 = "__pm_" then
+         (* v0.1.228: `par_map f xs` is desugared at parse time into spawn +
+            channel + list_map, binding helpers named `__pm_*`. Wasm cannot resolve
+            the let-bound lambda from inside the nested closure the desugaring
+            builds, and reported `unbound variable: __pm_f1` — a name the user never
+            wrote, about a function they did not know exists. Name what they wrote. *)
+         unsupported e.Ast.loc
+           "par_map has no Wasm lowering yet: it desugars to spawn + channel + \
+            list_map, and this backend cannot resolve the captured function from \
+            inside that nesting. Map and spawn by hand, or use another backend"
        else
          unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner
