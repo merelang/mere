@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.241 — 2026-08-13
+
+_The one algorithm here with both kinds of gate pointed at it — which is what makes the
+difference between them concrete rather than theoretical._
+
+```
+  contrib/unicode/normalize.mere    NFC and NFD
+  contrib/unicode/nfc_table.mere    generated: ccc, decompositions, and the derived inverse
+  scripts/gen_normalize_tables.sh   derives all three
+  scripts/normalize_conformance.sh  20,034 UCD cases x 6 assertions
+  scripts/unicode_parity.sh         + 8,755 inputs vs node's String.prototype.normalize
+```
+
+**`Normalize.nfc` and `Normalize.nfd`.** `é` can be one code point or two, and the two
+spellings are the same text. Anything that compares text — an origin check, a cache key, a
+search — has to pick one, and a renderer that draws both spellings differently is drawing the
+same text two ways.
+
+Three things carry the weight and only the first is obvious. **Canonical ordering** sorts each
+run of combining marks by class, *stably*, because marks of equal class must keep the order
+they were typed in. **A decomposition is not automatically a composition** — four kinds of
+mapping are excluded from the inverse, and the generator applies and **counts** all four
+rather than assuming them: 1,035 singletons, 4 non-starter decompositions, 81 script-specific
+exclusions, and 3,833 compatibility mappings that are not canonical at all. 2,081 canonical
+mappings in, **961 primary composites** out. And **blocking**: a mark reaches the last starter
+only if nothing between them blocks it, which is why `q` + dot-below + dot-above composes
+nothing while `d` + dot-below + dot-above composes only the first.
+
+Hangul is arithmetic rather than table lookup — 11,172 syllables that would otherwise be
+entries. Canonical mappings are stored **pairwise** and applied recursively, because the
+longest one in the UCD is two code points and a pre-expanded table would need variable-length
+values to buy a recursion a few levels deep.
+
+**Both gates, and the reason neither substitutes for the other.** The UCD's conformance file
+is exhaustive in ways no independent implementation is sampled for — canonical-order
+permutations, PRI #29's chained composites, the closure of every composite — but it is derived
+from the same rules this code reads, so a shared misreading would agree with itself. node's
+`normalize` is independent but not exhaustive. So: **20,034 cases × 6 assertions** against the
+file, and **8,755 inputs against node**, the latter derived from the generated tables so a row
+nobody thought to test still gets one.
+
+Six assertions per conformance line rather than two, because `NFC(c1) == c2` alone would pass
+an implementation that is wrong about already-normalized input — which is the common case in
+real text.
+
+Both green on the first run, which for once is worth saying: the previous slice's gate found
+three defects, and the difference is that this algorithm's hard parts (ordering, blocking) were
+measured against node before the gate existed rather than reasoned about.
+
+**Also**: the claim in `contrib/unicode/README.md` that a layout engine wants East Asian Width
+"for advance widths" was wrong and is corrected. A renderer with a font takes advances from the
+font's metrics. EAW is for terminal-style layout and for a fallback when there are no metrics,
+which moves it down the list rather than up it.
+
+---
+
 ## v0.1.240 — 2026-08-13
 
 _The first gate here that is not an independent implementation — and it caught three

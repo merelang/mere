@@ -11,6 +11,8 @@ character.
 | `gcb_table.mere` | `module GcbTable { class_of, the 18 class constants }` — **generated** | ~40 + a 22,834-char literal |
 | `linebreak.mere` | `module LineBreak { opportunities, split_lines, breaks_at, units_of }` | ~330 |
 | `lb_table.mere` | `module LbTable { key_of, class_of, flags_of, the 44 class constants }` — **generated** | ~50 + a 32,625-char literal |
+| `normalize.mere` | `module Normalize { nfc, nfd, is_nfc, is_nfd, ccc_of }` | ~200 |
+| `nfc_table.mere` | `module NfcTable { ccc_of, decomp_row, compose_pair }` — **generated** | ~90 + three literals |
 
 ## Usage
 
@@ -172,14 +174,70 @@ rules and were caught by cases nobody would have thought to write:
 `test/parity/linebreak.mere` additionally holds all four backends to the same
 output — the table is a 32,625-character literal read with `char_at`.
 
+## Normalization (UAX #15), canonical forms
+
+`é` can be one code point or two, and the two spellings are the same text.
+Anything that compares text — an origin check, a cache key, a search — has to pick
+one, and a renderer that draws both spellings differently is drawing the same text
+two ways.
+
+```
+Normalize.nfd "é"    // "e" + U+0301
+Normalize.nfc "é"    // U+00E9
+Normalize.is_nfc s   // without building the result
+```
+
+Three things carry the weight, and only the first is obvious:
+
+* **Canonical ordering.** Combining marks have a class and NFD sorts each run by
+  it — **stably**, so marks of equal class keep the order they were typed in. A
+  sort that reorders them changes the text.
+* **A decomposition is not automatically a composition.** Four kinds of mapping
+  are excluded from the inverse, and the generator applies and **counts** all four
+  rather than assuming them: 1,035 singletons, 4 non-starter decompositions, 81
+  script-specific exclusions, and 3,833 compatibility mappings that are not
+  canonical at all. 2,081 canonical mappings in, **961 primary composites** out.
+* **Blocking.** A mark composes with the last starter only if nothing between them
+  blocks it — a character blocks if its class is zero, or is not lower than the
+  mark's. Without that rule, `q` + dot-below + dot-above would wrongly compose the
+  dot-above onto the `q`; with it, `d` + dot-below + dot-above composes only the
+  first.
+
+**Hangul is arithmetic, not a table** — 11,172 syllables that would otherwise be
+entries.
+
+### Two gates, and they are not redundant
+
+Normalization is the one algorithm here with **both** kinds of gate pointed at it,
+which makes the difference between them concrete:
+
+| gate | what it is | what it covers |
+|---|---|---|
+| `scripts/normalize_conformance.sh` | the UCD's own 20,034 cases, **six assertions each** | canonical-order permutations, PRI #29's chained composites, the closure of every composite in the standard |
+| the normalization section of `scripts/unicode_parity.sh` | node's `String.prototype.normalize` — **an independent implementation** | 8,755 inputs derived from the generated tables: every canonical decomposition, every composing pair with and without a blocker, every non-zero combining class, and the Hangul boundaries |
+
+Neither substitutes for the other. An exhaustive file derived from the same rules
+cannot catch a misreading shared with it; an independent implementation is not
+sampled for canonical-order permutations. Six assertions per conformance line
+rather than two, because `NFC(c1) == c2` alone would pass an implementation that is
+wrong about already-normalized input — which is the common case in real text.
+
+The corpus for the node gate is **derived from the generated tables**, so a table
+row nobody thought to test still gets one, and it is read out of the file that is
+actually compiled in rather than from a second copy of the UCD.
+
 ## Not here yet
 
 - **East Asian Width** (UAX #11) as an exported property. The line break table
-  already carries the wide/fullwidth/halfwidth bit because LB19a and LB30 need it;
-  a layout engine wants it directly, for advance widths.
-- **Normalization.** `String.prototype.normalize` is an oracle for it, so it is
-  gateable whenever it is needed; a renderer can draw unnormalized text, so it is
-  not needed first.
+  already carries the wide/fullwidth/halfwidth bit, because LB19a and LB30 need it
+  as a *set*. Exporting it usefully means distinguishing halfwidth from wide, which
+  that bit does not — and it is worth being clear that a renderer with a font takes
+  advance widths from the font's metrics, not from this property. EAW is for
+  terminal-style layout and for a fallback when there are no metrics, which is why
+  it is here rather than higher up.
+- **NFKC and NFKD.** They fold compatibility differences, which needs the 3,833
+  compatibility mappings `gen_normalize_tables.sh` currently counts and discards.
+  The first caller will be UTS #46 for IDNA.
 - **Word and sentence segmentation.** `Intl.Segmenter` covers both granularities,
   so both are gateable. Neither is needed to draw a page.
 - **Bidi** (UAX #9).

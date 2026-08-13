@@ -19,7 +19,7 @@
 #     space — which no hand-written corpus and no sampling of another
 #     implementation would reach.
 #
-# The file is vendored (see scripts/gen_linebreak_testdata.sh) rather than fetched,
+# The file is vendored (see scripts/gen_ucd_testdata.sh) rather than fetched,
 # so this runs offline and cannot fail for network reasons, and so its version
 # cannot drift from the table's.
 #
@@ -33,7 +33,7 @@ DATA="$ROOT/test/data/LineBreakTest.txt"
 
 [ -x "$MERE" ] || { echo "linebreak_conformance: $MERE not found — run 'dune build'" >&2; exit 1; }
 [ -f "$DATA" ] || {
-  echo "linebreak_conformance: $DATA missing — run scripts/gen_linebreak_testdata.sh" >&2
+  echo "linebreak_conformance: $DATA missing — run scripts/gen_ucd_testdata.sh" >&2
   exit 1; }
 
 TMP=$(mktemp -d)

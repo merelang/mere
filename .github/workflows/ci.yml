@@ -178,6 +178,11 @@ jobs:
       - name: linebreak_conformance (UCD test file)
         run: sh scripts/linebreak_conformance.sh
 
+      # Normalization is the one algorithm here with both kinds of gate: an
+      # independent implementation above, and the UCD's exhaustive file here.
+      - name: normalize_conformance (UCD test file)
+        run: sh scripts/normalize_conformance.sh
+
       - name: host_matrix (every builtin on every backend)
         run: sh scripts/host_matrix.sh
 

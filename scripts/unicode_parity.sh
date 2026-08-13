@@ -2,10 +2,17 @@
 # scripts/unicode_parity.sh — check contrib/unicode against somebody else's
 # implementation of UAX #29.
 #
-# node's `Intl.Segmenter` is that implementation. Unlike the URL and Encoding
-# oracles it is not a second reading of a specification this code also reads —
-# it is ICU, and ICU is what browsers ship — so agreement here is the strongest
-# evidence available that the segmentation is right.
+# node is that implementation, twice over: `Intl.Segmenter` for UAX #29 grapheme
+# clusters and `String.prototype.normalize` for UAX #15. Unlike the URL and
+# Encoding oracles these are not a second reading of a specification this code also
+# reads — they are ICU, and ICU is what browsers ship — so agreement here is the
+# strongest evidence available that the algorithms are right.
+#
+# Normalization also has scripts/normalize_conformance.sh, which runs the UCD's own
+# 20,034 cases. The two are not redundant: an exhaustive file derived from the same
+# rules cannot catch a misreading shared with it, and an independent implementation
+# is not sampled for canonical-order permutations and chained composites. This is
+# the one algorithm here with both.
 #
 # **The Unicode version is asserted, not assumed.** The table is generated from a
 # pinned UCD version and `Intl.Segmenter` follows whatever node's ICU implements;
@@ -204,15 +211,143 @@ rm -f "$ROOT/examples/.uni_parity_tmp.mere.bak"
 ( ulimit -t 600; "$MERE" "$ROOT/examples/.uni_parity_tmp.mere" ) | sed '$d' > "$TMP/ours.txt"
 rm -f "$ROOT/examples/.uni_parity_tmp.mere"
 
+fail=0
 if diff -q "$TMP/want.txt" "$TMP/ours.txt" >/dev/null; then
   echo "  ok    grapheme clusters  ($counts, all agreeing)"
-  echo "unicode_parity: ok"
-  exit 0
+else
+  echo "  FAIL  grapheme clusters" >&2
+  paste -d'\t' "$TMP/corpus.txt" "$TMP/want.txt" "$TMP/ours.txt" \
+    | awk -F'\t' '$2 != $3 { printf "        U+%-28s node=%-14s ours=%s\n", $1, $2, $3 }' \
+    | head -20 >&2
+  fail=1
 fi
 
-echo "  FAIL  grapheme clusters" >&2
-paste -d'\t' "$TMP/corpus.txt" "$TMP/want.txt" "$TMP/ours.txt" \
-  | awk -F'\t' '$2 != $3 { printf "        U+%-28s node=%-14s ours=%s\n", $1, $2, $3 }' \
-  | head -20 >&2
-echo "unicode_parity: FAILED" >&2
-exit 1
+# --- normalization, against the same independent implementation --------------
+#
+# The corpus is derived from the generated tables rather than written: every code
+# point that has a canonical decomposition, every pair that composes, and every
+# code point with a non-zero combining class placed after a starter. That is the
+# set where the two implementations could possibly differ — everything else is
+# unchanged by both — and it means a table row nobody thought to test still gets
+# one.
+
+NFC_TABLE="$ROOT/contrib/unicode/nfc_table.mere"
+[ -f "$NFC_TABLE" ] || {
+  echo "unicode_parity: $NFC_TABLE missing — run gen_normalize_tables.sh" >&2; exit 1; }
+
+cat > "$TMP/nfgen.js" <<'NODE'
+const fs = require("fs");
+const src = fs.readFileSync(process.env.NFC_TABLE, "utf8");
+
+// The literals are read out of the generated file, so the corpus is derived from
+// the table that is actually compiled in rather than from a second copy of the UCD.
+const lit = (name) => {
+  const m = src.match(new RegExp('let ' + name + ' = "([0-9A-F]*)";'));
+  if (!m) throw new Error("no " + name + " literal in the table");
+  return m[1];
+};
+const rows = (t, w) => {
+  const out = [];
+  for (let i = 0; i < t.length; i += w) {
+    const r = [];
+    for (let k = 0; k < w / 6; k++) r.push(parseInt(t.slice(i + k * 6, i + (k + 1) * 6), 16));
+    out.push(r);
+  }
+  return out;
+};
+
+const inputs = [];
+// Every code point with a canonical decomposition, alone and after a letter.
+for (const [cp] of rows(lit("_decomp"), 18)) { inputs.push([cp]); inputs.push([0x41, cp]); }
+// Every pair that composes: in order, and with a blocker between them.
+for (const [a, b] of rows(lit("_comp"), 18)) {
+  inputs.push([a, b]);
+  inputs.push([a, 0x0334, b]);   // ccc 1, blocks almost nothing
+  inputs.push([a, 0x0301, b]);   // ccc 230, blocks almost everything
+}
+// Every non-zero combining class, after a starter, doubled, and after another mark.
+const cccTable = lit("_ccc");
+for (let i = 0; i < cccTable.length; i += 14) {
+  const s = parseInt(cccTable.slice(i, i + 6), 16);
+  const e = parseInt(cccTable.slice(i + 6, i + 12), 16);
+  for (const cp of (s === e ? [s] : [s, e])) {
+    inputs.push([0x61, cp]);
+    inputs.push([0x61, cp, cp]);
+    inputs.push([0x61, 0x0301, cp]);
+  }
+}
+// Hangul is arithmetic on both sides, so this is where an off-by-one hides.
+for (const cp of [0xAC00, 0xAC01, 0xD7A3, 0xABFF, 0xD7A4, 0x1100, 0x1161, 0x11A8])
+  inputs.push([cp]);
+for (const t of [0x11A7, 0x11A8, 0x11C2, 0x11C3]) inputs.push([0x1100, 0x1161, t]);
+
+const corpus = [], want = [];
+for (const seq of inputs) {
+  if (seq.some((c) => c >= 0xd800 && c <= 0xdfff)) continue;
+  corpus.push(seq.map((c) => c.toString(16).toUpperCase()).join(" "));
+  const str = seq.map((c) => String.fromCodePoint(c)).join("");
+  const dec = (x) => [...x].map((c) => c.codePointAt(0)).join(" ");
+  want.push(dec(str.normalize("NFC")) + "|" + dec(str.normalize("NFD")));
+}
+fs.writeFileSync(process.env.NF_CORPUS, corpus.join("\n") + "\n");
+fs.writeFileSync(process.env.NF_WANT, want.join("\n") + "\n");
+process.stderr.write(corpus.length + " inputs\n");
+NODE
+
+NFC_TABLE="$NFC_TABLE" NF_CORPUS="$TMP/nf_corpus.txt" NF_WANT="$TMP/nf_want.txt" \
+  node "$TMP/nfgen.js" 2> "$TMP/nf.log"
+nf_counts=$(cat "$TMP/nf.log")
+
+cat > "$ROOT/examples/.uni_nf_tmp.mere" <<'MERE'
+import "../contrib/unicode/normalize.mere";
+
+let _hv = fn (b: int) ->
+  if b >= 48 && b <= 57 then b - 48
+  else if b >= 65 && b <= 70 then b - 55
+  else b - 87;
+
+let rec _hex = fn (s: str) -> fn (i: int) -> fn (n: int) -> fn (acc: int) ->
+  if i >= n then acc else _hex s (i + 1) n (acc * 16 + _hv (ord (char_at s i)));
+
+let _build = fn (line: str) ->
+  list_fold (list_map (str_split line " ")
+                      (fn (h: str) -> str_of_codepoint (_hex h 0 (str_len h) 0)))
+            "" (fn (a: str) -> fn (b: str) -> a ++ b);
+
+let _hexs = fn (s: str) ->
+  let rec go = fn (i: int) -> fn (acc: str) ->
+    if i >= utf8_len s then acc
+    else go (i + 1) (acc ++ (if acc == "" then "" else " ") ++ show (codepoint_at s i)) in
+  go 0 "";
+
+let rec _go = fn (lines: str list) ->
+  match lines with
+  | Nil -> 0
+  | Cons (line, rest) ->
+    let _ =
+      if str_len line == 0 then ()
+      else
+        let s = _build line in
+        print (_hexs (Normalize.nfc s) ++ "|" ++ _hexs (Normalize.nfd s)) in
+    _go rest;
+
+let _ = _go (read_lines "NF_CORPUS_PATH");
+0
+MERE
+sed -i.bak "s|NF_CORPUS_PATH|$TMP/nf_corpus.txt|" "$ROOT/examples/.uni_nf_tmp.mere"
+rm -f "$ROOT/examples/.uni_nf_tmp.mere.bak"
+( ulimit -t 900; "$MERE" "$ROOT/examples/.uni_nf_tmp.mere" ) | sed '$d' > "$TMP/nf_ours.txt"
+rm -f "$ROOT/examples/.uni_nf_tmp.mere"
+
+if diff -q "$TMP/nf_want.txt" "$TMP/nf_ours.txt" >/dev/null; then
+  echo "  ok    normalization  ($nf_counts derived from the tables, all agreeing)"
+else
+  echo "  FAIL  normalization" >&2
+  paste -d'\t' "$TMP/nf_corpus.txt" "$TMP/nf_want.txt" "$TMP/nf_ours.txt" \
+    | awk -F'\t' '$2 != $3 { printf "        U+%-24s node=%-24s ours=%s\n", $1, $2, $3 }' \
+    | head -20 >&2
+  fail=1
+fi
+
+[ "$fail" = 0 ] && echo "unicode_parity: ok" || echo "unicode_parity: FAILED"
+[ "$fail" = 0 ]
