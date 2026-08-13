@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.230" Version.v "0.1.230";
+  check "version is 0.1.231" Version.v "0.1.231";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -7803,9 +7803,12 @@ let () =
            _l{max,min}_from / _llen / _range_down accumulator helpers)
         + v0.1.45 (display width): 5 (_eaw_width / _u8w_go / utf8_width /
            pad_right / pad_left)
-        = 61 total *)
+        + v0.1.231 (codepoint pair, Q-014's deferred sliver): 6
+           (_cp_bad / str_of_codepoint / _cp_span / _cp_cont /
+            codepoint_of / codepoint_at)
+        = 67 total *)
      string_of_int (List.length prog.Ast.decls))
-    "61";
+    "67";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"

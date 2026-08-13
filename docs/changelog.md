@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.231 — 2026-08-13
+
+_The codepoint pair, written in the prelude rather than five times._
+
+```
+  str_of_codepoint : int -> str      codepoint_of : str -> int
+  codepoint_at     : str -> int -> int
+```
+
+**Q-014's last deferred piece.** The Unicode question was settled in v0.1.38/45 — a `str`
+is a UTF-8 byte buffer, with a codepoint view composed above it — and one sliver was left
+open on purpose: the integer form of a codepoint, to be added "when an external program
+asks for it." Percent-encoding and punycode ask for it.
+
+It went in as **prelude source, not builtins**. The first attempt added them to the typer,
+the interpreter and the C backend, and stalled at the point of hand-writing the decoder
+in LLVM IR and WAT — at which point it was obvious the whole thing composes out of `chr`,
+`ord` and `char_at`, which every backend already has. The codepoint layer has been
+prelude-composed since v0.1.38 for the same reason. Six declarations, no codegen touched,
+and all four backends agree because there is only one definition.
+
+`chr` and `ord` stay byte-shaped: the redis, pg and http drivers build 0..255 bytes with
+them. And the divergence `chr` carries — out-of-range raises on the interpreter and masks
+on wasm and llvm — is not repeated: the new pair fails on all four. A scalar value is
+0..0x10FFFF less the surrogates, and **overlong encodings are refused**, because two
+spellings of one character is how a filter gets walked past.
+
+`test/parity/codepoint_pair.mere` round-trips both sides of every length boundary
+(127/128, 2047/2048, 65535/65536, 1114111) and refuses ten ill-formed inputs: negative,
+above max, both surrogate ends, empty, two codepoints, truncated, `C0 80`, a bare
+continuation byte, and a lead byte with nothing after it.
+
+**Getting that file green on four backends turned up three older holes**, none of them
+this change's:
+
+- **The llvm `str` is not byte-safe.** The v0.1.129 work reached C and wasm; llvm still
+  implements `str_len` as `call @strlen` and has no `__lang_str_size` anywhere, so a `str`
+  holding a NUL cannot exist there. `str_len (chr 0)` is 1 on interp, C and wasm, and 0 on
+  llvm, whose `chr` returns a raw pointer into a 256-entry table. U+0000 is left out of
+  the parity file for this reason and checked in the unit tests instead.
+- **`fail` does not unwind on wasm.** It sets a global and returns a sentinel, so whatever
+  sits between the `fail` and the `try_or` still runs. `1 + (fail "b")` survives, because
+  an integer tolerates the sentinel; `str_len (fail "b")` traps the module and the program
+  dies without even the `try_or` default. Which failure you get depends on what the
+  consumer does with the value.
+- **`print` stops at an interior NUL.** `str_len` says 2 and `print` emits one character,
+  on the same value. `print_bytes` (v0.1.219) is the byte-safe writer, but `print` is
+  silently lossy rather than either correct or refusing.
+
+Also: `codepoint_at` is `let rec` for a reason that has nothing to do with recursion. The
+decl loop is duplicated in test helpers that bind `Top_let_rec` and `Top_let` separately,
+so a plain `let` here reaching back to `let rec utf8_at` is unbound in those copies. Same
+duplication that made the quadratic-inference fix land in six places.
+
+---
+
 ## v0.1.230 — 2026-08-13
 
 _A loop was a function calling itself, and whether it survived was up to clang._

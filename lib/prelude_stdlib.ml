@@ -294,6 +294,83 @@ let rec _u8_nth = fn cs -> fn (i: int) ->
   | Nil -> ""
   | Cons (h, t) -> if i == 0 then h else _u8_nth t (i - 1);
 let rec utf8_at = fn (s: str) -> fn (i: int) -> _u8_nth (utf8_chars s) i;
+
+// Q-014's deferred sliver: the codepoint integer <-> str pair. Written here
+// rather than as builtins because the codepoint layer above `str` has been
+// prelude-composed since v0.1.38/45 (utf8_at, utf8_sub, utf8_width), and a
+// definition in Mere is the same on all four backends by construction — no
+// chance of the divergence `chr` still carries, where out-of-range raises on
+// the interpreter and masks on wasm and llvm.
+//
+// `chr` / `ord` stay byte-shaped: the redis, pg and http drivers build 0..255
+// bytes with them. These are separate names, not a widening of those.
+//
+// A Unicode scalar value is 0..0x10FFFF less the surrogate range. A caller who
+// wants U+FFFD for a bad value says so; this fails.
+let _cp_bad = fn (n: int) -> n < 0 || n > 1114111 || (n >= 55296 && n <= 57343);
+
+let str_of_codepoint = fn (n: int) ->
+  if _cp_bad n then fail "str_of_codepoint: not a Unicode scalar value"
+  else if n < 128 then chr n
+  else if n < 2048 then
+    chr (bit_or 192 (bit_shr n 6)) ++ chr (bit_or 128 (bit_and n 63))
+  else if n < 65536 then
+    chr (bit_or 224 (bit_shr n 12))
+    ++ chr (bit_or 128 (bit_and (bit_shr n 6) 63))
+    ++ chr (bit_or 128 (bit_and n 63))
+  else
+    chr (bit_or 240 (bit_shr n 18))
+    ++ chr (bit_or 128 (bit_and (bit_shr n 12) 63))
+    ++ chr (bit_or 128 (bit_and (bit_shr n 6) 63))
+    ++ chr (bit_or 128 (bit_and n 63));
+
+// The span the leading byte claims. 1 for a continuation or an invalid lead,
+// which then fails the length check below rather than reading past the end.
+let _cp_span = fn (b: int) ->
+  if b < 128 then 1
+  else if b >= 192 && b <= 223 then 2
+  else if b >= 224 && b <= 239 then 3
+  else if b >= 240 && b <= 247 then 4
+  else 1;
+
+let _cp_cont = fn (s: str) -> fn (i: int) -> bit_and (ord (char_at s i)) 63;
+
+// The exact inverse of str_of_codepoint: the str must hold one codepoint and
+// nothing else, so a truncated or overlong encoding is an error rather than a
+// value. Rejecting overlongs matters for anything security-relevant — two
+// spellings of the same character is how filters get walked past.
+let codepoint_of = fn (s: str) ->
+  let n = str_len s in
+  if n == 0 then fail "codepoint_of: expected a single-codepoint str"
+  else
+    let b0 = ord (char_at s 0) in
+    let span = _cp_span b0 in
+    if span != n then fail "codepoint_of: expected a single-codepoint str"
+    else
+      let cp =
+        if span == 1 then b0
+        else if span == 2 then bit_or (bit_shl (bit_and b0 31) 6) (_cp_cont s 1)
+        else if span == 3 then
+          bit_or (bit_or (bit_shl (bit_and b0 15) 12) (bit_shl (_cp_cont s 1) 6))
+                 (_cp_cont s 2)
+        else
+          bit_or (bit_or (bit_shl (bit_and b0 7) 18) (bit_shl (_cp_cont s 1) 12))
+                 (bit_or (bit_shl (_cp_cont s 2) 6) (_cp_cont s 3)) in
+      let shortest =
+        if span == 1 then cp < 128
+        else if span == 2 then cp >= 128
+        else if span == 3 then cp >= 2048
+        else cp >= 65536 in
+      if _cp_bad cp || not shortest then
+        fail "codepoint_of: expected a single-codepoint str"
+      else cp;
+
+// `let rec` like its neighbours, not for the recursion but because the decl
+// loops that tests keep miniature copies of bind Top_let_rec and Top_let
+// separately, and a plain `let` here that reaches back to `let rec utf8_at`
+// is unbound in those copies (note: the same duplication that made the
+// quadratic-inference fix land in six places).
+let rec codepoint_at = fn (s: str) -> fn (i: int) -> codepoint_of (utf8_at s i);
 let rec _u8_slice = fn cs -> fn (start: int) -> fn (len: int) -> fn (acc: str) ->
   match cs with
   | Nil -> acc
