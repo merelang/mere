@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.228 — 2026-08-13
+
+_The support matrix is asked for rather than remembered, and it found three holes._
+
+There have been three hand-written versions of "which backend has which host
+builtin": a table in the design notes, and a list in each of `codegen_llvm.ml` and
+`codegen_wasm.ml` naming the builtins with no lowering. All three had gone stale in
+the same direction — `print_int` gained real lowerings in v0.1.190 and
+`file_pwrite_bytes` in v0.1.222, and both were still listed as missing, in code that
+is inert rather than wrong. A table nobody can trust is worse than no table.
+
+`scripts/host_matrix.sh` produces one instead: fifty one-line programs, each using a
+host builtin, emitted for each backend, and the outcome recorded as `yes`, `refused`
+(the backend says so itself), `MISSING` (`unbound variable` — the compiler blaming
+the user for a backend hole), or `error`. The result is `docs/host-matrix.md`, checked
+in and diffed on every run.
+
+The first run found three `MISSING`, all of them the failure this project's
+loud-failure rule exists to prevent:
+
+- **`read_bytes` and `write_bytes` on LLVM and Wasm.** They arrived with the `bytes`
+  type in v0.1.216, *after* the per-backend lists were written, and fell straight
+  through to `unbound variable`. The hole those lists exist to close, reopened by a
+  later feature — which is exactly what a generated matrix is for.
+- **`par_map` on Wasm**, which said `unbound variable: __pm_f1`: a name the user never
+  wrote, about a function they do not know exists. `par_map` is desugared at parse
+  time into spawn + channel + list_map, and Wasm cannot resolve the captured function
+  from inside the nesting that produces. The limitation stands; it now names `par_map`.
+
+The matrix is now 50 builtins, **0 MISSING**.
+
+What it cannot see is a builtin that compiles and then does nothing — `tcp_set_timeout`
+on Wasm in v0.1.227 returned success and hung. Only running a program catches that,
+which is `scripts/parity.sh` and `scripts/socket_parity.sh`. The two kinds of check
+answer different questions and neither replaces the other.
+
 ## v0.1.227 — 2026-08-13
 
 _A capability that quietly did nothing now refuses._
