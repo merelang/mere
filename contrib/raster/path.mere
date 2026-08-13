@@ -1,0 +1,284 @@
+// contrib/raster/path.mere — filling shapes, with antialiasing.
+//
+// One primitive does the work: fill a set of closed polygons. A rectangle with
+// soft edges, a glyph outline, a rounded border, a stroked line — all of them are
+// that, once the curves are flattened and the strokes are turned into outlines.
+//
+// **Coverage, not sampling.** Each pixel row is cut into `sub` horizontal slices;
+// for each slice the polygon edges are intersected, the crossings sorted, and the
+// spans between them added to a per-pixel accumulator — **exactly in x**, so a
+// vertical edge at x = 3.25 puts 75% into pixel 3 and nothing into pixel 2. Only y
+// is quantized. That is much better than point-sampling a grid for the same cost,
+// because the horizontal term is closed-form rather than counted.
+//
+// Geometry is float and coverage is integer, and both choices were measured rather
+// than assumed: doubles are bit-identical on all four backends here (the same
+// `show` output for 1/3, sqrt 2, 0.1+0.2), so float geometry does not cost
+// determinism — and integer coverage means the accumulator cannot drift.
+//
+// Winding: non-zero by default, even-odd on request. A glyph with a counter needs
+// non-zero; a "subtract this shape" figure needs even-odd.
+//
+// Usage:
+//   import "contrib/raster/path.mere";
+//   let tri = [Path.pt 2.0 2.0, Path.pt 30.0 6.0, Path.pt 8.0 24.0];
+//   Path.fill c (Canvas.full_clip c) [tri] red false
+
+import "canvas.mere";
+
+// Named `point` and not `pt` because the module exports a constructor called
+// `pt`, and inside the module that name would shadow the type.
+type point = { x: float, y: float };
+
+// An edge is stored with y increasing, and `dir` remembers which way it ran, which
+// is what non-zero winding counts.
+type edge = { x0: float, y0: float, x1: float, y1: float, dir: int };
+
+type crossing = { cx: float, cdir: int };
+
+type bbox = { bx0: float, by0: float, bx1: float, by1: float };
+
+module Path {
+
+  let pt = fn (x: float) -> fn (y: float) -> point { x = x, y = y };
+
+  // --- flattening --------------------------------------------------------
+  // Recursive subdivision to a flatness tolerance, which is the standard answer
+  // and needs no arc-length arithmetic: split until the control points are within
+  // `tol` of the chord, then take the chord.
+
+  let _mid = fn (a: point) -> fn (b: point) ->
+    point { x = (a.x + b.x) / 2.0, y = (a.y + b.y) / 2.0 };
+
+  // Distance from `p` to the line through a and b, times |ab| — comparing that
+  // against tol*|ab| avoids the square root.
+  let _off2 = fn (a: point) -> fn (b: point) -> fn (p: point) ->
+    let dx = b.x - a.x in
+    let dy = b.y - a.y in
+    let d = (p.x - a.x) * dy - (p.y - a.y) * dx in
+    d * d;
+
+  let _len2 = fn (a: point) -> fn (b: point) ->
+    let dx = b.x - a.x in
+    let dy = b.y - a.y in
+    dx * dx + dy * dy;
+
+  let tol = 0.1;
+
+  // `min` and `max` in the prelude are int -> int -> int, so the float versions
+  // live here rather than being reached for by accident.
+  let _fmin = fn (a: float) -> fn (b: float) -> if a < b then a else b;
+  let _fmax = fn (a: float) -> fn (b: float) -> if a > b then a else b;
+
+  let rec _quad = fn (a: point) -> fn (c: point) -> fn (b: point) -> fn (depth: int) ->
+                  fn (acc: point list) ->
+    if depth <= 0 || _off2 a b c <= tol * tol * _len2 a b then Cons (b, acc)
+    else
+      let ac = _mid a c in
+      let cb = _mid c b in
+      let m = _mid ac cb in
+      _quad m cb b (depth - 1) (_quad a ac m (depth - 1) acc);
+
+  // The control points come in drawing order and the result is reversed, which
+  // the callers below undo once at the end rather than per segment.
+  let quad_to = fn (a: point) -> fn (c: point) -> fn (b: point) -> fn (acc: point list) ->
+    _quad a c b 16 acc;
+
+  let rec _cubic = fn (a: point) -> fn (c1: point) -> fn (c2: point) -> fn (b: point) ->
+                   fn (depth: int) -> fn (acc: point list) ->
+    if depth <= 0
+       || (_off2 a b c1 <= tol * tol * _len2 a b
+           && _off2 a b c2 <= tol * tol * _len2 a b)
+    then Cons (b, acc)
+    else
+      let ab = _mid a c1 in
+      let bc = _mid c1 c2 in
+      let cd = _mid c2 b in
+      let abc = _mid ab bc in
+      let bcd = _mid bc cd in
+      let m = _mid abc bcd in
+      _cubic m bcd cd b (depth - 1) (_cubic a ab abc m (depth - 1) acc);
+
+  let cubic_to = fn (a: point) -> fn (c1: point) -> fn (c2: point) -> fn (b: point) ->
+                 fn (acc: point list) ->
+    _cubic a c1 c2 b 16 acc;
+
+  // --- edges -------------------------------------------------------------
+
+  let _edge = fn (a: point) -> fn (b: point) ->
+    if a.y <= b.y
+    then edge { x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y, dir = 1 }
+    else edge { x0 = b.x, y0 = b.y, x1 = a.x, y1 = a.y, dir = 0 - 1 };
+
+  // Horizontal edges contribute nothing to a scanline crossing and are dropped,
+  // which is also what keeps the crossing count even.
+  let rec _poly_edges = fn (first: point) -> fn (prev: point) -> fn (rest: point list) ->
+                        fn (acc: edge list) ->
+    match rest with
+    | Nil ->
+      if prev.y == first.y then acc else Cons (_edge prev first, acc)
+    | Cons (p, more) ->
+      let acc2 = if p.y == prev.y then acc else Cons (_edge prev p, acc) in
+      _poly_edges first p more acc2;
+
+  let rec _all_edges = fn (polys: point list list) -> fn (acc: edge list) ->
+    match polys with
+    | Nil -> acc
+    | Cons (poly, more) ->
+      match poly with
+      | Nil -> _all_edges more acc
+      | Cons (first, rest) -> _all_edges more (_poly_edges first first rest acc);
+
+  // --- bounds ------------------------------------------------------------
+
+  // Seeded from the first edge rather than from sentinel infinities: there is no
+  // exponent notation in the lexer, and a bound that starts at real data cannot be
+  // wrong by a magic number.
+  let rec _bounds = fn (es: edge list) -> fn (b: bbox) ->
+    match es with
+    | Nil -> b
+    | Cons (e, more) ->
+      _bounds more (bbox { bx0 = _fmin b.bx0 (_fmin e.x0 e.x1),
+                           by0 = _fmin b.by0 e.y0,
+                           bx1 = _fmax b.bx1 (_fmax e.x0 e.x1),
+                           by1 = _fmax b.by1 e.y1 });
+
+  // --- the fill ----------------------------------------------------------
+
+  let sub = 5;   // sub-scanlines per pixel row; 255 / 5 is exact
+
+  let rec _crossings = fn (es: edge list) -> fn (sy: float) ->
+                       fn (acc: crossing list) ->
+    match es with
+    | Nil -> acc
+    | Cons (e, more) ->
+      // Half-open in y: an edge covers [y0, y1). That is what stops a shared
+      // vertex from being counted twice.
+      if sy < e.y0 || sy >= e.y1 then _crossings more sy acc
+      else
+        let t = (sy - e.y0) / (e.y1 - e.y0) in
+        let x = e.x0 + (e.x1 - e.x0) * t in
+        _crossings more sy (Cons (crossing { cx = x, cdir = e.dir }, acc));
+
+  // Adds one span's horizontal coverage to the row accumulator. Exact at both
+  // ends: a span from 3.25 to 5.5 puts 75% into pixel 3, all of pixel 4, and 50%
+  // into pixel 5.
+  let _add_span = fn (cov) -> fn (base: int) -> fn (n: int) ->
+                  fn (xa: float) -> fn (xb: float) ->
+    let lo = _fmax (float_of_int base) xa in
+    let hi = _fmin (float_of_int (base + n)) xb in
+    if hi <= lo then ()
+    else
+      let ia = int_of_float (floor lo) in
+      let ib = int_of_float (floor hi) in
+      let bump = fn (i: int) -> fn (amount: float) ->
+        let k = i - base in
+        if k < 0 || k >= n then ()
+        else vec_set cov k (vec_get cov k + int_of_float (amount * 255.0 + 0.5)) in
+      if ia == ib then bump ia (hi - lo)
+      else
+        let _ = bump ia (float_of_int (ia + 1) - lo) in
+        let rec mid = fn (i: int) ->
+          if i >= ib then () else let _ = bump i 1.0 in mid (i + 1) in
+        let _ = mid (ia + 1) in
+        bump ib (hi - float_of_int ib);
+
+  // Walks the sorted crossings, turning them into spans by the winding rule.
+  let rec _spans = fn (cs: crossing list) -> fn (wind: int) -> fn (start: float) ->
+                   fn (evenodd: bool) -> fn (cov) -> fn (base: int) -> fn (n: int) ->
+    match cs with
+    | Nil -> ()
+    | Cons (c, more) ->
+      let w2 = if evenodd then (wind + 1) % 2 else wind + c.cdir in
+      let was_in = if evenodd then wind % 2 == 1 else not (wind == 0) in
+      let is_in = if evenodd then w2 % 2 == 1 else not (w2 == 0) in
+      let _ = if was_in && not is_in then _add_span cov base n start c.cx else () in
+      let next_start = if not was_in && is_in then c.cx else start in
+      _spans more w2 next_start evenodd cov base n;
+
+  let fill = fn (c: canvas) -> fn (cl: clip) -> fn (polys: point list list) ->
+             fn (col: int) -> fn (evenodd: bool) ->
+    let es = _all_edges polys Nil in
+    match es with
+    | Nil -> ()
+    | Cons (e0, _) ->
+      let b = _bounds es (bbox { bx0 = _fmin e0.x0 e0.x1, by0 = e0.y0,
+                                 bx1 = _fmax e0.x0 e0.x1, by1 = e0.y1 }) in
+      let r = Canvas.clip_intersect cl
+                (Canvas.clip_of (int_of_float (floor b.bx0)) (int_of_float (floor b.by0))
+                                (int_of_float (ceil b.bx1)) (int_of_float (ceil b.by1))) in
+      if Canvas.clip_is_empty r then ()
+      else
+        let n = r.x1 - r.x0 in
+        let cov = vec_new () in
+        let rec init = fn (i: int) ->
+          if i >= n then () else let _ = vec_push cov 0 in init (i + 1) in
+        let _ = init 0 in
+        let rec row = fn (y: int) ->
+          if y >= r.y1 then ()
+          else
+            let rec reset = fn (i: int) ->
+              if i >= n then () else let _ = vec_set cov i 0 in reset (i + 1) in
+            let _ = reset 0 in
+            let rec slice = fn (s: int) ->
+              if s >= sub then ()
+              else
+                let sy = float_of_int y
+                         + (float_of_int s + 0.5) / float_of_int sub in
+                let cs = list_sort_by (fn (a: crossing) -> fn (b: crossing) ->
+                                         a.cx < b.cx)
+                                      (_crossings es sy Nil) in
+                let _ = _spans cs 0 0.0 evenodd cov r.x0 n in
+                slice (s + 1) in
+            let _ = slice 0 in
+            let rec paint = fn (i: int) ->
+              if i >= n then ()
+              else
+                let a = vec_get cov i / sub in
+                let _ = Canvas.blend c r (r.x0 + i) y col (min a 255) in
+                paint (i + 1) in
+            let _ = paint 0 in
+            row (y + 1) in
+        row r.y0;
+
+  // --- strokes -----------------------------------------------------------
+  // A stroke is a fill of the outline, which keeps one rasterizer rather than two.
+  // Butt caps and no joins: enough for a border or a rule, and a browser's
+  // rounded joins can be added as outline construction rather than as a new
+  // primitive.
+
+  let stroke_segment = fn (a: point) -> fn (b: point) -> fn (width: float) ->
+    let dx = b.x - a.x in
+    let dy = b.y - a.y in
+    let len = sqrt (dx * dx + dy * dy) in
+    if len == 0.0 then Nil
+    else
+      let hx = 0.0 - dy / len * (width / 2.0) in
+      let hy = dx / len * (width / 2.0) in
+      Cons (pt (a.x + hx) (a.y + hy),
+            Cons (pt (b.x + hx) (b.y + hy),
+                  Cons (pt (b.x - hx) (b.y - hy),
+                        Cons (pt (a.x - hx) (a.y - hy), Nil))));
+
+  let rec _stroke_polys = fn (ps: point list) -> fn (width: float) ->
+                          fn (acc: point list list) ->
+    match ps with
+    | Nil -> acc
+    | Cons (a, rest) ->
+      match rest with
+      | Nil -> acc
+      | Cons (b, _) ->
+        _stroke_polys rest width (Cons (stroke_segment a b width, acc));
+
+  // Each segment is filled as its own quad, so overlapping segments composite —
+  // visible at a joint with a translucent colour, and correct for the opaque case
+  // a border actually uses.
+  let stroke = fn (c: canvas) -> fn (cl: clip) -> fn (ps: point list) ->
+               fn (width: float) -> fn (col: int) ->
+    let rec go = fn (polys: point list list) ->
+      match polys with
+      | Nil -> ()
+      | Cons (p, more) -> let _ = fill c cl (Cons (p, Nil)) col false in go more in
+    go (_stroke_polys ps width Nil);
+
+}

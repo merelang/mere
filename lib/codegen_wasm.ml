@@ -2706,6 +2706,20 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "f64.load offset=0 align=8";
     emit_instr "f64.sqrt";
     emit_float_alloc_from_f64_on_stack ()
+  (* floor / ceil / round: refused rather than emitted.
+     f64.floor and f64.ceil are instructions and looked like a five-line addition,
+     but putting the names in the eta-expansion list above sent that machinery into
+     an infinite expansion — a bare `floor` call never finished emitting. `round`
+     is worse than missing: f64.nearest rounds half to even where C and the
+     interpreter round half away from zero, and doing it properly needs a scratch
+     f64 local, which this backend declares per function.
+     A backend that says "no" is one a caller can work around; one that quietly
+     rounds differently, or that hangs, is not. The C and LLVM backends have all
+     three; scripts/host_matrix.sh records the gap. *)
+  | Ast.App ({ node = Ast.Var fname; _ }, _)
+    when fname = "floor" || fname = "ceil" || fname = "round" ->
+    unsupported e.loc
+      (fname ^ " is not supported in the wasm codegen subset")
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
     when fname = "sin" || fname = "cos" || fname = "tan" ->
     emit_expr a_e;

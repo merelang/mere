@@ -1445,6 +1445,7 @@ let rec emit_expr (e : Ast.expr) : string =
       || name = "str_of_float" || name = "float_of_str"
       || name = "f_neg" || name = "f_abs"
       || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "floor" || name = "ceil" || name = "round"
       || name = "print" || name = "print_err" || name = "print_no_nl" || name = "fail"
       || name = "fst" || name = "snd"
     in
@@ -2363,6 +2364,18 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "cos(%s)" (emit_expr arg)
      | Ast.Var "tan" when not (user_shadows "tan") ->
        Printf.sprintf "tan(%s)" (emit_expr arg)
+     (* floor / ceil / round had no case on ANY compiled backend: emit succeeded
+        and the C compiler then failed on an undeclared `mu_floor`, so nothing
+        short of a program that used them could notice. Found while writing the
+        rasterizer, which needs floor for pixel bounds. `round` is
+        half-away-from-zero here, matching C and the interpreter — the Wasm
+        backend has to spell that out because f64.nearest is half-to-even. *)
+     | Ast.Var "floor" when not (user_shadows "floor") ->
+       Printf.sprintf "floor(%s)" (emit_expr arg)
+     | Ast.Var "ceil" when not (user_shadows "ceil") ->
+       Printf.sprintf "ceil(%s)" (emit_expr arg)
+     | Ast.Var "round" when not (user_shadows "round") ->
+       Printf.sprintf "round(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e) ->
        Printf.sprintf "pow(%s, %s)" (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "atan2"; _ }, a_e) ->
