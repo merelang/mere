@@ -6008,14 +6008,24 @@ let native_ffi_runtime ~tls ~midi =
       "static int mem_alloc(int n) { return __mem_bump(n <= 0 ? 1 : n); }";
       "static int mem_set_u8(int p, int off, int b) { __mem[p + off] = (unsigned char)b; return 0; }";
       "static int mem_get_u8(int p, int off) { return __mem[p + off]; }";
-      "static int mem_set_u32be(int p, int off, int v) {";
+      "static int mem_set_u32be(long long p, long long off, long long v) {";
       "  unsigned char* q = __mem + p + off;";
       "  q[0] = (v >> 24) & 0xff; q[1] = (v >> 16) & 0xff;";
       "  q[2] = (v >> 8) & 0xff;  q[3] = v & 0xff; return 0;";
       "}";
-      "static int mem_get_u32be(int p, int off) {";
+      (* Returns long long, and computes in an unsigned type, for two reasons
+         that both bite: a C `int` return sign-extends into Mere's 64-bit int, so
+         0x80000000 and above came back negative — and every opaque pixel has
+         alpha 0xFF, so anything touching pixels hit it. And `q[0] << 24` on an
+         int promoted from unsigned char overflows a signed int when q[0] >= 0x80,
+         which is undefined rather than merely wrong. Found by a probe that wrote
+         pixels into the arena and read them back; the same bug was in the JS host (scripts/pg_env.js used getInt32)
+         and backend parity could not see it, because both hosts were wrong the
+         same way. *)
+      "static long long mem_get_u32be(long long p, long long off) {";
       "  unsigned char* q = __mem + p + off;";
-      "  return (q[0] << 24) | (q[1] << 16) | (q[2] << 8) | q[3];";
+      "  return ((unsigned long long) q[0] << 24) | ((unsigned long long) q[1] << 16)";
+      "         | ((unsigned long long) q[2] << 8) | (unsigned long long) q[3];";
       "}";
       "static int mem_set_u16be(int p, int off, int v) {";
       "  unsigned char* q = __mem + p + off;";

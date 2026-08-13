@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.242 — 2026-08-13
+
+_A bug both hosts had, in a place the gate was only compile-checking. Backend parity could
+not see it, because being wrong the same way twice looks like agreement._
+
+```
+  lib/codegen_c.ml     mem_get_u32be: long long, unsigned
+  scripts/pg_env.js    getUint32, not getInt32
+  lib/eval.ml          the byte arena, so the interpreter can run these programs
+  scripts/ctest.sh     compare when both sides can run, compile-check when they cannot
+```
+
+**`mem_get_u32be` sign-extended.** It returned a C `int`, which widens into Mere's 64-bit int
+with the sign — so `0xFF008080` came back as `-16777088`. Every opaque pixel has alpha `0xFF`,
+so anything touching pixels hit it. It was also undefined behaviour rather than merely wrong:
+`q[0] << 24` on an `int` promoted from `unsigned char` overflows a signed int once `q[0]`
+reaches `0x80`. Now `long long`, computed unsigned.
+
+**The JS host had the identical bug** — `getInt32` where `getUint32` was meant. Which is the
+interesting part: **backend parity could not catch this, because both hosts were wrong the same
+way.** That is the same shape as an exhaustive test file derived from the rules it tests, and it
+is worth naming: agreement is only evidence when the things agreeing are independent.
+
+**So what did find it?** A probe that opened a window, wrote a known pattern, blitted it and read
+it back — when a pixel it wrote did not compare equal to the pixel it read. And what let it hide was `scripts/ctest.sh`: a program containing an
+FFI declaration was compile-checked only, on the grounds that a bare extern has no linkable
+symbol. True of an arbitrary name, false of the native FFI set — `mem_*`, `tcp_*`, `str_ptr`
+and the rest get `static` definitions emitted, so those programs link and run. Their **answers
+were never compared**.
+
+The rule is now: **compare when both sides can run, compile-check when they cannot.** Requiring
+the interpreter to run it too is what keeps this from firing on a program that would open a
+socket — an extern the interpreter mocks is an extern somebody thought about.
+
+**Which needed the interpreter to have the arena at all**, and now it does: the same bump
+allocator over a fixed buffer, the same capacity, the same first offset, so the two agree on
+arithmetic as well as on values. That also makes `contrib/db/pg.mere` runnable on the
+interpreter, and it is a prerequisite for the raster work: a framebuffer is an arena.
+
+`test/ctests/mem_arena_u32.mere` covers the round trip at `0x7FFFFFFF`, `0x80000000`,
+`0xFF008080`, `0xFFFFFFFF` and the byte order, on both sides. Reverting the fix turns it red.
+
+---
+
 ## v0.1.241 — 2026-08-13
 
 _The one algorithm here with both kinds of gate pointed at it — which is what makes the

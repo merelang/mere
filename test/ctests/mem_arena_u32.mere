@@ -1,0 +1,47 @@
+// The flat arena's 32-bit round trip, including values with the high bit set.
+//
+// mem_get_u32be used to return a C `int`, which sign-extended into Mere's 64-bit
+// int: 0xFF008080 came back as -16777088. Every opaque pixel has alpha 0xFF, so
+// anything touching pixels hit it. The JS host had the same bug, which is why
+// backend parity never saw it — both hosts were wrong the same way.
+
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u32be: int -> int -> int -> unit;
+extern fn mem_get_u32be: int -> int -> int;
+extern fn mem_set_u16be: int -> int -> int -> unit;
+extern fn mem_get_u16be: int -> int -> int;
+extern fn mem_set_u8: int -> int -> int -> unit;
+extern fn mem_get_u8: int -> int -> int;
+
+let buf = mem_alloc 64;
+
+let round32 = fn (v: int) ->
+  let _ = mem_set_u32be buf 0 v in
+  mem_get_u32be buf 0;
+
+let _ = print (str_of_int (round32 0));
+let _ = print (str_of_int (round32 1));
+let _ = print (str_of_int (round32 2147483647));      // 0x7FFFFFFF
+let _ = print (str_of_int (round32 2147483648));      // 0x80000000, the first that broke
+let _ = print (str_of_int (round32 4278223488));      // 0xFF008080, an opaque pixel
+let _ = print (str_of_int (round32 4294967295));      // 0xFFFFFFFF
+let _ = print (str_of_int (round32 4278190080));      // 0xFF000000, opaque black
+
+let round16 = fn (v: int) ->
+  let _ = mem_set_u16be buf 8 v in
+  mem_get_u16be buf 8;
+let _ = print (str_of_int (round16 0));
+let _ = print (str_of_int (round16 32768));           // 0x8000
+let _ = print (str_of_int (round16 65535));
+
+let round8 = fn (v: int) ->
+  let _ = mem_set_u8 buf 12 v in
+  mem_get_u8 buf 12;
+let _ = print (str_of_int (round8 0));
+let _ = print (str_of_int (round8 128));
+let _ = print (str_of_int (round8 255));
+
+// The bytes are big-endian, which is the other half of the contract.
+let _ = mem_set_u32be buf 16 4278223488;
+print (str_of_int (mem_get_u8 buf 16) ++ " " ++ str_of_int (mem_get_u8 buf 17)
+       ++ " " ++ str_of_int (mem_get_u8 buf 18) ++ " " ++ str_of_int (mem_get_u8 buf 19))
