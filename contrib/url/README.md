@@ -9,6 +9,7 @@ resolution against a base, and serialisation back out.
 |---|---|---|
 | `percent.mere` | `module Percent { c0_control, fragment, query, special_query, path, userinfo, component, encode, decode, decode_strict }` | ~140 |
 | `path.mere` | `module Path { split_fragment, split_query, is_single_dot, is_double_dot, normalize, opaque, encode_query, encode_fragment }` | ~110 |
+| `ipv6.mere` | `module Ipv6 { parse, serialize, canonical, longest_zero_run, group_value, dotted_quad }` | ~200 |
 | `host.mere` | `type url_parts`, `module Url { parse, resolve, href, origin, has_opaque_path, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number, last_index_of }` | ~500 |
 
 ## Usage
@@ -78,6 +79,16 @@ checked **after** decoding, so `http://a%2fb` has a `/` in its host and is
 rejected. An opaque host is not decoded and not folded, but the forbidden points
 still apply to it.
 
+**An IPv6 literal comes out in one canonical form.** `[0:0:0:0:0:0:0:1]` and
+`[::1]` are the same host, so both parse to the same eight pieces and serialise
+to `[::1]` — a comparison on the text would call them different origins. The
+serialiser is as much of the answer as the parser, and its rules are narrow:
+the **longest** run of zero pieces is compressed, ties go to the **first** run,
+and a run of exactly **one** zero is left alone (`[1:0:2:3:4:5:6:7]` keeps it).
+A trailing dotted quad takes the last two pieces and is **strict** dotted
+decimal — no leading zeros, no hex — deliberately not the multi-base parser a
+bare host uses, so `[::0x7f.1]` is not an address while `http://0x7f.1` is.
+
 **Resolution against an opaque base takes a leading `#` and nothing else.** Not a
 reference that merely contains one. This is the one place where this
 implementation deliberately differs from the oracle it is checked against — see
@@ -137,6 +148,10 @@ of the same specification that nobody here wrote. Two ways:
   wrong. This is the component where being too permissive is worst, since a host
   is what a request is actually sent to, and a hand-written list of forbidden
   code points is a list somebody transcribed.
+* **IPv6 literals**, 53 of them, weighted towards the compression rules — which
+  run is chosen, what a tie does, when a single zero is left alone — because that
+  is where an implementation can be plausibly wrong and still look right
+  on `[::1]`.
 
 ### Where this deliberately differs from node
 
@@ -169,8 +184,6 @@ every URL was rejected — with node agreeing with the interpreter the whole tim
 
 ## Not here yet
 
-- IPv6 parsing and re-serialisation. A literal is carried through in its
-  brackets, and only checked for a closing one.
 - IDNA / punycode for non-ASCII hosts. A domain is percent-decoded and
   lowercased, but not mapped or normalised, so a non-ASCII host stays as its
   UTF-8 bytes instead of becoming `xn--`.

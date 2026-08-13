@@ -1,0 +1,238 @@
+// contrib/url/ipv6.mere — IPv6 literals: parse to eight 16-bit pieces, and
+// serialise back.
+//
+// Both halves matter, and the serialiser is the half that is easy to get wrong,
+// because an IPv6 address has many spellings and exactly one canonical form.
+// `[0:0:0:0:0:0:0:1]` and `[::1]` are the same address, and a comparison that
+// works on the text rather than the pieces will say they are different hosts.
+//
+// The rules, all measured against another implementation rather than read off
+// the prose:
+//
+//   * `::` stands for one or more zero pieces, and may appear once. It may stand
+//     for exactly one: `[1:2:3:4:5:6:7::]` is `1:2:3:4:5:6:7:0`.
+//   * on the way out, the LONGEST run of zero pieces is compressed, and ties go
+//     to the FIRST run: `[1:0:0:1:0:0:1:1]` is `[1::1:0:0:1:1]`.
+//   * a run of exactly one zero is NOT compressed. `[1:0:2:3:4:5:6:7]` keeps it.
+//   * a trailing dotted quad occupies the last two pieces, and it is STRICT
+//     dotted decimal — four parts, no leading zeros, no hex. `[::1.2.3.4]` is
+//     `[::102:304]`; `[::01.2.3.4]` and `[::0x7f.1]` are not addresses. This is
+//     deliberately not the multi-base parser a bare host uses.
+//   * hex is case-insensitive coming in and lowercase going out, at most four
+//     digits per piece.
+//   * a bare quad in brackets is not an IPv6 address: `[1.2.3.4]` is invalid.
+
+module Ipv6 {
+
+  // --- digits ------------------------------------------------------------
+
+  let _is_hex_byte = fn (b: int) ->
+    (b >= 48 && b <= 57) || (b >= 65 && b <= 70) || (b >= 97 && b <= 102);
+
+  let _hex_of_byte = fn (b: int) ->
+    if b >= 48 && b <= 57 then b - 48
+    else if b >= 65 && b <= 70 then b - 55
+    else b - 87;
+
+  let _is_digit_byte = fn (b: int) -> b >= 48 && b <= 57;
+
+  let _lower_hex_digit = fn (d: int) ->
+    if d < 10 then chr (48 + d) else chr (87 + d);
+
+  let rec _hex_go = fn (v: int) -> fn (acc: str) ->
+    if v == 0 then acc
+    else _hex_go (v / 16) (_lower_hex_digit (v % 16) ++ acc);
+
+  let _hex_str = fn (v: int) -> if v == 0 then "0" else _hex_go v "";
+
+  // --- a single group ----------------------------------------------------
+  // -1 for anything that is not 1..4 hex digits, which is also how an empty
+  // group is rejected: `[:1]` and `[1:]` both produce one.
+
+  let rec _hex_value = fn (g: str) -> fn (i: int) -> fn (n: int) ->
+                       fn (acc: int) ->
+    if i >= n then acc
+    else
+      let b = ord (char_at g i) in
+      if not (_is_hex_byte b) then 0 - 1
+      else _hex_value g (i + 1) n (acc * 16 + _hex_of_byte b);
+
+  let group_value = fn (g: str) ->
+    let n = str_len g in
+    if n == 0 || n > 4 then 0 - 1 else _hex_value g 0 n 0;
+
+  // --- the trailing dotted quad ------------------------------------------
+  // Strict: exactly four parts, decimal only, no leading zeros, each 0..255.
+
+  let rec _dec_value = fn (p: str) -> fn (i: int) -> fn (n: int) ->
+                       fn (acc: int) ->
+    if i >= n then acc
+    else
+      let b = ord (char_at p i) in
+      if not (_is_digit_byte b) then 0 - 1
+      else _dec_value p (i + 1) n (acc * 10 + (b - 48));
+
+  let _octet = fn (p: str) ->
+    let n = str_len p in
+    if n == 0 || n > 3 then 0 - 1
+    else if n > 1 && (char_at p 0) == "0" then 0 - 1
+    else
+      let v = _dec_value p 0 n 0 in
+      if v > 255 then 0 - 1 else v;
+
+  let rec _octets = fn (parts) -> fn (acc) ->
+    match parts with
+    | Nil -> Some (list_rev acc)
+    | Cons (h, t) ->
+      let v = _octet h in
+      if v < 0 then None else _octets t (Cons (v, acc));
+
+  // The quad as the two 16-bit pieces it becomes.
+  let dotted_quad = fn (g: str) ->
+    let parts = str_split g "." in
+    if not (list_len parts == 4) then None
+    else
+      match _octets parts Nil with
+      | None -> None
+      | Some os ->
+        match os with
+        | Nil -> None
+        | Cons (a, t1) ->
+          match t1 with
+          | Nil -> None
+          | Cons (b, t2) ->
+            match t2 with
+            | Nil -> None
+            | Cons (c, t3) ->
+              match t3 with
+              | Nil -> None
+              | Cons (d, _) -> Some (a * 256 + b, c * 256 + d);
+
+  // Rewrite a trailing quad into two hex groups so the rest of the parse never
+  // has to know about dots. Anything else containing a dot then fails on its
+  // own, because `.` is not a hex digit.
+  //
+  // There is no str_last_index_of, and this wants the LAST colon.
+  let rec _last_colon = fn (s: str) -> fn (i: int) ->
+    if i < 0 then 0 - 1
+    else if (char_at s i) == ":" then i
+    else _last_colon s (i - 1);
+
+  let _fold_quad = fn (s: str) ->
+    if str_index_of s "." < 0 then Some s
+    else
+      let i = _last_colon s (str_len s - 1) in
+      // A quad with no colon before it is a bare IPv4, which is not an IPv6
+      // address however many brackets are around it.
+      if i < 0 then None
+      else
+        let head = substring s 0 (i + 1) in
+        let tail = substring s (i + 1) (str_len s) in
+        match dotted_quad tail with
+        | None -> None
+        | Some (hi, lo) -> Some (head ++ _hex_str hi ++ ":" ++ _hex_str lo);
+
+  // --- parse -------------------------------------------------------------
+
+  let rec _values = fn (gs) -> fn (acc) ->
+    match gs with
+    | Nil -> Some (list_rev acc)
+    | Cons (h, t) ->
+      let v = group_value h in
+      if v < 0 then None else _values t (Cons (v, acc));
+
+  // An empty side of a `::` is no groups, not one empty group.
+  let _groups = fn (s: str) -> if str_len s == 0 then Nil else str_split s ":";
+
+  let _pair = fn (l) ->
+    match l with
+    | Nil -> None
+    | Cons (a, t) ->
+      match t with
+      | Nil -> None
+      | Cons (b, t2) ->
+        match t2 with
+        | Nil -> Some (a, b)
+        | Cons (_, _) -> None;
+
+  let rec _zeros = fn (n: int) -> fn (acc) ->
+    if n <= 0 then acc else _zeros (n - 1) (Cons (0, acc));
+
+  // The text between the brackets, without them. `None` when it is not an
+  // address.
+  let parse = fn (s: str) ->
+    match _fold_quad s with
+    | None -> None
+    | Some t ->
+      let parts = str_split t "::" in
+      // Three parts means two `::`, which is one too many. `:::` splits into
+      // two parts whose second is a lone `:`, and that fails as an empty group.
+      if list_len parts > 2 then None
+      else if list_len parts == 1 then
+        match _values (_groups t) Nil with
+        | None -> None
+        | Some vs -> if list_len vs == 8 then Some vs else None
+      else
+        match _pair parts with
+        | None -> None
+        | Some (ls, rs) ->
+          match _values (_groups ls) Nil with
+          | None -> None
+          | Some lv ->
+            match _values (_groups rs) Nil with
+            | None -> None
+            | Some rv ->
+              let total = list_len lv + list_len rv in
+              // `::` must stand for at least one piece.
+              if total > 7 then None
+              else Some (list_append lv (list_append (_zeros (8 - total) Nil) rv));
+
+  // --- serialise ---------------------------------------------------------
+  // The first longest run of zeros, as (start, length). Length 1 is not worth
+  // compressing and is reported as length 0 so the writer ignores it.
+
+  let rec _scan_run = fn (ps) -> fn (i: int) -> fn (cur_start: int) ->
+                      fn (cur_len: int) -> fn (best_start: int) ->
+                      fn (best_len: int) ->
+    match ps with
+    | Nil ->
+      if cur_len > best_len then (cur_start, cur_len) else (best_start, best_len)
+    | Cons (h, t) ->
+      if h == 0 then
+        let ns = if cur_len == 0 then i else cur_start in
+        _scan_run t (i + 1) ns (cur_len + 1) best_start best_len
+      else
+        // Strictly greater, so a tie keeps the earlier run.
+        if cur_len > best_len then _scan_run t (i + 1) 0 0 cur_start cur_len
+        else _scan_run t (i + 1) 0 0 best_start best_len;
+
+  let longest_zero_run = fn (ps) ->
+    let (s, l) = _scan_run ps 0 0 0 0 0 in
+    if l < 2 then (0 - 1, 0) else (s, l);
+
+  // The compressed run becomes one empty string, which `str_join` turns into the
+  // middle colon of a `::`. A run at either end leaves only one colon there, so
+  // the missing one is added back after joining.
+  let rec _pieces_out = fn (ps) -> fn (i: int) -> fn (start: int) ->
+                        fn (len: int) -> fn (acc) ->
+    match ps with
+    | Nil -> list_rev acc
+    | Cons (h, t) ->
+      if i == start then _pieces_out (list_drop ps len) (i + len) start len
+                                     (Cons ("", acc))
+      else _pieces_out t (i + 1) start len (Cons (_hex_str h, acc));
+
+  let serialize = fn (ps) ->
+    let (start, len) = longest_zero_run ps in
+    let body = str_join ":" (_pieces_out ps 0 start len Nil) in
+    let lead = if start == 0 then ":" else "" in
+    let trail = if start >= 0 && start + len == 8 then ":" else "" in
+    lead ++ body ++ trail;
+
+  // What a host field holds: the canonical form, brackets included.
+  let canonical = fn (s: str) ->
+    match parse s with
+    | None -> None
+    | Some ps -> Some ("[" ++ serialize ps ++ "]");
+
+}
