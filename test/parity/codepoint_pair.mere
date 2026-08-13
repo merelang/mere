@@ -1,0 +1,57 @@
+// Q-014's codepoint pair: str_of_codepoint / codepoint_of / codepoint_at,
+// composed in the prelude on chr / ord / char_at so all four backends share
+// one definition.
+//
+// The shape of the failure checks is not arbitrary. Two backend gaps stand in
+// the way and are deliberately not exercised here, so that a diff in this file
+// means the pair is wrong rather than one of them:
+//   - U+0000 is left out entirely. `chr 0` is a one-byte str on interp, C and
+//     wasm, but zero-length on llvm, whose str is strlen-based rather than
+//     length-headered — a str holding a NUL is not representable there. So the
+//     encoder's 0 case cannot be checked across all four; it is covered by the
+//     unit tests instead.
+//   - `fail` does not unwind on wasm: it flags and returns a sentinel, so a
+//     consumer sitting between the fail and the try_or still runs, and one that
+//     dereferences the sentinel traps the module. So a failing call is the
+//     outermost thing inside each thunk here.
+
+let rt = fn (n: int) ->
+  show n ++ " -> " ++ show (codepoint_of (str_of_codepoint n))
+  ++ "  bytes=" ++ show (str_len (str_of_codepoint n));
+
+let _ = print (rt 65);
+let _ = print (rt 127);
+let _ = print (rt 128);
+let _ = print (rt 233);
+let _ = print (rt 2047);
+let _ = print (rt 2048);
+let _ = print (rt 12354);
+let _ = print (rt 65535);
+let _ = print (rt 65536);
+let _ = print (rt 128169);
+let _ = print (rt 1114111);
+let _ = print ("as text: " ++ str_of_codepoint 65 ++ str_of_codepoint 12354 ++ str_of_codepoint 128169);
+let _ = print ("codepoint_at 2 = " ++ show (codepoint_at "aあ💩" 2));
+let _ = print ("utf8_len = " ++ show (utf8_len "aあ💩"));
+
+// Encoding an ill-formed scalar value: the call is the whole thunk, and the
+// default is a marker string rather than a measurement.
+let enc_bad = fn (label: str) -> fn (n: int) ->
+  print (label ++ " = " ++ try_or (fn () -> str_of_codepoint n) "REFUSED");
+let _ = print "--- str_of_codepoint must refuse ---";
+let _ = enc_bad "negative  " (0 - 1);
+let _ = enc_bad "above max " 1114112;
+let _ = enc_bad "surrogate " 55296;
+let _ = enc_bad "surr high " 57343;
+
+// Decoding: codepoint_of returns int, and the failing call is outermost.
+let dec_bad = fn (label: str) -> fn (s: str) ->
+  print (label ++ " = " ++ show (try_or (fn () -> codepoint_of s) (0 - 1)));
+let _ = print "--- codepoint_of must refuse ---";
+let _ = dec_bad "empty        " "";
+let _ = dec_bad "two cps      " "ab";
+let _ = dec_bad "truncated    " (substring (str_of_codepoint 12354) 0 2);
+let _ = dec_bad "overlong C080" (chr 192 ++ chr 128);
+let _ = dec_bad "bare cont    " (chr 128);
+let _ = dec_bad "lead no cont " (chr 224);
+0
