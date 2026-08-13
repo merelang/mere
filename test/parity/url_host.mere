@@ -100,4 +100,98 @@ let _ = p "foo:";
 let _ = p "foo://";
 let _ = p "foo:?q";
 let _ = p "foo:#f";
+
+let _ = print "=== a domain is percent-decoded, so a decoded dot separates ===";
+let _ = p "http://a%41b/";
+let _ = p "http://a%2eb/";
+let _ = p "http://0x7f%2e1/";
+let _ = p "http://a%2fb/";
+let _ = p "http://a%b/";
+let _ = p "foo://a%41b/";
+
+let _ = print "=== forbidden host code points ===";
+let _ = p "http://a^b/";
+let _ = p "http://a|b/";
+let _ = p "http://a<b/";
+let _ = p "http://a[b/";
+let _ = p "foo://a^b/";
+let _ = p "foo://a\\b/";
+
+let _ = print "=== resolution against a base ===";
+
+let r = fn (b: str) -> fn (i: str) ->
+  match Url.parse b with
+  | None -> print (b ++ "  -> BASE-INVALID")
+  | Some bp ->
+    match Url.resolve bp i with
+    | None -> print ("  [" ++ i ++ "]  -> INVALID")
+    | Some u -> print ("  [" ++ i ++ "]  -> " ++ Url.href u);
+
+let _ = print "base http://h/a/b/c?bq#bf";
+let b1 = "http://h/a/b/c?bq#bf";
+let _ = r b1 "";
+let _ = r b1 "#f";
+let _ = r b1 "#";
+let _ = r b1 "?q";
+let _ = r b1 "?";
+let _ = r b1 "?q#f";
+let _ = r b1 "d";
+let _ = r b1 "./d";
+let _ = r b1 "../d";
+let _ = r b1 "../../../d";
+let _ = r b1 "/d";
+let _ = r b1 "//h2/d";
+let _ = r b1 "//h2";
+let _ = r b1 "e?q2#f2";
+let _ = r b1 "..?q2";
+let _ = r b1 ".";
+let _ = r b1 "..";
+let _ = r b1 "d/";
+let _ = r b1 "/";
+
+let _ = print "base http://h/a/b/c  (schemes, and separators)";
+let b2 = "http://h/a/b/c";
+let _ = r b2 "http:d";
+let _ = r b2 "http:/d";
+let _ = r b2 "http://d";
+let _ = r b2 "http:";
+let _ = r b2 "https:d";
+let _ = r b2 "http:..";
+let _ = r b2 "\\d";
+let _ = r b2 "d\\e";
+let _ = r b2 "//h2\\d";
+let _ = r b2 "\\\\h2/d";
+let _ = r b2 "1:2";
+let _ = r b2 "a:b";
+
+let _ = print "base http://h  (empty path)";
+let _ = r "http://h" "d";
+let _ = r "http://h" "../d";
+let _ = r "http://h" "?q";
+let _ = r "http://h" "#f";
+
+let _ = print "base foo://h/a/b  (non-special)";
+let _ = r "foo://h/a/b" "d";
+let _ = r "foo://h/a/b" "../d";
+let _ = r "foo://h/a/b" "/d";
+let _ = r "foo://h/a/b" "//h2/d";
+let _ = r "foo://h/a/b" "\\d";
+
+let _ = print "base foo://h  and  foo:/a/b  (no path, no authority)";
+let _ = r "foo://h" "d";
+let _ = r "foo://h" "#f";
+let _ = r "foo://h" "?q";
+let _ = r "foo://h" "";
+let _ = r "foo:/a/b" "d";
+let _ = r "foo:/a/b" "/d";
+let _ = r "foo:/a/b" "//h/d";
+let _ = r "foo:/a/b" "#f";
+
+let _ = print "base mailto:x@y  (opaque: only a leading # resolves)";
+let _ = r "mailto:x@y" "#f";
+let _ = r "mailto:x@y" "?q#f";
+let _ = r "mailto:x@y" "d";
+let _ = r "mailto:x@y" "";
+let _ = r "mailto:x@y" "//h/d";
+let _ = r "mailto:x@y" "mailto:x";
 0
