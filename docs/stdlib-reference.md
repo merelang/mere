@@ -127,7 +127,13 @@ is the group a paged store or a write-ahead log needs, and it was documented onl
 the changelog until v0.1.222 — which is how the mraft dogfood came to write its log
 through the Vec-taking call for a whole slice before noticing.
 
-**★ Codegen status**: `print` / `print_no_nl` / `print_int` / `print_bool` / `print_err` / `read_file` / `write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `print_int` / `print_bool` were the exception until v0.1.190 — this line claimed them for years while only the interpreter had them; C emitted a call to an undefined symbol and LLVM / Wasm refused outright. They now lower on all four (C through `printf`, LLVM and Wasm through the `str_of_int` they already had), locked by `test/parity/print_int_bool.mere`. `read_lines` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). `args` works on **all four** backends: C and LLVM read the argc/argv their `main` was handed, Wasm folds the host's `arg_count` / `arg_get` (v0.1.159 for Wasm, v0.1.169 for LLVM). The native-CLI / dogfood builtins `run` / `print_err` / `file_exists` / `file_mtime` / `file_size` / `tty_raw` / `tty_restore` / `read_key` / `random_int` also work on the **C native** backend (added for the `mk` / `mrog` / `mwasm` dogfoods, v0.1.13-v0.1.21).
+**★ Codegen status** (v0.1.246 for the first two): `print_no_nl` and `print_err` lower
+on **interp + C + LLVM**; both were refused by LLVM until it grew a `write(fd, ...)`
+for its own panic diagnostic, at which point they were three lines each. On **Wasm**
+`print_err` is **refused**: it used to write to the same host sink as `print`, so a
+diagnostic landed in the program's own output and nothing said so, and the JS host ABI
+has no second sink to give it. `print` / `print_int` / `print_bool` / `read_file` /
+`write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `print_int` / `print_bool` were the exception until v0.1.190 — this line claimed them for years while only the interpreter had them; C emitted a call to an undefined symbol and LLVM / Wasm refused outright. They now lower on all four (C through `printf`, LLVM and Wasm through the `str_of_int` they already had), locked by `test/parity/print_int_bool.mere`. `read_lines` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). `args` works on **all four** backends: C and LLVM read the argc/argv their `main` was handed, Wasm folds the host's `arg_count` / `arg_get` (v0.1.159 for Wasm, v0.1.169 for LLVM). The native-CLI / dogfood builtins `run` / `print_err` / `file_exists` / `file_mtime` / `file_size` / `tty_raw` / `tty_restore` / `read_key` / `random_int` also work on the **C native** backend (added for the `mk` / `mrog` / `mwasm` dogfoods, v0.1.13-v0.1.21).
 
 ```
 let _ = print "Hello";
@@ -335,6 +341,37 @@ if x < 0 then fail "negative" else x
 ```
 
 `fail` is polymorphic, so type inference works at branch merges (`if c then fail msg else int_val` → int).
+
+**★ What an uncaught failure does** (v0.1.246): the program writes one line to
+**stderr** and exits **1**, on every backend. The line is the message raised, tagged
+`fail: ` when it came from the `fail` builtin — the tag belongs to the builtin, so a
+backend's own failures (`int_of_str` on junk, an out-of-range index) are not tagged,
+which is what the interpreter has always done. The interpreter additionally prefixes
+the source file it is running; a compiled binary has none.
+
+None of that was true before. The same program exited 1 on two backends and 134
+(SIGABRT) on two others, wrote its diagnostic to stderr on two and stdout on two,
+tagged the message on three and not on the fourth, and `int_of_str` on junk named the
+offending input on two backends and not on the other two. It went unnoticed because
+the parity harness compared stdout and nothing else, so **no parity test used `fail`
+— none could have passed**. `test/parity/fail/*.mere` is the gate now: exit status,
+the output written before the failure, and the message, on all four.
+
+Two limitations remain, and both are pinned rather than described:
+
+- **Wasm has one output sink.** The JS host ABI provides `env.puts` and nothing else,
+  so the diagnostic lands in stdout there. The harness knows this and would break if
+  it changed. Under `--component` the same backend writes through WASI.
+- **`fail` on Wasm does not unwind.** It sets a flag that callers check on the way
+  out, so statements *after* it in the same body still run: inside a `try_or` thunk,
+  work that follows the failure happens. `test/parity/failure_caught.mere` holds the
+  other three to one answer and declares Wasm's exact output in a
+  `.wasm.expected` file next to it, so the day that backend learns to unwind, the
+  declaration breaks and says so.
+
+`try_or` catches all of these on all four backends, including the ones raised inside
+the backend rather than by `fail`. What it hands back is the default — **not the
+message**: the language can observe that something failed, not why.
 
 ---
 

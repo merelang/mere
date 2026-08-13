@@ -1,0 +1,18 @@
+// An uncaught `fail`, held to one behaviour on every backend.
+//
+// No parity test could use `fail` before v0.1.246, and that was not an oversight:
+// one could not have passed. The same program exited 1 on two backends and 134 on
+// two others, wrote its diagnostic to stderr on two and stdout on two, and said
+// `fail: boom` on three and `boom` on the fourth. The harness compared stdout and
+// nothing else, so the failure surface of the language was the one part of it that
+// four independent implementations were never held to.
+//
+// What is pinned here: output written before the failure survives, output after it
+// does not happen, the exit status is 1, and the message is the one raised.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let _ = print "before the failure";
+let _ = fail "boom";
+let _ = print "after the failure (must not appear)";
+0

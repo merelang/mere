@@ -1,0 +1,12 @@
+// `divmod x 0`. Its zero check is written out in the prelude rather than left to
+// `/`, because `/` by zero is not one thing across the backends — the interpreter
+// raises and C and LLVM return 0. This file is the gate on the check; the bare `/`
+// divergence is still open.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let d = 0;
+let _ = print "dividing";
+let (q, r) = divmod 17 d;
+let _ = print (show q ++ " " ++ show r);
+0

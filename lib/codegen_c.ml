@@ -2720,6 +2720,19 @@ let rec emit_expr (e : Ast.expr) : string =
            if args = [] then n else mono_variant_name n (List.map Ast.walk args)
          | _ -> "int"
        in
+       (* The `fail: ` tag belongs to this builtin, not to the printer. It used
+          to be added when the diagnostic was written, which tagged the backend's
+          *own* failures too: `int_of_str` on junk said `fail: int_of_str: ...`
+          here and `int_of_str: ...` on the interpreter. Same message, two texts,
+          and no gate could tell because both were envelopes. *)
+       (* __lang_str_dup_n and not a bare literal: this backend's strings carry a
+          length header before byte 0, and __lang_str_concat reads it. A raw C
+          literal has no header, so the concat read whatever preceded the constant
+          as its length — the program looped instead of printing its failure. Same
+          trap that made str_replace return "" in v0.1.233. *)
+       let arg_c =
+         Printf.sprintf "__lang_str_concat(__lang_str_dup_n(\"fail: \", 6), %s)" arg_c
+       in
        (match result_ty with
         | Ast.TyStr ->
           Printf.sprintf "__lang_fail_str(%s)" arg_c
@@ -6483,8 +6496,13 @@ let str_concat_helper =
       "     interpreter). Previously this printed unconditionally, leaking a";
       "     'fail: ...' line on every try_or-caught failure. */";
       "  if (__lang_fail_jmpbuf_set) { longjmp(__lang_fail_jmpbuf, 1); }";
-      "  fprintf(stderr, \"fail: %s\\n\", msg);";
-      "  abort();";
+      "  fprintf(stderr, \"%s\\n\", msg);";
+      (* exit rather than abort: an uncaught `fail` is a program error the
+         language defines, not a crash. abort() made the shell report 134 /
+         SIGABRT and could dump core, while the interpreter and the Wasm
+         backend both exited 1 for the same program. One status, and a
+         diagnostic is not a crash. *)
+      "  exit(1);";
       "}";
       "static int __lang_fail_int(const char* msg) {";
       "  __lang_fail_impl(msg); return 0;";
