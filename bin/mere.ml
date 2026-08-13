@@ -404,6 +404,16 @@ let () =
   | [_] -> usage ()
   | [_; "-h"] | [_; "--help"] -> usage ()
   | [_; "-v"] | [_; "--version"] -> version ()
+  (* One line per name in the typer's initial environment, `name<TAB>type`.
+     scripts/host_matrix.sh used to carry a hand-written list of builtins to probe,
+     which is how fifteen names that no compiled backend implements went unnoticed:
+     the harness whose job is to ask which backend has which builtin was asking
+     about a set somebody remembered. Now it asks for the set too. *)
+  | [_; "--dump-builtins"] ->
+    List.iter
+      (fun (name, (sch : Mere.Typer.scheme)) ->
+        Printf.printf "%s\t%s\n" name (Mere.Ast.pp_ty sch.body))
+      Mere.Typer.initial_env
   | [_; "-r"] -> Mere.Repl.run ()
   | [_; "install"] | [_; "install"; _] ->
     let root =

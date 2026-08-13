@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.244 — 2026-08-13
+
+_The harness whose job is to ask which backend has which builtin was asking about a set
+somebody remembered. Now it asks for the set too — and the answer is 144 builtins, not 50._
+
+```
+  bin/mere.ml             --dump-builtins: every name in the typer's environment, with its type
+  scripts/host_matrix.sh  probes generated from those types; a new `nocompile` state
+  docs/host-matrix.md     50 rows -> 144
+```
+
+**`mere --dump-builtins`.** One line per name in `Typer.initial_env`, `name<TAB>type`. The
+compiler is the authority on its own environment, which is the same argument
+`host_matrix.sh` already made for the *answers* — it just had not been applied to the
+*questions*.
+
+**Probes are synthesized from the type**: one literal per argument for `int`, `float`, `str`,
+`bool` and `unit`, and a bare mention for a non-arrow. Anything needing a value a literal
+cannot make — a `File`, a `Vec`, a `Channel` — falls back to a hand-written override, of which
+there are 28. **70 of the 214 names are not synthesizable and are counted and named**, so the
+part of the environment this harness cannot see is a number rather than a silence. A
+synthesized probe that does not type-check is dropped and counted too.
+
+**And a new state, `nocompile`.** `yes` used to mean "the backend emitted code", which is not
+the same as working: `floor`, `ceil` and `round` emitted fine and the C compiler then failed
+on an undeclared identifier. So for C the emitted source is now handed to a compiler, and the
+row says `nocompile` when that rejects it. That state is exactly the blind spot those three
+sat in for as long as they had been in the environment.
+
+The matrix went from **50 builtins, 0 MISSING** to **144 builtins, 18 MISSING, 20 nocompile**.
+The old number was not wrong — it was the answer to "is there a hole among the 50 somebody
+listed", which reads like the answer to a different question.
+
+Of the 20 `nocompile` rows, twelve are pure integer functions — `cube decr divmod incr
+int_max int_min lcm pow sign square sum_range assert` — which want defining in the prelude as
+Mere source, where all five backends get them at once. `exp` and `log` want libm cases beside
+`sqrt`. Neither is done here: this change is about being able to see them.
+
+Two rows that reported `error` were probe artifacts rather than defects — `map_new ()` alone
+leaves its key and value types unresolved, and codegen correctly refuses. Both now have
+overrides that pin the types, so the matrix reports 0 error.
+
+---
+
 ## v0.1.243 — 2026-08-13
 
 _A rasterizer, and the three math builtins it turned out no compiled backend had._
