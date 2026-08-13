@@ -251,6 +251,22 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..62` for portable code — int is 64-bit on C, LLVM and Wasm (widened in v0.1.96 / v0.1.127), 63-bit on interp |
 | `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
 
+**★ Integer `/` and `%` by zero raise** (v0.1.247): `division by zero` and
+`modulo by zero`, catchable with `try_or`, on the interpreter and the C, LLVM and
+Wasm backends. It cost a branch per division to make that true, and it was worth it
+because the alternative was not one behaviour but four: the interpreter raised, the
+C backend emitted a bare `a / b` — **undefined behaviour in C**, which an arm64 build
+answers with 0 and an x86-64 build answers with SIGFPE — LLVM emitted `sdiv`, which
+is undefined in IR and licenses the optimizer to assume it cannot happen, and Wasm
+trapped with no message at all. `INT_MIN / -1` is the other undefined case and wraps
+now, which is what the interpreter already did.
+
+**The `-rv` backend is the exception, and it is measured rather than assumed**: under
+QEMU's `virt` board, `17 / 0` is `-1` and `17 % 0` is `17` there — the RISC-V
+specification's non-trapping answer. That backend targets bare metal, where there is
+no stream to write a diagnostic to and no process to exit: the platform's answer is
+the answer. Float division is IEEE on every backend and keeps giving inf / nan.
+
 **★ On the width these are actually computed at** (v0.1.245): a builtin can be
 present on every backend, answer every small question correctly, and still be
 implemented at a narrower width than the language's int. `gcd` was a

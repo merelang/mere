@@ -500,9 +500,12 @@ let pow = fn (b: int) -> fn (e: int) ->
 let lcm = fn (a: int) -> fn (b: int) ->
   if a == 0 || b == 0 then 0 else abs (a / gcd a b * b);
 // Truncated division, matching `/` and `%`: divmod (0 - 17) 5 is (-3, -2). The
-// zero check is written out because `/` by zero is not one thing across the
-// backends — the interpreter raises and C and LLVM return 0 — so deferring to it
-// would have made a documented failure depend on which backend you built with.
+// zero check is written out rather than left to `/`, which is still worth it for
+// the message: bare `/` raises `division by zero` and this names the caller. When
+// this was written `/` by zero was not one thing across the backends at all — the
+// interpreter raised, the compiled ones had undefined behaviour or a silent trap.
+// That is fixed (v0.1.247), and the check stays because a named failure is better
+// than an unnamed one.
 let divmod = fn (a: int) -> fn (b: int) ->
   if b == 0 then fail "divmod: division by zero" else (a / b, a % b);
 let assert = fn (cond: bool) -> fn (msg: str) ->

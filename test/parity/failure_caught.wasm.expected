@@ -2,6 +2,8 @@
 fail -> -999
 assert false -> -999
 divmod by zero -> -999
+bare / by zero -> -999
+bare % by zero -> -999
 pow negative exp -> -999
 int_of_str junk -> -999
 no failure -> 42

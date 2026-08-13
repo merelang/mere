@@ -1,0 +1,21 @@
+// `x / 0`. The last of the four to be one thing.
+//
+// Until v0.1.247 this was three behaviours and none of them was a message on the
+// compiled side: the interpreter raised, the C backend emitted a bare `a / b`
+// (integer division by zero is *undefined behaviour* in C — this machine's arm64
+// quietly answered 0 and the program carried on, an x86-64 build of the same
+// source raises SIGFPE), LLVM emitted `sdiv` (undefined in IR, so the optimizer
+// is entitled to assume it never happens), and Wasm trapped with no output at all.
+//
+// So the same program could print a wrong answer, crash, or die silently,
+// depending on which backend and which CPU. It went unnoticed because the harness
+// compared stdout and the interpreter never reached the print.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let n = 17;
+let d = 0;
+let _ = print ("dividing " ++ show n ++ " by " ++ show d);
+let _ = print (show (n / d));
+let _ = print "unreachable";
+0

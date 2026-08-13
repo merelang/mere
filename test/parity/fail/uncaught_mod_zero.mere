@@ -1,0 +1,10 @@
+// `x % 0`, which the interpreter names differently from division — `modulo by
+// zero`, not `division by zero`. The compiled backends say what it says.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let n = 17;
+let d = 0;
+let _ = print "taking a remainder";
+let _ = print (show (n % d));
+0

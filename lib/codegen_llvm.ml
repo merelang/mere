@@ -3556,8 +3556,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           unsupported e.Ast.loc "float % / ++ (unreachable: typer rejects)"
       in
       emit_instr (Printf.sprintf "  %s = %s double %s, %s" r fop ra rb)
-    end else
-      emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" r (llvm_binop_int op) ra rb);
+    end else begin
+      (* Integer / and % go through a helper that checks the divisor. `sdiv i64 x, 0`
+         is immediate undefined behaviour in LLVM IR — the optimizer may assume it
+         never happens — while the interpreter has always raised. See the note on
+         @__lang_idiv. *)
+      match op with
+      | Ast.Div | Ast.Mod ->
+        let f = if op = Ast.Div then "__lang_idiv" else "__lang_imod" in
+        emit_instr (Printf.sprintf "  %s = call i64 @%s(i64 %s, i64 %s)" r f ra rb)
+      | _ ->
+        emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" r (llvm_binop_int op) ra rb)
+    end;
     r
   | Ast.Cmp (op, a, b) ->
     let ra = emit_expr env a in
@@ -9147,6 +9157,45 @@ let str_concat_helper =
       "  %nlw = call i64 @write(i32 2, ptr @.s_newline, i64 1)";
       "  call void @exit(i32 1)";
       "  unreachable";
+      "}";
+      (* One branch per division for a defined answer on every target: `sdiv` by
+         zero is undefined behaviour in IR, and b == -1 is the other undefined
+         case (INT_MIN / -1 does not fit). The unsigned negation is the
+         two's-complement wraparound the interpreter already produces. *)
+      "@.divzero_msg = internal constant [17 x i8] c\"division by zero\\00\"";
+      "@.modzero_msg = internal constant [15 x i8] c\"modulo by zero\\00\"";
+      "define i64 @__lang_idiv(i64 %a, i64 %b) {";
+      "entry:";
+      "  %z = icmp eq i64 %b, 0";
+      "  br i1 %z, label %bad, label %chk";
+      "bad:";
+      "  call void @__lang_fail_impl(ptr @.divzero_msg)";
+      "  unreachable";
+      "chk:";
+      "  %m1 = icmp eq i64 %b, -1";
+      "  br i1 %m1, label %wrap, label %ok";
+      "wrap:";
+      "  %n = sub i64 0, %a";
+      "  ret i64 %n";
+      "ok:";
+      "  %q = sdiv i64 %a, %b";
+      "  ret i64 %q";
+      "}";
+      "define i64 @__lang_imod(i64 %a, i64 %b) {";
+      "entry:";
+      "  %z = icmp eq i64 %b, 0";
+      "  br i1 %z, label %bad, label %chk";
+      "bad:";
+      "  call void @__lang_fail_impl(ptr @.modzero_msg)";
+      "  unreachable";
+      "chk:";
+      "  %m1 = icmp eq i64 %b, -1";
+      "  br i1 %m1, label %zero, label %ok";
+      "zero:";
+      "  ret i64 0";
+      "ok:";
+      "  %r = srem i64 %a, %b";
+      "  ret i64 %r";
       "}";
       "define i32 @__lang_fail_int(ptr %msg) {";
       "entry:";
